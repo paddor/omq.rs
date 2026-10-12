@@ -147,16 +147,15 @@ impl Fanin {
         let state = guard.as_mut().ok_or(Error::Closed)?;
         state.process_changes(self);
         let start = out.len();
-        self.signal.begin_drain();
-        state.poll_sources(true);
-        let rx = &mut state.receiver;
-        let observed_empty = if batching {
-            Self::drain_bulk(rx, out, &mut budget)
-        } else {
-            Self::drain_fair(rx, out, &mut budget)
-        };
-        if observed_empty && self.signal.clear_after(true) {
-            self.blocking.wake();
+        let mut observed_empty = Self::drain(state, out, &mut budget, batching, false);
+        if observed_empty && out.len() == start {
+            // A successful receive cannot park. Keep its data signal coalesced
+            // until a subsequent empty probe prepares the fenced handoff.
+            self.signal.begin_drain();
+            observed_empty = Self::drain(state, out, &mut budget, batching, true);
+            if observed_empty && out.len() == start && self.signal.clear_after(true) {
+                self.blocking.wake();
+            }
         }
         state.observed_empty = observed_empty;
         let count = out.len() - start;
@@ -166,6 +165,22 @@ impl Fanin {
         } else {
             state.wake_waiter(self);
             Ok(count)
+        }
+    }
+
+    #[inline]
+    fn drain(
+        state: &mut ReceiveState,
+        out: &mut Vec<Message>,
+        budget: &mut DrainBudget,
+        batching: bool,
+        force_poll: bool,
+    ) -> bool {
+        state.poll_sources(force_poll);
+        if batching {
+            Self::drain_bulk(&mut state.receiver, out, budget)
+        } else {
+            Self::drain_fair(&mut state.receiver, out, budget)
         }
     }
 
@@ -760,6 +775,8 @@ mod tests {
                 1
             );
             assert_eq!(out[4], messages[3]);
+            assert!(!queue.signal.is_idle());
+            assert!(matches!(queue.try_recv(), Err(Error::WouldBlock)));
             assert!(queue.signal.is_idle());
         }
     }
@@ -781,18 +798,19 @@ mod tests {
             4
         );
         assert!(!queue.signal.is_idle());
-        // Draining to empty clears it.
+        // A successful drain stays coalesced until the next empty probe.
         assert_eq!(
             queue
                 .recv_into(&mut out, DrainBudget::new(256, 2 * 1024 * 1024), true)
                 .unwrap(),
             4
         );
-        assert!(queue.signal.is_idle());
+        assert!(!queue.signal.is_idle());
         assert!(matches!(
             queue.recv_into(&mut out, DrainBudget::new(256, 2 * 1024 * 1024), true),
             Err(Error::WouldBlock)
         ));
+        assert!(queue.signal.is_idle());
         for (seq, message) in out.iter().enumerate() {
             assert_eq!(message.part_slice(0).unwrap(), &[seq as u8]);
         }

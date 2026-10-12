@@ -462,8 +462,13 @@ impl PayloadPool {
     /// The declared length starts at zero. Storage never grows.
     pub fn try_buffer(&self, size: usize) -> Option<PayloadBuffer> {
         for pool in self.classes.iter().filter(|pool| pool.buffer_size >= size) {
-            pool.reclaim();
-            if let Some(storage) = pool.free.pop() {
+            let storage = pool.free.pop().or_else(|| {
+                // Returned free slots are already reusable. Scan deferred
+                // owners only when checkout actually needs their credit.
+                pool.reclaim();
+                pool.free.pop()
+            });
+            if let Some(storage) = storage {
                 return Some(PayloadBuffer {
                     storage: Some(storage),
                     length: 0,

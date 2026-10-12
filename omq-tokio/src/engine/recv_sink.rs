@@ -600,7 +600,7 @@ impl RecvSink {
         let returned = if let Self::Fanin(sink) = unwrapped {
             let message = sink.take_pending();
             // Register the producer's space wake before the endpoint parks.
-            let full = if message.is_some() || !defer {
+            let full = if message.is_some() {
                 sink.is_full()
             } else {
                 false

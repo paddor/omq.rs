@@ -182,8 +182,8 @@ source allows drainage and frees queue capacity. PEER bounds retained memory
 per source; PULL and GATHER use message-count HWMs. Socket memory also includes
 held messages and transport buffers.
 
-The [receive backpressure contract](receive-backpressure.md) describes source
-receipts, retries, and socket-type constraints.
+The [receive backpressure contract](../DEVELOPMENT.md#source-receive-backpressure)
+describes source receipts, retries, and socket-type constraints.
 
 Round-robin and exclusive sends normally wait for space when mute; nonblocking
 sends report `Full`. Fan-out sockets apply their configured drop or block

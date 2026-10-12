@@ -248,7 +248,6 @@ RTT exchanges validate unique sequence tags and the full echoed body.
 
 Results append to `~/.cache/omq/quinn-datagram.jsonl`, including binary
 digests and protocol statistics.
-See [the measured results](doc/quinn-datagram-benchmark.md).
 
 Profile a single case serially:
 

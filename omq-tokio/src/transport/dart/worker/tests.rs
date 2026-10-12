@@ -77,6 +77,22 @@ fn expired_or_cancelled_activation_never_installs_storage() {
 }
 
 #[test]
+fn cancelled_activation_retires_the_current_handshake() {
+    let mut peer = peer();
+    let io = queues();
+    io.cancel.cancel();
+    let signal = Arc::new(DataSignal::new());
+    peer.install_io(2, io, &state(), false, &signal);
+    assert!(peer.session.is_none());
+    assert!(peer.pool.is_none());
+    assert!(
+        peer.io
+            .as_mut()
+            .is_some_and(|io| !io.controls(&signal, Instant::now()))
+    );
+}
+
+#[test]
 fn repeated_activation_preserves_the_original_queues() {
     let signal = Arc::new(DataSignal::new());
     let mut peer = peer();

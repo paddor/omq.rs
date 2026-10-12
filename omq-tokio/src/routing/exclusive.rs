@@ -131,6 +131,7 @@ impl Submitter {
 
 #[derive(Debug)]
 pub(crate) struct ExclusiveSend {
+    peer_id: Option<u64>,
     pipe: Arc<Mutex<Option<SendPipeProducer>>>,
     peer_ready: Arc<StateSignal>,
     closed: Arc<AtomicBool>,
@@ -139,6 +140,7 @@ pub(crate) struct ExclusiveSend {
 impl ExclusiveSend {
     pub(crate) fn new() -> Self {
         Self {
+            peer_id: None,
             pipe: Arc::new(Mutex::new(None)),
             peer_ready: Arc::new(StateSignal::new()),
             closed: Arc::new(AtomicBool::new(false)),
@@ -154,16 +156,22 @@ impl ExclusiveSend {
     }
 
     #[expect(clippy::needless_pass_by_value)]
-    pub(crate) fn connection_added(&mut self, _peer_id: u64, handle: ActorPeerDriverHandle) {
+    pub(crate) fn connection_added(&mut self, peer_id: u64, handle: ActorPeerDriverHandle) {
         let send_pipe = handle
             .send_pipe
             .as_ref()
             .and_then(|pipe| pipe.lock().expect("exclusive send pipe").take());
         *self.pipe.lock().expect("exclusive pipe") = send_pipe;
+        self.peer_id = Some(peer_id);
         self.peer_ready.notify_changed();
     }
 
-    pub(crate) fn connection_removed(&mut self, _peer_id: u64) {
+    pub(crate) fn connection_removed(&mut self, peer_id: u64) {
+        // A rejected handshake can close while the admitted peer stays live.
+        if self.peer_id != Some(peer_id) {
+            return;
+        }
+        self.peer_id = None;
         *self.pipe.lock().expect("exclusive pipe") = None;
         self.peer_ready.notify_changed();
     }
@@ -197,9 +205,39 @@ impl ExclusiveSend {
 #[cfg(test)]
 mod tests {
     use super::ExclusiveSend;
-    use crate::engine::{ActorPeerDriverHandle, send_pipe};
+    use crate::engine::{ActorPeerDriverHandle, SendPipeProducer, send_pipe};
     use omq_proto::error::TrySendError;
     use omq_proto::message::Message;
+
+    fn handle(producer: SendPipeProducer) -> ActorPeerDriverHandle {
+        ActorPeerDriverHandle {
+            inbox: tokio::sync::mpsc::channel(1).0.into(),
+            data_inbox: tokio::sync::mpsc::channel(1).0.into(),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            transmit_slot: None,
+            direct_tcp_writer: None,
+            send_pipe: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(producer)))),
+            inproc: None,
+        }
+    }
+
+    #[test]
+    fn rejected_peer_close_does_not_remove_the_admitted_send_pipe() {
+        let mut send = ExclusiveSend::new();
+        let submitter = send.submitter();
+        let (producer, mut consumer) = send_pipe(1);
+        send.connection_added(7, handle(producer));
+        send.connection_removed(8);
+        submitter.try_send(Message::from("live")).unwrap();
+        let mut messages = Vec::new();
+        assert_eq!(consumer.drain_into(&mut messages, 1, 1024), 1);
+        assert_eq!(messages, [Message::from("live")]);
+        send.connection_removed(7);
+        assert!(matches!(
+            submitter.try_send(Message::from("waiting")),
+            Err(TrySendError::Full(_))
+        ));
+    }
 
     #[test]
     fn closed_peer_pipe_is_treated_as_unavailable() {
@@ -208,18 +246,7 @@ mod tests {
         let (tx, rx) = send_pipe(1);
         drop(rx);
 
-        send.connection_added(
-            1,
-            ActorPeerDriverHandle {
-                inbox: tokio::sync::mpsc::channel(1).0.into(),
-                data_inbox: tokio::sync::mpsc::channel(1).0.into(),
-                cancel: tokio_util::sync::CancellationToken::new(),
-                transmit_slot: None,
-                direct_tcp_writer: None,
-                send_pipe: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(tx)))),
-                inproc: None,
-            },
-        );
+        send.connection_added(1, handle(tx));
 
         let msg = Message::single("retry");
         match submitter.try_send(msg) {

@@ -45,12 +45,16 @@ Loom checks:
 cargo test -p omq-tokio --test omq_loom_signal
 cargo test -p omq-tokio --features dart --test omq_loom_dart_pool
 RUSTFLAGS="--cfg loom" cargo test -p omq-proto --features dart --test omq_proto_loom_dart
+RUSTFLAGS="--cfg loom" cargo test -p omq-shm --test omq_shm_loom
+cargo +nightly miri test -p omq-shm --lib
 ```
 
 The `omq-tokio` Loom test models `StateSignal` and `DataSignal` lost-wake
 races. The reusable queue crates are maintained in
 [fanring.rs](https://github.com/paddor/fanring.rs). Run their unit tests,
 Loom models, and Miri checks in that workspace.
+Weekly extended CI checks SHM's production synchronization with Loom and
+storage ownership with Miri; Linux tests cover kernel and process behavior.
 
 For coordinated local changes, override published queue dependencies explicitly:
 

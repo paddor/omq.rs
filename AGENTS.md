@@ -2,7 +2,7 @@
 
 ## Workspace layout
 
-Four-crate Cargo workspace; `bindings/` is excluded and built
+Five-crate Cargo workspace; `bindings/` is excluded and built
 out-of-tree (maturin etc.).
 
 - **`omq-proto`** -- sans-I/O ZMTP 3.x core. Codec (`Connection`),
@@ -11,6 +11,8 @@ out-of-tree (maturin etc.).
   (lz4), endpoint parsing, options, subscription matcher. No async, no I/O.
 - **`omq-tokio`** -- multi-thread tokio backend. **Default backend.**
   Works on Linux, macOS, and Windows.
+- **`omq-shm`** -- Linux shared mappings, payload storage, remote leases,
+  and ancillary IO. Isolates unsafe SHM operations from the core/backend.
 - **`omq-libzmq`** -- libzmq-compatible C interface (`libomq_zmq`
   dynamic/static library). Drop-in replacement: ships `zmq.h`,
   implements the `zmq_*` API.
@@ -54,6 +56,7 @@ Full detail in `doc/`:
 Transport RFCs:
 [`lz4-rfc.md`](doc/lz4-rfc.md), [`quic-rfc.md`](doc/quic-rfc.md),
 [`dart-rfc.md`](doc/dart-rfc.md).
+Shared-memory architecture: [`shm_transport.md`](doc/shm_transport.md).
 
 **omq-proto key types.** `Connection`: ZMTP codec state machine
 (`handle_input`/`poll_event`/`send_message`/`poll_transmit`).
@@ -140,12 +143,16 @@ Lints: `missing_debug_implementations` = **deny**,
 
 ## Conventions
 
-- Add new charts or documentation files only when explicitly requested.
+- **HARD RULE: Never create documentation files unless the user explicitly
+  asks to create them.** Feature work does not authorize new docs; update
+  existing files instead.
+- Add new charts only when explicitly requested.
 - `doc/` documents how OMQ works. Development and benchmark notes belong in
   `DEVELOPMENT.md` and `RUNNING_BENCHMARKS.md`.
-- Keep documentation brief and technical, readable when browsing on GitHub.
-  Update existing sections; describe only relevant design and behavior.
-  Do not add a narrative or a wall of text for each change or feature.
+- **HARD RULE: No walls of text.** Keep documentation brief and technical.
+  README and architecture feature summaries: at most three short sentences,
+  plus examples and links. Do not repeat reference docs or add implementation
+  walkthroughs.
 - Never auto-add one-off feasibility or theoretical-ceiling benchmarks to Git
   history. Keep them local unless the user explicitly requests versioning.
 - `doc/architecture.md` describes current components, ownership, and data flow.

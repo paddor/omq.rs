@@ -57,6 +57,9 @@ pub(crate) struct PeerTransmitSlot {
     fanout_active: AtomicBool,
     above_lwm: AtomicBool,
     fanout_reactivation: Mutex<Option<FanOutReactivation>>,
+    #[cfg(target_os = "linux")]
+    shm: OnceLock<crate::transport::shm::ShmState>,
+    shm_credit_blocked: AtomicBool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -110,7 +113,148 @@ impl PeerTransmitSlot {
             fanout_active: AtomicBool::new(true),
             above_lwm: AtomicBool::new(false),
             fanout_reactivation: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            shm: OnceLock::new(),
+            shm_credit_blocked: AtomicBool::new(false),
         })
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn set_shm(&self, state: crate::transport::shm::ShmState) {
+        self.shm.set(state).expect("SHM slot initialized once");
+    }
+
+    #[cfg_attr(not(target_os = "linux"), expect(clippy::unused_self))]
+    pub(crate) fn is_shm(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.shm.get().is_some()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn shm_credit_blocked(&self) -> bool {
+        self.shm_credit_blocked.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn shm_credit_returned(&self) {
+        self.shm_credit_blocked.store(false, Ordering::Release);
+        self.space_available.notify_changed();
+        let eq = self.eq.lock().expect("transmit_slot eq poisoned");
+        let below_lwm =
+            self.is_below_lwm(eq.total_bytes(), self.queued_msgs.load(Ordering::Relaxed));
+        let reactivate = below_lwm
+            && self
+                .fanout_active
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok();
+        drop(eq);
+        if reactivate
+            && let Some(cb) = self
+                .fanout_reactivation
+                .lock()
+                .expect("transmit_slot fanout_reactivation poisoned")
+                .clone()
+        {
+            cb(self.peer_id);
+        }
+    }
+
+    /// Per-recipient SHM leases are created by the IO lane, after admission.
+    pub(crate) fn try_encode_shm_no_signal(&self, message: &Message) -> TryFrameResult {
+        self.try_encode_shm_record(message, 1, false)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn try_encode_shm_batch_no_signal(
+        &self,
+        message: &Message,
+        count: usize,
+        referenced: bool,
+    ) -> TryFrameResult {
+        self.try_encode_shm_record(message, count, referenced)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn message_capacity(&self) -> usize {
+        self.msg_cap
+    }
+
+    #[cfg_attr(not(target_os = "linux"), expect(clippy::unused_self))]
+    fn try_encode_shm_record(
+        &self,
+        message: &Message,
+        count: usize,
+        referenced: bool,
+    ) -> TryFrameResult {
+        #[cfg(target_os = "linux")]
+        {
+            let Some(state) = self.shm.get() else {
+                return TryFrameResult::Ineligible;
+            };
+            if self.dead.load(Ordering::Acquire) {
+                return TryFrameResult::Dead;
+            }
+            if !self.handshake_done.load(Ordering::Acquire) {
+                return TryFrameResult::Ineligible;
+            }
+            // Wire-space wakes do not return borrowed SHM leases. Keep the
+            // failed encode's credit snapshot until the driver wakes us for
+            // returned credit instead of rescanning the payload pool.
+            if self.shm_credit_blocked.load(Ordering::Acquire) {
+                return TryFrameResult::Full;
+            }
+            let mut eq = self.eq.lock().expect("transmit_slot eq poisoned");
+            if self.dead.load(Ordering::Acquire) {
+                return TryFrameResult::Dead;
+            }
+            if eq.total_bytes() >= self.cap
+                || self.queued_msgs.load(Ordering::Relaxed) + count > self.msg_cap
+            {
+                self.above_lwm.store(true, Ordering::Relaxed);
+                return TryFrameResult::Full;
+            }
+            let mut state = state.lock().expect("SHM connection");
+            let result = if count > 1 {
+                let kind = if referenced {
+                    omq_shm::BatchKind::Referenced
+                } else {
+                    omq_shm::BatchKind::Copied
+                };
+                state.encode_batch_and_frame(message, kind, &mut eq)
+            } else {
+                state.encode_and_frame(message, &mut eq)
+            };
+            drop(state);
+            match result {
+                Ok(true) => {
+                    let queued = self.queued_msgs.fetch_add(count, Ordering::Relaxed) + count;
+                    self.mark_above_lwm_if_needed(eq.total_bytes(), queued);
+                    TryFrameResult::Ok
+                }
+                Ok(false) => {
+                    self.shm_credit_blocked.store(true, Ordering::Release);
+                    drop(eq);
+                    // The driver must arm its futex wait even with no wire bytes.
+                    self.signal_encoded();
+                    TryFrameResult::Full
+                }
+                Err(_) => {
+                    drop(eq);
+                    self.mark_dead();
+                    TryFrameResult::Dead
+                }
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (message, count, referenced);
+            TryFrameResult::Ineligible
+        }
     }
 
     #[cfg(feature = "ws")]

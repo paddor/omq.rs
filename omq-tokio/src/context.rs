@@ -332,9 +332,8 @@ impl IoPoolHandle {
         }
     }
 
-    /// Reserve data IO thread `index` whatever its load, for work placed on
-    /// every IO thread.
-    #[cfg(feature = "quic")]
+    /// Reserve data IO thread `index` regardless of its current load.
+    #[cfg(any(feature = "quic", target_os = "linux"))]
     pub(crate) fn reserve_thread_at(&self, index: usize) -> IoThreadLease {
         if let Some(pool) = &self.pool {
             pool.threads[index + pool.data_thread_offset()]

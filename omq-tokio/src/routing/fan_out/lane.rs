@@ -112,6 +112,7 @@ struct LaneEndpoint {
 #[derive(Debug)]
 struct GroupAdmission {
     key: Option<CodecSharingKey>,
+    shm: bool,
     peers: usize,
 }
 
@@ -133,6 +134,8 @@ struct FanOutLaneState {
 }
 
 pub(super) struct FanOutLanes {
+    #[cfg(target_os = "linux")]
+    pub(super) shm_pool: omq_shm::SendPool,
     state: Mutex<FanOutLaneState>,
     active_flags: Arc<Vec<AtomicBool>>,
     distributor: Mutex<LaneDistributor>,
@@ -172,6 +175,8 @@ impl std::fmt::Debug for FanOutLanes {
 }
 
 struct LaneWorker {
+    #[cfg(target_os = "linux")]
+    shm_pool: omq_shm::SendPool,
     data_rx: yring::Consumer<LaneData>,
     ctrl_rx: yring::Consumer<LaneControl>,
     data_signal: Arc<DataSignal>,
@@ -206,6 +211,8 @@ impl FanOutLanes {
         io_pool: &crate::context::IoPoolHandle,
     ) -> Arc<Self> {
         let pipe_cap = options.send_hwm.max(1) as usize;
+        #[cfg(target_os = "linux")]
+        let shm_pool = omq_shm::SendPool::new(pipe_cap, options.shm_max_memory);
         let lane_count = io_pool.thread_count().max(1);
         let active_flags = Arc::new(
             (0..lane_count)
@@ -238,6 +245,8 @@ impl FanOutLanes {
             io_pool.spawn_on(
                 i,
                 LaneWorker {
+                    #[cfg(target_os = "linux")]
+                    shm_pool: shm_pool.clone(),
                     data_rx,
                     ctrl_rx,
                     data_signal: data_signal.clone(),
@@ -265,6 +274,8 @@ impl FanOutLanes {
             });
         }
         Arc::new(Self {
+            #[cfg(target_os = "linux")]
+            shm_pool,
             state: Mutex::new(FanOutLaneState { endpoints }),
             active_flags,
             distributor: Mutex::new(LaneDistributor {
@@ -317,13 +328,21 @@ impl FanOutLanes {
             .slot
             .codec_profile()
             .map(crate::engine::codec::CodecProfile::sharing_key);
+        let shm = add.slot.is_shm();
         let codec_group = endpoint
             .codec_groups
             .iter()
-            .position(|group| group.as_ref().is_some_and(|group| group.key == key))
+            .position(|group| {
+                group
+                    .as_ref()
+                    .is_some_and(|group| group.key == key && group.shm == shm)
+            })
             .or_else(|| endpoint.codec_groups.iter().position(Option::is_none))?;
-        let group = endpoint.codec_groups[codec_group]
-            .get_or_insert_with(|| GroupAdmission { key, peers: 0 });
+        let group = endpoint.codec_groups[codec_group].get_or_insert_with(|| GroupAdmission {
+            key,
+            shm,
+            peers: 0,
+        });
         group.peers += 1;
         endpoint.peer_groups.insert(add.peer_id, codec_group);
         endpoint.peer_count += 1;
@@ -555,7 +574,6 @@ impl FanOutLanes {
 
 impl LaneWorker {
     async fn run(mut self) {
-        let mut budget = DrainBudget::WORKER;
         let mut touched: SmallVec<[u64; 32]> = SmallVec::new();
         let mut batch: SmallVec<[LaneData; 32]> = SmallVec::new();
         let mut wire = FrameBuffer::new();
@@ -572,7 +590,16 @@ impl LaneWorker {
 
             // 2. Encode this lane's bounded batch. Other lanes are fed
             // directly by the caller and can encode independently.
-            budget.reset();
+            let mut budget = DrainBudget::WORKER;
+            #[cfg(target_os = "linux")]
+            if !self.peers.is_empty() && self.peers.values().all(|peer| peer.slot.is_shm()) {
+                // Shared references do not copy application bytes during this
+                // drain. Retain a byte bound while allowing large-body batches.
+                budget = DrainBudget::new(
+                    budget.remaining_msgs(),
+                    omq_shm::REFERENCE_BATCH_MAX_PAYLOAD,
+                );
+            }
             let mut drained = false;
             self.data_rx.prefetch();
             while let Some(data) = self.data_rx.pop() {
@@ -596,6 +623,20 @@ impl LaneWorker {
                 }
                 let mut next = 0;
                 while next < batch.len() {
+                    #[cfg(target_os = "linux")]
+                    if let Some((message, count, referenced)) =
+                        self.prepare_shm_batch(&batch[next..])
+                    {
+                        if self
+                            .dispatch_shm_batch(message, count, referenced, &mut touched)
+                            .await
+                        {
+                            self.stop(&mut touched);
+                            return;
+                        }
+                        next += count;
+                        continue;
+                    }
                     let count = self.encode_plain_batch(&batch[next..], &mut wire, &mut ends);
                     let shutdown = if count > 1 {
                         self.dispatch_plain_batch(wire.uncommitted_arena(), &ends, &mut touched)
@@ -621,6 +662,118 @@ impl LaneWorker {
                 () = self.data_signal.ready() => {}
             }
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn prepare_shm_batch(&self, batch: &[LaneData]) -> Option<(Message, usize, bool)> {
+        const BATCH_COUNT_BYTES: usize = std::mem::size_of::<u16>();
+        const MIN_BATCH_MESSAGES: usize = 4;
+        if batch.len() < MIN_BATCH_MESSAGES
+            || !matches!(self.mode, FanOutMode::Group)
+            || self.peers.is_empty()
+            || self.peers.values().any(|peer| !peer.slot.is_shm())
+        {
+            return None;
+        }
+        let limit = self
+            .peers
+            .values()
+            .map(|peer| peer.slot.message_capacity())
+            .min()?
+            .min(omq_shm::BATCH_MAX_MESSAGES);
+        let LaneData::Dispatch(first) = &batch[0];
+        let small = Self::shm_copied_body(&first.msg);
+        let referenced = !small && omq_shm::is_pooled(&first.msg);
+        if !referenced && first.msg.part_slice(1)?.len() > omq_shm::COPIED_BATCH_MAX_BODY {
+            return None;
+        }
+        let mut messages = SmallVec::<[&Message; omq_shm::BATCH_MAX_MESSAGES]>::new();
+        let mut budget = DrainBudget::new(limit, omq_shm::REFERENCE_BATCH_MAX_PAYLOAD);
+        let mut packed_bytes = BATCH_COUNT_BYTES;
+        for data in batch.iter().take(limit) {
+            let LaneData::Dispatch(dispatch) = data;
+            if dispatch.msg.len() != 2
+                || dispatch.msg.part_slice(0) != first.msg.part_slice(0)
+                || (referenced && Self::shm_copied_body(&dispatch.msg) != small)
+            {
+                break;
+            }
+            let body_length = dispatch.msg.part_slice(1)?.len();
+            if body_length > omq_shm::REFERENCE_BATCH_MAX_PAYLOAD.saturating_sub(budget.bytes()) {
+                break;
+            }
+            if !referenced {
+                packed_bytes += std::mem::size_of::<u64>() + body_length;
+                if body_length > omq_shm::COPIED_BATCH_MAX_BODY
+                    || packed_bytes > omq_shm::BATCH_MAX_BYTES
+                {
+                    break;
+                }
+            }
+            messages.push(&dispatch.msg);
+            if !budget.account(body_length) {
+                break;
+            }
+        }
+        if messages.len() < MIN_BATCH_MESSAGES {
+            return None;
+        }
+        let kind = if referenced {
+            omq_shm::BatchKind::Referenced
+        } else {
+            omq_shm::BatchKind::Copied
+        };
+        let message = self.shm_pool.prepare_batch(&messages, kind).ok()??;
+        Some((message, messages.len(), referenced))
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn dispatch_shm_batch(
+        &mut self,
+        message: Message,
+        count: usize,
+        referenced: bool,
+        touched: &mut SmallVec<[u64; 32]>,
+    ) -> bool {
+        let dispatch = LaneDispatch { msg: message };
+        let targets = self.matching_peer_groups(&dispatch);
+        let mut pending = SmallVec::<[PendingPeer; 8]>::new();
+        let mut payload = None;
+        for peers in targets {
+            for peer_id in peers {
+                let Some(peer) = self.peers.get_mut(&peer_id) else {
+                    continue;
+                };
+                match peer
+                    .slot
+                    .try_encode_shm_batch_no_signal(&dispatch.msg, count, referenced)
+                {
+                    TryFrameResult::Ok => Self::touch_peer(peer_id, peer, touched),
+                    TryFrameResult::Full if self.mute_policy == FanOutMutePolicy::Block => {
+                        let payload = payload
+                            .get_or_insert_with(|| {
+                                Arc::new(PreparedFrame::ShmBatch(
+                                    dispatch.msg.clone(),
+                                    count,
+                                    referenced,
+                                ))
+                            })
+                            .clone();
+                        pending.push(PendingPeer {
+                            peer_id,
+                            slot: peer.slot.clone(),
+                            payload,
+                            dictionary: None,
+                        });
+                    }
+                    TryFrameResult::Full => {
+                        peer.slot.deactivate_fanout();
+                    }
+                    TryFrameResult::Dead | TryFrameResult::Ineligible => {}
+                }
+            }
+        }
+        self.finish_pending(&mut pending, touched).await
     }
 
     /// Final bookkeeping when the worker returns: deliver what was framed,
@@ -793,8 +946,10 @@ impl LaneWorker {
         match cmd {
             LaneControl::AddPeer { add, codec_group } => {
                 let group = self.codec_groups[codec_group].get_or_insert_with(|| {
-                    CodecGroup::new(add.slot.codec_profile().cloned())
-                        .expect("validated codec profile")
+                    let mut group = CodecGroup::new(add.slot.codec_profile().cloned())
+                        .expect("validated codec profile");
+                    group.shm = add.slot.is_shm();
+                    group
                 });
                 group.peers += 1;
                 self.peers.insert(
@@ -892,6 +1047,14 @@ impl LaneWorker {
         if peer_ids.is_empty() {
             return;
         }
+        if self.codec_groups[group_id]
+            .as_ref()
+            .expect("matched codec group")
+            .shm
+        {
+            self.dispatch_shm_group(peer_ids, dispatch, touched, Some(pending));
+            return;
+        }
         let group = self.codec_groups[group_id]
             .as_mut()
             .expect("matched codec group");
@@ -969,6 +1132,98 @@ impl LaneWorker {
         clear_fan_out_frame(&mut self.eq, &mut self.chunks);
     }
 
+    fn dispatch_shm_group(
+        &mut self,
+        peer_ids: &[u64],
+        dispatch: &LaneDispatch,
+        touched: &mut SmallVec<[u64; 32]>,
+        mut pending: Option<&mut SmallVec<[PendingPeer; 8]>>,
+    ) {
+        debug_assert!(pending.is_some() || self.mute_policy == FanOutMutePolicy::DropNewest);
+        let prepared = self.prepare_shm_publication(dispatch);
+        let dispatch = prepared.as_ref().unwrap_or(dispatch);
+        let copied = Self::shm_copied_body(&dispatch.msg);
+        #[cfg(target_os = "linux")]
+        if copied {
+            // Copied records are identical for every recipient. Reference
+            // records below instead reserve a distinct lease per connection.
+            omq_shm::frame_copied(&dispatch.msg, &mut self.eq);
+        }
+        let mut payload = None;
+        for &peer_id in peer_ids {
+            let Some(peer) = self.peers.get_mut(&peer_id) else {
+                continue;
+            };
+            let result = if copied {
+                peer.slot
+                    .try_push_pre_framed_no_signal(self.eq.arena_bytes())
+            } else {
+                peer.slot.try_encode_shm_no_signal(&dispatch.msg)
+            };
+            match result {
+                TryFrameResult::Ok => Self::touch_peer(peer_id, peer, touched),
+                TryFrameResult::Full => {
+                    let Some(pending) = pending.as_mut() else {
+                        peer.slot.deactivate_fanout();
+                        continue;
+                    };
+                    let payload = payload
+                        .get_or_insert_with(|| {
+                            Arc::new(if copied {
+                                PreparedFrame::from_frame(&FanOutFrame::Arena(
+                                    self.eq.arena_bytes(),
+                                ))
+                            } else {
+                                PreparedFrame::Shm(dispatch.msg.clone())
+                            })
+                        })
+                        .clone();
+                    pending.push(PendingPeer {
+                        peer_id,
+                        slot: peer.slot.clone(),
+                        payload,
+                        dictionary: None,
+                    });
+                }
+                TryFrameResult::Dead | TryFrameResult::Ineligible => {}
+            }
+        }
+        self.eq.clear_arena();
+    }
+
+    fn shm_copied_body(message: &Message) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            message
+                .len()
+                .checked_sub(1)
+                .and_then(|index| message.part_slice(index))
+                .is_some_and(|body| body.len() <= omq_shm::COPY_THRESHOLD)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = message;
+            false
+        }
+    }
+
+    #[cfg_attr(not(target_os = "linux"), expect(clippy::unused_self))]
+    fn prepare_shm_publication(&self, dispatch: &LaneDispatch) -> Option<LaneDispatch> {
+        #[cfg(target_os = "linux")]
+        {
+            self.shm_pool
+                .prepare(&dispatch.msg)
+                .ok()
+                .flatten()
+                .map(|msg| LaneDispatch { msg })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = dispatch;
+            None
+        }
+    }
+
     async fn finish_pending(
         &mut self,
         pending: &mut SmallVec<[PendingPeer; 8]>,
@@ -1000,7 +1255,7 @@ impl LaneWorker {
                     }
                 }
                 if target.dictionary.is_none() {
-                    match Self::try_push_frame(&target.slot, &target.payload.as_frame()) {
+                    match target.payload.try_push(&target.slot) {
                         TryFrameResult::Ok => {
                             Self::touch_peer(target.peer_id, peer, touched);
                             return false;
@@ -1079,6 +1334,14 @@ impl LaneWorker {
         touched: &mut SmallVec<[u64; 32]>,
     ) {
         if peer_ids.is_empty() {
+            return;
+        }
+        if self.codec_groups[group_id]
+            .as_ref()
+            .expect("matched codec group")
+            .shm
+        {
+            self.dispatch_shm_group(peer_ids, dispatch, touched, None);
             return;
         }
         let group = self.codec_groups[group_id]
@@ -1236,6 +1499,9 @@ impl LaneWorker {
 enum PreparedFrame {
     Arena(Bytes),
     Chunks(Vec<Bytes>),
+    Shm(Message),
+    #[cfg(target_os = "linux")]
+    ShmBatch(Message, usize, bool),
 }
 
 impl PreparedFrame {
@@ -1256,6 +1522,20 @@ impl PreparedFrame {
         match self {
             Self::Arena(raw) => FanOutFrame::Arena(raw),
             Self::Chunks(chunks) => FanOutFrame::Chunks(chunks),
+            Self::Shm(_) => unreachable!("SHM references require per-recipient encoding"),
+            #[cfg(target_os = "linux")]
+            Self::ShmBatch(..) => unreachable!("SHM batches require per-recipient encoding"),
+        }
+    }
+
+    fn try_push(&self, slot: &PeerTransmitSlot) -> TryFrameResult {
+        match self {
+            Self::Shm(message) => slot.try_encode_shm_no_signal(message),
+            #[cfg(target_os = "linux")]
+            Self::ShmBatch(message, count, referenced) => {
+                slot.try_encode_shm_batch_no_signal(message, *count, *referenced)
+            }
+            _ => LaneWorker::try_push_frame(slot, &self.as_frame()),
         }
     }
 }
@@ -1367,6 +1647,8 @@ mod tests {
         let (data_tx, mut data_rx) = yring::spsc::<LaneData>(1);
         let data_space = Arc::new(crate::engine::signal::StateSignal::new());
         let lanes = FanOutLanes {
+            #[cfg(target_os = "linux")]
+            shm_pool: omq_shm::SendPool::new(16, None),
             state: std::sync::Mutex::new(FanOutLaneState { endpoints: vec![] }),
             active_flags: Arc::new(vec![AtomicBool::new(true)]),
             distributor: Mutex::new(LaneDistributor {
@@ -1407,6 +1689,8 @@ mod tests {
         let (data_tx, data_rx) = yring::spsc::<LaneData>(1);
         let data_space = Arc::new(crate::engine::signal::StateSignal::new());
         let lanes = FanOutLanes {
+            #[cfg(target_os = "linux")]
+            shm_pool: omq_shm::SendPool::new(16, None),
             state: std::sync::Mutex::new(FanOutLaneState { endpoints: vec![] }),
             active_flags: Arc::new(vec![AtomicBool::new(true)]),
             distributor: Mutex::new(LaneDistributor {
@@ -1454,6 +1738,8 @@ mod tests {
             let mut data_rx = Some(data_rx);
             let data_space = Arc::new(crate::engine::signal::StateSignal::new());
             let lanes = FanOutLanes {
+                #[cfg(target_os = "linux")]
+                shm_pool: omq_shm::SendPool::new(16, None),
                 state: std::sync::Mutex::new(FanOutLaneState { endpoints: vec![] }),
                 active_flags: Arc::new(vec![AtomicBool::new(true)]),
                 distributor: Mutex::new(LaneDistributor {
@@ -1494,6 +1780,8 @@ mod tests {
         let (_ctrl_tx, ctrl_rx) = yring::spsc(4);
         let data_signal = Arc::new(crate::engine::signal::DataSignal::new());
         let worker = LaneWorker {
+            #[cfg(target_os = "linux")]
+            shm_pool: omq_shm::SendPool::new(16, None),
             data_rx,
             ctrl_rx,
             data_signal: data_signal.clone(),
@@ -1545,6 +1833,8 @@ mod tests {
             },
         );
         let mut worker = LaneWorker {
+            #[cfg(target_os = "linux")]
+            shm_pool: omq_shm::SendPool::new(16, None),
             data_rx,
             ctrl_rx,
             data_signal: Arc::new(crate::engine::signal::DataSignal::new()),
@@ -1595,6 +1885,8 @@ mod tests {
             },
         );
         let mut worker = LaneWorker {
+            #[cfg(target_os = "linux")]
+            shm_pool: omq_shm::SendPool::new(16, None),
             data_rx,
             ctrl_rx,
             data_signal: Arc::new(crate::engine::signal::DataSignal::new()),
@@ -1678,6 +1970,8 @@ mod tests {
             },
         );
         let mut worker = LaneWorker {
+            #[cfg(target_os = "linux")]
+            shm_pool: omq_shm::SendPool::new(16, None),
             data_rx,
             ctrl_rx,
             data_signal: Arc::new(crate::engine::signal::DataSignal::new()),
@@ -1731,6 +2025,8 @@ mod tests {
             .collect();
         (
             LaneWorker {
+                #[cfg(target_os = "linux")]
+                shm_pool: omq_shm::SendPool::new(16, None),
                 data_rx,
                 ctrl_rx,
                 data_signal: Arc::new(crate::engine::signal::DataSignal::new()),
@@ -1758,6 +2054,92 @@ mod tests {
         let mut ends = SmallVec::new();
         assert_eq!(worker.encode_plain_batch(&batch, &mut wire, &mut ends), 8);
         (wire, ends)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn shm_dispatch_keeps_ready_peers_progressing_under_both_mute_policies() {
+        for policy in [FanOutMutePolicy::Block, FanOutMutePolicy::DropNewest] {
+            for size in [16, 256] {
+                let (first, second) = std::os::unix::net::UnixStream::pair().unwrap();
+                let slow = test_slot_with_msg_cap(7, 1);
+                let fast = test_slot(8);
+                for (slot, stream) in [(&slow, &first), (&fast, &second)] {
+                    let state = omq_shm::Connection::new(stream, 8, None).unwrap();
+                    slot.set_shm(Arc::new(Mutex::new(state)));
+                    slot.handshake_done
+                        .store(true, std::sync::atomic::Ordering::Release);
+                }
+                let (mut worker, _control) = batch_worker(policy, &[slow.clone(), fast.clone()]);
+                let dispatch = LaneDispatch {
+                    msg: omq_proto::Message::with_group("group", vec![7; size]),
+                };
+                let mut touched = SmallVec::new();
+                let mut pending = SmallVec::new();
+                for _ in 0..2 {
+                    worker.dispatch_shm_group(
+                        &[7, 8],
+                        &dispatch,
+                        &mut touched,
+                        (policy == FanOutMutePolicy::Block).then_some(&mut pending),
+                    );
+                }
+                assert_eq!(
+                    pending.len(),
+                    usize::from(policy == FanOutMutePolicy::Block)
+                );
+                assert_eq!(slow.fanout_active(), policy == FanOutMutePolicy::Block);
+                worker.flush_touched(&mut touched);
+                assert!(!fast.data_signal.is_idle());
+                let mut fast_frames = Vec::new();
+                let mut slow_frames = Vec::new();
+                fast.drain(&mut fast_frames, 1024);
+                slow.drain(&mut slow_frames, 1024);
+                assert_ne!(slow_frames, [] as [bytes::Bytes; 0]);
+                assert_eq!(fast_frames.concat().len(), slow_frames.concat().len() * 2);
+                if policy == FanOutMutePolicy::Block {
+                    assert!(
+                        !tokio::time::timeout(
+                            std::time::Duration::from_secs(1),
+                            worker.finish_pending(&mut pending, &mut touched)
+                        )
+                        .await
+                        .unwrap()
+                    );
+                    assert!(pending.is_empty());
+                    let mut retried = Vec::new();
+                    slow.drain(&mut retried, 1024);
+                    assert_eq!(retried.concat().len(), slow_frames.concat().len());
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn shm_reference_batches_admit_exact_body_limit() {
+        const SIZE: usize = 1024 * 1024;
+        let (stream, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let state = omq_shm::Connection::new(&stream, 16, None).unwrap();
+        let slot = test_slot(1);
+        slot.set_shm(Arc::new(Mutex::new(state)));
+        let (mut worker, _control) = batch_worker(FanOutMutePolicy::Block, &[slot]);
+        worker.mode = FanOutMode::Group;
+        let pool = omq_shm::payload_pool([(SIZE, 9)]).unwrap();
+        let batch: Vec<_> = (0..9)
+            .map(|_| {
+                let body = pool.message(SIZE, |bytes| bytes.fill(7)).unwrap();
+                LaneData::Dispatch(LaneDispatch {
+                    msg: omq_proto::Message::with_prefix(Bytes::from_static(b"group"), body),
+                })
+            })
+            .collect();
+        // A shared envelope does not consume the referenced-body byte budget.
+        // The ninth body exceeds that budget, so only eight may be admitted.
+        let (_, count, referenced) = worker.prepare_shm_batch(&batch).unwrap();
+        assert!(referenced);
+        assert_eq!(count * SIZE, omq_shm::REFERENCE_BATCH_MAX_PAYLOAD);
+        assert_eq!(count, 8);
     }
 
     fn poll_once<F: std::future::Future>(
@@ -1884,6 +2266,8 @@ mod tests {
             })
             .collect();
         FanOutLanes {
+            #[cfg(target_os = "linux")]
+            shm_pool: omq_shm::SendPool::new(16, None),
             state: std::sync::Mutex::new(FanOutLaneState { endpoints }),
             active_flags: Arc::new(
                 (0..count)

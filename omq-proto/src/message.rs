@@ -831,6 +831,62 @@ impl Message {
         }
     }
 
+    /// Clone the final frame's payload, preserving its existing byte owner.
+    /// Inline bytes remain inline; shared owners need no `Bytes` adapter.
+    pub fn last_payload(&self) -> Option<Payload> {
+        match &self.inner {
+            MessageInner::InlinePair(pair) => Some(Payload::from_slice(pair.slices()[1])),
+            MessageInner::Empty | MessageInner::RoutedEmpty { .. } => None,
+            MessageInner::Inline { len, data } => Some(Payload::from_slice(
+                &data[..usize::from(len & !INLINE_DELIMITED_FLAG)],
+            )),
+            MessageInner::Single(payload) => Some(payload.clone()),
+            MessageInner::EmptyDelimitedBytes(data) | MessageInner::RoutedBytes { data, .. } => {
+                Some(Payload::from_bytes(data.clone()))
+            }
+            MessageInner::Multi(parts) | MessageInner::RoutedMulti { parts, .. } => {
+                parts.last().cloned()
+            }
+            MessageInner::RoutedInline { len, data, .. } => {
+                Some(Payload::from_slice(&data[..usize::from(*len)]))
+            }
+            MessageInner::RoutedShared { body, .. } | MessageInner::PrefixedShared { body, .. } => {
+                Some(Payload {
+                    inner: PayloadInner::Shared(body.clone()),
+                })
+            }
+        }
+    }
+
+    /// Replace the final frame while retaining its envelope and routing ID.
+    /// Returns false for a message with no frames. Owned multipart tables
+    /// are reused, including tables borrowed from a `MessagePool`.
+    pub fn replace_last_payload(&mut self, payload: Payload) -> bool {
+        match &mut self.inner {
+            MessageInner::Multi(parts) | MessageInner::RoutedMulti { parts, .. } => {
+                let Some(last) = parts.last_mut() else {
+                    return false;
+                };
+                *last = payload;
+            }
+            _ => {
+                if self.is_empty() {
+                    return false;
+                }
+                let routing_id = self.routing_id();
+                let mut body = Self::from(payload);
+                if self.len() == 2 {
+                    body = Self::with_prefix(self.part_bytes(0).expect("envelope frame"), body);
+                }
+                if let Some(id) = routing_id {
+                    body = body.with_routing_id(id);
+                }
+                *self = body;
+            }
+        }
+        true
+    }
+
     /// Borrow exactly `N` parts as an array of `Bytes`.
     ///
     /// Returns [`PartCountError`] if the message has a different number of
@@ -1583,6 +1639,7 @@ mod tests {
                 assert_eq!(message.get(1), Some(body.as_slice()));
                 assert_eq!(message.get(2), None);
                 assert_eq!(message.part_bytes(2), None);
+                assert_eq!(message.last_payload().unwrap().as_slice(), body);
                 assert_eq!(message.clone(), message);
                 assert_eq!(
                     message.iter().collect::<Vec<_>>(),
@@ -1619,6 +1676,46 @@ mod tests {
         assert_eq!(overflow.byte_len(), 55);
         assert_eq!(overflow.part_slice(1), Some([7; 50].as_slice()));
         assert!(matches!(overflow.inner, MessageInner::Multi(_)));
+    }
+
+    #[test]
+    fn replacing_final_payload_preserves_envelopes_routing_and_cached_sizes() {
+        let pool = MessagePool::new(2, 3);
+        let messages = [
+            Message::from_slice(b"old"),
+            Message::single(vec![7; 128]),
+            Message::with_prefix(Bytes::new(), Message::from_slice(b"old")),
+            Message::with_prefix(Bytes::new(), Message::single(vec![7; 128])),
+            Message::with_group("group", "old"),
+            pool.multipart(["identity", "group", "old"]),
+        ];
+        for original in messages {
+            for routing_id in [None, Some(7)] {
+                let mut message = original.clone();
+                if let Some(id) = routing_id {
+                    message = message.with_routing_id(id);
+                }
+                let cloned = message.clone();
+                let old_bytes = message.byte_len();
+                let old_body = message.part_slice(message.len() - 1).unwrap().len();
+                assert!(message.replace_last_payload(Payload::from_slice(b"replacement")));
+                assert_eq!(message.routing_id(), routing_id);
+                assert_eq!(message.len(), cloned.len());
+                for index in 0..message.len() - 1 {
+                    assert_eq!(message.part_slice(index), cloned.part_slice(index));
+                }
+                assert_eq!(message.byte_len(), old_bytes - old_body + 11);
+                assert_eq!(cloned.byte_len(), old_bytes);
+                assert_eq!(
+                    message.part_slice(message.len() - 1),
+                    Some(b"replacement".as_slice())
+                );
+            }
+        }
+        let mut empty = Message::new().with_routing_id(9);
+        assert!(!empty.replace_last_payload(Payload::from_slice(b"unused")));
+        assert_eq!(empty.routing_id(), Some(9));
+        assert!(empty.is_empty());
     }
 
     struct SharedFrame(Vec<u8>);

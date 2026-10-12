@@ -372,6 +372,9 @@ if [[ "${OMQ_LOOM:-}" == "1" ]]; then
     run omq_cargo_with_rust_tools test -p omq-tokio --test omq_loom_signal
     run omq_cargo_with_rust_tools test -p omq-tokio --features dart --test omq_loom_dart_pool
     RUSTFLAGS="${RUSTFLAGS:-} --cfg loom" run omq_cargo_with_rust_tools test -p omq-proto --features dart --test omq_proto_loom_dart
+    if [[ "$(uname -s)" == "Linux" ]]; then
+        RUSTFLAGS="${RUSTFLAGS:-} --cfg loom" run omq_cargo_with_rust_tools test -p omq-shm --test omq_shm_loom
+    fi
 else
     echo "skip: OMQ_LOOM=1"
 fi

@@ -306,11 +306,22 @@ impl Consumer {
             .is_none_or(mpsc::Receiver::is_disconnected)
     }
 
+    #[cfg(test)]
     pub(crate) fn drain_into(
         &mut self,
         out: &mut Vec<Message>,
         max: usize,
         max_bytes: usize,
+    ) -> usize {
+        self.drain_into_with_cost(out, max, max_bytes, |_, bytes| bytes)
+    }
+
+    pub(crate) fn drain_into_with_cost(
+        &mut self,
+        out: &mut Vec<Message>,
+        max: usize,
+        max_bytes: usize,
+        mut cost: impl FnMut(&Message, usize) -> usize,
     ) -> usize {
         let Some(receiver) = &mut self.receiver else {
             return 0;
@@ -321,7 +332,10 @@ impl Consumer {
             let Ok(queued) = receiver.try_recv() else {
                 break;
             };
-            bytes += queued.bytes;
+            bytes += cost(
+                queued.message.as_ref().expect("queued message"),
+                queued.bytes,
+            );
             out.push(queued.into_message());
         }
         receiver.release_consumed();

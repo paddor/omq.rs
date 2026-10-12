@@ -712,6 +712,19 @@ impl SendPipeConsumer {
         max_msgs: usize,
         max_bytes: usize,
     ) -> usize {
+        self.drain_into_with_cost(batch, max_msgs, max_bytes, |message, admitted| {
+            admitted.unwrap_or_else(|| message.byte_len())
+        })
+    }
+
+    /// Drain with an IO-work byte charge, preserving admission byte accounting.
+    pub(crate) fn drain_into_with_cost(
+        &mut self,
+        batch: &mut Vec<Message>,
+        max_msgs: usize,
+        max_bytes: usize,
+        mut cost: impl FnMut(&Message, Option<usize>) -> usize,
+    ) -> usize {
         let Self {
             inner,
             data_signal,
@@ -720,7 +733,9 @@ impl SendPipeConsumer {
         } = self;
         data_signal.begin_drain();
         if let SendPipeConsumerInner::Peer(peer) = inner {
-            let count = peer.drain_into(batch, max_msgs, max_bytes);
+            let count = peer.drain_into_with_cost(batch, max_msgs, max_bytes, |message, bytes| {
+                cost(message, Some(bytes))
+            });
             data_signal.clear_after(peer.is_empty());
             return count;
         }
@@ -737,7 +752,7 @@ impl SendPipeConsumer {
             let Some(msg) = consumer.pop() else {
                 break;
             };
-            bytes += msg.byte_len();
+            bytes += cost(&msg, None);
             batch.push(msg);
             count += 1;
         }
@@ -808,6 +823,52 @@ mod tests {
     use tokio::time::{Duration, timeout};
 
     use super::*;
+
+    #[tokio::test]
+    async fn metadata_drain_preserves_limits_order_and_capacity_wakes() {
+        for (mut tx, mut rx) in [send_pipe(4), peer_send_pipe(4, None)] {
+            for sequence in 0..4 {
+                tx.try_send(Message::from(vec![sequence; 4096])).unwrap();
+            }
+            let mut batch = Vec::new();
+            for (count, bytes) in [(0, 128), (4, 0)] {
+                assert_eq!(
+                    rx.drain_into_with_cost(&mut batch, count, bytes, |_, _| 64),
+                    0
+                );
+            }
+            assert_eq!(rx.drain_into_with_cost(&mut batch, 4, 128, |_, _| 64), 2);
+            timeout(Duration::from_millis(10), rx.ready())
+                .await
+                .expect("bounded drain must rearm the remaining messages");
+            for sequence in 4..6 {
+                tx.try_send(Message::from(vec![sequence; 4096])).unwrap();
+            }
+            assert!(matches!(
+                tx.try_send(Message::from(vec![6; 4096])),
+                Err(SendPipeError::Full(_))
+            ));
+            assert_eq!(rx.drain_into_with_cost(&mut batch, 1, 128, |_, _| 64), 1);
+            assert_eq!(rx.drain_into(&mut batch, 4, 128), 1);
+            assert_eq!(rx.drain_into_with_cost(&mut batch, 4, 128, |_, _| 64), 2);
+            assert_eq!(batch.len(), 6);
+            for (sequence, message) in (0..6).zip(&batch) {
+                assert!(
+                    message
+                        .part_slice(0)
+                        .unwrap()
+                        .iter()
+                        .all(|&b| b == sequence)
+                );
+            }
+            assert!(rx.is_empty());
+            assert!(
+                timeout(Duration::from_millis(10), rx.ready())
+                    .await
+                    .is_err()
+            );
+        }
+    }
 
     #[cfg(feature = "dart")]
     #[test]

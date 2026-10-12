@@ -2125,17 +2125,15 @@ fn drain_decoded_messages(
             return Err(Error::ReceiveRateLimitExceeded);
         }
         let msg_bytes = m.byte_len();
+        #[cfg(target_os = "linux")]
+        let msg_bytes = if shm.is_some() && m.has_external_body_owner() {
+            omq_shm::REFERENCE_ENTRY_BYTES
+        } else {
+            msg_bytes
+        };
         let budget = recv_budget.get_or_insert_with(|| {
             recv_batch_time = receive_profile.time(msg_bytes);
-            let budget = receive_profile.budget(msg_bytes);
-            #[cfg(target_os = "linux")]
-            if shm.is_some() && matches!(receive_profile, ReceiveProfile::Throughput) {
-                return DrainBudget::new(
-                    budget.remaining_msgs(),
-                    omq_shm::REFERENCE_BATCH_MAX_PAYLOAD,
-                );
-            }
-            budget
+            receive_profile.budget(msg_bytes)
         });
         if !delivery.send(m, defer_yring_flush, &mut pending_yring_flush) {
             delivery.flush(&mut pending_yring_flush);
@@ -2387,11 +2385,16 @@ fn handle_send_pipe_ready(
             });
         }
     }
-    let drained = rx.drain_into(
-        pipe_batch,
-        crate::routing::OUTBOUND_BATCH_MAX_MSGS,
-        max_batch_bytes(),
-    );
+    let drained = if outbound.uses_shm() {
+        rx.drain_into_with_cost(
+            pipe_batch,
+            OUTBOUND_BATCH_MAX_MSGS,
+            max_batch_bytes(),
+            |_, _| std::mem::size_of::<Message>(),
+        )
+    } else {
+        rx.drain_into(pipe_batch, OUTBOUND_BATCH_MAX_MSGS, max_batch_bytes())
+    };
     if drained == 0 {
         if rx.is_disconnected() {
             return Ok(DriverStep::Close);

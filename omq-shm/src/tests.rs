@@ -493,6 +493,90 @@ fn copied_body_framing_preserves_envelopes_and_uses_no_lease() {
 }
 
 #[test]
+fn single_frame_batches_preserve_bodies_routes_and_logical_credit() {
+    for count in [2, 8, BATCH_MAX_MESSAGES] {
+        for kind in [BatchKind::Copied, BatchKind::Referenced] {
+            let (mut sender, mut receiver) = pair(count);
+            let slot_size = match kind {
+                BatchKind::Copied => 4096,
+                BatchKind::Referenced => 128 * 1024,
+            };
+            let sources = payload_pool([(slot_size, count)]).unwrap();
+            let sizes: &[usize] = match kind {
+                BatchKind::Copied => &[0, 16, 55, 64, 256, 4096],
+                BatchKind::Referenced => &[64, 256, 128 * 1024],
+            };
+            let messages: Vec<_> = (0..count)
+                .map(|index| {
+                    sources
+                        .try_message(sizes[index % sizes.len()], |bytes| bytes.fill(index as u8))
+                        .unwrap()
+                        .unwrap()
+                        .with_routing_id(7)
+                })
+                .collect();
+            let packed = sender
+                .prepare_batch(&messages.iter().collect::<Vec<_>>(), kind)
+                .unwrap()
+                .unwrap();
+            assert_eq!(packed.len(), 1);
+            assert_eq!(packed.routing_id(), Some(7));
+            let wire = sender
+                .encode_record(&packed, count, kind.record())
+                .unwrap()
+                .unwrap();
+            assert_eq!(sender.active.len(), 1);
+            assert_eq!(sender.leased_messages, count);
+            transfer(&mut sender, &mut receiver);
+            let mut decoded = vec![receiver.decode_received(wire).unwrap()];
+            while let Some(message) = receiver.poll_received() {
+                decoded.push(message);
+            }
+            assert_eq!(decoded, messages);
+            assert!(
+                decoded
+                    .iter()
+                    .all(|message| message.len() == 1 && message.routing_id() == Some(7))
+            );
+            let retained = decoded.last().unwrap().part_bytes(0).unwrap();
+            drop(decoded);
+            drop(packed);
+            drop(messages);
+            drop(sender);
+            drop(receiver);
+            assert_eq!(retained.as_ref(), vec![(count - 1) as u8; retained.len()]);
+            drop(retained);
+            assert_eq!(sources.available(), count);
+        }
+    }
+}
+
+#[test]
+fn batches_reject_mixed_envelopes_routes_and_excess_hwm() {
+    let (sender, _) = pair(2);
+    let ordinary = Message::from_slice(&[1; 64]);
+    let grouped = Message::with_group("g", vec![2; 64]);
+    assert!(
+        sender
+            .prepare_batch(&[&ordinary, &grouped], BatchKind::Copied)
+            .is_err()
+    );
+    let routed = ordinary.clone().with_routing_id(1);
+    assert!(
+        sender
+            .prepare_batch(&[&ordinary, &routed], BatchKind::Copied)
+            .is_err()
+    );
+    assert!(
+        sender
+            .prepare_batch(&[&ordinary; 3], BatchKind::Copied)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(sender.batch_capacity(), 2);
+}
+
+#[test]
 fn small_body_batches_preserve_order_and_charge_each_message_against_hwm() {
     for count in [2, 8, BATCH_MAX_MESSAGES] {
         let (mut sender, mut receiver) = pair(count);
@@ -972,10 +1056,31 @@ fn batch_size_tables_use_u64_and_reject_truncated_or_overflowing_lengths() {
     let bytes = referenced.part_slice(1).unwrap();
     assert_eq!(read_u64(bytes, 2), 100);
     assert_eq!(read_u64(bytes, 10), 128);
-    for length in [u64::from(u32::MAX) + 1, u64::MAX] {
+    for length in [(isize::MAX as u64) + 1, u64::MAX] {
         let mut forged = bytes.to_vec();
         forged[2..10].copy_from_slice(&length.to_le_bytes());
         assert!(batch::references(&forged).is_err());
+    }
+    #[cfg(target_pointer_width = "64")]
+    {
+        let length = u64::from(u32::MAX) + 1;
+        let mut forged = bytes.to_vec();
+        forged[2..10].copy_from_slice(&length.to_le_bytes());
+        assert_eq!(batch::references(&forged).unwrap().count(), 2);
+        let slot = find_slot(large[0].part_slice(1).unwrap()).unwrap();
+        let mut decoded = std::collections::VecDeque::new();
+        assert!(
+            batch::decode_references(
+                &Message::with_group("group", forged),
+                None,
+                &crate::views::Views::new(2),
+                |id, token| (slot.mapping.id == id && slot.mapping.token == token)
+                    .then(|| slot.mapping.clone()),
+                &mut decoded,
+            )
+            .is_err()
+        );
+        assert!(decoded.is_empty());
     }
 }
 
@@ -1037,12 +1142,13 @@ fn already_completed_cells_are_found_behind_held_cells() {
 
 #[test]
 fn batch_credit_finds_completed_cells_while_unused_positions_remain() {
-    let (mut sender, mut receiver) = pair(193);
+    let filled = 3 * BATCH_MAX_MESSAGES;
+    let (mut sender, mut receiver) = pair(filled + 1);
     let body = Message::from_slice(&[7; 128]);
-    let mut held: Vec<_> = (0..192)
+    let mut held: Vec<_> = (0..filled)
         .map(|_| delivered(&mut sender, &mut receiver, &body))
         .collect();
-    held.truncate(128);
+    held.truncate(2 * BATCH_MAX_MESSAGES);
     assert_eq!(sender.free.len(), 1);
     let pool = payload_pool([(BATCH_MAX_BYTES.next_power_of_two(), 1)]).unwrap();
     let message = Message::with_group("group", vec![8; 16]);

@@ -35,8 +35,8 @@ use pool::{Slot, find_slot, pool_storage};
 use wire::COPIED;
 
 pub use batch::{
-    BATCH_MAX_BYTES, BATCH_MAX_MESSAGES, BatchKind, COPIED_BATCH_MAX_BODY,
-    REFERENCE_BATCH_MAX_PAYLOAD, prepare_batch, prepare_reference_batch,
+    BATCH_MAX_BYTES, BATCH_MAX_MESSAGES, BatchKind, COPIED_BATCH_MAX_BODY, REFERENCE_ENTRY_BYTES,
+    prepare_batch, prepare_reference_batch,
 };
 pub use connection::{Connection, supports};
 pub use lease::CreditWait;
@@ -53,6 +53,21 @@ mod miri_tests;
 pub const COPY_THRESHOLD: usize = 55;
 /// Fixed transport preface length, before the ordinary ZMTP greeting.
 pub const PREFACE_SIZE: usize = 24;
+
+/// Bytes charged to outbound IO work: coordinates for pooled bodies, full
+/// application bytes when encoding requires a copy.
+#[must_use]
+pub fn send_work_bytes(message: &Message) -> usize {
+    let Some(index) = message.len().checked_sub(1) else {
+        return 0;
+    };
+    let length = message.part_slice(index).expect("message body").len();
+    if length > COPY_THRESHOLD && is_pooled(message) {
+        message.byte_len() - length + REFERENCE_ENTRY_BYTES
+    } else {
+        message.byte_len()
+    }
+}
 
 /// Frame a copied SHM body contiguously, retaining preceding envelopes.
 /// Used by IO workers when every recipient shares the same copied record.

@@ -155,7 +155,7 @@ cargo run --release -p omq-bench -- chart shm
 
 Writes `doc/charts/shm/{pubsub,pushpull,reqrep}.svg` from append-only
 `shm-{pubsub,pushpull,reqrep}.jsonl`.
-For SHM-only fan-out refreshes, run with `--impls shm,shm-pool`, then chart
+For SHM-only refreshes, run with `--impls shm,shm-pool`, then chart
 with `--cached-baselines` to retain cached inproc/IPC baselines.
 
 Main Rust/comparison latency panels plot p99 round-trip latency, with whiskers

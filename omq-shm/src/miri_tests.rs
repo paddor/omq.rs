@@ -360,6 +360,77 @@ fn grouped(pool: &omq_proto::PayloadPool, size: usize, value: u8) -> Message {
 }
 
 #[test]
+fn single_frame_batches_retain_storage_and_release_the_final_view() {
+    for referenced in [false, true] {
+        let sources = payload_pool([(256, 3)]).unwrap();
+        let metadata = payload_pool([(1024, 1)]).unwrap();
+        let sizes = if referenced {
+            [64, 128, 256]
+        } else {
+            [0, 16, 256]
+        };
+        let messages: Vec<_> = sizes
+            .into_iter()
+            .map(|size| {
+                sources
+                    .try_message(size, |bytes| bytes.fill(7))
+                    .unwrap()
+                    .unwrap()
+            })
+            .collect();
+        let references: Vec<_> = messages.iter().collect();
+        let packed = if referenced {
+            prepare_reference_batch(&metadata, &references)
+        } else {
+            prepare_batch(&metadata, &references)
+        }
+        .unwrap()
+        .unwrap();
+        let slot = find_slot(packed.part_slice(0).unwrap()).unwrap();
+        let regions = slot.state.lock().unwrap().regions.clone();
+        let table = table(1);
+        let kind = if referenced {
+            wire::REFERENCE_BATCH
+        } else {
+            wire::COPIED_BATCH
+        };
+        let reference = publish(&packed, &table, 0, GENERATION_STEP, kind);
+        let views = Views::new(3);
+        let received = Message::from(borrow(&packed, &table, reference, &views));
+        let mut decoded = VecDeque::new();
+        if referenced {
+            batch::decode_references(
+                &received,
+                None,
+                &views,
+                |id, token| {
+                    regions
+                        .iter()
+                        .find(|region| region.id == id && region.token == token)
+                        .cloned()
+                },
+                &mut decoded,
+            )
+            .unwrap();
+        } else {
+            batch::decode(&received, None, &views, &mut decoded).unwrap();
+        }
+        assert_eq!(decoded.iter().collect::<Vec<_>>(), references);
+        let retained = decoded.back().unwrap().part_bytes(0).unwrap();
+        drop(decoded);
+        drop(received);
+        drop(packed);
+        drop(messages);
+        drop(views);
+        assert_eq!(metadata.available(), 0);
+        assert_eq!(retained.as_ref(), &[7; 256]);
+        drop(retained);
+        assert_eq!(metadata.available(), 1);
+        assert_eq!(sources.available(), 3);
+    }
+}
+
+#[test]
 fn copied_batch_children_hold_the_shared_lease_until_the_final_byte_view() {
     let metadata = payload_pool([(1024, 1)]).unwrap();
     let messages: Vec<_> = [16, 128, 256]

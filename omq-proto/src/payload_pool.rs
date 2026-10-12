@@ -339,12 +339,16 @@ impl Storage {
 }
 
 impl Pool {
-    fn reclaim(&self) {
+    fn reclaim(&self, requested: usize) {
+        if requested == 0 {
+            return;
+        }
         let limit = self
             .pending_count
             .load(Ordering::Relaxed)
             .min(self.reclaim_budget.remaining_msgs());
         let mut budget = self.reclaim_budget.clone();
+        let mut returned = 0;
         // Inspect each queued owner at most once in this turn, even if it
         // remains held and is pushed back onto the pending queue.
         for _ in 0..limit {
@@ -363,6 +367,10 @@ impl Pool {
                 self.queued[owner.slot].store(false, Ordering::Relaxed);
                 self.pending_count.fetch_sub(1, Ordering::Relaxed);
                 owner.return_one(self, true);
+                returned += 1;
+                if returned == requested {
+                    break;
+                }
             } else {
                 self.pending
                     .push(owner)
@@ -574,7 +582,7 @@ impl PayloadPool {
             let storage = pool.free.pop().or_else(|| {
                 // Returned free slots are already reusable. Scan deferred
                 // owners only when checkout actually needs their credit.
-                pool.reclaim();
+                pool.reclaim(1);
                 pool.free.pop()
             });
             if let Some(storage) = storage {
@@ -701,16 +709,14 @@ impl PayloadPool {
             if budget.exhausted() {
                 break;
             }
-            pool.reclaim();
+            let requested = budget
+                .remaining_msgs()
+                .min((TRANSFER_BYTES.saturating_sub(budget.bytes()) / pool.buffer_size).max(1));
+            pool.reclaim(requested.saturating_sub(pool.free.len()));
             if pool.free.available.load(Ordering::Relaxed) == 0 {
                 continue;
             }
-            let count = pool.free.pop_many(
-                budget
-                    .remaining_msgs()
-                    .min((TRANSFER_BYTES.saturating_sub(budget.bytes()) / pool.buffer_size).max(1)),
-                output,
-            );
+            let count = pool.free.pop_many(requested, output);
             let batch_start = output.len() - count;
             for buffer in &mut output[batch_start..] {
                 buffer.returns.clone_from(&self.returns);
@@ -778,7 +784,7 @@ impl PayloadPool {
         self.classes
             .iter()
             .map(|pool| {
-                pool.reclaim();
+                pool.reclaim(usize::MAX);
                 pool.free.len()
             })
             .sum()
@@ -788,7 +794,7 @@ impl PayloadPool {
     #[doc(hidden)]
     pub fn reclaim(&self) {
         for pool in self.classes.iter() {
-            pool.reclaim();
+            pool.reclaim(usize::MAX);
         }
     }
 }
@@ -999,6 +1005,85 @@ mod tests {
             self.checks.fetch_add(1, Ordering::Relaxed);
             self.ready.load(Ordering::Acquire)
         }
+    }
+
+    #[test]
+    fn checkout_reclaims_only_the_requested_slots() {
+        let ready = Arc::new(AtomicBool::new(false));
+        let checks = Arc::new(AtomicUsize::new(0));
+        let pool = PayloadPool::with_storage(
+            [(128, TRANSFER)],
+            &DrainBudget::new(TRANSFER, usize::MAX),
+            |size, capacity| {
+                Ok((0..capacity)
+                    .map(|_| {
+                        Box::new(PendingStorage {
+                            bytes: vec![0; size].into_boxed_slice(),
+                            ready: ready.clone(),
+                            checks: checks.clone(),
+                        }) as Box<dyn PayloadStorage>
+                    })
+                    .collect())
+            },
+        )
+        .unwrap();
+        let buffers: Vec<_> = (0..TRANSFER)
+            .map(|_| pool.try_buffer(128).unwrap())
+            .collect();
+        drop(buffers);
+        ready.store(true, Ordering::Release);
+        checks.store(0, Ordering::Relaxed);
+        let held = pool.try_buffer(128).unwrap();
+        assert_eq!(checks.load(Ordering::Relaxed), 1);
+        let mut batch = Vec::with_capacity(4);
+        assert_eq!(pool.try_buffers_into(128, 4, &mut batch), 4);
+        assert_eq!(checks.load(Ordering::Relaxed), 5);
+        assert_eq!(
+            pool.classes[0].pending_count.load(Ordering::Relaxed),
+            TRANSFER - 5
+        );
+        drop(held);
+        drop(batch);
+        assert_eq!(pool.available(), TRANSFER);
+    }
+
+    #[test]
+    fn checkout_finds_ready_storage_behind_unreleased_backend_slots() {
+        let ready: Vec<_> = (0..TRANSFER)
+            .map(|_| Arc::new(AtomicBool::new(false)))
+            .collect();
+        let checks = Arc::new(AtomicUsize::new(0));
+        let pool = PayloadPool::with_storage(
+            [(128, TRANSFER)],
+            &DrainBudget::new(TRANSFER, usize::MAX),
+            |size, capacity| {
+                Ok((0..capacity)
+                    .map(|index| {
+                        Box::new(PendingStorage {
+                            bytes: vec![index as u8; size].into_boxed_slice(),
+                            ready: ready[index].clone(),
+                            checks: checks.clone(),
+                        }) as Box<dyn PayloadStorage>
+                    })
+                    .collect())
+            },
+        )
+        .unwrap();
+        let buffers: Vec<_> = (0..TRANSFER)
+            .map(|_| pool.try_buffer(128).unwrap())
+            .collect();
+        drop(buffers);
+        ready[TRANSFER - 1].store(true, Ordering::Release);
+        checks.store(0, Ordering::Relaxed);
+        let mut buffer = pool.try_buffer(128).unwrap();
+        assert_eq!(checks.load(Ordering::Relaxed), TRANSFER);
+        assert_eq!(buffer.writable(), &[(TRANSFER - 1) as u8; 128]);
+        assert!(pool.try_buffer(128).is_none());
+        for slot in &ready {
+            slot.store(true, Ordering::Release);
+        }
+        drop(buffer);
+        assert_eq!(pool.available(), TRANSFER);
     }
 
     #[test]

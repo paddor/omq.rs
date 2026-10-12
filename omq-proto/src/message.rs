@@ -23,6 +23,8 @@ pub(crate) use parts::Parts;
 mod owner;
 pub use owner::PayloadOwner;
 use owner::SharedOwner;
+mod inline_pair;
+use inline_pair::InlinePair;
 
 /// Error returned by [`Message::try_as_parts`] when the message does not have
 /// the requested number of parts.
@@ -387,6 +389,7 @@ pub(crate) enum MessageInner {
         len: u8,
         data: [u8; MAX_INLINE_MESSAGE],
     },
+    InlinePair(InlinePair),
     Single(Payload),
     /// Existing shared body with one local identity or group prefix.
     PrefixedShared {
@@ -431,6 +434,7 @@ impl Message {
         let extra = match &self.inner {
             MessageInner::Empty
             | MessageInner::Inline { .. }
+            | MessageInner::InlinePair(_)
             | MessageInner::RoutedEmpty { .. }
             | MessageInner::RoutedInline { .. } => 0,
             MessageInner::Single(payload) => payload.retained_size()?,
@@ -565,8 +569,9 @@ impl Message {
     }
 
     /// Create the `[group, body]` message required by RADIO sockets.
+    /// Small pairs (up to 54 bytes total) remain inline without a frame table.
     pub fn with_group(group: impl Into<Bytes>, body: impl Into<Bytes>) -> Self {
-        Self::multipart([group.into(), body.into()])
+        Self::with_prefix(group.into(), Self::single(body))
     }
 
     /// Attach the opaque routing ID supplied by a `SERVER` socket.
@@ -667,7 +672,9 @@ impl Message {
             | MessageInner::RoutedInline { .. }
             | MessageInner::RoutedBytes { .. }
             | MessageInner::RoutedShared { .. } => 1,
-            MessageInner::PrefixedShared { .. } | MessageInner::EmptyDelimitedBytes(_) => 2,
+            MessageInner::InlinePair(_)
+            | MessageInner::PrefixedShared { .. }
+            | MessageInner::EmptyDelimitedBytes(_) => 2,
             MessageInner::Multi(v) => v.len(),
             MessageInner::RoutedMulti { parts, .. } => parts.len(),
         }
@@ -687,6 +694,7 @@ impl Message {
         match &self.inner {
             MessageInner::Empty | MessageInner::RoutedEmpty { .. } => 0,
             MessageInner::Inline { len, .. } => (len & !INLINE_DELIMITED_FLAG) as usize,
+            MessageInner::InlinePair(pair) => pair.byte_len(),
             MessageInner::Single(p) => p.len(),
             MessageInner::RoutedShared { body, .. } => body.len(),
             MessageInner::PrefixedShared { prefix, body } => prefix.len() + body.len(),
@@ -715,7 +723,8 @@ impl Message {
             MessageInner::Inline { len, .. } if len & INLINE_DELIMITED_FLAG != 0
         ) || matches!(
             self.inner,
-            MessageInner::EmptyDelimitedBytes(_)
+            MessageInner::InlinePair(_)
+                | MessageInner::EmptyDelimitedBytes(_)
                 | MessageInner::PrefixedShared { .. }
                 | MessageInner::Multi(_)
                 | MessageInner::RoutedMulti { .. }
@@ -726,6 +735,7 @@ impl Message {
     #[inline]
     pub fn part_bytes(&self, index: usize) -> Option<Bytes> {
         match &self.inner {
+            MessageInner::InlinePair(pair) => pair.get(index).map(Bytes::copy_from_slice),
             MessageInner::Empty | MessageInner::RoutedEmpty { .. } => None,
             MessageInner::Inline { len, data } => {
                 if len & INLINE_DELIMITED_FLAG != 0 {
@@ -779,6 +789,7 @@ impl Message {
     #[inline]
     pub fn part_slice(&self, index: usize) -> Option<&[u8]> {
         match &self.inner {
+            MessageInner::InlinePair(pair) => pair.get(index),
             MessageInner::Empty | MessageInner::RoutedEmpty { .. } => None,
             MessageInner::Inline { len, data } => {
                 if len & INLINE_DELIMITED_FLAG != 0 {
@@ -859,6 +870,11 @@ impl Message {
     /// Large payloads retain their existing backing storage.
     pub fn pop_front_payload(&mut self) -> Option<Payload> {
         match std::mem::replace(&mut self.inner, MessageInner::Empty) {
+            MessageInner::InlinePair(pair) => {
+                let [first, second] = pair.payloads();
+                self.inner = MessageInner::Single(second);
+                Some(first)
+            }
             MessageInner::Empty | MessageInner::RoutedEmpty { .. } => None,
             MessageInner::Inline { len, data } => {
                 if len & INLINE_DELIMITED_FLAG != 0 {
@@ -919,6 +935,11 @@ impl Message {
         if prefix.is_empty() {
             return body.prepend_empty_delimiter();
         }
+        if let Some(pair) = InlinePair::for_message(&prefix, &body) {
+            return Self {
+                inner: MessageInner::InlinePair(pair),
+            };
+        }
         body.inner = match body.inner {
             MessageInner::Single(Payload {
                 inner: PayloadInner::Shared(shared),
@@ -943,6 +964,7 @@ impl Message {
         let mut parts = Vec::with_capacity(1 + body.len());
         parts.push(Payload::from_bytes(prefix));
         match body.inner {
+            MessageInner::InlinePair(pair) => parts.extend(pair.payloads()),
             MessageInner::Empty | MessageInner::RoutedEmpty { .. } => {}
             MessageInner::Inline { len, data } => {
                 if len & INLINE_DELIMITED_FLAG != 0 {
@@ -989,6 +1011,7 @@ impl Message {
         parts.extend(envelope.into_iter().map(Payload::from_bytes));
         parts.push(Payload::from_bytes(Bytes::new()));
         match body.inner {
+            MessageInner::InlinePair(pair) => parts.extend(pair.payloads()),
             MessageInner::Empty | MessageInner::RoutedEmpty { .. } => {}
             MessageInner::Inline { len, data } => {
                 if len & INLINE_DELIMITED_FLAG != 0 {
@@ -1031,6 +1054,10 @@ impl Message {
     #[inline]
     pub(crate) fn push_part_payload(&mut self, part: Payload) {
         self.inner = match std::mem::replace(&mut self.inner, MessageInner::Empty) {
+            MessageInner::InlinePair(pair) => {
+                let [first, second] = pair.payloads();
+                MessageInner::Multi(vec![first, second, part].into())
+            }
             MessageInner::Empty => MessageInner::Single(part),
             MessageInner::Inline { len, data } => {
                 let existing =
@@ -1100,6 +1127,7 @@ impl Message {
 
     pub(crate) fn parts_payload(&self) -> SmallVec<[Payload; 2]> {
         match &self.inner {
+            MessageInner::InlinePair(pair) => SmallVec::from_buf(pair.payloads()),
             MessageInner::Empty | MessageInner::RoutedEmpty { .. } => SmallVec::new(),
             MessageInner::Inline { len, data } => {
                 let body = Payload::from_slice(&data[..(*len & !INLINE_DELIMITED_FLAG) as usize]);
@@ -1139,6 +1167,11 @@ impl Message {
     #[inline]
     pub(crate) fn iter_slices(&self, mut f: impl FnMut(&[u8])) {
         match &self.inner {
+            MessageInner::InlinePair(pair) => {
+                for part in pair.slices() {
+                    f(part);
+                }
+            }
             MessageInner::Empty | MessageInner::RoutedEmpty { .. } => {}
             MessageInner::Inline { len, data } => {
                 if *len & INLINE_DELIMITED_FLAG != 0 {
@@ -1175,6 +1208,7 @@ impl Message {
 
     pub(crate) fn into_parts_payload(self) -> Parts {
         match self.inner {
+            MessageInner::InlinePair(pair) => Vec::from(pair.payloads()).into(),
             MessageInner::Empty | MessageInner::RoutedEmpty { .. } => Vec::new().into(),
             MessageInner::Inline { len, data } => {
                 let body = Payload::from_slice(&data[..(len & !INLINE_DELIMITED_FLAG) as usize]);
@@ -1232,6 +1266,10 @@ impl Message {
     pub(crate) fn prepend_empty_delimiter(self) -> Self {
         let empty = Payload::from_bytes(Bytes::new());
         match self.inner {
+            MessageInner::InlinePair(pair) => {
+                let [first, second] = pair.payloads();
+                Self::from_payloads_vec(vec![empty, first, second])
+            }
             MessageInner::Empty => Self {
                 inner: MessageInner::Single(empty),
             },
@@ -1262,18 +1300,13 @@ impl Message {
             MessageInner::Single(p) => Self {
                 inner: MessageInner::EmptyDelimitedBytes(p.as_bytes()),
             },
-            MessageInner::PrefixedShared { prefix, body } => Self {
-                inner: MessageInner::Multi(
-                    vec![
-                        empty,
-                        Payload::from_bytes(prefix),
-                        Payload {
-                            inner: PayloadInner::Shared(body),
-                        },
-                    ]
-                    .into(),
-                ),
-            },
+            MessageInner::PrefixedShared { prefix, body } => Self::from_payloads_vec(vec![
+                empty,
+                Payload::from_bytes(prefix),
+                Payload {
+                    inner: PayloadInner::Shared(body),
+                },
+            ]),
             MessageInner::RoutedShared { routing_id, body } => Self {
                 inner: MessageInner::RoutedMulti {
                     routing_id,
@@ -1286,16 +1319,11 @@ impl Message {
                     .into(),
                 },
             },
-            MessageInner::EmptyDelimitedBytes(p) => Self {
-                inner: MessageInner::Multi(
-                    vec![
-                        empty,
-                        Payload::from_bytes(Bytes::new()),
-                        Payload::from_bytes(p),
-                    ]
-                    .into(),
-                ),
-            },
+            MessageInner::EmptyDelimitedBytes(p) => Self::from_payloads_vec(vec![
+                empty,
+                Payload::from_bytes(Bytes::new()),
+                Payload::from_bytes(p),
+            ]),
             MessageInner::Multi(mut v) => {
                 v.insert(0, empty);
                 Self {
@@ -1397,6 +1425,7 @@ impl Clone for Message {
     fn clone(&self) -> Self {
         Self {
             inner: match &self.inner {
+                MessageInner::InlinePair(pair) => MessageInner::InlinePair(*pair),
                 MessageInner::Empty => MessageInner::Empty,
                 MessageInner::Inline { len, data } => MessageInner::Inline {
                     len: *len,
@@ -1466,46 +1495,7 @@ impl Message {
     /// Return one message part by index.
     #[inline]
     pub fn get(&self, index: usize) -> Option<&[u8]> {
-        match &self.inner {
-            MessageInner::Empty | MessageInner::RoutedEmpty { .. } => None,
-            MessageInner::Inline { len, data } => {
-                if *len & INLINE_DELIMITED_FLAG != 0 {
-                    match index {
-                        0 => Some(&[]),
-                        1 => Some(&data[..(*len & !INLINE_DELIMITED_FLAG) as usize]),
-                        _ => None,
-                    }
-                } else if index == 0 {
-                    Some(&data[..*len as usize])
-                } else {
-                    None
-                }
-            }
-            MessageInner::Single(p) => {
-                if index == 0 {
-                    Some(p.as_slice())
-                } else {
-                    None
-                }
-            }
-            MessageInner::EmptyDelimitedBytes(p) => match index {
-                0 => Some(&[]),
-                1 => Some(p.as_ref()),
-                _ => None,
-            },
-            MessageInner::Multi(v) => v.get(index).map(Payload::as_slice),
-            MessageInner::RoutedInline { len, data, .. } => {
-                (index == 0).then(|| &data[..usize::from(*len)])
-            }
-            MessageInner::RoutedBytes { data, .. } => (index == 0).then_some(data.as_ref()),
-            MessageInner::RoutedShared { body, .. } => (index == 0).then(|| body.as_ref()),
-            MessageInner::PrefixedShared { prefix, body } => match index {
-                0 => Some(prefix.as_ref()),
-                1 => Some(body.as_ref()),
-                _ => None,
-            },
-            MessageInner::RoutedMulti { parts, .. } => parts.get(index).map(Payload::as_slice),
-        }
+        self.part_slice(index)
     }
 }
 
@@ -1543,6 +1533,18 @@ impl From<Vec<u8>> for Message {
     }
 }
 
+impl From<String> for Message {
+    fn from(value: String) -> Self {
+        Self::single(value)
+    }
+}
+
+impl From<bytes::BytesMut> for Message {
+    fn from(value: bytes::BytesMut) -> Self {
+        Self::single(value.freeze())
+    }
+}
+
 impl From<Payload> for Message {
     fn from(p: Payload) -> Self {
         Self::from_payload(p)
@@ -1564,6 +1566,60 @@ pub fn generated_identity(id: u64) -> Bytes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn small_prefixed_frames_remain_inline_through_message_operations() {
+        for prefix_len in [1, 6, 32, 54] {
+            for body_len in 0..=54 - prefix_len {
+                let prefix = Bytes::from(vec![1; prefix_len]);
+                let body = vec![2; body_len];
+                let message = Message::with_prefix(prefix.clone(), Message::from_slice(&body));
+                assert!(matches!(message.inner, MessageInner::InlinePair(_)));
+                assert_eq!(message.retained_size(), Some(64));
+                assert_eq!(message.len(), 2);
+                assert!(message.is_multipart());
+                assert_eq!(message.byte_len(), prefix_len + body_len);
+                assert_eq!(message.get(0), Some(prefix.as_ref()));
+                assert_eq!(message.get(1), Some(body.as_slice()));
+                assert_eq!(message.get(2), None);
+                assert_eq!(message.part_bytes(2), None);
+                assert_eq!(message.clone(), message);
+                assert_eq!(
+                    message.iter().collect::<Vec<_>>(),
+                    [prefix.clone(), Bytes::copy_from_slice(&body)]
+                );
+                for parts in [
+                    message.parts_payload().to_vec(),
+                    message.clone().into_parts_payload().to_vec(),
+                ] {
+                    assert_eq!(parts[0].as_slice(), prefix);
+                    assert_eq!(parts[1].as_slice(), body);
+                }
+                let mut popped = message.clone();
+                assert_eq!(popped.pop_front_payload().unwrap().as_slice(), prefix);
+                assert_eq!(popped.part_slice(0), Some(body.as_slice()));
+                let mut routed = message.clone().with_routing_id(42);
+                assert_eq!(routed.take_routing_id(), Some(42));
+                assert_eq!(routed, message);
+                let delimited = Message::with_prefix(Bytes::new(), message.clone());
+                assert_eq!(delimited.len(), 3);
+                assert_eq!(delimited.part_slice(0), Some(b"".as_slice()));
+                assert_eq!(delimited.part_slice(1), Some(prefix.as_ref()));
+                assert_eq!(delimited.part_slice(2), Some(body.as_slice()));
+                let mut extended = message.clone();
+                extended.push_part_payload(Payload::from_slice(b"tail"));
+                assert_eq!(extended.len(), 3);
+                assert_eq!(extended.part_slice(2), Some(b"tail".as_slice()));
+                let mut bounded = message;
+                bounded.bound_storage();
+                assert!(matches!(bounded.inner, MessageInner::InlinePair(_)));
+            }
+        }
+        let overflow = Message::with_group("group", Bytes::from(vec![7; 50]));
+        assert_eq!(overflow.byte_len(), 55);
+        assert_eq!(overflow.part_slice(1), Some([7; 50].as_slice()));
+        assert!(matches!(overflow.inner, MessageInner::Multi(_)));
+    }
 
     struct SharedFrame(Vec<u8>);
 

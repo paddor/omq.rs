@@ -17,27 +17,27 @@ pub(crate) enum FanOutMode {
 
 pub(super) fn prepare(
     mode: FanOutMode,
-    msg: Message,
-) -> core::result::Result<(Message, Option<Bytes>), Error> {
+    msg: &Message,
+) -> core::result::Result<Option<&[u8]>, Error> {
     match mode {
-        FanOutMode::SubscriptionPrefix => Ok((msg, None)),
+        FanOutMode::SubscriptionPrefix => Ok(None),
         FanOutMode::Group => validate_group(msg),
     }
 }
 
-fn validate_group(msg: Message) -> core::result::Result<(Message, Option<Bytes>), Error> {
+fn validate_group(msg: &Message) -> core::result::Result<Option<&[u8]>, Error> {
     if msg.len() != 2 {
         return Err(Error::Protocol(
             "RADIO send requires [group, body] (2 parts)".into(),
         ));
     }
-    let group_bytes = msg.part_bytes(0).unwrap_or_default();
+    let group_bytes = msg.part_slice(0).unwrap_or_default();
     if group_bytes.len() > u8::MAX as usize {
         return Err(Error::Protocol(
             "RADIO group name too long (max 255 bytes)".into(),
         ));
     }
-    Ok((msg, Some(group_bytes)))
+    Ok(Some(group_bytes))
 }
 
 pub(super) fn first_frame_slice(msg: &Message) -> &[u8] {

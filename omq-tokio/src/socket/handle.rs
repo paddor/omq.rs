@@ -252,14 +252,29 @@ impl Socket {
         }
     }
 
-    /// Send one body to a RADIO group.
-    pub async fn send_group(&self, group: impl Into<Bytes>, body: impl Into<Bytes>) -> Result<()> {
+    /// Send one single-frame body to a RADIO group.
+    /// Accepts owning `Message` bodies, including preallocated payloads.
+    pub async fn send_group(
+        &self,
+        group: impl Into<Bytes>,
+        body: impl Into<Message>,
+    ) -> Result<()> {
+        self.send(self.group_message(group.into(), body.into())?)
+            .await
+    }
+
+    pub(crate) fn group_message(&self, group: Bytes, body: Message) -> Result<Message> {
         if self.inner.socket_type != SocketType::Radio {
             return Err(Error::Protocol(
                 "send_group is only valid on RADIO sockets".into(),
             ));
         }
-        self.send(Message::with_group(group, body)).await
+        if body.len() != 1 {
+            return Err(Error::Protocol(
+                "send_group requires a single-frame body".into(),
+            ));
+        }
+        Ok(Message::with_prefix(group, body))
     }
 
     /// Create a new socket of the given type with the given options. Spawns

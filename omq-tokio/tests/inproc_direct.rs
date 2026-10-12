@@ -376,7 +376,9 @@ fn radio_reaches_joined_dishes_without_the_io_thread() {
 
     for seq in 0u8..40 {
         let group = groups[usize::from(seq % 2)];
-        radio.send(Message::with_group(group, vec![seq])).unwrap();
+        radio
+            .send_group(group, Message::from_slice(&[seq]))
+            .unwrap();
     }
     for (index, dish) in dishes.iter().enumerate() {
         for seq in (0u8..40).filter(|seq| usize::from(seq % 2) == index) {

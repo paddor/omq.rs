@@ -21,6 +21,8 @@ fn worker(
     let (ctrl_tx, ctrl_rx) = yring::spsc(LANE_CTRL_RING_CAP);
     (
         LaneWorker {
+            #[cfg(target_os = "linux")]
+            shm_pool: omq_shm::SendPool::new(16, None),
             data_rx,
             ctrl_rx,
             data_signal: Arc::new(DataSignal::new()),

@@ -27,6 +27,56 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  shm-loom:
+    name: SHM native and Loom
+    if: github.repository == 'paddor/omq.rs'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: native SHM tests
+        run: |
+          cargo test -p omq-shm --lib
+          cargo test -p omq-tokio --all-features --test omq_shm
+      - name: production synchronization models
+        env:
+          RUSTFLAGS: --cfg loom -D warnings
+        run: cargo test -p omq-shm --test omq_shm_loom -- --test-threads=1
+
+  shm-miri:
+    name: SHM Miri (${{ matrix.model }})
+    if: github.repository == 'paddor/omq.rs'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - model: default
+            flags: ""
+          - model: tree-borrows
+            flags: -Zmiri-tree-borrows
+    env:
+      RUSTFLAGS: -D warnings -Zrandomize-layout
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri, rust-src
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: shm-miri-${{ matrix.model }}
+      - name: prepare interpreter
+        run: cargo miri setup
+      - name: mapped storage and payload ownership
+        run: |
+          for seed in {0..31}; do
+            export MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-seed=$seed ${{ matrix.flags }}"
+            cargo miri test -p omq-shm --lib
+          done
+
   fuzz:
     name: fuzz (${{ matrix.test }})
     if: github.repository == 'paddor/omq.rs'

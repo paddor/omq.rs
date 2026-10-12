@@ -25,6 +25,7 @@ limits](zws.md) and the source.
 | --- | --- |
 | `omq-proto` | Sans-I/O ZMTP codec, messages, options, mechanisms, and transforms |
 | `omq-tokio` | Async and blocking sockets, routing, I/O drivers, and reconnects |
+| `omq-shm` | Linux memory mappings, shared payload storage, and remote leases; isolates unsafe mapping operations |
 | `omq-libzmq` | libzmq-compatible C API and its socket ownership rules |
 | `bindings/` | Language-specific ownership and value conversion |
 | `omq-bench` | Benchmark peers, result storage, and charts |
@@ -212,6 +213,9 @@ bodies, reassembly, and LZ4 output. Contiguous buffered bodies retain byte views
 Zstd decodes into owned vectors. Configuration freezes before the first
 bind/connect; inproc transfers existing owners.
 Final owners return slots; overlapping releases use bounded reclamation.
+On Linux, `shm_payload_pool` returns the same `PayloadPool` with disjoint slots
+in size-sealed memfds. Slot checkout also acquires remote lease completions.
+Messages prepared in these pools work over every existing transport.
 
 `FrameBuffer` owns encoded headers and small bodies. Large bodies use shared
 chunks for gather writes. Drivers retain unfinished output until its wire
@@ -311,6 +315,7 @@ copy-free payload conversion.
 | URI family | Path |
 | --- | --- |
 | `tcp://`, `ipc://` | Byte streams with ZMTP framing |
+| `shm://` | Unix rendezvous; shared carrier ring and payload references (Linux, single-part sockets) |
 | `ws://`, `wss://` | ZWS over WebSocket, optionally TLS |
 | `quic://` | ZMTP byte stream over Quinn with TLS |
 | `inproc://` | Context-local message transfer without ZMTP |
@@ -321,6 +326,11 @@ copy-free payload conversion.
 STREAM uses raw TCP without a ZMTP handshake. Regular byte-stream sockets
 supervise reconnects. `Socket::monitor()` exposes lifecycle events and peer
 snapshots to applications.
+
+SHM uses Unix sockets for connection setup and shared memory for message transfer.
+Each socket shares bounded outbound storage across its peers, with one I/O lane
+per SHM endpoint. Received messages retain their shared storage until released;
+see [SHM transport](shm_transport.md).
 
 QUIC peers retain their UDP endpoint group and assigned data runtime. The
 listener controls new admission; established peers own their connections.

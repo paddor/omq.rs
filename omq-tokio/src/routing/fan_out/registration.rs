@@ -67,6 +67,11 @@ impl FanOutSend {
         let PeerOutbound::Wire { slot, .. } = target else {
             return None;
         };
+        // Oldest eviction cannot discard an already published SHM lease.
+        // Keep that policy on the raw-message driver queue.
+        if slot.is_shm() && self.mute_policy == super::FanOutMutePolicy::DropOldest {
+            return None;
+        }
         #[cfg(feature = "ws")]
         if slot.is_ws() {
             return None;

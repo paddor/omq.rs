@@ -156,6 +156,8 @@ pub(crate) enum AnyStream {
     Memory(tokio::io::DuplexStream),
     Tcp(TcpStream),
     Ipc(IpcStream),
+    #[cfg(target_os = "linux")]
+    Shm(crate::transport::shm::ShmStream),
     #[cfg(feature = "ws")]
     Ws(Box<crate::transport::ws::WsTransport>),
     #[cfg(feature = "quic")]
@@ -167,6 +169,8 @@ impl Migratable for AnyStream {
         match self {
             #[cfg(test)]
             Self::Memory(stream) => Ok(Self::Memory(stream)),
+            #[cfg(target_os = "linux")]
+            Self::Shm(s) => Ok(Self::Shm(s.migrate()?)),
             Self::Tcp(s) => {
                 let std = s.into_std()?;
                 Ok(Self::Tcp(TcpStream::from_std(std)?))
@@ -204,6 +208,11 @@ impl AnyStream {
                     AnyWriteHalf::Tcp { writer, fast_write },
                 )
             }
+            #[cfg(target_os = "linux")]
+            Self::Shm(stream) => {
+                let (reader, writer) = tokio::io::split(Self::Shm(stream));
+                (AnyReadHalf::Other(reader), AnyWriteHalf::Other(writer))
+            }
             Self::Ipc(stream) => {
                 let (reader, writer) = tokio::io::split(Self::Ipc(stream));
                 (AnyReadHalf::Other(reader), AnyWriteHalf::Other(writer))
@@ -236,6 +245,8 @@ impl AnyStream {
             }
             #[cfg(unix)]
             Self::Ipc(s) => options.apply_socket_buffers(s),
+            #[cfg(target_os = "linux")]
+            Self::Shm(s) => s.apply_options(options),
             #[cfg(target_os = "windows")]
             Self::Ipc(_) => Ok(()),
             #[cfg(feature = "ws")]
@@ -362,6 +373,8 @@ impl AsyncRead for AnyStream {
             #[cfg(test)]
             Self::Memory(s) => Pin::new(s).poll_read(cx, buf),
             Self::Ipc(s) => Pin::new(s).poll_read(cx, buf),
+            #[cfg(target_os = "linux")]
+            Self::Shm(s) => Pin::new(s).poll_read(cx, buf),
             #[cfg(feature = "ws")]
             Self::Ws(s) => Pin::new(s).poll_read(cx, buf),
             #[cfg(feature = "quic")]
@@ -381,6 +394,8 @@ impl AsyncWrite for AnyStream {
             #[cfg(test)]
             Self::Memory(s) => Pin::new(s).poll_write(cx, buf),
             Self::Ipc(s) => Pin::new(s).poll_write(cx, buf),
+            #[cfg(target_os = "linux")]
+            Self::Shm(s) => Pin::new(s).poll_write(cx, buf),
             #[cfg(feature = "ws")]
             Self::Ws(s) => Pin::new(s).poll_write(cx, buf),
             #[cfg(feature = "quic")]
@@ -398,6 +413,8 @@ impl AsyncWrite for AnyStream {
             #[cfg(test)]
             Self::Memory(s) => Pin::new(s).poll_write_vectored(cx, bufs),
             Self::Ipc(s) => Pin::new(s).poll_write_vectored(cx, bufs),
+            #[cfg(target_os = "linux")]
+            Self::Shm(s) => Pin::new(s).poll_write_vectored(cx, bufs),
             #[cfg(feature = "ws")]
             Self::Ws(s) => Pin::new(s).poll_write_vectored(cx, bufs),
             #[cfg(feature = "quic")]
@@ -411,6 +428,8 @@ impl AsyncWrite for AnyStream {
             #[cfg(test)]
             Self::Memory(s) => s.is_write_vectored(),
             Self::Ipc(s) => s.is_write_vectored(),
+            #[cfg(target_os = "linux")]
+            Self::Shm(s) => s.is_write_vectored(),
             #[cfg(feature = "ws")]
             Self::Ws(s) => s.is_write_vectored(),
             #[cfg(feature = "quic")]
@@ -424,6 +443,8 @@ impl AsyncWrite for AnyStream {
             #[cfg(test)]
             Self::Memory(s) => Pin::new(s).poll_flush(cx),
             Self::Ipc(s) => Pin::new(s).poll_flush(cx),
+            #[cfg(target_os = "linux")]
+            Self::Shm(s) => Pin::new(s).poll_flush(cx),
             #[cfg(feature = "ws")]
             Self::Ws(s) => Pin::new(s).poll_flush(cx),
             #[cfg(feature = "quic")]
@@ -437,6 +458,8 @@ impl AsyncWrite for AnyStream {
             #[cfg(test)]
             Self::Memory(s) => Pin::new(s).poll_shutdown(cx),
             Self::Ipc(s) => Pin::new(s).poll_shutdown(cx),
+            #[cfg(target_os = "linux")]
+            Self::Shm(s) => Pin::new(s).poll_shutdown(cx),
             #[cfg(feature = "ws")]
             Self::Ws(s) => Pin::new(s).poll_shutdown(cx),
             #[cfg(feature = "quic")]
@@ -494,6 +517,8 @@ pub(super) enum AnyListener {
     Tcp(crate::transport::tcp::TcpListener),
     Inproc(crate::transport::InprocListener),
     Ipc(crate::transport::ipc::IpcListener),
+    #[cfg(target_os = "linux")]
+    Shm(crate::transport::ipc::IpcListener, Endpoint),
     #[cfg(feature = "ws")]
     Ws(crate::transport::ws::WsListener),
     #[cfg(feature = "quic")]
@@ -506,6 +531,8 @@ impl AnyListener {
             Self::Tcp(l) => l.local_endpoint(),
             Self::Inproc(l) => l.local_endpoint(),
             Self::Ipc(l) => l.local_endpoint(),
+            #[cfg(target_os = "linux")]
+            Self::Shm(_, endpoint) => endpoint,
             #[cfg(feature = "ws")]
             Self::Ws(l) => l.local_endpoint(),
             #[cfg(feature = "quic")]
@@ -526,6 +553,13 @@ impl AnyListener {
                 let conn = l.accept().await?;
                 Ok(AnyConn::Inproc { conn, peer_ident })
             }
+            #[cfg(target_os = "linux")]
+            Self::Shm(l, _) => l.accept().await.map(|(s, peer_ident)| AnyConn::ByteStream {
+                stream: AnyStream::Ipc(s),
+                peer_ident,
+                leftover: bytes::Bytes::new(),
+                setup: None,
+            }),
             Self::Ipc(l) => l.accept().await.map(|(s, peer_ident)| AnyConn::ByteStream {
                 stream: AnyStream::Ipc(s),
                 peer_ident,
@@ -615,6 +649,14 @@ pub(super) async fn bind_any(
             endpoint: resolved,
         });
     }
+    #[cfg(target_os = "linux")]
+    if let Endpoint::Shm(path) = endpoint {
+        let listener = IpcTransport::bind(&Endpoint::Ipc(path.clone())).await?;
+        return Ok(BoundListener {
+            listener: AnyListener::Shm(listener, endpoint.clone()),
+            endpoint: endpoint.clone(),
+        });
+    }
     match endpoint {
         Endpoint::Inproc { name } => {
             let listener = AnyListener::Inproc(inproc_transport::bind(
@@ -665,7 +707,7 @@ pub(super) async fn preflight_connect_endpoint_resolution(endpoint: &Endpoint) -
         return preflight_connect_host(host, *port).await;
     }
     match endpoint {
-        Endpoint::Inproc { .. } | Endpoint::Ipc(_) => Ok(()),
+        Endpoint::Inproc { .. } | Endpoint::Ipc(_) | Endpoint::Shm(_) => Ok(()),
         other => Err(Error::UnsupportedScheme(other.scheme().to_string())),
     }
 }
@@ -741,6 +783,16 @@ pub(super) async fn connect_any(
         return Ok(AnyConn::ByteStream {
             stream: AnyStream::Quic(Box::new(stream)),
             peer_ident,
+            leftover: bytes::Bytes::new(),
+            setup: None,
+        });
+    }
+    #[cfg(target_os = "linux")]
+    if let Endpoint::Shm(path) = endpoint {
+        let stream = IpcTransport::connect(&Endpoint::Ipc(path.clone())).await?;
+        return Ok(AnyConn::ByteStream {
+            stream: AnyStream::Ipc(stream),
+            peer_ident: peer_ident_for_endpoint(endpoint),
             leftover: bytes::Bytes::new(),
             setup: None,
         });

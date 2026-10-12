@@ -44,6 +44,8 @@ use crate::socket::dispatch::{AnyReadHalf, AnyStream, AnyWriteHalf};
 use omq_proto::flow::{DrainBudget, max_batch_bytes};
 use omq_proto::frame_buffer::FrameBuffer;
 
+mod shm;
+
 const RECV_SMALL_MSG: usize = 1024;
 const RECV_MEDIUM_MSG: usize = 4096;
 const RECV_SMALL_BYTES: usize = 64 * 1024;
@@ -584,17 +586,25 @@ struct OutboundState {
     compression_pool: Option<Arc<CompressionPool>>,
     offload_threshold: usize,
     offload_pipeline: OffloadPipeline,
+    #[cfg(target_os = "linux")]
+    shm: Option<shm::Outbound>,
 }
 
 impl std::fmt::Debug for OutboundState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OutboundState")
+        let mut debug = f.debug_struct("OutboundState");
+        debug
             .field("has_encoder", &self.encoder.is_some())
             .field("has_passthrough", &self.passthrough.is_some())
             .field("has_compression_pool", &self.compression_pool.is_some())
             .field("offload_threshold", &self.offload_threshold)
-            .field("offload_pipeline_len", &self.offload_pipeline.len())
-            .finish()
+            .field("offload_pipeline_len", &self.offload_pipeline.len());
+        #[cfg(target_os = "linux")]
+        debug.field("shm", &self.shm.is_some()).field(
+            "shm_pending",
+            &self.shm.as_ref().map_or(0, shm::Outbound::pending_len),
+        );
+        debug.finish()
     }
 }
 
@@ -611,6 +621,8 @@ impl OutboundState {
             compression_pool,
             offload_threshold,
             offload_pipeline: FuturesOrdered::new(),
+            #[cfg(target_os = "linux")]
+            shm: None,
         }
     }
 
@@ -622,12 +634,17 @@ impl OutboundState {
         connection: &mut Connection,
         eq: &mut FrameBuffer,
     ) -> Result<usize> {
+        #[cfg(target_os = "linux")]
+        if let Some(shm) = &mut self.shm {
+            return shm.stage(first, try_recv, max_msgs, eq);
+        }
         let Self {
             encoder,
             passthrough,
             compression_pool,
             offload_threshold,
             offload_pipeline,
+            ..
         } = self;
         batch_encode(
             first,
@@ -641,6 +658,44 @@ impl OutboundState {
             *offload_threshold,
             offload_pipeline,
         )
+    }
+
+    #[cfg_attr(not(target_os = "linux"), expect(clippy::unused_self))]
+    fn has_pending_shm(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.shm.as_ref().is_some_and(shm::Outbound::has_pending)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
+    }
+
+    #[cfg_attr(not(target_os = "linux"), expect(clippy::unused_self))]
+    fn uses_shm(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.shm.is_some()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
+    }
+
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(clippy::unused_self, clippy::unnecessary_wraps)
+    )]
+    fn drain_shm(&mut self, eq: &mut FrameBuffer) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        if let Some(shm) = &mut self.shm {
+            shm.drain(eq)?;
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = eq;
+        Ok(())
     }
 
     fn has_pending_offload(&self) -> bool {
@@ -732,6 +787,7 @@ where
     /// the recv path is a plain fair-queue delivery with no per-type
     /// post-processing (no `TypeState::post_recv`, no identity-prefix).
     recv_direct: Option<RecvSink>,
+    recv_parts: Option<usize>,
     /// Shared pool of raw compression contexts for offloading large-message
     /// compression to blocking threads.
     compression_pool: Option<Arc<CompressionPool>>,
@@ -750,6 +806,8 @@ where
     decoded_payload_pool: Option<omq_proto::PayloadPool>,
     recv_ip_rate_limiter: Option<(Arc<SharedIpRateLimiter>, IpAddr)>,
     socket_close_state: Option<Arc<crate::socket::recv::SharedRecvPipe>>,
+    #[cfg(target_os = "linux")]
+    shm: Option<crate::transport::shm::ShmState>,
 }
 
 impl<T> ConnectionDriver<T>
@@ -843,6 +901,7 @@ where
             encoder: None,
             decoder: None,
             recv_direct: None,
+            recv_parts: None,
             compression_pool: None,
             offload_threshold: 0,
             transmit_slot: None,
@@ -854,6 +913,8 @@ where
             decoded_payload_pool: None,
             recv_ip_rate_limiter: None,
             socket_close_state: None,
+            #[cfg(target_os = "linux")]
+            shm: None,
         }
     }
 
@@ -948,6 +1009,29 @@ where
     #[must_use]
     pub(crate) fn with_transmit_slot(mut self, slot: Arc<PeerTransmitSlot>) -> Self {
         self.transmit_slot = Some(slot);
+        self
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn with_shm(mut self, state: Option<crate::transport::shm::ShmState>) -> Self {
+        self.shm = state;
+        self
+    }
+
+    #[cfg_attr(not(target_os = "linux"), expect(clippy::unused_self))]
+    pub(crate) fn uses_shm(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.shm.is_some()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
+    }
+
+    pub(crate) fn with_recv_parts(mut self, count: usize) -> Self {
+        self.recv_parts = Some(count);
         self
     }
 
@@ -1072,6 +1156,7 @@ where
             encoder,
             mut decoder,
             mut recv_direct,
+            recv_parts,
             compression_pool,
             offload_threshold,
             transmit_slot,
@@ -1084,6 +1169,8 @@ where
             setup_deadline,
             setup_cancel,
             socket_close_state,
+            #[cfg(target_os = "linux")]
+            shm,
             completion: _,
             latency_polling,
         } = self;
@@ -1094,6 +1181,19 @@ where
             .recv_rate_limit
             .map(|limit| TokenBucket::new(limit, Instant::now()));
         let mut outbound = OutboundState::new(encoder, compression_pool, offload_threshold);
+        #[cfg(target_os = "linux")]
+        {
+            outbound.shm = shm.clone().map(shm::Outbound::new);
+        }
+        let mut shm_driver = shm::Driver::new(
+            #[cfg(target_os = "linux")]
+            shm.clone(),
+        );
+        let shm_peer_death = shm::peer_death(
+            #[cfg(target_os = "linux")]
+            shm.clone(),
+        );
+        tokio::pin!(shm_peer_death);
         let latency_profile = !matches!(receive_profile, ReceiveProfile::Throughput);
         let (mut reader, mut writer) = stream.split(latency_profile);
         let mut read_buf_target = if latency_profile {
@@ -1150,6 +1250,12 @@ where
         tokio::pin!(control_credit);
         let mut activation_budget = DrainBudget::new(64, 64 * 1024);
         loop {
+            if transmit_slot
+                .as_ref()
+                .is_some_and(|slot| slot.dead.load(Ordering::Acquire))
+            {
+                return Ok(());
+            }
             if !peer_events.drive(
                 &mut connection,
                 event_out,
@@ -1184,6 +1290,7 @@ where
 
             tokio::select! {
                 biased;
+                exited = &mut shm_peer_death => { exited?; return Ok(()); }
                 () = cancel.cancelled() => {
                     if let Some(ref slot) = transmit_slot {
                         slot.mark_dead();
@@ -1343,6 +1450,8 @@ where
                 tokio::task::yield_now().await;
             }
 
+            outbound.drain_shm(&mut eq)?;
+
             if pending_input_error.is_none() && connection.is_closed() && graceful_close.is_none() {
                 // Peer-initiated WS CLOSE is a disconnect: stop accepting data
                 // and finish the already-staged wire prefix plus the reply.
@@ -1407,7 +1516,11 @@ where
                     authenticated_credit
                         .set(super::reserve_authenticated(authenticated_sender.as_ref()));
                 }
-                discard_pending = discard_received_messages(&mut connection);
+                discard_pending = discard_received_messages(
+                    &mut connection,
+                    #[cfg(target_os = "linux")]
+                    shm.as_ref(),
+                )?;
             } else {
                 match drain_decoded_messages(
                     &mut connection,
@@ -1420,12 +1533,15 @@ where
                         completion,
                         pending: &mut pending_receive,
                         reserved_admission: authenticated_sender.is_some(),
+                        expected_parts: recv_parts,
                     },
                     ReceiveRateLimiters {
                         connection: &mut recv_rate_limiter,
                         ip: recv_ip_rate_limiter.as_ref(),
                     },
                     decoded_payload_pool.as_ref(),
+                    #[cfg(target_os = "linux")]
+                    shm.as_ref(),
                 )? {
                     DriverStep::Continue => {}
                     DriverStep::Yield => {
@@ -1538,6 +1654,7 @@ where
                 && !connection.has_pending_transmit()
                 && (!data_plane_open
                     || (!outbound.has_pending_offload()
+                        && !outbound.has_pending_shm()
                         && pipe_batch.is_empty()
                         && deferred_data.is_none()
                         && send_pipe_rx.as_ref().is_none_or(SendPipeConsumer::is_empty)
@@ -1558,6 +1675,10 @@ where
             } else {
                 shutdown_ready
             };
+
+            // Staging above can exhaust SHM credit without producing bytes.
+            // Arm after every staging path, before parking in the select.
+            shm_driver.arm_credit_wait(outbound.has_pending_shm(), transmit_slot.as_deref());
 
             let want_write =
                 !pending_write.is_empty() || connection.has_pending_transmit() || !eq.is_empty();
@@ -1588,8 +1709,16 @@ where
                 data_inbox.as_ref(),
                 &inbox,
             );
+            // Use the same snapshot for suppressing SHM wakes and yielding.
+            // Rechecking the deadline after arming the reader could park with
+            // its cross-process wake disabled.
+            let poll_transport = poll_until.is_some_and(|deadline| {
+                graceful_close.is_none() && !recv_blocked && Instant::now() < deadline
+            });
+            shm_driver.receive_polling(latency_polling && poll_transport);
             tokio::select! {
                 biased;
+                exited = &mut shm_peer_death => { exited?; return Ok(()); }
                 () = cancel.cancelled() => {
                     if let Some(ref slot) = transmit_slot {
                         slot.mark_dead();
@@ -1606,6 +1735,9 @@ where
                         return Ok(());
                     }
                 },
+
+                () = shm_driver.credit_returned(transmit_slot.as_deref()),
+                    if shm_driver.waiting_for_credit() => {}
 
                 permit = &mut control_credit, if peer_events.control_ready(&mut peer_out, pending_receive.is_none()) => {
                     match permit {
@@ -1807,9 +1939,7 @@ where
 
                 // Keep the reactor polling for a follow-up send or reply.
                 // Yield every turn; idle and backpressured peers still park.
-                () = tokio::task::yield_now(), if poll_until.is_some_and(|deadline| {
-                    graceful_close.is_none() && !recv_blocked && Instant::now() < deadline
-                }) => {}
+                () = tokio::task::yield_now(), if poll_transport => {}
 
             }
         }
@@ -1874,6 +2004,7 @@ struct MessageDelivery<'a> {
     completion: &'a mut CompletionProgress,
     pending: &'a mut Option<Message>,
     reserved_admission: bool,
+    expected_parts: Option<usize>,
 }
 
 impl MessageDelivery<'_> {
@@ -1900,6 +2031,12 @@ impl MessageDelivery<'_> {
 
     #[inline]
     fn send(&mut self, message: Message, defer: bool, pending_flush: &mut bool) -> bool {
+        if self
+            .expected_parts
+            .is_some_and(|parts| message.len() != parts)
+        {
+            return true;
+        }
         if let Some(RecvSink::Fanin(sink)) = self.sink {
             return if defer {
                 *pending_flush = true;
@@ -1948,6 +2085,7 @@ fn drain_decoded_messages(
     mut delivery: MessageDelivery<'_>,
     rate_limiters: ReceiveRateLimiters<'_>,
     decoded_payload_pool: Option<&omq_proto::PayloadPool>,
+    #[cfg(target_os = "linux")] shm: Option<&crate::transport::shm::ShmState>,
 ) -> Result<DriverStep> {
     let ReceiveRateLimiters {
         connection: rate_connection,
@@ -1966,7 +2104,11 @@ fn drain_decoded_messages(
         && matches!(receive_profile, ReceiveProfile::Throughput)
         && delivery.sink.as_ref().is_some_and(RecvSink::is_yring);
     let mut pending_yring_flush = false;
-    while let Some(m) = connection.poll_message() {
+    while let Some(m) = poll_received_message(
+        connection,
+        #[cfg(target_os = "linux")]
+        shm,
+    )? {
         let m = match decoder.as_mut() {
             Some(dec) => match dec.decode_with_payload_pool(m, decoded_payload_pool)? {
                 Some(plain) => plain,
@@ -1985,7 +2127,15 @@ fn drain_decoded_messages(
         let msg_bytes = m.byte_len();
         let budget = recv_budget.get_or_insert_with(|| {
             recv_batch_time = receive_profile.time(msg_bytes);
-            receive_profile.budget(msg_bytes)
+            let budget = receive_profile.budget(msg_bytes);
+            #[cfg(target_os = "linux")]
+            if shm.is_some() && matches!(receive_profile, ReceiveProfile::Throughput) {
+                return DrainBudget::new(
+                    budget.remaining_msgs(),
+                    omq_shm::REFERENCE_BATCH_MAX_PAYLOAD,
+                );
+            }
+            budget
         });
         if !delivery.send(m, defer_yring_flush, &mut pending_yring_flush) {
             delivery.flush(&mut pending_yring_flush);
@@ -2009,16 +2159,43 @@ fn drain_decoded_messages(
     Ok(DriverStep::Continue)
 }
 
+#[cfg_attr(not(target_os = "linux"), expect(clippy::unnecessary_wraps))]
+fn poll_received_message(
+    connection: &mut Connection,
+    #[cfg(target_os = "linux")] shm: Option<&crate::transport::shm::ShmState>,
+) -> Result<Option<Message>> {
+    #[cfg(target_os = "linux")]
+    if let Some(state) = shm {
+        let mut state = state.lock().expect("SHM connection");
+        if let Some(message) = state.poll_received() {
+            return Ok(Some(message));
+        }
+        return connection
+            .poll_message()
+            .map(|message| state.decode_received(message))
+            .transpose();
+    }
+    Ok(connection.poll_message())
+}
+
 /// Closed sockets no longer deliver receives, but must keep parsing control
 /// traffic while accepted output drains. Bound even the discard work.
-fn discard_received_messages(connection: &mut Connection) -> bool {
+fn discard_received_messages(
+    connection: &mut Connection,
+    #[cfg(target_os = "linux")] shm: Option<&crate::transport::shm::ShmState>,
+) -> Result<bool> {
     let mut budget = DrainBudget::new(256, 1024 * 1024);
-    while let Some(message) = connection.poll_message() {
-        if !budget.account(message.byte_len()) {
-            return true;
+    while let Some(message) = poll_received_message(
+        connection,
+        #[cfg(target_os = "linux")]
+        shm,
+    )? {
+        let bytes = message.byte_len();
+        if !budget.account(bytes) {
+            return Ok(true);
         }
     }
-    false
+    Ok(false)
 }
 
 fn enable_transmit_slot_after_handshake(slot: Option<&PeerTransmitSlot>, connection: &Connection) {
@@ -2186,7 +2363,7 @@ fn handle_send_pipe_ready(
     eq: &mut FrameBuffer,
 ) -> Result<DriverStep> {
     let rx = send_pipe_rx.as_mut().expect("send pipe select guard");
-    if outbound.encoder.is_none() {
+    if outbound.encoder.is_none() && !outbound.uses_shm() {
         // Untransformed messages need no staging vector or reverse pass.
         // Encode in FIFO order while retaining the same drain/time budgets.
         let started = Instant::now();
@@ -2256,6 +2433,7 @@ fn outbound_work_idle(
         && eq.is_empty()
         && !connection.has_pending_transmit()
         && !outbound.has_pending_offload()
+        && !outbound.has_pending_shm()
 }
 
 /// A queued heartbeat owns one prefix of the codec transmit queue. Writes
@@ -5941,6 +6119,37 @@ mod tests {
         (push, pull)
     }
 
+    #[test]
+    fn receive_frame_validation_drops_bad_envelopes_without_using_queue_credit() {
+        let (events, mut receiver) = mpsc::channel(1);
+        let mut events = PeerOutput::from(events);
+        let mut pending = None;
+        let mut completion = CompletionProgress::default();
+        let mut sink = None;
+        let mut delivery = MessageDelivery {
+            sink: &mut sink,
+            peer_out: &mut events,
+            peer_id: 0,
+            completion: &mut completion,
+            pending: &mut pending,
+            reserved_admission: false,
+            expected_parts: Some(2),
+        };
+        for message in [
+            Message::from("body"),
+            Message::multipart(["group", "body", "extra"]),
+        ] {
+            assert!(delivery.send(message, false, &mut false));
+        }
+        assert!(receiver.try_recv().is_err());
+        assert!(delivery.send(Message::with_group("group", "body"), false, &mut false));
+        let (_, PeerEvent::Event(Event::Message(message))) = receiver.try_recv().unwrap() else {
+            panic!("expected valid grouped message");
+        };
+        assert_eq!(message, Message::with_group("group", "body"));
+        assert!(pending.is_none());
+    }
+
     #[tokio::test]
     async fn full_peer_queue_bounds_pending_delivery_and_leaves_decoder_remainder_in_place() {
         let (mut sender, mut connection) = ready_push_pull_connections();
@@ -5978,11 +6187,14 @@ mod tests {
                         completion: &mut CompletionProgress::default(),
                         pending: &mut pending,
                         reserved_admission: false,
+                        expected_parts: None,
                     },
                     ReceiveRateLimiters {
                         connection: &mut None,
                         ip: None
                     },
+                    None,
+                    #[cfg(target_os = "linux")]
                     None,
                 )
                 .unwrap(),

@@ -536,6 +536,21 @@ impl SocketDriver {
         options: &Options,
     ) -> Result<()> {
         options.validate()?;
+        if matches!(endpoint, Endpoint::Shm(_)) {
+            #[cfg(not(target_os = "linux"))]
+            return Err(Error::UnsupportedScheme("shm requires Linux".into()));
+            #[cfg(target_os = "linux")]
+            {
+                if !omq_shm::supports(self.socket_type) {
+                    return Err(Error::Config(
+                        "shm:// requires a single-part socket type".into(),
+                    ));
+                }
+                if !matches!(options.mechanism, omq_proto::MechanismConfig::Null) {
+                    return Err(Error::Config("shm:// requires the NULL mechanism".into()));
+                }
+            }
+        }
         #[cfg(feature = "dart")]
         if matches!(endpoint, Endpoint::Dart { .. }) {
             return self.validate_dart_options(options);

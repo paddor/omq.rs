@@ -515,6 +515,11 @@ impl FanOutInner {
 }
 
 impl FanOutSend {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn shm_send_pool(&self) -> omq_shm::SendPool {
+        self.lanes.shm_pool.clone()
+    }
+
     pub(crate) fn new(
         socket_type: SocketType,
         options: &Options,

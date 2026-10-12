@@ -2,6 +2,7 @@
 members = [
     "omq-bench",
     "omq-proto",
+    "omq-shm",
     "omq-tokio",
     "omq-libzmq",
 ]

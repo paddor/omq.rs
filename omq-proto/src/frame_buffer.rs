@@ -305,6 +305,27 @@ impl FrameBuffer {
         self.total_bytes += self.arena.len() - before;
     }
 
+    /// Prefix only the final frame's payload, retaining earlier envelopes.
+    /// Headers and payloads are encoded contiguously without a new message.
+    pub fn frame_body_prefixed_inline(&mut self, prefix: &[u8], msg: &Message) {
+        self.reserve_arena(msg.byte_len() + prefix.len() + msg.len() * 9);
+        let before = self.arena.len();
+        let mut index = 0;
+        let count = msg.len();
+        msg.iter_slices(|part| {
+            index += 1;
+            let last = index == count;
+            let length = part.len() + if last { prefix.len() } else { 0 };
+            frame::write_frame_header(&mut self.arena, !last, length);
+            if last {
+                self.arena.extend_from_slice(prefix);
+            }
+            self.arena.extend_from_slice(part);
+        });
+        copy_stats::record(Site::FrameInline, self.arena.len() - before);
+        self.total_bytes += self.arena.len() - before;
+    }
+
     /// Encode headers into the arena and retain shared payload entries.
     pub fn frame_gather(&mut self, msg: &Message) {
         let parts = msg.parts_payload();

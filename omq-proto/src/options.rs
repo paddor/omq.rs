@@ -33,6 +33,9 @@ pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Default per-`FrameBuffer` arena threshold.
 pub const DEFAULT_ARENA_THRESHOLD: usize = crate::frame_buffer::ARENA_THRESHOLD;
 
+/// Default socket-wide cap for automatically allocated outbound SHM regions.
+pub const DEFAULT_SHM_MAX_MEMORY: usize = 64 * 1024 * 1024;
+
 /// Token-bucket message rate limit.
 ///
 /// `messages_per_second` controls refill speed. `burst` is the maximum token
@@ -121,7 +124,7 @@ pub struct Options {
     /// latency profile; all other socket types use the throughput profile.
     /// For ping-pong SERVER/CLIENT or ROUTER/DEALER workloads, set this
     /// explicitly on both endpoints.
-    /// On owned runtimes, Unix IPC latency drivers briefly keep the reactor
+    /// On owned runtimes, IPC and SHM latency drivers briefly keep the reactor
     /// polling after traffic, consuming additional IO CPU. Blocking receives
     /// spin only when [`Self::recv_spin`] is enabled.
     pub workload_profile: Option<WorkloadProfile>,
@@ -250,6 +253,18 @@ pub struct Options {
     /// Count HWM and assembly limits do not bound aggregate retained bytes;
     /// there is no separate WS message-size default or socket byte ledger.
     pub max_message_size: Option<usize>,
+
+    /// Maximum automatic outbound SHM mapping bytes across this socket's peers
+    /// and fan-out lanes, including headers and alignment padding. Defaults to 64 MiB.
+    /// `None` disables this cap; `Some(0)` uses the shared carrier for ordinary
+    /// bodies without allocating automatic SHM payload storage.
+    ///
+    /// Unavailable storage uses carrier delivery rather than failing or waiting
+    /// forever for a body larger than the cap. Explicit producer pools, imported
+    /// mappings, completion/carrier tables, and ordinary heap queues are excluded.
+    /// Retained owners and leases keep their automatic region bytes charged.
+    /// Ignored by other transports.
+    pub shm_max_memory: Option<usize>,
 
     /// Conflate: keep only the latest message per subscriber. Applies to
     /// `FanOut` patterns only (PUB/XPUB/RADIO). Ignored elsewhere.
@@ -708,6 +723,7 @@ impl Default for Options {
             handshake_timeout: Some(DEFAULT_HANDSHAKE_TIMEOUT),
             max_pending_handshakes: DEFAULT_MAX_PENDING_HANDSHAKES,
             max_message_size: None,
+            shm_max_memory: Some(DEFAULT_SHM_MAX_MEMORY),
             conflate: false,
             router_mandatory: false,
             on_mute: OnMute::Block,
@@ -1025,6 +1041,14 @@ impl Options {
     /// Set max allowed size for one complete message.
     pub fn max_message_size(mut self, n: usize) -> Self {
         self.max_message_size = Some(n);
+        self
+    }
+
+    /// Cap automatically allocated outbound SHM across all peers of this socket.
+    /// See [`Self::shm_max_memory`] for scope and carrier fallback behavior.
+    #[must_use]
+    pub fn shm_max_memory(mut self, bytes: usize) -> Self {
+        self.shm_max_memory = Some(bytes);
         self
     }
 

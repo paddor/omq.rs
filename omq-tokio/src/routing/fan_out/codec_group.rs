@@ -16,6 +16,7 @@ pub(super) struct CodecGroup {
     training: Option<super::compression::DictTraining>,
     dictionary: Option<Message>,
     pub(super) peers: usize,
+    pub(super) shm: bool,
     #[cfg(test)]
     pub(super) encode_count: usize,
 }
@@ -48,6 +49,7 @@ impl CodecGroup {
             encoder,
             dictionary: None,
             peers: 0,
+            shm: false,
             #[cfg(test)]
             encode_count: 0,
         })

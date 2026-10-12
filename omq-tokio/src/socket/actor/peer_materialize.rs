@@ -6,6 +6,7 @@ use super::{
     peer_ident_socket_addr,
 };
 use crate::engine::codec::{CodecProfile, CodecSetup};
+use crate::engine::driver::ReceiveProfile;
 use crate::engine::framing::WireFraming;
 use crate::engine::send_pipe::SendPipeProducerHandle;
 use crate::engine::signal::StateSignal;
@@ -87,11 +88,23 @@ fn prepare_wire_codec(
     ) else {
         return None;
     };
-    let receive_wire_limit = transforms
-        .as_ref()
-        .map_or(peer.options.max_message_size, |setup| {
-            setup.decoder.max_wire_message_size()
-        });
+    let receive_wire_limit = if matches!(peer.endpoint, Endpoint::Shm(_)) {
+        const REFERENCE_WIRE_BUDGET: usize = 1024;
+        // References are small, but a bounded automatic pool may carry an
+        // ordinary body on the Unix stream. Decoded SHM sizes are checked
+        // separately, including group/identity envelopes.
+        peer.options.max_message_size.map(|maximum| {
+            maximum
+                .saturating_add(std::mem::size_of::<u8>())
+                .max(REFERENCE_WIRE_BUDGET)
+        })
+    } else {
+        transforms
+            .as_ref()
+            .map_or(peer.options.max_message_size, |setup| {
+                setup.decoder.max_wire_message_size()
+            })
+    };
     let mut codec = build_codec(
         socket,
         &peer.options,
@@ -146,7 +159,9 @@ fn prepare_wire_driver(
     let carrier_lease = take_carrier_io_lease(&mut stream);
     let workload_profile = workload_profile(socket);
     let codec_profile = transforms.as_ref().map(|setup| setup.profile.clone());
-    let has_transforms = transforms.is_some();
+    let has_transforms = transforms.is_some() || matches!(endpoint, Endpoint::Shm(_));
+    #[cfg(target_os = "linux")]
+    let (stream, shm) = prepare_shm_stream(stream, endpoint, &peer.options, &socket.shm_send_pool)?;
     let latency_profile = workload_profile == WorkloadProfile::Latency
         && !socket.options.mechanism.has_frame_transform();
     let Ok((stream, direct_tcp_writer)) =
@@ -154,10 +169,7 @@ fn prepare_wire_driver(
     else {
         return None;
     };
-    let passthrough_info = transforms
-        .as_ref()
-        .and_then(|setup| setup.encoder.passthrough_info())
-        .map(|(s, t)| (s.clone(), t));
+    let passthrough_info = codec_passthrough_info(transforms.as_ref());
 
     let Ok(peer_output) = socket.peer_out_tx.try_register() else {
         return None;
@@ -181,14 +193,14 @@ fn prepare_wire_driver(
     )
     .with_actor_data_inbox(data_inbox_rx)
     .with_socket_close_state(socket.recv_tx.clone())
-    .with_latency_polling(ipc_latency_polling(socket, endpoint, latency_profile))
-    .with_receive_profile(
-        crate::engine::driver::ReceiveProfile::from_workload_for_socket(
-            workload_profile,
-            socket.socket_type,
-        ),
-    );
+    .with_latency_polling(local_latency_polling(socket, endpoint, latency_profile))
+    .with_receive_profile(ReceiveProfile::from_workload_for_socket(
+        workload_profile,
+        socket.socket_type,
+    ));
     let peer_driver = attach_transforms(socket, peer_driver, transforms);
+    #[cfg(target_os = "linux")]
+    let peer_driver = peer_driver.with_shm(shm.clone());
     let peer_driver = attach_ip_rate_limit(socket, peer_driver, &peer_ident);
 
     let arena = arena_config(endpoint, latency_profile, socket);
@@ -201,27 +213,27 @@ fn prepare_wire_driver(
         arena,
         framing,
     );
+    #[cfg(target_os = "linux")]
+    if let (Some(slot), Some(state)) = (&transmit_slot, shm) {
+        slot.set_shm(state);
+    }
     let peer_driver = peer_driver
         .with_arena_threshold(arena.threshold)
         .with_arena_cap(arena.cap);
-    if let (Some(slot), Some(direct)) = (&transmit_slot, &direct_tcp_writer) {
-        slot.set_direct_writer(direct.clone());
-    }
     let peer_driver = match transmit_slot {
         Some(ref slot) => peer_driver.with_transmit_slot(slot.clone()),
         None => peer_driver,
     };
     let (send_pipe, peer_driver) = attach_send_pipe(socket, peer_driver, peer.send_pipe_rx.take());
-    if socket.socket_type == SocketType::Peer
-        && let (Some(handle), Some(slot), Some(_)) =
-            (&send_pipe, &transmit_slot, &direct_tcp_writer)
-        && let Some(producer) = handle.lock().expect("peer send pipe").as_mut()
-    {
-        producer.set_direct_slot(slot.clone());
-    }
+    attach_direct_writer(
+        socket.socket_type,
+        transmit_slot.as_ref(),
+        direct_tcp_writer.as_ref(),
+        send_pipe.as_ref(),
+    );
 
     let peer_driver = attach_recv_bypass(socket, peer_driver, peer_id);
-    let io_assignment = carrier_lease.unwrap_or_else(|| socket.io_pool.reserve_thread());
+    let io_assignment = carrier_lease.unwrap_or_else(|| reserve_peer_io(&socket.io_pool, endpoint));
     let io_thread = io_assignment.index();
 
     let entry = wire_peer_entry(
@@ -242,8 +254,70 @@ fn prepare_wire_driver(
     Some((peer_driver, entry, io_assignment))
 }
 
-fn ipc_latency_polling(socket: &SocketDriver, endpoint: &Endpoint, latency: bool) -> bool {
-    cfg!(unix) && matches!(endpoint, Endpoint::Ipc(_)) && latency && socket.io_pool.owns_runtime()
+fn local_latency_polling(socket: &SocketDriver, endpoint: &Endpoint, latency: bool) -> bool {
+    cfg!(unix)
+        && matches!(endpoint, Endpoint::Ipc(_) | Endpoint::Shm(_))
+        && latency
+        && socket.io_pool.owns_runtime()
+}
+
+#[cfg(target_os = "linux")]
+fn prepare_shm_stream(
+    stream: AnyStream,
+    endpoint: &Endpoint,
+    options: &Options,
+    pool: &omq_shm::SendPool,
+) -> Option<(AnyStream, Option<crate::transport::shm::ShmState>)> {
+    if !matches!(endpoint, Endpoint::Shm(_)) {
+        return Some((stream, None));
+    }
+    let AnyStream::Ipc(ipc) = stream else {
+        return None;
+    };
+    let carrier = crate::transport::shm::ShmStream::new(ipc, options, pool.clone()).ok()?;
+    let state = carrier.state.clone();
+    Some((AnyStream::Shm(carrier), Some(state)))
+}
+
+fn reserve_peer_io(
+    pool: &crate::context::IoPoolHandle,
+    endpoint: &Endpoint,
+) -> crate::context::IoThreadLease {
+    #[cfg(target_os = "linux")]
+    if matches!(endpoint, Endpoint::Shm(_)) {
+        use std::hash::BuildHasher;
+        // Stable endpoint assignment keeps every subscriber and its publisher
+        // fan-out worker on one IO lane, including after reconnection.
+        let thread = rustc_hash::FxBuildHasher.hash_one(endpoint) as usize % pool.thread_count();
+        return pool.reserve_thread_at(thread);
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = endpoint;
+    pool.reserve_thread()
+}
+
+fn codec_passthrough_info(setup: Option<&CodecSetup>) -> Option<(bytes::Bytes, usize)> {
+    setup
+        .and_then(|setup| setup.encoder.passthrough_info())
+        .map(|(bytes, threshold)| (bytes.clone(), threshold))
+}
+
+fn attach_direct_writer(
+    socket_type: SocketType,
+    slot: Option<&Arc<crate::engine::transmit_slot::PeerTransmitSlot>>,
+    writer: Option<&Arc<crate::socket::dispatch::DirectTcpWriter>>,
+    send_pipe: Option<&SendPipeProducerHandle>,
+) {
+    let (Some(slot), Some(writer)) = (slot, writer) else {
+        return;
+    };
+    slot.set_direct_writer(writer.clone());
+    if socket_type == SocketType::Peer
+        && let Some(handle) = send_pipe
+        && let Some(producer) = handle.lock().expect("peer send pipe").as_mut()
+    {
+        producer.set_direct_slot(slot.clone());
+    }
 }
 
 fn wire_peer_entry(
@@ -735,6 +809,8 @@ fn split_direct_tcp_writer(
             Ok((AnyStream::Tcp(driver_tcp), Some(direct)))
         }
         AnyStream::Ipc(ipc) => Ok((AnyStream::Ipc(ipc), None)),
+        #[cfg(target_os = "linux")]
+        AnyStream::Shm(shm) => Ok((AnyStream::Shm(shm), None)),
         #[cfg(test)]
         AnyStream::Memory(stream) => Ok((AnyStream::Memory(stream), None)),
         #[cfg(feature = "ws")]
@@ -794,7 +870,7 @@ fn arena_config(endpoint: &Endpoint, latency_profile: bool, socket: &SocketDrive
         .options
         .arena_threshold
         .unwrap_or(omq_proto::frame_buffer::ARENA_THRESHOLD);
-    let cap = if matches!(endpoint, Endpoint::Ipc(_)) {
+    let cap = if matches!(endpoint, Endpoint::Ipc(_) | Endpoint::Shm(_)) {
         omq_proto::frame_buffer::ARENA_INITIAL_CAP_IPC
     } else if latency_profile {
         4 * 1024
@@ -880,6 +956,11 @@ fn attach_recv_bypass(
     peer_driver: ConnectionDriver<AnyStream>,
     peer_id: u64,
 ) -> ConnectionDriver<AnyStream> {
+    if socket.socket_type == SocketType::Dish && peer_driver.uses_shm() {
+        // DISH's only receive transform is validating group + body. SHM
+        // drivers can do that before the existing per-peer receive queue.
+        return attach_yring_recv_bypass(socket, peer_driver, peer_id, false).with_recv_parts(2);
+    }
     let rep_latency = socket.socket_type == SocketType::Rep && socket.uses_latency_profile();
     if !can_bypass_actor_recv(socket.socket_type) && !rep_latency {
         return peer_driver;
@@ -1046,6 +1127,21 @@ fn can_use_yring_recv_bypass(t: SocketType, latency_profile: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn shm_endpoint_assignments_stay_on_one_thread_despite_peer_load() {
+        let context = crate::Context::with_config(crate::ContextConfig { io_threads: 4 });
+        let pool = context.core().io_pool_handle();
+        let endpoint: Endpoint = "shm://@single-lane-test".parse().unwrap();
+        let first = reserve_peer_io(&pool, &endpoint);
+        let peers: Vec<_> = (0..32).map(|_| reserve_peer_io(&pool, &endpoint)).collect();
+        assert!(peers.iter().all(|peer| peer.index() == first.index()));
+        let thread = first.index();
+        drop(peers);
+        drop(first);
+        assert_eq!(reserve_peer_io(&pool, &endpoint).index(), thread);
+    }
 
     #[tokio::test]
     async fn fanin_attachment_tolerates_receive_shutdown_before_actor_close() {

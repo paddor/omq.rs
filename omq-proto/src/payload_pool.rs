@@ -6,7 +6,51 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 
+use crate::flow::DrainBudget;
 use crate::message::{Message, Payload, PayloadOwner};
+
+/// Backend-provided fixed-size storage. Exclusive access is granted only
+/// after all local views and backend leases have returned.
+#[doc(hidden)]
+pub trait PayloadStorage: AsRef<[u8]> + AsMut<[u8]> + fmt::Debug + Send + Sync {
+    /// Whether external readers have released this slot. This check must
+    /// acquire their completion writes before allowing another checkout.
+    fn reusable(&self) -> bool;
+}
+
+#[derive(Debug)]
+enum StorageBytes {
+    Heap(Box<[u8]>),
+    Backend(Box<dyn PayloadStorage>),
+}
+
+impl StorageBytes {
+    fn reusable(&self) -> bool {
+        match self {
+            Self::Heap(_) => true,
+            Self::Backend(storage) => storage.reusable(),
+        }
+    }
+}
+
+impl std::ops::Deref for StorageBytes {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            Self::Heap(bytes) => bytes,
+            Self::Backend(storage) => storage.as_ref().as_ref(),
+        }
+    }
+}
+
+impl std::ops::DerefMut for StorageBytes {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        match self {
+            Self::Heap(bytes) => bytes,
+            Self::Backend(storage) => storage.as_mut().as_mut(),
+        }
+    }
+}
 
 /// Receive lifecycle callbacks implemented by I/O backends.
 /// Buffer returns publish credit only after the final payload owner is released.
@@ -60,6 +104,8 @@ struct Pool {
     pending_count: AtomicUsize,
     capacity: usize,
     buffer_size: usize,
+    backend: bool,
+    reclaim_budget: DrainBudget,
 }
 
 // Scalar returns keep the ordinary concurrent-queue path. Batch returns
@@ -194,7 +240,7 @@ impl FreeList {
 
 #[derive(Debug)]
 struct Storage {
-    bytes: Box<[u8]>,
+    bytes: StorageBytes,
     pool: Weak<Pool>,
     slot: usize,
     returns: Option<Arc<dyn PayloadRelease>>,
@@ -239,7 +285,7 @@ impl Storage {
                 recycle.pool = Some(pool);
             }
             let owner = storage.take().expect("unreleased storage");
-            if Arc::strong_count(&owner) == 1 {
+            if Arc::strong_count(&owner) == 1 && owner.bytes.reusable() {
                 recycle.push(owner, credited);
             } else {
                 let pool = recycle.pool.as_ref().expect("active pool").clone();
@@ -266,7 +312,7 @@ impl Storage {
         };
         // Storage is private and has no Weak references. A unique strong
         // owner cannot race a clone, so it can return without locking.
-        if Arc::strong_count(&self) == 1 {
+        if Arc::strong_count(&self) == 1 && self.bytes.reusable() {
             self.return_one(&pool, credited);
             return;
         }
@@ -294,14 +340,26 @@ impl Storage {
 
 impl Pool {
     fn reclaim(&self) {
-        let limit = self.pending_count.load(Ordering::Relaxed).min(TRANSFER);
-        let mut budget = crate::flow::DrainBudget::new(limit, TRANSFER_BYTES);
-        while !budget.exhausted() {
+        let limit = self
+            .pending_count
+            .load(Ordering::Relaxed)
+            .min(self.reclaim_budget.remaining_msgs());
+        let mut budget = self.reclaim_budget.clone();
+        // Inspect each queued owner at most once in this turn, even if it
+        // remains held and is pushed back onto the pending queue.
+        for _ in 0..limit {
+            if budget.exhausted() {
+                break;
+            }
             let Ok(owner) = self.pending.pop() else {
                 break;
             };
-            let _ = budget.account(owner.bytes.len());
-            if Arc::strong_count(&owner) == 1 {
+            let _ = budget.account(if self.backend {
+                std::mem::size_of::<Storage>()
+            } else {
+                owner.bytes.len()
+            });
+            if Arc::strong_count(&owner) == 1 && owner.bytes.reusable() {
                 self.queued[owner.slot].store(false, Ordering::Relaxed);
                 self.pending_count.fetch_sub(1, Ordering::Relaxed);
                 owner.return_one(self, true);
@@ -385,6 +443,57 @@ impl PayloadPool {
     /// Returns a configuration error for zero slot size, size overflow, or
     /// failure to reserve payload storage.
     pub fn new(classes: impl IntoIterator<Item = (usize, usize)>) -> crate::Result<Self> {
+        Self::build(
+            classes,
+            &DrainBudget::new(TRANSFER, TRANSFER_BYTES),
+            |size, capacity| {
+                let mut buffers = Vec::new();
+                buffers
+                    .try_reserve_exact(capacity)
+                    .map_err(|_| crate::Error::Config("payload pool allocation failed".into()))?;
+                for _ in 0..capacity {
+                    buffers.push(StorageBytes::Heap(owned_body(size)?.into_boxed_slice()));
+                }
+                Ok(buffers)
+            },
+        )
+    }
+
+    /// Construct the same pool with fixed-size backend storage. The allocator
+    /// returns exactly `capacity` slots of `size` bytes per class.
+    /// `reclaim_budget` bounds each pending-owner scan by count and metadata
+    /// bytes. Backend completion checks do not read application payloads.
+    #[doc(hidden)]
+    pub fn with_storage(
+        classes: impl IntoIterator<Item = (usize, usize)>,
+        reclaim_budget: &DrainBudget,
+        mut allocate: impl FnMut(usize, usize) -> crate::Result<Vec<Box<dyn PayloadStorage>>>,
+    ) -> crate::Result<Self> {
+        if reclaim_budget.exhausted() {
+            return Err(crate::Error::Config(
+                "empty backend reclamation budget".into(),
+            ));
+        }
+        Self::build(classes, reclaim_budget, |size, capacity| {
+            let buffers = allocate(size, capacity)?;
+            if buffers.len() != capacity
+                || buffers
+                    .iter()
+                    .any(|slot| slot.as_ref().as_ref().len() != size)
+            {
+                return Err(crate::Error::Config(
+                    "invalid backend payload storage".into(),
+                ));
+            }
+            Ok(buffers.into_iter().map(StorageBytes::Backend).collect())
+        })
+    }
+
+    fn build(
+        classes: impl IntoIterator<Item = (usize, usize)>,
+        reclaim_budget: &DrainBudget,
+        mut allocate: impl FnMut(usize, usize) -> crate::Result<Vec<StorageBytes>>,
+    ) -> crate::Result<Self> {
         let mut pools = Vec::new();
         for (buffer_size, capacity) in classes {
             if buffer_size == 0
@@ -395,13 +504,11 @@ impl PayloadPool {
             {
                 return Err(crate::Error::Config("invalid payload pool size".into()));
             }
-            let mut buffers = Vec::new();
-            buffers
-                .try_reserve_exact(capacity)
-                .map_err(|_| crate::Error::Config("payload pool allocation failed".into()))?;
-            for _ in 0..capacity {
-                buffers.push(owned_body(buffer_size)?.into_boxed_slice());
-            }
+            let buffers = allocate(buffer_size, capacity)?;
+            let backend = buffers
+                .first()
+                .is_some_and(|bytes| matches!(bytes, StorageBytes::Backend(_)));
+            let reclaim_budget = reclaim_budget.clone();
             pools.push(Arc::new_cyclic(move |pool| {
                 let free = FreeList::new(capacity);
                 for (slot, bytes) in buffers.into_iter().enumerate() {
@@ -419,6 +526,8 @@ impl PayloadPool {
                     pending_count: AtomicUsize::new(0),
                     capacity,
                     buffer_size,
+                    backend,
+                    reclaim_budget,
                 }
             }));
         }
@@ -865,6 +974,67 @@ impl Drop for PayloadBuffer {
 mod tests {
     use super::*;
     const BUFFER_CAPACITY: usize = 2048;
+
+    #[derive(Debug)]
+    struct PendingStorage {
+        bytes: Box<[u8]>,
+        ready: Arc<AtomicBool>,
+        checks: Arc<AtomicUsize>,
+    }
+
+    impl AsRef<[u8]> for PendingStorage {
+        fn as_ref(&self) -> &[u8] {
+            &self.bytes
+        }
+    }
+
+    impl AsMut<[u8]> for PendingStorage {
+        fn as_mut(&mut self) -> &mut [u8] {
+            &mut self.bytes
+        }
+    }
+
+    impl PayloadStorage for PendingStorage {
+        fn reusable(&self) -> bool {
+            self.checks.fetch_add(1, Ordering::Relaxed);
+            self.ready.load(Ordering::Acquire)
+        }
+    }
+
+    #[test]
+    fn backend_reclamation_honors_count_and_metadata_byte_budgets() {
+        for (budget, per_turn) in [
+            (DrainBudget::new(2, usize::MAX), 2),
+            (DrainBudget::new(4, std::mem::size_of::<Storage>()), 1),
+        ] {
+            let ready = Arc::new(AtomicBool::new(true));
+            let checks = Arc::new(AtomicUsize::new(0));
+            let pool = PayloadPool::with_storage([(128, 4)], &budget, |size, capacity| {
+                Ok((0..capacity)
+                    .map(|_| {
+                        Box::new(PendingStorage {
+                            bytes: vec![0; size].into_boxed_slice(),
+                            ready: ready.clone(),
+                            checks: checks.clone(),
+                        }) as Box<dyn PayloadStorage>
+                    })
+                    .collect())
+            })
+            .unwrap();
+            let buffers: Vec<_> = (0..4).map(|_| pool.try_buffer(128).unwrap()).collect();
+            ready.store(false, Ordering::Release);
+            drop(buffers);
+            checks.store(0, Ordering::Relaxed);
+            pool.reclaim();
+            assert_eq!(checks.load(Ordering::Relaxed), per_turn);
+            ready.store(true, Ordering::Release);
+            for turn in 1..=4 / per_turn {
+                pool.reclaim();
+                assert_eq!(checks.load(Ordering::Relaxed), per_turn * (turn + 1));
+            }
+            assert_eq!(pool.available(), 4);
+        }
+    }
 
     #[test]
     fn message_builder_selects_inline_pooled_and_owned_storage() {

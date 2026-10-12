@@ -35,6 +35,9 @@ pub enum Endpoint {
     /// `ipc://path` filesystem socket (Unix), `ipc://@name` Linux abstract namespace,
     /// or `ipc://name` Windows named pipe.
     Ipc(IpcPath),
+    /// `shm://path` Linux shared-memory messages with a Unix socket rendezvous.
+    /// Supports single-part socket types.
+    Shm(IpcPath),
     /// `inproc://name` in-process transport.
     Inproc {
         /// In-process endpoint name.
@@ -228,6 +231,7 @@ fn parse_carrier(scheme: &str, rest: &str, original: &str) -> Option<Result<Endp
     Some(match scheme {
         "tcp" => parse_host_port(rest).map(|(host, port)| Endpoint::Tcp { host, port }),
         "ipc" => parse_ipc(rest).map(Endpoint::Ipc),
+        "shm" => parse_ipc(rest).map(Endpoint::Shm),
         "inproc" => {
             if rest.is_empty() {
                 Err(Error::InvalidEndpoint(original.to_string()))
@@ -255,6 +259,7 @@ impl fmt::Display for Endpoint {
         match self {
             Self::Tcp { host, port } => write!(f, "tcp://{host}:{port}"),
             Self::Ipc(path) => write!(f, "ipc://{path}"),
+            Self::Shm(path) => write!(f, "shm://{path}"),
             Self::Inproc { name } => write!(f, "inproc://{name}"),
             Self::Udp { group, host, port } => match group {
                 Some(g) => write!(f, "udp://{g}@{host}:{port}"),
@@ -431,6 +436,7 @@ impl Endpoint {
         match self {
             Endpoint::Tcp { .. } => "tcp",
             Endpoint::Ipc(_) => "ipc",
+            Endpoint::Shm(_) => "shm",
             Endpoint::Inproc { .. } => "inproc",
             Endpoint::Udp { .. } => "udp",
             #[cfg(feature = "lz4")]

@@ -60,6 +60,20 @@ Full [API documentation](https://docs.rs/omq-tokio/latest/omq_tokio/).
 The `quic` feature adds `quic://` endpoints. See the
 [QUIC example](../examples/quic.rs) for certificate and trust setup.
 
+### Shared memory (Linux)
+
+`shm://` endpoints exchange messages through shared memory between local processes.
+
+Prepare payloads directly in shared memory with a producer pool:
+
+```rust
+let pool = omq_tokio::shm_payload_pool([(1024, 128), (16384, 16)])?;
+let message = pool.message(1024, |body| body.fill(7))?;
+socket.send(message).await?;
+```
+
+See [SHM transport](../doc/shm_transport.md).
+
 ## Internals
 
 [`doc/architecture.md`](../doc/architecture.md) covers the actor shape,

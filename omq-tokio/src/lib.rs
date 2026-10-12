@@ -1,7 +1,8 @@
 //! omq-tokio - tokio-runtime backend for omq.
 //!
 //! Wire-compatible with libzmq. Supports 20 socket types, TCP / IPC /
-//! inproc / UDP transports, NULL / PLAIN / CURVE mechanisms, and the
+//! inproc / UDP transports, Linux SHM for single-part sockets,
+//! NULL / PLAIN / CURVE mechanisms, and the
 //! lz4+tcp / zstd+tcp compression transports.
 //!
 //! The codec, message types, mechanism handshakes, and routing
@@ -48,6 +49,9 @@ pub use omq_proto::{CurveKeypair, CurvePublicKey, CurveSecretKey, CurveServerOpt
 #[cfg(feature = "dart")]
 pub use omq_proto::{DartCongestion, DartEcn, DartOptions};
 pub use omq_proto::{PayloadBuffer, PayloadLengthError, PayloadPool};
+/// Preallocate shared-memory storage in an ordinary `PayloadPool` (Linux).
+#[cfg(target_os = "linux")]
+pub use omq_shm::payload_pool as shm_payload_pool;
 #[cfg(feature = "dart")]
 pub use transport::dart::{DartCapabilities, DartStats};
 

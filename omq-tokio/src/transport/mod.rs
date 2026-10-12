@@ -26,6 +26,8 @@ pub mod ipc;
 #[cfg(feature = "quic")]
 pub(crate) mod quic;
 pub(crate) mod setup;
+#[cfg(target_os = "linux")]
+pub(crate) mod shm;
 pub(crate) mod stream_raw;
 pub mod tcp;
 #[cfg(any(feature = "ws", feature = "quic"))]

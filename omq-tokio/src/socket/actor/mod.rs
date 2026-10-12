@@ -234,6 +234,8 @@ struct PendingReceive {
 
 /// The socket actor.
 pub(crate) struct SocketDriver {
+    #[cfg(target_os = "linux")]
+    shm_send_pool: omq_shm::SendPool,
     socket_type: SocketType,
     #[cfg(feature = "dart")]
     pub(crate) dart: Arc<crate::transport::dart::SocketState>,
@@ -341,6 +343,8 @@ impl SocketDriver {
             .map(Arc::new);
         Self {
             socket_type,
+            #[cfg(target_os = "linux")]
+            shm_send_pool: send_strategy.shm_send_pool(&options),
             payload_pools: Arc::new(super::pools::Configuration::new(socket_type, &options)),
             #[cfg(feature = "dart")]
             dart: Arc::new(crate::transport::dart::SocketState::new(

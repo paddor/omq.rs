@@ -420,22 +420,23 @@ impl Submitter {
         if self.lanes.admission_closed() {
             return Err(omq_proto::error::TrySendError::Closed);
         }
-        let (forwarded, group) =
-            filter::prepare(self.mode, msg).map_err(omq_proto::error::TrySendError::Error)?;
+        let group =
+            filter::prepare(self.mode, &msg).map_err(omq_proto::error::TrySendError::Error)?;
 
-        self.try_dispatch_raw(&self.lanes, &forwarded, group.as_deref())?;
-        Ok(())
+        match self.try_dispatch_raw(&self.lanes, &msg, group) {
+            Err(omq_proto::TrySendError::Full(_)) => Err(omq_proto::TrySendError::Full(msg)),
+            result => result,
+        }
     }
 
     pub(crate) async fn send(&self, msg: Message) -> Result<()> {
         if self.lanes.admission_closed() {
             return Err(omq_proto::Error::Closed);
         }
-        let (forwarded, group) = filter::prepare(self.mode, msg)?;
-        let msg_bytes = forwarded.byte_len();
+        let group = filter::prepare(self.mode, &msg)?;
+        let msg_bytes = msg.byte_len();
 
-        self.dispatch_raw(&self.lanes, &forwarded, group.as_deref())
-            .await?;
+        self.dispatch_raw(&self.lanes, &msg, group).await?;
         if self.lanes.admission_closed() {
             return Err(omq_proto::Error::Closed);
         }

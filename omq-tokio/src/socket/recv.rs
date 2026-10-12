@@ -48,7 +48,7 @@ pub(crate) struct TcpYringConsumer {
     pub batch_remaining: AtomicUsize,
     pub batch_popped: AtomicUsize,
     pub capacity: usize,
-    /// DART rings allow empty spin probes without resetting data signals.
+    /// Direct receive rings allow idle probes without resetting data signals.
     pub spin_probe: bool,
     pub space: Arc<StateSignal>,
     pub peer_id: u64,
@@ -378,7 +378,7 @@ pub(crate) struct SpscAwareRecv {
     recv_batching: bool,
     /// Opt-in busy-wait budget before each blocking receive park.
     recv_spin: Duration,
-    /// Latency receives can probe one ring without preparing a signal drain.
+    /// Single-source receives can probe without preparing a signal drain.
     spin_single: bool,
     /// Waker for blocking `recv()` callers.
     blocking_recv_waker: Arc<BlockingRecvWaker>,
@@ -660,8 +660,7 @@ impl SpscAwareRecv {
         Self {
             recv_batching,
             recv_spin,
-            spin_single: latency
-                && handles.fanin.is_none()
+            spin_single: handles.fanin.is_none()
                 && handles.peer_recv.is_none()
                 && handles.conflate_slot.is_none(),
             fanin: handles.fanin,
@@ -1747,6 +1746,52 @@ mod tests {
                 }
                 worker.join().unwrap();
             }
+        }
+    }
+
+    #[test]
+    fn single_ring_spinning_observes_delivery_new_sources_and_close_in_both_profiles() {
+        for latency in [false, true] {
+            let (mut recv, mut producers, pipe) = bulk_receiver(1, 8, latency);
+            recv.recv_spin = Duration::MAX;
+            Arc::get_mut(&mut recv.tcp_consumers.write().unwrap()[0])
+                .unwrap()
+                .spin_probe = true;
+            let peers = recv.tcp_consumers.clone();
+            let generation = recv.consumer_generation.clone();
+            let signal = recv.recv_signal.clone();
+            let (done, received) = std::sync::mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                for _ in 0..3 {
+                    done.send(recv.blocking_recv_timeout(Duration::from_secs(1)))
+                        .unwrap();
+                }
+            });
+            std::thread::sleep(Duration::from_millis(5));
+            producers[0].push(Message::single("first")).unwrap();
+            producers[0].flush();
+            signal.mark();
+            assert_eq!(received.recv().unwrap().unwrap(), Message::single("first"));
+            std::thread::sleep(Duration::from_millis(5));
+            let (mut producer, peer) = tcp_consumer(99);
+            producer.push(Message::single("new peer")).unwrap();
+            producer.flush();
+            peers.write().unwrap().push(peer);
+            // Source registration must invalidate a cached idle probe even
+            // before this source has marked the socket's data signal.
+            generation.fetch_add(1, Ordering::Release);
+            assert_eq!(
+                received.recv().unwrap().unwrap(),
+                Message::single("new peer")
+            );
+            drop(producer);
+            drop(producers);
+            pipe.close();
+            assert!(matches!(
+                received.recv().unwrap(),
+                Err(omq_proto::Error::Closed)
+            ));
+            worker.join().unwrap();
         }
     }
 

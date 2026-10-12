@@ -106,6 +106,11 @@ Application handles enqueue raw messages; drivers own their encoding and
 transmission. Closing a socket either drains accepted output within its linger
 deadline or cancels the driver tasks.
 
+Owned runtimes keep latency-profile Unix IPC drivers runnable briefly after
+wire progress. Drivers yield between reactor polls and sleep after the idle
+window or when receive backpressure blocks them. Application receive spinning
+is controlled separately by `recv_spin`.
+
 A latency-profile plain-TCP route can perform one immediate nonblocking
 vectored write from the caller: framed small messages and headers from the
 slot arena, large payloads from their own buffers. The connection driver owns
@@ -177,8 +182,8 @@ source allows drainage and frees queue capacity. PEER bounds retained memory
 per source; PULL and GATHER use message-count HWMs. Socket memory also includes
 held messages and transport buffers.
 
-The [receive backpressure contract](receive-backpressure.md) describes source
-receipts, retries, and socket-type constraints.
+The [receive backpressure contract](../DEVELOPMENT.md#source-receive-backpressure)
+describes source receipts, retries, and socket-type constraints.
 
 Round-robin and exclusive sends normally wait for space when mute; nonblocking
 sends report `Full`. Fan-out sockets apply their configured drop or block

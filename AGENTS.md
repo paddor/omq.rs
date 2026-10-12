@@ -141,6 +141,8 @@ Lints: `missing_debug_implementations` = **deny**,
 ## Conventions
 
 - Add new charts or documentation files only when explicitly requested.
+- `doc/` documents how OMQ works. Development and benchmark notes belong in
+  `DEVELOPMENT.md` and `RUNNING_BENCHMARKS.md`.
 - Keep documentation brief and technical, readable when browsing on GitHub.
   Update existing sections; describe only relevant design and behavior.
   Do not add a narrative or a wall of text for each change or feature.

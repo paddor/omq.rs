@@ -102,6 +102,12 @@ const IPC_LAT_IMPLS: &[Impl] = &[
         color: C_OMQ_1T,
     },
     Impl {
+        key: "omq-tokio-1t-spin50",
+        label: "omq (50 \u{03bc}s spin)",
+        threads: "1 IO",
+        color: C_OMQ_SPIN,
+    },
+    Impl {
         key: "omq-tokio-ct",
         label: "omq",
         threads: "CT",

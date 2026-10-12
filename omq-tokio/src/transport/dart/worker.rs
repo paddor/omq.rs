@@ -375,11 +375,13 @@ impl Peer {
         ecn_supported: bool,
         signal: &Arc<DataSignal>,
     ) {
-        if self.generation != generation
-            || self.expires <= Instant::now()
-            || io.cancel.is_cancelled()
-            || self.io.is_some()
-        {
+        if self.generation != generation || self.expires <= Instant::now() || self.io.is_some() {
+            return;
+        }
+        if io.cancel.is_cancelled() {
+            // Keep cancellation visible to drive(), which retires this
+            // handshake. Discarding only the queues leaves READY retries live.
+            self.io = Some(io);
             return;
         }
         io.connect_signal(signal);

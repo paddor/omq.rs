@@ -984,6 +984,7 @@ fn run_pubsub_cell(
     duration: f64,
     rounds: u32,
     base_port: u16,
+    args: &ComparisonsArgs,
 ) -> CellResult {
     representative_of(rounds, |_| {
         run_pubsub_once(
@@ -995,6 +996,7 @@ fn run_pubsub_cell(
             peers,
             duration,
             base_port,
+            args,
         )
     })
 }
@@ -1010,6 +1012,7 @@ fn run_pubsub_once(
     peers: u64,
     duration: f64,
     base_port: u16,
+    args: &ComparisonsArgs,
 ) -> CellResult {
     let binary_str = binary.to_str().unwrap();
     let peer_binary_str = peer_binary.to_str().unwrap();
@@ -1059,6 +1062,15 @@ fn run_pubsub_once(
 
     let mut pub_env: Vec<(&str, &str)> = def.env.to_vec();
     let mut sub_env: Vec<(&str, &str)> = def.env.to_vec();
+    let receiver_io = args.pubsub_receiver_io_threads.map(|n| n.to_string());
+    if let Some(ref io) = receiver_io {
+        sub_env.push(("OMQ_IO_THREADS", io));
+        sub_env.push(("ZMQ_IO_THREADS", io));
+    }
+    let receiver_workers = args.pubsub_receiver_workers.map(|n| n.to_string());
+    if let Some(ref workers) = receiver_workers {
+        sub_env.push(("OMQ_BENCH_RECV_WORKERS", workers));
+    }
     let start_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock before Unix epoch")
@@ -1103,18 +1115,18 @@ fn run_pubsub_once(
         connect_addr = addr.clone();
     }
 
-    let sub_dur_str = format!("{:.1}", duration + 3.0);
     let sub_output = process::capture(
         &[
             peer_binary_str,
             "multi-sub",
             &connect_addr,
             &size_str,
-            &sub_dur_str,
+            &dur_str,
             &peers_str,
         ],
         &sub_env,
-        def.affinity(process::OTHER_CPU),
+        def.affinity(process::OTHER_CPU)
+            .map(|default| args.pubsub_receiver_cpus.as_deref().unwrap_or(default)),
         Duration::from_secs(duration as u64 + 30),
     );
 
@@ -1808,7 +1820,14 @@ impl ComparisonRun<'_> {
                 row.push_cpu_time = result.push_cpu;
                 row.pull_cpu_time = result.pull_cpu;
             }
-            CellKind::PubSub => row.pub_cpu_time = result.push_cpu,
+            CellKind::PubSub => {
+                row.pub_cpu_time = result.push_cpu;
+                row.pull_cpu_time = result.pull_cpu;
+                row.receiver_io_threads = self.args.pubsub_receiver_io_threads;
+                row.receiver_workers = self.args.pubsub_receiver_workers;
+                row.receiver_cpus
+                    .clone_from(&self.args.pubsub_receiver_cpus);
+            }
         }
         row.peer_min = result.peer_min;
         row.peer_max = result.peer_max;
@@ -1967,25 +1986,44 @@ impl ComparisonRun<'_> {
                     for &name in &impls {
                         let def = find_impl(name).unwrap();
                         let binary = self.binaries[name].as_path();
-                        let result = run_latency_cell(
-                            binary,
-                            binary,
-                            def,
-                            transport,
-                            size,
-                            self.args.latency_iterations,
-                            self.args.latency_warmup,
-                            self.args.latency_timeout,
-                            self.base_port,
-                            pair,
-                            profile,
-                        )
-                        .unwrap_or_else(|| {
-                            panic!(
-                                "latency measurement failed: {name} {pair} {profile} {} {size} B",
-                                transport.as_str()
+                        let mut results = Vec::new();
+                        for round in 0..self.rounds {
+                            let result = run_latency_cell(
+                                binary,
+                                binary,
+                                def,
+                                transport,
+                                size,
+                                self.args.latency_iterations,
+                                self.args.latency_warmup,
+                                self.args.latency_timeout,
+                                self.base_port,
+                                pair,
+                                profile,
                             )
-                        });
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "latency measurement failed: {name} {pair} {profile} {} {size} B",
+                                    transport.as_str()
+                                )
+                            });
+                            if self.rounds > 1 {
+                                eprintln!(
+                                    "  {name} {size} B round {}/{}: p50/p99/p99.9 {:.3}/{:.3}/{:.3} us",
+                                    round + 1,
+                                    self.rounds,
+                                    result.p50_us,
+                                    result.p99_us,
+                                    result.p999_us
+                                );
+                            }
+                            results.push(result);
+                        }
+                        results.sort_by(|a, b| a.p99_us.total_cmp(&b.p99_us));
+                        let result = results
+                            .into_iter()
+                            .nth((self.rounds.saturating_sub(1) / 2) as usize)
+                            .expect("at least one latency round");
                         self.record_latency(name, transport, size, pair, profile, &result);
                         cells.push(format!("{:.1}", result.p99_us));
                     }
@@ -2022,6 +2060,7 @@ impl ComparisonRun<'_> {
                         self.duration,
                         self.rounds,
                         self.base_port,
+                        self.args,
                     );
                     self.record_cell(
                         name,
@@ -2122,6 +2161,10 @@ impl ComparisonRun<'_> {
 }
 
 pub(crate) fn run(args: &ComparisonsArgs) {
+    assert!(
+        args.pubsub_receiver_cpus.is_none() || std::env::var_os("OMQ_BENCH_TASKSET").is_some(),
+        "--pubsub-receiver-cpus requires OMQ_BENCH_TASKSET"
+    );
     process::install_reaper();
     process::cleanup_ipc_sockets();
     let duration = if args.quick_run {

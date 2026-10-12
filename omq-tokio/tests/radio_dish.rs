@@ -56,6 +56,43 @@ async fn send_group_rejects_non_radio_socket() {
 }
 
 #[tokio::test]
+async fn send_group_accepts_inline_and_pooled_messages_without_replacing_storage() {
+    let ep = inproc_ep("rd-message-body");
+    let radio = Socket::new(SocketType::Radio, Options::default());
+    radio.bind(ep.clone()).await.unwrap();
+    let dish = Socket::new(SocketType::Dish, Options::default());
+    dish.connect(ep).await.unwrap();
+    dish.join("group").await.unwrap();
+    let pool = omq_tokio::PayloadPool::new([(64, 1)]).unwrap();
+    for size in [16, 64] {
+        let message = pool
+            .try_message(size, |body| body.fill(7))
+            .unwrap()
+            .unwrap();
+        let storage = message.part_slice(0).unwrap().as_ptr();
+        radio.send_group("group", message).await.unwrap();
+        let received = tokio::time::timeout(Duration::from_secs(1), dish.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received.part_slice(0), Some(b"group".as_slice()));
+        assert_eq!(received.part_slice(1), Some(vec![7; size].as_slice()));
+        if size == 64 {
+            assert_eq!(received.part_slice(1).unwrap().as_ptr(), storage);
+            assert!(pool.try_message(size, |_| {}).unwrap().is_none());
+        }
+        drop(received);
+        assert!(pool.try_message(size, |_| {}).unwrap().is_some());
+    }
+    for body in [Message::new(), Message::multipart(["a", "b"])] {
+        assert!(matches!(
+            radio.send_group("group", body).await,
+            Err(Error::Protocol(_))
+        ));
+    }
+}
+
+#[tokio::test]
 async fn radio_requires_group_body_pair() {
     let ep = inproc_ep("rd-bad-shape");
     let radio = Socket::new(SocketType::Radio, Options::default());

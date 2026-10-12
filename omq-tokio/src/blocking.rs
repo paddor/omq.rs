@@ -130,17 +130,14 @@ impl Socket {
         }
     }
 
-    /// Send one body to a RADIO group.
+    /// Send one single-frame body to a RADIO group.
+    /// Accepts owning `Message` bodies, including preallocated payloads.
     pub fn send_group(
         &self,
         group: impl Into<bytes::Bytes>,
-        body: impl Into<bytes::Bytes>,
+        body: impl Into<Message>,
     ) -> Result<()> {
-        let socket = self.inner.clone_shared();
-        let group = group.into();
-        let body = body.into();
-        self.ctx
-            .block_on(async move { socket.send_group(group, body).await })
+        self.send(self.inner.group_message(group.into(), body.into())?)
     }
 
     pub(crate) fn new(inner: AsyncSocket, ctx: Context) -> Self {

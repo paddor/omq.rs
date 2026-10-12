@@ -73,6 +73,12 @@ pub(crate) struct ComparisonRow {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime_workers: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub receiver_io_threads: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receiver_workers: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receiver_cpus: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub peers: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub msgs_s: Option<f64>,

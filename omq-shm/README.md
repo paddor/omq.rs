@@ -1,4 +1,8 @@
-# Shared-memory transport
+# omq-shm
+
+Linux shared-memory transport for the [OMQ messaging library](https://github.com/paddor/omq.rs).
+Applications use it through [`omq-tokio`](https://crates.io/crates/omq-tokio)
+sockets with `shm://` endpoints.
 
 Linux-only `shm://path` / `shm://@name`, using NULL authentication.
 Supported families: CHANNEL, CLIENT/SERVER, SCATTER/GATHER, PEER, RADIO/DISH.

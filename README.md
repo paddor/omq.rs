@@ -11,8 +11,8 @@ Your application sends messages, OMQ handles the network. Queues all the way!
   low p99 latency, and scalable background IO. See the [benchmarks](#performance).
 - **Compression.** LZ4/Zstd transports save bandwidth without changing application
   messages.
-- **One API across transports.** inproc, IPC, TCP, UDP, QUIC, DART, and
-  WebSocket. Sockets handle framing, reconnection, and back-pressure.
+- **One API across transports.** inproc, IPC, TCP, UDP, WebSocket, QUIC, DART, and
+  SHM. Sockets handle framing, reconnection, and back-pressure.
 - **Language support.** Rust plus [bindings](#workspace) for C/C++, Python,
   Ruby, Go, Java, Node.js, .NET, Lua, BEAM, Zig, and Crystal.
 
@@ -116,7 +116,8 @@ available:
 
 ## Cargo features
 
-The default build includes the NULL mechanism and TCP / IPC / inproc / UDP.
+The default build includes the NULL mechanism and TCP / IPC / inproc / UDP,
+plus SHM on Linux.
 It needs no libzmq, libsodium, or C compiler. Optional features:
 
 | Feature | Adds |
@@ -131,13 +132,14 @@ It needs no libzmq, libsodium, or C compiler. Optional features:
 
 ## Workspace
 
-Four Cargo workspace crates. The protocol core and tokio backend forbid
-unsafe Rust; native interfaces contain the FFI boundaries.
+Five Cargo workspace crates. The protocol core and tokio backend forbid
+unsafe Rust. SHM transport and native interfaces isolate unsafe operations.
 
 | Crate | What it does |
 |-------|--------------|
 | [`omq-proto`](omq-proto/) | Sans-I/O ZMTP 3.x: codec, messages, mechanisms, subscriptions |
 | [`omq-tokio`](omq-tokio/) | Tokio backend for Linux, macOS, and Windows |
+| [`omq-shm`](omq-shm/) | Linux shared-memory transport |
 | [`omq-libzmq`](omq-libzmq/) | libzmq-compatible C interface (`libomq_zmq` dynamic/static library) |
 | [`omq-bench`](omq-bench/) | Benchmark runner and SVG chart generator |
 
@@ -181,6 +183,7 @@ Language bindings:
   liveness, and reconnect rules.
 - [doc/udp_transports.md](doc/udp_transports.md): UDP, QUIC, and DART purposes,
   configuration, and benchmarks over loopback and lossy links.
+- [omq-shm/README.md](omq-shm/README.md): shared-memory transport on Linux.
 
 ## Platform and requirements
 

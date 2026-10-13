@@ -72,7 +72,7 @@ let message = pool.message(1024, |body| body.fill(7))?;
 socket.send(message).await?;
 ```
 
-See [SHM transport](../doc/shm_transport.md).
+See [SHM transport](../omq-shm/README.md).
 
 ## Internals
 

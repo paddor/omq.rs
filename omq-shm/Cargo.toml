@@ -6,7 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Linux shared-memory storage and leases for OMQ."
+description = "Linux shared-memory transport for OMQ."
+readme = "README.md"
 
 [lints]
 workspace = true

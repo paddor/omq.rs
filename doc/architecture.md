@@ -330,7 +330,7 @@ snapshots to applications.
 SHM uses Unix sockets for connection setup and shared memory for message transfer.
 Each socket shares bounded outbound storage across its peers, with one I/O lane
 per SHM endpoint. Received messages retain their shared storage until released;
-see [SHM transport](shm_transport.md).
+see [SHM transport](../omq-shm/README.md).
 
 QUIC peers retain their UDP endpoint group and assigned data runtime. The
 listener controls new admission; established peers own their connections.

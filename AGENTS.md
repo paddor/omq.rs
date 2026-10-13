@@ -56,7 +56,7 @@ Full detail in `doc/`:
 Transport RFCs:
 [`lz4-rfc.md`](doc/lz4-rfc.md), [`quic-rfc.md`](doc/quic-rfc.md),
 [`dart-rfc.md`](doc/dart-rfc.md).
-Shared-memory architecture: [`shm_transport.md`](doc/shm_transport.md).
+Shared-memory architecture: [`omq-shm/README.md`](omq-shm/README.md).
 
 **omq-proto key types.** `Connection`: ZMTP codec state machine
 (`handle_input`/`poll_event`/`send_message`/`poll_transmit`).

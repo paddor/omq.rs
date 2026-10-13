@@ -14,7 +14,9 @@ use super::recv::{BlockingRecvWaker, recv_budget_bytes};
 use crate::engine::receive_cell::ReceiveCell;
 use crate::engine::signal::{DataSignal, StateSignal};
 
+mod queue;
 mod source;
+use queue::{Item, Queue};
 pub(crate) use source::Source;
 use source::{ReceiveState, SourceRegistration};
 
@@ -25,6 +27,8 @@ const DART_PRODUCER: u8 = 2;
 #[derive(Debug)]
 pub(crate) struct Fanin {
     registrar: Mutex<mpsc::Sender<Message>>,
+    #[cfg(target_os = "linux")]
+    batch_registrar: Mutex<mpsc::Sender<Item>>,
     receiver: ReceiveCell<Option<ReceiveState>>,
     signal: Arc<DataSignal>,
     blocking: Arc<BlockingRecvWaker>,
@@ -60,9 +64,20 @@ impl Fanin {
         source_aware: bool,
     ) -> Arc<Self> {
         let (sender, rx) = mpsc::channel(capacity);
+        #[cfg(target_os = "linux")]
+        let (batch_sender, batch_rx) = mpsc::channel(capacity);
         Arc::new(Self {
             registrar: Mutex::new(sender),
-            receiver: ReceiveCell::new(Some(ReceiveState::new(rx)), Weak::new()),
+            #[cfg(target_os = "linux")]
+            batch_registrar: Mutex::new(batch_sender),
+            receiver: ReceiveCell::new(
+                Some(ReceiveState::new(Queue::new(
+                    rx,
+                    #[cfg(target_os = "linux")]
+                    batch_rx,
+                ))),
+                Weak::new(),
+            ),
             signal,
             blocking,
             registered: AtomicU8::new(0),
@@ -112,9 +127,10 @@ impl Fanin {
             Some(capacity) => registrar.try_register_with_capacity(capacity).ok()?,
             None => registrar.try_clone()?,
         };
+        let mut guard = self.receiver.lock();
+        let state = guard.as_mut()?;
+        state.receiver.register(sender.lane());
         let source = if self.source_aware {
-            let mut guard = self.receiver.lock();
-            let state = guard.as_mut()?;
             state.process_changes(self);
             state.reclaim_sources();
             state.scan_lanes |= external_ready;
@@ -122,11 +138,18 @@ impl Fanin {
         } else {
             None
         };
+        drop(guard);
         self.registered.fetch_or(kind, Ordering::Release);
         let space = Arc::new(SpaceWake {
             signal: Arc::new(StateSignal::new()),
         });
         Some(Producer {
+            #[cfg(target_os = "linux")]
+            owner: Arc::downgrade(self),
+            #[cfg(target_os = "linux")]
+            credits: None,
+            #[cfg(target_os = "linux")]
+            batch_sender: None,
             sender,
             signal: self.signal.clone(),
             blocking: self.blocking.clone(),
@@ -186,11 +209,7 @@ impl Fanin {
 
     /// Rotate sender lanes after every message. Returns whether the channel
     /// was observed empty.
-    fn drain_fair(
-        rx: &mut mpsc::Receiver<Message>,
-        out: &mut Vec<Message>,
-        budget: &mut DrainBudget,
-    ) -> bool {
+    fn drain_fair(rx: &mut Queue, out: &mut Vec<Message>, budget: &mut DrainBudget) -> bool {
         let mut observed_empty = false;
         while !budget.exhausted() {
             let Ok(item) = rx.try_recv_fair() else {
@@ -208,25 +227,8 @@ impl Fanin {
     /// the budget lasts. The message that exhausts the budget is still
     /// delivered, as in the fair drain. Returns whether the channel was
     /// observed empty.
-    fn drain_bulk(
-        rx: &mut mpsc::Receiver<Message>,
-        out: &mut Vec<Message>,
-        budget: &mut DrainBudget,
-    ) -> bool {
-        let limit = budget.remaining_msgs();
-        let mut rejected = false;
-        let result = rx.try_recv_batch_into_while(out, limit, |item| {
-            if budget.exhausted() {
-                rejected = true;
-                return false;
-            }
-            let _ = budget.account(recv_budget_bytes(item));
-            true
-        });
-        match result {
-            Ok(received) => received < limit && !rejected,
-            Err(_) => true,
-        }
+    fn drain_bulk(rx: &mut Queue, out: &mut Vec<Message>, budget: &mut DrainBudget) -> bool {
+        rx.drain_bulk(out, budget)
     }
 
     pub(crate) fn try_recv(&self) -> Result<Message> {
@@ -318,6 +320,12 @@ impl Wake for SpaceWake {
 #[derive(Debug)]
 pub(crate) struct Producer {
     sender: mpsc::Sender<Message>,
+    #[cfg(target_os = "linux")]
+    batch_sender: Option<Box<mpsc::Sender<Item>>>,
+    #[cfg(target_os = "linux")]
+    owner: Weak<Fanin>,
+    #[cfg(target_os = "linux")]
+    credits: Option<Arc<queue::Credits>>,
     signal: Arc<DataSignal>,
     blocking: Arc<BlockingRecvWaker>,
     space: Arc<SpaceWake>,
@@ -328,14 +336,7 @@ pub(crate) struct Producer {
 }
 impl Producer {
     pub(crate) fn try_send(&mut self, item: Message) -> std::result::Result<(), Message> {
-        let result = if self.external_ready {
-            // Inproc already uses the socket's fenced DataSignal handoff.
-            // The consumer polls these lanes; no second readiness RMW.
-            self.sender.try_send_unsignaled(item)
-        } else {
-            self.sender.try_send(item)
-        };
-        result.map_err(mpsc::TrySendError::into_inner)?;
+        self.send_message(item, false)?;
         self.signal.mark();
         self.blocking.wake_after_fence();
         if let Some(source) = &self.source {
@@ -345,11 +346,111 @@ impl Producer {
     }
     #[inline]
     fn try_send_deferred(&mut self, item: Message) -> std::result::Result<(), Message> {
-        self.sender
-            .try_send_deferred(item)
-            .map_err(mpsc::TrySendError::into_inner)
+        self.send_message(item, true)
+    }
+    #[inline]
+    fn send_message(
+        &mut self,
+        message: Message,
+        deferred: bool,
+    ) -> std::result::Result<(), Message> {
+        #[cfg(target_os = "linux")]
+        if let Some(credits) = &self.credits
+            && credits.reserve(1) == 0
+        {
+            return Err(message);
+        }
+        let result = {
+            #[cfg(target_os = "linux")]
+            if let Some(sender) = &mut self.batch_sender {
+                return Self::send_value(sender, Item::Message(message), deferred, false).map_err(
+                    |error| {
+                        self.credits.as_ref().expect("batch credits").release(1);
+                        queue::into_message(error.into_inner())
+                    },
+                );
+            }
+            Self::send_value(&mut self.sender, message, deferred, self.external_ready)
+        };
+        result.map_err(mpsc::TrySendError::into_inner)
+    }
+
+    #[inline]
+    fn send_value<T>(
+        sender: &mut mpsc::Sender<T>,
+        value: T,
+        deferred: bool,
+        external_ready: bool,
+    ) -> std::result::Result<(), mpsc::TrySendError<T>> {
+        if deferred {
+            sender.try_send_deferred(value)
+        } else if external_ready {
+            sender.try_send_unsignaled(value)
+        } else {
+            sender.try_send(value)
+        }
+    }
+    #[cfg(target_os = "linux")]
+    fn enable_batches(&mut self) -> bool {
+        if self.credits.is_some() {
+            return true;
+        }
+        let Some(owner) = self.owner.upgrade() else {
+            return false;
+        };
+        // Connection drivers call this before admitting any SHM delivery.
+        let Ok(sender) = owner
+            .batch_registrar
+            .lock()
+            .unwrap()
+            .try_register_with_capacity(self.sender.capacity())
+        else {
+            return false;
+        };
+        let mut guard = owner.receiver.lock();
+        let Some(state) = guard.as_mut() else {
+            return false;
+        };
+        let credits = queue::Credits::new(self.sender.capacity(), self.space.signal.clone());
+        state
+            .receiver
+            .enable_batches(self.sender.lane(), sender.lane(), credits.clone());
+        self.batch_sender = Some(Box::new(sender));
+        self.credits = Some(credits);
+        true
+    }
+    #[cfg(target_os = "linux")]
+    fn try_send_batch(
+        &mut self,
+        mut batch: omq_shm::ReceivedBatch,
+    ) -> std::result::Result<Option<omq_shm::ReceivedBatch>, omq_shm::ReceivedBatch> {
+        if self.is_full() {
+            return Err(batch);
+        }
+        let credits = self.credits.as_ref().expect("batch receive enabled");
+        let count = credits.reserve(batch.len());
+        if count == 0 {
+            return Err(batch);
+        }
+        let original = batch.clone();
+        let prefix = batch.take_prefix(count);
+        if self
+            .batch_sender
+            .as_mut()
+            .expect("batch receive enabled")
+            .try_send_deferred(Item::Batch(prefix))
+            .is_err()
+        {
+            credits.release(count);
+            return Err(original);
+        }
+        Ok((!batch.is_empty()).then_some(batch))
     }
     fn flush(&mut self) {
+        #[cfg(target_os = "linux")]
+        if let Some(sender) = &mut self.batch_sender {
+            sender.flush();
+        }
         self.sender.flush();
         self.signal.mark();
         self.blocking.wake_after_fence();
@@ -358,11 +459,24 @@ impl Producer {
         }
     }
     pub(crate) fn is_full(&mut self) -> bool {
+        #[cfg(target_os = "linux")]
+        if let Some(sender) = &mut self.batch_sender {
+            if self.credits.as_ref().expect("batch credits").full() && !sender.is_disconnected() {
+                return true;
+            }
+            return sender
+                .poll_ready(&mut Context::from_waker(&self.waker))
+                .is_pending();
+        }
         self.sender
             .poll_ready(&mut Context::from_waker(&self.waker))
             .is_pending()
     }
     pub(crate) fn is_closed(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        if let Some(sender) = &self.batch_sender {
+            return sender.is_disconnected();
+        }
         self.sender.is_disconnected()
     }
     pub(crate) fn space(&self) -> Arc<StateSignal> {
@@ -379,7 +493,7 @@ impl Drop for Producer {
 #[derive(Debug)]
 pub(crate) struct Sink {
     producer: Producer,
-    pending: Option<Message>,
+    pending: Option<Item>,
     space: Arc<StateSignal>,
 }
 impl Sink {
@@ -419,17 +533,43 @@ impl Sink {
                 if self.with_producer(|producer| producer.is_closed()) {
                     return false;
                 }
-                self.pending = Some(item);
+                self.pending = Some(Item::Message(item));
                 true
             }
         }
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn enable_batches(&mut self) -> bool {
+        self.producer.enable_batches()
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn push_batch(&mut self, batch: omq_shm::ReceivedBatch) -> bool {
+        debug_assert!(!self.blocked());
+        match self.producer.try_send_batch(batch) {
+            Ok(remaining) => self.pending = remaining.map(Item::Batch),
+            Err(batch) => {
+                if self.producer.is_closed() {
+                    return false;
+                }
+                self.pending = Some(Item::Batch(batch));
+            }
+        }
+        self.producer.flush();
+        true
     }
     pub(crate) fn blocked(&self) -> bool {
         self.pending.is_some()
     }
     /// Take back a message that `push` retained because the queue was full.
     pub(crate) fn take_pending(&mut self) -> Option<Message> {
-        self.pending.take()
+        match self.pending.take()? {
+            Item::Message(message) => Some(message),
+            #[cfg(target_os = "linux")]
+            Item::Batch(batch) => {
+                self.pending = Some(Item::Batch(batch));
+                None
+            }
+        }
     }
     /// Report fullness and register the space waker when full.
     pub(crate) fn is_full(&mut self) -> bool {
@@ -439,7 +579,12 @@ impl Sink {
         self.space.clone()
     }
     pub(crate) fn retry_pending(&mut self) -> bool {
-        self.pending.take().is_none_or(|message| self.push(message))
+        match self.pending.take() {
+            Some(Item::Message(message)) => self.push(message),
+            #[cfg(target_os = "linux")]
+            Some(Item::Batch(batch)) => self.push_batch(batch),
+            None => true,
+        }
     }
     pub(crate) async fn ready(&mut self) {
         let seen = self.space.generation();
@@ -863,5 +1008,227 @@ mod tests {
         assert!(!sink.retry_pending());
         assert!(matches!(queue.try_recv(), Err(Error::Closed)));
         assert!(queue.register().is_none());
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod batch_tests {
+    use super::*;
+    use omq_shm::{BatchKind, Connection, Received, ReceivedBatch};
+    use std::io::IoSlice;
+    use std::os::unix::net::UnixStream;
+
+    fn batch(count: usize) -> ReceivedBatch {
+        let (first, second) = UnixStream::pair().unwrap();
+        let mut sender = Connection::new(&first, 256, None).unwrap();
+        let mut receiver = Connection::new(&second, 256, None).unwrap();
+        let transfer = |sender: &mut Connection,
+                        receiver: &mut Connection,
+                        first: &UnixStream,
+                        second: &UnixStream| {
+            assert_eq!(sender.try_write(first, &[IoSlice::new(b"x")]).unwrap(), 1);
+            assert_eq!(receiver.try_read(second, &mut [0]).unwrap(), 1);
+        };
+        transfer(&mut sender, &mut receiver, &first, &second);
+        transfer(&mut receiver, &mut sender, &second, &first);
+        sender.accept_preface(&receiver.preface()).unwrap();
+        receiver.accept_preface(&sender.preface()).unwrap();
+        let messages: Vec<_> = (0..count)
+            .map(|seq| Message::from_slice(&[seq as u8; 64]))
+            .collect();
+        let prepared = sender
+            .prepare_batch(&messages.iter().collect::<Vec<_>>(), BatchKind::Copied)
+            .unwrap()
+            .unwrap();
+        let mut frames = omq_proto::frame_buffer::FrameBuffer::new();
+        assert!(
+            sender
+                .encode_batch_and_frame(&prepared, BatchKind::Copied, &mut frames)
+                .unwrap()
+        );
+        transfer(&mut sender, &mut receiver, &first, &second);
+        let bytes = frames.arena_bytes();
+        assert_eq!(bytes[0], 0);
+        assert_eq!(bytes.len(), usize::from(bytes[1]) + 2);
+        let Received::Batch(batch) = receiver
+            .decode_delivery(Message::from_slice(&bytes[2..]))
+            .unwrap()
+        else {
+            panic!("expected batch")
+        };
+        batch
+    }
+
+    fn queue(capacity: usize, sources: bool) -> Arc<Fanin> {
+        Fanin::build(
+            capacity,
+            Arc::new(DataSignal::new()),
+            BlockingRecvWaker::new(),
+            sources,
+        )
+    }
+
+    #[test]
+    fn partial_batches_charge_messages_and_resume_without_overtaking() {
+        let queue = queue(4, false);
+        let mut sink = Sink::owned(queue.register().unwrap());
+        assert!(sink.enable_batches());
+        assert!(sink.push_batch(batch(8)));
+        assert_eq!(
+            match sink.pending.as_ref().unwrap() {
+                Item::Batch(batch) => batch.len(),
+                Item::Message(_) => panic!("expected pending batch"),
+            },
+            4
+        );
+        let mut received = Vec::new();
+        assert_eq!(
+            queue
+                .recv_into(&mut received, DrainBudget::new(3, 4096), true)
+                .unwrap(),
+            3
+        );
+        assert!(sink.retry_pending());
+        assert_eq!(
+            match sink.pending.as_ref().unwrap() {
+                Item::Batch(batch) => batch.len(),
+                Item::Message(_) => panic!("expected pending batch"),
+            },
+            1
+        );
+        assert_eq!(
+            queue
+                .recv_into(&mut received, DrainBudget::new(4, 4096), true)
+                .unwrap(),
+            4
+        );
+        assert!(sink.retry_pending());
+        assert!(!sink.blocked());
+        assert!(sink.push(Message::from_slice(&[99; 64])));
+        assert_eq!(
+            queue
+                .recv_into(&mut received, DrainBudget::new(4, 4096), true)
+                .unwrap(),
+            2
+        );
+        for (seq, message) in received[..8].iter().enumerate() {
+            assert_eq!(message.part_slice(0).unwrap(), &[seq as u8; 64]);
+        }
+        assert_eq!(received[8].part_slice(0).unwrap(), &[99; 64]);
+    }
+
+    #[test]
+    fn scalar_batches_rotate_with_other_peers_and_publish_lwm_credits() {
+        let queue = queue(128, false);
+        let mut sink = Sink::owned(queue.register().unwrap());
+        let mut other = queue.register().unwrap();
+        assert!(sink.enable_batches());
+        assert!(sink.push_batch(batch(128)));
+        let seen = sink.space.generation();
+        for seq in 0..128_u8 {
+            other.try_send(Message::from_slice(&[200, seq])).unwrap();
+            assert_eq!(queue.try_recv().unwrap().part_slice(0).unwrap(), &[seq; 64]);
+            assert_eq!(
+                queue.try_recv().unwrap().part_slice(0).unwrap(),
+                &[200, seq]
+            );
+            if seq < 63 {
+                assert_eq!(sink.space.generation(), seen);
+            }
+        }
+        assert_ne!(sink.space.generation(), seen);
+        assert!(queue.try_recv().is_err());
+    }
+
+    #[test]
+    fn source_claims_pause_and_return_the_batch_cursor() {
+        let queue = queue(8, true);
+        let mut sink = Sink::owned(queue.register().unwrap());
+        let mut other = queue.register().unwrap();
+        assert!(sink.enable_batches());
+        assert!(sink.push_batch(batch(8)));
+        let (receipt, message) = queue.try_recv_from(None).unwrap();
+        let source = receipt.source().unwrap().clone();
+        other.try_send(Message::single("other")).unwrap();
+        assert_eq!(queue.try_recv().unwrap(), Message::single("other"));
+        assert!(queue.try_recv().is_err());
+        queue.unshift(receipt, message).unwrap();
+        let (receipt, message) = queue.try_recv_from(Some(&source)).unwrap();
+        assert_eq!(message.part_slice(0).unwrap(), &[0; 64]);
+        drop(receipt);
+        for seq in 1..8_u8 {
+            let (receipt, message) = queue.try_recv_from(Some(&source)).unwrap();
+            assert_eq!(message.part_slice(0).unwrap(), &[seq; 64]);
+            drop(receipt);
+        }
+    }
+
+    #[tokio::test]
+    async fn receiver_close_releases_a_blocked_batch_waiter() {
+        let queue = queue(1, false);
+        let mut sink = Sink::owned(queue.register().unwrap());
+        assert!(sink.enable_batches());
+        assert!(sink.push_batch(batch(4)));
+        assert!(sink.blocked());
+        queue.close();
+        tokio::time::timeout(std::time::Duration::from_secs(1), sink.ready())
+            .await
+            .unwrap();
+        assert!(!sink.retry_pending());
+    }
+    #[test]
+    fn plain_bulk_receive_reuses_output_storage_and_preserves_existing_values() {
+        let queue = queue(16, false);
+        let mut producer = queue.register().unwrap();
+        producer.try_send(Message::single("first")).unwrap();
+        producer.try_send(Message::single("second")).unwrap();
+        let mut out = Vec::with_capacity(16);
+        out.push(Message::single("prefix"));
+        let allocation = out.as_ptr();
+        assert_eq!(
+            queue
+                .recv_into(&mut out, DrainBudget::new(4, 4096), true)
+                .unwrap(),
+            2
+        );
+        assert_eq!(out.as_ptr(), allocation);
+        assert_eq!(
+            out,
+            [
+                Message::single("prefix"),
+                Message::single("first"),
+                Message::single("second")
+            ]
+        );
+        out.clear();
+        producer.try_send(Message::single("reused")).unwrap();
+        assert_eq!(
+            queue
+                .recv_into(&mut out, DrainBudget::new(4, 4096), true)
+                .unwrap(),
+            1
+        );
+        assert_eq!(out.as_ptr(), allocation);
+    }
+
+    #[test]
+    fn disconnected_batches_drain_before_lane_reuse_without_reviving_sources() {
+        let queue = queue(2, true);
+        for _ in 0..16 {
+            let mut sink = Sink::owned(queue.register().unwrap());
+            assert!(sink.enable_batches());
+            assert!(sink.push_batch(batch(4)));
+            let (receipt, held) = queue.try_recv_from(None).unwrap();
+            let source = receipt.source().unwrap().clone();
+            drop(sink);
+            drop(receipt);
+            assert_eq!(queue.try_recv().unwrap().part_slice(0).unwrap(), &[1; 64]);
+            assert!(queue.try_recv().is_err());
+            assert!(matches!(
+                queue.try_recv_from(Some(&source)),
+                Err(Error::Closed)
+            ));
+            assert_eq!(held.part_slice(0).unwrap(), &[0; 64]);
+        }
     }
 }

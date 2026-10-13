@@ -12,6 +12,7 @@ path = "src/main.rs"
 [workspace]
 
 [dependencies]
+omq-shm = { path = "../../omq-shm" }
 omq-tokio = { path = "../../omq-tokio" }
 serde_json = "1"
 bytes = "1"

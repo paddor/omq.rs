@@ -155,6 +155,9 @@ cargo run --release -p omq-bench -- chart shm
 
 Writes `doc/charts/shm/{pubsub,pushpull,reqrep}.svg` from append-only
 `shm-{pubsub,pushpull,reqrep}.jsonl`.
+All series use HWM 1000 and source pools of 64 MiB below 1 MiB, 256 MiB at or above.
+Throughput splits 4 KiB slabs for 64 B-1 KiB messages. Only SHM pool uses mapped
+source storage; other series use heap storage.
 For SHM-only refreshes, run with `--impls shm,shm-pool`, then chart
 with `--cached-baselines` to retain cached inproc/IPC baselines.
 

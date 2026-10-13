@@ -12,6 +12,7 @@ description = "Linux shared-memory storage and leases for OMQ."
 workspace = true
 
 [dependencies]
+bytes = "1"
 concurrent-queue = "2.5.0"
 omq-proto = { path = "../omq-proto", version = "0.29.0" }
 rand = "0.10"

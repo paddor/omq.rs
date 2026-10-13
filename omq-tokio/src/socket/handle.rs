@@ -1647,7 +1647,11 @@ fn recv_handles(
 fn supports_recv_batching(t: SocketType) -> bool {
     matches!(
         t,
-        SocketType::Pull | SocketType::Gather | SocketType::Sub | SocketType::XSub
+        SocketType::Pull
+            | SocketType::Gather
+            | SocketType::Sub
+            | SocketType::XSub
+            | SocketType::Dish
     )
 }
 

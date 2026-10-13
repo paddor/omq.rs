@@ -41,11 +41,20 @@ pub struct Connection {
     blocked_sequence: u32,
     hwm: usize,
     max_message_size: Option<usize>,
-    received: VecDeque<Message>,
+    received: Option<crate::ReceivedBatch>,
     views: crate::views::Views,
     sent_descriptors: u64,
     received_descriptors: u64,
     receive_polling: bool,
+}
+
+/// A decoded single message or a validated batch awaiting application receive.
+#[derive(Debug)]
+pub enum Received {
+    /// An ordinary, independently owned message.
+    Message(Message),
+    /// Bodies retained together until the application receives them.
+    Batch(crate::ReceivedBatch),
 }
 
 #[derive(Debug)]
@@ -143,7 +152,7 @@ impl Connection {
             blocked_sequence: 0,
             hwm: count,
             max_message_size,
-            received: VecDeque::with_capacity(crate::BATCH_MAX_MESSAGES),
+            received: None,
             views: crate::views::Views::new(count.max(crate::BATCH_MAX_MESSAGES)),
             sent_descriptors: 0,
             received_descriptors: 0,
@@ -697,45 +706,57 @@ impl Connection {
         })
     }
 
-    /// Decode a record and retain a bounded batch's independently owned bodies.
+    /// Decode one message and retain a validated batch cursor.
     /// Drain [`Self::poll_received`] before providing the next carrier record.
     ///
     /// # Errors
     /// Returns an error for undrained batches or invalid/oversized records.
     pub fn decode_received(&mut self, message: Message) -> Result<Message> {
-        if !self.received.is_empty() {
+        match self.decode_delivery(message)? {
+            Received::Message(message) => Ok(message),
+            Received::Batch(batch) => {
+                self.received = Some(batch);
+                Ok(self.poll_received().expect("nonempty SHM batch"))
+            }
+        }
+    }
+
+    /// Validate a carrier record without expanding a batch into payload views.
+    ///
+    /// # Errors
+    /// Returns an error for invalid, unregistered, or oversized records.
+    pub fn decode_delivery(&mut self, message: Message) -> Result<Received> {
+        if self.received.is_some() {
             return Err(invalid("SHM batch must be drained before the next record").into());
         }
         let kind = message
             .part_slice(message.len().saturating_sub(1))
             .and_then(|body| body.first().copied());
         let Some(kind @ (COPIED_BATCH | REFERENCE_BATCH)) = kind else {
-            return self.decode(message);
+            return self.decode(message).map(Received::Message);
         };
         let decoded = self.decode_record(message, kind)?;
-        let mut received = std::mem::take(&mut self.received);
-        let result = if kind == COPIED_BATCH {
-            batch::decode(&decoded, self.max_message_size, &self.views, &mut received)
+        let batch = if kind == COPIED_BATCH {
+            crate::ReceivedBatch::copied(&decoded, self.max_message_size, &self.views)?
         } else {
-            batch::decode_references(
+            crate::ReceivedBatch::referenced(
                 &decoded,
                 self.max_message_size,
                 &self.views,
                 |id, token| self.find_region(id, token).cloned(),
-                &mut received,
-            )
+            )?
         };
-        if result.is_err() {
-            received.clear();
-        }
-        self.received = received;
-        result?;
-        Ok(self.received.pop_front().expect("nonempty SHM batch"))
+        Ok(Received::Batch(batch))
     }
 
     /// Continue a decoded batch before polling the next carrier record.
     pub fn poll_received(&mut self) -> Option<Message> {
-        self.received.pop_front()
+        let batch = self.received.as_mut()?;
+        let message = batch.pop_front();
+        if batch.is_empty() {
+            self.received = None;
+        }
+        message
     }
 
     fn check_size(&self, message: &Message, length: usize) -> Result<()> {

@@ -981,6 +981,37 @@ mod tests {
     use super::*;
     const BUFFER_CAPACITY: usize = 2048;
 
+    #[test]
+    fn variable_slab_slices_keep_the_buffer_until_every_view_is_released() {
+        let pool = PayloadPool::new([(2048, 1)]).unwrap();
+        let sizes = [64, 256, 1024, 128, 512];
+        let mut buffer = pool.try_buffer(2048).unwrap();
+        let mut offset = 0;
+        for (index, size) in sizes.into_iter().enumerate() {
+            buffer.writable()[offset..offset + size].fill(index as u8);
+            offset += size;
+        }
+        buffer.set_len(offset).unwrap();
+        let mut bytes: bytes::Bytes = buffer.into_payload().into();
+        let messages: Vec<_> = sizes
+            .into_iter()
+            .map(|size| Message::from(bytes.split_to(size)))
+            .collect();
+        drop(bytes);
+        for (index, message) in messages.iter().enumerate() {
+            assert_eq!(
+                message.part_slice(0).unwrap(),
+                vec![index as u8; sizes[index]]
+            );
+        }
+        let held = messages[2].part_bytes(0).unwrap().slice(1..17);
+        std::thread::spawn(move || drop(messages)).join().unwrap();
+        assert_eq!(pool.available(), 0);
+        assert_eq!(held.as_ref(), &[2; 16]);
+        drop(held);
+        assert_eq!(pool.available(), 1);
+    }
+
     #[derive(Debug)]
     struct PendingStorage {
         bytes: Box<[u8]>,

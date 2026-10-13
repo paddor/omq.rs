@@ -1,6 +1,9 @@
 //! Verified single-stream throughput and request/reply latency.
 
-use super::{Config, DEADLINE, Error, PROBE, SIZES, connect, prepare_message};
+use super::{
+    BENCH_HWM, Config, DEADLINE, Error, PROBE, SIZES, connect, patterned_message, prepare_message,
+    send_slab,
+};
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::time::{Duration, Instant};
@@ -52,12 +55,7 @@ impl PointConfig {
     }
 
     fn pool(&self) -> Result<Option<PayloadPool>, Error> {
-        let classes = [(self.base.size, self.base.pool_slots())];
-        Ok(match self.base.implementation.as_str() {
-            "inproc" => Some(PayloadPool::new(classes)?),
-            "shm-pool" => Some(omq_tokio::shm_payload_pool(classes)?),
-            _ => None,
-        })
+        self.base.pool()
     }
 
     fn socket(&self, context: &Context, primary: bool) -> omq_tokio::blocking::Socket {
@@ -70,8 +68,8 @@ impl PointConfig {
         context.blocking_socket(
             kind,
             Options {
-                send_hwm: u32::try_from(self.base.hwm()).unwrap(),
-                recv_hwm: u32::try_from(self.base.hwm()).unwrap(),
+                send_hwm: BENCH_HWM,
+                recv_hwm: BENCH_HWM,
                 recv_batching: !self.latency,
                 recv_spin: Duration::from_micros(self.spin_us),
                 workload_profile: Some(if self.latency {
@@ -200,15 +198,16 @@ fn primary(config: &PointConfig, context: &Context) -> Result<(), Error> {
 }
 
 fn metadata(config: &PointConfig) -> serde_json::Value {
-    json!({
+    let mut row = json!({
         "implementation":config.base.implementation, "msg_size":config.base.size,
-        "readers":1, "send_hwm":config.base.hwm(), "recv_hwm":config.base.hwm(),
-        "pool_slots":if matches!(config.base.implementation.as_str(), "inproc" | "shm-pool") { config.base.pool_slots() } else { 0 },
+        "readers":1, "send_hwm":BENCH_HWM, "recv_hwm":BENCH_HWM,
         "shm_max_memory":if config.base.implementation.starts_with("shm") { Some(64 * 1024 * 1024) } else { None },
         "recv_spin_us":config.spin_us, "verified":true,
         "socket_pair":if config.latency { "client-server" } else { "scatter-gather" },
         "workload_profile":if config.latency { "latency" } else { "throughput" },
-    })
+    });
+    config.base.add_pool_metadata(&mut row, !config.latency);
+    row
 }
 
 fn measure_throughput(
@@ -217,14 +216,21 @@ fn measure_throughput(
     control: &mut UnixStream,
 ) -> Result<(), Error> {
     let pool = config.pool()?;
-    let mut bytes = vec![0xa5; config.base.size];
     for round in 0..=ROUNDS {
         let duration = Duration::from_secs(if round == 0 { 1 } else { 3 });
         let start = Instant::now();
         let mut count = 0_u64;
         while start.elapsed() < duration {
-            bytes[..8].copy_from_slice(&count.to_le_bytes());
-            socket.send_timeout(prepare_message(&bytes, pool.as_ref())?, DEADLINE)?;
+            if config.base.uses_slabs() {
+                count += send_slab(pool.as_ref().unwrap(), config.base.size, count, |message| {
+                    Ok(socket.send_timeout(message, DEADLINE)?)
+                })?;
+                continue;
+            }
+            socket.send_timeout(
+                patterned_message(config.base.size, count, pool.as_ref())?,
+                DEADLINE,
+            )?;
             count += 1;
         }
         let sent_elapsed = start.elapsed().as_secs_f64();

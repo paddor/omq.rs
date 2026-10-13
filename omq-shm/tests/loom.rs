@@ -12,6 +12,8 @@ mod coordination;
 #[path = "../src/memory.rs"]
 mod memory;
 
+pub use coordination::ReceiveCredits;
+
 use coordination::{
     BORROWED, COORDINATES, CarrierState, CreditSignal, DONE, GENERATION_STEP, LeaseCell, PENDING,
     STATE_BITS,
@@ -570,4 +572,73 @@ fn simultaneous_publication_borrow_and_close_never_pin_unread_storage() {
         assert!(lease.cell().completed(GENERATION_STEP));
         assert_eq!(lease.state.load(Ordering::Acquire) & STATE_BITS, DONE);
     });
+}
+
+#[test]
+fn receive_credit_reservations_cannot_exceed_logical_hwm() {
+    model(|| {
+        let credits = Arc::new(coordination::ReceiveCredits::new(4));
+        let first = {
+            let credits = credits.clone();
+            thread::spawn(move || credits.reserve(3))
+        };
+        let second = credits.reserve(3);
+        assert_eq!(first.join().unwrap() + second, 4);
+        assert!(credits.full());
+        assert!(credits.release(4));
+        assert!(!credits.full());
+    });
+}
+
+#[test]
+fn receive_credit_release_racing_reservation_preserves_capacity_and_wake() {
+    model(|| {
+        let credits = Arc::new(coordination::ReceiveCredits::new(4));
+        assert_eq!(credits.reserve(usize::MAX), 4);
+        let release = {
+            let credits = credits.clone();
+            thread::spawn(move || credits.release(2))
+        };
+        let reserved = credits.reserve(3);
+        assert!(reserved == 0 || reserved == 2);
+        assert!(release.join().unwrap());
+        assert_eq!(credits.reserve(usize::MAX), 2 - reserved);
+        assert!(credits.full());
+        assert!(credits.release(4));
+    });
+}
+
+#[test]
+fn receive_credit_partial_returns_wake_only_on_full_to_writable() {
+    model(|| {
+        let credits = Arc::new(coordination::ReceiveCredits::new(2));
+        assert_eq!(credits.reserve(256), 2);
+        let first = {
+            let credits = credits.clone();
+            thread::spawn(move || credits.release(1))
+        };
+        let second = credits.release(1);
+        assert_ne!(first.join().unwrap(), second);
+        assert_eq!(credits.reserve(usize::MAX), 2);
+    });
+}
+
+#[test]
+fn receive_credit_zero_and_maximum_capacities_do_not_overflow_or_invent_credit() {
+    for capacity in [0, 1, usize::MAX] {
+        model(move || {
+            let credits = Arc::new(ReceiveCredits::new(capacity));
+            assert_eq!(credits.reserve(0), 0);
+            let first = {
+                let credits = credits.clone();
+                thread::spawn(move || credits.reserve(usize::MAX))
+            };
+            let second = credits.reserve(usize::MAX);
+            assert_eq!(first.join().unwrap() + second, capacity);
+            assert!(credits.full());
+            assert!(!credits.release(0));
+            assert_eq!(credits.release(capacity), capacity != 0);
+            assert_eq!(credits.reserve(usize::MAX), capacity);
+        });
+    }
 }

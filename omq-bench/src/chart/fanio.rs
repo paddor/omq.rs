@@ -74,7 +74,6 @@ fn generate_fanio(kind: &str, dir_name: &str, title_fn: &dyn Fn(u64) -> String) 
         snd_label,
         rcv_label,
         Some(&fair_refs),
-        super::common::GbsScale::Linear,
         super::common::detect_hardware().as_deref(),
     )
     .expect("draw fanio chart");

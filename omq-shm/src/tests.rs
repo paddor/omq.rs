@@ -6,8 +6,8 @@ use crate::mapping::{HEADER, read_u64};
 use crate::pool::LOOKUP;
 use crate::wire::REFERENCE_SIZE;
 use crate::{
-    BATCH_MAX_MESSAGES, COPIED_BATCH_MAX_BODY, is_pooled, payload_pool, prepare_batch,
-    prepare_reference_batch,
+    BATCH_MAX_MESSAGES, COPIED_BATCH_MAX_BODY, is_pooled, payload_pool, pooled_prefix,
+    prepare_batch, prepare_reference_batch,
 };
 
 fn pair(capacity: usize) -> (Connection, Connection) {
@@ -411,6 +411,58 @@ fn tiny_copies_and_logical_size_limits() {
 }
 
 #[test]
+fn bulk_slot_lookup_handles_mixed_regions_sizes_and_missing_bodies() {
+    let pool = payload_pool([(128, 8), (256, 1)]).unwrap();
+    let other = payload_pool([(128, 1)]).unwrap();
+    let messages: Vec<_> = (0..8)
+        .map(|value| pool.message(128, |body| body.fill(value)).unwrap())
+        .collect();
+    let bodies = std::array::from_fn(|index| messages[index].part_slice(0));
+    let slots = crate::pool::find_slots(bodies);
+    for (body, slot) in bodies.into_iter().zip(slots) {
+        let expected = find_slot(body.unwrap()).unwrap();
+        assert!(Arc::ptr_eq(&expected, &slot.unwrap()));
+    }
+    let large = pool.message(256, |_| {}).unwrap();
+    let foreign = other.message(128, |_| {}).unwrap();
+    let slot = find_slot(bodies[0].unwrap()).unwrap();
+    let spanning = slot.mapping.bytes(slot.offset, slot.size + 1);
+    let mixed = [
+        bodies[0],
+        large.part_slice(0),
+        foreign.part_slice(0),
+        Some(&bodies[3].unwrap()[16..80]),
+        Some(spanning),
+        Some(&[0; 128]),
+        None,
+        bodies[7],
+    ];
+    let slots = crate::pool::find_slots(mixed);
+    for (body, actual) in mixed.into_iter().zip(slots) {
+        let expected = body.and_then(find_slot);
+        assert_eq!(actual.is_some(), expected.is_some());
+        if let (Some(actual), Some(expected)) = (actual, expected) {
+            assert!(Arc::ptr_eq(&actual, &expected));
+        }
+    }
+    // The first body need not be pooled for subsequent entries to resolve.
+    let mut mixed = mixed;
+    mixed[0] = None;
+    assert!(crate::pool::find_slots(mixed)[7].is_some());
+
+    let mut selected: Vec<_> = messages.iter().collect();
+    selected.push(&large);
+    selected.push(&foreign);
+    assert_eq!(pooled_prefix(&selected), 10);
+    let heap = Message::from_slice(&[0; 128]);
+    selected.insert(7, &heap);
+    assert_eq!(pooled_prefix(&selected), 7);
+    selected.insert(0, &heap);
+    assert_eq!(pooled_prefix(&selected), 0);
+    assert_eq!(pooled_prefix(&[]), 0);
+}
+
+#[test]
 fn region_lookup_handles_slots_slices_and_pool_destruction() {
     let pool = payload_pool([(128, 8), (1024, 4), (65536, 2)]).unwrap();
     let messages: Vec<_> = [128; 8]
@@ -490,6 +542,71 @@ fn copied_body_framing_preserves_envelopes_and_uses_no_lease() {
             .unwrap()
     );
     assert_eq!(frames.arena_bytes(), b"\x00\x01\x00");
+}
+
+#[test]
+fn queued_copy_policy_releases_small_sources_but_retains_large_references() {
+    for size in [
+        crate::POOLED_BATCH_COPY_THRESHOLD,
+        crate::POOLED_BATCH_COPY_THRESHOLD + 1,
+    ] {
+        let sources = payload_pool([(size, 8)]).unwrap();
+        let messages: Vec<_> = (0..8)
+            .map(|index| {
+                Message::with_prefix(
+                    bytes::Bytes::from_static(b"group"),
+                    sources.message(size, |bytes| bytes.fill(index)).unwrap(),
+                )
+                .with_routing_id(7)
+            })
+            .collect();
+        let copied = size <= crate::POOLED_BATCH_COPY_THRESHOLD;
+        let kind = BatchKind::for_message(&messages[0], crate::POOLED_BATCH_COPY_THRESHOLD);
+        let (mut sender, mut receiver) = pair(messages.len());
+        let packed = sender
+            .prepare_batch(&messages.iter().collect::<Vec<_>>(), kind)
+            .unwrap()
+            .unwrap();
+        let wire = sender
+            .encode_record(&packed, messages.len(), kind.record())
+            .unwrap()
+            .unwrap();
+        transfer(&mut sender, &mut receiver);
+        let mut decoded = vec![receiver.decode_received(wire).unwrap()];
+        decoded.extend(std::iter::from_fn(|| receiver.poll_received()));
+        assert_eq!(decoded, messages);
+        let held = decoded[0].part_bytes(1).unwrap().slice(1..17);
+        drop(messages);
+        drop(packed);
+        drop(decoded);
+        assert_eq!(sources.available(), if copied { 8 } else { 0 });
+        drop(sender);
+        drop(receiver);
+        assert_eq!(held.as_ref(), &[0; 16]);
+        drop(held);
+        assert_eq!(sources.available(), 8);
+    }
+}
+
+#[test]
+fn inline_grouped_messages_never_check_out_heap_or_mapped_pool_slots() {
+    for pool in [
+        omq_proto::PayloadPool::new([(4096, 2)]).unwrap(),
+        payload_pool([(4096, 2)]).unwrap(),
+    ] {
+        let message = Message::with_prefix(
+            bytes::Bytes::from_static(b"group"),
+            pool.message(16, |body| body.fill(7)).unwrap(),
+        );
+        assert!(!is_pooled(&message));
+        assert_eq!(pool.available(), pool.capacity());
+        let (mut sender, mut receiver) = pair(1);
+        let wire = encoded(&mut sender, &mut receiver, &message);
+        assert_eq!(body(&wire).unwrap()[0], COPIED);
+        assert_eq!(receiver.decode(wire).unwrap(), message);
+        assert!(sender.active.is_empty());
+        assert_eq!(sender.send_pool.memory_used(), 0);
+    }
 }
 
 #[test]
@@ -657,6 +774,12 @@ fn copied_batches_share_storage_and_keep_every_recipient_view_alive() {
     }
     assert_eq!(first, messages);
     assert_eq!(second, messages);
+    assert!(
+        first
+            .iter()
+            .all(|message| message.last_payload().unwrap().as_chunk().is_none()),
+        "grouped bodies must retain compact shared-owner envelopes"
+    );
     let region = receiver1
         .find_region(slot.mapping.id, slot.mapping.token)
         .unwrap();
@@ -697,6 +820,108 @@ fn copied_batches_bound_body_and_total_sizes_without_consuming_credit() {
             .is_none()
     );
     assert_eq!(pool.available(), 1);
+}
+
+#[test]
+fn copied_batch_boundaries_use_inline_bodies_or_shared_byte_slices() {
+    let sizes = [0, 16, 55, 56, 62, 63, 64, 256];
+    let pool = payload_pool([(4096, 1)]).unwrap();
+    let messages: Vec<_> = sizes
+        .into_iter()
+        .enumerate()
+        .map(|(index, size)| Message::from_slice(&vec![index as u8; size]))
+        .collect();
+    let batch = prepare_batch(&pool, &messages.iter().collect::<Vec<_>>())
+        .unwrap()
+        .unwrap();
+    let (mut sender, mut receiver) = pair(messages.len());
+    let wire = sender
+        .encode_record(&batch, messages.len(), 2)
+        .unwrap()
+        .unwrap();
+    transfer(&mut sender, &mut receiver);
+    let mut decoded = vec![receiver.decode_received(wire).unwrap()];
+    decoded.extend(std::iter::from_fn(|| receiver.poll_received()));
+    assert_eq!(decoded, messages);
+    for (message, size) in decoded.iter().zip(sizes) {
+        let payload = message.last_payload().unwrap();
+        assert_eq!(payload.as_chunk().is_some(), size > COPY_THRESHOLD);
+        assert_eq!(message.routing_id(), None);
+    }
+    let retained = decoded.last().unwrap().part_bytes(0).unwrap().slice(3..19);
+    drop(decoded);
+    drop(batch);
+    drop(sender);
+    drop(receiver);
+    assert_eq!(pool.available(), 0);
+    assert_eq!(retained.as_ref(), &[7; 16]);
+    drop(retained);
+    assert_eq!(pool.available(), 1);
+}
+
+#[test]
+fn reference_batch_runs_preserve_order_and_leave_gaps_unborrowed() {
+    // Full neighboring slots coalesce. Padding, gaps, reversed and repeated
+    // coordinates, and region changes keep their independent view owners.
+    for (size, order, expected) in [
+        (128, vec![0, 1, 2, 3], vec![true; 4]),
+        (64, vec![0, 1, 2, 3], vec![false; 4]),
+        (128, vec![0, 2], vec![false; 2]),
+        (128, vec![3, 2, 1, 0], vec![false; 4]),
+        (128, vec![0, 0, 1], vec![false, true, true]),
+        (128, vec![0, 1, 4, 5, 2, 3], vec![true; 6]),
+    ] {
+        let pools = [
+            payload_pool([(128, 4)]).unwrap(),
+            payload_pool([(128, 2)]).unwrap(),
+        ];
+        let mut messages: Vec<_> = (0..6)
+            .map(|index| {
+                pools[usize::from(index >= 4)]
+                    .message(size, |body| body.fill(index))
+                    .unwrap()
+            })
+            .collect();
+        let metadata = payload_pool([(1024, 1)]).unwrap();
+        let selected: Vec<_> = order.iter().map(|&index| &messages[index]).collect();
+        let batch = prepare_reference_batch(&metadata, &selected)
+            .unwrap()
+            .unwrap();
+        let (mut sender, mut receiver) = pair(selected.len());
+        let wire = sender
+            .encode_record(&batch, selected.len(), 3)
+            .unwrap()
+            .unwrap();
+        transfer(&mut sender, &mut receiver);
+        let mut decoded = vec![receiver.decode_received(wire).unwrap()];
+        decoded.extend(std::iter::from_fn(|| receiver.poll_received()));
+        assert_eq!(decoded.iter().collect::<Vec<_>>(), selected);
+        for (message, shared) in decoded.iter().zip(expected) {
+            assert_eq!(message.last_payload().unwrap().as_chunk().is_some(), shared);
+        }
+        drop(selected);
+        if order == [0, 2] {
+            drop(messages.remove(1));
+            let reused = pools[0]
+                .try_message(size, |body| body.fill(9))
+                .unwrap()
+                .unwrap();
+            assert_eq!(reused.part_slice(0).unwrap(), vec![9; size]);
+            assert_eq!(decoded[0].part_slice(0).unwrap(), vec![0; size]);
+            assert_eq!(decoded[1].part_slice(0).unwrap(), vec![2; size]);
+        }
+        let retained = decoded[0].part_bytes(0).unwrap().slice(1..17);
+        drop(messages);
+        drop(batch);
+        drop(sender);
+        drop(receiver);
+        drop(decoded);
+        assert_eq!(retained.as_ref(), vec![order[0] as u8; 16]);
+        assert!(pools[0].available() < 4);
+        drop(retained);
+        assert_eq!(pools[0].available(), 4);
+        assert_eq!(pools[1].available(), 2);
+    }
 }
 
 #[test]
@@ -756,6 +981,10 @@ fn reference_batches_keep_source_slots_until_the_final_recipient_view() {
             second.push(message);
         }
         for (index, message) in first.iter().enumerate() {
+            assert!(
+                message.last_payload().unwrap().as_chunk().is_none(),
+                "grouped bodies must retain compact shared-owner envelopes"
+            );
             assert_eq!(message.part_slice(1).unwrap(), vec![index as u8; size]);
             assert_eq!(message.part_slice(0), Some(b"group".as_slice()));
             let reference = batch::references(batch.part_slice(1).unwrap())
@@ -943,7 +1172,7 @@ fn reference_batch_rejections_complete_the_shared_lease() {
 }
 
 #[test]
-fn rejected_copied_batch_discards_partial_messages_and_keeps_receive_storage() {
+fn rejected_copied_batch_publishes_neither_views_nor_receive_cursor() {
     let metadata = payload_pool([(64, 2)]).unwrap();
     let messages = [
         Message::with_group("group", "first"),
@@ -951,7 +1180,7 @@ fn rejected_copied_batch_discards_partial_messages_and_keeps_receive_storage() {
     ];
     let references: Vec<_> = messages.iter().collect();
     let (mut sender, mut receiver) = pair(2);
-    let capacity = receiver.received.capacity();
+    assert!(receiver.received.is_none());
     let batch = prepare_batch(&metadata, &references).unwrap().unwrap();
     let forged = Message::with_prefix(
         b"group".as_slice().into(),
@@ -968,7 +1197,7 @@ fn rejected_copied_batch_discards_partial_messages_and_keeps_receive_storage() {
     transfer(&mut sender, &mut receiver);
     assert!(receiver.decode_received(wire).is_err());
     assert!(receiver.poll_received().is_none());
-    assert_eq!(receiver.received.capacity(), capacity);
+    assert!(receiver.received.is_none());
     assert_eq!(metadata.available(), 2);
 
     let batch = prepare_batch(&metadata, &references).unwrap().unwrap();
@@ -977,7 +1206,7 @@ fn rejected_copied_batch_discards_partial_messages_and_keeps_receive_storage() {
     assert_eq!(receiver.decode_received(wire).unwrap(), messages[0]);
     assert_eq!(receiver.poll_received().unwrap(), messages[1]);
     assert!(receiver.poll_received().is_none());
-    assert_eq!(receiver.received.capacity(), capacity);
+    assert!(receiver.received.is_none());
 }
 
 #[test]
@@ -1030,7 +1259,7 @@ fn batch_size_tables_use_u64_and_reject_truncated_or_overflowing_lengths() {
                 &truncated,
                 None,
                 &crate::views::Views::new(2),
-                &mut std::collections::VecDeque::new(),
+                &mut std::collections::VecDeque::new()
             )
             .is_err()
         );
@@ -1381,4 +1610,191 @@ fn descriptor_transfer_works_when_procfs_fd_access_is_denied() {
     assert!(child.wait().unwrap().success());
     drop(connection);
     assert_eq!(held.part_slice(0).unwrap(), &[7; 128]);
+}
+
+#[test]
+fn slab_slices_keep_the_whole_slot_until_every_recipient_releases() {
+    for size in [1024, 2048, 4096, 16384] {
+        for grouped in [false, true] {
+            let pool = payload_pool([(size, 1)]).unwrap();
+            let mut buffer = pool.try_buffer(size).unwrap();
+            for (seq, body) in buffer
+                .writable()
+                .as_chunks_mut::<64>()
+                .0
+                .iter_mut()
+                .enumerate()
+            {
+                body.fill(seq as u8);
+            }
+            buffer.set_len(size).unwrap();
+            let slab: bytes::Bytes = buffer.into_payload().into();
+            if size.is_multiple_of(4096) {
+                assert!((slab.as_ptr() as usize).is_multiple_of(4096));
+            }
+            let messages: Vec<_> = (0..size)
+                .step_by(64)
+                .map(|offset| {
+                    let message = Message::from(slab.slice(offset..offset + 64));
+                    if grouped {
+                        Message::with_prefix(bytes::Bytes::from_static(b"slab"), message)
+                    } else {
+                        message
+                    }
+                })
+                .collect();
+            let metadata = payload_pool([(8192, 1)]).unwrap();
+            let batch = prepare_reference_batch(&metadata, &messages.iter().collect::<Vec<_>>())
+                .unwrap()
+                .unwrap();
+            let (mut first_sender, mut first_reader) = pair(messages.len());
+            let (mut second_sender, mut second_reader) = pair(messages.len());
+            let first_wire = first_sender
+                .encode_record(&batch, messages.len(), 3)
+                .unwrap()
+                .unwrap();
+            let second_wire = second_sender
+                .encode_record(&batch, messages.len(), 3)
+                .unwrap()
+                .unwrap();
+            transfer(&mut first_sender, &mut first_reader);
+            transfer(&mut second_sender, &mut second_reader);
+            let mut first = vec![first_reader.decode_received(first_wire).unwrap()];
+            first.extend(std::iter::from_fn(|| first_reader.poll_received()));
+            let mut second = vec![second_reader.decode_received(second_wire).unwrap()];
+            second.extend(std::iter::from_fn(|| second_reader.poll_received()));
+            assert_eq!(first, messages);
+            assert_eq!(second, messages);
+            let held = second[size / 128]
+                .part_bytes(usize::from(grouped))
+                .unwrap()
+                .slice(1..17);
+            drop(messages);
+            drop(slab);
+            drop(batch);
+            drop(first);
+            assert_eq!(pool.available(), 0);
+            drop(second);
+            assert_eq!(pool.available(), 0);
+            drop(first_sender);
+            drop(second_sender);
+            drop(first_reader);
+            drop(second_reader);
+            assert_eq!(held.as_ref(), vec![(size / 128) as u8; 16]);
+            assert_eq!(pool.available(), 0);
+            drop(held);
+            assert_eq!(pool.available(), 1);
+        }
+    }
+}
+
+#[test]
+fn inline_batch_releases_metadata_before_split_cursors_are_received() {
+    let metadata = payload_pool([(1024, 1)]).unwrap();
+    let messages: Vec<_> = (0..8_u8)
+        .map(|seq| Message::from_slice(&[seq; 16]))
+        .collect();
+    let prepared = prepare_batch(&metadata, &messages.iter().collect::<Vec<_>>())
+        .unwrap()
+        .unwrap();
+    let (mut sender, mut receiver) = pair(8);
+    let wire = sender.encode_record(&prepared, 8, 2).unwrap().unwrap();
+    drop(prepared);
+    transfer(&mut sender, &mut receiver);
+    let Received::Batch(mut batch) = receiver.decode_delivery(wire).unwrap() else {
+        panic!("expected inline batch");
+    };
+    assert_eq!(metadata.available(), 1);
+    let mut prefix = batch.take_prefix(3);
+    drop(sender);
+    drop(receiver);
+    let mut output = Vec::new();
+    prefix.set_routing_id(19);
+    assert_eq!(prefix.drain_into(&mut output, 3, |_| false), 1);
+    assert_eq!(prefix.len(), 2);
+    assert_eq!(prefix.drain_into(&mut output, 8, |_| true), 2);
+    for (seq, message) in output.iter().enumerate() {
+        assert_eq!(message.routing_id(), Some(19));
+        assert_eq!(body(message).unwrap(), &[seq as u8; 16]);
+    }
+    for seq in 3..8 {
+        assert_eq!(body(&batch.pop_front().unwrap()).unwrap(), &[seq; 16]);
+    }
+    assert!(batch.pop_front().is_none());
+}
+
+#[test]
+fn lazy_batches_split_without_views_and_retain_storage_after_connection_close() {
+    for kind in [BatchKind::Copied, BatchKind::Referenced] {
+        for grouped in [false, true] {
+            let pool = payload_pool([(128, 8)]).unwrap();
+            let messages: Vec<_> = (0..8_u8)
+                .map(|seq| {
+                    let message = pool.message(128, |body| body.fill(seq)).unwrap();
+                    if grouped {
+                        Message::with_prefix(bytes::Bytes::from_static(b"lazy"), message)
+                    } else {
+                        message
+                    }
+                })
+                .collect();
+            let (mut sender, mut receiver) = pair(8);
+            let prepared = sender
+                .prepare_batch(&messages.iter().collect::<Vec<_>>(), kind)
+                .unwrap()
+                .unwrap();
+            let wire = sender
+                .encode_record(&prepared, 8, kind.record())
+                .unwrap()
+                .unwrap();
+            transfer(&mut sender, &mut receiver);
+            let Received::Batch(mut batch) = receiver.decode_delivery(wire).unwrap() else {
+                panic!("expected batch")
+            };
+            drop(prepared);
+            drop(messages);
+            drop(sender);
+            drop(receiver);
+            assert_eq!(batch.len(), 8);
+            assert_eq!(batch.parts(), if grouped { 2 } else { 1 });
+            let empty = batch.take_prefix(0);
+            assert!(empty.is_empty());
+            drop(empty);
+            let mut first = batch.take_prefix(3);
+            let mut middle = batch.take_prefix(2);
+            assert_eq!(batch.len(), 3);
+            let mut retained = Vec::new();
+            for (cursor, start, end) in
+                [(&mut middle, 3, 5), (&mut batch, 5, 8), (&mut first, 0, 3)]
+            {
+                cursor.set_routing_id(19);
+                for seq in start..end {
+                    let message = cursor.pop_front().unwrap();
+                    assert_eq!(message.routing_id(), Some(19));
+                    assert_eq!(body(&message).unwrap(), &[seq; 128]);
+                    if grouped {
+                        assert_eq!(message.part_slice(0), Some(b"lazy".as_slice()));
+                    }
+                    retained.push(message);
+                }
+                assert!(cursor.pop_front().is_none());
+            }
+            let last = retained
+                .pop()
+                .unwrap()
+                .part_bytes(usize::from(grouped))
+                .unwrap()
+                .slice(17..97);
+            drop(retained);
+            drop(first);
+            drop(middle);
+            drop(batch);
+            if matches!(kind, BatchKind::Referenced) {
+                assert_eq!(pool.available(), 0);
+            }
+            assert_eq!(last.as_ref(), &[2; 80]);
+            drop(last);
+            assert_eq!(pool.available(), 8);
+        }
+    }
 }

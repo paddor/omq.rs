@@ -117,7 +117,7 @@ const SOURCE_POLL_INTERVAL: usize = 64;
 
 #[derive(Debug)]
 pub(super) struct ReceiveState {
-    pub(super) receiver: mpsc::Receiver<Message>,
+    pub(super) receiver: super::queue::Queue,
     sources: FxHashMap<mpsc::LaneId, Source>,
     paused: Vec<Paused>,
     waiters: usize,
@@ -128,7 +128,7 @@ pub(super) struct ReceiveState {
 }
 
 impl ReceiveState {
-    pub(super) fn new(receiver: mpsc::Receiver<Message>) -> Self {
+    pub(super) fn new(receiver: super::queue::Queue) -> Self {
         Self {
             receiver,
             sources: FxHashMap::default(),
@@ -306,11 +306,11 @@ impl Fanin {
             self.signal.begin_drain();
         }
         state.poll_sources(false);
-        let mut result = state.receiver.with_lane_ids().try_recv_fair();
+        let mut result = state.receiver.try_recv_fair_with_lane();
         if result.is_err() && state.scan_lanes {
             self.signal.begin_drain();
             state.poll_sources(true);
-            result = state.receiver.with_lane_ids().try_recv_fair();
+            result = state.receiver.try_recv_fair_with_lane();
         }
         let Ok((lane, message)) = result else {
             state.receiver.release_consumed();

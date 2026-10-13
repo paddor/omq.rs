@@ -683,8 +683,15 @@ impl LaneWorker {
             .min()?
             .min(omq_shm::BATCH_MAX_MESSAGES);
         let LaneData::Dispatch(first) = &batch[0];
-        let small = Self::shm_copied_body(&first.msg);
-        let referenced = !small && omq_shm::is_pooled(&first.msg);
+        let kind = omq_shm::BatchKind::for_message(
+            &first.msg,
+            omq_shm::FANOUT_POOLED_BATCH_COPY_THRESHOLD,
+        );
+        let referenced = matches!(kind, omq_shm::BatchKind::Referenced);
+        let copy_limit = first.msg.part_slice(1)?.len().clamp(
+            omq_shm::FANOUT_POOLED_BATCH_COPY_THRESHOLD,
+            omq_shm::COPIED_BATCH_MAX_BODY,
+        );
         if !referenced && first.msg.part_slice(1)?.len() > omq_shm::COPIED_BATCH_MAX_BODY {
             return None;
         }
@@ -695,7 +702,7 @@ impl LaneWorker {
             let LaneData::Dispatch(dispatch) = data;
             if dispatch.msg.len() != 2
                 || dispatch.msg.part_slice(0) != first.msg.part_slice(0)
-                || (referenced && Self::shm_copied_body(&dispatch.msg) != small)
+                || (referenced && Self::shm_copied_body(&dispatch.msg))
             {
                 break;
             }
@@ -703,7 +710,7 @@ impl LaneWorker {
             let bytes = if referenced {
                 omq_shm::REFERENCE_ENTRY_BYTES
             } else {
-                if body_length > omq_shm::COPIED_BATCH_MAX_BODY {
+                if body_length > copy_limit {
                     break;
                 }
                 std::mem::size_of::<u64>() + body_length
@@ -717,14 +724,12 @@ impl LaneWorker {
                 break;
             }
         }
+        if referenced {
+            messages.truncate(omq_shm::pooled_prefix(&messages));
+        }
         if messages.len() < MIN_BATCH_MESSAGES {
             return None;
         }
-        let kind = if referenced {
-            omq_shm::BatchKind::Referenced
-        } else {
-            omq_shm::BatchKind::Copied
-        };
         let message = self.shm_pool.prepare_batch(&messages, kind).ok()??;
         Some((message, messages.len(), referenced))
     }

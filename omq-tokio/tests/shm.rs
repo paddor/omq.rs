@@ -151,7 +151,10 @@ async fn latency_polling_returns_to_signaled_reads_after_idle() {
 
 #[tokio::test]
 async fn dish_bulk_receive_keeps_source_order_and_releases_shared_views() {
-    for batching in [false, true] {
+    for (batching, size) in [false, true]
+        .into_iter()
+        .flat_map(|batching| [256, 8192].into_iter().map(move |size| (batching, size)))
+    {
         let context = Context::new();
         let options = Options {
             xpub_nodrop: true,
@@ -160,7 +163,7 @@ async fn dish_bulk_receive_keeps_source_order_and_releases_shared_views() {
         };
         let receiver = context.socket(SocketType::Dish, options.clone());
         receiver.join("group").await.unwrap();
-        let pool = shm_payload_pool([(256, 32)]).unwrap();
+        let pool = shm_payload_pool([(size, 32)]).unwrap();
         let mut senders = Vec::new();
         for _ in 0..2 {
             let sender = context.socket(SocketType::Radio, options.clone());
@@ -187,7 +190,7 @@ async fn dish_bulk_receive_keeps_source_order_and_releases_shared_views() {
         for (source, sender) in senders.iter().enumerate() {
             for sequence in 0..16_u8 {
                 let message = pool
-                    .message(256, |bytes| {
+                    .message(size, |bytes| {
                         bytes.fill(0xa5);
                         bytes[0] = u8::try_from(source).unwrap();
                         bytes[1] = sequence;
@@ -210,14 +213,16 @@ async fn dish_bulk_receive_keeps_source_order_and_releases_shared_views() {
         for message in &held {
             assert_eq!(message.part_slice(0), Some(b"group".as_slice()));
             let body = message.part_slice(1).unwrap();
-            assert_eq!(body.len(), 256);
+            assert_eq!(body.len(), size);
             let source = usize::from(body[0]);
             assert_eq!(body[1], next[source]);
-            assert_eq!(body[255], 0xa5);
+            assert_eq!(body[size - 1], 0xa5);
             next[source] += 1;
         }
         assert_eq!(next, [16; 2]);
-        assert_eq!(pool.available(), 0);
+        if size > omq_shm::FANOUT_POOLED_BATCH_COPY_THRESHOLD {
+            assert_eq!(pool.available(), 0);
+        }
         drop(held);
         tokio::time::timeout(DEADLINE, async {
             while pool.available() != 32 {
@@ -672,6 +677,7 @@ async fn released_leases_resume_staged_messages_without_new_io() {
 
 #[tokio::test]
 async fn many_pool_regions_preserve_order_and_retained_views() {
+    const SIZE: usize = 8192;
     let context = Context::with_config(omq_tokio::ContextConfig { io_threads: 2 });
     let options = options().send_hwm(256).recv_hwm(256);
     let receiver = context.socket(SocketType::Channel, options.clone());
@@ -679,12 +685,12 @@ async fn many_pool_regions_preserve_order_and_retained_views() {
     let sender = context.socket(SocketType::Channel, options);
     sender.connect(address).await.unwrap();
     let pools: Vec<_> = (0..128)
-        .map(|_| shm_payload_pool([(128, 1)]).unwrap())
+        .map(|_| shm_payload_pool([(SIZE, 1)]).unwrap())
         .collect();
     let messages: Vec<_> = pools
         .iter()
         .enumerate()
-        .map(|(index, pool)| pool.message(128, |bytes| bytes.fill(index as u8)).unwrap())
+        .map(|(index, pool)| pool.message(SIZE, |bytes| bytes.fill(index as u8)).unwrap())
         .collect();
     for message in &messages {
         sender.send(message.clone()).await.unwrap();
@@ -692,12 +698,12 @@ async fn many_pool_regions_preserve_order_and_retained_views() {
     let mut held = Vec::new();
     for index in 0..128 {
         let message = receive(&receiver).await;
-        assert_eq!(message.part_slice(0).unwrap(), &[index as u8; 128]);
+        assert_eq!(message.part_slice(0).unwrap(), &[index as u8; SIZE]);
         held.push(message);
     }
     sender.send(messages[0].clone()).await.unwrap();
     let again = receive(&receiver).await;
-    assert_eq!(again.part_slice(0).unwrap(), &[0; 128]);
+    assert_eq!(again.part_slice(0).unwrap(), &[0; SIZE]);
     let view = held[0].part_bytes(0).unwrap();
     drop(messages);
     drop(held);
@@ -706,10 +712,10 @@ async fn many_pool_regions_preserve_order_and_retained_views() {
     receiver.close().await.unwrap();
     drop(context);
     assert_eq!(pools[0].available(), 0);
-    assert!(pools[1..].iter().all(|pool| pool.available() == 1));
-    assert_eq!(view.as_ref(), &[0; 128]);
+    assert_eq!(view.as_ref(), &[0; SIZE]);
+    // A retained view also pins other source regions in its shared batch.
     drop(view);
-    assert_eq!(pools[0].available(), 1);
+    assert!(pools.iter().all(|pool| pool.available() == 1));
 }
 
 #[tokio::test]

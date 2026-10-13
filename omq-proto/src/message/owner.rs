@@ -28,6 +28,8 @@ pub trait PayloadOwner: AsRef<[u8]> + Send + Sync + 'static {
     }
 }
 
+impl PayloadOwner for bytes::Bytes {}
+
 #[derive(Clone)]
 pub(crate) struct SharedOwner {
     owner: Option<Arc<dyn PayloadOwner>>,

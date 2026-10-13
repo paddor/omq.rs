@@ -2097,6 +2097,18 @@ fn drain_decoded_messages(
     if delivery.blocked() {
         return Ok(DriverStep::Continue);
     }
+    #[cfg(target_os = "linux")]
+    if decoder.is_none()
+        && rate_connection.is_none()
+        && rate_ip.is_none()
+        && let Some(shm) = shm
+        && let Some(sink) = delivery.sink.as_mut().and_then(RecvSink::batch_sink)
+    {
+        if !sink.enable_batches() {
+            return Ok(DriverStep::Close);
+        }
+        return drain_shm_batches(connection, shm, receive_profile, delivery);
+    }
     let recv_batch_start = Instant::now();
     let mut recv_budget = None;
     let mut recv_batch_time = None;
@@ -2104,10 +2116,12 @@ fn drain_decoded_messages(
         && matches!(receive_profile, ReceiveProfile::Throughput)
         && delivery.sink.as_ref().is_some_and(RecvSink::is_yring);
     let mut pending_yring_flush = false;
-    while let Some(m) = poll_received_message(
+    #[cfg(target_os = "linux")]
+    let mut shm_guard = shm.map(|state| state.lock().expect("SHM connection"));
+    while let Some(m) = poll_received_locked(
         connection,
         #[cfg(target_os = "linux")]
-        shm,
+        shm_guard.as_deref_mut(),
     )? {
         let m = match decoder.as_mut() {
             Some(dec) => match dec.decode_with_payload_pool(m, decoded_payload_pool)? {
@@ -2126,8 +2140,9 @@ fn drain_decoded_messages(
         }
         let msg_bytes = m.byte_len();
         #[cfg(target_os = "linux")]
-        let msg_bytes = if shm.is_some() && m.has_external_body_owner() {
-            omq_shm::REFERENCE_ENTRY_BYTES
+        let msg_bytes = if shm.is_some() && decoder.is_none() {
+            // SHM delivery moves message headers after carrier input is budgeted.
+            std::mem::size_of::<Message>()
         } else {
             msg_bytes
         };
@@ -2157,14 +2172,73 @@ fn drain_decoded_messages(
     Ok(DriverStep::Continue)
 }
 
-#[cfg_attr(not(target_os = "linux"), expect(clippy::unnecessary_wraps))]
-fn poll_received_message(
+#[cfg(target_os = "linux")]
+fn drain_shm_batches(
     connection: &mut Connection,
-    #[cfg(target_os = "linux")] shm: Option<&crate::transport::shm::ShmState>,
+    shm: &crate::transport::shm::ShmState,
+    profile: ReceiveProfile,
+    mut delivery: MessageDelivery<'_>,
+) -> Result<DriverStep> {
+    let started = Instant::now();
+    let header_bytes = std::mem::size_of::<Message>();
+    let mut budget = profile.budget(header_bytes);
+    let deadline = profile.time(header_bytes);
+    let mut state = shm.lock().expect("SHM connection");
+    let mut pending_flush = false;
+    let defer = matches!(profile, ReceiveProfile::Throughput);
+    loop {
+        let received = if let Some(message) = state.poll_received() {
+            omq_shm::Received::Message(message)
+        } else if let Some(record) = connection.poll_message() {
+            state.decode_delivery(record)?
+        } else {
+            delivery.flush(&mut pending_flush);
+            return Ok(DriverStep::Continue);
+        };
+        let count = match received {
+            omq_shm::Received::Message(message) => {
+                if !delivery.send(message, defer, &mut pending_flush) {
+                    delivery.flush(&mut pending_flush);
+                    return Ok(DriverStep::Close);
+                }
+                1
+            }
+            omq_shm::Received::Batch(batch) => {
+                let count = batch.len();
+                if delivery
+                    .expected_parts
+                    .is_none_or(|parts| parts == batch.parts())
+                    && !delivery
+                        .sink
+                        .as_mut()
+                        .expect("batch sink")
+                        .push_batch(batch)
+                {
+                    delivery.flush(&mut pending_flush);
+                    return Ok(DriverStep::Close);
+                }
+                count
+            }
+        };
+        let remaining = budget.account_many(count, count * header_bytes);
+        if delivery.blocked() {
+            delivery.flush(&mut pending_flush);
+            return Ok(DriverStep::Continue);
+        }
+        if !remaining || deadline.is_some_and(|time| started.elapsed() >= time) {
+            delivery.flush(&mut pending_flush);
+            return Ok(DriverStep::Yield);
+        }
+    }
+}
+
+#[cfg_attr(not(target_os = "linux"), expect(clippy::unnecessary_wraps))]
+fn poll_received_locked(
+    connection: &mut Connection,
+    #[cfg(target_os = "linux")] shm: Option<&mut omq_shm::Connection>,
 ) -> Result<Option<Message>> {
     #[cfg(target_os = "linux")]
     if let Some(state) = shm {
-        let mut state = state.lock().expect("SHM connection");
         if let Some(message) = state.poll_received() {
             return Ok(Some(message));
         }
@@ -2174,6 +2248,20 @@ fn poll_received_message(
             .transpose();
     }
     Ok(connection.poll_message())
+}
+
+#[cfg_attr(not(target_os = "linux"), expect(clippy::unnecessary_wraps))]
+fn poll_received_message(
+    connection: &mut Connection,
+    #[cfg(target_os = "linux")] shm: Option<&crate::transport::shm::ShmState>,
+) -> Result<Option<Message>> {
+    #[cfg(target_os = "linux")]
+    let mut guard = shm.map(|state| state.lock().expect("SHM connection"));
+    poll_received_locked(
+        connection,
+        #[cfg(target_os = "linux")]
+        guard.as_deref_mut(),
+    )
 }
 
 /// Closed sockets no longer deliver receives, but must keep parsing control

@@ -18,6 +18,7 @@ static REGISTRY: OnceLock<Mutex<Registry>> = OnceLock::new();
 // Keep large power-of-two slots aligned for bulk copies instead of inheriting
 // the mapping header's fixed offset. Small classes keep their compact header.
 const LARGE_CLASS_ALIGNMENT: usize = 4096;
+pub(super) const LOOKUP_BATCH: usize = 8;
 
 pub(super) const fn payload_offset(size: usize) -> usize {
     if size >= LARGE_CLASS_ALIGNMENT {
@@ -65,10 +66,14 @@ pub(super) struct Slot {
     pub(super) offset: usize,
     pub(super) size: usize,
     pub(super) state: Mutex<SlotState>,
-    _region: Arc<PoolRegion>,
+    region: Arc<PoolRegion>,
 }
 
 impl Slot {
+    pub(super) fn contains(&self, bytes: &[u8]) -> bool {
+        contains(self.mapping.address() + self.offset, self.size, bytes)
+    }
+
     pub(super) fn track_lease(&self, lease: Lease, kind: u8) {
         const MIN_SCAN_INTERVAL: usize = 32;
         let mut state = self.state.lock().expect("SHM slot leases");
@@ -209,7 +214,7 @@ fn region_slots(
             offset: region.payload_offset + index * size,
             size,
             state: Mutex::new(SlotState::default()),
-            _region: region.clone(),
+            region: region.clone(),
         });
         references.push(Arc::downgrade(&slot));
         slots.push(Box::new(SlotStorage(slot)));
@@ -232,6 +237,38 @@ pub fn is_pooled(message: &Message) -> bool {
         .checked_sub(1)
         .and_then(|index| message.part_slice(index))
         .is_some_and(|body| find_slot(body).is_some())
+}
+
+/// Number of leading messages whose bodies belong to SHM pool slots.
+/// Resolves up to eight queued bodies against the same region at a time.
+#[must_use]
+pub fn pooled_prefix(messages: &[&Message]) -> usize {
+    let mut count = 0;
+    let mut previous: Option<Arc<Slot>> = None;
+    for messages in messages.chunks(LOOKUP_BATCH) {
+        let bodies = std::array::from_fn(|index| {
+            messages
+                .get(index)
+                .and_then(|message| crate::body(message).ok())
+        });
+        if let Some(slot) = &previous
+            && bodies
+                .iter()
+                .take(messages.len())
+                .all(|body| body.is_some_and(|body| slot.contains(body)))
+        {
+            count += messages.len();
+            continue;
+        }
+        for slot in find_slots(bodies).into_iter().take(messages.len()) {
+            if slot.is_none() {
+                return count;
+            }
+            count += 1;
+            previous = slot;
+        }
+    }
+    count
 }
 
 pub(super) fn find_slot(bytes: &[u8]) -> Option<Arc<Slot>> {
@@ -261,4 +298,33 @@ pub(super) fn find_slot(bytes: &[u8]) -> Option<Arc<Slot>> {
         cached.region = Arc::downgrade(&region);
         Some(slot)
     })
+}
+
+/// Resolve queued bodies together without retaining unused pool slots.
+pub(super) fn find_slots(
+    bodies: [Option<&[u8]>; LOOKUP_BATCH],
+) -> [Option<Arc<Slot>>; LOOKUP_BATCH] {
+    let first = bodies[0].and_then(find_slot);
+    let region = first.as_ref().map(|slot| &slot.region);
+    let size = bodies[0].map(<[u8]>::len);
+    let mut slots = std::array::from_fn(|index| {
+        if index == 0 {
+            return None;
+        }
+        let body = bodies[index]?;
+        if Some(body.len()) == size
+            && let Some(slot) = &first
+            && contains(slot.mapping.address() + slot.offset, slot.size, body)
+        {
+            return Some(slot.clone());
+        }
+        if Some(body.len()) == size
+            && let Some(slot) = region.and_then(|region| region.find(body))
+        {
+            return Some(slot);
+        }
+        find_slot(body)
+    });
+    slots[0] = first;
+    slots
 }

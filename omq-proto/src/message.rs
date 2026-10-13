@@ -426,21 +426,6 @@ pub struct Message {
 }
 
 impl Message {
-    /// Whether the last body is retained by a pool or backend payload owner.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn has_external_body_owner(&self) -> bool {
-        let external = |payload: &Payload| matches!(payload.inner, PayloadInner::Shared(_));
-        match &self.inner {
-            MessageInner::Single(payload) => external(payload),
-            MessageInner::RoutedShared { .. } | MessageInner::PrefixedShared { .. } => true,
-            MessageInner::Multi(parts) | MessageInner::RoutedMulti { parts, .. } => {
-                parts.last().is_some_and(external)
-            }
-            _ => false,
-        }
-    }
-
     /// Conservative storage retained by this message, including its value,
     /// multipart table capacity, and each payload's allocation backing.
     /// Shared allocations are counted separately for each view. Returns
@@ -1012,6 +997,16 @@ impl Message {
             };
         }
         body.inner = match body.inner {
+            MessageInner::Single(Payload {
+                inner: PayloadInner::Single(bytes),
+            }) => {
+                return Self {
+                    inner: MessageInner::PrefixedShared {
+                        prefix,
+                        body: SharedOwner::new(std::sync::Arc::new(bytes)),
+                    },
+                };
+            }
             MessageInner::Single(Payload {
                 inner: PayloadInner::Shared(shared),
             })
@@ -1731,6 +1726,32 @@ mod tests {
         assert!(!empty.replace_last_payload(Payload::from_slice(b"unused")));
         assert_eq!(empty.routing_id(), Some(9));
         assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn prefixed_slab_slices_share_headers_and_keep_the_original_buffer_live() {
+        let pool = crate::PayloadPool::new([(4096, 1)]).unwrap();
+        let mut buffer = pool.try_buffer(4096).unwrap();
+        buffer.writable().fill(7);
+        buffer.set_len(4096).unwrap();
+        let mut bytes: Bytes = buffer.into_payload().into();
+        let body = Message::from(bytes.split_to(64));
+        let pointer = body.part_slice(0).unwrap().as_ptr();
+        drop(bytes);
+        let grouped = Message::with_prefix(Bytes::from_static(b"group"), body);
+        assert!(matches!(grouped.inner, MessageInner::PrefixedShared { .. }));
+        let clones: Vec<_> = (0..32).map(|_| grouped.clone()).collect();
+        for message in &clones {
+            assert_eq!(message.part_slice(0), Some(b"group".as_slice()));
+            assert_eq!(message.part_slice(1).unwrap().as_ptr(), pointer);
+        }
+        let held = grouped.part_bytes(1).unwrap().slice(1..17);
+        drop(grouped);
+        std::thread::spawn(move || drop(clones)).join().unwrap();
+        assert_eq!(pool.available(), 0);
+        assert_eq!(held.as_ref(), &[7; 16]);
+        drop(held);
+        assert_eq!(pool.available(), 1);
     }
 
     struct SharedFrame(Vec<u8>);

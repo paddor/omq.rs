@@ -60,9 +60,16 @@ impl DrainBudget {
     /// Account one item. Returns `true` while budget remains.
     #[must_use]
     pub fn account(&mut self, byte_len: usize) -> bool {
-        self.msgs += 1;
+        self.account_many(1, byte_len)
+    }
+
+    /// Account a batch's logical item count and total work bytes.
+    /// Returns `true` while both budgets remain.
+    #[must_use]
+    pub fn account_many(&mut self, messages: usize, byte_len: usize) -> bool {
+        self.msgs = self.msgs.saturating_add(messages);
         self.bytes = self.bytes.saturating_add(byte_len);
-        self.msgs < self.max_msgs && self.bytes < self.max_bytes
+        !self.exhausted()
     }
 
     #[must_use]
@@ -185,5 +192,21 @@ mod tests {
         assert!(!b.account(30)); // bytes hit first: 60 >= 50
         assert!(b.exhausted());
         assert_eq!(b.msgs(), 2);
+    }
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use super::DrainBudget;
+    #[test]
+    fn logical_batches_exhaust_both_caps_and_saturate() {
+        let mut budget = DrainBudget::new(8, 1024);
+        assert!(budget.account_many(3, 512));
+        assert!(!budget.account_many(5, 512));
+        assert_eq!(budget.msgs(), 8);
+        assert_eq!(budget.bytes(), 1024);
+        assert!(!budget.account_many(usize::MAX, usize::MAX));
+        assert_eq!(budget.msgs(), usize::MAX);
+        assert_eq!(budget.bytes(), usize::MAX);
     }
 }

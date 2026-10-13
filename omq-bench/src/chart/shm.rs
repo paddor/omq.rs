@@ -18,7 +18,15 @@ const READERS: &[u64] = &[4, 32];
 const SIZES: &[u64] = &[
     16, 64, 256, 1024, 4096, 16384, 131_072, 1_048_576, 8_388_608,
 ];
-const LARGE_SIZES: &[u64] = &[131_072, 1_048_576, 8_388_608];
+#[cfg(test)]
+const LARGE_SIZES: &[u64] = &[1_048_576, 8_388_608];
+const HWM: u64 = 1000;
+const SLAB_BYTES: u64 = 4096;
+const POOL_BYTES: u64 = 64 * 1024 * 1024;
+const LARGE_POOL_BYTES: u64 = 256 * 1024 * 1024;
+const LARGE_POOL_MIN_BODY: u64 = 1024 * 1024;
+const POOLED_BATCH_COPY_THRESHOLD: u64 = 256;
+const FANOUT_POOLED_BATCH_COPY_THRESHOLD: u64 = 1024;
 const IMPLS: &[Impl] = &[
     Impl {
         key: "inproc",
@@ -59,6 +67,50 @@ fn hardware_subtitle() -> Option<String> {
     })
 }
 
+fn pool_bytes(size: u64) -> u64 {
+    if size >= LARGE_POOL_MIN_BODY {
+        LARGE_POOL_BYTES
+    } else {
+        POOL_BYTES
+    }
+}
+
+fn size_blocks(sizes: &[u64], cached_baselines: bool) -> Vec<&[u64]> {
+    let split = sizes.partition_point(|&size| size < LARGE_POOL_MIN_BODY);
+    if cached_baselines && split > 0 && split < sizes.len() {
+        vec![&sizes[..split], &sizes[split..]]
+    } else {
+        vec![sizes]
+    }
+}
+
+fn storage_matches(row: &Value, size: u64, latency: bool) -> bool {
+    let slot_bytes = size.max(SLAB_BYTES);
+    let slots = (pool_bytes(size) / slot_bytes).max(1);
+    let slab_bytes = if !latency && (56..SLAB_BYTES).contains(&size) {
+        SLAB_BYTES
+    } else {
+        0
+    };
+    row["send_hwm"] == HWM
+        && row["recv_hwm"] == HWM
+        && row["pool_slots"] == slots
+        && row["pool_slot_bytes"] == slot_bytes
+        && row["payload_pool_bytes"] == slots * slot_bytes
+        && row["slab_bytes"] == slab_bytes
+        && (latency || size < LARGE_POOL_MIN_BODY || row["payload_fill"] == "memset")
+        && (latency
+            || !row["impl"]
+                .as_str()
+                .is_some_and(|name| name.starts_with("shm"))
+            || row["pooled_batch_copy_threshold"]
+                == if row["socket_pair"] == "radio-dish" {
+                    FANOUT_POOLED_BATCH_COPY_THRESHOLD
+                } else {
+                    POOLED_BATCH_COPY_THRESHOLD
+                })
+}
+
 fn verified(row: &Value, implementation: &str, size: u64, readers: u64) -> bool {
     let inproc = implementation == "inproc";
     if row["kind"] != "shm_pubsub_verified"
@@ -80,25 +132,14 @@ fn verified(row: &Value, implementation: &str, size: u64, readers: u64) -> bool 
         || row["io_threads_per_context"] != 1
         || row["storage"]
             != match implementation {
-                "inproc" => "preallocated-heap",
                 "shm-pool" => "preallocated-shm",
-                _ => "ordinary",
+                _ => "preallocated-heap",
             }
         || row["warmup_seconds"] != 1
         || row["seconds"] != 3
+        || !storage_matches(row, size, false)
     {
         return false;
-    }
-    if inproc || LARGE_SIZES.contains(&size) {
-        let hwm = (32 * 1024 * 1024 / size).clamp(4, 256);
-        let slots = if matches!(implementation, "inproc" | "shm-pool") {
-            (64 * 1024 * 1024 / size).clamp(4, 1024)
-        } else {
-            0
-        };
-        if row["send_hwm"] != hwm || row["recv_hwm"] != hwm || row["pool_slots"] != slots {
-            return false;
-        }
     }
     let Some(rounds) = row["rounds"].as_array().filter(|rounds| rounds.len() == 3) else {
         return false;
@@ -178,13 +219,7 @@ fn load_cohorts(cache: &Path, family: &str) -> Cohorts {
     cohorts
 }
 
-fn build_panels(
-    inproc: &[Value],
-    baseline: &[Value],
-    shm: &[Value],
-    large_baseline: &[Value],
-    large_shm: &[Value],
-) -> Vec<(u64, ValMap, ValMap, FairnessMap)> {
+fn build_panels(rows: &[Value]) -> Vec<(u64, ValMap, ValMap, FairnessMap)> {
     let mut panels = Vec::new();
     for &readers in READERS {
         let mut bandwidth = ValMap::new();
@@ -192,15 +227,7 @@ fn build_panels(
         let mut spread = FairnessMap::new();
         for implementation in IMPLS {
             for &size in SIZES {
-                let cohort = match (implementation.key, LARGE_SIZES.contains(&size)) {
-                    ("inproc", _) => inproc,
-                    ("shm" | "shm-pool", true) => large_shm,
-                    ("shm" | "shm-pool", false) => shm,
-                    ("ipc", true) => large_baseline,
-                    ("ipc", false) => baseline,
-                    _ => unreachable!("known SHM comparison implementation"),
-                };
-                let row = find(cohort, implementation.key, size, readers).unwrap();
+                let row = find(rows, implementation.key, size, readers).unwrap();
                 let mut rates: Vec<_> = row["rounds"]
                     .as_array()
                     .unwrap()
@@ -264,55 +291,43 @@ fn generate_pubsub(cache: &Path, directory: &Path, cached_baselines: bool) -> Ch
         return Ok(());
     }
     let missing = "missing complete SHM comparison cohort; run scripts/run_shm_pubsub.rb";
-    let baseline = latest_complete(
-        &cohorts,
-        if cached_baselines {
-            &IMPLS[1..2]
-        } else {
-            IMPLS
-        },
-        if cached_baselines {
-            common::COMPARISON_SIZES
-        } else {
-            SIZES
-        },
-    )
-    .ok_or(missing)?;
-    let inproc = if cached_baselines {
-        latest_complete(&cohorts, &IMPLS[..1], SIZES).ok_or(missing)?
+    let groups = if cached_baselines {
+        vec![&IMPLS[..2], &IMPLS[2..]]
     } else {
-        baseline
+        vec![IMPLS]
     };
-    let shm = if cached_baselines {
-        latest_complete(&cohorts, &IMPLS[2..], common::COMPARISON_SIZES).ok_or(missing)?
-    } else {
-        baseline
-    };
-    let large_baseline = if cached_baselines {
-        latest_complete(&cohorts, &IMPLS[1..2], LARGE_SIZES).ok_or(missing)?
-    } else {
-        baseline
-    };
-    let large_shm = if cached_baselines {
-        latest_complete(&cohorts, &IMPLS[2..], LARGE_SIZES).ok_or(missing)?
-    } else {
-        shm
-    };
-    for (label, rows) in [
-        ("Inproc pool", inproc),
-        ("IPC through 16 KiB", baseline),
-        ("SHM through 16 KiB", shm),
-        ("IPC from 128 KiB", large_baseline),
-        ("SHM from 128 KiB", large_shm),
-    ] {
-        eprintln!(
-            "{label}: run={}, host={}, binary={}",
-            rows[0]["run_id"].as_str().unwrap(),
-            rows[0]["host"].as_str().unwrap_or("unknown"),
-            rows[0]["binary_sha256"].as_str().unwrap(),
-        );
+    let mut selected = Vec::new();
+    for implementations in groups {
+        for sizes in size_blocks(SIZES, cached_baselines) {
+            let cohort = latest_complete(&cohorts, implementations, sizes).ok_or(missing)?;
+            eprintln!(
+                "SHM pubsub: implementations={}, sizes={}..{}, run={}, binary={}",
+                implementations
+                    .iter()
+                    .map(|item| item.key)
+                    .collect::<Vec<_>>()
+                    .join(","),
+                sizes[0],
+                sizes[sizes.len() - 1],
+                cohort[0]["run_id"],
+                cohort[0]["binary_sha256"],
+            );
+            selected.extend(
+                cohort
+                    .iter()
+                    .filter(|row| {
+                        implementations
+                            .iter()
+                            .any(|implementation| row["impl"] == implementation.key)
+                            && row["msg_size"]
+                                .as_u64()
+                                .is_some_and(|size| sizes.contains(&size))
+                    })
+                    .cloned(),
+            );
+        }
     }
-    let panels = build_panels(inproc, baseline, shm, large_baseline, large_shm);
+    let panels = build_panels(&selected);
     let rows: Vec<_> = panels
         .iter()
         .map(|(readers, bandwidth, messages, _)| (*readers, bandwidth, messages))
@@ -330,7 +345,6 @@ fn generate_pubsub(cache: &Path, directory: &Path, cached_baselines: bool) -> Ch
         "",
         "",
         Some(&spread),
-        common::GbsScale::Logarithmic,
         hardware_subtitle().as_deref(),
     )?;
     eprintln!("Written: {}", path.display());
@@ -362,11 +376,15 @@ mod tests {
                         "publisher_cpus": if inproc { "1,2,3,4" } else { "1,2" },
                         "subscriber_cpus": if inproc { "1,2,3,4" } else { "3,4" },
                         "receiver_context": "shared", "io_threads_per_context": 1,
-                        "storage": match implementation.key { "inproc" => "preallocated-heap", "shm-pool" => "preallocated-shm", _ => "ordinary" },
+                        "storage": if implementation.key == "shm-pool" { "preallocated-shm" } else { "preallocated-heap" },
                         "warmup_seconds": 1, "seconds": 3, "rounds": rounds,
-                        "send_hwm": (32 * 1024 * 1024 / size).clamp(4, 256),
-                        "recv_hwm": (32 * 1024 * 1024 / size).clamp(4, 256),
-                        "pool_slots": if matches!(implementation.key, "inproc" | "shm-pool") { (64 * 1024 * 1024 / size).clamp(4, 1024) } else { 0 },
+                        "send_hwm": HWM, "recv_hwm": HWM,
+                        "pool_slots": (pool_bytes(size) / size.max(SLAB_BYTES)).max(1),
+                        "pool_slot_bytes": size.max(SLAB_BYTES),
+                        "payload_pool_bytes": (pool_bytes(size) / size.max(SLAB_BYTES)).max(1) * size.max(SLAB_BYTES),
+                        "slab_bytes": if (56..SLAB_BYTES).contains(&size) { SLAB_BYTES } else { 0 },
+                        "pooled_batch_copy_threshold": FANOUT_POOLED_BATCH_COPY_THRESHOLD,
+                        "payload_fill": "memset",
                     }));
                 }
             }
@@ -397,6 +415,11 @@ mod tests {
                     } else {
                         "scatter-gather"
                     });
+                    row["pooled_batch_copy_threshold"] = json!(POOLED_BATCH_COPY_THRESHOLD);
+                    if latency {
+                        row["slab_bytes"] = json!(0);
+                        row["payload_fill"] = json!("memcpy");
+                    }
                     row["peers"] = json!(1);
                     row["subscriber_threads"] = json!(1);
                     row["recv_mode"] = json!("blocking");
@@ -421,6 +444,38 @@ mod tests {
                 })
             })
             .collect()
+    }
+
+    #[test]
+    fn historical_hwm_and_pool_settings_cannot_supply_the_new_charts() {
+        let rows = cohort("current", SIZES);
+        for original in rows {
+            let implementation = original["impl"].as_str().unwrap();
+            let size = original["msg_size"].as_u64().unwrap();
+            let readers = original["peers"].as_u64().unwrap();
+            assert!(verified(&original, implementation, size, readers));
+            for field in [
+                "send_hwm",
+                "recv_hwm",
+                "pool_slot_bytes",
+                "payload_pool_bytes",
+                "slab_bytes",
+            ] {
+                let mut changed = original.clone();
+                changed[field] = json!(changed[field].as_u64().unwrap() + 1);
+                assert!(!verified(&changed, implementation, size, readers));
+            }
+            if implementation.starts_with("shm") {
+                let mut historical = original.clone();
+                historical["pooled_batch_copy_threshold"] = Value::Null;
+                assert!(!verified(&historical, implementation, size, readers));
+            }
+            if size >= LARGE_POOL_MIN_BODY {
+                let mut copied = original.clone();
+                copied["payload_fill"] = json!("memcpy");
+                assert!(!verified(&copied, implementation, size, readers));
+            }
+        }
     }
 
     #[test]
@@ -475,12 +530,13 @@ mod tests {
         let cohorts = BTreeMap::from([
             (
                 ("a".into(), "old-binary".into()),
-                cohort("a", common::COMPARISON_SIZES),
+                cohort("a", &SIZES[..SIZES.len() - LARGE_SIZES.len()]),
             ),
             (("b".into(), "new-binary".into()), cohort("b", LARGE_SIZES)),
         ]);
         assert_eq!(
-            latest_complete(&cohorts, IMPLS, common::COMPARISON_SIZES).unwrap()[0]["run_id"],
+            latest_complete(&cohorts, IMPLS, &SIZES[..SIZES.len() - LARGE_SIZES.len()]).unwrap()[0]
+                ["run_id"],
             "a"
         );
         assert_eq!(

@@ -1,7 +1,7 @@
 //! Production atomic transitions, also compiled against Loom in the test crate.
 #![forbid(unsafe_code)]
 
-use crate::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering, fence};
+use crate::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering, fence};
 use crate::sync::{Arc, Mutex};
 
 pub(crate) const STATE_BITS: u64 = 3;
@@ -10,6 +10,66 @@ pub(crate) const PENDING: u64 = 1;
 pub(crate) const BORROWED: u64 = 2;
 pub(crate) const DONE: u64 = 3;
 pub(crate) const COORDINATES: usize = 5;
+
+/// Logical message credits for a receive queue carrying batched records.
+#[derive(Debug)]
+pub struct ReceiveCredits {
+    used: AtomicUsize,
+    capacity: usize,
+}
+
+impl ReceiveCredits {
+    /// Create an empty queue with the given message capacity.
+    #[must_use]
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            used: AtomicUsize::new(0),
+            capacity,
+        }
+    }
+
+    /// Reserve up to `maximum` logical messages without exceeding capacity.
+    pub fn reserve(&self, maximum: usize) -> usize {
+        let previous = self.update(|used| used + maximum.min(self.capacity - used));
+        maximum.min(self.capacity - previous)
+    }
+
+    /// Whether no further logical message can be admitted.
+    #[must_use]
+    pub fn full(&self) -> bool {
+        self.used.load(Ordering::Acquire) == self.capacity
+    }
+
+    /// Return consumed credits. Reports a full-to-writable transition.
+    ///
+    /// # Panics
+    /// Panics if more credits are returned than were reserved.
+    pub fn release(&self, count: usize) -> bool {
+        let previous = self.update(|used| {
+            used.checked_sub(count)
+                .expect("returned unreserved receive credits")
+        });
+        count != 0 && previous == self.capacity
+    }
+    fn update(&self, change: impl Fn(usize) -> usize) -> usize {
+        let mut used = self.used.load(Ordering::Acquire);
+        loop {
+            let updated = change(used);
+            if updated == used {
+                return used;
+            }
+            match self.used.compare_exchange_weak(
+                used,
+                updated,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(previous) => return previous,
+                Err(current) => used = current,
+            }
+        }
+    }
+}
 
 pub(crate) struct LeaseCell<'a> {
     pub(crate) state: &'a AtomicU64,

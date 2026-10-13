@@ -55,12 +55,6 @@ pub(crate) struct FairnessEntry {
 
 pub(crate) type FairnessMap = BTreeMap<u64, BTreeMap<String, FairnessEntry>>;
 
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum GbsScale {
-    Linear,
-    Logarithmic,
-}
-
 #[derive(Clone, Copy)]
 enum LegendVersionMode {
     Hide,
@@ -1697,7 +1691,6 @@ pub(crate) fn draw_multirow_throughput(
     snd_label: &str,
     rcv_label: &str,
     fairness: Option<&[&FairnessMap]>,
-    gbs_scale: GbsScale,
     hw_label: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let present: Vec<&Impl> = impls
@@ -1771,20 +1764,15 @@ pub(crate) fn draw_multirow_throughput(
             )?;
         }
         if !large.is_empty() && gbs_max > 0.0 {
-            match gbs_scale {
-                GbsScale::Logarithmic => {
-                    draw_gbs_panel_log(&right_area, &large, &present, tput, row_fair)?;
-                }
-                GbsScale::Linear => draw_gbs_panel(
-                    &right_area,
-                    &large,
-                    &present,
-                    tput,
-                    gbs_max,
-                    gbs_ticks,
-                    row_fair,
-                )?,
-            }
+            draw_gbs_panel(
+                &right_area,
+                &large,
+                &present,
+                tput,
+                gbs_max,
+                gbs_ticks,
+                row_fair,
+            )?;
         }
     }
 

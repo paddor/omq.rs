@@ -102,7 +102,6 @@ pub(crate) fn generate() {
                 "snd CPU%",
                 "",
                 None,
-                super::common::GbsScale::Linear,
                 super::common::detect_hardware().as_deref(),
             )
             .expect("draw pubsub chart");

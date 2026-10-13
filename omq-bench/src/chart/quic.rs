@@ -181,7 +181,6 @@ fn generate_multi_peer(
         snd_label,
         rcv_label,
         with_fairness.then_some(fair_refs.as_slice()),
-        super::common::GbsScale::Linear,
         super::common::detect_hardware().as_deref(),
     )
     .expect("draw QUIC multi-peer chart");

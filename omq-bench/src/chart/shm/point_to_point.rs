@@ -8,12 +8,6 @@ use std::path::Path;
 
 fn verified(row: &Value, implementation: &str, size: u64, latency: bool, spin: u64) -> bool {
     let inproc = implementation == "inproc";
-    let hwm = (32 * 1024 * 1024 / size).clamp(4, 256);
-    let slots = if matches!(implementation, "inproc" | "shm-pool") {
-        (64 * 1024 * 1024 / size).clamp(4, 1024)
-    } else {
-        0
-    };
     if row["kind"]
         != if latency {
             "shm_reqrep_verified"
@@ -44,14 +38,11 @@ fn verified(row: &Value, implementation: &str, size: u64, latency: bool, spin: u
         || row["subscriber_processes"] != u64::from(!inproc)
         || row["subscriber_threads"] != 1
         || row["io_threads_per_context"] != 1
-        || row["send_hwm"] != hwm
-        || row["recv_hwm"] != hwm
-        || row["pool_slots"] != slots
+        || !super::storage_matches(row, size, latency)
         || row["storage"]
             != match implementation {
-                "inproc" => "preallocated-heap",
                 "shm-pool" => "preallocated-shm",
-                _ => "ordinary",
+                _ => "preallocated-heap",
             }
     {
         return false;
@@ -130,31 +121,38 @@ fn load(cache: &Path, latency: bool, cached_baselines: bool) -> ChartResult<Opti
     };
     let mut selected = Vec::new();
     for implementations in groups {
-        let cohort = cohorts
-            .values()
-            .rev()
-            .find(|rows| complete(rows, implementations, sizes, latency, spins))
-            .ok_or_else(|| format!("missing complete verified SHM {name} cohort"))?;
-        eprintln!(
-            "SHM {name}: implementations={}, run={}, binary={}",
-            implementations
-                .iter()
-                .map(|item| item.key)
-                .collect::<Vec<_>>()
-                .join(","),
-            cohort[0]["run_id"],
-            cohort[0]["binary_sha256"]
-        );
-        selected.extend(
-            cohort
-                .iter()
-                .filter(|row| {
-                    implementations
-                        .iter()
-                        .any(|implementation| row["impl"] == implementation.key)
-                })
-                .cloned(),
-        );
+        for sizes in super::size_blocks(sizes, cached_baselines) {
+            let cohort = cohorts
+                .values()
+                .rev()
+                .find(|rows| complete(rows, implementations, sizes, latency, spins))
+                .ok_or_else(|| format!("missing complete verified SHM {name} cohort"))?;
+            eprintln!(
+                "SHM {name}: implementations={}, sizes={}..{}, run={}, binary={}",
+                implementations
+                    .iter()
+                    .map(|item| item.key)
+                    .collect::<Vec<_>>()
+                    .join(","),
+                sizes[0],
+                sizes[sizes.len() - 1],
+                cohort[0]["run_id"],
+                cohort[0]["binary_sha256"]
+            );
+            selected.extend(
+                cohort
+                    .iter()
+                    .filter(|row| {
+                        implementations
+                            .iter()
+                            .any(|implementation| row["impl"] == implementation.key)
+                            && row["msg_size"]
+                                .as_u64()
+                                .is_some_and(|size| sizes.contains(&size))
+                    })
+                    .cloned(),
+            );
+        }
     }
     Ok(Some(selected))
 }
@@ -221,7 +219,6 @@ fn throughput(directory: &Path, rows: &[Value]) -> ChartResult {
         "",
         "",
         Some(&[&spread]),
-        common::GbsScale::Logarithmic,
         super::hardware_subtitle().as_deref(),
     )?;
     eprintln!("Written: {}", path.display());

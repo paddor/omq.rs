@@ -12,6 +12,11 @@ mod point_to_point;
 
 const DEADLINE: Duration = Duration::from_secs(30);
 const PROBE: u64 = u64::MAX;
+const BENCH_HWM: u32 = 1000;
+const SLAB_BYTES: usize = 4096;
+const POOL_BYTES: usize = 64 * 1024 * 1024;
+const LARGE_POOL_BYTES: usize = 256 * 1024 * 1024;
+const LARGE_POOL_MIN_BODY: usize = 1024 * 1024;
 const SIZES: &[usize] = &[
     16, 64, 256, 1024, 4096, 16384, 131_072, 1_048_576, 8_388_608,
 ];
@@ -69,12 +74,51 @@ impl Config {
         self.directory.join("control.sock")
     }
 
-    fn hwm(&self) -> usize {
-        (32 * 1024 * 1024 / self.size).clamp(4, 256)
+    fn pool_slot_size(&self) -> usize {
+        self.size.max(SLAB_BYTES)
     }
 
     fn pool_slots(&self) -> usize {
-        (64 * 1024 * 1024 / self.size).clamp(4, 1024)
+        let bytes = if self.size >= LARGE_POOL_MIN_BODY {
+            LARGE_POOL_BYTES
+        } else {
+            POOL_BYTES
+        };
+        (bytes / self.pool_slot_size()).max(1)
+    }
+
+    fn pool(&self) -> Result<Option<PayloadPool>, Error> {
+        let classes = [(self.pool_slot_size(), self.pool_slots())];
+        Ok(Some(if self.implementation == "shm-pool" {
+            omq_tokio::shm_payload_pool(classes)?
+        } else {
+            PayloadPool::new(classes)?
+        }))
+    }
+
+    fn uses_slabs(&self) -> bool {
+        (omq_tokio::message::MAX_INLINE_MESSAGE + 1..SLAB_BYTES).contains(&self.size)
+    }
+
+    fn add_pool_metadata(&self, row: &mut serde_json::Value, throughput: bool) {
+        row["payload_fill"] = json!(if throughput { "memset" } else { "memcpy" });
+        row["pooled_batch_copy_threshold"] = json!(
+            self.implementation
+                .starts_with("shm")
+                .then_some(if self.readers > 1 {
+                    omq_shm::FANOUT_POOLED_BATCH_COPY_THRESHOLD
+                } else {
+                    omq_shm::POOLED_BATCH_COPY_THRESHOLD
+                })
+        );
+        row["pool_slots"] = json!(self.pool_slots());
+        row["pool_slot_bytes"] = json!(self.pool_slot_size());
+        row["payload_pool_bytes"] = json!(self.pool_slots() * self.pool_slot_size());
+        row["slab_bytes"] = json!(if throughput && self.uses_slabs() {
+            SLAB_BYTES
+        } else {
+            0
+        });
     }
 }
 
@@ -88,7 +132,7 @@ struct Port {
 
 impl Port {
     fn open(config: &Config, context: &Context) -> Result<Self, Error> {
-        let hwm = u32::try_from(config.hwm())?;
+        let hwm = BENCH_HWM;
         let options = Options {
             xpub_nodrop: true,
             send_hwm: hwm,
@@ -112,12 +156,7 @@ impl Port {
             socket.connect(config.endpoint().parse::<omq_tokio::Endpoint>()?)?;
         }
         let pool = if config.publisher {
-            let classes = [(config.size, config.pool_slots())];
-            match config.implementation.as_str() {
-                "inproc" => Some(PayloadPool::new(classes)?),
-                "shm-pool" => Some(omq_tokio::shm_payload_pool(classes)?),
-                _ => None,
-            }
+            config.pool()?
         } else {
             None
         };
@@ -131,7 +170,8 @@ impl Port {
     }
 
     fn send(&self, bytes: &[u8], _checked: bool) -> Result<(), Error> {
-        let body = prepare_message(bytes, self.pool.as_ref())?;
+        let sequence = u64::from_le_bytes(bytes[..8].try_into()?);
+        let body = patterned_message(bytes.len(), sequence, self.pool.as_ref())?;
         let group = bytes::Bytes::from_static(b"fanout");
         self.socket.send_group(group, body)?;
         Ok(())
@@ -171,12 +211,29 @@ impl Port {
 }
 
 fn prepare_message(bytes: &[u8], pool: Option<&PayloadPool>) -> Result<Message, Error> {
+    prepare_with(bytes.len(), pool, |body| body.copy_from_slice(bytes))
+}
+
+fn patterned_message(
+    size: usize,
+    sequence: u64,
+    pool: Option<&PayloadPool>,
+) -> Result<Message, Error> {
+    prepare_with(size, pool, |body| {
+        body.fill(0xa5);
+        body[..8].copy_from_slice(&sequence.to_le_bytes());
+    })
+}
+
+fn prepare_with(
+    size: usize,
+    pool: Option<&PayloadPool>,
+    mut fill: impl FnMut(&mut [u8]),
+) -> Result<Message, Error> {
     Ok(if let Some(pool) = pool {
         let mut started = None;
         loop {
-            if let Some(message) =
-                pool.try_message(bytes.len(), |body| body.copy_from_slice(bytes))?
-            {
+            if let Some(message) = pool.try_message(size, &mut fill)? {
                 break message;
             }
             if started.get_or_insert_with(Instant::now).elapsed() >= DEADLINE {
@@ -185,8 +242,34 @@ fn prepare_message(bytes: &[u8], pool: Option<&PayloadPool>) -> Result<Message, 
             std::thread::yield_now();
         }
     } else {
-        Message::from_slice(bytes)
+        let mut body = vec![0; size];
+        fill(&mut body);
+        Message::from(bytes::Bytes::from(body))
     })
+}
+
+fn send_slab(
+    pool: &PayloadPool,
+    size: usize,
+    sequence: u64,
+    mut send: impl FnMut(Message) -> Result<(), Error>,
+) -> Result<u64, Error> {
+    let Some(mut buffer) = pool.try_buffer(SLAB_BYTES) else {
+        std::thread::yield_now();
+        return Ok(0);
+    };
+    buffer.writable().fill(0xa5);
+    for (index, body) in buffer.writable().chunks_exact_mut(size).enumerate() {
+        body[..8].copy_from_slice(&(sequence + index as u64).to_le_bytes());
+    }
+    buffer.set_len(SLAB_BYTES)?;
+    let mut bytes: bytes::Bytes = buffer.into_payload().into();
+    let mut count = 0;
+    while !bytes.is_empty() {
+        send(Message::from(bytes.split_to(size)))?;
+        count += 1;
+    }
+    Ok(count)
 }
 
 fn connect(path: &Path) -> Result<UnixStream, Error> {
@@ -265,7 +348,7 @@ fn subscribe(config: &Config, mut port: Port) -> Result<(), Error> {
     Ok(())
 }
 
-fn publish(config: &Config, port: &Port) -> Result<(), Error> {
+fn accept_readers(config: &Config, port: &Port) -> Result<Vec<(UnixStream, bool)>, Error> {
     let listener = UnixListener::bind(config.control())?;
     listener.set_nonblocking(true)?;
     std::fs::write(config.directory.join("ready"), b"ready")?;
@@ -306,6 +389,11 @@ fn publish(config: &Config, port: &Port) -> Result<(), Error> {
         stream.set_nonblocking(false)?;
         stream.set_read_timeout(Some(DEADLINE))?;
     }
+    Ok(readers)
+}
+
+fn publish(config: &Config, port: &Port) -> Result<(), Error> {
+    let mut readers = accept_readers(config, port)?;
     let mut bytes = vec![0xa5; config.size];
     let batch = (1024 * 1024 / config.size).clamp(1, 256);
     for round in 0..4_u64 {
@@ -313,6 +401,14 @@ fn publish(config: &Config, port: &Port) -> Result<(), Error> {
         let started = Instant::now();
         let mut sent = 0_u64;
         while started.elapsed() < duration {
+            if config.uses_slabs() {
+                sent += send_slab(port.pool.as_ref().unwrap(), config.size, sent, |message| {
+                    Ok(port
+                        .socket
+                        .send_group(bytes::Bytes::from_static(b"fanout"), message)?)
+                })?;
+                continue;
+            }
             for _ in 0..batch {
                 bytes[..8].copy_from_slice(&sent.to_le_bytes());
                 port.send(&bytes, true)?;
@@ -345,20 +441,18 @@ fn publish(config: &Config, port: &Port) -> Result<(), Error> {
         if round > 0 {
             let total_elapsed = elapsed.iter().copied().fold(sender_elapsed, f64::max);
             let rate = sent as f64 / total_elapsed;
-            println!(
-                "{}",
-                json!({"event":"result", "implementation":config.implementation,
+            let mut row = json!({"event":"result", "implementation":config.implementation,
                 "msg_size":config.size,"readers":config.readers,"round":round,
-                "send_hwm":config.hwm(),"recv_hwm":config.hwm(),
-                "pool_slots":if port.pool.is_some() { config.pool_slots() } else { 0 },
+                "send_hwm":BENCH_HWM,"recv_hwm":BENCH_HWM,
                 "shm_max_memory":if matches!(config.implementation.as_str(), "shm" | "shm-pool") {
                     Some(omq_tokio::options::DEFAULT_SHM_MAX_MEMORY)
                 } else { None },
                 "offered":sent,"reader_counts":counts,"reader_elapsed":elapsed,
                 "sender_elapsed":sender_elapsed,"elapsed":total_elapsed,"msgs_s":rate,
                 "aggregate_msgs_s":rate * config.readers as f64,"mbps":rate * config.size as f64 / 1e6,
-                "missing":0,"duplicates":0,"gaps":0,"corrupt":0})
-            );
+                "missing":0,"duplicates":0,"gaps":0,"corrupt":0});
+            config.add_pool_metadata(&mut row, true);
+            println!("{row}");
         }
     }
     for (stream, _) in &mut readers {

@@ -35,12 +35,14 @@ use pool::{Slot, find_slot, pool_storage};
 use wire::COPIED;
 
 pub use batch::{
-    BATCH_MAX_BYTES, BATCH_MAX_MESSAGES, BatchKind, COPIED_BATCH_MAX_BODY, REFERENCE_ENTRY_BYTES,
-    prepare_batch, prepare_reference_batch,
+    BATCH_MAX_BYTES, BATCH_MAX_MESSAGES, BatchKind, COPIED_BATCH_MAX_BODY,
+    FANOUT_POOLED_BATCH_COPY_THRESHOLD, POOLED_BATCH_COPY_THRESHOLD, REFERENCE_ENTRY_BYTES,
+    ReceivedBatch, prepare_batch, prepare_reference_batch,
 };
-pub use connection::{Connection, supports};
+pub use connection::{Connection, Received, supports};
+pub use coordination::ReceiveCredits;
 pub use lease::CreditWait;
-pub use pool::{is_pooled, payload_pool};
+pub use pool::{is_pooled, payload_pool, pooled_prefix};
 pub use send_pool::SendPool;
 
 const MAX_LEASES: usize = 4096;
@@ -107,13 +109,16 @@ fn copied_record(message: &Message) -> Result<Message> {
 }
 
 fn check_body_size(message: &Message, length: usize, maximum: Option<usize>) -> Result<()> {
+    let Some(maximum) = maximum else {
+        return Ok(());
+    };
     let wire_body = body(message)?;
     let size = message
         .byte_len()
         .saturating_sub(wire_body.len())
         .saturating_add(length)
         .saturating_add(message.len().saturating_mul(std::mem::size_of::<Payload>()));
-    if maximum.is_some_and(|maximum| size > maximum) {
+    if size > maximum {
         return Err(invalid("SHM body exceeds max_message_size").into());
     }
     Ok(())

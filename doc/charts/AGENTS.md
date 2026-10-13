@@ -88,6 +88,10 @@ separately.
 Generate with `omq_bench chart shm`; runner commands are in
 [`RUNNING_BENCHMARKS.md`](../../RUNNING_BENCHMARKS.md).
 Data: `shm-{pubsub,pushpull,reqrep}.jsonl`. Series: inproc pool, IPC, SHM, SHM pool.
+Require HWM 1000, 4 KiB slabs for tiny throughput, and source pools of
+64 MiB below 1 MiB, 256 MiB with direct memset filling at or above 1 MiB.
+SHM throughput records copy cutoffs of 256 B (point-to-point) or 1 KiB (fan-out).
+Reject cached rows with different settings.
 
 | file | workload |
 |------|----------|
@@ -96,7 +100,7 @@ Data: `shm-{pubsub,pushpull,reqrep}.jsonl`. Series: inproc pool, IPC, SHM, SHM p
 | `shm/reqrep.svg` | CLIENT/SERVER, 0/50 us receive spin |
 
 Use complete verified cohorts; exclude ordinary inproc from the pooled baseline.
-GB/s axes are logarithmic; msg/s stays linear. Latency plots p99 with p50-p99.9
+GB/s and msg/s axes are linear. Latency plots p99 with p50-p99.9
 whiskers, non-spinning above spinning, on 0-120 us axes with 20 us ticks.
 Use the usual subtitle without hostnames or CPU counts.
 

@@ -11,6 +11,13 @@ require 'time'
 
 SIZES = [16, 64, 256, 1024, 4096, 16_384, 131_072, 1_048_576, 8_388_608].freeze
 IMPLEMENTATIONS = %w[inproc ipc shm shm-pool].freeze
+HWM = 1000
+SLAB_BYTES = 4096
+POOL_BYTES = 64 * 1024 * 1024
+LARGE_POOL_BYTES = 256 * 1024 * 1024
+LARGE_POOL_MIN_BODY = 1024 * 1024
+POOLED_BATCH_COPY_THRESHOLD = 256
+FANOUT_POOLED_BATCH_COPY_THRESHOLD = 1024
 BAD = /\bwarn(?:ing)?\b|timeout|\[[WEF]\]/i
 options = { implementations: IMPLEMENTATIONS, sizes: nil, readers: nil,
             output: nil, port: 45_100, pattern: 'radio-dish', recv_spin_us: nil }
@@ -106,11 +113,19 @@ def run_case(implementation, size, readers, port, pattern, recv_spin_us)
   raise 'incomplete rounds' unless rows.map { |row| row.fetch('round') } == [1, 2, 3]
   rows.each do |row|
     raise 'wrong case' unless row['implementation'] == implementation && row['msg_size'] == size && row['readers'] == readers
-    hwm = (32 * 1024 * 1024 / size).clamp(4, 256)
-    slots = %w[inproc shm-pool].include?(implementation) ? (64 * 1024 * 1024 / size).clamp(4, 1024) : 0
-    raise 'wrong queue or pool limits' unless row['send_hwm'] == hwm && row['recv_hwm'] == hwm && row['pool_slots'] == slots
+    slot_bytes = [size, SLAB_BYTES].max
+    pool_bytes = size >= LARGE_POOL_MIN_BODY ? LARGE_POOL_BYTES : POOL_BYTES
+    slots = [pool_bytes / slot_bytes, 1].max
+    slab_bytes = pattern != 'client-server' && size > 55 && size < SLAB_BYTES ? SLAB_BYTES : 0
+    raise 'wrong HWM' unless row['send_hwm'] == HWM && row['recv_hwm'] == HWM
+    raise 'wrong payload pool' unless row['pool_slots'] == slots && row['pool_slot_bytes'] == slot_bytes && row['payload_pool_bytes'] == slots * slot_bytes && row['slab_bytes'] == slab_bytes
     memory_cap = implementation.start_with?('shm') ? 64 * 1024 * 1024 : nil
     raise 'wrong automatic SHM memory limit' unless row['shm_max_memory'] == memory_cap
+    copy_threshold = if implementation.start_with?('shm')
+                       pattern == 'radio-dish' ? FANOUT_POOLED_BATCH_COPY_THRESHOLD : POOLED_BATCH_COPY_THRESHOLD
+                     end
+    raise 'wrong pooled batch copy policy' unless row['pooled_batch_copy_threshold'] == copy_threshold
+    raise 'wrong payload fill' unless row['payload_fill'] == (pattern == 'client-server' ? 'memcpy' : 'memset')
     if pattern != 'radio-dish'
       raise 'wrong spin policy' unless row['recv_spin_us'] == recv_spin_us
     end
@@ -176,8 +191,8 @@ options[:implementations].each_with_index do |implementation, implementation_ind
                              'socket_pair' => options[:pattern],
                              'recv_mode' => options[:pattern] == 'radio-dish' ? 'yield-poll' : 'blocking',
                              'recv_spin_us' => recv_spin_us,
-                             'storage' => { 'inproc' => 'preallocated-heap', 'shm-pool' => 'preallocated-shm' }.fetch(implementation, 'ordinary'),
-                             'copy_in' => true,
+                             'storage' => implementation == 'shm-pool' ? 'preallocated-shm' : 'preallocated-heap',
+                             'copy_in' => latency,
                              'score' => latency ? 'round-trip latency' : 'publications / max(sender elapsed, slowest reader elapsed)',
                              'selection' => latency ? 'middle p99 RTT window' : 'middle throughput window')
         File.open(options[:output], 'a') { |file| file.puts(JSON.generate(row)) }

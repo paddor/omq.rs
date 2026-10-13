@@ -8,7 +8,7 @@ use omq_proto::{Payload, message::PayloadOwner};
 
 use crate::{lease::Borrowed, mapping::Mapping};
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(super) struct Views(Arc<Cache>);
 
 #[derive(Debug)]

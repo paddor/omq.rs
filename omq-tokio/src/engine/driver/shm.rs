@@ -32,6 +32,7 @@ pub(super) struct Outbound {
 struct PreparedBatch {
     message: Message,
     count: usize,
+    work_bytes: usize,
     kind: omq_shm::BatchKind,
 }
 
@@ -64,7 +65,9 @@ impl Outbound {
         let mut budget = DrainBudget::new(max_msgs, max_batch_bytes());
         self.pending.push_back(first.clone());
         let _ = budget.account(std::mem::size_of::<Message>());
-        while !budget.exhausted() && started.elapsed() < OUTBOUND_BATCH_TIME {
+        while !budget.exhausted()
+            && (!budget.msgs().is_multiple_of(32) || started.elapsed() < OUTBOUND_BATCH_TIME)
+        {
             let Some(message) = try_recv() else {
                 break;
             };
@@ -87,10 +90,8 @@ impl Outbound {
                 if !state.encode_batch_and_frame(&batch.message, batch.kind, frames)? {
                     break;
                 }
-                for _ in 0..batch.count {
-                    let message = self.pending.pop_front().expect("packed SHM message");
-                    let _ = budget.account(batch_work_bytes(&message, batch.kind));
-                }
+                let _ = budget.account_many(batch.count, batch.work_bytes);
+                self.pending.drain(..batch.count);
                 self.batch = None;
                 continue;
             }
@@ -113,7 +114,9 @@ fn prepare_batch(
     pending: &VecDeque<Message>,
     drain: &DrainBudget,
 ) -> Result<Option<PreparedBatch>> {
-    use omq_shm::{BATCH_MAX_MESSAGES, BatchKind, COPIED_BATCH_MAX_BODY, COPY_THRESHOLD};
+    use omq_shm::{
+        BATCH_MAX_MESSAGES, BatchKind, COPIED_BATCH_MAX_BODY, POOLED_BATCH_COPY_THRESHOLD,
+    };
 
     if pending.len() < 2 || state.batch_capacity() < 2 || drain.remaining_msgs() < 2 {
         return Ok(None);
@@ -125,12 +128,12 @@ fn prepare_batch(
         return Ok(None);
     };
     let body_index = first.len() - 1;
-    let first_size = first.part_slice(body_index).expect("SHM body").len();
-    let kind = if first_size > COPY_THRESHOLD && omq_shm::is_pooled(first) {
-        BatchKind::Referenced
-    } else {
-        BatchKind::Copied
-    };
+    let kind = BatchKind::for_message(first, POOLED_BATCH_COPY_THRESHOLD);
+    let copy_limit = first
+        .part_slice(body_index)
+        .expect("SHM body")
+        .len()
+        .clamp(POOLED_BATCH_COPY_THRESHOLD, COPIED_BATCH_MAX_BODY);
     let limit = state.batch_capacity().min(drain.remaining_msgs());
     let mut budget = DrainBudget::new(limit, max_batch_bytes().saturating_sub(drain.bytes()));
     let mut messages = smallvec::SmallVec::<[&Message; BATCH_MAX_MESSAGES]>::new();
@@ -144,8 +147,7 @@ fn prepare_batch(
         }
         let size = message.part_slice(body_index).expect("SHM body").len();
         match kind {
-            BatchKind::Copied if size > COPIED_BATCH_MAX_BODY => break,
-            BatchKind::Referenced if !omq_shm::is_pooled(message) => break,
+            BatchKind::Copied if size > copy_limit => break,
             _ => {}
         }
         let bytes = batch_work_bytes(message, kind);
@@ -155,14 +157,26 @@ fn prepare_batch(
         messages.push(message);
         let _ = budget.account(bytes);
     }
+    if matches!(kind, BatchKind::Referenced) {
+        messages.truncate(omq_shm::pooled_prefix(&messages));
+    }
     if messages.len() < 2 {
         return Ok(None);
     }
+    let work_bytes = if messages.len() == budget.msgs() {
+        budget.bytes()
+    } else {
+        messages
+            .iter()
+            .map(|message| batch_work_bytes(message, kind))
+            .sum()
+    };
     Ok(state
         .prepare_batch(&messages, kind)?
         .map(|message| PreparedBatch {
             message,
             count: messages.len(),
+            work_bytes,
             kind,
         }))
 }

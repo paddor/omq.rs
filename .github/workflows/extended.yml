@@ -75,6 +75,7 @@ jobs:
           for seed in {0..31}; do
             export MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-seed=$seed ${{ matrix.flags }}"
             cargo miri test -p omq-shm --lib
+            cargo miri test -p omq-proto --lib slab
           done
 
   fuzz:

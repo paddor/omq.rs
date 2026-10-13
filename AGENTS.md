@@ -143,6 +143,8 @@ Lints: `missing_debug_implementations` = **deny**,
 
 ## Conventions
 
+- Run benchmarks and profilers on this host only. Never run them over SSH.
+- Keep benchmark HWM independent of batch limits and pool capacity. SHM charts use HWM 1000.
 - **HARD RULE: Never create documentation files unless the user explicitly
   asks to create them.** Feature work does not authorize new docs; update
   existing files instead.

@@ -91,8 +91,8 @@ impl SendPool {
             return Ok(None);
         };
         match kind {
-            BatchKind::Copied => crate::prepare_batch(&pool, messages),
-            BatchKind::Referenced => crate::prepare_reference_batch(&pool, messages),
+            BatchKind::Copied => batch::prepare_copied_validated(&pool, messages, length),
+            BatchKind::Referenced => batch::prepare_references_validated(&pool, messages, length),
         }
     }
 

@@ -79,6 +79,61 @@ fn borrow(
 }
 
 #[test]
+fn slab_slices_keep_borrowed_views_live_while_another_slot_is_mutated() {
+    let sources = payload_pool([(1024, 2)]).unwrap();
+    let mut buffer = sources.try_buffer(1024).unwrap();
+    for (index, body) in buffer
+        .writable()
+        .as_chunks_mut::<64>()
+        .0
+        .iter_mut()
+        .enumerate()
+    {
+        body.fill(index as u8);
+    }
+    buffer.set_len(1024).unwrap();
+    let mut bytes: bytes::Bytes = buffer.into_payload().into();
+    let messages: Vec<_> = (0..16).map(|_| Message::from(bytes.split_to(64))).collect();
+    drop(bytes);
+    let metadata = payload_pool([(1024, 1)]).unwrap();
+    let packed = prepare_reference_batch(&metadata, &messages.iter().collect::<Vec<_>>())
+        .unwrap()
+        .unwrap();
+    let slot = find_slot(packed.part_slice(0).unwrap()).unwrap();
+    let regions = slot.state.lock().unwrap().regions.clone();
+    let table = table(1);
+    let reference = publish(&packed, &table, 0, GENERATION_STEP, wire::REFERENCE_BATCH);
+    let views = Views::new(1);
+    let received = Message::from(borrow(&packed, &table, reference, &views));
+    let mut cursor = batch::ReceivedBatch::referenced(&received, None, &views, |id, token| {
+        regions
+            .iter()
+            .find(|region| region.id == id && region.token == token)
+            .cloned()
+    })
+    .unwrap();
+    let held = cursor
+        .pop_front()
+        .unwrap()
+        .part_bytes(0)
+        .unwrap()
+        .slice(1..17);
+    drop(cursor);
+    drop(received);
+    drop(packed);
+    drop(messages);
+    table.close_reader();
+    let spare = sources.message(1024, |body| body.fill(9)).unwrap();
+    assert_eq!(spare.part_slice(0).unwrap(), &[9; 1024]);
+    assert_eq!(held.as_ref(), &[0; 16]);
+    drop(spare);
+    assert_eq!(sources.available(), 1);
+    drop(held);
+    assert_eq!(sources.available(), 2);
+    assert_eq!(metadata.available(), 1);
+}
+
+#[test]
 fn disjoint_slots_and_slices_survive_other_slot_mutation() {
     let pool = payload_pool([(128, 2)]).unwrap();
     let first = pool.try_message(128, |body| body.fill(1)).unwrap().unwrap();
@@ -463,6 +518,217 @@ fn copied_batch_children_hold_the_shared_lease_until_the_final_byte_view() {
 }
 
 #[test]
+fn shared_batch_byte_slices_survive_concurrent_final_drops() {
+    for referenced in [false, true] {
+        let sources = payload_pool([(128, 3)]).unwrap();
+        let metadata = payload_pool([(1024, 1)]).unwrap();
+        let messages: Vec<_> = (0..3)
+            .map(|value| sources.message(128, |body| body.fill(value)).unwrap())
+            .collect();
+        let bodies: Vec<_> = messages.iter().collect();
+        let packed = if referenced {
+            prepare_reference_batch(&metadata, &bodies)
+        } else {
+            prepare_batch(&metadata, &bodies)
+        }
+        .unwrap()
+        .unwrap();
+        let slot = find_slot(packed.part_slice(0).unwrap()).unwrap();
+        let regions = slot.state.lock().unwrap().regions.clone();
+        let table = table(1);
+        let kind = if referenced {
+            wire::REFERENCE_BATCH
+        } else {
+            wire::COPIED_BATCH
+        };
+        let reference = publish(&packed, &table, 0, GENERATION_STEP, kind);
+        let views = Views::new(1);
+        let received = Message::from(borrow(&packed, &table, reference, &views));
+        let mut decoded = VecDeque::new();
+        if referenced {
+            batch::decode_references(
+                &received,
+                None,
+                &views,
+                |id, token| {
+                    regions
+                        .iter()
+                        .find(|region| region.id == id && region.token == token)
+                        .cloned()
+                },
+                &mut decoded,
+            )
+            .unwrap();
+        } else {
+            batch::decode(&received, None, &views, &mut decoded).unwrap();
+        }
+        assert_eq!(decoded.iter().collect::<Vec<_>>(), bodies);
+        assert!(
+            decoded
+                .iter()
+                .all(|message| message.last_payload().unwrap().as_chunk().is_some())
+        );
+        let retained = decoded[1].part_bytes(0).unwrap().slice(3..19);
+        let bytes: Vec<_> = decoded
+            .iter()
+            .map(|message| message.part_bytes(0).unwrap())
+            .collect();
+        drop(decoded);
+        drop(received);
+        drop(packed);
+        drop(messages);
+        drop(slot);
+        drop(regions);
+        drop(views);
+        table.close_reader();
+        assert_eq!(metadata.available(), 0);
+        let handles: Vec<_> = bytes
+            .into_iter()
+            .enumerate()
+            .map(|(index, bytes)| {
+                std::thread::spawn(move || assert_eq!(bytes.as_ref(), vec![index as u8; 128]))
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        assert_eq!(metadata.available(), 0);
+        assert_eq!(retained.as_ref(), &[1; 16]);
+        drop(retained);
+        assert_eq!(metadata.available(), 1);
+        assert_eq!(sources.available(), 3);
+    }
+}
+
+#[test]
+fn reference_batch_gaps_remain_writable_while_neighbor_views_are_alive() {
+    for size in [64, 128] {
+        let sources = payload_pool([(128, 3)]).unwrap();
+        let metadata = payload_pool([(256, 1)]).unwrap();
+        let first = sources.message(size, |body| body.fill(1)).unwrap();
+        let gap = sources.message(128, |body| body.fill(2)).unwrap();
+        let last = sources.message(size, |body| body.fill(3)).unwrap();
+        let packed = prepare_reference_batch(&metadata, &[&first, &last])
+            .unwrap()
+            .unwrap();
+        let slot = find_slot(packed.part_slice(0).unwrap()).unwrap();
+        let regions = slot.state.lock().unwrap().regions.clone();
+        let table = table(1);
+        let reference = publish(&packed, &table, 0, GENERATION_STEP, wire::REFERENCE_BATCH);
+        let views = Views::new(1);
+        let received = Message::from(borrow(&packed, &table, reference, &views));
+        let mut decoded = VecDeque::new();
+        batch::decode_references(
+            &received,
+            None,
+            &views,
+            |id, token| {
+                regions
+                    .iter()
+                    .find(|region| region.id == id && region.token == token)
+                    .cloned()
+            },
+            &mut decoded,
+        )
+        .unwrap();
+        assert!(
+            decoded
+                .iter()
+                .all(|message| message.last_payload().unwrap().as_chunk().is_none())
+        );
+        drop(first);
+        drop(last);
+        drop(packed);
+        drop(received);
+        drop(gap);
+        let reused = sources
+            .try_message(128, |body| body.fill(9))
+            .unwrap()
+            .unwrap();
+        assert_eq!(reused.part_slice(0).unwrap(), &[9; 128]);
+        assert_eq!(decoded[0].part_slice(0).unwrap(), vec![1; size]);
+        assert_eq!(decoded[1].part_slice(0).unwrap(), vec![3; size]);
+        drop(reused);
+        drop(decoded);
+        assert_eq!(sources.available(), 3);
+        assert_eq!(metadata.available(), 1);
+    }
+}
+
+#[test]
+fn reference_run_validation_checks_every_body_and_retains_empty_views() {
+    #[derive(Debug)]
+    struct EditedBatch {
+        bytes: Vec<u8>,
+        _source: Message,
+    }
+    impl AsRef<[u8]> for EditedBatch {
+        fn as_ref(&self) -> &[u8] {
+            &self.bytes
+        }
+    }
+    let sources = payload_pool([(128, 4)]).unwrap();
+    let metadata = payload_pool([(256, 1)]).unwrap();
+    let messages: Vec<_> = (0..4)
+        .map(|value| sources.message(128, |body| body.fill(value)).unwrap())
+        .collect();
+    let packed = prepare_reference_batch(&metadata, &messages.iter().collect::<Vec<_>>())
+        .unwrap()
+        .unwrap();
+    let slot = find_slot(packed.part_slice(0).unwrap()).unwrap();
+    let regions = slot.state.lock().unwrap().regions.clone();
+    let views = Views::new(1);
+    let lookup = |id, token| {
+        regions
+            .iter()
+            .find(|region| region.id == id && region.token == token)
+            .cloned()
+    };
+    let mut invalid = packed.part_slice(0).unwrap().to_vec();
+    invalid[batch::COUNT_BYTES + batch::SIZE_BYTES..batch::COUNT_BYTES + 2 * batch::SIZE_BYTES]
+        .copy_from_slice(&256_u64.to_le_bytes());
+    let mut decoded = VecDeque::new();
+    assert!(
+        batch::decode_references(
+            &Message::from_slice(&invalid),
+            Some(128),
+            &views,
+            lookup,
+            &mut decoded
+        )
+        .is_err()
+    );
+    assert!(
+        decoded.is_empty(),
+        "validate a whole run before borrowing its span"
+    );
+    let mut bytes = packed.part_slice(0).unwrap().to_vec();
+    bytes[batch::COUNT_BYTES + batch::SIZE_BYTES..batch::COUNT_BYTES + 2 * batch::SIZE_BYTES]
+        .fill(0);
+    let edited = Message::from(bytes::Bytes::from_owner(EditedBatch {
+        bytes,
+        _source: packed.clone(),
+    }));
+    batch::decode_references(&edited, None, &views, lookup, &mut decoded).unwrap();
+    assert_eq!(decoded[1].part_slice(0).unwrap(), []);
+    assert!(decoded[1].last_payload().unwrap().as_chunk().is_none());
+    assert!(decoded[2].last_payload().unwrap().as_chunk().is_some());
+    let empty = decoded[1].part_bytes(0).unwrap();
+    drop(decoded);
+    drop(edited);
+    drop(packed);
+    drop(messages);
+    drop(slot);
+    drop(regions);
+    drop(views);
+    assert!(empty.is_empty());
+    assert_eq!(sources.available(), 0);
+    drop(empty);
+    assert_eq!(sources.available(), 4);
+    assert_eq!(metadata.available(), 1);
+}
+
+#[test]
 fn referenced_batches_retain_every_source_until_all_recipient_views_release() {
     let sources = payload_pool([(256, 2)]).unwrap();
     let metadata = payload_pool([(256, 1)]).unwrap();
@@ -623,7 +889,7 @@ fn inline_copied_batch_children_do_not_pin_shared_storage() {
 }
 
 #[test]
-fn partial_batch_rejection_returns_every_view_when_discarded() {
+fn rejected_batch_creates_no_views_and_releases_its_storage() {
     let pool = payload_pool([(512, 1)]).unwrap();
     let messages = [
         Message::with_group("g", vec![1; 64]),
@@ -641,11 +907,9 @@ fn partial_batch_rejection_returns_every_view_when_discarded() {
     );
     let mut decoded = VecDeque::new();
     assert!(batch::decode(&received, Some(200), &views, &mut decoded).is_err());
-    assert_eq!(decoded.len(), 1);
+    assert!(decoded.is_empty());
     drop(packed);
     drop(received);
-    assert_eq!(pool.available(), 0);
-    decoded.clear();
     assert_eq!(pool.available(), 1);
 }
 
@@ -802,4 +1066,169 @@ fn carrier_empty_buffers_and_iovec_limits_preserve_every_nonempty_byte() {
     assert_eq!(carrier.write(&mapping, &[IoSlice::new(b"x")]).unwrap(), 1);
     assert_eq!(carrier.read(&mapping, &mut output).unwrap(), 1);
     assert_eq!(output[0], b'x');
+}
+
+#[test]
+fn lazy_batch_cursors_and_retained_children_keep_the_lease_across_threads() {
+    for referenced in [false, true] {
+        let sources = payload_pool([(128, 4)]).unwrap();
+        let messages: Vec<_> = (0..4_u8)
+            .map(|seq| sources.message(128, |body| body.fill(seq)).unwrap())
+            .collect();
+        let (mut cursor, metadata, _table) = received_cursor(&messages, referenced);
+        let mut prefix = cursor.take_prefix(2);
+        drop(messages);
+        let retained = prefix
+            .pop_front()
+            .unwrap()
+            .part_bytes(0)
+            .unwrap()
+            .slice(17..97);
+        std::thread::spawn(move || {
+            assert_eq!(
+                prefix.pop_front().unwrap().part_slice(0).unwrap(),
+                &[1; 128]
+            );
+            assert!(prefix.pop_front().is_none());
+        })
+        .join()
+        .unwrap();
+        assert_eq!(
+            cursor.pop_front().unwrap().part_slice(0).unwrap(),
+            &[2; 128]
+        );
+        assert_eq!(
+            cursor.pop_front().unwrap().part_slice(0).unwrap(),
+            &[3; 128]
+        );
+        drop(cursor);
+        assert_eq!(metadata.available(), 0);
+        assert_eq!(retained.as_ref(), &[0; 80]);
+        drop(retained);
+        assert_eq!(metadata.available(), 1);
+        assert_eq!(sources.available(), 4);
+    }
+}
+
+fn received_cursor(
+    messages: &[Message],
+    referenced: bool,
+) -> (ReceivedBatch, omq_proto::PayloadPool, Arc<Table>) {
+    let metadata = payload_pool([(8192, 1)]).unwrap();
+    let refs: Vec<_> = messages.iter().collect();
+    let packed = if referenced {
+        prepare_reference_batch(&metadata, &refs)
+    } else {
+        prepare_batch(&metadata, &refs)
+    }
+    .unwrap()
+    .unwrap();
+    let slot = find_slot(crate::body(&packed).unwrap()).unwrap();
+    let regions = slot.state.lock().unwrap().regions.clone();
+    let table = table(1);
+    let kind = if referenced {
+        wire::REFERENCE_BATCH
+    } else {
+        wire::COPIED_BATCH
+    };
+    let reference = publish(&packed, &table, 0, GENERATION_STEP, kind);
+    let views = Views::new(1);
+    let mut received = packed.clone();
+    received.replace_last_payload(borrow(&packed, &table, reference, &views));
+    let cursor = if referenced {
+        ReceivedBatch::referenced(&received, None, &views, |id, token| {
+            regions
+                .iter()
+                .find(|region| region.id == id && region.token == token)
+                .cloned()
+        })
+    } else {
+        ReceivedBatch::copied(&received, None, &views)
+    }
+    .unwrap();
+    (cursor, metadata, table)
+}
+
+#[test]
+fn variable_batch_cursors_preserve_split_offsets_routes_and_final_views() {
+    for referenced in [false, true] {
+        for grouped in [false, true] {
+            let sizes = if referenced {
+                [56, 64, 256, 257, 511, 512, 1024, 1025]
+            } else {
+                [0, 1, 55, 56, 64, 256, 257, 1024]
+            };
+            let sources = payload_pool([(2048, sizes.len())]).unwrap();
+            let messages: Vec<_> = sizes
+                .iter()
+                .enumerate()
+                .map(|(index, &size)| {
+                    let body = sources
+                        .message(size, |body| body.fill(index as u8))
+                        .unwrap();
+                    let message = if grouped {
+                        Message::with_prefix(b"g".as_slice().into(), body)
+                    } else {
+                        body
+                    };
+                    message.with_routing_id(7)
+                })
+                .collect();
+            let (mut cursor, metadata, table) = received_cursor(&messages, referenced);
+            cursor.set_routing_id(99);
+            drop(messages);
+            let check = move |message: &Message, index: usize| {
+                assert_eq!(message.len(), 1 + usize::from(grouped));
+                assert_eq!(message.routing_id(), Some(99));
+                assert_eq!(
+                    crate::body(message).unwrap(),
+                    vec![index as u8; sizes[index]]
+                );
+                if grouped {
+                    assert_eq!(message.part_slice(0).unwrap(), b"g");
+                }
+            };
+            assert!(cursor.take_prefix(0).is_empty());
+            check(&cursor.pop_front().unwrap(), 0);
+            let mut prefix = cursor.take_prefix(3);
+            let mut nested = prefix.take_prefix(1);
+            check(&nested.pop_front().unwrap(), 1);
+            assert!(nested.pop_front().is_none());
+            drop(nested);
+            let mut out = Vec::new();
+            assert_eq!(prefix.drain_into(&mut out, usize::MAX, |_| false), 1);
+            assert_eq!(prefix.drain_into(&mut out, usize::MAX, |_| true), 1);
+            check(&out[0], 2);
+            check(&out[1], 3);
+            out.clear();
+            drop(prefix);
+            let mut clone = cursor.clone();
+            std::thread::spawn(move || {
+                for index in 4..sizes.len() {
+                    check(&clone.pop_front().unwrap(), index);
+                }
+                assert!(clone.pop_front().is_none());
+            })
+            .join()
+            .unwrap();
+            let first = cursor.pop_front().unwrap();
+            let held = first.part_bytes(first.len() - 1).unwrap();
+            drop(first);
+            let mut tail = cursor.take_prefix(usize::MAX);
+            assert!(cursor.is_empty());
+            drop(cursor);
+            assert_eq!(tail.drain_into(&mut out, usize::MAX, |_| true), 3);
+            for (index, message) in out.iter().enumerate() {
+                check(message, index + 5);
+            }
+            drop(out);
+            drop(tail);
+            table.close_reader();
+            assert_eq!(metadata.available(), 0);
+            assert_eq!(held.as_ref(), vec![4; sizes[4]]);
+            drop(held);
+            assert_eq!(metadata.available(), 1);
+            assert_eq!(sources.available(), sizes.len());
+        }
+    }
 }

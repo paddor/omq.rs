@@ -327,6 +327,26 @@ impl YringSink {
 }
 
 impl RecvSink {
+    #[cfg(target_os = "linux")]
+    pub(super) fn batch_sink(&mut self) -> Option<&mut crate::socket::fanin::Sink> {
+        match self {
+            Self::Fanin(sink) => Some(sink),
+            Self::Server(server) => server.sink.batch_sink(),
+            _ => None,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn push_batch(&mut self, mut batch: omq_shm::ReceivedBatch) -> bool {
+        match self {
+            Self::Fanin(sink) => sink.push_batch(batch),
+            Self::Server(server) => {
+                batch.set_routing_id(server.routing_id);
+                server.sink.push_batch(batch)
+            }
+            _ => unreachable!("batch receive sink"),
+        }
+    }
     /// Create a shared authenticated receive sink. Every connection gets a
     /// clone of the sender, so messages from all peers retain their own
     /// handshake properties in one application-facing queue.
@@ -722,6 +742,7 @@ impl RecvSink {
         match self {
             Self::Peer(sink) => sink.blocked(),
             Self::Fanin(sink) => sink.blocked(),
+            Self::Server(server) => server.sink.peer_blocked(),
             _ => false,
         }
     }
@@ -730,6 +751,7 @@ impl RecvSink {
         match self {
             Self::Peer(sink) => sink.retry_pending(),
             Self::Fanin(sink) => sink.retry_pending(),
+            Self::Server(server) => server.sink.retry_peer_pending(),
             _ => true,
         }
     }

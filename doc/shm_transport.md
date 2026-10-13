@@ -27,8 +27,11 @@ separate payload pools. Bodies through 55 bytes use the shared carrier ring.
 Caller threads only enqueue messages.
 
 `omq_tokio::shm_payload_pool([(bytes, slots), ...])` preallocates producer
-storage. Prepared bodies use existing slots without copying. `try_` preparation
+storage. Preparation fills existing slots directly. `try_` preparation
 never grows the pool; ordinary preparation retains heap fallback.
+`pool.message(size, fill)` accepts varying sizes and allocates separately when no
+slot fits. Batch producers can fill one buffer, freeze it into `Bytes`, and slice
+variable-sized messages; a retained slice pins the whole buffer.
 
 ## Batches and leases
 
@@ -36,15 +39,20 @@ Already queued messages with the same envelope may share a batch:
 
 | Bodies | Shared layout |
 |--------|---------------|
-| Ordinary | count, little-endian `u64` sizes, contiguous payloads |
-| SHM pool | count, little-endian `u64` sizes, region coordinates |
+| Ordinary or small pooled | count, little-endian `u64` sizes, contiguous payloads |
+| Larger SHM pool | count, little-endian `u64` sizes, region coordinates |
+
+Batch selection copies leading pooled bodies through 256 B for point-to-point
+traffic and 1 KiB for fan-out. Single-message sends keep their storage policy.
 
 Limits: 256 messages, 256 KiB shared storage/metadata, 16 KiB per copied body.
 Referenced payload bytes do not limit batches. Batching never waits for more messages.
 Each recipient holds one lease per body or batch; every message counts against
-send HWM. Final owners complete leases through shared atomics. Clones and byte
-views retain ownership; a borrowed batch body retains the whole batch lease.
+send and receive HWM. Final owners complete leases through shared atomics.
+Clones and byte views retain ownership; a borrowed body retains the batch lease.
 Slots become writable after local uniqueness and all recipient completions.
+Receivers validate batches on the IO thread and enqueue one descriptor;
+application receive creates the non-inline payload views.
 
 Disconnect cancels unread leases. Borrowed storage remains pinned until final
 drop or pidfd-confirmed reader exit; EOF cannot reclaim it. Mappings outlive

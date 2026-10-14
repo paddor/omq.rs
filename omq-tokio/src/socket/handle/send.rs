@@ -230,11 +230,31 @@ impl Socket {
         messages: &mut VecDeque<Message>,
         max: usize,
     ) -> core::result::Result<usize, TrySendError> {
+        let max = max.min(messages.len());
+        if max == 0 {
+            return Ok(0);
+        }
         match self.inner.socket_type {
-            SocketType::Push | SocketType::Scatter => self
-                .inner
-                .send_submitter
-                .try_send_many(messages, max.min(messages.len())),
+            SocketType::Push | SocketType::Scatter => {
+                let max = max.min(omq_proto::flow::DrainBudget::WORKER.remaining_msgs());
+                let max = if self.inner.socket_type == SocketType::Scatter {
+                    messages
+                        .iter()
+                        .take(max)
+                        .position(|message| message.len() != 1)
+                        .unwrap_or(max)
+                } else {
+                    max
+                };
+                if max == 0 {
+                    // Report an invalid front message through the scalar check.
+                    // A valid prefix is submitted first, subject to normal HWM.
+                    return messages
+                        .pop_front()
+                        .map_or(Ok(0), |message| self.try_send(message).map(|()| 1));
+                }
+                self.inner.send_submitter.try_send_many(messages, max)
+            }
             _ => {
                 let mut sent = 0usize;
                 while sent < max {

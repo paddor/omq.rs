@@ -124,6 +124,9 @@ async fn scatter_distributes_over_multiple_shm_and_mixed_connections() {
             receivers.push(gather);
         }
         connect_all(&scatter, &bound).await;
+        for receiver in &receivers {
+            receiver.wait_connected(1, DEADLINE).await.unwrap();
+        }
         let count = receivers.len() * 4;
         let (tx, mut rx) = tokio::sync::mpsc::channel(count);
         let mut tasks = tokio::task::JoinSet::new();

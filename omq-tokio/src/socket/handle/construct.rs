@@ -26,7 +26,7 @@ impl Socket {
         Self::try_new(socket_type, options).expect("invalid socket options")
     }
 
-    /// Create a socket, returning configuration errors instead of panicking.
+    /// Create a socket on the current Tokio runtime.
     ///
     /// # Errors
     /// Returns an error if the options are invalid for the protocol or socket type.
@@ -62,7 +62,10 @@ impl Socket {
             .expect("invalid socket options")
     }
 
-    /// Create a socket with a receive sink, returning configuration errors.
+    /// Create a socket with a receive sink on the current Tokio runtime.
+    ///
+    /// The actor uses this sink for the first peer's driver and refills it
+    /// after disconnects.
     ///
     /// # Errors
     /// Returns an error if the options are invalid for the protocol or socket type.

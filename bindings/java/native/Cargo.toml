@@ -15,11 +15,13 @@ name = "omq-java-peer"
 path = "src/bin/peer.rs"
 
 [features]
-default = ["plain", "curve", "lz4", "zstd"]
+default = ["plain", "curve", "lz4", "zstd", "quic", "dart"]
 plain = ["omq-proto/plain", "omq-tokio/plain"]
 curve = ["omq-proto/curve", "omq-tokio/curve"]
 lz4 = ["omq-proto/lz4", "omq-tokio/lz4"]
 zstd = ["omq-proto/zstd", "omq-tokio/zstd"]
+quic = ["omq-proto/quic", "omq-tokio/quic"]
+dart = ["omq-proto/dart", "omq-tokio/dart"]
 
 [dependencies]
 bytes = "1.12.0"

@@ -845,6 +845,55 @@ public final class Socket implements AutoCloseable {
         }
     }
 
+    /** Sets the QUIC server certificate and private key before first I/O. */
+    public Socket quicServerCertificate(byte[] certPem, byte[] keyPem) {
+        Objects.requireNonNull(certPem, "certPem");
+        Objects.requireNonNull(keyPem, "keyPem");
+        operationLock.lock();
+        try {
+            withHandleVoid(handle -> Native.socketSetQuicServerCertificate(
+                    handle, certPem.clone(), keyPem.clone()));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
+    }
+
+    /** Sets QUIC trust anchors before first I/O. */
+    public Socket quicTrustPem(byte[] trustPem) {
+        Objects.requireNonNull(trustPem, "trustPem");
+        operationLock.lock();
+        try {
+            withHandleVoid(handle -> Native.socketSetQuicTrustPem(handle, trustPem.clone()));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
+    }
+
+    /** Enables or disables the system certificate store for QUIC. */
+    public Socket quicTrustSystem(boolean enabled) {
+        operationLock.lock();
+        try {
+            withHandleVoid(handle -> Native.socketSetQuicTrustSystem(handle, enabled ? 1 : 0));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
+    }
+
+    /** Sets the verified QUIC server name before first I/O. */
+    public Socket quicServerName(String serverName) {
+        Objects.requireNonNull(serverName, "serverName");
+        operationLock.lock();
+        try {
+            withHandleVoid(handle -> Native.socketSetQuicServerName(handle, serverName));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
+    }
+
     /** Sets compression threshold in bytes before first I/O. */
     public Socket compressionThreshold(long threshold) {
         operationLock.lock();

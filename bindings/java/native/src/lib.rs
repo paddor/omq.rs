@@ -3470,6 +3470,89 @@ pub extern "system" fn Java_io_omq_Native_socketSetCompressionLevel(
     });
 }
 
+#[cfg(feature = "quic")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_omq_Native_socketSetQuicServerCertificate(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    cert_pem: JByteArray<'_>,
+    key_pem: JByteArray<'_>,
+) {
+    guard(&mut env, (), |env| {
+        let result = (|| {
+            let cert_pem = byte_array(env, cert_pem)?;
+            let key_pem = byte_array(env, key_pem)?;
+            socket_from_handle(handle)?.set_option(|options| {
+                options.quic.server_cert_pem = Some(cert_pem);
+                options.quic.server_key_pem = Some(key_pem);
+            })
+        })();
+        if let Err(error) = result {
+            throw_omq(env, error);
+        }
+    });
+}
+
+#[cfg(feature = "quic")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_omq_Native_socketSetQuicTrustPem(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    trust_pem: JByteArray<'_>,
+) {
+    guard(&mut env, (), |env| {
+        let result = (|| {
+            let trust_pem = byte_array(env, trust_pem)?;
+            socket_from_handle(handle)?.set_option(|options| {
+                options.quic.trust_pem = Some(trust_pem);
+            })
+        })();
+        if let Err(error) = result {
+            throw_omq(env, error);
+        }
+    });
+}
+
+#[cfg(feature = "quic")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_omq_Native_socketSetQuicTrustSystem(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    enabled: jint,
+) {
+    guard(&mut env, (), |env| {
+        if let Err(error) = socket_from_handle(handle).and_then(|socket| {
+            socket.set_option(|options| options.quic.trust_system = enabled != 0)
+        }) {
+            throw_omq(env, error);
+        }
+    });
+}
+
+#[cfg(feature = "quic")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_omq_Native_socketSetQuicServerName(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    server_name: JString<'_>,
+) {
+    guard(&mut env, (), |env| {
+        let result = (|| {
+            let server_name = java_string(env, server_name)?;
+            socket_from_handle(handle)?.set_option(|options| {
+                options.quic.server_name = Some(server_name);
+            })
+        })();
+        if let Err(error) = result {
+            throw_omq(env, error);
+        }
+    });
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_io_omq_Native_socketSetPlainServer(
     mut env: JNIEnv<'_>,

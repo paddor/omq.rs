@@ -4,7 +4,12 @@ use crate::socket::actor::{SocketDriver, spawn_driver};
 use crate::socket::monitor::MonitorPublisher;
 use crate::socket::recv::{SpscAwareRecv, SpscHandles};
 use crate::transport::inproc::InprocRegistry;
-use omq_proto::{options::Options, proto::SocketType, type_state::TypeState};
+use omq_proto::{
+    error::{Error, Result},
+    options::Options,
+    proto::SocketType,
+    type_state::TypeState,
+};
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::mpsc;
@@ -16,10 +21,16 @@ impl Socket {
     ///
     /// # Panics
     ///
-    /// Panics if `options` violates ZMTP protocol limits (identity > 255
-    /// bytes, heartbeat TTL overflow, etc.) or if `conflate` is set on an
-    /// incompatible socket type.
+    /// Panics if the options are invalid for the protocol or socket type.
     pub fn new(socket_type: SocketType, options: Options) -> Self {
+        Self::try_new(socket_type, options).expect("invalid socket options")
+    }
+
+    /// Create a socket, returning configuration errors instead of panicking.
+    ///
+    /// # Errors
+    /// Returns an error if the options are invalid for the protocol or socket type.
+    pub fn try_new(socket_type: SocketType, options: Options) -> Result<Self> {
         Self::new_inner(
             socket_type,
             options,
@@ -36,6 +47,7 @@ impl Socket {
         inproc_registry: Arc<InprocRegistry>,
     ) -> Self {
         Self::new_inner(socket_type, options, None, io_pool, inproc_registry)
+            .expect("invalid socket options")
     }
 
     /// Like [`Socket::new`], but installs a `RecvSinkConfig` that the
@@ -46,6 +58,19 @@ impl Socket {
         options: Options,
         config: Arc<crate::engine::RecvSinkConfig>,
     ) -> Self {
+        Self::try_new_with_recv_sink_config(socket_type, options, config)
+            .expect("invalid socket options")
+    }
+
+    /// Create a socket with a receive sink, returning configuration errors.
+    ///
+    /// # Errors
+    /// Returns an error if the options are invalid for the protocol or socket type.
+    pub fn try_new_with_recv_sink_config(
+        socket_type: SocketType,
+        options: Options,
+        config: Arc<crate::engine::RecvSinkConfig>,
+    ) -> Result<Self> {
         Self::new_inner(
             socket_type,
             options,
@@ -63,6 +88,7 @@ impl Socket {
         inproc_registry: Arc<InprocRegistry>,
     ) -> Self {
         Self::new_inner(socket_type, options, Some(config), io_pool, inproc_registry)
+            .expect("invalid socket options")
     }
 
     fn new_inner(
@@ -71,13 +97,11 @@ impl Socket {
         recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
         io_pool: &crate::context::IoPoolHandle,
         inproc_registry: Arc<InprocRegistry>,
-    ) -> Self {
+    ) -> Result<Self> {
         if socket_type == SocketType::Peer && options.max_message_size.is_none() {
             options.max_message_size = Some(crate::engine::peer_send::DEFAULT_MAX_BYTES);
         }
-        options
-            .validate()
-            .expect("Options::validate failed in Socket::new");
+        options.validate()?;
         let latency_profile = options.workload_profile.unwrap_or(
             if matches!(socket_type, SocketType::Req | SocketType::Rep) {
                 omq_proto::WorkloadProfile::Latency
@@ -86,12 +110,11 @@ impl Socket {
             },
         ) == omq_proto::WorkloadProfile::Latency
             && !options.mechanism.has_frame_transform();
-        assert!(
-            !options.conflate || crate::routing::supports_conflate(socket_type),
-            "Options::conflate(true) is not valid for socket type {socket_type:?} \
-             - only PUSH/PULL/PUB/SUB/XPUB/XSUB/RADIO/DISH/DEALER/SCATTER/GATHER \
-             carry queueable single-message-state semantics"
-        );
+        if options.conflate && !crate::routing::supports_conflate(socket_type) {
+            return Err(Error::Config(format!(
+                "Options::conflate(true) is not supported for socket type {socket_type:?}"
+            )));
+        }
         let cancel = CancellationToken::new();
         let (cmd_tx, cmd_rx) = mpsc::channel(options.send_hwm.max(16) as usize);
         let recv_hwm = options.recv_hwm.max(16) as usize;
@@ -141,7 +164,7 @@ impl Socket {
         let dart = driver.dart.clone();
         let payload_pools = driver.payload_pools.clone();
         let actor_task = spawn_driver(driver, io_pool);
-        Self {
+        Ok(Self {
             send_submitter: send_submitter.clone(),
             receive_handle,
             inner: Arc::new(Inner {
@@ -171,7 +194,7 @@ impl Socket {
                 last_bound_endpoint: RwLock::new(None),
                 actor_task: Mutex::new(Some(actor_task)),
             }),
-        }
+        })
     }
 }
 
@@ -217,4 +240,21 @@ fn supports_recv_batching(t: SocketType) -> bool {
             | SocketType::XSub
             | SocketType::Dish
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn try_new_returns_invalid_options() {
+        assert!(matches!(
+            Socket::try_new(SocketType::Pair, Options::default().identity(vec![0])),
+            Err(Error::Config(_))
+        ));
+        assert!(matches!(
+            Socket::try_new(SocketType::Pair, Options::default().conflate(true)),
+            Err(Error::Config(_))
+        ));
+    }
 }

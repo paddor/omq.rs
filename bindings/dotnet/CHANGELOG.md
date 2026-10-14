@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-10-14
+
+### Changed
+
+- Bundle `omq-libzmq` 0.5.22 and avoid an extra managed copy on sends.
+
 ### Fixed
 
 - `SendAsync(ReadOnlyMemory<byte>)` on a full queue parks in the native async

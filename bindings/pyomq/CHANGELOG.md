@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-10-14
+
+### Added
+
+- Linux `shm://` and `dart://` endpoints, with DART enabled in wheels.
+- Endpoint methods accept URI strings.
+
 ### Fixed
 
 - Sync receives with `RCVTIMEO`, sends with `SNDTIMEO` on a full queue,

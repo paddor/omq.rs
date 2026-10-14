@@ -113,6 +113,30 @@ public final class SocketOptions {
             return add(socket -> socket.compressionAutoTrain(enabled));
         }
 
+        /** Sets the QUIC server certificate and private key. */
+        public Builder quicServerCertificate(byte[] certPem, byte[] keyPem) {
+            byte[] cert = copy(Objects.requireNonNull(certPem, "certPem"));
+            byte[] key = copy(Objects.requireNonNull(keyPem, "keyPem"));
+            return add(socket -> socket.quicServerCertificate(cert, key));
+        }
+
+        /** Sets QUIC trust anchors. */
+        public Builder quicTrustPem(byte[] trustPem) {
+            byte[] trust = copy(Objects.requireNonNull(trustPem, "trustPem"));
+            return add(socket -> socket.quicTrustPem(trust));
+        }
+
+        /** Enables or disables the system certificate store for QUIC. */
+        public Builder quicTrustSystem(boolean enabled) {
+            return add(socket -> socket.quicTrustSystem(enabled));
+        }
+
+        /** Sets the verified QUIC server name. */
+        public Builder quicServerName(String serverName) {
+            Objects.requireNonNull(serverName, "serverName");
+            return add(socket -> socket.quicServerName(serverName));
+        }
+
         /** Sets compression threshold in bytes. */
         public Builder compressionThreshold(long threshold) {
             requireNonNegative("threshold", threshold);

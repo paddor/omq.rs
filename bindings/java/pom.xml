@@ -175,7 +175,7 @@
               <arguments>
                 <argument>build</argument>
                 <argument>--features</argument>
-                <argument>plain,curve,lz4,zstd</argument>
+                <argument>plain,curve,lz4,zstd,quic,dart</argument>
               </arguments>
             </configuration>
           </execution>

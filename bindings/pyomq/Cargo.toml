@@ -20,6 +20,7 @@ curve = ["omq-tokio/curve"]
 lz4 = ["omq-tokio/lz4"]
 zstd = ["omq-tokio/zstd"]
 quic = ["omq-tokio/quic"]
+dart = ["omq-tokio/dart"]
 
 [dependencies]
 omq-proto = { path = "../../omq-proto", default-features = false }

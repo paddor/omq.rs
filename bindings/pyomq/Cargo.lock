@@ -636,6 +636,7 @@ dependencies = [
  "parking_lot",
  "pin-project-lite",
  "quinn",
+ "quinn-udp 0.6.3",
  "rand",
  "rustc-hash",
  "rustls",
@@ -812,7 +813,7 @@ dependencies = [
  "cfg_aliases",
  "pin-project-lite",
  "quinn-proto",
- "quinn-udp",
+ "quinn-udp 0.5.16",
  "rustc-hash",
  "rustls",
  "socket2",
@@ -856,6 +857,18 @@ dependencies = [
  "socket2",
  "tracing",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "quinn-udp"
+version = "0.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47091c86514c2e11452cb228dee77037334b99d92a23e4c69aa5982261f39247"
+dependencies = [
+ "cfg_aliases",
+ "libc",
+ "socket2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

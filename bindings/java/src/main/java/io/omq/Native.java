@@ -106,6 +106,14 @@ final class Native {
 
     static native void socketSetCompressionLevel(long handle, int level);
 
+    static native void socketSetQuicServerCertificate(long handle, byte[] certPem, byte[] keyPem);
+
+    static native void socketSetQuicTrustPem(long handle, byte[] trustPem);
+
+    static native void socketSetQuicTrustSystem(long handle, int enabled);
+
+    static native void socketSetQuicServerName(long handle, String serverName);
+
     static native void socketSetPlainServer(long handle, String[] usernames, String[] passwords);
 
     static native void socketSetPlainServerCallback(long handle, Object authenticator);

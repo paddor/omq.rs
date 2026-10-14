@@ -1,10 +1,10 @@
 [package]
 name = "omq_rs_native"
 version = "0.2.0"
-edition = "2024"
-rust-version = "1.93"
-license = "ISC"
-authors = ["Patrik Wenger <paddor@gmail.com>"]
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
 publish = false
 
 [lib]
@@ -30,9 +30,6 @@ futures = { version = "0.3", default-features = false, features = ["std", "async
 libc = "0.2"
 rb-sys = "0.9"
 tokio = { version = "1.52.0", features = ["rt", "rt-multi-thread", "time", "sync", "io-util", "net"] }
-
-[build-dependencies]
-rb-sys = "0.9"
 
 [lints.rust]
 missing_debug_implementations = "deny"

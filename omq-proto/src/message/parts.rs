@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use bytes::Bytes;
 use concurrent_queue::ConcurrentQueue;
 
-use super::{MAX_INLINE_PAYLOAD, Message, Payload};
+use super::{Message, Payload};
 
 /// Preallocated multipart frame tables shared by message construction and drop.
 ///
@@ -48,14 +48,11 @@ impl MessagePool {
         I: IntoIterator<Item = P>,
         P: Into<Bytes>,
     {
-        self.multipart_payloads(parts.into_iter().map(|part| {
-            let bytes = part.into();
-            if bytes.len() <= MAX_INLINE_PAYLOAD {
-                Payload::from_slice(&bytes)
-            } else {
-                Payload::from_bytes(bytes)
-            }
-        }))
+        self.multipart_payloads(
+            parts
+                .into_iter()
+                .map(|part| Payload::from_compact_bytes(part.into())),
+        )
     }
 
     /// Reuse a frame table without converting owning payloads to `Bytes`.

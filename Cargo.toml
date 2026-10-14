@@ -19,7 +19,6 @@ rust-version = "1.93"
 license = "ISC"
 authors = ["Patrik Wenger <paddor@gmail.com>"]
 repository = "https://github.com/paddor/omq.rs"
-description = "Pure Rust ØMQ/ZeroMQ: wire-compatible, feature-complete, high-performance."
 
 [workspace.lints.rust]
 missing_debug_implementations = "deny"

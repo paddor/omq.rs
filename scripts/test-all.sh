@@ -222,7 +222,9 @@ _repo_perf_busy_processes() {
         cmd="$(tr '\0' ' ' <"$proc/cmdline" 2>/dev/null || true)"
         [[ -n "$cmd" ]] || continue
         case "$cmd" in
-            *omq_cargo*|*cargo*|*rustc*|*rustdoc*|*maturin*|*pytest*|*target/debug/deps/*|*target/release/deps/*)
+            *omq_cargo*|*cargo*|*rustc*|*rustdoc*|*maturin*|*pytest*|\
+            *target/debug/deps/*|*target/release/deps/*|\
+            *target/debug/build/*|*target/release/build/*)
                 cwd="$(readlink "$proc/cwd" 2>/dev/null || true)"
                 exe="$(readlink "$proc/exe" 2>/dev/null || true)"
                 if [[ "$cwd" == "$_repo_root"* || "$exe" == "$_repo_root"* || "$cmd" == *"$_repo_root"* ]]; then

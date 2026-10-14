@@ -24,6 +24,7 @@ use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering, fence};
 use std::sync::{Arc, Mutex, Weak};
 
+use smallvec::SmallVec;
 use tokio::sync::Notify;
 
 fn new_notify() -> Notify {
@@ -176,14 +177,25 @@ impl BlockingSignal {
         if self.active.load(Ordering::Acquire) == 0 {
             return;
         }
-        for waiter in self.waiters.lock().unwrap().iter() {
-            match &waiter.target {
-                WakeTarget::Thread(thread) => {
-                    if waiter.armed.swap(false, Ordering::AcqRel) {
-                        thread.unpark();
+        let mut wakers = SmallVec::<[Arc<BlockingThread>; 4]>::new();
+        {
+            let waiters = self.waiters.lock().unwrap();
+            for waiter in waiters.iter() {
+                match &waiter.target {
+                    WakeTarget::Thread(thread) => {
+                        if waiter.armed.swap(false, Ordering::AcqRel) {
+                            thread.unpark();
+                        }
                     }
+                    WakeTarget::Waker(_) => wakers.push(waiter.clone()),
                 }
-                WakeTarget::Waker(waker) => waker.wake_by_ref(),
+            }
+        }
+        // User wakers can reenter registration or panic. Keep them outside
+        // the waiter lock, including their clone/drop callbacks.
+        for waiter in wakers {
+            if let WakeTarget::Waker(waker) = &waiter.target {
+                waker.wake_by_ref();
             }
         }
     }
@@ -409,7 +421,13 @@ impl DataSignal {
         // Order the caller's publication before the state read. See the
         // module docs.
         fence(Ordering::SeqCst);
-        let mut state = self.state.load(Ordering::Acquire);
+        let state = self.state.load(Ordering::Acquire);
+        if !matches!(state, PENDING | DIRTY) {
+            self.mark_pending(state);
+        }
+    }
+
+    fn mark_pending(&self, mut state: u8) {
         loop {
             match state {
                 IDLE => match self.state.compare_exchange_weak(
@@ -563,7 +581,7 @@ impl DataSignal {
 #[derive(Debug)]
 pub struct StateSignal {
     #[cfg(feature = "dart")]
-    endpoints: std::sync::OnceLock<Mutex<Vec<Weak<DataSignal>>>>,
+    endpoints: std::sync::OnceLock<Mutex<Arc<Vec<Weak<DataSignal>>>>>,
     generation: AtomicU64,
     notify: Notify,
 }
@@ -573,14 +591,14 @@ pub struct StateSignal {
 /// cannot miss a change. Never completes for an empty set.
 pub(crate) fn any_changed(signals: impl IntoIterator<Item = Arc<StateSignal>>) -> AnyChanged {
     AnyChanged {
-        waits: signals
+        signals: signals
             .into_iter()
             .map(|signal| {
                 let seen = signal.generation();
-                let wait: ChangeWait = Box::pin(async move { signal.changed_after(seen).await });
-                wait
+                (signal, seen)
             })
             .collect(),
+        waits: None,
     }
 }
 
@@ -588,18 +606,37 @@ type ChangeWait = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>
 
 /// Future returned by [`any_changed`].
 pub(crate) struct AnyChanged {
-    waits: Vec<ChangeWait>,
+    signals: SmallVec<[(Arc<StateSignal>, u64); 4]>,
+    waits: Option<SmallVec<[ChangeWait; 4]>>,
 }
 
 impl std::future::Future for AnyChanged {
     type Output = ();
 
     fn poll(
-        mut self: std::pin::Pin<&mut Self>,
+        self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<()> {
-        if self
-            .waits
+        let this = self.get_mut();
+        if this.waits.is_none()
+            && this
+                .signals
+                .iter()
+                .any(|(signal, seen)| signal.generation() != *seen)
+        {
+            return std::task::Poll::Ready(());
+        }
+        let waits = this.waits.get_or_insert_with(|| {
+            std::mem::take(&mut this.signals)
+                .into_iter()
+                .map(|(signal, seen)| {
+                    let wait: ChangeWait =
+                        Box::pin(async move { signal.changed_after(seen).await });
+                    wait
+                })
+                .collect()
+        });
+        if waits
             .iter_mut()
             .any(|wait| wait.as_mut().poll(cx).is_ready())
         {
@@ -613,17 +650,17 @@ impl std::future::Future for AnyChanged {
 impl StateSignal {
     #[cfg(feature = "dart")]
     pub(crate) fn dart_forward_to(&self, signal: &Arc<DataSignal>) {
-        let mut endpoints = self
+        let mut subscribers = self
             .endpoints
-            .get_or_init(|| Mutex::new(Vec::new()))
+            .get_or_init(|| Mutex::new(Arc::new(Vec::new())))
             .lock()
             .expect("DART space subscribers");
+        let endpoints = Arc::make_mut(&mut subscribers);
         endpoints.retain(|endpoint| endpoint.strong_count() != 0);
         if !endpoints
             .iter()
             .any(|endpoint| endpoint.as_ptr() == Arc::as_ptr(signal))
         {
-            assert!(endpoints.len() < 128, "bounded DART endpoint subscriptions");
             endpoints.push(Arc::downgrade(signal));
         }
     }
@@ -651,7 +688,10 @@ impl StateSignal {
         self.notify.notify_waiters();
         #[cfg(feature = "dart")]
         if let Some(endpoints) = self.endpoints.get() {
-            for endpoint in endpoints.lock().expect("DART space subscribers").iter() {
+            // Snapshot once per publication; registration copies only while
+            // a wake holds the old list. Notify can invoke user callbacks.
+            let endpoints = Arc::clone(&endpoints.lock().expect("DART space subscribers"));
+            for endpoint in endpoints.iter() {
                 if let Some(signal) = endpoint.upgrade() {
                     signal.mark();
                 }
@@ -709,6 +749,137 @@ mod tests {
     use tokio::time::{Duration, timeout};
 
     use super::*;
+
+    #[test]
+    fn blocking_waker_can_reenter_registration() {
+        struct Reenter(Arc<BlockingSignal>);
+        impl std::task::Wake for Reenter {
+            fn wake(self: Arc<Self>) {
+                self.wake_by_ref();
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                assert!(self.0.waiters.try_lock().is_ok());
+                drop(self.0.register());
+            }
+        }
+        let signal = BlockingSignal::new();
+        let registration = signal.register_waker(Arc::new(Reenter(signal.clone())).into());
+        signal.wake();
+        drop(registration);
+        assert_eq!(signal.active.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn panicking_waker_does_not_poison_waiter_registration() {
+        struct Panics;
+        impl std::task::Wake for Panics {
+            fn wake(self: Arc<Self>) {
+                panic!("user waker");
+            }
+        }
+        let signal = BlockingSignal::new();
+        let registration = signal.register_waker(Arc::new(Panics).into());
+        assert!(std::panic::catch_unwind(|| signal.wake()).is_err());
+        drop(registration);
+        let waiter = signal.register();
+        signal.wake();
+        assert!(!waiter.state.armed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn any_changed_observes_changes_before_first_poll_and_after_cancellation() {
+        let signal = Arc::new(StateSignal::new());
+        let mut wait = std::pin::pin!(any_changed([signal.clone()]));
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        signal.notify_changed();
+        assert!(wait.as_mut().poll(&mut cx).is_ready());
+
+        let mut cancelled = Box::pin(any_changed([signal.clone()]));
+        assert!(cancelled.as_mut().poll(&mut cx).is_pending());
+        drop(cancelled);
+        let mut wait = std::pin::pin!(any_changed([signal.clone()]));
+        assert!(wait.as_mut().poll(&mut cx).is_pending());
+        signal.notify_changed();
+        assert!(wait.as_mut().poll(&mut cx).is_ready());
+        assert!(
+            std::pin::pin!(any_changed([]))
+                .as_mut()
+                .poll(&mut cx)
+                .is_pending()
+        );
+    }
+
+    #[test]
+    fn any_changed_registers_every_signal_and_wakes_the_task() {
+        struct Count(AtomicUsize);
+        impl std::task::Wake for Count {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        for count in [1, 4, 8] {
+            let signals: Vec<_> = (0..count).map(|_| Arc::new(StateSignal::new())).collect();
+            let mut wait = std::pin::pin!(any_changed(signals.iter().cloned()));
+            let counter = Arc::new(Count(AtomicUsize::new(0)));
+            let waker = std::task::Waker::from(counter.clone());
+            let mut cx = std::task::Context::from_waker(&waker);
+            assert!(wait.as_mut().poll(&mut cx).is_pending());
+            signals.last().unwrap().notify_changed();
+            assert!(counter.0.load(Ordering::Relaxed) != 0);
+            assert!(wait.as_mut().poll(&mut cx).is_ready());
+        }
+    }
+
+    #[cfg(feature = "dart")]
+    #[test]
+    fn dart_forwarded_waker_can_register_another_endpoint() {
+        struct RegisterEndpoint {
+            space: Arc<StateSignal>,
+            endpoint: Arc<DataSignal>,
+        }
+        impl std::task::Wake for RegisterEndpoint {
+            fn wake(self: Arc<Self>) {
+                assert!(self.space.endpoints.get().unwrap().try_lock().is_ok());
+                self.space.dart_forward_to(&self.endpoint);
+            }
+        }
+        let space = Arc::new(StateSignal::new());
+        let endpoint = Arc::new(DataSignal::new());
+        let extra = Arc::new(DataSignal::new());
+        space.dart_forward_to(&endpoint);
+        let waker = std::task::Waker::from(Arc::new(RegisterEndpoint {
+            space: space.clone(),
+            endpoint: extra.clone(),
+        }));
+        let mut cx = std::task::Context::from_waker(&waker);
+        let mut wait = std::pin::pin!(endpoint.ready());
+        assert!(wait.as_mut().poll(&mut cx).is_pending());
+        space.notify_changed();
+        assert!(wait.as_mut().poll(&mut cx).is_ready());
+        space.notify_changed();
+        assert!(!extra.is_idle());
+    }
+
+    #[cfg(feature = "dart")]
+    #[test]
+    fn dart_space_signal_supports_many_endpoints_and_prunes_dropped_ones() {
+        let space = StateSignal::new();
+        let dropped = Arc::new(DataSignal::new());
+        space.dart_forward_to(&dropped);
+        drop(dropped);
+        let endpoints: Vec<_> = (0..129).map(|_| Arc::new(DataSignal::new())).collect();
+        for endpoint in &endpoints {
+            space.dart_forward_to(endpoint);
+            space.dart_forward_to(endpoint);
+        }
+        assert_eq!(
+            space.endpoints.get().unwrap().lock().unwrap().len(),
+            endpoints.len()
+        );
+        space.notify_changed();
+        assert!(endpoints.iter().all(|endpoint| !endpoint.is_idle()));
+    }
 
     #[test]
     fn blocking_task_waker_releases_at_thread_exit_and_allows_late_tls_calls() {

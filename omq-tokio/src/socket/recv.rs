@@ -856,8 +856,9 @@ impl SpscAwareRecv {
         if !matches!(result, DrainResult::Empty) || self.recv_spin.is_zero() {
             return result;
         }
-        let spin_deadline =
-            (self.recv_spin != Duration::MAX).then(|| Instant::now() + self.recv_spin);
+        let spin_deadline = (self.recv_spin != Duration::MAX)
+            .then(|| super::deadline_after(self.recv_spin))
+            .flatten();
         let deadline = match (deadline, spin_deadline) {
             (Some(timeout), Some(spin)) => Some(timeout.min(spin)),
             (timeout, spin) => timeout.or(spin),
@@ -1702,6 +1703,18 @@ mod tests {
             messages,
             [Message::single("first"), Message::single("second")]
         );
+    }
+
+    #[test]
+    fn overflowing_spin_duration_respects_receive_deadline() {
+        for latency in [false, true] {
+            let (mut recv, _, _pipe) = bulk_receiver(0, 16, latency);
+            recv.recv_spin = Duration::from_secs(u64::MAX);
+            assert!(matches!(
+                recv.blocking_recv_timeout(Duration::ZERO),
+                Err(omq_proto::Error::Timeout)
+            ));
+        }
     }
 
     #[test]

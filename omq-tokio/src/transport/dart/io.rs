@@ -51,6 +51,8 @@ impl std::os::fd::AsRawFd for NativeTimer {
 }
 
 #[cfg(target_os = "linux")]
+// NativeTimer owns its descriptor; all registered access is through get_ref().
+#[allow(deprecated, reason = "AsyncFd::register requires unsafe code")]
 fn new_timer() -> io::Result<tokio::io::unix::AsyncFd<NativeTimer>> {
     use nix::sys::timerfd::{ClockId, TimerFd, TimerFlags};
 

@@ -14,6 +14,12 @@ use tokio::net::UnixStream;
 
 pub(crate) type ShmState = Arc<Mutex<omq_shm::Connection>>;
 
+// AsyncFd retains the File; callers never replace it while registered.
+#[allow(deprecated, reason = "AsyncFd::register requires unsafe code")]
+fn register_signal(signal: Arc<File>) -> io::Result<AsyncFd<Arc<File>>> {
+    AsyncFd::new(signal)
+}
+
 #[derive(Debug)]
 pub(crate) struct ShmStream {
     stream: UnixStream,
@@ -39,7 +45,7 @@ impl ShmStream {
             pool,
         )?;
         let send = connection.preface();
-        let writer_signal = AsyncFd::new(connection.carrier_writer_signal())?;
+        let writer_signal = register_signal(connection.carrier_writer_signal())?;
         Ok(Self {
             stream,
             state: Arc::new(Mutex::new(connection)),
@@ -54,10 +60,10 @@ impl ShmStream {
 
     pub(crate) fn migrate(mut self) -> io::Result<Self> {
         self.stream = UnixStream::from_std(self.stream.into_std()?)?;
-        self.writer_signal = AsyncFd::new(self.writer_signal.into_inner())?;
+        self.writer_signal = register_signal(self.writer_signal.into_inner())?;
         self.reader_signal = self
             .reader_signal
-            .map(|signal| AsyncFd::new(signal.into_inner()))
+            .map(|signal| register_signal(signal.into_inner()))
             .transpose()?;
         Ok(self)
     }
@@ -297,7 +303,7 @@ impl AsyncRead for ShmStream {
                 .expect("SHM connection")
                 .carrier_reader_signal()
                 .ok_or(io::ErrorKind::InvalidData)?;
-            this.reader_signal = Some(AsyncFd::new(signal)?);
+            this.reader_signal = Some(register_signal(signal)?);
         }
         let received =
             std::task::ready!(this.poll_carrier_receive(cx, output.initialize_unfilled()))?;

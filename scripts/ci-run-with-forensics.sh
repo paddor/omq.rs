@@ -26,6 +26,7 @@ if [[ $# -eq 0 ]]; then
 fi
 
 cmd=("$@")
+process_pattern='cargo|nextest|target/.*/(deps|build)|cross|qemu|pytest|python|miri'
 start_epoch=$(date +%s)
 safe_label="$(printf '%s' "$label" | tr -c 'A-Za-z0-9_.-' '_')"
 forensics_dir="${OMQ_FORENSICS_DIR:-target/hang-forensics}"
@@ -51,7 +52,7 @@ dump_proc_stacks() {
     local pids=()
     if command -v pgrep >/dev/null 2>&1; then
         mapfile -t pids < <(
-            pgrep -f 'cargo|nextest|target/.*/deps|cross|qemu|pytest|python|miri' \
+            pgrep -f "$process_pattern" \
                 2>/dev/null || true
         )
     fi
@@ -107,7 +108,7 @@ dump_forensics() {
     run_capture "process tree" ps -eo pid,ppid,pgid,sid,stat,etime,comm,args --forest
     if command -v pgrep >/dev/null 2>&1; then
         run_capture "matching processes" \
-            pgrep -af 'cargo|nextest|target/.*/deps|cross|qemu|pytest|python|miri'
+            pgrep -af "$process_pattern"
     fi
     dump_proc_stacks
     log "::endgroup::"

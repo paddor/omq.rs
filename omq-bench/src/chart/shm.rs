@@ -419,6 +419,10 @@ mod tests {
                     if latency {
                         row["slab_bytes"] = json!(0);
                         row["payload_fill"] = json!("memcpy");
+                    } else {
+                        row["sender_clock_batch"] = json!(point_to_point::sender_clock_batch(
+                            row["msg_size"].as_u64().unwrap()
+                        ));
                     }
                     row["peers"] = json!(1);
                     row["subscriber_threads"] = json!(1);

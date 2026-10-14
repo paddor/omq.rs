@@ -142,8 +142,8 @@ fn serve_throughput(
     socket: &omq_tokio::blocking::Socket,
     control: &mut UnixStream,
 ) -> Result<(), Error> {
-    let mut messages = Vec::with_capacity(256);
-    let batch = (1024 * 1024 / config.base.size).clamp(1, 256);
+    let batch = config.base.batch_size();
+    let mut messages = Vec::with_capacity(batch);
     for round in 0..=ROUNDS {
         let mut count = 0_u64;
         let mut started = None;
@@ -216,6 +216,7 @@ fn measure_throughput(
     control: &mut UnixStream,
 ) -> Result<(), Error> {
     let pool = config.pool()?;
+    let batch = config.base.batch_size();
     for round in 0..=ROUNDS {
         let duration = Duration::from_secs(if round == 0 { 1 } else { 3 });
         let start = Instant::now();
@@ -227,11 +228,13 @@ fn measure_throughput(
                 })?;
                 continue;
             }
-            socket.send_timeout(
-                patterned_message(config.base.size, count, pool.as_ref())?,
-                DEADLINE,
-            )?;
-            count += 1;
+            for _ in 0..batch {
+                socket.send_timeout(
+                    patterned_message(config.base.size, count, pool.as_ref())?,
+                    DEADLINE,
+                )?;
+                count += 1;
+            }
         }
         let sent_elapsed = start.elapsed().as_secs_f64();
         socket.send_timeout(

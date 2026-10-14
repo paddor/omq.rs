@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.22] - 2026-10-14
+
+### Changed
+
+- Bundle `omq-tokio` 0.26.0, including Linux `shm://` endpoints.
+
 ### Fixed
 
 - `zmq_poll` and `ZMQ_EVENTS` report `ZMQ_POLLOUT` only when a nonblocking

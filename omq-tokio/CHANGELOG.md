@@ -7,8 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-10-14
+
+### Breaking
+
+- Re-exported `Options` gains fields for DART, SHM memory, and receive pools.
+  Update exhaustive struct literals or construct options with `Default`.
+
 ### Added
 
+- Linux `shm://` endpoints share message payloads across processes.
+- Opt-in `dart://` provides reliable ordered UDP messages.
+- `Socket::try_new` reports invalid options without panicking.
 - `blocking::Socket::send_timeout` waits for queue space up to a deadline.
 - `blocking::Socket::send_cancelable` waits for queue space until a
   `BlockingRecvCancel` fires.

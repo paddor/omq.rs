@@ -22,7 +22,7 @@ go get github.com/paddor/omq.rs/bindings/go
 The Go package links against the native library built from `native/`:
 
 ```sh
-cargo build --release --manifest-path native/Cargo.toml
+cargo build --release --manifest-path native/Cargo.toml --target-dir native/target
 go test ./...
 ```
 

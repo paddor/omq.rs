@@ -1,3 +1,5 @@
+//! Benchmark runner and SVG chart generator for omq.rs.
+
 mod bench;
 mod chart;
 mod cli;

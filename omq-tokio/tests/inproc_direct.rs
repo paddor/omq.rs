@@ -487,3 +487,107 @@ fn muted_senders_wait_and_resume_without_the_io_thread() {
     });
     drop(release);
 }
+
+#[test]
+fn scatter_bulk_rejects_invalid_frames_after_delivering_the_valid_prefix() {
+    let ctx = Context::new();
+    let (gather, scatter) = connected_pair(
+        &ctx,
+        "direct-bulk-frame-check",
+        SocketType::Gather,
+        SocketType::Scatter,
+    );
+    let release = stall_io_thread(&ctx);
+    for invalid in [Message::new(), Message::multipart(["one", "two"])] {
+        let mut messages = [
+            Message::single("before"),
+            invalid.clone(),
+            Message::single("after"),
+        ]
+        .into();
+        assert_eq!(scatter.try_send_many(&mut messages, 0).unwrap(), 0);
+        assert_eq!(messages.len(), 3);
+        assert_eq!(scatter.try_send_many(&mut messages, 3).unwrap(), 1);
+        assert_eq!(
+            gather.recv_timeout(TIMEOUT).unwrap(),
+            Message::single("before")
+        );
+        assert_eq!(messages.front(), Some(&invalid));
+        assert!(matches!(
+            scatter.try_send_many(&mut messages, 2),
+            Err(TrySendError::Error(omq_tokio::Error::Protocol(_)))
+        ));
+        assert_eq!(messages, [Message::single("after")]);
+        assert_eq!(scatter.try_send_many(&mut messages, 1).unwrap(), 1);
+        assert_eq!(
+            gather.recv_timeout(TIMEOUT).unwrap(),
+            Message::single("after")
+        );
+        assert!(gather.try_recv().is_err());
+    }
+    drop(release);
+}
+
+#[test]
+fn scatter_bulk_frame_check_respects_hwm_and_the_requested_limit() {
+    let ctx = Context::new();
+    let options = Options::default().send_hwm(2).recv_hwm(2);
+    let gather = ctx.blocking_socket(SocketType::Gather, options.clone());
+    let scatter = ctx.blocking_socket(SocketType::Scatter, options);
+    gather.bind(inproc("direct-bulk-frame-hwm")).unwrap();
+    scatter.connect(inproc("direct-bulk-frame-hwm")).unwrap();
+    gather.wait_connected(1, TIMEOUT).unwrap();
+    scatter.wait_connected(1, TIMEOUT).unwrap();
+    let release = stall_io_thread(&ctx);
+    let mut messages: std::collections::VecDeque<_> = (0..5u8)
+        .map(|value| Message::from_slice(&[value]))
+        .chain([Message::new(), Message::single("after")])
+        .collect();
+
+    assert_eq!(scatter.try_send_many(&mut messages, 1).unwrap(), 1);
+    assert_eq!(scatter.try_send_many(&mut messages, 6).unwrap(), 3);
+    let Err(TrySendError::Full(returned)) = scatter.try_send_many(&mut messages, 3) else {
+        panic!("the remaining valid message must retain normal backpressure");
+    };
+    assert_eq!(returned, Message::from_slice(&[4]));
+    messages.push_front(returned);
+    for value in 0..4u8 {
+        assert_eq!(
+            gather.recv_timeout(TIMEOUT).unwrap(),
+            Message::from_slice(&[value])
+        );
+    }
+    assert_eq!(scatter.try_send_many(&mut messages, 3).unwrap(), 1);
+    assert_eq!(
+        gather.recv_timeout(TIMEOUT).unwrap(),
+        Message::from_slice(&[4])
+    );
+    assert!(matches!(
+        scatter.try_send_many(&mut messages, 2),
+        Err(TrySendError::Error(omq_tokio::Error::Protocol(_)))
+    ));
+    assert_eq!(scatter.try_send_many(&mut messages, 1).unwrap(), 1);
+    assert_eq!(
+        gather.recv_timeout(TIMEOUT).unwrap(),
+        Message::single("after")
+    );
+    assert!(messages.is_empty());
+    drop(release);
+}
+
+#[test]
+fn push_bulk_still_accepts_multipart_messages() {
+    let ctx = Context::new();
+    let (pull, push) = connected_pair(
+        &ctx,
+        "direct-bulk-push-multipart",
+        SocketType::Pull,
+        SocketType::Push,
+    );
+    let release = stall_io_thread(&ctx);
+    let multipart = Message::multipart(["one", "two"]);
+    let mut messages = [multipart.clone()].into();
+    assert_eq!(push.try_send_many(&mut messages, 1).unwrap(), 1);
+    assert_eq!(pull.recv_timeout(TIMEOUT).unwrap(), multipart);
+    drop(release);
+}

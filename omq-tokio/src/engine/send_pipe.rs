@@ -286,10 +286,19 @@ impl SendPipeProducer {
         if self.dart.is_some() {
             return self.try_send(msg);
         }
-        if !matches!(self.inner, SendPipeProducerInner::Queue(_)) {
-            return self.try_send(msg);
-        }
-        let result = self.try_send_queue::<true>(msg, SendPreparation::Plain);
+        let result = match &self.inner {
+            SendPipeProducerInner::Inproc(sender) => {
+                let result = sender.try_send_deferred(msg, &mut self.pending);
+                if matches!(result, Err(SendPipeError::Full(_))) {
+                    self.above_lwm.store(true, Ordering::Release);
+                }
+                result
+            }
+            SendPipeProducerInner::Queue(_) => {
+                self.try_send_queue::<true>(msg, SendPreparation::Plain)
+            }
+            _ => return self.try_send(msg),
+        };
         if result.is_err() {
             // A muted pipe must publish accepted messages before leaving the
             // active set, so its consumer can drain and return LWM credit.
@@ -299,11 +308,15 @@ impl SendPipeProducer {
     }
 
     pub(crate) fn flush_deferred(&mut self) {
-        if std::mem::take(&mut self.pending)
-            && let SendPipeProducerInner::Queue(producer) = &mut self.inner
-        {
-            producer.flush();
-            self.data_signal.mark();
+        if std::mem::take(&mut self.pending) {
+            match &mut self.inner {
+                SendPipeProducerInner::Queue(producer) => {
+                    producer.flush();
+                    self.data_signal.mark();
+                }
+                SendPipeProducerInner::Inproc(sender) => sender.flush_deferred(&mut true),
+                _ => {}
+            }
         }
     }
 
@@ -474,21 +487,9 @@ impl SendPipeProducer {
         max: usize,
     ) -> core::result::Result<usize, SendPipeError> {
         if matches!(self.inner, SendPipeProducerInner::Inproc(_)) {
-            let mut count = 0usize;
-            while count < max {
-                let Some(msg) = messages.pop_front() else {
-                    break;
-                };
-                match self.try_send(msg) {
-                    Ok(()) => count += 1,
-                    Err(SendPipeError::Full(msg) | SendPipeError::Closed(msg)) if count > 0 => {
-                        messages.push_front(msg);
-                        break;
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-            return Ok(count);
+            let result = self.try_send_many_deferred(messages, max);
+            self.flush_deferred();
+            return result;
         }
         let SendPipeProducerInner::Queue(producer) = &mut self.inner else {
             let Some(msg) = messages.pop_front() else {
@@ -537,6 +538,28 @@ impl SendPipeProducer {
         if count > 0 {
             producer.flush();
             self.data_signal.mark();
+        }
+        Ok(count)
+    }
+
+    fn try_send_many_deferred(
+        &mut self,
+        messages: &mut VecDeque<Message>,
+        max: usize,
+    ) -> core::result::Result<usize, SendPipeError> {
+        let mut count = 0;
+        while count < max {
+            let Some(msg) = messages.pop_front() else {
+                break;
+            };
+            match self.try_send_deferred(msg) {
+                Ok(()) => count += 1,
+                Err(SendPipeError::Full(msg) | SendPipeError::Closed(msg)) if count > 0 => {
+                    messages.push_front(msg);
+                    break;
+                }
+                Err(error) => return Err(error),
+            }
         }
         Ok(count)
     }
@@ -671,7 +694,8 @@ impl SendPipeProducer {
 impl Drop for SendPipeProducer {
     fn drop(&mut self) {
         match &mut self.inner {
-            SendPipeProducerInner::Peer(_) | SendPipeProducerInner::Inproc(_) => {}
+            SendPipeProducerInner::Peer(_) => {}
+            SendPipeProducerInner::Inproc(sender) => sender.flush_deferred(&mut self.pending),
             SendPipeProducerInner::Queue(producer) => producer.close(),
             SendPipeProducerInner::Conflate(state) => {
                 state.producer_dropped.store(true, Ordering::Release);

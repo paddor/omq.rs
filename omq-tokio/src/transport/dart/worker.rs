@@ -297,7 +297,7 @@ impl PeerIo {
                 count += 1;
                 continue;
             }
-            match sink.try_deliver_datagram(message, &mut self.pending_flush) {
+            match sink.try_deliver_deferred(message, &mut self.pending_flush) {
                 Ok(()) => {
                     if inline_credit {
                         // Inline bodies own no shared receive buffer. Once the
@@ -1167,7 +1167,7 @@ impl EndpointWorker {
                     message,
                     ecn,
                     elapsed,
-                    |message| match sink.try_deliver_datagram(message, &mut io.pending_flush) {
+                    |message| match sink.try_deliver_deferred(message, &mut io.pending_flush) {
                         Ok(()) => Ok(()),
                         Err(TrySendError::Full(message)) => Err(message),
                         Err(_) => {

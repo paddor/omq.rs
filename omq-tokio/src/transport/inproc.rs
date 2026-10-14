@@ -205,10 +205,11 @@ impl InprocPort {
     }
 
     fn close_locked(state: &mut PortState, changed: &StateSignal) {
-        if let PortState::Open(mut open) = std::mem::replace(state, PortState::Closed)
-            && let Some(space) = open.sink.direct_space()
-        {
-            space.notify_changed();
+        if let PortState::Open(mut open) = std::mem::replace(state, PortState::Closed) {
+            open.sink.flush_delivery(&mut true);
+            if let Some(space) = open.sink.direct_space() {
+                space.notify_changed();
+            }
         }
         changed.notify_changed();
     }
@@ -219,6 +220,14 @@ impl InprocPort {
 
     /// Deliver one message into the receiving socket's queue.
     pub(crate) fn try_send(&self, msg: Message) -> std::result::Result<(), SendPipeError> {
+        self.try_send_inner::<false>(msg, &mut false)
+    }
+
+    fn try_send_inner<const DEFERRED: bool>(
+        &self,
+        msg: Message,
+        pending: &mut bool,
+    ) -> std::result::Result<(), SendPipeError> {
         let mut state = self.state.lock();
         let open = match &mut *state {
             PortState::Pending => return Err(SendPipeError::Full(msg)),
@@ -239,7 +248,12 @@ impl InprocPort {
             Some(identity) => Message::with_prefix(identity.clone(), msg),
             None => msg,
         };
-        match open.sink.try_deliver(msg) {
+        let delivered = if DEFERRED {
+            open.sink.try_deliver_deferred(msg, pending)
+        } else {
+            open.sink.try_deliver(msg)
+        };
+        match delivered {
             Ok(()) => Ok(()),
             Err(omq_proto::error::TrySendError::Full(mut msg)) => {
                 if prefixed {
@@ -254,6 +268,16 @@ impl InprocPort {
                 Ok(())
             }
         }
+    }
+
+    fn flush_deferred(&self, pending: &mut bool) {
+        if !*pending {
+            return;
+        }
+        if let PortState::Open(open) = &mut *self.state.lock() {
+            open.sink.flush_delivery(pending);
+        }
+        *pending = false;
     }
 
     /// Whether a send can make progress now. A closed port reports `true`
@@ -361,16 +385,10 @@ impl InprocSender {
 
     pub(crate) fn try_send_prepared(
         &self,
-        mut msg: Message,
+        msg: Message,
         preparation: SendPreparation,
     ) -> std::result::Result<(), SendPipeError> {
-        if self.has_backlog() {
-            match self.flush_backlog() {
-                Flush::Done => {}
-                Flush::Stalled => return Err(SendPipeError::Full(msg)),
-                Flush::Closed => return Err(SendPipeError::Closed(msg)),
-            }
-        }
+        let mut msg = self.after_backlog(msg)?;
         if !matches!(preparation, SendPreparation::StripIdentity) {
             return self.inner.port.try_send(msg);
         }
@@ -385,6 +403,31 @@ impl InprocSender {
             #[cfg(feature = "dart")]
             SendPipeError::Invalid(error) => SendPipeError::Invalid(error),
         })
+    }
+
+    pub(crate) fn try_send_deferred(
+        &self,
+        msg: Message,
+        pending: &mut bool,
+    ) -> std::result::Result<(), SendPipeError> {
+        let msg = self.after_backlog(msg)?;
+        self.inner.port.try_send_inner::<true>(msg, pending)
+    }
+
+    pub(crate) fn flush_deferred(&self, pending: &mut bool) {
+        self.inner.port.flush_deferred(pending);
+    }
+
+    #[inline]
+    fn after_backlog(&self, msg: Message) -> std::result::Result<Message, SendPipeError> {
+        if self.has_backlog() {
+            match self.flush_backlog() {
+                Flush::Done => {}
+                Flush::Stalled => return Err(SendPipeError::Full(msg)),
+                Flush::Closed => return Err(SendPipeError::Closed(msg)),
+            }
+        }
+        Ok(msg)
     }
 
     fn has_backlog(&self) -> bool {
@@ -699,6 +742,9 @@ impl Drop for InprocListener {
         }
     }
 }
+
+#[cfg(test)]
+mod batch_tests;
 
 #[cfg(test)]
 mod tests {

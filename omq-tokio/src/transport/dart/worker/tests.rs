@@ -244,7 +244,7 @@ fn teardown_publishes_pending_inline_delivery() {
     io.sink
         .as_mut()
         .unwrap()
-        .try_deliver_datagram(Message::from_slice(b"last"), &mut io.pending_flush)
+        .try_deliver_deferred(Message::from_slice(b"last"), &mut io.pending_flush)
         .unwrap();
     assert!(io.pending_flush);
     drop(io);
@@ -290,11 +290,11 @@ async fn fanin_space_return_wakes_the_endpoint_without_network_activity() {
     let endpoint = Arc::new(DataSignal::new());
     sink.dart_forward_to(&endpoint);
     let mut pending = false;
-    sink.try_deliver_datagram(Message::single("first"), &mut pending)
+    sink.try_deliver_deferred(Message::single("first"), &mut pending)
         .unwrap();
     sink.flush_delivery(&mut pending);
     let Err(TrySendError::Full(held)) =
-        sink.try_deliver_datagram(Message::single("second"), &mut pending)
+        sink.try_deliver_deferred(Message::single("second"), &mut pending)
     else {
         panic!("full receive lane");
     };
@@ -305,7 +305,7 @@ async fn fanin_space_return_wakes_the_endpoint_without_network_activity() {
     tokio::time::timeout(Duration::from_secs(1), endpoint.ready())
         .await
         .unwrap();
-    sink.try_deliver_datagram(held, &mut pending).unwrap();
+    sink.try_deliver_deferred(held, &mut pending).unwrap();
     sink.flush_delivery(&mut pending);
     assert_eq!(queue.try_recv().unwrap().part_slice(0).unwrap(), b"second");
 }
@@ -327,7 +327,7 @@ async fn peer_space_return_wakes_the_endpoint_without_network_activity() {
     let mut held = None;
     let mut accepted = 0;
     for _ in 0..64 {
-        match sink.try_deliver_datagram(Message::single("body"), &mut pending) {
+        match sink.try_deliver_deferred(Message::single("body"), &mut pending) {
             Ok(()) => accepted += 1,
             Err(TrySendError::Full(message)) => {
                 held = Some(message);
@@ -347,7 +347,7 @@ async fn peer_space_return_wakes_the_endpoint_without_network_activity() {
     tokio::time::timeout(Duration::from_secs(1), endpoint.ready())
         .await
         .unwrap();
-    sink.try_deliver_datagram(held.unwrap(), &mut pending)
+    sink.try_deliver_deferred(held.unwrap(), &mut pending)
         .unwrap();
     sink.flush_delivery(&mut pending);
     assert_eq!(receive.try_recv().unwrap().part_slice(1).unwrap(), b"body");

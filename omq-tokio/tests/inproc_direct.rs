@@ -221,6 +221,53 @@ fn pipelines_fan_in_from_several_peers_without_the_io_thread() {
 }
 
 #[test]
+fn bulk_pipeline_rotates_peers_and_resumes_after_hwm_without_io() {
+    let ctx = Context::new();
+    for (index, (receiver, sender)) in [
+        (SocketType::Pull, SocketType::Push),
+        (SocketType::Gather, SocketType::Scatter),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let ep = inproc(&format!("direct-bulk-{index}"));
+        let source = ctx.blocking_socket(sender, Options::default().send_hwm(2));
+        source.bind(ep.clone()).unwrap();
+        let receivers: Vec<_> = (0..2)
+            .map(|_| {
+                let sink = ctx.blocking_socket(receiver, Options::default().recv_hwm(2));
+                sink.connect(ep.clone()).unwrap();
+                sink.wait_connected(1, TIMEOUT).unwrap();
+                sink
+            })
+            .collect();
+        source.wait_connected(2, TIMEOUT).unwrap();
+        let release = stall_io_thread(&ctx);
+        let mut messages = (0..10_u8).map(|seq| Message::from_slice(&[seq])).collect();
+        assert_eq!(source.try_send_many(&mut messages, 10).unwrap(), 8);
+        let mut received = Vec::new();
+        for receiver in &receivers {
+            let mut lane = Vec::new();
+            for _ in 0..4 {
+                let message = receiver.recv_timeout(TIMEOUT).unwrap();
+                lane.push(message.part_slice(0).unwrap()[0]);
+            }
+            assert!(lane.windows(2).all(|pair| pair[1] == pair[0] + 2));
+            received.extend(lane);
+        }
+        assert_eq!(source.try_send_many(&mut messages, 10).unwrap(), 2);
+        assert!(messages.is_empty());
+        for receiver in &receivers {
+            let message = receiver.recv_timeout(TIMEOUT).unwrap();
+            received.push(message.part_slice(0).unwrap()[0]);
+        }
+        received.sort_unstable();
+        assert_eq!(received, (0..10).collect::<Vec<_>>());
+        drop(release);
+    }
+}
+
+#[test]
 fn ring_holds_send_hwm_plus_recv_hwm() {
     let ctx = Context::new();
     let pull = ctx.blocking_socket(SocketType::Pull, Options::default().recv_hwm(16));

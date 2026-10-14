@@ -7,8 +7,10 @@
 //! pipe cannot reorder and bias the cursor toward another peer.
 
 use std::collections::{HashSet, VecDeque};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+
+use parking_lot::Mutex;
 
 use crate::engine::signal::StateSignal;
 use crate::engine::{
@@ -284,7 +286,7 @@ pub(crate) struct Submitter {
 impl Submitter {
     pub(crate) fn shutdown(&self) {
         self.closed.store(true, Ordering::Release);
-        let mut active = self.active.lock().expect("round_robin active");
+        let mut active = self.active.lock();
         active.clear();
         self.active_changed.notify_changed();
     }
@@ -303,7 +305,7 @@ impl Submitter {
             }
 
             let space_available = {
-                let mut active = self.active.lock().expect("round_robin active");
+                let mut active = self.active.lock();
                 active.next_space_notify_any()
             };
 
@@ -353,7 +355,7 @@ impl Submitter {
         if self.closed.load(Ordering::Acquire) {
             return true;
         }
-        let mut guard = self.active.lock().expect("round_robin active");
+        let mut guard = self.active.lock();
         let pipes = &mut *guard;
         pipes.active.iter_mut().any(|pipe| pipe.tx.can_accept())
             || pipes
@@ -365,7 +367,7 @@ impl Submitter {
     pub(crate) async fn wait_send_ready(&self) {
         loop {
             let changed = {
-                let active = self.active.lock().expect("round_robin active");
+                let active = self.active.lock();
                 let pipes = active.active.iter().chain(&active.inactive);
                 crate::engine::signal::any_changed(
                     std::iter::once(self.active_changed.clone())
@@ -381,7 +383,7 @@ impl Submitter {
 
     pub(crate) async fn wait_send_progress(&self) {
         let space_available = {
-            let mut active = self.active.lock().expect("round_robin active");
+            let mut active = self.active.lock();
             active.next_space_notify_any()
         };
 
@@ -408,10 +410,7 @@ impl Submitter {
         if self.closed.load(Ordering::Acquire) {
             return Err(omq_proto::TrySendError::Closed);
         }
-        self.active
-            .lock()
-            .expect("round_robin active")
-            .try_send::<false>(message)
+        self.active.lock().try_send::<false>(message)
     }
 
     pub(crate) fn try_send_many(
@@ -425,7 +424,7 @@ impl Submitter {
         if self.closed.load(Ordering::Acquire) {
             return Err(omq_proto::TrySendError::Closed);
         }
-        let mut active = self.active.lock().expect("round_robin active");
+        let mut active = self.active.lock();
         if !active.has_any_pipe() {
             return Err(omq_proto::TrySendError::Full(
                 messages.pop_front().expect("message present"),
@@ -547,7 +546,7 @@ impl RoundRobinSend {
             }
             tx
         };
-        let mut active = self.active.lock().expect("round_robin active");
+        let mut active = self.active.lock();
         active.insert_pipe(route_id, tx);
         self.active_changed.notify_changed();
         rx
@@ -559,7 +558,7 @@ impl RoundRobinSend {
         handle: &ActorPeerDriverHandle,
         _is_inproc: bool,
     ) {
-        let mut active = self.active.lock().expect("round_robin active");
+        let mut active = self.active.lock();
         // A direct inproc route replaces the connect-side pipe. Dropping
         // that producer ends the pipe, and the route delivers what it still
         // holds before any later message.
@@ -580,10 +579,7 @@ impl RoundRobinSend {
     }
 
     pub(crate) fn connection_removed(&mut self, route_id: u64) {
-        self.active
-            .lock()
-            .expect("round_robin active")
-            .remove_peer(route_id);
+        self.active.lock().remove_peer(route_id);
         self.active_changed.notify_changed();
     }
 
@@ -600,7 +596,7 @@ impl RoundRobinSend {
 
     pub(crate) fn stop_admission(&self) {
         self.closed.store(true, Ordering::Release);
-        let active = self.active.lock().expect("round_robin active");
+        let active = self.active.lock();
         for pipe in active.active.iter().chain(&active.inactive) {
             pipe.tx.space_available().notify_changed();
         }
@@ -609,20 +605,20 @@ impl RoundRobinSend {
 
     pub(crate) fn shutdown(&self) {
         self.closed.store(true, Ordering::Release);
-        let mut active = self.active.lock().expect("round_robin active");
+        let mut active = self.active.lock();
         active.clear();
         self.active_changed.notify_changed();
     }
 
     pub(crate) fn is_drained(&self) -> bool {
-        let guard = self.active.lock().expect("round_robin active");
+        let guard = self.active.lock();
         let active_empty = guard.active.iter().all(|pipe| pipe.tx.is_empty());
         let inactive_empty = guard.inactive.iter().all(|pipe| pipe.tx.is_empty());
         active_empty && inactive_empty
     }
 
     pub(crate) fn watch_close(&self, progress: &Arc<StateSignal>) {
-        let guard = self.active.lock().expect("round_robin active");
+        let guard = self.active.lock();
         for pipe in guard.active.iter().chain(&guard.inactive) {
             pipe.tx.watch_close(progress);
         }
@@ -646,7 +642,6 @@ mod tests {
         let order: Vec<_> = send
             .active
             .lock()
-            .unwrap()
             .active
             .iter()
             .map(|pipe| pipe.peer_id as usize)

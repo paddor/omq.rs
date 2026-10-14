@@ -26,9 +26,12 @@ const CHART: CompressionChart = CompressionChart {
     dict_pattern: "pushpull_zstd_dict",
     dict_series_key: "zstd+tcp+dict",
     output_file: "zstd_tcp.svg",
-    title: "PUSH/PULL Zstd L1, JSON payloads, 2 KiB dict, netem, 1 IO",
+    title: "PUSH/PULL Zstd L1, varied binary/JSON, 2 KiB dict, netem, 1 IO",
     series: SERIES,
     compression_level: Some(1),
+    payload: "structured-varied-v1",
+    arena_bytes: 32768,
+    sizes: &[16, 32, 64, 256, 1024, 4096, 16384, 65536, 262_144],
 };
 
 pub(crate) fn generate() {

@@ -1,20 +1,24 @@
 # Compression Transport Benchmarks
 
-Structural JSON payloads over TCP between two processes. Linux netem
+Structured payloads over TCP between two processes. Linux netem
 emulates shared 1 Gbps, 100 Mbps, and 10 Mbps links with 1 ms delay in each
 direction, MTU 1500, and segmentation offloads disabled. Charts use the
 median of three measurements after active receiver warmup.
 Dictionary auto-training is off by default. When enabled, the default
 dictionary capacity is 2 KiB.
 
+Both codecs cycle a prebuilt corpus of distinct messages: medium-entropy binary
+records at 16/32 B, JSON events with recurring keys and varying values at
+64 B and above. Receivers verify the full sequence; dictionary training uses
+separate samples. Earlier repeated-payload runs are excluded from both charts.
+
 Payload throughput = received msg/s x uncompressed size. Sender CPU is
 measured during the same receive interval; it includes application and IO.
 
-- `lz4+tcp://`: low CPU cost, high message rate. With the 2 KiB
-  dict, charted JSON payloads at 1 KiB and larger average ~3.2x wire
-  reduction.
-- `zstd+tcp://`: higher CPU cost, ~4.5x average wire reduction over the
-  same points.
+- `lz4+tcp://` and `zstd+tcp://`: batch queued small messages into arenas
+  (16 KiB LZ4, 32 KiB Zstd), sharing compression history without a dictionary.
+  Larger messages use per-part compression.
+- Zstd uses level 1.
 - Auto-dict: trains once, ships once per direction per connection, then
   lowers the small-message compression threshold.
 
@@ -25,9 +29,6 @@ measured during the same receive interval; it includes application and IO.
 </p>
 
 ### Zstd
-
-Zstd's extra compression ratio is visible, but so is the CPU cost: on
-fast links it loses to LZ4 despite similar wire savings.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/zstd_tcp.svg" alt="PUSH/PULL zstd+tcp over netem links" width="850">
@@ -40,7 +41,8 @@ Wire formats:
 
 ### Compression thresholds
 
-Messages below a minimum size pass through as plaintext.
+The minimum applies to each part, or to the aggregate frame bytes of a
+compression arena. Smaller compression units use raw encoding.
 
 | Transport | No dict | With dict |
 |-----------|---------|-----------|

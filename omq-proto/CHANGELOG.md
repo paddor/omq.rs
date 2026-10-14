@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.0] - 2026-10-14
+
+### Breaking
+
+- Zstd draft revision 2 adds bounded `ZSTA` arenas of complete messages.
+  Decoders must drain `poll_message()` before accepting another wire message.
+
+### Added
+
+- Zstd arena compression with shared frame validation and receive cursors.
+
+## [0.31.0] - 2026-10-14
+
+### Breaking
+
+- LZ4 draft revision 2 adds bounded `LZ4A` arenas of complete messages.
+  Decoders must drain `poll_message()` before accepting another wire message.
+
+### Added
+
+- Aggregate LZ4 compression and validated shared receive storage, preserving
+  multipart boundaries and per-message size limits.
+
 ## [0.30.0] - 2026-10-14
 
 ### Breaking

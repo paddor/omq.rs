@@ -24,6 +24,9 @@ pub(crate) struct CompressionChart {
     pub(crate) title: &'static str,
     pub(crate) series: &'static [Series],
     pub(crate) compression_level: Option<i32>,
+    pub(crate) payload: &'static str,
+    pub(crate) arena_bytes: u64,
+    pub(crate) sizes: &'static [u64],
 }
 
 const LINK_SPEEDS: &[(u32, &str)] = &[
@@ -39,6 +42,14 @@ struct CompressionData {
 }
 
 type LinkData = BTreeMap<u32, BTreeMap<u64, CompressionData>>;
+
+fn matches_payload(row: &PushpullLz4Row, payload: &str, arena_bytes: u64) -> bool {
+    row.payload.as_deref() == Some(payload)
+        && (payload != "structured-varied-v1"
+            || (row.payload_corpus_messages
+                == Some((64 * 1024 * 1024 / row.msg_size.max(1)).clamp(2, 4096))
+                && row.arena_bytes == Some(arena_bytes)))
+}
 
 fn load_data(chart: &CompressionChart, sizes: &[u64]) -> LinkData {
     let path = jsonl::cache_dir().join(chart.cache_file);
@@ -60,7 +71,7 @@ fn load_data(chart: &CompressionChart, sizes: &[u64]) -> LinkData {
             || row
                 .duration_seconds
                 .is_none_or(|seconds| !seconds.is_finite() || seconds < 2.0)
-            || row.payload.as_deref() != Some("json")
+            || !matches_payload(&row, chart.payload, chart.arena_bytes)
             || row.payload_seed != Some(4242)
             || row.cpu_affinity.as_deref() != Some("sender=1-2,receiver=3-4")
             || row
@@ -186,13 +197,13 @@ fn series_as_impls(chart: &CompressionChart) -> Vec<Impl> {
 
 #[expect(clippy::too_many_lines)]
 pub(crate) fn generate(chart: &CompressionChart) {
-    let sizes: Vec<u64> = vec![16, 64, 256, 1024, 4096, 16384, 65536, 262_144];
-    let data = load_data(chart, &sizes);
+    let sizes = chart.sizes;
+    let data = load_data(chart, sizes);
     if data.is_empty() {
         return;
     }
     for &(rate, _) in LINK_SPEEDS {
-        for &size in &sizes {
+        for &size in sizes {
             for series in chart.series {
                 assert!(
                     data.get(&rate)
@@ -297,7 +308,13 @@ pub(crate) fn generate(chart: &CompressionChart) {
         chart_area
             .configure_secondary_axes()
             .y_labels(gbs_ticks + 1)
-            .y_label_formatter(&|v| fmt_gbps(*v))
+            .y_label_formatter(&|v| {
+                if *v > 0.0 && *v < 0.01 {
+                    format!("{:.1} MB/s", v * 1000.0)
+                } else {
+                    fmt_gbps(*v)
+                }
+            })
             .label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
             .axis_style(AXIS_COLOR)
             .draw()
@@ -360,7 +377,11 @@ pub(crate) fn generate(chart: &CompressionChart) {
                         } else {
                             2
                         };
-                        let dy = [0, 9, -7][series_index];
+                        let dy = if cpu_pct < 15.0 {
+                            [-18, -9, -27][series_index]
+                        } else {
+                            [0, 9, -7][series_index]
+                        };
                         EmptyElement::at((x, y))
                             + Text::new(
                                 format!("{cpu_pct:.0}%"),
@@ -409,7 +430,7 @@ pub(crate) fn generate(chart: &CompressionChart) {
         .unwrap();
     table_area
         .draw_text(
-            "\u{2500}\u{2500}\u{2500} solid = GB/s (right axis)",
+            "\u{2500}\u{2500}\u{2500} solid = payload/s (right axis)",
             &style_dim,
             (col_note, 18),
         )
@@ -446,7 +467,11 @@ pub(crate) fn generate(chart: &CompressionChart) {
         .unwrap();
     table_area
         .draw_text(
-            "Median of 3; 0.5 s active warmup, >=2 s measurement; JSON; 2 KiB dictionary.",
+            if chart.payload == "structured-varied-v1" {
+                "Median of 3; 0.5 s warmup, >=2 s measurement; varied binary/JSON; 2 KiB dict."
+            } else {
+                "Median of 3; 0.5 s active warmup, >=2 s measurement; JSON; 2 KiB dictionary."
+            },
             &style_dim,
             (78, note_y + 13),
         )
@@ -475,4 +500,34 @@ pub(crate) fn generate(chart: &CompressionChart) {
     std::fs::write(&out, svg).unwrap();
 
     eprintln!("Written: {}", out.display());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn varied_chart_rejects_repeated_or_mismatched_workloads() {
+        let mut row: PushpullLz4Row = serde_json::from_value(serde_json::json!({
+            "run_id": "test", "pattern": "pushpull_lz4", "transport": "lz4+tcp",
+            "peers": 1, "msg_size": 64, "wire_bytes": 70, "payload": "json"
+        }))
+        .unwrap();
+        assert!(matches_payload(&row, "json", 16384));
+        assert!(!matches_payload(&row, "structured-varied-v1", 16384));
+        row.payload = Some("structured-varied-v1".into());
+        assert!(!matches_payload(&row, "structured-varied-v1", 16384));
+        row.payload_corpus_messages = Some(4096);
+        row.arena_bytes = Some(16384);
+        assert!(matches_payload(&row, "structured-varied-v1", 16384));
+        assert!(!matches_payload(&row, "structured-varied-v1", 32768));
+        row.arena_bytes = Some(32768);
+        assert!(matches_payload(&row, "structured-varied-v1", 32768));
+        row.arena_bytes = Some(16384);
+        row.payload_corpus_messages = Some(1);
+        assert!(!matches_payload(&row, "structured-varied-v1", 16384));
+        row.payload_corpus_messages = Some(4096);
+        row.arena_bytes = Some(0);
+        assert!(!matches_payload(&row, "structured-varied-v1", 16384));
+    }
 }

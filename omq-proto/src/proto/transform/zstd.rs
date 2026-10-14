@@ -1,10 +1,10 @@
-//! `zstd+tcp://` per-part transform backed by zrip.
+//! Zstd revision 2: per-part compression and bounded arenas backed by zrip.
 //!
 //! Dict shipment is a single-part ZMTP message containing ZDICT-format bytes.
 //! The ZDICT magic (`37 A4 30 EC`) is the shipment discriminator. Compressed
 //! parts are raw Zstd frames and must carry `Frame_Content_Size`.
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use smallvec::SmallVec;
 use zrip::dict::Dictionary;
 use zrip::{CompressContext, DecompressContext};
@@ -13,12 +13,15 @@ use crate::error::{Error, Result};
 use crate::message::{Message, Payload};
 
 use super::TransformedOut;
+use super::arena::{self, DecodedArena};
+pub use super::arena::{MAX_ARENA_BYTES, MAX_ARENA_MESSAGES, MAX_ARENA_PARTS, arena_message_size};
 use super::common::{
     ENVELOPE_PLAIN, SENTINEL_PLAIN, body_budget, plaintext_payload, take_budget, validate_dict,
 };
 
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
 const ZDICT_MAGIC: [u8; 4] = [0x37, 0xA4, 0x30, 0xEC];
+const ARENA_SENTINEL: [u8; 4] = *b"ZSTA";
 const MIN_COMPRESS_NO_DICT: usize = 512;
 const MIN_COMPRESS_WITH_DICT: usize = 64;
 const MAX_DECOMPRESSED_SIZE: usize = 0x4000_0000 - 1;
@@ -34,6 +37,19 @@ pub const MAX_DICT_BYTES: usize = 8 * 1024;
 pub const DEFAULT_LEVEL: i32 = 1;
 /// Default trained dictionary capacity in bytes.
 pub const DEFAULT_DICT_CAPACITY: usize = 2048;
+
+/// Sender target for naturally queued arenas. Zero disables arena batching.
+#[must_use]
+pub fn arena_capacity() -> usize {
+    static CAPACITY: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CAPACITY.get_or_init(|| {
+        std::env::var("OMQ_ZSTD_ARENA_BYTES")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(32 * 1024)
+            .min(MAX_ARENA_BYTES)
+    })
+}
 
 /// Train a bounded ZDICT dictionary; return `None` for unusable samples or output.
 pub fn train_zdict(samples: &[&[u8]], capacity: usize) -> Option<Bytes> {
@@ -74,6 +90,7 @@ pub struct ZstdEncoder {
     train: Option<TrainState>,
     threshold_override: Option<usize>,
     dict_capacity: usize,
+    arena_buf: BytesMut,
 }
 
 impl std::fmt::Debug for ZstdEncoder {
@@ -105,6 +122,7 @@ impl Default for ZstdEncoder {
             train: None,
             threshold_override: None,
             dict_capacity: DEFAULT_DICT_CAPACITY,
+            arena_buf: BytesMut::new(),
         }
     }
 }
@@ -206,6 +224,7 @@ impl ZstdEncoder {
             train: None,
             threshold_override: self.threshold_override,
             dict_capacity: self.dict_capacity,
+            arena_buf: BytesMut::new(),
         }
     }
 
@@ -246,18 +265,76 @@ impl ZstdEncoder {
             self.maybe_train(&part.as_bytes());
         }
 
-        let mut out: TransformedOut = SmallVec::new();
+        let mut out = self.ship_dictionary();
+        let mut wire = Message::new();
+        for part in &msg.parts_payload() {
+            wire.push_part_payload(self.encode_part(part)?);
+        }
+        out.push(wire);
+        Ok(out)
+    }
+
+    fn ship_dictionary(&mut self) -> TransformedOut {
+        let mut out = SmallVec::new();
         if let Some(dict) = self.send_dict.clone()
             && !self.send_dict_shipped
         {
             out.push(Message::single(dict));
             self.send_dict_shipped = true;
         }
-        let mut wire = Message::new();
-        for part in &msg.parts_payload() {
-            wire.push_part_payload(self.encode_part(part)?);
+        out
+    }
+
+    /// Encode complete messages together, preceded by any pending dictionary.
+    ///
+    /// # Errors
+    /// Rejects empty or oversized arenas and compression failures.
+    pub fn encode_arena(&mut self, messages: &[&Message]) -> Result<TransformedOut> {
+        let mut size = 0usize;
+        let mut parts = 0usize;
+        for message in messages {
+            size =
+                size.saturating_add(arena_message_size(message).ok_or_else(|| {
+                    Error::Protocol("message is not eligible for Zstd arena".into())
+                })?);
+            parts = parts.saturating_add(message.len());
         }
-        out.push(wire);
+        if !(1..=MAX_ARENA_MESSAGES).contains(&messages.len())
+            || size > MAX_ARENA_BYTES
+            || parts > MAX_ARENA_PARTS
+        {
+            return Err(Error::Protocol("Zstd arena exceeds limits".into()));
+        }
+        self.arena_buf.clear();
+        self.arena_buf.reserve(size);
+        for message in messages {
+            for part in &message.parts_payload() {
+                self.maybe_train(&part.as_bytes());
+            }
+            crate::proto::frame::encode_message_flat(message, &mut self.arena_buf);
+        }
+        let mut out = self.ship_dictionary();
+        let compressed = if size >= self.effective_threshold() {
+            self.ensure_cctx()?;
+            Some(
+                self.cctx
+                    .as_mut()
+                    .unwrap()
+                    .compress(&self.arena_buf)
+                    .map_err(|e| compress_err(&e))?,
+            )
+            .filter(|compressed| compressed.len() < size)
+        } else {
+            None
+        };
+        let body = compressed.as_deref().unwrap_or(&self.arena_buf);
+        let mut wire = BytesMut::with_capacity(arena::HEADER + body.len());
+        wire.extend_from_slice(&ARENA_SENTINEL);
+        wire.extend_from_slice(&[u8::from(compressed.is_some()), 0, 0, 0]);
+        wire.extend_from_slice(&u32::try_from(size).unwrap().to_le_bytes());
+        wire.extend_from_slice(&u32::try_from(messages.len()).unwrap().to_le_bytes());
+        wire.extend_from_slice(body);
+        out.push(Message::single(wire.freeze()));
         Ok(out)
     }
 
@@ -327,6 +404,7 @@ pub struct ZstdDecoder {
     max_message_size: Option<usize>,
     max_recv_dict_size: usize,
     dctx: DecompressContext,
+    arena: Option<DecodedArena>,
 }
 
 impl std::fmt::Debug for ZstdDecoder {
@@ -345,6 +423,7 @@ impl Default for ZstdDecoder {
             max_message_size: None,
             max_recv_dict_size: MAX_DICT_BYTES,
             dctx: DecompressContext::new(),
+            arena: None,
         }
     }
 }
@@ -375,10 +454,80 @@ impl ZstdDecoder {
     /// # Errors
     /// Returns errors for invalid envelopes, dictionaries, sizes, or compressed data.
     pub fn decode(&mut self, msg: Message) -> Result<Option<Message>> {
+        if self.has_pending_messages() {
+            return Err(Error::Protocol("undrained Zstd arena".into()));
+        }
+        if Self::is_arena(&msg) {
+            return self.decode_arena(&msg, false);
+        }
         self.decode_with_budget(msg, self.max_message_size)
     }
 
+    /// Drain an already decoded arena before accepting another wire message.
+    pub fn poll_message(&mut self) -> Option<Message> {
+        let arena = self.arena.as_mut()?;
+        let message = arena.next();
+        if arena.is_empty() {
+            self.arena = None;
+        }
+        message
+    }
+
+    /// Whether an arena still contains undelivered messages.
+    #[must_use]
+    pub fn has_pending_messages(&self) -> bool {
+        self.arena.is_some()
+    }
+
+    fn is_arena(msg: &Message) -> bool {
+        msg.part_slice(0)
+            .is_some_and(|part| part.starts_with(&ARENA_SENTINEL))
+    }
+
+    fn decode_arena(&mut self, msg: &Message, payload_slots: bool) -> Result<Option<Message>> {
+        let invalid = || Error::Protocol("invalid Zstd arena envelope".into());
+        let bytes = msg.part_bytes(0).ok_or_else(invalid)?;
+        if msg.len() != 1 || bytes.len() < arena::HEADER || bytes[4] > 1 || bytes[5..8] != [0; 3] {
+            return Err(invalid());
+        }
+        let size = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+        let count = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+        if !(1..=MAX_ARENA_BYTES).contains(&size)
+            || !(1..=MAX_ARENA_MESSAGES).contains(&count)
+            || bytes.len() > arena::HEADER + MAX_ARENA_BYTES
+        {
+            return Err(invalid());
+        }
+        let body = bytes.slice(arena::HEADER..);
+        let payload = if bytes[4] == 0 {
+            if body.len() != size {
+                return Err(invalid());
+            }
+            Payload::from_bytes(Bytes::copy_from_slice(&body))
+        } else {
+            let payload = self.decode_zstd(&body, &mut Some(size))?;
+            if payload.len() != size {
+                return Err(invalid());
+            }
+            payload
+        };
+        self.arena = Some(DecodedArena::new(
+            payload.as_bytes(),
+            payload.retained_size().unwrap_or(size),
+            count,
+            self.max_message_size,
+            payload_slots,
+        )?);
+        Ok(self.poll_message())
+    }
+
     pub(super) fn decode_with_payload_slots(&mut self, msg: Message) -> Result<Option<Message>> {
+        if self.has_pending_messages() {
+            return Err(Error::Protocol("undrained Zstd arena".into()));
+        }
+        if Self::is_arena(&msg) {
+            return self.decode_arena(&msg, true);
+        }
         if is_dict_shipment(&msg) {
             return self.decode(msg);
         }
@@ -393,7 +542,9 @@ impl ZstdDecoder {
             // largest per-part overhead is the four-byte passthrough prefix.
             let data = limit.saturating_add(parts.saturating_mul(ENVELOPE_PLAIN));
             let setup = self.max_recv_dict_size + size_of::<Payload>();
-            data.max(setup).min(isize::MAX.unsigned_abs())
+            data.max(setup)
+                .max(arena::HEADER + MAX_ARENA_BYTES + size_of::<Payload>())
+                .min(isize::MAX.unsigned_abs())
         })
     }
 
@@ -526,7 +677,7 @@ mod tests {
         assert_eq!(parts.as_ptr(), pointer);
     }
 
-    fn trained_dict() -> Bytes {
+    pub(super) fn trained_dict() -> Bytes {
         let samples: Vec<&[u8]> = (0..200)
             .map(|_| &b"the-quick-brown-fox-jumps-over-the-lazy-dog\n"[..])
             .collect();
@@ -660,5 +811,181 @@ mod tests {
         assert_eq!(&dict[..4], &ZDICT_MAGIC);
         let id = u32::from_le_bytes(dict[4..8].try_into().unwrap());
         assert!((USER_DICT_ID_MIN..=USER_DICT_ID_MAX).contains(&id));
+    }
+}
+
+#[cfg(test)]
+mod arena_tests {
+
+    use super::*;
+    use crate::{Error, Message};
+    use bytes::Bytes;
+
+    #[test]
+    fn compressed_arena_rejects_trailing_frames_and_content_size_mismatch() {
+        let message = Message::single(vec![b'x'; 128]);
+        let wire = ZstdEncoder::new()
+            .encode_arena(&[&message; 32])
+            .unwrap()
+            .pop()
+            .unwrap();
+        let bytes = wire.part_bytes(0).unwrap();
+        assert_eq!(bytes[4], 1);
+        for delta in [-1i32, 1] {
+            let mut bad = bytes.to_vec();
+            let size = u32::from_le_bytes(bad[8..12].try_into().unwrap());
+            bad[8..12].copy_from_slice(&size.checked_add_signed(delta).unwrap().to_le_bytes());
+            assert!(ZstdDecoder::new().decode(Message::single(bad)).is_err());
+        }
+        let mut bad = bytes.to_vec();
+        bad.extend_from_slice(&bytes[arena::HEADER..]);
+        assert!(ZstdDecoder::new().decode(Message::single(bad)).is_err());
+        let mut bad = bytes.to_vec();
+        bad.push(0);
+        assert!(ZstdDecoder::new().decode(Message::single(bad)).is_err());
+        let mut decoder = ZstdDecoder::new();
+        assert_eq!(decode(&mut decoder, wire), vec![message; 32]);
+    }
+
+    fn raw(body: &[u8], count: u32) -> Message {
+        let mut bytes = Vec::from(ARENA_SENTINEL);
+        bytes.extend_from_slice(&[0; 4]);
+        bytes.extend_from_slice(&u32::try_from(body.len()).unwrap().to_le_bytes());
+        bytes.extend_from_slice(&count.to_le_bytes());
+        bytes.extend_from_slice(body);
+        Message::single(bytes)
+    }
+
+    fn decode(decoder: &mut ZstdDecoder, wire: Message) -> Vec<Message> {
+        let mut messages: Vec<_> = decoder.decode(wire).unwrap().into_iter().collect();
+        while let Some(message) = decoder.poll_message() {
+            messages.push(message);
+        }
+        messages
+    }
+
+    #[test]
+    fn arenas_roundtrip_mixed_parts_and_survive_retained_views() {
+        let messages = [
+            Message::single(""),
+            Message::single(vec![b'x'; 1024]),
+            Message::multipart([Bytes::new(), Bytes::from_static(b"tail"), Bytes::new()]),
+        ];
+        for threshold in [0, usize::MAX] {
+            let mut encoder = ZstdEncoder::new().with_threshold(threshold);
+            let mut decoder = ZstdDecoder::new();
+            let wire = encoder
+                .encode_arena(&messages.iter().collect::<Vec<_>>())
+                .unwrap()
+                .pop()
+                .unwrap();
+            assert_eq!(&wire.part_slice(0).unwrap()[..4], &ARENA_SENTINEL);
+            assert_eq!(decode(&mut decoder, wire), messages);
+            let wire = encoder
+                .encode_arena(&[&messages[1]; 4])
+                .unwrap()
+                .pop()
+                .unwrap();
+            let retained = decoder
+                .decode(wire)
+                .unwrap()
+                .unwrap()
+                .part_bytes(0)
+                .unwrap();
+            while decoder.poll_message().is_some() {}
+            drop(decoder);
+            assert_eq!(retained.as_ref(), vec![b'x'; 1024]);
+        }
+    }
+
+    #[test]
+    fn arena_limit_is_per_logical_message_and_counts_payload_slots() {
+        let message = Message::single(vec![b'x'; 64]);
+        let wire = ZstdEncoder::new()
+            .encode_arena(&[&message; 128])
+            .unwrap()
+            .pop()
+            .unwrap();
+        let mut decoder = ZstdDecoder::new().with_max_message_size(Some(128));
+        assert!(
+            decoder
+                .decode_with_payload_slots(wire.clone())
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(std::iter::from_fn(|| decoder.poll_message()).count(), 127);
+        let mut decoder = ZstdDecoder::new().with_max_message_size(Some(127));
+        assert!(matches!(
+            decoder.decode_with_payload_slots(wire),
+            Err(Error::MessageTooLarge { .. })
+        ));
+        let bad = raw(&[0, 1, b'a', 1, 1, b'b', 0, 1, b'c'], 2);
+        assert!(
+            ZstdDecoder::new()
+                .with_max_message_size(Some(1))
+                .decode(bad)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn arena_rejects_bad_headers_frames_and_trailing_data_before_delivery() {
+        for wire in [
+            raw(&[1, 0], 1),
+            raw(&[4, 0], 1),
+            raw(&[8, 0], 1),
+            raw(&[0, 2, b'a'], 1),
+            raw(&[2, 0], 1),
+            raw(&[0, 0, 0], 1),
+            raw(&[0, 0], 0),
+            raw(&[0, 0], 2),
+            raw(&[], 1),
+        ] {
+            assert!(ZstdDecoder::new().decode(wire).is_err());
+        }
+        let valid = raw(&[0, 0, 0, 0], 2).part_bytes(0).unwrap();
+        for (offset, value) in [(4, 2), (5, 1), (6, 1), (7, 1), (10, 2), (15, 1)] {
+            let mut bytes = valid.to_vec();
+            bytes[offset] = value;
+            assert!(ZstdDecoder::new().decode(Message::single(bytes)).is_err());
+        }
+        assert!(
+            ZstdDecoder::new()
+                .decode(Message::multipart([valid.clone(), Bytes::new()]))
+                .is_err()
+        );
+        let mut compressed = valid.to_vec();
+        compressed[4] = 1;
+        assert!(
+            ZstdDecoder::new()
+                .decode(Message::single(compressed))
+                .is_err()
+        );
+        assert!(
+            ZstdDecoder::new()
+                .decode(raw(&vec![0; 2 * (MAX_ARENA_PARTS + 1)], 2))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn pending_arena_cannot_be_overwritten_and_dictionary_ships_once() {
+        let dict = tests::trained_dict();
+        let mut encoder = ZstdEncoder::with_send_dict(dict).unwrap();
+        let message = Message::single("hello");
+        let mut wire = encoder.encode_arena(&[&message; 128]).unwrap();
+        assert_eq!(wire.len(), 2);
+        assert!(is_dict_shipment(&wire[0]));
+        let mut decoder = ZstdDecoder::new();
+        assert!(decoder.decode(wire.remove(0)).unwrap().is_none());
+        assert_eq!(
+            decoder.decode(wire.pop().unwrap()).unwrap(),
+            Some(message.clone())
+        );
+        let later = encoder.encode_arena(&[&message; 128]).unwrap();
+        assert_eq!(later.len(), 1);
+        assert!(decoder.decode(later[0].clone()).is_err());
+        assert_eq!(std::iter::from_fn(|| decoder.poll_message()).count(), 127);
+        assert_eq!(decode(&mut decoder, later[0].clone()), vec![message; 128]);
     }
 }

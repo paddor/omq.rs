@@ -12,12 +12,16 @@
 //! Transforms are sans-I/O. They take a `Message` and return one or more
 //! transformed `Message`s; or take a wire-level `Message` and return
 //! `None` (consumed at transport, e.g. dict shipment) or `Some(plaintext)`.
+//! Compression arenas retain additional decoded messages for `poll_message`.
 //!
 //! The encode and decode state are disjoint: `MessageEncoder` owns the
 //! outbound compressor, `MessageDecoder` owns the inbound decompressor.
 //! This split lets runtime code hold encoder and decoder state
 //! independently so dict-compressed sends do not contend with reads.
 
+/// Bounded inner framing shared by compression transports.
+#[cfg(any(feature = "lz4", feature = "zstd"))]
+pub mod arena;
 #[cfg(any(feature = "lz4", feature = "zstd"))]
 mod common;
 #[cfg(feature = "lz4")]
@@ -44,10 +48,10 @@ use crate::proto::mechanism::MechanismSetup;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum CompressionKind {
-    /// LZ4 per-part compression.
+    /// LZ4 part and arena compression.
     #[cfg(feature = "lz4")]
     Lz4,
-    /// Zstd per-part compression.
+    /// Zstd part and arena compression.
     #[cfg(feature = "zstd")]
     Zstd,
 }
@@ -165,6 +169,35 @@ pub enum MessageDecoder {
 mod limits;
 
 impl MessageEncoder {
+    /// Target bytes for naturally queued arenas; zero disables arena encoding.
+    #[must_use]
+    pub fn arena_capacity(&self) -> usize {
+        match self {
+            #[cfg(feature = "lz4")]
+            Self::Lz4(_) => lz4::arena_capacity(),
+            #[cfg(feature = "zstd")]
+            Self::Zstd(_) => zstd::arena_capacity(),
+            #[cfg(not(any(feature = "lz4", feature = "zstd")))]
+            _ => 0,
+        }
+    }
+
+    /// Encode a bounded arena of complete messages in order.
+    ///
+    /// # Errors
+    /// Rejects invalid arenas and compression failures.
+    #[allow(unused_variables)]
+    pub fn encode_arena(&mut self, messages: &[&Message]) -> Result<TransformedOut> {
+        match self {
+            #[cfg(feature = "lz4")]
+            Self::Lz4(encoder) => encoder.encode_arena(messages),
+            #[cfg(feature = "zstd")]
+            Self::Zstd(encoder) => encoder.encode_arena(messages),
+            #[cfg(not(any(feature = "lz4", feature = "zstd")))]
+            _ => unreachable!("MessageEncoder is uninhabited without compression features"),
+        }
+    }
+
     /// Returns `(sentinel, threshold)` when this encoder will always emit a
     /// plaintext-passthrough sentinel for parts smaller than `threshold` bytes.
     /// `None` when a dictionary or auto-train is active (threshold can change).
@@ -389,6 +422,31 @@ impl MessageEncoder {
 }
 
 impl MessageDecoder {
+    /// Drain decoded arena messages before submitting another wire message.
+    pub fn poll_message(&mut self) -> Option<Message> {
+        match self {
+            #[cfg(feature = "lz4")]
+            Self::Lz4(decoder) => decoder.poll_message(),
+            #[cfg(feature = "zstd")]
+            Self::Zstd(decoder) => decoder.poll_message(),
+            #[cfg(not(any(feature = "lz4", feature = "zstd")))]
+            _ => None,
+        }
+    }
+
+    /// Whether a decoded arena still has messages awaiting admission.
+    #[must_use]
+    pub fn has_pending_messages(&self) -> bool {
+        match self {
+            #[cfg(feature = "lz4")]
+            Self::Lz4(decoder) => decoder.has_pending_messages(),
+            #[cfg(feature = "zstd")]
+            Self::Zstd(decoder) => decoder.has_pending_messages(),
+            #[cfg(not(any(feature = "lz4", feature = "zstd")))]
+            _ => false,
+        }
+    }
+
     /// Framer limit for transformed body bytes plus payload slots. This allows
     /// bounded codec overhead and dictionary setup independently of the decoded
     /// message limit. An explicitly unlimited decoded limit remains unlimited.
@@ -406,8 +464,10 @@ impl MessageDecoder {
 
     /// Transform an inbound wire message. `None` means the message was
     /// consumed by the transport (dict shipment) and must not surface.
-    /// The configured decoded limit includes a payload slot per part, reserved
-    /// before decompression. Raw codec decoders retain their body-only limits.
+    /// Drain [`Self::poll_message`] before submitting another wire message.
+    /// The decoded limit includes a payload slot per part. Per-part envelopes
+    /// reserve it before decompression; bounded arenas check each message before
+    /// delivery. Raw codec decoders retain their body-only limits.
     pub fn decode(&mut self, msg: Message) -> Result<Option<Message>> {
         self.decode_with_payload_pool(msg, None)
     }

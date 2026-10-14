@@ -17,6 +17,7 @@ use std::net::Ipv4Addr;
 
 mod blocking_inproc;
 mod latency_common;
+mod payload_corpus;
 mod pushpull_common;
 #[cfg(any(feature = "ws", feature = "quic"))]
 mod ws_bench_config;
@@ -543,6 +544,7 @@ fn drain_warmup(sock: &blocking::Socket) {
 // --- Subcommands -------------------------------------------------------------
 
 fn run_push(ctx: &omq_tokio::Context, ep: Endpoint, size: usize, peers: usize) {
+    let corpus = payload_corpus::from_env(size);
     let push = ctx.blocking_socket(SocketType::Push, bench_options_server(size));
     let bound = push.bind(ep).expect("push bind");
     report_bound_port(ctx, &bound);
@@ -552,6 +554,15 @@ fn run_push(ctx: &omq_tokio::Context, ep: Endpoint, size: usize, peers: usize) {
             .expect("wait for pull peers");
     }
 
+    if let Some(corpus) = corpus {
+        wait_for_warmup_barrier();
+        wait_for_start_barrier();
+        loop {
+            for message in &corpus {
+                send_fast(&push, message.clone());
+            }
+        }
+    }
     let payload = bench_payload(size);
     wait_for_warmup_barrier();
     let warmup_deadline = Instant::now() + warmup_duration();
@@ -572,11 +583,12 @@ fn run_push(ctx: &omq_tokio::Context, ep: Endpoint, size: usize, peers: usize) {
 }
 
 fn run_pull(ctx: &omq_tokio::Context, ep: Endpoint, size: usize, duration: Duration) {
+    let corpus = payload_corpus::from_env(size);
     let pull = ctx.blocking_socket(SocketType::Pull, bench_options_client(size));
     pull.connect(ep).expect("pull connect");
 
     if std::env::var_os("OMQ_BENCH_COMPRESSION").is_some() {
-        run_compression_pull(&pull, size, duration);
+        run_compression_pull(&pull, size, duration, corpus.as_deref());
         return;
     }
 
@@ -586,12 +598,18 @@ fn run_pull(ctx: &omq_tokio::Context, ep: Endpoint, size: usize, duration: Durat
     println!("{count} {elapsed:.6} {size} {cpu:.6}");
 }
 
-fn run_compression_pull(pull: &blocking::Socket, size: usize, duration: Duration) {
+fn run_compression_pull(
+    pull: &blocking::Socket,
+    size: usize,
+    duration: Duration,
+    corpus: Option<&[Message]>,
+) {
     pull.wait_connected(1, Duration::from_secs(10))
         .expect("compression sender connected");
     let payload = bench_payload(size);
+    let mut index = 0;
     let batch = (64 * 1024 / size).clamp(1, 64);
-    let receive_until = |deadline: Instant| {
+    let mut receive_until = |deadline: Instant| {
         let mut count = 0u64;
         loop {
             let mut received = 0u64;
@@ -599,10 +617,19 @@ fn run_compression_pull(pull: &blocking::Socket, size: usize, duration: Duration
                 let Ok(message) = pull.try_recv() else {
                     break;
                 };
+                let expected = corpus.map_or(payload.as_ref(), |messages| {
+                    messages[index].part_slice(0).unwrap()
+                });
                 assert!(
-                    message.len() == 1 && message.part_slice(0) == Some(payload.as_ref()),
+                    message.len() == 1 && message.part_slice(0) == Some(expected),
                     "corrupt compression payload"
                 );
+                if let Some(messages) = corpus {
+                    index += 1;
+                    if index == messages.len() {
+                        index = 0;
+                    }
+                }
                 received += 1;
             }
             // Exclude the entire batch that crosses the measurement boundary.

@@ -20,8 +20,8 @@ zstd = ["omq-tokio/zstd"]
 ws = ["omq-tokio/ws"]
 
 [dependencies]
-omq-proto = { version = "0.30.0", default-features = false }
-omq-tokio = { version = "0.26.0", default-features = false }
+omq-proto = { version = "0.32.0", default-features = false }
+omq-tokio = { version = "0.28.0", default-features = false }
 yring = { version = "0.3.20", features = ["async"] }
 
 bytes = "1.12.0"

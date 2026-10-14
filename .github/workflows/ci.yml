@@ -158,6 +158,10 @@ jobs:
             printf '%s\n' "$files"
             exit 1
           fi
+      - name: check standalone native dependencies
+        run: |
+          cargo read-manifest --manifest-path bindings/go/native/Cargo.toml \
+            | jq -e 'all(.dependencies[]; .source != null)'
       - name: build native
         run: cargo build --release --manifest-path bindings/go/native/Cargo.toml
       - name: go vet

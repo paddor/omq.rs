@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-10-15
+
+### Changed
+
+- Bundle `omq-tokio` 0.28.0 with LZ4 arena compression for batches of small
+  messages. LZ4 peers require the updated transport revision.
+
+
 ## [0.2.4] - 2026-10-14
 
 ### Changed

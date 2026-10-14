@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-15
+
+### Changed
+
+- Bundle `omq-tokio` 0.28.0 and `omq-proto` 0.32.0 with LZ4/Zstd arena
+  compression for batches of small messages. Compressed peers require the
+  updated transport revisions.
+
+
 ## [0.4.0] - 2026-10-14
 
 ### Added

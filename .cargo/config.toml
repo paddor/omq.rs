@@ -1,2 +1,6 @@
 [build]
 rustflags = ["-C", "target-cpu=native"]
+
+[patch.crates-io]
+omq-proto = { path = "omq-proto" }
+omq-tokio = { path = "omq-tokio" }

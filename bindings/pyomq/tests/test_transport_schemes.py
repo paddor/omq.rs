@@ -14,7 +14,7 @@ def test_push_pull_transport(transport, tmp_path):
         pytest.fail("pyomq was built without DART")
 
     endpoint = (
-        f"dart://127.0.0.1:0"
+        "dart://127.0.0.1:0"
         if transport == "dart"
         else f"shm://{tmp_path / 'pyomq.sock'}"
     )

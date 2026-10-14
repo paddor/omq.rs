@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-10-14
+
+### Changed
+
+- Bundle `omq-tokio` 0.26.0 and `omq-proto` 0.30.0.
+
 ### Fixed
 
 - Timed sends, monitor receives, and `wait_any` park until woken instead of

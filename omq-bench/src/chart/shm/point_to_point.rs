@@ -6,6 +6,9 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::Path;
 
+const TIMED_BATCH_MESSAGES: u64 = 256;
+const TIMED_BATCH_BYTES: u64 = 1024 * 1024;
+
 fn verified(row: &Value, implementation: &str, size: u64, latency: bool, spin: u64) -> bool {
     let inproc = implementation == "inproc";
     if row["kind"]
@@ -39,6 +42,7 @@ fn verified(row: &Value, implementation: &str, size: u64, latency: bool, spin: u
         || row["subscriber_threads"] != 1
         || row["io_threads_per_context"] != 1
         || !super::storage_matches(row, size, latency)
+        || (!latency && row["sender_clock_batch"] != sender_clock_batch(size))
         || row["storage"]
             != match implementation {
                 "shm-pool" => "preallocated-shm",
@@ -88,6 +92,14 @@ fn verified(row: &Value, implementation: &str, size: u64, latency: bool, spin: u
                     .all(|field| round[field] == 0)
         }
     })
+}
+
+pub(super) fn sender_clock_batch(size: u64) -> u64 {
+    if (56..super::SLAB_BYTES).contains(&size) {
+        super::SLAB_BYTES / size
+    } else {
+        (TIMED_BATCH_BYTES / size).clamp(1, TIMED_BATCH_MESSAGES)
+    }
 }
 
 fn find<'a>(
@@ -294,6 +306,22 @@ pub(super) fn generate(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn throughput_rejects_the_old_per_message_clock_measurements() {
+        let rows = super::super::tests::point_cohort(false);
+        let mut row = rows
+            .iter()
+            .find(|row| row["msg_size"] == 16)
+            .unwrap()
+            .clone();
+        let implementation = row["impl"].as_str().unwrap().to_owned();
+        assert!(verified(&row, &implementation, 16, false, 0));
+        row.as_object_mut().unwrap().remove("sender_clock_batch");
+        assert!(!verified(&row, &implementation, 16, false, 0));
+        row["sender_clock_batch"] = json!(1);
+        assert!(!verified(&row, &implementation, 16, false, 0));
+    }
 
     fn write_rows(path: &Path, rows: &[Value]) {
         use std::io::Write;

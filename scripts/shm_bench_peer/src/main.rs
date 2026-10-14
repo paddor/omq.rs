@@ -14,6 +14,8 @@ const DEADLINE: Duration = Duration::from_secs(30);
 const PROBE: u64 = u64::MAX;
 const BENCH_HWM: u32 = 1000;
 const SLAB_BYTES: usize = 4096;
+const BATCH_MESSAGES: usize = 256;
+const BATCH_BYTES: usize = 1024 * 1024;
 const POOL_BYTES: usize = 64 * 1024 * 1024;
 const LARGE_POOL_BYTES: usize = 256 * 1024 * 1024;
 const LARGE_POOL_MIN_BODY: usize = 1024 * 1024;
@@ -100,7 +102,18 @@ impl Config {
         (omq_tokio::message::MAX_INLINE_MESSAGE + 1..SLAB_BYTES).contains(&self.size)
     }
 
+    fn batch_size(&self) -> usize {
+        (BATCH_BYTES / self.size).clamp(1, BATCH_MESSAGES)
+    }
+
     fn add_pool_metadata(&self, row: &mut serde_json::Value, throughput: bool) {
+        if throughput {
+            row["sender_clock_batch"] = json!(if self.uses_slabs() {
+                SLAB_BYTES / self.size
+            } else {
+                self.batch_size()
+            });
+        }
         row["payload_fill"] = json!(if throughput { "memset" } else { "memcpy" });
         row["pooled_batch_copy_threshold"] = json!(
             self.implementation
@@ -163,9 +176,9 @@ impl Port {
         Ok(Self {
             socket,
             pool,
-            messages: Vec::with_capacity(256),
+            messages: Vec::with_capacity(BATCH_MESSAGES),
             next: 0,
-            batch: (1024 * 1024 / config.size).clamp(1, 256),
+            batch: config.batch_size(),
         })
     }
 
@@ -293,7 +306,7 @@ fn subscribe(config: &Config, mut port: Port) -> Result<(), Error> {
         let mut received = 0_u64;
         let mut started = None;
         let mut ended = false;
-        let batch = (1024 * 1024 / config.size).clamp(1, 256);
+        let batch = config.batch_size();
         while !ended {
             for _ in 0..batch {
                 port.receive(&mut |bytes| {
@@ -395,7 +408,7 @@ fn accept_readers(config: &Config, port: &Port) -> Result<Vec<(UnixStream, bool)
 fn publish(config: &Config, port: &Port) -> Result<(), Error> {
     let mut readers = accept_readers(config, port)?;
     let mut bytes = vec![0xa5; config.size];
-    let batch = (1024 * 1024 / config.size).clamp(1, 256);
+    let batch = config.batch_size();
     for round in 0..4_u64 {
         let duration = Duration::from_secs(if round == 0 { 1 } else { 3 });
         let started = Instant::now();

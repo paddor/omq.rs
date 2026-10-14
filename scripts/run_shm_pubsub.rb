@@ -13,6 +13,8 @@ SIZES = [16, 64, 256, 1024, 4096, 16_384, 131_072, 1_048_576, 8_388_608].freeze
 IMPLEMENTATIONS = %w[inproc ipc shm shm-pool].freeze
 HWM = 1000
 SLAB_BYTES = 4096
+BATCH_MESSAGES = 256
+BATCH_BYTES = 1024 * 1024
 POOL_BYTES = 64 * 1024 * 1024
 LARGE_POOL_BYTES = 256 * 1024 * 1024
 LARGE_POOL_MIN_BODY = 1024 * 1024
@@ -126,6 +128,10 @@ def run_case(implementation, size, readers, port, pattern, recv_spin_us)
                      end
     raise 'wrong pooled batch copy policy' unless row['pooled_batch_copy_threshold'] == copy_threshold
     raise 'wrong payload fill' unless row['payload_fill'] == (pattern == 'client-server' ? 'memcpy' : 'memset')
+    if pattern == 'scatter-gather'
+      clock_batch = slab_bytes.positive? ? slab_bytes / size : (BATCH_BYTES / size).clamp(1, BATCH_MESSAGES)
+      raise 'wrong sender clock batch' unless row['sender_clock_batch'] == clock_batch
+    end
     if pattern != 'radio-dish'
       raise 'wrong spin policy' unless row['recv_spin_us'] == recv_spin_us
     end

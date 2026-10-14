@@ -584,10 +584,9 @@ impl RecvSink {
         self.try_deliver_inner(message, false, &mut false)
     }
 
-    #[cfg(feature = "dart")]
-    /// Defer notification and return rejected ownership to the reliable
-    /// datagram session, which retains it until application space returns.
-    pub(crate) fn try_deliver_datagram(
+    /// Defer notification and return rejected ownership to the sender.
+    /// The caller must flush accepted messages before waiting or returning.
+    pub(crate) fn try_deliver_deferred(
         &mut self,
         message: Message,
         pending: &mut bool,
@@ -651,7 +650,6 @@ impl RecvSink {
         Ok(())
     }
 
-    #[cfg(feature = "dart")]
     pub(crate) fn flush_delivery(&mut self, pending: &mut bool) {
         self.flush_deferred(pending);
     }

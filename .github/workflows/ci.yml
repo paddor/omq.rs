@@ -101,11 +101,13 @@ jobs:
             ruby:
               - 'bindings/ruby/**'
               - 'omq-proto/**'
+              - 'omq-shm/**'
               - 'omq-tokio/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.cargo/**'
               - '.github/workflows/ci.yml'
+              - '.github/workflows/release-rubygems.yml'
             node:
               - 'bindings/node/**'
               - '.github/workflows/ci.yml'
@@ -340,6 +342,13 @@ jobs:
         env:
           OMQ_PYTHON3: ${{ steps.ruby-python.outputs.python-path }}
         run: bundle exec rake
+
+      - name: Check packaged Ruby manifest
+        working-directory: bindings/ruby
+        run: |
+          bundle exec rake build
+          version="$(ruby -Ilib -romq/rs/version -e 'print OMQ::Rust::VERSION')"
+          ruby scripts/check-gem.rb --manifest-only "pkg/omq-rs-$version.gem"
 
   linux-gate:
     name: linux gate

@@ -127,15 +127,30 @@ native ARM runner with the official manylinux containers.
 
 `omq-rs` publishes to RubyGems from
 `.github/workflows/release-rubygems.yml`. Prepare a release by bumping
-`bindings/ruby/lib/omq/rs/version.rb`, updating
+`bindings/ruby/lib/omq/rs/version.rb` and
+`bindings/ruby/ext/omq_rs_native/Cargo.toml`, updating
 `bindings/ruby/CHANGELOG.md`, running `bundle lock --local` to refresh the
 local gem version in `Gemfile.lock`, and running `cargo update -p omq_rs_native`
 inside `bindings/ruby`. Publish the required `omq-proto` and `omq-tokio`
-versions before pushing the Ruby tag. After the PR is merged, push a tag:
+versions before pushing the Ruby tag. The release workflow installs the built
+source gem outside the checkout with a fresh `GEM_HOME` on Ruby 3.3 and 4.0,
+then checks loading, features, CURVE keys, and TCP/LZ4/Zstd messaging before
+publication. Normal CI checks the packaged manifest without requiring
+unreleased core crates. After the PR is merged, push a tag:
 
 ```sh
-git tag -a ruby-v0.2.0 -m "omq-rs 0.2.0"
-git -c push.followTags=false push origin ruby-v0.2.0
+git tag -a ruby-v0.2.4 -m "omq-rs 0.2.4"
+git -c push.followTags=false push origin ruby-v0.2.4
+```
+
+After publication, fetch that exact version into a temporary directory and
+run the same check against the downloaded artifact:
+
+```sh
+# From bindings/ruby; substitute the released version.
+gem_dir="$(mktemp -d)"
+(cd "$gem_dir" && gem fetch omq-rs --version 0.2.4)
+ruby scripts/check-gem.rb "$gem_dir/omq-rs-0.2.4.gem"
 ```
 
 `OMQ.java` publishes to Maven Central from

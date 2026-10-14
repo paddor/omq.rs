@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Require `omq-shm` 0.2.0 so registry builds use the same `omq-proto` version
+  throughout the dependency graph.
+
 ## [0.28.0] - 2026-10-14
 
 ### Breaking

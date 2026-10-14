@@ -16,7 +16,7 @@ use jni::objects::{
 };
 use jni::sys::{jboolean, jint, jlong, jlongArray, jobject, jobjectArray, jsize, jstring};
 use jni::{JNIEnv, JavaVM};
-use omq_proto::TrySendError;
+use omq_proto::{PayloadPool, TrySendError};
 use omq_tokio::blocking::{BlockingRecvCancel, Socket as BlockingSocket};
 use omq_tokio::options::{KeepAlive, OnMute, ReconnectPolicy, WorkloadProfile};
 use omq_tokio::{
@@ -177,6 +177,10 @@ struct SendSlotOwner {
     offset: usize,
     len: usize,
 }
+
+const SEND_BATCH_MESSAGES: usize = 256;
+const SEND_POOL_SLOT_BYTES: usize = 256;
+const SEND_POOL_SLOTS: usize = 2_000;
 
 const RECV_RING_STATUS_OK: i32 = 0;
 const RECV_RING_STATUS_TIMEOUT: i32 = 1;
@@ -648,20 +652,49 @@ impl JavaSendRingShared {
         moved
     }
 
-    fn message_at(self: &Arc<Self>, cursor: usize) -> Message {
+    fn message_at(
+        self: &Arc<Self>,
+        cursor: usize,
+        pool: &OnceLock<Option<PayloadPool>>,
+    ) -> (Message, bool) {
         let desc = self.desc[cursor & self.desc_mask];
         let len = desc.payload_len as usize;
         let offset = desc.payload as usize;
-        Message::single(Bytes::from_owner(SendSlotOwner {
-            shared: Arc::clone(self),
-            cursor,
-            offset,
-            len,
-        }))
+        let body = &self.payload[offset..offset + len];
+        if len <= omq_proto::message::MAX_INLINE_MESSAGE {
+            return (Message::from_slice(body), true);
+        }
+        if len <= SEND_POOL_SLOT_BYTES
+            && let Some(pool) = pool
+                .get_or_init(|| PayloadPool::new([(SEND_POOL_SLOT_BYTES, SEND_POOL_SLOTS)]).ok())
+            && let Ok(Some(message)) = pool.try_message(len, |target| target.copy_from_slice(body))
+        {
+            return (message, true);
+        }
+        (
+            Message::single(Bytes::from_owner(SendSlotOwner {
+                shared: Arc::clone(self),
+                cursor,
+                offset,
+                len,
+            })),
+            false,
+        )
     }
 
     fn release_slot(&self, cursor: usize) {
-        self.done[cursor & self.desc_mask].store(true, Ordering::Release);
+        self.release_slots(std::iter::once(cursor));
+    }
+
+    fn release_slots(&self, cursors: impl IntoIterator<Item = usize>) {
+        let mut released = false;
+        for cursor in cursors {
+            self.done[cursor & self.desc_mask].store(true, Ordering::Release);
+            released = true;
+        }
+        if !released {
+            return;
+        }
         let Ok(mut reclaim) = self.reclaim.lock() else {
             return;
         };
@@ -671,8 +704,8 @@ impl JavaSendRingShared {
                 break;
             }
             reclaim.cursor = reclaim.cursor.wrapping_add(1);
-            self.control.head.store(reclaim.cursor, Ordering::SeqCst);
         }
+        self.control.head.store(reclaim.cursor, Ordering::SeqCst);
         drop(reclaim);
         if self.control.producer_waiting.load(Ordering::SeqCst) != 0 {
             let _space = self.space.lock();
@@ -696,11 +729,13 @@ impl Drop for SendSlotOwner {
 fn send_ring_worker(shared: Arc<JavaSendRingShared>) {
     let mut head = 0usize;
     let mut cached_tail = 0usize;
-    let mut batch = VecDeque::with_capacity(256);
+    let mut batch = VecDeque::with_capacity(SEND_BATCH_MESSAGES);
+    let mut copied = VecDeque::with_capacity(SEND_BATCH_MESSAGES);
+    let pool = OnceLock::new();
     let mut spins = 0u32;
 
     loop {
-        while batch.len() < 256 {
+        while batch.len() < SEND_BATCH_MESSAGES {
             let cursor = head.wrapping_add(batch.len());
             if cursor == cached_tail {
                 cached_tail = shared.control.tail.load(Ordering::Acquire);
@@ -708,7 +743,9 @@ fn send_ring_worker(shared: Arc<JavaSendRingShared>) {
                     break;
                 }
             }
-            batch.push_back(shared.message_at(cursor));
+            let (message, was_copied) = shared.message_at(cursor, &pool);
+            batch.push_back(message);
+            copied.push_back(was_copied);
         }
 
         if batch.is_empty() {
@@ -724,15 +761,15 @@ fn send_ring_worker(shared: Arc<JavaSendRingShared>) {
         }
         spins = 0;
 
-        match shared.socket.try_send_many(&mut batch, 256) {
-            Ok(sent) => head = head.wrapping_add(sent),
+        match shared.socket.try_send_many(&mut batch, SEND_BATCH_MESSAGES) {
+            Ok(sent) => finish_send_batch(&shared, &mut copied, &mut head, sent),
             Err(TrySendError::Full(returned)) => {
                 // Park on queue space; ring close cancels the wait.
                 match shared
                     .socket
                     .send_cancelable(returned.clone(), &shared.send_cancel)
                 {
-                    Ok(true) => head = head.wrapping_add(1),
+                    Ok(true) => finish_send_batch(&shared, &mut copied, &mut head, 1),
                     Ok(false) => {
                         batch.push_front(returned);
                         break;
@@ -760,6 +797,24 @@ fn send_ring_worker(shared: Arc<JavaSendRingShared>) {
 
     shared.control.closed.store(1, Ordering::Release);
     shared.wake();
+}
+
+fn finish_send_batch(
+    shared: &JavaSendRingShared,
+    copied: &mut VecDeque<bool>,
+    head: &mut usize,
+    sent: usize,
+) {
+    // Publish copied slots only after submission, so draining the Java ring
+    // orders these messages before subsequent JNI sends.
+    shared.release_slots(
+        copied
+            .drain(..sent)
+            .enumerate()
+            .filter(|(_, copied)| *copied)
+            .map(|(index, _)| head.wrapping_add(index)),
+    );
+    *head = head.wrapping_add(sent);
 }
 
 fn send_ring_spin(spins: &mut u32) {

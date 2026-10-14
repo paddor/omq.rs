@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-10-14
+
+### Changed
+
+- Bundle `omq-tokio` 0.26.0 and `omq-proto` 0.30.0, including Linux
+  shared-memory endpoints.
+
 ## [0.2.2] - 2026-10-07
 
 - Bundle `omq-tokio` 0.25.0 and `omq-proto` 0.29.0 with bounded receive

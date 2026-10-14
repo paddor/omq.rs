@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-10-14
+
+### Changed
+
+- Bundle `omq-tokio` 0.26.0 and `omq-proto` 0.30.0.
+
 ### Fixed
 
 - `Send`, `SendTimeout`, `BoundSocket.Send`, `SendBlocking`, `RecvInto`, and

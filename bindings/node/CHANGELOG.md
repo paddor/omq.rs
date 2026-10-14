@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-10-14
+
+### Changed
+
+- Bundle `omq-tokio` 0.26.0, including Linux shared-memory endpoints.
+
 ## [0.2.3] - 2026-10-07
 
 ### Changed

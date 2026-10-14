@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-10-14
+
+### Changed
+
+- Bundle `omq-libzmq` 0.5.22, including Linux shared-memory endpoints.
+
 ## [0.1.2] - 2026-10-07
 
 ### Changed

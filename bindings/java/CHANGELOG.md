@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-14
+
+### Added
+
+- QUIC TLS socket options and DART and SHM endpoint coverage.
+
+### Changed
+
+- Reuse native payload slots for 56-256 B `send(byte[])` bodies.
+
 ### Fixed
 
 - Blocking and timed sends on a full queue, `receiveAny`, and the PUSH and

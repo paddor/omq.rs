@@ -99,6 +99,7 @@ pub(crate) struct SendPipeProducer {
     data_signal: Arc<DataSignal>,
     space_available: Arc<StateSignal>,
     pub(crate) above_lwm: Arc<AtomicBool>,
+    pending: bool,
 }
 
 /// Consumer half owned by a peer task.
@@ -144,6 +145,7 @@ pub(crate) fn send_pipe_with_mode(
             data_signal: data_signal.clone(),
             space_available: space_available.clone(),
             above_lwm: above_lwm.clone(),
+            pending: false,
         },
         SendPipeConsumer {
             inner: consumer,
@@ -176,6 +178,7 @@ pub(crate) fn peer_send_pipe(
             data_signal: data_signal.clone(),
             space_available: space_available.clone(),
             above_lwm: above_lwm.clone(),
+            pending: false,
         },
         SendPipeConsumer {
             inner: SendPipeConsumerInner::Peer(consumer),
@@ -197,6 +200,7 @@ pub(crate) fn inproc_send_pipe(sender: crate::transport::inproc::InprocSender) -
         data_signal: Arc::new(DataSignal::new()),
         space_available: Arc::new(StateSignal::new()),
         above_lwm: Arc::new(AtomicBool::new(false)),
+        pending: false,
     }
 }
 
@@ -242,6 +246,7 @@ impl SendPipeProducer {
             data_signal: self.data_signal.clone(),
             space_available: self.space_available.clone(),
             above_lwm: self.above_lwm.clone(),
+            pending: false,
         })
     }
 
@@ -270,6 +275,36 @@ impl SendPipeProducer {
     #[inline]
     pub(crate) fn try_send(&mut self, msg: Message) -> core::result::Result<(), SendPipeError> {
         self.try_send_prepared(msg, SendPreparation::Plain)
+    }
+
+    #[inline]
+    pub(crate) fn try_send_deferred(
+        &mut self,
+        msg: Message,
+    ) -> core::result::Result<(), SendPipeError> {
+        #[cfg(feature = "dart")]
+        if self.dart.is_some() {
+            return self.try_send(msg);
+        }
+        if !matches!(self.inner, SendPipeProducerInner::Queue(_)) {
+            return self.try_send(msg);
+        }
+        let result = self.try_send_queue::<true>(msg, SendPreparation::Plain);
+        if result.is_err() {
+            // A muted pipe must publish accepted messages before leaving the
+            // active set, so its consumer can drain and return LWM credit.
+            self.flush_deferred();
+        }
+        result
+    }
+
+    pub(crate) fn flush_deferred(&mut self) {
+        if std::mem::take(&mut self.pending)
+            && let SendPipeProducerInner::Queue(producer) = &mut self.inner
+        {
+            producer.flush();
+            self.data_signal.mark();
+        }
     }
 
     #[inline]
@@ -345,8 +380,20 @@ impl SendPipeProducer {
             }
             return result;
         }
+        if matches!(self.inner, SendPipeProducerInner::Queue(_)) {
+            return self.try_send_queue::<false>(msg, preparation);
+        }
+        self.try_send_conflate(msg, preparation)
+    }
+
+    #[inline]
+    fn try_send_queue<const DEFERRED: bool>(
+        &mut self,
+        msg: Message,
+        preparation: SendPreparation,
+    ) -> core::result::Result<(), SendPipeError> {
         let SendPipeProducerInner::Queue(producer) = &mut self.inner else {
-            return self.try_send_conflate(msg, preparation);
+            unreachable!("queue send requires a queue pipe");
         };
         if producer.is_consumer_dropped() {
             return Err(SendPipeError::Closed(msg));
@@ -358,8 +405,13 @@ impl SendPipeProducer {
         // Exclusive producer access guarantees capacity until this push.
         match producer.push(preparation.prepare(msg)) {
             Ok(()) => {
-                producer.flush();
-                self.data_signal.mark();
+                if DEFERRED {
+                    self.pending = true;
+                } else {
+                    producer.flush();
+                    self.pending = false;
+                    self.data_signal.mark();
+                }
                 Ok(())
             }
             Err(_) if producer.is_consumer_dropped() => Ok(()),
@@ -823,6 +875,36 @@ mod tests {
     use tokio::time::{Duration, timeout};
 
     use super::*;
+
+    #[test]
+    fn deferred_sends_publish_before_full_returns() {
+        let (mut tx, mut rx) = send_pipe(2);
+        tx.try_send_deferred(Message::single("first")).unwrap();
+        tx.try_send_deferred(Message::single("second")).unwrap();
+        assert!(tx.data_signal.is_idle());
+        let mut received = Vec::new();
+        assert_eq!(rx.drain_into(&mut received, 2, usize::MAX), 0);
+        assert!(matches!(
+            tx.try_send_deferred(Message::single("full")),
+            Err(SendPipeError::Full(_))
+        ));
+        assert_eq!(rx.drain_into(&mut received, 2, usize::MAX), 2);
+        assert_eq!(
+            received,
+            [Message::single("first"), Message::single("second")]
+        );
+    }
+
+    #[test]
+    fn dropping_a_deferred_producer_publishes_its_accepted_messages() {
+        let (mut tx, mut rx) = send_pipe(2);
+        tx.try_send_deferred(Message::single("last")).unwrap();
+        drop(tx);
+        let mut received = Vec::new();
+        assert_eq!(rx.drain_into(&mut received, 2, usize::MAX), 1);
+        assert_eq!(received, [Message::single("last")]);
+        assert!(rx.is_disconnected());
+    }
 
     #[tokio::test]
     async fn metadata_drain_preserves_limits_order_and_capacity_wakes() {

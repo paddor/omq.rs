@@ -19,6 +19,8 @@ use omq_tokio::{Context, ContextConfig, Endpoint, Message, Options, SocketType};
 mod affinity;
 #[path = "perf_verify/contract.rs"]
 mod contract;
+#[path = "perf_verify/draft.rs"]
+mod draft;
 #[path = "perf_verify/measurement.rs"]
 mod measurement;
 
@@ -100,13 +102,33 @@ fn tcp_zero() -> Endpoint {
 }
 
 fn inproc_endpoint() -> Endpoint {
-    "inproc://perf-gate".parse().expect("valid inproc endpoint")
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    format!(
+        "inproc://perf-gate-{}",
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    )
+    .parse()
+    .expect("valid inproc endpoint")
+}
+
+#[cfg(unix)]
+fn local_endpoint(scheme: &str) -> Endpoint {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let id = NEXT.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("omq-perf-{}-{id}.{scheme}", std::process::id()));
+    format!("{scheme}://{}", path.display())
+        .parse()
+        .expect("local endpoint")
 }
 
 #[derive(Clone, Copy, Debug)]
 enum Transport {
     Tcp,
     Inproc,
+    #[cfg(unix)]
+    Ipc,
+    #[cfg(target_os = "linux")]
+    Shm,
     #[cfg(feature = "quic")]
     Quic,
     #[cfg(feature = "dart")]
@@ -118,6 +140,10 @@ impl Transport {
         match self {
             Self::Tcp => "",
             Self::Inproc => "inproc_",
+            #[cfg(unix)]
+            Self::Ipc => "ipc_",
+            #[cfg(target_os = "linux")]
+            Self::Shm => "shm_",
             #[cfg(feature = "quic")]
             Self::Quic => "quic_",
             #[cfg(feature = "dart")]
@@ -129,6 +155,10 @@ impl Transport {
         match self {
             Self::Tcp => tcp_zero(),
             Self::Inproc => inproc_endpoint(),
+            #[cfg(unix)]
+            Self::Ipc => local_endpoint("ipc"),
+            #[cfg(target_os = "linux")]
+            Self::Shm => local_endpoint("shm"),
             #[cfg(feature = "quic")]
             Self::Quic => "quic://127.0.0.1:0".parse().expect("QUIC endpoint"),
             #[cfg(feature = "dart")]
@@ -207,12 +237,14 @@ static QUIC_CREDENTIALS: LazyLock<(Vec<u8>, Vec<u8>)> = LazyLock::new(|| {
 });
 
 fn smoke_thresholds() -> HashMap<String, f64> {
-    HashMap::from([
+    let mut thresholds = HashMap::from([
         ("reqrep_ct.p50_256b_us".to_string(), 1_000.0),
         ("pushpull_1io.16b_msgs_s".to_string(), 1_000_000.0),
         ("pubsub_1io.16b_msgs_s".to_string(), 500_000.0),
         ("inproc_pushpull_1io.16b_msgs_s".to_string(), 1_000_000.0),
-    ])
+    ]);
+    draft::smoke_thresholds(&mut thresholds);
+    thresholds
 }
 
 fn read_thresholds() -> ThresholdConfig {
@@ -309,13 +341,21 @@ fn send_blocking_batch_until(
     message: &Message,
     deadline: Instant,
 ) -> bool {
+    send_blocking_batch_until_with(sock, || message.clone(), deadline)
+}
+
+fn send_blocking_batch_until_with(
+    sock: &omq_tokio::blocking::Socket,
+    mut message: impl FnMut() -> Message,
+    deadline: Instant,
+) -> bool {
     if Instant::now() >= deadline {
         return false;
     }
     let mut budget = DrainBudget::WORKER;
-    let bytes = message.byte_len();
     loop {
-        let mut msg = message.clone();
+        let mut msg = message();
+        let bytes = msg.byte_len();
         loop {
             match sock.try_send(msg) {
                 Ok(()) => break,
@@ -768,6 +808,7 @@ async fn run_mode(args: &[String]) -> bool {
 
 #[derive(Debug)]
 enum Workload {
+    Draft(draft::Workload),
     Reqrep,
     Pipeline {
         size: usize,
@@ -865,6 +906,7 @@ fn cases() -> Vec<Case> {
         },
     });
     contract_cases(&mut cases);
+    draft::cases(&mut cases);
     cases
 }
 
@@ -911,6 +953,15 @@ fn contract_cases(cases: &mut Vec<Case>) {
 
 async fn measure(case: &Case) -> Sample {
     let (value, unit) = match case.workload {
+        Workload::Draft(workload) => (
+            tokio::task::spawn_blocking(move || {
+                SETTINGS.affinity.pin(0);
+                draft::measure(workload)
+            })
+            .await
+            .expect("draft transport task"),
+            "msg/s",
+        ),
         Workload::Reqrep => (reqrep_latency().await, "us"),
         Workload::Pipeline {
             size,

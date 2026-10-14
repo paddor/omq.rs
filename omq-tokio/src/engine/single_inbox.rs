@@ -92,22 +92,9 @@ impl<T> Producer<T> {
         if self.shared.admitted.load(Ordering::Acquire) & CLOSED != 0 {
             return Err(());
         }
-        let waiting = self.shared.waiting.swap(true, Ordering::AcqRel);
-        match self
-            .sender
-            .poll_ready(&mut Context::from_waker(&self.waker))
-        {
-            Poll::Pending => Ok(false),
-            Poll::Ready(Err(_)) => Err(()),
-            Poll::Ready(Ok(())) => {
-                self.shared.waiting.store(false, Ordering::Release);
-                // A probe can cancel the native producer's sole waker.
-                if waiting {
-                    self.shared.space.notify_changed();
-                }
-                Ok(true)
-            }
-        }
+        super::producer_ready::ready(&mut self.sender, &self.shared.waiting, &self.waker, || {
+            self.shared.space.notify_changed();
+        })
     }
 }
 

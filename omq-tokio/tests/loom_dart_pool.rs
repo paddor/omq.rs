@@ -208,18 +208,30 @@ mod publication {
         data: Mutex<Vec<(usize, Claim)>>,
     }
 
-    struct Claim(Arc<Channel>);
+    struct Claim {
+        channel: Arc<Channel>,
+        count: usize,
+    }
 
     impl Drop for Claim {
         fn drop(&mut self) {
-            assert!(self.0.queued.fetch_sub(1, Ordering::AcqRel) > 0);
-            assert!(self.0.admitted.fetch_sub(1, Ordering::AcqRel) & !CLOSED > 0);
+            if self.count == 0 {
+                return;
+            }
+            assert!(self.channel.queued.fetch_sub(self.count, Ordering::AcqRel) >= self.count);
+            assert!(
+                self.channel
+                    .admitted
+                    .fetch_sub(self.count, Ordering::AcqRel)
+                    & !CLOSED
+                    >= self.count
+            );
         }
     }
 
     impl Claim {
         fn send(self, value: usize) {
-            let channel = self.0.clone();
+            let channel = self.channel.clone();
             let _producer = channel.producer.lock().unwrap();
             channel.data.lock().unwrap().push((value, self));
         }
@@ -257,15 +269,25 @@ mod publication {
                 }
             }
             channel.queued.fetch_add(1, Ordering::AcqRel);
-            Some(Claim(channel.clone()))
+            Some(Claim {
+                channel: channel.clone(),
+                count: 1,
+            })
         }
 
         fn drain(&self) -> Vec<usize> {
             let items = std::mem::take(&mut *self.data.lock().unwrap());
+            let mut batch: Option<Claim> = None;
             items
                 .into_iter()
-                .map(|(value, claim)| {
-                    drop(claim);
+                .map(|(value, mut claim)| {
+                    if let Some(current) = &mut batch {
+                        assert!(Arc::ptr_eq(&current.channel, &claim.channel));
+                        current.count += claim.count;
+                        claim.count = 0;
+                    } else {
+                        batch = Some(claim);
+                    }
                     value
                 })
                 .collect()
@@ -313,6 +335,49 @@ mod publication {
             let values = channel.drain();
             assert_eq!(values.len(), 2);
             assert_eq!(values.iter().filter(|&&value| value == 7).count(), 1);
+            assert_eq!(channel.admitted.load(Ordering::Acquire), 0);
+            assert_eq!(channel.queued.load(Ordering::Acquire), 0);
+        });
+    }
+
+    #[test]
+    fn batch_release_racing_close_preserves_an_unsent_reservation() {
+        loom::model(|| {
+            let channel = Channel::new(3);
+            let unsent = Channel::reserve(&channel).unwrap();
+            Channel::reserve(&channel).unwrap().send(7);
+            Channel::reserve(&channel).unwrap().send(9);
+            let draining = {
+                let channel = channel.clone();
+                thread::spawn(move || assert_eq!(channel.drain(), [7, 9]))
+            };
+            channel.admitted.fetch_or(CLOSED, Ordering::AcqRel);
+            assert!(channel.admitted.load(Ordering::Acquire) & !CLOSED >= 1);
+            assert!(Channel::reserve(&channel).is_none());
+            draining.join().unwrap();
+            assert_eq!(channel.admitted.load(Ordering::Acquire), CLOSED | 1);
+            assert_eq!(channel.queued.load(Ordering::Acquire), 1);
+            drop(unsent);
+            assert_eq!(channel.admitted.load(Ordering::Acquire), CLOSED);
+            assert_eq!(channel.queued.load(Ordering::Acquire), 0);
+        });
+    }
+
+    #[test]
+    fn batch_release_cannot_steal_a_concurrent_reservation() {
+        loom::model(|| {
+            let channel = Channel::new(3);
+            Channel::reserve(&channel).unwrap().send(7);
+            Channel::reserve(&channel).unwrap().send(9);
+            let writer = {
+                let channel = channel.clone();
+                thread::spawn(move || Channel::reserve(&channel))
+            };
+            assert_eq!(channel.drain(), [7, 9]);
+            let reserved = writer.join().unwrap().unwrap();
+            assert_eq!(channel.admitted.load(Ordering::Acquire), 1);
+            assert_eq!(channel.queued.load(Ordering::Acquire), 1);
+            drop(reserved);
             assert_eq!(channel.admitted.load(Ordering::Acquire), 0);
             assert_eq!(channel.queued.load(Ordering::Acquire), 0);
         });

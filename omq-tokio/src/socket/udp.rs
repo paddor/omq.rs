@@ -10,8 +10,9 @@
 //! - **RADIO** connects, sends every datagram unfiltered (the receiver
 //!   does the filter).
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use rustc_hash::FxHashSet;
 
 use bytes::Bytes;
@@ -25,12 +26,12 @@ use omq_proto::endpoint::Endpoint;
 use omq_proto::message::Message;
 
 /// Joined-groups set, shared between the socket actor (mutated by
-/// `apply_join`) and every UDP DISH listener task (read on each recv).
-/// Lock hold time is one `HashSet::contains`; contention is negligible.
-pub(crate) type JoinedGroups = Arc<Mutex<FxHashSet<Bytes>>>;
+/// `apply_join`) and UDP/DART DISH listeners. The actor publishes a new
+/// immutable set before acknowledging join/leave; readers never lock it.
+pub(crate) type JoinedGroups = Arc<ArcSwap<FxHashSet<Bytes>>>;
 
 pub(crate) fn new_joined_groups() -> JoinedGroups {
-    Arc::new(Mutex::new(FxHashSet::default()))
+    Arc::new(ArcSwap::from_pointee(FxHashSet::default()))
 }
 
 /// One bound UDP listener (DISH side). Cancelling the token tears down
@@ -71,10 +72,7 @@ pub(crate) fn spawn_dish_listener(
                         let Some((group, body)) = udp::decode_datagram(&buf[..n]) else {
                             continue;
                         };
-                        let joined_now = {
-                            let g = joined.lock().expect("joined_groups poisoned");
-                            g.contains(&group)
-                        };
+                        let joined_now = joined.load().contains(&group);
                         if !joined_now {
                             continue;
                         }

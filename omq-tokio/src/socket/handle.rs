@@ -1,7 +1,7 @@
 //! Public `Socket` handle.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use futures::channel::oneshot;
@@ -82,10 +82,6 @@ struct Inner {
     /// REQ alternation flag. Avoids Mutex on the REQ hot path.
     /// Shared with the actor for `on_peer_disconnected` reset.
     req_awaiting_reply: Arc<ReqAwaitingReply>,
-    /// Cooperative yield counter. Every `SEND_YIELD_INTERVAL` successful
-    /// synchronous sends, `send()` yields to the runtime so driver tasks
-    /// on the same worker thread can drain and flush.
-    send_ops: AtomicU32,
     /// Subscription commands received from peers. Incremented by the
     /// actor on each `Command::Subscribe`; read by `wait_subscribed`.
     subscribe_count: Arc<AtomicU64>,
@@ -94,8 +90,6 @@ struct Inner {
     last_bound_endpoint: RwLock<Option<Endpoint>>,
     actor_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
-
-const SEND_YIELD_INTERVAL: u32 = 4096;
 
 impl AsRef<Self> for Socket {
     fn as_ref(&self) -> &Self {
@@ -149,14 +143,7 @@ impl Socket {
         if body.is_empty() {
             return Err(Error::Protocol("send_to requires a message body".into()));
         }
-        if self
-            .inner
-            .send_ops
-            .fetch_add(1, Ordering::Relaxed)
-            .is_multiple_of(SEND_YIELD_INTERVAL)
-        {
-            tokio::task::yield_now().await;
-        }
+        super::send_budget::cooperate().await;
         self.send_submitter.send_to(identity.as_ref(), body).await
     }
 
@@ -432,7 +419,6 @@ impl Socket {
                 send_submitter,
                 rep_current,
                 req_awaiting_reply,
-                send_ops: AtomicU32::new(0),
                 subscribe_count,
                 ready_peer_count,
                 last_bound_endpoint: RwLock::new(None),
@@ -605,14 +591,7 @@ impl Socket {
     /// a pipe exists and has space. Connected no-peer sends queue in the
     /// endpoint's pre-ready pipe up to `Options::send_hwm`.
     pub async fn send(&self, msg: Message) -> Result<()> {
-        if self
-            .inner
-            .send_ops
-            .fetch_add(1, Ordering::Relaxed)
-            .is_multiple_of(SEND_YIELD_INTERVAL)
-        {
-            tokio::task::yield_now().await;
-        }
+        super::send_budget::cooperate().await;
         match self.inner.socket_type {
             SocketType::Req => {
                 if !self.inner.req_awaiting_reply.claim() {

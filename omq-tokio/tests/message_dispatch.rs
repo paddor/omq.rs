@@ -224,6 +224,127 @@ async fn sink_cooperates_with_other_application_tasks_under_ready_load() {
 }
 
 #[tokio::test]
+async fn ready_async_sends_cooperate_across_clones_and_sockets() {
+    for identity in [false, true] {
+        let context = Context::new();
+        // These sends drop immediately without peers, so backpressure cannot
+        // accidentally provide the cooperation being tested. ROUTER has no
+        // additional fan-out yield budget.
+        let first = context.socket(SocketType::Router, Options::default());
+        let sockets = [
+            first.clone(),
+            first,
+            context.socket(SocketType::Router, Options::default()),
+        ];
+        let body = Message::single("ready");
+        let message = if identity {
+            body
+        } else {
+            Message::with_prefix(bytes::Bytes::from_static(b"absent"), body)
+        };
+        let produced = Arc::new(AtomicUsize::new(0));
+        let observed = produced.clone();
+        let other_task = tokio::spawn(async move { observed.load(Ordering::Relaxed) });
+        let total = 16_384;
+        for index in 0..total {
+            let socket = &sockets[index % sockets.len()];
+            if identity {
+                socket.send_to(b"absent", message.clone()).await.unwrap();
+            } else {
+                socket.send(message.clone()).await.unwrap();
+            }
+            produced.fetch_add(1, Ordering::Relaxed);
+        }
+        let count = other_task.await.unwrap();
+        assert!(count > 0 && count < total, "other task only ran at {count}");
+        for socket in sockets {
+            socket.close().await.unwrap();
+        }
+    }
+}
+
+#[test]
+fn ready_sends_yield_outside_tokio_and_cancel_cleanly() {
+    use std::future::Future;
+    use std::task::{Context as TaskContext, Poll, Wake, Waker};
+
+    struct CountWake(AtomicUsize);
+    impl Wake for CountWake {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    let context = Context::new();
+    let sender = context.socket(SocketType::Router, Options::default());
+    let clone = sender.clone();
+    let router = context.socket(SocketType::Router, Options::default());
+    let wake = Arc::new(CountWake(AtomicUsize::new(0)));
+    let waker = Waker::from(wake.clone());
+    let mut cx = TaskContext::from_waker(&waker);
+    for _ in 0..3 {
+        let mut yielded = false;
+        for index in 0..4096 {
+            let mut send = std::pin::pin!(async {
+                let message = Message::single("ready");
+                match index % 3 {
+                    0 => sender.send(ready_routed_message()).await,
+                    1 => clone.send(ready_routed_message()).await,
+                    _ => router.send_to(b"absent", message).await,
+                }
+            });
+            match send.as_mut().poll(&mut cx) {
+                Poll::Ready(result) => result.unwrap(),
+                Poll::Pending => {
+                    yielded = true;
+                    assert!(wake.0.load(Ordering::Relaxed) > 0);
+                    // Drop while yielding, before routing. Subsequent sends
+                    // must still make progress and yield again.
+                    break;
+                }
+            }
+        }
+        assert!(yielded, "ready sends never yielded");
+    }
+    // A pending send can resume on another executor thread.
+    let mut yielded_send = Box::pin(sender.send(ready_routed_message()));
+    let mut pending = false;
+    for _ in 0..4096 {
+        match yielded_send.as_mut().poll(&mut cx) {
+            Poll::Ready(result) => {
+                result.unwrap();
+                yielded_send = Box::pin(sender.send(ready_routed_message()));
+            }
+            Poll::Pending => {
+                pending = true;
+                break;
+            }
+        }
+    }
+    assert!(pending, "ready send never yielded before migration");
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            let mut cx = TaskContext::from_waker(Waker::noop());
+            assert!(matches!(
+                yielded_send.as_mut().poll(&mut cx),
+                Poll::Ready(Ok(()))
+            ));
+        });
+    });
+}
+
+fn ready_routed_message() -> Message {
+    Message::with_prefix(
+        bytes::Bytes::from_static(b"absent"),
+        Message::single("ready"),
+    )
+}
+
+#[tokio::test]
 async fn sinks_preserve_req_rep_alternation_and_reply_routes() {
     for endpoint in ["inproc://sink-req-rep", "tcp://127.0.0.1:0"] {
         let context = Context::new();

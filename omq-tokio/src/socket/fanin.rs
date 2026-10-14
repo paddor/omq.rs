@@ -1,4 +1,6 @@
 //! Socket-owned fan-in. Drivers own producers; only the application drains.
+#[cfg(target_os = "linux")]
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::task::{Context, Wake, Waker};
@@ -317,11 +319,27 @@ impl Wake for SpaceWake {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct BatchProducer {
+    sender: mpsc::Sender<Item>,
+    ready: Arc<AtomicU64>,
+    generation: u64,
+}
+
+#[cfg(target_os = "linux")]
+impl BatchProducer {
+    fn published(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.ready.store(self.generation, Ordering::Release);
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct Producer {
     sender: mpsc::Sender<Message>,
     #[cfg(target_os = "linux")]
-    batch_sender: Option<Box<mpsc::Sender<Item>>>,
+    batch_sender: Option<Box<BatchProducer>>,
     #[cfg(target_os = "linux")]
     owner: Weak<Fanin>,
     #[cfg(target_os = "linux")]
@@ -337,12 +355,17 @@ pub(crate) struct Producer {
 impl Producer {
     pub(crate) fn try_send(&mut self, item: Message) -> std::result::Result<(), Message> {
         self.send_message(item, false)?;
+        self.notify_data();
+        Ok(())
+    }
+
+    #[inline]
+    fn notify_data(&mut self) {
         self.signal.mark();
         self.blocking.wake_after_fence();
         if let Some(source) = &self.source {
             source.published();
         }
-        Ok(())
     }
     #[inline]
     fn try_send_deferred(&mut self, item: Message) -> std::result::Result<(), Message> {
@@ -362,13 +385,16 @@ impl Producer {
         }
         let result = {
             #[cfg(target_os = "linux")]
-            if let Some(sender) = &mut self.batch_sender {
-                return Self::send_value(sender, Item::Message(message), deferred, false).map_err(
-                    |error| {
-                        self.credits.as_ref().expect("batch credits").release(1);
-                        queue::into_message(error.into_inner())
-                    },
-                );
+            if let Some(batch) = &mut self.batch_sender {
+                let result =
+                    Self::send_value(&mut batch.sender, Item::Message(message), deferred, false);
+                if result.is_ok() && !deferred {
+                    batch.published();
+                }
+                return result.map_err(|error| {
+                    self.credits.as_ref().expect("batch credits").release(1);
+                    queue::into_message(error.into_inner())
+                });
             }
             Self::send_value(&mut self.sender, message, deferred, self.external_ready)
         };
@@ -412,10 +438,18 @@ impl Producer {
             return false;
         };
         let credits = queue::Credits::new(self.sender.capacity(), self.space.signal.clone());
-        state
-            .receiver
-            .enable_batches(self.sender.lane(), sender.lane(), credits.clone());
-        self.batch_sender = Some(Box::new(sender));
+        let ready = Arc::new(AtomicU64::new(0));
+        state.receiver.enable_batches(
+            self.sender.lane(),
+            sender.lane(),
+            credits.clone(),
+            ready.clone(),
+        );
+        self.batch_sender = Some(Box::new(BatchProducer {
+            sender,
+            ready,
+            generation: 0,
+        }));
         self.credits = Some(credits);
         true
     }
@@ -438,6 +472,7 @@ impl Producer {
             .batch_sender
             .as_mut()
             .expect("batch receive enabled")
+            .sender
             .try_send_deferred(Item::Batch(prefix))
             .is_err()
         {
@@ -448,19 +483,17 @@ impl Producer {
     }
     fn flush(&mut self) {
         #[cfg(target_os = "linux")]
-        if let Some(sender) = &mut self.batch_sender {
-            sender.flush();
+        if let Some(batch) = &mut self.batch_sender {
+            batch.sender.flush();
+            batch.published();
         }
         self.sender.flush();
-        self.signal.mark();
-        self.blocking.wake_after_fence();
-        if let Some(source) = &self.source {
-            source.published();
-        }
+        self.notify_data();
     }
     pub(crate) fn is_full(&mut self) -> bool {
         #[cfg(target_os = "linux")]
-        if let Some(sender) = &mut self.batch_sender {
+        if let Some(batch) = &mut self.batch_sender {
+            let sender = &mut batch.sender;
             if self.credits.as_ref().expect("batch credits").full() && !sender.is_disconnected() {
                 return true;
             }
@@ -474,8 +507,8 @@ impl Producer {
     }
     pub(crate) fn is_closed(&self) -> bool {
         #[cfg(target_os = "linux")]
-        if let Some(sender) = &self.batch_sender {
-            return sender.is_disconnected();
+        if let Some(batch) = &self.batch_sender {
+            return batch.sender.is_disconnected();
         }
         self.sender.is_disconnected()
     }
@@ -1138,6 +1171,87 @@ mod batch_tests {
         }
         assert_ne!(sink.space.generation(), seen);
         assert!(queue.try_recv().is_err());
+    }
+
+    #[test]
+    fn batch_scheduler_discovers_a_new_active_peer_among_idle_lanes() {
+        const IDLE: usize = 64;
+        let queue = queue(256, false);
+        let mut idle: Vec<_> = (0..IDLE).map(|_| queue.register().unwrap()).collect();
+        let mut sink = Sink::owned(queue.register().unwrap());
+        assert!(sink.enable_batches());
+        assert!(sink.push_batch(batch(256)));
+        assert_eq!(queue.try_recv().unwrap().part_slice(0).unwrap(), &[0; 64]);
+        idle[IDLE - 1]
+            .try_send(Message::single("newly ready"))
+            .unwrap();
+        let mut discovered = false;
+        for _ in 0..=IDLE {
+            if queue.try_recv().unwrap() == Message::single("newly ready") {
+                discovered = true;
+                break;
+            }
+        }
+        assert!(
+            discovered,
+            "inactive peers must join a continuously busy drain"
+        );
+    }
+
+    #[test]
+    fn batch_scheduler_remaps_active_lanes_after_disconnection() {
+        let queue = queue(8, false);
+        let mut removed = queue.register().unwrap();
+        let mut sink = Sink::owned(queue.register().unwrap());
+        assert!(sink.enable_batches());
+        removed.try_send(Message::single("old")).unwrap();
+        assert!(sink.push_batch(batch(8)));
+        assert_eq!(queue.try_recv().unwrap(), Message::single("old"));
+        assert_eq!(queue.try_recv().unwrap().part_slice(0).unwrap(), &[0; 64]);
+        drop(removed);
+        let mut added = queue.register().unwrap();
+        added.try_send(Message::single("new")).unwrap();
+        let mut seen = Vec::new();
+        for _ in 0..8 {
+            seen.push(queue.try_recv().unwrap());
+        }
+        assert!(seen.contains(&Message::single("new")));
+        for seq in 1..8_u8 {
+            assert!(seen.contains(&Message::from_slice(&[seq; 64])));
+        }
+    }
+
+    #[test]
+    fn idle_native_peers_cannot_hide_a_ready_shm_batch() {
+        let queue = queue(8, false);
+        let _idle: Vec<_> = (0..8).map(|_| queue.register().unwrap()).collect();
+        let mut sink = Sink::owned(queue.register().unwrap());
+        assert!(sink.enable_batches());
+        assert!(queue.try_recv().is_err());
+        assert!(sink.push_batch(batch(8)));
+        for seq in 0..8_u8 {
+            assert_eq!(queue.try_recv().unwrap().part_slice(0).unwrap(), &[seq; 64]);
+        }
+    }
+
+    #[test]
+    fn native_readiness_probe_keeps_its_message_across_disconnection_and_registration() {
+        let queue = queue(8, false);
+        let mut sink = Sink::owned(queue.register().unwrap());
+        assert!(sink.enable_batches());
+        let mut native = queue.register().unwrap();
+        assert!(sink.push_batch(batch(8)));
+        for seq in 0..2_u8 {
+            assert_eq!(queue.try_recv().unwrap().part_slice(0).unwrap(), &[seq; 64]);
+        }
+        native.try_send(Message::single("last native")).unwrap();
+        assert_eq!(queue.try_recv().unwrap().part_slice(0).unwrap(), &[2; 64]);
+        drop(native);
+        let _new_peer = queue.register().unwrap();
+        assert_eq!(queue.try_recv().unwrap(), Message::single("last native"));
+        for seq in 3..8_u8 {
+            assert_eq!(queue.try_recv().unwrap().part_slice(0).unwrap(), &[seq; 64]);
+        }
     }
 
     #[test]

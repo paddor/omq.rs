@@ -4,7 +4,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Poll, Wake, Waker};
 
 use arc_swap::ArcSwap;
 use fanring::{mpsc, teardown::Coordinated};
@@ -163,11 +163,38 @@ pub(crate) enum Receiver {
 #[derive(Debug)]
 pub(crate) struct Admission {
     lane: Arc<Lane>,
+    count: usize,
+}
+
+impl Admission {
+    // Only consumed/acknowledged messages enter this batch. Unsent permits
+    // keep their own credits, including during cancellation and close.
+    fn accumulate(pending: &mut Option<Self>, mut admission: Self) {
+        if let Some(current) = pending
+            && Arc::ptr_eq(&current.lane, &admission.lane)
+        {
+            current.count += admission.count;
+            admission.count = 0;
+        } else {
+            *pending = Some(admission);
+        }
+    }
+
+    #[cfg(feature = "dart")]
+    pub(crate) fn release_batch(admissions: impl Iterator<Item = Self>) {
+        let mut pending = None;
+        for admission in admissions {
+            Self::accumulate(&mut pending, admission);
+        }
+    }
 }
 
 impl Drop for Admission {
     fn drop(&mut self) {
-        if self.lane.queued.fetch_sub(1, Ordering::AcqRel) == self.lane.template.capacity {
+        if self.count == 0 {
+            return;
+        }
+        if self.lane.queued.fetch_sub(self.count, Ordering::AcqRel) == self.lane.template.capacity {
             self.lane.space.notify_changed();
             #[cfg(feature = "dart")]
             self.lane.template.shared.notify_native_progress();
@@ -177,20 +204,44 @@ impl Drop for Admission {
             .template
             .shared
             .admitted
-            .fetch_sub(1, Ordering::AcqRel);
-        if remaining & !CLOSED == 1 {
+            .fetch_sub(self.count, Ordering::AcqRel);
+        if remaining & !CLOSED == self.count {
             self.lane.template.shared.notify_close_progress();
         }
-        if remaining == (CLOSED | 1) {
+        if remaining == (CLOSED | self.count) {
             self.lane.template.shared.drained.wake();
         }
+    }
+}
+
+/// Returns consumed lane credits at batch boundaries, including on error.
+#[derive(Debug)]
+pub(crate) struct Batch<'a> {
+    receiver: &'a mut Receiver,
+    admission: Option<Admission>,
+}
+
+impl Batch<'_> {
+    pub(crate) fn try_recv(&mut self) -> Result<PeerDriverData, legacy::error::TryRecvError> {
+        let (data, admission) = self.receiver.try_recv_admitted()?;
+        if let Some(admission) = admission {
+            Admission::accumulate(&mut self.admission, admission);
+        }
+        Ok(data)
+    }
+}
+
+impl Drop for Batch<'_> {
+    fn drop(&mut self) {
+        drop(self.admission.take());
+        self.receiver.release_consumed();
     }
 }
 
 #[derive(Debug)]
 pub(crate) struct Queued {
     data: PeerDriverData,
-    _admission: Admission,
+    admission: Admission,
 }
 
 pub(crate) enum Permit<'a> {
@@ -218,7 +269,7 @@ impl OwnedPermit {
             .sender
             .try_send(Queued {
                 data,
-                _admission: self.0,
+                admission: self.0,
             });
         if let Some(signal) = lane.template.shared.endpoint.get() {
             signal.mark();
@@ -246,10 +297,7 @@ impl Permit<'_> {
                     .as_mut()
                     .expect("reserved producer")
                     .sender
-                    .try_send(Queued {
-                        data,
-                        _admission: admission,
-                    });
+                    .try_send(Queued { data, admission });
                 #[cfg(feature = "dart")]
                 if let Some(signal) = endpoint {
                     signal.mark();
@@ -381,24 +429,18 @@ impl Lane {
             });
         }
         let producer = producer.as_mut().expect("registered producer");
-        let was_waiting = self.wake.waiting.swap(true, Ordering::AcqRel);
-        match producer
-            .sender
-            .poll_ready(&mut Context::from_waker(&producer.waker))
-        {
-            Poll::Pending => return Ok(false),
-            Poll::Ready(Err(_)) => return Err(ReserveError::Closed(())),
-            Poll::Ready(Ok(())) => {}
-        }
-        self.wake.waiting.store(false, Ordering::Release);
-        if was_waiting {
-            // A ready probe cancels fanring's sole waker. Existing callers
-            // waiting on this lane still need the observed readiness edge.
-            self.space.notify_changed();
-            #[cfg(feature = "dart")]
-            self.template.shared.notify_native_progress();
-        }
-        Ok(self.queued.load(Ordering::Acquire) < self.template.capacity)
+        let ready = super::producer_ready::ready(
+            &mut producer.sender,
+            &self.wake.waiting,
+            &producer.waker,
+            || {
+                self.space.notify_changed();
+                #[cfg(feature = "dart")]
+                self.template.shared.notify_native_progress();
+            },
+        )
+        .map_err(|()| ReserveError::Closed(()))?;
+        Ok(ready && self.queued.load(Ordering::Acquire) < self.template.capacity)
     }
 }
 
@@ -469,7 +511,10 @@ impl Sender {
                 lane.queued.fetch_add(1, Ordering::AcqRel);
                 Ok(Permit::Owned {
                     producer,
-                    admission: Admission { lane: lane.clone() },
+                    admission: Admission {
+                        lane: lane.clone(),
+                        count: 1,
+                    },
                 })
             }
         }
@@ -561,19 +606,7 @@ impl Receiver {
 
     #[cfg(feature = "dart")]
     pub(crate) fn dart_try_recv(&mut self) -> Option<(PeerDriverData, Option<Admission>)> {
-        match self {
-            Self::Legacy(receiver) => receiver.try_recv().ok().map(|data| (data, None)),
-            Self::Owned { receiver, template } => {
-                let result = receiver.try_recv().ok().map(
-                    |Queued {
-                         data,
-                         _admission: admission,
-                     }| (data, Some(admission)),
-                );
-                template.notify_registration();
-                result
-            }
-        }
+        self.try_recv_admitted().ok()
     }
 
     pub(crate) fn close(&mut self) {
@@ -598,20 +631,37 @@ impl Receiver {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn try_recv(&mut self) -> Result<PeerDriverData, legacy::error::TryRecvError> {
+        self.try_recv_admitted().map(|(data, _)| data)
+    }
+
+    fn try_recv_admitted(
+        &mut self,
+    ) -> Result<(PeerDriverData, Option<Admission>), legacy::error::TryRecvError> {
         match self {
-            Self::Legacy(receiver) => receiver.try_recv(),
+            Self::Legacy(receiver) => receiver.try_recv().map(|data| (data, None)),
             Self::Owned { receiver, template } => {
-                let result = receiver.try_recv().map(|queued| queued.data).map_err(|_| {
-                    if template.shared.admitted.load(Ordering::Acquire) == CLOSED {
-                        legacy::error::TryRecvError::Disconnected
-                    } else {
-                        legacy::error::TryRecvError::Empty
-                    }
-                });
+                let result = receiver
+                    .try_recv()
+                    .map(|queued| (queued.data, Some(queued.admission)))
+                    .map_err(|_| {
+                        if template.shared.admitted.load(Ordering::Acquire) == CLOSED {
+                            legacy::error::TryRecvError::Disconnected
+                        } else {
+                            legacy::error::TryRecvError::Empty
+                        }
+                    });
                 template.notify_registration();
                 result
             }
+        }
+    }
+
+    pub(crate) fn batch(&mut self) -> Batch<'_> {
+        Batch {
+            receiver: self,
+            admission: None,
         }
     }
 
@@ -690,6 +740,7 @@ impl Sender {
 mod tests {
     use super::*;
     use omq_proto::Message;
+    use std::task::Context;
     use std::time::Duration;
 
     fn poll_once<F: std::future::Future>(future: std::pin::Pin<&mut F>) -> Poll<F::Output> {
@@ -742,6 +793,106 @@ mod tests {
         assert_eq!(second_values, [10, 11, 12]);
         receiver.release_consumed();
         shared.try_send(message(3)).unwrap();
+    }
+
+    #[test]
+    fn batch_returns_only_consumed_credits_across_lanes() {
+        let (root, mut receiver) = channel(3);
+        let scope = SenderLanes::default();
+        let first = scope.bind(&root);
+        let second = scope.clone().bind(&root);
+        for n in 0..3 {
+            first.try_send(message(n)).unwrap();
+            second.try_send(message(n + 10)).unwrap();
+        }
+        let mut values = Vec::new();
+        {
+            let mut batch = receiver.batch();
+            for _ in 0..4 {
+                values.push(value(batch.try_recv().unwrap()));
+            }
+        }
+        let first_count = values.iter().filter(|&&n| n < 10).count();
+        let second_count = values.len() - first_count;
+        for (sender, count) in [(&first, first_count), (&second, second_count)] {
+            for _ in 0..count {
+                sender.try_send(message(99)).unwrap();
+            }
+            assert!(matches!(
+                sender.try_send(message(99)),
+                Err(legacy::error::TrySendError::Full(_))
+            ));
+        }
+        let remaining: Vec<_> = (0..6)
+            .map(|_| value(receiver.try_recv().unwrap()))
+            .filter(|&n| n != 99)
+            .collect();
+        assert_eq!(remaining.len(), 2);
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(legacy::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn batch_drop_wakes_capacity_and_finishes_close() {
+        let (root, mut receiver) = channel(3);
+        let sender = SenderLanes::default().bind(&root);
+        for n in 0..3 {
+            sender.try_send(message(n)).unwrap();
+        }
+        let wait = sender.wait_capacity();
+        tokio::pin!(wait);
+        assert!(poll_once(wait.as_mut()).is_pending());
+        {
+            let mut batch = receiver.batch();
+            for n in 0..3 {
+                assert_eq!(value(batch.try_recv().unwrap()), n);
+            }
+            assert!(poll_once(wait.as_mut()).is_pending());
+        }
+        tokio::time::timeout(Duration::from_secs(1), wait)
+            .await
+            .unwrap();
+        for n in 0..3 {
+            sender.try_send(message(n)).unwrap();
+        }
+        receiver.close();
+        {
+            let mut batch = receiver.batch();
+            for n in 0..3 {
+                assert_eq!(value(batch.try_recv().unwrap()), n);
+            }
+        }
+        assert!(receiver.is_empty());
+        assert!(receiver.recv().await.is_none());
+    }
+
+    #[test]
+    fn unwinding_a_batch_returns_credits_without_dropping_queued_data() {
+        let (root, mut receiver) = channel(3);
+        let sender = SenderLanes::default().bind(&root);
+        for n in 0..3 {
+            sender.try_send(message(n)).unwrap();
+        }
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut batch = receiver.batch();
+                assert_eq!(value(batch.try_recv().unwrap()), 0);
+                assert_eq!(value(batch.try_recv().unwrap()), 1);
+                panic!("encoding failed");
+            }))
+            .is_err()
+        );
+        sender.try_send(message(3)).unwrap();
+        sender.try_send(message(4)).unwrap();
+        assert!(matches!(
+            sender.try_send(message(5)),
+            Err(legacy::error::TrySendError::Full(_))
+        ));
+        for n in 2..5 {
+            assert_eq!(value(receiver.try_recv().unwrap()), n);
+        }
     }
 
     #[tokio::test]
@@ -833,6 +984,44 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[cfg(feature = "dart")]
+    #[tokio::test]
+    async fn final_ack_batch_wakes_a_closed_receiver_and_close_progress() {
+        #[derive(Debug, Default)]
+        struct CountWake(AtomicUsize);
+        impl Wake for CountWake {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let (root, mut receiver) = dart_channel(3, omq_proto::SocketType::Radio);
+        let sender = SenderLanes::default().bind(&root);
+        let progress = Arc::new(StateSignal::new());
+        sender.watch_close(&progress);
+        for n in 0..3 {
+            sender.try_send(message(n)).unwrap();
+        }
+        let claims: Vec<_> = (0..3)
+            .map(|_| receiver.dart_try_recv().unwrap().1.unwrap())
+            .collect();
+        receiver.release_consumed();
+        receiver.close();
+        let wake = Arc::new(CountWake::default());
+        let waker = Waker::from(wake.clone());
+        let mut done = Box::pin(receiver.recv());
+        assert!(
+            done.as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+        let seen = progress.generation();
+        Admission::release_batch(claims.into_iter());
+        assert_ne!(progress.generation(), seen);
+        assert_eq!(wake.0.load(Ordering::Relaxed), 1);
+        assert!(done.await.is_none());
     }
 
     #[cfg(feature = "dart")]

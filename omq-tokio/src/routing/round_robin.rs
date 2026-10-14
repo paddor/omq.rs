@@ -15,6 +15,7 @@ use crate::engine::{
     ActorPeerDriverHandle, SendPipeConsumer, SendPipeError, SendPipeMode, SendPipeProducer,
 };
 use omq_proto::error::Result;
+use omq_proto::flow::DrainBudget;
 use omq_proto::message::Message;
 use omq_proto::options::Options;
 
@@ -52,6 +53,107 @@ impl Default for ActivePipes {
 }
 
 impl ActivePipes {
+    #[inline]
+    fn try_send<const DEFERRED: bool>(
+        &mut self,
+        mut message: Message,
+    ) -> core::result::Result<(), omq_proto::TrySendError> {
+        if self.active.len() == 1 && self.inactive.is_empty() {
+            return self
+                .send_to_pipe::<DEFERRED>(0, message)
+                .map_err(|error| self.reject(0, error));
+        }
+        if !self.has_any_pipe() {
+            return Err(omq_proto::TrySendError::Full(message));
+        }
+        if self.active.is_empty() {
+            self.try_reactivate_when_empty();
+        } else if !self.inactive.is_empty() {
+            self.try_reactivate_one();
+        }
+        let mut scanned = 0;
+        while scanned < self.active.len() {
+            let index = self.cursor;
+            self.cursor += 1;
+            if self.cursor == self.active.len() {
+                self.cursor = 0;
+            }
+            scanned += 1;
+            match self.send_to_pipe::<DEFERRED>(index, message) {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    message = match self.reject(index, error) {
+                        omq_proto::TrySendError::Full(returned) => returned,
+                        error => return Err(error),
+                    };
+                    if self.active.is_empty() {
+                        break;
+                    }
+                    // Removal leaves the next stable-order pipe at index.
+                    scanned = scanned.saturating_sub(1);
+                }
+            }
+        }
+        Err(omq_proto::TrySendError::Full(message))
+    }
+
+    #[inline]
+    fn send_to_pipe<const DEFERRED: bool>(
+        &mut self,
+        index: usize,
+        message: Message,
+    ) -> core::result::Result<(), SendPipeError> {
+        if DEFERRED {
+            self.active[index].tx.try_send_deferred(message)
+        } else {
+            self.active[index].tx.try_send(message)
+        }
+    }
+
+    fn reject(&mut self, index: usize, error: SendPipeError) -> omq_proto::TrySendError {
+        match error {
+            SendPipeError::Full(message) => {
+                self.deactivate(index);
+                omq_proto::TrySendError::Full(message)
+            }
+            SendPipeError::Closed(message) => {
+                let peer_id = self.active[index].peer_id;
+                self.remove_peer(peer_id);
+                omq_proto::TrySendError::Full(message)
+            }
+            #[cfg(feature = "dart")]
+            SendPipeError::Invalid(error) => omq_proto::TrySendError::Error(error),
+        }
+    }
+
+    fn try_send_batch(
+        &mut self,
+        messages: &mut VecDeque<Message>,
+        max: usize,
+        closed: &AtomicBool,
+    ) -> core::result::Result<usize, omq_proto::TrySendError> {
+        let mut budget = DrainBudget::WORKER;
+        while budget.msgs() < max && !budget.exhausted() {
+            if closed.load(Ordering::Acquire) {
+                return Err(omq_proto::TrySendError::Closed);
+            }
+            let Some(message) = messages.pop_front() else {
+                break;
+            };
+            match self.try_send::<true>(message) {
+                Ok(()) => {
+                    let _ = budget.account(std::mem::size_of::<Message>());
+                }
+                Err(omq_proto::TrySendError::Full(returned)) if budget.msgs() > 0 => {
+                    messages.push_front(returned);
+                    break;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(budget.msgs())
+    }
+
     fn clear(&mut self) {
         for pipe in &self.active {
             pipe.tx.space_available().notify_changed();
@@ -301,133 +403,50 @@ impl Submitter {
     #[inline]
     pub(crate) fn try_send(
         &self,
-        mut msg: Message,
-    ) -> core::result::Result<(), omq_proto::error::TrySendError> {
+        message: Message,
+    ) -> core::result::Result<(), omq_proto::TrySendError> {
         if self.closed.load(Ordering::Acquire) {
-            return Err(omq_proto::error::TrySendError::Closed);
+            return Err(omq_proto::TrySendError::Closed);
         }
-        let mut active = self.active.lock().expect("round_robin active");
-        if !active.has_any_pipe() {
-            return Err(omq_proto::error::TrySendError::Full(msg));
-        }
-
-        if active.active.is_empty() {
-            // No pipe can make progress until one inactive pipe crosses LWM.
-            // Probe the whole rotating list only in this stalled state.
-            active.try_reactivate_when_empty();
-        } else if !active.inactive.is_empty() {
-            active.try_reactivate_one();
-        }
-
-        let mut scanned = 0usize;
-        while scanned < active.active.len() {
-            let i = active.cursor;
-            active.cursor += 1;
-            if active.cursor >= active.active.len() {
-                active.cursor = 0;
-            }
-            scanned += 1;
-            match active.active[i].tx.try_send(msg) {
-                Ok(()) => return Ok(()),
-                #[cfg(feature = "dart")]
-                Err(SendPipeError::Invalid(error)) => {
-                    return Err(omq_proto::TrySendError::Error(error));
-                }
-                Err(SendPipeError::Full(returned)) => {
-                    msg = returned;
-                    active.deactivate(i);
-                    if active.active.is_empty() {
-                        break;
-                    }
-                    // Position i now holds the next stable-order pipe.
-                    scanned = scanned.saturating_sub(1);
-                }
-                Err(SendPipeError::Closed(returned)) => {
-                    let peer_id = active.active[i].peer_id;
-                    active.pipe_peers.remove(&peer_id);
-                    active.active.remove(i);
-                    msg = returned;
-                    if active.active.is_empty() {
-                        active.cursor = 0;
-                        break;
-                    }
-                    if i < active.cursor {
-                        active.cursor -= 1;
-                    }
-                    if active.cursor >= active.active.len() {
-                        active.cursor = 0;
-                    }
-                    scanned = scanned.saturating_sub(1);
-                }
-            }
-        }
-
-        Err(omq_proto::error::TrySendError::Full(msg))
+        self.active
+            .lock()
+            .expect("round_robin active")
+            .try_send::<false>(message)
     }
 
     pub(crate) fn try_send_many(
         &self,
         messages: &mut VecDeque<Message>,
         max: usize,
-    ) -> core::result::Result<usize, omq_proto::error::TrySendError> {
+    ) -> core::result::Result<usize, omq_proto::TrySendError> {
         if messages.is_empty() || max == 0 {
             return Ok(0);
         }
         if self.closed.load(Ordering::Acquire) {
-            return Err(omq_proto::error::TrySendError::Closed);
+            return Err(omq_proto::TrySendError::Closed);
         }
-
         let mut active = self.active.lock().expect("round_robin active");
         if !active.has_any_pipe() {
-            let msg = messages.pop_front().expect("message present");
-            return Err(omq_proto::error::TrySendError::Full(msg));
+            return Err(omq_proto::TrySendError::Full(
+                messages.pop_front().expect("message present"),
+            ));
         }
-
         if active.active.is_empty() {
             active.try_reactivate_when_empty();
         } else if !active.inactive.is_empty() {
             active.try_reactivate_one();
         }
-
-        if active.active.len() != 1 {
-            drop(active);
-            let mut sent = 0usize;
-            while sent < max {
-                let Some(msg) = messages.pop_front() else {
-                    break;
-                };
-                match self.try_send(msg) {
-                    Ok(()) => sent += 1,
-                    Err(omq_proto::error::TrySendError::Full(returned)) => {
-                        messages.push_front(returned);
-                        if sent > 0 {
-                            return Ok(sent);
-                        }
-                        let msg = messages.pop_front().expect("returned message present");
-                        return Err(omq_proto::error::TrySendError::Full(msg));
-                    }
-                    Err(error) => return Err(error),
-                }
+        if active.active.len() != 1 || !active.inactive.is_empty() {
+            let result = active.try_send_batch(messages, max, &self.closed);
+            for pipe in &mut active.active {
+                pipe.tx.flush_deferred();
             }
-            return Ok(sent);
+            return result;
         }
-
-        match active.active[0].tx.try_send_many(messages, max) {
-            Ok(count) => Ok(count),
-            #[cfg(feature = "dart")]
-            Err(SendPipeError::Invalid(error)) => Err(omq_proto::TrySendError::Error(error)),
-            Err(SendPipeError::Full(returned)) => {
-                active.deactivate(0);
-                Err(omq_proto::error::TrySendError::Full(returned))
-            }
-            Err(SendPipeError::Closed(returned)) => {
-                let peer_id = active.active[0].peer_id;
-                active.pipe_peers.remove(&peer_id);
-                active.active.remove(0);
-                active.cursor = 0;
-                Err(omq_proto::error::TrySendError::Full(returned))
-            }
-        }
+        let result = active.active[0]
+            .tx
+            .try_send_many(messages, max.min(DrainBudget::WORKER.remaining_msgs()));
+        result.map_err(|error| active.reject(0, error))
     }
 }
 
@@ -617,7 +636,75 @@ mod tests {
     use crate::engine::send_pipe::send_pipe;
     use omq_proto::message::Message;
     use omq_proto::options::Options;
+    use std::collections::VecDeque;
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn batches_preserve_round_robin_order_and_scalar_cursor() {
+        let mut send = RoundRobinSend::new(&Options::default().send_hwm(16));
+        let mut receivers: Vec<_> = (0..3).map(|id| send.make_connect_pipe(id)).collect();
+        let order: Vec<_> = send
+            .active
+            .lock()
+            .unwrap()
+            .active
+            .iter()
+            .map(|pipe| pipe.peer_id as usize)
+            .collect();
+        let submitter = send.submitter();
+        let mut messages = (0..7_u8).map(|seq| Message::from_slice(&[seq])).collect();
+        assert_eq!(submitter.try_send_many(&mut messages, 7).unwrap(), 7);
+        submitter.try_send(Message::from_slice(&[7])).unwrap();
+        for (position, &peer) in order.iter().enumerate() {
+            let mut received = Vec::new();
+            receivers[peer].drain_into(&mut received, 16, usize::MAX);
+            let expected: Vec<_> = (position..8)
+                .step_by(3)
+                .map(|seq| Message::from_slice(&[u8::try_from(seq).unwrap()]))
+                .collect();
+            assert_eq!(received, expected);
+        }
+    }
+
+    #[test]
+    fn partial_full_batches_publish_and_reactivate_without_losing_messages() {
+        let mut send = RoundRobinSend::new(&Options::default().send_hwm(2));
+        let mut receivers: Vec<_> = (0..2).map(|id| send.make_connect_pipe(id)).collect();
+        let submitter = send.submitter();
+        let mut messages: VecDeque<_> = (0..7_u8).map(|seq| Message::from_slice(&[seq])).collect();
+        assert_eq!(submitter.try_send_many(&mut messages, 7).unwrap(), 4);
+        assert_eq!(messages.front().unwrap(), &Message::from_slice(&[4]));
+        let mut received = Vec::new();
+        for receiver in &mut receivers {
+            assert_eq!(receiver.drain_into(&mut received, 2, usize::MAX), 2);
+        }
+        assert_eq!(submitter.try_send_many(&mut messages, 7).unwrap(), 3);
+        assert!(messages.is_empty());
+        for receiver in &mut receivers {
+            receiver.drain_into(&mut received, 2, usize::MAX);
+        }
+        let mut sequences: Vec<_> = received
+            .iter()
+            .map(|message| message.part_slice(0).unwrap()[0])
+            .collect();
+        sequences.sort_unstable();
+        assert_eq!(sequences, (0..7).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn batch_skips_closed_peer_and_delivers_to_the_remaining_peer() {
+        let mut send = RoundRobinSend::new(&Options::default().send_hwm(16));
+        let closed = send.make_connect_pipe(0);
+        let mut receiver = send.make_connect_pipe(1);
+        drop(closed);
+        let submitter = send.submitter();
+        let expected: Vec<_> = (0..7_u8).map(|seq| Message::from_slice(&[seq])).collect();
+        let mut messages = expected.clone().into();
+        assert_eq!(submitter.try_send_many(&mut messages, 7).unwrap(), 7);
+        let mut batch = Vec::new();
+        receiver.drain_into(&mut batch, 16, usize::MAX);
+        assert_eq!(batch, expected);
+    }
 
     #[test]
     fn deactivation_preserves_active_peer_order() {

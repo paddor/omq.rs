@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::task::{Context, Wake, Waker};
+use std::task::{Wake, Waker};
 
 use fanring::{mpsc, teardown::Coordinated};
 use omq_proto::Message;
@@ -216,26 +216,15 @@ impl Producer {
         self.waiting_budget = false;
         let bytes = preparation.bytes(&message);
         self.waiting_bytes = bytes;
-        let was_waiting = self.ring_space.waiting.load(Ordering::Acquire);
-        self.ring_space.waiting.store(true, Ordering::Release);
-        match self
-            .sender
-            .as_mut()
-            .expect("live sender")
-            .poll_ready(&mut Context::from_waker(&self.waker))
-        {
-            std::task::Poll::Pending => return Err(SendPipeError::Full(message)),
-            std::task::Poll::Ready(Err(_)) => return Err(SendPipeError::Closed(message)),
-            std::task::Poll::Ready(Ok(())) => {}
-        }
-        self.ring_space.waiting.store(false, Ordering::Release);
-        if was_waiting {
-            // Multiple send futures may share this producer. fanring's
-            // poll_ready cancels its single waker when it observes capacity,
-            // possibly before the consumer delivers the wake for that slot.
-            // Relay readiness to callers already waiting on our ring signal;
-            // otherwise this caller can cancel their only remaining wake.
-            self.space.notify_changed();
+        match super::producer_ready::ready(
+            self.sender.as_mut().expect("live sender"),
+            &self.ring_space.waiting,
+            &self.waker,
+            || self.space.notify_changed(),
+        ) {
+            Ok(false) => return Err(SendPipeError::Full(message)),
+            Err(()) => return Err(SendPipeError::Closed(message)),
+            Ok(true) => {}
         }
         self.waiting_budget = true;
         if !self.ready()

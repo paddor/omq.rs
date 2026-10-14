@@ -16,6 +16,7 @@ pub(crate) mod peer_recv;
 pub(crate) mod pools;
 pub(crate) mod recv;
 mod recv_stream;
+mod send_budget;
 mod send_sink;
 pub(crate) mod type_state;
 pub(crate) mod udp;

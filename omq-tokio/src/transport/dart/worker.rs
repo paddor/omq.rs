@@ -249,13 +249,16 @@ impl PeerIo {
         {
             pipe.dart_acknowledge(pipes);
         }
-        while self
-            .admissions
-            .front()
-            .is_some_and(|(sequence, _)| *sequence < ack)
-        {
-            self.admissions.pop_front();
-        }
+        crate::engine::data_inbox::Admission::release_batch(
+            std::iter::from_fn(|| {
+                let (sequence, _) = self.admissions.front()?;
+                if *sequence >= ack {
+                    return None;
+                }
+                self.admissions.pop_front().map(|(_, admission)| admission)
+            })
+            .flatten(),
+        );
     }
 
     fn deliver(
@@ -273,6 +276,7 @@ impl PeerIo {
         };
         let mut count = 0;
         let mut bytes = 0;
+        let groups = groups.map(|groups| groups.load());
         while count < DATA_MESSAGES && bytes < BYTES {
             let Some(message) = session.take_received_with(|body| body.finish(pool)) else {
                 break;
@@ -286,11 +290,8 @@ impl PeerIo {
                 count += 1;
                 continue;
             }
-            if let Some(groups) = groups
-                && !groups
-                    .lock()
-                    .expect("joined groups poisoned")
-                    .contains(message.part_slice(0).expect("DISH group"))
+            if let Some(groups) = &groups
+                && !groups.contains(message.part_slice(0).expect("DISH group"))
             {
                 drop(message);
                 count += 1;
@@ -1136,11 +1137,11 @@ impl EndpointWorker {
             }
         };
         let group = if let Some(group) = group {
-            let joined = self.joined.lock().expect("joined groups poisoned");
+            let joined = self.joined.load();
             let Some(group) = joined.get(group).cloned() else {
                 session.commit_receive(
                     sequence,
-                    Message::multipart([b"".as_slice(), b"".as_slice()]),
+                    Message::with_group(Bytes::new(), Bytes::new()),
                     ecn,
                     elapsed,
                 );

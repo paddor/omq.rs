@@ -2418,11 +2418,12 @@ fn handle_data_inbox(
     eq: &mut FrameBuffer,
 ) -> Result<Option<PeerDriverData>> {
     let mut deferred = None;
+    let mut batch = data_inbox.batch();
     match first {
         PeerDriverData::SendMessage(first) => {
             outbound.batch_encode(
                 &first,
-                || match data_inbox.try_recv() {
+                || match batch.try_recv() {
                     Ok(PeerDriverData::SendMessage(message)) => Some(message),
                     Ok(data @ PeerDriverData::SendEncoded(_)) => {
                         deferred = Some(data);
@@ -2437,7 +2438,6 @@ fn handle_data_inbox(
         }
         PeerDriverData::SendEncoded(chunks) => eq.push_shared_chunks(&chunks),
     }
-    data_inbox.release_consumed();
     Ok(deferred)
 }
 

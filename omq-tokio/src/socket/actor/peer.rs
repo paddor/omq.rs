@@ -744,13 +744,7 @@ impl SocketDriver {
             }
         }
         if supports_groups(self.socket_type) {
-            let groups: Vec<bytes::Bytes> = self
-                .joined_groups
-                .lock()
-                .expect("joined_groups poisoned")
-                .iter()
-                .cloned()
-                .collect();
+            let groups: Vec<bytes::Bytes> = self.joined_groups.load().iter().cloned().collect();
             for group in groups {
                 let _ = handle
                     .inbox

@@ -301,6 +301,59 @@ async fn radio_dish_filters_locally_and_preserves_group() {
 }
 
 #[tokio::test]
+async fn dish_group_changes_reach_every_endpoint() {
+    let dish = Socket::new(SocketType::Dish, Options::default());
+    dish.join("changing").await.unwrap();
+    dish.join("stable").await.unwrap();
+    let mut radios = Vec::new();
+    for _ in 0..2 {
+        let radio = Socket::new(SocketType::Radio, Options::default());
+        radio
+            .connect(dish.bind(endpoint(0)).await.unwrap())
+            .await
+            .unwrap();
+        ready(&radio, 1).await;
+        radios.push(radio);
+    }
+    ready(&dish, 2).await;
+    for radio in &radios {
+        radio
+            .send_group("changing", Message::single("before"))
+            .await
+            .unwrap();
+        assert_eq!(
+            receive(&dish).await,
+            Message::with_group("changing", "before")
+        );
+    }
+    dish.leave("changing").await.unwrap();
+    for radio in &radios {
+        radio
+            .send_group("changing", Message::single("filtered"))
+            .await
+            .unwrap();
+        radio
+            .send_group("stable", Message::single("after"))
+            .await
+            .unwrap();
+        assert_eq!(receive(&dish).await, Message::with_group("stable", "after"));
+    }
+    dish.join("changing").await.unwrap();
+    for radio in radios {
+        radio
+            .send_group("changing", Message::single("rejoined"))
+            .await
+            .unwrap();
+        assert_eq!(
+            receive(&dish).await,
+            Message::with_group("changing", "rejoined")
+        );
+        radio.close().await.unwrap();
+    }
+    dish.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn held_receive_storage_backpressures_and_final_clone_drop_returns_credit() {
     let pool = omq_tokio::PayloadPool::new([(2048, 64)]).unwrap();
     let gather = Socket::new(

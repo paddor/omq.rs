@@ -306,12 +306,13 @@ impl SocketDriver {
             ));
         }
         {
-            let mut g = self.joined_groups.lock().expect("joined_groups poisoned");
+            let mut groups = (**self.joined_groups.load()).clone();
             if joining {
-                g.insert(group.clone());
+                groups.insert(group.clone());
             } else {
-                g.remove(&group);
+                groups.remove(&group);
             }
+            self.joined_groups.store(Arc::new(groups));
         }
         // Replay to data-plane-ready peers. Pending peers pick up the join
         // via `handle_peer_event(HandshakeSucceeded)`'s replay loop. UDP DISH

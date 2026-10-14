@@ -49,6 +49,53 @@ fn options() -> omq_proto::DartOptions {
 }
 
 #[test]
+fn partial_ack_returns_exact_credits_and_keeps_unsent_reservations() {
+    use crate::engine::data_inbox::{SenderLanes, dart_channel};
+
+    let (root, mut data) = dart_channel(5, SocketType::Radio);
+    let sender = SenderLanes::default().bind(&root);
+    for n in 0..4 {
+        sender
+            .try_send(PeerDriverData::SendMessage(Message::from_slice(&[n])))
+            .unwrap();
+    }
+    let unsent = sender.try_reserve_owned().unwrap();
+    let mut io = queues();
+    for sequence in 0..4 {
+        let (_, admission) = data.dart_try_recv().unwrap();
+        io.admissions.push_back((sequence, admission));
+    }
+    data.release_consumed();
+    io.data = data;
+    io.acknowledge(0);
+    assert!(matches!(
+        sender.try_reserve_owned(),
+        Err(tokio::sync::mpsc::error::TrySendError::Full(()))
+    ));
+    io.acknowledge(2);
+    let first = sender.try_reserve_owned().unwrap();
+    let second = sender.try_reserve_owned().unwrap();
+    assert!(matches!(
+        sender.try_reserve_owned(),
+        Err(tokio::sync::mpsc::error::TrySendError::Full(()))
+    ));
+    io.acknowledge(2);
+    assert_eq!(io.admissions.len(), 2);
+    io.data.close();
+    io.acknowledge(4);
+    assert!(io.admissions.is_empty());
+    assert!(!io.data.is_empty());
+    drop((first, second));
+    assert!(!io.data.is_empty());
+    drop(unsent);
+    assert!(io.data.is_empty());
+    assert!(matches!(
+        io.data.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+    ));
+}
+
+#[test]
 fn late_activation_cannot_replace_a_new_generation() {
     let mut peer = peer();
     let old = queues();

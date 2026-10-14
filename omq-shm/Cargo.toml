@@ -13,6 +13,7 @@ readme = "README.md"
 workspace = true
 
 [dependencies]
+arc-swap = "1.7.1"
 bytes = "1"
 concurrent-queue = "2.5.0"
 omq-proto = { path = "../omq-proto", version = "0.29.0" }

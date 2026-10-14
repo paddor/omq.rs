@@ -5,6 +5,26 @@ use loom::sync::{Arc, Mutex};
 use loom::thread;
 
 #[test]
+fn observing_lane_generation_before_empty_probe_cannot_hide_publication() {
+    loom::model(|| {
+        let data = Arc::new(AtomicBool::new(false));
+        let ready = Arc::new(AtomicUsize::new(0));
+        let producer = {
+            let data = data.clone();
+            let ready = ready.clone();
+            thread::spawn(move || {
+                data.store(true, Ordering::Release);
+                ready.store(1, Ordering::Release);
+            })
+        };
+        let seen = ready.load(Ordering::Acquire);
+        let observed = data.load(Ordering::Acquire);
+        producer.join().unwrap();
+        assert!(observed || ready.load(Ordering::Acquire) != seen);
+    });
+}
+
+#[test]
 fn publication_fence_covers_async_and_blocking_waiter_registration() {
     loom::model(|| {
         let published = Arc::new(AtomicBool::new(false));
@@ -694,10 +714,10 @@ fn native_slot_release_wakes_after_the_earlier_admission_capacity_edge() {
     });
 }
 
-/// Two send futures share one PEER producer. The first has already observed
+/// Two send futures share one inbox producer. The first has already observed
 /// a full ring and registered the bridge waker. The second can observe the
 /// consumer's released slot before fanring delivers the capacity wake.
-fn peer_shared_sender_capacity_handoff_model(relay_ready: bool, parked: bool) {
+fn peer_shared_sender_capacity_handoff_model(relay_ready: bool, parked: bool, fast_ready: bool) {
     let full = Arc::new(AtomicBool::new(true));
     let waiting = Arc::new(AtomicBool::new(true));
     let registered = Arc::new(Mutex::new(true));
@@ -716,7 +736,7 @@ fn peer_shared_sender_capacity_handoff_model(relay_ready: bool, parked: bool) {
             full.store(false, Ordering::Release);
             let wake = std::mem::replace(&mut *registered.lock().unwrap(), false);
             if wake {
-                // peer_send::SpaceWake::wake
+                // The inbox bridge waker forwards the ring's capacity edge.
                 waiting.store(false, Ordering::Release);
                 signal.notify_changed();
             }
@@ -727,10 +747,12 @@ fn peer_shared_sender_capacity_handoff_model(relay_ready: bool, parked: bool) {
         let registered = registered.clone();
         let signal = signal.clone();
         thread::spawn(move || {
-            // peer_send::Producer::try_send, serialized with the first
-            // caller by the lane mutex. Both calls use the same bridge waker.
-            let was_waiting = waiting.load(Ordering::Acquire);
-            waiting.store(true, Ordering::Release);
+            // engine::producer_ready, serialized with the first caller by
+            // the lane mutex. Both calls use the same bridge waker.
+            if fast_ready && !waiting.load(Ordering::Acquire) && !full.load(Ordering::Acquire) {
+                return;
+            }
+            let was_waiting = waiting.swap(true, Ordering::AcqRel);
             if full.load(Ordering::Acquire) {
                 *registered.lock().unwrap() = true;
                 if full.load(Ordering::Acquire) {
@@ -759,15 +781,19 @@ fn peer_shared_sender_capacity_handoff_model(relay_ready: bool, parked: bool) {
 
 #[test]
 fn peer_shared_sender_capacity_handoff_wakes_existing_waiters() {
-    for parked in [false, true] {
-        loom::model(move || peer_shared_sender_capacity_handoff_model(true, parked));
+    for fast_ready in [false, true] {
+        for parked in [false, true] {
+            loom::model(move || {
+                peer_shared_sender_capacity_handoff_model(true, parked, fast_ready);
+            });
+        }
     }
 }
 
 #[test]
 #[should_panic(expected = "shared sender parked")]
 fn peer_shared_sender_without_capacity_handoff_can_lose_wake() {
-    loom::model(|| peer_shared_sender_capacity_handoff_model(false, true));
+    loom::model(|| peer_shared_sender_capacity_handoff_model(false, true, true));
 }
 
 #[test]

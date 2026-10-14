@@ -9,8 +9,35 @@ permissions:
   contents: read
 
 jobs:
+  smoke-test:
+    name: Install source gem (Ruby ${{ matrix.ruby }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        ruby: ['3.3', '4.0']
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+          bundler-cache: true
+          working-directory: bindings/ruby
+      - name: Build and install source gem
+        working-directory: bindings/ruby
+        run: |
+          version="$(ruby -Ilib -romq/rs/version -e 'print OMQ::Rust::VERSION')"
+          test "$GITHUB_REF_NAME" = "ruby-v$version"
+          bundle exec rake build
+          ruby scripts/check-gem.rb "pkg/omq-rs-$version.gem"
+
   publish:
     name: Publish to RubyGems
+    needs: [smoke-test]
     runs-on: ubuntu-latest
     environment: rubygems
     permissions:

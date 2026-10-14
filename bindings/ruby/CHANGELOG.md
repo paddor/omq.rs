@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-10-15
+
+### Fixed
+
+- Make the packaged native manifest independent of the development workspace
+  so installation works outside the source checkout.
+- Check the packaged manifest in CI and require an isolated gem installation
+  and messaging smoke test before publication.
+
+### Changed
+
+- Require `omq-proto` 0.32.0 and `omq-tokio` 0.28.0 with LZ4/Zstd arenas.
+
 ## [0.2.3] - 2026-10-14
 
 ### Changed

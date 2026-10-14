@@ -159,7 +159,13 @@ Build the source gem from the binding directory:
 ```sh
 cd bindings/ruby
 bundle exec rake build
+version="$(ruby -Ilib -romq/rs/version -e 'print OMQ::Rust::VERSION')"
+ruby scripts/check-gem.rb "pkg/omq-rs-$version.gem"
 ```
+
+The check installs into a temporary gem home outside the checkout and exercises
+the installed extension. It requires the core crate versions to be published.
+Use `--manifest-only` before core publication to check workspace independence.
 
 The gem is written to `bindings/ruby/pkg/`. Publication runs only through
 `.github/workflows/release-rubygems.yml` using RubyGems trusted publishing.

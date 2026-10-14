@@ -1,10 +1,10 @@
 [package]
 name = "omq_rs_native"
-version = "0.2.0"
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
-authors.workspace = true
+version = "0.2.4"
+edition = "2024"
+rust-version = "1.93"
+license = "ISC"
+authors = ["Patrik Wenger <paddor@gmail.com>"]
 publish = false
 
 [lib]

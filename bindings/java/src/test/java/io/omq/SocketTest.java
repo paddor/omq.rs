@@ -11,6 +11,7 @@ import java.nio.ByteBuffer;
 import java.nio.ReadOnlyBufferException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.UUID;
@@ -166,6 +167,46 @@ final class SocketTest {
             assertArrayEquals(utf8("route"), multipart.part(0));
             assertArrayEquals(utf8("body"), multipart.part(1));
             assertEquals("last", pull.receive(Duration.ofSeconds(5)).orElseThrow().text());
+        }
+    }
+
+    @Test
+    void sendBytesPoolExhaustionAndReusePreserveVariableBodies() {
+        int count = 4_000;
+        int[] sizes = {0, 16, 55, 56, 64, 127, 128, 255, 256, 257};
+        for (SocketType sender : new SocketType[] {SocketType.PUSH, SocketType.SCATTER}) {
+            SocketType receiver = sender == SocketType.PUSH ? SocketType.PULL : SocketType.GATHER;
+            try (Context context = OMQ.context();
+                 Socket pull = context.socket(receiver).receiveHighWaterMark(count);
+                 Socket push = context.socket(sender).sendHighWaterMark(count)) {
+                push.connect(pull.bind("inproc://send-pool-" + UUID.randomUUID()));
+                push.waitConnected(1, Duration.ofSeconds(5));
+                for (int round = 0; round < 3; round++) {
+                    // Retain more pooled bodies than the pool can hold before receiving.
+                    for (int i = 0; i < count; i++) {
+                        byte[] body = new byte[sizes[i % sizes.length]];
+                        Arrays.fill(body, (byte) (i + round));
+                        if (body.length > 0) {
+                            body[0] = (byte) (i >>> 8);
+                        }
+                        push.send(body);
+                        Arrays.fill(body, (byte) 0x5a);
+                    }
+                    for (int i = 0; i < count; i++) {
+                        byte[] expected = new byte[sizes[i % sizes.length]];
+                        Arrays.fill(expected, (byte) (i + round));
+                        if (expected.length > 0) {
+                            expected[0] = (byte) (i >>> 8);
+                        }
+                        assertArrayEquals(expected, pull.receiveBytes(Duration.ofSeconds(5)).orElseThrow());
+                    }
+                    // The JNI overload must follow the final ring send, including inline bodies.
+                    push.send(new byte[16]);
+                    push.send(Message.text("last"));
+                    assertArrayEquals(new byte[16], pull.receiveBytes(Duration.ofSeconds(5)).orElseThrow());
+                    assertEquals("last", pull.receive(Duration.ofSeconds(5)).orElseThrow().text());
+                }
+            }
         }
     }
 
@@ -510,12 +551,21 @@ final class SocketTest {
 
     @Test
     void blockedSendUnblocksWhenSocketCloses() throws Exception {
+        blockedSendUnblocksWhenSocketCloses(64 * 1024);
+    }
+
+    @Test
+    void blockedPooledSendUnblocksWhenSocketCloses() throws Exception {
+        blockedSendUnblocksWhenSocketCloses(64);
+    }
+
+    private static void blockedSendUnblocksWhenSocketCloses(int size) throws Exception {
         Context context = OMQ.context();
         Socket push = context.socket(SocketType.PUSH)
                 .sendHighWaterMark(1)
                 .transmitSlotCapacity(1_024);
         push.bind("inproc://blocked-send-close-" + UUID.randomUUID());
-        byte[] body = new byte[64 * 1024];
+        byte[] body = new byte[size];
         CountDownLatch started = new CountDownLatch(1);
         CompletableFuture<Throwable> sent = new CompletableFuture<>();
         Thread sender = Thread.ofPlatform().daemon().start(() -> {

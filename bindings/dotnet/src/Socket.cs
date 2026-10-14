@@ -187,7 +187,14 @@ public sealed class Socket : IDisposable
     /// Sends one frame, optionally marking it as multipart and/or non-blocking.
     public void Send(ReadOnlySpan<byte> data, bool more = false, bool dontWait = false)
     {
-        lock (gate) { byte[] copy = data.ToArray(); unsafe { fixed (byte* p = copy) Errors.Check("send", Native.zmq_send(Require(), (IntPtr)p, (nuint)copy.Length, Flags(more, dontWait))); } }
+        lock (gate)
+        {
+            unsafe
+            {
+                fixed (byte* p = data)
+                    Errors.Check("send", Native.zmq_send(Require(), (IntPtr)p, (nuint)data.Length, Flags(more, dontWait)));
+            }
+        }
     }
     /// Sends a UTF-8 frame.
     public void SendText(string text, bool more = false, bool dontWait = false) => Send(Encoding.UTF8.GetBytes(text), more, dontWait);

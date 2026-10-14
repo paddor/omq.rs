@@ -7,13 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-10-14
+
 ### Breaking
 
+- `Options` gains DART, SHM memory, and receive-pool fields. Update exhaustive
+  struct literals or construct options with `Default`.
 - `FrameBuffer::drain` and `FrameBuffer::drain_owned` return `Drained`, the
   protected and drained entry counts, instead of the protected count.
 
 ### Added
 
+- `PayloadPool` and `PayloadBuffer` provide reusable message storage.
+- DART transport options configure reliable UDP delivery.
 - `FrameBuffer::io_slices` and `FrameBuffer::advance` write queued frames
   without draining them, large payloads from their own buffers.
 - `FrameBuffer::push_raw_message` queues one message's chunks as a group that

@@ -507,13 +507,12 @@ mod tests {
             expected.push(batch.storage[length..length + size].to_vec());
             length += size;
         }
-        batch.metadata[0] = RecvMeta {
-            len: length,
-            stride: expected[0].len(),
-            addr: "127.0.0.1:1".parse().unwrap(),
-            ecn: Some(EcnCodepoint::Ce),
-            dst_ip: Some("127.0.0.1".parse().unwrap()),
-        };
+        let meta = &mut batch.metadata[0];
+        meta.len = length;
+        meta.stride = expected[0].len();
+        meta.addr = "127.0.0.1:1".parse().unwrap();
+        meta.ecn = Some(EcnCodepoint::Ce);
+        meta.dst_ip = Some("127.0.0.1".parse().unwrap());
         let datagrams: Vec<_> = batch.datagrams().collect();
         assert_eq!(datagrams.len(), 3);
         assert!(expected[2].len() < expected[0].len());

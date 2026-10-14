@@ -50,28 +50,24 @@ pub(crate) type RepEnvelope = SmallVec<[Bytes; 2]>;
 
 pub(crate) fn split_rep_request(msg: &Message) -> Option<(RepEnvelope, Message)> {
     let mut envelope = RepEnvelope::new();
-    let mut body = Vec::new();
-    let mut seen_delimiter = false;
-
-    for part in msg {
-        if seen_delimiter {
-            body.push(part);
-        } else if part.is_empty() {
-            seen_delimiter = true;
-        } else {
-            envelope.push(part);
+    let mut parts = msg.iter();
+    while let Some(part) = parts.next() {
+        if part.is_empty() {
+            return Some((envelope, Message::multipart(parts)));
         }
+        envelope.push(part);
     }
-
-    seen_delimiter.then(|| (envelope, Message::multipart(body)))
+    None
 }
 
 pub(crate) fn rep_reply_with_envelope(envelope: &RepEnvelope, body: &Message) -> Message {
-    let mut parts = Vec::with_capacity(envelope.len() + 1 + body.len());
-    parts.extend(envelope.iter().cloned());
-    parts.push(Bytes::new());
-    parts.extend(body.iter());
-    Message::multipart(parts)
+    Message::multipart(
+        envelope
+            .iter()
+            .cloned()
+            .chain(std::iter::once(Bytes::new()))
+            .chain(body.iter()),
+    )
 }
 
 /// Send-side policy.

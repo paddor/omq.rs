@@ -85,6 +85,15 @@ impl Payload {
         }
     }
 
+    #[inline]
+    fn from_compact_bytes(bytes: Bytes) -> Self {
+        if bytes.len() <= MAX_INLINE_PAYLOAD {
+            Self::from_slice(&bytes)
+        } else {
+            Self::from_bytes(bytes)
+        }
+    }
+
     /// Wrap bytes with a conservative bound on their retained allocation.
     /// `retained` must include the entire backing allocation, including bytes
     /// outside this view. Callers that cannot determine it must use
@@ -537,35 +546,33 @@ impl Message {
         I: IntoIterator<Item = P>,
         P: Into<Bytes>,
     {
-        let payloads: Vec<Payload> = parts
-            .into_iter()
-            .map(|p| {
-                let b = p.into();
-                if b.len() <= MAX_INLINE_PAYLOAD {
-                    Payload::from_slice(&b)
-                } else {
-                    Payload::from_bytes(b)
-                }
-            })
-            .collect();
-        match payloads.len() {
-            0 => Self::new(),
-            1 => {
-                let p = payloads.into_iter().next().unwrap();
-                Self {
-                    inner: MessageInner::Single(p),
-                }
-            }
-            _ => Self {
-                inner: MessageInner::Multi(payloads.into()),
-            },
-        }
+        Self::multipart_payloads(
+            parts
+                .into_iter()
+                .map(|part| Payload::from_compact_bytes(part.into())),
+        )
     }
 
     /// Construct a message from owning payloads without converting them to
     /// `Bytes`. Shared owners and empty frames retain their ownership policy.
     pub fn multipart_payloads(parts: impl IntoIterator<Item = Payload>) -> Self {
-        Self::from_payloads_vec(parts.into_iter().collect())
+        let mut parts = parts.into_iter();
+        // Preserve Vec's allocation reuse when multipart is already known.
+        if parts.size_hint().0 >= 2 {
+            return Self::from_payloads_vec(parts.collect());
+        }
+        let Some(first) = parts.next() else {
+            return Self::new();
+        };
+        let Some(second) = parts.next() else {
+            return Self::from_payload(first);
+        };
+        Self::from_payloads_vec(
+            std::iter::once(first)
+                .chain(std::iter::once(second))
+                .chain(parts)
+                .collect(),
+        )
     }
 
     /// Create the `[group, body]` message required by RADIO sockets.
@@ -1772,6 +1779,43 @@ mod tests {
         let owner = std::sync::Arc::new(SharedFrame(vec![7; length]));
         let weak = std::sync::Arc::downgrade(&owner);
         (Message::from(Payload::from_shared_owner(owner)), weak)
+    }
+
+    #[test]
+    fn multipart_construction_preserves_empty_frames_and_shared_owners() {
+        assert_eq!(Message::multipart(std::iter::empty::<Bytes>()).len(), 0);
+        assert_eq!(Message::multipart([Bytes::new()]).len(), 1);
+        assert_eq!(Message::multipart_payloads(std::iter::empty()).len(), 0);
+        for length in [0, 16, 63, 1024] {
+            for count in [1, 2, 3] {
+                let (mut body, owner) = shared_frame(length);
+                let payload = body.pop_front_payload().unwrap();
+                let parts = std::iter::repeat_n(payload, count).filter(|_| true);
+                let message = Message::multipart_payloads(parts);
+                assert_eq!(message.len(), count);
+                assert_eq!(message.byte_len(), count * length);
+                let clone = message.clone();
+                let view = message.part_bytes(count - 1).unwrap();
+                drop(message);
+                assert_eq!(clone.part_slice(count - 1), Some(view.as_ref()));
+                drop(clone);
+                assert!(owner.upgrade().is_some());
+                drop(view);
+                assert!(owner.upgrade().is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn multipart_payloads_reuses_an_owned_frame_table() {
+        let parts = vec![Payload::from_slice(b"body"); 8];
+        let table = parts.as_ptr();
+        let message = Message::multipart_payloads(parts);
+        let MessageInner::Multi(parts) = &message.inner else {
+            panic!("expected multipart");
+        };
+        assert_eq!(parts.as_ptr(), table);
+        assert_eq!(message.len(), 8);
     }
 
     #[test]

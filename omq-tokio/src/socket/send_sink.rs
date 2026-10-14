@@ -56,7 +56,11 @@ where
     #[inline]
     fn start_send(self: Pin<&mut Self>, message: Message) -> Result<()> {
         let this = self.project();
-        assert!(this.pending.is_none() && this.future.is_none());
+        if this.pending.is_some() || this.future.is_some() {
+            return Err(Error::Protocol(
+                "send sink must be ready before sending".into(),
+            ));
+        }
         *this.pending = Some(message);
         Ok(())
     }

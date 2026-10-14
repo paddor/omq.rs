@@ -10,7 +10,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use futures::{SinkExt, Stream, StreamExt, stream, stream::FusedStream};
+use futures::{Sink, SinkExt, Stream, StreamExt, stream, stream::FusedStream};
 use omq_tokio::blocking::{BlockingRecvCancel, DispatchExit, DispatchOptions};
 use omq_tokio::{Context, Error, Message, Options, Socket, SocketType, TrySendError};
 
@@ -109,6 +109,40 @@ async fn sink_sends_streams_and_flushes_on_close_without_closing_socket() {
                 .unwrap(),
             Message::single("socket still open")
         );
+        drop(sink);
+        push.close().await.unwrap();
+        pull.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn sink_rejects_unready_sends_without_losing_the_pending_message() {
+    for poll in [false, true] {
+        let (_context, push, pull, queued) = full_inproc_pair("inproc://sink-unready").await;
+        let mut sink = Box::pin(push.sink());
+        sink.feed(Message::single("pending")).await.unwrap();
+        if poll {
+            let mut flush = Box::pin(sink.flush());
+            let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+            assert!(std::future::Future::poll(flush.as_mut(), &mut cx).is_pending());
+        }
+        assert!(matches!(
+            sink.as_mut().start_send(Message::single("rejected")),
+            Err(Error::Protocol(_))
+        ));
+        let drain = async {
+            for _ in 0..queued {
+                assert_eq!(pull.recv().await.unwrap(), Message::single("queued"));
+            }
+            assert_eq!(pull.recv().await.unwrap(), Message::single("pending"));
+        };
+        tokio::time::timeout(WAIT, async {
+            let (result, ()) = tokio::join!(sink.flush(), drain);
+            result.unwrap();
+        })
+        .await
+        .unwrap();
+        assert!(matches!(pull.try_recv(), Err(Error::WouldBlock)));
         drop(sink);
         push.close().await.unwrap();
         pull.close().await.unwrap();

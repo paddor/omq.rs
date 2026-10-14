@@ -207,6 +207,8 @@ pub(super) async fn peer_death(#[cfg(target_os = "linux")] state: Option<ShmStat
     if let Some(state) = state {
         let descriptor = state.lock().expect("SHM connection").peer_descriptor()?;
         if let Some(descriptor) = descriptor {
+            // AsyncFd owns the File and only exposes it through this shared borrow.
+            #[allow(deprecated, reason = "AsyncFd::register requires unsafe code")]
             let registered = tokio::io::unix::AsyncFd::new(descriptor)?;
             let _ = registered.readable().await?;
         }

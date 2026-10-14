@@ -9,7 +9,7 @@ use crate::transport::shm::ShmState;
 
 #[cfg(target_os = "linux")]
 use {
-    super::OUTBOUND_BATCH_TIME,
+    super::{BATCH_TIME_CHECK_MSGS, OUTBOUND_BATCH_TIME},
     crate::routing::OUTBOUND_BATCH_MAX_MSGS,
     omq_proto::{
         Message,
@@ -66,7 +66,8 @@ impl Outbound {
         self.pending.push_back(first.clone());
         let _ = budget.account(std::mem::size_of::<Message>());
         while !budget.exhausted()
-            && (!budget.msgs().is_multiple_of(32) || started.elapsed() < OUTBOUND_BATCH_TIME)
+            && (!budget.msgs().is_multiple_of(BATCH_TIME_CHECK_MSGS)
+                || started.elapsed() < OUTBOUND_BATCH_TIME)
         {
             let Some(message) = try_recv() else {
                 break;

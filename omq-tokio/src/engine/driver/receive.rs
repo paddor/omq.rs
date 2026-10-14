@@ -195,23 +195,36 @@ pub(super) fn drain_decoded_messages(
     let recv_batch_start = Instant::now();
     let mut recv_budget = None;
     let mut recv_batch_time = None;
-    let defer_yring_flush = decoder.is_none()
+    let defer_codec = match decoder {
+        None => true,
+        #[cfg(feature = "lz4")]
+        Some(MessageDecoder::Lz4(_)) => true,
+        #[cfg(feature = "zstd")]
+        Some(MessageDecoder::Zstd(_)) => true,
+        #[cfg(not(any(feature = "lz4", feature = "zstd")))]
+        Some(_) => false,
+    };
+    let defer_yring_flush = defer_codec
         && matches!(receive_profile, ReceiveProfile::Throughput)
         && delivery.sink.as_ref().is_some_and(RecvSink::is_yring);
     let mut pending_yring_flush = false;
     #[cfg(target_os = "linux")]
     let mut shm_guard = shm.map(|state| state.lock().expect("SHM connection"));
-    while let Some(m) = poll_received_locked(
-        connection,
-        #[cfg(target_os = "linux")]
-        shm_guard.as_deref_mut(),
-    )? {
-        let m = match decoder.as_mut() {
-            Some(dec) => match dec.decode_with_payload_pool(m, decoded_payload_pool)? {
-                Some(plain) => plain,
-                None => continue,
-            },
-            None => m,
+    loop {
+        let m = match poll_decoded_message(
+            connection,
+            decoder,
+            decoded_payload_pool,
+            #[cfg(target_os = "linux")]
+            shm_guard.as_deref_mut(),
+        ) {
+            Ok(DecodedReceive::Message(message)) => message,
+            Ok(DecodedReceive::Setup) => continue,
+            Ok(DecodedReceive::Empty) => break,
+            Err(error) => {
+                delivery.flush(&mut pending_yring_flush);
+                return Err(error);
+            }
         };
         let rate_limited = rate_connection
             .as_mut()
@@ -253,6 +266,36 @@ pub(super) fn drain_decoded_messages(
     }
     delivery.flush(&mut pending_yring_flush);
     Ok(DriverStep::Continue)
+}
+
+enum DecodedReceive {
+    Message(Message),
+    Setup,
+    Empty,
+}
+
+fn poll_decoded_message(
+    connection: &mut Connection,
+    decoder: &mut Option<MessageDecoder>,
+    pool: Option<&omq_proto::PayloadPool>,
+    #[cfg(target_os = "linux")] shm: Option<&mut omq_shm::Connection>,
+) -> Result<DecodedReceive> {
+    if let Some(message) = decoder.as_mut().and_then(MessageDecoder::poll_message) {
+        return Ok(DecodedReceive::Message(message));
+    }
+    let Some(wire) = poll_received_locked(
+        connection,
+        #[cfg(target_os = "linux")]
+        shm,
+    )?
+    else {
+        return Ok(DecodedReceive::Empty);
+    };
+    let message = match decoder {
+        Some(decoder) => decoder.decode_with_payload_pool(wire, pool)?,
+        None => Some(wire),
+    };
+    Ok(message.map_or(DecodedReceive::Setup, DecodedReceive::Message))
 }
 
 #[cfg(target_os = "linux")]

@@ -27,6 +27,8 @@ use super::{FAN_OUT_TOTAL_COPY_BUDGET, FanOutMutePolicy};
 const LANE_CTRL_RING_CAP: usize = 64;
 const PLAIN_BATCH_MESSAGES: usize = 8;
 const PLAIN_BATCH_BYTES: usize = 16 * 1024;
+#[cfg(any(feature = "lz4", feature = "zstd"))]
+const CODEC_ARENA_FRAME_OVERHEAD: usize = 16 + 9;
 
 #[derive(Debug)]
 enum LaneControl {
@@ -624,6 +626,20 @@ impl LaneWorker {
                 }
                 let mut next = 0;
                 while next < batch.len() {
+                    #[cfg(any(feature = "lz4", feature = "zstd"))]
+                    {
+                        let (count, shutdown) = self
+                            .dispatch_codec_arena(&batch[next..], &mut touched)
+                            .await;
+                        if shutdown {
+                            self.stop(&mut touched);
+                            return;
+                        }
+                        if count > 1 {
+                            next += count;
+                            continue;
+                        }
+                    }
                     #[cfg(target_os = "linux")]
                     if let Some((message, count, referenced)) =
                         self.prepare_shm_batch(&batch[next..])
@@ -822,6 +838,139 @@ impl LaneWorker {
     async fn handle_data(&mut self, data: &LaneData, touched: &mut SmallVec<[u64; 32]>) -> bool {
         let LaneData::Dispatch(dispatch) = data;
         self.dispatch(dispatch, touched).await
+    }
+
+    /// Share an arena only when the same recipients can admit every message.
+    /// Partial credit, changed filters and oldest eviction use scalar dispatch.
+    #[cfg(any(feature = "lz4", feature = "zstd"))]
+    async fn dispatch_codec_arena(
+        &mut self,
+        batch: &[LaneData],
+        touched: &mut SmallVec<[u64; 32]>,
+    ) -> (usize, bool) {
+        use omq_proto::proto::transform::arena::{
+            MAX_ARENA_MESSAGES, MAX_ARENA_PARTS, arena_message_size,
+        };
+        if batch.len() < 2 || self.mute_policy == FanOutMutePolicy::DropOldest {
+            return (0, false);
+        }
+        let LaneData::Dispatch(first) = &batch[0];
+        let targets = self.matching_peer_groups(first);
+        if !self.codec_arena_targets_ready(&targets) {
+            return (0, false);
+        }
+        let capacity = targets
+            .iter()
+            .enumerate()
+            .filter(|(_, peers)| !peers.is_empty())
+            .map(|(group, _)| self.codec_groups[group].as_ref().unwrap().arena_capacity())
+            .min()
+            .unwrap();
+        let mut messages = SmallVec::<[&Message; 32]>::new();
+
+        let mut bytes = 0;
+        let mut parts = 0;
+        let (max_messages, max_bytes) = targets.iter().flatten().fold(
+            (MAX_ARENA_MESSAGES, capacity + CODEC_ARENA_FRAME_OVERHEAD),
+            |(messages, bytes), id| {
+                let (credit, space) = self.peers[id].slot.arena_credit();
+                (messages.min(credit), bytes.min(space))
+            },
+        );
+        for data in batch.iter().take(max_messages) {
+            let LaneData::Dispatch(dispatch) = data;
+            let Some(size) = arena_message_size(&dispatch.msg) else {
+                break;
+            };
+            if bytes + size > capacity
+                || parts + dispatch.msg.len() > MAX_ARENA_PARTS
+                || self.matching_peer_groups(dispatch) != targets
+                || bytes + size + CODEC_ARENA_FRAME_OVERHEAD > max_bytes
+            {
+                break;
+            }
+            bytes += size;
+            parts += dispatch.msg.len();
+            messages.push(&dispatch.msg);
+        }
+        if messages.len() < 2 {
+            return (0, false);
+        }
+        let mut fallback = SmallVec::<[(usize, u64); 8]>::new();
+        for (group, peers) in targets
+            .iter()
+            .enumerate()
+            .filter(|(_, peers)| !peers.is_empty())
+        {
+            let Ok(wire) = self.codec_groups[group]
+                .as_mut()
+                .unwrap()
+                .encode_arena(&messages)
+            else {
+                fallback.extend(peers.iter().map(|id| (group, *id)));
+                continue;
+            };
+            let frame = build_fan_out_frame(
+                &mut self.eq,
+                &wire,
+                &mut self.chunks,
+                peers.len(),
+                FAN_OUT_TOTAL_COPY_BUDGET,
+            );
+            for id in peers {
+                let peer = self.peers.get_mut(id).unwrap();
+                match peer.slot.try_push_arena_no_signal(&frame, messages.len()) {
+                    TryFrameResult::Ok => Self::touch_peer(*id, peer, touched),
+                    TryFrameResult::Full => fallback.push((group, *id)),
+                    TryFrameResult::Dead | TryFrameResult::Ineligible => {}
+                }
+            }
+            clear_fan_out_frame(&mut self.eq, &mut self.chunks);
+        }
+        // A slot can close during encoding. If admission otherwise changed,
+        // retain normal per-message mute behavior for just that recipient.
+        if fallback.is_empty() {
+            return (messages.len(), false);
+        }
+        for data in batch.iter().take(messages.len()) {
+            let LaneData::Dispatch(dispatch) = data;
+            let mut pending = SmallVec::new();
+            for &(group, id) in &fallback {
+                if self.mute_policy.is_lossy() {
+                    self.dispatch_group_lossy(group, &[id], dispatch, touched);
+                } else {
+                    self.dispatch_group_ready(group, &[id], dispatch, touched, &mut pending);
+                }
+            }
+            if self.finish_pending(&mut pending, touched).await {
+                return (messages.len(), true);
+            }
+        }
+        (messages.len(), false)
+    }
+
+    #[cfg(any(feature = "lz4", feature = "zstd"))]
+    fn codec_arena_targets_ready(&self, targets: &[SmallVec<[u64; 32]>; MAX_CODEC_GROUPS]) -> bool {
+        targets.iter().any(|peers| !peers.is_empty())
+            && targets.iter().enumerate().all(|(group, peers)| {
+                peers.is_empty()
+                    || (self.codec_groups[group]
+                        .as_ref()
+                        .is_some_and(CodecGroup::can_encode_arena)
+                        && peers.iter().all(|id| {
+                            let peer = &self.peers[id];
+                            #[cfg(feature = "ws")]
+                            if peer.slot.is_ws() {
+                                return false;
+                            }
+                            self.codec_groups[group]
+                                .as_ref()
+                                .unwrap()
+                                .dictionary()
+                                .is_none()
+                                || peer.dict_shipped
+                        }))
+            })
     }
 
     /// Reuse the contiguous small-message path when every peer wants the

@@ -222,10 +222,11 @@ chunks for gather writes. Drivers retain unfinished output until its wire
 write completes. Received storage passes from the transport through the codec
 to the application message.
 
-Compression transforms complete messages before ZMTP framing. Peer-routed
-sends encode on their connection driver, which can delegate compute work to
-worker tasks. Fan-out lanes encode independently and share results with
-compatible peers. Dictionary shipment is ordered and scoped to each connection.
+Connection drivers and fan-out lanes compress complete messages before outer
+ZMTP framing; LZ4 and Zstd combine queued small messages into bounded arenas.
+Receivers retain a decoded arena and admit its messages in order under normal
+backpressure, while compatible fan-out peers share encoded arenas.
+Dictionary shipment is ordered and scoped to each connection.
 The [LZ4 RFC](lz4-rfc.md) and [Zstd RFC](zstd-rfc.md) define their wire formats.
 
 Endpoint URIs select carriers and optional transforms. Bind/connect capture

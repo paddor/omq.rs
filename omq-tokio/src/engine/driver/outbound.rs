@@ -81,6 +81,14 @@ impl OutboundState {
         if let Some(shm) = &mut self.shm {
             return shm.stage(first, try_recv, max_msgs, eq);
         }
+        #[cfg(any(feature = "lz4", feature = "zstd"))]
+        if self
+            .encoder
+            .as_ref()
+            .is_some_and(|encoder| encoder.arena_capacity() > 0)
+        {
+            return self.batch_encode_arena(first, try_recv, max_msgs, connection, eq);
+        }
         let started = Instant::now();
         let use_pipeline = self.offload_threshold > 0
             && self
@@ -127,6 +135,129 @@ impl OutboundState {
             }
         }
         Ok(count)
+    }
+
+    #[cfg(any(feature = "lz4", feature = "zstd"))]
+    fn batch_encode_arena(
+        &mut self,
+        first: &Message,
+        mut try_recv: impl FnMut() -> Option<Message>,
+        max_msgs: usize,
+        connection: &mut Connection,
+        eq: &mut FrameBuffer,
+    ) -> Result<usize> {
+        use omq_proto::proto::transform::arena::{
+            MAX_ARENA_MESSAGES, MAX_ARENA_PARTS, arena_message_size,
+        };
+        let started = Instant::now();
+        let capacity = self.encoder.as_ref().unwrap().arena_capacity();
+        let mut messages = smallvec::SmallVec::<[Message; 32]>::new();
+        let mut arena_bytes = 0;
+        let mut parts = 0;
+        let mut count = 0;
+        let mut bytes = 0;
+        let mut next = Some(first.clone());
+        while let Some(message) = next {
+            let size = arena_message_size(&message).filter(|size| *size <= capacity);
+            if size.is_none()
+                || arena_bytes + size.unwrap_or(0) > capacity
+                || messages.len() == MAX_ARENA_MESSAGES
+                || parts + message.len() > MAX_ARENA_PARTS
+            {
+                self.flush_arena(&messages, connection, eq)?;
+                messages.clear();
+                arena_bytes = 0;
+                parts = 0;
+            }
+            count += 1;
+            bytes += message.byte_len();
+            if let Some(size) = size {
+                arena_bytes += size;
+                parts += message.len();
+                messages.push(message);
+            } else {
+                // Preserve ordered large-message offloads around small arenas.
+                if self.offload_threshold > 0
+                    && let Some(pool) = &self.compression_pool
+                    && self
+                        .encoder
+                        .as_ref()
+                        .is_some_and(MessageEncoder::can_offload)
+                {
+                    submit_to_pipeline(
+                        &message,
+                        self.encoder.as_mut().unwrap(),
+                        pool,
+                        self.offload_threshold,
+                        &mut self.offload_pipeline,
+                    );
+                } else {
+                    let wire = self.encoder.as_mut().unwrap().encode(&message)?;
+                    self.queue_arena_wire(wire, connection, eq)?;
+                }
+            }
+            if count >= max_msgs
+                || bytes >= max_batch_bytes()
+                || (count.is_multiple_of(BATCH_TIME_CHECK_MSGS)
+                    && started.elapsed() >= OUTBOUND_BATCH_TIME)
+            {
+                break;
+            }
+            next = try_recv();
+        }
+        self.flush_arena(&messages, connection, eq)?;
+        Ok(count)
+    }
+
+    #[cfg(any(feature = "lz4", feature = "zstd"))]
+    fn flush_arena(
+        &mut self,
+        messages: &[Message],
+        connection: &mut Connection,
+        eq: &mut FrameBuffer,
+    ) -> Result<()> {
+        if messages.is_empty() {
+            return Ok(());
+        }
+        if messages.len() == 1 && self.offload_pipeline.is_empty() {
+            return encode_msg(
+                &messages[0],
+                &mut self.encoder,
+                connection,
+                eq,
+                self.passthrough.as_ref(),
+            );
+        }
+        let encoder = self.encoder.as_mut().unwrap();
+        let wire = if messages.len() == 1 {
+            encoder.encode(&messages[0])?
+        } else {
+            let references: smallvec::SmallVec<[&Message; 32]> = messages.iter().collect();
+            encoder.encode_arena(&references)?
+        };
+        self.queue_arena_wire(wire, connection, eq)
+    }
+
+    #[cfg(any(feature = "lz4", feature = "zstd"))]
+    fn queue_arena_wire(
+        &mut self,
+        wire: TransformedOut,
+        connection: &Connection,
+        eq: &mut FrameBuffer,
+    ) -> Result<()> {
+        if self.offload_pipeline.is_empty() {
+            drain_offload_result(
+                None,
+                Ok(wire),
+                self.compression_pool.as_ref(),
+                connection,
+                eq,
+            )
+        } else {
+            self.offload_pipeline
+                .push_back(Box::pin(std::future::ready((None, Ok(wire)))));
+            Ok(())
+        }
     }
 
     #[cfg_attr(not(target_os = "linux"), expect(clippy::unused_self))]

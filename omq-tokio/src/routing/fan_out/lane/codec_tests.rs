@@ -129,10 +129,122 @@ fn receive(slot: &PeerTransmitSlot, decoder: &mut Option<MessageDecoder>) -> (Ve
             if let Some(plain) = plain {
                 messages.push(plain);
             }
+            if let Some(decoder) = decoder {
+                while let Some(message) = decoder.poll_message() {
+                    messages.push(message);
+                }
+            }
         }
     }
     assert!(parts.is_empty(), "multipart publication was truncated");
     (messages, dictionaries)
+}
+
+#[tokio::test]
+async fn arena_shares_encoding_counts_messages_and_stops_at_filter_changes() {
+    for kind in kinds().into_iter().flatten() {
+        let options = Options::default();
+        let (mut worker, _) = worker(FanOutMode::SubscriptionPrefix, FanOutMutePolicy::DropNewest);
+        let first = add_peer(&mut worker, 1, 0, Some(kind), &options, 8);
+        let second = add_peer(&mut worker, 2, 0, Some(kind), &options, 8);
+        let batch: Vec<_> = (0..12)
+            .map(|index| LaneData::Dispatch(dispatch(format!("body-{index}").as_bytes())))
+            .collect();
+        let mut touched = SmallVec::new();
+        let (count, shutdown) = worker.dispatch_codec_arena(&batch, &mut touched).await;
+        assert_eq!(count, 8, "logical HWM must cap an arena");
+        assert!(!shutdown);
+        assert_eq!(worker.codec_groups[0].as_ref().unwrap().encode_count, 1);
+        assert_eq!(first.arena_credit().0, 0);
+        assert_eq!(second.arena_credit().0, 0);
+        let mut first_decoder = decoder(Some(kind), &options);
+        let mut second_decoder = decoder(Some(kind), &options);
+        let expected: Vec<_> = batch[..8]
+            .iter()
+            .map(|LaneData::Dispatch(data)| data.msg.clone())
+            .collect();
+        assert_eq!(receive(&first, &mut first_decoder).0, expected);
+        assert_eq!(receive(&second, &mut second_decoder).0, expected);
+        let mut changed = batch[..3].to_vec();
+        changed[2] = LaneData::Dispatch(LaneDispatch {
+            msg: Message::single("other-topic"),
+        });
+        assert_eq!(
+            worker.dispatch_codec_arena(&changed, &mut touched).await.0,
+            2
+        );
+        assert_eq!(receive(&first, &mut first_decoder).0, expected[..2]);
+        assert_eq!(receive(&second, &mut second_decoder).0, expected[..2]);
+    }
+}
+
+#[tokio::test]
+async fn arena_keeps_dictionary_shipment_per_peer_and_oldest_eviction_scalar() {
+    for kind in kinds().into_iter().flatten() {
+        let dict = match kind {
+            #[cfg(feature = "lz4")]
+            CompressionKind::Lz4 => Bytes::from_static(b"topic common prefix body"),
+            #[cfg(feature = "zstd")]
+            CompressionKind::Zstd => omq_proto::proto::transform::train_zdict(
+                &[b"topic common prefix body".as_slice(); 200],
+                2048,
+            )
+            .unwrap(),
+            _ => unreachable!(),
+        };
+        let options = Options::default().compression_dict(dict);
+
+        for mute in [FanOutMutePolicy::DropNewest, FanOutMutePolicy::DropOldest] {
+            let (mut worker, _) = worker(FanOutMode::SubscriptionPrefix, mute);
+            let slot = add_peer(&mut worker, 1, 0, Some(kind), &options, 16);
+            let mut decoder = decoder(Some(kind), &options);
+            let mut touched = SmallVec::new();
+            let batch = vec![LaneData::Dispatch(dispatch(b"common prefix body")); 4];
+            assert_eq!(worker.dispatch_codec_arena(&batch, &mut touched).await.0, 0);
+            worker.handle_data(&batch[0], &mut touched).await;
+            assert_eq!(receive(&slot, &mut decoder).1, 1);
+            let count = worker.dispatch_codec_arena(&batch, &mut touched).await.0;
+            assert_eq!(
+                count,
+                if mute == FanOutMutePolicy::DropOldest {
+                    0
+                } else {
+                    4
+                }
+            );
+            if count > 0 {
+                let (messages, dictionaries) = receive(&slot, &mut decoder);
+                assert_eq!(messages.len(), count);
+                assert_eq!(dictionaries, 0);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn raw_arenas_share_gathered_storage_without_losing_message_credit() {
+    for kind in kinds().into_iter().flatten() {
+        let options = Options::default().compression_threshold(usize::MAX);
+        let (mut worker, _) = worker(FanOutMode::SubscriptionPrefix, FanOutMutePolicy::Block);
+        let slot = add_peer(&mut worker, 1, 0, Some(kind), &options, 64);
+        let batch: Vec<_> = (0..64)
+            .map(|index| LaneData::Dispatch(dispatch(&vec![index; 512])))
+            .collect();
+        let (count, shutdown) = worker
+            .dispatch_codec_arena(&batch, &mut SmallVec::new())
+            .await;
+        assert!(count > 8);
+        assert!(!shutdown);
+        assert_eq!(slot.arena_credit().0, 64 - count);
+        let expected: Vec<_> = batch[..count]
+            .iter()
+            .map(|LaneData::Dispatch(data)| data.msg.clone())
+            .collect();
+        let (messages, dictionaries) = receive(&slot, &mut decoder(Some(kind), &options));
+        assert_eq!(messages, expected);
+        assert_eq!(dictionaries, 0);
+        assert_eq!(slot.arena_credit().0, 64);
+    }
 }
 
 #[tokio::test]

@@ -8,6 +8,9 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ### Breaking
 
+- LZ4 and Zstd draft revision 2 add `LZ4A` and `ZSTA` arenas; both endpoints
+  need arena support. `omq-proto` is 0.32.0 and `omq-tokio` is 0.28.0.
+
 - `InprocConn::out` and `InprocConn::in_rx` expose `RelaySender` and
   `RelayReceiver` with separate command/data lanes instead of Tokio halves.
 
@@ -26,6 +29,9 @@ All notable changes to omq.rs will be documented here. Format loosely follows
   implement it; other writers need an empty `impl DriverWrite`.
 
 ### Changed
+
+- LZ4 and Zstd drivers and fan-out lanes compress queued small messages together.
+  Bounded receive arenas preserve multipart messages and per-message limits.
 
 - Idle TCP receive spin probes skip mutable receive ownership. The matched
   transport throughput runner reuses prepared large bodies and verifies

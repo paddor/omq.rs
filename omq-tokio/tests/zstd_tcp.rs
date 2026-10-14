@@ -145,6 +145,69 @@ async fn pull_on_loopback() -> (Socket, Endpoint) {
 }
 
 #[tokio::test]
+async fn arenas_resume_through_receive_hwm_and_preserve_multipart_limits() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let pull = Socket::new(
+            SocketType::Pull,
+            Options::default().recv_hwm(4).max_message_size(256),
+        );
+        let endpoint = pull.bind("zstd+tcp://127.0.0.1:0").await.unwrap();
+        let push = Socket::new(
+            SocketType::Push,
+            Options::default()
+                .send_hwm(2048)
+                .compression_auto_train(true),
+        );
+        push.connect(endpoint).await.unwrap();
+        let expected: Vec<_> = (0..1024u32)
+            .map(|index| {
+                Message::multipart([
+                    Bytes::new(),
+                    Bytes::copy_from_slice(&index.to_le_bytes()),
+                    Bytes::new(),
+                ])
+            })
+            .collect();
+        for message in &expected {
+            push.send(message.clone()).await.unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        for message in expected {
+            assert_eq!(pull.recv().await.unwrap(), message);
+        }
+    })
+    .await
+    .expect("arena receive stalled");
+}
+
+#[tokio::test]
+async fn arenas_keep_order_across_large_compression_offloads() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (pull, endpoint) = pull_on_loopback().await;
+        let push = Socket::new(
+            SocketType::Push,
+            Options::default().compression_offload_threshold(Some(4096)),
+        );
+        push.connect(endpoint).await.unwrap();
+        let expected: Vec<_> = (0..300u32)
+            .map(|index| {
+                let mut bytes = vec![b'x'; if index % 31 == 0 { 128 * 1024 } else { 128 }];
+                bytes[..4].copy_from_slice(&index.to_le_bytes());
+                Message::single(bytes)
+            })
+            .collect();
+        for message in &expected {
+            push.send(message.clone()).await.unwrap();
+        }
+        for message in expected {
+            assert_eq!(pull.recv().await.unwrap(), message);
+        }
+    })
+    .await
+    .expect("ordered arena/offload stream stalled");
+}
+
+#[tokio::test]
 async fn small_plaintext_roundtrip() {
     let (pull, ep) = pull_on_loopback().await;
     let push = Socket::new(SocketType::Push, Options::default());

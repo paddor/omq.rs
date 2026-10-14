@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-10-14
+
+### Breaking
+
+- Zstd transports emit draft revision 2 arenas; both peers need arena support.
+
+### Changed
+
+- Drivers and fan-out lanes batch queued small Zstd messages without waiting.
+  Receive cursors preserve ordering, message-level HWM, and fair scheduling.
+
+## [0.27.0] - 2026-10-14
+
+### Breaking
+
+- LZ4 transports emit draft revision 2 arenas; both peers need arena support.
+
+### Changed
+
+- Drivers and fan-out lanes batch queued small LZ4 messages without waiting.
+  Receive cursors preserve ordering, message-level HWM, and fair scheduling.
+
 ## [0.26.0] - 2026-10-14
 
 ### Breaking

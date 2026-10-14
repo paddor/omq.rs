@@ -18,6 +18,9 @@ cargo bench -p omq-tokio --bench omq_pull_bulk_fanin
 Env knobs: `OMQ_BENCH_TRANSPORTS`, `OMQ_BENCH_SIZES`,
 `OMQ_BENCH_PEERS`, `OMQ_BENCH_ROUND_MS`, `OMQ_BENCH_ROUNDS`,
 `OMQ_BENCH_ARENA_THRESHOLD`.
+`OMQ_LZ4_ARENA_BYTES` and `OMQ_ZSTD_ARENA_BYTES` set each sender's arena target
+(defaults 16384 and 32768, maximum 65536); zero selects per-part encoding for comparison. Keep HWM
+fixed while comparing caps, and measure both dictionary and no-dictionary traffic.
 Results append to `$XDG_CACHE_HOME/omq/` (default `~/.cache/omq/`)
 unless `OMQ_BENCH_NO_WRITE=1`.
 
@@ -569,6 +572,13 @@ is 1500. Segmentation offloads are disabled. Three repeats use 0.5 s active
 warmup and at least a 2 s receive interval, extended for large messages on
 slow links. Payloads are checked; boundary-crossing
 batches are excluded. Sender CPU covers the measured interval only.
+
+Both codecs use `structured-varied-v1`: 4096 distinct prebuilt messages, reduced
+to fit 64 MiB for large sizes. Sizes 16/32 B use binary records; sizes >=64 B
+use JSON events with varying IDs, symbols, prices, quantities, and times.
+The receiver checks every payload in order across warmup and measurement.
+Dictionary training uses a separate seed. Cache rows record corpus size and
+arena cap; both charts exclude repeated-payload results.
 
 ### pyomq Bindings Charts
 

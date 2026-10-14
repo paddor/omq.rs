@@ -170,6 +170,10 @@ pub(crate) struct PushpullLz4Row {
     pub payload: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payload_seed: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload_corpus_messages: Option<u64>,
+    #[serde(alias = "lz4_arena_bytes", skip_serializing_if = "Option::is_none")]
+    pub arena_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

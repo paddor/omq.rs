@@ -336,11 +336,9 @@ pub struct Options {
     /// achieve 8-24x compression ratios on sub-1 KiB messages.
     pub compression_auto_train: bool,
 
-    /// Minimum payload size (bytes) before compression is attempted.
-    /// Messages smaller than this are sent uncompressed regardless of
-    /// dict presence. `None` uses the built-in defaults (which vary by
-    /// transport and dict presence). Useful on high-bandwidth links
-    /// where compressing tiny messages wastes CPU.
+    /// Minimum part size (bytes) before compression is attempted, or aggregate
+    /// frame bytes for a compression arena. Smaller compression units are sent raw.
+    /// `None` uses defaults that depend on the codec and dictionary presence.
     pub compression_threshold: Option<usize>,
 
     /// Compression level for `zstd+tcp://`. `None` uses the transport
@@ -1248,10 +1246,8 @@ impl Options {
         self
     }
 
-    /// Override the minimum payload size for compression. Messages
-    /// smaller than `threshold` bytes are sent uncompressed. Useful
-    /// on high-bandwidth links where compressing tiny messages wastes
-    /// CPU without meaningful wire savings.
+    /// Override the minimum part or aggregate arena size for compression.
+    /// Smaller compression units are sent uncompressed.
     #[must_use]
     pub fn compression_threshold(mut self, threshold: usize) -> Self {
         self.compression_threshold = Some(threshold);

@@ -6,7 +6,7 @@ use crate::cli::CompressionLinkArgs;
 use crate::jsonl::{self, CompressionLink, PushpullLz4Row};
 use crate::process;
 
-const CHART_SIZES: &[u64] = &[16, 64, 256, 1024, 4096, 16384, 65536, 262_144];
+const CHART_SIZES: &[u64] = &[16, 32, 64, 256, 1024, 4096, 16384, 65536, 262_144];
 const QUICK_SIZES: &[u64] = &[64, 1024, 16384];
 
 pub(crate) struct Config {
@@ -85,7 +85,7 @@ fn utility(peers: &Peers, args: &[&str], env: &[(&str, &str)], timeout: Duration
 
 fn environment<'a>(dict: Option<&'a str>, level: Option<&'a str>) -> Vec<(&'static str, &'a str)> {
     let mut env = vec![
-        ("OMQ_BENCH_PAYLOAD", "json"),
+        ("OMQ_BENCH_PAYLOAD", "structured-varied-v1"),
         ("OMQ_BENCH_JSON_SEED", "4242"),
     ];
     if let Some(path) = dict {
@@ -234,8 +234,20 @@ fn measure(
                 duration_seconds: Some(cell_duration),
                 binary_sha256: peers.sha256.clone(),
                 cpu_affinity: Some(affinity.to_owned()),
-                payload: Some("json".to_owned()),
+                payload: Some("structured-varied-v1".to_owned()),
                 payload_seed: Some(4242),
+                payload_corpus_messages: Some((64 * 1024 * 1024 / size).clamp(2, 4096)),
+                arena_bytes: Some({
+                    std::env::var(format!("OMQ_{}_ARENA_BYTES", config.feature.to_uppercase()))
+                        .ok()
+                        .and_then(|value| value.parse::<u64>().ok())
+                        .unwrap_or(if config.feature == "zstd" {
+                            32768
+                        } else {
+                            16384
+                        })
+                        .min(65536)
+                }),
             };
             if !config.quick {
                 jsonl::append_jsonl(&cache, &row);
@@ -316,7 +328,7 @@ pub(crate) fn run(config: &Config) {
         utility(
             &peers,
             &[action, &path, &capacity.to_string()],
-            &[],
+            &environment(None, None),
             Duration::from_secs(30),
         );
         if transports.contains(&compressed.as_str()) {

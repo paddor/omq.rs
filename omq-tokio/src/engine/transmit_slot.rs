@@ -382,6 +382,53 @@ impl PeerTransmitSlot {
         TryFrameResult::Ok
     }
 
+    /// Conservative admission before compressing a shared arena. A lane is
+    /// the sole data writer of its compressed fan-out slots; drains can only
+    /// increase this available space while the lane encodes.
+    #[cfg(any(feature = "lz4", feature = "zstd"))]
+    pub(crate) fn arena_credit(&self) -> (usize, usize) {
+        let eq = self.eq.lock().expect("transmit_slot eq poisoned");
+        if self.dead.load(Ordering::Acquire) {
+            return (0, 0);
+        }
+        (
+            self.msg_cap
+                .saturating_sub(self.queued_msgs.load(Ordering::Relaxed)),
+            self.cap.saturating_sub(eq.total_bytes().saturating_add(1)),
+        )
+    }
+
+    /// One indivisible carrier still consumes credit for every logical message.
+    #[cfg(any(feature = "lz4", feature = "zstd"))]
+    pub(crate) fn try_push_arena_no_signal(
+        &self,
+        frame: &FanOutFrame<'_>,
+        messages: usize,
+    ) -> TryFrameResult {
+        let bytes = match frame {
+            FanOutFrame::Arena(data) => data.len(),
+            FanOutFrame::Chunks(chunks) => chunks.iter().map(Bytes::len).sum(),
+        };
+        let mut eq = self.eq.lock().expect("transmit_slot eq poisoned");
+        if self.dead.load(Ordering::Acquire) {
+            return TryFrameResult::Dead;
+        }
+        let queued = self.queued_msgs.load(Ordering::Relaxed);
+        if queued.saturating_add(messages) > self.msg_cap
+            || eq.total_bytes().saturating_add(bytes) >= self.cap
+        {
+            self.above_lwm.store(true, Ordering::Relaxed);
+            return TryFrameResult::Full;
+        }
+        match frame {
+            FanOutFrame::Arena(data) => eq.push_pre_framed(data),
+            FanOutFrame::Chunks(chunks) => eq.push_shared_chunks(chunks),
+        }
+        self.queued_msgs.store(queued + messages, Ordering::Relaxed);
+        self.mark_above_lwm_if_needed(eq.total_bytes(), queued + messages);
+        TryFrameResult::Ok
+    }
+
     /// Admit a prefix of complete publications under one lock. `ends` holds
     /// their cumulative wire lengths; the caller retries any unaccepted suffix.
     pub(crate) fn try_push_pre_framed_batch_no_signal(

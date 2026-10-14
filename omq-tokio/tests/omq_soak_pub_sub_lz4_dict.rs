@@ -87,29 +87,71 @@ fn payload(seq: u64) -> Bytes {
     ))
 }
 
-async fn assert_raw_dict_then_payloads(raw: &Socket) {
+fn verify_message(message: &Message, previous: &mut Option<u64>) {
+    assert_eq!(message.len(), 1, "unexpected multipart publication");
+    let bytes = message.part_bytes(0).unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let seq = value["seq"].as_u64().expect("publication sequence");
+    assert_eq!(bytes, payload(seq), "corrupt publication {seq}");
+    if let Some(last) = previous {
+        assert!(
+            seq > *last,
+            "duplicate or reordered publication {seq} after {last}"
+        );
+    }
+    *previous = Some(seq);
+}
+
+async fn assert_raw_dict_then_payloads(raw: &Socket) -> u64 {
     let dict = tokio::time::timeout(RAW_RECV_TIMEOUT, raw.recv())
         .await
         .expect("raw subscriber did not receive dictionary shipment")
         .unwrap();
-    let dict_part = dict.part_bytes(0).unwrap();
-    assert!(
-        dict_part.starts_with(b"LZ4D"),
-        "raw subscriber first message must be LZ4D, got {:?}",
-        &dict_part[..dict_part.len().min(4)]
-    );
-
+    assert!(dict.part_slice(0).unwrap().starts_with(b"LZ4D"));
+    let mut decoder = omq_proto::proto::transform::Lz4Decoder::new();
+    assert!(decoder.decode(dict).unwrap().is_none());
+    let mut previous = None;
+    let mut arenas = 0;
     for idx in 0..RAW_PAYLOAD_CHECKS {
         let msg = tokio::time::timeout(RAW_RECV_TIMEOUT, raw.recv())
             .await
             .unwrap_or_else(|_| panic!("raw subscriber missed compressed payload {idx}"))
             .unwrap();
-        let part = msg.part_bytes(0).unwrap();
+        let part = msg.part_slice(0).unwrap();
+        let arena = part.starts_with(b"LZ4A");
         assert!(
-            part.starts_with(b"LZ4B"),
-            "raw payload {idx} should be dictionary-compressed, got {:?}",
-            &part[..part.len().min(4)]
+            arena || part.starts_with(b"LZ4B"),
+            "unexpected wire envelope"
         );
+        if arena {
+            assert_eq!(part[4], 1, "expected compressed arena");
+            arenas += 1;
+        }
+        let message = decoder.decode(msg).unwrap().expect("duplicate dictionary");
+        verify_message(&message, &mut previous);
+        for _ in 1..omq_proto::proto::transform::arena::MAX_ARENA_MESSAGES {
+            let Some(message) = decoder.poll_message() else {
+                break;
+            };
+            verify_message(&message, &mut previous);
+        }
+        assert!(!decoder.has_pending_messages());
+    }
+    arenas
+}
+
+async fn receive_publications(sub: Socket, stop: Arc<AtomicBool>, decoded: Arc<AtomicU64>) {
+    let mut previous = None;
+    while !stop.load(Ordering::Relaxed) {
+        match tokio::time::timeout(Duration::from_secs(2), sub.recv()).await {
+            Ok(result) => {
+                verify_message(&result.unwrap(), &mut previous);
+                decoded.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(_) => {
+                assert!(stop.load(Ordering::Relaxed), "decoded subscriber stalled");
+            }
+        }
     }
 }
 
@@ -121,6 +163,7 @@ fn soak_pub_sub_lz4_dict_io_lane_fanout() {
     let sent = Arc::new(AtomicU64::new(0));
     let decoded = Arc::new(AtomicU64::new(0));
     let raw_probes = Arc::new(AtomicU64::new(0));
+    let raw_arenas = Arc::new(AtomicU64::new(0));
     let stop = Arc::new(AtomicBool::new(false));
 
     let ctx = soak_common::build_context();
@@ -147,15 +190,7 @@ fn soak_pub_sub_lz4_dict_io_lane_fanout() {
             let sub = sub.clone();
             let decoded = decoded.clone();
             let stop = stop.clone();
-            decode_tasks.push(tokio::spawn(async move {
-                while !stop.load(Ordering::Relaxed) {
-                    if let Ok(Ok(_msg)) =
-                        tokio::time::timeout(Duration::from_secs(2), sub.recv()).await
-                    {
-                        decoded.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
-            }));
+            decode_tasks.push(tokio::spawn(receive_publications(sub, stop, decoded)));
         }
 
         let send_stop = stop.clone();
@@ -164,9 +199,8 @@ fn soak_pub_sub_lz4_dict_io_lane_fanout() {
         let send_task = tokio::spawn(async move {
             let mut seq = TRAINING_MSGS;
             while !send_stop.load(Ordering::Relaxed) {
-                if send_pub.send(Message::single(payload(seq))).await.is_ok() {
-                    send_sent.fetch_add(1, Ordering::Relaxed);
-                }
+                send_pub.send(Message::single(payload(seq))).await.unwrap();
+                send_sent.fetch_add(1, Ordering::Relaxed);
                 seq += 1;
             }
         });
@@ -181,7 +215,7 @@ fn soak_pub_sub_lz4_dict_io_lane_fanout() {
                 let raw = Socket::new(SocketType::Sub, soak_common::soak_options().recv_hwm(64));
                 raw.connect(tcp_from_lz4(&ep)).await.unwrap();
                 raw.subscribe(Bytes::new()).await.unwrap();
-                assert_raw_dict_then_payloads(&raw).await;
+                raw_arenas.fetch_add(assert_raw_dict_then_payloads(&raw).await, Ordering::Relaxed);
                 raw.close().await.unwrap();
                 raw_probes.fetch_add(1, Ordering::Relaxed);
             }
@@ -199,9 +233,9 @@ fn soak_pub_sub_lz4_dict_io_lane_fanout() {
         }
 
         stop.store(true, Ordering::Relaxed);
-        let _ = send_task.await;
+        send_task.await.expect("publisher task failed");
         for task in decode_tasks {
-            let _ = task.await;
+            task.await.expect("subscriber task failed");
         }
 
         assert!(
@@ -213,6 +247,15 @@ fn soak_pub_sub_lz4_dict_io_lane_fanout() {
             "decoded subscribers must receive traffic"
         );
 
+        let arenas = raw_arenas.load(Ordering::Relaxed);
+        assert!(
+            arenas > 0,
+            "raw probes did not observe any compression arenas"
+        );
+        eprintln!(
+            "[pub_sub_lz4_dict] verified {arenas} arena carriers across {} late subscribers",
+            raw_probes.load(Ordering::Relaxed)
+        );
         for sub in decoded_subs {
             sub.close().await.unwrap();
         }

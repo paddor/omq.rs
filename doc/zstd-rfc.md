@@ -3,6 +3,7 @@
 | Field    | Value                                              |
 |----------|----------------------------------------------------|
 | Status   | Draft                                              |
+| Revision | 2                                                  |
 | Editor   | Patrik Wenger                                      |
 | Scheme   | `zstd+tcp://`                                      |
 | Requires | [RFC 37/ZMTP 3.1](https://rfc.zeromq.org/spec/37/) |
@@ -11,13 +12,14 @@
 ## 1. Abstract
 
 This specification defines `zstd+tcp://`, a TCP transport for ZMTP 3.1
-that applies per-part Zstandard compression after the ZMTP handshake.
+that applies Zstandard compression to parts or bounded arenas of complete
+messages after the ZMTP handshake.
 Both peers use the `zstd+tcp://` scheme in their endpoint URIs. The ZMTP
 greeting and handshake proceed over raw TCP exactly as they would over
 `tcp://`. After the handshake completes, every message part on the wire
-is individually encoded with a 4-byte sentinel dispatch that
-distinguishes uncompressed plaintext, Zstandard-compressed frames, and
-dictionary shipments. No ZMTP properties, command frames, or
+uses a 4-byte sentinel dispatch that
+distinguishes uncompressed plaintext, Zstandard-compressed frames,
+dictionary shipments, and arenas. No ZMTP properties, command frames, or
 negotiation are involved. Compression is an intrinsic property of the
 transport, like encryption is an intrinsic property of TLS.
 
@@ -102,10 +104,10 @@ per-subscriber CPU dominates the total budget.
 ### 4.1 Goals
 
 - Transparent to application code: send/receive operations see plaintext.
-- Per-part sender decision: opt out for short or incompressible parts.
+- Per-part or per-arena sender decision: opt out for short or incompressible data.
 - Works for legacy multipart socket types (PUSH/PULL, PUB/SUB, ...) and
   draft single-frame types alike.
-- Small-message-friendly via an optional shared dictionary, either
+- Small-message-friendly via arenas and an optional shared dictionary, either
   supplied out of band or automatically trained from early traffic.
 - No ZMTP-level negotiation, no new READY properties, no new command
   frames.
@@ -119,8 +121,8 @@ per-subscriber CPU dominates the total budget.
   compression is pure overhead; `ipc://` rarely benefits).
 - Replacing or weakening CurveZMQ or any other security mechanism.
   See Sec. 9.
-- Streaming / context-takeover compression. Each part is decodable in
-  isolation with no dependency on a previous part's LZ77 history.
+- Streaming / context-takeover compression. Parts and arenas have no
+  dependency on earlier compression history beyond the installed dictionary.
 
 
 ## 5. Terminology
@@ -133,14 +135,14 @@ per-subscriber CPU dominates the total budget.
 | Compressed part     | A wire part whose first 4 bytes are the Zstandard magic `28 B5 2F FD`. |
 | Dictionary part     | A wire part whose first 4 bytes are `37 A4 30 EC` (Sec. 7).         |
 | Dictionary message  | A single-part ZMTP message consisting of exactly one dictionary part. |
+| Arena               | A bounded single-part carrier containing complete logical messages. |
 
 
 ## 6. Part Encoding
 
-After the ZMTP handshake completes, every message part on the wire is
-individually encoded. The ZMTP MORE flag is carried on the wire frame
-header as normal. Multipart messages are encoded part by part; each
-part is independent.
+After the ZMTP handshake, data uses per-part encoding or an arena (Sec. 6.7).
+Per-part encoding carries the ZMTP MORE flag normally; each part is independent.
+An arena carries its logical multipart boundaries inside one outer frame.
 
 ### 6.1 Sentinel dispatch
 
@@ -151,6 +153,7 @@ The first 4 bytes of each wire part determine how it is decoded.
 | `00 00 00 00`    | Uncompressed plaintext (Sec. 6.3)    |
 | `28 B5 2F FD`    | Zstandard compressed frame (Sec. 6.4)|
 | `37 A4 30 EC`    | Dictionary shipment (Sec. 7)         |
+| `5A 53 54 41`    | `ZSTA` arena (Sec. 6.7)              |
 
 All other 4-byte values are reserved. A receiver that encounters an
 unknown sentinel MUST close the connection.
@@ -253,13 +256,73 @@ For each incoming wire part, the receiver proceeds as follows:
 
 4. Sentinel `37 A4 30 EC`: dictionary shipment. See Sec. 7.
 
-5. Any other sentinel: close the connection.
+5. Sentinel `5A 53 54 41`: arena. See Sec. 6.7.
 
-The maximum message size always refers to the **decompressed** plaintext
+6. Any other sentinel: close the connection.
+
+The outer framer MUST allow the bounded arena envelope independently of
+the logical message limit. The maximum message size refers to **decompressed** plaintext
 summed across all parts of a multipart message. A multipart message
-whose total wire length is small but whose total decompressed size
-exceeds the limit MUST be rejected before decoder invocation.
+in per-part encoding whose total decompressed size exceeds the limit MUST
+be rejected before decoder invocation. Arenas use the separate bounds below.
 
+
+### 6.7 Arena (`ZSTA`)
+
+An arena is one single-part, non-command outer ZMTP message:
+
+```
+ZSTA | mode u8 | reserved[3] | decoded_size u32 LE | messages u32 LE | data
+```
+
+The header is 16 bytes. `mode = 0` carries raw arena bytes; `mode = 1`
+carries one Zstandard frame, using the installed dictionary if present.
+The frame MUST carry `Frame_Content_Size` equal to `decoded_size`.
+Reserved bytes MUST be zero; other modes MUST close the connection.
+
+Decoded data concatenates ordinary ZMTP data frames: flags, short or long
+length, then payload. MORE chains parts of one logical message; a clear
+MORE ends that message. Commands, reserved flag bits, incomplete headers,
+truncated bodies, unfinished multipart messages, and trailing bytes are
+invalid. Payloads are application bytes, with no inner compression sentinels.
+
+Protocol limits, checked before decompression:
+
+- `1 <= decoded_size <= 65536` bytes, including inner frame headers.
+- `1 <= messages <= 256`.
+- The outer payload MUST NOT exceed 65552 bytes, including its header.
+- Raw data length MUST equal `decoded_size`; compressed data MUST decode
+  to exactly that length, with no unused compressed input.
+
+The receiver MUST validate the complete decoded arena before exposing any
+message. It MUST contain exactly `messages` complete messages and at most
+4096 parts total. Apply `max_message_size` separately to each logical
+message, including the implementation's per-part storage charge; the arena
+size is a separate bound, never one application's message budget.
+
+Receivers MAY retain one decoded arena and deliver it incrementally.
+Delivery MUST preserve message order, message-level HWM/rate accounting,
+and fair scheduling. Backpressure MUST retain the unread suffix. An arena
+is transport overhead and MUST NOT appear as an application message.
+
+### 6.8 Arena sender rules
+
+Senders MAY batch already queued small messages. They MUST bound both
+bytes and message count and MUST NOT wait for additional messages to fill
+an arena. The recommended target is 32 KiB of decoded frame bytes;
+isolated or larger messages MAY use the existing per-part encodings.
+
+Apply the compression threshold to the whole arena. Use mode 0 below
+threshold or when the compressed block is no smaller than the raw arena.
+Each arena is independent of earlier arenas. A dictionary shipment MUST
+precede any arena that uses it; dictionary changes cannot occur inside
+an arena. Training MAY sample logical messages before encoding the arena.
+
+Fan-out senders MUST filter and admit logical messages before sharing an
+arena. Recipients sharing compressed bytes MUST receive the same message
+sequence and dictionary. Limited credit or message-level eviction MAY
+require smaller arenas or per-message encoding; batching MUST NOT change
+the socket's drop policy or allow a slow peer to starve ready peers.
 
 ## 7. Dictionary Shipment
 
@@ -302,7 +365,7 @@ dictionary-load operation.
   per connection. A receiver that receives a second dictionary message
   on the same connection MUST close the connection.
 
-- A dictionary message MUST be sent BEFORE any compressed part that
+- A dictionary message MUST be sent BEFORE any compressed part or arena that
   references the dictionary. In practice this means the sender ships
   the dictionary before (or immediately after training triggers during)
   the first compressed write that would benefit from it.
@@ -404,8 +467,8 @@ negotiation in the READY handshake is unaffected.
 
 ### 8.4 Peer requirement
 
-Both peers of a connection MUST use `zstd+tcp://`. There is no
-fallback to plaintext TCP and no negotiation. A `zstd+tcp://` peer
+Both peers MUST use `zstd+tcp://` and support revision 2 arenas. There is no
+fallback to older revisions or plaintext TCP, and no negotiation. A `zstd+tcp://` peer
 connecting to a plain `tcp://` peer (or vice versa) will see garbled
 data or sentinel errors and the connection will fail.
 
@@ -427,10 +490,11 @@ opt-in.
 
 ### 9.2 Length side-channel
 
-Compression makes the wire length of a part depend on its content. An
+Compression makes the wire length of a part or arena depend on its content. An
 on-path observer can learn something about the plaintext from the
 compressed length alone. Deployments that care about traffic analysis
-MUST NOT rely on `zstd+tcp://` to hide payload shape.
+MUST NOT rely on `zstd+tcp://` to hide payload shape. Arena messages share
+compression history; separate logical messages are not separate compression contexts.
 
 ### 9.3 Dictionary contents
 
@@ -445,9 +509,10 @@ received dictionaries across connections.
 A small compressed frame can decompress to many megabytes of plaintext.
 The receiver rules in Sec. 6.6 mitigate this:
 
-1. Every compressed part MUST carry `Frame_Content_Size`. The receiver
+1. Every compressed part or arena MUST carry `Frame_Content_Size`. The receiver
    checks the declared total against the maximum message size before
-   invoking the decoder, so a bomb is rejected on its header alone.
+   invoking the decoder for per-part encoding. Arenas instead enforce the
+   64 KiB decoded bound first, then validate every logical message before delivery.
 2. The decoder is invoked in bounded mode. It aborts if it would write
    more bytes than declared. A peer that lies in the header cannot
    expand a part past its declared size.
@@ -464,6 +529,10 @@ unbounded.
 | Uncompressed sentinel   | `00 00 00 00`                                 |
 | Zstd frame sentinel     | `28 B5 2F FD` (Zstandard frame magic)         |
 | Dictionary sentinel     | `37 A4 30 EC`                                 |
+| Arena sentinel          | `5A 53 54 41` (`ZSTA`)                       |
+| Arena header            | 16 bytes                                      |
+| Maximum decoded arena   | 65536 bytes                                   |
+| Maximum arena messages/parts | 256 / 4096                              |
 | Suggested default level | 1                                             |
 | Min compress, no dict   | 512 bytes                                     |
 | Min compress, with dict | 64 bytes                                      |

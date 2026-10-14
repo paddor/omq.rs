@@ -1,13 +1,15 @@
-//! `lz4+tcp://` per-part transform.
+//! LZ4 revision 2: per-part compression and bounded arenas of ZMTP data frames.
 //!
-//! Wire format (per `omq-lz4/RFC.md`): every post-handshake ZMTP message
-//! part begins with a 4-byte sentinel. Three sentinels are legal; any
+//! Wire format (per `doc/lz4-rfc.md`): every post-handshake ZMTP message
+//! part begins with a 4-byte sentinel. Five sentinels are legal; any
 //! other 4-byte prefix MUST close the connection.
 //!
 //! ```text
 //! 00 00 00 00              uncompressed plaintext follows
 //! 4C 5A 34 42 (LZ4B)       u64 LE decompressed_size; LZ4 block bytes
+//! 4C 5A 34 4D (LZ4M)       u64 LE decompressed_size; length-prefixed blocks
 //! 4C 5A 34 44 (LZ4D)       dict shipment (single-part ZMTP message)
+//! 4C 5A 34 41 (LZ4A)       bounded arena (single-part ZMTP message)
 //! ```
 //!
 //! Dictionary shipment (LZ4D): if a send-side dict is configured, the
@@ -22,7 +24,12 @@
 //! plaintext is bounded by platform allocation size (`isize::MAX`) and
 //! by configured message limits.
 
-use bytes::Bytes;
+mod arena;
+pub use arena::{
+    MAX_ARENA_BYTES, MAX_ARENA_MESSAGES, MAX_ARENA_PARTS, arena_capacity, arena_message_size,
+};
+
+use bytes::{Bytes, BytesMut};
 pub use lz4rip::block::DictTrainer;
 use lz4rip::block::{self, Compressor, Decompressor, DictCompressor};
 use smallvec::SmallVec;
@@ -121,6 +128,7 @@ pub struct Lz4Encoder {
     block_size: usize,
     /// Reusable compression output buffer.
     out_buf: Vec<u8>,
+    arena_buf: BytesMut,
     /// Reusable block compressor (optionally dict-seeded).
     compressor: LzCompressor,
     /// User override for the compression threshold.
@@ -141,6 +149,7 @@ impl Default for Lz4Encoder {
             max_message_size: None,
             block_size: LZ4M_BLOCK_SIZE,
             out_buf: Vec::new(),
+            arena_buf: BytesMut::new(),
             compressor: LzCompressor::NoDict(Compressor::new()),
             threshold_override: None,
             trainer: None,
@@ -203,6 +212,7 @@ impl Lz4Encoder {
             max_message_size: None,
             block_size: LZ4M_BLOCK_SIZE,
             out_buf: Vec::new(),
+            arena_buf: BytesMut::new(),
             compressor,
             threshold_override: None,
             trainer: None,
@@ -234,7 +244,7 @@ impl Lz4Encoder {
         self
     }
 
-    /// Set the minimum part size at which compression is attempted.
+    /// Set the minimum part or aggregate arena size for compression attempts.
     #[must_use]
     pub fn with_threshold(mut self, threshold: usize) -> Self {
         self.threshold_override = Some(threshold);
@@ -286,6 +296,7 @@ impl Lz4Encoder {
             max_message_size: self.max_message_size,
             block_size: self.block_size,
             out_buf: Vec::new(),
+            arena_buf: BytesMut::new(),
             compressor,
             threshold_override: self.threshold_override,
             trainer: None,
@@ -333,6 +344,17 @@ impl Lz4Encoder {
     /// # Errors
     /// Returns errors for invalid message sizes or compression failure.
     pub fn encode(&mut self, msg: &Message) -> Result<TransformedOut> {
+        self.sample(msg);
+        let mut out = self.ship_dictionary();
+        let mut wire = Message::new();
+        for part in &msg.parts_payload() {
+            wire.push_part_payload(self.encode_part(part)?);
+        }
+        out.push(wire);
+        Ok(out)
+    }
+
+    fn sample(&mut self, msg: &Message) {
         if let Some(trainer) = &mut self.trainer {
             for part in &msg.parts_payload() {
                 trainer.add_sample(&part.as_bytes());
@@ -349,19 +371,71 @@ impl Lz4Encoder {
                 }
             }
         }
+    }
 
-        let mut out: TransformedOut = SmallVec::new();
+    fn ship_dictionary(&mut self) -> TransformedOut {
+        let mut out = SmallVec::new();
         if let Some(dict) = self.send_dict.as_ref()
             && !self.send_dict_shipped
         {
             out.push(build_dict_shipment(SENTINEL_LZ4D, dict));
             self.send_dict_shipped = true;
         }
-        let mut wire = Message::new();
-        for part in &msg.parts_payload() {
-            wire.push_part_payload(self.encode_part(part)?);
+        out
+    }
+
+    /// Encode complete messages together, with at most one preceding dictionary.
+    /// The arena is independent of all earlier arenas except the immutable dict.
+    ///
+    /// # Errors
+    /// Rejects empty or oversized arenas and compression failures.
+    pub fn encode_arena(&mut self, messages: &[&Message]) -> Result<TransformedOut> {
+        let mut size = 0usize;
+        let mut parts = 0usize;
+        for message in messages {
+            size =
+                size.saturating_add(arena_message_size(message).ok_or_else(|| {
+                    Error::Protocol("message is not eligible for LZ4 arena".into())
+                })?);
+            parts = parts.saturating_add(message.len());
         }
-        out.push(wire);
+        if !(1..=MAX_ARENA_MESSAGES).contains(&messages.len())
+            || size > MAX_ARENA_BYTES
+            || parts > MAX_ARENA_PARTS
+        {
+            return Err(Error::Protocol("LZ4 arena exceeds limits".into()));
+        }
+        self.arena_buf.clear();
+        self.arena_buf.reserve(size);
+        for message in messages {
+            self.sample(message);
+            crate::proto::frame::encode_message_flat(message, &mut self.arena_buf);
+        }
+        let mut out = self.ship_dictionary();
+        let bound = block::get_maximum_output_size(size);
+        self.out_buf.resize(arena::HEADER + bound, 0);
+        let compressed = if size >= self.effective_threshold() {
+            Some(
+                self.compressor
+                    .compress_into(&self.arena_buf, &mut self.out_buf[arena::HEADER..])
+                    .map_err(|error| Error::Protocol(format!("lz4 arena compress: {error}")))?,
+            )
+            .filter(|length| *length < size)
+        } else {
+            None
+        };
+        let length = compressed.unwrap_or(size);
+        if compressed.is_none() {
+            self.out_buf[arena::HEADER..arena::HEADER + size].copy_from_slice(&self.arena_buf);
+        }
+        self.out_buf[..4].copy_from_slice(&arena::SENTINEL);
+        self.out_buf[4] = u8::from(compressed.is_some());
+        self.out_buf[5..8].fill(0);
+        self.out_buf[8..12].copy_from_slice(&u32::try_from(size).unwrap().to_le_bytes());
+        self.out_buf[12..16].copy_from_slice(&u32::try_from(messages.len()).unwrap().to_le_bytes());
+        out.push(Message::single(Bytes::copy_from_slice(
+            &self.out_buf[..arena::HEADER + length],
+        )));
         Ok(out)
     }
 
@@ -426,6 +500,7 @@ impl Lz4Encoder {
 /// Receive-side per-connection LZ4 state.
 #[derive(Debug)]
 pub struct Lz4Decoder {
+    arena: Option<arena::DecodedArena>,
     /// Inbound decompressor, created on receipt of the peer's LZ4D shipment.
     decompressor: Option<Decompressor>,
     /// Decompression budget, in bytes. `None` = use the absolute ceiling.
@@ -439,6 +514,7 @@ pub struct Lz4Decoder {
 impl Default for Lz4Decoder {
     fn default() -> Self {
         Self {
+            arena: None,
             decompressor: None,
             max_message_size: None,
             block_size: LZ4M_BLOCK_SIZE,
@@ -484,11 +560,89 @@ impl Lz4Decoder {
     }
 
     /// Decode message parts; return `None` for a consumed dictionary shipment.
+    /// An arena returns its first message here; drain [`Self::poll_message`]
+    /// before decoding the next wire message.
     ///
     /// # Errors
     /// Returns errors for invalid envelopes, dictionaries, sizes, or compressed data.
     pub fn decode(&mut self, msg: Message) -> Result<Option<Message>> {
+        if self.has_pending_messages() {
+            return Err(Error::Protocol("undrained LZ4 arena".into()));
+        }
+        if Self::is_arena(&msg) {
+            return self.decode_arena(&msg, false, None);
+        }
         self.decode_with_budget(msg, self.max_message_size, None)
+    }
+
+    /// Drain an already decoded arena before accepting another wire message.
+    pub fn poll_message(&mut self) -> Option<Message> {
+        let arena = self.arena.as_mut()?;
+        let message = arena.next();
+        if arena.is_empty() {
+            self.arena = None;
+        }
+        message
+    }
+
+    /// Whether an arena still contains undelivered messages.
+    #[must_use]
+    pub fn has_pending_messages(&self) -> bool {
+        self.arena.is_some()
+    }
+
+    fn is_arena(msg: &Message) -> bool {
+        msg.part_slice(0)
+            .is_some_and(|part| part.starts_with(&arena::SENTINEL))
+    }
+
+    fn decode_arena(
+        &mut self,
+        msg: &Message,
+        payload_slots: bool,
+        pool: Option<&crate::PayloadPool>,
+    ) -> Result<Option<Message>> {
+        let invalid = || Error::Protocol("invalid LZ4 arena envelope".into());
+        let bytes = msg.part_slice(0).ok_or_else(invalid)?;
+        if msg.len() != 1 || bytes.len() < arena::HEADER || bytes[4] > 1 || bytes[5..8] != [0; 3] {
+            return Err(invalid());
+        }
+        let size = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+        let count = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+        if !(1..=MAX_ARENA_BYTES).contains(&size)
+            || !(1..=MAX_ARENA_MESSAGES).contains(&count)
+            || bytes.len() > arena::HEADER + MAX_ARENA_BYTES
+        {
+            return Err(invalid());
+        }
+        let data = &bytes[arena::HEADER..];
+        let payload = if bytes[4] == 0 {
+            if data.len() != size {
+                return Err(invalid());
+            }
+            Payload::from_bytes(Bytes::copy_from_slice(data))
+        } else {
+            super::common::decode_payload(size, pool, |out| {
+                let length = match &self.decompressor {
+                    Some(decoder) => decoder.decompress_into(data, out),
+                    None => block::decompress_into(data, out),
+                }
+                .map_err(|error| Error::Protocol(format!("lz4 arena decompress: {error}")))?;
+                if length != size {
+                    return Err(invalid());
+                }
+                Ok(())
+            })?
+        };
+        let retained = payload.retained_size().unwrap_or(size);
+        self.arena = Some(arena::DecodedArena::new(
+            payload.as_bytes(),
+            retained,
+            count,
+            self.max_message_size,
+            payload_slots,
+        )?);
+        Ok(self.poll_message())
     }
 
     pub(super) fn decode_with_payload_slots(
@@ -496,6 +650,12 @@ impl Lz4Decoder {
         msg: Message,
         pool: Option<&crate::PayloadPool>,
     ) -> Result<Option<Message>> {
+        if self.has_pending_messages() {
+            return Err(Error::Protocol("undrained LZ4 arena".into()));
+        }
+        if Self::is_arena(&msg) {
+            return self.decode_arena(&msg, true, pool);
+        }
         if is_dict_shipment(&msg) {
             return self.decode(msg);
         }
@@ -514,7 +674,9 @@ impl Lz4Decoder {
                 .saturating_add(blocks.saturating_mul(4 + 20))
                 .saturating_add(parts.saturating_mul(ENVELOPE_LZ4B));
             let setup = ENVELOPE_PLAIN + self.max_recv_dict_size + size_of::<Payload>();
-            data.max(setup).min(isize::MAX.unsigned_abs())
+            data.max(setup)
+                .max(arena::HEADER + MAX_ARENA_BYTES + size_of::<Payload>())
+                .min(isize::MAX.unsigned_abs())
         })
     }
 

@@ -35,26 +35,26 @@ copy-stats = []
 
 [dependencies]
 concurrent-queue = "2.5.0"
-bytes = "1.12.0"
+bytes = "1.12.1"
 crypto_box = { version = "0.9", optional = true }
 crypto_secretbox = { version = "0.1", optional = true }
 subtle = { version = "2.6", optional = true }
 x25519-dalek = { version = "3", features = ["static_secrets", "getrandom"], optional = true }
-rand = "0.10"
-patricia_tree = "0.10"
-smallvec = { version = "1", features = ["const_generics", "union"] }
+rand = "0.10.3"
+patricia_tree = "0.10.2"
+smallvec = { version = "1.16.3", features = ["const_generics", "union"] }
 socket2 = { version = "0.6", features = ["all"] }
-thiserror = "2.0.18"
-zeroize = { version = "1.8.0", features = ["zeroize_derive"], optional = true }
+thiserror = "2.0.21"
+zeroize = { version = "1.9.1", features = ["zeroize_derive"], optional = true }
 
 [dependencies.lz4rip]
-version = "0.11.9"
+version = "0.11.10"
 default-features = false
 features = ["std"]
 optional = true
 
 [dependencies.zrip]
-version = "0.8.10"
+version = "0.8.11"
 default-features = false
 features = ["std", "frame", "dict_builder"]
 optional = true

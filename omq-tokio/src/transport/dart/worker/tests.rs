@@ -1,5 +1,6 @@
 use super::*;
-use omq_proto::{DartCongestion, PayloadPool};
+use crate::engine::{PeerDriverCommand, PeerDriverData};
+use omq_proto::{DartCongestion, PayloadPool, TrySendError};
 
 fn peer() -> Peer {
     Peer {

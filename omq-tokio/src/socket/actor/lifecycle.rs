@@ -23,6 +23,11 @@ impl<'a> PeerLifecycle<'a> {
             self.driver
                 .send_strategy
                 .connection_removed(peer_id, p.route_id);
+            if self.driver.socket_type == SocketType::Req {
+                self.driver
+                    .req_awaiting_reply
+                    .peer_disconnected(p.route_id, peer_id);
+            }
             if p.ready {
                 self.driver.ready_peer_count_shared.remove();
             }
@@ -91,15 +96,7 @@ impl<'a> PeerLifecycle<'a> {
 
     fn reset_type_state_if_last_peer(&mut self) {
         match self.driver.socket_type {
-            SocketType::Req if self.driver.ready_peer_count() == 0 => {
-                self.driver.req_awaiting_reply.clear();
-                self.driver
-                    .type_state
-                    .lock()
-                    .expect("type_state")
-                    .on_peer_disconnected();
-            }
-            SocketType::Rep if self.driver.ready_peer_count() == 0 => {
+            SocketType::Req | SocketType::Rep if self.driver.ready_peer_count() == 0 => {
                 self.driver
                     .type_state
                     .lock()

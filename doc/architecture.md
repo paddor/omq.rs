@@ -266,6 +266,8 @@ receiver as wire connections.
 The receive path applies socket-type routing and request/reply rules. ROUTER
 messages carry the peer identity, SERVER messages carry a routing ID, and REP
 admits the saved reply route when the application receives the request.
+REQ retains the connection selected for each request and admits replies from
+that connection only, including through binding receive queues.
 
 Message streams and sinks use the normal receive and send paths without extra
 tasks or queues. Blocking dispatch runs handlers on the calling application

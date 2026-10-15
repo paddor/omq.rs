@@ -7,10 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.1] - 2026-10-15
+
 ### Fixed
 
-- Require `omq-shm` 0.2.0 so registry builds use the same `omq-proto` version
-  throughout the dependency graph.
+- Accept REQ replies only from the connection selected for the request,
+  including replies staged in binding receive queues.
+- Release REQ send readiness when its selected peer disconnects, and reject
+  that peer's queued replies after a new request starts.
+- Reject REP requests with no body after the delimiter.
 
 ## [0.28.0] - 2026-10-14
 

@@ -8,7 +8,7 @@ use omq_proto::{
     message::Message,
     proto::SocketType,
 };
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::sync::mpsc;
@@ -106,7 +106,10 @@ impl Socket {
                     sent: false,
                 };
                 let msg = Message::with_prefix(Bytes::new(), msg);
-                let result = self.send_submitter.send(msg).await;
+                let result = self
+                    .send_submitter
+                    .send_request(msg, &self.inner.req_awaiting_reply)
+                    .await;
                 claim.sent = result.is_ok();
                 result
             }
@@ -182,7 +185,9 @@ impl Socket {
                     )));
                 }
                 let msg = Message::with_prefix(Bytes::new(), msg);
-                let result = self.send_submitter.try_send(msg);
+                let result = self
+                    .send_submitter
+                    .try_send_request(msg, &self.inner.req_awaiting_reply);
                 if result.is_err() {
                     self.inner.req_awaiting_reply.clear();
                 }
@@ -422,14 +427,27 @@ fn xsub_raw_command(msg: &Message) -> Result<(XSubRawCommand, Bytes)> {
     Ok((command, Bytes::copy_from_slice(prefix)))
 }
 
-/// REQ alternation: set while a reply is outstanding. Shared with the actor,
-/// which clears it when the last peer leaves. Clearing wakes send-readiness
-/// waiters; without waiters it costs one fenced store.
+/// REQ alternation and the connection selected for the outstanding request.
+/// A pending connect route resolves to one connection when its handshake is
+/// admitted. Replies retain that connection ID through binding receive queues.
 #[derive(Debug, Default)]
 pub(crate) struct ReqAwaitingReply {
     awaiting: AtomicBool,
     waiters: AtomicUsize,
     cleared: crate::engine::signal::StateSignal,
+    routes: Mutex<ReqRoutes>,
+}
+
+#[derive(Debug, Default)]
+struct ReqRoutes {
+    connected: HashMap<u64, u64>,
+    selected: Option<ReqReplySource>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReqReplySource {
+    Pending(u64),
+    Connected(u64),
 }
 
 impl ReqAwaitingReply {
@@ -438,12 +456,75 @@ impl ReqAwaitingReply {
     }
 
     fn claim(&self) -> bool {
-        self.awaiting
+        let mut routes = self.routes.lock().expect("REQ routes");
+        let claimed = self
+            .awaiting
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
+            .is_ok();
+        if claimed {
+            routes.selected = None;
+        }
+        claimed
+    }
+
+    pub(crate) fn select_route(
+        &self,
+        send: impl FnOnce() -> core::result::Result<u64, TrySendError>,
+    ) -> core::result::Result<(), TrySendError> {
+        // Keep receive admission behind route publication, even when an
+        // inproc peer replies on another application thread immediately.
+        let mut routes = self.routes.lock().expect("REQ routes");
+        let route_id = send()?;
+        routes.selected = Some(
+            routes
+                .connected
+                .get(&route_id)
+                .map_or(ReqReplySource::Pending(route_id), |peer_id| {
+                    ReqReplySource::Connected(*peer_id)
+                }),
+        );
+        Ok(())
+    }
+
+    pub(crate) fn peer_connected(&self, route_id: u64, peer_id: u64) {
+        let mut routes = self.routes.lock().expect("REQ routes");
+        routes.connected.insert(route_id, peer_id);
+        if routes.selected == Some(ReqReplySource::Pending(route_id)) {
+            routes.selected = Some(ReqReplySource::Connected(peer_id));
+        }
+    }
+
+    pub(crate) fn peer_disconnected(&self, route_id: u64, peer_id: u64) {
+        let mut routes = self.routes.lock().expect("REQ routes");
+        if routes.connected.get(&route_id) == Some(&peer_id) {
+            routes.connected.remove(&route_id);
+        }
+        if matches!(routes.selected, Some(ReqReplySource::Connected(id)) if id == peer_id)
+            || routes.selected == Some(ReqReplySource::Pending(route_id))
+        {
+            // A queued reply remains receivable after disconnect. A new
+            // request replaces this source and rejects the old queued reply.
+            self.clear_awaiting();
+        }
+    }
+
+    pub(crate) fn accept_reply(&self, peer_id: u64) -> bool {
+        let mut routes = self.routes.lock().expect("REQ routes");
+        if routes.selected != Some(ReqReplySource::Connected(peer_id)) {
+            return false;
+        }
+        routes.selected = None;
+        self.clear_awaiting();
+        true
     }
 
     pub(crate) fn clear(&self) {
+        let mut routes = self.routes.lock().expect("REQ routes");
+        routes.selected = None;
+        self.clear_awaiting();
+    }
+
+    fn clear_awaiting(&self) {
         // Pairs with `wait_cleared`: either it sees the flag clear or this
         // sees its waiter count.
         self.awaiting.store(false, Ordering::SeqCst);

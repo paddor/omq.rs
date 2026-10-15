@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-10-15
+
+### Fixed
+
+- Admit REQ/REP messages when Ruby receives them, so prefetched requests
+  cannot redirect replies or advance request/reply state.
+- Capture REP reply destinations at application send and preserve them
+  across backpressure retries.
+- Require `omq-tokio` 0.28.1 and `omq-proto` 0.32.1 to reject unrelated
+  REQ replies and REP requests without a body frame.
+
 ## [0.2.4] - 2026-10-15
 
 ### Fixed

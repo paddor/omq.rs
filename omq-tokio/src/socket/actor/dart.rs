@@ -176,7 +176,9 @@ impl SocketDriver {
             return;
         };
         let peer_id = self.next_peer_id;
-        if self.socket_type == SocketType::Server && u32::try_from(next).is_err() {
+        if matches!(self.socket_type, SocketType::Server | SocketType::Req)
+            && u32::try_from(next).is_err()
+        {
             return;
         }
         self.next_peer_id = next;
@@ -277,7 +279,7 @@ impl SocketDriver {
                 space,
             })
         };
-        if self.socket_type == SocketType::Server {
+        if matches!(self.socket_type, SocketType::Server | SocketType::Req) {
             RecvSink::server(
                 sink,
                 u32::try_from(peer_id + 1).expect("checked server route"),

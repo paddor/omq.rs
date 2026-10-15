@@ -422,8 +422,8 @@ impl SocketDriver {
                 if !self.peers.get(&peer_id).is_some_and(|p| p.ready) {
                     return;
                 }
-                if self.socket_type == SocketType::Rep {
-                    let routing_id = u32::try_from(peer_id + 1).expect("REP peer ID checked");
+                if matches!(self.socket_type, SocketType::Req | SocketType::Rep) {
+                    let routing_id = u32::try_from(peer_id + 1).expect("REQ/REP peer ID checked");
                     self.stage_receive(peer_id, msg.with_routing_id(routing_id));
                     return;
                 }
@@ -455,6 +455,7 @@ impl SocketDriver {
         }
     }
 
+    #[expect(clippy::too_many_lines)]
     pub(super) async fn handle_handshake_succeeded(
         &mut self,
         peer_id: u64,
@@ -534,6 +535,9 @@ impl SocketDriver {
                 .is_some_and(|peer| matches!(peer.endpoint, omq_proto::Endpoint::Dart { .. }));
         #[cfg(not(feature = "dart"))]
         let any_groups = false;
+        if self.socket_type == SocketType::Req {
+            self.req_awaiting_reply.peer_connected(route_id, peer_id);
+        }
         if any_groups {
             self.send_strategy
                 .connection_added_any_groups(peer_id, handle.clone(), io_thread);

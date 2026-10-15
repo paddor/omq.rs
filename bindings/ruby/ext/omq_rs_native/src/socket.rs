@@ -370,6 +370,7 @@ fn rust_socket_materialize_impl(rb_self: &RustSocket) -> RbResult<()> {
     let recv_notify = Arc::new(PipeNotify::new());
     let send_notify = Arc::new(PipeNotify::new());
     let recv_space = Arc::new(tokio::sync::Notify::new());
+    let (send_waiting, _) = tokio::sync::watch::channel(false);
 
     let (monitor_tx, monitor_rx) = flume::bounded(64);
     let monitor_notify = Arc::new(PipeNotify::new());
@@ -385,6 +386,7 @@ fn rust_socket_materialize_impl(rb_self: &RustSocket) -> RbResult<()> {
         recv_prod,
         recv_notify.clone(),
         send_notify.clone(),
+        send_waiting.clone(),
         recv_space.clone(),
         monitor_tx,
         monitor_notify.clone(),
@@ -401,6 +403,7 @@ fn rust_socket_materialize_impl(rb_self: &RustSocket) -> RbResult<()> {
         send_notify,
         recv_space,
         send_pump,
+        send_waiting,
         recv_pump,
         monitor_rx,
         monitor_notify,
@@ -581,6 +584,32 @@ unsafe extern "C" fn rust_socket_enqueue_send_routed(
     })
 }
 
+fn receive_message(
+    mat: &Materialized,
+    cons: &mut yring::Consumer<omq_tokio::Message>,
+) -> Option<omq_tokio::Message> {
+    let mut budget = omq_proto::flow::DrainBudget::WORKER;
+    loop {
+        let message = if let Some(message) = cons.prefetch_and_pop() {
+            message
+        } else {
+            mat.recv_notify.park_begin();
+            let message = cons.prefetch_and_pop()?;
+            mat.recv_notify.cancel_park();
+            message
+        };
+        mat.recv_space.notify_one();
+        let more = budget.account(message.byte_len());
+        if let Some(message) = mat.socket.prepare_external_recv(message) {
+            return Some(message);
+        }
+        if !more {
+            mat.recv_notify.force_wake();
+            return None;
+        }
+    }
+}
+
 fn rust_socket_try_recv_impl(rb_self: &RustSocket) -> RbResult<VALUE> {
     let mat_guard = rb_self.materialized.read().unwrap();
     let Some(mat) = mat_guard.as_ref() else {
@@ -588,19 +617,9 @@ fn rust_socket_try_recv_impl(rb_self: &RustSocket) -> RbResult<VALUE> {
     };
 
     let mut cons = mat.recv_cons.lock().unwrap();
-    if let Some(msg) = cons.prefetch_and_pop() {
-        mat.recv_space.notify_one();
-        message_to_ruby_parts(&msg)
-    } else {
-        mat.recv_notify.park_begin();
-        match cons.prefetch_and_pop() {
-            Some(msg) => {
-                mat.recv_notify.cancel_park();
-                mat.recv_space.notify_one();
-                message_to_ruby_parts(&msg)
-            }
-            None => Ok(rb::qnil()),
-        }
+    match receive_message(mat, &mut cons) {
+        Some(message) => message_to_ruby_parts(&message),
+        None => Ok(rb::qnil()),
     }
 }
 
@@ -618,19 +637,9 @@ fn rust_socket_try_recv_routed_impl(rb_self: &RustSocket) -> RbResult<VALUE> {
     };
 
     let mut cons = mat.recv_cons.lock().unwrap();
-    if let Some(msg) = cons.prefetch_and_pop() {
-        mat.recv_space.notify_one();
-        routed_message_to_ruby_parts(&msg)
-    } else {
-        mat.recv_notify.park_begin();
-        match cons.prefetch_and_pop() {
-            Some(msg) => {
-                mat.recv_notify.cancel_park();
-                mat.recv_space.notify_one();
-                routed_message_to_ruby_parts(&msg)
-            }
-            None => Ok(rb::qnil()),
-        }
+    match receive_message(mat, &mut cons) {
+        Some(message) => routed_message_to_ruby_parts(&message),
+        None => Ok(rb::qnil()),
     }
 }
 
@@ -648,6 +657,17 @@ fn rust_socket_try_recv_batch_impl(rb_self: &RustSocket) -> RbResult<VALUE> {
     };
 
     let mut cons = mat.recv_cons.lock().unwrap();
+    if matches!(
+        rb_self.socket_type,
+        omq_tokio::SocketType::Req | omq_tokio::SocketType::Rep
+    ) {
+        let Some(message) = receive_message(mat, &mut cons) else {
+            return Ok(rb::qnil());
+        };
+        let batch = rb::array_new_capa(1)?;
+        rb::array_push(batch, message_to_ruby_parts(&message)?)?;
+        return Ok(batch);
+    }
     let mut count = cons.prefetch();
     if count == 0 {
         mat.recv_notify.park_begin();
@@ -660,9 +680,14 @@ fn rust_socket_try_recv_batch_impl(rb_self: &RustSocket) -> RbResult<VALUE> {
 
     let batch = rb::array_new_capa(count)?;
     let mut popped = 0usize;
+    let mut budget = omq_proto::flow::DrainBudget::WORKER;
     while let Some(msg) = cons.pop() {
         rb::array_push(batch, message_to_ruby_parts(&msg)?)?;
         popped += 1;
+        if !budget.account(msg.byte_len()) {
+            mat.recv_notify.force_wake();
+            break;
+        }
     }
     cons.release();
 
@@ -977,6 +1002,32 @@ fn enqueue_message(rb_self: &RustSocket, msg: omq_tokio::Message) -> RbResult<VA
     let mat = mat_guard
         .as_ref()
         .ok_or_else(|| RubyErr::runtime("socket not materialized"))?;
+
+    if rb_self.socket_type == omq_tokio::SocketType::Rep {
+        // Capture the application-admitted request before Ruby can receive
+        // another one. The ordinary send pump must not claim this route later.
+        mat.send_notify.park_begin();
+        return match mat.socket.try_send(msg) {
+            Ok(()) => {
+                mat.send_notify.cancel_park();
+                mat.send_waiting.send_if_modified(std::mem::take);
+                rb::symbol("ok")
+            }
+            Err(omq_tokio::TrySendError::Full(_)) => {
+                mat.send_waiting
+                    .send_if_modified(|waiting| !std::mem::replace(waiting, true));
+                rb::symbol("full")
+            }
+            Err(omq_tokio::TrySendError::Error(error)) => {
+                mat.send_notify.cancel_park();
+                Err(map_err(error))
+            }
+            Err(omq_tokio::TrySendError::Closed) => {
+                mat.send_notify.cancel_park();
+                Err(map_err(omq_tokio::Error::Closed))
+            }
+        };
+    }
 
     let mut prod = mat.send_prod.lock().unwrap();
     let returned = match prod.push(msg) {

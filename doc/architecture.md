@@ -184,9 +184,10 @@ cannot inherit a held message.
 
 Backpressure propagates through bounded queues. A full connection lane stops
 transport reads; transport buffers and sender queues then fill. Resuming the
-lane allows drainage and frees queue capacity. PEER bounds retained memory
-per lane; PULL and GATHER use message-count HWMs. Socket memory also includes
-held messages and transport buffers.
+lane allows drainage and frees queue capacity. PEER uses per-connection byte
+budgets configurable through `peer_send_max_bytes` and `peer_recv_max_bytes`;
+receive charges include claimed and held messages. PULL and GATHER use
+message-count HWMs. Transport buffers are outside these queue budgets.
 
 The [receive backpressure contract](../DEVELOPMENT.md#receive-lane-backpressure)
 describes lane receipts, retries, and socket-type constraints.

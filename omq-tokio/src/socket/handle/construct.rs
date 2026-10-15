@@ -175,7 +175,7 @@ impl Socket {
         let receive_handle = Arc::new(());
         spsc.set_receive_handles(&receive_handle);
         let peer_recv_routes = (socket_type == SocketType::Peer && recv_sink_config.is_none())
-            .then(|| spsc.init_peer_recv(recv_hwm, options.max_message_size));
+            .then(|| spsc.init_peer_recv(recv_hwm, &options));
         let type_state = Arc::new(Mutex::new(TypeState::new()));
         let rep_current = Arc::new(Mutex::new(None));
         let req_awaiting_reply = Arc::new(ReqAwaitingReply::default());

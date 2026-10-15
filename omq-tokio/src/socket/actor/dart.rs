@@ -431,7 +431,7 @@ impl Entry {
         }
         let cap = self.options.send_hwm.max(1) as usize;
         let (mut producer, consumer) = if socket_type == SocketType::Peer {
-            crate::engine::peer_send_pipe(cap, self.options.max_message_size)
+            crate::engine::peer_send_pipe(cap, &self.options)
         } else {
             crate::engine::send_pipe_with_mode(
                 cap,

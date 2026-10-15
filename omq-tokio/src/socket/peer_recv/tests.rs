@@ -34,6 +34,71 @@ fn receive_pair(limits: RecvLimits, hwm: usize) -> (PeerRecvRoutes, PeerReceiver
     PeerRecvRoutes::with_limits(hwm, &handles, limits)
 }
 
+#[test]
+fn receive_byte_options_preserve_defaults_and_honor_explicit_limits() {
+    const MIB: usize = 1024 * 1024;
+    for (options, expected) in [
+        (omq_proto::Options::default(), 64 * MIB),
+        (
+            omq_proto::Options::default().max_message_size(128 * MIB),
+            128 * MIB,
+        ),
+        (
+            omq_proto::Options::default()
+                .max_message_size(128 * MIB)
+                .peer_recv_max_bytes(16 * MIB),
+            16 * MIB,
+        ),
+    ] {
+        let handles = SpscHandles::new(BlockingRecvWaker::new(), false);
+        let (routes, _receiver) = PeerRecvRoutes::new(16, &handles, &options);
+        assert_eq!(routes.limits.bytes, expected);
+    }
+}
+
+#[test]
+fn configured_receive_byte_budget_survives_claims_and_wakes_on_release() {
+    let options = omq_proto::Options::default()
+        .max_message_size(1024)
+        .peer_recv_max_bytes(128);
+    let handles = SpscHandles::new(BlockingRecvWaker::new(), false);
+    let (mut routes, mut receiver) = PeerRecvRoutes::new(16, &handles, &options);
+    let mut a = register(&mut routes, "a");
+    let mut b = register(&mut routes, "b");
+    put(&mut a, "first");
+    put(&mut a, "second");
+    put(&mut a, "pending");
+    assert!(a.blocked());
+    let (receipt, _) = receiver.try_recv_with_receipt(None).unwrap();
+    assert!(a.retry_pending());
+    assert!(a.blocked(), "a claimed message keeps its byte charge");
+    put(&mut b, "independent");
+    assert!(!b.blocked());
+    assert_eq!(
+        receiver.try_recv().unwrap().part_slice(0),
+        Some(b"b".as_slice())
+    );
+    let state = routes
+        .previous
+        .get(b"a".as_slice())
+        .unwrap()
+        .upgrade()
+        .unwrap();
+    let signal = &state.budget.space;
+    let seen = signal.generation();
+    drop(receipt);
+    assert_ne!(signal.generation(), seen);
+    assert!(a.retry_pending());
+    assert!(!a.blocked());
+    for expected in ["second", "pending"] {
+        assert_eq!(
+            receiver.try_recv().unwrap().part_slice(1),
+            Some(expected.as_bytes())
+        );
+    }
+    assert!(!a.push(Message::single(vec![0; 256])));
+}
+
 fn ordinary_receive(
     hwm: usize,
 ) -> (
@@ -43,7 +108,7 @@ fn ordinary_receive(
 ) {
     let blocking = BlockingRecvWaker::new();
     let mut handles = SpscHandles::new(blocking.clone(), false);
-    let routes = handles.init_peer_recv(hwm, None);
+    let routes = handles.init_peer_recv(hwm, &omq_proto::Options::default());
     let (pipe, consumer, notify, space) = recv_pipe(hwm, blocking);
     let receiver = SpscAwareRecv::new(
         consumer,
@@ -814,7 +879,7 @@ fn ordinary_async_receive_yields_during_stale_generation_cleanup() {
 
     let blocking = BlockingRecvWaker::new();
     let mut handles = SpscHandles::new(blocking.clone(), false);
-    let mut routes = handles.init_peer_recv(512, None);
+    let mut routes = handles.init_peer_recv(512, &omq_proto::Options::default());
     let lane = handles.peer_recv.clone().unwrap();
     let (_pipe, consumer, notify, space) = recv_pipe(512, blocking);
     let receiver = SpscAwareRecv::new(
@@ -848,7 +913,7 @@ fn ordinary_bulk_after_first_preserves_budget_and_releases_partial_credits() {
     for (max, size, expected) in [(1, 8, 1), (1024, 8, 256), (1024, 70_000, 2)] {
         let blocking = BlockingRecvWaker::new();
         let mut handles = SpscHandles::new(blocking.clone(), false);
-        let mut routes = handles.init_peer_recv(512, None);
+        let mut routes = handles.init_peer_recv(512, &omq_proto::Options::default());
         let (_pipe, consumer, notify, space) = recv_pipe(512, blocking);
         let receiver = SpscAwareRecv::new(
             consumer,

@@ -158,14 +158,19 @@ pub(crate) fn send_pipe_with_mode(
 
 pub(crate) fn peer_send_pipe(
     capacity: usize,
-    max_message_size: Option<usize>,
+    options: &omq_proto::Options,
 ) -> (SendPipeProducer, SendPipeConsumer) {
     let data_signal = Arc::new(DataSignal::new());
     let space_available = Arc::new(StateSignal::new());
     let above_lwm = Arc::new(AtomicBool::new(false));
     let (producer, consumer) = super::peer_send::channel(
         capacity,
-        max_message_size,
+        options.peer_send_max_bytes.unwrap_or_else(|| {
+            options
+                .max_message_size
+                .unwrap_or(0)
+                .max(super::peer_send::DEFAULT_MAX_BYTES)
+        }),
         data_signal.clone(),
         space_available.clone(),
     );
@@ -930,9 +935,33 @@ mod tests {
         assert!(rx.is_disconnected());
     }
 
+    #[test]
+    fn peer_send_byte_options_preserve_defaults_and_honor_explicit_limits() {
+        const MIB: usize = 1024 * 1024;
+        for (options, expected) in [
+            (omq_proto::Options::default(), 64 * MIB),
+            (
+                omq_proto::Options::default().max_message_size(128 * MIB),
+                128 * MIB,
+            ),
+            (
+                omq_proto::Options::default()
+                    .max_message_size(128 * MIB)
+                    .peer_send_max_bytes(16 * MIB),
+                16 * MIB,
+            ),
+        ] {
+            let (producer, _consumer) = peer_send_pipe(16, &options);
+            assert_eq!(producer.peer_max_bytes(), Some(expected));
+        }
+    }
+
     #[tokio::test]
     async fn metadata_drain_preserves_limits_order_and_capacity_wakes() {
-        for (mut tx, mut rx) in [send_pipe(4), peer_send_pipe(4, None)] {
+        for (mut tx, mut rx) in [
+            send_pipe(4),
+            peer_send_pipe(4, &omq_proto::Options::default()),
+        ] {
             for sequence in 0..4 {
                 tx.try_send(Message::from(vec![sequence; 4096])).unwrap();
             }
@@ -1091,7 +1120,7 @@ mod tests {
     #[test]
     fn dart_direct_drain_leaves_peer_and_conflate_untouched() {
         for (mut tx, mut rx) in [
-            peer_send_pipe(4, None),
+            peer_send_pipe(4, &omq_proto::Options::default()),
             send_pipe_with_mode(4, SendPipeMode::Conflate),
         ] {
             tx.try_send(Message::single("body")).unwrap();

@@ -197,10 +197,12 @@ impl PeerRecvRoutes {
     pub(crate) fn new(
         hwm: usize,
         handles: &super::recv::SpscHandles,
-        max_message_size: Option<usize>,
+        options: &omq_proto::Options,
     ) -> (Self, PeerReceiver) {
         let mut limits = RecvLimits::default();
-        limits.bytes = limits.bytes.max(max_message_size.unwrap_or(0));
+        limits.bytes = options
+            .peer_recv_max_bytes
+            .unwrap_or_else(|| limits.bytes.max(options.max_message_size.unwrap_or(0)));
         Self::with_limits(hwm, handles, limits)
     }
 

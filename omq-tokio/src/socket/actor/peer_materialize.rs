@@ -946,7 +946,7 @@ fn make_send_pipe(
         (socket.options.send_hwm.max(1) as usize, SendPipeMode::Queue)
     };
     let (send_pipe, send_pipe_rx) = if socket.socket_type == SocketType::Peer {
-        crate::engine::peer_send_pipe(pipe_cap, socket.options.max_message_size)
+        crate::engine::peer_send_pipe(pipe_cap, &socket.options)
     } else {
         crate::engine::send_pipe_with_mode(pipe_cap, pipe_mode)
     };

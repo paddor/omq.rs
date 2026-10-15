@@ -21,6 +21,51 @@ async fn connected(socket: &Socket) {
     socket.wait_connected(1, DEADLINE).await.unwrap();
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn configured_send_byte_budget_backpressures_clones_and_rejects_oversize() {
+    use futures::FutureExt;
+    use omq_tokio::TrySendError;
+
+    let context = Context::current();
+    let server = context.socket(SocketType::Peer, options("server"));
+    let endpoint = server.bind(test_support::tcp_loopback(0)).await.unwrap();
+    let client = context.socket(SocketType::Peer, options("client").peer_send_max_bytes(192));
+    client.connect(endpoint).await.unwrap();
+    connected(&client).await;
+    connected(&server).await;
+    let clone = client.clone();
+    let message = Message::multipart([Bytes::from_static(b"server"), Bytes::from(vec![7; 128])]);
+    client.try_send(message.clone()).unwrap();
+    let Err(TrySendError::Full(returned)) = clone.try_send(message.clone()) else {
+        panic!("clones must share the connection byte budget");
+    };
+    assert_eq!(returned, message);
+    let mut sending = Box::pin(clone.send(returned));
+    assert!(sending.as_mut().now_or_never().is_none());
+    let oversized = Message::multipart([Bytes::from_static(b"server"), Bytes::from(vec![0; 256])]);
+    assert!(matches!(
+        client.try_send(oversized),
+        Err(TrySendError::Error(Error::Protocol(_)))
+    ));
+    let received = tokio::time::timeout(DEADLINE, server.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(received.part_slice(1), message.part_slice(1));
+    tokio::time::timeout(DEADLINE, sending)
+        .await
+        .unwrap()
+        .unwrap();
+    let received = tokio::time::timeout(DEADLINE, server.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(received.part_slice(1), message.part_slice(1));
+    drop(clone);
+    client.close().await.unwrap();
+    server.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn identity_view_preserves_targeted_claims_and_explicit_body_sends() {
     let context = Context::new();
@@ -155,7 +200,9 @@ async fn large_source_backpressure(endpoint: Endpoint) {
     let context = Context::with_config(ContextConfig { io_threads: 2 });
     let server = context.socket(
         SocketType::Peer,
-        options("server").max_message_size(SIZE + 1024),
+        options("server")
+            .max_message_size(SIZE + 1024)
+            .peer_recv_max_bytes(16 * 1024 * 1024),
     );
     let endpoint = server.bind(endpoint).await.unwrap();
     let a = context.socket(SocketType::Peer, options("a").max_message_size(SIZE + 1024));

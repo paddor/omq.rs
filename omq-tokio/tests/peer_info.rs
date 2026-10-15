@@ -72,7 +72,7 @@ async fn snapshot_roundtrip(kind: SocketType, endpoint: Endpoint) {
     let info = identity.peer_info();
     assert!(info.authentication.public_key.is_none());
     assert!(info.authentication.user_id.is_none());
-    assert!(info.authentication.metadata.is_empty());
+    assert_eq!(info.authentication.metadata, [] as [(String, Bytes); 0]);
     assert_eq!(info.diagnostics.endpoint, endpoint.to_string());
     assert_eq!(
         info.diagnostics.local_address,

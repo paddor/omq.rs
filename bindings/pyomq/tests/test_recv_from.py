@@ -34,14 +34,18 @@ def test_recv_from_roundtrip_and_lifetime(transport, peer, copy):
         assert isinstance(body[0], bytes if copy else zmq.Frame)
         info = identity.peer_info
         assert isinstance(info, zmq.PeerInfo)
-        assert info.authentication.public_key is None
+        auth = info.authentication
+        diagnostics = info.diagnostics
+        assert auth is not None
+        assert diagnostics is not None
+        assert auth.public_key is None
         assert info.password is None
-        assert info.diagnostics.endpoint == server.last_endpoint.decode()
-        metadata = info.authentication.metadata
+        assert diagnostics.endpoint == server.last_endpoint.decode()
+        metadata = auth.metadata
         metadata["injected"] = b"value"
-        assert "injected" not in info.authentication.metadata
+        assert "injected" not in auth.metadata
         with pytest.raises(AttributeError):
-            info.diagnostics.endpoint = "changed"
+            diagnostics.endpoint = "changed"
         server.send_to(identity, [b"reply"])
         if peer:
             sender, reply = client.recv_from()
@@ -60,7 +64,9 @@ def test_recv_from_roundtrip_and_lifetime(transport, peer, copy):
         server.close(0)
         ctx.term()
     assert bytes(identity) == b"client"
-    assert identity.peer_info.diagnostics.endpoint == info.diagnostics.endpoint
+    retained_diagnostics = identity.peer_info.diagnostics
+    assert retained_diagnostics is not None
+    assert retained_diagnostics.endpoint == diagnostics.endpoint
     assert [bytes(part) for part in body] == parts
 
 
@@ -108,8 +114,10 @@ def test_curve_snapshot_survives_same_route_handover():
                 identities.append(identity)
                 assert body == [str(n).encode()]
                 auth = identity.peer_info.authentication
+                assert auth is not None
                 assert auth.mechanism == "CURVE"
                 assert auth.public_key_type == "CURVE"
+                assert auth.public_key is not None
                 assert len(auth.public_key) == 32
                 assert identity.peer_info.public_key == public
                 assert identity.peer_info.password is None
@@ -146,7 +154,9 @@ async def test_async_recv_from(copy, peer, transport):
         assert [bytes(part) for part in body] == [b"one", b"two"]
         assert isinstance(body[0], bytes if copy else zmq.Frame)
         assert bytes(identity) == b"async-client"
-        assert identity.peer_info.authentication.public_key is None
+        auth = identity.peer_info.authentication
+        assert auth is not None
+        assert auth.public_key is None
         await server.send_to(identity, [b"reply"])
         if peer:
             _, reply = await asyncio.wait_for(client.recv_from(), 5)
@@ -166,7 +176,9 @@ async def test_async_recv_from(copy, peer, transport):
         client.close(0)
         server.close(0)
         ctx.term()
-    assert identity.peer_info.diagnostics.endpoint == endpoint.decode()
+    diagnostics = identity.peer_info.diagnostics
+    assert diagnostics is not None
+    assert diagnostics.endpoint == endpoint.decode()
 
 
 def test_shadow_recv_from():

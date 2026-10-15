@@ -85,7 +85,7 @@ ZeroMQ Guide patterns to OMQ.
 </details>
 
 [Full comparison charts](COMPARISONS.md) |
-[Other protocol comparisons](PROTOCOL_COMPARISONS.md)
+[Other protocol comparisons][other-protocol-comparisons]
 
 ## Behavior under load
 
@@ -169,7 +169,7 @@ Language bindings:
 ## Further reading
 
 - [COMPARISONS.md](COMPARISONS.md): cross-implementation comparison charts.
-- [PROTOCOL_COMPARISONS.md](PROTOCOL_COMPARISONS.md): throughput and
+- [PROTOCOL_COMPARISONS.md][other-protocol-comparisons]: throughput and
   request/reply-like latency against other messaging and RPC protocols.
 - [BENCHMARKS_COMPRESSION.md](BENCHMARKS_COMPRESSION.md): lz4+tcp
   throughput on bandwidth-limited links.
@@ -184,6 +184,8 @@ Language bindings:
 - [doc/udp_transports.md](doc/udp_transports.md): UDP, QUIC, and DART purposes,
   configuration, and benchmarks over loopback and lossy links.
 - [omq-shm/README.md](omq-shm/README.md): shared-memory transport on Linux.
+
+[other-protocol-comparisons]: https://github.com/paddor/omq.rs/blob/other-moms/PROTOCOL_COMPARISONS.md
 
 ## Platform and requirements
 

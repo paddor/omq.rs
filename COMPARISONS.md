@@ -5,7 +5,7 @@ benchmark runner records throughput, latency, CPU time, and peer fairness where
 the pattern has multiple peers.
 
 Comparisons with other messaging and RPC protocols live in
-[PROTOCOL_COMPARISONS.md](PROTOCOL_COMPARISONS.md).
+[PROTOCOL_COMPARISONS.md](https://github.com/paddor/omq.rs/blob/other-moms/PROTOCOL_COMPARISONS.md).
 
 ## Setup
 

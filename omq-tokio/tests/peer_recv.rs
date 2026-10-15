@@ -597,26 +597,19 @@ async fn handshake_notification_already_has_a_usable_reply_route() {
 #[tokio::test]
 async fn rejected_replacement_does_not_evict_live_identity() {
     let context = Context::with_config(ContextConfig { io_threads: 2 });
-    let server = context.socket(SocketType::Peer, options("server"));
+    let server = context.socket(SocketType::Peer, options("server").peer_max_peers(2));
     let endpoint = server.bind(test_support::tcp_loopback(0)).await.unwrap();
     let client_options = options("client").reconnect(omq_tokio::ReconnectPolicy::Disabled);
     let original = context.socket(SocketType::Peer, client_options.clone());
     original.connect(endpoint.clone()).await.unwrap();
     connected(&original).await;
     connected(&server).await;
-    // Fill the ordinary receiver's 128 allocated peer slots. Admission must
+    // Fill the configured receive peer slots. Admission must
     // reject the replacement without invalidating the original identity.
-    let mut fillers = Vec::new();
-    for index in 0..127 {
-        let filler = context.socket(
-            SocketType::Peer,
-            options("filler").identity(Bytes::from(format!("filler-{index}"))),
-        );
-        filler.connect(endpoint.clone()).await.unwrap();
-        connected(&filler).await;
-        fillers.push(filler);
-    }
-    server.wait_connected(128, DEADLINE).await.unwrap();
+    let filler = context.socket(SocketType::Peer, options("filler"));
+    filler.connect(endpoint.clone()).await.unwrap();
+    connected(&filler).await;
+    server.wait_connected(2, DEADLINE).await.unwrap();
     let mut monitor = server.monitor();
     let replacement = context.socket(SocketType::Peer, client_options);
     replacement.connect(endpoint).await.unwrap();
@@ -659,9 +652,7 @@ async fn rejected_replacement_does_not_evict_live_identity() {
     assert_eq!(message.part_slice(1), Some(b"still readable".as_slice()));
     original.close().await.unwrap();
     replacement.close().await.unwrap();
-    for filler in fillers {
-        filler.close().await.unwrap();
-    }
+    filler.close().await.unwrap();
     server.close().await.unwrap();
 }
 

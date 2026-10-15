@@ -165,12 +165,7 @@ pub(crate) fn peer_send_pipe(
     let above_lwm = Arc::new(AtomicBool::new(false));
     let (producer, consumer) = super::peer_send::channel(
         capacity,
-        options.peer_send_max_bytes.unwrap_or_else(|| {
-            options
-                .max_message_size
-                .unwrap_or(0)
-                .max(super::peer_send::DEFAULT_MAX_BYTES)
-        }),
+        options,
         data_signal.clone(),
         space_available.clone(),
     );
@@ -936,10 +931,10 @@ mod tests {
     }
 
     #[test]
-    fn peer_send_byte_options_preserve_defaults_and_honor_explicit_limits() {
+    fn peer_send_byte_options_honor_defaults_and_explicit_limits() {
         const MIB: usize = 1024 * 1024;
         for (options, expected) in [
-            (omq_proto::Options::default(), 64 * MIB),
+            (omq_proto::Options::default(), 16 * MIB),
             (
                 omq_proto::Options::default().max_message_size(128 * MIB),
                 128 * MIB,

@@ -137,7 +137,7 @@ impl Socket {
         compatibility: SendCompatibility,
     ) -> Result<Self> {
         if socket_type == SocketType::Peer && options.max_message_size.is_none() {
-            options.max_message_size = Some(crate::engine::peer_send::DEFAULT_MAX_BYTES);
+            options.max_message_size = Some(omq_proto::options::DEFAULT_PEER_MAX_BYTES);
         }
         options.validate()?;
         let latency_profile = options.workload_profile.unwrap_or(

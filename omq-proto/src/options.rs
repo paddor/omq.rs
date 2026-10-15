@@ -36,6 +36,9 @@ pub const DEFAULT_ARENA_THRESHOLD: usize = crate::frame_buffer::ARENA_THRESHOLD;
 /// Default socket-wide cap for automatically allocated outbound SHM regions.
 pub const DEFAULT_SHM_MAX_MEMORY: usize = 64 * 1024 * 1024;
 
+/// Default PEER per-connection queue byte budget and single-message limit.
+pub const DEFAULT_PEER_MAX_BYTES: usize = 16 * 1024 * 1024;
+
 /// Token-bucket message rate limit.
 ///
 /// `messages_per_second` controls refill speed. `burst` is the maximum token
@@ -142,16 +145,38 @@ pub struct Options {
     /// Receive-side high-water mark as a message count.
     pub recv_hwm: u32,
 
+    /// Native PEER queue capacity per sending handle and destination. Default 64.
+    /// Uses the smaller of this and [`Self::send_hwm`] (at least one), rounded
+    /// up to a power of two. The shared per-connection `send_hwm` still applies.
+    /// Must be positive and at most `1 << (usize::BITS - 2)`.
+    pub peer_send_queue_capacity: usize,
+
+    /// Native PEER maximum sending handles per destination. Default 64.
+    /// Retired queues count until drained; sends wait for registration capacity.
+    /// Must be positive and less than `usize::MAX`.
+    pub peer_max_senders: usize,
+
+    /// Native PEER maximum receive peers per socket. Default 128.
+    /// Retired queues count until drained. New connections are rejected while
+    /// full; existing connections remain usable. Must be positive and less than
+    /// `usize::MAX`.
+    pub peer_max_peers: usize,
+
+    /// Native PEER retained messages per receiving connection. Default 8192.
+    /// Includes claimed and held messages, independently of [`Self::recv_hwm`].
+    /// Must be positive. A full budget pauses that connection's receive path.
+    pub peer_recv_max_messages: usize,
+
     /// Native PEER outbound queue byte budget per connection, shared by clones.
     /// Counts payload bytes and one payload slot per part, excluding identity.
-    /// `None` uses the larger of 64 MiB and [`Self::max_message_size`]. An
+    /// `None` uses the larger of 16 MiB and [`Self::max_message_size`]. An
     /// explicit nonzero budget is used exactly; oversized sends are rejected.
     /// Driver buffers and messages already dequeued for transmission are excluded.
     pub peer_send_max_bytes: Option<usize>,
 
     /// Native PEER receive queue byte budget per connection, including claimed
     /// and held messages. Counts retained backing allocations and frame tables.
-    /// `None` uses the larger of 64 MiB and [`Self::max_message_size`]. An
+    /// `None` uses the larger of 16 MiB and [`Self::max_message_size`]. An
     /// explicit nonzero budget is used exactly; an oversized message closes
     /// that connection. Decoder storage and one pending message are excluded.
     /// This is independent of the single-message limit [`Self::max_message_size`].
@@ -261,7 +286,8 @@ pub struct Options {
     pub max_pending_handshakes: usize,
 
     /// Reject incoming messages larger than this. Accounting includes payload
-    /// bytes plus one internal payload slot per part. `None` = no limit.
+    /// bytes plus one internal payload slot per part. `None` = no limit,
+    /// except native PEER sockets which default to 16 MiB.
     /// For compression transports this is the decoded size. Framing has a
     /// separate finite allowance for codec overhead and dictionary setup;
     /// command limits and dictionary protocol ceilings remain independent.
@@ -721,6 +747,10 @@ impl Default for Options {
             workload_profile: None,
             send_hwm: 1000,
             recv_hwm: 1000,
+            peer_send_queue_capacity: 64,
+            peer_max_senders: 64,
+            peer_max_peers: 128,
+            peer_recv_max_messages: 8192,
             peer_send_max_bytes: None,
             peer_recv_max_bytes: None,
             recv_spin: Duration::ZERO,
@@ -812,7 +842,7 @@ impl Options {
                 "max_pending_handshakes must be greater than zero".into(),
             ));
         }
-        self.validate_peer_byte_budgets()?;
+        self.validate_peer_limits()?;
         #[cfg(feature = "quic")]
         self.quic.validate()?;
         #[cfg(feature = "dart")]
@@ -883,8 +913,30 @@ impl Options {
         Ok(())
     }
 
-    fn validate_peer_byte_budgets(&self) -> crate::error::Result<()> {
+    fn validate_peer_limits(&self) -> crate::error::Result<()> {
+        if self.peer_send_queue_capacity > 1usize << (usize::BITS - 2) {
+            return Err(crate::error::Error::Config(
+                "peer_send_queue_capacity exceeds the supported ring capacity".into(),
+            ));
+        }
         for (name, limit) in [
+            ("peer_max_senders", self.peer_max_senders),
+            ("peer_max_peers", self.peer_max_peers),
+        ] {
+            if limit == usize::MAX {
+                return Err(crate::error::Error::Config(format!(
+                    "{name} must leave room for the internal registrar"
+                )));
+            }
+        }
+        for (name, limit) in [
+            (
+                "peer_send_queue_capacity",
+                Some(self.peer_send_queue_capacity),
+            ),
+            ("peer_max_senders", Some(self.peer_max_senders)),
+            ("peer_max_peers", Some(self.peer_max_peers)),
+            ("peer_recv_max_messages", Some(self.peer_recv_max_messages)),
             ("peer_send_max_bytes", self.peer_send_max_bytes),
             ("peer_recv_max_bytes", self.peer_recv_max_bytes),
         ] {
@@ -932,6 +984,38 @@ impl Options {
     /// not a byte limit.
     pub fn recv_hwm(mut self, hwm: u32) -> Self {
         self.recv_hwm = hwm;
+        self
+    }
+
+    /// Set the native PEER queue capacity per sending handle and destination.
+    /// See [`Self::peer_send_queue_capacity`] for rounding and shared limits.
+    #[must_use]
+    pub fn peer_send_queue_capacity(mut self, messages: usize) -> Self {
+        self.peer_send_queue_capacity = messages;
+        self
+    }
+
+    /// Set the native PEER sending-handle limit per destination.
+    /// See [`Self::peer_max_senders`] for retired queue accounting.
+    #[must_use]
+    pub fn peer_max_senders(mut self, senders: usize) -> Self {
+        self.peer_max_senders = senders;
+        self
+    }
+
+    /// Set the native PEER receive-peer limit per socket.
+    /// See [`Self::peer_max_peers`] for connection admission behavior.
+    #[must_use]
+    pub fn peer_max_peers(mut self, peers: usize) -> Self {
+        self.peer_max_peers = peers;
+        self
+    }
+
+    /// Set the native PEER retained-message budget per receiving connection.
+    /// See [`Self::peer_recv_max_messages`] for claim and HWM accounting.
+    #[must_use]
+    pub fn peer_recv_max_messages(mut self, messages: usize) -> Self {
+        self.peer_recv_max_messages = messages;
         self
     }
 
@@ -1604,6 +1688,33 @@ mod tests {
     }
 
     #[test]
+    fn peer_count_limits_reject_zero_and_overflow() {
+        for options in [
+            Options::default().peer_send_queue_capacity(0),
+            Options::default().peer_send_queue_capacity(usize::MAX),
+            Options::default().peer_max_senders(0),
+            Options::default().peer_max_senders(usize::MAX),
+            Options::default().peer_max_peers(0),
+            Options::default().peer_max_peers(usize::MAX),
+            Options::default().peer_recv_max_messages(0),
+        ] {
+            assert!(matches!(options.validate(), Err(crate::Error::Config(_))));
+        }
+        for count in [1, 16384] {
+            let options = Options::default()
+                .peer_send_queue_capacity(count)
+                .peer_max_senders(count)
+                .peer_max_peers(count)
+                .peer_recv_max_messages(count);
+            assert!(options.validate().is_ok());
+            assert_eq!(options.peer_send_queue_capacity, count);
+            assert_eq!(options.peer_max_senders, count);
+            assert_eq!(options.peer_max_peers, count);
+            assert_eq!(options.peer_recv_max_messages, count);
+        }
+    }
+
+    #[test]
     fn peer_byte_budgets_must_be_nonzero() {
         assert!(
             Options::default()
@@ -1630,6 +1741,10 @@ mod tests {
         let o = Options::default();
         assert_eq!(o.send_hwm, 1000);
         assert_eq!(o.recv_hwm, 1000);
+        assert_eq!(o.peer_send_queue_capacity, 64);
+        assert_eq!(o.peer_max_senders, 64);
+        assert_eq!(o.peer_max_peers, 128);
+        assert_eq!(o.peer_recv_max_messages, 8192);
         assert_eq!(o.peer_send_max_bytes, None);
         assert_eq!(o.peer_recv_max_bytes, None);
         assert!(!o.recv_batching);

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-10-16
+
+### Added
+
+- `recv_from()` returns an owning identity and body frames on ROUTER and PEER.
+  Peer authentication and diagnostics remain available after disconnect.
+
+### Changed
+
+- Bundle `omq-tokio` 0.29.0 and `omq-proto` 0.33.0.
+
 ## [0.25.0] - 2026-10-15
 
 ### Changed

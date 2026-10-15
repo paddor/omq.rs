@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-10-16
+
+### Changed
+
+- Bundle `omq-tokio` 0.29.0 and `omq-proto` 0.33.0 with configurable PEER
+  queue limits and corrected fan-out send readiness.
+
 ## [0.1.6] - 2026-10-15
 
 ### Changed

@@ -320,7 +320,7 @@ fn latency_peer_keeps_fanring_admission() {
     let mut send = IdentitySend::new(SocketType::Peer, &options);
     assert!(send.needs_peer_send_pipe());
     assert!(send.needs_transmit_slot());
-    let (producer, mut receiver) = crate::engine::peer_send_pipe(1, None);
+    let (producer, mut receiver) = crate::engine::peer_send_pipe(1, &omq_proto::Options::default());
     send.connection_added(1, peer_handle(producer), Bytes::from_static(b"id"), false);
     let first = send.submitter();
     let second = first.clone();
@@ -398,7 +398,7 @@ fn full_peer_retry_preserves_all_frames_and_metadata() {
     for fanring in [false, true] {
         let send_pipe = |capacity| {
             if fanring {
-                crate::engine::peer_send_pipe(capacity, None)
+                crate::engine::peer_send_pipe(capacity, &omq_proto::Options::default())
             } else {
                 send_pipe(capacity)
             }
@@ -466,7 +466,7 @@ async fn progress_wait_observes_capacity_released_before_registration() {
     for fanring in [false, true] {
         let send_pipe = |capacity| {
             if fanring {
-                crate::engine::peer_send_pipe(capacity, None)
+                crate::engine::peer_send_pipe(capacity, &omq_proto::Options::default())
             } else {
                 send_pipe(capacity)
             }
@@ -501,7 +501,7 @@ async fn registered_progress_wait_wakes_for_drain_close_and_identity_handover() 
     for fanring in [false, true] {
         let send_pipe = |capacity| {
             if fanring {
-                crate::engine::peer_send_pipe(capacity, None)
+                crate::engine::peer_send_pipe(capacity, &omq_proto::Options::default())
             } else {
                 send_pipe(capacity)
             }
@@ -556,7 +556,7 @@ async fn send_retry_changes_wait_queue_after_handover_before_registration() {
     for fanring in [false, true] {
         let send_pipe = |capacity| {
             if fanring {
-                crate::engine::peer_send_pipe(capacity, None)
+                crate::engine::peer_send_pipe(capacity, &omq_proto::Options::default())
             } else {
                 send_pipe(capacity)
             }
@@ -624,7 +624,7 @@ async fn pending_send_follows_full_replacement_until_it_drains() {
     for fanring in [false, true] {
         let send_pipe = |capacity| {
             if fanring {
-                crate::engine::peer_send_pipe(capacity, None)
+                crate::engine::peer_send_pipe(capacity, &omq_proto::Options::default())
             } else {
                 send_pipe(capacity)
             }
@@ -666,7 +666,7 @@ fn stale_disconnects_do_not_remove_replacement_peer_routes() {
     for fanring in [false, true] {
         let send_pipe = |capacity| {
             if fanring {
-                crate::engine::peer_send_pipe(capacity, None)
+                crate::engine::peer_send_pipe(capacity, &omq_proto::Options::default())
             } else {
                 send_pipe(capacity)
             }

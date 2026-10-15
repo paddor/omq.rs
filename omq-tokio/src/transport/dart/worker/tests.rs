@@ -316,7 +316,7 @@ async fn peer_space_return_wakes_the_endpoint_without_network_activity() {
     let handles =
         crate::socket::recv::SpscHandles::new(crate::socket::recv::BlockingRecvWaker::new(), false);
     let (mut routes, mut receive) =
-        crate::socket::peer_recv::PeerRecvRoutes::new(1, &handles, None);
+        crate::socket::peer_recv::PeerRecvRoutes::new(1, &handles, &omq_proto::Options::default());
     let mut sink = RecvSink::Peer(
         routes
             .register(Bytes::from_static(b"peer"), CancellationToken::new())

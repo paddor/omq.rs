@@ -300,9 +300,9 @@ impl SpscHandles {
     pub(crate) fn init_peer_recv(
         &mut self,
         hwm: usize,
-        max_message_size: Option<usize>,
+        options: &omq_proto::Options,
     ) -> super::peer_recv::PeerRecvRoutes {
-        let (routes, receive) = super::peer_recv::PeerRecvRoutes::new(hwm, self, max_message_size);
+        let (routes, receive) = super::peer_recv::PeerRecvRoutes::new(hwm, self, options);
         self.peer_recv = Some(Arc::new(ReceiveCell::new(
             receive,
             self.receive_handles.clone(),

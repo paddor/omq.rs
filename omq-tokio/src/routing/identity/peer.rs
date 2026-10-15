@@ -538,7 +538,8 @@ mod tests {
     #[test]
     fn direct_identity_send_returns_body_unchanged_when_full() {
         let routes = PeerRoutes::new();
-        let (producer, _receiver) = crate::engine::peer_send_pipe(1, None);
+        let (producer, _receiver) =
+            crate::engine::peer_send_pipe(1, &omq_proto::Options::default());
         routes.insert(1, Bytes::from_static(b"id"), PeerTarget::Pipe(producer));
         let lanes = SenderLanes::default();
         let body = Message::single("body");
@@ -558,7 +559,8 @@ mod tests {
         use futures::FutureExt;
 
         let routes = PeerRoutes::new();
-        let (producer, mut receiver) = crate::engine::peer_send_pipe(1, None);
+        let (producer, mut receiver) =
+            crate::engine::peer_send_pipe(1, &omq_proto::Options::default());
         routes.insert(1, Bytes::from_static(b"id"), PeerTarget::Pipe(producer));
         let first = SenderLanes::default();
         let second = first.clone();
@@ -591,7 +593,8 @@ mod tests {
         use futures::FutureExt;
 
         let routes = PeerRoutes::new();
-        let (producer, mut receiver) = crate::engine::peer_send_pipe(128, None);
+        let (producer, mut receiver) =
+            crate::engine::peer_send_pipe(128, &omq_proto::Options::default());
         routes.insert(1, Bytes::from_static(b"id"), PeerTarget::Pipe(producer));
         let mut senders: Vec<_> = (0..64).map(|_| SenderLanes::default()).collect();
         let message = Message::multipart(["id", "body"]);
@@ -625,7 +628,7 @@ mod tests {
         let routes = PeerRoutes::new();
         let first = SenderLanes::default();
         let second = first.clone();
-        let (old, old_rx) = crate::engine::peer_send_pipe(4, None);
+        let (old, old_rx) = crate::engine::peer_send_pipe(4, &omq_proto::Options::default());
         routes.insert(1, Bytes::from_static(b"id"), PeerTarget::Pipe(old));
         for sender in [&first, &second] {
             routes
@@ -635,7 +638,7 @@ mod tests {
         let old_table = routes.table.load_full().unwrap();
         let old_first = first.table.load_full();
         let old_second = second.table.load_full();
-        let (new, mut new_rx) = crate::engine::peer_send_pipe(4, None);
+        let (new, mut new_rx) = crate::engine::peer_send_pipe(4, &omq_proto::Options::default());
         routes.insert(2, Bytes::from_static(b"id"), PeerTarget::Pipe(new));
         for cache in [&old_first, &old_second] {
             assert!(cache[&1].producer.lock().unwrap().is_none());

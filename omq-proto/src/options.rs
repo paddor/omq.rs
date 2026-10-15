@@ -142,6 +142,21 @@ pub struct Options {
     /// Receive-side high-water mark as a message count.
     pub recv_hwm: u32,
 
+    /// Native PEER outbound queue byte budget per connection, shared by clones.
+    /// Counts payload bytes and one payload slot per part, excluding identity.
+    /// `None` uses the larger of 64 MiB and [`Self::max_message_size`]. An
+    /// explicit nonzero budget is used exactly; oversized sends are rejected.
+    /// Driver buffers and messages already dequeued for transmission are excluded.
+    pub peer_send_max_bytes: Option<usize>,
+
+    /// Native PEER receive queue byte budget per connection, including claimed
+    /// and held messages. Counts retained backing allocations and frame tables.
+    /// `None` uses the larger of 64 MiB and [`Self::max_message_size`]. An
+    /// explicit nonzero budget is used exactly; an oversized message closes
+    /// that connection. Decoder storage and one pending message are excluded.
+    /// This is independent of the single-message limit [`Self::max_message_size`].
+    pub peer_recv_max_bytes: Option<usize>,
+
     /// Maximum busy-wait time before each park in native blocking receives.
     ///
     /// Defaults to zero for every socket type, independently of
@@ -706,6 +721,8 @@ impl Default for Options {
             workload_profile: None,
             send_hwm: 1000,
             recv_hwm: 1000,
+            peer_send_max_bytes: None,
+            peer_recv_max_bytes: None,
             recv_spin: Duration::ZERO,
             recv_batching: false,
             recv_message_pool: None,
@@ -795,6 +812,7 @@ impl Options {
                 "max_pending_handshakes must be greater than zero".into(),
             ));
         }
+        self.validate_peer_byte_budgets()?;
         #[cfg(feature = "quic")]
         self.quic.validate()?;
         #[cfg(feature = "dart")]
@@ -865,6 +883,20 @@ impl Options {
         Ok(())
     }
 
+    fn validate_peer_byte_budgets(&self) -> crate::error::Result<()> {
+        for (name, limit) in [
+            ("peer_send_max_bytes", self.peer_send_max_bytes),
+            ("peer_recv_max_bytes", self.peer_recv_max_bytes),
+        ] {
+            if limit == Some(0) {
+                return Err(crate::error::Error::Config(format!(
+                    "{name} must be greater than zero"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     fn validate_recv_rate_limits(&self) -> crate::error::Result<()> {
         for (name, limit) in [
             ("recv_rate_limit", self.recv_rate_limit),
@@ -900,6 +932,22 @@ impl Options {
     /// not a byte limit.
     pub fn recv_hwm(mut self, hwm: u32) -> Self {
         self.recv_hwm = hwm;
+        self
+    }
+
+    /// Set the native PEER outbound byte budget for each connection.
+    /// See [`Self::peer_send_max_bytes`] for accounting and defaults.
+    #[must_use]
+    pub fn peer_send_max_bytes(mut self, bytes: usize) -> Self {
+        self.peer_send_max_bytes = Some(bytes);
+        self
+    }
+
+    /// Set the native PEER receive byte budget for each connection.
+    /// See [`Self::peer_recv_max_bytes`] for accounting and defaults.
+    #[must_use]
+    pub fn peer_recv_max_bytes(mut self, bytes: usize) -> Self {
+        self.peer_recv_max_bytes = Some(bytes);
         self
     }
 
@@ -1556,10 +1604,34 @@ mod tests {
     }
 
     #[test]
+    fn peer_byte_budgets_must_be_nonzero() {
+        assert!(
+            Options::default()
+                .peer_send_max_bytes(0)
+                .validate()
+                .is_err()
+        );
+        assert!(
+            Options::default()
+                .peer_recv_max_bytes(0)
+                .validate()
+                .is_err()
+        );
+        let options = Options::default()
+            .peer_send_max_bytes(16 * 1024 * 1024)
+            .peer_recv_max_bytes(16 * 1024 * 1024);
+        assert!(options.validate().is_ok());
+        assert_eq!(options.peer_send_max_bytes, Some(16 * 1024 * 1024));
+        assert_eq!(options.peer_recv_max_bytes, Some(16 * 1024 * 1024));
+    }
+
+    #[test]
     fn defaults_are_per_socket_hwm_block() {
         let o = Options::default();
         assert_eq!(o.send_hwm, 1000);
         assert_eq!(o.recv_hwm, 1000);
+        assert_eq!(o.peer_send_max_bytes, None);
+        assert_eq!(o.peer_recv_max_bytes, None);
         assert!(!o.recv_batching);
         assert_eq!(o.recv_rate_limit, None);
         assert_eq!(o.recv_ip_rate_limit, None);

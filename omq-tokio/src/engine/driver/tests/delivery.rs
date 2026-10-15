@@ -188,7 +188,7 @@ async fn full_peer_queue_bounds_pending_delivery_and_leaves_decoder_remainder_in
     let handles =
         crate::socket::recv::SpscHandles::new(crate::socket::recv::BlockingRecvWaker::new(), false);
     let (mut routes, mut receiver) =
-        crate::socket::peer_recv::PeerRecvRoutes::new(16, &handles, None);
+        crate::socket::peer_recv::PeerRecvRoutes::new(16, &handles, &omq_proto::Options::default());
     let sink = routes
         .register(Bytes::from_static(b"peer"), CancellationToken::new())
         .unwrap();

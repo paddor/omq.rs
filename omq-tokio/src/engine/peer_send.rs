@@ -79,7 +79,7 @@ pub(crate) struct Consumer {
 
 pub(crate) fn channel(
     capacity: usize,
-    max_message_size: Option<usize>,
+    max_bytes: usize,
     data: Arc<DataSignal>,
     space: Arc<StateSignal>,
 ) -> (Producer, Consumer) {
@@ -88,9 +88,7 @@ pub(crate) fn channel(
         messages: AtomicUsize::new(0),
         bytes: AtomicUsize::new(0),
         max_messages: capacity.max(1),
-        max_bytes: max_message_size
-            .unwrap_or(DEFAULT_MAX_BYTES)
-            .max(DEFAULT_MAX_BYTES),
+        max_bytes,
         closed: AtomicBool::new(false),
         data,
         space,
@@ -353,7 +351,7 @@ mod tests {
     fn queue(capacity: usize) -> (Producer, Consumer) {
         channel(
             capacity,
-            None,
+            DEFAULT_MAX_BYTES,
             Arc::new(DataSignal::new()),
             Arc::new(StateSignal::new()),
         )

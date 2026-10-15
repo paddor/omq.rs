@@ -1138,7 +1138,8 @@ mod tests {
         let socket = unsafe { &*publisher.cast::<Arc<OmqSocket>>() };
         let backend = socket.inner.get().unwrap();
         let io = socket.ctx.io_context().unwrap();
-        let subscriber = io.blocking_socket(omq_tokio::SocketType::Sub, Default::default());
+        let subscriber =
+            io.blocking_socket(omq_tokio::SocketType::Sub, omq_tokio::Options::default());
         subscriber.subscribe("").unwrap();
         subscriber
             .connect(backend.last_bound_endpoint().unwrap())

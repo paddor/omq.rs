@@ -158,7 +158,7 @@ fn stream_connect_identity_routes_to_each_raw_server() {
             assert_eq!(zmq_connect(socket.socket, endpoint.as_ptr()), 0);
             // The route is usable without first receiving a connect notification.
             let identity = socket.identity();
-            assert!(!identity.is_empty());
+            assert_ne!(identity.as_slice(), b"");
             assert!(!identities.contains(&identity));
             assert!(socket.send(&identity, SNDMORE, message_api) > 0);
             assert_eq!(
@@ -198,7 +198,7 @@ fn stream_connect_before_bind_applies_hwm_at_the_routing_frame() {
         let endpoint = CString::new(format!("tcp://{address}")).unwrap();
         assert_eq!(zmq_connect(socket.socket, endpoint.as_ptr()), 0);
         let identity = socket.identity();
-        assert!(!identity.is_empty());
+        assert_ne!(identity.as_slice(), b"");
         assert!(socket.send(&identity, SNDMORE, message_api) > 0);
         assert_eq!(socket.send(b"before", 0, message_api), 6);
         assert_eq!(socket.send(&identity, SNDMORE | 1, message_api), -1);

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.25] - 2026-10-16
+
+### Added
+
+- PEER send and receive queue byte caps are configurable socket options.
+
+### Fixed
+
+- STREAM routes raw data frames by connection identity and reports connects
+  before transport establishment.
+- Bundle `omq-tokio` 0.29.0 with corrected fan-out send readiness.
+
 ## [0.5.24] - 2026-10-15
 
 ### Fixed

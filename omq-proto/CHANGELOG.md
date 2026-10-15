@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.33.0] - 2026-10-16
+
+### Breaking
+
+- `Options` gains configurable PEER queue and connection limits. `PeerInfo`
+  and `PeerProperties` gain immutable authentication and diagnostics fields.
+
+### Added
+
+- Owning receive identities retain peer metadata after disconnect or handover.
+- STREAM messages support raw routed data and connection identities.
+
 ## [0.32.1] - 2026-10-15
 
 ### Fixed

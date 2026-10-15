@@ -1,6 +1,12 @@
 use super::*;
 use crate::socket::recv::{BlockingRecvWaker, SpscAwareRecv, SpscHandles, recv_pipe};
 
+impl Default for RecvLimits {
+    fn default() -> Self {
+        Self::from(&omq_proto::Options::default())
+    }
+}
+
 impl PeerRecvRoutes {
     #[expect(clippy::needless_pass_by_value)]
     pub(crate) fn register(
@@ -35,10 +41,10 @@ fn receive_pair(limits: RecvLimits, hwm: usize) -> (PeerRecvRoutes, PeerReceiver
 }
 
 #[test]
-fn receive_byte_options_preserve_defaults_and_honor_explicit_limits() {
+fn receive_byte_options_honor_defaults_and_explicit_limits() {
     const MIB: usize = 1024 * 1024;
     for (options, expected) in [
-        (omq_proto::Options::default(), 64 * MIB),
+        (omq_proto::Options::default(), 16 * MIB),
         (
             omq_proto::Options::default().max_message_size(128 * MIB),
             128 * MIB,
@@ -57,21 +63,32 @@ fn receive_byte_options_preserve_defaults_and_honor_explicit_limits() {
 }
 
 #[test]
-fn configured_receive_byte_budget_survives_claims_and_wakes_on_release() {
-    let options = omq_proto::Options::default()
-        .max_message_size(1024)
-        .peer_recv_max_bytes(128);
+fn configured_receive_budgets_survive_claims_and_wake_on_release() {
+    for options in [
+        omq_proto::Options::default().peer_recv_max_bytes(128),
+        omq_proto::Options::default().peer_recv_max_messages(2),
+    ] {
+        receive_budget_survives_claims(&options);
+    }
+}
+
+fn receive_budget_survives_claims(options: &omq_proto::Options) {
     let handles = SpscHandles::new(BlockingRecvWaker::new(), false);
-    let (mut routes, mut receiver) = PeerRecvRoutes::new(16, &handles, &options);
+    let (mut routes, mut receiver) = PeerRecvRoutes::new(16, &handles, options);
     let mut a = register(&mut routes, "a");
     let mut b = register(&mut routes, "b");
     put(&mut a, "first");
     put(&mut a, "second");
     put(&mut a, "pending");
     assert!(a.blocked());
-    let (receipt, _) = receiver.try_recv_with_receipt(None).unwrap();
+    let (receipt, message) = receiver.try_recv_with_receipt(None).unwrap();
+    let lane = receipt.lane().unwrap().clone();
+    receiver.unshift(receipt, message).unwrap();
     assert!(a.retry_pending());
-    assert!(a.blocked(), "a claimed message keeps its byte charge");
+    assert!(a.blocked(), "a held message keeps its budget charge");
+    let (receipt, _) = receiver.try_recv_with_receipt(Some(&lane)).unwrap();
+    assert!(a.retry_pending());
+    assert!(a.blocked(), "a claimed message keeps its budget charge");
     put(&mut b, "independent");
     assert!(!b.blocked());
     assert_eq!(
@@ -96,7 +113,63 @@ fn configured_receive_byte_budget_survives_claims_and_wakes_on_release() {
             Some(expected.as_bytes())
         );
     }
-    assert!(!a.push(Message::single(vec![0; 256])));
+    if options.peer_recv_max_bytes == Some(128) {
+        assert!(!a.push(Message::single(vec![0; 256])));
+    }
+}
+
+#[test]
+fn receive_message_budget_can_exceed_old_limit() {
+    let options = omq_proto::Options::default().peer_recv_max_messages(8200);
+    let handles = SpscHandles::new(BlockingRecvWaker::new(), false);
+    let (mut routes, mut receiver) = PeerRecvRoutes::new(16384, &handles, &options);
+    let mut sink = register(&mut routes, "a");
+    for _ in 0..8200 {
+        put(&mut sink, "queued");
+        assert!(!sink.blocked());
+    }
+    put(&mut sink, "pending");
+    assert!(sink.blocked());
+    assert!(poll_once(sink.ready()).is_pending());
+    receiver.try_recv().unwrap();
+    assert!(poll_once(sink.ready()).is_ready());
+    assert!(sink.retry_pending());
+    assert!(!sink.blocked());
+}
+
+#[test]
+fn configured_receive_peer_limit_counts_retired_queues() {
+    for limit in [1, 129] {
+        let options = omq_proto::Options::default().peer_max_peers(limit);
+        let handles = SpscHandles::new(BlockingRecvWaker::new(), false);
+        let (mut routes, mut receiver) = PeerRecvRoutes::new(16, &handles, &options);
+        let mut peers: Vec<_> = (0..limit)
+            .map(|id| {
+                routes
+                    .register(Bytes::from(id.to_string()), CancellationToken::new())
+                    .unwrap()
+            })
+            .collect();
+        assert!(
+            routes
+                .register(Bytes::from_static(b"new"), CancellationToken::new())
+                .is_err()
+        );
+        for peer in &mut peers {
+            put(peer, "retained");
+        }
+        drop(peers);
+        assert!(
+            routes
+                .register(Bytes::from_static(b"new"), CancellationToken::new())
+                .is_err()
+        );
+        for _ in 0..limit {
+            receiver.try_recv().unwrap();
+        }
+        assert!(matches!(receiver.try_recv(), Err(Error::WouldBlock)));
+        let _replacement = register(&mut routes, "new");
+    }
 }
 
 fn ordinary_receive(
@@ -913,7 +986,9 @@ fn ordinary_bulk_after_first_preserves_budget_and_releases_partial_credits() {
     for (max, size, expected) in [(1, 8, 1), (1024, 8, 256), (1024, 70_000, 2)] {
         let blocking = BlockingRecvWaker::new();
         let mut handles = SpscHandles::new(blocking.clone(), false);
-        let mut routes = handles.init_peer_recv(512, &omq_proto::Options::default());
+        // Exercise ring credits without reaching the separate byte budget.
+        let options = omq_proto::Options::default().peer_recv_max_bytes(64 * 1024 * 1024);
+        let mut routes = handles.init_peer_recv(512, &options);
         let (_pipe, consumer, notify, space) = recv_pipe(512, blocking);
         let receiver = SpscAwareRecv::new(
             consumer,
@@ -1073,12 +1148,12 @@ fn dropping_receiver_cancels_idle_and_full_peers_and_releases_budgets() {
     }
     let budget = busy_state.budget.clone();
     drop(receiver);
-    assert!(budget.room(64 * 1024 * 1024));
+    assert!(budget.room(omq_proto::options::DEFAULT_PEER_MAX_BYTES));
     assert!(busy_state.cancel.is_cancelled());
     assert!(idle_state.cancel.is_cancelled());
     assert!(!busy.retry_pending());
     drop((busy, idle));
-    assert!(budget.room(64 * 1024 * 1024));
+    assert!(budget.room(omq_proto::options::DEFAULT_PEER_MAX_BYTES));
 }
 
 #[tokio::test]

@@ -35,12 +35,15 @@ struct RecvLimits {
     bytes: usize,
 }
 
-impl Default for RecvLimits {
-    fn default() -> Self {
+impl From<&omq_proto::Options> for RecvLimits {
+    fn from(options: &omq_proto::Options) -> Self {
         Self {
-            peers: 128,
-            messages: 8192,
-            bytes: 64 * 1024 * 1024,
+            peers: options.peer_max_peers,
+            messages: options.peer_recv_max_messages,
+            bytes: options.peer_recv_max_bytes.unwrap_or_else(|| {
+                omq_proto::options::DEFAULT_PEER_MAX_BYTES
+                    .max(options.max_message_size.unwrap_or(0))
+            }),
         }
     }
 }
@@ -199,11 +202,7 @@ impl PeerRecvRoutes {
         handles: &super::recv::SpscHandles,
         options: &omq_proto::Options,
     ) -> (Self, PeerReceiver) {
-        let mut limits = RecvLimits::default();
-        limits.bytes = options
-            .peer_recv_max_bytes
-            .unwrap_or_else(|| limits.bytes.max(options.max_message_size.unwrap_or(0)));
-        Self::with_limits(hwm, handles, limits)
+        Self::with_limits(hwm, handles, options.into())
     }
 
     fn with_limits(

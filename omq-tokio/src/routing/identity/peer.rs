@@ -593,10 +593,10 @@ mod tests {
         use futures::FutureExt;
 
         let routes = PeerRoutes::new();
-        let (producer, mut receiver) =
-            crate::engine::peer_send_pipe(128, &omq_proto::Options::default());
+        let options = omq_proto::Options::default().peer_max_senders(3);
+        let (producer, mut receiver) = crate::engine::peer_send_pipe(128, &options);
         routes.insert(1, Bytes::from_static(b"id"), PeerTarget::Pipe(producer));
-        let mut senders: Vec<_> = (0..64).map(|_| SenderLanes::default()).collect();
+        let mut senders: Vec<_> = (0..3).map(|_| SenderLanes::default()).collect();
         let message = Message::multipart(["id", "body"]);
         for sender in &senders {
             routes.try_send(message.clone(), true, sender).unwrap();

@@ -186,7 +186,9 @@ Backpressure propagates through bounded queues. A full connection lane stops
 transport reads; transport buffers and sender queues then fill. Resuming the
 lane allows drainage and frees queue capacity. PEER uses per-connection byte
 budgets configurable through `peer_send_max_bytes` and `peer_recv_max_bytes`;
-receive charges include claimed and held messages. PULL and GATHER use
+receive charges include claimed and held messages. PEER queue capacities,
+sending-handle counts, receive-peer counts, and retained-message counts are
+also socket options; retired queues count until drained. PULL and GATHER use
 message-count HWMs. Transport buffers are outside these queue budgets.
 
 The [receive backpressure contract](../DEVELOPMENT.md#receive-lane-backpressure)

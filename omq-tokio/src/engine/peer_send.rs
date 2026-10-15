@@ -6,14 +6,11 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Wake, Waker};
 
 use fanring::{mpsc, teardown::Coordinated};
-use omq_proto::Message;
+use omq_proto::{Message, Options, options::DEFAULT_PEER_MAX_BYTES};
 
 use super::SendPipeError;
 use super::send_pipe::SendPreparation;
 use super::signal::{DataSignal, StateSignal};
-
-pub(crate) const MAX_SENDERS: usize = 64;
-pub(crate) const DEFAULT_MAX_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug)]
 struct Shared {
@@ -21,6 +18,7 @@ struct Shared {
     bytes: AtomicUsize,
     max_messages: usize,
     max_bytes: usize,
+    max_senders: usize,
     closed: AtomicBool,
     data: Arc<DataSignal>,
     space: Arc<StateSignal>,
@@ -79,16 +77,20 @@ pub(crate) struct Consumer {
 
 pub(crate) fn channel(
     capacity: usize,
-    max_bytes: usize,
+    options: &Options,
     data: Arc<DataSignal>,
     space: Arc<StateSignal>,
 ) -> (Producer, Consumer) {
-    let (sender, receiver) = mpsc::channel_with_policy(capacity.clamp(1, 64));
+    let (sender, receiver) =
+        mpsc::channel_with_policy(capacity.max(1).min(options.peer_send_queue_capacity));
     let shared = Arc::new(Shared {
         messages: AtomicUsize::new(0),
         bytes: AtomicUsize::new(0),
         max_messages: capacity.max(1),
-        max_bytes,
+        max_bytes: options
+            .peer_send_max_bytes
+            .unwrap_or_else(|| DEFAULT_PEER_MAX_BYTES.max(options.max_message_size.unwrap_or(0))),
+        max_senders: options.peer_max_senders,
         closed: AtomicBool::new(false),
         data,
         space,
@@ -123,7 +125,7 @@ impl Producer {
     pub(crate) fn register(&self) -> Option<Self> {
         self.sender
             .as_ref()?
-            .try_register_bounded(MAX_SENDERS + 1)
+            .try_register_bounded(self.shared.max_senders + 1)
             .ok()
             .map(|sender| Self::new(sender, self.shared.clone()))
     }
@@ -133,7 +135,7 @@ impl Producer {
             || self
                 .sender
                 .as_ref()
-                .is_some_and(|sender| sender.registered_lanes() < MAX_SENDERS + 1)
+                .is_some_and(|sender| sender.registered_lanes() < self.shared.max_senders + 1)
     }
 
     #[cfg(feature = "dart")]
@@ -349,12 +351,67 @@ mod tests {
     use super::*;
 
     fn queue(capacity: usize) -> (Producer, Consumer) {
+        queue_with_options(capacity, &Options::default())
+    }
+
+    fn queue_with_options(capacity: usize, options: &Options) -> (Producer, Consumer) {
         channel(
             capacity,
-            DEFAULT_MAX_BYTES,
+            options,
             Arc::new(DataSignal::new()),
             Arc::new(StateSignal::new()),
         )
+    }
+
+    #[test]
+    fn configured_handle_queues_fill_independently_and_wake_after_drain() {
+        for capacity in [1, 4, 128] {
+            let options = Options::default().peer_send_queue_capacity(capacity);
+            let (root, mut receiver) = queue_with_options(256, &options);
+            let mut busy = root.register().unwrap();
+            let mut quiet = root.register().unwrap();
+            for _ in 0..capacity {
+                busy.try_send(Message::single("busy")).unwrap();
+            }
+            assert!(matches!(
+                busy.try_send(Message::single("retry")),
+                Err(SendPipeError::Full(_))
+            ));
+            assert!(!busy.ready());
+            let signal = busy.space();
+            let seen = signal.generation();
+            quiet.try_send(Message::single("quiet")).unwrap();
+            let mut out = Vec::new();
+            assert_eq!(receiver.drain_into(&mut out, 256, usize::MAX), capacity + 1);
+            assert!(
+                out.iter()
+                    .any(|message| *message == Message::single("quiet"))
+            );
+            assert_ne!(signal.generation(), seen);
+            assert!(busy.ready());
+            busy.try_send(Message::single("retry")).unwrap();
+        }
+    }
+
+    #[test]
+    fn configured_registration_limit_counts_retired_senders() {
+        for limit in [1, 129] {
+            let options = Options::default().peer_max_senders(limit);
+            let (root, mut receiver) = queue_with_options(256, &options);
+            let mut senders: Vec<_> = (0..limit).map(|_| root.register().unwrap()).collect();
+            assert!(!root.registration_ready());
+            assert!(root.register().is_none());
+            senders[0].try_send(Message::single("retained")).unwrap();
+            drop(senders);
+            assert!(!root.registration_ready());
+            assert!(root.register().is_none());
+            let signal = root.registration_space();
+            let seen = signal.generation();
+            assert_eq!(receiver.drain_into(&mut Vec::new(), 256, usize::MAX), 1);
+            assert_ne!(signal.generation(), seen);
+            assert!(root.registration_ready());
+            assert!(root.register().is_some());
+        }
     }
 
     #[test]
@@ -391,7 +448,9 @@ mod tests {
     #[test]
     fn producer_count_and_payload_budget_stay_bounded_through_churn() {
         let (root, mut receiver) = queue(4);
-        let mut senders: Vec<_> = (0..MAX_SENDERS).map(|_| root.register().unwrap()).collect();
+        let mut senders: Vec<_> = (0..Options::default().peer_max_senders)
+            .map(|_| root.register().unwrap())
+            .collect();
         assert!(root.register().is_none());
         for sender in &mut senders[..4] {
             sender.try_send(Message::single("x")).unwrap();

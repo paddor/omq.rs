@@ -1,7 +1,7 @@
 <svg viewBox="0 0 850 694" xmlns="http://www.w3.org/2000/svg" font-family="system-ui, -apple-system, sans-serif">
 <rect x="0" y="0" width="850" height="694" opacity="1" fill="#000000" stroke="none"/>
 <text x="425" y="17" text-anchor="middle" font-family="sans-serif" font-size="14" font-weight="bold" fill="#F9FAFB">Echo RTT, DART / TCP / Aeron UDP loopback, 2-process, median-p99 run of 3</text>
-<text x="425" y="31" text-anchor="middle" font-family="sans-serif" font-size="10" fill="#9CA3AF">performance governor, turbo off</text>
+<text x="425" y="31" text-anchor="middle" font-family="sans-serif" font-size="10" fill="#9CA3AF">Intel(R) Core(TM) i7-8700B CPU @ 3.20GHz, performance governor, turbo off</text>
 <text x="415" y="41" dy="0.76em" text-anchor="middle" font-family="sans-serif" font-size="9.67741935483871" opacity="1" fill="#E5E7EB">
 p99 round-trip latency; whiskers: p50 to p99.9 (lower is better)
 </text>
@@ -321,21 +321,21 @@ threads
 OMQ / DART-LAN
 </text>
 <text x="250" y="620" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
-1 IO, app/IO spin 50 us
+1 IO, app/IO spin 50 μs
 </text>
 <polyline fill="none" opacity="1" stroke="#FFB74D" stroke-width="2" points="78,642 92,642 "/>
 <text x="98" y="636" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
 OMQ / DART-adaptive
 </text>
 <text x="250" y="636" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
-1 IO, app/IO spin 50 us
+1 IO, app/IO spin 50 μs
 </text>
 <polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="78,658 92,658 "/>
 <text x="98" y="652" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
 OMQ / TCP
 </text>
 <text x="250" y="652" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
-1 IO, recv spin 50 us
+1 IO, recv spin 50 μs
 </text>
 <polyline fill="none" opacity="1" stroke="#2563EB" stroke-width="2" points="78,674 92,674 "/>
 <text x="98" y="668" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">

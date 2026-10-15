@@ -231,7 +231,8 @@ fn throughput(directory: &Path, rows: &[Value]) -> ChartResult {
         "",
         "",
         Some(&[&spread]),
-        super::hardware_subtitle().as_deref(),
+        common::GbsScale::Linear,
+        common::detect_hardware().as_deref(),
     )?;
     eprintln!("Written: {}", path.display());
     Ok(())
@@ -280,7 +281,7 @@ fn latency(directory: &Path, rows: &[Value]) -> ChartResult {
         ],
         120,
         20,
-        super::hardware_subtitle().as_deref(),
+        common::detect_hardware().as_deref(),
     )?;
     eprintln!("Written: {}", path.display());
     Ok(())

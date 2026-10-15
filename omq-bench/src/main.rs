@@ -31,6 +31,8 @@ fn main() {
                 chart::shm::generate(cached_baselines).expect("generate SHM charts");
             }
             Some(ChartSub::Main) => chart::main_tcp::generate(),
+            Some(ChartSub::Mom) => chart::moms::generate(),
+            Some(ChartSub::MomFanout) => chart::moms_fanout::generate(),
             Some(ChartSub::Comparison) => chart::comparison::generate(),
             Some(ChartSub::Pubsub) => chart::pubsub::generate(),
             Some(ChartSub::Fanio) => chart::fanio::generate(),
@@ -41,6 +43,7 @@ fn main() {
             Some(ChartSub::Zstd) => chart::zstd::generate(),
             None => {
                 chart::main_tcp::generate();
+                chart::moms::generate();
                 chart::comparison::generate();
                 chart::pubsub::generate();
                 chart::shm::generate(false).expect("generate SHM charts");

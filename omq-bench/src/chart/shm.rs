@@ -54,19 +54,6 @@ const IMPLS: &[Impl] = &[
     },
 ];
 
-/// Keep the standard machine/tuning subtitle without CPU counts.
-fn hardware_subtitle() -> Option<String> {
-    common::detect_hardware().map(|label| {
-        label
-            .split(", ")
-            .filter(|field| {
-                !field.contains(" cores") && !field.to_ascii_lowercase().contains("vcpu")
-            })
-            .collect::<Vec<_>>()
-            .join(", ")
-    })
-}
-
 fn pool_bytes(size: u64) -> u64 {
     if size >= LARGE_POOL_MIN_BODY {
         LARGE_POOL_BYTES
@@ -336,7 +323,7 @@ fn generate_pubsub(cache: &Path, directory: &Path, cached_baselines: bool) -> Ch
     let path = directory.join("pubsub.svg");
     common::draw_multirow_throughput(
         &path,
-        "RADIO/DISH throughput, inproc / IPC / SHM",
+        "RADIO/DISH throughput per subscriber, inproc / IPC / SHM",
         &rows,
         SIZES,
         IMPLS,
@@ -345,7 +332,8 @@ fn generate_pubsub(cache: &Path, directory: &Path, cached_baselines: bool) -> Ch
         "",
         "",
         Some(&spread),
-        hardware_subtitle().as_deref(),
+        common::GbsScale::Linear,
+        common::detect_hardware().as_deref(),
     )?;
     eprintln!("Written: {}", path.display());
     Ok(())

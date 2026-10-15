@@ -240,8 +240,8 @@ pub(crate) fn generate() {
                 label: implementation.label,
                 threads: match implementation.key {
                     "aeron" => implementation.threads,
-                    "tcp" => "1 IO, recv spin 50 us",
-                    _ => "1 IO, app/IO spin 50 us",
+                    "tcp" => "1 IO, recv spin 50 \u{03bc}s",
+                    _ => "1 IO, app/IO spin 50 \u{03bc}s",
                 },
                 color: implementation.color,
             })

@@ -22,6 +22,7 @@ pub(crate) const MUTED_TEXT_COLOR: RGBColor = RGBColor(156, 163, 175);
 pub(crate) const TITLE_FILL: &str = "#F9FAFB";
 pub(crate) const MUTED_FILL: &str = "#9CA3AF";
 
+#[derive(Clone, Copy)]
 pub(crate) struct Impl {
     pub key: &'static str,
     pub label: &'static str,
@@ -41,6 +42,7 @@ pub(crate) type LatencyMap = BTreeMap<u64, BTreeMap<String, LatencyEntry>>;
 
 pub(crate) struct CpuData {
     pub sender: Option<f64>,
+    pub broker: Option<f64>,
     pub receiver: Option<f64>,
     pub runtime_workers: Option<usize>,
 }
@@ -56,9 +58,38 @@ pub(crate) struct FairnessEntry {
 pub(crate) type FairnessMap = BTreeMap<u64, BTreeMap<String, FairnessEntry>>;
 
 #[derive(Clone, Copy)]
+pub(crate) enum GbsScale {
+    Linear,
+    Logarithmic,
+}
+
+#[derive(Clone, Copy)]
 enum LegendVersionMode {
     Hide,
     ShowOtherImpls,
+}
+
+#[derive(Clone, Copy)]
+enum LegendTableLayout {
+    Threads,
+    BrokeredMom,
+}
+
+impl LegendTableLayout {
+    fn meta_label(self) -> &'static str {
+        match self {
+            Self::Threads => "threads",
+            Self::BrokeredMom => "runtime / broker",
+        }
+    }
+
+    fn show_crate(self) -> bool {
+        matches!(self, Self::BrokeredMom)
+    }
+
+    fn empty_meta_uses_cores(self) -> bool {
+        matches!(self, Self::Threads)
+    }
 }
 
 // colors
@@ -66,6 +97,7 @@ enum LegendVersionMode {
 pub(crate) const C_LIBZMQ: RGBColor = RGBColor(250, 204, 21);
 pub(crate) const C_LIBZMQ_2T: RGBColor = RGBColor(245, 158, 11);
 pub(crate) const C_OMQ_1T: RGBColor = RGBColor(239, 68, 68);
+pub(crate) const C_OMQ_QUIC: RGBColor = RGBColor(29, 78, 216);
 pub(crate) const C_OMQ_SPIN: RGBColor = RGBColor(251, 146, 60);
 pub(crate) const C_OMQ_CT: RGBColor = RGBColor(251, 113, 133);
 pub(crate) const C_OMQ_MT: RGBColor = RGBColor(249, 115, 22);
@@ -76,6 +108,13 @@ pub(crate) const C_MONOCOQUE: RGBColor = RGBColor(37, 99, 235);
 pub(crate) const C_R0Z: RGBColor = RGBColor(34, 211, 238);
 pub(crate) const C_TMQ: RGBColor = RGBColor(168, 85, 247);
 pub(crate) const C_RZMQ_IOURING: RGBColor = RGBColor(16, 185, 129);
+pub(crate) const C_GRPC: RGBColor = RGBColor(244, 114, 182);
+pub(crate) const C_RABBITMQ: RGBColor = RGBColor(96, 165, 250);
+pub(crate) const C_AERON: RGBColor = RGBColor(148, 163, 184);
+pub(crate) const C_NATS: RGBColor = RGBColor(34, 211, 238);
+pub(crate) const C_REDIS: RGBColor = RGBColor(132, 204, 22);
+pub(crate) const C_ZENOH: RGBColor = RGBColor(255, 255, 255);
+pub(crate) const C_IROH: RGBColor = RGBColor(167, 139, 250);
 
 // formatting
 
@@ -169,12 +208,16 @@ impl MsgAxisMode {
 const MSG_AXIS_STEP: f64 = 2_000_000.0;
 
 pub(crate) fn msg_axis_2m(max_val: f64) -> (f64, usize) {
+    msg_axis_fixed_step(max_val, MSG_AXIS_STEP)
+}
+
+fn msg_axis_fixed_step(max_val: f64, step: f64) -> (f64, usize) {
     let ticks = if max_val <= 0.0 {
         1
     } else {
-        (max_val / MSG_AXIS_STEP).ceil().max(1.0) as usize
+        (max_val / step).ceil().max(1.0) as usize
     };
-    (MSG_AXIS_STEP * ticks as f64, ticks)
+    (step * ticks as f64, ticks)
 }
 
 // hardware detection
@@ -187,7 +230,8 @@ pub(crate) fn detect_hardware() -> Option<String> {
         .or_else(|| hw_conf.get("postfix").cloned());
     let prefix = std::env::var("OMQ_HW_PREFIX")
         .ok()
-        .or_else(|| hw_conf.get("prefix").cloned());
+        .or_else(|| hw_conf.get("prefix").cloned())
+        .or_else(cpu_model);
 
     match (prefix, postfix) {
         (Some(prefix), Some(postfix)) => Some(format!("{prefix}, {postfix}")),
@@ -195,6 +239,16 @@ pub(crate) fn detect_hardware() -> Option<String> {
         (None, Some(postfix)) => Some(postfix),
         (None, None) => None,
     }
+}
+
+fn cpu_model() -> Option<String> {
+    let cpuinfo = std::fs::read_to_string("/proc/cpuinfo").ok()?;
+    cpuinfo.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        (key.trim() == "model name")
+            .then(|| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
 }
 
 fn read_chart_hw() -> BTreeMap<String, String> {
@@ -383,18 +437,23 @@ pub(crate) fn draw_legend_table(
         impls,
         cpu,
         snd_label,
+        "",
         rcv_label,
         LegendVersionMode::Hide,
+        LegendTableLayout::Threads,
     )
 }
 
+#[expect(clippy::too_many_arguments)]
 fn draw_legend_table_with_versions(
     table_area: &DrawingArea<SVGBackend<'_>, plotters::coord::Shift>,
     impls: &[&Impl],
     cpu: &BTreeMap<String, CpuData>,
     snd_label: &str,
+    broker_label: &str,
     rcv_label: &str,
     version_mode: LegendVersionMode,
+    layout: LegendTableLayout,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let style_hdr = ("sans-serif", 11).into_font().color(&MUTED_TEXT_COLOR);
     let style_val = ("sans-serif", 11).into_font().color(&TEXT_COLOR);
@@ -402,14 +461,26 @@ fn draw_legend_table_with_versions(
 
     let col_swatch = 78;
     let col_name = col_swatch + 20;
-    let col_threads = 250;
-    let col_snd = 360;
-    let col_rcv = 450;
+    let show_crate = layout.show_crate();
+    let (col_crate, col_meta, col_snd, col_broker, col_rcv) = if show_crate {
+        (290, 455, 555, 655, 765)
+    } else if broker_label.is_empty() {
+        (0, 250, 360, 0, 450)
+    } else {
+        (0, 350, 515, 610, 710)
+    };
     let row_h = 16i32;
 
-    table_area.draw_text("threads", &style_hdr, (col_threads, 4))?;
+    if show_crate {
+        table_area.draw_text("protocol", &style_hdr, (col_name, 4))?;
+        table_area.draw_text("crate", &style_hdr, (col_crate, 4))?;
+    }
+    table_area.draw_text(layout.meta_label(), &style_hdr, (col_meta, 4))?;
     if !snd_label.is_empty() {
         table_area.draw_text(snd_label, &style_hdr, (col_snd, 4))?;
+    }
+    if !broker_label.is_empty() {
+        table_area.draw_text(broker_label, &style_hdr, (col_broker, 4))?;
     }
     if !rcv_label.is_empty() {
         table_area.draw_text(rcv_label, &style_hdr, (col_rcv, 4))?;
@@ -421,29 +492,57 @@ fn draw_legend_table_with_versions(
         #[expect(clippy::cast_possible_wrap)]
         let y = 20 + i as i32 * row_h;
 
-        table_area.draw(&PathElement::new(
-            vec![(col_swatch, y + 6), (col_swatch + 14, y + 6)],
-            imp.color.stroke_width(2),
-        ))?;
-        let label = legend_label(imp, version_mode);
+        if imp.key.ends_with("-spin50") {
+            for dx in [0, 8] {
+                table_area.draw(&PathElement::new(
+                    vec![(col_swatch + dx, y + 6), (col_swatch + dx + 5, y + 6)],
+                    imp.color.stroke_width(2),
+                ))?;
+            }
+        } else {
+            table_area.draw(&PathElement::new(
+                vec![(col_swatch, y + 6), (col_swatch + 14, y + 6)],
+                imp.color.stroke_width(2),
+            ))?;
+        }
+        let label = if show_crate {
+            imp.label.to_string()
+        } else {
+            legend_label(imp, version_mode)
+        };
         table_area.draw_text(&label, &style_val, (col_name, y))?;
 
-        let threads = if imp.threads.is_empty() {
-            let workers = cpu
-                .get(imp.key)
-                .and_then(|data| data.runtime_workers)
-                .unwrap_or(cores);
-            format!("{workers} MT")
+        if show_crate {
+            let client = mom_client_crate_label(imp.key);
+            table_area.draw_text(client, &style_dim, (col_crate, y))?;
+        }
+        let meta = if imp.threads.is_empty() {
+            if layout.empty_meta_uses_cores() {
+                let workers = cpu
+                    .get(imp.key)
+                    .and_then(|data| data.runtime_workers)
+                    .unwrap_or(cores);
+                format!("{workers} MT")
+            } else {
+                String::new()
+            }
         } else {
             imp.threads.to_string()
         };
-        table_area.draw_text(&threads, &style_dim, (col_threads, y))?;
+        if !meta.is_empty() {
+            table_area.draw_text(&meta, &style_dim, (col_meta, y))?;
+        }
 
         if let Some(cd) = cpu.get(imp.key) {
             if !snd_label.is_empty()
                 && let Some(v) = cd.sender
             {
                 table_area.draw_text(&format!("{v:.0}%"), &style_dim, (col_snd, y))?;
+            }
+            if !broker_label.is_empty()
+                && let Some(v) = cd.broker
+            {
+                table_area.draw_text(&format!("{v:.0}%"), &style_dim, (col_broker, y))?;
             }
             if !rcv_label.is_empty()
                 && let Some(v) = cd.receiver
@@ -455,13 +554,30 @@ fn draw_legend_table_with_versions(
     Ok(())
 }
 
+fn mom_client_crate_label(key: &str) -> &'static str {
+    match key {
+        key if key.starts_with("omq-") => "omq-tokio",
+        "grpc-rust" => "tonic v0.12.3",
+        "rabbitmq" => "lapin v2.5.5",
+        "aeron-udp-2proc" => "Aeron v1.51.0",
+        "nats" => "async-nats v0.42.0",
+        "redis-streams" => "redis v0.32.7",
+        "zenoh-tcp-2proc" => "zenoh v1.10.1",
+        "iroh-quic-2proc" => "iroh v1.3.0",
+        "iceoryx2-shm-2proc" => "iceoryx2 v0.10.0",
+        _ => "",
+    }
+}
+
 // data loading
 
 #[derive(Default)]
 struct CpuAccum {
     sender_sum: f64,
+    broker_sum: f64,
     receiver_sum: f64,
     sender_count: u32,
+    broker_count: u32,
     receiver_count: u32,
     runtime_workers: Option<usize>,
 }
@@ -477,6 +593,11 @@ impl CpuAccum {
         self.receiver_count += 1;
     }
 
+    fn add_broker_pct(&mut self, pct: f64) {
+        self.broker_sum += pct;
+        self.broker_count += 1;
+    }
+
     fn add_sender(&mut self, cpu_time: f64, elapsed: f64) {
         self.add_sender_pct(cpu_time / elapsed * 100.0);
     }
@@ -485,10 +606,15 @@ impl CpuAccum {
         self.add_receiver_pct(cpu_time / elapsed * 100.0);
     }
 
+    fn add_broker(&mut self, cpu_time: f64, elapsed: f64) {
+        self.add_broker_pct(cpu_time / elapsed * 100.0);
+    }
+
     fn into_data(self) -> CpuData {
         CpuData {
             runtime_workers: self.runtime_workers,
             sender: (self.sender_count > 0).then(|| self.sender_sum / f64::from(self.sender_count)),
+            broker: (self.broker_count > 0).then(|| self.broker_sum / f64::from(self.broker_count)),
             receiver: (self.receiver_count > 0)
                 .then(|| self.receiver_sum / f64::from(self.receiver_count)),
         }
@@ -506,6 +632,9 @@ pub(crate) fn merge_cpu_data<'a>(
             accum.runtime_workers = data.runtime_workers.or(accum.runtime_workers);
             if let Some(sender) = data.sender {
                 accum.add_sender_pct(sender);
+            }
+            if let Some(broker) = data.broker {
+                accum.add_broker_pct(broker);
             }
             if let Some(receiver) = data.receiver {
                 accum.add_receiver_pct(receiver);
@@ -529,8 +658,7 @@ pub(crate) fn load_tput(
 
     let path = jsonl::cache_dir().join("comparisons.jsonl");
     let rows: Vec<(usize, ComparisonRow)> = jsonl::load_jsonl(&path);
-    let keys: Vec<&str> = impls.iter().map(|i| i.key).collect();
-
+    let map_omq_quic = impls.iter().any(|imp| imp.key == "omq-quic");
     let mut tput: ValMap = BTreeMap::new();
     let mut msgs: ValMap = BTreeMap::new();
     let mut latest: BTreeMap<(String, u64), ComparisonRow> = BTreeMap::new();
@@ -539,38 +667,45 @@ pub(crate) fn load_tput(
         if row.transport != transport || row.kind != kind {
             continue;
         }
-        if !keys.contains(&row.impl_name.as_str()) {
+        let chart_key = impls.iter().find_map(|imp| {
+            (comparison_impl_key(imp.key, transport, map_omq_quic) == Some(row.impl_name.as_str()))
+                .then_some(imp.key)
+        });
+        let Some(chart_key) = chart_key else {
             continue;
-        }
+        };
         if let Some(p) = peers
             && row.peers != Some(p)
         {
             continue;
         }
-        let key = (row.impl_name.clone(), row.msg_size);
+        let key = (chart_key.to_string(), row.msg_size);
         latest.insert(key, row);
     }
 
     let mut cpu_sums: BTreeMap<String, CpuAccum> = BTreeMap::new();
 
-    for row in latest.into_values() {
+    for ((chart_key, _), row) in latest {
         if let Some(v) = row.mbps {
             tput.entry(row.msg_size)
                 .or_default()
-                .insert(row.impl_name.clone(), v);
+                .insert(chart_key.clone(), v);
         }
         if let Some(v) = row.msgs_s {
             msgs.entry(row.msg_size)
                 .or_default()
-                .insert(row.impl_name.clone(), v);
+                .insert(chart_key.clone(), v);
         }
         if let Some(elapsed) = row.elapsed
             && elapsed > 0.0
         {
-            let e = cpu_sums.entry(row.impl_name.clone()).or_default();
+            let e = cpu_sums.entry(chart_key).or_default();
             e.runtime_workers = row.runtime_workers.or(e.runtime_workers);
             if let Some(push) = row.push_cpu_time.or(row.pub_cpu_time) {
                 e.add_sender(push, elapsed);
+            }
+            if let Some(broker) = row.broker_cpu_time {
+                e.add_broker(broker, elapsed);
             }
             if let Some(pull) = row.pull_cpu_time {
                 e.add_receiver(pull, elapsed);
@@ -588,6 +723,21 @@ pub(crate) fn load_tput(
         .collect();
 
     (tput, msgs, cpu)
+}
+
+fn comparison_impl_key<'a>(
+    chart_key: &'a str,
+    transport: &str,
+    map_omq_quic: bool,
+) -> Option<&'a str> {
+    if !map_omq_quic {
+        return Some(chart_key);
+    }
+    match (chart_key, transport) {
+        ("omq-tokio-1t" | "omq-tokio-1t-spin50", "quic") => None,
+        ("omq-quic", "quic") => Some("omq-tokio-1t"),
+        _ => Some(chart_key),
+    }
 }
 
 pub(crate) fn load_fairness(
@@ -655,7 +805,7 @@ pub(crate) fn load_latency(
 
     let path = jsonl::cache_dir().join("comparisons.jsonl");
     let rows: Vec<(usize, ComparisonRow)> = jsonl::load_jsonl(&path);
-    let keys: Vec<&str> = impls.iter().map(|i| i.key).collect();
+    let map_omq_quic = impls.iter().any(|imp| imp.key == "omq-quic");
 
     let mut lat: LatencyMap = BTreeMap::new();
     let mut latest: BTreeMap<(String, u64), ComparisonRow> = BTreeMap::new();
@@ -675,30 +825,37 @@ pub(crate) fn load_latency(
         {
             continue;
         }
-        if !keys.contains(&row.impl_name.as_str()) {
+        let chart_key = impls.iter().find_map(|imp| {
+            (comparison_impl_key(imp.key, transport, map_omq_quic) == Some(row.impl_name.as_str()))
+                .then_some(imp.key)
+        });
+        let Some(chart_key) = chart_key else {
             continue;
-        }
+        };
         if !sizes.contains(&row.msg_size) {
             continue;
         }
-        let key = (row.impl_name.clone(), row.msg_size);
+        let key = (chart_key.to_string(), row.msg_size);
         latest.insert(key, row);
     }
 
     let mut cpu_sums: BTreeMap<String, CpuAccum> = BTreeMap::new();
 
-    for row in latest.into_values() {
+    for ((chart_key, _), row) in latest {
         if let (Some(p50), Some(p99), Some(p999)) = (row.p50_us, row.p99_us, row.p999_us) {
             lat.entry(row.msg_size)
                 .or_default()
-                .insert(row.impl_name.clone(), LatencyEntry { p50, p99, p999 });
+                .insert(chart_key.clone(), LatencyEntry { p50, p99, p999 });
         }
         if let Some(elapsed) = row.elapsed
             && elapsed > 0.0
         {
-            let e = cpu_sums.entry(row.impl_name.clone()).or_default();
+            let e = cpu_sums.entry(chart_key).or_default();
             if let Some(req) = row.req_cpu_time {
                 e.add_sender(req, elapsed);
+            }
+            if let Some(broker) = row.broker_cpu_time {
+                e.add_broker(broker, elapsed);
             }
             if let (Some(total), Some(req)) = (row.cpu_time, row.req_cpu_time) {
                 e.add_receiver(total - req, elapsed);
@@ -800,8 +957,9 @@ pub(crate) fn draw_throughput_dual_panel(
         msgs,
         cpu,
         snd_label,
+        "",
         rcv_label,
-        MsgAxisMode::Auto,
+        ThroughputChartConfig::default(),
         LegendVersionMode::Hide,
     )
 }
@@ -827,8 +985,9 @@ pub(crate) fn draw_throughput_dual_panel_with_versions(
         msgs,
         cpu,
         snd_label,
+        "",
         rcv_label,
-        MsgAxisMode::Auto,
+        ThroughputChartConfig::default(),
         LegendVersionMode::ShowOtherImpls,
     )
 }
@@ -854,10 +1013,69 @@ pub(crate) fn draw_throughput_dual_panel_fixed_2m_msgs_with_versions(
         msgs,
         cpu,
         snd_label,
+        "",
         rcv_label,
-        MsgAxisMode::Fixed2M,
+        ThroughputChartConfig {
+            msg_axis: MsgAxisMode::Fixed2M,
+            ..ThroughputChartConfig::default()
+        },
         LegendVersionMode::ShowOtherImpls,
     )
+}
+
+#[expect(clippy::too_many_arguments)]
+pub(crate) fn draw_throughput_dual_panel_brokered_with_versions(
+    out_path: &Path,
+    title: &str,
+    sizes: &[u64],
+    impls: &[Impl],
+    tput: &ValMap,
+    msgs: &ValMap,
+    cpu: &BTreeMap<String, CpuData>,
+    snd_label: &str,
+    broker_label: &str,
+    rcv_label: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    draw_throughput_dual_panel_with_msg_axis(
+        out_path,
+        title,
+        sizes,
+        impls,
+        tput,
+        msgs,
+        cpu,
+        snd_label,
+        broker_label,
+        rcv_label,
+        ThroughputChartConfig {
+            chart_h: 520,
+            msg_target_ticks: 10,
+            legend_layout: LegendTableLayout::BrokeredMom,
+            ..ThroughputChartConfig::default()
+        },
+        LegendVersionMode::ShowOtherImpls,
+    )
+}
+
+#[derive(Clone, Copy)]
+struct ThroughputChartConfig {
+    chart_h: u32,
+    msg_target_ticks: usize,
+    gbs_target_ticks: usize,
+    msg_axis: MsgAxisMode,
+    legend_layout: LegendTableLayout,
+}
+
+impl Default for ThroughputChartConfig {
+    fn default() -> Self {
+        Self {
+            chart_h: 340,
+            msg_target_ticks: 6,
+            gbs_target_ticks: 6,
+            msg_axis: MsgAxisMode::Auto,
+            legend_layout: LegendTableLayout::Threads,
+        }
+    }
 }
 
 #[expect(clippy::too_many_arguments)]
@@ -870,8 +1088,9 @@ fn draw_throughput_dual_panel_with_msg_axis(
     msgs: &ValMap,
     cpu: &BTreeMap<String, CpuData>,
     snd_label: &str,
+    broker_label: &str,
     rcv_label: &str,
-    msg_axis: MsgAxisMode,
+    config: ThroughputChartConfig,
     version_mode: LegendVersionMode,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let present: Vec<&Impl> = impls
@@ -896,7 +1115,7 @@ fn draw_throughput_dual_panel_with_msg_axis(
 
     let row_h = 16u32;
     let table_h = 20 + present.len() as u32 * row_h + 10;
-    let chart_h = 340u32;
+    let chart_h = config.chart_h;
     let total_h = chart_h + table_h;
     let width = 950u32;
     let hw_label = detect_hardware();
@@ -906,14 +1125,13 @@ fn draw_throughput_dual_panel_with_msg_axis(
     let (chart_area, table_area) = root.split_vertically(chart_h);
     let (left_area, right_area) = chart_area.split_horizontally(width / 2 - 10);
 
-    let n_ticks = 6usize;
     let gbs_raw = large
         .iter()
         .filter_map(|s| tput.get(s))
         .flat_map(|m| m.values())
         .map(|v| v / 1000.0)
         .fold(0.0_f64, f64::max);
-    let (gbs_max, gbs_ticks) = nice_axis(gbs_raw, n_ticks);
+    let (gbs_max, gbs_ticks) = nice_axis(gbs_raw, config.gbs_target_ticks);
 
     let msgs_raw = small
         .iter()
@@ -921,7 +1139,7 @@ fn draw_throughput_dual_panel_with_msg_axis(
         .flat_map(|m| m.values())
         .copied()
         .fold(0.0_f64, f64::max);
-    let (msgs_max, msgs_ticks) = msg_axis.bounds(msgs_raw, n_ticks);
+    let (msgs_max, msgs_ticks) = config.msg_axis.bounds(msgs_raw, config.msg_target_ticks);
 
     if !small.is_empty() {
         draw_msgs_panel(
@@ -945,8 +1163,10 @@ fn draw_throughput_dual_panel_with_msg_axis(
         &present,
         cpu,
         snd_label,
+        broker_label,
         rcv_label,
         version_mode,
+        config.legend_layout,
     )?;
     root.present()?;
     drop(root);
@@ -1092,7 +1312,19 @@ pub(crate) fn draw_gbs_panel(
         if pts.is_empty() {
             continue;
         }
-        chart.draw_series(LineSeries::new(pts.clone(), imp.color.stroke_width(2)))?;
+        if imp.key.ends_with("-spin50") {
+            chart.draw_series(DashedLineSeries::new(
+                pts.iter().copied(),
+                6,
+                3,
+                imp.color.stroke_width(2),
+            ))?;
+        } else {
+            chart.draw_series(LineSeries::new(
+                pts.iter().copied(),
+                imp.color.stroke_width(2),
+            ))?;
+        }
         chart.draw_series(
             pts.iter()
                 .map(|&(x, y)| Circle::new((x, y), 2, imp.color.filled())),
@@ -1169,6 +1401,226 @@ pub(crate) fn draw_latency_single_panel_with_versions(
     )
 }
 
+pub(crate) fn draw_latency_brokered_with_versions(
+    out_path: &Path,
+    title: &str,
+    sizes: &[u64],
+    impls: &[Impl],
+    lat: &LatencyMap,
+    cpu: &BTreeMap<String, CpuData>,
+    local: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let present: Vec<&Impl> = impls
+        .iter()
+        .filter(|imp| {
+            sizes.iter().any(|size| {
+                lat.get(size)
+                    .is_some_and(|values| values.contains_key(imp.key))
+            })
+        })
+        .collect();
+    let legend: Vec<&Impl> = present
+        .iter()
+        .copied()
+        .filter(|imp| !imp.key.ends_with("-spin50"))
+        .collect();
+    let (top_h, bottom_h) = if local { (300, 300) } else { (540, 340) };
+    let chart_h = top_h + bottom_h;
+    let table_h = 30 + legend.len() as u32 * 16;
+    let total_h = chart_h + table_h;
+    let width = 850u32;
+    let hardware = detect_hardware();
+    let root = SVGBackend::new(out_path, (width, total_h)).into_drawing_area();
+    root.fill(&BACKGROUND_COLOR)?;
+    let (chart_area, table_area) = root.split_vertically(chart_h);
+
+    let (top, bottom) = chart_area.split_vertically(top_h);
+    let is_spinning = |imp: &&Impl| {
+        imp.key.ends_with("-spin50")
+            || imp.key == "aeron-udp-2proc"
+            || imp.key == "iceoryx2-shm-2proc"
+    };
+    let no_spin: Vec<&Impl> = present
+        .iter()
+        .copied()
+        .filter(|imp| !is_spinning(imp))
+        .collect();
+    let spinning: Vec<&Impl> = present.iter().copied().filter(is_spinning).collect();
+    draw_mom_latency_panel(
+        &top,
+        if local {
+            "No receive spin"
+        } else {
+            "No explicit receive spin"
+        },
+        sizes,
+        &no_spin,
+        lat,
+        local.then_some(20.0),
+    )?;
+    draw_mom_latency_panel(
+        &bottom,
+        if local {
+            "50 \u{03bc}s OMQ spin; iceoryx2 polling"
+        } else {
+            "50 \u{03bc}s OMQ spin; Aeron busy polling"
+        },
+        sizes,
+        &spinning,
+        lat,
+        local.then_some(5.0),
+    )?;
+    draw_legend_table_with_versions(
+        &table_area,
+        &legend,
+        cpu,
+        "",
+        "",
+        "",
+        LegendVersionMode::ShowOtherImpls,
+        LegendTableLayout::BrokeredMom,
+    )?;
+    root.present()?;
+    drop(root);
+    postprocess_svg(out_path, width, total_h, title, hardware.as_deref())
+}
+
+fn mom_latency_axis(
+    min_p50: f64,
+    max_p999: f64,
+    tick_us: Option<f64>,
+) -> (LatencyAxis, std::ops::Range<f64>, f64) {
+    let log_min_us = 10.0_f64.powf(min_p50.log10().floor()).max(0.1);
+    let (axis_min, axis_max, ticks) = if let Some(step) = tick_us {
+        let max = ((max_p999 * 1.1 / step).ceil() * step).max(step);
+        let ticks = (0..=(max / step) as usize)
+            .map(|index| index as f64 * step)
+            .collect();
+        (0.0, max, ticks)
+    } else {
+        let min = log_min_us.log10();
+        let max = (max_p999 * 1.25).log10().max(min + 1.0);
+        let ticks = (min.floor() as i32..=max.ceil() as i32)
+            .flat_map(|decade| {
+                [1.0_f64, 2.0, 5.0].map(move |factor| f64::from(decade) + factor.log10())
+            })
+            .filter(|tick| *tick >= min - 1e-9 && *tick <= max + 1e-9)
+            .collect();
+        (min, max, ticks)
+    };
+    let bounds = axis_min..axis_max;
+    (
+        LatencyAxis(bounds.clone().into(), ticks),
+        bounds,
+        log_min_us,
+    )
+}
+
+fn draw_mom_latency_panel(
+    area: &DrawingArea<SVGBackend<'_>, plotters::coord::Shift>,
+    caption: &str,
+    sizes: &[u64],
+    present: &[&Impl],
+    lat: &LatencyMap,
+    tick_us: Option<f64>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (min_p50, max_p999) = present
+        .iter()
+        .flat_map(|imp| sizes.iter().filter_map(|size| lat.get(size)?.get(imp.key)))
+        .fold((f64::INFINITY, 0.0_f64), |(lo, hi), entry| {
+            (lo.min(entry.p50), hi.max(entry.p999))
+        });
+    let (axis, bounds, log_min_us) = mom_latency_axis(min_p50, max_p999, tick_us);
+    let plot_us = |value: f64| {
+        if tick_us.is_some() {
+            value
+        } else {
+            value.max(log_min_us).log10()
+        }
+    };
+    let plot_lat: LatencyMap = lat
+        .iter()
+        .map(|(&size, values)| {
+            (
+                size,
+                values
+                    .iter()
+                    .map(|(key, entry)| {
+                        (
+                            key.clone(),
+                            LatencyEntry {
+                                p50: plot_us(entry.p50),
+                                p99: plot_us(entry.p99),
+                                p999: plot_us(entry.p999),
+                            },
+                        )
+                    })
+                    .collect(),
+            )
+        })
+        .collect();
+
+    let mut chart = ChartBuilder::on(area)
+        .caption(caption, ("sans-serif", 12).into_font().color(&TEXT_COLOR))
+        .set_label_area_size(LabelAreaPosition::Bottom, 28)
+        .set_label_area_size(LabelAreaPosition::Left, 60)
+        .margin_top(36)
+        .margin_left(10)
+        .margin_right(30)
+        .build_cartesian_2d(-0.15..(sizes.len() - 1) as f64 + 0.15, axis)?;
+
+    chart
+        .configure_mesh()
+        .x_labels(sizes.len())
+        .x_label_formatter(&|value| {
+            sizes
+                .get(value.round() as usize)
+                .map_or(String::new(), |&size| fmt_size(size))
+        })
+        .y_label_formatter(&|value| {
+            if tick_us.is_some() {
+                format!("{value:.0} \u{03bc}s")
+            } else {
+                fmt_us(10.0_f64.powf(*value))
+            }
+        })
+        .y_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
+        .x_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
+        .light_line_style(TRANSPARENT)
+        .bold_line_style(GRID_COLOR)
+        .axis_style(AXIS_COLOR)
+        .draw()?;
+
+    draw_latency_ranges(&mut chart, sizes, present, &plot_lat, bounds, false)?;
+
+    for imp in present.iter().rev() {
+        let points: Vec<(f64, f64)> = sizes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, size)| {
+                plot_lat
+                    .get(size)?
+                    .get(imp.key)
+                    .map(|value| (index as f64, value.p99))
+            })
+            .collect();
+        if points.is_empty() {
+            continue;
+        }
+        chart.draw_series(LineSeries::new(
+            points.iter().copied(),
+            imp.color.stroke_width(2),
+        ))?;
+        chart.draw_series(
+            points
+                .iter()
+                .map(|&(x, y)| Circle::new((x, y), 2, imp.color.filled())),
+        )?;
+    }
+
+    Ok(())
+}
+
 pub(crate) fn draw_latency_single_panel_100us(
     out_path: &Path,
     title: &str,
@@ -1243,8 +1695,10 @@ fn draw_latency_single_panel_with_version_mode<Y: Ranged<ValueType = f64> + Valu
         &present,
         cpu,
         if cpu.is_empty() { "" } else { "req CPU%" },
+        "",
         if cpu.is_empty() { "" } else { "rep CPU%" },
         version_mode,
+        LegendTableLayout::Threads,
     )?;
     root.present()?;
     drop(root);
@@ -1319,7 +1773,19 @@ fn draw_latency_panel<DB: DrawingBackend, Y: Ranged<ValueType = f64> + ValueForm
         if pts.is_empty() {
             continue;
         }
-        chart.draw_series(LineSeries::new(pts.clone(), imp.color.stroke_width(2)))?;
+        if imp.key.ends_with("-spin50") {
+            chart.draw_series(DashedLineSeries::new(
+                pts.iter().copied(),
+                6,
+                3,
+                imp.color.stroke_width(2),
+            ))?;
+        } else {
+            chart.draw_series(LineSeries::new(
+                pts.iter().copied(),
+                imp.color.stroke_width(2),
+            ))?;
+        }
         chart.draw_series(
             pts.iter()
                 .map(|&(x, y)| Circle::new((x, y), 2, imp.color.filled())),
@@ -1658,7 +2124,19 @@ fn draw_gbs_panel_log(
         if pts.is_empty() {
             continue;
         }
-        chart.draw_series(LineSeries::new(pts.clone(), imp.color.stroke_width(2)))?;
+        if imp.key.ends_with("-spin50") {
+            chart.draw_series(DashedLineSeries::new(
+                pts.iter().copied(),
+                6,
+                3,
+                imp.color.stroke_width(2),
+            ))?;
+        } else {
+            chart.draw_series(LineSeries::new(
+                pts.iter().copied(),
+                imp.color.stroke_width(2),
+            ))?;
+        }
         chart.draw_series(
             pts.iter()
                 .map(|&(x, y)| Circle::new((x, y), 2, imp.color.filled())),
@@ -1691,6 +2169,7 @@ pub(crate) fn draw_multirow_throughput(
     snd_label: &str,
     rcv_label: &str,
     fairness: Option<&[&FairnessMap]>,
+    gbs_scale: GbsScale,
     hw_label: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let present: Vec<&Impl> = impls
@@ -1764,15 +2243,20 @@ pub(crate) fn draw_multirow_throughput(
             )?;
         }
         if !large.is_empty() && gbs_max > 0.0 {
-            draw_gbs_panel(
-                &right_area,
-                &large,
-                &present,
-                tput,
-                gbs_max,
-                gbs_ticks,
-                row_fair,
-            )?;
+            match gbs_scale {
+                GbsScale::Logarithmic => {
+                    draw_gbs_panel_log(&right_area, &large, &present, tput, row_fair)?;
+                }
+                GbsScale::Linear => draw_gbs_panel(
+                    &right_area,
+                    &large,
+                    &present,
+                    tput,
+                    gbs_max,
+                    gbs_ticks,
+                    row_fair,
+                )?,
+            }
         }
     }
 

@@ -146,8 +146,8 @@ The output is `bindings/ruby/doc/charts/bindings.svg`. Its hardware subtitle
 comes from the repository-root `.chart_hw` file:
 
 ```text
-prefix=Linux VM on a 2018 Mac Mini
-postfix=6 cores, performance governor, turbo off
+prefix=<CPU model>
+postfix=performance governor, turbo off
 ```
 
 `.chart_hw` is local-only and gitignored.

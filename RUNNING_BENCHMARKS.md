@@ -156,27 +156,32 @@ ruby scripts/run_shm_pubsub.rb --pattern client-server
 cargo run --release -p omq-bench -- chart shm
 ```
 
-Writes `doc/charts/shm/{pubsub,pushpull,reqrep}.svg` from append-only
-`shm-{pubsub,pushpull,reqrep}.jsonl`.
-All series use HWM 1000 and source pools of 64 MiB below 1 MiB, 256 MiB at or above.
-Throughput splits 4 KiB slabs for 64 B-1 KiB messages. Only SHM pool uses mapped
-source storage; other series use heap storage.
-For SHM-only refreshes, run with `--impls shm,shm-pool`, then chart
-with `--cached-baselines` to retain cached inproc/IPC baselines.
+- Charts: `doc/charts/shm/{pubsub,pushpull,reqrep}.svg`. PUB/SUB rates are per
+  subscriber; msg/s lines are dashed on the left.
+- HWM: 1000. Source pools: 64 MiB below 1 MiB, 256 MiB above.
+- SHM pool uses mapped source storage; other series use heap storage.
+- For SHM-only refreshes, run with `--impls shm,shm-pool`, then chart with
+  `--cached-baselines`.
+
+The 2026-10-15 refresh passed all delivery checks. A separate old/new/new/old
+check of `d58a5a91` against `6f391f1f`, with identical harness, compiler, and
+external dependencies, found 16 B pooled-SHM throughput down 16.4% and
+inproc down 6.3%; inproc at 8 MiB fell 7.4%. Pooled SHM at 16 KiB/1 MiB/8 MiB
+changed +0.8%/-2.2%/-1.3%. These six-window medians flag regression candidates;
+the earlier cached large-payload gap alone overstated the current difference.
 
 Main Rust/comparison latency panels plot p99 round-trip latency, with whiskers
 from p50 to p99.9. Each point uses all three percentiles from the same measured
 run, and the Y axis includes the full whisker range.
 
-Chart subtitles come from `.chart_hw` in the repo root:
+Chart subtitles use the CPU model and repo-root `.chart_hw`:
 
 ```text
-prefix=Linux VM on a 2018 Mac Mini
-postfix=6 cores, performance governor, turbo off
+postfix=performance governor, turbo off
 ```
 
-`omq_bench` and binding chart scripts read the repo-root `.chart_hw`
-automatically.
+`omq_bench` reads the CPU model from `/proc/cpuinfo` and the postfix from
+`.chart_hw`. Set `prefix` there to override the CPU label.
 
 Run throughput benchmarks with `OMQ_BENCH_TASKSET=1`. It pins the measured
 peer to CPUs 1-2 and the other peer to CPUs 3-4. MT comparison peers keep the
@@ -445,6 +450,62 @@ cargo run --release -p omq-bench -- run dart --binary path/to/omq_dart_bench_pee
   --profile /mnt/bench/tmp/dart-profile --profile-side receive
 perf report --stdio --no-inline -g none \
   -i /mnt/bench/tmp/dart-profile/gather-16.data
+```
+
+### MOM Charts
+
+- `omq_bench chart mom` writes six network/local throughput, RTT, and PUB/SUB
+  SVGs in `doc/charts/moms/`.
+- RTT uses request/reply workloads and complete rival runs. Network axes are
+  logarithmic; local axes are linear with 20 μs top and 5 μs bottom ticks.
+  Network panels separate no-spin and spin results; all network lines are
+  solid. The bottom panel includes Aeron busy polling. DART also spins IO.
+- Local RTT separates no-spin and spin results into two panels. Iceoryx2
+  polling is in the bottom panel; all lines are solid.
+- PUB/SUB rates are per subscriber. Left msg/s lines are dashed; right GB/s
+  lines are solid.
+
+Build `omq_dart_bench_peer` with `dart quic`, then collect both OMQ network
+latency cohorts. Local IPC/SHM RTT comes from the SHM REQ/REP sweep above.
+The six CPU IDs place sender caller/IO on 1/2 and receiver IO/caller on 3/4.
+
+```sh
+for spin in 0 50; do
+  omq_bench run dart --binary path/to/omq_dart_bench_peer \
+    --transport tcp,quic,dart --congestion adaptive --kind latency \
+    --spin "$spin" --io-spin "$spin" --cpus 1,2,0,3,5,4 \
+    --sizes 16,32,64,256,1024,4096 --iterations 10000 --warmup 2000 --repeats 3 \
+    --output "$HOME/.cache/omq/mom-omq.jsonl"
+done
+omq_bench run dart --binary path/to/omq_dart_bench_peer \
+  --transport dart --congestion adaptive --kind throughput --window-messages 512 \
+  --spin 50 --io-spin 50 --cpus 1,2,0,3,5,4 --warmup-seconds 1 --repeats 3 \
+  --sizes 16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,262144,4194304,8388608 \
+  --output "$HOME/.cache/omq/mom-omq.jsonl"
+omq_bench chart mom
+```
+
+The optional `omq_mom_bench` executable provides broker adapters. Run it with
+`cargo run --release -p omq-bench --features mom-bench --bin omq_mom_bench -- --help`.
+Rival adapters: [scripts/rivals](scripts/rivals/README.md).
+
+- `scripts/rivals/run_fanout.rb` writes `~/.cache/omq/mom-fanout.jsonl`.
+- Each of three rounds (at least 3 seconds of publishing) verifies delivery to all 1/4/32
+  subscribers. The score includes the slowest subscriber's drain.
+- OMQ uses HWM 1000 and blocking receive. SHM uses RADIO/DISH; the pooled
+  series fills producer slots without allocation fallback.
+- Zenoh uses one session per subscriber and blocking FIFO receive over TCP or
+  Unix sockets. RabbitMQ uses a fanout exchange with one queue per subscriber;
+  start a local broker first.
+- Publisher CPUs: 1-2. Subscriber CPUs: 3-4. Optional sizes: 128 KiB, 1 MiB,
+  8 MiB. Incomplete cohorts fail chart generation.
+
+Refresh verified fan-out:
+
+```sh
+ruby scripts/rivals/run_fanout.rb --impls omq-tcp,omq-quic,omq-dart,omq-ipc,omq-shm,omq-shm-pool
+ruby scripts/rivals/run_fanout.rb --impls zenoh-tcp,rabbitmq-tcp,zenoh-unix
+omq_bench chart mom-fanout
 ```
 
 ### Cross-library Comparison Charts

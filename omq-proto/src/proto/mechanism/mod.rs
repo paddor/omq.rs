@@ -356,7 +356,8 @@ pub struct AuthenticationResult {
     /// Optional application user identity. `Some` may contain an empty value
     /// when a protocol explicitly supplied an empty user-id field.
     pub user_id: Option<Bytes>,
-    /// Additional authenticated connection properties.
+    /// Additional authenticated connection properties. These replace
+    /// peer-supplied properties with the same name, ignoring ASCII case.
     pub metadata: Vec<(String, Bytes)>,
 }
 
@@ -396,6 +397,15 @@ impl AuthenticationResult {
     }
 
     pub(crate) fn apply_to(self, properties: &mut PeerProperties) {
+        // User-Id belongs to the authenticator even when it supplies no ID.
+        // Remove collisions rather than relying on a consumer's lookup order.
+        properties.other.retain(|(name, _)| {
+            !name.eq_ignore_ascii_case("User-Id")
+                && !self
+                    .metadata
+                    .iter()
+                    .any(|(authenticated, _)| name.eq_ignore_ascii_case(authenticated))
+        });
         if let Some(user_id) = self.user_id {
             properties.add("User-Id", user_id);
         }
@@ -755,6 +765,40 @@ mod tests {
 
     use super::*;
     use crate::proto::SocketType;
+
+    #[test]
+    fn null_authentication_properties_override_peer_claims() {
+        for user_id in [None, Some(Bytes::new()), Some(Bytes::from_static(b"alice"))] {
+            let authentication = AuthenticationResult {
+                status: AuthenticationStatus::Success,
+                user_id: user_id.clone(),
+                metadata: vec![("Role".into(), Bytes::from_static(b"reader"))],
+            };
+            let mut server = NullMechanism::new_server(
+                Authenticator::new_with_result(move |_| authentication.clone()),
+                None,
+            );
+            let mut out = Vec::new();
+            server.start(&mut out, PeerProperties::default()).unwrap();
+            let mut peer = PeerProperties::default().with_socket_type(SocketType::Push);
+            for name in ["User-Id", "user-id", "USER-ID", "Role", "role", "ROLE"] {
+                peer.add(name, Bytes::from_static(b"admin"));
+            }
+            peer.add("X-Application", Bytes::from_static(b"client"));
+            let MechanismStep::Complete { peer_properties } =
+                server.on_command(Command::Ready(peer), &mut out).unwrap()
+            else {
+                panic!("expected completed handshake");
+            };
+            let mut expected = vec![("X-Application".into(), Bytes::from_static(b"client"))];
+            if let Some(user_id) = user_id {
+                expected.push(("User-Id".into(), user_id));
+            }
+            expected.push(("Role".into(), Bytes::from_static(b"reader")));
+            assert_eq!(peer_properties.other, expected);
+            assert_eq!(peer_properties.socket_type, Some(SocketType::Push));
+        }
+    }
 
     #[test]
     fn null_start_emits_ready() {

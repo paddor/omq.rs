@@ -493,6 +493,9 @@ mod tests {
             .unwrap();
         let mut client_properties = PeerProperties::default().with_socket_type(SocketType::Push);
         client_properties.identity = Some(Bytes::from_static(b"client"));
+        for name in ["User-Id", "user-id", "Role", "role"] {
+            client_properties.add(name, Bytes::from_static(b"forged"));
+        }
         let step = server
             .on_command(
                 Command::Unknown {

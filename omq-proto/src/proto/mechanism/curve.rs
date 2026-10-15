@@ -980,7 +980,13 @@ mod tests {
     fn full_handshake_and_transform_roundtrip() {
         let server_kp = CurveKeypair::generate();
         let client_kp = CurveKeypair::generate();
-        let mut server = CurveMechanism::new_server(server_kp.clone(), test_server_options());
+        let mut options = test_server_options();
+        options.authenticator = Some(super::super::Authenticator::new_with_result(|_| {
+            super::super::AuthenticationResult::allow()
+                .with_user_id(Bytes::from_static(b"alice"))
+                .with_metadata(vec![("Role".into(), Bytes::from_static(b"reader"))])
+        }));
+        let mut server = CurveMechanism::new_server(server_kp.clone(), options);
         let mut client = CurveMechanism::new_client(client_kp.clone(), server_kp.public);
 
         let mut s_out = Vec::new();
@@ -990,9 +996,11 @@ mod tests {
         server
             .start(&mut s_out, dummy_props(SocketType::Pull))
             .unwrap();
-        client
-            .start(&mut c_out, dummy_props(SocketType::Push))
-            .unwrap();
+        let mut client_properties = dummy_props(SocketType::Push);
+        for name in ["User-Id", "user-id", "Role", "role"] {
+            client_properties.add(name, Bytes::from_static(b"forged"));
+        }
+        client.start(&mut c_out, client_properties).unwrap();
         assert!(s_out.is_empty());
         assert_eq!(c_out.len(), 1);
 
@@ -1024,6 +1032,13 @@ mod tests {
         assert!(matches!(step_c, MechanismStep::Complete { .. }));
         if let MechanismStep::Complete { peer_properties } = step_s {
             assert_eq!(peer_properties.socket_type, Some(SocketType::Push));
+            assert_eq!(
+                peer_properties.other,
+                vec![
+                    ("User-Id".into(), Bytes::from_static(b"alice")),
+                    ("Role".into(), Bytes::from_static(b"reader")),
+                ]
+            );
         }
         if let MechanismStep::Complete { peer_properties } = step_c {
             assert_eq!(peer_properties.socket_type, Some(SocketType::Pull));

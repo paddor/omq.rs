@@ -5,6 +5,67 @@ use std::time::Duration;
 use super::*;
 use crate::engine::send_pipe;
 
+#[tokio::test]
+async fn stream_full_lane_preserves_backpressure_and_other_peers() {
+    let mut send = IdentitySend::new(SocketType::Stream, &Options::default());
+    let (data_inbox, mut receiver) = crate::engine::data_inbox::channel(1);
+    let (other_inbox, mut other_receiver) = crate::engine::data_inbox::channel(1);
+    let make_handle = |data_inbox| ActorPeerDriverHandle {
+        inbox: tokio::sync::mpsc::channel(1).0.into(),
+        data_inbox,
+        cancel: tokio_util::sync::CancellationToken::new(),
+        transmit_slot: None,
+        direct_tcp_writer: None,
+        send_pipe: None,
+        inproc: None,
+    };
+    send.connection_added(
+        7,
+        make_handle(data_inbox),
+        Bytes::from_static(b"slow"),
+        false,
+    );
+    send.connection_added(
+        8,
+        make_handle(other_inbox),
+        Bytes::from_static(b"fast"),
+        false,
+    );
+    let submitter = send.submitter();
+    submitter
+        .try_send(Message::multipart(["slow", "first"]))
+        .unwrap();
+    assert!(submitter.send_ready());
+    let next = Message::multipart(["slow", "next"]);
+    assert!(matches!(
+        submitter.try_send(next.clone()),
+        Err(TrySendError::Full(returned)) if returned == next
+    ));
+    let waiting = submitter.send(next);
+    tokio::pin!(waiting);
+    assert!(waiting.as_mut().now_or_never().is_none());
+    submitter
+        .try_send(Message::multipart(["fast", "available"]))
+        .unwrap();
+    assert!(matches!(
+        other_receiver.recv().await.unwrap(),
+        PeerDriverData::SendMessage(message) if message == Message::single("available")
+    ));
+    assert!(matches!(
+        receiver.recv().await.unwrap(),
+        PeerDriverData::SendMessage(message) if message == Message::single("first")
+    ));
+    receiver.release_consumed();
+    tokio::time::timeout(Duration::from_secs(1), waiting)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        receiver.recv().await.unwrap(),
+        PeerDriverData::SendMessage(message) if message == Message::single("next")
+    ));
+}
+
 #[test]
 fn default_router_releases_full_messages_outside_routing_lock() {
     struct Export {

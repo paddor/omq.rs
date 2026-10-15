@@ -602,6 +602,9 @@ fn check_pre_send_frame_count(t: SocketType, msg: &Message) -> Result<()> {
                 msg.len()
             )))
         }
+        SocketType::Stream if msg.len() != 2 => Err(Error::Protocol(
+            "STREAM socket requires [routing_id, body] (2 parts)".into(),
+        )),
         _ => Ok(()),
     }
 }

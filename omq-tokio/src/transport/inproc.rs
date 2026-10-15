@@ -163,7 +163,7 @@ enum PortState {
 pub(crate) struct OpenPort {
     pub(crate) sink: RecvSink,
     /// ROUTER receive: identity frame prepended to every message.
-    pub(crate) identity: Option<bytes::Bytes>,
+    pub(crate) identity: Option<omq_proto::Identity>,
     pub(crate) max_message_size: Option<usize>,
     /// Cancels the receiving peer after a protocol violation.
     pub(crate) cancel: tokio_util::sync::CancellationToken,
@@ -245,7 +245,7 @@ impl InprocPort {
         }
         let prefixed = open.identity.is_some();
         let msg = match &open.identity {
-            Some(identity) => Message::with_prefix(identity.clone(), msg),
+            Some(identity) => Message::with_identity(identity.clone(), msg),
             None => msg,
         };
         let delivered = if DEFERRED {

@@ -133,6 +133,17 @@ async fn peer_identity_api_over_quic() {
         .unwrap()
         .unwrap();
     assert_eq!(sender.as_ref(), b"peer-b");
+    let diagnostics = &sender.peer_info().diagnostics;
+    assert_eq!(diagnostics.endpoint, bound.to_string());
+    assert!(
+        matches!(diagnostics.local_address, Some(omq_tokio::PeerIdent::Socket(address)) if address.port() == port_of(&bound))
+    );
+    assert!(matches!(
+        diagnostics.remote_address,
+        Some(omq_tokio::PeerIdent::Socket(_))
+    ));
+    // QUIC's TLS configuration does not request client certificates.
+    assert!(sender.peer_info().authentication.public_key.is_none());
     assert_eq!(body, Message::single("request"));
 
     a.send_to(sender, Message::multipart(["reply", "part-2"]))
@@ -188,42 +199,46 @@ async fn receive_receipts_isolate_paused_quic_sources() {
         };
         send(&paused, Message::single("held")).await;
         let (held, message) =
-            tokio::time::timeout(Duration::from_secs(10), receiver.recv_from(None))
+            tokio::time::timeout(Duration::from_secs(10), receiver.recv_with_receipt(None))
                 .await
                 .unwrap()
                 .unwrap();
-        let source = held.source().unwrap().clone();
+        let source = held.lane().unwrap().clone();
         assert_eq!(message, Message::single("held"));
         for i in 0..8 {
             send(&paused, Message::single(format!("queued-{i}"))).await;
         }
         assert!(matches!(
-            receiver.try_recv_from(Some(&source)),
+            receiver.try_recv_with_receipt(Some(&source)),
             Err(omq_tokio::Error::WouldBlock)
         ));
         send(&healthy, Message::single("healthy")).await;
         let (receipt, body) =
-            tokio::time::timeout(Duration::from_secs(10), receiver.recv_from(None))
+            tokio::time::timeout(Duration::from_secs(10), receiver.recv_with_receipt(None))
                 .await
                 .unwrap()
                 .unwrap();
-        assert_ne!(receipt.source().unwrap(), &source);
+        assert_ne!(receipt.lane().unwrap(), &source);
         assert_eq!(body, Message::single("healthy"));
         drop(receipt);
         receiver.unshift(held, message).unwrap();
-        let (receipt, body) =
-            tokio::time::timeout(Duration::from_secs(10), receiver.recv_from(Some(&source)))
-                .await
-                .unwrap()
-                .unwrap();
+        let (receipt, body) = tokio::time::timeout(
+            Duration::from_secs(10),
+            receiver.recv_with_receipt(Some(&source)),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(body, Message::single("held"));
         drop(receipt);
         for i in 0..8 {
-            let (receipt, body) =
-                tokio::time::timeout(Duration::from_secs(10), receiver.recv_from(Some(&source)))
-                    .await
-                    .unwrap()
-                    .unwrap();
+            let (receipt, body) = tokio::time::timeout(
+                Duration::from_secs(10),
+                receiver.recv_with_receipt(Some(&source)),
+            )
+            .await
+            .unwrap()
+            .unwrap();
             assert_eq!(body, Message::single(format!("queued-{i}")));
             drop(receipt);
         }

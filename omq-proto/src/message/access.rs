@@ -6,6 +6,7 @@ impl Message {
     #[inline]
     pub fn len(&self) -> usize {
         match &self.inner {
+            MessageInner::Identified(message) => message.len(),
             MessageInner::Empty | MessageInner::RoutedEmpty { .. } => 0,
             MessageInner::Inline { len, .. } => {
                 if len & INLINE_DELIMITED_FLAG != 0 {
@@ -38,6 +39,7 @@ impl Message {
     #[inline]
     pub fn byte_len(&self) -> usize {
         match &self.inner {
+            MessageInner::Identified(message) => message.byte_len(),
             MessageInner::Empty | MessageInner::RoutedEmpty { .. } => 0,
             MessageInner::Inline { len, .. } => (len & !INLINE_DELIMITED_FLAG) as usize,
             MessageInner::InlinePair(pair) => pair.byte_len(),
@@ -64,23 +66,14 @@ impl Message {
 
     /// Whether this is a multi-part message (more than one frame).
     pub fn is_multipart(&self) -> bool {
-        matches!(
-            self.inner,
-            MessageInner::Inline { len, .. } if len & INLINE_DELIMITED_FLAG != 0
-        ) || matches!(
-            self.inner,
-            MessageInner::InlinePair(_)
-                | MessageInner::EmptyDelimitedBytes(_)
-                | MessageInner::PrefixedShared { .. }
-                | MessageInner::Multi(_)
-                | MessageInner::RoutedMulti { .. }
-        )
+        self.len() > 1
     }
 
     /// Get a single part as `Bytes` by index.
     #[inline]
     pub fn part_bytes(&self, index: usize) -> Option<Bytes> {
         match &self.inner {
+            MessageInner::Identified(message) => message.payload(index).map(|p| p.as_bytes()),
             MessageInner::InlinePair(pair) => pair.get(index).map(Bytes::copy_from_slice),
             MessageInner::Empty | MessageInner::RoutedEmpty { .. } => None,
             MessageInner::Inline { len, data } => {
@@ -135,6 +128,7 @@ impl Message {
     #[inline]
     pub fn part_slice(&self, index: usize) -> Option<&[u8]> {
         match &self.inner {
+            MessageInner::Identified(message) => message.get(index),
             MessageInner::InlinePair(pair) => pair.get(index),
             MessageInner::Empty | MessageInner::RoutedEmpty { .. } => None,
             MessageInner::Inline { len, data } => {
@@ -181,6 +175,7 @@ impl Message {
     /// Inline bytes remain inline; shared owners need no `Bytes` adapter.
     pub fn last_payload(&self) -> Option<Payload> {
         match &self.inner {
+            MessageInner::Identified(message) => message.payload(message.len() - 1),
             MessageInner::InlinePair(pair) => Some(Payload::from_slice(pair.slices()[1])),
             MessageInner::Empty | MessageInner::RoutedEmpty { .. } => None,
             MessageInner::Inline { len, data } => Some(Payload::from_slice(
@@ -234,6 +229,11 @@ impl Message {
     #[inline]
     pub(crate) fn iter_slices(&self, mut f: impl FnMut(&[u8])) {
         match &self.inner {
+            MessageInner::Identified(message) => {
+                for index in 0..message.len() {
+                    f(message.get(index).expect("identity frame"));
+                }
+            }
             MessageInner::InlinePair(pair) => {
                 for part in pair.slices() {
                     f(part);

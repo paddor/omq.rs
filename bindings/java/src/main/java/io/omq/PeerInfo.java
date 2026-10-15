@@ -3,8 +3,10 @@ package io.omq;
 import java.util.Arrays;
 import java.util.Optional;
 
-/** Peer metadata supplied to authentication callbacks and monitor events. */
+/** Peer metadata supplied to authentication callbacks, monitor events, and received identities. */
 public final class PeerInfo {
+    private final PeerAuthentication authentication;
+    private final PeerDiagnostics diagnostics;
     private final String mechanism;
     private final String publicKey;
     private final byte[] identity;
@@ -31,6 +33,15 @@ public final class PeerInfo {
             String socketType,
             int zmtpMajor,
             int zmtpMinor) {
+        this(mechanism, publicKey, identity, username, password, connectionId, peerAddress,
+                socketType, zmtpMajor, zmtpMinor, null, null);
+    }
+
+    PeerInfo(String mechanism, String publicKey, byte[] identity, String username, String password,
+            long connectionId, String peerAddress, String socketType, int zmtpMajor, int zmtpMinor,
+            PeerAuthentication authentication, PeerDiagnostics diagnostics) {
+        this.authentication = authentication;
+        this.diagnostics = diagnostics;
         this.mechanism = mechanism;
         this.publicKey = publicKey;
         this.identity = identity == null ? null : Arrays.copyOf(identity, identity.length);
@@ -41,6 +52,16 @@ public final class PeerInfo {
         this.socketType = socketType;
         this.zmtpMajor = zmtpMajor;
         this.zmtpMinor = zmtpMinor;
+    }
+
+    /** Returns locally verified facts; absent on pre-admission authentication callbacks. */
+    public Optional<PeerAuthentication> authentication() {
+        return Optional.ofNullable(authentication);
+    }
+
+    /** Returns admission-time transport diagnostics, when available. */
+    public Optional<PeerDiagnostics> diagnostics() {
+        return Optional.ofNullable(diagnostics);
     }
 
     /** Returns the ZMTP mechanism name, such as {@code PLAIN} or {@code CURVE}. */
@@ -68,12 +89,12 @@ public final class PeerInfo {
         return Optional.ofNullable(password);
     }
 
-    /** Returns native connection id, when present. */
+    /** Returns a native connection ID for diagnostics, when present. */
     public java.util.OptionalLong connectionId() {
         return connectionId < 0 ? java.util.OptionalLong.empty() : java.util.OptionalLong.of(connectionId);
     }
 
-    /** Returns TCP peer address, when present. */
+    /** Returns the TCP peer address for diagnostics, when present. */
     public Optional<String> peerAddress() {
         return Optional.ofNullable(peerAddress);
     }

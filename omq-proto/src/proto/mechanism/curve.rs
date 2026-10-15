@@ -580,7 +580,11 @@ impl CurveClient {
         let pt = CurveBox::new(peer_eph_public, our_eph_secret)
             .decrypt(&nonce, ready_box)
             .map_err(|_| Error::HandshakeFailed("CURVE READY decrypt failed".into()))?;
-        let props = decode_metadata(&pt)?;
+        let mut props = decode_metadata(&pt)?;
+        let authentication = std::sync::Arc::make_mut(&mut props.authentication);
+        authentication.mechanism = Some(crate::proto::MechanismName::CURVE);
+        authentication.public_key =
+            Some(crate::PeerPublicKey::Curve(*self.peer_lt_public.as_bytes()));
 
         // Transition to Done, moving keys.
         let CurveClientState::AwaitingReady {
@@ -717,6 +721,9 @@ impl CurveServer {
             }
             (b"INITIATE", CurveServerState::AwaitingInitiate) => {
                 let (mut peer_props, peer_public_key) = self.parse_initiate(&body)?;
+                let authentication = std::sync::Arc::make_mut(&mut peer_props.authentication);
+                authentication.mechanism = Some(crate::proto::MechanismName::CURVE);
+                authentication.public_key = Some(crate::PeerPublicKey::Curve(peer_public_key));
                 if let Some(auth) = &self.authenticator {
                     let result = auth.authenticate(&super::MechanismPeerInfo {
                         mechanism: crate::proto::greeting::MechanismName::CURVE,
@@ -737,7 +744,7 @@ impl CurveServer {
                             result.status.code()
                         )));
                     }
-                    result.apply_to(&mut peer_props);
+                    result.apply_to(&mut peer_props, crate::proto::MechanismName::CURVE);
                 }
                 // parse_initiate transitions state to Done.
                 let ready = self.build_ready()?;
@@ -1031,6 +1038,18 @@ mod tests {
         assert!(matches!(step_s, MechanismStep::Complete { .. }));
         assert!(matches!(step_c, MechanismStep::Complete { .. }));
         if let MechanismStep::Complete { peer_properties } = step_s {
+            assert_eq!(
+                peer_properties.authentication.public_key,
+                Some(crate::PeerPublicKey::Curve(*client_kp.public.as_bytes()))
+            );
+            assert_eq!(
+                peer_properties.authentication.user_id.as_deref(),
+                Some(b"alice".as_slice())
+            );
+            assert_eq!(
+                peer_properties.authentication.metadata,
+                vec![("Role".into(), Bytes::from_static(b"reader"))]
+            );
             assert_eq!(peer_properties.socket_type, Some(SocketType::Push));
             assert_eq!(
                 peer_properties.other,
@@ -1041,6 +1060,12 @@ mod tests {
             );
         }
         if let MechanismStep::Complete { peer_properties } = step_c {
+            assert_eq!(
+                peer_properties.authentication.public_key,
+                Some(crate::PeerPublicKey::Curve(*server_kp.public.as_bytes()))
+            );
+            assert!(peer_properties.authentication.user_id.is_none());
+            assert!(peer_properties.authentication.metadata.is_empty());
             assert_eq!(peer_properties.socket_type, Some(SocketType::Pull));
         }
 

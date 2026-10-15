@@ -45,6 +45,7 @@ impl Payload {
     /// `None` means an opaque byte owner whose allocation cannot be measured.
     pub fn retained_size(&self) -> Option<usize> {
         match &self.inner {
+            PayloadInner::Identity(identity) => Some(identity.retained_size()),
             PayloadInner::Empty | PayloadInner::Inline { .. } => Some(0),
             PayloadInner::Single(_) => None,
             // Include a conservative allowance for Bytes' shared owner and
@@ -121,6 +122,7 @@ impl Payload {
     #[inline]
     pub fn len(&self) -> usize {
         match &self.inner {
+            PayloadInner::Identity(identity) => identity.as_ref().len(),
             PayloadInner::Empty => 0,
             PayloadInner::Inline { len, .. } => *len as usize,
             PayloadInner::Single(b) => b.len(),
@@ -154,6 +156,7 @@ impl Payload {
     /// - Shared owner: allocates one `Bytes` adapter retaining that owner.
     pub fn as_bytes(&self) -> Bytes {
         match &self.inner {
+            PayloadInner::Identity(identity) => identity.to_bytes(),
             PayloadInner::Empty => Bytes::new(),
             PayloadInner::Inline { data, len } => Bytes::copy_from_slice(&data[..*len as usize]),
             PayloadInner::Single(b) => b.clone(),
@@ -166,6 +169,7 @@ impl Payload {
     #[inline]
     pub fn as_slice(&self) -> &[u8] {
         match &self.inner {
+            PayloadInner::Identity(identity) => identity.as_ref(),
             PayloadInner::Empty => &[],
             PayloadInner::Inline { data, len } => &data[..*len as usize],
             PayloadInner::Single(b) => b,

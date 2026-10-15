@@ -18,7 +18,7 @@ use crate::engine::signal::{DataSignal, StateSignal};
 mod budget;
 mod sink;
 mod source;
-pub use source::{ReceiveReceipt, ReceiveSource, UnshiftError};
+pub use source::{ReceiveLane, ReceiveReceipt, UnshiftError};
 #[cfg(test)]
 mod tests;
 use budget::{Budget, QueuedMessage};
@@ -110,7 +110,7 @@ impl RecvShared {
 
 #[derive(Debug)]
 struct QueueState {
-    identity: Bytes,
+    identity: omq_proto::Identity,
     // Identity handover invalidates the old queue before publishing its replacement.
     status: AtomicU8,
     space: StateSignal,
@@ -179,7 +179,7 @@ impl RecvItem {
     fn budget_bytes(&self) -> usize {
         self.body
             .byte_len()
-            .saturating_add(self.state.identity.len())
+            .saturating_add(self.state.identity.as_ref().len())
             .saturating_add(std::mem::size_of::<omq_proto::message::Payload>())
     }
 }
@@ -240,9 +240,9 @@ impl PeerRecvRoutes {
         )
     }
 
-    pub(crate) fn register(
+    pub(crate) fn register_peer(
         &mut self,
-        identity: Bytes,
+        identity: omq_proto::Identity,
         cancel: CancellationToken,
     ) -> Result<PeerRecvSink> {
         let mut registration = self
@@ -270,7 +270,7 @@ impl PeerRecvRoutes {
             .states
             .retain(|state| state.strong_count() != 0);
         let state = Arc::new(QueueState {
-            identity: identity.clone(),
+            identity,
             status: AtomicU8::new(QueueState::LIVE),
             space: StateSignal::new(),
             cancel,
@@ -285,7 +285,7 @@ impl PeerRecvRoutes {
         registration.states.push(Arc::downgrade(&state));
         if let Some(previous) = self
             .previous
-            .insert(identity, Arc::downgrade(&state))
+            .insert(state.identity.to_bytes(), Arc::downgrade(&state))
             .and_then(|state| state.upgrade())
         {
             let claimed = previous.retire();
@@ -382,8 +382,10 @@ impl PeerReceiver {
                 let _ = budget.account(item.budget_bytes());
                 if item.state.current() {
                     self.observed_empty = false;
-                    let message =
-                        Message::with_prefix(item.state.identity.clone(), item.body.into_message());
+                    let message = Message::with_identity(
+                        item.state.identity.clone(),
+                        item.body.into_message(),
+                    );
                     // Another caller may already be parked on this batch's
                     // coalesced signal. No handoff work for a sole receiver.
                     self.wake_waiter();

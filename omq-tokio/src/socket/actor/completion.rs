@@ -332,6 +332,8 @@ mod tests {
         driver.peers.insert(
             peer_id,
             PeerEntry {
+                local_address: None,
+                remote_address: None,
                 options: Arc::new(driver.options.clone()),
                 ident: PeerIdent::Socket("127.0.0.1:12345".parse().unwrap()),
                 handle: PeerDriverHandle {

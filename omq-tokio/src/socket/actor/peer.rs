@@ -370,6 +370,8 @@ impl SocketDriver {
         self.peers.insert(
             peer_id,
             PeerEntry {
+                local_address: None,
+                remote_address: None,
                 options,
                 ident: peer_ident,
                 handle: handle.clone(),
@@ -486,9 +488,28 @@ impl SocketDriver {
             }
             return;
         }
+        let Some(peer) = self.peers.get(&peer_id) else {
+            return;
+        };
+        let info = PeerInfo {
+            authentication: peer_properties.authentication.clone(),
+            diagnostics: omq_proto::PeerDiagnostics {
+                endpoint: peer.endpoint.to_string(),
+                local_address: peer.local_address.clone(),
+                remote_address: peer.remote_address.clone(),
+            },
+            connection_id: peer_id,
+            peer_address: peer_ident_socket_addr(&peer.ident),
+            peer_identity: peer_properties.identity.clone(),
+            peer_properties: peer_properties.clone(),
+            zmtp_version: Self::peer_protocol_version(&peer.endpoint, peer_minor),
+        };
+        let sender = omq_proto::Identity::new(&identity, info);
+        // The compact snapshot is published before any data plane can run.
+        let info = sender.peer_info().clone();
         // Admission can reject a replacement at the receive queue limit.
         // Keep the current route alive until the replacement owns its queue.
-        let Some(activation) = self.receive_activation(peer_id, &identity) else {
+        let Some(activation) = self.receive_activation(peer_id, &sender) else {
             return;
         };
         if let Some(old_id) = self.send_strategy.peer_for_identity(&identity)
@@ -505,13 +526,6 @@ impl SocketDriver {
             p.pending_handshake = false;
             p.handshake_admission = None;
             p.identity = identity.clone();
-            let info = PeerInfo {
-                connection_id: peer_id,
-                peer_address: peer_ident_socket_addr(&p.ident),
-                peer_identity: peer_properties.identity.clone(),
-                peer_properties: peer_properties.clone(),
-                zmtp_version: Self::peer_protocol_version(&p.endpoint, peer_minor),
-            };
             p.info = Some(info.clone());
             let ready_event = MonitorEvent::HandshakeSucceeded {
                 endpoint: p.endpoint.clone(),
@@ -551,14 +565,17 @@ impl SocketDriver {
                 io_thread,
             );
         }
-        self.recv_strategy.connection_added(peer_id, identity);
+        self.recv_strategy.admitted(peer_id, sender.clone());
         // Replies are routable now, so the peer may deliver into this
         // socket's receive queue.
-        if let Some((port, open)) = self
+        if let Some((port, mut open)) = self
             .peers
             .get_mut(&peer_id)
             .and_then(|peer| peer.inproc_inbound.take())
         {
+            if self.socket_type == SocketType::Router {
+                open.identity = Some(sender);
+            }
             port.open(open);
         }
         if became_ready {
@@ -579,13 +596,13 @@ impl SocketDriver {
     fn receive_activation(
         &mut self,
         peer_id: u64,
-        identity: &bytes::Bytes,
+        identity: &omq_proto::Identity,
     ) -> Option<crate::engine::PeerDriverCommand> {
         let Some(routes) = &mut self.peer_recv_routes else {
             return Some(crate::engine::PeerDriverCommand::ActivateDataPlane);
         };
         let peer = self.peers.get(&peer_id)?;
-        match routes.register(identity.clone(), peer.handle.cancel.clone()) {
+        match routes.register_peer(identity.clone(), peer.handle.cancel.clone()) {
             Ok(sink) => Some(crate::engine::PeerDriverCommand::ActivateWithRecvSink(
                 crate::engine::RecvSink::Peer(sink),
             )),

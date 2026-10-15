@@ -17,6 +17,7 @@ pub mod flow;
 /// Encoded frame queue with arena storage and external payload entries.
 pub mod frame_buffer;
 pub mod handle_frame;
+pub mod identity;
 pub mod inproc;
 pub mod message;
 pub mod monitor;
@@ -33,6 +34,7 @@ pub mod type_state;
 pub use endpoint::IpcPath;
 pub use endpoint::{Endpoint, EndpointRole, EndpointSpec};
 pub use error::{Error, HandshakeRefusal, Result, TrySendError};
+pub use identity::{Identity, PeerAuthentication, PeerDiagnostics, PeerPublicKey};
 pub use message::{
     Frame, FrameFlags, Message, MessageIter, MessagePool, PartCountError, Payload,
     generated_identity,

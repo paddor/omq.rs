@@ -448,6 +448,8 @@ impl Entry {
 
     fn peer_entry(&self, ident: PeerIdent, handle: PeerDriverHandle, route_id: u64) -> PeerEntry {
         PeerEntry {
+            local_address: None,
+            remote_address: Some(ident.clone()),
             options: self.options.clone(),
             ident,
             handle,
@@ -471,6 +473,7 @@ impl Entry {
 
 fn ready_properties(ready: ReadyPeer) -> Arc<PeerProperties> {
     Arc::new(PeerProperties {
+        authentication: Arc::default(),
         socket_type: Some(ready.socket_type),
         identity: ready.identity,
         other: vec![

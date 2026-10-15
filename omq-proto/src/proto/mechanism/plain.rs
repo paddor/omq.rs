@@ -221,7 +221,7 @@ impl PlainServer {
             {
                 let mut peer_properties = command::decode_properties(&body)?;
                 if let Some(authentication) = self.authentication.take() {
-                    authentication.apply_to(&mut peer_properties);
+                    authentication.apply_to(&mut peer_properties, super::MechanismName::PLAIN);
                 }
                 let metadata = command::encode_properties(&self.our_props);
                 out.push(Command::Unknown {
@@ -508,6 +508,19 @@ mod tests {
         let MechanismStep::Complete { peer_properties } = step else {
             panic!("expected completed handshake");
         };
+        assert_eq!(
+            peer_properties.authentication.user_id.as_deref(),
+            Some(b"alice".as_slice())
+        );
+        assert_eq!(
+            peer_properties.authentication.metadata,
+            vec![("Role".into(), Bytes::from_static(b"administrator"))]
+        );
+        assert_eq!(
+            peer_properties.authentication.mechanism,
+            Some(super::super::MechanismName::PLAIN)
+        );
+        assert!(peer_properties.authentication.public_key.is_none());
         assert_eq!(
             peer_properties.other,
             vec![

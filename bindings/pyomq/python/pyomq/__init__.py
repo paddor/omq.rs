@@ -257,8 +257,10 @@ def curve_public(secret_key: bytes | str) -> bytes:
     return _native.curve_public(secret_key)
 
 
-if hasattr(_native, "PeerInfo"):
-    PeerInfo = _native.PeerInfo
+PeerInfo = _native.PeerInfo
+Identity = _native.Identity
+PeerAuthentication = _native.PeerAuthentication
+PeerDiagnostics = _native.PeerDiagnostics
 
 
 # ── Socket option attribute map ──────────────────────────────────────
@@ -843,6 +845,48 @@ class Socket(_BaseSocket[_native.Socket, "Context[Socket]"], metaclass=_SocketMe
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 
+    @overload
+    def recv_from(
+        self, flags: int = 0, copy: Literal[True] = True
+    ) -> tuple[Identity, list[bytes]]: ...
+
+    @overload
+    def recv_from(
+        self, flags: int = 0, *, copy: Literal[False]
+    ) -> tuple[Identity, list[Frame]]: ...
+
+    @overload
+    def recv_from(
+        self, flags: int, copy: Literal[False]
+    ) -> tuple[Identity, list[Frame]]: ...
+
+    @overload
+    def recv_from(
+        self, flags: int = 0, copy: bool = True
+    ) -> tuple[Identity, list[bytes] | list[Frame]]: ...
+
+    def recv_from(self, flags=0, copy=True):
+        """Receive (Identity, body frames) on ROUTER/PEER, with an owning peer snapshot.
+
+        Finish any partial recv() before calling this method. Use identity.peer_info
+        for authentication and diagnostics, and bytes(identity) for routing bytes.
+        """
+        try:
+            return self._sock.recv_from(flags, copy)
+        except _native.ZMQError as e:
+            raise error.from_native(e) from None
+
+    def send_to(
+        self,
+        identity: Identity,
+        parts: Iterable[Sendable],
+        flags: int = 0,
+        copy: bool = True,
+        track: bool = False,
+    ) -> MessageTracker | None:
+        """Send body frames to the identity's route, which may now belong to a replacement peer."""
+        return self.send_multipart([bytes(identity), *parts], flags, copy, track)
+
     def send_multipart(
         self,
         msg_parts: Iterable[Sendable],
@@ -1208,6 +1252,45 @@ class _ShadowSocket(_SocketOptionsBase[_native.AsyncSocket, "Context[Socket]"]):
                         return result
             finally:
                 os.close(fd)
+
+    @overload
+    def recv_from(
+        self, flags: int = 0, copy: Literal[True] = True
+    ) -> tuple[Identity, list[bytes]]: ...
+
+    @overload
+    def recv_from(
+        self, flags: int = 0, *, copy: Literal[False]
+    ) -> tuple[Identity, list[Frame]]: ...
+
+    @overload
+    def recv_from(
+        self, flags: int, copy: Literal[False]
+    ) -> tuple[Identity, list[Frame]]: ...
+
+    @overload
+    def recv_from(
+        self, flags: int = 0, copy: bool = True
+    ) -> tuple[Identity, list[bytes] | list[Frame]]: ...
+
+    def recv_from(self, flags=0, copy=True):
+        def try_recv():
+            result = self._native._try_recv_from(copy)
+            if result is None and flags & NOBLOCK:
+                raise _native.ZMQError(EAGAIN)
+            return result
+
+        return self._blocking_recv(try_recv)
+
+    def send_to(
+        self,
+        identity: Identity,
+        parts: Iterable[Sendable],
+        flags: int = 0,
+        copy: bool = True,
+        track: bool = False,
+    ) -> MessageTracker | None:
+        return self.send_multipart([bytes(identity), *parts], flags, copy, track)
 
     @overload
     def recv(
@@ -1853,6 +1936,9 @@ __all__ = [  # noqa: RUF022
     "curve_keypair",
     "curve_public",
     "PeerInfo",
+    "Identity",
+    "PeerAuthentication",
+    "PeerDiagnostics",
 ]
 
 

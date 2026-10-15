@@ -53,6 +53,34 @@ final class RecvRing implements AutoCloseable {
         }
     }
 
+    ReceivedMessage receiveFrom(long socketHandle, long timeoutMillis) {
+        ensureOpen(socketHandle);
+        Desc desc = next(timeoutMillis);
+        try {
+            return readFrom(desc);
+        } finally {
+            advance();
+        }
+    }
+
+    Optional<ReceivedMessage> tryReceiveFromCached() {
+        if (handle == 0 || !hasCached()) {
+            return Optional.empty();
+        }
+        try {
+            return Optional.of(readFrom(current()));
+        } finally {
+            advance();
+        }
+    }
+
+    private ReceivedMessage readFrom(Desc desc) {
+        Identity identity = Native.recvRingIdentity(handle, head);
+        byte[][] parts = readParts(desc);
+        byte[][] body = java.util.Arrays.copyOfRange(parts, 1, parts.length);
+        return new ReceivedMessage(identity, Message.fromNative(body));
+    }
+
     byte[] receiveBytes(long socketHandle, long timeoutMillis) {
         ensureOpen(socketHandle);
         Desc desc = next(timeoutMillis);

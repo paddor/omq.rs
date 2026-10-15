@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- Rename receipt-based receives to `recv_with_receipt` and
+  `try_recv_with_receipt` on `Socket` and `IdentitySocket`.
+- Rename `ReceiveSource` to `ReceiveLane` and `ReceiveReceipt::source` to `lane`.
+  `IdentitySocket::recv_from` remains the identity-and-body receive API.
+
 ## [0.28.1] - 2026-10-15
 
 ### Fixed

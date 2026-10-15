@@ -601,6 +601,7 @@ async fn curve_dealer_router() {
     let server_kp = CurveKeypair::generate();
     let client_kp = CurveKeypair::generate();
     let server_pub = server_kp.public;
+    let client_public = *client_kp.public.as_bytes();
     let router = Socket::new(
         SocketType::Router,
         Options::default().curve_server(server_kp),
@@ -622,6 +623,13 @@ async fn curve_dealer_router() {
         .unwrap();
     assert_eq!(m.part_bytes(0).unwrap(), &b"d1"[..]);
     assert_eq!(m.part_bytes(1).unwrap(), &b"hi"[..]);
+    let authentication = &m.sender_identity().unwrap().peer_info().authentication;
+    assert_eq!(
+        authentication.public_key,
+        Some(omq_tokio::PeerPublicKey::Curve(client_public))
+    );
+    assert!(authentication.user_id.is_none());
+    assert!(authentication.metadata.is_empty());
 }
 
 #[tokio::test]

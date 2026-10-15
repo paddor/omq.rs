@@ -9,6 +9,12 @@ impl Message {
     /// Returns false for a message with no frames. Owned multipart tables
     /// are reused, including tables borrowed from a `MessagePool`.
     pub fn replace_last_payload(&mut self, payload: Payload) -> bool {
+        if matches!(self.inner, MessageInner::Identified(_)) && self.len() > 1 {
+            let identity = self.pop_identity().expect("identity frame");
+            let replaced = self.replace_last_payload(payload);
+            *self = Self::with_identity(identity, std::mem::take(self));
+            return replaced;
+        }
         match &mut self.inner {
             MessageInner::Multi(parts) | MessageInner::RoutedMulti { parts, .. } => {
                 let Some(last) = parts.last_mut() else {
@@ -46,6 +52,13 @@ impl Message {
     /// Large payloads retain their existing backing storage.
     pub fn pop_front_payload(&mut self) -> Option<Payload> {
         match std::mem::replace(&mut self.inner, MessageInner::Empty) {
+            MessageInner::Identified(message) => {
+                let (identity, body) = message.into_sender_body();
+                *self = body;
+                Some(Payload {
+                    inner: PayloadInner::Identity(identity),
+                })
+            }
             MessageInner::InlinePair(pair) => {
                 let [first, second] = pair.payloads();
                 self.inner = MessageInner::Single(second);
@@ -170,6 +183,11 @@ impl Message {
     #[inline]
     pub(crate) fn push_part_payload(&mut self, part: Payload) {
         self.inner = match std::mem::replace(&mut self.inner, MessageInner::Empty) {
+            MessageInner::Identified(message) => {
+                let mut parts = message.into_parts();
+                parts.push(part);
+                MessageInner::Multi(parts)
+            }
             MessageInner::InlinePair(pair) => {
                 let [first, second] = pair.payloads();
                 MessageInner::Multi(vec![first, second, part].into())
@@ -242,9 +260,15 @@ impl Message {
     }
 
     #[inline]
+    #[expect(clippy::too_many_lines)]
     pub(crate) fn prepend_empty_delimiter(self) -> Self {
         let empty = Payload::from_bytes(Bytes::new());
         match self.inner {
+            MessageInner::Identified(message) => {
+                let mut parts = message.into_parts();
+                parts.insert(0, empty);
+                Self::from_parts(parts)
+            }
             MessageInner::InlinePair(pair) => {
                 let [first, second] = pair.payloads();
                 Self::from_payloads_vec(vec![empty, first, second])
@@ -276,6 +300,11 @@ impl Message {
                     body,
                 },
             },
+            MessageInner::Single(
+                p @ Payload {
+                    inner: PayloadInner::Identity(_),
+                },
+            ) => Self::from_payloads_vec(vec![empty, p]),
             MessageInner::Single(p) => Self {
                 inner: MessageInner::EmptyDelimitedBytes(p.as_bytes()),
             },
@@ -340,6 +369,7 @@ impl Message {
     }
     fn append_payloads_to(self, parts: &mut Vec<Payload>) {
         match self.inner {
+            MessageInner::Identified(message) => parts.extend(message.into_parts().drain(..)),
             MessageInner::InlinePair(pair) => parts.extend(pair.payloads()),
             MessageInner::Empty | MessageInner::RoutedEmpty { .. } => {}
             MessageInner::Inline { len, data } => {

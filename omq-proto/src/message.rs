@@ -18,6 +18,7 @@ use bytes::Bytes;
 
 mod access;
 mod frame;
+mod identified;
 mod multipart;
 mod payload;
 mod routing;
@@ -66,6 +67,7 @@ pub struct Payload {
 
 #[derive(Clone)]
 enum PayloadInner {
+    Identity(crate::Identity),
     Empty,
     Inline {
         len: u8,
@@ -104,6 +106,7 @@ fn routed_inline_id(data: &[u8; MAX_INLINE_MESSAGE]) -> u32 {
 }
 
 pub(crate) enum MessageInner {
+    Identified(identified::Identified),
     Empty,
     Inline {
         len: u8,
@@ -270,6 +273,7 @@ impl Clone for Message {
     fn clone(&self) -> Self {
         Self {
             inner: match &self.inner {
+                MessageInner::Identified(message) => MessageInner::Identified(message.clone()),
                 MessageInner::InlinePair(pair) => MessageInner::InlinePair(*pair),
                 MessageInner::Empty => MessageInner::Empty,
                 MessageInner::Inline { len, data } => MessageInner::Inline {

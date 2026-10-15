@@ -418,6 +418,9 @@ async fn peer_roundtrip(server: &Socket, client_ep: Endpoint) {
         .unwrap()
         .unwrap();
     assert_eq!(m, Message::multipart(["pb", "hi a"]));
+    let identity = m.sender_identity().expect("PEER snapshot");
+    assert_eq!(identity.as_ref(), b"pb");
+    assert!(identity.peer_info().authentication.public_key.is_none());
 }
 
 #[tokio::test]

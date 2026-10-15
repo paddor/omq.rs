@@ -164,6 +164,64 @@ pub(crate) enum AnyStream {
     Quic(Box<crate::transport::quic::QuicStream>),
 }
 
+impl AnyStream {
+    /// Capture observations before the transport is split or migrated.
+    pub(crate) fn addresses(&self) -> (Option<PeerIdent>, Option<PeerIdent>) {
+        match self {
+            Self::Tcp(stream) => (
+                stream.local_addr().ok().map(PeerIdent::Socket),
+                stream.peer_addr().ok().map(PeerIdent::Socket),
+            ),
+            #[cfg(unix)]
+            Self::Ipc(stream) => (
+                ipc_address(stream.local_addr()),
+                ipc_address(stream.peer_addr()),
+            ),
+            #[cfg(feature = "ws")]
+            Self::Ws(stream) => {
+                use crate::transport::ws::WsTransport;
+                let tcp = match stream.as_ref() {
+                    WsTransport::Plain(tcp) => tcp,
+                    WsTransport::Tls(tls) => tls.get_ref().0,
+                    WsTransport::TlsServer(tls) => tls.get_ref().0,
+                };
+                (
+                    tcp.local_addr().ok().map(PeerIdent::Socket),
+                    tcp.peer_addr().ok().map(PeerIdent::Socket),
+                )
+            }
+            #[cfg(feature = "quic")]
+            Self::Quic(stream) => (
+                stream.local_address().map(PeerIdent::Socket),
+                Some(PeerIdent::Socket(stream.remote_address())),
+            ),
+            // SHM addresses are captured from its IPC rendezvous before wrapping.
+            #[cfg(target_os = "linux")]
+            Self::Shm(_) => (None, None),
+            #[cfg(target_os = "windows")]
+            Self::Ipc(_) => (None, None),
+            #[cfg(test)]
+            Self::Memory(_) => (None, None),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn ipc_address(address: io::Result<tokio::net::unix::SocketAddr>) -> Option<PeerIdent> {
+    let address = address.ok()?;
+    if let Some(path) = address.as_pathname() {
+        return Some(PeerIdent::Path(path.to_string_lossy().into_owned()));
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(name) = address.as_abstract_name() {
+        return Some(PeerIdent::Path(format!(
+            "@{}",
+            String::from_utf8_lossy(name)
+        )));
+    }
+    None
+}
+
 impl Migratable for AnyStream {
     fn migrate(self) -> io::Result<Self> {
         match self {

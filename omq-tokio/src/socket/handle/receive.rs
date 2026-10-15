@@ -9,48 +9,49 @@ use omq_proto::{
 mod blocking;
 
 impl Socket {
-    /// Receive from any unpaused PEER, PULL, or GATHER connection (`None`),
-    /// or one exact source. PEER returns the body without an identity prefix;
-    /// its receipt exposes the logical identity. PULL and GATHER receipts have
-    /// no logical identity. Keep the receipt until accepting or discarding the
+    /// Receive with a receipt from any unpaused PEER, PULL, or GATHER lane
+    /// (`None`), or one selected lane (`Some(lane)`). PEER returns the body
+    /// without an identity prefix; its receipt exposes the logical identity.
+    /// PULL and GATHER receipts have no logical identity.
+    /// Keep the receipt until accepting or discarding the
     /// body, or return both with [`unshift`](Self::unshift). Other receivers
-    /// cannot overtake this message on its source while the receipt is live.
+    /// cannot overtake this message on its lane while the receipt is live.
     ///
-    /// Targeted waits wake only for that source and end with `Closed` after
+    /// Targeted waits wake only for that lane and end with `Closed` after
     /// disconnect, handover, or socket close. Cancellation consumes nothing.
     /// ROUTER supports `None` with an inert receipt. Conflate and external
-    /// receive sinks do not support source claims.
-    pub async fn recv_from(
+    /// receive sinks do not support lane claims.
+    pub async fn recv_with_receipt(
         &self,
-        source: Option<&crate::socket::ReceiveSource>,
+        lane: Option<&crate::socket::ReceiveLane>,
     ) -> Result<(crate::socket::ReceiveReceipt, Message)> {
-        if self.inner.socket_type == SocketType::Router && source.is_none() {
+        if self.inner.socket_type == SocketType::Router && lane.is_none() {
             let mut message = self.recv().await?;
             return Ok((
-                crate::socket::ReceiveReceipt::inert(message.pop_front()),
+                crate::socket::ReceiveReceipt::inert(message.pop_identity()),
                 message,
             ));
         }
-        self.inner.recv_rx.recv_from(source).await
+        self.inner.recv_rx.recv_with_receipt(lane).await
     }
 
-    /// Nonblocking form of [`recv_from`](Self::recv_from).
-    pub fn try_recv_from(
+    /// Nonblocking form of [`recv_with_receipt`](Self::recv_with_receipt).
+    pub fn try_recv_with_receipt(
         &self,
-        source: Option<&crate::socket::ReceiveSource>,
+        lane: Option<&crate::socket::ReceiveLane>,
     ) -> Result<(crate::socket::ReceiveReceipt, Message)> {
-        if self.inner.socket_type == SocketType::Router && source.is_none() {
+        if self.inner.socket_type == SocketType::Router && lane.is_none() {
             let mut message = self.try_recv()?;
             return Ok((
-                crate::socket::ReceiveReceipt::inert(message.pop_front()),
+                crate::socket::ReceiveReceipt::inert(message.pop_identity()),
                 message,
             ));
         }
-        self.inner.recv_rx.try_recv_from(source)
+        self.inner.recv_rx.try_recv_with_receipt(lane)
     }
 
-    /// Hold a received message ahead of its source's queued messages. Fair
-    /// and ordinary receives skip the source until a targeted receive takes
+    /// Hold a received message ahead of its lane's queued messages. Fair
+    /// and ordinary receives skip the lane until a targeted receive takes
     /// the held message and its new receipt is released. No new byte permit
     /// is reserved. A stale or oversized return preserves caller ownership
     /// through [`UnshiftError`](crate::socket::UnshiftError).

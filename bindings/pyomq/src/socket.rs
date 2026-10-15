@@ -413,6 +413,23 @@ impl SocketInner {
     }
 
     /// Take all leftover RCVMORE frames at once (used by recv_multipart).
+    pub(crate) fn check_recv_from(&self) -> PyResult<()> {
+        if !matches!(
+            self.socket_type,
+            omq_tokio::SocketType::Router | omq_tokio::SocketType::Peer
+        ) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "recv_from requires ROUTER or PEER",
+            ));
+        }
+        if !self.rxbuf.lock().unwrap().is_empty() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "finish the current multipart receive before recv_from",
+            ));
+        }
+        Ok(())
+    }
+
     pub fn take_rxbuf(&self) -> Vec<Bytes> {
         let mut rx = self.rxbuf.lock().unwrap();
         std::mem::take(&mut *rx)
@@ -1033,6 +1050,23 @@ impl Socket {
             self.inner.store_rxbuf(parts);
         }
         Bound::new(py, Frame::from_bytes_more_routing(head, more, routing_id))
+    }
+
+    /// Receive an owning sender identity and every body frame atomically.
+    #[pyo3(signature = (flags = 0, copy = true))]
+    fn recv_from<'py>(
+        &self,
+        py: Python<'py>,
+        flags: i32,
+        copy: bool,
+    ) -> PyResult<(crate::peer_info::Identity, Bound<'py, PyList>)> {
+        self.inner.check_recv_from()?;
+        let msg = if flags & crate::constants::NOBLOCK != 0 {
+            self.try_recv_message()?
+        } else {
+            self.recv_message(py)?
+        };
+        crate::peer_info::received_from(py, msg, copy)
     }
 
     #[pyo3(signature = (flags = 0))]

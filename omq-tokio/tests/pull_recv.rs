@@ -44,16 +44,16 @@ async fn backpressure(kind: SocketType, endpoint: Endpoint) {
     connected(&b).await;
     receiver.wait_connected(2, DEADLINE).await.unwrap();
     a.send(Message::single("held")).await.unwrap();
-    let (receipt, message) = tokio::time::timeout(DEADLINE, receiver.recv_from(None))
+    let (receipt, message) = tokio::time::timeout(DEADLINE, receiver.recv_with_receipt(None))
         .await
         .unwrap()
         .unwrap();
     assert!(receipt.identity().is_none());
-    let source = receipt.source().unwrap().clone();
+    let source = receipt.lane().unwrap().clone();
     let other_handle = receiver.clone();
     a.send(Message::single("next")).await.unwrap();
     assert!(matches!(
-        other_handle.try_recv_from(Some(&source)),
+        other_handle.try_recv_with_receipt(Some(&source)),
         Err(Error::WouldBlock)
     ));
     receiver.unshift(receipt, message).unwrap();
@@ -85,12 +85,12 @@ async fn backpressure(kind: SocketType, endpoint: Endpoint) {
     assert!(matches!(receiver.try_recv(), Err(Error::WouldBlock)));
 
     for _ in 0..3 {
-        let (receipt, message) = other_handle.try_recv_from(Some(&source)).unwrap();
+        let (receipt, message) = other_handle.try_recv_with_receipt(Some(&source)).unwrap();
         assert_eq!(message.part_slice(0), Some(b"held".as_slice()));
         assert!(matches!(receiver.try_recv(), Err(Error::WouldBlock)));
         other_handle.unshift(receipt, message).unwrap();
     }
-    let (receipt, _) = receiver.try_recv_from(Some(&source)).unwrap();
+    let (receipt, _) = receiver.try_recv_with_receipt(Some(&source)).unwrap();
     drop(receipt);
     assert_eq!(
         receive(&receiver).await.part_slice(0),
@@ -184,8 +184,8 @@ async fn pull_mixed_transports_preserve_multipart_and_source_fifo() {
     a.send(Message::multipart(["held", "second frame"]))
         .await
         .unwrap();
-    let (receipt, message) = receiver.recv_from(None).await.unwrap();
-    let source = receipt.source().unwrap().clone();
+    let (receipt, message) = receiver.recv_with_receipt(None).await.unwrap();
+    let source = receipt.lane().unwrap().clone();
     receiver.unshift(receipt, message).unwrap();
     for sequence in 0_u8..10 {
         a.send(Message::single(vec![sequence])).await.unwrap();
@@ -198,7 +198,7 @@ async fn pull_mixed_transports_preserve_multipart_and_source_fifo() {
         );
     }
     assert!(matches!(receiver.try_recv(), Err(Error::WouldBlock)));
-    let (receipt, message) = receiver.try_recv_from(Some(&source)).unwrap();
+    let (receipt, message) = receiver.try_recv_with_receipt(Some(&source)).unwrap();
     assert_eq!(message.len(), 2);
     assert_eq!(message.part_slice(1), Some(b"second frame".as_slice()));
     drop(receipt);
@@ -227,19 +227,22 @@ async fn pull_targeted_waits_cancel_and_end_on_disconnect_or_close() {
     sender.connect(endpoint.clone()).await.unwrap();
     connected(&sender).await;
     sender.send(Message::single("first")).await.unwrap();
-    let (receipt, _) = receiver.recv_from(None).await.unwrap();
-    let source = receipt.source().unwrap().clone();
+    let (receipt, _) = receiver.recv_with_receipt(None).await.unwrap();
+    let source = receipt.lane().unwrap().clone();
     drop(receipt);
     assert!(
-        tokio::time::timeout(Duration::from_millis(10), receiver.recv_from(Some(&source)))
-            .await
-            .is_err()
+        tokio::time::timeout(
+            Duration::from_millis(10),
+            receiver.recv_with_receipt(Some(&source))
+        )
+        .await
+        .is_err()
     );
     sender
         .send(Message::single("after cancellation"))
         .await
         .unwrap();
-    let (receipt, message) = receiver.recv_from(Some(&source)).await.unwrap();
+    let (receipt, message) = receiver.recv_with_receipt(Some(&source)).await.unwrap();
     assert_eq!(
         message.part_slice(0),
         Some(b"after cancellation".as_slice())
@@ -247,7 +250,7 @@ async fn pull_targeted_waits_cancel_and_end_on_disconnect_or_close() {
     receiver.unshift(receipt, message).unwrap();
     sender.close().await.unwrap();
     test_support::wait_for_connection_count(&receiver, 0, DEADLINE, "PULL source disconnect").await;
-    let waiting = receiver.recv_from(Some(&source));
+    let waiting = receiver.recv_with_receipt(Some(&source));
     assert!(matches!(
         tokio::time::timeout(DEADLINE, waiting).await.unwrap(),
         Err(Error::Closed)
@@ -260,14 +263,14 @@ async fn pull_targeted_waits_cancel_and_end_on_disconnect_or_close() {
         .send(Message::single("replacement"))
         .await
         .unwrap();
-    let (receipt, _) = receiver.recv_from(None).await.unwrap();
-    assert_ne!(receipt.source().unwrap(), &source);
+    let (receipt, _) = receiver.recv_with_receipt(None).await.unwrap();
+    assert_ne!(receipt.lane().unwrap(), &source);
     assert!(matches!(
-        receiver.try_recv_from(Some(&source)),
+        receiver.try_recv_with_receipt(Some(&source)),
         Err(Error::Closed)
     ));
-    let new_source = receipt.source().unwrap().clone();
-    let waiting = receiver.recv_from(Some(&new_source));
+    let new_source = receipt.lane().unwrap().clone();
+    let waiting = receiver.recv_with_receipt(Some(&new_source));
     tokio::pin!(waiting);
     assert!(
         tokio::time::timeout(Duration::from_millis(10), waiting.as_mut())
@@ -288,7 +291,7 @@ async fn conflate_does_not_expose_fifo_source_claims() {
     let context = Context::new();
     let receiver = context.socket(SocketType::Pull, options().conflate(true));
     assert!(matches!(
-        receiver.try_recv_from(None),
+        receiver.try_recv_with_receipt(None),
         Err(Error::Protocol(_))
     ));
     receiver.close().await.unwrap();
@@ -309,11 +312,11 @@ async fn pipeline_source_cannot_target_or_return_to_a_peer_socket() {
     connected(&sender).await;
     sender.send(Message::single("first")).await.unwrap();
     sender.send(Message::single("next")).await.unwrap();
-    let (receipt, message) = receiver.recv_from(None).await.unwrap();
-    let source = receipt.source().unwrap().clone();
+    let (receipt, message) = receiver.recv_with_receipt(None).await.unwrap();
+    let source = receipt.lane().unwrap().clone();
     let peer = context.socket(SocketType::Peer, options());
     assert!(matches!(
-        peer.try_recv_from(Some(&source)),
+        peer.try_recv_with_receipt(Some(&source)),
         Err(Error::Protocol(_))
     ));
     let error = peer.unshift(receipt, message).unwrap_err();
@@ -340,7 +343,7 @@ async fn gather_rejects_multipart_returns_even_when_the_original_charge_fits() {
     connected(&sender).await;
     sender.send(Message::single(vec![5; 4096])).await.unwrap();
     sender.send(Message::single("next")).await.unwrap();
-    let (receipt, _) = receiver.recv_from(None).await.unwrap();
+    let (receipt, _) = receiver.recv_with_receipt(None).await.unwrap();
     let returned = Message::multipart(["one", "two"]);
     let error = receiver.unshift(receipt, returned.clone()).unwrap_err();
     assert!(matches!(error.error, Error::Protocol(_)));

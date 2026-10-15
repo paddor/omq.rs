@@ -597,36 +597,34 @@ fn drain_yring_one(
 }
 
 impl SpscAwareRecv {
-    pub(crate) async fn recv_from(
+    pub(crate) async fn recv_with_receipt(
         &self,
-        source: Option<&super::peer_recv::ReceiveSource>,
+        source: Option<&super::peer_recv::ReceiveLane>,
     ) -> Result<(super::peer_recv::ReceiveReceipt, Message)> {
         if let Some(fanin) = self.fanin.as_ref().filter(|fanin| fanin.source_aware()) {
-            return fanin.recv_from(source).await;
+            return fanin.recv_with_receipt(source).await;
         }
         let peer = self.peer_recv.as_ref().ok_or_else(|| {
             Error::Protocol(
-                "source-aware receive requires native PEER, PULL, or GATHER without conflate"
-                    .into(),
+                "receipt receive requires native PEER, PULL, or GATHER without conflate".into(),
             )
         })?;
-        super::peer_recv::PeerReceiver::recv_from(peer, source).await
+        super::peer_recv::PeerReceiver::recv_with_receipt(peer, source).await
     }
 
-    pub(crate) fn try_recv_from(
+    pub(crate) fn try_recv_with_receipt(
         &self,
-        source: Option<&super::peer_recv::ReceiveSource>,
+        source: Option<&super::peer_recv::ReceiveLane>,
     ) -> Result<(super::peer_recv::ReceiveReceipt, Message)> {
         if let Some(fanin) = self.fanin.as_ref().filter(|fanin| fanin.source_aware()) {
-            return fanin.try_recv_from(source);
+            return fanin.try_recv_with_receipt(source);
         }
         let peer = self.peer_recv.as_ref().ok_or_else(|| {
             Error::Protocol(
-                "source-aware receive requires native PEER, PULL, or GATHER without conflate"
-                    .into(),
+                "receipt receive requires native PEER, PULL, or GATHER without conflate".into(),
             )
         })?;
-        peer.lock().try_recv_from(source)
+        peer.lock().try_recv_with_receipt(source)
     }
 
     pub(crate) fn unshift(

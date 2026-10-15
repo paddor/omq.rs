@@ -130,6 +130,18 @@ try (Context ctx = OMQ.context();
 }
 ```
 
+ROUTER and PEER expose `recvFrom()`, timed/try variants, and `recvFromAsync()`.
+The returned identity retains its immutable admission snapshot after reconnect or
+socket closure; authentication facts and transport diagnostics are separate.
+
+```java
+ReceivedMessage received = router.recvFrom();
+PeerInfo info = received.identity().peerInfo();
+byte[] key = info.authentication().orElseThrow().publicKey().orElse(null); // raw CURVE key
+String endpoint = info.diagnostics().orElseThrow().endpoint();
+router.sendTo(received.identity(), Message.text("reply"));
+```
+
 Reusable socket options:
 
 ```java

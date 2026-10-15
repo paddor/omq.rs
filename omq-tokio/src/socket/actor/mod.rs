@@ -161,6 +161,8 @@ struct PeerEntry {
     /// Immutable endpoint-generation configuration, including reconnects.
     options: Arc<Options>,
     ident: PeerIdent,
+    local_address: Option<PeerIdent>,
+    remote_address: Option<PeerIdent>,
     handle: PeerDriverHandle,
     /// True after this peer is eligible for data-plane routing. For
     /// ZMTP byte streams this flips on `HandshakeSucceeded`; pre-auth

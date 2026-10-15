@@ -1,6 +1,34 @@
 use super::*;
 use crate::socket::recv::{BlockingRecvWaker, SpscAwareRecv, SpscHandles, recv_pipe};
 
+impl PeerRecvRoutes {
+    #[expect(clippy::needless_pass_by_value)]
+    pub(crate) fn register(
+        &mut self,
+        bytes: Bytes,
+        cancel: CancellationToken,
+    ) -> Result<PeerRecvSink> {
+        let properties = Arc::new(omq_proto::proto::PeerProperties::default());
+        let identity = omq_proto::Identity::new(
+            &bytes,
+            omq_proto::PeerInfo {
+                connection_id: 0,
+                peer_address: None,
+                peer_identity: None,
+                authentication: properties.authentication.clone(),
+                peer_properties: properties,
+                diagnostics: omq_proto::PeerDiagnostics {
+                    endpoint: "inproc://test".into(),
+                    local_address: None,
+                    remote_address: None,
+                },
+                zmtp_version: (0, 0),
+            },
+        );
+        self.register_peer(identity, cancel)
+    }
+}
+
 fn receive_pair(limits: RecvLimits, hwm: usize) -> (PeerRecvRoutes, PeerReceiver) {
     let handles = SpscHandles::new(BlockingRecvWaker::new(), false);
     PeerRecvRoutes::with_limits(hwm, &handles, limits)
@@ -55,9 +83,9 @@ fn held_message_and_live_receipt_exclude_source_from_ordinary_receives() {
     let mut b = register(&mut routes, "b");
     put(&mut a, "first");
     put(&mut a, "second");
-    let (receipt, message) = receiver.try_recv_from(None).unwrap();
+    let (receipt, message) = receiver.try_recv_with_receipt(None).unwrap();
     assert_eq!(receipt.identity(), Some(b"a".as_slice()));
-    let source = receipt.source().unwrap().clone();
+    let source = receipt.lane().unwrap().clone();
     receiver.unshift(receipt, message).unwrap();
     put(&mut b, "healthy");
     assert_eq!(
@@ -66,16 +94,16 @@ fn held_message_and_live_receipt_exclude_source_from_ordinary_receives() {
     );
     assert!(matches!(receiver.try_recv(), Err(Error::WouldBlock)));
     for _ in 0..3 {
-        let (receipt, message) = receiver.try_recv_from(Some(&source)).unwrap();
+        let (receipt, message) = receiver.try_recv_with_receipt(Some(&source)).unwrap();
         assert_eq!(message.part_slice(0), Some(b"first".as_slice()));
         assert!(matches!(
-            receiver.try_recv_from(Some(&source)),
+            receiver.try_recv_with_receipt(Some(&source)),
             Err(Error::WouldBlock)
         ));
         assert!(matches!(receiver.try_recv(), Err(Error::WouldBlock)));
         receiver.unshift(receipt, message).unwrap();
     }
-    let (receipt, _) = receiver.try_recv_from(Some(&source)).unwrap();
+    let (receipt, _) = receiver.try_recv_with_receipt(Some(&source)).unwrap();
     drop(receipt);
     assert_eq!(
         receiver.try_recv().unwrap().part_slice(1),
@@ -95,14 +123,14 @@ fn unshift_transfers_charge_without_readmitting_or_overtaking() {
     );
     let mut sink = register(&mut routes, "a");
     put(&mut sink, "one");
-    let (receipt, message) = receiver.try_recv_from(None).unwrap();
-    let source = receipt.source().unwrap().clone();
+    let (receipt, message) = receiver.try_recv_with_receipt(None).unwrap();
+    let source = receipt.lane().unwrap().clone();
     assert!(sink.push(Message::single("two")));
     assert!(sink.blocked());
     receiver.unshift(receipt, message).unwrap();
     assert!(sink.retry_pending());
     assert!(sink.blocked());
-    let (receipt, message) = receiver.try_recv_from(Some(&source)).unwrap();
+    let (receipt, message) = receiver.try_recv_with_receipt(Some(&source)).unwrap();
     assert_eq!(message.part_slice(0), Some(b"one".as_slice()));
     assert!(sink.retry_pending());
     assert!(sink.blocked());
@@ -132,7 +160,7 @@ fn receipt_drain_preserves_batched_producer_space_wakes() {
         let mut ready = Box::pin(sink.ready());
         assert!(ready.as_mut().poll(&mut cx).is_pending());
         for consumed in 1..=release_at {
-            let (receipt, body) = receiver.try_recv_from(None).unwrap();
+            let (receipt, body) = receiver.try_recv_with_receipt(None).unwrap();
             assert_eq!(body.part_slice(0), Some(b"queued".as_slice()));
             drop((receipt, body));
             if consumed < release_at {
@@ -171,8 +199,8 @@ fn paused_source_retains_one_large_frame_without_blocking_other_sources() {
         .clone();
     assert!(a.push(message.clone()));
     a.flush();
-    let (receipt, held) = receiver.try_recv_from(None).unwrap();
-    let source = receipt.source().unwrap().clone();
+    let (receipt, held) = receiver.try_recv_with_receipt(None).unwrap();
+    let source = receipt.lane().unwrap().clone();
     receiver.unshift(receipt, held).unwrap();
     assert!(a.push(message.clone()));
     a.flush();
@@ -186,18 +214,18 @@ fn paused_source_retains_one_large_frame_without_blocking_other_sources() {
     assert!(ready.as_mut().poll(&mut cx).is_pending());
 
     for _ in 0..3 {
-        let (receipt, held) = receiver.try_recv_from(Some(&source)).unwrap();
+        let (receipt, held) = receiver.try_recv_with_receipt(Some(&source)).unwrap();
         receiver.unshift(receipt, held).unwrap();
         assert!(b.push(message.clone()));
         b.flush();
         assert!(!b.blocked());
-        let (receipt, body) = receiver.try_recv_from(None).unwrap();
+        let (receipt, body) = receiver.try_recv_with_receipt(None).unwrap();
         assert_eq!(receipt.identity(), Some(b"b".as_slice()));
         assert_eq!(body.part_slice(0).unwrap().len(), 8 * 1024 * 1024);
         drop((receipt, body));
         assert_eq!(count.0.load(Ordering::Relaxed), 0);
     }
-    let (receipt, held) = receiver.try_recv_from(Some(&source)).unwrap();
+    let (receipt, held) = receiver.try_recv_with_receipt(Some(&source)).unwrap();
     drop((receipt, held));
     assert!(count.0.load(Ordering::Relaxed) > 0);
     assert!(ready.as_mut().poll(&mut cx).is_ready());
@@ -214,14 +242,14 @@ fn stale_unshift_returns_body_and_does_not_pause_replacement() {
     let (mut routes, mut receiver) = receive_pair(RecvLimits::default(), 16);
     let mut old = register(&mut routes, "a");
     put(&mut old, "old");
-    let (receipt, message) = receiver.try_recv_from(None).unwrap();
-    let source = receipt.source().unwrap().clone();
+    let (receipt, message) = receiver.try_recv_with_receipt(None).unwrap();
+    let source = receipt.lane().unwrap().clone();
     let mut new = register(&mut routes, "a");
     let error = receiver.unshift(receipt, message).unwrap_err();
     assert!(matches!(error.error, Error::Closed));
     assert_eq!(error.message.part_slice(0), Some(b"old".as_slice()));
     assert!(matches!(
-        receiver.try_recv_from(Some(&source)),
+        receiver.try_recv_with_receipt(Some(&source)),
         Err(Error::Closed)
     ));
     put(&mut new, "new");
@@ -237,15 +265,15 @@ fn disconnected_held_source_releases_held_and_unread_charges() {
     let mut sink = register(&mut routes, "a");
     put(&mut sink, "one");
     put(&mut sink, "two");
-    let (receipt, message) = receiver.try_recv_from(None).unwrap();
-    let source = receipt.source().unwrap().clone();
+    let (receipt, message) = receiver.try_recv_with_receipt(None).unwrap();
+    let source = receipt.lane().unwrap().clone();
     receiver.unshift(receipt, message).unwrap();
     drop(sink);
     assert!(matches!(receiver.try_recv(), Err(Error::WouldBlock)));
     assert!(receiver.is_empty());
     assert!(receiver.paused.is_empty());
     assert!(matches!(
-        receiver.try_recv_from(Some(&source)),
+        receiver.try_recv_with_receipt(Some(&source)),
         Err(Error::Closed)
     ));
 }
@@ -257,15 +285,15 @@ fn foreign_and_oversized_returns_preserve_ownership_and_release_claim() {
     let mut sink = register(&mut routes, "a");
     put(&mut sink, "one");
     put(&mut sink, "two");
-    let (receipt, message) = receiver.try_recv_from(None).unwrap();
-    let source = receipt.source().unwrap().clone();
+    let (receipt, message) = receiver.try_recv_with_receipt(None).unwrap();
+    let source = receipt.lane().unwrap().clone();
     assert!(matches!(
-        foreign.try_recv_from(Some(&source)),
+        foreign.try_recv_with_receipt(Some(&source)),
         Err(Error::Protocol(_))
     ));
     let error = foreign.unshift(receipt, message).unwrap_err();
     assert_eq!(error.message.part_slice(0), Some(b"one".as_slice()));
-    let (receipt, _) = receiver.try_recv_from(None).unwrap();
+    let (receipt, _) = receiver.try_recv_with_receipt(None).unwrap();
     let large = Message::from_slice(&[7; 1024]);
     let error = receiver.unshift(receipt, large).unwrap_err();
     assert!(matches!(error.error, Error::Protocol(_)));
@@ -286,12 +314,12 @@ fn targeted_wait_ignores_other_sources_and_wakes_on_its_source() {
     let mut a = register(&mut routes, "a");
     let mut b = register(&mut routes, "b");
     put(&mut a, "first");
-    let (receipt, _) = receiver.lock().try_recv_from(None).unwrap();
-    let source = receipt.source().unwrap().clone();
+    let (receipt, _) = receiver.lock().try_recv_with_receipt(None).unwrap();
+    let source = receipt.lane().unwrap().clone();
     drop(receipt);
     let count = Arc::new(WakeCount(0.into()));
     let waker = Waker::from(count.clone());
-    let mut waiting = Box::pin(PeerReceiver::recv_from(&receiver, Some(&source)));
+    let mut waiting = Box::pin(PeerReceiver::recv_with_receipt(&receiver, Some(&source)));
     assert!(
         waiting
             .as_mut()
@@ -321,12 +349,12 @@ fn targeted_wait_ends_on_disconnect_or_socket_close() {
         let receiver = ReceiveCell::new(receiver, Weak::new());
         let mut a = register(&mut routes, "a");
         put(&mut a, "first");
-        let (receipt, _) = receiver.lock().try_recv_from(None).unwrap();
-        let source = receipt.source().unwrap().clone();
+        let (receipt, _) = receiver.lock().try_recv_with_receipt(None).unwrap();
+        let source = receipt.lane().unwrap().clone();
         drop(receipt);
         let count = Arc::new(WakeCount(0.into()));
         let waker = Waker::from(count.clone());
-        let mut waiting = Box::pin(PeerReceiver::recv_from(&receiver, Some(&source)));
+        let mut waiting = Box::pin(PeerReceiver::recv_with_receipt(&receiver, Some(&source)));
         assert!(
             waiting
                 .as_mut()
@@ -353,8 +381,8 @@ fn held_only_queue_does_not_reschedule_fair_waiters_in_a_loop() {
     let (mut routes, receiver, _pipe) = ordinary_receive(16);
     let mut a = register(&mut routes, "a");
     put(&mut a, "held");
-    let (receipt, message) = receiver.try_recv_from(None).unwrap();
-    let source = receipt.source().unwrap().clone();
+    let (receipt, message) = receiver.try_recv_with_receipt(None).unwrap();
+    let source = receipt.lane().unwrap().clone();
     receiver.unshift(receipt, message).unwrap();
     let count = Arc::new(WakeCount(0.into()));
     let waker = Waker::from(count.clone());
@@ -373,7 +401,7 @@ fn held_only_queue_does_not_reschedule_fair_waiters_in_a_loop() {
             .is_pending()
     );
     assert_eq!(count.0.load(Ordering::Relaxed), seen);
-    let (receipt, _) = receiver.try_recv_from(Some(&source)).unwrap();
+    let (receipt, _) = receiver.try_recv_with_receipt(Some(&source)).unwrap();
     drop(receipt);
     put(&mut a, "resumed");
     assert!(count.0.load(Ordering::Relaxed) > seen);
@@ -935,10 +963,10 @@ fn per_source_count_and_byte_bounds_leave_other_sources_usable() {
         put(&mut a, "5678");
         put(&mut a, "next");
         assert!(a.blocked());
-        let (held, _) = receiver.try_recv_from(None).unwrap();
+        let (held, _) = receiver.try_recv_with_receipt(None).unwrap();
         put(&mut b, "healthy");
         assert!(!b.blocked());
-        let (receipt, body) = receiver.try_recv_from(None).unwrap();
+        let (receipt, body) = receiver.try_recv_with_receipt(None).unwrap();
         assert_eq!(receipt.identity(), Some(b"b".as_slice()));
         assert_eq!(body.part_slice(0), Some(b"healthy".as_slice()));
         drop(receipt);

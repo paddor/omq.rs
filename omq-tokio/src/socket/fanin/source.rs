@@ -7,7 +7,7 @@ use rustc_hash::FxHashMap;
 
 use super::{Arc, AtomicBool, Fanin, Message, Ordering, StateSignal, mpsc};
 use crate::engine::signal::DataSignal;
-use crate::socket::{ReceiveReceipt, ReceiveSource, UnshiftError};
+use crate::socket::{ReceiveLane, ReceiveReceipt, UnshiftError};
 use omq_proto::{Error, Result};
 
 #[derive(Clone, Debug)]
@@ -267,14 +267,14 @@ impl Fanin {
         ReceiveWaiter(self)
     }
 
-    pub(crate) fn try_recv_from(
+    pub(crate) fn try_recv_with_receipt(
         self: &Arc<Self>,
-        source: Option<&ReceiveSource>,
+        source: Option<&ReceiveLane>,
     ) -> Result<(ReceiveReceipt, Message)> {
-        let source = source.map(ReceiveSource::fanin).transpose()?;
+        let source = source.map(ReceiveLane::fanin).transpose()?;
         if source.is_some_and(|source| !source.belongs(self)) {
             return Err(Error::Protocol(
-                "receive source belongs to another socket".into(),
+                "receive lane belongs to another socket".into(),
             ));
         }
         let mut guard = self.receiver.lock();
@@ -324,18 +324,18 @@ impl Fanin {
         state.claim(self, source, message)
     }
 
-    pub(crate) async fn recv_from(
+    pub(crate) async fn recv_with_receipt(
         self: &Arc<Self>,
-        source: Option<&ReceiveSource>,
+        source: Option<&ReceiveLane>,
     ) -> Result<(ReceiveReceipt, Message)> {
-        let selected = source.map(ReceiveSource::fanin).transpose()?;
+        let selected = source.map(ReceiveLane::fanin).transpose()?;
         let _source_waiter = selected.map(SourceWaiter::new);
         loop {
             let seen = selected.map(|source| source.state.data.generation());
             if let Some(selected) = selected {
                 selected.state.batch.begin_drain();
             }
-            let result = self.try_recv_from(source);
+            let result = self.try_recv_with_receipt(source);
             if let Some(selected) = selected {
                 // A successful receive claims the lane. Otherwise no message
                 // is currently admissible to this targeted caller. A racing
@@ -452,13 +452,13 @@ mod tests {
         let mut a = queue.register().unwrap();
         let mut b = queue.register().unwrap();
         a.try_send(Message::single("first")).unwrap();
-        let (receipt, _) = queue.try_recv_from(None).unwrap();
-        let source = receipt.source().unwrap().clone();
+        let (receipt, _) = queue.try_recv_with_receipt(None).unwrap();
+        let source = receipt.lane().unwrap().clone();
         drop(receipt);
         let counter = Arc::new(WakeCount::default());
         let waker = Waker::from(counter.clone());
         let mut cx = Context::from_waker(&waker);
-        let mut waiting = Box::pin(queue.recv_from(Some(&source)));
+        let mut waiting = Box::pin(queue.recv_with_receipt(Some(&source)));
         assert!(waiting.as_mut().poll(&mut cx).is_pending());
         b.try_send(Message::single("unrelated")).unwrap();
         assert_eq!(counter.0.load(Ordering::SeqCst), 0);
@@ -470,7 +470,7 @@ mod tests {
             source.fanin().unwrap().state.waiters.load(Ordering::SeqCst),
             0
         );
-        let (receipt, message) = queue.try_recv_from(Some(&source)).unwrap();
+        let (receipt, message) = queue.try_recv_with_receipt(Some(&source)).unwrap();
         assert_eq!(message, Message::single("selected"));
         drop(receipt);
         assert_eq!(queue.try_recv().unwrap(), Message::single("unrelated"));
@@ -483,10 +483,10 @@ mod tests {
         let other = self::queue();
         sender.try_send(Message::single("first")).unwrap();
         sender.try_send(Message::single("next")).unwrap();
-        let (receipt, message) = queue.try_recv_from(None).unwrap();
-        let source = receipt.source().unwrap().clone();
+        let (receipt, message) = queue.try_recv_with_receipt(None).unwrap();
+        let source = receipt.lane().unwrap().clone();
         assert!(matches!(
-            other.try_recv_from(Some(&source)),
+            other.try_recv_with_receipt(Some(&source)),
             Err(Error::Protocol(_))
         ));
         let error = other.unshift(receipt, message).unwrap_err();
@@ -495,7 +495,7 @@ mod tests {
         assert_eq!(queue.try_recv().unwrap(), Message::single("next"));
 
         sender.try_send(Message::single("small")).unwrap();
-        let (receipt, _) = queue.try_recv_from(None).unwrap();
+        let (receipt, _) = queue.try_recv_with_receipt(None).unwrap();
         let large = Message::single(vec![8; 4096]);
         let error = queue.unshift(receipt, large).unwrap_err();
         assert!(matches!(error.error, Error::Protocol(_)));
@@ -513,12 +513,12 @@ mod tests {
         let mut sender = queue.register().unwrap();
         sender.try_send(Message::single("held")).unwrap();
         sender.try_send(Message::single("already queued")).unwrap();
-        let (receipt, message) = queue.try_recv_from(None).unwrap();
-        let source = receipt.source().unwrap().clone();
+        let (receipt, message) = queue.try_recv_with_receipt(None).unwrap();
+        let source = receipt.lane().unwrap().clone();
         queue.unshift(receipt, message).unwrap();
         drop(sender);
         assert!(matches!(
-            queue.try_recv_from(Some(&source)),
+            queue.try_recv_with_receipt(Some(&source)),
             Err(Error::Closed)
         ));
         // Preserve the previously published prefix under ordinary PULL rules.
@@ -526,11 +526,11 @@ mod tests {
         assert!(matches!(queue.try_recv(), Err(Error::WouldBlock)));
         let mut replacement = queue.register_with_capacity(8).unwrap();
         replacement.try_send(Message::single("new")).unwrap();
-        let (receipt, message) = queue.try_recv_from(None).unwrap();
-        assert_ne!(receipt.source().unwrap(), &source);
+        let (receipt, message) = queue.try_recv_with_receipt(None).unwrap();
+        assert_ne!(receipt.lane().unwrap(), &source);
         assert_eq!(message, Message::single("new"));
         assert!(matches!(
-            queue.try_recv_from(Some(&source)),
+            queue.try_recv_with_receipt(Some(&source)),
             Err(Error::Closed)
         ));
     }
@@ -546,8 +546,8 @@ mod tests {
         let second_waker = Waker::from(second_counter.clone());
         let mut first_cx = Context::from_waker(&first_waker);
         let mut second_cx = Context::from_waker(&second_waker);
-        let mut first = Box::pin(queue.recv_from(None));
-        let mut second = Box::pin(queue.recv_from(None));
+        let mut first = Box::pin(queue.recv_with_receipt(None));
+        let mut second = Box::pin(queue.recv_with_receipt(None));
         assert!(first.as_mut().poll(&mut first_cx).is_pending());
         assert!(second.as_mut().poll(&mut second_cx).is_pending());
         a.try_send(Message::single("a")).unwrap();
@@ -574,8 +574,8 @@ mod tests {
             let mut a = queue.register().unwrap();
             let mut b = queue.register().unwrap();
             a.try_send(Message::single("held")).unwrap();
-            let (receipt, message) = queue.try_recv_from(None).unwrap();
-            let source = receipt.source().unwrap().clone();
+            let (receipt, message) = queue.try_recv_with_receipt(None).unwrap();
+            let source = receipt.lane().unwrap().clone();
             queue.unshift(receipt, message).unwrap();
             for _ in 0..3 {
                 a.try_send(Message::single("paused")).unwrap();
@@ -592,7 +592,7 @@ mod tests {
                 out.iter()
                     .all(|message| *message == Message::single("healthy"))
             );
-            let (receipt, message) = queue.try_recv_from(Some(&source)).unwrap();
+            let (receipt, message) = queue.try_recv_with_receipt(Some(&source)).unwrap();
             assert_eq!(message, Message::single("held"));
             drop(receipt);
             out.clear();
@@ -645,8 +645,8 @@ mod tests {
         let mut sender = queue.register_with_capacity(4).unwrap();
         sender.try_send(Message::single("held")).unwrap();
         sender.try_send(Message::single("next")).unwrap();
-        let (receipt, message) = queue.try_recv_from(None).unwrap();
-        let source = receipt.source().unwrap().clone();
+        let (receipt, message) = queue.try_recv_with_receipt(None).unwrap();
+        let source = receipt.lane().unwrap().clone();
         assert!(matches!(queue.try_recv(), Err(Error::WouldBlock)));
         queue.unshift(receipt, message).unwrap();
         assert!(matches!(queue.try_recv(), Err(Error::WouldBlock)));
@@ -656,7 +656,7 @@ mod tests {
             Err(Error::WouldBlock)
         ));
         assert_eq!(batch, [] as [Message; 0]);
-        let (receipt, message) = queue.try_recv_from(Some(&source)).unwrap();
+        let (receipt, message) = queue.try_recv_with_receipt(Some(&source)).unwrap();
         assert_eq!(message, Message::single("held"));
         drop(receipt);
         assert_eq!(queue.try_recv().unwrap(), Message::single("next"));
@@ -667,8 +667,8 @@ mod tests {
         let queue = queue();
         let mut producer = queue.register().unwrap();
         producer.try_send(Message::single("initial")).unwrap();
-        let (receipt, _) = queue.try_recv_from(None).unwrap();
-        let source = receipt.source().unwrap().clone();
+        let (receipt, _) = queue.try_recv_with_receipt(None).unwrap();
+        let source = receipt.lane().unwrap().clone();
         drop(receipt);
         let first_counter = Arc::new(WakeCount::default());
         let second_counter = Arc::new(WakeCount::default());
@@ -676,8 +676,8 @@ mod tests {
         let second_waker = Waker::from(second_counter.clone());
         let mut first_cx = Context::from_waker(&first_waker);
         let mut second_cx = Context::from_waker(&second_waker);
-        let mut first = Box::pin(queue.recv_from(Some(&source)));
-        let mut second = Box::pin(queue.recv_from(Some(&source)));
+        let mut first = Box::pin(queue.recv_with_receipt(Some(&source)));
+        let mut second = Box::pin(queue.recv_with_receipt(Some(&source)));
         assert!(first.as_mut().poll(&mut first_cx).is_pending());
         assert!(second.as_mut().poll(&mut second_cx).is_pending());
         producer.try_send(Message::single("first")).unwrap();

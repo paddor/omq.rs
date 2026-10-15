@@ -608,6 +608,12 @@ impl RecvStrategy {
         }
     }
 
+    pub(crate) fn admitted(&mut self, peer_id: u64, identity: omq_proto::Identity) {
+        if let Self::Identity(receiver) = self {
+            receiver.admitted(peer_id, identity);
+        }
+    }
+
     pub(crate) fn connection_removed(&mut self, peer_id: u64) {
         match self {
             Self::None | Self::FairQueue => {}

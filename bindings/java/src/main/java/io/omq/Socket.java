@@ -362,6 +362,103 @@ public final class Socket implements AutoCloseable {
         }
     }
 
+    /** Receives a complete ROUTER/PEER body and its original sender snapshot. */
+    public ReceivedMessage recvFrom() {
+        operationLock.lock();
+        try {
+            requireIdentitySocket();
+            if (Thread.currentThread().isVirtual()) {
+                return await(recvFromAsync());
+            }
+            return withRecvRing((ring, handle) -> ring.receiveFrom(handle, FOREVER));
+        } finally {
+            operationLock.unlock();
+        }
+    }
+
+    /** Receives a body and sender before the timeout, or returns empty. */
+    public Optional<ReceivedMessage> recvFrom(Duration timeout) {
+        operationLock.lock();
+        try {
+            requireIdentitySocket();
+            Objects.requireNonNull(timeout, "timeout");
+            long timeoutMillis = millis(timeout);
+            try {
+                if (Thread.currentThread().isVirtual()) {
+                    return Optional.of(await(recvFromAsync(timeout)));
+                }
+                synchronized (state) {
+                    long handle = state.handle();
+                    Optional<ReceivedMessage> cached = state.recvRing.tryReceiveFromCached();
+                    return cached.isPresent() ? cached
+                            : Optional.of(Native.socketRecvFrom(handle, timeoutMillis));
+                }
+            } catch (TimeoutException error) {
+                return Optional.empty();
+            }
+        } finally {
+            operationLock.unlock();
+        }
+    }
+
+    /** Receives an available body and sender without blocking. */
+    public Optional<ReceivedMessage> tryRecvFrom() {
+        return recvFrom(Duration.ZERO);
+    }
+
+    /** Receives a body and sender asynchronously; cancellation aborts the native receive. */
+    public CompletableFuture<ReceivedMessage> recvFromAsync() {
+        return recvFromAsyncMillis(FOREVER);
+    }
+
+    /** Receives a body and sender asynchronously before the timeout. */
+    public CompletableFuture<ReceivedMessage> recvFromAsync(Duration timeout) {
+        Objects.requireNonNull(timeout, "timeout");
+        return recvFromAsyncMillis(millis(timeout));
+    }
+
+    private CompletableFuture<ReceivedMessage> recvFromAsyncMillis(long timeoutMillis) {
+        operationLock.lock();
+        try {
+            requireIdentitySocket();
+            NativeFuture<ReceivedMessage> future = new NativeFuture<>();
+            try {
+                synchronized (state) {
+                    long handle = state.handle();
+                    Optional<ReceivedMessage> cached = state.recvRing.tryReceiveFromCached();
+                    if (cached.isPresent()) {
+                        future.complete(cached.orElseThrow());
+                    } else {
+                        future.setNativeTask(Native.socketRecvFromAsync(handle, timeoutMillis, future));
+                    }
+                }
+            } catch (OMQException error) {
+                future.completeExceptionally(error);
+            }
+            return future;
+        } finally {
+            operationLock.unlock();
+        }
+    }
+
+    /** Sends a body to the identity's routing bytes, which may now select a replacement peer. */
+    public void sendTo(Identity identity, Message message) {
+        requireIdentitySocket();
+        Objects.requireNonNull(identity, "identity");
+        Objects.requireNonNull(message, "message");
+        byte[][] body = message.toNative();
+        byte[][] parts = new byte[body.length + 1][];
+        parts[0] = identity.bytes();
+        System.arraycopy(body, 0, parts, 1, body.length);
+        send(Message.fromNative(parts));
+    }
+
+    private void requireIdentitySocket() {
+        if (type != SocketType.ROUTER && type != SocketType.PEER) {
+            throw new IllegalStateException("recvFrom/sendTo requires ROUTER or PEER");
+        }
+    }
+
     /** Receives one single-part message body, blocking forever. */
     public byte[] receiveBytes() {
         operationLock.lock();

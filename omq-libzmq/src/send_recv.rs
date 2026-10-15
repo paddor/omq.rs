@@ -424,6 +424,28 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
     // SAFETY: libzmq sockets are accessed by at most one application thread.
     let accum = unsafe { sock.send_accum.get() };
 
+    if sock.socket_type == omq_tokio::SocketType::Stream {
+        if accum.is_empty() {
+            if flags & ZMQ_SNDMORE == 0 {
+                return fail(libc::EINVAL);
+            }
+            if let Err(error) = prepare_stream_route(sock, data, flags, sndtimeo) {
+                return fail(error);
+            }
+            accum.push(Bytes::copy_from_slice(data));
+            return ret_len;
+        }
+        let message =
+            omq_tokio::Message::multipart([accum[0].clone(), Bytes::copy_from_slice(data)]);
+        // STREAM data always ends the pair. Keep the identity on EAGAIN so
+        // the caller can retry the same data frame.
+        let result = submit_message(sock, message, ret_len, flags & !ZMQ_SNDMORE, sndtimeo);
+        if result >= 0 || crate::error::zmq_errno() != libc::EAGAIN {
+            accum.clear();
+        }
+        return result;
+    }
+
     // If SNDMORE: buffer and return immediately.
     if flags & ZMQ_SNDMORE != 0 {
         accum.push(Bytes::copy_from_slice(data));
@@ -440,6 +462,35 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
     };
 
     submit_message(sock, msg, ret_len, flags, sndtimeo)
+}
+
+fn prepare_stream_route(
+    sock: &Arc<OmqSocket>,
+    identity: &[u8],
+    flags: c_int,
+    sndtimeo: i64,
+) -> Result<(), c_int> {
+    crate::socket::ensure_materialized(sock)?;
+    let inner = sock.inner.get().ok_or(ETERM)?;
+    match inner.check_stream_route(identity) {
+        Ok(()) => return Ok(()),
+        Err(omq_tokio::Error::WouldBlock) if flags & ZMQ_DONTWAIT == 0 && sndtimeo != 0 => {}
+        Err(error) => return Err(map_omq_err(&error)),
+    }
+    let identity = Bytes::copy_from_slice(identity);
+    let result = crate::socket::with_socket(&sock.ctx, inner, move |socket| async move {
+        let ready = socket.wait_stream_route(identity);
+        if sndtimeo > 0 {
+            tokio::time::timeout(Duration::from_millis(sndtimeo as u64), ready)
+                .await
+                .unwrap_or(Err(omq_tokio::Error::WouldBlock))
+        } else {
+            ready.await
+        }
+    });
+    result
+        .map_err(|()| ETERM)?
+        .map_err(|error| map_omq_err(&error))
 }
 
 pub(crate) fn send_message(

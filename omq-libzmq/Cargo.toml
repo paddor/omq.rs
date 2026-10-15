@@ -64,6 +64,10 @@ name = "omq_libzmq_basic"
 path = "tests/basic.rs"
 
 [[test]]
+name = "omq_libzmq_stream"
+path = "tests/stream.rs"
+
+[[test]]
 name = "omq_libzmq_ctx"
 path = "tests/ctx.rs"
 

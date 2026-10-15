@@ -14,6 +14,30 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::sync::mpsc;
 
 impl Socket {
+    /// Check a STREAM identity before accepting its C API routing frame.
+    #[doc(hidden)]
+    pub fn check_stream_route(&self, identity: &[u8]) -> Result<()> {
+        if self.socket_type() != SocketType::Stream {
+            return Err(Error::Protocol("expected a STREAM socket".into()));
+        }
+        let crate::routing::SendSubmitter::Identity(submitter) = &self.send_submitter else {
+            unreachable!("STREAM identity routing")
+        };
+        submitter.check_route(identity)
+    }
+
+    /// Wait for space at a STREAM route without submitting its body.
+    #[doc(hidden)]
+    pub async fn wait_stream_route(&self, identity: Bytes) -> Result<()> {
+        let message = Message::single(identity);
+        loop {
+            match self.check_stream_route(message.part_slice(0).unwrap()) {
+                Err(Error::WouldBlock) => self.send_submitter.wait_send_progress(&message).await,
+                result => return result,
+            }
+        }
+    }
+
     /// Send a body to a ROUTER or PEER identity without an identity part.
     pub async fn send_to(&self, identity: impl AsRef<[u8]>, body: Message) -> Result<()> {
         self.check_identity_routing()?;

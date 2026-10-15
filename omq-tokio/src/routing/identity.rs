@@ -46,6 +46,14 @@ enum PeerTarget {
 }
 
 impl PeerTarget {
+    fn is_alive(&self) -> bool {
+        match self {
+            Self::Pipe(pipe) | Self::RepInproc(pipe) => pipe.is_alive(),
+            Self::Direct(target) => target.is_alive(),
+            Self::Inbox(inbox) => !inbox.is_closed(),
+        }
+    }
+
     fn watch_close(&self, progress: &Arc<StateSignal>) {
         match self {
             Self::Pipe(pipe) | Self::RepInproc(pipe) => pipe.watch_close(progress),
@@ -140,6 +148,26 @@ pub(crate) struct Submitter {
 }
 
 impl Submitter {
+    pub(crate) fn check_route(&self, identity: &[u8]) -> Result<()> {
+        let mut state = self.inner.lock().expect("identity inner poisoned");
+        if state.closed {
+            return Err(Error::Closed);
+        }
+        let peer_id = *state
+            .identity_to_peer
+            .get(identity)
+            .ok_or(Error::Unroutable)?;
+        let peer = state.peers.get_mut(&peer_id).ok_or(Error::Unroutable)?;
+        if !peer.target.is_alive() {
+            return Err(Error::Unroutable);
+        }
+        if peer.target.can_accept(&self.data_lanes) {
+            Ok(())
+        } else {
+            Err(Error::WouldBlock)
+        }
+    }
+
     pub(crate) fn clone_shared(&self) -> Self {
         Self {
             data_lanes: self.data_lanes.clone_shared(),

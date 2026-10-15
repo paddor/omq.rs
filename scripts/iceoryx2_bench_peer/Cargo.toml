@@ -1,0 +1,23 @@
+[package]
+name = "iceoryx2_bench_peer"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+publish = false
+
+[[bin]]
+name = "omq_iceoryx2_bench_peer"
+path = "src/main.rs"
+
+[workspace]
+
+[dependencies]
+iceoryx2 = "=0.10.0"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"

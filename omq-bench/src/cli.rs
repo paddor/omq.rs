@@ -32,6 +32,10 @@ pub(crate) enum ChartSub {
     },
     /// Main TCP overview charts.
     Main,
+    /// Direct, RPC, and brokered messaging comparisons.
+    Mom,
+    /// Verified local and network fan-out comparisons only.
+    MomFanout,
     /// Per-transport PUSH/PULL and REQ/REP charts.
     Comparison,
     /// PUB/SUB multi-panel and CURVE charts.

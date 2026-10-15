@@ -7,6 +7,7 @@ Generated SVGs. Do not hand-edit. Data source: `~/.cache/omq/*.jsonl`.
 ```sh
 cargo run --release -p omq-bench -- chart          # all charts
 cargo run --release -p omq-bench -- chart main      # main overview only
+cargo run --release -p omq-bench -- chart mom       # other protocol comparisons
 cargo run --release -p omq-bench -- chart comparison # per-transport
 cargo run --release -p omq-bench -- chart pubsub    # PUB/SUB + CURVE
 cargo run --release -p omq-bench -- chart fanio     # fan-out/fan-in
@@ -47,6 +48,24 @@ Older cache rows without pair/profile metadata remain valid REQ/REP defaults.
 On `main`, only the three `main_*.svg` overview charts include other
 implementations, except the DART charts, which also include Aeron.
 All other secondary charts in `doc/charts/` show OMQ and libzmq only.
+
+## MOM charts (6 files)
+
+- `omq_bench chart mom` writes six SVGs in `moms/`; `chart mom-fanout`
+  writes the two PUB/SUB SVGs. Require complete, verified cohorts.
+- Throughput: `comparisons.jsonl`, `mom-omq.jsonl`, `shm-pushpull.jsonl`.
+- RTT: `mom-omq.jsonl`, `shm-reqrep.jsonl`, `comparisons.jsonl`.
+  Use request/reply workloads, p99 lines, and p50-p99.9 whiskers. Network axes
+  are logarithmic; local axes are linear with 20 μs top and 5 μs bottom ticks.
+  Split network and local no-spin/spin into two panels each; put Aeron and
+  iceoryx2 below. Reuse colors and one legend row per implementation. Use
+  solid lines throughout. DART spins IO with receive spin.
+- PUB/SUB: 16 B to 16 KiB, 1/4/32 subscribers, three verified rounds with
+  at least 3 seconds of publishing. Plot per-subscriber rates, including the
+  slowest drain. OMQ uses HWM 1000 and blocking receive. Use dashed msg/s
+  left, solid GB/s right, with a log GB/s axis.
+- All six SVGs use the CPU model and repo-root `.chart_hw` subtitle. No
+  hostnames or virtualization metadata.
 
 ## Secondary comparison charts (6 files)
 
@@ -107,14 +126,14 @@ Reject cached rows with different settings.
 
 | file | workload |
 |------|----------|
-| `shm/pubsub.svg` | RADIO/DISH, 4/32 readers |
+| `shm/pubsub.svg` | RADIO/DISH, 4/32 subscribers, per-subscriber rates |
 | `shm/pushpull.svg` | SCATTER/GATHER, one sender/receiver |
-| `shm/reqrep.svg` | CLIENT/SERVER, 0/50 us receive spin |
+| `shm/reqrep.svg` | CLIENT/SERVER, 0/50 μs receive spin |
 
 Use complete verified cohorts; exclude ordinary inproc from the pooled baseline.
 GB/s and msg/s axes are linear. Latency plots p99 with p50-p99.9
-whiskers, non-spinning above spinning, on 0-120 us axes with 20 us ticks.
-Use the usual subtitle without hostnames or CPU counts.
+whiskers, non-spinning above spinning, on 0-120 μs axes with 20 μs ticks.
+Use the CPU model and repo-root `.chart_hw` subtitle without hostnames.
 
 ## Fan-out / fan-in charts (2 files)
 

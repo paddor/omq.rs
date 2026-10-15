@@ -6,6 +6,8 @@ pub(crate) mod dart;
 pub(crate) mod fanio;
 pub(crate) mod lossy;
 pub(crate) mod main_tcp;
+pub(crate) mod moms;
+pub(crate) mod moms_fanout;
 pub(crate) mod pubsub;
 mod pushpull_compression;
 pub(crate) mod quic;

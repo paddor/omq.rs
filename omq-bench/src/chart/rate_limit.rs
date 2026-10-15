@@ -145,6 +145,7 @@ fn series_data(selected: &[Row]) -> (ValMap, ValMap, BTreeMap<String, CpuData>) 
             series.key.into(),
             CpuData {
                 sender: Some(mean_cpu_pct(&rows, |row| row.sender_cpu)),
+                broker: None,
                 receiver: Some(mean_cpu_pct(&rows, |row| row.receiver_cpu)),
                 runtime_workers: None,
             },

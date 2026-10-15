@@ -22,6 +22,7 @@ pub(crate) const MUTED_TEXT_COLOR: RGBColor = RGBColor(156, 163, 175);
 pub(crate) const TITLE_FILL: &str = "#F9FAFB";
 pub(crate) const MUTED_FILL: &str = "#9CA3AF";
 
+#[derive(Clone, Copy)]
 pub(crate) struct Impl {
     pub key: &'static str,
     pub label: &'static str,
@@ -41,6 +42,7 @@ pub(crate) type LatencyMap = BTreeMap<u64, BTreeMap<String, LatencyEntry>>;
 
 pub(crate) struct CpuData {
     pub sender: Option<f64>,
+    pub broker: Option<f64>,
     pub receiver: Option<f64>,
     pub runtime_workers: Option<usize>,
 }
@@ -95,6 +97,7 @@ enum LegendVersionMode {
 pub(crate) const C_LIBZMQ: RGBColor = RGBColor(250, 204, 21);
 pub(crate) const C_LIBZMQ_2T: RGBColor = RGBColor(245, 158, 11);
 pub(crate) const C_OMQ_1T: RGBColor = RGBColor(239, 68, 68);
+pub(crate) const C_OMQ_QUIC: RGBColor = RGBColor(29, 78, 216);
 pub(crate) const C_OMQ_SPIN: RGBColor = RGBColor(251, 146, 60);
 pub(crate) const C_OMQ_CT: RGBColor = RGBColor(251, 113, 133);
 pub(crate) const C_OMQ_MT: RGBColor = RGBColor(249, 115, 22);
@@ -104,6 +107,13 @@ pub(crate) const C_ZMQRS: RGBColor = RGBColor(96, 165, 250);
 pub(crate) const C_MONOCOQUE: RGBColor = RGBColor(37, 99, 235);
 pub(crate) const C_R0Z: RGBColor = RGBColor(34, 211, 238);
 pub(crate) const C_TMQ: RGBColor = RGBColor(168, 85, 247);
+pub(crate) const C_GRPC: RGBColor = RGBColor(244, 114, 182);
+pub(crate) const C_RABBITMQ: RGBColor = RGBColor(96, 165, 250);
+pub(crate) const C_AERON: RGBColor = RGBColor(148, 163, 184);
+pub(crate) const C_NATS: RGBColor = RGBColor(34, 211, 238);
+pub(crate) const C_REDIS: RGBColor = RGBColor(132, 204, 22);
+pub(crate) const C_ZENOH: RGBColor = RGBColor(255, 255, 255);
+pub(crate) const C_IROH: RGBColor = RGBColor(167, 139, 250);
 pub(crate) const C_RZMQ_IOURING: RGBColor = RGBColor(16, 185, 129);
 
 // formatting
@@ -216,7 +226,8 @@ pub(crate) fn detect_hardware() -> Option<String> {
         .or_else(|| hw_conf.get("postfix").cloned());
     let prefix = std::env::var("OMQ_HW_PREFIX")
         .ok()
-        .or_else(|| hw_conf.get("prefix").cloned());
+        .or_else(|| hw_conf.get("prefix").cloned())
+        .or_else(cpu_model);
 
     match (prefix, postfix) {
         (Some(prefix), Some(postfix)) => Some(format!("{prefix}, {postfix}")),
@@ -224,6 +235,16 @@ pub(crate) fn detect_hardware() -> Option<String> {
         (None, Some(postfix)) => Some(postfix),
         (None, None) => None,
     }
+}
+
+fn cpu_model() -> Option<String> {
+    let cpuinfo = std::fs::read_to_string("/proc/cpuinfo").ok()?;
+    cpuinfo.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        (key.trim() == "model name")
+            .then(|| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
 }
 
 fn read_chart_hw() -> BTreeMap<String, String> {
@@ -487,13 +508,93 @@ fn draw_legend_table_with_versions(
     Ok(())
 }
 
+/// Legend table of the MOM charts: protocol, client crate, runtime or
+/// broker, and the CPU columns that have a header.
+fn draw_mom_legend_table(
+    table_area: &DrawingArea<SVGBackend<'_>, plotters::coord::Shift>,
+    impls: &[&Impl],
+    columns: &CpuColumns<'_>,
+    broker_label: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let style_hdr = ("sans-serif", 11).into_font().color(&MUTED_TEXT_COLOR);
+    let style_val = ("sans-serif", 11).into_font().color(&TEXT_COLOR);
+    let style_dim = ("sans-serif", 11).into_font().color(&MUTED_TEXT_COLOR);
+
+    let col_swatch = 78;
+    let col_name = col_swatch + 20;
+    let (col_crate, col_meta, col_snd, col_broker, col_rcv) = (290, 455, 555, 655, 765);
+    let row_h = 16i32;
+
+    let headers = [
+        ("protocol", col_name),
+        ("crate", col_crate),
+        ("runtime / broker", col_meta),
+        (columns.snd_label, col_snd),
+        (broker_label, col_broker),
+        (columns.rcv_label, col_rcv),
+    ];
+    for (header, col) in headers {
+        if !header.is_empty() {
+            table_area.draw_text(header, &style_hdr, (col, 4))?;
+        }
+    }
+
+    for (i, imp) in impls.iter().enumerate() {
+        #[expect(clippy::cast_possible_wrap)]
+        let y = 20 + i as i32 * row_h;
+
+        table_area.draw(&PathElement::new(
+            vec![(col_swatch, y + 6), (col_swatch + 14, y + 6)],
+            imp.color.stroke_width(2),
+        ))?;
+        table_area.draw_text(imp.label, &style_val, (col_name, y))?;
+        let client = mom_client_crate_label(imp.key);
+        table_area.draw_text(client, &style_dim, (col_crate, y))?;
+        if !imp.threads.is_empty() {
+            table_area.draw_text(imp.threads, &style_dim, (col_meta, y))?;
+        }
+
+        let Some(cd) = columns.cpu.get(imp.key) else {
+            continue;
+        };
+        let cells = [
+            (columns.snd_label, cd.sender, col_snd),
+            (broker_label, cd.broker, col_broker),
+            (columns.rcv_label, cd.receiver, col_rcv),
+        ];
+        for (header, value, col) in cells {
+            if let (false, Some(v)) = (header.is_empty(), value) {
+                table_area.draw_text(&format!("{v:.0}%"), &style_dim, (col, y))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn mom_client_crate_label(key: &str) -> &'static str {
+    match key {
+        key if key.starts_with("omq-") => "omq-tokio",
+        "grpc-rust" => "tonic v0.12.3",
+        "rabbitmq" => "lapin v2.5.5",
+        "aeron-udp-2proc" => "Aeron v1.51.0",
+        "nats" => "async-nats v0.42.0",
+        "redis-streams" => "redis v0.32.7",
+        "zenoh-tcp-2proc" => "zenoh v1.10.1",
+        "iroh-quic-2proc" => "iroh v1.3.0",
+        "iceoryx2-shm-2proc" => "iceoryx2 v0.10.0",
+        _ => "",
+    }
+}
+
 // data loading
 
 #[derive(Default)]
 struct CpuAccum {
     sender_sum: f64,
+    broker_sum: f64,
     receiver_sum: f64,
     sender_count: u32,
+    broker_count: u32,
     receiver_count: u32,
     runtime_workers: Option<usize>,
 }
@@ -509,6 +610,11 @@ impl CpuAccum {
         self.receiver_count += 1;
     }
 
+    fn add_broker_pct(&mut self, pct: f64) {
+        self.broker_sum += pct;
+        self.broker_count += 1;
+    }
+
     fn add_sender(&mut self, cpu_time: f64, elapsed: f64) {
         self.add_sender_pct(cpu_time / elapsed * 100.0);
     }
@@ -517,10 +623,15 @@ impl CpuAccum {
         self.add_receiver_pct(cpu_time / elapsed * 100.0);
     }
 
+    fn add_broker(&mut self, cpu_time: f64, elapsed: f64) {
+        self.add_broker_pct(cpu_time / elapsed * 100.0);
+    }
+
     fn into_data(self) -> CpuData {
         CpuData {
             runtime_workers: self.runtime_workers,
             sender: (self.sender_count > 0).then(|| self.sender_sum / f64::from(self.sender_count)),
+            broker: (self.broker_count > 0).then(|| self.broker_sum / f64::from(self.broker_count)),
             receiver: (self.receiver_count > 0)
                 .then(|| self.receiver_sum / f64::from(self.receiver_count)),
         }
@@ -538,6 +649,9 @@ pub(crate) fn merge_cpu_data<'a>(
             accum.runtime_workers = data.runtime_workers.or(accum.runtime_workers);
             if let Some(sender) = data.sender {
                 accum.add_sender_pct(sender);
+            }
+            if let Some(broker) = data.broker {
+                accum.add_broker_pct(broker);
             }
             if let Some(receiver) = data.receiver {
                 accum.add_receiver_pct(receiver);
@@ -561,7 +675,6 @@ pub(crate) fn load_tput(
 
     let path = jsonl::cache_dir().join("comparisons.jsonl");
     let rows: Vec<(usize, ComparisonRow)> = jsonl::load_jsonl(&path);
-    let keys: Vec<&str> = impls.iter().map(|i| i.key).collect();
 
     let mut tput: ValMap = BTreeMap::new();
     let mut msgs: ValMap = BTreeMap::new();
@@ -571,38 +684,41 @@ pub(crate) fn load_tput(
         if row.transport != transport || row.kind != kind {
             continue;
         }
-        if !keys.contains(&row.impl_name.as_str()) {
+        let Some(chart_key) = chart_key_for(impls, &row.impl_name, transport) else {
             continue;
-        }
+        };
         if let Some(p) = peers
             && row.peers != Some(p)
         {
             continue;
         }
-        let key = (row.impl_name.clone(), row.msg_size);
+        let key = (chart_key.to_string(), row.msg_size);
         latest.insert(key, row);
     }
 
     let mut cpu_sums: BTreeMap<String, CpuAccum> = BTreeMap::new();
 
-    for row in latest.into_values() {
+    for ((chart_key, _), row) in latest {
         if let Some(v) = row.mbps {
             tput.entry(row.msg_size)
                 .or_default()
-                .insert(row.impl_name.clone(), v);
+                .insert(chart_key.clone(), v);
         }
         if let Some(v) = row.msgs_s {
             msgs.entry(row.msg_size)
                 .or_default()
-                .insert(row.impl_name.clone(), v);
+                .insert(chart_key.clone(), v);
         }
         if let Some(elapsed) = row.elapsed
             && elapsed > 0.0
         {
-            let e = cpu_sums.entry(row.impl_name.clone()).or_default();
+            let e = cpu_sums.entry(chart_key).or_default();
             e.runtime_workers = row.runtime_workers.or(e.runtime_workers);
             if let Some(push) = row.push_cpu_time.or(row.pub_cpu_time) {
                 e.add_sender(push, elapsed);
+            }
+            if let Some(broker) = row.broker_cpu_time {
+                e.add_broker(broker, elapsed);
             }
             if let Some(pull) = row.pull_cpu_time {
                 e.add_receiver(pull, elapsed);
@@ -620,6 +736,31 @@ pub(crate) fn load_tput(
         .collect();
 
     (tput, msgs, cpu)
+}
+
+/// Chart key whose series `impl_name` rows feed on `transport`. Charts with
+/// an `omq-quic` series read OMQ QUIC rows recorded as `omq-tokio-1t`.
+fn chart_key_for(impls: &[Impl], impl_name: &str, transport: &str) -> Option<&'static str> {
+    let map_omq_quic = impls.iter().any(|imp| imp.key == "omq-quic");
+    impls
+        .iter()
+        .map(|imp| imp.key)
+        .find(|&key| comparison_impl_key(key, transport, map_omq_quic) == Some(impl_name))
+}
+
+fn comparison_impl_key<'a>(
+    chart_key: &'a str,
+    transport: &str,
+    map_omq_quic: bool,
+) -> Option<&'a str> {
+    if !map_omq_quic {
+        return Some(chart_key);
+    }
+    match (chart_key, transport) {
+        ("omq-tokio-1t" | "omq-tokio-1t-spin50", "quic") => None,
+        ("omq-quic", "quic") => Some("omq-tokio-1t"),
+        _ => Some(chart_key),
+    }
 }
 
 pub(crate) fn load_fairness(
@@ -687,7 +828,6 @@ pub(crate) fn load_latency(
 
     let path = jsonl::cache_dir().join("comparisons.jsonl");
     let rows: Vec<(usize, ComparisonRow)> = jsonl::load_jsonl(&path);
-    let keys: Vec<&str> = impls.iter().map(|i| i.key).collect();
 
     let mut lat: LatencyMap = BTreeMap::new();
     let mut latest: BTreeMap<(String, u64), ComparisonRow> = BTreeMap::new();
@@ -707,30 +847,33 @@ pub(crate) fn load_latency(
         {
             continue;
         }
-        if !keys.contains(&row.impl_name.as_str()) {
+        let Some(chart_key) = chart_key_for(impls, &row.impl_name, transport) else {
             continue;
-        }
+        };
         if !sizes.contains(&row.msg_size) {
             continue;
         }
-        let key = (row.impl_name.clone(), row.msg_size);
+        let key = (chart_key.to_string(), row.msg_size);
         latest.insert(key, row);
     }
 
     let mut cpu_sums: BTreeMap<String, CpuAccum> = BTreeMap::new();
 
-    for row in latest.into_values() {
+    for ((chart_key, _), row) in latest {
         if let (Some(p50), Some(p99), Some(p999)) = (row.p50_us, row.p99_us, row.p999_us) {
             lat.entry(row.msg_size)
                 .or_default()
-                .insert(row.impl_name.clone(), LatencyEntry { p50, p99, p999 });
+                .insert(chart_key.clone(), LatencyEntry { p50, p99, p999 });
         }
         if let Some(elapsed) = row.elapsed
             && elapsed > 0.0
         {
-            let e = cpu_sums.entry(row.impl_name.clone()).or_default();
+            let e = cpu_sums.entry(chart_key).or_default();
             if let Some(req) = row.req_cpu_time {
                 e.add_sender(req, elapsed);
+            }
+            if let Some(broker) = row.broker_cpu_time {
+                e.add_broker(broker, elapsed);
             }
             if let (Some(total), Some(req)) = (row.cpu_time, row.req_cpu_time) {
                 e.add_receiver(total - req, elapsed);
@@ -824,10 +967,31 @@ enum GbsScale {
 
 /// Axis and legend options of a dual-panel throughput chart.
 #[derive(Clone, Copy)]
-struct DualPanelStyle {
+struct DualPanelStyle<'a> {
     msg_axis: MsgAxisMode,
     gbs_scale: GbsScale,
     version_mode: LegendVersionMode,
+    chart_h: u32,
+    msg_ticks: usize,
+    /// Broker CPU header of the MOM legend; `None` keeps the thread legend.
+    mom_broker_label: Option<&'a str>,
+}
+
+impl DualPanelStyle<'_> {
+    const fn standard(
+        msg_axis: MsgAxisMode,
+        gbs_scale: GbsScale,
+        version_mode: LegendVersionMode,
+    ) -> Self {
+        Self {
+            msg_axis,
+            gbs_scale,
+            version_mode,
+            chart_h: 340,
+            msg_ticks: N_TICKS,
+            mom_broker_label: None,
+        }
+    }
 }
 
 pub(crate) fn draw_throughput_dual_panel(
@@ -836,11 +1000,8 @@ pub(crate) fn draw_throughput_dual_panel(
     msgs: &ValMap,
     columns: &CpuColumns<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let style = DualPanelStyle {
-        msg_axis: MsgAxisMode::Auto,
-        gbs_scale: GbsScale::Linear,
-        version_mode: LegendVersionMode::Hide,
-    };
+    let style =
+        DualPanelStyle::standard(MsgAxisMode::Auto, GbsScale::Linear, LegendVersionMode::Hide);
     draw_dual_panel(spec, tput, msgs, columns, style)
 }
 
@@ -850,11 +1011,11 @@ pub(crate) fn draw_throughput_dual_panel_with_versions(
     msgs: &ValMap,
     columns: &CpuColumns<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let style = DualPanelStyle {
-        msg_axis: MsgAxisMode::Auto,
-        gbs_scale: GbsScale::Linear,
-        version_mode: LegendVersionMode::ShowOtherImpls,
-    };
+    let style = DualPanelStyle::standard(
+        MsgAxisMode::Auto,
+        GbsScale::Linear,
+        LegendVersionMode::ShowOtherImpls,
+    );
     draw_dual_panel(spec, tput, msgs, columns, style)
 }
 
@@ -864,11 +1025,11 @@ pub(crate) fn draw_throughput_dual_panel_fixed_2m_msgs_with_versions(
     msgs: &ValMap,
     columns: &CpuColumns<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let style = DualPanelStyle {
-        msg_axis: MsgAxisMode::Fixed2M,
-        gbs_scale: GbsScale::Linear,
-        version_mode: LegendVersionMode::ShowOtherImpls,
-    };
+    let style = DualPanelStyle::standard(
+        MsgAxisMode::Fixed2M,
+        GbsScale::Linear,
+        LegendVersionMode::ShowOtherImpls,
+    );
     draw_dual_panel(spec, tput, msgs, columns, style)
 }
 
@@ -880,10 +1041,28 @@ pub(crate) fn draw_throughput_dual_panel_log_gbs(
     msgs: &ValMap,
     columns: &CpuColumns<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let style = DualPanelStyle::standard(MsgAxisMode::Auto, GbsScale::Log, LegendVersionMode::Hide);
+    draw_dual_panel(spec, tput, msgs, columns, style)
+}
+
+/// Dual-panel MOM throughput chart: taller panels, finer msg/s ticks, and
+/// the MOM legend with a broker CPU column.
+pub(crate) fn draw_throughput_dual_panel_brokered_with_versions(
+    spec: &ChartSpec<'_>,
+    tput: &ValMap,
+    msgs: &ValMap,
+    columns: &CpuColumns<'_>,
+    broker_label: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     let style = DualPanelStyle {
-        msg_axis: MsgAxisMode::Auto,
-        gbs_scale: GbsScale::Log,
-        version_mode: LegendVersionMode::Hide,
+        chart_h: 520,
+        msg_ticks: 10,
+        mom_broker_label: Some(broker_label),
+        ..DualPanelStyle::standard(
+            MsgAxisMode::Auto,
+            GbsScale::Linear,
+            LegendVersionMode::ShowOtherImpls,
+        )
     };
     draw_dual_panel(spec, tput, msgs, columns, style)
 }
@@ -937,7 +1116,7 @@ fn draw_dual_panel(
     tput: &ValMap,
     msgs: &ValMap,
     columns: &CpuColumns<'_>,
-    style: DualPanelStyle,
+    style: DualPanelStyle<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let present: Vec<&Impl> = spec
         .impls
@@ -946,7 +1125,7 @@ fn draw_dual_panel(
         .collect();
     let (small, large) = split_sizes(spec.sizes);
 
-    let chart_h = 340u32;
+    let chart_h = style.chart_h;
     let total_h = chart_h + legend_table_height(present.len());
     let width = 950u32;
     let hw_label = detect_hardware();
@@ -961,7 +1140,9 @@ fn draw_dual_panel(
             sizes: &small,
             present: &present,
         };
-        let axis = style.msg_axis.bounds(peak_msgs(&small, msgs), N_TICKS);
+        let axis = style
+            .msg_axis
+            .bounds(peak_msgs(&small, msgs), style.msg_ticks);
         draw_msgs_panel(&left_area, &panel, msgs, axis, None)?;
     }
 
@@ -979,7 +1160,11 @@ fn draw_dual_panel(
         }
     }
 
-    draw_legend_table_with_versions(&table_area, &present, columns, style.version_mode)?;
+    if let Some(broker_label) = style.mom_broker_label {
+        draw_mom_legend_table(&table_area, &present, columns, broker_label)?;
+    } else {
+        draw_legend_table_with_versions(&table_area, &present, columns, style.version_mode)?;
+    }
     root.present()?;
     drop(root);
 
@@ -1163,6 +1348,220 @@ pub(crate) fn draw_latency_single_panel_with_versions(
         annotate_clipped: false,
     };
     draw_latency_single_panel_with_layout(spec, lat, cpu, layout)
+}
+
+/// MOM request/reply chart: series without spinning on top, spinning or
+/// polling series below. Network axes are logarithmic, local axes linear.
+pub(crate) fn draw_latency_brokered_with_versions(
+    spec: &ChartSpec<'_>,
+    lat: &LatencyMap,
+    cpu: &BTreeMap<String, CpuData>,
+    local: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let present: Vec<&Impl> = spec
+        .impls
+        .iter()
+        .filter(|imp| {
+            spec.sizes.iter().any(|size| {
+                lat.get(size)
+                    .is_some_and(|values| values.contains_key(imp.key))
+            })
+        })
+        .collect();
+    let (spinning, no_spin): (Vec<&Impl>, Vec<&Impl>) = present
+        .iter()
+        .copied()
+        .partition(|imp| is_spinning_mom(imp));
+    // Spin variants share their base series' legend row.
+    let legend: Vec<&Impl> = present
+        .iter()
+        .copied()
+        .filter(|imp| !imp.key.ends_with("-spin50"))
+        .collect();
+
+    let (top_h, bottom_h) = if local { (300, 300) } else { (540, 340) };
+    let chart_h = top_h + bottom_h;
+    let total_h = chart_h + 30 + legend.len() as u32 * 16;
+    let width = 850u32;
+    let hardware = detect_hardware();
+    let root = SVGBackend::new(spec.out_path, (width, total_h)).into_drawing_area();
+    root.fill(&BACKGROUND_COLOR)?;
+    let (chart_area, table_area) = root.split_vertically(chart_h);
+    let (top, bottom) = chart_area.split_vertically(top_h);
+
+    let (top_caption, bottom_caption) = if local {
+        ("No receive spin", "50 \u{03bc}s OMQ spin; iceoryx2 polling")
+    } else {
+        (
+            "No explicit receive spin",
+            "50 \u{03bc}s OMQ spin; Aeron busy polling",
+        )
+    };
+    let top_panel = Panel {
+        sizes: spec.sizes,
+        present: &no_spin,
+    };
+    draw_mom_latency_panel(&top, top_caption, &top_panel, lat, local.then_some(20.0))?;
+    let bottom_panel = Panel {
+        sizes: spec.sizes,
+        present: &spinning,
+    };
+    draw_mom_latency_panel(
+        &bottom,
+        bottom_caption,
+        &bottom_panel,
+        lat,
+        local.then_some(5.0),
+    )?;
+
+    let columns = CpuColumns {
+        cpu,
+        snd_label: "",
+        rcv_label: "",
+    };
+    draw_mom_legend_table(&table_area, &legend, &columns, "")?;
+    root.present()?;
+    drop(root);
+    postprocess_svg(
+        spec.out_path,
+        width,
+        total_h,
+        spec.title,
+        hardware.as_deref(),
+    )
+}
+
+/// Series measured with receive spinning or busy polling.
+fn is_spinning_mom(imp: &Impl) -> bool {
+    imp.key.ends_with("-spin50") || matches!(imp.key, "aeron-udp-2proc" | "iceoryx2-shm-2proc")
+}
+
+/// Linear axis with `tick_us` steps, or a log10 axis with 1/2/5 ticks per
+/// decade. Returns the axis, its bounds, and the log axis floor in us.
+fn mom_latency_axis(
+    min_p50: f64,
+    max_p999: f64,
+    tick_us: Option<f64>,
+) -> (LatencyAxis, std::ops::Range<f64>, f64) {
+    let log_min_us = 10.0_f64.powf(min_p50.log10().floor()).max(0.1);
+    let (axis_min, axis_max, ticks) = if let Some(step) = tick_us {
+        let max = ((max_p999 * 1.1 / step).ceil() * step).max(step);
+        let ticks = (0..=(max / step) as usize)
+            .map(|index| index as f64 * step)
+            .collect();
+        (0.0, max, ticks)
+    } else {
+        let min = log_min_us.log10();
+        let max = (max_p999 * 1.25).log10().max(min + 1.0);
+        let ticks = (min.floor() as i32..=max.ceil() as i32)
+            .flat_map(|decade| {
+                [1.0_f64, 2.0, 5.0].map(move |factor| f64::from(decade) + factor.log10())
+            })
+            .filter(|tick| *tick >= min - 1e-9 && *tick <= max + 1e-9)
+            .collect();
+        (min, max, ticks)
+    };
+    let bounds = axis_min..axis_max;
+    (
+        LatencyAxis(bounds.clone().into(), ticks),
+        bounds,
+        log_min_us,
+    )
+}
+
+/// Latency values in plot units: microseconds on a linear axis, log10
+/// microseconds (floored at `log_min_us`) otherwise.
+fn mom_plot_latency(lat: &LatencyMap, tick_us: Option<f64>, log_min_us: f64) -> LatencyMap {
+    let plot_us = |value: f64| {
+        if tick_us.is_some() {
+            value
+        } else {
+            value.max(log_min_us).log10()
+        }
+    };
+    lat.iter()
+        .map(|(&size, values)| {
+            let values = values
+                .iter()
+                .map(|(key, entry)| {
+                    let entry = LatencyEntry {
+                        p50: plot_us(entry.p50),
+                        p99: plot_us(entry.p99),
+                        p999: plot_us(entry.p999),
+                    };
+                    (key.clone(), entry)
+                })
+                .collect();
+            (size, values)
+        })
+        .collect()
+}
+
+fn draw_mom_latency_panel(
+    area: &DrawingArea<SVGBackend<'_>, plotters::coord::Shift>,
+    caption: &str,
+    panel: &Panel<'_>,
+    lat: &LatencyMap,
+    tick_us: Option<f64>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let sizes = panel.sizes;
+    let (min_p50, max_p999) = panel
+        .present
+        .iter()
+        .flat_map(|imp| sizes.iter().filter_map(|size| lat.get(size)?.get(imp.key)))
+        .fold((f64::INFINITY, 0.0_f64), |(lo, hi), entry| {
+            (lo.min(entry.p50), hi.max(entry.p999))
+        });
+    let (axis, bounds, log_min_us) = mom_latency_axis(min_p50, max_p999, tick_us);
+    let plot_lat = mom_plot_latency(lat, tick_us, log_min_us);
+
+    let mut chart = ChartBuilder::on(area)
+        .caption(caption, ("sans-serif", 12).into_font().color(&TEXT_COLOR))
+        .set_label_area_size(LabelAreaPosition::Bottom, 28)
+        .set_label_area_size(LabelAreaPosition::Left, 60)
+        .margin_top(36)
+        .margin_left(10)
+        .margin_right(30)
+        .build_cartesian_2d(-0.15..(sizes.len() - 1) as f64 + 0.15, axis)?;
+
+    chart
+        .configure_mesh()
+        .x_labels(sizes.len())
+        .x_label_formatter(&|value| {
+            sizes
+                .get(value.round() as usize)
+                .map_or(String::new(), |&size| fmt_size(size))
+        })
+        .y_label_formatter(&|value| {
+            if tick_us.is_some() {
+                format!("{value:.0} \u{03bc}s")
+            } else {
+                fmt_us(10.0_f64.powf(*value))
+            }
+        })
+        .y_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
+        .x_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
+        .light_line_style(TRANSPARENT)
+        .bold_line_style(GRID_COLOR)
+        .axis_style(AXIS_COLOR)
+        .draw()?;
+
+    draw_latency_ranges(&mut chart, panel, &plot_lat, bounds, false)?;
+
+    for imp in panel.present.iter().rev() {
+        let points: Vec<(f64, f64)> = sizes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, size)| {
+                let entry = plot_lat.get(size)?.get(imp.key)?;
+                Some((index as f64, entry.p99))
+            })
+            .collect();
+        if !points.is_empty() {
+            draw_line_with_dots(&mut chart, &points, imp.color)?;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn draw_latency_single_panel_100us(
@@ -1717,6 +2116,43 @@ pub(crate) fn draw_multirow_throughput(
     row_title_fn: &dyn Fn(u64) -> String,
     hw_label: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let style = MultirowStyle {
+        row_title_fn,
+        hw_label,
+        gbs_scale: GbsScale::Linear,
+    };
+    draw_multirow(spec, rows, columns, &style)
+}
+
+/// Same as `draw_multirow_throughput` but the GB/s panels use a log10 Y axis.
+pub(crate) fn draw_multirow_throughput_log_gbs(
+    spec: &ChartSpec<'_>,
+    rows: &[ThroughputRow<'_>],
+    columns: &CpuColumns<'_>,
+    row_title_fn: &dyn Fn(u64) -> String,
+    hw_label: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let style = MultirowStyle {
+        row_title_fn,
+        hw_label,
+        gbs_scale: GbsScale::Log,
+    };
+    draw_multirow(spec, rows, columns, &style)
+}
+
+/// Row titles, subtitle, and GB/s scale of a multi-row throughput chart.
+struct MultirowStyle<'a> {
+    row_title_fn: &'a dyn Fn(u64) -> String,
+    hw_label: Option<&'a str>,
+    gbs_scale: GbsScale,
+}
+
+fn draw_multirow(
+    spec: &ChartSpec<'_>,
+    rows: &[ThroughputRow<'_>],
+    columns: &CpuColumns<'_>,
+    style: &MultirowStyle<'_>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let present: Vec<&Impl> = spec
         .impls
         .iter()
@@ -1754,10 +2190,16 @@ pub(crate) fn draw_multirow_throughput(
         let row_area = root.clone().shrink((0, y_top), (width, panel_h));
 
         // Titles go into the gap above each row once plotters is done.
-        row_titles.push((y_top - 6, row_title_fn(row.peers)));
+        row_titles.push((y_top - 6, (style.row_title_fn)(row.peers)));
 
         let (left_area, right_area) = row_area.split_horizontally(width / 2 - 10);
-        draw_throughput_row((&left_area, &right_area), &small_panel, &large_panel, row)?;
+        draw_throughput_row(
+            (&left_area, &right_area),
+            &small_panel,
+            &large_panel,
+            row,
+            style.gbs_scale,
+        )?;
     }
 
     let table_area = root.clone().shrink((0, chart_total), (width, table_h));
@@ -1766,7 +2208,7 @@ pub(crate) fn draw_multirow_throughput(
     root.present()?;
     drop(root);
 
-    postprocess_svg(spec.out_path, width, total_h, spec.title, hw_label)?;
+    postprocess_svg(spec.out_path, width, total_h, spec.title, style.hw_label)?;
     append_row_titles(spec.out_path, width, &row_titles)
 }
 
@@ -1780,6 +2222,7 @@ fn draw_throughput_row(
     small: &Panel<'_>,
     large: &Panel<'_>,
     row: &ThroughputRow<'_>,
+    gbs_scale: GbsScale,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let gbs_axis = nice_axis(peak_gbs(large.sizes, row.tput), N_TICKS);
     let msgs_axis = nice_axis(peak_msgs(small.sizes, row.msgs), N_TICKS);
@@ -1789,7 +2232,12 @@ fn draw_throughput_row(
     }
 
     if !large.sizes.is_empty() && gbs_axis.0 > 0.0 {
-        draw_gbs_panel(right_area, large, row.tput, gbs_axis, row.fairness)?;
+        match gbs_scale {
+            GbsScale::Linear => {
+                draw_gbs_panel(right_area, large, row.tput, gbs_axis, row.fairness)?;
+            }
+            GbsScale::Log => draw_gbs_panel_log(right_area, large, row.tput, row.fairness)?,
+        }
     }
     Ok(())
 }

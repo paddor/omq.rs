@@ -698,6 +698,82 @@ fn zap_user_id_and_metadata_are_attached_to_every_received_frame() {
 }
 
 #[test]
+fn zap_metadata_cannot_be_shadowed_by_peer_properties() {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
+    use bytes::{Bytes, BytesMut};
+    use omq_tokio::proto::{Command, Greeting, MechanismName, PeerProperties, command, frame};
+    use omq_tokio::{Frame, FrameFlags, Message, Payload, SocketType};
+
+    let ctx = zmq_ctx_new();
+    let zap = start_zap_handler(ctx, ZMQ_REP, |request| {
+        assert_eq!(request[5], b"NULL");
+        vec![
+            b"1.0".to_vec(),
+            request[1].clone(),
+            b"200".to_vec(),
+            b"OK".to_vec(),
+            b"alice".to_vec(),
+            b"\x04Role\x00\x00\x00\x06reader".to_vec(),
+        ]
+    });
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    set_bytes(pull, ZMQ_ZAP_DOMAIN, b"global");
+    set_timeo(pull, 5000);
+    let endpoint = helpers::bind_random_tcp(pull);
+    let address = endpoint.to_str().unwrap().strip_prefix("tcp://").unwrap();
+    let mut peer = TcpStream::connect(address).unwrap();
+    peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    peer.set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+
+    let mut wire = BytesMut::new();
+    Greeting::current(MechanismName::NULL, false).encode(&mut wire);
+    peer.write_all(&wire).unwrap();
+    peer.read_exact(&mut [0; 64]).unwrap();
+    wire.clear();
+
+    let mut properties = PeerProperties::default().with_socket_type(SocketType::Push);
+    for name in ["User-Id", "user-id", "USER-ID", "Role", "role", "ROLE"] {
+        properties.add(name, Bytes::from_static(b"admin"));
+    }
+    properties.add("X-Application", Bytes::from_static(b"client"));
+    let mut ready = BytesMut::new();
+    command::encode(&Command::Ready(properties), &mut ready);
+    frame::encode_frame(
+        &Frame {
+            flags: FrameFlags::COMMAND,
+            payload: Payload::from_bytes(ready.freeze()),
+        },
+        &mut wire,
+    );
+    frame::encode_message_flat(&Message::single("hello"), &mut wire);
+    peer.write_all(&wire).unwrap();
+    zap.join().unwrap();
+
+    let mut message = ZmqMsg::new();
+    assert_eq!(zmq_msg_recv(message.0.as_mut_ptr().cast(), pull, 0), 5);
+    assert_eq!(msg_property(&message, c"User-Id"), Some(b"alice".to_vec()));
+    assert_eq!(msg_property(&message, c"Role"), Some(b"reader".to_vec()));
+    for name in [c"user-id", c"USER-ID", c"role", c"ROLE"] {
+        assert_eq!(msg_property(&message, name), None);
+    }
+    assert_eq!(
+        msg_property(&message, c"X-Application"),
+        Some(b"client".to_vec())
+    );
+    assert_eq!(
+        msg_property(&message, c"Socket-Type"),
+        Some(b"PUSH".to_vec())
+    );
+    zmq_msg_close(message.0.as_mut_ptr().cast());
+    drop(peer);
+    zmq_close(pull);
+    zmq_ctx_term(ctx);
+}
+
+#[test]
 fn zap_router_can_pipeline_requests_from_multiple_servers() {
     let server_ctx = zmq_ctx_new();
     assert_eq!(zmq_ctx_set(server_ctx, ZMQ_IO_THREADS, 2), 0);

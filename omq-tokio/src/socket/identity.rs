@@ -2,12 +2,12 @@
 
 use std::ops::Deref;
 
-use bytes::Bytes;
+use omq_proto::Identity;
 use omq_proto::error::{Error, Result, TrySendError};
 use omq_proto::message::Message;
 use omq_proto::proto::SocketType;
 
-use super::{ReceiveReceipt, ReceiveSource, handle::Socket};
+use super::{ReceiveLane, ReceiveReceipt, handle::Socket};
 
 /// ROUTER or PEER socket with sender identities separate from message bodies.
 #[derive(Clone, Debug)]
@@ -63,37 +63,42 @@ impl IdentitySocket {
         self.0.try_send_to(identity, body)
     }
 
-    /// Receive a body and its logical sender identity.
-    pub async fn recv_from(&self) -> Result<(Bytes, Message)> {
-        let (receipt, message) = self.0.recv_from(None).await?;
+    /// Receive a body and its sender identity with an immutable peer snapshot.
+    /// `identity.peer_info()` stays valid across handover and socket closure.
+    /// Keeping the identity does not pause a receive lane. Use
+    /// [`recv_with_receipt`](Self::recv_with_receipt) to retain a lane claim.
+    pub async fn recv_from(&self) -> Result<(Identity, Message)> {
+        let (mut receipt, message) = self.0.recv_with_receipt(None).await?;
         let identity = receipt
-            .identity_bytes()
+            .take_identity()
             .ok_or_else(|| Error::Protocol("received message has no sender identity".into()))?;
         Ok((identity, message))
     }
 
     /// Nonblocking identity receive.
-    pub fn try_recv_from(&self) -> Result<(Bytes, Message)> {
-        let (receipt, message) = self.0.try_recv_from(None)?;
+    pub fn try_recv_from(&self) -> Result<(Identity, Message)> {
+        let (mut receipt, message) = self.0.try_recv_with_receipt(None)?;
         let identity = receipt
-            .identity_bytes()
+            .take_identity()
             .ok_or_else(|| Error::Protocol("received message has no sender identity".into()))?;
         Ok((identity, message))
     }
 
-    /// Receive with a claim of the exact source for selective backpressure.
-    pub async fn recv_from_source(
+    /// Receive with a lane claim for selective backpressure.
+    /// `None` selects any unpaused lane fairly; `Some(lane)` selects that lane.
+    /// See [`Socket::recv_with_receipt`] for claim lifetime and socket support.
+    pub async fn recv_with_receipt(
         &self,
-        source: Option<&ReceiveSource>,
+        lane: Option<&ReceiveLane>,
     ) -> Result<(ReceiveReceipt, Message)> {
-        self.0.recv_from(source).await
+        self.0.recv_with_receipt(lane).await
     }
 
-    /// Nonblocking receive from one exact source.
-    pub fn try_recv_from_source(
+    /// Nonblocking form of [`recv_with_receipt`](Self::recv_with_receipt).
+    pub fn try_recv_with_receipt(
         &self,
-        source: Option<&ReceiveSource>,
+        lane: Option<&ReceiveLane>,
     ) -> Result<(ReceiveReceipt, Message)> {
-        self.0.try_recv_from(source)
+        self.0.try_recv_with_receipt(lane)
     }
 }

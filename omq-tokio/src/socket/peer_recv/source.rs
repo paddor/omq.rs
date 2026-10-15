@@ -6,10 +6,11 @@ use super::{
     ReceiveCell, RecvItem, RecvShared, Result, Weak, mpsc,
 };
 
-/// One physical receive connection and generation. A replacement connection
-/// has a different source even when it has the same logical identity.
+/// Opaque receive lane used for selective backpressure and retries.
+/// A replacement peer gets a different lane even with the same logical identity.
+/// Obtain a handle through [`ReceiveReceipt::lane`].
 #[derive(Clone)]
-pub struct ReceiveSource {
+pub struct ReceiveLane {
     inner: SourceOwner,
 }
 
@@ -25,7 +26,7 @@ struct PeerSource {
     shared: Weak<RecvShared>,
 }
 
-impl PartialEq for ReceiveSource {
+impl PartialEq for ReceiveLane {
     fn eq(&self, other: &Self) -> bool {
         match (&self.inner, &other.inner) {
             (SourceOwner::Peer(a), SourceOwner::Peer(b)) => Arc::ptr_eq(&a.state, &b.state),
@@ -35,9 +36,9 @@ impl PartialEq for ReceiveSource {
     }
 }
 
-impl Eq for ReceiveSource {}
+impl Eq for ReceiveLane {}
 
-impl std::hash::Hash for ReceiveSource {
+impl std::hash::Hash for ReceiveLane {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         match &self.inner {
             SourceOwner::Peer(source) => {
@@ -52,11 +53,11 @@ impl std::hash::Hash for ReceiveSource {
     }
 }
 
-impl std::fmt::Debug for ReceiveSource {
+impl std::fmt::Debug for ReceiveLane {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.inner {
             SourceOwner::Peer(source) => f
-                .debug_struct("ReceiveSource")
+                .debug_struct("ReceiveLane")
                 .field("identity", &source.state.identity)
                 .finish_non_exhaustive(),
             SourceOwner::Fanin(source) => source.fmt(f),
@@ -64,12 +65,12 @@ impl std::fmt::Debug for ReceiveSource {
     }
 }
 
-impl ReceiveSource {
+impl ReceiveLane {
     fn peer(&self) -> Result<&PeerSource> {
         match &self.inner {
             SourceOwner::Peer(source) => Ok(source),
             SourceOwner::Fanin(_) => Err(Error::Protocol(
-                "receive source belongs to another socket".into(),
+                "receive lane belongs to another socket".into(),
             )),
         }
     }
@@ -78,43 +79,52 @@ impl ReceiveSource {
         match &self.inner {
             SourceOwner::Fanin(source) => Ok(source),
             SourceOwner::Peer(_) => Err(Error::Protocol(
-                "receive source belongs to another socket".into(),
+                "receive lane belongs to another socket".into(),
             )),
         }
     }
 }
 
-/// Owns a source's FIFO claim. PEER also retains its receive memory charge.
-/// Drop after admitting or discarding the message to resume that source.
-/// While live, all other receive calls skip this source. PULL and GATHER use
+/// Owns a lane's FIFO claim. PEER also retains its receive memory charge.
+/// Drop after admitting or discarding the message to resume that lane.
+/// While live, all other receive calls skip this lane. PULL and GATHER use
 /// their bounded lane storage plus this one claimed message.
 #[derive(Debug)]
 pub struct ReceiveReceipt {
-    source: Option<ReceiveSource>,
-    identity: Option<Bytes>,
+    lane: Option<ReceiveLane>,
+    identity: Option<omq_proto::Identity>,
     permit: Option<Permit>,
     fanin_bytes: usize,
 }
 
 impl ReceiveReceipt {
-    /// Physical source, when the socket supports source-aware drainage.
-    pub fn source(&self) -> Option<&ReceiveSource> {
-        self.source.as_ref()
+    /// Claimed receive lane, when supported. ROUTER receipts have no lane.
+    pub fn lane(&self) -> Option<&ReceiveLane> {
+        self.lane.as_ref()
     }
 
     /// Logical peer identity, when supplied by an identity-routing socket.
     pub fn identity(&self) -> Option<&[u8]> {
-        self.identity.as_deref()
+        self.identity.as_ref().map(AsRef::as_ref)
     }
 
     /// Clone the logical peer identity without copying its allocation.
     pub fn identity_bytes(&self) -> Option<Bytes> {
-        self.identity.clone()
+        self.identity.as_ref().map(omq_proto::Identity::to_bytes)
     }
 
-    pub(in crate::socket) fn inert(identity: Option<Bytes>) -> Self {
+    /// Original sender snapshot, independent of current routing and lane lifetime.
+    pub fn peer_identity(&self) -> Option<&omq_proto::Identity> {
+        self.identity.as_ref()
+    }
+
+    pub(in crate::socket) fn take_identity(&mut self) -> Option<omq_proto::Identity> {
+        self.identity.take()
+    }
+
+    pub(in crate::socket) fn inert(identity: Option<omq_proto::Identity>) -> Self {
         Self {
-            source: None,
+            lane: None,
             identity,
             permit: None,
             fanin_bytes: 0,
@@ -123,7 +133,7 @@ impl ReceiveReceipt {
 
     pub(in crate::socket) fn from_fanin(source: super::super::fanin::Source, bytes: usize) -> Self {
         Self {
-            source: Some(ReceiveSource {
+            lane: Some(ReceiveLane {
                 inner: SourceOwner::Fanin(source),
             }),
             identity: None,
@@ -133,21 +143,20 @@ impl ReceiveReceipt {
     }
 
     pub(in crate::socket) fn fanin_claim(&self) -> Result<(&super::super::fanin::Source, usize)> {
-        let source = self
-            .source
-            .as_ref()
-            .ok_or_else(|| Error::Protocol("unshift requires a source-aware receipt".into()))?;
+        let source = self.lane.as_ref().ok_or_else(|| {
+            Error::Protocol("unshift requires a receipt with a lane claim".into())
+        })?;
         Ok((source.fanin()?, self.fanin_bytes))
     }
 
     pub(in crate::socket) fn forget_claim(&mut self) {
-        self.source = None;
+        self.lane = None;
     }
 }
 
 impl Drop for ReceiveReceipt {
     fn drop(&mut self) {
-        if let Some(source) = &self.source {
+        if let Some(source) = &self.lane {
             match &source.inner {
                 SourceOwner::Peer(source) => {
                     if self.permit.is_some()
@@ -167,7 +176,7 @@ impl Drop for ReceiveReceipt {
 /// Failed return of a message. The caller retains the original message.
 #[derive(Debug)]
 pub struct UnshiftError {
-    /// Reason the receipt could not be returned to this socket/source.
+    /// Reason the receipt could not be returned to this socket/lane.
     pub error: Error,
     /// Message returned to the caller for retry or discard.
     pub message: Message,
@@ -223,11 +232,11 @@ impl PeerReceiver {
     }
 
     /// Acquire one source, preserving its byte permit until receipt release.
-    pub(crate) fn try_recv_from(
+    pub(crate) fn try_recv_with_receipt(
         &mut self,
-        source: Option<&ReceiveSource>,
+        source: Option<&ReceiveLane>,
     ) -> Result<(ReceiveReceipt, Message)> {
-        let source = source.map(ReceiveSource::peer).transpose()?;
+        let source = source.map(ReceiveLane::peer).transpose()?;
         self.process_source_changes();
         if self.shared.closed.load(Ordering::Acquire) {
             return Err(Error::Closed);
@@ -236,7 +245,7 @@ impl PeerReceiver {
         if let Some(source) = source {
             if !self.belongs(source) {
                 return Err(Error::Protocol(
-                    "receive source belongs to another socket".into(),
+                    "receive lane belongs to another socket".into(),
                 ));
             }
             if !source.state.live() {
@@ -316,7 +325,7 @@ impl PeerReceiver {
         (
             ReceiveReceipt {
                 identity: Some(state.identity.clone()),
-                source: Some(ReceiveSource {
+                lane: Some(ReceiveLane {
                     inner: SourceOwner::Peer(PeerSource {
                         state,
                         shared: Arc::downgrade(shared),
@@ -329,17 +338,17 @@ impl PeerReceiver {
         )
     }
 
-    pub(crate) async fn recv_from(
+    pub(crate) async fn recv_with_receipt(
         receiver: &ReceiveCell<Self>,
-        source: Option<&ReceiveSource>,
+        source: Option<&ReceiveLane>,
     ) -> Result<(ReceiveReceipt, Message)> {
-        let peer_source = source.map(ReceiveSource::peer).transpose()?;
+        let peer_source = source.map(ReceiveLane::peer).transpose()?;
         let shared = receiver.lock().shared.clone();
         loop {
             let seen = peer_source.map(|source| source.state.data.generation());
             let (result, yielded) = {
                 let mut receiver = receiver.lock();
-                let result = receiver.try_recv_from(source);
+                let result = receiver.try_recv_with_receipt(source);
                 (result, receiver.take_yield_pending())
             };
             match result {
@@ -371,11 +380,7 @@ impl PeerReceiver {
         self.process_source_changes();
         let error = if self.shared.closed.load(Ordering::Acquire) {
             Some(Error::Closed)
-        } else if let Some(source) = receipt
-            .source
-            .as_ref()
-            .and_then(|source| source.peer().ok())
-        {
+        } else if let Some(source) = receipt.lane.as_ref().and_then(|source| source.peer().ok()) {
             if !self.belongs(source) {
                 Some(Error::Protocol("receipt belongs to another socket".into()))
             } else if !source.state.live() {
@@ -385,14 +390,14 @@ impl PeerReceiver {
             }
         } else {
             Some(Error::Protocol(
-                "unshift requires a source-aware receipt".into(),
+                "unshift requires a receipt with a lane claim".into(),
             ))
         };
         if let Some(error) = error {
             return Err(UnshiftError { error, message });
         }
         let source = receipt
-            .source
+            .lane
             .as_ref()
             .expect("validated receipt")
             .peer()
@@ -429,7 +434,7 @@ impl PeerReceiver {
             receipt.permit.take().expect("receipt permit"),
         ));
         source.state.data.notify_changed();
-        receipt.source = None;
+        receipt.lane = None;
         Ok(())
     }
 }

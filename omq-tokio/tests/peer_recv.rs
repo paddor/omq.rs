@@ -45,8 +45,8 @@ async fn identity_view_preserves_targeted_claims_and_explicit_body_sends() {
         .send_to("server", Message::single("held"))
         .await
         .unwrap();
-    let (receipt, message) = server.recv_from_source(None).await.unwrap();
-    let source = receipt.source().unwrap().clone();
+    let (receipt, message) = server.recv_with_receipt(None).await.unwrap();
+    let source = receipt.lane().unwrap().clone();
     assert_eq!(receipt.identity(), Some(b"client".as_slice()));
     server.unshift(receipt, message).unwrap();
     server
@@ -56,7 +56,7 @@ async fn identity_view_preserves_targeted_claims_and_explicit_body_sends() {
     let (identity, message) = client.recv_from().await.unwrap();
     assert_eq!(identity.as_ref(), b"server");
     assert_eq!(message, Message::single("reply while paused"));
-    let (receipt, message) = server.try_recv_from_source(Some(&source)).unwrap();
+    let (receipt, message) = server.try_recv_with_receipt(Some(&source)).unwrap();
     assert_eq!(message, Message::single("held"));
     drop(receipt);
     client
@@ -83,19 +83,19 @@ async fn source_backpressure(endpoint: Endpoint) {
     a.send(Message::multipart(["server", "held"]))
         .await
         .unwrap();
-    let (receipt, message) = tokio::time::timeout(DEADLINE, server.recv_from(None))
+    let (receipt, message) = tokio::time::timeout(DEADLINE, server.recv_with_receipt(None))
         .await
         .unwrap()
         .unwrap();
     assert_eq!(receipt.identity(), Some(b"a".as_slice()));
-    let source = receipt.source().unwrap().clone();
+    let source = receipt.lane().unwrap().clone();
     // Another application handle cannot overtake a live receipt.
     let receiving = server.clone();
     a.send(Message::multipart(["server", "next"]))
         .await
         .unwrap();
     assert!(matches!(
-        receiving.try_recv_from(Some(&source)),
+        receiving.try_recv_with_receipt(Some(&source)),
         Err(Error::WouldBlock)
     ));
     server.unshift(receipt, message).unwrap();
@@ -120,12 +120,12 @@ async fn source_backpressure(endpoint: Endpoint) {
         .unwrap();
     assert_eq!(reply.part_slice(1), Some(b"reply while paused".as_slice()));
     for _ in 0..3 {
-        let (receipt, message) = receiving.try_recv_from(Some(&source)).unwrap();
+        let (receipt, message) = receiving.try_recv_with_receipt(Some(&source)).unwrap();
         assert_eq!(message.part_slice(0), Some(b"held".as_slice()));
         assert!(matches!(server.try_recv(), Err(Error::WouldBlock)));
         receiving.unshift(receipt, message).unwrap();
     }
-    let (receipt, _) = server.try_recv_from(Some(&source)).unwrap();
+    let (receipt, _) = server.try_recv_with_receipt(Some(&source)).unwrap();
     drop(receipt);
     let next = tokio::time::timeout(DEADLINE, receiving.recv())
         .await
@@ -133,8 +133,8 @@ async fn source_backpressure(endpoint: Endpoint) {
         .unwrap();
     assert_eq!(next.part_slice(1), Some(b"next".as_slice()));
     // A targeted wait on an outstanding claim must terminate on close.
-    let (receipt, _) = server.recv_from(Some(&source)).await.unwrap();
-    let mut waiting = Box::pin(receiving.recv_from(Some(&source)));
+    let (receipt, _) = server.recv_with_receipt(Some(&source)).await.unwrap();
+    let mut waiting = Box::pin(receiving.recv_with_receipt(Some(&source)));
     assert!(
         tokio::time::timeout(Duration::from_millis(10), waiting.as_mut())
             .await
@@ -172,12 +172,12 @@ async fn large_source_backpressure(endpoint: Endpoint) {
     ]))
     .await
     .unwrap();
-    let (receipt, body) = tokio::time::timeout(DEADLINE, server.recv_from(None))
+    let (receipt, body) = tokio::time::timeout(DEADLINE, server.recv_with_receipt(None))
         .await
         .unwrap()
         .unwrap();
     assert_eq!(receipt.identity(), Some(b"a".as_slice()));
-    let source = receipt.source().unwrap().clone();
+    let source = receipt.lane().unwrap().clone();
     server.unshift(receipt, body).unwrap();
 
     tokio::time::timeout(DEADLINE, async {
@@ -201,14 +201,14 @@ async fn large_source_backpressure(endpoint: Endpoint) {
         ]))
         .await
         .unwrap();
-        let (receipt, body) = tokio::time::timeout(DEADLINE, server.recv_from(None))
+        let (receipt, body) = tokio::time::timeout(DEADLINE, server.recv_with_receipt(None))
             .await
             .unwrap()
             .unwrap();
         assert_eq!(receipt.identity(), Some(b"b".as_slice()));
         assert_eq!(body.part_slice(0).unwrap().len(), SIZE);
         drop((receipt, body));
-        let (receipt, body) = server.try_recv_from(Some(&source)).unwrap();
+        let (receipt, body) = server.try_recv_with_receipt(Some(&source)).unwrap();
         assert_eq!(body.part_slice(0).unwrap().len(), SIZE);
         server.unshift(receipt, body).unwrap();
     }
@@ -222,7 +222,7 @@ async fn large_source_backpressure(endpoint: Endpoint) {
         .unwrap();
     assert_eq!(reply.part_slice(1), Some(b"reply while paused".as_slice()));
 
-    let (receipt, body) = server.try_recv_from(Some(&source)).unwrap();
+    let (receipt, body) = server.try_recv_with_receipt(Some(&source)).unwrap();
     drop((receipt, body));
     let next = tokio::time::timeout(DEADLINE, server.recv())
         .await
@@ -634,6 +634,7 @@ async fn reconnect_churn_discards_stale_backlogs_and_reclaims_retired_rings() {
         current.connect(endpoint.clone()).await.unwrap();
         connected(&current).await;
         connected(&server).await;
+        let mut snapshots = Vec::new();
         for _ in 0..160 {
             current
                 .send(Message::multipart(["server", "before handover"]))
@@ -644,6 +645,9 @@ async fn reconnect_churn_discards_stale_backlogs_and_reclaims_retired_rings() {
                 .unwrap()
                 .unwrap();
             assert_eq!(message.part_slice(1), Some(b"before handover".as_slice()));
+            let snapshot = message.sender_identity().unwrap().clone();
+            assert!(snapshots.iter().all(|old| *old != snapshot));
+            snapshots.push(snapshot);
             for _ in 0..16 {
                 current
                     .send(Message::multipart(["server", "stale"]))
@@ -672,6 +676,12 @@ async fn reconnect_churn_discards_stale_backlogs_and_reclaims_retired_rings() {
         }
         current.close().await.unwrap();
         server.close().await.unwrap();
+        assert_eq!(snapshots.len(), 160);
+        assert!(
+            snapshots
+                .iter()
+                .all(|identity| identity.as_ref() == b"client")
+        );
     }
 }
 

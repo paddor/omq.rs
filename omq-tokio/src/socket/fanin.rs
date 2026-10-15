@@ -1261,17 +1261,17 @@ mod batch_tests {
         let mut other = queue.register().unwrap();
         assert!(sink.enable_batches());
         assert!(sink.push_batch(batch(8)));
-        let (receipt, message) = queue.try_recv_from(None).unwrap();
-        let source = receipt.source().unwrap().clone();
+        let (receipt, message) = queue.try_recv_with_receipt(None).unwrap();
+        let source = receipt.lane().unwrap().clone();
         other.try_send(Message::single("other")).unwrap();
         assert_eq!(queue.try_recv().unwrap(), Message::single("other"));
         assert!(queue.try_recv().is_err());
         queue.unshift(receipt, message).unwrap();
-        let (receipt, message) = queue.try_recv_from(Some(&source)).unwrap();
+        let (receipt, message) = queue.try_recv_with_receipt(Some(&source)).unwrap();
         assert_eq!(message.part_slice(0).unwrap(), &[0; 64]);
         drop(receipt);
         for seq in 1..8_u8 {
-            let (receipt, message) = queue.try_recv_from(Some(&source)).unwrap();
+            let (receipt, message) = queue.try_recv_with_receipt(Some(&source)).unwrap();
             assert_eq!(message.part_slice(0).unwrap(), &[seq; 64]);
             drop(receipt);
         }
@@ -1332,14 +1332,14 @@ mod batch_tests {
             let mut sink = Sink::owned(queue.register().unwrap());
             assert!(sink.enable_batches());
             assert!(sink.push_batch(batch(4)));
-            let (receipt, held) = queue.try_recv_from(None).unwrap();
-            let source = receipt.source().unwrap().clone();
+            let (receipt, held) = queue.try_recv_with_receipt(None).unwrap();
+            let source = receipt.lane().unwrap().clone();
             drop(sink);
             drop(receipt);
             assert_eq!(queue.try_recv().unwrap().part_slice(0).unwrap(), &[1; 64]);
             assert!(queue.try_recv().is_err());
             assert!(matches!(
-                queue.try_recv_from(Some(&source)),
+                queue.try_recv_with_receipt(Some(&source)),
                 Err(Error::Closed)
             ));
             assert_eq!(held.part_slice(0).unwrap(), &[0; 64]);

@@ -9,6 +9,7 @@ impl Message {
     /// `None` when any backing allocation is opaque.
     pub fn retained_size(&self) -> Option<usize> {
         let extra = match &self.inner {
+            MessageInner::Identified(message) => message.retained_size()?,
             MessageInner::Empty
             | MessageInner::Inline { .. }
             | MessageInner::InlinePair(_)
@@ -34,6 +35,16 @@ impl Message {
     /// Copy payloads with opaque allocation backing into exactly sized
     /// storage. Known backing remains shared. Preserves frames and routing.
     pub fn bound_storage(&mut self) {
+        if let MessageInner::Identified(message) = &self.inner {
+            if message.retained_size().is_none() {
+                let mut parts = std::mem::take(self).into_parts_payload();
+                for part in parts.iter_mut() {
+                    part.bound_storage();
+                }
+                self.inner = MessageInner::Multi(parts);
+            }
+            return;
+        }
         match &mut self.inner {
             MessageInner::Single(payload) => payload.bound_storage(),
             MessageInner::PrefixedShared { prefix, body } => {
@@ -78,6 +89,9 @@ impl Message {
 
     pub(crate) fn parts_payload(&self) -> SmallVec<[Payload; 2]> {
         match &self.inner {
+            MessageInner::Identified(message) => (0..message.len())
+                .map(|index| message.payload(index).expect("identity frame"))
+                .collect(),
             MessageInner::InlinePair(pair) => SmallVec::from_buf(pair.payloads()),
             MessageInner::Empty | MessageInner::RoutedEmpty { .. } => SmallVec::new(),
             MessageInner::Inline { len, data } => {
@@ -117,6 +131,7 @@ impl Message {
 
     pub(crate) fn into_parts_payload(self) -> Parts {
         match self.inner {
+            MessageInner::Identified(message) => message.into_parts(),
             MessageInner::InlinePair(pair) => Vec::from(pair.payloads()).into(),
             MessageInner::Empty | MessageInner::RoutedEmpty { .. } => Vec::new().into(),
             MessageInner::Inline { len, data } => {

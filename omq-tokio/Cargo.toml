@@ -134,6 +134,10 @@ name = "peer_recv"
 path = "tests/peer_recv.rs"
 
 [[test]]
+name = "peer_info"
+path = "tests/peer_info.rs"
+
+[[test]]
 name = "pull_recv"
 path = "tests/pull_recv.rs"
 

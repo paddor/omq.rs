@@ -132,6 +132,7 @@ fn prepare_wire_codec(
     })
 }
 
+#[expect(clippy::too_many_lines)]
 fn prepare_wire_driver(
     socket: &mut SocketDriver,
     peer_id: u64,
@@ -149,6 +150,7 @@ fn prepare_wire_driver(
     PeerEntry,
     crate::context::IoThreadLease,
 )> {
+    let (local_address, remote_address) = stream.addresses();
     let endpoint = &peer.endpoint;
     let (inbox_tx, inbox_rx) = crate::engine::control_inbox::channel(PEER_INBOX_CAP);
     let (data_inbox_tx, data_inbox_rx) = crate::engine::data_inbox::channel(
@@ -236,7 +238,7 @@ fn prepare_wire_driver(
     let io_assignment = carrier_lease.unwrap_or_else(|| reserve_peer_io(&socket.io_pool, endpoint));
     let io_thread = io_assignment.index();
 
-    let entry = wire_peer_entry(
+    let mut entry = wire_peer_entry(
         peer,
         peer_ident,
         PeerDriverHandle {
@@ -251,6 +253,8 @@ fn prepare_wire_driver(
         setup,
         io_thread,
     );
+    entry.local_address = local_address;
+    entry.remote_address = remote_address;
     Some((peer_driver, entry, io_assignment))
 }
 
@@ -328,6 +332,8 @@ fn wire_peer_entry(
     io_thread: usize,
 ) -> PeerEntry {
     PeerEntry {
+        local_address: None,
+        remote_address: None,
         options: peer.options,
         ident,
         handle,
@@ -428,7 +434,7 @@ pub(super) fn spawn_inproc_peer(
     let InprocConn {
         out,
         in_rx,
-        peer: peer_snapshot,
+        peer: _,
         peer_send_hwm,
         inbound,
         outbound,
@@ -453,16 +459,9 @@ pub(super) fn spawn_inproc_peer(
         Some(port) => {
             let sink = inproc_port_sink(socket, peer_id, peer_send_hwm);
             debug_assert!(sink.supports_direct());
-            let identity = (socket.socket_type == SocketType::Router).then(|| {
-                if peer_snapshot.identity.is_empty() {
-                    super::generated_identity(peer_id)
-                } else {
-                    peer_snapshot.identity.clone()
-                }
-            });
             let open = crate::transport::inproc::OpenPort {
                 sink,
-                identity,
+                identity: None,
                 max_message_size: socket.options.max_message_size,
                 cancel: child_cancel.clone(),
             };
@@ -476,6 +475,8 @@ pub(super) fn spawn_inproc_peer(
     socket.peers.insert(
         peer_id,
         PeerEntry {
+            local_address: None,
+            remote_address: None,
             options,
             ident: peer_ident,
             handle: PeerDriverHandle {

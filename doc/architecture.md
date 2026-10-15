@@ -158,6 +158,11 @@ clones share the receive drain; outbound PEER sends use per-clone,
 per-destination producers consumed by the connection driver. A
 replacement identity invalidates the old route and its queued receive data.
 
+Received ROUTER and PEER identities retain immutable `PeerInfo` snapshots;
+`Identity::peer_info()` reads the original sender's authentication without locks
+or a live-directory lookup. `PeerDiagnostics` holds endpoint and address
+observations; snapshots retain metadata only and are released with their last owner.
+
 ## Receive ownership and backpressure
 
 PULL, GATHER, SUB, XSUB, and PEER own their receive queues. Each connection
@@ -170,21 +175,21 @@ ends. Atomic ownership transfer supports concurrent calls through one handle.
 Multiple application handles also serialize receives with a shared mutex;
 driver and endpoint references do not count as application handles.
 
-PEER, PULL, and GATHER let the application claim a receive source while deciding
-whether to admit its message. Receipt lifetime controls the claim; the receiving
-socket enforces the pause and owns any returned message. A claim pauses that
-connection's drainage while other sources, outbound traffic, and control work
-continue. Claims belong to a physical
-connection generation, so a reconnect cannot inherit a held message.
+PEER, PULL, and GATHER let the application claim a receive lane through
+`recv_with_receipt` while deciding whether to admit its message. Receipt lifetime
+controls the claim; the receiving socket enforces the pause and owns any returned
+message. Other lanes, outbound traffic, and control work continue while the lane
+is paused. Claims belong to a physical connection generation, so a reconnect
+cannot inherit a held message.
 
 Backpressure propagates through bounded queues. A full connection lane stops
 transport reads; transport buffers and sender queues then fill. Resuming the
-source allows drainage and frees queue capacity. PEER bounds retained memory
-per source; PULL and GATHER use message-count HWMs. Socket memory also includes
+lane allows drainage and frees queue capacity. PEER bounds retained memory
+per lane; PULL and GATHER use message-count HWMs. Socket memory also includes
 held messages and transport buffers.
 
-The [receive backpressure contract](../DEVELOPMENT.md#source-receive-backpressure)
-describes source receipts, retries, and socket-type constraints.
+The [receive backpressure contract](../DEVELOPMENT.md#receive-lane-backpressure)
+describes lane receipts, retries, and socket-type constraints.
 
 Round-robin and exclusive sends normally wait for space when mute; nonblocking
 sends report `Full`. Fan-out sockets apply their configured drop or block

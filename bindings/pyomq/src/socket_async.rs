@@ -390,6 +390,19 @@ impl AsyncSocket {
         }
     }
 
+    #[pyo3(name = "_try_recv_from", signature = (copy = true))]
+    fn try_recv_from<'py>(
+        &self,
+        py: Python<'py>,
+        copy: bool,
+    ) -> PyResult<Option<(crate::peer_info::Identity, Bound<'py, PyList>)>> {
+        self.inner.check_recv_from()?;
+        self.inner
+            .try_external_recv()?
+            .map(|msg| crate::peer_info::received_from(py, msg, copy))
+            .transpose()
+    }
+
     #[pyo3(name = "_try_recv_multipart")]
     fn try_recv_multipart<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let dish = matches!(self.inner.socket_type, omq_tokio::SocketType::Dish);

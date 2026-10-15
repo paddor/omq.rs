@@ -234,6 +234,19 @@ pull.set_curve_auth(None)
 No ZAP, no filesystem key management. The callback runs during the CURVE
 handshake; returning a falsy value rejects the client.
 
+On ROUTER and PEER, `recv_from()` returns an owning identity and all body
+frames; `copy=False` returns `Frame` objects, and the asyncio API is awaitable.
+The identity retains the admission snapshot across reconnects and socket closure;
+`authentication` contains verified facts, while `diagnostics` is for logging.
+
+```python
+identity, frames = router.recv_from()
+info = identity.peer_info
+key = info.authentication.public_key  # raw CURVE key bytes, or None
+endpoint = info.diagnostics.endpoint
+router.send_to(identity, [b"reply"])  # route bytes may now select a replacement peer
+```
+
 ## Develop
 
 ```sh

@@ -863,35 +863,46 @@ impl IdentitySend {
     }
 }
 
-/// Recv strategy that prepends each peer's identity as the first frame.
+/// Actor-owned receive identities; no shared table or lock on delivery.
 #[derive(Debug)]
 pub(crate) struct IdentityRecv {
-    peers: Arc<Mutex<FxHashMap<u64, Bytes>>>,
+    peers: FxHashMap<u64, ReceiveIdentity>,
+}
+
+#[derive(Debug)]
+enum ReceiveIdentity {
+    Raw(Bytes),
+    Admitted(omq_proto::Identity),
 }
 
 impl IdentityRecv {
     pub(crate) fn new() -> Self {
         Self {
-            peers: Arc::new(Mutex::new(FxHashMap::default())),
+            peers: FxHashMap::default(),
         }
     }
 
     pub(crate) fn connection_added(&mut self, peer_id: u64, identity: Bytes) {
-        let mut g = self.peers.lock().expect("identity recv poisoned");
-        g.insert(peer_id, identity);
+        self.peers.insert(peer_id, ReceiveIdentity::Raw(identity));
+    }
+
+    pub(crate) fn admitted(&mut self, peer_id: u64, identity: omq_proto::Identity) {
+        self.peers
+            .insert(peer_id, ReceiveIdentity::Admitted(identity));
     }
 
     pub(crate) fn connection_removed(&mut self, peer_id: u64) {
-        let mut g = self.peers.lock().expect("identity recv poisoned");
-        g.remove(&peer_id);
+        self.peers.remove(&peer_id);
     }
 
     pub(crate) fn wrap(&self, peer_id: u64, msg: Message) -> Message {
-        let identity = {
-            let g = self.peers.lock().expect("identity recv poisoned");
-            g.get(&peer_id).cloned().unwrap_or_default()
-        };
-        Message::with_prefix(identity, msg)
+        match self.peers.get(&peer_id) {
+            Some(ReceiveIdentity::Admitted(identity)) => {
+                Message::with_identity(identity.clone(), msg)
+            }
+            Some(ReceiveIdentity::Raw(identity)) => Message::with_prefix(identity.clone(), msg),
+            None => Message::with_prefix(Bytes::new(), msg),
+        }
     }
 }
 

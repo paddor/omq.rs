@@ -830,9 +830,9 @@ async fn full_receive_lane_retains_messages_and_other_sources_progress() {
     ready(&slow, 1).await;
     ready(&fast, 1).await;
     slow.send(pooled(&pool, 16, 1)).await.unwrap();
-    let (receipt, message) = gather.recv_from(None).await.unwrap();
+    let (receipt, message) = gather.recv_with_receipt(None).await.unwrap();
     assert_eq!(message.part_slice(0).unwrap(), &[1; 16]);
-    let source = receipt.source().unwrap().clone();
+    let source = receipt.lane().unwrap().clone();
     for _ in 0..8 {
         slow.send(pooled(&pool, 16, 2)).await.unwrap();
     }
@@ -842,11 +842,13 @@ async fn full_receive_lane_retains_messages_and_other_sources_progress() {
     drop(receipt);
     drop(message);
     for _ in 0..8 {
-        let (_, queued) =
-            tokio::time::timeout(Duration::from_secs(1), gather.recv_from(Some(&source)))
-                .await
-                .unwrap()
-                .unwrap();
+        let (_, queued) = tokio::time::timeout(
+            Duration::from_secs(1),
+            gather.recv_with_receipt(Some(&source)),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(queued.part_slice(0).unwrap(), &[2; 16]);
     }
     assert_eq!(dart_stats(&gather).receive_overflow, 0);

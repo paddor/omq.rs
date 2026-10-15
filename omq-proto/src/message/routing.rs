@@ -34,6 +34,14 @@ impl Message {
             MessageInner::Single(Payload {
                 inner: PayloadInner::Shared(body),
             }) => MessageInner::RoutedShared { routing_id, body },
+            MessageInner::Single(
+                payload @ Payload {
+                    inner: PayloadInner::Identity(_),
+                },
+            ) => MessageInner::RoutedMulti {
+                routing_id,
+                parts: vec![payload].into(),
+            },
             MessageInner::Single(payload) => MessageInner::RoutedBytes {
                 routing_id,
                 data: payload.as_bytes(),

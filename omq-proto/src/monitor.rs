@@ -196,20 +196,25 @@ pub enum DisconnectReason {
     Handover,
 }
 
-/// Rich context passed on per-connection events. Cheap to clone: heavy
-/// fields are reference-counted.
+/// Peer admission snapshot, also carried by monitor events.
+/// Authentication is separate from transport diagnostics and peer claims.
+/// Heavy fields are reference-counted.
 #[derive(Debug, Clone)]
 pub struct PeerInfo {
-    /// Stable per-socket id for this connection.
+    /// Locally verified facts; use these for application authorization.
+    pub authentication: Arc<crate::PeerAuthentication>,
+    /// Transport observations for diagnostics, not application identity.
+    pub diagnostics: crate::PeerDiagnostics,
+    /// Diagnostic only: stable per-socket id for this connection.
     pub connection_id: u64,
-    /// `SocketAddr` for IP peers; `None` for IPC / inproc.
+    /// Diagnostic only: `SocketAddr` for IP peers; `None` for IPC / inproc.
     pub peer_address: Option<SocketAddr>,
-    /// Peer identity declared via the READY `Identity` property; empty
-    /// bytes if the peer didn't declare one (we auto-generate internally).
+    /// Untrusted routing identity declared via READY; absent for generated identities.
     pub peer_identity: Option<Bytes>,
-    /// Full READY property bag. `Arc` because several subscribers share it.
+    /// READY property bag, including untrusted peer claims. Use `authentication`
+    /// for authorization; presence here does not establish provenance.
     pub peer_properties: Arc<PeerProperties>,
-    /// Negotiated ZMTP version (`(3, 0)` or `(3, 1)`). `(0, 0)` for DART,
+    /// Diagnostic only: negotiated ZMTP version (`(3, 0)` or `(3, 1)`). `(0, 0)` for DART,
     /// whose version is the `DART-Version` READY property.
     pub zmtp_version: (u8, u8),
 }

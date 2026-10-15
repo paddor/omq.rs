@@ -104,31 +104,31 @@ scripts/test-ruby.sh
 
 Set `OMQ_RUBY=/path/to/ruby` when Ruby is not on `PATH`.
 
-## Source receive backpressure
+## Receive lane backpressure
 
 ### Current contract
 
 PEER, PULL, and GATHER expose the same API:
 
 ```rust
-recv_from(source: Option<&ReceiveSource>) -> Result<(ReceiveReceipt, Message)>
-try_recv_from(source: Option<&ReceiveSource>) -> Result<(ReceiveReceipt, Message)>
+recv_with_receipt(lane: Option<&ReceiveLane>) -> Result<(ReceiveReceipt, Message)>
+try_recv_with_receipt(lane: Option<&ReceiveLane>) -> Result<(ReceiveReceipt, Message)>
 unshift(receipt: ReceiveReceipt, message: Message) -> Result<(), UnshiftError>
 ```
 
-`None` selects an unpaused source fairly. `Some(source)` selects one physical
-connection generation, returning its held message first. A live receipt claims
-that source and prevents other socket clones, ordinary receives, and bulk
+`receipt.lane()` exposes the claimed lane. `None` selects an unpaused lane fairly.
+`Some(lane)` selects that lane, returning its held message first. A live receipt claims
+that lane and prevents other socket clones, ordinary receives, and bulk
 receives from overtaking it. Drop the receipt after admitting or discarding the
 message to resume drainage. `unshift` transfers the claim and message into one
-OMQ-owned side slot; the source stays paused until a targeted retry is accepted.
+OMQ-owned side slot; the lane stays paused until a targeted retry is accepted.
 
 Fanring stores a Boolean, not the popped message. The paused ring fills, the
 connection stops reading, and its upstream buffers eventually fill. Resumption
 makes the lane eligible for drainage; existing ring release batches return
 consumed slots. There are no application credits or capacity grants.
 
-PEER receipts retain the existing per-source memory permit. PULL/GATHER retain
+PEER receipts retain the existing per-lane memory permit. PULL/GATHER retain
 their message-count HWM behavior: a bounded ring, at most one claimed or held
 message, and one pending message in each wire driver. Their receipt records the
 original backing-storage size so a returned message cannot enlarge the side
@@ -138,7 +138,7 @@ PULL/GATHER remains unlimited. No socket-wide admission budget couples peers.
 PULL/GATHER use one socket-owned fanring for wire and inproc connections. Wire
 lanes use receiver HWM. Inproc lanes use sender HWM plus receiver HWM, rounded
 up to a power of two. Inproc sends enqueue from the calling thread and receives
-drain from the application thread. No IO task relays a message. Source metadata
+drain from the application thread. No IO task relays a message. Lane metadata
 lives once per connection; plain slots contain only `Message`. Tagged receives
 use fanring's borrowed `with_lane_ids()` view.
 
@@ -150,9 +150,9 @@ messages and recheck all lanes before reporting empty. Bulk drains poll before
 each bounded batch. Wire drivers retain indexed batch publication.
 The readiness poll changes no ring capacity or application admission state.
 
-Targeted waits observe only their source's data, claim, and lifecycle signals.
-Unrelated sources do not wake them. Cancellation consumes no message. After
-disconnect is observed, targeting or returning to that source fails with
+Targeted waits observe only their lane's data, claim, and lifecycle signals.
+Unrelated lanes do not wake them. Cancellation consumes no message. After
+disconnect is observed, targeting or returning to that lane fails with
 `Closed`; it cannot select a replacement. PULL/GATHER discard a held retry on
 disconnect while ordinary receives preserve an already published queue prefix.
 Invalid returns preserve the caller's message through `UnshiftError`.
@@ -162,16 +162,16 @@ Invalid returns preserve the caller's message through `UnshiftError`.
 These assessments follow the existing receive paths in `socket/handle.rs`,
 `socket/actor/peer_materialize.rs`, `socket/recv.rs`, `routing/mod.rs`, and
 `socket/udp.rs`. They describe possible extensions; only PEER, PULL, and GATHER
-currently expose physical source claims.
+currently expose physical lane claims.
 
 | Receiving type | Feasibility | Work and constraints |
 |---|---|---|
 | PEER | Implemented | Keep identity routing, generation fencing, and retained-memory permits. |
 | PULL / GATHER | Implemented | Wire and direct inproc lanes share one fair drain. GATHER retains single-frame semantics. |
 | SUB / XSUB | Straightforward next | Reuse the PULL/GATHER fanring and direct inproc path. Apply filters before admission. Subscription commands must continue while a data lane is paused. Preserve XSUB raw subscription sends. |
-| SERVER | Feasible, small structural change | Register native inbound peers in source-aware fanring. Keep `RecvSink::Server` attaching routing IDs; keep replies independent of inbound drainage. Physical source IDs must not alias reused routing IDs. |
-| DEALER / CLIENT | Feasible | Register inbound peers in the common source-aware fanring. Preserve CLIENT's single-frame contract. Receive source selection does not change existing outbound round-robin routing. |
-| ROUTER | Feasible, more work | Move wire identity receive processing into a per-connection sink/drain, preserving identities, mandatory sends, and handover policy. Adapt direct inproc identity prefixes. Current `IdentitySocket` source receives remain inert on ROUTER. |
+| SERVER | Feasible, small structural change | Register native inbound peers in lane-aware fanring. Keep `RecvSink::Server` attaching routing IDs; keep replies independent of inbound drainage. Physical lane IDs must not alias reused routing IDs. |
+| DEALER / CLIENT | Feasible | Register inbound peers in the common lane-aware fanring. Preserve CLIENT's single-frame contract. Receive lane selection does not change existing outbound round-robin routing. |
+| ROUTER | Feasible, more work | Move wire identity receive processing into a per-connection sink/drain, preserving identities, mandatory sends, and handover policy. Adapt direct inproc identity prefixes. Current `IdentitySocket` lane receives remain inert on ROUTER. |
 | PAIR / CHANNEL | Feasible, limited fan-in benefit | One physical connection only. A held message can still support application admission retries. CHANNEL remains single-frame. |
 | REQ / REP | Requires protocol-specific receipts | Coordinate retry and receipt acceptance with request correlation, alternation, REP envelopes, and saved reply routes. Existing `recv` admits protocol state before returning; a generic queue pause alone is insufficient. |
 | DISH | Transport-dependent | TCP/inproc could pause per RADIO connection after group filtering, with a blocking sender policy. UDP cannot propagate lossless backpressure to a remote sender. |
@@ -184,7 +184,7 @@ currently expose physical source claims.
 
 Pausing one SUB publisher connection can bound application backlog while
 other publisher connections continue. With `xpub_nodrop` enabled on the PUB or
-XPUB peer, filling that source's receive path eventually blocks upstream
+XPUB peer, filling that lane's receive path eventually blocks upstream
 publication. Default PUB/XPUB drop behavior can lose publications once its
 outbound HWM is reached. The receiver cannot change that policy or recover
 already dropped messages. This matches the publisher-side
@@ -200,7 +200,7 @@ can progress. OMQ services ready peers independently while a blocking send is
 pending, but the same sequential caller cannot submit its next publication
 until that send completes. Concurrent nonblocking publication reserves all
 required targets before publishing, preventing partial delivery on retry.
-Per-source receive pausing cannot promise independent publication throughput
+Per-lane receive pausing cannot promise independent publication throughput
 for subscribers sharing one publisher and message stream.
 
 ### Implementation order
@@ -216,8 +216,8 @@ for subscribers sharing one publisher and message stream.
    admission design. Keep XPUB subscription handling and UDP outside this
    lossless data-lane contract.
 
-Conflate uses replacement semantics and cannot offer FIFO source claims.
-External receive sinks own drainage outside `Socket`; source pausing needs a
+Conflate uses replacement semantics and cannot offer FIFO lane claims.
+External receive sinks own drainage outside `Socket`; lane pausing needs a
 separate adapter agreed with that consumer. Neither path is enabled implicitly.
 
 ## Stress Tests

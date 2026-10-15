@@ -27,7 +27,7 @@ pub use monitor::{
     ConnectionStatus, DisconnectReason, MonitorEvent, MonitorRecvError, MonitorStream,
     MonitorTryRecvError, PeerCommandKind, PeerIdent, PeerInfo,
 };
-pub use peer_recv::{ReceiveReceipt, ReceiveSource, UnshiftError};
+pub use peer_recv::{ReceiveLane, ReceiveReceipt, UnshiftError};
 pub use pools::SocketPools;
 
 pub(crate) fn deadline_after(timeout: std::time::Duration) -> Option<std::time::Instant> {

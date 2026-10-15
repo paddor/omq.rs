@@ -11,7 +11,6 @@ mod error;
 mod frame;
 mod notify;
 mod options;
-#[cfg(feature = "curve")]
 mod peer_info;
 mod recv;
 mod runtime;
@@ -69,8 +68,10 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(native_proxy, m)?)?;
     m.add_function(wrap_pyfunction!(has_feature, m)?)?;
     m.add_function(wrap_pyfunction!(rust_thread_send_via_share_key, m)?)?;
-    #[cfg(feature = "curve")]
     m.add_class::<peer_info::PeerInfo>()?;
+    m.add_class::<peer_info::Identity>()?;
+    m.add_class::<peer_info::PeerAuthentication>()?;
+    m.add_class::<peer_info::PeerDiagnostics>()?;
     #[cfg(feature = "curve")]
     {
         m.add_function(wrap_pyfunction!(curve_keypair, m)?)?;

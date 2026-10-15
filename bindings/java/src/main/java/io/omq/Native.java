@@ -68,6 +68,14 @@ final class Native {
 
     static native long socketSendAsync(long handle, byte[][] parts, int routingId, Object future);
 
+    static native ReceivedMessage socketRecvFrom(long handle, long timeoutMillis);
+    static native long socketRecvFromAsync(long handle, long timeoutMillis, Object future);
+    static native Identity recvRingIdentity(long handle, long cursor);
+    static native PeerInfo identityPeerInfo(long handle);
+    static native boolean identityEquals(long first, long second);
+    static native int identityHash(long handle);
+    static native void identityRelease(long handle);
+
     static native Object socketRecv(long handle, long timeoutMillis);
 
     static native int socketRecvInto(long handle, ByteBuffer destination, long timeoutMillis);

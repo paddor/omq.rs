@@ -51,9 +51,16 @@ Full [API documentation](https://docs.rs/omq-tokio/latest/omq_tokio/).
 | `recv`, `try_recv` | Receive one complete message |
 | `message` | Stream messages asynchronously |
 | `sink` | Send messages from a stream |
+| `identity_routing` | Receive ROUTER/PEER bodies with an owning `Identity`; `identity.peer_info()` exposes verified authentication and separate transport diagnostics |
+| `IdentitySocket::recv_from`, `try_recv_from` | Receive `(Identity, Message)`; retaining the identity keeps metadata only |
+| `recv_with_receipt`, `try_recv_with_receipt` | Receive `(ReceiveReceipt, Message)`; `None` selects any lane, `Some(&lane)` selects one |
 | `recv_many_into` | Receive into reusable batch storage |
 | `blocking::Socket::dispatch` | Handle messages on the calling thread |
 | `close` | Close with configured linger |
+
+On PEER, PULL, and GATHER, keeping a receipt pauses its receive lane; dropping
+it resumes drainage. `receipt.lane()` returns a `ReceiveLane` for targeted
+receives, and `unshift(receipt, message)` leaves the message pending on that lane.
 
 ### QUIC
 

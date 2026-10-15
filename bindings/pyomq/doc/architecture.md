@@ -429,6 +429,10 @@ At materialization, `build_authenticator()` converts the enum into an
 `omq_proto::Authenticator` closure. Callable authenticators acquire the
 GIL when invoked from the tokio thread.
 
+ROUTER/PEER `recv_from()` returns an owning `Identity` and complete body frames
+in both sync and async APIs. `Identity.peer_info` reads the immutable admission
+snapshot; authentication facts and transport diagnostics stay separate.
+
 ## Error mapping
 
 `error.rs` maps `omq_proto::Error` variants to libzmq-compatible errno

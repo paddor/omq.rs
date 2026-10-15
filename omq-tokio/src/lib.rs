@@ -36,7 +36,6 @@ pub mod transport;
 // Re-export the sans-I/O surface so downstream callers don't have
 // to depend on omq-proto explicitly. Identical surface to the
 // pre-split crate.
-pub use omq_proto::IpcPath;
 pub use omq_proto::{AuthenticationResult, AuthenticationStatus, Authenticator, MechanismPeerInfo};
 pub use omq_proto::{
     CompressionKind, CompressionOptions, Endpoint, EndpointRole, EndpointSpec, Error, Frame,
@@ -48,6 +47,7 @@ pub use omq_proto::{
 pub use omq_proto::{CurveKeypair, CurvePublicKey, CurveSecretKey, CurveServerOptions};
 #[cfg(feature = "dart")]
 pub use omq_proto::{DartCongestion, DartEcn, DartOptions};
+pub use omq_proto::{Identity, IpcPath, PeerAuthentication, PeerDiagnostics, PeerPublicKey};
 pub use omq_proto::{PayloadBuffer, PayloadLengthError, PayloadPool};
 /// Preallocate shared-memory storage in an ordinary `PayloadPool` (Linux).
 #[cfg(target_os = "linux")]
@@ -69,6 +69,6 @@ pub use context::{Context, ContextConfig, ContextCore};
 pub use proxy::{Proxy, ProxyExit};
 pub use socket::{
     ConnectionStatus, DisconnectReason, IdentitySocket, MonitorEvent, MonitorRecvError,
-    MonitorStream, MonitorTryRecvError, PeerCommandKind, PeerIdent, PeerInfo, ReceiveReceipt,
-    ReceiveSource, Socket, SocketPools, UnshiftError,
+    MonitorStream, MonitorTryRecvError, PeerCommandKind, PeerIdent, PeerInfo, ReceiveLane,
+    ReceiveReceipt, Socket, SocketPools, UnshiftError,
 };

@@ -26,7 +26,6 @@ use super::code;
 struct Shared {
     carrier: Carrier,
     /// Keeps the endpoint driver and UDP socket alive while this peer lives.
-    #[cfg_attr(not(test), expect(dead_code))]
     endpoint: Arc<super::UdpEndpoint>,
     /// Preserve reuseport membership while any accepted peer lives.
     _listener_group: Option<Arc<super::ListenerGroup>>,
@@ -111,6 +110,15 @@ impl QuicStream {
 
     pub(crate) fn remote_address(&self) -> std::net::SocketAddr {
         self.send.shared.carrier.connection().remote_address()
+    }
+
+    pub(crate) fn local_address(&self) -> Option<std::net::SocketAddr> {
+        let shared = &self.send.shared;
+        let mut address = shared.endpoint.local_addr().ok()?;
+        if let Some(ip) = shared.carrier.connection().local_ip() {
+            address.set_ip(ip);
+        }
+        Some(address)
     }
 
     pub(crate) fn into_split(self) -> (QuicRecvHalf, QuicSendHalf) {

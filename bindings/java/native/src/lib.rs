@@ -130,6 +130,7 @@ struct JavaRecvRing {
     socket: BlockingSocket,
     control: Box<RecvRingControl>,
     desc: Box<[RecvRingDesc]>,
+    identities: Box<[Option<omq_proto::Identity>]>,
     payload: Box<[u8]>,
     desc_mask: usize,
     payload_mask: usize,
@@ -206,7 +207,7 @@ impl JavaSocket {
         }
 
         if let Some(socket) = self.socket.get() {
-            return Ok(socket.clone());
+            return Ok(socket.clone_shared());
         }
 
         let _guard = self
@@ -217,7 +218,7 @@ impl JavaSocket {
             return Err(Error::Closed);
         }
         if let Some(socket) = self.socket.get() {
-            return Ok(socket.clone());
+            return Ok(socket.clone_shared());
         }
 
         let options = self
@@ -229,7 +230,7 @@ impl JavaSocket {
 
         let created = self.ctx.blocking_socket(self.socket_type, options);
         self.socket
-            .set(created.clone())
+            .set(created.clone_shared())
             .map_err(|_| Error::Config("socket materialized concurrently".to_string()))?;
         Ok(created)
     }
@@ -285,6 +286,7 @@ impl JavaRecvRing {
             socket,
             control: Box::new(RecvRingControl::new()),
             desc: vec![RecvRingDesc::default(); desc_capacity].into_boxed_slice(),
+            identities: vec![None; desc_capacity].into_boxed_slice(),
             payload: vec![0; payload_capacity].into_boxed_slice(),
             desc_mask: desc_capacity - 1,
             payload_mask: payload_capacity - 1,
@@ -340,6 +342,7 @@ impl JavaRecvRing {
         while self.reclaimed_head != head {
             let index = self.reclaimed_head & self.desc_mask;
             let desc = self.desc[index];
+            self.identities[index] = None;
             if desc.flags & RECV_RING_FLAG_EXTERNAL != 0 {
                 if self
                     .external
@@ -438,6 +441,7 @@ impl JavaRecvRing {
             };
         }
 
+        self.identities[index] = message.sender_identity().cloned();
         self.cursor = self.cursor.wrapping_add(1);
         true
     }
@@ -1369,6 +1373,147 @@ fn mechanism_peer_info_object<'local>(
     .map_err(jni_error)
 }
 
+fn optional_java_string<'local>(
+    env: &mut JNIEnv<'local>,
+    value: Option<&str>,
+) -> Result<JObject<'local>, Error> {
+    value
+        .map(|value| env.new_string(value).map(JObject::from).map_err(jni_error))
+        .unwrap_or_else(|| Ok(JObject::null()))
+}
+
+fn optional_java_bytes<'local>(
+    env: &mut JNIEnv<'local>,
+    value: Option<&[u8]>,
+) -> Result<JObject<'local>, Error> {
+    value
+        .map(|value| {
+            env.byte_array_from_slice(value)
+                .map(JObject::from)
+                .map_err(jni_error)
+        })
+        .unwrap_or_else(|| Ok(JObject::null()))
+}
+
+fn peer_authentication_object<'local>(
+    env: &mut JNIEnv<'local>,
+    auth: &omq_proto::PeerAuthentication,
+) -> Result<JObject<'local>, Error> {
+    let mechanism =
+        optional_java_string(env, auth.mechanism.as_ref().and_then(|m| m.as_str().ok()))?;
+    let (key_type, key) = match &auth.public_key {
+        Some(omq_proto::PeerPublicKey::Curve(key)) => (Some("CURVE"), Some(key.as_slice())),
+        _ => (None, None),
+    };
+    let key_type = optional_java_string(env, key_type)?;
+    let key = optional_java_bytes(env, key)?;
+    let user_id = optional_java_bytes(env, auth.user_id.as_deref())?;
+    let metadata = env
+        .new_object("java/util/LinkedHashMap", "()V", &[])
+        .map_err(jni_error)?;
+    for (name, value) in &auth.metadata {
+        env.with_local_frame(8, |env| -> jni::errors::Result<()> {
+            let name = JObject::from(env.new_string(name)?);
+            let value = JObject::from(env.byte_array_from_slice(value)?);
+            env.call_method(
+                &metadata,
+                "put",
+                "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+                &[JValue::Object(&name), JValue::Object(&value)],
+            )?;
+            Ok(())
+        })
+        .map_err(jni_error)?;
+    }
+    env.new_object(
+        "io/omq/PeerAuthentication",
+        "(Ljava/lang/String;Ljava/lang/String;[B[BLjava/util/Map;)V",
+        &[
+            JValue::Object(&mechanism),
+            JValue::Object(&key_type),
+            JValue::Object(&key),
+            JValue::Object(&user_id),
+            JValue::Object(&metadata),
+        ],
+    )
+    .map_err(jni_error)
+}
+
+fn peer_diagnostics_object<'local>(
+    env: &mut JNIEnv<'local>,
+    diagnostics: &omq_proto::PeerDiagnostics,
+) -> Result<JObject<'local>, Error> {
+    let endpoint = optional_java_string(env, Some(&diagnostics.endpoint))?;
+    let local = optional_java_string(
+        env,
+        diagnostics
+            .local_address
+            .as_ref()
+            .map(ToString::to_string)
+            .as_deref(),
+    )?;
+    let remote = optional_java_string(
+        env,
+        diagnostics
+            .remote_address
+            .as_ref()
+            .map(ToString::to_string)
+            .as_deref(),
+    )?;
+    env.new_object(
+        "io/omq/PeerDiagnostics",
+        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+        &[
+            JValue::Object(&endpoint),
+            JValue::Object(&local),
+            JValue::Object(&remote),
+        ],
+    )
+    .map_err(jni_error)
+}
+
+fn identity_object<'local>(
+    env: &mut JNIEnv<'local>,
+    identity: &omq_proto::Identity,
+) -> Result<JObject<'local>, Error> {
+    let bytes = JObject::from(
+        env.byte_array_from_slice(identity.as_ref())
+            .map_err(jni_error)?,
+    );
+    let handle = Box::into_raw(Box::new(identity.clone()));
+    match env.new_object(
+        "io/omq/Identity",
+        "(J[B)V",
+        &[JValue::Long(handle as jlong), JValue::Object(&bytes)],
+    ) {
+        Ok(object) => Ok(object),
+        Err(error) => {
+            // Construction did not register a Cleaner; reclaim the native owner.
+            unsafe {
+                drop(Box::from_raw(handle));
+            }
+            Err(jni_error(error))
+        }
+    }
+}
+
+fn received_message_object<'local>(
+    env: &mut JNIEnv<'local>,
+    mut message: Message,
+) -> Result<JObject<'local>, Error> {
+    let identity = message
+        .pop_identity()
+        .ok_or_else(|| Error::Config("message has no sender snapshot".into()))?;
+    let identity = identity_object(env, &identity)?;
+    let message = message_to_java_object(env, message)?;
+    env.new_object(
+        "io/omq/ReceivedMessage",
+        "(Lio/omq/Identity;Lio/omq/Message;)V",
+        &[JValue::Object(&identity), JValue::Object(&message)],
+    )
+    .map_err(jni_error)
+}
+
 fn monitor_peer_info_object<'local>(
     env: &mut JNIEnv<'local>,
     peer: &NativePeerInfo,
@@ -1389,13 +1534,28 @@ fn monitor_peer_info_object<'local>(
         None => JObject::null(),
     };
 
+    let authentication = peer_authentication_object(env, &peer.authentication)?;
+    let diagnostics = peer_diagnostics_object(env, &peer.diagnostics)?;
+    let mechanism = optional_java_string(
+        env,
+        peer.authentication
+            .mechanism
+            .as_ref()
+            .and_then(|m| m.as_str().ok()),
+    )?;
+    let public_key = match &peer.authentication.public_key {
+        Some(omq_proto::PeerPublicKey::Curve(key)) => {
+            optional_java_string(env, Some(&CurvePublicKey::from_bytes(*key).to_z85()))?
+        }
+        _ => JObject::null(),
+    };
     let null = JObject::null();
     env.new_object(
         "io/omq/PeerInfo",
-        "(Ljava/lang/String;Ljava/lang/String;[BLjava/lang/String;Ljava/lang/String;JLjava/lang/String;Ljava/lang/String;II)V",
+        "(Ljava/lang/String;Ljava/lang/String;[BLjava/lang/String;Ljava/lang/String;JLjava/lang/String;Ljava/lang/String;IILio/omq/PeerAuthentication;Lio/omq/PeerDiagnostics;)V",
         &[
-            JValue::Object(&null),
-            JValue::Object(&null),
+            JValue::Object(&mechanism),
+            JValue::Object(&public_key),
             JValue::Object(&identity),
             JValue::Object(&null),
             JValue::Object(&null),
@@ -1404,6 +1564,8 @@ fn monitor_peer_info_object<'local>(
             JValue::Object(&socket_type),
             JValue::Int(peer.zmtp_version.0 as jint),
             JValue::Int(peer.zmtp_version.1 as jint),
+            JValue::Object(&authentication),
+            JValue::Object(&diagnostics),
         ],
     )
     .map_err(jni_error)
@@ -1781,6 +1943,33 @@ fn complete_future_message(jvm: JavaVM, future: GlobalRef, result: Result<Messag
         },
         Err(error) => complete_future_exceptionally(&mut env, &future, error),
     }
+}
+
+fn complete_future_received_message(
+    jvm: JavaVM,
+    future: GlobalRef,
+    result: Result<Message, Error>,
+) {
+    let Ok(mut env) = jvm.attach_current_thread_as_daemon() else {
+        return;
+    };
+    let _ = env.with_local_frame(32, |env| -> jni::errors::Result<()> {
+        match result {
+            Ok(message) => match received_message_object(env, message) {
+                Ok(message) => {
+                    let _ = env.call_method(
+                        &future,
+                        "complete",
+                        "(Ljava/lang/Object;)Z",
+                        &[JValue::Object(&message)],
+                    );
+                }
+                Err(error) => complete_future_exceptionally(env, &future, error),
+            },
+            Err(error) => complete_future_exceptionally(env, &future, error),
+        }
+        Ok(())
+    });
 }
 
 fn receive_event_object<'local>(
@@ -3099,6 +3288,30 @@ pub extern "system" fn Java_io_omq_Native_socketRecv(
 }
 
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_io_omq_Native_socketRecvFrom(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    timeout_millis: jlong,
+) -> jobject {
+    guard(&mut env, std::ptr::null_mut(), |env| {
+        let result = (|| {
+            let socket = socket_from_handle(handle)?.materialize()?;
+            let message = recv_with_timeout(&socket, timeout_millis)?;
+            received_message_object(env, message).map(JObject::into_raw)
+        })();
+
+        match result {
+            Ok(value) => value,
+            Err(error) => {
+                throw_omq(env, error);
+                std::ptr::null_mut()
+            }
+        }
+    })
+}
+
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_io_omq_Native_socketRecvInto(
     mut env: JNIEnv<'_>,
     _class: JClass<'_>,
@@ -3151,6 +3364,45 @@ pub extern "system" fn Java_io_omq_Native_socketRecvAsync(
                     None => socket.recv().await,
                 };
                 complete_future_message(jvm, future, result);
+            });
+            Ok(async_task_handle(join))
+        })();
+
+        match result {
+            Ok(handle) => handle,
+            Err(error) => {
+                throw_omq(env, error);
+                0
+            }
+        }
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_omq_Native_socketRecvFromAsync(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    timeout_millis: jlong,
+    future: JObject<'_>,
+) -> jlong {
+    guard(&mut env, 0, |env| {
+        let result = (|| {
+            let socket = socket_from_handle(handle)?;
+            let timeout = optional_duration_from_millis(timeout_millis)?;
+            let jvm = env.get_java_vm().map_err(jni_error)?;
+            let future = env.new_global_ref(&future).map_err(jni_error)?;
+            let handle = socket.ctx.handle().clone();
+            let socket = socket.materialize()?.into_async();
+            let join = handle.spawn(async move {
+                let result = match timeout {
+                    Some(timeout) => match tokio::time::timeout(timeout, socket.recv()).await {
+                        Ok(result) => result,
+                        Err(_) => Err(Error::Timeout),
+                    },
+                    None => socket.recv().await,
+                };
+                complete_future_received_message(jvm, future, result);
             });
             Ok(async_task_handle(join))
         })();
@@ -4228,6 +4480,101 @@ pub extern "system" fn Java_io_omq_Native_socketSetXpubNoDrop(
             throw_omq(env, error);
         }
     });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_omq_Native_identityRelease(
+    _env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+) {
+    // Only the Cleaner registered for this owner calls release, exactly once.
+    if handle != 0 {
+        unsafe {
+            drop(Box::from_raw(handle as *mut omq_proto::Identity));
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_omq_Native_identityPeerInfo(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+) -> jobject {
+    guard(&mut env, std::ptr::null_mut(), |env| {
+        // Java keeps the Identity reachable until this call completes.
+        let identity = unsafe { &*(handle as *const omq_proto::Identity) };
+        match monitor_peer_info_object(env, identity.peer_info()) {
+            Ok(info) => info.into_raw(),
+            Err(error) => {
+                throw_omq(env, error);
+                std::ptr::null_mut()
+            }
+        }
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_omq_Native_identityEquals(
+    _env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    first: jlong,
+    second: jlong,
+) -> jboolean {
+    // Both Java owners are kept reachable by the caller.
+    let (first, second) = unsafe {
+        (
+            &*(first as *const omq_proto::Identity),
+            &*(second as *const omq_proto::Identity),
+        )
+    };
+    u8::from(first == second)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_omq_Native_identityHash(
+    _env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+) -> jint {
+    use std::hash::{Hash, Hasher};
+    let identity = unsafe { &*(handle as *const omq_proto::Identity) };
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    identity.hash(&mut hash);
+    hash.finish() as jint
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_omq_Native_recvRingIdentity(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    cursor: jlong,
+) -> jobject {
+    guard(&mut env, std::ptr::null_mut(), |env| {
+        let result = (|| {
+            // The Java socket serializes fill/read/release under its existing lock.
+            let ring = recv_ring_from_handle(handle)?;
+            let cursor = cursor as usize;
+            if cursor.wrapping_sub(ring.reclaimed_head)
+                >= ring.cursor.wrapping_sub(ring.reclaimed_head)
+            {
+                return Err(Error::Config("receive ring cursor is not readable".into()));
+            }
+            let identity = ring.identities[cursor & ring.desc_mask]
+                .as_ref()
+                .ok_or_else(|| Error::Config("message has no sender snapshot".into()))?;
+            identity_object(env, identity).map(JObject::into_raw)
+        })();
+        match result {
+            Ok(identity) => identity,
+            Err(error) => {
+                throw_omq(env, error);
+                std::ptr::null_mut()
+            }
+        }
+    })
 }
 
 #[cfg(test)]

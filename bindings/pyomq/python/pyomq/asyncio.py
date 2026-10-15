@@ -35,6 +35,7 @@ from . import (
     POLLIN,
     POLLOUT,
     Frame,
+    Identity,
     MessageTracker,
     _BaseSocket,
     _copy_received_into,
@@ -373,6 +374,48 @@ class Socket(_BaseSocket[_native.AsyncSocket, "Context"]):
         if result is not None:
             result._track_received()
         return result
+
+    @overload
+    def recv_from(
+        self, flags: int = 0, copy: Literal[True] = True
+    ) -> FutureResult[tuple[Identity, list[bytes]]]: ...
+
+    @overload
+    def recv_from(
+        self, flags: int = 0, *, copy: Literal[False]
+    ) -> FutureResult[tuple[Identity, list[Frame]]]: ...
+
+    @overload
+    def recv_from(
+        self, flags: int, copy: Literal[False]
+    ) -> FutureResult[tuple[Identity, list[Frame]]]: ...
+
+    @overload
+    def recv_from(
+        self, flags: int = 0, copy: bool = True
+    ) -> FutureResult[tuple[Identity, list[bytes] | list[Frame]]]: ...
+
+    def recv_from(self, flags=0, copy=True):
+        """Receive (Identity, body frames) on ROUTER/PEER with the original peer snapshot."""
+
+        def try_recv():
+            result = self._sock._try_recv_from(copy)
+            if result is None and flags & _native.NOBLOCK:
+                raise _native.ZMQError(_EAGAIN)
+            return result
+
+        return self._add_recv_event(try_recv)
+
+    def send_to(
+        self,
+        identity: Identity,
+        parts: Iterable[Sendable],
+        flags: int = 0,
+        copy: bool = True,
+        track: bool = False,
+    ) -> FutureResult[MessageTracker | None]:
+        """Send body frames to the identity's route, possibly a replacement peer."""
+        return self.send_multipart([bytes(identity), *parts], flags, copy, track)
 
     def send_multipart(
         self,

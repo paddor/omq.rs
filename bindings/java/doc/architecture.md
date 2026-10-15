@@ -63,9 +63,11 @@ ring path and use native owned storage or JNI fallback.
 ## Receive Path
 
 - Each socket lazily creates a native off-heap receive ring.
+- Receive descriptors retain optional owning identities until reclamation. `recvFrom` transfers an owner to Java; `PeerInfo` is read lazily from that snapshot without consulting live connections.
+- Java identities retain metadata only. Their native owners are released by a `Cleaner`; application-held snapshots survive socket closure.
 - When Java's cache is empty, Rust fills descriptors and payload storage with `recv_many_into()` and reuses one internal `Vec<Message>`.
 - Java drains cached descriptors through `MemorySegment` views.
-- `receive`, `receiveBytes`, `receiveInto`, timeout variants, and try variants all use this hidden batch path.
+- Blocking scalar receives use this hidden batch path. Timed and try receives drain cached descriptors before reading directly through JNI.
 - On virtual threads, blocking receives drain cached ring data first; if empty, they wait through native async receive so the JVM can park the virtual thread.
 
 ## Send Path

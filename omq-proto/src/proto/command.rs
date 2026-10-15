@@ -117,6 +117,8 @@ impl Command {
 /// can inspect them.
 #[derive(Clone, Debug, Default)]
 pub struct PeerProperties {
+    /// Local authentication result. Never serialized or decoded from the wire.
+    pub authentication: std::sync::Arc<crate::PeerAuthentication>,
     /// Peer's declared socket type (from the `Socket-Type` property).
     pub socket_type: Option<SocketType>,
     /// Peer's routing identity (from the `Identity` property).
@@ -402,12 +404,18 @@ mod tests {
             .with_socket_type(SocketType::Dealer)
             .with_identity(Bytes::from_static(b"alice"));
         props.add("X-Metric", Bytes::from_static(b"42"));
+        std::sync::Arc::make_mut(&mut props.authentication).user_id =
+            Some(Bytes::from_static(b"local-only"));
         let cmd = Command::Ready(props);
 
         match roundtrip(cmd) {
             Command::Ready(p) => {
                 assert_eq!(p.socket_type, Some(SocketType::Dealer));
                 assert_eq!(p.identity.as_deref(), Some(&b"alice"[..]));
+                assert!(
+                    p.authentication.user_id.is_none(),
+                    "local facts must not cross the wire"
+                );
                 assert_eq!(p.other.len(), 1);
                 assert_eq!(p.other[0].0, "X-Metric");
                 assert_eq!(p.other[0].1, &b"42"[..]);

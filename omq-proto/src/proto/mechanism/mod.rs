@@ -396,7 +396,11 @@ impl AuthenticationResult {
         self
     }
 
-    pub(crate) fn apply_to(self, properties: &mut PeerProperties) {
+    pub(crate) fn apply_to(self, properties: &mut PeerProperties, mechanism: MechanismName) {
+        let authentication = std::sync::Arc::make_mut(&mut properties.authentication);
+        authentication.mechanism = Some(mechanism);
+        authentication.user_id.clone_from(&self.user_id);
+        authentication.metadata.clone_from(&self.metadata);
         // User-Id belongs to the authenticator even when it supplies no ID.
         // Remove collisions rather than relying on a consumer's lookup order.
         properties.other.retain(|(name, _)| {
@@ -707,7 +711,7 @@ impl NullMechanism {
         match (self.state, cmd) {
             (NullState::AwaitingReady, Command::Ready(mut props)) => {
                 if let Some(authentication) = self.authentication.take() {
-                    authentication.apply_to(&mut props);
+                    authentication.apply_to(&mut props, MechanismName::NULL);
                 }
                 self.state = NullState::Done;
                 Ok(MechanismStep::Complete {
@@ -727,7 +731,7 @@ impl NullMechanism {
                     },
                 )?;
                 if let Some(authentication) = self.authentication.take() {
-                    authentication.apply_to(&mut props);
+                    authentication.apply_to(&mut props, MechanismName::NULL);
                 }
                 self.state = NullState::Done;
                 Ok(MechanismStep::Complete {
@@ -790,6 +794,16 @@ mod tests {
             else {
                 panic!("expected completed handshake");
             };
+            assert_eq!(
+                peer_properties.authentication.mechanism,
+                Some(MechanismName::NULL)
+            );
+            assert_eq!(peer_properties.authentication.user_id, user_id);
+            assert_eq!(
+                peer_properties.authentication.metadata,
+                vec![("Role".into(), Bytes::from_static(b"reader"))]
+            );
+            assert!(peer_properties.authentication.public_key.is_none());
             let mut expected = vec![("X-Application".into(), Bytes::from_static(b"client"))];
             if let Some(user_id) = user_id {
                 expected.push(("User-Id".into(), user_id));

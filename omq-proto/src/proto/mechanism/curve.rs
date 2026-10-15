@@ -1065,7 +1065,10 @@ mod tests {
                 Some(crate::PeerPublicKey::Curve(*server_kp.public.as_bytes()))
             );
             assert!(peer_properties.authentication.user_id.is_none());
-            assert!(peer_properties.authentication.metadata.is_empty());
+            assert_eq!(
+                peer_properties.authentication.metadata,
+                [] as [(String, Bytes); 0]
+            );
             assert_eq!(peer_properties.socket_type, Some(SocketType::Pull));
         }
 

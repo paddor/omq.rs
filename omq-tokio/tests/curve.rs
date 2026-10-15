@@ -629,7 +629,7 @@ async fn curve_dealer_router() {
         Some(omq_tokio::PeerPublicKey::Curve(client_public))
     );
     assert!(authentication.user_id.is_none());
-    assert!(authentication.metadata.is_empty());
+    assert_eq!(authentication.metadata, [] as [(String, bytes::Bytes); 0]);
 }
 
 #[tokio::test]

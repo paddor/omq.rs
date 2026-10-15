@@ -304,11 +304,11 @@ control socket keep running. Socket HWM and routing policy govern forwarding.
 
 ### Send readiness
 
-`Socket::send_ready` and `wait_send_ready` follow libzmq `ZMQ_POLLOUT`. Each
-send strategy probes the queues its `try_send` would use, and a full queue
-arms its space wake as a failed send does. The wait snapshots the space and
-topology signals before probing, so no change is lost. `zmq_poll`,
-`ZMQ_EVENTS`, and the Python `Poller` use it.
+`Socket::send_ready` and `wait_send_ready` track `try_send` admission; native
+fan-out requires internal lane capacity while ordinary lossy `send` drops
+at full lanes. Waits observe space and topology signals before probing.
+C and Python sockets select compatibility admission at construction, retaining
+lossy sends and libzmq writability for `zmq_poll`, `ZMQ_EVENTS`, and `Poller`.
 
 ### C and language bindings
 

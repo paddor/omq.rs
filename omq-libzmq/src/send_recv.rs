@@ -1119,6 +1119,80 @@ mod tests {
     const ZMQ_ENOTSUP: c_int = crate::error::ENOTSUP;
 
     #[test]
+    fn lossy_pub_stays_writable_when_internal_lane_is_full() {
+        let ctx = crate::zmq_ctx_new();
+        let publisher = crate::zmq_socket(ctx, 1);
+        for (option, value) in [(17, 0_i32), (23, 1)] {
+            assert_eq!(
+                crate::zmq_setsockopt(
+                    publisher,
+                    option,
+                    (&raw const value).cast(),
+                    size_of::<i32>()
+                ),
+                0
+            );
+        }
+        assert_eq!(crate::zmq_bind(publisher, c"tcp://127.0.0.1:0".as_ptr()), 0);
+        // SAFETY: publisher is a live socket returned by zmq_socket.
+        let socket = unsafe { &*publisher.cast::<Arc<OmqSocket>>() };
+        let backend = socket.inner.get().unwrap();
+        let io = socket.ctx.io_context().unwrap();
+        let subscriber = io.blocking_socket(omq_tokio::SocketType::Sub, Default::default());
+        subscriber.subscribe("").unwrap();
+        subscriber
+            .connect(backend.last_bound_endpoint().unwrap())
+            .unwrap();
+        io.handle()
+            .block_on(backend.wait_subscribed(1, Duration::from_secs(5)))
+            .unwrap();
+
+        let (paused_tx, paused_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let paused = io.handle().spawn(async move {
+            paused_tx.send(()).unwrap();
+            // A failed assertion drops resume_tx and releases the runtime.
+            let _ = resume_rx.recv_timeout(Duration::from_secs(5));
+        });
+        paused_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        for _ in 0..3 {
+            assert_eq!(
+                crate::zmq_send(publisher, b"body".as_ptr().cast(), 4, ZMQ_DONTWAIT),
+                4
+            );
+        }
+        assert!(matches!(
+            try_send_message(socket, omq_tokio::Message::from("proxy")),
+            Ok(SendMessageAttempt::Sent)
+        ));
+        let mut item = crate::poll::ZmqPollItem {
+            socket: publisher,
+            fd: 0,
+            events: crate::poll::ZMQ_POLLOUT,
+            revents: 0,
+        };
+        assert_eq!(crate::zmq_poll((&raw mut item).cast(), 1, 0), 1);
+        assert_eq!(item.revents, crate::poll::ZMQ_POLLOUT);
+        let mut events = 0_i32;
+        let mut size = size_of::<i32>();
+        assert_eq!(
+            crate::zmq_getsockopt(publisher, 15, (&raw mut events).cast(), &raw mut size),
+            0
+        );
+        assert_ne!(events & i32::from(crate::poll::ZMQ_POLLOUT), 0);
+
+        resume_tx.send(()).unwrap();
+        io.handle().block_on(paused).unwrap();
+        assert_eq!(
+            subscriber.recv_timeout(Duration::from_secs(5)).unwrap(),
+            omq_tokio::Message::from("body")
+        );
+        subscriber.close().unwrap();
+        assert_eq!(crate::zmq_close(publisher), 0);
+        assert_eq!(crate::zmq_ctx_term(ctx), 0);
+    }
+
+    #[test]
     fn direct_inproc_req_rep_progresses_while_io_runtime_is_paused() {
         let ctx = crate::zmq_ctx_new();
         assert_eq!(crate::zmq_ctx_set(ctx, 1, 0), 0);

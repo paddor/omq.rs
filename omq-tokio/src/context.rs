@@ -697,6 +697,49 @@ impl Context {
         )
     }
 
+    /// Construct a binding socket with libzmq send and polling semantics.
+    #[doc(hidden)]
+    pub fn socket_for_libzmq(
+        &self,
+        socket_type: SocketType,
+        options: Options,
+        recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
+    ) -> Socket {
+        assert!(
+            !self.inner.terminated.load(Ordering::Acquire),
+            "Context::socket_for_libzmq() called on a terminated context"
+        );
+        assert!(
+            self.inner.is_owner_process(),
+            "Context::socket_for_libzmq() called on a context inherited across fork"
+        );
+        let _guard = self.inner.primary_handle().enter();
+        Socket::new_for_libzmq(
+            socket_type,
+            options,
+            recv_sink_config,
+            &self.inner.io_pool_handle(),
+            self.inner.inproc_registry.clone(),
+        )
+    }
+
+    /// Construct a blocking binding socket with libzmq send semantics.
+    #[doc(hidden)]
+    pub fn blocking_socket_for_libzmq(
+        &self,
+        socket_type: SocketType,
+        options: Options,
+    ) -> crate::blocking::Socket {
+        assert!(
+            self.io_threads() > 0,
+            "blocking_socket_for_libzmq() requires at least one owned IO thread"
+        );
+        crate::blocking::Socket::new(
+            self.socket_for_libzmq(socket_type, options, None),
+            self.clone(),
+        )
+    }
+
     /// Run a future on this context's runtime, blocking the calling
     /// thread until it completes. The future runs inline on the
     /// primary IO thread with the same priority as spawned driver tasks.

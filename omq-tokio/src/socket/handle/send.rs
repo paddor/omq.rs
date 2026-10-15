@@ -103,8 +103,10 @@ impl Socket {
 
     /// Send a message.
     ///
-    /// This waits until the message is accepted into OMQ's outbound routing
-    /// buffers. It does not wait for bytes to reach the peer or the kernel.
+    /// This applies the socket's routing and mute policy. Lossy fan-out
+    /// (`PUB`, `XPUB`, `RADIO`) drops at full internal lanes or subscriber
+    /// queues and returns success. Other sends wait for outbound admission;
+    /// none wait for bytes to reach the peer or the kernel.
     ///
     /// Native round-robin sockets (`PUSH`, `DEALER`, `REQ`, `CLIENT`,
     /// `SCATTER`) with no ready bound peer mute like libzmq: this waits until
@@ -191,14 +193,30 @@ impl Socket {
 
     /// Non-blocking send.
     ///
-    /// Routes through the `SendSubmitter` directly (no actor hop), mirroring
-    /// `send()` but synchronously. Returns `Full(msg)` when native outbound
-    /// buffers are at HWM so the caller can retry or fall back to async
-    /// `send()`.
+    /// Returns `Full(msg)` when outbound admission has no capacity. Native
+    /// fan-out (`PUB`, `XPUB`, `RADIO`) requires space in every active internal
+    /// lane before publishing anywhere, even with lossy subscriber policies.
+    /// Slow subscribers can still drop messages after admission. Ordinary
+    /// [`Self::send`] also drops at full internal lanes for lossy fan-out.
     ///
     /// For native round-robin sockets, a connect-side pre-ready pipe counts as
     /// an outbound buffer. `try_send()` can therefore succeed before any peer
     /// is ready. Bound no-peer sockets return `Full`.
+    ///
+    /// To wait for internal admission, retain the returned message and retry:
+    ///
+    /// ```no_run
+    /// # use omq_tokio::{Message, Socket, TrySendError};
+    /// # async fn submit(socket: &Socket, mut message: Message) -> Result<(), TrySendError> {
+    /// loop {
+    ///     match socket.try_send(message) {
+    ///         Err(TrySendError::Full(returned)) => message = returned,
+    ///         result => return result,
+    ///     }
+    ///     socket.wait_send_ready().await;
+    /// }
+    /// # }
+    /// ```
     #[inline]
     pub fn try_send(&self, msg: Message) -> core::result::Result<(), TrySendError> {
         match self.inner.socket_type {
@@ -246,6 +264,18 @@ impl Socket {
                     .map_err(TrySendError::Error)?;
                 self.send_submitter.try_send(msg)
             }
+        }
+    }
+
+    /// Immediate attempt for ordinary blocking sends. Their fan-out policy
+    /// applies at internal lanes too, independently of native `try_send` admission.
+    pub(crate) fn try_send_for_send(&self, msg: Message) -> core::result::Result<(), TrySendError> {
+        if let crate::routing::SendSubmitter::FanOut(sender) = &self.send_submitter {
+            check_pre_send_frame_count(self.inner.socket_type, &msg)
+                .map_err(TrySendError::Error)?;
+            sender.try_send_for_send(msg)
+        } else {
+            self.try_send(msg)
         }
     }
 
@@ -310,16 +340,18 @@ impl Socket {
 
     /// Whether [`Self::try_send`] would accept a message now.
     ///
-    /// Matches libzmq `ZMQ_POLLOUT`. `REQ` is writable once it has received
-    /// its reply, `REP` while a request awaits its reply. Round-robin and
+    /// `REQ` is writable once it has received its reply, `REP` while a request
+    /// awaits its reply. Round-robin and
     /// exclusive types are writable while a peer queue has space. `ROUTER`
     /// is writable unless `router_mandatory` is set and every peer is full.
-    /// `SERVER`, `PEER`, `STREAM`, and lossy fan-out never block. With
-    /// `xpub_nodrop`, fan-out is writable while its distribution ring has
-    /// space. Receive-only types are never writable. After close, sockets
+    /// `SERVER`, `PEER`, and `STREAM` always report writable. Native fan-out
+    /// requires space in every active internal lane; `xpub_nodrop` additionally
+    /// requires fallback peer capacity. These checks precede topic matching.
+    /// Receive-only types are never writable. After close, sockets
     /// report writable so the next send reports the error.
     ///
-    /// Another handle can take the space before this handle sends.
+    /// Another handle can take the space before this handle sends. C and
+    /// Python compatibility sockets retain libzmq's lossy fan-out writability.
     pub fn send_ready(&self) -> bool {
         match self.inner.socket_type {
             SocketType::Req => {

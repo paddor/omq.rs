@@ -35,7 +35,7 @@ use omq_proto::proto::SocketType;
 use super::peer_outbound::PeerOutbound;
 use super::subscription::SubscriptionSet;
 pub(crate) use filter::FanOutMode;
-use lane::{FanOutLanes, LaneDispatch};
+use lane::{FanOutLanes, LaneAdmission, LaneDispatch};
 
 /// Total bytes copied into per-peer wire queues before switching to
 /// shared `Bytes` chunks. This is fan-out specific. Do not change
@@ -81,10 +81,12 @@ pub(crate) struct Submitter {
     /// between.
     publish: Arc<Mutex<()>>,
     generation: Arc<AtomicU64>,
+    changed: Arc<crate::engine::signal::StateSignal>,
     mode: FanOutMode,
     send_count: Arc<AtomicU32>,
     xpub_nodrop: bool,
     mute_policy: FanOutMutePolicy,
+    compatibility: super::SendCompatibility,
     #[cfg(feature = "dart")]
     native: Arc<Mutex<native::Cache>>,
     #[cfg(feature = "dart")]
@@ -148,6 +150,14 @@ fn deactivate_fanout_target(
 }
 
 impl Submitter {
+    fn try_admission(&self) -> LaneAdmission {
+        if self.compatibility == super::SendCompatibility::Libzmq && self.mute_policy.is_lossy() {
+            LaneAdmission::Drop
+        } else {
+            LaneAdmission::Backpressure
+        }
+    }
+
     pub(crate) fn clone_shared(&self) -> Self {
         #[allow(unused_mut)] // The native cache exists only with DART.
         let mut shared = self.copy_with_lanes(self.data_lanes.clone_shared());
@@ -171,10 +181,12 @@ impl Submitter {
             inner: self.inner.clone(),
             publish: self.publish.clone(),
             generation: self.generation.clone(),
+            changed: self.changed.clone(),
             mode: self.mode,
             send_count: self.send_count.clone(),
             xpub_nodrop: self.xpub_nodrop,
             mute_policy: self.mute_policy,
+            compatibility: self.compatibility,
             #[cfg(feature = "dart")]
             native: Arc::new(Mutex::new(native::Cache::default())),
             #[cfg(feature = "dart")]
@@ -224,15 +236,14 @@ impl Submitter {
         lanes: &FanOutLanes,
         msg: &Message,
         group: Option<&[u8]>,
+        admission: LaneAdmission,
     ) -> core::result::Result<(), omq_proto::error::TrySendError> {
         // Fast path: no fallback peers, push raw message directly to lanes.
         if self.fallback_peer_count.load(Ordering::Relaxed) == 0 {
             let lane_count = self.lane_peer_count.load(Ordering::Acquire);
             if lane_count > 0 {
                 let dispatch = LaneDispatch { msg: msg.clone() };
-                if let Err(returned) = lanes.try_dispatch(dispatch) {
-                    return Err(omq_proto::error::TrySendError::Full(returned.msg));
-                }
+                lanes.try_dispatch(dispatch, admission)?;
             }
             return Ok(());
         }
@@ -257,9 +268,7 @@ impl Submitter {
                     .expect("native fanout cache poisoned")
                     .publish(fallback_targets, msg, || {
                         if has_lane_peers {
-                            lanes
-                                .try_dispatch(LaneDispatch { msg: msg.clone() })
-                                .map_err(|returned| omq_proto::TrySendError::Full(returned.msg))?;
+                            lanes.try_dispatch(LaneDispatch { msg: msg.clone() }, admission)?;
                         }
                         Ok(())
                     })?;
@@ -274,14 +283,18 @@ impl Submitter {
             };
             if has_lane_peers {
                 let dispatch = LaneDispatch { msg: msg.clone() };
-                if let Err(returned) = lanes.try_dispatch(dispatch) {
-                    return Err(omq_proto::error::TrySendError::Full(returned.msg));
-                }
+                lanes.try_dispatch(dispatch, admission)?;
             }
             for permit in permits {
                 permit.send(msg.clone());
             }
             return Ok(());
+        }
+
+        // A failed lane admission must leave fallback peers untouched so the
+        // caller can retry the complete publication without duplicates.
+        if has_lane_peers {
+            lanes.try_dispatch(LaneDispatch { msg: msg.clone() }, admission)?;
         }
 
         if !fallback_targets.is_empty() {
@@ -290,12 +303,6 @@ impl Submitter {
                 .map_err(omq_proto::error::TrySendError::Error)?;
         }
 
-        if has_lane_peers {
-            let dispatch = LaneDispatch { msg: msg.clone() };
-            if let Err(returned) = lanes.try_dispatch(dispatch) {
-                return Err(omq_proto::error::TrySendError::Full(returned.msg));
-            }
-        }
         Ok(())
     }
 
@@ -394,22 +401,51 @@ impl Submitter {
         }
     }
 
-    /// Lossy fan-out never blocks. With `xpub_nodrop`, sends wait for lane
-    /// 0's ring; fallback peers (inproc, WebSocket) are not probed.
+    fn blocked_fallback(&self) -> Option<PeerOutbound> {
+        if self.mute_policy.is_lossy() || self.fallback_peer_count.load(Ordering::Acquire) == 0 {
+            return None;
+        }
+        let peers = self.inner.lock().expect("fanout inner poisoned");
+        peers
+            .peers
+            .values()
+            .filter(|peer| peer.lane.is_none() && peer.fanout_active)
+            .map(|peer| peer.target.bind(&self.data_lanes))
+            .find(|target| !target.send_ready())
+    }
+
+    /// Native admission requires every active lane to have space. No-drop
+    /// additionally requires fallback capacity, before topic matching.
     pub(crate) fn send_ready(&self) -> bool {
-        self.mute_policy.is_lossy()
-            || self.lane_peer_count.load(Ordering::Acquire) == 0
-            || self.lanes.dispatch_space().0
+        self.try_admission() == LaneAdmission::Drop
+            || self.lanes.admission_closed()
+            || ((self.lane_peer_count.load(Ordering::Acquire) == 0
+                || self.lanes.dispatch_space().0)
+                && self.blocked_fallback().is_none())
     }
 
     pub(crate) async fn wait_send_ready(&self) {
+        if self.try_admission() == LaneAdmission::Drop {
+            return;
+        }
         loop {
             let (_, space) = self.lanes.dispatch_space();
-            let changed = crate::engine::signal::any_changed([space]);
-            if self.send_ready() {
+            // Observe membership and lane releases before choosing a peer.
+            // Removal must wake us even if its retained queue stays full.
+            let changed = crate::engine::signal::any_changed([self.changed.clone(), space]);
+            let blocked = self.blocked_fallback();
+            if self.lanes.admission_closed()
+                || (blocked.is_none()
+                    && (self.lane_peer_count.load(Ordering::Acquire) == 0
+                        || self.lanes.dispatch_space().0))
+            {
                 return;
             }
-            changed.await;
+            tokio::select! {
+                () = changed => {},
+                () = async { blocked.as_ref().unwrap().wait_capacity().await },
+                    if blocked.is_some() => {},
+            }
         }
     }
 
@@ -417,13 +453,33 @@ impl Submitter {
         &self,
         msg: Message,
     ) -> core::result::Result<(), omq_proto::error::TrySendError> {
+        self.try_send_with_admission(msg, self.try_admission())
+    }
+
+    pub(crate) fn try_send_for_send(
+        &self,
+        msg: Message,
+    ) -> core::result::Result<(), omq_proto::error::TrySendError> {
+        let admission = if self.mute_policy.is_lossy() {
+            LaneAdmission::Drop
+        } else {
+            LaneAdmission::Backpressure
+        };
+        self.try_send_with_admission(msg, admission)
+    }
+
+    fn try_send_with_admission(
+        &self,
+        msg: Message,
+        admission: LaneAdmission,
+    ) -> core::result::Result<(), omq_proto::error::TrySendError> {
         if self.lanes.admission_closed() {
             return Err(omq_proto::error::TrySendError::Closed);
         }
         let group =
             filter::prepare(self.mode, &msg).map_err(omq_proto::error::TrySendError::Error)?;
 
-        match self.try_dispatch_raw(&self.lanes, &msg, group) {
+        match self.try_dispatch_raw(&self.lanes, &msg, group, admission) {
             Err(omq_proto::TrySendError::Full(_)) => Err(omq_proto::TrySendError::Full(msg)),
             result => result,
         }
@@ -456,9 +512,11 @@ pub(crate) struct FanOutSend {
     inner: Arc<Mutex<FanOutInner>>,
     publish: Arc<Mutex<()>>,
     generation: Arc<AtomicU64>,
+    changed: Arc<crate::engine::signal::StateSignal>,
     mode: FanOutMode,
     xpub_nodrop: bool,
     mute_policy: FanOutMutePolicy,
+    pub(super) compatibility: super::SendCompatibility,
     #[cfg(feature = "dart")]
     native_progress: Arc<crate::engine::signal::StateSignal>,
     #[cfg(feature = "dart")]
@@ -542,9 +600,11 @@ impl FanOutSend {
             inner,
             publish: Arc::new(Mutex::new(())),
             generation,
+            changed: Arc::new(crate::engine::signal::StateSignal::new()),
             mode,
             xpub_nodrop: options.xpub_nodrop,
             mute_policy,
+            compatibility: super::SendCompatibility::Native,
             #[cfg(feature = "dart")]
             native_progress: Arc::new(crate::engine::signal::StateSignal::new()),
             #[cfg(feature = "dart")]
@@ -556,6 +616,7 @@ impl FanOutSend {
 
     fn bump_generation(&self) {
         self.generation.fetch_add(1, Ordering::Release);
+        self.changed.notify_changed();
     }
 
     pub(crate) fn submitter(&self) -> Submitter {
@@ -567,10 +628,12 @@ impl FanOutSend {
             inner: self.inner.clone(),
             publish: self.publish.clone(),
             generation: self.generation.clone(),
+            changed: self.changed.clone(),
             mode: self.mode,
             send_count: Arc::new(AtomicU32::new(0)),
             xpub_nodrop: self.xpub_nodrop,
             mute_policy: self.mute_policy,
+            compatibility: self.compatibility,
             #[cfg(feature = "dart")]
             native: Arc::new(Mutex::new(native::Cache::default())),
             #[cfg(feature = "dart")]

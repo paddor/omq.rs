@@ -27,6 +27,14 @@ use super::{FAN_OUT_TOTAL_COPY_BUDGET, FanOutMutePolicy};
 const LANE_CTRL_RING_CAP: usize = 64;
 const PLAIN_BATCH_MESSAGES: usize = 8;
 const PLAIN_BATCH_BYTES: usize = 16 * 1024;
+
+/// Internal queue admission is independent of each subscriber's mute policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum LaneAdmission {
+    Backpressure,
+    Drop,
+}
+
 #[cfg(any(feature = "lz4", feature = "zstd"))]
 const CODEC_ARENA_FRAME_OVERHEAD: usize = 16 + 9;
 
@@ -416,24 +424,37 @@ impl FanOutLanes {
             }
             Self::push_control(endpoint, LaneControl::RemovePeer { peer_id });
         }
+        drop(state);
+        // Readiness may have probed before the lane became inactive. Publish
+        // a capacity change after the flag update, even if no worker drains.
+        let space = self
+            .distributor
+            .lock()
+            .expect("distributor poisoned")
+            .space
+            .clone();
+        space.notify_changed();
     }
 
     /// Publish directly into each active IO lane's queue.
     pub(super) fn try_dispatch(
         &self,
         dispatch: LaneDispatch,
-    ) -> core::result::Result<(), LaneDispatch> {
+        admission: LaneAdmission,
+    ) -> core::result::Result<(), omq_proto::TrySendError> {
         let mut dist = self.distributor.lock().expect("distributor poisoned");
         if self.admission_closed.load(Ordering::Acquire) {
-            return Err(dispatch);
+            return Err(omq_proto::TrySendError::Closed);
         }
-        self.publish(&mut dist, dispatch)
+        self.publish(&mut dist, dispatch, admission)
+            .map_err(|returned| omq_proto::TrySendError::Full(returned.msg))
     }
 
     fn publish(
         &self,
         dist: &mut LaneDistributor,
         dispatch: LaneDispatch,
+        admission: LaneAdmission,
     ) -> core::result::Result<(), LaneDispatch> {
         let mut selected: SmallVec<[usize; 4]> = SmallVec::new();
         for (index, input) in dist.lanes.iter_mut().enumerate() {
@@ -446,7 +467,7 @@ impl FanOutLanes {
             if input.tx.is_full() {
                 input.tx.flush();
                 input.signal.mark();
-                if !self.mute_policy.is_lossy() {
+                if admission == LaneAdmission::Backpressure {
                     return Err(dispatch);
                 }
             } else {
@@ -472,6 +493,11 @@ impl FanOutLanes {
     }
 
     pub(super) async fn dispatch(&self, mut dispatch: LaneDispatch) {
+        let admission = if self.mute_policy.is_lossy() {
+            LaneAdmission::Drop
+        } else {
+            LaneAdmission::Backpressure
+        };
         loop {
             let wait = {
                 let mut dist = self.distributor.lock().expect("distributor poisoned");
@@ -481,7 +507,7 @@ impl FanOutLanes {
                 // Snapshot before admission: any worker's release or exit
                 // must remain observable when a full queue makes us wait.
                 let seen = dist.space.generation();
-                match self.publish(&mut dist, dispatch) {
+                match self.publish(&mut dist, dispatch, admission) {
                     Ok(()) => return,
                     Err(returned) => {
                         dispatch = returned;
@@ -1722,9 +1748,163 @@ mod tests {
     use crate::routing::subscription::SubscriptionSet;
 
     use super::{
-        FanOutLaneState, FanOutLanes, FanOutMode, FanOutMutePolicy, LaneControl, LaneData,
-        LaneDispatch, LaneDistributor, LaneEndpoint, LaneInput, LanePeer, LanePeerAdd, LaneWorker,
+        FanOutLaneState, FanOutLanes, FanOutMode, FanOutMutePolicy, LaneAdmission, LaneControl,
+        LaneData, LaneDispatch, LaneDistributor, LaneEndpoint, LaneInput, LanePeer, LanePeerAdd,
+        LaneWorker,
     };
+
+    fn paused_lanes(count: usize) -> (FanOutLanes, Vec<yring::Consumer<LaneData>>) {
+        let lanes = test_lanes(count);
+        let mut receivers = Vec::new();
+        for (index, input) in lanes
+            .distributor
+            .lock()
+            .unwrap()
+            .lanes
+            .iter_mut()
+            .enumerate()
+        {
+            let (tx, rx) = yring::spsc(1);
+            input.tx = tx;
+            lanes.active_flags[index].store(true, std::sync::atomic::Ordering::Release);
+            receivers.push(rx);
+        }
+        (lanes, receivers)
+    }
+
+    fn pop_dispatch(receiver: &mut yring::Consumer<LaneData>) -> Option<omq_proto::Message> {
+        receiver.prefetch();
+        let result = receiver
+            .pop()
+            .map(|LaneData::Dispatch(dispatch)| dispatch.msg);
+        receiver.release();
+        result
+    }
+
+    #[test]
+    fn strict_admission_is_atomic_across_lanes_but_lossy_dispatch_skips_full_lanes() {
+        for full_lane in [0, 1] {
+            let (lanes, mut receivers) = paused_lanes(2);
+            lanes
+                .try_dispatch(test_dispatch("first"), LaneAdmission::Backpressure)
+                .unwrap();
+            let available_lane = 1 - full_lane;
+            assert_eq!(
+                pop_dispatch(&mut receivers[available_lane]),
+                Some("first".into())
+            );
+
+            let Err(omq_proto::TrySendError::Full(message)) =
+                lanes.try_dispatch(test_dispatch("retry"), LaneAdmission::Backpressure)
+            else {
+                panic!("one full lane must reject the entire publication");
+            };
+            assert_eq!(message, "retry".into());
+            assert_eq!(pop_dispatch(&mut receivers[available_lane]), None);
+
+            lanes
+                .try_dispatch(test_dispatch("lossy"), LaneAdmission::Drop)
+                .unwrap();
+            assert_eq!(
+                pop_dispatch(&mut receivers[available_lane]),
+                Some("lossy".into())
+            );
+            assert_eq!(
+                pop_dispatch(&mut receivers[full_lane]),
+                Some("first".into())
+            );
+            lanes
+                .try_dispatch(
+                    super::LaneDispatch { msg: message },
+                    LaneAdmission::Backpressure,
+                )
+                .unwrap();
+            for receiver in &mut receivers {
+                assert_eq!(pop_dispatch(receiver), Some("retry".into()));
+                assert_eq!(pop_dispatch(receiver), None);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn native_readiness_observes_inactive_lanes_worker_exit_and_close() {
+        use crate::routing::fan_out::FanOutSend;
+        use std::future::Future;
+
+        #[derive(Default)]
+        struct CountWake(std::sync::atomic::AtomicUsize);
+        impl std::task::Wake for CountWake {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        for event in ["remove", "exit", "close"] {
+            let mut sender = FanOutSend::new(
+                omq_proto::SocketType::Radio,
+                &omq_proto::Options::default(),
+                FanOutMode::Group,
+                &crate::context::IoPoolHandle::none(),
+            );
+            let (lanes, _receivers) = paused_lanes(2);
+            sender.lanes = Arc::new(lanes);
+            sender
+                .lane_peer_count
+                .store(2, std::sync::atomic::Ordering::Release);
+            let submitter = sender.submitter();
+            let message = omq_proto::Message::with_group("group", "body");
+            submitter.try_send(message.clone()).unwrap();
+            assert!(matches!(
+                submitter.try_send(message),
+                Err(omq_proto::TrySendError::Full(_))
+            ));
+            assert!(!submitter.send_ready());
+            let wake = Arc::new(CountWake::default());
+            let waker = std::task::Waker::from(wake.clone());
+            let mut cx = std::task::Context::from_waker(&waker);
+            let mut wait = Box::pin(submitter.wait_send_ready());
+            assert!(wait.as_mut().poll(&mut cx).is_pending());
+
+            for lane in 0..2 {
+                match event {
+                    "remove" => sender.lanes.remove_peer(lane, 100),
+                    "exit" => {
+                        let dist = sender.lanes.distributor.lock().unwrap();
+                        dist.lanes[lane]
+                            .exited
+                            .store(true, std::sync::atomic::Ordering::Release);
+                        dist.space.notify_changed();
+                    }
+                    "close" => sender.stop_admission(),
+                    _ => unreachable!(),
+                }
+                if lane == 0 || event != "close" {
+                    assert!(
+                        wake.0.swap(0, std::sync::atomic::Ordering::SeqCst) > 0,
+                        "{event}: no wake"
+                    );
+                }
+                if lane == 0 && event != "close" {
+                    assert!(wait.as_mut().poll(&mut cx).is_pending());
+                }
+            }
+            assert!(wait.as_mut().poll(&mut cx).is_ready(), "{event}");
+            assert!(submitter.send_ready());
+            let result = submitter.try_send(omq_proto::Message::with_group("group", "after"));
+            if event == "close" {
+                assert!(matches!(result, Err(omq_proto::TrySendError::Closed)));
+                // Also cover closure after the submitter's initial open check.
+                assert!(matches!(
+                    sender
+                        .lanes
+                        .try_dispatch(test_dispatch("race"), LaneAdmission::Backpressure),
+                    Err(omq_proto::TrySendError::Closed)
+                ));
+            } else {
+                result.unwrap();
+            }
+        }
+    }
 
     #[test]
     fn add_peer_uses_supplied_lane_and_marks_it_active() {
@@ -1819,7 +1999,9 @@ mod tests {
             mute_policy: FanOutMutePolicy::Block,
         };
 
-        lanes.try_dispatch(test_dispatch("one")).unwrap();
+        lanes
+            .try_dispatch(test_dispatch("one"), super::LaneAdmission::Backpressure)
+            .unwrap();
 
         let send_second = lanes.dispatch(test_dispatch("two"));
         tokio::pin!(send_second);
@@ -1860,7 +2042,9 @@ mod tests {
             admission_closed: AtomicBool::new(false),
             mute_policy: FanOutMutePolicy::Block,
         };
-        lanes.try_dispatch(test_dispatch("one")).unwrap();
+        lanes
+            .try_dispatch(test_dispatch("one"), super::LaneAdmission::Backpressure)
+            .unwrap();
 
         let send_second = lanes.dispatch(test_dispatch("two"));
         tokio::pin!(send_second);
@@ -1909,7 +2093,9 @@ mod tests {
                 admission_closed: AtomicBool::new(false),
                 mute_policy: FanOutMutePolicy::Block,
             };
-            lanes.try_dispatch(test_dispatch("one")).unwrap();
+            lanes
+                .try_dispatch(test_dispatch("one"), super::LaneAdmission::Backpressure)
+                .unwrap();
 
             // Stop can publish its final wake before an in-flight sender
             // tries to push. No later space notification will arrive.

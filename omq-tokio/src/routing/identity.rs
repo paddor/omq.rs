@@ -7,7 +7,7 @@
 //!
 //! Identity send: the first user frame identifies a peer. SERVER instead
 //! looks up the peer directly from `Message::routing_id`. If no match:
-//! - `router_mandatory = true` -> `Error::Unroutable`.
+//! - STREAM or `router_mandatory = true` -> `Error::Unroutable`.
 //! - otherwise silently drop (libzmq default).
 //!
 //! Identity recv prepends the peer identity. SERVER bypasses this path and
@@ -133,6 +133,7 @@ pub(crate) struct Submitter {
     inner: Arc<Mutex<IdentityInner>>,
     changed: Arc<StateSignal>,
     router_mandatory: bool,
+    reject_unroutable: bool,
     drop_on_full: bool,
     peer: Option<Arc<peer::PeerRoutes>>,
     lanes: peer::SenderLanes,
@@ -145,6 +146,7 @@ impl Submitter {
             inner: self.inner.clone(),
             changed: self.changed.clone(),
             router_mandatory: self.router_mandatory,
+            reject_unroutable: self.reject_unroutable,
             drop_on_full: self.drop_on_full,
             peer: self.peer.clone(),
             lanes: self.lanes.clone_shared(),
@@ -177,13 +179,13 @@ impl Submitter {
             return Err(omq_proto::error::TrySendError::Closed);
         }
         let Some(&id) = g.identity_to_peer.get(identity) else {
-            if self.router_mandatory {
+            if self.reject_unroutable {
                 return Err(omq_proto::error::TrySendError::Error(Error::Unroutable));
             }
             return Ok(());
         };
         let Some(peer) = g.peers.get_mut(&id) else {
-            if self.router_mandatory {
+            if self.reject_unroutable {
                 return Err(omq_proto::error::TrySendError::Error(Error::Unroutable));
             }
             return Ok(());
@@ -204,7 +206,7 @@ impl Submitter {
             Err(SendPipeError::Full(returned)) => Err(TrySendError::Full(returned)),
             Err(SendPipeError::Closed(_)) => {
                 g.remove_peer(id);
-                if self.router_mandatory {
+                if self.reject_unroutable {
                     Err(omq_proto::error::TrySendError::Error(Error::Unroutable))
                 } else {
                     Ok(())
@@ -587,13 +589,13 @@ impl Submitter {
             return Err(Error::Closed);
         }
         let Some(&id) = g.identity_to_peer.get(identity) else {
-            if self.router_mandatory {
+            if self.reject_unroutable {
                 return Err(Error::Unroutable);
             }
             return Ok(Ok(()));
         };
         let Some(peer) = g.peers.get_mut(&id) else {
-            if self.router_mandatory {
+            if self.reject_unroutable {
                 return Err(Error::Unroutable);
             }
             return Ok(Ok(()));
@@ -607,7 +609,7 @@ impl Submitter {
             }
             Err(SendPipeError::Closed(_)) => {
                 g.remove_peer(id);
-                if self.router_mandatory {
+                if self.reject_unroutable {
                     Err(Error::Unroutable)
                 } else {
                     Ok(Ok(()))
@@ -728,6 +730,7 @@ impl IdentitySend {
             inner: self.inner.clone(),
             changed: self.changed.clone(),
             router_mandatory: self.router_mandatory,
+            reject_unroutable: self.router_mandatory || self.socket_type == SocketType::Stream,
             drop_on_full: self.socket_type == SocketType::Router && !self.router_mandatory,
             peer: self.peer.clone(),
             lanes: peer::SenderLanes::default(),

@@ -19,6 +19,7 @@ use crate::engine::driver::DriverStream;
 use crate::engine::peer_completion::CompletionProgress;
 use crate::engine::{ActorPeerDriverHandle, PeerDriverCommand, PeerDriverData};
 
+#[expect(clippy::too_many_arguments)]
 pub(crate) fn spawn<T: DriverStream + Send + 'static>(
     stream: T,
     peer_id: u64,
@@ -27,6 +28,7 @@ pub(crate) fn spawn<T: DriverStream + Send + 'static>(
     completion: CompletionProgress,
     capacity: usize,
     pool: Option<crate::PayloadPool>,
+    send_pipe: Option<crate::engine::SendPipeConsumer>,
 ) -> (ActorPeerDriverHandle, tokio::task::JoinHandle<()>) {
     let (inbox_tx, inbox_rx) = crate::engine::control_inbox::channel(64);
     let (data_inbox_tx, data_inbox_rx) = crate::engine::data_inbox::channel(capacity);
@@ -43,6 +45,7 @@ pub(crate) fn spawn<T: DriverStream + Send + 'static>(
             data_inbox_rx,
             &mut completion,
             pool,
+            send_pipe,
         )
         .await;
         let _ = completion.complete(omq_proto::DisconnectReason::PeerClosed);
@@ -61,7 +64,7 @@ pub(crate) fn spawn<T: DriverStream + Send + 'static>(
     )
 }
 
-#[expect(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn run_body<T: DriverStream>(
     stream: T,
     peer_id: u64,
@@ -71,6 +74,7 @@ async fn run_body<T: DriverStream>(
     mut data_inbox: crate::engine::data_inbox::Receiver,
     completion: &mut CompletionProgress,
     pool: Option<crate::PayloadPool>,
+    mut send_pipe: Option<crate::engine::SendPipeConsumer>,
 ) {
     let (mut reader, mut writer) = stream.split(false);
     let mut buf = vec![0u8; 64 * 1024];
@@ -99,7 +103,14 @@ async fn run_body<T: DriverStream>(
                 }
             }
         }
-        if closing && pending.is_none() && inbox.is_empty() && data_inbox.is_empty() {
+        if closing
+            && pending.is_none()
+            && inbox.is_empty()
+            && data_inbox.is_empty()
+            && send_pipe
+                .as_ref()
+                .is_none_or(crate::engine::SendPipeConsumer::is_empty)
+        {
             tokio::select! {
                 biased;
                 () = cancel.cancelled() => {},
@@ -154,7 +165,7 @@ async fn run_body<T: DriverStream>(
                     }
                 }
             },
-            data = data_inbox.recv(), if pending.is_none() => {
+            data = data_inbox.recv(), if pending.is_none() && (!closing || !data_inbox.is_empty()) => {
                 match data {
                     Some(PeerDriverData::SendMessage(mut message)) => {
                         let _ = budget.account(message.byte_len());
@@ -164,6 +175,23 @@ async fn run_body<T: DriverStream>(
                     }
                     Some(PeerDriverData::SendEncoded(_)) => {}
                     None => return,
+                }
+            },
+            () = async { send_pipe.as_ref().unwrap().ready().await },
+                if pending.is_none() && send_pipe.is_some() => {
+                let pipe = send_pipe.as_mut().unwrap();
+                let mut next = None;
+                pipe.drain_queue_with(1, 64 * 1024, |message| {
+                    next = Some(message);
+                    false
+                }).expect("STREAM uses a queue pipe");
+                if let Some(mut message) = next {
+                    let _ = budget.account(message.byte_len());
+                    let data = message.pop_front().unwrap_or_default();
+                    if data.is_empty() { return; }
+                    pending = Some(data);
+                } else if pipe.is_disconnected() {
+                    return;
                 }
             },
         }
@@ -177,6 +205,40 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[tokio::test]
+    async fn stream_linger_drains_connect_pipe_before_shutdown() {
+        let (stream, mut remote) = tokio::io::duplex(16);
+        let (events, _event_inbox) = mpsc::channel(1);
+        let (completion, _finished) = CompletionProgress::reserve(7);
+        let (mut producer, consumer) = crate::engine::send_pipe(2);
+        producer.try_send(Message::single("first")).unwrap();
+        producer.try_send(Message::single("second")).unwrap();
+        let (handle, task) = spawn(
+            stream,
+            7,
+            events.into(),
+            &CancellationToken::new(),
+            completion,
+            2,
+            None,
+            Some(consumer),
+        );
+        // Queue shutdown before the current-thread runtime runs the driver.
+        handle
+            .inbox
+            .try_send(PeerDriverCommand::DrainAndClose {
+                deadline: Some(Instant::now() + Duration::from_secs(2)),
+            })
+            .unwrap();
+        let mut received = Vec::new();
+        tokio::time::timeout(Duration::from_secs(2), remote.read_to_end(&mut received))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received, b"firstsecond");
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn stream_close_joins_without_reading_the_connect_notification() {
         let (stream, mut remote) = tokio::io::duplex(1024);
         let (events, mut event_inbox) = mpsc::channel(1);
@@ -188,6 +250,7 @@ mod tests {
             &CancellationToken::new(),
             completion,
             64,
+            None,
             None,
         );
         handle.inbox.try_send(PeerDriverCommand::Close).unwrap();
@@ -225,6 +288,7 @@ mod tests {
                 &CancellationToken::new(),
                 completion,
                 64,
+                None,
                 None,
             );
             handle.data_inbox =

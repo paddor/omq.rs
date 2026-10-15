@@ -343,12 +343,15 @@ impl SocketDriver {
             is_server,
             route_id,
             options,
-            ..
+            send_pipe_rx,
         }: PeerSetup,
     ) {
         let peer_id = self.next_peer_id;
         self.next_peer_id += 1;
-        let identity = generated_identity(peer_id);
+        let identity = generated_identity(if is_server { peer_id } else { route_id });
+        if is_server {
+            self.last_stream_routing_id = Some(identity.clone());
+        }
 
         let (completion, receiver) =
             crate::engine::peer_completion::CompletionProgress::reserve(peer_id);
@@ -365,6 +368,7 @@ impl SocketDriver {
             completion,
             self.options.send_hwm.max(1) as usize,
             options.recv_payload_pool.clone(),
+            send_pipe_rx,
         );
 
         self.peers.insert(

@@ -60,6 +60,23 @@ impl Socket {
         self.inner.last_bound_endpoint.read().unwrap().clone()
     }
 
+    /// Last STREAM route allocated by connect or accept. Connecting routes
+    /// accept bounded sends before TCP is established; reconnect allocates a
+    /// new identity. Used by the C API's `ZMQ_IDENTITY` option.
+    #[doc(hidden)]
+    pub async fn last_stream_routing_id(&self) -> Result<Option<bytes::Bytes>> {
+        if self.socket_type() != omq_proto::SocketType::Stream {
+            return Err(Error::Protocol("expected a STREAM socket".into()));
+        }
+        let (ack, rx) = oneshot::channel();
+        self.inner
+            .cmd_tx
+            .send(SocketCommand::QueryStreamRoutingId { ack })
+            .await
+            .map_err(|_| Error::Closed)?;
+        rx.await.map_err(|_| Error::Closed)
+    }
+
     /// Queue a connect attempt to a URI string or typed endpoint.
     /// The background reconnect loop handles retries per `ReconnectPolicy`.
     pub async fn connect(

@@ -309,7 +309,14 @@ impl Submitter {
         }
     }
 
-    pub(crate) fn try_send(&self, mut msg: Message) -> core::result::Result<(), TrySendError> {
+    pub(crate) fn try_send(&self, msg: Message) -> core::result::Result<(), TrySendError> {
+        self.try_send_routed(msg).map(|_| ())
+    }
+
+    pub(crate) fn try_send_routed(
+        &self,
+        mut msg: Message,
+    ) -> core::result::Result<u64, TrySendError> {
         if self.closed.load(Ordering::Acquire) {
             return Err(TrySendError::Closed);
         }
@@ -329,7 +336,7 @@ impl Submitter {
                 .bind(&self.data_lanes)
                 .try_send(msg)
             {
-                Ok(()) => return Ok(()),
+                Ok(()) => return Ok(state.peers[index].id),
                 #[cfg(feature = "dart")]
                 Err(SendPipeError::Invalid(error)) => {
                     return Err(omq_proto::TrySendError::Error(error));
@@ -375,7 +382,7 @@ impl State {
         }
     }
 
-    fn try_send_pending(&mut self, mut msg: Message) -> core::result::Result<(), TrySendError> {
+    fn try_send_pending(&mut self, mut msg: Message) -> core::result::Result<u64, TrySendError> {
         if self.pending.is_empty() {
             return Err(TrySendError::Full(msg));
         }
@@ -385,7 +392,7 @@ impl State {
             self.pending_cursor = (index + 1) % self.pending.len();
             scanned += 1;
             match self.pending[index].tx.try_send(msg) {
-                Ok(()) => return Ok(()),
+                Ok(()) => return Ok(self.pending[index].route_id),
                 #[cfg(feature = "dart")]
                 Err(SendPipeError::Invalid(error)) => {
                     return Err(omq_proto::TrySendError::Error(error));

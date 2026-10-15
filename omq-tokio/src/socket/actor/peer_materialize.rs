@@ -378,14 +378,14 @@ fn inproc_sink(socket: &SocketDriver, peer_id: u64) -> Option<crate::engine::Rec
     if socket.socket_type == SocketType::Rep {
         return recv_sink.map(|sink| crate::engine::RecvSink::rep(sink, peer_id));
     }
-    if socket.socket_type != SocketType::Server {
+    if !matches!(socket.socket_type, SocketType::Server | SocketType::Req) {
         return recv_sink;
     }
     let sink =
         recv_sink.unwrap_or_else(|| crate::engine::RecvSink::Channel(socket.recv_tx.clone()));
     Some(crate::engine::RecvSink::server(
         sink,
-        server_routing_id(peer_id).expect("SERVER peer ID checked"),
+        server_routing_id(peer_id).expect("SERVER/REQ peer ID checked"),
     ))
 }
 
@@ -409,8 +409,10 @@ pub(super) fn spawn_inproc_peer(
         return;
     }
     let peer_id = next_peer_id(socket);
-    if matches!(socket.socket_type, SocketType::Server | SocketType::Rep)
-        && server_routing_id(peer_id).is_none()
+    if matches!(
+        socket.socket_type,
+        SocketType::Server | SocketType::Req | SocketType::Rep
+    ) && server_routing_id(peer_id).is_none()
     {
         return;
     }
@@ -600,10 +602,10 @@ fn inproc_port_sink(
         });
     if socket.socket_type == SocketType::Rep {
         crate::engine::RecvSink::rep(sink, peer_id)
-    } else if socket.socket_type == SocketType::Server {
+    } else if matches!(socket.socket_type, SocketType::Server | SocketType::Req) {
         crate::engine::RecvSink::server(
             sink,
-            server_routing_id(peer_id).expect("SERVER peer ID checked"),
+            server_routing_id(peer_id).expect("SERVER/REQ peer ID checked"),
         )
     } else {
         sink
@@ -642,8 +644,10 @@ fn allocate_peer_id(socket: &mut SocketDriver) -> Option<u64> {
         return None;
     }
     let peer_id = next_peer_id(socket);
-    if matches!(socket.socket_type, SocketType::Server | SocketType::Rep)
-        && server_routing_id(peer_id).is_none()
+    if matches!(
+        socket.socket_type,
+        SocketType::Server | SocketType::Req | SocketType::Rep
+    ) && server_routing_id(peer_id).is_none()
     {
         return None;
     }
@@ -979,10 +983,10 @@ fn attach_recv_bypass(
             crate::engine::RecvSink::Channel(socket.recv_tx.clone()),
             peer_id,
         ))
-    } else if socket.socket_type == SocketType::Server {
+    } else if matches!(socket.socket_type, SocketType::Server | SocketType::Req) {
         peer_driver.with_recv_sink(crate::engine::RecvSink::server(
             crate::engine::RecvSink::Channel(socket.recv_tx.clone()),
-            server_routing_id(peer_id).expect("SERVER peer ID checked"),
+            server_routing_id(peer_id).expect("SERVER/REQ peer ID checked"),
         ))
     } else {
         peer_driver.with_recv_direct(socket.recv_tx.clone())
@@ -1002,10 +1006,10 @@ fn attach_yring_recv_bypass(
     {
         return if rep_latency {
             peer_driver.with_recv_sink(crate::engine::RecvSink::rep(sink, peer_id))
-        } else if socket.socket_type == SocketType::Server {
+        } else if matches!(socket.socket_type, SocketType::Server | SocketType::Req) {
             peer_driver.with_recv_sink(crate::engine::RecvSink::server(
                 sink,
-                server_routing_id(peer_id).expect("SERVER peer ID checked"),
+                server_routing_id(peer_id).expect("SERVER/REQ peer ID checked"),
             ))
         } else {
             peer_driver.with_recv_sink(sink)
@@ -1042,10 +1046,10 @@ fn attach_yring_recv_bypass(
 
     if rep_latency {
         peer_driver.with_recv_sink(crate::engine::RecvSink::rep(sink, peer_id))
-    } else if socket.socket_type == SocketType::Server {
+    } else if matches!(socket.socket_type, SocketType::Server | SocketType::Req) {
         peer_driver.with_recv_sink(crate::engine::RecvSink::server(
             sink,
-            server_routing_id(peer_id).expect("SERVER peer ID checked"),
+            server_routing_id(peer_id).expect("SERVER/REQ peer ID checked"),
         ))
     } else {
         peer_driver.with_recv_sink(sink)

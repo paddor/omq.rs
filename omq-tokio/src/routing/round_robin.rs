@@ -59,10 +59,11 @@ impl ActivePipes {
     fn try_send<const DEFERRED: bool>(
         &mut self,
         mut message: Message,
-    ) -> core::result::Result<(), omq_proto::TrySendError> {
+    ) -> core::result::Result<u64, omq_proto::TrySendError> {
         if self.active.len() == 1 && self.inactive.is_empty() {
             return self
                 .send_to_pipe::<DEFERRED>(0, message)
+                .map(|()| self.active[0].peer_id)
                 .map_err(|error| self.reject(0, error));
         }
         if !self.has_any_pipe() {
@@ -82,7 +83,7 @@ impl ActivePipes {
             }
             scanned += 1;
             match self.send_to_pipe::<DEFERRED>(index, message) {
-                Ok(()) => return Ok(()),
+                Ok(()) => return Ok(self.active[index].peer_id),
                 Err(error) => {
                     message = match self.reject(index, error) {
                         omq_proto::TrySendError::Full(returned) => returned,
@@ -143,7 +144,7 @@ impl ActivePipes {
                 break;
             };
             match self.try_send::<true>(message) {
-                Ok(()) => {
+                Ok(_) => {
                     let _ = budget.account(std::mem::size_of::<Message>());
                 }
                 Err(omq_proto::TrySendError::Full(returned)) if budget.msgs() > 0 => {
@@ -407,6 +408,13 @@ impl Submitter {
         &self,
         message: Message,
     ) -> core::result::Result<(), omq_proto::TrySendError> {
+        self.try_send_routed(message).map(|_| ())
+    }
+
+    pub(crate) fn try_send_routed(
+        &self,
+        message: Message,
+    ) -> core::result::Result<u64, omq_proto::TrySendError> {
         if self.closed.load(Ordering::Acquire) {
             return Err(omq_proto::TrySendError::Closed);
         }

@@ -121,6 +121,218 @@ async fn rep_rejects_send_before_recv() {
 }
 
 #[tokio::test]
+async fn req_rejects_replies_from_unselected_peers() {
+    for profile in [WorkloadProfile::Latency, WorkloadProfile::Throughput] {
+        for transport in ["inproc", "tcp"] {
+            let req = Socket::new(
+                SocketType::Req,
+                Options::default()
+                    .identity(bytes::Bytes::from_static(b"requester"))
+                    .workload_profile(profile),
+            );
+            let endpoint = if transport == "tcp" {
+                tcp_ep(0)
+            } else {
+                inproc_ep(&format!("req-peer-{profile:?}"))
+            };
+            let endpoint = req.bind(endpoint).await.unwrap();
+            let routers = [
+                Socket::new(SocketType::Router, Options::default()),
+                Socket::new(SocketType::Router, Options::default()),
+            ];
+            for router in &routers {
+                router.connect(endpoint.clone()).await.unwrap();
+                router
+                    .wait_connected(1, Duration::from_secs(2))
+                    .await
+                    .unwrap();
+            }
+            req.wait_connected(2, Duration::from_secs(2)).await.unwrap();
+            req.send(Message::single("request")).await.unwrap();
+            let (selected, request) = recv_from_any_rep(&routers).await;
+            assert_eq!(request, Message::multipart(["requester", "", "request"]));
+            routers[1 - selected]
+                .send(Message::multipart(["requester", "", "unrelated"]))
+                .await
+                .unwrap();
+            let unrelated =
+                tokio::time::timeout(Duration::from_secs(2), req.recv_for_external_recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert!(
+                req.prepare_external_recv(unrelated).is_none(),
+                "{profile:?}/{transport}"
+            );
+            assert!(
+                !req.send_ready(),
+                "an unrelated reply must not finish the request"
+            );
+            routers[selected]
+                .send(Message::multipart(["requester", "", "reply"]))
+                .await
+                .unwrap();
+            let reply = tokio::time::timeout(Duration::from_secs(2), req.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(reply, Message::single("reply"));
+            assert_eq!(reply.routing_id(), None);
+            routers[selected]
+                .send(Message::multipart(["requester", "", "duplicate"]))
+                .await
+                .unwrap();
+            let duplicate =
+                tokio::time::timeout(Duration::from_secs(2), req.recv_for_external_recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert!(req.prepare_external_recv(duplicate).is_none());
+            for router in routers {
+                router.close().await.unwrap();
+            }
+            req.close().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn rep_rejects_delimiter_without_body() {
+    for profile in [WorkloadProfile::Latency, WorkloadProfile::Throughput] {
+        for transport in ["inproc", "tcp"] {
+            let rep = Socket::new(
+                SocketType::Rep,
+                Options::default().workload_profile(profile),
+            );
+            let endpoint = if transport == "tcp" {
+                tcp_ep(0)
+            } else {
+                inproc_ep(&format!("rep-no-body-{profile:?}"))
+            };
+            let endpoint = rep.bind(endpoint).await.unwrap();
+            let dealer = Socket::new(SocketType::Dealer, Options::default());
+            dealer.connect(endpoint).await.unwrap();
+            for malformed in [Message::single(""), Message::multipart(["route", ""])] {
+                dealer.send(malformed).await.unwrap();
+                dealer
+                    .send(Message::multipart(["route", "", ""]))
+                    .await
+                    .unwrap();
+                let body = tokio::time::timeout(Duration::from_secs(2), rep.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(body, Message::single(""), "{profile:?}/{transport}");
+                rep.send(Message::single("reply")).await.unwrap();
+                let reply = tokio::time::timeout(Duration::from_secs(2), dealer.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(reply, Message::multipart(["route", "", "reply"]));
+            }
+            dealer.close().await.unwrap();
+            rep.close().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn req_accepts_a_queued_reply_after_its_peer_disconnects() {
+    let rep = Socket::new(SocketType::Rep, Options::default());
+    let endpoint = rep.bind(tcp_ep(0)).await.unwrap();
+    let req = Socket::new(SocketType::Req, Options::default());
+    req.connect(endpoint).await.unwrap();
+    req.send(Message::single("request")).await.unwrap();
+    assert_eq!(rep.recv().await.unwrap(), Message::single("request"));
+    rep.send(Message::single("reply")).await.unwrap();
+    let reply = tokio::time::timeout(Duration::from_secs(2), req.recv_for_external_recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut monitor = req.monitor();
+    rep.close().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !matches!(
+            monitor.recv().await.unwrap(),
+            omq_tokio::MonitorEvent::Disconnected { .. }
+        ) {}
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        req.prepare_external_recv(reply),
+        Some(Message::single("reply"))
+    );
+    req.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn req_replaces_a_disconnected_reply_source_without_accepting_its_queued_reply() {
+    let req = Socket::new(SocketType::Req, Options::default());
+    let endpoint = req.bind(tcp_ep(0)).await.unwrap();
+    let routers = [
+        Socket::new(SocketType::Router, Options::default()),
+        Socket::new(SocketType::Router, Options::default()),
+    ];
+    for router in &routers {
+        router.connect(endpoint.clone()).await.unwrap();
+        router
+            .wait_connected(1, Duration::from_secs(2))
+            .await
+            .unwrap();
+    }
+    req.wait_connected(2, Duration::from_secs(2)).await.unwrap();
+    req.send(Message::single("first")).await.unwrap();
+    let (selected, mut request) = recv_from_any_rep(&routers).await;
+    let identity = request.pop_front().unwrap();
+    routers[selected]
+        .send(Message::multipart([
+            identity,
+            bytes::Bytes::new(),
+            bytes::Bytes::from_static(b"old reply"),
+        ]))
+        .await
+        .unwrap();
+    let old_reply = tokio::time::timeout(Duration::from_secs(2), req.recv_for_external_recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut monitor = req.monitor();
+    routers[selected].clone().close().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !matches!(
+            monitor.recv().await.unwrap(),
+            omq_tokio::MonitorEvent::Disconnected { .. }
+        ) {}
+    })
+    .await
+    .unwrap();
+
+    req.try_send(Message::single("second")).unwrap();
+    assert!(req.prepare_external_recv(old_reply).is_none());
+    let remaining = &routers[1 - selected];
+    let mut request = tokio::time::timeout(Duration::from_secs(2), remaining.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let identity = request.pop_front().unwrap();
+    assert_eq!(request, Message::multipart(["", "second"]));
+    remaining
+        .send(Message::multipart([
+            identity,
+            bytes::Bytes::new(),
+            bytes::Bytes::from_static(b"new reply"),
+        ]))
+        .await
+        .unwrap();
+    let reply = tokio::time::timeout(Duration::from_secs(2), req.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply, Message::single("new reply"));
+}
+
+#[tokio::test]
 async fn req_rep_multiple_rounds() {
     let ep = inproc_ep("rr-many");
     let rep = Socket::new(SocketType::Rep, Options::default());

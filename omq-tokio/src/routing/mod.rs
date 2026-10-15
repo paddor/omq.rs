@@ -53,7 +53,8 @@ pub(crate) fn split_rep_request(msg: &Message) -> Option<(RepEnvelope, Message)>
     let mut parts = msg.iter();
     while let Some(part) = parts.next() {
         if part.is_empty() {
-            return Some((envelope, Message::multipart(parts)));
+            let body = Message::multipart(parts);
+            return (!body.is_empty()).then_some((envelope, body));
         }
         envelope.push(part);
     }
@@ -92,6 +93,34 @@ pub(crate) enum SendSubmitter {
 }
 
 impl SendSubmitter {
+    pub(crate) fn try_send_request(
+        &self,
+        message: Message,
+        request: &crate::socket::handle::ReqAwaitingReply,
+    ) -> core::result::Result<(), omq_proto::TrySendError> {
+        request.select_route(|| match self {
+            Self::RoundRobin(sender) => sender.try_send_routed(message),
+            Self::Latency(sender) => sender.try_send_routed(message),
+            _ => unreachable!("REQ uses round-robin routing"),
+        })
+    }
+
+    pub(crate) async fn send_request(
+        &self,
+        mut message: Message,
+        request: &crate::socket::handle::ReqAwaitingReply,
+    ) -> Result<()> {
+        loop {
+            match self.try_send_request(message, request) {
+                Ok(()) => return Ok(()),
+                Err(omq_proto::TrySendError::Full(returned)) => message = returned,
+                Err(omq_proto::TrySendError::Error(error)) => return Err(error),
+                Err(omq_proto::TrySendError::Closed) => return Err(Error::Closed),
+            }
+            self.wait_send_ready().await;
+        }
+    }
+
     pub(crate) fn clone_shared(&self) -> Self {
         match self {
             Self::Identity(s) => Self::Identity(s.clone_shared()),

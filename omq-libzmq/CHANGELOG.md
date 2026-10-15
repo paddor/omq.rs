@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.24] - 2026-10-15
+
+### Fixed
+
+- Bundle `omq-tokio` 0.28.1 and `omq-proto` 0.32.1 with REQ reply-source
+  validation and rejection of REQ/REP messages without a body frame.
+
 ## [0.5.23] - 2026-10-15
 
 ### Changed

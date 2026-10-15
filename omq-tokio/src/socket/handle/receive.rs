@@ -82,16 +82,19 @@ impl Socket {
         self.inner.recv_rx.try_recv()
     }
 
-    /// Validate and admit a transport item at application receive. REP carries
-    /// its peer ID, envelope, and body together through every receive queue.
+    /// Validate and admit a transport item at application receive. REQ and REP
+    /// retain their source peer through every queue; REP also keeps its envelope.
     #[doc(hidden)]
     pub fn prepare_external_recv(&self, mut message: Message) -> Option<Message> {
         match self.inner.socket_type {
             SocketType::Req => {
+                let peer_id = u64::from(message.take_routing_id()?.checked_sub(1)?);
                 if message.len() < 2 || !message.pop_front()?.is_empty() {
                     return None;
                 }
-                self.inner.req_awaiting_reply.clear();
+                if !self.inner.req_awaiting_reply.accept_reply(peer_id) {
+                    return None;
+                }
                 Some(message)
             }
             SocketType::Rep => {

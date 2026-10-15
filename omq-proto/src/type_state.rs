@@ -103,7 +103,7 @@ impl TypeState {
     /// the message is a valid wire reply and must not be dropped.
     pub fn post_recv_req_direct(&mut self, msg: Message) -> Option<Message> {
         let mut parts = msg.into_parts_payload();
-        if parts.is_empty() || !parts[0].is_empty() {
+        if parts.len() < 2 || !parts[0].is_empty() {
             return None;
         }
         parts.remove(0);
@@ -124,7 +124,7 @@ impl TypeState {
                     return Ok(None);
                 }
                 let mut parts = msg.into_parts_payload();
-                if parts.is_empty() || !parts[0].is_empty() {
+                if parts.len() < 2 || !parts[0].is_empty() {
                     return Ok(None);
                 }
                 parts.remove(0);
@@ -142,6 +142,9 @@ impl TypeState {
                 let Some(delim_idx) = parts.iter().position(Payload::is_empty) else {
                     return Ok(None);
                 };
+                if delim_idx + 1 == parts.len() {
+                    return Ok(None);
+                }
                 let mut envelope = SmallVec::with_capacity(delim_idx);
                 for p in parts.iter().take(delim_idx) {
                     envelope.push(p.as_bytes());
@@ -281,5 +284,56 @@ mod tests {
         assert_eq!(out.part_bytes(0).unwrap(), m.part_bytes(0).unwrap());
         let got = s.post_recv(SocketType::Pull, m.clone()).unwrap().unwrap();
         assert_eq!(got.part_bytes(0).unwrap(), m.part_bytes(0).unwrap());
+    }
+
+    #[test]
+    fn rep_requires_a_body_after_the_delimiter() {
+        let mut state = TypeState::new();
+        for request in [Message::single(""), Message::multipart(["route", ""])] {
+            assert!(state.post_recv(SocketType::Rep, request).unwrap().is_none());
+            assert!(
+                state
+                    .pre_send(SocketType::Rep, Message::single("reply"))
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            state
+                .post_recv(SocketType::Rep, Message::multipart(["route", "", ""]))
+                .unwrap(),
+            Some(Message::single("")),
+        );
+        assert_eq!(
+            state
+                .pre_send(SocketType::Rep, Message::single("reply"))
+                .unwrap(),
+            Message::multipart(["route", "", "reply"]),
+        );
+    }
+
+    #[test]
+    fn req_requires_a_body_without_finishing_the_request() {
+        let mut state = TypeState::new();
+        state
+            .pre_send(SocketType::Req, Message::single("request"))
+            .unwrap();
+        assert!(
+            state
+                .post_recv(SocketType::Req, Message::single(""))
+                .unwrap()
+                .is_none()
+        );
+        assert!(state.post_recv_req_direct(Message::single("")).is_none());
+        assert!(
+            state
+                .pre_send(SocketType::Req, Message::single("another"))
+                .is_err()
+        );
+        assert_eq!(
+            state
+                .post_recv(SocketType::Req, Message::multipart(["", ""]))
+                .unwrap(),
+            Some(Message::single("")),
+        );
     }
 }

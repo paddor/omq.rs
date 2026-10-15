@@ -129,6 +129,7 @@ pub struct Materialized {
     pub send_notify: Arc<PipeNotify>,
     pub recv_space: Arc<tokio::sync::Notify>,
     pub send_pump: JoinHandle<()>,
+    pub send_waiting: tokio::sync::watch::Sender<bool>,
     pub recv_pump: JoinHandle<()>,
 
     pub monitor_rx: flume::Receiver<MonitorEventData>,
@@ -294,7 +295,7 @@ async fn push_to_ring(
     }
 }
 
-#[expect(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, clippy::too_many_lines)]
 pub fn materialize(
     io_threads: usize,
     socket_type: omq_tokio::SocketType,
@@ -303,6 +304,7 @@ pub fn materialize(
     mut recv_prod: yring::Producer<omq_tokio::Message>,
     recv_notify: Arc<PipeNotify>,
     send_notify: Arc<PipeNotify>,
+    send_waiting: tokio::sync::watch::Sender<bool>,
     recv_space: Arc<tokio::sync::Notify>,
     monitor_tx: flume::Sender<MonitorEventData>,
     monitor_notify: Arc<PipeNotify>,
@@ -323,6 +325,12 @@ pub fn materialize(
         let s = sock.clone();
         let sn = send_notify.clone();
         let send_pump = tokio::spawn(async move {
+            if socket_type == omq_tokio::SocketType::Rep {
+                // REP submits at application send. Watch only failed sends;
+                // a successful retry cancels an obsolete capacity wait.
+                watch_rep_send_capacity(&s, &send_waiting, &sn).await;
+                return;
+            }
             let mut send_cons = send_cons;
             let mut budget = omq_proto::flow::DrainBudget::new(256, 1024 * 1024);
             while let Some(msg) = futures::StreamExt::next(&mut send_cons).await {
@@ -343,19 +351,27 @@ pub fn materialize(
         let rs = recv_space.clone();
         let recv_pump = tokio::spawn(async move {
             loop {
-                match s.recv().await {
+                match s.recv_for_external_recv().await {
                     Ok(msg) => {
+                        let mut budget = omq_proto::flow::DrainBudget::WORKER;
+                        let mut more = budget.account(msg.byte_len());
                         push_to_ring(&mut recv_prod, msg, &rs).await;
 
-                        while !recv_prod.is_full() {
-                            match s.try_recv() {
-                                Ok(msg) => push_to_ring(&mut recv_prod, msg, &rs).await,
+                        while more && !recv_prod.is_full() {
+                            match s.try_recv_for_external_recv() {
+                                Ok(msg) => {
+                                    more = budget.account(msg.byte_len());
+                                    push_to_ring(&mut recv_prod, msg, &rs).await;
+                                }
                                 Err(_) => break,
                             }
                         }
 
                         recv_prod.flush();
                         rn.force_wake();
+                        if !more {
+                            tokio::task::yield_now().await;
+                        }
                     }
                     Err(omq_tokio::Error::Closed) => break,
                     Err(_) => {}
@@ -417,6 +433,27 @@ pub fn materialize(
     recv_blocking(orx, "omq-rs: materialize failed")
 }
 
+async fn watch_rep_send_capacity(
+    socket: &InnerSocket,
+    requested: &tokio::sync::watch::Sender<bool>,
+    notify: &PipeNotify,
+) {
+    let mut waiting = requested.subscribe();
+    while waiting.wait_for(|requested| *requested).await.is_ok() {
+        tokio::select! {
+            () = socket.wait_send_ready() => {
+                requested.send_replace(false);
+                notify.force_wake();
+            }
+            changed = waiting.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+}
+
 pub fn destroy_socket(
     io_threads: usize,
     sock: Arc<InnerSocket>,
@@ -428,6 +465,10 @@ pub fn destroy_socket(
 ) {
     recv_pump.abort();
     monitor_pump.abort();
+    if sock.socket_type() == omq_tokio::SocketType::Rep {
+        // This task only watches capacity; REP has no binding send backlog.
+        send_pump.abort();
+    }
     drop(recv_pump);
     drop(monitor_pump);
     let handle = ensure_runtime(io_threads);

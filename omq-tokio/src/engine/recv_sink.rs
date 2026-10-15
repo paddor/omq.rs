@@ -41,7 +41,7 @@ pub enum RecvSink {
     Conflate(Arc<crate::socket::recv::ConflateRecvSlot>),
     /// REP receive path retaining the request route and envelope.
     Rep(RepRecvSink),
-    /// SERVER receive path attaching an opaque routing ID.
+    /// Attach an opaque connection ID for SERVER routing or REQ validation.
     Server(ServerRecvSink),
     /// Fair PEER receive path retaining peer routing information.
     Peer(crate::socket::peer_recv::PeerRecvSink),
@@ -80,8 +80,8 @@ impl RepRecvSink {
     }
 }
 
-/// SERVER's direct receive path: attach the connection's opaque routing ID
-/// without constructing an identity frame or multipart message.
+/// Attach the connection's opaque routing ID without constructing an identity
+/// frame or multipart message. REQ removes it at application admission.
 #[derive(Debug)]
 pub struct ServerRecvSink {
     sink: Box<RecvSink>,

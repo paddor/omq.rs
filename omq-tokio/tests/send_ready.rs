@@ -207,6 +207,9 @@ async fn async_wait_send_ready_tracks_peer_queues() {
     let push = ctx.socket(SocketType::Push, options);
     push.connect(endpoint).await.unwrap();
     push.wait_connected(1, TIMEOUT).await.unwrap();
+    // The receiver must open its inproc port before filling the final queue.
+    // Otherwise opening it later legitimately makes the sender writable.
+    pull.wait_connected(1, TIMEOUT).await.unwrap();
     while push.try_send(Message::from("x")).is_ok() {}
     assert!(!push.send_ready());
 

@@ -38,6 +38,116 @@ class PatternsTest < Minitest::Test
     assert_raises(RuntimeError) { rep.try_send("early") }
   end
 
+  def test_rep_prefetch_does_not_redirect_an_unanswered_request
+    rep = socket(:rep, recv_timeout: 2)
+    endpoint = tcp_endpoint(rep)
+    first = socket(:req, recv_timeout: 2)
+    second = socket(:req, recv_timeout: 2)
+    [first, second].each { |client| client.connect(endpoint).wait_for_peer(timeout: 2) }
+
+    first << "first"
+    rep.wait_readable(timeout: 2)
+    assert_equal ["first"], rep.recv
+    second << "second"
+    rep.wait_readable(timeout: 2)
+
+    rep << "first-reply"
+    assert_equal ["first-reply"], first.recv
+    assert_equal ["second"], rep.recv
+    rep << "second-reply"
+    assert_equal ["second-reply"], second.recv
+  end
+
+  def test_rep_reply_route_is_claimed_before_next_receive
+    rep = socket(:rep, recv_timeout: 2)
+    endpoint = tcp_endpoint(rep)
+    clients = 3.times.map { socket(:req, recv_timeout: 2) }
+    clients.each { |client| client.connect(endpoint).wait_for_peer(timeout: 2) }
+
+    30.times do |round|
+      clients.each_with_index { |client, index| client << "#{round}:#{index}" }
+      clients.length.times do
+        request = rep.recv
+        rep.send(request)
+      end
+      clients.each_with_index do |client, index|
+        assert_equal ["#{round}:#{index}"], client.recv
+      end
+    end
+  end
+
+  def test_rep_discards_envelopes_without_a_body
+    rep = socket(:rep, recv_timeout: 2)
+    endpoint = tcp_endpoint(rep)
+    dealer = socket(:dealer, recv_timeout: 2)
+    dealer.connect(endpoint).wait_for_peer(timeout: 2)
+
+    dealer.send("")
+    dealer.send("route", "")
+    dealer.send("route", "", "")
+    assert_equal [""], rep.recv
+    rep.send("reply")
+    assert_equal ["route", "", "reply"], dealer.recv
+  end
+
+  def test_rep_retries_a_full_reply_without_losing_its_envelope
+    count = 32
+    body = "reply" * 26_000
+    rep = socket(:rep, recv_timeout: 5, send_timeout: 5, send_hwm: 1, sndbuf: 65_536)
+    endpoint = tcp_endpoint(rep)
+    dealer = socket(:dealer, recv_timeout: 5, recv_hwm: 1, rcvbuf: 65_536)
+    dealer.connect(endpoint).wait_for_peer(timeout: 2)
+    count.times { |index| dealer.send(index.to_s, "", "request") }
+
+    accepted = 0
+    count.times do
+      assert_equal ["request"], rep.recv
+      break unless rep.try_send(body)
+
+      accepted += 1
+    end
+    assert_operator accepted, :<, count, "REP never reached backpressure"
+
+    receiver = Thread.new do
+      count.times do |index|
+        assert_equal [index.to_s, "", body], dealer.recv
+      end
+    end
+    rep.send(body)
+    (count - accepted - 1).times do
+      assert_equal ["request"], rep.recv
+      rep.send(body)
+    end
+    assert receiver.join(10), "replies did not drain"
+    receiver.value
+  ensure
+    receiver&.kill
+    receiver&.join
+  end
+
+  def test_req_discards_replies_from_an_unselected_router
+    req = socket(:req, identity: "requester", recv_timeout: 2)
+    endpoint = tcp_endpoint(req)
+    routers = 2.times.map { socket(:router, recv_timeout: 2) }
+    routers.each { |router| router.connect(endpoint).wait_for_peer(timeout: 2) }
+    req.send("request")
+    selected = nil
+    Timeout.timeout(2) do
+      until selected
+        selected = routers.find { |router| router.try_recv }
+        Thread.pass unless selected
+      end
+    end
+    unrelated = (routers - [selected]).first
+    unrelated.send("requester", "", "unrelated")
+    req.wait_readable(timeout: 2)
+    assert_nil req.try_recv
+    assert_raises(RuntimeError) { req.try_send("another request") }
+
+    selected.send("requester", "", "reply")
+    assert_equal ["reply"], req.recv
+  end
+
   def test_pub_sub
     pub = socket(:pub)
     endpoint = tcp_endpoint(pub)

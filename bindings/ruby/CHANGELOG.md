@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-10-16
+
+### Changed
+
+- Require `omq-tokio` 0.29.0 and `omq-proto` 0.33.0 with the latest PEER
+  limits and fan-out send readiness fixes.
+
 ## [0.2.5] - 2026-10-15
 
 ### Fixed

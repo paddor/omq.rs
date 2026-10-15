@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-10-16
+
+### Changed
+
+- Bundle `omq-libzmq` 0.5.25 with STREAM routing fixes and configurable PEER
+  queue byte limits.
+
 ## [0.1.4] - 2026-10-15
 
 ### Changed

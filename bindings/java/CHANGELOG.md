@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-16
+
+### Added
+
+- ROUTER and PEER `recvFrom()` return owning identities with immutable peer
+  authentication and diagnostics snapshots.
+
+### Changed
+
+- Bundle `omq-tokio` 0.29.0 and `omq-proto` 0.33.0.
+
 ## [0.4.1] - 2026-10-15
 
 ### Changed

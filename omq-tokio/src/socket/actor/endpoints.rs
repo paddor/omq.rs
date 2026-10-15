@@ -491,7 +491,17 @@ impl SocketDriver {
     ) {
         let route_id = self.next_peer_id;
         self.next_peer_id += 1;
-        let send_pipe_rx = self.send_strategy.make_connect_pipe(route_id);
+        let send_pipe_rx = if self.socket_type == SocketType::Stream {
+            let identity = super::generated_identity(route_id);
+            self.last_stream_routing_id = Some(identity.clone());
+            Some(self.send_strategy.make_stream_connect_pipe(
+                route_id,
+                identity,
+                self.options.send_hwm.max(1) as usize,
+            ))
+        } else {
+            self.send_strategy.make_connect_pipe(route_id)
+        };
         let cancel = self.cancel.child_token();
         let failed_attempts = Arc::new(std::sync::atomic::AtomicU32::new(failed_attempts));
         let setup = crate::transport::setup::DialSetup {

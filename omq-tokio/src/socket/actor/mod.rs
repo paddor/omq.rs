@@ -111,6 +111,9 @@ pub(crate) enum SocketCommand {
     QueryConnections {
         ack: oneshot::Sender<Vec<ConnectionStatus>>,
     },
+    QueryStreamRoutingId {
+        ack: oneshot::Sender<Option<bytes::Bytes>>,
+    },
     Close {
         ack: Option<oneshot::Sender<Result<()>>>,
         linger: CloseLinger,
@@ -268,6 +271,7 @@ pub(crate) struct SocketDriver {
     /// behind the actor's existing pending receive without replacing it.
     stream_disconnects: std::collections::VecDeque<u64>,
     next_peer_id: u64,
+    last_stream_routing_id: Option<bytes::Bytes>,
     peers: FxHashMap<u64, PeerEntry>,
     setup_admission: crate::transport::setup::Admission,
     listeners: Vec<ListenerEntry>,
@@ -372,6 +376,7 @@ impl SocketDriver {
             peer_completions: FuturesUnordered::new(),
             stream_disconnects: std::collections::VecDeque::new(),
             next_peer_id: 0,
+            last_stream_routing_id: None,
             peers: FxHashMap::default(),
             listeners: Vec::new(),
             dialers: Vec::new(),
@@ -585,6 +590,9 @@ impl SocketDriver {
                     .filter_map(|(id, peer)| peer.ready.then(|| self.peer_status(*id)).flatten())
                     .collect();
                 let _ = ack.send(snapshot);
+            }
+            SocketCommand::QueryStreamRoutingId { ack } => {
+                let _ = ack.send(self.last_stream_routing_id.clone());
             }
             SocketCommand::Close { ack, linger } => {
                 let linger = match linger {

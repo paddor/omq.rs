@@ -725,6 +725,27 @@ struct IdentityPeer {
 }
 
 impl IdentitySend {
+    pub(crate) fn make_stream_connect_pipe(
+        &mut self,
+        route_id: u64,
+        identity: Bytes,
+        capacity: usize,
+    ) -> crate::engine::SendPipeConsumer {
+        let (producer, consumer) = crate::engine::send_pipe(capacity);
+        let mut state = self.inner.lock().expect("identity inner poisoned");
+        state.identity_to_peer.insert(identity.clone(), route_id);
+        state.peers.insert(
+            route_id,
+            IdentityPeer {
+                identity,
+                target: PeerTarget::Pipe(producer),
+            },
+        );
+        drop(state);
+        self.changed.notify_changed();
+        consumer
+    }
+
     pub(crate) fn new(socket_type: SocketType, options: &Options) -> Self {
         let latency_profile = options
                 .workload_profile
@@ -785,7 +806,7 @@ impl IdentitySend {
         identity: Bytes,
         is_inproc: bool,
     ) {
-        let target = if self.latency_profile && self.peer.is_none() {
+        let mut target = if self.latency_profile && self.peer.is_none() {
             PeerTarget::Direct(PeerOutbound::from_handle(&handle))
         } else if let Some(ref pipe_handle) = handle.send_pipe {
             if let Some(pipe) = pipe_handle.lock().expect("identity send pipe").take() {
@@ -806,6 +827,14 @@ impl IdentitySend {
             return;
         }
         let mut g = self.inner.lock().expect("identity inner poisoned");
+        // A connecting STREAM route already owns its producer. Its queued
+        // prefix and capacity must survive attachment to the raw driver.
+        if self.socket_type == SocketType::Stream
+            && let Some(previous) = g.identity_to_peer.get(&identity).copied()
+            && let Some(pending) = g.peers.remove(&previous)
+        {
+            target = pending.target;
+        }
         g.peers.insert(
             peer_id,
             IdentityPeer {

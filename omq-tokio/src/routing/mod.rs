@@ -432,8 +432,21 @@ impl SendStrategy {
         match self {
             Self::RoundRobin(s) => s.connection_removed(route_id),
             Self::Latency(s) => s.connection_removed(route_id),
-            Self::None | Self::Exclusive(_) | Self::FanOut(_) | Self::Identity(_) => {}
+            Self::Identity(s) => s.connection_removed(route_id),
+            Self::None | Self::Exclusive(_) | Self::FanOut(_) => {}
         }
+    }
+
+    pub(crate) fn make_stream_connect_pipe(
+        &mut self,
+        route_id: u64,
+        identity: Bytes,
+        capacity: usize,
+    ) -> SendPipeConsumer {
+        let Self::Identity(strategy) = self else {
+            unreachable!("STREAM identity routing")
+        };
+        strategy.make_stream_connect_pipe(route_id, identity, capacity)
     }
 
     pub(crate) fn peer_for_identity(&self, identity: &Bytes) -> Option<u64> {

@@ -38,6 +38,128 @@ fn resolved_addr(ep: &Endpoint) -> std::net::SocketAddr {
 }
 
 #[tokio::test]
+async fn stream_connect_identity_queues_before_bind_with_bounded_capacity() {
+    let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = reserved.local_addr().unwrap();
+    drop(reserved);
+    let stream = Socket::new(SocketType::Stream, Options::default().send_hwm(1));
+    stream.connect(tcp_ep(addr.port())).await.unwrap();
+    let identity = stream.last_stream_routing_id().await.unwrap().unwrap();
+    assert!(!identity.is_empty());
+    stream
+        .try_send(Message::multipart([
+            identity.clone(),
+            Bytes::from_static(b"before"),
+        ]))
+        .unwrap();
+    let after = Message::multipart([identity.clone(), Bytes::from_static(b"after")]);
+    assert!(matches!(
+        stream.try_send(after.clone()),
+        Err(TrySendError::Full(_))
+    ));
+
+    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    let (mut peer, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    let notification = tokio::time::timeout(Duration::from_secs(2), stream.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(notification.part_bytes(0).unwrap(), identity);
+    assert!(notification.part_bytes(1).unwrap().is_empty());
+    tokio::time::timeout(Duration::from_secs(2), stream.send(after))
+        .await
+        .unwrap()
+        .unwrap();
+    let mut received = [0; 11];
+    tokio::time::timeout(Duration::from_secs(2), peer.read_exact(&mut received))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&received, b"beforeafter");
+    stream.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn stream_disconnect_removes_pending_route() {
+    let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = tcp_ep(reserved.local_addr().unwrap().port());
+    drop(reserved);
+    let stream = Socket::new(SocketType::Stream, Options::default());
+    stream.connect(endpoint.clone()).await.unwrap();
+    let identity = stream.last_stream_routing_id().await.unwrap().unwrap();
+    let message = Message::multipart([identity, Bytes::from_static(b"queued")]);
+    stream.try_send(message.clone()).unwrap();
+    stream.disconnect(endpoint).await.unwrap();
+    assert!(matches!(
+        stream.try_send(message),
+        Err(TrySendError::Error(Error::Unroutable))
+    ));
+    stream.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn stream_reconnect_replaces_identity_and_invalidates_old_route() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let stream = Socket::new(SocketType::Stream, Options::default());
+    stream
+        .connect(tcp_ep(listener.local_addr().unwrap().port()))
+        .await
+        .unwrap();
+    let original = stream.last_stream_routing_id().await.unwrap().unwrap();
+    let (peer, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    let connected = tokio::time::timeout(Duration::from_secs(2), stream.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(connected.part_bytes(0).unwrap(), original);
+    drop(peer);
+    let disconnected = tokio::time::timeout(Duration::from_secs(2), stream.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(disconnected.part_bytes(0).unwrap(), original);
+    assert!(disconnected.part_bytes(1).unwrap().is_empty());
+    let (mut peer, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    let reconnected = tokio::time::timeout(Duration::from_secs(2), stream.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let replacement = reconnected.part_bytes(0).unwrap();
+    assert_ne!(replacement, original);
+    assert_eq!(
+        stream.last_stream_routing_id().await.unwrap(),
+        Some(replacement.clone())
+    );
+    assert!(matches!(
+        stream.try_send(Message::multipart([original, Bytes::from_static(b"old")])),
+        Err(TrySendError::Error(Error::Unroutable))
+    ));
+    stream
+        .send(Message::multipart([
+            replacement,
+            Bytes::from_static(b"new"),
+        ]))
+        .await
+        .unwrap();
+    let mut received = [0; 3];
+    tokio::time::timeout(Duration::from_secs(2), peer.read_exact(&mut received))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&received, b"new");
+    stream.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn stream_rejects_malformed_sends_without_writing_or_closing() {
     let stream = Socket::new(SocketType::Stream, Options::default());
     let ep = stream.bind(tcp_ep(0)).await.unwrap();

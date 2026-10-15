@@ -10,8 +10,8 @@ use std::ffi::c_int;
 use std::time::Duration;
 
 use bytes::Bytes;
-use omq_tokio::MechanismSetup;
 use omq_tokio::options::{KeepAlive, OnMute, ReconnectPolicy, WorkloadProfile};
+use omq_tokio::{MechanismSetup, SocketType};
 
 use crate::error::fail;
 #[cfg(unix)]
@@ -1340,6 +1340,18 @@ pub extern "C" fn zmq_getsockopt(
             write_i32(optval, optvallen, v)
         }
         ZMQ_IDENTITY => {
+            if sock_arc.socket_type == SocketType::Stream
+                && let Some(inner) = sock_arc.inner.get()
+            {
+                match crate::socket::with_socket(&sock_arc.ctx, inner, |socket| async move {
+                    socket.last_stream_routing_id().await
+                }) {
+                    Ok(Ok(Some(identity))) => return write_bytes(optval, optvallen, &identity),
+                    Ok(Ok(None)) => {}
+                    Ok(Err(error)) => return fail(crate::error::map_omq_err(&error)),
+                    Err(()) => return fail(crate::error::ETERM),
+                }
+            }
             let ov = lock_overlay!(sock_arc);
             write_bytes(optval, optvallen, &ov.identity)
         }

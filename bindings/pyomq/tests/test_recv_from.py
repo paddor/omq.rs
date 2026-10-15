@@ -45,7 +45,8 @@ def test_recv_from_roundtrip_and_lifetime(transport, peer, copy):
         metadata["injected"] = b"value"
         assert "injected" not in auth.metadata
         with pytest.raises(AttributeError):
-            diagnostics.endpoint = "changed"
+            # Exercise the read-only property at runtime, bypassing type checks.
+            setattr(diagnostics, "endpoint", "changed")  # noqa: B010
         server.send_to(identity, [b"reply"])
         if peer:
             sender, reply = client.recv_from()

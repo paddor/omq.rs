@@ -1,5 +1,5 @@
 use super::{Inner, ReadyPeers, ReqAwaitingReply, Socket};
-use crate::routing::SendStrategy;
+use crate::routing::{SendCompatibility, SendStrategy};
 use crate::socket::actor::{SocketDriver, spawn_driver};
 use crate::socket::monitor::MonitorPublisher;
 use crate::socket::recv::{SpscAwareRecv, SpscHandles};
@@ -37,6 +37,7 @@ impl Socket {
             None,
             &crate::context::IoPoolHandle::none(),
             crate::transport::inproc::standalone_registry(),
+            SendCompatibility::Native,
         )
     }
 
@@ -46,8 +47,15 @@ impl Socket {
         io_pool: &crate::context::IoPoolHandle,
         inproc_registry: Arc<InprocRegistry>,
     ) -> Self {
-        Self::new_inner(socket_type, options, None, io_pool, inproc_registry)
-            .expect("invalid socket options")
+        Self::new_inner(
+            socket_type,
+            options,
+            None,
+            io_pool,
+            inproc_registry,
+            SendCompatibility::Native,
+        )
+        .expect("invalid socket options")
     }
 
     /// Like [`Socket::new`], but installs a `RecvSinkConfig` that the
@@ -80,6 +88,7 @@ impl Socket {
             Some(config),
             &crate::context::IoPoolHandle::none(),
             crate::transport::inproc::standalone_registry(),
+            SendCompatibility::Native,
         )
     }
 
@@ -90,8 +99,33 @@ impl Socket {
         io_pool: &crate::context::IoPoolHandle,
         inproc_registry: Arc<InprocRegistry>,
     ) -> Self {
-        Self::new_inner(socket_type, options, Some(config), io_pool, inproc_registry)
-            .expect("invalid socket options")
+        Self::new_inner(
+            socket_type,
+            options,
+            Some(config),
+            io_pool,
+            inproc_registry,
+            SendCompatibility::Native,
+        )
+        .expect("invalid socket options")
+    }
+
+    pub(crate) fn new_for_libzmq(
+        socket_type: SocketType,
+        options: Options,
+        recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
+        io_pool: &crate::context::IoPoolHandle,
+        inproc_registry: Arc<InprocRegistry>,
+    ) -> Self {
+        Self::new_inner(
+            socket_type,
+            options,
+            recv_sink_config,
+            io_pool,
+            inproc_registry,
+            SendCompatibility::Libzmq,
+        )
+        .expect("invalid socket options")
     }
 
     fn new_inner(
@@ -100,6 +134,7 @@ impl Socket {
         recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
         io_pool: &crate::context::IoPoolHandle,
         inproc_registry: Arc<InprocRegistry>,
+        compatibility: SendCompatibility,
     ) -> Result<Self> {
         if socket_type == SocketType::Peer && options.max_message_size.is_none() {
             options.max_message_size = Some(crate::engine::peer_send::DEFAULT_MAX_BYTES);
@@ -128,7 +163,8 @@ impl Socket {
         let (recv_tx, recv_consumer, recv_pipe_notify, recv_pipe_space) =
             crate::socket::recv::recv_pipe(recv_hwm, blocking_recv_waker.clone());
         let monitor = MonitorPublisher::new();
-        let send_strategy = SendStrategy::for_socket_type(socket_type, &options, io_pool);
+        let send_strategy = SendStrategy::for_socket_type(socket_type, &options, io_pool)
+            .with_compatibility(compatibility);
         let send_submitter = send_strategy.submitter();
         let mut spsc = recv_handles(
             socket_type,

@@ -451,7 +451,7 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) -> Result<(), c_int> {
     let handle = ctx.handle().clone();
     let _guard = handle.enter();
 
-    let inner = Arc::new(ctx.socket_with_recv_sink_config(socket_type, opts, recv_sink_cfg));
+    let inner = Arc::new(ctx.socket_for_libzmq(socket_type, opts, Some(recv_sink_cfg)));
 
     // Relay complete transport items into the pump yring. Request/reply
     // validation and admission belong to the application receive path.

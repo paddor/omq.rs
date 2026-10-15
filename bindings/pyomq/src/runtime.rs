@@ -169,7 +169,7 @@ impl ContextInner {
         let (otx, orx) = flume::bounded(1);
         handle.spawn(async move {
             let id = next_id();
-            let _ = otx.send((id, ctx.blocking_socket(socket_type, options)));
+            let _ = otx.send((id, ctx.blocking_socket_for_libzmq(socket_type, options)));
         });
         Ok(Python::attach(|py| {
             py.detach(|| orx.recv().expect("pyomq: runtime dropped result"))
@@ -212,10 +212,7 @@ impl ContextInner {
         let recv_all_signal = global_recv_signal();
         handle.spawn(async move {
             let id = next_id();
-            let sock = Arc::new(match recv_config {
-                Some(config) => ctx.socket_with_recv_sink_config(socket_type, options, config),
-                None => ctx.socket(socket_type, options),
-            });
+            let sock = Arc::new(ctx.socket_for_libzmq(socket_type, options, recv_config));
 
             let send_socket = sock.clone();
             let send_recv_ready = recv_ready.clone();

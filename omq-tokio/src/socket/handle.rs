@@ -39,6 +39,10 @@ pub(crate) use send::ReqAwaitingReply;
 /// allocate a pre-ready pipe at `connect()` time, so sends may queue before
 /// the peer reaches READY.
 ///
+/// Fan-out `try_send()` returns `Full` when an internal lane is full, before
+/// publishing to any peer. Callers can await `wait_send_ready()` and retry.
+/// Ordinary lossy `send()` drops at full lanes; subscriber queues stay lossy.
+///
 /// `Options::send_hwm` counts complete messages, not bytes. It is not an
 /// exact total queue cap because connect-side pre-ready pipes, per-peer pipes,
 /// fan-out lane rings, and transmit slots are separate buffers.

@@ -48,6 +48,14 @@ pub(crate) use round_robin::{RoundRobinSend, Submitter as RoundRobinSubmitter};
 
 pub(crate) type RepEnvelope = SmallVec<[Bytes; 2]>;
 
+/// Fixed at construction, before any socket handles are published.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum SendCompatibility {
+    #[default]
+    Native,
+    Libzmq,
+}
+
 pub(crate) fn split_rep_request(msg: &Message) -> Option<(RepEnvelope, Message)> {
     let mut envelope = RepEnvelope::new();
     let mut parts = msg.iter();
@@ -320,6 +328,13 @@ impl SendSubmitter {
 }
 
 impl SendStrategy {
+    pub(crate) fn with_compatibility(mut self, compatibility: SendCompatibility) -> Self {
+        if let Self::FanOut(send) = &mut self {
+            send.compatibility = compatibility;
+        }
+        self
+    }
+
     pub(crate) fn watch_close(
         &self,
         progress: &std::sync::Arc<crate::engine::signal::StateSignal>,

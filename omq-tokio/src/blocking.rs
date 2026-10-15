@@ -229,7 +229,7 @@ impl Socket {
 
     /// Send one complete message, blocking while the socket is muted.
     pub fn send(&self, msg: Message) -> Result<()> {
-        match self.inner.try_send(msg) {
+        match self.inner.try_send_for_send(msg) {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(msg)) => {
                 // Wait on this thread. Whoever frees space wakes it
@@ -245,7 +245,7 @@ impl Socket {
     /// Send one complete message, or return `Timeout` if the socket stays
     /// muted until `timeout` elapses. A timed-out message is not sent.
     pub fn send_timeout(&self, msg: Message, timeout: Duration) -> Result<()> {
-        let msg = match self.inner.try_send(msg) {
+        let msg = match self.inner.try_send_for_send(msg) {
             Ok(()) => return Ok(()),
             Err(TrySendError::Full(msg)) => msg,
             Err(TrySendError::Closed) => return Err(Error::Closed),
@@ -268,7 +268,7 @@ impl Socket {
     /// is accepted or `cancel` fires. Returns `Ok(false)` when canceled; a
     /// canceled message is not sent.
     pub fn send_cancelable(&self, msg: Message, cancel: &BlockingRecvCancel) -> Result<bool> {
-        let msg = match self.inner.try_send(msg) {
+        let msg = match self.inner.try_send_for_send(msg) {
             Ok(()) => return Ok(true),
             Err(TrySendError::Full(msg)) => msg,
             Err(TrySendError::Closed) => return Err(Error::Closed),

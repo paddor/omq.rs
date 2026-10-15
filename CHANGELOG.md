@@ -215,6 +215,29 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 - Async inproc `PUSH` sends remain safe when a task moves between runtime
   worker threads or cloned socket handles send concurrently.
 
+## [omq-libzmq 0.5.25] - 2026-10-16
+
+- Bring STREAM routing and raw data frames into line with the socket contract.
+- Expose configurable PEER queue byte limits through C socket options.
+- Bundle the corrected fan-out send readiness from `omq-tokio` 0.29.0.
+
+## [omq-tokio 0.29.0] - 2026-10-16
+
+- Expose immutable peer identities and diagnostics on received messages.
+- Fix STREAM connection identities and routed sends.
+- Wake callers waiting for a lossy fan-out queue to regain capacity.
+- Make PEER queue sizes and connection limits configurable.
+
+## [omq-shm 0.2.1] - 2026-10-16
+
+- Require `omq-proto` 0.33.0.
+
+## [omq-proto 0.33.0] - 2026-10-16
+
+- Add authentication and transport diagnostics to peer metadata.
+- Add configurable PEER queue sizes and connection limits.
+- Add routed message identity support for STREAM and other socket types.
+
 ## [pyomq 0.19.1] - 2026-08-02
 
 ### Fixed

@@ -7,12 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-10-16
+
 ### Breaking
 
 - Rename receipt-based receives to `recv_with_receipt` and
   `try_recv_with_receipt` on `Socket` and `IdentitySocket`.
 - Rename `ReceiveSource` to `ReceiveLane` and `ReceiveReceipt::source` to `lane`.
   `IdentitySocket::recv_from` remains the identity-and-body receive API.
+
+### Added
+
+- Routed receives expose owning identities with immutable peer snapshots.
+- PEER queue sizes and connection limits are configurable.
+
+### Fixed
+
+- STREAM connection identities are available before transport establishment.
+- Lossy fan-out sends that return `Full` wake waiters when queue space returns.
 
 ## [0.28.1] - 2026-10-15
 

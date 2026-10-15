@@ -291,8 +291,9 @@ impl Socket {
     /// exclusive types are writable while a peer queue has space. `ROUTER`
     /// is writable unless `router_mandatory` is set and every peer is full.
     /// `SERVER`, `PEER`, `STREAM`, and lossy fan-out never block. With
-    /// `xpub_nodrop`, fan-out is writable while its distribution ring has
-    /// space. Receive-only types are never writable. After close, sockets
+    /// `xpub_nodrop`, fan-out conservatively requires space in every active
+    /// distribution lane and fallback peer, before topic matching.
+    /// Receive-only types are never writable. After close, sockets
     /// report writable so the next send reports the error.
     ///
     /// Another handle can take the space before this handle sends.

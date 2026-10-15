@@ -81,6 +81,7 @@ pub(crate) struct Submitter {
     /// between.
     publish: Arc<Mutex<()>>,
     generation: Arc<AtomicU64>,
+    changed: Arc<crate::engine::signal::StateSignal>,
     mode: FanOutMode,
     send_count: Arc<AtomicU32>,
     xpub_nodrop: bool,
@@ -171,6 +172,7 @@ impl Submitter {
             inner: self.inner.clone(),
             publish: self.publish.clone(),
             generation: self.generation.clone(),
+            changed: self.changed.clone(),
             mode: self.mode,
             send_count: self.send_count.clone(),
             xpub_nodrop: self.xpub_nodrop,
@@ -394,22 +396,51 @@ impl Submitter {
         }
     }
 
-    /// Lossy fan-out never blocks. With `xpub_nodrop`, sends wait for lane
-    /// 0's ring; fallback peers (inproc, WebSocket) are not probed.
+    fn blocked_fallback(&self) -> Option<PeerOutbound> {
+        if self.fallback_peer_count.load(Ordering::Acquire) == 0 {
+            return None;
+        }
+        let peers = self.inner.lock().expect("fanout inner poisoned");
+        peers
+            .peers
+            .values()
+            .filter(|peer| peer.lane.is_none() && peer.fanout_active)
+            .map(|peer| peer.target.bind(&self.data_lanes))
+            .find(|target| !target.send_ready())
+    }
+
+    /// Lossy fan-out never blocks. No-drop readiness conservatively requires
+    /// space in every active lane and fallback peer, before topic matching.
     pub(crate) fn send_ready(&self) -> bool {
         self.mute_policy.is_lossy()
-            || self.lane_peer_count.load(Ordering::Acquire) == 0
-            || self.lanes.dispatch_space().0
+            || self.lanes.admission_closed()
+            || ((self.lane_peer_count.load(Ordering::Acquire) == 0
+                || self.lanes.dispatch_space().0)
+                && self.blocked_fallback().is_none())
     }
 
     pub(crate) async fn wait_send_ready(&self) {
+        if self.mute_policy.is_lossy() {
+            return;
+        }
         loop {
             let (_, space) = self.lanes.dispatch_space();
-            let changed = crate::engine::signal::any_changed([space]);
-            if self.send_ready() {
+            // Observe membership and lane releases before choosing a peer.
+            // Removal must wake us even if its retained queue stays full.
+            let changed = crate::engine::signal::any_changed([self.changed.clone(), space]);
+            let blocked = self.blocked_fallback();
+            if self.lanes.admission_closed()
+                || (blocked.is_none()
+                    && (self.lane_peer_count.load(Ordering::Acquire) == 0
+                        || self.lanes.dispatch_space().0))
+            {
                 return;
             }
-            changed.await;
+            tokio::select! {
+                () = changed => {},
+                () = async { blocked.as_ref().unwrap().wait_capacity().await },
+                    if blocked.is_some() => {},
+            }
         }
     }
 
@@ -456,6 +487,7 @@ pub(crate) struct FanOutSend {
     inner: Arc<Mutex<FanOutInner>>,
     publish: Arc<Mutex<()>>,
     generation: Arc<AtomicU64>,
+    changed: Arc<crate::engine::signal::StateSignal>,
     mode: FanOutMode,
     xpub_nodrop: bool,
     mute_policy: FanOutMutePolicy,
@@ -542,6 +574,7 @@ impl FanOutSend {
             inner,
             publish: Arc::new(Mutex::new(())),
             generation,
+            changed: Arc::new(crate::engine::signal::StateSignal::new()),
             mode,
             xpub_nodrop: options.xpub_nodrop,
             mute_policy,
@@ -556,6 +589,7 @@ impl FanOutSend {
 
     fn bump_generation(&self) {
         self.generation.fetch_add(1, Ordering::Release);
+        self.changed.notify_changed();
     }
 
     pub(crate) fn submitter(&self) -> Submitter {
@@ -567,6 +601,7 @@ impl FanOutSend {
             inner: self.inner.clone(),
             publish: self.publish.clone(),
             generation: self.generation.clone(),
+            changed: self.changed.clone(),
             mode: self.mode,
             send_count: Arc::new(AtomicU32::new(0)),
             xpub_nodrop: self.xpub_nodrop,

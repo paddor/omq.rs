@@ -229,3 +229,103 @@ async fn async_wait_send_ready_tracks_peer_queues() {
         .unwrap();
     assert!(push.send_ready());
 }
+
+#[tokio::test]
+async fn nodrop_pub_readiness_waits_for_inproc_capacity() {
+    use futures::FutureExt;
+
+    let ctx = Context::current();
+    let options = Options {
+        send_hwm: 1,
+        xpub_nodrop: true,
+        ..Options::default()
+    };
+    let publisher = ctx.socket(SocketType::Pub, options);
+    let subscriber = ctx.socket(SocketType::Sub, Options::default().recv_hwm(1));
+    let second_subscriber = ctx.socket(SocketType::Sub, Options::default().recv_hwm(1));
+    let endpoint = publisher
+        .bind("inproc://nodrop-pub-readiness")
+        .await
+        .unwrap();
+    subscriber.subscribe("").await.unwrap();
+    subscriber.connect(endpoint.clone()).await.unwrap();
+    second_subscriber.subscribe("").await.unwrap();
+    second_subscriber.connect(endpoint).await.unwrap();
+    publisher.wait_subscribed(2, TIMEOUT).await.unwrap();
+    subscriber.wait_connected(1, TIMEOUT).await.unwrap();
+    second_subscriber.wait_connected(1, TIMEOUT).await.unwrap();
+
+    let message = Message::single("queued");
+    let mut accepted = 0;
+    let returned = loop {
+        match publisher.try_send(message.clone()) {
+            Ok(()) => accepted += 1,
+            Err(TrySendError::Full(message)) => break message,
+            Err(error) => panic!("unexpected send error: {error}"),
+        }
+        assert!(accepted <= 8, "inproc queue should be bounded");
+    };
+    assert!(!publisher.send_ready(), "full PUB must not report writable");
+    let mut wait = Box::pin(publisher.wait_send_ready());
+    assert!(
+        wait.as_mut().now_or_never().is_none(),
+        "wait completed while full"
+    );
+    for _ in 0..accepted {
+        assert_eq!(subscriber.recv().await.unwrap(), message);
+    }
+    assert!(!publisher.send_ready(), "another subscriber is still full");
+    assert!(wait.as_mut().now_or_never().is_none());
+    for _ in 0..accepted {
+        assert_eq!(second_subscriber.recv().await.unwrap(), message);
+    }
+    tokio::time::timeout(TIMEOUT, wait)
+        .await
+        .expect("capacity release did not wake PUB");
+    assert!(publisher.send_ready());
+    publisher.try_send(returned).unwrap();
+    assert_eq!(subscriber.recv().await.unwrap(), message);
+    assert_eq!(second_subscriber.recv().await.unwrap(), message);
+    publisher.close().await.unwrap();
+    subscriber.close().await.unwrap();
+    second_subscriber.close().await.unwrap();
+}
+
+#[test]
+fn nodrop_pub_registered_waker_tracks_inproc_capacity() {
+    let ctx = Context::new();
+    let publisher = ctx.blocking_socket(
+        SocketType::Pub,
+        Options {
+            send_hwm: 1,
+            xpub_nodrop: true,
+            ..Options::default()
+        },
+    );
+    let subscriber = ctx.blocking_socket(SocketType::Sub, Options::default().recv_hwm(1));
+    let endpoint = publisher.bind("inproc://nodrop-pub-waker").unwrap();
+    subscriber.subscribe("").unwrap();
+    subscriber.connect(endpoint).unwrap();
+    publisher.wait_subscribed(1, TIMEOUT).unwrap();
+    subscriber.wait_connected(1, TIMEOUT).unwrap();
+    let accepted = fill(&publisher);
+    assert!(!publisher.send_ready());
+    let wake = Arc::new(CountWake::default());
+    wake.thread.set(std::thread::current()).unwrap();
+    let _registration = publisher.register_send_waker(Waker::from(wake.clone()));
+    assert!(!publisher.send_ready());
+    for _ in 0..accepted {
+        subscriber.recv_timeout(TIMEOUT).unwrap();
+    }
+    wait_for(
+        || wake.count.load(Ordering::SeqCst) > 0,
+        "PUB capacity wake",
+    );
+    assert!(publisher.send_ready());
+    publisher.try_send(Message::single("after")).unwrap();
+    assert_eq!(
+        subscriber.recv_timeout(TIMEOUT).unwrap(),
+        Message::single("after")
+    );
+    ctx.term();
+}

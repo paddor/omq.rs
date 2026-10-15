@@ -342,6 +342,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nodrop_readiness_wakes_on_fallback_removal_and_shutdown() {
+        use futures::FutureExt;
+
+        for shutdown in [false, true] {
+            let mut sender = blocking_sender();
+            let _data = add_inbox_peer(&mut sender, 1);
+            let submitter = sender.submitter();
+            submitter.try_send(Message::single("queued")).unwrap();
+            assert!(matches!(
+                submitter.try_send(Message::single("full")),
+                Err(omq_proto::TrySendError::Full(_))
+            ));
+            assert!(!submitter.send_ready());
+            let mut wait = Box::pin(submitter.wait_send_ready());
+            assert!(wait.as_mut().now_or_never().is_none());
+            if shutdown {
+                sender.stop_admission();
+            } else {
+                sender.connection_removed(1);
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(1), wait)
+                .await
+                .expect("topology or shutdown did not wake readiness");
+            assert!(submitter.send_ready());
+            sender.shutdown();
+        }
+    }
+
+    #[tokio::test]
     async fn nodrop_fallback_waits_without_starving_ready_peers_and_close_wakes_it() {
         let mut sender = blocking_sender();
         let mut slow = add_inbox_peer(&mut sender, 0);

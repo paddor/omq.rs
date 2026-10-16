@@ -1,7 +1,5 @@
 -module(omq_gleam_test_ffi).
 
--include_lib("kernel/include/file.hrl").
-
 -export([
     endpoint/1,
     erlang_push_send/3,
@@ -16,14 +14,9 @@ endpoint(Name) ->
     <<"inproc://gleam-", NameBin/binary, "-", Id/binary>>.
 
 ensure_omq() ->
-    code:add_patha("../_build/default/lib/omq/ebin"),
-    Source = nif_source(),
-    Target = "../_build/default/lib/omq/priv/omq_beam_native.so",
-    ok = filelib:ensure_dir(Target),
-    case file:copy(Source, Target) of
-        {ok, _Bytes} -> nil;
-        {error, same} -> nil;
-        {error, Reason} -> erlang:error({nif_stage_failed, Reason})
+    case code:ensure_loaded(omq_nif) of
+        {module, omq_nif} -> nil;
+        {error, Reason} -> erlang:error({omq_nif_unavailable, Reason})
     end.
 
 erlang_push_send(Context, Endpoint, Body) ->
@@ -55,21 +48,4 @@ erlang_wait_pull(Pid) ->
         {Pid, Error} -> erlang:error({erlang_pull_failed, Error})
     after 2000 ->
         erlang:error(erlang_pull_timeout)
-    end.
-
-nif_source() ->
-    Candidates = [
-        "../native/target/debug/libomq_beam_native.so",
-        "../native/target/release/libomq_beam_native.so",
-        "../priv/omq_beam_native.so"
-    ],
-    case [Path || Path <- Candidates, usable_file(Path)] of
-        [Path | _] -> Path;
-        [] -> erlang:error(no_usable_nif_shared_object)
-    end.
-
-usable_file(Path) ->
-    case file:read_file_info(Path) of
-        {ok, #file_info{type = regular, size = Size}} when Size > 0 -> true;
-        _ -> false
     end.

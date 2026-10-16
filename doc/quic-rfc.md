@@ -1,10 +1,28 @@
 # Native OMQ over QUIC
 
-## 1. Scope
+- Status: draft
+- Author: Patrik Wenger <paddor@gmail.com>
+- Profile version: 1
+- URI scheme: `quic://`
 
-`quic://host:port` carries ZMTP 3.x over QUIC v1 and TLS 1.3. One OMQ
-peer is one QUIC connection. This native profile uses ALPN `omq-zmtp/1`.
-It does not use HTTP/3, WebTransport, QUIC DATAGRAMs, or OMQ compression.
+This document specifies `quic://host:port`, the native OMQ profile for
+carrying ZMTP 3.x over QUIC v1 and TLS 1.3. One OMQ peer is one QUIC
+connection, with ALPN `omq-zmtp/1`.
+
+## 1. Preamble
+
+Copyright (c) 2026 Patrik Wenger. This specification is licensed under the
+[ISC license](../LICENSE).
+
+The uppercase terms MUST, MUST NOT, REQUIRED, SHALL, SHALL NOT, SHOULD,
+SHOULD NOT, RECOMMENDED, NOT RECOMMENDED, MAY, and OPTIONAL have the meanings
+defined in [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119) and
+[RFC 8174](https://www.rfc-editor.org/rfc/rfc8174).
+
+## 2. Scope
+
+This profile does not use HTTP/3, WebTransport, QUIC DATAGRAMs, or OMQ
+compression.
 
 Socket compatibility, identities, subscriptions, multipart boundaries,
 and ZMTP mechanisms have their usual meanings. STREAM remains TCP-only.
@@ -15,7 +33,7 @@ remove head-of-line blocking between messages from the same peer.
 The underlying transport follows [RFC 9000](https://www.rfc-editor.org/rfc/rfc9000)
 and [RFC 9001](https://www.rfc-editor.org/rfc/rfc9001).
 
-## 2. TLS and authentication
+## 3. TLS and Authentication
 
 The listener supplies a PEM certificate chain and private key. The
 connector MUST verify the server's chain and DNS name or IP address.
@@ -27,7 +45,7 @@ disable certificate verification. ALPN mismatch rejects setup.
 not authenticate the client. Use PLAIN credentials inside TLS or CURVE
 with an admission policy when authenticated clients are required.
 
-## 3. Stream roles
+## 4. Stream Roles
 
 The connector opens exactly two bidirectional streams:
 
@@ -48,7 +66,7 @@ The data stream has no extra OMQ preface. Parsing a complete ZMTP message
 is the only way to deliver it to the application. FIN, RESET_STREAM, or
 connection loss MUST NOT cause a partial message to be delivered.
 
-## 4. Liveness wire format
+## 5. Liveness Wire Format
 
 Each direction begins with this eight-byte preface, exactly once:
 
@@ -74,7 +92,7 @@ PING and one pending PONG. A newer pending PONG replaces an older one.
 A partly written record MUST finish before another record begins.
 Liveness records have no ordering relationship to application messages.
 
-## 5. Heartbeats and backpressure
+## 6. Heartbeats and Backpressure
 
 With a nonzero heartbeat interval, each side sends periodic PINGs. The
 reply timeout starts when a complete PING is admitted to the transport,
@@ -97,7 +115,7 @@ Messages larger than the window advance as the receiver returns credit.
 Connection credit includes a liveness reserve above the data window:
 `max(data_window / 4, 64 KiB)`. Data must not consume that reserve.
 
-## 6. Setup and admission
+## 7. Setup and Admission
 
 One setup deadline covers TLS, stream roles, the liveness preface, the
 ZMTP mechanism, and READY. Setup failures retire that generation and
@@ -120,7 +138,7 @@ Pending setup admission occurs before accepting TLS. Ready-peer admission
 is separate; QUIC peers do not consume another transport's ready-peer
 limit. Identity handover may replace a route without another ready slot.
 
-## 7. Close and linger
+## 8. Close and Linger
 
 Graceful close drains accepted outbound messages, sends data FIN, waits
 for acknowledgment of data and FIN, then waits for the peer to close
@@ -141,7 +159,7 @@ finite closes remain bounded by their deadlines.
 | `04` | Unexpected stream |
 | `05` | Local abort or incomplete linger |
 
-## 8. Endpoint lifetime and reconnect
+## 9. Endpoint Lifetime and Reconnect
 
 Unbind stops new admission and preserves accepted peers. Live peers
 retain their UDP endpoint group and assigned IO runtimes. Within one
@@ -156,7 +174,7 @@ the old generation and reconnecting. QUIC retransmission handles packet
 loss, duplication, and reordering within a generation. OMQ does not add
 an end-to-end acknowledgment or exactly-once replay across reconnects.
 
-## 9. Configuration and use
+## 10. Configuration and Use
 
 The Rust configuration is `Options::quic`. The C and Python bindings use
 `OMQ_QUIC_*` options for certificates, trust, verified name, stream window,

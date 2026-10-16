@@ -1,7 +1,7 @@
 <svg viewBox="0 0 800 1118" xmlns="http://www.w3.org/2000/svg" font-family="system-ui, -apple-system, sans-serif">
 <rect x="0" y="0" width="800" height="1118" opacity="1" fill="#000000" stroke="none"/>
 <text x="400" y="17" text-anchor="middle" font-family="sans-serif" font-size="14" font-weight="bold" fill="#F9FAFB">PUSH/PULL Zstd L1, varied binary/JSON, 2 KiB dict, netem, 1 IO</text>
-<text x="400" y="31" text-anchor="middle" font-family="sans-serif" font-size="10" fill="#9CA3AF">performance governor, turbo off</text>
+<text x="400" y="31" text-anchor="middle" font-family="sans-serif" font-size="10" fill="#9CA3AF">Intel Core i7-8700B @ 3.20 GHz (KVM), performance governor, turbo off</text>
 <line opacity="1" stroke="#374151" stroke-width="1" x1="80" y1="307" x2="80" y2="62"/>
 <line opacity="1" stroke="#374151" stroke-width="1" x1="160" y1="307" x2="160" y2="62"/>
 <line opacity="1" stroke="#374151" stroke-width="1" x1="241" y1="307" x2="241" y2="62"/>

@@ -268,6 +268,118 @@ async fn peer_roundtrip_keeps_identity_outside_datagram_body() {
 }
 
 #[tokio::test]
+async fn dish_inline_group_credit_is_independent_of_application_clones() {
+    for (group_size, body_size) in [(1, 53), (38, 16), (1, 54)] {
+        let options = Options {
+            xpub_nodrop: true,
+            dart: DartOptions {
+                window_messages: 1,
+                congestion: DartCongestion::Lan,
+                ..DartOptions::default()
+            },
+            ..Options::default()
+        };
+        let group = Bytes::from(vec![b'g'; group_size]);
+        let radio = Socket::new(SocketType::Radio, options.clone());
+        let dish = Socket::new(SocketType::Dish, options);
+        dish.join(group.clone()).await.unwrap();
+        radio
+            .connect(dish.bind(endpoint(0)).await.unwrap())
+            .await
+            .unwrap();
+        ready(&radio, 1).await;
+        radio
+            .send_group(group.clone(), Message::single(vec![1; body_size]))
+            .await
+            .unwrap();
+        let first = receive(&dish).await;
+        let held = first.clone();
+        drop(first);
+        radio
+            .send_group(group.clone(), Message::single(vec![2; body_size]))
+            .await
+            .unwrap();
+        if group_size + body_size == 54 {
+            assert_eq!(held.retained_size(), Some(std::mem::size_of::<Message>()));
+            let next = receive(&dish).await;
+            assert_eq!(next.part_slice(0), Some(group.as_ref()));
+            assert_eq!(next.part_slice(1).unwrap(), vec![2; body_size]);
+            assert_eq!(held.part_slice(1).unwrap(), vec![1; body_size]);
+        } else {
+            assert!(
+                tokio::time::timeout(Duration::from_millis(30), dish.recv())
+                    .await
+                    .is_err()
+            );
+            drop(held);
+            assert_eq!(
+                receive(&dish).await.part_slice(1).unwrap(),
+                vec![2; body_size]
+            );
+        }
+        radio.close().await.unwrap();
+        dish.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn radio_fanout_keeps_mixed_fragment_batches_ordered() {
+    for congestion in [DartCongestion::Lan, DartCongestion::Adaptive] {
+        let options = Options {
+            xpub_nodrop: true,
+            send_hwm: 97,
+            recv_hwm: 97,
+            dart: DartOptions {
+                window_messages: 32,
+                congestion,
+                ..DartOptions::default()
+            },
+            ..Options::default()
+        };
+        let radio = Socket::new(SocketType::Radio, options.clone());
+        let target = radio.bind(endpoint(0)).await.unwrap();
+        let mut dishes = Vec::new();
+        for _ in 0..4 {
+            let dish = Socket::new(SocketType::Dish, options.clone());
+            dish.join("fanout").await.unwrap();
+            dish.connect(target.clone()).await.unwrap();
+            dishes.push(dish);
+        }
+        ready(&radio, 4).await;
+        let sizes = [16, 4096, 64, 16384, 1024];
+        let send = async {
+            for sequence in 0_u64..257 {
+                let mut body = vec![7; sizes[sequence as usize % sizes.len()]];
+                body[..8].copy_from_slice(&sequence.to_le_bytes());
+                radio
+                    .send_group("fanout", Message::single(body))
+                    .await
+                    .unwrap();
+            }
+        };
+        let receivers = dishes.iter().map(|dish| async {
+            for sequence in 0_u64..257 {
+                let message = dish.recv().await.unwrap();
+                assert_eq!(message.part_slice(0), Some(b"fanout".as_slice()));
+                let body = message.part_slice(1).unwrap();
+                assert_eq!(body.len(), sizes[sequence as usize % sizes.len()]);
+                assert_eq!(&body[..8], &sequence.to_le_bytes());
+                assert!(body[8..].iter().all(|byte| *byte == 7));
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(send, futures::future::join_all(receivers));
+        })
+        .await
+        .unwrap();
+        radio.close().await.unwrap();
+        for dish in dishes {
+            dish.close().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
 async fn radio_dish_filters_locally_and_preserves_group() {
     let pool = omq_tokio::PayloadPool::new([(2048, 64)]).unwrap();
     let radio = Socket::new(SocketType::Radio, Options::default());

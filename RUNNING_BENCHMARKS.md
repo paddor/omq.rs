@@ -289,6 +289,25 @@ perf report --stdio --no-inline --no-children -g none --percent-limit 1 \
 
 ### Dart Charts
 
+RADIO/DISH uses the verified fan-out harness: 4/32 subscribers in one receiver
+process, HWM 1000, yield-poll receivers, no IO spin, DART window 256, and no drops.
+Chart runs use sender pools/slabs and a receive pool per DISH on all transports:
+1024 slots of `max(body size, 64)` bytes, with batched buffer returns.
+Each cell has three 3-second rounds after 1-second warmup; rates include
+delivery to the slowest subscriber. Generate the LAN/adaptive/TCP comparison:
+
+```sh
+cargo build --release --manifest-path scripts/shm_bench_peer/Cargo.toml --features dart
+ruby scripts/run_shm_pubsub.rb --dart --recv-pool
+cargo run --release -p omq-bench -- chart dart
+```
+
+Set `CARGO_TARGET_DIR` to the built peer's target directory for the Ruby runner.
+Data appends to `dart-radiodish.jsonl`; output is `doc/charts/dart/radiodish.svg`.
+Use `--profile DIR --profile-side pub|sub` and `--output PATH` for diagnostics.
+Omit `--recv-pool` to measure unpooled receivers; add `--no-pool` to also disable
+sender pools/slabs. These diagnostic rows are excluded from charts.
+
 SCATTER/GATHER measures messages received by the application. CLIENT/SERVER
 measures RTT with the latency profile on both endpoints. Both transports use
 the same body sizes, application spin, and CPU placement. Dart initializes an

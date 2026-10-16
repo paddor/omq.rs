@@ -214,6 +214,9 @@ impl PeerIo {
                 && !groups.contains(message.part_slice(0).expect("DISH group"))
             {
                 drop(message);
+                if inline_credit {
+                    session.release_receive(1);
+                }
                 count += 1;
                 continue;
             }

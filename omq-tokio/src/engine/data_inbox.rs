@@ -316,7 +316,7 @@ impl Permit<'_> {
 
 pub(crate) fn channel(capacity: usize) -> (Sender, Receiver) {
     channel_inner(
-        capacity,
+        capacity.clamp(1, 64),
         #[cfg(feature = "dart")]
         None,
     )
@@ -327,6 +327,8 @@ pub(crate) fn dart_channel(
     capacity: usize,
     socket_type: omq_proto::SocketType,
 ) -> (Sender, Receiver) {
+    // DART retains admissions until acknowledgment, including after dequeue.
+    // Its full outbound HWM must cover both queued and in-flight messages.
     channel_inner(capacity, Some(socket_type))
 }
 
@@ -334,7 +336,7 @@ fn channel_inner(
     capacity: usize,
     #[cfg(feature = "dart")] dart: Option<omq_proto::SocketType>,
 ) -> (Sender, Receiver) {
-    let capacity = capacity.clamp(1, 64);
+    let capacity = capacity.max(1);
     let (registrar, receiver) = mpsc::channel_with_policy(capacity);
     let template = Arc::new(Template {
         id: NEXT_ID.fetch_add(1, Ordering::Relaxed),

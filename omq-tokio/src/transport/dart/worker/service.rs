@@ -258,35 +258,71 @@ impl EndpointWorker {
         stats: &mut DartStats,
         blocked: &mut bool,
     ) -> bool {
+        let started = Instant::now();
+        let mut budget = omq_proto::flow::DrainBudget::new(DATA_MESSAGES, BYTES);
+        let mut worked = false;
+        let mut elapsed = Duration::ZERO;
+        // A short final fragment ends a GSO batch, not the peer's turn.
+        // Keep sending queued batches within the same byte/message/time caps.
+        while !budget.exhausted() && elapsed < TURN {
+            let Some((messages, bytes)) = self.transmit_batch(
+                source,
+                session,
+                stage,
+                now + elapsed,
+                stats,
+                blocked,
+                &budget,
+            ) else {
+                break;
+            };
+            worked = true;
+            if !budget.account_many(messages.max(1), bytes) {
+                break;
+            }
+            elapsed = started.elapsed();
+        }
+        worked
+    }
+
+    #[expect(clippy::too_many_arguments)]
+    fn transmit_batch(
+        &self,
+        source: SocketAddr,
+        session: &mut Session,
+        stage: &mut Stage,
+        now: Duration,
+        stats: &mut DartStats,
+        blocked: &mut bool,
+        budget: &omq_proto::flow::DrainBudget,
+    ) -> Option<(usize, usize)> {
         stage.packet_ends.clear();
+        let output = &mut stage.bytes[..BYTES - budget.bytes()];
         let first = session.next_repair().unwrap_or_else(|| session.next_send());
         let grouped = self.socket_type == SocketType::Radio;
         let mut reserved = 0;
         let (token, length, mut prepared) = if self.shared.options.max_send_rate.is_some() {
-            let Some((token, length)) = session.prepare_data(first, now, grouped, &mut stage.bytes)
-            else {
-                return false;
-            };
+            let (token, length) = session.prepare_data(first, now, grouped, output)?;
             (token, length, 1)
         } else {
-            let Some(prefix) = session.prepare_packed_prefix(
+            session.prepare_packed_prefix(
                 first,
                 now,
                 grouped,
                 &mut reserved,
-                &mut stage.bytes,
-                DATA_MESSAGES,
-            ) else {
-                return false;
-            };
-            prefix
+                output,
+                budget.remaining_msgs(),
+            )?
         };
         stage.packet_ends.push(prepared);
         let repair = matches!(token, Transmit::Data { repair: true, .. });
         let batch_limit = if repair || self.shared.options.max_send_rate.is_some() {
             1
         } else {
-            self.io.max_gso_segments().min(MESSAGES).min(BYTES / length)
+            self.io
+                .max_gso_segments()
+                .min(MESSAGES)
+                .min(output.len() / length)
         };
         let mut total = length;
         for _ in 1..batch_limit {
@@ -295,8 +331,8 @@ impl EndpointWorker {
                 now,
                 grouped,
                 &mut reserved,
-                &mut stage.bytes[total..],
-                DATA_MESSAGES - prepared,
+                &mut output[total..],
+                budget.remaining_msgs() - prepared,
             ) else {
                 break;
             };
@@ -314,7 +350,7 @@ impl EndpointWorker {
         let ecn = session.ecn_enabled().then_some(EcnCodepoint::Ect0);
         match self
             .io
-            .try_send_segments(source, None, ecn, &stage.bytes[..total], length)
+            .try_send_segments(source, None, ecn, &output[..total], length)
         {
             Ok(count) => {
                 let accepted = count
@@ -330,19 +366,19 @@ impl EndpointWorker {
                         stats.sent_messages += 1;
                     }
                 }
-                count != 0
+                (count != 0).then_some((accepted, total.min(count * length)))
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 *blocked = true;
-                false
+                None
             }
             Err(error) if error.raw_os_error() == Some(libc::EMSGSIZE) && length > MAX_DATAGRAM => {
                 session.reduce_packing_mtu();
-                true
+                Some((0, 0))
             }
             Err(_) => {
                 stats.send_failures += 1;
-                false
+                None
             }
         }
     }

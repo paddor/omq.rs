@@ -111,9 +111,10 @@ fn storage_matches(row: &Value, size: u64, latency: bool) -> bool {
                 })
 }
 
-fn verified(row: &Value, implementation: &str, size: u64, readers: u64) -> bool {
+pub(super) fn verified(row: &Value, implementation: &str, size: u64, readers: u64) -> bool {
     let inproc = implementation == "inproc";
     if row["kind"] != "shm_pubsub_verified"
+        || row["profiled"] == true
         || row["impl"] != implementation
         || row["msg_size"] != size
         || row["peers"] != readers

@@ -40,7 +40,7 @@ pub(crate) enum ChartSub {
     Fanio,
     /// OMQ over QUIC against OMQ over TCP.
     Quic,
-    /// DART against TCP, SCATTER/GATHER and CLIENT/SERVER.
+    /// DART against TCP, SCATTER/GATHER, CLIENT/SERVER, and RADIO/DISH.
     Dart,
     /// Dart and QUIC throughput and RTT over simulated lossy links.
     Lossy,

@@ -40,6 +40,8 @@ impl PointConfig {
                 readers: 1,
                 id: 0,
                 directory: args[6].clone().into(),
+                source_pool: true,
+                receive_pool: false,
             },
             latency: args[1] == "client-server",
             spin_us: args[5].parse()?,

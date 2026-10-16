@@ -400,11 +400,18 @@ impl EndpointWorker {
         };
         // PEER adds an identity prefix during receive; shared bodies keep that
         // routed representation allocation-free.
-        if group.is_none()
-            && self.socket_type != SocketType::Peer
+        if self.socket_type != SocketType::Peer
             && body.len() <= omq_proto::message::MAX_INLINE_MESSAGE
+            && group.as_ref().is_none_or(|group| {
+                // Inline pairs also store the boundary between the two parts.
+                group.len() + body.len() < omq_proto::message::MAX_INLINE_MESSAGE
+            })
         {
-            let message = Message::from_slice(body);
+            let inline = || match &group {
+                Some(group) => Message::with_prefix(group.clone(), Message::from_slice(body)),
+                None => Message::from_slice(body),
+            };
+            let message = inline();
             if let Some(io) = &mut peer.io
                 && io.active
                 && let Some(sink) = &mut io.sink
@@ -419,7 +426,7 @@ impl EndpointWorker {
                         Err(TrySendError::Full(message)) => Err(message),
                         Err(_) => {
                             io.cancel.cancel();
-                            Err(Message::from_slice(body))
+                            Err(inline())
                         }
                     },
                 ) {

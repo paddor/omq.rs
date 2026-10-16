@@ -6,6 +6,8 @@ use plotters::style::RGBColor;
 use super::common::{self, Impl, LatencyEntry, LatencyMap, ValMap};
 use crate::jsonl;
 
+mod radiodish;
+
 use crate::bench::datagram::{LATENCY_SIZES, THROUGHPUT_SIZES};
 // The chart binary builds without the transport feature. Match the codec version.
 const DART_WIRE_VERSION: u64 = 1;
@@ -170,6 +172,7 @@ fn aeron_runs(groups: &mut Runs) {
 }
 
 pub(crate) fn generate() {
+    radiodish::generate().expect("generate DART RADIO/DISH chart");
     let mut messages = ValMap::new();
     let mut bandwidth = ValMap::new();
     let mut latency = LatencyMap::new();

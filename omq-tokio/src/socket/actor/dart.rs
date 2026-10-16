@@ -185,7 +185,7 @@ impl SocketDriver {
         let entry = &mut self.dart_endpoints[index];
         let (controls_tx, controls_rx) = crate::engine::control_inbox::channel(64);
         let (data_tx, data_rx) = crate::engine::data_inbox::dart_channel(
-            64.min(entry.options.send_hwm.max(1) as usize),
+            entry.options.send_hwm.max(1) as usize,
             self.socket_type,
         );
         let cancel = entry.cancel.child_token();

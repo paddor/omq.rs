@@ -50,6 +50,75 @@ fn options() -> omq_proto::DartOptions {
 }
 
 #[test]
+fn radio_hwm_above_one_batch_counts_queued_and_unacknowledged_messages() {
+    use crate::engine::data_inbox::{SenderLanes, dart_channel};
+
+    // A non-power-of-two HWM must stay exact even when the ring rounds up.
+    let (root, mut data) = dart_channel(97, SocketType::Radio);
+    let sender = SenderLanes::default().bind(&root);
+    let mut io = queues();
+    for sequence in 0..97 {
+        sender
+            .try_send(PeerDriverData::SendMessage(Message::single("body")))
+            .unwrap();
+        if sequence < 64 {
+            let (_, admission) = data.dart_try_recv().unwrap();
+            io.admissions.push_back((sequence, admission));
+        }
+    }
+    data.release_consumed();
+    assert!(sender.try_reserve_owned().is_err(), "dequeue retains HWM");
+    io.acknowledge(32);
+    let permits: Vec<_> = (0..32)
+        .map(|_| sender.try_reserve_owned().unwrap())
+        .collect();
+    assert!(sender.try_reserve_owned().is_err(), "only ACK frees HWM");
+    io.acknowledge(32);
+    assert!(
+        sender.try_reserve_owned().is_err(),
+        "duplicate ACK is inert"
+    );
+    drop(permits);
+    io.data = data;
+}
+
+#[test]
+fn leaving_a_group_returns_retained_inline_credit() {
+    let queue = crate::socket::fanin::Fanin::new(
+        1,
+        Arc::new(DataSignal::new()),
+        crate::socket::recv::BlockingRecvWaker::new(),
+    );
+    let mut io = queues();
+    io.active = true;
+    io.sink = Some(RecvSink::Fanin(crate::socket::fanin::Sink::owned(
+        queue.register().unwrap(),
+    )));
+    let mut peer = peer();
+    peer.install_io(2, io, &state(), false, &Arc::new(DataSignal::new()));
+    let session = peer.session.as_mut().unwrap();
+    session.commit_receive(
+        0,
+        Message::with_group("left", "body"),
+        dart::Ecn::NotEct,
+        Duration::ZERO,
+    );
+    let edge = session.receive_right_edge();
+    let mut stats = DartStats::default();
+    let count = peer.io.as_mut().unwrap().deliver(
+        session,
+        Some(&crate::socket::udp::new_joined_groups()),
+        peer.pool.as_ref().unwrap(),
+        &mut stats,
+    );
+    assert_eq!(count, 1);
+    assert_eq!(session.receive_right_edge(), edge + 1);
+    assert_eq!(stats.received_messages, 0);
+    assert_eq!(peer.returns.take(), 0, "inline credit returns exactly once");
+    assert!(queue.try_recv().is_err(), "unsubscribed group is filtered");
+}
+
+#[test]
 fn partial_ack_returns_exact_credits_and_keeps_unsent_reservations() {
     use crate::engine::data_inbox::{SenderLanes, dart_channel};
 

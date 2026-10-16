@@ -20,31 +20,46 @@ LARGE_POOL_BYTES = 256 * 1024 * 1024
 LARGE_POOL_MIN_BODY = 1024 * 1024
 POOLED_BATCH_COPY_THRESHOLD = 256
 FANOUT_POOLED_BATCH_COPY_THRESHOLD = 1024
+RECEIVE_POOL_SLOTS = 1024
 BAD = /\bwarn(?:ing)?\b|timeout|\[[WEF]\]/i
-options = { implementations: IMPLEMENTATIONS, sizes: nil, readers: nil,
-            output: nil, port: 45_100, pattern: 'radio-dish', recv_spin_us: nil }
+options = { implementations: nil, sizes: nil, readers: nil, dart: false,
+            output: nil, port: 45_100, pattern: 'radio-dish', recv_spin_us: nil,
+            profile: nil, profile_side: 'pub', no_pool: false, recv_pool: false }
 OptionParser.new do |parser|
   parser.banner = 'run_shm_pubsub.rb [--pattern radio-dish|scatter-gather|client-server] [--impls LIST] [--sizes LIST]'
   parser.on('--impls LIST') { |value| options[:implementations] = value.split(',') }
+  parser.on('--dart', 'Compare DART-LAN, DART-adaptive, and TCP RADIO/DISH') { options[:dart] = true }
   parser.on('--sizes LIST') { |value| options[:sizes] = value.split(',').map { |item| Integer(item) } }
   parser.on('--readers LIST') { |value| options[:readers] = value.split(',').map { |item| Integer(item) } }
   parser.on('--output PATH') { |value| options[:output] = File.expand_path(value) }
   parser.on('--port-base PORT', Integer) { |value| options[:port] = value }
   parser.on('--pattern PAIR', %w[radio-dish scatter-gather client-server]) { |value| options[:pattern] = value }
   parser.on('--recv-spin-us LIST') { |value| options[:recv_spin_us] = value.split(',').map { |item| Integer(item) } }
+  parser.on('--profile DIR') { |value| options[:profile] = File.expand_path(value) }
+  parser.on('--profile-side SIDE', %w[pub sub]) { |value| options[:profile_side] = value }
+  parser.on('--no-pool', 'Allocate each RADIO/DISH payload on the heap') { options[:no_pool] = true }
+  parser.on('--recv-pool', 'Use per-DISH payload pools with batched returns') { options[:recv_pool] = true }
 end.parse!
 latency = options[:pattern] == 'client-server'
+raise '--dart requires radio-dish' if options[:dart] && options[:pattern] != 'radio-dish'
+options[:implementations] ||= options[:dart] ? %w[dart-lan dart-adaptive tcp] : IMPLEMENTATIONS
 options[:readers] ||= options[:pattern] == 'radio-dish' ? [4, 32] : [1]
-options[:sizes] ||= latency ? [16, 64, 256, 1024, 4096] : SIZES
+options[:sizes] ||= latency ? [16, 64, 256, 1024, 4096] : options[:dart] ? SIZES.first(6) : SIZES
 options[:recv_spin_us] ||= latency ? [0, 50] : [0]
 cache = { 'radio-dish' => 'pubsub', 'scatter-gather' => 'pushpull', 'client-server' => 'reqrep' }.fetch(options[:pattern])
 cache_home = ENV['XDG_CACHE_HOME'].to_s
 cache_home = File.expand_path('~/.cache') if cache_home.empty?
-options[:output] ||= File.join(cache_home, 'omq', "shm-#{cache}.jsonl")
-allowed = options[:pattern] == 'radio-dish' ? IMPLEMENTATIONS : IMPLEMENTATIONS + ['tcp']
+options[:output] ||= File.join(cache_home, 'omq', options[:dart] ? 'dart-radiodish.jsonl' : "shm-#{cache}.jsonl")
+allowed = IMPLEMENTATIONS + ['tcp']
+allowed += %w[dart-lan dart-adaptive] if options[:pattern] == 'radio-dish'
 raise 'unknown implementation' unless (options[:implementations] - allowed).empty?
+raise '--no-pool requires TCP/DART RADIO/DISH' if options[:no_pool] &&
+  (options[:pattern] != 'radio-dish' || !(options[:implementations] - %w[tcp dart-lan dart-adaptive]).empty?)
+raise '--recv-pool requires TCP/DART RADIO/DISH' if options[:recv_pool] &&
+  (options[:pattern] != 'radio-dish' || !(options[:implementations] - %w[tcp dart-lan dart-adaptive]).empty?)
+raise '--no-pool conflicts with --recv-pool' if options[:no_pool] && options[:recv_pool]
 raise 'invalid sizes' unless (options[:sizes] - SIZES).empty? && !options[:sizes].empty?
-raise 'invalid readers' unless (options[:readers] - (options[:pattern] == 'radio-dish' ? [4, 32] : [1])).empty? && !options[:readers].empty?
+raise 'invalid readers' unless (options[:readers] - (options[:pattern] == 'radio-dish' ? [1, 4, 32] : [1])).empty? && !options[:readers].empty?
 raise 'invalid receive spin' unless (options[:recv_spin_us] - (options[:pattern] == 'radio-dish' ? [0] : [0, 30, 50])).empty? && !options[:recv_spin_us].empty?
 
 def peer_command(implementation, role, size, readers, id, _port, directory, pattern, recv_spin_us)
@@ -58,12 +73,20 @@ def peer_command(implementation, role, size, readers, id, _port, directory, patt
    *arguments]
 end
 
-def run_case(implementation, size, readers, port, pattern, recv_spin_us)
+def run_case(implementation, size, readers, port, pattern, recv_spin_us, profile, profile_side, no_pool, recv_pool)
   processes = []
   streams = {}
   rows = []
   spawn = lambda do |role, id, directory|
-    input, output, error, waiter = Open3.popen3(*peer_command(implementation, role, size, readers, id, port, directory, pattern, recv_spin_us), pgroup: true)
+    command = peer_command(implementation, role, size, readers, id, port, directory, pattern, recv_spin_us)
+    if profile && role == profile_side
+      FileUtils.mkdir_p(profile)
+      path = File.join(profile, "#{implementation}-#{size}-#{readers}-#{recv_spin_us}-#{role}.data")
+      command = ['perf', 'record', '-F', '499', '--call-graph', 'dwarf,16384', '-o', path, '--', *command]
+    end
+    input, output, error, waiter = Open3.popen3(
+      { 'OMQ_SHM_BENCH_NO_POOL' => no_pool ? '1' : nil,
+        'OMQ_SHM_BENCH_RECV_POOL' => recv_pool ? '1' : nil }, *command, pgroup: true)
     input.close
     processes << waiter
     streams[output] = [role, id, 'stdout', +'']
@@ -119,6 +142,12 @@ def run_case(implementation, size, readers, port, pattern, recv_spin_us)
     pool_bytes = size >= LARGE_POOL_MIN_BODY ? LARGE_POOL_BYTES : POOL_BYTES
     slots = [pool_bytes / slot_bytes, 1].max
     slab_bytes = pattern != 'client-server' && size > 55 && size < SLAB_BYTES ? SLAB_BYTES : 0
+    slots = slot_bytes = pool_bytes = slab_bytes = 0 if no_pool
+    raise 'wrong source storage' unless row['source_pool'] == !no_pool
+    raise 'wrong receive pool' unless row['receive_pool'] == recv_pool &&
+      row['receive_pool_slots'] == (recv_pool ? RECEIVE_POOL_SLOTS : 0) &&
+      row['receive_pool_slot_bytes'] == (recv_pool ? [size, 64].max : 0) &&
+      row['receive_pool_batch_recycle'] == recv_pool
     raise 'wrong HWM' unless row['send_hwm'] == HWM && row['recv_hwm'] == HWM
     raise 'wrong payload pool' unless row['pool_slots'] == slots && row['pool_slot_bytes'] == slot_bytes && row['payload_pool_bytes'] == slots * slot_bytes && row['slab_bytes'] == slab_bytes
     memory_cap = implementation.start_with?('shm') ? 64 * 1024 * 1024 : nil
@@ -181,12 +210,14 @@ options[:implementations].each_with_index do |implementation, implementation_ind
     options[:sizes].each_with_index do |size, size_index|
       options[:recv_spin_us].each do |recv_spin_us|
         port = options[:port] + implementation_index * 100 + size_index * 40
-        rounds = run_case(implementation, size, readers, port, options[:pattern], recv_spin_us)
+        rounds = run_case(implementation, size, readers, port, options[:pattern], recv_spin_us,
+                          options[:profile], options[:profile_side], options[:no_pool], options[:recv_pool])
         selected = rounds.sort_by { |row| row.fetch(latency ? 'p99_us' : 'msgs_s') }[1]
         row = selected.merge('kind' => "shm_#{cache}_verified", 'impl' => implementation,
                              'transport' => implementation.split('-').first, 'peers' => readers,
                              'run_id' => run_id, 'host' => Socket.gethostname, 'revision' => revision.strip,
                              'binary_sha256' => digest.hexdigest, 'rounds' => rounds,
+                             'profiled' => !options[:profile].nil?,
                              'warmup_seconds' => latency ? nil : 1, 'seconds' => latency ? nil : 3, 'drain_seconds' => 30,
                              'publisher_cpus' => implementation == 'inproc' ? '1,2,3,4' : '1,2',
                              'subscriber_cpus' => implementation == 'inproc' ? '1,2,3,4' : '3,4',
@@ -195,9 +226,10 @@ options[:implementations].each_with_index do |implementation, implementation_ind
                              'receiver_context' => 'shared',
                              'io_threads_per_context' => 1, 'inproc_data_io_threads' => 0,
                              'socket_pair' => options[:pattern],
+                             'workload_profile' => latency ? 'latency' : 'throughput', 'io_spin_us' => 0,
                              'recv_mode' => options[:pattern] == 'radio-dish' ? 'yield-poll' : 'blocking',
                              'recv_spin_us' => recv_spin_us,
-                             'storage' => implementation == 'shm-pool' ? 'preallocated-shm' : 'preallocated-heap',
+                             'storage' => options[:no_pool] ? 'heap' : implementation == 'shm-pool' ? 'preallocated-shm' : 'preallocated-heap',
                              'copy_in' => latency,
                              'score' => latency ? 'round-trip latency' : 'publications / max(sender elapsed, slowest reader elapsed)',
                              'selection' => latency ? 'middle p99 RTT window' : 'middle throughput window')

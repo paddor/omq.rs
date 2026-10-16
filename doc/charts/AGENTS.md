@@ -161,6 +161,15 @@ Bench: `omq_bench run pushpull-zstd --level 1 --link-mbps RATE`.
 
 ## Reliable DART charts
 
+`dart/radiodish.svg` reads `dart-radiodish.jsonl`: DART-LAN, DART-adaptive,
+and TCP with 4/32 subscribers, 16 B through 16 KiB, HWM 1000, window 256,
+yield-poll receivers, and no IO spin. Require one complete campaign, one binary
+digest, and verified delivery to every reader; exclude profiles. Plot per-subscriber
+throughput, median and range of three rounds, using the usual dual panels.
+Use the SHM harness's sender pools/slabs and `--recv-pool` on all transports:
+1024 slots per DISH, `max(body size, 64)` bytes per slot, batched buffer returns.
+Exclude unpooled diagnostics from the chart cohort; label the pool policy.
+
 Data: `dart.jsonl`. Outputs: `dart/{scattergather,clientserver}.svg`.
 Select DART protocol version 1, LAN/adaptive as separate series, with TCP from the
 matched runner. Exclude profiled rows, other spin budgets, verification

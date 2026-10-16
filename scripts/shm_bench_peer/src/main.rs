@@ -1,4 +1,4 @@
-//! Verified RADIO/DISH fan-out over inproc, IPC, and shared memory.
+//! Verified RADIO/DISH fan-out over local transports, TCP, and DART.
 
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -19,6 +19,7 @@ const BATCH_BYTES: usize = 1024 * 1024;
 const POOL_BYTES: usize = 64 * 1024 * 1024;
 const LARGE_POOL_BYTES: usize = 256 * 1024 * 1024;
 const LARGE_POOL_MIN_BODY: usize = 1024 * 1024;
+const RECEIVE_POOL_SLOTS: usize = 1024;
 const SIZES: &[usize] = &[
     16, 64, 256, 1024, 4096, 16384, 131_072, 1_048_576, 8_388_608,
 ];
@@ -32,6 +33,8 @@ struct Config {
     readers: usize,
     id: usize,
     directory: PathBuf,
+    source_pool: bool,
+    receive_pool: bool,
 }
 
 impl Config {
@@ -51,10 +54,21 @@ impl Config {
             readers: args[4].parse()?,
             id: args[5].parse()?,
             directory: PathBuf::from(&args[6]),
+            source_pool: std::env::var_os("OMQ_SHM_BENCH_NO_POOL").is_none(),
+            receive_pool: std::env::var_os("OMQ_SHM_BENCH_RECV_POOL").is_some(),
         };
-        if !["inproc", "ipc", "shm", "shm-pool"].contains(&config.implementation.as_str())
+        if ![
+            "inproc",
+            "ipc",
+            "shm",
+            "shm-pool",
+            "tcp",
+            "dart-lan",
+            "dart-adaptive",
+        ]
+        .contains(&config.implementation.as_str())
             || !SIZES.contains(&config.size)
-            || ![4, 32].contains(&config.readers)
+            || ![1, 4, 32].contains(&config.readers)
             || config.id >= config.readers
         {
             return Err("invalid transport, size, or reader count".into());
@@ -68,6 +82,10 @@ impl Config {
             "ipc" => format!("ipc://{}", self.directory.join("data.sock").display()),
             "tcp" => std::fs::read_to_string(self.directory.join("endpoint"))
                 .unwrap_or_else(|_| "tcp://127.0.0.1:0".into()),
+            "dart-lan" | "dart-adaptive" => {
+                std::fs::read_to_string(self.directory.join("endpoint"))
+                    .unwrap_or_else(|_| "dart://127.0.0.1:0".into())
+            }
             _ => format!("shm://{}", self.directory.join("data.sock").display()),
         }
     }
@@ -90,6 +108,9 @@ impl Config {
     }
 
     fn pool(&self) -> Result<Option<PayloadPool>, Error> {
+        if !self.source_pool {
+            return Ok(None);
+        }
         let classes = [(self.pool_slot_size(), self.pool_slots())];
         Ok(Some(if self.implementation == "shm-pool" {
             omq_tokio::shm_payload_pool(classes)?
@@ -99,7 +120,8 @@ impl Config {
     }
 
     fn uses_slabs(&self) -> bool {
-        (omq_tokio::message::MAX_INLINE_MESSAGE + 1..SLAB_BYTES).contains(&self.size)
+        self.source_pool
+            && (omq_tokio::message::MAX_INLINE_MESSAGE + 1..SLAB_BYTES).contains(&self.size)
     }
 
     fn batch_size(&self) -> usize {
@@ -124,9 +146,34 @@ impl Config {
                     omq_shm::POOLED_BATCH_COPY_THRESHOLD
                 })
         );
-        row["pool_slots"] = json!(self.pool_slots());
-        row["pool_slot_bytes"] = json!(self.pool_slot_size());
-        row["payload_pool_bytes"] = json!(self.pool_slots() * self.pool_slot_size());
+        row["source_pool"] = json!(self.source_pool);
+        row["receive_pool"] = json!(self.receive_pool);
+        row["receive_pool_slots"] = json!(if self.receive_pool {
+            RECEIVE_POOL_SLOTS
+        } else {
+            0
+        });
+        row["receive_pool_slot_bytes"] = json!(if self.receive_pool {
+            self.size.max(64)
+        } else {
+            0
+        });
+        row["receive_pool_batch_recycle"] = json!(self.receive_pool);
+        row["pool_slots"] = json!(if self.source_pool {
+            self.pool_slots()
+        } else {
+            0
+        });
+        row["pool_slot_bytes"] = json!(if self.source_pool {
+            self.pool_slot_size()
+        } else {
+            0
+        });
+        row["payload_pool_bytes"] = json!(if self.source_pool {
+            self.pool_slots() * self.pool_slot_size()
+        } else {
+            0
+        });
         row["slab_bytes"] = json!(if throughput && self.uses_slabs() {
             SLAB_BYTES
         } else {
@@ -146,13 +193,34 @@ struct Port {
 impl Port {
     fn open(config: &Config, context: &Context) -> Result<Self, Error> {
         let hwm = BENCH_HWM;
+        let receive_pool = if config.receive_pool && !config.publisher {
+            Some(PayloadPool::new([(
+                config.size.max(64),
+                RECEIVE_POOL_SLOTS,
+            )])?)
+        } else {
+            None
+        };
         let options = Options {
             xpub_nodrop: true,
             send_hwm: hwm,
             recv_hwm: hwm,
             recv_batching: true,
+            recv_payload_pool: receive_pool.clone(),
             workload_profile: Some(omq_tokio::options::WorkloadProfile::Throughput),
             ..Options::default()
+        };
+        #[cfg(feature = "dart")]
+        let options = Options {
+            dart: omq_tokio::DartOptions {
+                congestion: if config.implementation == "dart-lan" {
+                    omq_tokio::DartCongestion::Lan
+                } else {
+                    omq_tokio::DartCongestion::Adaptive
+                },
+                ..options.dart
+            },
+            ..options
         };
         let socket = context.blocking_socket(
             if config.publisher {
@@ -163,7 +231,8 @@ impl Port {
             options,
         );
         if config.publisher {
-            socket.bind(config.endpoint().parse::<omq_tokio::Endpoint>()?)?;
+            let endpoint = socket.bind(config.endpoint().parse::<omq_tokio::Endpoint>()?)?;
+            std::fs::write(config.directory.join("endpoint"), endpoint.to_string())?;
         } else {
             socket.join("fanout")?;
             socket.connect(config.endpoint().parse::<omq_tokio::Endpoint>()?)?;
@@ -171,7 +240,7 @@ impl Port {
         let pool = if config.publisher {
             config.pool()?
         } else {
-            None
+            receive_pool
         };
         Ok(Self {
             socket,
@@ -192,7 +261,11 @@ impl Port {
 
     fn receive(&mut self, check: &mut dyn FnMut(&[u8]) -> Result<(), Error>) -> Result<(), Error> {
         if self.next == self.messages.len() {
-            self.messages.clear();
+            if let Some(pool) = &self.pool {
+                pool.with_recycling_batch(|| self.messages.clear());
+            } else {
+                self.messages.clear();
+            }
             let started = Instant::now();
             loop {
                 match self
@@ -465,6 +538,17 @@ fn publish(config: &Config, port: &Port) -> Result<(), Error> {
                 "aggregate_msgs_s":rate * config.readers as f64,"mbps":rate * config.size as f64 / 1e6,
                 "missing":0,"duplicates":0,"gaps":0,"corrupt":0});
             config.add_pool_metadata(&mut row, true);
+            #[cfg(feature = "dart")]
+            if config.implementation.starts_with("dart-") {
+                let stats = omq_tokio::diagnostics::dart_stats(&port.socket);
+                row["dart_wire_version"] = json!(omq_proto::dart::VERSION);
+                row["dart_window_messages"] = json!(Options::default().dart.window_messages);
+                row["dart_congestion"] = json!(config.implementation.trim_start_matches("dart-"));
+                row["dart_retransmitted"] = json!(stats.retransmitted);
+                row["dart_credit_stalls"] = json!(stats.credit_stalls);
+                row["dart_congestion_stalls"] = json!(stats.congestion_stalls);
+                row["dart_send_failures"] = json!(stats.send_failures);
+            }
             println!("{row}");
         }
     }

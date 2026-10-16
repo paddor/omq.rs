@@ -25,9 +25,9 @@ TCP and IPC charts run communicating sides in separate processes.
 - PUSH/PULL fan-in/fan-out charts use one process for each pusher or puller.
 - `inproc` charts stay inside one process by definition.
 
-Multi-peer charts report total throughput. PUSH fan-out charts also show
-peer fairness: whiskers mark the slowest and fastest puller in a measured
-round.
+PUB/SUB and PUSH/PULL multi-peer charts report total throughput. PUSH fan-out
+charts also show peer fairness: whiskers mark the slowest and fastest puller
+in a measured round.
 
 Transport coverage differs by implementation. Missing lines mean that
 implementation does not expose a usable peer for that transport and
@@ -181,4 +181,38 @@ These charts compare QUIC with CURVE over TCP on loopback.
 
 <p align="center">
   <img src="doc/charts/quic/pubsub.svg" alt="PUB/SUB throughput: QUIC vs CURVE/TCP" width="850">
+</p>
+
+## DART
+
+Loopback comparisons of OMQ DART-LAN, DART-adaptive, and TCP, with Aeron
+over UDP for SCATTER/GATHER and CLIENT/SERVER.
+
+### SCATTER/GATHER Throughput
+
+<p align="center">
+  <img src="doc/charts/dart/scattergather.svg" alt="SCATTER/GATHER throughput: DART vs TCP vs Aeron" width="950">
+</p>
+
+### CLIENT/SERVER Latency
+
+<p align="center">
+  <img src="doc/charts/dart/clientserver.svg" alt="CLIENT/SERVER latency: DART vs TCP vs Aeron" width="950">
+</p>
+
+### RADIO/DISH Throughput
+
+Per-subscriber throughput with sender and receive payload pools on all transports.
+
+<p align="center">
+  <img src="doc/charts/dart/radiodish.svg" alt="RADIO/DISH throughput: DART vs TCP, 4 and 32 subscribers" width="950">
+</p>
+
+### Lossy Links
+
+DART and QUIC under simulated packet loss on a 100 Mbps link with 1 ms
+delay each way.
+
+<p align="center">
+  <img src="doc/charts/dart/lossy.svg" alt="DART vs QUIC throughput and latency under packet loss" width="950">
 </p>

@@ -1,7 +1,7 @@
 <svg viewBox="0 0 950 740" xmlns="http://www.w3.org/2000/svg" font-family="system-ui, -apple-system, sans-serif">
 <rect x="0" y="0" width="950" height="740" opacity="1" fill="#000000" stroke="none"/>
 <text x="475" y="17" text-anchor="middle" font-family="sans-serif" font-size="14" font-weight="bold" fill="#F9FAFB">PUSH fan-in, CURVE/TCP vs QUIC loopback, 2-process</text>
-<text x="475" y="31" text-anchor="middle" font-family="sans-serif" font-size="10" fill="#9CA3AF">performance governor, turbo off</text>
+<text x="475" y="31" text-anchor="middle" font-family="sans-serif" font-size="10" fill="#9CA3AF">Intel Core i7-8700B @ 3.20 GHz (KVM), performance governor, turbo off</text>
 <text x="227" y="97" dy="0.76em" text-anchor="middle" font-family="sans-serif" font-size="9.67741935483871" opacity="1" fill="#E5E7EB">
 small messages (higher is better)
 </text>

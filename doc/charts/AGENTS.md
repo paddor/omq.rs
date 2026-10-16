@@ -16,6 +16,8 @@ cargo run --release -p omq-bench -- chart zstd      # Zstd compression
 
 A chart refresh without new benchmarks just re-renders existing data.
 Benchmark processes must not run in parallel.
+After a performance change, rebenchmark and regenerate the affected charts
+before presenting the next decision to the user.
 
 ## Main charts (3 files)
 

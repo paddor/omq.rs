@@ -622,12 +622,10 @@ impl Lz4Decoder {
             }
             Payload::from_bytes(Bytes::copy_from_slice(data))
         } else {
-            super::common::decode_payload(size, pool, |out| {
-                let length = match &self.decompressor {
-                    Some(decoder) => decoder.decompress_into(data, out),
-                    None => block::decompress_into(data, out),
-                }
-                .map_err(|error| Error::Protocol(format!("lz4 arena decompress: {error}")))?;
+            decode_payload(size, pool, |mut out| {
+                let length = out
+                    .decompress(data, self.decompressor.as_ref(), 0..size)
+                    .map_err(|error| Error::Protocol(format!("lz4 arena decompress: {error}")))?;
                 if length != size {
                     return Err(invalid());
                 }
@@ -745,6 +743,58 @@ impl Lz4Decoder {
     }
 }
 
+enum DecodeBuffer<'a> {
+    Slice(&'a mut [u8]),
+    Append(&'a mut Vec<u8>),
+}
+
+impl DecodeBuffer<'_> {
+    fn decompress(
+        &mut self,
+        input: &[u8],
+        decompressor: Option<&Decompressor>,
+        range: std::ops::Range<usize>,
+    ) -> std::result::Result<usize, block::DecompressError> {
+        match self {
+            Self::Slice(output) => match decompressor {
+                Some(decoder) => decoder.decompress_into(input, &mut output[range]),
+                None => block::decompress_into(input, &mut output[range]),
+            },
+            Self::Append(output) => {
+                debug_assert_eq!(output.len(), range.start);
+                match decompressor {
+                    Some(decoder) => decoder.decompress_append(input, output, range.len()),
+                    None => block::decompress_append(input, output, range.len()),
+                }
+            }
+        }
+    }
+}
+
+/// Select output storage before decoding; never copy an already decoded body.
+fn decode_payload(
+    size: usize,
+    pool: Option<&crate::PayloadPool>,
+    decode: impl FnOnce(DecodeBuffer<'_>) -> Result<()>,
+) -> Result<Payload> {
+    if size <= crate::message::MAX_INLINE_PAYLOAD {
+        let mut body = [0; crate::message::MAX_INLINE_PAYLOAD];
+        decode(DecodeBuffer::Slice(&mut body[..size]))?;
+        return Ok(Payload::from_slice(&body[..size]));
+    }
+    if let Some(mut buffer) = pool.and_then(|pool| pool.try_buffer(size)) {
+        decode(DecodeBuffer::Slice(&mut buffer.writable()[..size]))?;
+        buffer
+            .set_len(size)
+            .expect("selected slot fits decoded body");
+        return Ok(buffer.into_payload());
+    }
+    // lz4rip appends directly into spare capacity and exposes only initialized bytes.
+    let mut body = Vec::with_capacity(size);
+    decode(DecodeBuffer::Append(&mut body))?;
+    Ok(Payload::from_bytes(Bytes::from(body)))
+}
+
 fn decode_lz4b(
     body: &[u8],
     decompressor: Option<&Decompressor>,
@@ -766,14 +816,10 @@ fn decode_lz4b(
         ));
     }
     take_budget(budget, decompressed_size)?;
-    super::common::decode_payload(decompressed_size, pool, |out| {
-        let n = match decompressor {
-            Some(d) => d
-                .decompress_into(block, out)
-                .map_err(|e| Error::Protocol(format!("lz4 decompress: {e}")))?,
-            None => block::decompress_into(block, out)
-                .map_err(|e| Error::Protocol(format!("lz4 decompress: {e}")))?,
-        };
+    decode_payload(decompressed_size, pool, |mut out| {
+        let n = out
+            .decompress(block, decompressor, 0..decompressed_size)
+            .map_err(|e| Error::Protocol(format!("lz4 decompress: {e}")))?;
         if n != decompressed_size {
             return Err(Error::Protocol(
                 "LZ4B decompressed length does not match declared".into(),
@@ -811,7 +857,7 @@ fn decode_lz4m(
         ));
     }
 
-    super::common::decode_payload(decompressed_size, pool, |out| {
+    decode_payload(decompressed_size, pool, |mut out| {
         let mut src_pos = 8;
         let mut dst_pos = 0;
 
@@ -831,16 +877,13 @@ fn decode_lz4m(
             let remaining = decompressed_size - dst_pos;
             let block_decompressed = remaining.min(block_size);
 
-            let n = match decompressor {
-                Some(d) => d
-                    .decompress_into(block_data, &mut out[dst_pos..dst_pos + block_decompressed])
-                    .map_err(|e| Error::Protocol(format!("lz4 decompress: {e}")))?,
-                None => block::decompress_into(
+            let n = out
+                .decompress(
                     block_data,
-                    &mut out[dst_pos..dst_pos + block_decompressed],
+                    decompressor,
+                    dst_pos..dst_pos + block_decompressed,
                 )
-                .map_err(|e| Error::Protocol(format!("lz4 decompress: {e}")))?,
-            };
+                .map_err(|e| Error::Protocol(format!("lz4 decompress: {e}")))?;
             if n != block_decompressed {
                 return Err(Error::Protocol(
                     "LZ4M block decompressed length mismatch".into(),
@@ -862,6 +905,73 @@ fn decode_lz4m(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decode_storage_rejects_length_mismatches_and_recovers() {
+        let plain = Message::single(vec![b'x'; 2048]);
+        let pool = crate::PayloadPool::new([(8192, 1)]).unwrap();
+        for dict in [None, Some(Bytes::from(vec![b'x'; 2048]))] {
+            for format in [SENTINEL_LZ4B, SENTINEL_LZ4M, arena::SENTINEL] {
+                let mut encoder = dict.clone().map_or_else(Lz4Encoder::new, |dict| {
+                    Lz4Encoder::with_send_dict(dict).unwrap()
+                });
+                let mut decoder = Lz4Decoder::new();
+                if format == SENTINEL_LZ4M {
+                    encoder = encoder.with_block_size(1024);
+                    decoder = decoder.with_block_size(1024);
+                }
+                let mut wire = if format == arena::SENTINEL {
+                    encoder.encode_arena(&[&plain; 2]).unwrap()
+                } else {
+                    encoder.encode(&plain).unwrap()
+                };
+                if dict.is_some() {
+                    assert!(decoder.decode(wire.remove(0)).unwrap().is_none());
+                }
+                let wire = wire.pop().unwrap();
+                let bytes = wire.part_slice(0).unwrap();
+                assert_eq!(&bytes[..4], &format);
+                for use_pool in [None, Some(&pool)] {
+                    for extra in [-1_i64, 1] {
+                        let mut bad = bytes.to_vec();
+                        if format == arena::SENTINEL {
+                            assert_eq!(bad[4], 1, "compressed arena");
+                            let size = u32::from_le_bytes(bad[8..12].try_into().unwrap());
+                            let size = u32::try_from(i64::from(size) + extra).unwrap();
+                            bad[8..12].copy_from_slice(&size.to_le_bytes());
+                        } else {
+                            let size = u64::from_le_bytes(bad[4..12].try_into().unwrap());
+                            let size = size.checked_add_signed(extra).unwrap();
+                            bad[4..12].copy_from_slice(&size.to_le_bytes());
+                        }
+                        assert!(matches!(
+                            decoder.decode_with_payload_slots(Message::single(bad), use_pool),
+                            Err(Error::Protocol(_))
+                        ));
+                        assert!(decoder.poll_message().is_none());
+                        assert!(
+                            pool.try_buffer(8192).is_some(),
+                            "failed decode returns slot"
+                        );
+                    }
+                    for exhausted in [false, true] {
+                        let held = exhausted.then(|| pool.try_buffer(8192).unwrap());
+                        let recovered = decoder
+                            .decode_with_payload_slots(wire.clone(), use_pool)
+                            .unwrap()
+                            .unwrap();
+                        assert_eq!(recovered, plain);
+                        if format == arena::SENTINEL {
+                            assert_eq!(decoder.poll_message(), Some(plain.clone()));
+                        }
+                        assert!(decoder.poll_message().is_none());
+                        drop(recovered);
+                        drop(held);
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn pooled_decode_preserves_table_and_invalidates_wire_byte_count() {

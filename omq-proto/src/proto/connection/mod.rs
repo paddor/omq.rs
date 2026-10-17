@@ -86,7 +86,8 @@ pub struct ConnectionConfig {
     /// Routing identity sent in the READY command. Empty = anonymous.
     pub identity: bytes::Bytes,
     /// Reject inbound messages larger than this in body bytes plus one payload
-    /// slot per part. Commands use this limit too. `None` = no limit.
+    /// slot per part. Commands use this limit too, except fixed-size heartbeats.
+    /// `None` = no limit.
     pub max_message_size: Option<usize>,
     /// Override the data framer's body-plus-payload-slot limit for a message
     /// transform. Commands retain `max_message_size`; the transform must
@@ -154,10 +155,21 @@ impl ConnectionConfig {
 
     fn frame_size_limit(&self, command: bool) -> Option<usize> {
         if command {
+            // Admit a complete heartbeat before its command name is known.
+            // Other commands retain the configured limit after decoding.
+            const HEARTBEAT_SIZE: usize = 1 + 4 + 2 + super::command::PING_CONTEXT_MAX;
             self.max_message_size
+                .map(|max| max.max(size_of::<crate::message::Payload>() + HEARTBEAT_SIZE))
         } else {
             self.data_size_limit()
         }
+    }
+
+    #[cfg(feature = "curve")]
+    fn max_frame_size_limit(&self) -> Option<usize> {
+        self.frame_size_limit(false)
+            .zip(self.frame_size_limit(true))
+            .map(|(data, command)| data.max(command))
     }
 
     /// Select the security handshake and frame transform.

@@ -235,8 +235,7 @@ impl Connection {
             }
             return Ok(true);
         }
-        if self.config.data_size_limit().is_some()
-            && let Some(max) = self.config.frame_size_limit(hdr.flags.command)
+        if let Some(max) = self.wire_frame_size_limit(hdr.flags.command)
             && hdr.payload_len.saturating_add(size_of::<Payload>()) > max
         {
             return Err(Error::MessageTooLarge {
@@ -254,6 +253,20 @@ impl Connection {
         };
         self.decode_assembled_frame(frame.flags, frame.payload)?;
         Ok(true)
+    }
+
+    fn wire_frame_size_limit(&self, command: bool) -> Option<usize> {
+        #[cfg(feature = "curve")]
+        if self.has_frame_transform() {
+            // MESSAGE prefix, nonce, tag, and inner flags are wire overhead.
+            // The outer command bit cannot identify the inner payload kind.
+            const MESSAGE_OVERHEAD: usize = 8 + 8 + 16 + 1;
+            return self
+                .config
+                .max_frame_size_limit()
+                .map(|max| max.saturating_add(MESSAGE_OVERHEAD));
+        }
+        self.config.frame_size_limit(command)
     }
 
     /// Run the post-handshake dispatch on an already-assembled wire frame:
@@ -290,9 +303,7 @@ impl Connection {
         }
 
         if flags.command {
-            let cmd = command::decode(payload.as_bytes())?;
-            self.handle_post_handshake_command(cmd)?;
-            return Ok(());
+            return self.decode_post_handshake_command(payload.as_bytes());
         }
 
         self.absorb_data_frame(flags.more, payload)?;
@@ -302,12 +313,23 @@ impl Connection {
     #[cfg(feature = "curve")]
     fn dispatch_decrypted(&mut self, command: bool, more: bool, plaintext: Bytes) -> Result<()> {
         if command {
-            let cmd = command::decode(plaintext)?;
-            self.handle_post_handshake_command(cmd)?;
+            self.decode_post_handshake_command(plaintext)?;
         } else {
             self.absorb_data_frame(more, Payload::from_bytes(plaintext))?;
         }
         Ok(())
+    }
+
+    fn decode_post_handshake_command(&mut self, payload: Bytes) -> Result<()> {
+        let size = payload.len().saturating_add(size_of::<Payload>());
+        let command = command::decode(payload)?;
+        if !matches!(command, Command::Ping { .. } | Command::Pong { .. })
+            && let Some(max) = self.config.max_message_size
+            && size > max
+        {
+            return Err(Error::MessageTooLarge { size, max });
+        }
+        self.handle_post_handshake_command(command)
     }
 
     #[inline]
@@ -433,7 +455,7 @@ impl Connection {
         let Some(hdr) = frame::peek_frame_header(&self.in_buf)? else {
             return Ok(None);
         };
-        if let Some(max) = self.config.frame_size_limit(hdr.flags.command)
+        if let Some(max) = self.wire_frame_size_limit(hdr.flags.command)
             && hdr.payload_len.saturating_add(size_of::<Payload>()) > max
         {
             return Err(Error::MessageTooLarge {
@@ -475,7 +497,7 @@ impl Connection {
             return None;
         }
         let hdr = frame::peek_frame_header(&self.in_buf).ok().flatten()?;
-        if let Some(max) = self.config.frame_size_limit(hdr.flags.command)
+        if let Some(max) = self.wire_frame_size_limit(hdr.flags.command)
             && hdr.payload_len.saturating_add(size_of::<Payload>()) > max
         {
             return None;
@@ -509,7 +531,7 @@ impl Connection {
             return None;
         }
         let hdr = frame::peek_frame_header(&self.in_buf).ok().flatten()?;
-        if let Some(max) = self.config.frame_size_limit(hdr.flags.command)
+        if let Some(max) = self.wire_frame_size_limit(hdr.flags.command)
             && hdr.payload_len.saturating_add(size_of::<Payload>()) > max
         {
             return None;
@@ -615,7 +637,7 @@ impl Connection {
                 self.process_mechanism_command(payload.as_bytes())
             }
             State::Ready => {
-                if let Some(max) = self.config.frame_size_limit(flags.command)
+                if let Some(max) = self.wire_frame_size_limit(flags.command)
                     && payload.len().saturating_add(size_of::<Payload>()) > max
                 {
                     return Err(Error::MessageTooLarge {
@@ -688,7 +710,7 @@ impl Connection {
                 return Ok(());
             };
 
-            let payload_len = self.ws_frame_payload_len(ws_hdr.payload_len)?;
+            let payload_len = self.ws_frame_payload_len(&ws_hdr)?;
             let total_frame = ws_hdr
                 .header_len
                 .checked_add(payload_len)
@@ -743,7 +765,11 @@ impl Connection {
     }
 
     #[cfg(feature = "ws")]
-    fn ws_frame_payload_len(&self, declared: u64) -> Result<usize> {
+    fn ws_frame_payload_len(
+        &self,
+        header: &super::super::ws_codec::WsFrameHeader,
+    ) -> Result<usize> {
+        let declared = header.payload_len;
         let payload_len = usize::try_from(declared).map_err(|_| {
             Error::Protocol(format!(
                 "WS payload length {declared} exceeds platform usize"
@@ -756,7 +782,8 @@ impl Connection {
         }
         // Reject oversized declarations before buffering the body. The
         // pre-auth ceiling applies even without an application message limit.
-        if let Some(cap) = self.ws_payload_cap()
+        if header.opcode < super::super::ws_codec::OP_CLOSE_CODE
+            && let Some(cap) = self.ws_payload_cap()
             && payload_len > cap
         {
             return Err(Error::Protocol(format!(
@@ -785,7 +812,13 @@ impl Connection {
     #[cfg(feature = "ws")]
     fn ws_payload_cap(&self) -> Option<usize> {
         if matches!(self.state, State::Ready) {
-            self.config.data_size_limit()
+            self.wire_frame_size_limit(false)
+                .zip(self.wire_frame_size_limit(true))
+                .map(|(data, command)| {
+                    data.max(command)
+                        .saturating_sub(size_of::<Payload>())
+                        .saturating_add(1) // ZWS flag
+                })
         } else {
             Some(MAX_HANDSHAKE_COMMAND)
         }
@@ -862,15 +895,6 @@ impl Connection {
 
         let zmtp_payload_len = ws_payload_len - 1;
 
-        if let Some(max) = self.config.data_size_limit()
-            && zmtp_payload_len.saturating_add(size_of::<Payload>()) > max
-        {
-            return Err(Error::MessageTooLarge {
-                size: zmtp_payload_len,
-                max,
-            });
-        }
-
         self.in_buf.advance(header_len);
 
         let mut data = [0u8; crate::message::MAX_INLINE_MESSAGE];
@@ -905,6 +929,15 @@ impl Connection {
             return self
                 .dispatch_ws_binary(flags, Payload::new())
                 .map(|()| Some(true));
+        }
+
+        if let Some(max) = self.config.data_size_limit()
+            && zmtp_payload_len.saturating_add(size_of::<Payload>()) > max
+        {
+            return Err(Error::MessageTooLarge {
+                size: zmtp_payload_len,
+                max,
+            });
         }
 
         if zmtp_payload_len > 0 {

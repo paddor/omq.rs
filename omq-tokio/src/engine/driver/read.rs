@@ -16,6 +16,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 
 pub(super) const RECV_POOL_MAX_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 pub(super) const RECV_POOL_MAX_RETAINED_BYTES: usize = 64 * 1024 * 1024;
+const LARGE_READ_CHUNK: usize = 64 * 1024;
 
 #[derive(Debug)]
 pub(super) struct RecvBufPool {
@@ -126,6 +127,9 @@ impl PendingLargeRead {
         if info.buffered_payload_prefix == info.payload_len {
             return Ok(None);
         }
+        let bounded = connection
+            .receive_frame_size_limit(info.flags.command)
+            .is_some();
         let payload_buffer = if info.flags.command {
             None
         } else {
@@ -155,8 +159,13 @@ impl PendingLargeRead {
         let pooled = target <= RECV_POOL_MAX_BUFFER_BYTES;
         let mut buf = if pooled {
             pool.take(target)
-        } else {
+        } else if bounded {
+            // Admission already checked the complete frame and multipart size.
+            // Allocate once so accepted large bodies never move while filling.
             BytesMut::with_capacity(target)
+        } else {
+            // A declaration alone must not reserve an arbitrarily large body.
+            BytesMut::with_capacity(prefix.len().saturating_add(LARGE_READ_CHUNK).min(target))
         };
         buf.extend_from_slice(prefix.as_slice());
         Ok(Some(Self {
@@ -178,9 +187,10 @@ impl PendingLargeRead {
 
     pub(super) async fn read<R: AsyncRead + Unpin>(&mut self, reader: &mut R) -> io::Result<usize> {
         let filled = self.filled();
-        let remaining = (self.target - filled).min(64 * 1024);
+        let remaining = (self.target - filled).min(LARGE_READ_CHUNK);
         let n = match &mut self.buf {
             ReceiveBody::Stream { buf, .. } => {
+                buf.reserve(remaining);
                 let mut limited = buf.limit(remaining);
                 reader.read_buf(&mut limited).await?
             }

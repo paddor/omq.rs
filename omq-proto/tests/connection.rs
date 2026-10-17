@@ -227,6 +227,145 @@ fn pair_configurations() -> Vec<(ConnectionConfig, ConnectionConfig)> {
 }
 
 #[test]
+fn core_stops_automatic_replies_until_output_drains() {
+    const PINGS: usize = 8192;
+    for (receiver, sender) in pair_configurations() {
+        let mut receiver = Connection::new(receiver);
+        let mut sender = Connection::new(sender);
+        pump(&mut sender, &mut receiver);
+        let ping = Command::Ping {
+            ttl_deciseconds: 0,
+            context: Bytes::from_static(b"echo"),
+        };
+        sender.send_command(&ping).unwrap();
+        transfer(&mut sender, &mut receiver).unwrap();
+        let reply_size = receiver.pending_transmit_size();
+        transfer(&mut receiver, &mut sender).unwrap();
+        for _ in 0..PINGS {
+            sender.send_command(&ping).unwrap();
+        }
+        transfer(&mut sender, &mut receiver).unwrap();
+        assert!(receiver.input_blocked_on_output());
+        assert!(receiver.has_pending_input());
+        let queued = receiver.pending_transmit_size();
+        assert!(queued < 64 * 1024 + reply_size);
+        receiver.resume_input().unwrap();
+        assert_eq!(receiver.pending_transmit_size(), queued);
+        assert!(receiver.handle_input(Bytes::from_static(b"extra")).is_err());
+        assert!(receiver.peek_next_frame_payload_size().unwrap().is_none());
+        let mut replies = 0;
+        loop {
+            replies += receiver.pending_transmit_size() / reply_size;
+            transfer(&mut receiver, &mut sender).unwrap();
+            assert!(!receiver.input_blocked_on_output());
+            if !receiver.has_pending_input() {
+                break;
+            }
+            receiver.resume_input().unwrap();
+        }
+        assert_eq!(replies, PINGS);
+        sender
+            .send_message(&Message::single("after replies"))
+            .unwrap();
+        transfer(&mut sender, &mut receiver).unwrap();
+        assert_eq!(
+            receiver.poll_message(),
+            Some(Message::single("after replies"))
+        );
+    }
+}
+
+#[test]
+fn core_parser_turns_stop_on_frame_and_byte_budgets() {
+    for (frames, body_len) in [(1000, 4), (128, 8192)] {
+        let (mut sender, mut receiver) = push_pull_pair();
+        pump(&mut sender, &mut receiver);
+        receiver.set_input_budget(true);
+        for sequence in 0u32..frames {
+            let mut body = vec![0; body_len];
+            body[..4].copy_from_slice(&sequence.to_be_bytes());
+            sender.send_message(&Message::single(body)).unwrap();
+        }
+        transfer(&mut sender, &mut receiver).unwrap();
+        assert!(receiver.has_pending_input());
+        let mut observed = 0u32;
+        loop {
+            let mut turn = 0;
+            while let Some(message) = receiver.poll_message() {
+                assert_eq!(
+                    &message.part_bytes(0).unwrap()[..4],
+                    &observed.to_be_bytes()
+                );
+                observed += 1;
+                turn += 1;
+            }
+            assert!(turn <= 256);
+            if body_len == 8192 {
+                assert!(turn <= 32);
+            }
+            if !receiver.has_pending_input() {
+                break;
+            }
+            receiver.resume_input().unwrap();
+        }
+        assert_eq!(observed, frames);
+        receiver.handle_input(Bytes::from_static(&[0])).unwrap();
+        assert!(!receiver.has_pending_input());
+        receiver.handle_input(Bytes::from_static(&[0])).unwrap();
+        assert_eq!(receiver.poll_message(), Some(Message::single(Bytes::new())));
+    }
+}
+
+#[test]
+fn automatic_pong_accounting_survives_partial_writes_and_interleaved_data() {
+    for (receiver, sender) in pair_configurations() {
+        let mut receiver = Connection::new(receiver);
+        let mut sender = Connection::new(sender);
+        pump(&mut sender, &mut receiver);
+        let message = Message::single(Bytes::from(vec![42; 128 * 1024]));
+        receiver.send_message(&message).unwrap();
+        receiver
+            .send_command(&Command::Pong {
+                context: Bytes::new(),
+            })
+            .unwrap();
+        assert_eq!(receiver.pending_pong_size(), 0);
+        let prefix = receiver.pending_transmit_size();
+        let ping = Command::Ping {
+            ttl_deciseconds: 0,
+            context: Bytes::from_static(b"echo"),
+        };
+        sender.send_command(&ping).unwrap();
+        transfer(&mut sender, &mut receiver).unwrap();
+        let reply_size = receiver.pending_transmit_size() - prefix;
+        assert!(reply_size > 1);
+        assert_eq!(receiver.pending_pong_size(), reply_size);
+
+        receiver.advance_transmit(prefix + 1);
+        assert_eq!(receiver.pending_pong_size(), reply_size);
+        receiver.send_message(&message).unwrap();
+        sender.send_command(&ping).unwrap();
+        transfer(&mut sender, &mut receiver).unwrap();
+        assert_eq!(receiver.pending_pong_size(), reply_size * 2);
+        let through_reply = receiver.pending_transmit_size();
+        receiver.send_message(&message).unwrap();
+
+        receiver.advance_transmit(through_reply - 1);
+        assert_eq!(receiver.pending_pong_size(), reply_size * 2);
+        receiver.advance_transmit(1);
+        assert_eq!(receiver.pending_pong_size(), 0);
+        assert!(receiver.has_pending_transmit());
+        receiver.advance_transmit(receiver.pending_transmit_size());
+
+        sender.send_command(&ping).unwrap();
+        transfer(&mut sender, &mut receiver).unwrap();
+        assert_eq!(receiver.pending_pong_size(), reply_size);
+        receiver.advance_transmit(receiver.pending_transmit_size());
+        assert_eq!(receiver.pending_pong_size(), 0);
+    }
+}
+
+#[test]
 fn small_message_limit_still_allows_heartbeats() {
     for (receiver, sender) in pair_configurations() {
         let mut receiver = Connection::new(receiver.max_message_size(size_of::<Payload>()));

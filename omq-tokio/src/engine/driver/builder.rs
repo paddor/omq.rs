@@ -87,13 +87,14 @@ where
 
     fn with_output_config(
         stream: T,
-        connection: Connection,
+        mut connection: Connection,
         inbox: crate::engine::control_inbox::Receiver,
         peer_out: PeerOutput,
         peer_id: u64,
         cancel: CancellationToken,
         config: PeerDriverConfig,
     ) -> Self {
+        connection.set_input_budget(true);
         Self {
             stream,
             network: crate::network_limit::Lane::default(),

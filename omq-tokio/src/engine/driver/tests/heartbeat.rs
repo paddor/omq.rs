@@ -1,4 +1,100 @@
 use super::*;
+use tokio::io::AsyncWriteExt;
+
+#[tokio::test(start_paused = true)]
+async fn stalled_pong_output_backpressures_input_and_keeps_close_reachable() {
+    stalled_pong_output(
+        ConnectionConfig::new(Role::Client, SocketType::Push),
+        ConnectionConfig::new(Role::Server, SocketType::Pull),
+        b"\x04\x0d\x04PONG",
+    )
+    .await;
+}
+
+#[cfg(feature = "ws")]
+#[tokio::test(start_paused = true)]
+async fn ws_stalled_pong_output_backpressures_input_and_keeps_close_reachable() {
+    use omq_proto::proto::connection::WsRole;
+    stalled_pong_output(
+        ConnectionConfig::new(Role::Client, SocketType::Push).ws_role(WsRole::Client),
+        ConnectionConfig::new(Role::Server, SocketType::Pull)
+            .ws_role(WsRole::Server)
+            .ws_input_budget(true),
+        b"\x82\x0e\x02\x04PONG",
+    )
+    .await;
+}
+
+async fn stalled_pong_output(
+    sender: ConnectionConfig,
+    receiver: ConnectionConfig,
+    reply_prefix: &[u8],
+) {
+    const PINGS: usize = 16 * 1024;
+    for close_while_blocked in [false, true] {
+        let (mut sender, connection) = ready_connections(sender.clone(), receiver.clone());
+        for sequence in 0..PINGS {
+            sender
+                .send_command(&Command::Ping {
+                    ttl_deciseconds: 0,
+                    context: Bytes::copy_from_slice(&(sequence as u64).to_be_bytes()),
+                })
+                .unwrap();
+        }
+        let wire = drain_transmit(&mut sender);
+        let (stream, remote) = tokio::io::duplex(8192);
+        let (commands, inbox) = mpsc::channel(8);
+        let (events, _event_inbox) = mpsc::channel(8);
+        commands
+            .send(PeerDriverCommand::ActivateDataPlane)
+            .await
+            .unwrap();
+        let task = tokio::spawn(
+            ConnectionDriver::new(
+                stream,
+                connection,
+                inbox,
+                events,
+                1,
+                CancellationToken::new(),
+            )
+            .run(),
+        );
+        let (mut replies, mut requests) = tokio::io::split(remote);
+        let mut sending = tokio::spawn(async move { requests.write_all(&wire).await });
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), &mut sending)
+                .await
+                .is_err(),
+            "the driver consumed every PING while its PONG writer was blocked"
+        );
+
+        if close_while_blocked {
+            sending.abort();
+        } else {
+            let reply_len = reply_prefix.len() + 8;
+            let mut wire = vec![0; PINGS * reply_len];
+            tokio::time::timeout(Duration::from_secs(1), replies.read_exact(&mut wire))
+                .await
+                .expect("reply drainage did not resume input")
+                .unwrap();
+            sending.await.unwrap().unwrap();
+            for (sequence, reply) in wire.chunks_exact(reply_len).enumerate() {
+                assert_eq!(&reply[..reply_prefix.len()], reply_prefix);
+                assert_eq!(
+                    &reply[reply_prefix.len()..],
+                    &(sequence as u64).to_be_bytes()
+                );
+            }
+        }
+        commands.send(PeerDriverCommand::Close).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("queued replies blocked local close")
+            .unwrap()
+            .unwrap();
+    }
+}
 
 #[tokio::test]
 async fn heartbeat_queued_behind_stalled_data_does_not_kill_the_peer() {

@@ -70,7 +70,7 @@ pub struct PeerDriverConfig {
     /// `TTL` field of outgoing PING (peer-hint for when to assume dead).
     pub heartbeat_ttl: Option<Duration>,
     /// Recv frames whose payload exceeds this threshold directly into
-    /// a pre-sized owned buffer, bypassing the fixed
+    /// an owned buffer, bypassing the fixed
     /// `read_buf` -> `Connection` buffering path. `0` disables.
     pub large_message_threshold: usize,
     /// Hard per-connection receive message rate limit.

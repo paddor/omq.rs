@@ -275,6 +275,23 @@ impl Connection {
         self.out_bytes_total.saturating_sub(self.front_consumed)
     }
 
+    /// Upper bound on queued automatic ZMTP PONG reply bytes, including wire
+    /// overhead. Earlier replies remain counted until the last queued reply
+    /// has been written. Application data and locally queued commands do not
+    /// increase this count. Drivers can pause input at a reply backlog limit
+    /// while continuing to write and service local control.
+    pub fn pending_pong_size(&self) -> usize {
+        self.pending_pong_bytes
+    }
+
+    /// Input needs output progress before parsing can continue. The core
+    /// stops between frames once automatic ZMTP replies reach 64 KiB, so the
+    /// bound includes at most one extra reply. Application output does not
+    /// trigger this pause. Keep servicing writes and local lifecycle work.
+    pub fn input_blocked_on_output(&self) -> bool {
+        self.pending_pong_bytes >= 64 * 1024
+    }
+
     /// Whether any bytes are pending transmit.
     pub fn has_pending_transmit(&self) -> bool {
         self.out_bytes_total > self.front_consumed
@@ -344,7 +361,6 @@ impl Connection {
     /// peeling fully-consumed entries off the front and remembering
     /// the partial offset on the front chunk if any.
     pub fn advance_transmit(&mut self, mut n: usize) {
-        #[cfg(feature = "ws")]
         let written = n;
         while n > 0 {
             let Some(front) = self.out_chunks.front() else {
@@ -361,6 +377,12 @@ impl Connection {
             self.out_chunks.pop_front();
             self.out_bytes_total = self.out_bytes_total.saturating_sub(front_len);
             self.front_consumed = 0;
+        }
+        if self.pending_pong_bytes != 0 {
+            self.pong_queued_through = self.pong_queued_through.saturating_sub(written);
+            if self.pong_queued_through == 0 {
+                self.pending_pong_bytes = 0;
+            }
         }
         #[cfg(feature = "ws")]
         self.advance_ws_pong(written);

@@ -567,10 +567,18 @@ fn drain_transmit(connection: &mut Connection) -> Vec<u8> {
 }
 
 fn ready_push_pull_connections() -> (Connection, Connection) {
-    let mut push = Connection::new(
+    ready_connections(
         ConnectionConfig::new(Role::Client, SocketType::Push).identity(Bytes::from_static(b"c")),
-    );
-    let mut pull = Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pull));
+        ConnectionConfig::new(Role::Server, SocketType::Pull),
+    )
+}
+
+fn ready_connections(
+    sender: ConnectionConfig,
+    receiver: ConnectionConfig,
+) -> (Connection, Connection) {
+    let mut push = Connection::new(sender);
+    let mut pull = Connection::new(receiver);
     for _ in 0..10 {
         let push_out = drain_transmit(&mut push);
         let pull_out = drain_transmit(&mut pull);

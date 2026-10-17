@@ -262,6 +262,14 @@ enum State {
     Closed,
 }
 
+#[derive(Debug, Default)]
+struct InputState {
+    /// A bounded parser turn left buffered work for the next driver turn.
+    pending: bool,
+    /// Apply frame-count and byte service limits to each parser turn.
+    budget: bool,
+}
+
 /// ZMTP connection state machine.
 #[derive(Debug)]
 pub struct Connection {
@@ -300,6 +308,10 @@ pub struct Connection {
     /// every push/pop so `pending_transmit_size` runs in O(1) instead
     /// of iterating the whole queue on every drain-loop call.
     out_bytes_total: usize,
+    /// Conservative reply-byte count until the last queued PONG is written.
+    pending_pong_bytes: usize,
+    /// Remaining output prefix through that PONG, including earlier data.
+    pong_queued_through: usize,
     events: VecDeque<Event>,
     messages: VecDeque<Message>,
     pending_parts: Parts,
@@ -307,8 +319,7 @@ pub struct Connection {
     pending_size: usize,
     discarding_multipart: bool,
     peer_heartbeat_ttl: u16,
-    /// A bounded parser turn left buffered work for the next driver turn.
-    input_pending: bool,
+    input: InputState,
     /// WebSocket role for this connection. `None` = ZMTP byte-stream.
     /// When set, `emit_frame` wraps ZMTP frames in WS binary frame
     /// headers and pushes directly into `out_chunks`; inbound `drive()`
@@ -345,6 +356,8 @@ impl Connection {
             header_scratch: BytesMut::with_capacity(64 * 1024),
             front_consumed: 0,
             out_bytes_total: 0,
+            pending_pong_bytes: 0,
+            pong_queued_through: 0,
             events: VecDeque::new(),
             messages: VecDeque::new(),
             pending_parts: Vec::new().into(),
@@ -352,7 +365,7 @@ impl Connection {
             pending_size: 0,
             discarding_multipart: false,
             peer_heartbeat_ttl: 0,
-            input_pending: false,
+            input: InputState::default(),
             #[cfg(feature = "ws")]
             ws_role,
             #[cfg(feature = "ws")]
@@ -879,6 +892,45 @@ mod tests {
             "3 × {per} = {} > {max}",
             3 * per,
         );
+    }
+
+    #[test]
+    fn multipart_header_admission_is_shared_by_every_receive_path() {
+        for path in 0..5 {
+            let mut c = ready_connection(Some(1024));
+            feed_data_frames(&mut c, &[(true, &[7; 448])]).unwrap();
+            let mut header = BytesMut::new();
+            header.put_u8(frame::FLAG_LONG);
+            header.put_u64(449);
+            if path == 0 {
+                assert!(matches!(
+                    c.handle_input(header.freeze()),
+                    Err(Error::MessageTooLarge { .. })
+                ));
+                continue;
+            }
+            c.in_buf.push(header.freeze());
+            let before = c.in_buf.len();
+            match path {
+                1 => assert!(matches!(
+                    c.peek_next_frame_payload_size(),
+                    Err(Error::MessageTooLarge { .. })
+                )),
+                2 => assert!(c.begin_supplied_payload().is_none()),
+                3 => assert!(c.begin_supplied_payload_with_prefix().is_none()),
+                4 => assert!(matches!(
+                    c.begin_supplied_payload_into(&mut [0; 449]),
+                    Err(Error::MessageTooLarge { .. })
+                )),
+                _ => unreachable!(),
+            }
+            assert_eq!(c.in_buf.len(), before);
+            assert!(matches!(c.state, State::Ready));
+            assert!(c.poll_message().is_none());
+        }
+        let mut c = ready_connection(Some(1024));
+        feed_data_frames(&mut c, &[(true, &[7; 448]), (false, &[8; 448])]).unwrap();
+        assert_eq!(c.poll_message().unwrap().len(), 2);
     }
 
     #[test]

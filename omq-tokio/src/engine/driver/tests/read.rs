@@ -101,6 +101,125 @@ fn recv_buf_pool_accepts_concurrent_last_owner_drops() {
 }
 
 #[tokio::test]
+async fn accepted_large_read_keeps_one_allocation_through_completion() {
+    let declared = RECV_POOL_MAX_BUFFER_BYTES * 2;
+    let (_, mut pull) = ready_connections(
+        ConnectionConfig::new(Role::Client, SocketType::Push),
+        ConnectionConfig::new(Role::Server, SocketType::Pull)
+            .max_message_size(declared + size_of::<omq_proto::Payload>()),
+    );
+    let prefix = b"buffered prefix";
+    let mut wire = vec![0x02];
+    wire.extend_from_slice(&(declared as u64).to_be_bytes());
+    wire.extend_from_slice(prefix);
+    pull.handle_input(Bytes::from(wire)).unwrap();
+    let config = PeerDriverConfig {
+        large_message_threshold: 128 * 1024,
+        ..PeerDriverConfig::default()
+    };
+    let pool = RecvBufPool::new();
+    let mut pending = PendingLargeRead::begin(&mut pull, &config, &pool)
+        .unwrap()
+        .unwrap();
+    let ReceiveBody::Stream { buf, pooled } = &pending.buf else {
+        panic!("expected an owned receive buffer");
+    };
+    assert!(!pooled);
+    assert_eq!(buf.capacity(), declared);
+    let allocation = buf.as_ptr();
+    let mut reader = tokio::io::repeat(b'!').take((declared - prefix.len()) as u64);
+    while !pending.complete() {
+        pending.read(&mut reader).await.unwrap();
+        let ReceiveBody::Stream { buf, .. } = &pending.buf else {
+            unreachable!()
+        };
+        assert_eq!(buf.as_ptr(), allocation, "receive body moved during a read");
+        assert_eq!(buf.capacity(), declared);
+    }
+    pending.finish(&mut pull, &pool).unwrap();
+    let message = pull.poll_message().unwrap();
+    let body = message.part_bytes(0).unwrap();
+    assert_eq!(body.as_ptr(), allocation);
+    assert_eq!(&body[..prefix.len()], prefix);
+    assert!(body[prefix.len()..].iter().all(|byte| *byte == b'!'));
+}
+
+#[tokio::test]
+async fn unpooled_large_read_grows_with_received_bytes() {
+    let declared = RECV_POOL_MAX_BUFFER_BYTES * 2;
+    let prefix = b"buffered prefix";
+    let (_, mut pull) = ready_push_pull_connections();
+    let mut wire = vec![0x02];
+    wire.extend_from_slice(&(declared as u64).to_be_bytes());
+    wire.extend_from_slice(prefix);
+    pull.handle_input(Bytes::from(wire)).unwrap();
+    let config = PeerDriverConfig {
+        large_message_threshold: 128 * 1024,
+        ..PeerDriverConfig::default()
+    };
+    let pool = RecvBufPool::new();
+    let mut pending = PendingLargeRead::begin(&mut pull, &config, &pool)
+        .unwrap()
+        .unwrap();
+    let ReceiveBody::Stream { buf, pooled } = &pending.buf else {
+        panic!("expected an unpooled receive buffer");
+    };
+    assert!(!pooled);
+    assert_eq!(buf.as_ref(), prefix);
+    assert!(
+        buf.capacity() <= prefix.len() + 64 * 1024,
+        "a header allocated the entire declared body: {} bytes",
+        buf.capacity()
+    );
+
+    let mut reader = tokio::io::repeat(b'!').take((declared - prefix.len()) as u64);
+    while !pending.complete() {
+        let before = pending.filled();
+        let n = pending.read(&mut reader).await.unwrap();
+        assert!(n > 0 && n <= 64 * 1024);
+        assert_eq!(pending.filled(), before + n);
+    }
+    pending.finish(&mut pull, &pool).unwrap();
+    let message = pull.poll_message().unwrap();
+    let body = message.part_bytes(0).unwrap();
+    assert_eq!(body.len(), declared);
+    assert_eq!(&body[..prefix.len()], prefix);
+    assert!(body[prefix.len()..].iter().all(|byte| *byte == b'!'));
+    assert_eq!(pool.inner.lock().unwrap().retained_bytes, 0);
+}
+
+#[tokio::test]
+async fn unpooled_large_declaration_keeps_partial_read_bounded() {
+    let declared = isize::MAX as usize;
+    let (_, mut pull) = ready_push_pull_connections();
+    let mut wire = vec![0x02];
+    wire.extend_from_slice(&(declared as u64).to_be_bytes());
+    pull.handle_input(Bytes::from(wire)).unwrap();
+    let config = PeerDriverConfig {
+        large_message_threshold: 128 * 1024,
+        ..PeerDriverConfig::default()
+    };
+    let pool = RecvBufPool::new();
+    let mut pending = PendingLargeRead::begin(&mut pull, &config, &pool)
+        .unwrap()
+        .unwrap();
+    let mut reader = &b"partial body"[..];
+    assert_eq!(pending.read(&mut reader).await.unwrap(), 12);
+    assert_eq!(pending.target, declared);
+    assert!(!pending.complete());
+    let ReceiveBody::Stream { buf, .. } = &pending.buf else {
+        panic!("expected an unpooled receive buffer");
+    };
+    assert_eq!(buf.as_ref(), b"partial body");
+    assert!(buf.capacity() <= 64 * 1024);
+    assert_eq!(
+        pending.read(&mut reader).await.unwrap_err().kind(),
+        io::ErrorKind::UnexpectedEof
+    );
+    assert!(pull.poll_message().is_none());
+}
+
+#[tokio::test]
 async fn large_message_direct_read_preserves_buffered_prefix() {
     const MSG_SIZE: usize = 1024 * 1024;
     const PREFIX_PAYLOAD_BYTES: usize = 632_558;

@@ -6,6 +6,7 @@ use bytes::Bytes;
 use bytes::BytesMut;
 
 use crate::error::{Error, Result};
+use crate::flow::DrainBudget;
 use crate::message::{FrameFlags, Message, Payload};
 
 use super::super::command::{self, Command, PeerProperties};
@@ -22,9 +23,13 @@ use super::{Connection, Event, NextFrameInfo, State, decode_command_raw};
 /// hundred bytes at most; this only exists to stop a pre-auth peer from
 /// making us buffer unbounded data during the handshake.
 const MAX_HANDSHAKE_COMMAND: usize = 256 * 1024;
+const INPUT_SERVICE_FRAMES: usize = 256;
+const INPUT_SERVICE_BYTES: usize = 256 * 1024;
 
 impl Connection {
     /// Feed received wire bytes and advance parsing.
+    /// Drain output when [`Self::input_blocked_on_output`] is true, and resume
+    /// pending parsing before supplying another chunk.
     ///
     /// # Errors
     /// Returns errors for invalid framing, handshake failure, size limits, or closure.
@@ -41,6 +46,11 @@ impl Connection {
         if src.is_empty() {
             return Ok(());
         }
+        if self.input.pending || self.input_blocked_on_output() {
+            return Err(Error::Protocol(
+                "drain pending codec work before supplying more input".into(),
+            ));
+        }
         self.peer_heartbeat_ttl = 0;
         self.in_buf.push(src);
         self.drive()
@@ -48,7 +58,7 @@ impl Connection {
 
     #[inline]
     fn drive(&mut self) -> Result<()> {
-        self.input_pending = false;
+        self.input.pending = false;
         #[cfg(feature = "ws")]
         if self.ws_role.is_some() {
             return self.drive_ws();
@@ -59,7 +69,16 @@ impl Connection {
     /// Whether a bounded parse turn left input to service after yielding.
     /// Incomplete frames waiting for more wire bytes do not set this flag.
     pub fn has_pending_input(&self) -> bool {
-        self.input_pending
+        self.input.pending
+    }
+
+    /// Enable bounded parser turns for an I/O driver. Service at most 256
+    /// frames or 256 KiB per turn, stopping between frames. A single frame
+    /// may exceed the byte budget. Drain decoded work and call
+    /// [`Self::resume_input`] while [`Self::has_pending_input`] is true.
+    /// Automatic reply backpressure applies even when this is disabled.
+    pub fn set_input_budget(&mut self, enabled: bool) {
+        self.input.budget = enabled;
     }
 
     /// Resume buffered parsing without admitting more wire input.
@@ -68,7 +87,12 @@ impl Connection {
     }
 
     fn drive_zmtp(&mut self) -> Result<()> {
+        let mut budget = DrainBudget::new(INPUT_SERVICE_FRAMES, INPUT_SERVICE_BYTES);
         loop {
+            if self.pause_input_for_output() {
+                return Ok(());
+            }
+            let before = self.in_buf.len();
             let progress = match self.state {
                 State::AwaitingGreeting => self.try_advance_greeting()?,
                 State::MechanismHandshake => self.try_advance_mechanism()?,
@@ -78,7 +102,20 @@ impl Connection {
             if !progress {
                 return Ok(());
             }
+            if self.input.budget && !budget.account(before - self.in_buf.len()) {
+                self.input.pending = !self.in_buf.is_empty();
+                return Ok(());
+            }
         }
+    }
+
+    #[inline]
+    fn pause_input_for_output(&mut self) -> bool {
+        if self.input_blocked_on_output() {
+            self.input.pending = !self.in_buf.is_empty();
+            return true;
+        }
+        false
     }
 
     fn try_advance_greeting(&mut self) -> Result<bool> {
@@ -194,6 +231,7 @@ impl Connection {
         let Some(hdr) = frame::peek_frame_header(&self.in_buf)? else {
             return Ok(false);
         };
+        self.validate_receive_frame(hdr.flags, hdr.payload_len)?;
         // Complete single-part data messages need no frame or multipart assembly.
         if !self.has_frame_transform()
             && self.pending_parts.is_empty()
@@ -202,14 +240,6 @@ impl Connection {
             && !hdr.flags.more
             && self.in_buf.len() >= hdr.header_len + hdr.payload_len
         {
-            if let Some(max) = self.config.data_size_limit()
-                && hdr.payload_len.saturating_add(size_of::<Payload>()) > max
-            {
-                return Err(Error::MessageTooLarge {
-                    size: hdr.payload_len,
-                    max,
-                });
-            }
             self.in_buf.advance(hdr.header_len);
             if hdr.payload_len <= crate::message::MAX_INLINE_MESSAGE {
                 self.messages.push_back(Message {
@@ -235,14 +265,6 @@ impl Connection {
             }
             return Ok(true);
         }
-        if let Some(max) = self.wire_frame_size_limit(hdr.flags.command)
-            && hdr.payload_len.saturating_add(size_of::<Payload>()) > max
-        {
-            return Err(Error::MessageTooLarge {
-                size: hdr.payload_len,
-                max,
-            });
-        }
         let pool = if self.has_frame_transform() {
             None
         } else {
@@ -255,7 +277,10 @@ impl Connection {
         Ok(true)
     }
 
-    fn wire_frame_size_limit(&self, command: bool) -> Option<usize> {
+    /// Configured frame allowance, including its payload slot and any wire
+    /// wrapper. Direct receive backends may reserve the full body after
+    /// [`Self::peek_next_frame_payload_size`] accepts it under a finite limit.
+    pub fn receive_frame_size_limit(&self, command: bool) -> Option<usize> {
         #[cfg(feature = "curve")]
         if self.has_frame_transform() {
             // MESSAGE prefix, nonce, tag, and inner flags are wire overhead.
@@ -267,6 +292,28 @@ impl Connection {
                 .map(|max| max.saturating_add(MESSAGE_OVERHEAD));
         }
         self.config.frame_size_limit(command)
+    }
+
+    #[inline]
+    fn validate_receive_frame(&self, flags: FrameFlags, payload_len: usize) -> Result<()> {
+        if let Some(max) = self.receive_frame_size_limit(flags.command) {
+            let frame_size = payload_len.saturating_add(size_of::<Payload>());
+            if frame_size > max {
+                return Err(Error::MessageTooLarge {
+                    size: payload_len,
+                    max,
+                });
+            }
+            // For unwrapped data the header also determines the multipart
+            // total. Reject it before allocating or collecting another body.
+            if self.pending_size != 0 && !flags.command && !self.has_frame_transform() {
+                let size = self.pending_size.saturating_add(frame_size);
+                if size > max {
+                    return Err(Error::MessageTooLarge { size, max });
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Run the post-handshake dispatch on an already-assembled wire frame:
@@ -397,7 +444,11 @@ impl Connection {
             } => {
                 self.peer_heartbeat_ttl = ttl_deciseconds;
                 let pong = Command::Pong { context };
+                let before = self.pending_transmit_size();
                 self.write_outbound_commands(&[pong])?;
+                let after = self.pending_transmit_size();
+                self.pending_pong_bytes = self.pending_pong_bytes.saturating_add(after - before);
+                self.pong_queued_through = after;
             }
             Command::Pong { .. } => {
                 // Engine tracks last-received timestamp on every byte; PONG
@@ -445,7 +496,10 @@ impl Connection {
     /// Errors propagate the same protocol violations as the frame decoder
     /// (reserved bits set, COMMAND+MORE).
     pub fn peek_next_frame_payload_size(&self) -> Result<Option<NextFrameInfo>> {
-        if !matches!(self.state, State::Ready) {
+        if !matches!(self.state, State::Ready)
+            || self.input.pending
+            || self.input_blocked_on_output()
+        {
             return Ok(None);
         }
         #[cfg(feature = "ws")]
@@ -455,14 +509,7 @@ impl Connection {
         let Some(hdr) = frame::peek_frame_header(&self.in_buf)? else {
             return Ok(None);
         };
-        if let Some(max) = self.wire_frame_size_limit(hdr.flags.command)
-            && hdr.payload_len.saturating_add(size_of::<Payload>()) > max
-        {
-            return Err(Error::MessageTooLarge {
-                size: hdr.payload_len,
-                max,
-            });
-        }
+        self.validate_receive_frame(hdr.flags, hdr.payload_len)?;
         let buffered_total = self.in_buf.len();
         let prefix_after_header = buffered_total.saturating_sub(hdr.header_len);
         let buffered_payload_prefix = prefix_after_header.min(hdr.payload_len);
@@ -489,28 +536,16 @@ impl Connection {
     /// While in `AwaitingSuppliedPayload`, [`handle_input`](Self::handle_input)
     /// will reject further bytes — direct-recv has claimed the wire.
     pub fn begin_supplied_payload(&mut self) -> Option<usize> {
-        if !matches!(self.state, State::Ready) {
+        let info = self.peek_next_frame_payload_size().ok().flatten()?;
+        if self.in_buf.len() != info.header_len {
             return None;
         }
-        #[cfg(feature = "ws")]
-        if self.ws_role.is_some() {
-            return None;
-        }
-        let hdr = frame::peek_frame_header(&self.in_buf).ok().flatten()?;
-        if let Some(max) = self.wire_frame_size_limit(hdr.flags.command)
-            && hdr.payload_len.saturating_add(size_of::<Payload>()) > max
-        {
-            return None;
-        }
-        if self.in_buf.len() != hdr.header_len {
-            return None;
-        }
-        self.in_buf.advance(hdr.header_len);
+        self.in_buf.advance(info.header_len);
         self.state = State::AwaitingSuppliedPayload {
-            flags: hdr.flags,
-            payload_len: hdr.payload_len,
+            flags: info.flags,
+            payload_len: info.payload_len,
         };
-        Some(hdr.payload_len)
+        Some(info.payload_len)
     }
 
     /// Like [`begin_supplied_payload`](Self::begin_supplied_payload) but
@@ -523,34 +558,19 @@ impl Connection {
     /// Returns `None` when `begin_supplied_payload`'s preconditions fail
     /// (not Ready, no complete header).
     pub fn begin_supplied_payload_with_prefix(&mut self) -> Option<(usize, Payload)> {
-        if !matches!(self.state, State::Ready) {
-            return None;
-        }
-        #[cfg(feature = "ws")]
-        if self.ws_role.is_some() {
-            return None;
-        }
-        let hdr = frame::peek_frame_header(&self.in_buf).ok().flatten()?;
-        if let Some(max) = self.wire_frame_size_limit(hdr.flags.command)
-            && hdr.payload_len.saturating_add(size_of::<Payload>()) > max
-        {
-            return None;
-        }
-        if self.in_buf.len() < hdr.header_len {
-            return None;
-        }
-        self.in_buf.advance(hdr.header_len);
-        let prefix_len = self.in_buf.len().min(hdr.payload_len);
+        let info = self.peek_next_frame_payload_size().ok().flatten()?;
+        self.in_buf.advance(info.header_len);
+        let prefix_len = info.buffered_payload_prefix;
         let prefix = if prefix_len > 0 {
             self.in_buf.split_to(prefix_len)
         } else {
             Payload::new()
         };
         self.state = State::AwaitingSuppliedPayload {
-            flags: hdr.flags,
-            payload_len: hdr.payload_len,
+            flags: info.flags,
+            payload_len: info.payload_len,
         };
-        Some((hdr.payload_len, prefix))
+        Some((info.payload_len, prefix))
     }
 
     /// Claim the next frame and copy its buffered prefix directly into the
@@ -637,14 +657,7 @@ impl Connection {
                 self.process_mechanism_command(payload.as_bytes())
             }
             State::Ready => {
-                if let Some(max) = self.wire_frame_size_limit(flags.command)
-                    && payload.len().saturating_add(size_of::<Payload>()) > max
-                {
-                    return Err(Error::MessageTooLarge {
-                        size: payload.len(),
-                        max,
-                    });
-                }
+                self.validate_receive_frame(flags, payload.len())?;
                 self.decode_assembled_frame(flags, payload)
             }
             _ => Err(Error::Protocol(
@@ -661,10 +674,11 @@ impl Connection {
             ws_codec::WsRole::Client => ws_codec::WsRole::Server,
             ws_codec::WsRole::Server => ws_codec::WsRole::Client,
         };
-        let mut service = self.config.ws_input_budget.then(super::ws::Service::new);
+        let mut service =
+            (self.input.budget || self.config.ws_input_budget).then(super::ws::Service::new);
 
         loop {
-            if matches!(self.state, State::Closed) {
+            if matches!(self.state, State::Closed) || self.pause_input_for_output() {
                 return Ok(());
             }
             let before = self.in_buf.len();
@@ -790,7 +804,63 @@ impl Connection {
                 "WS frame too large: {payload_len} bytes (max {cap})"
             )));
         }
+        if !self.ws_close_sent {
+            self.validate_ws_receive_header(header, payload_len)?;
+        }
         Ok(payload_len)
+    }
+
+    #[cfg(feature = "ws")]
+    fn validate_ws_receive_header(
+        &self,
+        header: &super::super::ws_codec::WsFrameHeader,
+        payload_len: usize,
+    ) -> Result<()> {
+        use super::super::{ws_codec, zws};
+        let (total, flag) = match header.opcode {
+            ws_codec::OP_BINARY_CODE => {
+                if self.ws_fragment.is_some() {
+                    return Err(Error::Protocol(
+                        "new WS binary frame before fragmented message completed".into(),
+                    ));
+                }
+                let flag = (payload_len > 0)
+                    .then(|| self.in_buf.peek_array_at::<1>(header.header_len))
+                    .flatten()
+                    .map(|value| value[0] ^ if header.masked { header.mask_key[0] } else { 0 });
+                (payload_len, flag)
+            }
+            ws_codec::OP_CONTINUATION_CODE => {
+                let Some(fragment) = self.ws_fragment.as_ref() else {
+                    return Err(Error::Protocol(
+                        "WS continuation frame without initial binary frame".into(),
+                    ));
+                };
+                if fragment.count == super::ws::MAX_FRAGMENTS {
+                    return Err(Error::Protocol("WS fragment limit exceeded".into()));
+                }
+                let total = fragment
+                    .bytes
+                    .len()
+                    .checked_add(payload_len)
+                    .ok_or_else(|| Error::Protocol("WS fragmented message size overflow".into()))?;
+                (total, fragment.bytes.first().copied())
+            }
+            _ => return Ok(()),
+        };
+        if let Some(max) = self.ws_payload_cap()
+            && total > max
+        {
+            return Err(Error::Protocol(format!(
+                "WS fragmented message too large: {total} bytes (max {max})"
+            )));
+        }
+        if matches!(self.state, State::Ready)
+            && let Some(flag) = flag
+        {
+            self.validate_receive_frame(zws::zws_to_flags(flag)?, total.saturating_sub(1))?;
+        }
+        Ok(())
     }
 
     #[cfg(feature = "ws")]
@@ -803,7 +873,7 @@ impl Connection {
             .as_mut()
             .is_some_and(|service| !service.account(bytes))
         {
-            self.input_pending = !self.in_buf.is_empty();
+            self.input.pending = !self.in_buf.is_empty();
             return false;
         }
         true
@@ -812,8 +882,8 @@ impl Connection {
     #[cfg(feature = "ws")]
     fn ws_payload_cap(&self) -> Option<usize> {
         if matches!(self.state, State::Ready) {
-            self.wire_frame_size_limit(false)
-                .zip(self.wire_frame_size_limit(true))
+            self.receive_frame_size_limit(false)
+                .zip(self.receive_frame_size_limit(true))
                 .map(|(data, command)| {
                     data.max(command)
                         .saturating_sub(size_of::<Payload>())
@@ -931,14 +1001,7 @@ impl Connection {
                 .map(|()| Some(true));
         }
 
-        if let Some(max) = self.config.data_size_limit()
-            && zmtp_payload_len.saturating_add(size_of::<Payload>()) > max
-        {
-            return Err(Error::MessageTooLarge {
-                size: zmtp_payload_len,
-                max,
-            });
-        }
+        self.validate_receive_frame(FrameFlags::LAST, zmtp_payload_len)?;
 
         if zmtp_payload_len > 0 {
             self.in_buf.read_into(zmtp_payload_len, &mut data);

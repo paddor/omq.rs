@@ -70,6 +70,9 @@ impl<'events> Activation<'_, 'events> {
                 return Ok(PreActivationStep::Close);
             }
             let want_write = self.connection.has_pending_transmit() || !self.eq.is_empty();
+            let resume_input = self.pending_input_error.is_none()
+                && !self.connection.input_blocked_on_output()
+                && self.connection.has_pending_input();
 
             tokio::select! {
                 biased;
@@ -145,7 +148,7 @@ impl<'events> Activation<'_, 'events> {
                     res?;
                 }
 
-                () = tokio::task::yield_now(), if !self.peer_events.has_pending() && (self.peer_events.needs_drain() || (self.pending_input_error.is_none() && self.connection.has_pending_input())) => {
+                () = tokio::task::yield_now(), if !self.peer_events.has_pending() && (self.peer_events.needs_drain() || resume_input) => {
                     if !self.peer_events.needs_drain() {
                         *self.pending_input_error = self.connection.resume_input().err();
                     }

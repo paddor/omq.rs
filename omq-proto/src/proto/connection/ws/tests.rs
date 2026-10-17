@@ -114,6 +114,36 @@ fn fragmented_message_limit_counts_body_and_payload_slot() {
 }
 
 #[test]
+fn multipart_limit_rejects_a_ws_header_before_collecting_its_body() {
+    for fragmented in [false, true] {
+        let mut connection = ready();
+        connection.config.max_message_size = Some(256);
+        let mut first = vec![FLAG_MORE];
+        first.extend_from_slice(&[7; 64]);
+        connection
+            .handle_input(frame(true, OP_BINARY_CODE, &first))
+            .unwrap();
+        if fragmented {
+            connection
+                .handle_input(frame(false, OP_BINARY_CODE, &[FLAG_FINAL]))
+                .unwrap();
+            // The first part uses 128 bytes including its slot. This next
+            // body's declaration would take the total to 257 bytes.
+            assert!(matches!(
+                connection.handle_input(Bytes::from_static(&[0x80, 65])),
+                Err(Error::MessageTooLarge { .. })
+            ));
+        } else {
+            assert!(matches!(
+                connection.handle_input(Bytes::from_static(&[0x82, 66, FLAG_FINAL])),
+                Err(Error::MessageTooLarge { .. })
+            ));
+        }
+        assert!(connection.poll_message().is_none());
+    }
+}
+
+#[test]
 fn small_message_limit_accepts_full_control_frames() {
     let mut connection = ready();
     connection.config.max_message_size = Some(size_of::<crate::message::Payload>());

@@ -30,9 +30,11 @@ limits](zws.md) and the source.
 | `bindings/` | Language-specific ownership and value conversion |
 | `omq-bench` | Benchmark peers, result storage, and charts |
 
-`Connection` in `omq-proto` consumes bytes and emits decoded events or wire
-output. It never owns a socket or runtime. `omq-tokio` decides when to read,
-write, and deliver those events. The queue crates are maintained in the
+`Connection` in `omq-proto` validates receive sizes and emits decoded events
+or wire output, with bounded parser turns and a pause when automatic replies
+need drainage. Drivers honor that pause while servicing writes and lifecycle
+work; accepted finite-size direct receives fill one allocated destination.
+The codec never owns a socket or runtime; the queue crates are maintained in the
 separate [fanring.rs workspace](https://github.com/paddor/fanring.rs).
 
 ## Runtime and task ownership

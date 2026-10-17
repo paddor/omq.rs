@@ -344,7 +344,11 @@ where
             let message_blocked = !control.discard_receive
                 && (pending_receive.is_some()
                     || recv_direct.as_ref().is_some_and(RecvSink::peer_blocked));
-            let recv_blocked = message_blocked || peer_events.blocked();
+            // Bound automatic replies without stopping reads for application
+            // output: two peers with pending data must still read each other.
+            let replies_blocked = connection.input_blocked_on_output();
+            let recv_blocked = message_blocked || peer_events.blocked() || replies_blocked;
+            let resume_input = !replies_blocked && connection.has_pending_input();
             let want_read = pending_input_error.is_none()
                 && !recv_blocked
                 && !connection.has_pending_input()
@@ -480,8 +484,8 @@ where
                     recv_direct.as_mut().unwrap().receive_space_ready().await;
                 }, if message_blocked && recv_direct.is_some() && authenticated_sender.is_none() => {}
 
-                () = tokio::task::yield_now(), if !message_blocked && !peer_events.has_pending() && (peer_events.needs_drain() || (pending_input_error.is_none() && (connection.has_pending_input() || discard_pending))) => {
-                    if !peer_events.needs_drain() && connection.has_pending_input() && !discard_pending {
+                () = tokio::task::yield_now(), if !message_blocked && !peer_events.has_pending() && (peer_events.needs_drain() || (pending_input_error.is_none() && (resume_input || discard_pending))) => {
+                    if !peer_events.needs_drain() && resume_input && !discard_pending {
                         pending_input_error = connection.resume_input().err();
                     }
                 }

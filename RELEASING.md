@@ -27,6 +27,9 @@ PUB/SUB churn, ROUTER/DEALER churn, HWM reconnect, WebSocket
 throughput, WebSocket reconnect, large-message throughput, compression
 with lz4/zstd, PLAIN, CURVE, multi-socket, inproc cross-thread,
 cancel safety, and driver control responsiveness under stalled writes.
+`omq_soak_network_byte_limit` checks shared byte budgets on 1/2/4 IO lanes,
+mixed transports, canceled sends, shutdown, and heap/FD stability.
+It accepts `OMQ_SOAK_START_EPOCH` to replay a later phase with the same seed.
 
 Set duration with `OMQ_SOAK_DURATION_SECS` (default 600s). `Context::new()`
 uses one dedicated background IO thread. `OMQ_IO_THREADS=N` selects N

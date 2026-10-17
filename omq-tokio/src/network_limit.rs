@@ -456,6 +456,16 @@ impl Local {
     }
 
     fn publish(&mut self) {
+        // A pending batch cannot use a partial balance. Return it before
+        // advertising demand so fragments on other lanes cannot prevent an
+        // indivisible datagram at the allocator's cursor from ever fitting.
+        if self
+            .waiters
+            .front()
+            .is_some_and(|w| self.credit < w.minimum)
+        {
+            self.return_credit();
+        }
         // A fully used IO allowance predicts another operation. Refill at
         // half a quantum; canceled/idle operations withdraw this demand.
         let prefetch = u64::from(self.active != 0 && self.credit <= self.mailbox.quantum / 2);
@@ -479,9 +489,13 @@ impl Local {
         self.mailbox.allocator.mark();
     }
 
-    fn return_idle(&mut self) {
+    fn return_credit(&mut self) {
         self.returned = self.returned.wrapping_add(self.credit);
         self.credit = 0;
+    }
+
+    fn return_idle(&mut self) {
+        self.return_credit();
         self.publish();
     }
 
@@ -539,6 +553,10 @@ impl Gate {
             self.cancel_wait();
             return Poll::Ready(0);
         }
+        // Queue a useful batch, not just the transport's smallest operation.
+        // Otherwise a stream can receive only a few bytes per turn while a
+        // competing datagram consumes its entire packet on every turn.
+        let minimum = wanted.min(self.mailbox.quantum.max(minimum as u64) as usize);
         let granted = LOCAL.with(|locals| {
             let mut locals = locals.borrow_mut();
             let local = locals
@@ -556,12 +574,6 @@ impl Gate {
             }
             if local.credit < minimum as u64 {
                 local.collect();
-                // A stream may have left less than the next datagram needs.
-                // Return that remainder so several lanes cannot pin the
-                // entire burst in unusable packet fragments.
-                if minimum as u64 > self.mailbox.quantum && local.credit < minimum as u64 {
-                    local.return_idle();
-                }
             }
             if local.waiters.front().is_some_and(|w| w.id == self.id)
                 && local.credit >= minimum as u64

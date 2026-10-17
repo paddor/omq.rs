@@ -308,6 +308,86 @@ async fn short_and_pending_writes_return_unused_credit() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn streams_make_bounded_progress_beside_large_datagrams() {
+    let allocator = Allocator::new(
+        NetworkRateLimits {
+            ingress: None,
+            egress: Some(ByteRateLimit::new(1000, 1000)),
+        },
+        1,
+    );
+    let lane = allocator.lanes()[0].clone();
+    let cancel = CancellationToken::new();
+    let allocator_task = tokio::spawn(allocator.run(cancel.clone()));
+    let lane_task = tokio::spawn(lane.clone().run(cancel.clone()));
+    let mut datagram = lane.egress().unwrap();
+    let stop_datagrams = CancellationToken::new();
+    let stopped = stop_datagrams.clone();
+    let datagrams = tokio::spawn(async move {
+        let mut bytes = 0;
+        loop {
+            tokio::select! {
+                biased;
+                () = stopped.cancelled() => return bytes,
+                n = datagram.acquire(600) => {
+                    datagram.finish(n, n);
+                    bytes += n;
+                }
+            }
+        }
+    });
+    let mut stream = lane.egress().unwrap();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        let mut remaining = 8000;
+        while remaining != 0 {
+            let n = std::future::poll_fn(|cx| stream.poll(cx, remaining, 1)).await;
+            stream.finish(n, n);
+            remaining -= n;
+        }
+    })
+    .await
+    .expect("a stream must get useful batches while whole datagrams compete");
+    stream.cancel_wait();
+    stop_datagrams.cancel();
+    assert!(
+        datagrams.await.unwrap() >= 6000,
+        "datagrams must progress too"
+    );
+    cancel.cancel();
+    allocator_task.await.unwrap();
+    lane_task.await.unwrap();
+}
+
+#[test]
+fn partial_stream_balances_cannot_pin_a_datagrams_burst() {
+    let mut b = bucket(1500, 1500, 4);
+    let cx = Context::from_waker(Waker::noop());
+    let mut streams = Vec::new();
+    for account in &mut b.accounts[1..] {
+        // Deliver exactly one grant before each short write. No prefetch
+        // grant hides the three 186-byte unusable balances in this schedule.
+        account.totals.grant(187, &account.mailbox.granted);
+        b.held += 187;
+        b.available -= 187;
+        let mut gate = Gate::new(account.mailbox.clone());
+        assert_eq!(gate.poll(&cx, 187, 1), Poll::Ready(187));
+        gate.finish(187, 1);
+        assert!(gate.poll(&cx, 187, 1).is_pending());
+        streams.push(gate);
+    }
+    let mut datagram = Gate::new(b.accounts[0].mailbox.clone());
+    assert!(datagram.poll(&cx, 1200, 1200).is_pending());
+    b.service(b.updated);
+    assert_eq!(
+        datagram.poll(&cx, 1200, 1200),
+        Poll::Ready(1200),
+        "partial stream balances must not trap a whole datagram"
+    );
+    datagram.finish(1200, 1200);
+    drop(streams);
+}
+
+#[tokio::test(start_paused = true)]
 async fn lane_shutdown_does_not_reissue_previous_grants() {
     let allocator = Allocator::new(
         NetworkRateLimits {

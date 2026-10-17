@@ -37,6 +37,26 @@ static async Task ShutdownAndCancellationBoundPoll()
     await pending.WaitAsync(TimeSpan.FromSeconds(2));
 }
 
+static async Task ShutdownCompletesPendingSend()
+{
+    foreach (bool dispose in new[] { false, true })
+    {
+        using var context = new Context();
+        using var push = context.CreateSocket(SocketType.Push, new SocketOptions { Linger = 0 });
+        push.Bind($"inproc://dotnet-send-shutdown-{dispose}");
+        Task pending = push.SendAsync(Message.Text("pending"));
+        Check(!pending.IsCompleted, "send should wait for a peer");
+        if (dispose) context.Dispose();
+        else context.Shutdown();
+        try
+        {
+            await pending.WaitAsync(TimeSpan.FromSeconds(2));
+            throw new Exception("shutdown did not stop pending send");
+        }
+        catch (OmqException error) when (error.Errno == 156384765) { } // ETERM
+    }
+}
+
 static async Task MonitorStopWakesReceive()
 {
     using var context = new Context();
@@ -130,6 +150,7 @@ static void SerializedThreadMigration()
 
 await AsyncSendUnderHwmIsBounded();
 await ShutdownAndCancellationBoundPoll();
+await ShutdownCompletesPendingSend();
 await MonitorStopWakesReceive();
 await ConnectBeforeBind();
 await TryReceivePreservesMultipartAtomicity();

@@ -233,28 +233,9 @@ mod unix {
             }
         }
 
-        // Takes &self (behind Arc), so fds can't be invalidated after close.
-        // No double-close path exists: called once from zmq_close, then dropped.
-        fn close(&self) {
-            #[cfg(target_os = "linux")]
-            if let Some(linux) = &self.0 {
-                // SAFETY: recv_fd and send_fd are valid fds opened by new().
-                unsafe {
-                    libc::close(linux.recv_fd);
-                    libc::close(linux.send_fd);
-                }
-            }
-            #[cfg(not(target_os = "linux"))]
-            if let Some(unix) = &self.0 {
-                // SAFETY: all fds are valid, opened by new().
-                unsafe {
-                    libc::close(unix.recv_read);
-                    libc::close(unix.recv_write);
-                    libc::close(unix.send_read);
-                    libc::close(unix.send_write);
-                }
-            }
-        }
+        // Tasks and receive callbacks may still signal after socket close.
+        // Their Arc owners keep the descriptors open until the final drop.
+        fn close(&self) {}
 
         fn recv_fd(&self) -> std::os::raw::c_int {
             #[cfg(target_os = "linux")]
@@ -299,6 +280,29 @@ mod unix {
                         signal_fd: u.recv_write,
                     },
                 )
+            }
+        }
+    }
+
+    impl Drop for UnixNotifyHandle {
+        fn drop(&mut self) {
+            #[cfg(target_os = "linux")]
+            if let Some(linux) = &self.0 {
+                // SAFETY: recv_fd and send_fd are valid fds opened by new().
+                unsafe {
+                    libc::close(linux.recv_fd);
+                    libc::close(linux.send_fd);
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            if let Some(unix) = &self.0 {
+                // SAFETY: all fds are valid, opened by new().
+                unsafe {
+                    libc::close(unix.recv_read);
+                    libc::close(unix.recv_write);
+                    libc::close(unix.send_read);
+                    libc::close(unix.send_write);
+                }
             }
         }
     }

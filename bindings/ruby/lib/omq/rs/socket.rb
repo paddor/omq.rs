@@ -671,11 +671,13 @@ module OMQ
       #
       # @return [nil]
       def close
-        return if closed?
+        @materialize_lock.synchronize do
+          return if closed?
 
-        @native.close
-        close_wrapper(@recv_io)
-        close_wrapper(@send_io)
+          @native.close
+          close_wrapper(@recv_io)
+          close_wrapper(@send_io)
+        end
         nil
       end
 

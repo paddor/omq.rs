@@ -3,6 +3,44 @@
 require_relative "test_helper"
 
 class LifecycleTest < Minitest::Test
+  def test_close_during_materialization_finishes
+    script = <<~'RUBY'
+      50.times do |index|
+        socket = OMQ.rs(:pull, linger: 0)
+        target = index.even? ? socket : socket.instance_variable_get(:@native)
+        called = Queue.new
+        trace = TracePoint.new(:c_call) do |event|
+          called << true if event.method_id == :materialize
+        end
+        worker = Thread.new do
+          trace.enable(target_thread: Thread.current) do
+            if target.equal?(socket)
+              socket.bind("inproc://close-materializing-#{index}")
+            else
+              target.materialize
+            end
+          rescue IOError, RuntimeError
+            raise unless socket.closed?
+          end
+        end
+        called.pop
+        target.close
+        worker.value
+        raise "socket stayed open" unless socket.closed?
+      end
+    RUBY
+    pid = Process.spawn(RbConfig.ruby, "-I", File.expand_path("../lib", __dir__),
+                        "-romq/rs", "-e", script)
+    _, status = Timeout.timeout(10) { Process.wait2(pid) }
+    pid = nil
+    assert status.success?, "close during materialization failed"
+  ensure
+    if pid
+      Process.kill("KILL", pid)
+      Process.wait(pid)
+    end
+  end
+
   def test_explicit_close_releases_file_descriptors
     assert_fd_growth_at_most(2) do
       20.times { OMQ.rs(:pull, linger: 0).close }

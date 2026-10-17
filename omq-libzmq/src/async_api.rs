@@ -21,6 +21,26 @@ pub struct OmqAsyncTask {
     _join: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
+struct Completion {
+    callback: Option<OMQAsyncCallback>,
+    userdata: usize,
+}
+
+impl Completion {
+    fn finish(&mut self, status: i32) {
+        if let Some(callback) = self.callback.take() {
+            callback(self.userdata as *mut c_void, status);
+        }
+    }
+}
+
+impl Drop for Completion {
+    fn drop(&mut self) {
+        // Runtime teardown may drop the send before it is ever polled.
+        self.finish(ETERM);
+    }
+}
+
 fn decode_message(encoded: *const u8, length: usize) -> Option<Message> {
     if encoded.is_null() || length < 8 {
         return None;
@@ -99,16 +119,19 @@ pub extern "C" fn omq_socket_send_async(
     let cancel = Arc::new(StateSignal::new());
     let cancel_seen = cancel.generation();
     let cancel_wait = cancel.clone();
-    let userdata = userdata as usize;
+    let context = socket.ctx.clone();
+    let mut completion = Completion {
+        callback,
+        userdata: userdata as usize,
+    };
     let join = runtime.spawn(async move {
         let status = tokio::select! {
             biased;
+            () = context.wait_for_shutdown() => ETERM,
             () = cancel_wait.changed_after(cancel_seen) => libc::ECANCELED,
             result = inner.send(message) => result.map_or(ETERM, |()| 0),
         };
-        if let Some(callback) = callback {
-            callback(userdata as *mut c_void, status);
-        }
+        completion.finish(status);
     });
     Box::into_raw(Box::new(OmqAsyncTask {
         cancel,
@@ -197,5 +220,90 @@ mod tests {
             assert_eq!(crate::zmq_close(socket), 0);
             assert_eq!(crate::zmq_ctx_term(context), 0);
         }
+    }
+
+    #[test]
+    fn shutdown_completes_a_muted_send() {
+        let context = crate::zmq_ctx_new();
+        let socket = crate::zmq_socket(context, 8);
+        assert_eq!(
+            crate::zmq_bind(socket, c"inproc://async-shutdown".as_ptr()),
+            0
+        );
+        let mut encoded = [0; 17];
+        encoded[0] = 1;
+        encoded[8] = 1;
+        encoded[16] = b'x';
+        let (sender, receiver) = mpsc::channel::<i32>();
+        let task = omq_socket_send_async(
+            socket,
+            encoded.as_ptr(),
+            encoded.len(),
+            Some(complete),
+            Box::into_raw(Box::new(sender)).cast(),
+        );
+        assert!(!task.is_null());
+        assert_eq!(crate::zmq_ctx_shutdown(context), 0);
+        assert_eq!(
+            receiver.recv_timeout(Duration::from_secs(5)).unwrap(),
+            ETERM
+        );
+        omq_async_task_free(task);
+        assert_eq!(crate::zmq_close(socket), 0);
+        assert_eq!(crate::zmq_ctx_term(context), 0);
+    }
+
+    #[test]
+    #[expect(
+        clippy::used_underscore_binding,
+        reason = "abort the retained task handle to simulate runtime teardown"
+    )]
+    fn dropping_an_unpolled_send_completes_its_callback() {
+        let context = crate::zmq_ctx_new();
+        let socket = crate::zmq_socket(context, 8);
+        assert_eq!(crate::zmq_bind(socket, c"inproc://async-abort".as_ptr()), 0);
+        // SAFETY: this test owns the live socket handle.
+        let handle = unsafe { &*socket.cast::<Arc<OmqSocket>>() }
+            .ctx
+            .handle()
+            .unwrap()
+            .clone();
+        let (paused_tx, paused_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let paused = handle.spawn(async move {
+            paused_tx.send(()).unwrap();
+            let _ = resume_rx.recv_timeout(Duration::from_secs(5));
+        });
+        paused_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let mut encoded = [0; 17];
+        encoded[0] = 1;
+        encoded[8] = 1;
+        encoded[16] = b'x';
+        let (sender, receiver) = mpsc::channel::<i32>();
+        let task = omq_socket_send_async(
+            socket,
+            encoded.as_ptr(),
+            encoded.len(),
+            Some(complete),
+            Box::into_raw(Box::new(sender)).cast(),
+        );
+        assert!(!task.is_null());
+        // SAFETY: task is live until omq_async_task_free below.
+        unsafe { &*task }
+            ._join
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .abort();
+        resume_tx.send(()).unwrap();
+        handle.block_on(paused).unwrap();
+        assert_eq!(
+            receiver.recv_timeout(Duration::from_secs(5)).unwrap(),
+            ETERM
+        );
+        omq_async_task_free(task);
+        assert_eq!(crate::zmq_close(socket), 0);
+        assert_eq!(crate::zmq_ctx_term(context), 0);
     }
 }

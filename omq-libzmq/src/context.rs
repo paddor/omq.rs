@@ -7,6 +7,7 @@ use std::sync::Once;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 
+use omq_tokio::engine::StateSignal;
 use tokio::runtime::Handle;
 
 use crate::notify::NotifyHandle;
@@ -16,6 +17,7 @@ pub(crate) struct OmqContext {
     pub(crate) ctx: OnceLock<omq_tokio::Context>,
     pub(crate) configured_io_threads: AtomicI32,
     pub terminated: Arc<AtomicBool>,
+    shutdown_signal: StateSignal,
     pub socket_count: AtomicI32,
     linger_count: AtomicI32,
     socket_notify: (Mutex<()>, Condvar),
@@ -59,6 +61,7 @@ impl OmqContext {
             ctx: OnceLock::new(),
             configured_io_threads: AtomicI32::new(i32::try_from(n).unwrap_or(i32::MAX)),
             terminated: Arc::new(AtomicBool::new(false)),
+            shutdown_signal: StateSignal::new(),
             socket_count: AtomicI32::new(0),
             linger_count: AtomicI32::new(0),
             socket_notify: (Mutex::new(()), Condvar::new()),
@@ -79,6 +82,7 @@ impl OmqContext {
             ctx: OnceLock::new(),
             configured_io_threads: AtomicI32::new(i32::try_from(ctx.io_threads()).unwrap_or(1)),
             terminated: Arc::new(AtomicBool::new(false)),
+            shutdown_signal: StateSignal::new(),
             socket_count: AtomicI32::new(0),
             linger_count: AtomicI32::new(0),
             socket_notify: (Mutex::new(()), Condvar::new()),
@@ -194,6 +198,7 @@ impl OmqContext {
 
     pub(crate) fn shutdown(&self) {
         self.terminated.store(true, Ordering::Release);
+        self.shutdown_signal.notify_changed();
         self.zap.shutdown();
         let notifies = self
             .sockets
@@ -212,6 +217,12 @@ impl OmqContext {
             notify.signal_send();
         }
         self.notify_socket_change();
+    }
+
+    pub(crate) async fn wait_for_shutdown(&self) {
+        self.shutdown_signal
+            .wait_until(|| self.is_effectively_terminated())
+            .await;
     }
 }
 

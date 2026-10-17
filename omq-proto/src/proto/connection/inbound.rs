@@ -23,7 +23,9 @@ use super::{Connection, Event, NextFrameInfo, State, decode_command_raw};
 /// hundred bytes at most; this only exists to stop a pre-auth peer from
 /// making us buffer unbounded data during the handshake.
 const MAX_HANDSHAKE_COMMAND: usize = 256 * 1024;
-const INPUT_SERVICE_FRAMES: usize = 256;
+// Parsing precedes the driver's smaller delivery batches. Keep normal wire
+// chunks together without making empty-frame streams an unbounded turn.
+const INPUT_SERVICE_FRAMES: usize = 4096;
 const INPUT_SERVICE_BYTES: usize = 256 * 1024;
 
 impl Connection {
@@ -72,8 +74,9 @@ impl Connection {
         self.input.pending
     }
 
-    /// Enable bounded parser turns for an I/O driver. Service at most 256
-    /// frames or 256 KiB per turn, stopping between frames. A single frame
+    /// Enable bounded parser turns for an I/O driver. Byte streams service
+    /// at most 4096 frames or 256 KiB per turn; WebSocket turns use 256
+    /// frames and the same byte cap. Stop between frames, so a single frame
     /// may exceed the byte budget. Drain decoded work and call
     /// [`Self::resume_input`] while [`Self::has_pending_input`] is true.
     /// Automatic reply backpressure applies even when this is disabled.

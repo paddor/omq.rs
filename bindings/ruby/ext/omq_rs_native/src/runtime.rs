@@ -11,12 +11,10 @@ use tokio::task::JoinHandle;
 
 use crate::notify::PipeNotify;
 
-type Job = Box<dyn FnOnce() + Send + 'static>;
-
 struct RuntimeState {
     pid: u32,
     handle: Handle,
-    submit: flume::Sender<Job>,
+    _keepalive: flume::Sender<()>,
 }
 
 static RUNTIME: Mutex<Option<RuntimeState>> = Mutex::new(None);
@@ -34,7 +32,7 @@ pub fn ensure_runtime(io_threads: usize) -> Handle {
     {
         return rt.handle.clone();
     }
-    let (tx, rx) = flume::unbounded::<Job>();
+    let (tx, rx) = flume::bounded::<()>(1);
     let (handle_tx, handle_rx) = flume::bounded::<Handle>(1);
     let n = io_threads.max(1);
     thread::Builder::new()
@@ -54,9 +52,7 @@ pub fn ensure_runtime(io_threads: usize) -> Handle {
             };
             let _ = handle_tx.send(rt.handle().clone());
             rt.block_on(async move {
-                while let Ok(job) = rx.recv_async().await {
-                    job();
-                }
+                let _ = rx.recv_async().await;
             });
         })
         .expect("omq-rs: spawn tokio thread");
@@ -64,21 +60,9 @@ pub fn ensure_runtime(io_threads: usize) -> Handle {
     *guard = Some(RuntimeState {
         pid,
         handle: handle.clone(),
-        submit: tx,
+        _keepalive: tx,
     });
     handle
-}
-
-fn submit_job(io_threads: usize) -> flume::Sender<Job> {
-    let guard = RUNTIME.lock().unwrap();
-    if let Some(ref rt) = *guard
-        && rt.pid == std::process::id()
-    {
-        return rt.submit.clone();
-    }
-    drop(guard);
-    ensure_runtime(io_threads);
-    RUNTIME.lock().unwrap().as_ref().unwrap().submit.clone()
 }
 
 fn recv_blocking<T>(rx: flume::Receiver<T>, missing: &'static str) -> T {
@@ -295,7 +279,7 @@ async fn push_to_ring(
     }
 }
 
-#[expect(clippy::too_many_arguments, clippy::too_many_lines)]
+#[expect(clippy::too_many_arguments)]
 pub fn materialize(
     io_threads: usize,
     socket_type: omq_tokio::SocketType,
@@ -317,120 +301,118 @@ pub fn materialize(
     JoinHandle<()>,
     JoinHandle<()>,
 ) {
-    let (otx, orx) = flume::bounded(1);
-    let tx = submit_job(io_threads);
-    let job: Job = Box::new(move || {
-        let sock = Arc::new(InnerSocket::new(socket_type, options));
+    // Construction only spawns tasks. Keep the GVL while the caller holds
+    // its materialization lock; waiting without it would let close take
+    // the GVL and block on that same lock.
+    let handle = ensure_runtime(io_threads);
+    let _guard = handle.enter();
+    let sock = Arc::new(InnerSocket::new(socket_type, options));
 
-        let s = sock.clone();
-        let sn = send_notify.clone();
-        let send_pump = tokio::spawn(async move {
-            if socket_type == omq_tokio::SocketType::Rep {
-                // REP submits at application send. Watch only failed sends;
-                // a successful retry cancels an obsolete capacity wait.
-                watch_rep_send_capacity(&s, &send_waiting, &sn).await;
-                return;
-            }
-            let mut send_cons = send_cons;
-            let mut budget = omq_proto::flow::DrainBudget::new(256, 1024 * 1024);
-            while let Some(msg) = futures::StreamExt::next(&mut send_cons).await {
-                let byte_len = msg.byte_len();
-                send_cons.release();
-                sn.notify();
-                let _ = s.send(msg).await;
-                if !budget.account(byte_len) {
-                    budget.reset();
-                    tokio::task::yield_now().await;
-                }
-            }
+    let s = sock.clone();
+    let sn = send_notify;
+    let send_pump = tokio::spawn(async move {
+        if socket_type == omq_tokio::SocketType::Rep {
+            // REP submits at application send. Watch only failed sends;
+            // a successful retry cancels an obsolete capacity wait.
+            watch_rep_send_capacity(&s, &send_waiting, &sn).await;
+            return;
+        }
+        let mut send_cons = send_cons;
+        let mut budget = omq_proto::flow::DrainBudget::new(256, 1024 * 1024);
+        while let Some(msg) = futures::StreamExt::next(&mut send_cons).await {
+            let byte_len = msg.byte_len();
+            send_cons.release();
             sn.notify();
-        });
-
-        let s = sock.clone();
-        let rn = recv_notify.clone();
-        let rs = recv_space.clone();
-        let recv_pump = tokio::spawn(async move {
-            loop {
-                match s.recv_for_external_recv().await {
-                    Ok(msg) => {
-                        let mut budget = omq_proto::flow::DrainBudget::WORKER;
-                        let mut more = budget.account(msg.byte_len());
-                        push_to_ring(&mut recv_prod, msg, &rs).await;
-
-                        while more && !recv_prod.is_full() {
-                            match s.try_recv_for_external_recv() {
-                                Ok(msg) => {
-                                    more = budget.account(msg.byte_len());
-                                    push_to_ring(&mut recv_prod, msg, &rs).await;
-                                }
-                                Err(_) => break,
-                            }
-                        }
-
-                        recv_prod.flush();
-                        rn.force_wake();
-                        if !more {
-                            tokio::task::yield_now().await;
-                        }
-                    }
-                    Err(omq_tokio::Error::Closed) => break,
-                    Err(_) => {}
-                }
+            let _ = s.send(msg).await;
+            if !budget.account(byte_len) {
+                budget.reset();
+                tokio::task::yield_now().await;
             }
-        });
-
-        let mut stream = sock.monitor();
-        let peer_ready_sock = sock.clone();
-        let monitor_pump = tokio::spawn(async move {
-            let mut peer_count: u32 = 0;
-            let mut had_peers = false;
-            let mut peer_connected_fired = false;
-            let mut subscriber_joined_fired = false;
-
-            loop {
-                match stream.recv().await {
-                    Ok(event) => {
-                        match &event {
-                            omq_tokio::MonitorEvent::HandshakeSucceeded { .. } => {
-                                peer_count += 1;
-                                had_peers = true;
-                                if !peer_connected_fired {
-                                    peer_connected_fired = true;
-                                    let _ = peer_ready_sock.connections().await;
-                                    peer_connected_notify.force_wake();
-                                }
-                            }
-                            omq_tokio::MonitorEvent::Disconnected { .. } => {
-                                peer_count = peer_count.saturating_sub(1);
-                                if had_peers && peer_count == 0 {
-                                    all_peers_gone_notify.force_wake();
-                                }
-                            }
-                            omq_tokio::MonitorEvent::SubscribeReceived { .. }
-                            | omq_tokio::MonitorEvent::JoinReceived { .. }
-                                if !subscriber_joined_fired =>
-                            {
-                                subscriber_joined_fired = true;
-                                subscriber_joined_notify.force_wake();
-                            }
-                            _ => {}
-                        }
-
-                        let data = convert_monitor_event(&event);
-                        let _ = monitor_tx.try_send(data);
-                        monitor_notify.notify();
-                    }
-                    Err(omq_tokio::MonitorRecvError::Lagged(_)) => {}
-                    Err(_) => break,
-                }
-            }
-        });
-
-        let _ = otx.send((sock, send_pump, recv_pump, monitor_pump));
+        }
+        sn.notify();
     });
-    tx.send(job).expect("omq-rs: tokio runtime gone");
 
-    recv_blocking(orx, "omq-rs: materialize failed")
+    let s = sock.clone();
+    let rn = recv_notify;
+    let rs = recv_space;
+    let recv_pump = tokio::spawn(async move {
+        loop {
+            match s.recv_for_external_recv().await {
+                Ok(msg) => {
+                    let mut budget = omq_proto::flow::DrainBudget::WORKER;
+                    let mut more = budget.account(msg.byte_len());
+                    push_to_ring(&mut recv_prod, msg, &rs).await;
+
+                    while more && !recv_prod.is_full() {
+                        match s.try_recv_for_external_recv() {
+                            Ok(msg) => {
+                                more = budget.account(msg.byte_len());
+                                push_to_ring(&mut recv_prod, msg, &rs).await;
+                            }
+                            Err(_) => break,
+                        }
+                    }
+
+                    recv_prod.flush();
+                    rn.force_wake();
+                    if !more {
+                        tokio::task::yield_now().await;
+                    }
+                }
+                Err(omq_tokio::Error::Closed) => break,
+                Err(_) => {}
+            }
+        }
+    });
+
+    let mut stream = sock.monitor();
+    let peer_ready_sock = sock.clone();
+    let monitor_pump = tokio::spawn(async move {
+        let mut peer_count: u32 = 0;
+        let mut had_peers = false;
+        let mut peer_connected_fired = false;
+        let mut subscriber_joined_fired = false;
+
+        loop {
+            match stream.recv().await {
+                Ok(event) => {
+                    match &event {
+                        omq_tokio::MonitorEvent::HandshakeSucceeded { .. } => {
+                            peer_count += 1;
+                            had_peers = true;
+                            if !peer_connected_fired {
+                                peer_connected_fired = true;
+                                let _ = peer_ready_sock.connections().await;
+                                peer_connected_notify.force_wake();
+                            }
+                        }
+                        omq_tokio::MonitorEvent::Disconnected { .. } => {
+                            peer_count = peer_count.saturating_sub(1);
+                            if had_peers && peer_count == 0 {
+                                all_peers_gone_notify.force_wake();
+                            }
+                        }
+                        omq_tokio::MonitorEvent::SubscribeReceived { .. }
+                        | omq_tokio::MonitorEvent::JoinReceived { .. }
+                            if !subscriber_joined_fired =>
+                        {
+                            subscriber_joined_fired = true;
+                            subscriber_joined_notify.force_wake();
+                        }
+                        _ => {}
+                    }
+
+                    let data = convert_monitor_event(&event);
+                    let _ = monitor_tx.try_send(data);
+                    monitor_notify.notify();
+                }
+                Err(omq_tokio::MonitorRecvError::Lagged(_)) => {}
+                Err(_) => break,
+            }
+        }
+    });
+
+    (sock, send_pump, recv_pump, monitor_pump)
 }
 
 async fn watch_rep_send_capacity(

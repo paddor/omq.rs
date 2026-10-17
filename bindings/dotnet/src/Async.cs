@@ -43,7 +43,6 @@ public static class SocketAsyncExtensions
             root.Free();
             throw new OmqException("send_async", Native.zmq_errno(), "native async send creation failed");
         }
-        state.Task = task;
         using var registration = cancellationToken.Register(static state => Native.omq_async_task_cancel((IntPtr)state!), task);
         try
         {
@@ -112,7 +111,6 @@ public static class SocketAsyncExtensions
     private sealed class AsyncState
     {
         internal readonly TaskCompletionSource<object?> Completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        internal IntPtr Task;
     }
 
     private static readonly Native.AsyncCallback Complete = CompleteNative;
@@ -120,7 +118,6 @@ public static class SocketAsyncExtensions
     {
         var root = GCHandle.FromIntPtr(userdata);
         var state = (AsyncState)root.Target!;
-        while (state.Task == IntPtr.Zero) Thread.Yield();
         if (status == 0) state.Completion.TrySetResult(null);
         else if (status == 125) state.Completion.TrySetCanceled();
         else state.Completion.TrySetException(new OmqException("send_async", status, "native async send failed"));

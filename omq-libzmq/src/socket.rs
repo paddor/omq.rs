@@ -404,7 +404,6 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) -> Result<(), c_int> {
 
     let socket_type = sock.socket_type;
 
-    let recv_notify = sock.notify.recv_notifier();
     let cap = recv_hwm.max(16);
     let (fast_prod, fast_cons) = yring::spsc(cap);
     let (mut pump_prod, pump_cons) = yring::spsc(cap);
@@ -422,7 +421,8 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) -> Result<(), c_int> {
     // Build the direct receive sink. ZAP-authenticated sockets use a shared
     // MPSC queue so every peer's authentication properties stay attached to
     // its messages; the normal hot path retains the SPSC yring.
-    let signal_cb: Arc<dyn Fn() + Send + Sync> = Arc::new(move || recv_notify.signal());
+    let notify = sock.notify.clone();
+    let signal_cb: Arc<dyn Fn() + Send + Sync> = Arc::new(move || notify.signal_recv());
     let recv_sink = if needs_zap {
         let (sink, receiver) = omq_tokio::engine::RecvSink::authenticated(cap, signal_cb.clone());
         *unsafe { sock.authenticated_recv.get_unchecked() } = Some(receiver);
@@ -459,7 +459,9 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) -> Result<(), c_int> {
     // For the single-peer case, the async_channel stays empty
     // and this task idles.
     let s_recv = inner.clone();
+    let pump_notify = sock.notify.clone();
     let recv_pump = tokio::spawn(async move {
+        let recv_notify = pump_notify.recv_notifier();
         while let Ok(msg) = s_recv.recv_for_external_recv().await {
             push_to_pump(&mut pump_prod, msg, recv_notify, &recv_space).await;
         }
@@ -1042,4 +1044,41 @@ fn monitor_frame(event_id: u16, value: i32, endpoint: &str) -> omq_tokio::Messag
         bytes::Bytes::copy_from_slice(&header),
         bytes::Bytes::copy_from_slice(endpoint.as_bytes()),
     ])
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn receive_signal_retains_its_descriptor_after_socket_close() {
+        let context = crate::zmq_ctx_new();
+        let socket = zmq_socket(context, 7);
+        assert_eq!(
+            zmq_bind(socket, c"inproc://retained-recv-signal".as_ptr()),
+            0
+        );
+        // SAFETY: this test owns the live socket handle.
+        let sock = unsafe { &*socket.cast::<Arc<OmqSocket>>() };
+        let fd = sock.notify.recv_fd();
+        let sink = sock.recv_sink_config.get().unwrap().take_sink().unwrap();
+        let omq_tokio::engine::RecvSink::Yring(sink) = sink else {
+            panic!("expected direct receive sink");
+        };
+        let signal = sink.signal;
+        drop(sink.producer);
+        assert_eq!(zmq_close(socket), 0);
+        assert_eq!(crate::zmq_ctx_term(context), 0);
+
+        // A driver may already have committed to signaling when close runs.
+        // The descriptor must stay owned until that callback is dropped.
+        assert_ne!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, -1);
+        signal();
+        let mut count = 0u64;
+        assert_eq!(
+            unsafe { libc::read(fd, (&raw mut count).cast(), size_of::<u64>()) },
+            8,
+        );
+        assert_eq!(count, 1);
+    }
 }

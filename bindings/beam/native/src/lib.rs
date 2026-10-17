@@ -156,8 +156,16 @@ impl NativeSocket {
             } else {
                 let username = self.plain_username.lock().unwrap().clone();
                 let password = self.plain_password.lock().unwrap().clone();
-                if let (Some(username), Some(password)) = (username, password) {
-                    options = options.plain_client(username, password);
+                match (username, password) {
+                    (Some(username), Some(password)) => {
+                        options = options.plain_client(username, password);
+                    }
+                    (None, None) => {}
+                    _ => {
+                        return Err(OmqError::Config(
+                            "PLAIN client requires username and password".into(),
+                        ));
+                    }
                 }
             }
         }
@@ -167,17 +175,39 @@ impl NativeSocket {
             let secret = self.curve_secretkey.lock().unwrap().clone();
             let server_key = self.curve_serverkey.lock().unwrap().clone();
             if self.curve_server.load(Ordering::Acquire) {
-                if let (Some(public), Some(secret)) = (public, secret) {
-                    let keypair = curve_keypair(&public, &secret)?;
-                    options = options.curve_server(keypair);
-                }
-            } else if let (Some(public), Some(secret), Some(server_key)) =
-                (public, secret, server_key)
-            {
+                let (Some(public), Some(secret)) = (public, secret) else {
+                    return Err(OmqError::Config(
+                        "CURVE server requires public and secret keys".into(),
+                    ));
+                };
+                let keypair = curve_keypair(&public, &secret)?;
+                options = options.curve_server(keypair);
+            } else if public.is_some() || secret.is_some() || server_key.is_some() {
+                let (Some(public), Some(secret), Some(server_key)) = (public, secret, server_key)
+                else {
+                    return Err(OmqError::Config(
+                        "CURVE client requires public, secret, and server keys".into(),
+                    ));
+                };
                 let keypair = curve_keypair(&public, &secret)?;
                 let server_public = curve_public_key(&server_key)?;
                 options = options.curve_client(keypair, server_public);
             }
+        }
+        #[cfg(not(feature = "plain"))]
+        if self.plain_server.load(Ordering::Acquire)
+            || self.plain_username.lock().unwrap().is_some()
+            || self.plain_password.lock().unwrap().is_some()
+        {
+            return Err(OmqError::Config("PLAIN support is not enabled".into()));
+        }
+        #[cfg(not(feature = "curve"))]
+        if self.curve_server.load(Ordering::Acquire)
+            || self.curve_publickey.lock().unwrap().is_some()
+            || self.curve_secretkey.lock().unwrap().is_some()
+            || self.curve_serverkey.lock().unwrap().is_some()
+        {
+            return Err(OmqError::Config("CURVE support is not enabled".into()));
         }
         Ok(options)
     }
@@ -1230,7 +1260,8 @@ fn plain_server_credentials<'a>(
     socket: ResourceArc<NativeSocket>,
     credentials: Vec<(Binary<'a>, Binary<'a>)>,
 ) -> Term<'a> {
-    if socket.socket.read().unwrap().is_some() {
+    let materialized_guard = socket.socket.read().unwrap();
+    if materialized_guard.is_some() {
         return err_term(
             env,
             atoms::badarg(),

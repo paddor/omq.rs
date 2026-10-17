@@ -919,6 +919,51 @@ curve_key_helpers_test() ->
         ?assertMatch({error, badarg, _}, omq:curve_public(<<"not-valid-z85-key">>))
     end).
 
+curve_incomplete_options_return_config_test() ->
+    {ok, Ctx} = omq:context(),
+    %% Incomplete settings must fail even when CURVE was not compiled in.
+    Cases = [
+        [{curve_server, true}],
+        [{curve_server, true}, {curve_publickey, <<"public">>}],
+        [{curve_server, true}, {curve_secretkey, <<"secret">>}],
+        [{curve_publickey, <<"public">>}],
+        [{curve_secretkey, <<"secret">>}],
+        [{curve_serverkey, <<"server">>}],
+        [{curve_publickey, <<"public">>}, {curve_secretkey, <<"secret">>}]
+    ],
+    try
+        lists:foreach(fun(Options) ->
+            {ok, Sock} = omq:socket(Ctx, pull),
+            try
+                lists:foreach(fun({Name, Value}) ->
+                    ok = omq:setsockopt(Sock, Name, Value)
+                end, Options),
+                ?assertMatch({error, config, _}, omq:bind(Sock, <<"tcp://127.0.0.1:0">>)),
+                ?assertEqual({ok, <<>>}, omq:getsockopt(Sock, last_endpoint))
+            after
+                ok = omq:close(Sock)
+            end
+        end, Cases)
+    after
+        ok = omq:term(Ctx)
+    end.
+
+plain_incomplete_options_return_config_test() ->
+    {ok, Ctx} = omq:context(),
+    try
+        lists:foreach(fun(Name) ->
+            {ok, Sock} = omq:socket(Ctx, push),
+            try
+                ok = omq:setsockopt(Sock, Name, <<"value">>),
+                ?assertMatch({error, config, _}, omq:connect(Sock, <<"tcp://127.0.0.1:1">>))
+            after
+                ok = omq:close(Sock)
+            end
+        end, [plain_username, plain_password])
+    after
+        ok = omq:term(Ctx)
+    end.
+
 curve_mismatched_keypair_returns_config_test() ->
     with_feature(curve, fun() ->
         {ok, FirstPublic, _} = omq:curve_keypair(),

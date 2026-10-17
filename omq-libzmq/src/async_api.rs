@@ -1,7 +1,6 @@
 //! Small C ABI for operations that must remain asynchronous across FFI.
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
@@ -19,7 +18,6 @@ pub type OMQAsyncCallback = extern "C" fn(*mut c_void, i32);
 #[derive(Debug)]
 pub struct OmqAsyncTask {
     cancel: Arc<StateSignal>,
-    cancelled: Arc<AtomicBool>,
     _join: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
@@ -99,15 +97,14 @@ pub extern "C" fn omq_socket_send_async(
         return std::ptr::null_mut();
     };
     let cancel = Arc::new(StateSignal::new());
-    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancel_seen = cancel.generation();
     let cancel_wait = cancel.clone();
-    let cancelled_wait = cancelled.clone();
     let userdata = userdata as usize;
     let join = runtime.spawn(async move {
-        let cancel_seen = cancel_wait.generation();
         let status = tokio::select! {
+            biased;
+            () = cancel_wait.changed_after(cancel_seen) => libc::ECANCELED,
             result = inner.send(message) => result.map_or(ETERM, |()| 0),
-            () = cancel_wait.changed_after(cancel_seen) => { cancelled_wait.store(true, Ordering::Release); libc::ECANCELED }
         };
         if let Some(callback) = callback {
             callback(userdata as *mut c_void, status);
@@ -115,7 +112,6 @@ pub extern "C" fn omq_socket_send_async(
     });
     Box::into_raw(Box::new(OmqAsyncTask {
         cancel,
-        cancelled,
         _join: Mutex::new(Some(join)),
     }))
 }
@@ -128,7 +124,6 @@ pub extern "C" fn omq_async_task_cancel(task: *mut OmqAsyncTask) {
     }
     // SAFETY: caller retains ownership of the task handle until free.
     let task = unsafe { &*task };
-    task.cancelled.store(true, Ordering::Release);
     task.cancel.notify_changed();
 }
 
@@ -140,4 +135,67 @@ pub extern "C" fn omq_async_task_free(task: *mut OmqAsyncTask) {
     }
     // SAFETY: caller owns this task handle and frees it exactly once.
     drop(unsafe { Box::from_raw(task) });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use super::*;
+
+    extern "C" fn complete(userdata: *mut c_void, status: i32) {
+        // SAFETY: the test transfers one boxed sender to this callback.
+        let sender = unsafe { Box::from_raw(userdata.cast::<mpsc::Sender<i32>>()) };
+        let _ = sender.send(status);
+    }
+
+    #[test]
+    fn cancellation_before_first_poll_stops_ready_and_muted_sends() {
+        for socket_type in [1, 8] {
+            let context = crate::zmq_ctx_new();
+            let socket = crate::zmq_socket(context, socket_type);
+            assert_eq!(
+                crate::zmq_bind(socket, c"inproc://cancel-before-poll".as_ptr()),
+                0
+            );
+            // SAFETY: this test owns the live socket handle.
+            let handle = unsafe { &*socket.cast::<Arc<OmqSocket>>() }
+                .ctx
+                .handle()
+                .unwrap()
+                .clone();
+            let (paused_tx, paused_rx) = mpsc::channel();
+            let (resume_tx, resume_rx) = mpsc::channel();
+            let paused = handle.spawn(async move {
+                paused_tx.send(()).unwrap();
+                let _ = resume_rx.recv_timeout(Duration::from_secs(5));
+            });
+            paused_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+            let mut encoded = [0; 17];
+            encoded[0] = 1;
+            encoded[8] = 1;
+            encoded[16] = b'x';
+            let (sender, receiver) = mpsc::channel::<i32>();
+            let task = omq_socket_send_async(
+                socket,
+                encoded.as_ptr(),
+                encoded.len(),
+                Some(complete),
+                Box::into_raw(Box::new(sender)).cast(),
+            );
+            assert!(!task.is_null());
+            omq_async_task_cancel(task);
+            resume_tx.send(()).unwrap();
+            handle.block_on(paused).unwrap();
+            assert_eq!(
+                receiver.recv_timeout(Duration::from_secs(5)).unwrap(),
+                libc::ECANCELED,
+            );
+            omq_async_task_free(task);
+            assert_eq!(crate::zmq_close(socket), 0);
+            assert_eq!(crate::zmq_ctx_term(context), 0);
+        }
+    }
 }

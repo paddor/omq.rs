@@ -170,8 +170,7 @@ impl OmqContext {
     pub(crate) fn socket_closed(&self) {
         let prev = self.socket_count.fetch_sub(1, Ordering::AcqRel);
         if prev == 1 {
-            let (_, cvar) = &self.socket_notify;
-            cvar.notify_all();
+            self.notify_socket_change();
         }
     }
 
@@ -182,9 +181,15 @@ impl OmqContext {
     pub(crate) fn linger_finished(&self) {
         let prev = self.linger_count.fetch_sub(1, Ordering::AcqRel);
         if prev == 1 {
-            let (_, cvar) = &self.socket_notify;
-            cvar.notify_all();
+            self.notify_socket_change();
         }
+    }
+
+    fn notify_socket_change(&self) {
+        let (lock, cvar) = &self.socket_notify;
+        // Serialize with the predicate-to-wait transition in zmq_ctx_term.
+        let _guard = lock.lock().expect("context socket wait poisoned");
+        cvar.notify_all();
     }
 
     pub(crate) fn shutdown(&self) {
@@ -206,8 +211,7 @@ impl OmqContext {
             notify.signal_recv();
             notify.signal_send();
         }
-        let (_, cvar) = &self.socket_notify;
-        cvar.notify_all();
+        self.notify_socket_change();
     }
 }
 
@@ -526,4 +530,48 @@ fn write_bytes(optval: *mut c_void, optvallen: *mut usize, bytes: &[u8]) -> c_in
         *optvallen = needed;
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::*;
+
+    #[test]
+    fn final_close_and_linger_wake_a_waiter_between_check_and_wait() {
+        for linger in [false, true] {
+            let context = OmqContext::new(1);
+            let counter = if linger {
+                context.linger_started();
+                &context.linger_count
+            } else {
+                context.socket_opened();
+                &context.socket_count
+            };
+            let (lock, cvar) = &context.socket_notify;
+            let guard = lock.lock().unwrap();
+            assert_eq!(counter.load(Ordering::Acquire), 1);
+
+            let closing = context.clone();
+            let thread = std::thread::spawn(move || {
+                if linger {
+                    closing.linger_finished();
+                } else {
+                    closing.socket_closed();
+                }
+            });
+            // Force the last completion after the predicate check, while
+            // this thread still owns the condition variable's mutex.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while counter.load(Ordering::Acquire) != 0 {
+                assert!(Instant::now() < deadline);
+                std::thread::yield_now();
+            }
+            let (guard, waited) = cvar.wait_timeout(guard, Duration::from_secs(5)).unwrap();
+            assert!(!waited.timed_out(), "last completion wake was lost");
+            drop(guard);
+            thread.join().unwrap();
+        }
+    }
 }

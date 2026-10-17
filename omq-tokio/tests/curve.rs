@@ -33,6 +33,44 @@ fn url_of(ep: &Endpoint) -> String {
     }
 }
 
+#[tokio::test]
+async fn curve_delivers_messages_at_the_configured_limit() {
+    for message in [
+        Message::single(Vec::new()),
+        Message::single("x"),
+        Message::single(vec![42; 4096]),
+        Message::multipart([vec![], vec![42; 256]]),
+    ] {
+        let limit = message.max_message_size_len();
+        let keypair = CurveKeypair::generate();
+        let public = keypair.public;
+        let server = Socket::new(
+            SocketType::Pair,
+            Options::default()
+                .curve_server(keypair)
+                .max_message_size(limit),
+        );
+        let client = Socket::new(
+            SocketType::Pair,
+            Options::default()
+                .curve_client(CurveKeypair::generate(), public)
+                .max_message_size(limit),
+        );
+        let endpoint = server.bind(tcp_ep(0)).await.unwrap();
+        client.connect(endpoint).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            client.send(message.clone()).await.unwrap();
+            assert_eq!(server.recv().await.unwrap(), message);
+            server.send(message.clone()).await.unwrap();
+            assert_eq!(client.recv().await.unwrap(), message);
+        })
+        .await
+        .expect("message at the configured limit was not delivered");
+        client.close().await.unwrap();
+        server.close().await.unwrap();
+    }
+}
+
 // Auth tests need a real transport (inproc bypasses the wire codec).
 // IPC on Unix, TCP :0 on Windows.
 #[cfg(unix)]

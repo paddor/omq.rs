@@ -28,7 +28,7 @@ impl TokenBucket {
     }
 
     pub(crate) fn allow(&mut self, now: Instant) -> bool {
-        if now != self.updated {
+        if now > self.updated {
             let elapsed = now.saturating_duration_since(self.updated).as_secs_f64();
             self.updated = now;
             self.tokens = (self.tokens + elapsed * f64::from(self.limit.messages_per_second))
@@ -113,5 +113,20 @@ mod tests {
         assert!(limiter.allow(a, start));
         assert!(!limiter.allow(a, start));
         assert!(limiter.allow(b, start));
+    }
+
+    #[test]
+    fn ip_bucket_ignores_timestamps_from_delayed_callers() {
+        let start = Instant::now();
+        let limiter = SharedIpRateLimiter::new(MessageRateLimit::new(1, 1));
+        let ip = "192.0.2.1".parse().unwrap();
+        assert!(limiter.allow(ip, start));
+        let later = start + Duration::from_secs(1);
+        assert!(limiter.allow(ip, later));
+        assert!(!limiter.allow(ip, start));
+        assert!(
+            !limiter.allow(ip, later),
+            "the same second was refilled twice"
+        );
     }
 }

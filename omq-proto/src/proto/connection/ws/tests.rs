@@ -92,6 +92,42 @@ fn fragment_count_restarts_only_after_completed_binary_message() {
 }
 
 #[test]
+fn fragmented_message_limit_counts_body_and_payload_slot() {
+    for over in [false, true] {
+        let mut connection = ready();
+        connection.config.max_message_size = Some(size_of::<crate::message::Payload>() + 60);
+        let mut prefix = vec![FLAG_FINAL];
+        prefix.extend_from_slice(&[7; 30]);
+        connection
+            .handle_input(frame(false, OP_BINARY_CODE, &prefix))
+            .unwrap();
+        let body = vec![7; 30 + usize::from(over)];
+        let result = connection.handle_input(frame(true, OP_CONTINUATION_CODE, &body));
+        if over {
+            assert!(result.is_err());
+            assert!(connection.poll_message().is_none());
+        } else {
+            result.unwrap();
+            assert_eq!(connection.poll_message().unwrap().byte_len(), 60);
+        }
+    }
+}
+
+#[test]
+fn small_message_limit_accepts_full_control_frames() {
+    let mut connection = ready();
+    connection.config.max_message_size = Some(size_of::<crate::message::Payload>());
+    connection
+        .handle_input(frame(true, OP_PING_CODE, &[7; 125]))
+        .unwrap();
+    assert!(connection.has_pending_transmit());
+    connection
+        .handle_input(frame(true, OP_PONG_CODE, &[7; 125]))
+        .unwrap();
+    assert!(connection.poll_message().is_none());
+}
+
+#[test]
 fn pong_flood_keeps_one_staged_frame_and_latest_pending_payload() {
     let mut connection = ready();
     connection

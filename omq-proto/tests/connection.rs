@@ -196,6 +196,111 @@ fn single_frame_fast_path_enforces_message_overhead_limit() {
     assert!(matches!(err, Error::MessageTooLarge { .. }));
 }
 
+fn pair_configurations() -> Vec<(ConnectionConfig, ConnectionConfig)> {
+    let mut configurations = Vec::new();
+    let client = ConnectionConfig::new(Role::Client, SocketType::Pair);
+    let server = ConnectionConfig::new(Role::Server, SocketType::Pair);
+    configurations.push((client.clone(), server.clone()));
+    #[cfg(feature = "ws")]
+    configurations.push((
+        client.ws_role(omq_proto::proto::connection::WsRole::Client),
+        server.ws_role(omq_proto::proto::connection::WsRole::Server),
+    ));
+    #[cfg(feature = "curve")]
+    for (client, server) in configurations.clone() {
+        use omq_proto::{CurveKeypair, Options};
+        let keypair = CurveKeypair::generate();
+        let public = keypair.public;
+        configurations.push((
+            client.mechanism(
+                Options::default()
+                    .curve_client(CurveKeypair::generate(), public)
+                    .mechanism,
+            ),
+            server.mechanism(Options::default().curve_server(keypair).mechanism),
+        ));
+    }
+    configurations
+        .into_iter()
+        .flat_map(|(client, server)| [(client.clone(), server.clone()), (server, client)])
+        .collect()
+}
+
+#[test]
+fn small_message_limit_still_allows_heartbeats() {
+    for (receiver, sender) in pair_configurations() {
+        let mut receiver = Connection::new(receiver.max_message_size(size_of::<Payload>()));
+        let mut sender = Connection::new(sender.max_message_size(size_of::<Payload>()));
+        pump(&mut sender, &mut receiver);
+        sender.send_message(&Message::single(Bytes::new())).unwrap();
+        sender
+            .send_command(&Command::Ping {
+                ttl_deciseconds: 10,
+                context: Bytes::from_static(b"0123456789abcdef"),
+            })
+            .unwrap();
+        pump(&mut sender, &mut receiver);
+        assert_eq!(receiver.poll_message(), Some(Message::single(Bytes::new())));
+    }
+}
+
+#[test]
+fn message_limit_counts_decoded_parts() {
+    for message in [
+        Message::single(Bytes::new()),
+        Message::single("x"),
+        Message::single(Bytes::from(vec![42; 1024])),
+        Message::multipart([Bytes::new(), Bytes::from(vec![42; 256])]),
+    ] {
+        for (receiver, sender) in pair_configurations() {
+            for over in [false, true] {
+                let limit = message.max_message_size_len() - usize::from(over);
+                let mut receiver = Connection::new(receiver.clone().max_message_size(limit));
+                let mut sender = Connection::new(sender.clone());
+                pump(&mut sender, &mut receiver);
+                sender.send_message(&message).unwrap();
+                let result = transfer(&mut sender, &mut receiver);
+                if over {
+                    assert!(result.is_err(), "oversized message accepted");
+                    assert!(receiver.poll_message().is_none());
+                } else {
+                    result.unwrap();
+                    assert_eq!(receiver.poll_message(), Some(message.clone()));
+                }
+            }
+        }
+    }
+}
+
+fn transfer(sender: &mut Connection, receiver: &mut Connection) -> Result<(), Error> {
+    loop {
+        let wire = sender.poll_transmit();
+        if wire.is_empty() {
+            return Ok(());
+        }
+        sender.advance_transmit(wire.len());
+        receiver.handle_input(wire)?;
+    }
+}
+
+#[test]
+fn heartbeat_allowance_preserves_other_command_limits() {
+    for (receiver, sender) in pair_configurations() {
+        let mut receiver = Connection::new(receiver.max_message_size(size_of::<Payload>()));
+        let mut sender = Connection::new(sender);
+        pump(&mut sender, &mut receiver);
+        while receiver.poll_event().is_some() {}
+        sender
+            .send_command(&Command::Subscribe(Bytes::new()))
+            .unwrap();
+        assert!(matches!(
+            transfer(&mut sender, &mut receiver),
+            Err(Error::MessageTooLarge { .. })
+        ));
+        assert!(receiver.poll_event().is_none());
+    }
+}
+
 #[test]
 fn oversized_handshake_command_rejected() {
     // A peer must not be able to make us buffer an unbounded amount of data
@@ -624,12 +729,12 @@ fn supply_payload_through_curve() {
     let client_kp = CurveKeypair::generate();
     let server_pub = server_kp.public;
     let mut server = Connection::new(
-        ConnectionConfig::new(Role::Server, SocketType::Pull).mechanism(
-            MechanismSetup::CurveServer {
+        ConnectionConfig::new(Role::Server, SocketType::Pull)
+            .max_message_size(4096 + size_of::<Payload>())
+            .mechanism(MechanismSetup::CurveServer {
                 our_keypair: server_kp,
                 options: CurveServerOptions::default(),
-            },
-        ),
+            }),
     );
     let mut client = Connection::new(
         ConnectionConfig::new(Role::Client, SocketType::Push).mechanism(

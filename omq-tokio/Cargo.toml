@@ -671,3 +671,7 @@ path = "tests/xpub_xsub.rs"
 
 [package.metadata.docs.rs]
 all-features = true
+
+[[test]]
+name = "omq_network_rate_limit"
+path = "tests/network_rate_limit.rs"

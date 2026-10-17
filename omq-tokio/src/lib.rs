@@ -28,6 +28,7 @@ pub mod context;
 pub mod diagnostics;
 pub mod engine;
 pub mod exclusive;
+mod network_limit;
 pub mod proxy;
 pub(crate) mod routing;
 pub mod socket;
@@ -66,6 +67,7 @@ pub use omq_proto::options;
 pub use omq_proto::proto;
 
 pub use context::{Context, ContextConfig, ContextCore};
+pub use network_limit::{ByteRateLimit, NetworkRateLimits};
 pub use proxy::{Proxy, ProxyExit};
 pub use socket::{
     ConnectionStatus, DisconnectReason, IdentitySocket, MonitorEvent, MonitorRecvError,

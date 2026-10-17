@@ -155,6 +155,7 @@ impl EndpointWorker {
         (worked || routes.remaining != 0, deadline, blocked)
     }
 
+    #[expect(clippy::too_many_lines, reason = "Ordered peer service phases")]
     fn drive_peer(
         &self,
         source: SocketAddr,
@@ -197,6 +198,23 @@ impl EndpointWorker {
             return turn;
         }
         turn.worked |= io.refill(session) != 0;
+        if let Some(ingress) = &mut peer.ingress {
+            // Each newly admitted sequence can carry at most MAX_DATAGRAM
+            // bytes. Packed packets reconcile all their units on arrival.
+            let wanted =
+                session.pending_receive_credit().min(MESSAGES as u64) as usize * MAX_DATAGRAM;
+            if wanted != 0 {
+                let cx = std::task::Context::from_waker(&peer.budget_waker);
+                if let std::task::Poll::Ready(n) = ingress.poll(&cx, wanted, MAX_DATAGRAM) {
+                    let units = n / MAX_DATAGRAM;
+                    ingress.finish(n, units * MAX_DATAGRAM);
+                    session.grant_receive_credit(units);
+                    turn.worked = true;
+                }
+            } else {
+                ingress.cancel_wait();
+            }
+        }
         if now >= peer.send_retry {
             let failures = stats.send_failures;
             for _ in 0..3 {
@@ -221,7 +239,16 @@ impl EndpointWorker {
                     }
                 }
             }
-            turn.worked |= self.transmit(source, session, stage, now, stats, &mut turn.blocked);
+            turn.worked |= self.transmit(
+                source,
+                session,
+                stage,
+                now,
+                stats,
+                &mut turn.blocked,
+                peer.egress.as_mut(),
+                &peer.budget_waker,
+            );
             if stats.send_failures != failures {
                 peer.send_retry = now + Duration::from_millis(1);
             }
@@ -249,6 +276,7 @@ impl EndpointWorker {
         turn
     }
 
+    #[expect(clippy::too_many_arguments)]
     fn transmit(
         &self,
         source: SocketAddr,
@@ -257,6 +285,8 @@ impl EndpointWorker {
         now: Duration,
         stats: &mut DartStats,
         blocked: &mut bool,
+        mut egress: Option<&mut crate::network_limit::Gate>,
+        waker: &std::task::Waker,
     ) -> bool {
         let started = Instant::now();
         let mut budget = omq_proto::flow::DrainBudget::new(DATA_MESSAGES, BYTES);
@@ -273,6 +303,8 @@ impl EndpointWorker {
                 stats,
                 blocked,
                 &budget,
+                egress.as_deref_mut(),
+                waker,
             ) else {
                 break;
             };
@@ -285,7 +317,7 @@ impl EndpointWorker {
         worked
     }
 
-    #[expect(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, clippy::too_many_lines)]
     fn transmit_batch(
         &self,
         source: SocketAddr,
@@ -295,15 +327,18 @@ impl EndpointWorker {
         stats: &mut DartStats,
         blocked: &mut bool,
         budget: &omq_proto::flow::DrainBudget,
+        mut egress: Option<&mut crate::network_limit::Gate>,
+        waker: &std::task::Waker,
     ) -> Option<(usize, usize)> {
         stage.packet_ends.clear();
         let output = &mut stage.bytes[..BYTES - budget.bytes()];
         let first = session.next_repair().unwrap_or_else(|| session.next_send());
         let grouped = self.socket_type == SocketType::Radio;
         let mut reserved = 0;
-        let (token, length, mut prepared) = if self.shared.options.max_send_rate.is_some() {
-            let (token, length) = session.prepare_data(first, now, grouped, output)?;
-            (token, length, 1)
+        let prepared = if self.shared.options.max_send_rate.is_some() {
+            session
+                .prepare_data(first, now, grouped, output)
+                .map(|(token, length)| (token, length, 1))
         } else {
             session.prepare_packed_prefix(
                 first,
@@ -312,7 +347,13 @@ impl EndpointWorker {
                 &mut reserved,
                 output,
                 budget.remaining_msgs(),
-            )?
+            )
+        };
+        let Some((token, length, mut prepared)) = prepared else {
+            if let Some(gate) = egress {
+                gate.cancel_wait();
+            }
+            return None;
         };
         stage.packet_ends.push(prepared);
         let repair = matches!(token, Transmit::Data { repair: true, .. });
@@ -347,11 +388,28 @@ impl EndpointWorker {
                 break;
             }
         }
+        let allowance = if let Some(gate) = &mut egress {
+            match gate.poll(&std::task::Context::from_waker(waker), total, length) {
+                std::task::Poll::Ready(n) => n,
+                std::task::Poll::Pending => return None,
+            }
+        } else {
+            total
+        };
+        if allowance < total {
+            total = allowance / length * length;
+        }
         let ecn = session.ecn_enabled().then_some(EcnCodepoint::Ect0);
-        match self
+        let result = self
             .io
-            .try_send_segments(source, None, ecn, &output[..total], length)
-        {
+            .try_send_segments(source, None, ecn, &output[..total], length);
+        if let Some(gate) = egress {
+            gate.finish(
+                allowance,
+                result.as_ref().map_or(0, |count| total.min(count * length)),
+            );
+        }
+        match result {
             Ok(count) => {
                 let accepted = count
                     .checked_sub(1)

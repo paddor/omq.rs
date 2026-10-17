@@ -207,6 +207,8 @@ impl SocketDriver {
                 "udp:// bind is only supported on DISH sockets".into(),
             ));
         }
+        let network = self.io_pool.network_primary();
+        network.validate_datagrams(crate::transport::udp::MAX_DATAGRAM_SIZE)?;
         let sock = crate::transport::udp::bind(&endpoint).await?;
         let local = sock.local_addr()?;
         let resolved = match &endpoint {
@@ -227,6 +229,8 @@ impl SocketDriver {
             self.joined_groups.clone(),
             cancel.clone(),
             self.payload_pools.receive(),
+            &self.io_pool,
+            self.io_pool.reserve_thread(),
         );
         let ret = resolved.clone();
         self.udp_listeners.push(UdpListenerEntry {
@@ -246,6 +250,8 @@ impl SocketDriver {
                 "udp:// connect is only supported on RADIO sockets".into(),
             ));
         }
+        let network = self.io_pool.network_primary();
+        network.validate_datagrams(crate::transport::udp::MAX_DATAGRAM_SIZE)?;
         let sock = crate::transport::udp::connect(&endpoint).await?;
         let peer_id = self.next_peer_id;
         self.next_peer_id += 1;
@@ -254,14 +260,23 @@ impl SocketDriver {
         let (inbox_tx, inbox_rx) = crate::engine::control_inbox::channel(64);
         let (data_inbox_tx, data_inbox_rx) =
             crate::engine::data_inbox::channel(self.options.send_hwm.max(1) as usize);
-        let task = spawn_radio_sender(sock, inbox_rx, data_inbox_rx, cancel.clone());
+        let assignment = self.io_pool.reserve_thread();
+        let index = assignment.index();
+        let task = spawn_radio_sender(
+            sock,
+            inbox_rx,
+            data_inbox_rx,
+            cancel.clone(),
+            &self.io_pool,
+            assignment,
+        );
         let handle = fake_handle(inbox_tx, data_inbox_tx, cancel.clone());
 
         // Register the synthetic peer with SendStrategy as an
         // any-groups RADIO target - UDP DISH never sends JOIN, so the
         // sender must fan out unconditionally. The receiver filters.
         self.send_strategy
-            .connection_added_any_groups(peer_id, handle, 0);
+            .connection_added_any_groups(peer_id, handle, index);
 
         // Synthesise Connected so users see the same monitor signal
         // they'd get for any other transport. PeerIdent is the

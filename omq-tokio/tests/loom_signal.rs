@@ -5,6 +5,66 @@ use loom::sync::{Arc, Mutex};
 use loom::thread;
 
 #[test]
+fn byte_grant_publication_cannot_be_lost_during_lane_drain() {
+    loom::model(|| {
+        let granted = Arc::new(AtomicUsize::new(0));
+        let signal = Arc::new(AtomicDataSignal::new(AtomicDataSignal::IDLE, true));
+        let allocator = {
+            let granted = granted.clone();
+            let signal = signal.clone();
+            thread::spawn(move || {
+                granted.store(8, Ordering::Release);
+                signal.mark();
+            })
+        };
+        signal.begin_drain();
+        let collected = granted.load(Ordering::Acquire);
+        signal.clear_after(true);
+        allocator.join().unwrap();
+        assert!(collected == 8 || !signal.is_idle());
+        // Cumulative publication is collected once even after a repeated wake.
+        let remaining = granted.load(Ordering::Acquire) - collected;
+        assert_eq!(collected + remaining, 8);
+    });
+}
+
+#[test]
+fn independently_published_spend_and_return_reports_preserve_burst_capacity() {
+    loom::model(|| {
+        let spent = Arc::new(AtomicUsize::new(0));
+        let returned = Arc::new(AtomicUsize::new(0));
+        let lane = {
+            let spent = spent.clone();
+            let returned = returned.clone();
+            thread::spawn(move || {
+                spent.store(3, Ordering::Release);
+                returned.store(5, Ordering::Release);
+            })
+        };
+        let mut held = 8;
+        let mut available = 0;
+        let mut last = (0, 0);
+        for _ in 0..2 {
+            // Refill before observing reports; unseen spend remains held.
+            available = 8 - held;
+            let current = (
+                spent.load(Ordering::Acquire),
+                returned.load(Ordering::Acquire),
+            );
+            held -= current.0 - last.0 + current.1 - last.1;
+            available += current.1 - last.1;
+            assert!(held + available <= 8);
+            last = current;
+        }
+        lane.join().unwrap();
+        held -= 3 - last.0 + 5 - last.1;
+        available += 5 - last.1;
+        assert_eq!(held, 0);
+        assert!(available <= 8);
+    });
+}
+
+#[test]
 fn observing_lane_generation_before_empty_probe_cannot_hide_publication() {
     loom::model(|| {
         let data = Arc::new(AtomicBool::new(false));

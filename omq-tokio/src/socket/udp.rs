@@ -61,14 +61,46 @@ pub(crate) fn spawn_dish_listener(
     joined: JoinedGroups,
     cancel: CancellationToken,
     pool: Option<crate::PayloadPool>,
+    io_pool: &crate::context::IoPoolHandle,
+    assignment: crate::context::IoThreadLease,
 ) -> JoinHandle<()> {
-    tokio::spawn(async move {
+    let index = assignment.index();
+    let network = io_pool.network_on(index);
+    io_pool.spawn_on(index, async move {
+        let _assignment = assignment;
+        let Ok(sock) = sock.into_std().and_then(UdpSocket::from_std) else { return; };
+        let mut ingress = network.ingress();
         let mut buf = vec![0u8; udp::MAX_DATAGRAM_SIZE];
         loop {
             tokio::select! {
                 () = cancel.cancelled() => break,
-                res = sock.recv_from(&mut buf) => match res {
+                res = async {
+                    // Peeking preserves a complete datagram while waiting for
+                    // credit. This socket has exactly one receive owner.
+                    if let Some(gate) = &mut ingress {
+                        let (length, _) = sock.peek_from(&mut buf).await?;
+                        std::future::poll_fn(|cx| {
+                            let n = std::task::ready!(gate.poll(cx, length, length));
+                            match sock.try_recv_from(&mut buf) {
+                                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                    gate.finish(n, 0);
+                                    match sock.poll_recv_ready(cx) {
+                                        std::task::Poll::Ready(Ok(())) => cx.waker().wake_by_ref(),
+                                        std::task::Poll::Ready(Err(e)) => return std::task::Poll::Ready(Err(e)),
+                                        std::task::Poll::Pending => {}
+                                    }
+                                    std::task::Poll::Pending
+                                }
+                                result => {
+                                    gate.finish(n, result.as_ref().map_or(0, |(n, _)| *n));
+                                    std::task::Poll::Ready(result)
+                                }
+                            }
+                        }).await
+                    } else { sock.recv_from(&mut buf).await }
+                } => match res {
                     Ok((n, _from)) => {
+                        if let Some(gate) = &mut ingress { gate.cancel_wait(); }
                         let Some((group, body)) = udp::decode_datagram(&buf[..n]) else {
                             continue;
                         };
@@ -104,8 +136,15 @@ pub(crate) fn spawn_radio_sender(
     mut inbox_rx: crate::engine::control_inbox::Receiver,
     mut data_inbox_rx: crate::engine::data_inbox::Receiver,
     cancel: CancellationToken,
+    io_pool: &crate::context::IoPoolHandle,
+    assignment: crate::context::IoThreadLease,
 ) -> JoinHandle<()> {
-    tokio::spawn(async move {
+    let index = assignment.index();
+    let network = io_pool.network_on(index);
+    io_pool.spawn_on(index, async move {
+        let _assignment = assignment;
+        let Ok(sock) = sock.into_std().and_then(UdpSocket::from_std) else { return; };
+        let mut egress = network.egress();
         let mut pending: Option<Bytes> = None;
         let mut control_open = true;
         let mut closing = false;
@@ -119,6 +158,7 @@ pub(crate) fn spawn_radio_sender(
                 tokio::task::yield_now().await;
             }
             let _ = budget.account(0);
+            if pending.is_none() && let Some(gate) = &mut egress { gate.cancel_wait(); }
             if closing && pending.is_none() && inbox_rx.is_empty() && data_inbox_rx.is_empty() {
                 break;
             }
@@ -140,7 +180,27 @@ pub(crate) fn spawn_radio_sender(
                     None => control_open = false,
                 },
                 result = async {
-                    sock.send(pending.as_ref().unwrap()).await
+                    let bytes = pending.as_ref().unwrap();
+                    if let Some(gate) = &mut egress {
+                        std::future::poll_fn(|cx| {
+                            let n = std::task::ready!(gate.poll(cx, bytes.len(), bytes.len()));
+                            match sock.try_send(bytes) {
+                                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                    gate.finish(n, 0);
+                                    match sock.poll_send_ready(cx) {
+                                        std::task::Poll::Ready(Ok(())) => cx.waker().wake_by_ref(),
+                                        std::task::Poll::Ready(Err(e)) => return std::task::Poll::Ready(Err(e)),
+                                        std::task::Poll::Pending => {}
+                                    }
+                                    std::task::Poll::Pending
+                                }
+                                result => {
+                                    gate.finish(n, result.as_ref().map_or(0, |n| *n));
+                                    std::task::Poll::Ready(result)
+                                }
+                            }
+                        }).await
+                    } else { sock.send(bytes).await }
                 }, if pending.is_some() => {
                     // Best-effort fire-and-forget; UDP errors
                     // (ECONNREFUSED, ENETUNREACH) are silently dropped.

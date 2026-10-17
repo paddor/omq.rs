@@ -20,7 +20,7 @@ use crate::engine::peer_completion::CompletionProgress;
 use crate::engine::{ActorPeerDriverHandle, PeerDriverCommand, PeerDriverData};
 
 #[expect(clippy::too_many_arguments)]
-pub(crate) fn spawn<T: DriverStream + Send + 'static>(
+pub(crate) fn spawn_on<T: DriverStream + Send + 'static>(
     stream: T,
     peer_id: u64,
     peer_out: PeerOutput,
@@ -29,13 +29,23 @@ pub(crate) fn spawn<T: DriverStream + Send + 'static>(
     capacity: usize,
     pool: Option<crate::PayloadPool>,
     send_pipe: Option<crate::engine::SendPipeConsumer>,
+    io_pool: &crate::context::IoPoolHandle,
+    assignment: crate::context::IoThreadLease,
+    prepare: impl FnOnce(T) -> std::io::Result<T> + Send + 'static,
 ) -> (ActorPeerDriverHandle, tokio::task::JoinHandle<()>) {
     let (inbox_tx, inbox_rx) = crate::engine::control_inbox::channel(64);
     let (data_inbox_tx, data_inbox_rx) = crate::engine::data_inbox::channel(capacity);
     let child_cancel = cancel.child_token();
     let handle_cancel = child_cancel.clone();
     let mut completion = completion.with_stream_disconnect();
-    let task = tokio::spawn(async move {
+    let index = assignment.index();
+    let network = io_pool.network_on(index);
+    let task = io_pool.spawn_on(index, async move {
+        let _assignment = assignment;
+        let Ok(stream) = prepare(stream) else {
+            let _ = completion.complete(omq_proto::DisconnectReason::PeerClosed);
+            return;
+        };
         run_body(
             stream,
             peer_id,
@@ -46,6 +56,7 @@ pub(crate) fn spawn<T: DriverStream + Send + 'static>(
             &mut completion,
             pool,
             send_pipe,
+            network,
         )
         .await;
         let _ = completion.complete(omq_proto::DisconnectReason::PeerClosed);
@@ -64,6 +75,34 @@ pub(crate) fn spawn<T: DriverStream + Send + 'static>(
     )
 }
 
+#[cfg(test)]
+#[expect(clippy::too_many_arguments)]
+fn spawn<T: DriverStream + Send + 'static>(
+    stream: T,
+    peer_id: u64,
+    peer_out: PeerOutput,
+    cancel: &CancellationToken,
+    completion: CompletionProgress,
+    capacity: usize,
+    pool: Option<crate::PayloadPool>,
+    send_pipe: Option<crate::engine::SendPipeConsumer>,
+) -> (ActorPeerDriverHandle, tokio::task::JoinHandle<()>) {
+    let io = crate::context::IoPoolHandle::none();
+    spawn_on(
+        stream,
+        peer_id,
+        peer_out,
+        cancel,
+        completion,
+        capacity,
+        pool,
+        send_pipe,
+        &io,
+        io.reserve_thread(),
+        Ok,
+    )
+}
+
 #[expect(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn run_body<T: DriverStream>(
     stream: T,
@@ -75,8 +114,11 @@ async fn run_body<T: DriverStream>(
     completion: &mut CompletionProgress,
     pool: Option<crate::PayloadPool>,
     mut send_pipe: Option<crate::engine::SendPipeConsumer>,
+    network: crate::network_limit::Lane,
 ) {
-    let (mut reader, mut writer) = stream.split(false);
+    let (reader, writer) = stream.split(false);
+    let mut reader = crate::network_limit::PacedRead::new(reader, network.ingress());
+    let mut writer = crate::network_limit::PacedWrite::new(writer, network.egress());
     let mut buf = vec![0u8; 64 * 1024];
     let mut pending: Option<Bytes> = None;
     let mut pending_offset = 0usize;
@@ -92,6 +134,12 @@ async fn run_body<T: DriverStream>(
             tokio::task::yield_now().await;
         }
         let _ = budget.account(0);
+        if closing || pending_event.is_some() {
+            reader.cancel_wait();
+        }
+        if pending.is_none() {
+            writer.cancel_wait();
+        }
         if let Some(message) = pending_event.take() {
             match peer_out.try_send(peer_id, message, false) {
                 Ok(()) => completion.note_event(),

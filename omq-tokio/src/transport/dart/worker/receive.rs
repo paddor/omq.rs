@@ -115,6 +115,7 @@ impl EndpointWorker {
         count
     }
 
+    #[expect(clippy::too_many_lines, reason = "Exhaustive packet dispatch")]
     fn receive_established(
         &self,
         decoded: Packet<'_>,
@@ -138,6 +139,14 @@ impl EndpointWorker {
             return;
         };
         let elapsed = now.duration_since(timestamp.epoch);
+        let data = matches!(
+            decoded,
+            Packet::First { .. }
+                | Packet::Continuation { .. }
+                | Packet::Data { .. }
+                | Packet::Packed { .. }
+        );
+        let before = session.received_units();
         match decoded {
             Packet::First {
                 session: id,
@@ -211,6 +220,13 @@ impl EndpointWorker {
                     stats.invalid_datagrams += 1;
                 }
             }
+        }
+        if data && let Some(ingress) = &mut peer.ingress {
+            let accepted = peer.session.as_ref().unwrap().received_units() - before;
+            ingress.reconcile(
+                accepted * super::MAX_DATAGRAM as u64,
+                packet.bytes.len() as u64,
+            );
         }
     }
 

@@ -360,7 +360,10 @@ impl SocketDriver {
         let Ok(peer_output) = self.peer_out_tx.try_register() else {
             return;
         };
-        let (handle, task) = crate::transport::stream_raw::spawn(
+        let assignment = self.io_pool.reserve_thread();
+        let io_thread = assignment.index();
+        let migrate = self.io_pool.has_dedicated_io_threads();
+        let (handle, task) = crate::transport::stream_raw::spawn_on(
             stream,
             peer_id,
             crate::engine::actor_output::PeerOutput::actor(peer_output),
@@ -369,6 +372,16 @@ impl SocketDriver {
             self.options.send_hwm.max(1) as usize,
             options.recv_payload_pool.clone(),
             send_pipe_rx,
+            &self.io_pool,
+            assignment,
+            move |stream| {
+                use crate::socket::dispatch::Migratable;
+                if migrate {
+                    stream.migrate()
+                } else {
+                    Ok(stream)
+                }
+            },
         );
 
         self.peers.insert(
@@ -392,13 +405,19 @@ impl SocketDriver {
                 route_id,
                 inproc_inbound: None,
                 task: Some(task),
-                io_thread: 0,
+                io_thread,
             },
         );
         self.ready_peer_count_shared.add();
 
-        self.send_strategy
-            .connection_added(peer_id, route_id, handle, identity.clone(), false, 0);
+        self.send_strategy.connection_added(
+            peer_id,
+            route_id,
+            handle,
+            identity.clone(),
+            false,
+            io_thread,
+        );
         self.recv_strategy.connection_added(peer_id, identity);
     }
 

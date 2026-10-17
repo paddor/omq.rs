@@ -171,6 +171,10 @@ impl IoThreadPool {
     }
 
     fn assign_thread(&self) -> usize {
+        self.assign_thread_preferred(0)
+    }
+
+    fn assign_thread_preferred(&self, preferred: usize) -> usize {
         // Return a logical data-thread index. Multi-IO runtime 0 stays
         // reserved for socket actors and binding control calls.
         let offset = self.data_thread_offset();
@@ -180,7 +184,7 @@ impl IoThreadPool {
             .expect("data-thread offset is in bounds")
             .iter()
             .enumerate()
-            .min_by_key(|(_, t)| t.load.load(Ordering::Relaxed))
+            .min_by_key(|(index, t)| (t.load.load(Ordering::Relaxed), *index != preferred))
             .map_or(0, |(i, _)| i);
         self.threads[best + offset]
             .load
@@ -352,6 +356,19 @@ impl IoPoolHandle {
         }
     }
 
+    /// Prefer the transport's reactor when it is among the least-loaded lanes.
+    #[cfg(feature = "quic")]
+    pub(crate) fn reserve_thread_preferred(&self, preferred: usize) -> IoThreadLease {
+        let index = self
+            .pool
+            .as_ref()
+            .map_or(0, |pool| pool.assign_thread_preferred(preferred));
+        IoThreadLease {
+            pool: self.pool.clone(),
+            index,
+        }
+    }
+
     /// Reserve data IO thread `index` regardless of its current load.
     #[cfg(any(feature = "quic", target_os = "linux"))]
     pub(crate) fn reserve_thread_at(&self, index: usize) -> IoThreadLease {
@@ -373,6 +390,16 @@ impl IoPoolHandle {
             pool.threads
                 .iter()
                 .map(|thread| thread.handle.metrics().num_alive_tasks())
+                .collect()
+        })
+    }
+
+    #[cfg(all(test, feature = "quic"))]
+    pub(crate) fn io_loads(&self) -> Vec<usize> {
+        self.pool.as_ref().map_or_else(Vec::new, |pool| {
+            pool.threads[pool.data_thread_offset()..]
+                .iter()
+                .map(|thread| thread.load.load(Ordering::Relaxed))
                 .collect()
         })
     }

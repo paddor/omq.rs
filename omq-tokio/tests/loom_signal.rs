@@ -1,8 +1,140 @@
 #![cfg(target_pointer_width = "64")]
 
-use loom::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering, fence};
+use loom::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering, fence};
 use loom::sync::{Arc, Mutex};
 use loom::thread;
+
+// Compile the production publication/ledger code with Loom's atomics.
+#[path = "../src/network_limit/ledger.rs"]
+mod byte_ledger;
+
+#[test]
+fn byte_ledger_conserves_credit_across_two_concurrent_lanes() {
+    let mut model = loom::model::Builder::new();
+    model.preemption_bound = Some(2);
+    model.check(|| {
+        let reports = Arc::new([
+            byte_ledger::Reports::default(),
+            byte_ledger::Reports::default(),
+        ]);
+        let grants = Arc::new([AtomicU64::new(0), AtomicU64::new(0)]);
+        let mut accounts = [
+            byte_ledger::Ledger::default(),
+            byte_ledger::Ledger::default(),
+        ];
+        for index in 0..2 {
+            accounts[index].grant(4, &grants[index]);
+        }
+        let lanes: Vec<_> = (0..2)
+            .map(|index| {
+                let reports = reports.clone();
+                let grants = grants.clone();
+                thread::spawn(move || {
+                    let credit = grants[index].load(Ordering::Acquire);
+                    let spent = index as u64 + 1;
+                    reports[index].publish([spent, credit - spent, 1, 0, 0]);
+                })
+            })
+            .collect();
+        let mut available = 0;
+        let mut spent = 0;
+        for _ in 0..2 {
+            for index in 0..2 {
+                let updates = accounts[index].collect(&reports[index]);
+                available += updates.returned;
+                spent += updates.spent;
+                #[cfg(feature = "dart")]
+                assert_eq!((updates.refunded, updates.debt), (0, 0));
+                assert_eq!(
+                    available + spent + accounts.iter().map(|a| a.held).sum::<u64>(),
+                    8
+                );
+                if available != 0 {
+                    available -= 1;
+                    accounts[index].grant(1, &grants[index]);
+                }
+            }
+        }
+        for lane in lanes {
+            lane.join().unwrap();
+        }
+        for index in 0..2 {
+            let updates = accounts[index].collect(&reports[index]);
+            available += updates.returned;
+            spent += updates.spent;
+        }
+        assert_eq!(spent, 3);
+        assert_eq!(available + accounts.iter().map(|a| a.held).sum::<u64>(), 5);
+    });
+}
+
+#[test]
+fn byte_grant_racing_cancellation_is_returned_or_wakes_the_idle_lane() {
+    loom::model(|| {
+        let reports = Arc::new(byte_ledger::Reports::default());
+        reports.demand.store(1, Ordering::Release);
+        let granted = Arc::new(AtomicU64::new(0));
+        let signal = Arc::new(AtomicDataSignal::new(AtomicDataSignal::IDLE, true));
+        let allocator = {
+            let reports = reports.clone();
+            let granted = granted.clone();
+            let signal = signal.clone();
+            thread::spawn(move || {
+                let mut account = byte_ledger::Ledger::default();
+                if reports.demand.load(Ordering::Acquire) != 0 {
+                    account.grant(8, &granted);
+                    signal.mark();
+                }
+                account
+            })
+        };
+        reports.publish([0; 5]); // Cancel before collecting a concurrent grant.
+        signal.begin_drain();
+        let returned = granted.load(Ordering::Acquire);
+        reports.publish([0, returned, 0, 0, 0]);
+        signal.clear_after(true);
+        let mut account = allocator.join().unwrap();
+        let first = account.collect(&reports);
+        assert_eq!(first.returned, returned);
+        if account.held != 0 {
+            assert!(!signal.is_idle());
+        }
+        reports.publish([0, granted.load(Ordering::Acquire), 0, 0, 0]);
+        let last = account.collect(&reports);
+        assert_eq!(first.returned + last.returned, account.granted);
+        assert_eq!(account.held, 0);
+    });
+}
+
+#[test]
+fn byte_ledger_handles_cumulative_counter_wrap_without_duplicate_credit() {
+    loom::model(|| {
+        let reports = byte_ledger::Reports::default();
+        let granted = Arc::new(AtomicU64::new(0));
+        let mut account = byte_ledger::Ledger::default();
+        let initial = u64::MAX - 4;
+        account.grant(initial, &granted);
+        reports.publish([initial, 0, 1, 0, 0]);
+        assert_eq!(account.collect(&reports).spent, initial);
+        let allocator = {
+            let granted = granted.clone();
+            thread::spawn(move || {
+                account.grant(8, &granted);
+                account
+            })
+        };
+        let observed = granted.load(Ordering::Acquire);
+        let credit = observed.wrapping_sub(initial);
+        assert!(credit == 0 || credit == 8);
+        reports.publish([observed, 0, 1, 0, 0]);
+        let mut account = allocator.join().unwrap();
+        let first = account.collect(&reports).spent;
+        reports.publish([granted.load(Ordering::Acquire), 0, 0, 0, 0]);
+        let last = account.collect(&reports).spent;
+        assert_eq!(first + last, 8);
+        assert_eq!(account.held, 0);
+    });
+}
 
 #[test]
 fn byte_grant_publication_cannot_be_lost_during_lane_drain() {

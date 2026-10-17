@@ -2,6 +2,7 @@
 //! each owned runtime publishes batched accounting through its own mailbox.
 
 mod io;
+mod ledger;
 #[cfg(test)]
 mod tests;
 pub(crate) use io::{PacedRead, PacedWrite};
@@ -18,6 +19,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::engine::signal::DataSignal;
+use ledger::{Ledger, Reports};
 
 /// A byte token bucket. Both fields must be nonzero.
 ///
@@ -84,17 +86,6 @@ impl NetworkRateLimits {
         }
         Ok(())
     }
-}
-
-#[derive(Debug, Default)]
-struct Reports {
-    spent: AtomicU64,
-    returned: AtomicU64,
-    demand: AtomicU64,
-    #[cfg(feature = "dart")]
-    refunded: AtomicU64,
-    #[cfg(feature = "dart")]
-    debt: AtomicU64,
 }
 
 #[derive(Debug)]
@@ -174,12 +165,9 @@ impl Lane {
             }
             signal.clear_after(true);
         }
-        LOCAL.with(|locals| {
-            let mut locals = locals.borrow_mut();
-            for mailbox in [&self.ingress, &self.egress].into_iter().flatten() {
-                locals.remove(&key(mailbox));
-            }
-        });
+        // Owned runtime threads destroy LOCAL on exit, after dropping their
+        // drivers. Removing it here lets a driver still being shut down
+        // recreate zeroed counters and collect an old cumulative grant again.
     }
 }
 
@@ -261,14 +249,7 @@ impl Allocator {
 #[derive(Debug)]
 struct Account {
     mailbox: Arc<Mailbox>,
-    granted: u64,
-    spent: u64,
-    returned: u64,
-    held: u64,
-    #[cfg(feature = "dart")]
-    refunded: u64,
-    #[cfg(feature = "dart")]
-    debt: u64,
+    totals: Ledger,
 }
 
 #[derive(Debug)]
@@ -297,14 +278,7 @@ impl Bucket {
                 .into_iter()
                 .map(|mailbox| Account {
                     mailbox,
-                    granted: 0,
-                    spent: 0,
-                    returned: 0,
-                    held: 0,
-                    #[cfg(feature = "dart")]
-                    refunded: 0,
-                    #[cfg(feature = "dart")]
-                    debt: 0,
+                    totals: Ledger::default(),
                 })
                 .collect(),
         }
@@ -336,28 +310,18 @@ impl Bucket {
         // refill after a delayed spend report would manufacture burst credit.
         self.refill(now);
         for account in &mut self.accounts {
-            let spent = account.mailbox.reports.spent.load(Ordering::Acquire);
-            let returned = account.mailbox.reports.returned.load(Ordering::Acquire);
-            let spent_delta = spent.wrapping_sub(account.spent);
-            let returned_delta = returned.wrapping_sub(account.returned);
-            account.spent = spent;
-            account.returned = returned;
-            account.held -= spent_delta + returned_delta;
-            self.held -= spent_delta + returned_delta;
-            self.available += returned_delta;
+            let updates = account.totals.collect(&account.mailbox.reports);
+            self.held -= updates.spent + updates.returned;
+            self.available += updates.returned;
             #[cfg(feature = "dart")]
             {
-                let refunded = account.mailbox.reports.refunded.load(Ordering::Acquire);
-                let debt = account.mailbox.reports.debt.load(Ordering::Acquire);
-                self.debt += u128::from(debt.wrapping_sub(account.debt));
-                let refund = u128::from(refunded.wrapping_sub(account.refunded));
+                self.debt += u128::from(updates.debt);
+                let refund = u128::from(updates.refunded);
                 let repaid = refund.min(self.debt);
                 self.debt -= repaid;
                 self.available = (u128::from(self.available) + refund - repaid)
                     .min(u128::from(self.limit.burst_bytes - self.held))
                     as u64;
-                account.refunded = refunded;
-                account.debt = debt;
             }
         }
         let repaid = self.debt.min(u128::from(self.available));
@@ -385,29 +349,29 @@ impl Bucket {
                     .max(2 * account.mailbox.quantum)
                     .min(self.limit.burst_bytes)
             };
-            let needed = demand.saturating_sub(account.held);
+            let needed = demand.saturating_sub(account.totals.held);
             if needed == 0 {
                 continue;
             }
-            let minimum = requested.saturating_sub(account.held).min(needed);
+            let minimum = requested.saturating_sub(account.totals.held).min(needed);
+            if self.available < minimum {
+                // Preserve this lane's turn while an indivisible packet
+                // accumulates credit. Serving smaller requests behind it
+                // could otherwise keep it below its minimum forever.
+                self.cursor = index;
+                waiting = true;
+                next_bytes = minimum;
+                break;
+            }
             // Never spread an indivisible datagram's credit over several
             // lanes: all lanes could otherwise hold an unusable partial grant.
-            let grant = if self.available >= minimum {
-                needed
-                    .min(account.mailbox.quantum.max(minimum))
-                    .min(self.available)
-            } else {
-                0
-            };
+            let grant = needed
+                .min(account.mailbox.quantum.max(minimum))
+                .min(self.available);
             if grant != 0 {
                 self.available -= grant;
                 self.held += grant;
-                account.held += grant;
-                account.granted = account.granted.wrapping_add(grant);
-                account
-                    .mailbox
-                    .granted
-                    .store(account.granted, Ordering::Release);
+                account.totals.grant(grant, &account.mailbox.granted);
                 account.mailbox.lane.mark();
                 self.cursor = (index + 1) % count;
             }
@@ -511,26 +475,7 @@ impl Local {
             return;
         }
         self.published = snapshot;
-        self.mailbox
-            .reports
-            .spent
-            .store(self.spent, Ordering::Release);
-        self.mailbox
-            .reports
-            .returned
-            .store(self.returned, Ordering::Release);
-        #[cfg(feature = "dart")]
-        {
-            self.mailbox
-                .reports
-                .refunded
-                .store(self.refunded, Ordering::Release);
-            self.mailbox
-                .reports
-                .debt
-                .store(self.debt, Ordering::Release);
-        }
-        self.mailbox.reports.demand.store(demand, Ordering::Release);
+        self.mailbox.reports.publish(snapshot);
         self.mailbox.allocator.mark();
     }
 

@@ -28,7 +28,7 @@ fn outstanding_grants_still_occupy_burst_capacity() {
     assert_eq!(b.held, 100);
     // The first lane reports old spending after a minute. No historical
     // refill can be applied to capacity that was still reserved until now.
-    let spent = b.accounts[0].held;
+    let spent = b.accounts[0].totals.held;
     b.accounts[0]
         .mailbox
         .reports
@@ -51,7 +51,7 @@ fn returned_credit_is_transferred_not_refilled() {
         .demand
         .store(100, Ordering::Release);
     b.service(start);
-    let granted = b.accounts[0].held;
+    let granted = b.accounts[0].totals.held;
     b.accounts[0]
         .mailbox
         .reports
@@ -96,11 +96,11 @@ fn one_byte_burst_rotates_between_waiting_lanes() {
                 .mailbox
                 .reports
                 .spent
-                .store(account.granted, Ordering::Release);
+                .store(account.totals.granted, Ordering::Release);
         }
         b.service(start + Duration::from_secs(second));
     }
-    assert!(b.accounts.iter().all(|a| a.granted != 0));
+    assert!(b.accounts.iter().all(|a| a.totals.granted != 0));
 }
 
 #[tokio::test(start_paused = true)]
@@ -140,14 +140,58 @@ fn whole_datagram_grants_do_not_fragment_a_small_burst() {
     }
     for second in 0..8 {
         b.service(start + Duration::from_secs(second));
-        assert_eq!(b.accounts.iter().filter(|a| a.held != 0).count(), 1);
-        assert!(b.accounts.iter().all(|a| a.held == 0 || a.held >= 1200));
+        assert_eq!(b.accounts.iter().filter(|a| a.totals.held != 0).count(), 1);
+        assert!(
+            b.accounts
+                .iter()
+                .all(|a| a.totals.held == 0 || a.totals.held >= 1200)
+        );
         for a in &b.accounts {
-            a.mailbox.reports.spent.store(a.granted, Ordering::Release);
+            a.mailbox
+                .reports
+                .spent
+                .store(a.totals.granted, Ordering::Release);
         }
         b.service(start + Duration::from_secs(second));
     }
-    assert!(b.accounts.iter().all(|a| a.granted >= 2400));
+    assert!(b.accounts.iter().all(|a| a.totals.granted >= 2400));
+}
+
+#[test]
+fn a_large_datagram_is_not_starved_by_stream_grants() {
+    let mut b = bucket(1000, 100, 2);
+    let start = b.updated;
+    b.available = 0;
+    b.accounts[0]
+        .mailbox
+        .reports
+        .demand
+        .store(100, Ordering::Release);
+    b.accounts[1]
+        .mailbox
+        .reports
+        .demand
+        .store(1, Ordering::Release);
+    for tick in 0..=500 {
+        let now = start + Duration::from_millis(tick);
+        b.service(now);
+        for account in &b.accounts {
+            account
+                .mailbox
+                .reports
+                .spent
+                .store(account.totals.granted, Ordering::Release);
+        }
+        b.service(now);
+    }
+    assert!(
+        b.accounts[0].totals.granted >= 100,
+        "the datagram never received enough credit"
+    );
+    assert!(
+        b.accounts[1].totals.granted > 0,
+        "the stream must also make progress"
+    );
 }
 
 #[test]
@@ -159,7 +203,7 @@ fn delayed_batched_reports_preserve_the_aggregate_envelope() {
     let mut samples = Vec::new();
     for tick in 0..1000u64 {
         for (index, a) in b.accounts.iter().enumerate() {
-            let credit = a.granted - spent[index] - returned[index];
+            let credit = a.totals.granted - spent[index] - returned[index];
             if tick % (index as u64 + 2) == 0 {
                 spent[index] += credit;
             } else if tick % 7 == 0 {
@@ -261,4 +305,34 @@ async fn short_and_pending_writes_return_unused_credit() {
     cancel.cancel();
     allocator_task.await.unwrap();
     lane_task.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn lane_shutdown_does_not_reissue_previous_grants() {
+    let allocator = Allocator::new(
+        NetworkRateLimits {
+            ingress: None,
+            egress: Some(ByteRateLimit::new(1, 8)),
+        },
+        1,
+    );
+    let lane = allocator.lanes()[0].clone();
+    let stop_allocator = CancellationToken::new();
+    let stop_lane = CancellationToken::new();
+    let allocator_task = tokio::spawn(allocator.run(stop_allocator.clone()));
+    let lane_task = tokio::spawn(lane.clone().run(stop_lane.clone()));
+    let mut gate = lane.egress().unwrap();
+    let reserved = gate.acquire(8).await;
+    gate.finish(reserved, 8);
+    gate.cancel_wait();
+    stop_lane.cancel();
+    lane_task.await.unwrap();
+    // A connection may still get polled while its runtime is shutting down.
+    // Its already-consumed cumulative mailbox total is not a new grant.
+    assert!(
+        gate.poll(&Context::from_waker(Waker::noop()), 1, 1)
+            .is_pending()
+    );
+    stop_allocator.cancel();
+    allocator_task.await.unwrap();
 }

@@ -519,17 +519,18 @@ fn setup_runs_quinn_tasks_on_data_io_runtimes_only() {
             client_thread,
             "least-loaded placement"
         );
-        assert_on_endpoint_thread(&listener, &accepted, server_lease.index());
+        assert!(listener_endpoint_of(&listener, &accepted).is_some());
+        assert!(server_lease.index() < pool.thread_count());
+        assert_balanced_connection_load(&pool);
     });
 }
 
-/// The accepted stream runs on the IO thread of the listener endpoint that
-/// received it, or on any thread when the listener has one endpoint.
-fn assert_on_endpoint_thread(listener: &QuicListener, stream: &QuicStream, thread: usize) {
-    let index = listener_endpoint_of(listener, stream).expect("listener endpoint");
-    if listener.endpoints.len() > 1 {
-        assert_eq!(listener.endpoints[index].lease.index(), thread);
-    }
+fn assert_balanced_connection_load(pool: &crate::context::IoPoolHandle) {
+    let loads = pool.io_loads();
+    assert!(
+        loads.iter().max().unwrap() - loads.iter().min().unwrap() <= 1,
+        "QUIC connection assignments are skewed: {loads:?}"
+    );
 }
 
 /// Index of the listener endpoint serving an accepted stream.
@@ -592,7 +593,7 @@ fn listener_binds_one_endpoint_per_io_thread_on_linux() {
             });
             let mut accepted = accepted.unwrap();
             let lease = accepted.take_io_lease().unwrap();
-            assert_on_endpoint_thread(&listener, &accepted, lease.index());
+            assert_balanced_connection_load(&pool);
             per_endpoint[listener_endpoint_of(&listener, &accepted).unwrap()] += 1;
             peers.push((client.unwrap(), accepted, lease));
         }
@@ -619,6 +620,76 @@ fn listener_binds_one_endpoint_per_io_thread_on_linux() {
             group.upgrade().is_none(),
             "idle listener group was retained"
         );
+    });
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn skewed_initials_still_balance_connection_work_and_transfer_data() {
+    let context = crate::Context::with_config(crate::ContextConfig { io_threads: 2 });
+    let pool = context.io_pool_handle_for_test();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let certified = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
+        let mut options = Options::default();
+        options.quic.server_cert_pem = Some(certified.cert.pem().into_bytes());
+        options.quic.server_key_pem = Some(certified.signing_key.serialize_pem().into_bytes());
+        options.quic.trust_pem = options.quic.server_cert_pem.clone();
+        options.quic.trust_system = false;
+        let mut listener = bind(
+            &"quic://127.0.0.1:0".parse().unwrap(),
+            AcceptSetup {
+                admission: Admission::new(4),
+                timeout: Duration::from_secs(5),
+                cancel: CancellationToken::new(),
+                monitor: MonitorPublisher::new(),
+                io_pool: pool.clone(),
+            },
+            &options,
+        )
+        .await
+        .unwrap();
+        assert_eq!(listener.endpoints.len(), 2);
+        let address = listener.endpoints[0].udp.local_addr().unwrap();
+        let endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+        let mut client_config = config::client(&options.quic).unwrap();
+        client_config.initial_dst_cid_provider(Arc::new(|| {
+            let mut bytes: [u8; 20] = rand::random();
+            bytes[0] = 0; // Every Initial enters listener endpoint zero.
+            quinn::ConnectionId::new(&bytes)
+        }));
+        let mut peers = Vec::new();
+        let mut assigned = [0; 2];
+        for _ in 0..4 {
+            let client = async {
+                let connection = endpoint
+                    .connect_with(client_config.clone(), address, "127.0.0.1")
+                    .unwrap()
+                    .await
+                    .unwrap();
+                open_raw_roles(connection, None).await.unwrap()
+            };
+            let (client, accepted) = tokio::join!(client, listener.accept());
+            let (mut accepted, _, _) = accepted.unwrap();
+            assert_eq!(listener_endpoint_of(&listener, &accepted), Some(0));
+            let lease = accepted.take_io_lease().unwrap();
+            assigned[lease.index()] += 1;
+            peers.push((client, accepted, lease));
+        }
+        assert_eq!(assigned, [2, 2]);
+        for (client, accepted, _) in &mut peers {
+            let SendHalf::Raw(send) = &mut client.data.0;
+            send.write_all(b"ping").await.unwrap();
+            let mut buf = [0; 4];
+            accepted.read_exact(&mut buf).await.unwrap();
+            assert_eq!(&buf, b"ping");
+            accepted.write_all(b"pong").await.unwrap();
+            client.data.1.read_exact(&mut buf).await.unwrap();
+            assert_eq!(&buf, b"pong");
+        }
     });
 }
 

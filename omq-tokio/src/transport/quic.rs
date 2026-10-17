@@ -386,13 +386,11 @@ impl QuicListener {
         let group = self.endpoints.clone();
         let liveness = self.liveness;
         let pool = self.setup.io_pool.clone();
-        // Accept on the peer's IO runtime so its connection driver, crypto,
-        // timers, and liveness task stay there with the OMQ driver. With one
-        // endpoint per IO thread, that is the endpoint's thread, so received
-        // datagrams never cross threads. The client's random connection ID
-        // picks the endpoint, which balances only across many connections.
+        // Keep connection crypto, timers, liveness and OMQ IO together.
+        // Prefer the receiving endpoint's reactor, but do not let random
+        // Initial connection IDs pile all connection work onto one lane.
         let lease = if self.endpoints.len() > 1 {
-            pool.reserve_thread_at(self.endpoints[index].lease.index())
+            pool.reserve_thread_preferred(self.endpoints[index].lease.index())
         } else {
             pool.reserve_thread()
         };

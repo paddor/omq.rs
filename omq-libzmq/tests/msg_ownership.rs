@@ -190,6 +190,55 @@ fn msg_recv_closes_existing_destination_once_before_replacement() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
+fn shm_received_message_data_is_writable() {
+    const ZMQ_CHANNEL: i32 = 20;
+    let ctx = zmq_ctx_new();
+    let sender = zmq_socket(ctx, ZMQ_CHANNEL);
+    let receiver = zmq_socket(ctx, ZMQ_CHANNEL);
+    for socket in [sender, receiver] {
+        set_i32(socket, ZMQ_LINGER, 0);
+        set_i32(socket, ZMQ_RCVTIMEO, 5000);
+        set_i32(socket, ZMQ_SNDTIMEO, 5000);
+    }
+    let endpoint =
+        std::ffi::CString::new(format!("shm://@omq-msg-data-{}", std::process::id())).unwrap();
+    assert_eq!(omq_zmq::zmq_bind(receiver, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(sender, endpoint.as_ptr()), 0);
+    let payload = [b'a'; 512];
+    assert_eq!(
+        zmq_send(sender, payload.as_ptr().cast(), payload.len(), 0),
+        512
+    );
+    let mut message = ZmqMsg::new();
+    assert_eq!(
+        zmq_msg_recv(message.0.as_mut_ptr().cast(), receiver, 0),
+        512
+    );
+    let data = zmq_msg_data(message.0.as_mut_ptr().cast()).cast::<u8>();
+    // SAFETY: the received message exposes 512 writable bytes until close.
+    unsafe { std::slice::from_raw_parts_mut(data, payload.len()) }.fill(b'b');
+    assert_eq!(
+        zmq_msg_data(message.0.as_mut_ptr().cast()).cast::<u8>(),
+        data,
+    );
+    assert_eq!(
+        zmq_msg_send(message.0.as_mut_ptr().cast(), receiver, 0),
+        512
+    );
+    let mut reply = [0; 512];
+    assert_eq!(
+        zmq_recv(sender, reply.as_mut_ptr().cast(), reply.len(), 0),
+        512
+    );
+    assert_eq!(reply, [b'b'; 512]);
+    assert_eq!(zmq_msg_close(message.0.as_mut_ptr().cast()), 0);
+    assert_eq!(zmq_close(sender), 0);
+    assert_eq!(zmq_close(receiver), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
 fn copied_large_received_message_survives_original_close() {
     let ctx = zmq_ctx_new();
     let push = zmq_socket(ctx, ZMQ_PUSH);

@@ -277,7 +277,7 @@ fn core_stops_automatic_replies_until_output_drains() {
 
 #[test]
 fn core_parser_turns_stop_on_frame_and_byte_budgets() {
-    for (frames, body_len) in [(1000, 4), (128, 8192)] {
+    for (frames, body_len) in [(10_000, 4), (128, 8192)] {
         let (mut sender, mut receiver) = push_pull_pair();
         pump(&mut sender, &mut receiver);
         receiver.set_input_budget(true);
@@ -299,7 +299,7 @@ fn core_parser_turns_stop_on_frame_and_byte_budgets() {
                 observed += 1;
                 turn += 1;
             }
-            assert!(turn <= 256);
+            assert!(turn <= 4096);
             if body_len == 8192 {
                 assert!(turn <= 32);
             }

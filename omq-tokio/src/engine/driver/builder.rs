@@ -96,6 +96,7 @@ where
     ) -> Self {
         Self {
             stream,
+            network: crate::network_limit::Lane::default(),
             connection,
             inbox,
             data_inbox: None,
@@ -141,6 +142,11 @@ where
     ) -> Self {
         self.notify_xpub = notify_xpub;
         self.peer_control = Some(control);
+        self
+    }
+
+    pub(crate) fn with_network(mut self, network: crate::network_limit::Lane) -> Self {
+        self.network = network;
         self
     }
 

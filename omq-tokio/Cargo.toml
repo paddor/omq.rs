@@ -483,6 +483,11 @@ name = "omq_soak_rate_limit"
 path = "tests/omq_soak_rate_limit.rs"
 
 [[test]]
+name = "omq_soak_network_byte_limit"
+path = "tests/omq_soak_network_byte_limit.rs"
+required-features = ["soak"]
+
+[[test]]
 name = "omq_soak_reconnect_all_types"
 path = "tests/omq_soak_reconnect_all_types.rs"
 
@@ -671,3 +676,7 @@ path = "tests/xpub_xsub.rs"
 
 [package.metadata.docs.rs]
 all-features = true
+
+[[test]]
+name = "omq_network_rate_limit"
+path = "tests/network_rate_limit.rs"

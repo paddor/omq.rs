@@ -114,6 +114,19 @@ available:
 
 </details>
 
+Owned contexts support independent aggregate ingress/egress byte limits,
+configured before the first socket; exhaustion applies backpressure.
+Limits count transport bytes after compression and each fan-out copy;
+IPC, inproc, and SHM are excluded.
+
+```rust,ignore
+let ctx = omq::Context::new();
+ctx.set_network_rate_limits(omq::NetworkRateLimits {
+    ingress: None,
+    egress: Some(omq::ByteRateLimit::new(10_000_000, 100_000)),
+})?;
+```
+
 ## Cargo features
 
 The default build includes the NULL mechanism and TCP / IPC / inproc / UDP,

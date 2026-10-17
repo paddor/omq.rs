@@ -18,6 +18,9 @@ fn peer() -> Peer {
         io: None,
         sampled: dart::SessionStats::default(),
         send_retry: Duration::ZERO,
+        ingress: None,
+        egress: None,
+        budget_waker: std::task::Waker::noop().clone(),
     }
 }
 

@@ -181,8 +181,9 @@ The Rust configuration is `Options::quic`. The C and Python bindings use
 and ready-peer limit. Python fixes these settings before its backend is
 materialized. Invalid local configuration fails before network setup.
 
-QUIC requires a usable UDP path. One connection's packet processing runs
-on one IO thread; multiple peers can spread across IO threads. It provides
+QUIC requires a usable UDP path. Connection work uses the least-loaded IO
+lane, preferring its UDP endpoint's lane when tied; an endpoint can forward
+received packets to another lane. It provides
 authenticated server transport and liveness independent of data credit.
 It does not promise higher throughput or lower latency than TCP. Compare
 against encrypted TCP when measuring encryption cost.

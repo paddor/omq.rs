@@ -83,6 +83,8 @@ impl SocketDriver {
         let (socket, target) = prepare_socket(&endpoint, &options, connect)?;
         let lease = self.io_pool.reserve_thread();
         let io_thread = lease.index();
+        let network = self.io_pool.network_on(io_thread);
+        network.validate_datagrams(omq_proto::dart::MAX_PACKED_DATAGRAM)?;
         let io = self
             .io_pool
             .spawn_on(io_thread, async move { DartIo::new(socket).map(Arc::new) })
@@ -116,6 +118,7 @@ impl SocketDriver {
         self.dart
             .configure_receive_pool(options.recv_payload_pool.clone());
         let worker = EndpointWorker {
+            network,
             max_message_size: options.max_message_size,
             id,
             io: io.clone(),

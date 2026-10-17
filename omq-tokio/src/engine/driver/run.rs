@@ -69,6 +69,7 @@ where
     async fn run_inner_body(self, completion: &mut CompletionProgress) -> Result<()> {
         let Self {
             stream,
+            network,
             mut connection,
             mut inbox,
             data_inbox,
@@ -191,6 +192,8 @@ where
             return Ok(());
         }
 
+        let mut reader = crate::network_limit::PacedRead::new(reader, network.ingress());
+        let mut writer = crate::network_limit::PacedWrite::new(writer, network.egress());
         enable_transmit_slot_after_handshake(transmit_slot.as_deref(), &connection);
         heartbeat.activate(&connection);
         let authenticated_sender = recv_direct
@@ -342,8 +345,22 @@ where
                 && (pending_receive.is_some()
                     || recv_direct.as_ref().is_some_and(RecvSink::peer_blocked));
             let recv_blocked = message_blocked || peer_events.blocked();
-            let peer_ttl_deadline =
-                heartbeat.peer_deadline(&connection, recv_blocked, control.is_closing());
+            let want_read = pending_input_error.is_none()
+                && !recv_blocked
+                && !connection.has_pending_input()
+                && !discard_pending
+                && !connection.is_closed();
+            if !want_read {
+                reader.cancel_wait();
+            }
+            if !want_write {
+                writer.cancel_wait();
+            }
+            let peer_ttl_deadline = heartbeat.peer_deadline(
+                &connection,
+                recv_blocked || reader.blocked(),
+                control.is_closing(),
+            );
 
             output.publish_idle(
                 &connection,
@@ -469,7 +486,7 @@ where
                     }
                 }
 
-                res = read.read(&mut reader), if pending_input_error.is_none() && !recv_blocked && !connection.has_pending_input() && !discard_pending && !connection.is_closed() => {
+                res = read.read(&mut reader), if want_read => {
                     if !claim_direct_writer(transmit_slot.as_deref()) { return Ok(()); }
                     let n = res?;
                     if latency_polling {
@@ -524,7 +541,7 @@ where
                 },
 
                 () = sleep_until_opt(peer_ttl_deadline), if peer_ttl_deadline.is_some() && pending_input_error.is_none() => {
-                    return Err(Error::Timeout);
+                    if !reader.blocked() { return Err(Error::Timeout); }
                 }
 
                 // Heartbeat tick: enabled only post-handshake when
@@ -536,7 +553,7 @@ where
                 // Any actual peer input acknowledges the outstanding probe.
                 () = sleep_until_opt(heartbeat.deadline), if heartbeat.deadline.is_some() && !control.is_closing() && pending_input_error.is_none() => {
                     if !claim_direct_writer(transmit_slot.as_deref()) { return Ok(()); }
-                    heartbeat.tick(&mut connection, recv_blocked)?;
+                    heartbeat.tick(&mut connection, recv_blocked || reader.blocked())?;
                 }
 
                 () = tokio::task::yield_now(), if control_exhausted => {}

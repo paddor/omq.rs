@@ -3,7 +3,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, Weak, mpsc};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, Weak, mpsc};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -171,6 +171,10 @@ impl IoThreadPool {
     }
 
     fn assign_thread(&self) -> usize {
+        self.assign_thread_preferred(0)
+    }
+
+    fn assign_thread_preferred(&self, preferred: usize) -> usize {
         // Return a logical data-thread index. Multi-IO runtime 0 stays
         // reserved for socket actors and binding control calls.
         let offset = self.data_thread_offset();
@@ -180,7 +184,7 @@ impl IoThreadPool {
             .expect("data-thread offset is in bounds")
             .iter()
             .enumerate()
-            .min_by_key(|(_, t)| t.load.load(Ordering::Relaxed))
+            .min_by_key(|(index, t)| (t.load.load(Ordering::Relaxed), *index != preferred))
             .map_or(0, |(i, _)| i);
         self.threads[best + offset]
             .load
@@ -254,6 +258,7 @@ impl std::fmt::Debug for IoThreadPool {
 #[derive(Clone, Debug)]
 pub(crate) struct IoPoolHandle {
     pool: Option<Arc<IoThreadPool>>,
+    network: Option<Arc<Vec<crate::network_limit::Lane>>>,
 }
 
 /// One load reservation owned by the driver future, including before its
@@ -280,7 +285,26 @@ impl Drop for IoThreadLease {
 
 impl IoPoolHandle {
     pub(crate) fn none() -> Self {
-        Self { pool: None }
+        Self {
+            pool: None,
+            network: None,
+        }
+    }
+
+    pub(crate) fn network_on(&self, index: usize) -> crate::network_limit::Lane {
+        let offset = self
+            .pool
+            .as_ref()
+            .map_or(0, |pool| pool.data_thread_offset());
+        self.network
+            .as_ref()
+            .map_or_else(Default::default, |lanes| lanes[index + offset].clone())
+    }
+
+    pub(crate) fn network_primary(&self) -> crate::network_limit::Lane {
+        self.network
+            .as_ref()
+            .map_or_else(Default::default, |lanes| lanes[0].clone())
     }
 
     /// Spawn a future on the primary IO thread (index 0).
@@ -332,6 +356,19 @@ impl IoPoolHandle {
         }
     }
 
+    /// Prefer the transport's reactor when it is among the least-loaded lanes.
+    #[cfg(feature = "quic")]
+    pub(crate) fn reserve_thread_preferred(&self, preferred: usize) -> IoThreadLease {
+        let index = self
+            .pool
+            .as_ref()
+            .map_or(0, |pool| pool.assign_thread_preferred(preferred));
+        IoThreadLease {
+            pool: self.pool.clone(),
+            index,
+        }
+    }
+
     /// Reserve data IO thread `index` regardless of its current load.
     #[cfg(any(feature = "quic", target_os = "linux"))]
     pub(crate) fn reserve_thread_at(&self, index: usize) -> IoThreadLease {
@@ -353,6 +390,16 @@ impl IoPoolHandle {
             pool.threads
                 .iter()
                 .map(|thread| thread.handle.metrics().num_alive_tasks())
+                .collect()
+        })
+    }
+
+    #[cfg(all(test, feature = "quic"))]
+    pub(crate) fn io_loads(&self) -> Vec<usize> {
+        self.pool.as_ref().map_or_else(Vec::new, |pool| {
+            pool.threads[pool.data_thread_offset()..]
+                .iter()
+                .map(|thread| thread.load.load(Ordering::Relaxed))
                 .collect()
         })
     }
@@ -426,6 +473,8 @@ pub struct ContextCore {
     io_threads: usize,
     terminated: AtomicBool,
     share_key: u128,
+    network_config: Mutex<(crate::NetworkRateLimits, bool)>,
+    network: OnceLock<Arc<Vec<crate::network_limit::Lane>>>,
     inproc_registry: Arc<crate::transport::inproc::InprocRegistry>,
 }
 
@@ -479,10 +528,39 @@ impl ContextCore {
             io_threads,
             terminated: AtomicBool::new(false),
             share_key: next_context_key(),
+            network_config: Mutex::new((crate::NetworkRateLimits::default(), false)),
+            network: OnceLock::new(),
             inproc_registry: Arc::new(crate::transport::inproc::InprocRegistry::new()),
         });
         register_context_core(&core);
         core
+    }
+
+    fn freeze_network(&self) {
+        let mut config = self
+            .network_config
+            .lock()
+            .expect("context network settings");
+        if config.1 {
+            return;
+        }
+        config.1 = true;
+        if !config.0.enabled() {
+            return;
+        }
+        let RuntimeOwnership::Owned { pool } = &self.ownership else {
+            unreachable!()
+        };
+        let allocator = crate::network_limit::Allocator::new(config.0, pool.threads.len());
+        let lanes = Arc::new(allocator.lanes());
+        for (thread, lane) in pool.threads.iter().zip(lanes.iter()) {
+            thread.handle.spawn(lane.clone().run(pool.cancel.clone()));
+        }
+        pool.primary_handle()
+            .spawn(allocator.run(pool.cancel.clone()));
+        self.network
+            .set(lanes)
+            .expect("network settings frozen once");
     }
 
     fn is_owner_process(&self) -> bool {
@@ -500,6 +578,7 @@ impl ContextCore {
         match &self.ownership {
             RuntimeOwnership::Owned { pool } => IoPoolHandle {
                 pool: Some(pool.clone()),
+                network: self.network.get().cloned(),
             },
             RuntimeOwnership::Borrowed { .. } => IoPoolHandle::none(),
         }
@@ -513,6 +592,55 @@ impl ContextCore {
 }
 
 impl Context {
+    /// Set aggregate network byte rates before creating the first socket.
+    ///
+    /// Requires an OMQ-owned runtime when either direction is limited. Limits
+    /// are shared by all handles importing this context. Setup traffic is
+    /// exempt; transport headers below the OMQ stream/datagram are not counted.
+    ///
+    /// # Errors
+    /// Returns a configuration error for zero rate/burst, borrowed runtimes,
+    /// terminated contexts, or changes after the first socket is created.
+    pub fn set_network_rate_limits(&self, limits: crate::NetworkRateLimits) -> crate::Result<()> {
+        limits.validate()?;
+        // Check ownership before touching a mutex that may have been locked
+        // by a vanished thread in the process that called fork().
+        if self.is_terminated() || !self.inner.is_owner_process() {
+            return Err(crate::Error::Config(
+                "network limits require a live context owned by this process".into(),
+            ));
+        }
+        let mut config = self
+            .inner
+            .network_config
+            .lock()
+            .expect("context network settings");
+        if config.1 {
+            return Err(crate::Error::Config(
+                "network limits must be configured before creating sockets".into(),
+            ));
+        }
+        if limits.enabled() && self.io_threads() == 0 {
+            return Err(crate::Error::Config(
+                "network limits require an OMQ-owned runtime".into(),
+            ));
+        }
+        config.0 = limits;
+        Ok(())
+    }
+
+    /// Return the context's configured aggregate network byte rates.
+    pub fn network_rate_limits(&self) -> crate::NetworkRateLimits {
+        assert!(
+            self.inner.is_owner_process(),
+            "network_rate_limits() called on a context inherited across fork"
+        );
+        self.inner
+            .network_config
+            .lock()
+            .expect("context network settings")
+            .0
+    }
     #[cfg(all(test, feature = "quic"))]
     pub(crate) fn io_pool_handle_for_test(&self) -> IoPoolHandle {
         self.inner.io_pool_handle()
@@ -661,6 +789,7 @@ impl Context {
             self.inner.is_owner_process(),
             "Context::socket() called on a context inherited across fork"
         );
+        self.inner.freeze_network();
         let _guard = self.inner.primary_handle().enter();
         let io_pool = self.inner.io_pool_handle();
         Socket::new_with_io_pool(
@@ -686,6 +815,7 @@ impl Context {
             self.inner.is_owner_process(),
             "Context::socket_with_recv_sink_config() called on a context inherited across fork"
         );
+        self.inner.freeze_network();
         let _guard = self.inner.primary_handle().enter();
         let io_pool = self.inner.io_pool_handle();
         Socket::new_with_recv_sink_config_and_io_pool(
@@ -713,6 +843,7 @@ impl Context {
             self.inner.is_owner_process(),
             "Context::socket_for_libzmq() called on a context inherited across fork"
         );
+        self.inner.freeze_network();
         let _guard = self.inner.primary_handle().enter();
         Socket::new_for_libzmq(
             socket_type,
@@ -989,6 +1120,47 @@ mod tests {
             vec![0, 0, 0],
             "socket teardown leaked IO assignment load"
         );
+    }
+
+    #[tokio::test]
+    async fn raw_stream_reserves_a_data_lane_for_its_lifetime() {
+        let context = super::Context::with_config(super::ContextConfig { io_threads: 2 });
+        let handle = context.inner.io_pool_handle();
+        let pool = handle.pool.as_ref().unwrap();
+        let socket = context.socket(crate::SocketType::Stream, crate::Options::default());
+        let endpoint = socket
+            .bind("tcp://127.0.0.1:0".parse::<crate::Endpoint>().unwrap())
+            .await
+            .unwrap();
+        let remote =
+            tokio::net::TcpStream::connect(endpoint.to_string().trim_start_matches("tcp://"))
+                .await
+                .unwrap();
+        socket.recv().await.unwrap();
+        assert_eq!(pool.threads[0].load.load(super::Ordering::Relaxed), 0);
+        assert_eq!(
+            pool.threads[1..]
+                .iter()
+                .map(|t| t.load.load(super::Ordering::Relaxed))
+                .sum::<usize>(),
+            1
+        );
+        drop(remote);
+        socket
+            .close_with_linger(Some(Duration::ZERO))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while pool
+                .threads
+                .iter()
+                .any(|t| t.load.load(super::Ordering::Relaxed) != 0)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

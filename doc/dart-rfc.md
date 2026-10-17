@@ -186,7 +186,9 @@ classification. Duplicates MUST NOT increment these counters.
 prefix. `credit-edge` is the exclusive sequence bound for new transmission.
 Senders MUST NOT submit new units at or beyond that edge.
 The receiver MUST advertise initial credit and MUST NOT retract granted
-credit. Each peer has a bounded window of at most 65,536 sequence units.
+credit. A byte pacer MAY start at zero and delay initial and returned grants;
+storage release alone does not expand a paced credit edge. Each peer has a
+bounded window of at most 65,536 sequence units.
 Gaps reserve capacity even when later units arrive. Duplicates MUST NOT
 consume extra capacity or return additional credit.
 

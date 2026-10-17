@@ -237,6 +237,15 @@ fn prepare_wire_driver(
     let peer_driver = attach_recv_bypass(socket, peer_driver, peer_id);
     let io_assignment = carrier_lease.unwrap_or_else(|| reserve_peer_io(&socket.io_pool, endpoint));
     let io_thread = io_assignment.index();
+    let network = if matches!(
+        endpoint.scheme(),
+        "tcp" | "lz4+tcp" | "zstd+tcp" | "ws" | "wss" | "lz4+ws" | "quic"
+    ) {
+        socket.io_pool.network_on(io_thread)
+    } else {
+        crate::network_limit::Lane::default()
+    };
+    let peer_driver = peer_driver.with_network(network);
 
     let mut entry = wire_peer_entry(
         peer,
@@ -797,7 +806,8 @@ fn split_direct_tcp_writer(
     ),
     (),
 > {
-    if !latency_profile
+    if socket.io_pool.network_primary().has_egress()
+        || !latency_profile
         || !supports_direct_tcp_writer(socket.socket_type)
         || !matches!(endpoint, Endpoint::Tcp { .. })
         || has_transforms

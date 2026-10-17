@@ -150,8 +150,10 @@ jobs:
           - test: omq_soak_cancel_safety
           - test: omq_soak_inproc_cross_thread
           - test: omq_soak_multi_socket
+          - test: omq_soak_network_byte_limit
+            features: soak lz4 zstd ws dart quic
     env:
-      SOAK_FEATURES: soak plain curve lz4 zstd ws
+      SOAK_FEATURES: ${{ matrix.features || 'soak plain curve lz4 zstd ws' }}
       OMQ_SOAK_DURATION_SECS: ${{ inputs.soak_duration_secs || '7200' }}
       OMQ_SOAK_SEED: ${{ inputs.soak_seed || '' }}
     steps:

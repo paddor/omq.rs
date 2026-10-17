@@ -121,6 +121,20 @@ struct Peer {
     io: Option<Box<PeerIo>>,
     sampled: dart::SessionStats,
     send_retry: Duration,
+    ingress: Option<crate::network_limit::Gate>,
+    egress: Option<crate::network_limit::Gate>,
+    budget_waker: std::task::Waker,
+}
+
+struct BudgetWake(Arc<DataSignal>);
+
+impl std::task::Wake for BudgetWake {
+    fn wake(self: Arc<Self>) {
+        self.0.mark();
+    }
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.mark();
+    }
 }
 
 impl Peer {
@@ -164,7 +178,22 @@ impl Peer {
                 max_send_rate: options.max_send_rate,
             },
         ));
+        if self.ingress.is_some() {
+            self.session.as_mut().unwrap().pace_receive_credit();
+        }
+        if self.ingress.is_some() || self.egress.is_some() {
+            self.budget_waker = std::task::Waker::from(Arc::new(BudgetWake(signal.clone())));
+        }
         self.io = Some(io);
+    }
+}
+
+impl Drop for Peer {
+    fn drop(&mut self) {
+        if let (Some(session), Some(ingress)) = (&self.session, &mut self.ingress) {
+            let unused = session.receive_right_edge() - session.received_units();
+            ingress.reconcile(unused * MAX_DATAGRAM as u64, 0);
+        }
     }
 }
 
@@ -215,6 +244,7 @@ impl Stage {
 }
 
 pub(crate) struct EndpointWorker {
+    pub(crate) network: crate::network_limit::Lane,
     pub(crate) max_message_size: Option<usize>,
     pub(crate) id: u64,
     pub(crate) io: Arc<DartIo>,
@@ -512,6 +542,9 @@ impl EndpointWorker {
                     io: None,
                     sampled: dart::SessionStats::default(),
                     send_retry: Duration::ZERO,
+                    ingress: self.network.ingress(),
+                    egress: self.network.egress(),
+                    budget_waker: std::task::Waker::noop().clone(),
                 });
             }
         } else if let Some(peer) = &mut route.peer {

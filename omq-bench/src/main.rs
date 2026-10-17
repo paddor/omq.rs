@@ -21,6 +21,7 @@ fn main() {
             RunSub::Comparisons(args) => bench::comparisons::run(&args),
             RunSub::PushpullLz4(args) => bench::pushpull_lz4::run(args),
             RunSub::PushpullZstd(args) => bench::pushpull_zstd::run(args),
+            RunSub::PushpullRateLimit(args) => bench::pushpull_rate_limit::run(&args),
             RunSub::Compression(args) => bench::compression::run(args),
             RunSub::Dart(args) => bench::datagram::dart::run(args),
             RunSub::AeronDart(args) => bench::datagram::aeron::run(args),
@@ -39,6 +40,7 @@ fn main() {
             Some(ChartSub::Lossy) => chart::lossy::generate(),
             Some(ChartSub::Lz4) => chart::lz4::generate(),
             Some(ChartSub::Zstd) => chart::zstd::generate(),
+            Some(ChartSub::RateLimit) => chart::rate_limit::generate(),
             None => {
                 chart::main_tcp::generate();
                 chart::comparison::generate();
@@ -50,6 +52,7 @@ fn main() {
                 chart::lossy::generate();
                 chart::lz4::generate();
                 chart::zstd::generate();
+                chart::rate_limit::generate();
             }
         },
     });

@@ -37,6 +37,7 @@ cargo test -p omq-tokio --features plain     --test omq_plain
 cargo test -p omq-tokio --features curve     --test omq_curve
 cargo test -p omq-tokio --features lz4       --test omq_lz4_tcp --test omq_lz4_pub_sub
 cargo test -p omq-tokio --features dart     --test omq_dart_transport --test omq_dart_pool
+cargo test -p omq-tokio --all-features --test omq_network_rate_limit
 ```
 
 Loom checks:

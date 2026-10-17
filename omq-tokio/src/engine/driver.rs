@@ -191,6 +191,7 @@ where
     T: DriverStream,
 {
     stream: T,
+    network: crate::network_limit::Lane,
     connection: Connection,
     inbox: super::control_inbox::Receiver,
     data_inbox: Option<super::data_inbox::Receiver>,

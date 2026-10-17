@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -27,10 +27,11 @@ struct Peers {
     sha256: Option<String>,
 }
 
-struct Measurement {
-    count: f64,
-    elapsed: f64,
-    sender_cpu: f64,
+pub(crate) struct Measurement {
+    pub count: f64,
+    pub elapsed: f64,
+    pub sender_cpu: f64,
+    pub receiver_cpu: f64,
 }
 
 // Positional shell arguments keep paths and user arguments out of shell code.
@@ -52,7 +53,7 @@ trap 'tc -s qdisc show dev ifb0' EXIT
 "$@"
 "#;
 
-fn run_in_netem(args: &CompressionLinkArgs) -> bool {
+pub(crate) fn run_in_netem(args: &CompressionLinkArgs) -> bool {
     let Some(rate) = args.link_mbps else {
         return false;
     };
@@ -97,15 +98,16 @@ fn environment<'a>(dict: Option<&'a str>, level: Option<&'a str>) -> Vec<(&'stat
     env
 }
 
-fn run_cell(
-    peers: &Peers,
+pub(crate) fn run_cell(
+    blocking: &Path,
     transport: &str,
     size: u64,
     duration: f64,
     warmup: f64,
-    env: &[(&str, &str)],
+    sender_env: &[(&str, &str)],
+    receiver_env: &[(&str, &str)],
 ) -> Measurement {
-    let binary = peers.blocking.to_str().expect("peer path");
+    let binary = blocking.to_str().expect("peer path");
     // Measurements are serial; both peers exit before this port is reused.
     let endpoint = format!("{transport}://127.0.0.1:17500");
     let size_arg = size.to_string();
@@ -113,13 +115,13 @@ fn run_cell(
     let warmup_arg = Duration::from_secs_f64(warmup).as_millis().to_string();
     let mut sender = process::spawn(
         &[binary, "push", &endpoint, &size_arg],
-        env,
+        sender_env,
         Some(process::MEASURED_CPU),
     );
     let sender_pid = sender.pid().to_string();
-    let mut receiver_env = env.to_vec();
+    let mut receiver_env = receiver_env.to_vec();
     receiver_env.extend([
-        ("OMQ_BENCH_COMPRESSION", "1"),
+        ("OMQ_BENCH_VERIFIED_PUSHPULL", "1"),
         ("OMQ_BENCH_SENDER_PID", sender_pid.as_str()),
         ("OMQ_BENCH_WARMUP_MS", warmup_arg.as_str()),
     ]);
@@ -153,6 +155,7 @@ fn run_cell(
         count: fields[0],
         elapsed: fields[1],
         sender_cpu: fields[4],
+        receiver_cpu: fields[3],
     }
 }
 
@@ -200,11 +203,12 @@ fn measure(
         });
         for repeat in 1..=rounds {
             let sample = run_cell(
-                peers,
+                &peers.blocking,
                 transport,
                 size,
                 cell_duration,
                 config.link.warmup_seconds,
+                &env,
                 &env,
             );
             let msgs_s = sample.count / sample.elapsed;

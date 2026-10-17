@@ -48,8 +48,8 @@ separate [fanring.rs workspace](https://github.com/paddor/fanring.rs).
 
 Owned data runtimes have separate reactors and do not steal tasks from one
 another. The socket actor runs on the control runtime. Regular connection
-drivers and fan-out lanes run on assigned data runtimes; raw STREAM runs with
-the actor. With one I/O thread, control and data share that thread. A borrowed
+drivers, raw STREAM, UDP/DART endpoints, and fan-out lanes run on assigned
+data runtimes. With one I/O thread, control and data share that thread. A borrowed
 context runs its tasks on the caller's runtime.
 
 ```text
@@ -69,6 +69,12 @@ Async and blocking sockets use the same backend. Blocking calls enter it
 through a context-owned runtime; `Context::current()` instead borrows the
 application runtime. Sharing a context across bindings shares its socket
 resources and inproc namespace without changing binding-level ownership rules.
+
+Owned contexts optionally share independent ingress and egress byte buckets
+across network transports. A control-runtime allocator distributes batched
+credit through atomic mailboxes to runtime-local fair queues; outstanding
+grants remain part of the context burst allowance. Configuration freezes at
+the first socket; IPC, inproc, and SHM bypass these buckets.
 
 ## Message paths
 

@@ -136,6 +136,10 @@ pub enum Admission {
 /// One ordered message sequence per peer and direction. All tables allocate
 /// at construction. Only this owner mutates sequencing or congestion state.
 #[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "Independent transport and protocol state flags"
+)]
 pub struct Session<B: FragmentBuffer = Vec<u8>> {
     local: u64,
     remote: u64,
@@ -156,6 +160,7 @@ pub struct Session<B: FragmentBuffer = Vec<u8>> {
     receive_next: u64,
     deliver_next: u64,
     receive_credit: u64,
+    paced_receive: bool,
     received: u64,
     released: u64,
     advertised_credit: u64,
@@ -250,6 +255,7 @@ impl<B: FragmentBuffer> Session<B> {
             receive_next: 0,
             deliver_next: 0,
             receive_credit: window as u64,
+            paced_receive: false,
             received: 0,
             released: 0,
             advertised_credit: 0,
@@ -322,6 +328,36 @@ impl<B: FragmentBuffer> Session<B> {
     /// Return the exclusive end of local receive credit.
     pub const fn receive_right_edge(&self) -> u64 {
         self.receive_credit
+    }
+
+    /// Defer initial and returned receive credit to the transport's byte pacer.
+    /// Must be called before the first control packet or receive operation.
+    pub fn pace_receive_credit(&mut self) {
+        assert_eq!(self.status_serial, 0);
+        assert_eq!(self.received, 0);
+        self.paced_receive = true;
+        self.receive_credit = 0;
+    }
+
+    /// Available storage units not yet admitted by the byte pacer.
+    pub fn pending_receive_credit(&self) -> u64 {
+        self.released + self.config.window as u64 - self.receive_credit
+    }
+
+    /// Admit storage units after reserving their transport byte allowance.
+    pub fn grant_receive_credit(&mut self, count: usize) {
+        assert!(self.paced_receive);
+        assert!(count as u64 <= self.pending_receive_credit());
+        self.receive_credit = self
+            .receive_credit
+            .checked_add(count as u64)
+            .expect("session credit exhausted");
+        self.status_pending |= count != 0;
+    }
+
+    /// Accepted sequence units, excluding duplicate datagrams.
+    pub const fn received_units(&self) -> u64 {
+        self.received
     }
     /// Return the next sequence position awaiting initial transmission.
     pub const fn next_send(&self) -> u64 {
@@ -570,6 +606,9 @@ impl<B: FragmentBuffer> Session<B> {
         // immediately, even if earlier returns were coalesced locally.
         let was_closed = self.advertised_credit == self.receive_next;
         self.released += count as u64;
+        if self.paced_receive {
+            return;
+        }
         self.receive_credit = self
             .receive_credit
             .checked_add(count as u64)
@@ -1188,6 +1227,33 @@ impl<B: FragmentBuffer> Session<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paced_credit_separates_initial_and_released_storage_from_admission() {
+        let mut s = session(2);
+        s.pace_receive_credit();
+        assert_eq!(s.receive_right_edge(), 0);
+        assert_eq!(s.pending_receive_credit(), 2);
+        assert_eq!(s.classify(1, 0), super::super::Admission::OutsideWindow);
+        s.grant_receive_credit(1);
+        assert_eq!(s.receive_right_edge(), 1);
+        assert!(s.commit_receive_with_delivery(
+            0,
+            Message::single("small"),
+            Ecn::NotEct,
+            Duration::ZERO,
+            |_| Ok(())
+        ));
+        assert_eq!(s.received_units(), 1);
+        assert_eq!(
+            s.receive_right_edge(),
+            1,
+            "inline storage release cannot grant unpaced credit"
+        );
+        assert_eq!(s.pending_receive_credit(), 2);
+        s.grant_receive_credit(2);
+        assert_eq!(s.receive_right_edge(), 3);
+    }
 
     fn session(window: usize) -> Session {
         Session::new(

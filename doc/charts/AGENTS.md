@@ -69,6 +69,17 @@ Sizes: 16B, 64B, 256B, 1KiB, 4KiB.
 The IPC refresh uses three runs per cell, 100,000 measured exchanges after
 20,000 warmup exchanges, retaining the median-p99 run.
 
+## TCP byte-limit chart
+
+`pushpull/tcp_rate_limit.svg` reads `pushpull-rate-limit.jsonl`.
+Two TCP processes, 1 IO each; uncapped OMQ versus sender egress of
+100,000,000 bytes/s with a 1,000,000-byte burst. Use all 15 main PUSH/PULL
+sizes, a 1000 Mbit/s shared netem link, 1 ms/direction, MTU 1500, and offloads
+off. Require three verified repeats per cell, 1 s warmup, at least 3 s
+measurement (extended for 110 large messages), and sender CPUs 1-2 / receiver
+3-4. Select one complete campaign/binary cohort; plot median throughput with
+its matching CPU samples using the standard dual-panel layout.
+
 ## PUB/SUB charts (3 files)
 
 Data: `comparisons.jsonl`, kind `pub_sub`.

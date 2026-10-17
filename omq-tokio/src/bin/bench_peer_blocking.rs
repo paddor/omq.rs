@@ -102,6 +102,19 @@ fn main() {
     #[cfg(any(feature = "ws", feature = "quic"))]
     ws_bench_config::set_endpoint(args.get(2).map(String::as_str));
     let ctx = omq_tokio::Context::with_config(omq_tokio::ContextConfig::from_env());
+    if let Ok(value) = std::env::var("OMQ_BENCH_EGRESS_BYTE_LIMIT") {
+        let (rate, burst) = value
+            .split_once(',')
+            .expect("OMQ_BENCH_EGRESS_BYTE_LIMIT must be BYTES_PER_SECOND,BURST_BYTES");
+        ctx.set_network_rate_limits(omq_tokio::NetworkRateLimits {
+            ingress: None,
+            egress: Some(omq_tokio::ByteRateLimit::new(
+                rate.parse().expect("egress bytes per second"),
+                burst.parse().expect("egress burst bytes"),
+            )),
+        })
+        .expect("configure context byte limit");
+    }
     let n = ctx.io_threads();
     eprintln!("runtime: blocking, {n} IO thread(s)");
     install_signals();
@@ -587,7 +600,9 @@ fn run_pull(ctx: &omq_tokio::Context, ep: Endpoint, size: usize, duration: Durat
     let pull = ctx.blocking_socket(SocketType::Pull, bench_options_client(size));
     pull.connect(ep).expect("pull connect");
 
-    if std::env::var_os("OMQ_BENCH_COMPRESSION").is_some() {
+    if std::env::var_os("OMQ_BENCH_COMPRESSION").is_some()
+        || std::env::var_os("OMQ_BENCH_VERIFIED_PUSHPULL").is_some()
+    {
         run_compression_pull(&pull, size, duration, corpus.as_deref());
         return;
     }

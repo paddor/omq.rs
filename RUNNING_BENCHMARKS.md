@@ -204,6 +204,27 @@ cargo run --release -p omq-bench -- run comparisons --transport tcp
 cargo run --release -p omq-bench -- chart main
 ```
 
+### TCP byte-limit chart
+
+```sh
+OMQ_BENCH_TASKSET=1 cargo run --release -p omq-bench -- run pushpull-rate-limit
+cargo run --release -p omq-bench -- chart rate-limit
+```
+
+Produces `doc/charts/pushpull/tcp_rate_limit.svg` from append-only
+`pushpull-rate-limit.jsonl`: two TCP processes with one IO thread each,
+all 15 main PUSH/PULL sizes (16 B through 8 MiB), uncapped versus sender
+egress of 100,000,000 bytes/s with a 1,000,000-byte burst. The private netem
+link shares 1000 Mbit/s between directions, with 1 ms delay each way,
+MTU 1500, and segmentation offloads disabled. Each cell retains three runs
+after 1 s active warmup; measurement lasts at least 3 s and accommodates
+110 messages at the byte limit. Payload validation and CPU sampling use the
+same interval; charts select median-throughput samples from one complete
+campaign and binary digest.
+
+The blocking peer accepts `OMQ_BENCH_EGRESS_BYTE_LIMIT=BYTES_PER_SECOND,BURST_BYTES`
+for direct experiments. The chart runner sets it only on the sender.
+
 ### QUIC Charts
 
 Produces `doc/charts/quic/{pushpull,reqrep,pubsub,fanout,fanin}.svg`, OMQ

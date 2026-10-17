@@ -74,6 +74,17 @@ blocking API.
   <img src="doc/charts/pushpull/inproc.svg" alt="PUSH/PULL throughput: inproc" width="850">
 </p>
 
+### Context byte limit
+
+Two processes, one IO thread each, over a 1000 Mbit/s netem link.
+The capped sender uses 800 Mbit/s egress (100 MB/s) with a 1 MB burst;
+the receiver is unrestricted. The limiter counts ZMTP framing, while the
+chart shows payload throughput.
+
+<p align="center">
+  <img src="doc/charts/pushpull/tcp_rate_limit.svg" alt="TCP PUSH/PULL on a 1000 Mbit/s link: uncapped OMQ versus 800 Mbit/s egress" width="950">
+</p>
+
 ### Fan-Out
 
 1-to-N PUSH/PULL over TCP. Whiskers show the slowest and fastest

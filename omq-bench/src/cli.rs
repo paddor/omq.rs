@@ -48,6 +48,8 @@ pub(crate) enum ChartSub {
     Lz4,
     /// PUSH/PULL Zstd compression chart.
     Zstd,
+    /// PUSH/PULL over a 1 Gbit/s link with an 800 Mbit/s egress limit.
+    RateLimit,
 }
 
 #[derive(Subcommand)]
@@ -58,6 +60,8 @@ pub(crate) enum RunSub {
     PushpullLz4(PushpullLz4Args),
     /// PUSH/PULL with experimental Zstd compression.
     PushpullZstd(PushpullZstdArgs),
+    /// Two-process TCP PUSH/PULL with context byte pacing on a netem link.
+    PushpullRateLimit(PushpullRateLimitArgs),
     /// Push/pull compression benchmarks.
     Compression(CompressionArgs),
     /// Pinned, two-process DART/TCP benchmarks.
@@ -273,6 +277,21 @@ pub(crate) struct PushpullZstdArgs {
     /// Zstd compression level (-8..=4). Omitted uses transport default.
     #[arg(long)]
     pub level: Option<i32>,
+}
+
+#[derive(Parser)]
+pub(crate) struct PushpullRateLimitArgs {
+    /// Message sizes (comma-separated); defaults to all 15 TCP chart sizes.
+    #[arg(long, value_delimiter = ',')]
+    pub sizes: Option<Vec<u64>>,
+
+    /// Minimum measured seconds; extended to fit 110 large messages.
+    #[arg(long, default_value_t = 3.0)]
+    pub duration: f64,
+
+    /// Measurements per cell (all rounds are retained).
+    #[arg(long, default_value_t = 3)]
+    pub rounds: u32,
 }
 
 #[derive(Parser)]

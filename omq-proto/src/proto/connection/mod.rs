@@ -98,6 +98,11 @@ pub struct ConnectionConfig {
     pub mechanism: MechanismSetup,
     /// Remote address exposed to security authenticators, when known.
     pub peer_address: Option<String>,
+    /// Hand server authenticator calls to the I/O driver through
+    /// [`Connection::take_authentication_request`] instead of running them
+    /// during input handling. Disabled by default for existing sans-I/O
+    /// callers.
+    pub defer_authentication: bool,
     /// WebSocket role. `None` = standard ZMTP byte-stream framing.
     /// `Some(Client)` or `Some(Server)` = ZWS/2.0 framing with WS masking.
     #[cfg(feature = "ws")]
@@ -120,6 +125,7 @@ impl ConnectionConfig {
             max_wire_message_size: None,
             mechanism: MechanismSetup::Null,
             peer_address: None,
+            defer_authentication: false,
             #[cfg(feature = "ws")]
             ws_role: None,
             #[cfg(feature = "ws")]
@@ -183,6 +189,14 @@ impl ConnectionConfig {
     #[must_use]
     pub fn peer_address(mut self, address: impl Into<String>) -> Self {
         self.peer_address = Some(address.into());
+        self
+    }
+
+    /// Defer server authenticator calls to the I/O driver. See
+    /// [`ConnectionConfig::defer_authentication`].
+    #[must_use]
+    pub fn defer_authentication(mut self, defer: bool) -> Self {
+        self.defer_authentication = defer;
         self
     }
 
@@ -340,7 +354,8 @@ impl Connection {
     /// Create a new connection and queue our greeting into the out buffer.
     /// Supports every configured security mechanism.
     pub fn new(config: ConnectionConfig) -> Self {
-        let mechanism = config.mechanism.clone().build(config.peer_address.clone());
+        let mut mechanism = config.mechanism.clone().build(config.peer_address.clone());
+        mechanism.set_defer_authentication(config.defer_authentication);
         #[cfg(feature = "ws")]
         let ws_role = config.ws_role;
         let mut conn = Self {

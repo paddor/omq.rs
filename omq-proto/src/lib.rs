@@ -54,7 +54,8 @@ pub use options::{DartCongestion, DartEcn, DartOptions};
 pub use payload_pool::{PayloadBuffer, PayloadLengthError, PayloadPool};
 pub use proto::mechanism::MechanismSetup;
 pub use proto::mechanism::{
-    AuthenticationResult, AuthenticationStatus, Authenticator, MechanismPeerInfo,
+    AuthenticationRequest, AuthenticationResult, AuthenticationStatus, Authenticator,
+    MechanismPeerInfo,
 };
 #[cfg(feature = "curve")]
 pub use proto::mechanism::{CurveKeypair, CurvePublicKey, CurveSecretKey, CurveServerOptions};

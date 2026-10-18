@@ -10,8 +10,8 @@
 use bytes::{BufMut, Bytes, BytesMut};
 
 use super::{
-    AuthenticationResult, AuthenticationStatus, Authenticator, MechanismPeerInfo, MechanismStep,
-    try_error_command,
+    AuthGate, AuthenticationResult, Authenticator, MechanismPeerInfo, MechanismStep,
+    check_authentication, try_error_command,
 };
 use crate::error::{Error, Result};
 use crate::proto::command::{self, Command, PeerProperties};
@@ -55,6 +55,7 @@ pub(crate) struct PlainServer {
     peer_address: Option<String>,
     our_props: PeerProperties,
     authentication: Option<AuthenticationResult>,
+    auth: AuthGate,
     state: PlainServerState,
 }
 
@@ -62,6 +63,7 @@ pub(crate) struct PlainServer {
 enum PlainServerState {
     NotStarted,
     AwaitingHello,
+    AwaitingAuthentication,
     AwaitingInitiate,
     Done,
 }
@@ -81,8 +83,34 @@ impl PlainMechanism {
             peer_address,
             our_props: PeerProperties::default(),
             authentication: None,
+            auth: AuthGate::default(),
             state: PlainServerState::NotStarted,
         })
+    }
+
+    pub(super) fn auth_gate(&mut self) -> Option<&mut AuthGate> {
+        match self {
+            Self::Client(_) => None,
+            Self::Server(s) => Some(&mut s.auth),
+        }
+    }
+
+    pub(super) fn awaiting_authentication(&self) -> bool {
+        matches!(self, Self::Server(s) if s.auth.waiting)
+    }
+
+    pub(super) fn complete_authentication(
+        &mut self,
+        result: AuthenticationResult,
+        out: &mut Vec<Command>,
+    ) -> Result<MechanismStep> {
+        match self {
+            Self::Client(_) => Err(Error::Protocol("no authentication is pending".into())),
+            Self::Server(s) => {
+                s.auth.finish()?;
+                s.welcome(result, out)
+            }
+        }
     }
 
     pub(crate) fn new_client(username: String, password: String) -> Self {
@@ -196,25 +224,11 @@ impl PlainServer {
                     username: Some(username),
                     password: Some(password),
                 };
-                let result = self.authenticator.authenticate(&peer);
-                if result.status != AuthenticationStatus::Success {
-                    if result.status != AuthenticationStatus::TemporaryFailure {
-                        out.push(Command::Error {
-                            reason: result.status.code().into(),
-                        });
-                    }
-                    return Err(Error::HandshakeFailed(format!(
-                        "PLAIN authentication failed with status {}",
-                        result.status.code()
-                    )));
-                }
-                self.authentication = Some(result);
-                self.state = PlainServerState::AwaitingInitiate;
-                out.push(Command::Unknown {
-                    name: Bytes::from_static(b"WELCOME"),
-                    body: Bytes::new(),
-                });
-                Ok(MechanismStep::Continue)
+                let Some(result) = self.auth.decide(&self.authenticator, peer) else {
+                    self.state = PlainServerState::AwaitingAuthentication;
+                    return Ok(MechanismStep::Continue);
+                };
+                self.welcome(result, out)
             }
             (PlainServerState::AwaitingInitiate, Command::Unknown { name, body })
                 if name.as_ref() == b"INITIATE" =>
@@ -237,6 +251,23 @@ impl PlainServer {
                 std::mem::discriminant(state),
             ))),
         }
+    }
+}
+
+impl PlainServer {
+    fn welcome(
+        &mut self,
+        result: AuthenticationResult,
+        out: &mut Vec<Command>,
+    ) -> Result<MechanismStep> {
+        check_authentication(&result, "PLAIN", out)?;
+        self.authentication = Some(result);
+        self.state = PlainServerState::AwaitingInitiate;
+        out.push(Command::Unknown {
+            name: Bytes::from_static(b"WELCOME"),
+            body: Bytes::new(),
+        });
+        Ok(MechanismStep::Continue)
     }
 }
 
@@ -301,6 +332,7 @@ fn decode_hello(body: &[u8]) -> Result<(String, String)> {
 mod tests {
     use super::*;
     use crate::proto::SocketType;
+    use crate::proto::mechanism::AuthenticationStatus;
 
     #[test]
     fn hello_encode_decode_roundtrip() {

@@ -154,7 +154,7 @@ fn prepare_wire_driver(
     let endpoint = &peer.endpoint;
     let (inbox_tx, inbox_rx) = crate::engine::control_inbox::channel(PEER_INBOX_CAP);
     let (data_inbox_tx, data_inbox_rx) = crate::engine::data_inbox::channel(
-        PEER_INBOX_CAP.min(socket.options.send_hwm.max(1) as usize),
+        PEER_INBOX_CAP.min(socket.options.send_queue_capacity()),
     );
     let child_cancel = socket.cancel.child_token();
     let driver_cfg = peer_driver_config(socket, endpoint);
@@ -434,7 +434,7 @@ pub(super) fn spawn_inproc_peer(
 
     let (inbox_tx, inbox_rx) = crate::engine::control_inbox::channel(PEER_INBOX_CAP);
     let (data_inbox_tx, data_inbox_rx) = crate::engine::data_inbox::channel(
-        PEER_INBOX_CAP.min(socket.options.send_hwm.max(1) as usize),
+        PEER_INBOX_CAP.min(socket.options.send_queue_capacity()),
     );
     let child_cancel = socket.cancel.child_token();
     let peer_props = omq_proto::proto::command::PeerProperties::default()
@@ -578,8 +578,10 @@ fn inproc_port_sink(
                 .map(|slot| crate::engine::RecvSink::Conflate(slot.clone()))
         })
         .unwrap_or_else(|| {
-            let cap =
-                (socket.options.recv_hwm.max(1) as usize).saturating_add(peer_send_hwm.max(1));
+            let cap = socket
+                .options
+                .recv_queue_capacity()
+                .saturating_add(peer_send_hwm.max(1));
             if let Some(fanin) = &socket.spsc.fanin
                 && fanin.source_aware()
             {
@@ -912,7 +914,7 @@ fn build_transmit_slot(
         .options
         .transmit_slot_cap
         .unwrap_or(crate::engine::transmit_slot::TRANSMIT_SLOT_CAP_DEFAULT);
-    let transmit_slot_msg_cap = socket.options.send_hwm.max(1) as usize;
+    let transmit_slot_msg_cap = socket.options.send_queue_capacity();
     Some(crate::engine::transmit_slot::PeerTransmitSlot::new(
         peer_id,
         has_transforms,
@@ -953,7 +955,7 @@ fn make_send_pipe(
     let (pipe_cap, pipe_mode) = if socket.options.conflate {
         (1, SendPipeMode::Conflate)
     } else {
-        (socket.options.send_hwm.max(1) as usize, SendPipeMode::Queue)
+        (socket.options.send_queue_capacity(), SendPipeMode::Queue)
     };
     let (send_pipe, send_pipe_rx) = if socket.socket_type == SocketType::Peer {
         crate::engine::peer_send_pipe(pipe_cap, &socket.options)
@@ -1038,7 +1040,7 @@ fn attach_yring_recv_bypass(
             if let Some(fanin) = &socket.spsc.fanin {
                 return fanin_recv_sink(fanin, &socket.recv_tx);
             }
-            let cap = socket.options.recv_hwm.max(16) as usize;
+            let cap = socket.options.recv_queue_capacity().max(16);
             let (prod, cons) = yring::spsc(cap);
             let recv_signal = socket.spsc.recv_signal.clone();
             let blocking_waker = socket.spsc.blocking_recv_waker.clone();

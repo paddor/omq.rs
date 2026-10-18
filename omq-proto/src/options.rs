@@ -39,6 +39,18 @@ pub const DEFAULT_SHM_MAX_MEMORY: usize = 64 * 1024 * 1024;
 /// Default PEER per-connection queue byte budget and single-message limit.
 pub const DEFAULT_PEER_MAX_BYTES: usize = 16 * 1024 * 1024;
 
+/// Largest message queue allocated for one HWM. Queues preallocate their
+/// capacity, so larger HWM values behave as this limit.
+pub const MAX_QUEUE_CAPACITY: usize = 1 << 20;
+
+/// Queue capacity in messages for `hwm`, clamped to `1..=MAX_QUEUE_CAPACITY`.
+#[must_use]
+pub fn queue_capacity(hwm: u32) -> usize {
+    usize::try_from(hwm)
+        .unwrap_or(MAX_QUEUE_CAPACITY)
+        .clamp(1, MAX_QUEUE_CAPACITY)
+}
+
 /// Token-bucket message rate limit.
 ///
 /// `messages_per_second` controls refill speed. `burst` is the maximum token
@@ -963,6 +975,18 @@ impl Options {
             }
         }
         Ok(())
+    }
+
+    /// Send queue capacity in messages, from `send_hwm` via [`queue_capacity`].
+    #[must_use]
+    pub fn send_queue_capacity(&self) -> usize {
+        queue_capacity(self.send_hwm)
+    }
+
+    /// Receive queue capacity in messages, from `recv_hwm` via [`queue_capacity`].
+    #[must_use]
+    pub fn recv_queue_capacity(&self) -> usize {
+        queue_capacity(self.recv_hwm)
     }
 
     /// Set send-side HWM as a message count.

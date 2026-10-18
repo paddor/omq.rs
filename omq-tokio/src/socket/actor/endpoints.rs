@@ -267,7 +267,7 @@ impl SocketDriver {
         let cancel = self.cancel.child_token();
         let (inbox_tx, inbox_rx) = crate::engine::control_inbox::channel(64);
         let (data_inbox_tx, data_inbox_rx) =
-            crate::engine::data_inbox::channel(self.options.send_hwm.max(1) as usize);
+            crate::engine::data_inbox::channel(self.options.send_queue_capacity());
         let assignment = self.io_pool.reserve_thread();
         let index = assignment.index();
         let task = spawn_radio_sender(
@@ -527,7 +527,7 @@ impl SocketDriver {
             Some(self.send_strategy.make_stream_connect_pipe(
                 route_id,
                 identity,
-                self.options.send_hwm.max(1) as usize,
+                self.options.send_queue_capacity(),
             ))
         } else {
             self.send_strategy.make_connect_pipe(route_id)

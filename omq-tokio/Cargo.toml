@@ -548,6 +548,10 @@ name = "omq_runtime_blocking_ban"
 path = "tests/runtime_blocking_ban.rs"
 
 [[test]]
+name = "omq_queue_capacity_ban"
+path = "tests/queue_capacity_ban.rs"
+
+[[test]]
 name = "omq_radio_dish"
 path = "tests/radio_dish.rs"
 

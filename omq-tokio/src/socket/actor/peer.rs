@@ -173,7 +173,7 @@ impl SocketDriver {
     ) -> crate::transport::inproc::RecvConfig {
         crate::transport::inproc::RecvConfig {
             direct: self.inproc_direct_inbound(),
-            send_hwm: options.send_hwm.max(1) as usize,
+            send_hwm: options.send_queue_capacity(),
         }
     }
 
@@ -369,7 +369,7 @@ impl SocketDriver {
             crate::engine::actor_output::PeerOutput::actor(peer_output),
             &self.cancel,
             completion,
-            self.options.send_hwm.max(1) as usize,
+            self.options.send_queue_capacity(),
             options.recv_payload_pool.clone(),
             send_pipe_rx,
             &self.io_pool,

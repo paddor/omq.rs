@@ -384,7 +384,7 @@ impl SendStrategy {
     pub(crate) fn shm_send_pool(&self, options: &Options) -> omq_shm::SendPool {
         match self {
             Self::FanOut(send) => send.shm_send_pool(),
-            _ => omq_shm::SendPool::new(options.send_hwm.max(1) as usize, options.shm_max_memory),
+            _ => omq_shm::SendPool::new(options.send_queue_capacity(), options.shm_max_memory),
         }
     }
 

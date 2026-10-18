@@ -188,7 +188,7 @@ impl SocketDriver {
         let entry = &mut self.dart_endpoints[index];
         let (controls_tx, controls_rx) = crate::engine::control_inbox::channel(64);
         let (data_tx, data_rx) = crate::engine::data_inbox::dart_channel(
-            entry.options.send_hwm.max(1) as usize,
+            entry.options.send_queue_capacity(),
             self.socket_type,
         );
         let cancel = entry.cancel.child_token();
@@ -258,12 +258,12 @@ impl SocketDriver {
         let sink = if let Some(slot) = &self.spsc.conflate_slot {
             RecvSink::Conflate(slot.clone())
         } else if let Some(fanin) = &self.spsc.fanin {
-            match fanin.register_dart(self.options.recv_hwm.max(1) as usize) {
+            match fanin.register_dart(self.options.recv_queue_capacity()) {
                 Some(producer) => RecvSink::Fanin(crate::socket::fanin::Sink::owned(producer)),
                 None => RecvSink::Channel(self.recv_tx.clone()),
             }
         } else {
-            let (producer, consumer) = yring::spsc(self.options.recv_hwm.max(1) as usize);
+            let (producer, consumer) = yring::spsc(self.options.recv_queue_capacity());
             let signal = self.spsc.recv_signal.clone();
             let blocking = self.spsc.blocking_recv_waker.clone();
             let space = Arc::new(crate::engine::signal::StateSignal::new());
@@ -432,7 +432,7 @@ impl Entry {
         if !needed {
             return (None, None);
         }
-        let cap = self.options.send_hwm.max(1) as usize;
+        let cap = self.options.send_queue_capacity();
         let (mut producer, consumer) = if socket_type == SocketType::Peer {
             crate::engine::peer_send_pipe(cap, &self.options)
         } else {

@@ -231,7 +231,7 @@ impl FanOutLanes {
         mute_policy: FanOutMutePolicy,
         io_pool: &crate::context::IoPoolHandle,
     ) -> Arc<Self> {
-        let pipe_cap = options.send_hwm.max(1) as usize;
+        let pipe_cap = options.send_queue_capacity();
         #[cfg(target_os = "linux")]
         let shm_pool = omq_shm::SendPool::new(pipe_cap, options.shm_max_memory);
         let lane_count = io_pool.thread_count().max(1);

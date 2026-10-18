@@ -167,13 +167,23 @@ async fn curve_handover(kind: SocketType) {
         .await
         .unwrap()
         .unwrap();
+    // Another key may reuse the route only after its holder disconnects.
+    let mut monitor = server.monitor();
+    old.close().await.unwrap();
+    tokio::time::timeout(DEADLINE, async {
+        while !matches!(
+            monitor.recv().await.unwrap(),
+            omq_tokio::MonitorEvent::Disconnected { .. }
+        ) {}
+    })
+    .await
+    .unwrap();
     let new_key = CurveKeypair::generate();
     let new_public = *new_key.public.as_bytes();
     let replacement = context.socket(
         client_kind,
         options("same-route").curve_client(new_key, server_public),
     );
-    let mut monitor = server.monitor();
     replacement.connect(endpoint).await.unwrap();
     ready(&mut monitor).await;
     replacement.wait_connected(1, DEADLINE).await.unwrap();
@@ -205,7 +215,6 @@ async fn curve_handover(kind: SocketType) {
         );
         assert!(identity.peer_info().authentication.user_id.is_none());
     }
-    old.close().await.unwrap();
     replacement.close().await.unwrap();
     server.into_inner().close().await.unwrap();
     assert_eq!(

@@ -248,6 +248,60 @@ impl CarrierState<'_> {
     }
 }
 
+/// A recipient lease that holds shared storage until it finishes.
+pub(crate) trait Recipient {
+    fn finished(&self) -> bool;
+}
+
+/// Recipient leases of one shared record. Storage is reusable only after the
+/// final local owner seals the group and every tracked recipient finishes.
+#[derive(Debug)]
+pub(crate) struct LeaseGroup<L> {
+    leases: Mutex<Vec<L>>,
+    sealed: AtomicBool,
+    complete: AtomicBool,
+}
+
+impl<L> Default for LeaseGroup<L> {
+    fn default() -> Self {
+        Self {
+            leases: Mutex::new(Vec::new()),
+            sealed: AtomicBool::new(false),
+            complete: AtomicBool::new(false),
+        }
+    }
+}
+
+impl<L: Recipient> LeaseGroup<L> {
+    /// Track a recipient while a local owner still retains the record.
+    pub(crate) fn track(&self, lease: L) {
+        let mut leases = self.leases.lock().expect("SHM group leases");
+        debug_assert!(!self.sealed.load(Ordering::Relaxed), "sealed SHM group");
+        leases.push(lease);
+    }
+
+    /// Called once by the final local owner, after every recipient was tracked.
+    pub(crate) fn seal(&self) {
+        self.sealed.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn completed(&self) -> bool {
+        if self.complete.load(Ordering::Acquire) {
+            return true;
+        }
+        if !self.sealed.load(Ordering::Acquire) {
+            return false;
+        }
+        let leases = self.leases.lock().expect("SHM group leases");
+        if leases.iter().all(Recipient::finished) {
+            self.complete.store(true, Ordering::Release);
+            true
+        } else {
+            false
+        }
+    }
+}
+
 pub(crate) fn unique_release<T>(owner: Arc<T>, gate: &Mutex<()>) -> Option<Arc<T>> {
     if Arc::strong_count(&owner) != 1 {
         let _guard = gate.lock().expect("view release");

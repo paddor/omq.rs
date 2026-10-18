@@ -1,8 +1,8 @@
 //! Generation-tagged completion credit and retained receive owners.
 #![forbid(unsafe_code)]
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
 
 use omq_proto::Result;
 use omq_proto::message::PayloadOwner;
@@ -134,36 +134,11 @@ pub(super) struct Lease {
     pub(super) generation: u64,
 }
 
-#[derive(Debug, Default)]
-pub(super) struct LeaseGroup {
-    staging: Mutex<Vec<Lease>>,
-    published: OnceLock<Vec<Lease>>,
-    pub(super) complete: AtomicBool,
-}
+pub(super) type LeaseGroup = crate::coordination::LeaseGroup<Lease>;
 
-impl LeaseGroup {
-    pub(super) fn track(&self, lease: Lease) {
-        self.staging.lock().expect("SHM batch leases").push(lease);
-    }
-
-    pub(super) fn seal(&self) {
-        let leases = std::mem::take(&mut *self.staging.lock().expect("SHM batch leases"));
-        self.published.set(leases).expect("unsealed SHM batch");
-    }
-
-    pub(super) fn completed(&self) -> bool {
-        if self.complete.load(Ordering::Acquire) {
-            return true;
-        }
-        let Some(leases) = self.published.get() else {
-            return false;
-        };
-        if leases.iter().all(Lease::completed) {
-            self.complete.store(true, Ordering::Release);
-            true
-        } else {
-            false
-        }
+impl crate::coordination::Recipient for Lease {
+    fn finished(&self) -> bool {
+        self.completed()
     }
 }
 

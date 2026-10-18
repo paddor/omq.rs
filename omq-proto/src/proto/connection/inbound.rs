@@ -30,8 +30,8 @@ const INPUT_SERVICE_BYTES: usize = 256 * 1024;
 
 impl Connection {
     /// Feed received wire bytes and advance parsing.
-    /// Drain output when [`Self::input_blocked_on_output`] is true, and resume
-    /// pending parsing before supplying another chunk.
+    /// Supply input only while [`Self::accepts_input`] is true. Otherwise
+    /// drain output and call [`Self::resume_input`] first.
     ///
     /// # Errors
     /// Returns errors for invalid framing, handshake failure, size limits, or closure.
@@ -48,7 +48,7 @@ impl Connection {
         if src.is_empty() {
             return Ok(());
         }
-        if self.input.pending || self.input_blocked_on_output() {
+        if !self.accepts_input() {
             return Err(Error::Protocol(
                 "drain pending codec work before supplying more input".into(),
             ));
@@ -72,6 +72,12 @@ impl Connection {
     /// Incomplete frames waiting for more wire bytes do not set this flag.
     pub fn has_pending_input(&self) -> bool {
         self.input.pending
+    }
+
+    /// Whether [`Self::handle_input`] admits another wire chunk. False while
+    /// buffered parsing is pending or automatic replies wait for output.
+    pub fn accepts_input(&self) -> bool {
+        !self.input.pending && !self.input_blocked_on_output()
     }
 
     /// Enable bounded parser turns for an I/O driver. Byte streams service
@@ -499,10 +505,7 @@ impl Connection {
     /// Errors propagate the same protocol violations as the frame decoder
     /// (reserved bits set, COMMAND+MORE).
     pub fn peek_next_frame_payload_size(&self) -> Result<Option<NextFrameInfo>> {
-        if !matches!(self.state, State::Ready)
-            || self.input.pending
-            || self.input_blocked_on_output()
-        {
+        if !matches!(self.state, State::Ready) || !self.accepts_input() {
             return Ok(None);
         }
         #[cfg(feature = "ws")]

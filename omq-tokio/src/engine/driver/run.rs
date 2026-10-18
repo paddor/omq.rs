@@ -351,7 +351,7 @@ where
             let resume_input = !replies_blocked && connection.has_pending_input();
             let want_read = pending_input_error.is_none()
                 && !recv_blocked
-                && !connection.has_pending_input()
+                && connection.accepts_input()
                 && !discard_pending
                 && !connection.is_closed();
             if !want_read {

@@ -306,4 +306,62 @@ mod tests {
         assert_eq!(crate::zmq_close(socket), 0);
         assert_eq!(crate::zmq_ctx_term(context), 0);
     }
+    struct Reentry {
+        socket: usize,
+        result: mpsc::Sender<(i32, i32)>,
+    }
+
+    extern "C" fn bind_from_callback(userdata: *mut c_void, _status: i32) {
+        // SAFETY: the test transfers one boxed state to this callback.
+        let state = unsafe { Box::from_raw(userdata.cast::<Reentry>()) };
+        let rc = crate::zmq_bind(
+            state.socket as *mut c_void,
+            c"inproc://async-callback-reentry".as_ptr(),
+        );
+        let _ = state.result.send((rc, crate::zmq_errno()));
+    }
+
+    #[test]
+    fn blocking_calls_from_a_completion_callback_fail_instead_of_deadlocking() {
+        let context = crate::zmq_ctx_new();
+        let push = crate::zmq_socket(context, 8);
+        let pull = crate::zmq_socket(context, 7);
+        let other = crate::zmq_socket(context, 7);
+        assert_eq!(
+            crate::zmq_bind(pull, c"inproc://async-callback-source".as_ptr()),
+            0
+        );
+        assert_eq!(
+            crate::zmq_connect(push, c"inproc://async-callback-source".as_ptr()),
+            0
+        );
+        let mut encoded = [0; 17];
+        encoded[0] = 1;
+        encoded[8] = 1;
+        encoded[16] = b'x';
+        let (result, receiver) = mpsc::channel();
+        let state = Box::new(Reentry {
+            socket: other as usize,
+            result,
+        });
+        let task = omq_socket_send_async(
+            push,
+            encoded.as_ptr(),
+            encoded.len(),
+            Some(bind_from_callback),
+            Box::into_raw(state).cast(),
+        );
+        assert!(!task.is_null());
+        assert_eq!(
+            receiver
+                .recv_timeout(Duration::from_secs(5))
+                .expect("callback deadlocked on its own IO thread"),
+            (-1, libc::EDEADLK)
+        );
+        omq_async_task_free(task);
+        for socket in [push, pull, other] {
+            assert_eq!(crate::zmq_close(socket), 0);
+        }
+        assert_eq!(crate::zmq_ctx_term(context), 0);
+    }
 }

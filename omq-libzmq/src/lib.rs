@@ -24,6 +24,7 @@
 compile_error!("omq-libzmq requires target_has_atomic = \"64\"");
 
 mod async_api;
+mod blocking;
 mod consts;
 mod context;
 pub mod curve;

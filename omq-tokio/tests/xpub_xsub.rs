@@ -477,3 +477,24 @@ async fn xpub_tcp_subscriber_churn() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
+
+#[tokio::test]
+async fn sub_control_stays_responsive_when_an_xpub_never_reads() {
+    let xpub = Socket::new(SocketType::XPub, Options::default());
+    xpub.bind("inproc://xpub-never-reads").await.unwrap();
+    let sub = Socket::new(SocketType::Sub, Options::default());
+    sub.connect("inproc://xpub-never-reads").await.unwrap();
+    sub.wait_connected(1, Duration::from_secs(2)).await.unwrap();
+    // The XPUB never receives its subscription messages, so queues toward it
+    // fill. Subscribing must not make the SUB actor wait for that peer.
+    for topic in 0..10_000 {
+        tokio::time::timeout(Duration::from_secs(2), sub.subscribe(format!("t{topic}")))
+            .await
+            .expect("subscribe waited for a stalled peer")
+            .unwrap();
+    }
+    tokio::time::timeout(Duration::from_secs(2), sub.close())
+        .await
+        .expect("close waited for a stalled peer")
+        .unwrap();
+}

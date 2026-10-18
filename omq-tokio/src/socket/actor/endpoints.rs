@@ -567,7 +567,7 @@ impl SocketDriver {
             route_id,
             send_pipe_rx,
             failed_attempts,
-            _task: task,
+            task,
         });
     }
 

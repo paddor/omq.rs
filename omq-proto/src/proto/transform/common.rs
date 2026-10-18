@@ -38,12 +38,34 @@ pub(super) fn take_budget(budget: &mut Option<usize>, take: usize) -> Result<()>
     Ok(())
 }
 
+/// Decoded bytes per message when no message limit is configured. Whatever
+/// its parts declare, a small compressed frame cannot expand past this.
+pub(super) const DEFAULT_DECODED_MESSAGE_LIMIT: usize = 0x4000_0000 - 1;
+
 /// Reserve the per-part storage charged by the socket's decoded-message limit
 /// before allocating any decompressed bodies. Raw codec APIs keep body-only
-/// budgets; the socket decoder uses this remaining body budget.
-pub(super) fn body_budget(parts: usize, mut limit: Option<usize>) -> Result<Option<usize>> {
+/// budgets; the socket decoder uses this remaining body budget, which is
+/// always finite.
+pub(super) fn body_budget(parts: usize, limit: Option<usize>) -> Result<Option<usize>> {
+    let mut limit = Some(limit.unwrap_or(DEFAULT_DECODED_MESSAGE_LIMIT));
     take_budget(&mut limit, parts.saturating_mul(size_of::<Payload>()))?;
     Ok(limit)
+}
+
+/// Reject a declared decoded size that `compressed` input bytes cannot
+/// produce at `max_ratio`, before anything is allocated for it.
+pub(super) fn check_expansion(
+    declared: usize,
+    compressed: usize,
+    max_ratio: usize,
+    label: &str,
+) -> Result<()> {
+    if declared > compressed.saturating_mul(max_ratio) {
+        return Err(Error::Protocol(format!(
+            "{label} declared size implausibly large for compressed input"
+        )));
+    }
+    Ok(())
 }
 
 /// Build the plaintext-sentinel-prefixed payload for a part the
@@ -87,4 +109,21 @@ pub(super) fn build_dict_shipment(sentinel: [u8; 4], dict: &Bytes) -> Message {
     frame.extend_from_slice(&sentinel);
     frame.extend_from_slice(dict);
     Message::single(frame.freeze())
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    #[test]
+    fn decoded_budget_is_finite_without_a_message_limit() {
+        let slot = size_of::<Payload>();
+        assert_eq!(
+            body_budget(2, None).unwrap(),
+            Some(DEFAULT_DECODED_MESSAGE_LIMIT - 2 * slot)
+        );
+        assert_eq!(body_budget(1, Some(1000)).unwrap(), Some(1000 - slot));
+        assert!(check_expansion(255, 1, 255, "test").is_ok());
+        assert!(check_expansion(256, 1, 255, "test").is_err());
+    }
 }

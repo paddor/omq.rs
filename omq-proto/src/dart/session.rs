@@ -148,6 +148,8 @@ pub struct Session<B: FragmentBuffer = Vec<u8>> {
     tx: Box<[Option<Sent>]>,
     rx: Box<[Option<Message>]>,
     fragments: Box<[Option<FragmentReceive<B>>]>,
+    /// Bodies reserved by FIRST fragments still waiting in the window.
+    reserved_ahead: usize,
     sending: Option<FragmentSend>,
     assembly: Option<Assembly<B>>,
     receive_failed: bool,
@@ -243,6 +245,7 @@ impl<B: FragmentBuffer> Session<B> {
             tx: (0..window).map(|_| None).collect(),
             rx: (0..window).map(|_| None).collect(),
             fragments: (0..window).map(|_| None).collect(),
+            reserved_ahead: 0,
             sending: None,
             assembly: None,
             receive_failed: false,
@@ -1253,6 +1256,20 @@ mod tests {
         assert_eq!(s.pending_receive_credit(), 2);
         s.grant_receive_credit(2);
         assert_eq!(s.receive_right_edge(), 3);
+    }
+
+    #[test]
+    fn out_of_order_firsts_share_a_bounded_reservation() {
+        let mut s = session(32);
+        let mib: u64 = 1024 * 1024;
+        let chunk = Message::single(vec![1; 16]);
+        assert_eq!(s.classify(1, 1), Admission::Accept);
+        // The first waiting body is admitted at any size.
+        assert!(s.may_reserve_ahead(48 * mib));
+        assert!(s.commit_fragment(1, Some(48 * mib), chunk, Ecn::Unavailable, Duration::ZERO));
+        // Further bodies must fit the shared budget.
+        assert!(s.may_reserve_ahead(16 * mib));
+        assert!(!s.may_reserve_ahead(17 * mib));
     }
 
     fn session(window: usize) -> Session {

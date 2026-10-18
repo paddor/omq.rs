@@ -45,6 +45,10 @@ pub(super) enum FragmentReceive<B> {
     Continuation,
 }
 
+/// Bodies FIRST fragments may reserve while waiting in the window, beyond
+/// the first such body, which is always admitted.
+const RESERVE_AHEAD_LIMIT: usize = 64 * 1024 * 1024;
+
 #[derive(Debug)]
 pub(super) struct Assembly<B> {
     body: B,
@@ -143,6 +147,17 @@ impl<B: FragmentBuffer> Session<B> {
         budget.msgs() != 0
     }
 
+    /// Whether a FIRST advertising `length` may reserve its body now. One
+    /// waiting body is always admitted; more must fit a fixed byte budget,
+    /// so out-of-order FIRSTs cannot each reserve a large body. A refused
+    /// FIRST stays unacknowledged and the sender retransmits it.
+    pub fn may_reserve_ahead(&self, length: u64) -> bool {
+        self.reserved_ahead == 0
+            || usize::try_from(length).is_ok_and(|length| {
+                self.reserved_ahead.saturating_add(length) <= RESERVE_AHEAD_LIMIT
+            })
+    }
+
     /// Reserve the entire advertised body before committing FIRST. No partial
     /// message is visible to the application, even across multiple windows.
     /// `reserve` runs only for FIRST and must return empty storage with at
@@ -174,6 +189,7 @@ impl<B: FragmentBuffer> Session<B> {
             if !body.as_ref().is_empty() || body.capacity() < length {
                 return false;
             }
+            self.reserved_ahead += length;
             FragmentReceive::First(Assembly {
                 body,
                 length,
@@ -201,6 +217,9 @@ impl<B: FragmentBuffer> Session<B> {
         while self.deliver_next < self.receive_next && !budget.exhausted() {
             let index = self.index(self.deliver_next);
             let fragment = self.fragments[index].take();
+            if let Some(FragmentReceive::First(assembly)) = &fragment {
+                self.reserved_ahead -= assembly.length;
+            }
             match fragment {
                 Some(FragmentReceive::First(assembly)) if self.assembly.is_none() => {
                     self.assembly = Some(assembly);

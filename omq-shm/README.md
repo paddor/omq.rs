@@ -15,7 +15,7 @@ CHANNEL admits one peer at a time across all endpoints.
 ## Data flow
 
 The path directly names the Unix rendezvous socket; `@name` uses the abstract
-namespace. Its stream carries setup, FD registration, and disconnect detection.
+namespace. Bind replaces only a stale socket at the path. Its stream carries setup, FD registration, and disconnect detection.
 Anonymous, size-sealed memfds are registered with `SCM_RIGHTS`. Payload memfds are
 also write-sealed (`F_SEAL_FUTURE_WRITE`): only the sender modifies them, through
 its existing mapping. Receivers map payloads read-only and validate coordinates

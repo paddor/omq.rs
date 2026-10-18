@@ -34,3 +34,31 @@ def test_mismatched_curve_keypair_raises_valueerror(tcp_endpoint):
     finally:
         s.close()
         ctx.term()
+
+
+@pytest.mark.skipif(not zmq.has("curve"), reason="curve not compiled")
+def test_curve_server_without_secret_key_fails_closed(tcp_endpoint):
+    ctx = zmq.Context()
+    s = ctx.socket(zmq.PULL)
+    try:
+        s.setsockopt(zmq.CURVE_SERVER, 1)
+        with pytest.raises(ValueError, match="CURVE_SECRETKEY"):
+            s.bind(tcp_endpoint)
+    finally:
+        s.close()
+        ctx.term()
+
+
+@pytest.mark.skipif(not zmq.has("curve"), reason="curve not compiled")
+def test_partial_curve_client_fails_closed(tcp_endpoint):
+    public, secret = zmq.curve_keypair()
+    ctx = zmq.Context()
+    s = ctx.socket(zmq.PUSH)
+    try:
+        s.setsockopt(zmq.CURVE_PUBLICKEY, public)
+        s.setsockopt(zmq.CURVE_SECRETKEY, secret)
+        with pytest.raises(ValueError, match="CURVE_SERVERKEY"):
+            s.connect(tcp_endpoint)
+    finally:
+        s.close()
+        ctx.term()

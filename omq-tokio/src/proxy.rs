@@ -16,6 +16,7 @@
 //! is intentionally not implemented.
 
 use omq_proto::error::{Error, Result, TrySendError};
+use omq_proto::flow::DrainBudget;
 use omq_proto::message::Message;
 use omq_proto::proto::SocketType;
 
@@ -26,6 +27,10 @@ use crate::Socket;
 /// Larger bursts reduce select-loop overhead under load. Smaller bursts
 /// reduce worst-case delay for the opposite direction and control socket.
 pub const DEFAULT_PROXY_BURST_SIZE: usize = 64;
+
+/// Bursts forwarded without awaiting before the loop yields its runtime
+/// thread and lets the biased select poll control first.
+const TURN_BURSTS: usize = 16;
 
 /// Reason a proxy forwarding loop stopped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -156,6 +161,7 @@ impl Proxy {
         let mut fe_pending: Option<Pending> = None;
         let mut be_pending: Option<Pending> = None;
         let mut preferred = Direction::FrontendToBackend;
+        let mut turn = DrainBudget::new(TURN_BURSTS, usize::MAX);
 
         'main: loop {
             if let Some(action) = self.try_handle_control(&mut state).await?
@@ -174,7 +180,14 @@ impl Proxy {
                         be_to_fe_enabled,
                     )? {
                         preferred = direction.opposite();
-                        continue 'main;
+                        if turn.account(0) {
+                            continue 'main;
+                        }
+                        // Sources stay ready under sustained load, and socket
+                        // receives never yield on their own.
+                        turn.reset();
+                        tokio::task::yield_now().await;
+                        break;
                     }
                 }
             }

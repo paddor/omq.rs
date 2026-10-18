@@ -1,5 +1,5 @@
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use omq_proto::proto::transform::MessageEncoder;
 
@@ -37,33 +37,59 @@ impl CompressionPool {
     /// its full configuration. Returns `None` when all `cap` encoders are
     /// in flight. New encoders are created on demand up to `cap`.
     #[cfg(any(feature = "lz4", feature = "zstd"))]
-    pub(crate) fn try_take(&self, primary: &MessageEncoder) -> Option<MessageEncoder> {
+    pub(crate) fn try_take(self: &Arc<Self>, primary: &MessageEncoder) -> Option<EncoderLoan> {
         {
             let mut pool = self.encoders.lock().unwrap();
             if let Some(pos) = pool.iter().position(|e| e.variant_matches(primary)) {
-                let mut enc = pool.swap_remove(pos);
+                let mut encoder = pool.swap_remove(pos);
                 drop(pool);
                 self.in_flight.fetch_add(1, Ordering::Relaxed);
-                enc.sync_offload_config(primary);
-                return Some(enc);
+                encoder.sync_offload_config(primary);
+                return Some(EncoderLoan {
+                    encoder,
+                    slot: InFlightSlot(self.clone()),
+                });
             }
         }
         let prev = self.in_flight.fetch_add(1, Ordering::Relaxed);
+        let slot = InFlightSlot(self.clone());
         if prev >= self.cap {
-            self.in_flight.fetch_sub(1, Ordering::Relaxed);
             return None;
         }
-        Some(MessageEncoder::new_offload(primary))
-    }
-
-    #[cfg(any(feature = "lz4", feature = "zstd"))]
-    pub(crate) fn put(&self, enc: MessageEncoder) {
-        self.encoders.lock().unwrap().push(enc);
-        self.in_flight.fetch_sub(1, Ordering::Relaxed);
+        Some(EncoderLoan {
+            encoder: MessageEncoder::new_offload(primary),
+            slot,
+        })
     }
 
     pub(crate) fn clear(&self) {
         self.encoders.lock().unwrap().clear();
+    }
+}
+
+/// A pool encoder on loan. `restore` keeps the warm encoder for reuse.
+/// Dropping the loan instead, as when a closing connection drops an
+/// unfinished offload or the encode panics, discards the encoder but still
+/// frees its in-flight slot.
+#[derive(Debug)]
+pub(crate) struct EncoderLoan {
+    pub(crate) encoder: MessageEncoder,
+    slot: InFlightSlot,
+}
+
+impl EncoderLoan {
+    pub(crate) fn restore(self) {
+        let Self { encoder, slot } = self;
+        slot.0.encoders.lock().unwrap().push(encoder);
+    }
+}
+
+#[derive(Debug)]
+struct InFlightSlot(Arc<CompressionPool>);
+
+impl Drop for InFlightSlot {
+    fn drop(&mut self) {
+        self.0.in_flight.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -81,7 +107,7 @@ mod tests {
             #[cfg(feature = "zstd")]
             CompressionKind::Zstd,
         ] {
-            let pool = CompressionPool::new();
+            let pool = Arc::new(CompressionPool::new());
             let message = Message::single(Bytes::from(vec![0x5a; 4096]));
             let (old, _) = MessageEncoder::for_compression_kind(
                 kind,
@@ -90,8 +116,8 @@ mod tests {
             .unwrap()
             .unwrap();
             let mut warm = pool.try_take(&old).unwrap();
-            let old_wire = warm.encode(&message).unwrap();
-            pool.put(warm);
+            let old_wire = warm.encoder.encode(&message).unwrap();
+            warm.restore();
             let (mut primary, _) = MessageEncoder::for_compression_kind(
                 kind,
                 &Options::default().compression_threshold(8192),
@@ -104,15 +130,46 @@ mod tests {
                 "fixture must distinguish configurations"
             );
             let mut reused = pool.try_take(&primary).unwrap();
-            assert_eq!(reused.encode(&message).unwrap(), expected, "kind={kind:?}");
-            pool.put(reused);
+            assert_eq!(
+                reused.encoder.encode(&message).unwrap(),
+                expected,
+                "kind={kind:?}"
+            );
+            reused.restore();
+        }
+    }
+
+    #[test]
+    fn dropped_loans_free_their_slots() {
+        for kind in [
+            #[cfg(feature = "lz4")]
+            CompressionKind::Lz4,
+            #[cfg(feature = "zstd")]
+            CompressionKind::Zstd,
+        ] {
+            let pool = Arc::new(CompressionPool::new());
+            let (primary, _) = MessageEncoder::for_compression_kind(kind, &Options::default())
+                .unwrap()
+                .unwrap();
+            // A closing connection drops unfinished offloads without restoring.
+            for _ in 0..=pool.cap {
+                drop(pool.try_take(&primary).unwrap());
+            }
+            let held: Vec<_> = (0..pool.cap)
+                .map(|_| pool.try_take(&primary).unwrap())
+                .collect();
+            assert!(
+                pool.try_take(&primary).is_none(),
+                "cap must still bound loans"
+            );
+            drop(held);
         }
     }
 
     #[cfg(feature = "lz4")]
     #[test]
     fn reused_lz4_encoder_switches_and_removes_dictionaries_without_shipping() {
-        let pool = CompressionPool::new();
+        let pool = Arc::new(CompressionPool::new());
         let mut state = 17_u64;
         let dictionaries: Vec<_> = (0..2)
             .map(|_| {
@@ -152,7 +209,7 @@ mod tests {
                 assert!(decoder.decode(shipment).unwrap().is_none());
             }
             let mut reused = pool.try_take(&primary).unwrap();
-            let actual = reused.encode(&message).unwrap();
+            let actual = reused.encoder.encode(&message).unwrap();
             assert!(
                 actual == expected,
                 "offload dictionary must match the new primary"
@@ -163,7 +220,7 @@ mod tests {
                 "offload encoders must never ship dictionaries"
             );
             assert_eq!(decoder.decode(actual[0].clone()).unwrap(), Some(message));
-            pool.put(reused);
+            reused.restore();
         }
     }
 
@@ -171,7 +228,7 @@ mod tests {
     #[test]
     fn reused_zstd_encoder_rebuilds_a_warm_context_for_a_different_level() {
         use std::fmt::Write as _;
-        let pool = CompressionPool::new();
+        let pool = Arc::new(CompressionPool::new());
         let mut body = String::new();
         for index in 0..2048 {
             writeln!(
@@ -192,8 +249,8 @@ mod tests {
         .unwrap()
         .unwrap();
         let mut warm = pool.try_take(&old).unwrap();
-        let old_wire = warm.encode(&message).unwrap();
-        pool.put(warm);
+        let old_wire = warm.encoder.encode(&message).unwrap();
+        warm.restore();
         let (mut primary, mut decoder) = MessageEncoder::for_compression_kind(
             CompressionKind::Zstd,
             &Options::default().compression_level(4),
@@ -203,12 +260,12 @@ mod tests {
         let expected = primary.encode(&message).unwrap();
         assert!(old_wire != expected, "fixture must distinguish levels");
         let mut reused = pool.try_take(&primary).unwrap();
-        let actual = reused.encode(&message).unwrap();
+        let actual = reused.encoder.encode(&message).unwrap();
         assert!(
             actual == expected,
             "context must use the new compression level"
         );
         assert_eq!(decoder.decode(actual[0].clone()).unwrap(), Some(message));
-        pool.put(reused);
+        reused.restore();
     }
 }

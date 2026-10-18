@@ -152,7 +152,8 @@ impl Overlay {
             recv_buffer_size: self.recv_buffer_size,
             reconnect: match (self.reconnect_ivl, self.reconnect_ivl_max) {
                 (None, _) => ReconnectPolicy::Disabled,
-                (Some(min), None) => ReconnectPolicy::Fixed(min),
+                // libzmq: a zero maximum turns exponential backoff off.
+                (Some(min), None | Some(Duration::ZERO)) => ReconnectPolicy::Fixed(min),
                 (Some(min), Some(max)) => ReconnectPolicy::Exponential { min, max },
             },
             on_mute: self.on_mute,

@@ -1798,3 +1798,30 @@ fn lazy_batches_split_without_views_and_retain_storage_after_connection_close() 
         }
     }
 }
+
+#[test]
+fn local_close_wakes_a_credit_waiter_even_if_the_peer_clears_its_parked_flag() {
+    let (mut sender, mut receiver) = pair(1);
+    let message = Message::from_slice(&[7; 128]);
+    let held = delivered(&mut sender, &mut receiver, &message);
+    assert!(sender.encode(&message).unwrap().is_none());
+    let wait = sender.credit_wait();
+    let (complete, done) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        wait.wait();
+        let _ = complete.send(());
+    });
+    std::thread::sleep(Duration::from_millis(50));
+    // The parked flag lives in sender-owned memory the receiver can write.
+    receiver
+        .incoming
+        .as_ref()
+        .unwrap()
+        .mapping
+        .atomic32(crate::wire::WAITER_PARKED)
+        .store(0, std::sync::atomic::Ordering::SeqCst);
+    drop(sender);
+    done.recv_timeout(Duration::from_secs(2))
+        .expect("local close must wake its own credit waiter");
+    drop(held);
+}

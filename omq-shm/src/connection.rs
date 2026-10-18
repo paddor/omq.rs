@@ -490,8 +490,7 @@ impl Drop for Connection {
         if let Some(table) = &self.incoming {
             table.close_reader();
         }
-        self.outgoing.stopped.store(true, Ordering::Release);
-        self.outgoing.notify();
+        self.outgoing.stop();
         let _ = self.outgoing.carrier.notify_writer(&self.outgoing.mapping);
         // EOF alone never clears borrowed outgoing leases. Application pools
         // retain those leases; pidfd death or final receiver Drop returns them.

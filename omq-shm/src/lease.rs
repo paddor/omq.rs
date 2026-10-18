@@ -90,6 +90,15 @@ impl Table {
         self.mapping.atomic32(WAKE_SEQUENCE).load(Ordering::Acquire)
     }
 
+    /// Stop credit waits from this side. The parked flag is peer-writable,
+    /// so a local stop always issues the kernel wake.
+    pub(super) fn stop(&self) {
+        self.stopped.store(true, Ordering::Release);
+        let sequence = self.mapping.atomic32(WAKE_SEQUENCE);
+        sequence.fetch_add(1, Ordering::Release);
+        futex_wake(sequence);
+    }
+
     pub(super) fn notify(&self) {
         // One kernel wake for a parked producer, rather than for every drop.
         if self.credit_signal().notify() {

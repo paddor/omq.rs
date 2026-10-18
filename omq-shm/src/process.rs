@@ -88,8 +88,14 @@ impl Process {
     }
 }
 
+/// The peer can write `word`, so a wait never trusts it to bring a wake.
+/// Each wait is bounded; callers recheck local state after it returns.
 pub(crate) fn futex_wait(word: &AtomicU32, expected: u32) {
-    let _ = futex::wait(word, futex::Flags::empty(), expected, None);
+    const SLICE: Timespec = Timespec {
+        tv_sec: 0,
+        tv_nsec: 100_000_000,
+    };
+    let _ = futex::wait(word, futex::Flags::empty(), expected, Some(&SLICE));
 }
 
 pub(crate) fn futex_wake(word: &AtomicU32) {

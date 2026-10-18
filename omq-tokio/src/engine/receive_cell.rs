@@ -61,6 +61,7 @@ impl<T> ReceiveCell<T> {
             // or a clone may have appeared while its prior call owned the state.
             std::thread::yield_now();
         };
+        super::signal::enter_receive_guard();
         ReceiveGuard {
             cell: self,
             value: Some(value),
@@ -75,9 +76,11 @@ impl<T> ReceiveCell<T> {
         } else {
             None
         };
+        let value = ManuallyDrop::into_inner(self.available.take())?;
+        super::signal::enter_receive_guard();
         Some(ReceiveGuard {
             cell: self,
-            value: Some(ManuallyDrop::into_inner(self.available.take())?),
+            value: Some(value),
             serialization: shared,
         })
     }
@@ -128,6 +131,8 @@ impl<T> Drop for ReceiveGuard<'_, T> {
             .available
             .store(ManuallyDrop::new(self.value.take()));
         drop(self.serialization.take());
+        // User wakers deferred under this guard may reenter receive now.
+        super::signal::leave_receive_guard();
     }
 }
 
@@ -187,5 +192,38 @@ mod tests {
         }));
         assert!(result.is_err());
         assert_eq!(*cell.lock(), 7);
+    }
+    #[test]
+    fn user_wakers_run_after_the_receive_guard_releases() {
+        use crate::engine::signal::BlockingSignal;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct Reenter {
+            cell: Arc<ReceiveCell<u32>>,
+            ran: AtomicBool,
+        }
+        impl std::task::Wake for Reenter {
+            fn wake(self: Arc<Self>) {
+                self.wake_by_ref();
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                // Reentering receive must not find the guard still held.
+                assert!(self.cell.try_lock().is_some());
+                self.ran.store(true, Ordering::Release);
+            }
+        }
+        let handles = Arc::new(());
+        let cell = Arc::new(ReceiveCell::new(7, Arc::downgrade(&handles)));
+        let waker = Arc::new(Reenter {
+            cell: cell.clone(),
+            ran: AtomicBool::new(false),
+        });
+        let signal = BlockingSignal::new();
+        let _registration = signal.register_waker(std::task::Waker::from(waker.clone()));
+        let guard = cell.lock();
+        signal.wake();
+        assert!(!waker.ran.load(Ordering::Acquire));
+        drop(guard);
+        assert!(waker.ran.load(Ordering::Acquire));
     }
 }

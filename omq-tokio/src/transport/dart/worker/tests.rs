@@ -339,7 +339,7 @@ fn removing_a_route_preserves_dense_indices_and_returns_admission() {
                 index,
                 peer: None,
                 pending: None,
-                _permit: shared.peers.clone().try_acquire_owned().unwrap(),
+                _permit: Some(shared.peers.clone().try_acquire_owned().unwrap()),
             },
         );
     }

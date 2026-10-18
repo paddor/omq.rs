@@ -102,8 +102,11 @@ struct Pending {
     handshake: Handshake,
     socket_type: SocketType,
     identity: Option<Bytes>,
+    /// Fixed at the first HELLO; repeats never extend it.
     expires: Instant,
     retry: Instant,
+    /// Inbound handshakes hold a pending slot; our own connector does not.
+    _slot: Option<OwnedSemaphorePermit>,
 }
 
 struct Peer {
@@ -201,7 +204,8 @@ struct Route {
     index: usize,
     pending: Option<Pending>,
     peer: Option<Peer>,
-    _permit: OwnedSemaphorePermit,
+    /// A ready slot, taken when the handshake confirms.
+    _permit: Option<OwnedSemaphorePermit>,
 }
 
 #[derive(Default)]
@@ -419,20 +423,30 @@ impl EndpointWorker {
         now: Instant,
         routes: &mut Routes,
     ) {
+        let slot = if handshake.is_connector() {
+            None
+        } else {
+            // Never answer a new source that could not take a ready slot.
+            if !routes.map.contains_key(&source) && self.shared.peers.available_permits() == 0 {
+                return;
+            }
+            let Ok(slot) = self.shared.pending.clone().try_acquire_owned() else {
+                return;
+            };
+            Some(slot)
+        };
         let pending = Pending {
             handshake,
             socket_type,
             identity,
             expires: now + LEASE,
             retry: now,
+            _slot: slot,
         };
         if let Some(route) = routes.map.get_mut(&source) {
             route.pending = Some(pending);
             return;
         }
-        let Ok(permit) = self.shared.peers.clone().try_acquire_owned() else {
-            return;
-        };
         let index = routes.order.len();
         routes.order.push(source);
         routes.map.insert(
@@ -441,7 +455,7 @@ impl EndpointWorker {
                 index,
                 pending: Some(pending),
                 peer: None,
-                _permit: permit,
+                _permit: None,
             },
         );
     }
@@ -496,8 +510,8 @@ impl EndpointWorker {
             if !same {
                 // Exclusive CHANNEL cannot admit a second source while live.
                 if self.socket_type == SocketType::Channel
-                    && !routes.map.is_empty()
                     && existing.is_none()
+                    && routes.map.values().any(|route| route.peer.is_some())
                 {
                     return;
                 }
@@ -520,8 +534,15 @@ impl EndpointWorker {
             }
             pending.socket_type = ready.socket_type;
             pending.identity = ready.identity.map(Bytes::copy_from_slice);
-            pending.expires = now + LEASE;
             if pending.handshake.confirmed() {
+                if route._permit.is_none() {
+                    let Ok(permit) = self.shared.peers.clone().try_acquire_owned() else {
+                        // Every ready slot is taken; this source stays out.
+                        route.pending = None;
+                        return;
+                    };
+                    route._permit = Some(permit);
+                }
                 let Some(next) = generation.checked_add(1) else {
                     return;
                 };

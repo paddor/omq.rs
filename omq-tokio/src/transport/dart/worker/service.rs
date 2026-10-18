@@ -94,12 +94,19 @@ impl EndpointWorker {
                 if pending.expires <= now {
                     route.pending = None;
                 } else {
-                    if pending.retry <= now {
+                    // A listener answers each HELLO once and never resends
+                    // WELCOME on its own, so spoofed HELLOs cannot amplify.
+                    let connector = pending.handshake.is_connector();
+                    if connector && pending.retry <= now {
                         pending.handshake.retry();
                         pending.retry = now + RETRY;
                     }
                     worked |= self.send_handshake(source, &mut pending.handshake, control, stats);
-                    deadline = deadline.min(pending.retry);
+                    deadline = deadline.min(if connector {
+                        pending.retry
+                    } else {
+                        pending.expires
+                    });
                 }
             }
             let remove = if let Some(peer) = &mut route.peer {

@@ -329,3 +329,50 @@ async fn proxy_forwards_xpub_subscriptions_to_xsub() {
     send_control(&controller, b"TERMINATE").await;
     assert_eq!(task.await.unwrap().unwrap(), ProxyExit::Terminated);
 }
+
+#[tokio::test]
+async fn rep_control_is_serviced_while_input_stays_ready() {
+    // Every queued message fits in the backend, so the forwarding loop never
+    // has to await. Control must still run long before the input drains.
+    const QUEUED: u32 = 20_000;
+    let options = || {
+        Options::default()
+            .linger(Duration::ZERO)
+            .send_hwm(2 * QUEUED)
+            .recv_hwm(2 * QUEUED)
+    };
+    let frontend = Socket::new(SocketType::Pull, options());
+    let feeder = Socket::new(SocketType::Push, options());
+    frontend.bind(endpoint("ready-fe")).await.unwrap();
+    feeder.connect(endpoint("ready-fe")).await.unwrap();
+    let backend = Socket::new(SocketType::Push, options());
+    let sink = Socket::new(SocketType::Pull, options());
+    backend.bind(endpoint("ready-be")).await.unwrap();
+    sink.connect(endpoint("ready-be")).await.unwrap();
+    backend
+        .wait_connected(1, Duration::from_secs(2))
+        .await
+        .unwrap();
+    for _ in 0..QUEUED {
+        feeder.send(Message::single("x")).await.unwrap();
+    }
+    let (control, controller) = control_pair("ready-ctl").await;
+    controller.send(Message::single("TERMINATE")).await.unwrap();
+
+    let exit = tokio::time::timeout(
+        Duration::from_secs(5),
+        Proxy::new(frontend, backend).control(control).run(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(exit, ProxyExit::Terminated);
+    let mut forwarded = 0;
+    while sink.try_recv().is_ok() {
+        forwarded += 1;
+    }
+    assert!(
+        forwarded < QUEUED / 4,
+        "control waited for {forwarded} forwarded messages"
+    );
+}

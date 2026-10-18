@@ -228,7 +228,16 @@ struct DialerEntry {
     route_id: u64,
     send_pipe_rx: Option<crate::engine::SendPipeConsumer>,
     failed_attempts: Arc<std::sync::atomic::AtomicU32>,
-    _task: JoinHandle<()>,
+    task: JoinHandle<()>,
+}
+
+impl Drop for DialerEntry {
+    /// A dialer leaves the table only when it must stop. A detached task
+    /// would keep redialing, even after the socket closed.
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        self.task.abort();
+    }
 }
 
 struct PendingReceive {

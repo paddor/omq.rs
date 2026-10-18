@@ -150,16 +150,12 @@ async fn attach_on_route(
     remote
 }
 
-#[expect(
-    clippy::used_underscore_binding,
-    reason = "Await the retained dial task before releasing test setup admission"
-)]
 async fn stop_dial_transport(driver: &mut SocketDriver) -> u64 {
     assert_eq!(driver.dialers.len(), 1);
     let dialer = &mut driver.dialers[0];
     dialer.cancel.cancel();
-    dialer._task.abort();
-    let _ = (&mut dialer._task).await;
+    dialer.task.abort();
+    let _ = (&mut dialer.task).await;
     dialer.route_id
 }
 

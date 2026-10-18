@@ -347,36 +347,37 @@ pub(super) fn decode(
     Ok(())
 }
 
-pub(super) fn references(bytes: &[u8]) -> Result<impl Iterator<Item = Reference> + Clone + '_> {
+/// Decode a reference table once. Callers use only the returned copy, never
+/// the shared table again.
+pub(super) fn references(bytes: &[u8]) -> Result<Vec<Reference>> {
     let count = count(bytes)?;
     let end = COUNT_BYTES + count * REFERENCE_ENTRY_BYTES;
     if bytes.len() != end.max(MIN_STORAGE_BYTES) || bytes[end..].iter().any(|&byte| byte != 0) {
         return Err(invalid("invalid SHM reference table length or padding").into());
     }
-    for index in 0..count {
-        let size = COUNT_BYTES + index * SIZE_BYTES;
-        let length = read_u64(bytes, size);
-        let coordinate = COUNT_BYTES + count * SIZE_BYTES + index * COORDINATE_BYTES;
-        if length > isize::MAX as u64
-            || usize::try_from(read_u64(bytes, coordinate + BODY_OFFSET)).is_err()
-        {
-            return Err(invalid("SHM reference batch exceeds payload limits").into());
-        }
-    }
-    Ok((0..count).map(move |index| {
-        let coordinate = COUNT_BYTES + count * SIZE_BYTES + index * COORDINATE_BYTES;
-        let size = COUNT_BYTES + index * SIZE_BYTES;
-        Reference {
-            id: u32::from_le_bytes(
-                bytes[coordinate..coordinate + REGION_TOKEN]
-                    .try_into()
-                    .unwrap(),
-            ),
-            token: read_u64(bytes, coordinate + REGION_TOKEN),
-            offset: read_u64(bytes, coordinate + BODY_OFFSET) as usize,
-            length: read_u64(bytes, size) as usize,
-        }
-    }))
+    (0..count)
+        .map(|index| {
+            let size = COUNT_BYTES + index * SIZE_BYTES;
+            let coordinate = COUNT_BYTES + count * SIZE_BYTES + index * COORDINATE_BYTES;
+            let offset = usize::try_from(read_u64(bytes, coordinate + BODY_OFFSET));
+            let length = usize::try_from(read_u64(bytes, size))
+                .ok()
+                .filter(|&length| isize::try_from(length).is_ok());
+            let (Ok(offset), Some(length)) = (offset, length) else {
+                return Err(invalid("SHM reference batch exceeds payload limits").into());
+            };
+            Ok(Reference {
+                id: u32::from_le_bytes(
+                    bytes[coordinate..coordinate + REGION_TOKEN]
+                        .try_into()
+                        .unwrap(),
+                ),
+                token: read_u64(bytes, coordinate + REGION_TOKEN),
+                offset,
+                length,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -484,11 +485,22 @@ struct ReceivedStorage {
     backing: ReceivedBacking,
 }
 
+// Copied and referenced batches keep validated copies of the shared size and
+// coordinate tables; receives never read those tables again.
 #[derive(Debug)]
 enum ReceivedBacking {
     Inline(Box<[Message]>),
-    Copied,
-    Referenced(Vec<ReceivedRun>),
+    Copied(Box<[usize]>),
+    Referenced {
+        runs: Vec<ReceivedRun>,
+        bodies: Box<[Body]>,
+    },
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Body {
+    offset: usize,
+    length: usize,
 }
 
 #[derive(Debug)]
@@ -510,6 +522,7 @@ impl ReceivedBatch {
         let count = count(bytes)?;
         let mut offset = COUNT_BYTES + count * SIZE_BYTES;
         let mut inline = message.len() == 1;
+        let mut lengths = Vec::with_capacity(count);
         for index in 0..count {
             let length = copied_length(bytes, index)?;
             inline &= length <= COPY_THRESHOLD;
@@ -521,6 +534,7 @@ impl ReceivedBatch {
                 .checked_add(length)
                 .filter(|&end| end <= bytes.len())
                 .ok_or_else(|| invalid("truncated SHM batch body"))?;
+            lengths.push(length);
         }
         if bytes[offset..].iter().any(|&byte| byte != 0)
             || bytes.len() != offset.max(MIN_STORAGE_BYTES)
@@ -532,8 +546,7 @@ impl ReceivedBatch {
             // then transfer one batch without retaining its SHM metadata lease.
             let mut messages = Vec::with_capacity(count);
             let mut offset = COUNT_BYTES + count * SIZE_BYTES;
-            for index in 0..count {
-                let length = copied_length(bytes, index).expect("validated inline body");
+            for length in lengths {
                 messages.push(Message::from_slice(&bytes[offset..offset + length]));
                 offset += length;
             }
@@ -544,7 +557,7 @@ impl ReceivedBatch {
         } else {
             (
                 message.last_payload().expect("batch owner").as_bytes(),
-                ReceivedBacking::Copied,
+                ReceivedBacking::Copied(lengths.into_boxed_slice()),
             )
         };
         Ok(Self::new(message, bytes, views, count, backing))
@@ -557,10 +570,10 @@ impl ReceivedBatch {
         mut region: impl FnMut(u32, u64) -> Option<Arc<Mapping>>,
     ) -> Result<Self> {
         check_envelope(message)?;
-        let bytes = crate::body(message)?;
-        let count = count(bytes)?;
+        let bodies = references(crate::body(message)?)?;
+        let count = bodies.len();
         let owner = message.last_payload().expect("batch owner").as_bytes();
-        let mut references = references(bytes)?.peekable();
+        let mut references = bodies.iter().copied().peekable();
         let mut runs = Vec::new();
         let mut end = 0;
         while let Some(reference) = references.next() {
@@ -590,7 +603,16 @@ impl ReceivedBatch {
             owner,
             views,
             count,
-            ReceivedBacking::Referenced(runs),
+            ReceivedBacking::Referenced {
+                runs,
+                bodies: bodies
+                    .iter()
+                    .map(|reference| Body {
+                        offset: reference.offset,
+                        length: reference.length,
+                    })
+                    .collect(),
+            },
         ))
     }
 
@@ -653,11 +675,10 @@ impl ReceivedBatch {
             run: self.run,
             routing_id: self.routing_id,
         };
-        if count < self.len() && matches!(self.storage.backing, ReceivedBacking::Copied) {
-            for index in self.next..self.next + count {
-                self.offset += copied_length(self.storage.bytes.as_ref(), index)
-                    .expect("validated batch length");
-            }
+        if count < self.len()
+            && let ReceivedBacking::Copied(lengths) = &self.storage.backing
+        {
+            self.offset += lengths[self.next..self.next + count].iter().sum::<usize>();
         }
         self.next += count;
         prefix
@@ -675,7 +696,7 @@ impl ReceivedBatch {
             self.next += 1;
             return Some(self.wrap(message));
         }
-        if matches!(self.storage.backing, ReceivedBacking::Copied) {
+        if matches!(self.storage.backing, ReceivedBacking::Copied(_)) {
             return Some(self.pop_copied());
         }
         Some(self.pop_referenced())
@@ -687,33 +708,24 @@ impl ReceivedBatch {
     )]
     #[inline(always)]
     fn pop_referenced(&mut self) -> Message {
-        let bytes = self.storage.bytes.as_ref();
-        let length = read_u64(bytes, COUNT_BYTES + self.next * SIZE_BYTES) as usize;
-        let body = match &self.storage.backing {
-            ReceivedBacking::Copied | ReceivedBacking::Inline(_) => {
-                unreachable!("copied cursor handled above")
-            }
-            ReceivedBacking::Referenced(runs) => {
-                while self.next >= runs[self.run].end {
-                    self.run += 1;
-                }
-                let run = &runs[self.run];
-                let count =
-                    usize::from(u16::from_le_bytes(bytes[..COUNT_BYTES].try_into().unwrap()));
-                let coordinate = COUNT_BYTES + count * SIZE_BYTES + self.next * COORDINATE_BYTES;
-                let offset = read_u64(bytes, coordinate + BODY_OFFSET) as usize;
-                if let Some(shared) = &run.shared {
-                    let start = offset - run.offset;
-                    Payload::from_bytes(shared.slice(start..start + length))
-                } else {
-                    self.storage.views.referenced(
-                        run.mapping.clone(),
-                        offset,
-                        length,
-                        Payload::from_bytes(self.storage.bytes.clone()),
-                    )
-                }
-            }
+        let ReceivedBacking::Referenced { runs, bodies } = &self.storage.backing else {
+            unreachable!("copied cursor handled above")
+        };
+        let Body { offset, length } = bodies[self.next];
+        while self.next >= runs[self.run].end {
+            self.run += 1;
+        }
+        let run = &runs[self.run];
+        let body = if let Some(shared) = &run.shared {
+            let start = offset - run.offset;
+            Payload::from_bytes(shared.slice(start..start + length))
+        } else {
+            self.storage.views.referenced(
+                run.mapping.clone(),
+                offset,
+                length,
+                Payload::from_bytes(self.storage.bytes.clone()),
+            )
         };
         self.next += 1;
         self.wrap(Message::from(body))
@@ -725,8 +737,11 @@ impl ReceivedBatch {
     )]
     #[inline(always)]
     fn pop_copied(&mut self) -> Message {
+        let ReceivedBacking::Copied(lengths) = &self.storage.backing else {
+            unreachable!("referenced cursor handled separately")
+        };
+        let length = lengths[self.next];
         let bytes = self.storage.bytes.as_ref();
-        let length = read_u64(bytes, COUNT_BYTES + self.next * SIZE_BYTES) as usize;
         let offset = self.offset;
         self.offset += length;
         self.next += 1;
@@ -767,7 +782,7 @@ impl ReceivedBatch {
             let count = out.len() - start;
             self.next += count;
             count
-        } else if matches!(self.storage.backing, ReceivedBacking::Copied) {
+        } else if matches!(self.storage.backing, ReceivedBacking::Copied(_)) {
             Self::append(out, maximum, || self.pop_copied(), continue_after)
         } else {
             Self::append(out, maximum, || self.pop_referenced(), continue_after)

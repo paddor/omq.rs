@@ -371,6 +371,9 @@ impl Connection {
             if pending.contains(&(region.0, region.1)) {
                 self.retired_regions.push_back(region);
             }
+            if self.retired_regions.len() > MAX_LEASES {
+                return Err(invalid("too many retained SHM regions"));
+            }
         }
         Ok(())
     }

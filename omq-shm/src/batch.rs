@@ -9,7 +9,7 @@ use omq_proto::message::PayloadOwner;
 use omq_proto::{Message, Payload, PayloadPool, Result};
 
 use crate::{
-    COPY_THRESHOLD, find_slot,
+    COPY_THRESHOLD, Slot, find_slot,
     lease::LeaseGroup,
     mapping::{Mapping, invalid, read_u64},
 };
@@ -32,6 +32,9 @@ pub(crate) const SIZE_BYTES: usize = std::mem::size_of::<u64>();
 const MIN_STORAGE_BYTES: usize = 64;
 /// Bytes per length-and-coordinate entry in a reference batch.
 pub const REFERENCE_ENTRY_BYTES: usize = SIZE_BYTES + COORDINATE_BYTES;
+/// Bytes in frames before the last from which a whole message uses one shared
+/// multipart record instead of carrying those frames on the carrier ring.
+pub const MULTIPART_ENVELOPE_THRESHOLD: usize = 4 * 1024;
 
 /// Layout of application bodies in a shared publication batch.
 #[derive(Clone, Copy, Debug)]
@@ -219,6 +222,141 @@ pub(crate) fn prepare_references_validated(
     )))
 }
 
+/// Whether a message travels as one shared multipart record: 2 to 256 frames
+/// whose frames before the last reach [`MULTIPART_ENVELOPE_THRESHOLD`].
+#[must_use]
+pub fn uses_multipart_record(message: &Message) -> bool {
+    let count = message.len();
+    (2..=BATCH_MAX_MESSAGES).contains(&count)
+        && (0..count - 1)
+            .map(|index| message.part_slice(index).map_or(0, <[u8]>::len))
+            .sum::<usize>()
+            >= MULTIPART_ENVELOPE_THRESHOLD
+}
+
+/// Multipart records reference larger pooled frames in place.
+fn referenced_frame(frame: &[u8]) -> bool {
+    frame.len() > COPY_THRESHOLD && find_slot(frame).is_some()
+}
+
+pub(crate) fn multipart_work_bytes(message: &Message) -> usize {
+    (0..message.len())
+        .map(|index| {
+            let frame = message.part_slice(index).expect("multipart frame");
+            if referenced_frame(frame) {
+                REFERENCE_ENTRY_BYTES
+            } else {
+                frame.len()
+            }
+        })
+        .sum()
+}
+
+/// Copied frames follow the table in the same slot.
+fn multipart_table_length(count: usize) -> usize {
+    (COUNT_BYTES + count * REFERENCE_ENTRY_BYTES).max(MIN_STORAGE_BYTES)
+}
+
+/// Frames of one multipart record: pooled frames are referenced, all others
+/// are copied once after the frame table.
+pub(crate) struct MultipartFrames {
+    payloads: Vec<Payload>,
+    referenced: Vec<bool>,
+    length: usize,
+}
+
+impl MultipartFrames {
+    pub(crate) fn new(message: &Message) -> Self {
+        let mut source = message.clone();
+        let mut payloads = Vec::with_capacity(message.len());
+        while let Some(payload) = source.pop_front_payload() {
+            payloads.push(payload);
+        }
+        let referenced: Vec<_> = payloads
+            .iter()
+            .map(|payload| referenced_frame(payload.as_slice()))
+            .collect();
+        let copied: usize = payloads
+            .iter()
+            .zip(&referenced)
+            .filter(|(_, referenced)| !**referenced)
+            .map(|(payload, _)| payload.len())
+            .sum();
+        Self {
+            length: multipart_table_length(payloads.len()) + copied,
+            payloads,
+            referenced,
+        }
+    }
+
+    pub(crate) const fn length(&self) -> usize {
+        self.length
+    }
+
+    fn write(&self, bytes: &mut [u8], sources: &Sources, slot: &Slot, base: usize) {
+        let count = self.payloads.len();
+        bytes[..COUNT_BYTES].copy_from_slice(&(count as u16).to_le_bytes());
+        let mut pooled = sources.references.iter();
+        let mut data = multipart_table_length(count);
+        for (index, (payload, referenced)) in self.payloads.iter().zip(&self.referenced).enumerate()
+        {
+            let reference = if *referenced {
+                *pooled.next().expect("pooled multipart frame")
+            } else {
+                let frame = payload.as_slice();
+                bytes[data..data + frame.len()].copy_from_slice(frame);
+                let reference = Reference {
+                    id: slot.mapping.id,
+                    token: slot.mapping.token,
+                    offset: base + data,
+                    length: frame.len(),
+                };
+                data += frame.len();
+                reference
+            };
+            write_reference(bytes, count, index, reference);
+        }
+        bytes[COUNT_BYTES + count * REFERENCE_ENTRY_BYTES..multipart_table_length(count)].fill(0);
+    }
+}
+
+/// Write a multipart table and its copied frames into one pool slot.
+/// The record retains pooled source slots until every recipient completes it.
+pub(crate) fn prepare_multipart_validated(
+    pool: &PayloadPool,
+    message: &Message,
+    frames: &MultipartFrames,
+) -> Option<Message> {
+    let pooled: Vec<_> = frames
+        .payloads
+        .iter()
+        .zip(&frames.referenced)
+        .filter(|(_, referenced)| **referenced)
+        .map(|(payload, _)| Message::from(payload.clone()))
+        .collect();
+    let pooled: Vec<_> = pooled.iter().collect();
+    let sources = Sources::gather(&pooled)?;
+    let mut buffer = pool.try_buffer(frames.length)?;
+    let slot = find_slot(&buffer.writable()[..frames.length])?;
+    let base = buffer.writable().as_ptr() as usize - slot.mapping.address();
+    frames.write(buffer.writable(), &sources, &slot, base);
+    buffer
+        .set_len(multipart_table_length(frames.payloads.len()))
+        .expect("multipart table fits its slot");
+    let group = Arc::new(LeaseGroup::default());
+    sources.attach(&slot, &group);
+    let owner = Arc::new(PreparedBatch {
+        metadata: buffer.into_payload(),
+        group,
+        _sources: sources.retained,
+    });
+    let record = Message::from(Payload::from_shared_owner(owner));
+    Some(match message.routing_id() {
+        Some(id) => record.with_routing_id(id),
+        None => record,
+    })
+}
+
 struct Sources {
     references: Vec<Reference>,
     retained: Vec<Payload>,
@@ -288,21 +426,12 @@ impl Sources {
     }
 
     fn write(&self, bytes: &mut [u8]) {
-        bytes[..COUNT_BYTES].copy_from_slice(&(self.references.len() as u16).to_le_bytes());
+        let count = self.references.len();
+        bytes[..COUNT_BYTES].copy_from_slice(&(count as u16).to_le_bytes());
         for (index, reference) in self.references.iter().enumerate() {
-            let size = COUNT_BYTES + index * SIZE_BYTES;
-            bytes[size..size + SIZE_BYTES]
-                .copy_from_slice(&(reference.length as u64).to_le_bytes());
-            let coordinate =
-                COUNT_BYTES + self.references.len() * SIZE_BYTES + index * COORDINATE_BYTES;
-            bytes[coordinate..coordinate + REGION_TOKEN]
-                .copy_from_slice(&reference.id.to_le_bytes());
-            bytes[coordinate + REGION_TOKEN..coordinate + BODY_OFFSET]
-                .copy_from_slice(&reference.token.to_le_bytes());
-            bytes[coordinate + BODY_OFFSET..coordinate + COORDINATE_BYTES]
-                .copy_from_slice(&(reference.offset as u64).to_le_bytes());
+            write_reference(bytes, count, index, *reference);
         }
-        bytes[COUNT_BYTES + self.references.len() * REFERENCE_ENTRY_BYTES..].fill(0);
+        bytes[COUNT_BYTES + count * REFERENCE_ENTRY_BYTES..].fill(0);
     }
 
     fn attach(&self, metadata: &crate::Slot, group: &Arc<LeaseGroup>) {
@@ -317,6 +446,17 @@ impl Sources {
         state.published_batch = Some(group.clone());
         state.regions.clone_from(&self.regions);
     }
+}
+
+fn write_reference(bytes: &mut [u8], count: usize, index: usize, reference: Reference) {
+    let size = COUNT_BYTES + index * SIZE_BYTES;
+    bytes[size..size + SIZE_BYTES].copy_from_slice(&(reference.length as u64).to_le_bytes());
+    let coordinate = COUNT_BYTES + count * SIZE_BYTES + index * COORDINATE_BYTES;
+    bytes[coordinate..coordinate + REGION_TOKEN].copy_from_slice(&reference.id.to_le_bytes());
+    bytes[coordinate + REGION_TOKEN..coordinate + BODY_OFFSET]
+        .copy_from_slice(&reference.token.to_le_bytes());
+    bytes[coordinate + BODY_OFFSET..coordinate + COORDINATE_BYTES]
+        .copy_from_slice(&(reference.offset as u64).to_le_bytes());
 }
 
 pub(super) fn count(bytes: &[u8]) -> Result<usize> {
@@ -394,6 +534,35 @@ pub(super) fn decode_references(
         messages.push_back(message);
     }
     Ok(())
+}
+
+/// Expand a multipart table into one message. Frames retain the record lease;
+/// the shared table is not read again after validation.
+pub(super) fn multipart(
+    message: &Message,
+    maximum: Option<usize>,
+    views: &crate::views::Views,
+    region: impl FnMut(u32, u64) -> Option<Arc<Mapping>>,
+) -> Result<Message> {
+    if message.len() != 1 {
+        return Err(invalid("invalid SHM multipart envelope").into());
+    }
+    let mut frames = ReceivedBatch::referenced(message, maximum, views, region)?;
+    let ReceivedBacking::Referenced { bodies, .. } = &frames.storage.backing else {
+        unreachable!("multipart records are referenced")
+    };
+    let size = bodies.iter().fold(
+        bodies.len() * std::mem::size_of::<Payload>(),
+        |size, body| size.saturating_add(body.length),
+    );
+    if maximum.is_some_and(|maximum| size > maximum) {
+        return Err(invalid("SHM multipart message exceeds max_message_size").into());
+    }
+    let mut parts = Vec::with_capacity(frames.len());
+    while let Some(mut frame) = frames.pop_front() {
+        parts.push(frame.pop_front_payload().expect("multipart frame"));
+    }
+    Ok(Message::multipart_payloads(parts))
 }
 
 #[derive(Debug)]

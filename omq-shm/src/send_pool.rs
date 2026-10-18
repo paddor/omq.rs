@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use arc_swap::ArcSwap;
 use omq_proto::{Message, PayloadPool, Result};
 
+use crate::mapping::invalid;
 use crate::pool::{payload_offset, storage_length};
 use crate::{
     BatchKind, COPY_THRESHOLD, MAX_LEASES, batch, find_slot, memory::Budget, pool_storage,
@@ -97,6 +98,25 @@ impl SendPool {
             BatchKind::Copied => batch::prepare_copied_validated(&pool, messages, length),
             BatchKind::Referenced => batch::prepare_references_validated(&pool, messages, length),
         }
+    }
+
+    /// Prepare one shared record for a message selected by
+    /// [`crate::uses_multipart_record`]. Unpooled frames are copied once after
+    /// the frame table; larger pooled frames stay in place. Publish it with
+    /// [`crate::Connection::encode_multipart_and_frame`].
+    /// `None` means storage is unavailable; the message can still be encoded.
+    ///
+    /// # Errors
+    /// Returns an error for an unsupported message, size overflow, or OS failure.
+    pub fn prepare_multipart(&self, message: &Message) -> Result<Option<Message>> {
+        if !batch::uses_multipart_record(message) {
+            return Err(invalid("message does not use an SHM multipart record").into());
+        }
+        let frames = batch::MultipartFrames::new(message);
+        let Some(pool) = self.class(frames.length())? else {
+            return Ok(None);
+        };
+        Ok(batch::prepare_multipart_validated(&pool, message, &frames))
     }
 
     fn class(&self, length: usize) -> Result<Option<Arc<PayloadPool>>> {

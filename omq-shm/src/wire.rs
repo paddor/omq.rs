@@ -10,6 +10,7 @@ pub(crate) const COPIED: u8 = 0;
 pub(crate) const BODY: u8 = 1;
 pub(crate) const COPIED_BATCH: u8 = 2;
 pub(crate) const REFERENCE_BATCH: u8 = 3;
+pub(crate) const MULTIPART: u8 = 4;
 pub(crate) use crate::coordination::{GENERATION_STEP, STATE_BITS};
 pub(crate) const CELL_FIELDS: usize = crate::coordination::COORDINATES + 1;
 pub(crate) const CELL_BYTES: usize = CELL_FIELDS * std::mem::size_of::<u64>();

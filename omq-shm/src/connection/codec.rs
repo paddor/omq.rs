@@ -5,11 +5,11 @@ use crate::lease::{Borrowed, Lease};
 use crate::mapping::invalid;
 use crate::pool::{Slot, find_slot};
 use crate::wire::{
-    self, BODY, COPIED, COPIED_BATCH, GENERATION_STEP, READER_CLOSED, REFERENCE_BATCH,
+    self, BODY, COPIED, COPIED_BATCH, GENERATION_STEP, MULTIPART, READER_CLOSED, REFERENCE_BATCH,
 };
 use crate::{
     BATCH_MAX_BYTES, BatchKind, COPY_THRESHOLD, batch, body, check_body_size, copied_record,
-    replace_body,
+    replace_body, uses_multipart_record,
 };
 use omq_proto::{Message, Payload, Result};
 use std::sync::Arc;
@@ -17,14 +17,32 @@ use std::sync::atomic::Ordering;
 
 impl Connection {
     /// Convert the last application body to copied bytes or a region reference.
-    /// `None` means pool/lease backpressure: retain the message and await credit.
-    /// Automatic storage exhaustion uses copied carrier bytes. Existing pooled
-    /// bodies keep their mapped storage and reserve one recipient lease.
+    /// Messages selected by [`crate::uses_multipart_record`] become one shared
+    /// record with all frames. `None` means pool/lease backpressure: retain the
+    /// message and await credit. Automatic storage exhaustion uses copied
+    /// carrier bytes. Existing pooled bodies keep their mapped storage and
+    /// reserve one recipient lease.
     ///
     /// # Errors
     /// Returns an error for a missing body, closed reader, or failed OS operation.
     pub fn encode(&mut self, message: &Message) -> Result<Option<Message>> {
+        if uses_multipart_record(message) {
+            return self.encode_multipart(message);
+        }
         self.encode_record(message, 1, BODY)
+    }
+
+    fn encode_multipart(&mut self, message: &Message) -> Result<Option<Message>> {
+        self.prepare_encode()?;
+        // Check credit before copying frames into shared storage.
+        self.reclaim(1);
+        if self.hwm == self.leased_messages {
+            return Ok(None);
+        }
+        match self.send_pool.prepare_multipart(message)? {
+            Some(record) => self.encode_record(&record, 1, MULTIPART),
+            None => self.encode_record(message, 1, BODY),
+        }
     }
 
     pub(super) fn encode_record(
@@ -66,7 +84,7 @@ impl Connection {
     }
 
     fn register_sources(&mut self, slot: &Slot, kind: u8) -> Result<bool> {
-        if kind == REFERENCE_BATCH {
+        if matches!(kind, REFERENCE_BATCH | MULTIPART) {
             let state = slot.state.lock().expect("SHM batch sources");
             if state.published_batch.is_none() {
                 return Err(invalid("SHM reference batch was not prepared").into());
@@ -138,12 +156,31 @@ impl Connection {
             .len()
             .checked_sub(1)
             .ok_or_else(|| omq_proto::Error::Protocol("missing SHM message body".into()))?;
-        if message.part_slice(index).expect("message body").len() <= COPY_THRESHOLD {
+        if message.part_slice(index).expect("message body").len() <= COPY_THRESHOLD
+            && !uses_multipart_record(message)
+        {
             self.prepare_encode()?;
             crate::frame_copied(message, frames);
             return Ok(true);
         }
         let Some(wire) = self.encode(message)? else {
+            return Ok(false);
+        };
+        frames.frame(&wire);
+        Ok(true)
+    }
+
+    /// Publish a record from [`crate::SendPool::prepare_multipart`] with one
+    /// lease. `false` means retain the record and wait for connection credit.
+    ///
+    /// # Errors
+    /// Returns an error for an unprepared record, a closed reader, or OS failures.
+    pub fn encode_multipart_and_frame(
+        &mut self,
+        record: &Message,
+        frames: &mut omq_proto::frame_buffer::FrameBuffer,
+    ) -> Result<bool> {
+        let Some(wire) = self.encode_record(record, 1, MULTIPART)? else {
             return Ok(false);
         };
         frames.frame(&wire);
@@ -292,10 +329,16 @@ impl Connection {
         let kind = message
             .part_slice(message.len().saturating_sub(1))
             .and_then(|body| body.first().copied());
-        let Some(kind @ (COPIED_BATCH | REFERENCE_BATCH)) = kind else {
+        let Some(kind @ (COPIED_BATCH | REFERENCE_BATCH | MULTIPART)) = kind else {
             return self.decode(message).map(Received::Message);
         };
         let decoded = self.decode_record(message, kind)?;
+        if kind == MULTIPART {
+            return batch::multipart(&decoded, self.max_message_size, &self.views, |id, token| {
+                self.find_region(id, token).cloned()
+            })
+            .map(Received::Message);
+        }
         let batch = if kind == COPIED_BATCH {
             crate::ReceivedBatch::copied(&decoded, self.max_message_size, &self.views)?
         } else {

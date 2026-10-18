@@ -122,10 +122,13 @@ fn prepare_batch(
     if pending.len() < 2 || state.batch_capacity() < 2 || drain.remaining_msgs() < 2 {
         return Ok(None);
     }
-    let Some(first) = pending
-        .front()
-        .filter(|message| (1..=2).contains(&message.len()))
-    else {
+    // Batch members share the first envelope and send it once. Larger
+    // envelopes use multipart records instead.
+    let Some(first) = pending.front().filter(|message| {
+        (1..=2).contains(&message.len())
+            && (message.len() == 1
+                || message.part_slice(0).expect("SHM envelope").len() <= COPIED_BATCH_MAX_BODY)
+    }) else {
         return Ok(None);
     };
     let body_index = first.len() - 1;

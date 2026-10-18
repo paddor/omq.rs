@@ -6,8 +6,8 @@ use crate::mapping::{HEADER, read_u64};
 use crate::pool::LOOKUP;
 use crate::wire::REFERENCE_SIZE;
 use crate::{
-    BATCH_MAX_MESSAGES, COPIED_BATCH_MAX_BODY, is_pooled, payload_pool, pooled_prefix,
-    prepare_batch, prepare_reference_batch,
+    BATCH_MAX_MESSAGES, COPIED_BATCH_MAX_BODY, MULTIPART_ENVELOPE_THRESHOLD, is_pooled,
+    payload_pool, pooled_prefix, prepare_batch, prepare_reference_batch,
 };
 
 fn pair(capacity: usize) -> (Connection, Connection) {
@@ -1929,4 +1929,133 @@ fn sender_survives_a_receiver_that_scribbles_over_its_lease_table() {
         drop(held);
         drop(receiver);
     }
+}
+
+fn large_envelope() -> Vec<u8> {
+    vec![1; MULTIPART_ENVELOPE_THRESHOLD]
+}
+
+#[test]
+fn large_envelopes_travel_as_one_multipart_record_with_one_lease() {
+    let pool = payload_pool([(8192, 2)]).unwrap();
+    let pooled = pool
+        .try_message(8192, |bytes| bytes.fill(2))
+        .unwrap()
+        .unwrap()
+        .last_payload()
+        .unwrap();
+    let message = Message::multipart_payloads([
+        Payload::from_bytes(large_envelope().into()),
+        Payload::new(),
+        pooled,
+        Payload::from_slice(b"tail"),
+    ]);
+    let (mut sender, mut receiver) = pair(1);
+    let wire = encoded(&mut sender, &mut receiver, &message);
+    assert_eq!((wire.len(), body(&wire).unwrap()[0]), (1, MULTIPART));
+    assert!(
+        sender.encode(&message).unwrap().is_none(),
+        "one record, one lease"
+    );
+    let delivered = receiver.decode_received(wire).unwrap();
+    assert!(receiver.poll_received().is_none());
+    assert_eq!(delivered, message);
+    drop(message);
+    let view = delivered.part_bytes(2).unwrap();
+    drop(delivered);
+    assert_eq!(pool.available(), 1, "pooled frames are referenced in place");
+    drop(view);
+    assert_eq!(pool.available(), 2);
+    let next = Message::multipart([large_envelope(), vec![4; 64]]);
+    let wire = encoded(&mut sender, &mut receiver, &next);
+    assert_eq!(receiver.decode_received(wire).unwrap(), next);
+}
+
+#[test]
+fn prepared_multipart_records_are_copied_once_for_every_recipient() {
+    let pool = SendPool::new(1, Some(HEADER + 16 * 1024));
+    let (mut sender1, mut receiver1) = pair_with_send_pool(2, pool.clone());
+    let (mut sender2, mut receiver2) = pair_with_send_pool(2, pool.clone());
+    let original = Message::multipart([large_envelope(), vec![6; 1024]]);
+    let record = pool.prepare_multipart(&original).unwrap().unwrap();
+    assert!(pool.prepare_multipart(&original).unwrap().is_none());
+    let first = sender1
+        .encode_record(&record, 1, MULTIPART)
+        .unwrap()
+        .unwrap();
+    let second = sender2
+        .encode_record(&record, 1, MULTIPART)
+        .unwrap()
+        .unwrap();
+    transfer(&mut sender1, &mut receiver1);
+    transfer(&mut sender2, &mut receiver2);
+    let coordinates = |wire: &Message| {
+        let reference = wire::Reference::decode(body(wire).unwrap(), MULTIPART).unwrap();
+        (reference.id, reference.token, reference.offset)
+    };
+    assert_eq!(coordinates(&first), coordinates(&second));
+    let first = receiver1.decode_received(first).unwrap();
+    let second = receiver2.decode_received(second).unwrap();
+    drop(record);
+    drop(first);
+    assert!(pool.prepare_multipart(&original).unwrap().is_none());
+    assert_eq!(second, original);
+    drop(second);
+    assert!(pool.prepare_multipart(&original).unwrap().is_some());
+}
+
+#[test]
+fn malformed_multipart_records_release_their_lease() {
+    let message = Message::multipart([large_envelope(), vec![2; 64]]);
+    let (mut sender, mut receiver) = pair(1);
+    let wire = encoded(&mut sender, &mut receiver, &message);
+    let enveloped = Message::with_prefix(bytes::Bytes::from_static(b"envelope"), wire);
+    assert!(receiver.decode_received(enveloped).is_err());
+    receiver.max_message_size = Some(message.max_message_size_len() - 1);
+    let wire = encoded(&mut sender, &mut receiver, &message);
+    assert!(receiver.decode_received(wire).is_err());
+    receiver.max_message_size = Some(message.max_message_size_len());
+    let wire = encoded(&mut sender, &mut receiver, &message);
+    assert_eq!(receiver.decode_received(wire).unwrap(), message);
+}
+
+#[test]
+fn multipart_messages_use_carrier_frames_without_automatic_storage() {
+    let (mut sender, mut receiver) = pair_with_send_pool(1, SendPool::new(1, Some(0)));
+    let message = Message::multipart([large_envelope(), vec![2; 4096]]);
+    let wire = encoded(&mut sender, &mut receiver, &message);
+    assert_eq!(wire.len(), 2);
+    assert_eq!(receiver.decode_received(wire).unwrap(), message);
+}
+
+#[test]
+fn multipart_records_preserve_unread_regions_across_registration_eviction() {
+    let sources: Vec<_> = (0..128)
+        .map(|_| payload_pool([(128, 1)]).unwrap())
+        .collect();
+    let (mut sender, mut receiver) = pair(128);
+    let mut wires = Vec::new();
+    for (index, source) in sources.iter().enumerate() {
+        let frame = source
+            .try_message(128, |bytes| bytes.fill(index as u8))
+            .unwrap()
+            .unwrap()
+            .last_payload()
+            .unwrap();
+        let message =
+            Message::multipart_payloads([Payload::from_bytes(large_envelope().into()), frame]);
+        wires.push(sender.encode(&message).unwrap().unwrap());
+        transfer(&mut sender, &mut receiver);
+    }
+    assert!(!receiver.retired_regions.is_empty());
+    let messages: Vec<_> = wires
+        .into_iter()
+        .map(|wire| receiver.decode_received(wire).unwrap())
+        .collect();
+    for (index, message) in messages.iter().enumerate() {
+        assert_eq!(message.part_slice(1).unwrap(), vec![index as u8; 128]);
+        assert_eq!(sources[index].available(), 0);
+    }
+    drop(messages);
+    assert!(sources.iter().all(|pool| pool.available() == 1));
 }

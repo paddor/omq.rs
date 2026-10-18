@@ -37,8 +37,9 @@ use wire::COPIED;
 
 pub use batch::{
     BATCH_MAX_BYTES, BATCH_MAX_MESSAGES, BatchKind, COPIED_BATCH_MAX_BODY,
-    FANOUT_POOLED_BATCH_COPY_THRESHOLD, POOLED_BATCH_COPY_THRESHOLD, REFERENCE_ENTRY_BYTES,
-    ReceivedBatch, prepare_batch, prepare_reference_batch,
+    FANOUT_POOLED_BATCH_COPY_THRESHOLD, MULTIPART_ENVELOPE_THRESHOLD, POOLED_BATCH_COPY_THRESHOLD,
+    REFERENCE_ENTRY_BYTES, ReceivedBatch, prepare_batch, prepare_reference_batch,
+    uses_multipart_record,
 };
 pub use connection::{Connection, Received, supports};
 pub use coordination::ReceiveCredits;
@@ -61,6 +62,9 @@ pub const PREFACE_SIZE: usize = 24;
 /// application bytes when encoding requires a copy.
 #[must_use]
 pub fn send_work_bytes(message: &Message) -> usize {
+    if uses_multipart_record(message) {
+        return batch::multipart_work_bytes(message);
+    }
     let Some(index) = message.len().checked_sub(1) else {
         return 0;
     };

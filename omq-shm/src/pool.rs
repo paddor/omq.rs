@@ -11,7 +11,7 @@ use omq_proto::{Message, PayloadPool, Result};
 use crate::lease::{Lease, LeaseGroup};
 use crate::mapping::{DATA, HEADER, Mapping};
 use crate::memory;
-use crate::wire::REFERENCE_BATCH;
+use crate::wire::{MULTIPART, REFERENCE_BATCH};
 
 type Registry = BTreeMap<usize, Weak<PoolRegion>>;
 static REGISTRY: OnceLock<Mutex<Registry>> = OnceLock::new();
@@ -77,7 +77,7 @@ impl Slot {
     pub(super) fn track_lease(&self, lease: Lease, kind: u8) {
         const MIN_SCAN_INTERVAL: usize = 32;
         let mut state = self.state.lock().expect("SHM slot leases");
-        if kind == REFERENCE_BATCH {
+        if matches!(kind, REFERENCE_BATCH | MULTIPART) {
             state
                 .published_batch
                 .as_ref()

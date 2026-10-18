@@ -707,6 +707,10 @@ impl LaneWorker {
             .min()?
             .min(omq_shm::BATCH_MAX_MESSAGES);
         let LaneData::Dispatch(first) = &batch[0];
+        // Larger shared envelopes use multipart records instead.
+        if first.msg.part_slice(0)?.len() > omq_shm::COPIED_BATCH_MAX_BODY {
+            return None;
+        }
         let kind = omq_shm::BatchKind::for_message(
             &first.msg,
             omq_shm::FANOUT_POOLED_BATCH_COPY_THRESHOLD,
@@ -1304,9 +1308,13 @@ impl LaneWorker {
         mut pending: Option<&mut SmallVec<[PendingPeer; 8]>>,
     ) {
         debug_assert!(pending.is_some() || self.mute_policy == FanOutMutePolicy::DropNewest);
-        let prepared = self.prepare_shm_publication(dispatch);
+        let multipart = self.prepare_shm_multipart(dispatch);
+        let prepared = multipart
+            .is_none()
+            .then(|| self.prepare_shm_publication(dispatch))
+            .flatten();
         let dispatch = prepared.as_ref().unwrap_or(dispatch);
-        let copied = Self::shm_copied_body(&dispatch.msg);
+        let copied = multipart.is_none() && Self::shm_copied_body(&dispatch.msg);
         #[cfg(target_os = "linux")]
         if copied {
             // Copied records are identical for every recipient. Reference
@@ -1321,6 +1329,8 @@ impl LaneWorker {
             let result = if copied {
                 peer.slot
                     .try_push_pre_framed_no_signal(self.eq.arena_bytes())
+            } else if let Some(record) = &multipart {
+                Self::try_encode_shm_multipart(&peer.slot, record)
             } else {
                 peer.slot.try_encode_shm_no_signal(&dispatch.msg)
             };
@@ -1337,6 +1347,8 @@ impl LaneWorker {
                                 PreparedFrame::from_frame(&FanOutFrame::Arena(
                                     self.eq.arena_bytes(),
                                 ))
+                            } else if let Some(record) = &multipart {
+                                PreparedFrame::ShmMultipart(record.clone())
                             } else {
                                 PreparedFrame::Shm(dispatch.msg.clone())
                             })
@@ -1368,6 +1380,39 @@ impl LaneWorker {
         {
             let _ = message;
             false
+        }
+    }
+
+    /// Copy a large-envelope publication once into one shared multipart record.
+    #[cfg_attr(not(target_os = "linux"), expect(clippy::unused_self))]
+    fn prepare_shm_multipart(&self, dispatch: &LaneDispatch) -> Option<Message> {
+        #[cfg(target_os = "linux")]
+        {
+            omq_shm::uses_multipart_record(&dispatch.msg)
+                .then(|| {
+                    self.shm_pool
+                        .prepare_multipart(&dispatch.msg)
+                        .ok()
+                        .flatten()
+                })
+                .flatten()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = dispatch;
+            None
+        }
+    }
+
+    fn try_encode_shm_multipart(slot: &PeerTransmitSlot, record: &Message) -> TryFrameResult {
+        #[cfg(target_os = "linux")]
+        {
+            slot.try_encode_shm_multipart_no_signal(record)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (slot, record);
+            TryFrameResult::Ineligible
         }
     }
 
@@ -1664,6 +1709,7 @@ enum PreparedFrame {
     Arena(Bytes),
     Chunks(Vec<Bytes>),
     Shm(Message),
+    ShmMultipart(Message),
     #[cfg(target_os = "linux")]
     ShmBatch(Message, usize, bool),
 }
@@ -1686,7 +1732,9 @@ impl PreparedFrame {
         match self {
             Self::Arena(raw) => FanOutFrame::Arena(raw),
             Self::Chunks(chunks) => FanOutFrame::Chunks(chunks),
-            Self::Shm(_) => unreachable!("SHM references require per-recipient encoding"),
+            Self::Shm(_) | Self::ShmMultipart(_) => {
+                unreachable!("SHM references require per-recipient encoding")
+            }
             #[cfg(target_os = "linux")]
             Self::ShmBatch(..) => unreachable!("SHM batches require per-recipient encoding"),
         }
@@ -1695,6 +1743,7 @@ impl PreparedFrame {
     fn try_push(&self, slot: &PeerTransmitSlot) -> TryFrameResult {
         match self {
             Self::Shm(message) => slot.try_encode_shm_no_signal(message),
+            Self::ShmMultipart(record) => LaneWorker::try_encode_shm_multipart(slot, record),
             #[cfg(target_os = "linux")]
             Self::ShmBatch(message, count, referenced) => {
                 slot.try_encode_shm_batch_no_signal(message, *count, *referenced)

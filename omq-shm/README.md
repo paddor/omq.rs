@@ -5,8 +5,9 @@ Applications use it through [`omq-tokio`](https://crates.io/crates/omq-tokio)
 sockets with `shm://` endpoints.
 
 Linux-only `shm://path` / `shm://@name`, using NULL authentication.
-Every socket type except STREAM is supported. Only the final frame uses shared
-storage; earlier frames and group/routing envelopes use the carrier ring.
+Every socket type except STREAM is supported. The final frame uses shared
+storage; earlier frames use the carrier ring until they reach 4 KiB in total.
+Larger messages with up to 256 frames travel as one shared multipart record.
 
 A socket can bind or connect multiple SHM endpoints and mix them with inproc,
 IPC, TCP, QUIC, and DART endpoints (with the corresponding features enabled).
@@ -42,8 +43,8 @@ variable-sized messages; a retained slice pins the whole buffer.
 
 ## Batches and leases
 
-Already queued messages with the same envelope of at most one frame may share
-a batch:
+Already queued messages with the same envelope (at most one frame, up to 16 KiB)
+may share a batch:
 
 | Bodies | Shared layout |
 |--------|---------------|
@@ -52,11 +53,14 @@ a batch:
 
 Batch selection copies leading pooled bodies through 256 B for point-to-point
 traffic and 1 KiB for fan-out. Single-message sends keep their storage policy.
+Multipart records use the reference layout for all frames: pooled frames over
+55 bytes stay in place, other frames are copied once after the table.
 
 Limits: 256 messages, 256 KiB shared storage/metadata, 16 KiB per copied body.
 Referenced payload bytes do not limit batches. Batching never waits for more messages.
-Each recipient holds one lease per body or batch; every message counts against
-send and receive HWM. Final owners complete leases through shared atomics.
+Each recipient holds one lease per body, batch, or multipart record; every
+message counts against send and receive HWM. Final owners complete leases
+through shared atomics.
 Clones and byte views retain ownership; a borrowed body retains the batch lease.
 Slots become writable after local uniqueness and all recipient completions.
 Receivers validate batches on the IO thread and enqueue one descriptor;

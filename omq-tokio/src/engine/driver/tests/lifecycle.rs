@@ -840,7 +840,7 @@ async fn protocol_failure_retires_a_queued_transmit_slot() {
     // Not a ZMTP greeting: the driver exits with a protocol error.
     peer.write_all(&[0xff; 64]).await.unwrap();
     assert!(
-        tokio::time::timeout(Duration::from_secs(2), driver.run())
+        tokio::time::timeout(Duration::from_secs(2), Box::pin(driver.run()))
             .await
             .unwrap()
             .is_err()

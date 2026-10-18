@@ -418,7 +418,7 @@ impl RoundRobinSend {
             pipe_cap: if options.conflate {
                 1
             } else {
-                options.send_hwm.max(1) as usize
+                options.send_queue_capacity()
             },
             pipe_mode: if options.conflate {
                 SendPipeMode::Conflate

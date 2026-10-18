@@ -1309,3 +1309,26 @@ fn identity_rejects_reserved_prefix_and_preserves_previous_value() {
     zmq_close(socket);
     zmq_ctx_term(ctx);
 }
+
+/// HWM preallocates queue slots. A huge HWM is clamped instead of aborting
+/// on the allocation.
+#[test]
+fn huge_hwm_values_bind_connect_and_deliver() {
+    let ctx = zmq_ctx_new();
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    assert_eq!(set_i32(pull, ZMQ_RCVHWM, i32::MAX), 0);
+    assert_eq!(set_i32(push, ZMQ_SNDHWM, i32::MAX), 0);
+    let addr = std::ffi::CString::new("inproc://opts-huge-hwm").unwrap();
+    assert_eq!(omq_zmq::zmq_bind(pull, addr.as_ptr()), 0);
+    assert_eq!(omq_zmq::zmq_connect(push, addr.as_ptr()), 0);
+    assert_eq!(omq_zmq::zmq_send(push, b"x".as_ptr().cast(), 1, 0), 1);
+    let mut buf = [0u8; 4];
+    assert_eq!(
+        omq_zmq::zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0),
+        1
+    );
+    zmq_close(push);
+    zmq_close(pull);
+    zmq_ctx_term(ctx);
+}

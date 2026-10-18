@@ -363,7 +363,7 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) -> Result<(), c_int> {
         let overlay = sock.overlay.lock().map_err(|_| ETERM)?;
         (
             overlay.to_options(),
-            overlay.recv_hwm.unwrap_or(DEFAULT_HWM as u32) as usize,
+            omq_tokio::options::queue_capacity(overlay.recv_hwm.unwrap_or(DEFAULT_HWM as u32)),
             !overlay.immediate,
             overlay.mechanism.clone(),
             overlay.zap_domain.clone(),

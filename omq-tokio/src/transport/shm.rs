@@ -40,7 +40,7 @@ impl ShmStream {
     ) -> io::Result<Self> {
         let connection = omq_shm::Connection::with_send_pool(
             &stream,
-            options.send_hwm.max(1) as usize,
+            options.send_queue_capacity(),
             options.max_message_size,
             pool,
         )?;

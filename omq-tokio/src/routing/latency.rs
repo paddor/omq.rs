@@ -53,7 +53,7 @@ impl LatencySend {
     pub(crate) fn new(options: &Options) -> Self {
         Self {
             state: Arc::new(Mutex::new(State::default())),
-            pipe_cap: options.send_hwm.max(1) as usize,
+            pipe_cap: options.send_queue_capacity(),
             changed: Arc::new(crate::engine::signal::StateSignal::new()),
             closed: Arc::new(AtomicBool::new(false)),
         }

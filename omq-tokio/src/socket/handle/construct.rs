@@ -154,8 +154,8 @@ impl Socket {
             )));
         }
         let cancel = CancellationToken::new();
-        let (cmd_tx, cmd_rx) = mpsc::channel(options.send_hwm.max(16) as usize);
-        let recv_hwm = options.recv_hwm.max(16) as usize;
+        let (cmd_tx, cmd_rx) = mpsc::channel(options.send_queue_capacity().max(16));
+        let recv_hwm = options.recv_queue_capacity().max(16);
         let driver_linger = options.linger;
         let recv_batching = options.recv_batching && supports_recv_batching(socket_type);
         let recv_spin = options.recv_spin;
@@ -262,7 +262,7 @@ fn recv_handles(
             crate::socket::fanin::Fanin::new
         };
         spsc.fanin = Some(constructor(
-            options.recv_hwm.max(16) as usize,
+            options.recv_queue_capacity().max(16),
             spsc.recv_signal.clone(),
             spsc.blocking_recv_waker.clone(),
         ));

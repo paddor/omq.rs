@@ -351,6 +351,7 @@ mod tests {
                     crate::transport::setup::PendingHandshake::acquire(
                         &driver.setup_admission,
                         None,
+                        None,
                     )
                     .unwrap(),
                 ),

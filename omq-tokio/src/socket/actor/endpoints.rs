@@ -537,7 +537,7 @@ impl SocketDriver {
         let setup = crate::transport::setup::DialSetup {
             admission: (!matches!(endpoint, Endpoint::Inproc { .. })
                 && self.socket_type != SocketType::Stream)
-                .then(|| self.setup_admission.clone()),
+                .then(|| self.dial_admission.clone()),
             timeout: dial_setup_timeout(&endpoint, &options),
             cancel: cancel.clone(),
         };

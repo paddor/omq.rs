@@ -320,7 +320,7 @@ impl SocketDriver {
         let admission = (kind == Kind::Connect
             && self.socket_type != super::SocketType::Stream
             && !matches!(endpoint, Endpoint::Udp { .. }))
-        .then(|| self.setup_admission.clone());
+        .then(|| self.dial_admission.clone());
         let setup_timeout = super::endpoints::dial_setup_timeout(&endpoint, &options);
         let id = self.next_peer_id;
         self.next_peer_id += 1;

@@ -364,9 +364,11 @@ impl QuicListener {
 
     fn start_setup(&mut self, index: usize, incoming: quinn::Incoming) {
         let addr = incoming.remote_address();
-        let Some(admission) =
-            PendingHandshake::acquire(&self.setup.admission, Some(&self.listener_admission))
-        else {
+        let Some(admission) = PendingHandshake::acquire(
+            &self.setup.admission,
+            Some(&self.listener_admission),
+            Some(addr.ip()),
+        ) else {
             // Clients retransmit Initials once capacity returns.
             incoming.ignore();
             self.reject(addr, "pending-handshake limit reached".into());

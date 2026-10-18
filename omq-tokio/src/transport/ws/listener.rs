@@ -69,9 +69,11 @@ impl WsListener {
     }
 
     fn start_setup(&mut self, stream: TcpStream, addr: SocketAddr) {
-        let Some(admission) =
-            PendingHandshake::acquire(&self.setup.admission, Some(&self.listener_admission))
-        else {
+        let Some(admission) = PendingHandshake::acquire(
+            &self.setup.admission,
+            Some(&self.listener_admission),
+            Some(addr.ip()),
+        ) else {
             self.reject(addr, "pending-handshake limit reached".into());
             return;
         };

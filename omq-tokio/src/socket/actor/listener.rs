@@ -60,7 +60,11 @@ impl ListenerTask {
             && setup.is_none()
             && let Some(limit) = &self.admission
         {
-            let Some(admission) = PendingHandshake::acquire(limit, None) else {
+            let source = match peer_ident {
+                omq_proto::monitor::PeerIdent::Socket(address) => Some(address.ip()),
+                _ => None,
+            };
+            let Some(admission) = PendingHandshake::acquire(limit, None, source) else {
                 self.reject(peer_ident.clone(), "socket pending-handshake limit reached");
                 return false;
             };

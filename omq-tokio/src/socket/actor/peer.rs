@@ -265,9 +265,12 @@ impl SocketDriver {
                 return;
             }
             if setup.is_none() {
-                let Some(admission) =
-                    crate::transport::setup::PendingHandshake::acquire(&self.setup_admission, None)
-                else {
+                let source = peer_ident_socket_addr(peer_ident).map(|address| address.ip());
+                let Some(admission) = crate::transport::setup::PendingHandshake::acquire(
+                    &self.setup_admission,
+                    None,
+                    source,
+                ) else {
                     self.monitor.publish(MonitorEvent::HandshakeFailed {
                         endpoint: peer.endpoint.clone(),
                         peer_ident: peer_ident.clone(),

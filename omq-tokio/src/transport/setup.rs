@@ -33,27 +33,29 @@ pub(crate) struct Admission {
 /// Pending handshakes per remote host.
 type SourceCounts = Arc<Mutex<FxHashMap<SourceKey, usize>>>;
 
-/// A remote host: an IPv4 address or an IPv6 /64.
+/// A remote host: an IPv4 address or an IPv6 /64. One host can pick any
+/// address in its /64, so per-host limits must not key on the full address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum SourceKey {
+pub(crate) enum SourceKey {
     V4([u8; 4]),
     V6([u8; 8]),
 }
 
 impl SourceKey {
-    /// Loopback peers are local and exempt.
-    fn of(address: IpAddr) -> Option<Self> {
-        if address.is_loopback() {
-            return None;
-        }
-        Some(match address {
+    pub(crate) fn host(address: IpAddr) -> Self {
+        match address {
             IpAddr::V4(v4) => Self::V4(v4.octets()),
             IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
-                Some(v4) if !v4.is_loopback() => Self::V4(v4.octets()),
-                Some(_) => return None,
+                Some(v4) => Self::V4(v4.octets()),
                 None => Self::V6(v6.octets()[..8].try_into().expect("prefix")),
             },
-        })
+        }
+    }
+
+    /// Loopback peers are local and exempt.
+    fn of(address: IpAddr) -> Option<Self> {
+        let key = Self::host(address);
+        (!address.is_loopback() && !matches!(key, Self::V4([127, ..]))).then_some(key)
     }
 }
 

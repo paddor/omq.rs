@@ -7,6 +7,8 @@ use std::time::{Duration, Instant};
 
 use omq_proto::MessageRateLimit;
 
+use crate::transport::setup::SourceKey;
+
 const IP_BUCKET_SWEEP_INTERVAL: Duration = Duration::from_mins(1);
 const IP_BUCKET_IDLE_TTL: Duration = Duration::from_mins(5);
 const IP_BUCKET_SHARDS: usize = 64;
@@ -44,7 +46,7 @@ impl TokenBucket {
 
 #[derive(Debug)]
 struct IpBucketState {
-    buckets: HashMap<IpAddr, TokenBucket>,
+    buckets: HashMap<SourceKey, TokenBucket>,
     last_sweep: Instant,
 }
 
@@ -68,8 +70,9 @@ impl SharedIpRateLimiter {
     }
 
     pub(crate) fn allow(&self, ip: IpAddr, now: Instant) -> bool {
+        let host = SourceKey::host(ip);
         let mut hasher = DefaultHasher::new();
-        ip.hash(&mut hasher);
+        host.hash(&mut hasher);
         let shard = usize::try_from(hasher.finish() % IP_BUCKET_SHARDS as u64)
             .expect("IP bucket shard index fits usize");
         let mut state = self.shards[shard]
@@ -83,7 +86,7 @@ impl SharedIpRateLimiter {
         }
         state
             .buckets
-            .entry(ip)
+            .entry(host)
             .or_insert_with(|| TokenBucket::new(self.limit, now))
             .allow(now)
     }
@@ -113,6 +116,29 @@ mod tests {
         assert!(limiter.allow(a, start));
         assert!(!limiter.allow(a, start));
         assert!(limiter.allow(b, start));
+    }
+
+    #[test]
+    fn ip_buckets_key_on_the_host() {
+        let start = Instant::now();
+        let limiter = SharedIpRateLimiter::new(MessageRateLimit::new(1, 1));
+        let v6 = "2001:db8:1:2::1".parse().unwrap();
+        let same_prefix = "2001:db8:1:2:ffff::7".parse().unwrap();
+        let other_prefix = "2001:db8:1:3::1".parse().unwrap();
+        assert!(limiter.allow(v6, start));
+        assert!(
+            !limiter.allow(same_prefix, start),
+            "one /64 must share a bucket"
+        );
+        assert!(limiter.allow(other_prefix, start));
+
+        let v4 = "192.0.2.9".parse().unwrap();
+        let mapped = "::ffff:192.0.2.9".parse().unwrap();
+        assert!(limiter.allow(v4, start));
+        assert!(
+            !limiter.allow(mapped, start),
+            "mapped IPv4 is the same host"
+        );
     }
 
     #[test]

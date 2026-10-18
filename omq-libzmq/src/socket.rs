@@ -87,6 +87,8 @@ pub(crate) struct OmqSocket {
     pub rcvtimeo_ms: AtomicI64,
     /// Accumulator for SNDMORE multipart assembly.
     pub send_accum: crate::local_cell::LocalCell<Vec<Bytes>>,
+    /// `send_accum` holds frames kept after the final frame would block.
+    pub send_retry: crate::local_cell::LocalCell<bool>,
     /// Leftover frames from a multipart recv (RCVMORE).
     pub recv_drain: Mutex<VecDeque<Bytes>>,
     /// True when `recv_drain` is non-empty. Checked without the lock so the
@@ -136,6 +138,7 @@ impl OmqSocket {
 
     fn allow_thread_migration(&self) {
         self.send_accum.allow_thread_migration();
+        self.send_retry.allow_thread_migration();
         self.recv_cons.allow_thread_migration();
         self.authenticated_recv.allow_thread_migration();
         self.authenticated_recv_drain.allow_thread_migration();
@@ -233,6 +236,7 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
         sndtimeo_ms: AtomicI64::new(-1),
         rcvtimeo_ms: AtomicI64::new(-1),
         send_accum: crate::local_cell::LocalCell::new(Vec::new()),
+        send_retry: crate::local_cell::LocalCell::new(false),
         recv_drain: Mutex::new(VecDeque::new()),
         drain_nonempty: AtomicBool::new(false),
         recv_cons: crate::local_cell::LocalCell::new(None),

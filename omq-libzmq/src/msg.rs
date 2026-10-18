@@ -747,13 +747,16 @@ pub extern "C" fn zmq_msg_send(
         extract_bytes(msg)
     };
 
-    if !group.is_empty() {
-        // SAFETY: libzmq sockets are accessed by at most one application thread.
-        let accum = unsafe { sock_arc.send_accum.get() };
-        accum.push(group);
-    }
-
-    let ret = if sock_arc.socket_type == omq_tokio::SocketType::Server {
+    // Only RADIO sends a group. Build it into this message; never stage it
+    // in the socket's frame buffer, where a failed or non-RADIO send would
+    // leave it in front of the next message.
+    let ret = if sock_arc.socket_type == omq_tokio::SocketType::Radio && !group.is_empty() {
+        let Ok(ret_len) = c_int::try_from(r.size()) else {
+            return crate::error::fail(libc::EMSGSIZE);
+        };
+        let message = omq_tokio::Message::with_group(group, bytes);
+        crate::send_recv::send_message(sock_arc, message, ret_len, flags)
+    } else if sock_arc.socket_type == omq_tokio::SocketType::Server {
         let Ok(ret_len) = c_int::try_from(r.size()) else {
             return crate::error::fail(libc::EMSGSIZE);
         };

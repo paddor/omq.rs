@@ -631,3 +631,95 @@ fn raw_send_then_msg_recv() {
     zmq_close(pull);
     zmq_ctx_term(ctx);
 }
+
+fn recv_frames(sock: *mut c_void) -> Vec<Vec<u8>> {
+    let mut frames = Vec::new();
+    loop {
+        let mut buf = [0u8; 64];
+        let n = zmq_recv(sock, buf.as_mut_ptr().cast(), buf.len(), 0);
+        assert!(n >= 0, "recv failed");
+        frames.push(buf[..n as usize].to_vec());
+        if !rcvmore(sock) {
+            return frames;
+        }
+    }
+}
+
+/// Like libzmq, a full pipe reports EAGAIN at a message's first frame.
+#[test]
+fn eagain_comes_at_the_first_frame_and_never_splits_a_message() {
+    const ZMQ_DONTWAIT: i32 = 1;
+    const ZMQ_SNDHWM: i32 = 23;
+    const ZMQ_RCVHWM: i32 = 24;
+    let ctx = zmq_ctx_new();
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    set_timeo(pull, ZMQ_RCVHWM, 1);
+    set_timeo(push, ZMQ_SNDHWM, 1);
+    set_timeo(pull, ZMQ_RCVTIMEO, 2000);
+    let addr = CString::new("inproc://multipart-eagain-retry").unwrap();
+    assert_eq!(zmq_bind(pull, addr.as_ptr()), 0);
+    assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
+    // Fill the pipe; a connect-side pipe moves into the peer once ready.
+    let mut queued = 0;
+    for _ in 0..50 {
+        while zmq_send(push, b"f".as_ptr().cast(), 1, ZMQ_DONTWAIT) == 1 {
+            queued += 1;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(queued > 0);
+    assert_eq!(
+        zmq_send(push, b"a".as_ptr().cast(), 1, ZMQ_SNDMORE | ZMQ_DONTWAIT),
+        -1
+    );
+    assert_eq!(omq_zmq::zmq_errno(), libc::EAGAIN);
+    // Make room, then retry the message from its first frame.
+    for _ in 0..queued {
+        assert_eq!(recv_frames(pull), [b"f".to_vec()]);
+    }
+    assert_eq!(
+        zmq_send(push, b"a".as_ptr().cast(), 1, ZMQ_SNDMORE | ZMQ_DONTWAIT),
+        1
+    );
+    assert_eq!(zmq_send(push, b"b".as_ptr().cast(), 1, ZMQ_DONTWAIT), 1);
+    assert_eq!(recv_frames(pull), [b"a".to_vec(), b"b".to_vec()]);
+    zmq_close(push);
+    zmq_close(pull);
+    zmq_ctx_term(ctx);
+}
+
+/// A group on a message for a non-RADIO socket never becomes a frame.
+#[test]
+fn message_group_is_not_staged_for_other_socket_types() {
+    let ctx = zmq_ctx_new();
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    set_timeo(pull, ZMQ_RCVTIMEO, 2000);
+    let addr = CString::new("inproc://multipart-group-staging").unwrap();
+    assert_eq!(zmq_bind(pull, addr.as_ptr()), 0);
+    assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
+    let group = CString::new("weather").unwrap();
+    for body in [b"one", b"two"] {
+        let mut msg = ZmqMsg::new();
+        assert_eq!(zmq_msg_init_size(msg.0.as_mut_ptr().cast(), body.len()), 0);
+        // SAFETY: the message owns `body.len()` writable bytes.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                body.as_ptr(),
+                zmq_msg_data(msg.0.as_mut_ptr().cast()).cast(),
+                body.len(),
+            );
+        }
+        zmq_msg_set_group(msg.0.as_mut_ptr().cast(), group.as_ptr());
+        assert_eq!(
+            zmq_msg_send(msg.0.as_mut_ptr().cast(), push, 0),
+            i32::try_from(body.len()).unwrap()
+        );
+    }
+    assert_eq!(recv_frames(pull), [b"one".to_vec()]);
+    assert_eq!(recv_frames(pull), [b"two".to_vec()]);
+    zmq_close(push);
+    zmq_close(pull);
+    zmq_ctx_term(ctx);
+}

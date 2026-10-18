@@ -169,6 +169,39 @@ impl Sender {
     }
 }
 
+impl Sender {
+    /// Whether protocol commands wait behind a full ring.
+    pub(crate) fn protocol_backlogged(&self) -> bool {
+        let Self::Owned { lifecycle, .. } = self else {
+            return false;
+        };
+        !lifecycle
+            .pending
+            .lock()
+            .expect("control lifecycle poisoned")
+            .overflow
+            .is_empty()
+    }
+
+    /// Wait until no protocol command waits behind a full ring, or the lane
+    /// closed. A caller feels the backpressure that the actor must not.
+    pub(crate) async fn protocol_drained(&self) {
+        let Self::Owned { lifecycle, .. } = self else {
+            return;
+        };
+        lifecycle
+            .changed
+            .wait_until(|| {
+                let pending = lifecycle
+                    .pending
+                    .lock()
+                    .expect("control lifecycle poisoned");
+                pending.closed || pending.overflow.is_empty()
+            })
+            .await;
+    }
+}
+
 impl Receiver {
     #[cfg(feature = "dart")]
     pub(crate) fn dart_forward_to(&self, signal: Arc<super::signal::DataSignal>) {
@@ -204,12 +237,17 @@ impl Receiver {
     /// Overflow holds only commands newer than every ring entry, so it is
     /// read after the ring is empty.
     fn take_overflow(lifecycle: &Lifecycle) -> Option<PeerDriverCommand> {
-        lifecycle
+        let command = lifecycle
             .pending
             .lock()
             .expect("control lifecycle poisoned")
             .overflow
-            .pop_front()
+            .pop_front();
+        if command.is_some() {
+            // Wakes callers waiting in `Sender::protocol_drained`.
+            lifecycle.changed.notify_changed();
+        }
+        command
     }
 
     pub(crate) fn try_recv(&mut self) -> Result<PeerDriverCommand, mpsc::error::TryRecvError> {

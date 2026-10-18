@@ -1,6 +1,10 @@
 //! Actor-owned protocol lane. Bounded lifecycle slots keep activation and
 //! shutdown reachable even when forwarding protocol commands is blocked.
+//! Protocol commands never make the actor wait: commands that do not fit the
+//! ring queue in order behind it, so one stalled driver cannot stall the
+//! socket. Their volume follows subscriptions and joins, not data.
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
@@ -10,6 +14,8 @@ use super::{PeerDriverCommand, signal::StateSignal, single_inbox};
 struct Pending {
     activation: Option<PeerDriverCommand>,
     close: Option<PeerDriverCommand>,
+    /// Protocol commands after a full ring, oldest first.
+    overflow: VecDeque<PeerDriverCommand>,
     closed: bool,
 }
 
@@ -90,7 +96,24 @@ impl Sender {
         let old = match command {
             PeerDriverCommand::SendCommand(_) => {
                 // Serialize with lifecycle admission; one native producer.
-                return commands.try_send(command);
+                // The ring only takes commands while no older one overflowed.
+                if pending.overflow.is_empty() {
+                    match commands.try_send(command) {
+                        Err(mpsc::error::TrySendError::Full(returned)) => {
+                            pending.overflow.push_back(returned);
+                        }
+                        result => return result,
+                    }
+                } else {
+                    pending.overflow.push_back(command);
+                }
+                drop(pending);
+                lifecycle.receive.wake();
+                #[cfg(feature = "dart")]
+                if let Some(signal) = lifecycle.endpoint.get() {
+                    signal.mark();
+                }
+                return Ok(());
             }
             PeerDriverCommand::ActivateDataPlane | PeerDriverCommand::ActivateWithRecvSink(_) => {
                 pending.activation.replace(command)
@@ -178,13 +201,31 @@ impl Receiver {
         pending.activation.take().or_else(|| pending.close.take())
     }
 
+    /// Overflow holds only commands newer than every ring entry, so it is
+    /// read after the ring is empty.
+    fn take_overflow(lifecycle: &Lifecycle) -> Option<PeerDriverCommand> {
+        lifecycle
+            .pending
+            .lock()
+            .expect("control lifecycle poisoned")
+            .overflow
+            .pop_front()
+    }
+
     pub(crate) fn try_recv(&mut self) -> Result<PeerDriverCommand, mpsc::error::TryRecvError> {
         match self {
             Self::Legacy(receiver) => receiver.try_recv(),
             Self::Owned {
                 commands,
                 lifecycle,
-            } => Self::take_lifecycle(lifecycle).map_or_else(|| commands.try_recv(), Ok),
+            } => {
+                if let Some(command) = Self::take_lifecycle(lifecycle) {
+                    return Ok(command);
+                }
+                commands
+                    .try_recv()
+                    .or_else(|error| Self::take_overflow(lifecycle).ok_or(error))
+            }
         }
     }
 
@@ -199,7 +240,13 @@ impl Receiver {
                 if let Some(command) = Self::take_lifecycle(lifecycle) {
                     return std::task::Poll::Ready(Some(command));
                 }
-                commands.poll_recv(cx)
+                match commands.poll_recv(cx) {
+                    std::task::Poll::Ready(Some(command)) => std::task::Poll::Ready(Some(command)),
+                    closed_or_pending => Self::take_overflow(lifecycle)
+                        .map_or(closed_or_pending, |command| {
+                            std::task::Poll::Ready(Some(command))
+                        }),
+                }
             }
         })
         .await
@@ -235,7 +282,10 @@ impl Receiver {
                     .pending
                     .lock()
                     .expect("control lifecycle poisoned");
-                commands.is_empty() && pending.activation.is_none() && pending.close.is_none()
+                commands.is_empty()
+                    && pending.activation.is_none()
+                    && pending.close.is_none()
+                    && pending.overflow.is_empty()
             }
         }
     }
@@ -257,9 +307,11 @@ impl Drop for Receiver {
                 .expect("control lifecycle poisoned");
             let activation = pending.activation.take();
             let close = pending.close.take();
+            let overflow = std::mem::take(&mut pending.overflow);
             drop(pending);
             drop(activation);
             drop(close);
+            drop(overflow);
         }
     }
 }
@@ -290,10 +342,7 @@ mod tests {
     async fn activation_and_close_bypass_full_protocol_lane() {
         let (sender, mut receiver) = channel(1);
         sender.try_send(command(1)).unwrap();
-        assert!(matches!(
-            sender.try_send(command(2)),
-            Err(mpsc::error::TrySendError::Full(_))
-        ));
+        sender.try_send(command(2)).unwrap();
         sender
             .try_send(PeerDriverCommand::ActivateDataPlane)
             .unwrap();
@@ -301,17 +350,11 @@ mod tests {
             receiver.recv_lifecycle().await,
             Some(PeerDriverCommand::ActivateDataPlane)
         ));
-        let copy = sender.clone();
-        let waiting = tokio::spawn(async move { copy.send(command(3)).await });
-        tokio::task::yield_now().await;
         sender.try_send(PeerDriverCommand::Close).unwrap();
-        assert!(
-            tokio::time::timeout(Duration::from_secs(1), waiting)
-                .await
-                .unwrap()
-                .unwrap()
-                .is_err()
-        );
+        assert!(matches!(
+            sender.try_send(command(3)),
+            Err(mpsc::error::TrySendError::Closed(_))
+        ));
         assert!(matches!(
             receiver.recv_lifecycle().await,
             Some(PeerDriverCommand::Close)
@@ -320,7 +363,7 @@ mod tests {
 
     #[tokio::test]
     async fn graceful_close_retains_accepted_protocol_fifo() {
-        let (sender, mut receiver) = channel(2);
+        let (sender, mut receiver) = channel(1);
         sender.try_send(command(1)).unwrap();
         sender.try_send(command(2)).unwrap();
         sender
@@ -341,6 +384,35 @@ mod tests {
             };
             assert_eq!(prefix.as_ref(), &[expected]);
         }
+        assert!(receiver.is_empty());
+    }
+
+    #[tokio::test]
+    async fn protocol_commands_never_wait_and_keep_fifo_across_the_ring() {
+        let (sender, mut receiver) = channel(2);
+        for value in 0..5 {
+            tokio::time::timeout(Duration::from_secs(1), sender.send(command(value)))
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        // A command sent after a partial drain still follows the overflow.
+        let first = receiver.try_recv().unwrap();
+        sender.try_send(command(5)).unwrap();
+        let mut received = vec![first];
+        while let Ok(command) = receiver.try_recv() {
+            received.push(command);
+        }
+        let prefixes: Vec<u8> = received
+            .into_iter()
+            .map(|command| {
+                let PeerDriverCommand::SendCommand(Command::Subscribe(prefix)) = command else {
+                    panic!("protocol command");
+                };
+                prefix[0]
+            })
+            .collect();
+        assert_eq!(prefixes, [0, 1, 2, 3, 4, 5]);
         assert!(receiver.is_empty());
     }
 }

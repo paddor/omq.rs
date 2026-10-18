@@ -56,7 +56,7 @@ impl Submitter {
             if self.send_ready() {
                 return;
             }
-            changed.await;
+            changed.wait().await;
         }
     }
 

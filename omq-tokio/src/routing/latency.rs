@@ -241,7 +241,7 @@ impl Submitter {
             let mut peers = peers;
             tokio::select! {
                 Some(()) = peers.next() => {},
-                () = pending => {},
+                () = pending.wait() => {},
             }
         }
     }

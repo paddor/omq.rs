@@ -364,6 +364,16 @@ impl QuicListener {
 
     fn start_setup(&mut self, index: usize, incoming: quinn::Incoming) {
         let addr = incoming.remote_address();
+        // A spoofed source never receives the Retry token. Once half of this
+        // listener's setup slots are taken, admit only validated addresses.
+        if !incoming.remote_address_validated()
+            && self.listener_admission.in_use() >= LISTENER_SETUPS as usize / 2
+        {
+            if let Err(error) = incoming.retry() {
+                error.into_incoming().ignore();
+            }
+            return;
+        }
         let Some(admission) = PendingHandshake::acquire(
             &self.setup.admission,
             Some(&self.listener_admission),

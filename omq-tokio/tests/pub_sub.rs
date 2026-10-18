@@ -803,3 +803,54 @@ async fn pub_clones_send_concurrently_and_sub_preserves_per_clone_fifo() {
     }
     assert_eq!(next, [PER_CLONE; CLONES]);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn single_io_thread_pub_survives_subscription_replay_bursts() {
+    // The actor and the only fan-out lane share one IO thread. Replaying
+    // more subscriptions than one lane drain turn must not stall either.
+    let pub_ctx = omq_tokio::Context::new();
+    let sub_ctx = omq_tokio::Context::new();
+    let publisher = pub_ctx.socket(SocketType::Pub, Options::default().linger(Duration::ZERO));
+    let endpoint = publisher.bind("tcp://127.0.0.1:0").await.unwrap();
+    let mut subscribers = Vec::new();
+    for _ in 0..2 {
+        let sub = sub_ctx.socket(SocketType::Sub, Options::default().linger(Duration::ZERO));
+        for topic in 0..100 {
+            sub.subscribe(format!("t{topic:05}")).await.unwrap();
+        }
+        sub.subscribe("hello").await.unwrap();
+        subscribers.push(sub);
+    }
+    for sub in &subscribers {
+        sub.connect(endpoint.clone()).await.unwrap();
+    }
+    publisher
+        .wait_subscribed(2 * 101, Duration::from_secs(5))
+        .await
+        .unwrap();
+    publisher
+        .send(Message::single("hello world"))
+        .await
+        .unwrap();
+    for sub in &subscribers {
+        let message = tokio::time::timeout(Duration::from_secs(5), sub.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(message, Message::single("hello world"));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn closing_many_pub_clones_never_waits_for_an_exited_lane() {
+    let publisher = Socket::new(SocketType::Pub, Options::default().linger(Duration::ZERO));
+    publisher.bind("tcp://127.0.0.1:0").await.unwrap();
+    let clones: Vec<Socket> = (0..80).map(|_| publisher.clone()).collect();
+    publisher.close().await.unwrap();
+    for clone in clones {
+        tokio::time::timeout(Duration::from_secs(2), clone.close())
+            .await
+            .expect("clone close stalled")
+            .unwrap();
+    }
+}

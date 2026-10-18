@@ -16,18 +16,18 @@ fn kinds() -> Vec<Option<CompressionKind>> {
 fn worker(
     mode: FanOutMode,
     mute_policy: FanOutMutePolicy,
-) -> (LaneWorker, yring::Producer<LaneControl>) {
+) -> (LaneWorker, Arc<ControlQueue<LaneControl>>) {
     let (_data_tx, data_rx) = yring::spsc(4);
-    let (ctrl_tx, ctrl_rx) = yring::spsc(LANE_CTRL_RING_CAP);
+    let ctrl = Arc::new(ControlQueue::new());
     (
         LaneWorker {
             #[cfg(target_os = "linux")]
             shm_pool: omq_shm::SendPool::new(16, None),
             data_rx,
-            ctrl_rx,
+            ctrl: ctrl.clone(),
+            ctrl_batch: VecDeque::new(),
             data_signal: Arc::new(DataSignal::new()),
             data_space: Arc::new(StateSignal::new()),
-            ctrl_notify: Arc::new(DataSignal::new()),
             mode,
             mute_policy,
             peers: FxHashMap::default(),
@@ -37,7 +37,7 @@ fn worker(
             codec_groups: std::array::from_fn(|_| None),
             exited: Arc::new(AtomicBool::new(false)),
         },
-        ctrl_tx,
+        ctrl,
     )
 }
 
@@ -351,7 +351,7 @@ async fn nodrop_services_ready_groups_and_removal_discards_only_old_connection_o
     use futures::FutureExt;
     let options = Options::default();
     let kind = kinds().into_iter().flatten().next().unwrap();
-    let (mut worker, mut ctrl) = worker(FanOutMode::SubscriptionPrefix, FanOutMutePolicy::Block);
+    let (mut worker, ctrl) = worker(FanOutMode::SubscriptionPrefix, FanOutMutePolicy::Block);
     let slow = add_peer(&mut worker, 0, 0, None, &options, 1);
     let fast = add_peer(&mut worker, 1, 0, None, &options, 16);
     let other = add_peer(&mut worker, 2, 1, Some(kind), &options, 16);
@@ -360,7 +360,6 @@ async fn nodrop_services_ready_groups_and_removal_discards_only_old_connection_o
         TryFrameResult::Ok
     );
     let publication = dispatch(&[0x5a; 4096]);
-    let notify = worker.ctrl_notify.clone();
     let mut touched = SmallVec::new();
     let send = worker.dispatch(&publication, &mut touched);
     tokio::pin!(send);
@@ -384,7 +383,7 @@ async fn nodrop_services_ready_groups_and_removal_discards_only_old_connection_o
         16,
         WireFraming::Zmtp,
     );
-    ctrl.push(LaneControl::RemovePeer { peer_id: 0 }).unwrap();
+    ctrl.push(LaneControl::RemovePeer { peer_id: 0 });
     ctrl.push(LaneControl::AddPeer {
         add: LanePeerAdd {
             peer_id: 0,
@@ -392,10 +391,7 @@ async fn nodrop_services_ready_groups_and_removal_discards_only_old_connection_o
             any_groups: false,
         },
         codec_group: 0,
-    })
-    .unwrap();
-    ctrl.flush();
-    notify.mark();
+    });
     assert!(
         !tokio::time::timeout(std::time::Duration::from_secs(1), send)
             .await
@@ -413,11 +409,10 @@ async fn nodrop_services_ready_groups_and_removal_discards_only_old_connection_o
 async fn shutdown_remains_reachable_while_a_dictionary_cannot_be_admitted() {
     use futures::FutureExt;
     let options = Options::default().compression_dict(Bytes::from_static(b"shared-dictionary"));
-    let (mut worker, mut ctrl) = worker(FanOutMode::SubscriptionPrefix, FanOutMutePolicy::Block);
+    let (mut worker, ctrl) = worker(FanOutMode::SubscriptionPrefix, FanOutMutePolicy::Block);
     let slow = add_peer(&mut worker, 0, 0, Some(CompressionKind::Lz4), &options, 1);
     let fast = add_peer(&mut worker, 1, 1, None, &Options::default(), 16);
     slow.try_push_pre_framed_no_signal(b"\x00\x03old");
-    let notify = worker.ctrl_notify.clone();
     let publication = dispatch(&[0x5a; 4096]);
     let mut touched = SmallVec::new();
     let send = worker.dispatch(&publication, &mut touched);
@@ -428,9 +423,7 @@ async fn shutdown_remains_reachable_while_a_dictionary_cannot_be_admitted() {
         (vec![publication.msg.clone()], 0)
     );
     assert!(!slow.fanout_dict_shipped());
-    ctrl.push(LaneControl::Shutdown).unwrap();
-    ctrl.flush();
-    notify.mark();
+    ctrl.push(LaneControl::Shutdown);
     assert!(
         tokio::time::timeout(std::time::Duration::from_secs(1), send)
             .await

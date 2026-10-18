@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -8,6 +9,7 @@ use smallvec::SmallVec;
 use tokio::sync::oneshot;
 
 use crate::engine::codec::CodecSharingKey;
+use crate::engine::control_queue::ControlQueue;
 use crate::engine::signal::{DataSignal, StateSignal};
 use crate::engine::transmit_slot::{PeerTransmitSlot, TryFrameResult};
 use crate::routing::subscription::SubscriptionSet;
@@ -24,7 +26,6 @@ use super::codec_group::{CodecGroup, MAX_CODEC_GROUPS};
 use super::filter::{self, FanOutMode};
 use super::{FAN_OUT_TOTAL_COPY_BUDGET, FanOutMutePolicy};
 
-const LANE_CTRL_RING_CAP: usize = 64;
 const PLAIN_BATCH_MESSAGES: usize = 8;
 const PLAIN_BATCH_BYTES: usize = 16 * 1024;
 
@@ -110,8 +111,7 @@ struct PendingBatchPeer {
 }
 
 struct LaneEndpoint {
-    ctrl_tx: yring::Producer<LaneControl>,
-    ctrl_notify: Arc<DataSignal>,
+    ctrl: Arc<ControlQueue<LaneControl>>,
     data_signal: Arc<DataSignal>,
     exited: Arc<AtomicBool>,
     peer_count: usize,
@@ -188,10 +188,10 @@ struct LaneWorker {
     #[cfg(target_os = "linux")]
     shm_pool: omq_shm::SendPool,
     data_rx: yring::Consumer<LaneData>,
-    ctrl_rx: yring::Consumer<LaneControl>,
+    ctrl: Arc<ControlQueue<LaneControl>>,
+    ctrl_batch: VecDeque<LaneControl>,
     data_signal: Arc<DataSignal>,
     data_space: Arc<StateSignal>,
-    ctrl_notify: Arc<DataSignal>,
     mode: FanOutMode,
     mute_policy: FanOutMutePolicy,
     peers: FxHashMap<u64, LanePeer>,
@@ -232,18 +232,10 @@ impl FanOutLanes {
 
         let space = Arc::new(StateSignal::new());
         let mut inputs = Vec::with_capacity(lane_count);
-        let mut ctrl_channels: Vec<_> = (0..lane_count)
-            .map(|_| {
-                let (tx, rx) = yring::spsc(LANE_CTRL_RING_CAP);
-                let notify = Arc::new(DataSignal::new());
-                (tx, rx, notify)
-            })
-            .collect();
-
         // Build endpoints (ctrl only) and spawn workers.
         let mut endpoints = Vec::with_capacity(lane_count);
         for i in 0..lane_count {
-            let (ctrl_tx, ctrl_rx, ctrl_notify) = ctrl_channels.remove(0);
+            let ctrl = Arc::new(ControlQueue::new());
             let (data_tx, data_rx) = yring::spsc(pipe_cap);
             let data_signal = Arc::new(DataSignal::new());
             let exited = Arc::new(AtomicBool::new(false));
@@ -258,10 +250,10 @@ impl FanOutLanes {
                     #[cfg(target_os = "linux")]
                     shm_pool: shm_pool.clone(),
                     data_rx,
-                    ctrl_rx,
+                    ctrl: ctrl.clone(),
+                    ctrl_batch: VecDeque::new(),
                     data_signal: data_signal.clone(),
                     data_space: space.clone(),
-                    ctrl_notify: ctrl_notify.clone(),
                     mode,
                     mute_policy,
                     peers: FxHashMap::default(),
@@ -274,8 +266,7 @@ impl FanOutLanes {
                 .run(),
             );
             endpoints.push(LaneEndpoint {
-                ctrl_tx,
-                ctrl_notify,
+                ctrl,
                 data_signal,
                 exited,
                 peer_count: 0,
@@ -307,27 +298,9 @@ impl FanOutLanes {
         lane.min(lane_count.saturating_sub(1))
     }
 
-    fn push_control(endpoint: &mut LaneEndpoint, cmd: LaneControl) {
-        Self::push_control_spinning(endpoint, cmd);
-    }
-
-    /// Spin-loop until the lane worker's control ring has space.
-    fn push_control_spinning(endpoint: &mut LaneEndpoint, mut cmd: LaneControl) {
-        loop {
-            match endpoint.ctrl_tx.push(cmd) {
-                Ok(()) => {
-                    endpoint.ctrl_tx.flush();
-                    endpoint.ctrl_notify.mark();
-                    return;
-                }
-                Err(returned) => {
-                    cmd = returned;
-                    endpoint.ctrl_tx.flush();
-                    endpoint.ctrl_notify.mark();
-                    std::thread::yield_now();
-                }
-            }
-        }
+    /// Never waits for the worker: it may share this runtime thread.
+    fn push_control(endpoint: &LaneEndpoint, cmd: LaneControl) {
+        endpoint.ctrl.push(cmd);
     }
 
     pub(super) fn add_lane_peer(&self, lane: usize, add: LanePeerAdd) -> Option<usize> {
@@ -586,15 +559,13 @@ impl FanOutLanes {
                 .expect("fanout lanes poisoned")
                 .endpoints
                 .iter()
-                .all(|endpoint| {
-                    endpoint.ctrl_tx.is_empty() || endpoint.exited.load(Ordering::Acquire)
-                })
+                .all(|endpoint| endpoint.ctrl.is_empty() || endpoint.exited.load(Ordering::Acquire))
     }
 
     pub(super) fn watch_close(&self, progress: &Arc<StateSignal>) {
         let state = self.state.lock().expect("fanout lanes poisoned");
         for endpoint in &state.endpoints {
-            endpoint.ctrl_notify.watch_idle(progress);
+            endpoint.ctrl.watch_idle(progress);
             endpoint.data_signal.watch_idle(progress);
         }
     }
@@ -701,7 +672,7 @@ impl LaneWorker {
                 continue;
             }
             tokio::select! {
-                () = self.ctrl_notify.ready() => {}
+                () = self.ctrl.ready() => {}
                 () = self.data_signal.ready() => {}
             }
         }
@@ -849,15 +820,15 @@ impl LaneWorker {
 
     fn drain_control(&mut self) -> bool {
         let mut shutdown = false;
-        self.ctrl_notify.begin_drain();
-        self.ctrl_rx.prefetch();
-        while let Some(cmd) = self.ctrl_rx.pop() {
+        let mut batch = std::mem::take(&mut self.ctrl_batch);
+        self.ctrl.take_batch(&mut batch);
+        for cmd in batch.drain(..) {
             if self.handle_control(cmd) {
                 shutdown = true;
             }
         }
-        self.ctrl_rx.release();
-        self.ctrl_notify.clear_after(self.ctrl_rx.is_empty());
+        self.ctrl_batch = batch;
+        self.ctrl.finish_drain();
         shutdown
     }
 
@@ -1115,7 +1086,7 @@ impl LaneWorker {
             }
             tokio::select! {
                 biased;
-                () = self.ctrl_notify.ready() => {
+                () = self.ctrl.ready() => {
                     if self.drain_control() { return true; }
                 }
                 _ = waits.next() => {}
@@ -1458,7 +1429,7 @@ impl LaneWorker {
             }
             tokio::select! {
                 biased;
-                () = self.ctrl_notify.ready() => {
+                () = self.ctrl.ready() => {
                     if self.drain_control() { return true; }
                 }
                 _ = waits.next() => {}
@@ -1732,6 +1703,7 @@ struct PendingPeer {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
 
@@ -1745,6 +1717,7 @@ mod tests {
     use rustc_hash::{FxHashMap, FxHashSet};
     use smallvec::SmallVec;
 
+    use crate::engine::control_queue::ControlQueue;
     use crate::routing::subscription::SubscriptionSet;
 
     use super::{
@@ -2119,16 +2092,15 @@ mod tests {
     #[tokio::test]
     async fn empty_data_drain_clears_stale_signal() {
         let (_data_tx, data_rx) = yring::spsc::<LaneData>(4);
-        let (_ctrl_tx, ctrl_rx) = yring::spsc(4);
         let data_signal = Arc::new(crate::engine::signal::DataSignal::new());
         let worker = LaneWorker {
             #[cfg(target_os = "linux")]
             shm_pool: omq_shm::SendPool::new(16, None),
             data_rx,
-            ctrl_rx,
+            ctrl: Arc::new(ControlQueue::new()),
+            ctrl_batch: VecDeque::new(),
             data_signal: data_signal.clone(),
             data_space: Arc::new(crate::engine::signal::StateSignal::new()),
-            ctrl_notify: Arc::new(crate::engine::signal::DataSignal::new()),
             mode: FanOutMode::SubscriptionPrefix,
             mute_policy: FanOutMutePolicy::DropNewest,
             peers: FxHashMap::default(),
@@ -2157,7 +2129,6 @@ mod tests {
     #[test]
     fn drop_oldest_lossy_dispatch_keeps_newest_per_peer_frames() {
         let (_data_tx, data_rx) = yring::spsc::<LaneData>(4);
-        let (_ctrl_tx, ctrl_rx) = yring::spsc(4);
         let slot = test_slot_with_msg_cap(7, 2);
         let mut subscriptions = SubscriptionSet::new();
         subscriptions.add(b"");
@@ -2178,10 +2149,10 @@ mod tests {
             #[cfg(target_os = "linux")]
             shm_pool: omq_shm::SendPool::new(16, None),
             data_rx,
-            ctrl_rx,
+            ctrl: Arc::new(ControlQueue::new()),
+            ctrl_batch: VecDeque::new(),
             data_signal: Arc::new(crate::engine::signal::DataSignal::new()),
             data_space: Arc::new(crate::engine::signal::StateSignal::new()),
-            ctrl_notify: Arc::new(crate::engine::signal::DataSignal::new()),
             mode: FanOutMode::SubscriptionPrefix,
             mute_policy: FanOutMutePolicy::DropOldest,
             peers,
@@ -2209,7 +2180,6 @@ mod tests {
     #[test]
     fn drop_oldest_lossy_dispatch_keeps_dict_with_first_payload() {
         let (_data_tx, data_rx) = yring::spsc::<LaneData>(4);
-        let (_ctrl_tx, ctrl_rx) = yring::spsc(4);
         let slot = test_slot_with_msg_cap(7, 1);
         let mut subscriptions = SubscriptionSet::new();
         subscriptions.add(b"");
@@ -2230,10 +2200,10 @@ mod tests {
             #[cfg(target_os = "linux")]
             shm_pool: omq_shm::SendPool::new(16, None),
             data_rx,
-            ctrl_rx,
+            ctrl: Arc::new(ControlQueue::new()),
+            ctrl_batch: VecDeque::new(),
             data_signal: Arc::new(crate::engine::signal::DataSignal::new()),
             data_space: Arc::new(crate::engine::signal::StateSignal::new()),
-            ctrl_notify: Arc::new(crate::engine::signal::DataSignal::new()),
             mode: FanOutMode::SubscriptionPrefix,
             mute_policy: FanOutMutePolicy::DropOldest,
             peers,
@@ -2294,7 +2264,6 @@ mod tests {
     #[test]
     fn drop_newest_lossy_dispatch_keeps_oldest_per_peer_frames() {
         let (_data_tx, data_rx) = yring::spsc::<LaneData>(4);
-        let (_ctrl_tx, ctrl_rx) = yring::spsc(4);
         let slot = test_slot_with_msg_cap(7, 2);
         let mut subscriptions = SubscriptionSet::new();
         subscriptions.add(b"");
@@ -2315,10 +2284,10 @@ mod tests {
             #[cfg(target_os = "linux")]
             shm_pool: omq_shm::SendPool::new(16, None),
             data_rx,
-            ctrl_rx,
+            ctrl: Arc::new(ControlQueue::new()),
+            ctrl_batch: VecDeque::new(),
             data_signal: Arc::new(crate::engine::signal::DataSignal::new()),
             data_space: Arc::new(crate::engine::signal::StateSignal::new()),
-            ctrl_notify: Arc::new(crate::engine::signal::DataSignal::new()),
             mode: FanOutMode::SubscriptionPrefix,
             mute_policy: FanOutMutePolicy::DropNewest,
             peers,
@@ -2343,9 +2312,9 @@ mod tests {
     fn batch_worker(
         mute_policy: FanOutMutePolicy,
         slots: &[Arc<crate::engine::transmit_slot::PeerTransmitSlot>],
-    ) -> (LaneWorker, yring::Producer<LaneControl>) {
+    ) -> (LaneWorker, Arc<ControlQueue<LaneControl>>) {
         let (_data_tx, data_rx) = yring::spsc(4);
-        let (ctrl_tx, ctrl_rx) = yring::spsc(4);
+        let ctrl = Arc::new(ControlQueue::new());
         let peers = slots
             .iter()
             .map(|slot| {
@@ -2370,10 +2339,10 @@ mod tests {
                 #[cfg(target_os = "linux")]
                 shm_pool: omq_shm::SendPool::new(16, None),
                 data_rx,
-                ctrl_rx,
+                ctrl: ctrl.clone(),
+                ctrl_batch: VecDeque::new(),
                 data_signal: Arc::new(crate::engine::signal::DataSignal::new()),
                 data_space: Arc::new(crate::engine::signal::StateSignal::new()),
-                ctrl_notify: Arc::new(crate::engine::signal::DataSignal::new()),
                 mode: FanOutMode::SubscriptionPrefix,
                 mute_policy,
                 peers,
@@ -2383,7 +2352,7 @@ mod tests {
                 codec_groups: test_plain_groups(),
                 exited: Arc::new(AtomicBool::new(false)),
             },
-            ctrl_tx,
+            ctrl,
         )
     }
 
@@ -2533,17 +2502,14 @@ mod tests {
     #[tokio::test]
     async fn plain_batch_services_shutdown_while_peer_stays_full() {
         let slow = test_slot_with_msg_cap(7, 1);
-        let (mut worker, mut control) =
+        let (mut worker, control) =
             batch_worker(FanOutMutePolicy::Block, std::slice::from_ref(&slow));
-        let notify = worker.ctrl_notify.clone();
         let (wire, ends) = batch_wire(&worker);
         let mut touched = SmallVec::new();
         let dispatch = worker.dispatch_plain_batch(wire.uncommitted_arena(), &ends, &mut touched);
         tokio::pin!(dispatch);
         assert!(poll_once(dispatch.as_mut()).is_pending());
-        control.push(LaneControl::Shutdown).unwrap();
-        control.flush();
-        notify.mark();
+        control.push(LaneControl::Shutdown);
         assert_eq!(poll_once(dispatch.as_mut()), std::task::Poll::Ready(true));
         assert!(
             !slow.data_signal.is_idle(),
@@ -2627,10 +2593,8 @@ mod tests {
     }
 
     fn test_endpoint() -> LaneEndpoint {
-        let (ctrl_tx, _ctrl_rx) = yring::spsc(4);
         LaneEndpoint {
-            ctrl_tx,
-            ctrl_notify: Arc::new(crate::engine::signal::DataSignal::new()),
+            ctrl: Arc::new(ControlQueue::new()),
             data_signal: Arc::new(crate::engine::signal::DataSignal::new()),
             exited: Arc::new(AtomicBool::new(false)),
             peer_count: 0,

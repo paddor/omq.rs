@@ -756,6 +756,37 @@ async fn connect_before_bind_rebind_and_mixed_transport() {
 }
 
 #[tokio::test]
+async fn bind_replaces_only_a_stale_socket_file() {
+    let path = format!(
+        "/tmp/omq-shm-{}-{}.sock",
+        std::process::id(),
+        rand::random::<u64>()
+    );
+    let address: Endpoint = format!("shm://{path}").parse().unwrap();
+    let context = Context::new();
+    let blocked = context.socket(SocketType::Gather, options());
+    std::fs::write(&path, b"keep").unwrap();
+    assert!(blocked.bind(address.clone()).await.is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), b"keep");
+    std::fs::remove_file(&path).unwrap();
+
+    drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+    let gather = context.socket(SocketType::Gather, options());
+    gather.bind(address.clone()).await.unwrap();
+    assert!(blocked.bind(address.clone()).await.is_err());
+    let scatter = context.socket(SocketType::Scatter, options());
+    scatter.connect(address).await.unwrap();
+    scatter.send(Message::from_slice(&[9; 1024])).await.unwrap();
+    assert_eq!(
+        receive(&gather).await.part_slice(0),
+        Some([9; 1024].as_slice())
+    );
+    scatter.close().await.unwrap();
+    gather.close().await.unwrap();
+    blocked.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn multipart_capable_socket_types_are_rejected_before_io() {
     for socket_type in [
         SocketType::Pair,

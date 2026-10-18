@@ -710,7 +710,7 @@ pub(super) async fn bind_any(
     }
     #[cfg(target_os = "linux")]
     if let Endpoint::Shm(path) = endpoint {
-        let listener = IpcTransport::bind(&Endpoint::Ipc(path.clone())).await?;
+        let listener = crate::transport::ipc::bind_shm(&Endpoint::Ipc(path.clone()))?;
         return Ok(BoundListener {
             listener: AnyListener::Shm(listener, endpoint.clone()),
             endpoint: endpoint.clone(),

@@ -315,6 +315,11 @@ async fn bind_filesystem_unix(endpoint: &Endpoint, path: &Path) -> Result<IpcLis
     // failure: the real bind below surfaces a precise error if the
     // path is unusable.
     let _ = std::fs::remove_file(path);
+    listen_filesystem_unix(endpoint, path)
+}
+
+#[cfg(unix)]
+fn listen_filesystem_unix(endpoint: &Endpoint, path: &Path) -> Result<IpcListener> {
     let listener = TokioUnixListener::bind(path)?;
     Ok(IpcListener {
         inner: listener,
@@ -322,6 +327,51 @@ async fn bind_filesystem_unix(endpoint: &Endpoint, path: &Path) -> Result<IpcLis
         socket_file: Some(SocketFile::new(path)?),
         ident: PeerIdent::Path(path.display().to_string()),
     })
+}
+
+/// Bind an `shm://` rendezvous socket. Unlike IPC, a filesystem path is
+/// replaced only when it holds a stale socket: SHM peers are always OMQ, so
+/// the libzmq unlink-on-bind behavior does not apply.
+#[cfg(target_os = "linux")]
+pub(crate) fn bind_shm(endpoint: &Endpoint) -> Result<IpcListener> {
+    match endpoint {
+        Endpoint::Ipc(IpcPath::Filesystem(path)) => {
+            remove_stale_socket(path)?;
+            listen_filesystem_unix(endpoint, path)
+        }
+        Endpoint::Ipc(IpcPath::Abstract(name)) => bind_abstract_unix(endpoint, name),
+        other => Err(Error::InvalidEndpoint(format!(
+            "shm transport got non-ipc endpoint: {other}"
+        ))),
+    }
+}
+
+/// Remove `path` if it is a socket nobody accepts on; fail if anything else
+/// occupies it. A nonblocking connect never waits on a full backlog.
+#[cfg(target_os = "linux")]
+fn remove_stale_socket(path: &Path) -> Result<()> {
+    use std::os::unix::fs::FileTypeExt;
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let refused = || -> std::io::Result<bool> {
+        let socket = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)?;
+        socket.set_nonblocking(true)?;
+        Ok(socket
+            .connect(&socket2::SockAddr::unix(path)?)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::ConnectionRefused))
+    };
+    if metadata.file_type().is_socket() && refused()? {
+        std::fs::remove_file(path)?;
+        return Ok(());
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AddrInUse,
+        format!("shm path {} is in use", path.display()),
+    )
+    .into())
 }
 
 #[cfg(target_os = "linux")]

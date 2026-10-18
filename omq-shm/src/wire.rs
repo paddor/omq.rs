@@ -5,7 +5,7 @@ use std::io;
 
 use crate::mapping::{invalid, read_u64};
 
-pub(crate) const PREFACE_MAGIC: &[u8; 8] = b"OMQSHM07";
+pub(crate) const PREFACE_MAGIC: &[u8; 8] = b"OMQSHM08";
 pub(crate) const COPIED: u8 = 0;
 pub(crate) const BODY: u8 = 1;
 pub(crate) const COPIED_BATCH: u8 = 2;

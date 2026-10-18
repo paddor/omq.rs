@@ -16,8 +16,10 @@ CHANNEL admits one peer at a time across all endpoints.
 
 The path directly names the Unix rendezvous socket; `@name` uses the abstract
 namespace. Its stream carries setup, FD registration, and disconnect detection.
-Anonymous, size-sealed memfds are registered with `SCM_RIGHTS`; receivers map
-payloads read-only and validate coordinates against generation-tagged leases.
+Anonymous, size-sealed memfds are registered with `SCM_RIGHTS`. Payload memfds are
+also write-sealed (`F_SEAL_FUTURE_WRITE`): only the sender modifies them, through
+its existing mapping. Receivers map payloads read-only and validate coordinates
+against generation-tagged leases.
 
 Each direction has a bounded SPSC byte ring for ZMTP framing, control, and
 coordinates. Release/acquire cursors publish and return bytes. Parked peers
@@ -73,6 +75,8 @@ storage uses shared carrier delivery. `Some(0)` disables automatic allocation;
 Explicit producer pools, received mappings, completion/carrier tables, and heap queues
 are excluded. Message-count HWM and `max_message_size` are separate limits.
 
-Requires Linux 5.3+, trusted same-UID peers, visible peer PIDs, and `OMQSHM07`
-on both peers. `omq-shm` contains the Linux/unsafe boundary. Do not inherit
-live contexts or borrowed payloads across `fork`.
+Requires Linux 5.3+, same-UID peers, visible peer PIDs, and `OMQSHM08` on both
+peers. Receivers trust the sender and read payloads in place. Receivers cannot
+write payloads, but can retain slots until they release them or exit. `omq-shm`
+contains the Linux/unsafe boundary. Do not inherit live contexts or borrowed
+payloads across `fork`.

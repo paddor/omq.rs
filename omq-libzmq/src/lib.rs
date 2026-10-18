@@ -29,6 +29,7 @@ mod consts;
 mod context;
 pub mod curve;
 mod error;
+mod handle;
 mod local_cell;
 mod msg;
 mod notify;

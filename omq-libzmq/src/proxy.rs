@@ -376,7 +376,8 @@ impl ProxyCtx {
         let input = items.iter().any(|item| {
             // SAFETY: proxy sockets stay valid for the whole `zmq_proxy` call.
             item.events == ZMQ_POLLIN
-                && recv_ready(unsafe { &*(item.socket.cast::<Arc<OmqSocket>>()) })
+                && unsafe { crate::handle::socket(item.socket) }
+                    .is_ok_and(|socket| recv_ready(socket))
         });
         let sent = [fe_pending, be_pending]
             .into_iter()
@@ -415,9 +416,8 @@ fn socket_arc(ptr: *mut c_void) -> Result<Arc<OmqSocket>, libc::c_int> {
     if ptr.is_null() {
         return Err(libc::EFAULT);
     }
-    // SAFETY: public entry points receive pointers returned by `zmq_socket`.
-    let sock = unsafe { &*(ptr.cast::<Arc<OmqSocket>>()) };
-    Ok(sock.clone())
+    // SAFETY: C callers pass null or a pointer from this API.
+    Ok(unsafe { crate::handle::socket(ptr) }?.clone())
 }
 
 fn optional_socket_arc(ptr: *mut c_void) -> Result<Option<Arc<OmqSocket>>, libc::c_int> {

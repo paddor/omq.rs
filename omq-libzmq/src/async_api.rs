@@ -9,7 +9,6 @@ use omq_tokio::engine::StateSignal;
 
 use crate::context::WorkGuard;
 use crate::error::{ETERM, fail};
-use crate::socket::OmqSocket;
 
 const ROUTED_MESSAGE_MAGIC: &[u8; 8] = b"OMQROUTE";
 
@@ -110,7 +109,13 @@ pub extern "C" fn omq_socket_send_async(
         return std::ptr::null_mut();
     };
     // SAFETY: socket_ptr is an active zmq socket handle, represented by Arc<OmqSocket>.
-    let socket = unsafe { &*(socket_ptr.cast::<Arc<OmqSocket>>()) }.clone();
+    let socket = match unsafe { crate::handle::socket(socket_ptr) } {
+        Ok(socket) => socket.clone(),
+        Err(errno) => {
+            fail(errno);
+            return std::ptr::null_mut();
+        }
+    };
     let Some(inner) = socket.inner.get().cloned() else {
         fail(ETERM);
         return std::ptr::null_mut();
@@ -187,7 +192,8 @@ mod tests {
                 0
             );
             // SAFETY: this test owns the live socket handle.
-            let handle = unsafe { &*socket.cast::<Arc<OmqSocket>>() }
+            let handle = unsafe { crate::handle::socket(socket) }
+                .unwrap()
                 .ctx
                 .handle()
                 .unwrap()
@@ -267,7 +273,8 @@ mod tests {
         let socket = crate::zmq_socket(context, 8);
         assert_eq!(crate::zmq_bind(socket, c"inproc://async-abort".as_ptr()), 0);
         // SAFETY: this test owns the live socket handle.
-        let handle = unsafe { &*socket.cast::<Arc<OmqSocket>>() }
+        let handle = unsafe { crate::handle::socket(socket) }
+            .unwrap()
             .ctx
             .handle()
             .unwrap()

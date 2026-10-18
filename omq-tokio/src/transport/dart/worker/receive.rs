@@ -300,6 +300,11 @@ impl EndpointWorker {
             peer.expires = timestamp.at;
             return;
         }
+        if length.is_some_and(|length| !session.may_reserve_ahead(length)) {
+            // Enough bodies already wait in the window. Leave this FIRST
+            // unacknowledged; the sender retransmits it later.
+            return;
+        }
         let ecn = match packet.ecn {
             Some(EcnCodepoint::Ect0) => {
                 stats.ect0 += 1;

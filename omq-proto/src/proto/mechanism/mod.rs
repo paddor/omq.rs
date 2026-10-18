@@ -419,6 +419,7 @@ impl AuthenticationResult {
 
 /// Server-side admission callback for NULL, PLAIN, and CURVE. Invoked once per
 /// handshake, after credentials are available and before READY completes.
+/// The tokio backend runs it on the blocking pool, so it may block.
 /// `Arc`-wrapped so the closure can be cloned through `MechanismSetup`.
 #[derive(Clone)]
 pub struct Authenticator(Arc<dyn Fn(&MechanismPeerInfo) -> AuthenticationResult + Send + Sync>);

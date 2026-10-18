@@ -7,7 +7,6 @@
 //! Multicast is intentionally out of scope for this slice; the listener
 //! takes whatever address is bound and lets the OS handle routing.
 
-use std::io;
 use std::net::{IpAddr, SocketAddr};
 
 use bytes::Bytes;
@@ -81,11 +80,11 @@ pub async fn bind(endpoint: &Endpoint) -> Result<UdpSocket> {
 }
 
 /// Open an unbound UDP socket and "connect" it to the RADIO target so
-/// we can use `send` rather than `send_to`. Hostname resolution is
-/// delegated to the std lookup; failure surfaces as `io::Error`.
+/// we can use `send` rather than `send_to`. Hostnames resolve through the
+/// shared DNS workers; failure surfaces as `io::Error`.
 pub async fn connect(endpoint: &Endpoint) -> Result<UdpSocket> {
     let (host, port) = parts(endpoint)?;
-    let target = host_to_lookup(host, port)?;
+    let target = host_to_lookup(host, port).await?;
     // Bind to ephemeral local; let the OS pick the address family.
     let local = match target {
         SocketAddr::V4(_) => "0.0.0.0:0".parse::<SocketAddr>().unwrap(),
@@ -105,21 +104,18 @@ fn parts(endpoint: &Endpoint) -> Result<(&Host, u16)> {
     }
 }
 
-fn host_to_lookup(host: &Host, port: u16) -> Result<SocketAddr> {
+async fn host_to_lookup(host: &Host, port: u16) -> Result<SocketAddr> {
     match host {
         Host::Ip(ip) => Ok(SocketAddr::new(*ip, port)),
         Host::Wildcard => Err(Error::InvalidEndpoint(
             "udp connect cannot target a wildcard host".into(),
         )),
-        Host::Name(name) => {
-            // Synchronous lookup; UDP connect paths run inside the dial
-            // task so a brief block here is acceptable.
-            let mut addrs = std::net::ToSocketAddrs::to_socket_addrs(&(name.as_str(), port))
-                .map_err(|e| Error::Io(io::Error::new(e.kind(), format!("{name}: {e}"))))?;
-            addrs
-                .next()
-                .ok_or_else(|| Error::InvalidEndpoint(format!("udp: no address for {name}")))
-        }
+        // Never block a runtime thread on a system lookup.
+        Host::Name(name) => super::dns::resolve(name, port)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::InvalidEndpoint(format!("udp: no address for {name}"))),
         _ => unreachable!(),
     }
 }

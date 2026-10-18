@@ -1,17 +1,24 @@
-//! Rejects busy-waiting in the backend and the libzmq API.
+//! Rejects busy-waiting and blocking name lookups in the backend and the
+//! libzmq API.
 //!
 //! A spin on a runtime thread can wait for a task that needs that same
 //! thread, which livelocks a single-IO-thread context. Producers must enqueue
 //! without waiting, and consumers must park on a signal. Every remaining spin
-//! is bounded and runs where it cannot block the task it waits for.
+//! is bounded and runs where it cannot block the task it waits for. System
+//! lookups run only on the shared DNS workers.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const FORBIDDEN: &[&str] = &["thread::yield_now(", "spin_loop("];
+const FORBIDDEN: &[&str] = &["thread::yield_now(", "spin_loop(", "to_socket_addrs("];
 
 /// (path relative to repo root, line substring, reason)
 const ALLOWED: &[(&str, &str, &str)] = &[
+    (
+        "omq-tokio/src/transport/dns.rs",
+        ".to_socket_addrs()",
+        "DNS worker threads own every system lookup",
+    ),
     (
         "omq-tokio/src/blocking.rs",
         "std::thread::yield_now();",
@@ -55,7 +62,7 @@ const ALLOWED: &[(&str, &str, &str)] = &[
 ];
 
 #[test]
-fn runtime_code_does_not_busy_wait() {
+fn runtime_code_does_not_busy_wait_or_block_on_lookups() {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let repo = manifest.parent().expect("omq-tokio lives under repo root");
     let mut violations = Vec::new();
@@ -64,7 +71,7 @@ fn runtime_code_does_not_busy_wait() {
     }
     assert!(
         violations.is_empty(),
-        "busy-wait outside the allowlist; enqueue without waiting or park on a signal:\n{}",
+        "busy-wait or blocking lookup outside the allowlist; enqueue without waiting, park on a signal, or use transport::dns:\n{}",
         violations.join("\n")
     );
 }

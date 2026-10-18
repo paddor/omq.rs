@@ -21,6 +21,14 @@ impl SocketDriver {
             let _ = ack.send(Err(Error::Protocol(
                 "STREAM sockets only support tcp:// endpoints".into(),
             )));
+        } else if matches!(endpoint, Endpoint::Udp { .. })
+            && super::endpoint_resolution::needs_dns(&endpoint)
+        {
+            self.start_endpoint_resolution(
+                endpoint,
+                options,
+                super::endpoint_resolution::Ack::Connect(ack),
+            );
         } else if matches!(endpoint, Endpoint::Udp { .. }) {
             let res = self.start_dial_udp(endpoint).await;
             let _ = ack.send(res);

@@ -583,7 +583,7 @@ impl SocketDriver {
             {
                 if !omq_shm::supports(self.socket_type) {
                     return Err(Error::Config(
-                        "shm:// requires a single-part socket type".into(),
+                        "shm:// does not support STREAM sockets".into(),
                     ));
                 }
                 if !matches!(options.mechanism, omq_proto::MechanismConfig::Null) {

@@ -20,7 +20,7 @@
 //!   let both loads read stale values, and the consumer parks with the item
 //!   queued (`tests/loom_signal.rs`).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering, fence};
 use std::sync::{Arc, Mutex, Weak};
 
@@ -137,6 +137,65 @@ fn blocking_thread(signal: &Arc<BlockingSignal>) -> Arc<BlockingThread> {
         .unwrap_or_else(|_| new()) // Thread-local teardown is outside steady state.
 }
 
+/// Receive guards this thread holds, and user wakers deferred until the
+/// outermost one releases.
+struct ReceiveGuards {
+    held: Cell<usize>,
+    pending: Cell<bool>,
+    deferred: RefCell<Vec<Arc<BlockingThread>>>,
+}
+
+thread_local! {
+    static RECEIVE_GUARDS: ReceiveGuards = const {
+        ReceiveGuards {
+            held: Cell::new(0),
+            pending: Cell::new(false),
+            deferred: RefCell::new(Vec::new()),
+        }
+    };
+}
+
+/// A receive guard was acquired on this thread.
+#[inline]
+pub(crate) fn enter_receive_guard() {
+    let _ = RECEIVE_GUARDS.try_with(|guards| guards.held.set(guards.held.get() + 1));
+}
+
+/// A receive guard was released. The outermost release runs deferred wakers.
+#[inline]
+pub(crate) fn leave_receive_guard() {
+    let wakers = RECEIVE_GUARDS.try_with(|guards| {
+        let held = guards.held.get().saturating_sub(1);
+        guards.held.set(held);
+        (held == 0 && guards.pending.replace(false))
+            .then(|| std::mem::take(&mut *guards.deferred.borrow_mut()))
+    });
+    if let Ok(Some(wakers)) = wakers {
+        run_wakers(wakers);
+    }
+}
+
+fn defer_wakers(wakers: &mut SmallVec<[Arc<BlockingThread>; 4]>) -> bool {
+    RECEIVE_GUARDS
+        .try_with(|guards| {
+            if guards.held.get() == 0 {
+                return false;
+            }
+            guards.deferred.borrow_mut().extend(wakers.drain(..));
+            guards.pending.set(true);
+            true
+        })
+        .unwrap_or(false)
+}
+
+fn run_wakers(wakers: impl IntoIterator<Item = Arc<BlockingThread>>) {
+    for waiter in wakers {
+        if let WakeTarget::Waker(waker) = &waiter.target {
+            waker.wake_by_ref();
+        }
+    }
+}
+
 pub(crate) struct BlockingWaiter<'a> {
     signal: &'a BlockingSignal,
     state: Arc<BlockingThread>,
@@ -192,12 +251,13 @@ impl BlockingSignal {
             }
         }
         // User wakers can reenter registration or panic. Keep them outside
-        // the waiter lock, including their clone/drop callbacks.
-        for waiter in wakers {
-            if let WakeTarget::Waker(waker) = &waiter.target {
-                waker.wake_by_ref();
-            }
+        // the waiter lock, including their clone/drop callbacks. Under a
+        // receive guard they wait until the guard releases, so a waker may
+        // also reenter receive.
+        if wakers.is_empty() || defer_wakers(&mut wakers) {
+            return;
         }
+        run_wakers(wakers);
     }
 
     /// Wake `waker` on every publication until the registration drops.

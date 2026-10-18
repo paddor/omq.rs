@@ -3,7 +3,7 @@
 #[cfg(target_os = "linux")]
 use super::shm;
 use super::{BATCH_TIME_CHECK_MSGS, OUTBOUND_BATCH_TIME};
-use crate::engine::compression_pool::CompressionPool;
+use crate::engine::compression_pool::{CompressionPool, EncoderLoan};
 use crate::routing::OUTBOUND_BATCH_MAX_MSGS;
 use bytes::Bytes;
 use futures::stream::FuturesOrdered;
@@ -246,13 +246,7 @@ impl OutboundState {
         eq: &mut FrameBuffer,
     ) -> Result<()> {
         if self.offload_pipeline.is_empty() {
-            drain_offload_result(
-                None,
-                Ok(wire),
-                self.compression_pool.as_ref(),
-                connection,
-                eq,
-            )
+            drain_offload_result(None, Ok(wire), connection, eq)
         } else {
             self.offload_pipeline
                 .push_back(Box::pin(std::future::ready((None, Ok(wire)))));
@@ -304,25 +298,9 @@ impl OutboundState {
 
     pub(super) async fn next_offload(
         &mut self,
-    ) -> Option<(Option<MessageEncoder>, Result<TransformedOut>)> {
+    ) -> Option<(Option<EncoderLoan>, Result<TransformedOut>)> {
         use futures::StreamExt;
         self.offload_pipeline.next().await
-    }
-
-    pub(super) fn drain_offload_result(
-        &mut self,
-        pool_enc: Option<MessageEncoder>,
-        frames: Result<TransformedOut>,
-        connection: &Connection,
-        eq: &mut FrameBuffer,
-    ) -> Result<()> {
-        drain_offload_result(
-            pool_enc,
-            frames,
-            self.compression_pool.as_ref(),
-            connection,
-            eq,
-        )
     }
 
     /// Drain the selected result plus any immediately-ready followers. This
@@ -330,7 +308,7 @@ impl OutboundState {
     /// awaiting compression outside the driver's main `select!`.
     pub(super) fn drain_ready_offload_batch(
         &mut self,
-        first: (Option<MessageEncoder>, Result<TransformedOut>),
+        first: (Option<EncoderLoan>, Result<TransformedOut>),
         connection: &Connection,
         eq: &mut FrameBuffer,
     ) -> Result<usize> {
@@ -339,8 +317,8 @@ impl OutboundState {
         let started = Instant::now();
         let mut count = 0;
         let mut next = Some(first);
-        while let Some((pool_enc, frames)) = next {
-            self.drain_offload_result(pool_enc, frames, connection, eq)?;
+        while let Some((loan, frames)) = next {
+            drain_offload_result(loan, frames, connection, eq)?;
             count += 1;
             if count >= OUTBOUND_BATCH_MAX_MSGS
                 || (count.is_multiple_of(BATCH_TIME_CHECK_MSGS)
@@ -356,10 +334,7 @@ impl OutboundState {
 
 pub(super) type OffloadPipeline = FuturesOrdered<
     std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = (Option<MessageEncoder>, Result<TransformedOut>)>
-                + Send,
-        >,
+        Box<dyn std::future::Future<Output = (Option<EncoderLoan>, Result<TransformedOut>)> + Send>,
     >,
 >;
 
@@ -376,12 +351,12 @@ pub(super) fn submit_to_pipeline(
 ) {
     #[cfg(any(feature = "lz4", feature = "zstd"))]
     if msg.byte_len() >= threshold
-        && let Some(mut pool_enc) = pool.try_take(encoder)
+        && let Some(mut loan) = pool.try_take(encoder)
     {
         let msg = msg.clone();
         let handle = tokio::task::spawn_blocking(move || {
-            let result = pool_enc.encode(&msg);
-            (Some(pool_enc), result)
+            let result = loan.encoder.encode(&msg);
+            (Some(loan), result)
         });
         pipeline.push_back(Box::pin(async move {
             match handle.await {
@@ -398,17 +373,15 @@ pub(super) fn submit_to_pipeline(
     pipeline.push_back(Box::pin(futures::future::ready((None, result))));
 }
 
-#[allow(unused_variables, clippy::needless_pass_by_value)]
+#[allow(unused_variables)]
 pub(super) fn drain_offload_result(
-    pool_enc: Option<MessageEncoder>,
+    loan: Option<EncoderLoan>,
     frames: Result<TransformedOut>,
-    pool: Option<&Arc<CompressionPool>>,
     connection: &Connection,
     eq: &mut FrameBuffer,
 ) -> Result<()> {
-    #[cfg(any(feature = "lz4", feature = "zstd"))]
-    if let (Some(enc), Some(pool)) = (pool_enc, pool) {
-        pool.put(enc);
+    if let Some(loan) = loan {
+        loan.restore();
     }
     #[cfg(feature = "ws")]
     let ws = connection.is_ws().then(|| {

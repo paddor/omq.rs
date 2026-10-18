@@ -126,7 +126,7 @@ impl<'events> Activation<'_, 'events> {
                         Error::HandshakeFailed("handshake timeout".into())));
                 }
 
-                res = reader.read_buf(&mut self.read.buffer), if self.pending_input_error.is_none() && !self.peer_events.blocked() && !self.connection.is_ready() && !self.connection.has_pending_input() => {
+                res = reader.read_buf(&mut self.read.buffer), if self.pending_input_error.is_none() && !self.peer_events.blocked() && !self.connection.is_ready() && self.connection.accepts_input() => {
                     let n = res?;
                     if n == 0 {
                         mark_peer_dead(self.transmit_slot);

@@ -136,6 +136,9 @@ struct LiveConnection {
     heartbeat_deadline: Option<Instant>,
     ping_sequence: u64,
     peer_identity: Bytes,
+    /// A flat message write started and has not completed. A caller that
+    /// drops `send` mid-write leaves a truncated frame on the wire.
+    write_pending: bool,
 }
 
 impl LiveConnection {
@@ -274,10 +277,13 @@ impl Socket {
             live.write_buf.clear();
             live.connection
                 .send_message_flat(&wire_message, &mut live.write_buf);
+            live.write_pending = true;
             live.stream
                 .write_all(&live.write_buf)
                 .await
-                .map_err(Error::Io)
+                .map_err(Error::Io)?;
+            live.write_pending = false;
+            Ok(())
         })
         .await;
         if let Err(error) = result {
@@ -353,7 +359,7 @@ impl Socket {
         }
         let flush_result = run_timeout(
             self.options.io_timeout,
-            flush_live(self.live.as_mut().expect("connected")),
+            flush_and_settle(self.live.as_mut().expect("connected")),
         )
         .await;
         if let Err(error) = flush_result {
@@ -415,6 +421,11 @@ impl Socket {
     async fn ensure_connected(&mut self) -> Result<()> {
         if self.closed {
             return Err(Error::Closed);
+        }
+        if self.live.as_ref().is_some_and(|live| live.write_pending) {
+            self.mark_disconnected(&Error::Protocol(
+                "exclusive socket write was cancelled".into(),
+            ));
         }
         if self.live.is_some() {
             return Ok(());
@@ -635,6 +646,7 @@ async fn establish_connected_live(
         heartbeat_deadline: None,
         ping_sequence: 0,
         peer_identity: Bytes::new(),
+        write_pending: false,
     };
     live.peer_identity = tokio::time::timeout(handshake_timeout, finish_handshake(&mut live))
         .await
@@ -666,6 +678,7 @@ async fn establish_bound_live(
         heartbeat_deadline: None,
         ping_sequence: 0,
         peer_identity: Bytes::new(),
+        write_pending: false,
     };
     live.peer_identity = tokio::time::timeout(handshake_timeout, finish_handshake(&mut live))
         .await
@@ -696,7 +709,7 @@ async fn finish_handshake(live: &mut LiveConnection) -> Result<Bytes> {
             }
         }
     }
-    flush_live(live).await?;
+    flush_and_settle(live).await?;
     Ok(peer_identity.unwrap_or_else(|| generated_identity(0)))
 }
 
@@ -730,6 +743,10 @@ async fn recv_live(
         if let Some(message) = live.connection.poll_message() {
             return Ok(message);
         }
+        if !live.connection.accepts_input() {
+            flush_and_settle(live).await?;
+            continue;
+        }
 
         let ping_deadline = heartbeat_interval
             .filter(|_| live.connection.peer_minor() >= 1)
@@ -739,7 +756,7 @@ async fn recv_live(
             biased;
             result = read_live_once(live) => {
                 result?;
-                flush_live(live).await?;
+                flush_and_settle(live).await?;
             }
             () = sleep_until(heartbeat_deadline), if heartbeat_deadline.is_some() => {
                 return Err(Error::Timeout);
@@ -810,7 +827,8 @@ async fn read_live_once(live: &mut LiveConnection) -> Result<()> {
 }
 
 fn drain_ready_input(live: &mut LiveConnection) -> Result<()> {
-    loop {
+    // Paused input resumes after the caller writes the reply backlog.
+    while live.connection.accepts_input() {
         match live.stream.try_read_buf(&mut live.read_buf) {
             Ok(0) => return Err(Error::Closed),
             Ok(_) => {
@@ -822,9 +840,11 @@ fn drain_ready_input(live: &mut LiveConnection) -> Result<()> {
             Err(error) => return Err(Error::Io(error)),
         }
     }
+    Ok(())
 }
 
 async fn flush_live(live: &mut LiveConnection) -> Result<()> {
+    // Unwritten bytes stay queued in the codec, so cancellation is safe here.
     while live.connection.has_pending_transmit() {
         let chunks = live.connection.transmit_chunks_capped(64);
         let n = live.stream.write_vectored(&chunks).await?;
@@ -838,6 +858,18 @@ async fn flush_live(live: &mut LiveConnection) -> Result<()> {
         live.connection.advance_transmit(n);
     }
     Ok(())
+}
+
+/// Write queued output and resume input the core paused behind automatic
+/// replies. Returns once the connection accepts more wire input.
+async fn flush_and_settle(live: &mut LiveConnection) -> Result<()> {
+    loop {
+        flush_live(live).await?;
+        if live.connection.accepts_input() {
+            return Ok(());
+        }
+        live.connection.resume_input()?;
+    }
 }
 
 async fn run_timeout<T>(
@@ -931,6 +963,7 @@ mod tests {
                 heartbeat_deadline: None,
                 ping_sequence: 0,
                 peer_identity: generated_identity(0),
+                write_pending: false,
             };
             finish_handshake(&mut live).await.unwrap();
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -959,6 +992,7 @@ mod tests {
                 heartbeat_deadline: None,
                 ping_sequence: 0,
                 peer_identity: generated_identity(0),
+                write_pending: false,
             };
             finish_handshake(&mut live).await.unwrap();
             read_live_once(&mut live).await.unwrap();
@@ -1449,5 +1483,62 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, Error::Config(message) if message.contains("only tcp://")));
+    }
+    #[tokio::test]
+    async fn maintain_resumes_input_paused_behind_ping_replies() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint: Endpoint = format!("tcp://{}", listener.local_addr().unwrap())
+            .parse()
+            .unwrap();
+        let (sent_tx, sent_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let now = Instant::now();
+            let mut live = LiveConnection {
+                stream,
+                connection: Connection::new(ConnectionConfig::new(
+                    Role::Server,
+                    SocketType::Router,
+                )),
+                read_buf: BytesMut::with_capacity(4 * 1024),
+                write_buf: BytesMut::with_capacity(4 * 1024),
+                last_ping: now,
+                last_input: now,
+                heartbeat_deadline: None,
+                ping_sequence: 0,
+                peer_identity: generated_identity(0),
+                write_pending: false,
+            };
+            finish_handshake(&mut live).await.unwrap();
+            // Enough replies to exceed the core's automatic reply backlog,
+            // followed by data the client must still receive.
+            for _ in 0..4096 {
+                live.connection
+                    .send_command(&Command::Ping {
+                        ttl_deciseconds: 0,
+                        context: Bytes::from_static(&[7; 16]),
+                    })
+                    .unwrap();
+            }
+            live.connection
+                .send_message(&Message::single(Bytes::from_static(b"after pings")))
+                .unwrap();
+            flush_live(&mut live).await.unwrap();
+            sent_tx.send(()).unwrap();
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        });
+        let mut socket = Socket::connect(SocketType::Dealer, endpoint, Options::default())
+            .await
+            .unwrap();
+        sent_rx.await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Nonblocking reads parse the whole burst before replies are written.
+        socket.maintain().await.unwrap();
+        let message = tokio::time::timeout(Duration::from_secs(5), socket.recv())
+            .await
+            .expect("paused input was not resumed")
+            .unwrap();
+        assert_eq!(message, Message::single(Bytes::from_static(b"after pings")));
+        server.abort();
     }
 }

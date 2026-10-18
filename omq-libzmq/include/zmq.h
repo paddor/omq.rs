@@ -537,6 +537,10 @@ ZMQ_EXPORT void *omq_ctx_from_share_key (uint64_t key_hi_, uint64_t key_lo_);
 /*  OMQ async extension API ------------------------------------------------- */
 typedef struct omq_async_task omq_async_task_t;
 typedef void (*omq_async_callback_fn) (void *userdata_, int status_);
+/*  A non-NULL task runs the callback exactly once: 0, ECANCELED, or ETERM.
+    It may run on an IO thread, during context shutdown, or before
+    omq_socket_send_async returns. Keep userdata valid until it runs, and do
+    not make blocking calls into the same context from the callback.  */
 ZMQ_EXPORT omq_async_task_t *omq_socket_send_async (
     void *socket_, const uint8_t *encoded_, size_t encoded_size_,
     omq_async_callback_fn callback_, void *userdata_);

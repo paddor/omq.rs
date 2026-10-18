@@ -857,19 +857,7 @@ impl Options {
                 "max_pending_handshakes must be greater than zero".into(),
             ));
         }
-        let zero_reconnect = match self.reconnect {
-            ReconnectPolicy::Disabled => false,
-            ReconnectPolicy::Fixed(interval) => interval.is_zero(),
-            ReconnectPolicy::Exponential { min, max } => min.is_zero() || max.is_zero(),
-        };
-        if zero_reconnect {
-            // A zero delay redials in a tight loop against a refusing peer.
-            return Err(crate::error::Error::Config(
-                "reconnect intervals must be greater than zero; use ReconnectPolicy::Disabled \
-                 to stop reconnecting"
-                    .into(),
-            ));
-        }
+        self.validate_reconnect()?;
         self.validate_peer_limits()?;
         #[cfg(feature = "quic")]
         self.quic.validate()?;
@@ -936,6 +924,23 @@ impl Options {
         {
             return Err(crate::error::Error::Config(
                 "CURVE cookie lifetime must be greater than zero".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_reconnect(&self) -> crate::error::Result<()> {
+        let zero_reconnect = match self.reconnect {
+            ReconnectPolicy::Disabled => false,
+            ReconnectPolicy::Fixed(interval) => interval.is_zero(),
+            ReconnectPolicy::Exponential { min, max } => min.is_zero() || max.is_zero(),
+        };
+        if zero_reconnect {
+            // A zero delay redials in a tight loop against a refusing peer.
+            return Err(crate::error::Error::Config(
+                "reconnect intervals must be greater than zero; use ReconnectPolicy::Disabled \
+                 to stop reconnecting"
+                    .into(),
             ));
         }
         Ok(())

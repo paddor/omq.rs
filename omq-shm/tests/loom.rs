@@ -574,6 +574,95 @@ fn simultaneous_publication_borrow_and_close_never_pin_unread_storage() {
     });
 }
 
+/// One recipient lease of a shared record.
+struct Tracked {
+    leases: Arc<[Lease; 2]>,
+    index: usize,
+}
+
+impl coordination::Recipient for Tracked {
+    fn finished(&self) -> bool {
+        self.leases[self.index].cell().completed(GENERATION_STEP)
+    }
+}
+
+fn borrowed_leases() -> Arc<[Lease; 2]> {
+    let leases = Arc::new([Lease::new(), Lease::new()]);
+    for lease in leases.iter() {
+        lease.publish(GENERATION_STEP, [1; COORDINATES]);
+        assert!(lease.cell().borrow(GENERATION_STEP));
+    }
+    leases
+}
+
+#[test]
+fn shared_record_storage_waits_for_the_seal_and_every_recipient() {
+    model(|| {
+        let leases = borrowed_leases();
+        let group = Arc::new(coordination::LeaseGroup::default());
+        group.track(Tracked {
+            leases: leases.clone(),
+            index: 0,
+        });
+        let data = Arc::new(loom::cell::UnsafeCell::new(7));
+        let readers: Vec<_> = (0..2)
+            .map(|index| {
+                let leases = leases.clone();
+                let data = data.clone();
+                thread::spawn(move || {
+                    // SAFETY: each reader owns its own outstanding recipient lease.
+                    data.with(|ptr| assert_eq!(unsafe { *ptr }, 7));
+                    leases[index].cell().complete(GENERATION_STEP, BORROWED);
+                })
+            })
+            .collect();
+        // The local owner tracks a late recipient, then drops on another thread.
+        let owner = {
+            let group = group.clone();
+            let leases = leases.clone();
+            thread::spawn(move || {
+                group.track(Tracked { leases, index: 1 });
+                group.seal();
+            })
+        };
+        if group.completed() {
+            // SAFETY: the seal and every tracked completion were acquired.
+            data.with_mut(|ptr| unsafe { *ptr = 9 });
+        }
+        owner.join().unwrap();
+        for reader in readers {
+            reader.join().unwrap();
+        }
+        assert!(group.completed());
+    });
+}
+
+#[test]
+fn unsealed_groups_stay_pinned_after_tracked_recipients_finish() {
+    model(|| {
+        let leases = borrowed_leases();
+        let group = coordination::LeaseGroup::default();
+        for index in 0..2 {
+            group.track(Tracked {
+                leases: leases.clone(),
+                index,
+            });
+        }
+        let reader = {
+            let leases = leases.clone();
+            thread::spawn(move || {
+                for lease in leases.iter() {
+                    lease.cell().complete(GENERATION_STEP, BORROWED);
+                }
+            })
+        };
+        reader.join().unwrap();
+        assert!(!group.completed(), "a live local owner can add recipients");
+        group.seal();
+        assert!(group.completed());
+    });
+}
+
 #[test]
 fn receive_credit_reservations_cannot_exceed_logical_hwm() {
     model(|| {

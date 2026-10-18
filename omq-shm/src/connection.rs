@@ -408,7 +408,9 @@ impl Connection {
                             && let Ok(references) = batch::references(mapping.bytes(offset, length))
                         {
                             regions.extend(
-                                references.map(|reference| (reference.id, reference.token)),
+                                references
+                                    .into_iter()
+                                    .map(|reference| (reference.id, reference.token)),
                             );
                         }
                     }

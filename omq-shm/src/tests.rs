@@ -738,6 +738,37 @@ fn small_body_batches_preserve_order_and_charge_each_message_against_hwm() {
 }
 
 #[test]
+fn received_batches_ignore_size_table_changes_after_validation() {
+    let (mut sender, mut receiver) = pair(4);
+    let pool = payload_pool([(BATCH_MAX_BYTES.next_power_of_two(), 1)]).unwrap();
+    let messages: Vec<_> = (0..3_u8)
+        .map(|index| Message::from(vec![index; 1024]))
+        .collect();
+    let references: Vec<_> = messages.iter().collect();
+    let batch = prepare_batch(&pool, &references).unwrap().unwrap();
+    let wire = sender
+        .encode_record(&batch, messages.len(), crate::wire::COPIED_BATCH)
+        .unwrap()
+        .unwrap();
+    transfer(&mut sender, &mut receiver);
+    let Received::Batch(mut batch_view) = receiver.decode_delivery(wire).unwrap() else {
+        panic!("expected a batch");
+    };
+    // The sender can still write its table after the receiver validated it.
+    let table = batch.part_slice(0).unwrap();
+    let slot = find_slot(table).unwrap();
+    let offset = table.as_ptr() as usize - slot.mapping.address();
+    slot.mapping
+        .atomic64(offset + 8)
+        .store(u64::MAX, std::sync::atomic::Ordering::Relaxed);
+    let mut decoded = Vec::new();
+    while let Some(message) = batch_view.pop_front() {
+        decoded.push(message);
+    }
+    assert_eq!(decoded, messages);
+}
+
+#[test]
 fn copied_batches_share_storage_and_keep_every_recipient_view_alive() {
     let pool = payload_pool([(BATCH_MAX_BYTES, 1)]).unwrap();
     let messages: Vec<_> = [16, 128, 1024, 4096, COPIED_BATCH_MAX_BODY]
@@ -987,10 +1018,7 @@ fn reference_batches_keep_source_slots_until_the_final_recipient_view() {
             );
             assert_eq!(message.part_slice(1).unwrap(), vec![index as u8; size]);
             assert_eq!(message.part_slice(0), Some(b"group".as_slice()));
-            let reference = batch::references(batch.part_slice(1).unwrap())
-                .unwrap()
-                .nth(index)
-                .unwrap();
+            let reference = batch::references(batch.part_slice(1).unwrap()).unwrap()[index];
             let mapping = receiver1
                 .find_region(reference.id, reference.token)
                 .unwrap();
@@ -1295,7 +1323,7 @@ fn batch_size_tables_use_u64_and_reject_truncated_or_overflowing_lengths() {
         let length = u64::from(u32::MAX) + 1;
         let mut forged = bytes.to_vec();
         forged[2..10].copy_from_slice(&length.to_le_bytes());
-        assert_eq!(batch::references(&forged).unwrap().count(), 2);
+        assert_eq!(batch::references(&forged).unwrap().len(), 2);
         let slot = find_slot(large[0].part_slice(1).unwrap()).unwrap();
         let mut decoded = std::collections::VecDeque::new();
         assert!(

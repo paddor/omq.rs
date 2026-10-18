@@ -1255,3 +1255,37 @@ async fn dish_filters_groups_across_separate_datagrams() {
     );
     dish.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn unconfirmed_hellos_get_one_welcome_each_and_never_take_ready_slots() {
+    let gather = Socket::new(
+        SocketType::Gather,
+        Options {
+            dart: DartOptions {
+                max_ready_peers: 1,
+                ..DartOptions::default()
+            },
+            ..Options::default()
+        },
+    );
+    let target = address(&gather.bind(endpoint(0)).await.unwrap());
+    // A source that never confirms gets one WELCOME per HELLO, not a stream
+    // of retransmissions toward a possibly spoofed address.
+    let silent = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    send_ready(&silent, target, SocketType::Scatter, None, true).await;
+    let mut bytes = [0; dart::MAX_DATAGRAM];
+    let mut welcomes = 0;
+    while tokio::time::timeout(Duration::from_millis(400), silent.recv_from(&mut bytes))
+        .await
+        .is_ok()
+    {
+        welcomes += 1;
+    }
+    assert_eq!(welcomes, 1);
+    // Its pending handshake does not hold the only ready slot.
+    let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    send_ready(&peer, target, SocketType::Scatter, None, true).await;
+    response(&peer).await;
+    ready(&gather, 1).await;
+    gather.close().await.unwrap();
+}

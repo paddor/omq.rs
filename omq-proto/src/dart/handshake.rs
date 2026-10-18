@@ -42,6 +42,11 @@ impl Handshake {
         }
     }
 
+    /// Whether this side started the handshake with HELLO.
+    pub const fn is_connector(&self) -> bool {
+        self.connector
+    }
+
     /// Return the local receiver session ID.
     pub const fn local(&self) -> u64 {
         self.local

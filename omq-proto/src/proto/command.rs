@@ -287,9 +287,22 @@ fn write_property(out: &mut BytesMut, name: &[u8], value: &[u8]) {
     out.put_slice(value);
 }
 
+/// Most READY properties one peer may declare. Legitimate peers send a few;
+/// each retained property costs an allocation for the connection's lifetime.
+const MAX_READY_PROPERTIES: usize = 256;
+
+/// Names only the local side may set. A peer's claim to them is dropped here,
+/// for every mechanism, so no lookup can see it.
+const LOCAL_ONLY_PROPERTIES: [&str; 2] = ["User-Id", "Peer-Address"];
+
 pub(crate) fn decode_properties_inner(mut body: Bytes) -> Result<PeerProperties> {
     let mut props = PeerProperties::default();
+    let mut count = 0;
     while !body.is_empty() {
+        count += 1;
+        if count > MAX_READY_PROPERTIES {
+            return Err(Error::Protocol("too many READY properties".into()));
+        }
         let name_len = body[0] as usize;
         if name_len == 0 {
             return Err(Error::Protocol("READY property name is empty".into()));
@@ -337,13 +350,16 @@ pub(crate) fn decode_properties_inner(mut body: Bytes) -> Result<PeerProperties>
             if props.identity.is_some() {
                 return Err(Error::Protocol("duplicate Identity property".into()));
             }
-            if value.len() > 255 || value.first() == Some(&0) {
+            if !crate::message::is_valid_peer_identity(&value) {
                 return Err(Error::Protocol("invalid peer identity".into()));
             }
             if !value.is_empty() {
                 props.identity = Some(value);
             }
-        } else {
+        } else if !LOCAL_ONLY_PROPERTIES
+            .iter()
+            .any(|reserved| name_str.eq_ignore_ascii_case(reserved))
+        {
             props.other.push((name_str.to_string(), value));
         }
     }
@@ -644,5 +660,28 @@ mod tests {
             .kind(),
             CommandKind::Error
         );
+    }
+    #[test]
+    fn ready_drops_local_only_claims_and_bounds_property_count() {
+        use bytes::{BufMut, BytesMut};
+        fn property(out: &mut BytesMut, name: &[u8], value: &[u8]) {
+            out.put_u8(u8::try_from(name.len()).unwrap());
+            out.put_slice(name);
+            out.put_u32(u32::try_from(value.len()).unwrap());
+            out.put_slice(value);
+        }
+        let mut body = BytesMut::new();
+        for name in [&b"User-Id"[..], b"user-id", b"Peer-Address", b"X-Role"] {
+            property(&mut body, name, b"admin");
+        }
+        let props = super::decode_properties_inner(body.freeze()).unwrap();
+        assert_eq!(props.other.len(), 1);
+        assert_eq!(props.other[0].0, "X-Role");
+
+        let mut crowded = BytesMut::new();
+        for index in 0..=super::MAX_READY_PROPERTIES {
+            property(&mut crowded, format!("X-{index}").as_bytes(), b"");
+        }
+        assert!(super::decode_properties_inner(crowded.freeze()).is_err());
     }
 }

@@ -403,3 +403,9 @@ pub fn generated_identity(id: u64) -> Bytes {
     buf[1..].copy_from_slice(&id.to_be_bytes());
     Bytes::copy_from_slice(&buf)
 }
+
+/// Whether a peer may declare `identity` as its routing identity: at most
+/// 255 bytes, and not starting with 0x00, which generated identities use.
+pub(crate) fn is_valid_peer_identity(identity: &[u8]) -> bool {
+    identity.len() <= 255 && identity.first() != Some(&0)
+}

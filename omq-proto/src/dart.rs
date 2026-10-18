@@ -563,6 +563,9 @@ fn property(bytes: &[u8]) -> Option<(&[u8], &[u8], &[u8])> {
     Some((name, value, rest))
 }
 
+/// Most properties one READY datagram may carry.
+const MAX_READY_PROPERTIES: usize = 16;
+
 /// Validate required metadata and all duplicate properties, without allocation.
 pub fn decode_ready(bytes: &[u8]) -> Option<Ready<'_>> {
     let Datagram::Command {
@@ -580,7 +583,13 @@ pub fn decode_ready(bytes: &[u8]) -> Option<Ready<'_>> {
     let mut session = None;
     let mut echo = None;
     let mut phase = None;
+    let mut count = 0;
     while !rest.is_empty() {
+        // A READY needs seven properties. Bound the duplicate scan below.
+        count += 1;
+        if count > MAX_READY_PROPERTIES {
+            return None;
+        }
         let current = rest;
         let (name, value, remaining) = property(rest)?;
         // At most 1200 bytes of control input. Compare earlier names directly
@@ -596,7 +605,7 @@ pub fn decode_ready(bytes: &[u8]) -> Option<Ready<'_>> {
         match name {
             b"Socket-Type" => socket_type = SocketType::from_wire(value),
             b"Identity" => {
-                if value.is_empty() || value.len() > 255 {
+                if value.is_empty() || !crate::message::is_valid_peer_identity(value) {
                     return None;
                 }
                 identity = Some(value);
@@ -762,6 +771,22 @@ mod tests {
         assert_eq!(decode_ready(&extra), Some(ready));
         append_property(&mut extra, b"Extension", b"again");
         assert_eq!(decode_ready(&extra), None);
+        // Unknown properties are bounded, so the duplicate scan stays small.
+        let mut crowded = output[..n].to_vec();
+        for index in 0..16_u8 {
+            append_property(&mut crowded, &[b'X', index + b'a'], b"");
+        }
+        assert_eq!(decode_ready(&crowded), None);
+        // Identities starting with 0x00 belong to generated identities.
+        let reserved = encode_ready(
+            Ready {
+                identity: Some(b"\0peer"),
+                ..ready
+            },
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(decode_ready(&output[..reserved]), None);
         assert_eq!(decode_ready(b"\xc0\x05READY"), None);
         for (name, value) in [
             (b"DART-Version".as_slice(), b"\x00".as_slice()),

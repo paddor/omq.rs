@@ -374,7 +374,18 @@ pub(crate) struct DataSignal {
     endpoint: std::sync::OnceLock<Arc<DataSignal>>,
     close_progress: std::sync::OnceLock<Arc<StateSignal>>,
     state: AtomicU8,
+    /// Async consumers parked in [`Self::ready`].
+    waiters: AtomicUsize,
     notify: Notify,
+}
+
+/// Counts one parked [`DataSignal::ready`] caller until it wakes or drops.
+struct ParkedWaiter<'a>(&'a AtomicUsize);
+
+impl Drop for ParkedWaiter<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl DataSignal {
@@ -395,6 +406,7 @@ impl DataSignal {
             endpoint: std::sync::OnceLock::new(),
             close_progress: std::sync::OnceLock::new(),
             state: AtomicU8::new(IDLE),
+            waiters: AtomicUsize::new(0),
             notify: new_notify(),
         }
     }
@@ -559,7 +571,27 @@ impl DataSignal {
         if !self.is_idle() {
             return;
         }
+        // Count this waiter before the final check. A consumer that later
+        // sees pending data in `hand_off` then also sees this waiter.
+        self.waiters.fetch_add(1, Ordering::SeqCst);
+        let _parked = ParkedWaiter(&self.waiters);
+        if self.state.load(Ordering::SeqCst) != IDLE {
+            return;
+        }
         notified.await;
+    }
+
+    /// Consumer: call after a wake from [`Self::ready`] led to taking data.
+    ///
+    /// One mark wakes one waiter, and a signal left pending coalesces later
+    /// marks. With concurrent async consumers, the woken one must pass the
+    /// wake on while data may remain, or the others stay parked behind it.
+    #[inline]
+    pub(crate) fn hand_off(&self) {
+        fence(Ordering::SeqCst);
+        if self.waiters.load(Ordering::SeqCst) != 0 && !self.is_idle() {
+            self.notify.notify_one();
+        }
     }
 
     #[inline]

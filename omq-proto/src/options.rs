@@ -857,6 +857,19 @@ impl Options {
                 "max_pending_handshakes must be greater than zero".into(),
             ));
         }
+        let zero_reconnect = match self.reconnect {
+            ReconnectPolicy::Disabled => false,
+            ReconnectPolicy::Fixed(interval) => interval.is_zero(),
+            ReconnectPolicy::Exponential { min, max } => min.is_zero() || max.is_zero(),
+        };
+        if zero_reconnect {
+            // A zero delay redials in a tight loop against a refusing peer.
+            return Err(crate::error::Error::Config(
+                "reconnect intervals must be greater than zero; use ReconnectPolicy::Disabled \
+                 to stop reconnecting"
+                    .into(),
+            ));
+        }
         self.validate_peer_limits()?;
         #[cfg(feature = "quic")]
         self.quic.validate()?;
@@ -1836,6 +1849,37 @@ mod tests {
         assert!(Options::new().recv_rate_limit(1, 0).validate().is_err());
         assert!(Options::new().recv_ip_rate_limit(0, 1).validate().is_err());
         assert!(Options::new().recv_ip_rate_limit(1, 0).validate().is_err());
+    }
+
+    #[test]
+    fn rejects_zero_reconnect_intervals() {
+        let ms = Duration::from_millis;
+        for policy in [
+            ReconnectPolicy::Fixed(Duration::ZERO),
+            ReconnectPolicy::Exponential {
+                min: Duration::ZERO,
+                max: ms(100),
+            },
+            ReconnectPolicy::Exponential {
+                min: ms(100),
+                max: Duration::ZERO,
+            },
+        ] {
+            assert!(
+                Options::new().reconnect(policy).validate().is_err(),
+                "{policy:?}"
+            );
+        }
+        for policy in [
+            ReconnectPolicy::Disabled,
+            ReconnectPolicy::Fixed(ms(1)),
+            ReconnectPolicy::Exponential {
+                min: ms(10),
+                max: ms(1_000),
+            },
+        ] {
+            assert!(Options::new().reconnect(policy).validate().is_ok());
+        }
     }
 
     #[test]

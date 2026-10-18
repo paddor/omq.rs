@@ -203,6 +203,18 @@ def test_reconnect_ivl_round_trip():
         ctx.term()
 
 
+def test_zero_reconnect_ivl_max_turns_backoff_off():
+    # libzmq treats a zero maximum as fixed-interval reconnects.
+    ctx, s = _push()
+    try:
+        s.setsockopt(zmq.RECONNECT_IVL, 100)
+        s.setsockopt(zmq.RECONNECT_IVL_MAX, 0)
+        s.connect("tcp://127.0.0.1:1")
+    finally:
+        s.close(linger=0)
+        ctx.term()
+
+
 def test_heartbeat_round_trip():
     ctx, s = _push()
     try:

@@ -86,7 +86,12 @@ pub(crate) fn spawn_dish_listener(
         let Ok(sock) = sock.into_std().and_then(UdpSocket::from_std) else { return; };
         let mut ingress = network.ingress();
         let mut buf = vec![0u8; udp::MAX_DATAGRAM_SIZE];
+        let mut budget = omq_proto::flow::DrainBudget::new(64, 1024 * 1024);
         loop {
+            if budget.exhausted() {
+                budget.reset();
+                tokio::task::yield_now().await;
+            }
             tokio::select! {
                 () = cancel.cancelled() => break,
                 res = async {
@@ -116,20 +121,20 @@ pub(crate) fn spawn_dish_listener(
                 } => match res {
                     Ok((n, _from)) => {
                         if let Some(gate) = &mut ingress { gate.cancel_wait(); }
-                        let Some((group, body)) = udp::decode_datagram(&buf[..n]) else {
+                        let _ = budget.account(n);
+                        let Some((group, body)) = udp::split_datagram(&buf[..n]) else {
                             continue;
                         };
-                        let joined_now = joined.load().contains(&group);
-                        if !joined_now {
+                        if !joined.load().contains(group) {
                             continue;
                         }
                         let msg = if let Some(pool) = &pool {
-                            let group = pool.payload(group.len(), |bytes| bytes.copy_from_slice(&group));
-                            let body = pool.payload(body.len(), |bytes| bytes.copy_from_slice(&body));
+                            let group = pool.payload(group.len(), |bytes| bytes.copy_from_slice(group));
+                            let body = pool.payload(body.len(), |bytes| bytes.copy_from_slice(body));
                             let (Ok(group), Ok(body)) = (group, body) else { continue; };
                             Message::multipart_payloads([group, body])
                         } else {
-                            Message::multipart([group, body])
+                            Message::multipart([Bytes::copy_from_slice(group), Bytes::copy_from_slice(body)])
                         };
                         if recv_tx.send(msg).await.is_err() {
                             break;

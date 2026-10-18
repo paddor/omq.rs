@@ -7,6 +7,8 @@ use std::sync::{Arc, LazyLock, Mutex, OnceLock, Weak, mpsc};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use rustc_hash::FxHashMap;
 use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
@@ -113,19 +115,19 @@ impl IoThreadPool {
                         let rt = build_current_thread_runtime();
                         let _ = handle_tx.send(rt.handle().clone());
                         rt.block_on(async move {
+                            // Jobs from different callers run concurrently, so
+                            // one long wait cannot delay another caller's bind.
+                            // Cancellation drops every unfinished job.
+                            let mut jobs = FuturesUnordered::new();
                             loop {
-                                let mut fut = tokio::select! {
-                                    biased;
-                                    () = cancel_i.cancelled() => break,
-                                    job = job_rx.recv() => match job {
-                                        Some(fut) => fut,
-                                        None => break,
-                                    },
-                                };
                                 tokio::select! {
                                     biased;
                                     () = cancel_i.cancelled() => break,
-                                    () = fut.as_mut() => {}
+                                    job = job_rx.recv() => match job {
+                                        Some(fut) => jobs.push(fut),
+                                        None => break,
+                                    },
+                                    Some(()) = jobs.next(), if !jobs.is_empty() => {}
                                 }
                             }
                         });
@@ -872,8 +874,8 @@ impl Context {
     }
 
     /// Run a future on this context's runtime, blocking the calling
-    /// thread until it completes. The future runs inline on the
-    /// primary IO thread with the same priority as spawned driver tasks.
+    /// thread until it completes. The future runs inline on the primary IO
+    /// thread, concurrently with other callers' futures.
     /// If the caller already has an async runtime, await socket futures
     /// directly instead.
     ///

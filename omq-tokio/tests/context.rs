@@ -1268,3 +1268,23 @@ fn blocking_socket_multi_io_threads() {
         assert_eq!(m, Message::single(format!("mt-bl-{i}")));
     }
 }
+
+#[test]
+fn block_on_callers_do_not_wait_for_each_other() {
+    let ctx = Context::new();
+    let long = {
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            ctx.block_on(async { tokio::time::sleep(Duration::from_secs(3)).await });
+        })
+    };
+    std::thread::sleep(Duration::from_millis(50));
+    let started = std::time::Instant::now();
+    assert_eq!(ctx.block_on(async { 7 }), 7);
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "short call waited {:?} behind a long one",
+        started.elapsed()
+    );
+    long.join().unwrap();
+}

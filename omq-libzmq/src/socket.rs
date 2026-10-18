@@ -170,29 +170,20 @@ fn map_socket_type(t: c_int) -> Option<SocketType> {
     }
 }
 
-/// Run an async op against the socket's inner Arc and return the result.
-/// Spawns the future on the context's tokio runtime and blocks the
-/// calling thread until completion.
+/// Run an async op against the socket's inner Arc on the context runtime and
+/// block the calling thread until completion. Fails with `ETERM` when the
+/// context shuts down first and `EDEADLK` on an OMQ IO thread.
 pub(crate) fn with_socket<F, Fut, T>(
     ctx: &Arc<OmqContext>,
     inner: &Arc<omq_tokio::Socket>,
     op: F,
-) -> Result<T, ()>
+) -> Result<T, c_int>
 where
     F: FnOnce(Arc<omq_tokio::Socket>) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = T> + Send + 'static,
     T: Send + 'static,
 {
-    let (otx, orx) = flume::bounded::<T>(1);
-    let s = inner.clone();
-    let Some(handle) = ctx.handle() else {
-        return Err(());
-    };
-    handle.spawn(async move {
-        let out = op(s).await;
-        let _ = otx.send(out);
-    });
-    orx.recv().map_err(|_| ())
+    crate::blocking::run(ctx, op(inner.clone()))
 }
 
 /// Create a socket handle of the requested type in a context; return null with errno on
@@ -605,13 +596,13 @@ unsafe fn parse_group_args<'a>(
     Ok((sock, Bytes::copy_from_slice(g.as_bytes())))
 }
 
-/// Map the two-level `Result<Result<T, omq Error>, ()>` returned by
+/// Map the two-level `Result<Result<T, omq Error>, errno>` returned by
 /// `with_socket` to a C return code (0 on success).
-fn result_to_rc<T>(result: &Result<Result<T, omq_tokio::error::Error>, ()>) -> c_int {
+fn result_to_rc<T>(result: &Result<Result<T, omq_tokio::error::Error>, c_int>) -> c_int {
     match result {
         Ok(Ok(_)) => 0,
         Ok(Err(e)) => fail(map_omq_err(e)),
-        Err(()) => fail(ETERM),
+        Err(errno) => fail(*errno),
     }
 }
 
@@ -695,7 +686,7 @@ pub extern "C" fn zmq_bind(sock_ptr: *mut c_void, addr: *const libc::c_char) -> 
             0
         }
         Ok(Err(ref e)) => fail(map_omq_err(e)),
-        Err(()) => fail(ETERM),
+        Err(errno) => fail(errno),
     }
 }
 
@@ -750,7 +741,7 @@ pub extern "C" fn zmq_connect(sock_ptr: *mut c_void, addr: *const libc::c_char) 
             0
         }
         Ok(Err(ref e)) => fail(map_omq_err(e)),
-        Err(()) => fail(ETERM),
+        Err(errno) => fail(errno),
     }
 }
 
@@ -810,7 +801,7 @@ pub extern "C" fn zmq_disconnect(sock_ptr: *mut c_void, addr: *const libc::c_cha
             0
         }
         Ok(Err(ref e)) => fail(map_omq_err(e)),
-        Err(()) => fail(ETERM),
+        Err(errno) => fail(errno),
     }
 }
 
@@ -939,7 +930,7 @@ pub extern "C" fn zmq_socket_monitor(
     match result {
         Ok(Ok(())) => 0,
         Ok(Err(ref e)) => fail(map_omq_err(e)),
-        Err(()) => fail(ETERM),
+        Err(errno) => fail(errno),
     }
 }
 

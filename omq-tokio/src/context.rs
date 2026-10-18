@@ -22,6 +22,10 @@ type BoxFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 static NEXT_CONTEXT_THREAD_ID: AtomicUsize = AtomicUsize::new(0);
 
+thread_local! {
+    static OWNED_IO_THREAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Configuration for a [`Context`] that owns its own tokio runtime.
 ///
 /// ```
@@ -112,6 +116,7 @@ impl IoThreadPool {
                 thread::Builder::new()
                     .name(thread_name)
                     .spawn(move || {
+                        OWNED_IO_THREAD.set(true);
                         let rt = build_current_thread_runtime();
                         let _ = handle_tx.send(rt.handle().clone());
                         rt.block_on(async move {
@@ -137,6 +142,7 @@ impl IoThreadPool {
                 thread::Builder::new()
                     .name(thread_name)
                     .spawn(move || {
+                        OWNED_IO_THREAD.set(true);
                         let rt = build_current_thread_runtime();
                         let _ = handle_tx.send(rt.handle().clone());
                         rt.block_on(cancel_i.cancelled());
@@ -921,6 +927,12 @@ impl Context {
     /// Return the tokio runtime handle for the primary IO thread.
     pub fn handle(&self) -> &Handle {
         self.inner.primary_handle()
+    }
+
+    /// Whether the calling thread runs an owned context's IO runtime.
+    /// A blocking wait there can need work that only this thread runs.
+    pub fn on_io_thread() -> bool {
+        OWNED_IO_THREAD.get()
     }
 
     /// Number of IO threads. Returns 0 for a borrowed context

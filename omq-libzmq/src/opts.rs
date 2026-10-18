@@ -1287,7 +1287,7 @@ fn do_subscribe(
     match result {
         Ok(Ok(())) => 0,
         Ok(Err(ref e)) => crate::error::fail(crate::error::map_omq_err(e)),
-        Err(()) => crate::error::fail(crate::error::ETERM),
+        Err(errno) => crate::error::fail(errno),
     }
 }
 
@@ -1349,7 +1349,7 @@ pub extern "C" fn zmq_getsockopt(
                     Ok(Ok(Some(identity))) => return write_bytes(optval, optvallen, &identity),
                     Ok(Ok(None)) => {}
                     Ok(Err(error)) => return fail(crate::error::map_omq_err(&error)),
-                    Err(()) => return fail(crate::error::ETERM),
+                    Err(errno) => return fail(errno),
                 }
             }
             let ov = lock_overlay!(sock_arc);

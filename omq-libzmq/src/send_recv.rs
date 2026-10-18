@@ -283,7 +283,7 @@ fn wait_for_ready_peer(sock: &OmqSocket, sndtimeo: i64) -> Result<(), c_int> {
         Ok(Ok(())) => Ok(()),
         Ok(Err(omq_tokio::Error::Timeout)) => Err(libc::EAGAIN),
         Ok(Err(ref e)) => Err(map_omq_err(e)),
-        Err(()) => Err(ETERM),
+        Err(errno) => Err(errno),
     }
 }
 
@@ -412,7 +412,7 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
         return match result {
             Ok(Ok(())) => ret_len,
             Ok(Err(ref e)) => fail(crate::error::map_omq_err(e)),
-            Err(()) => fail(ETERM),
+            Err(errno) => fail(errno),
         };
     }
 
@@ -488,9 +488,7 @@ fn prepare_stream_route(
             ready.await
         }
     });
-    result
-        .map_err(|()| ETERM)?
-        .map_err(|error| map_omq_err(&error))
+    result?.map_err(|error| map_omq_err(&error))
 }
 
 pub(crate) fn send_message(
@@ -570,31 +568,22 @@ fn submit_message(
                     Err(omq_tokio::TrySendError::Full(returned)) => msg = returned,
                 }
             }
-            let Some(handle) = sock.ctx.handle() else {
-                return fail(ETERM);
-            };
             let s = inner.clone();
-            if sndtimeo > 0 {
-                let timeout = Duration::from_millis(sndtimeo as u64);
-                if Instant::now().checked_add(timeout).is_some() {
-                    match handle
-                        .block_on(async { tokio::time::timeout(timeout, s.send(msg)).await })
-                    {
-                        Ok(Ok(())) => ret_len,
-                        Ok(Err(_)) => fail(ETERM),
-                        Err(_elapsed) => fail(libc::EAGAIN),
-                    }
-                } else {
-                    match handle.block_on(s.send(msg)) {
-                        Ok(()) => ret_len,
-                        Err(_) => fail(ETERM),
-                    }
+            let timeout = (sndtimeo > 0)
+                .then(|| Duration::from_millis(sndtimeo as u64))
+                .filter(|timeout| Instant::now().checked_add(*timeout).is_some());
+            // Context shutdown ends the wait with ETERM.
+            let sent = crate::blocking::block_on(&sock.ctx, async move {
+                match timeout {
+                    Some(timeout) => tokio::time::timeout(timeout, s.send(msg)).await.ok(),
+                    None => Some(s.send(msg).await),
                 }
-            } else {
-                match handle.block_on(s.send(msg)) {
-                    Ok(()) => ret_len,
-                    Err(_) => fail(ETERM),
-                }
+            });
+            match sent {
+                Ok(Some(Ok(()))) => ret_len,
+                Ok(Some(Err(_))) => fail(ETERM),
+                Ok(None) => fail(libc::EAGAIN),
+                Err(errno) => fail(errno),
             }
         }
     }

@@ -380,10 +380,12 @@ where
     Ok(n)
 }
 
-/// Abort/error cleanup must retire a direct route even when `run()` is dropped.
-pub(super) struct DirectWriteLifetime(pub(super) Option<Arc<PeerTransmitSlot>>);
+/// Every driver exit retires its transmit slot, including errors, timeouts,
+/// and a dropped `run()`. A live-looking slot of a dead peer would keep
+/// fan-out and nodrop senders waiting for space that never frees.
+pub(super) struct TransmitSlotLifetime(pub(super) Option<Arc<PeerTransmitSlot>>);
 
-impl Drop for DirectWriteLifetime {
+impl Drop for TransmitSlotLifetime {
     fn drop(&mut self) {
         if let Some(slot) = &self.0 {
             slot.mark_dead();

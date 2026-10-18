@@ -808,3 +808,46 @@ async fn send_pipe_to_yring_large_payload_harness<S, C>(
     client_result.expect("client driver failed");
     server_result.expect("server driver failed");
 }
+
+#[tokio::test]
+async fn protocol_failure_retires_a_queued_transmit_slot() {
+    use crate::engine::transmit_slot::{PeerTransmitSlot, TryFrameResult};
+    use tokio::io::AsyncWriteExt;
+
+    let (stream, mut peer) = tokio::io::duplex(64 * 1024);
+    let slot = PeerTransmitSlot::new(
+        1,
+        false,
+        None,
+        None,
+        omq_proto::frame_buffer::ARENA_THRESHOLD,
+        omq_proto::frame_buffer::ARENA_INITIAL_CAP,
+        crate::engine::transmit_slot::TRANSMIT_SLOT_CAP_DEFAULT,
+        crate::engine::transmit_slot::TRANSMIT_SLOT_MSG_CAP_DEFAULT,
+        crate::engine::framing::WireFraming::Zmtp,
+    );
+    let (_inbox_tx, inbox_rx) = mpsc::channel(16);
+    let (events_tx, _events_rx) = mpsc::channel(16);
+    let driver = ConnectionDriver::new(
+        stream,
+        Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pull)),
+        inbox_rx,
+        events_tx,
+        0,
+        CancellationToken::new(),
+    )
+    .with_transmit_slot(slot.clone());
+    // Not a ZMTP greeting: the driver exits with a protocol error.
+    peer.write_all(&[0xff; 64]).await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), driver.run())
+            .await
+            .unwrap()
+            .is_err()
+    );
+    assert_eq!(
+        slot.try_push_encoded(&[Bytes::from_static(&[0, 1, b'x'])]),
+        TryFrameResult::Dead,
+        "a dead peer's slot must stop admitting fan-out frames"
+    );
+}

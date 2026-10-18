@@ -12,7 +12,7 @@ use super::{
     },
     shm,
     write::{
-        DirectWriteLifetime, claim_direct_writer, enable_transmit_slot_after_handshake,
+        TransmitSlotLifetime, claim_direct_writer, enable_transmit_slot_after_handshake,
         mark_peer_dead, write_driver_progress,
     },
 };
@@ -133,12 +133,7 @@ where
             writer.chunk_writer().is_some(),
         );
         let mut drain_buf: Vec<Bytes> = Vec::new();
-        let _write_lifetime = DirectWriteLifetime(
-            transmit_slot
-                .as_ref()
-                .filter(|slot| slot.direct_writer().is_some())
-                .cloned(),
-        );
+        let _slot_lifetime = TransmitSlotLifetime(transmit_slot.clone());
         let mut heartbeat = Heartbeat::new(&config);
         let mut handshake_deadline: Option<Instant> = setup_deadline.or_else(|| {
             config

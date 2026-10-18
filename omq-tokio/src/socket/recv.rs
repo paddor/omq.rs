@@ -54,6 +54,15 @@ pub(crate) struct TcpYringConsumer {
     pub peer_id: u64,
 }
 
+impl Drop for TcpYringConsumer {
+    fn drop(&mut self) {
+        // Disconnect the ring first, then wake a driver waiting for space so
+        // its recheck observes the dropped consumer.
+        drop(self.consumer.take());
+        self.space.notify_changed();
+    }
+}
+
 impl std::fmt::Debug for TcpYringConsumer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TcpYringConsumer")
@@ -2564,5 +2573,17 @@ mod tests {
             );
             assert_eq!(held.part_bytes(0).unwrap().as_ref(), first.as_slice());
         }
+    }
+    #[test]
+    fn dropping_a_ring_consumer_wakes_a_producer_waiting_for_space() {
+        let (mut producer, consumer) = tcp_consumer(7);
+        while producer.push(Message::single("x")).is_ok() {}
+        producer.flush();
+        let space = consumer.space.clone();
+        let seen = space.generation();
+        drop(consumer);
+        // The wake follows the disconnect, so the producer's recheck sees it.
+        assert_ne!(space.generation(), seen);
+        assert!(producer.is_consumer_dropped());
     }
 }

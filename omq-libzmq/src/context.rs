@@ -278,8 +278,10 @@ pub extern "C" fn zmq_ctx_term(ctx_ptr: *mut libc::c_void) -> c_int {
     if ctx_ptr.is_null() {
         return crate::error::fail(libc::EFAULT);
     }
-    // SAFETY: ctx_ptr came from Box::into_raw in zmq_ctx_new; reclaiming ownership.
-    let arc = unsafe { *Box::from_raw(ctx_ptr.cast::<Arc<OmqContext>>()) };
+    // SAFETY: ctx_ptr came from Box::into_raw in zmq_ctx_new and stays valid
+    // until this call frees it below. Other threads may still pass it to
+    // zmq_socket or zmq_ctx_get while term waits; they must see ETERM.
+    let arc = unsafe { &*ctx_ptr.cast::<Arc<OmqContext>>() }.clone();
 
     // Signal termination to all io threads and wake blocking socket calls.
     arc.shutdown();
@@ -307,6 +309,9 @@ pub extern "C" fn zmq_ctx_term(ctx_ptr: *mut libc::c_void) -> c_int {
         ctx.term();
     }
     drop(arc);
+    // SAFETY: the handle came from Box::into_raw; libzmq forbids its use
+    // after zmq_ctx_term returns, so this is its final owner.
+    drop(unsafe { Box::from_raw(ctx_ptr.cast::<Arc<OmqContext>>()) });
     0
 }
 

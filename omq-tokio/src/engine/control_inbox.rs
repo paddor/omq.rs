@@ -399,11 +399,11 @@ mod tests {
         // A command sent after a partial drain still follows the overflow.
         let first = receiver.try_recv().unwrap();
         sender.try_send(command(5)).unwrap();
-        let mut received = vec![first];
+        let mut drained = vec![first];
         while let Ok(command) = receiver.try_recv() {
-            received.push(command);
+            drained.push(command);
         }
-        let prefixes: Vec<u8> = received
+        let prefixes: Vec<u8> = drained
             .into_iter()
             .map(|command| {
                 let PeerDriverCommand::SendCommand(Command::Subscribe(prefix)) = command else {

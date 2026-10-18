@@ -293,3 +293,41 @@ async fn canceled_connect_caller_releases_dns_setup_admission() {
     socket.close().await.unwrap();
     assert!(matches!(second.await.unwrap(), Err(Error::Closed)));
 }
+
+#[tokio::test]
+async fn named_udp_connect_resolves_without_holding_the_actor() {
+    let dish = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = dish.local_addr().unwrap();
+    let _lookup =
+        crate::transport::dns::test_lookup::ScopedLookup::new(address.port(), Some(address.ip()));
+    let radio = Socket::new(SocketType::Radio, Options::default());
+    let endpoint: Endpoint = format!("udp://omq-test-lookup.invalid:{}", address.port())
+        .parse()
+        .unwrap();
+    radio.connect(endpoint).await.unwrap();
+    radio
+        .send(crate::Message::with_group("weather", "hot"))
+        .await
+        .unwrap();
+    let mut datagram = [0; 64];
+    let len = tokio::time::timeout(Duration::from_secs(1), dish.recv(&mut datagram))
+        .await
+        .unwrap()
+        .unwrap();
+    let (group, body) = crate::transport::udp::decode_datagram(&datagram[..len]).unwrap();
+    assert_eq!((&group[..], &body[..]), (&b"weather"[..], &b"hot"[..]));
+
+    // A lookup that never answers leaves the actor serving other commands.
+    let _guard = TEST_STALL_LOCK.lock().await;
+    let stalled: Endpoint = "udp://omq-test-stall.invalid:13006".parse().unwrap();
+    let pending = {
+        let radio = radio.clone();
+        tokio::spawn(async move { radio.connect(stalled).await })
+    };
+    tokio::time::timeout(Duration::from_secs(1), radio.join("ignored"))
+        .await
+        .expect("actor waited for a UDP lookup")
+        .unwrap_err();
+    pending.abort();
+    radio.close().await.unwrap();
+}

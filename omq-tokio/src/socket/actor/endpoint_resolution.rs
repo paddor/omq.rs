@@ -87,6 +87,9 @@ impl Drop for PendingEndpoint {
 }
 
 pub(super) fn needs_dns(endpoint: &Endpoint) -> bool {
+    if let Endpoint::Udp { host, .. } = endpoint {
+        return matches!(host, Host::Name(_));
+    }
     #[cfg(feature = "dart")]
     if let Endpoint::Dart { host, .. } = endpoint {
         return matches!(host, Host::Name(_));
@@ -121,6 +124,19 @@ pub(super) fn needs_dns(endpoint: &Endpoint) -> bool {
 }
 
 async fn bind_address(endpoint: Endpoint) -> Result<Endpoint> {
+    if let Endpoint::Udp {
+        host: Host::Name(host),
+        port,
+        group,
+    } = &endpoint
+    {
+        let address = first(host, *port).await?;
+        return Ok(Endpoint::Udp {
+            host: Host::Ip(address.ip()),
+            port: *port,
+            group: group.clone(),
+        });
+    }
     #[cfg(feature = "dart")]
     if let Endpoint::Dart {
         host: Host::Name(host),
@@ -267,6 +283,9 @@ impl EndpointTask {
                     if matches!(self.endpoint, Endpoint::Dart { .. }) {
                         return bind_address(self.endpoint.clone()).await;
                     }
+                    if matches!(self.endpoint, Endpoint::Udp { .. }) {
+                        return bind_address(self.endpoint.clone()).await;
+                    }
                     super::super::dispatch::preflight_connect_endpoint_resolution(&self.endpoint)
                         .await
                         .map(|()| self.endpoint.clone())
@@ -297,8 +316,11 @@ impl SocketDriver {
             return;
         }
         let kind = ack.kind();
-        let admission = (kind == Kind::Connect && self.socket_type != super::SocketType::Stream)
-            .then(|| self.setup_admission.clone());
+        // Datagram targets have no handshake to admit.
+        let admission = (kind == Kind::Connect
+            && self.socket_type != super::SocketType::Stream
+            && !matches!(endpoint, Endpoint::Udp { .. }))
+        .then(|| self.setup_admission.clone());
         let setup_timeout = super::endpoints::dial_setup_timeout(&endpoint, &options);
         let id = self.next_peer_id;
         self.next_peer_id += 1;
@@ -360,6 +382,10 @@ impl SocketDriver {
                 let _ = ack.send(self.bind(resolved.endpoint, pending.options.clone()).await);
             }
             (Ack::Connect(ack), Ok(resolved)) => {
+                if matches!(resolved.endpoint, Endpoint::Udp { .. }) {
+                    let _ = ack.send(self.start_dial_udp(resolved.endpoint).await);
+                    return;
+                }
                 #[cfg(feature = "dart")]
                 if matches!(resolved.endpoint, Endpoint::Dart { .. }) {
                     let _ = ack.send(

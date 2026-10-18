@@ -202,6 +202,29 @@ impl SocketDriver {
         not(any(feature = "ws", feature = "quic")),
         expect(clippy::unused_self)
     )]
+    /// A routing identity in use stays with its principal. Handover needs the
+    /// same mechanism, CURVE key, PLAIN username, and authenticator user ID.
+    fn identity_held_by_other_principal(
+        &self,
+        peer_id: u64,
+        identity: &bytes::Bytes,
+        authentication: &omq_proto::PeerAuthentication,
+    ) -> bool {
+        let Some(held) = self
+            .send_strategy
+            .peer_for_identity(identity)
+            .filter(|&old_id| old_id != peer_id)
+            .and_then(|old_id| self.peers.get(&old_id)?.info.as_ref())
+        else {
+            return false;
+        };
+        let held = &held.authentication;
+        held.mechanism != authentication.mechanism
+            || held.public_key != authentication.public_key
+            || held.username != authentication.username
+            || held.user_id != authentication.user_id
+    }
+
     fn can_accept_carrier_peer(&self, peer_id: u64, identity: &bytes::Bytes) -> bool {
         #[cfg(feature = "ws")]
         if let Some(allowed) = self.carrier_ready_capacity(
@@ -501,7 +524,19 @@ impl SocketDriver {
             .identity
             .clone()
             .unwrap_or_else(|| generated_identity(peer_id));
-        if !self.can_accept_ready_peer() || !self.can_accept_carrier_peer(peer_id, &identity) {
+        let rejection =
+            if !self.can_accept_ready_peer() || !self.can_accept_carrier_peer(peer_id, &identity) {
+                Some("socket peer limit reached")
+            } else if self.identity_held_by_other_principal(
+                peer_id,
+                &identity,
+                &peer_properties.authentication,
+            ) {
+                Some("routing identity in use by another principal")
+            } else {
+                None
+            };
+        if let Some(reason) = rejection {
             let (endpoint, peer_ident) = {
                 let Some(p) = self.peers.get(&peer_id) else {
                     return;
@@ -511,7 +546,7 @@ impl SocketDriver {
             self.monitor.publish(MonitorEvent::HandshakeFailed {
                 endpoint,
                 peer_ident,
-                reason: "socket peer limit reached".into(),
+                reason: reason.into(),
             });
             // Let the driver report closure through the ordinary lifecycle.
             // Removing/aborting it here loses that event and strands an

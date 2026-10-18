@@ -684,3 +684,19 @@ fn ctx_max_msgsz_enforced() {
     zmq_close(pull);
     zmq_ctx_term(ctx);
 }
+
+#[test]
+fn context_calls_during_a_blocked_term_report_eterm() {
+    const ZMQ_PUSH: i32 = 8;
+    const ZMQ_ETERM: i32 = 156_384_765;
+    let ctx = omq_zmq::zmq_ctx_new();
+    let open = omq_zmq::zmq_socket(ctx, ZMQ_PUSH);
+    let ctx_addr = ctx as usize;
+    let terminating = std::thread::spawn(move || omq_zmq::zmq_ctx_term(ctx_addr as *mut c_void));
+    // Term blocks until the open socket closes. The handle stays valid.
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert!(omq_zmq::zmq_socket(ctx, ZMQ_PUSH).is_null());
+    assert_eq!(omq_zmq::zmq_errno(), ZMQ_ETERM);
+    assert_eq!(omq_zmq::zmq_close(open), 0);
+    assert_eq!(terminating.join().unwrap(), 0);
+}

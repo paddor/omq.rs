@@ -693,6 +693,9 @@ impl SendPipeProducer {
 
 impl Drop for SendPipeProducer {
     fn drop(&mut self) {
+        // Waiters park on whichever signal `space_available` returned, which
+        // for peer and inproc pipes is not the local field.
+        let space = self.space_available();
         match &mut self.inner {
             SendPipeProducerInner::Peer(_) => {}
             SendPipeProducerInner::Inproc(sender) => sender.flush_deferred(&mut self.pending),
@@ -703,6 +706,9 @@ impl Drop for SendPipeProducer {
         }
         self.data_signal.wake_all();
         self.space_available.notify_changed();
+        if !Arc::ptr_eq(&space, &self.space_available) {
+            space.notify_changed();
+        }
     }
 }
 

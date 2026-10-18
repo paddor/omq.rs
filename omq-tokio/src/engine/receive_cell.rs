@@ -40,6 +40,11 @@ impl<T> ReceiveCell<T> {
         self.handles = handles;
     }
 
+    /// Take the value out of an exclusively borrowed cell.
+    pub(crate) fn take(&mut self) -> Option<T> {
+        ManuallyDrop::into_inner(self.available.take()).map(|value| *value)
+    }
+
     #[expect(
         clippy::inline_always,
         reason = "Measured scalar receives avoid out-of-line ownership transfers"

@@ -203,6 +203,17 @@ struct LaneWorker {
     exited: Arc<AtomicBool>,
 }
 
+impl Drop for LaneWorker {
+    fn drop(&mut self) {
+        // Runtime teardown can drop the task before it sees Shutdown. Senders
+        // waiting for lane space must still observe the exit.
+        if !self.exited.swap(true, Ordering::AcqRel) {
+            self.data_signal.notify_close_progress();
+            self.notify_data_space();
+        }
+    }
+}
+
 impl std::fmt::Debug for LaneWorker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LaneWorker")
@@ -2659,6 +2670,16 @@ mod tests {
             bytes.extend_from_slice(&encoded);
         }
         bytes.freeze()
+    }
+    #[test]
+    fn dropping_an_unstopped_worker_releases_lane_space_waiters() {
+        let (worker, _control) = batch_worker(FanOutMutePolicy::Block, &[]);
+        let exited = worker.exited.clone();
+        let space = worker.data_space.clone();
+        let seen = space.generation();
+        drop(worker);
+        assert!(exited.load(std::sync::atomic::Ordering::Acquire));
+        assert_ne!(space.generation(), seen);
     }
 }
 

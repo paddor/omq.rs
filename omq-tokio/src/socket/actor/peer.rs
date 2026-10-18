@@ -63,7 +63,7 @@ impl SocketDriver {
             InternalEvent::ConnectGaveUp { endpoint, route_id } => {
                 self.dialers
                     .retain(|d| !(d.route_id == route_id && d.endpoint == endpoint));
-                self.send_strategy.connect_pipe_removed(route_id);
+                self.remove_connect_route(route_id);
             }
             InternalEvent::PeerEvent { peer_id, event } => {
                 self.handle_peer_event(peer_id, event).await;
@@ -182,6 +182,13 @@ impl SocketDriver {
             socket_type: self.socket_type,
             identity: self.options.identity.clone(),
         }
+    }
+
+    /// Drop a connect route's pre-ready send pipe. A REQ request queued
+    /// there can no longer be answered, so alternation resets.
+    pub(super) fn remove_connect_route(&mut self, route_id: u64) {
+        self.send_strategy.connect_pipe_removed(route_id);
+        self.req_awaiting_reply.route_removed(route_id);
     }
 
     fn take_dialer_send_pipe(&mut self, route_id: u64) -> Option<crate::engine::SendPipeConsumer> {

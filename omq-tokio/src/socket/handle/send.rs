@@ -564,6 +564,14 @@ impl ReqAwaitingReply {
         }
     }
 
+    /// A removed connect route never delivers its queued request.
+    pub(crate) fn route_removed(&self, route_id: u64) {
+        let routes = self.routes.lock().expect("REQ routes");
+        if routes.selected == Some(ReqReplySource::Pending(route_id)) {
+            self.clear_awaiting();
+        }
+    }
+
     pub(crate) fn accept_reply(&self, peer_id: u64) -> bool {
         let mut routes = self.routes.lock().expect("REQ routes");
         if routes.selected != Some(ReqReplySource::Connected(peer_id)) {

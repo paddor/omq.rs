@@ -111,6 +111,29 @@ async fn req_rejects_double_send() {
 }
 
 #[tokio::test]
+async fn req_sends_again_after_its_unanswered_pending_route_is_removed() {
+    let req = Socket::new(SocketType::Req, Options::default());
+    let dead = inproc_ep("rr-pending-route-dead");
+    req.connect(dead.clone()).await.unwrap();
+    // Queued in the pre-ready pipe of a route that never connects.
+    req.send(Message::single("lost")).await.unwrap();
+    req.disconnect(dead).await.unwrap();
+
+    let live = inproc_ep("rr-pending-route-live");
+    let rep = Socket::new(SocketType::Rep, Options::default());
+    rep.bind(live.clone()).await.unwrap();
+    req.connect(live).await.unwrap();
+    req.send(Message::single("hello")).await.unwrap();
+    assert_eq!(rep.recv().await.unwrap(), Message::single("hello"));
+    rep.send(Message::single("world")).await.unwrap();
+    let reply = tokio::time::timeout(Duration::from_secs(2), req.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply, Message::single("world"));
+}
+
+#[tokio::test]
 async fn rep_rejects_send_before_recv() {
     let ep = inproc_ep("rr-rep-noreq");
     let rep = Socket::new(SocketType::Rep, Options::default());

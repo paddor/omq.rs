@@ -5,8 +5,8 @@ Applications use it through [`omq-tokio`](https://crates.io/crates/omq-tokio)
 sockets with `shm://` endpoints.
 
 Linux-only `shm://path` / `shm://@name`, using NULL authentication.
-Supported families: CHANNEL, CLIENT/SERVER, SCATTER/GATHER, PEER, RADIO/DISH.
-Bodies are single-part; group and routing envelopes retain normal semantics.
+Every socket type except STREAM is supported. Only the final frame uses shared
+storage; earlier frames and group/routing envelopes use the carrier ring.
 
 A socket can bind or connect multiple SHM endpoints and mix them with inproc,
 IPC, TCP, QUIC, and DART endpoints (with the corresponding features enabled).
@@ -42,7 +42,8 @@ variable-sized messages; a retained slice pins the whole buffer.
 
 ## Batches and leases
 
-Already queued messages with the same envelope may share a batch:
+Already queued messages with the same envelope of at most one frame may share
+a batch:
 
 | Bodies | Shared layout |
 |--------|---------------|

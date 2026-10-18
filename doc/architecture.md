@@ -334,7 +334,7 @@ copy-free payload conversion.
 | URI family | Path |
 | --- | --- |
 | `tcp://`, `ipc://` | Byte streams with ZMTP framing |
-| `shm://` | Unix rendezvous; shared carrier ring and payload references (Linux, single-part sockets) |
+| `shm://` | Unix rendezvous; shared carrier ring and payload references (Linux, all but STREAM) |
 | `ws://`, `wss://` | ZWS over WebSocket, optionally TLS |
 | `quic://` | ZMTP byte stream over Quinn with TLS |
 | `inproc://` | Context-local message transfer without ZMTP |

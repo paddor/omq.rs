@@ -10,6 +10,8 @@ use omq_tokio::{Context, Endpoint, Message, Options, Socket, SocketType, shm_pay
 
 #[path = "shm/endpoints.rs"]
 mod endpoints;
+#[path = "shm/multipart.rs"]
+mod multipart;
 
 const DEADLINE: Duration = Duration::from_secs(10);
 
@@ -84,6 +86,15 @@ async fn receive(socket: &Socket) -> Message {
 async fn wait_radio_ready(publisher: &Socket, subscribers: &[&Socket], group: &'static str) {
     let probe = Message::with_group(group, vec![0xff]);
     let fence = Message::with_group(group, vec![0xfe]);
+    wait_fanout_ready(publisher, subscribers, probe, fence).await;
+}
+
+async fn wait_fanout_ready(
+    publisher: &Socket,
+    subscribers: &[&Socket],
+    probe: Message,
+    fence: Message,
+) {
     tokio::time::timeout(DEADLINE, async {
         loop {
             publisher.send(probe.clone()).await.unwrap();
@@ -787,27 +798,14 @@ async fn bind_replaces_only_a_stale_socket_file() {
 }
 
 #[tokio::test]
-async fn multipart_capable_socket_types_are_rejected_before_io() {
-    for socket_type in [
-        SocketType::Pair,
-        SocketType::Pub,
-        SocketType::Sub,
-        SocketType::Push,
-        SocketType::Pull,
-        SocketType::Req,
-        SocketType::Rep,
-        SocketType::Dealer,
-        SocketType::Router,
-        SocketType::Stream,
-    ] {
-        let socket = Socket::new(socket_type, options());
-        assert!(matches!(
-            socket.bind(endpoint()).await,
-            Err(omq_tokio::Error::Config(_))
-        ));
-        assert!(socket.connect(endpoint()).await.is_err());
-        socket.close().await.unwrap();
-    }
+async fn stream_sockets_are_rejected_before_io() {
+    let socket = Socket::new(SocketType::Stream, options());
+    assert!(matches!(
+        socket.bind(endpoint()).await,
+        Err(omq_tokio::Error::Config(_))
+    ));
+    assert!(socket.connect(endpoint()).await.is_err());
+    socket.close().await.unwrap();
 }
 
 #[derive(Debug)]

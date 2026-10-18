@@ -69,21 +69,10 @@ struct ActiveLease {
     messages: usize,
 }
 
-/// Whether a socket type supports SHM: CHANNEL, CLIENT/SERVER, SCATTER/GATHER,
-/// PEER, and RADIO/DISH. Group and routing envelopes remain ordinary codec
-/// frames; only the final application body uses shared storage.
+/// Whether a socket type supports SHM: every type except STREAM. Envelope
+/// frames remain ordinary codec frames; only the final frame uses shared storage.
 pub const fn supports(socket_type: SocketType) -> bool {
-    matches!(
-        socket_type,
-        SocketType::Channel
-            | SocketType::Client
-            | SocketType::Server
-            | SocketType::Scatter
-            | SocketType::Gather
-            | SocketType::Peer
-            | SocketType::Radio
-            | SocketType::Dish
-    )
+    !matches!(socket_type, SocketType::Stream)
 }
 
 impl Connection {

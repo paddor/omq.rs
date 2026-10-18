@@ -322,7 +322,13 @@ impl SocketDriver {
         self.peers.get(&connection_id)?.info.clone()
     }
 
-    pub(super) async fn apply_join(&mut self, group: bytes::Bytes, joining: bool) -> Result<()> {
+    /// Returns the peers whose protocol lane backlogged. The caller's ack
+    /// waits for them; the actor never does.
+    pub(super) fn apply_join(
+        &mut self,
+        group: bytes::Bytes,
+        joining: bool,
+    ) -> Result<Vec<crate::engine::control_inbox::Sender>> {
         if !supports_groups(self.socket_type) {
             return Err(Error::Protocol(
                 "socket type does not support join / leave".into(),
@@ -346,24 +352,16 @@ impl SocketDriver {
         } else {
             omq_proto::proto::Command::Leave(group)
         };
-        for p in self.peers.values() {
-            if !p.ready {
-                continue;
-            }
-            let _ = p
-                .handle
-                .inbox
-                .send(crate::engine::PeerDriverCommand::SendCommand(cmd.clone()))
-                .await;
-        }
-        Ok(())
+        Ok(self.send_protocol_to_ready_peers(&cmd))
     }
 
-    pub(super) async fn apply_subscription(
+    /// Returns the peers whose protocol lane backlogged. The caller's ack
+    /// waits for them; the actor never does.
+    pub(super) fn apply_subscription(
         &mut self,
         prefix: bytes::Bytes,
         subscribe: bool,
-    ) -> Result<()> {
+    ) -> Result<Vec<crate::engine::control_inbox::Sender>> {
         if !supports_subscribe(self.socket_type) {
             return Err(Error::Protocol(
                 "socket type does not support subscribe".into(),
@@ -382,17 +380,26 @@ impl SocketDriver {
         } else {
             omq_proto::proto::Command::Cancel(prefix)
         };
+        Ok(self.send_protocol_to_ready_peers(&cmd))
+    }
+
+    /// Queue `cmd` for every data-plane-ready peer without waiting.
+    fn send_protocol_to_ready_peers(
+        &self,
+        cmd: &omq_proto::proto::Command,
+    ) -> Vec<crate::engine::control_inbox::Sender> {
+        let mut backlogged = Vec::new();
         for p in self.peers.values() {
             if !p.ready {
                 continue;
             }
-            let _ = p
-                .handle
-                .inbox
-                .send(crate::engine::PeerDriverCommand::SendCommand(cmd.clone()))
-                .await;
+            let inbox = &p.handle.inbox;
+            let _ = inbox.try_send(crate::engine::PeerDriverCommand::SendCommand(cmd.clone()));
+            if inbox.protocol_backlogged() {
+                backlogged.push(inbox.clone());
+            }
         }
-        Ok(())
+        backlogged
     }
 
     pub(super) fn capture_endpoint_options(

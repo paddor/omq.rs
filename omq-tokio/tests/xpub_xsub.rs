@@ -478,7 +478,7 @@ async fn xpub_tcp_subscriber_churn() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sub_control_stays_responsive_when_an_xpub_never_reads() {
     let xpub = Socket::new(SocketType::XPub, Options::default());
     xpub.bind("inproc://xpub-never-reads").await.unwrap();
@@ -486,15 +486,26 @@ async fn sub_control_stays_responsive_when_an_xpub_never_reads() {
     sub.connect("inproc://xpub-never-reads").await.unwrap();
     sub.wait_connected(1, Duration::from_secs(2)).await.unwrap();
     // The XPUB never receives its subscription messages, so queues toward it
-    // fill. Subscribing must not make the SUB actor wait for that peer.
-    for topic in 0..10_000 {
-        tokio::time::timeout(Duration::from_secs(2), sub.subscribe(format!("t{topic}")))
-            .await
-            .expect("subscribe waited for a stalled peer")
-            .unwrap();
-    }
+    // fill and subscribe() feels backpressure. The actor must not.
+    let flooding = sub.clone();
+    let flood = tokio::spawn(async move {
+        for topic in 0..10_000 {
+            if flooding.subscribe(format!("t{topic}")).await.is_err() {
+                return;
+            }
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::timeout(Duration::from_secs(2), sub.connections())
+        .await
+        .expect("socket commands waited behind a stalled peer")
+        .unwrap();
     tokio::time::timeout(Duration::from_secs(2), sub.close())
         .await
         .expect("close waited for a stalled peer")
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), flood)
+        .await
+        .expect("backpressured subscribe outlived close")
         .unwrap();
 }

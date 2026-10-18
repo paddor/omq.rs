@@ -556,20 +556,16 @@ impl SocketDriver {
                     .await;
             }
             SocketCommand::Subscribe { prefix, ack } => {
-                let res = self.apply_subscription(prefix, true).await;
-                let _ = ack.send(res);
+                ack_after_protocol_drain(self.apply_subscription(prefix, true), ack);
             }
             SocketCommand::Unsubscribe { prefix, ack } => {
-                let res = self.apply_subscription(prefix, false).await;
-                let _ = ack.send(res);
+                ack_after_protocol_drain(self.apply_subscription(prefix, false), ack);
             }
             SocketCommand::Join { group, ack } => {
-                let res = self.apply_join(group, true).await;
-                let _ = ack.send(res);
+                ack_after_protocol_drain(self.apply_join(group, true), ack);
             }
             SocketCommand::Leave { group, ack } => {
-                let res = self.apply_join(group, false).await;
-                let _ = ack.send(res);
+                ack_after_protocol_drain(self.apply_join(group, false), ack);
             }
             SocketCommand::Unbind { endpoint, ack } => {
                 let _ = ack.send(self.unbind(&endpoint).await);
@@ -772,6 +768,28 @@ impl SocketDriver {
             self.socket_type,
             SocketType::Req | SocketType::Rep | SocketType::Dish
         )
+    }
+}
+
+/// Acknowledge a subscription or group change once every backlogged peer
+/// took its protocol command. The waiting happens off the actor, so slow
+/// peers backpressure the caller without making the socket unresponsive.
+fn ack_after_protocol_drain(
+    result: Result<Vec<crate::engine::control_inbox::Sender>>,
+    ack: oneshot::Sender<Result<()>>,
+) {
+    match result {
+        Ok(backlogged) if !backlogged.is_empty() => {
+            tokio::spawn(async move {
+                for inbox in backlogged {
+                    inbox.protocol_drained().await;
+                }
+                let _ = ack.send(Ok(()));
+            });
+        }
+        result => {
+            let _ = ack.send(result.map(|_| ()));
+        }
     }
 }
 

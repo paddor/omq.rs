@@ -304,6 +304,71 @@ async fn plain_dealer_router() {
 }
 
 #[tokio::test]
+async fn router_identity_stays_with_its_plain_user() {
+    let router = Socket::new(
+        SocketType::Router,
+        Options::default().plain_server(|peer| peer.password.as_deref() == Some("secret")),
+    );
+    let mut monitor = router.monitor();
+    let ep = router.bind(auth_ep("identity-owner")).await.unwrap();
+    let dealer = |username| {
+        Socket::new(
+            SocketType::Dealer,
+            Options::default()
+                .identity(bytes::Bytes::from_static(b"shared"))
+                .plain_client(username, "secret")
+                .reconnect(omq_tokio::ReconnectPolicy::Disabled),
+        )
+    };
+    let alice = dealer("alice");
+    alice.connect(ep.clone()).await.unwrap();
+    test_support::wait_for_handshake(&alice).await;
+
+    let mallory = dealer("mallory");
+    mallory.connect(ep.clone()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let omq_tokio::MonitorEvent::HandshakeFailed { reason, .. } =
+                monitor.recv().await.unwrap()
+            {
+                assert_eq!(reason, "routing identity in use by another principal");
+                break;
+            }
+        }
+    })
+    .await
+    .expect("another user took over the identity");
+    router
+        .send(Message::multipart(["shared", "to-alice"]))
+        .await
+        .unwrap();
+    let reply = tokio::time::timeout(Duration::from_secs(2), alice.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply, Message::single("to-alice"));
+
+    let alice_again = dealer("alice");
+    alice_again.connect(ep).await.unwrap();
+    test_support::wait_for_handshake(&alice_again).await;
+    alice_again.send(Message::single("back")).await.unwrap();
+    let m = tokio::time::timeout(Duration::from_secs(2), router.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m, Message::multipart(["shared", "back"]));
+    router
+        .send(Message::multipart(["shared", "to-new-alice"]))
+        .await
+        .unwrap();
+    let reply = tokio::time::timeout(Duration::from_secs(2), alice_again.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply, Message::single("to-new-alice"));
+}
+
+#[tokio::test]
 async fn plain_pub_sub() {
     let p = Socket::new(
         SocketType::Pub,

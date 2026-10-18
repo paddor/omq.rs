@@ -139,7 +139,7 @@ down and reconnects.
 | PUB fan-out: slow sub blocks all | No; slow sub mutes and drops | Per-sub independent queues; slow sub drops | **=** |
 | PUB fan-out: ref counting | Manual rm_refs on failure | Bytes Arc clone | **=** equivalent |
 | ROUTER mandatory | EHOSTUNREACH | Error::Unroutable | **=** |
-| ROUTER handover | Reassign old conn integral ID | Always-on; evict old peer, `Disconnected(Handover)` | **=** better (no opt-in needed) |
+| ROUTER handover | Reassign old conn integral ID | Always-on for the same principal; evict old peer, `Disconnected(Handover)` | **=** better (no opt-in needed) |
 | ROUTER anonymous pipes | Separate set until identified | Not mentioned | **~** |
 | lb _dropping mode (mid-msg pipe death) | Silently consume remaining frames | Different architecture (whole-message queuing) | **N/A** |
 
@@ -251,4 +251,6 @@ down and reconnects.
   reaper thread.
 - **ROUTER handover:** Implemented. Always-on (libzmq gates behind
   `ZMQ_ROUTER_HANDOVER`). Old connection is evicted with
-  `DisconnectReason::Handover`. Applies to ROUTER and SERVER.
+  `DisconnectReason::Handover`. Applies to ROUTER and SERVER. A peer
+  authenticated as a different principal (PLAIN username, CURVE key, or
+  authenticator user ID) is rejected while the identity is in use.

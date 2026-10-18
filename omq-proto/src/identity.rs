@@ -22,6 +22,8 @@ pub struct PeerAuthentication {
     pub mechanism: Option<MechanismName>,
     /// Verified key, available even without an admission callback.
     pub public_key: Option<PeerPublicKey>,
+    /// PLAIN username accepted by the handshake.
+    pub username: Option<String>,
     /// User identity supplied by the local authenticator (including ZAP).
     pub user_id: Option<Bytes>,
     /// Properties supplied by the local authenticator; excludes peer claims.

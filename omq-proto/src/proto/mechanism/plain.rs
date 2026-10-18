@@ -54,6 +54,7 @@ pub(crate) struct PlainServer {
     authenticator: Authenticator,
     peer_address: Option<String>,
     our_props: PeerProperties,
+    username: Option<String>,
     authentication: Option<AuthenticationResult>,
     auth: AuthGate,
     state: PlainServerState,
@@ -82,6 +83,7 @@ impl PlainMechanism {
             authenticator,
             peer_address,
             our_props: PeerProperties::default(),
+            username: None,
             authentication: None,
             auth: AuthGate::default(),
             state: PlainServerState::NotStarted,
@@ -216,6 +218,7 @@ impl PlainServer {
                 if name.as_ref() == b"HELLO" =>
             {
                 let (username, password) = decode_hello(&body)?;
+                self.username = Some(username.clone());
                 let peer = MechanismPeerInfo {
                     mechanism: MechanismName::PLAIN,
                     public_key: [0; 32],
@@ -237,6 +240,8 @@ impl PlainServer {
                 if let Some(authentication) = self.authentication.take() {
                     authentication.apply_to(&mut peer_properties, super::MechanismName::PLAIN);
                 }
+                std::sync::Arc::make_mut(&mut peer_properties.authentication).username =
+                    self.username.take();
                 let metadata = command::encode_properties(&self.our_props);
                 out.push(Command::Unknown {
                     name: Bytes::from_static(b"READY"),
@@ -553,6 +558,10 @@ mod tests {
             Some(super::super::MechanismName::PLAIN)
         );
         assert!(peer_properties.authentication.public_key.is_none());
+        assert_eq!(
+            peer_properties.authentication.username.as_deref(),
+            Some("alice")
+        );
         assert_eq!(
             peer_properties.other,
             vec![

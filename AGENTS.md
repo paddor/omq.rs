@@ -244,7 +244,7 @@ convenience. Core guarantees:
   the FSM (free send/recv). ROUTER prepends identity frame on recv,
   routes by identity frame on send. `router_mandatory`: error on
   unknown identity. Handover: new peer with same identity evicts
-  old.
+  old, unless it authenticated as a different principal.
 - **CLIENT/SERVER** CLIENT is DEALER without multipart.
   SERVER is ROUTER without multipart. Routing via `routing_id`
   field instead of identity frame.

@@ -442,7 +442,7 @@ impl Submitter {
                 return;
             }
             tokio::select! {
-                () = changed => {},
+                () = changed.wait() => {},
                 () = async { blocked.as_ref().unwrap().wait_capacity().await },
                     if blocked.is_some() => {},
             }

@@ -680,61 +680,59 @@ pub struct StateSignal {
 
 /// Completes once any of `signals` changes after this call returns.
 /// Generations are read before returning, so a probe made after this call
-/// cannot miss a change. Never completes for an empty set.
-pub(crate) fn any_changed(signals: impl IntoIterator<Item = Arc<StateSignal>>) -> AnyChanged {
-    AnyChanged {
-        signals: signals
+/// cannot miss a change. Never completes for an empty set. Up to four
+/// signals wait without allocating, as senders do on every full-pipe park.
+pub(crate) fn any_changed(signals: impl IntoIterator<Item = Arc<StateSignal>>) -> Changes {
+    Changes(
+        signals
             .into_iter()
             .map(|signal| {
                 let seen = signal.generation();
                 (signal, seen)
             })
             .collect(),
-        waits: None,
-    }
+    )
 }
 
-type ChangeWait = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+/// Generations captured by [`any_changed`].
+#[derive(Debug)]
+pub(crate) struct Changes(SmallVec<[(Arc<StateSignal>, u64); 4]>);
 
-/// Future returned by [`any_changed`].
-pub(crate) struct AnyChanged {
-    signals: SmallVec<[(Arc<StateSignal>, u64); 4]>,
-    waits: Option<SmallVec<[ChangeWait; 4]>>,
-}
-
-impl std::future::Future for AnyChanged {
-    type Output = ();
-
-    fn poll(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<()> {
-        let this = self.get_mut();
-        if this.waits.is_none()
-            && this
-                .signals
-                .iter()
-                .any(|(signal, seen)| signal.generation() != *seen)
-        {
-            return std::task::Poll::Ready(());
-        }
-        let waits = this.waits.get_or_insert_with(|| {
-            std::mem::take(&mut this.signals)
-                .into_iter()
-                .map(|(signal, seen)| {
-                    let wait: ChangeWait =
-                        Box::pin(async move { signal.changed_after(seen).await });
-                    wait
-                })
-                .collect()
-        });
-        if waits
-            .iter_mut()
-            .any(|wait| wait.as_mut().poll(cx).is_ready())
-        {
-            std::task::Poll::Ready(())
-        } else {
-            std::task::Poll::Pending
+impl Changes {
+    /// Wait until any captured signal moved past its generation.
+    pub(crate) async fn wait(self) {
+        let signals = self.0;
+        match signals.as_slice() {
+            [] => std::future::pending().await,
+            [(a, seen_a)] => a.changed_after(*seen_a).await,
+            [(a, seen_a), (b, seen_b)] => {
+                tokio::select! {
+                    () = a.changed_after(*seen_a) => {}
+                    () = b.changed_after(*seen_b) => {}
+                }
+            }
+            [(a, seen_a), (b, seen_b), (c, seen_c)] => {
+                tokio::select! {
+                    () = a.changed_after(*seen_a) => {}
+                    () = b.changed_after(*seen_b) => {}
+                    () = c.changed_after(*seen_c) => {}
+                }
+            }
+            [(a, seen_a), (b, seen_b), (c, seen_c), (d, seen_d)] => {
+                tokio::select! {
+                    () = a.changed_after(*seen_a) => {}
+                    () = b.changed_after(*seen_b) => {}
+                    () = c.changed_after(*seen_c) => {}
+                    () = d.changed_after(*seen_d) => {}
+                }
+            }
+            many => {
+                let mut waits: futures::stream::FuturesUnordered<_> = many
+                    .iter()
+                    .map(|(signal, seen)| signal.changed_after(*seen))
+                    .collect();
+                futures::StreamExt::next(&mut waits).await;
+            }
         }
     }
 }
@@ -882,20 +880,20 @@ mod tests {
     #[test]
     fn any_changed_observes_changes_before_first_poll_and_after_cancellation() {
         let signal = Arc::new(StateSignal::new());
-        let mut wait = std::pin::pin!(any_changed([signal.clone()]));
+        let mut wait = std::pin::pin!(any_changed([signal.clone()]).wait());
         let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
         signal.notify_changed();
         assert!(wait.as_mut().poll(&mut cx).is_ready());
 
-        let mut cancelled = Box::pin(any_changed([signal.clone()]));
+        let mut cancelled = Box::pin(any_changed([signal.clone()]).wait());
         assert!(cancelled.as_mut().poll(&mut cx).is_pending());
         drop(cancelled);
-        let mut wait = std::pin::pin!(any_changed([signal.clone()]));
+        let mut wait = std::pin::pin!(any_changed([signal.clone()]).wait());
         assert!(wait.as_mut().poll(&mut cx).is_pending());
         signal.notify_changed();
         assert!(wait.as_mut().poll(&mut cx).is_ready());
         assert!(
-            std::pin::pin!(any_changed([]))
+            std::pin::pin!(any_changed([]).wait())
                 .as_mut()
                 .poll(&mut cx)
                 .is_pending()
@@ -912,7 +910,7 @@ mod tests {
         }
         for count in [1, 4, 8] {
             let signals: Vec<_> = (0..count).map(|_| Arc::new(StateSignal::new())).collect();
-            let mut wait = std::pin::pin!(any_changed(signals.iter().cloned()));
+            let mut wait = std::pin::pin!(any_changed(signals.iter().cloned()).wait());
             let counter = Arc::new(Count(AtomicUsize::new(0)));
             let waker = std::task::Waker::from(counter.clone());
             let mut cx = std::task::Context::from_waker(&waker);

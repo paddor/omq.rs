@@ -381,7 +381,7 @@ impl Submitter {
             }
             tokio::select! {
                 Some(()) = peers.next() => {},
-                () = changed => {},
+                () = changed.wait() => {},
             }
         }
     }
@@ -400,7 +400,7 @@ impl Submitter {
         }
         match target {
             PeerTarget::Pipe(pipe) | PeerTarget::RepInproc(pipe) => {
-                Box::pin(crate::engine::signal::any_changed(pipe.readiness_signals()))
+                Box::pin(crate::engine::signal::any_changed(pipe.readiness_signals()).wait())
             }
             PeerTarget::Direct(_) | PeerTarget::Inbox(_) => Box::pin(std::future::pending()),
         }
@@ -433,7 +433,7 @@ impl Submitter {
             let Some(peer) = peer else { return };
             tokio::select! {
                 () = peer => {},
-                () = changed => {},
+                () = changed.wait() => {},
             }
         }
     }

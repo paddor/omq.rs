@@ -752,3 +752,40 @@ async fn push_tcp_multi_pull_distributes() {
     let total: usize = counts.iter().map(|c| c.load(Ordering::SeqCst)).sum();
     assert_eq!(total, N, "every message must arrive");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn push_keeps_sending_to_a_fast_peer_while_another_stalls() {
+    let options = Options::default()
+        .linger(Duration::ZERO)
+        .send_hwm(1)
+        .recv_hwm(1);
+    let push = Socket::new(SocketType::Push, options.clone());
+    let slow = Socket::new(SocketType::Pull, options.clone());
+    let fast = Socket::new(SocketType::Pull, options);
+    let slow_ep = slow.bind("tcp://127.0.0.1:0").await.unwrap();
+    let fast_ep = fast.bind("tcp://127.0.0.1:0").await.unwrap();
+    push.connect(slow_ep).await.unwrap();
+    push.connect(fast_ep).await.unwrap();
+    push.wait_connected(2, Duration::from_secs(2))
+        .await
+        .unwrap();
+    let reader = tokio::spawn(async move { while fast.recv().await.is_ok() {} });
+    // Large bodies fill the stalled peer's TCP buffers quickly. Once both
+    // pipes have been full, a sender parked on the stalled pipe alone would
+    // never see the fast pipe drain.
+    let body = bytes::Bytes::from(vec![7u8; 256 * 1024]);
+    let started = std::time::Instant::now();
+    let mut sent = 0;
+    while started.elapsed() < Duration::from_secs(1) {
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            push.send(Message::single(body.clone())),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("send stalled after {sent} messages"))
+        .unwrap();
+        sent += 1;
+    }
+    reader.abort();
+    drop(slow);
+}

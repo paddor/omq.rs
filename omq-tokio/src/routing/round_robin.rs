@@ -296,57 +296,13 @@ impl Submitter {
         loop {
             match self.try_send(msg) {
                 Ok(()) => return Ok(()),
-                Err(omq_proto::error::TrySendError::Full(returned)) => {
-                    msg = returned;
-                }
+                Err(omq_proto::error::TrySendError::Full(returned)) => msg = returned,
                 Err(omq_proto::error::TrySendError::Error(e)) => return Err(e),
                 Err(omq_proto::error::TrySendError::Closed) => {
                     return Err(omq_proto::error::Error::Closed);
                 }
             }
-
-            let space_available = {
-                let mut active = self.active.lock();
-                active.next_space_notify_any()
-            };
-
-            let Some(space_available) = space_available else {
-                if self.closed.load(Ordering::Acquire) {
-                    return Err(omq_proto::error::Error::Closed);
-                }
-                let active_seen = self.active_changed.generation();
-                let active_changed = self.active_changed.changed_after(active_seen);
-                tokio::pin!(active_changed);
-
-                match self.try_send(msg) {
-                    Ok(()) => return Ok(()),
-                    Err(omq_proto::error::TrySendError::Full(returned)) => {
-                        msg = returned;
-                    }
-                    Err(omq_proto::error::TrySendError::Error(e)) => return Err(e),
-                    Err(omq_proto::error::TrySendError::Closed) => {
-                        return Err(omq_proto::error::Error::Closed);
-                    }
-                }
-
-                active_changed.await;
-                continue;
-            };
-
-            let seen = space_available.generation();
-            let notified = space_available.changed_after(seen);
-            tokio::pin!(notified);
-            match self.try_send(msg) {
-                Ok(()) => return Ok(()),
-                Err(omq_proto::error::TrySendError::Full(returned)) => {
-                    msg = returned;
-                }
-                Err(omq_proto::error::TrySendError::Error(e)) => return Err(e),
-                Err(omq_proto::error::TrySendError::Closed) => {
-                    return Err(omq_proto::error::Error::Closed);
-                }
-            }
-            notified.await;
+            self.wait_send_ready().await;
         }
     }
 
@@ -382,25 +338,10 @@ impl Submitter {
         }
     }
 
+    /// Wait until a send may succeed. Any pipe can free space first, so this
+    /// watches every pipe and rechecks after registering.
     pub(crate) async fn wait_send_progress(&self) {
-        let space_available = {
-            let mut active = self.active.lock();
-            active.next_space_notify_any()
-        };
-
-        let Some(space_available) = space_available else {
-            if self.closed.load(Ordering::Acquire) {
-                return;
-            }
-            let active_seen = self.active_changed.generation();
-            let active_changed = self.active_changed.changed_after(active_seen);
-            tokio::pin!(active_changed);
-            active_changed.await;
-            return;
-        };
-
-        let seen = space_available.generation();
-        space_available.changed_after(seen).await;
+        self.wait_send_ready().await;
     }
 
     #[inline]
@@ -457,42 +398,7 @@ impl Submitter {
     }
 }
 
-impl ActivePipes {
-    fn next_space_notify_any(&mut self) -> Option<Arc<StateSignal>> {
-        // Prefer inactive pipes: they are the ones we're waiting on.
-        for pipe in &self.inactive {
-            if pipe.tx.is_alive() {
-                return Some(pipe.tx.space_available());
-            }
-        }
-        // Fallback: scan active pipes (rare: all active hit Full this
-        // call but haven't been deactivated yet).
-        let mut scanned = 0usize;
-        while scanned < self.active.len() {
-            let i = self.cursor % self.active.len();
-            self.cursor = (i + 1) % self.active.len();
-            scanned += 1;
-            if self.active[i].tx.is_alive() {
-                return Some(self.active[i].tx.space_available());
-            }
-            let peer_id = self.active[i].peer_id;
-            self.pipe_peers.remove(&peer_id);
-            self.active.remove(i);
-            if self.active.is_empty() {
-                self.cursor = 0;
-                return None;
-            }
-            if i < self.cursor {
-                self.cursor -= 1;
-            }
-            if self.cursor >= self.active.len() {
-                self.cursor = 0;
-            }
-            scanned = scanned.saturating_sub(1);
-        }
-        None
-    }
-}
+impl ActivePipes {}
 
 /// Round-robin send strategy.
 #[derive(Debug)]

@@ -74,13 +74,7 @@ impl Carrier {
         } else {
             return Ok(false);
         };
-        // Anonymous descriptors exclude regular files, devices and sockets.
-        // Requiring read/write nonblocking access also rejects pidfds.
-        let mode = file.metadata()?.mode();
-        let flags = rustix::fs::fcntl_getfl(&file)?;
-        if mode & rustix::fs::FileType::Unknown.as_raw_mode() != 0
-            || !flags.contains(rustix::fs::OFlags::RDWR | rustix::fs::OFlags::NONBLOCK)
-        {
+        if !is_eventfd(&file)? {
             return Err(invalid("invalid SHM carrier notifier"));
         }
         target
@@ -214,6 +208,20 @@ fn eventfd() -> io::Result<File> {
     )?))
 }
 
+/// An eventfd shares the anonymous inode with a local eventfd, which excludes
+/// files, devices, sockets, pidfds, and secure anonymous inodes. Of the other
+/// anonymous descriptors, only an eventfd accepts an 8-byte write; adding zero
+/// changes nothing.
+fn is_eventfd(file: &File) -> io::Result<bool> {
+    let metadata = file.metadata()?;
+    let local = eventfd()?.metadata()?;
+    let flags = rustix::fs::fcntl_getfl(file)?;
+    Ok(metadata.dev() == local.dev()
+        && metadata.ino() == local.ino()
+        && flags.contains(rustix::fs::OFlags::RDWR | rustix::fs::OFlags::NONBLOCK)
+        && rustix::io::write(file, &0_u64.to_ne_bytes()) == Ok(8))
+}
+
 fn signal(file: &File) -> io::Result<()> {
     // write_all retries interruptions; a saturated eventfd is already readable.
     match (&*file).write_all(&1_u64.to_ne_bytes()) {
@@ -246,6 +254,39 @@ mod tests {
         let mut bytes = [0; std::mem::size_of::<u64>()];
         (&*file).read_exact(&mut bytes)?;
         Ok(u64::from_ne_bytes(bytes))
+    }
+
+    #[test]
+    fn notifiers_must_be_nonblocking_eventfds() {
+        use rustix::fs::OFlags;
+        let carrier = Carrier::new(2, false).unwrap();
+        let epoll = File::from(
+            rustix::event::epoll::create(rustix::event::epoll::CreateFlags::CLOEXEC).unwrap(),
+        );
+        rustix::fs::fcntl_setfl(&epoll, OFlags::NONBLOCK).unwrap();
+        let blocking =
+            File::from(rustix::event::eventfd(0, rustix::event::EventfdFlags::CLOEXEC).unwrap());
+        let (pipe, _writer) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::NONBLOCK).unwrap();
+        let memfd = File::from(
+            rustix::fs::memfd_create("omq-notifier", rustix::fs::MemfdFlags::CLOEXEC).unwrap(),
+        );
+        for file in [epoll, blocking, File::from(pipe), memfd] {
+            assert_eq!(
+                carrier.accept_signal(file).unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
+        let notifier = eventfd().unwrap();
+        assert!(
+            carrier
+                .accept_signal(notifier.try_clone().unwrap())
+                .unwrap()
+        );
+        assert_eq!(
+            counter(&notifier).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock,
+            "the probe must not signal"
+        );
     }
 
     #[test]

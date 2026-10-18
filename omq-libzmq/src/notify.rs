@@ -325,12 +325,8 @@ mod unix {
 
             for (i, item) in items.iter().enumerate() {
                 if !item.socket.is_null() {
-                    // SAFETY: socket is non-null (checked above);
-                    // caller guarantees valid socket.
-                    let sock = unsafe {
-                        &*(item
-                            .socket
-                            .cast::<std::sync::Arc<crate::socket::OmqSocket>>())
+                    let Some(sock) = crate::poll::item_socket(item) else {
+                        continue;
                     };
 
                     if (item.events & crate::poll::ZMQ_POLLIN as libc::c_short) != 0 {
@@ -630,11 +626,8 @@ pub(crate) mod windows {
                     continue;
                 }
 
-                // SAFETY: socket is non-null (checked above); caller guarantees valid socket.
-                let sock = unsafe {
-                    &*(item
-                        .socket
-                        .cast::<std::sync::Arc<crate::socket::OmqSocket>>())
+                let Some(sock) = crate::poll::item_socket(item) else {
+                    continue;
                 };
 
                 if (item.events & crate::poll::ZMQ_POLLIN as libc::c_short) != 0

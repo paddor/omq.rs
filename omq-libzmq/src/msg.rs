@@ -719,8 +719,11 @@ pub extern "C" fn zmq_msg_send(
         return crate::error::fail(libc::EFAULT);
     }
 
-    // SAFETY: sock is non-null (checked above); caller guarantees a valid socket.
-    let sock_arc = unsafe { &*(sock.cast::<Arc<crate::socket::OmqSocket>>()) };
+    // SAFETY: C callers pass null or a pointer from this API.
+    let sock_arc = match unsafe { crate::handle::socket(sock) } {
+        Ok(socket) => socket,
+        Err(errno) => return crate::error::fail(errno),
+    };
 
     let group = msg_group_bytes(msg);
     let routing_id = zmq_msg_routing_id(msg);
@@ -820,8 +823,11 @@ pub extern "C" fn zmq_msg_recv(
     if msg.is_null() || sock_ptr.is_null() {
         return crate::error::fail(libc::EFAULT);
     }
-    // SAFETY: sock_ptr is non-null (checked above); caller guarantees a valid socket.
-    let sock = unsafe { &*(sock_ptr.cast::<std::sync::Arc<crate::socket::OmqSocket>>()) };
+    // SAFETY: C callers pass null or a pointer from this API.
+    let sock = match unsafe { crate::handle::socket(sock_ptr) } {
+        Ok(socket) => socket,
+        Err(errno) => return crate::error::fail(errno),
+    };
     if sock
         .ctx
         .terminated

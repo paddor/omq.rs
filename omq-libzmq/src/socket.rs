@@ -197,8 +197,11 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
         set_errno(libc::EFAULT);
         return std::ptr::null_mut();
     }
-    // SAFETY: caller must pass a valid context pointer from zmq_ctx_new.
-    let ctx = unsafe { &*(ctx_ptr.cast::<Arc<OmqContext>>()) };
+    // SAFETY: C callers pass null or a pointer from this API.
+    let Ok(ctx) = (unsafe { crate::handle::context(ctx_ptr) }) else {
+        set_errno(libc::EFAULT);
+        return std::ptr::null_mut();
+    };
     if ctx.is_effectively_terminated() {
         set_errno(ETERM);
         return std::ptr::null_mut();
@@ -256,7 +259,7 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
     sock.ctx.socket_opened();
     sock.ctx.register_socket(&sock);
 
-    Box::into_raw(Box::new(sock)).cast()
+    crate::handle::socket_into_raw(sock)
 }
 
 /// Opts a socket into externally serialized migration between application threads.
@@ -265,8 +268,11 @@ pub extern "C" fn omq_socket_allow_thread_migration(sock_ptr: *mut c_void) -> c_
     if sock_ptr.is_null() {
         return fail(libc::EFAULT);
     }
-    // SAFETY: caller must pass an active socket handle returned by zmq_socket.
-    let socket = unsafe { &*(sock_ptr.cast::<Arc<OmqSocket>>()) };
+    // SAFETY: C callers pass null or a pointer from this API.
+    let socket = match unsafe { crate::handle::socket(sock_ptr) } {
+        Ok(socket) => socket,
+        Err(errno) => return fail(errno),
+    };
     socket.allow_thread_migration();
     0
 }
@@ -473,8 +479,12 @@ pub extern "C" fn zmq_close(sock_ptr: *mut c_void) -> c_int {
     if sock_ptr.is_null() {
         return fail(crate::error::ENOTSOCK);
     }
-    // SAFETY: sock_ptr came from Box::into_raw in zmq_socket; reclaiming ownership.
-    let arc = unsafe { *Box::from_raw(sock_ptr.cast::<Arc<OmqSocket>>()) };
+    // SAFETY: C callers pass null or a pointer from this API; on success
+    // close owns the socket and the handle is gone.
+    let arc = match unsafe { crate::handle::take_socket(sock_ptr) } {
+        Ok(socket) => socket,
+        Err(errno) => return fail(errno),
+    };
 
     // A full direct receive ring may have a driver waiting for space.
     // Drop its consumer before signaling so the driver observes closure.
@@ -549,8 +559,8 @@ unsafe fn parse_endpoint_args<'a>(
     if addr.is_null() {
         return Err(libc::EFAULT);
     }
-    // SAFETY: caller guarantees sock_ptr is a valid socket from zmq_socket.
-    let sock = unsafe { &*(sock_ptr.cast::<Arc<OmqSocket>>()) };
+    // SAFETY: C callers pass null or a pointer from this API.
+    let sock = unsafe { crate::handle::socket(sock_ptr) }?;
     if sock.ctx.is_effectively_terminated() {
         return Err(ETERM);
     }
@@ -590,8 +600,8 @@ unsafe fn parse_group_args<'a>(
     if cstr.is_null() {
         return Err(libc::EFAULT);
     }
-    // SAFETY: caller guarantees sock_ptr is a valid socket from zmq_socket.
-    let sock = unsafe { &*(sock_ptr.cast::<Arc<OmqSocket>>()) };
+    // SAFETY: C callers pass null or a pointer from this API.
+    let sock = unsafe { crate::handle::socket(sock_ptr) }?;
     // SAFETY: cstr is non-null (checked above); caller guarantees a valid C string.
     let Ok(g) = unsafe { CStr::from_ptr(cstr) }.to_str() else {
         return Err(libc::EINVAL);
@@ -881,8 +891,11 @@ pub extern "C" fn zmq_socket_monitor(
     if addr.is_null() {
         return 0;
     }
-    // SAFETY: sock_ptr is non-null (checked above); caller guarantees a valid socket.
-    let sock = unsafe { &*(sock_ptr.cast::<Arc<OmqSocket>>()) };
+    // SAFETY: C callers pass null or a pointer from this API.
+    let sock = match unsafe { crate::handle::socket(sock_ptr) } {
+        Ok(socket) => socket,
+        Err(errno) => return fail(errno),
+    };
     // SAFETY: addr is non-null (checked above); caller guarantees a valid C string.
     let Ok(addr_str) = unsafe { CStr::from_ptr(addr) }.to_str() else {
         return fail(libc::EINVAL);
@@ -1053,7 +1066,7 @@ mod tests {
             0
         );
         // SAFETY: this test owns the live socket handle.
-        let sock = unsafe { &*socket.cast::<Arc<OmqSocket>>() };
+        let sock = unsafe { crate::handle::socket(socket) }.unwrap();
         let fd = sock.notify.recv_fd();
         let sink = sock.recv_sink_config.get().unwrap().take_sink().unwrap();
         let omq_tokio::engine::RecvSink::Yring(sink) = sink else {

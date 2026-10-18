@@ -46,11 +46,9 @@ fn check_immediate(items: &mut [ZmqPollItem]) -> i32 {
     let mut ready = 0i32;
     for item in items.iter_mut() {
         item.revents = 0;
-        if item.socket.is_null() {
+        let Some(sock) = item_socket(item) else {
             continue;
-        }
-        // SAFETY: socket is non-null (checked above); caller guarantees a valid socket.
-        let sock = unsafe { &*(item.socket.cast::<Arc<OmqSocket>>()) };
+        };
 
         if (item.events & ZMQ_POLLIN) != 0 && recv_ready(sock) {
             item.revents |= ZMQ_POLLIN;
@@ -77,11 +75,9 @@ pub(crate) fn recv_ready(sock: &OmqSocket) -> bool {
 /// that are writable. A send eventfd only says readiness may have changed.
 fn accumulate_buffered(items: &mut [ZmqPollItem]) {
     for item in items.iter_mut() {
-        if item.socket.is_null() {
+        let Some(sock) = item_socket(item) else {
             continue;
-        }
-        // SAFETY: socket is non-null (checked above); caller guarantees a valid socket.
-        let sock = unsafe { &*(item.socket.cast::<Arc<OmqSocket>>()) };
+        };
         if (item.events & ZMQ_POLLIN) != 0 && recv_ready(sock) {
             item.revents |= ZMQ_POLLIN;
         }
@@ -99,24 +95,22 @@ fn accumulate_buffered(items: &mut [ZmqPollItem]) {
 fn arm_send_wakes(items: &[ZmqPollItem]) -> Vec<crate::send_recv::SendWake> {
     items
         .iter()
-        .filter(|item| !item.socket.is_null() && (item.events & ZMQ_POLLOUT) != 0)
-        .filter_map(|item| {
-            // SAFETY: socket is non-null (checked above); caller guarantees a valid socket.
-            let sock = unsafe { &*(item.socket.cast::<Arc<OmqSocket>>()) };
-            crate::send_recv::arm_send_wake(sock)
-        })
+        .filter(|item| (item.events & ZMQ_POLLOUT) != 0)
+        .filter_map(|item| crate::send_recv::arm_send_wake(item_socket(item)?))
         .collect()
 }
 
 fn any_socket_terminated(items: &[ZmqPollItem]) -> bool {
-    items.iter().any(|item| {
-        if item.socket.is_null() {
-            return false;
-        }
-        // SAFETY: socket is non-null (checked above); caller guarantees a valid socket.
-        let sock = unsafe { &*(item.socket.cast::<Arc<OmqSocket>>()) };
-        sock.ctx.is_effectively_terminated()
-    })
+    items
+        .iter()
+        .filter_map(item_socket)
+        .any(|sock| sock.ctx.is_effectively_terminated())
+}
+
+/// The socket of a socket item. `zmq_poll` validates every handle first.
+pub(crate) fn item_socket<'a>(item: &ZmqPollItem) -> Option<&'a Arc<OmqSocket>> {
+    // SAFETY: C callers pass null or a pointer from this API.
+    unsafe { crate::handle::socket(item.socket) }.ok()
 }
 
 /// Wait for socket or descriptor events, with a millisecond timeout; negative means
@@ -141,6 +135,12 @@ pub extern "C" fn zmq_poll(
         unsafe { std::slice::from_raw_parts_mut(items, n) }
     };
 
+    if items_slice
+        .iter()
+        .any(|item| !item.socket.is_null() && item_socket(item).is_none())
+    {
+        return crate::error::fail(crate::error::ENOTSOCK);
+    }
     if any_socket_terminated(items_slice) {
         return crate::error::fail(crate::error::ETERM);
     }

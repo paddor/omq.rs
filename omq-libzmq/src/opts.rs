@@ -558,8 +558,11 @@ pub extern "C" fn zmq_setsockopt(
     if sock.is_null() {
         return crate::error::fail(crate::error::ENOTSOCK);
     }
-    // SAFETY: caller guarantees sock is a valid socket pointer from zmq_socket.
-    let sock_arc = unsafe { &*(sock.cast::<std::sync::Arc<crate::socket::OmqSocket>>()) };
+    // SAFETY: C callers pass null or a pointer from this API.
+    let sock_arc = match unsafe { crate::handle::socket(sock) } {
+        Ok(socket) => socket,
+        Err(errno) => return crate::error::fail(errno),
+    };
 
     #[cfg(feature = "quic")]
     if let Some(rc) = quic::set(sock_arc, option, optval, optvallen) {
@@ -1215,9 +1218,11 @@ pub extern "C" fn omq_socket_set_plain_server_credentials(
     if credential_count > isize::MAX as usize / std::mem::size_of::<OmqPlainCredential>() {
         return fail(libc::EINVAL);
     }
-    // SAFETY: `sock` is non-null and must be a live handle returned by
-    // `zmq_socket`, matching the rest of this C API.
-    let socket = unsafe { &*(sock.cast::<std::sync::Arc<crate::socket::OmqSocket>>()) };
+    // SAFETY: C callers pass null or a pointer from this API.
+    let socket = match unsafe { crate::handle::socket(sock) } {
+        Ok(socket) => socket,
+        Err(errno) => return fail(errno),
+    };
     if socket
         .bound_or_connected
         .load(std::sync::atomic::Ordering::Acquire)
@@ -1304,8 +1309,11 @@ pub extern "C" fn zmq_getsockopt(
     if sock.is_null() {
         return crate::error::fail(crate::error::ENOTSOCK);
     }
-    // SAFETY: caller guarantees sock is a valid socket pointer from zmq_socket.
-    let sock_arc = unsafe { &*(sock.cast::<std::sync::Arc<crate::socket::OmqSocket>>()) };
+    // SAFETY: C callers pass null or a pointer from this API.
+    let sock_arc = match unsafe { crate::handle::socket(sock) } {
+        Ok(socket) => socket,
+        Err(errno) => return crate::error::fail(errno),
+    };
 
     #[cfg(feature = "quic")]
     if let Some(rc) = quic::get(sock_arc, option, optval, optvallen) {

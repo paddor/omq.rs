@@ -672,8 +672,11 @@ pub extern "C" fn zmq_send(
     if sock_ptr.is_null() {
         return fail(libc::EFAULT);
     }
-    // SAFETY: sock_ptr is non-null (checked above); caller guarantees a valid socket.
-    let sock = unsafe { &*(sock_ptr.cast::<Arc<OmqSocket>>()) };
+    // SAFETY: C callers pass null or a pointer from this API.
+    let sock = match unsafe { crate::handle::socket(sock_ptr) } {
+        Ok(socket) => socket,
+        Err(errno) => return fail(errno),
+    };
     if sock.ctx.is_effectively_terminated() {
         return fail(ETERM);
     }
@@ -714,8 +717,11 @@ pub extern "C" fn zmq_recv(
     if sock_ptr.is_null() {
         return fail(libc::EFAULT);
     }
-    // SAFETY: sock_ptr is non-null (checked above); caller guarantees a valid socket.
-    let sock = unsafe { &*(sock_ptr.cast::<Arc<OmqSocket>>()) };
+    // SAFETY: C callers pass null or a pointer from this API.
+    let sock = match unsafe { crate::handle::socket(sock_ptr) } {
+        Ok(socket) => socket,
+        Err(errno) => return fail(errno),
+    };
     if sock.ctx.is_effectively_terminated() {
         return fail(ETERM);
     }
@@ -1196,7 +1202,7 @@ mod tests {
         }
         assert_eq!(crate::zmq_bind(publisher, c"tcp://127.0.0.1:0".as_ptr()), 0);
         // SAFETY: publisher is a live socket returned by zmq_socket.
-        let socket = unsafe { &*publisher.cast::<Arc<OmqSocket>>() };
+        let socket = unsafe { crate::handle::socket(publisher) }.unwrap();
         let backend = socket.inner.get().unwrap();
         let io = socket.ctx.io_context().unwrap();
         let subscriber =
@@ -1291,7 +1297,7 @@ mod tests {
             );
         }
         // SAFETY: ctx is a live context returned by zmq_ctx_new.
-        let context = unsafe { &*ctx.cast::<Arc<crate::context::OmqContext>>() };
+        let context = unsafe { crate::handle::context(ctx) }.unwrap();
         let handle = context.handle().unwrap();
         let (paused_tx, paused_rx) = std::sync::mpsc::channel();
         let (resume_tx, resume_rx) = std::sync::mpsc::channel();

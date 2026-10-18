@@ -644,7 +644,7 @@ fn build_message_transforms(
                 });
             if !is_server {
                 socket.dialers.retain(|d| d.route_id != route_id);
-                socket.send_strategy.connect_pipe_removed(route_id);
+                socket.remove_connect_route(route_id);
             }
             Err(())
         }

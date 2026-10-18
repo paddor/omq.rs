@@ -341,7 +341,7 @@ impl SocketDriver {
             }) {
                 let entry = self.dart_endpoints.swap_remove(index);
                 entry.cancel.cancel();
-                self.send_strategy.connect_pipe_removed(entry.route_id);
+                self.remove_connect_route(entry.route_id);
                 removed.push(entry);
             } else {
                 index += 1;

@@ -148,7 +148,7 @@ impl SocketDriver {
             }
         });
         for route_id in removed_routes {
-            self.send_strategy.connect_pipe_removed(route_id);
+            self.remove_connect_route(route_id);
         }
         // Cancel matching UDP dialers AND tell the SendStrategy the
         // synthetic peer is gone so RADIO stops queuing through it.

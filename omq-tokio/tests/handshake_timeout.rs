@@ -213,3 +213,65 @@ async fn silent_inbound_peers_cannot_starve_outbound_connects() {
         .expect("outbound connect waited for inbound admission");
     drop(silent);
 }
+
+#[tokio::test]
+async fn blocked_authenticator_leaves_the_io_thread_to_other_connections() {
+    use std::sync::{Arc, Condvar, Mutex};
+
+    // One IO thread runs every connection below.
+    let context = omq_tokio::Context::with_config(omq_tokio::ContextConfig { io_threads: 1 });
+    let release = Arc::new((Mutex::new(false), Condvar::new()));
+    let gate = release.clone();
+    let (entered_tx, mut entered) = tokio::sync::mpsc::unbounded_channel();
+    let options = Options {
+        mechanism: omq_tokio::MechanismSetup::NullServer {
+            authenticator: omq_tokio::Authenticator::new(move |_| {
+                // Stands in for a slow ZAP handler.
+                let _ = entered_tx.send(());
+                let (lock, cvar) = &*gate;
+                let released = cvar
+                    .wait_timeout_while(lock.lock().unwrap(), Duration::from_secs(5), |released| {
+                        !*released
+                    })
+                    .unwrap()
+                    .0;
+                *released
+            }),
+        },
+        ..Options::default()
+    };
+    let guarded = context.socket(SocketType::Pull, options);
+    let guarded_endpoint = guarded.bind("tcp://127.0.0.1:0").await.unwrap();
+    let client = context.socket(SocketType::Push, Options::default());
+    client.connect(guarded_endpoint).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), entered.recv())
+        .await
+        .unwrap()
+        .unwrap();
+
+    let unrelated = tokio::time::timeout(Duration::from_secs(2), async {
+        let pull = context.socket(SocketType::Pull, Options::default());
+        let endpoint = pull.bind("tcp://127.0.0.1:0").await.unwrap();
+        let push = context.socket(SocketType::Push, Options::default());
+        push.connect(endpoint).await.unwrap();
+        push.send(Message::single("through")).await.unwrap();
+        pull.recv().await.unwrap()
+    })
+    .await;
+    {
+        let (lock, cvar) = &*release;
+        *lock.lock().unwrap() = true;
+        cvar.notify_all();
+    }
+    assert_eq!(
+        unrelated.expect("the IO thread waited for the authenticator"),
+        Message::single("through")
+    );
+
+    client.send(Message::single("admitted")).await.unwrap();
+    let admitted = tokio::time::timeout(Duration::from_secs(2), guarded.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(admitted, Message::single("admitted"));
+}

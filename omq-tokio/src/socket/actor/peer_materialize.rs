@@ -721,9 +721,12 @@ fn connection_config(
     } else {
         Role::Client
     };
+    // The driver runs authenticators on the blocking pool; a ZAP handler
+    // may take as long as the handshake timeout.
     let mut cfg = ConnectionConfig::new(role, socket.socket_type)
         .identity(options.identity.clone())
-        .mechanism(options.mechanism.clone());
+        .mechanism(options.mechanism.clone())
+        .defer_authentication(true);
     let peer_address = match peer_ident {
         PeerIdent::Socket(address) => Some(address.ip().to_string()),
         PeerIdent::Path(path) => Some(path.clone()),

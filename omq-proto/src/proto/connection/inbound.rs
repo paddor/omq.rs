@@ -11,7 +11,7 @@ use crate::message::{FrameFlags, Message, Payload};
 
 use super::super::command::{self, Command, PeerProperties};
 use super::super::greeting::{self, MechanismName, effective_minor};
-use super::super::mechanism::MechanismStep;
+use super::super::mechanism::{AuthenticationRequest, AuthenticationResult, MechanismStep};
 use super::super::{frame, is_compatible};
 #[cfg(feature = "curve")]
 use super::FrameTransform;
@@ -77,7 +77,31 @@ impl Connection {
     /// Whether [`Self::handle_input`] admits another wire chunk. False while
     /// buffered parsing is pending or automatic replies wait for output.
     pub fn accepts_input(&self) -> bool {
-        !self.input.pending && !self.input_blocked_on_output()
+        !self.input.pending && !self.input_blocked_on_output() && !self.awaiting_authentication()
+    }
+
+    /// Whether the handshake waits for [`Self::complete_authentication`].
+    /// Input stays buffered until then.
+    pub fn awaiting_authentication(&self) -> bool {
+        matches!(self.state, State::MechanismHandshake) && self.mechanism.awaiting_authentication()
+    }
+
+    /// Take the authenticator call a deferring connection waits for. Each
+    /// call is handed out once. See
+    /// [`ConnectionConfig::defer_authentication`](super::ConnectionConfig::defer_authentication).
+    pub fn take_authentication_request(&mut self) -> Option<AuthenticationRequest> {
+        self.mechanism.take_authentication_request()
+    }
+
+    /// Resume the handshake with the decision for the request from
+    /// [`Self::take_authentication_request`], then parse buffered input.
+    /// A failed decision queues the mechanism `ERROR` and returns an error.
+    pub fn complete_authentication(&mut self, result: AuthenticationResult) -> Result<()> {
+        let mut cmds = Vec::new();
+        let step = self.mechanism.complete_authentication(result, &mut cmds);
+        self.write_outbound_commands(&cmds)?;
+        self.finish_mechanism_step(step?)?;
+        self.drive()
     }
 
     /// Enable bounded parser turns for an I/O driver. Byte streams service
@@ -174,6 +198,9 @@ impl Connection {
     }
 
     fn try_advance_mechanism(&mut self) -> Result<bool> {
+        if self.mechanism.awaiting_authentication() {
+            return Ok(false);
+        }
         // Bound the frame before buffering its whole body. This runs
         // pre-authentication, so a peer must not be able to make us buffer an
         // arbitrary amount by declaring a huge command frame and dribbling
@@ -207,7 +234,10 @@ impl Connection {
         let mut cmds = Vec::new();
         let result = self.mechanism.on_command(cmd, &mut cmds);
         self.write_outbound_commands(&cmds)?;
-        let step = result?;
+        self.finish_mechanism_step(result?)
+    }
+
+    fn finish_mechanism_step(&mut self, step: MechanismStep) -> Result<()> {
         if let MechanismStep::Complete { peer_properties } = step {
             let peer_type = peer_properties
                 .socket_type
@@ -673,6 +703,13 @@ impl Connection {
     }
 
     #[cfg(feature = "ws")]
+    fn ws_input_paused(&mut self) -> bool {
+        matches!(self.state, State::Closed)
+            || self.pause_input_for_output()
+            || self.awaiting_authentication()
+    }
+
+    #[cfg(feature = "ws")]
     fn drive_ws(&mut self) -> Result<()> {
         use super::super::ws_codec;
 
@@ -684,7 +721,7 @@ impl Connection {
             (self.input.budget || self.config.ws_input_budget).then(super::ws::Service::new);
 
         loop {
-            if matches!(self.state, State::Closed) || self.pause_input_for_output() {
+            if self.ws_input_paused() {
                 return Ok(());
             }
             let before = self.in_buf.len();

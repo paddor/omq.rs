@@ -479,6 +479,86 @@ impl std::fmt::Debug for Authenticator {
     }
 }
 
+/// An authenticator call that a deferring connection waits for. It may
+/// block, so run it off the I/O thread and pass the result to
+/// [`crate::proto::Connection::complete_authentication`].
+#[derive(Debug)]
+pub struct AuthenticationRequest {
+    authenticator: Authenticator,
+    peer: MechanismPeerInfo,
+}
+
+impl AuthenticationRequest {
+    /// The peer being authenticated.
+    #[must_use]
+    pub fn peer(&self) -> &MechanismPeerInfo {
+        &self.peer
+    }
+
+    /// Call the authenticator.
+    #[must_use]
+    pub fn run(&self) -> AuthenticationResult {
+        self.authenticator.authenticate(&self.peer)
+    }
+}
+
+/// Runs a server mechanism's authenticator inline, or parks the call for the
+/// I/O driver when the connection defers authentication.
+#[derive(Debug, Default)]
+pub(crate) struct AuthGate {
+    defer: bool,
+    waiting: bool,
+    request: Option<Box<AuthenticationRequest>>,
+}
+
+impl AuthGate {
+    /// The decision now, or `None` while the parked call waits for the driver.
+    fn decide(
+        &mut self,
+        authenticator: &Authenticator,
+        peer: MechanismPeerInfo,
+    ) -> Option<AuthenticationResult> {
+        if !self.defer {
+            return Some(authenticator.authenticate(&peer));
+        }
+        self.waiting = true;
+        self.request = Some(Box::new(AuthenticationRequest {
+            authenticator: authenticator.clone(),
+            peer,
+        }));
+        None
+    }
+
+    fn finish(&mut self) -> Result<()> {
+        if !self.waiting {
+            return Err(Error::Protocol("no authentication is pending".into()));
+        }
+        self.waiting = false;
+        self.request = None;
+        Ok(())
+    }
+}
+
+/// Queue the mechanism `ERROR` for a failed decision and fail the handshake.
+fn check_authentication(
+    result: &AuthenticationResult,
+    mechanism: &str,
+    out: &mut Vec<Command>,
+) -> Result<()> {
+    if result.status == AuthenticationStatus::Success {
+        return Ok(());
+    }
+    if result.status != AuthenticationStatus::TemporaryFailure {
+        out.push(Command::Error {
+            reason: result.status.code().into(),
+        });
+    }
+    Err(Error::HandshakeFailed(format!(
+        "{mechanism} authentication failed with status {}",
+        result.status.code()
+    )))
+}
+
 /// Re-wrap a raw command body with its name length prefix so it can be
 /// fed to `command::decode`. Used by `NullMechanism` to parse the property
 /// list inside a raw `Unknown { name: "READY", body }`.
@@ -566,6 +646,60 @@ impl SecurityMechanism {
         }
     }
 
+    /// Park authenticator calls for the I/O driver instead of running them.
+    pub(crate) fn set_defer_authentication(&mut self, defer: bool) {
+        if let Some(gate) = self.auth_gate() {
+            gate.defer = defer;
+        }
+    }
+
+    /// The parked authenticator call, handed out once.
+    pub(crate) fn take_authentication_request(&mut self) -> Option<AuthenticationRequest> {
+        self.auth_gate()
+            .and_then(|gate| gate.request.take())
+            .map(|request| *request)
+    }
+
+    /// Whether the handshake waits for an authenticator decision.
+    pub(crate) fn awaiting_authentication(&self) -> bool {
+        match self {
+            Self::Null(m) => m.auth.waiting,
+            #[cfg(feature = "curve")]
+            Self::Curve(m) => m.awaiting_authentication(),
+            #[cfg(feature = "plain")]
+            Self::Plain(m) => m.awaiting_authentication(),
+        }
+    }
+
+    /// Resume the handshake with the authenticator's decision.
+    pub(crate) fn complete_authentication(
+        &mut self,
+        result: AuthenticationResult,
+        out: &mut Vec<Command>,
+    ) -> Result<MechanismStep> {
+        match self {
+            Self::Null(m) => m.complete_authentication(result, out),
+            #[cfg(feature = "curve")]
+            Self::Curve(m) => m.complete_authentication(result, out),
+            #[cfg(feature = "plain")]
+            Self::Plain(m) => m.complete_authentication(result, out),
+        }
+    }
+
+    #[cfg_attr(
+        not(any(feature = "curve", feature = "plain")),
+        expect(clippy::unnecessary_wraps, reason = "client mechanisms have no gate")
+    )]
+    fn auth_gate(&mut self) -> Option<&mut AuthGate> {
+        match self {
+            Self::Null(m) => Some(&mut m.auth),
+            #[cfg(feature = "curve")]
+            Self::Curve(m) => m.auth_gate(),
+            #[cfg(feature = "plain")]
+            Self::Plain(m) => m.auth_gate(),
+        }
+    }
+
     /// Build the post-handshake frame transform. Only present when
     /// CURVE produces a per-part MESSAGE-command transform.
     #[cfg(feature = "curve")]
@@ -648,11 +782,14 @@ pub(crate) struct NullMechanism {
     authenticator: Option<Authenticator>,
     peer_address: Option<String>,
     authentication: Option<AuthenticationResult>,
+    auth: AuthGate,
+    pending_props: Option<PeerProperties>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NullState {
     NotStarted,
+    AwaitingAuthentication,
     AwaitingReady,
     Done,
 }
@@ -664,41 +801,60 @@ impl NullMechanism {
             authenticator: None,
             peer_address: None,
             authentication: None,
+            auth: AuthGate::default(),
+            pending_props: None,
         }
     }
 
     pub(crate) fn new_server(authenticator: Authenticator, peer_address: Option<String>) -> Self {
         Self {
-            state: NullState::NotStarted,
             authenticator: Some(authenticator),
             peer_address,
-            authentication: None,
+            ..Self::new()
         }
     }
 
     fn start(&mut self, out: &mut Vec<Command>, our_props: PeerProperties) -> Result<()> {
-        if let Some(authenticator) = &self.authenticator {
-            let result = authenticator.authenticate(&MechanismPeerInfo {
-                mechanism: MechanismName::NULL,
-                public_key: [0; 32],
-                identity: None,
-                peer_address: self.peer_address.clone(),
-                username: None,
-                password: None,
-            });
-            if result.status != AuthenticationStatus::Success {
-                if result.status != AuthenticationStatus::TemporaryFailure {
-                    out.push(Command::Error {
-                        reason: result.status.code().into(),
-                    });
-                }
-                return Err(Error::HandshakeFailed(format!(
-                    "NULL authentication failed with status {}",
-                    result.status.code()
-                )));
-            }
-            self.authentication = Some(result);
+        let Some(authenticator) = &self.authenticator else {
+            return self.send_ready(None, out, our_props);
+        };
+        let peer = MechanismPeerInfo {
+            mechanism: MechanismName::NULL,
+            public_key: [0; 32],
+            identity: None,
+            peer_address: self.peer_address.clone(),
+            username: None,
+            password: None,
+        };
+        let Some(result) = self.auth.decide(authenticator, peer) else {
+            self.pending_props = Some(our_props);
+            self.state = NullState::AwaitingAuthentication;
+            return Ok(());
+        };
+        self.send_ready(Some(result), out, our_props)
+    }
+
+    fn complete_authentication(
+        &mut self,
+        result: AuthenticationResult,
+        out: &mut Vec<Command>,
+    ) -> Result<MechanismStep> {
+        self.auth.finish()?;
+        let our_props = self.pending_props.take().unwrap_or_default();
+        self.send_ready(Some(result), out, our_props)?;
+        Ok(MechanismStep::Continue)
+    }
+
+    fn send_ready(
+        &mut self,
+        authentication: Option<AuthenticationResult>,
+        out: &mut Vec<Command>,
+        our_props: PeerProperties,
+    ) -> Result<()> {
+        if let Some(result) = &authentication {
+            check_authentication(result, "NULL", out)?;
         }
+        self.authentication = authentication;
         out.push(Command::Ready(our_props));
         self.state = NullState::AwaitingReady;
         Ok(())

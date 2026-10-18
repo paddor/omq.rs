@@ -297,6 +297,28 @@ impl CurveMechanism {
         }
     }
 
+    pub(super) fn auth_gate(&mut self) -> Option<&mut super::AuthGate> {
+        match self {
+            Self::Client(_) => None,
+            Self::Server(s) => Some(&mut s.auth),
+        }
+    }
+
+    pub(super) fn awaiting_authentication(&self) -> bool {
+        matches!(self, Self::Server(s) if s.auth.waiting)
+    }
+
+    pub(super) fn complete_authentication(
+        &mut self,
+        result: super::AuthenticationResult,
+        out: &mut Vec<Command>,
+    ) -> Result<MechanismStep> {
+        match self {
+            Self::Client(_) => Err(Error::Protocol("no authentication is pending".into())),
+            Self::Server(s) => s.complete_authentication(result, out),
+        }
+    }
+
     pub(crate) fn build_transform(&self) -> Result<CurveTransform> {
         match self {
             Self::Client(c) => c.build_transform(),
@@ -634,6 +656,8 @@ pub(crate) struct CurveServer {
     our_props: PeerProperties,
     out_counter: u64,
     state: CurveServerState,
+    auth: super::AuthGate,
+    pending_props: Option<PeerProperties>,
 }
 
 impl std::fmt::Debug for CurveServer {
@@ -682,6 +706,8 @@ impl CurveServer {
             our_props: PeerProperties::default(),
             out_counter: 0,
             state: CurveServerState::Init,
+            auth: super::AuthGate::default(),
+            pending_props: None,
         }
     }
 
@@ -724,37 +750,23 @@ impl CurveServer {
                 let authentication = std::sync::Arc::make_mut(&mut peer_props.authentication);
                 authentication.mechanism = Some(crate::proto::MechanismName::CURVE);
                 authentication.public_key = Some(crate::PeerPublicKey::Curve(peer_public_key));
-                if let Some(auth) = &self.authenticator {
-                    let result = auth.authenticate(&super::MechanismPeerInfo {
-                        mechanism: crate::proto::greeting::MechanismName::CURVE,
-                        public_key: peer_public_key,
-                        identity: peer_props.identity.clone(),
-                        peer_address: self.peer_address.clone(),
-                        username: None,
-                        password: None,
-                    });
-                    if result.status != super::AuthenticationStatus::Success {
-                        if result.status != super::AuthenticationStatus::TemporaryFailure {
-                            out.push(Command::Error {
-                                reason: result.status.code().into(),
-                            });
-                        }
-                        return Err(Error::HandshakeFailed(format!(
-                            "CURVE authentication failed with status {}",
-                            result.status.code()
-                        )));
-                    }
-                    result.apply_to(&mut peer_props, crate::proto::MechanismName::CURVE);
-                }
                 // parse_initiate transitions state to Done.
-                let ready = self.build_ready()?;
-                out.push(Command::Unknown {
-                    name: Bytes::from_static(b"READY"),
-                    body: ready,
-                });
-                Ok(MechanismStep::Complete {
-                    peer_properties: peer_props,
-                })
+                let Some(auth) = &self.authenticator else {
+                    return self.send_ready(out, peer_props);
+                };
+                let peer = super::MechanismPeerInfo {
+                    mechanism: crate::proto::greeting::MechanismName::CURVE,
+                    public_key: peer_public_key,
+                    identity: peer_props.identity.clone(),
+                    peer_address: self.peer_address.clone(),
+                    username: None,
+                    password: None,
+                };
+                let Some(result) = self.auth.decide(auth, peer) else {
+                    self.pending_props = Some(peer_props);
+                    return Ok(MechanismStep::Continue);
+                };
+                self.admit(result, out, peer_props)
             }
             (n, st) => Err(Error::HandshakeFailed(format!(
                 "CURVE server state {:?} cannot consume command {:?}",
@@ -762,6 +774,42 @@ impl CurveServer {
                 std::str::from_utf8(n).unwrap_or("<binary>")
             ))),
         }
+    }
+
+    fn complete_authentication(
+        &mut self,
+        result: super::AuthenticationResult,
+        out: &mut Vec<Command>,
+    ) -> Result<MechanismStep> {
+        self.auth.finish()?;
+        let peer_props = self.pending_props.take().unwrap_or_default();
+        self.admit(result, out, peer_props)
+    }
+
+    fn admit(
+        &mut self,
+        result: super::AuthenticationResult,
+        out: &mut Vec<Command>,
+        mut peer_props: PeerProperties,
+    ) -> Result<MechanismStep> {
+        super::check_authentication(&result, "CURVE", out)?;
+        result.apply_to(&mut peer_props, crate::proto::MechanismName::CURVE);
+        self.send_ready(out, peer_props)
+    }
+
+    fn send_ready(
+        &mut self,
+        out: &mut Vec<Command>,
+        peer_props: PeerProperties,
+    ) -> Result<MechanismStep> {
+        let ready = self.build_ready()?;
+        out.push(Command::Unknown {
+            name: Bytes::from_static(b"READY"),
+            body: ready,
+        });
+        Ok(MechanismStep::Complete {
+            peer_properties: peer_props,
+        })
     }
 
     fn parse_hello(&mut self, body: &[u8]) -> Result<(StaticSecret, PublicKey)> {

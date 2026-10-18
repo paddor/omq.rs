@@ -12,6 +12,7 @@ use crate::engine::{
 };
 use bytes::Bytes;
 use omq_proto::{
+    AuthenticationResult, AuthenticationStatus,
     error::{Error, Result},
     frame_buffer::FrameBuffer,
     proto::Connection,
@@ -65,9 +66,16 @@ impl<'events> Activation<'_, 'events> {
         >,
     {
         let mut activation_budget = COMMAND_DRAIN_BUDGET;
+        let mut authentication = None;
         loop {
             if self.drive_events()? == PreActivationStep::Close {
                 return Ok(PreActivationStep::Close);
+            }
+            if authentication.is_none()
+                && let Some(request) = self.connection.take_authentication_request()
+            {
+                // Authenticators may block, as on a ZAP handler.
+                authentication = Some(tokio::task::spawn_blocking(move || request.run()));
             }
             let want_write = self.connection.has_pending_transmit() || !self.eq.is_empty();
             let resume_input = self.pending_input_error.is_none()
@@ -119,6 +127,16 @@ impl<'events> Activation<'_, 'events> {
 
                 () = async { self.setup_cancel.as_ref().unwrap().cancelled().await; }, if self.setup_cancel.is_some() => {
                     return Ok(PreActivationStep::Close);
+                }
+
+                result = async { authentication.as_mut().unwrap().await }, if authentication.is_some() => {
+                    authentication = None;
+                    // A panicking authenticator fails like a broken auth service.
+                    let result = result.unwrap_or(AuthenticationResult {
+                        status: AuthenticationStatus::InternalError,
+                        ..AuthenticationResult::deny()
+                    });
+                    *self.pending_input_error = self.connection.complete_authentication(result).err();
                 }
 
                 () = sleep_until_opt(*self.handshake_deadline), if self.handshake_deadline.is_some() => {

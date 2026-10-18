@@ -1373,3 +1373,171 @@ fn curve_security_roles_and_discard_preserve_encrypted_stream() {
         b"next nonce".as_slice()
     );
 }
+
+mod deferred_authentication {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+    use omq_proto::proto::mechanism::MechanismSetup;
+    use omq_proto::{AuthenticationResult, Authenticator};
+
+    struct Counted {
+        calls: Arc<AtomicUsize>,
+        authenticator: Authenticator,
+    }
+
+    fn counted(result: AuthenticationResult) -> Counted {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = calls.clone();
+        Counted {
+            calls,
+            authenticator: Authenticator::new_with_result(move |_| {
+                seen.fetch_add(1, Ordering::SeqCst);
+                result.clone()
+            }),
+        }
+    }
+
+    /// Pump both directions. Run each deferred call only after checking that
+    /// the server neither called the authenticator inline nor sent anything
+    /// past it.
+    fn pump(
+        client: &mut Connection,
+        server: &mut Connection,
+        calls: &AtomicUsize,
+    ) -> Result<(), Error> {
+        loop {
+            // Like an I/O driver, hold input while the server waits.
+            let c_out = if server.accepts_input() {
+                client.poll_transmit()
+            } else {
+                Bytes::new()
+            };
+            let s_out = server.poll_transmit();
+            let request = server.take_authentication_request();
+            if c_out.is_empty() && s_out.is_empty() && request.is_none() {
+                return Ok(());
+            }
+            if !c_out.is_empty() {
+                client.advance_transmit(c_out.len());
+                server.handle_input(c_out)?;
+            }
+            if !s_out.is_empty() {
+                server.advance_transmit(s_out.len());
+                client.handle_input(s_out)?;
+            }
+            if let Some(request) = request {
+                assert_eq!(calls.load(Ordering::SeqCst), 0, "called inline");
+                assert!(server.awaiting_authentication());
+                assert!(!server.accepts_input());
+                assert!(server.poll_transmit().is_empty(), "sent past the decision");
+                assert!(server.take_authentication_request().is_none());
+                server.complete_authentication(request.run())?;
+            }
+        }
+    }
+
+    fn pair(server: MechanismSetup, client: MechanismSetup) -> (Connection, Connection) {
+        let server = Connection::new(
+            ConnectionConfig::new(Role::Server, SocketType::Pull)
+                .mechanism(server)
+                .defer_authentication(true),
+        );
+        let client = Connection::new(
+            ConnectionConfig::new(Role::Client, SocketType::Push).mechanism(client),
+        );
+        (client, server)
+    }
+
+    fn assert_admitted(server: MechanismSetup, client: MechanismSetup, calls: &AtomicUsize) {
+        let (mut client, mut server) = pair(server, client);
+        pump(&mut client, &mut server, calls).unwrap();
+        assert!(client.is_ready() && server.is_ready());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let Some(Event::HandshakeSucceeded {
+            peer_properties, ..
+        }) = server.poll_event()
+        else {
+            panic!("server handshake event");
+        };
+        assert_eq!(
+            peer_properties.authentication.user_id.as_deref(),
+            Some(&b"alice"[..])
+        );
+    }
+
+    fn allow() -> AuthenticationResult {
+        AuthenticationResult::allow().with_user_id(Bytes::from_static(b"alice"))
+    }
+
+    #[test]
+    fn null_server_waits_for_the_decision() {
+        let auth = counted(allow());
+        assert_admitted(
+            MechanismSetup::NullServer {
+                authenticator: auth.authenticator,
+            },
+            MechanismSetup::Null,
+            &auth.calls,
+        );
+    }
+
+    #[test]
+    fn denied_decision_sends_error_and_fails_both_sides() {
+        let auth = counted(AuthenticationResult::deny());
+        let (mut client, mut server) = pair(
+            MechanismSetup::NullServer {
+                authenticator: auth.authenticator,
+            },
+            MechanismSetup::Null,
+        );
+        let err = pump(&mut client, &mut server, &auth.calls).unwrap_err();
+        assert!(matches!(err, Error::HandshakeFailed(_)), "{err:?}");
+        let error = server.poll_transmit();
+        assert!(!error.is_empty(), "server must queue ERROR");
+        assert!(matches!(
+            client.handle_input(error),
+            Err(Error::HandshakeRefused(_))
+        ));
+        assert!(!server.is_ready());
+    }
+
+    #[cfg(feature = "plain")]
+    #[test]
+    fn plain_server_waits_for_the_decision() {
+        let auth = counted(allow());
+        assert_admitted(
+            MechanismSetup::PlainServer {
+                authenticator: auth.authenticator,
+            },
+            MechanismSetup::PlainClient {
+                username: "alice".into(),
+                password: "secret".into(),
+            },
+            &auth.calls,
+        );
+    }
+
+    #[cfg(feature = "curve")]
+    #[test]
+    fn curve_server_waits_for_the_decision() {
+        use omq_proto::proto::mechanism::{CurveKeypair, CurveServerOptions};
+        let auth = counted(allow());
+        let server_kp = CurveKeypair::generate();
+        let server_public = server_kp.public;
+        let mut options = CurveServerOptions::default();
+        options.authenticator = Some(auth.authenticator);
+        assert_admitted(
+            MechanismSetup::CurveServer {
+                our_keypair: server_kp,
+                options,
+            },
+            MechanismSetup::CurveClient {
+                our_keypair: CurveKeypair::generate(),
+                server_public,
+            },
+            &auth.calls,
+        );
+    }
+}

@@ -37,7 +37,10 @@ pub mod transport;
 // Re-export the sans-I/O surface so downstream callers don't have
 // to depend on omq-proto explicitly. Identical surface to the
 // pre-split crate.
-pub use omq_proto::{AuthenticationResult, AuthenticationStatus, Authenticator, MechanismPeerInfo};
+pub use omq_proto::{
+    AuthenticationRequest, AuthenticationResult, AuthenticationStatus, Authenticator,
+    MechanismPeerInfo,
+};
 pub use omq_proto::{
     CompressionKind, CompressionOptions, Endpoint, EndpointRole, EndpointSpec, Error, Frame,
     FrameFlags, HandshakeRefusal, KeepAlive, MechanismConfig, MechanismSetup, Message, MessageIter,

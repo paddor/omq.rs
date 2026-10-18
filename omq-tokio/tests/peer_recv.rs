@@ -1051,3 +1051,56 @@ async fn full_peer_queue_saturation_transport_and_io_thread_matrix() {
         }
     }
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn blocking_receive_parks_while_a_receipt_holds_the_only_source() {
+    fn thread_cpu() -> Duration {
+        let stat = std::fs::read_to_string("/proc/thread-self/schedstat").unwrap();
+        Duration::from_nanos(stat.split_whitespace().next().unwrap().parse().unwrap())
+    }
+    let ctx = Context::new();
+    let server = ctx.blocking_socket(SocketType::Peer, options("server"));
+    let client = ctx.blocking_socket(SocketType::Peer, options("client"));
+    let endpoint = Endpoint::Inproc {
+        name: "peer-receipt-park".into(),
+    };
+    server.bind(endpoint.clone()).unwrap();
+    client.connect(endpoint).unwrap();
+    for body in [b"0", b"1"] {
+        let message = Message::multipart([Bytes::from_static(b"server"), Bytes::from_static(body)]);
+        let deadline = std::time::Instant::now() + DEADLINE;
+        while client.send(message.clone()).is_err() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "client never connected"
+            );
+            std::thread::yield_now();
+        }
+    }
+    let deadline = std::time::Instant::now() + DEADLINE;
+    let (_receipt, _first) = loop {
+        match server.as_ref().try_recv_with_receipt(None) {
+            Ok(claimed) => break claimed,
+            Err(_) => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "first message never arrived"
+                );
+                std::thread::yield_now();
+            }
+        }
+    };
+    // The held receipt keeps the queued second message unavailable. Its
+    // permit must not make the receive loop spin instead of parking.
+    let receiving = server.clone();
+    let (result, cpu) = std::thread::spawn(move || {
+        let before = thread_cpu();
+        let result = receiving.recv_timeout(Duration::from_millis(300));
+        (result, thread_cpu() - before)
+    })
+    .join()
+    .unwrap();
+    assert!(result.is_err());
+    assert!(cpu < Duration::from_millis(100), "receive spun for {cpu:?}");
+}

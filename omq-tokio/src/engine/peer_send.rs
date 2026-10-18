@@ -179,17 +179,26 @@ impl Producer {
     /// Whether a send may be admitted now, judged without polling the ring:
     /// the last ring poll found space and the shared budget has room.
     pub(crate) fn has_space(&self) -> bool {
-        !self.ring_space.waiting.load(Ordering::Acquire)
-            && self.shared.messages.load(Ordering::Acquire) < self.shared.max_messages
-            && self.shared.bytes.load(Ordering::Acquire) < self.shared.max_bytes
+        !self.ring_space.waiting.load(Ordering::Acquire) && self.budget_has_room()
+    }
+
+    /// Shared budget room for the message a budget rejection left waiting,
+    /// or for any message otherwise. Readiness and admission must agree, or
+    /// a poller wakes for a send that fails again.
+    fn budget_has_room(&self) -> bool {
+        let bytes = self.shared.bytes.load(Ordering::Acquire);
+        self.shared.messages.load(Ordering::Acquire) < self.shared.max_messages
+            && if self.waiting_budget {
+                bytes <= self.shared.max_bytes.saturating_sub(self.waiting_bytes)
+            } else {
+                bytes < self.shared.max_bytes
+            }
     }
 
     pub(crate) fn ready(&self) -> bool {
         !self.alive()
             || if self.waiting_budget {
-                self.shared.messages.load(Ordering::Acquire) < self.shared.max_messages
-                    && self.shared.bytes.load(Ordering::Acquire)
-                        <= self.shared.max_bytes.saturating_sub(self.waiting_bytes)
+                self.budget_has_room()
             } else {
                 // A ring wake must release this wait even if another producer
                 // filled the shared budget. Retry then selects the budget wake.
@@ -510,5 +519,22 @@ mod tests {
             busy.try_send(Message::single("busy")).unwrap();
         }
         panic!("quiet sender starved beyond one fanring burst");
+    }
+    #[test]
+    fn readiness_after_a_budget_rejection_matches_admission() {
+        // Each part also costs one 64-byte payload slot.
+        let options = Options::default().peer_send_max_bytes(300);
+        let (mut sender, _receiver) = queue_with_options(16, &options);
+        sender.try_send(Message::single(vec![0; 100])).unwrap();
+        let large = Message::single(vec![0; 100]);
+        assert!(matches!(
+            sender.try_send(large.clone()),
+            Err(SendPipeError::Full(_))
+        ));
+        // Bytes remain below the cap, but not enough for the waiting send.
+        assert!(!sender.has_space());
+        assert!(!sender.ready());
+        sender.try_send(Message::single(vec![0; 8])).unwrap();
+        assert!(sender.has_space());
     }
 }

@@ -952,8 +952,11 @@ impl SpscAwareRecv {
         if self.fanin.is_some() && !self.has_ring_sources() {
             return true;
         }
-        if let Some(peer) = &self.peer_recv {
-            return peer.lock().is_empty();
+        if self.peer_recv.is_some() {
+            // The PEER drain clears or rearms its signal before reporting
+            // empty. Its message permits also count held receipts and paused
+            // lanes, which no drain returns, so they must not prevent parking.
+            return true;
         }
         let guard = self.drain_state.lock();
         Self::state_is_empty(&guard) && self.conflate_slot_empty()

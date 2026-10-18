@@ -67,6 +67,11 @@ impl Admission {
         }
     }
 
+    /// Slots currently reserved.
+    pub(crate) fn in_use(&self) -> usize {
+        self.used.load(Ordering::Acquire)
+    }
+
     /// Reserve a slot for a peer at `source`, within the socket limit and
     /// its per-source share. Returns `None` without waiting.
     pub(crate) fn try_acquire_from(&self, source: Option<IpAddr>) -> Option<Permit> {

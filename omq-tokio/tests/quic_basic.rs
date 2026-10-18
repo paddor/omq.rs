@@ -643,3 +643,30 @@ async fn plain_predicate_receives_peer_info_during_quic_handshake() {
     assert_eq!(received.part_bytes(0).as_deref(), Some(&b"accepted"[..]));
     assert!(called.load(std::sync::atomic::Ordering::Relaxed));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn connection_bursts_past_half_the_setup_slots_complete_through_retry() {
+    let tls = tls_for(&["127.0.0.1"]);
+    let server = Socket::new(SocketType::Pull, server_options(&tls));
+    let endpoint = server.bind(quic(0)).await.unwrap();
+    // More concurrent setups than half of the listener's 32 slots makes the
+    // listener require address validation, which clients satisfy by retrying.
+    let clients: Vec<Socket> = (0..24)
+        .map(|_| Socket::new(SocketType::Push, client_options(&tls)))
+        .collect();
+    for client in &clients {
+        client.connect(endpoint.clone()).await.unwrap();
+    }
+    for client in &clients {
+        client
+            .wait_connected(1, Duration::from_secs(10))
+            .await
+            .expect("validated client did not connect");
+    }
+    for client in &clients {
+        client.send(Message::single("hello")).await.unwrap();
+    }
+    for _ in 0..clients.len() {
+        assert_eq!(recv(&server).await, Message::single("hello"));
+    }
+}

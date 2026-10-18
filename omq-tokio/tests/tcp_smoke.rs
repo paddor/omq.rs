@@ -144,3 +144,50 @@ async fn latency_client_server_tcp_smoke() {
         .unwrap();
     assert_eq!(reply, Message::single("latency-server-reply"));
 }
+
+/// `tcp_user_timeout` drops a peer that stops reading; without it, the
+/// connection stays up.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+#[tokio::test]
+async fn tcp_user_timeout_drops_a_peer_that_stops_reading() {
+    for user_timeout in [None, Some(Duration::from_millis(300))] {
+        let buffers = Options::default()
+            .send_buffer_size(64 * 1024)
+            .recv_buffer_size(64 * 1024);
+        let pull = Socket::new(SocketType::Pull, buffers.clone().recv_hwm(1));
+        let port = test_support::bind_loopback(&pull).await;
+        let mut options = buffers.send_hwm(1);
+        if let Some(timeout) = user_timeout {
+            options = options.tcp_user_timeout(timeout);
+        }
+        let push = Socket::new(SocketType::Push, options);
+        let mut monitor = push.monitor();
+        push.connect(test_support::tcp_loopback(port))
+            .await
+            .unwrap();
+        test_support::wait_for_handshake(&push).await;
+
+        // PULL never reads, so both kernel buffers fill and the window closes.
+        let payload = bytes::Bytes::from(vec![0; 64 * 1024]);
+        while tokio::time::timeout(
+            Duration::from_millis(200),
+            push.send(Message::single(payload.clone())),
+        )
+        .await
+        .is_ok()
+        {}
+        let disconnected = tokio::time::timeout(Duration::from_secs(3), async {
+            while !matches!(
+                monitor.recv().await.unwrap(),
+                omq_tokio::MonitorEvent::Disconnected { .. }
+            ) {}
+        })
+        .await
+        .is_ok();
+        assert_eq!(
+            disconnected,
+            user_timeout.is_some(),
+            "user timeout {user_timeout:?}"
+        );
+    }
+}

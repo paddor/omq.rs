@@ -53,6 +53,7 @@ pub struct Overlay {
     pub keepalive_idle: Option<Duration>,
     pub keepalive_intvl: Option<Duration>,
     pub keepalive_cnt: Option<u32>,
+    pub tcp_user_timeout: Option<Duration>,
     pub max_message_size: Option<usize>,
     pub router_mandatory: bool,
     pub heartbeat_ivl: Option<Duration>,
@@ -97,6 +98,7 @@ impl Default for Overlay {
             keepalive_idle: None,
             keepalive_intvl: None,
             keepalive_cnt: None,
+            tcp_user_timeout: None,
             max_message_size: None,
             router_mandatory: false,
             heartbeat_ivl: None,
@@ -148,6 +150,7 @@ impl Overlay {
             handshake_timeout: self.handshake_ivl,
             conflate: self.conflate,
             tcp_keepalive: self.keepalive,
+            tcp_user_timeout: self.tcp_user_timeout,
             send_buffer_size: self.send_buffer_size,
             recv_buffer_size: self.recv_buffer_size,
             reconnect: match (self.reconnect_ivl, self.reconnect_ivl_max) {
@@ -268,6 +271,7 @@ impl Overlay {
             keepalive_idle: None,
             keepalive_intvl: None,
             keepalive_cnt: None,
+            tcp_user_timeout: o.tcp_user_timeout,
             max_message_size: o.max_message_size,
             router_mandatory: o.router_mandatory,
             heartbeat_ivl: o.heartbeat_interval,
@@ -479,6 +483,17 @@ pub fn setsockopt(
             };
             promote_keepalive(&mut ov);
         }
+        constants::TCP_MAXRT => {
+            ov.tcp_user_timeout = match value.extract::<i64>()? {
+                v if v < 0 => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "TCP_MAXRT must be non-negative",
+                    ));
+                }
+                0 => None,
+                v => Some(Duration::from_millis(v as u64)),
+            };
+        }
         constants::SNDBUF => {
             let v = value.extract::<i64>()?;
             ov.send_buffer_size = if v <= 0 { None } else { Some(v as usize) };
@@ -565,7 +580,6 @@ pub fn setsockopt(
         | constants::REQ_RELAXED
         | constants::ROUTER_HANDOVER
         | constants::TCP_ACCEPT_FILTER
-        | constants::TCP_MAXRT
         | constants::MULTICAST_HOPS
         | constants::RECOVERY_IVL
         | constants::ZAP_DOMAIN => {}
@@ -733,6 +747,10 @@ pub fn getsockopt<'py>(
             let v = sock.overlay.lock().unwrap().conflate as i64;
             Ok(int_to_bound(py, v))
         }
+        constants::TCP_MAXRT => {
+            let timeout = sock.overlay.lock().unwrap().tcp_user_timeout;
+            Ok(int_to_bound(py, as_ms(timeout).max(0)))
+        }
         constants::SNDBUF => {
             let v = sock.overlay.lock().unwrap().send_buffer_size.unwrap_or(0) as i64;
             Ok(int_to_bound(py, v))
@@ -835,7 +853,6 @@ pub fn getsockopt<'py>(
         | constants::REQ_CORRELATE
         | constants::REQ_RELAXED
         | constants::ROUTER_HANDOVER
-        | constants::TCP_MAXRT
         | constants::MULTICAST_HOPS
         | constants::RECOVERY_IVL => Ok(int_to_bound(py, 0_i64)),
         constants::RECONNECT_STOP => Ok(int_to_bound(

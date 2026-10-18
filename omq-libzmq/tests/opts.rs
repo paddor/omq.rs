@@ -44,6 +44,7 @@ const ZMQ_TCP_KEEPALIVE: i32 = 34;
 const ZMQ_TCP_KEEPALIVE_CNT: i32 = 35;
 const ZMQ_TCP_KEEPALIVE_IDLE: i32 = 36;
 const ZMQ_TCP_KEEPALIVE_INTVL: i32 = 37;
+const ZMQ_TCP_MAXRT: i32 = 80;
 const ZMQ_SNDBUF: i32 = 11;
 const ZMQ_RCVBUF: i32 = 12;
 const ZMQ_MECHANISM: i32 = 43;
@@ -759,6 +760,22 @@ fn tcp_keepalive_roundtrip() {
 
     set_i32(s, ZMQ_TCP_KEEPALIVE_INTVL, 30);
     assert_eq!(get_i32(s, ZMQ_TCP_KEEPALIVE_INTVL), 30);
+
+    zmq_close(s);
+    zmq_ctx_term(ctx);
+}
+
+#[test]
+fn tcp_maxrt_roundtrip() {
+    let ctx = zmq_ctx_new();
+    let s = zmq_socket(ctx, ZMQ_PUSH);
+
+    assert_eq!(get_i32(s, ZMQ_TCP_MAXRT), 0);
+    assert_eq!(set_i32(s, ZMQ_TCP_MAXRT, 1500), 0);
+    assert_eq!(get_i32(s, ZMQ_TCP_MAXRT), 1500);
+    assert_eq!(set_i32(s, ZMQ_TCP_MAXRT, -1), -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+    assert_eq!(get_i32(s, ZMQ_TCP_MAXRT), 1500);
 
     zmq_close(s);
     zmq_ctx_term(ctx);

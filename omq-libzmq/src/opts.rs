@@ -51,6 +51,8 @@ pub(crate) struct SocketOverlay {
     pub tcp_keepalive_cnt: Option<u32>,
     pub tcp_keepalive_idle: Option<Duration>,
     pub tcp_keepalive_intvl: Option<Duration>,
+    /// `ZMQ_TCP_MAXRT` in milliseconds; 0 keeps the system default.
+    pub tcp_maxrt: i32,
     pub mechanism: MechanismOverlay,
     pub zap_domain: String,
     pub zap_enforce_domain: bool,
@@ -173,6 +175,7 @@ impl Default for SocketOverlay {
             tcp_keepalive_cnt: None,
             tcp_keepalive_idle: None,
             tcp_keepalive_intvl: None,
+            tcp_maxrt: 0,
             mechanism: MechanismOverlay::Null,
             zap_domain: String::new(),
             zap_enforce_domain: false,
@@ -283,8 +286,8 @@ impl SocketOverlay {
         }
     }
 
-    pub(crate) fn to_options(&self) -> omq_tokio::Options {
-        let keepalive = match self.tcp_keepalive {
+    fn keepalive(&self) -> KeepAlive {
+        match self.tcp_keepalive {
             1 => KeepAlive::Enabled {
                 idle: self.tcp_keepalive_idle.unwrap_or(Duration::from_mins(1)),
                 intvl: self.tcp_keepalive_intvl.unwrap_or(Duration::from_secs(10)),
@@ -292,7 +295,17 @@ impl SocketOverlay {
             },
             0 => KeepAlive::Disabled,
             _ => KeepAlive::Default,
-        };
+        }
+    }
+
+    fn tcp_user_timeout(&self) -> Option<Duration> {
+        u64::try_from(self.tcp_maxrt)
+            .ok()
+            .filter(|&ms| ms > 0)
+            .map(Duration::from_millis)
+    }
+
+    pub(crate) fn to_options(&self) -> omq_tokio::Options {
         let reconnect = match (self.reconnect_ivl, self.reconnect_ivl_max) {
             (None, _) => ReconnectPolicy::Disabled,
             (Some(min), None) => ReconnectPolicy::Fixed(min),
@@ -357,7 +370,8 @@ impl SocketOverlay {
                 (h, _) => h,
             },
             conflate: self.conflate,
-            tcp_keepalive: keepalive,
+            tcp_keepalive: self.keepalive(),
+            tcp_user_timeout: self.tcp_user_timeout(),
             reconnect,
             send_buffer_size: self.sndbuf,
             recv_buffer_size: self.rcvbuf,
@@ -754,6 +768,12 @@ pub extern "C" fn zmq_setsockopt(
                 Some(Duration::from_secs(v as u64))
             };
         }
+        ZMQ_TCP_MAXRT => {
+            let Some(v) = read_i32(optval, optvallen).filter(|&v| v >= 0) else {
+                return fail(libc::EINVAL);
+            };
+            lock_overlay!(sock_arc).tcp_maxrt = v;
+        }
         ZMQ_SNDBUF => {
             let Some(v) = read_i32(optval, optvallen) else {
                 return fail(libc::EINVAL);
@@ -1114,7 +1134,6 @@ pub extern "C" fn zmq_setsockopt(
         | ZMQ_STREAM_NOTIFY
         | ZMQ_INVERT_MATCHING
         | ZMQ_XPUB_VERBOSER
-        | ZMQ_TCP_MAXRT
         | ZMQ_THREAD_SAFE
         | ZMQ_MULTICAST_MAXTPDU
         | ZMQ_VMCI_BUFFER_SIZE
@@ -1519,6 +1538,10 @@ pub extern "C" fn zmq_getsockopt(
                 .map_or(-1, |d| d.as_secs() as i32);
             write_i32(optval, optvallen, v)
         }
+        ZMQ_TCP_MAXRT => {
+            let v = lock_overlay!(sock_arc).tcp_maxrt;
+            write_i32(optval, optvallen, v)
+        }
         ZMQ_SNDBUF => {
             let v = lock_overlay!(sock_arc).sndbuf.map_or(0, |n| n as i32);
             write_i32(optval, optvallen, v)
@@ -1751,7 +1774,6 @@ pub extern "C" fn zmq_getsockopt(
         | ZMQ_XPUB_MANUAL
         | ZMQ_INVERT_MATCHING
         | ZMQ_XPUB_VERBOSER
-        | ZMQ_TCP_MAXRT
         | ZMQ_THREAD_SAFE
         | ZMQ_VMCI_CONNECT_TIMEOUT
         | ZMQ_GSSAPI_PRINCIPAL_NAMETYPE

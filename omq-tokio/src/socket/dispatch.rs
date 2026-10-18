@@ -288,7 +288,7 @@ impl AnyStream {
         }
     }
 
-    /// Apply per-socket TCP options (currently just keepalive). No-op
+    /// Apply per-socket TCP options (keepalive, user timeout). No-op
     /// for non-TCP variants. Called from the actor on every accepted /
     /// connected stream so the option lives for the connection's
     /// lifetime.
@@ -298,6 +298,7 @@ impl AnyStream {
             Self::Memory(_) => Ok(()),
             Self::Tcp(s) => {
                 options.tcp_keepalive.apply(s)?;
+                options.apply_tcp_user_timeout(s)?;
                 options.apply_socket_buffers(s)?;
                 Ok(())
             }

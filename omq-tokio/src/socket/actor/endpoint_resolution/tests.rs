@@ -184,7 +184,7 @@ async fn stalled_named_bind_and_connect_leave_controls_responsive() {
 
 #[tokio::test]
 #[cfg(feature = "ws")]
-async fn named_connect_waits_for_shared_setup_credit_before_dns() {
+async fn named_connect_waits_for_dial_setup_credit_before_dns() {
     let _serial = TEST_STALL_LOCK.lock().await;
     let socket = Socket::new(
         SocketType::Sub,
@@ -212,18 +212,21 @@ async fn named_connect_waits_for_shared_setup_credit_before_dns() {
         assert!(head.len() < 4096);
         head.push(pending.read_u8().await.unwrap());
     }
+    // An inbound peer holding the sole inbound slot does not delay dials.
     let before = crate::transport::dns::stalled_test_lookups();
-    let endpoint: Endpoint = "ws://omq-test-stall.invalid:12001/".parse().unwrap();
-    let connecting = tokio::spawn({
+    let connect = |endpoint: Endpoint| {
         let socket = socket.clone();
-        let endpoint = endpoint.clone();
-        async move { socket.connect(endpoint).await }
-    });
-    // No DNS request may start while the existing peer holds the sole
-    // admission slot through its unfinished ZMTP handshake.
+        tokio::spawn(async move { socket.connect(endpoint).await })
+    };
+    let first: Endpoint = "ws://omq-test-stall.invalid:12001/".parse().unwrap();
+    let first_connect = connect(first.clone());
+    wait_stalled(before + 1).await;
+    // A second named dial waits for the sole outbound slot before DNS.
+    let second: Endpoint = "ws://omq-test-stall.invalid:12002/".parse().unwrap();
+    let second_connect = connect(second.clone());
     assert!(
         tokio::time::timeout(Duration::from_millis(40), async {
-            while crate::transport::dns::stalled_test_lookups() == before {
+            while crate::transport::dns::stalled_test_lookups() == before + 1 {
                 tokio::task::yield_now().await;
             }
         })
@@ -234,10 +237,12 @@ async fn named_connect_waits_for_shared_setup_credit_before_dns() {
         .await
         .unwrap()
         .unwrap();
+    socket.disconnect(first).await.unwrap();
+    wait_stalled(before + 2).await;
+    socket.disconnect(second).await.unwrap();
+    assert!(matches!(first_connect.await.unwrap(), Err(Error::Closed)));
+    assert!(matches!(second_connect.await.unwrap(), Err(Error::Closed)));
     drop(pending);
-    wait_stalled(before + 1).await;
-    socket.disconnect(endpoint).await.unwrap();
-    assert!(matches!(connecting.await.unwrap(), Err(Error::Closed)));
     socket.close().await.unwrap();
 }
 

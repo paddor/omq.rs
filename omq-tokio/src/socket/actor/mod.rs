@@ -215,10 +215,26 @@ async fn stop_peer_task(task: JoinHandle<()>) {
     let _ = tokio::time::timeout(PEER_TASK_JOIN_TIMEOUT, task).await;
 }
 
+/// Stop an endpoint task and wait until it has released its socket.
+async fn stop_endpoint_task(cancel: &CancellationToken, task: &mut JoinHandle<()>) {
+    cancel.cancel();
+    task.abort();
+    let _ = tokio::time::timeout(PEER_TASK_JOIN_TIMEOUT, task).await;
+}
+
 struct ListenerEntry {
     endpoint: Endpoint,
     cancel: CancellationToken,
-    _task: JoinHandle<()>,
+    task: JoinHandle<()>,
+}
+
+impl Drop for ListenerEntry {
+    /// A detached listener would keep accepting, and keep its port bound,
+    /// after unbind or close.
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        self.task.abort();
+    }
 }
 
 struct DialerEntry {
@@ -654,6 +670,9 @@ impl SocketDriver {
         for l in &self.listeners {
             l.cancel.cancel();
         }
+        for l in &self.udp_listeners {
+            l.cancel.cancel();
+        }
         for d in &self.dialers {
             d.cancel.cancel();
         }
@@ -744,14 +763,14 @@ impl SocketDriver {
                 peer_tasks.push(task);
             }
         }
-        for l in &self.listeners {
-            l.cancel.cancel();
+        for mut l in self.listeners.drain(..) {
+            stop_endpoint_task(&l.cancel, &mut l.task).await;
         }
-        self.listeners.clear();
-        for d in &self.dialers {
-            d.cancel.cancel();
+        for mut l in self.udp_listeners.drain(..) {
+            stop_endpoint_task(&l.cancel, &mut l.task).await;
         }
         self.dialers.clear();
+        self.udp_dialers.clear();
         if let Some(pool) = self.compression_pool.take() {
             pool.clear();
         }

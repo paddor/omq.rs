@@ -101,22 +101,21 @@ impl SocketDriver {
         let pending =
             self.cancel_pending_endpoints(Some((endpoint, super::endpoint_resolution::Kind::Bind)));
         let before = self.listeners.len() + self.udp_listeners.len();
-        self.listeners.retain(|l| {
-            if &l.endpoint == endpoint {
-                l.cancel.cancel();
-                false
-            } else {
-                true
-            }
-        });
-        self.udp_listeners.retain(|l| {
-            if &l.endpoint == endpoint {
-                l.cancel.cancel();
-                false
-            } else {
-                true
-            }
-        });
+        // Wait for each task so the address is free when unbind returns.
+        let (mut removed, kept) = std::mem::take(&mut self.listeners)
+            .into_iter()
+            .partition::<Vec<_>, _>(|l| &l.endpoint == endpoint);
+        self.listeners = kept;
+        for l in &mut removed {
+            super::stop_endpoint_task(&l.cancel, &mut l.task).await;
+        }
+        let (mut removed, kept) = std::mem::take(&mut self.udp_listeners)
+            .into_iter()
+            .partition::<Vec<_>, _>(|l| &l.endpoint == endpoint);
+        self.udp_listeners = kept;
+        for l in &mut removed {
+            super::stop_endpoint_task(&l.cancel, &mut l.task).await;
+        }
         if pending || self.listeners.len() + self.udp_listeners.len() < before {
             Ok(())
         } else {
@@ -244,7 +243,7 @@ impl SocketDriver {
         self.udp_listeners.push(UdpListenerEntry {
             endpoint: resolved,
             cancel,
-            _task: task,
+            task,
         });
         Ok(ret)
     }
@@ -300,7 +299,7 @@ impl SocketDriver {
             endpoint,
             cancel,
             peer_id,
-            _task: task,
+            task,
         });
         Ok(())
     }
@@ -483,7 +482,7 @@ impl SocketDriver {
         self.listeners.push(ListenerEntry {
             endpoint: resolved,
             cancel,
-            _task: task,
+            task,
         });
         Ok(ret)
     }

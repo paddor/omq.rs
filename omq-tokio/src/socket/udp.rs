@@ -39,7 +39,15 @@ pub(crate) fn new_joined_groups() -> JoinedGroups {
 pub(crate) struct UdpListenerEntry {
     pub endpoint: Endpoint,
     pub cancel: CancellationToken,
-    pub _task: JoinHandle<()>,
+    pub task: JoinHandle<()>,
+}
+
+impl Drop for UdpListenerEntry {
+    /// A detached listener would keep the UDP port bound after unbind or close.
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        self.task.abort();
+    }
 }
 
 /// One outbound UDP "connection" (RADIO side). Holds the synthetic
@@ -49,7 +57,14 @@ pub(crate) struct UdpDialerEntry {
     pub endpoint: Endpoint,
     pub cancel: CancellationToken,
     pub peer_id: u64,
-    pub _task: JoinHandle<()>,
+    pub task: JoinHandle<()>,
+}
+
+impl Drop for UdpDialerEntry {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        self.task.abort();
+    }
 }
 
 /// Spawn a DISH listener task. Reads datagrams, applies the local

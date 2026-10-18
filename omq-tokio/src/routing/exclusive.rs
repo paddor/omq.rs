@@ -28,36 +28,7 @@ impl Submitter {
                 Err(omq_proto::error::TrySendError::Error(e)) => return Err(e),
                 Err(omq_proto::error::TrySendError::Closed) => return Err(Error::Closed),
             }
-
-            let space = {
-                let guard = self.pipe.lock().expect("exclusive pipe");
-                guard.as_ref().map(SendPipeProducer::space_available)
-            };
-
-            if let Some(space) = space {
-                let seen = space.generation();
-                let notified = space.changed_after(seen);
-                tokio::pin!(notified);
-                match self.try_send(msg) {
-                    Ok(()) => return Ok(()),
-                    Err(omq_proto::error::TrySendError::Full(returned)) => msg = returned,
-                    Err(omq_proto::error::TrySendError::Error(e)) => return Err(e),
-                    Err(omq_proto::error::TrySendError::Closed) => return Err(Error::Closed),
-                }
-                notified.await;
-                continue;
-            }
-
-            let seen = self.peer_ready.generation();
-            let notified = self.peer_ready.changed_after(seen);
-            tokio::pin!(notified);
-            match self.try_send(msg) {
-                Ok(()) => return Ok(()),
-                Err(omq_proto::error::TrySendError::Full(returned)) => msg = returned,
-                Err(omq_proto::error::TrySendError::Error(e)) => return Err(e),
-                Err(omq_proto::error::TrySendError::Closed) => return Err(Error::Closed),
-            }
-            notified.await;
+            self.wait_send_ready().await;
         }
     }
 
@@ -89,19 +60,10 @@ impl Submitter {
         }
     }
 
+    /// Wait until a send may succeed. A replaced pipe or a new peer counts,
+    /// so this watches both and rechecks after registering.
     pub(crate) async fn wait_send_progress(&self) {
-        let space = {
-            let guard = self.pipe.lock().expect("exclusive pipe");
-            guard.as_ref().map(SendPipeProducer::space_available)
-        };
-
-        if let Some(space) = space {
-            let seen = space.generation();
-            space.changed_after(seen).await;
-        } else {
-            let seen = self.peer_ready.generation();
-            self.peer_ready.changed_after(seen).await;
-        }
+        self.wait_send_ready().await;
     }
 
     pub(crate) fn try_send(

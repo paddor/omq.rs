@@ -176,31 +176,58 @@ impl Overlay {
             opts.mechanism = backend::MechanismSetup::PlainServer {
                 authenticator: crate::auth::build_plain_authenticator(authenticator),
             };
-        } else if let (Some(u), Some(p)) = (&self.plain_username, &self.plain_password) {
-            opts = opts.plain_client(u.clone(), p.clone());
+        } else if self.plain_username.is_some() || self.plain_password.is_some() {
+            // Like libzmq, either credential selects PLAIN. Never fall back
+            // to NULL when only one was set.
+            opts = opts.plain_client(
+                self.plain_username.clone().unwrap_or_default(),
+                self.plain_password.clone().unwrap_or_default(),
+            );
+        }
+        #[cfg(not(feature = "plain"))]
+        if self.plain_server || self.plain_username.is_some() || self.plain_password.is_some() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "PLAIN support is not enabled",
+            ));
         }
         #[cfg(feature = "curve")]
         if self.curve_server {
-            if let (Some(pk), Some(sk)) = (&self.curve_publickey, &self.curve_secretkey) {
-                let pk_str = std::str::from_utf8(pk).map_err(|_| bad_key("CURVE_PUBLICKEY"))?;
-                let sk_str = std::str::from_utf8(sk).map_err(|_| bad_key("CURVE_SECRETKEY"))?;
-                let public = backend::CurvePublicKey::from_z85(pk_str)
-                    .map_err(|e| bad_key_detail("CURVE_PUBLICKEY", &e))?;
-                let secret = backend::CurveSecretKey::from_z85(sk_str)
-                    .map_err(|e| bad_key_detail("CURVE_SECRETKEY", &e))?;
-                let keypair = backend::CurveKeypair { public, secret };
-                let mut curve_options = backend::CurveServerOptions::default();
-                curve_options.authenticator = self
-                    .curve_authenticator
-                    .as_ref()
-                    .map(crate::auth::build_authenticator);
-                opts = opts.curve_server_with_options(keypair, curve_options);
-            }
-        } else if let (Some(pk), Some(sk), Some(svk)) = (
-            &self.curve_publickey,
-            &self.curve_secretkey,
-            &self.curve_serverkey,
-        ) {
+            let sk = self.curve_secretkey.as_ref().ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err("CURVE server requires CURVE_SECRETKEY")
+            })?;
+            let sk_str = std::str::from_utf8(sk).map_err(|_| bad_key("CURVE_SECRETKEY"))?;
+            let secret = backend::CurveSecretKey::from_z85(sk_str)
+                .map_err(|e| bad_key_detail("CURVE_SECRETKEY", &e))?;
+            let public = match &self.curve_publickey {
+                Some(pk) => {
+                    let pk_str = std::str::from_utf8(pk).map_err(|_| bad_key("CURVE_PUBLICKEY"))?;
+                    backend::CurvePublicKey::from_z85(pk_str)
+                        .map_err(|e| bad_key_detail("CURVE_PUBLICKEY", &e))?
+                }
+                None => secret.derive_public(),
+            };
+            let keypair = backend::CurveKeypair { public, secret };
+            let mut curve_options = backend::CurveServerOptions::default();
+            curve_options.authenticator = self
+                .curve_authenticator
+                .as_ref()
+                .map(crate::auth::build_authenticator);
+            opts = opts.curve_server_with_options(keypair, curve_options);
+        } else if self.curve_publickey.is_some()
+            || self.curve_secretkey.is_some()
+            || self.curve_serverkey.is_some()
+        {
+            // Any CURVE key selects CURVE. A partial client setup is an
+            // error, never a silent fallback to NULL.
+            let (Some(pk), Some(sk), Some(svk)) = (
+                &self.curve_publickey,
+                &self.curve_secretkey,
+                &self.curve_serverkey,
+            ) else {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "CURVE client requires CURVE_PUBLICKEY, CURVE_SECRETKEY, and CURVE_SERVERKEY",
+                ));
+            };
             let pk_str = std::str::from_utf8(pk).map_err(|_| bad_key("CURVE_PUBLICKEY"))?;
             let sk_str = std::str::from_utf8(sk).map_err(|_| bad_key("CURVE_SECRETKEY"))?;
             let svk_str = std::str::from_utf8(svk).map_err(|_| bad_key("CURVE_SERVERKEY"))?;
@@ -212,6 +239,16 @@ impl Overlay {
                 .map_err(|e| bad_key_detail("CURVE_SERVERKEY", &e))?;
             let keypair = backend::CurveKeypair { public, secret };
             opts = opts.curve_client(keypair, server_public);
+        }
+        #[cfg(not(feature = "curve"))]
+        if self.curve_server
+            || self.curve_publickey.is_some()
+            || self.curve_secretkey.is_some()
+            || self.curve_serverkey.is_some()
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "CURVE support is not enabled",
+            ));
         }
         opts.validate()
             .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;

@@ -205,7 +205,7 @@ struct Route {
     pending: Option<Pending>,
     peer: Option<Peer>,
     /// A ready slot, taken when the handshake confirms.
-    _permit: Option<OwnedSemaphorePermit>,
+    permit: Option<OwnedSemaphorePermit>,
 }
 
 #[derive(Default)]
@@ -455,7 +455,7 @@ impl EndpointWorker {
                 index,
                 pending: Some(pending),
                 peer: None,
-                _permit: None,
+                permit: None,
             },
         );
     }
@@ -535,13 +535,13 @@ impl EndpointWorker {
             pending.socket_type = ready.socket_type;
             pending.identity = ready.identity.map(Bytes::copy_from_slice);
             if pending.handshake.confirmed() {
-                if route._permit.is_none() {
+                if route.permit.is_none() {
                     let Ok(permit) = self.shared.peers.clone().try_acquire_owned() else {
                         // Every ready slot is taken; this source stays out.
                         route.pending = None;
                         return;
                     };
-                    route._permit = Some(permit);
+                    route.permit = Some(permit);
                 }
                 let Some(next) = generation.checked_add(1) else {
                     return;

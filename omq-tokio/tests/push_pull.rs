@@ -789,3 +789,31 @@ async fn push_keeps_sending_to_a_fast_peer_while_another_stalls() {
     reader.abort();
     drop(slow);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn push_resumes_once_an_inproc_connect_backlog_moves_into_the_ring() {
+    let options = Options::default().send_hwm(8).recv_hwm(8);
+    let pull = Socket::new(SocketType::Pull, options.clone());
+    let push = Socket::new(SocketType::Push, options);
+    pull.bind(inproc_ep("backlog-batches")).await.unwrap();
+    push.connect(inproc_ep("backlog-batches")).await.unwrap();
+    for round in 0u32..128 {
+        for index in 0u32..16 {
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                push.send(Message::single((round * 16 + index).to_le_bytes().to_vec())),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "round {round} send {index} stalled; ready={}",
+                    push.send_ready()
+                )
+            })
+            .unwrap();
+        }
+        for _ in 0..16 {
+            pull.recv().await.unwrap();
+        }
+    }
+}

@@ -467,6 +467,9 @@ impl InprocSender {
                 backlog.pre_ready = None;
                 self.inner.backlog_pending.store(false, Ordering::Release);
                 self.notify_close_progress();
+                // Admission counted the backlog as full. Senders waiting on
+                // this route's space must see that it cleared.
+                self.inner.port.space().notify_changed();
                 return Flush::Done;
             }
             backlog.stalled = backlog.batch.pop();

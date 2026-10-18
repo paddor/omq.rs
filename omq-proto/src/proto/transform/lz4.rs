@@ -39,8 +39,8 @@ use crate::message::{Message, Payload};
 
 use super::TransformedOut;
 use super::common::{
-    ENVELOPE_PLAIN, SENTINEL_PLAIN, body_budget, build_dict_shipment, plaintext_payload,
-    take_budget, validate_dict,
+    ENVELOPE_PLAIN, SENTINEL_PLAIN, body_budget, build_dict_shipment, check_expansion,
+    plaintext_payload, take_budget, validate_dict,
 };
 
 const SENTINEL_LZ4B: [u8; 4] = *b"LZ4B";
@@ -815,6 +815,7 @@ fn decode_lz4b(
             "LZ4B declared size exceeds block limit; use LZ4M for large parts".into(),
         ));
     }
+    check_expansion(decompressed_size, block.len(), LZ4_MAX_EXPANSION, "LZ4B")?;
     take_budget(budget, decompressed_size)?;
     decode_payload(decompressed_size, pool, |mut out| {
         let n = out
@@ -843,35 +844,28 @@ fn decode_lz4m(
     }
     let declared = u64::from_le_bytes(body[..8].try_into().unwrap());
     let decompressed_size = decode_len(declared, "LZ4M")?;
+    // The decompressed output cannot exceed the available compressed bytes
+    // times LZ4's max expansion ratio. Check before reserving it.
+    check_expansion(decompressed_size, body.len() - 8, LZ4_MAX_EXPANSION, "LZ4M")?;
     take_budget(budget, decompressed_size)?;
-
-    // Decompression-bomb guard. `decompressed_size` is an attacker-controlled
-    // 8-byte wire field and `take_budget` is a no-op when no max_message_size
-    // is set (the default), so without this the line below would allocate an
-    // arbitrary amount from a tiny frame. The decompressed output cannot
-    // exceed the available compressed bytes times LZ4's max expansion ratio.
-    let avail = body.len() - 8;
-    if decompressed_size > avail.saturating_mul(LZ4_MAX_EXPANSION) {
-        return Err(Error::Protocol(
-            "LZ4M declared size implausibly large for compressed input".into(),
-        ));
-    }
 
     decode_payload(decompressed_size, pool, |mut out| {
         let mut src_pos = 8;
         let mut dst_pos = 0;
 
         while dst_pos < decompressed_size {
-            if src_pos + 4 > body.len() {
+            let Some(length) = body.get(src_pos..).and_then(|rest| rest.first_chunk::<4>()) else {
                 return Err(Error::Protocol("LZ4M truncated block length".into()));
-            }
-            let compressed_len =
-                u32::from_le_bytes(body[src_pos..src_pos + 4].try_into().unwrap()) as usize;
+            };
+            let compressed_len = u32::from_le_bytes(*length) as usize;
             src_pos += 4;
-            if src_pos + compressed_len > body.len() {
+            // The peer chooses the length; never let the end offset wrap.
+            let Some(block_data) = src_pos
+                .checked_add(compressed_len)
+                .and_then(|end| body.get(src_pos..end))
+            else {
                 return Err(Error::Protocol("LZ4M truncated block data".into()));
-            }
-            let block_data = &body[src_pos..src_pos + compressed_len];
+            };
             src_pos += compressed_len;
 
             let remaining = decompressed_size - dst_pos;
@@ -1641,5 +1635,17 @@ mod tests {
         for _ in 0..70_000 {
             compressor.compress_into(&input, &mut output).unwrap();
         }
+    }
+    #[test]
+    fn lz4b_rejects_a_tiny_frame_declaring_a_huge_body() {
+        // 13 bytes declaring one GiB would otherwise reserve that much.
+        let mut part = SENTINEL_LZ4B.to_vec();
+        part.extend_from_slice(&(1_u64 << 30).to_le_bytes());
+        part.push(0);
+        let mut decoder = Lz4Decoder::new().with_block_size(1 << 30);
+        assert!(matches!(
+            decoder.decode(Message::single(part)),
+            Err(Error::Protocol(reason)) if reason.contains("implausibly large")
+        ));
     }
 }

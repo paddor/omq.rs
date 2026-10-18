@@ -196,8 +196,40 @@ impl Transport for IpcTransport {
 pub struct IpcListener {
     inner: TokioUnixListener,
     endpoint: Endpoint,
-    cleanup_path: Option<PathBuf>,
+    socket_file: Option<SocketFile>,
     ident: PeerIdent,
+}
+
+/// The socket file a filesystem bind created. A later bind may replace the
+/// path; drop then leaves the newer file in place.
+#[cfg(unix)]
+#[derive(Debug)]
+struct SocketFile {
+    path: PathBuf,
+    dev: u64,
+    ino: u64,
+}
+
+#[cfg(unix)]
+impl SocketFile {
+    fn new(path: &Path) -> Result<Self> {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::symlink_metadata(path)?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+        })
+    }
+
+    fn remove_if_unchanged(&self) {
+        use std::os::unix::fs::MetadataExt;
+        if std::fs::symlink_metadata(&self.path)
+            .is_ok_and(|metadata| metadata.dev() == self.dev && metadata.ino() == self.ino)
+        {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
 }
 
 /// Bound IPC listener (Windows).
@@ -259,8 +291,8 @@ impl Listener for IpcListener {
 #[cfg(unix)]
 impl Drop for IpcListener {
     fn drop(&mut self) {
-        if let Some(path) = &self.cleanup_path {
-            let _ = std::fs::remove_file(path);
+        if let Some(file) = &self.socket_file {
+            file.remove_if_unchanged();
         }
     }
 }
@@ -287,7 +319,7 @@ async fn bind_filesystem_unix(endpoint: &Endpoint, path: &Path) -> Result<IpcLis
     Ok(IpcListener {
         inner: listener,
         endpoint: endpoint.clone(),
-        cleanup_path: Some(path.to_path_buf()),
+        socket_file: Some(SocketFile::new(path)?),
         ident: PeerIdent::Path(path.display().to_string()),
     })
 }
@@ -305,7 +337,7 @@ fn bind_abstract_unix(endpoint: &Endpoint, name: &str) -> Result<IpcListener> {
     Ok(IpcListener {
         inner,
         endpoint: endpoint.clone(),
-        cleanup_path: None,
+        socket_file: None,
         ident: PeerIdent::Path(format!("@{name}")),
     })
 }

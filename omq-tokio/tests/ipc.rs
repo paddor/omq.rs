@@ -167,3 +167,30 @@ async fn ipc_socket_file_cleaned_on_close() {
     }
     panic!("close should remove the socket file");
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn ipc_close_keeps_a_newer_bind_of_the_same_path() {
+    let path =
+        std::path::PathBuf::from(format!("/tmp/omq-ipc-rebound-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let ep = Endpoint::Ipc(IpcPath::Filesystem(path.clone()));
+    let old = Socket::new(SocketType::Pull, Options::default());
+    old.bind(ep.clone()).await.unwrap();
+    // A later bind replaces the socket file, as after a crashed owner.
+    let new = Socket::new(SocketType::Pull, Options::default());
+    new.bind(ep.clone()).await.unwrap();
+    old.close().await.unwrap();
+    assert!(path.exists(), "the old owner removed the newer socket file");
+
+    let push = Socket::new(SocketType::Push, Options::default());
+    push.connect(ep).await.unwrap();
+    push.send(Message::single("to new")).await.unwrap();
+    let m = tokio::time::timeout(Duration::from_secs(2), new.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m, Message::single("to new"));
+    new.close().await.unwrap();
+    assert!(!path.exists(), "close should remove its own socket file");
+}

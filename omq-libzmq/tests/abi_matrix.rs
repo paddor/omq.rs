@@ -806,11 +806,7 @@ const SOCKET_OPTION_MATRIX: &[SocketOptionEntry] = &[
         SetStatus::RoundTrip,
         GetStatus::RoundTrip,
     ),
-    opt(
-        "ZMQ_TCP_MAXRT",
-        SetStatus::AcceptedNoop,
-        GetStatus::CompatDefault,
-    ),
+    opt("ZMQ_TCP_MAXRT", SetStatus::RoundTrip, GetStatus::RoundTrip),
     opt(
         "ZMQ_THREAD_SAFE",
         SetStatus::AcceptedNoop,
@@ -1102,8 +1098,8 @@ fn option_status_counts_are_stable() {
             .or_insert(0) += 1;
     }
 
-    assert_eq!(counts.get("RoundTrip/RoundTrip"), Some(&45));
-    assert_eq!(counts.get("AcceptedNoop/CompatDefault"), Some(&54));
+    assert_eq!(counts.get("RoundTrip/RoundTrip"), Some(&46));
+    assert_eq!(counts.get("AcceptedNoop/CompatDefault"), Some(&53));
     assert_eq!(counts.get("AcceptedNoop/State"), Some(&8));
     assert_eq!(counts.get("Command/WriteOnly"), Some(&2));
 }

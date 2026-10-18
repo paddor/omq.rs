@@ -348,6 +348,19 @@ pub struct Options {
     /// (`inproc://`, `ipc://`, `udp://`).
     pub tcp_keepalive: KeepAlive,
 
+    /// `TCP_USER_TIMEOUT` for TCP streams on Linux and Android: how long sent
+    /// data may stay unacknowledged, or queued data unsent, before the kernel
+    /// drops the connection. Off by default.
+    ///
+    /// Heartbeats cannot time out a peer while our own writes are stalled,
+    /// so without this a dead host behind a full send buffer is dropped only
+    /// at the kernel retry limit (about 15 minutes). This timeout also drops
+    /// a live peer that stops reading for this long, losing the data in the
+    /// kernel send buffer. The connection then reconnects like any other
+    /// peer loss. `None` or zero keeps the system default. Ignored on other
+    /// platforms and non-TCP transports. libzmq: `ZMQ_TCP_MAXRT`.
+    pub tcp_user_timeout: Option<Duration>,
+
     /// `SO_RCVBUF` size in bytes. Applied to every TCP/IPC stream after
     /// connect/accept. `None` leaves the OS default. Larger values
     /// reduce the number of kernel-to-userspace round-trips for large
@@ -788,6 +801,7 @@ impl Default for Options {
             router_mandatory: false,
             on_mute: OnMute::Block,
             tcp_keepalive: KeepAlive::default(),
+            tcp_user_timeout: None,
             recv_buffer_size: None,
             send_buffer_size: None,
             mechanism: MechanismSetup::Null,
@@ -1256,6 +1270,14 @@ impl Options {
     }
 
     #[must_use]
+    /// Set `TCP_USER_TIMEOUT` for TCP streams. See the
+    /// [`tcp_user_timeout`](Self::tcp_user_timeout) field for the trade-off.
+    pub fn tcp_user_timeout(mut self, timeout: Duration) -> Self {
+        self.tcp_user_timeout = Some(timeout);
+        self
+    }
+
+    #[must_use]
     /// Set OS receive buffer size for TCP/IPC streams and QUIC UDP sockets.
     pub fn recv_buffer_size(mut self, bytes: usize) -> Self {
         self.recv_buffer_size = Some(bytes);
@@ -1569,6 +1591,18 @@ impl Options {
         }
         Ok(())
     }
+
+    /// Apply [`Self::tcp_user_timeout`] to a connected TCP socket. No-op
+    /// where the OS has no `TCP_USER_TIMEOUT`.
+    pub fn apply_tcp_user_timeout<S: SocketRef>(&self, sock: &S) -> std::io::Result<()> {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        if let Some(timeout) = self.tcp_user_timeout {
+            sock.as_socket_ref().set_tcp_user_timeout(Some(timeout))?;
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        let _ = sock;
+        Ok(())
+    }
 }
 
 impl KeepAlive {
@@ -1801,6 +1835,7 @@ mod tests {
         assert_eq!(o.heartbeat_interval, None);
         assert_eq!(o.max_message_size, None);
         assert_eq!(o.tcp_keepalive, KeepAlive::Default);
+        assert_eq!(o.tcp_user_timeout, None);
         assert!(!o.conflate);
         assert!(!o.router_mandatory);
         assert_eq!(o.compression_level, None);

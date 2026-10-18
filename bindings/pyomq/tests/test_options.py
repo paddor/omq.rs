@@ -176,6 +176,20 @@ def test_tcp_keepalive_disabled():
         ctx.term()
 
 
+def test_tcp_maxrt_round_trip():
+    ctx, s = _push()
+    try:
+        assert s.getsockopt(zmq.TCP_MAXRT) == 0
+        s.setsockopt(zmq.TCP_MAXRT, 1500)
+        assert s.getsockopt(zmq.TCP_MAXRT) == 1500
+        with pytest.raises(ValueError):
+            s.setsockopt(zmq.TCP_MAXRT, -1)
+        assert s.getsockopt(zmq.TCP_MAXRT) == 1500
+    finally:
+        s.close()
+        ctx.term()
+
+
 # Group C "not implemented" raises ZMQError.
 
 

@@ -67,7 +67,7 @@ down and reconnects.
 | TCP_NODELAY | Yes | Yes | **=** |
 | SO_SNDBUF / SO_RCVBUF | Yes, via `assert_success_or_recoverable` | Yes, via socket2 | **=** |
 | Keepalive (time/interval/retries) | Yes, platform-specific | Yes, via socket2 `TcpKeepalive` | **=** |
-| TCP_USER_TIMEOUT (Linux) | Yes | No | **X** |
+| TCP_USER_TIMEOUT (Linux) | Yes | Yes, opt-in `tcp_user_timeout` / `ZMQ_TCP_MAXRT` | **=** |
 | TCP_MAXRT (Windows) | Yes | No | **X** |
 | SO_NOSIGPIPE (macOS/BSD) | Yes | No (relies on runtime) | **~** tokio uses MSG_NOSIGNAL on send |
 | SO_BUSY_POLL (Linux) | Yes | No | **X** |
@@ -220,9 +220,8 @@ down and reconnects.
   treat this as a fatal write error on Windows.
 - **SO_EXCLUSIVEADDRUSE (Windows):** libzmq sets this on listeners instead
   of SO_REUSEADDR. Prevents port hijacking on Windows.
-- **TCP_USER_TIMEOUT (Linux) / TCP_MAXRT (Windows):** Caps kernel-level
-  retransmit time. Without it, a dead peer can hold a connection for
-  minutes before the kernel gives up.
+- **TCP_MAXRT (Windows):** Caps kernel-level retransmit time. omq.rs sets
+  `TCP_USER_TIMEOUT` on Linux and Android only.
 - **SOCK_CLOEXEC / FD_CLOEXEC:** Prevents fd leak to child processes on
   fork+exec. Not critical for typical Rust programs (no fork), but matters
   if the process spawns children.

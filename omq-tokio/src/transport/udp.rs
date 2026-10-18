@@ -45,19 +45,19 @@ pub fn encode_datagram(group: &[u8], body: &[u8]) -> Result<Bytes> {
 /// malformed datagrams (wrong flags byte, truncated header, group
 /// overruns the buffer) so DISH can drop them silently per RFC 48.
 pub fn decode_datagram(data: &[u8]) -> Option<(Bytes, Bytes)> {
-    if data.len() < 2 {
+    let (group, body) = split_datagram(data)?;
+    Some((Bytes::copy_from_slice(group), Bytes::copy_from_slice(body)))
+}
+
+/// Borrow `(group, body)` from a wire datagram without copying, so a
+/// receiver can drop unjoined groups first. Malformed datagrams give `None`.
+pub fn split_datagram(data: &[u8]) -> Option<(&[u8], &[u8])> {
+    let (&flags, rest) = data.split_first()?;
+    let (&glen, rest) = rest.split_first()?;
+    if flags != FLAG_DATA {
         return None;
     }
-    if data[0] != FLAG_DATA {
-        return None;
-    }
-    let glen = data[1] as usize;
-    if data.len() < 2 + glen {
-        return None;
-    }
-    let group = Bytes::copy_from_slice(&data[2..2 + glen]);
-    let body = Bytes::copy_from_slice(&data[2 + glen..]);
-    Some((group, body))
+    rest.split_at_checked(usize::from(glen))
 }
 
 /// Bind a UDP socket for a DISH endpoint. Wildcard (`udp://*:port`) is

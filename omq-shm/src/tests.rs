@@ -1853,3 +1853,80 @@ fn local_close_wakes_a_credit_waiter_even_if_the_peer_clears_its_parked_flag() {
         .expect("local close must wake its own credit waiter");
     drop(held);
 }
+
+#[test]
+fn local_close_wakes_a_credit_waiter_while_the_peer_pins_the_wake_sequence() {
+    use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+    let (mut sender, mut receiver) = pair(1);
+    let message = Message::from_slice(&[7; 128]);
+    let held = delivered(&mut sender, &mut receiver, &message);
+    assert!(sender.encode(&message).unwrap().is_none());
+    let wait = sender.credit_wait();
+    let pinned = sender.outgoing.sequence();
+    let (complete, done) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        wait.wait();
+        let _ = complete.send(());
+    });
+    let incoming = receiver.incoming.clone().unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let pinning = std::thread::spawn({
+        let stop = stop.clone();
+        move || {
+            while !stop.load(Relaxed) {
+                let mapping = &incoming.mapping;
+                mapping
+                    .atomic32(crate::wire::WAKE_SEQUENCE)
+                    .store(pinned, Relaxed);
+                mapping
+                    .atomic32(crate::wire::WAITER_PARKED)
+                    .store(0, Relaxed);
+                std::hint::spin_loop();
+            }
+        }
+    });
+    std::thread::sleep(Duration::from_millis(50));
+    drop(sender);
+    let woke = done.recv_timeout(Duration::from_secs(2));
+    stop.store(true, Relaxed);
+    pinning.join().unwrap();
+    woke.expect("a local close must end the credit wait despite a pinned sequence");
+    drop(held);
+}
+
+#[test]
+fn sender_survives_a_receiver_that_scribbles_over_its_lease_table() {
+    let patterns: [fn(usize) -> u64; 3] = [|_| 0, |_| u64::MAX, |_| rand::random()];
+    for pattern in patterns {
+        let (mut sender, mut receiver) = pair(4);
+        let message = Message::from_slice(&[7; 128]);
+        let held = delivered(&mut sender, &mut receiver, &message);
+        let mapping = &receiver.incoming.as_ref().unwrap().mapping;
+        for offset in (0..mapping.len()).step_by(8) {
+            let value = if offset == READER_CLOSED {
+                0
+            } else {
+                pattern(offset)
+            };
+            mapping
+                .atomic64(offset)
+                .store(value, std::sync::atomic::Ordering::Relaxed);
+        }
+        // Every sender operation must fail or proceed, never panic or hang.
+        for _ in 0..8 {
+            let _ = sender.encode(&message);
+            let _ = sender.try_write_carrier(&[IoSlice::new(b"carrier")]);
+        }
+        let wait = sender.credit_wait();
+        let (complete, done) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            wait.wait();
+            let _ = complete.send(());
+        });
+        done.recv_timeout(Duration::from_secs(2))
+            .expect("a credit wait must stay bounded");
+        drop(sender);
+        drop(held);
+        drop(receiver);
+    }
+}

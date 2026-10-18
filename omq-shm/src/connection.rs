@@ -15,7 +15,7 @@ use omq_proto::{Message, SocketType};
 use crate::lease::{CreditWait, PENDING, Table, lease_completed};
 use crate::mapping::{LEASES, Mapping, invalid};
 use crate::process::Process;
-use crate::wire::{self, READER_CLOSED, REFERENCE_BATCH, STATE_BITS};
+use crate::wire::{self, MULTIPART, READER_CLOSED, REFERENCE_BATCH, STATE_BITS};
 use crate::{MAX_LEASES, PREFACE_SIZE, SendPool, batch, socket};
 
 #[cfg(test)]
@@ -379,10 +379,10 @@ impl Connection {
                         .coordinates(index, wire::REGION_TOKEN)
                         .load(Ordering::Relaxed);
                     regions.insert((id, token));
-                    if table
+                    let kind = table
                         .coordinates(index, wire::RECORD_KIND)
-                        .load(Ordering::Relaxed)
-                        == u64::from(REFERENCE_BATCH)
+                        .load(Ordering::Relaxed);
+                    if (kind == u64::from(REFERENCE_BATCH) || kind == u64::from(MULTIPART))
                         && let Some(mapping) = self.find_region(id, token)
                     {
                         let offset = table

@@ -8,7 +8,8 @@ use omq_tokio::{
 };
 
 /// Part sizes per message. Final frames use carrier copies, automatic storage,
-/// or pool slots; 128 KiB envelope frames exceed the carrier ring.
+/// or pool slots. Earlier frames of 4 KiB or more in total move the whole
+/// message into one shared record; smaller ones use the carrier ring.
 const SHAPES: &[&[usize]] = &[
     &[16],
     &[0, 0],
@@ -16,13 +17,17 @@ const SHAPES: &[&[usize]] = &[
     &[5, 55],
     &[5, 56],
     &[3, 9, 4096],
+    &[4095, 0],
+    &[4096, 0],
+    &[8 * 1024, 8 * 1024],
+    &[0, 64 * 1024, 16, 1024],
     &[128 * 1024, 64],
     &[7, 128 * 1024],
     &[1, 2, 3, 4, 5, 1024 * 1024],
 ];
 
 fn pool() -> PayloadPool {
-    shm_payload_pool([(4096, 8), (128 * 1024, 8), (1024 * 1024, 4)]).unwrap()
+    shm_payload_pool([(4096, 32), (128 * 1024, 32), (1024 * 1024, 4)]).unwrap()
 }
 
 fn pattern(seed: usize, part: usize, size: usize) -> Bytes {
@@ -31,37 +36,46 @@ fn pattern(seed: usize, part: usize, size: usize) -> Bytes {
         .collect()
 }
 
-fn body_payload(bytes: &Bytes, pool: Option<&PayloadPool>) -> Payload {
+fn frame(bytes: Bytes, pool: Option<&PayloadPool>) -> Payload {
     match pool {
         Some(pool) if !bytes.is_empty() => pool
-            .message(bytes.len(), |body| body.copy_from_slice(bytes))
+            .message(bytes.len(), |frame| frame.copy_from_slice(&bytes))
             .unwrap()
             .last_payload()
             .unwrap(),
-        _ => Payload::from_bytes(bytes.clone()),
+        _ => Payload::from_bytes(bytes),
     }
 }
 
-fn shape(seed: usize, sizes: &[usize], pool: Option<&PayloadPool>) -> Message {
-    let (body, envelopes) = sizes.split_last().unwrap();
-    let mut parts: Vec<_> = envelopes
-        .iter()
-        .enumerate()
-        .map(|(part, size)| Payload::from_bytes(pattern(seed, part, *size)))
-        .collect();
-    parts.push(body_payload(&pattern(seed, envelopes.len(), *body), pool));
-    Message::multipart_payloads(parts)
+/// Frames taken from the producer pool.
+#[derive(Clone, Copy)]
+enum Pooled {
+    None,
+    Last,
+    All,
 }
 
-/// Every shape with heap and pooled final frames.
+fn shape(seed: usize, sizes: &[usize], pool: &PayloadPool, pooled: Pooled) -> Message {
+    let last = sizes.len() - 1;
+    Message::multipart_payloads(sizes.iter().enumerate().map(|(part, size)| {
+        let pooled = match pooled {
+            Pooled::None => false,
+            Pooled::Last => part == last,
+            Pooled::All => true,
+        };
+        frame(pattern(seed, part, *size), pooled.then_some(pool))
+    }))
+}
+
+/// Every shape with heap frames, a pooled final frame, and only pooled frames.
 fn messages(pool: &PayloadPool) -> Vec<Message> {
-    [None, Some(pool)]
+    [Pooled::None, Pooled::Last, Pooled::All]
         .into_iter()
-        .flat_map(|pool| {
+        .flat_map(|pooled| {
             SHAPES
                 .iter()
                 .enumerate()
-                .map(move |(seed, sizes)| shape(seed, sizes, pool))
+                .map(move |(seed, sizes)| shape(seed, sizes, pool, pooled))
         })
         .collect()
 }
@@ -103,6 +117,41 @@ async fn pipeline_pair_and_dealer_keep_every_multipart_shape() {
         sender.close().await.unwrap();
         receiver.close().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn pooled_envelope_frames_stay_shared_until_the_receiver_drops_them() {
+    let pool = shm_payload_pool([(8192, 1)]).unwrap();
+    let context = Context::new();
+    let (receiver, sender) = connected(
+        &context,
+        (SocketType::Pull, options()),
+        (SocketType::Push, options()),
+    )
+    .await;
+    let envelope = pattern(1, 0, 8192);
+    let message = Message::multipart_payloads([
+        frame(envelope.clone(), Some(&pool)),
+        Payload::from_static(b"body"),
+    ]);
+    sender.send(message).await.unwrap();
+    let delivered = receive(&receiver).await;
+    assert_eq!(delivered.part_slice(0), Some(envelope.as_ref()));
+    assert_eq!(
+        pool.available(),
+        0,
+        "the envelope frame is shared, not copied"
+    );
+    drop(delivered);
+    tokio::time::timeout(DEADLINE, async {
+        while pool.available() == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
+    sender.close().await.unwrap();
+    receiver.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -266,7 +315,7 @@ fn queued(sequence: usize, pool: Option<&PayloadPool>) -> Message {
     if sequence.is_multiple_of(7) {
         parts.push(Payload::from_static(b"extra"));
     }
-    parts.push(body_payload(&Bytes::from(body), pool));
+    parts.push(frame(Bytes::from(body), pool));
     Message::multipart_payloads(parts)
 }
 

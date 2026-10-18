@@ -37,6 +37,16 @@ pub(crate) enum TryFrameResult {
     Ineligible,
 }
 
+/// SHM record kinds published by per-recipient encoding.
+#[derive(Debug, Clone, Copy)]
+enum ShmRecord {
+    Body,
+    #[cfg(target_os = "linux")]
+    Batch(omq_shm::BatchKind),
+    #[cfg(target_os = "linux")]
+    Multipart,
+}
+
 pub(crate) struct PeerTransmitSlot {
     eq: Mutex<FrameBuffer>,
     direct_writer: OnceLock<Arc<crate::socket::dispatch::DirectTcpWriter>>,
@@ -166,7 +176,7 @@ impl PeerTransmitSlot {
 
     /// Per-recipient SHM leases are created by the IO lane, after admission.
     pub(crate) fn try_encode_shm_no_signal(&self, message: &Message) -> TryFrameResult {
-        self.try_encode_shm_record(message, 1, false)
+        self.try_encode_shm_record(message, 1, ShmRecord::Body)
     }
 
     #[cfg(target_os = "linux")]
@@ -176,7 +186,18 @@ impl PeerTransmitSlot {
         count: usize,
         referenced: bool,
     ) -> TryFrameResult {
-        self.try_encode_shm_record(message, count, referenced)
+        let record = if referenced {
+            ShmRecord::Batch(omq_shm::BatchKind::Referenced)
+        } else {
+            ShmRecord::Batch(omq_shm::BatchKind::Copied)
+        };
+        self.try_encode_shm_record(message, count, record)
+    }
+
+    /// Publish a record prepared once by the IO lane for every recipient.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn try_encode_shm_multipart_no_signal(&self, record: &Message) -> TryFrameResult {
+        self.try_encode_shm_record(record, 1, ShmRecord::Multipart)
     }
 
     #[cfg(target_os = "linux")]
@@ -189,7 +210,7 @@ impl PeerTransmitSlot {
         &self,
         message: &Message,
         count: usize,
-        referenced: bool,
+        record: ShmRecord,
     ) -> TryFrameResult {
         #[cfg(target_os = "linux")]
         {
@@ -219,15 +240,10 @@ impl PeerTransmitSlot {
                 return TryFrameResult::Full;
             }
             let mut state = state.lock().expect("SHM connection");
-            let result = if count > 1 {
-                let kind = if referenced {
-                    omq_shm::BatchKind::Referenced
-                } else {
-                    omq_shm::BatchKind::Copied
-                };
-                state.encode_batch_and_frame(message, kind, &mut eq)
-            } else {
-                state.encode_and_frame(message, &mut eq)
+            let result = match record {
+                ShmRecord::Body => state.encode_and_frame(message, &mut eq),
+                ShmRecord::Batch(kind) => state.encode_batch_and_frame(message, kind, &mut eq),
+                ShmRecord::Multipart => state.encode_multipart_and_frame(message, &mut eq),
             };
             drop(state);
             match result {
@@ -252,7 +268,7 @@ impl PeerTransmitSlot {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = (message, count, referenced);
+            let _ = (message, count, record);
             TryFrameResult::Ineligible
         }
     }

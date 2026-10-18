@@ -68,6 +68,7 @@ impl Admission {
     }
 
     /// Slots currently reserved.
+    #[cfg(feature = "quic")]
     pub(crate) fn in_use(&self) -> usize {
         self.used.load(Ordering::Acquire)
     }

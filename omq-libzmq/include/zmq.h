@@ -540,7 +540,8 @@ typedef void (*omq_async_callback_fn) (void *userdata_, int status_);
 /*  A non-NULL task runs the callback exactly once: 0, ECANCELED, or ETERM.
     It may run on an IO thread, during context shutdown, or before
     omq_socket_send_async returns. Keep userdata valid until it runs, and do
-    not make blocking calls into the same context from the callback.  */
+    not make blocking calls into the same context from the callback.
+    zmq_ctx_term returns only after every pending callback has run.  */
 ZMQ_EXPORT omq_async_task_t *omq_socket_send_async (
     void *socket_, const uint8_t *encoded_, size_t encoded_size_,
     omq_async_callback_fn callback_, void *userdata_);

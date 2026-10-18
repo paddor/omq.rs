@@ -7,6 +7,7 @@ use bytes::Bytes;
 use omq_tokio::Message;
 use omq_tokio::engine::StateSignal;
 
+use crate::context::WorkGuard;
 use crate::error::{ETERM, fail};
 use crate::socket::OmqSocket;
 
@@ -24,6 +25,8 @@ pub struct OmqAsyncTask {
 struct Completion {
     callback: Option<OMQAsyncCallback>,
     userdata: usize,
+    // Dropped after `Drop::drop` runs the callback, so term waits for it.
+    _work: WorkGuard,
 }
 
 impl Completion {
@@ -123,6 +126,7 @@ pub extern "C" fn omq_socket_send_async(
     let mut completion = Completion {
         callback,
         userdata: userdata as usize,
+        _work: context.begin_work(),
     };
     let join = runtime.spawn(async move {
         let status = tokio::select! {
@@ -306,6 +310,72 @@ mod tests {
         assert_eq!(crate::zmq_close(socket), 0);
         assert_eq!(crate::zmq_ctx_term(context), 0);
     }
+    struct HeldCompletion {
+        entered: mpsc::Sender<()>,
+        release: mpsc::Receiver<()>,
+    }
+
+    extern "C" fn hold_completion(userdata: *mut c_void, _status: i32) {
+        // SAFETY: the test transfers one boxed state to this callback.
+        let state = unsafe { Box::from_raw(userdata.cast::<HeldCompletion>()) };
+        let _ = state.entered.send(());
+        let _ = state.release.recv_timeout(Duration::from_secs(5));
+    }
+
+    #[test]
+    fn shared_context_term_waits_for_a_running_completion() {
+        let owner = crate::zmq_ctx_new();
+        let (mut hi, mut lo) = (0, 0);
+        assert_eq!(crate::omq_ctx_share_key(owner, &raw mut hi, &raw mut lo), 0);
+        let shared = crate::omq_ctx_from_share_key(hi, lo);
+        assert!(!shared.is_null());
+        let socket = crate::zmq_socket(shared, 8);
+        let linger: i32 = 0;
+        assert_eq!(
+            crate::zmq_setsockopt(socket, 17, (&raw const linger).cast(), 4),
+            0
+        );
+        assert_eq!(
+            crate::zmq_bind(socket, c"inproc://async-shared-term".as_ptr()),
+            0
+        );
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let state = Box::new(HeldCompletion {
+            entered: entered_tx,
+            release: release_rx,
+        });
+        let mut encoded = [0; 17];
+        encoded[0] = 1;
+        encoded[8] = 1;
+        encoded[16] = b'x';
+        let task = omq_socket_send_async(
+            socket,
+            encoded.as_ptr(),
+            encoded.len(),
+            Some(hold_completion),
+            Box::into_raw(state).cast(),
+        );
+        assert!(!task.is_null());
+        assert_eq!(crate::zmq_close(socket), 0);
+
+        let shared = shared as usize;
+        let (done_tx, done_rx) = mpsc::channel();
+        let term = std::thread::spawn(move || {
+            let _ = done_tx.send(crate::zmq_ctx_term(shared as *mut c_void));
+        });
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "term returned while a completion callback was still running"
+        );
+        release_tx.send(()).unwrap();
+        assert_eq!(done_rx.recv_timeout(Duration::from_secs(5)), Ok(0));
+        term.join().unwrap();
+        omq_async_task_free(task);
+        assert_eq!(crate::zmq_ctx_term(owner), 0);
+    }
+
     struct Reentry {
         socket: usize,
         result: mpsc::Sender<(i32, i32)>,

@@ -516,11 +516,10 @@ pub extern "C" fn zmq_close(sock_ptr: *mut c_void) -> c_int {
                 let _ = socket.close_with_linger(linger).await;
             }));
         } else {
-            let ctx = arc.ctx.clone();
-            ctx.linger_started();
+            let work = arc.ctx.begin_work();
             drop(handle.spawn(async move {
                 let _ = socket.close_with_linger(linger).await;
-                ctx.linger_finished();
+                drop(work);
             }));
         }
     }

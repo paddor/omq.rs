@@ -19,7 +19,7 @@ pub(crate) struct OmqContext {
     pub terminated: Arc<AtomicBool>,
     shutdown_signal: StateSignal,
     pub socket_count: AtomicI32,
-    linger_count: AtomicI32,
+    work_count: AtomicI32,
     socket_notify: (Mutex<()>, Condvar),
     sockets: Mutex<Vec<Weak<crate::socket::OmqSocket>>>,
     pub max_sockets: AtomicI32,
@@ -63,7 +63,7 @@ impl OmqContext {
             terminated: Arc::new(AtomicBool::new(false)),
             shutdown_signal: StateSignal::new(),
             socket_count: AtomicI32::new(0),
-            linger_count: AtomicI32::new(0),
+            work_count: AtomicI32::new(0),
             socket_notify: (Mutex::new(()), Condvar::new()),
             sockets: Mutex::new(Vec::new()),
             max_sockets: AtomicI32::new(1023),
@@ -84,7 +84,7 @@ impl OmqContext {
             terminated: Arc::new(AtomicBool::new(false)),
             shutdown_signal: StateSignal::new(),
             socket_count: AtomicI32::new(0),
-            linger_count: AtomicI32::new(0),
+            work_count: AtomicI32::new(0),
             socket_notify: (Mutex::new(()), Condvar::new()),
             sockets: Mutex::new(Vec::new()),
             max_sockets: AtomicI32::new(1023),
@@ -178,15 +178,10 @@ impl OmqContext {
         }
     }
 
-    pub(crate) fn linger_started(&self) {
-        self.linger_count.fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub(crate) fn linger_finished(&self) {
-        let prev = self.linger_count.fetch_sub(1, Ordering::AcqRel);
-        if prev == 1 {
-            self.notify_socket_change();
-        }
+    /// Hold `zmq_ctx_term` until the returned guard drops.
+    pub(crate) fn begin_work(self: &Arc<Self>) -> WorkGuard {
+        self.work_count.fetch_add(1, Ordering::Relaxed);
+        WorkGuard(self.clone())
     }
 
     fn notify_socket_change(&self) {
@@ -232,12 +227,27 @@ impl std::fmt::Debug for OmqContext {
             .field("ctx", &self.ctx)
             .field("terminated", &self.terminated.load(Ordering::Relaxed))
             .field("socket_count", &self.socket_count.load(Ordering::Relaxed))
-            .field("linger_count", &self.linger_count.load(Ordering::Relaxed))
+            .field("work_count", &self.work_count.load(Ordering::Relaxed))
             .field("max_sockets", &self.max_sockets.load(Ordering::Relaxed))
             .field("max_msg_size", &self.max_msg_size.load(Ordering::Relaxed))
             .field("ipv6", &self.ipv6.load(Ordering::Relaxed))
             .field("blocky", &self.blocky.load(Ordering::Relaxed))
             .finish_non_exhaustive()
+    }
+}
+
+/// Background work that `zmq_ctx_term` waits for: a lingering close or an
+/// async send whose callback has not run. The guard lives in the task, so
+/// runtime teardown that drops the task also ends the work.
+#[derive(Debug)]
+pub(crate) struct WorkGuard(Arc<OmqContext>);
+
+impl Drop for WorkGuard {
+    fn drop(&mut self) {
+        let prev = self.0.work_count.fetch_sub(1, Ordering::AcqRel);
+        if prev == 1 {
+            self.0.notify_socket_change();
+        }
     }
 }
 
@@ -272,11 +282,15 @@ pub extern "C" fn zmq_ctx_shutdown(ctx_ptr: *mut libc::c_void) -> c_int {
     0
 }
 
-/// Shut down the context, wait for sockets and linger work, and release its handle.
+/// Shut down the context, wait for sockets and background work, and release its handle.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_ctx_term(ctx_ptr: *mut libc::c_void) -> c_int {
     if ctx_ptr.is_null() {
         return crate::error::fail(libc::EFAULT);
+    }
+    if omq_tokio::Context::on_io_thread() {
+        // Term waits for work that may need this thread.
+        return crate::error::fail(libc::EDEADLK);
     }
     // SAFETY: ctx_ptr came from Box::into_raw in zmq_ctx_new and stays valid
     // until this call frees it below. Other threads may still pass it to
@@ -295,7 +309,7 @@ pub extern "C" fn zmq_ctx_term(ctx_ptr: *mut libc::c_void) -> c_int {
         if cvar
             .wait_while(guard, |()| {
                 arc.socket_count.load(Ordering::Acquire) > 0
-                    || arc.linger_count.load(Ordering::Acquire) > 0
+                    || arc.work_count.load(Ordering::Acquire) > 0
             })
             .is_err()
         {
@@ -555,12 +569,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn final_close_and_linger_wake_a_waiter_between_check_and_wait() {
-        for linger in [false, true] {
+    fn final_close_and_work_wake_a_waiter_between_check_and_wait() {
+        for work in [false, true] {
             let context = OmqContext::new(1);
-            let counter = if linger {
-                context.linger_started();
-                &context.linger_count
+            let mut work_guard = None;
+            let counter = if work {
+                work_guard = Some(context.begin_work());
+                &context.work_count
             } else {
                 context.socket_opened();
                 &context.socket_count
@@ -571,8 +586,8 @@ mod tests {
 
             let closing = context.clone();
             let thread = std::thread::spawn(move || {
-                if linger {
-                    closing.linger_finished();
+                if let Some(work_guard) = work_guard {
+                    drop(work_guard);
                 } else {
                     closing.socket_closed();
                 }
@@ -589,5 +604,36 @@ mod tests {
             drop(guard);
             thread.join().unwrap();
         }
+    }
+
+    fn shared_context(owner: *mut c_void) -> *mut c_void {
+        let (mut hi, mut lo) = (0, 0);
+        assert_eq!(omq_ctx_share_key(owner, &raw mut hi, &raw mut lo), 0);
+        let shared = omq_ctx_from_share_key(hi, lo);
+        assert!(!shared.is_null());
+        shared
+    }
+
+    #[test]
+    fn runtime_teardown_under_a_lingering_close_releases_term() {
+        let owner = zmq_ctx_new();
+        let shared = shared_context(owner);
+        let push = crate::zmq_socket(shared, 8);
+        assert_eq!(
+            crate::zmq_connect(push, c"inproc://linger-runtime-teardown".as_ptr()),
+            0
+        );
+        // Queued for a peer that never binds, so the default infinite linger
+        // keeps the close task alive until the owner's runtime drops it.
+        assert_eq!(crate::zmq_send(push, b"x".as_ptr().cast(), 1, 0), 1);
+        assert_eq!(crate::zmq_close(push), 0);
+        assert_eq!(zmq_ctx_term(owner), 0);
+
+        let shared = shared as usize;
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done_tx.send(zmq_ctx_term(shared as *mut c_void));
+        });
+        assert_eq!(done_rx.recv_timeout(Duration::from_secs(5)), Ok(0));
     }
 }

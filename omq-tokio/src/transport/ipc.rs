@@ -392,8 +392,11 @@ fn bind_named_pipe_windows(endpoint: &Endpoint, name: &str) -> Result<IpcListene
     // Construct the full named pipe path
     let pipe_path = format!(r"\\.\pipe\{name}");
 
-    // Create the first named pipe server using ServerOptions
-    let server = ServerOptions::new().create(&pipe_path)?;
+    // The first instance must be new: if another server already owns the
+    // name, connecting clients would reach it instead of us.
+    let server = ServerOptions::new()
+        .first_pipe_instance(true)
+        .create(&pipe_path)?;
 
     Ok(IpcListener {
         inner: Some(server),

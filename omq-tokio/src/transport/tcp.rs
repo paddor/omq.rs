@@ -84,6 +84,9 @@ pub(crate) fn reuse_addr_bind(addr: SocketAddr) -> Result<TokioTcpListener> {
         socket2::Domain::IPV6
     };
     let sock = socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))?;
+    // On Windows, SO_REUSEADDR lets a second socket bind a port that is
+    // still listening. Elsewhere it only allows rebinding past TIME_WAIT.
+    #[cfg(not(windows))]
     sock.set_reuse_address(true)?;
     sock.set_nonblocking(true)?;
     sock.bind(&addr.into())?;

@@ -174,8 +174,8 @@ impl Carrier {
         let position = read as usize % CAPACITY;
         let first = length.min(CAPACITY - position);
         let base = self.offset + CONTROL_BYTES;
-        output[..first].copy_from_slice(mapping.bytes(base + position, first));
-        output[first..length].copy_from_slice(mapping.bytes(base, length - first));
+        mapping.read_carrier(base + position, &mut output[..first]);
+        mapping.read_carrier(base, &mut output[first..length]);
         if state.return_bytes(read.wrapping_add(length as u64)) {
             self.signal_writer()?;
         }

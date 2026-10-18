@@ -32,8 +32,9 @@ const ID_OFFSET: usize = 48;
 
 #[derive(Debug)]
 pub(crate) struct Mapping {
+    // Own regions keep their descriptor for registration; imports drop it.
     #[cfg(not(miri))]
-    file: File,
+    file: Option<File>,
     #[cfg(miri)]
     allocation: std::alloc::Layout,
     address: NonNull<u8>,
@@ -46,9 +47,12 @@ pub(crate) struct Mapping {
 }
 
 // SAFETY: immutable metadata and a stable shared mapping. Payload mutation is
-// confined to disjoint slots with exclusive pool checkout. Lease bytes are
-// accessed only as aligned, lock-free atomics, shared across processes. Carrier
-// bytes are owned by the SPSC writer until publication and reader until return.
+// confined to disjoint slots with exclusive pool checkout; data regions are
+// write-sealed against peers, and receivers trust the sender not to modify
+// published slots. Peers can write lease tables, so their bytes are accessed
+// only as aligned lock-free atomics or by raw carrier copies, never through
+// references. Carrier bytes are owned by the SPSC writer until publication
+// and by the reader until return.
 unsafe impl Send for Mapping {}
 unsafe impl Sync for Mapping {}
 
@@ -65,7 +69,7 @@ impl Mapping {
         file.set_len(length as u64)?;
         rustix::fs::fcntl_add_seals(&file, SealFlags::SHRINK | SealFlags::GROW)?;
         let token = rand::random::<u64>();
-        let mut mapping = Self::map(file, length, true, token)?;
+        let mut mapping = Self::map(&file, length, true, token)?;
         mapping.kind = kind;
         mapping.initialize_header();
         // FUTURE_WRITE keeps this writable mapping, but no descriptor can write,
@@ -76,7 +80,8 @@ impl Mapping {
         } else {
             SealFlags::SEAL
         };
-        rustix::fs::fcntl_add_seals(&mapping.file, seals)?;
+        rustix::fs::fcntl_add_seals(&file, seals)?;
+        mapping.file = Some(file);
         Ok(mapping)
     }
 
@@ -133,14 +138,14 @@ impl Mapping {
         if !(HEADER..=isize::MAX as usize).contains(&length) {
             return Err(invalid("invalid SHM region length"));
         }
-        let mut mapping = Self::map(file, length, false, 0)?;
+        let mut mapping = Self::map(&file, length, false, 0)?;
         mapping.validate_header()?;
         if mapping.kind == DATA && !seals.intersects(WRITE_SEALS) {
             return Err(invalid("SHM data region is not write-sealed"));
         }
         if mapping.kind == LEASES {
-            // SAFETY: only the lease table becomes writable. Its received FD
-            // and stable size-sealed mapping remain owned by this object.
+            // SAFETY: only the lease table becomes writable. Its stable
+            // size-sealed mapping remains owned by this object.
             unsafe {
                 rustix::mm::mprotect(
                     mapping.address.as_ptr().cast(),
@@ -150,6 +155,8 @@ impl Mapping {
             }
             mapping.writable = true;
         }
+        // The mapping keeps the region alive without holding a descriptor.
+        drop(file);
         Ok(mapping)
     }
 
@@ -180,7 +187,7 @@ impl Mapping {
     }
 
     #[cfg(not(miri))]
-    fn map(file: File, length: usize, writable: bool, token: u64) -> io::Result<Self> {
+    fn map(file: &File, length: usize, writable: bool, token: u64) -> io::Result<Self> {
         let protection = ProtFlags::READ
             | if writable {
                 ProtFlags::WRITE
@@ -194,13 +201,13 @@ impl Mapping {
                 length,
                 protection,
                 MapFlags::SHARED,
-                &file,
+                file,
                 0,
             )?
         };
         let id = file.as_raw_fd() as u32;
         Ok(Self {
-            file,
+            file: None,
             address: NonNull::new(address.cast()).expect("mmap returned non-null address"),
             length,
             writable,
@@ -218,7 +225,10 @@ impl Mapping {
     pub(crate) fn descriptor(&self) -> io::Result<File> {
         #[cfg(not(miri))]
         {
-            self.file.try_clone()
+            self.file
+                .as_ref()
+                .ok_or_else(|| invalid("imported SHM region has no descriptor"))?
+                .try_clone()
         }
         #[cfg(miri)]
         {
@@ -238,10 +248,12 @@ impl Mapping {
         offset >= HEADER && offset <= self.length && length <= self.length - offset
     }
 
+    /// Data region bytes or a region header. Peers write lease table bodies;
+    /// use atomics or [`Self::read_carrier`] there.
     pub(crate) fn bytes(&self, offset: usize, length: usize) -> &[u8] {
         assert!(offset <= self.length && length <= self.length - offset);
         // SAFETY: bounded immutable payload range. Callers never request
-        // atomic cells as byte slices while those cells may change.
+        // peer-written lease table bytes as slices.
         unsafe { std::slice::from_raw_parts(self.address.as_ptr().add(offset), length) }
     }
 
@@ -255,7 +267,7 @@ impl Mapping {
     /// Caller has exclusive access to this disjoint writable range.
     #[expect(
         clippy::mut_from_ref,
-        reason = "Exclusive ranges are enforced by pool leases or SPSC carrier cursors."
+        reason = "Exclusive ranges are enforced by pool checkout."
     )]
     unsafe fn slot_mut(&self, offset: usize, length: usize) -> &mut [u8] {
         assert!(
@@ -264,15 +276,44 @@ impl Mapping {
                 && offset <= self.length
                 && length <= self.length - offset
         );
-        // SAFETY: the caller's pool checkout or SPSC cursor ownership excludes
-        // every reader before obtaining mutable access to this range.
+        // SAFETY: the caller's pool checkout excludes every reader before
+        // obtaining mutable access to this range.
         unsafe { std::slice::from_raw_parts_mut(self.address.as_ptr().add(offset), length) }
     }
 
+    /// Copy into this lease table's carrier ring.
     pub(super) fn write_carrier(&self, offset: usize, bytes: &[u8]) {
-        // SAFETY: the connection's sole writer owns this free SPSC range after
-        // acquiring the reader cursor; it publishes only after this copy.
-        unsafe { self.slot_mut(offset, bytes.len()) }.copy_from_slice(bytes);
+        assert!(
+            self.writable
+                && offset >= HEADER
+                && offset <= self.length
+                && bytes.len() <= self.length - offset
+        );
+        // SAFETY: checked writable range. The connection's sole writer owns
+        // this free SPSC range after acquiring the reader cursor and publishes
+        // only after this copy. The peer can write the ring, so no reference
+        // to it is formed.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                self.address.as_ptr().add(offset),
+                bytes.len(),
+            );
+        }
+    }
+
+    /// Copy published carrier bytes out of a peer's lease table.
+    pub(super) fn read_carrier(&self, offset: usize, output: &mut [u8]) {
+        assert!(offset >= HEADER && offset <= self.length && output.len() <= self.length - offset);
+        // SAFETY: checked range of a live mapping. The reader owns published
+        // bytes until it returns them; a raw copy forms no reference to them.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                self.address.as_ptr().add(offset),
+                output.as_mut_ptr(),
+                output.len(),
+            );
+        }
     }
 
     #[expect(
@@ -410,6 +451,8 @@ mod tests {
             assert_eq!(source.id, imported.id);
             assert_eq!(source.kind, imported.kind);
             assert_eq!(source.len(), imported.len());
+            assert!(imported.file.is_none());
+            assert!(imported.descriptor().is_err());
             if kind == DATA {
                 assert!(!imported.writable);
                 assert!(std::panic::catch_unwind(|| imported.atomic64(HEADER)).is_err());

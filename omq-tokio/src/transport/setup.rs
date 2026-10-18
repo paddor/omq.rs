@@ -5,9 +5,12 @@
 //! the transport and its reservation before waiting for the reconnect delay.
 //! Waiting for initial admission happens before starting that attempt's clock.
 
-use std::sync::Arc;
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+use rustc_hash::FxHashMap;
 
 use omq_proto::{Error, Result};
 
@@ -15,11 +18,43 @@ use tokio_util::sync::CancellationToken;
 
 use crate::engine::signal::StateSignal;
 
+/// One remote host may hold at most this share of a socket's pending
+/// handshakes, so a single source cannot fill the pool.
+const SOURCE_SHARE: usize = 8;
+
 #[derive(Clone, Debug)]
 pub(crate) struct Admission {
     used: Arc<AtomicUsize>,
     changed: Arc<StateSignal>,
     limit: usize,
+    sources: SourceCounts,
+}
+
+/// Pending handshakes per remote host.
+type SourceCounts = Arc<Mutex<FxHashMap<SourceKey, usize>>>;
+
+/// A remote host: an IPv4 address or an IPv6 /64.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum SourceKey {
+    V4([u8; 4]),
+    V6([u8; 8]),
+}
+
+impl SourceKey {
+    /// Loopback peers are local and exempt.
+    fn of(address: IpAddr) -> Option<Self> {
+        if address.is_loopback() {
+            return None;
+        }
+        Some(match address {
+            IpAddr::V4(v4) => Self::V4(v4.octets()),
+            IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+                Some(v4) if !v4.is_loopback() => Self::V4(v4.octets()),
+                Some(_) => return None,
+                None => Self::V6(v6.octets()[..8].try_into().expect("prefix")),
+            },
+        })
+    }
 }
 
 impl Admission {
@@ -28,7 +63,25 @@ impl Admission {
             used: Arc::new(AtomicUsize::new(0)),
             changed: Arc::new(StateSignal::new()),
             limit,
+            sources: Arc::new(Mutex::new(FxHashMap::default())),
         }
+    }
+
+    /// Reserve a slot for a peer at `source`, within the socket limit and
+    /// its per-source share. Returns `None` without waiting.
+    pub(crate) fn try_acquire_from(&self, source: Option<IpAddr>) -> Option<Permit> {
+        let Some(key) = source.and_then(SourceKey::of) else {
+            return self.try_acquire();
+        };
+        let mut sources = self.sources.lock().expect("admission sources poisoned");
+        let held = sources.entry(key).or_default();
+        if *held >= (self.limit / SOURCE_SHARE).max(1) {
+            return None;
+        }
+        let mut permit = self.try_acquire()?;
+        *held += 1;
+        permit.source = Some(Box::new((key, self.sources.clone())));
+        Some(permit)
     }
 
     // Atomic::try_update is unstable on MSRV 1.93.
@@ -42,6 +95,7 @@ impl Admission {
         Some(Permit {
             used: self.used.clone(),
             changed: self.changed.clone(),
+            source: None,
         })
     }
 
@@ -60,10 +114,21 @@ impl Admission {
 pub(crate) struct Permit {
     used: Arc<AtomicUsize>,
     changed: Arc<StateSignal>,
+    // Boxed: inbound transports carry permits through setup by value.
+    source: Option<Box<(SourceKey, SourceCounts)>>,
 }
 
 impl Drop for Permit {
     fn drop(&mut self) {
+        if let Some((key, sources)) = self.source.take().map(|source| *source) {
+            let mut sources = sources.lock().expect("admission sources poisoned");
+            if let Some(held) = sources.get_mut(&key) {
+                *held -= 1;
+                if *held == 0 {
+                    sources.remove(&key);
+                }
+            }
+        }
         self.used.fetch_sub(1, Ordering::Release);
         self.changed.notify_changed();
     }
@@ -83,9 +148,13 @@ impl PendingHandshake {
         }
     }
 
-    pub(crate) fn acquire(socket: &Admission, listener: Option<&Admission>) -> Option<Self> {
+    pub(crate) fn acquire(
+        socket: &Admission,
+        listener: Option<&Admission>,
+        source: Option<IpAddr>,
+    ) -> Option<Self> {
         // Neither reservation waits. Failure drops the first before returning.
-        let socket = socket.try_acquire()?;
+        let socket = socket.try_acquire_from(source)?;
         let listener = match listener {
             Some(limit) => Some(limit.try_acquire()?),
             None => None,
@@ -152,7 +221,7 @@ impl DialSetup {
                 .admission
                 .as_ref()
                 .map(|limit| {
-                    PendingHandshake::acquire(limit, None).ok_or_else(|| {
+                    PendingHandshake::acquire(limit, None, None).ok_or_else(|| {
                         Error::HandshakeFailed("socket pending-handshake limit reached".into())
                     })
                 })
@@ -184,12 +253,12 @@ mod tests {
     fn failed_listener_reservation_releases_socket_credit() {
         let socket = Admission::new(2);
         let listener = Admission::new(1);
-        let first = PendingHandshake::acquire(&socket, Some(&listener)).unwrap();
-        assert!(PendingHandshake::acquire(&socket, Some(&listener)).is_none());
-        let second = PendingHandshake::acquire(&socket, None).unwrap();
-        assert!(PendingHandshake::acquire(&socket, None).is_none());
+        let first = PendingHandshake::acquire(&socket, Some(&listener), None).unwrap();
+        assert!(PendingHandshake::acquire(&socket, Some(&listener), None).is_none());
+        let second = PendingHandshake::acquire(&socket, None, None).unwrap();
+        assert!(PendingHandshake::acquire(&socket, None, None).is_none());
         drop(first);
-        let third = PendingHandshake::acquire(&socket, Some(&listener)).unwrap();
+        let third = PendingHandshake::acquire(&socket, Some(&listener), None).unwrap();
         drop((second, third));
         assert_eq!(socket.used.load(Ordering::Relaxed), 0);
         assert_eq!(listener.used.load(Ordering::Relaxed), 0);
@@ -274,5 +343,35 @@ mod tests {
         assert!(admission.try_acquire().is_none());
         drop(state);
         assert!(admission.try_acquire().is_some());
+    }
+    #[test]
+    fn one_remote_host_holds_at_most_its_share_of_inbound_slots() {
+        let admission = Admission::new(16);
+        let host: IpAddr = "192.0.2.1".parse().unwrap();
+        let same_prefix: IpAddr = "2001:db8::1".parse().unwrap();
+        let first = admission.try_acquire_from(Some(host)).unwrap();
+        let _second = admission.try_acquire_from(Some(host)).unwrap();
+        assert!(admission.try_acquire_from(Some(host)).is_none());
+        // Another host still gets slots; one IPv6 /64 counts as one host.
+        let other = admission.try_acquire_from(Some("192.0.2.2".parse().unwrap()));
+        assert!(other.is_some());
+        let _v6 = admission.try_acquire_from(Some(same_prefix)).unwrap();
+        let _v6b = admission
+            .try_acquire_from(Some("2001:db8::2".parse().unwrap()))
+            .unwrap();
+        assert!(
+            admission
+                .try_acquire_from(Some("2001:db8::3".parse().unwrap()))
+                .is_none()
+        );
+        // Releasing a slot returns it to that host.
+        drop(first);
+        assert!(admission.try_acquire_from(Some(host)).is_some());
+        // Loopback peers are local and use only the socket limit.
+        let loopback: IpAddr = "127.0.0.1".parse().unwrap();
+        let held: Vec<_> = (0..8)
+            .map(|_| admission.try_acquire_from(Some(loopback)).unwrap())
+            .collect();
+        assert_eq!(held.len(), 8);
     }
 }

@@ -181,3 +181,35 @@ async fn failed_driver_handshake_waits_before_reconnecting() {
     drop(silent_peer);
     push.close().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn silent_inbound_peers_cannot_starve_outbound_connects() {
+    let peer = Socket::new(SocketType::Push, Options::default());
+    let peer_ep = peer.bind("tcp://127.0.0.1:0").await.unwrap();
+    let socket = Socket::new(
+        SocketType::Pull,
+        Options::default()
+            .max_pending_handshakes(2)
+            .handshake_timeout(Duration::from_secs(10)),
+    );
+    let endpoint = socket.bind("tcp://127.0.0.1:0").await.unwrap();
+    let Endpoint::Tcp { port, .. } = endpoint else {
+        unreachable!()
+    };
+    // Unauthenticated, silent transports fill every inbound slot.
+    let mut silent = Vec::new();
+    for _ in 0..2 {
+        silent.push(
+            tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap(),
+        );
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    socket.connect(peer_ep).await.unwrap();
+    socket
+        .wait_connected(1, Duration::from_secs(3))
+        .await
+        .expect("outbound connect waited for inbound admission");
+    drop(silent);
+}

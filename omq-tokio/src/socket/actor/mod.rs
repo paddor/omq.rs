@@ -273,7 +273,10 @@ pub(crate) struct SocketDriver {
     next_peer_id: u64,
     last_stream_routing_id: Option<bytes::Bytes>,
     peers: FxHashMap<u64, PeerEntry>,
+    /// Inbound setups: accepted transports and listener carriers.
     setup_admission: crate::transport::setup::Admission,
+    /// Outbound setups. Separate, so accepted peers cannot starve redials.
+    dial_admission: crate::transport::setup::Admission,
     listeners: Vec<ListenerEntry>,
     dialers: Vec<DialerEntry>,
     pending_endpoints: FxHashMap<u64, endpoint_resolution::PendingEndpoint>,
@@ -362,6 +365,7 @@ impl SocketDriver {
             setup_admission: crate::transport::setup::Admission::new(
                 options.max_pending_handshakes,
             ),
+            dial_admission: crate::transport::setup::Admission::new(options.max_pending_handshakes),
             options,
             cmd_rx,
             recv_tx,

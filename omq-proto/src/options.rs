@@ -283,8 +283,11 @@ pub struct Options {
     /// peers hold pending-handshake slots longer.
     pub handshake_timeout: Option<Duration>,
 
-    /// Maximum pending byte-stream handshakes per socket. Includes accepted
-    /// TCP/IPC connections, WS/WSS before TLS/HTTP, and outbound attempts.
+    /// Maximum pending byte-stream handshakes per socket, counted separately
+    /// for inbound peers (accepted TCP/IPC connections, WS/WSS before
+    /// TLS/HTTP) and outbound attempts, so inbound load cannot stall
+    /// reconnects. One remote host (an IPv4 address or IPv6 /64, loopback
+    /// exempt) may hold at most an eighth of the inbound slots.
     /// The tokio backend reserves admission before spawning a peer driver,
     /// including before DNS for named outbound connections. WS/WSS also
     /// allows at most 32 pending peers per listener. Named bind/connect API

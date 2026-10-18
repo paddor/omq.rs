@@ -1,6 +1,7 @@
 //! Linux SHM storage, region coordinates, and generation-tagged leases.
 //!
-//! Payloads use anonymous size-sealed memfds passed through Unix `SCM_RIGHTS`.
+//! Payloads use anonymous size- and write-sealed memfds passed through Unix
+//! `SCM_RIGHTS`.
 //! Peers use kernel credentials and pidfds; no procfs lookup is required.
 //! The Unix connection carries region coordinates, never virtual addresses.
 //! Mapping references survive socket/context destruction and process exit.

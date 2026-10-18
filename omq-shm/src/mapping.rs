@@ -1,5 +1,6 @@
 //! The Linux mapping boundary. All references are checked against a sealed
 //! mapping; payload slots are disjoint and mutable only before publication.
+//! Data regions are write-sealed: only the creator's mapping can modify them.
 
 use std::fs::File;
 use std::io;
@@ -20,6 +21,8 @@ pub(crate) const LEASES: u64 = 2;
 const SEALS: SealFlags = SealFlags::SHRINK
     .union(SealFlags::GROW)
     .union(SealFlags::SEAL);
+#[cfg(not(miri))]
+const WRITE_SEALS: SealFlags = SealFlags::WRITE.union(SealFlags::FUTURE_WRITE);
 const REGION_MAGIC: &[u8; 8] = b"OMQSHM02";
 const TOKEN_OFFSET: usize = REGION_MAGIC.len();
 const KIND_OFFSET: usize = TOKEN_OFFSET + std::mem::size_of::<u64>();
@@ -60,11 +63,20 @@ impl Mapping {
             MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING,
         )?);
         file.set_len(length as u64)?;
-        rustix::fs::fcntl_add_seals(&file, SEALS)?;
+        rustix::fs::fcntl_add_seals(&file, SealFlags::SHRINK | SealFlags::GROW)?;
         let token = rand::random::<u64>();
         let mut mapping = Self::map(file, length, true, token)?;
         mapping.kind = kind;
         mapping.initialize_header();
+        // FUTURE_WRITE keeps this writable mapping, but no descriptor can write,
+        // punch, or newly map a data region writable. Receivers complete
+        // leases in place, so lease tables stay writable.
+        let seals = if kind == DATA {
+            SealFlags::FUTURE_WRITE | SealFlags::SEAL
+        } else {
+            SealFlags::SEAL
+        };
+        rustix::fs::fcntl_add_seals(&mapping.file, seals)?;
         Ok(mapping)
     }
 
@@ -112,9 +124,10 @@ impl Mapping {
 
     #[cfg(not(miri))]
     pub(crate) fn import(file: File) -> io::Result<Self> {
-        if !rustix::fs::fcntl_get_seals(&file).is_ok_and(|seals| seals.contains(SEALS)) {
-            return Err(invalid("SHM region is not size-sealed"));
-        }
+        let seals = rustix::fs::fcntl_get_seals(&file)
+            .ok()
+            .filter(|seals| seals.contains(SEALS))
+            .ok_or_else(|| invalid("SHM region is not size-sealed"))?;
         let length = usize::try_from(file.metadata()?.len())
             .map_err(|_| invalid("SHM region exceeds address space"))?;
         if !(HEADER..=isize::MAX as usize).contains(&length) {
@@ -122,6 +135,9 @@ impl Mapping {
         }
         let mut mapping = Self::map(file, length, false, 0)?;
         mapping.validate_header()?;
+        if mapping.kind == DATA && !seals.intersects(WRITE_SEALS) {
+            return Err(invalid("SHM data region is not write-sealed"));
+        }
         if mapping.kind == LEASES {
             // SAFETY: only the lease table becomes writable. Its received FD
             // and stable size-sealed mapping remain owned by this object.
@@ -278,6 +294,39 @@ impl Mapping {
         // SAFETY: aligned atomic-only storage in a writable shared mapping.
         unsafe { &*self.address.as_ptr().add(offset).cast::<AtomicU32>() }
     }
+
+    /// Try a fresh writable shared mapping of `file`, unmapping it on success.
+    #[cfg(all(test, not(miri)))]
+    fn try_map_writable(file: &File, length: usize) -> io::Result<()> {
+        // SAFETY: a fresh mapping that nothing references; unmapped below.
+        let address = unsafe {
+            rustix::mm::mmap(
+                std::ptr::null_mut(),
+                length,
+                ProtFlags::READ | ProtFlags::WRITE,
+                MapFlags::SHARED,
+                file,
+                0,
+            )?
+        };
+        // SAFETY: the mapping created above.
+        unsafe { rustix::mm::munmap(address, length)? };
+        Ok(())
+    }
+
+    /// Try to upgrade this mapping to writable.
+    #[cfg(all(test, not(miri)))]
+    fn try_mprotect_writable(&self) -> io::Result<()> {
+        // SAFETY: changes only the protection of this object's own mapping.
+        unsafe {
+            rustix::mm::mprotect(
+                self.address.as_ptr().cast(),
+                self.length,
+                MprotectFlags::READ | MprotectFlags::WRITE,
+            )?;
+        }
+        Ok(())
+    }
 }
 
 impl Drop for Mapping {
@@ -376,6 +425,69 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn receivers_cannot_write_a_data_region_through_any_descriptor_or_mapping() {
+        use std::os::unix::fs::FileExt;
+        use std::sync::atomic::Ordering;
+
+        let source = Mapping::create(HEADER + 4096, DATA).unwrap();
+        let file = source.descriptor().unwrap();
+        let imported = Mapping::import(source.descriptor().unwrap()).unwrap();
+        let offset = HEADER as u64;
+        assert!(file.write_at(b"x", offset).is_err());
+        assert!(
+            rustix::fs::fallocate(
+                &file,
+                rustix::fs::FallocateFlags::PUNCH_HOLE | rustix::fs::FallocateFlags::KEEP_SIZE,
+                offset,
+                1,
+            )
+            .is_err()
+        );
+        assert!(Mapping::try_map_writable(&file, source.len()).is_err());
+        assert!(imported.try_mprotect_writable().is_err());
+        let reopened = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(format!("/proc/self/fd/{}", file.as_raw_fd()))
+            .unwrap();
+        assert!(reopened.write_at(b"x", offset).is_err());
+        assert!(Mapping::try_map_writable(&reopened, source.len()).is_err());
+        let memory = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/proc/self/mem")
+            .unwrap();
+        assert!(
+            memory
+                .write_at(b"x", (imported.address() + HEADER) as u64)
+                .is_err()
+        );
+        // The creator's existing mapping still writes slots in place.
+        source.atomic64(HEADER).store(7, Ordering::Release);
+        assert_eq!(read_u64(imported.bytes(HEADER, 8), 0), 7);
+    }
+
+    #[test]
+    fn import_rejects_a_data_region_without_a_write_seal() {
+        use std::os::unix::fs::FileExt;
+
+        let length = HEADER + 16;
+        let file = File::from(
+            rustix::fs::memfd_create("omq-unsealed", MemfdFlags::ALLOW_SEALING).unwrap(),
+        );
+        file.set_len(length as u64).unwrap();
+        let mut header = [0; HEADER];
+        header[..REGION_MAGIC.len()].copy_from_slice(REGION_MAGIC);
+        for (offset, value) in [(KIND_OFFSET, DATA), (LENGTH_OFFSET, length as u64)] {
+            header[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        file.write_all_at(&header, 0).unwrap();
+        rustix::fs::fcntl_add_seals(&file, SEALS).unwrap();
+        let error = Mapping::import(file).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(error.to_string(), "SHM data region is not write-sealed");
     }
 
     #[test]

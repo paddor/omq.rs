@@ -1080,16 +1080,14 @@ fn blocking_receive_parks_while_a_receipt_holds_the_only_source() {
     }
     let deadline = std::time::Instant::now() + DEADLINE;
     let (_receipt, _first) = loop {
-        match server.as_ref().try_recv_with_receipt(None) {
-            Ok(claimed) => break claimed,
-            Err(_) => {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "first message never arrived"
-                );
-                std::thread::yield_now();
-            }
+        if let Ok(claimed) = server.as_ref().try_recv_with_receipt(None) {
+            break claimed;
         }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "first message never arrived"
+        );
+        std::thread::yield_now();
     };
     // The held receipt keeps the queued second message unavailable. Its
     // permit must not make the receive loop spin instead of parking.
@@ -1097,7 +1095,7 @@ fn blocking_receive_parks_while_a_receipt_holds_the_only_source() {
     let (result, cpu) = std::thread::spawn(move || {
         let before = thread_cpu();
         let result = receiving.recv_timeout(Duration::from_millis(300));
-        (result, thread_cpu() - before)
+        (result, thread_cpu().saturating_sub(before))
     })
     .join()
     .unwrap();

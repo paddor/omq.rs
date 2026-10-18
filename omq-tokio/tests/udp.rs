@@ -36,6 +36,30 @@ async fn dish_on_loopback() -> (Socket, Endpoint) {
     (dish, connect_ep)
 }
 
+fn udp_port(endpoint: &Endpoint) -> u16 {
+    let Endpoint::Udp { port, .. } = endpoint else {
+        panic!("not a UDP endpoint: {endpoint}");
+    };
+    *port
+}
+
+#[tokio::test]
+async fn dish_close_releases_its_udp_port() {
+    let (dish, ep) = dish_on_loopback().await;
+    dish.close().await.unwrap();
+    std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, udp_port(&ep)))
+        .expect("closed DISH must release its UDP port");
+}
+
+#[tokio::test]
+async fn dish_unbind_releases_its_udp_port() {
+    let (dish, ep) = dish_on_loopback().await;
+    dish.unbind(ep.clone()).await.unwrap();
+    std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, udp_port(&ep)))
+        .expect("unbound DISH must release its UDP port");
+    dish.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn radio_to_dish_matching_group_delivers() {
     let (dish, ep) = dish_on_loopback().await;

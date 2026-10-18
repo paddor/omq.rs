@@ -174,26 +174,40 @@ pub extern "C" fn zmq_timers_timeout(timers_ptr: *mut c_void) -> c_long {
 }
 
 /// Run due timer callbacks and reschedule their deadlines; return zero or -1 with errno.
+///
+/// A callback may cancel, reset, or re-interval any timer in the set. Each due
+/// timer is looked up again right before its callback runs, so a timer that an
+/// earlier callback cancelled or pushed back does not fire with a stale `arg`.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_timers_execute(timers_ptr: *mut c_void) -> c_int {
-    let callbacks = {
-        let timers = match unsafe { timers(timers_ptr) } {
-            Ok(t) => t,
-            Err(e) => return fail(e),
-        };
-
-        let now = Instant::now();
-        let mut callbacks = Vec::new();
-        for entry in &mut timers.entries {
-            if entry.next.is_some_and(|next| next <= now) {
-                callbacks.push((entry.id, entry.handler, entry.arg));
-                entry.next = now.checked_add(entry.interval);
-            }
-        }
-        callbacks
+    let now = Instant::now();
+    let due: Vec<c_int> = match unsafe { timers(timers_ptr) } {
+        Ok(timers) => timers
+            .entries
+            .iter()
+            .filter(|entry| entry.next.is_some_and(|next| next <= now))
+            .map(|entry| entry.id)
+            .collect(),
+        Err(e) => return fail(e),
     };
 
-    for (id, handler, arg) in callbacks {
+    for id in due {
+        let callback = {
+            // SAFETY: callbacks must not destroy the set they run from.
+            let Ok(timers) = (unsafe { timers(timers_ptr) }) else {
+                break;
+            };
+            let Some(idx) = find_timer(&timers.entries, id) else {
+                continue;
+            };
+            let entry = &mut timers.entries[idx];
+            if entry.next.is_none_or(|next| next > now) {
+                continue;
+            }
+            entry.next = now.checked_add(entry.interval);
+            (entry.handler, entry.arg)
+        };
+        let (handler, arg) = callback;
         // SAFETY: handler came from C caller and matched zmq_timer_fn.
         unsafe { handler(id, arg) };
     }
@@ -216,6 +230,24 @@ mod tests {
         // SAFETY: test passes an AtomicUsize pointer as timer arg.
         let count = unsafe { &*arg.cast::<AtomicUsize>() };
         count.fetch_add(1, Ordering::SeqCst);
+    }
+
+    #[derive(Debug)]
+    struct CancelOther {
+        timers: *mut c_void,
+        other: AtomicUsize,
+        fired: AtomicUsize,
+    }
+
+    unsafe extern "C" fn cancel_other(_timer_id: c_int, arg: *mut c_void) {
+        // SAFETY: test passes a CancelOther pointer as timer arg.
+        let state = unsafe { &*arg.cast::<CancelOther>() };
+        state.fired.fetch_add(1, Ordering::SeqCst);
+        let other = c_int::try_from(state.other.load(Ordering::SeqCst)).unwrap();
+        if other != 0 {
+            assert_eq!(zmq_timers_cancel(state.timers, other), 0);
+            state.other.store(0, Ordering::SeqCst);
+        }
     }
 
     unsafe extern "C" fn cancel_self(timer_id: c_int, arg: *mut c_void) {
@@ -300,6 +332,34 @@ mod tests {
         assert_eq!(zmq_timers_execute(timers), 0);
         assert_eq!(state.fired.load(Ordering::SeqCst), 1);
         assert_eq!(zmq_timers_timeout(timers), -1);
+
+        let mut timers_slot = timers;
+        assert_eq!(zmq_timers_destroy(&raw mut timers_slot), 0);
+    }
+
+    #[test]
+    fn timer_cancelled_by_earlier_due_callback_does_not_fire() {
+        let timers = zmq_timers_new();
+        assert!(!timers.is_null());
+
+        // Both timers are due; whichever runs first cancels the other.
+        let state = CancelOther {
+            timers,
+            other: AtomicUsize::new(0),
+            fired: AtomicUsize::new(0),
+        };
+        let arg = std::ptr::from_ref(&state).cast::<c_void>().cast_mut();
+        let first = zmq_timers_add(timers, 0, Some(cancel_other), arg);
+        let second = zmq_timers_add(timers, 0, Some(cancel_other), arg);
+        assert!(first > 0 && second > 0);
+        state
+            .other
+            .store(usize::try_from(second).unwrap(), Ordering::SeqCst);
+
+        assert_eq!(zmq_timers_execute(timers), 0);
+        assert_eq!(state.fired.load(Ordering::SeqCst), 1);
+        assert_eq!(zmq_timers_cancel(timers, second), -1);
+        assert_eq!(zmq_timers_cancel(timers, first), 0);
 
         let mut timers_slot = timers;
         assert_eq!(zmq_timers_destroy(&raw mut timers_slot), 0);

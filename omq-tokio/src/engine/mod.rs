@@ -14,6 +14,7 @@ pub(crate) mod codec;
 /// Bounded blocking workers for compression transforms.
 pub mod compression_pool;
 pub(crate) mod control_inbox;
+pub(crate) mod control_queue;
 pub(crate) mod data_inbox;
 pub mod driver;
 pub(crate) mod framing;

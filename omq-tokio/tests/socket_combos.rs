@@ -100,3 +100,49 @@ async fn dealer_to_dealer_multiple_rounds() {
         assert_eq!(msg.part_bytes(0).unwrap(), format!("rep-{i}").as_bytes());
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_async_receivers_on_one_socket_all_get_messages() {
+    for (sender_type, receiver_type) in [
+        (SocketType::Pub, SocketType::Sub),
+        (SocketType::Dealer, SocketType::Dealer),
+        (SocketType::Push, SocketType::Pull),
+    ] {
+        let options = Options::default().linger(Duration::ZERO);
+        let sender = Socket::new(sender_type, options.clone());
+        let receiver = Socket::new(receiver_type, options);
+        let endpoint = sender.bind("tcp://127.0.0.1:0").await.unwrap();
+        if receiver_type == SocketType::Sub {
+            receiver.subscribe("").await.unwrap();
+        }
+        receiver.connect(endpoint).await.unwrap();
+        sender
+            .wait_connected(1, Duration::from_secs(2))
+            .await
+            .unwrap();
+        if sender_type == SocketType::Pub {
+            sender
+                .wait_subscribed(1, Duration::from_secs(2))
+                .await
+                .unwrap();
+        }
+        let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel();
+        for _ in 0..2 {
+            let receiver = receiver.clone();
+            let done = done_tx.clone();
+            tokio::spawn(async move {
+                done.send(receiver.recv().await.unwrap()).unwrap();
+            });
+        }
+        // Let both receivers park before anything arrives.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        sender.send(Message::single("one")).await.unwrap();
+        sender.send(Message::single("two")).await.unwrap();
+        for _ in 0..2 {
+            tokio::time::timeout(Duration::from_secs(2), done_rx.recv())
+                .await
+                .unwrap_or_else(|_| panic!("{receiver_type:?} receiver stayed parked"))
+                .unwrap();
+        }
+    }
+}

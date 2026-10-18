@@ -1237,11 +1237,13 @@ impl SpscAwareRecv {
         self.drain_state.lock().generation = u64::MAX;
     }
 
-    #[expect(clippy::needless_continue)]
     pub(crate) async fn recv(&self) -> Result<Message> {
+        // Set once a signal wake led here. A woken receiver that takes a
+        // message passes the wake on to other parked receivers.
+        let mut woken = false;
         loop {
             match self.try_drain() {
-                DrainResult::Message(msg) => return Ok(msg),
+                DrainResult::Message(msg) => return Ok(self.delivered(msg, woken)),
                 DrainResult::Closed => return Err(Error::Closed),
                 DrainResult::Empty => {}
             }
@@ -1265,7 +1267,7 @@ impl SpscAwareRecv {
                 || self.conflate_slot.is_some()
             {
                 match self.try_drain() {
-                    DrainResult::Message(msg) => return Ok(msg),
+                    DrainResult::Message(msg) => return Ok(self.delivered(msg, woken)),
                     DrainResult::Closed => return Err(Error::Closed),
                     DrainResult::Empty => {}
                 }
@@ -1286,23 +1288,35 @@ impl SpscAwareRecv {
                     .map(super::fanin::Fanin::wait);
                 tokio::select! {
                     biased;
-                    () = &mut recv_ready => continue,
-                    () = &mut pipe_ready => continue,
-                    () = &mut activated => continue,
+                    () = &mut recv_ready => {}
+                    () = &mut pipe_ready => {}
+                    () = &mut activated => {}
                 }
+                woken = true;
+                continue;
             }
             match self.try_drain() {
-                DrainResult::Message(msg) => return Ok(msg),
+                DrainResult::Message(msg) => return Ok(self.delivered(msg, woken)),
                 DrainResult::Closed => return Err(Error::Closed),
                 DrainResult::Empty => {}
             }
 
             tokio::select! {
                 biased;
-                () = &mut pipe_ready => continue,
-                () = &mut activated => continue,
+                () = &mut pipe_ready => {}
+                () = &mut activated => {}
             }
+            woken = true;
         }
+    }
+
+    #[inline]
+    fn delivered(&self, msg: Message, woken: bool) -> Message {
+        if woken {
+            self.recv_signal.hand_off();
+            self.recv_pipe_notify.hand_off();
+        }
+        msg
     }
 
     fn take_peer_yield_pending(&self) -> bool {

@@ -98,26 +98,34 @@ fn environment<'a>(dict: Option<&'a str>, level: Option<&'a str>) -> Vec<(&'stat
     env
 }
 
+/// One timed PUSH/PULL measurement between two blocking peers.
+pub(crate) struct Cell<'a> {
+    pub blocking: &'a Path,
+    pub transport: &'a str,
+    pub size: u64,
+    pub duration: f64,
+    pub warmup: f64,
+}
+
 pub(crate) fn run_cell(
-    blocking: &Path,
-    transport: &str,
-    size: u64,
-    duration: f64,
-    warmup: f64,
+    cell: &Cell<'_>,
     sender_env: &[(&str, &str)],
     receiver_env: &[(&str, &str)],
 ) -> Measurement {
-    let binary = blocking.to_str().expect("peer path");
+    let binary = cell.blocking.to_str().expect("peer path");
     // Measurements are serial; both peers exit before this port is reused.
-    let endpoint = format!("{transport}://127.0.0.1:17500");
-    let size_arg = size.to_string();
-    let duration_arg = duration.to_string();
-    let warmup_arg = Duration::from_secs_f64(warmup).as_millis().to_string();
+    let endpoint = format!("{}://127.0.0.1:17500", cell.transport);
+    let size_arg = cell.size.to_string();
+    let duration_arg = cell.duration.to_string();
+    let warmup_arg = Duration::from_secs_f64(cell.warmup).as_millis().to_string();
+
     let mut sender = process::spawn(
         &[binary, "push", &endpoint, &size_arg],
         sender_env,
         Some(process::MEASURED_CPU),
     );
+
+    // The receiver verifies payloads and reads the sender's CPU time by PID.
     let sender_pid = sender.pid().to_string();
     let mut receiver_env = receiver_env.to_vec();
     receiver_env.extend([
@@ -129,10 +137,16 @@ pub(crate) fn run_cell(
         &[binary, "pull", &endpoint, &size_arg, &duration_arg],
         &receiver_env,
         Some(process::OTHER_CPU),
-        Duration::from_secs_f64(duration + warmup + 15.0),
+        Duration::from_secs_f64(cell.duration + cell.warmup + 15.0),
     )
     .expect("compression receiver failed or timed out");
     sender.kill();
+
+    parse_measurement(&output, cell.size)
+}
+
+/// Parses `count elapsed size receiver_cpu sender_cpu` from the receiver.
+fn parse_measurement(output: &str, size: u64) -> Measurement {
     let fields: Vec<f64> = output
         .split_whitespace()
         .map(|field| field.parse().expect("invalid compression measurement"))
@@ -144,6 +158,7 @@ pub(crate) fn run_cell(
             .all(|field| field.is_finite() && *field >= 0.0)
     );
     assert!(fields[0] > 0.0 && fields[1] > 0.0);
+
     let reported_size: u64 = output
         .split_whitespace()
         .nth(2)
@@ -151,6 +166,7 @@ pub(crate) fn run_cell(
         .parse()
         .expect("integer payload size");
     assert_eq!(reported_size, size, "incorrect payload size");
+
     Measurement {
         count: fields[0],
         elapsed: fields[1],
@@ -159,111 +175,187 @@ pub(crate) fn run_cell(
     }
 }
 
-#[expect(clippy::too_many_arguments)]
-fn measure(
-    config: &Config,
-    peers: &Peers,
-    sizes: &[u64],
-    transport: &str,
-    dictionary: Option<(&str, u64)>,
-    run_id: &str,
+/// Settings shared by every measurement of one benchmark run.
+struct Sweep<'a> {
+    config: &'a Config,
+    peers: &'a Peers,
+    sizes: &'a [u64],
+    run_id: &'a str,
     rounds: u32,
     duration: f64,
-) {
-    let level = config.level.map(|value| value.to_string());
-    let env = environment(dictionary.map(|(path, _)| path), level.as_deref());
-    let netem = config.link.link_mbps.map(|rate_mbps| CompressionLink {
-        rate_mbps,
-        delay_us: config.link.link_delay_us,
-        mtu: 1500,
-        shared_rate: true,
-        segmentation_offloads: false,
-        placement: "tcp-ingress-ifb".to_owned(),
-    });
-    let affinity = if std::env::var_os("OMQ_BENCH_TASKSET").is_some() {
-        "sender=1-2,receiver=3-4"
-    } else {
-        "unbound"
-    };
-    let cache = jsonl::cache_dir().join(format!("results_pushpull_{}.jsonl", config.feature));
-    for &size in sizes {
+}
+
+impl Sweep<'_> {
+    fn measure(&self, transport: &str, dictionary: Option<(&str, u64)>) {
+        let config = self.config;
+        let level = config.level.map(|value| value.to_string());
+        let env = environment(dictionary.map(|(path, _)| path), level.as_deref());
+        let cache = jsonl::cache_dir().join(format!("results_pushpull_{}.jsonl", config.feature));
+
+        for &size in self.sizes {
+            let wire_bytes = self.wire_bytes(transport, size, &env);
+            // Slow links need enough large messages to avoid integer-count steps.
+            let cell_duration = config.link.link_mbps.map_or(self.duration, |rate| {
+                self.duration
+                    .max((110.0 * wire_bytes as f64 * 8.0 / (f64::from(rate) * 1e6)).min(40.0))
+            });
+            let cell = Cell {
+                blocking: &self.peers.blocking,
+                transport,
+                size,
+                duration: cell_duration,
+                warmup: config.link.warmup_seconds,
+            };
+            let base = self.base_row(&cell, wire_bytes, dictionary);
+
+            for repeat in 1..=self.rounds {
+                let sample = run_cell(&cell, &env, &env);
+                let msgs_s = sample.count / sample.elapsed;
+                let mbps = msgs_s * size as f64 / 1_000_000.0;
+                let row = PushpullLz4Row {
+                    msg_count: Some(sample.count),
+                    elapsed: Some(sample.elapsed),
+                    cpu_time: Some(sample.sender_cpu),
+                    msgs_s: Some(msgs_s),
+                    mbps: Some(mbps),
+                    repeat: Some(repeat),
+                    ..base.clone()
+                };
+
+                if !config.quick {
+                    jsonl::append_jsonl(&cache, &row);
+                }
+
+                eprintln!(
+                    "{transport}{} size={size} round={repeat}/{}: {msgs_s:.0} msg/s, \
+                     {mbps:.3} MB/s, sender CPU={:.1}%",
+                    if dictionary.is_some() { "+dict" } else { "" },
+                    self.rounds,
+                    sample.sender_cpu / sample.elapsed * 100.0,
+                );
+            }
+        }
+    }
+
+    /// Encoded wire bytes of one message, as reported by the peer.
+    fn wire_bytes(&self, transport: &str, size: u64, env: &[(&str, &str)]) -> u64 {
         let endpoint = format!("{transport}://127.0.0.1:17500");
-        let wire_bytes: u64 = utility(
-            peers,
+        utility(
+            self.peers,
             &["wire-size", &endpoint, &size.to_string()],
-            &env,
+            env,
             Duration::from_secs(10),
         )
         .trim()
         .parse()
-        .expect("invalid encoded wire size");
-        // Slow links need enough large messages to avoid integer-count steps.
-        let cell_duration = config.link.link_mbps.map_or(duration, |rate| {
-            duration.max((110.0 * wire_bytes as f64 * 8.0 / (f64::from(rate) * 1e6)).min(40.0))
+        .expect("invalid encoded wire size")
+    }
+
+    /// Row fields shared by every repeat of one cell.
+    fn base_row(
+        &self,
+        cell: &Cell<'_>,
+        wire_bytes: u64,
+        dictionary: Option<(&str, u64)>,
+    ) -> PushpullLz4Row {
+        let config = self.config;
+        let netem = config.link.link_mbps.map(|rate_mbps| CompressionLink {
+            rate_mbps,
+            delay_us: config.link.link_delay_us,
+            mtu: 1500,
+            shared_rate: true,
+            segmentation_offloads: false,
+            placement: "tcp-ingress-ifb".to_owned(),
         });
-        for repeat in 1..=rounds {
-            let sample = run_cell(
-                &peers.blocking,
-                transport,
-                size,
-                cell_duration,
-                config.link.warmup_seconds,
-                &env,
-                &env,
-            );
-            let msgs_s = sample.count / sample.elapsed;
-            let mbps = msgs_s * size as f64 / 1_000_000.0;
-            let row = PushpullLz4Row {
-                run_id: run_id.to_owned(),
-                pattern: format!(
-                    "pushpull_{}{}",
-                    config.feature,
-                    if dictionary.is_some() { "_dict" } else { "" }
-                ),
-                transport: transport.to_owned(),
-                peers: 1,
-                msg_size: size,
-                wire_bytes,
-                msg_count: Some(sample.count),
-                elapsed: Some(sample.elapsed),
-                cpu_time: Some(sample.sender_cpu),
-                msgs_s: Some(msgs_s),
-                mbps: Some(mbps),
-                dict_size: dictionary.map(|(_, capacity)| capacity),
-                compression_level: config.level,
-                netem: netem.clone(),
-                repeat: Some(repeat),
-                rounds: Some(rounds),
-                warmup_seconds: Some(config.link.warmup_seconds),
-                duration_seconds: Some(cell_duration),
-                binary_sha256: peers.sha256.clone(),
-                cpu_affinity: Some(affinity.to_owned()),
-                payload: Some("structured-varied-v1".to_owned()),
-                payload_seed: Some(4242),
-                payload_corpus_messages: Some((64 * 1024 * 1024 / size).clamp(2, 4096)),
-                arena_bytes: Some({
-                    std::env::var(format!("OMQ_{}_ARENA_BYTES", config.feature.to_uppercase()))
-                        .ok()
-                        .and_then(|value| value.parse::<u64>().ok())
-                        .unwrap_or(if config.feature == "zstd" {
-                            32768
-                        } else {
-                            16384
-                        })
-                        .min(65536)
-                }),
-            };
-            if !config.quick {
-                jsonl::append_jsonl(&cache, &row);
-            }
-            eprintln!(
-                "{transport}{} size={size} round={repeat}/{rounds}: {msgs_s:.0} msg/s, \
-                 {mbps:.3} MB/s, sender CPU={:.1}%",
-                if dictionary.is_some() { "+dict" } else { "" },
-                sample.sender_cpu / sample.elapsed * 100.0,
-            );
+        let affinity = if std::env::var_os("OMQ_BENCH_TASKSET").is_some() {
+            "sender=1-2,receiver=3-4"
+        } else {
+            "unbound"
+        };
+
+        PushpullLz4Row {
+            run_id: self.run_id.to_owned(),
+            pattern: format!(
+                "pushpull_{}{}",
+                config.feature,
+                if dictionary.is_some() { "_dict" } else { "" }
+            ),
+            transport: cell.transport.to_owned(),
+            peers: 1,
+            msg_size: cell.size,
+            wire_bytes,
+            msg_count: None,
+            elapsed: None,
+            cpu_time: None,
+            msgs_s: None,
+            mbps: None,
+            dict_size: dictionary.map(|(_, capacity)| capacity),
+            compression_level: config.level,
+            netem,
+            repeat: None,
+            rounds: Some(self.rounds),
+            warmup_seconds: Some(config.link.warmup_seconds),
+            duration_seconds: Some(cell.duration),
+            binary_sha256: self.peers.sha256.clone(),
+            cpu_affinity: Some(affinity.to_owned()),
+            payload: Some("structured-varied-v1".to_owned()),
+            payload_seed: Some(4242),
+            payload_corpus_messages: Some((64 * 1024 * 1024 / cell.size).clamp(2, 4096)),
+            arena_bytes: Some(arena_bytes(config.feature)),
         }
     }
+
+    /// Trains a dictionary of `capacity` bytes and measures the compressed
+    /// transport with it, if that transport was selected.
+    fn measure_dictionary(&self, capacity: u64, compressed: &str, selected: bool) {
+        let feature = self.config.feature;
+        let path = format!(
+            "/tmp/omq-bench-{feature}-dict-{capacity}-{}.bin",
+            std::process::id()
+        );
+        let action = if feature == "lz4" {
+            "train-dict"
+        } else {
+            "train-zstd-dict"
+        };
+        utility(
+            self.peers,
+            &[action, &path, &capacity.to_string()],
+            &environment(None, None),
+            Duration::from_secs(30),
+        );
+
+        if selected {
+            self.measure(compressed, Some((&path, capacity)));
+        }
+
+        std::fs::remove_file(&path).expect("remove benchmark dictionary");
+    }
+}
+
+/// Peer arena size: the `OMQ_<FEATURE>_ARENA_BYTES` override, else the
+/// feature default, capped at 64 KiB.
+fn arena_bytes(feature: &str) -> u64 {
+    std::env::var(format!("OMQ_{}_ARENA_BYTES", feature.to_uppercase()))
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(if feature == "zstd" { 32768 } else { 16384 })
+        .min(65536)
+}
+
+/// SHA-256 of the peer binary, so result rows identify the build.
+pub(crate) fn peer_sha256(binary: &Path) -> String {
+    let hash = Command::new("sha256sum")
+        .arg(binary)
+        .output()
+        .expect("hash benchmark peer");
+    assert!(hash.status.success(), "benchmark peer hash failed");
+    String::from_utf8(hash.stdout)
+        .expect("UTF-8 peer hash")
+        .split_whitespace()
+        .next()
+        .expect("peer hash")
+        .to_owned()
 }
 
 pub(crate) fn run(config: &Config) {
@@ -274,19 +366,8 @@ pub(crate) fn run(config: &Config) {
     if run_in_netem(&config.link) {
         return;
     }
-    let sha256 = config.link.link_mbps.map(|_| {
-        let hash = Command::new("sha256sum")
-            .arg(&blocking)
-            .output()
-            .expect("hash benchmark peer");
-        assert!(hash.status.success(), "benchmark peer hash failed");
-        String::from_utf8(hash.stdout)
-            .expect("UTF-8 peer hash")
-            .split_whitespace()
-            .next()
-            .expect("peer hash")
-            .to_owned()
-    });
+
+    let sha256 = config.link.link_mbps.map(|_| peer_sha256(&blocking));
     let peers = Peers {
         blocking,
         utility: utility_path,
@@ -298,8 +379,6 @@ pub(crate) fn run(config: &Config) {
         CHART_SIZES
     });
     assert!(sizes.iter().all(|size| *size > 0));
-    let duration = if config.quick { 1.5 } else { config.duration };
-    let rounds = if config.quick { 1 } else { config.rounds };
     let run_id = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("benchmark timestamp")
@@ -313,40 +392,23 @@ pub(crate) fn run(config: &Config) {
             .all(|transport| *transport == "tcp" || *transport == compressed),
         "compression measurements require TCP transports"
     );
+
+    let sweep = Sweep {
+        config,
+        peers: &peers,
+        sizes,
+        run_id: &run_id,
+        rounds: if config.quick { 1 } else { config.rounds },
+        duration: if config.quick { 1.5 } else { config.duration },
+    };
     for transport in &transports {
-        measure(
-            config, &peers, sizes, transport, None, &run_id, rounds, duration,
-        );
+        sweep.measure(transport, None);
     }
     for &capacity in &config.dict_sizes {
-        let path = format!(
-            "/tmp/omq-bench-{}-dict-{}-{capacity}.bin",
-            config.feature,
-            std::process::id()
+        sweep.measure_dictionary(
+            capacity,
+            &compressed,
+            transports.contains(&compressed.as_str()),
         );
-        let action = if config.feature == "lz4" {
-            "train-dict"
-        } else {
-            "train-zstd-dict"
-        };
-        utility(
-            &peers,
-            &[action, &path, &capacity.to_string()],
-            &environment(None, None),
-            Duration::from_secs(30),
-        );
-        if transports.contains(&compressed.as_str()) {
-            measure(
-                config,
-                &peers,
-                sizes,
-                &compressed,
-                Some((&path, capacity)),
-                &run_id,
-                rounds,
-                duration,
-            );
-        }
-        std::fs::remove_file(&path).expect("remove benchmark dictionary");
     }
 }

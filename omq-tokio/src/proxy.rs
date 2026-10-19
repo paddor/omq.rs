@@ -86,6 +86,33 @@ impl std::fmt::Debug for Pending {
     }
 }
 
+/// Forwarding state of both directions for one proxy run.
+#[derive(Debug)]
+struct Flows {
+    fe_pending: Option<Pending>,
+    be_pending: Option<Pending>,
+    fe_to_be_enabled: bool,
+    be_to_fe_enabled: bool,
+    /// Tried first on the next turn; flips after each forward for fairness.
+    preferred: Direction,
+}
+
+impl Flows {
+    fn enabled(&self, direction: Direction) -> bool {
+        match direction {
+            Direction::FrontendToBackend => self.fe_to_be_enabled,
+            Direction::BackendToFrontend => self.be_to_fe_enabled,
+        }
+    }
+
+    fn pending(&mut self, direction: Direction) -> &mut Option<Pending> {
+        match direction {
+            Direction::FrontendToBackend => &mut self.fe_pending,
+            Direction::BackendToFrontend => &mut self.be_pending,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProxyState {
     Active,
@@ -154,13 +181,14 @@ impl Proxy {
 
     async fn run_loop(self) -> Result<ProxyExit> {
         let same_socket = self.frontend.same_socket(&self.backend);
-        let fe_to_be_enabled = self.can_forward_direction(Direction::FrontendToBackend, false);
-        let be_to_fe_enabled =
-            self.can_forward_direction(Direction::BackendToFrontend, same_socket);
+        let mut flows = Flows {
+            fe_pending: None,
+            be_pending: None,
+            fe_to_be_enabled: self.can_forward_direction(Direction::FrontendToBackend, false),
+            be_to_fe_enabled: self.can_forward_direction(Direction::BackendToFrontend, same_socket),
+            preferred: Direction::FrontendToBackend,
+        };
         let mut state = ProxyState::Active;
-        let mut fe_pending: Option<Pending> = None;
-        let mut be_pending: Option<Pending> = None;
-        let mut preferred = Direction::FrontendToBackend;
         let mut turn = DrainBudget::new(TURN_BURSTS, usize::MAX);
 
         'main: loop {
@@ -171,15 +199,9 @@ impl Proxy {
             }
 
             if state == ProxyState::Active {
-                for direction in [preferred, preferred.opposite()] {
-                    if self.try_forward_available(
-                        direction,
-                        &mut fe_pending,
-                        &mut be_pending,
-                        fe_to_be_enabled,
-                        be_to_fe_enabled,
-                    )? {
-                        preferred = direction.opposite();
+                for direction in [flows.preferred, flows.preferred.opposite()] {
+                    if self.try_forward_available(direction, &mut flows)? {
+                        flows.preferred = direction.opposite();
                         if turn.account(0) {
                             continue 'main;
                         }
@@ -192,71 +214,66 @@ impl Proxy {
                 }
             }
 
-            let frontend = self.frontend.clone_shared();
-            let backend = self.backend.clone_shared();
-            let control = self.control.as_ref().map(Socket::clone_shared);
-
-            tokio::select! {
-                biased;
-                command = recv_optional(control), if self.control.is_some() => {
-                    match command? {
-                        Some(command) => {
-                            if self.handle_control(command, &mut state).await?
-                                == ControlAction::Terminate
-                            {
-                                return Ok(ProxyExit::Terminated);
-                            }
-                        }
-                        None => return Ok(ProxyExit::Closed),
-                    }
-                }
-                sent = pending_send(&mut fe_pending),
-                    if state == ProxyState::Active && fe_to_be_enabled && fe_pending.is_some() => {
-                    self.finish_pending(sent, &mut fe_pending)?;
-                    preferred = Direction::BackendToFrontend;
-                }
-                sent = pending_send(&mut be_pending),
-                    if state == ProxyState::Active && be_to_fe_enabled && be_pending.is_some() => {
-                    self.finish_pending(sent, &mut be_pending)?;
-                    preferred = Direction::FrontendToBackend;
-                }
-                msg = frontend.recv(),
-                    if state == ProxyState::Active && fe_to_be_enabled && fe_pending.is_none() => {
-                    let msg = msg?;
-                    self.forward_burst(Direction::FrontendToBackend, msg, &mut fe_pending)?;
-                    preferred = Direction::BackendToFrontend;
-                }
-                msg = backend.recv(),
-                    if state == ProxyState::Active && be_to_fe_enabled && be_pending.is_none() => {
-                    let msg = msg?;
-                    self.forward_burst(Direction::BackendToFrontend, msg, &mut be_pending)?;
-                    preferred = Direction::FrontendToBackend;
-                }
+            if let Some(exit) = self.wait_ready(&mut state, &mut flows).await? {
+                return Ok(exit);
             }
         }
     }
 
-    fn try_forward_available(
+    /// Park until control, a pending send, or a source is ready, then serve
+    /// it. Returns the exit reason once the proxy must stop.
+    async fn wait_ready(
         &self,
-        direction: Direction,
-        fe_pending: &mut Option<Pending>,
-        be_pending: &mut Option<Pending>,
-        fe_to_be_enabled: bool,
-        be_to_fe_enabled: bool,
-    ) -> Result<bool> {
-        if !direction_enabled(direction, fe_to_be_enabled, be_to_fe_enabled) {
+        state: &mut ProxyState,
+        flows: &mut Flows,
+    ) -> Result<Option<ProxyExit>> {
+        let frontend = self.frontend.clone_shared();
+        let backend = self.backend.clone_shared();
+        let control = self.control.as_ref().map(Socket::clone_shared);
+        let active = *state == ProxyState::Active;
+
+        tokio::select! {
+            biased;
+            command = recv_optional(control), if self.control.is_some() => match command? {
+                Some(command) => {
+                    let action = self.handle_control(command, state).await?;
+                    Ok((action == ControlAction::Terminate).then_some(ProxyExit::Terminated))
+                }
+                None => Ok(Some(ProxyExit::Closed)),
+            },
+            sent = pending_send(&mut flows.fe_pending),
+                if active && flows.fe_to_be_enabled && flows.fe_pending.is_some() => {
+                self.finish_pending(sent, &mut flows.fe_pending)?;
+                flows.preferred = Direction::BackendToFrontend;
+                Ok(None)
+            }
+            sent = pending_send(&mut flows.be_pending),
+                if active && flows.be_to_fe_enabled && flows.be_pending.is_some() => {
+                self.finish_pending(sent, &mut flows.be_pending)?;
+                flows.preferred = Direction::FrontendToBackend;
+                Ok(None)
+            }
+            msg = frontend.recv(),
+                if active && flows.fe_to_be_enabled && flows.fe_pending.is_none() => {
+                self.forward_burst(Direction::FrontendToBackend, msg?, &mut flows.fe_pending)?;
+                flows.preferred = Direction::BackendToFrontend;
+                Ok(None)
+            }
+            msg = backend.recv(),
+                if active && flows.be_to_fe_enabled && flows.be_pending.is_none() => {
+                self.forward_burst(Direction::BackendToFrontend, msg?, &mut flows.be_pending)?;
+                flows.preferred = Direction::FrontendToBackend;
+                Ok(None)
+            }
+        }
+    }
+
+    fn try_forward_available(&self, direction: Direction, flows: &mut Flows) -> Result<bool> {
+        // A direction with a pending send takes no input until it completes.
+        if !flows.enabled(direction) || flows.pending(direction).is_some() {
             return Ok(false);
         }
-        match direction {
-            Direction::FrontendToBackend if fe_pending.is_some() => return Ok(false),
-            Direction::BackendToFrontend if be_pending.is_some() => return Ok(false),
-            _ => {}
-        }
-
-        let pending = match direction {
-            Direction::FrontendToBackend => fe_pending,
-            Direction::BackendToFrontend => be_pending,
-        };
+        let pending = flows.pending(direction);
 
         match self.source(direction).try_recv() {
             Ok(msg) => {
@@ -447,13 +464,6 @@ fn pending_send(
         Some(pending) => pending.send.as_mut().poll(cx),
         None => std::task::Poll::Pending,
     })
-}
-
-fn direction_enabled(direction: Direction, fe_to_be_enabled: bool, be_to_fe_enabled: bool) -> bool {
-    match direction {
-        Direction::FrontendToBackend => fe_to_be_enabled,
-        Direction::BackendToFrontend => be_to_fe_enabled,
-    }
 }
 
 fn socket_can_recv(socket_type: SocketType) -> bool {

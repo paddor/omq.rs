@@ -1,5 +1,7 @@
 use super::*;
-use crate::socket::recv::{BlockingRecvWaker, SpscAwareRecv, SpscHandles, recv_pipe};
+use crate::socket::recv::{
+    BlockingRecvWaker, RecvPipeEnds, RecvTuning, SpscAwareRecv, SpscHandles, recv_pipe,
+};
 
 impl Default for RecvLimits {
     fn default() -> Self {
@@ -183,15 +185,12 @@ fn ordinary_receive(
     let mut handles = SpscHandles::new(blocking.clone(), false);
     let routes = handles.init_peer_recv(hwm, &omq_proto::Options::default());
     let (pipe, consumer, notify, space) = recv_pipe(hwm, blocking);
-    let receiver = SpscAwareRecv::new(
+    let ends = RecvPipeEnds {
         consumer,
         notify,
         space,
-        handles,
-        false,
-        false,
-        std::time::Duration::ZERO,
-    );
+    };
+    let receiver = SpscAwareRecv::new(ends, handles, RecvTuning::default());
     (routes, receiver, pipe)
 }
 
@@ -948,22 +947,21 @@ fn registration_racing_receiver_drop_always_cancels_admitted_connections() {
 
 #[test]
 fn ordinary_async_receive_yields_during_stale_generation_cleanup() {
-    use crate::socket::recv::{BlockingRecvWaker, SpscAwareRecv, SpscHandles, recv_pipe};
+    use crate::socket::recv::{
+        BlockingRecvWaker, RecvPipeEnds, RecvTuning, SpscAwareRecv, SpscHandles, recv_pipe,
+    };
 
     let blocking = BlockingRecvWaker::new();
     let mut handles = SpscHandles::new(blocking.clone(), false);
     let mut routes = handles.init_peer_recv(512, &omq_proto::Options::default());
     let lane = handles.peer_recv.clone().unwrap();
     let (_pipe, consumer, notify, space) = recv_pipe(512, blocking);
-    let receiver = SpscAwareRecv::new(
+    let ends = RecvPipeEnds {
         consumer,
         notify,
         space,
-        handles,
-        false,
-        false,
-        std::time::Duration::ZERO,
-    );
+    };
+    let receiver = SpscAwareRecv::new(ends, handles, RecvTuning::default());
     let mut old = register(&mut routes, "a");
     for _ in 0..512 {
         put(&mut old, "stale");
@@ -981,7 +979,9 @@ fn ordinary_async_receive_yields_during_stale_generation_cleanup() {
 
 #[test]
 fn ordinary_bulk_after_first_preserves_budget_and_releases_partial_credits() {
-    use crate::socket::recv::{BlockingRecvWaker, SpscAwareRecv, SpscHandles, recv_pipe};
+    use crate::socket::recv::{
+        BlockingRecvWaker, RecvPipeEnds, RecvTuning, SpscAwareRecv, SpscHandles, recv_pipe,
+    };
 
     for (max, size, expected) in [(1, 8, 1), (1024, 8, 256), (1024, 70_000, 2)] {
         let blocking = BlockingRecvWaker::new();
@@ -990,15 +990,12 @@ fn ordinary_bulk_after_first_preserves_budget_and_releases_partial_credits() {
         let options = omq_proto::Options::default().peer_recv_max_bytes(64 * 1024 * 1024);
         let mut routes = handles.init_peer_recv(512, &options);
         let (_pipe, consumer, notify, space) = recv_pipe(512, blocking);
-        let receiver = SpscAwareRecv::new(
+        let ends = RecvPipeEnds {
             consumer,
             notify,
             space,
-            handles,
-            false,
-            false,
-            std::time::Duration::ZERO,
-        );
+        };
+        let receiver = SpscAwareRecv::new(ends, handles, RecvTuning::default());
         let mut sink = register(&mut routes, "a");
         let payload = Bytes::from(vec![0x55; size]);
         for _ in 0..513 {

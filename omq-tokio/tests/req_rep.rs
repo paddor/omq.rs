@@ -143,80 +143,112 @@ async fn rep_rejects_send_before_recv() {
     assert!(matches!(r, Err(Error::Protocol(_))), "got {r:?}");
 }
 
+/// Connects two ROUTERs to the bound REQ and waits until all three see
+/// their connections.
+async fn connect_two_routers(req: &Socket, endpoint: &Endpoint) -> [Socket; 2] {
+    let routers = [
+        Socket::new(SocketType::Router, Options::default()),
+        Socket::new(SocketType::Router, Options::default()),
+    ];
+    for router in &routers {
+        router.connect(endpoint.clone()).await.unwrap();
+        router
+            .wait_connected(1, Duration::from_secs(2))
+            .await
+            .unwrap();
+    }
+
+    req.wait_connected(2, Duration::from_secs(2)).await.unwrap();
+    routers
+}
+
+/// Receives the next raw reply without letting the REQ state machine
+/// accept or reject it yet.
+async fn recv_external(req: &Socket) -> Message {
+    tokio::time::timeout(Duration::from_secs(2), req.recv_for_external_recv())
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+async fn wait_for_disconnect(monitor: &mut omq_tokio::MonitorStream) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !matches!(
+            monitor.recv().await.unwrap(),
+            omq_tokio::MonitorEvent::Disconnected { .. }
+        ) {}
+    })
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 async fn req_rejects_replies_from_unselected_peers() {
     for profile in [WorkloadProfile::Latency, WorkloadProfile::Throughput] {
         for transport in ["inproc", "tcp"] {
-            let req = Socket::new(
-                SocketType::Req,
-                Options::default()
-                    .identity(bytes::Bytes::from_static(b"requester"))
-                    .workload_profile(profile),
-            );
-            let endpoint = if transport == "tcp" {
-                tcp_ep(0)
-            } else {
-                inproc_ep(&format!("req-peer-{profile:?}"))
-            };
-            let endpoint = req.bind(endpoint).await.unwrap();
-            let routers = [
-                Socket::new(SocketType::Router, Options::default()),
-                Socket::new(SocketType::Router, Options::default()),
-            ];
-            for router in &routers {
-                router.connect(endpoint.clone()).await.unwrap();
-                router
-                    .wait_connected(1, Duration::from_secs(2))
-                    .await
-                    .unwrap();
-            }
-            req.wait_connected(2, Duration::from_secs(2)).await.unwrap();
-            req.send(Message::single("request")).await.unwrap();
-            let (selected, request) = recv_from_any_rep(&routers).await;
-            assert_eq!(request, Message::multipart(["requester", "", "request"]));
-            routers[1 - selected]
-                .send(Message::multipart(["requester", "", "unrelated"]))
-                .await
-                .unwrap();
-            let unrelated =
-                tokio::time::timeout(Duration::from_secs(2), req.recv_for_external_recv())
-                    .await
-                    .unwrap()
-                    .unwrap();
-            assert!(
-                req.prepare_external_recv(unrelated).is_none(),
-                "{profile:?}/{transport}"
-            );
-            assert!(
-                !req.send_ready(),
-                "an unrelated reply must not finish the request"
-            );
-            routers[selected]
-                .send(Message::multipart(["requester", "", "reply"]))
-                .await
-                .unwrap();
-            let reply = tokio::time::timeout(Duration::from_secs(2), req.recv())
-                .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(reply, Message::single("reply"));
-            assert_eq!(reply.routing_id(), None);
-            routers[selected]
-                .send(Message::multipart(["requester", "", "duplicate"]))
-                .await
-                .unwrap();
-            let duplicate =
-                tokio::time::timeout(Duration::from_secs(2), req.recv_for_external_recv())
-                    .await
-                    .unwrap()
-                    .unwrap();
-            assert!(req.prepare_external_recv(duplicate).is_none());
-            for router in routers {
-                router.close().await.unwrap();
-            }
-            req.close().await.unwrap();
+            check_unselected_replies_rejected(profile, transport).await;
         }
     }
+}
+
+async fn check_unselected_replies_rejected(profile: WorkloadProfile, transport: &str) {
+    let req = Socket::new(
+        SocketType::Req,
+        Options::default()
+            .identity(bytes::Bytes::from_static(b"requester"))
+            .workload_profile(profile),
+    );
+    let endpoint = if transport == "tcp" {
+        tcp_ep(0)
+    } else {
+        inproc_ep(&format!("req-peer-{profile:?}"))
+    };
+    let endpoint = req.bind(endpoint).await.unwrap();
+    let routers = connect_two_routers(&req, &endpoint).await;
+
+    req.send(Message::single("request")).await.unwrap();
+    let (selected, request) = recv_from_any_rep(&routers).await;
+    assert_eq!(request, Message::multipart(["requester", "", "request"]));
+
+    // A reply from the peer REQ did not send to is dropped and leaves the
+    // request outstanding.
+    routers[1 - selected]
+        .send(Message::multipart(["requester", "", "unrelated"]))
+        .await
+        .unwrap();
+    let unrelated = recv_external(&req).await;
+    assert!(
+        req.prepare_external_recv(unrelated).is_none(),
+        "{profile:?}/{transport}"
+    );
+    assert!(
+        !req.send_ready(),
+        "an unrelated reply must not finish the request"
+    );
+
+    routers[selected]
+        .send(Message::multipart(["requester", "", "reply"]))
+        .await
+        .unwrap();
+    let reply = tokio::time::timeout(Duration::from_secs(2), req.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply, Message::single("reply"));
+    assert_eq!(reply.routing_id(), None);
+
+    // Once answered, a second reply from the same peer is dropped too.
+    routers[selected]
+        .send(Message::multipart(["requester", "", "duplicate"]))
+        .await
+        .unwrap();
+    let duplicate = recv_external(&req).await;
+    assert!(req.prepare_external_recv(duplicate).is_none());
+
+    for router in routers {
+        router.close().await.unwrap();
+    }
+    req.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -274,14 +306,7 @@ async fn req_accepts_a_queued_reply_after_its_peer_disconnects() {
         .unwrap();
     let mut monitor = req.monitor();
     rep.close().await.unwrap();
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while !matches!(
-            monitor.recv().await.unwrap(),
-            omq_tokio::MonitorEvent::Disconnected { .. }
-        ) {}
-    })
-    .await
-    .unwrap();
+    wait_for_disconnect(&mut monitor).await;
     assert_eq!(
         req.prepare_external_recv(reply),
         Some(Message::single("reply"))
@@ -293,18 +318,8 @@ async fn req_accepts_a_queued_reply_after_its_peer_disconnects() {
 async fn req_replaces_a_disconnected_reply_source_without_accepting_its_queued_reply() {
     let req = Socket::new(SocketType::Req, Options::default());
     let endpoint = req.bind(tcp_ep(0)).await.unwrap();
-    let routers = [
-        Socket::new(SocketType::Router, Options::default()),
-        Socket::new(SocketType::Router, Options::default()),
-    ];
-    for router in &routers {
-        router.connect(endpoint.clone()).await.unwrap();
-        router
-            .wait_connected(1, Duration::from_secs(2))
-            .await
-            .unwrap();
-    }
-    req.wait_connected(2, Duration::from_secs(2)).await.unwrap();
+    let routers = connect_two_routers(&req, &endpoint).await;
+
     req.send(Message::single("first")).await.unwrap();
     let (selected, mut request) = recv_from_any_rep(&routers).await;
     let identity = request.pop_front().unwrap();
@@ -316,21 +331,14 @@ async fn req_replaces_a_disconnected_reply_source_without_accepting_its_queued_r
         ]))
         .await
         .unwrap();
-    let old_reply = tokio::time::timeout(Duration::from_secs(2), req.recv_for_external_recv())
-        .await
-        .unwrap()
-        .unwrap();
+    let old_reply = recv_external(&req).await;
+
+    // Disconnect the selected peer while its reply is still unaccepted.
     let mut monitor = req.monitor();
     routers[selected].clone().close().await.unwrap();
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while !matches!(
-            monitor.recv().await.unwrap(),
-            omq_tokio::MonitorEvent::Disconnected { .. }
-        ) {}
-    })
-    .await
-    .unwrap();
+    wait_for_disconnect(&mut monitor).await;
 
+    // A new request replaces the old one, so the stale reply is rejected.
     req.try_send(Message::single("second")).unwrap();
     assert!(req.prepare_external_recv(old_reply).is_none());
     let remaining = &routers[1 - selected];

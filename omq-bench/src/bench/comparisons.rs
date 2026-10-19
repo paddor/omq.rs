@@ -586,8 +586,6 @@ fn build_peers(
     needs_quic: bool,
     needs_curve: bool,
 ) -> HashMap<String, PathBuf> {
-    let mut binaries: HashMap<String, PathBuf> = HashMap::new();
-    let mut built: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let needs_mt_runtime = impl_names.contains(&"omq-tokio-mt");
     let peer_features: Vec<&str> = [
         (needs_ws, "ws"),
@@ -597,6 +595,7 @@ fn build_peers(
     .into_iter()
     .filter_map(|(needed, feature)| needed.then_some(feature))
     .collect();
+
     let sources: Vec<&str> = impl_names
         .iter()
         .map(|&name| {
@@ -604,59 +603,13 @@ fn build_peers(
             def.binary_from.unwrap_or(def.name)
         })
         .collect();
-    for source in sources {
-        if built.contains(source) {
-            continue;
-        }
-        built.insert(source);
 
-        match source {
-            "omq-tokio-ct" => {
-                let mut features = peer_features.clone();
-                if needs_mt_runtime {
-                    features.push("bench-mt-runtime");
-                }
-                binaries.insert(
-                    source.to_string(),
-                    process::build_omq_peer("omq_bench_peer_tokio", &features),
-                );
-            }
-            "omq-tokio-1t" => {
-                binaries.insert(
-                    source.to_string(),
-                    process::build_omq_peer("omq_bench_peer_blocking", &peer_features),
-                );
-            }
-            "libzmq" => {
-                let src = "scripts/libzmq_bench_peer.c";
-                let out = "scripts/omq_libzmq_baseline_peer";
-                run_build(&["gcc", "-O2", "-o", out, src, "-lzmq", "-lpthread"]);
-                binaries.insert(source.to_string(), PathBuf::from(out));
-            }
-            "zmq.rs" => {
-                run_build_in_dir(
-                    &["cargo", "build", "--release", "-q"],
-                    "scripts/zmqrs_bench_peer",
-                );
-                binaries.insert(
-                    source.to_string(),
-                    PathBuf::from("scripts/zmqrs_bench_peer/target/release/omq_zmqrs_bench_peer"),
-                );
-            }
-            "r0z-async" | "tmq" | "monocoque-tokio-ct" => {
-                binaries.insert(source.to_string(), build_external_comparison_peer(source));
-            }
-            "rzmq" => {
-                run_build_in_dir(
-                    &["cargo", "build", "--release", "-q"],
-                    "scripts/rzmq_bench_peer",
-                );
-                binaries.insert(
-                    source.to_string(),
-                    PathBuf::from("scripts/rzmq_bench_peer/target/release/omq_rzmq_bench_peer"),
-                );
-            }
-            _ => panic!("unknown impl source: {source}"),
+    // Variants that share a source binary build it once.
+    let mut binaries: HashMap<String, PathBuf> = HashMap::new();
+    for source in sources {
+        if !binaries.contains_key(source) {
+            let binary = build_source(source, &peer_features, needs_mt_runtime);
+            binaries.insert(source.to_string(), binary);
         }
     }
 
@@ -667,10 +620,49 @@ fn build_peers(
         let source = def.binary_from.unwrap_or(def.name);
         result.insert(name.to_string(), binaries[source].clone());
     }
+
     if binaries.contains_key("omq-tokio-1t") {
         result.insert("omq-tokio-1t".to_string(), binaries["omq-tokio-1t"].clone());
     }
+
     result
+}
+
+/// Builds the peer binary of one implementation source.
+fn build_source(source: &str, peer_features: &[&str], needs_mt_runtime: bool) -> PathBuf {
+    match source {
+        "omq-tokio-ct" => {
+            // The MT variant reuses this binary with the MT runtime built in.
+            let mut features = peer_features.to_vec();
+            if needs_mt_runtime {
+                features.push("bench-mt-runtime");
+            }
+            process::build_omq_peer("omq_bench_peer_tokio", &features)
+        }
+        "omq-tokio-1t" => process::build_omq_peer("omq_bench_peer_blocking", peer_features),
+        "libzmq" => {
+            let src = "scripts/libzmq_bench_peer.c";
+            let out = "scripts/omq_libzmq_baseline_peer";
+            run_build(&["gcc", "-O2", "-o", out, src, "-lzmq", "-lpthread"]);
+            PathBuf::from(out)
+        }
+        "zmq.rs" => {
+            run_build_in_dir(
+                &["cargo", "build", "--release", "-q"],
+                "scripts/zmqrs_bench_peer",
+            );
+            PathBuf::from("scripts/zmqrs_bench_peer/target/release/omq_zmqrs_bench_peer")
+        }
+        "r0z-async" | "tmq" | "monocoque-tokio-ct" => build_external_comparison_peer(source),
+        "rzmq" => {
+            run_build_in_dir(
+                &["cargo", "build", "--release", "-q"],
+                "scripts/rzmq_bench_peer",
+            );
+            PathBuf::from("scripts/rzmq_bench_peer/target/release/omq_rzmq_bench_peer")
+        }
+        _ => panic!("unknown impl source: {source}"),
+    }
 }
 
 fn build_external_comparison_peer(source: &str) -> PathBuf {
@@ -791,6 +783,22 @@ struct CellResult {
     peer_p90: Option<f64>,
 }
 
+impl CellResult {
+    /// Copies the per-peer rate spread of a multi-peer measurement.
+    fn with_spread(self, spread: &parse::MultiThroughputResult) -> Self {
+        Self {
+            peer_min: spread.peer_min,
+            peer_max: spread.peer_max,
+            peer_p10: spread.peer_p10,
+            peer_p25: spread.peer_p25,
+            peer_median: spread.peer_median,
+            peer_p75: spread.peer_p75,
+            peer_p90: spread.peer_p90,
+            ..self
+        }
+    }
+}
+
 fn zero_result(duration: f64) -> CellResult {
     CellResult {
         blocking_inproc: None,
@@ -809,628 +817,539 @@ fn zero_result(duration: f64) -> CellResult {
     }
 }
 
-#[expect(clippy::too_many_arguments)]
-fn run_throughput_cell(
-    binary: &Path,
-    peer_binary: &Path,
-    def: &ImplDef,
+/// One measured cell: implementation, transport, and message size.
+struct Cell<'a> {
+    binary: &'a Path,
+    peer_binary: &'a Path,
+    def: &'a ImplDef,
     transport: TransportKind,
     size: u64,
-    duration: f64,
-    rounds: u32,
     base_port: u16,
-) -> CellResult {
-    representative_of(rounds, |_| {
-        run_throughput_once(
-            binary,
-            peer_binary,
-            def,
-            transport,
-            size,
-            duration,
-            base_port,
-        )
-    })
 }
 
-#[allow(clippy::too_many_lines)]
-fn run_throughput_once(
-    binary: &Path,
-    peer_binary: &Path,
-    def: &ImplDef,
-    transport: TransportKind,
-    size: u64,
-    duration: f64,
-    base_port: u16,
-) -> CellResult {
-    let binary_str = binary.to_str().unwrap();
-    let peer_binary_str = peer_binary.to_str().unwrap();
-    let size_str = size.to_string();
-    let dur_str = format!("{duration:.1}");
+impl Cell<'_> {
+    fn addr(&self) -> String {
+        addr_for(
+            self.transport,
+            self.def.prefix,
+            0,
+            self.base_port,
+            self.def.name,
+        )
+    }
 
-    if transport == TransportKind::Inproc {
-        let name = addr_for(transport, def.prefix, 0, base_port, def.name);
-        let cmd = vec![
-            binary_str,
-            def.inproc_tput_subcmd,
-            &name,
+    fn cleanup(&self, addr: &str) {
+        if self.transport == TransportKind::Ipc {
+            cleanup_ipc_addr(addr, self.def.name);
+        }
+    }
+}
+
+/// Command line, environment, and CPUs of the peer that binds. The bind
+/// address goes between `head` and `tail`.
+struct BinderCmd<'a> {
+    head: [&'a str; 2],
+    tail: &'a [&'a str],
+    env: &'a [(&'a str, &'a str)],
+    cpus: Option<&'a str>,
+    /// Peer name for the missing-READY panic.
+    role: &'a str,
+    /// Startup wait for binders that cannot report readiness.
+    settle: Duration,
+}
+
+/// Binding peer and the address the other side connects to.
+struct BoundPeer {
+    guard: process::ProcessGuard,
+    connect_addr: String,
+    coord: Option<CoordSocket>,
+}
+
+/// Spawns the binding peer. TCP and QUIC binders take port 0 and report the
+/// real port over a coord socket. Other transports bind `fixed_addr` and get
+/// `settle` to come up.
+fn spawn_binder(transport: TransportKind, fixed_addr: &str, binder: &BinderCmd<'_>) -> BoundPeer {
+    let scheme = transport.port_scheme();
+    let bind_any = scheme.map(|scheme| format!("{scheme}://127.0.0.1:0"));
+    let mut cmd = binder.head.to_vec();
+    cmd.push(bind_any.as_deref().unwrap_or(fixed_addr));
+    cmd.extend_from_slice(binder.tail);
+
+    let coord = scheme.is_some().then(CoordSocket::bind_new);
+    let mut env = binder.env.to_vec();
+    if let Some(coord) = &coord {
+        env.push(("OMQ_BENCH_COORD", coord.endpoint()));
+    }
+
+    let guard = process::spawn(&cmd, &env, binder.cpus);
+
+    let connect_addr = if let (Some(scheme), Some(coord)) = (scheme, &coord) {
+        let port = coord
+            .recv_ready_port(Duration::from_secs(10))
+            .unwrap_or_else(|| panic!("coord: no READY from {} peer", binder.role));
+        format!("{scheme}://127.0.0.1:{port}")
+    } else {
+        std::thread::sleep(binder.settle);
+        fixed_addr.to_owned()
+    };
+
+    BoundPeer {
+        guard,
+        connect_addr,
+        coord,
+    }
+}
+
+/// Start time two seconds out, shared by both sides so their warmups and
+/// timed windows line up.
+fn start_at() -> String {
+    let start_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before Unix epoch")
+        .as_secs_f64()
+        + 2.0;
+    format!("{start_at:.6}")
+}
+
+fn push_start_env<'a>(env: &mut Vec<(&'a str, &'a str)>, start_at: &'a str) {
+    env.push(("OMQ_BENCH_START_AT", start_at));
+    env.push(("OMQ_BENCH_WARMUP_MS", "500"));
+}
+
+/// Binder arguments after the address: the size, then the peer count for
+/// peers that take it.
+fn size_and_peers<'a>(size: &'a str, peers: &'a str, with_peers: bool) -> Vec<&'a str> {
+    let mut tail = vec![size];
+    if with_peers {
+        tail.push(peers);
+    }
+    tail
+}
+
+fn run_throughput_cell(cell: &Cell<'_>, duration: f64, rounds: u32) -> CellResult {
+    representative_of(rounds, |_| run_throughput_once(cell, duration))
+}
+
+fn run_throughput_once(cell: &Cell<'_>, duration: f64) -> CellResult {
+    if cell.transport == TransportKind::Inproc {
+        return run_inproc_throughput(cell, duration);
+    }
+
+    let def = cell.def;
+    let size_str = cell.size.to_string();
+    let dur_str = format!("{duration:.1}");
+    let addr = cell.addr();
+    let env: Vec<(&str, &str)> = def.env.to_vec();
+
+    // WS binders cannot report readiness, so they get a longer head start.
+    let settle = if cell.transport == TransportKind::Ws {
+        Duration::from_millis(200)
+    } else {
+        Duration::from_millis(100)
+    };
+    let binder = BinderCmd {
+        head: [cell.binary.to_str().unwrap(), "push"],
+        tail: &[&size_str],
+        env: &env,
+        cpus: def.affinity(process::MEASURED_CPU),
+        role: "push",
+        settle,
+    };
+    let mut pusher = spawn_binder(cell.transport, &addr, &binder);
+
+    let pull_output = process::capture(
+        &[
+            cell.peer_binary.to_str().unwrap(),
+            "pull",
+            &pusher.connect_addr,
             &size_str,
             &dur_str,
-        ];
-        let _ = cmd; // used below
-        let env: Vec<(&str, &str)> = def.env.to_vec();
-        if let Some((out, cpu)) = process::capture_with_cpu(
-            &[
-                binary_str,
-                def.inproc_tput_subcmd,
-                &name,
-                &size_str,
-                &dur_str,
-            ],
-            &env,
-            def.affinity(process::MEASURED_CPU),
-            Duration::from_secs(duration as u64 + 30),
-        ) && let Some(r) = parse::parse_throughput(&out, size)
-        {
-            let blocking_inproc = parse::parse_blocking_inproc_stats(&out);
-            let measured_cpu = blocking_inproc
-                .as_ref()
-                .and_then(|stats| stats.cpu_seconds)
-                .unwrap_or(cpu);
-            return CellResult {
-                blocking_inproc,
-                msgs_s: r.msgs_s,
-                mbps: r.mbps,
-                elapsed: r.elapsed,
-                push_cpu: Some(measured_cpu),
-                pull_cpu: None,
-                peer_min: None,
-                peer_max: None,
-                peer_p10: None,
-                peer_p25: None,
-                peer_median: None,
-                peer_p75: None,
-                peer_p90: None,
-            };
-        }
-        return zero_result(duration);
-    }
-
-    let addr = addr_for(transport, def.prefix, 0, base_port, def.name);
-    let push_env: Vec<(&str, &str)> = def.env.to_vec();
-    let pull_env: Vec<(&str, &str)> = def.env.to_vec();
-
-    let push_cmd: Vec<&str>;
-    let mut push_proc;
-    let mut _coord_socket = None;
-    let bind_any = transport
-        .port_scheme()
-        .map(|scheme| format!("{scheme}://127.0.0.1:0"));
-    let connect_addr = match transport {
-        TransportKind::Tcp | TransportKind::Quic => {
-            let scheme = transport.port_scheme().unwrap();
-            let coord = CoordSocket::bind_new();
-            push_cmd = vec![binary_str, "push", bind_any.as_deref().unwrap(), &size_str];
-            let mut env = push_env.clone();
-            env.push(("OMQ_BENCH_COORD", coord.endpoint()));
-            push_proc = process::spawn(&push_cmd, &env, def.affinity(process::MEASURED_CPU));
-            let port = coord
-                .recv_ready_port(Duration::from_secs(10))
-                .expect("coord: no READY from push peer");
-            _coord_socket = Some(coord);
-            format!("{scheme}://127.0.0.1:{port}")
-        }
-        TransportKind::Ws => {
-            push_cmd = vec![binary_str, "push", &addr, &size_str];
-            push_proc = process::spawn(&push_cmd, &push_env, def.affinity(process::MEASURED_CPU));
-            std::thread::sleep(Duration::from_millis(200));
-            addr.clone()
-        }
-        _ => {
-            push_cmd = vec![binary_str, "push", &addr, &size_str];
-            push_proc = process::spawn(&push_cmd, &push_env, def.affinity(process::MEASURED_CPU));
-            std::thread::sleep(Duration::from_millis(100));
-            addr.clone()
-        }
-    };
-
-    let pull_result = process::capture(
-        &[peer_binary_str, "pull", &connect_addr, &size_str, &dur_str],
-        &pull_env,
+        ],
+        &env,
         def.affinity(process::OTHER_CPU),
         Duration::from_secs(duration as u64 + 30),
-    )
-    .map(|output| (output, 0.0));
+    );
 
-    let push_cpu = process::read_proc_cpu(push_proc.pid());
-    push_proc.kill();
+    let push_cpu = process::read_proc_cpu(pusher.guard.pid());
+    pusher.guard.kill();
+    cell.cleanup(&addr);
 
-    if transport == TransportKind::Ipc {
-        cleanup_ipc_addr(&addr, def.name);
-    }
-
-    let Some((output, _measured_pull_cpu)) = pull_result else {
+    let Some(output) = pull_output else {
         return zero_result(duration);
     };
-
-    match parse::parse_throughput(&output, size) {
+    match parse::parse_throughput(&output, cell.size) {
         Some(r) => CellResult {
-            blocking_inproc: None,
             msgs_s: r.msgs_s,
             mbps: r.mbps,
             elapsed: r.elapsed,
             push_cpu: Some(push_cpu),
             pull_cpu: r.pull_cpu,
-            peer_min: None,
-            peer_max: None,
-            peer_p10: None,
-            peer_p25: None,
-            peer_median: None,
-            peer_p75: None,
-            peer_p90: None,
+            ..zero_result(duration)
         },
         None => zero_result(duration),
     }
 }
 
-#[expect(clippy::too_many_arguments)]
+/// Inproc runs both sides in one process on the measured CPUs.
+fn run_inproc_throughput(cell: &Cell<'_>, duration: f64) -> CellResult {
+    let def = cell.def;
+    let name = cell.addr();
+    let size_str = cell.size.to_string();
+    let dur_str = format!("{duration:.1}");
+    let cmd = [
+        cell.binary.to_str().unwrap(),
+        def.inproc_tput_subcmd,
+        &name,
+        &size_str,
+        &dur_str,
+    ];
+    let env: Vec<(&str, &str)> = def.env.to_vec();
+
+    if let Some((out, cpu)) = process::capture_with_cpu(
+        &cmd,
+        &env,
+        def.affinity(process::MEASURED_CPU),
+        Duration::from_secs(duration as u64 + 30),
+    ) && let Some(r) = parse::parse_throughput(&out, cell.size)
+    {
+        // Blocking inproc peers report their own CPU seconds; prefer those.
+        let blocking_inproc = parse::parse_blocking_inproc_stats(&out);
+        let measured_cpu = blocking_inproc
+            .as_ref()
+            .and_then(|stats| stats.cpu_seconds)
+            .unwrap_or(cpu);
+        return CellResult {
+            blocking_inproc,
+            msgs_s: r.msgs_s,
+            mbps: r.mbps,
+            elapsed: r.elapsed,
+            push_cpu: Some(measured_cpu),
+            ..zero_result(duration)
+        };
+    }
+
+    zero_result(duration)
+}
+
 fn run_pubsub_cell(
-    binary: &Path,
-    peer_binary: &Path,
-    def: &ImplDef,
-    transport: TransportKind,
-    size: u64,
+    cell: &Cell<'_>,
     peers: u64,
     duration: f64,
     rounds: u32,
-    base_port: u16,
     args: &ComparisonsArgs,
 ) -> CellResult {
-    representative_of(rounds, |_| {
-        run_pubsub_once(
-            binary,
-            peer_binary,
-            def,
-            transport,
-            size,
-            peers,
-            duration,
-            base_port,
-            args,
-        )
-    })
+    representative_of(rounds, |_| run_pubsub_once(cell, peers, duration, args))
 }
 
-#[allow(clippy::needless_late_init, clippy::too_many_lines)]
-#[expect(clippy::too_many_arguments)]
 fn run_pubsub_once(
-    binary: &Path,
-    peer_binary: &Path,
-    def: &ImplDef,
-    transport: TransportKind,
-    size: u64,
+    cell: &Cell<'_>,
     peers: u64,
     duration: f64,
-    base_port: u16,
     args: &ComparisonsArgs,
 ) -> CellResult {
-    let binary_str = binary.to_str().unwrap();
-    let peer_binary_str = peer_binary.to_str().unwrap();
-    let size_str = size.to_string();
+    if cell.transport == TransportKind::Inproc {
+        return run_inproc_pubsub(cell, peers, duration);
+    }
+
+    let def = cell.def;
+    let size_str = cell.size.to_string();
     let dur_str = format!("{duration:.1}");
     let peers_str = peers.to_string();
+    let addr = cell.addr();
 
-    if transport == TransportKind::Inproc {
-        let name = addr_for(transport, def.prefix, 0, base_port, def.name);
-        let cmd = vec![
-            binary_str,
-            def.inproc_pubsub_subcmd,
-            &name,
-            &size_str,
-            &dur_str,
-            &peers_str,
-        ];
-        let env: Vec<(&str, &str)> = def.env.to_vec();
-        if let Some((out, cpu)) = process::capture_with_cpu(
-            &cmd,
-            &env,
-            def.affinity(process::MEASURED_CPU),
-            Duration::from_secs(duration as u64 + 30),
-        ) && let Some(r) = parse::parse_throughput(&out, size)
-        {
-            return CellResult {
-                blocking_inproc: None,
-                msgs_s: r.msgs_s,
-                mbps: r.mbps,
-                elapsed: r.elapsed,
-                push_cpu: Some(cpu),
-                pull_cpu: None,
-                peer_min: None,
-                peer_max: None,
-                peer_p10: None,
-                peer_p25: None,
-                peer_median: None,
-                peer_p75: None,
-                peer_p90: None,
-            };
-        }
-        return zero_result(duration);
-    }
-
-    let addr = addr_for(transport, def.prefix, 0, base_port, def.name);
-    let connect_addr;
-
-    let mut pub_env: Vec<(&str, &str)> = def.env.to_vec();
-    let mut sub_env: Vec<(&str, &str)> = def.env.to_vec();
     let receiver_io = args.pubsub_receiver_io_threads.map(|n| n.to_string());
-    if let Some(ref io) = receiver_io {
-        sub_env.push(("OMQ_IO_THREADS", io));
-        sub_env.push(("ZMQ_IO_THREADS", io));
-    }
     let receiver_workers = args.pubsub_receiver_workers.map(|n| n.to_string());
-    if let Some(ref workers) = receiver_workers {
-        sub_env.push(("OMQ_BENCH_RECV_WORKERS", workers));
-    }
-    let start_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system clock before Unix epoch")
-        .as_secs_f64()
-        + 2.0;
-    let start_at_str = format!("{start_at:.6}");
-    pub_env.push(("OMQ_BENCH_START_AT", &start_at_str));
-    sub_env.push(("OMQ_BENCH_START_AT", &start_at_str));
-    pub_env.push(("OMQ_BENCH_WARMUP_MS", "500"));
-    sub_env.push(("OMQ_BENCH_WARMUP_MS", "500"));
+    let start_at = start_at();
+    let mut pub_env: Vec<(&str, &str)> = def.env.to_vec();
+    let mut sub_env = subscriber_env(def, receiver_io.as_deref(), receiver_workers.as_deref());
+    push_start_env(&mut pub_env, &start_at);
+    push_start_env(&mut sub_env, &start_at);
 
-    let mut pub_cmd: Vec<&str> = vec![binary_str, "pub"];
-    let bind_any = transport
-        .port_scheme()
-        .map(|scheme| format!("{scheme}://127.0.0.1:0"));
-    if let Some(bind_any) = bind_any.as_deref() {
-        pub_cmd.extend([bind_any, &size_str]);
-    } else {
-        pub_cmd.extend([addr.as_str(), &size_str]);
-    }
-    if def.pub_needs_peer_count {
-        pub_cmd.push(&peers_str);
-    }
+    let tail = size_and_peers(&size_str, &peers_str, def.pub_needs_peer_count);
+    let binder = BinderCmd {
+        head: [cell.binary.to_str().unwrap(), "pub"],
+        tail: &tail,
+        env: &pub_env,
+        cpus: def.affinity(process::MEASURED_CPU),
+        role: "pub",
+        settle: Duration::from_millis(100),
+    };
+    let mut publisher = spawn_binder(cell.transport, &addr, &binder);
 
-    let coord = transport
-        .port_scheme()
-        .is_some()
-        .then(CoordSocket::bind_new);
-    let mut spawn_env = pub_env.clone();
-    if let Some(ref c) = coord {
-        spawn_env.push(("OMQ_BENCH_COORD", c.endpoint()));
-    }
-    let mut pub_proc = process::spawn(&pub_cmd, &spawn_env, def.affinity(process::MEASURED_CPU));
-
-    if let Some(ref c) = coord {
-        let port = c
-            .recv_ready_port(Duration::from_secs(10))
-            .expect("coord: no READY from pub peer");
-        connect_addr = format!("{}://127.0.0.1:{port}", transport.port_scheme().unwrap());
-    } else {
-        std::thread::sleep(Duration::from_millis(100));
-        connect_addr = addr.clone();
-    }
-
+    // --pubsub-receiver-cpus only replaces a pinned default.
+    let sub_cpus = def
+        .affinity(process::OTHER_CPU)
+        .map(|default| args.pubsub_receiver_cpus.as_deref().unwrap_or(default));
     let sub_output = process::capture(
         &[
-            peer_binary_str,
+            cell.peer_binary.to_str().unwrap(),
             "multi-sub",
-            &connect_addr,
+            &publisher.connect_addr,
             &size_str,
             &dur_str,
             &peers_str,
         ],
         &sub_env,
-        def.affinity(process::OTHER_CPU)
-            .map(|default| args.pubsub_receiver_cpus.as_deref().unwrap_or(default)),
+        sub_cpus,
         Duration::from_secs(duration as u64 + 30),
     );
 
-    let pub_cpu = process::read_proc_cpu(pub_proc.pid());
-    pub_proc.kill();
+    let pub_cpu = process::read_proc_cpu(publisher.guard.pid());
+    publisher.guard.kill();
+    cell.cleanup(&addr);
 
-    if transport == TransportKind::Ipc {
-        cleanup_ipc_addr(&addr, def.name);
-    }
-
-    let Some(output) = sub_output else {
+    let Some(r) =
+        sub_output.and_then(|output| parse::parse_multi_throughput(&output, cell.size, peers))
+    else {
         return zero_result(duration);
     };
+    CellResult {
+        msgs_s: r.msgs_s,
+        mbps: r.mbps,
+        elapsed: r.elapsed,
+        push_cpu: Some(pub_cpu),
+        pull_cpu: r.pull_cpu,
+        ..zero_result(duration)
+    }
+    .with_spread(&r)
+}
 
-    match parse::parse_multi_throughput(&output, size, peers) {
-        Some(r) => CellResult {
-            blocking_inproc: None,
+/// Subscriber environment with the optional receiver tuning from the CLI.
+fn subscriber_env<'a>(
+    def: &'a ImplDef,
+    receiver_io: Option<&'a str>,
+    receiver_workers: Option<&'a str>,
+) -> Vec<(&'a str, &'a str)> {
+    let mut env: Vec<(&str, &str)> = def.env.to_vec();
+    if let Some(io) = receiver_io {
+        env.push(("OMQ_IO_THREADS", io));
+        env.push(("ZMQ_IO_THREADS", io));
+    }
+
+    if let Some(workers) = receiver_workers {
+        env.push(("OMQ_BENCH_RECV_WORKERS", workers));
+    }
+
+    env
+}
+
+fn run_inproc_pubsub(cell: &Cell<'_>, peers: u64, duration: f64) -> CellResult {
+    let def = cell.def;
+    let name = cell.addr();
+    let size_str = cell.size.to_string();
+    let dur_str = format!("{duration:.1}");
+    let peers_str = peers.to_string();
+    let cmd = [
+        cell.binary.to_str().unwrap(),
+        def.inproc_pubsub_subcmd,
+        &name,
+        &size_str,
+        &dur_str,
+        &peers_str,
+    ];
+    let env: Vec<(&str, &str)> = def.env.to_vec();
+
+    if let Some((out, cpu)) = process::capture_with_cpu(
+        &cmd,
+        &env,
+        def.affinity(process::MEASURED_CPU),
+        Duration::from_secs(duration as u64 + 30),
+    ) && let Some(r) = parse::parse_throughput(&out, cell.size)
+    {
+        return CellResult {
             msgs_s: r.msgs_s,
             mbps: r.mbps,
             elapsed: r.elapsed,
-            push_cpu: Some(pub_cpu),
-            pull_cpu: r.pull_cpu,
-            peer_min: r.peer_min,
-            peer_max: r.peer_max,
-            peer_p10: r.peer_p10,
-            peer_p25: r.peer_p25,
-            peer_median: r.peer_median,
-            peer_p75: r.peer_p75,
-            peer_p90: r.peer_p90,
-        },
-        None => zero_result(duration),
+            push_cpu: Some(cpu),
+            ..zero_result(duration)
+        };
     }
+
+    zero_result(duration)
 }
 
-#[expect(clippy::too_many_arguments)]
-fn run_fanout_cell(
-    binary: &Path,
-    peer_binary: &Path,
-    def: &ImplDef,
-    transport: TransportKind,
-    size: u64,
-    peers: u64,
-    duration: f64,
-    rounds: u32,
-    base_port: u16,
-) -> CellResult {
-    representative_of(rounds, |_| {
-        run_fanout_once(
-            binary,
-            peer_binary,
-            def,
-            transport,
-            size,
-            peers,
-            duration,
-            base_port,
-        )
-    })
+fn run_fanout_cell(cell: &Cell<'_>, peers: u64, duration: f64, rounds: u32) -> CellResult {
+    representative_of(rounds, |_| run_fanout_once(cell, peers, duration))
 }
 
-#[allow(clippy::needless_late_init)]
-#[expect(clippy::too_many_arguments)]
-#[expect(clippy::too_many_lines)]
-fn run_fanout_once(
-    binary: &Path,
-    peer_binary: &Path,
-    def: &ImplDef,
-    transport: TransportKind,
-    size: u64,
-    peers: u64,
-    duration: f64,
-    base_port: u16,
-) -> CellResult {
-    let binary_str = binary.to_str().unwrap();
-    let peer_binary_str = peer_binary.to_str().unwrap();
-    let size_str = size.to_string();
-    let dur_str = format!("{duration:.1}");
+fn run_fanout_once(cell: &Cell<'_>, peers: u64, duration: f64) -> CellResult {
+    let def = cell.def;
+    let size_str = cell.size.to_string();
     let peers_str = peers.to_string();
+    let addr = cell.addr();
 
-    let addr = addr_for(transport, def.prefix, 0, base_port, def.name);
-    let connect_addr;
-
+    let start_at = start_at();
     let mut push_env: Vec<(&str, &str)> = def.env.to_vec();
     let mut pull_env: Vec<(&str, &str)> = def.env.to_vec();
-    let start_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system clock before Unix epoch")
-        .as_secs_f64()
-        + 2.0;
-    let start_at_str = format!("{start_at:.6}");
-    push_env.push(("OMQ_BENCH_START_AT", &start_at_str));
-    pull_env.push(("OMQ_BENCH_START_AT", &start_at_str));
-    push_env.push(("OMQ_BENCH_WARMUP_MS", "500"));
-    pull_env.push(("OMQ_BENCH_WARMUP_MS", "500"));
+    push_start_env(&mut push_env, &start_at);
+    push_start_env(&mut pull_env, &start_at);
 
-    let fanout_subcmd = def.fanout_subcmd;
-    let mut push_cmd: Vec<&str> = vec![binary_str, fanout_subcmd];
-    let bind_any = transport
-        .port_scheme()
-        .map(|scheme| format!("{scheme}://127.0.0.1:0"));
-    if let Some(bind_any) = bind_any.as_deref() {
-        push_cmd.extend([bind_any, &size_str]);
-    } else {
-        push_cmd.extend([addr.as_str(), &size_str]);
-    }
-    if def.fanio_needs_peer_count {
-        push_cmd.push(&peers_str);
-    }
+    let tail = size_and_peers(&size_str, &peers_str, def.fanio_needs_peer_count);
+    let binder = BinderCmd {
+        head: [cell.binary.to_str().unwrap(), def.fanout_subcmd],
+        tail: &tail,
+        env: &push_env,
+        cpus: def.affinity(process::MEASURED_CPU),
+        role: "push",
+        settle: Duration::from_millis(100),
+    };
+    let mut pusher = spawn_binder(cell.transport, &addr, &binder);
 
-    let coord = transport
-        .port_scheme()
-        .is_some()
-        .then(CoordSocket::bind_new);
-    let mut spawn_env = push_env.clone();
-    if let Some(ref c) = coord {
-        spawn_env.push(("OMQ_BENCH_COORD", c.endpoint()));
-    }
-    let mut push_proc = process::spawn(&push_cmd, &spawn_env, def.affinity(process::MEASURED_CPU));
+    let (mut pull_procs, peers_per_process) =
+        spawn_fanout_receivers(cell, &pusher.connect_addr, peers, duration, &pull_env);
 
-    if let Some(ref c) = coord {
-        let port = c
-            .recv_ready_port(Duration::from_secs(10))
-            .expect("coord: no READY from push peer");
-        connect_addr = format!("{}://127.0.0.1:{port}", transport.port_scheme().unwrap());
-    } else {
-        std::thread::sleep(Duration::from_millis(100));
-        connect_addr = addr.clone();
+    let timeout = Duration::from_secs(duration as u64 + 30);
+    let mut pull_results = Vec::new();
+    for pull_proc in &mut pull_procs {
+        if let Some(output) = pull_proc.wait_with_output(timeout)
+            && let Some(result) =
+                parse::parse_multi_throughput(&output, cell.size, peers_per_process)
+        {
+            pull_results.push(result);
+        }
     }
 
+    let push_cpu = process::read_proc_cpu(pusher.guard.pid());
+    pusher.guard.kill();
+    cell.cleanup(&addr);
+
+    if pull_results.is_empty() {
+        return zero_result(duration);
+    }
+
+    let receivers = FanoutReceivers {
+        results: &pull_results,
+        peers_per_process,
+        peers,
+    };
+    receivers.combine(cell.size, push_cpu)
+}
+
+/// Spawns the PULL side, split across `OMQ_BENCH_RECEIVER_PROCS` processes
+/// (default 1), and returns them with the peer count of each process.
+fn spawn_fanout_receivers(
+    cell: &Cell<'_>,
+    connect_addr: &str,
+    peers: u64,
+    duration: f64,
+    env: &[(&str, &str)],
+) -> (Vec<process::ProcessGuard>, u64) {
     let receiver_processes = std::env::var("OMQ_BENCH_RECEIVER_PROCS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(1);
     assert!(receiver_processes > 0 && peers.is_multiple_of(receiver_processes));
     let peers_per_process = peers / receiver_processes;
+
+    let size_str = cell.size.to_string();
+    let dur_str = format!("{duration:.1}");
     let local_peers_str = peers_per_process.to_string();
     let mut pull_procs = Vec::new();
     for _ in 0..receiver_processes {
         pull_procs.push(process::spawn(
             &[
-                peer_binary_str,
+                cell.peer_binary.to_str().unwrap(),
                 "multi-pull",
-                &connect_addr,
+                connect_addr,
                 &size_str,
                 &dur_str,
                 &local_peers_str,
             ],
-            &pull_env,
-            def.affinity(process::OTHER_CPU),
+            env,
+            cell.def.affinity(process::OTHER_CPU),
         ));
     }
-    let timeout = Duration::from_secs(duration as u64 + 30);
-    let mut pull_results = Vec::new();
-    for pull_proc in &mut pull_procs {
-        if let Some(output) = pull_proc.wait_with_output(timeout)
-            && let Some(result) = parse::parse_multi_throughput(&output, size, peers_per_process)
-        {
-            pull_results.push(result);
+
+    (pull_procs, peers_per_process)
+}
+
+/// Parsed results of all fan-out receiver processes.
+struct FanoutReceivers<'a> {
+    results: &'a [parse::MultiThroughputResult],
+    peers_per_process: u64,
+    peers: u64,
+}
+
+impl FanoutReceivers<'_> {
+    /// One cell result: total messages over the slowest receiver's elapsed
+    /// time, plus the spread of all per-peer rates.
+    fn combine(&self, size: u64, push_cpu: f64) -> CellResult {
+        let total_msgs: f64 = self
+            .results
+            .iter()
+            .map(|r| r.msgs_s * self.peers_per_process as f64 * r.elapsed)
+            .sum();
+        let elapsed = self.results.iter().map(|r| r.elapsed).fold(0.0, f64::max);
+        let mut peer_rates: Vec<f64> = self
+            .results
+            .iter()
+            .flat_map(|r| r.peer_rates.iter().copied())
+            .collect();
+        peer_rates.sort_unstable_by(f64::total_cmp);
+        let cpu: f64 = self.results.iter().filter_map(|r| r.pull_cpu).sum();
+
+        // Nearest-rank quantile over the sorted rates.
+        let quantile = |p: f64| {
+            if peer_rates.is_empty() {
+                None
+            } else {
+                Some(peer_rates[((peer_rates.len() - 1) as f64 * p).round() as usize])
+            }
+        };
+
+        CellResult {
+            blocking_inproc: None,
+            msgs_s: total_msgs / elapsed / self.peers as f64,
+            mbps: total_msgs * size as f64 / elapsed / 1_000_000.0,
+            elapsed,
+            push_cpu: Some(push_cpu),
+            pull_cpu: Some(cpu),
+            peer_min: quantile(0.0),
+            peer_max: quantile(1.0),
+            peer_p10: quantile(0.10),
+            peer_p25: quantile(0.25),
+            peer_median: quantile(0.50),
+            peer_p75: quantile(0.75),
+            peer_p90: quantile(0.90),
         }
-    }
-
-    let push_cpu = process::read_proc_cpu(push_proc.pid());
-    push_proc.kill();
-
-    if transport == TransportKind::Ipc {
-        cleanup_ipc_addr(&addr, def.name);
-    }
-
-    if pull_results.is_empty() {
-        return zero_result(duration);
-    }
-
-    let total_msgs: f64 = pull_results
-        .iter()
-        .map(|r| r.msgs_s * peers_per_process as f64 * r.elapsed)
-        .sum();
-    let elapsed = pull_results.iter().map(|r| r.elapsed).fold(0.0, f64::max);
-    let mut peer_rates: Vec<f64> = pull_results
-        .iter()
-        .flat_map(|r| r.peer_rates.iter().copied())
-        .collect();
-    peer_rates.sort_unstable_by(f64::total_cmp);
-    let cpu: f64 = pull_results.iter().filter_map(|r| r.pull_cpu).sum();
-    let quantile = |p: f64| {
-        if peer_rates.is_empty() {
-            None
-        } else {
-            Some(peer_rates[((peer_rates.len() - 1) as f64 * p).round() as usize])
-        }
-    };
-
-    CellResult {
-        blocking_inproc: None,
-        msgs_s: total_msgs / elapsed / peers as f64,
-        mbps: total_msgs * size as f64 / elapsed / 1_000_000.0,
-        elapsed,
-        push_cpu: Some(push_cpu),
-        pull_cpu: Some(cpu),
-        peer_min: quantile(0.0),
-        peer_max: quantile(1.0),
-        peer_p10: quantile(0.10),
-        peer_p25: quantile(0.25),
-        peer_median: quantile(0.50),
-        peer_p75: quantile(0.75),
-        peer_p90: quantile(0.90),
     }
 }
 
-#[expect(clippy::too_many_arguments)]
-fn run_fanin_cell(
-    binary: &Path,
-    peer_binary: &Path,
-    def: &ImplDef,
-    transport: TransportKind,
-    size: u64,
-    peers: u64,
-    duration: f64,
-    rounds: u32,
-    base_port: u16,
-) -> CellResult {
-    representative_of(rounds, |_| {
-        run_fanin_once(
-            binary,
-            peer_binary,
-            def,
-            transport,
-            size,
-            peers,
-            duration,
-            base_port,
-        )
-    })
+fn run_fanin_cell(cell: &Cell<'_>, peers: u64, duration: f64, rounds: u32) -> CellResult {
+    representative_of(rounds, |_| run_fanin_once(cell, peers, duration))
 }
 
-#[allow(clippy::needless_late_init)]
-#[expect(clippy::too_many_arguments)]
-fn run_fanin_once(
-    binary: &Path,
-    peer_binary: &Path,
-    def: &ImplDef,
-    transport: TransportKind,
-    size: u64,
-    peers: u64,
-    duration: f64,
-    base_port: u16,
-) -> CellResult {
-    let binary_str = binary.to_str().unwrap();
-    let peer_binary_str = peer_binary.to_str().unwrap();
-    let size_str = size.to_string();
+fn run_fanin_once(cell: &Cell<'_>, peers: u64, duration: f64) -> CellResult {
+    let def = cell.def;
+    let size_str = cell.size.to_string();
     let dur_str = format!("{duration:.1}");
     let peers_str = peers.to_string();
+    let addr = cell.addr();
 
-    let addr = addr_for(transport, def.prefix, 0, base_port, def.name);
-    let connect_addr;
-
+    let start_at = start_at();
     let mut pull_env: Vec<(&str, &str)> = def.env.to_vec();
     let mut push_env: Vec<(&str, &str)> = def.env.to_vec();
-    let start_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system clock before Unix epoch")
-        .as_secs_f64()
-        + 2.0;
-    let start_at_str = format!("{start_at:.6}");
-    pull_env.push(("OMQ_BENCH_START_AT", &start_at_str));
-    push_env.push(("OMQ_BENCH_START_AT", &start_at_str));
-    pull_env.push(("OMQ_BENCH_WARMUP_MS", "500"));
-    push_env.push(("OMQ_BENCH_WARMUP_MS", "500"));
+    push_start_env(&mut pull_env, &start_at);
+    push_start_env(&mut push_env, &start_at);
 
     // pull-bind binds on the measured CPU.
-    let mut pull_cmd = vec![binary_str, "pull-bind"];
-    let bind_any = transport
-        .port_scheme()
-        .map(|scheme| format!("{scheme}://127.0.0.1:0"));
-    if let Some(bind_any) = bind_any.as_deref() {
-        pull_cmd.extend([bind_any, &size_str, &dur_str]);
-    } else {
-        pull_cmd.extend([addr.as_str(), &size_str, &dur_str]);
-    }
-
-    let coord = transport
-        .port_scheme()
-        .is_some()
-        .then(CoordSocket::bind_new);
-    let mut spawn_env = pull_env.clone();
-    if let Some(ref c) = coord {
-        spawn_env.push(("OMQ_BENCH_COORD", c.endpoint()));
-    }
-    let mut pull_proc = process::spawn(&pull_cmd, &spawn_env, def.affinity(process::MEASURED_CPU));
-
-    if let Some(c) = coord {
-        let port = c
-            .recv_ready_port(Duration::from_secs(10))
-            .expect("coord: no READY from pull-bind peer");
-        connect_addr = format!("{}://127.0.0.1:{port}", transport.port_scheme().unwrap());
-    } else {
-        std::thread::sleep(Duration::from_millis(100));
-        connect_addr = addr.clone();
-    }
+    let binder = BinderCmd {
+        head: [cell.binary.to_str().unwrap(), "pull-bind"],
+        tail: &[&size_str, &dur_str],
+        env: &pull_env,
+        cpus: def.affinity(process::MEASURED_CPU),
+        role: "pull-bind",
+        settle: Duration::from_millis(100),
+    };
+    let mut puller = spawn_binder(cell.transport, &addr, &binder);
+    // Fan-in closes the coord socket as soon as the binder is ready.
+    drop(puller.coord.take());
 
     let mut push_proc = process::spawn(
         &[
-            peer_binary_str,
+            cell.peer_binary.to_str().unwrap(),
             "multi-push",
-            &connect_addr,
+            &puller.connect_addr,
             &size_str,
             &peers_str,
             &dur_str,
@@ -1439,48 +1358,47 @@ fn run_fanin_once(
         def.affinity(process::OTHER_CPU),
     );
 
-    let pull_output = pull_proc.wait_with_output(Duration::from_secs(duration as u64 + 30));
-
+    let timeout = Duration::from_secs(duration as u64 + 30);
+    let pull_output = puller.guard.wait_with_output(timeout);
     let push_cpu = process::read_proc_cpu(push_proc.pid());
-    let timed_push = def.name != "zmq.rs" && def.name != "rzmq" && def.name != "rzmq-iouring";
-    let push_output = if timed_push {
-        push_proc.wait_with_output(Duration::from_secs(duration as u64 + 30))
-    } else {
-        push_proc.kill();
-        None
-    };
+    let push_output = finish_fanin_push(&mut push_proc, def, timeout);
+    let pull_cpu_proc = process::read_proc_cpu(puller.guard.pid());
+    cell.cleanup(&addr);
 
-    let pull_cpu_proc = process::read_proc_cpu(pull_proc.pid());
-    // pull_proc dropped by wait_with_output
-
-    if transport == TransportKind::Ipc {
-        cleanup_ipc_addr(&addr, def.name);
-    }
-
-    let Some(output) = pull_output else {
+    let Some(r) = pull_output.and_then(|output| parse::parse_throughput(&output, cell.size)) else {
         return zero_result(duration);
     };
-
-    let Some(r) = parse::parse_throughput(&output, size) else {
-        return zero_result(duration);
-    };
-    let p = push_output
-        .as_deref()
-        .and_then(|output| parse::parse_multi_throughput(output, size, peers));
-    CellResult {
-        blocking_inproc: None,
+    let result = CellResult {
         msgs_s: r.msgs_s,
         mbps: r.mbps,
         elapsed: r.elapsed,
         push_cpu: Some(push_cpu),
         pull_cpu: Some(r.pull_cpu.unwrap_or(pull_cpu_proc)),
-        peer_min: p.as_ref().and_then(|p| p.peer_min),
-        peer_max: p.as_ref().and_then(|p| p.peer_max),
-        peer_p10: p.as_ref().and_then(|p| p.peer_p10),
-        peer_p25: p.as_ref().and_then(|p| p.peer_p25),
-        peer_median: p.as_ref().and_then(|p| p.peer_median),
-        peer_p75: p.as_ref().and_then(|p| p.peer_p75),
-        peer_p90: p.as_ref().and_then(|p| p.peer_p90),
+        ..zero_result(duration)
+    };
+
+    match push_output
+        .as_deref()
+        .and_then(|output| parse::parse_multi_throughput(output, cell.size, peers))
+    {
+        Some(spread) => result.with_spread(&spread),
+        None => result,
+    }
+}
+
+/// Waits for the fan-in PUSH side. The zmq.rs and rzmq push peers do not
+/// stop on their own, so they are killed and report no per-peer rates.
+fn finish_fanin_push(
+    push_proc: &mut process::ProcessGuard,
+    def: &ImplDef,
+    timeout: Duration,
+) -> Option<String> {
+    let timed_push = !matches!(def.name, "zmq.rs" | "rzmq" | "rzmq-iouring");
+    if timed_push {
+        push_proc.wait_with_output(timeout)
+    } else {
+        push_proc.kill();
+        None
     }
 }
 
@@ -1495,137 +1413,110 @@ struct LatencyResult {
     elapsed: Option<f64>,
 }
 
-#[expect(clippy::too_many_arguments)]
-#[allow(
-    clippy::needless_late_init,
-    clippy::similar_names,
-    clippy::too_many_lines
-)]
-fn run_latency_cell(
-    binary: &Path,
-    peer_binary: &Path,
-    def: &ImplDef,
-    transport: TransportKind,
-    size: u64,
+/// Latency settings shared by every cell of one socket pair and profile.
+struct LatencyWorkload<'a> {
+    pair: &'a str,
+    profile: &'a str,
     iterations: u64,
     warmup: u64,
+    /// Expected run time in seconds; peers get 30 s on top.
     timeout: u64,
-    base_port: u16,
-    pair: &str,
-    profile: &str,
-) -> Option<LatencyResult> {
-    let binary_str = binary.to_str().unwrap();
-    let peer_binary_str = peer_binary.to_str().unwrap();
-    let size_str = size.to_string();
-    let iters_str = iterations.to_string();
-    let warmup_str = warmup.to_string();
+}
 
-    if transport == TransportKind::Inproc {
-        let name = addr_for(transport, def.prefix, 0, base_port, def.name);
-        let env = latency_env(def, pair, profile);
-        let (out, cpu) = process::capture_with_cpu(
-            &[
-                binary_str,
-                def.inproc_lat_subcmd,
-                &name,
-                &size_str,
-                &iters_str,
-                &warmup_str,
-            ],
-            &env,
-            def.affinity(process::MEASURED_CPU),
-            Duration::from_secs(timeout + 30),
-        )?;
-        let r = parse::parse_latency(&out)?;
-        validate_latency_result(&r, iterations);
-        return Some(LatencyResult {
-            p50_us: r.p50_us,
-            p99_us: r.p99_us,
-            p999_us: r.p999_us,
-            max_us: r.max_us,
-            iterations: r.iterations,
-            cpu_time: Some(cpu),
-            req_cpu: Some(cpu),
-            elapsed: r.elapsed,
-        });
+#[expect(clippy::similar_names)]
+fn run_latency_cell(cell: &Cell<'_>, workload: &LatencyWorkload<'_>) -> Option<LatencyResult> {
+    if cell.transport == TransportKind::Inproc {
+        return run_inproc_latency(cell, workload);
     }
 
-    let addr = addr_for(transport, def.prefix, 0, base_port, def.name);
-    let connect_addr;
+    let def = cell.def;
+    let size_str = cell.size.to_string();
+    let iters_str = workload.iterations.to_string();
+    let warmup_str = workload.warmup.to_string();
+    let addr = cell.addr();
+    let env = latency_env(def, workload.pair, workload.profile);
 
-    let rep_env = latency_env(def, pair, profile);
-    let req_env = rep_env.clone();
+    // REP binds on the other CPUs; the timed REQ side runs on the measured
+    // CPUs.
+    let binder = BinderCmd {
+        head: [cell.peer_binary.to_str().unwrap(), latency_rep_subcmd(def)],
+        tail: &[&size_str],
+        env: &env,
+        cpus: def.affinity(process::OTHER_CPU),
+        role: "rep",
+        settle: Duration::from_millis(100),
+    };
+    let mut replier = spawn_binder(cell.transport, &addr, &binder);
+    // Latency closes the coord socket as soon as the binder is ready.
+    drop(replier.coord.take());
 
-    let mut rep_cmd = vec![peer_binary_str, latency_rep_subcmd(def)];
-    let bind_any = transport
-        .port_scheme()
-        .map(|scheme| format!("{scheme}://127.0.0.1:0"));
-    if let Some(bind_any) = bind_any.as_deref() {
-        rep_cmd.extend([bind_any, &size_str]);
-    } else {
-        rep_cmd.extend([addr.as_str(), &size_str]);
-    }
-
-    let coord = transport
-        .port_scheme()
-        .is_some()
-        .then(CoordSocket::bind_new);
-    let mut spawn_env = rep_env.clone();
-    if let Some(ref c) = coord {
-        spawn_env.push(("OMQ_BENCH_COORD", c.endpoint()));
-    }
-    let mut rep_proc = process::spawn(&rep_cmd, &spawn_env, def.affinity(process::OTHER_CPU));
-
-    if let Some(c) = coord {
-        let port = c
-            .recv_ready_port(Duration::from_secs(10))
-            .expect("coord: no READY from rep peer");
-        connect_addr = format!("{}://127.0.0.1:{port}", transport.port_scheme().unwrap());
-    } else {
-        std::thread::sleep(Duration::from_millis(100));
-        connect_addr = addr.clone();
-    }
-
-    let req_result = process::capture(
+    let req_output = process::capture(
         &[
-            binary_str,
+            cell.binary.to_str().unwrap(),
             latency_req_subcmd(def),
-            &connect_addr,
+            &replier.connect_addr,
             &size_str,
             &iters_str,
             &warmup_str,
         ],
-        &req_env,
+        &env,
         def.affinity(process::MEASURED_CPU),
-        Duration::from_secs(timeout + 30),
-    )
-    .map(|output| (output, 0.0));
+        Duration::from_secs(workload.timeout + 30),
+    );
 
-    let rep_cpu = process::read_proc_cpu(rep_proc.pid());
-    rep_proc.kill();
+    let rep_cpu = process::read_proc_cpu(replier.guard.pid());
+    replier.guard.kill();
+    cell.cleanup(&addr);
 
-    if transport == TransportKind::Ipc {
-        cleanup_ipc_addr(&addr, def.name);
-    }
-
-    let (output, _measured_req_cpu) = req_result?;
-    let r = parse::parse_latency(&output)?;
-    validate_latency_result(&r, iterations);
+    let r = parse::parse_latency(&req_output?)?;
+    validate_latency_result(&r, workload.iterations);
 
     let req_cpu = r.req_cpu;
-    let cpu_time = match (req_cpu, rep_cpu) {
-        (Some(rc), _) => Some(rc + rep_cpu),
-        _ => None,
-    };
-
     Some(LatencyResult {
         p50_us: r.p50_us,
         p99_us: r.p99_us,
         p999_us: r.p999_us,
         max_us: r.max_us,
         iterations: r.iterations,
-        cpu_time,
+        cpu_time: req_cpu.map(|req| req + rep_cpu),
         req_cpu,
+        elapsed: r.elapsed,
+    })
+}
+
+fn run_inproc_latency(cell: &Cell<'_>, workload: &LatencyWorkload<'_>) -> Option<LatencyResult> {
+    let def = cell.def;
+    let name = cell.addr();
+    let size_str = cell.size.to_string();
+    let iters_str = workload.iterations.to_string();
+    let warmup_str = workload.warmup.to_string();
+    let env = latency_env(def, workload.pair, workload.profile);
+
+    let (out, cpu) = process::capture_with_cpu(
+        &[
+            cell.binary.to_str().unwrap(),
+            def.inproc_lat_subcmd,
+            &name,
+            &size_str,
+            &iters_str,
+            &warmup_str,
+        ],
+        &env,
+        def.affinity(process::MEASURED_CPU),
+        Duration::from_secs(workload.timeout + 30),
+    )?;
+    let r = parse::parse_latency(&out)?;
+    validate_latency_result(&r, workload.iterations);
+
+    // One process runs both sides, so all of its CPU counts as REQ CPU.
+    Some(LatencyResult {
+        p50_us: r.p50_us,
+        p99_us: r.p99_us,
+        p999_us: r.p999_us,
+        max_us: r.max_us,
+        iterations: r.iterations,
+        cpu_time: Some(cpu),
+        req_cpu: Some(cpu),
         elapsed: r.elapsed,
     })
 }
@@ -1788,16 +1679,27 @@ impl ComparisonRun<'_> {
         }
     }
 
+    /// Cell of `name` at `size`. Both sides run the same peer binary.
+    fn cell(&self, name: &str, transport: TransportKind, size: u64) -> Cell<'_> {
+        let binary = self.binaries[name].as_path();
+        Cell {
+            binary,
+            peer_binary: binary,
+            def: find_impl(name).unwrap(),
+            transport,
+            size,
+            base_port: self.base_port,
+        }
+    }
+
     fn record_cell(
         &self,
-        name: &str,
+        cell: &Cell<'_>,
         kind: CellKind,
-        transport: TransportKind,
-        size: u64,
         peers: Option<u64>,
         result: &CellResult,
     ) {
-        let mut row = self.row(name, kind.as_str(), transport, size);
+        let mut row = self.row(cell.def.name, kind.as_str(), cell.transport, cell.size);
         row.peers = peers;
         row.blocking_inproc.clone_from(&result.blocking_inproc);
         row.msgs_s = Some(result.msgs_s);
@@ -1842,14 +1744,12 @@ impl ComparisonRun<'_> {
 
     fn record_latency(
         &self,
-        name: &str,
-        transport: TransportKind,
-        size: u64,
-        pair: &str,
-        profile: &str,
+        cell: &Cell<'_>,
+        workload: &LatencyWorkload<'_>,
         result: &LatencyResult,
     ) {
-        let mut row = self.row(name, "latency", transport, size);
+        let name = cell.def.name;
+        let mut row = self.row(name, "latency", cell.transport, cell.size);
         row.elapsed = result.elapsed;
         row.cpu_time = result.cpu_time;
         row.req_cpu_time = result.req_cpu;
@@ -1858,12 +1758,11 @@ impl ComparisonRun<'_> {
         row.p999_us = Some(result.p999_us);
         row.max_us = Some(result.max_us);
         row.iterations = Some(result.iterations);
-        row.latency_pair = Some(pair.to_owned());
-        row.workload_profile = Some(profile.to_owned());
+        row.latency_pair = Some(workload.pair.to_owned());
+        row.workload_profile = Some(workload.profile.to_owned());
         if name.starts_with("omq-") {
-            let def = find_impl(name).unwrap();
             row.recv_spin_us = Some(
-                latency_env(def, pair, profile)
+                latency_env(cell.def, workload.pair, workload.profile)
                     .iter()
                     .find(|&&(key, _)| key == "OMQ_BENCH_RECV_SPIN_US")
                     .unwrap()
@@ -1936,19 +1835,9 @@ impl ComparisonRun<'_> {
         for &size in self.sizes {
             let mut cells = Vec::with_capacity(impls.len());
             for &name in &impls {
-                let def = find_impl(name).unwrap();
-                let binary = self.binaries[name].as_path();
-                let result = run_throughput_cell(
-                    binary,
-                    binary,
-                    def,
-                    transport,
-                    size,
-                    self.duration,
-                    self.rounds,
-                    self.base_port,
-                );
-                self.record_cell(name, CellKind::Throughput, transport, size, None, &result);
+                let cell = self.cell(name, transport, size);
+                let result = run_throughput_cell(&cell, self.duration, self.rounds);
+                self.record_cell(&cell, CellKind::Throughput, None, &result);
                 cells.push(if size >= 1024 {
                     fmt_gbps(result.mbps)
                 } else {
@@ -1976,61 +1865,71 @@ impl ComparisonRun<'_> {
                 if impls.is_empty() {
                     continue;
                 }
+
                 eprintln!(
                     "\n=== Latency / {pair} / {profile} / {} (p99 us) ===",
                     transport.as_str()
                 );
                 print_latency_header(&impls);
+                let workload = LatencyWorkload {
+                    pair,
+                    profile,
+                    iterations: self.args.latency_iterations,
+                    warmup: self.args.latency_warmup,
+                    timeout: self.args.latency_timeout,
+                };
+
                 for &size in &sizes {
                     let mut cells = Vec::with_capacity(impls.len());
                     for &name in &impls {
-                        let def = find_impl(name).unwrap();
-                        let binary = self.binaries[name].as_path();
-                        let mut results = Vec::new();
-                        for round in 0..self.rounds {
-                            let result = run_latency_cell(
-                                binary,
-                                binary,
-                                def,
-                                transport,
-                                size,
-                                self.args.latency_iterations,
-                                self.args.latency_warmup,
-                                self.args.latency_timeout,
-                                self.base_port,
-                                pair,
-                                profile,
-                            )
-                            .unwrap_or_else(|| {
-                                panic!(
-                                    "latency measurement failed: {name} {pair} {profile} {} {size} B",
-                                    transport.as_str()
-                                )
-                            });
-                            if self.rounds > 1 {
-                                eprintln!(
-                                    "  {name} {size} B round {}/{}: p50/p99/p99.9 {:.3}/{:.3}/{:.3} us",
-                                    round + 1,
-                                    self.rounds,
-                                    result.p50_us,
-                                    result.p99_us,
-                                    result.p999_us
-                                );
-                            }
-                            results.push(result);
-                        }
-                        results.sort_by(|a, b| a.p99_us.total_cmp(&b.p99_us));
-                        let result = results
-                            .into_iter()
-                            .nth((self.rounds.saturating_sub(1) / 2) as usize)
-                            .expect("at least one latency round");
-                        self.record_latency(name, transport, size, pair, profile, &result);
+                        let cell = self.cell(name, transport, size);
+                        let result = self.measure_latency(&cell, &workload);
+                        self.record_latency(&cell, &workload, &result);
                         cells.push(format!("{:.1}", result.p99_us));
                     }
                     print_table_row(&size_label(size), &cells, 14);
                 }
             }
         }
+    }
+
+    /// Runs every latency round of one cell and keeps the median-p99 round.
+    fn measure_latency(&self, cell: &Cell<'_>, workload: &LatencyWorkload<'_>) -> LatencyResult {
+        let mut results = Vec::new();
+
+        for round in 0..self.rounds {
+            let result = run_latency_cell(cell, workload).unwrap_or_else(|| {
+                panic!(
+                    "latency measurement failed: {} {} {} {} {} B",
+                    cell.def.name,
+                    workload.pair,
+                    workload.profile,
+                    cell.transport.as_str(),
+                    cell.size
+                )
+            });
+
+            if self.rounds > 1 {
+                eprintln!(
+                    "  {} {} B round {}/{}: p50/p99/p99.9 {:.3}/{:.3}/{:.3} us",
+                    cell.def.name,
+                    cell.size,
+                    round + 1,
+                    self.rounds,
+                    result.p50_us,
+                    result.p99_us,
+                    result.p999_us
+                );
+            }
+
+            results.push(result);
+        }
+
+        results.sort_by(|a, b| a.p99_us.total_cmp(&b.p99_us));
+        results
+            .into_iter()
+            .nth((self.rounds.saturating_sub(1) / 2) as usize)
+            .expect("at least one latency round")
     }
 
     fn run_pubsub(
@@ -2048,28 +1947,10 @@ impl ComparisonRun<'_> {
             for &size in &sizes {
                 let mut cells = Vec::with_capacity(impls.len());
                 for &name in impls {
-                    let def = find_impl(name).unwrap();
-                    let binary = self.binaries[name].as_path();
-                    let result = run_pubsub_cell(
-                        binary,
-                        binary,
-                        def,
-                        transport,
-                        size,
-                        peers,
-                        self.duration,
-                        self.rounds,
-                        self.base_port,
-                        self.args,
-                    );
-                    self.record_cell(
-                        name,
-                        CellKind::PubSub,
-                        transport,
-                        size,
-                        Some(peers),
-                        &result,
-                    );
+                    let cell = self.cell(name, transport, size);
+                    let result =
+                        run_pubsub_cell(&cell, peers, self.duration, self.rounds, self.args);
+                    self.record_cell(&cell, CellKind::PubSub, Some(peers), &result);
                     cells.push(if curve {
                         if size >= 1024 {
                             fmt_gbps(result.mbps)
@@ -2120,34 +2001,15 @@ impl ComparisonRun<'_> {
             for &size in &sizes {
                 let mut cells = Vec::with_capacity(impls.len());
                 for &name in &impls {
-                    let def = find_impl(name).unwrap();
-                    let binary = self.binaries[name].as_path();
+                    let cell = self.cell(name, transport, size);
                     let result = match kind {
-                        CellKind::FanOut => run_fanout_cell(
-                            binary,
-                            binary,
-                            def,
-                            transport,
-                            size,
-                            peers,
-                            self.duration,
-                            self.rounds,
-                            self.base_port,
-                        ),
-                        CellKind::FanIn => run_fanin_cell(
-                            binary,
-                            binary,
-                            def,
-                            transport,
-                            size,
-                            peers,
-                            self.duration,
-                            self.rounds,
-                            self.base_port,
-                        ),
+                        CellKind::FanOut => {
+                            run_fanout_cell(&cell, peers, self.duration, self.rounds)
+                        }
+                        CellKind::FanIn => run_fanin_cell(&cell, peers, self.duration, self.rounds),
                         _ => unreachable!(),
                     };
-                    self.record_cell(name, kind, transport, size, Some(peers), &result);
+                    self.record_cell(&cell, kind, Some(peers), &result);
                     cells.push(if size >= 1024 {
                         format!("{:.1}", result.mbps / 1000.0)
                     } else {
@@ -2167,47 +2029,12 @@ pub(crate) fn run(args: &ComparisonsArgs) {
     );
     process::install_reaper();
     process::cleanup_ipc_sockets();
-    let duration = if args.quick_run {
-        QUICK_DURATION
-    } else {
-        args.duration
-            .or_else(|| std::env::var("OMQ_BENCH_DURATION").ok()?.parse().ok())
-            .unwrap_or(DEFAULT_DURATION)
-    };
-    let rounds = if args.quick_run {
-        1
-    } else {
-        args.rounds
-            .or_else(|| std::env::var("OMQ_BENCH_ROUNDS").ok()?.parse().ok())
-            .unwrap_or(DEFAULT_ROUNDS)
-    };
+    let (duration, rounds) = duration_and_rounds(args);
     let sizes = selected_sizes(args);
     let impl_names = selected_impl_names(args);
-    for &name in &impl_names {
-        if find_impl(name).is_none() {
-            eprintln!("unknown impl: {name}");
-            eprintln!(
-                "available: {}",
-                IMPLS
-                    .iter()
-                    .map(|imp| imp.name)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-            std::process::exit(1);
-        }
-    }
-    let transports: Vec<TransportKind> = args
-        .transport
-        .iter()
-        .map(|transport| match transport {
-            crate::cli::Transport::Tcp => TransportKind::Tcp,
-            crate::cli::Transport::Ipc => TransportKind::Ipc,
-            crate::cli::Transport::Inproc => TransportKind::Inproc,
-            crate::cli::Transport::Ws => TransportKind::Ws,
-            crate::cli::Transport::Quic => TransportKind::Quic,
-        })
-        .collect();
+    exit_on_unknown_impls(&impl_names);
+    let transports = selected_transports(args);
+
     let needs_ws = transports.contains(&TransportKind::Ws);
     let needs_quic = transports.contains(&TransportKind::Quic);
     if needs_quic {
@@ -2216,6 +2043,7 @@ pub(crate) fn run(args: &ComparisonsArgs) {
     let needs_curve = args.curve || impl_names.iter().any(|name| name.contains("curve"));
     eprintln!("Building peers...");
     let binaries = build_peers(&impl_names, needs_ws, needs_quic, needs_curve);
+
     let base_port = args.base_port.unwrap_or_else(random_base_port);
     let run_id = make_run_id(args.id.as_deref());
     let jsonl_path = jsonl::cache_dir().join("comparisons.jsonl");
@@ -2231,6 +2059,7 @@ pub(crate) fn run(args: &ComparisonsArgs) {
         run_id: &run_id,
         jsonl_path: &jsonl_path,
     };
+
     for &transport in &transports {
         run.run_transport(transport);
     }
@@ -2239,6 +2068,56 @@ pub(crate) fn run(args: &ComparisonsArgs) {
     }
     tracker.check();
     eprintln!("\nResults appended to {}", jsonl_path.display());
+}
+
+/// Seconds per cell and rounds per cell: CLI, then environment, then
+/// defaults. Quick runs override both.
+fn duration_and_rounds(args: &ComparisonsArgs) -> (f64, u32) {
+    let duration = if args.quick_run {
+        QUICK_DURATION
+    } else {
+        args.duration
+            .or_else(|| std::env::var("OMQ_BENCH_DURATION").ok()?.parse().ok())
+            .unwrap_or(DEFAULT_DURATION)
+    };
+    let rounds = if args.quick_run {
+        1
+    } else {
+        args.rounds
+            .or_else(|| std::env::var("OMQ_BENCH_ROUNDS").ok()?.parse().ok())
+            .unwrap_or(DEFAULT_ROUNDS)
+    };
+    (duration, rounds)
+}
+
+fn exit_on_unknown_impls(impl_names: &[&str]) {
+    for &name in impl_names {
+        if find_impl(name).is_none() {
+            eprintln!("unknown impl: {name}");
+            eprintln!(
+                "available: {}",
+                IMPLS
+                    .iter()
+                    .map(|imp| imp.name)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
+fn selected_transports(args: &ComparisonsArgs) -> Vec<TransportKind> {
+    args.transport
+        .iter()
+        .map(|transport| match transport {
+            crate::cli::Transport::Tcp => TransportKind::Tcp,
+            crate::cli::Transport::Ipc => TransportKind::Ipc,
+            crate::cli::Transport::Inproc => TransportKind::Inproc,
+            crate::cli::Transport::Ws => TransportKind::Ws,
+            crate::cli::Transport::Quic => TransportKind::Quic,
+        })
+        .collect()
 }
 
 fn print_throughput_header(impls: &[&str]) {

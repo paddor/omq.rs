@@ -193,114 +193,40 @@ impl ContextInner {
 
     /// Build a socket on the tokio thread, spawn per-socket send/recv pumps,
     /// and return the socket Arc and its id.
-    #[expect(clippy::too_many_arguments, clippy::type_complexity)]
+    #[expect(clippy::type_complexity)]
     pub fn materialize(
         &self,
         socket_type: omq_tokio::SocketType,
         options: omq_tokio::Options,
-        send_queue: Arc<crate::send::SendQueue>,
-        send_cons: yring::AsyncConsumer<omq_tokio::Message>,
-        send_ready: Arc<ReadinessSignal>,
-        mut recv_prod: yring::Producer<omq_tokio::Message>,
-        recv_ready: Arc<ReadinessSignal>,
-        recv_space: Arc<omq_tokio::engine::StateSignal>,
-        recv_config: Option<Arc<omq_tokio::engine::RecvSinkConfig>>,
+        send: SendPlumbing,
+        recv: RecvPlumbing,
     ) -> PyResult<(u64, Arc<InnerSocket>, JoinHandle<()>, JoinHandle<()>)> {
         let ctx = self.runtime_context()?;
         let handle = ctx.handle().clone();
         let (otx, orx) = flume::bounded(1);
         let recv_all_signal = global_recv_signal();
+
         handle.spawn(async move {
             let id = next_id();
-            let sock = Arc::new(ctx.socket_for_libzmq(socket_type, options, recv_config));
+            let sock = Arc::new(ctx.socket_for_libzmq(socket_type, options, recv.sink_config));
 
-            let send_socket = sock.clone();
-            let send_recv_ready = recv_ready.clone();
-            let send_all_ready = recv_all_signal.clone();
-            let send_pump = tokio::spawn(async move {
-                futures::pin_mut!(send_cons);
-                let mut count = 0;
-                let mut bytes = 0;
-                while let Some(message) = futures::StreamExt::next(&mut send_cons).await {
-                    bytes += message.byte_len();
-                    count += 1;
-                    let _ = send_socket.send(message).await;
-                    send_queue.complete();
-                    if matches!(
-                        send_socket.socket_type(),
-                        omq_tokio::SocketType::Req | omq_tokio::SocketType::Rep
-                    ) {
-                        send_recv_ready.signal();
-                        send_all_ready.signal();
-                    }
-                    if count >= 256 || bytes >= 1024 * 1024 {
-                        count = 0;
-                        bytes = 0;
-                        tokio::task::yield_now().await;
-                    }
-                }
-                send_ready.signal();
-            });
-            let recv_socket = sock.clone();
-            let recv_pump = tokio::spawn(async move {
-                let mut count = 0;
-                let mut bytes = 0;
-                while let Ok(msg) = recv_socket.recv_for_external_recv().await {
-                    bytes += msg.byte_len();
-                    count += 1;
-                    let mut pending_msg = msg;
-                    loop {
-                        match recv_prod.push(pending_msg) {
-                            Ok(()) => {
-                                if matches!(
-                                    recv_prod.flush_and_check(),
-                                    yring::FlushResult::Flushed {
-                                        was_empty: true,
-                                        ..
-                                    }
-                                ) {
-                                    recv_ready.signal();
-                                    recv_all_signal.signal();
-                                }
-                                break;
-                            }
-                            Err(returned) => {
-                                pending_msg = returned;
-                                let seen = recv_space.generation();
-                                let changed = recv_space.changed_after(seen);
-                                tokio::pin!(changed);
-                                match recv_prod.push(pending_msg) {
-                                    Ok(()) => {
-                                        if matches!(
-                                            recv_prod.flush_and_check(),
-                                            yring::FlushResult::Flushed {
-                                                was_empty: true,
-                                                ..
-                                            }
-                                        ) {
-                                            recv_ready.signal();
-                                            recv_all_signal.signal();
-                                        }
-                                        break;
-                                    }
-                                    Err(returned2) => {
-                                        pending_msg = returned2;
-                                        changed.await;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if count >= 256 || bytes >= 1024 * 1024 {
-                        count = 0;
-                        bytes = 0;
-                        tokio::task::yield_now().await;
-                    }
-                }
-            });
+            let send_pump = tokio::spawn(run_send_pump(
+                sock.clone(),
+                send,
+                recv.ready.clone(),
+                recv_all_signal.clone(),
+            ));
+            let recv_pump = tokio::spawn(run_recv_pump(
+                sock.clone(),
+                recv.pump_prod,
+                recv.ready,
+                recv.space,
+                recv_all_signal,
+            ));
 
             let _ = otx.send((id, sock, send_pump, recv_pump));
         });
+
         Ok(Python::attach(|py| {
             py.detach(|| orx.recv().expect("pyomq: runtime dropped result"))
         }))
@@ -428,6 +354,133 @@ impl ContextInner {
         });
 
         Ok(py_future)
+    }
+}
+
+/// Send plumbing for one socket: the app-facing queue, the pump's consumer,
+/// and the writable signal raised when the pump stops.
+pub(crate) struct SendPlumbing {
+    pub queue: Arc<crate::send::SendQueue>,
+    pub pump_cons: yring::AsyncConsumer<omq_tokio::Message>,
+    pub ready: Arc<ReadinessSignal>,
+}
+
+/// Receive plumbing for one socket: the drivers' direct sink, plus the
+/// fallback pump's producer and its readiness and space signals.
+pub(crate) struct RecvPlumbing {
+    pub sink_config: Option<Arc<omq_tokio::engine::RecvSinkConfig>>,
+    pub pump_prod: yring::Producer<omq_tokio::Message>,
+    pub ready: Arc<ReadinessSignal>,
+    pub space: Arc<omq_tokio::engine::StateSignal>,
+}
+
+/// Forward queued app sends to the socket, yielding every 256 messages or
+/// 1 MiB so one busy socket cannot hog the runtime.
+async fn run_send_pump(
+    send_socket: Arc<InnerSocket>,
+    send: SendPlumbing,
+    send_recv_ready: Arc<ReadinessSignal>,
+    send_all_ready: Arc<ReadinessSignal>,
+) {
+    let SendPlumbing {
+        queue: send_queue,
+        pump_cons: send_cons,
+        ready: send_ready,
+    } = send;
+    futures::pin_mut!(send_cons);
+
+    let mut count = 0;
+    let mut bytes = 0;
+    while let Some(message) = futures::StreamExt::next(&mut send_cons).await {
+        bytes += message.byte_len();
+        count += 1;
+        let _ = send_socket.send(message).await;
+        send_queue.complete();
+
+        // REQ/REP state flips on send, which can make a waiting recv ready.
+        if matches!(
+            send_socket.socket_type(),
+            omq_tokio::SocketType::Req | omq_tokio::SocketType::Rep
+        ) {
+            send_recv_ready.signal();
+            send_all_ready.signal();
+        }
+
+        if count >= 256 || bytes >= 1024 * 1024 {
+            count = 0;
+            bytes = 0;
+            tokio::task::yield_now().await;
+        }
+    }
+    send_ready.signal();
+}
+
+/// Relay fallback receives into the pump ring, waiting on `recv_space` when
+/// it is full. Yields every 256 messages or 1 MiB.
+async fn run_recv_pump(
+    recv_socket: Arc<InnerSocket>,
+    mut recv_prod: yring::Producer<omq_tokio::Message>,
+    recv_ready: Arc<ReadinessSignal>,
+    recv_space: Arc<omq_tokio::engine::StateSignal>,
+    recv_all_signal: Arc<ReadinessSignal>,
+) {
+    let mut count = 0;
+    let mut bytes = 0;
+    while let Ok(msg) = recv_socket.recv_for_external_recv().await {
+        bytes += msg.byte_len();
+        count += 1;
+        let mut pending_msg = msg;
+        loop {
+            match recv_prod.push(pending_msg) {
+                Ok(()) => {
+                    // Wake readers only on the empty-to-nonempty edge.
+                    if matches!(
+                        recv_prod.flush_and_check(),
+                        yring::FlushResult::Flushed {
+                            was_empty: true,
+                            ..
+                        }
+                    ) {
+                        recv_ready.signal();
+                        recv_all_signal.signal();
+                    }
+                    break;
+                }
+                Err(returned) => {
+                    pending_msg = returned;
+                    // Snapshot the space generation before retrying, so a pop
+                    // between the retry and the await still wakes us.
+                    let seen = recv_space.generation();
+                    let changed = recv_space.changed_after(seen);
+                    tokio::pin!(changed);
+                    match recv_prod.push(pending_msg) {
+                        Ok(()) => {
+                            if matches!(
+                                recv_prod.flush_and_check(),
+                                yring::FlushResult::Flushed {
+                                    was_empty: true,
+                                    ..
+                                }
+                            ) {
+                                recv_ready.signal();
+                                recv_all_signal.signal();
+                            }
+                            break;
+                        }
+                        Err(returned2) => {
+                            pending_msg = returned2;
+                            changed.await;
+                        }
+                    }
+                }
+            }
+        }
+
+        if count >= 256 || bytes >= 1024 * 1024 {
+            count = 0;
+            bytes = 0;
+            tokio::task::yield_now().await;
+        }
     }
 }
 

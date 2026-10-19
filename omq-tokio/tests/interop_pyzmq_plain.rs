@@ -144,6 +144,39 @@ ctx.term()
     );
 }
 
+/// Reads the ephemeral port a pyzmq server prints as its first stdout
+/// line. A blocking reader then collects up to `lines` further lines.
+async fn read_port_then_lines(
+    stdout: std::process::ChildStdout,
+    lines: usize,
+) -> (u16, tokio::task::JoinHandle<Vec<String>>) {
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<u16>();
+    let reader = tokio::task::spawn_blocking(move || {
+        use std::io::{BufRead, BufReader};
+
+        let mut r = BufReader::new(stdout);
+        let mut first = String::new();
+        r.read_line(&mut first).ok();
+        let _ = ready_tx.send(first.trim().parse::<u16>().expect("port from python"));
+
+        let mut collected = Vec::new();
+        for _ in 0..lines {
+            let mut buf = String::new();
+            if r.read_line(&mut buf).unwrap_or(0) == 0 {
+                break;
+            }
+            collected.push(buf.trim().to_string());
+        }
+        collected
+    });
+
+    let port = tokio::time::timeout(Duration::from_secs(5), ready_rx)
+        .await
+        .expect("python bind timed out")
+        .unwrap();
+    (port, reader)
+}
+
 // Rust PLAIN PUSH (client) -> pyzmq PLAIN PULL (server)
 #[tokio::test]
 async fn rust_plain_push_to_pyzmq_pull() {
@@ -179,27 +212,8 @@ ctx.term()
 
     let stdout = child.stdout.take().unwrap();
     let mut stderr = child.stderr.take().unwrap();
-    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<u16>();
-    let reader = tokio::task::spawn_blocking(move || {
-        use std::io::{BufRead, BufReader};
-        let mut r = BufReader::new(stdout);
-        let mut first = String::new();
-        r.read_line(&mut first).ok();
-        let _ = ready_tx.send(first.trim().parse::<u16>().expect("port from python"));
-        let mut lines = Vec::new();
-        for _ in 0..5 {
-            let mut buf = String::new();
-            if r.read_line(&mut buf).unwrap_or(0) == 0 {
-                break;
-            }
-            lines.push(buf.trim().to_string());
-        }
-        lines
-    });
-    let port = tokio::time::timeout(Duration::from_secs(5), ready_rx)
-        .await
-        .expect("python bind timed out")
-        .unwrap();
+    // The five lines after the port are the received messages.
+    let (port, reader) = read_port_then_lines(stdout, 5).await;
 
     let push = Socket::new(
         SocketType::Push,

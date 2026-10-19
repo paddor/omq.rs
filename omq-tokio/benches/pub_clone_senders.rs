@@ -94,8 +94,12 @@ fn spawn_receivers(
         .collect()
 }
 
-async fn run_cell(transport: &str, senders: usize, size: usize, seq: usize) -> (common::Cell, f64) {
-    let ep = common::endpoint(transport, seq);
+/// Bind one PUB and connect `SUBSCRIBERS` SUBs subscribed to everything.
+async fn connect_pub_subs(
+    transport: &str,
+    ep: omq_tokio::Endpoint,
+    size: usize,
+) -> (Socket, Vec<Socket>) {
     let pub_ = Socket::new(SocketType::Pub, common::options(size));
     pub_.bind(ep.clone()).await.expect("bind PUB");
 
@@ -106,6 +110,7 @@ async fn run_cell(transport: &str, senders: usize, size: usize, seq: usize) -> (
         s.subscribe(Bytes::new()).await.expect("subscribe");
         subs.push(s);
     }
+
     if transport != "inproc" {
         let refs: Vec<&Socket> = subs.iter().collect();
         common::wait_connected(&refs).await;
@@ -114,6 +119,69 @@ async fn run_cell(transport: &str, senders: usize, size: usize, seq: usize) -> (
         let refs: Vec<&Socket> = subs.iter().collect();
         common::wait_subscribed(&pub_, &refs).await;
     }
+    (pub_, subs)
+}
+
+/// One timed round's totals.
+struct RoundTotals {
+    sent: usize,
+    elapsed: Duration,
+    cpu: Duration,
+    delivered: usize,
+}
+
+/// Run `senders` clone threads against `pub_` for `dur` and collect totals.
+async fn run_round(
+    pub_: &Socket,
+    senders: usize,
+    payload: &Bytes,
+    recv_count: &AtomicUsize,
+    dur: Duration,
+) -> RoundTotals {
+    let round_stop = Arc::new(AtomicBool::new(false));
+    // Senders and this task start the window together.
+    let barrier = Arc::new(Barrier::new(senders + 1));
+    let handles: Vec<_> = (0..senders)
+        .map(|_| {
+            let sock = pub_.clone();
+            // Each thread owns its payload so the refcount is not shared.
+            let payload = Bytes::copy_from_slice(payload);
+            let round_stop = round_stop.clone();
+            let barrier = barrier.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                let mut sent = 0usize;
+                while !round_stop.load(Ordering::Relaxed) {
+                    let _ = sock.try_send(Message::single(payload.clone()));
+                    sent += 1;
+                }
+                sent
+            })
+        })
+        .collect();
+
+    recv_count.store(0, Ordering::Relaxed);
+    let cpu0 = common::process_cpu_time();
+    barrier.wait();
+    let t0 = Instant::now();
+    tokio::time::sleep(dur).await;
+    round_stop.store(true, Ordering::Relaxed);
+
+    let sent: usize = handles
+        .into_iter()
+        .map(|h| h.join().expect("sender thread"))
+        .sum();
+    RoundTotals {
+        sent,
+        elapsed: t0.elapsed(),
+        cpu: common::process_cpu_time().saturating_sub(cpu0),
+        delivered: recv_count.load(Ordering::Relaxed),
+    }
+}
+
+async fn run_cell(transport: &str, senders: usize, size: usize, seq: usize) -> (common::Cell, f64) {
+    let ep = common::endpoint(transport, seq);
+    let (pub_, subs) = connect_pub_subs(transport, ep, size).await;
 
     let payload = common::payload(size);
     let stop = Arc::new(AtomicBool::new(false));
@@ -135,49 +203,19 @@ async fn run_cell(transport: &str, senders: usize, size: usize, seq: usize) -> (
         } else {
             round_dur
         };
-        let round_stop = Arc::new(AtomicBool::new(false));
-        let barrier = Arc::new(Barrier::new(senders + 1));
-        let handles: Vec<_> = (0..senders)
-            .map(|_| {
-                let sock = pub_.clone();
-                // Each thread owns its payload so the refcount is not shared.
-                let payload = Bytes::copy_from_slice(&payload);
-                let round_stop = round_stop.clone();
-                let barrier = barrier.clone();
-                thread::spawn(move || {
-                    barrier.wait();
-                    let mut sent = 0usize;
-                    while !round_stop.load(Ordering::Relaxed) {
-                        let _ = sock.try_send(Message::single(payload.clone()));
-                        sent += 1;
-                    }
-                    sent
-                })
-            })
-            .collect();
-        recv_count.store(0, Ordering::Relaxed);
-        let cpu0 = common::process_cpu_time();
-        barrier.wait();
-        let t0 = Instant::now();
-        tokio::time::sleep(dur).await;
-        round_stop.store(true, Ordering::Relaxed);
-        let sent: usize = handles
-            .into_iter()
-            .map(|h| h.join().expect("sender thread"))
-            .sum();
-        let elapsed = t0.elapsed();
-        let cpu = common::process_cpu_time().saturating_sub(cpu0);
-        let delivered = recv_count.load(Ordering::Relaxed);
+        let totals = run_round(&pub_, senders, &payload, &recv_count, dur).await;
         if round == 0 {
             continue;
         }
-        let msgs_s = sent as f64 / elapsed.as_secs_f64();
+
+        let msgs_s = totals.sent as f64 / totals.elapsed.as_secs_f64();
         if msgs_s > best_msgs_s {
             best_msgs_s = msgs_s;
-            best_elapsed = elapsed;
-            best_n = sent;
-            best_cpu = cpu;
-            best_delivered_s = delivered as f64 / SUBSCRIBERS as f64 / elapsed.as_secs_f64();
+            best_elapsed = totals.elapsed;
+            best_n = totals.sent;
+            best_cpu = totals.cpu;
+            best_delivered_s =
+                totals.delivered as f64 / SUBSCRIBERS as f64 / totals.elapsed.as_secs_f64();
         }
     }
 

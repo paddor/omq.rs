@@ -115,26 +115,33 @@ impl PeerEventDispatch {
 
     /// Empty checks avoid clocks or reservations on the ordinary message path.
     /// Event service is bounded by count, logical bytes, and elapsed time.
-    #[expect(clippy::too_many_arguments)]
+    /// Returns `false` once the actor mailbox is closed.
     pub(super) fn drive(
         &mut self,
         connection: &mut Connection,
-        peer_out: &mpsc::Sender<(u64, PeerEvent)>,
-        peer_id: u64,
+        route: EventRoute<'_>,
         mut recv_direct: Option<&mut RecvSink>,
-        completion: &mut CompletionProgress,
-        output: &mut super::actor_output::PeerOutput,
         data_clear: bool,
     ) -> bool {
+        // A retained event or notification must go first; the select arm
+        // owns its permit wait.
         if self.pending.is_some() || self.notification.is_some() {
             return true;
         }
         self.needs_drain = false;
+
         let Some(mut event) = connection.poll_event() else {
             return true;
         };
+        let EventRoute {
+            mailbox,
+            output,
+            peer_id,
+            completion,
+        } = route;
         let mut budget = DrainBudget::new(64, 64 * 1024);
         let started = Instant::now();
+
         loop {
             if let Event::HandshakeSucceeded {
                 ref peer_properties,
@@ -144,16 +151,20 @@ impl PeerEventDispatch {
             {
                 sink.set_peer_properties(peer_properties.clone());
             }
+
             let bytes = event_work_bytes(&event);
             if self.notify_xpub {
                 self.notification = xpub_notification(&event);
             }
+            // The XPUB notification rides the data output right after its
+            // event, so both wait together when that output has no room.
             if self.notification.is_some() && (!data_clear || !output.has_capacity()) {
                 self.pending = Some(event);
                 return true;
             }
+
             let handshake = matches!(event, Event::HandshakeSucceeded { .. });
-            match peer_out.try_send((peer_id, PeerEvent::Event(event))) {
+            match mailbox.try_send((peer_id, PeerEvent::Event(event))) {
                 Ok(()) => {
                     self.admitted = self.admitted.wrapping_add(1);
                     self.handshake_admitted |= handshake;
@@ -169,6 +180,7 @@ impl PeerEventDispatch {
             if !self.send_notification(output, peer_id, completion) {
                 return false;
             }
+
             if !budget.account(bytes) || started.elapsed() >= Duration::from_millis(1) {
                 self.needs_drain = true;
                 return true;
@@ -179,6 +191,14 @@ impl PeerEventDispatch {
             event = next;
         }
     }
+}
+
+/// Where one peer's admitted codec events go, and who accounts for them.
+pub(super) struct EventRoute<'a> {
+    pub(super) mailbox: &'a mpsc::Sender<(u64, PeerEvent)>,
+    pub(super) output: &'a mut super::actor_output::PeerOutput,
+    pub(super) peer_id: u64,
+    pub(super) completion: &'a mut CompletionProgress,
 }
 
 pub(crate) fn xpub_notification(event: &Event) -> Option<omq_proto::Message> {

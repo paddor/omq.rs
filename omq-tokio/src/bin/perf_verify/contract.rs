@@ -154,14 +154,9 @@ fn round_trips(pattern: Pattern, size: usize, peers: usize, profile: WorkloadPro
     let endpoint = responder.bind(tcp_zero()).expect("responder bind");
     let requesters: Vec<_> = (0..peers)
         .map(|index| {
-            let requester = requester_ctx.blocking_socket(
-                requester_type,
-                Pattern::options(
-                    requester_type,
-                    profile,
-                    Bytes::from(format!("perf-requester-{index}")),
-                ),
-            );
+            let identity = Bytes::from(format!("perf-requester-{index}"));
+            let options = Pattern::options(requester_type, profile, identity);
+            let requester = requester_ctx.blocking_socket(requester_type, options);
             requester
                 .connect(endpoint.clone())
                 .expect("requester connect");
@@ -176,45 +171,15 @@ fn round_trips(pattern: Pattern, size: usize, peers: usize, profile: WorkloadPro
         .expect("responder connect timeout");
 
     let stop = Arc::new(AtomicBool::new(false));
-    let serving = {
-        let stop = stop.clone();
-        thread::spawn(move || {
-            SETTINGS.affinity.pin(5);
-            while !stop.load(Ordering::Acquire) {
-                match responder.recv_timeout(Duration::from_millis(20)) {
-                    Ok(request) => responder.send(request).expect("responder echo"),
-                    Err(omq_tokio::Error::Timeout | omq_tokio::Error::WouldBlock) => {}
-                    Err(error) => panic!("responder recv failed: {error}"),
-                }
-            }
-            responder
-        })
-    };
+    let serving = spawn_echo(responder, stop.clone());
     let window = Window::new(Instant::now(), SETTINGS.warmup, SETTINGS.measure);
     let request = pattern.request(size);
     let clients: Vec<_> = requesters
         .into_iter()
         .enumerate()
-        .map(|(index, requester)| {
-            let request = request.clone();
-            thread::spawn(move || {
-                SETTINGS.affinity.pin(index);
-                let mut count = 0u64;
-                loop {
-                    let started = Instant::now();
-                    if started >= window.end {
-                        break;
-                    }
-                    requester.send(request.clone()).expect("requester send");
-                    requester.recv_timeout(TIMEOUT).expect("requester recv");
-                    if started >= window.start && Instant::now() < window.end {
-                        count += 1;
-                    }
-                }
-                (count, requester)
-            })
-        })
+        .map(|(index, requester)| spawn_round_trips(index, requester, request.clone(), window))
         .collect();
+
     let mut total = 0;
     let mut sockets = Vec::with_capacity(clients.len() + 1);
     for client in clients {
@@ -228,4 +193,49 @@ fn round_trips(pattern: Pattern, size: usize, peers: usize, profile: WorkloadPro
     requester_ctx.term();
     responder_ctx.term();
     total as f64 / SETTINGS.measure.as_secs_f64()
+}
+
+/// Echo every request on CPU 5 until `stop`; return the socket for teardown.
+fn spawn_echo(
+    responder: omq_tokio::blocking::Socket,
+    stop: Arc<AtomicBool>,
+) -> thread::JoinHandle<omq_tokio::blocking::Socket> {
+    thread::spawn(move || {
+        SETTINGS.affinity.pin(5);
+        // A short receive timeout keeps the stop flag responsive.
+        while !stop.load(Ordering::Acquire) {
+            match responder.recv_timeout(Duration::from_millis(20)) {
+                Ok(request) => responder.send(request).expect("responder echo"),
+                Err(omq_tokio::Error::Timeout | omq_tokio::Error::WouldBlock) => {}
+                Err(error) => panic!("responder recv failed: {error}"),
+            }
+        }
+        responder
+    })
+}
+
+/// Lockstep round trips until the window ends. Counts only trips that start
+/// and finish inside the measured part of the window.
+fn spawn_round_trips(
+    index: usize,
+    requester: omq_tokio::blocking::Socket,
+    request: Message,
+    window: Window,
+) -> thread::JoinHandle<(u64, omq_tokio::blocking::Socket)> {
+    thread::spawn(move || {
+        SETTINGS.affinity.pin(index);
+        let mut count = 0u64;
+        loop {
+            let started = Instant::now();
+            if started >= window.end {
+                break;
+            }
+            requester.send(request.clone()).expect("requester send");
+            requester.recv_timeout(TIMEOUT).expect("requester recv");
+            if started >= window.start && Instant::now() < window.end {
+                count += 1;
+            }
+        }
+        (count, requester)
+    })
 }

@@ -412,24 +412,46 @@ async fn tcp_dealer_identity_is_available_on_initial_handshake() {
     assert_eq!(reply, Message::single("pong"));
 }
 
+fn fixed_identity(identity: &'static [u8]) -> Options {
+    Options::default()
+        .identity(bytes::Bytes::from_static(identity))
+        .reconnect(ReconnectPolicy::Disabled)
+}
+
+/// Receives "from-a" and "from-b", in either order, each prefixed with
+/// its sender's identity frame and no REQ delimiter.
+async fn assert_routed_from_a_and_b(router: &Socket) {
+    let mut saw_a = false;
+    let mut saw_b = false;
+    for _ in 0..2 {
+        let msg = tokio::time::timeout(Duration::from_secs(1), router.recv())
+            .await
+            .expect("router did not receive")
+            .unwrap();
+        assert_eq!(msg.len(), 2, "DEALER/ROUTER must not add REQ delimiter");
+
+        match (
+            msg.part_bytes(0).unwrap().as_ref(),
+            msg.part_bytes(1).unwrap().as_ref(),
+        ) {
+            (b"a", b"from-a") => saw_a = true,
+            (b"b", b"from-b") => saw_b = true,
+            other => panic!("unexpected routed message: {other:?}"),
+        }
+    }
+
+    assert!(saw_a, "router did not receive dealer a identity");
+    assert!(saw_b, "router did not receive dealer b identity");
+}
+
 #[tokio::test]
 async fn tcp_router_routes_two_initial_dealer_identities() {
     let router = Socket::new(SocketType::Router, Options::default());
     let port = test_support::bind_loopback(&router).await;
     let ep = test_support::tcp_loopback(port);
 
-    let dealer_a = Socket::new(
-        SocketType::Dealer,
-        Options::default()
-            .identity(bytes::Bytes::from_static(b"a"))
-            .reconnect(ReconnectPolicy::Disabled),
-    );
-    let dealer_b = Socket::new(
-        SocketType::Dealer,
-        Options::default()
-            .identity(bytes::Bytes::from_static(b"b"))
-            .reconnect(ReconnectPolicy::Disabled),
-    );
+    let dealer_a = Socket::new(SocketType::Dealer, fixed_identity(b"a"));
+    let dealer_b = Socket::new(SocketType::Dealer, fixed_identity(b"b"));
     dealer_a.connect(ep.clone()).await.unwrap();
     dealer_b.connect(ep).await.unwrap();
 
@@ -448,26 +470,7 @@ async fn tcp_router_routes_two_initial_dealer_identities() {
 
     dealer_a.send(Message::single("from-a")).await.unwrap();
     dealer_b.send(Message::single("from-b")).await.unwrap();
-
-    let mut saw_a = false;
-    let mut saw_b = false;
-    for _ in 0..2 {
-        let msg = tokio::time::timeout(Duration::from_secs(1), router.recv())
-            .await
-            .expect("router did not receive")
-            .unwrap();
-        assert_eq!(msg.len(), 2, "DEALER/ROUTER must not add REQ delimiter");
-        match (
-            msg.part_bytes(0).unwrap().as_ref(),
-            msg.part_bytes(1).unwrap().as_ref(),
-        ) {
-            (b"a", b"from-a") => saw_a = true,
-            (b"b", b"from-b") => saw_b = true,
-            other => panic!("unexpected routed message: {other:?}"),
-        }
-    }
-    assert!(saw_a, "router did not receive dealer a identity");
-    assert!(saw_b, "router did not receive dealer b identity");
+    assert_routed_from_a_and_b(&router).await;
 
     router
         .send(Message::multipart(["a", "reply-a"]))

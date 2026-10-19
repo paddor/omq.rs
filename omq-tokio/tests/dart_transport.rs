@@ -98,17 +98,32 @@ async fn response(socket: &tokio::net::UdpSocket) -> u64 {
     session
 }
 
-async fn send_data(
-    socket: &tokio::net::UdpSocket,
+/// Raw UDP peer that completed a DART handshake with `target`.
+struct RawSession<'a> {
+    socket: &'a tokio::net::UdpSocket,
     target: std::net::SocketAddr,
     session: u64,
-    sequence: u64,
-    body: &[u8],
-    group: Option<&[u8]>,
-) {
-    let mut bytes = [0; dart::MAX_DATAGRAM];
-    let length = dart::encode_sequenced_data(session, sequence, body, group, &mut bytes).unwrap();
-    socket.send_to(&bytes[..length], target).await.unwrap();
+}
+
+impl<'a> RawSession<'a> {
+    fn new(socket: &'a tokio::net::UdpSocket, target: std::net::SocketAddr, session: u64) -> Self {
+        Self {
+            socket,
+            target,
+            session,
+        }
+    }
+
+    /// Sends one sequenced DATA datagram on this session.
+    async fn send_data(&self, sequence: u64, body: &[u8], group: Option<&[u8]>) {
+        let mut bytes = [0; dart::MAX_DATAGRAM];
+        let length =
+            dart::encode_sequenced_data(self.session, sequence, body, group, &mut bytes).unwrap();
+        self.socket
+            .send_to(&bytes[..length], self.target)
+            .await
+            .unwrap();
+    }
 }
 
 fn endpoint(port: u16) -> Endpoint {
@@ -181,7 +196,9 @@ async fn malformed_packed_body_cannot_partially_advance_receipt() {
             .await
             .is_err()
     );
-    send_data(&raw, target, session, 0, b"valid", None).await;
+    RawSession::new(&raw, target, session)
+        .send_data(0, b"valid", None)
+        .await;
     assert_eq!(
         receive(&gather).await.part_slice(0),
         Some(b"valid".as_slice())
@@ -581,10 +598,10 @@ async fn concurrent_receive_batch(socket: std::sync::Arc<Socket>) -> Vec<u64> {
     sequences
 }
 
-#[tokio::test]
-async fn malformed_flood_and_closed_receive_window_preserve_handshake_and_teardown_progress() {
-    let pool = omq_tokio::PayloadPool::new([(2048, 1)]).unwrap();
-    let gather = Socket::new(
+/// GATHER whose only receive slot (one pool buffer, HWM 1, window 1) can be
+/// held by the application to close receive credit.
+fn single_slot_gather(pool: &omq_tokio::PayloadPool) -> Socket {
+    Socket::new(
         SocketType::Gather,
         Options {
             recv_hwm: 1,
@@ -597,51 +614,54 @@ async fn malformed_flood_and_closed_receive_window_preserve_handshake_and_teardo
             },
             ..Options::default()
         },
-    );
-    let bound = gather.bind(endpoint(0)).await.unwrap();
-    let target = address(&bound);
-    let raw = std::sync::Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
-    send_ready(&raw, target, SocketType::Scatter, None, true).await;
-    let session = response(&raw).await;
-    ready(&gather, 1).await;
-    send_data(&raw, target, session, 0, &[7; 256], None).await;
-    let held = receive(&gather).await;
-    let stop = tokio_util::sync::CancellationToken::new();
-    let flood = {
-        let stop = stop.clone();
-        let receiver = gather.clone_shared();
-        tokio::spawn(async move {
-            let oversized = [0u8; dart::MAX_DATAGRAM + 1];
-            let started = std::time::Instant::now();
-            while !stop.is_cancelled() && started.elapsed() < Duration::from_secs(2) {
-                for packet in [&[0; 17][..], &oversized[..], b"\xc0\x05READYbroken"] {
-                    // Bound kernel backlog by receiver progress. Oversized GRO
-                    // buffers count as one rejection, so send those singly.
-                    let count = if packet.len() > dart::MAX_DATAGRAM {
-                        1
-                    } else {
-                        32
-                    };
-                    let until = dart_stats(&receiver).invalid_datagrams + count;
-                    for _ in 0..count {
-                        if raw.send_to(packet, target).await.is_err() {
-                            return;
-                        }
-                    }
-                    while dart_stats(&receiver).invalid_datagrams < until {
-                        if stop.is_cancelled() || started.elapsed() >= Duration::from_secs(2) {
-                            return;
-                        }
-                        tokio::task::yield_now().await;
+    )
+}
+
+/// Floods `target` with short, oversized, and broken READY datagrams for up
+/// to 2 s or until `stop` fires.
+fn spawn_malformed_flood(
+    raw: std::sync::Arc<tokio::net::UdpSocket>,
+    target: std::net::SocketAddr,
+    receiver: Socket,
+    stop: tokio_util::sync::CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let oversized = [0u8; dart::MAX_DATAGRAM + 1];
+        let started = std::time::Instant::now();
+        while !stop.is_cancelled() && started.elapsed() < Duration::from_secs(2) {
+            for packet in [&[0; 17][..], &oversized[..], b"\xc0\x05READYbroken"] {
+                // Bound kernel backlog by receiver progress. Oversized GRO
+                // buffers count as one rejection, so send those singly.
+                let count = if packet.len() > dart::MAX_DATAGRAM {
+                    1
+                } else {
+                    32
+                };
+                let until = dart_stats(&receiver).invalid_datagrams + count;
+
+                for _ in 0..count {
+                    if raw.send_to(packet, target).await.is_err() {
+                        return;
                     }
                 }
-                tokio::task::yield_now().await;
+
+                while dart_stats(&receiver).invalid_datagrams < until {
+                    if stop.is_cancelled() || started.elapsed() >= Duration::from_secs(2) {
+                        return;
+                    }
+                    tokio::task::yield_now().await;
+                }
             }
-        })
-    };
+            tokio::task::yield_now().await;
+        }
+    })
+}
+
+/// Waits until `socket` has rejected at least one invalid datagram.
+async fn wait_for_invalid_datagram(socket: &Socket) {
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
-            let stats = dart_stats(&gather);
+            let stats = dart_stats(socket);
             if stats.invalid_datagrams != 0 {
                 break;
             }
@@ -650,6 +670,29 @@ async fn malformed_flood_and_closed_receive_window_preserve_handshake_and_teardo
     })
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn malformed_flood_and_closed_receive_window_preserve_handshake_and_teardown_progress() {
+    let pool = omq_tokio::PayloadPool::new([(2048, 1)]).unwrap();
+    let gather = single_slot_gather(&pool);
+    let bound = gather.bind(endpoint(0)).await.unwrap();
+    let target = address(&bound);
+    let raw = std::sync::Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    send_ready(&raw, target, SocketType::Scatter, None, true).await;
+    let session = response(&raw).await;
+    ready(&gather, 1).await;
+
+    // Holding the only delivered message keeps the sole pool buffer busy.
+    RawSession::new(&raw, target, session)
+        .send_data(0, &[7; 256], None)
+        .await;
+    let held = receive(&gather).await;
+
+    let stop = tokio_util::sync::CancellationToken::new();
+    let flood = spawn_malformed_flood(raw, target, gather.clone_shared(), stop.clone());
+    wait_for_invalid_datagram(&gather).await;
+
     // Require the actual connector to make progress while malformed traffic
     // continues and the sole receive slot is retained by the application.
     let probe = Socket::new(SocketType::Scatter, Options::default());
@@ -664,11 +707,14 @@ async fn malformed_flood_and_closed_receive_window_preserve_handshake_and_teardo
         pool.try_buffer(1).is_none(),
         "control cannot consume another body slot"
     );
+
+    // Teardown must also make progress under the flood.
     tokio::time::timeout(Duration::from_secs(1), gather.unbind(bound))
         .await
         .unwrap()
         .unwrap();
     assert!(gather.connections().await.unwrap().is_empty());
+
     stop.cancel();
     tokio::time::timeout(Duration::from_secs(1), flood)
         .await
@@ -676,6 +722,7 @@ async fn malformed_flood_and_closed_receive_window_preserve_handshake_and_teardo
         .unwrap();
     drop(held);
     assert_eq!(pool.available(), 1);
+
     probe.close().await.unwrap();
     gather.close().await.unwrap();
 }
@@ -708,38 +755,42 @@ async fn readiness_requires_challenge_confirmation_and_rejects_stale_data() {
     let confirmed = response(&raw).await;
     assert_eq!(confirmed, session);
     ready(&gather, 1).await;
-    send_data(&raw, target, session.wrapping_add(1), 0, b"stale", None).await;
-    send_data(&raw, target, session, 0, b"fresh", None).await;
+    RawSession::new(&raw, target, session.wrapping_add(1))
+        .send_data(0, b"stale", None)
+        .await;
+    RawSession::new(&raw, target, session)
+        .send_data(0, b"fresh", None)
+        .await;
     assert_eq!(receive(&gather).await.part_slice(0).unwrap(), b"fresh");
     gather.close().await.unwrap();
 }
 
-async fn faulty_relay(
-    relay: tokio::net::UdpSocket,
-    target: std::net::SocketAddr,
-    cancel: tokio_util::sync::CancellationToken,
-) -> ([bool; 3], bool, bool, bool) {
-    let mut bytes = [0; dart::MAX_DATAGRAM];
-    let mut client = None;
-    let mut dropped = [false; 3];
-    let mut ack_lost = false;
-    let mut nak_lost = false;
-    let mut reordered = None;
-    let mut duplicated = false;
-    loop {
-        let (length, source) = tokio::select! {
-            () = cancel.cancelled() => break,
-            result = relay.recv_from(&mut bytes) => result.unwrap(),
-        };
-        let server = source == target;
-        let destination = if server {
-            client.expect("client initiated handshake")
-        } else {
-            client = Some(source);
-            target
-        };
-        let mut duplicate = false;
-        let decoded = dart::decode_packet(&bytes[..length]);
+/// One-shot faults injected by `faulty_relay`. Each fault fires once.
+#[derive(Default)]
+struct RelayFaults {
+    /// Client data carrying sequences 3, 4, and 127 was dropped.
+    dropped: [bool; 3],
+    /// The first server STATUS with a nonzero ACK was dropped.
+    ack_lost: bool,
+    /// The first server NAK was dropped.
+    nak_lost: bool,
+    /// Client data carrying sequence 8, held until the next client datagram.
+    reordered: Option<Vec<u8>>,
+    /// Client data carrying sequence 6 was forwarded twice.
+    duplicated: bool,
+}
+
+/// What `faulty_relay` does with one datagram.
+#[derive(PartialEq)]
+enum RelayAction {
+    Forward,
+    ForwardTwice,
+    Swallow,
+}
+
+impl RelayFaults {
+    fn classify(&mut self, packet: &[u8], server: bool) -> RelayAction {
+        let decoded = dart::decode_packet(packet);
         let sequences = match decoded {
             Some(
                 dart::Packet::Data { sequence, .. }
@@ -751,50 +802,104 @@ async fn faulty_relay(
             }) => Some(first..first + messages.message_count() as u64),
             _ => None,
         };
+
         match decoded {
             Some(
                 dart::Packet::Data { .. }
                 | dart::Packet::Packed { .. }
                 | dart::Packet::First { .. }
                 | dart::Packet::Continuation { .. },
-            ) if !server => {
-                let sequences = sequences.unwrap();
-                let mut drop_packet = false;
-                for (index, sequence) in [3, 4, 127].iter().enumerate() {
-                    if sequences.contains(sequence) && !dropped[index] {
-                        dropped[index] = true;
-                        drop_packet = true;
-                    }
-                }
-                if drop_packet {
-                    continue;
-                }
-                if sequences.contains(&8) && reordered.is_none() {
-                    reordered = Some(bytes[..length].to_vec());
-                    continue;
-                }
-                duplicate = sequences.contains(&6) && !duplicated;
-                duplicated |= duplicate;
+            ) if !server => self.client_data(sequences.unwrap(), packet),
+            Some(dart::Packet::Status(status)) if server && status.ack != 0 && !self.ack_lost => {
+                self.ack_lost = true;
+                RelayAction::Swallow
             }
-            Some(dart::Packet::Status(status)) if server && status.ack != 0 && !ack_lost => {
-                ack_lost = true;
-                continue;
+            Some(dart::Packet::Nak { .. }) if server && !self.nak_lost => {
+                self.nak_lost = true;
+                RelayAction::Swallow
             }
-            Some(dart::Packet::Nak { .. }) if server && !nak_lost => {
-                nak_lost = true;
-                continue;
-            }
-            _ => {}
+            _ => RelayAction::Forward,
         }
-        relay.send_to(&bytes[..length], destination).await.unwrap();
+    }
+
+    fn client_data(&mut self, sequences: std::ops::Range<u64>, packet: &[u8]) -> RelayAction {
+        // A packed datagram may cover several targets. Mark all of them so
+        // each loss happens once, not once per retransmission.
+        let mut drop_packet = false;
+        for (index, sequence) in [3, 4, 127].iter().enumerate() {
+            if sequences.contains(sequence) && !self.dropped[index] {
+                self.dropped[index] = true;
+                drop_packet = true;
+            }
+        }
+        if drop_packet {
+            return RelayAction::Swallow;
+        }
+
+        if sequences.contains(&8) && self.reordered.is_none() {
+            self.reordered = Some(packet.to_vec());
+            return RelayAction::Swallow;
+        }
+
+        let duplicate = sequences.contains(&6) && !self.duplicated;
+        self.duplicated |= duplicate;
         if duplicate {
+            RelayAction::ForwardTwice
+        } else {
+            RelayAction::Forward
+        }
+    }
+}
+
+/// UDP relay between one client and `target` that drops, reorders, and
+/// duplicates data plus loses one ACK and one NAK. Returns which faults
+/// fired: (dropped, ack lost, nak lost, duplicated).
+async fn faulty_relay(
+    relay: tokio::net::UdpSocket,
+    target: std::net::SocketAddr,
+    cancel: tokio_util::sync::CancellationToken,
+) -> ([bool; 3], bool, bool, bool) {
+    let mut bytes = [0; dart::MAX_DATAGRAM];
+    let mut client = None;
+    let mut faults = RelayFaults::default();
+
+    loop {
+        let (length, source) = tokio::select! {
+            () = cancel.cancelled() => break,
+            result = relay.recv_from(&mut bytes) => result.unwrap(),
+        };
+
+        // The first datagram comes from the client. Everything from
+        // `target` goes back to that client.
+        let server = source == target;
+        let destination = if server {
+            client.expect("client initiated handshake")
+        } else {
+            client = Some(source);
+            target
+        };
+
+        let action = faults.classify(&bytes[..length], server);
+        if action == RelayAction::Swallow {
+            continue;
+        }
+
+        relay.send_to(&bytes[..length], destination).await.unwrap();
+        if action == RelayAction::ForwardTwice {
             relay.send_to(&bytes[..length], destination).await.unwrap();
         }
-        if !server && let Some(delayed) = reordered.take() {
+        // Release the held packet after a later one to reorder it.
+        if !server && let Some(delayed) = faults.reordered.take() {
             relay.send_to(&delayed, destination).await.unwrap();
         }
     }
-    (dropped, ack_lost, nak_lost, duplicated)
+
+    (
+        faults.dropped,
+        faults.ack_lost,
+        faults.nak_lost,
+        faults.duplicated,
+    )
 }
 
 #[tokio::test]
@@ -908,7 +1013,9 @@ async fn invalid_traffic_cannot_renew_a_lease_and_reconnection_reassigns_routing
     send_ready(&raw, target, SocketType::Client, None, true).await;
     let session = response(&raw).await;
     ready(&server, 1).await;
-    send_data(&raw, target, session, 0, &[7], None).await;
+    RawSession::new(&raw, target, session)
+        .send_data(0, &[7], None)
+        .await;
     let old_id = receive(&server).await.routing_id().unwrap();
     let until = tokio::time::Instant::now() + Duration::from_millis(3200);
     while tokio::time::Instant::now() < until {
@@ -922,7 +1029,9 @@ async fn invalid_traffic_cannot_renew_a_lease_and_reconnection_reassigns_routing
     send_ready(&raw, target, SocketType::Client, None, true).await;
     let session = response(&raw).await;
     ready(&server, 1).await;
-    send_data(&raw, target, session, 0, &[9], None).await;
+    RawSession::new(&raw, target, session)
+        .send_data(0, &[9], None)
+        .await;
     let fresh = receive(&server).await;
     assert_ne!(fresh.routing_id(), Some(old_id));
     assert_eq!(fresh.part_slice(0).unwrap(), &[9]);
@@ -1101,8 +1210,13 @@ async fn oversized_first_is_rejected_before_allocation_and_other_senders_continu
         send_ready(&raw, address(&target), SocketType::Scatter, None, true).await;
         let id = response(&raw).await;
         let mut bytes = [0; dart::MAX_DATAGRAM];
-        let length =
-            dart::encode_fragment(id, 0, Some(advertised), b"x", None, &mut bytes).unwrap();
+        let header = dart::FragmentHeader {
+            session: id,
+            sequence: 0,
+            length: Some(advertised),
+            group: None,
+        };
+        let length = dart::encode_fragment(header, b"x", &mut bytes).unwrap();
         raw.send_to(&bytes[..length], address(&target))
             .await
             .unwrap();
@@ -1205,8 +1319,9 @@ async fn separate_datagrams(profile: WorkloadProfile, io_spin: Duration) {
     ready(&gather, 1).await;
     let before = dart_stats(&gather);
     let bodies: Vec<_> = (0..97).map(|index| vec![index; 16]).collect();
+    let peer = RawSession::new(&raw, target, session);
     for (sequence, body) in bodies.iter().enumerate() {
-        send_data(&raw, target, session, sequence as u64, body, None).await;
+        peer.send_data(sequence as u64, body, None).await;
     }
     let mut received = Vec::new();
     for _ in 0..97 {
@@ -1240,8 +1355,9 @@ async fn dish_filters_groups_across_separate_datagrams() {
         (b"ignored", Some(b"beta")),
         (b"last", Some(b"alpha")),
     ];
+    let peer = RawSession::new(&raw, target, session);
     for (sequence, (body, group)) in records.into_iter().enumerate() {
-        send_data(&raw, target, session, sequence as u64, body, group).await;
+        peer.send_data(sequence as u64, body, group).await;
     }
     for expected in [b"first".as_slice(), b"last"] {
         let message = receive(&dish).await;

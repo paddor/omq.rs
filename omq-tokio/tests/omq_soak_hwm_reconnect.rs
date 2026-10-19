@@ -40,6 +40,31 @@ async fn rebind(ep: &omq_tokio::Endpoint) -> Option<Socket> {
     None
 }
 
+/// Sends one 8-message burst. With `DropNewest` some will be lost; with `Block`
+/// send will stall until the peer is back (but we just rebound). Returns
+/// false if any send failed or stalled past 5 s.
+async fn send_burst(push: &Socket, name: &str, cycle: u64) -> bool {
+    for i in 0..8u32 {
+        let tag = format!("{name}-{cycle}-{i}");
+        if !matches!(
+            tokio::time::timeout(Duration::from_secs(5), push.send(Message::single(tag))).await,
+            Ok(Ok(())),
+        ) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Receives until the socket stays quiet for 500 ms; returns the count.
+async fn drain(pull: &Socket) -> u64 {
+    let mut received = 0;
+    while let Ok(Ok(_)) = tokio::time::timeout(Duration::from_millis(500), pull.recv()).await {
+        received += 1;
+    }
+    received
+}
+
 fn run_hwm_storm(name: &str, mute: OnMute) {
     let duration = soak_common::soak_duration();
     let monitor = soak_common::ResourceMonitor::start();
@@ -67,27 +92,8 @@ fn run_hwm_storm(name: &str, mute: OnMute) {
                 continue;
             };
 
-            // Send a burst. With DropNewest some will be lost; with Block
-            // send will stall until the peer is back (but we just rebound).
-            let mut burst_ok = true;
-            for i in 0..8u32 {
-                let tag = format!("{name}-{cycles}-{i}");
-                if !matches!(
-                    tokio::time::timeout(Duration::from_secs(5), push.send(Message::single(tag)))
-                        .await,
-                    Ok(Ok(())),
-                ) {
-                    burst_ok = false;
-                    break;
-                }
-            }
-
-            if burst_ok {
-                while let Ok(Ok(_)) =
-                    tokio::time::timeout(Duration::from_millis(500), pull.recv()).await
-                {
-                    delivered += 1;
-                }
+            if send_burst(&push, &name, cycles).await {
+                delivered += drain(&pull).await;
             }
 
             pull.close().await.unwrap();
@@ -104,6 +110,7 @@ fn run_hwm_storm(name: &str, mute: OnMute) {
 
         push.close().await.unwrap();
 
+        // Informational only: DropNewest is allowed to lose messages.
         let pct = if cycles > 0 {
             delivered as f64 / (cycles * 8) as f64 * 100.0
         } else {

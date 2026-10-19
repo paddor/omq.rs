@@ -1216,7 +1216,7 @@ mod tests {
 
     #[test]
     fn immediate_tcp_write_unlocks_reserved_producer_before_buffer_release() {
-        use crate::engine::transmit_slot::PeerTransmitSlot;
+        use crate::engine::transmit_slot::{PeerTransmitSlot, SlotConfig};
         use crate::routing::peer_outbound::PeerOutbound;
         use crate::socket::dispatch::DirectTcpWriter;
         use std::net::{TcpListener, TcpStream};
@@ -1238,16 +1238,15 @@ mod tests {
         let tcp = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (_remote, _) = listener.accept().unwrap();
         tcp.set_nonblocking(true).unwrap();
-        let slot = PeerTransmitSlot::new(
+        let slot = PeerTransmitSlot::with_config(
             1,
-            false,
-            None,
-            None,
-            4096,
-            4096,
-            8192,
-            4,
-            crate::engine::framing::WireFraming::Zmtp,
+            SlotConfig {
+                arena_threshold: 4096,
+                arena_cap: 4096,
+                cap: 8192,
+                msg_cap: 4,
+                ..SlotConfig::default()
+            },
         );
         slot.handshake_done.store(true, Ordering::Release);
         let writer = Arc::new(DirectTcpWriter::new(tcp));

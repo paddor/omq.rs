@@ -64,6 +64,36 @@ fn usage() -> (Duration, i64) {
     )
 }
 
+/// CPU time and voluntary context switches spent by this process while the
+/// test thread sleeps for `idle`.
+fn usage_while_sleeping(idle: Duration) -> (Duration, i64) {
+    let (cpu_before, switches_before) = usage();
+    std::thread::sleep(idle);
+    let (cpu_after, switches_after) = usage();
+    (
+        cpu_after.saturating_sub(cpu_before),
+        switches_after - switches_before,
+    )
+}
+
+/// Send `body` without blocking until sends have failed for 200 ms straight.
+fn fill_until_backpressured(src: *mut c_void, body: &[u8]) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut full_since: Option<Instant> = None;
+    loop {
+        assert!(Instant::now() < deadline, "proxy never backpressured");
+        if zmq_send(src, body.as_ptr().cast(), body.len(), ZMQ_DONTWAIT) >= 0 {
+            full_since = None;
+        } else {
+            let since = *full_since.get_or_insert_with(Instant::now);
+            if since.elapsed() > Duration::from_millis(200) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
 #[test]
 fn proxy_into_muted_nodrop_publisher_does_not_spin() {
     let ctx = zmq_ctx_new();
@@ -107,29 +137,12 @@ fn proxy_into_muted_nodrop_publisher_does_not_spin() {
 
     // Fill until the proxy stops taking input: it then holds a pending send.
     let body = vec![1u8; 64 * 1024];
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let mut full_since: Option<Instant> = None;
-    loop {
-        assert!(Instant::now() < deadline, "proxy never backpressured");
-        if zmq_send(src, body.as_ptr().cast(), body.len(), ZMQ_DONTWAIT) >= 0 {
-            full_since = None;
-        } else {
-            let since = *full_since.get_or_insert_with(Instant::now);
-            if since.elapsed() > Duration::from_millis(200) {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-    }
+    fill_until_backpressured(src, &body);
 
     // A 1 ms poll costs little CPU but wakes about 300 times here. The
     // stalled subscriber adds about 30 from its receive space fallback.
     let idle = Duration::from_millis(300);
-    let (cpu_before, switches_before) = usage();
-    std::thread::sleep(idle);
-    let (cpu_after, switches_after) = usage();
-    let burned = cpu_after.saturating_sub(cpu_before);
-    let wakeups = switches_after - switches_before;
+    let (burned, wakeups) = usage_while_sleeping(idle);
     assert!(
         burned < idle / 10,
         "muted proxy burned {burned:?} CPU in {idle:?}"

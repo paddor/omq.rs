@@ -55,6 +55,35 @@ pub(crate) struct FairnessEntry {
 
 pub(crate) type FairnessMap = BTreeMap<u64, BTreeMap<String, FairnessEntry>>;
 
+/// Output file, title, x-axis sizes, and candidate series of one chart.
+pub(crate) struct ChartSpec<'a> {
+    pub out_path: &'a Path,
+    pub title: &'a str,
+    pub sizes: &'a [u64],
+    pub impls: &'a [Impl],
+}
+
+/// CPU data and legend column headers. An empty header hides its column.
+pub(crate) struct CpuColumns<'a> {
+    pub cpu: &'a BTreeMap<String, CpuData>,
+    pub snd_label: &'a str,
+    pub rcv_label: &'a str,
+}
+
+/// One row of a multi-row throughput chart.
+pub(crate) struct ThroughputRow<'a> {
+    pub peers: u64,
+    pub tput: &'a ValMap,
+    pub msgs: &'a ValMap,
+    pub fairness: Option<&'a FairnessMap>,
+}
+
+/// X-axis sizes and the series drawn in one panel.
+struct Panel<'a> {
+    sizes: &'a [u64],
+    present: &'a [&'a Impl],
+}
+
 #[derive(Clone, Copy)]
 enum LegendVersionMode {
     Hide,
@@ -374,28 +403,29 @@ fn legend_label(imp: &Impl, version_mode: LegendVersionMode) -> String {
 pub(crate) fn draw_legend_table(
     table_area: &DrawingArea<SVGBackend<'_>, plotters::coord::Shift>,
     impls: &[&Impl],
-    cpu: &BTreeMap<String, CpuData>,
-    snd_label: &str,
-    rcv_label: &str,
+    columns: &CpuColumns<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    draw_legend_table_with_versions(
-        table_area,
-        impls,
-        cpu,
-        snd_label,
-        rcv_label,
-        LegendVersionMode::Hide,
-    )
+    draw_legend_table_with_versions(table_area, impls, columns, LegendVersionMode::Hide)
+}
+
+/// Legend table height for `rows` series: header, one row each, padding.
+fn legend_table_height(rows: usize) -> u32 {
+    let row_h = 16u32;
+    20 + rows as u32 * row_h + 10
 }
 
 fn draw_legend_table_with_versions(
     table_area: &DrawingArea<SVGBackend<'_>, plotters::coord::Shift>,
     impls: &[&Impl],
-    cpu: &BTreeMap<String, CpuData>,
-    snd_label: &str,
-    rcv_label: &str,
+    columns: &CpuColumns<'_>,
     version_mode: LegendVersionMode,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let CpuColumns {
+        cpu,
+        snd_label,
+        rcv_label,
+    } = *columns;
+
     let style_hdr = ("sans-serif", 11).into_font().color(&MUTED_TEXT_COLOR);
     let style_val = ("sans-serif", 11).into_font().color(&TEXT_COLOR);
     let style_dim = ("sans-serif", 11).into_font().color(&MUTED_TEXT_COLOR);
@@ -428,6 +458,8 @@ fn draw_legend_table_with_versions(
         let label = legend_label(imp, version_mode);
         table_area.draw_text(&label, &style_val, (col_name, y))?;
 
+        // An empty thread label marks a multi-thread runtime: show its
+        // recorded worker count, else the host core count.
         let threads = if imp.threads.is_empty() {
             let workers = cpu
                 .get(imp.key)
@@ -722,19 +754,18 @@ fn draw_whiskers<DB: DrawingBackend>(
         DB,
         Cartesian2d<plotters::coord::types::RangedCoordf64, plotters::coord::types::RangedCoordf64>,
     >,
-    sizes: &[u64],
-    present: &[&Impl],
+    panel: &Panel<'_>,
     chart_vals: &ValMap,
     fairness: &FairnessMap,
     transform: impl Fn(f64) -> f64,
 ) {
     let cap_hw = 0.06;
 
-    for imp in present.iter().rev() {
+    for imp in panel.present.iter().rev() {
         let fill = RGBAColor(imp.color.0, imp.color.1, imp.color.2, 0.15);
         let stroke = RGBAColor(imp.color.0, imp.color.1, imp.color.2, 0.5);
 
-        for (size_idx, &sz) in sizes.iter().enumerate() {
+        for (size_idx, &sz) in panel.sizes.iter().enumerate() {
             let Some(&agg) = chart_vals.get(&sz).and_then(|m| m.get(imp.key)) else {
                 continue;
             };
@@ -745,6 +776,8 @@ fn draw_whiskers<DB: DrawingBackend>(
                 continue;
             }
 
+            // Per-peer rates scale around the plotted aggregate, so the
+            // median peer lands on the line and the box shows the spread.
             let project = |v: f64| transform(agg * v / f.median);
             let y_min = project(f.min);
             let y_p25 = project(f.p25);
@@ -779,110 +812,92 @@ fn draw_whiskers<DB: DrawingBackend>(
 
 // chart drawing helpers
 
-#[expect(clippy::too_many_arguments)]
-pub(crate) fn draw_throughput_dual_panel(
-    out_path: &Path,
-    title: &str,
-    sizes: &[u64],
-    impls: &[Impl],
-    tput: &ValMap,
-    msgs: &ValMap,
-    cpu: &BTreeMap<String, CpuData>,
-    snd_label: &str,
-    rcv_label: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    draw_throughput_dual_panel_with_msg_axis(
-        out_path,
-        title,
-        sizes,
-        impls,
-        tput,
-        msgs,
-        cpu,
-        snd_label,
-        rcv_label,
-        MsgAxisMode::Auto,
-        LegendVersionMode::Hide,
-    )
+/// Y-axis tick target shared by throughput panels.
+const N_TICKS: usize = 6;
+
+/// GB/s panel scale.
+#[derive(Clone, Copy)]
+enum GbsScale {
+    Linear,
+    Log,
 }
 
-#[expect(clippy::too_many_arguments)]
-pub(crate) fn draw_throughput_dual_panel_with_versions(
-    out_path: &Path,
-    title: &str,
-    sizes: &[u64],
-    impls: &[Impl],
-    tput: &ValMap,
-    msgs: &ValMap,
-    cpu: &BTreeMap<String, CpuData>,
-    snd_label: &str,
-    rcv_label: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    draw_throughput_dual_panel_with_msg_axis(
-        out_path,
-        title,
-        sizes,
-        impls,
-        tput,
-        msgs,
-        cpu,
-        snd_label,
-        rcv_label,
-        MsgAxisMode::Auto,
-        LegendVersionMode::ShowOtherImpls,
-    )
-}
-
-#[expect(clippy::too_many_arguments)]
-pub(crate) fn draw_throughput_dual_panel_fixed_2m_msgs_with_versions(
-    out_path: &Path,
-    title: &str,
-    sizes: &[u64],
-    impls: &[Impl],
-    tput: &ValMap,
-    msgs: &ValMap,
-    cpu: &BTreeMap<String, CpuData>,
-    snd_label: &str,
-    rcv_label: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    draw_throughput_dual_panel_with_msg_axis(
-        out_path,
-        title,
-        sizes,
-        impls,
-        tput,
-        msgs,
-        cpu,
-        snd_label,
-        rcv_label,
-        MsgAxisMode::Fixed2M,
-        LegendVersionMode::ShowOtherImpls,
-    )
-}
-
-#[expect(clippy::too_many_arguments)]
-fn draw_throughput_dual_panel_with_msg_axis(
-    out_path: &Path,
-    title: &str,
-    sizes: &[u64],
-    impls: &[Impl],
-    tput: &ValMap,
-    msgs: &ValMap,
-    cpu: &BTreeMap<String, CpuData>,
-    snd_label: &str,
-    rcv_label: &str,
+/// Axis and legend options of a dual-panel throughput chart.
+#[derive(Clone, Copy)]
+struct DualPanelStyle {
     msg_axis: MsgAxisMode,
+    gbs_scale: GbsScale,
     version_mode: LegendVersionMode,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let present: Vec<&Impl> = impls
-        .iter()
-        .filter(|imp| {
-            sizes
-                .iter()
-                .any(|s| tput.get(s).is_some_and(|m| m.contains_key(imp.key)))
-        })
-        .collect();
+}
 
+pub(crate) fn draw_throughput_dual_panel(
+    spec: &ChartSpec<'_>,
+    tput: &ValMap,
+    msgs: &ValMap,
+    columns: &CpuColumns<'_>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let style = DualPanelStyle {
+        msg_axis: MsgAxisMode::Auto,
+        gbs_scale: GbsScale::Linear,
+        version_mode: LegendVersionMode::Hide,
+    };
+    draw_dual_panel(spec, tput, msgs, columns, style)
+}
+
+pub(crate) fn draw_throughput_dual_panel_with_versions(
+    spec: &ChartSpec<'_>,
+    tput: &ValMap,
+    msgs: &ValMap,
+    columns: &CpuColumns<'_>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let style = DualPanelStyle {
+        msg_axis: MsgAxisMode::Auto,
+        gbs_scale: GbsScale::Linear,
+        version_mode: LegendVersionMode::ShowOtherImpls,
+    };
+    draw_dual_panel(spec, tput, msgs, columns, style)
+}
+
+pub(crate) fn draw_throughput_dual_panel_fixed_2m_msgs_with_versions(
+    spec: &ChartSpec<'_>,
+    tput: &ValMap,
+    msgs: &ValMap,
+    columns: &CpuColumns<'_>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let style = DualPanelStyle {
+        msg_axis: MsgAxisMode::Fixed2M,
+        gbs_scale: GbsScale::Linear,
+        version_mode: LegendVersionMode::ShowOtherImpls,
+    };
+    draw_dual_panel(spec, tput, msgs, columns, style)
+}
+
+/// Same as `draw_throughput_dual_panel` but the GB/s panel uses a log10
+/// Y axis. Used for inproc where throughput spans orders of magnitude.
+pub(crate) fn draw_throughput_dual_panel_log_gbs(
+    spec: &ChartSpec<'_>,
+    tput: &ValMap,
+    msgs: &ValMap,
+    columns: &CpuColumns<'_>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let style = DualPanelStyle {
+        msg_axis: MsgAxisMode::Auto,
+        gbs_scale: GbsScale::Log,
+        version_mode: LegendVersionMode::Hide,
+    };
+    draw_dual_panel(spec, tput, msgs, columns, style)
+}
+
+/// Whether `values` holds a point for `key` at any of `sizes`.
+fn has_point(values: &ValMap, sizes: &[u64], key: &str) -> bool {
+    sizes
+        .iter()
+        .any(|s| values.get(s).is_some_and(|m| m.contains_key(key)))
+}
+
+/// Splits sizes into the msg/s panel and the GB/s panel. The ranges overlap
+/// on purpose, so mid sizes show up in both units.
+fn split_sizes(sizes: &[u64]) -> (Vec<u64>, Vec<u64>) {
     let small: Vec<u64> = sizes
         .iter()
         .copied()
@@ -893,76 +908,100 @@ fn draw_throughput_dual_panel_with_msg_axis(
         .copied()
         .filter(|&s| s >= LARGE_START)
         .collect();
+    (small, large)
+}
 
-    let row_h = 16u32;
-    let table_h = 20 + present.len() as u32 * row_h + 10;
-    let chart_h = 340u32;
-    let total_h = chart_h + table_h;
-    let width = 950u32;
-    let hw_label = detect_hardware();
-
-    let root = SVGBackend::new(out_path, (width, total_h)).into_drawing_area();
-    root.fill(&BACKGROUND_COLOR)?;
-    let (chart_area, table_area) = root.split_vertically(chart_h);
-    let (left_area, right_area) = chart_area.split_horizontally(width / 2 - 10);
-
-    let n_ticks = 6usize;
-    let gbs_raw = large
-        .iter()
-        .filter_map(|s| tput.get(s))
-        .flat_map(|m| m.values())
-        .map(|v| v / 1000.0)
-        .fold(0.0_f64, f64::max);
-    let (gbs_max, gbs_ticks) = nice_axis(gbs_raw, n_ticks);
-
-    let msgs_raw = small
+fn peak_msgs(sizes: &[u64], msgs: &ValMap) -> f64 {
+    sizes
         .iter()
         .filter_map(|s| msgs.get(s))
         .flat_map(|m| m.values())
         .copied()
-        .fold(0.0_f64, f64::max);
-    let (msgs_max, msgs_ticks) = msg_axis.bounds(msgs_raw, n_ticks);
+        .fold(0.0_f64, f64::max)
+}
+
+/// Peak bandwidth in GB/s. Rows store MB/s.
+fn peak_gbs(sizes: &[u64], tput: &ValMap) -> f64 {
+    sizes
+        .iter()
+        .filter_map(|s| tput.get(s))
+        .flat_map(|m| m.values())
+        .map(|v| v / 1000.0)
+        .fold(0.0_f64, f64::max)
+}
+
+/// Draws msg/s for small sizes on the left, GB/s for large sizes on the
+/// right, and the legend table below both panels.
+fn draw_dual_panel(
+    spec: &ChartSpec<'_>,
+    tput: &ValMap,
+    msgs: &ValMap,
+    columns: &CpuColumns<'_>,
+    style: DualPanelStyle,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let present: Vec<&Impl> = spec
+        .impls
+        .iter()
+        .filter(|imp| has_point(tput, spec.sizes, imp.key))
+        .collect();
+    let (small, large) = split_sizes(spec.sizes);
+
+    let chart_h = 340u32;
+    let total_h = chart_h + legend_table_height(present.len());
+    let width = 950u32;
+    let hw_label = detect_hardware();
+
+    let root = SVGBackend::new(spec.out_path, (width, total_h)).into_drawing_area();
+    root.fill(&BACKGROUND_COLOR)?;
+    let (chart_area, table_area) = root.split_vertically(chart_h);
+    let (left_area, right_area) = chart_area.split_horizontally(width / 2 - 10);
 
     if !small.is_empty() {
-        draw_msgs_panel(
-            &left_area, &small, &present, msgs, msgs_max, msgs_ticks, None,
-        )?;
-    }
-    if !large.is_empty() {
-        draw_gbs_panel(
-            &right_area,
-            &large,
-            &present,
-            tput,
-            gbs_max,
-            gbs_ticks,
-            None,
-        )?;
+        let panel = Panel {
+            sizes: &small,
+            present: &present,
+        };
+        let axis = style.msg_axis.bounds(peak_msgs(&small, msgs), N_TICKS);
+        draw_msgs_panel(&left_area, &panel, msgs, axis, None)?;
     }
 
-    draw_legend_table_with_versions(
-        &table_area,
-        &present,
-        cpu,
-        snd_label,
-        rcv_label,
-        version_mode,
-    )?;
+    if !large.is_empty() {
+        let panel = Panel {
+            sizes: &large,
+            present: &present,
+        };
+        match style.gbs_scale {
+            GbsScale::Linear => {
+                let axis = nice_axis(peak_gbs(&large, tput), N_TICKS);
+                draw_gbs_panel(&right_area, &panel, tput, axis, None)?;
+            }
+            GbsScale::Log => draw_gbs_panel_log(&right_area, &panel, tput, None)?,
+        }
+    }
+
+    draw_legend_table_with_versions(&table_area, &present, columns, style.version_mode)?;
     root.present()?;
     drop(root);
 
-    postprocess_svg(out_path, width, total_h, title, hw_label.as_deref())
+    postprocess_svg(
+        spec.out_path,
+        width,
+        total_h,
+        spec.title,
+        hw_label.as_deref(),
+    )
 }
 
-pub(crate) fn draw_msgs_panel(
+/// Draws the msg/s panel. `axis` is the Y maximum and its tick count.
+fn draw_msgs_panel(
     area: &DrawingArea<SVGBackend<'_>, plotters::coord::Shift>,
-    sizes: &[u64],
-    present: &[&Impl],
+    panel: &Panel<'_>,
     msgs: &ValMap,
-    msgs_max: f64,
-    n_ticks: usize,
+    (msgs_max, n_ticks): (f64, usize),
     fairness: Option<&FairnessMap>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let sizes = panel.sizes;
+
     let mut chart = ChartBuilder::on(area)
         .caption(
             "small messages (higher is better)",
@@ -993,25 +1032,17 @@ pub(crate) fn draw_msgs_panel(
         .draw()?;
 
     if let Some(fair) = fairness {
-        draw_whiskers(
-            &mut chart,
-            sizes,
-            present,
-            msgs,
-            fair,
-            std::convert::identity,
-        );
+        draw_whiskers(&mut chart, panel, msgs, fair, std::convert::identity);
     }
 
-    for imp in present.iter().rev() {
-        let pts: Vec<(f64, f64)> = sizes
-            .iter()
-            .enumerate()
-            .filter_map(|(i, &s)| msgs.get(&s)?.get(imp.key).map(|&v| (i as f64, v)))
-            .collect();
+    // Reverse order draws the first series last, on top of the others.
+    for imp in panel.present.iter().rev() {
+        let pts = series_points(sizes, msgs, imp.key, Some);
         if pts.is_empty() {
             continue;
         }
+
+        // Dashed lines tell msg/s series apart from the solid GB/s lines.
         chart.draw_series(DashedLineSeries::new(
             pts.iter().copied(),
             6,
@@ -1026,15 +1057,16 @@ pub(crate) fn draw_msgs_panel(
     Ok(())
 }
 
-pub(crate) fn draw_gbs_panel(
+/// Draws the linear GB/s panel. `axis` is the Y maximum and its tick count.
+fn draw_gbs_panel(
     area: &DrawingArea<SVGBackend<'_>, plotters::coord::Shift>,
-    sizes: &[u64],
-    present: &[&Impl],
+    panel: &Panel<'_>,
     tput: &ValMap,
-    gbs_max: f64,
-    n_ticks: usize,
+    (gbs_max, n_ticks): (f64, usize),
     fairness: Option<&FairnessMap>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let sizes = panel.sizes;
+
     let mut chart = ChartBuilder::on(area)
         .caption(
             "medium/large messages (higher is better)",
@@ -1065,38 +1097,18 @@ pub(crate) fn draw_gbs_panel(
         .draw()?;
 
     if let Some(fair) = fairness {
-        let gbs_tput: ValMap = tput
-            .iter()
-            .map(|(&sz, m)| {
-                let gbs: BTreeMap<String, f64> =
-                    m.iter().map(|(k, v)| (k.clone(), v / 1000.0)).collect();
-                (sz, gbs)
-            })
-            .collect();
-        draw_whiskers(
-            &mut chart,
-            sizes,
-            present,
-            &gbs_tput,
-            fair,
-            std::convert::identity,
-        );
+        // Whiskers scale around the plotted value, so they need GB/s too.
+        let gbs_tput = gbs_values(sizes, tput);
+        draw_whiskers(&mut chart, panel, &gbs_tput, fair, std::convert::identity);
     }
 
-    for imp in present.iter().rev() {
-        let pts: Vec<(f64, f64)> = sizes
-            .iter()
-            .enumerate()
-            .filter_map(|(i, &s)| tput.get(&s)?.get(imp.key).map(|&v| (i as f64, v / 1000.0)))
-            .collect();
+    for imp in panel.present.iter().rev() {
+        let pts = series_points(sizes, tput, imp.key, |v| Some(v / 1000.0));
         if pts.is_empty() {
             continue;
         }
-        chart.draw_series(LineSeries::new(pts.clone(), imp.color.stroke_width(2)))?;
-        chart.draw_series(
-            pts.iter()
-                .map(|&(x, y)| Circle::new((x, y), 2, imp.color.filled())),
-        )?;
+
+        draw_line_with_dots(&mut chart, &pts, imp.color)?;
     }
     Ok(())
 }
@@ -1121,155 +1133,152 @@ impl Ranged for LatencyAxis {
 }
 
 pub(crate) fn draw_latency_single_panel(
-    out_path: &Path,
-    title: &str,
-    sizes: &[u64],
-    impls: &[Impl],
+    spec: &ChartSpec<'_>,
     lat: &LatencyMap,
     cpu: &BTreeMap<String, CpuData>,
     lat_range: (f64, f64),
 ) -> Result<(), Box<dyn std::error::Error>> {
     let axis: RangedCoordf64 = (lat_range.0..lat_range.1).into();
-    draw_latency_single_panel_with_version_mode(
-        out_path,
-        title,
-        sizes,
-        impls,
-        lat,
-        cpu,
+    let layout = LatencyLayout {
         axis,
-        340,
-        LegendVersionMode::Hide,
-        false,
-    )
+        chart_h: 340,
+        version_mode: LegendVersionMode::Hide,
+        annotate_clipped: false,
+    };
+    draw_latency_single_panel_with_layout(spec, lat, cpu, layout)
 }
 
 pub(crate) fn draw_latency_single_panel_with_versions(
-    out_path: &Path,
-    title: &str,
-    sizes: &[u64],
-    impls: &[Impl],
+    spec: &ChartSpec<'_>,
     lat: &LatencyMap,
     cpu: &BTreeMap<String, CpuData>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    draw_latency_single_panel_with_version_mode(
-        out_path,
-        title,
-        sizes,
-        impls,
-        lat,
-        cpu,
-        LatencyAxis(
+    let layout = LatencyLayout {
+        axis: LatencyAxis(
             (0.0..250.0).into(),
             (0..=250).step_by(25).map(f64::from).collect(),
         ),
-        600,
-        LegendVersionMode::ShowOtherImpls,
-        false,
-    )
+        chart_h: 600,
+        version_mode: LegendVersionMode::ShowOtherImpls,
+        annotate_clipped: false,
+    };
+    draw_latency_single_panel_with_layout(spec, lat, cpu, layout)
 }
 
 pub(crate) fn draw_latency_single_panel_100us(
-    out_path: &Path,
-    title: &str,
-    sizes: &[u64],
-    impls: &[Impl],
+    spec: &ChartSpec<'_>,
     lat: &LatencyMap,
     cpu: &BTreeMap<String, CpuData>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // The axis starts at 1 us, so that gets its own tick before the 10 us
+    // steps.
     let ticks = std::iter::once(1.0)
         .chain((10..=100).step_by(10).map(f64::from))
         .collect();
-    let axis = LatencyAxis((1.0..100.0).into(), ticks);
-    draw_latency_single_panel_with_version_mode(
-        out_path,
-        title,
-        sizes,
-        impls,
-        lat,
-        cpu,
-        axis,
-        600,
-        LegendVersionMode::Hide,
-        true,
-    )
+    let layout = LatencyLayout {
+        axis: LatencyAxis((1.0..100.0).into(), ticks),
+        chart_h: 600,
+        version_mode: LegendVersionMode::Hide,
+        annotate_clipped: true,
+    };
+    draw_latency_single_panel_with_layout(spec, lat, cpu, layout)
 }
 
-#[expect(clippy::too_many_arguments)]
-fn draw_latency_single_panel_with_version_mode<Y: Ranged<ValueType = f64> + ValueFormatter<f64>>(
-    out_path: &Path,
-    title: &str,
-    sizes: &[u64],
-    impls: &[Impl],
-    lat: &LatencyMap,
-    cpu: &BTreeMap<String, CpuData>,
-    lat_axis: Y,
+/// Y axis, chart height, and legend options of a single latency panel chart.
+struct LatencyLayout<Y> {
+    axis: Y,
     chart_h: u32,
     version_mode: LegendVersionMode,
     annotate_clipped: bool,
+}
+
+fn draw_latency_single_panel_with_layout<Y: Ranged<ValueType = f64> + ValueFormatter<f64>>(
+    spec: &ChartSpec<'_>,
+    lat: &LatencyMap,
+    cpu: &BTreeMap<String, CpuData>,
+    layout: LatencyLayout<Y>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let present: Vec<&Impl> = impls
+    let present: Vec<&Impl> = spec
+        .impls
         .iter()
         .filter(|imp| {
-            sizes
+            spec.sizes
                 .iter()
                 .any(|s| lat.get(s).is_some_and(|m| m.contains_key(imp.key)))
         })
         .collect();
 
-    let row_h = 16u32;
-    let table_h = 20 + present.len() as u32 * row_h + 10;
-    let total_h = chart_h + table_h;
+    let total_h = layout.chart_h + legend_table_height(present.len());
     let width = 850u32;
     let hw_label = detect_hardware();
 
-    let root = SVGBackend::new(out_path, (width, total_h)).into_drawing_area();
+    let root = SVGBackend::new(spec.out_path, (width, total_h)).into_drawing_area();
     root.fill(&BACKGROUND_COLOR)?;
-    let (chart_area, table_area) = root.split_vertically(chart_h);
+    let (chart_area, table_area) = root.split_vertically(layout.chart_h);
 
-    draw_latency_panel(
-        &chart_area,
-        "p99 round-trip latency; whiskers: p50 to p99.9 (lower is better)",
-        sizes,
-        &present,
-        lat,
-        lat_axis,
-        36,
-        annotate_clipped,
-    )?;
+    let panel = Panel {
+        sizes: spec.sizes,
+        present: &present,
+    };
+    let style = LatencyPanelStyle {
+        caption: "p99 round-trip latency; whiskers: p50 to p99.9 (lower is better)",
+        top_margin: 36,
+        annotate_clipped: layout.annotate_clipped,
+    };
+    draw_latency_panel(&chart_area, &panel, lat, layout.axis, &style)?;
 
-    draw_legend_table_with_versions(
-        &table_area,
-        &present,
+    // No CPU data means no CPU columns.
+    let (snd_label, rcv_label) = if cpu.is_empty() {
+        ("", "")
+    } else {
+        ("req CPU%", "rep CPU%")
+    };
+    let columns = CpuColumns {
         cpu,
-        if cpu.is_empty() { "" } else { "req CPU%" },
-        if cpu.is_empty() { "" } else { "rep CPU%" },
-        version_mode,
-    )?;
+        snd_label,
+        rcv_label,
+    };
+    draw_legend_table_with_versions(&table_area, &present, &columns, layout.version_mode)?;
     root.present()?;
     drop(root);
 
-    postprocess_svg(out_path, width, total_h, title, hw_label.as_deref())
+    postprocess_svg(
+        spec.out_path,
+        width,
+        total_h,
+        spec.title,
+        hw_label.as_deref(),
+    )
 }
 
-#[expect(clippy::too_many_arguments)]
+/// Caption, top margin, and clipping mode of one latency panel.
+struct LatencyPanelStyle<'a> {
+    caption: &'a str,
+    top_margin: u32,
+    /// Clamp values to the axis and label the ranges that overflow it.
+    annotate_clipped: bool,
+}
+
 fn draw_latency_panel<DB: DrawingBackend, Y: Ranged<ValueType = f64> + ValueFormatter<f64>>(
     area: &DrawingArea<DB, plotters::coord::Shift>,
-    caption: &str,
-    sizes: &[u64],
-    present: &[&Impl],
+    panel: &Panel<'_>,
     lat: &LatencyMap,
     lat_axis: Y,
-    top_margin: u32,
-    annotate_clipped: bool,
+    style: &LatencyPanelStyle<'_>,
 ) -> Result<(), DrawingAreaErrorKind<DB::ErrorType>> {
+    let sizes = panel.sizes;
     let n = sizes.len();
     let bounds = lat_axis.range();
+
+    // Pad the x range so the first and last sizes sit off the plot edges.
     let mut chart = ChartBuilder::on(area)
-        .caption(caption, ("sans-serif", 12).into_font().color(&TEXT_COLOR))
+        .caption(
+            style.caption,
+            ("sans-serif", 12).into_font().color(&TEXT_COLOR),
+        )
         .set_label_area_size(LabelAreaPosition::Bottom, 28)
         .set_label_area_size(LabelAreaPosition::Left, 60)
-        .margin_top(top_margin)
+        .margin_top(style.top_margin)
         .margin_left(10)
         .margin_right(30)
         .build_cartesian_2d(-0.15..(n - 1) as f64 + 0.15, lat_axis)?;
@@ -1292,14 +1301,13 @@ fn draw_latency_panel<DB: DrawingBackend, Y: Ranged<ValueType = f64> + ValueForm
 
     draw_latency_ranges(
         &mut chart,
-        sizes,
-        present,
+        panel,
         lat,
         bounds.clone(),
-        annotate_clipped,
+        style.annotate_clipped,
     )?;
 
-    for imp in present.iter().rev() {
+    for imp in panel.present.iter().rev() {
         let pts: Vec<(f64, f64)> = sizes
             .iter()
             .enumerate()
@@ -1307,7 +1315,7 @@ fn draw_latency_panel<DB: DrawingBackend, Y: Ranged<ValueType = f64> + ValueForm
                 lat.get(&s)?.get(imp.key).map(|v| {
                     (
                         i as f64,
-                        if annotate_clipped {
+                        if style.annotate_clipped {
                             v.p99.clamp(bounds.start, bounds.end)
                         } else {
                             v.p99
@@ -1319,29 +1327,24 @@ fn draw_latency_panel<DB: DrawingBackend, Y: Ranged<ValueType = f64> + ValueForm
         if pts.is_empty() {
             continue;
         }
-        chart.draw_series(LineSeries::new(pts.clone(), imp.color.stroke_width(2)))?;
-        chart.draw_series(
-            pts.iter()
-                .map(|&(x, y)| Circle::new((x, y), 2, imp.color.filled())),
-        )?;
+
+        draw_line_with_dots(&mut chart, &pts, imp.color)?;
     }
 
     Ok(())
 }
 
 /// Draw stacked latency panels with one transport legend and a shared axis.
-#[expect(clippy::too_many_arguments)]
 pub(crate) fn draw_multirow_latency(
-    out_path: &Path,
-    title: &str,
-    sizes: &[u64],
-    impls: &[Impl],
+    spec: &ChartSpec<'_>,
     rows: &[(&str, &LatencyMap)],
     maximum_us: u32,
     step_us: usize,
     subtitle: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let present: Vec<_> = impls
+    let sizes = spec.sizes;
+    let present: Vec<_> = spec
+        .impls
         .iter()
         .filter(|imp| {
             rows.iter().any(|(_, lat)| {
@@ -1352,6 +1355,7 @@ pub(crate) fn draw_multirow_latency(
             })
         })
         .collect();
+
     let width = 850;
     let panel_height = 300;
     let gap = 30;
@@ -1359,8 +1363,14 @@ pub(crate) fn draw_multirow_latency(
     let chart_height = top_margin + rows.len() as u32 * (panel_height + gap) - gap;
     let legend_height = 30 + present.len() as u32 * 16;
     let height = chart_height + legend_height;
-    let root = SVGBackend::new(out_path, (width, height)).into_drawing_area();
+
+    let root = SVGBackend::new(spec.out_path, (width, height)).into_drawing_area();
     root.fill(&BACKGROUND_COLOR)?;
+
+    let panel = Panel {
+        sizes,
+        present: &present,
+    };
     for (index, (caption, lat)) in rows.iter().enumerate() {
         let y = top_margin + index as u32 * (panel_height + gap);
         let area = root.clone().shrink((0, y), (width, panel_height));
@@ -1368,33 +1378,45 @@ pub(crate) fn draw_multirow_latency(
             (0.0..f64::from(maximum_us)).into(),
             (0..=maximum_us).step_by(step_us).map(f64::from).collect(),
         );
-        draw_latency_panel(&area, caption, sizes, &present, lat, axis, 0, true)?;
+        let style = LatencyPanelStyle {
+            caption,
+            top_margin: 0,
+            annotate_clipped: true,
+        };
+        draw_latency_panel(&area, &panel, lat, axis, &style)?;
     }
+
     let legend = root
         .clone()
         .shrink((0, chart_height), (width, legend_height));
-    draw_legend_table(&legend, &present, &BTreeMap::new(), "", "")?;
+    let no_cpu = BTreeMap::new();
+    let columns = CpuColumns {
+        cpu: &no_cpu,
+        snd_label: "",
+        rcv_label: "",
+    };
+    draw_legend_table(&legend, &present, &columns)?;
     root.present()?;
     drop(root);
-    postprocess_svg(out_path, width, height, title, subtitle)
+
+    postprocess_svg(spec.out_path, width, height, spec.title, subtitle)
 }
 
 fn draw_latency_ranges<DB: DrawingBackend, Y: Ranged<ValueType = f64>>(
     chart: &mut ChartContext<'_, DB, Cartesian2d<RangedCoordf64, Y>>,
-    sizes: &[u64],
-    present: &[&Impl],
+    panel: &Panel<'_>,
     lat: &LatencyMap,
     bounds: std::ops::Range<f64>,
     annotate_clipped: bool,
 ) -> Result<(), DrawingAreaErrorKind<DB::ErrorType>> {
     // Draw ranges behind the p99 lines and dots. All three values come from
     // the same measured run, not from variation between runs.
-    let pixels = chart.plotting_area().get_pixel_range().1;
-    let label_step = 14.0 * (bounds.end - bounds.start) / f64::from(pixels.end - pixels.start);
-    let mut label_rows: Vec<Vec<std::ops::Range<i32>>> = Vec::new();
-    for imp in present.iter().rev() {
+    let mut labels = ClipLabels::new(chart, bounds.clone());
+
+    for imp in panel.present.iter().rev() {
         let stroke = imp.color.mix(0.65).stroke_width(1);
-        for (index, size) in sizes.iter().enumerate() {
+
+        for (index, size) in panel.sizes.iter().enumerate() {
             let Some(entry) = lat.get(size).and_then(|values| values.get(imp.key)) else {
                 continue;
             };
@@ -1407,63 +1429,15 @@ fn draw_latency_ranges<DB: DrawingBackend, Y: Ranged<ValueType = f64>>(
             } else {
                 (entry.p50, entry.p999)
             };
+
             chart.draw_series([
                 PathElement::new(vec![(x, low), (x, high)], stroke),
                 PathElement::new(vec![(x - 0.05, low), (x + 0.05, low)], stroke),
                 PathElement::new(vec![(x - 0.05, high), (x + 0.05, high)], stroke),
             ])?;
+
             if annotate_clipped && entry.p999 > bounds.end {
-                chart.draw_series(std::iter::once(TriangleMarker::new(
-                    (x, bounds.end - 1.0),
-                    4,
-                    imp.color.filled(),
-                )))?;
-                let label = if entry.p99 > bounds.end {
-                    format!(
-                        "p50: {}; p99: {}; p99.9: {}",
-                        fmt_us(entry.p50),
-                        fmt_us(entry.p99),
-                        fmt_us(entry.p999)
-                    )
-                } else {
-                    format!("p99.9: {}", fmt_us(entry.p999))
-                };
-                let pixel_x = chart.plotting_area().map_coordinate(&(x, bounds.end)).0;
-                let label_width = i32::try_from(label.len()).unwrap() * 6;
-                let boundary =
-                    pixel_x + label_width + 8 > chart.plotting_area().get_pixel_range().0.end;
-                let span = if boundary {
-                    pixel_x - label_width - 8..pixel_x
-                } else {
-                    pixel_x..pixel_x + label_width + 8
-                };
-                let row = label_rows
-                    .iter()
-                    .position(|placed| {
-                        placed
-                            .iter()
-                            .all(|old| old.end <= span.start || span.end <= old.start)
-                    })
-                    .unwrap_or(label_rows.len());
-                if row == label_rows.len() {
-                    label_rows.push(Vec::new());
-                }
-                label_rows[row].push(span);
-                let style = ("sans-serif", 10)
-                    .into_font()
-                    .color(&imp.color)
-                    .pos(Pos::new(
-                        if boundary { HPos::Right } else { HPos::Left },
-                        VPos::Top,
-                    ));
-                chart.draw_series(std::iter::once(Text::new(
-                    label,
-                    (
-                        x + if boundary { -0.05 } else { 0.05 },
-                        bounds.end - 4.0 - row as f64 * label_step,
-                    ),
-                    style,
-                )))?;
+                labels.draw(chart, imp, entry, x)?;
             }
         }
     }
@@ -1471,75 +1445,151 @@ fn draw_latency_ranges<DB: DrawingBackend, Y: Ranged<ValueType = f64>>(
     Ok(())
 }
 
-/// Same as `draw_throughput_dual_panel` but the GB/s panel uses a log10
-/// Y axis. Used for inproc where throughput spans orders of magnitude.
-#[expect(clippy::too_many_arguments)]
-pub(crate) fn draw_throughput_dual_panel_log_gbs(
-    out_path: &Path,
-    title: &str,
-    sizes: &[u64],
-    impls: &[Impl],
-    tput: &ValMap,
-    msgs: &ValMap,
-    cpu: &BTreeMap<String, CpuData>,
-    snd_label: &str,
-    rcv_label: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let present: Vec<&Impl> = impls
+/// Marks and labels latency ranges that overflow the top of the axis.
+/// Labels go into stacked rows so labels at nearby sizes do not overlap.
+struct ClipLabels {
+    bounds: std::ops::Range<f64>,
+    /// One 14 px label row in data units.
+    row_step: f64,
+    /// Pixel spans already taken, per label row.
+    rows: Vec<Vec<std::ops::Range<i32>>>,
+}
+
+impl ClipLabels {
+    fn new<DB: DrawingBackend, Y: Ranged<ValueType = f64>>(
+        chart: &ChartContext<'_, DB, Cartesian2d<RangedCoordf64, Y>>,
+        bounds: std::ops::Range<f64>,
+    ) -> Self {
+        let pixels = chart.plotting_area().get_pixel_range().1;
+        let row_step = 14.0 * (bounds.end - bounds.start) / f64::from(pixels.end - pixels.start);
+        Self {
+            bounds,
+            row_step,
+            rows: Vec::new(),
+        }
+    }
+
+    /// Returns the first row where `span` fits, opening a new row if none
+    /// does, and reserves the span there.
+    fn place(&mut self, span: std::ops::Range<i32>) -> usize {
+        let row = self
+            .rows
+            .iter()
+            .position(|placed| {
+                placed
+                    .iter()
+                    .all(|old| old.end <= span.start || span.end <= old.start)
+            })
+            .unwrap_or(self.rows.len());
+        if row == self.rows.len() {
+            self.rows.push(Vec::new());
+        }
+        self.rows[row].push(span);
+        row
+    }
+
+    fn draw<DB: DrawingBackend, Y: Ranged<ValueType = f64>>(
+        &mut self,
+        chart: &mut ChartContext<'_, DB, Cartesian2d<RangedCoordf64, Y>>,
+        imp: &Impl,
+        entry: &LatencyEntry,
+        x: f64,
+    ) -> Result<(), DrawingAreaErrorKind<DB::ErrorType>> {
+        let top = self.bounds.end;
+        chart.draw_series(std::iter::once(TriangleMarker::new(
+            (x, top - 1.0),
+            4,
+            imp.color.filled(),
+        )))?;
+
+        // When p99 is off the axis too, the line point is clamped, so show
+        // all three values.
+        let label = if entry.p99 > top {
+            format!(
+                "p50: {}; p99: {}; p99.9: {}",
+                fmt_us(entry.p50),
+                fmt_us(entry.p99),
+                fmt_us(entry.p999)
+            )
+        } else {
+            format!("p99.9: {}", fmt_us(entry.p999))
+        };
+
+        // Estimate 6 px per character. Flip the label to the left of the
+        // point when it would run past the right edge of the plot.
+        let pixel_x = chart.plotting_area().map_coordinate(&(x, top)).0;
+        let label_width = i32::try_from(label.len()).unwrap() * 6;
+        let boundary = pixel_x + label_width + 8 > chart.plotting_area().get_pixel_range().0.end;
+        let span = if boundary {
+            pixel_x - label_width - 8..pixel_x
+        } else {
+            pixel_x..pixel_x + label_width + 8
+        };
+        let row = self.place(span);
+
+        let style = ("sans-serif", 10)
+            .into_font()
+            .color(&imp.color)
+            .pos(Pos::new(
+                if boundary { HPos::Right } else { HPos::Left },
+                VPos::Top,
+            ));
+        chart.draw_series(std::iter::once(Text::new(
+            label,
+            (
+                x + if boundary { -0.05 } else { 0.05 },
+                top - 4.0 - row as f64 * self.row_step,
+            ),
+            style,
+        )))?;
+        Ok(())
+    }
+}
+
+/// MB/s values at `sizes` converted to GB/s.
+fn gbs_values(sizes: &[u64], tput: &ValMap) -> ValMap {
+    sizes
         .iter()
-        .filter(|imp| {
-            sizes
+        .filter_map(|size| {
+            let values = tput
+                .get(size)?
                 .iter()
-                .any(|s| tput.get(s).is_some_and(|m| m.contains_key(imp.key)))
+                .map(|(key, value)| (key.clone(), value / 1000.0))
+                .collect();
+            Some((*size, values))
         })
-        .collect();
+        .collect()
+}
 
-    let small: Vec<u64> = sizes
+/// Plot points of one series: x is the size index, y is `map(value)`.
+/// Sizes without a value, or where `map` returns `None`, are skipped.
+fn series_points(
+    sizes: &[u64],
+    values: &ValMap,
+    key: &str,
+    map: impl Fn(f64) -> Option<f64>,
+) -> Vec<(f64, f64)> {
+    sizes
         .iter()
-        .copied()
-        .filter(|&s| s <= SMALL_CUTOFF)
-        .collect();
-    let large: Vec<u64> = sizes
-        .iter()
-        .copied()
-        .filter(|&s| s >= LARGE_START)
-        .collect();
+        .enumerate()
+        .filter_map(|(i, &s)| {
+            let v = *values.get(&s)?.get(key)?;
+            map(v).map(|y| (i as f64, y))
+        })
+        .collect()
+}
 
-    let row_h = 16u32;
-    let table_h = 20 + present.len() as u32 * row_h + 10;
-    let chart_h = 340u32;
-    let total_h = chart_h + table_h;
-    let width = 950u32;
-    let hw_label = detect_hardware();
-
-    let root = SVGBackend::new(out_path, (width, total_h)).into_drawing_area();
-    root.fill(&BACKGROUND_COLOR)?;
-    let (chart_area, table_area) = root.split_vertically(chart_h);
-    let (left_area, right_area) = chart_area.split_horizontally(width / 2 - 10);
-
-    let n_ticks = 6usize;
-    let msgs_raw = small
-        .iter()
-        .filter_map(|s| msgs.get(s))
-        .flat_map(|m| m.values())
-        .copied()
-        .fold(0.0_f64, f64::max);
-    let (msgs_max, msgs_ticks) = nice_axis(msgs_raw, n_ticks);
-
-    if !small.is_empty() {
-        draw_msgs_panel(
-            &left_area, &small, &present, msgs, msgs_max, msgs_ticks, None,
-        )?;
-    }
-    if !large.is_empty() {
-        draw_gbs_panel_log(&right_area, &large, &present, tput, None)?;
-    }
-
-    draw_legend_table(&table_area, &present, cpu, snd_label, rcv_label)?;
-    root.present()?;
-    drop(root);
-
-    postprocess_svg(out_path, width, total_h, title, hw_label.as_deref())
+fn draw_line_with_dots<DB: DrawingBackend, Y: Ranged<ValueType = f64>>(
+    chart: &mut ChartContext<'_, DB, Cartesian2d<RangedCoordf64, Y>>,
+    pts: &[(f64, f64)],
+    color: RGBColor,
+) -> Result<(), DrawingAreaErrorKind<DB::ErrorType>> {
+    chart.draw_series(LineSeries::new(pts.iter().copied(), color.stroke_width(2)))?;
+    chart.draw_series(
+        pts.iter()
+            .map(|&(x, y)| Circle::new((x, y), 2, color.filled())),
+    )?;
+    Ok(())
 }
 
 fn log_gbs_range(gbs_tput: &ValMap, fairness: Option<&FairnessMap>) -> Option<(f64, f64)> {
@@ -1583,28 +1633,20 @@ fn log_gbs_range(gbs_tput: &ValMap, fairness: Option<&FairnessMap>) -> Option<(f
     Some((lo, hi))
 }
 
+/// Draws the GB/s panel on a log10 axis with one tick per decade.
 fn draw_gbs_panel_log(
     area: &DrawingArea<SVGBackend<'_>, plotters::coord::Shift>,
-    sizes: &[u64],
-    present: &[&Impl],
+    panel: &Panel<'_>,
     tput: &ValMap,
     fairness: Option<&FairnessMap>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let gbs_tput: ValMap = sizes
-        .iter()
-        .filter_map(|size| {
-            let values = tput
-                .get(size)?
-                .iter()
-                .map(|(key, value)| (key.clone(), value / 1000.0))
-                .collect();
-            Some((*size, values))
-        })
-        .collect();
+    let sizes = panel.sizes;
+    let gbs_tput = gbs_values(sizes, tput);
     let Some((lo, hi)) = log_gbs_range(&gbs_tput, fairness) else {
         return Ok(());
     };
 
+    // Y values are log10(GB/s); the label formatter maps them back.
     let mut chart = ChartBuilder::on(area)
         .caption(
             "medium/large messages (log scale; higher is better)",
@@ -1638,31 +1680,20 @@ fn draw_gbs_panel_log(
         .draw()?;
 
     if let Some(fairness) = fairness {
-        draw_whiskers(&mut chart, sizes, present, &gbs_tput, fairness, f64::log10);
+        draw_whiskers(&mut chart, panel, &gbs_tput, fairness, f64::log10);
     }
 
-    for imp in present.iter().rev() {
-        let pts: Vec<(f64, f64)> = sizes
-            .iter()
-            .enumerate()
-            .filter_map(|(i, &s)| {
-                let v = *tput.get(&s)?.get(imp.key)?;
-                let gbs = v / 1000.0;
-                if gbs > 0.0 {
-                    Some((i as f64, gbs.log10()))
-                } else {
-                    None
-                }
-            })
-            .collect();
+    for imp in panel.present.iter().rev() {
+        // log10 is undefined at zero, so drop empty points.
+        let pts = series_points(sizes, tput, imp.key, |v| {
+            let gbs = v / 1000.0;
+            (gbs > 0.0).then(|| gbs.log10())
+        });
         if pts.is_empty() {
             continue;
         }
-        chart.draw_series(LineSeries::new(pts.clone(), imp.color.stroke_width(2)))?;
-        chart.draw_series(
-            pts.iter()
-                .map(|&(x, y)| Circle::new((x, y), 2, imp.color.filled())),
-        )?;
+
+        draw_line_with_dots(&mut chart, &pts, imp.color)?;
     }
     Ok(())
 }
@@ -1677,124 +1708,98 @@ pub(crate) fn auto_lat_range(lat: &LatencyMap) -> (f64, f64) {
     (0.0, top)
 }
 
-/// Draw a multi-row throughput chart. Each row is a dual-panel (msg/s left,
-/// legend table
-#[expect(clippy::too_many_arguments)]
+/// Draws one dual-panel row per peer count (msg/s left, GB/s right) above
+/// one shared legend table.
 pub(crate) fn draw_multirow_throughput(
-    out_path: &Path,
-    title: &str,
-    rows: &[(u64, &ValMap, &ValMap)],
-    sizes: &[u64],
-    impls: &[Impl],
-    cpu: &BTreeMap<String, CpuData>,
+    spec: &ChartSpec<'_>,
+    rows: &[ThroughputRow<'_>],
+    columns: &CpuColumns<'_>,
     row_title_fn: &dyn Fn(u64) -> String,
-    snd_label: &str,
-    rcv_label: &str,
-    fairness: Option<&[&FairnessMap]>,
     hw_label: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let present: Vec<&Impl> = impls
+    let present: Vec<&Impl> = spec
+        .impls
         .iter()
         .filter(|imp| {
-            rows.iter().any(|(_, tput, _)| {
-                sizes
-                    .iter()
-                    .any(|s| tput.get(s).is_some_and(|m| m.contains_key(imp.key)))
-            })
+            rows.iter()
+                .any(|row| has_point(row.tput, spec.sizes, imp.key))
         })
         .collect();
-
-    let small: Vec<u64> = sizes
-        .iter()
-        .copied()
-        .filter(|&s| s <= SMALL_CUTOFF)
-        .collect();
-    let large: Vec<u64> = sizes
-        .iter()
-        .copied()
-        .filter(|&s| s >= LARGE_START)
-        .collect();
+    let (small, large) = split_sizes(spec.sizes);
 
     let row_count = rows.len() as u32;
     let panel_h = 260u32;
     let row_gap = 70u32;
-    let legend_row_h = 16u32;
-    let table_h = 20 + present.len() as u32 * legend_row_h + 10;
+    let table_h = legend_table_height(present.len());
     let top_margin = 56u32;
     let chart_total = row_count * panel_h + (row_count - 1) * row_gap + top_margin;
     let total_h = chart_total + table_h;
     let width = 950u32;
 
-    let root = SVGBackend::new(out_path, (width, total_h)).into_drawing_area();
+    let root = SVGBackend::new(spec.out_path, (width, total_h)).into_drawing_area();
     root.fill(&BACKGROUND_COLOR)?;
 
-    let n_ticks = 6usize;
-
+    let small_panel = Panel {
+        sizes: &small,
+        present: &present,
+    };
+    let large_panel = Panel {
+        sizes: &large,
+        present: &present,
+    };
     let mut row_titles: Vec<(u32, String)> = Vec::new();
 
-    for (idx, (peers, tput, msgs)) in rows.iter().enumerate() {
+    for (idx, row) in rows.iter().enumerate() {
         let y_top = top_margin + idx as u32 * (panel_h + row_gap);
-        let y_bot = y_top + panel_h;
-        let row_area = root.clone().shrink((0, y_top), (width, y_bot - y_top));
+        let row_area = root.clone().shrink((0, y_top), (width, panel_h));
 
-        row_titles.push((y_top - 6, row_title_fn(*peers)));
+        // Titles go into the gap above each row once plotters is done.
+        row_titles.push((y_top - 6, row_title_fn(row.peers)));
 
         let (left_area, right_area) = row_area.split_horizontally(width / 2 - 10);
-
-        let gbs_raw = large
-            .iter()
-            .filter_map(|s| tput.get(s))
-            .flat_map(|m| m.values())
-            .map(|v| v / 1000.0)
-            .fold(0.0_f64, f64::max);
-        let (gbs_max, gbs_ticks) = nice_axis(gbs_raw, n_ticks);
-
-        let msgs_raw = small
-            .iter()
-            .filter_map(|s| msgs.get(s))
-            .flat_map(|m| m.values())
-            .copied()
-            .fold(0.0_f64, f64::max);
-        let (msgs_max, msgs_ticks) = nice_axis(msgs_raw, n_ticks);
-
-        let row_fair = fairness.and_then(|f| f.get(idx).copied());
-        if !small.is_empty() && msgs_max > 0.0 {
-            draw_msgs_panel(
-                &left_area, &small, &present, msgs, msgs_max, msgs_ticks, row_fair,
-            )?;
-        }
-        if !large.is_empty() && gbs_max > 0.0 {
-            draw_gbs_panel(
-                &right_area,
-                &large,
-                &present,
-                tput,
-                gbs_max,
-                gbs_ticks,
-                row_fair,
-            )?;
-        }
+        draw_throughput_row((&left_area, &right_area), &small_panel, &large_panel, row)?;
     }
 
     let table_area = root.clone().shrink((0, chart_total), (width, table_h));
-    draw_legend_table(&table_area, &present, cpu, snd_label, rcv_label)?;
+    draw_legend_table(&table_area, &present, columns)?;
 
     root.present()?;
     drop(root);
 
-    postprocess_multirow_svg(out_path, width, total_h, title, hw_label, &row_titles)
+    postprocess_svg(spec.out_path, width, total_h, spec.title, hw_label)?;
+    append_row_titles(spec.out_path, width, &row_titles)
 }
 
-fn postprocess_multirow_svg(
+/// Draws one row of a multi-row throughput chart. A panel with no sizes or
+/// no data stays blank.
+fn draw_throughput_row(
+    (left_area, right_area): (
+        &DrawingArea<SVGBackend<'_>, plotters::coord::Shift>,
+        &DrawingArea<SVGBackend<'_>, plotters::coord::Shift>,
+    ),
+    small: &Panel<'_>,
+    large: &Panel<'_>,
+    row: &ThroughputRow<'_>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let gbs_axis = nice_axis(peak_gbs(large.sizes, row.tput), N_TICKS);
+    let msgs_axis = nice_axis(peak_msgs(small.sizes, row.msgs), N_TICKS);
+
+    if !small.sizes.is_empty() && msgs_axis.0 > 0.0 {
+        draw_msgs_panel(left_area, small, row.msgs, msgs_axis, row.fairness)?;
+    }
+
+    if !large.sizes.is_empty() && gbs_axis.0 > 0.0 {
+        draw_gbs_panel(right_area, large, row.tput, gbs_axis, row.fairness)?;
+    }
+    Ok(())
+}
+
+/// Appends the row titles as the last SVG elements so they draw on top.
+pub(crate) fn append_row_titles(
     path: &Path,
     width: u32,
-    height: u32,
-    title: &str,
-    hw_label: Option<&str>,
     row_titles: &[(u32, String)],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    postprocess_svg(path, width, height, title, hw_label)?;
-
     let mut svg = std::fs::read_to_string(path)?;
     let mid = width / 2;
     let mut extra = String::new();
@@ -1807,6 +1812,7 @@ fn postprocess_multirow_svg(
         )
         .unwrap();
     }
+
     if let Some(pos) = svg.rfind("</svg>") {
         svg.insert_str(pos, &extra);
     }

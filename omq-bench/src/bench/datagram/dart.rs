@@ -128,6 +128,8 @@ fn measure(args: &DartArgs, transport: &str, kind: &str, size: u64) -> Value {
     } else {
         ("server", "client")
     };
+
+    // The receiver binds port 0 and reports the endpoint for the sender.
     peers.spawn(
         Side::Receive,
         &mut command(
@@ -150,19 +152,10 @@ fn measure(args: &DartArgs, transport: &str, kind: &str, size: u64) -> Value {
     peers.spawn(Side::Send, &mut send);
     let receive_ready = peers.wait_json(Side::Receive, "ready");
     let send_ready = peers.wait_json(Side::Send, "ready");
-    assert_eq!(
-        receive_ready["dart_wire_version"],
-        send_ready["dart_wire_version"]
-    );
-    if transport == "dart" {
-        for ready in [&receive_ready, &send_ready] {
-            assert_eq!(
-                ready["dart_window_messages"].as_u64().unwrap_or(256),
-                args.window_messages as u64,
-                "peer receive/retention window"
-            );
-        }
-    }
+    check_ready(args, transport, &receive_ready, &send_ready);
+
+    // Both sides start at one wall-clock time 200 ms out. The latency
+    // server echoes until told to stop.
     let start = timestamp() + 200_000_000;
     peers.command(Side::Receive, start);
     peers.command(Side::Send, start);
@@ -172,6 +165,7 @@ fn measure(args: &DartArgs, transport: &str, kind: &str, size: u64) -> Value {
     }
     let receiver = peers.wait_json(Side::Receive, "result");
     peers.finish();
+
     let mut row = json!({"timestamp_ns":timestamp(), "kind":kind, "transport":transport,
         "msg_size":size, "spin_us":args.spin, "io_spin_us":args.io_spin,
         "continuous_spin":args.continuous_spin, "continuous_io_spin":args.continuous_io_spin,
@@ -187,6 +181,25 @@ fn measure(args: &DartArgs, transport: &str, kind: &str, size: u64) -> Value {
         "offloads_before":{"receive":receive_ready["offloads"], "send":send_ready["offloads"]}});
     verify(&mut row, args, samples);
     row
+}
+
+/// Both peers must speak one wire version, and DART peers must use the
+/// configured receive/retention window.
+fn check_ready(args: &DartArgs, transport: &str, receive_ready: &Value, send_ready: &Value) {
+    assert_eq!(
+        receive_ready["dart_wire_version"],
+        send_ready["dart_wire_version"]
+    );
+
+    if transport == "dart" {
+        for ready in [receive_ready, send_ready] {
+            assert_eq!(
+                ready["dart_window_messages"].as_u64().unwrap_or(256),
+                args.window_messages as u64,
+                "peer receive/retention window"
+            );
+        }
+    }
 }
 
 fn verify(row: &mut Value, args: &DartArgs, samples: Option<std::path::PathBuf>) {

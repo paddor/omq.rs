@@ -10,13 +10,18 @@ use crate::notify::PipeNotify;
 use crate::options::parse_curve_public_key;
 use crate::rb::{self, RbResult};
 
+/// Handshake facts handed to the Ruby auth callback as a hash.
+struct AuthPeer {
+    public_key: [u8; 32],
+    identity: Option<Bytes>,
+    peer_address: Option<String>,
+    username: Option<String>,
+    password: Option<String>,
+}
+
 enum AuthRequest {
     Check {
-        public_key: [u8; 32],
-        identity: Option<Bytes>,
-        peer_address: Option<String>,
-        username: Option<String>,
-        password: Option<String>,
+        peer: AuthPeer,
         reply: flume::Sender<bool>,
     },
     Stop,
@@ -85,78 +90,18 @@ fn wait_for_request(data: &WorkerData) -> Option<AuthRequest> {
 unsafe extern "C" fn auth_worker_main(data: *mut c_void) -> VALUE {
     let data = unsafe { Box::from_raw(data.cast::<WorkerData>()) };
     let _ = catch_unwind(AssertUnwindSafe(|| {
-        while let Some(AuthRequest::Check {
-            public_key,
-            identity,
-            peer_address,
-            username,
-            password,
-            reply,
-        }) = wait_for_request(&data)
-        {
-            let accepted = invoke_callback(
-                data.callback,
-                public_key,
-                identity.as_ref(),
-                peer_address.as_deref(),
-                username.as_deref(),
-                password.as_deref(),
-            );
+        while let Some(AuthRequest::Check { peer, reply }) = wait_for_request(&data) {
+            let accepted = invoke_callback(data.callback, &peer);
             let _ = reply.send(accepted);
         }
     }));
     rb::qnil()
 }
 
-fn invoke_callback(
-    callback: VALUE,
-    public_key: [u8; 32],
-    identity: Option<&Bytes>,
-    peer_address: Option<&str>,
-    username: Option<&str>,
-    password: Option<&str>,
-) -> bool {
-    let result = (|| -> RbResult<VALUE> {
-        let peer = rb::hash_new()?;
-        let key = if username.is_some() {
-            rb::qnil()
-        } else {
-            #[cfg(feature = "curve")]
-            {
-                let key = omq_proto::CurvePublicKey::from_bytes(public_key)
-                    .to_z85()
-                    .into_bytes();
-                rb::new_binary_string(&key)?
-            }
-            #[cfg(not(feature = "curve"))]
-            {
-                let _ = public_key;
-                rb::qnil()
-            }
-        };
-        rb::hash_aset(peer, rb::symbol("public_key")?, key)?;
-        let identity = match identity {
-            Some(value) => rb::new_binary_string(value)?,
-            None => rb::qnil(),
-        };
-        rb::hash_aset(peer, rb::symbol("identity")?, identity)?;
-        let peer_address = match peer_address {
-            Some(value) => rb::new_utf8_string(value)?,
-            None => rb::qnil(),
-        };
-        rb::hash_aset(peer, rb::symbol("peer_address")?, peer_address)?;
-        let username = match username {
-            Some(value) => rb::new_utf8_string(value)?,
-            None => rb::qnil(),
-        };
-        rb::hash_aset(peer, rb::symbol("username")?, username)?;
-        let password = match password {
-            Some(value) => rb::new_utf8_string(value)?,
-            None => rb::qnil(),
-        };
-        rb::hash_aset(peer, rb::symbol("password")?, password)?;
-        rb::call_method_1(callback, c"call", peer)
-    })();
+/// Call the Ruby callback with the peer hash; any truthy result accepts.
+/// A raised exception rejects the peer and clears Ruby's error state.
+fn invoke_callback(callback: VALUE, peer: &AuthPeer) -> bool {
+    let result = peer_hash(peer).and_then(|hash| rb::call_method_1(callback, c"call", hash));
 
     if let Ok(value) = result {
         value != rb::qfalse() && value != rb::qnil()
@@ -164,6 +109,54 @@ fn invoke_callback(
         unsafe { rb_sys::rb_set_errinfo(rb::qnil()) };
         false
     }
+}
+
+fn peer_hash(peer: &AuthPeer) -> RbResult<VALUE> {
+    let hash = rb::hash_new()?;
+
+    // PLAIN peers carry a username; only CURVE peers expose a public key.
+    let key = if peer.username.is_some() {
+        rb::qnil()
+    } else {
+        #[cfg(feature = "curve")]
+        {
+            let key = omq_proto::CurvePublicKey::from_bytes(peer.public_key)
+                .to_z85()
+                .into_bytes();
+            rb::new_binary_string(&key)?
+        }
+        #[cfg(not(feature = "curve"))]
+        {
+            let _ = peer.public_key;
+            rb::qnil()
+        }
+    };
+    rb::hash_aset(hash, rb::symbol("public_key")?, key)?;
+
+    let identity = match &peer.identity {
+        Some(value) => rb::new_binary_string(value)?,
+        None => rb::qnil(),
+    };
+    rb::hash_aset(hash, rb::symbol("identity")?, identity)?;
+
+    let peer_address = match &peer.peer_address {
+        Some(value) => rb::new_utf8_string(value)?,
+        None => rb::qnil(),
+    };
+    rb::hash_aset(hash, rb::symbol("peer_address")?, peer_address)?;
+
+    let username = match &peer.username {
+        Some(value) => rb::new_utf8_string(value)?,
+        None => rb::qnil(),
+    };
+    rb::hash_aset(hash, rb::symbol("username")?, username)?;
+
+    let password = match &peer.password {
+        Some(value) => rb::new_utf8_string(value)?,
+        None => rb::qnil(),
+    };
+    rb::hash_aset(hash, rb::symbol("password")?, password)?;
+    Ok(hash)
 }
 
 #[cfg(feature = "curve")]
@@ -207,11 +200,13 @@ pub fn callback(callback: VALUE) -> RbResult<(omq_proto::Authenticator, AuthWork
     let authenticator = omq_proto::Authenticator::new(move |peer| {
         let (reply, result) = flume::bounded(1);
         let request = AuthRequest::Check {
-            public_key: peer.public_key,
-            identity: peer.identity.clone(),
-            peer_address: peer.peer_address.clone(),
-            username: peer.username.clone(),
-            password: peer.password.clone(),
+            peer: AuthPeer {
+                public_key: peer.public_key,
+                identity: peer.identity.clone(),
+                peer_address: peer.peer_address.clone(),
+                username: peer.username.clone(),
+                password: peer.password.clone(),
+            },
             reply,
         };
         if auth_sender.send(request).is_err() {

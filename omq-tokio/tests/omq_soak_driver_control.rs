@@ -40,14 +40,59 @@ impl DriverStream for SoakDuplex {
     }
 }
 
-#[test]
-fn soak_driver_control_separation() {
-    let duration = soak_common::soak_duration();
-    let workers = std::env::var("OMQ_SOAK_DRIVER_WORKERS")
+fn worker_count() -> usize {
+    std::env::var("OMQ_SOAK_DRIVER_WORKERS")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(4)
-        .clamp(1, 32);
+        .clamp(1, 32)
+}
+
+/// Repeats the stalled-write close until `deadline`, recording the worst
+/// control latency seen.
+async fn soak_worker(
+    worker: usize,
+    deadline: Instant,
+    iterations: Arc<AtomicU64>,
+    max_control_ns: Arc<AtomicU64>,
+) {
+    let mut local_iterations = 0u64;
+    while Instant::now() < deadline {
+        let payload_len = if (worker as u64 + local_iterations).is_multiple_of(2) {
+            4 * 1024
+        } else {
+            1024 * 1024
+        };
+        let control_latency = stalled_write_close_once(worker, local_iterations, payload_len).await;
+
+        iterations.fetch_add(1, Ordering::Relaxed);
+        max_control_ns.fetch_max(
+            u64::try_from(control_latency.as_nanos()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        local_iterations += 1;
+    }
+}
+
+fn spawn_reporter(deadline: Instant, iterations: Arc<AtomicU64>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            if Instant::now() >= deadline {
+                break;
+            }
+            eprintln!(
+                "[driver_control] iterations {}",
+                iterations.load(Ordering::Relaxed),
+            );
+        }
+    })
+}
+
+#[test]
+fn soak_driver_control_separation() {
+    let duration = soak_common::soak_duration();
+    let workers = worker_count();
     let monitor = soak_common::ResourceMonitor::start();
     let iterations = Arc::new(AtomicU64::new(0));
     let max_control_ns = Arc::new(AtomicU64::new(0));
@@ -57,45 +102,20 @@ fn soak_driver_control_separation() {
         .enable_all()
         .build()
         .unwrap();
+
     runtime.block_on(async {
         let deadline = Instant::now() + duration;
         let mut tasks = JoinSet::new();
         for worker in 0..workers {
-            let iterations = iterations.clone();
-            let max_control_ns = max_control_ns.clone();
-            tasks.spawn(async move {
-                let mut local_iterations = 0u64;
-                while Instant::now() < deadline {
-                    let payload_len = if (worker as u64 + local_iterations).is_multiple_of(2) {
-                        4 * 1024
-                    } else {
-                        1024 * 1024
-                    };
-                    let control_latency =
-                        stalled_write_close_once(worker, local_iterations, payload_len).await;
-                    iterations.fetch_add(1, Ordering::Relaxed);
-                    max_control_ns.fetch_max(
-                        u64::try_from(control_latency.as_nanos()).unwrap_or(u64::MAX),
-                        Ordering::Relaxed,
-                    );
-                    local_iterations += 1;
-                }
-            });
+            tasks.spawn(soak_worker(
+                worker,
+                deadline,
+                iterations.clone(),
+                max_control_ns.clone(),
+            ));
         }
 
-        let report_iterations = iterations.clone();
-        let reporter = tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(30)).await;
-                if Instant::now() >= deadline {
-                    break;
-                }
-                eprintln!(
-                    "[driver_control] iterations {}",
-                    report_iterations.load(Ordering::Relaxed),
-                );
-            }
-        });
+        let reporter = spawn_reporter(deadline, iterations.clone());
 
         while let Some(result) = tasks.join_next().await {
             result.expect("driver-control soak worker panicked");
@@ -128,6 +148,8 @@ async fn stalled_write_close_once(worker: usize, iteration: u64, payload_len: us
             .identity(Bytes::from(format!("control-{worker}-{iteration}"))),
     );
 
+    // The event queues hold one event each and both receivers stay alive
+    // until the end, so an unread event blocks the driver that emits it.
     let (server_control_tx, server_control_rx) = mpsc::channel(4);
     let (client_control_tx, client_control_rx) = mpsc::channel(4);
     let (_server_data_tx, server_data_rx) = mpsc::channel(4);
@@ -146,6 +168,7 @@ async fn stalled_write_close_once(worker: usize, iteration: u64, payload_len: us
         server_cancel.clone(),
     )
     .with_data_inbox(server_data_rx);
+
     let client = ConnectionDriver::new(
         SoakDuplex(client_stream),
         client_connection,
@@ -155,6 +178,7 @@ async fn stalled_write_close_once(worker: usize, iteration: u64, payload_len: us
         client_cancel.clone(),
     )
     .with_data_inbox(client_data_rx);
+
     let server_task = tokio::spawn(server.run());
     let mut client_task = tokio::spawn(client.run());
 
@@ -162,25 +186,40 @@ async fn stalled_write_close_once(worker: usize, iteration: u64, payload_len: us
         wait_for_handshake(&mut server_events_rx),
         wait_for_handshake(&mut client_events_rx),
     );
-    server_control_tx
-        .send(PeerDriverCommand::ActivateDataPlane)
-        .await
-        .unwrap();
-    client_control_tx
-        .send(PeerDriverCommand::ActivateDataPlane)
-        .await
-        .unwrap();
 
+    for control_tx in [&server_control_tx, &client_control_tx] {
+        control_tx
+            .send(PeerDriverCommand::ActivateDataPlane)
+            .await
+            .unwrap();
+    }
+
+    fill_data_backlog(&client_data_tx, payload_len).await;
+    let control_latency = close_behind_stall(&client_control_tx, &mut client_task, iteration).await;
+
+    server_cancel.cancel();
+    server_task.abort();
+    let _ = server_task.await;
+
+    control_latency
+}
+
+/// Fills the client's data inbox and waits until the driver is mid-backlog,
+/// stuck on a partial write.
+async fn fill_data_backlog(data_tx: &mpsc::Sender<PeerDriverData>, payload_len: usize) {
     let payload = Bytes::from(vec![0xA5; payload_len]);
     for _ in 0..DATA_BACKLOG {
-        client_data_tx
+        data_tx
             .try_send(PeerDriverData::SendMessage(Message::single(
                 payload.clone(),
             )))
             .expect("data inbox accepted less than its capacity");
     }
+
+    // Freed capacity proves the driver picked up data. After a short pause
+    // the inbox must still hold most of the backlog, so the write stalled.
     tokio::time::timeout(IO_TIMEOUT, async {
-        while client_data_tx.capacity() == 0 {
+        while data_tx.capacity() == 0 {
             tokio::task::yield_now().await;
         }
     })
@@ -188,32 +227,35 @@ async fn stalled_write_close_once(worker: usize, iteration: u64, payload_len: us
     .expect("client driver did not start outbound work");
     tokio::time::sleep(Duration::from_millis(1)).await;
     assert!(
-        client_data_tx.capacity() < DATA_BACKLOG,
+        data_tx.capacity() < DATA_BACKLOG,
         "driver drained entire backlog before control arrived",
     );
+}
 
+/// Sends PING then Close on the control inbox and returns how long the
+/// stalled driver took to exit.
+async fn close_behind_stall(
+    control_tx: &mpsc::Sender<PeerDriverCommand>,
+    client_task: &mut tokio::task::JoinHandle<omq_tokio::Result<()>>,
+    iteration: u64,
+) -> Duration {
     let control_started = Instant::now();
-    client_control_tx
+    control_tx
         .send(PeerDriverCommand::SendCommand(Command::Ping {
             ttl_deciseconds: 0,
             context: Bytes::copy_from_slice(&iteration.to_le_bytes()),
         }))
         .await
         .unwrap();
-    client_control_tx
-        .send(PeerDriverCommand::Close)
-        .await
-        .unwrap();
-    let client_result = tokio::time::timeout(CONTROL_DEADLINE, &mut client_task)
+    control_tx.send(PeerDriverCommand::Close).await.unwrap();
+
+    let client_result = tokio::time::timeout(CONTROL_DEADLINE, client_task)
         .await
         .expect("control was trapped behind stalled data")
         .expect("client driver task panicked");
     let control_latency = control_started.elapsed();
     client_result.expect("client driver failed during controlled close");
 
-    server_cancel.cancel();
-    server_task.abort();
-    let _ = server_task.await;
     control_latency
 }
 

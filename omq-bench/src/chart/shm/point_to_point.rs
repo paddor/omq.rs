@@ -1,7 +1,10 @@
 //! Verified SCATTER/GATHER throughput and CLIENT/SERVER latency cohorts.
 
 use super::{ChartResult, IMPLS, SIZES, common};
-use common::{FairnessEntry, FairnessMap, LatencyEntry, LatencyMap, ValMap};
+use common::{
+    ChartSpec, CpuColumns, FairnessEntry, FairnessMap, LatencyEntry, LatencyMap, ThroughputRow,
+    ValMap,
+};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -10,8 +13,29 @@ const TIMED_BATCH_MESSAGES: u64 = 256;
 const TIMED_BATCH_BYTES: u64 = 1024 * 1024;
 
 fn verified(row: &Value, implementation: &str, size: u64, latency: bool, spin: u64) -> bool {
+    if setup_rejected(row, implementation, size, latency, spin) {
+        return false;
+    }
+    let Some(rounds) = row["rounds"].as_array().filter(|rounds| rounds.len() == 3) else {
+        return false;
+    };
+    rounds.iter().enumerate().all(|(index, round)| {
+        if round["round"] != index + 1 || round["verified"] != true {
+            return false;
+        }
+        if latency {
+            latency_round_verified(round)
+        } else {
+            throughput_round_verified(round)
+        }
+    })
+}
+
+/// Rejects rows from another setup. Same CPU and process layout as the
+/// RADIO/DISH chart, with one blocking receiver.
+fn setup_rejected(row: &Value, implementation: &str, size: u64, latency: bool, spin: u64) -> bool {
     let inproc = implementation == "inproc";
-    if row["kind"]
+    row["kind"]
         != if latency {
             "shm_reqrep_verified"
         } else {
@@ -48,50 +72,46 @@ fn verified(row: &Value, implementation: &str, size: u64, latency: bool, spin: u
                 "shm-pool" => "preallocated-shm",
                 _ => "preallocated-heap",
             }
-    {
-        return false;
-    }
-    let Some(rounds) = row["rounds"].as_array().filter(|rounds| rounds.len() == 3) else {
-        return false;
-    };
-    rounds.iter().enumerate().all(|(index, round)| {
-        if round["round"] != index + 1 || round["verified"] != true {
-            return false;
-        }
-        if latency {
-            let quantiles: Option<Vec<f64>> = ["p50_us", "p99_us", "p999_us", "max_us"]
-                .iter()
-                .map(|key| round[key].as_f64())
-                .collect();
-            round["samples"] == 100_000
-                && round["warmup_iterations"] == 20_000
-                && quantiles.is_some_and(|values| {
-                    values.iter().all(|value| value.is_finite() && *value > 0.0)
-                        && values.windows(2).all(|pair| pair[0] <= pair[1])
-                })
-        } else {
-            let offered = round["offered"].as_u64().unwrap_or(0);
-            let sender = round["sender_elapsed"].as_f64().unwrap_or(0.0);
-            let receiver = round["reader_elapsed"][0].as_f64().unwrap_or(0.0);
-            let elapsed = round["elapsed"].as_f64().unwrap_or(0.0);
-            let rate = round["msgs_s"].as_f64().unwrap_or(0.0);
-            offered > 0
-                && round["reader_counts"]
-                    .as_array()
-                    .is_some_and(|counts| counts.len() == 1 && counts[0] == offered)
-                && sender.is_finite()
-                && sender >= 3.0
-                && receiver.is_finite()
-                && receiver > 0.0
-                && (elapsed - sender.max(receiver)).abs() < 1e-6
-                && rate.is_finite()
-                && rate > 0.0
-                && (rate - offered as f64 / elapsed).abs() < rate * 1e-6
-                && ["missing", "duplicates", "gaps", "corrupt"]
-                    .iter()
-                    .all(|field| round[field] == 0)
-        }
-    })
+}
+
+/// Standard sample counts and positive, monotonic quantiles.
+fn latency_round_verified(round: &Value) -> bool {
+    let quantiles: Option<Vec<f64>> = ["p50_us", "p99_us", "p999_us", "max_us"]
+        .iter()
+        .map(|key| round[key].as_f64())
+        .collect();
+    round["samples"] == 100_000
+        && round["warmup_iterations"] == 20_000
+        && quantiles.is_some_and(|values| {
+            values.iter().all(|value| value.is_finite() && *value > 0.0)
+                && values.windows(2).all(|pair| pair[0] <= pair[1])
+        })
+}
+
+/// The receiver got every offered message intact, and the rate matches
+/// offered / elapsed, where elapsed is the slower of the two sides.
+fn throughput_round_verified(round: &Value) -> bool {
+    let offered = round["offered"].as_u64().unwrap_or(0);
+    let sender = round["sender_elapsed"].as_f64().unwrap_or(0.0);
+    let receiver = round["reader_elapsed"][0].as_f64().unwrap_or(0.0);
+    let elapsed = round["elapsed"].as_f64().unwrap_or(0.0);
+    let rate = round["msgs_s"].as_f64().unwrap_or(0.0);
+
+    offered > 0
+        && round["reader_counts"]
+            .as_array()
+            .is_some_and(|counts| counts.len() == 1 && counts[0] == offered)
+        && sender.is_finite()
+        && sender >= 3.0
+        && receiver.is_finite()
+        && receiver > 0.0
+        && (elapsed - sender.max(receiver)).abs() < 1e-6
+        && rate.is_finite()
+        && rate > 0.0
+        && (rate - offered as f64 / elapsed).abs() < rate * 1e-6
+        && ["missing", "duplicates", "gaps", "corrupt"]
+            .iter()
+            .all(|field| round[field] == 0)
 }
 
 pub(super) fn sender_clock_batch(size: u64) -> u64 {
@@ -186,9 +206,44 @@ fn complete(
 }
 
 fn throughput(directory: &Path, rows: &[Value]) -> ChartResult {
+    let (bandwidth, messages, spread) = throughput_maps(rows);
+    let path = directory.join("pushpull.svg");
+    let spec = ChartSpec {
+        out_path: &path,
+        title: "SCATTER/GATHER throughput, inproc / IPC / SHM",
+        sizes: SIZES,
+        impls: IMPLS,
+    };
+    let row = ThroughputRow {
+        peers: 1,
+        tput: &bandwidth,
+        msgs: &messages,
+        fairness: Some(&spread),
+    };
+    let columns = CpuColumns {
+        cpu: &BTreeMap::new(),
+        snd_label: "",
+        rcv_label: "",
+    };
+
+    common::draw_multirow_throughput(
+        &spec,
+        &[row],
+        &columns,
+        &|_| "1 sender / 1 receiver".into(),
+        super::hardware_subtitle().as_deref(),
+    )?;
+    eprintln!("Written: {}", path.display());
+    Ok(())
+}
+
+/// Bandwidth, message rate, and round spread per size from the median of
+/// three rounds.
+fn throughput_maps(rows: &[Value]) -> (ValMap, ValMap, FairnessMap) {
     let mut messages = ValMap::new();
     let mut bandwidth = ValMap::new();
     let mut spread = FairnessMap::new();
+
     for implementation in IMPLS {
         for &size in SIZES {
             let row = find(rows, implementation.key, size, false, 0).unwrap();
@@ -219,22 +274,8 @@ fn throughput(directory: &Path, rows: &[Value]) -> ChartResult {
             );
         }
     }
-    let path = directory.join("pushpull.svg");
-    common::draw_multirow_throughput(
-        &path,
-        "SCATTER/GATHER throughput, inproc / IPC / SHM",
-        &[(1, &bandwidth, &messages)],
-        SIZES,
-        IMPLS,
-        &BTreeMap::new(),
-        &|_| "1 sender / 1 receiver".into(),
-        "",
-        "",
-        Some(&[&spread]),
-        super::hardware_subtitle().as_deref(),
-    )?;
-    eprintln!("Written: {}", path.display());
-    Ok(())
+
+    (bandwidth, messages, spread)
 }
 
 fn latency(directory: &Path, rows: &[Value]) -> ChartResult {
@@ -263,11 +304,14 @@ fn latency(directory: &Path, rows: &[Value]) -> ChartResult {
         }
     }
     let path = directory.join("reqrep.svg");
+    let spec = ChartSpec {
+        out_path: &path,
+        title: "CLIENT/SERVER round-trip latency, inproc / IPC / SHM",
+        sizes: common::COMPARISON_LATENCY_SIZES,
+        impls: IMPLS,
+    };
     common::draw_multirow_latency(
-        &path,
-        "CLIENT/SERVER round-trip latency, inproc / IPC / SHM",
-        common::COMPARISON_LATENCY_SIZES,
-        IMPLS,
+        &spec,
         &[
             (
                 "Non-spinning: p99 RTT; whiskers: p50 to p99.9 (lower is better)",

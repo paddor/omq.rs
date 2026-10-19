@@ -90,19 +90,50 @@ impl std::fmt::Debug for PeerTransmitSlot {
     }
 }
 
+/// Encoding and capacity settings of one peer's transmit slot.
+#[derive(Debug, Clone)]
+pub(crate) struct SlotConfig {
+    pub(crate) has_transform: bool,
+    pub(crate) codec_profile: Option<CodecProfile>,
+    pub(crate) transform_passthrough: Option<(Bytes, usize)>,
+    pub(crate) arena_threshold: usize,
+    pub(crate) arena_cap: usize,
+    /// Queued byte limit.
+    pub(crate) cap: usize,
+    /// Queued message limit; at least one.
+    pub(crate) msg_cap: usize,
+    pub(crate) framing: WireFraming,
+}
+
+#[cfg(test)]
+impl Default for SlotConfig {
+    fn default() -> Self {
+        Self {
+            has_transform: false,
+            codec_profile: None,
+            transform_passthrough: None,
+            arena_threshold: omq_proto::frame_buffer::ARENA_THRESHOLD,
+            arena_cap: omq_proto::frame_buffer::ARENA_INITIAL_CAP,
+            cap: TRANSMIT_SLOT_CAP_DEFAULT,
+            msg_cap: TRANSMIT_SLOT_MSG_CAP_DEFAULT,
+            framing: WireFraming::Zmtp,
+        }
+    }
+}
+
 impl PeerTransmitSlot {
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
-        peer_id: u64,
-        has_transform: bool,
-        codec_profile: Option<CodecProfile>,
-        transform_passthrough: Option<(Bytes, usize)>,
-        arena_threshold: usize,
-        arena_cap: usize,
-        cap: usize,
-        msg_cap: usize,
-        framing: WireFraming,
-    ) -> Arc<Self> {
+    pub(crate) fn with_config(peer_id: u64, config: SlotConfig) -> Arc<Self> {
+        let SlotConfig {
+            has_transform,
+            codec_profile,
+            transform_passthrough,
+            arena_threshold,
+            arena_cap,
+            cap,
+            msg_cap,
+            framing,
+        } = config;
+
         Arc::new(Self {
             eq: Mutex::new(FrameBuffer::with_config_lazy(arena_threshold, arena_cap)),
             direct_writer: OnceLock::new(),
@@ -791,17 +822,7 @@ mod tests {
     use tokio::time::{Duration, timeout};
 
     fn test_slot() -> Arc<PeerTransmitSlot> {
-        let slot = PeerTransmitSlot::new(
-            1,
-            false,
-            None,
-            None,
-            omq_proto::frame_buffer::ARENA_THRESHOLD,
-            omq_proto::frame_buffer::ARENA_INITIAL_CAP,
-            TRANSMIT_SLOT_CAP_DEFAULT,
-            TRANSMIT_SLOT_MSG_CAP_DEFAULT,
-            crate::engine::framing::WireFraming::Zmtp,
-        );
+        let slot = PeerTransmitSlot::with_config(1, SlotConfig::default());
         slot.handshake_done.store(true, Ordering::Release);
         slot
     }
@@ -830,6 +851,22 @@ mod tests {
         assert_eq!(slot.try_encode(&msg), TryFrameResult::Ok);
     }
 
+    /// Push messages `start..` one at a time until the slot refuses one.
+    /// Returns the index of the first message not admitted.
+    fn admit_singles(slot: &PeerTransmitSlot, data: &[u8], ends: &[usize], start: usize) -> usize {
+        let mut next = start;
+        let mut offset = if start == 0 { 0 } else { ends[start - 1] };
+        while next < ends.len() {
+            let end = ends[next];
+            if slot.try_push_pre_framed_no_signal(&data[offset..end]) != TryFrameResult::Ok {
+                break;
+            }
+            next += 1;
+            offset = end;
+        }
+        next
+    }
+
     #[test]
     fn pre_framed_batch_matches_single_admission_and_retries_suffix() {
         let messages = [
@@ -847,16 +884,15 @@ mod tests {
         for byte_cap in [1, 5, 8, 100] {
             for msg_cap in [1, 2, 8] {
                 let make_slot = || {
-                    PeerTransmitSlot::new(
+                    PeerTransmitSlot::with_config(
                         1,
-                        false,
-                        None,
-                        None,
-                        4096,
-                        16 * 1024,
-                        byte_cap,
-                        msg_cap,
-                        crate::engine::framing::WireFraming::Zmtp,
+                        SlotConfig {
+                            arena_threshold: 4096,
+                            arena_cap: 16 * 1024,
+                            cap: byte_cap,
+                            msg_cap,
+                            ..SlotConfig::default()
+                        },
                     )
                 };
                 let batched = make_slot();
@@ -864,18 +900,7 @@ mod tests {
                 let mut start = 0;
                 let mut received = Vec::new();
                 while start < ends.len() {
-                    let mut expected = start;
-                    let mut offset = if start == 0 { 0 } else { ends[start - 1] };
-                    while expected < ends.len() {
-                        let end = ends[expected];
-                        if singles.try_push_pre_framed_no_signal(&data[offset..end])
-                            != TryFrameResult::Ok
-                        {
-                            break;
-                        }
-                        expected += 1;
-                        offset = end;
-                    }
+                    let expected = admit_singles(&singles, data, &ends, start);
                     let (next, result) =
                         batched.try_push_pre_framed_batch_no_signal(data, &ends, start);
                     assert_eq!(next, expected);
@@ -901,16 +926,12 @@ mod tests {
 
     #[test]
     fn fanout_drop_oldest_slot_keeps_newest_messages() {
-        let slot = PeerTransmitSlot::new(
+        let slot = PeerTransmitSlot::with_config(
             1,
-            false,
-            None,
-            None,
-            omq_proto::frame_buffer::ARENA_THRESHOLD,
-            omq_proto::frame_buffer::ARENA_INITIAL_CAP,
-            TRANSMIT_SLOT_CAP_DEFAULT,
-            2,
-            crate::engine::framing::WireFraming::Zmtp,
+            SlotConfig {
+                msg_cap: 2,
+                ..SlotConfig::default()
+            },
         );
         slot.handshake_done.store(true, Ordering::Release);
 
@@ -933,16 +954,12 @@ mod tests {
 
     #[test]
     fn fanout_drop_oldest_slot_keeps_protected_entry() {
-        let slot = PeerTransmitSlot::new(
+        let slot = PeerTransmitSlot::with_config(
             1,
-            false,
-            None,
-            None,
-            omq_proto::frame_buffer::ARENA_THRESHOLD,
-            omq_proto::frame_buffer::ARENA_INITIAL_CAP,
-            TRANSMIT_SLOT_CAP_DEFAULT,
-            1,
-            crate::engine::framing::WireFraming::Zmtp,
+            SlotConfig {
+                msg_cap: 1,
+                ..SlotConfig::default()
+            },
         );
         slot.handshake_done.store(true, Ordering::Release);
 
@@ -972,16 +989,12 @@ mod tests {
 
     #[test]
     fn fanout_drop_oldest_shares_large_bodies_and_evicts_whole_messages() {
-        let slot = PeerTransmitSlot::new(
+        let slot = PeerTransmitSlot::with_config(
             1,
-            false,
-            None,
-            None,
-            omq_proto::frame_buffer::ARENA_THRESHOLD,
-            omq_proto::frame_buffer::ARENA_INITIAL_CAP,
-            TRANSMIT_SLOT_CAP_DEFAULT,
-            2,
-            crate::engine::framing::WireFraming::Zmtp,
+            SlotConfig {
+                msg_cap: 2,
+                ..SlotConfig::default()
+            },
         );
         slot.handshake_done.store(true, Ordering::Release);
         let bodies: Vec<Bytes> = (0..3u8)

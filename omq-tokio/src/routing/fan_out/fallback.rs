@@ -174,14 +174,11 @@ pub(super) fn dispatch_to_targets(
                 let eq = &mut *cell.borrow_mut();
                 encode_fan_out_message(eq, msg, targets.len(), FAN_OUT_TOTAL_COPY_BUDGET);
                 CHUNKS.with(|drain| {
-                    dispatch_encoded(
-                        eq,
-                        targets,
-                        msg,
-                        &mut drain.borrow_mut(),
-                        mute_policy,
-                        deactivate,
-                    );
+                    let chunks = &mut *drain.borrow_mut();
+                    let frame =
+                        finish_fan_out_frame(eq, chunks, targets.len(), FAN_OUT_TOTAL_COPY_BUDGET);
+                    dispatch_frame(frame, targets, msg, mute_policy, deactivate);
+                    clear_fan_out_frame(eq, chunks);
                     Ok(())
                 })
             })
@@ -218,15 +215,16 @@ fn push_to_peers(
     }
 }
 
-fn dispatch_encoded(
-    eq: &mut FrameBuffer,
+/// Push one shared fan-out frame to every wire target. Arena frames are
+/// pushed without signaling, then each slot is signaled once.
+fn dispatch_frame(
+    frame: FanOutFrame<'_>,
     targets: &[PeerOutbound],
     msg: &Message,
-    chunks: &mut Vec<Bytes>,
     mute_policy: FanOutMutePolicy,
     deactivate: &mut impl FnMut(&PeerOutbound),
 ) {
-    match finish_fan_out_frame(eq, chunks, targets.len(), FAN_OUT_TOTAL_COPY_BUDGET) {
+    match frame {
         FanOutFrame::Arena(raw) => {
             let frame = FanOutFrame::Arena(raw);
             push_to_peers(
@@ -263,7 +261,6 @@ fn dispatch_encoded(
             );
         }
     }
-    clear_fan_out_frame(eq, chunks);
 }
 
 #[cfg(test)]
@@ -274,6 +271,7 @@ mod tests {
     use omq_proto::fan_out_frame::{build_fan_out_frame, clear_fan_out_frame};
 
     use super::*;
+    use crate::engine::transmit_slot::SlotConfig;
 
     #[tokio::test]
     async fn fanring_publication_reserves_all_clone_lanes_before_committing() {
@@ -557,32 +555,25 @@ mod tests {
     fn test_slot_with_msg_cap(
         msg_cap: usize,
     ) -> Arc<crate::engine::transmit_slot::PeerTransmitSlot> {
-        let slot = crate::engine::transmit_slot::PeerTransmitSlot::new(
+        let slot = crate::engine::transmit_slot::PeerTransmitSlot::with_config(
             1,
-            false,
-            None,
-            None,
-            omq_proto::frame_buffer::ARENA_THRESHOLD,
-            omq_proto::frame_buffer::ARENA_INITIAL_CAP,
-            crate::engine::transmit_slot::TRANSMIT_SLOT_CAP_DEFAULT,
-            msg_cap,
-            crate::engine::framing::WireFraming::Zmtp,
+            SlotConfig {
+                msg_cap,
+                ..SlotConfig::default()
+            },
         );
         slot.handshake_done.store(true, Ordering::Release);
         slot
     }
 
     fn test_transformed_slot(peer_id: u64) -> Arc<crate::engine::transmit_slot::PeerTransmitSlot> {
-        let slot = crate::engine::transmit_slot::PeerTransmitSlot::new(
+        let slot = crate::engine::transmit_slot::PeerTransmitSlot::with_config(
             peer_id,
-            true,
-            None,
-            None,
-            omq_proto::frame_buffer::ARENA_THRESHOLD,
-            omq_proto::frame_buffer::ARENA_INITIAL_CAP,
-            crate::engine::transmit_slot::TRANSMIT_SLOT_CAP_DEFAULT,
-            8,
-            crate::engine::framing::WireFraming::Zmtp,
+            SlotConfig {
+                has_transform: true,
+                msg_cap: 8,
+                ..SlotConfig::default()
+            },
         );
         slot.handshake_done.store(true, Ordering::Release);
         slot

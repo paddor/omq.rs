@@ -21,6 +21,7 @@ use omq_proto::flow::DrainBudget;
 use omq_proto::frame_buffer::FrameBuffer;
 use omq_proto::message::Message;
 use omq_proto::options::Options;
+use omq_proto::proto::transform::TransformedOut;
 
 use super::codec_group::{CodecGroup, MAX_CODEC_GROUPS};
 use super::filter::{self, FanOutMode};
@@ -101,6 +102,16 @@ struct LanePeer {
     dict_shipped: bool,
     codec_group: usize,
     needs_flush: bool,
+}
+
+impl LanePeer {
+    fn filter(&self) -> filter::PeerFilter<'_> {
+        filter::PeerFilter {
+            subscriptions: &self.subscriptions,
+            groups: &self.groups,
+            any_groups: self.any_groups,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -203,6 +214,27 @@ struct LaneWorker {
     exited: Arc<AtomicBool>,
 }
 
+/// Buffers a lane worker reuses across turns.
+struct LaneScratch {
+    /// Peers with newly framed output, signaled once per batch.
+    touched: SmallVec<[u64; 32]>,
+    batch: SmallVec<[LaneData; 32]>,
+    /// Plain multi-message frame and the end offset of each message in it.
+    wire: FrameBuffer,
+    ends: SmallVec<[usize; PLAIN_BATCH_MESSAGES]>,
+}
+
+impl LaneScratch {
+    fn new() -> Self {
+        Self {
+            touched: SmallVec::new(),
+            batch: SmallVec::new(),
+            wire: FrameBuffer::new(),
+            ends: SmallVec::new(),
+        }
+    }
+}
+
 impl Drop for LaneWorker {
     fn drop(&mut self) {
         // Runtime teardown can drop the task before it sees Shutdown. Senders
@@ -224,6 +256,65 @@ impl std::fmt::Debug for LaneWorker {
     }
 }
 
+/// Settings shared by every lane worker of one socket.
+struct LaneTemplate {
+    #[cfg(target_os = "linux")]
+    shm_pool: omq_shm::SendPool,
+    space: Arc<StateSignal>,
+    pipe_cap: usize,
+    mode: FanOutMode,
+    mute_policy: FanOutMutePolicy,
+}
+
+impl LaneTemplate {
+    /// Spawn lane `index`'s worker on that IO thread. Returns the data
+    /// producer for the distributor and the control endpoint.
+    fn spawn_lane(
+        &self,
+        index: usize,
+        io_pool: &crate::context::IoPoolHandle,
+    ) -> (LaneInput, LaneEndpoint) {
+        let ctrl = Arc::new(ControlQueue::new());
+        let (data_tx, data_rx) = yring::spsc(self.pipe_cap);
+        let data_signal = Arc::new(DataSignal::new());
+        let exited = Arc::new(AtomicBool::new(false));
+
+        let input = LaneInput {
+            tx: data_tx,
+            signal: data_signal.clone(),
+            exited: exited.clone(),
+        };
+        let worker = LaneWorker {
+            #[cfg(target_os = "linux")]
+            shm_pool: self.shm_pool.clone(),
+            data_rx,
+            ctrl: ctrl.clone(),
+            ctrl_batch: VecDeque::new(),
+            data_signal: data_signal.clone(),
+            data_space: self.space.clone(),
+            mode: self.mode,
+            mute_policy: self.mute_policy,
+            peers: FxHashMap::default(),
+            subscribe_all_count: 0,
+            eq: FrameBuffer::one_shot(),
+            chunks: Vec::new(),
+            codec_groups: std::array::from_fn(|_| None),
+            exited: exited.clone(),
+        };
+        io_pool.spawn_on(index, worker.run());
+
+        let endpoint = LaneEndpoint {
+            ctrl,
+            data_signal,
+            exited,
+            peer_count: 0,
+            codec_groups: std::array::from_fn(|_| None),
+            peer_groups: FxHashMap::default(),
+        };
+        (input, endpoint)
+    }
+}
+
 impl FanOutLanes {
     pub(super) fn spawn(
         options: &Options,
@@ -232,8 +323,14 @@ impl FanOutLanes {
         io_pool: &crate::context::IoPoolHandle,
     ) -> Arc<Self> {
         let pipe_cap = options.send_queue_capacity();
-        #[cfg(target_os = "linux")]
-        let shm_pool = omq_shm::SendPool::new(pipe_cap, options.shm_max_memory);
+        let template = LaneTemplate {
+            #[cfg(target_os = "linux")]
+            shm_pool: omq_shm::SendPool::new(pipe_cap, options.shm_max_memory),
+            space: Arc::new(StateSignal::new()),
+            pipe_cap,
+            mode,
+            mute_policy,
+        };
         let lane_count = io_pool.thread_count().max(1);
         let active_flags = Arc::new(
             (0..lane_count)
@@ -241,58 +338,19 @@ impl FanOutLanes {
                 .collect::<Vec<_>>(),
         );
 
-        let space = Arc::new(StateSignal::new());
-        let mut inputs = Vec::with_capacity(lane_count);
-        // Build endpoints (ctrl only) and spawn workers.
-        let mut endpoints = Vec::with_capacity(lane_count);
-        for i in 0..lane_count {
-            let ctrl = Arc::new(ControlQueue::new());
-            let (data_tx, data_rx) = yring::spsc(pipe_cap);
-            let data_signal = Arc::new(DataSignal::new());
-            let exited = Arc::new(AtomicBool::new(false));
-            inputs.push(LaneInput {
-                tx: data_tx,
-                signal: data_signal.clone(),
-                exited: exited.clone(),
-            });
-            io_pool.spawn_on(
-                i,
-                LaneWorker {
-                    #[cfg(target_os = "linux")]
-                    shm_pool: shm_pool.clone(),
-                    data_rx,
-                    ctrl: ctrl.clone(),
-                    ctrl_batch: VecDeque::new(),
-                    data_signal: data_signal.clone(),
-                    data_space: space.clone(),
-                    mode,
-                    mute_policy,
-                    peers: FxHashMap::default(),
-                    subscribe_all_count: 0,
-                    eq: FrameBuffer::one_shot(),
-                    chunks: Vec::new(),
-                    codec_groups: std::array::from_fn(|_| None),
-                    exited: exited.clone(),
-                }
-                .run(),
-            );
-            endpoints.push(LaneEndpoint {
-                ctrl,
-                data_signal,
-                exited,
-                peer_count: 0,
-                codec_groups: std::array::from_fn(|_| None),
-                peer_groups: FxHashMap::default(),
-            });
-        }
+        // One worker per IO thread; endpoints keep only control handles.
+        let (inputs, endpoints): (Vec<_>, Vec<_>) = (0..lane_count)
+            .map(|lane| template.spawn_lane(lane, io_pool))
+            .unzip();
+
         Arc::new(Self {
             #[cfg(target_os = "linux")]
-            shm_pool,
+            shm_pool: template.shm_pool,
             state: Mutex::new(FanOutLaneState { endpoints }),
             active_flags,
             distributor: Mutex::new(LaneDistributor {
                 lanes: inputs,
-                space,
+                space: template.space,
             }),
             admission_closed: AtomicBool::new(false),
             mute_policy,
@@ -584,100 +642,33 @@ impl FanOutLanes {
 
 impl LaneWorker {
     async fn run(mut self) {
-        let mut touched: SmallVec<[u64; 32]> = SmallVec::new();
-        let mut batch: SmallVec<[LaneData; 32]> = SmallVec::new();
-        let mut wire = FrameBuffer::new();
-        let mut ends = SmallVec::<[usize; PLAIN_BATCH_MESSAGES]>::new();
+        let mut scratch = LaneScratch::new();
+
         loop {
-            batch.clear();
+            scratch.batch.clear();
             self.data_signal.begin_drain();
 
             // 1. ALL control commands, unconditionally.
             if self.drain_control() {
-                self.stop(&mut touched);
+                self.stop(&mut scratch.touched);
                 return;
             }
 
             // 2. Encode this lane's bounded batch. Other lanes are fed
             // directly by the caller and can encode independently.
-            let mut budget = DrainBudget::WORKER;
-            #[cfg(target_os = "linux")]
-            let shm_only =
-                !self.peers.is_empty() && self.peers.values().all(|peer| peer.slot.is_shm());
-            let mut drained = false;
-            self.data_rx.prefetch();
-            while let Some(data) = self.data_rx.pop() {
-                drained = true;
-                let msg_bytes = data.byte_len();
-                #[cfg(target_os = "linux")]
-                let msg_bytes = if shm_only {
-                    let LaneData::Dispatch(dispatch) = &data;
-                    omq_shm::send_work_bytes(&dispatch.msg)
-                } else {
-                    msg_bytes
-                };
-                batch.push(data);
-                if !budget.account(msg_bytes) {
-                    break;
-                }
-            }
-            self.data_rx.release();
-            if drained {
-                self.notify_data_space();
-            }
-            if !batch.is_empty() {
-                // Control sent before publication may race with the first
-                // drain. Observe it again before processing the data batch.
-                if self.drain_control() {
-                    self.stop(&mut touched);
-                    return;
-                }
-                let mut next = 0;
-                while next < batch.len() {
-                    #[cfg(any(feature = "lz4", feature = "zstd"))]
-                    {
-                        let (count, shutdown) = self
-                            .dispatch_codec_arena(&batch[next..], &mut touched)
-                            .await;
-                        if shutdown {
-                            self.stop(&mut touched);
-                            return;
-                        }
-                        if count > 1 {
-                            next += count;
-                            continue;
-                        }
-                    }
-                    #[cfg(target_os = "linux")]
-                    if let Some((message, count, referenced)) =
-                        self.prepare_shm_batch(&batch[next..])
-                    {
-                        if self
-                            .dispatch_shm_batch(message, count, referenced, &mut touched)
-                            .await
-                        {
-                            self.stop(&mut touched);
-                            return;
-                        }
-                        next += count;
-                        continue;
-                    }
-                    let count = self.encode_plain_batch(&batch[next..], &mut wire, &mut ends);
-                    let shutdown = if count > 1 {
-                        self.dispatch_plain_batch(wire.uncommitted_arena(), &ends, &mut touched)
-                            .await
-                    } else {
-                        self.handle_data(&batch[next], &mut touched).await
-                    };
-                    if shutdown {
-                        self.stop(&mut touched);
-                        return;
-                    }
-                    next += count.max(1);
-                }
+            let drained = self.receive_batch(&mut scratch.batch);
+            // Control sent before publication may race with the first
+            // drain. Observe it again before processing the data batch.
+            if !scratch.batch.is_empty()
+                && (self.drain_control() || self.dispatch_batch(&mut scratch).await)
+            {
+                self.stop(&mut scratch.touched);
+                return;
             }
 
-            self.flush_touched(&mut touched);
+            // 3. Wake touched peers once per batch, then park unless more
+            // data or a rearmed signal is already waiting.
+            self.flush_touched(&mut scratch.touched);
             if self.finish_data_drain(drained) {
                 tokio::task::yield_now().await;
                 continue;
@@ -689,17 +680,109 @@ impl LaneWorker {
         }
     }
 
+    /// Pop one budgeted batch from the data ring. Returns whether anything
+    /// was popped; senders waiting for ring space are woken then.
+    fn receive_batch(&mut self, batch: &mut SmallVec<[LaneData; 32]>) -> bool {
+        let mut budget = DrainBudget::WORKER;
+        // SHM-only lanes charge per-record send work, not payload bytes.
+        #[cfg(target_os = "linux")]
+        let shm_only = !self.peers.is_empty() && self.peers.values().all(|peer| peer.slot.is_shm());
+        let mut drained = false;
+
+        self.data_rx.prefetch();
+        while let Some(data) = self.data_rx.pop() {
+            drained = true;
+            let msg_bytes = data.byte_len();
+            #[cfg(target_os = "linux")]
+            let msg_bytes = if shm_only {
+                let LaneData::Dispatch(dispatch) = &data;
+                omq_shm::send_work_bytes(&dispatch.msg)
+            } else {
+                msg_bytes
+            };
+            batch.push(data);
+            if !budget.account(msg_bytes) {
+                break;
+            }
+        }
+        self.data_rx.release();
+
+        if drained {
+            self.notify_data_space();
+        }
+        drained
+    }
+
+    /// Dispatch a drained batch through the cheapest admissible path: a
+    /// shared codec arena, an SHM batch record, a plain multi-message frame,
+    /// or one publication at a time. Returns `true` on shutdown.
+    async fn dispatch_batch(&mut self, scratch: &mut LaneScratch) -> bool {
+        let mut next = 0;
+        while next < scratch.batch.len() {
+            #[cfg(any(feature = "lz4", feature = "zstd"))]
+            {
+                let (count, shutdown) = self
+                    .dispatch_codec_arena(&scratch.batch[next..], &mut scratch.touched)
+                    .await;
+                if shutdown {
+                    return true;
+                }
+                if count > 1 {
+                    next += count;
+                    continue;
+                }
+            }
+
+            #[cfg(target_os = "linux")]
+            if let Some((message, count, referenced)) =
+                self.prepare_shm_batch(&scratch.batch[next..])
+            {
+                if self
+                    .dispatch_shm_batch(message, count, referenced, &mut scratch.touched)
+                    .await
+                {
+                    return true;
+                }
+                next += count;
+                continue;
+            }
+
+            let count = self.encode_plain_batch(
+                &scratch.batch[next..],
+                &mut scratch.wire,
+                &mut scratch.ends,
+            );
+            let shutdown = if count > 1 {
+                let wire = scratch.wire.uncommitted_arena();
+                self.dispatch_plain_batch(wire, &scratch.ends, &mut scratch.touched)
+                    .await
+            } else {
+                self.handle_data(&scratch.batch[next], &mut scratch.touched)
+                    .await
+            };
+            if shutdown {
+                return true;
+            }
+            next += count.max(1);
+        }
+
+        false
+    }
+
+    /// Pack a run of same-envelope group publications into one SHM batch
+    /// record. Returns the record, how many publications it covers, and
+    /// whether bodies are pool references rather than copies.
     #[cfg(target_os = "linux")]
     fn prepare_shm_batch(&self, batch: &[LaneData]) -> Option<(Message, usize, bool)> {
-        const BATCH_COUNT_BYTES: usize = std::mem::size_of::<u16>();
-        const MIN_BATCH_MESSAGES: usize = 4;
-        if batch.len() < MIN_BATCH_MESSAGES
+        if batch.len() < SHM_BATCH_MIN_MESSAGES
             || !matches!(self.mode, FanOutMode::Group)
             || self.peers.is_empty()
             || self.peers.values().any(|peer| !peer.slot.is_shm())
         {
             return None;
         }
+
+        // Every recipient must fit the whole batch as messages.
         let limit = self
             .peers
             .values()
@@ -707,59 +790,18 @@ impl LaneWorker {
             .min()?
             .min(omq_shm::BATCH_MAX_MESSAGES);
         let LaneData::Dispatch(first) = &batch[0];
-        // Larger shared envelopes use multipart records instead.
-        if first.msg.part_slice(0)?.len() > omq_shm::COPIED_BATCH_MAX_BODY {
-            return None;
-        }
-        let kind = omq_shm::BatchKind::for_message(
-            &first.msg,
-            omq_shm::FANOUT_POOLED_BATCH_COPY_THRESHOLD,
-        );
-        let referenced = matches!(kind, omq_shm::BatchKind::Referenced);
-        let copy_limit = first.msg.part_slice(1)?.len().clamp(
-            omq_shm::FANOUT_POOLED_BATCH_COPY_THRESHOLD,
-            omq_shm::COPIED_BATCH_MAX_BODY,
-        );
-        if !referenced && first.msg.part_slice(1)?.len() > omq_shm::COPIED_BATCH_MAX_BODY {
-            return None;
-        }
-        let mut messages = SmallVec::<[&Message; omq_shm::BATCH_MAX_MESSAGES]>::new();
-        let mut budget = DrainBudget::new(limit, omq_shm::BATCH_MAX_BYTES);
-        let mut packed_bytes = BATCH_COUNT_BYTES;
-        for data in batch.iter().take(limit) {
-            let LaneData::Dispatch(dispatch) = data;
-            if dispatch.msg.len() != 2
-                || dispatch.msg.part_slice(0) != first.msg.part_slice(0)
-                || (referenced && Self::shm_copied_body(&dispatch.msg))
-            {
-                break;
-            }
-            let body_length = dispatch.msg.part_slice(1)?.len();
-            let bytes = if referenced {
-                omq_shm::REFERENCE_ENTRY_BYTES
-            } else {
-                if body_length > copy_limit {
-                    break;
-                }
-                std::mem::size_of::<u64>() + body_length
-            };
-            packed_bytes += bytes;
-            if packed_bytes > omq_shm::BATCH_MAX_BYTES {
-                break;
-            }
-            messages.push(&dispatch.msg);
-            if !budget.account(bytes) {
-                break;
-            }
-        }
-        if referenced {
+        let shape = ShmBatchShape::new(&first.msg)?;
+        let mut messages = shape.collect(batch, limit)?;
+
+        if shape.referenced {
             messages.truncate(omq_shm::pooled_prefix(&messages));
         }
-        if messages.len() < MIN_BATCH_MESSAGES {
+        if messages.len() < SHM_BATCH_MIN_MESSAGES {
             return None;
         }
-        let message = self.shm_pool.prepare_batch(&messages, kind).ok()??;
-        Some((message, messages.len(), referenced))
+
+        let message = self.shm_pool.prepare_batch(&messages, shape.kind).ok()??;
+        Some((message, messages.len(), shape.referenced))
     }
 
     #[cfg(target_os = "linux")]
@@ -860,9 +902,6 @@ impl LaneWorker {
         batch: &[LaneData],
         touched: &mut SmallVec<[u64; 32]>,
     ) -> (usize, bool) {
-        use omq_proto::proto::transform::arena::{
-            MAX_ARENA_MESSAGES, MAX_ARENA_PARTS, arena_message_size,
-        };
         if batch.len() < 2 || self.mute_policy == FanOutMutePolicy::DropOldest {
             return (0, false);
         }
@@ -871,6 +910,37 @@ impl LaneWorker {
         if !self.codec_arena_targets_ready(&targets) {
             return (0, false);
         }
+
+        let messages = self.codec_arena_members(batch, &targets);
+        if messages.len() < 2 {
+            return (0, false);
+        }
+        let count = messages.len();
+        let fallback = self.push_codec_arena(&targets, &messages, touched);
+
+        // A slot can close during encoding. If admission otherwise changed,
+        // retain normal per-message mute behavior for just that recipient.
+        if fallback.is_empty() {
+            return (count, false);
+        }
+        let shutdown = self
+            .dispatch_arena_fallback(&batch[..count], &fallback, touched)
+            .await;
+        (count, shutdown)
+    }
+
+    /// Leading publications that share `targets` and fit one arena within
+    /// every target's message and byte credit.
+    #[cfg(any(feature = "lz4", feature = "zstd"))]
+    fn codec_arena_members<'b>(
+        &self,
+        batch: &'b [LaneData],
+        targets: &[SmallVec<[u64; 32]>; MAX_CODEC_GROUPS],
+    ) -> SmallVec<[&'b Message; 32]> {
+        use omq_proto::proto::transform::arena::{
+            MAX_ARENA_MESSAGES, MAX_ARENA_PARTS, arena_message_size,
+        };
+
         let capacity = targets
             .iter()
             .enumerate()
@@ -878,10 +948,6 @@ impl LaneWorker {
             .map(|(group, _)| self.codec_groups[group].as_ref().unwrap().arena_capacity())
             .min()
             .unwrap();
-        let mut messages = SmallVec::<[&Message; 32]>::new();
-
-        let mut bytes = 0;
-        let mut parts = 0;
         let (max_messages, max_bytes) = targets.iter().flatten().fold(
             (MAX_ARENA_MESSAGES, capacity + CODEC_ARENA_FRAME_OVERHEAD),
             |(messages, bytes), id| {
@@ -889,6 +955,10 @@ impl LaneWorker {
                 (messages.min(credit), bytes.min(space))
             },
         );
+
+        let mut messages = SmallVec::new();
+        let mut bytes = 0;
+        let mut parts = 0;
         for data in batch.iter().take(max_messages) {
             let LaneData::Dispatch(dispatch) = data;
             let Some(size) = arena_message_size(&dispatch.msg) else {
@@ -896,7 +966,7 @@ impl LaneWorker {
             };
             if bytes + size > capacity
                 || parts + dispatch.msg.len() > MAX_ARENA_PARTS
-                || self.matching_peer_groups(dispatch) != targets
+                || self.matching_peer_groups(dispatch) != *targets
                 || bytes + size + CODEC_ARENA_FRAME_OVERHEAD > max_bytes
             {
                 break;
@@ -905,10 +975,20 @@ impl LaneWorker {
             parts += dispatch.msg.len();
             messages.push(&dispatch.msg);
         }
-        if messages.len() < 2 {
-            return (0, false);
-        }
-        let mut fallback = SmallVec::<[(usize, u64); 8]>::new();
+
+        messages
+    }
+
+    /// Encode one arena per codec group and push it to that group's targets.
+    /// Returns the `(group, peer)` pairs that could not take the arena.
+    #[cfg(any(feature = "lz4", feature = "zstd"))]
+    fn push_codec_arena(
+        &mut self,
+        targets: &[SmallVec<[u64; 32]>; MAX_CODEC_GROUPS],
+        messages: &[&Message],
+        touched: &mut SmallVec<[u64; 32]>,
+    ) -> SmallVec<[(usize, u64); 8]> {
+        let mut fallback = SmallVec::new();
         for (group, peers) in targets
             .iter()
             .enumerate()
@@ -917,11 +997,12 @@ impl LaneWorker {
             let Ok(wire) = self.codec_groups[group]
                 .as_mut()
                 .unwrap()
-                .encode_arena(&messages)
+                .encode_arena(messages)
             else {
                 fallback.extend(peers.iter().map(|id| (group, *id)));
                 continue;
             };
+
             let frame = build_fan_out_frame(
                 &mut self.eq,
                 &wire,
@@ -939,26 +1020,39 @@ impl LaneWorker {
             }
             clear_fan_out_frame(&mut self.eq, &mut self.chunks);
         }
-        // A slot can close during encoding. If admission otherwise changed,
-        // retain normal per-message mute behavior for just that recipient.
-        if fallback.is_empty() {
-            return (messages.len(), false);
-        }
-        for data in batch.iter().take(messages.len()) {
+
+        fallback
+    }
+
+    /// Dispatch each arena member to the recipients that missed the arena,
+    /// one publication at a time. Returns `true` on shutdown.
+    #[cfg(any(feature = "lz4", feature = "zstd"))]
+    async fn dispatch_arena_fallback(
+        &mut self,
+        members: &[LaneData],
+        fallback: &[(usize, u64)],
+        touched: &mut SmallVec<[u64; 32]>,
+    ) -> bool {
+        for data in members {
             let LaneData::Dispatch(dispatch) = data;
             let mut pending = SmallVec::new();
-            for &(group, id) in &fallback {
+            for &(group, id) in fallback {
+                let target = GroupPeers {
+                    group,
+                    peers: &[id],
+                };
                 if self.mute_policy.is_lossy() {
-                    self.dispatch_group_lossy(group, &[id], dispatch, touched);
+                    self.dispatch_group_lossy(target, dispatch, touched);
                 } else {
-                    self.dispatch_group_ready(group, &[id], dispatch, touched, &mut pending);
+                    self.dispatch_group_ready(target, dispatch, touched, &mut pending);
                 }
             }
             if self.finish_pending(&mut pending, touched).await {
-                return (messages.len(), true);
+                return true;
             }
         }
-        (messages.len(), false)
+
+        false
     }
 
     #[cfg(any(feature = "lz4", feature = "zstd"))]
@@ -1041,6 +1135,9 @@ impl LaneWorker {
         ends.len()
     }
 
+    /// Push a pre-framed plain batch to every active peer. A full peer keeps
+    /// its own resume offset; under `DropNewest` it is muted instead.
+    /// Returns `true` on shutdown.
     async fn dispatch_plain_batch(
         &mut self,
         wire: &[u8],
@@ -1052,6 +1149,7 @@ impl LaneWorker {
             if !peer.slot.fanout_active() {
                 continue;
             }
+
             let (next, result) = peer.slot.try_push_pre_framed_batch_no_signal(wire, ends, 0);
             if next > 0 {
                 Self::touch_peer(peer_id, peer, touched);
@@ -1068,6 +1166,20 @@ impl LaneWorker {
                 });
             }
         }
+
+        self.finish_plain_batch(&mut pending, wire, ends, touched)
+            .await
+    }
+
+    /// Retry blocked peers from their resume offsets until all finish, while
+    /// still serving control. Returns `true` on shutdown.
+    async fn finish_plain_batch(
+        &mut self,
+        pending: &mut SmallVec<[PendingBatchPeer; 8]>,
+        wire: &[u8],
+        ends: &[usize],
+        touched: &mut SmallVec<[u64; 32]>,
+    ) -> bool {
         while !pending.is_empty() {
             let mut waits = FuturesUnordered::new();
             pending.retain_mut(|target| {
@@ -1076,8 +1188,12 @@ impl LaneWorker {
                     .get_mut(&target.peer_id)
                     .filter(|peer| Arc::ptr_eq(&peer.slot, &target.slot))
                 else {
+                    // Removed or replaced peers drop their unsent suffix.
                     return false;
                 };
+
+                // Snapshot before admission so a concurrent drain cannot lose
+                // the only space wake between the failed push and parking.
                 let seen = target.slot.space_available.generation();
                 let (next, result) =
                     target
@@ -1090,6 +1206,7 @@ impl LaneWorker {
                 if result != TryFrameResult::Full {
                     return false;
                 }
+
                 target.slot.signal_encoded();
                 let space = target.slot.space_available.clone();
                 waits.push(async move { space.changed_after(seen).await });
@@ -1099,6 +1216,7 @@ impl LaneWorker {
             if pending.is_empty() {
                 break;
             }
+
             tokio::select! {
                 biased;
                 () = self.ctrl.ready() => {
@@ -1107,46 +1225,14 @@ impl LaneWorker {
                 _ = waits.next() => {}
             }
         }
+
         false
     }
 
     fn handle_control(&mut self, cmd: LaneControl) -> bool {
         match cmd {
-            LaneControl::AddPeer { add, codec_group } => {
-                let group = self.codec_groups[codec_group].get_or_insert_with(|| {
-                    let mut group = CodecGroup::new(add.slot.codec_profile().cloned())
-                        .expect("validated codec profile");
-                    group.shm = add.slot.is_shm();
-                    group
-                });
-                group.peers += 1;
-                self.peers.insert(
-                    add.peer_id,
-                    LanePeer {
-                        subscriptions: SubscriptionSet::new(),
-                        groups: FxHashSet::default(),
-                        any_groups: add.any_groups,
-                        dict_shipped: add.slot.fanout_dict_shipped(),
-                        codec_group,
-                        needs_flush: false,
-                        slot: add.slot,
-                    },
-                );
-            }
-            LaneControl::RemovePeer { peer_id } => {
-                if let Some(peer) = self.peers.remove(&peer_id) {
-                    if peer.subscriptions.is_subscribe_all() {
-                        self.subscribe_all_count = self.subscribe_all_count.saturating_sub(1);
-                    }
-                    let group = self.codec_groups[peer.codec_group]
-                        .as_mut()
-                        .expect("peer codec group");
-                    group.peers -= 1;
-                    if group.peers == 0 {
-                        self.codec_groups[peer.codec_group] = None;
-                    }
-                }
-            }
+            LaneControl::AddPeer { add, codec_group } => self.add_peer(add, codec_group),
+            LaneControl::RemovePeer { peer_id } => self.remove_peer(peer_id),
             LaneControl::Subscribe {
                 peer_id,
                 prefix,
@@ -1183,6 +1269,48 @@ impl LaneWorker {
         false
     }
 
+    /// Peers of one codec profile share a codec group, created by its first
+    /// peer and dropped with its last.
+    fn add_peer(&mut self, add: LanePeerAdd, codec_group: usize) {
+        let group = self.codec_groups[codec_group].get_or_insert_with(|| {
+            let mut group = CodecGroup::new(add.slot.codec_profile().cloned())
+                .expect("validated codec profile");
+            group.shm = add.slot.is_shm();
+            group
+        });
+        group.peers += 1;
+
+        self.peers.insert(
+            add.peer_id,
+            LanePeer {
+                subscriptions: SubscriptionSet::new(),
+                groups: FxHashSet::default(),
+                any_groups: add.any_groups,
+                dict_shipped: add.slot.fanout_dict_shipped(),
+                codec_group,
+                needs_flush: false,
+                slot: add.slot,
+            },
+        );
+    }
+
+    fn remove_peer(&mut self, peer_id: u64) {
+        let Some(peer) = self.peers.remove(&peer_id) else {
+            return;
+        };
+        if peer.subscriptions.is_subscribe_all() {
+            self.subscribe_all_count = self.subscribe_all_count.saturating_sub(1);
+        }
+
+        let group = self.codec_groups[peer.codec_group]
+            .as_mut()
+            .expect("peer codec group");
+        group.peers -= 1;
+        if group.peers == 0 {
+            self.codec_groups[peer.codec_group] = None;
+        }
+    }
+
     async fn dispatch(
         &mut self,
         dispatch: &LaneDispatch,
@@ -1190,91 +1318,69 @@ impl LaneWorker {
     ) -> bool {
         let targets = self.matching_peer_groups(dispatch);
         if self.mute_policy.is_lossy() {
-            for (group_id, peer_ids) in targets.into_iter().enumerate() {
-                self.dispatch_group_lossy(group_id, &peer_ids, dispatch, touched);
+            for (group, peers) in targets.iter().enumerate() {
+                self.dispatch_group_lossy(GroupPeers { group, peers }, dispatch, touched);
             }
             return false;
         }
+
         // One publication in flight. Retain at most one payload and one
         // dictionary frame per bounded group, shared by its blocked peers.
         let mut pending = SmallVec::<[PendingPeer; 8]>::new();
-        for (group_id, peer_ids) in targets.into_iter().enumerate() {
-            self.dispatch_group_ready(group_id, &peer_ids, dispatch, touched, &mut pending);
+        for (group, peers) in targets.iter().enumerate() {
+            let target = GroupPeers { group, peers };
+            self.dispatch_group_ready(target, dispatch, touched, &mut pending);
         }
         self.finish_pending(&mut pending, touched).await
     }
 
+    fn is_shm_group(&self, group: usize) -> bool {
+        self.codec_groups[group]
+            .as_ref()
+            .expect("matched codec group")
+            .shm
+    }
+
+    /// Frame one publication for a codec group under a blocking mute policy.
+    /// Peers without room join `pending` with a shared owned copy.
     fn dispatch_group_ready(
         &mut self,
-        group_id: usize,
-        peer_ids: &[u64],
+        target: GroupPeers<'_>,
         dispatch: &LaneDispatch,
         touched: &mut SmallVec<[u64; 32]>,
         pending: &mut SmallVec<[PendingPeer; 8]>,
     ) {
-        if peer_ids.is_empty() {
+        if target.peers.is_empty() {
             return;
         }
-        if self.codec_groups[group_id]
-            .as_ref()
-            .expect("matched codec group")
-            .shm
-        {
-            self.dispatch_shm_group(peer_ids, dispatch, touched, Some(pending));
+        if self.is_shm_group(target.group) {
+            self.dispatch_shm_group(target.peers, dispatch, touched, Some(pending));
             return;
         }
-        let group = self.codec_groups[group_id]
+
+        let group = self.codec_groups[target.group]
             .as_mut()
             .expect("matched codec group");
         let Ok(wire_messages) = group.encode(&dispatch.msg) else {
             return;
         };
         let dictionary = group.dictionary().cloned();
-        let mut owned_dict = None;
-        if let Some(dict) = &dictionary {
-            let frame = build_fan_out_frame(
-                &mut self.eq,
-                dict,
-                &mut self.chunks,
-                peer_ids.len(),
-                FAN_OUT_TOTAL_COPY_BUDGET,
-            );
-            for &peer_id in peer_ids {
-                let Some(peer) = self.peers.get_mut(&peer_id) else {
-                    continue;
-                };
-                if !peer.dict_shipped {
-                    if Self::try_push_frame(&peer.slot, &frame) == TryFrameResult::Ok {
-                        peer.dict_shipped = true;
-                        peer.slot.mark_fanout_dict_shipped();
-                        Self::touch_peer(peer_id, peer, touched);
-                    } else {
-                        owned_dict
-                            .get_or_insert_with(|| Arc::new(PreparedFrame::from_frame(&frame)));
-                    }
-                }
-            }
-            clear_fan_out_frame(&mut self.eq, &mut self.chunks);
-        }
-        for message in &wire_messages {
-            encode_fan_out_message(
-                &mut self.eq,
-                message,
-                peer_ids.len(),
-                FAN_OUT_TOTAL_COPY_BUDGET,
-            );
-        }
-        let frame = finish_fan_out_frame(
+        let owned_dict = dictionary
+            .as_ref()
+            .and_then(|dict| self.ship_dictionary_ready(dict, target.peers, touched));
+
+        let frame = frame_publication(
             &mut self.eq,
             &mut self.chunks,
-            peer_ids.len(),
-            FAN_OUT_TOTAL_COPY_BUDGET,
+            &wire_messages,
+            target.peers.len(),
         );
         let mut owned_payload = None;
-        for &peer_id in peer_ids {
+        for &peer_id in target.peers {
             let Some(peer) = self.peers.get_mut(&peer_id) else {
                 continue;
             };
+            // A payload must not overtake its peer's unshipped dictionary.
             let needs_dict = dictionary.is_some() && !peer.dict_shipped;
             let result = if needs_dict {
                 TryFrameResult::Full
@@ -1298,6 +1404,44 @@ impl LaneWorker {
             }
         }
         clear_fan_out_frame(&mut self.eq, &mut self.chunks);
+    }
+
+    /// Ship the group dictionary to peers that lack it. Returns an owned copy
+    /// for peers that must wait for room, if any.
+    fn ship_dictionary_ready(
+        &mut self,
+        dict: &Message,
+        peer_ids: &[u64],
+        touched: &mut SmallVec<[u64; 32]>,
+    ) -> Option<Arc<PreparedFrame>> {
+        let frame = build_fan_out_frame(
+            &mut self.eq,
+            dict,
+            &mut self.chunks,
+            peer_ids.len(),
+            FAN_OUT_TOTAL_COPY_BUDGET,
+        );
+
+        let mut owned_dict = None;
+        for &peer_id in peer_ids {
+            let Some(peer) = self.peers.get_mut(&peer_id) else {
+                continue;
+            };
+            if peer.dict_shipped {
+                continue;
+            }
+
+            if Self::try_push_frame(&peer.slot, &frame) == TryFrameResult::Ok {
+                peer.dict_shipped = true;
+                peer.slot.mark_fanout_dict_shipped();
+                Self::touch_peer(peer_id, peer, touched);
+            } else {
+                owned_dict.get_or_insert_with(|| Arc::new(PreparedFrame::from_frame(&frame)));
+            }
+        }
+        clear_fan_out_frame(&mut self.eq, &mut self.chunks);
+
+        owned_dict
     }
 
     fn dispatch_shm_group(
@@ -1514,9 +1658,7 @@ impl LaneWorker {
                 && (all_subscribe_all
                     || filter::peer_matches(
                         self.mode,
-                        &peer.subscriptions,
-                        &peer.groups,
-                        peer.any_groups,
+                        &peer.filter(),
                         dispatch.msg.part_slice(0).unwrap_or_default(),
                         matches!(self.mode, FanOutMode::Group)
                             .then(|| dispatch.msg.part_slice(0).unwrap_or_default()),
@@ -1530,30 +1672,28 @@ impl LaneWorker {
 
     #[cfg(test)]
     fn dispatch_lossy(&mut self, dispatch: &LaneDispatch, touched: &mut SmallVec<[u64; 32]>) {
-        for (group_id, peers) in self.matching_peer_groups(dispatch).into_iter().enumerate() {
-            self.dispatch_group_lossy(group_id, &peers, dispatch, touched);
+        for (group, peers) in self.matching_peer_groups(dispatch).iter().enumerate() {
+            self.dispatch_group_lossy(GroupPeers { group, peers }, dispatch, touched);
         }
     }
 
+    /// Frame one publication for a codec group under a lossy mute policy.
+    /// Full peers drop it instead of waiting.
     fn dispatch_group_lossy(
         &mut self,
-        group_id: usize,
-        peer_ids: &[u64],
+        target: GroupPeers<'_>,
         dispatch: &LaneDispatch,
         touched: &mut SmallVec<[u64; 32]>,
     ) {
-        if peer_ids.is_empty() {
+        if target.peers.is_empty() {
             return;
         }
-        if self.codec_groups[group_id]
-            .as_ref()
-            .expect("matched codec group")
-            .shm
-        {
-            self.dispatch_shm_group(peer_ids, dispatch, touched, None);
+        if self.is_shm_group(target.group) {
+            self.dispatch_shm_group(target.peers, dispatch, touched, None);
             return;
         }
-        let group = self.codec_groups[group_id]
+
+        let group = self.codec_groups[target.group]
             .as_mut()
             .expect("matched codec group");
         let Ok(wire_messages) = group.encode(&dispatch.msg) else {
@@ -1561,72 +1701,65 @@ impl LaneWorker {
         };
         let dict_msg = group.dictionary().cloned();
 
-        let payload_peer_ids = if let Some(dict) = dict_msg.as_ref() {
-            let mut payload_peer_ids = SmallVec::<[u64; 32]>::new();
-            encode_fan_out_message(
-                &mut self.eq,
-                dict,
-                peer_ids.len(),
-                FAN_OUT_TOTAL_COPY_BUDGET,
-            );
-            {
-                let encoded = finish_fan_out_frame(
-                    &mut self.eq,
-                    &mut self.chunks,
-                    peer_ids.len(),
-                    FAN_OUT_TOTAL_COPY_BUDGET,
-                );
-                for &peer_id in peer_ids {
-                    let Some(peer) = self.peers.get_mut(&peer_id) else {
-                        continue;
-                    };
-                    let dict_ready = peer.slot.fanout_dict_queued_or_shipped()
-                        || Self::push_protected_frame_to_peer_lossy(
-                            self.mute_policy,
-                            peer_id,
-                            peer,
-                            &encoded,
-                            touched,
-                        );
-                    if dict_ready {
-                        payload_peer_ids.push(peer_id);
-                    }
-                }
-            }
-            clear_fan_out_frame(&mut self.eq, &mut self.chunks);
-
-            payload_peer_ids
-        } else {
-            SmallVec::<[u64; 32]>::from_slice(peer_ids)
+        // A payload is only useful to peers whose dictionary already went out.
+        let payload_peer_ids = match dict_msg.as_ref() {
+            Some(dict) => self.ship_dictionary_lossy(dict, target.peers, touched),
+            None => SmallVec::<[u64; 32]>::from_slice(target.peers),
         };
-
         if payload_peer_ids.is_empty() {
             return;
         }
 
-        for wire_msg in &wire_messages {
-            encode_fan_out_message(
-                &mut self.eq,
-                wire_msg,
-                payload_peer_ids.len(),
-                FAN_OUT_TOTAL_COPY_BUDGET,
-            );
-        }
-
-        let encoded = finish_fan_out_frame(
+        let encoded = frame_publication(
             &mut self.eq,
             &mut self.chunks,
+            &wire_messages,
             payload_peer_ids.len(),
-            FAN_OUT_TOTAL_COPY_BUDGET,
         );
-
         for peer_id in payload_peer_ids {
             if let Some(peer) = self.peers.get_mut(&peer_id) {
                 Self::push_frame_to_peer_lossy(self.mute_policy, peer_id, peer, &encoded, touched);
             }
         }
-
         clear_fan_out_frame(&mut self.eq, &mut self.chunks);
+    }
+
+    /// Queue the group dictionary where it is not queued or shipped yet.
+    /// Returns the peers that now have it ahead of the payload.
+    fn ship_dictionary_lossy(
+        &mut self,
+        dict: &Message,
+        peer_ids: &[u64],
+        touched: &mut SmallVec<[u64; 32]>,
+    ) -> SmallVec<[u64; 32]> {
+        let mut payload_peer_ids = SmallVec::new();
+        let encoded = build_fan_out_frame(
+            &mut self.eq,
+            dict,
+            &mut self.chunks,
+            peer_ids.len(),
+            FAN_OUT_TOTAL_COPY_BUDGET,
+        );
+
+        for &peer_id in peer_ids {
+            let Some(peer) = self.peers.get_mut(&peer_id) else {
+                continue;
+            };
+            let dict_ready = peer.slot.fanout_dict_queued_or_shipped()
+                || Self::push_protected_frame_to_peer_lossy(
+                    self.mute_policy,
+                    peer_id,
+                    peer,
+                    &encoded,
+                    touched,
+                );
+            if dict_ready {
+                payload_peer_ids.push(peer_id);
+            }
+        }
+        clear_fan_out_frame(&mut self.eq, &mut self.chunks);
+
+        payload_peer_ids
     }
 
     fn push_frame_to_peer_lossy(
@@ -1636,7 +1769,11 @@ impl LaneWorker {
         frame: &FanOutFrame<'_>,
         touched: &mut SmallVec<[u64; 32]>,
     ) -> bool {
-        Self::push_frame_to_peer_lossy_inner(mute_policy, peer_id, peer, frame, touched, false)
+        let push = LossyPush {
+            policy: mute_policy,
+            protected: false,
+        };
+        Self::push_frame_to_peer_lossy_inner(push, peer_id, peer, frame, touched)
     }
 
     fn push_protected_frame_to_peer_lossy(
@@ -1646,19 +1783,23 @@ impl LaneWorker {
         frame: &FanOutFrame<'_>,
         touched: &mut SmallVec<[u64; 32]>,
     ) -> bool {
-        Self::push_frame_to_peer_lossy_inner(mute_policy, peer_id, peer, frame, touched, true)
+        let push = LossyPush {
+            policy: mute_policy,
+            protected: true,
+        };
+        Self::push_frame_to_peer_lossy_inner(push, peer_id, peer, frame, touched)
     }
 
+    /// Returns whether the peer took the frame.
     fn push_frame_to_peer_lossy_inner(
-        mute_policy: FanOutMutePolicy,
+        push: LossyPush,
         peer_id: u64,
         peer: &mut LanePeer,
         frame: &FanOutFrame<'_>,
         touched: &mut SmallVec<[u64; 32]>,
-        protected: bool,
     ) -> bool {
-        let result = match mute_policy {
-            FanOutMutePolicy::DropOldest if protected => {
+        let result = match push.policy {
+            FanOutMutePolicy::DropOldest if push.protected => {
                 peer.slot.try_push_protected_fanout_drop_oldest(frame)
             }
             FanOutMutePolicy::DropOldest => peer.slot.try_push_fanout_drop_oldest(frame),
@@ -1667,9 +1808,12 @@ impl LaneWorker {
                 FanOutFrame::Chunks(chunks) => peer.slot.try_push_encoded_no_signal(chunks),
             },
         };
+
         match result {
             TryFrameResult::Ok => {
-                if protected && mute_policy != FanOutMutePolicy::DropOldest {
+                // Under DropOldest the slot marks a protected dictionary shipped
+                // once it drains it. Here it is only queued.
+                if push.protected && push.policy != FanOutMutePolicy::DropOldest {
                     peer.dict_shipped = true;
                     peer.slot.mark_fanout_dict_shipped();
                 }
@@ -1678,7 +1822,7 @@ impl LaneWorker {
             }
             TryFrameResult::Dead | TryFrameResult::Ineligible => false,
             TryFrameResult::Full => {
-                if mute_policy == FanOutMutePolicy::DropNewest {
+                if push.policy == FanOutMutePolicy::DropNewest {
                     peer.slot.deactivate_fanout();
                 }
                 false
@@ -1761,6 +1905,122 @@ struct PendingPeer {
     dictionary: Option<Arc<PreparedFrame>>,
 }
 
+/// Matched recipients of one codec group.
+#[derive(Clone, Copy)]
+struct GroupPeers<'a> {
+    group: usize,
+    peers: &'a [u64],
+}
+
+/// How a lossy push treats a full peer. A protected frame is a dictionary
+/// that `DropOldest` eviction must keep.
+#[derive(Clone, Copy)]
+struct LossyPush {
+    policy: FanOutMutePolicy,
+    protected: bool,
+}
+
+/// Frame a group's encoded publication once for `recipients` peers.
+fn frame_publication<'f>(
+    eq: &'f mut FrameBuffer,
+    chunks: &'f mut Vec<Bytes>,
+    wire: &TransformedOut,
+    recipients: usize,
+) -> FanOutFrame<'f> {
+    for message in wire {
+        encode_fan_out_message(eq, message, recipients, FAN_OUT_TOTAL_COPY_BUDGET);
+    }
+    finish_fan_out_frame(eq, chunks, recipients, FAN_OUT_TOTAL_COPY_BUDGET)
+}
+
+/// Shorter runs are cheaper as individual SHM records.
+#[cfg(target_os = "linux")]
+const SHM_BATCH_MIN_MESSAGES: usize = 4;
+
+/// Layout every member of one fan-out SHM batch shares with the first
+/// publication: two parts, the same envelope, and one body storage kind.
+#[cfg(target_os = "linux")]
+struct ShmBatchShape<'m> {
+    first: &'m Message,
+    kind: omq_shm::BatchKind,
+    referenced: bool,
+    copy_limit: usize,
+}
+
+#[cfg(target_os = "linux")]
+impl<'m> ShmBatchShape<'m> {
+    fn new(first: &'m Message) -> Option<Self> {
+        // Larger shared envelopes use multipart records instead.
+        if first.part_slice(0)?.len() > omq_shm::COPIED_BATCH_MAX_BODY {
+            return None;
+        }
+
+        let kind =
+            omq_shm::BatchKind::for_message(first, omq_shm::FANOUT_POOLED_BATCH_COPY_THRESHOLD);
+        let referenced = matches!(kind, omq_shm::BatchKind::Referenced);
+        let body = first.part_slice(1)?.len();
+        let copy_limit = body.clamp(
+            omq_shm::FANOUT_POOLED_BATCH_COPY_THRESHOLD,
+            omq_shm::COPIED_BATCH_MAX_BODY,
+        );
+        if !referenced && body > omq_shm::COPIED_BATCH_MAX_BODY {
+            return None;
+        }
+
+        Some(Self {
+            first,
+            kind,
+            referenced,
+            copy_limit,
+        })
+    }
+
+    /// Leading publications that share this shape and fit one record.
+    /// `None` when a candidate has no body part.
+    fn collect<'b>(
+        &self,
+        batch: &'b [LaneData],
+        limit: usize,
+    ) -> Option<SmallVec<[&'b Message; omq_shm::BATCH_MAX_MESSAGES]>> {
+        // The record starts with a u16 member count.
+        let mut packed_bytes = std::mem::size_of::<u16>();
+        let mut budget = DrainBudget::new(limit, omq_shm::BATCH_MAX_BYTES);
+        let mut messages = SmallVec::new();
+
+        for data in batch.iter().take(limit) {
+            let LaneData::Dispatch(dispatch) = data;
+            if dispatch.msg.len() != 2
+                || dispatch.msg.part_slice(0) != self.first.part_slice(0)
+                || (self.referenced && LaneWorker::shm_copied_body(&dispatch.msg))
+            {
+                break;
+            }
+
+            let body_length = dispatch.msg.part_slice(1)?.len();
+            let bytes = if self.referenced {
+                omq_shm::REFERENCE_ENTRY_BYTES
+            } else {
+                if body_length > self.copy_limit {
+                    break;
+                }
+                // Copied entries carry a u64 length before the body.
+                std::mem::size_of::<u64>() + body_length
+            };
+            packed_bytes += bytes;
+            if packed_bytes > omq_shm::BATCH_MAX_BYTES {
+                break;
+            }
+
+            messages.push(&dispatch.msg);
+            if !budget.account(bytes) {
+                break;
+            }
+        }
+
+        Some(messages)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
@@ -1778,6 +2038,7 @@ mod tests {
     use smallvec::SmallVec;
 
     use crate::engine::control_queue::ControlQueue;
+    use crate::engine::transmit_slot::SlotConfig;
     use crate::routing::subscription::SubscriptionSet;
 
     use super::{
@@ -1861,7 +2122,6 @@ mod tests {
 
     #[tokio::test]
     async fn native_readiness_observes_inactive_lanes_worker_exit_and_close() {
-        use crate::routing::fan_out::FanOutSend;
         use std::future::Future;
 
         #[derive(Default)]
@@ -1873,25 +2133,8 @@ mod tests {
         }
 
         for event in ["remove", "exit", "close"] {
-            let mut sender = FanOutSend::new(
-                omq_proto::SocketType::Radio,
-                &omq_proto::Options::default(),
-                FanOutMode::Group,
-                &crate::context::IoPoolHandle::none(),
-            );
-            let (lanes, _receivers) = paused_lanes(2);
-            sender.lanes = Arc::new(lanes);
-            sender
-                .lane_peer_count
-                .store(2, std::sync::atomic::Ordering::Release);
+            let (sender, _receivers) = full_radio_sender();
             let submitter = sender.submitter();
-            let message = omq_proto::Message::with_group("group", "body");
-            submitter.try_send(message.clone()).unwrap();
-            assert!(matches!(
-                submitter.try_send(message),
-                Err(omq_proto::TrySendError::Full(_))
-            ));
-            assert!(!submitter.send_ready());
             let wake = Arc::new(CountWake::default());
             let waker = std::task::Waker::from(wake.clone());
             let mut cx = std::task::Context::from_waker(&waker);
@@ -1899,18 +2142,7 @@ mod tests {
             assert!(wait.as_mut().poll(&mut cx).is_pending());
 
             for lane in 0..2 {
-                match event {
-                    "remove" => sender.lanes.remove_peer(lane, 100),
-                    "exit" => {
-                        let dist = sender.lanes.distributor.lock().unwrap();
-                        dist.lanes[lane]
-                            .exited
-                            .store(true, std::sync::atomic::Ordering::Release);
-                        dist.space.notify_changed();
-                    }
-                    "close" => sender.stop_admission(),
-                    _ => unreachable!(),
-                }
+                release_lane(&sender, event, lane);
                 if lane == 0 || event != "close" {
                     assert!(
                         wake.0.swap(0, std::sync::atomic::Ordering::SeqCst) > 0,
@@ -1936,6 +2168,51 @@ mod tests {
             } else {
                 result.unwrap();
             }
+        }
+    }
+
+    /// A RADIO sender over two paused lanes whose one-slot rings are full.
+    fn full_radio_sender() -> (
+        crate::routing::fan_out::FanOutSend,
+        Vec<yring::Consumer<LaneData>>,
+    ) {
+        let mut sender = crate::routing::fan_out::FanOutSend::new(
+            omq_proto::SocketType::Radio,
+            &omq_proto::Options::default(),
+            FanOutMode::Group,
+            &crate::context::IoPoolHandle::none(),
+        );
+        let (lanes, receivers) = paused_lanes(2);
+        sender.lanes = Arc::new(lanes);
+        sender
+            .lane_peer_count
+            .store(2, std::sync::atomic::Ordering::Release);
+
+        let submitter = sender.submitter();
+        let message = omq_proto::Message::with_group("group", "body");
+        submitter.try_send(message.clone()).unwrap();
+        assert!(matches!(
+            submitter.try_send(message),
+            Err(omq_proto::TrySendError::Full(_))
+        ));
+        assert!(!submitter.send_ready());
+        (sender, receivers)
+    }
+
+    /// Free `lane` the way `event` names: remove its peer, mark its worker
+    /// exited, or stop admission for all lanes.
+    fn release_lane(sender: &crate::routing::fan_out::FanOutSend, event: &str, lane: usize) {
+        match event {
+            "remove" => sender.lanes.remove_peer(lane, 100),
+            "exit" => {
+                let dist = sender.lanes.distributor.lock().unwrap();
+                dist.lanes[lane]
+                    .exited
+                    .store(true, std::sync::atomic::Ordering::Release);
+                dist.space.notify_changed();
+            }
+            "close" => sender.stop_admission(),
+            _ => unreachable!(),
         }
     }
 
@@ -2241,6 +2518,57 @@ mod tests {
     fn drop_oldest_lossy_dispatch_keeps_dict_with_first_payload() {
         let (_data_tx, data_rx) = yring::spsc::<LaneData>(4);
         let slot = test_slot_with_msg_cap(7, 1);
+        let options = Options::default().compression_dict(Bytes::from_static(b"shared-dict"));
+        let mut codec_groups = std::array::from_fn(|_| None);
+        codec_groups[0] = Some(
+            super::CodecGroup::new(Some(crate::engine::codec::CodecProfile::new(
+                CompressionKind::Lz4,
+                &options,
+            )))
+            .unwrap(),
+        );
+        let mut worker =
+            single_peer_worker(data_rx, &slot, FanOutMutePolicy::DropOldest, codec_groups);
+        let mut touched = SmallVec::new();
+
+        let payload = "shared-dict".repeat(16);
+        worker.dispatch_lossy(&test_dispatch(&payload), &mut touched);
+        worker.dispatch_lossy(&test_dispatch(&payload), &mut touched);
+
+        let mut actual = Vec::new();
+        slot.drain(&mut actual, 1024);
+        assert_eq!(actual.len(), 1);
+        let bytes = actual.concat();
+        assert!(
+            bytes.windows(4).any(|window| window == b"LZ4D"),
+            "dict shipment must stay queued"
+        );
+        assert!(
+            !bytes.windows(4).any(|window| window == b"LZ4B"),
+            "compressed payload must not evict or share the protected dict slot"
+        );
+
+        worker.dispatch_lossy(&test_dispatch(&payload), &mut touched);
+        let mut after_dict = Vec::new();
+        slot.drain(&mut after_dict, 1024);
+        assert_eq!(after_dict.len(), 1);
+        assert!(
+            after_dict
+                .concat()
+                .windows(4)
+                .any(|window| window == b"LZ4B"),
+            "payload may queue after protected dict drains"
+        );
+    }
+
+    /// A worker with one subscribe-all peer 7 on codec group 0.
+    #[cfg(feature = "lz4")]
+    fn single_peer_worker(
+        data_rx: yring::Consumer<LaneData>,
+        slot: &Arc<crate::engine::transmit_slot::PeerTransmitSlot>,
+        mute_policy: FanOutMutePolicy,
+        codec_groups: [Option<super::CodecGroup>; super::MAX_CODEC_GROUPS],
+    ) -> LaneWorker {
         let mut subscriptions = SubscriptionSet::new();
         subscriptions.add(b"");
         let mut peers = FxHashMap::default();
@@ -2256,7 +2584,8 @@ mod tests {
                 needs_flush: false,
             },
         );
-        let mut worker = LaneWorker {
+
+        LaneWorker {
             #[cfg(target_os = "linux")]
             shm_pool: omq_shm::SendPool::new(16, None),
             data_rx,
@@ -2265,60 +2594,14 @@ mod tests {
             data_signal: Arc::new(crate::engine::signal::DataSignal::new()),
             data_space: Arc::new(crate::engine::signal::StateSignal::new()),
             mode: FanOutMode::SubscriptionPrefix,
-            mute_policy: FanOutMutePolicy::DropOldest,
+            mute_policy,
             peers,
             subscribe_all_count: 1,
             eq: FrameBuffer::one_shot(),
             chunks: Vec::new(),
-            codec_groups: {
-                let options =
-                    Options::default().compression_dict(Bytes::from_static(b"shared-dict"));
-                let mut groups = std::array::from_fn(|_| None);
-                groups[0] = Some(
-                    super::CodecGroup::new(Some(crate::engine::codec::CodecProfile::new(
-                        CompressionKind::Lz4,
-                        &options,
-                    )))
-                    .unwrap(),
-                );
-                groups
-            },
+            codec_groups,
             exited: Arc::new(AtomicBool::new(false)),
-        };
-        let mut touched = SmallVec::new();
-
-        let payload = "shared-dict".repeat(16);
-        worker.dispatch_lossy(&test_dispatch(&payload), &mut touched);
-        worker.dispatch_lossy(&test_dispatch(&payload), &mut touched);
-
-        let mut actual = Vec::new();
-        slot.drain(&mut actual, 1024);
-        assert_eq!(actual.len(), 1);
-        let mut bytes = Vec::new();
-        for chunk in actual {
-            bytes.extend_from_slice(&chunk);
         }
-        assert!(
-            bytes.windows(4).any(|window| window == b"LZ4D"),
-            "dict shipment must stay queued"
-        );
-        assert!(
-            !bytes.windows(4).any(|window| window == b"LZ4B"),
-            "compressed payload must not evict or share the protected dict slot"
-        );
-
-        worker.dispatch_lossy(&test_dispatch(&payload), &mut touched);
-        let mut after_dict = Vec::new();
-        slot.drain(&mut after_dict, 1024);
-        assert_eq!(after_dict.len(), 1);
-        let mut bytes = Vec::new();
-        for chunk in after_dict {
-            bytes.extend_from_slice(&chunk);
-        }
-        assert!(
-            bytes.windows(4).any(|window| window == b"LZ4B"),
-            "payload may queue after protected dict drains"
-        );
     }
 
     #[test]
@@ -2671,16 +2954,15 @@ mod tests {
         peer_id: u64,
         msg_cap: usize,
     ) -> Arc<crate::engine::transmit_slot::PeerTransmitSlot> {
-        crate::engine::transmit_slot::PeerTransmitSlot::new(
+        crate::engine::transmit_slot::PeerTransmitSlot::with_config(
             peer_id,
-            false,
-            None,
-            None,
-            4096,
-            16 * 1024,
-            64 * 1024,
-            msg_cap,
-            crate::engine::framing::WireFraming::Zmtp,
+            SlotConfig {
+                arena_threshold: 4096,
+                arena_cap: 16 * 1024,
+                cap: 64 * 1024,
+                msg_cap,
+                ..SlotConfig::default()
+            },
         )
     }
 

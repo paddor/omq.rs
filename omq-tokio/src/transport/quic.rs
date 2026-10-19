@@ -82,15 +82,7 @@ impl Roles {
             config,
         ))
         .abort_handle();
-        let (data_send, data_recv) = self.data;
-        QuicStream::new(
-            self.carrier,
-            endpoint,
-            group,
-            data_send,
-            data_recv,
-            liveness,
-        )
+        QuicStream::new(self.carrier, endpoint, group, self.data, liveness)
     }
 }
 

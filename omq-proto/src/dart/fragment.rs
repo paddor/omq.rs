@@ -1,5 +1,5 @@
 //! Bounded fragment retention and incremental atomic receive assembly.
-use super::{DATA_HEADER, Duration, Ecn, Message, Sent, Session};
+use super::{DATA_HEADER, Duration, Message, Receipt, Sent, Session};
 use crate::dart::MAX_FRAGMENT_BODY;
 use crate::message::Payload;
 
@@ -165,11 +165,9 @@ impl<B: FragmentBuffer> Session<B> {
     /// The sequence must have been accepted by [`Self::classify`].
     pub fn commit_fragment_with(
         &mut self,
-        sequence: u64,
+        receipt: Receipt,
         length: Option<u64>,
         message: Message,
-        ecn: Ecn,
-        now: Duration,
         reserve: impl FnOnce(usize) -> Option<B>,
     ) -> bool {
         let fragment = if let Some(length) = length {
@@ -180,15 +178,18 @@ impl<B: FragmentBuffer> Session<B> {
             let Some(chunk) = message.part_slice(usize::from(grouped)) else {
                 return false;
             };
+            // FIRST must leave at least one byte for a continuation.
             if length <= chunk.len() || chunk.is_empty() {
                 return false;
             }
+
             let Some(body) = reserve(length) else {
                 return false;
             };
             if !body.as_ref().is_empty() || body.capacity() < length {
                 return false;
             }
+
             self.reserved_ahead += length;
             FragmentReceive::First(Assembly {
                 body,
@@ -196,14 +197,16 @@ impl<B: FragmentBuffer> Session<B> {
                 group: grouped.then(|| message.part_bytes(0).expect("group")),
             })
         } else {
+            // Only FIRST carries a group, so a continuation is one part.
             if message.len() != 1 || message.byte_len() == 0 {
                 return false;
             }
             FragmentReceive::Continuation
         };
-        let index = self.index(sequence);
+
+        let index = self.index(receipt.sequence);
         self.fragments[index] = Some(fragment);
-        self.commit_receive(sequence, message, ecn, now);
+        self.commit_receive(receipt, message);
         true
     }
 

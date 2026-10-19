@@ -68,15 +68,16 @@ impl OutboundState {
         }
     }
 
-    /// Encode a bounded batch directly, or queue ordered compression offloads.
+    /// Encode a batch of at most `OUTBOUND_BATCH_MAX_MSGS` messages directly,
+    /// or queue ordered compression offloads.
     pub(super) fn batch_encode(
         &mut self,
         first: &Message,
         mut try_recv: impl FnMut() -> Option<Message>,
-        max_msgs: usize,
         connection: &mut Connection,
         eq: &mut FrameBuffer,
     ) -> Result<usize> {
+        let max_msgs = OUTBOUND_BATCH_MAX_MSGS;
         #[cfg(target_os = "linux")]
         if let Some(shm) = &mut self.shm {
             return shm.stage(first, try_recv, max_msgs, eq);
@@ -87,9 +88,12 @@ impl OutboundState {
             .as_ref()
             .is_some_and(|encoder| encoder.arena_capacity() > 0)
         {
-            return self.batch_encode_arena(first, try_recv, max_msgs, connection, eq);
+            return self.batch_encode_arena(first, try_recv, connection, eq);
         }
+
         let started = Instant::now();
+        // With offload on, small messages also enter the ordered pipeline as
+        // ready results, so they cannot overtake a large offload on the wire.
         let use_pipeline = self.offload_threshold > 0
             && self
                 .encoder
@@ -116,6 +120,7 @@ impl OutboundState {
                 )
             }
         };
+
         encode(first)?;
         let mut count = 1usize;
         let mut bytes = first.byte_len();
@@ -134,21 +139,24 @@ impl OutboundState {
                 None => break,
             }
         }
+
         Ok(count)
     }
 
+    /// Pack small messages into shared compression arenas. A message that
+    /// does not fit any arena closes the current one and is encoded alone.
     #[cfg(any(feature = "lz4", feature = "zstd"))]
     fn batch_encode_arena(
         &mut self,
         first: &Message,
         mut try_recv: impl FnMut() -> Option<Message>,
-        max_msgs: usize,
         connection: &mut Connection,
         eq: &mut FrameBuffer,
     ) -> Result<usize> {
         use omq_proto::proto::transform::arena::{
             MAX_ARENA_MESSAGES, MAX_ARENA_PARTS, arena_message_size,
         };
+
         let started = Instant::now();
         let capacity = self.encoder.as_ref().unwrap().arena_capacity();
         let mut messages = smallvec::SmallVec::<[Message; 32]>::new();
@@ -157,6 +165,7 @@ impl OutboundState {
         let mut count = 0;
         let mut bytes = 0;
         let mut next = Some(first.clone());
+
         while let Some(message) = next {
             let size = arena_message_size(&message).filter(|size| *size <= capacity);
             if size.is_none()
@@ -169,6 +178,7 @@ impl OutboundState {
                 arena_bytes = 0;
                 parts = 0;
             }
+
             count += 1;
             bytes += message.byte_len();
             if let Some(size) = size {
@@ -176,27 +186,10 @@ impl OutboundState {
                 parts += message.len();
                 messages.push(message);
             } else {
-                // Preserve ordered large-message offloads around small arenas.
-                if self.offload_threshold > 0
-                    && let Some(pool) = &self.compression_pool
-                    && self
-                        .encoder
-                        .as_ref()
-                        .is_some_and(MessageEncoder::can_offload)
-                {
-                    submit_to_pipeline(
-                        &message,
-                        self.encoder.as_mut().unwrap(),
-                        pool,
-                        self.offload_threshold,
-                        &mut self.offload_pipeline,
-                    );
-                } else {
-                    let wire = self.encoder.as_mut().unwrap().encode(&message)?;
-                    self.queue_arena_wire(wire, connection, eq)?;
-                }
+                self.encode_outside_arena(&message, connection, eq)?;
             }
-            if count >= max_msgs
+
+            if count >= OUTBOUND_BATCH_MAX_MSGS
                 || bytes >= max_batch_bytes()
                 || (count.is_multiple_of(BATCH_TIME_CHECK_MSGS)
                     && started.elapsed() >= OUTBOUND_BATCH_TIME)
@@ -205,8 +198,38 @@ impl OutboundState {
             }
             next = try_recv();
         }
+
         self.flush_arena(&messages, connection, eq)?;
         Ok(count)
+    }
+
+    /// Preserve ordered large-message offloads around small arenas.
+    #[cfg(any(feature = "lz4", feature = "zstd"))]
+    fn encode_outside_arena(
+        &mut self,
+        message: &Message,
+        connection: &Connection,
+        eq: &mut FrameBuffer,
+    ) -> Result<()> {
+        if self.offload_threshold > 0
+            && let Some(pool) = &self.compression_pool
+            && self
+                .encoder
+                .as_ref()
+                .is_some_and(MessageEncoder::can_offload)
+        {
+            submit_to_pipeline(
+                message,
+                self.encoder.as_mut().unwrap(),
+                pool,
+                self.offload_threshold,
+                &mut self.offload_pipeline,
+            );
+            return Ok(());
+        }
+
+        let wire = self.encoder.as_mut().unwrap().encode(message)?;
+        self.queue_arena_wire(wire, connection, eq)
     }
 
     #[cfg(any(feature = "lz4", feature = "zstd"))]

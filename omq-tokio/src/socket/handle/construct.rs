@@ -1,19 +1,36 @@
-use super::{Inner, ReadyPeers, ReqAwaitingReply, Socket};
+use super::{Inner, Socket};
 use crate::routing::{SendCompatibility, SendStrategy};
-use crate::socket::actor::{SocketDriver, spawn_driver};
+use crate::socket::actor::{DriverEnv, HandleLink, HandleShared, SocketDriver, spawn_driver};
 use crate::socket::monitor::MonitorPublisher;
-use crate::socket::recv::{SpscAwareRecv, SpscHandles};
+use crate::socket::peer_recv::PeerRecvRoutes;
+use crate::socket::recv::{
+    BlockingRecvWaker, RecvPipeEnds, RecvTuning, SharedRecvPipe, SpscAwareRecv, SpscHandles,
+};
 use crate::transport::inproc::InprocRegistry;
 use omq_proto::{
     error::{Error, Result},
     options::Options,
     proto::SocketType,
-    type_state::TypeState,
 };
-use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+
+/// Where a new socket runs: its IO pool and inproc namespace.
+struct Placement<'a> {
+    io_pool: &'a crate::context::IoPoolHandle,
+    inproc_registry: Arc<InprocRegistry>,
+}
+
+impl Placement<'_> {
+    /// Standalone socket on the current Tokio runtime.
+    fn standalone(io_pool: &crate::context::IoPoolHandle) -> Placement<'_> {
+        Placement {
+            io_pool,
+            inproc_registry: crate::transport::inproc::standalone_registry(),
+        }
+    }
+}
 
 impl Socket {
     /// Create a new socket of the given type with the given options. Spawns
@@ -35,8 +52,7 @@ impl Socket {
             socket_type,
             options,
             None,
-            &crate::context::IoPoolHandle::none(),
-            crate::transport::inproc::standalone_registry(),
+            Placement::standalone(&crate::context::IoPoolHandle::none()),
             SendCompatibility::Native,
         )
     }
@@ -47,12 +63,15 @@ impl Socket {
         io_pool: &crate::context::IoPoolHandle,
         inproc_registry: Arc<InprocRegistry>,
     ) -> Self {
+        let placement = Placement {
+            io_pool,
+            inproc_registry,
+        };
         Self::new_inner(
             socket_type,
             options,
             None,
-            io_pool,
-            inproc_registry,
+            placement,
             SendCompatibility::Native,
         )
         .expect("invalid socket options")
@@ -86,8 +105,7 @@ impl Socket {
             socket_type,
             options,
             Some(config),
-            &crate::context::IoPoolHandle::none(),
-            crate::transport::inproc::standalone_registry(),
+            Placement::standalone(&crate::context::IoPoolHandle::none()),
             SendCompatibility::Native,
         )
     }
@@ -99,12 +117,15 @@ impl Socket {
         io_pool: &crate::context::IoPoolHandle,
         inproc_registry: Arc<InprocRegistry>,
     ) -> Self {
+        let placement = Placement {
+            io_pool,
+            inproc_registry,
+        };
         Self::new_inner(
             socket_type,
             options,
             Some(config),
-            io_pool,
-            inproc_registry,
+            placement,
             SendCompatibility::Native,
         )
         .expect("invalid socket options")
@@ -117,12 +138,15 @@ impl Socket {
         io_pool: &crate::context::IoPoolHandle,
         inproc_registry: Arc<InprocRegistry>,
     ) -> Self {
+        let placement = Placement {
+            io_pool,
+            inproc_registry,
+        };
         Self::new_inner(
             socket_type,
             options,
             recv_sink_config,
-            io_pool,
-            inproc_registry,
+            placement,
             SendCompatibility::Libzmq,
         )
         .expect("invalid socket options")
@@ -132,80 +156,46 @@ impl Socket {
         socket_type: SocketType,
         mut options: Options,
         recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
-        io_pool: &crate::context::IoPoolHandle,
-        inproc_registry: Arc<InprocRegistry>,
+        placement: Placement<'_>,
         compatibility: SendCompatibility,
     ) -> Result<Self> {
-        if socket_type == SocketType::Peer && options.max_message_size.is_none() {
-            options.max_message_size = Some(omq_proto::options::DEFAULT_PEER_MAX_BYTES);
-        }
-        options.validate()?;
-        let latency_profile = options.workload_profile.unwrap_or(
-            if matches!(socket_type, SocketType::Req | SocketType::Rep) {
-                omq_proto::WorkloadProfile::Latency
-            } else {
-                omq_proto::WorkloadProfile::Throughput
-            },
-        ) == omq_proto::WorkloadProfile::Latency
-            && !options.mechanism.has_frame_transform();
-        if options.conflate && !crate::routing::supports_conflate(socket_type) {
-            return Err(Error::Config(format!(
-                "Options::conflate(true) is not supported for socket type {socket_type:?}"
-            )));
-        }
+        prepare_options(socket_type, &mut options)?;
+        let tuning = recv_tuning(socket_type, &options);
+
         let cancel = CancellationToken::new();
         let (cmd_tx, cmd_rx) = mpsc::channel(options.send_queue_capacity().max(16));
-        let recv_hwm = options.recv_queue_capacity().max(16);
         let driver_linger = options.linger;
-        let recv_batching = options.recv_batching && supports_recv_batching(socket_type);
-        let recv_spin = options.recv_spin;
-        let blocking_recv_waker = crate::socket::recv::BlockingRecvWaker::new();
-        let (recv_tx, recv_consumer, recv_pipe_notify, recv_pipe_space) =
-            crate::socket::recv::recv_pipe(recv_hwm, blocking_recv_waker.clone());
         let monitor = MonitorPublisher::new();
-        let send_strategy = SendStrategy::for_socket_type(socket_type, &options, io_pool)
+        let send_strategy = SendStrategy::for_socket_type(socket_type, &options, placement.io_pool)
             .with_compatibility(compatibility);
         let send_submitter = send_strategy.submitter();
-        let mut spsc = recv_handles(
-            socket_type,
-            &options,
-            recv_sink_config.is_none(),
-            blocking_recv_waker,
-        );
-        let receive_handle = Arc::new(());
-        spsc.set_receive_handles(&receive_handle);
-        let peer_recv_routes = (socket_type == SocketType::Peer && recv_sink_config.is_none())
-            .then(|| spsc.init_peer_recv(recv_hwm, &options));
-        let type_state = Arc::new(Mutex::new(TypeState::new()));
-        let rep_current = Arc::new(Mutex::new(None));
-        let req_awaiting_reply = Arc::new(ReqAwaitingReply::default());
-        let subscribe_count = Arc::new(AtomicU64::new(0));
-        let ready_peer_count = Arc::new(ReadyPeers::default());
-        let mut driver = SocketDriver::new(
-            socket_type,
-            options,
+        // A caller-provided sink replaces the native receive fast paths.
+        let recv = ReceiveParts::new(socket_type, &options, recv_sink_config.is_none());
+        let shared = HandleShared::new();
+
+        let link = HandleLink {
             cmd_rx,
-            recv_tx,
-            cancel.clone(),
-            monitor.clone(),
-            send_strategy,
-            spsc.clone(),
-            type_state,
-            req_awaiting_reply.clone(),
+            recv_tx: recv.recv_tx,
+            cancel: cancel.clone(),
+            monitor: monitor.clone(),
+            spsc: recv.spsc.clone(),
+            peer_recv_routes: recv.peer_recv_routes,
+            shared: shared.clone(),
+        };
+        let env = DriverEnv {
+            io_pool: placement.io_pool.clone(),
+            inproc_registry: placement.inproc_registry,
             recv_sink_config,
-            subscribe_count.clone(),
-            ready_peer_count.clone(),
-            io_pool.clone(),
-            inproc_registry,
-        );
-        driver.peer_recv_routes = peer_recv_routes;
+        };
+        let driver = SocketDriver::new(socket_type, options, send_strategy, link, env);
         #[cfg(feature = "dart")]
         let dart = driver.dart.clone();
         let payload_pools = driver.payload_pools.clone();
-        let actor_task = spawn_driver(driver, io_pool);
+        let actor_task = spawn_driver(driver, placement.io_pool);
+
         Ok(Self {
             send_submitter: send_submitter.clone(),
-            receive_handle,
+            receive_handle: recv.receive_handle,
             inner: Arc::new(Inner {
                 socket_type,
                 payload_pools,
@@ -214,26 +204,91 @@ impl Socket {
                 cmd_tx,
                 cancel,
                 linger: driver_linger,
-                recv_rx: SpscAwareRecv::new(
-                    recv_consumer,
-                    recv_pipe_notify,
-                    recv_pipe_space,
-                    spsc,
-                    // REP admits one complete request per receive call.
-                    latency_profile || socket_type == SocketType::Rep,
-                    recv_batching,
-                    recv_spin,
-                ),
+                recv_rx: SpscAwareRecv::new(recv.ends, recv.spsc, tuning),
                 monitor,
                 send_submitter,
-                rep_current,
-                req_awaiting_reply,
-                subscribe_count,
-                ready_peer_count,
+                rep_current: Arc::new(Mutex::new(None)),
+                req_awaiting_reply: shared.req_awaiting_reply,
+                subscribe_count: shared.subscribe_count,
+                ready_peer_count: shared.ready_peers,
                 last_bound_endpoint: RwLock::new(None),
                 actor_task: Mutex::new(Some(actor_task)),
             }),
         })
+    }
+}
+
+/// Receive-side pieces, split between the socket handle and its actor.
+struct ReceiveParts {
+    /// Actor end of the shared receive pipe.
+    recv_tx: Arc<SharedRecvPipe>,
+    /// Handle end of the shared receive pipe.
+    ends: RecvPipeEnds,
+    spsc: SpscHandles,
+    /// Receive handles stay valid while the socket holds this token.
+    receive_handle: Arc<()>,
+    peer_recv_routes: Option<PeerRecvRoutes>,
+}
+
+impl ReceiveParts {
+    fn new(socket_type: SocketType, options: &Options, native: bool) -> Self {
+        let recv_hwm = options.recv_queue_capacity().max(16);
+        let blocking_recv_waker = BlockingRecvWaker::new();
+        let (recv_tx, consumer, notify, space) =
+            crate::socket::recv::recv_pipe(recv_hwm, blocking_recv_waker.clone());
+
+        let mut spsc = recv_handles(socket_type, options, native, blocking_recv_waker);
+        let receive_handle = Arc::new(());
+        spsc.set_receive_handles(&receive_handle);
+        let peer_recv_routes = (socket_type == SocketType::Peer && native)
+            .then(|| spsc.init_peer_recv(recv_hwm, options));
+
+        Self {
+            recv_tx,
+            ends: RecvPipeEnds {
+                consumer,
+                notify,
+                space,
+            },
+            spsc,
+            receive_handle,
+            peer_recv_routes,
+        }
+    }
+}
+
+/// Apply socket-type defaults, then validate.
+fn prepare_options(socket_type: SocketType, options: &mut Options) -> Result<()> {
+    if socket_type == SocketType::Peer && options.max_message_size.is_none() {
+        options.max_message_size = Some(omq_proto::options::DEFAULT_PEER_MAX_BYTES);
+    }
+    options.validate()?;
+
+    if options.conflate && !crate::routing::supports_conflate(socket_type) {
+        return Err(Error::Config(format!(
+            "Options::conflate(true) is not supported for socket type {socket_type:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// REQ/REP default to the latency profile. Frame transforms (compression)
+/// always use the throughput receive path.
+fn recv_tuning(socket_type: SocketType, options: &Options) -> RecvTuning {
+    let default = if matches!(socket_type, SocketType::Req | SocketType::Rep) {
+        omq_proto::WorkloadProfile::Latency
+    } else {
+        omq_proto::WorkloadProfile::Throughput
+    };
+    let latency = options.workload_profile.unwrap_or(default)
+        == omq_proto::WorkloadProfile::Latency
+        && !options.mechanism.has_frame_transform();
+
+    RecvTuning {
+        // REP admits one complete request per receive call.
+        latency_profile: latency || socket_type == SocketType::Rep,
+        batching: options.recv_batching && supports_recv_batching(socket_type),
+        spin: options.recv_spin,
     }
 }
 

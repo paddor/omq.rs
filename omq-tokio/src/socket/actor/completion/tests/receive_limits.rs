@@ -18,28 +18,35 @@ fn kinds() -> Vec<CompressionKind> {
     ]
 }
 
-#[expect(clippy::too_many_lines)]
-async fn receive_boundary(
-    kind: CompressionKind,
-    message: Message,
-    dict: Option<Bytes>,
-    threshold: usize,
-) {
-    let (mut actor, _consumer) = fixture_for(SocketType::Router);
-    let limit = message.max_message_size_len();
-    let options = Arc::new(Options {
-        max_message_size: Some(limit),
-        ..Options::default()
-    });
-    let send_options = Options {
-        compression_dict: dict,
-        compression_threshold: Some(threshold),
-        ..(*options).clone()
-    };
-    let endpoint = kind.tcp_endpoint(
-        omq_proto::endpoint::Host::Ip("127.0.0.1".parse().unwrap()),
-        1,
-    );
+/// Remote DEALER driver wired to the actor through an in-memory stream.
+struct Remote {
+    id: u64,
+    data: mpsc::Sender<PeerDriverData>,
+    cancel: CancellationToken,
+    task: tokio::task::JoinHandle<omq_proto::Result<()>>,
+    // Kept open for the test: dropping either could end the remote early.
+    _control: mpsc::Sender<PeerDriverCommand>,
+    _events: mpsc::Receiver<(u64, PeerEvent)>,
+}
+
+impl Remote {
+    async fn send(&self, encoder: &mut MessageEncoder, message: &Message) {
+        for wire in encoder.encode(message).unwrap() {
+            self.data
+                .send(PeerDriverData::SendMessage(wire))
+                .await
+                .unwrap();
+        }
+    }
+}
+
+/// Accept a remote peer, finish the handshake on both sides, and activate
+/// the remote's data plane.
+async fn accept_remote(
+    actor: &mut SocketDriver,
+    endpoint: Endpoint,
+    options: Arc<Options>,
+) -> Remote {
     let (native, remote) = tokio::io::duplex(16 * 1024);
     let (control, inbox) = mpsc::channel(16);
     let (data, data_inbox) = mpsc::channel(16);
@@ -55,6 +62,7 @@ async fn receive_boundary(
     )
     .with_data_inbox(data_inbox);
     let task = tokio::spawn(remote_driver.run());
+
     actor
         .handle_internal_event(InternalEvent::Accepted {
             conn: AnyConn::ByteStream {
@@ -82,6 +90,41 @@ async fn receive_boundary(
         .await
         .unwrap();
 
+    Remote {
+        id,
+        data,
+        cancel,
+        task,
+        _control: control,
+        _events: remote_events,
+    }
+}
+
+async fn receive_boundary(
+    kind: CompressionKind,
+    message: Message,
+    dict: Option<Bytes>,
+    threshold: usize,
+) {
+    let (mut actor, _consumer) = fixture_for(SocketType::Router);
+    let limit = message.max_message_size_len();
+    let options = Arc::new(Options {
+        max_message_size: Some(limit),
+        ..Options::default()
+    });
+    let send_options = Options {
+        compression_dict: dict,
+        compression_threshold: Some(threshold),
+        ..(*options).clone()
+    };
+    let endpoint = kind.tcp_endpoint(
+        omq_proto::endpoint::Host::Ip("127.0.0.1".parse().unwrap()),
+        1,
+    );
+    let remote = accept_remote(&mut actor, endpoint, options).await;
+
+    // A message at the limit arrives intact, even when its wire form
+    // (uncompressed, or with a dictionary shipment) exceeds the limit.
     let (mut encoder, _) = MessageEncoder::for_compression_kind(kind, &send_options)
         .unwrap()
         .unwrap();
@@ -93,7 +136,11 @@ async fn receive_boundary(
         assert!(wire[0].max_message_size_len() > limit);
     }
     for wire in wire {
-        data.send(PeerDriverData::SendMessage(wire)).await.unwrap();
+        remote
+            .data
+            .send(PeerDriverData::SendMessage(wire))
+            .await
+            .unwrap();
     }
     let received = actor
         .peer_out_rx
@@ -102,12 +149,32 @@ async fn receive_boundary(
         .recv_async()
         .await
         .unwrap();
-    assert_eq!(received.peer_id, id);
-    let received = received.message;
-    assert_eq!(received, message);
+    assert_eq!(received.peer_id, remote.id);
+    assert_eq!(received.message, message);
 
-    // Compressible oversize bodies must fail the decoded budget even when
-    // their entire wire message fits the enlarged framing allowance.
+    assert_oversize_closes_peer(&mut actor, &remote, &mut encoder, limit).await;
+    actor
+        .peers
+        .get_mut(&remote.id)
+        .unwrap()
+        .task
+        .take()
+        .unwrap()
+        .await
+        .unwrap();
+    actor.send_strategy.shutdown();
+    remote.cancel.cancel();
+    let _ = remote.task.await.unwrap();
+}
+
+/// Compressible oversize bodies must fail the decoded budget even when
+/// their entire wire message fits the enlarged framing allowance.
+async fn assert_oversize_closes_peer(
+    actor: &mut SocketDriver,
+    remote: &Remote,
+    encoder: &mut MessageEncoder,
+    limit: usize,
+) {
     let excess = Message::single(Bytes::from(vec![
         0x5a;
         limit
@@ -115,11 +182,10 @@ async fn receive_boundary(
             )
             + 1
     ]));
-    for wire in encoder.encode(&excess).unwrap() {
-        data.send(PeerDriverData::SendMessage(wire)).await.unwrap();
-    }
+    remote.send(encoder, &excess).await;
+
     let completion = actor.peer_completions.next().await.unwrap().unwrap();
-    assert_eq!(completion.peer_id, id);
+    assert_eq!(completion.peer_id, remote.id);
     assert!(
         matches!(&completion.reason, omq_proto::DisconnectReason::Error(reason)
             if reason.contains("message too large")),
@@ -129,18 +195,6 @@ async fn receive_boundary(
         actor.peer_out_rx.as_mut().unwrap().try_recv(),
         Err(fanring::mpsc::TryRecvError::Empty)
     ));
-    actor
-        .peers
-        .get_mut(&id)
-        .unwrap()
-        .task
-        .take()
-        .unwrap()
-        .await
-        .unwrap();
-    actor.send_strategy.shutdown();
-    cancel.cancel();
-    let _ = task.await.unwrap();
 }
 
 #[tokio::test]

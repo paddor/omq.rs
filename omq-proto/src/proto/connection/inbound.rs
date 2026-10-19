@@ -727,98 +727,118 @@ impl Connection {
             let before = self.in_buf.len();
             self.clear_peer_ttl_if_input_buffered();
 
-            if self.ws_control.skip_payload > 0 {
-                let take = self
-                    .ws_control
-                    .skip_payload
-                    .min(self.in_buf.len())
-                    .min(super::ws::SERVICE_BYTES);
-                if take == 0 {
-                    return Ok(());
-                }
-                self.in_buf.advance(take);
-                self.ws_control.skip_payload -= take;
-                if !self.account_ws_service(&mut service, take) {
-                    return Ok(());
-                }
-                continue;
-            }
-
-            if matches!(self.state, State::Ready)
-                && !self.ws_close_sent
-                && !self.has_frame_transform()
-                && self.pending_parts.is_empty()
-                && !self.discarding_multipart
-                && self.ws_fragment.is_none()
-            {
-                match self.try_advance_ready_ws(peer_role)? {
-                    Some(true) => {
-                        if !self.account_ws_service(&mut service, before - self.in_buf.len()) {
-                            return Ok(());
-                        }
-                        continue;
-                    }
-                    Some(false) => return Ok(()),
-                    None => {}
-                }
-            }
-
-            let Some(ws_hdr) = ws_codec::peek_ws_header(&self.in_buf, peer_role)? else {
-                return Ok(());
+            let progressed = if self.ws_control.skip_payload > 0 {
+                self.skip_ws_payload()
+            } else {
+                self.step_ws_frame(peer_role)?
             };
-
-            let payload_len = self.ws_frame_payload_len(&ws_hdr)?;
-            let total_frame = ws_hdr
-                .header_len
-                .checked_add(payload_len)
-                .ok_or_else(|| Error::Protocol("WS frame size overflow".into()))?;
-            if self.ws_close_sent
-                && matches!(
-                    ws_hdr.opcode,
-                    ws_codec::OP_BINARY_CODE | ws_codec::OP_CONTINUATION_CODE
-                )
-            {
-                self.in_buf.advance(ws_hdr.header_len);
-                self.ws_control.skip_payload = payload_len;
-                if !self.account_ws_service(&mut service, ws_hdr.header_len) {
-                    return Ok(());
-                }
-                continue;
-            }
-            if self.in_buf.len() < total_frame {
-                return Ok(());
-            }
-
-            self.in_buf.advance(ws_hdr.header_len);
-
-            match ws_hdr.opcode {
-                ws_codec::OP_BINARY_CODE | ws_codec::OP_CONTINUATION_CODE => {
-                    if ws_hdr.opcode == ws_codec::OP_BINARY_CODE
-                        && ws_hdr.fin
-                        && !ws_hdr.masked
-                        && self.ws_fragment.is_none()
-                    {
-                        self.handle_unmasked_ws_binary(payload_len)?;
-                    } else {
-                        self.handle_ws_data_frame(payload_len, &ws_hdr)?;
-                    }
-                }
-                ws_codec::OP_CLOSE_CODE => {
-                    self.handle_ws_close(payload_len, &ws_hdr)?;
-                    return Ok(());
-                }
-                ws_codec::OP_PING_CODE => {
-                    self.handle_ws_ping(payload_len, &ws_hdr);
-                }
-                ws_codec::OP_PONG_CODE => {
-                    self.in_buf.advance(payload_len);
-                }
-                _ => unreachable!("peek_ws_header rejects unknown opcodes"),
-            }
-            if !self.account_ws_service(&mut service, before - self.in_buf.len()) {
+            // Charge consumed bytes to the service budget; stop once spent.
+            if !progressed || !self.account_ws_service(&mut service, before - self.in_buf.len()) {
                 return Ok(());
             }
         }
+    }
+
+    /// Discard up to one service slice of an ignored payload. Returns false
+    /// when none of it is buffered yet.
+    #[cfg(feature = "ws")]
+    #[inline]
+    fn skip_ws_payload(&mut self) -> bool {
+        let take = self
+            .ws_control
+            .skip_payload
+            .min(self.in_buf.len())
+            .min(super::ws::SERVICE_BYTES);
+        if take == 0 {
+            return false;
+        }
+
+        self.in_buf.advance(take);
+        self.ws_control.skip_payload -= take;
+        true
+    }
+
+    /// Consume one WS frame, or one small ready frame on the fast path.
+    /// Returns false when input is incomplete or the peer closed.
+    #[cfg(feature = "ws")]
+    #[inline]
+    fn step_ws_frame(&mut self, peer_role: super::super::ws_codec::WsRole) -> Result<bool> {
+        use super::super::ws_codec;
+
+        if matches!(self.state, State::Ready)
+            && !self.ws_close_sent
+            && !self.has_frame_transform()
+            && self.pending_parts.is_empty()
+            && !self.discarding_multipart
+            && self.ws_fragment.is_none()
+            && let Some(advanced) = self.try_advance_ready_ws(peer_role)?
+        {
+            return Ok(advanced);
+        }
+
+        let Some(ws_hdr) = ws_codec::peek_ws_header(&self.in_buf, peer_role)? else {
+            return Ok(false);
+        };
+        let payload_len = self.ws_frame_payload_len(&ws_hdr)?;
+        let total_frame = ws_hdr
+            .header_len
+            .checked_add(payload_len)
+            .ok_or_else(|| Error::Protocol("WS frame size overflow".into()))?;
+
+        // After our CLOSE, data frames are skipped without buffering them.
+        if self.ws_close_sent
+            && matches!(
+                ws_hdr.opcode,
+                ws_codec::OP_BINARY_CODE | ws_codec::OP_CONTINUATION_CODE
+            )
+        {
+            self.in_buf.advance(ws_hdr.header_len);
+            self.ws_control.skip_payload = payload_len;
+            return Ok(true);
+        }
+        if self.in_buf.len() < total_frame {
+            return Ok(false);
+        }
+
+        self.in_buf.advance(ws_hdr.header_len);
+        self.dispatch_ws_frame(payload_len, &ws_hdr)
+    }
+
+    /// Handle one complete frame whose header is consumed. Returns false
+    /// after CLOSE.
+    #[cfg(feature = "ws")]
+    fn dispatch_ws_frame(
+        &mut self,
+        payload_len: usize,
+        ws_hdr: &super::super::ws_codec::WsFrameHeader,
+    ) -> Result<bool> {
+        use super::super::ws_codec;
+
+        match ws_hdr.opcode {
+            ws_codec::OP_BINARY_CODE | ws_codec::OP_CONTINUATION_CODE => {
+                if ws_hdr.opcode == ws_codec::OP_BINARY_CODE
+                    && ws_hdr.fin
+                    && !ws_hdr.masked
+                    && self.ws_fragment.is_none()
+                {
+                    self.handle_unmasked_ws_binary(payload_len)?;
+                } else {
+                    self.handle_ws_data_frame(payload_len, ws_hdr)?;
+                }
+            }
+            ws_codec::OP_CLOSE_CODE => {
+                self.handle_ws_close(payload_len, ws_hdr)?;
+                return Ok(false);
+            }
+            ws_codec::OP_PING_CODE => {
+                self.handle_ws_ping(payload_len, ws_hdr);
+            }
+            ws_codec::OP_PONG_CODE => {
+                self.in_buf.advance(payload_len);
+            }
+            _ => unreachable!("peek_ws_header rejects unknown opcodes"),
+        }
+        Ok(true)
     }
 
     #[cfg(feature = "ws")]
@@ -963,7 +983,7 @@ impl Connection {
         &mut self,
         peer_role: super::super::ws_codec::WsRole,
     ) -> Result<Option<bool>> {
-        use super::super::ws_codec::{self, WsRole};
+        use super::super::ws_codec::WsRole;
         use super::super::zws;
 
         const FIN_BINARY: u8 = 0x80 | 0x02;
@@ -976,12 +996,14 @@ impl Connection {
             return Ok(None);
         }
 
+        // Clients must mask and servers must not (RFC 6455 5.1).
         let masked = peer_role == WsRole::Client;
         let b1 = first_two[1];
         if masked != (b1 & 0x80 != 0) {
             return Ok(None);
         }
 
+        // 126 and 127 announce extended lengths; leave those to the full parse.
         let ws_payload_len = (b1 & 0x7F) as usize;
         if ws_payload_len >= 126 {
             return Ok(None);
@@ -1001,67 +1023,85 @@ impl Connection {
             let Some(hdr) = self.in_buf.peek_array::<6>() else {
                 return Ok(Some(false));
             };
-            [hdr[2], hdr[3], hdr[4], hdr[5]]
+            Some([hdr[2], hdr[3], hdr[4], hdr[5]])
         } else {
-            [0; 4]
+            None
         };
 
         let zmtp_payload_len = ws_payload_len - 1;
 
         self.in_buf.advance(header_len);
 
-        let mut data = [0u8; crate::message::MAX_INLINE_MESSAGE];
-
         let mut zws_flag = 0u8;
         self.in_buf
             .read_into(1, std::slice::from_mut(&mut zws_flag));
 
-        if masked {
+        if let Some(mask_key) = mask_key {
             zws_flag ^= mask_key[0];
         }
 
         // Only handle single-part data frames on the fast path.
         if zws_flag != zws::FLAG_FINAL {
-            // Already consumed the ZWS flag byte — need to fall back.
-            // Re-parse via the slow path by reading the remaining payload
-            // and dispatching.
-            let flags = zws::zws_to_flags(zws_flag)?;
-            if zmtp_payload_len > 0 {
-                if masked {
-                    let mut raw = BytesMut::with_capacity(zmtp_payload_len);
-                    self.in_buf.copy_into(zmtp_payload_len, &mut raw);
-                    ws_codec::apply_mask_offset(&mut raw, mask_key, 1);
-                    let zmtp_payload = Payload::from_bytes(raw.freeze());
-                    return self
-                        .dispatch_ws_binary(flags, zmtp_payload)
-                        .map(|()| Some(true));
-                }
-                let payload = self.in_buf.split_to(zmtp_payload_len);
-                return self.dispatch_ws_binary(flags, payload).map(|()| Some(true));
-            }
             return self
-                .dispatch_ws_binary(flags, Payload::new())
+                .dispatch_consumed_ws_flag(zws_flag, zmtp_payload_len, mask_key)
                 .map(|()| Some(true));
         }
 
         self.validate_receive_frame(FrameFlags::LAST, zmtp_payload_len)?;
+        self.push_inline_ws_message(zmtp_payload_len, mask_key);
+        Ok(Some(true))
+    }
 
-        if zmtp_payload_len > 0 {
-            self.in_buf.read_into(zmtp_payload_len, &mut data);
+    /// The fast path already consumed this frame's ZWS flag byte. Read the
+    /// rest of the payload and dispatch it through the general path.
+    #[cfg(feature = "ws")]
+    fn dispatch_consumed_ws_flag(
+        &mut self,
+        zws_flag: u8,
+        payload_len: usize,
+        mask_key: Option<[u8; 4]>,
+    ) -> Result<()> {
+        use super::super::ws_codec;
+
+        let flags = super::super::zws::zws_to_flags(zws_flag)?;
+        if payload_len == 0 {
+            return self.dispatch_ws_binary(flags, Payload::new());
         }
 
-        if masked && zmtp_payload_len > 0 {
-            ws_codec::apply_mask_offset(&mut data[..zmtp_payload_len], mask_key, 1);
+        if let Some(mask_key) = mask_key {
+            let mut raw = BytesMut::with_capacity(payload_len);
+            self.in_buf.copy_into(payload_len, &mut raw);
+            // Offset 1: the flag byte already used the first key byte.
+            ws_codec::apply_mask_offset(&mut raw, mask_key, 1);
+            return self.dispatch_ws_binary(flags, Payload::from_bytes(raw.freeze()));
+        }
+
+        let payload = self.in_buf.split_to(payload_len);
+        self.dispatch_ws_binary(flags, payload)
+    }
+
+    /// Read a single-part payload into an inline message, unmasking it.
+    #[cfg(feature = "ws")]
+    #[inline]
+    fn push_inline_ws_message(&mut self, payload_len: usize, mask_key: Option<[u8; 4]>) {
+        let mut data = [0u8; crate::message::MAX_INLINE_MESSAGE];
+        if payload_len > 0 {
+            self.in_buf.read_into(payload_len, &mut data);
+        }
+
+        if let Some(mask_key) = mask_key
+            && payload_len > 0
+        {
+            super::super::ws_codec::apply_mask_offset(&mut data[..payload_len], mask_key, 1);
         }
 
         let msg = Message {
             inner: crate::message::MessageInner::Inline {
-                len: zmtp_payload_len as u8,
+                len: payload_len as u8,
                 data,
             },
         };
         self.messages.push_back(msg);
-        Ok(Some(true))
     }
 
     #[cfg(feature = "ws")]

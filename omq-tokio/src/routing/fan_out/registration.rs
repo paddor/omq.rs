@@ -110,7 +110,7 @@ mod tests {
     use super::*;
     use crate::engine::codec::CodecProfile;
     use crate::engine::framing::WireFraming;
-    use crate::engine::transmit_slot::PeerTransmitSlot;
+    use crate::engine::transmit_slot::{PeerTransmitSlot, SlotConfig};
     #[cfg(feature = "ws")]
     use bytes::Bytes;
     #[cfg(any(feature = "ws", feature = "lz4", feature = "zstd"))]
@@ -142,16 +142,18 @@ mod tests {
         ActorPeerDriverHandle,
         mpsc::Receiver<crate::engine::PeerDriverData>,
     ) {
-        let slot = PeerTransmitSlot::new(
+        let slot = PeerTransmitSlot::with_config(
             peer_id,
-            compression.is_some(),
-            compression.map(|kind| CodecProfile::new(kind, options)),
-            None,
-            4096,
-            16384,
-            512 * 1024,
-            16,
-            framing,
+            SlotConfig {
+                has_transform: compression.is_some(),
+                codec_profile: compression.map(|kind| CodecProfile::new(kind, options)),
+                arena_threshold: 4096,
+                arena_cap: 16384,
+                cap: 512 * 1024,
+                msg_cap: 16,
+                framing,
+                ..SlotConfig::default()
+            },
         );
         slot.handshake_done.store(true, Ordering::Release);
         let (inbox, _commands) = mpsc::channel(1);
@@ -200,13 +202,7 @@ mod tests {
                 peers.reverse();
             }
             for (id, _, _, handle, _) in &peers {
-                sender.connection_added(*id, handle.clone(), 0);
-                if let Some(ack) = sender.peer_subscribe(*id, Bytes::new()) {
-                    tokio::time::timeout(std::time::Duration::from_secs(1), ack)
-                        .await
-                        .unwrap()
-                        .unwrap();
-                }
+                register_subscribed(&mut sender, *id, handle).await;
             }
             assert_eq!(sender.lane_peer_count.load(Ordering::Acquire), 1);
             assert_eq!(sender.fallback_peer_count.load(Ordering::Acquire), 2);
@@ -229,21 +225,39 @@ mod tests {
             .await
             .unwrap();
             for (id, framing, slot, _, _) in peers {
-                let mut chunks = Vec::new();
-                slot.drain(&mut chunks, 16);
-                let wire: Vec<_> = chunks
-                    .iter()
-                    .flat_map(|chunk| chunk.iter().copied())
-                    .collect();
-                match framing {
-                    WireFraming::Zmtp => assert_eq!(wire, b"\x01\x05topic\x00\x07payload"),
-                    WireFraming::Zws(_) => assert_zws_wire(&wire, framing.is_masked()),
-                }
+                assert_framed_publication(framing, &slot);
                 sender.connection_removed(id);
             }
             assert_eq!(sender.lane_peer_count.load(Ordering::Acquire), 0);
             assert_eq!(sender.fallback_peer_count.load(Ordering::Acquire), 0);
             sender.shutdown();
+        }
+    }
+
+    /// Add peer `id` and subscribe it to everything, waiting for its lane.
+    #[cfg(feature = "ws")]
+    async fn register_subscribed(sender: &mut FanOutSend, id: u64, handle: &ActorPeerDriverHandle) {
+        sender.connection_added(id, handle.clone(), 0);
+        if let Some(ack) = sender.peer_subscribe(id, Bytes::new()) {
+            tokio::time::timeout(std::time::Duration::from_secs(1), ack)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+    }
+
+    /// The slot holds the `topic`/`payload` publication in its own framing.
+    #[cfg(feature = "ws")]
+    fn assert_framed_publication(framing: WireFraming, slot: &PeerTransmitSlot) {
+        let mut chunks = Vec::new();
+        slot.drain(&mut chunks, 16);
+        let wire: Vec<_> = chunks
+            .iter()
+            .flat_map(|chunk| chunk.iter().copied())
+            .collect();
+        match framing {
+            WireFraming::Zmtp => assert_eq!(wire, b"\x01\x05topic\x00\x07payload"),
+            WireFraming::Zws(_) => assert_zws_wire(&wire, framing.is_masked()),
         }
     }
 

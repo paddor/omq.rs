@@ -203,17 +203,19 @@ impl SocketInner {
             ))
         });
         let socket_type = self.socket_type;
-        let (id, socket, send_pump, recv_pump) = self.ctx.materialize(
-            socket_type,
-            opts,
-            send_queue.clone(),
-            send_cons,
-            send_ready.clone(),
-            recv_prod,
-            recv_ready.clone(),
-            recv_space.clone(),
-            recv_config.clone(),
-        )?;
+        let send = crate::runtime::SendPlumbing {
+            queue: send_queue.clone(),
+            pump_cons: send_cons,
+            ready: send_ready.clone(),
+        };
+        let recv = crate::runtime::RecvPlumbing {
+            sink_config: recv_config.clone(),
+            pump_prod: recv_prod,
+            ready: recv_ready.clone(),
+            space: recv_space.clone(),
+        };
+        let (id, socket, send_pump, recv_pump) =
+            self.ctx.materialize(socket_type, opts, send, recv)?;
         *slot = Some(Materialized {
             id,
             fork_gen,
@@ -801,6 +803,7 @@ impl Socket {
         dispatch::blocking_unit(&self.inner, py, move |s| s.disconnect(ep))
     }
 
+    #[expect(clippy::too_many_arguments, reason = "Python signature mirrors pyzmq")]
     #[pyo3(signature = (payload, flags = 0, copy = true, track = false))]
     fn send(
         &self,
@@ -838,6 +841,7 @@ impl Socket {
         Ok(tracker)
     }
 
+    #[expect(clippy::too_many_arguments, reason = "Python signature mirrors pyzmq")]
     #[pyo3(signature = (payload, group, flags = 0, copy = true, track = false))]
     fn _send_with_group(
         &self,
@@ -861,6 +865,7 @@ impl Socket {
         Ok(tracker)
     }
 
+    #[expect(clippy::too_many_arguments, reason = "Python signature mirrors pyzmq")]
     #[pyo3(signature = (payload, routing_id, flags = 0, copy = true, track = false))]
     fn _send_with_routing(
         &self,
@@ -885,6 +890,7 @@ impl Socket {
         Ok(tracker)
     }
 
+    #[expect(clippy::too_many_arguments, reason = "Python signature mirrors pyzmq")]
     #[pyo3(signature = (parts, flags = 0, copy = true, track = false))]
     fn send_multipart(
         &self,
@@ -907,6 +913,7 @@ impl Socket {
         Ok(tracker)
     }
 
+    #[expect(clippy::too_many_arguments, reason = "Python signature mirrors pyzmq")]
     #[pyo3(signature = (parts, group, flags = 0, copy = true, track = false))]
     fn _send_multipart_with_group(
         &self,
@@ -936,6 +943,7 @@ impl Socket {
         Ok(tracker)
     }
 
+    #[expect(clippy::too_many_arguments, reason = "Python signature mirrors pyzmq")]
     #[pyo3(signature = (parts, routing_id, flags = 0, copy = true, track = false))]
     fn _send_multipart_with_routing(
         &self,

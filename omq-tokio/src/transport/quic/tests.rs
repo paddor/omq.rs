@@ -459,21 +459,10 @@ fn setup_runs_quinn_tasks_on_data_io_runtimes_only() {
         .unwrap();
     test_runtime.block_on(async {
         let before = pool.alive_tasks();
-        let certified = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
-        let mut options = Options::default();
-        options.quic.server_cert_pem = Some(certified.cert.pem().into_bytes());
-        options.quic.server_key_pem = Some(certified.signing_key.serialize_pem().into_bytes());
-        options.quic.trust_pem = options.quic.server_cert_pem.clone();
-        options.quic.trust_system = false;
+        let options = self_signed_options();
         let mut listener = bind(
             &"quic://127.0.0.1:0".parse().unwrap(),
-            AcceptSetup {
-                admission: Admission::new(4),
-                timeout: Duration::from_secs(5),
-                cancel: CancellationToken::new(),
-                monitor: MonitorPublisher::new(),
-                io_pool: pool.clone(),
-            },
+            accept_setup(&pool),
             &options,
         )
         .await
@@ -481,18 +470,7 @@ fn setup_runs_quinn_tasks_on_data_io_runtimes_only() {
         let Endpoint::Quic { host, port } = listener.local_endpoint().clone() else {
             unreachable!()
         };
-        // Linux listeners reserve every data thread; other platforms reserve
-        // one. Compute the connector's expected placement from those leases.
-        let mut loads = vec![0; pool.thread_count()];
-        for endpoint in listener.endpoints.iter() {
-            loads[endpoint.lease.index()] += 1;
-        }
-        let client_thread = loads
-            .iter()
-            .enumerate()
-            .min_by_key(|&(_, load)| load)
-            .unwrap()
-            .0;
+        let client_thread = least_loaded_thread(&listener, &pool);
         let accept = tokio::spawn(async move {
             let accepted = listener.accept().await.map(|(stream, _, _)| stream);
             (listener, accepted)
@@ -525,6 +503,70 @@ fn setup_runs_quinn_tasks_on_data_io_runtimes_only() {
     });
 }
 
+/// Listener and trust options for a fresh self-signed 127.0.0.1 certificate.
+fn self_signed_options() -> Options {
+    let certified = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
+    let mut options = Options::default();
+    options.quic.server_cert_pem = Some(certified.cert.pem().into_bytes());
+    options.quic.server_key_pem = Some(certified.signing_key.serialize_pem().into_bytes());
+    options.quic.trust_pem = options.quic.server_cert_pem.clone();
+    options.quic.trust_system = false;
+    options
+}
+
+fn accept_setup(pool: &crate::context::IoPoolHandle) -> AcceptSetup {
+    AcceptSetup {
+        admission: Admission::new(4),
+        timeout: Duration::from_secs(5),
+        cancel: CancellationToken::new(),
+        monitor: MonitorPublisher::new(),
+        io_pool: pool.clone(),
+    }
+}
+
+/// Where a new connector lands. Linux listeners reserve every data thread;
+/// other platforms reserve one.
+fn least_loaded_thread(listener: &QuicListener, pool: &crate::context::IoPoolHandle) -> usize {
+    let mut loads = vec![0; pool.thread_count()];
+    for endpoint in listener.endpoints.iter() {
+        loads[endpoint.lease.index()] += 1;
+    }
+    loads
+        .iter()
+        .enumerate()
+        .min_by_key(|&(_, load)| load)
+        .unwrap()
+        .0
+}
+
+/// Connect one client and accept it, keeping connection load balanced.
+async fn connect_and_accept(
+    listener: &mut QuicListener,
+    target: &Endpoint,
+    options: &Options,
+    pool: &crate::context::IoPoolHandle,
+) -> (QuicStream, QuicStream, crate::context::IoThreadLease) {
+    let (client, accepted) = tokio::join!(connect(target, options, None, pool), async {
+        listener.accept().await.map(|(stream, _, _)| stream)
+    });
+    let mut accepted = accepted.unwrap();
+    let lease = accepted.take_io_lease().unwrap();
+    assert_balanced_connection_load(pool);
+
+    (client.unwrap(), accepted, lease)
+}
+
+async fn assert_ping_pong(client: &mut QuicStream, accepted: &mut QuicStream) {
+    client.write_all(b"ping").await.unwrap();
+    let mut buf = [0; 4];
+    accepted.read_exact(&mut buf).await.unwrap();
+    assert_eq!(&buf, b"ping");
+
+    accepted.write_all(b"pong").await.unwrap();
+    client.read_exact(&mut buf).await.unwrap();
+    assert_eq!(&buf, b"pong");
+}
+
 fn assert_balanced_connection_load(pool: &crate::context::IoPoolHandle) {
     let loads = pool.io_loads();
     assert!(
@@ -551,22 +593,14 @@ fn listener_binds_one_endpoint_per_io_thread_on_linux() {
         .build()
         .unwrap();
     test_runtime.block_on(async {
-        let certified = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
-        let mut options = Options::default();
-        options.quic.server_cert_pem = Some(certified.cert.pem().into_bytes());
-        options.quic.server_key_pem = Some(certified.signing_key.serialize_pem().into_bytes());
-        options.quic.trust_pem = options.quic.server_cert_pem.clone();
-        options.quic.trust_system = false;
-        let setup = || AcceptSetup {
-            admission: Admission::new(4),
-            timeout: Duration::from_secs(5),
-            cancel: CancellationToken::new(),
-            monitor: MonitorPublisher::new(),
-            io_pool: pool.clone(),
-        };
-        let mut listener = bind(&"quic://127.0.0.1:0".parse().unwrap(), setup(), &options)
-            .await
-            .unwrap();
+        let options = self_signed_options();
+        let mut listener = bind(
+            &"quic://127.0.0.1:0".parse().unwrap(),
+            accept_setup(&pool),
+            &options,
+        )
+        .await
+        .unwrap();
         let expected = if cfg!(target_os = "linux") { 2 } else { 1 };
         assert_eq!(listener.endpoints.len(), expected);
         let threads: Vec<usize> = listener.endpoints.iter().map(|e| e.lease.index()).collect();
@@ -576,7 +610,9 @@ fn listener_binds_one_endpoint_per_io_thread_on_linux() {
             unreachable!()
         };
         let target = Endpoint::Quic { host, port };
-        let taken = bind(&target, setup(), &options).await.unwrap_err();
+        let taken = bind(&target, accept_setup(&pool), &options)
+            .await
+            .unwrap_err();
         assert!(
             matches!(&taken, Error::Io(e) if e.kind() == std::io::ErrorKind::AddrInUse),
             "second listener on a bound port: {taken:?}"
@@ -588,14 +624,10 @@ fn listener_binds_one_endpoint_per_io_thread_on_linux() {
         let mut per_endpoint = [0; 2];
         let mut peers = Vec::new();
         for _ in 0..24 {
-            let (client, accepted) = tokio::join!(connect(&target, &options, None, &pool), async {
-                listener.accept().await.map(|(stream, _, _)| stream)
-            });
-            let mut accepted = accepted.unwrap();
-            let lease = accepted.take_io_lease().unwrap();
-            assert_balanced_connection_load(&pool);
+            let (client, accepted, lease) =
+                connect_and_accept(&mut listener, &target, &options, &pool).await;
             per_endpoint[listener_endpoint_of(&listener, &accepted).unwrap()] += 1;
-            peers.push((client.unwrap(), accepted, lease));
+            peers.push((client, accepted, lease));
         }
         if cfg!(target_os = "linux") {
             assert!(
@@ -604,13 +636,7 @@ fn listener_binds_one_endpoint_per_io_thread_on_linux() {
             );
         }
         for (client, accepted, _) in &mut peers {
-            client.write_all(b"ping").await.unwrap();
-            let mut buf = [0; 4];
-            accepted.read_exact(&mut buf).await.unwrap();
-            assert_eq!(&buf, b"ping");
-            accepted.write_all(b"pong").await.unwrap();
-            client.read_exact(&mut buf).await.unwrap();
-            assert_eq!(&buf, b"pong");
+            assert_ping_pong(client, accepted).await;
         }
         let group = Arc::downgrade(&listener.endpoints);
         drop(listener);
@@ -633,21 +659,10 @@ fn skewed_initials_still_balance_connection_work_and_transfer_data() {
         .build()
         .unwrap();
     runtime.block_on(async {
-        let certified = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
-        let mut options = Options::default();
-        options.quic.server_cert_pem = Some(certified.cert.pem().into_bytes());
-        options.quic.server_key_pem = Some(certified.signing_key.serialize_pem().into_bytes());
-        options.quic.trust_pem = options.quic.server_cert_pem.clone();
-        options.quic.trust_system = false;
+        let options = self_signed_options();
         let mut listener = bind(
             &"quic://127.0.0.1:0".parse().unwrap(),
-            AcceptSetup {
-                admission: Admission::new(4),
-                timeout: Duration::from_secs(5),
-                cancel: CancellationToken::new(),
-                monitor: MonitorPublisher::new(),
-                io_pool: pool.clone(),
-            },
+            accept_setup(&pool),
             &options,
         )
         .await

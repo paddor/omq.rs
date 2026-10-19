@@ -16,8 +16,11 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use rand::RngExt;
+use rand::rngs::StdRng;
 
-use omq_tokio::{Message, MonitorEvent, OnMute, Options, ReconnectPolicy, Socket, SocketType};
+use omq_tokio::{
+    Endpoint, Message, MonitorEvent, OnMute, Options, ReconnectPolicy, Socket, SocketType,
+};
 
 const TOPICS: &[&str] = &["fast.", "slow.", "all.", "rare."];
 
@@ -47,6 +50,43 @@ async fn wait_for_subscribes(mon: &mut omq_tokio::MonitorStream, n: usize) {
     }
 }
 
+/// Publishes up to 1k messages, cycling through topics. A send blocked for
+/// 1 ms is skipped; only accepted sends advance `pub_count`.
+async fn publish_batch(publisher: &Socket, pub_count: &mut u64) {
+    for _ in 0..1_000 {
+        let topic = TOPICS[*pub_count as usize % TOPICS.len()];
+        let msg = format!("{topic}{pub_count}");
+        if let Ok(Ok(())) = tokio::time::timeout(
+            Duration::from_millis(1),
+            publisher.send(Message::single(msg)),
+        )
+        .await
+        {
+            *pub_count += 1;
+        }
+    }
+}
+
+/// Closes a random SUB half the time, then adds one with a random prefix
+/// while there are fewer than 10.
+async fn churn_subscribers(rng: &mut StdRng, subs: &mut Vec<Socket>, ep: &Endpoint) {
+    if !subs.is_empty() && rng.random_bool(0.5) {
+        let idx = rng.random_range(0..subs.len());
+        let sub = subs.swap_remove(idx);
+        sub.close().await.unwrap();
+    }
+
+    if subs.len() < 10 {
+        let sub = Socket::new(SocketType::Sub, no_reconnect().recv_hwm(32));
+        sub.connect(ep.clone()).await.unwrap();
+        let prefix = TOPICS[rng.random_range(0..TOPICS.len())];
+        sub.subscribe(Bytes::from(prefix.to_string()))
+            .await
+            .unwrap();
+        subs.push(sub);
+    }
+}
+
 #[test]
 fn soak_pub_sub_churn_tcp() {
     let duration = soak_common::soak_duration();
@@ -58,6 +98,8 @@ fn soak_pub_sub_churn_tcp() {
         let mut mon = publisher.monitor();
         let ep = publisher.bind(soak_common::tcp_ep(0)).await.unwrap();
 
+        // A never-read SUB with HWM 1 stays connected the whole run; PUB
+        // must keep publishing by dropping for it instead of blocking.
         let slow_sub = Socket::new(SocketType::Sub, no_reconnect().recv_hwm(1));
         slow_sub.connect(ep.clone()).await.unwrap();
         slow_sub.subscribe(Bytes::new()).await.unwrap();
@@ -72,18 +114,7 @@ fn soak_pub_sub_churn_tcp() {
         let mut last_log_pub_count = 0u64;
 
         while start.elapsed() < duration {
-            for _ in 0..1_000 {
-                let topic = TOPICS[pub_count as usize % TOPICS.len()];
-                let msg = format!("{topic}{pub_count}");
-                if let Ok(Ok(())) = tokio::time::timeout(
-                    Duration::from_millis(1),
-                    publisher.send(Message::single(msg)),
-                )
-                .await
-                {
-                    pub_count += 1;
-                }
-            }
+            publish_batch(&publisher, &mut pub_count).await;
 
             for sub in &subs {
                 while sub.try_recv().is_ok() {}
@@ -91,22 +122,7 @@ fn soak_pub_sub_churn_tcp() {
 
             if last_churn.elapsed() >= Duration::from_millis(500) {
                 last_churn = Instant::now();
-
-                if !subs.is_empty() && rng.random_bool(0.5) {
-                    let idx = rng.random_range(0..subs.len());
-                    let sub = subs.swap_remove(idx);
-                    sub.close().await.unwrap();
-                }
-
-                if subs.len() < 10 {
-                    let sub = Socket::new(SocketType::Sub, no_reconnect().recv_hwm(32));
-                    sub.connect(ep.clone()).await.unwrap();
-                    let prefix = TOPICS[rng.random_range(0..TOPICS.len())];
-                    sub.subscribe(Bytes::from(prefix.to_string()))
-                        .await
-                        .unwrap();
-                    subs.push(sub);
-                }
+                churn_subscribers(&mut rng, &mut subs, &ep).await;
             }
 
             if last_log.elapsed() >= Duration::from_secs(30) {

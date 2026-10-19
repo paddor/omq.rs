@@ -1,4 +1,5 @@
 use super::*;
+use crate::engine::transmit_slot::SlotConfig;
 
 #[tokio::test]
 async fn flush_frame_buffer_preserves_large_payload_after_partial_write() {
@@ -358,17 +359,7 @@ async fn owned_chunk_writer_receives_few_chunks_for_mid_size_frames() {
 
 #[test]
 fn owned_slot_staging_merges_shared_fan_out_chunks() {
-    let slot = PeerTransmitSlot::new(
-        1,
-        false,
-        None,
-        None,
-        omq_proto::frame_buffer::ARENA_THRESHOLD,
-        omq_proto::frame_buffer::ARENA_INITIAL_CAP,
-        crate::engine::transmit_slot::TRANSMIT_SLOT_CAP_DEFAULT,
-        crate::engine::transmit_slot::TRANSMIT_SLOT_MSG_CAP_DEFAULT,
-        crate::engine::framing::WireFraming::Zmtp,
-    );
+    let slot = PeerTransmitSlot::with_config(1, SlotConfig::default());
     slot.handshake_done.store(true, Ordering::Release);
     // Shared fan-out payloads stay separate chunks in the slot.
     let payload = Bytes::from(patterned_payload(256, 7));

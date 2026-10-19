@@ -344,7 +344,18 @@ fn rust_socket_materialize_impl(rb_self: &RustSocket) -> RbResult<()> {
     }
 
     #[cfg(feature = "plain")]
-    if rb_self
+    ensure_plain_auth_configured(rb_self)?;
+
+    let opts = rb_self.options.lock().unwrap().take().unwrap_or_default();
+    *slot = Some(spawn_materialized(rb_self.socket_type, opts));
+    Ok(())
+}
+
+/// A PLAIN server without an installed authenticator would reject every
+/// client; fail loudly at materialization instead.
+#[cfg(feature = "plain")]
+fn ensure_plain_auth_configured(rb_self: &RustSocket) -> RbResult<()> {
+    let plain_server = rb_self
         .options
         .lock()
         .unwrap()
@@ -354,15 +365,21 @@ fn rust_socket_materialize_impl(rb_self: &RustSocket) -> RbResult<()> {
                 options.mechanism,
                 omq_proto::MechanismSetup::PlainServer { .. }
             )
-        })
-        && !rb_self.plain_auth_configured.load(Ordering::Acquire)
-    {
+        });
+    if plain_server && !rb_self.plain_auth_configured.load(Ordering::Acquire) {
         return Err(RubyErr::runtime(
             "PLAIN server requires explicit authentication via set_plain_auth",
         ));
     }
+    Ok(())
+}
 
-    let opts = rb_self.options.lock().unwrap().take().unwrap_or_default();
+/// Build the Ruby-facing rings and signals, then create the socket and
+/// its pumps on the runtime.
+fn spawn_materialized(
+    socket_type: omq_tokio::SocketType,
+    opts: omq_tokio::Options,
+) -> Materialized {
     let send_cap = opts.send_hwm.max(1) as usize;
     let recv_cap = opts.recv_hwm.max(1) as usize;
     let (send_prod, send_cons) = yring::async_spsc(send_cap);
@@ -378,41 +395,38 @@ fn rust_socket_materialize_impl(rb_self: &RustSocket) -> RbResult<()> {
     let all_peers_gone_notify = Arc::new(PipeNotify::new());
     let subscriber_joined_notify = Arc::new(PipeNotify::new());
 
-    let (socket, send_pump, recv_pump, monitor_pump) = runtime::materialize(
-        io_threads(),
-        rb_self.socket_type,
-        opts,
+    let pumps = runtime::PumpChannels {
         send_cons,
+        send_notify: send_notify.clone(),
+        send_waiting: send_waiting.clone(),
         recv_prod,
-        recv_notify.clone(),
-        send_notify.clone(),
-        send_waiting.clone(),
-        recv_space.clone(),
-        monitor_tx,
-        monitor_notify.clone(),
-        peer_connected_notify.clone(),
-        all_peers_gone_notify.clone(),
-        subscriber_joined_notify.clone(),
-    );
+        recv_notify: recv_notify.clone(),
+        recv_space: recv_space.clone(),
+    };
+    let monitor = runtime::MonitorSinks {
+        events: monitor_tx,
+        notify: monitor_notify.clone(),
+        peer_connected: peer_connected_notify.clone(),
+        all_peers_gone: all_peers_gone_notify.clone(),
+        subscriber_joined: subscriber_joined_notify.clone(),
+    };
+    let (socket, tasks) = runtime::materialize(io_threads(), socket_type, opts, pumps, monitor);
 
-    *slot = Some(Materialized {
+    Materialized {
         socket,
         send_prod: Mutex::new(send_prod),
         recv_cons: Mutex::new(recv_cons),
         recv_notify,
         send_notify,
         recv_space,
-        send_pump,
         send_waiting,
-        recv_pump,
         monitor_rx,
         monitor_notify,
         peer_connected_notify,
         all_peers_gone_notify,
         subscriber_joined_notify,
-        monitor_pump,
-    });
-    Ok(())
+        tasks,
+    }
 }
 
 unsafe extern "C" fn rust_socket_materialize(rb_self: VALUE) -> VALUE {
@@ -931,15 +945,7 @@ fn rust_socket_close_impl(rb_self: &RustSocket, wait_for_auth_worker: bool) {
         m.subscriber_joined_notify.force_wake();
         m.monitor_notify.force_wake();
         let linger = *rb_self.linger.lock().unwrap();
-        runtime::destroy_socket(
-            io_threads(),
-            m.socket,
-            m.send_prod,
-            m.send_pump,
-            m.recv_pump,
-            m.monitor_pump,
-            linger,
-        );
+        runtime::destroy_socket(io_threads(), m.socket, m.send_prod, m.tasks, linger);
     }
 }
 
@@ -1085,33 +1091,55 @@ pub fn register(native: VALUE) -> RbResult<()> {
         rb::undef_alloc_func(class)?;
         rb::define_singleton_method_1(class, c"new", rust_socket_new)?;
         rb::define_method_1(class, c"set_options", rust_socket_set_options)?;
-        #[cfg(feature = "curve")]
-        {
-            rb::define_method_1(
-                class,
-                c"set_curve_auth_keys",
-                rust_socket_set_curve_auth_keys,
-            )?;
-            rb::define_method_1(
-                class,
-                c"set_curve_auth_callback",
-                rust_socket_set_curve_auth_callback,
-            )?;
-            rb::define_method_0(class, c"clear_curve_auth", rust_socket_clear_curve_auth)?;
-        }
-        #[cfg(feature = "plain")]
-        {
-            rb::define_method_1(
-                class,
-                c"set_plain_auth_credentials",
-                rust_socket_set_plain_auth_credentials,
-            )?;
-            rb::define_method_1(
-                class,
-                c"set_plain_auth_callback",
-                rust_socket_set_plain_auth_callback,
-            )?;
-        }
+    }
+
+    #[cfg(feature = "curve")]
+    register_curve_auth_methods(class)?;
+    #[cfg(feature = "plain")]
+    register_plain_auth_methods(class)?;
+    register_io_methods(class)?;
+
+    Ok(())
+}
+
+#[cfg(feature = "curve")]
+fn register_curve_auth_methods(class: VALUE) -> RbResult<()> {
+    unsafe {
+        rb::define_method_1(
+            class,
+            c"set_curve_auth_keys",
+            rust_socket_set_curve_auth_keys,
+        )?;
+        rb::define_method_1(
+            class,
+            c"set_curve_auth_callback",
+            rust_socket_set_curve_auth_callback,
+        )?;
+        rb::define_method_0(class, c"clear_curve_auth", rust_socket_clear_curve_auth)?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "plain")]
+fn register_plain_auth_methods(class: VALUE) -> RbResult<()> {
+    unsafe {
+        rb::define_method_1(
+            class,
+            c"set_plain_auth_credentials",
+            rust_socket_set_plain_auth_credentials,
+        )?;
+        rb::define_method_1(
+            class,
+            c"set_plain_auth_callback",
+            rust_socket_set_plain_auth_callback,
+        )?;
+    }
+    Ok(())
+}
+
+/// Lifecycle, endpoint, message, readiness fd, and subscription methods.
+fn register_io_methods(class: VALUE) -> RbResult<()> {
+    unsafe {
         rb::define_method_0(class, c"materialize", rust_socket_materialize)?;
         rb::define_method_1(class, c"bind", rust_socket_bind)?;
         rb::define_method_1(class, c"connect", rust_socket_connect)?;

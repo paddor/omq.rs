@@ -215,15 +215,7 @@ impl Submitter {
             .values()
             .filter(|peer| peer.lane.is_none() && peer.fanout_active)
             .filter(|peer| {
-                all_subscribe_all
-                    || filter::peer_matches(
-                        self.mode,
-                        &peer.subscriptions,
-                        &peer.groups,
-                        peer.any_groups,
-                        topic,
-                        group,
-                    )
+                all_subscribe_all || filter::peer_matches(self.mode, &peer.filter(), topic, group)
             })
             .map(|peer| peer.target.bind(&self.data_lanes))
             .collect();
@@ -330,41 +322,8 @@ impl Submitter {
         }
 
         if self.mute_policy == FanOutMutePolicy::Block {
-            // Every fallback peer usually has space. Publish to them at
-            // once and only set up per-peer waits when one is full.
-            let published = {
-                let _publishing = self.publish.lock().expect("fanout publish poisoned");
-                #[cfg(feature = "dart")]
-                if matches!(targets, FallbackTargets::Native(_)) {
-                    self.native
-                        .lock()
-                        .expect("native fanout cache poisoned")
-                        .publish(fallback_targets, msg, || Ok(()))
-                        .expect("no lane reservation during fallback publication")
-                } else {
-                    Self::publish_fallback(fallback_targets, msg)
-                }
-                #[cfg(not(feature = "dart"))]
-                Self::publish_fallback(fallback_targets, msg)
-            };
-            let native = async {
-                if has_lane_peers {
-                    lanes.dispatch(LaneDispatch { msg: msg.clone() }).await;
-                }
-            };
-            if published {
-                native.await;
-            } else {
-                let fallback = async {
-                    #[cfg(feature = "dart")]
-                    if let FallbackTargets::Native(snapshot) = &targets {
-                        self.dispatch_native_blocking(snapshot, msg).await;
-                        return;
-                    }
-                    fallback::dispatch_blocking(fallback_targets, msg, lanes, &self.publish).await;
-                };
-                tokio::join!(fallback, native);
-            }
+            self.dispatch_raw_blocking(lanes, msg, &targets, has_lane_peers)
+                .await;
             return Ok(());
         }
 
@@ -381,6 +340,54 @@ impl Submitter {
             lanes.dispatch(LaneDispatch { msg: msg.clone() }).await;
         }
         Ok(())
+    }
+
+    /// Every fallback peer usually has space. Publish to them at once and
+    /// only set up per-peer waits when one is full. Lane peers proceed
+    /// concurrently with those waits.
+    async fn dispatch_raw_blocking(
+        &self,
+        lanes: &FanOutLanes,
+        msg: &Message,
+        targets: &FallbackTargets,
+        has_lane_peers: bool,
+    ) {
+        let fallback_targets = targets.as_slice();
+        let published = {
+            let _publishing = self.publish.lock().expect("fanout publish poisoned");
+            #[cfg(feature = "dart")]
+            if matches!(targets, FallbackTargets::Native(_)) {
+                self.native
+                    .lock()
+                    .expect("native fanout cache poisoned")
+                    .publish(fallback_targets, msg, || Ok(()))
+                    .expect("no lane reservation during fallback publication")
+            } else {
+                Self::publish_fallback(fallback_targets, msg)
+            }
+            #[cfg(not(feature = "dart"))]
+            Self::publish_fallback(fallback_targets, msg)
+        };
+
+        let native = async {
+            if has_lane_peers {
+                lanes.dispatch(LaneDispatch { msg: msg.clone() }).await;
+            }
+        };
+        if published {
+            native.await;
+            return;
+        }
+
+        let fallback = async {
+            #[cfg(feature = "dart")]
+            if let FallbackTargets::Native(snapshot) = targets {
+                self.dispatch_native_blocking(snapshot, msg).await;
+                return;
+            }
+            fallback::dispatch_blocking(fallback_targets, msg, lanes, &self.publish).await;
+        };
+        tokio::join!(fallback, native);
     }
 
     fn publish_fallback(targets: &[PeerOutbound], msg: &Message) -> bool {
@@ -546,6 +553,16 @@ struct FanOutPeer {
     target: PeerOutbound,
     lane: Option<usize>,
     fanout_active: bool,
+}
+
+impl FanOutPeer {
+    fn filter(&self) -> filter::PeerFilter<'_> {
+        filter::PeerFilter {
+            subscriptions: &self.subscriptions,
+            groups: &self.groups,
+            any_groups: self.any_groups,
+        }
+    }
 }
 
 impl FanOutInner {

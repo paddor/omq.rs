@@ -196,60 +196,66 @@ impl DartIo {
     ///
     /// `ecn` is a low-level facility. Socket policy must separately authorize
     /// ECT marking with application feedback and rate control.
-    pub fn try_send_segments(
-        &self,
-        destination: SocketAddr,
-        source: Option<IpAddr>,
-        ecn: Option<EcnCodepoint>,
-        contents: &[u8],
-        segment_size: usize,
-    ) -> io::Result<usize> {
-        if contents.is_empty()
-            || contents.len() > MAX_BATCH_BYTES
-            || !(1..=MAX_PACKED_DATAGRAM).contains(&segment_size)
+    pub fn try_send_segments(&self, batch: SegmentBatch<'_>) -> io::Result<usize> {
+        if batch.contents.is_empty()
+            || batch.contents.len() > MAX_BATCH_BYTES
+            || !(1..=MAX_PACKED_DATAGRAM).contains(&batch.segment_size)
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "invalid DART segment batch",
             ));
         }
+
         let initial_cap = self.max_gso_segments();
-        match self.send_window(
-            destination,
-            source,
-            ecn,
-            contents,
-            segment_size,
-            initial_cap,
-        ) {
-            Err(_) if initial_cap > 1 && self.max_gso_segments() == 1 => {
-                self.send_window(destination, source, ecn, contents, segment_size, 1)
-            }
+        match self.send_window(batch, initial_cap) {
+            // A GSO failure downshifts the carrier to one segment; retry unbatched.
+            Err(_) if initial_cap > 1 && self.max_gso_segments() == 1 => self.send_window(batch, 1),
             result => result,
         }
     }
 
-    fn send_window(
-        &self,
-        destination: SocketAddr,
-        source: Option<IpAddr>,
-        ecn: Option<EcnCodepoint>,
-        contents: &[u8],
-        segment_size: usize,
-        max_segments: usize,
-    ) -> io::Result<usize> {
-        let (length, count) = send_window(contents.len(), segment_size, max_segments);
+    fn send_window(&self, batch: SegmentBatch<'_>, max_segments: usize) -> io::Result<usize> {
+        let (length, count) = send_window(batch.contents.len(), batch.segment_size, max_segments);
         let transmit = Transmit {
-            destination,
-            ecn,
-            contents: &contents[..length],
-            segment_size: (count > 1).then_some(segment_size),
-            src_ip: source,
+            destination: batch.destination,
+            ecn: batch.ecn,
+            contents: &batch.contents[..length],
+            segment_size: (count > 1).then_some(batch.segment_size),
+            src_ip: batch.source,
         };
         self.socket.try_io(Interest::WRITABLE, || {
             self.state.try_send((&self.socket).into(), &transmit)
         })?;
         Ok(count)
+    }
+}
+
+/// Concatenated equal-length datagrams for one destination.
+#[derive(Clone, Copy, Debug)]
+pub struct SegmentBatch<'a> {
+    /// Remote receiver address.
+    pub destination: SocketAddr,
+    /// Local source address; `None` lets the kernel choose.
+    pub source: Option<IpAddr>,
+    /// ECN codepoint applied to every datagram.
+    pub ecn: Option<EcnCodepoint>,
+    /// Concatenated datagrams; the final one may be shorter.
+    pub contents: &'a [u8],
+    /// Length of every datagram except possibly the final one.
+    pub segment_size: usize,
+}
+
+impl<'a> SegmentBatch<'a> {
+    /// Datagrams to `destination` without ECN marking or a fixed source.
+    pub const fn new(destination: SocketAddr, contents: &'a [u8], segment_size: usize) -> Self {
+        Self {
+            destination,
+            source: None,
+            ecn: None,
+            contents,
+            segment_size,
+        }
     }
 }
 
@@ -568,7 +574,7 @@ mod tests {
         let mut offset = 0;
         while offset < wire.len() {
             sender.writable().await.unwrap();
-            match sender.try_send_segments(target, None, None, &wire[offset..], 3) {
+            match sender.try_send_segments(SegmentBatch::new(target, &wire[offset..], 3)) {
                 Ok(count) => offset = (offset + count * 3).min(wire.len()),
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
                 Err(error) => panic!("send: {error}"),
@@ -607,7 +613,10 @@ mod tests {
         sender.writable().await.unwrap();
         assert_eq!(
             sender
-                .try_send_segments(target, None, Some(EcnCodepoint::Ect0), &[0, 7], 2)
+                .try_send_segments(SegmentBatch {
+                    ecn: Some(EcnCodepoint::Ect0),
+                    ..SegmentBatch::new(target, &[0, 7], 2)
+                })
                 .unwrap(),
             1
         );

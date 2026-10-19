@@ -649,6 +649,13 @@ impl AnyListener {
     }
 }
 
+/// Listener settings for carriers with TLS/HTTP setup.
+#[cfg(any(feature = "ws", feature = "quic"))]
+pub(super) struct CarrierAccept<'a> {
+    pub(super) options: &'a omq_proto::Options,
+    pub(super) setup: crate::transport::setup::AcceptSetup,
+}
+
 /// Bind dispatch: route an endpoint to its transport's listener and wrap it.
 ///
 /// `lz4+tcp://` reuses the TCP listener; the per-connection
@@ -658,9 +665,7 @@ pub(super) async fn bind_any(
     endpoint: &Endpoint,
     snapshot: &InprocPeerSnapshot,
     recv: &inproc_transport::RecvConfig,
-    #[cfg(any(feature = "ws", feature = "quic"))] carrier_options: &omq_proto::Options,
-    #[cfg(any(feature = "ws", feature = "quic"))]
-    carrier_setup: crate::transport::setup::AcceptSetup,
+    #[cfg(any(feature = "ws", feature = "quic"))] carrier: CarrierAccept<'_>,
 ) -> Result<BoundListener> {
     if endpoint.is_tcp_family() {
         let listener = AnyListener::Tcp(TcpTransport::bind(&endpoint.underlying_tcp()).await?);
@@ -670,37 +675,16 @@ pub(super) async fn bind_any(
             endpoint: resolved,
         });
     }
+
     #[cfg(feature = "ws")]
     if endpoint.is_ws_family() {
-        let plain = endpoint.underlying_ws();
-        let wss_tls = &carrier_options.wss_tls;
-        let tls_acc = if matches!(plain, Endpoint::Wss { .. }) {
-            let cert = wss_tls.server_cert_pem.as_deref().ok_or_else(|| {
-                Error::Protocol("wss:// bind requires server_cert_pem in WssTls options".into())
-            })?;
-            let key = wss_tls.server_key_pem.as_deref().ok_or_else(|| {
-                Error::Protocol("wss:// bind requires server_key_pem in WssTls options".into())
-            })?;
-            Some(tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(
-                crate::transport::tls::server_config(cert, key)?,
-            )))
-        } else {
-            None
-        };
-        let mut ws_listener =
-            crate::transport::ws::bind(&plain, tls_acc, carrier_setup, carrier_options).await?;
-        let resolved = endpoint.rewrap_ws(ws_listener.local_endpoint().clone());
-        ws_listener.set_monitor_endpoint(resolved.clone());
-        let listener = AnyListener::Ws(ws_listener);
-        return Ok(BoundListener {
-            listener,
-            endpoint: resolved,
-        });
+        return bind_ws(endpoint, carrier).await;
     }
+
     #[cfg(feature = "quic")]
     if endpoint.is_quic_family() {
         let mut quic_listener =
-            crate::transport::quic::bind(endpoint, carrier_setup, carrier_options).await?;
+            crate::transport::quic::bind(endpoint, carrier.setup, carrier.options).await?;
         let resolved = quic_listener.local_endpoint().clone();
         quic_listener.set_monitor_endpoint(resolved.clone());
         return Ok(BoundListener {
@@ -708,6 +692,7 @@ pub(super) async fn bind_any(
             endpoint: resolved,
         });
     }
+
     #[cfg(target_os = "linux")]
     if let Endpoint::Shm(path) = endpoint {
         let listener = crate::transport::ipc::bind_shm(&Endpoint::Ipc(path.clone()))?;
@@ -716,30 +701,52 @@ pub(super) async fn bind_any(
             endpoint: endpoint.clone(),
         });
     }
-    match endpoint {
-        Endpoint::Inproc { name } => {
-            let listener = AnyListener::Inproc(inproc_transport::bind(
-                inproc_registry.clone(),
-                name,
-                snapshot.clone(),
-                *recv,
-            )?);
-            let resolved = listener.local_endpoint().clone();
-            Ok(BoundListener {
-                listener,
-                endpoint: resolved,
-            })
-        }
-        Endpoint::Ipc(_) => {
-            let listener = AnyListener::Ipc(IpcTransport::bind(endpoint).await?);
-            let resolved = listener.local_endpoint().clone();
-            Ok(BoundListener {
-                listener,
-                endpoint: resolved,
-            })
-        }
-        other => Err(Error::UnsupportedScheme(other.scheme().to_string())),
-    }
+
+    let listener = match endpoint {
+        Endpoint::Inproc { name } => AnyListener::Inproc(inproc_transport::bind(
+            inproc_registry.clone(),
+            name,
+            snapshot.clone(),
+            *recv,
+        )?),
+        Endpoint::Ipc(_) => AnyListener::Ipc(IpcTransport::bind(endpoint).await?),
+        other => return Err(Error::UnsupportedScheme(other.scheme().to_string())),
+    };
+    let resolved = listener.local_endpoint().clone();
+    Ok(BoundListener {
+        listener,
+        endpoint: resolved,
+    })
+}
+
+/// Bind a WS/WSS listener. WSS needs the server certificate and key.
+#[cfg(feature = "ws")]
+async fn bind_ws(endpoint: &Endpoint, carrier: CarrierAccept<'_>) -> Result<BoundListener> {
+    let plain = endpoint.underlying_ws();
+    let wss_tls = &carrier.options.wss_tls;
+    let tls_acc = if matches!(plain, Endpoint::Wss { .. }) {
+        let cert = wss_tls.server_cert_pem.as_deref().ok_or_else(|| {
+            Error::Protocol("wss:// bind requires server_cert_pem in WssTls options".into())
+        })?;
+        let key = wss_tls.server_key_pem.as_deref().ok_or_else(|| {
+            Error::Protocol("wss:// bind requires server_key_pem in WssTls options".into())
+        })?;
+        Some(tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(
+            crate::transport::tls::server_config(cert, key)?,
+        )))
+    } else {
+        None
+    };
+
+    let mut ws_listener =
+        crate::transport::ws::bind(&plain, tls_acc, carrier.setup, carrier.options).await?;
+    // Report the bound port and keep any wrapper (e.g. lz4+ws://).
+    let resolved = endpoint.rewrap_ws(ws_listener.local_endpoint().clone());
+    ws_listener.set_monitor_endpoint(resolved.clone());
+    Ok(BoundListener {
+        listener: AnyListener::Ws(ws_listener),
+        endpoint: resolved,
+    })
 }
 
 /// Validate connect-side DNS synchronously before registering a dialer.
@@ -792,43 +799,17 @@ pub(super) async fn connect_any(
 ) -> Result<AnyConn> {
     if endpoint.is_tcp_family() {
         let s = TcpTransport::connect(&endpoint.underlying_tcp()).await?;
-        let peer_ident = peer_ident_for_endpoint(endpoint);
-        return Ok(AnyConn::ByteStream {
-            stream: AnyStream::Tcp(s),
-            peer_ident,
-            leftover: bytes::Bytes::new(),
-            setup: None,
-        });
+        return Ok(byte_stream(
+            AnyStream::Tcp(s),
+            peer_ident_for_endpoint(endpoint),
+        ));
     }
+
     #[cfg(feature = "ws")]
     if endpoint.is_ws_family() {
-        let plain = endpoint.underlying_ws();
-        let (host, port, path) = match &plain {
-            Endpoint::Ws {
-                host, port, path, ..
-            }
-            | Endpoint::Wss {
-                host, port, path, ..
-            } => (host, *port, path.as_str()),
-            _ => unreachable!(),
-        };
-        let connected = crate::transport::ws::connect(
-            host,
-            port,
-            path,
-            matches!(plain, Endpoint::Wss { .. }),
-            &carrier.options.wss_tls,
-            &carrier.options.mechanism,
-        )
-        .await?;
-        let peer_ident = peer_ident_for_endpoint(endpoint);
-        return Ok(AnyConn::ByteStream {
-            stream: AnyStream::Ws(Box::new(connected.transport)),
-            peer_ident,
-            leftover: connected.leftover,
-            setup: None,
-        });
+        return connect_ws(endpoint, carrier).await;
     }
+
     #[cfg(feature = "quic")]
     if endpoint.is_quic_family() {
         let stream = crate::transport::quic::connect(
@@ -839,23 +820,19 @@ pub(super) async fn connect_any(
         )
         .await?;
         let peer_ident = PeerIdent::Socket(stream.remote_address());
-        return Ok(AnyConn::ByteStream {
-            stream: AnyStream::Quic(Box::new(stream)),
-            peer_ident,
-            leftover: bytes::Bytes::new(),
-            setup: None,
-        });
+        return Ok(byte_stream(AnyStream::Quic(Box::new(stream)), peer_ident));
     }
+
+    // SHM sets up over a Unix stream; the actor wraps it after connect.
     #[cfg(target_os = "linux")]
     if let Endpoint::Shm(path) = endpoint {
         let stream = IpcTransport::connect(&Endpoint::Ipc(path.clone())).await?;
-        return Ok(AnyConn::ByteStream {
-            stream: AnyStream::Ipc(stream),
-            peer_ident: peer_ident_for_endpoint(endpoint),
-            leftover: bytes::Bytes::new(),
-            setup: None,
-        });
+        return Ok(byte_stream(
+            AnyStream::Ipc(stream),
+            peer_ident_for_endpoint(endpoint),
+        ));
     }
+
     match endpoint {
         Endpoint::Inproc { name } => {
             let conn =
@@ -867,15 +844,55 @@ pub(super) async fn connect_any(
         }
         Endpoint::Ipc(_) => {
             let s = IpcTransport::connect(endpoint).await?;
-            let peer_ident = peer_ident_for_endpoint(endpoint);
-            Ok(AnyConn::ByteStream {
-                stream: AnyStream::Ipc(s),
-                peer_ident,
-                leftover: bytes::Bytes::new(),
-                setup: None,
-            })
+            Ok(byte_stream(
+                AnyStream::Ipc(s),
+                peer_ident_for_endpoint(endpoint),
+            ))
         }
         other => Err(Error::UnsupportedScheme(other.scheme().to_string())),
+    }
+}
+
+/// Connect a WS/WSS transport. Bytes read past the HTTP upgrade belong to
+/// the ZMTP stream.
+#[cfg(feature = "ws")]
+async fn connect_ws(endpoint: &Endpoint, carrier: CarrierConnect<'_>) -> Result<AnyConn> {
+    let plain = endpoint.underlying_ws();
+    let (host, port, path) = match &plain {
+        Endpoint::Ws {
+            host, port, path, ..
+        }
+        | Endpoint::Wss {
+            host, port, path, ..
+        } => (host, *port, path.as_str()),
+        _ => unreachable!(),
+    };
+
+    let target = crate::transport::ws::WsTarget {
+        host,
+        port,
+        path,
+        tls: matches!(plain, Endpoint::Wss { .. }),
+    };
+
+    let connected =
+        crate::transport::ws::connect(target, &carrier.options.wss_tls, &carrier.options.mechanism)
+            .await?;
+    Ok(AnyConn::ByteStream {
+        stream: AnyStream::Ws(Box::new(connected.transport)),
+        peer_ident: peer_ident_for_endpoint(endpoint),
+        leftover: connected.leftover,
+        setup: None,
+    })
+}
+
+/// A connected byte stream with no buffered bytes or carrier setup state.
+fn byte_stream(stream: AnyStream, peer_ident: PeerIdent) -> AnyConn {
+    AnyConn::ByteStream {
+        stream,
+        peer_ident,
+        leftover: bytes::Bytes::new(),
+        setup: None,
     }
 }
 
@@ -925,14 +942,15 @@ mod tests {
                 send_hwm: 1000,
             },
             #[cfg(any(feature = "ws", feature = "quic"))]
-            &carrier_options,
-            #[cfg(any(feature = "ws", feature = "quic"))]
-            crate::transport::setup::AcceptSetup {
-                admission: crate::transport::setup::Admission::new(128),
-                timeout: std::time::Duration::from_secs(30),
-                cancel: tokio_util::sync::CancellationToken::new(),
-                monitor: crate::socket::monitor::MonitorPublisher::new(),
-                io_pool: crate::context::IoPoolHandle::none(),
+            CarrierAccept {
+                options: &carrier_options,
+                setup: crate::transport::setup::AcceptSetup {
+                    admission: crate::transport::setup::Admission::new(128),
+                    timeout: std::time::Duration::from_secs(30),
+                    cancel: tokio_util::sync::CancellationToken::new(),
+                    monitor: crate::socket::monitor::MonitorPublisher::new(),
+                    io_pool: crate::context::IoPoolHandle::none(),
+                },
             },
         )
         .await

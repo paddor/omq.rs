@@ -116,14 +116,15 @@ mod inner {
                                 cpu_pct,
                                 cell.n,
                             );
-                            append_compression_jsonl(
-                                PATTERN,
+                            let row = CompressionRow {
+                                pattern: PATTERN,
                                 transport,
                                 peers,
-                                actual,
-                                wire_bytes_per_msg,
-                                cell,
-                            );
+                                msg_size: actual,
+                                wire_bytes: wire_bytes_per_msg,
+                                dict_size: None,
+                            };
+                            append_compression_jsonl(&row, cell);
                         }
                         println!();
                     }
@@ -177,15 +178,15 @@ mod inner {
                             cpu_pct,
                             cell.n,
                         );
-                        append_compression_jsonl_dict(
-                            "compression_json_dict",
+                        let row = CompressionRow {
+                            pattern: "compression_json_dict",
                             transport,
                             peers,
-                            actual,
-                            wire_bytes_per_msg,
-                            cell,
-                            Some(dict_cap),
-                        );
+                            msg_size: actual,
+                            wire_bytes: wire_bytes_per_msg,
+                            dict_size: Some(dict_cap),
+                        };
+                        append_compression_jsonl(&row, cell);
                     }
                     println!();
                 }
@@ -193,26 +194,26 @@ mod inner {
         }
     }
 
-    fn append_compression_jsonl(
-        pattern: &str,
-        transport: &str,
+    /// Identifies one result row; `dict_size` is set only for dictionary runs.
+    struct CompressionRow<'a> {
+        pattern: &'a str,
+        transport: &'a str,
         peers: usize,
         msg_size: usize,
         wire_bytes: usize,
-        c: common::Cell,
-    ) {
-        append_compression_jsonl_dict(pattern, transport, peers, msg_size, wire_bytes, c, None);
+        dict_size: Option<usize>,
     }
 
-    fn append_compression_jsonl_dict(
-        pattern: &str,
-        transport: &str,
-        peers: usize,
-        msg_size: usize,
-        wire_bytes: usize,
-        c: common::Cell,
-        dict_size: Option<usize>,
-    ) {
+    fn append_compression_jsonl(row: &CompressionRow<'_>, c: common::Cell) {
+        let CompressionRow {
+            pattern,
+            transport,
+            peers,
+            msg_size,
+            wire_bytes,
+            dict_size,
+        } = *row;
+
         if std::env::var_os("OMQ_BENCH_NO_WRITE").is_some() {
             return;
         }
@@ -220,11 +221,12 @@ mod inner {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
+
         let dict_field = match dict_size {
             Some(ds) => format!(r#","dict_size":{ds}"#),
             None => String::new(),
         };
-        let row = format!(
+        let line = format!(
             r#"{{"run_id":"{run}","pattern":"{pattern}","transport":"{transport}","peers":{peers},"msg_size":{msg_size},"wire_bytes":{wire_bytes},"msg_count":{n},"elapsed":{el},"cpu_time":{cpu},"mbps":{mbps},"msgs_s":{msgs_s}{dict_field}}}"#,
             run = common::run_id(),
             n = c.n,
@@ -239,7 +241,7 @@ mod inner {
             .open(path)
         {
             use std::io::Write as _;
-            let _ = writeln!(f, "{row}");
+            let _ = writeln!(f, "{line}");
         }
     }
 
@@ -310,18 +312,7 @@ mod inner {
 
         let label = format!("{transport} ~{}B {peers}p", payload.len());
 
-        let pull = Socket::new(SocketType::Pull, recv_opts(dict.as_ref()));
-        pull.bind(ep.clone()).await.expect("bind PULL");
-
-        let mut pushes: Vec<Socket> = Vec::with_capacity(peers);
-        for _ in 0..peers {
-            let p = Socket::new(SocketType::Push, push_opts(dict.as_ref()));
-            p.connect(ep.clone()).await.expect("connect PUSH");
-            pushes.push(p);
-        }
-        let refs: Vec<&Socket> = pushes.iter().collect();
-        common::wait_connected(&refs).await;
-
+        let (pull, pushes) = connect_push_pull(ep, peers, dict.as_ref()).await;
         let pull = Arc::new(pull);
         let pushes = Arc::new(pushes);
 
@@ -371,16 +362,43 @@ mod inner {
         pull_handle.abort();
         let _ = pull_handle.await;
 
-        if let Ok(pushes) = Arc::try_unwrap(pushes) {
+        close_all(pull, pushes).await;
+
+        cell
+    }
+
+    /// Close every socket that is no longer shared.
+    async fn close_all(pull: std::sync::Arc<Socket>, pushes: std::sync::Arc<Vec<Socket>>) {
+        if let Ok(pushes) = std::sync::Arc::try_unwrap(pushes) {
             for p in pushes {
                 let _ = p.close().await;
             }
         }
-        if let Ok(pull) = Arc::try_unwrap(pull) {
+        if let Ok(pull) = std::sync::Arc::try_unwrap(pull) {
             let _ = pull.close().await;
         }
+    }
 
-        cell
+    /// Bind one PULL and connect `peers` PUSH sockets, waiting until every
+    /// PUSH is connected.
+    async fn connect_push_pull(
+        ep: omq_tokio::Endpoint,
+        peers: usize,
+        dict: Option<&Bytes>,
+    ) -> (Socket, Vec<Socket>) {
+        let pull = Socket::new(SocketType::Pull, recv_opts(dict));
+        pull.bind(ep.clone()).await.expect("bind PULL");
+
+        let mut pushes: Vec<Socket> = Vec::with_capacity(peers);
+        for _ in 0..peers {
+            let p = Socket::new(SocketType::Push, push_opts(dict));
+            p.connect(ep.clone()).await.expect("connect PUSH");
+            pushes.push(p);
+        }
+        let refs: Vec<&Socket> = pushes.iter().collect();
+        common::wait_connected(&refs).await;
+
+        (pull, pushes)
     }
 
     fn spawn_recv_loop(
@@ -405,111 +423,118 @@ mod inner {
         })
     }
 
-    #[expect(clippy::too_many_lines)]
-    fn json_payload(target_bytes: usize) -> Bytes {
-        const LEVELS: &[&str] = &["DEBUG", "INFO", "WARN", "ERROR"];
-        const SERVICES: &[&str] = &[
-            "api-gateway",
-            "auth-svc",
-            "order-svc",
-            "payment-svc",
-            "notify-svc",
-        ];
-        const METHODS: &[&str] = &["GET", "POST", "PUT", "DELETE", "PATCH"];
-        const PATHS: &[&str] = &[
-            "/v1/widgets",
-            "/v1/users",
-            "/v1/orders",
-            "/v2/events",
-            "/v1/health",
-        ];
-        const REGIONS: &[&str] = &[
-            "us-east-1",
-            "us-west-2",
-            "eu-west-1",
-            "ap-south-1",
-            "eu-central-1",
-        ];
-        const STATUSES: &[u16] = &[200, 201, 204, 400, 404, 500, 502, 503];
-        const ACTIONS: &[&str] = &["login", "logout", "purchase", "refund", "update_profile"];
-        const CURRENCIES: &[&str] = &["USD", "EUR", "GBP", "JPY", "CHF"];
-        const ERROR_CODES: &[&str] = &[
-            "TIMEOUT",
-            "RATE_LIMITED",
-            "AUTH_EXPIRED",
-            "INVALID_INPUT",
-            "UPSTREAM_5XX",
-        ];
+    const LEVELS: &[&str] = &["DEBUG", "INFO", "WARN", "ERROR"];
+    const SERVICES: &[&str] = &[
+        "api-gateway",
+        "auth-svc",
+        "order-svc",
+        "payment-svc",
+        "notify-svc",
+    ];
+    const METHODS: &[&str] = &["GET", "POST", "PUT", "DELETE", "PATCH"];
+    const PATHS: &[&str] = &[
+        "/v1/widgets",
+        "/v1/users",
+        "/v1/orders",
+        "/v2/events",
+        "/v1/health",
+    ];
+    const REGIONS: &[&str] = &[
+        "us-east-1",
+        "us-west-2",
+        "eu-west-1",
+        "ap-south-1",
+        "eu-central-1",
+    ];
+    const STATUSES: &[u16] = &[200, 201, 204, 400, 404, 500, 502, 503];
+    const ACTIONS: &[&str] = &["login", "logout", "purchase", "refund", "update_profile"];
+    const CURRENCIES: &[&str] = &["USD", "EUR", "GBP", "JPY", "CHF"];
+    const ERROR_CODES: &[&str] = &[
+        "TIMEOUT",
+        "RATE_LIMITED",
+        "AUTH_EXPIRED",
+        "INVALID_INPUT",
+        "UPSTREAM_5XX",
+    ];
 
-        use std::fmt::Write as _;
+    /// Deterministic newline-separated JSON records, truncated to exactly
+    /// `target_bytes`, so every run compresses the same input.
+    fn json_payload(target_bytes: usize) -> Bytes {
         let mut out = String::with_capacity(target_bytes + 512);
         let mut counter: u32 = 0;
         while out.len() < target_bytes {
+            // Multiplicative hash spreads consecutive counters over all fields.
             let h = counter.wrapping_mul(0x9E37_79B1) as usize;
-            let id = format!("{h:08x}");
-            let kind = h % 5;
-            match kind {
-                0 => {
-                    let level = LEVELS[h % LEVELS.len()];
-                    let service = SERVICES[(h >> 4) % SERVICES.len()];
-                    let method = METHODS[(h >> 8) % METHODS.len()];
-                    let path = PATHS[(h >> 12) % PATHS.len()];
-                    let status = STATUSES[(h >> 20) % STATUSES.len()];
-                    let latency = (h % 500) as u32 + 1;
-                    let _ = write!(
-                        out,
-                        r#"{{"ts":"2026-04-27T12:34:56.{id}Z","level":"{level}","service":"{service}","trace_id":"{id}","method":"{method}","path":"{path}/{id}","status":{status},"latency_ms":{latency}}}"#,
-                    );
-                }
-                1 => {
-                    let action = ACTIONS[(h >> 4) % ACTIONS.len()];
-                    let region = REGIONS[(h >> 16) % REGIONS.len()];
-                    let _ = write!(
-                        out,
-                        r#"{{"event":"{action}","user_id":"u-{id}","session":"{id}","ts":"2026-04-27T12:34:56.{id}Z","ip":"10.{a}.{b}.{c}","region":"{region}","user_agent":"Mozilla/5.0","success":true}}"#,
-                        a = (h >> 8) % 256,
-                        b = (h >> 12) % 256,
-                        c = (h >> 16) % 256,
-                    );
-                }
-                2 => {
-                    let currency = CURRENCIES[(h >> 4) % CURRENCIES.len()];
-                    let amount = ((h % 99900) as f64 + 100.0) / 100.0;
-                    let _ = write!(
-                        out,
-                        r#"{{"type":"transaction","id":"txn-{id}","user_id":"u-{id}","amount":{amount:.2},"currency":"{currency}","ts":"2026-04-27T12:34:56.{id}Z","items":[{{"sku":"SKU-{id}","qty":{qty},"price":{price:.2}}}]}}"#,
-                        qty = (h >> 8) % 10 + 1,
-                        price = ((h % 9900) as f64 + 100.0) / 100.0,
-                    );
-                }
-                3 => {
-                    let service = SERVICES[(h >> 4) % SERVICES.len()];
-                    let region = REGIONS[(h >> 16) % REGIONS.len()];
-                    let _ = write!(
-                        out,
-                        r#"{{"type":"metric","service":"{service}","host":"{service}-{id}.svc.cluster.local","region":"{region}","ts":"2026-04-27T12:34:56.{id}Z","cpu":{cpu:.1},"mem_mb":{mem},"gc_ms":{gc},"conns":{conns}}}"#,
-                        cpu = (h % 1000) as f64 / 10.0,
-                        mem = (h >> 8) % 8192 + 256,
-                        gc = (h >> 12) % 200,
-                        conns = (h >> 16) % 500 + 10,
-                    );
-                }
-                _ => {
-                    let code = ERROR_CODES[(h >> 4) % ERROR_CODES.len()];
-                    let service = SERVICES[(h >> 8) % SERVICES.len()];
-                    let region = REGIONS[(h >> 16) % REGIONS.len()];
-                    let _ = write!(
-                        out,
-                        r#"{{"type":"error","code":"{code}","service":"{service}","region":"{region}","trace_id":"{id}","ts":"2026-04-27T12:34:56.{id}Z","stack":["at {service}::handle (src/handler.rs:{line})","at {service}::dispatch (src/router.rs:{line2})","at tokio::runtime::task ({id})"]}}"#,
-                        line = (h >> 12) % 500 + 1,
-                        line2 = (h >> 16) % 300 + 1,
-                    );
-                }
-            }
+            write_json_record(&mut out, h);
             out.push('\n');
             counter = counter.wrapping_add(1);
         }
         out.truncate(target_bytes);
         Bytes::from(out)
+    }
+
+    /// Append one record; `h % 5` picks the kind (access log, auth event,
+    /// transaction, metric, error) and other bits of `h` pick field values.
+    fn write_json_record(out: &mut String, h: usize) {
+        use std::fmt::Write as _;
+        let id = format!("{h:08x}");
+        match h % 5 {
+            0 => {
+                let level = LEVELS[h % LEVELS.len()];
+                let service = SERVICES[(h >> 4) % SERVICES.len()];
+                let method = METHODS[(h >> 8) % METHODS.len()];
+                let path = PATHS[(h >> 12) % PATHS.len()];
+                let status = STATUSES[(h >> 20) % STATUSES.len()];
+                let latency = (h % 500) as u32 + 1;
+                let _ = write!(
+                    out,
+                    r#"{{"ts":"2026-04-27T12:34:56.{id}Z","level":"{level}","service":"{service}","trace_id":"{id}","method":"{method}","path":"{path}/{id}","status":{status},"latency_ms":{latency}}}"#,
+                );
+            }
+            1 => {
+                let action = ACTIONS[(h >> 4) % ACTIONS.len()];
+                let region = REGIONS[(h >> 16) % REGIONS.len()];
+                let _ = write!(
+                    out,
+                    r#"{{"event":"{action}","user_id":"u-{id}","session":"{id}","ts":"2026-04-27T12:34:56.{id}Z","ip":"10.{a}.{b}.{c}","region":"{region}","user_agent":"Mozilla/5.0","success":true}}"#,
+                    a = (h >> 8) % 256,
+                    b = (h >> 12) % 256,
+                    c = (h >> 16) % 256,
+                );
+            }
+            2 => {
+                let currency = CURRENCIES[(h >> 4) % CURRENCIES.len()];
+                let amount = ((h % 99900) as f64 + 100.0) / 100.0;
+                let _ = write!(
+                    out,
+                    r#"{{"type":"transaction","id":"txn-{id}","user_id":"u-{id}","amount":{amount:.2},"currency":"{currency}","ts":"2026-04-27T12:34:56.{id}Z","items":[{{"sku":"SKU-{id}","qty":{qty},"price":{price:.2}}}]}}"#,
+                    qty = (h >> 8) % 10 + 1,
+                    price = ((h % 9900) as f64 + 100.0) / 100.0,
+                );
+            }
+            3 => {
+                let service = SERVICES[(h >> 4) % SERVICES.len()];
+                let region = REGIONS[(h >> 16) % REGIONS.len()];
+                let _ = write!(
+                    out,
+                    r#"{{"type":"metric","service":"{service}","host":"{service}-{id}.svc.cluster.local","region":"{region}","ts":"2026-04-27T12:34:56.{id}Z","cpu":{cpu:.1},"mem_mb":{mem},"gc_ms":{gc},"conns":{conns}}}"#,
+                    cpu = (h % 1000) as f64 / 10.0,
+                    mem = (h >> 8) % 8192 + 256,
+                    gc = (h >> 12) % 200,
+                    conns = (h >> 16) % 500 + 10,
+                );
+            }
+            _ => {
+                let code = ERROR_CODES[(h >> 4) % ERROR_CODES.len()];
+                let service = SERVICES[(h >> 8) % SERVICES.len()];
+                let region = REGIONS[(h >> 16) % REGIONS.len()];
+                let _ = write!(
+                    out,
+                    r#"{{"type":"error","code":"{code}","service":"{service}","region":"{region}","trace_id":"{id}","ts":"2026-04-27T12:34:56.{id}Z","stack":["at {service}::handle (src/handler.rs:{line})","at {service}::dispatch (src/router.rs:{line2})","at tokio::runtime::task ({id})"]}}"#,
+                    line = (h >> 12) % 500 + 1,
+                    line2 = (h >> 16) % 300 + 1,
+                );
+            }
+        }
     }
 }

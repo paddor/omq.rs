@@ -211,6 +211,7 @@ impl AsyncSocket {
         submit(payload.py(), &self.inner, msg, tracker)
     }
 
+    #[expect(clippy::too_many_arguments, reason = "Python signature mirrors pyzmq")]
     #[pyo3(signature = (payload, group, flags = 0, copy = true, track = false))]
     fn _send_with_group(
         &self,
@@ -237,6 +238,7 @@ impl AsyncSocket {
         )
     }
 
+    #[expect(clippy::too_many_arguments, reason = "Python signature mirrors pyzmq")]
     #[pyo3(signature = (payload, routing_id, flags = 0, copy = true, track = false))]
     fn _send_with_routing(
         &self,
@@ -279,6 +281,7 @@ impl AsyncSocket {
         submit(parts.py(), &self.inner, msg, tracker)
     }
 
+    #[expect(clippy::too_many_arguments, reason = "Python signature mirrors pyzmq")]
     #[pyo3(signature = (parts, group, flags = 0, copy = true, track = false))]
     fn _send_multipart_with_group(
         &self,
@@ -311,6 +314,7 @@ impl AsyncSocket {
         )
     }
 
+    #[expect(clippy::too_many_arguments, reason = "Python signature mirrors pyzmq")]
     #[pyo3(signature = (parts, routing_id, flags = 0, copy = true, track = false))]
     fn _send_multipart_with_routing(
         &self,

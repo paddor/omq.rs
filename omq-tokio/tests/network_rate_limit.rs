@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use omq_tokio::{
-    ByteRateLimit, Context, ContextConfig, Message, NetworkRateLimits, Options, SocketType,
+    ByteRateLimit, Context, ContextConfig, Message, NetworkRateLimits, Options, Socket, SocketType,
 };
 
 #[tokio::test]
@@ -39,10 +39,10 @@ async fn configuration_is_shared_frozen_and_owned_only() {
     socket.close().await.unwrap();
 }
 
-async fn aggregate(threads: usize, ingress: bool, scheme: &str) {
-    let context = Context::with_config(ContextConfig {
-        io_threads: threads,
-    });
+/// Owned context whose ingress (or egress, if `!ingress`) is limited to
+/// 64 KiB/s with a 1500-byte burst.
+fn limited_context(io_threads: usize, ingress: bool) -> Context {
+    let context = Context::with_config(ContextConfig { io_threads });
     let limit = Some(ByteRateLimit::new(64 * 1024, 1500));
     context
         .set_network_rate_limits(NetworkRateLimits {
@@ -50,7 +50,36 @@ async fn aggregate(threads: usize, ingress: bool, scheme: &str) {
             egress: (!ingress).then_some(limit).flatten(),
         })
         .unwrap();
+    context
+}
+
+/// Binds `pull` on a loopback `scheme` endpoint, connects `push`, and waits
+/// until both sides see the peer. Returns `(push, pull)`.
+async fn connect_pair(
+    pull: Socket,
+    push: Socket,
+    scheme: &str,
+    timeout: Duration,
+) -> (Socket, Socket) {
+    let endpoint = pull
+        .bind(
+            format!("{scheme}://127.0.0.1:0")
+                .parse::<omq_tokio::Endpoint>()
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    push.connect(endpoint).await.unwrap();
+
+    pull.wait_connected(1, timeout).await.unwrap();
+    push.wait_connected(1, timeout).await.unwrap();
+    (push, pull)
+}
+
+async fn aggregate(threads: usize, ingress: bool, scheme: &str) {
+    let context = limited_context(threads, ingress);
     let other = Context::current();
+
     // DART admits initial receive credit while endpoints are established.
     // Its ingress envelope starts there, rather than at the first data send.
     let admission_started = Instant::now();
@@ -60,23 +89,11 @@ async fn aggregate(threads: usize, ingress: bool, scheme: &str) {
             if ingress { &context } else { &other }.socket(SocketType::Gather, Options::default());
         let push =
             if ingress { &other } else { &context }.socket(SocketType::Scatter, Options::default());
-        let endpoint = pull
-            .bind(
-                format!("{scheme}://127.0.0.1:0")
-                    .parse::<omq_tokio::Endpoint>()
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        push.connect(endpoint).await.unwrap();
-        pull.wait_connected(1, Duration::from_secs(2))
-            .await
-            .unwrap();
-        push.wait_connected(1, Duration::from_secs(2))
-            .await
-            .unwrap();
-        pairs.push((push, pull));
+        pairs.push(connect_pair(pull, push, scheme, Duration::from_secs(2)).await);
     }
+
+    // Four 8 KiB messages through one shared 64 KiB/s budget take at least
+    // ~450 ms, however many sockets and IO threads carry them.
     let started = Instant::now();
     for (push, _) in &pairs {
         push.send(Message::from_slice(&vec![7; 8192]))
@@ -162,29 +179,25 @@ async fn raw_stream_runs_and_is_paced_on_owned_io_lanes() {
     stream.close().await.unwrap();
 }
 
-async fn transfer(
-    scheme: &str,
-    ingress: bool,
+/// Messages pushed through one limited pair, and the time window the whole
+/// transfer must land in.
+struct Workload {
     body: Vec<u8>,
     count: usize,
     minimum: Duration,
     maximum: Duration,
-) {
-    let limited = Context::with_config(ContextConfig { io_threads: 3 });
-    let limit = Some(ByteRateLimit::new(64 * 1024, 1500));
-    limited
-        .set_network_rate_limits(NetworkRateLimits {
-            ingress: if ingress { limit } else { None },
-            egress: if ingress { None } else { limit },
-        })
-        .unwrap();
-    let unlimited = Context::current();
+}
+
+/// Server and client options with fast heartbeats, so pacing that starves
+/// PING/PONG would drop the connection. QUIC also gets a self-signed cert.
+fn heartbeat_options(scheme: &str) -> (Options, Options) {
     let mut server = Options::default();
     let mut client = Options::default();
     server.heartbeat_interval = Some(Duration::from_millis(50));
     server.heartbeat_timeout = Some(Duration::from_millis(150));
     client.heartbeat_interval = server.heartbeat_interval;
     client.heartbeat_timeout = server.heartbeat_timeout;
+
     #[cfg(feature = "quic")]
     if scheme == "quic" {
         let tls = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
@@ -193,23 +206,27 @@ async fn transfer(
         client.quic.trust_system = false;
         client.quic.trust_pem = Some(tls.cert.pem().into_bytes());
     }
+    #[cfg(not(feature = "quic"))]
+    let _ = scheme;
+
+    (server, client)
+}
+
+async fn transfer(scheme: &str, ingress: bool, workload: Workload) {
+    let Workload {
+        body,
+        count,
+        minimum,
+        maximum,
+    } = workload;
+    let limited = limited_context(3, ingress);
+    let unlimited = Context::current();
+    let (server, client) = heartbeat_options(scheme);
+
     let pull = if ingress { &limited } else { &unlimited }.socket(SocketType::Gather, server);
     let push = if ingress { &unlimited } else { &limited }.socket(SocketType::Scatter, client);
-    let endpoint = pull
-        .bind(
-            format!("{scheme}://127.0.0.1:0")
-                .parse::<omq_tokio::Endpoint>()
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    push.connect(endpoint).await.unwrap();
-    pull.wait_connected(1, Duration::from_secs(3))
-        .await
-        .unwrap();
-    push.wait_connected(1, Duration::from_secs(3))
-        .await
-        .unwrap();
+    let (push, pull) = connect_pair(pull, push, scheme, Duration::from_secs(3)).await;
+
     let start = Instant::now();
     tokio::time::timeout(maximum, async {
         for _ in 0..count {
@@ -229,6 +246,7 @@ async fn transfer(
         "{scheme} escaped limit in {:?}",
         start.elapsed()
     );
+
     push.close().await.unwrap();
     pull.close().await.unwrap();
 }
@@ -238,10 +256,12 @@ async fn pacing_preserves_heartbeat_liveness() {
     transfer(
         "tcp",
         true,
-        vec![9; 32 * 1024],
-        1,
-        Duration::from_millis(450),
-        Duration::from_secs(5),
+        Workload {
+            body: vec![9; 32 * 1024],
+            count: 1,
+            minimum: Duration::from_millis(450),
+            maximum: Duration::from_secs(5),
+        },
     )
     .await;
 }
@@ -259,10 +279,12 @@ async fn compression_is_charged_after_encoding() {
             transfer(
                 scheme,
                 ingress,
-                vec![7; 256 * 1024],
-                1,
-                Duration::ZERO,
-                Duration::from_secs(2),
+                Workload {
+                    body: vec![7; 256 * 1024],
+                    count: 1,
+                    minimum: Duration::ZERO,
+                    maximum: Duration::from_secs(2),
+                },
             )
             .await;
         }
@@ -284,10 +306,12 @@ async fn phase_two_transports_use_the_context_budget() {
             transfer(
                 scheme,
                 ingress,
-                vec![7; 1024],
-                32,
-                Duration::from_millis(430),
-                Duration::from_secs(5),
+                Workload {
+                    body: vec![7; 1024],
+                    count: 32,
+                    minimum: Duration::from_millis(430),
+                    maximum: Duration::from_secs(5),
+                },
             )
             .await;
         }

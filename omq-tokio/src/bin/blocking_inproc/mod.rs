@@ -20,29 +20,8 @@ pub(super) fn run(ctx: &Context, name: String, size: usize, duration: Duration, 
 
     let barrier = Arc::new(std::sync::Barrier::new(2));
     let stop = Arc::new(AtomicBool::new(false));
-    let sender_barrier = barrier.clone();
-    let sender_stop = stop.clone();
-    let sender_push = push.clone();
     let payload = super::bench_payload(size);
-    let sender = std::thread::spawn(move || {
-        sender_barrier.wait();
-        if size <= omq_tokio::message::MAX_INLINE_MESSAGE {
-            while !sender_stop.load(Ordering::Acquire) {
-                if let Err(error) = sender_push.send(Message::from_slice(&payload)) {
-                    assert!(sender_stop.load(Ordering::Acquire), "send failed: {error}");
-                    break;
-                }
-            }
-        } else {
-            let message = Message::single(payload);
-            while !sender_stop.load(Ordering::Acquire) {
-                if let Err(error) = sender_push.send(message.clone()) {
-                    assert!(sender_stop.load(Ordering::Acquire), "send failed: {error}");
-                    break;
-                }
-            }
-        }
-    });
+    let sender = spawn_sender(push.clone(), payload, size, barrier.clone(), stop.clone());
 
     let receiver_pull = pull.clone();
     let receiver_push = push;
@@ -74,7 +53,44 @@ pub(super) fn run(ctx: &Context, name: String, size: usize, duration: Duration, 
     sender.join().expect("sender thread");
     pull.close_with_linger(Some(Duration::ZERO))
         .expect("close pull");
+
     println!("{count} {:.9} {size}", elapsed.as_secs_f64());
+    print_stats(hwm, usage.as_ref());
+}
+
+/// Blocking `send` until `stop`. A send error is only expected once the
+/// receiver has stopped and closed the PUSH.
+fn spawn_sender(
+    sender_push: omq_tokio::blocking::Socket,
+    payload: bytes::Bytes,
+    size: usize,
+    sender_barrier: Arc<std::sync::Barrier>,
+    sender_stop: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        sender_barrier.wait();
+        if size <= omq_tokio::message::MAX_INLINE_MESSAGE {
+            while !sender_stop.load(Ordering::Acquire) {
+                if let Err(error) = sender_push.send(Message::from_slice(&payload)) {
+                    assert!(sender_stop.load(Ordering::Acquire), "send failed: {error}");
+                    break;
+                }
+            }
+        } else {
+            let message = Message::single(payload);
+            while !sender_stop.load(Ordering::Acquire) {
+                if let Err(error) = sender_push.send(message.clone()) {
+                    assert!(sender_stop.load(Ordering::Acquire), "send failed: {error}");
+                    break;
+                }
+            }
+        }
+    })
+}
+
+/// Second output line: HWM, the ring size it implies, and process usage.
+fn print_stats(hwm: u32, usage: Option<&Usage>) {
+    // Each direction's ring holds send_hwm + recv_hwm, rounded up to a power of two.
     let ring_capacity = (hwm as usize).saturating_mul(2).next_power_of_two();
     print!("blocking-stats hwm={hwm} ring_capacity={ring_capacity}");
     if let Some(usage) = usage {

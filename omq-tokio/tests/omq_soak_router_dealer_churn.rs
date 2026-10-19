@@ -68,14 +68,9 @@ async fn churn_dealers(
     }
 }
 
-async fn exchange_messages(
-    router: &Socket,
-    dealers: &[Dealer],
-    stats: &mut Stats,
-    next_id: u64,
-    action: u8,
-    rng: &mut StdRng,
-) {
+/// Every DEALER pings, ROUTER answers each request by identity, and the
+/// DEALERs discard the pongs.
+async fn exchange_messages(router: &Socket, dealers: &[Dealer], stats: &mut Stats) {
     for dealer in dealers {
         if let Ok(Ok(())) = tokio::time::timeout(
             Duration::from_millis(5),
@@ -102,25 +97,34 @@ async fn exchange_messages(
     for dealer in dealers {
         while dealer.socket.try_recv().is_ok() {}
     }
+}
 
-    if action == 9 && next_id > 1 {
-        let stale = format!("d-{}", rng.random_range(0..next_id));
-        let is_live = dealers.iter().any(|d| d.identity == stale.as_bytes());
-        match router
-            .send(Message::multipart([
-                Bytes::from(stale),
-                Bytes::from_static(b"probe"),
-            ]))
-            .await
-        {
-            Ok(()) => {
-                if is_live {
-                    stats.delivered += 1;
-                }
+/// Sends to a random identity ever issued. Departed identities must fail
+/// with `Unroutable` under `router_mandatory` rather than panic or hang.
+async fn probe_identity(
+    router: &Socket,
+    dealers: &[Dealer],
+    stats: &mut Stats,
+    next_id: u64,
+    rng: &mut StdRng,
+) {
+    let stale = format!("d-{}", rng.random_range(0..next_id));
+    let is_live = dealers.iter().any(|d| d.identity == stale.as_bytes());
+
+    match router
+        .send(Message::multipart([
+            Bytes::from(stale),
+            Bytes::from_static(b"probe"),
+        ]))
+        .await
+    {
+        Ok(()) => {
+            if is_live {
+                stats.delivered += 1;
             }
-            Err(omq_tokio::Error::Unroutable) => stats.unroutable += 1,
-            Err(e) => panic!("unexpected send error: {e}"),
         }
+        Err(omq_tokio::Error::Unroutable) => stats.unroutable += 1,
+        Err(e) => panic!("unexpected send error: {e}"),
     }
 }
 
@@ -151,7 +155,11 @@ fn soak_router_dealer_churn() {
         while start.elapsed() < duration {
             let action = rng.random_range(0u8..10);
             churn_dealers(&mut dealers, &mut next_id, &ep, action, &mut rng).await;
-            exchange_messages(&router, &dealers, &mut stats, next_id, action, &mut rng).await;
+            exchange_messages(&router, &dealers, &mut stats).await;
+
+            if action == 9 && next_id > 1 {
+                probe_identity(&router, &dealers, &mut stats, next_id, &mut rng).await;
+            }
 
             if last_log.elapsed() >= Duration::from_secs(30) {
                 eprintln!(

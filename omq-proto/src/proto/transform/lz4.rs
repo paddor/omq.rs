@@ -927,17 +927,7 @@ mod tests {
                 assert_eq!(&bytes[..4], &format);
                 for use_pool in [None, Some(&pool)] {
                     for extra in [-1_i64, 1] {
-                        let mut bad = bytes.to_vec();
-                        if format == arena::SENTINEL {
-                            assert_eq!(bad[4], 1, "compressed arena");
-                            let size = u32::from_le_bytes(bad[8..12].try_into().unwrap());
-                            let size = u32::try_from(i64::from(size) + extra).unwrap();
-                            bad[8..12].copy_from_slice(&size.to_le_bytes());
-                        } else {
-                            let size = u64::from_le_bytes(bad[4..12].try_into().unwrap());
-                            let size = size.checked_add_signed(extra).unwrap();
-                            bad[4..12].copy_from_slice(&size.to_le_bytes());
-                        }
+                        let bad = with_declared_length_off_by(bytes, format, extra);
                         assert!(matches!(
                             decoder.decode_with_payload_slots(Message::single(bad), use_pool),
                             Err(Error::Protocol(_))
@@ -965,6 +955,22 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Copy `bytes` with its declared decompressed size shifted by `extra`.
+    fn with_declared_length_off_by(bytes: &[u8], format: [u8; 4], extra: i64) -> Vec<u8> {
+        let mut bad = bytes.to_vec();
+        if format == arena::SENTINEL {
+            assert_eq!(bad[4], 1, "compressed arena");
+            let size = u32::from_le_bytes(bad[8..12].try_into().unwrap());
+            let size = u32::try_from(i64::from(size) + extra).unwrap();
+            bad[8..12].copy_from_slice(&size.to_le_bytes());
+        } else {
+            let size = u64::from_le_bytes(bad[4..12].try_into().unwrap());
+            let size = size.checked_add_signed(extra).unwrap();
+            bad[4..12].copy_from_slice(&size.to_le_bytes());
+        }
+        bad
     }
 
     #[test]

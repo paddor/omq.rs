@@ -390,30 +390,7 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
 
     // XSUB: intercept subscription frames.
     if sock.socket_type == omq_tokio::SocketType::XSub && !data.is_empty() {
-        if let Err(error) = crate::socket::ensure_materialized(sock) {
-            return fail(error);
-        }
-        let Some(inner) = sock.inner.get() else {
-            return fail(ETERM);
-        };
-        let bytes = Bytes::copy_from_slice(data);
-        let (subscribe, prefix) = match bytes[0] {
-            0x01 => (true, bytes.slice(1..)),
-            0x00 => (false, bytes.slice(1..)),
-            _ => (true, bytes),
-        };
-        let result = crate::socket::with_socket(&sock.ctx, inner, move |s| async move {
-            if subscribe {
-                s.subscribe(prefix).await
-            } else {
-                s.unsubscribe(prefix).await
-            }
-        });
-        return match result {
-            Ok(Ok(())) => ret_len,
-            Ok(Err(ref e)) => fail(crate::error::map_omq_err(e)),
-            Err(errno) => fail(errno),
-        };
+        return send_xsub_subscription(sock, data, ret_len);
     }
 
     let sndtimeo = sock.sndtimeo_ms.load(std::sync::atomic::Ordering::Relaxed);
@@ -421,33 +398,15 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
         return fail(e);
     }
 
-    // SAFETY: libzmq sockets are accessed by at most one application thread.
-    let accum = unsafe { sock.send_accum.get() };
-
     if sock.socket_type == omq_tokio::SocketType::Stream {
-        if accum.is_empty() {
-            if flags & ZMQ_SNDMORE == 0 {
-                return fail(libc::EINVAL);
-            }
-            if let Err(error) = prepare_stream_route(sock, data, flags, sndtimeo) {
-                return fail(error);
-            }
-            accum.push(Bytes::copy_from_slice(data));
-            return ret_len;
-        }
-        let message =
-            omq_tokio::Message::multipart([accum[0].clone(), Bytes::copy_from_slice(data)]);
-        // STREAM data always ends the pair. Keep the identity on EAGAIN so
-        // the caller can retry the same data frame.
-        let result = submit_message(sock, message, ret_len, flags & !ZMQ_SNDMORE, sndtimeo);
-        if result >= 0 || crate::error::zmq_errno() != libc::EAGAIN {
-            accum.clear();
-        }
-        return result;
+        return send_stream_frame(sock, data, ret_len, flags, sndtimeo);
     }
 
     // SAFETY: libzmq sockets are accessed by at most one application thread.
+    let accum = unsafe { sock.send_accum.get() };
+    // SAFETY: libzmq sockets are accessed by at most one application thread.
     let retry = unsafe { sock.send_retry.get() };
+
     // If SNDMORE: buffer and return immediately.
     if flags & ZMQ_SNDMORE != 0 {
         if std::mem::take(retry) {
@@ -463,6 +422,7 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
         accum.push(Bytes::copy_from_slice(data));
         return ret_len;
     }
+
     *retry = false;
 
     // Drain accumulated parts + current frame into one message.
@@ -486,6 +446,70 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
             fail(libc::EAGAIN)
         }
     }
+}
+
+/// XSUB data frames are subscription commands: a leading 0x01 subscribes,
+/// 0x00 unsubscribes, and any other first byte subscribes to the whole frame.
+fn send_xsub_subscription(sock: &Arc<OmqSocket>, data: &[u8], ret_len: c_int) -> c_int {
+    if let Err(error) = crate::socket::ensure_materialized(sock) {
+        return fail(error);
+    }
+    let Some(inner) = sock.inner.get() else {
+        return fail(ETERM);
+    };
+
+    let bytes = Bytes::copy_from_slice(data);
+    let (subscribe, prefix) = match bytes[0] {
+        0x01 => (true, bytes.slice(1..)),
+        0x00 => (false, bytes.slice(1..)),
+        _ => (true, bytes),
+    };
+
+    let result = crate::socket::with_socket(&sock.ctx, inner, move |s| async move {
+        if subscribe {
+            s.subscribe(prefix).await
+        } else {
+            s.unsubscribe(prefix).await
+        }
+    });
+    match result {
+        Ok(Ok(())) => ret_len,
+        Ok(Err(ref e)) => fail(crate::error::map_omq_err(e)),
+        Err(errno) => fail(errno),
+    }
+}
+
+/// STREAM frames come in [identity, data] pairs. The identity frame must
+/// carry SNDMORE and is staged until its data frame arrives.
+fn send_stream_frame(
+    sock: &Arc<OmqSocket>,
+    data: &[u8],
+    ret_len: c_int,
+    flags: c_int,
+    sndtimeo: i64,
+) -> c_int {
+    // SAFETY: libzmq sockets are accessed by at most one application thread.
+    let accum = unsafe { sock.send_accum.get() };
+
+    if accum.is_empty() {
+        if flags & ZMQ_SNDMORE == 0 {
+            return fail(libc::EINVAL);
+        }
+        if let Err(error) = prepare_stream_route(sock, data, flags, sndtimeo) {
+            return fail(error);
+        }
+        accum.push(Bytes::copy_from_slice(data));
+        return ret_len;
+    }
+
+    let message = omq_tokio::Message::multipart([accum[0].clone(), Bytes::copy_from_slice(data)]);
+    // STREAM data always ends the pair. Keep the identity on EAGAIN so
+    // the caller can retry the same data frame.
+    let result = submit_message(sock, message, ret_len, flags & !ZMQ_SNDMORE, sndtimeo);
+    if result >= 0 || crate::error::zmq_errno() != libc::EAGAIN {
+        accum.clear();
+    }
+    result
 }
 
 /// libzmq applies HWM at a message's first frame, so a would-block never
@@ -1185,22 +1209,45 @@ mod tests {
     const ZMQ_PUSH: c_int = 8;
     const ZMQ_ENOTSUP: c_int = crate::error::ENOTSUP;
 
+    /// Set `int` options through the C API, asserting each succeeds.
+    fn set_int_options(socket: *mut libc::c_void, options: &[(c_int, i32)]) {
+        for &(option, value) in options {
+            assert_eq!(
+                crate::zmq_setsockopt(socket, option, (&raw const value).cast(), size_of::<i32>()),
+                0
+            );
+        }
+    }
+
+    /// Both `zmq_poll` and `ZMQ_EVENTS` must report the socket writable.
+    fn assert_pollout(socket: *mut libc::c_void) {
+        let mut item = crate::poll::ZmqPollItem {
+            socket,
+            fd: 0,
+            events: crate::poll::ZMQ_POLLOUT,
+            revents: 0,
+        };
+        assert_eq!(crate::zmq_poll((&raw mut item).cast(), 1, 0), 1);
+        assert_eq!(item.revents, crate::poll::ZMQ_POLLOUT);
+
+        // 15 is ZMQ_EVENTS.
+        let mut events = 0_i32;
+        let mut size = size_of::<i32>();
+        assert_eq!(
+            crate::zmq_getsockopt(socket, 15, (&raw mut events).cast(), &raw mut size),
+            0
+        );
+        assert_ne!(events & i32::from(crate::poll::ZMQ_POLLOUT), 0);
+    }
+
     #[test]
     fn lossy_pub_stays_writable_when_internal_lane_is_full() {
         let ctx = crate::zmq_ctx_new();
         let publisher = crate::zmq_socket(ctx, 1);
-        for (option, value) in [(17, 0_i32), (23, 1)] {
-            assert_eq!(
-                crate::zmq_setsockopt(
-                    publisher,
-                    option,
-                    (&raw const value).cast(),
-                    size_of::<i32>()
-                ),
-                0
-            );
-        }
+        // ZMQ_LINGER 0, ZMQ_SNDHWM 1.
+        set_int_options(publisher, &[(17, 0), (23, 1)]);
         assert_eq!(crate::zmq_bind(publisher, c"tcp://127.0.0.1:0".as_ptr()), 0);
+
         // SAFETY: publisher is a live socket returned by zmq_socket.
         let socket = unsafe { crate::handle::socket(publisher) }.unwrap();
         let backend = socket.inner.get().unwrap();
@@ -1215,6 +1262,7 @@ mod tests {
             .block_on(backend.wait_subscribed(1, Duration::from_secs(5)))
             .unwrap();
 
+        // Park the IO runtime so the lane cannot drain while the sends fill it.
         let (paused_tx, paused_rx) = std::sync::mpsc::channel();
         let (resume_tx, resume_rx) = std::sync::mpsc::channel();
         let paused = io.handle().spawn(async move {
@@ -1223,6 +1271,7 @@ mod tests {
             let _ = resume_rx.recv_timeout(Duration::from_secs(5));
         });
         paused_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
         for _ in 0..3 {
             assert_eq!(
                 crate::zmq_send(publisher, b"body".as_ptr().cast(), 4, ZMQ_DONTWAIT),
@@ -1233,21 +1282,7 @@ mod tests {
             try_send_message(socket, omq_tokio::Message::from("proxy")),
             Ok(SendMessageAttempt::Sent)
         ));
-        let mut item = crate::poll::ZmqPollItem {
-            socket: publisher,
-            fd: 0,
-            events: crate::poll::ZMQ_POLLOUT,
-            revents: 0,
-        };
-        assert_eq!(crate::zmq_poll((&raw mut item).cast(), 1, 0), 1);
-        assert_eq!(item.revents, crate::poll::ZMQ_POLLOUT);
-        let mut events = 0_i32;
-        let mut size = size_of::<i32>();
-        assert_eq!(
-            crate::zmq_getsockopt(publisher, 15, (&raw mut events).cast(), &raw mut size),
-            0
-        );
-        assert_ne!(events & i32::from(crate::poll::ZMQ_POLLOUT), 0);
+        assert_pollout(publisher);
 
         resume_tx.send(()).unwrap();
         io.handle().block_on(paused).unwrap();

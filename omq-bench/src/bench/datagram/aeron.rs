@@ -18,34 +18,10 @@ pub(crate) fn run(mut args: AeronArgs) {
         .classes
         .canonicalize()
         .expect("compiled Aeron peer classes");
-    let mut manifest = Command::new("unzip");
-    manifest
-        .arg("-p")
-        .arg(&args.jar)
-        .arg("META-INF/MANIFEST.MF");
-    assert!(
-        capture(&mut manifest)
-            .lines()
-            .any(|line| line.trim() == "Implementation-Version: 1.53.3"),
-        "use Aeron 1.53.3"
-    );
-    let mut classes: Vec<_> = std::fs::read_dir(&args.classes)
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| {
-            path.file_name()
-                .unwrap()
-                .to_string_lossy()
-                .starts_with("AeronUdpPeer")
-                && path
-                    .extension()
-                    .is_some_and(|extension| extension == "class")
-        })
-        .collect();
-    assert!(!classes.is_empty(), "compile AeronUdpPeer.java first");
-    classes.sort();
-    classes.insert(0, args.jar.clone());
-    let binary_sha = digest(&classes);
+
+    // A new JAR or a recompiled peer gets a new digest and starts a new cohort.
+    let binary_sha = digest(&peer_files(&args));
+
     rounds(
         &args.common,
         THROUGHPUT_SIZES,
@@ -73,6 +49,40 @@ pub(crate) fn run(mut args: AeronArgs) {
             row
         },
     );
+}
+
+/// Aeron JAR followed by the sorted peer classes. Panics unless the JAR is
+/// Aeron 1.53.3 and the peer was compiled.
+fn peer_files(args: &AeronArgs) -> Vec<PathBuf> {
+    let mut manifest = Command::new("unzip");
+    manifest
+        .arg("-p")
+        .arg(&args.jar)
+        .arg("META-INF/MANIFEST.MF");
+    assert!(
+        capture(&mut manifest)
+            .lines()
+            .any(|line| line.trim() == "Implementation-Version: 1.53.3"),
+        "use Aeron 1.53.3"
+    );
+
+    let mut classes: Vec<_> = std::fs::read_dir(&args.classes)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("AeronUdpPeer")
+                && path
+                    .extension()
+                    .is_some_and(|extension| extension == "class")
+        })
+        .collect();
+    assert!(!classes.is_empty(), "compile AeronUdpPeer.java first");
+    classes.sort();
+    classes.insert(0, args.jar.clone());
+    classes
 }
 
 fn command(args: &AeronArgs, directory: &Path, kind: &str, peer_side: Side, size: u64) -> Command {

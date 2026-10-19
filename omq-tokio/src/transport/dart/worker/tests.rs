@@ -1,5 +1,6 @@
 use super::*;
 use crate::engine::{PeerDriverCommand, PeerDriverData};
+use omq_proto::dart::Receipt;
 use omq_proto::{DartCongestion, PayloadPool, TrySendError};
 
 fn peer() -> Peer {
@@ -11,6 +12,7 @@ fn peer() -> Peer {
         expires: Instant::now() + LEASE,
         retry: Instant::now(),
         reported: false,
+        ecn_supported: false,
         session: None,
         pool: None,
         receive_buffers: super::super::pool::ReceiveBuffers::default(),
@@ -28,12 +30,14 @@ fn queues() -> Box<PeerIo> {
     let (_, commands) = crate::engine::control_inbox::channel(8);
     let (_, data) = crate::engine::data_inbox::dart_channel(8, SocketType::Scatter);
     Box::new(PeerIo::new(
-        commands,
-        data,
-        None,
-        None,
-        CancellationToken::new(),
-        crate::engine::peer_completion::CompletionProgress::default(),
+        PeerQueues {
+            commands,
+            data,
+            pipe: None,
+            sink: None,
+            cancel: CancellationToken::new(),
+            completion: crate::engine::peer_completion::CompletionProgress::default(),
+        },
         2,
     ))
 }
@@ -98,13 +102,11 @@ fn leaving_a_group_returns_retained_inline_credit() {
         queue.register().unwrap(),
     )));
     let mut peer = peer();
-    peer.install_io(2, io, &state(), false, &Arc::new(DataSignal::new()));
+    peer.install_io(2, io, &state(), &Arc::new(DataSignal::new()));
     let session = peer.session.as_mut().unwrap();
     session.commit_receive(
-        0,
+        Receipt::new(0, dart::Ecn::NotEct, Duration::ZERO),
         Message::with_group("left", "body"),
-        dart::Ecn::NotEct,
-        Duration::ZERO,
     );
     let edge = session.receive_right_edge();
     let mut stats = DartStats::default();
@@ -173,7 +175,7 @@ fn late_activation_cannot_replace_a_new_generation() {
     let mut peer = peer();
     let old = queues();
     let cancel = old.cancel.clone();
-    peer.install_io(1, old, &state(), false, &Arc::new(DataSignal::new()));
+    peer.install_io(1, old, &state(), &Arc::new(DataSignal::new()));
     assert!(cancel.is_cancelled());
     assert!(peer.io.is_none());
     assert!(peer.session.is_none());
@@ -190,7 +192,7 @@ fn expired_or_cancelled_activation_never_installs_storage() {
             io.cancel.cancel();
         }
         let cancel = io.cancel.clone();
-        peer.install_io(2, io, &state(), false, &Arc::new(DataSignal::new()));
+        peer.install_io(2, io, &state(), &Arc::new(DataSignal::new()));
         assert!(cancel.is_cancelled());
         assert!(peer.pool.is_none());
     }
@@ -202,7 +204,7 @@ fn cancelled_activation_retires_the_current_handshake() {
     let io = queues();
     io.cancel.cancel();
     let signal = Arc::new(DataSignal::new());
-    peer.install_io(2, io, &state(), false, &signal);
+    peer.install_io(2, io, &state(), &signal);
     assert!(peer.session.is_none());
     assert!(peer.pool.is_none());
     assert!(
@@ -216,11 +218,11 @@ fn cancelled_activation_retires_the_current_handshake() {
 fn repeated_activation_preserves_the_original_queues() {
     let signal = Arc::new(DataSignal::new());
     let mut peer = peer();
-    peer.install_io(2, queues(), &state(), false, &signal);
+    peer.install_io(2, queues(), &state(), &signal);
     let live = peer.io.as_ref().unwrap().cancel.clone();
     let repeated = queues();
     let rejected = repeated.cancel.clone();
-    peer.install_io(2, repeated, &state(), false, &signal);
+    peer.install_io(2, repeated, &state(), &signal);
     assert!(rejected.is_cancelled());
     assert!(!live.is_cancelled());
     assert_eq!(
@@ -258,7 +260,7 @@ fn a_closed_delivery_window_does_not_block_lifecycle_control() {
 fn final_receive_owner_returns_physical_storage_and_credit_once() {
     let mut peer = peer();
     let signal = Arc::new(DataSignal::new());
-    peer.install_io(2, queues(), &state(), false, &signal);
+    peer.install_io(2, queues(), &state(), &signal);
     let pool = peer.pool.as_ref().unwrap().storage().unwrap();
     let message = pool.try_buffer(1).unwrap().into_message();
     let view = message.clone();

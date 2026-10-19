@@ -305,10 +305,20 @@ impl Bucket {
         self.updated = now;
     }
 
+    /// Refill, settle lane reports, and grant credit. Returns when the bucket
+    /// next needs service, if a lane is still waiting for credit.
     fn service(&mut self, now: Instant) -> Option<Instant> {
         // Reports release capacity only from now onward. Backdating this
         // refill after a delayed spend report would manufacture burst credit.
         self.refill(now);
+        self.collect_reports();
+
+        let next_bytes = self.grant_round()?;
+        self.ready_at(now, next_bytes)
+    }
+
+    /// Settle spent and returned credit, then repay debt from what is free.
+    fn collect_reports(&mut self) {
         for account in &mut self.accounts {
             let updates = account.totals.collect(&account.mailbox.reports);
             self.held -= updates.spent + updates.returned;
@@ -324,13 +334,20 @@ impl Bucket {
                     as u64;
             }
         }
+
         let repaid = self.debt.min(u128::from(self.available));
         self.debt -= repaid;
         self.available -= repaid as u64;
+    }
+
+    /// Grant credit round-robin from the cursor. Returns the smallest credit
+    /// a waiting lane still needs, or `None` when no lane waits.
+    fn grant_round(&mut self) -> Option<u64> {
         let count = self.accounts.len();
         let mut waiting = false;
         let mut next_bytes = u64::MAX;
         let start = self.cursor;
+
         // One bounded grant per runtime per turn. A follow-up turn rotates
         // past the last recipient, including when only one byte is available.
         for offset in 0..count {
@@ -353,6 +370,7 @@ impl Bucket {
             if needed == 0 {
                 continue;
             }
+
             let minimum = requested.saturating_sub(account.totals.held).min(needed);
             if self.available < minimum {
                 // Preserve this lane's turn while an indivisible packet
@@ -363,6 +381,7 @@ impl Bucket {
                 next_bytes = minimum;
                 break;
             }
+
             // Never spread an indivisible datagram's credit over several
             // lanes: all lanes could otherwise hold an unusable partial grant.
             let grant = needed
@@ -375,21 +394,27 @@ impl Bucket {
                 account.mailbox.lane.mark();
                 self.cursor = (index + 1) % count;
             }
+
             if grant < needed {
                 waiting = true;
                 next_bytes =
                     next_bytes.min((needed - grant).min(account.mailbox.quantum.max(minimum)));
             }
         }
-        if !waiting {
-            return None;
-        }
+
+        waiting.then_some(next_bytes)
+    }
+
+    /// When `next_bytes` of credit will be available, or `None` when held
+    /// credit must come back first.
+    fn ready_at(&self, now: Instant, next_bytes: u64) -> Option<Instant> {
         if self.available >= next_bytes {
             return Some(now);
         }
         if next_bytes > self.limit.burst_bytes - self.held {
             return None;
         }
+
         let bytes = next_bytes
             .min(self.limit.burst_bytes - self.held)
             .saturating_sub(self.available);

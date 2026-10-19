@@ -77,13 +77,9 @@ impl Message {
                 }
             }
             MessageInner::Single(p) => Some(p),
-            MessageInner::RoutedShared { body, .. } => Some(Payload {
-                inner: PayloadInner::Shared(body),
-            }),
+            MessageInner::RoutedShared { body, .. } => Some(shared_payload(body)),
             MessageInner::PrefixedShared { prefix, body } => {
-                self.inner = MessageInner::Single(Payload {
-                    inner: PayloadInner::Shared(body),
-                });
+                self.inner = MessageInner::Single(shared_payload(body));
                 Some(Payload::from_bytes(prefix))
             }
             MessageInner::EmptyDelimitedBytes(p) => {
@@ -95,11 +91,7 @@ impl Message {
                     return None;
                 }
                 let first = v.remove(0);
-                self.inner = match v.len() {
-                    0 => MessageInner::Empty,
-                    1 => MessageInner::Single(v.pop().unwrap()),
-                    _ => MessageInner::Multi(v),
-                };
+                self.inner = Self::from_parts(v).inner;
                 Some(first)
             }
             MessageInner::RoutedInline { len, data, .. } => {
@@ -190,65 +182,42 @@ impl Message {
             }
             MessageInner::InlinePair(pair) => {
                 let [first, second] = pair.payloads();
-                MessageInner::Multi(vec![first, second, part].into())
+                multi([first, second, part])
             }
             MessageInner::Empty => MessageInner::Single(part),
             MessageInner::Inline { len, data } => {
                 let existing =
                     Payload::from_slice(&data[..(len & !INLINE_DELIMITED_FLAG) as usize]);
                 if len & INLINE_DELIMITED_FLAG != 0 {
-                    MessageInner::Multi(
-                        vec![Payload::from_bytes(Bytes::new()), existing, part].into(),
-                    )
+                    multi([Payload::from_bytes(Bytes::new()), existing, part])
                 } else {
-                    MessageInner::Multi(vec![existing, part].into())
+                    multi([existing, part])
                 }
             }
-            MessageInner::Single(existing) => MessageInner::Multi(vec![existing, part].into()),
-            MessageInner::PrefixedShared { prefix, body } => MessageInner::Multi(
-                vec![
-                    Payload::from_bytes(prefix),
-                    Payload {
-                        inner: PayloadInner::Shared(body),
-                    },
-                    part,
-                ]
-                .into(),
-            ),
-            MessageInner::RoutedShared { routing_id, body } => MessageInner::RoutedMulti {
-                routing_id,
-                parts: vec![
-                    Payload {
-                        inner: PayloadInner::Shared(body),
-                    },
-                    part,
-                ]
-                .into(),
-            },
-            MessageInner::EmptyDelimitedBytes(existing) => MessageInner::Multi(
-                vec![
-                    Payload::from_bytes(Bytes::new()),
-                    Payload::from_bytes(existing),
-                    part,
-                ]
-                .into(),
-            ),
+            MessageInner::Single(existing) => multi([existing, part]),
+            MessageInner::PrefixedShared { prefix, body } => {
+                multi([Payload::from_bytes(prefix), shared_payload(body), part])
+            }
+            MessageInner::RoutedShared { routing_id, body } => {
+                routed_multi(routing_id, [shared_payload(body), part])
+            }
+            MessageInner::EmptyDelimitedBytes(existing) => multi([
+                Payload::from_bytes(Bytes::new()),
+                Payload::from_bytes(existing),
+                part,
+            ]),
             MessageInner::Multi(mut v) => {
                 v.push(part);
                 MessageInner::Multi(v)
             }
-            MessageInner::RoutedEmpty { routing_id } => MessageInner::RoutedMulti {
-                routing_id,
-                parts: vec![part].into(),
-            },
-            MessageInner::RoutedInline { len, data } => MessageInner::RoutedMulti {
-                routing_id: routed_inline_id(&data),
-                parts: vec![Payload::from_slice(&data[..usize::from(len)]), part].into(),
-            },
-            MessageInner::RoutedBytes { routing_id, data } => MessageInner::RoutedMulti {
-                routing_id,
-                parts: vec![Payload::from_bytes(data), part].into(),
-            },
+            MessageInner::RoutedEmpty { routing_id } => routed_multi(routing_id, [part]),
+            MessageInner::RoutedInline { len, data } => routed_multi(
+                routed_inline_id(&data),
+                [Payload::from_slice(&data[..usize::from(len)]), part],
+            ),
+            MessageInner::RoutedBytes { routing_id, data } => {
+                routed_multi(routing_id, [Payload::from_bytes(data), part])
+            }
             MessageInner::RoutedMulti {
                 routing_id,
                 mut parts,
@@ -260,113 +229,82 @@ impl Message {
     }
 
     #[inline]
-    #[expect(clippy::too_many_lines)]
     pub(crate) fn prepend_empty_delimiter(self) -> Self {
         let empty = Payload::from_bytes(Bytes::new());
-        match self.inner {
+        let inner = match self.inner {
             MessageInner::Identified(message) => {
                 let mut parts = message.into_parts();
                 parts.insert(0, empty);
-                Self::from_parts(parts)
+                return Self::from_parts(parts);
             }
             MessageInner::InlinePair(pair) => {
                 let [first, second] = pair.payloads();
-                Self::from_payloads_vec(vec![empty, first, second])
+                return Self::from_payloads_vec(vec![empty, first, second]);
             }
-            MessageInner::Empty => Self {
-                inner: MessageInner::Single(empty),
-            },
-            MessageInner::Inline { len, data } if len & INLINE_DELIMITED_FLAG != 0 => Self {
-                inner: MessageInner::Multi(
-                    vec![
-                        empty,
-                        Payload::from_bytes(Bytes::new()),
-                        Payload::from_slice(&data[..(len & !INLINE_DELIMITED_FLAG) as usize]),
-                    ]
-                    .into(),
-                ),
-            },
-            MessageInner::Inline { len, data } => Self {
-                inner: MessageInner::Inline {
-                    len: len | INLINE_DELIMITED_FLAG,
-                    data,
-                },
-            },
-            MessageInner::Single(Payload {
-                inner: PayloadInner::Shared(body),
-            }) => Self {
-                inner: MessageInner::PrefixedShared {
-                    prefix: Bytes::new(),
-                    body,
-                },
-            },
-            MessageInner::Single(
-                p @ Payload {
-                    inner: PayloadInner::Identity(_),
-                },
-            ) => Self::from_payloads_vec(vec![empty, p]),
-            MessageInner::Single(p) => Self {
-                inner: MessageInner::EmptyDelimitedBytes(p.as_bytes()),
-            },
-            MessageInner::PrefixedShared { prefix, body } => Self::from_payloads_vec(vec![
-                empty,
-                Payload::from_bytes(prefix),
-                Payload {
-                    inner: PayloadInner::Shared(body),
-                },
-            ]),
-            MessageInner::RoutedShared { routing_id, body } => Self {
-                inner: MessageInner::RoutedMulti {
-                    routing_id,
-                    parts: vec![
-                        empty,
-                        Payload {
-                            inner: PayloadInner::Shared(body),
-                        },
-                    ]
-                    .into(),
-                },
-            },
-            MessageInner::EmptyDelimitedBytes(p) => Self::from_payloads_vec(vec![
+            MessageInner::Empty => MessageInner::Single(empty),
+            // An already delimited inline body needs a second delimiter frame.
+            MessageInner::Inline { len, data } if len & INLINE_DELIMITED_FLAG != 0 => multi([
                 empty,
                 Payload::from_bytes(Bytes::new()),
-                Payload::from_bytes(p),
+                Payload::from_slice(&data[..(len & !INLINE_DELIMITED_FLAG) as usize]),
             ]),
+            MessageInner::Inline { len, data } => MessageInner::Inline {
+                len: len | INLINE_DELIMITED_FLAG,
+                data,
+            },
+            MessageInner::Single(part) => return Self::delimit_single(part, empty),
+            MessageInner::PrefixedShared { prefix, body } => {
+                let prefix = Payload::from_bytes(prefix);
+                return Self::from_payloads_vec(vec![empty, prefix, shared_payload(body)]);
+            }
+            MessageInner::RoutedShared { routing_id, body } => {
+                routed_multi(routing_id, [empty, shared_payload(body)])
+            }
+            MessageInner::EmptyDelimitedBytes(p) => {
+                let delimiter = Payload::from_bytes(Bytes::new());
+                return Self::from_payloads_vec(vec![empty, delimiter, Payload::from_bytes(p)]);
+            }
             MessageInner::Multi(mut v) => {
                 v.insert(0, empty);
-                Self {
-                    inner: MessageInner::Multi(v),
-                }
+                MessageInner::Multi(v)
             }
-            MessageInner::RoutedEmpty { routing_id } => Self {
-                inner: MessageInner::RoutedMulti {
-                    routing_id,
-                    parts: vec![empty].into(),
-                },
-            },
-            MessageInner::RoutedInline { len, data } => Self {
-                inner: MessageInner::RoutedMulti {
-                    routing_id: routed_inline_id(&data),
-                    parts: vec![empty, Payload::from_slice(&data[..usize::from(len)])].into(),
-                },
-            },
-            MessageInner::RoutedBytes { routing_id, data } => Self {
-                inner: MessageInner::RoutedMulti {
-                    routing_id,
-                    parts: vec![empty, Payload::from_bytes(data)].into(),
-                },
-            },
+            MessageInner::RoutedEmpty { routing_id } => routed_multi(routing_id, [empty]),
+            MessageInner::RoutedInline { len, data } => routed_multi(
+                routed_inline_id(&data),
+                [empty, Payload::from_slice(&data[..usize::from(len)])],
+            ),
+            MessageInner::RoutedBytes { routing_id, data } => {
+                routed_multi(routing_id, [empty, Payload::from_bytes(data)])
+            }
             MessageInner::RoutedMulti {
                 routing_id,
                 mut parts,
             } => {
                 parts.insert(0, empty);
-                Self {
-                    inner: MessageInner::RoutedMulti { routing_id, parts },
-                }
+                MessageInner::RoutedMulti { routing_id, parts }
             }
-        }
+        };
+        Self { inner }
     }
+
+    /// Prepend `empty` to one frame, keeping compact shared and byte forms.
+    #[inline]
+    fn delimit_single(part: Payload, empty: Payload) -> Self {
+        let inner = match part {
+            Payload {
+                inner: PayloadInner::Shared(body),
+            } => MessageInner::PrefixedShared {
+                prefix: Bytes::new(),
+                body,
+            },
+            p @ Payload {
+                inner: PayloadInner::Identity(_),
+            } => return Self::from_payloads_vec(vec![empty, p]),
+            p => MessageInner::EmptyDelimitedBytes(p.as_bytes()),
+        };
+        Self { inner }
+    }
+
     fn append_payloads_to(self, parts: &mut Vec<Payload>) {
         match self.inner {
             MessageInner::Identified(message) => parts.extend(message.into_parts().drain(..)),
@@ -404,5 +342,27 @@ impl Message {
                 ..
             } => parts.extend(routed_parts.drain(..)),
         }
+    }
+}
+
+#[inline]
+fn shared_payload(body: SharedOwner) -> Payload {
+    Payload {
+        inner: PayloadInner::Shared(body),
+    }
+}
+
+/// Multipart table holding exactly `parts`.
+#[inline]
+fn multi<const N: usize>(parts: [Payload; N]) -> MessageInner {
+    MessageInner::Multi(Vec::from(parts).into())
+}
+
+/// Routed multipart table holding exactly `parts`.
+#[inline]
+fn routed_multi<const N: usize>(routing_id: u32, parts: [Payload; N]) -> MessageInner {
+    MessageInner::RoutedMulti {
+        routing_id,
+        parts: Vec::from(parts).into(),
     }
 }

@@ -68,6 +68,54 @@ async fn create_pairs() -> Vec<SocketPair> {
     pairs
 }
 
+/// Sends 10 messages per pair, completes REQ/REP round trips inline, then
+/// drains the one-way receivers. Returns the number of messages exchanged.
+async fn exchange_round(pairs: &[SocketPair]) -> u64 {
+    let mut exchanged = 0;
+
+    for _ in 0..10 {
+        for pair in pairs {
+            // Skip pairs whose send blocks (HWM) or is refused this round.
+            let sent = tokio::time::timeout(
+                Duration::from_millis(1),
+                pair.sender.send(Message::single("multi")),
+            )
+            .await;
+
+            if sent.is_err() || sent.unwrap().is_err() {
+                continue;
+            }
+
+            if pair.kind != "req/rep-tcp" {
+                continue;
+            }
+
+            // REQ must see the reply before it may send again.
+            if let Ok(Ok(_)) =
+                tokio::time::timeout(Duration::from_millis(5), pair.receiver.recv()).await
+            {
+                exchanged += 1;
+                let _ = tokio::time::timeout(
+                    Duration::from_millis(5),
+                    pair.receiver.send(Message::single("reply")),
+                )
+                .await;
+                let _ = tokio::time::timeout(Duration::from_millis(5), pair.sender.recv()).await;
+            }
+        }
+    }
+
+    for pair in pairs {
+        if pair.kind != "req/rep-tcp" {
+            while pair.receiver.try_recv().is_ok() {
+                exchanged += 1;
+            }
+        }
+    }
+
+    exchanged
+}
+
 #[test]
 fn soak_multi_socket() {
     let duration = soak_common::soak_duration();
@@ -84,45 +132,7 @@ fn soak_multi_socket() {
         let mut last_log = start;
 
         while start.elapsed() < duration {
-            for _ in 0..10 {
-                for pair in &pairs {
-                    let sent = tokio::time::timeout(
-                        Duration::from_millis(1),
-                        pair.sender.send(Message::single("multi")),
-                    )
-                    .await;
-
-                    if sent.is_err() || sent.unwrap().is_err() {
-                        continue;
-                    }
-
-                    if pair.kind != "req/rep-tcp" {
-                        continue;
-                    }
-
-                    if let Ok(Ok(_)) =
-                        tokio::time::timeout(Duration::from_millis(5), pair.receiver.recv()).await
-                    {
-                        total_exchanged += 1;
-                        let _ = tokio::time::timeout(
-                            Duration::from_millis(5),
-                            pair.receiver.send(Message::single("reply")),
-                        )
-                        .await;
-                        let _ = tokio::time::timeout(Duration::from_millis(5), pair.sender.recv())
-                            .await;
-                    }
-                }
-            }
-
-            for pair in &pairs {
-                if pair.kind != "req/rep-tcp" {
-                    while pair.receiver.try_recv().is_ok() {
-                        total_exchanged += 1;
-                    }
-                }
-            }
-
+            total_exchanged += exchange_round(&pairs).await;
             tracker.record(total_exchanged);
 
             if last_log.elapsed() >= Duration::from_secs(30) {

@@ -253,35 +253,21 @@ pub extern "C" fn zmq_poller_wait_all(
     if events_out.is_null() || n_events <= 0 {
         return fail(libc::EFAULT);
     }
+
     let p = match unsafe { poller(poller_ptr) } {
         Ok(p) => p,
         Err(e) => return fail(e),
     };
 
+    // `map[i]` is the entry index behind `poll_items[i]`; entries with no
+    // interests are skipped.
     let mut poll_items = Vec::new();
     let mut map = Vec::new();
     for (idx, entry) in p.entries.iter().enumerate() {
         if entry.events == 0 {
             continue;
         }
-        match entry.target {
-            PollerTarget::Socket(socket) => {
-                poll_items.push(ZmqPollItem {
-                    socket,
-                    fd: invalid_fd(),
-                    events: entry.events,
-                    revents: 0,
-                });
-            }
-            PollerTarget::Fd(fd) => {
-                poll_items.push(ZmqPollItem {
-                    socket: std::ptr::null_mut(),
-                    fd,
-                    events: entry.events,
-                    revents: 0,
-                });
-            }
-        }
+        poll_items.push(entry.poll_item());
         map.push(idx);
     }
 
@@ -309,25 +295,49 @@ pub extern "C" fn zmq_poller_wait_all(
         if written >= n_events as usize {
             break;
         }
-        let entry = p.entries[map[poll_idx]];
-        let out = ZmqPollerEvent {
-            socket: match entry.target {
-                PollerTarget::Socket(socket) => socket,
-                PollerTarget::Fd(_) => std::ptr::null_mut(),
-            },
-            fd: match entry.target {
-                PollerTarget::Socket(_) => invalid_fd(),
-                PollerTarget::Fd(fd) => fd,
-            },
-            user_data: entry.user_data,
-            events: item.revents,
-        };
+        let out = p.entries[map[poll_idx]].event(item.revents);
         // SAFETY: events_out points to at least n_events entries (caller contract).
         unsafe { events_out.add(written).write(out) };
         written += 1;
     }
 
     c_int::try_from(written).unwrap_or(c_int::MAX)
+}
+
+impl PollerEntry {
+    /// `zmq_poll` item for this entry; exactly one of socket and fd is set.
+    fn poll_item(&self) -> ZmqPollItem {
+        match self.target {
+            PollerTarget::Socket(socket) => ZmqPollItem {
+                socket,
+                fd: invalid_fd(),
+                events: self.events,
+                revents: 0,
+            },
+            PollerTarget::Fd(fd) => ZmqPollItem {
+                socket: std::ptr::null_mut(),
+                fd,
+                events: self.events,
+                revents: 0,
+            },
+        }
+    }
+
+    /// Caller-visible event for this entry with the observed `revents`.
+    fn event(&self, revents: c_short) -> ZmqPollerEvent {
+        ZmqPollerEvent {
+            socket: match self.target {
+                PollerTarget::Socket(socket) => socket,
+                PollerTarget::Fd(_) => std::ptr::null_mut(),
+            },
+            fd: match self.target {
+                PollerTarget::Socket(_) => invalid_fd(),
+                PollerTarget::Fd(fd) => fd,
+            },
+            user_data: self.user_data,
+            events: revents,
+        }
+    }
 }
 
 /// Unsupported poller descriptor query; return -1 with EINVAL for valid arguments.

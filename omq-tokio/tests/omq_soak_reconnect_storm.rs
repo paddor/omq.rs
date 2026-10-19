@@ -8,7 +8,43 @@ mod soak_common;
 use std::time::{Duration, Instant};
 
 use omq_tokio::options::ReconnectPolicy;
-use omq_tokio::{Message, Socket, SocketType};
+use omq_tokio::{Endpoint, Message, Socket, SocketType};
+
+/// Retries the bind for up to ~1 s while the previous listener releases
+/// the port.
+async fn bind_with_retry(pull: &Socket, ep: &Endpoint) -> bool {
+    for _ in 0..40 {
+        if pull.bind(ep.clone()).await.is_ok() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    false
+}
+
+/// Sends one tagged message and checks that the fresh PULL receives it.
+async fn deliver_once(push: &Socket, pull: &Socket, cycle: u64) -> bool {
+    let tag = format!("c-{cycle}");
+    let t0 = Instant::now();
+    push.send(Message::single(tag.clone())).await.unwrap();
+    let send_us = t0.elapsed().as_micros();
+
+    match tokio::time::timeout(Duration::from_secs(5), pull.recv()).await {
+        Ok(Ok(m)) => {
+            assert_eq!(m.part_bytes(0).unwrap(), tag.as_bytes());
+            true
+        }
+        other => {
+            let recv_ms = t0.elapsed().as_millis();
+            eprintln!(
+                "[reconnect_storm] MISS cycle {cycle}: \
+                 send took {send_us} µs, recv waited {recv_ms} ms, \
+                 result={other:?}",
+            );
+            false
+        }
+    }
+}
 
 #[test]
 fn soak_reconnect_storm() {
@@ -38,38 +74,13 @@ fn soak_reconnect_storm() {
 
         while start.elapsed() < duration {
             let pull = Socket::new(SocketType::Pull, soak_common::soak_options());
-
-            let mut bound = false;
-            for _ in 0..40 {
-                if pull.bind(ep.clone()).await.is_ok() {
-                    bound = true;
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-            if !bound {
+            if !bind_with_retry(&pull, &ep).await {
                 eprintln!("[reconnect_storm] bind failed at cycle {cycles}, retrying");
                 continue;
             }
 
-            let tag = format!("c-{cycles}");
-            let t0 = Instant::now();
-            push.send(Message::single(tag.clone())).await.unwrap();
-            let send_us = t0.elapsed().as_micros();
-
-            match tokio::time::timeout(Duration::from_secs(5), pull.recv()).await {
-                Ok(Ok(m)) => {
-                    assert_eq!(m.part_bytes(0).unwrap(), tag.as_bytes());
-                    delivered += 1;
-                }
-                other => {
-                    let recv_ms = t0.elapsed().as_millis();
-                    eprintln!(
-                        "[reconnect_storm] MISS cycle {cycles}: \
-                         send took {send_us} µs, recv waited {recv_ms} ms, \
-                         result={other:?}",
-                    );
-                }
+            if deliver_once(&push, &pull, cycles).await {
+                delivered += 1;
             }
 
             pull.close().await.unwrap();

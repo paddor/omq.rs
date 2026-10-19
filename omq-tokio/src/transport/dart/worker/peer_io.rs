@@ -5,22 +5,21 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use omq_proto::{Message, TrySendError};
-use tokio_util::sync::CancellationToken;
 
-use super::{BYTES, DATA_MESSAGES, DartStats, MESSAGES, PeerIo, Session};
+use super::{BYTES, DATA_MESSAGES, DartStats, MESSAGES, PeerIo, PeerQueues, Session};
 use crate::engine::signal::DataSignal;
-use crate::engine::{PeerDriverCommand, PeerDriverData, RecvSink, SendPipeConsumer};
+use crate::engine::{PeerDriverCommand, PeerDriverData};
 
 impl PeerIo {
-    pub(crate) fn new(
-        commands: crate::engine::control_inbox::Receiver,
-        data: crate::engine::data_inbox::Receiver,
-        pipe: Option<SendPipeConsumer>,
-        sink: Option<RecvSink>,
-        cancel: CancellationToken,
-        completion: crate::engine::peer_completion::CompletionProgress,
-        window: usize,
-    ) -> Self {
+    pub(crate) fn new(queues: PeerQueues, window: usize) -> Self {
+        let PeerQueues {
+            commands,
+            data,
+            pipe,
+            sink,
+            cancel,
+            completion,
+        } = queues;
         Self {
             commands,
             data,

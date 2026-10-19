@@ -67,15 +67,21 @@ impl Drop for UdpDialerEntry {
     }
 }
 
+/// Where a DISH listener delivers matching datagrams.
+pub(crate) struct DishDelivery {
+    pub(crate) recv_tx: std::sync::Arc<crate::socket::recv::SharedRecvPipe>,
+    /// Groups this socket joined. Other datagrams are dropped here.
+    pub(crate) joined: JoinedGroups,
+    pub(crate) pool: Option<crate::PayloadPool>,
+}
+
 /// Spawn a DISH listener task. Reads datagrams, applies the local
 /// joined-groups filter (RFC 48),
 /// pushes matching `[group, body]` messages straight onto `recv_tx`.
 pub(crate) fn spawn_dish_listener(
     sock: UdpSocket,
-    recv_tx: std::sync::Arc<crate::socket::recv::SharedRecvPipe>,
-    joined: JoinedGroups,
+    delivery: DishDelivery,
     cancel: CancellationToken,
-    pool: Option<crate::PayloadPool>,
     io_pool: &crate::context::IoPoolHandle,
     assignment: crate::context::IoThreadLease,
 ) -> JoinHandle<()> {
@@ -83,68 +89,111 @@ pub(crate) fn spawn_dish_listener(
     let network = io_pool.network_on(index);
     io_pool.spawn_on(index, async move {
         let _assignment = assignment;
-        let Ok(sock) = sock.into_std().and_then(UdpSocket::from_std) else { return; };
-        let mut ingress = network.ingress();
-        let mut buf = vec![0u8; udp::MAX_DATAGRAM_SIZE];
-        let mut budget = omq_proto::flow::DrainBudget::new(64, 1024 * 1024);
-        loop {
-            if budget.exhausted() {
-                budget.reset();
-                tokio::task::yield_now().await;
-            }
-            tokio::select! {
-                () = cancel.cancelled() => break,
-                res = async {
-                    // Peeking preserves a complete datagram while waiting for
-                    // credit. This socket has exactly one receive owner.
+        // Re-register the socket with this IO thread's reactor.
+        let Ok(sock) = sock.into_std().and_then(UdpSocket::from_std) else {
+            return;
+        };
+        run_dish_listener(&sock, &delivery, &cancel, network.ingress()).await;
+    })
+}
+
+async fn run_dish_listener(
+    sock: &UdpSocket,
+    delivery: &DishDelivery,
+    cancel: &CancellationToken,
+    mut ingress: Option<crate::network_limit::Gate>,
+) {
+    let mut buf = vec![0u8; udp::MAX_DATAGRAM_SIZE];
+    let mut budget = omq_proto::flow::DrainBudget::new(64, 1024 * 1024);
+
+    loop {
+        if budget.exhausted() {
+            budget.reset();
+            tokio::task::yield_now().await;
+        }
+
+        tokio::select! {
+            () = cancel.cancelled() => break,
+            res = recv_datagram(sock, &mut buf, ingress.as_mut()) => match res {
+                Ok((n, _from)) => {
                     if let Some(gate) = &mut ingress {
-                        let (length, _) = sock.peek_from(&mut buf).await?;
-                        std::future::poll_fn(|cx| {
-                            let n = std::task::ready!(gate.poll(cx, length, length));
-                            match sock.try_recv_from(&mut buf) {
-                                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                                    gate.finish(n, 0);
-                                    match sock.poll_recv_ready(cx) {
-                                        std::task::Poll::Ready(Ok(())) => cx.waker().wake_by_ref(),
-                                        std::task::Poll::Ready(Err(e)) => return std::task::Poll::Ready(Err(e)),
-                                        std::task::Poll::Pending => {}
-                                    }
-                                    std::task::Poll::Pending
-                                }
-                                result => {
-                                    gate.finish(n, result.as_ref().map_or(0, |(n, _)| *n));
-                                    std::task::Poll::Ready(result)
-                                }
-                            }
-                        }).await
-                    } else { sock.recv_from(&mut buf).await }
-                } => match res {
-                    Ok((n, _from)) => {
-                        if let Some(gate) = &mut ingress { gate.cancel_wait(); }
-                        let _ = budget.account(n);
-                        let Some((group, body)) = udp::split_datagram(&buf[..n]) else {
-                            continue;
-                        };
-                        if !joined.load().contains(group) {
-                            continue;
-                        }
-                        let msg = if let Some(pool) = &pool {
-                            let group = pool.payload(group.len(), |bytes| bytes.copy_from_slice(group));
-                            let body = pool.payload(body.len(), |bytes| bytes.copy_from_slice(body));
-                            let (Ok(group), Ok(body)) = (group, body) else { continue; };
-                            Message::multipart_payloads([group, body])
-                        } else {
-                            Message::multipart([Bytes::copy_from_slice(group), Bytes::copy_from_slice(body)])
-                        };
-                        if recv_tx.send(msg).await.is_err() {
-                            break;
-                        }
+                        gate.cancel_wait();
                     }
-                    Err(_) => break,
+                    let _ = budget.account(n);
+                    let Some(msg) = dish_message(&buf[..n], delivery) else {
+                        continue;
+                    };
+                    if delivery.recv_tx.send(msg).await.is_err() {
+                        break;
+                    }
                 }
+                Err(_) => break,
+            }
+        }
+    }
+}
+
+/// Receive one datagram. With an ingress limit, peek first so the complete
+/// datagram stays queued while waiting for credit. This socket has exactly
+/// one receive owner.
+async fn recv_datagram(
+    sock: &UdpSocket,
+    buf: &mut [u8],
+    ingress: Option<&mut crate::network_limit::Gate>,
+) -> std::io::Result<(usize, std::net::SocketAddr)> {
+    let Some(gate) = ingress else {
+        return sock.recv_from(buf).await;
+    };
+
+    let (length, _) = sock.peek_from(buf).await?;
+    std::future::poll_fn(|cx| {
+        let n = std::task::ready!(gate.poll(cx, length, length));
+        match sock.try_recv_from(buf) {
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // Return the unused credit, then wait for readiness again.
+                gate.finish(n, 0);
+                match sock.poll_recv_ready(cx) {
+                    std::task::Poll::Ready(Ok(())) => cx.waker().wake_by_ref(),
+                    std::task::Poll::Ready(Err(e)) => return std::task::Poll::Ready(Err(e)),
+                    std::task::Poll::Pending => {}
+                }
+                std::task::Poll::Pending
+            }
+            result => {
+                gate.finish(n, result.as_ref().map_or(0, |(n, _)| *n));
+                std::task::Poll::Ready(result)
             }
         }
     })
+    .await
+}
+
+/// Decode a `[group, body]` datagram for a joined group. `None` drops it.
+fn dish_message(datagram: &[u8], delivery: &DishDelivery) -> Option<Message> {
+    let (group, body) = udp::split_datagram(datagram)?;
+    if !delivery.joined.load().contains(group) {
+        return None;
+    }
+
+    if let Some(pool) = &delivery.pool {
+        let group = pool.payload(group.len(), |bytes| bytes.copy_from_slice(group));
+        let body = pool.payload(body.len(), |bytes| bytes.copy_from_slice(body));
+        let (Ok(group), Ok(body)) = (group, body) else {
+            return None;
+        };
+        Some(Message::multipart_payloads([group, body]))
+    } else {
+        Some(Message::multipart([
+            Bytes::copy_from_slice(group),
+            Bytes::copy_from_slice(body),
+        ]))
+    }
+}
+
+/// Control and data inboxes of a RADIO sender task.
+pub(crate) struct RadioInboxes {
+    pub(crate) control: crate::engine::control_inbox::Receiver,
+    pub(crate) data: crate::engine::data_inbox::Receiver,
 }
 
 /// Spawn a RADIO sender task. Drains [`PeerDriverCommand`]s from `inbox_rx`
@@ -153,8 +202,7 @@ pub(crate) fn spawn_dish_listener(
 /// programming error; drop silently).
 pub(crate) fn spawn_radio_sender(
     sock: UdpSocket,
-    mut inbox_rx: crate::engine::control_inbox::Receiver,
-    mut data_inbox_rx: crate::engine::data_inbox::Receiver,
+    inboxes: RadioInboxes,
     cancel: CancellationToken,
     io_pool: &crate::context::IoPoolHandle,
     assignment: crate::context::IoThreadLease,
@@ -163,88 +211,124 @@ pub(crate) fn spawn_radio_sender(
     let network = io_pool.network_on(index);
     io_pool.spawn_on(index, async move {
         let _assignment = assignment;
-        let Ok(sock) = sock.into_std().and_then(UdpSocket::from_std) else { return; };
-        let mut egress = network.egress();
-        let mut pending: Option<Bytes> = None;
-        let mut control_open = true;
-        let mut closing = false;
-        let mut deadline: Option<std::time::Instant> = None;
-        let mut budget = omq_proto::flow::DrainBudget::new(64, 64 * 1024);
-        loop {
-            if budget.exhausted() {
-                inbox_rx.release_consumed();
-                data_inbox_rx.release_consumed();
-                budget.reset();
-                tokio::task::yield_now().await;
-            }
-            let _ = budget.account(0);
-            if pending.is_none() && let Some(gate) = &mut egress { gate.cancel_wait(); }
-            if closing && pending.is_none() && inbox_rx.is_empty() && data_inbox_rx.is_empty() {
-                break;
-            }
-            tokio::select! {
-                biased;
-                () = cancel.cancelled() => break,
-                () = async { tokio::time::sleep_until(deadline.unwrap().into()).await; },
-                    if deadline.is_some() => break,
-                cmd = inbox_rx.recv(), if control_open => match cmd {
-                    Some(PeerDriverCommand::ActivateDataPlane | PeerDriverCommand::SendCommand(_)) => {}
-                    Some(PeerDriverCommand::Close | PeerDriverCommand::ActivateWithRecvSink(_)) => break,
-                    Some(PeerDriverCommand::DrainAndClose { deadline: end }) => {
-                        if !closing {
-                            closing = true;
-                            deadline = end;
-                            data_inbox_rx.close();
-                        }
+        // Re-register the socket with this IO thread's reactor.
+        let Ok(sock) = sock.into_std().and_then(UdpSocket::from_std) else {
+            return;
+        };
+        run_radio_sender(&sock, inboxes, &cancel, network.egress()).await;
+    })
+}
+
+async fn run_radio_sender(
+    sock: &UdpSocket,
+    RadioInboxes {
+        control: mut inbox_rx,
+        data: mut data_inbox_rx,
+    }: RadioInboxes,
+    cancel: &CancellationToken,
+    mut egress: Option<crate::network_limit::Gate>,
+) {
+    let mut pending: Option<Bytes> = None;
+    let mut control_open = true;
+    let mut closing = false;
+    let mut deadline: Option<std::time::Instant> = None;
+    let mut budget = omq_proto::flow::DrainBudget::new(64, 64 * 1024);
+
+    loop {
+        if budget.exhausted() {
+            inbox_rx.release_consumed();
+            data_inbox_rx.release_consumed();
+            budget.reset();
+            tokio::task::yield_now().await;
+        }
+        let _ = budget.account(0);
+        if pending.is_none()
+            && let Some(gate) = &mut egress
+        {
+            gate.cancel_wait();
+        }
+        if closing && pending.is_none() && inbox_rx.is_empty() && data_inbox_rx.is_empty() {
+            break;
+        }
+
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => break,
+            () = async { tokio::time::sleep_until(deadline.unwrap().into()).await; },
+                if deadline.is_some() => break,
+            cmd = inbox_rx.recv(), if control_open => match cmd {
+                Some(PeerDriverCommand::ActivateDataPlane | PeerDriverCommand::SendCommand(_)) => {}
+                Some(PeerDriverCommand::Close | PeerDriverCommand::ActivateWithRecvSink(_)) => break,
+                Some(PeerDriverCommand::DrainAndClose { deadline: end }) => {
+                    if !closing {
+                        closing = true;
+                        deadline = end;
+                        data_inbox_rx.close();
                     }
-                    None => control_open = false,
-                },
-                result = async {
-                    let bytes = pending.as_ref().unwrap();
-                    if let Some(gate) = &mut egress {
-                        std::future::poll_fn(|cx| {
-                            let n = std::task::ready!(gate.poll(cx, bytes.len(), bytes.len()));
-                            match sock.try_send(bytes) {
-                                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                                    gate.finish(n, 0);
-                                    match sock.poll_send_ready(cx) {
-                                        std::task::Poll::Ready(Ok(())) => cx.waker().wake_by_ref(),
-                                        std::task::Poll::Ready(Err(e)) => return std::task::Poll::Ready(Err(e)),
-                                        std::task::Poll::Pending => {}
-                                    }
-                                    std::task::Poll::Pending
-                                }
-                                result => {
-                                    gate.finish(n, result.as_ref().map_or(0, |n| *n));
-                                    std::task::Poll::Ready(result)
-                                }
-                            }
-                        }).await
-                    } else { sock.send(bytes).await }
-                }, if pending.is_some() => {
-                    // Best-effort fire-and-forget; UDP errors
-                    // (ECONNREFUSED, ENETUNREACH) are silently dropped.
-                    let _ = result;
-                    pending = None;
                 }
-                data = data_inbox_rx.recv(), if pending.is_none() => match data {
-                    Some(PeerDriverData::SendMessage(m)) => {
-                        let _ = budget.account(m.byte_len());
-                        if m.len() != 2 {
-                            continue;
-                        }
-                        let group = m.part_bytes(0).unwrap_or_default();
-                        let body = m.part_bytes(1).unwrap_or_default();
-                        if let Ok(dgram) = udp::encode_datagram(&group, &body) {
-                            pending = Some(dgram);
-                        }
-                    }
-                    Some(PeerDriverData::SendEncoded(_)) => {}
-                    None => break,
-                },
+                None => control_open = false,
+            },
+            result = send_datagram(sock, pending.as_ref(), egress.as_mut()), if pending.is_some() => {
+                // Best-effort fire-and-forget; UDP errors
+                // (ECONNREFUSED, ENETUNREACH) are silently dropped.
+                let _ = result;
+                pending = None;
+            }
+            data = data_inbox_rx.recv(), if pending.is_none() => match data {
+                Some(PeerDriverData::SendMessage(m)) => {
+                    let _ = budget.account(m.byte_len());
+                    pending = radio_datagram(&m);
+                }
+                Some(PeerDriverData::SendEncoded(_)) => {}
+                None => break,
+            },
+        }
+    }
+}
+
+/// Send one datagram, waiting for egress credit first when limited.
+async fn send_datagram(
+    sock: &UdpSocket,
+    bytes: Option<&Bytes>,
+    egress: Option<&mut crate::network_limit::Gate>,
+) -> std::io::Result<usize> {
+    // Only polled when the arm is enabled, which requires a datagram.
+    let bytes = bytes.unwrap();
+    let Some(gate) = egress else {
+        return sock.send(bytes).await;
+    };
+
+    std::future::poll_fn(|cx| {
+        let n = std::task::ready!(gate.poll(cx, bytes.len(), bytes.len()));
+        match sock.try_send(bytes) {
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // Return the unused credit, then wait for readiness again.
+                gate.finish(n, 0);
+                match sock.poll_send_ready(cx) {
+                    std::task::Poll::Ready(Ok(())) => cx.waker().wake_by_ref(),
+                    std::task::Poll::Ready(Err(e)) => return std::task::Poll::Ready(Err(e)),
+                    std::task::Poll::Pending => {}
+                }
+                std::task::Poll::Pending
+            }
+            result => {
+                gate.finish(n, result.as_ref().map_or(0, |n| *n));
+                std::task::Poll::Ready(result)
             }
         }
     })
+    .await
+}
+
+/// Encode a RADIO `[group, body]` message as one datagram. Other shapes,
+/// and messages that do not encode, are dropped.
+fn radio_datagram(message: &Message) -> Option<Bytes> {
+    if message.len() != 2 {
+        return None;
+    }
+    let group = message.part_bytes(0).unwrap_or_default();
+    let body = message.part_bytes(1).unwrap_or_default();
+    udp::encode_datagram(&group, &body).ok()
 }
 
 /// Build a [`ActorPeerDriverHandle`] for a synthetic UDP RADIO peer. The handle's

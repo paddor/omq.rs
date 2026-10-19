@@ -60,85 +60,88 @@ async fn make_pair(name: &'static str, bind_type: SocketType, connector: Socket)
     }
 }
 
+/// Pair name and the bind-side type that each cycle recreates.
+const PAIRS: [(&str, SocketType); 8] = [
+    ("push/pull", SocketType::Pull),
+    ("req/rep", SocketType::Rep),
+    ("pub/sub", SocketType::Pub),
+    ("dealer/router", SocketType::Router),
+    ("pair", SocketType::Pair),
+    ("client/server", SocketType::Server),
+    ("scatter/gather", SocketType::Gather),
+    ("channel", SocketType::Channel),
+];
+
+/// The long-lived connect side of a pair, which must reconnect on its own.
+async fn connector(name: &str) -> Socket {
+    match name {
+        "push/pull" => Socket::new(SocketType::Push, fast_reconnect().send_hwm(16)),
+        "req/rep" => Socket::new(SocketType::Req, fast_reconnect()),
+        "pub/sub" => {
+            let sub = Socket::new(SocketType::Sub, fast_reconnect());
+            sub.subscribe("x.").await.unwrap();
+            sub
+        }
+        "dealer/router" => Socket::new(
+            SocketType::Dealer,
+            fast_reconnect().identity(Bytes::from_static(b"d1")),
+        ),
+        "pair" => Socket::new(SocketType::Pair, fast_reconnect()),
+        "client/server" => Socket::new(
+            SocketType::Client,
+            fast_reconnect().identity(Bytes::from_static(b"c1")),
+        ),
+        "scatter/gather" => Socket::new(SocketType::Scatter, fast_reconnect().send_hwm(16)),
+        "channel" => Socket::new(SocketType::Channel, fast_reconnect()),
+        _ => unreachable!(),
+    }
+}
+
 async fn create_all_pairs() -> Vec<PairState> {
     let mut pairs = Vec::new();
-
-    pairs.push(
-        make_pair(
-            "push/pull",
-            SocketType::Pull,
-            Socket::new(SocketType::Push, fast_reconnect().send_hwm(16)),
-        )
-        .await,
-    );
-
-    pairs.push(
-        make_pair(
-            "req/rep",
-            SocketType::Rep,
-            Socket::new(SocketType::Req, fast_reconnect()),
-        )
-        .await,
-    );
-
-    {
-        let sub = Socket::new(SocketType::Sub, fast_reconnect());
-        sub.subscribe("x.").await.unwrap();
-        pairs.push(make_pair("pub/sub", SocketType::Pub, sub).await);
+    for (name, bind_type) in PAIRS {
+        pairs.push(make_pair(name, bind_type, connector(name).await).await);
     }
-
-    pairs.push(
-        make_pair(
-            "dealer/router",
-            SocketType::Router,
-            Socket::new(
-                SocketType::Dealer,
-                fast_reconnect().identity(Bytes::from_static(b"d1")),
-            ),
-        )
-        .await,
-    );
-
-    pairs.push(
-        make_pair(
-            "pair",
-            SocketType::Pair,
-            Socket::new(SocketType::Pair, fast_reconnect()),
-        )
-        .await,
-    );
-
-    pairs.push(
-        make_pair(
-            "client/server",
-            SocketType::Server,
-            Socket::new(
-                SocketType::Client,
-                fast_reconnect().identity(Bytes::from_static(b"c1")),
-            ),
-        )
-        .await,
-    );
-
-    pairs.push(
-        make_pair(
-            "scatter/gather",
-            SocketType::Gather,
-            Socket::new(SocketType::Scatter, fast_reconnect().send_hwm(16)),
-        )
-        .await,
-    );
-
-    pairs.push(
-        make_pair(
-            "channel",
-            SocketType::Channel,
-            Socket::new(SocketType::Channel, fast_reconnect()),
-        )
-        .await,
-    );
-
     pairs
+}
+
+/// One restart cycle; true if a message crossed the fresh bind side.
+async fn cycle(pair: &mut PairState) -> bool {
+    match pair.name {
+        "push/pull" => cycle_push_pull(pair).await,
+        "req/rep" => cycle_req_rep(pair).await,
+        "pub/sub" => cycle_pub_sub(pair).await,
+        "dealer/router" => cycle_dealer_router(pair).await,
+        "pair" | "channel" => cycle_bidirectional(pair).await,
+        "client/server" => cycle_client_server(pair).await,
+        "scatter/gather" => cycle_scatter_gather(pair).await,
+        _ => unreachable!(),
+    }
+}
+
+fn delivery_pct(pair: &PairState) -> f64 {
+    if pair.cycles > 0 {
+        pair.delivered as f64 / pair.cycles as f64 * 100.0
+    } else {
+        100.0
+    }
+}
+
+/// Delivery may fail when a restart races the send, so the gate is a
+/// minimum rate per pair rather than every cycle.
+fn assert_delivery(pairs: &[PairState]) {
+    for pair in pairs {
+        let pct = delivery_pct(pair);
+        eprintln!(
+            "[reconnect_all_types] {}: {}/{} delivered ({pct:.1}%)",
+            pair.name, pair.delivered, pair.cycles,
+        );
+        assert!(
+            pct >= 70.0,
+            "{} delivery rate too low: {pct:.1}%",
+            pair.name,
+        );
+    }
 }
 
 #[test]
@@ -158,17 +161,7 @@ fn soak_reconnect_all_types() {
             let idx = rng.random_range(0..pairs.len());
             let pair = &mut pairs[idx];
 
-            let ok = match pair.name {
-                "push/pull" => cycle_push_pull(pair).await,
-                "req/rep" => cycle_req_rep(pair).await,
-                "pub/sub" => cycle_pub_sub(pair).await,
-                "dealer/router" => cycle_dealer_router(pair).await,
-                "pair" | "channel" => cycle_bidirectional(pair).await,
-                "client/server" => cycle_client_server(pair).await,
-                "scatter/gather" => cycle_scatter_gather(pair).await,
-                _ => unreachable!(),
-            };
-
+            let ok = cycle(pair).await;
             pair.cycles += 1;
             if ok {
                 pair.delivered += 1;
@@ -180,33 +173,14 @@ fn soak_reconnect_all_types() {
                     start.elapsed().as_secs_f64()
                 );
                 for p in &pairs {
-                    let pct = if p.cycles > 0 {
-                        p.delivered as f64 / p.cycles as f64 * 100.0
-                    } else {
-                        100.0
-                    };
+                    let pct = delivery_pct(p);
                     eprintln!("  {}: {}/{} ({pct:.0}%)", p.name, p.delivered, p.cycles);
                 }
                 last_log = Instant::now();
             }
         }
 
-        for pair in &pairs {
-            let pct = if pair.cycles > 0 {
-                pair.delivered as f64 / pair.cycles as f64 * 100.0
-            } else {
-                100.0
-            };
-            eprintln!(
-                "[reconnect_all_types] {}: {}/{} delivered ({pct:.1}%)",
-                pair.name, pair.delivered, pair.cycles,
-            );
-            assert!(
-                pct >= 70.0,
-                "{} delivery rate too low: {pct:.1}%",
-                pair.name,
-            );
-        }
+        assert_delivery(&pairs);
 
         for pair in pairs {
             pair.connector.close().await.unwrap();

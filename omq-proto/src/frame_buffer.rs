@@ -561,29 +561,7 @@ impl FrameBuffer {
             return drained;
         }
 
-        let mut retired_capacity = 0;
-        let frozen = if self.arena.is_empty() {
-            None
-        } else {
-            let cap = self.arena.capacity();
-            if cap > self.arena_peak_cap {
-                self.arena_peak_cap = cap;
-            }
-            if owned {
-                retired_capacity = cap;
-                Some(std::mem::take(&mut self.arena).freeze())
-            } else {
-                // Copy the arena content and clear() to preserve the backing
-                // allocation. The alternative (split().freeze()) transfers the
-                // entire backing to the frozen Bytes, forcing a fresh
-                // reserve() that causes page-fault storms on glibc's
-                // per-thread arenas.
-                copy_stats::record(Site::ArenaDrain, self.arena.len());
-                let frozen = Bytes::copy_from_slice(&self.arena);
-                self.arena.clear();
-                Some(frozen)
-            }
-        };
+        let (frozen, retired_capacity) = self.freeze_arena(owned);
 
         let take = max_chunks.min(self.entries.len());
         for entry in self.entries.drain(..take) {
@@ -604,24 +582,8 @@ impl FrameBuffer {
             buf.push(b);
         }
 
-        // Resolve remaining Arena entries so they don't reference the
-        // (now-split) arena buffer. In practice max_chunks (1024) always
-        // exceeds the entry count, so this loop is nearly always empty.
         if let Some(ref frozen) = frozen {
-            for entry in &mut self.entries {
-                if let Entry::Arena {
-                    offset,
-                    len,
-                    protected,
-                } = *entry
-                {
-                    *entry = Entry::External {
-                        bytes: frozen.slice(offset as usize..(offset + len) as usize),
-                        protected,
-                        continues: false,
-                    };
-                }
-            }
+            self.detach_arena_entries(frozen);
         }
 
         self.arena_mark = 0;
@@ -629,6 +591,53 @@ impl FrameBuffer {
             self.retire_arena(frozen, retired_capacity);
         }
         drained
+    }
+
+    /// Freeze the arena's bytes for draining. Returns them, if any, and the
+    /// capacity handed off with an owned arena.
+    #[inline]
+    fn freeze_arena(&mut self, owned: bool) -> (Option<Bytes>, usize) {
+        if self.arena.is_empty() {
+            return (None, 0);
+        }
+
+        let cap = self.arena.capacity();
+        if cap > self.arena_peak_cap {
+            self.arena_peak_cap = cap;
+        }
+        if owned {
+            return (Some(std::mem::take(&mut self.arena).freeze()), cap);
+        }
+
+        // Copy the arena content and clear() to preserve the backing
+        // allocation. The alternative (split().freeze()) transfers the
+        // entire backing to the frozen Bytes, forcing a fresh
+        // reserve() that causes page-fault storms on glibc's
+        // per-thread arenas.
+        copy_stats::record(Site::ArenaDrain, self.arena.len());
+        let frozen = Bytes::copy_from_slice(&self.arena);
+        self.arena.clear();
+        (Some(frozen), 0)
+    }
+
+    /// Resolve remaining Arena entries so they don't reference the
+    /// (now-split) arena buffer. In practice `max_chunks` (1024) always
+    /// exceeds the entry count, so this loop is nearly always empty.
+    fn detach_arena_entries(&mut self, frozen: &Bytes) {
+        for entry in &mut self.entries {
+            if let Entry::Arena {
+                offset,
+                len,
+                protected,
+            } = *entry
+            {
+                *entry = Entry::External {
+                    bytes: frozen.slice(offset as usize..(offset + len) as usize),
+                    protected,
+                    continues: false,
+                };
+            }
+        }
     }
 
     /// Restore drained chunks at the front after skipping `written` bytes.

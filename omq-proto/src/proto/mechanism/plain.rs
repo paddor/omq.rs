@@ -512,39 +512,8 @@ mod tests {
                 .with_user_id(Bytes::from_static(b"alice"))
                 .with_metadata(vec![("Role".into(), Bytes::from_static(b"administrator"))])
         }));
-        let mut out = Vec::new();
-        server
-            .start(
-                &mut out,
-                PeerProperties::default().with_socket_type(SocketType::Pull),
-            )
-            .unwrap();
-        server
-            .on_command(
-                Command::Unknown {
-                    name: Bytes::from_static(b"HELLO"),
-                    body: encode_hello("alice", "secret").unwrap(),
-                },
-                &mut out,
-            )
-            .unwrap();
-        let mut client_properties = PeerProperties::default().with_socket_type(SocketType::Push);
-        client_properties.identity = Some(Bytes::from_static(b"client"));
-        for name in ["User-Id", "user-id", "Role", "role"] {
-            client_properties.add(name, Bytes::from_static(b"forged"));
-        }
-        let step = server
-            .on_command(
-                Command::Unknown {
-                    name: Bytes::from_static(b"INITIATE"),
-                    body: Bytes::from(command::encode_properties(&client_properties)),
-                },
-                &mut out,
-            )
-            .unwrap();
-        let MechanismStep::Complete { peer_properties } = step else {
-            panic!("expected completed handshake");
-        };
+        let peer_properties = complete_forged_handshake(&mut server);
+
         assert_eq!(
             peer_properties.authentication.user_id.as_deref(),
             Some(b"alice".as_slice())
@@ -562,6 +531,7 @@ mod tests {
             peer_properties.authentication.username.as_deref(),
             Some("alice")
         );
+        // Forged local-only names are dropped; authenticator values win.
         assert_eq!(
             peer_properties.other,
             vec![
@@ -569,6 +539,46 @@ mod tests {
                 ("Role".into(), Bytes::from_static(b"administrator")),
             ]
         );
+    }
+
+    /// Run HELLO and INITIATE as `alice`, whose INITIATE forges
+    /// `User-Id` and `Role`. Returns the server's view of the client.
+    fn complete_forged_handshake(server: &mut PlainMechanism) -> PeerProperties {
+        let mut out = Vec::new();
+        server
+            .start(
+                &mut out,
+                PeerProperties::default().with_socket_type(SocketType::Pull),
+            )
+            .unwrap();
+        server
+            .on_command(
+                Command::Unknown {
+                    name: Bytes::from_static(b"HELLO"),
+                    body: encode_hello("alice", "secret").unwrap(),
+                },
+                &mut out,
+            )
+            .unwrap();
+
+        let mut client_properties = PeerProperties::default().with_socket_type(SocketType::Push);
+        client_properties.identity = Some(Bytes::from_static(b"client"));
+        for name in ["User-Id", "user-id", "Role", "role"] {
+            client_properties.add(name, Bytes::from_static(b"forged"));
+        }
+        let step = server
+            .on_command(
+                Command::Unknown {
+                    name: Bytes::from_static(b"INITIATE"),
+                    body: Bytes::from(command::encode_properties(&client_properties)),
+                },
+                &mut out,
+            )
+            .unwrap();
+        let MechanismStep::Complete { peer_properties } = step else {
+            panic!("expected completed handshake");
+        };
+        peer_properties
     }
 
     #[test]

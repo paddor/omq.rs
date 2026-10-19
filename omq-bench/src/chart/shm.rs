@@ -6,7 +6,9 @@ use std::path::Path;
 use plotters::style::RGBColor;
 use serde_json::Value;
 
-use super::common::{self, FairnessEntry, FairnessMap, Impl, ValMap};
+use super::common::{
+    self, ChartSpec, CpuColumns, FairnessEntry, FairnessMap, Impl, ThroughputRow, ValMap,
+};
 use crate::jsonl;
 
 mod point_to_point;
@@ -112,8 +114,24 @@ fn storage_matches(row: &Value, size: u64, latency: bool) -> bool {
 }
 
 pub(super) fn verified(row: &Value, implementation: &str, size: u64, readers: u64) -> bool {
+    if setup_rejected(row, implementation, size, readers) {
+        return false;
+    }
+    let Some(rounds) = row["rounds"].as_array().filter(|rounds| rounds.len() == 3) else {
+        return false;
+    };
+    rounds
+        .iter()
+        .enumerate()
+        .all(|(index, round)| round_verified(round, index, readers))
+}
+
+/// Rejects rows from another setup. Inproc runs in one process across all
+/// four CPUs; the other transports pin the publisher and the shared
+/// receiver process to two CPUs each.
+fn setup_rejected(row: &Value, implementation: &str, size: u64, readers: u64) -> bool {
     let inproc = implementation == "inproc";
-    if row["kind"] != "shm_pubsub_verified"
+    row["kind"] != "shm_pubsub_verified"
         || row["profiled"] == true
         || row["impl"] != implementation
         || row["msg_size"] != size
@@ -139,46 +157,47 @@ pub(super) fn verified(row: &Value, implementation: &str, size: u64, readers: u6
         || row["warmup_seconds"] != 1
         || row["seconds"] != 3
         || !storage_matches(row, size, false)
-    {
-        return false;
-    }
-    let Some(rounds) = row["rounds"].as_array().filter(|rounds| rounds.len() == 3) else {
+}
+
+/// Round `index` (zero-based) is valid when every reader got every offered
+/// message intact and its rate is consistent with the measured times.
+fn round_verified(round: &Value, index: usize, readers: u64) -> bool {
+    let offered = round["offered"].as_u64().unwrap_or(0);
+    let Some(counts) = round["reader_counts"].as_array() else {
         return false;
     };
-    rounds.iter().enumerate().all(|(index, round)| {
-        let offered = round["offered"].as_u64().unwrap_or(0);
-        let Some(counts) = round["reader_counts"].as_array() else {
-            return false;
-        };
-        let Some(times) = round["reader_elapsed"].as_array() else {
-            return false;
-        };
-        let sender = round["sender_elapsed"].as_f64().unwrap_or(0.0);
-        let elapsed = round["elapsed"].as_f64().unwrap_or(0.0);
-        let rate = round["msgs_s"].as_f64().unwrap_or(0.0);
-        let slowest = times
+    let Some(times) = round["reader_elapsed"].as_array() else {
+        return false;
+    };
+    let sender = round["sender_elapsed"].as_f64().unwrap_or(0.0);
+    let elapsed = round["elapsed"].as_f64().unwrap_or(0.0);
+    let rate = round["msgs_s"].as_f64().unwrap_or(0.0);
+
+    // The round ends with its slowest side, so elapsed must equal the max of
+    // the sender and reader times.
+    let slowest = times
+        .iter()
+        .filter_map(Value::as_f64)
+        .fold(sender, f64::max);
+
+    round["round"] == index + 1
+        && offered > 0
+        && counts.len() as u64 == readers
+        && counts.iter().all(|count| count.as_u64() == Some(offered))
+        && times.len() as u64 == readers
+        && times
             .iter()
-            .filter_map(Value::as_f64)
-            .fold(sender, f64::max);
-        round["round"] == index + 1
-            && offered > 0
-            && counts.len() as u64 == readers
-            && counts.iter().all(|count| count.as_u64() == Some(offered))
-            && times.len() as u64 == readers
-            && times
-                .iter()
-                .all(|time| time.as_f64().is_some_and(|v| v.is_finite() && v > 0.0))
-            && sender.is_finite()
-            && sender >= 3.0
-            && elapsed.is_finite()
-            && (elapsed - slowest).abs() < 1e-6
-            && rate.is_finite()
-            && rate > 0.0
-            && (rate - offered as f64 / elapsed).abs() < rate * 1e-6
-            && ["missing", "duplicates", "gaps", "corrupt"]
-                .iter()
-                .all(|field| round[field] == 0)
-    })
+            .all(|time| time.as_f64().is_some_and(|v| v.is_finite() && v > 0.0))
+        && sender.is_finite()
+        && sender >= 3.0
+        && elapsed.is_finite()
+        && (elapsed - slowest).abs() < 1e-6
+        && rate.is_finite()
+        && rate > 0.0
+        && (rate - offered as f64 / elapsed).abs() < rate * 1e-6
+        && ["missing", "duplicates", "gaps", "corrupt"]
+            .iter()
+            .all(|field| round[field] == 0)
 }
 
 fn find<'a>(rows: &'a [Value], implementation: &str, size: u64, readers: u64) -> Option<&'a Value> {
@@ -291,6 +310,46 @@ fn generate_pubsub(cache: &Path, directory: &Path, cached_baselines: bool) -> Ch
     if cohorts.is_empty() {
         return Ok(());
     }
+    let selected = select_rows(&cohorts, cached_baselines)?;
+
+    let panels = build_panels(&selected);
+    let rows: Vec<ThroughputRow<'_>> = panels
+        .iter()
+        .map(|(readers, bandwidth, messages, spread)| ThroughputRow {
+            peers: *readers,
+            tput: bandwidth,
+            msgs: messages,
+            fairness: Some(spread),
+        })
+        .collect();
+    let path = directory.join("pubsub.svg");
+    let spec = ChartSpec {
+        out_path: &path,
+        title: "RADIO/DISH throughput, inproc / IPC / SHM",
+        sizes: SIZES,
+        impls: IMPLS,
+    };
+    let columns = CpuColumns {
+        cpu: &BTreeMap::new(),
+        snd_label: "",
+        rcv_label: "",
+    };
+
+    common::draw_multirow_throughput(
+        &spec,
+        &rows,
+        &columns,
+        &|readers| format!("{readers} subscribers"),
+        hardware_subtitle().as_deref(),
+    )?;
+    eprintln!("Written: {}", path.display());
+    Ok(())
+}
+
+/// Rows of the newest complete cohort per implementation group and size
+/// block. With cached baselines, inproc/IPC and SHM may come from different
+/// runs, and so may sizes below and above the large-pool threshold.
+fn select_rows(cohorts: &Cohorts, cached_baselines: bool) -> ChartResult<Vec<Value>> {
     let missing = "missing complete SHM comparison cohort; run scripts/run_shm_pubsub.rb";
     let groups = if cached_baselines {
         vec![&IMPLS[..2], &IMPLS[2..]]
@@ -298,9 +357,10 @@ fn generate_pubsub(cache: &Path, directory: &Path, cached_baselines: bool) -> Ch
         vec![IMPLS]
     };
     let mut selected = Vec::new();
+
     for implementations in groups {
         for sizes in size_blocks(SIZES, cached_baselines) {
-            let cohort = latest_complete(&cohorts, implementations, sizes).ok_or(missing)?;
+            let cohort = latest_complete(cohorts, implementations, sizes).ok_or(missing)?;
             eprintln!(
                 "SHM pubsub: implementations={}, sizes={}..{}, run={}, binary={}",
                 implementations
@@ -328,28 +388,8 @@ fn generate_pubsub(cache: &Path, directory: &Path, cached_baselines: bool) -> Ch
             );
         }
     }
-    let panels = build_panels(&selected);
-    let rows: Vec<_> = panels
-        .iter()
-        .map(|(readers, bandwidth, messages, _)| (*readers, bandwidth, messages))
-        .collect();
-    let spread: Vec<_> = panels.iter().map(|(_, _, _, spread)| spread).collect();
-    let path = directory.join("pubsub.svg");
-    common::draw_multirow_throughput(
-        &path,
-        "RADIO/DISH throughput, inproc / IPC / SHM",
-        &rows,
-        SIZES,
-        IMPLS,
-        &BTreeMap::new(),
-        &|readers| format!("{readers} subscribers"),
-        "",
-        "",
-        Some(&spread),
-        hardware_subtitle().as_deref(),
-    )?;
-    eprintln!("Written: {}", path.display());
-    Ok(())
+
+    Ok(selected)
 }
 
 #[cfg(test)]

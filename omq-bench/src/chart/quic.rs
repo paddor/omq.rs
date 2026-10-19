@@ -9,8 +9,8 @@ use std::collections::BTreeMap;
 use plotters::style::RGBColor;
 
 use super::common::{
-    self, C_OMQ_1T, C_OMQ_2T, COMPARISON_SIZES, CpuData, FairnessMap, Impl, LatencyMap, ValMap,
-    draw_latency_single_panel, draw_multirow_throughput,
+    self, C_OMQ_1T, C_OMQ_2T, COMPARISON_SIZES, ChartSpec, CpuColumns, CpuData, FairnessMap, Impl,
+    LatencyMap, ThroughputRow, ValMap, draw_latency_single_panel, draw_multirow_throughput,
     draw_throughput_dual_panel_fixed_2m_msgs_with_versions, load_fairness, load_latency, load_tput,
     merge_cpu_data, out_dir,
 };
@@ -138,21 +138,56 @@ fn load_latency_all(impls: &[Impl]) -> (LatencyMap, BTreeMap<String, CpuData>) {
     (lat, cpu)
 }
 
-fn generate_multi_peer(
-    kind: &str,
-    file: &str,
-    title: &str,
-    row_title: &dyn Fn(u64) -> String,
-    (snd_label, rcv_label): (&str, &str),
+/// One multi-peer chart: a row per entry in `PEER_COUNTS`.
+struct MultiPeerChart {
+    kind: &'static str,
+    file: &'static str,
+    title: &'static str,
+    row_title: fn(u64) -> String,
+    snd_label: &'static str,
+    rcv_label: &'static str,
+    /// Draw per-peer spread whiskers.
     with_fairness: bool,
-) {
+}
+
+const MULTI_PEER_CHARTS: &[MultiPeerChart] = &[
+    MultiPeerChart {
+        kind: "pub_sub",
+        file: "pubsub.svg",
+        title: "PUB/SUB throughput, CURVE/TCP vs QUIC loopback, 2-process",
+        row_title: |peers| format!("{peers} subscribers"),
+        snd_label: "snd CPU%",
+        rcv_label: "",
+        with_fairness: false,
+    },
+    MultiPeerChart {
+        kind: "fan_out",
+        file: "fanout.svg",
+        title: "PUSH fan-out, CURVE/TCP vs QUIC loopback, 2-process",
+        row_title: |peers| format!("{peers} peers"),
+        snd_label: "push CPU%",
+        rcv_label: "pull CPU%",
+        with_fairness: true,
+    },
+    MultiPeerChart {
+        kind: "fan_in",
+        file: "fanin.svg",
+        title: "PUSH fan-in, CURVE/TCP vs QUIC loopback, 2-process",
+        row_title: |peers| format!("{peers} peers"),
+        snd_label: "push CPU%",
+        rcv_label: "pull CPU%",
+        with_fairness: true,
+    },
+];
+
+fn generate_multi_peer(chart: &MultiPeerChart) {
     #[expect(clippy::type_complexity)]
     let mut panel_data: Vec<(u64, ValMap, ValMap, BTreeMap<String, CpuData>, FairnessMap)> =
         Vec::new();
     for &peers in PEER_COUNTS {
-        let (tput, msgs, cpu) = load_tput_all(kind, Some(peers), MULTI_PEER_IMPLS);
-        let fair = if with_fairness {
-            load_fairness_all(kind, Some(peers), MULTI_PEER_IMPLS)
+        let (tput, msgs, cpu) = load_tput_all(chart.kind, Some(peers), MULTI_PEER_IMPLS);
+        let fair = if chart.with_fairness {
+            load_fairness_all(chart.kind, Some(peers), MULTI_PEER_IMPLS)
         } else {
             FairnessMap::new()
         };
@@ -163,24 +198,35 @@ fn generate_multi_peer(
     if panel_data.is_empty() {
         return;
     }
+
     let merged_cpu = merge_cpu_data(panel_data.iter().map(|(_, _, _, cpu, _)| cpu));
-    let rows: Vec<(u64, &ValMap, &ValMap)> = panel_data
+    let rows: Vec<ThroughputRow<'_>> = panel_data
         .iter()
-        .map(|(p, t, m, _, _)| (*p, t, m))
+        .map(|(peers, tput, msgs, _, fair)| ThroughputRow {
+            peers: *peers,
+            tput,
+            msgs,
+            fairness: chart.with_fairness.then_some(fair),
+        })
         .collect();
-    let fair_refs: Vec<&FairnessMap> = panel_data.iter().map(|(_, _, _, _, f)| f).collect();
-    let out = out_dir().join("quic").join(file);
+    let out = out_dir().join("quic").join(chart.file);
+    let spec = ChartSpec {
+        out_path: &out,
+        title: chart.title,
+        sizes: COMPARISON_SIZES,
+        impls: MULTI_PEER_IMPLS,
+    };
+    let columns = CpuColumns {
+        cpu: &merged_cpu,
+        snd_label: chart.snd_label,
+        rcv_label: chart.rcv_label,
+    };
+
     draw_multirow_throughput(
-        &out,
-        title,
+        &spec,
         &rows,
-        COMPARISON_SIZES,
-        MULTI_PEER_IMPLS,
-        &merged_cpu,
-        row_title,
-        snd_label,
-        rcv_label,
-        with_fairness.then_some(fair_refs.as_slice()),
+        &columns,
+        &chart.row_title,
         super::common::detect_hardware().as_deref(),
     )
     .expect("draw QUIC multi-peer chart");
@@ -194,59 +240,37 @@ pub(crate) fn generate() {
     let (tput, msgs, cpu) = load_tput_all("throughput", None, SINGLE_PEER_IMPLS);
     if !tput.is_empty() {
         let out = dir.join("pushpull.svg");
-        draw_throughput_dual_panel_fixed_2m_msgs_with_versions(
-            &out,
-            "PUSH/PULL throughput, CURVE/TCP vs QUIC loopback, 2-process",
-            TPUT_SIZES,
-            SINGLE_PEER_IMPLS,
-            &tput,
-            &msgs,
-            &cpu,
-            "snd CPU%",
-            "rcv CPU%",
-        )
-        .expect("draw QUIC pushpull chart");
+        let spec = ChartSpec {
+            out_path: &out,
+            title: "PUSH/PULL throughput, CURVE/TCP vs QUIC loopback, 2-process",
+            sizes: TPUT_SIZES,
+            impls: SINGLE_PEER_IMPLS,
+        };
+        let columns = CpuColumns {
+            cpu: &cpu,
+            snd_label: "snd CPU%",
+            rcv_label: "rcv CPU%",
+        };
+        draw_throughput_dual_panel_fixed_2m_msgs_with_versions(&spec, &tput, &msgs, &columns)
+            .expect("draw QUIC pushpull chart");
         eprintln!("Written: {}", out.display());
     }
 
     let (lat, cpu) = load_latency_all(SINGLE_PEER_IMPLS);
     if !lat.is_empty() {
         let out = dir.join("reqrep.svg");
-        draw_latency_single_panel(
-            &out,
-            "REQ/REP latency, CURVE/TCP vs QUIC loopback, 2-process",
-            LAT_SIZES,
-            SINGLE_PEER_IMPLS,
-            &lat,
-            &cpu,
-            common::auto_lat_range(&lat),
-        )
-        .expect("draw QUIC reqrep chart");
+        let spec = ChartSpec {
+            out_path: &out,
+            title: "REQ/REP latency, CURVE/TCP vs QUIC loopback, 2-process",
+            sizes: LAT_SIZES,
+            impls: SINGLE_PEER_IMPLS,
+        };
+        draw_latency_single_panel(&spec, &lat, &cpu, common::auto_lat_range(&lat))
+            .expect("draw QUIC reqrep chart");
         eprintln!("Written: {}", out.display());
     }
 
-    generate_multi_peer(
-        "pub_sub",
-        "pubsub.svg",
-        "PUB/SUB throughput, CURVE/TCP vs QUIC loopback, 2-process",
-        &|peers| format!("{peers} subscribers"),
-        ("snd CPU%", ""),
-        false,
-    );
-    generate_multi_peer(
-        "fan_out",
-        "fanout.svg",
-        "PUSH fan-out, CURVE/TCP vs QUIC loopback, 2-process",
-        &|peers| format!("{peers} peers"),
-        ("push CPU%", "pull CPU%"),
-        true,
-    );
-    generate_multi_peer(
-        "fan_in",
-        "fanin.svg",
-        "PUSH fan-in, CURVE/TCP vs QUIC loopback, 2-process",
-        &|peers| format!("{peers} peers"),
-        ("push CPU%", "pull CPU%"),
-        true,
-    );
+    for chart in MULTI_PEER_CHARTS {
+        generate_multi_peer(chart);
+    }
 }

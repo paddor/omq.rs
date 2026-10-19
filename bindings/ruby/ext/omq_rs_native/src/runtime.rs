@@ -112,16 +112,14 @@ pub struct Materialized {
     pub recv_notify: Arc<PipeNotify>,
     pub send_notify: Arc<PipeNotify>,
     pub recv_space: Arc<tokio::sync::Notify>,
-    pub send_pump: JoinHandle<()>,
     pub send_waiting: tokio::sync::watch::Sender<bool>,
-    pub recv_pump: JoinHandle<()>,
 
     pub monitor_rx: flume::Receiver<MonitorEventData>,
     pub monitor_notify: Arc<PipeNotify>,
     pub peer_connected_notify: Arc<PipeNotify>,
     pub all_peers_gone_notify: Arc<PipeNotify>,
     pub subscriber_joined_notify: Arc<PipeNotify>,
-    pub monitor_pump: JoinHandle<()>,
+    pub tasks: SocketTasks,
 }
 
 #[derive(Clone)]
@@ -138,17 +136,24 @@ pub enum MonitorValue {
     Text(String),
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "one exhaustive match keeps monitor event conversion auditable"
-)]
+/// Map a monitor event to the Ruby-facing name, endpoint, and detail pairs.
+/// Event kinds this binding does not know map to "unknown".
 fn convert_monitor_event(event: &omq_tokio::MonitorEvent) -> MonitorEventData {
-    use omq_tokio::MonitorEvent::{
-        Accepted, Closed, ConnectDelayed, Connected, Disconnected, HandshakeFailed,
-        HandshakeSucceeded, JoinReceived, LeaveReceived, Listening, SubscribeReceived,
-        UnsubscribeReceived,
-    };
-    match event {
+    connection_event(event)
+        .or_else(|| attempt_event(event))
+        .or_else(|| subscription_event(event))
+        .unwrap_or_else(|| MonitorEventData {
+            event_type: "unknown",
+            endpoint: None,
+            detail: vec![],
+        })
+}
+
+/// Listener and connection lifecycle events.
+fn connection_event(event: &omq_tokio::MonitorEvent) -> Option<MonitorEventData> {
+    use omq_tokio::MonitorEvent::{Accepted, Connected, Disconnected, Listening};
+
+    let data = match event {
         Listening { endpoint } => MonitorEventData {
             event_type: "listening",
             endpoint: Some(endpoint.to_string()),
@@ -172,6 +177,29 @@ fn convert_monitor_event(event: &omq_tokio::MonitorEvent) -> MonitorEventData {
             endpoint: Some(endpoint.to_string()),
             detail: vec![("connection_id", MonitorValue::Integer(*connection_id))],
         },
+        Disconnected {
+            endpoint,
+            peer,
+            reason,
+        } => MonitorEventData {
+            event_type: "disconnected",
+            endpoint: Some(endpoint.to_string()),
+            detail: vec![
+                ("reason", MonitorValue::Text(format!("{reason:?}"))),
+                ("connection_id", MonitorValue::Integer(peer.connection_id)),
+            ],
+        },
+        _ => return None,
+    };
+
+    Some(data)
+}
+
+/// Connect retries and handshake outcomes.
+fn attempt_event(event: &omq_tokio::MonitorEvent) -> Option<MonitorEventData> {
+    use omq_tokio::MonitorEvent::{ConnectDelayed, HandshakeFailed, HandshakeSucceeded};
+
+    let data = match event {
         HandshakeSucceeded { endpoint, peer } => {
             let mut detail = vec![("connection_id", MonitorValue::Integer(peer.connection_id))];
             if let Some(ref ident) = peer.peer_identity
@@ -207,18 +235,19 @@ fn convert_monitor_event(event: &omq_tokio::MonitorEvent) -> MonitorEventData {
                 ("attempt", MonitorValue::Integer(u64::from(*attempt))),
             ],
         },
-        Disconnected {
-            endpoint,
-            peer,
-            reason,
-        } => MonitorEventData {
-            event_type: "disconnected",
-            endpoint: Some(endpoint.to_string()),
-            detail: vec![
-                ("reason", MonitorValue::Text(format!("{reason:?}"))),
-                ("connection_id", MonitorValue::Integer(peer.connection_id)),
-            ],
-        },
+        _ => return None,
+    };
+
+    Some(data)
+}
+
+/// Subscription and group traffic, plus socket close.
+fn subscription_event(event: &omq_tokio::MonitorEvent) -> Option<MonitorEventData> {
+    use omq_tokio::MonitorEvent::{
+        Closed, JoinReceived, LeaveReceived, SubscribeReceived, UnsubscribeReceived,
+    };
+
+    let data = match event {
         SubscribeReceived { prefix } => MonitorEventData {
             event_type: "subscribe_received",
             endpoint: None,
@@ -244,12 +273,10 @@ fn convert_monitor_event(event: &omq_tokio::MonitorEvent) -> MonitorEventData {
             endpoint: None,
             detail: vec![],
         },
-        _ => MonitorEventData {
-            event_type: "unknown",
-            endpoint: None,
-            detail: vec![],
-        },
-    }
+        _ => return None,
+    };
+
+    Some(data)
 }
 
 async fn push_to_ring(
@@ -279,28 +306,39 @@ async fn push_to_ring(
     }
 }
 
-#[expect(clippy::too_many_arguments)]
+/// Pump ends and wake signals between the Ruby-facing rings and the socket.
+pub struct PumpChannels {
+    pub send_cons: yring::AsyncConsumer<omq_tokio::Message>,
+    pub send_notify: Arc<PipeNotify>,
+    pub send_waiting: tokio::sync::watch::Sender<bool>,
+    pub recv_prod: yring::Producer<omq_tokio::Message>,
+    pub recv_notify: Arc<PipeNotify>,
+    pub recv_space: Arc<tokio::sync::Notify>,
+}
+
+/// Where the monitor pump reports events and one-shot peer milestones.
+pub struct MonitorSinks {
+    pub events: flume::Sender<MonitorEventData>,
+    pub notify: Arc<PipeNotify>,
+    pub peer_connected: Arc<PipeNotify>,
+    pub all_peers_gone: Arc<PipeNotify>,
+    pub subscriber_joined: Arc<PipeNotify>,
+}
+
+/// Background tasks owned by one materialized socket.
+pub struct SocketTasks {
+    pub send: JoinHandle<()>,
+    pub recv: JoinHandle<()>,
+    pub monitor: JoinHandle<()>,
+}
+
 pub fn materialize(
     io_threads: usize,
     socket_type: omq_tokio::SocketType,
     options: omq_tokio::Options,
-    send_cons: yring::AsyncConsumer<omq_tokio::Message>,
-    mut recv_prod: yring::Producer<omq_tokio::Message>,
-    recv_notify: Arc<PipeNotify>,
-    send_notify: Arc<PipeNotify>,
-    send_waiting: tokio::sync::watch::Sender<bool>,
-    recv_space: Arc<tokio::sync::Notify>,
-    monitor_tx: flume::Sender<MonitorEventData>,
-    monitor_notify: Arc<PipeNotify>,
-    peer_connected_notify: Arc<PipeNotify>,
-    all_peers_gone_notify: Arc<PipeNotify>,
-    subscriber_joined_notify: Arc<PipeNotify>,
-) -> (
-    Arc<InnerSocket>,
-    JoinHandle<()>,
-    JoinHandle<()>,
-    JoinHandle<()>,
-) {
+    pumps: PumpChannels,
+    monitor: MonitorSinks,
+) -> (Arc<InnerSocket>, SocketTasks) {
     // Construction only spawns tasks. Keep the GVL while the caller holds
     // its materialization lock; waiting without it would let close take
     // the GVL and block on that same lock.
@@ -308,111 +346,148 @@ pub fn materialize(
     let _guard = handle.enter();
     let sock = Arc::new(InnerSocket::new(socket_type, options));
 
-    let s = sock.clone();
-    let sn = send_notify;
-    let send_pump = tokio::spawn(async move {
-        if socket_type == omq_tokio::SocketType::Rep {
-            // REP submits at application send. Watch only failed sends;
-            // a successful retry cancels an obsolete capacity wait.
-            watch_rep_send_capacity(&s, &send_waiting, &sn).await;
-            return;
-        }
-        let mut send_cons = send_cons;
-        let mut budget = omq_proto::flow::DrainBudget::new(256, 1024 * 1024);
-        while let Some(msg) = futures::StreamExt::next(&mut send_cons).await {
-            let byte_len = msg.byte_len();
-            send_cons.release();
-            sn.notify();
-            let _ = s.send(msg).await;
-            if !budget.account(byte_len) {
-                budget.reset();
-                tokio::task::yield_now().await;
-            }
-        }
+    let send_pump = tokio::spawn(run_send_pump(
+        sock.clone(),
+        pumps.send_cons,
+        pumps.send_notify,
+        pumps.send_waiting,
+    ));
+    let recv_pump = tokio::spawn(run_recv_pump(
+        sock.clone(),
+        pumps.recv_prod,
+        pumps.recv_notify,
+        pumps.recv_space,
+    ));
+
+    // Subscribe here, not inside the task: the broadcast receiver keeps
+    // events emitted before the task first runs.
+    let stream = sock.monitor();
+    let monitor_pump = tokio::spawn(run_monitor_pump(sock.clone(), stream, monitor));
+
+    let tasks = SocketTasks {
+        send: send_pump,
+        recv: recv_pump,
+        monitor: monitor_pump,
+    };
+    (sock, tasks)
+}
+
+/// Feed queued Ruby sends to the socket with a drain budget. REP instead
+/// only watches send capacity.
+async fn run_send_pump(
+    s: Arc<InnerSocket>,
+    mut send_cons: yring::AsyncConsumer<omq_tokio::Message>,
+    sn: Arc<PipeNotify>,
+    send_waiting: tokio::sync::watch::Sender<bool>,
+) {
+    if s.socket_type() == omq_tokio::SocketType::Rep {
+        // REP submits at application send. Watch only failed sends;
+        // a successful retry cancels an obsolete capacity wait.
+        watch_rep_send_capacity(&s, &send_waiting, &sn).await;
+        return;
+    }
+
+    let mut budget = omq_proto::flow::DrainBudget::new(256, 1024 * 1024);
+    while let Some(msg) = futures::StreamExt::next(&mut send_cons).await {
+        let byte_len = msg.byte_len();
+        // Release the ring slot before the send so Ruby can refill while
+        // this message is in flight.
+        send_cons.release();
         sn.notify();
-    });
+        let _ = s.send(msg).await;
+        if !budget.account(byte_len) {
+            budget.reset();
+            tokio::task::yield_now().await;
+        }
+    }
+    sn.notify();
+}
 
-    let s = sock.clone();
-    let rn = recv_notify;
-    let rs = recv_space;
-    let recv_pump = tokio::spawn(async move {
-        loop {
-            match s.recv_for_external_recv().await {
-                Ok(msg) => {
-                    let mut budget = omq_proto::flow::DrainBudget::WORKER;
-                    let mut more = budget.account(msg.byte_len());
-                    push_to_ring(&mut recv_prod, msg, &rs).await;
+/// Move received messages into the Ruby ring in budgeted batches, waking
+/// the reader once per batch.
+async fn run_recv_pump(
+    s: Arc<InnerSocket>,
+    mut recv_prod: yring::Producer<omq_tokio::Message>,
+    rn: Arc<PipeNotify>,
+    rs: Arc<tokio::sync::Notify>,
+) {
+    loop {
+        match s.recv_for_external_recv().await {
+            Ok(msg) => {
+                let mut budget = omq_proto::flow::DrainBudget::WORKER;
+                let mut more = budget.account(msg.byte_len());
+                push_to_ring(&mut recv_prod, msg, &rs).await;
 
-                    while more && !recv_prod.is_full() {
-                        match s.try_recv_for_external_recv() {
-                            Ok(msg) => {
-                                more = budget.account(msg.byte_len());
-                                push_to_ring(&mut recv_prod, msg, &rs).await;
-                            }
-                            Err(_) => break,
+                while more && !recv_prod.is_full() {
+                    match s.try_recv_for_external_recv() {
+                        Ok(msg) => {
+                            more = budget.account(msg.byte_len());
+                            push_to_ring(&mut recv_prod, msg, &rs).await;
                         }
-                    }
-
-                    recv_prod.flush();
-                    rn.force_wake();
-                    if !more {
-                        tokio::task::yield_now().await;
+                        Err(_) => break,
                     }
                 }
-                Err(omq_tokio::Error::Closed) => break,
-                Err(_) => {}
-            }
-        }
-    });
 
-    let mut stream = sock.monitor();
-    let peer_ready_sock = sock.clone();
-    let monitor_pump = tokio::spawn(async move {
-        let mut peer_count: u32 = 0;
-        let mut had_peers = false;
-        let mut peer_connected_fired = false;
-        let mut subscriber_joined_fired = false;
-
-        loop {
-            match stream.recv().await {
-                Ok(event) => {
-                    match &event {
-                        omq_tokio::MonitorEvent::HandshakeSucceeded { .. } => {
-                            peer_count += 1;
-                            had_peers = true;
-                            if !peer_connected_fired {
-                                peer_connected_fired = true;
-                                let _ = peer_ready_sock.connections().await;
-                                peer_connected_notify.force_wake();
-                            }
-                        }
-                        omq_tokio::MonitorEvent::Disconnected { .. } => {
-                            peer_count = peer_count.saturating_sub(1);
-                            if had_peers && peer_count == 0 {
-                                all_peers_gone_notify.force_wake();
-                            }
-                        }
-                        omq_tokio::MonitorEvent::SubscribeReceived { .. }
-                        | omq_tokio::MonitorEvent::JoinReceived { .. }
-                            if !subscriber_joined_fired =>
-                        {
-                            subscriber_joined_fired = true;
-                            subscriber_joined_notify.force_wake();
-                        }
-                        _ => {}
-                    }
-
-                    let data = convert_monitor_event(&event);
-                    let _ = monitor_tx.try_send(data);
-                    monitor_notify.notify();
+                recv_prod.flush();
+                rn.force_wake();
+                if !more {
+                    tokio::task::yield_now().await;
                 }
-                Err(omq_tokio::MonitorRecvError::Lagged(_)) => {}
-                Err(_) => break,
             }
+            Err(omq_tokio::Error::Closed) => break,
+            Err(_) => {}
         }
-    });
+    }
+}
 
-    (sock, send_pump, recv_pump, monitor_pump)
+/// Forward monitor events to Ruby and fire the one-shot peer milestones.
+async fn run_monitor_pump(
+    peer_ready_sock: Arc<InnerSocket>,
+    mut stream: omq_tokio::MonitorStream,
+    sinks: MonitorSinks,
+) {
+    let mut peer_count: u32 = 0;
+    let mut had_peers = false;
+    let mut peer_connected_fired = false;
+    let mut subscriber_joined_fired = false;
+
+    loop {
+        match stream.recv().await {
+            Ok(event) => {
+                match &event {
+                    omq_tokio::MonitorEvent::HandshakeSucceeded { .. } => {
+                        peer_count += 1;
+                        had_peers = true;
+                        if !peer_connected_fired {
+                            peer_connected_fired = true;
+                            let _ = peer_ready_sock.connections().await;
+                            sinks.peer_connected.force_wake();
+                        }
+                    }
+                    omq_tokio::MonitorEvent::Disconnected { .. } => {
+                        peer_count = peer_count.saturating_sub(1);
+                        if had_peers && peer_count == 0 {
+                            sinks.all_peers_gone.force_wake();
+                        }
+                    }
+                    omq_tokio::MonitorEvent::SubscribeReceived { .. }
+                    | omq_tokio::MonitorEvent::JoinReceived { .. }
+                        if !subscriber_joined_fired =>
+                    {
+                        subscriber_joined_fired = true;
+                        sinks.subscriber_joined.force_wake();
+                    }
+                    _ => {}
+                }
+
+                let data = convert_monitor_event(&event);
+                let _ = sinks.events.try_send(data);
+                sinks.notify.notify();
+            }
+            Err(omq_tokio::MonitorRecvError::Lagged(_)) => {}
+            Err(_) => break,
+        }
+    }
 }
 
 async fn watch_rep_send_capacity(
@@ -436,15 +511,21 @@ async fn watch_rep_send_capacity(
     }
 }
 
+/// Stop the pumps and close the socket, giving queued sends up to the
+/// linger time (30 s when unset, at least 10 ms) to flush.
 pub fn destroy_socket(
     io_threads: usize,
     sock: Arc<InnerSocket>,
     send_prod: Mutex<yring::AsyncProducer<omq_tokio::Message>>,
-    mut send_pump: JoinHandle<()>,
-    recv_pump: JoinHandle<()>,
-    monitor_pump: JoinHandle<()>,
+    tasks: SocketTasks,
     linger: Option<Duration>,
 ) {
+    let SocketTasks {
+        send: mut send_pump,
+        recv: recv_pump,
+        monitor: monitor_pump,
+    } = tasks;
+
     recv_pump.abort();
     monitor_pump.abort();
     if sock.socket_type() == omq_tokio::SocketType::Rep {

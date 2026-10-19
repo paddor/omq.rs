@@ -543,30 +543,12 @@ async fn large_message_direct_read_survives_prefix_boundary_matrix() {
 
 #[tokio::test]
 async fn large_message_direct_read_matches_mixed_chunked_wire_reference() {
-    const LENGTHS: &[usize] = &[
-        16,
-        255,
-        256,
-        4095,
-        4096,
-        65_536,
-        128 * 1024 + 1,
-        632_558,
-        1024 * 1024,
-    ];
     const CASES: u64 = 24;
 
     for case in 0..CASES {
         let mut seed = 0x5151_F00D_ABCD_1234 ^ case;
         let (mut push, mut pull) = ready_push_pull_connections();
-        let mut expected = Vec::new();
-        for seq in 0..18u64 {
-            let len = LENGTHS[next_random(&mut seed) % LENGTHS.len()];
-            let payload = patterned_payload(len, (case << 8) | seq);
-            push.send_message(&Message::single(Bytes::from(payload.clone())))
-                .unwrap();
-            expected.push(payload);
-        }
+        let expected = queue_random_payloads(&mut push, &mut seed, case);
         let wire = Bytes::from(drain_transmit(&mut push));
         let config = PeerDriverConfig {
             large_message_threshold: 128 * 1024,
@@ -576,32 +558,15 @@ async fn large_message_direct_read_matches_mixed_chunked_wire_reference() {
         let mut cursor = 0usize;
         let mut got = Vec::new();
 
+        // Alternate codec input chunks with direct large-body reads.
         while cursor < wire.len() {
-            let chunk_len = match next_random(&mut seed) % 10 {
-                0 => 1,
-                1 => 2,
-                2 => 9,
-                3 => 17,
-                4 => 4096,
-                5 => 65_536,
-                6 => 128 * 1024,
-                7 => 128 * 1024 + 4,
-                8 => 9 + 632_558,
-                _ => (next_random(&mut seed) % (128 * 1024)) + 1,
-            };
-            let end = cursor.saturating_add(chunk_len).min(wire.len());
+            let end = cursor
+                .saturating_add(random_chunk_len(&mut seed))
+                .min(wire.len());
             pull.handle_input(wire.slice(cursor..end)).unwrap();
             cursor = end;
 
-            let read_caps = [
-                1 + (next_random(&mut seed) % 7),
-                31,
-                4093,
-                65_537,
-                131_071,
-                262_147,
-            ];
-            let mut reader = ScriptedReader::new(wire.slice(cursor..), read_caps);
+            let mut reader = ScriptedReader::new(wire.slice(cursor..), random_read_caps(&mut seed));
             handle_large_messages_test(&mut pull, &mut reader, &config, &mut last_input)
                 .await
                 .unwrap();
@@ -617,4 +582,57 @@ async fn large_message_direct_read_matches_mixed_chunked_wire_reference() {
         }
         assert_eq!(got, expected, "case={case}");
     }
+}
+
+/// Queue 18 patterned messages of random sizes around the large-message
+/// threshold. Returns their payloads in order.
+fn queue_random_payloads(push: &mut Connection, seed: &mut u64, case: u64) -> Vec<Vec<u8>> {
+    const LENGTHS: &[usize] = &[
+        16,
+        255,
+        256,
+        4095,
+        4096,
+        65_536,
+        128 * 1024 + 1,
+        632_558,
+        1024 * 1024,
+    ];
+
+    let mut expected = Vec::new();
+    for seq in 0..18u64 {
+        let len = LENGTHS[next_random(seed) % LENGTHS.len()];
+        let payload = patterned_payload(len, (case << 8) | seq);
+        push.send_message(&Message::single(Bytes::from(payload.clone())))
+            .unwrap();
+        expected.push(payload);
+    }
+    expected
+}
+
+/// Codec input chunk sizes that split frame headers and bodies at edges.
+fn random_chunk_len(seed: &mut u64) -> usize {
+    match next_random(seed) % 10 {
+        0 => 1,
+        1 => 2,
+        2 => 9,
+        3 => 17,
+        4 => 4096,
+        5 => 65_536,
+        6 => 128 * 1024,
+        7 => 128 * 1024 + 4,
+        8 => 9 + 632_558,
+        _ => (next_random(seed) % (128 * 1024)) + 1,
+    }
+}
+
+fn random_read_caps(seed: &mut u64) -> [usize; 6] {
+    [
+        1 + (next_random(seed) % 7),
+        31,
+        4093,
+        65_537,
+        131_071,
+        262_147,
+    ]
 }

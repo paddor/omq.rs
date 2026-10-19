@@ -1,6 +1,6 @@
 use super::*;
 use crate::engine::codec::CodecProfile;
-use crate::engine::framing::WireFraming;
+use crate::engine::transmit_slot::SlotConfig;
 use omq_proto::proto::transform::{CompressionKind, MessageDecoder, MessageEncoder};
 
 fn kinds() -> Vec<Option<CompressionKind>> {
@@ -41,24 +41,29 @@ fn worker(
     )
 }
 
+fn profile(kind: Option<CompressionKind>, options: &Options) -> Option<CodecProfile> {
+    kind.map(|kind| CodecProfile::new(kind, options))
+}
+
+/// Register a peer in codec group `group` subscribed to and joined on `topic`.
 fn add_peer(
     worker: &mut LaneWorker,
     id: u64,
     group: usize,
-    kind: Option<CompressionKind>,
-    options: &Options,
+    codec: Option<CodecProfile>,
     cap: usize,
 ) -> Arc<PeerTransmitSlot> {
-    let slot = PeerTransmitSlot::new(
+    let slot = PeerTransmitSlot::with_config(
         id,
-        kind.is_some(),
-        kind.map(|kind| CodecProfile::new(kind, options)),
-        None,
-        4096,
-        16384,
-        512 * 1024,
-        cap,
-        WireFraming::Zmtp,
+        SlotConfig {
+            has_transform: codec.is_some(),
+            codec_profile: codec,
+            arena_threshold: 4096,
+            arena_cap: 16384,
+            cap: 512 * 1024,
+            msg_cap: cap,
+            ..SlotConfig::default()
+        },
     );
     worker.handle_control(LaneControl::AddPeer {
         add: LanePeerAdd {
@@ -145,8 +150,8 @@ async fn arena_shares_encoding_counts_messages_and_stops_at_filter_changes() {
     for kind in kinds().into_iter().flatten() {
         let options = Options::default();
         let (mut worker, _) = worker(FanOutMode::SubscriptionPrefix, FanOutMutePolicy::DropNewest);
-        let first = add_peer(&mut worker, 1, 0, Some(kind), &options, 8);
-        let second = add_peer(&mut worker, 2, 0, Some(kind), &options, 8);
+        let first = add_peer(&mut worker, 1, 0, profile(Some(kind), &options), 8);
+        let second = add_peer(&mut worker, 2, 0, profile(Some(kind), &options), 8);
         let batch: Vec<_> = (0..12)
             .map(|index| LaneData::Dispatch(dispatch(format!("body-{index}").as_bytes())))
             .collect();
@@ -196,7 +201,7 @@ async fn arena_keeps_dictionary_shipment_per_peer_and_oldest_eviction_scalar() {
 
         for mute in [FanOutMutePolicy::DropNewest, FanOutMutePolicy::DropOldest] {
             let (mut worker, _) = worker(FanOutMode::SubscriptionPrefix, mute);
-            let slot = add_peer(&mut worker, 1, 0, Some(kind), &options, 16);
+            let slot = add_peer(&mut worker, 1, 0, profile(Some(kind), &options), 16);
             let mut decoder = decoder(Some(kind), &options);
             let mut touched = SmallVec::new();
             let batch = vec![LaneData::Dispatch(dispatch(b"common prefix body")); 4];
@@ -226,7 +231,7 @@ async fn raw_arenas_share_gathered_storage_without_losing_message_credit() {
     for kind in kinds().into_iter().flatten() {
         let options = Options::default().compression_threshold(usize::MAX);
         let (mut worker, _) = worker(FanOutMode::SubscriptionPrefix, FanOutMutePolicy::Block);
-        let slot = add_peer(&mut worker, 1, 0, Some(kind), &options, 64);
+        let slot = add_peer(&mut worker, 1, 0, profile(Some(kind), &options), 64);
         let batch: Vec<_> = (0..64)
             .map(|index| LaneData::Dispatch(dispatch(&vec![index; 512])))
             .collect();
@@ -272,8 +277,7 @@ async fn encodes_once_per_matched_group_per_lane_in_both_registration_orders() {
                                 &mut worker,
                                 index as u64,
                                 group,
-                                kinds[group],
-                                &options,
+                                profile(kinds[group], &options),
                                 16,
                             );
                             peers.push((slot, decoder(kinds[group], &options)));
@@ -313,7 +317,7 @@ async fn trained_dictionary_precedes_payload_once_and_is_sent_to_late_joins() {
             let (mut worker, _ctrl) = worker(FanOutMode::SubscriptionPrefix, policy);
             let mut peers: Vec<_> = (0..2)
                 .map(|id| {
-                    let slot = add_peer(&mut worker, id, 0, Some(kind), &options, 16);
+                    let slot = add_peer(&mut worker, id, 0, profile(Some(kind), &options), 16);
                     (slot, decoder(Some(kind), &options))
                 })
                 .collect();
@@ -331,7 +335,7 @@ async fn trained_dictionary_precedes_payload_once_and_is_sent_to_late_joins() {
                     );
                 }
             }
-            let slot = add_peer(&mut worker, 2, 0, Some(kind), &options, 16);
+            let slot = add_peer(&mut worker, 2, 0, profile(Some(kind), &options), 16);
             peers.push((slot, decoder(Some(kind), &options)));
             let publication = dispatch(b"orders orders orders orders orders orders orders orders");
             assert!(!worker.dispatch(&publication, &mut SmallVec::new()).await);
@@ -352,9 +356,9 @@ async fn nodrop_services_ready_groups_and_removal_discards_only_old_connection_o
     let options = Options::default();
     let kind = kinds().into_iter().flatten().next().unwrap();
     let (mut worker, ctrl) = worker(FanOutMode::SubscriptionPrefix, FanOutMutePolicy::Block);
-    let slow = add_peer(&mut worker, 0, 0, None, &options, 1);
-    let fast = add_peer(&mut worker, 1, 0, None, &options, 16);
-    let other = add_peer(&mut worker, 2, 1, Some(kind), &options, 16);
+    let slow = add_peer(&mut worker, 0, 0, None, 1);
+    let fast = add_peer(&mut worker, 1, 0, None, 16);
+    let other = add_peer(&mut worker, 2, 1, profile(Some(kind), &options), 16);
     assert_eq!(
         slow.try_push_pre_framed_no_signal(b"\x00\x03old"),
         TryFrameResult::Ok
@@ -372,16 +376,15 @@ async fn nodrop_services_ready_groups_and_removal_discards_only_old_connection_o
         receive(&other, &mut decoder(Some(kind), &options)),
         (vec![publication.msg.clone()], 0)
     );
-    let replacement = PeerTransmitSlot::new(
+    let replacement = PeerTransmitSlot::with_config(
         0,
-        false,
-        None,
-        None,
-        4096,
-        16384,
-        512 * 1024,
-        16,
-        WireFraming::Zmtp,
+        SlotConfig {
+            arena_threshold: 4096,
+            arena_cap: 16384,
+            cap: 512 * 1024,
+            msg_cap: 16,
+            ..SlotConfig::default()
+        },
     );
     ctrl.push(LaneControl::RemovePeer { peer_id: 0 });
     ctrl.push(LaneControl::AddPeer {
@@ -410,8 +413,14 @@ async fn shutdown_remains_reachable_while_a_dictionary_cannot_be_admitted() {
     use futures::FutureExt;
     let options = Options::default().compression_dict(Bytes::from_static(b"shared-dictionary"));
     let (mut worker, ctrl) = worker(FanOutMode::SubscriptionPrefix, FanOutMutePolicy::Block);
-    let slow = add_peer(&mut worker, 0, 0, Some(CompressionKind::Lz4), &options, 1);
-    let fast = add_peer(&mut worker, 1, 1, None, &Options::default(), 16);
+    let slow = add_peer(
+        &mut worker,
+        0,
+        0,
+        profile(Some(CompressionKind::Lz4), &options),
+        1,
+    );
+    let fast = add_peer(&mut worker, 1, 1, None, 16);
     slow.try_push_pre_framed_no_signal(b"\x00\x03old");
     let publication = dispatch(&[0x5a; 4096]);
     let mut touched = SmallVec::new();
@@ -449,8 +458,7 @@ async fn grouped_large_multipart_remains_atomic_with_all_mute_policies() {
                         &mut worker,
                         (group * 2 + copy) as u64,
                         group,
-                        kind,
-                        &options,
+                        profile(kind, &options),
                         16,
                     );
                     peers.push((slot, decoder(kind, &options)));

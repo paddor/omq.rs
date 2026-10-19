@@ -1,7 +1,7 @@
 use super::common::{
     self, C_LIBZMQ, C_OMQ_1T, C_OMQ_CT, C_OMQ_EXCLUSIVE, C_OMQ_SPIN, COMPARISON_LATENCY_SIZES,
-    COMPARISON_SIZES, Impl, draw_latency_single_panel, draw_throughput_dual_panel, load_latency,
-    load_tput, out_dir,
+    COMPARISON_SIZES, ChartSpec, CpuColumns, Impl, draw_latency_single_panel,
+    draw_throughput_dual_panel, load_latency, load_tput, out_dir,
 };
 
 const TCP_TPUT_IMPLS: &[Impl] = &[
@@ -178,32 +178,25 @@ pub(crate) fn generate() {
             let sub = dir.join("pushpull");
             std::fs::create_dir_all(&sub).ok();
             let out = sub.join(format!("{}.svg", tc.transport));
+            let title = format!("PUSH/PULL throughput: {}", tc.label);
+            let spec = ChartSpec {
+                out_path: &out,
+                title: &title,
+                sizes: COMPARISON_SIZES,
+                impls: tc.tput_impls,
+            };
+            let columns = CpuColumns {
+                cpu: &cpu,
+                snd_label: "snd CPU%",
+                rcv_label: "rcv CPU%",
+            };
+
             if tc.log_gbs {
-                common::draw_throughput_dual_panel_log_gbs(
-                    &out,
-                    &format!("PUSH/PULL throughput: {}", tc.label),
-                    COMPARISON_SIZES,
-                    tc.tput_impls,
-                    &tput,
-                    &msgs,
-                    &cpu,
-                    "snd CPU%",
-                    "rcv CPU%",
-                )
-                .expect("draw pushpull chart");
+                common::draw_throughput_dual_panel_log_gbs(&spec, &tput, &msgs, &columns)
+                    .expect("draw pushpull chart");
             } else {
-                draw_throughput_dual_panel(
-                    &out,
-                    &format!("PUSH/PULL throughput: {}", tc.label),
-                    COMPARISON_SIZES,
-                    tc.tput_impls,
-                    &tput,
-                    &msgs,
-                    &cpu,
-                    "snd CPU%",
-                    "rcv CPU%",
-                )
-                .expect("draw pushpull chart");
+                draw_throughput_dual_panel(&spec, &tput, &msgs, &columns)
+                    .expect("draw pushpull chart");
             }
             eprintln!("Written: {}", out.display());
         }
@@ -215,16 +208,14 @@ pub(crate) fn generate() {
             std::fs::create_dir_all(&sub).ok();
             let out = sub.join(format!("{}.svg", tc.transport));
             let range = common::auto_lat_range(&lat);
-            draw_latency_single_panel(
-                &out,
-                &format!("REQ/REP latency: {}", tc.label),
-                COMPARISON_LATENCY_SIZES,
-                tc.lat_impls,
-                &lat,
-                &cpu,
-                range,
-            )
-            .expect("draw reqrep chart");
+            let title = format!("REQ/REP latency: {}", tc.label);
+            let spec = ChartSpec {
+                out_path: &out,
+                title: &title,
+                sizes: COMPARISON_LATENCY_SIZES,
+                impls: tc.lat_impls,
+            };
+            draw_latency_single_panel(&spec, &lat, &cpu, range).expect("draw reqrep chart");
             eprintln!("Written: {}", out.display());
         }
     }

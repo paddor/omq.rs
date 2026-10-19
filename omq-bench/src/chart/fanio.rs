@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 
 use super::common::{
-    C_LIBZMQ, C_LIBZMQ_2T, C_OMQ_1T, C_OMQ_2T, COMPARISON_SIZES, CpuData, FairnessMap, Impl,
-    ValMap, draw_multirow_throughput, load_fairness, load_tput, merge_cpu_data, out_dir,
+    C_LIBZMQ, C_LIBZMQ_2T, C_OMQ_1T, C_OMQ_2T, COMPARISON_SIZES, ChartSpec, CpuColumns, CpuData,
+    FairnessMap, Impl, ThroughputRow, ValMap, draw_multirow_throughput, load_fairness, load_tput,
+    merge_cpu_data, out_dir,
 };
 
 const FANIO_IMPLS: &[Impl] = &[
@@ -54,26 +55,35 @@ fn generate_fanio(kind: &str, dir_name: &str, title_fn: &dyn Fn(u64) -> String) 
     }
 
     let merged_cpu = merge_cpu_data(panel_data.iter().map(|(_, _, _, cpu, _)| cpu));
-    let rows: Vec<(u64, &ValMap, &ValMap)> = panel_data
+    let rows: Vec<ThroughputRow<'_>> = panel_data
         .iter()
-        .map(|(p, t, m, _, _)| (*p, t, m))
+        .map(|(peers, tput, msgs, _, fair)| ThroughputRow {
+            peers: *peers,
+            tput,
+            msgs,
+            fairness: Some(fair),
+        })
         .collect();
-    let fair_refs: Vec<&FairnessMap> = panel_data.iter().map(|(_, _, _, _, f)| f).collect();
     let out = sub.join("tcp.svg");
     let chart_title = title_fn(0);
     let _ = kind;
-    let (snd_label, rcv_label) = ("push CPU%", "pull CPU%");
+    let spec = ChartSpec {
+        out_path: &out,
+        title: &chart_title,
+        sizes: COMPARISON_SIZES,
+        impls: FANIO_IMPLS,
+    };
+    let columns = CpuColumns {
+        cpu: &merged_cpu,
+        snd_label: "push CPU%",
+        rcv_label: "pull CPU%",
+    };
+
     draw_multirow_throughput(
-        &out,
-        &chart_title,
+        &spec,
         &rows,
-        COMPARISON_SIZES,
-        FANIO_IMPLS,
-        &merged_cpu,
+        &columns,
         &|peers| format!("{peers} peers"),
-        snd_label,
-        rcv_label,
-        Some(&fair_refs),
         super::common::detect_hardware().as_deref(),
     )
     .expect("draw fanio chart");

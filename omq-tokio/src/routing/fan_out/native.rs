@@ -113,23 +113,10 @@ impl Submitter {
             .masks
             .as_ref()
             .expect("blocking native fanout masks");
-        let mut pending = loop {
-            let seen = self.native_progress.generation();
-            let mask = masks.0.lock().expect("native fanout masks poisoned").pop();
-            if let Some(mut delivered) = mask {
-                delivered.fill(0);
-                break Pending {
-                    masks,
-                    progress: &self.native_progress,
-                    delivered,
-                };
-            }
-            tokio::select! {
-                biased;
-                () = self.lanes.admission_stopped() => return,
-                () = self.native_progress.changed_after(seen) => {}
-            }
+        let Some(mut pending) = self.take_native_mask(masks).await else {
+            return;
         };
+
         let mut remaining = snapshot.targets.len();
         while remaining != 0 {
             // Keep this generation for the entire scan, including budget
@@ -140,39 +127,15 @@ impl Submitter {
                 if self.lanes.admission_closed() {
                     return;
                 }
-                let mut budget = omq_proto::flow::DrainBudget::WORKER;
                 {
                     let _publishing = self.publish.lock().expect("fanout publish poisoned");
-                    while cursor < snapshot.targets.len() {
-                        let word = &mut pending.delivered[cursor / 64];
-                        let bit = 1 << (cursor % 64);
-                        let mut bytes = 0;
-                        if *word & bit == 0 {
-                            let PeerOutbound::Inbox(inbox) = &snapshot.targets[cursor] else {
-                                unreachable!("native fanout snapshot")
-                            };
-                            let result = inbox.try_send(
-                                crate::engine::PeerDriverData::SendMessage(message.clone()),
-                            );
-                            if !matches!(
-                                result,
-                                Err(tokio::sync::mpsc::error::TrySendError::Full(_))
-                            ) {
-                                *word |= bit;
-                                remaining -= 1;
-                            }
-                            bytes = message.byte_len();
-                        }
-                        cursor += 1;
-                        if !budget.account(bytes) {
-                            break;
-                        }
-                    }
+                    remaining -= pending.deliver_burst(&snapshot.targets, message, &mut cursor);
                 }
                 if cursor < snapshot.targets.len() {
                     tokio::task::yield_now().await;
                 }
             }
+
             if remaining != 0 {
                 tokio::select! {
                     biased;
@@ -181,6 +144,71 @@ impl Submitter {
                 }
             }
         }
+    }
+
+    /// Borrow a delivery mask from the bounded pool, waiting while every
+    /// mask is in use. `None` once admission stops.
+    async fn take_native_mask<'a>(&'a self, masks: &'a Masks) -> Option<Pending<'a>> {
+        loop {
+            // Read the generation before checking, so a release between the
+            // check and the wait still wakes us.
+            let seen = self.native_progress.generation();
+            let mask = masks.0.lock().expect("native fanout masks poisoned").pop();
+            if let Some(mut delivered) = mask {
+                delivered.fill(0);
+                return Some(Pending {
+                    masks,
+                    progress: &self.native_progress,
+                    delivered,
+                });
+            }
+
+            tokio::select! {
+                biased;
+                () = self.lanes.admission_stopped() => return None,
+                () = self.native_progress.changed_after(seen) => {}
+            }
+        }
+    }
+}
+
+impl Pending<'_> {
+    /// Offer `message` to undelivered targets from `cursor` on, within one
+    /// drain budget. Returns how many targets accepted it or are gone.
+    fn deliver_burst(
+        &mut self,
+        targets: &[PeerOutbound],
+        message: &Message,
+        cursor: &mut usize,
+    ) -> usize {
+        let mut budget = omq_proto::flow::DrainBudget::WORKER;
+        let mut done = 0;
+
+        while *cursor < targets.len() {
+            let word = &mut self.delivered[*cursor / 64];
+            let bit = 1 << (*cursor % 64);
+            let mut bytes = 0;
+            if *word & bit == 0 {
+                let PeerOutbound::Inbox(inbox) = &targets[*cursor] else {
+                    unreachable!("native fanout snapshot")
+                };
+                let result =
+                    inbox.try_send(crate::engine::PeerDriverData::SendMessage(message.clone()));
+                // Only a full inbox retries; a closed one counts as done.
+                if !matches!(result, Err(tokio::sync::mpsc::error::TrySendError::Full(_))) {
+                    *word |= bit;
+                    done += 1;
+                }
+                bytes = message.byte_len();
+            }
+
+            *cursor += 1;
+            if !budget.account(bytes) {
+                break;
+            }
+        }
+
+        done
     }
 }
 

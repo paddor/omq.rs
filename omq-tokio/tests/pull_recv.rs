@@ -35,6 +35,7 @@ async fn backpressure(kind: SocketType, endpoint: Endpoint) {
     } else {
         SocketType::Push
     };
+
     // Logical identities do not merge independent PULL sources.
     let a = context.socket(sender_kind, options().identity(Bytes::from_static(b"same")));
     let b = context.socket(sender_kind, options().identity(Bytes::from_static(b"same")));
@@ -43,6 +44,7 @@ async fn backpressure(kind: SocketType, endpoint: Endpoint) {
     connected(&a).await;
     connected(&b).await;
     receiver.wait_connected(2, DEADLINE).await.unwrap();
+
     a.send(Message::single("held")).await.unwrap();
     let (receipt, message) = tokio::time::timeout(DEADLINE, receiver.recv_with_receipt(None))
         .await
@@ -50,6 +52,8 @@ async fn backpressure(kind: SocketType, endpoint: Endpoint) {
         .unwrap();
     assert!(receipt.identity().is_none());
     let source = receipt.lane().unwrap().clone();
+
+    // Another handle cannot read past a live receipt on the same lane.
     let other_handle = receiver.clone();
     a.send(Message::single("next")).await.unwrap();
     assert!(matches!(
@@ -59,21 +63,12 @@ async fn backpressure(kind: SocketType, endpoint: Endpoint) {
     receiver.unshift(receipt, message).unwrap();
 
     // A large stream reaches sustained upstream pressure, beyond TCP buffers.
-    let payload = Bytes::from(vec![7; 1024 * 1024]);
-    let mut blocked = false;
-    for _ in 0..128 {
-        if tokio::time::timeout(
-            Duration::from_millis(100),
-            a.send(Message::single(payload.clone())),
-        )
-        .await
-        .is_err()
-        {
-            blocked = true;
-            break;
-        }
-    }
-    assert!(blocked, "paused source must eventually block its sender");
+    assert!(
+        send_until_blocked(&a).await,
+        "paused source must eventually block its sender"
+    );
+
+    // The other source still delivers, alone, while A's lane is held.
     b.send(Message::single("healthy")).await.unwrap();
     let mut batch = Vec::new();
     tokio::time::timeout(DEADLINE, other_handle.recv_many_into(16, &mut batch))
@@ -84,37 +79,65 @@ async fn backpressure(kind: SocketType, endpoint: Endpoint) {
     assert_eq!(batch[0].part_slice(0), Some(b"healthy".as_slice()));
     assert!(matches!(receiver.try_recv(), Err(Error::WouldBlock)));
 
+    // An unshifted message stays at the head of its lane, and the claim
+    // keeps untargeted receives from reading past it.
     for _ in 0..3 {
         let (receipt, message) = other_handle.try_recv_with_receipt(Some(&source)).unwrap();
         assert_eq!(message.part_slice(0), Some(b"held".as_slice()));
         assert!(matches!(receiver.try_recv(), Err(Error::WouldBlock)));
         other_handle.unshift(receipt, message).unwrap();
     }
+
     let (receipt, _) = receiver.try_recv_with_receipt(Some(&source)).unwrap();
     drop(receipt);
     assert_eq!(
         receive(&receiver).await.part_slice(0),
         Some(b"next".as_slice())
     );
-    // Drain a complete receive release window and confirm upstream resumes.
+    assert_upstream_resumes(&receiver, &a).await;
+
+    receiver.close().await.unwrap();
+    a.close().await.unwrap();
+    b.close().await.unwrap();
+}
+
+/// Sends 1 MiB messages from `a` until one stays pending for 100 ms.
+/// Returns false if 128 sends all completed.
+async fn send_until_blocked(a: &Socket) -> bool {
+    let payload = Bytes::from(vec![7; 1024 * 1024]);
+    for _ in 0..128 {
+        if tokio::time::timeout(
+            Duration::from_millis(100),
+            a.send(Message::single(payload.clone())),
+        )
+        .await
+        .is_err()
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Drains a complete receive release window and confirms upstream resumes.
+async fn assert_upstream_resumes(receiver: &Socket, a: &Socket) {
     let sending = a.clone();
     let resumed = tokio::spawn(async move { sending.send(Message::single("resumed")).await });
+
     let draining = async {
         loop {
-            if receive(&receiver).await.part_slice(0) == Some(b"resumed".as_slice()) {
+            if receive(receiver).await.part_slice(0) == Some(b"resumed".as_slice()) {
                 break;
             }
         }
     };
     tokio::time::timeout(DEADLINE, draining).await.unwrap();
+
     tokio::time::timeout(DEADLINE, resumed)
         .await
         .unwrap()
         .unwrap()
         .unwrap();
-    receiver.close().await.unwrap();
-    a.close().await.unwrap();
-    b.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -226,10 +249,13 @@ async fn pull_targeted_waits_cancel_and_end_on_disconnect_or_close() {
     let sender = context.socket(SocketType::Push, options());
     sender.connect(endpoint.clone()).await.unwrap();
     connected(&sender).await;
+
     sender.send(Message::single("first")).await.unwrap();
     let (receipt, _) = receiver.recv_with_receipt(None).await.unwrap();
     let source = receipt.lane().unwrap().clone();
     drop(receipt);
+
+    // A targeted wait canceled by its timeout consumes nothing.
     assert!(
         tokio::time::timeout(
             Duration::from_millis(10),
@@ -248,6 +274,9 @@ async fn pull_targeted_waits_cancel_and_end_on_disconnect_or_close() {
         Some(b"after cancellation".as_slice())
     );
     receiver.unshift(receipt, message).unwrap();
+
+    // Disconnecting the source ends targeted waits on its lane, even with
+    // an unshifted message still queued.
     sender.close().await.unwrap();
     test_support::wait_for_connection_count(&receiver, 0, DEADLINE, "PULL source disconnect").await;
     let waiting = receiver.recv_with_receipt(Some(&source));
@@ -256,6 +285,17 @@ async fn pull_targeted_waits_cancel_and_end_on_disconnect_or_close() {
         Err(Error::Closed)
     ));
 
+    assert_replacement_gets_new_lane(&context, &receiver, endpoint, &source).await;
+}
+
+/// A reconnected sender gets a fresh lane while the old one stays closed.
+/// A targeted wait on the new lane ends when the socket closes.
+async fn assert_replacement_gets_new_lane(
+    context: &Context,
+    receiver: &Socket,
+    endpoint: Endpoint,
+    old_source: &omq_tokio::ReceiveLane,
+) {
     let replacement = context.socket(SocketType::Push, options());
     replacement.connect(endpoint).await.unwrap();
     connected(&replacement).await;
@@ -263,12 +303,14 @@ async fn pull_targeted_waits_cancel_and_end_on_disconnect_or_close() {
         .send(Message::single("replacement"))
         .await
         .unwrap();
+
     let (receipt, _) = receiver.recv_with_receipt(None).await.unwrap();
-    assert_ne!(receipt.lane().unwrap(), &source);
+    assert_ne!(receipt.lane().unwrap(), old_source);
     assert!(matches!(
-        receiver.try_recv_with_receipt(Some(&source)),
+        receiver.try_recv_with_receipt(Some(old_source)),
         Err(Error::Closed)
     ));
+
     let new_source = receipt.lane().unwrap().clone();
     let waiting = receiver.recv_with_receipt(Some(&new_source));
     tokio::pin!(waiting);
@@ -277,6 +319,7 @@ async fn pull_targeted_waits_cancel_and_end_on_disconnect_or_close() {
             .await
             .is_err()
     );
+
     receiver.clone().close().await.unwrap();
     assert!(matches!(
         tokio::time::timeout(DEADLINE, waiting).await.unwrap(),

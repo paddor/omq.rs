@@ -6,15 +6,28 @@ use rb_sys::VALUE;
 
 use crate::rb::{self, RbResult, RubyErr};
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "flat option mapping mirrors omq-proto Options fields"
-)]
 pub fn build_options(hash: VALUE) -> RbResult<omq_tokio::Options> {
     rb::check_hash(hash)?;
 
+    // Groups run in a fixed order, so the first invalid option reported
+    // stays the same. Each maps fields one to one onto omq-proto Options.
     let mut opts = omq_tokio::Options::default();
+    apply_queue_options(hash, &mut opts)?;
+    apply_timing_options(hash, &mut opts)?;
+    apply_transport_options(hash, &mut opts)?;
+    apply_compression_options(hash, &mut opts)?;
+    apply_policy_options(hash, &mut opts)?;
+    if let Some(mechanism_type) = mechanism_type(hash)? {
+        apply_mechanism(hash, &mechanism_type, &mut opts)?;
+    }
 
+    opts.validate()
+        .map_err(|error| RubyErr::arg(error.to_string()))?;
+    Ok(opts)
+}
+
+/// Queue limits, receive rate limits, workload, linger, and identity.
+fn apply_queue_options(hash: VALUE, opts: &mut omq_tokio::Options) -> RbResult<()> {
     if let Some(v) = get_opt_u32(hash, "send_hwm")? {
         opts.send_hwm = v;
     }
@@ -56,6 +69,11 @@ pub fn build_options(hash: VALUE) -> RbResult<omq_tokio::Options> {
     if let Some(v) = get_opt_bool(hash, "conflate")? {
         opts.conflate = v;
     }
+    Ok(())
+}
+
+/// Heartbeat and handshake timing.
+fn apply_timing_options(hash: VALUE, opts: &mut omq_tokio::Options) -> RbResult<()> {
     if let Some(v) = get_opt_duration(hash, "heartbeat_interval")? {
         opts.heartbeat_interval = Some(v);
     }
@@ -71,6 +89,11 @@ pub fn build_options(hash: VALUE) -> RbResult<omq_tokio::Options> {
     if let Some(v) = get_opt_usize(hash, "max_pending_handshakes")? {
         opts.max_pending_handshakes = v;
     }
+    Ok(())
+}
+
+/// Message size limits, buffers, framing thresholds, and delivery flags.
+fn apply_transport_options(hash: VALUE, opts: &mut omq_tokio::Options) -> RbResult<()> {
     if let Some(v) = get_opt_usize(hash, "max_message_size")? {
         opts.max_message_size = Some(v);
     }
@@ -95,6 +118,11 @@ pub fn build_options(hash: VALUE) -> RbResult<omq_tokio::Options> {
     if let Some(v) = get_opt_bool(hash, "reconnect_stop_conn_refused")? {
         opts.reconnect_stop_conn_refused = v;
     }
+    Ok(())
+}
+
+/// Compression dictionary, training, level, and offload.
+fn apply_compression_options(hash: VALUE, opts: &mut omq_tokio::Options) -> RbResult<()> {
     if let Some(v) = get_opt_bytes(hash, "compression_dict")? {
         opts.compression_dict = (!v.is_empty()).then(|| Bytes::from(v));
     }
@@ -115,8 +143,14 @@ pub fn build_options(hash: VALUE) -> RbResult<omq_tokio::Options> {
         opts.max_recv_dict_size = Some(v);
     }
     if let Some(v) = get_opt_i64(hash, "compression_offload_threshold")? {
+        // Negative disables offload.
         opts.compression_offload_threshold = if v < 0 { None } else { Some(v as usize) };
     }
+    Ok(())
+}
+
+/// Mute and reconnect policies.
+fn apply_policy_options(hash: VALUE, opts: &mut omq_tokio::Options) -> RbResult<()> {
     if let Some(v) = get_opt_string(hash, "on_mute")? {
         opts.on_mute = match v.as_str() {
             "drop_newest" | "drop" => omq_tokio::OnMute::DropNewest,
@@ -143,37 +177,37 @@ pub fn build_options(hash: VALUE) -> RbResult<omq_tokio::Options> {
             max: duration_from_seconds("reconnect_interval max", max)?,
         };
     }
+    Ok(())
+}
 
-    let mut mechanism_type = get_opt_string(hash, "mechanism_type")?;
-    if mechanism_type.is_none() {
-        let curve = option_present(
-            hash,
-            &[
-                "curve_server",
-                "curve_publickey",
-                "curve_public_key",
-                "curve_secretkey",
-                "curve_secret_key",
-                "curve_serverkey",
-                "curve_server_key",
-            ],
-        )?;
-        let plain = option_present(hash, &["plain_server", "plain_username", "plain_password"])?;
-        mechanism_type = if curve {
-            Some("curve".to_owned())
-        } else if plain {
-            Some("plain".to_owned())
-        } else {
-            None
-        };
-    }
-    if let Some(mechanism_type) = mechanism_type {
-        apply_mechanism(hash, &mechanism_type, &mut opts)?;
+/// Explicit `mechanism_type`, or one inferred from CURVE or PLAIN keys.
+/// CURVE wins when both kinds of keys are present.
+fn mechanism_type(hash: VALUE) -> RbResult<Option<String>> {
+    if let Some(mechanism_type) = get_opt_string(hash, "mechanism_type")? {
+        return Ok(Some(mechanism_type));
     }
 
-    opts.validate()
-        .map_err(|error| RubyErr::arg(error.to_string()))?;
-    Ok(opts)
+    let curve = option_present(
+        hash,
+        &[
+            "curve_server",
+            "curve_publickey",
+            "curve_public_key",
+            "curve_secretkey",
+            "curve_secret_key",
+            "curve_serverkey",
+            "curve_server_key",
+        ],
+    )?;
+    let plain = option_present(hash, &["plain_server", "plain_username", "plain_password"])?;
+
+    Ok(if curve {
+        Some("curve".to_owned())
+    } else if plain {
+        Some("plain".to_owned())
+    } else {
+        None
+    })
 }
 
 fn apply_mechanism(hash: VALUE, mech_type: &str, opts: &mut omq_tokio::Options) -> RbResult<()> {
@@ -181,75 +215,12 @@ fn apply_mechanism(hash: VALUE, mech_type: &str, opts: &mut omq_tokio::Options) 
         "null" => {}
 
         #[cfg(feature = "curve")]
-        "curve" => {
-            let is_server =
-                get_opt_bool_alias(hash, &["curve_server", "mechanism_server"])?.unwrap_or(false);
-            let pub_key = get_opt_bytes_alias(
-                hash,
-                &[
-                    "curve_publickey",
-                    "curve_public_key",
-                    "mechanism_public_key",
-                ],
-            )?;
-            let sec_key = get_opt_bytes_alias(
-                hash,
-                &[
-                    "curve_secretkey",
-                    "curve_secret_key",
-                    "mechanism_secret_key",
-                ],
-            )?;
-
-            if is_server {
-                let public = parse_curve_public_key(
-                    &pub_key
-                        .ok_or_else(|| RubyErr::arg("CURVE server requires curve_publickey"))?,
-                    "curve_publickey",
-                )?;
-                let secret = curve_secret_key(
-                    &sec_key
-                        .ok_or_else(|| RubyErr::arg("CURVE server requires curve_secretkey"))?,
-                    "curve_secretkey",
-                )?;
-                opts.mechanism = omq_proto::MechanismSetup::CurveServer {
-                    our_keypair: omq_proto::CurveKeypair { public, secret },
-                    options: omq_proto::CurveServerOptions::default(),
-                };
-            } else {
-                let server_key = get_opt_bytes_alias(
-                    hash,
-                    &[
-                        "curve_serverkey",
-                        "curve_server_key",
-                        "mechanism_server_key",
-                    ],
-                )?;
-                let public = parse_curve_public_key(
-                    &pub_key
-                        .ok_or_else(|| RubyErr::arg("CURVE client requires curve_publickey"))?,
-                    "curve_publickey",
-                )?;
-                let secret = curve_secret_key(
-                    &sec_key
-                        .ok_or_else(|| RubyErr::arg("CURVE client requires curve_secretkey"))?,
-                    "curve_secretkey",
-                )?;
-                let server_public = parse_curve_public_key(
-                    &server_key
-                        .ok_or_else(|| RubyErr::arg("CURVE client requires curve_serverkey"))?,
-                    "curve_serverkey",
-                )?;
-                opts.mechanism = omq_proto::MechanismSetup::CurveClient {
-                    our_keypair: omq_proto::CurveKeypair { public, secret },
-                    server_public,
-                };
-            }
-        }
+        "curve" => apply_curve_mechanism(hash, opts)?,
 
         #[cfg(feature = "plain")]
         "plain" => {
             if get_opt_bool_alias(hash, &["plain_server", "mechanism_server"])?.unwrap_or(false) {
+                // Fail closed until an authenticator is installed on the socket.
                 opts.mechanism = omq_proto::MechanismSetup::PlainServer {
                     authenticator: omq_proto::Authenticator::new(|_| false),
                 };
@@ -266,6 +237,70 @@ fn apply_mechanism(hash: VALUE, mech_type: &str, opts: &mut omq_tokio::Options) 
 
         _ => return Err(RubyErr::arg(format!("unknown mechanism_type: {mech_type}"))),
     }
+    Ok(())
+}
+
+#[cfg(feature = "curve")]
+fn apply_curve_mechanism(hash: VALUE, opts: &mut omq_tokio::Options) -> RbResult<()> {
+    let is_server =
+        get_opt_bool_alias(hash, &["curve_server", "mechanism_server"])?.unwrap_or(false);
+    let pub_key = get_opt_bytes_alias(
+        hash,
+        &[
+            "curve_publickey",
+            "curve_public_key",
+            "mechanism_public_key",
+        ],
+    )?;
+    let sec_key = get_opt_bytes_alias(
+        hash,
+        &[
+            "curve_secretkey",
+            "curve_secret_key",
+            "mechanism_secret_key",
+        ],
+    )?;
+
+    if is_server {
+        let public = parse_curve_public_key(
+            &pub_key.ok_or_else(|| RubyErr::arg("CURVE server requires curve_publickey"))?,
+            "curve_publickey",
+        )?;
+        let secret = curve_secret_key(
+            &sec_key.ok_or_else(|| RubyErr::arg("CURVE server requires curve_secretkey"))?,
+            "curve_secretkey",
+        )?;
+        opts.mechanism = omq_proto::MechanismSetup::CurveServer {
+            our_keypair: omq_proto::CurveKeypair { public, secret },
+            options: omq_proto::CurveServerOptions::default(),
+        };
+        return Ok(());
+    }
+
+    let server_key = get_opt_bytes_alias(
+        hash,
+        &[
+            "curve_serverkey",
+            "curve_server_key",
+            "mechanism_server_key",
+        ],
+    )?;
+    let public = parse_curve_public_key(
+        &pub_key.ok_or_else(|| RubyErr::arg("CURVE client requires curve_publickey"))?,
+        "curve_publickey",
+    )?;
+    let secret = curve_secret_key(
+        &sec_key.ok_or_else(|| RubyErr::arg("CURVE client requires curve_secretkey"))?,
+        "curve_secretkey",
+    )?;
+    let server_public = parse_curve_public_key(
+        &server_key.ok_or_else(|| RubyErr::arg("CURVE client requires curve_serverkey"))?,
+        "curve_serverkey",
+    )?;
+    opts.mechanism = omq_proto::MechanismSetup::CurveClient {
+        our_keypair: omq_proto::CurveKeypair { public, secret },
+        server_public,
+    };
     Ok(())
 }
 

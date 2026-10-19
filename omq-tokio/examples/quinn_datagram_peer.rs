@@ -254,8 +254,9 @@ fn tls_configs(config: &Config) -> Result<(quinn::ServerConfig, quinn::ClientCon
     Ok((server, client))
 }
 
-async fn connect(config: &Config) -> Result<(quinn::Endpoint, Connection)> {
-    let (server, client) = tls_configs(config)?;
+/// Bind the UDP socket with enlarged kernel buffers. Returns the socket and
+/// the receive and send buffer sizes the kernel actually granted.
+fn bind_udp(config: &Config) -> Result<(UdpSocket, usize, usize)> {
     let address = if config.receiving() {
         config.address
     } else {
@@ -263,17 +264,30 @@ async fn connect(config: &Config) -> Result<(quinn::Endpoint, Connection)> {
     };
     let udp = UdpSocket::bind(address)?;
     udp.set_nonblocking(true)?;
+
     let sock = socket2::SockRef::from(&udp);
     sock.set_recv_buffer_size(QUEUE_BYTES)?;
     sock.set_send_buffer_size(QUEUE_BYTES)?;
     let recv_buffer = sock.recv_buffer_size()?;
     let send_buffer = sock.send_buffer_size()?;
-    let runtime = Arc::new(quinn::TokioRuntime);
+    Ok((udp, recv_buffer, send_buffer))
+}
+
+/// Wrap `udp` for quinn, adding the busy-poll layer when `io_spin` is set.
+/// Returns the socket and its GSO and GRO segment counts.
+fn quinn_socket(
+    config: &Config,
+    udp: UdpSocket,
+    runtime: &quinn::TokioRuntime,
+) -> Result<(Arc<dyn AsyncUdpSocket>, usize, usize)> {
+    // A duplicate handle on the same socket lets the spin layer probe for
+    // input without going through quinn's poller.
     let probe = udp.try_clone()?;
     let probe_state = udp::UdpSocketState::new((&probe).into())?;
     let mut socket = runtime.wrap_udp_socket(udp)?;
     let gso = socket.max_transmit_segments();
     let gro = socket.max_receive_segments();
+
     if !config.io_spin.is_zero() {
         let activity = Arc::new(Activity {
             epoch: Instant::now(),
@@ -288,6 +302,15 @@ async fn connect(config: &Config) -> Result<(quinn::Endpoint, Connection)> {
             latency: matches!(config.role.as_str(), "client" | "server"),
         });
     }
+    Ok((socket, gso, gro))
+}
+
+async fn connect(config: &Config) -> Result<(quinn::Endpoint, Connection)> {
+    let (server, client) = tls_configs(config)?;
+    let (udp, recv_buffer, send_buffer) = bind_udp(config)?;
+    let runtime = Arc::new(quinn::TokioRuntime);
+    let (socket, gso, gro) = quinn_socket(config, udp, &runtime)?;
+
     let mut endpoint = quinn::Endpoint::new_with_abstract_socket(
         quinn::EndpointConfig::default(),
         config.receiving().then_some(server),

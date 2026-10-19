@@ -34,7 +34,7 @@ impl WireFraming {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::transmit_slot::{PeerTransmitSlot, TryFrameResult};
+    use crate::engine::transmit_slot::{PeerTransmitSlot, SlotConfig, TryFrameResult};
     use bytes::Bytes;
     use omq_proto::Message;
     use omq_proto::proto::SocketType;
@@ -93,8 +93,17 @@ mod tests {
             let mut sender = connection(framing, server);
             let mut receiver = connection(peer_framing, !server);
             handshake(&mut sender, &mut receiver);
-            let slot =
-                PeerTransmitSlot::new(1, false, None, None, 4096, 16384, 512 * 1024, 16, framing);
+            let slot = PeerTransmitSlot::with_config(
+                1,
+                SlotConfig {
+                    arena_threshold: 4096,
+                    arena_cap: 16384,
+                    cap: 512 * 1024,
+                    msg_cap: 16,
+                    framing,
+                    ..SlotConfig::default()
+                },
+            );
             slot.handshake_done.store(true, Ordering::Release);
             let messages = [
                 Message::single(Bytes::new()),

@@ -8,8 +8,43 @@ mod soak_common;
 use std::time::{Duration, Instant};
 
 use rand::RngExt;
+use rand::rngs::StdRng;
 
-use omq_tokio::{Message, Socket, SocketType};
+use omq_tokio::{Endpoint, Message, Socket, SocketType};
+
+/// 30% chance to add a PULL (up to 20), 20% chance to close one (keeping
+/// at least one), otherwise leave the peer set alone.
+async fn churn_peers(rng: &mut StdRng, peers: &mut Vec<Socket>, ep: &Endpoint) {
+    let action = rng.random_range(0u8..10);
+    if action < 3 && peers.len() < 20 {
+        let pull = Socket::new(SocketType::Pull, soak_common::soak_options().recv_hwm(64));
+        pull.connect(ep.clone()).await.unwrap();
+        peers.push(pull);
+    } else if action < 5 && peers.len() > 1 {
+        let idx = rng.random_range(0..peers.len());
+        let peer = peers.swap_remove(idx);
+        peer.close().await.unwrap();
+    }
+}
+
+/// Tries 100 random-size sends; a send blocked for 1 ms is skipped.
+/// Returns how many were accepted.
+async fn send_batch(push: &Socket, rng: &mut StdRng) -> u64 {
+    let mut sent = 0;
+    for _ in 0..100 {
+        let len = rng.random_range(1..=8192);
+        let payload = vec![0xABu8; len];
+        if let Ok(Ok(())) = tokio::time::timeout(
+            Duration::from_millis(1),
+            push.send(Message::single(payload)),
+        )
+        .await
+        {
+            sent += 1;
+        }
+    }
+    sent
+}
 
 #[test]
 fn soak_peer_churn() {
@@ -33,29 +68,8 @@ fn soak_peer_churn() {
         let mut last_log = start;
 
         while start.elapsed() < duration {
-            let action = rng.random_range(0u8..10);
-            if action < 3 && peers.len() < 20 {
-                let pull = Socket::new(SocketType::Pull, soak_common::soak_options().recv_hwm(64));
-                pull.connect(ep.clone()).await.unwrap();
-                peers.push(pull);
-            } else if action < 5 && peers.len() > 1 {
-                let idx = rng.random_range(0..peers.len());
-                let peer = peers.swap_remove(idx);
-                peer.close().await.unwrap();
-            }
-
-            for _ in 0..100 {
-                let len = rng.random_range(1..=8192);
-                let payload = vec![0xABu8; len];
-                if let Ok(Ok(())) = tokio::time::timeout(
-                    Duration::from_millis(1),
-                    push.send(Message::single(payload)),
-                )
-                .await
-                {
-                    sent += 1;
-                }
-            }
+            churn_peers(&mut rng, &mut peers, &ep).await;
+            sent += send_batch(&push, &mut rng).await;
 
             for peer in &peers {
                 while peer.try_recv().is_ok() {}

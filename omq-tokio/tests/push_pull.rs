@@ -377,6 +377,47 @@ async fn push_pull_persistent_actor_loop_does_not_stall() {
         .await
         .expect("push connect");
 
+    // Long-lived actor tasks on both ends, fed through small channels, as an
+    // application pipeline would run them.
+    let mut pull_rx = Some(spawn_stress_reader(pull));
+    let push_tx = spawn_stress_writer(push);
+
+    for iteration in 0..iterations {
+        let payload = vec![0xAB; STRESS_PAYLOAD_BYTES];
+        let send = {
+            let push_tx = push_tx.clone();
+            tokio::spawn(async move {
+                for i in 0..STRESS_BATCH {
+                    push_tx
+                        .send((i, payload.clone()))
+                        .await
+                        .expect("push channel");
+                }
+            })
+        };
+
+        // The receiver task hands its channel back so the next iteration
+        // continues on the same stream.
+        let mut pull_rx_owned = pull_rx.take().unwrap();
+        let recv = tokio::spawn(async move {
+            for expected in 0..STRESS_BATCH {
+                let got = pull_rx_owned.recv().await.expect("pull channel");
+                assert_eq!(got, expected, "iteration {iteration}: message reordered");
+            }
+            pull_rx_owned
+        });
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            send.await.expect("sender task");
+            pull_rx.replace(recv.await.expect("receiver task"));
+        })
+        .await
+        .unwrap_or_else(|_| panic!("iteration {iteration}: push/pull stalled"));
+    }
+}
+
+/// Forwards decoded message ids from `pull` into a bounded channel.
+fn spawn_stress_reader(pull: Socket) -> tokio::sync::mpsc::Receiver<u32> {
     let (pull_tx, pull_rx) = tokio::sync::mpsc::channel(STRESS_CHANNEL_CAPACITY);
     tokio::spawn(async move {
         while let Ok(msg) = pull.recv().await {
@@ -385,10 +426,16 @@ async fn push_pull_persistent_actor_loop_does_not_stall() {
             }
         }
     });
+    pull_rx
+}
 
+/// Two-stage writer: one task encodes `(id, payload)` pairs, another sends
+/// the encoded messages on `push`.
+fn spawn_stress_writer(push: Socket) -> tokio::sync::mpsc::Sender<(u32, Vec<u8>)> {
     let (push_tx, mut push_rx) =
         tokio::sync::mpsc::channel::<(u32, Vec<u8>)>(STRESS_CHANNEL_CAPACITY);
     let (writer_tx, mut writer_rx) = tokio::sync::mpsc::channel(STRESS_CHANNEL_CAPACITY);
+
     tokio::spawn(async move {
         while let Some((id, payload)) = push_rx.recv().await {
             if writer_tx
@@ -406,36 +453,7 @@ async fn push_pull_persistent_actor_loop_does_not_stall() {
         }
     });
 
-    let mut pull_rx = Some(pull_rx);
-    for iteration in 0..iterations {
-        let payload = vec![0xAB; STRESS_PAYLOAD_BYTES];
-        let send = {
-            let push_tx = push_tx.clone();
-            tokio::spawn(async move {
-                for i in 0..STRESS_BATCH {
-                    push_tx
-                        .send((i, payload.clone()))
-                        .await
-                        .expect("push channel");
-                }
-            })
-        };
-        let mut pull_rx_owned = pull_rx.take().unwrap();
-        let recv = tokio::spawn(async move {
-            for expected in 0..STRESS_BATCH {
-                let got = pull_rx_owned.recv().await.expect("pull channel");
-                assert_eq!(got, expected, "iteration {iteration}: message reordered");
-            }
-            pull_rx_owned
-        });
-
-        tokio::time::timeout(Duration::from_secs(5), async {
-            send.await.expect("sender task");
-            pull_rx.replace(recv.await.expect("receiver task"));
-        })
-        .await
-        .unwrap_or_else(|_| panic!("iteration {iteration}: push/pull stalled"));
-    }
+    push_tx
 }
 
 #[tokio::test]

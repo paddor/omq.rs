@@ -16,7 +16,10 @@ mod handshake;
 mod session;
 pub use credit::{AdmissionCounter, CreditCounter};
 pub use handshake::Handshake;
-pub use session::{Admission, Ecn, FragmentBuffer, Session, SessionConfig, SessionStats, Transmit};
+pub use session::{
+    Admission, DataBatch, Ecn, FragmentBuffer, Receipt, Session, SessionConfig, SessionStats,
+    Transmit,
+};
 
 /// Bytes in the tag, session ID, and sequence header.
 pub const DATA_HEADER: usize = 17;
@@ -187,30 +190,24 @@ fn word(bytes: &[u8], offset: usize) -> Option<u64> {
 /// Decode a reliable packet; return `None` for an invalid UDP payload.
 pub fn decode_packet(bytes: &[u8]) -> Option<Packet<'_>> {
     let tag = *bytes.first()?;
+
+    // PACKED reuses its tag as the message count, so it owns tags 2..=128.
     if (2..=MAX_PACKED_MESSAGES as u8).contains(&tag) {
-        if bytes.len() > MAX_PACKED_DATAGRAM {
-            return None;
-        }
-        let count = usize::from(tag);
-        let lengths = bytes.get(1..1 + count)?;
-        let session = word(bytes, 1 + count)?;
-        let first = word(bytes, 9 + count)?;
-        if session == 0 {
-            return None;
-        }
-        return Some(Packet::Packed {
-            session,
-            first,
-            messages: decode_packed(lengths, &bytes[DATA_HEADER + count..], first)?,
-        });
+        return decode_packed_packet(bytes, usize::from(tag));
     }
+
     if bytes.len() > MAX_DATAGRAM {
         return None;
     }
+
     let session = word(bytes, 1)?;
+    // Receiver session IDs are always nonzero.
     if session == 0 {
         return None;
     }
+
+    // Control packets have exact sizes: tag and session, then STATUS carries
+    // eight u64 words, NAK a u64 and a u32, and PROBE one u64.
     match tag {
         0x81 => Some(Packet::First {
             session,
@@ -228,19 +225,7 @@ pub fn decode_packet(bytes: &[u8]) -> Option<Packet<'_>> {
             sequence: word(bytes, 9)?,
             payload: &bytes[17..],
         }),
-        0xC1 if bytes.len() == 73 => Some(Packet::Status(Status {
-            session,
-            serial: word(bytes, 9)?,
-            ack: word(bytes, 17)?,
-            credit: word(bytes, 25)?,
-            counts: [
-                word(bytes, 33)?,
-                word(bytes, 41)?,
-                word(bytes, 49)?,
-                word(bytes, 57)?,
-                word(bytes, 65)?,
-            ],
-        })),
+        0xC1 if bytes.len() == 73 => decode_status(bytes, session).map(Packet::Status),
         0xC2 if bytes.len() == 21 => Some(Packet::Nak {
             session,
             first: word(bytes, 9)?,
@@ -252,6 +237,43 @@ pub fn decode_packet(bytes: &[u8]) -> Option<Packet<'_>> {
         }),
         _ => None,
     }
+}
+
+/// Decode PACKED: tag/count, length table, session, first sequence, bodies.
+#[inline]
+fn decode_packed_packet(bytes: &[u8], count: usize) -> Option<Packet<'_>> {
+    if bytes.len() > MAX_PACKED_DATAGRAM {
+        return None;
+    }
+
+    let lengths = bytes.get(1..1 + count)?;
+    let session = word(bytes, 1 + count)?;
+    let first = word(bytes, 9 + count)?;
+    if session == 0 {
+        return None;
+    }
+
+    Some(Packet::Packed {
+        session,
+        first,
+        messages: decode_packed(lengths, &bytes[DATA_HEADER + count..], first)?,
+    })
+}
+
+fn decode_status(bytes: &[u8], session: u64) -> Option<Status> {
+    Some(Status {
+        session,
+        serial: word(bytes, 9)?,
+        ack: word(bytes, 17)?,
+        credit: word(bytes, 25)?,
+        counts: [
+            word(bytes, 33)?,
+            word(bytes, 41)?,
+            word(bytes, 49)?,
+            word(bytes, 57)?,
+            word(bytes, 65)?,
+        ],
+    })
 }
 
 /// Encode a control packet without allocation or padding.
@@ -325,20 +347,38 @@ pub fn validate_message(
     Ok(())
 }
 
+/// Header fields of one fragment datagram.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FragmentHeader<'a> {
+    /// Receiver session ID identifying this sequence.
+    pub session: u64,
+    /// Sequence position of this fragment.
+    pub sequence: u64,
+    /// Complete body length; present only on FIRST.
+    pub length: Option<u64>,
+    /// RADIO group; present only on FIRST.
+    pub group: Option<&'a [u8]>,
+}
+
 /// Encode one fragment. Only FIRST carries the full u64 body length and group.
 pub fn encode_fragment(
-    session: u64,
-    sequence: u64,
-    length: Option<u64>,
+    header: FragmentHeader<'_>,
     body: &[u8],
-    group: Option<&[u8]>,
     output: &mut [u8],
 ) -> Option<usize> {
+    let FragmentHeader {
+        session,
+        sequence,
+        length,
+        group,
+    } = header;
     let prefix = if length.is_some() {
         FIRST_HEADER
     } else {
         DATA_HEADER
     };
+
+    // Only FIRST may carry a group, and a group must fit its u8 length.
     if session == 0
         || body.is_empty()
         || body.len() > MAX_FRAGMENT_BODY
@@ -347,12 +387,14 @@ pub fn encode_fragment(
     {
         return None;
     }
-    let header = prefix + group.map_or(0, |g| g.len() + 1);
-    let size = header + body.len();
+
+    let header_len = prefix + group.map_or(0, |g| g.len() + 1);
+    let size = header_len + body.len();
     let output = output.get_mut(..size.min(MAX_DATAGRAM))?;
     if size > MAX_DATAGRAM {
         return None;
     }
+
     output[0] = if length.is_some() { 0x81 } else { 0x82 };
     output[1..9].copy_from_slice(&session.to_le_bytes());
     output[9..17].copy_from_slice(&sequence.to_le_bytes());
@@ -361,9 +403,10 @@ pub fn encode_fragment(
     }
     if let Some(group) = group {
         output[prefix] = group.len() as u8;
-        output[prefix + 1..header].copy_from_slice(group);
+        output[prefix + 1..header_len].copy_from_slice(group);
     }
-    output[header..].copy_from_slice(body);
+
+    output[header_len..].copy_from_slice(body);
     Some(size)
 }
 
@@ -575,14 +618,9 @@ pub fn decode_ready(bytes: &[u8]) -> Option<Ready<'_>> {
     else {
         return None;
     };
+
+    let mut fields = ReadyFields::default();
     let mut rest = body;
-    let mut socket_type = None;
-    let mut identity = None;
-    let mut version = None;
-    let mut reply_requested = None;
-    let mut session = None;
-    let mut echo = None;
-    let mut phase = None;
     let mut count = 0;
     while !rest.is_empty() {
         // A READY needs seven properties. Bound the duplicate scan below.
@@ -590,38 +628,69 @@ pub fn decode_ready(bytes: &[u8]) -> Option<Ready<'_>> {
         if count > MAX_READY_PROPERTIES {
             return None;
         }
-        let current = rest;
+
         let (name, value, remaining) = property(rest)?;
-        // At most 1200 bytes of control input. Compare earlier names directly
-        // rather than constructing a per-datagram set of allocated strings.
-        let mut earlier = body;
-        while earlier.len() > current.len() {
-            let (previous, _, next) = property(earlier)?;
-            if previous == name {
-                return None;
-            }
-            earlier = next;
+        if repeats_earlier_property(body, rest, name)? {
+            return None;
         }
+        fields.set(name, value)?;
+        rest = remaining;
+    }
+
+    fields.finish()
+}
+
+/// Whether `name` already appears in `body` before the property at `current`.
+fn repeats_earlier_property(body: &[u8], current: &[u8], name: &[u8]) -> Option<bool> {
+    // At most 1200 bytes of control input. Compare earlier names directly
+    // rather than constructing a per-datagram set of allocated strings.
+    let mut earlier = body;
+    while earlier.len() > current.len() {
+        let (previous, _, next) = property(earlier)?;
+        if previous == name {
+            return Some(true);
+        }
+        earlier = next;
+    }
+
+    Some(false)
+}
+
+/// READY properties seen so far. Unknown names are ignored.
+#[derive(Default)]
+struct ReadyFields<'a> {
+    socket_type: Option<SocketType>,
+    identity: Option<&'a [u8]>,
+    version: Option<&'a [u8]>,
+    reply_requested: Option<bool>,
+    session: Option<u64>,
+    echo: Option<u64>,
+    phase: Option<Phase>,
+}
+
+impl<'a> ReadyFields<'a> {
+    /// Record one property. `None` rejects the whole datagram.
+    fn set(&mut self, name: &[u8], value: &'a [u8]) -> Option<()> {
         match name {
-            b"Socket-Type" => socket_type = SocketType::from_wire(value),
+            b"Socket-Type" => self.socket_type = SocketType::from_wire(value),
             b"Identity" => {
                 if value.is_empty() || !crate::message::is_valid_peer_identity(value) {
                     return None;
                 }
-                identity = Some(value);
+                self.identity = Some(value);
             }
-            b"DART-Version" => version = Some(value),
+            b"DART-Version" => self.version = Some(value),
             b"Reply-Requested" => {
-                reply_requested = match value {
+                self.reply_requested = match value {
                     [0] => Some(false),
                     [1] => Some(true),
                     _ => return None,
                 };
             }
-            b"Session" => session = value.try_into().ok().map(u64::from_le_bytes),
-            b"Echo" => echo = value.try_into().ok().map(u64::from_le_bytes),
+            b"Session" => self.session = value.try_into().ok().map(u64::from_le_bytes),
+            b"Echo" => self.echo = value.try_into().ok().map(u64::from_le_bytes),
             b"Phase" => {
-                phase = match value {
+                self.phase = match value {
                     [0] => Some(Phase::Hello),
                     [1] => Some(Phase::Welcome),
                     [2] => Some(Phase::Confirm),
@@ -630,27 +699,35 @@ pub fn decode_ready(bytes: &[u8]) -> Option<Ready<'_>> {
             }
             _ => {}
         }
-        rest = remaining;
+
+        Some(())
     }
-    let socket_type = socket_type?;
-    let phase = phase?;
-    let echo = echo?;
-    if session? == 0
-        || !valid_echo(phase, echo)
-        || !supports(socket_type)
-        || version? != [VERSION]
-        || (socket_type == SocketType::Peer && identity.is_none())
-    {
-        return None;
+
+    /// Require every mandatory property and check cross-field rules.
+    fn finish(self) -> Option<Ready<'a>> {
+        let socket_type = self.socket_type?;
+        let phase = self.phase?;
+        let echo = self.echo?;
+        let session = self.session?;
+
+        if session == 0
+            || !valid_echo(phase, echo)
+            || !supports(socket_type)
+            || self.version? != [VERSION]
+            || (socket_type == SocketType::Peer && self.identity.is_none())
+        {
+            return None;
+        }
+
+        Some(Ready {
+            socket_type,
+            identity: self.identity,
+            reply_requested: self.reply_requested?,
+            session,
+            echo,
+            phase,
+        })
     }
-    Some(Ready {
-        socket_type,
-        identity,
-        reply_requested: reply_requested?,
-        session: session?,
-        echo,
-        phase,
-    })
 }
 
 #[cfg(test)]

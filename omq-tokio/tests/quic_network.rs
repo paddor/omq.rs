@@ -84,23 +84,25 @@ impl Drop for Proxy {
     }
 }
 
+/// State shared between a `Proxy` handle and its forwarding task.
+#[derive(Clone)]
+struct ProxySignals {
+    rebind: Arc<AtomicBool>,
+    forwarded: Arc<AtomicU64>,
+}
+
 async fn proxy(server: SocketAddr, impairment: Impairment, seed: u64) -> Proxy {
     let front = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
     let addr = front.local_addr().unwrap();
-    let rebind = Arc::new(AtomicBool::new(false));
-    let forwarded = Arc::new(AtomicU64::new(0));
-    let task = tokio::spawn(run_proxy(
-        front,
-        server,
-        impairment,
-        seed,
-        rebind.clone(),
-        forwarded.clone(),
-    ));
+    let signals = ProxySignals {
+        rebind: Arc::new(AtomicBool::new(false)),
+        forwarded: Arc::new(AtomicU64::new(0)),
+    };
+    let task = tokio::spawn(run_proxy(front, server, impairment, seed, signals.clone()));
     Proxy {
         addr,
-        rebind,
-        forwarded,
+        rebind: signals.rebind,
+        forwarded: signals.forwarded,
         task,
     }
 }
@@ -110,18 +112,21 @@ async fn run_proxy(
     server: SocketAddr,
     impairment: Impairment,
     seed: u64,
-    rebind: Arc<AtomicBool>,
-    forwarded: Arc<AtomicU64>,
+    signals: ProxySignals,
 ) {
+    let ProxySignals { rebind, forwarded } = signals;
     let mut back = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
     let mut rng = XorShift(seed | 1);
     let mut client: Option<SocketAddr> = None;
     let mut up = vec![0u8; 65536];
     let mut down = vec![0u8; 65536];
+
     loop {
+        // A fresh upstream socket makes the server see a new client address.
         if rebind.swap(false, Ordering::AcqRel) {
             back = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
         }
+
         let (bytes, to_server, target) = tokio::select! {
             result = front.recv_from(&mut up) => {
                 let (n, from) = result.unwrap();
@@ -134,6 +139,9 @@ async fn run_proxy(
                 (down[..n].to_vec(), false, client)
             }
         };
+
+        // Draw drop, duplicate, and reorder decisions in a fixed order so a
+        // seed always replays the same impairment pattern.
         if rng.per_mille() < impairment.drop {
             continue;
         }
@@ -147,12 +155,16 @@ async fn run_proxy(
         } else {
             Duration::ZERO
         };
+
         let socket = if to_server {
             back.clone()
         } else {
             front.clone()
         };
         forwarded.fetch_add(1, Ordering::Relaxed);
+
+        // A delayed datagram goes out from its own task, so later
+        // datagrams can overtake it.
         if delay.is_zero() {
             for _ in 0..copies {
                 let _ = socket.send_to(&bytes, target).await;

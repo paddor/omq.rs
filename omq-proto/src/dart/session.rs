@@ -770,6 +770,14 @@ impl<B: FragmentBuffer> Session<B> {
                 self.congest();
             }
         }
+
+        // The first peer STATUS proves its session is installed. Our initial
+        // STATUS may have arrived before then and been dropped, leaving the
+        // peer without credit until the idle interval. Repeat it now.
+        if self.peer_status_serial == 0 {
+            self.status_pending = true;
+        }
+
         self.peer_status_serial = status.serial;
         self.peer_ecn = status.counts;
         self.peer_credit = status.credit;

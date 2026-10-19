@@ -651,6 +651,45 @@ fn retransmissions_keep_message_sequence_and_are_paced() {
 }
 
 #[test]
+fn first_peer_status_repeats_credit_sent_before_peer_admission() {
+    let mut bytes = [0; dart::MAX_DATAGRAM];
+
+    // The receiver installs first. Its initial STATUS reaches no session.
+    let mut receiver = session(2, 1, 4);
+    let (token, _) = receiver
+        .prepare_control(Duration::ZERO, &mut bytes)
+        .unwrap();
+    receiver.commit_transmit(token, Duration::ZERO);
+    assert!(
+        receiver
+            .prepare_control(Duration::ZERO, &mut bytes)
+            .is_none()
+    );
+
+    // The late sender's first STATUS solicits the lost credit at once.
+    let mut sender = session(1, 2, 4);
+    sender.submit(message(7)).unwrap();
+    assert!(!transfer(&mut sender, &mut receiver, Duration::ZERO, false));
+    feedback(&mut sender, &mut receiver, Duration::ZERO, false);
+    feedback(&mut receiver, &mut sender, Duration::ZERO, false);
+
+    // Each side repeats once; the exchange then goes quiet.
+    feedback(&mut sender, &mut receiver, Duration::ZERO, false);
+    assert!(
+        receiver
+            .prepare_control(Duration::ZERO, &mut bytes)
+            .is_none()
+    );
+    assert!(sender.prepare_control(Duration::ZERO, &mut bytes).is_none());
+
+    assert!(transfer(&mut sender, &mut receiver, Duration::ZERO, false));
+    assert_eq!(
+        receiver.take_received().unwrap().part_slice(0).unwrap(),
+        7u64.to_le_bytes()
+    );
+}
+
+#[test]
 fn lost_naks_status_and_tail_data_eventually_recover() {
     for fault in 0..4 {
         let mut sender = session(1, 2, 4);

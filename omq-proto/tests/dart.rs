@@ -1,7 +1,8 @@
 use std::time::Duration;
 
 use omq_proto::dart::{
-    self, Admission, Ecn, Handshake, Packet, Phase, Ready, Session, SessionConfig, Status,
+    self, Admission, DataBatch, Ecn, Handshake, Packet, Phase, Ready, Receipt, Session,
+    SessionConfig, Status,
 };
 use omq_proto::{DartCongestion, Message, SocketType};
 
@@ -49,7 +50,10 @@ fn transfer(sender: &mut Session, receiver: &mut Session, now: Duration, drop: b
             panic!()
         };
         if receiver.classify(session, sequence) == Admission::Accept {
-            receiver.commit_receive(sequence, Message::from_slice(payload), Ecn::NotEct, now);
+            receiver.commit_receive(
+                Receipt::new(sequence, Ecn::NotEct, now),
+                Message::from_slice(payload),
+            );
         }
     }
     true
@@ -70,7 +74,10 @@ fn feedback(receiver: &mut Session, sender: &mut Session, now: Duration, drop: b
 
 fn receive_payload(receiver: &mut Session, id: u64, sequence: u64, payload: &[u8], now: Duration) {
     if receiver.classify(id, sequence) == Admission::Accept {
-        receiver.commit_receive(sequence, Message::from_slice(payload), Ecn::NotEct, now);
+        receiver.commit_receive(
+            Receipt::new(sequence, Ecn::NotEct, now),
+            Message::from_slice(payload),
+        );
     }
 }
 
@@ -84,11 +91,9 @@ fn receive_packet(receiver: &mut Session, packet: Packet<'_>, now: Duration) -> 
         } => {
             if receiver.classify(session, sequence) == Admission::Accept {
                 assert!(receiver.commit_fragment(
-                    sequence,
+                    Receipt::new(sequence, Ecn::NotEct, now),
                     Some(length),
-                    Message::from_slice(payload),
-                    Ecn::NotEct,
-                    now
+                    Message::from_slice(payload)
                 ));
             }
         }
@@ -99,11 +104,9 @@ fn receive_packet(receiver: &mut Session, packet: Packet<'_>, now: Duration) -> 
         } => {
             if receiver.classify(session, sequence) == Admission::Accept {
                 assert!(receiver.commit_fragment(
-                    sequence,
+                    Receipt::new(sequence, Ecn::NotEct, now),
                     None,
-                    Message::from_slice(payload),
-                    Ecn::NotEct,
-                    now
+                    Message::from_slice(payload)
                 ));
             }
         }
@@ -137,7 +140,10 @@ fn status_message_threshold_tracks_window_and_resets_after_feedback() {
             .unwrap();
         receiver.commit_transmit(token, Duration::ZERO);
         for sequence in 0..threshold as u64 {
-            receiver.commit_receive(sequence, message(sequence), Ecn::NotEct, Duration::ZERO);
+            receiver.commit_receive(
+                Receipt::new(sequence, Ecn::NotEct, Duration::ZERO),
+                message(sequence),
+            );
             if sequence + 1 < threshold as u64 {
                 assert!(
                     receiver
@@ -162,7 +168,10 @@ fn status_message_threshold_tracks_window_and_resets_after_feedback() {
                 .is_none()
         );
         if threshold < window && threshold > 1 {
-            receiver.commit_receive(threshold as u64, message(7), Ecn::NotEct, Duration::ZERO);
+            receiver.commit_receive(
+                Receipt::new(threshold as u64, Ecn::NotEct, Duration::ZERO),
+                message(7),
+            );
             assert!(
                 receiver
                     .prepare_control(Duration::ZERO, &mut bytes)
@@ -180,7 +189,10 @@ fn pending_receipt_still_bounds_status_delay_to_fifty_microseconds() {
         .prepare_control(Duration::ZERO, &mut bytes)
         .unwrap();
     receiver.commit_transmit(token, Duration::ZERO);
-    receiver.commit_receive(0, message(7), Ecn::Ect0, Duration::from_micros(10));
+    receiver.commit_receive(
+        Receipt::new(0, Ecn::Ect0, Duration::from_micros(10)),
+        message(7),
+    );
     assert!(
         receiver
             .prepare_control(Duration::from_micros(59), &mut bytes)
@@ -206,7 +218,7 @@ fn duplicates_and_gaps_solicit_feedback_below_status_threshold() {
             .unwrap();
         receiver.commit_transmit(token, Duration::ZERO);
         if duplicate {
-            receiver.commit_receive(0, message(7), Ecn::Ect1, Duration::ZERO);
+            receiver.commit_receive(Receipt::new(0, Ecn::Ect1, Duration::ZERO), message(7));
             assert!(
                 receiver
                     .prepare_control(Duration::ZERO, &mut bytes)
@@ -222,7 +234,7 @@ fn duplicates_and_gaps_solicit_feedback_below_status_threshold() {
             assert_eq!(status.ack, 1);
             assert_eq!(status.counts, [0, 1, 0, 0, 0]);
         } else {
-            receiver.commit_receive(1, message(7), Ecn::NotEct, Duration::ZERO);
+            receiver.commit_receive(Receipt::new(1, Ecn::NotEct, Duration::ZERO), message(7));
             let (_, length) = receiver
                 .prepare_control(Duration::ZERO, &mut bytes)
                 .unwrap();
@@ -254,10 +266,8 @@ fn direct_delivery_preserves_inline_storage_forms_and_routing() {
             Some(std::mem::size_of::<Message>())
         );
         assert!(receiver.commit_receive_with_delivery(
-            0,
+            Receipt::new(0, Ecn::NotEct, Duration::ZERO),
             original.clone(),
-            Ecn::NotEct,
-            Duration::ZERO,
             |delivered| {
                 assert_eq!(delivered.routing_id(), original.routing_id());
                 assert_eq!(delivered.len(), original.len());
@@ -289,17 +299,16 @@ fn direct_inline_delivery_matches_retained_receipt_feedback_across_wraps() {
                 };
                 assert_eq!(direct.classify(2, sequence), Admission::Accept);
                 assert!(direct.commit_receive_with_delivery(
-                    sequence,
+                    Receipt::new(sequence, ecn, now),
                     Message::from_slice(&body),
-                    ecn,
-                    now,
                     |message| {
                         assert_eq!(message.part_slice(0).unwrap(), body);
                         Ok(())
                     }
                 ));
                 assert!(direct.take_received().is_none());
-                retained.commit_receive(sequence, Message::from_slice(&body), ecn, now);
+                retained
+                    .commit_receive(Receipt::new(sequence, ecn, now), Message::from_slice(&body));
                 assert_eq!(
                     retained.take_received().unwrap().part_slice(0).unwrap(),
                     body
@@ -328,14 +337,16 @@ fn direct_inline_delivery_matches_retained_receipt_feedback_across_wraps() {
 #[test]
 fn direct_delivery_rejection_and_gaps_preserve_order_and_credit() {
     let mut receiver = session(2, 1, 4);
-    assert!(!receiver.commit_receive_with_delivery(0, message(0), Ecn::Ce, Duration::ZERO, Err));
+    assert!(!receiver.commit_receive_with_delivery(
+        Receipt::new(0, Ecn::Ce, Duration::ZERO),
+        message(0),
+        Err
+    ));
     assert_eq!(receiver.next_receive(), 1);
     assert_eq!(receiver.receive_right_edge(), 4);
     assert!(!receiver.commit_receive_with_delivery(
-        1,
+        Receipt::new(1, Ecn::Ect0, Duration::ZERO),
         message(1),
-        Ecn::Ect0,
-        Duration::ZERO,
         |_| panic!("retained predecessor must be delivered first")
     ));
     for sequence in 0u64..2 {
@@ -345,12 +356,10 @@ fn direct_delivery_rejection_and_gaps_preserve_order_and_credit() {
         );
         receiver.release_receive(1);
     }
-    receiver.commit_receive(3, message(3), Ecn::NotEct, Duration::ZERO);
+    receiver.commit_receive(Receipt::new(3, Ecn::NotEct, Duration::ZERO), message(3));
     assert!(receiver.commit_receive_with_delivery(
-        2,
+        Receipt::new(2, Ecn::NotEct, Duration::ZERO),
         message(2),
-        Ecn::NotEct,
-        Duration::ZERO,
         |m| {
             assert_eq!(m.part_slice(0).unwrap(), 2u64.to_le_bytes());
             Ok(())
@@ -372,10 +381,8 @@ fn direct_delivery_retains_shared_bodies_and_waits_for_fragment_assembly() {
     let mut receiver = session(2, 1, 4);
     let body = vec![7; omq_proto::message::MAX_INLINE_MESSAGE + 1];
     assert!(!receiver.commit_receive_with_delivery(
-        0,
+        Receipt::new(0, Ecn::NotEct, Duration::ZERO),
         Message::single(body.clone()),
-        Ecn::NotEct,
-        Duration::ZERO,
         |_| panic!("shared body must retain its receive credit")
     ));
     assert_eq!(receiver.receive_right_edge(), 4);
@@ -385,25 +392,19 @@ fn direct_delivery_retains_shared_bodies_and_waits_for_fragment_assembly() {
     );
     receiver.release_receive(1);
     assert!(receiver.commit_fragment(
-        1,
+        Receipt::new(1, Ecn::NotEct, Duration::ZERO),
         Some(2048),
-        Message::single(vec![1; 1024]),
-        Ecn::NotEct,
-        Duration::ZERO
+        Message::single(vec![1; 1024])
     ));
     assert!(receiver.take_received().is_none());
     assert!(receiver.commit_fragment(
-        2,
+        Receipt::new(2, Ecn::NotEct, Duration::ZERO),
         None,
-        Message::single(vec![2; 1024]),
-        Ecn::NotEct,
-        Duration::ZERO
+        Message::single(vec![2; 1024])
     ));
     assert!(!receiver.commit_receive_with_delivery(
-        3,
+        Receipt::new(3, Ecn::NotEct, Duration::ZERO),
         message(3),
-        Ecn::NotEct,
-        Duration::ZERO,
         |_| panic!("unfinished assembly must be delivered first")
     ));
     let assembled = receiver.take_received().unwrap();
@@ -479,7 +480,13 @@ fn fragments_stream_across_windows_and_repair_every_kind() {
 #[test]
 fn fragment_length_is_u64_and_bad_allocations_do_not_commit_receipt() {
     let mut bytes = [0; dart::MAX_DATAGRAM];
-    let length = dart::encode_fragment(2, 0, Some(u64::MAX), b"x", None, &mut bytes).unwrap();
+    let header = dart::FragmentHeader {
+        session: 2,
+        sequence: 0,
+        length: Some(u64::MAX),
+        group: None,
+    };
+    let length = dart::encode_fragment(header, b"x", &mut bytes).unwrap();
     assert!(matches!(
         dart::decode_packet(&bytes[..length]),
         Some(Packet::First {
@@ -489,11 +496,9 @@ fn fragment_length_is_u64_and_bad_allocations_do_not_commit_receipt() {
     ));
     let mut receiver = session(2, 1, 2);
     assert!(!receiver.commit_fragment(
-        0,
+        Receipt::new(0, Ecn::NotEct, Duration::ZERO),
         Some(u64::MAX),
-        Message::single("x"),
-        Ecn::NotEct,
-        Duration::ZERO
+        Message::single("x")
     ));
     assert_eq!(receiver.next_receive(), 0);
     assert_eq!(receiver.classify(2, 0), Admission::Accept);
@@ -519,11 +524,14 @@ fn window_reserves_space_for_a_missing_first_message() {
     let mut receiver = session(2, 1, 4);
     for sequence in [3, 2, 1] {
         assert_eq!(receiver.classify(2, sequence), Admission::Accept);
-        receiver.commit_receive(sequence, message(sequence), Ecn::NotEct, Duration::ZERO);
+        receiver.commit_receive(
+            Receipt::new(sequence, Ecn::NotEct, Duration::ZERO),
+            message(sequence),
+        );
     }
     assert!(receiver.take_received().is_none());
     assert_eq!(receiver.classify(2, 4), Admission::OutsideWindow);
-    receiver.commit_receive(0, message(0), Ecn::NotEct, Duration::ZERO);
+    receiver.commit_receive(Receipt::new(0, Ecn::NotEct, Duration::ZERO), message(0));
     for sequence in 0u64..4 {
         assert_eq!(
             receiver.take_received().unwrap().part_slice(0).unwrap(),
@@ -538,7 +546,7 @@ fn window_reserves_space_for_a_missing_first_message() {
 #[test]
 fn duplicates_do_not_create_receipt_or_capacity() {
     let mut receiver = session(2, 1, 2);
-    receiver.commit_receive(0, message(0), Ecn::Ce, Duration::ZERO);
+    receiver.commit_receive(Receipt::new(0, Ecn::Ce, Duration::ZERO), message(0));
     assert_eq!(receiver.classify(2, 0), Admission::Duplicate);
     receiver.take_received().unwrap();
     receiver.release_receive(1);
@@ -755,7 +763,7 @@ fn adaptive_feedback_reduces_window_on_ce_and_disables_unusable_ecn() {
             .unwrap();
         sender.commit_transmit(token, Duration::ZERO);
         let before = sender.congestion_window();
-        receiver.commit_receive(0, message(0), received_ecn, Duration::ZERO);
+        receiver.commit_receive(Receipt::new(0, received_ecn, Duration::ZERO), message(0));
         feedback(
             &mut receiver,
             &mut sender,
@@ -794,20 +802,18 @@ fn adaptive_batch_reserves_the_complete_congestion_window() {
     }
     let mut bytes = [0; dart::MAX_DATAGRAM];
     let mut tokens = Vec::new();
-    let mut reserved = 0;
+    let mut batch = DataBatch::new(Duration::ZERO, false);
     for sequence in 0..64 {
-        let Some((token, length)) =
-            sender.prepare_batch_data(sequence, Duration::ZERO, false, reserved, &mut bytes)
-        else {
+        let Some((token, length)) = sender.prepare_batch_data(sequence, batch, &mut bytes) else {
             break;
         };
-        reserved += length;
+        batch.reserved_bytes += length;
         tokens.push(token);
     }
     let length = dart::DATA_HEADER + dart::MAX_BODY;
     assert_eq!(tokens.len(), sender.congestion_window() / length);
-    assert!(reserved <= sender.congestion_window());
-    assert!(reserved + length > sender.congestion_window());
+    assert!(batch.reserved_bytes <= sender.congestion_window());
+    assert!(batch.reserved_bytes + length > sender.congestion_window());
     assert_eq!(sender.bytes_in_flight(), 0);
     assert_eq!(sender.next_send(), 0);
     // A partial carrier submission consumes only its successful prefix.
@@ -817,9 +823,13 @@ fn adaptive_batch_reserves_the_complete_congestion_window() {
     assert_eq!(sender.bytes_in_flight(), 5 * length);
     assert_eq!(sender.next_send(), 5);
     assert_eq!(sender.outstanding(), 64);
+    let saturated = DataBatch {
+        reserved_bytes: usize::MAX,
+        ..DataBatch::new(Duration::from_secs(1), false)
+    };
     assert!(
         sender
-            .prepare_batch_data(5, Duration::from_secs(1), false, usize::MAX, &mut bytes,)
+            .prepare_batch_data(5, saturated, &mut bytes)
             .is_none()
     );
 }
@@ -842,12 +852,12 @@ fn batch_pacing_charges_only_the_successful_prefix() {
     }
     let mut bytes = [0; dart::MAX_DATAGRAM];
     let mut tokens = Vec::new();
-    let mut reserved = 0;
+    let mut batch = DataBatch::new(Duration::ZERO, false);
     for sequence in 0..3 {
         let (token, length) = sender
-            .prepare_batch_data(sequence, Duration::ZERO, false, reserved, &mut bytes)
+            .prepare_batch_data(sequence, batch, &mut bytes)
             .unwrap();
-        reserved += length;
+        batch.reserved_bytes += length;
         tokens.push(token);
     }
     for token in tokens.iter().take(2) {
@@ -957,6 +967,15 @@ fn invalid_message_shapes_never_enter_retention() {
     }
 }
 
+/// Pack from sequence 0 at time zero without RADIO groups.
+fn prepare_packed(
+    sender: &mut Session,
+    bytes: &mut [u8],
+    tokens: &mut Vec<dart::Transmit>,
+) -> Option<usize> {
+    sender.prepare_packed_data(0, &mut DataBatch::new(Duration::ZERO, false), bytes, tokens)
+}
+
 fn retained_packing_messages(size: usize, grouped: bool) -> Session {
     let mut sender = session(1, 2, 256);
     assert!(sender.handle_control(status(2, 1, 0, 256), Duration::ZERO));
@@ -980,98 +999,108 @@ fn packed_prefix_matches_tokens_and_discards_uncommitted_preparation() {
     for grouped in [false, true] {
         for size in [0, 16, 255, 256, 1024, 4096] {
             for capacity in [0, 1, 2, 128] {
-                let mut indexed = retained_packing_messages(size, grouped);
-                let mut prefix = retained_packing_messages(size, grouped);
-                let mut indexed_bytes = [0; dart::MAX_PACKED_DATAGRAM];
-                let mut prefix_bytes = [0; dart::MAX_PACKED_DATAGRAM];
-                let mut tokens = Vec::with_capacity(capacity);
-                let mut indexed_reserved = 0;
-                let mut prefix_reserved = 0;
-                let expected = indexed.prepare_packed_data(
-                    0,
-                    Duration::ZERO,
-                    grouped,
-                    &mut indexed_reserved,
-                    &mut indexed_bytes,
-                    &mut tokens,
-                );
-                let prepared = prefix.prepare_packed_prefix(
-                    0,
-                    Duration::ZERO,
-                    grouped,
-                    &mut prefix_reserved,
-                    &mut prefix_bytes,
-                    tokens.capacity(),
-                );
-                assert_eq!(expected, prepared.map(|(_, length, _)| length));
-                assert_eq!(indexed_reserved, prefix_reserved);
-                assert_eq!(prefix.next_send(), 0);
-                assert_eq!(prefix.bytes_in_flight(), 0);
-                if let Some((first, length, count)) = prepared {
-                    assert_eq!(count, tokens.len());
-                    assert_eq!(first, tokens[0]);
-                    assert_eq!(&indexed_bytes[..length], &prefix_bytes[..length]);
-                    // A rejected datagram can be prepared again unchanged.
-                    let mut retry = [0; dart::MAX_PACKED_DATAGRAM];
-                    assert_eq!(
-                        prefix.prepare_packed_prefix(
-                            0,
-                            Duration::ZERO,
-                            grouped,
-                            &mut 0,
-                            &mut retry,
-                            capacity
-                        ),
-                        prepared
-                    );
-                    assert_eq!(&retry[..length], &prefix_bytes[..length]);
-                    for (offset, expected_token) in tokens.into_iter().enumerate() {
-                        let token = if offset == 0 {
-                            first
-                        } else {
-                            dart::Transmit::Data {
-                                sequence: offset as u64,
-                                repair: false,
-                            }
-                        };
-                        assert_eq!(token, expected_token);
-                        indexed.commit_transmit(expected_token, Duration::ZERO);
-                        prefix.commit_transmit(token, Duration::ZERO);
-                    }
-                    assert_eq!(indexed.next_send(), prefix.next_send());
-                    assert_eq!(indexed.bytes_in_flight(), prefix.bytes_in_flight());
-                    for sender in [&mut indexed, &mut prefix] {
-                        assert!(sender.handle_control(
-                            Packet::Nak {
-                                session: 2,
-                                first: 0,
-                                count: 1
-                            },
-                            Duration::ZERO
-                        ));
-                    }
-                    let repaired = prefix
-                        .prepare_packed_prefix(
-                            0,
-                            Duration::ZERO,
-                            grouped,
-                            &mut 0,
-                            &mut prefix_bytes,
-                            128,
-                        )
-                        .unwrap();
-                    assert_eq!(
-                        repaired.0,
-                        dart::Transmit::Data {
-                            sequence: 0,
-                            repair: true
-                        }
-                    );
-                    assert_eq!(repaired.2, 1);
-                }
+                check_packed_prefix_matches_tokens(grouped, size, capacity);
             }
         }
     }
+}
+
+/// Prepare the same retained messages through `prepare_packed_data` and
+/// `prepare_packed_prefix`, then commit both and repair the first unit.
+fn check_packed_prefix_matches_tokens(grouped: bool, size: usize, capacity: usize) {
+    let mut indexed = retained_packing_messages(size, grouped);
+    let mut prefix = retained_packing_messages(size, grouped);
+    let mut indexed_bytes = [0; dart::MAX_PACKED_DATAGRAM];
+    let mut prefix_bytes = [0; dart::MAX_PACKED_DATAGRAM];
+    let mut tokens = Vec::with_capacity(capacity);
+    let mut indexed_batch = DataBatch::new(Duration::ZERO, grouped);
+    let mut prefix_batch = DataBatch::new(Duration::ZERO, grouped);
+    let expected =
+        indexed.prepare_packed_data(0, &mut indexed_batch, &mut indexed_bytes, &mut tokens);
+    let prepared =
+        prefix.prepare_packed_prefix(0, &mut prefix_batch, &mut prefix_bytes, tokens.capacity());
+    assert_eq!(expected, prepared.map(|(_, length, _)| length));
+    assert_eq!(indexed_batch, prefix_batch);
+    assert_eq!(prefix.next_send(), 0);
+    assert_eq!(prefix.bytes_in_flight(), 0);
+
+    let Some((first, length, count)) = prepared else {
+        return;
+    };
+    assert_eq!(count, tokens.len());
+    assert_eq!(first, tokens[0]);
+    assert_eq!(&indexed_bytes[..length], &prefix_bytes[..length]);
+    // A rejected datagram can be prepared again unchanged.
+    let mut retry = [0; dart::MAX_PACKED_DATAGRAM];
+    assert_eq!(
+        prefix.prepare_packed_prefix(
+            0,
+            &mut DataBatch::new(Duration::ZERO, grouped),
+            &mut retry,
+            capacity
+        ),
+        prepared
+    );
+    assert_eq!(&retry[..length], &prefix_bytes[..length]);
+
+    commit_prefix_tokens(&mut indexed, &mut prefix, first, tokens);
+    assert_repair_prepares_alone(&mut indexed, &mut prefix, grouped);
+}
+
+/// Commit the stored tokens on `indexed` and tokens rebuilt from the first
+/// one on `prefix`; both must leave identical flight state.
+fn commit_prefix_tokens(
+    indexed: &mut Session,
+    prefix: &mut Session,
+    first: dart::Transmit,
+    tokens: Vec<dart::Transmit>,
+) {
+    for (offset, expected_token) in tokens.into_iter().enumerate() {
+        let token = if offset == 0 {
+            first
+        } else {
+            dart::Transmit::Data {
+                sequence: offset as u64,
+                repair: false,
+            }
+        };
+        assert_eq!(token, expected_token);
+        indexed.commit_transmit(expected_token, Duration::ZERO);
+        prefix.commit_transmit(token, Duration::ZERO);
+    }
+    assert_eq!(indexed.next_send(), prefix.next_send());
+    assert_eq!(indexed.bytes_in_flight(), prefix.bytes_in_flight());
+}
+
+/// After a NAK of sequence 0, the repair occupies one wire position.
+fn assert_repair_prepares_alone(indexed: &mut Session, prefix: &mut Session, grouped: bool) {
+    for sender in [indexed, &mut *prefix] {
+        assert!(sender.handle_control(
+            Packet::Nak {
+                session: 2,
+                first: 0,
+                count: 1
+            },
+            Duration::ZERO
+        ));
+    }
+    let mut bytes = [0; dart::MAX_PACKED_DATAGRAM];
+    let repaired = prefix
+        .prepare_packed_prefix(
+            0,
+            &mut DataBatch::new(Duration::ZERO, grouped),
+            &mut bytes,
+            128,
+        )
+        .unwrap();
+    assert_eq!(
+        repaired.0,
+        dart::Transmit::Data {
+            sequence: 0,
+            repair: true
+        }
+    );
+    assert_eq!(repaired.2, 1);
 }
 
 #[test]
@@ -1081,17 +1110,7 @@ fn packing_is_immediate_bounded_and_retained_until_acknowledged() {
     sender.submit(message(0)).unwrap();
     let mut bytes = [0; dart::MAX_DATAGRAM];
     let mut tokens = Vec::with_capacity(64);
-    let mut reserved = 0;
-    let length = sender
-        .prepare_packed_data(
-            0,
-            Duration::ZERO,
-            false,
-            &mut reserved,
-            &mut bytes,
-            &mut tokens,
-        )
-        .unwrap();
+    let length = prepare_packed(&mut sender, &mut bytes, &mut tokens).unwrap();
     assert!(matches!(
         dart::decode_packet(&bytes[..length]),
         Some(Packet::Data { sequence: 0, .. })
@@ -1101,17 +1120,7 @@ fn packing_is_immediate_bounded_and_retained_until_acknowledged() {
     for sequence in 1..128 {
         sender.submit(message(sequence)).unwrap();
     }
-    reserved = 0;
-    let length = sender
-        .prepare_packed_data(
-            0,
-            Duration::ZERO,
-            false,
-            &mut reserved,
-            &mut bytes,
-            &mut tokens,
-        )
-        .unwrap();
+    let length = prepare_packed(&mut sender, &mut bytes, &mut tokens).unwrap();
     let Packet::Packed {
         session,
         first,
@@ -1147,9 +1156,7 @@ fn packed_decoder_rejects_incomplete_oversized_and_wrapping_records() {
     }
     let mut bytes = [0; dart::MAX_DATAGRAM];
     let mut tokens = Vec::with_capacity(64);
-    let length = sender
-        .prepare_packed_data(0, Duration::ZERO, false, &mut 0, &mut bytes, &mut tokens)
-        .unwrap();
+    let length = prepare_packed(&mut sender, &mut bytes, &mut tokens).unwrap();
     for prefix in 0..length {
         assert!(
             dart::decode_packet(&bytes[..prefix]).is_none(),
@@ -1199,9 +1206,7 @@ fn packing_respects_udp_and_preallocated_token_capacity() {
         }
         let mut bytes = vec![0; mtu];
         let mut tokens = Vec::with_capacity(capacity);
-        let length = sender
-            .prepare_packed_data(0, Duration::ZERO, false, &mut 0, &mut bytes, &mut tokens)
-            .unwrap();
+        let length = prepare_packed(&mut sender, &mut bytes, &mut tokens).unwrap();
         assert_eq!(tokens.len(), count);
         assert!(length <= mtu);
         assert_eq!(
@@ -1221,16 +1226,12 @@ fn packing_respects_udp_and_preallocated_token_capacity() {
         }
         sender.reduce_packing_mtu();
         tokens.clear();
-        let length = sender
-            .prepare_packed_data(0, Duration::ZERO, false, &mut 0, &mut bytes, &mut tokens)
-            .unwrap();
+        let length = prepare_packed(&mut sender, &mut bytes, &mut tokens).unwrap();
         assert!(length <= dart::MAX_DATAGRAM);
         assert!(dart::decode_packet(&bytes[..length]).is_some());
         assert_eq!(sender.next_send(), 0);
         let mut tokens = Vec::with_capacity(1);
-        let length = sender
-            .prepare_packed_data(0, Duration::ZERO, false, &mut 0, &mut bytes, &mut tokens)
-            .unwrap();
+        let length = prepare_packed(&mut sender, &mut bytes, &mut tokens).unwrap();
         assert_eq!(tokens.len(), 1);
         assert_eq!(length, dart::DATA_HEADER + size);
         assert_eq!(bytes[0], 1);
@@ -1250,9 +1251,7 @@ fn packing_never_skips_a_large_message_and_preserves_empty_bodies() {
         let length = sender
             .prepare_packed_data(
                 first,
-                Duration::ZERO,
-                false,
-                &mut 0,
+                &mut DataBatch::new(Duration::ZERO, false),
                 &mut bytes,
                 &mut tokens,
             )
@@ -1284,9 +1283,7 @@ fn packing_never_skips_a_large_message_and_preserves_empty_bodies() {
     let length = sender
         .prepare_packed_data(
             5,
-            Duration::ZERO,
-            false,
-            &mut 0,
+            &mut DataBatch::new(Duration::ZERO, false),
             &mut bytes,
             &mut Vec::with_capacity(64),
         )
@@ -1319,17 +1316,16 @@ fn congestion_shortens_the_length_table_without_changing_payloads() {
         let mut bytes = [0; dart::MAX_DATAGRAM];
         let mut tokens = Vec::with_capacity(64);
         let initial = sender.congestion_window() - count * (dart::DATA_HEADER + 8);
-        let mut reserved = initial;
-        let length = sender.prepare_packed_data(
-            0,
-            Duration::ZERO,
-            false,
-            &mut reserved,
-            &mut bytes,
-            &mut tokens,
-        );
+        let mut batch = DataBatch {
+            reserved_bytes: initial,
+            ..DataBatch::new(Duration::ZERO, false)
+        };
+        let length = sender.prepare_packed_data(0, &mut batch, &mut bytes, &mut tokens);
         assert_eq!(tokens.len(), count);
-        assert_eq!(reserved, initial + count * (dart::DATA_HEADER + 8));
+        assert_eq!(
+            batch.reserved_bytes,
+            initial + count * (dart::DATA_HEADER + 8)
+        );
         if count == 0 {
             assert!(length.is_none());
             continue;
@@ -1361,51 +1357,17 @@ fn a_lost_packed_datagram_is_repaired_as_individual_messages() {
     for sequence in 0..32 {
         sender.submit(message(sequence)).unwrap();
     }
-    let mut bytes = [0; dart::MAX_DATAGRAM];
-    let mut delayed = Vec::new();
-    for batch in 0..2 {
-        let mut tokens = Vec::with_capacity(16);
-        let length = sender
-            .prepare_packed_data(
-                batch * 16,
-                Duration::ZERO,
-                false,
-                &mut 0,
-                &mut bytes,
-                &mut tokens,
-            )
-            .unwrap();
-        for token in tokens {
-            sender.commit_transmit(token, Duration::ZERO);
-        }
-        if batch == 0 {
-            delayed.extend_from_slice(&bytes[..length]);
-            continue;
-        }
-        let Packet::Packed {
-            session,
-            first,
-            messages,
-        } = dart::decode_packet(&bytes[..length]).unwrap()
-        else {
-            panic!()
-        };
-        for (offset, payload) in messages.iter().enumerate() {
-            receiver.commit_receive(
-                first + offset as u64,
-                Message::from_slice(payload),
-                Ecn::NotEct,
-                Duration::ZERO,
-            );
-        }
-        assert_eq!(session, 2);
-    }
+    let delayed = send_second_packed_batch(&mut sender, &mut receiver);
     assert!(receiver.take_received().is_none());
+
+    // Repairs travel as individual messages and fill the gap.
     let now = Duration::from_micros(100);
     feedback(&mut receiver, &mut sender, now, false);
     for _ in 0..16 {
         assert!(transfer(&mut sender, &mut receiver, now, false));
     }
+
+    // The late original datagram is now only duplicates.
     let Packet::Packed {
         session,
         first,
@@ -1420,6 +1382,7 @@ fn a_lost_packed_datagram_is_repaired_as_individual_messages() {
             Admission::Duplicate
         );
     }
+
     feedback(&mut receiver, &mut sender, now, false);
     assert_eq!(sender.outstanding(), 0);
     assert_eq!(receiver.stats().duplicates, 16);
@@ -1431,6 +1394,48 @@ fn a_lost_packed_datagram_is_repaired_as_individual_messages() {
     }
     receiver.release_receive(32);
     assert_eq!(receiver.receive_right_edge(), 64);
+}
+
+/// Send sequences 0..32 as two PACKED datagrams. Only the second one
+/// reaches `receiver`; the first is returned undelivered.
+fn send_second_packed_batch(sender: &mut Session, receiver: &mut Session) -> Vec<u8> {
+    let mut bytes = [0; dart::MAX_DATAGRAM];
+    let mut delayed = Vec::new();
+    for batch in 0..2 {
+        let mut tokens = Vec::with_capacity(16);
+        let length = sender
+            .prepare_packed_data(
+                batch * 16,
+                &mut DataBatch::new(Duration::ZERO, false),
+                &mut bytes,
+                &mut tokens,
+            )
+            .unwrap();
+        for token in tokens {
+            sender.commit_transmit(token, Duration::ZERO);
+        }
+        if batch == 0 {
+            delayed.extend_from_slice(&bytes[..length]);
+            continue;
+        }
+
+        let Packet::Packed {
+            session,
+            first,
+            messages,
+        } = dart::decode_packet(&bytes[..length]).unwrap()
+        else {
+            panic!()
+        };
+        for (offset, payload) in messages.iter().enumerate() {
+            receiver.commit_receive(
+                Receipt::new(first + offset as u64, Ecn::NotEct, Duration::ZERO),
+                Message::from_slice(payload),
+            );
+        }
+        assert_eq!(session, 2);
+    }
+    delayed
 }
 
 #[test]
@@ -1446,9 +1451,7 @@ fn packed_group_metadata_and_variable_bodies_preserve_boundaries() {
     let length = sender
         .prepare_packed_data(
             0,
-            Duration::ZERO,
-            true,
-            &mut 0,
+            &mut DataBatch::new(Duration::ZERO, true),
             &mut bytes,
             &mut Vec::with_capacity(4),
         )
@@ -1471,100 +1474,145 @@ fn packed_group_metadata_and_variable_bodies_preserve_boundaries() {
 
 #[test]
 fn deterministic_fault_link_recovers_reordering_duplication_and_burst_loss() {
-    use std::collections::VecDeque;
     for congestion in [DartCongestion::Lan, DartCongestion::Adaptive] {
         for seed in 1..=8u64 {
-            let config = SessionConfig {
-                window: 8,
-                congestion,
-                ecn: false,
-                max_send_rate: None,
-            };
-            let mut sender = Session::new(1, 2, config);
-            let mut receiver = Session::new(2, 1, config);
-            feedback(&mut receiver, &mut sender, Duration::ZERO, false);
-            let mut random = seed;
-            let mut link: VecDeque<(bool, Vec<u8>)> = VecDeque::new();
-            let mut submitted = 0u64;
-            let mut delivered = 0u64;
+            let mut link = FaultLink::new(congestion, seed);
             for tick in 0..400_000u64 {
-                let now = Duration::from_micros(tick * 5);
-                sender.handle_timeout(now);
-                receiver.handle_timeout(now);
-                for _ in 0..4 {
-                    if submitted < 64 && sender.submit(message(submitted)).is_ok() {
-                        submitted += 1;
-                    } else {
-                        break;
-                    }
-                }
-                let mut bytes = [0; dart::MAX_DATAGRAM];
-                for (to_sender, core) in [(false, &mut sender), (true, &mut receiver)] {
-                    for _ in 0..3 {
-                        let Some((token, length)) = core.prepare_control(now, &mut bytes) else {
-                            break;
-                        };
-                        core.commit_transmit(token, now);
-                        link.push_back((to_sender, bytes[..length].to_vec()));
-                    }
-                }
-                let sequence = sender.next_repair().unwrap_or_else(|| sender.next_send());
-                let mut tokens = Vec::with_capacity(dart::MAX_PACKED_MESSAGES);
-                let mut reserved = 0;
-                if let Some(length) = sender.prepare_packed_data(
-                    sequence,
-                    now,
-                    false,
-                    &mut reserved,
-                    &mut bytes,
-                    &mut tokens,
-                ) {
-                    for token in tokens {
-                        sender.commit_transmit(token, now);
-                    }
-                    link.push_back((false, bytes[..length].to_vec()));
-                }
-                random = random
-                    .wrapping_mul(6_364_136_223_846_793_005)
-                    .wrapping_add(1);
-                let packet = if random & 1 == 0 {
-                    link.pop_front()
-                } else {
-                    link.pop_back()
-                };
-                if let Some((to_sender, bytes)) = packet {
-                    let fault = tick < 3000;
-                    let dropped = fault && (random % 7 == 0 || (100..200).contains(&tick));
-                    if !dropped {
-                        let repetitions = if fault && random % 11 == 0 { 2 } else { 1 };
-                        for _ in 0..repetitions {
-                            let packet = dart::decode_packet(&bytes).unwrap();
-                            if !receive_packet(&mut receiver, packet, now) {
-                                if to_sender {
-                                    sender.handle_control(packet, now);
-                                } else {
-                                    receiver.handle_control(packet, now);
-                                }
-                            }
-                        }
-                    }
-                }
-                while let Some(message) = receiver.take_received() {
-                    assert_eq!(message.part_slice(0).unwrap(), delivered.to_le_bytes());
-                    delivered += 1;
-                    receiver.release_receive(1);
-                }
-                assert!(sender.outstanding() <= 8);
-                assert!(link.len() <= 64);
-                if delivered == 64 && sender.outstanding() == 0 {
+                link.tick(tick, Duration::from_micros(tick * 5));
+                if link.delivered == 64 && link.sender.outstanding() == 0 {
                     break;
                 }
             }
             assert_eq!(
-                (submitted, delivered, sender.outstanding()),
+                (link.submitted, link.delivered, link.sender.outstanding()),
                 (64, 64, 0),
                 "{congestion:?} seed {seed}"
             );
+        }
+    }
+}
+
+/// Two sessions joined by a seeded link that reorders, duplicates, and
+/// drops datagrams. Faults stop after tick 3000; recovery must follow.
+struct FaultLink {
+    sender: Session,
+    receiver: Session,
+    /// Datagrams in flight; `true` travels toward the sender.
+    queue: std::collections::VecDeque<(bool, Vec<u8>)>,
+    random: u64,
+    submitted: u64,
+    delivered: u64,
+}
+
+impl FaultLink {
+    fn new(congestion: DartCongestion, seed: u64) -> Self {
+        let config = SessionConfig {
+            window: 8,
+            congestion,
+            ecn: false,
+            max_send_rate: None,
+        };
+        let mut sender = Session::new(1, 2, config);
+        let mut receiver = Session::new(2, 1, config);
+        feedback(&mut receiver, &mut sender, Duration::ZERO, false);
+        Self {
+            sender,
+            receiver,
+            queue: std::collections::VecDeque::new(),
+            random: seed,
+            submitted: 0,
+            delivered: 0,
+        }
+    }
+
+    fn tick(&mut self, tick: u64, now: Duration) {
+        self.sender.handle_timeout(now);
+        self.receiver.handle_timeout(now);
+        for _ in 0..4 {
+            if self.submitted < 64 && self.sender.submit(message(self.submitted)).is_ok() {
+                self.submitted += 1;
+            } else {
+                break;
+            }
+        }
+
+        self.transmit(now);
+        self.deliver_one(tick, now);
+        while let Some(message) = self.receiver.take_received() {
+            assert_eq!(message.part_slice(0).unwrap(), self.delivered.to_le_bytes());
+            self.delivered += 1;
+            self.receiver.release_receive(1);
+        }
+
+        assert!(self.sender.outstanding() <= 8);
+        assert!(self.queue.len() <= 64);
+    }
+
+    /// Queue both sides' control packets and the sender's next data.
+    fn transmit(&mut self, now: Duration) {
+        let mut bytes = [0; dart::MAX_DATAGRAM];
+        for (to_sender, core) in [(false, &mut self.sender), (true, &mut self.receiver)] {
+            for _ in 0..3 {
+                let Some((token, length)) = core.prepare_control(now, &mut bytes) else {
+                    break;
+                };
+                core.commit_transmit(token, now);
+                self.queue.push_back((to_sender, bytes[..length].to_vec()));
+            }
+        }
+
+        let sender = &mut self.sender;
+        let sequence = sender.next_repair().unwrap_or_else(|| sender.next_send());
+        let mut tokens = Vec::with_capacity(dart::MAX_PACKED_MESSAGES);
+        if let Some(length) = sender.prepare_packed_data(
+            sequence,
+            &mut DataBatch::new(now, false),
+            &mut bytes,
+            &mut tokens,
+        ) {
+            for token in tokens {
+                sender.commit_transmit(token, now);
+            }
+            self.queue.push_back((false, bytes[..length].to_vec()));
+        }
+    }
+
+    /// Take one datagram from a random end of the queue. While faults are
+    /// active it may be dropped or delivered twice.
+    fn deliver_one(&mut self, tick: u64, now: Duration) {
+        self.random = self
+            .random
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
+        let random = self.random;
+        let packet = if random & 1 == 0 {
+            self.queue.pop_front()
+        } else {
+            self.queue.pop_back()
+        };
+        let Some((to_sender, bytes)) = packet else {
+            return;
+        };
+
+        let fault = tick < 3000;
+        let dropped = fault && (random.is_multiple_of(7) || (100..200).contains(&tick));
+        if dropped {
+            return;
+        }
+        let repetitions = if fault && random.is_multiple_of(11) {
+            2
+        } else {
+            1
+        };
+        for _ in 0..repetitions {
+            let packet = dart::decode_packet(&bytes).unwrap();
+            if !receive_packet(&mut self.receiver, packet, now) {
+                if to_sender {
+                    self.sender.handle_control(packet, now);
+                } else {
+                    self.receiver.handle_control(packet, now);
+                }
+            }
         }
     }
 }

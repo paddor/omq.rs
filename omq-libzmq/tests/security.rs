@@ -697,14 +697,43 @@ fn zap_user_id_and_metadata_are_attached_to_every_received_frame() {
     zmq_ctx_term(ctx);
 }
 
-#[test]
-fn zap_metadata_cannot_be_shadowed_by_peer_properties() {
+/// Speak raw ZMTP: a NULL handshake whose READY claims `User-Id` and `Role`
+/// in several spellings, then one "hello" message.
+fn send_null_ready_with_spoofed_properties(peer: &mut std::net::TcpStream) {
     use std::io::{Read, Write};
-    use std::net::TcpStream;
 
     use bytes::{Bytes, BytesMut};
     use omq_tokio::proto::{Command, Greeting, MechanismName, PeerProperties, command, frame};
     use omq_tokio::{Frame, FrameFlags, Message, Payload, SocketType};
+
+    let mut wire = BytesMut::new();
+    Greeting::current(MechanismName::NULL, false).encode(&mut wire);
+    peer.write_all(&wire).unwrap();
+    peer.read_exact(&mut [0; 64]).unwrap();
+    wire.clear();
+
+    let mut properties = PeerProperties::default().with_socket_type(SocketType::Push);
+    for name in ["User-Id", "user-id", "USER-ID", "Role", "role", "ROLE"] {
+        properties.add(name, Bytes::from_static(b"admin"));
+    }
+    properties.add("X-Application", Bytes::from_static(b"client"));
+
+    let mut ready = BytesMut::new();
+    command::encode(&Command::Ready(properties), &mut ready);
+    frame::encode_frame(
+        &Frame {
+            flags: FrameFlags::COMMAND,
+            payload: Payload::from_bytes(ready.freeze()),
+        },
+        &mut wire,
+    );
+    frame::encode_message_flat(&Message::single("hello"), &mut wire);
+    peer.write_all(&wire).unwrap();
+}
+
+#[test]
+fn zap_metadata_cannot_be_shadowed_by_peer_properties() {
+    use std::net::TcpStream;
 
     let ctx = zmq_ctx_new();
     let zap = start_zap_handler(ctx, ZMQ_REP, |request| {
@@ -728,30 +757,11 @@ fn zap_metadata_cannot_be_shadowed_by_peer_properties() {
     peer.set_write_timeout(Some(Duration::from_secs(5)))
         .unwrap();
 
-    let mut wire = BytesMut::new();
-    Greeting::current(MechanismName::NULL, false).encode(&mut wire);
-    peer.write_all(&wire).unwrap();
-    peer.read_exact(&mut [0; 64]).unwrap();
-    wire.clear();
-
-    let mut properties = PeerProperties::default().with_socket_type(SocketType::Push);
-    for name in ["User-Id", "user-id", "USER-ID", "Role", "role", "ROLE"] {
-        properties.add(name, Bytes::from_static(b"admin"));
-    }
-    properties.add("X-Application", Bytes::from_static(b"client"));
-    let mut ready = BytesMut::new();
-    command::encode(&Command::Ready(properties), &mut ready);
-    frame::encode_frame(
-        &Frame {
-            flags: FrameFlags::COMMAND,
-            payload: Payload::from_bytes(ready.freeze()),
-        },
-        &mut wire,
-    );
-    frame::encode_message_flat(&Message::single("hello"), &mut wire);
-    peer.write_all(&wire).unwrap();
+    send_null_ready_with_spoofed_properties(&mut peer);
     zap.join().unwrap();
 
+    // ZAP's User-Id and Role win, peer spellings of them are dropped, and
+    // unrelated peer properties pass through.
     let mut message = ZmqMsg::new();
     assert_eq!(zmq_msg_recv(message.0.as_mut_ptr().cast(), pull, 0), 5);
     assert_eq!(msg_property(&message, c"User-Id"), Some(b"alice".to_vec()));
@@ -773,11 +783,10 @@ fn zap_metadata_cannot_be_shadowed_by_peer_properties() {
     zmq_ctx_term(ctx);
 }
 
-#[test]
-fn zap_router_can_pipeline_requests_from_multiple_servers() {
-    let server_ctx = zmq_ctx_new();
-    assert_eq!(zmq_ctx_set(server_ctx, ZMQ_IO_THREADS, 2), 0);
-    let handler_ctx = server_ctx as usize;
+/// ZAP ROUTER that reads two requests before answering either, so both
+/// handshakes must be in flight at once. Returns the requests.
+fn spawn_pipelined_zap_router(ctx: *mut c_void) -> std::thread::JoinHandle<[Vec<Vec<u8>>; 2]> {
+    let handler_ctx = ctx as usize;
     let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
     let zap = std::thread::spawn(move || {
         let ctx = handler_ctx as *mut c_void;
@@ -785,9 +794,11 @@ fn zap_router_can_pipeline_requests_from_multiple_servers() {
         set_timeo(router, 5000);
         assert_eq!(zmq_bind(router, c"inproc://zeromq.zap.01".as_ptr()), 0);
         ready_tx.send(()).unwrap();
+
         let requests = [recv_multipart(router), recv_multipart(router)];
         assert_ne!(requests[0][0], requests[1][0]);
         for request in &requests {
+            // [route, delimiter, version, request id, status, text, user id, metadata]
             let response = [
                 request[0].as_slice(),
                 b"",
@@ -804,6 +815,36 @@ fn zap_router_can_pipeline_requests_from_multiple_servers() {
         requests
     });
     ready_rx.recv().unwrap();
+    zap
+}
+
+/// One PLAIN PUSH client per context; each sends its username as the body.
+fn connect_plain_clients(
+    addr: &std::ffi::CStr,
+    contexts: [*mut c_void; 2],
+    credentials: [(&[u8], &[u8]); 2],
+) -> [*mut c_void; 2] {
+    std::array::from_fn(|index| {
+        let ctx = contexts[index];
+        let (username, password) = credentials[index];
+        let push = zmq_socket(ctx, ZMQ_PUSH);
+        set_bytes(push, ZMQ_PLAIN_USERNAME, username);
+        set_bytes(push, ZMQ_PLAIN_PASSWORD, password);
+        set_timeo(push, 5000);
+        assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
+        assert_eq!(
+            zmq_send(push, username.as_ptr().cast(), username.len(), 0),
+            i32::try_from(username.len()).unwrap()
+        );
+        push
+    })
+}
+
+#[test]
+fn zap_router_can_pipeline_requests_from_multiple_servers() {
+    let server_ctx = zmq_ctx_new();
+    assert_eq!(zmq_ctx_set(server_ctx, ZMQ_IO_THREADS, 2), 0);
+    let zap = spawn_pipelined_zap_router(server_ctx);
 
     let pull = zmq_socket(server_ctx, ZMQ_PULL);
     set_i32(pull, ZMQ_PLAIN_SERVER, 1);
@@ -816,20 +857,7 @@ fn zap_router_can_pipeline_requests_from_multiple_servers() {
         (b"alice".as_slice(), b"secret".as_slice()),
         (b"bob".as_slice(), b"hunter2".as_slice()),
     ];
-    let clients: [*mut c_void; 2] = std::array::from_fn(|index| {
-        let ctx = client_contexts[index];
-        let (username, password) = credentials[index];
-        let push = zmq_socket(ctx, ZMQ_PUSH);
-        set_bytes(push, ZMQ_PLAIN_USERNAME, username);
-        set_bytes(push, ZMQ_PLAIN_PASSWORD, password);
-        set_timeo(push, 5000);
-        assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
-        assert_eq!(
-            zmq_send(push, username.as_ptr().cast(), username.len(), 0),
-            i32::try_from(username.len()).unwrap()
-        );
-        push
-    });
+    let clients = connect_plain_clients(&addr, client_contexts, credentials);
 
     let requests = zap.join().unwrap();
     assert_eq!(requests[0][7], b"PLAIN");

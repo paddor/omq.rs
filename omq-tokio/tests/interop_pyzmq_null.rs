@@ -89,6 +89,40 @@ ctx.term()
     wait_success(child, "pyzmq PUSH").await;
 }
 
+/// Reads the endpoint a pyzmq PULL prints once bound (the resolved port for
+/// `tcp://...:0`). A blocking reader then collects up to `lines` received
+/// messages, one per line.
+async fn read_endpoint_then_lines(
+    stdout: std::process::ChildStdout,
+    lines: usize,
+) -> (Endpoint, tokio::task::JoinHandle<Vec<String>>) {
+    let (endpoint_tx, endpoint_rx) = tokio::sync::oneshot::channel::<Endpoint>();
+    let reader = tokio::task::spawn_blocking(move || {
+        use std::io::{BufRead, BufReader};
+
+        let mut r = BufReader::new(stdout);
+        let mut first = String::new();
+        r.read_line(&mut first).unwrap();
+        let _ = endpoint_tx.send(first.trim().parse().unwrap());
+
+        let mut collected = Vec::new();
+        for _ in 0..lines {
+            let mut buf = String::new();
+            if r.read_line(&mut buf).unwrap_or(0) == 0 {
+                break;
+            }
+            collected.push(buf.trim().to_string());
+        }
+        collected
+    });
+
+    let endpoint = tokio::time::timeout(Duration::from_secs(5), endpoint_rx)
+        .await
+        .expect("pyzmq PULL did not become ready")
+        .unwrap();
+    (endpoint, reader)
+}
+
 async fn rust_push_to_pyzmq_pull(endpoint: Endpoint) {
     let script = r#"
 import os, sys, zmq
@@ -117,30 +151,11 @@ ctx.term()
 
     let stdout = child.stdout.take().unwrap();
     let mut stderr = child.stderr.take().unwrap();
-    let (endpoint_tx, endpoint_rx) = tokio::sync::oneshot::channel::<Endpoint>();
-    let reader = tokio::task::spawn_blocking(move || {
-        use std::io::{BufRead, BufReader};
-        let mut r = BufReader::new(stdout);
-        let mut first = String::new();
-        r.read_line(&mut first).unwrap();
-        let _ = endpoint_tx.send(first.trim().parse().unwrap());
-        let mut lines = Vec::new();
-        for _ in 0..3 {
-            let mut buf = String::new();
-            if r.read_line(&mut buf).unwrap_or(0) == 0 {
-                break;
-            }
-            lines.push(buf.trim().to_string());
-        }
-        lines
-    });
-    let connect_endpoint = tokio::time::timeout(Duration::from_secs(5), endpoint_rx)
-        .await
-        .expect("pyzmq PULL did not become ready")
-        .unwrap();
+    let (connect_endpoint, reader) = read_endpoint_then_lines(stdout, 3).await;
 
     let push = Socket::new(SocketType::Push, Options::default());
     push.connect(connect_endpoint).await.unwrap();
+
     for i in 0..3 {
         push.send(Message::single(format!("rust-null-{i}")))
             .await

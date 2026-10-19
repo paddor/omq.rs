@@ -44,6 +44,7 @@ mod shm;
 mod stream;
 mod write;
 
+pub(crate) use builder::ActorLink;
 pub(crate) use receive::ReceiveProfile;
 pub use stream::{ChunkWrite, DriverStream, DriverWrite};
 

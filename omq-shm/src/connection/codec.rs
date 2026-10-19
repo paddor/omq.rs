@@ -75,8 +75,7 @@ impl Connection {
         if !self.register_sources(&slot, kind)? {
             return Ok(None);
         }
-        let offset = source.as_ptr() as usize - slot.mapping.address();
-        let reference = self.publish_lease(&slot, count, kind, offset, source.len())?;
+        let reference = self.publish_lease(&slot, source, count, kind)?;
         Ok(Some(replace_body(
             message,
             Message::from_slice(&reference.encode()),
@@ -98,14 +97,15 @@ impl Connection {
         Ok(self.register_region(&slot.mapping)?)
     }
 
+    /// Lease `source`, a body inside `slot`'s mapping, to the peer.
     fn publish_lease(
         &mut self,
         slot: &Slot,
+        source: &[u8],
         count: usize,
         kind: u8,
-        offset: usize,
-        length: usize,
     ) -> Result<wire::Reference> {
+        let offset = source.as_ptr() as usize - slot.mapping.address();
         let generation = self
             .generation
             .checked_add(GENERATION_STEP)
@@ -115,7 +115,7 @@ impl Connection {
             id: slot.mapping.id,
             token: slot.mapping.token,
             offset,
-            length,
+            length: source.len(),
             lease: self.free.pop_front().expect("reserved lease credit"),
             generation,
         };

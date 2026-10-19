@@ -33,6 +33,47 @@ pub enum Ecn {
     Ce,
 }
 
+/// One received sequence unit and the metadata of its carrying datagram.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Receipt {
+    /// Sequence position accepted by [`Session::classify`].
+    pub sequence: u64,
+    /// ECN codepoint of the carrying UDP datagram.
+    pub ecn: Ecn,
+    /// Owner clock at receipt.
+    pub now: Duration,
+}
+
+impl Receipt {
+    /// Describe one received sequence unit.
+    pub const fn new(sequence: u64, ecn: Ecn, now: Duration) -> Self {
+        Self { sequence, ecn, now }
+    }
+}
+
+/// Inputs shared by every data packet prepared in one send batch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DataBatch {
+    /// Owner clock used for pacing.
+    pub now: Duration,
+    /// Whether retained messages carry a RADIO group part.
+    pub grouped: bool,
+    /// Wire bytes of preceding uncommitted initial packets in this batch,
+    /// so the complete submission fits the congestion window.
+    pub reserved_bytes: usize,
+}
+
+impl DataBatch {
+    /// Start an empty batch.
+    pub const fn new(now: Duration, grouped: bool) -> Self {
+        Self {
+            now,
+            grouped,
+            reserved_bytes: 0,
+        }
+    }
+}
+
 /// Fixed limits for one peer, independent in each direction.
 #[derive(Clone, Copy, Debug)]
 pub struct SessionConfig {
@@ -90,7 +131,13 @@ impl Prepared<'_> {
     fn encode(&self, remote: u64, sequence: u64, output: &mut [u8]) -> Option<usize> {
         match self.fragment {
             Some(part) => {
-                super::encode_fragment(remote, sequence, part.length, self.body, self.group, output)
+                let header = super::FragmentHeader {
+                    session: remote,
+                    sequence,
+                    length: part.length,
+                    group: self.group,
+                };
+                super::encode_fragment(header, self.body, output)
             }
             None => super::encode_sequenced_data(remote, sequence, self.body, self.group, output),
         }
@@ -212,13 +259,11 @@ impl Session {
     /// Reserve an owned allocation for FIRST before acknowledging it.
     pub fn commit_fragment(
         &mut self,
-        sequence: u64,
+        receipt: Receipt,
         length: Option<u64>,
         message: Message,
-        ecn: Ecn,
-        now: Duration,
     ) -> bool {
-        self.commit_fragment_with(sequence, length, message, ecn, now, |length| {
+        self.commit_fragment_with(receipt, length, message, |length| {
             let mut body = Vec::new();
             body.try_reserve_exact(length).ok()?;
             Some(body)
@@ -459,15 +504,18 @@ impl<B: FragmentBuffer> Session<B> {
 
     /// Commit only after complete body ownership is secured. Receipt and
     /// delivery positions are separate while application queues are full.
-    pub fn commit_receive(&mut self, sequence: u64, message: Message, ecn: Ecn, now: Duration) {
+    pub fn commit_receive(&mut self, receipt: Receipt, message: Message) {
+        let sequence = receipt.sequence;
         assert!(sequence >= self.receive_next && sequence < self.receive_credit);
         let index = self.index(sequence);
         assert!(self.rx[index].is_none());
+
         if sequence != self.receive_next {
             self.stats.reordered += 1;
         }
         self.rx[index] = Some(message);
-        self.record_receive(sequence, ecn, now);
+        self.record_receive(receipt);
+
         // In-order receipt without a retained successor needs no prefix scan.
         if sequence == self.receive_next && self.rx[self.index(sequence + 1)].is_none() {
             self.receive_next += 1;
@@ -482,12 +530,13 @@ impl<B: FragmentBuffer> Session<B> {
     #[inline]
     pub fn commit_receive_with_delivery(
         &mut self,
-        sequence: u64,
+        receipt: Receipt,
         message: Message,
-        ecn: Ecn,
-        now: Duration,
         deliver: impl FnOnce(Message) -> Result<(), Message>,
     ) -> bool {
+        let sequence = receipt.sequence;
+        // Only the next in-order unit, outside fragment assembly and without
+        // shared storage, may skip its receive slot.
         if sequence != self.receive_next
             || sequence != self.deliver_next
             || self.assembly.is_some()
@@ -497,40 +546,45 @@ impl<B: FragmentBuffer> Session<B> {
                 _ => message.retained_size() != Some(std::mem::size_of::<Message>()),
             }
         {
-            self.commit_receive(sequence, message, ecn, now);
+            self.commit_receive(receipt, message);
             return false;
         }
+
         assert!(sequence < self.receive_credit);
         assert!(self.rx[self.index(sequence)].is_none());
         let Err(message) = deliver(message) else {
-            self.record_receive(sequence, ecn, now);
+            self.record_receive(receipt);
             self.receive_next += 1;
             self.deliver_next += 1;
             if self.rx[self.index(self.receive_next)].is_some() {
                 self.advance_receipt();
             }
+            // Inline delivery retains no storage, so its credit returns now.
             self.release_receive(1);
             return true;
         };
-        self.commit_receive(sequence, message, ecn, now);
+
+        self.commit_receive(receipt, message);
         false
     }
 
-    fn record_receive(&mut self, sequence: u64, ecn: Ecn, now: Duration) {
+    fn record_receive(&mut self, receipt: Receipt) {
         self.received += 1;
-        self.ecn_counts[match ecn {
+        // Index order matches `Status::counts`.
+        self.ecn_counts[match receipt.ecn {
             Ecn::Ect0 => 0,
             Ecn::Ect1 => 1,
             Ecn::Ce => 2,
             Ecn::NotEct => 3,
             Ecn::Unavailable => 4,
         }] += 1;
-        self.gap_high = self.gap_high.max(sequence.saturating_add(1));
+        self.gap_high = self.gap_high.max(receipt.sequence.saturating_add(1));
+
         self.status_messages += 1;
         if self.status_messages >= self.status_threshold {
             self.status_pending = true;
         }
-        self.status_at = self.status_at.min(now + STATUS_INTERVAL);
+        self.status_at = self.status_at.min(receipt.now + STATUS_INTERVAL);
     }
 
     fn advance_receipt(&mut self) -> bool {
@@ -885,22 +939,22 @@ impl<B: FragmentBuffer> Session<B> {
         grouped: bool,
         output: &mut [u8],
     ) -> Option<(Transmit, usize)> {
-        self.prepare_batch_data(sequence, now, grouped, 0, output)
+        self.prepare_batch_data(sequence, DataBatch::new(now, grouped), output)
     }
 
-    /// Prepare one packet in a batch. `reserved_bytes` must include every
-    /// preceding, uncommitted initial packet in this batch so the complete
-    /// submission fits the congestion window. Repairs are submitted alone.
+    /// Prepare one packet in a batch. `batch.reserved_bytes` must include
+    /// every preceding, uncommitted initial packet in this batch so the
+    /// complete submission fits the congestion window. Repairs are submitted
+    /// alone.
     pub fn prepare_batch_data(
         &mut self,
         sequence: u64,
-        now: Duration,
-        grouped: bool,
-        reserved_bytes: usize,
+        batch: DataBatch,
         output: &mut [u8],
     ) -> Option<(Transmit, usize)> {
         let remote = self.remote;
-        let prepared = self.prepare_parts(sequence, now, grouped, reserved_bytes)?;
+        let prepared =
+            self.prepare_parts(sequence, batch.now, batch.grouped, batch.reserved_bytes)?;
         let length = prepared.encode(remote, sequence, output)?;
         Some((prepared.token, length))
     }
@@ -909,25 +963,19 @@ impl<B: FragmentBuffer> Session<B> {
     /// message, payloads over 255 bytes, and every repair retain ordinary DATA
     /// framing. The caller's preallocated token capacity bounds the turn;
     /// this never grows it.
-    /// `reserved_bytes` includes conservative per-message wire costs across
-    /// every prepared datagram and changes only for appended tokens.
+    /// `batch.reserved_bytes` includes conservative per-message wire costs
+    /// across every prepared datagram and changes only for appended tokens.
     pub fn prepare_packed_data(
         &mut self,
         first: u64,
-        now: Duration,
-        grouped: bool,
-        reserved_bytes: &mut usize,
+        batch: &mut DataBatch,
         output: &mut [u8],
         tokens: &mut Vec<Transmit>,
     ) -> Option<usize> {
-        let (first_token, length, count) = self.prepare_packed_prefix(
-            first,
-            now,
-            grouped,
-            reserved_bytes,
-            output,
-            tokens.capacity() - tokens.len(),
-        )?;
+        let max_tokens = tokens.capacity() - tokens.len();
+        let (first_token, length, count) =
+            self.prepare_packed_prefix(first, batch, output, max_tokens)?;
+
         for offset in 0..count {
             tokens.push(if offset == 0 {
                 first_token
@@ -938,6 +986,7 @@ impl<B: FragmentBuffer> Session<B> {
                 }
             });
         }
+
         Some(length)
     }
 
@@ -947,9 +996,7 @@ impl<B: FragmentBuffer> Session<B> {
     pub fn prepare_packed_prefix(
         &mut self,
         first: u64,
-        now: Duration,
-        grouped: bool,
-        reserved_bytes: &mut usize,
+        batch: &mut DataBatch,
         output: &mut [u8],
         max_tokens: usize,
     ) -> Option<(Transmit, usize, usize)> {
@@ -957,12 +1004,63 @@ impl<B: FragmentBuffer> Session<B> {
         if limit == 0 {
             return None;
         }
+
         let remote = self.remote;
+        let count = self.plan_packed(first, limit, output)?;
+        // PACKED needs two messages; a single one keeps DATA framing.
+        if count < 2 {
+            let prepared =
+                self.prepare_parts(first, batch.now, batch.grouped, batch.reserved_bytes)?;
+            let length = prepared.encode(remote, first, output)?;
+            batch.reserved_bytes += prepared.bytes;
+            return Some((prepared.token, length, 1));
+        }
+
+        // The length table sits between the tag and the session ID.
+        output[1 + count..9 + count].copy_from_slice(&remote.to_le_bytes());
+        output[9 + count..DATA_HEADER + count].copy_from_slice(&first.to_le_bytes());
+        // Only initial transmissions at the send cursor may be packed.
+        if first < self.peer_ack || first < self.send_cursor {
+            return None;
+        }
+        if batch.now < self.pace_at {
+            self.stats.congestion_stalls += 1;
+            return None;
+        }
+
+        let (actual, mut length) = self.fill_packed(first, count, batch, output);
+        if actual == 0 {
+            return None;
+        }
+        if actual < count {
+            // Congestion can shorten the planned prefix. Collapse the table,
+            // preserving ordinary DATA framing when only one message fits.
+            let table = if actual == 1 { 0 } else { actual };
+            output.copy_within(1 + count..DATA_HEADER + count, 1 + table);
+            output.copy_within(DATA_HEADER + count..length, DATA_HEADER + table);
+            length -= count - table;
+        }
+
+        output[0] = actual as u8;
+        Some((
+            Transmit::Data {
+                sequence: first,
+                repair: false,
+            },
+            length,
+            actual,
+        ))
+    }
+
+    /// Plan the PACKED length table using cached wire lengths, so the common
+    /// case writes every payload directly to its final position. Returns how
+    /// many leading messages fit.
+    #[inline]
+    fn plan_packed(&self, first: u64, limit: usize, output: &mut [u8]) -> Option<usize> {
         let capacity = output.len().min(self.packed_mtu);
         let mut count = 0;
         let mut payload_bytes = 0;
-        // Plan the table using cached wire lengths. The common case writes
-        // every payload directly to its final position without moving it.
+
         for offset in 0..limit {
             let sequence = first.checked_add(offset as u64)?;
             if sequence >= self.send_next || sequence >= self.peer_credit {
@@ -971,6 +1069,8 @@ impl<B: FragmentBuffer> Session<B> {
             let Some(sent) = self.tx[self.index(sequence)].as_ref() else {
                 break;
             };
+
+            // Each table entry is one byte, so a packed payload is at most 255.
             let payload = sent.bytes - DATA_HEADER;
             if sent.repair
                 || sent.fragment.is_some()
@@ -979,27 +1079,29 @@ impl<B: FragmentBuffer> Session<B> {
             {
                 break;
             }
+
             output[1 + count] = payload as u8;
             payload_bytes += payload;
             count += 1;
         }
-        if count < 2 {
-            let prepared = self.prepare_parts(first, now, grouped, *reserved_bytes)?;
-            let length = prepared.encode(remote, first, output)?;
-            *reserved_bytes += prepared.bytes;
-            return Some((prepared.token, length, 1));
-        }
-        output[1 + count..9 + count].copy_from_slice(&remote.to_le_bytes());
-        output[9 + count..DATA_HEADER + count].copy_from_slice(&first.to_le_bytes());
-        if first < self.peer_ack || first < self.send_cursor {
-            return None;
-        }
-        if now < self.pace_at {
-            self.stats.congestion_stalls += 1;
-            return None;
-        }
+
+        Some(count)
+    }
+
+    /// Copy planned payloads behind a `count`-entry table. Congestion or an
+    /// unexpected shape can stop early. Returns packed messages and length.
+    #[inline]
+    fn fill_packed(
+        &mut self,
+        first: u64,
+        count: usize,
+        batch: &mut DataBatch,
+        output: &mut [u8],
+    ) -> (usize, usize) {
+        let grouped = batch.grouped;
         let mut length = DATA_HEADER + count;
         let mut actual = 0;
+
         for offset in 0..count {
             let sequence = first + offset as u64;
             let sent = self.tx[self.index(sequence)]
@@ -1009,7 +1111,7 @@ impl<B: FragmentBuffer> Session<B> {
                 && !sent.in_flight
                 && self
                     .flight
-                    .saturating_add(*reserved_bytes)
+                    .saturating_add(batch.reserved_bytes)
                     .saturating_add(sent.bytes)
                     > self.cwnd
             {
@@ -1019,6 +1121,7 @@ impl<B: FragmentBuffer> Session<B> {
             if sent.message.len() != 1 + usize::from(grouped) {
                 break;
             }
+
             let payload = usize::from(output[1 + offset]);
             // The plan excludes fragments and repairs. Shape validation at
             // submission and the cached wire length bound this payload.
@@ -1035,30 +1138,13 @@ impl<B: FragmentBuffer> Session<B> {
             } else {
                 destination.copy_from_slice(body);
             }
+
             length += payload;
-            *reserved_bytes += sent.bytes;
+            batch.reserved_bytes += sent.bytes;
             actual += 1;
         }
-        if actual == 0 {
-            return None;
-        }
-        if actual < count {
-            // Congestion can shorten the planned prefix. Collapse the table,
-            // preserving ordinary DATA framing when only one message fits.
-            let table = if actual == 1 { 0 } else { actual };
-            output.copy_within(1 + count..DATA_HEADER + count, 1 + table);
-            output.copy_within(DATA_HEADER + count..length, DATA_HEADER + table);
-            length -= count - table;
-        }
-        output[0] = actual as u8;
-        Some((
-            Transmit::Data {
-                sequence: first,
-                repair: false,
-            },
-            length,
-            actual,
-        ))
+
+        (actual, length)
     }
 
     #[inline]
@@ -1241,10 +1327,8 @@ mod tests {
         s.grant_receive_credit(1);
         assert_eq!(s.receive_right_edge(), 1);
         assert!(s.commit_receive_with_delivery(
-            0,
+            Receipt::new(0, Ecn::NotEct, Duration::ZERO),
             Message::single("small"),
-            Ecn::NotEct,
-            Duration::ZERO,
             |_| Ok(())
         ));
         assert_eq!(s.received_units(), 1);
@@ -1266,7 +1350,11 @@ mod tests {
         assert_eq!(s.classify(1, 1), Admission::Accept);
         // The first waiting body is admitted at any size.
         assert!(s.may_reserve_ahead(48 * mib));
-        assert!(s.commit_fragment(1, Some(48 * mib), chunk, Ecn::Unavailable, Duration::ZERO));
+        assert!(s.commit_fragment(
+            Receipt::new(1, Ecn::Unavailable, Duration::ZERO),
+            Some(48 * mib),
+            chunk
+        ));
         // Further bodies must fit the shared budget.
         assert!(s.may_reserve_ahead(16 * mib));
         assert!(!s.may_reserve_ahead(17 * mib));
@@ -1345,13 +1433,14 @@ mod tests {
         let mut session = session(128);
         for sequence in 1..128 {
             session.commit_receive(
-                sequence,
+                Receipt::new(sequence, Ecn::NotEct, Duration::ZERO),
                 Message::single("data"),
-                Ecn::NotEct,
-                Duration::ZERO,
             );
         }
-        session.commit_receive(0, Message::single("data"), Ecn::NotEct, Duration::ZERO);
+        session.commit_receive(
+            Receipt::new(0, Ecn::NotEct, Duration::ZERO),
+            Message::single("data"),
+        );
         assert_eq!(session.next_receive(), 64);
         assert!(session.poll_progress());
         assert_eq!(session.next_receive(), 128);

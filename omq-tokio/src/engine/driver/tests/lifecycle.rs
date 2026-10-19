@@ -188,33 +188,16 @@ async fn close_interrupts_stalled_outbound_write() {
     .with_data_inbox(client_data_rx);
     let server_task = tokio::spawn(Box::pin(server.run()));
     let mut client_task = tokio::spawn(Box::pin(client.run()));
+    activate_after_handshakes(
+        [&mut client_events_rx, &mut server_events_rx],
+        [&client_inbox_tx, &server_inbox_tx],
+    )
+    .await;
 
-    assert!(matches!(
-        client_events_rx.recv().await,
-        Some((_, PeerEvent::Event(Event::HandshakeSucceeded { .. })))
-    ));
-    assert!(matches!(
-        server_events_rx.recv().await,
-        Some((_, PeerEvent::Event(Event::HandshakeSucceeded { .. })))
-    ));
-    client_inbox_tx
-        .send(PeerDriverCommand::ActivateDataPlane)
-        .await
-        .unwrap();
-    server_inbox_tx
-        .send(PeerDriverCommand::ActivateDataPlane)
-        .await
-        .unwrap();
-
-    let payload = Bytes::from(vec![0xA5; 1024 * 1024]);
-    for _ in 0..3 {
-        client_data_tx
-            .send(PeerDriverData::SendMessage(Message::single(
-                payload.clone(),
-            )))
-            .await
-            .unwrap();
-    }
+    // Nothing drains server events, so the server stops reading and the
+    // client writer stalls on the 64-byte duplex.
+    let payload = Message::single(Bytes::from(vec![0xA5; 1024 * 1024]));
+    send_copies(&client_data_tx, &payload, 3).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(!client_task.is_finished(), "writer did not reach the stall");
     client_inbox_tx
@@ -238,29 +221,19 @@ async fn close_interrupts_stalled_outbound_write() {
         .expect("server driver panicked");
 }
 
+async fn send_copies(data: &mpsc::Sender<PeerDriverData>, message: &Message, count: usize) {
+    for _ in 0..count {
+        data.send(PeerDriverData::SendMessage(message.clone()))
+            .await
+            .unwrap();
+    }
+}
+
 #[cfg(feature = "ws")]
 #[tokio::test]
 async fn peer_ws_close_preserves_coalesced_messages_through_backpressure() {
-    use omq_proto::proto::connection::WsRole;
-
     for direct in [false, true] {
-        let mut push = Connection::new(
-            ConnectionConfig::new(Role::Server, SocketType::Push).ws_role(WsRole::Server),
-        );
-        let mut pull = Connection::new(
-            ConnectionConfig::new(Role::Client, SocketType::Pull).ws_role(WsRole::Client),
-        );
-        for _ in 0..10 {
-            let push_out = drain_transmit(&mut push);
-            let pull_out = drain_transmit(&mut pull);
-            if !push_out.is_empty() {
-                pull.handle_input(Bytes::from(push_out)).unwrap();
-            }
-            if !pull_out.is_empty() {
-                push.handle_input(Bytes::from(pull_out)).unwrap();
-            }
-        }
-        assert!(push.is_ready() && pull.is_ready());
+        let (mut push, mut pull) = ready_ws_push_pull();
         while pull.poll_event().is_some() {}
         let messages = [
             Message::single("before close"),
@@ -294,24 +267,10 @@ async fn peer_ws_close_preserves_coalesced_messages_through_backpressure() {
         let task = tokio::spawn(driver.run());
         tokio::task::yield_now().await;
         for expected in messages {
-            let received = tokio::time::timeout(Duration::from_secs(1), async {
-                if direct {
-                    loop {
-                        if let Some(message) = consumer.prefetch_and_pop() {
-                            consumer.release();
-                            space.notify_changed();
-                            break message;
-                        }
-                        tokio::task::yield_now().await;
-                    }
-                } else {
-                    let (_, event) = event_inbox.recv().await.unwrap();
-                    let PeerEvent::Event(Event::Message(message)) = event else {
-                        panic!("peer closed before delivering {expected:?}: {event:?}");
-                    };
-                    message
-                }
-            })
+            let received = tokio::time::timeout(
+                Duration::from_secs(1),
+                next_delivery(direct, &mut consumer, &space, &mut event_inbox, &expected),
+            )
             .await
             .expect("peer CLOSE discarded a preceding message");
             assert_eq!(received, expected);
@@ -327,26 +286,8 @@ async fn peer_ws_close_preserves_coalesced_messages_through_backpressure() {
 #[cfg(feature = "ws")]
 #[tokio::test]
 async fn graceful_ws_close_drains_data_waits_for_reply_and_keeps_original_deadline() {
-    use omq_proto::proto::connection::WsRole;
-
     for reply in [false, true] {
-        let mut push = Connection::new(
-            ConnectionConfig::new(Role::Server, SocketType::Push).ws_role(WsRole::Server),
-        );
-        let mut pull = Connection::new(
-            ConnectionConfig::new(Role::Client, SocketType::Pull).ws_role(WsRole::Client),
-        );
-        for _ in 0..10 {
-            let push_out = drain_transmit(&mut push);
-            let pull_out = drain_transmit(&mut pull);
-            if !push_out.is_empty() {
-                pull.handle_input(Bytes::from(push_out)).unwrap();
-            }
-            if !pull_out.is_empty() {
-                push.handle_input(Bytes::from(pull_out)).unwrap();
-            }
-        }
-        assert!(push.is_ready() && pull.is_ready());
+        let (mut push, mut pull) = ready_ws_push_pull();
         while push.poll_event().is_some() {}
         let (stream, mut remote) = tokio::io::duplex(64);
         let (commands, inbox) = mpsc::channel(4);
@@ -372,16 +313,7 @@ async fn graceful_ws_close_drains_data_waits_for_reply_and_keeps_original_deadli
         let task = tokio::spawn(driver.run());
         tokio::time::sleep(Duration::from_millis(75)).await;
         assert!(!task.is_finished(), "staged data was dropped during drain");
-        let mut buffer = [0; 1024];
-        while !pull.is_closed() {
-            let count = tokio::time::timeout_at(deadline.into(), remote.read(&mut buffer))
-                .await
-                .unwrap()
-                .unwrap();
-            assert_ne!(count, 0, "driver closed without the WS CLOSE frame");
-            pull.handle_input(Bytes::copy_from_slice(&buffer[..count]))
-                .unwrap();
-        }
+        read_until_ws_close(&mut remote, &mut pull, deadline).await;
         assert_eq!(
             pull.poll_message().unwrap().part_slice(0).unwrap(),
             &[9; 4096]
@@ -397,6 +329,59 @@ async fn graceful_ws_close_drains_data_waits_for_reply_and_keeps_original_deadli
             .await
             .expect("close restarted its deadline after draining data")
             .unwrap()
+            .unwrap();
+    }
+}
+
+/// Ready WS PUSH server and PULL client codecs. Handshake events stay queued.
+#[cfg(feature = "ws")]
+fn ready_ws_push_pull() -> (Connection, Connection) {
+    use omq_proto::proto::connection::WsRole;
+    ready_connections(
+        ConnectionConfig::new(Role::Server, SocketType::Push).ws_role(WsRole::Server),
+        ConnectionConfig::new(Role::Client, SocketType::Pull).ws_role(WsRole::Client),
+    )
+}
+
+/// Next delivered message, from the yring sink when `direct`, else from the
+/// actor mailbox.
+#[cfg(feature = "ws")]
+async fn next_delivery(
+    direct: bool,
+    consumer: &mut yring::Consumer<Message>,
+    space: &StateSignal,
+    event_inbox: &mut mpsc::Receiver<(u64, PeerEvent)>,
+    expected: &Message,
+) -> Message {
+    if !direct {
+        let (_, event) = event_inbox.recv().await.unwrap();
+        let PeerEvent::Event(Event::Message(message)) = event else {
+            panic!("peer closed before delivering {expected:?}: {event:?}");
+        };
+        return message;
+    }
+
+    loop {
+        if let Some(message) = consumer.prefetch_and_pop() {
+            consumer.release();
+            space.notify_changed();
+            return message;
+        }
+        tokio::task::yield_now().await;
+    }
+}
+
+/// Feed driver output to `pull` until it sees the WS CLOSE frame.
+#[cfg(feature = "ws")]
+async fn read_until_ws_close(remote: &mut DuplexStream, pull: &mut Connection, deadline: Instant) {
+    let mut buffer = [0; 1024];
+    while !pull.is_closed() {
+        let count = tokio::time::timeout_at(deadline.into(), remote.read(&mut buffer))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(count, 0, "driver closed without the WS CLOSE frame");
+        pull.handle_input(Bytes::copy_from_slice(&buffer[..count]))
             .unwrap();
     }
 }
@@ -474,21 +459,7 @@ async fn stalled_authentication_error_keeps_cancel_and_original_deadline_reachab
     for cancel in [true, false] {
         let (server_stream, client_stream) = tokio::io::duplex(4096);
         let stalled = Arc::new(StateSignal::new());
-        let server_connection = Connection::new(
-            ConnectionConfig::new(Role::Server, SocketType::Pull).mechanism(
-                omq_proto::MechanismSetup::PlainServer {
-                    authenticator: omq_proto::Authenticator::new(|_| false),
-                },
-            ),
-        );
-        let client_connection = Connection::new(
-            ConnectionConfig::new(Role::Client, SocketType::Push).mechanism(
-                omq_proto::MechanismSetup::PlainClient {
-                    username: "alice".into(),
-                    password: "wrong".into(),
-                },
-            ),
-        );
+        let (server_connection, client_connection) = rejected_plain_connections();
         let (server_inbox, server_commands) = mpsc::channel(16);
         let (_client_inbox, client_commands) = mpsc::channel(16);
         let (server_events, mut server_events_rx) = mpsc::channel(16);
@@ -521,6 +492,7 @@ async fn stalled_authentication_error_keeps_cancel_and_original_deadline_reachab
         );
         let server_task = tokio::spawn(server.run());
         let client_task = tokio::spawn(client.run());
+
         tokio::time::timeout(Duration::from_secs(1), stalled.changed_after(0))
             .await
             .expect("authentication ERROR write never stalled");
@@ -539,9 +511,31 @@ async fn stalled_authentication_error_keeps_cancel_and_original_deadline_reachab
         }
         let (_, event) = server_events_rx.recv().await.unwrap();
         assert!(matches!(event, PeerEvent::Closed { .. }));
+
         client_cancel.cancel();
         let _ = client_task.await.unwrap();
     }
+}
+
+/// PLAIN PULL server that rejects everyone, and a PUSH client it rejects.
+#[cfg(feature = "plain")]
+fn rejected_plain_connections() -> (Connection, Connection) {
+    let server = Connection::new(
+        ConnectionConfig::new(Role::Server, SocketType::Pull).mechanism(
+            omq_proto::MechanismSetup::PlainServer {
+                authenticator: omq_proto::Authenticator::new(|_| false),
+            },
+        ),
+    );
+    let client = Connection::new(
+        ConnectionConfig::new(Role::Client, SocketType::Push).mechanism(
+            omq_proto::MechanismSetup::PlainClient {
+                username: "alice".into(),
+                password: "wrong".into(),
+            },
+        ),
+    );
+    (server, client)
 }
 
 #[cfg(feature = "plain")]
@@ -684,7 +678,6 @@ async fn coalesced_ready_and_error_still_emits_handshake_succeeded() {
     );
 }
 
-#[expect(clippy::too_many_lines)]
 async fn send_pipe_to_yring_large_payload_harness<S, C>(
     server_stream: S,
     client_stream: C,
@@ -694,87 +687,39 @@ async fn send_pipe_to_yring_large_payload_harness<S, C>(
     C: DriverStream + Send + 'static,
 {
     const MSG_SIZE: usize = 1024 * 1024;
-    let server_connection = Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pull));
-    let client_connection = Connection::new(
-        ConnectionConfig::new(Role::Client, SocketType::Push).identity(Bytes::from_static(b"c")),
-    );
-
     let (mut send_pipe_tx, send_pipe_rx) = crate::engine::send_pipe(4);
-    let (recv_producer, mut recv_consumer) = yring::spsc(4);
+    let (recv_producer, recv_consumer) = yring::spsc(4);
     let recv_signals = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let recv_signals_for_sink = recv_signals.clone();
-    let recv_space = Arc::new(StateSignal::new());
-
-    let (s_inbox_tx, s_inbox_rx) = mpsc::channel(16);
-    let (c_inbox_tx, c_inbox_rx) = mpsc::channel(16);
-    let (s_evt_tx, s_evt_rx) = mpsc::channel(16);
-    let (c_evt_tx, c_evt_rx) = mpsc::channel(16);
-    let mut s_evt_rx = EventAdapter { rx: s_evt_rx };
-    let mut c_evt_rx = EventAdapter { rx: c_evt_rx };
-    let s_cancel = CancellationToken::new();
-    let c_cancel = CancellationToken::new();
-
-    let server = ConnectionDriver::with_config(
-        server_stream,
-        server_connection,
-        s_inbox_rx,
-        s_evt_tx,
-        0,
-        s_cancel.clone(),
-        PeerDriverConfig {
-            large_message_threshold: 128 * 1024,
-            ..PeerDriverConfig::default()
-        },
-    )
-    .with_recv_sink(RecvSink::Yring(YringSink {
+    let mut receiver = LargeReceiver {
+        consumer: recv_consumer,
+        space: Arc::new(StateSignal::new()),
+        msg_size: MSG_SIZE,
+        next: 0,
+    };
+    let sink = RecvSink::Yring(YringSink {
         producer: recv_producer,
         signal: Box::new(move || {
             recv_signals_for_sink.fetch_add(1, Ordering::Relaxed);
         }),
-        space: recv_space.clone(),
-    }));
-    let client = ConnectionDriver::new(
-        client_stream,
-        client_connection,
-        c_inbox_rx,
-        c_evt_tx,
-        0,
-        c_cancel.clone(),
-    )
-    .with_send_pipe(send_pipe_rx);
+        space: receiver.space.clone(),
+    });
 
+    let (server, client, mut ends) =
+        large_payload_drivers(server_stream, client_stream, sink, send_pipe_rx);
     let server_task = tokio::spawn(Box::pin(server.run()));
     let client_task = tokio::spawn(Box::pin(client.run()));
+    ends.activate().await;
 
-    c_evt_rx.recv().await.unwrap();
-    s_evt_rx.recv().await.unwrap();
-    c_inbox_tx
-        .send(PeerDriverCommand::ActivateDataPlane)
-        .await
-        .unwrap();
-    s_inbox_tx
-        .send(PeerDriverCommand::ActivateDataPlane)
-        .await
-        .unwrap();
-
-    let mut next_recv = 0usize;
     for seq in 0..msgs {
-        let payload = patterned_payload(MSG_SIZE, seq as u64);
-        let mut msg = Message::single(payload);
+        let mut msg = Message::single(patterned_payload(MSG_SIZE, seq as u64));
+        // A full four-slot pipe waits for the receiver to drain older messages.
         loop {
             match send_pipe_tx.try_send(msg) {
                 Ok(()) => break,
                 Err(crate::engine::SendPipeError::Full(returned)) => {
                     msg = returned;
-                    drain_large_messages_until(
-                        &mut recv_consumer,
-                        &recv_space,
-                        MSG_SIZE,
-                        &mut next_recv,
-                        seq,
-                        false,
-                    )
-                    .await;
+                    receiver.drain_until(seq, false).await;
                     tokio::task::yield_now().await;
                 }
                 Err(crate::engine::SendPipeError::Closed(_)) => panic!("send pipe closed"),
@@ -785,18 +730,10 @@ async fn send_pipe_to_yring_large_payload_harness<S, C>(
             }
         }
     }
+    receiver.drain_until(msgs, true).await;
 
-    drain_large_messages_until(
-        &mut recv_consumer,
-        &recv_space,
-        MSG_SIZE,
-        &mut next_recv,
-        msgs,
-        true,
-    )
-    .await;
-    c_cancel.cancel();
-    s_cancel.cancel();
+    ends.c_cancel.cancel();
+    ends.s_cancel.cancel();
     let client_result = tokio::time::timeout(Duration::from_secs(5), client_task)
         .await
         .expect("client driver did not stop")
@@ -809,23 +746,90 @@ async fn send_pipe_to_yring_large_payload_harness<S, C>(
     server_result.expect("server driver failed");
 }
 
+/// Test ends of the large-payload PULL server and PUSH client drivers.
+struct LargeEnds {
+    s_inbox_tx: mpsc::Sender<PeerDriverCommand>,
+    c_inbox_tx: mpsc::Sender<PeerDriverCommand>,
+    s_evt_rx: EventAdapter,
+    c_evt_rx: EventAdapter,
+    s_cancel: CancellationToken,
+    c_cancel: CancellationToken,
+}
+
+impl LargeEnds {
+    /// Wait for both handshakes, then open both data planes.
+    async fn activate(&mut self) {
+        self.c_evt_rx.recv().await.unwrap();
+        self.s_evt_rx.recv().await.unwrap();
+        for inbox in [&self.c_inbox_tx, &self.s_inbox_tx] {
+            inbox
+                .send(PeerDriverCommand::ActivateDataPlane)
+                .await
+                .unwrap();
+        }
+    }
+}
+
+/// A PULL server that receives into `sink` with large-frame reads, and a
+/// PUSH client that sends from `send_pipe`.
+fn large_payload_drivers<S, C>(
+    server_stream: S,
+    client_stream: C,
+    sink: RecvSink,
+    send_pipe: crate::engine::SendPipeConsumer,
+) -> (ConnectionDriver<S>, ConnectionDriver<C>, LargeEnds)
+where
+    S: DriverStream,
+    C: DriverStream,
+{
+    let (s_inbox_tx, s_inbox_rx) = mpsc::channel(16);
+    let (c_inbox_tx, c_inbox_rx) = mpsc::channel(16);
+    let (s_evt_tx, s_evt_rx) = mpsc::channel(16);
+    let (c_evt_tx, c_evt_rx) = mpsc::channel(16);
+    let ends = LargeEnds {
+        s_inbox_tx,
+        c_inbox_tx,
+        s_evt_rx: EventAdapter { rx: s_evt_rx },
+        c_evt_rx: EventAdapter { rx: c_evt_rx },
+        s_cancel: CancellationToken::new(),
+        c_cancel: CancellationToken::new(),
+    };
+
+    let server = ConnectionDriver::with_config(
+        server_stream,
+        Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pull)),
+        s_inbox_rx,
+        s_evt_tx,
+        0,
+        ends.s_cancel.clone(),
+        PeerDriverConfig {
+            large_message_threshold: 128 * 1024,
+            ..PeerDriverConfig::default()
+        },
+    )
+    .with_recv_sink(sink);
+    let client = ConnectionDriver::new(
+        client_stream,
+        Connection::new(
+            ConnectionConfig::new(Role::Client, SocketType::Push)
+                .identity(Bytes::from_static(b"c")),
+        ),
+        c_inbox_rx,
+        c_evt_tx,
+        0,
+        ends.c_cancel.clone(),
+    )
+    .with_send_pipe(send_pipe);
+    (server, client, ends)
+}
+
 #[tokio::test]
 async fn protocol_failure_retires_a_queued_transmit_slot() {
-    use crate::engine::transmit_slot::{PeerTransmitSlot, TryFrameResult};
+    use crate::engine::transmit_slot::{PeerTransmitSlot, SlotConfig, TryFrameResult};
     use tokio::io::AsyncWriteExt;
 
     let (stream, mut peer) = tokio::io::duplex(64 * 1024);
-    let slot = PeerTransmitSlot::new(
-        1,
-        false,
-        None,
-        None,
-        omq_proto::frame_buffer::ARENA_THRESHOLD,
-        omq_proto::frame_buffer::ARENA_INITIAL_CAP,
-        crate::engine::transmit_slot::TRANSMIT_SLOT_CAP_DEFAULT,
-        crate::engine::transmit_slot::TRANSMIT_SLOT_MSG_CAP_DEFAULT,
-        crate::engine::framing::WireFraming::Zmtp,
-    );
+    let slot = PeerTransmitSlot::with_config(1, SlotConfig::default());
     let (_inbox_tx, inbox_rx) = mpsc::channel(16);
     let (events_tx, _events_rx) = mpsc::channel(16);
     let driver = ConnectionDriver::new(

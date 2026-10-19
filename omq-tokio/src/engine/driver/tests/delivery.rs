@@ -199,8 +199,13 @@ async fn full_peer_queue_bounds_pending_delivery_and_leaves_decoder_remainder_in
     for _ in 0..8 {
         assert_eq!(
             drain_decoded_messages(
-                &mut connection,
-                &mut None,
+                DecodeInput {
+                    connection: &mut connection,
+                    decoder: &mut None,
+                    payload_pool: None,
+                    #[cfg(target_os = "linux")]
+                    shm: None,
+                },
                 ReceiveProfile::Throughput,
                 MessageDelivery {
                     sink: &mut sink,
@@ -215,9 +220,6 @@ async fn full_peer_queue_bounds_pending_delivery_and_leaves_decoder_remainder_in
                     connection: &mut None,
                     ip: None
                 },
-                None,
-                #[cfg(target_os = "linux")]
-                None,
             )
             .unwrap(),
             DriverStep::Continue

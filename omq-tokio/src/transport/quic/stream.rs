@@ -65,12 +65,12 @@ pub(crate) struct QuicStream {
 }
 
 impl QuicStream {
+    /// Wrap the data stream pair. Dropping the last half aborts `liveness`.
     pub(super) fn new(
         carrier: Carrier,
         endpoint: Arc<super::UdpEndpoint>,
         group: Option<Arc<super::ListenerGroup>>,
-        send: SendHalf,
-        recv: RecvHalf,
+        (send, recv): (SendHalf, RecvHalf),
         liveness: tokio::task::AbortHandle,
     ) -> Self {
         let shared = Arc::new(Shared {

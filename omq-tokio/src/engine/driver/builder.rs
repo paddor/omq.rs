@@ -20,11 +20,28 @@ use std::{io, net::IpAddr, sync::Arc, time::Instant};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+/// Control mailbox, event output, and identity shared by every constructor.
+struct DriverLink {
+    inbox: crate::engine::control_inbox::Receiver,
+    peer_out: PeerOutput,
+    peer_id: u64,
+    cancel: CancellationToken,
+}
+
+/// Mailbox, actor event output, and identity for a socket-owned driver.
+pub(crate) struct ActorLink {
+    pub(crate) inbox: crate::engine::control_inbox::Receiver,
+    pub(crate) peer_out: DataSender,
+    pub(crate) peer_id: u64,
+    pub(crate) cancel: CancellationToken,
+}
+
 impl<T> ConnectionDriver<T>
 where
     T: DriverStream,
 {
     /// Create a standalone driver with default configuration.
+    #[expect(clippy::too_many_arguments, reason = "public constructor API")]
     pub fn new(
         stream: T,
         connection: Connection,
@@ -45,6 +62,7 @@ where
     }
 
     /// Create a standalone driver with explicit limits and receive configuration.
+    #[expect(clippy::too_many_arguments, reason = "public constructor API")]
     pub fn with_config(
         stream: T,
         connection: Connection,
@@ -54,47 +72,46 @@ where
         cancel: CancellationToken,
         config: PeerDriverConfig,
     ) -> Self {
-        Self::with_output_config(
-            stream,
-            connection,
-            inbox.into(),
-            peer_out.into(),
+        let link = DriverLink {
+            inbox: inbox.into(),
+            peer_out: peer_out.into(),
             peer_id,
             cancel,
-            config,
-        )
+        };
+
+        Self::with_output_config(stream, connection, link, config)
     }
 
     pub(crate) fn with_actor_config(
         stream: T,
         connection: Connection,
-        inbox: impl Into<crate::engine::control_inbox::Receiver>,
-        peer_out: DataSender,
-        peer_id: u64,
-        cancel: CancellationToken,
+        link: ActorLink,
         config: PeerDriverConfig,
     ) -> Self {
-        Self::with_output_config(
-            stream,
-            connection,
-            inbox.into(),
-            PeerOutput::actor(peer_out),
-            peer_id,
-            cancel,
-            config,
-        )
+        let link = DriverLink {
+            inbox: link.inbox,
+            peer_out: PeerOutput::actor(link.peer_out),
+            peer_id: link.peer_id,
+            cancel: link.cancel,
+        };
+
+        Self::with_output_config(stream, connection, link, config)
     }
 
     fn with_output_config(
         stream: T,
         mut connection: Connection,
-        inbox: crate::engine::control_inbox::Receiver,
-        peer_out: PeerOutput,
-        peer_id: u64,
-        cancel: CancellationToken,
+        link: DriverLink,
         config: PeerDriverConfig,
     ) -> Self {
+        let DriverLink {
+            inbox,
+            peer_out,
+            peer_id,
+            cancel,
+        } = link;
         connection.set_input_budget(true);
+
         Self {
             stream,
             network: crate::network_limit::Lane::default(),

@@ -238,8 +238,10 @@ async fn linger_drains_fanout_on_two_io_threads() {
     context.term();
 }
 
-async fn drain_large_partial_writes(scheme: &str) {
-    const COUNT: u32 = 24;
+/// Receiver and sender options for `drain_large_partial_writes`. A small
+/// kernel send buffer and a slow receiver keep 1 MiB writes partial, so
+/// linger must drain data the driver already owns.
+fn partial_write_options(scheme: &str) -> (Options, Options) {
     let receiver_options = Options::default().recv_hwm(1);
     let sender_options = Options {
         send_buffer_size: Some(64 * 1024),
@@ -247,6 +249,7 @@ async fn drain_large_partial_writes(scheme: &str) {
             .send_hwm(32)
             .linger(Duration::from_secs(4))
     };
+
     #[cfg(feature = "ws")]
     let (receiver_options, sender_options) = if scheme == "wss" {
         let mut receiver_options = receiver_options;
@@ -262,6 +265,16 @@ async fn drain_large_partial_writes(scheme: &str) {
     } else {
         (receiver_options, sender_options)
     };
+    #[cfg(not(feature = "ws"))]
+    let _ = scheme;
+
+    (receiver_options, sender_options)
+}
+
+async fn drain_large_partial_writes(scheme: &str) {
+    const COUNT: u32 = 24;
+    let (receiver_options, sender_options) = partial_write_options(scheme);
+
     let receiver = Socket::new(SocketType::Pull, receiver_options);
     let suffix = if scheme == "tcp" { "" } else { "/" };
     let endpoint = receiver
@@ -274,14 +287,17 @@ async fn drain_large_partial_writes(scheme: &str) {
         .wait_connected(1, Duration::from_secs(2))
         .await
         .unwrap();
+
     for sequence in 0..COUNT {
         let mut body = vec![sequence as u8; 1024 * 1024];
         body[..4].copy_from_slice(&sequence.to_be_bytes());
         sender.send(Message::single(body)).await.unwrap();
     }
+
     let close = tokio::spawn(sender.close());
     // Force driver-owned data to survive the actor's queue-empty decision.
     tokio::time::sleep(Duration::from_millis(30)).await;
+
     for sequence in 0..COUNT {
         let message = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
             .await
@@ -293,6 +309,7 @@ async fn drain_large_partial_writes(scheme: &str) {
         assert!(body[4..].iter().all(|&byte| byte == sequence as u8));
         tokio::time::sleep(Duration::from_millis(3)).await;
     }
+
     tokio::time::timeout(Duration::from_secs(2), close)
         .await
         .unwrap()

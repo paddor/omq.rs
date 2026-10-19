@@ -41,6 +41,9 @@ use super::udp::{
 use crate::routing::{
     RecvStrategy, SendStrategy, max_peer_count, supports_groups, supports_subscribe,
 };
+#[cfg(feature = "dart")]
+use crate::transport::dart::SocketState as DartSocketState;
+use crate::transport::setup::Admission;
 use crate::transport::{InprocConn, InprocPeerSnapshot, PeerIdent};
 use omq_proto::endpoint::Endpoint;
 use omq_proto::endpoint::reject_encrypted_inproc;
@@ -53,7 +56,7 @@ use omq_proto::proto::{Connection as ZmtpConnection, Event as ZmtpEvent, SocketT
 use crate::engine::rate_limit::SharedIpRateLimiter;
 use crate::engine::{
     ActorPeerDriverHandle as PeerDriverHandle, ConnectionDriver, PeerDriverCommand,
-    PeerDriverConfig,
+    PeerDriverConfig, reserve_authenticated,
 };
 
 /// Byte-stream dispatch across TCP-shaped transports (TCP and IPC).
@@ -262,6 +265,71 @@ struct PendingReceive {
     properties: Option<Arc<omq_proto::proto::command::PeerProperties>>,
 }
 
+/// Actor-side ends of what a socket handle shares with its actor.
+pub(crate) struct HandleLink {
+    pub(crate) cmd_rx: mpsc::Receiver<SocketCommand>,
+    pub(crate) recv_tx: Arc<super::recv::SharedRecvPipe>,
+    pub(crate) cancel: CancellationToken,
+    pub(crate) monitor: MonitorPublisher,
+    pub(crate) spsc: super::recv::SpscHandles,
+    /// Producer side of native PEER receive routes.
+    pub(crate) peer_recv_routes: Option<super::peer_recv::PeerRecvRoutes>,
+    pub(crate) shared: HandleShared,
+}
+
+/// State the socket handle reads or updates without an actor hop.
+#[derive(Clone)]
+pub(crate) struct HandleShared {
+    /// REQ / REP envelope + alternation state, so `Socket::send` can call
+    /// `pre_send` without an actor hop.
+    pub(crate) type_state: Arc<Mutex<TypeState>>,
+    /// REQ alternation flag for lock-free send/recv on REQ. The actor resets
+    /// it on peer disconnect.
+    pub(crate) req_awaiting_reply: Arc<crate::socket::handle::ReqAwaitingReply>,
+    pub(crate) subscribe_count: Arc<AtomicU64>,
+    pub(crate) ready_peers: Arc<crate::socket::handle::ReadyPeers>,
+}
+
+impl HandleShared {
+    pub(crate) fn new() -> Self {
+        Self {
+            type_state: Arc::new(Mutex::new(TypeState::new())),
+            req_awaiting_reply: Arc::default(),
+            subscribe_count: Arc::new(AtomicU64::new(0)),
+            ready_peers: Arc::default(),
+        }
+    }
+}
+
+/// Where the actor runs, plus an optional caller-provided receive sink.
+pub(crate) struct DriverEnv {
+    pub(crate) io_pool: crate::context::IoPoolHandle,
+    pub(crate) inproc_registry: Arc<crate::transport::inproc::InprocRegistry>,
+    pub(crate) recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
+}
+
+/// Progress of a close that `begin_close` started.
+struct CloseState {
+    /// Every peer was asked to drain and close.
+    peers_requested: bool,
+    /// Signaled as send queues drain, so the actor can wait without polling.
+    progress: Arc<crate::engine::signal::StateSignal>,
+    /// Linger deadline. `None` waits for the drain without limit.
+    deadline: Option<Instant>,
+    ack: Option<oneshot::Sender<Result<()>>>,
+}
+
+impl CloseState {
+    fn new() -> Self {
+        Self {
+            peers_requested: false,
+            progress: Arc::new(crate::engine::signal::StateSignal::new()),
+            deadline: None,
+            ack: None,
+        }
+    }
+}
+
 /// The socket actor.
 pub(crate) struct SocketDriver {
     #[cfg(target_os = "linux")]
@@ -307,13 +375,7 @@ pub(crate) struct SocketDriver {
     pending_endpoints: FxHashMap<u64, endpoint_resolution::PendingEndpoint>,
     send_strategy: SendStrategy,
     recv_strategy: RecvStrategy,
-    /// REQ / REP envelope + alternation state. Shared with the socket
-    /// handle so `Socket::send` can call `pre_send` without an actor hop.
-    type_state: Arc<Mutex<TypeState>>,
-    /// REP latency route: envelopes for requests waiting in the receive pipe.
-    /// REQ alternation flag. Shared with the socket handle for lock-free
-    /// send/recv on REQ. Actor resets on peer disconnect.
-    req_awaiting_reply: Arc<crate::socket::handle::ReqAwaitingReply>,
+    shared: HandleShared,
     monitor: MonitorPublisher,
     /// Active subscription prefixes for SUB / XSUB. Replayed to new peers
     /// on `HandshakeSucceeded` so late-connecting publishers get our state.
@@ -328,73 +390,53 @@ pub(crate) struct SocketDriver {
     /// UDP RADIO outbound dialers.
     udp_dialers: Vec<UdpDialerEntry>,
     closing: bool,
-    close_peers_requested: bool,
-    close_progress: Arc<crate::engine::signal::StateSignal>,
-    close_deadline: Option<Instant>,
-    close_ack: Option<oneshot::Sender<Result<()>>>,
+    close: CloseState,
     spsc: super::recv::SpscHandles,
     compression_pool: Option<Arc<crate::engine::compression_pool::CompressionPool>>,
     recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
     authenticated_recv_sink: Option<crate::engine::RecvSink>,
     pending_receive: Option<PendingReceive>,
-    subscribe_count: Arc<AtomicU64>,
-    ready_peer_count_shared: Arc<crate::socket::handle::ReadyPeers>,
     io_pool: crate::context::IoPoolHandle,
     inproc_registry: Arc<crate::transport::inproc::InprocRegistry>,
     recv_ip_rate_limiter: Option<Arc<SharedIpRateLimiter>>,
-    pub(crate) peer_recv_routes: Option<super::peer_recv::PeerRecvRoutes>,
+    peer_recv_routes: Option<super::peer_recv::PeerRecvRoutes>,
 }
 
 impl SocketDriver {
-    #[expect(clippy::too_many_arguments)]
     pub(crate) fn new(
         socket_type: SocketType,
         options: Options,
-        cmd_rx: mpsc::Receiver<SocketCommand>,
-        recv_tx: Arc<super::recv::SharedRecvPipe>,
-        cancel: CancellationToken,
-        monitor: MonitorPublisher,
         send_strategy: SendStrategy,
-        spsc: super::recv::SpscHandles,
-        type_state: Arc<Mutex<TypeState>>,
-        req_awaiting_reply: Arc<crate::socket::handle::ReqAwaitingReply>,
-        recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
-        subscribe_count: Arc<AtomicU64>,
-        ready_peer_count_shared: Arc<crate::socket::handle::ReadyPeers>,
-        io_pool: crate::context::IoPoolHandle,
-        inproc_registry: Arc<crate::transport::inproc::InprocRegistry>,
+        link: HandleLink,
+        env: DriverEnv,
     ) -> Self {
         let (internal_tx, internal_rx) = mpsc::channel(128);
         let (peer_out_tx, peer_out_rx) = fanring::mpsc::channel_with_policy(256);
         let (peer_control_tx, peer_control_rx) = mpsc::channel(256);
-        let recv_strategy = RecvStrategy::for_socket_type(socket_type);
-        let authenticated_recv_sink = recv_sink_config
+
+        // An authenticated sink delivers each message with its peer's
+        // properties, so the actor routes those receives itself.
+        let authenticated_recv_sink = env
+            .recv_sink_config
             .as_ref()
             .and_then(|config| config.authenticated_sink());
-        let recv_ip_rate_limiter = options
-            .recv_ip_rate_limit
-            .map(SharedIpRateLimiter::new)
-            .map(Arc::new);
+        let recv_ip_rate_limiter = recv_ip_rate_limiter(&options);
+
         Self {
             socket_type,
             #[cfg(target_os = "linux")]
             shm_send_pool: send_strategy.shm_send_pool(&options),
             payload_pools: Arc::new(super::pools::Configuration::new(socket_type, &options)),
             #[cfg(feature = "dart")]
-            dart: Arc::new(crate::transport::dart::SocketState::new(
-                options.dart,
-                socket_type,
-            )),
+            dart: Arc::new(DartSocketState::new(options.dart, socket_type)),
             #[cfg(feature = "dart")]
             dart_endpoints: Vec::new(),
-            setup_admission: crate::transport::setup::Admission::new(
-                options.max_pending_handshakes,
-            ),
-            dial_admission: crate::transport::setup::Admission::new(options.max_pending_handshakes),
+            setup_admission: Admission::new(options.max_pending_handshakes),
+            dial_admission: Admission::new(options.max_pending_handshakes),
             options,
-            cmd_rx,
-            recv_tx,
-            cancel,
+            cmd_rx: link.cmd_rx,
+            recv_tx: link.recv_tx,
+            cancel: link.cancel,
             internal_tx,
             internal_rx,
             peer_out_tx,
@@ -411,98 +453,70 @@ impl SocketDriver {
             dialers: Vec::new(),
             pending_endpoints: FxHashMap::default(),
             send_strategy,
-            recv_strategy,
-            type_state,
-            req_awaiting_reply,
-            monitor,
+            recv_strategy: RecvStrategy::for_socket_type(socket_type),
+            shared: link.shared,
+            monitor: link.monitor,
             subscriptions: Vec::new(),
             joined_groups: new_joined_groups(),
             udp_listeners: Vec::new(),
             udp_dialers: Vec::new(),
             closing: false,
-            close_peers_requested: false,
-            close_progress: Arc::new(crate::engine::signal::StateSignal::new()),
-            close_deadline: None,
-            close_ack: None,
-            spsc,
+            close: CloseState::new(),
+            spsc: link.spsc,
             compression_pool: None,
-            recv_sink_config,
+            recv_sink_config: env.recv_sink_config,
             authenticated_recv_sink,
             pending_receive: None,
-            subscribe_count,
-            ready_peer_count_shared,
-            io_pool,
-            inproc_registry,
+            io_pool: env.io_pool,
+            inproc_registry: env.inproc_registry,
             recv_ip_rate_limiter,
-            peer_recv_routes: None,
+            peer_recv_routes: link.peer_recv_routes,
         }
     }
 
     async fn run(mut self) {
-        let authenticated_sender = self
-            .authenticated_recv_sink
-            .as_ref()
-            .and_then(crate::engine::RecvSink::authenticated_sender);
-        let authenticated_credit =
-            crate::engine::reserve_authenticated(authenticated_sender.as_ref());
+        let authenticated_sender = self.authenticated_sender();
+        let authenticated_credit = reserve_authenticated(authenticated_sender.as_ref());
         tokio::pin!(authenticated_credit);
+
         loop {
             let pending_peer = self.pending_receive.as_ref().map(|pending| pending.peer_id);
+            // Closing drops a blocked receive, then starts a fresh reservation.
             if self.closing && self.pending_receive.take().is_some() {
-                authenticated_credit.set(crate::engine::reserve_authenticated(
-                    authenticated_sender.as_ref(),
-                ));
+                authenticated_credit.set(reserve_authenticated(authenticated_sender.as_ref()));
             }
-            if authenticated_sender.is_none() {
-                self.retry_pending_receive();
-            }
-            if self.pending_receive.is_none()
-                && let Some(peer_id) = pending_peer
-            {
-                self.retire_completed_peer(peer_id).await;
-            }
-            self.drain_peer_completions().await;
-            self.drain_peer_control().await;
-            self.retry_peer_data().await;
-            self.drain_stream_disconnects().await;
-            if self.request_peer_close_if_drained().await {
+
+            let retry_receive = authenticated_sender.is_none();
+            if !self.service_backlogs(pending_peer, retry_receive).await {
                 self.teardown().await;
                 return;
             }
 
-            if self.should_exit() {
-                self.teardown().await;
-                return;
-            }
-
-            let linger_sleep = self
-                .close_deadline
-                .map(|t| tokio::time::sleep_until(t.into()));
+            let linger_sleep = self.linger_sleep();
             let close_seen = self.close_drain_wait();
+            // Drained while waiting on close progress: loop again so the peers
+            // get their close request without waiting on a select arm.
             if close_seen.is_some() && self.send_strategy.is_drained() {
                 continue;
             }
 
+            // Biased order: cancel and linger first, then caller commands and
+            // internal events, then data. Backlogs above are drained every pass,
+            // so data volume cannot hide control traffic.
             tokio::select! {
                 biased;
                 () = self.cancel.cancelled() => {
                     self.teardown().await;
                     return;
                 }
-                () = async { linger_sleep.unwrap().await }, if self.close_deadline.is_some() => {
+                () = async { linger_sleep.unwrap().await }, if self.close.deadline.is_some() => {
                     self.teardown().await;
                     return;
                 }
-                () = self.close_progress.changed_after(close_seen.unwrap_or(0)), if close_seen.is_some() => {}
-                cmd = self.cmd_rx.recv(), if !self.closing || !self.cmd_rx.is_empty() => match cmd {
-                    Some(_) if self.closing => {},
-                    Some(c) => self.handle_command(c).await,
-                    None => {
-                        // All handles dropped. No caller can await an ack here,
-                        // but configured linger still controls background drain.
-                        self.begin_close(None, self.options.linger);
-                    }
-                },
+                () = self.close.progress.changed_after(close_seen.unwrap_or(0)), if close_seen.is_some() => {}
+                cmd = self.cmd_rx.recv(), if !self.closing || !self.cmd_rx.is_empty() => {
+                    self.handle_command_slot(cmd).await;
+                }
                 Some(evt) = self.internal_rx.recv() => {
                     self.handle_internal_event(evt).await;
                 }
@@ -516,18 +530,8 @@ impl SocketDriver {
                 }
                 permit = &mut authenticated_credit,
                     if self.pending_receive.is_some() && authenticated_sender.is_some() => {
-                    match permit {
-                        Ok(permit) => {
-                            let pending = self.pending_receive.take().unwrap();
-                            let peer_id = pending.peer_id;
-                            self.authenticated_recv_sink.as_ref().unwrap().send_authenticated_reserved(
-                                pending.message, pending.properties.unwrap(), permit,
-                            );
-                            self.retire_completed_peer(peer_id).await;
-                        }
-                        Err(_) => self.begin_close(None, Some(Duration::ZERO)),
-                    }
-                    authenticated_credit.set(crate::engine::reserve_authenticated(authenticated_sender.as_ref()));
+                    self.deliver_authenticated(permit).await;
+                    authenticated_credit.set(reserve_authenticated(authenticated_sender.as_ref()));
                 }
                 () = self.recv_tx.space_ready(),
                     if self.pending_receive.is_some() && authenticated_sender.is_none() => {}
@@ -541,19 +545,101 @@ impl SocketDriver {
         }
     }
 
+    /// Sender for receives that carry peer properties. `None` without an
+    /// authenticated sink.
+    fn authenticated_sender(&self) -> Option<mpsc::Sender<crate::engine::AuthenticatedRecvItem>> {
+        self.authenticated_recv_sink
+            .as_ref()
+            .and_then(crate::engine::RecvSink::authenticated_sender)
+    }
+
+    fn linger_sleep(&self) -> Option<tokio::time::Sleep> {
+        self.close
+            .deadline
+            .map(|deadline| tokio::time::sleep_until(deadline.into()))
+    }
+
+    /// Work done before every select: retry the blocked receive, then drain
+    /// each backlog within its budget. Returns false once the actor must exit.
+    async fn service_backlogs(&mut self, pending_peer: Option<u64>, retry_receive: bool) -> bool {
+        if retry_receive {
+            self.retry_pending_receive();
+        }
+
+        // A peer whose completion waited behind the blocked receive can retire
+        // once that receive was admitted.
+        if self.pending_receive.is_none()
+            && let Some(peer_id) = pending_peer
+        {
+            self.retire_completed_peer(peer_id).await;
+        }
+
+        self.drain_peer_completions().await;
+        self.drain_peer_control().await;
+        self.retry_peer_data().await;
+        self.drain_stream_disconnects().await;
+
+        if self.request_peer_close_if_drained().await {
+            return false;
+        }
+        !self.should_exit()
+    }
+
+    /// Hand the blocked receive to the authenticated sink with the credit
+    /// reserved for it. A closed sink closes the socket without linger.
+    async fn deliver_authenticated(
+        &mut self,
+        permit: core::result::Result<
+            mpsc::Permit<'_, crate::engine::AuthenticatedRecvItem>,
+            mpsc::error::SendError<()>,
+        >,
+    ) {
+        match permit {
+            Ok(permit) => {
+                let pending = self.pending_receive.take().unwrap();
+                let peer_id = pending.peer_id;
+                // Authenticated receives always carry the peer's properties.
+                self.authenticated_recv_sink
+                    .as_ref()
+                    .unwrap()
+                    .send_authenticated_reserved(
+                        pending.message,
+                        pending.properties.unwrap(),
+                        permit,
+                    );
+                self.retire_completed_peer(peer_id).await;
+            }
+            Err(_) => self.begin_close(None, Some(Duration::ZERO)),
+        }
+    }
+
+    /// While closing, queued commands are drained and dropped. A closed
+    /// command channel means every handle is gone.
+    async fn handle_command_slot(&mut self, cmd: Option<SocketCommand>) {
+        match cmd {
+            Some(_) if self.closing => {}
+            Some(c) => self.handle_command(c).await,
+            None => {
+                // All handles dropped. No caller can await an ack here,
+                // but configured linger still controls background drain.
+                self.begin_close(None, self.options.linger);
+            }
+        }
+    }
+
     fn close_drain_wait(&self) -> Option<u64> {
-        if !self.closing || self.close_peers_requested {
+        if !self.closing || self.close.peers_requested {
             return None;
         }
-        self.send_strategy.watch_close(&self.close_progress);
-        Some(self.close_progress.generation())
+        self.send_strategy.watch_close(&self.close.progress);
+        Some(self.close.progress.generation())
     }
 
     fn should_exit(&self) -> bool {
         if !self.closing {
             return false;
         }
-        self.close_peers_requested && self.peers.is_empty()
+        self.close.peers_requested && self.peers.is_empty()
     }
 
     async fn handle_command(&mut self, cmd: SocketCommand) {
@@ -563,18 +649,7 @@ impl SocketDriver {
                 compression,
                 ack,
             } => {
-                let options = self.capture_endpoint_options(compression);
-                if let Err(error) = self.validate_setup_options(&endpoint, &options) {
-                    let _ = ack.send(Err(error));
-                } else if endpoint_resolution::needs_dns(&endpoint) {
-                    self.start_endpoint_resolution(
-                        endpoint,
-                        options,
-                        endpoint_resolution::Ack::Bind(ack),
-                    );
-                } else {
-                    let _ = ack.send(self.bind(endpoint, options).await);
-                }
+                self.handle_bind_command(endpoint, compression, ack).await;
             }
             SocketCommand::Connect {
                 endpoint,
@@ -609,12 +684,7 @@ impl SocketDriver {
                 let _ = ack.send(self.server_peer_info(routing_id));
             }
             SocketCommand::QueryConnections { ack } => {
-                let snapshot: Vec<ConnectionStatus> = self
-                    .peers
-                    .iter()
-                    .filter_map(|(id, peer)| peer.ready.then(|| self.peer_status(*id)).flatten())
-                    .collect();
-                let _ = ack.send(snapshot);
+                let _ = ack.send(self.ready_connections());
             }
             SocketCommand::QueryStreamRoutingId { ack } => {
                 let _ = ack.send(self.last_stream_routing_id.clone());
@@ -629,6 +699,31 @@ impl SocketDriver {
         }
     }
 
+    async fn handle_bind_command(
+        &mut self,
+        endpoint: Endpoint,
+        compression: Option<omq_proto::CompressionOptions>,
+        ack: oneshot::Sender<Result<Endpoint>>,
+    ) {
+        // Snapshot options now; later option changes must not affect this bind.
+        let options = self.capture_endpoint_options(compression);
+        if let Err(error) = self.validate_setup_options(&endpoint, &options) {
+            let _ = ack.send(Err(error));
+        } else if endpoint_resolution::needs_dns(&endpoint) {
+            self.start_endpoint_resolution(endpoint, options, endpoint_resolution::Ack::Bind(ack));
+        } else {
+            let _ = ack.send(self.bind(endpoint, options).await);
+        }
+    }
+
+    /// Status of every peer past its handshake.
+    fn ready_connections(&self) -> Vec<ConnectionStatus> {
+        self.peers
+            .iter()
+            .filter_map(|(id, peer)| peer.ready.then(|| self.peer_status(*id)).flatten())
+            .collect()
+    }
+
     fn begin_close(&mut self, ack: Option<oneshot::Sender<Result<()>>>, linger: Option<Duration>) {
         if self.closing {
             if let Some(a) = ack {
@@ -636,13 +731,14 @@ impl SocketDriver {
             }
             return;
         }
+
         self.closing = true;
-        self.close_deadline = linger.and_then(|d| Instant::now().checked_add(d));
+        self.close.deadline = linger.and_then(|d| Instant::now().checked_add(d));
         self.cmd_rx.close();
         self.send_strategy.stop_admission();
         self.cancel_pending_endpoints(None);
-        self.close_peers_requested = false;
-        self.close_ack = ack;
+        self.close.peers_requested = false;
+        self.close.ack = ack;
         // Close the recv channel so any awaiting recv() returns Closed.
         self.recv_tx.close();
         if let Some(fanin) = &self.spsc.fanin {
@@ -679,7 +775,7 @@ impl SocketDriver {
     }
 
     async fn request_peer_close_if_drained(&mut self) -> bool {
-        if !self.closing || self.close_peers_requested || !self.send_strategy.is_drained() {
+        if !self.closing || self.close.peers_requested || !self.send_strategy.is_drained() {
             return false;
         }
 
@@ -689,7 +785,7 @@ impl SocketDriver {
             .map(|(&peer_id, peer)| (peer_id, peer.handle.inbox.clone()))
             .collect();
         if targets.is_empty() {
-            self.close_peers_requested = true;
+            self.close.peers_requested = true;
             return false;
         }
 
@@ -697,9 +793,9 @@ impl SocketDriver {
         let mut disconnected = Vec::new();
         for (peer_id, inbox) in targets {
             let send = inbox.send(PeerDriverCommand::DrainAndClose {
-                deadline: self.close_deadline,
+                deadline: self.close.deadline,
             });
-            let result = match self.close_deadline {
+            let result = match self.close.deadline {
                 Some(deadline) => {
                     let deadline = tokio::time::Instant::from_std(deadline);
                     tokio::select! {
@@ -735,7 +831,7 @@ impl SocketDriver {
             }
         }
 
-        self.close_peers_requested = true;
+        self.close.peers_requested = true;
         false
     }
 
@@ -747,7 +843,10 @@ impl SocketDriver {
         self.peer_control_rx.close();
         self.pending_endpoints.clear();
         self.send_strategy.shutdown();
-        self.ready_peer_count_shared.set(0);
+        self.shared.ready_peers.set(0);
+
+        // Detach the handle-side send paths (dead slots, taken pipes) before
+        // cancel, so no caller writes into a peer that is shutting down.
         let mut peer_tasks = Vec::new();
         for p in self.peers.values() {
             if let Some(ref slot) = p.handle.transmit_slot {
@@ -763,24 +862,28 @@ impl SocketDriver {
                 peer_tasks.push(task);
             }
         }
+
         for mut l in self.listeners.drain(..) {
             stop_endpoint_task(&l.cancel, &mut l.task).await;
         }
         for mut l in self.udp_listeners.drain(..) {
             stop_endpoint_task(&l.cancel, &mut l.task).await;
         }
+        // Dropping an entry cancels and aborts its task.
         self.dialers.clear();
         self.udp_dialers.clear();
         if let Some(pool) = self.compression_pool.take() {
             pool.clear();
         }
+
         for task in peer_tasks {
             stop_peer_task(task).await;
         }
         #[cfg(feature = "dart")]
         self.stop_dart_endpoints(None).await;
+
         self.monitor.publish(MonitorEvent::Closed);
-        if let Some(ack) = self.close_ack.take() {
+        if let Some(ack) = self.close.ack.take() {
             let _ = ack.send(Ok(()));
         }
     }
@@ -801,6 +904,14 @@ impl SocketDriver {
             SocketType::Req | SocketType::Rep | SocketType::Dish
         )
     }
+}
+
+/// One limiter per socket, shared by all peers and keyed by remote IP.
+fn recv_ip_rate_limiter(options: &Options) -> Option<Arc<SharedIpRateLimiter>> {
+    options
+        .recv_ip_rate_limit
+        .map(SharedIpRateLimiter::new)
+        .map(Arc::new)
 }
 
 /// Acknowledge a subscription or group change once every backlogged peer

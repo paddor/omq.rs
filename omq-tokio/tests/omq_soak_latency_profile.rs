@@ -297,6 +297,64 @@ async fn wait_for_disconnect(monitor: &mut omq_tokio::MonitorStream, scenario: &
     }
 }
 
+/// Every supported pairing; asymmetric pairings are bound from both sides.
+const SPECS: [Scenario; 9] = [
+    Scenario {
+        name: "channel",
+        bind_kind: SocketType::Channel,
+        connect_kind: SocketType::Channel,
+        flow: Flow::Pair,
+    },
+    Scenario {
+        name: "peer",
+        bind_kind: SocketType::Peer,
+        connect_kind: SocketType::Peer,
+        flow: Flow::Peer,
+    },
+    Scenario {
+        name: "pair",
+        bind_kind: SocketType::Pair,
+        connect_kind: SocketType::Pair,
+        flow: Flow::Pair,
+    },
+    Scenario {
+        name: "dealer-router",
+        bind_kind: SocketType::Router,
+        connect_kind: SocketType::Dealer,
+        flow: Flow::DealerRouter,
+    },
+    Scenario {
+        name: "router-dealer",
+        bind_kind: SocketType::Dealer,
+        connect_kind: SocketType::Router,
+        flow: Flow::DealerRouter,
+    },
+    Scenario {
+        name: "req-rep",
+        bind_kind: SocketType::Rep,
+        connect_kind: SocketType::Req,
+        flow: Flow::ReqRep,
+    },
+    Scenario {
+        name: "rep-req",
+        bind_kind: SocketType::Req,
+        connect_kind: SocketType::Rep,
+        flow: Flow::ReqRep,
+    },
+    Scenario {
+        name: "client-server",
+        bind_kind: SocketType::Server,
+        connect_kind: SocketType::Client,
+        flow: Flow::ClientServer,
+    },
+    Scenario {
+        name: "server-client",
+        bind_kind: SocketType::Client,
+        connect_kind: SocketType::Server,
+        flow: Flow::ClientServer,
+    },
+];
+
 #[test]
 fn soak_latency_profile_all_supported_socket_types() {
     let duration = soak_common::soak_duration();
@@ -304,65 +362,8 @@ fn soak_latency_profile_all_supported_socket_types() {
     let ctx = soak_common::build_context();
 
     ctx.block_on(async move {
-        let specs = [
-            Scenario {
-                name: "channel",
-                bind_kind: SocketType::Channel,
-                connect_kind: SocketType::Channel,
-                flow: Flow::Pair,
-            },
-            Scenario {
-                name: "peer",
-                bind_kind: SocketType::Peer,
-                connect_kind: SocketType::Peer,
-                flow: Flow::Peer,
-            },
-            Scenario {
-                name: "pair",
-                bind_kind: SocketType::Pair,
-                connect_kind: SocketType::Pair,
-                flow: Flow::Pair,
-            },
-            Scenario {
-                name: "dealer-router",
-                bind_kind: SocketType::Router,
-                connect_kind: SocketType::Dealer,
-                flow: Flow::DealerRouter,
-            },
-            Scenario {
-                name: "router-dealer",
-                bind_kind: SocketType::Dealer,
-                connect_kind: SocketType::Router,
-                flow: Flow::DealerRouter,
-            },
-            Scenario {
-                name: "req-rep",
-                bind_kind: SocketType::Rep,
-                connect_kind: SocketType::Req,
-                flow: Flow::ReqRep,
-            },
-            Scenario {
-                name: "rep-req",
-                bind_kind: SocketType::Req,
-                connect_kind: SocketType::Rep,
-                flow: Flow::ReqRep,
-            },
-            Scenario {
-                name: "client-server",
-                bind_kind: SocketType::Server,
-                connect_kind: SocketType::Client,
-                flow: Flow::ClientServer,
-            },
-            Scenario {
-                name: "server-client",
-                bind_kind: SocketType::Client,
-                connect_kind: SocketType::Server,
-                flow: Flow::ClientServer,
-            },
-        ];
-
         let mut states = Vec::new();
-        for spec in specs {
+        for spec in SPECS {
             states.push(make_state(spec).await);
         }
 
@@ -372,6 +373,7 @@ fn soak_latency_profile_all_supported_socket_types() {
             for state in &mut states {
                 cycle(state).await;
             }
+
             if last_log.elapsed() >= Duration::from_secs(30) {
                 eprintln!("[latency-profile] {:.0}s:", start.elapsed().as_secs_f64());
                 for state in &states {
@@ -392,6 +394,7 @@ fn soak_latency_profile_all_supported_socket_types() {
                 state.spec.name
             );
         }
+
         for state in states {
             state
                 .bound

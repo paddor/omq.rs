@@ -202,14 +202,14 @@ impl Connection {
         self.pending_size = 0;
         let role = self.ws_role.unwrap_or(ws_codec::WsRole::Server);
         self.refill_scratch(8);
-        ws_codec::encode_ws_control(
+        let frame = ws_codec::encode_ws_control(
             &mut self.header_scratch,
-            &mut self.out_chunks,
-            &mut self.out_bytes_total,
             ws_codec::OP_CLOSE_CODE,
             payload,
             role,
         );
+        self.out_bytes_total += frame.len();
+        self.out_chunks.push_back(frame);
     }
 
     /// Queue a WebSocket pong frame echoing the ping payload.
@@ -224,14 +224,14 @@ impl Connection {
         }
         let role = self.ws_role.unwrap_or(ws_codec::WsRole::Server);
         self.refill_scratch(6 + payload.len());
-        ws_codec::encode_ws_control(
+        let frame = ws_codec::encode_ws_control(
             &mut self.header_scratch,
-            &mut self.out_chunks,
-            &mut self.out_bytes_total,
             ws_codec::OP_PONG_CODE,
             payload,
             role,
         );
+        self.out_bytes_total += frame.len();
+        self.out_chunks.push_back(frame);
         self.ws_control.pong_remaining = Some(self.pending_transmit_size());
     }
 

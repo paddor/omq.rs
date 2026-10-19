@@ -60,20 +60,8 @@ fn run(writers: usize, size: usize, seconds: u64) {
     let recv_batching = std::env::var("OMQ_BENCH_RECV_BATCHING").is_ok_and(|value| value == "1");
     let pull = ctx.blocking_socket(SocketType::Pull, options().recv_batching(recv_batching));
     let endpoint = pull.bind("tcp://127.0.0.1:0").unwrap();
-    let mut children = Writers(Vec::new());
-    for id in 0..writers {
-        children.0.push(
-            Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--writer",
-                    &endpoint.to_string(),
-                    &id.to_string(),
-                    &size.to_string(),
-                ])
-                .spawn()
-                .unwrap(),
-        );
-    }
+    // Held until the end of `run`; dropping it kills the writer processes.
+    let _children = spawn_writers(&endpoint.to_string(), writers, size);
     pull.wait_connected(writers, Duration::from_secs(10))
         .unwrap();
     let mut out = Vec::with_capacity(256);
@@ -116,18 +104,48 @@ fn run(writers: usize, size: usize, seconds: u64) {
             }
         }
         if measuring {
-            let elapsed = (end - start).as_secs_f64();
-            let cpu = cpu_seconds() - cpu_start;
-            let total: u64 = counts.iter().sum();
-            assert!(counts.iter().all(|&count| count > 0));
-            println!(
-                "writers={writers} size={size} recv_batching={recv_batching} msg_s={:.0} cpu_pct={:.1} msg_call={:.2} per_writer={counts:?}",
-                total as f64 / elapsed,
-                cpu / elapsed * 100.0,
-                total as f64 / calls as f64
-            );
+            let window = Window {
+                elapsed: (end - start).as_secs_f64(),
+                cpu: cpu_seconds() - cpu_start,
+                calls,
+            };
+            report(size, recv_batching, &counts, &window);
         }
     }
+}
+
+/// Launch `writers` copies of this executable in writer mode.
+fn spawn_writers(endpoint: &str, writers: usize, size: usize) -> Writers {
+    let mut children = Writers(Vec::new());
+    for id in 0..writers {
+        children.0.push(
+            Command::new(std::env::current_exe().unwrap())
+                .args(["--writer", endpoint, &id.to_string(), &size.to_string()])
+                .spawn()
+                .unwrap(),
+        );
+    }
+    children
+}
+
+/// One measured receive window: wall and CPU seconds, and receive calls.
+struct Window {
+    elapsed: f64,
+    cpu: f64,
+    calls: u64,
+}
+
+/// Print one measured window. Every writer must have delivered something.
+fn report(size: usize, recv_batching: bool, counts: &[u64], window: &Window) {
+    let writers = counts.len();
+    let total: u64 = counts.iter().sum();
+    assert!(counts.iter().all(|&count| count > 0));
+    println!(
+        "writers={writers} size={size} recv_batching={recv_batching} msg_s={:.0} cpu_pct={:.1} msg_call={:.2} per_writer={counts:?}",
+        total as f64 / window.elapsed,
+        window.cpu / window.elapsed * 100.0,
+        total as f64 / window.calls as f64
+    );
 }
 
 fn main() {

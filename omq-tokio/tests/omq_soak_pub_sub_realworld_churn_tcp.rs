@@ -57,23 +57,6 @@ fn account_external_pause(
     true
 }
 
-fn reset_measurement_after_pause(
-    subs: &mut [SubscriberProbe],
-    seq: u64,
-    measure_start: &mut Instant,
-    sent_at_measure_start: &mut u64,
-    recv_at_measure_start: &mut u64,
-    gaps_at_measure_start: &mut u64,
-) {
-    *measure_start = Instant::now();
-    *sent_at_measure_start = seq;
-    *recv_at_measure_start = subs.iter().map(|s| s.received).sum();
-    *gaps_at_measure_start = subs.iter().map(|s| s.gaps).sum();
-    for sub in subs {
-        sub.reset_gap_window();
-    }
-}
-
 fn pub_options() -> Options {
     soak_common::soak_options()
         .send_hwm(SOAK_HWM)
@@ -218,197 +201,258 @@ impl SubscriberProbe {
     }
 }
 
-async fn set_target_subscribers(
-    subs: &mut Vec<SubscriberProbe>,
-    publisher: &Socket,
-    mon: &mut omq_tokio::MonitorStream,
-    ep: &omq_tokio::Endpoint,
-    target: usize,
-    next_id: &mut usize,
-) {
-    while subs.len() > target {
-        let sub = subs.pop().unwrap();
-        sub.socket.close().await.unwrap();
-    }
-    if subs.len() < target {
-        let add = target - subs.len();
-        for _ in 0..add {
-            let sub = SubscriberProbe::connect(ep.clone(), *next_id).await;
-            *next_id += 1;
-            subs.push(sub);
+/// Baseline counters captured when a phase's measurement window opens.
+struct Measurement {
+    start: Instant,
+    sent: u64,
+    received: u64,
+    gaps: u64,
+}
+
+impl Measurement {
+    /// Opens a window at `seq`. Gap tracking restarts so the first message
+    /// after this point starts each subscriber's in-phase gap window.
+    fn begin(subs: &mut [SubscriberProbe], seq: u64) -> Self {
+        let measurement = Self {
+            start: Instant::now(),
+            sent: seq,
+            received: subs.iter().map(|s| s.received).sum(),
+            gaps: subs.iter().map(|s| s.gaps).sum(),
+        };
+        for sub in subs {
+            sub.reset_gap_window();
         }
-        wait_for_subscribes(mon, add).await;
+        measurement
     }
-    wait_for_live_peers(publisher, target).await;
+
+    fn assert_phase(&self, subs: &[SubscriberProbe], seq: u64, target: usize) {
+        let elapsed = self.start.elapsed().as_secs_f64().max(0.001);
+        let sent_delta = seq.saturating_sub(self.sent);
+        let received_now: u64 = subs.iter().map(|s| s.received).sum();
+        let gaps_now: u64 = subs.iter().map(|s| s.gaps).sum();
+        let recv_delta = received_now.saturating_sub(self.received);
+        let gap_delta = gaps_now.saturating_sub(self.gaps);
+        let send_rate = sent_delta as f64 / elapsed;
+
+        // Each message a subscriber should have seen was either received
+        // or counted as a gap.
+        let expected = recv_delta + gap_delta;
+        let gap_ratio = if expected == 0 {
+            0.0
+        } else {
+            gap_delta as f64 / expected as f64
+        };
+
+        eprintln!(
+            "[pub_sub_realworld_churn_tcp] phase target {target}: \
+             send_rate {send_rate:.0} msg/s, recv {recv_delta}, \
+             gaps {gap_delta}, gap_ratio {gap_ratio:.4}"
+        );
+
+        assert!(
+            send_rate >= MIN_SEND_MSGS_PER_SEC,
+            "phase target {target} send rate too low: {send_rate:.0} msg/s"
+        );
+        // Small samples make the ratio too noisy to gate on.
+        if expected >= MIN_EXPECTED_FOR_GAP_CHECK {
+            assert!(
+                gap_ratio <= MAX_GAP_RATIO,
+                "phase target {target} gap ratio too high: {gap_ratio:.4}"
+            );
+        }
+    }
+}
+
+/// Clock and measurement window of one subscriber-count phase.
+struct Phase {
+    target: usize,
+    start: Instant,
+    paused: Duration,
+    last_progress: Instant,
+    /// Opens after `PHASE_WARMUP`, once new subscribers are flowing.
+    measurement: Option<Measurement>,
+}
+
+impl Phase {
+    fn new(target: usize) -> Self {
+        let start = Instant::now();
+        Self {
+            target,
+            start,
+            paused: Duration::ZERO,
+            last_progress: start,
+            measurement: None,
+        }
+    }
+
+    fn active(&self) -> Duration {
+        active_elapsed(self.start, self.paused)
+    }
+}
+
+/// Soak-wide state carried across phases.
+struct Soak {
+    publisher: Socket,
+    mon: omq_tokio::MonitorStream,
+    ep: omq_tokio::Endpoint,
+    subs: Vec<SubscriberProbe>,
+    next_sub_id: usize,
+    seq: u64,
+    start: Instant,
+    /// External pause time excluded from the soak duration.
+    paused: Duration,
+    last_log: Instant,
+    duration: Duration,
+    phase_duration: Duration,
+}
+
+impl Soak {
+    async fn start(duration: Duration) -> Self {
+        let phase_duration = phase_duration(duration);
+        let publisher = Socket::new(SocketType::Pub, pub_options());
+        let mon = publisher.monitor();
+        let ep = publisher.bind(soak_common::tcp_ep(0)).await.unwrap();
+        let start = Instant::now();
+
+        Self {
+            publisher,
+            mon,
+            ep,
+            subs: Vec::new(),
+            next_sub_id: 0,
+            seq: 0,
+            start,
+            paused: Duration::ZERO,
+            last_log: start,
+            duration,
+            phase_duration,
+        }
+    }
+
+    fn active(&self) -> Duration {
+        active_elapsed(self.start, self.paused)
+    }
+
+    /// Closes the newest subscribers or connects new ones until `target`
+    /// are live and subscribed on the PUB side.
+    async fn set_target_subscribers(&mut self, target: usize) {
+        while self.subs.len() > target {
+            let sub = self.subs.pop().unwrap();
+            sub.socket.close().await.unwrap();
+        }
+
+        if self.subs.len() < target {
+            let add = target - self.subs.len();
+            for _ in 0..add {
+                let sub = SubscriberProbe::connect(self.ep.clone(), self.next_sub_id).await;
+                self.next_sub_id += 1;
+                self.subs.push(sub);
+            }
+            wait_for_subscribes(&mut self.mon, add).await;
+        }
+
+        wait_for_live_peers(&self.publisher, target).await;
+    }
+
+    async fn run_phase(&mut self, target: usize) {
+        self.set_target_subscribers(target).await;
+
+        let mut phase = Phase::new(target);
+        while phase.active() < self.phase_duration && self.active() < self.duration {
+            self.handle_pause(&mut phase, "phase");
+            self.send_batch().await;
+
+            if phase.measurement.is_none() && phase.active() >= PHASE_WARMUP {
+                phase.measurement = Some(Measurement::begin(&mut self.subs, self.seq));
+            }
+
+            self.log_progress(target);
+            self.handle_pause(&mut phase, "phase work");
+            tokio::task::yield_now().await;
+        }
+
+        for sub in &mut self.subs {
+            sub.drain();
+        }
+
+        if let Some(measurement) = &phase.measurement {
+            measurement.assert_phase(&self.subs, self.seq, phase.target);
+        }
+    }
+
+    /// Excludes an external pause from both clocks and restarts any open
+    /// measurement window, since rates across the pause are meaningless.
+    fn handle_pause(&mut self, phase: &mut Phase, label: &str) {
+        if account_external_pause(
+            label,
+            &mut phase.last_progress,
+            &mut self.paused,
+            &mut phase.paused,
+        ) {
+            self.last_log = Instant::now();
+            if phase.measurement.is_some() {
+                phase.measurement = Some(Measurement::begin(&mut self.subs, self.seq));
+            }
+        }
+    }
+
+    async fn send_batch(&mut self) {
+        for _ in 0..SEND_BATCH {
+            let msg = Message::single(encode(self.seq));
+            tokio::time::timeout(SEND_TIMEOUT, self.publisher.send(msg))
+                .await
+                .expect("PUB send stalled")
+                .unwrap();
+            self.seq += 1;
+        }
+
+        for sub in &mut self.subs {
+            sub.drain();
+        }
+    }
+
+    fn log_progress(&mut self, target: usize) {
+        if self.last_log.elapsed() < Duration::from_secs(30) {
+            return;
+        }
+
+        let received: u64 = self.subs.iter().map(|s| s.received).sum();
+        let gaps: u64 = self.subs.iter().map(|s| s.gaps).sum();
+        eprintln!(
+            "[pub_sub_realworld_churn_tcp] {:.0}s, phase_target {target}, \
+             sent {}, received {received}, gaps {gaps}",
+            self.active().as_secs_f64(),
+            self.seq,
+        );
+        self.last_log = Instant::now();
+    }
+
+    async fn finish(self) {
+        for sub in self.subs {
+            sub.socket.close().await.unwrap();
+        }
+        wait_for_live_peers(&self.publisher, 0).await;
+        self.publisher.close().await.unwrap();
+    }
 }
 
 #[test]
-#[expect(clippy::too_many_lines)]
 fn soak_pub_sub_realworld_churn_tcp() {
     let duration = soak_common::soak_duration();
-    let phase_duration = phase_duration(duration);
     let monitor = soak_common::ResourceMonitor::start();
 
     let ctx = soak_common::build_context();
     ctx.block_on(async move {
-        let publisher = Socket::new(SocketType::Pub, pub_options());
-        let mut mon = publisher.monitor();
-        let ep = publisher.bind(soak_common::tcp_ep(0)).await.unwrap();
+        let mut soak = Soak::start(duration).await;
 
-        let mut subs: Vec<SubscriberProbe> = Vec::new();
-        let mut seq = 0u64;
-        let mut next_sub_id = 0usize;
         let mut phase_idx = 0usize;
-        let start = Instant::now();
-        let mut run_paused = Duration::ZERO;
-        let mut last_log = start;
-
-        while active_elapsed(start, run_paused) < duration {
+        while soak.active() < duration {
             let target = PHASE_TARGETS[phase_idx % PHASE_TARGETS.len()];
             phase_idx += 1;
-
-            set_target_subscribers(
-                &mut subs,
-                &publisher,
-                &mut mon,
-                &ep,
-                target,
-                &mut next_sub_id,
-            )
-            .await;
-
-            let phase_start = Instant::now();
-            let mut measuring = false;
-            let mut sent_at_measure_start = seq;
-            let mut recv_at_measure_start = 0u64;
-            let mut gaps_at_measure_start = 0u64;
-            let mut measure_start = phase_start;
-            let mut phase_paused = Duration::ZERO;
-            let mut last_progress = phase_start;
-
-            while active_elapsed(phase_start, phase_paused) < phase_duration
-                && active_elapsed(start, run_paused) < duration
-            {
-                if account_external_pause(
-                    "phase",
-                    &mut last_progress,
-                    &mut run_paused,
-                    &mut phase_paused,
-                ) {
-                    last_log = Instant::now();
-                    if measuring {
-                        reset_measurement_after_pause(
-                            &mut subs,
-                            seq,
-                            &mut measure_start,
-                            &mut sent_at_measure_start,
-                            &mut recv_at_measure_start,
-                            &mut gaps_at_measure_start,
-                        );
-                    }
-                }
-
-                for _ in 0..SEND_BATCH {
-                    let msg = Message::single(encode(seq));
-                    tokio::time::timeout(SEND_TIMEOUT, publisher.send(msg))
-                        .await
-                        .expect("PUB send stalled")
-                        .unwrap();
-                    seq += 1;
-                }
-
-                for sub in &mut subs {
-                    sub.drain();
-                }
-
-                if !measuring && active_elapsed(phase_start, phase_paused) >= PHASE_WARMUP {
-                    measuring = true;
-                    measure_start = Instant::now();
-                    sent_at_measure_start = seq;
-                    recv_at_measure_start = subs.iter().map(|s| s.received).sum();
-                    gaps_at_measure_start = subs.iter().map(|s| s.gaps).sum();
-                    // First post-warmup message starts the in-phase gap window.
-                    for sub in &mut subs {
-                        sub.reset_gap_window();
-                    }
-                }
-
-                if last_log.elapsed() >= Duration::from_secs(30) {
-                    let received: u64 = subs.iter().map(|s| s.received).sum();
-                    let gaps: u64 = subs.iter().map(|s| s.gaps).sum();
-                    eprintln!(
-                        "[pub_sub_realworld_churn_tcp] {:.0}s, phase_target {target}, \
-                         sent {seq}, received {received}, gaps {gaps}",
-                        active_elapsed(start, run_paused).as_secs_f64(),
-                    );
-                    last_log = Instant::now();
-                }
-
-                if account_external_pause(
-                    "phase work",
-                    &mut last_progress,
-                    &mut run_paused,
-                    &mut phase_paused,
-                ) {
-                    last_log = Instant::now();
-                    if measuring {
-                        reset_measurement_after_pause(
-                            &mut subs,
-                            seq,
-                            &mut measure_start,
-                            &mut sent_at_measure_start,
-                            &mut recv_at_measure_start,
-                            &mut gaps_at_measure_start,
-                        );
-                    }
-                }
-
-                tokio::task::yield_now().await;
-            }
-
-            for sub in &mut subs {
-                sub.drain();
-            }
-
-            if measuring {
-                let elapsed = measure_start.elapsed().as_secs_f64().max(0.001);
-                let sent_delta = seq.saturating_sub(sent_at_measure_start);
-                let received_now: u64 = subs.iter().map(|s| s.received).sum();
-                let gaps_now: u64 = subs.iter().map(|s| s.gaps).sum();
-                let recv_delta = received_now.saturating_sub(recv_at_measure_start);
-                let gap_delta = gaps_now.saturating_sub(gaps_at_measure_start);
-                let send_rate = sent_delta as f64 / elapsed;
-                let expected = recv_delta + gap_delta;
-                let gap_ratio = if expected == 0 {
-                    0.0
-                } else {
-                    gap_delta as f64 / expected as f64
-                };
-
-                eprintln!(
-                    "[pub_sub_realworld_churn_tcp] phase target {target}: \
-                     send_rate {send_rate:.0} msg/s, recv {recv_delta}, \
-                     gaps {gap_delta}, gap_ratio {gap_ratio:.4}"
-                );
-
-                assert!(
-                    send_rate >= MIN_SEND_MSGS_PER_SEC,
-                    "phase target {target} send rate too low: {send_rate:.0} msg/s"
-                );
-                if expected >= MIN_EXPECTED_FOR_GAP_CHECK {
-                    assert!(
-                        gap_ratio <= MAX_GAP_RATIO,
-                        "phase target {target} gap ratio too high: {gap_ratio:.4}"
-                    );
-                }
-            }
+            soak.run_phase(target).await;
         }
 
-        for sub in subs {
-            sub.socket.close().await.unwrap();
-        }
-        wait_for_live_peers(&publisher, 0).await;
-        publisher.close().await.unwrap();
+        soak.finish().await;
     });
 
     let report = monitor.stop();

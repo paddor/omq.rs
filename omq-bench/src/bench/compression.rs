@@ -155,21 +155,18 @@ pub(crate) fn run(args: CompressionArgs) {
     let binary_str = binary.to_str().unwrap();
     let run_id = make_run_id();
     let jsonl_path = jsonl::cache_dir().join("results_compression_tokio.jsonl");
+    let sweep = Sweep {
+        binary: binary_str,
+        sizes: &sizes,
+        duration: args.duration,
+        run_id: &run_id,
+        jsonl_path: &jsonl_path,
+    };
 
     eprintln!("Compression benchmark");
 
     // Non-dict sweep.
-    run_sweep(
-        binary_str,
-        &transports,
-        &sizes,
-        args.duration,
-        &run_id,
-        None,
-        "compression_json",
-        None,
-        &jsonl_path,
-    );
+    sweep.run(&transports, "compression_json", None);
 
     // Dict sweeps.
     for &dict_cap in &args.dict_sizes {
@@ -177,17 +174,11 @@ pub(crate) fn run(args: CompressionArgs) {
         eprintln!("\nTraining dict (capacity={dict_cap})...");
         train_dict(binary_str, &dict_path, dict_cap);
 
-        run_sweep(
-            binary_str,
-            &["lz4+tcp"],
-            &sizes,
-            args.duration,
-            &run_id,
-            Some(&dict_path),
-            "compression_json_dict",
-            Some(dict_cap),
-            &jsonl_path,
-        );
+        let dict = Dict {
+            path: &dict_path,
+            capacity: dict_cap,
+        };
+        sweep.run(&["lz4+tcp"], "compression_json_dict", Some(&dict));
 
         std::fs::remove_file(&dict_path).ok();
     }
@@ -195,50 +186,60 @@ pub(crate) fn run(args: CompressionArgs) {
     eprintln!("\nResults appended to {}", jsonl_path.display());
 }
 
-#[expect(clippy::too_many_arguments)]
-fn run_sweep(
-    binary: &str,
-    transports: &[&str],
-    sizes: &[u64],
+/// Settings shared by every sweep of one compression run.
+struct Sweep<'a> {
+    binary: &'a str,
+    sizes: &'a [u64],
     duration: f64,
-    run_id: &str,
-    dict_file: Option<&str>,
-    pattern: &str,
-    dict_size: Option<u64>,
-    jsonl_path: &std::path::Path,
-) {
-    for transport in transports {
-        eprintln!("\n=== {transport} {pattern} ===");
+    run_id: &'a str,
+    jsonl_path: &'a std::path::Path,
+}
 
-        for &size in sizes {
-            eprint!("{:>8}", size_label(size));
+/// Trained dictionary file and the capacity recorded in each row.
+struct Dict<'a> {
+    path: &'a str,
+    capacity: u64,
+}
 
-            let wire_bytes = get_wire_size(binary, transport, size, dict_file);
+impl Sweep<'_> {
+    fn run(&self, transports: &[&str], pattern: &str, dict: Option<&Dict<'_>>) {
+        let dict_file = dict.map(|dict| dict.path);
+        let dict_size = dict.map(|dict| dict.capacity);
 
-            match run_cell(binary, transport, size, duration, dict_file) {
-                Some((msgs_s, mbps, cpu_time)) => {
-                    let row = CompressionRow {
-                        run_id: run_id.to_string(),
-                        pattern: pattern.to_string(),
-                        transport: transport.to_string(),
-                        peers: 1,
-                        msg_size: size,
-                        wire_bytes,
-                        msg_count: Some(msgs_s * duration),
-                        elapsed: Some(duration),
-                        cpu_time: Some(cpu_time),
-                        mbps: Some(mbps),
-                        msgs_s: Some(msgs_s),
-                        dict_size,
-                    };
-                    jsonl::append_jsonl(jsonl_path, &row);
-                    eprint!("  {msgs_s:>10.0} msg/s  {mbps:>8.1} MB/s");
+        for transport in transports {
+            eprintln!("\n=== {transport} {pattern} ===");
+
+            for &size in self.sizes {
+                eprint!("{:>8}", size_label(size));
+
+                let wire_bytes = get_wire_size(self.binary, transport, size, dict_file);
+
+                match run_cell(self.binary, transport, size, self.duration, dict_file) {
+                    Some((msgs_s, mbps, cpu_time)) => {
+                        let row = CompressionRow {
+                            run_id: self.run_id.to_string(),
+                            pattern: pattern.to_string(),
+                            transport: transport.to_string(),
+                            peers: 1,
+                            msg_size: size,
+                            wire_bytes,
+                            msg_count: Some(msgs_s * self.duration),
+                            elapsed: Some(self.duration),
+                            cpu_time: Some(cpu_time),
+                            mbps: Some(mbps),
+                            msgs_s: Some(msgs_s),
+                            dict_size,
+                        };
+                        jsonl::append_jsonl(self.jsonl_path, &row);
+                        eprint!("  {msgs_s:>10.0} msg/s  {mbps:>8.1} MB/s");
+                    }
+                    None => {
+                        eprint!("  {:>10}", "-");
+                    }
                 }
-                None => {
-                    eprint!("  {:>10}", "-");
-                }
+
+                eprintln!();
             }
-            eprintln!();
         }
     }
 }

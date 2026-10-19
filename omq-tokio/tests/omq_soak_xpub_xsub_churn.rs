@@ -33,6 +33,29 @@ fn xpub_options() -> Options {
     soak_common::soak_options().on_mute(OnMute::DropNewest)
 }
 
+/// Publishes up to 1k messages across all topics. A send blocked for 1 ms
+/// is skipped; only accepted sends advance `pub_count`.
+async fn publish_batch(xpub: &Socket, pub_count: &mut u64) {
+    for _ in 0..1_000 {
+        let topic = TOPICS[*pub_count as usize % TOPICS.len()];
+        let msg = format!("{topic}{pub_count}");
+        if let Ok(Ok(())) =
+            tokio::time::timeout(Duration::from_millis(1), xpub.send(Message::single(msg))).await
+        {
+            *pub_count += 1;
+        }
+    }
+}
+
+/// Drains XPUB subscribe/unsubscribe notifications until 1 ms of quiet.
+async fn drain_notifications(xpub: &Socket) -> u64 {
+    let mut count = 0;
+    while let Ok(Ok(_notif)) = tokio::time::timeout(Duration::from_millis(1), xpub.recv()).await {
+        count += 1;
+    }
+    count
+}
+
 #[test]
 fn soak_xpub_xsub_churn() {
     let duration = soak_common::soak_duration();
@@ -52,24 +75,8 @@ fn soak_xpub_xsub_churn() {
         let mut last_log = start;
 
         while start.elapsed() < duration {
-            // Publish across all topics.
-            for _ in 0..1_000 {
-                let topic = TOPICS[pub_count as usize % TOPICS.len()];
-                let msg = format!("{topic}{pub_count}");
-                if let Ok(Ok(())) =
-                    tokio::time::timeout(Duration::from_millis(1), xpub.send(Message::single(msg)))
-                        .await
-                {
-                    pub_count += 1;
-                }
-            }
-
-            // Drain XPUB subscribe/unsubscribe notifications.
-            while let Ok(Ok(_notif)) =
-                tokio::time::timeout(Duration::from_millis(1), xpub.recv()).await
-            {
-                sub_notifications += 1;
-            }
+            publish_batch(&xpub, &mut pub_count).await;
+            sub_notifications += drain_notifications(&xpub).await;
 
             // Drain subscriber recv queues.
             for sub in &subs {

@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use omq_proto::DartOptions;
 
 use crate::PayloadPool;
-pub use io::{DartIo, ReceiveBatch, ReceivedDatagram};
+pub use io::{DartIo, ReceiveBatch, ReceivedDatagram, SegmentBatch};
 
 /// Unconfirmed inbound handshakes allowed even with a small ready limit.
 const PENDING_HANDSHAKES: usize = 64;

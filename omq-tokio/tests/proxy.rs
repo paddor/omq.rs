@@ -225,30 +225,11 @@ async fn proxy_does_not_starve_backend_when_frontend_is_hot() {
         .await
         .unwrap();
 
+    // Keep the frontend direction saturated while the backend side drains.
     let stop = Arc::new(AtomicBool::new(false));
     let drained = Arc::new(AtomicUsize::new(0));
-    let spam_stop = stop.clone();
-    let spam_client = client.clone();
-    let spam = tokio::spawn(async move {
-        while !spam_stop.load(Ordering::Relaxed) {
-            if spam_client.send(Message::single("load")).await.is_err() {
-                break;
-            }
-        }
-    });
-
-    let drain_stop = stop.clone();
-    let drain_count = drained.clone();
-    let drain_server = server.clone();
-    let drain = tokio::spawn(async move {
-        while !drain_stop.load(Ordering::Relaxed) {
-            if let Ok(Ok(_)) =
-                tokio::time::timeout(Duration::from_millis(20), drain_server.recv()).await
-            {
-                drain_count.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-    });
+    let spam = spawn_spammer(client.clone(), stop.clone());
+    let drain = spawn_drainer(server.clone(), stop.clone(), drained.clone());
 
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     while drained.load(Ordering::Relaxed) < 64 {
@@ -268,6 +249,33 @@ async fn proxy_does_not_starve_backend_when_frontend_is_hot() {
     drain.abort();
     send_control(&controller, b"TERMINATE").await;
     assert_eq!(task.await.unwrap().unwrap(), ProxyExit::Terminated);
+}
+
+/// Sends "load" from `client` as fast as the proxy accepts it until `stop`.
+fn spawn_spammer(client: Socket, stop: Arc<AtomicBool>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while !stop.load(Ordering::Relaxed) {
+            if client.send(Message::single("load")).await.is_err() {
+                break;
+            }
+        }
+    })
+}
+
+/// Receives on `server` until `stop`, counting messages in `drained`.
+fn spawn_drainer(
+    server: Socket,
+    stop: Arc<AtomicBool>,
+    drained: Arc<AtomicUsize>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while !stop.load(Ordering::Relaxed) {
+            if let Ok(Ok(_)) = tokio::time::timeout(Duration::from_millis(20), server.recv()).await
+            {
+                drained.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    })
 }
 
 #[tokio::test]

@@ -263,54 +263,79 @@ async fn ready_async_sends_cooperate_across_clones_and_sockets() {
     }
 }
 
+/// Counts wakeups, so a cooperative yield can be told apart from a stall.
+struct CountWake(AtomicUsize);
+
+impl std::task::Wake for CountWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Polls always-ready sends over `sender`, its `clone`, and an unrouted
+/// `router` until one yields, then drops that send mid-flight. Returns
+/// whether any send yielded within 4096 polls.
+fn poll_ready_sends_until_yield(
+    sender: &Socket,
+    clone: &Socket,
+    router: &Socket,
+    wake: &Arc<CountWake>,
+) -> bool {
+    use std::future::Future;
+    use std::task::{Context as TaskContext, Poll, Waker};
+
+    let waker = Waker::from(wake.clone());
+    let mut cx = TaskContext::from_waker(&waker);
+
+    for index in 0..4096 {
+        let mut send = std::pin::pin!(async {
+            let message = Message::single("ready");
+            match index % 3 {
+                0 => sender.send(ready_routed_message()).await,
+                1 => clone.send(ready_routed_message()).await,
+                _ => router.send_to(b"absent", message).await,
+            }
+        });
+
+        match send.as_mut().poll(&mut cx) {
+            Poll::Ready(result) => result.unwrap(),
+            Poll::Pending => {
+                // A yield must schedule its own wakeup.
+                assert!(wake.0.load(Ordering::Relaxed) > 0);
+                // Drop while yielding, before routing. Subsequent sends
+                // must still make progress and yield again.
+                return true;
+            }
+        }
+    }
+    false
+}
+
 #[test]
 fn ready_sends_yield_outside_tokio_and_cancel_cleanly() {
     use std::future::Future;
-    use std::task::{Context as TaskContext, Poll, Wake, Waker};
-
-    struct CountWake(AtomicUsize);
-    impl Wake for CountWake {
-        fn wake(self: Arc<Self>) {
-            self.wake_by_ref();
-        }
-
-        fn wake_by_ref(self: &Arc<Self>) {
-            self.0.fetch_add(1, Ordering::Relaxed);
-        }
-    }
+    use std::task::{Context as TaskContext, Poll, Waker};
 
     let context = Context::new();
     let sender = context.socket(SocketType::Router, Options::default());
     let clone = sender.clone();
     let router = context.socket(SocketType::Router, Options::default());
     let wake = Arc::new(CountWake(AtomicUsize::new(0)));
+
+    for _ in 0..3 {
+        assert!(
+            poll_ready_sends_until_yield(&sender, &clone, &router, &wake),
+            "ready sends never yielded"
+        );
+    }
+
+    // A pending send can resume on another executor thread.
     let waker = Waker::from(wake.clone());
     let mut cx = TaskContext::from_waker(&waker);
-    for _ in 0..3 {
-        let mut yielded = false;
-        for index in 0..4096 {
-            let mut send = std::pin::pin!(async {
-                let message = Message::single("ready");
-                match index % 3 {
-                    0 => sender.send(ready_routed_message()).await,
-                    1 => clone.send(ready_routed_message()).await,
-                    _ => router.send_to(b"absent", message).await,
-                }
-            });
-            match send.as_mut().poll(&mut cx) {
-                Poll::Ready(result) => result.unwrap(),
-                Poll::Pending => {
-                    yielded = true;
-                    assert!(wake.0.load(Ordering::Relaxed) > 0);
-                    // Drop while yielding, before routing. Subsequent sends
-                    // must still make progress and yield again.
-                    break;
-                }
-            }
-        }
-        assert!(yielded, "ready sends never yielded");
-    }
-    // A pending send can resume on another executor thread.
     let mut yielded_send = Box::pin(sender.send(ready_routed_message()));
     let mut pending = false;
     for _ in 0..4096 {
@@ -326,6 +351,7 @@ fn ready_sends_yield_outside_tokio_and_cancel_cleanly() {
         }
     }
     assert!(pending, "ready send never yielded before migration");
+
     std::thread::scope(|scope| {
         scope.spawn(move || {
             let mut cx = TaskContext::from_waker(Waker::noop());

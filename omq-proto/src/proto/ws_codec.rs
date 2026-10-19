@@ -58,80 +58,14 @@ pub(crate) fn peek_ws_header(
         return Ok(None);
     };
 
-    let b0 = first_two[0];
-    let b1 = first_two[1];
-
-    if b0 & RSV_MASK != 0 {
-        return Err(Error::Protocol(
-            "WS RSV bits set but no extensions negotiated".into(),
-        ));
-    }
-    let fin = b0 & FIN_BIT != 0;
-    let opcode = b0 & OPCODE_MASK;
-    match opcode {
-        OP_CONTINUATION | OP_BINARY | OP_CLOSE | OP_PING | OP_PONG => {}
-        _ => {
-            return Err(Error::Protocol(format!(
-                "unsupported WS opcode: 0x{opcode:02x}"
-            )));
-        }
-    }
-
-    let masked = b1 & MASK_BIT != 0;
-    match peer_role {
-        WsRole::Client => {
-            if !masked {
-                return Err(Error::Protocol("client WS frame must be masked".into()));
-            }
-        }
-        WsRole::Server => {
-            if masked {
-                return Err(Error::Protocol("server WS frame must not be masked".into()));
-            }
-        }
-    }
-
-    let len7 = b1 & LEN_MASK;
-    let (payload_len, len_header_size) = match len7 {
-        126 => {
-            let Some(hdr) = buf.peek_array::<4>() else {
-                return Ok(None);
-            };
-            let len = u64::from(u16::from_be_bytes([hdr[2], hdr[3]]));
-            if len < 126 {
-                return Err(Error::Protocol("nonminimal WS payload length".into()));
-            }
-            (len, 4)
-        }
-        127 => {
-            let Some(hdr) = buf.peek_array::<10>() else {
-                return Ok(None);
-            };
-            let len = u64::from_be_bytes(hdr[2..10].try_into().unwrap());
-            if len >> 63 != 0 {
-                return Err(Error::Protocol("WS payload length MSB set".into()));
-            }
-            if len <= 65535 {
-                return Err(Error::Protocol("nonminimal WS payload length".into()));
-            }
-            (len, 10)
-        }
-        n => (u64::from(n), 2),
+    let (fin, opcode) = decode_first_byte(first_two[0])?;
+    let masked = first_two[1] & MASK_BIT != 0;
+    check_mask_direction(masked, peer_role)?;
+    let Some((payload_len, len_header_size)) = peek_payload_len(buf, first_two[1] & LEN_MASK)?
+    else {
+        return Ok(None);
     };
-
-    if opcode >= OP_CLOSE && payload_len > 125 {
-        return Err(Error::Protocol(
-            "WS control frame payload > 125 bytes".into(),
-        ));
-    }
-    if opcode >= OP_CLOSE && !fin {
-        return Err(Error::Protocol("fragmented WS control frame".into()));
-    }
-    if opcode == OP_CLOSE && payload_len == 1 {
-        return Err(Error::Protocol(
-            "WS close frame has one-byte payload".into(),
-        ));
-    }
+    check_control_frame(opcode, fin, payload_len)?;
 
     let mask_size = if masked { 4 } else { 0 };
     let header_len = len_header_size + mask_size;
@@ -156,6 +90,86 @@ pub(crate) fn peek_ws_header(
         masked,
         mask_key,
     }))
+}
+
+/// Split FIN and the opcode, rejecting RSV bits and unsupported opcodes.
+fn decode_first_byte(b0: u8) -> Result<(bool, u8)> {
+    if b0 & RSV_MASK != 0 {
+        return Err(Error::Protocol(
+            "WS RSV bits set but no extensions negotiated".into(),
+        ));
+    }
+
+    let fin = b0 & FIN_BIT != 0;
+    let opcode = b0 & OPCODE_MASK;
+    match opcode {
+        OP_CONTINUATION | OP_BINARY | OP_CLOSE | OP_PING | OP_PONG => Ok((fin, opcode)),
+        _ => Err(Error::Protocol(format!(
+            "unsupported WS opcode: 0x{opcode:02x}"
+        ))),
+    }
+}
+
+/// Clients must mask every frame and servers must not (RFC 6455 5.1).
+fn check_mask_direction(masked: bool, peer_role: WsRole) -> Result<()> {
+    match peer_role {
+        WsRole::Client if !masked => Err(Error::Protocol("client WS frame must be masked".into())),
+        WsRole::Server if masked => {
+            Err(Error::Protocol("server WS frame must not be masked".into()))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Decode the 7-bit length or its 16/64-bit extension. Returns the payload
+/// length and the header bytes before any mask key.
+fn peek_payload_len(buf: &ChunkedInputBuf, len7: u8) -> Result<Option<(u64, usize)>> {
+    match len7 {
+        126 => {
+            let Some(hdr) = buf.peek_array::<4>() else {
+                return Ok(None);
+            };
+            let len = u64::from(u16::from_be_bytes([hdr[2], hdr[3]]));
+            // Lengths must use the shortest encoding.
+            if len < 126 {
+                return Err(Error::Protocol("nonminimal WS payload length".into()));
+            }
+            Ok(Some((len, 4)))
+        }
+        127 => {
+            let Some(hdr) = buf.peek_array::<10>() else {
+                return Ok(None);
+            };
+            let len = u64::from_be_bytes(hdr[2..10].try_into().unwrap());
+            if len >> 63 != 0 {
+                return Err(Error::Protocol("WS payload length MSB set".into()));
+            }
+            if len <= 65535 {
+                return Err(Error::Protocol("nonminimal WS payload length".into()));
+            }
+            Ok(Some((len, 10)))
+        }
+        n => Ok(Some((u64::from(n), 2))),
+    }
+}
+
+/// Control frames are short, unfragmented, and CLOSE never carries a lone
+/// status byte.
+fn check_control_frame(opcode: u8, fin: bool, payload_len: u64) -> Result<()> {
+    if opcode >= OP_CLOSE && payload_len > 125 {
+        return Err(Error::Protocol(
+            "WS control frame payload > 125 bytes".into(),
+        ));
+    }
+    if opcode >= OP_CLOSE && !fin {
+        return Err(Error::Protocol("fragmented WS control frame".into()));
+    }
+    if opcode == OP_CLOSE && payload_len == 1 {
+        return Err(Error::Protocol(
+            "WS close frame has one-byte payload".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Write a WebSocket binary frame header into `scratch`.
@@ -201,15 +215,13 @@ fn encode_ws_header(
     }
 }
 
-/// Queue a WebSocket control frame (Close/Pong) into `out_chunks`.
+/// Encode a complete WebSocket control frame (Close/Pong).
 pub(crate) fn encode_ws_control(
     scratch: &mut BytesMut,
-    out_chunks: &mut std::collections::VecDeque<bytes::Bytes>,
-    out_bytes_total: &mut usize,
     opcode: u8,
     payload: &[u8],
     role: WsRole,
-) {
+) -> bytes::Bytes {
     debug_assert!(payload.len() <= 125);
     let mask = encode_ws_header(scratch, opcode, payload.len(), role);
 
@@ -223,9 +235,7 @@ pub(crate) fn encode_ws_control(
         }
     }
 
-    let frame = scratch.split().freeze();
-    *out_bytes_total += frame.len();
-    out_chunks.push_back(frame);
+    scratch.split().freeze()
 }
 
 /// Apply XOR mask to a byte slice. Uses word-at-a-time XOR for throughput.
@@ -555,22 +565,11 @@ mod tests {
     #[test]
     fn control_frame_encode_close() {
         let mut scratch = BytesMut::with_capacity(64);
-        let mut out = std::collections::VecDeque::new();
-        let mut total = 0;
         let code: [u8; 2] = 1000u16.to_be_bytes();
-        encode_ws_control(
-            &mut scratch,
-            &mut out,
-            &mut total,
-            OP_CLOSE,
-            &code,
-            WsRole::Server,
-        );
-        assert_eq!(out.len(), 1);
-        let frame = &out[0];
+        let frame = encode_ws_control(&mut scratch, OP_CLOSE, &code, WsRole::Server);
         assert_eq!(frame[0], FIN_BIT | OP_CLOSE);
         assert_eq!(frame[1], 2);
         assert_eq!(u16::from_be_bytes([frame[2], frame[3]]), 1000);
-        assert_eq!(total, 4);
+        assert_eq!(frame.len(), 4);
     }
 }

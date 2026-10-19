@@ -100,12 +100,9 @@ async fn dealer_identity_survives_reconnect() {
     assert_eq!(r.part_bytes(0).unwrap().as_ref(), b"reply2");
 }
 
-#[tokio::test]
-async fn multi_dealer_reconnect_to_restarted_router() {
-    let router1 = Socket::new(SocketType::Router, Options::default());
-    let ep = router1.bind(tcp_ep(0)).await.unwrap();
-
-    let dealers: Vec<Socket> = [b"d1" as &[u8], b"d2", b"d3"]
+/// Three DEALERs with fixed identities d1..d3 and a fast reconnect.
+fn reconnecting_dealers() -> Vec<Socket> {
+    [b"d1" as &[u8], b"d2", b"d3"]
         .iter()
         .map(|id| {
             Socket::new(
@@ -116,7 +113,39 @@ async fn multi_dealer_reconnect_to_restarted_router() {
                 },
             )
         })
-        .collect();
+        .collect()
+}
+
+/// Receives one message per dealer, replies "re:<body>" to its identity,
+/// and returns the identities seen.
+async fn echo_three(router: &Socket) -> HashSet<Vec<u8>> {
+    let mut ids = HashSet::new();
+    for _ in 0..3 {
+        let m = tokio::time::timeout(TIMEOUT, router.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let id = m.part_bytes(0).unwrap().to_vec();
+        let body = m.part_bytes(1).unwrap();
+
+        router
+            .send(Message::multipart([
+                Bytes::from(id.clone()),
+                Bytes::from(format!("re:{}", String::from_utf8_lossy(&body))),
+            ]))
+            .await
+            .unwrap();
+        ids.insert(id);
+    }
+    ids
+}
+
+#[tokio::test]
+async fn multi_dealer_reconnect_to_restarted_router() {
+    let router1 = Socket::new(SocketType::Router, Options::default());
+    let ep = router1.bind(tcp_ep(0)).await.unwrap();
+
+    let dealers = reconnecting_dealers();
     let mut dealer_mons: Vec<_> = dealers.iter().map(Socket::monitor).collect();
     for d in &dealers {
         d.connect(ep.clone()).await.unwrap();
@@ -141,30 +170,15 @@ async fn multi_dealer_reconnect_to_restarted_router() {
     router1.close().await.unwrap();
     let router2 = rebind(&ep, || Socket::new(SocketType::Router, Options::default())).await;
 
+    // Every dealer reconnects on its own and keeps its identity, so the new
+    // router can route replies by the same ids.
     for mon in &mut dealer_mons {
         test_support::wait_for_handshake_on(mon).await;
     }
     for (i, d) in dealers.iter().enumerate() {
         d.send(Message::single(format!("after-{i}"))).await.unwrap();
     }
-    let mut ids_after = HashSet::new();
-    for _ in 0..3 {
-        let m = tokio::time::timeout(TIMEOUT, router2.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        let id = m.part_bytes(0).unwrap().to_vec();
-        let body = m.part_bytes(1).unwrap();
-
-        router2
-            .send(Message::multipart([
-                Bytes::from(id.clone()),
-                Bytes::from(format!("re:{}", String::from_utf8_lossy(&body))),
-            ]))
-            .await
-            .unwrap();
-        ids_after.insert(id);
-    }
+    let ids_after = echo_three(&router2).await;
     assert_eq!(ids_after.len(), 3);
     assert_eq!(ids_before, ids_after);
 

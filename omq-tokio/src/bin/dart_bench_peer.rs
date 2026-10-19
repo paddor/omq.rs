@@ -232,14 +232,62 @@ impl CapacityWait {
     }
 }
 
+/// Send counters for one scatter run. The tag's top bit marks a body sent
+/// inside the measured window.
+#[derive(Default)]
+struct ScatterCounts {
+    offered: u64,
+    warmup_offered: u64,
+    pool_empty: u64,
+}
+
+impl ScatterCounts {
+    #[inline]
+    fn sent(&mut self, measured: bool) {
+        if measured {
+            self.offered += 1;
+        } else {
+            self.warmup_offered += 1;
+        }
+    }
+}
+
+/// Bodies come from the send pool, or from a recycled cache when the
+/// size exceeds the pool's largest slot.
+struct BodySource<'a> {
+    cache: Option<BodyCache>,
+    pool: &'a PayloadPool,
+    size: usize,
+}
+
+impl<'a> BodySource<'a> {
+    fn new(pool: &'a PayloadPool, size: usize) -> Self {
+        let cache = (size > pool.max_size()).then(|| BodyCache::new(size));
+        Self { cache, pool, size }
+    }
+
+    /// A tagged body, or `None` while every slot is still in flight.
+    #[inline]
+    fn next(&mut self, tag: u64) -> Option<Message> {
+        if let Some(cache) = &mut self.cache {
+            cache.message(tag)
+        } else {
+            self.pool
+                .try_message(self.size, |body| {
+                    body.fill(7);
+                    write_tag(body, tag);
+                })
+                .unwrap()
+        }
+    }
+}
+
 fn scatter(socket: &Socket, config: &Config, native: bool, pool: &PayloadPool, at: Instant) {
-    let mut cache = (config.size > pool.max_size()).then(|| BodyCache::new(config.size));
+    let mut bodies = BodySource::new(pool, config.size);
     let measure_at = at + config.throughput_warmup;
     let until = measure_at + config.duration;
     let mut pending = None;
-    let mut offered = 0u64;
-    let mut warmup_offered = 0u64;
-    let mut pool_empty = 0u64;
+    let mut counts = ScatterCounts::default();
     let mut sequence = 0u64;
     let mut wait = CapacityWait {
         spin: config.spin,
@@ -247,6 +295,7 @@ fn scatter(socket: &Socket, config: &Config, native: bool, pool: &PayloadPool, a
     };
     let mut now = at;
     let mut until_clock = 0;
+
     loop {
         // Submit messages individually. Read time every 64 successful sends,
         // or at most eight capacity probes while making no progress.
@@ -257,23 +306,15 @@ fn scatter(socket: &Socket, config: &Config, native: bool, pool: &PayloadPool, a
         if now >= until {
             break;
         }
+
         if pending.is_none() {
             let measured = now >= measure_at;
             let tag = sequence | (u64::from(measured) << 63);
-            let body = if let Some(cache) = &mut cache {
-                cache.message(tag)
-            } else {
-                pool.try_message(config.size, |body| {
-                    body.fill(7);
-                    write_tag(body, tag);
-                })
-                .unwrap()
-            };
-            if let Some(body) = body {
+            if let Some(body) = bodies.next(tag) {
                 sequence += 1;
                 pending = Some((body, measured));
             } else {
-                pool_empty += 1;
+                counts.pool_empty += 1;
             }
         }
         let Some((body, measured)) = pending.take() else {
@@ -281,13 +322,10 @@ fn scatter(socket: &Socket, config: &Config, native: bool, pool: &PayloadPool, a
             until_clock = until_clock.min(8) - 1;
             continue;
         };
+
         match socket.try_send(body) {
             Ok(()) => {
-                if measured {
-                    offered += 1;
-                } else {
-                    warmup_offered += 1;
-                }
+                counts.sent(measured);
                 wait.progressed();
                 until_clock -= 1;
             }
@@ -299,27 +337,22 @@ fn scatter(socket: &Socket, config: &Config, native: bool, pool: &PayloadPool, a
             Err(error) => panic!("send failed: {error}"),
         }
     }
+
     drop(pending);
     std::thread::sleep((config.drain / 2).min(Duration::from_secs(1)));
     if native {
-        wait_acknowledged(
-            socket,
-            offered + warmup_offered,
-            until + config.drain,
-            &mut wait,
-        );
+        let all_offered = counts.offered + counts.warmup_offered;
+        wait_acknowledged(socket, all_offered, until + config.drain, &mut wait);
     }
-    scatter_result(socket, config, native, offered, warmup_offered, pool_empty);
+    scatter_result(socket, config, native, &counts);
 }
 
-fn scatter_result(
-    socket: &Socket,
-    config: &Config,
-    native: bool,
-    offered: u64,
-    warmup_offered: u64,
-    pool_empty: u64,
-) {
+fn scatter_result(socket: &Socket, config: &Config, native: bool, counts: &ScatterCounts) {
+    let ScatterCounts {
+        offered,
+        warmup_offered,
+        pool_empty,
+    } = *counts;
     let stats = dart_stats(socket);
     let unacknowledged = if native {
         (offered + warmup_offered).saturating_sub(stats.acknowledged)
@@ -396,28 +429,27 @@ fn wait_acknowledged(socket: &Socket, count: u64, deadline: Instant, wait: &mut 
     }
 }
 
-fn gather(socket: &Socket, config: &Config, at: Instant) {
-    let recycle_pooled = matches!(config.endpoint, omq_tokio::Endpoint::Dart { .. })
-        && config.size > omq_tokio::message::MAX_INLINE_MESSAGE;
-    let until = at + config.throughput_warmup + config.duration;
-    let cancel = timed_cancel(until + config.drain);
-    let mut batch = Vec::with_capacity(256);
-    let mut received = 0u64;
-    let mut total = 0u64;
-    let mut expected = 0u64;
-    let mut duplicates = 0u64;
-    let mut gaps = 0u64;
-    let mut corrupt = 0u64;
-    while socket
-        .recv_many_registered_cancelable_into(256, &cancel, &mut batch)
-        .unwrap()
-        .is_some()
-    {
+/// Receive-side integrity counters. `expected` is the next sequence number;
+/// a lower one is a duplicate and a higher one skips a gap.
+#[derive(Default)]
+struct GatherTally {
+    received: u64,
+    total: u64,
+    expected: u64,
+    duplicates: u64,
+    gaps: u64,
+    corrupt: u64,
+}
+
+impl GatherTally {
+    /// Validate one batch and return how many bodies carry the measured bit.
+    #[inline]
+    fn check_batch(&mut self, batch: &[Message], size: usize) -> u64 {
         let mut measured = 0u64;
-        for message in &batch {
+        for message in batch {
             let body = message.part_slice(0).expect("single body");
-            if body.len() != config.size {
-                corrupt += 1;
+            if body.len() != size {
+                self.corrupt += 1;
                 continue;
             }
             let tag = u64::from_le_bytes(body[..8].try_into().unwrap());
@@ -428,20 +460,39 @@ fn gather(socket: &Socket, config: &Config, at: Instant) {
                 valid_padding(&body[8..])
             };
             if !valid {
-                corrupt += 1;
+                self.corrupt += 1;
             }
             let sequence = tag & !(1 << 63);
-            if sequence < expected {
-                duplicates += 1;
+            if sequence < self.expected {
+                self.duplicates += 1;
             } else {
-                gaps += sequence - expected;
-                expected = sequence + 1;
+                self.gaps += sequence - self.expected;
+                self.expected = sequence + 1;
             }
             measured += tag >> 63;
         }
-        total += measured;
+        measured
+    }
+}
+
+fn gather(socket: &Socket, config: &Config, at: Instant) {
+    let recycle_pooled = matches!(config.endpoint, omq_tokio::Endpoint::Dart { .. })
+        && config.size > omq_tokio::message::MAX_INLINE_MESSAGE;
+    let until = at + config.throughput_warmup + config.duration;
+    let cancel = timed_cancel(until + config.drain);
+    let mut batch = Vec::with_capacity(256);
+    let mut tally = GatherTally::default();
+
+    while socket
+        .recv_many_registered_cancelable_into(256, &cancel, &mut batch)
+        .unwrap()
+        .is_some()
+    {
+        let measured = tally.check_batch(&batch, config.size);
+        tally.total += measured;
+        // Bodies drained after the window still count toward the total only.
         if Instant::now() <= until {
-            received += measured;
+            tally.received += measured;
         }
         if recycle_pooled {
             while !batch.is_empty() {
@@ -451,6 +502,19 @@ fn gather(socket: &Socket, config: &Config, at: Instant) {
             batch.clear();
         }
     }
+
+    gather_result(socket, config, &tally);
+}
+
+fn gather_result(socket: &Socket, config: &Config, tally: &GatherTally) {
+    let GatherTally {
+        received,
+        total,
+        duplicates,
+        gaps,
+        corrupt,
+        ..
+    } = *tally;
     let stats = dart_stats(socket);
     emit(&format!(
         "{{\"event\":\"result\",\"received\":{received},\"received_total\":{total},\"duplicates\":{duplicates},\"gaps\":{gaps},\"corrupt\":{corrupt},\"seconds\":{},\"received_datagrams\":{},\"pool_exhausted\":{},\"receive_overflow\":{},\"invalid_datagrams\":{},\"receive_failures\":{},\"ect0\":{},\"ect1\":{},\"ce\":{},\"ecn_unavailable\":{},\"offloads\":{}}}",
@@ -581,20 +645,10 @@ fn main() {
     let config = Config::parse();
     let affinity = affinity::Affinity::from_env();
     if config.runtime != RuntimeMode::Owned {
-        assert!(matches!(config.role.as_str(), "client" | "server"));
-        affinity.pin(if config.receiving() { 5 } else { 0 });
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .event_interval(if config.runtime == RuntimeMode::CurrentPoll {
-                1
-            } else {
-                61
-            })
-            .build()
-            .unwrap()
-            .block_on(current::run(&config, &affinity));
+        run_current_runtime(&config, &affinity);
         return;
     }
+
     let placement = if config.receiving() {
         affinity::Side::Receiver
     } else {
@@ -612,6 +666,7 @@ fn main() {
             PayloadPool::new([(1024, 1024)]).unwrap()
         }
     });
+
     if config.receiving() {
         let endpoint = socket.bind(config.endpoint.clone()).unwrap();
         emit(&format!(
@@ -621,6 +676,40 @@ fn main() {
         socket.connect(config.endpoint.clone()).unwrap();
     }
     socket.wait_connected(1, SETUP_TIMEOUT).unwrap();
+    emit_ready(&socket, &config, &affinity, native);
+
+    let at = start();
+    match config.role.as_str() {
+        "scatter" => scatter(&socket, &config, native, pool.as_ref().unwrap(), at),
+        "gather" => gather(&socket, &config, at),
+        "client" => client(&socket, &config, pool.as_ref().unwrap()),
+        "server" => server(&socket),
+        _ => unreachable!(),
+    }
+    socket.close().unwrap();
+    context.term();
+}
+
+/// Run a latency role on the caller's current-thread runtime instead of an
+/// owned OMQ context.
+fn run_current_runtime(config: &Config, affinity: &affinity::Affinity) {
+    assert!(matches!(config.role.as_str(), "client" | "server"));
+    affinity.pin(if config.receiving() { 5 } else { 0 });
+    // A poll interval of 1 checks IO on every scheduler tick.
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .event_interval(if config.runtime == RuntimeMode::CurrentPoll {
+            1
+        } else {
+            61
+        })
+        .build()
+        .unwrap()
+        .block_on(current::run(config, affinity));
+}
+
+/// Tell the coordinator the peer is connected, with placement and DART setup.
+fn emit_ready(socket: &Socket, config: &Config, affinity: &affinity::Affinity, native: bool) {
     let wire_version = if native {
         omq_proto::dart::VERSION.to_string()
     } else {
@@ -629,7 +718,7 @@ fn main() {
     emit(&format!(
         "{{\"event\":\"ready\",\"affinity\":\"{}\",\"offloads\":{},\"dart_wire_version\":{wire_version},\"dart_window_messages\":{},\"recv_pool_capacity\":{},\"recv_pool_slot_bytes\":{}}}",
         affinity.description(),
-        offloads(&socket),
+        offloads(socket),
         config.window_messages,
         if native && config.role != "scatter" {
             POOL_SLOTS
@@ -642,14 +731,4 @@ fn main() {
             0
         },
     ));
-    let at = start();
-    match config.role.as_str() {
-        "scatter" => scatter(&socket, &config, native, pool.as_ref().unwrap(), at),
-        "gather" => gather(&socket, &config, at),
-        "client" => client(&socket, &config, pool.as_ref().unwrap()),
-        "server" => server(&socket),
-        _ => unreachable!(),
-    }
-    socket.close().unwrap();
-    context.term();
 }

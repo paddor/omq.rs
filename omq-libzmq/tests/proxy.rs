@@ -87,6 +87,67 @@ impl SocketArg {
     }
 }
 
+/// Run `zmq_proxy_steerable` on its own thread; join for its return code.
+fn spawn_proxy(
+    fe: *mut c_void,
+    be: *mut c_void,
+    cap: *mut c_void,
+    ctrl: *mut c_void,
+) -> std::thread::JoinHandle<i32> {
+    let args = ProxyArgs { fe, be, cap, ctrl };
+    std::thread::spawn(move || {
+        let a = args;
+        zmq_proxy_steerable(a.fe, a.be, a.cap, a.ctrl)
+    })
+}
+
+/// Send `0..n` as little-endian u32 frames from another thread, retrying
+/// each EAGAIN until it is accepted. Join to get the socket back.
+fn spawn_counter_sender(src: *mut c_void, n: usize) -> std::thread::JoinHandle<SocketArg> {
+    let src_arg = SocketArg(src);
+    std::thread::spawn(move || {
+        let src = src_arg.into_ptr();
+        let mut sent = 0usize;
+        while sent < n {
+            let data = (sent as u32).to_le_bytes();
+            let rc = zmq_send(src, data.as_ptr().cast(), data.len(), ZMQ_DONTWAIT);
+            if rc == i32::try_from(data.len()).expect("test payload len fits i32") {
+                sent += 1;
+            } else {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        SocketArg(src)
+    })
+}
+
+/// Receive `count` 4-byte frames, failing on the first short or missing one.
+fn recv_u32_frames(sock: *mut c_void, count: usize) {
+    let mut buf = [0u8; 4];
+    for n in 0..count {
+        let rc = zmq_recv(sock, buf.as_mut_ptr().cast(), buf.len(), 0);
+        assert_eq!(
+            rc,
+            4,
+            "hot recv {n}/{count} failed (errno={})",
+            omq_zmq::zmq_errno()
+        );
+    }
+}
+
+/// Send `0..count` as non-blocking u32 frames; return how many were accepted.
+fn send_burst(sock: *mut c_void, count: u32) -> usize {
+    let mut sent = 0usize;
+    for i in 0..count {
+        let data = i.to_le_bytes();
+        let rc = zmq_send(sock, data.as_ptr().cast(), data.len(), ZMQ_DONTWAIT);
+        if rc == i32::try_from(data.len()).expect("test payload len fits i32") {
+            sent += 1;
+        }
+    }
+    sent
+}
+
 /// Proxy forwards a small message (well under 64 KB).
 #[test]
 fn proxy_small_message() {
@@ -156,19 +217,10 @@ fn proxy_retries_pending_after_inproc_backpressure() {
     let ctrl_a = zmq_socket(ctx, ZMQ_PAIR);
     let ctrl_b = zmq_socket(ctx, ZMQ_PAIR);
 
+    // Small HWMs on the proxy's backend path force EAGAIN inside the proxy.
     let hwm = 16i32;
-    zmq_setsockopt(
-        be,
-        ZMQ_SNDHWM,
-        (&hwm as *const i32).cast(),
-        size_of::<i32>(),
-    );
-    zmq_setsockopt(
-        dst,
-        ZMQ_RCVHWM,
-        (&hwm as *const i32).cast(),
-        size_of::<i32>(),
-    );
+    set_i32(be, ZMQ_SNDHWM, hwm);
+    set_i32(dst, ZMQ_RCVHWM, hwm);
 
     let addr_fe = CString::new("inproc://proxy-fe-backpressure").unwrap();
     let addr_be = CString::new("inproc://proxy-be-backpressure").unwrap();
@@ -184,32 +236,8 @@ fn proxy_retries_pending_after_inproc_backpressure() {
 
     set_timeo(dst, ZMQ_RCVTIMEO, 5000);
 
-    let args = ProxyArgs {
-        fe,
-        be,
-        cap: std::ptr::null_mut(),
-        ctrl: ctrl_a,
-    };
-    let proxy = std::thread::spawn(move || {
-        let a = args;
-        zmq_proxy_steerable(a.fe, a.be, a.cap, a.ctrl)
-    });
-
-    let src_arg = SocketArg(src);
-    let sender = std::thread::spawn(move || {
-        let src = src_arg.into_ptr();
-        let mut sent = 0usize;
-        while sent < N {
-            let data = (sent as u32).to_le_bytes();
-            let rc = zmq_send(src, data.as_ptr().cast(), data.len(), ZMQ_DONTWAIT);
-            if rc == i32::try_from(data.len()).expect("test payload len fits i32") {
-                sent += 1;
-            } else {
-                std::thread::sleep(Duration::from_millis(1));
-            }
-        }
-        SocketArg(src)
-    });
+    let proxy = spawn_proxy(fe, be, std::ptr::null_mut(), ctrl_a);
+    let sender = spawn_counter_sender(src, N);
 
     std::thread::sleep(Duration::from_millis(200));
 
@@ -254,18 +282,8 @@ fn proxy_does_not_starve_reverse_direction_when_frontend_is_hot() {
     }
 
     let hwm = 16i32;
-    zmq_setsockopt(
-        be,
-        ZMQ_SNDHWM,
-        (&hwm as *const i32).cast(),
-        size_of::<i32>(),
-    );
-    zmq_setsockopt(
-        right,
-        ZMQ_RCVHWM,
-        (&hwm as *const i32).cast(),
-        size_of::<i32>(),
-    );
+    set_i32(be, ZMQ_SNDHWM, hwm);
+    set_i32(right, ZMQ_RCVHWM, hwm);
 
     let addr_fe = CString::new("inproc://proxy-fe-starve").unwrap();
     let addr_be = CString::new("inproc://proxy-be-starve").unwrap();
@@ -282,25 +300,9 @@ fn proxy_does_not_starve_reverse_direction_when_frontend_is_hot() {
     set_timeo(left, ZMQ_RCVTIMEO, 5000);
     set_timeo(right, ZMQ_SNDTIMEO, 5000);
 
-    let args = ProxyArgs {
-        fe,
-        be,
-        cap: std::ptr::null_mut(),
-        ctrl: ctrl_a,
-    };
-    let proxy = std::thread::spawn(move || {
-        let a = args;
-        zmq_proxy_steerable(a.fe, a.be, a.cap, a.ctrl)
-    });
+    let proxy = spawn_proxy(fe, be, std::ptr::null_mut(), ctrl_a);
 
-    let mut hot_sent = 0usize;
-    for i in 0..HOT_MESSAGES {
-        let data = i.to_le_bytes();
-        let rc = zmq_send(left, data.as_ptr().cast(), data.len(), ZMQ_DONTWAIT);
-        if rc == i32::try_from(data.len()).expect("test payload len fits i32") {
-            hot_sent += 1;
-        }
-    }
+    let hot_sent = send_burst(left, HOT_MESSAGES);
     assert!(
         hot_sent > hwm as usize,
         "hot path did not build backlog (sent {hot_sent})"
@@ -321,16 +323,7 @@ fn proxy_does_not_starve_reverse_direction_when_frontend_is_hot() {
     assert_eq!(&buf[..payload.len()], payload);
 
     set_timeo(right, ZMQ_RCVTIMEO, 5000);
-    let mut hot_buf = [0u8; 4];
-    for n in 0..hot_sent {
-        let rc = zmq_recv(right, hot_buf.as_mut_ptr().cast(), hot_buf.len(), 0);
-        assert_eq!(
-            rc,
-            4,
-            "right hot recv {n}/{hot_sent} failed (errno={})",
-            omq_zmq::zmq_errno()
-        );
-    }
+    recv_u32_frames(right, hot_sent);
 
     zmq_send(ctrl_b, b"TERMINATE".as_ptr().cast(), 9, 0);
     assert_eq!(proxy.join().unwrap(), 0);

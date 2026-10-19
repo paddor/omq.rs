@@ -30,6 +30,15 @@ pub enum Canceled {
     StoppedConnRefused,
 }
 
+/// Retry rules and starting point for one dial loop.
+pub(crate) struct DialRetry {
+    pub(crate) policy: ReconnectPolicy,
+    /// Give up on `ECONNREFUSED` instead of retrying.
+    pub(crate) stop_conn_refused: bool,
+    /// Failed attempts already made, so a resumed loop keeps its delay.
+    pub(crate) attempt: u32,
+}
+
 /// Keep trying to connect. Returns the established stream on success, or
 /// [`Canceled`] if the cancellation token fired (or the policy was
 /// [`ReconnectPolicy::Disabled`] and we failed once).
@@ -52,22 +61,32 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<S>>,
 {
-    dial_with_backoff_from(dial, policy, stop_conn_refused, cancel, on_delay, 0).await
+    let retry = DialRetry {
+        policy,
+        stop_conn_refused,
+        attempt: 0,
+    };
+
+    dial_with_backoff_from(dial, retry, cancel, on_delay).await
 }
 
 /// Resume after a driver failure using the same delay policy as a failed dial.
 pub(crate) async fn dial_with_backoff_from<F, Fut, S>(
     mut dial: F,
-    policy: ReconnectPolicy,
-    stop_conn_refused: bool,
+    retry: DialRetry,
     cancel: &CancellationToken,
     mut on_delay: impl FnMut(Duration, u32),
-    mut attempt: u32,
 ) -> std::result::Result<S, Canceled>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<S>>,
 {
+    let DialRetry {
+        policy,
+        stop_conn_refused,
+        mut attempt,
+    } = retry;
+
     loop {
         if cancel.is_cancelled() {
             return Err(Canceled::Token);

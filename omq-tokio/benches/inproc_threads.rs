@@ -30,14 +30,39 @@ fn round(ctx: &Context, size: usize, seq: usize, duration: Duration) -> common::
 
     let payload = vec![b'x'; size];
     let template = Message::from_slice(&payload);
+    // Both threads start together; the receiver stops the sender when its
+    // timed window ends.
     let barrier = Arc::new(Barrier::new(2));
     let stop = Arc::new(AtomicBool::new(false));
     let cpu_before = common::process_cpu_time();
 
-    let sender_barrier = barrier.clone();
-    let sender_stop = stop.clone();
-    let sender_push = push.clone();
-    let sender = thread::spawn(move || {
+    let sender = spawn_sender(push.clone(), template, barrier.clone(), stop.clone());
+    let receiver = spawn_receiver(pull.clone(), barrier, stop.clone(), duration);
+
+    let (count, elapsed) = receiver.join().expect("receiver thread");
+    sender.join().expect("sender thread");
+    let cpu_time = common::process_cpu_time().saturating_sub(cpu_before);
+    let _ = pull.close();
+    let _ = push.close();
+
+    let elapsed_secs = elapsed.as_secs_f64();
+    common::Cell {
+        n: count,
+        elapsed,
+        mbps: count as f64 * size as f64 / elapsed_secs / 1e6,
+        msgs_s: count as f64 / elapsed_secs,
+        cpu_time,
+    }
+}
+
+/// Spin on `try_send` of `template` clones until `stop` is set.
+fn spawn_sender(
+    sender_push: omq_tokio::blocking::Socket,
+    template: Message,
+    sender_barrier: Arc<Barrier>,
+    sender_stop: Arc<AtomicBool>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
         sender_barrier.wait();
         while !sender_stop.load(Ordering::Acquire) {
             let mut msg = template.clone();
@@ -55,16 +80,23 @@ fn round(ctx: &Context, size: usize, seq: usize, duration: Duration) -> common::
                 }
             }
         }
-    });
+    })
+}
 
-    let receiver_barrier = barrier;
-    let receiver_stop = stop.clone();
-    let receiver_pull = pull.clone();
-    let receiver = thread::spawn(move || {
+/// Spin on `try_recv` for `duration`, then set `stop`. Returns the message
+/// count and the measured window.
+fn spawn_receiver(
+    receiver_pull: omq_tokio::blocking::Socket,
+    receiver_barrier: Arc<Barrier>,
+    receiver_stop: Arc<AtomicBool>,
+    duration: Duration,
+) -> thread::JoinHandle<(usize, Duration)> {
+    thread::spawn(move || {
         receiver_barrier.wait();
         let start = Instant::now();
         let deadline = start + duration;
         let mut count = 0usize;
+        // Read the clock only every TIMER_CHECK_INTERVAL polls.
         let mut until_timer_check = TIMER_CHECK_INTERVAL;
         loop {
             match receiver_pull.try_recv() {
@@ -82,21 +114,7 @@ fn round(ctx: &Context, size: usize, seq: usize, duration: Duration) -> common::
         }
         receiver_stop.store(true, Ordering::Release);
         (count, start.elapsed())
-    });
-
-    let (count, elapsed) = receiver.join().expect("receiver thread");
-    sender.join().expect("sender thread");
-    let cpu_time = common::process_cpu_time().saturating_sub(cpu_before);
-    let _ = pull.close();
-    let _ = push.close();
-    let elapsed_secs = elapsed.as_secs_f64();
-    common::Cell {
-        n: count,
-        elapsed,
-        mbps: count as f64 * size as f64 / elapsed_secs / 1e6,
-        msgs_s: count as f64 / elapsed_secs,
-        cpu_time,
-    }
+    })
 }
 
 fn main() {

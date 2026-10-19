@@ -121,29 +121,10 @@ pub extern "C" fn zmq_poll(
     nitems: c_int,
     timeout_ms: libc::c_long,
 ) -> c_int {
-    if nitems < 0 {
-        return crate::error::fail(libc::EINVAL);
-    }
-    if items.is_null() && nitems > 0 {
-        return crate::error::fail(libc::EFAULT);
-    }
-    let n = nitems as usize;
-    let items_slice = if n == 0 {
-        &mut []
-    } else {
-        // SAFETY: items is non-null (checked above) with nitems elements.
-        unsafe { std::slice::from_raw_parts_mut(items, n) }
+    let items_slice = match poll_items(items, nitems) {
+        Ok(items) => items,
+        Err(errno) => return crate::error::fail(errno),
     };
-
-    if items_slice
-        .iter()
-        .any(|item| !item.socket.is_null() && item_socket(item).is_none())
-    {
-        return crate::error::fail(crate::error::ENOTSOCK);
-    }
-    if any_socket_terminated(items_slice) {
-        return crate::error::fail(crate::error::ETERM);
-    }
 
     let ready = check_immediate(items_slice);
     if ready > 0 || timeout_ms == 0 {
@@ -170,30 +151,68 @@ pub extern "C" fn zmq_poll(
             return ready;
         }
 
-        let wait_ms = match deadline {
-            None => -1,
-            Some(deadline) => {
-                let left = deadline.saturating_duration_since(std::time::Instant::now());
-                if left.is_zero() {
-                    return 0;
-                }
-                // Round up so the final wait reaches the deadline.
-                libc::c_long::try_from(left.as_micros().div_ceil(1000)).unwrap_or(libc::c_long::MAX)
-            }
+        let Some(wait_ms) = wait_budget_ms(deadline) else {
+            return 0;
         };
         let rc = waiter.wait(wait_ms, items_slice);
         if rc < 0 {
             return rc;
         }
+
         accumulate_buffered(items_slice);
         let ready = items_slice.iter().filter(|item| item.revents != 0).count();
         if ready > 0 {
             return c_int::try_from(ready).unwrap_or(c_int::MAX);
         }
+
         if any_socket_terminated(items_slice) {
             return crate::error::fail(crate::error::ETERM);
         }
     }
+}
+
+/// Borrow the caller's poll items after validating count, pointer, socket
+/// handles, and context state, in libzmq's errno order.
+fn poll_items<'a>(items: *mut ZmqPollItem, nitems: c_int) -> Result<&'a mut [ZmqPollItem], c_int> {
+    if nitems < 0 {
+        return Err(libc::EINVAL);
+    }
+    if items.is_null() && nitems > 0 {
+        return Err(libc::EFAULT);
+    }
+
+    let n = nitems as usize;
+    let items_slice = if n == 0 {
+        &mut []
+    } else {
+        // SAFETY: items is non-null (checked above) with nitems elements.
+        unsafe { std::slice::from_raw_parts_mut(items, n) }
+    };
+
+    if items_slice
+        .iter()
+        .any(|item| !item.socket.is_null() && item_socket(item).is_none())
+    {
+        return Err(crate::error::ENOTSOCK);
+    }
+    if any_socket_terminated(items_slice) {
+        return Err(crate::error::ETERM);
+    }
+    Ok(items_slice)
+}
+
+/// Milliseconds for the next OS wait: -1 without a deadline, `None` once it passed.
+fn wait_budget_ms(deadline: Option<std::time::Instant>) -> Option<libc::c_long> {
+    let Some(deadline) = deadline else {
+        return Some(-1);
+    };
+
+    let left = deadline.saturating_duration_since(std::time::Instant::now());
+    if left.is_zero() {
+        return None;
+    }
+    // Round up so the final wait reaches the deadline.
+    Some(libc::c_long::try_from(left.as_micros().div_ceil(1000)).unwrap_or(libc::c_long::MAX))
 }
 
 /// Poll with a millisecond timeout; non-null signal masks are unsupported and return ENOTSUP.

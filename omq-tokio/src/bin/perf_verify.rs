@@ -848,51 +848,17 @@ fn cases() -> Vec<Case> {
         Transport::Dart,
     ];
     for transport in transports {
-        let pipeline = match transport {
-            #[cfg(feature = "dart")]
-            Transport::Dart => "scattergather",
-            _ => "pushpull",
-        };
         for io_threads in [1, 2] {
-            for (size, suffix) in [(16, "16b"), (256, "256b"), (1024, "1k"), (16 * 1024, "16k")] {
-                if size > 1024 && !matches!(transport, Transport::Tcp) {
-                    continue;
-                }
-                cases.push(Case {
-                    name: format!(
-                        "{}{pipeline}_{io_threads}io.{suffix}_msgs_s",
-                        transport.prefix()
-                    ),
-                    workload: Workload::Pipeline {
-                        size,
-                        io_threads,
-                        transport,
-                    },
-                });
-            }
+            add_pipeline_cases(&mut cases, transport, io_threads);
+            // DART has no PUB/SUB gate.
             #[cfg(feature = "dart")]
             if matches!(transport, Transport::Dart) {
                 continue;
             }
-            for (size, suffix) in [(16, "16b"), (256, "256b"), (1024, "1k"), (4096, "4k")] {
-                if size > 1024 && !matches!(transport, Transport::Tcp) {
-                    continue;
-                }
-                cases.push(Case {
-                    name: format!(
-                        "{}pubsub_{io_threads}io.{suffix}_msgs_s",
-                        transport.prefix()
-                    ),
-                    workload: Workload::Pubsub {
-                        size,
-                        io_threads,
-                        peers: 4,
-                        transport,
-                    },
-                });
-            }
+            add_pubsub_cases(&mut cases, transport, io_threads);
         }
     }
+
     cases.push(Case {
         name: "pubsub_2io.256b_32p_msgs_s".to_owned(),
         workload: Workload::PubsubProcesses,
@@ -908,6 +874,54 @@ fn cases() -> Vec<Case> {
     contract_cases(&mut cases);
     draft::cases(&mut cases);
     cases
+}
+
+/// PUSH/PULL (SCATTER/GATHER on DART) throughput. Sizes above 1 KiB are
+/// gated on TCP only.
+fn add_pipeline_cases(cases: &mut Vec<Case>, transport: Transport, io_threads: usize) {
+    let pipeline = match transport {
+        #[cfg(feature = "dart")]
+        Transport::Dart => "scattergather",
+        _ => "pushpull",
+    };
+    for (size, suffix) in [(16, "16b"), (256, "256b"), (1024, "1k"), (16 * 1024, "16k")] {
+        if size > 1024 && !matches!(transport, Transport::Tcp) {
+            continue;
+        }
+        cases.push(Case {
+            name: format!(
+                "{}{pipeline}_{io_threads}io.{suffix}_msgs_s",
+                transport.prefix()
+            ),
+            workload: Workload::Pipeline {
+                size,
+                io_threads,
+                transport,
+            },
+        });
+    }
+}
+
+/// PUB/SUB fan-out to four subscribers. Sizes above 1 KiB are gated on TCP
+/// only.
+fn add_pubsub_cases(cases: &mut Vec<Case>, transport: Transport, io_threads: usize) {
+    for (size, suffix) in [(16, "16b"), (256, "256b"), (1024, "1k"), (4096, "4k")] {
+        if size > 1024 && !matches!(transport, Transport::Tcp) {
+            continue;
+        }
+        cases.push(Case {
+            name: format!(
+                "{}pubsub_{io_threads}io.{suffix}_msgs_s",
+                transport.prefix()
+            ),
+            workload: Workload::Pubsub {
+                size,
+                io_threads,
+                peers: 4,
+                transport,
+            },
+        });
+    }
 }
 
 /// Round trips across socket types and peer counts, where a latency
@@ -1033,6 +1047,53 @@ impl RunOptions {
     }
 }
 
+fn print_run_header(options: &RunOptions, thresholds: &ThresholdConfig) {
+    println!("placement: {}", SETTINGS.affinity.description());
+    println!(
+        "warmup: {:?}, measurement: {:?}, repetitions: {}",
+        SETTINGS.warmup, SETTINGS.measure, options.repeat
+    );
+    if options.measure_only {
+        println!("measurement only: thresholds are not checked");
+    } else if thresholds.mode == ThresholdMode::Smoke {
+        println!(".perf_hw absent: using smoke thresholds");
+    }
+}
+
+/// Measure `case` `repeat` times and return the median sample. With an even
+/// count the median is the midpoint of the two middle samples.
+async fn measure_median(case: &Case, repeat: usize) -> Sample {
+    let mut samples = Vec::with_capacity(repeat);
+    for round in 0..repeat {
+        let sample = measure(case).await;
+        assert!(sample.value.is_finite(), "invalid benchmark measurement");
+        if repeat > 1 {
+            println!(
+                "  sample {}: {:.2} {}",
+                round + 1,
+                sample.value,
+                sample.unit
+            );
+        }
+        samples.push(sample);
+    }
+
+    samples.sort_by(|a, b| a.value.total_cmp(&b.value));
+    let mut sample = samples[samples.len() / 2].clone();
+    if samples.len() % 2 == 0 {
+        sample.value = sample.value.midpoint(samples[samples.len() / 2 - 1].value);
+    }
+    if repeat > 1 {
+        println!(
+            "  range: {:.2}..{:.2} {} (result is median)",
+            samples[0].value,
+            samples[samples.len() - 1].value,
+            sample.unit
+        );
+    }
+    sample
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -1058,16 +1119,8 @@ async fn main() {
         );
     }
     let thresholds = read_thresholds();
-    println!("placement: {}", SETTINGS.affinity.description());
-    println!(
-        "warmup: {:?}, measurement: {:?}, repetitions: {}",
-        SETTINGS.warmup, SETTINGS.measure, options.repeat
-    );
-    if options.measure_only {
-        println!("measurement only: thresholds are not checked");
-    } else if thresholds.mode == ThresholdMode::Smoke {
-        println!(".perf_hw absent: using smoke thresholds");
-    }
+    print_run_header(&options, &thresholds);
+
     for case in cases {
         if let Some(name) = &options.case {
             if name != &case.name {
@@ -1076,33 +1129,8 @@ async fn main() {
         } else if !options.measure_only && !should_measure(&case.name, &thresholds) {
             continue;
         }
-        let mut samples = Vec::with_capacity(options.repeat);
-        for round in 0..options.repeat {
-            let sample = measure(&case).await;
-            assert!(sample.value.is_finite(), "invalid benchmark measurement");
-            if options.repeat > 1 {
-                println!(
-                    "  sample {}: {:.2} {}",
-                    round + 1,
-                    sample.value,
-                    sample.unit
-                );
-            }
-            samples.push(sample);
-        }
-        samples.sort_by(|a, b| a.value.total_cmp(&b.value));
-        let mut sample = samples[samples.len() / 2].clone();
-        if samples.len() % 2 == 0 {
-            sample.value = sample.value.midpoint(samples[samples.len() / 2 - 1].value);
-        }
-        if options.repeat > 1 {
-            println!(
-                "  range: {:.2}..{:.2} {} (result is median)",
-                samples[0].value,
-                samples[samples.len() - 1].value,
-                sample.unit
-            );
-        }
+
+        let sample = measure_median(&case, options.repeat).await;
         if options.measure_only {
             println!("{:<24} {:>12.2} {}", sample.name, sample.value, sample.unit);
         } else if !verify(&sample, &thresholds.values) {

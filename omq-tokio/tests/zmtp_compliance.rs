@@ -158,71 +158,80 @@ async fn duplicate_subscriptions_survive_one_cancel_and_replay() {
     for transport in ["tcp", "inproc"] {
         for kind in [SocketType::Sub, SocketType::XSub] {
             for prefix in ["", "topic"] {
-                let publisher =
-                    Socket::new(SocketType::XPub, Options::default().linger(Duration::ZERO));
-                let subscriber = Socket::new(kind, Options::default().linger(Duration::ZERO));
-                subscriber.subscribe(prefix).await.unwrap();
-                subscriber.subscribe(prefix).await.unwrap();
-                let endpoint = if transport == "tcp" {
-                    "tcp://127.0.0.1:0".to_owned()
-                } else {
-                    format!("inproc://duplicate-{kind:?}-{}", prefix.len())
-                };
-                let endpoint = publisher.bind(endpoint).await.unwrap();
-                for attempt in 0..2 {
-                    subscriber.connect(endpoint.clone()).await.unwrap();
-                    // XPUB notifications provide a control-plane barrier for both replayed copies.
-                    for _ in 0..2 {
-                        let notification = tokio::time::timeout(DEADLINE, publisher.recv())
-                            .await
-                            .unwrap()
-                            .unwrap();
-                        assert_eq!(
-                            notification.part_bytes(0).unwrap().as_ref(),
-                            [b"\x01".as_slice(), prefix.as_bytes()].concat()
-                        );
-                    }
-                    subscriber.unsubscribe(prefix).await.unwrap();
-                    let cancel = tokio::time::timeout(DEADLINE, publisher.recv())
-                        .await
-                        .unwrap()
-                        .unwrap();
-                    assert_eq!(
-                        cancel.part_bytes(0).unwrap().as_ref(),
-                        [b"\x00".as_slice(), prefix.as_bytes()].concat()
-                    );
-                    publisher.send(Message::single("topic/body")).await.unwrap();
-                    assert_eq!(
-                        tokio::time::timeout(DEADLINE, subscriber.recv())
-                            .await
-                            .unwrap()
-                            .unwrap()
-                            .part_bytes(0)
-                            .unwrap()
-                            .as_ref(),
-                        b"topic/body"
-                    );
-                    if attempt == 0 {
-                        subscriber.disconnect(endpoint.clone()).await.unwrap();
-                        subscriber.subscribe(prefix).await.unwrap();
-                    } else {
-                        subscriber.unsubscribe(prefix).await.unwrap();
-                        let _ = tokio::time::timeout(DEADLINE, publisher.recv())
-                            .await
-                            .unwrap()
-                            .unwrap();
-                        publisher
-                            .send(Message::single("topic/dropped"))
-                            .await
-                            .unwrap();
-                        assert!(
-                            tokio::time::timeout(Duration::from_millis(50), subscriber.recv())
-                                .await
-                                .is_err()
-                        );
-                    }
-                }
+                check_duplicate_subscription(transport, kind, prefix).await;
             }
+        }
+    }
+}
+
+/// Receives one XPUB notification and checks it is `tag` (1 subscribe,
+/// 0 cancel) followed by `prefix`.
+async fn expect_notification(publisher: &Socket, tag: u8, prefix: &str) {
+    let notification = tokio::time::timeout(DEADLINE, publisher.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        notification.part_bytes(0).unwrap().as_ref(),
+        [[tag].as_slice(), prefix.as_bytes()].concat()
+    );
+}
+
+async fn check_duplicate_subscription(transport: &str, kind: SocketType, prefix: &'static str) {
+    let publisher = Socket::new(SocketType::XPub, Options::default().linger(Duration::ZERO));
+    let subscriber = Socket::new(kind, Options::default().linger(Duration::ZERO));
+    // Two copies of the same prefix: one cancel must leave the other live.
+    subscriber.subscribe(prefix).await.unwrap();
+    subscriber.subscribe(prefix).await.unwrap();
+
+    let endpoint = if transport == "tcp" {
+        "tcp://127.0.0.1:0".to_owned()
+    } else {
+        format!("inproc://duplicate-{kind:?}-{}", prefix.len())
+    };
+    let endpoint = publisher.bind(endpoint).await.unwrap();
+
+    for attempt in 0..2 {
+        subscriber.connect(endpoint.clone()).await.unwrap();
+        // XPUB notifications provide a control-plane barrier for both replayed copies.
+        for _ in 0..2 {
+            expect_notification(&publisher, 1, prefix).await;
+        }
+
+        subscriber.unsubscribe(prefix).await.unwrap();
+        expect_notification(&publisher, 0, prefix).await;
+        publisher.send(Message::single("topic/body")).await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(DEADLINE, subscriber.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                .part_bytes(0)
+                .unwrap()
+                .as_ref(),
+            b"topic/body"
+        );
+
+        if attempt == 0 {
+            // Restore two copies, then reconnect so both are replayed.
+            subscriber.disconnect(endpoint.clone()).await.unwrap();
+            subscriber.subscribe(prefix).await.unwrap();
+        } else {
+            // Canceling the last copy stops delivery.
+            subscriber.unsubscribe(prefix).await.unwrap();
+            let _ = tokio::time::timeout(DEADLINE, publisher.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            publisher
+                .send(Message::single("topic/dropped"))
+                .await
+                .unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), subscriber.recv())
+                    .await
+                    .is_err()
+            );
         }
     }
 }

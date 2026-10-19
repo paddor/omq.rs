@@ -218,7 +218,6 @@ impl QueuedOutput {
                         }
                         Err(_) => None,
                     },
-                    OUTBOUND_BATCH_MAX_MSGS,
                     connection,
                     &mut self.frames,
                 )?;
@@ -233,7 +232,6 @@ impl QueuedOutput {
             self.encoding.batch_encode(
                 &first,
                 || self.pipe_batch.pop(),
-                OUTBOUND_BATCH_MAX_MSGS,
                 connection,
                 &mut self.frames,
             )?;

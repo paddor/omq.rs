@@ -1,85 +1,135 @@
 use super::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 
-pub(super) async fn stream_worker(
-    context: Context,
-    deadline: Instant,
-    seed: u64,
-    counts: Arc<Counts>,
-) {
+/// A STREAM socket connected to a plain TCP peer that the worker drives.
+struct RawPeer {
+    stream: Socket,
+    identity: Bytes,
+    reader: OwnedReadHalf,
+    writer: OwnedWriteHalf,
+}
+
+async fn raw_peer(context: &Context) -> RawPeer {
+    let stream = context.socket(SocketType::Stream, options());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint: Endpoint = format!("tcp://{}", listener.local_addr().unwrap())
+        .parse()
+        .unwrap();
+    stream.connect(endpoint).await.unwrap();
+
+    let (remote, _) = listener.accept().await.unwrap();
+    let (reader, writer) = remote.into_split();
+
+    // STREAM announces a new peer as its identity plus an empty frame.
+    let greeting = tokio::time::timeout(IO_TIMEOUT, stream.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let identity = greeting.part_bytes(0).unwrap();
+    assert_eq!(greeting.part_slice(1), Some(&[][..]));
+
+    RawPeer {
+        stream,
+        identity,
+        reader,
+        writer,
+    }
+}
+
+/// Echoes `body` through STREAM in both directions at once.
+async fn stream_round(peer: &mut RawPeer, body: &Bytes, sequence: u64, counts: &Counts) {
+    let progress = [AtomicU64::new(0), AtomicU64::new(0)];
+    let mut events = peer.stream.monitor();
+    let RawPeer {
+        stream,
+        identity,
+        reader,
+        writer,
+    } = peer;
+
+    tokio::time::timeout(IO_TIMEOUT, async {
+        let outgoing = async {
+            stream
+                .send(Message::multipart([identity.clone(), body.clone()]))
+                .await
+                .unwrap();
+
+            let mut received = vec![0; body.len()];
+            let mut offset = 0;
+            while offset < received.len() {
+                let n = reader.read(&mut received[offset..]).await.unwrap();
+                assert!(n != 0, "STREAM disconnected under pacing");
+                offset += n;
+                progress[0].store(offset as u64, Ordering::Relaxed);
+            }
+
+            assert_eq!(&received[..], body.as_ref());
+            counts.received(body.len());
+        };
+
+        // Paced reads split the raw bytes into arbitrary chunks, so the
+        // chunks must concatenate to the body rather than match it whole.
+        let incoming = async {
+            writer.write_all(body).await.unwrap();
+
+            let mut offset = 0;
+            while offset < body.len() {
+                let message = stream.recv().await.unwrap();
+                assert_eq!(message.len(), 2);
+                assert_eq!(&message.part_bytes(0).unwrap(), identity);
+
+                let chunk = message.part_slice(1).unwrap();
+                assert!(!chunk.is_empty(), "STREAM disconnected under pacing");
+                assert!(offset + chunk.len() <= body.len());
+                assert_eq!(chunk, &body[offset..offset + chunk.len()]);
+                offset += chunk.len();
+                progress[1].store(offset as u64, Ordering::Relaxed);
+            }
+
+            counts.received(body.len());
+        };
+
+        tokio::join!(outgoing, incoming);
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "STREAM sequence={sequence} size={} egress={} ingress={} events={:?}",
+            body.len(),
+            progress[0].load(Ordering::Relaxed),
+            progress[1].load(Ordering::Relaxed),
+            recent_events(&mut events)
+        )
+    });
+}
+
+pub(super) async fn stream_worker(worker: Worker) {
+    let Worker {
+        limited,
+        deadline,
+        seed,
+        counts,
+        ..
+    } = worker;
+
     let mut sequence = 0;
     while Instant::now() < deadline {
-        let stream = context.socket(SocketType::Stream, options());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let endpoint: Endpoint = format!("tcp://{}", listener.local_addr().unwrap())
-            .parse()
-            .unwrap();
-        stream.connect(endpoint).await.unwrap();
-        let (remote, _) = listener.accept().await.unwrap();
-        let (mut reader, mut writer) = remote.into_split();
-        let greeting = tokio::time::timeout(IO_TIMEOUT, stream.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        let identity = greeting.part_bytes(0).unwrap();
-        assert_eq!(greeting.part_slice(1), Some(&[][..]));
+        let mut peer = raw_peer(&limited).await;
         counts.connections.fetch_add(1, Ordering::Relaxed);
+
         for _ in 0..16 {
             let body = payload(seed, sequence, SIZES[sequence as usize % SIZES.len()]);
-            let progress = [AtomicU64::new(0), AtomicU64::new(0)];
-            let mut events = stream.monitor();
-            tokio::time::timeout(IO_TIMEOUT, async {
-                let outgoing = async {
-                    stream
-                        .send(Message::multipart([identity.clone(), body.clone()]))
-                        .await
-                        .unwrap();
-                    let mut received = vec![0; body.len()];
-                    let mut offset = 0;
-                    while offset < received.len() {
-                        let n = reader.read(&mut received[offset..]).await.unwrap();
-                        assert!(n != 0, "STREAM disconnected under pacing");
-                        offset += n;
-                        progress[0].store(offset as u64, Ordering::Relaxed);
-                    }
-                    assert_eq!(&received[..], body.as_ref());
-                    counts.received(body.len());
-                };
-                let incoming = async {
-                    writer.write_all(&body).await.unwrap();
-                    let mut offset = 0;
-                    while offset < body.len() {
-                        let message = stream.recv().await.unwrap();
-                        assert_eq!(message.len(), 2);
-                        assert_eq!(message.part_bytes(0).unwrap(), identity);
-                        let chunk = message.part_slice(1).unwrap();
-                        assert!(!chunk.is_empty(), "STREAM disconnected under pacing");
-                        assert!(offset + chunk.len() <= body.len());
-                        assert_eq!(chunk, &body[offset..offset + chunk.len()]);
-                        offset += chunk.len();
-                        progress[1].store(offset as u64, Ordering::Relaxed);
-                    }
-                    counts.received(body.len());
-                };
-                tokio::join!(outgoing, incoming);
-            })
-            .await
-            .unwrap_or_else(|_| {
-                panic!(
-                    "STREAM sequence={sequence} size={} egress={} ingress={} events={:?}",
-                    body.len(),
-                    progress[0].load(Ordering::Relaxed),
-                    progress[1].load(Ordering::Relaxed),
-                    recent_events(&mut events)
-                )
-            });
+            stream_round(&mut peer, &body, sequence, &counts).await;
             sequence += 1;
             if Instant::now() >= deadline {
                 break;
             }
         }
-        close(stream).await;
+
+        close(peer.stream).await;
     }
+
     assert!(sequence != 0, "STREAM made no progress");
 }
 
@@ -95,24 +145,28 @@ async fn udp_pair(sender: &Context, receiver: &Context) -> (Socket, Socket) {
     (radio, dish)
 }
 
-pub(super) async fn udp_worker(
-    limited: Context,
-    remote: Context,
-    deadline: Instant,
-    seed: u64,
-    counts: Arc<Counts>,
-) {
+pub(super) async fn udp_worker(worker: Worker) {
+    let Worker {
+        limited,
+        remote,
+        deadline,
+        seed,
+        counts,
+    } = worker;
+
     let mut sequence = 0;
     while Instant::now() < deadline {
         let (out, out_receiver) = udp_pair(&limited, &remote).await;
         let (input, in_receiver) = udp_pair(&remote, &limited).await;
         counts.connections.fetch_add(2, Ordering::Relaxed);
+
         for _ in 0..16 {
             let body = payload(
                 seed,
                 sequence,
                 SIZES[sequence as usize % SIZES.len()].min(16384),
             );
+
             // One datagram outstanding in each direction avoids overflowing
             // UDP's lossy receive queues while their reads are paced.
             let transfer = async |sender: &Socket, receiver: &Socket, body: Bytes| {
@@ -134,14 +188,17 @@ pub(super) async fn udp_worker(
             })
             .await
             .expect("UDP made no progress under mixed demand");
+
             sequence += 1;
             if Instant::now() >= deadline {
                 break;
             }
         }
+
         for socket in [out, out_receiver, input, in_receiver] {
             close(socket).await;
         }
     }
+
     assert!(sequence != 0, "UDP made no progress");
 }

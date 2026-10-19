@@ -239,24 +239,155 @@ fn large_throughput_options() -> Options {
     options
 }
 
+/// Progress shared between the sender, receiver, and monitor tasks.
+#[derive(Default)]
+struct Counters {
+    sent: AtomicU64,
+    recvd: AtomicU64,
+    sent_bytes: AtomicU64,
+    recvd_bytes: AtomicU64,
+    stop: AtomicBool,
+}
+
+/// Sends the deterministic payload sequence until stopped. `seq` advances
+/// only on success, so a timed-out payload is retried with the same seq.
+fn spawn_sender(push: Socket, counters: Arc<Counters>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut seq = 0u64;
+        while !counters.stop.load(Ordering::Relaxed) {
+            let payload = build_payload(seq);
+            let payload_len = payload.len() as u64;
+            if let Ok(Ok(())) =
+                tokio::time::timeout(Duration::from_secs(2), push.send(Message::single(payload)))
+                    .await
+            {
+                seq += 1;
+                counters.sent.store(seq, Ordering::Relaxed);
+                counters
+                    .sent_bytes
+                    .fetch_add(payload_len, Ordering::Relaxed);
+            }
+        }
+    })
+}
+
+fn spawn_receiver(
+    pull: Socket,
+    counters: Arc<Counters>,
+    stats: Arc<std::sync::Mutex<PayloadStats>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while !counters.stop.load(Ordering::Relaxed) {
+            if let Ok(Ok(m)) = tokio::time::timeout(Duration::from_secs(2), pull.recv()).await {
+                let data = m.part_bytes(0).unwrap();
+                stats.lock().unwrap().validate(&data);
+                counters.recvd.fetch_add(1, Ordering::Relaxed);
+                counters
+                    .recvd_bytes
+                    .fetch_add(data.len() as u64, Ordering::Relaxed);
+            }
+        }
+    })
+}
+
+/// Runs for `duration`, failing fast if either worker exits early, and
+/// checks that receive throughput did not degrade.
+async fn monitor_workers(
+    duration: Duration,
+    counters: &Counters,
+    send_task: &mut tokio::task::JoinHandle<()>,
+    recv_task: &mut tokio::task::JoinHandle<()>,
+) {
+    let start = Instant::now();
+    let mut last_log = start;
+    let mut tracker = soak_common::ThroughputTracker::new(Duration::from_secs(10));
+
+    while start.elapsed() < duration {
+        // Workers loop until `stop`, so any earlier exit is a failure.
+        tokio::select! {
+            res = &mut *send_task => {
+                counters.stop.store(true, Ordering::Relaxed);
+                res.expect("large throughput send task panicked");
+                panic!("large throughput send task exited before stop");
+            }
+            res = &mut *recv_task => {
+                counters.stop.store(true, Ordering::Relaxed);
+                res.expect("large throughput recv task panicked");
+                panic!("large throughput recv task exited before stop");
+            }
+            () = tokio::time::sleep(Duration::from_secs(1)) => {}
+        }
+
+        let s = counters.sent.load(Ordering::Relaxed);
+        let r = counters.recvd.load(Ordering::Relaxed);
+        tracker.record(r);
+
+        if last_log.elapsed() >= Duration::from_secs(30) {
+            eprintln!(
+                "[large_throughput] {:.0}s, sent {s}, recvd {r}",
+                start.elapsed().as_secs_f64(),
+            );
+            last_log = Instant::now();
+        }
+    }
+
+    counters.stop.store(true, Ordering::Relaxed);
+    tracker.assert_stable("large_throughput");
+}
+
+/// Checks that the probe arrived and that reordering and loss stayed small.
+fn assert_payload_stats(st: &mut PayloadStats, total_sent: u64) {
+    st.finalize(total_sent);
+    eprintln!(
+        "[large_throughput] max size: {} MiB, reorders: {}, max distance: {}, dropped: {}/{}",
+        st.max_size / 1024 / 1024,
+        st.reorders,
+        st.max_reorder_distance,
+        st.dropped,
+        total_sent,
+    );
+
+    assert_eq!(
+        st.max_size, PROBE_MSG_SIZE,
+        "128 MiB probe was not received"
+    );
+    assert!(
+        st.max_reorder_distance <= 16,
+        "reorder distance {} exceeds tolerance of 16",
+        st.max_reorder_distance,
+    );
+
+    // Messages in flight when the workers stop are counted as dropped, so
+    // allow a small absolute count even when the percentage is high.
+    let drop_pct = if total_sent > 0 {
+        st.dropped as f64 / total_sent as f64 * 100.0
+    } else {
+        0.0
+    };
+    assert!(
+        drop_pct < 5.0 || st.dropped <= 16,
+        "dropped {:.1}% of messages ({}/{})",
+        drop_pct,
+        st.dropped,
+        total_sent,
+    );
+}
+
 #[test]
-#[expect(clippy::too_many_lines)]
 fn soak_large_message_throughput() {
     let duration = soak_common::soak_duration();
     let monitor = soak_common::ResourceMonitor::start();
 
-    let sent = Arc::new(AtomicU64::new(0));
-    let recvd = Arc::new(AtomicU64::new(0));
-    let sent_bytes = Arc::new(AtomicU64::new(0));
-    let recvd_bytes = Arc::new(AtomicU64::new(0));
-    let stop = Arc::new(AtomicBool::new(false));
-    let report_sent = sent.clone();
+    let counters = Arc::new(Counters::default());
+    let report_counters = counters.clone();
     let report_stats = Arc::new(std::sync::Mutex::new(PayloadStats::new()));
     let stats = report_stats.clone();
 
     let ctx = soak_common::build_context();
 
     ctx.block_on(async move {
+        // HWM 4 on both sides keeps only a few large messages queued, so
+        // the sender is paced by the wire rather than by memory.
         let pull = Socket::new(SocketType::Pull, large_throughput_options().recv_hwm(4));
         let ep = pull.bind(soak_common::tcp_ep(0)).await.unwrap();
 
@@ -264,78 +395,9 @@ fn soak_large_message_throughput() {
         push.connect(ep).await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        let send_sent = sent.clone();
-        let send_sent_bytes = sent_bytes.clone();
-        let send_stop = stop.clone();
-        let push_clone = push.clone();
-        let mut send_task = tokio::spawn(async move {
-            let mut seq = 0u64;
-            while !send_stop.load(Ordering::Relaxed) {
-                let payload = build_payload(seq);
-                let payload_len = payload.len() as u64;
-                if let Ok(Ok(())) = tokio::time::timeout(
-                    Duration::from_secs(2),
-                    push_clone.send(Message::single(payload)),
-                )
-                .await
-                {
-                    seq += 1;
-                    send_sent.store(seq, Ordering::Relaxed);
-                    send_sent_bytes.fetch_add(payload_len, Ordering::Relaxed);
-                }
-            }
-        });
-
-        let recv_recvd = recvd.clone();
-        let recv_recvd_bytes = recvd_bytes.clone();
-        let recv_stop = stop.clone();
-        let pull_clone = pull.clone();
-        let recv_stats = stats.clone();
-        let mut recv_task = tokio::spawn(async move {
-            while !recv_stop.load(Ordering::Relaxed) {
-                if let Ok(Ok(m)) =
-                    tokio::time::timeout(Duration::from_secs(2), pull_clone.recv()).await
-                {
-                    let data = m.part_bytes(0).unwrap();
-                    recv_stats.lock().unwrap().validate(&data);
-                    recv_recvd.fetch_add(1, Ordering::Relaxed);
-                    recv_recvd_bytes.fetch_add(data.len() as u64, Ordering::Relaxed);
-                }
-            }
-        });
-
-        let start = Instant::now();
-        let mut last_log = start;
-        let mut tracker = soak_common::ThroughputTracker::new(Duration::from_secs(10));
-
-        while start.elapsed() < duration {
-            tokio::select! {
-                res = &mut send_task => {
-                    stop.store(true, Ordering::Relaxed);
-                    res.expect("large throughput send task panicked");
-                    panic!("large throughput send task exited before stop");
-                }
-                res = &mut recv_task => {
-                    stop.store(true, Ordering::Relaxed);
-                    res.expect("large throughput recv task panicked");
-                    panic!("large throughput recv task exited before stop");
-                }
-                () = tokio::time::sleep(Duration::from_secs(1)) => {}
-            }
-            let s = sent.load(Ordering::Relaxed);
-            let r = recvd.load(Ordering::Relaxed);
-            tracker.record(r);
-
-            if last_log.elapsed() >= Duration::from_secs(30) {
-                eprintln!(
-                    "[large_throughput] {:.0}s, sent {s}, recvd {r}",
-                    start.elapsed().as_secs_f64(),
-                );
-                last_log = Instant::now();
-            }
-        }
-        stop.store(true, Ordering::Relaxed);
-        tracker.assert_stable("large_throughput");
+        let mut send_task = spawn_sender(push.clone(), counters.clone());
+        let mut recv_task = spawn_receiver(pull.clone(), counters.clone(), stats);
+        monitor_workers(duration, &counters, &mut send_task, &mut recv_task).await;
 
         send_task
             .await
@@ -344,9 +406,9 @@ fn soak_large_message_throughput() {
             .await
             .expect("large throughput recv task panicked");
 
-        let s = sent.load(Ordering::Relaxed);
-        let r = recvd.load(Ordering::Relaxed);
-        let bytes = recvd_bytes.load(Ordering::Relaxed);
+        let s = counters.sent.load(Ordering::Relaxed);
+        let r = counters.recvd.load(Ordering::Relaxed);
+        let bytes = counters.recvd_bytes.load(Ordering::Relaxed);
         eprintln!(
             "[large_throughput] done: sent {s}, recvd {r} in {:.1}s ({:.1} MiB/s)",
             duration.as_secs_f64(),
@@ -360,36 +422,6 @@ fn soak_large_message_throughput() {
     let report = monitor.stop();
     report.assert_no_leak("large_throughput");
 
-    let mut st = report_stats.lock().unwrap();
-    let total_sent = report_sent.load(Ordering::Relaxed);
-    st.finalize(total_sent);
-    eprintln!(
-        "[large_throughput] max size: {} MiB, reorders: {}, max distance: {}, dropped: {}/{}",
-        st.max_size / 1024 / 1024,
-        st.reorders,
-        st.max_reorder_distance,
-        st.dropped,
-        total_sent,
-    );
-    assert_eq!(
-        st.max_size, PROBE_MSG_SIZE,
-        "128 MiB probe was not received"
-    );
-    assert!(
-        st.max_reorder_distance <= 16,
-        "reorder distance {} exceeds tolerance of 16",
-        st.max_reorder_distance,
-    );
-    let drop_pct = if total_sent > 0 {
-        st.dropped as f64 / total_sent as f64 * 100.0
-    } else {
-        0.0
-    };
-    assert!(
-        drop_pct < 5.0 || st.dropped <= 16,
-        "dropped {:.1}% of messages ({}/{})",
-        drop_pct,
-        st.dropped,
-        total_sent,
-    );
+    let total_sent = report_counters.sent.load(Ordering::Relaxed);
+    assert_payload_stats(&mut report_stats.lock().unwrap(), total_sent);
 }

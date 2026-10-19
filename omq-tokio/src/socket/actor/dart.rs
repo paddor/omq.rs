@@ -16,7 +16,7 @@ use super::{
 use crate::engine::{RecvSink, SendPipeConsumer};
 use crate::transport::dart::{
     DartIo,
-    worker::{EndpointCommand, EndpointWorker, PeerIo, ReadyPeer},
+    worker::{EndpointCommand, EndpointWorker, PeerIo, PeerQueues, ReadyPeer},
 };
 
 pub(super) struct Entry {
@@ -32,6 +32,14 @@ pub(super) struct Entry {
     route_id: u64,
     pipe: Option<SendPipeConsumer>,
     active_peer: Option<u64>,
+}
+
+/// A bound DART datagram socket and the IO thread reserved for it.
+struct Carrier {
+    io: Arc<DartIo>,
+    target: Option<SocketAddr>,
+    network: crate::network_limit::Lane,
+    lease: crate::context::IoThreadLease,
 }
 
 impl SocketDriver {
@@ -80,25 +88,20 @@ impl SocketDriver {
         if self.dart_endpoints.len() >= 128 {
             return Err(Error::Config("DART endpoint limit reached".into()));
         }
-        let (socket, target) = prepare_socket(&endpoint, &options, connect)?;
-        let lease = self.io_pool.reserve_thread();
-        let io_thread = lease.index();
-        let network = self.io_pool.network_on(io_thread);
-        network.validate_datagrams(omq_proto::dart::MAX_PACKED_DATAGRAM)?;
-        let io = self
-            .io_pool
-            .spawn_on(io_thread, async move { DartIo::new(socket).map(Arc::new) })
-            .await
-            .map_err(|error| Error::Config(format!("DART IO setup failed: {error}")))??;
+
+        let carrier = self.open_dart_carrier(&endpoint, &options, connect).await?;
+        let io_thread = carrier.lease.index();
         let resolved = if connect {
             endpoint
         } else {
-            let local = io.local_addr()?;
+            // Report the bound port, which differs from the request for port 0.
+            let local = carrier.io.local_addr()?;
             Endpoint::Dart {
                 host: Host::Ip(local.ip()),
                 port: local.port(),
             }
         };
+
         let id = self.next_peer_id;
         self.next_peer_id = self
             .next_peer_id
@@ -111,41 +114,15 @@ impl SocketDriver {
         } else {
             None
         };
+
         let cancel = self.cancel.child_token();
-        let (commands, commands_rx) = mpsc::channel(128);
-        let ready_tx = self.internal_tx.clone();
-        self.dart.register_carrier(&io);
-        self.dart
-            .configure_receive_pool(options.recv_payload_pool.clone());
-        let worker = EndpointWorker {
-            network,
-            max_message_size: options.max_message_size,
-            id,
-            io: io.clone(),
-            socket_type: self.socket_type,
-            identity: self.dart.identity(&options.identity),
-            target,
-            shared: self.dart.clone(),
-            joined: self.joined_groups.clone(),
-            ready: Arc::new(move |peer| {
-                ready_tx
-                    .try_send(super::InternalEvent::DartReady(peer))
-                    .is_ok()
-            }),
-            commands: commands_rx,
-            cancel: cancel.clone(),
-            spin: options.dart.io_spin,
-            latency: options.workload_profile == Some(omq_proto::WorkloadProfile::Latency),
-        };
-        let task = self.io_pool.spawn_on(io_thread, async move {
-            let _lease = lease;
-            worker.run().await;
-        });
+        let (task, commands) = self.spawn_dart_worker(id, carrier, &options, cancel.clone());
         if !connect {
             self.monitor.publish(MonitorEvent::Listening {
                 endpoint: resolved.clone(),
             });
         }
+
         self.dart_endpoints.push(Entry {
             id,
             endpoint: resolved.clone(),
@@ -163,6 +140,82 @@ impl SocketDriver {
         Ok(resolved)
     }
 
+    /// Bind the datagram socket and pin it to a reserved IO thread.
+    async fn open_dart_carrier(
+        &self,
+        endpoint: &Endpoint,
+        options: &Options,
+        connect: bool,
+    ) -> Result<Carrier> {
+        let (socket, target) = prepare_socket(endpoint, options, connect)?;
+        let lease = self.io_pool.reserve_thread();
+        let io_thread = lease.index();
+        let network = self.io_pool.network_on(io_thread);
+        network.validate_datagrams(omq_proto::dart::MAX_PACKED_DATAGRAM)?;
+
+        // Build the tokio socket on its IO thread so it registers with the
+        // reactor of the runtime that polls it.
+        let io = self
+            .io_pool
+            .spawn_on(io_thread, async move { DartIo::new(socket).map(Arc::new) })
+            .await
+            .map_err(|error| Error::Config(format!("DART IO setup failed: {error}")))??;
+
+        Ok(Carrier {
+            io,
+            target,
+            network,
+            lease,
+        })
+    }
+
+    /// Start the endpoint worker on the carrier's IO thread. Returns its task
+    /// and command sender.
+    fn spawn_dart_worker(
+        &self,
+        id: u64,
+        carrier: Carrier,
+        options: &Options,
+        cancel: CancellationToken,
+    ) -> (JoinHandle<()>, mpsc::Sender<EndpointCommand>) {
+        let (commands, commands_rx) = mpsc::channel(128);
+        let ready_tx = self.internal_tx.clone();
+        self.dart.register_carrier(&carrier.io);
+        self.dart
+            .configure_receive_pool(options.recv_payload_pool.clone());
+
+        let worker = EndpointWorker {
+            network: carrier.network,
+            max_message_size: options.max_message_size,
+            id,
+            io: carrier.io,
+            socket_type: self.socket_type,
+            identity: self.dart.identity(&options.identity),
+            target: carrier.target,
+            shared: self.dart.clone(),
+            joined: self.joined_groups.clone(),
+            // A full actor queue refuses the notice; the worker reports the
+            // peer again on a later service pass.
+            ready: Arc::new(move |peer| {
+                ready_tx
+                    .try_send(super::InternalEvent::DartReady(peer))
+                    .is_ok()
+            }),
+            commands: commands_rx,
+            cancel,
+            spin: options.dart.io_spin,
+            latency: options.workload_profile == Some(omq_proto::WorkloadProfile::Latency),
+        };
+
+        let lease = carrier.lease;
+        let task = self.io_pool.spawn_on(lease.index(), async move {
+            // The lease keeps this thread's load reservation for the worker's life.
+            let _lease = lease;
+            worker.run().await;
+        });
+        (task, commands)
+    }
+
     pub(super) async fn dart_peer_ready(&mut self, ready: ReadyPeer) {
         let Some(index) = self
             .dart_endpoints
@@ -174,32 +227,72 @@ impl SocketDriver {
         if self.closing && self.send_strategy.is_drained() {
             return;
         }
+
+        // A connect endpoint carries one peer at a time; a new generation
+        // replaces the previous one.
         self.retire_dart_connect_generation(index).await;
-        let Some(next) = self.next_peer_id.checked_add(1) else {
+        let Some(peer_id) = self.next_dart_peer_id() else {
             return;
         };
+
+        let (commands, io) = self.materialize_dart_peer(index, peer_id, ready.source);
+        tokio::select! {
+            biased;
+            () = self.cancel.cancelled() => return,
+            result = commands.send(EndpointCommand::Activate { source: ready.source, generation: ready.generation, peer: io }) => {
+                if result.is_err() { return; }
+            },
+        }
+
+        // The worker already finished the DART handshake. Report it through
+        // the same path as a ZMTP handshake.
+        let properties = ready_properties(ready);
+        self.handle_handshake_succeeded(peer_id, 0, properties)
+            .await;
+    }
+
+    /// Allocate a peer id. SERVER and REQ route by `peer_id + 1` as u32, so
+    /// ids past that range are refused.
+    fn next_dart_peer_id(&mut self) -> Option<u64> {
+        let next = self.next_peer_id.checked_add(1)?;
         let peer_id = self.next_peer_id;
         if matches!(self.socket_type, SocketType::Server | SocketType::Req)
             && u32::try_from(next).is_err()
         {
-            return;
+            return None;
         }
+
         self.next_peer_id = next;
+        Some(peer_id)
+    }
+
+    /// Register a ready DART peer and build the IO half the endpoint worker
+    /// activates. Returns the worker's command sender with that IO.
+    fn materialize_dart_peer(
+        &mut self,
+        index: usize,
+        peer_id: u64,
+        source: SocketAddr,
+    ) -> (mpsc::Sender<EndpointCommand>, Box<PeerIo>) {
         let entry = &mut self.dart_endpoints[index];
         let (controls_tx, controls_rx) = crate::engine::control_inbox::channel(64);
         let (data_tx, data_rx) = crate::engine::data_inbox::dart_channel(
             entry.options.send_queue_capacity(),
             self.socket_type,
         );
+
         let cancel = entry.cancel.child_token();
         let options = entry.options.clone();
         let endpoint = entry.endpoint.clone();
         let connect = entry.connect;
         let commands = entry.commands.clone();
+        // Connect endpoints keep the route allocated at connect() time.
         let route_id = if connect { entry.route_id } else { peer_id };
         let (send_pipe, pipe) =
             entry.make_send_pipe(self.socket_type, self.send_strategy.needs_peer_send_pipe());
         entry.active_peer = Some(peer_id);
+
+        // PEER receives its sink later, with the data-plane activation.
         let sink = if self.socket_type == SocketType::Peer {
             None
         } else {
@@ -214,44 +307,26 @@ impl SocketDriver {
             send_pipe,
             inproc: None,
         };
-        let ident = PeerIdent::Socket(ready.source);
-        self.monitor.publish(if connect {
-            MonitorEvent::Connected {
-                endpoint: endpoint.clone(),
-                peer_ident: ident.clone(),
-                connection_id: peer_id,
-            }
-        } else {
-            MonitorEvent::Accepted {
-                endpoint: endpoint.clone(),
-                peer_ident: ident.clone(),
-                connection_id: peer_id,
-            }
-        });
+
+        let ident = PeerIdent::Socket(source);
+        self.monitor
+            .publish(connection_event(connect, endpoint, ident.clone(), peer_id));
         let peer = self.dart_endpoints[index].peer_entry(ident, handle, route_id);
         self.peers.insert(peer_id, peer);
+
         let (completion, receiver) =
             crate::engine::peer_completion::CompletionProgress::reserve(peer_id);
         self.peer_completions.push(receiver);
-        let io = Box::new(PeerIo::new(
-            controls_rx,
-            data_rx,
+        let queues = PeerQueues {
+            commands: controls_rx,
+            data: data_rx,
             pipe,
             sink,
             cancel,
             completion,
-            options.dart.window_messages,
-        ));
-        tokio::select! {
-            biased;
-            () = self.cancel.cancelled() => return,
-            result = commands.send(EndpointCommand::Activate { source: ready.source, generation: ready.generation, peer: io }) => {
-                if result.is_err() { return; }
-            },
-        }
-        let properties = ready_properties(ready);
-        self.handle_handshake_succeeded(peer_id, 0, properties)
-            .await;
+        };
+        let io = Box::new(PeerIo::new(queues, options.dart.window_messages));
+        (commands, io)
     }
 
     fn dart_recv_sink(&mut self, peer_id: u64) -> RecvSink {
@@ -470,6 +545,28 @@ impl Entry {
             inproc_inbound: None,
             task: None,
             io_thread: self.io_thread,
+        }
+    }
+}
+
+/// Connect endpoints report `Connected`, bind endpoints `Accepted`.
+fn connection_event(
+    connect: bool,
+    endpoint: Endpoint,
+    peer_ident: PeerIdent,
+    connection_id: u64,
+) -> MonitorEvent {
+    if connect {
+        MonitorEvent::Connected {
+            endpoint,
+            peer_ident,
+            connection_id,
+        }
+    } else {
+        MonitorEvent::Accepted {
+            endpoint,
+            peer_ident,
+            connection_id,
         }
     }
 }

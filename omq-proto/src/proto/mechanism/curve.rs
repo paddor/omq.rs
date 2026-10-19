@@ -901,22 +901,16 @@ impl CurveServer {
                 "CURVE INITIATE plaintext too short".into(),
             ));
         }
+        // INITIATE plaintext: client long-term key, vouch (nonce suffix and
+        // box), then metadata.
         let client_lt_bytes: [u8; 32] = init_pt[..32].try_into().unwrap();
-        let vouch_suffix: [u8; 16] = init_pt[32..48].try_into().unwrap();
-        let vouch_box = &init_pt[48..128];
+        let vouch = &init_pt[32..128];
         let metadata = &init_pt[128..];
 
         validate_dh_not_zero(&sn_secret, &client_lt_bytes)?;
 
         let cl = PublicKey::from(client_lt_bytes);
-        Self::verify_vouch(
-            &sn_secret,
-            &self.our_lt_public,
-            &vouch_suffix,
-            vouch_box,
-            &cl,
-            &cp,
-        )?;
+        Self::verify_vouch(&sn_secret, &self.our_lt_public, vouch, &cl, &cp)?;
 
         let props = decode_metadata(metadata)?;
 
@@ -927,14 +921,18 @@ impl CurveServer {
         Ok((props, *cl.as_bytes()))
     }
 
+    /// Check that the client long-term key `cl` vouches for its ephemeral
+    /// key `expected_cp` toward this server. `vouch` is the 16-byte nonce
+    /// suffix followed by the box.
     fn verify_vouch(
         our_eph_secret: &StaticSecret,
         our_lt_public: &PublicKey,
-        vouch_suffix: &[u8; 16],
-        vouch_box: &[u8],
+        vouch: &[u8],
         cl: &PublicKey,
         expected_cp: &PublicKey,
     ) -> Result<()> {
+        let (vouch_suffix, vouch_box) = vouch.split_at(16);
+        let vouch_suffix: &[u8; 16] = vouch_suffix.try_into().unwrap();
         let vouch_nonce = nonce_long(NONCE_VOUCH_PREFIX, vouch_suffix);
         let vouch_pt = CurveBox::new(cl, our_eph_secret)
             .decrypt(&vouch_nonce, vouch_box)
@@ -1059,7 +1057,19 @@ mod tests {
         assert!(s_out.is_empty());
         assert_eq!(c_out.len(), 1);
 
-        // Pump messages back and forth until both Done.
+        let (step_s, step_c) = pump_handshake(&mut server, &mut client, s_out, c_out);
+        assert_server_saw_client(step_s, &client_kp);
+        assert_client_saw_server(step_c, &server_kp);
+        assert_transforms_roundtrip(&server, &client);
+    }
+
+    /// Pump commands both ways until both sides complete.
+    fn pump_handshake(
+        server: &mut CurveMechanism,
+        client: &mut CurveMechanism,
+        mut s_out: Vec<Command>,
+        mut c_out: Vec<Command>,
+    ) -> (MechanismStep, MechanismStep) {
         let mut step_s = MechanismStep::Continue;
         let mut step_c = MechanismStep::Continue;
         for _ in 0..6 {
@@ -1085,42 +1095,55 @@ mod tests {
         }
         assert!(matches!(step_s, MechanismStep::Complete { .. }));
         assert!(matches!(step_c, MechanismStep::Complete { .. }));
-        if let MechanismStep::Complete { peer_properties } = step_s {
-            assert_eq!(
-                peer_properties.authentication.public_key,
-                Some(crate::PeerPublicKey::Curve(*client_kp.public.as_bytes()))
-            );
-            assert_eq!(
-                peer_properties.authentication.user_id.as_deref(),
-                Some(b"alice".as_slice())
-            );
-            assert_eq!(
-                peer_properties.authentication.metadata,
-                vec![("Role".into(), Bytes::from_static(b"reader"))]
-            );
-            assert_eq!(peer_properties.socket_type, Some(SocketType::Push));
-            assert_eq!(
-                peer_properties.other,
-                vec![
-                    ("User-Id".into(), Bytes::from_static(b"alice")),
-                    ("Role".into(), Bytes::from_static(b"reader")),
-                ]
-            );
-        }
-        if let MechanismStep::Complete { peer_properties } = step_c {
-            assert_eq!(
-                peer_properties.authentication.public_key,
-                Some(crate::PeerPublicKey::Curve(*server_kp.public.as_bytes()))
-            );
-            assert!(peer_properties.authentication.user_id.is_none());
-            assert_eq!(
-                peer_properties.authentication.metadata,
-                [] as [(String, Bytes); 0]
-            );
-            assert_eq!(peer_properties.socket_type, Some(SocketType::Pull));
-        }
+        (step_s, step_c)
+    }
 
-        // Build transforms and verify roundtrip in both directions.
+    /// The server sees the client's key, authenticator output, and no
+    /// forged local-only properties.
+    fn assert_server_saw_client(step: MechanismStep, client_kp: &CurveKeypair) {
+        let MechanismStep::Complete { peer_properties } = step else {
+            return;
+        };
+        assert_eq!(
+            peer_properties.authentication.public_key,
+            Some(crate::PeerPublicKey::Curve(*client_kp.public.as_bytes()))
+        );
+        assert_eq!(
+            peer_properties.authentication.user_id.as_deref(),
+            Some(b"alice".as_slice())
+        );
+        assert_eq!(
+            peer_properties.authentication.metadata,
+            vec![("Role".into(), Bytes::from_static(b"reader"))]
+        );
+        assert_eq!(peer_properties.socket_type, Some(SocketType::Push));
+        assert_eq!(
+            peer_properties.other,
+            vec![
+                ("User-Id".into(), Bytes::from_static(b"alice")),
+                ("Role".into(), Bytes::from_static(b"reader")),
+            ]
+        );
+    }
+
+    fn assert_client_saw_server(step: MechanismStep, server_kp: &CurveKeypair) {
+        let MechanismStep::Complete { peer_properties } = step else {
+            return;
+        };
+        assert_eq!(
+            peer_properties.authentication.public_key,
+            Some(crate::PeerPublicKey::Curve(*server_kp.public.as_bytes()))
+        );
+        assert!(peer_properties.authentication.user_id.is_none());
+        assert_eq!(
+            peer_properties.authentication.metadata,
+            [] as [(String, Bytes); 0]
+        );
+        assert_eq!(peer_properties.socket_type, Some(SocketType::Pull));
+    }
+
+    /// Build transforms and verify roundtrip in both directions.
+    fn assert_transforms_roundtrip(server: &CurveMechanism, client: &CurveMechanism) {
         let mut s_tx = server.build_transform().unwrap();
         let mut c_tx = client.build_transform().unwrap();
 

@@ -251,6 +251,22 @@ impl Drop for SharedRecvPipe {
     }
 }
 
+/// Receiver-side ends of a [`recv_pipe`].
+pub(crate) struct RecvPipeEnds {
+    pub(crate) consumer: yring::Consumer<Message>,
+    pub(crate) notify: Arc<DataSignal>,
+    pub(crate) space: Arc<StateSignal>,
+}
+
+/// Receive-path settings fixed when the socket is built.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct RecvTuning {
+    /// Hand out one message per receive instead of draining batches.
+    pub(crate) latency_profile: bool,
+    pub(crate) batching: bool,
+    pub(crate) spin: Duration,
+}
+
 /// Create a recv pipe pair.
 ///
 /// Returns `(producer_pipe, consumer, data_notify, space_notify)`.
@@ -655,18 +671,11 @@ impl SpscAwareRecv {
         peer.lock().unshift(receipt, message)
     }
 
-    pub(crate) fn new(
-        recv_consumer: yring::Consumer<Message>,
-        recv_pipe_notify: Arc<DataSignal>,
-        recv_pipe_space: Arc<StateSignal>,
-        handles: SpscHandles,
-        latency: bool,
-        recv_batching: bool,
-        recv_spin: Duration,
-    ) -> Self {
+    pub(crate) fn new(pipe: RecvPipeEnds, handles: SpscHandles, tuning: RecvTuning) -> Self {
         Self {
-            recv_batching,
-            recv_spin,
+            recv_batching: tuning.batching,
+            recv_spin: tuning.spin,
+            // Only per-peer rings and the shared pipe allow the single-source probe.
             spin_single: handles.fanin.is_none()
                 && handles.peer_recv.is_none()
                 && handles.conflate_slot.is_none(),
@@ -677,8 +686,8 @@ impl SpscAwareRecv {
             recv_signal: handles.recv_signal,
             activated: handles.activated,
             conflate_slot: handles.conflate_slot,
-            recv_pipe_notify,
-            recv_pipe_space,
+            recv_pipe_notify: pipe.notify,
+            recv_pipe_space: pipe.space,
             blocking_recv_waker: handles.blocking_recv_waker,
             rings_first: AtomicBool::new(false),
             drain_state: ReceiveCell::new(
@@ -687,9 +696,9 @@ impl SpscAwareRecv {
                     recv_cursor: 0,
                     tcp: Vec::new(),
                     batch: VecDeque::new(),
-                    recv_consumer,
+                    recv_consumer: pipe.consumer,
                     recv_batch: RingDrain::default(),
-                    latency,
+                    latency: tuning.latency_profile,
                 },
                 handles.receive_handles,
             ),
@@ -1155,9 +1164,8 @@ impl SpscAwareRecv {
                     RecvSource::Stream(index) => {
                         drain_peer_source(&state.tcp[index], latency, batch, budget, limit)
                     }
-                    RecvSource::Shared => {
-                        self.drain_shared_source(state, budget, limit, latency, batch)
-                    }
+                    RecvSource::Shared if latency => self.drain_shared_one(state),
+                    RecvSource::Shared => self.drain_shared_batch(state, budget, limit, batch),
                 };
                 result = outcome.message;
                 has_disconnected |= outcome.disconnected;
@@ -1169,48 +1177,51 @@ impl SpscAwareRecv {
         (result, has_disconnected)
     }
 
-    fn drain_shared_source(
+    /// Latency path: take one message from the shared pipe straight to the
+    /// caller, bypassing the batch.
+    fn drain_shared_one(&self, state: &mut DrainState) -> SourceDrain {
+        let (item, wake) = drain_yring_one(&mut state.recv_consumer, &mut state.recv_batch);
+        if wake {
+            self.recv_pipe_space.notify_changed();
+        }
+        SourceDrain {
+            message: item,
+            disconnected: false,
+        }
+    }
+
+    /// Throughput path: move shared-pipe messages into `batch`, one or up to
+    /// the budget depending on `limit`.
+    fn drain_shared_batch(
         &self,
         state: &mut DrainState,
         budget: &mut DrainBudget,
         limit: DrainLimit,
-        latency: bool,
         batch: &mut Vec<Message>,
     ) -> SourceDrain {
-        if latency {
-            let (item, wake) = drain_yring_one(&mut state.recv_consumer, &mut state.recv_batch);
-            if wake {
-                self.recv_pipe_space.notify_changed();
-            }
-            SourceDrain {
-                message: item,
-                disconnected: false,
-            }
-        } else {
-            match limit {
-                DrainLimit::One => {
-                    let (_, wake) = drain_yring_one_into_batch(
-                        &mut state.recv_consumer,
-                        batch,
-                        &mut state.recv_batch,
-                        budget,
-                    );
-                    if wake {
-                        self.recv_pipe_space.notify_changed();
-                    }
-                }
-                DrainLimit::Budget => {
-                    drain_yring(
-                        &mut state.recv_consumer,
-                        batch,
-                        &mut state.recv_batch,
-                        budget,
-                        || self.recv_pipe_space.notify_changed(),
-                    );
+        match limit {
+            DrainLimit::One => {
+                let (_, wake) = drain_yring_one_into_batch(
+                    &mut state.recv_consumer,
+                    batch,
+                    &mut state.recv_batch,
+                    budget,
+                );
+                if wake {
+                    self.recv_pipe_space.notify_changed();
                 }
             }
-            SourceDrain::default()
+            DrainLimit::Budget => {
+                drain_yring(
+                    &mut state.recv_consumer,
+                    batch,
+                    &mut state.recv_batch,
+                    budget,
+                    || self.recv_pipe_space.notify_changed(),
+                );
+            }
         }
+        SourceDrain::default()
     }
 
     fn state_is_empty(state: &DrainState) -> bool {
@@ -1254,10 +1265,8 @@ impl SpscAwareRecv {
         // message passes the wake on to other parked receivers.
         let mut woken = false;
         loop {
-            match self.try_drain() {
-                DrainResult::Message(msg) => return Ok(self.delivered(msg, woken)),
-                DrainResult::Closed => return Err(Error::Closed),
-                DrainResult::Empty => {}
+            if let Some(result) = self.try_deliver(woken) {
+                return result;
             }
 
             if self.take_peer_yield_pending() {
@@ -1265,6 +1274,8 @@ impl SpscAwareRecv {
                 continue;
             }
 
+            // Arm the wake futures before the second drain, so a push between
+            // that drain and the select still wakes this receiver.
             let recv_ready = self.recv_signal.ready();
             let pipe_ready = self.recv_pipe_notify.ready();
             let activated_seen = self.activated.generation();
@@ -1273,15 +1284,9 @@ impl SpscAwareRecv {
             tokio::pin!(pipe_ready);
             tokio::pin!(activated);
 
-            if self.fanin.is_some()
-                || self.peer_recv.is_some()
-                || self.consumer_generation.load(Ordering::Acquire) > 0
-                || self.conflate_slot.is_some()
-            {
-                match self.try_drain() {
-                    DrainResult::Message(msg) => return Ok(self.delivered(msg, woken)),
-                    DrainResult::Closed => return Err(Error::Closed),
-                    DrainResult::Empty => {}
+            if self.has_signaled_sources() {
+                if let Some(result) = self.try_deliver(woken) {
+                    return result;
                 }
 
                 if self.take_peer_yield_pending() {
@@ -1307,10 +1312,9 @@ impl SpscAwareRecv {
                 woken = true;
                 continue;
             }
-            match self.try_drain() {
-                DrainResult::Message(msg) => return Ok(self.delivered(msg, woken)),
-                DrainResult::Closed => return Err(Error::Closed),
-                DrainResult::Empty => {}
+
+            if let Some(result) = self.try_deliver(woken) {
+                return result;
             }
 
             tokio::select! {
@@ -1320,6 +1324,26 @@ impl SpscAwareRecv {
             }
             woken = true;
         }
+    }
+
+    /// One drain attempt. `None` means nothing is ready yet.
+    #[inline]
+    fn try_deliver(&self, woken: bool) -> Option<Result<Message>> {
+        match self.try_drain() {
+            DrainResult::Message(msg) => Some(Ok(self.delivered(msg, woken))),
+            DrainResult::Closed => Some(Err(Error::Closed)),
+            DrainResult::Empty => None,
+        }
+    }
+
+    /// Fan-in, PEER, per-peer rings, and the conflate slot wake through
+    /// `recv_signal`. Without them only the shared pipe can wake a receive.
+    #[inline]
+    fn has_signaled_sources(&self) -> bool {
+        self.fanin.is_some()
+            || self.peer_recv.is_some()
+            || self.consumer_generation.load(Ordering::Acquire) > 0
+            || self.conflate_slot.is_some()
     }
 
     #[inline]
@@ -1587,19 +1611,65 @@ mod tests {
         }
         let (pipe, consumer, notify, space) = recv_pipe(capacity, waker);
         handles.consumer_generation.store(1, Ordering::Release);
-        (
-            SpscAwareRecv::new(
-                consumer,
-                notify,
-                space,
-                handles,
-                latency,
-                false,
-                Duration::ZERO,
-            ),
-            producers,
-            pipe,
-        )
+        let tuning = super::RecvTuning {
+            latency_profile: latency,
+            ..super::RecvTuning::default()
+        };
+        let ends = super::RecvPipeEnds {
+            consumer,
+            notify,
+            space,
+        };
+        (SpscAwareRecv::new(ends, handles, tuning), producers, pipe)
+    }
+
+    type WaiterResult = omq_proto::Result<Option<Message>>;
+
+    /// Block a thread in a receive that ends by `mode`: cancel, a short
+    /// timeout, or (for "close") a long timeout that close cuts short.
+    fn spawn_first_waiter(
+        recv: &Arc<SpscAwareRecv>,
+        cancel: &Arc<super::BlockingRecvCancel>,
+        mode: &'static str,
+        results: std::sync::mpsc::Sender<WaiterResult>,
+    ) -> std::thread::JoinHandle<()> {
+        let recv = recv.clone();
+        let cancel = cancel.clone();
+        std::thread::spawn(move || {
+            let result = if mode == "cancel" {
+                recv.blocking_recv_cancelable(&cancel)
+            } else {
+                let timeout = if mode == "timeout" {
+                    Duration::from_millis(100)
+                } else {
+                    Duration::from_secs(2)
+                };
+                recv.blocking_recv_timeout(timeout).map(Some)
+            };
+            results.send(result).unwrap();
+        })
+    }
+
+    fn wait_until_parked(recv: &SpscAwareRecv, thread: &std::thread::Thread) {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !recv.blocking_recv_waker.has_waiter(thread.id()) {
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+    }
+
+    fn assert_waiter_results(mode: &str, first: &WaiterResult, second: omq_proto::Result<Message>) {
+        match mode {
+            "cancel" => assert!(matches!(first, Ok(None))),
+            "timeout" => assert!(matches!(first, Err(omq_proto::Error::Timeout))),
+            _ => assert!(matches!(first, Err(omq_proto::Error::Closed))),
+        }
+
+        if mode == "close" {
+            assert!(matches!(second, Err(omq_proto::Error::Closed)));
+        } else {
+            assert_eq!(second.unwrap(), Message::single("remaining"));
+        }
     }
 
     #[test]
@@ -1610,28 +1680,11 @@ mod tests {
             let cancel = Arc::new(super::BlockingRecvCancel::new());
             let (first_tx, first_rx) = std::sync::mpsc::channel();
             let (second_tx, second_rx) = std::sync::mpsc::channel();
-            let first = {
-                let recv = recv.clone();
-                let cancel = cancel.clone();
-                std::thread::spawn(move || {
-                    let result = if mode == "cancel" {
-                        recv.blocking_recv_cancelable(&cancel)
-                    } else {
-                        let timeout = if mode == "timeout" {
-                            Duration::from_millis(100)
-                        } else {
-                            Duration::from_secs(2)
-                        };
-                        recv.blocking_recv_timeout(timeout).map(Some)
-                    };
-                    first_tx.send(result).unwrap();
-                })
-            };
-            let deadline = Instant::now() + Duration::from_secs(1);
-            while !recv.blocking_recv_waker.has_waiter(first.thread().id()) {
-                assert!(Instant::now() < deadline);
-                std::thread::yield_now();
-            }
+
+            // Park two waiters; the first one ends by `mode`, and the second
+            // must still see the next message (or the close).
+            let first = spawn_first_waiter(&recv, &cancel, mode, first_tx);
+            wait_until_parked(&recv, first.thread());
             let second = {
                 let recv = recv.clone();
                 std::thread::spawn(move || {
@@ -1640,11 +1693,8 @@ mod tests {
                         .unwrap();
                 })
             };
-            let deadline = Instant::now() + Duration::from_secs(1);
-            while !recv.blocking_recv_waker.has_waiter(second.thread().id()) {
-                assert!(Instant::now() < deadline);
-                std::thread::yield_now();
-            }
+            wait_until_parked(&recv, second.thread());
+
             if mode == "cancel" {
                 cancel.cancel();
             } else if mode == "close" {
@@ -1660,24 +1710,17 @@ mod tests {
                     .unwrap();
             }
             let second_result = second_rx.recv_timeout(Duration::from_millis(500));
+
+            // Release both threads before checking results, so a failure does
+            // not leave a parked thread behind.
             cancel.cancel();
             pipe.close();
             first.thread().unpark();
             second.thread().unpark();
             first.join().unwrap();
             second.join().unwrap();
-            let first_result = first_result.unwrap();
-            let second_result = second_result.unwrap();
-            match mode {
-                "cancel" => assert!(matches!(first_result, Ok(None))),
-                "timeout" => assert!(matches!(first_result, Err(omq_proto::Error::Timeout))),
-                _ => assert!(matches!(first_result, Err(omq_proto::Error::Closed))),
-            }
-            if mode == "close" {
-                assert!(matches!(second_result, Err(omq_proto::Error::Closed)));
-            } else {
-                assert_eq!(second_result.unwrap(), Message::single("remaining"));
-            }
+
+            assert_waiter_results(mode, &first_result.unwrap(), second_result.unwrap());
         }
     }
 
@@ -2285,15 +2328,27 @@ mod tests {
         assert_eq!(batch.len(), 5);
     }
 
+    /// Drain with a fresh, roomy budget.
+    fn drain_unbounded(
+        consumer: &mut yring::Consumer<Message>,
+        out: &mut Vec<Message>,
+        remaining: &mut super::RingDrain,
+    ) -> usize {
+        let mut budget = DrainBudget::new(256, RECV_BATCH_BYTES);
+        drain_yring(consumer, out, remaining, &mut budget, || {})
+    }
+
     #[test]
     fn predicate_drain_preserves_rejected_message_across_wraparound() {
         let (mut producer, mut consumer) = yring::spsc(4);
+        let mut out = Vec::new();
+        let mut remaining = super::RingDrain::default();
+
+        // Advance the ring cursor so the next batch wraps around the end.
         for _ in 0..3 {
             producer.push(Message::from_slice(b"warmup")).unwrap();
         }
         producer.flush();
-        let mut out = Vec::new();
-        let mut remaining = super::RingDrain::default();
         drain_yring(
             &mut consumer,
             &mut out,
@@ -2302,6 +2357,7 @@ mod tests {
             || {},
         );
         out.clear();
+
         let messages = [
             Message::from_slice(b"tiny"),
             Message::from_slice(&vec![1; 1025]),
@@ -2312,6 +2368,8 @@ mod tests {
             producer.push(message.clone()).unwrap();
         }
         producer.flush();
+
+        // The byte budget rejects the 80 KB message; it must stay queued.
         let prefix = Message::from_slice(b"existing");
         out.push(prefix.clone());
         let mut budget = DrainBudget::new(256, 5120);
@@ -2329,29 +2387,13 @@ mod tests {
             drain_yring(&mut consumer, &mut out, &mut remaining, &mut budget, || {}),
             0
         );
+
+        // Released slots are reusable while the rejected message waits.
         assert!(producer.push(Message::from_slice(b"reused")).is_ok());
         producer.flush();
-        assert_eq!(
-            drain_yring(
-                &mut consumer,
-                &mut out,
-                &mut remaining,
-                &mut DrainBudget::new(256, RECV_BATCH_BYTES),
-                || {}
-            ),
-            1,
-        );
+        assert_eq!(drain_unbounded(&mut consumer, &mut out, &mut remaining), 1);
         assert_eq!(out[3], messages[2]);
-        assert_eq!(
-            drain_yring(
-                &mut consumer,
-                &mut out,
-                &mut remaining,
-                &mut DrainBudget::new(256, RECV_BATCH_BYTES),
-                || {}
-            ),
-            2,
-        );
+        assert_eq!(drain_unbounded(&mut consumer, &mut out, &mut remaining), 2);
         assert_eq!(out[4], messages[3]);
         assert_eq!(out[5].part_slice(0).unwrap(), b"reused");
     }

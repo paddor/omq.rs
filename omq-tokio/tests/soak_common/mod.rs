@@ -112,10 +112,25 @@ type Samples = (
 const LIVE_GROWTH_WARMUP: Duration = Duration::from_secs(30);
 const LIVE_GROWTH_WINDOW: Duration = Duration::from_mins(2);
 const LIVE_GROWTH_MIN_SAMPLES: usize = 30;
-const LIVE_HEAP_SLOPE_LIMIT_KIB_S: f64 = 512.0;
-const LIVE_HEAP_GROWTH_MIN_BYTES: usize = 64 * 1024 * 1024;
-const LIVE_RSS_SLOPE_LIMIT_KIB_S: f64 = 1024.0;
-const LIVE_RSS_GROWTH_MIN_BYTES: usize = 128 * 1024 * 1024;
+
+/// Live growth gate for one sampled metric. The monitor fails only when both
+/// the windowed slope and the absolute window growth exceed their limits.
+struct GrowthLimit {
+    metric: &'static str,
+    slope_limit_kib_s: f64,
+    min_growth_bytes: usize,
+}
+
+const LIVE_HEAP_LIMIT: GrowthLimit = GrowthLimit {
+    metric: "heap",
+    slope_limit_kib_s: 512.0,
+    min_growth_bytes: 64 * 1024 * 1024,
+};
+const LIVE_RSS_LIMIT: GrowthLimit = GrowthLimit {
+    metric: "RSS",
+    slope_limit_kib_s: 1024.0,
+    min_growth_bytes: 128 * 1024 * 1024,
+};
 
 pub struct ResourceMonitor {
     stop: Arc<AtomicBool>,
@@ -129,40 +144,34 @@ impl ResourceMonitor {
         let label = std::thread::current().name().unwrap_or("soak").to_owned();
         let stop = Arc::new(AtomicBool::new(false));
         let stop2 = stop.clone();
+
         let handle = std::thread::spawn(move || {
             let started = Instant::now();
             let mut rss_samples = Vec::new();
             let mut fd_samples = Vec::new();
             let mut heap_samples = Vec::new();
+
             while !stop2.load(Ordering::Relaxed) {
                 let now = Instant::now();
+                // Live growth checks exit the process before a runaway leak
+                // can OOM the host; the end-of-run report cannot do that.
                 if let Some(rss) = read_rss_bytes() {
                     rss_samples.push((now, rss));
-                    assert_live_growth_stable(
-                        &label,
-                        "RSS",
-                        started,
-                        &rss_samples,
-                        LIVE_RSS_SLOPE_LIMIT_KIB_S,
-                        LIVE_RSS_GROWTH_MIN_BYTES,
-                    );
+                    assert_live_growth_stable(&label, started, &rss_samples, &LIVE_RSS_LIMIT);
                 }
+
                 if let Some(fds) = read_fd_count() {
                     fd_samples.push((now, fds));
                 }
+
                 heap_samples.push((now, alloc::LIVE_BYTES.load(Ordering::Relaxed)));
-                assert_live_growth_stable(
-                    &label,
-                    "heap",
-                    started,
-                    &heap_samples,
-                    LIVE_HEAP_SLOPE_LIMIT_KIB_S,
-                    LIVE_HEAP_GROWTH_MIN_BYTES,
-                );
+                assert_live_growth_stable(&label, started, &heap_samples, &LIVE_HEAP_LIMIT);
                 std::thread::sleep(Duration::from_secs(1));
             }
+
             (rss_samples, fd_samples, heap_samples)
         });
+
         Self {
             stop,
             handle: Some(handle),
@@ -203,15 +212,20 @@ fn read_fd_count() -> Option<usize> {
 
 fn assert_live_growth_stable(
     label: &str,
-    metric: &str,
     started: Instant,
     samples: &[(Instant, usize)],
-    slope_limit_kib_s: f64,
-    min_growth_bytes: usize,
+    limit: &GrowthLimit,
 ) {
+    let GrowthLimit {
+        metric,
+        slope_limit_kib_s,
+        min_growth_bytes,
+    } = *limit;
+
     let Some((now, current)) = samples.last().copied() else {
         return;
     };
+    // Skip startup allocation and require one full window of samples.
     if now.duration_since(started) < LIVE_GROWTH_WARMUP + LIVE_GROWTH_WINDOW {
         return;
     }

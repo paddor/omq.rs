@@ -1,8 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 use super::common::{
-    C_LIBZMQ, C_LIBZMQ_2T, C_OMQ_1T, C_OMQ_2T, COMPARISON_SIZES, CpuData, Impl, ValMap,
-    draw_multirow_throughput, draw_throughput_dual_panel, load_tput, merge_cpu_data, out_dir,
+    C_LIBZMQ, C_LIBZMQ_2T, C_OMQ_1T, C_OMQ_2T, COMPARISON_SIZES, ChartSpec, CpuColumns, CpuData,
+    Impl, ThroughputRow, ValMap, draw_multirow_throughput, draw_throughput_dual_panel, load_tput,
+    merge_cpu_data, out_dir,
 };
 
 const PUBSUB_IMPLS: &[Impl] = &[
@@ -72,61 +74,85 @@ pub(crate) fn generate() {
         ("tcp", "PUB/SUB throughput, TCP loopback, 2-process"),
         ("ipc", "PUB/SUB throughput, IPC, 2-process"),
     ] {
-        let mut panel_data: Vec<(u64, ValMap, ValMap, BTreeMap<String, CpuData>)> = Vec::new();
-        for &peers in PUBSUB_PEERS {
-            let (tput, msgs, cpu) = load_tput("pub_sub", transport, Some(peers), PUBSUB_IMPLS);
-            if !tput.is_empty() {
-                panel_data.push((peers, tput, msgs, cpu));
-            }
-        }
-        if !panel_data.is_empty() {
-            let title = format!("{title}{}", receiver_label(transport));
-            let merged_cpu = merge_cpu_data(panel_data.iter().map(|(_, _, _, cpu)| cpu));
-            let rows: Vec<(u64, &ValMap, &ValMap)> =
-                panel_data.iter().map(|(p, t, m, _)| (*p, t, m)).collect();
-            let out = sub.join(format!("{transport}.svg"));
-            draw_multirow_throughput(
-                &out,
-                &title,
-                &rows,
-                COMPARISON_SIZES,
-                PUBSUB_IMPLS,
-                &merged_cpu,
-                &|peers| {
-                    if peers == 1 {
-                        "1 subscriber".to_string()
-                    } else {
-                        format!("{peers} subscribers")
-                    }
-                },
-                "snd CPU%",
-                "",
-                None,
-                super::common::detect_hardware().as_deref(),
-            )
-            .expect("draw pubsub chart");
-            eprintln!("Written: {}", out.display());
-        }
+        generate_multi_peer(&sub, transport, title);
     }
 
     // CURVE PUB/SUB
     let (tput, msgs, cpu) = load_tput("pub_sub", "tcp", Some(CURVE_PEERS), CURVE_IMPLS);
     if !tput.is_empty() {
         let out = sub.join("curve_tcp.svg");
-        draw_throughput_dual_panel(
-            &out,
-            &format!("CURVE PUB/SUB throughput ({CURVE_PEERS} peers), TCP loopback, 2-process"),
-            COMPARISON_SIZES,
-            CURVE_IMPLS,
-            &tput,
-            &msgs,
-            &cpu,
-            "snd CPU%",
-            "rcv CPU%",
-        )
-        .expect("draw curve chart");
+        let title =
+            format!("CURVE PUB/SUB throughput ({CURVE_PEERS} peers), TCP loopback, 2-process");
+        let spec = ChartSpec {
+            out_path: &out,
+            title: &title,
+            sizes: COMPARISON_SIZES,
+            impls: CURVE_IMPLS,
+        };
+        let columns = CpuColumns {
+            cpu: &cpu,
+            snd_label: "snd CPU%",
+            rcv_label: "rcv CPU%",
+        };
+        draw_throughput_dual_panel(&spec, &tput, &msgs, &columns).expect("draw curve chart");
         eprintln!("Written: {}", out.display());
     }
+}
+
+/// One row per subscriber count in `PUBSUB_PEERS` that has data.
+fn generate_multi_peer(sub: &Path, transport: &str, title: &str) {
+    let mut panel_data: Vec<(u64, ValMap, ValMap, BTreeMap<String, CpuData>)> = Vec::new();
+    for &peers in PUBSUB_PEERS {
+        let (tput, msgs, cpu) = load_tput("pub_sub", transport, Some(peers), PUBSUB_IMPLS);
+        if !tput.is_empty() {
+            panel_data.push((peers, tput, msgs, cpu));
+        }
+    }
+
+    if panel_data.is_empty() {
+        return;
+    }
+
+    let title = format!("{title}{}", receiver_label(transport));
+    let merged_cpu = merge_cpu_data(panel_data.iter().map(|(_, _, _, cpu)| cpu));
+    let rows: Vec<ThroughputRow<'_>> = panel_data
+        .iter()
+        .map(|(peers, tput, msgs, _)| ThroughputRow {
+            peers: *peers,
+            tput,
+            msgs,
+            fairness: None,
+        })
+        .collect();
+    let out = sub.join(format!("{transport}.svg"));
+    let spec = ChartSpec {
+        out_path: &out,
+        title: &title,
+        sizes: COMPARISON_SIZES,
+        impls: PUBSUB_IMPLS,
+    };
+    let columns = CpuColumns {
+        cpu: &merged_cpu,
+        snd_label: "snd CPU%",
+        rcv_label: "",
+    };
+    let row_title = |peers: u64| {
+        if peers == 1 {
+            "1 subscriber".to_string()
+        } else {
+            format!("{peers} subscribers")
+        }
+    };
+
+    draw_multirow_throughput(
+        &spec,
+        &rows,
+        &columns,
+        &row_title,
+        super::common::detect_hardware().as_deref(),
+    )
+    .expect("draw pubsub chart");
+    eprintln!("Written: {}", out.display());
 }
 
 fn receiver_label(transport: &str) -> String {

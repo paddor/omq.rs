@@ -9,10 +9,48 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use rand::RngExt;
+use rand::rngs::StdRng;
 
-use omq_tokio::{Message, Options, Socket, SocketType};
+use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
 
 const TOPICS: &[&str] = &["fast.", "slow.", "all.", "rare."];
+
+/// Publishes up to 10k messages, cycling through topics. A send blocked for
+/// 1 ms is skipped; only accepted sends advance `pub_count`.
+async fn publish_batch(publisher: &Socket, pub_count: &mut u64) {
+    for _ in 0..10_000 {
+        let topic = TOPICS[*pub_count as usize % TOPICS.len()];
+        let msg = format!("{topic}{pub_count}");
+        if let Ok(Ok(())) = tokio::time::timeout(
+            Duration::from_millis(1),
+            publisher.send(Message::single(msg)),
+        )
+        .await
+        {
+            *pub_count += 1;
+        }
+    }
+}
+
+/// Closes a random SUB half the time, then adds one with a random prefix
+/// while there are fewer than 10.
+async fn churn_subscribers(rng: &mut StdRng, subs: &mut Vec<Socket>, ep: &Endpoint) {
+    if !subs.is_empty() && rng.random_bool(0.5) {
+        let idx = rng.random_range(0..subs.len());
+        let sub = subs.swap_remove(idx);
+        sub.close().await.unwrap();
+    }
+
+    if subs.len() < 10 {
+        let sub = Socket::new(SocketType::Sub, Options::default().recv_hwm(32));
+        sub.connect(ep.clone()).await.unwrap();
+        let prefix = TOPICS[rng.random_range(0..TOPICS.len())];
+        sub.subscribe(Bytes::from(prefix.to_string()))
+            .await
+            .unwrap();
+        subs.push(sub);
+    }
+}
 
 #[test]
 fn soak_pub_sub_churn() {
@@ -33,18 +71,7 @@ fn soak_pub_sub_churn() {
         let mut last_log = start;
 
         while start.elapsed() < duration {
-            for _ in 0..10_000 {
-                let topic = TOPICS[pub_count as usize % TOPICS.len()];
-                let msg = format!("{topic}{pub_count}");
-                if let Ok(Ok(())) = tokio::time::timeout(
-                    Duration::from_millis(1),
-                    publisher.send(Message::single(msg)),
-                )
-                .await
-                {
-                    pub_count += 1;
-                }
-            }
+            publish_batch(&publisher, &mut pub_count).await;
 
             for sub in &subs {
                 while sub.try_recv().is_ok() {}
@@ -52,22 +79,7 @@ fn soak_pub_sub_churn() {
 
             if last_churn.elapsed() >= Duration::from_millis(500) {
                 last_churn = Instant::now();
-
-                if !subs.is_empty() && rng.random_bool(0.5) {
-                    let idx = rng.random_range(0..subs.len());
-                    let sub = subs.swap_remove(idx);
-                    sub.close().await.unwrap();
-                }
-
-                if subs.len() < 10 {
-                    let sub = Socket::new(SocketType::Sub, Options::default().recv_hwm(32));
-                    sub.connect(ep.clone()).await.unwrap();
-                    let prefix = TOPICS[rng.random_range(0..TOPICS.len())];
-                    sub.subscribe(Bytes::from(prefix.to_string()))
-                        .await
-                        .unwrap();
-                    subs.push(sub);
-                }
+                churn_subscribers(&mut rng, &mut subs, &ep).await;
             }
 
             if last_log.elapsed() >= Duration::from_secs(30) {

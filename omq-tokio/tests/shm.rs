@@ -160,6 +160,85 @@ async fn latency_polling_returns_to_signaled_reads_after_idle() {
     }
 }
 
+/// Connects `receiver` to two RADIOs, each bound on its own SHM endpoint,
+/// and waits until each has seen the join and delivers to it.
+async fn connect_two_radios(
+    context: &Context,
+    receiver: &Socket,
+    options: &Options,
+) -> Vec<Socket> {
+    let mut senders = Vec::new();
+    for _ in 0..2 {
+        let sender = context.socket(SocketType::Radio, options.clone());
+        let mut monitor = sender.monitor();
+        receiver
+            .connect(sender.bind(endpoint()).await.unwrap())
+            .await
+            .unwrap();
+
+        tokio::time::timeout(DEADLINE, async {
+            loop {
+                if matches!(
+                    monitor.recv().await.unwrap(),
+                    omq_tokio::MonitorEvent::JoinReceived { .. }
+                ) {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        wait_radio_ready(&sender, &[receiver], "group").await;
+        senders.push(sender);
+    }
+    senders
+}
+
+/// Sends 16 pooled messages per sender. Byte 0 names the source, byte 1
+/// is the sequence, and the rest is 0xa5 filler.
+async fn send_tagged_sources(senders: &[Socket], pool: &omq_tokio::PayloadPool, size: usize) {
+    for (source, sender) in senders.iter().enumerate() {
+        for sequence in 0..16_u8 {
+            let message = pool
+                .message(size, |bytes| {
+                    bytes.fill(0xa5);
+                    bytes[0] = u8::try_from(source).unwrap();
+                    bytes[1] = sequence;
+                })
+                .unwrap();
+            sender.send_group("group", message).await.unwrap();
+        }
+    }
+}
+
+/// Bulk-receives all 32 messages from `send_tagged_sources`, keeping every
+/// view alive, and checks per-source order.
+async fn recv_tagged_sources(receiver: &Socket, size: usize) -> Vec<Message> {
+    let mut held = Vec::new();
+    let mut batch = Vec::new();
+    tokio::time::timeout(DEADLINE, async {
+        while held.len() < 32 {
+            receiver.recv_many_into(64, &mut batch).await.unwrap();
+            held.append(&mut batch);
+        }
+    })
+    .await
+    .unwrap();
+
+    let mut next = [0_u8; 2];
+    for message in &held {
+        assert_eq!(message.part_slice(0), Some(b"group".as_slice()));
+        let body = message.part_slice(1).unwrap();
+        assert_eq!(body.len(), size);
+        let source = usize::from(body[0]);
+        assert_eq!(body[1], next[source]);
+        assert_eq!(body[size - 1], 0xa5);
+        next[source] += 1;
+    }
+    assert_eq!(next, [16; 2]);
+    held
+}
+
 #[tokio::test]
 async fn dish_bulk_receive_keeps_source_order_and_releases_shared_views() {
     for (batching, size) in [false, true]
@@ -175,65 +254,17 @@ async fn dish_bulk_receive_keeps_source_order_and_releases_shared_views() {
         let receiver = context.socket(SocketType::Dish, options.clone());
         receiver.join("group").await.unwrap();
         let pool = shm_payload_pool([(size, 32)]).unwrap();
-        let mut senders = Vec::new();
-        for _ in 0..2 {
-            let sender = context.socket(SocketType::Radio, options.clone());
-            let mut monitor = sender.monitor();
-            receiver
-                .connect(sender.bind(endpoint()).await.unwrap())
-                .await
-                .unwrap();
-            tokio::time::timeout(DEADLINE, async {
-                loop {
-                    if matches!(
-                        monitor.recv().await.unwrap(),
-                        omq_tokio::MonitorEvent::JoinReceived { .. }
-                    ) {
-                        break;
-                    }
-                }
-            })
-            .await
-            .unwrap();
-            wait_radio_ready(&sender, &[&receiver], "group").await;
-            senders.push(sender);
-        }
-        for (source, sender) in senders.iter().enumerate() {
-            for sequence in 0..16_u8 {
-                let message = pool
-                    .message(size, |bytes| {
-                        bytes.fill(0xa5);
-                        bytes[0] = u8::try_from(source).unwrap();
-                        bytes[1] = sequence;
-                    })
-                    .unwrap();
-                sender.send_group("group", message).await.unwrap();
-            }
-        }
-        let mut held = Vec::new();
-        let mut batch = Vec::new();
-        tokio::time::timeout(DEADLINE, async {
-            while held.len() < 32 {
-                receiver.recv_many_into(64, &mut batch).await.unwrap();
-                held.append(&mut batch);
-            }
-        })
-        .await
-        .unwrap();
-        let mut next = [0_u8; 2];
-        for message in &held {
-            assert_eq!(message.part_slice(0), Some(b"group".as_slice()));
-            let body = message.part_slice(1).unwrap();
-            assert_eq!(body.len(), size);
-            let source = usize::from(body[0]);
-            assert_eq!(body[1], next[source]);
-            assert_eq!(body[size - 1], 0xa5);
-            next[source] += 1;
-        }
-        assert_eq!(next, [16; 2]);
+        let senders = connect_two_radios(&context, &receiver, &options).await;
+
+        send_tagged_sources(&senders, &pool, size).await;
+        let held = recv_tagged_sources(&receiver, size).await;
+
+        // Bodies above the copy threshold stay leased while views are held.
         if size > omq_shm::FANOUT_POOLED_BATCH_COPY_THRESHOLD {
             assert_eq!(pool.available(), 0);
         }
+
+        // Dropping the views returns every lease to the pool.
         drop(held);
         tokio::time::timeout(DEADLINE, async {
             while pool.available() != 32 {
@@ -455,75 +486,112 @@ async fn radio_lanes_preserve_order_across_copied_and_leased_bodies_and_transpor
             ..options().send_hwm(if ipc_peer { 2 } else { 8 }).recv_hwm(2)
         };
         let radio = context.socket(SocketType::Radio, options.clone());
-        let shm = radio.bind(endpoint()).await.unwrap();
-        let ipc = radio
-            .bind(format!(
-                "ipc:///tmp/omq-shm-mixed-{}.sock",
-                rand::random::<u64>()
-            ))
-            .await
-            .unwrap();
-        let mut receivers = Vec::new();
-        for address in [shm.clone(), if ipc_peer { ipc } else { shm }] {
-            let dish = context.socket(SocketType::Dish, options.clone());
-            dish.join("group").await.unwrap();
-            dish.connect(address).await.unwrap();
-            dish.wait_connected(1, DEADLINE).await.unwrap();
-            receivers.push(dish);
-        }
+        let receivers = connect_mixed_dishes(&context, &radio, &options, ipc_peer).await;
         for dish in &receivers {
-            let deadline = Instant::now() + DEADLINE;
-            loop {
-                radio.send_group("group", "ready").await.unwrap();
-                if tokio::time::timeout(Duration::from_millis(20), dish.recv())
-                    .await
-                    .is_ok()
-                {
-                    break;
-                }
-                assert!(Instant::now() < deadline);
-            }
+            prime_dish(&radio, dish).await;
         }
-        let sizes = [16, 55, 56, 1024, 16384];
+
+        // One sender, two receivers draining concurrently, so a slow lane
+        // cannot hide reordering on the other.
         let pool = shm_payload_pool([(16384, 4)]).unwrap();
-        let send = async {
-            for sequence in 0..128_u8 {
-                let size = sizes[usize::from(sequence) / 8 % sizes.len()];
-                let body = if sequence % 2 == 0 {
-                    pool.message(size, |bytes| bytes.fill(sequence)).unwrap()
-                } else {
-                    Message::from_slice(&vec![sequence; size])
-                };
-                radio
-                    .send(Message::with_prefix(Bytes::from_static(b"group"), body))
-                    .await
-                    .unwrap();
-            }
-        };
-        let drain = async |dish: &Socket| {
-            for sequence in 0..128_u8 {
-                let got = loop {
-                    let got = receive(dish).await;
-                    if got.part_slice(1) != Some(b"ready".as_slice()) {
-                        break got;
-                    }
-                };
-                assert_eq!(got.part_slice(0), Some(b"group".as_slice()));
-                assert_eq!(
-                    got.part_slice(1).unwrap(),
-                    vec![sequence; sizes[usize::from(sequence) / 8 % sizes.len()]]
-                );
-            }
-        };
         tokio::time::timeout(DEADLINE, async {
-            tokio::join!(send, drain(&receivers[0]), drain(&receivers[1]));
+            tokio::join!(
+                send_mixed_bodies(&radio, &pool),
+                drain_mixed_bodies(&receivers[0]),
+                drain_mixed_bodies(&receivers[1])
+            );
         })
         .await
         .unwrap();
+
         radio.close().await.unwrap();
         for dish in receivers {
             dish.close().await.unwrap();
         }
+    }
+}
+
+/// Body sizes around the inline (55/56) and pooled boundaries. Each size
+/// repeats for eight consecutive sequence numbers.
+fn mixed_size(sequence: u8) -> usize {
+    const SIZES: [usize; 5] = [16, 55, 56, 1024, 16384];
+    SIZES[usize::from(sequence) / 8 % SIZES.len()]
+}
+
+/// Binds `radio` on SHM and IPC, then connects two DISH sockets: both over
+/// SHM, or one over SHM and one over IPC.
+async fn connect_mixed_dishes(
+    context: &Context,
+    radio: &Socket,
+    options: &Options,
+    ipc_peer: bool,
+) -> Vec<Socket> {
+    let shm = radio.bind(endpoint()).await.unwrap();
+    let ipc = radio
+        .bind(format!(
+            "ipc:///tmp/omq-shm-mixed-{}.sock",
+            rand::random::<u64>()
+        ))
+        .await
+        .unwrap();
+
+    let mut receivers = Vec::new();
+    for address in [shm.clone(), if ipc_peer { ipc } else { shm }] {
+        let dish = context.socket(SocketType::Dish, options.clone());
+        dish.join("group").await.unwrap();
+        dish.connect(address).await.unwrap();
+        dish.wait_connected(1, DEADLINE).await.unwrap();
+        receivers.push(dish);
+    }
+    receivers
+}
+
+/// Publishes "ready" until `dish` receives one, so its join is in effect.
+async fn prime_dish(radio: &Socket, dish: &Socket) {
+    let deadline = Instant::now() + DEADLINE;
+    loop {
+        radio.send_group("group", "ready").await.unwrap();
+        if tokio::time::timeout(Duration::from_millis(20), dish.recv())
+            .await
+            .is_ok()
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline);
+    }
+}
+
+/// Sends 128 bodies, alternating pooled (leased over SHM) and plain
+/// (copied) storage.
+async fn send_mixed_bodies(radio: &Socket, pool: &omq_tokio::PayloadPool) {
+    for sequence in 0..128_u8 {
+        let size = mixed_size(sequence);
+        let body = if sequence % 2 == 0 {
+            pool.message(size, |bytes| bytes.fill(sequence)).unwrap()
+        } else {
+            Message::from_slice(&vec![sequence; size])
+        };
+        radio
+            .send(Message::with_prefix(Bytes::from_static(b"group"), body))
+            .await
+            .unwrap();
+    }
+}
+
+async fn drain_mixed_bodies(dish: &Socket) {
+    for sequence in 0..128_u8 {
+        // Skip leftover "ready" probes from priming.
+        let got = loop {
+            let got = receive(dish).await;
+            if got.part_slice(1) != Some(b"ready".as_slice()) {
+                break got;
+            }
+        };
+        assert_eq!(got.part_slice(0), Some(b"group".as_slice()));
+        assert_eq!(
+            got.part_slice(1).unwrap(),
+            vec![sequence; mixed_size(sequence)]
+        );
     }
 }
 
@@ -615,6 +683,32 @@ async fn held_views_outlive_contexts_and_credit_wait_keeps_close_reachable() {
     assert_eq!(pool.available(), 1);
 }
 
+/// RADIO messages need a group prefix. CHANNEL messages are sent as is.
+fn group_envelope(sender_type: SocketType, message: Message) -> Message {
+    if sender_type == SocketType::Radio {
+        Message::with_prefix(Bytes::from_static(b"group"), message)
+    } else {
+        message
+    }
+}
+
+/// Sends small inline "ready" messages until one arrives.
+async fn wait_until_delivering(sender: &Socket, receiver: &Socket, sender_type: SocketType) {
+    let deadline = Instant::now() + DEADLINE;
+    loop {
+        sender
+            .send(group_envelope(sender_type, Message::from_slice(b"ready")))
+            .await
+            .unwrap();
+        if let Ok(message) = tokio::time::timeout(Duration::from_millis(20), receiver.recv()).await
+        {
+            message.unwrap();
+            break;
+        }
+        assert!(Instant::now() < deadline);
+    }
+}
+
 #[tokio::test]
 async fn released_leases_resume_staged_messages_without_new_io() {
     for (sender_type, receiver_type) in [
@@ -634,28 +728,11 @@ async fn released_leases_resume_staged_messages_without_new_io() {
         }
         receiver.connect(address).await.unwrap();
         receiver.wait_connected(1, DEADLINE).await.unwrap();
-        let envelope = |message| {
-            if sender_type == SocketType::Radio {
-                Message::with_prefix(Bytes::from_static(b"group"), message)
-            } else {
-                message
-            }
-        };
+        let envelope = |message| group_envelope(sender_type, message);
+
         // Establish subscription readiness without consuming lease credit.
-        let deadline = Instant::now() + DEADLINE;
-        loop {
-            sender
-                .send(envelope(Message::from_slice(b"ready")))
-                .await
-                .unwrap();
-            if let Ok(message) =
-                tokio::time::timeout(Duration::from_millis(20), receiver.recv()).await
-            {
-                message.unwrap();
-                break;
-            }
-            assert!(Instant::now() < deadline);
-        }
+        wait_until_delivering(&sender, &receiver, sender_type).await;
+
         let pool = shm_payload_pool([(128, 4)]).unwrap();
         sender
             .send(envelope(pool.message(128, |bytes| bytes.fill(0)).unwrap()))
@@ -667,6 +744,9 @@ async fn released_leases_resume_staged_messages_without_new_io() {
                 break message;
             }
         };
+
+        // Each staged message must go out when the held view is released,
+        // with no further send to kick the IO path.
         for value in 1..=16_u8 {
             sender
                 .send(envelope(
@@ -680,6 +760,7 @@ async fn released_leases_resume_staged_messages_without_new_io() {
             held = receive(&receiver).await;
             assert_eq!(held.iter().last().unwrap().as_ref(), &[value; 128]);
         }
+
         drop(held);
         sender.close().await.unwrap();
         receiver.close().await.unwrap();

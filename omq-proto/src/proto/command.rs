@@ -303,67 +303,84 @@ pub(crate) fn decode_properties_inner(mut body: Bytes) -> Result<PeerProperties>
         if count > MAX_READY_PROPERTIES {
             return Err(Error::Protocol("too many READY properties".into()));
         }
-        let name_len = body[0] as usize;
-        if name_len == 0 {
-            return Err(Error::Protocol("READY property name is empty".into()));
-        }
-        if body.len() < 1 + name_len + 4 {
-            return Err(Error::Protocol("READY property truncated".into()));
-        }
-        let name = body.slice(1..=name_len);
-        if !name
-            .iter()
-            .all(|&b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'+')
-        {
-            return Err(Error::Protocol(
-                "READY property name contains invalid characters".into(),
-            ));
-        }
-        let value_len =
-            u32::from_be_bytes(body[1 + name_len..1 + name_len + 4].try_into().unwrap());
-        if value_len > i32::MAX as u32 {
-            return Err(Error::Protocol("READY property value too large".into()));
-        }
-        let value_len = value_len as usize;
-        let val_start = 1 + name_len + 4;
-        if value_len > body.len() - val_start {
-            return Err(Error::Protocol("READY property value truncated".into()));
-        }
-        let val_end = val_start + value_len;
-        let value = body.slice(val_start..val_end);
-        body = body.slice(val_end..);
+        let (name, value) = split_property(&mut body)?;
 
-        // Safe: we validated ASCII alphanumeric + [-_.+] above.
-        let name_str = std::str::from_utf8(&name).expect("validated ASCII");
-        if name_str.eq_ignore_ascii_case("Socket-Type") {
-            if props.socket_type.is_some() {
-                return Err(Error::Protocol("duplicate Socket-Type property".into()));
-            }
-            let t = SocketType::from_wire(&value).ok_or_else(|| {
-                Error::Protocol(format!(
-                    "unknown peer socket type: {:?}",
-                    String::from_utf8_lossy(&value)
-                ))
-            })?;
-            props.socket_type = Some(t);
-        } else if name_str.eq_ignore_ascii_case("Identity") {
-            if props.identity.is_some() {
-                return Err(Error::Protocol("duplicate Identity property".into()));
-            }
-            if !crate::message::is_valid_peer_identity(&value) {
-                return Err(Error::Protocol("invalid peer identity".into()));
-            }
-            if !value.is_empty() {
-                props.identity = Some(value);
-            }
-        } else if !LOCAL_ONLY_PROPERTIES
-            .iter()
-            .any(|reserved| name_str.eq_ignore_ascii_case(reserved))
-        {
-            props.other.push((name_str.to_string(), value));
-        }
+        // split_property admits only ASCII alphanumerics and [-_.+].
+        let name = std::str::from_utf8(&name).expect("validated ASCII");
+        record_property(&mut props, name, value)?;
     }
     Ok(props)
+}
+
+/// Split one `name-len name value-len value` property off the front of
+/// `body`, validating the name and both lengths.
+fn split_property(body: &mut Bytes) -> Result<(Bytes, Bytes)> {
+    let name_len = body[0] as usize;
+    if name_len == 0 {
+        return Err(Error::Protocol("READY property name is empty".into()));
+    }
+    if body.len() < 1 + name_len + 4 {
+        return Err(Error::Protocol("READY property truncated".into()));
+    }
+
+    let name = body.slice(1..=name_len);
+    if !name
+        .iter()
+        .all(|&b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'+')
+    {
+        return Err(Error::Protocol(
+            "READY property name contains invalid characters".into(),
+        ));
+    }
+
+    let value_len = u32::from_be_bytes(body[1 + name_len..1 + name_len + 4].try_into().unwrap());
+    if value_len > i32::MAX as u32 {
+        return Err(Error::Protocol("READY property value too large".into()));
+    }
+    let value_len = value_len as usize;
+    let val_start = 1 + name_len + 4;
+    if value_len > body.len() - val_start {
+        return Err(Error::Protocol("READY property value truncated".into()));
+    }
+
+    let val_end = val_start + value_len;
+    let value = body.slice(val_start..val_end);
+    *body = body.slice(val_end..);
+    Ok((name, value))
+}
+
+/// Store one property. Names match case-insensitively; local-only names
+/// are dropped.
+fn record_property(props: &mut PeerProperties, name: &str, value: Bytes) -> Result<()> {
+    if name.eq_ignore_ascii_case("Socket-Type") {
+        if props.socket_type.is_some() {
+            return Err(Error::Protocol("duplicate Socket-Type property".into()));
+        }
+        let t = SocketType::from_wire(&value).ok_or_else(|| {
+            Error::Protocol(format!(
+                "unknown peer socket type: {:?}",
+                String::from_utf8_lossy(&value)
+            ))
+        })?;
+        props.socket_type = Some(t);
+    } else if name.eq_ignore_ascii_case("Identity") {
+        if props.identity.is_some() {
+            return Err(Error::Protocol("duplicate Identity property".into()));
+        }
+        if !crate::message::is_valid_peer_identity(&value) {
+            return Err(Error::Protocol("invalid peer identity".into()));
+        }
+        // An empty identity means "none"; the socket generates one.
+        if !value.is_empty() {
+            props.identity = Some(value);
+        }
+    } else if !LOCAL_ONLY_PROPERTIES
+        .iter()
+        .any(|reserved| name.eq_ignore_ascii_case(reserved))
+    {
+        props.other.push((name.to_string(), value));
+    }
+    Ok(())
 }
 
 #[expect(clippy::needless_pass_by_value)]

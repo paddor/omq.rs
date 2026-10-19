@@ -223,7 +223,7 @@ mod tests {
 
     #[test]
     fn handshake_does_not_let_direct_send_overtake_inbox() {
-        use crate::engine::transmit_slot::{PeerTransmitSlot, TryFrameResult};
+        use crate::engine::transmit_slot::{PeerTransmitSlot, SlotConfig, TryFrameResult};
         use crate::socket::dispatch::DirectTcpWriter;
         use std::io::Read;
         use std::net::{TcpListener, TcpStream};
@@ -235,16 +235,15 @@ mod tests {
         let (mut remote, _) = listener.accept().unwrap();
         tcp.set_nonblocking(true).unwrap();
         remote.set_nonblocking(true).unwrap();
-        let slot = PeerTransmitSlot::new(
+        let slot = PeerTransmitSlot::with_config(
             1,
-            false,
-            None,
-            None,
-            4096,
-            4096,
-            8192,
-            4,
-            crate::engine::framing::WireFraming::Zmtp,
+            SlotConfig {
+                arena_threshold: 4096,
+                arena_cap: 4096,
+                cap: 8192,
+                msg_cap: 4,
+                ..SlotConfig::default()
+            },
         );
         let (inbox, mut rx) = tokio::sync::mpsc::channel(4);
         let target = PeerOutbound::Wire {

@@ -30,18 +30,8 @@ async fn stalled_pong_output(
     receiver: ConnectionConfig,
     reply_prefix: &[u8],
 ) {
-    const PINGS: usize = 16 * 1024;
     for close_while_blocked in [false, true] {
-        let (mut sender, connection) = ready_connections(sender.clone(), receiver.clone());
-        for sequence in 0..PINGS {
-            sender
-                .send_command(&Command::Ping {
-                    ttl_deciseconds: 0,
-                    context: Bytes::copy_from_slice(&(sequence as u64).to_be_bytes()),
-                })
-                .unwrap();
-        }
-        let wire = drain_transmit(&mut sender);
+        let (wire, connection) = ping_flood(sender.clone(), receiver.clone());
         let (stream, remote) = tokio::io::duplex(8192);
         let (commands, inbox) = mpsc::channel(8);
         let (events, _event_inbox) = mpsc::channel(8);
@@ -60,6 +50,8 @@ async fn stalled_pong_output(
             )
             .run(),
         );
+
+        // Nothing reads the replies yet, so PONG output fills the duplex.
         let (mut replies, mut requests) = tokio::io::split(remote);
         let mut sending = tokio::spawn(async move { requests.write_all(&wire).await });
         assert!(
@@ -72,20 +64,8 @@ async fn stalled_pong_output(
         if close_while_blocked {
             sending.abort();
         } else {
-            let reply_len = reply_prefix.len() + 8;
-            let mut wire = vec![0; PINGS * reply_len];
-            tokio::time::timeout(Duration::from_secs(1), replies.read_exact(&mut wire))
-                .await
-                .expect("reply drainage did not resume input")
-                .unwrap();
+            assert_pong_replies(&mut replies, reply_prefix).await;
             sending.await.unwrap().unwrap();
-            for (sequence, reply) in wire.chunks_exact(reply_len).enumerate() {
-                assert_eq!(&reply[..reply_prefix.len()], reply_prefix);
-                assert_eq!(
-                    &reply[reply_prefix.len()..],
-                    &(sequence as u64).to_be_bytes()
-                );
-            }
         }
         commands.send(PeerDriverCommand::Close).await.unwrap();
         tokio::time::timeout(Duration::from_secs(1), task)
@@ -93,6 +73,41 @@ async fn stalled_pong_output(
             .expect("queued replies blocked local close")
             .unwrap()
             .unwrap();
+    }
+}
+
+const PINGS: usize = 16 * 1024;
+
+/// Wire bytes of `PINGS` sequenced PINGs, and the ready receiving codec.
+fn ping_flood(sender: ConnectionConfig, receiver: ConnectionConfig) -> (Vec<u8>, Connection) {
+    let (mut sender, connection) = ready_connections(sender, receiver);
+    for sequence in 0..PINGS {
+        sender
+            .send_command(&Command::Ping {
+                ttl_deciseconds: 0,
+                context: Bytes::copy_from_slice(&(sequence as u64).to_be_bytes()),
+            })
+            .unwrap();
+    }
+
+    (drain_transmit(&mut sender), connection)
+}
+
+/// Read every PONG once draining resumes; each echoes its PING context.
+async fn assert_pong_replies(replies: &mut tokio::io::ReadHalf<DuplexStream>, reply_prefix: &[u8]) {
+    let reply_len = reply_prefix.len() + 8;
+    let mut wire = vec![0; PINGS * reply_len];
+    tokio::time::timeout(Duration::from_secs(1), replies.read_exact(&mut wire))
+        .await
+        .expect("reply drainage did not resume input")
+        .unwrap();
+
+    for (sequence, reply) in wire.chunks_exact(reply_len).enumerate() {
+        assert_eq!(&reply[..reply_prefix.len()], reply_prefix);
+        assert_eq!(
+            &reply[reply_prefix.len()..],
+            &(sequence as u64).to_be_bytes()
+        );
     }
 }
 
@@ -120,62 +135,32 @@ async fn queued_heartbeat_with_stalled_output(
     server_config: ConnectionConfig,
     client_config: ConnectionConfig,
 ) {
-    let (server_stream, client_stream) = tokio::io::duplex(1024);
-    let (producer, _consumer) = yring::spsc(1);
-    let (server_control, server_inbox) = mpsc::channel(8);
-    let (client_control, client_inbox) = mpsc::channel(8);
-    let (client_data, client_data_inbox) = mpsc::channel(64);
-    let (server_events, mut server_event_inbox) = mpsc::channel(8);
-    let (client_events, mut client_event_inbox) = mpsc::channel(8);
-    let server_cancel = CancellationToken::new();
-    let client_cancel = CancellationToken::new();
-    let server = ConnectionDriver::new(
-        server_stream,
-        Connection::new(server_config),
-        server_inbox,
-        server_events,
-        1,
-        server_cancel.clone(),
-    )
-    .with_recv_sink(RecvSink::Yring(YringSink {
-        producer,
-        signal: Box::new(|| {}),
-        space: Arc::new(StateSignal::new()),
-    }));
-    let client = ConnectionDriver::with_config(
-        client_stream,
-        Connection::new(client_config),
-        client_inbox,
-        client_events,
-        2,
-        client_cancel.clone(),
-        PeerDriverConfig {
+    let spec = PairSpec {
+        duplex: 1024,
+        server: server_config,
+        client: client_config,
+        server_events: 8,
+        client_data: 64,
+        server_driver: PeerDriverConfig::default(),
+        client_driver: PeerDriverConfig {
             heartbeat_interval: Some(Duration::from_millis(50)),
             heartbeat_timeout: Some(Duration::from_millis(150)),
             ..PeerDriverConfig::default()
         },
-    )
-    .with_data_inbox(client_data_inbox);
-    let server_task = tokio::spawn(server.run());
-    let client_task = tokio::spawn(client.run());
-    assert!(matches!(
-        server_event_inbox.recv().await.unwrap().1,
-        PeerEvent::Event(Event::HandshakeSucceeded { .. })
-    ));
-    assert!(matches!(
-        client_event_inbox.recv().await.unwrap().1,
-        PeerEvent::Event(Event::HandshakeSucceeded { .. })
-    ));
-    server_control
-        .send(PeerDriverCommand::ActivateDataPlane)
-        .await
-        .unwrap();
-    client_control
-        .send(PeerDriverCommand::ActivateDataPlane)
-        .await
-        .unwrap();
+    };
+    let (server, client, mut ends) = pair_drivers(spec);
+    // Nothing drains this one-slot ring, so the server stops reading and the
+    // client's output, PINGs included, queues behind data.
+    let (producer, _consumer) = yring::spsc(1);
+    let server = server.with_recv_sink(RecvSink::Yring(YringSink {
+        producer,
+        signal: Box::new(|| {}),
+        space: Arc::new(StateSignal::new()),
+    }));
+    let (server_task, client_task) = start_pair(server, client, &mut ends).await;
+
     for _ in 0..32 {
-        client_data
+        ends.client_data
             .send(PeerDriverData::SendMessage(Message::single(Bytes::from(
                 vec![7; 1024],
             ))))
@@ -184,19 +169,15 @@ async fn queued_heartbeat_with_stalled_output(
     }
     tokio::time::sleep(Duration::from_millis(350)).await;
     assert!(
-        !client_control.is_closed(),
+        !ends.client_control.is_closed(),
         "a locally queued PING cannot establish peer silence"
     );
-    client_control.send(PeerDriverCommand::Close).await.unwrap();
-    tokio::time::timeout(Duration::from_millis(500), client_task)
+
+    ends.client_control
+        .send(PeerDriverCommand::Close)
         .await
-        .unwrap()
-        .unwrap()
         .unwrap();
-    server_cancel.cancel();
-    tokio::time::timeout(Duration::from_millis(500), server_task)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+    join_ok(client_task).await;
+    ends.server_cancel.cancel();
+    join_ok(server_task).await;
 }

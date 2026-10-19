@@ -206,12 +206,7 @@ async fn queued_generations_materialize_original_codec_settings_after_defaults_c
                     Bytes::from_static(b"topic"),
                     Bytes::from(vec![0x5a; 4096]),
                 ]);
-                driver
-                    .send_strategy
-                    .submitter()
-                    .send(message.clone())
-                    .await
-                    .unwrap();
+                publish(&driver, &message).await;
                 for peer in &mut peers {
                     peer.assert_publication(&message).await;
                 }
@@ -227,6 +222,64 @@ async fn queued_generations_materialize_original_codec_settings_after_defaults_c
     .unwrap();
 }
 
+/// Issue a CONNECT for a name that needs DNS. Returns the pending
+/// resolution id and the caller's ack, which must stay alive so the
+/// resolution is not canceled. The completion is injected by the caller.
+async fn connect_by_name(
+    driver: &mut SocketDriver,
+    resolved: &Endpoint,
+) -> (
+    u64,
+    futures::channel::oneshot::Receiver<omq_proto::Result<()>>,
+) {
+    let named = resolved.rewrap_tcp(Endpoint::Tcp {
+        host: omq_proto::endpoint::Host::Name("snapshot.invalid".into()),
+        port: 1,
+    });
+    let (ack, pending_ack) = futures::channel::oneshot::channel();
+    driver
+        .handle_command(SocketCommand::Connect {
+            endpoint: named,
+            compression: Some(CompressionOptions {
+                threshold: Some(64),
+                ..CompressionOptions::default()
+            }),
+            ack,
+        })
+        .await;
+    assert_eq!(driver.pending_endpoints.len(), 1);
+    (
+        *driver.pending_endpoints.keys().next().unwrap(),
+        pending_ack,
+    )
+}
+
+/// Inject a successful resolution, so no OS DNS or socket IO runs.
+async fn finish_connect(driver: &mut SocketDriver, id: u64, resolved: Endpoint) {
+    let (ack, completed) = futures::channel::oneshot::channel();
+    driver
+        .finish_endpoint_resolution(
+            id,
+            endpoint_resolution::Ack::Connect(ack),
+            Ok(endpoint_resolution::ResolvedEndpoint {
+                endpoint: resolved,
+                first_deadline: None,
+                admission: None,
+            }),
+        )
+        .await;
+    completed.await.unwrap().unwrap();
+}
+
+async fn publish(driver: &SocketDriver, message: &Message) {
+    driver
+        .send_strategy
+        .submitter()
+        .send(message.clone())
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn resolution_handoff_and_peer_reconnect_retain_the_operation_snapshot() {
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -239,42 +292,17 @@ async fn resolution_handoff_and_peer_reconnect_retain_the_operation_snapshot() {
         ] {
             let (mut driver, _consumer) = fixture_for(SocketType::Pub);
             driver.options.reconnect = ReconnectPolicy::Fixed(Duration::from_millis(10));
+            // Hold the only admission so the dialer cannot connect on its own.
             driver.setup_admission = crate::transport::setup::Admission::new(1);
             let held = driver.setup_admission.try_acquire().unwrap();
             let resolved = endpoint(kind);
-            let named = resolved.rewrap_tcp(Endpoint::Tcp {
-                host: omq_proto::endpoint::Host::Name("snapshot.invalid".into()),
-                port: 1,
-            });
-            let (ack, _pending_ack) = futures::channel::oneshot::channel();
-            driver
-                .handle_command(SocketCommand::Connect {
-                    endpoint: named,
-                    compression: Some(CompressionOptions {
-                        threshold: Some(64),
-                        ..CompressionOptions::default()
-                    }),
-                    ack,
-                })
-                .await;
-            assert_eq!(driver.pending_endpoints.len(), 1);
-            let id = *driver.pending_endpoints.keys().next().unwrap();
+            let (id, _pending_ack) = connect_by_name(&mut driver, &resolved).await;
+
+            // Socket defaults change while DNS is pending; the dialer must keep
+            // the options captured by connect().
             driver.options.compression_threshold = Some(8192);
             driver.options.reconnect = ReconnectPolicy::Disabled;
-            let (ack, completed) = futures::channel::oneshot::channel();
-            // Hold admission and inject completion so no OS DNS/socket IO runs.
-            driver
-                .finish_endpoint_resolution(
-                    id,
-                    endpoint_resolution::Ack::Connect(ack),
-                    Ok(endpoint_resolution::ResolvedEndpoint {
-                        endpoint: resolved.clone(),
-                        first_deadline: None,
-                        admission: None,
-                    }),
-                )
-                .await;
-            completed.await.unwrap().unwrap();
+            finish_connect(&mut driver, id, resolved.clone()).await;
             let route = stop_dial_transport(&mut driver).await;
             let original = driver.dialers[0].options.clone();
             assert_eq!(original.compression_threshold, Some(64));
@@ -283,18 +311,16 @@ async fn resolution_handoff_and_peer_reconnect_retain_the_operation_snapshot() {
                 ReconnectPolicy::Fixed(Duration::from_millis(10))
             );
             drop(held);
+
             let mut remote =
                 attach_on_route(&mut driver, resolved.clone(), original.clone(), Some(route)).await;
             let message = Message::single(Bytes::from(vec![0x5a; 4096]));
-            driver
-                .send_strategy
-                .submitter()
-                .send(message.clone())
-                .await
-                .unwrap();
+            publish(&driver, &message).await;
             remote.assert_publication(&message).await;
             let peer_id = *driver.peers.keys().next().unwrap();
             assert!(Arc::ptr_eq(&driver.peers[&peer_id].options, &original));
+
+            // The redial after a drop reuses the same snapshot.
             let held = driver.setup_admission.try_acquire().unwrap();
             remote.cancel.cancel();
             remote.task.await.unwrap().unwrap();
@@ -307,13 +333,9 @@ async fn resolution_handoff_and_peer_reconnect_retain_the_operation_snapshot() {
             let route = stop_dial_transport(&mut driver).await;
             assert!(Arc::ptr_eq(&driver.dialers[0].options, &original));
             drop(held);
+
             let mut remote = attach_on_route(&mut driver, resolved, original, Some(route)).await;
-            driver
-                .send_strategy
-                .submitter()
-                .send(message.clone())
-                .await
-                .unwrap();
+            publish(&driver, &message).await;
             remote.assert_publication(&message).await;
             stop(&mut driver, vec![remote]).await;
         }
@@ -339,22 +361,12 @@ async fn old_listener_dictionary_survives_new_profile_and_late_subscriber() {
         let mut peers = vec![attach(&mut driver, endpoint.clone(), first.clone()).await];
         let message =
             Message::multipart([Bytes::from_static(b"topic"), Bytes::from(vec![0x5a; 4096])]);
-        driver
-            .send_strategy
-            .submitter()
-            .send(message.clone())
-            .await
-            .unwrap();
+        publish(&driver, &message).await;
         peers[0].assert_publication(&message).await;
         peers.push(attach(&mut driver, endpoint.clone(), second).await);
         peers.push(attach(&mut driver, endpoint, first).await);
         for _ in 0..2 {
-            driver
-                .send_strategy
-                .submitter()
-                .send(message.clone())
-                .await
-                .unwrap();
+            publish(&driver, &message).await;
             for peer in &mut peers {
                 peer.assert_publication(&message).await;
             }

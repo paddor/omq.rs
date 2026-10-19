@@ -115,44 +115,21 @@ fn prepare_batch(
     pending: &VecDeque<Message>,
     drain: &DrainBudget,
 ) -> Result<Option<PreparedBatch>> {
-    use omq_shm::{
-        BATCH_MAX_MESSAGES, BatchKind, COPIED_BATCH_MAX_BODY, POOLED_BATCH_COPY_THRESHOLD,
-    };
-
     if pending.len() < 2 || state.batch_capacity() < 2 || drain.remaining_msgs() < 2 {
         return Ok(None);
     }
-    // Batch members share the first envelope and send it once. Larger
-    // envelopes use multipart records instead.
-    let Some(first) = pending.front().filter(|message| {
-        (1..=2).contains(&message.len())
-            && (message.len() == 1
-                || message.part_slice(0).expect("SHM envelope").len() <= COPIED_BATCH_MAX_BODY)
-    }) else {
+    let Some(shape) = pending.front().and_then(BatchShape::new) else {
         return Ok(None);
     };
-    let body_index = first.len() - 1;
-    let kind = BatchKind::for_message(first, POOLED_BATCH_COPY_THRESHOLD);
-    let copy_limit = first
-        .part_slice(body_index)
-        .expect("SHM body")
-        .len()
-        .clamp(POOLED_BATCH_COPY_THRESHOLD, COPIED_BATCH_MAX_BODY);
+    let kind = shape.kind;
+
+    // Members must also fit what is left of the caller's drain budget.
     let limit = state.batch_capacity().min(drain.remaining_msgs());
     let mut budget = DrainBudget::new(limit, max_batch_bytes().saturating_sub(drain.bytes()));
-    let mut messages = smallvec::SmallVec::<[&Message; BATCH_MAX_MESSAGES]>::new();
+    let mut messages = smallvec::SmallVec::<[&Message; omq_shm::BATCH_MAX_MESSAGES]>::new();
     for message in pending.iter().take(limit) {
-        if budget.exhausted()
-            || message.len() != first.len()
-            || message.routing_id() != first.routing_id()
-            || (body_index != 0 && message.part_slice(0) != first.part_slice(0))
-        {
+        if budget.exhausted() || !shape.admits(message) {
             break;
-        }
-        let size = message.part_slice(body_index).expect("SHM body").len();
-        match kind {
-            BatchKind::Copied if size > copy_limit => break,
-            _ => {}
         }
         let bytes = batch_work_bytes(message, kind);
         if bytes > max_batch_bytes().saturating_sub(drain.bytes() + budget.bytes()) {
@@ -161,12 +138,15 @@ fn prepare_batch(
         messages.push(message);
         let _ = budget.account(bytes);
     }
-    if matches!(kind, BatchKind::Referenced) {
+
+    // Referenced batches can only carry the prefix whose bodies live in the pool.
+    if matches!(kind, omq_shm::BatchKind::Referenced) {
         messages.truncate(omq_shm::pooled_prefix(&messages));
     }
     if messages.len() < 2 {
         return Ok(None);
     }
+
     let work_bytes = if messages.len() == budget.msgs() {
         budget.bytes()
     } else {
@@ -183,6 +163,58 @@ fn prepare_batch(
             work_bytes,
             kind,
         }))
+}
+
+/// Layout shared by every member of one SHM batch, taken from its first message.
+#[cfg(target_os = "linux")]
+struct BatchShape<'m> {
+    first: &'m Message,
+    body_index: usize,
+    kind: omq_shm::BatchKind,
+    copy_limit: usize,
+}
+
+#[cfg(target_os = "linux")]
+impl<'m> BatchShape<'m> {
+    /// Batch members share the first envelope and send it once. Larger
+    /// envelopes use multipart records instead.
+    fn new(first: &'m Message) -> Option<Self> {
+        use omq_shm::{BatchKind, COPIED_BATCH_MAX_BODY, POOLED_BATCH_COPY_THRESHOLD};
+
+        let envelope_fits = (1..=2).contains(&first.len())
+            && (first.len() == 1
+                || first.part_slice(0).expect("SHM envelope").len() <= COPIED_BATCH_MAX_BODY);
+        if !envelope_fits {
+            return None;
+        }
+
+        let body_index = first.len() - 1;
+        let copy_limit = first
+            .part_slice(body_index)
+            .expect("SHM body")
+            .len()
+            .clamp(POOLED_BATCH_COPY_THRESHOLD, COPIED_BATCH_MAX_BODY);
+        Some(Self {
+            first,
+            body_index,
+            kind: BatchKind::for_message(first, POOLED_BATCH_COPY_THRESHOLD),
+            copy_limit,
+        })
+    }
+
+    /// Same part count, routing ID, and envelope as the first message. Copied
+    /// batches also cap each body near the first body's size.
+    fn admits(&self, message: &Message) -> bool {
+        if message.len() != self.first.len()
+            || message.routing_id() != self.first.routing_id()
+            || (self.body_index != 0 && message.part_slice(0) != self.first.part_slice(0))
+        {
+            return false;
+        }
+
+        let size = message.part_slice(self.body_index).expect("SHM body").len();
+        !matches!(self.kind, omq_shm::BatchKind::Copied if size > self.copy_limit)
+    }
 }
 
 #[cfg(target_os = "linux")]

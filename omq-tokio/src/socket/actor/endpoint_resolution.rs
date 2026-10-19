@@ -137,6 +137,7 @@ async fn bind_address(endpoint: Endpoint) -> Result<Endpoint> {
             group: group.clone(),
         });
     }
+
     #[cfg(feature = "dart")]
     if let Endpoint::Dart {
         host: Host::Name(host),
@@ -149,52 +150,16 @@ async fn bind_address(endpoint: Endpoint) -> Result<Endpoint> {
             port: *port,
         });
     }
+
     if endpoint.is_tcp_family() {
-        let Endpoint::Tcp {
-            host: Host::Name(host),
-            port,
-        } = endpoint.underlying_tcp()
-        else {
-            unreachable!()
-        };
-        let address = first(&host, port).await?;
-        return Ok(endpoint.rewrap_tcp(Endpoint::Tcp {
-            host: Host::Ip(address.ip()),
-            port,
-        }));
+        return tcp_bind_address(endpoint).await;
     }
+
     #[cfg(feature = "ws")]
     if endpoint.is_ws_family() {
-        let underlying = endpoint.underlying_ws();
-        let (host, port, path, tls) = match underlying {
-            Endpoint::Ws {
-                host: Host::Name(host),
-                port,
-                path,
-            } => (host, port, path, false),
-            Endpoint::Wss {
-                host: Host::Name(host),
-                port,
-                path,
-            } => (host, port, path, true),
-            _ => unreachable!(),
-        };
-        let address = first(&host, port).await?;
-        let resolved = if tls {
-            Endpoint::Wss {
-                host: Host::Ip(address.ip()),
-                port,
-                path,
-            }
-        } else {
-            Endpoint::Ws {
-                host: Host::Ip(address.ip()),
-                port,
-                path,
-            }
-        };
-        return Ok(endpoint.rewrap_ws(resolved));
+        return ws_bind_address(endpoint).await;
     }
+
     #[cfg(feature = "quic")]
     if let Endpoint::Quic {
         host: Host::Name(host),
@@ -207,7 +172,53 @@ async fn bind_address(endpoint: Endpoint) -> Result<Endpoint> {
             port: *port,
         });
     }
+
     unreachable!("only named network endpoints are dispatched")
+}
+
+/// Resolve the TCP host under any TCP-family wrapper (e.g. `lz4+tcp://`)
+/// and keep the wrapper around the resolved address.
+async fn tcp_bind_address(endpoint: Endpoint) -> Result<Endpoint> {
+    let Endpoint::Tcp {
+        host: Host::Name(host),
+        port,
+    } = endpoint.underlying_tcp()
+    else {
+        unreachable!()
+    };
+
+    let address = first(&host, port).await?;
+    Ok(endpoint.rewrap_tcp(Endpoint::Tcp {
+        host: Host::Ip(address.ip()),
+        port,
+    }))
+}
+
+/// Resolve the WS/WSS host and keep scheme, path, and any wrapper.
+#[cfg(feature = "ws")]
+async fn ws_bind_address(endpoint: Endpoint) -> Result<Endpoint> {
+    let (host, port, path, tls) = match endpoint.underlying_ws() {
+        Endpoint::Ws {
+            host: Host::Name(host),
+            port,
+            path,
+        } => (host, port, path, false),
+        Endpoint::Wss {
+            host: Host::Name(host),
+            port,
+            path,
+        } => (host, port, path, true),
+        _ => unreachable!(),
+    };
+
+    let address = first(&host, port).await?;
+    let host = Host::Ip(address.ip());
+    let resolved = if tls {
+        Endpoint::Wss { host, port, path }
+    } else {
+        Endpoint::Ws { host, port, path }
+    };
+    Ok(endpoint.rewrap_ws(resolved))
 }
 
 async fn first(host: &str, port: u16) -> Result<SocketAddr> {

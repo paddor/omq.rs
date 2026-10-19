@@ -23,7 +23,25 @@ fn response() -> String {
 #[test]
 fn rejects_ambiguous_or_malformed_requests() {
     let valid = request();
-    let cases = [
+    let cases = request_line_cases(&valid)
+        .into_iter()
+        .chain(request_header_cases(&valid))
+        .chain(request_syntax_cases(&valid));
+    let accepted: Vec<_> = cases
+        .filter_map(|(name, wire)| {
+            parse_client_upgrade(wire.as_bytes())
+                .is_ok()
+                .then_some(name)
+        })
+        .collect();
+    assert!(
+        accepted.is_empty(),
+        "accepted malformed requests: {accepted:?}"
+    );
+}
+
+fn request_line_cases(valid: &str) -> Vec<(&'static str, String)> {
+    vec![
         ("lowercase method", valid.replacen("GET", "get", 1)),
         ("old version", valid.replacen("HTTP/1.1", "HTTP/1.0", 1)),
         (
@@ -31,6 +49,11 @@ fn rejects_ambiguous_or_malformed_requests() {
             valid.replacen("HTTP/1.1", "HTTP/1.1 extra", 1),
         ),
         ("tab separator", valid.replacen("GET ", "GET\t", 1)),
+    ]
+}
+
+fn request_header_cases(valid: &str) -> Vec<(&'static str, String)> {
+    vec![
         (
             "missing Host",
             valid.replace("Host: localhost:9000\r\n", ""),
@@ -83,6 +106,11 @@ fn rejects_ambiguous_or_malformed_requests() {
                 "Origin: https://one.example\r\nOrigin: https://two.example\r\nHost:",
             ),
         ),
+    ]
+}
+
+fn request_syntax_cases(valid: &str) -> Vec<(&'static str, String)> {
+    vec![
         ("invalid header name", valid.replace("Host:", "Ho(st:")),
         ("space before colon", valid.replace("Host:", "Host :")),
         ("folded field", valid.replace("Host:", " Host:")),
@@ -101,19 +129,7 @@ fn rejects_ambiguous_or_malformed_requests() {
             "transfer encoding",
             valid.replace("Host:", "Transfer-Encoding: chunked\r\nHost:"),
         ),
-    ];
-    let accepted: Vec<_> = cases
-        .into_iter()
-        .filter_map(|(name, wire)| {
-            parse_client_upgrade(wire.as_bytes())
-                .is_ok()
-                .then_some(name)
-        })
-        .collect();
-    assert!(
-        accepted.is_empty(),
-        "accepted malformed requests: {accepted:?}"
-    );
+    ]
 }
 
 #[test]

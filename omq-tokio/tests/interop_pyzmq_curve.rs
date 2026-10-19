@@ -95,6 +95,58 @@ async fn wait_for_curve_handshake(sock: &Socket) {
     }
 }
 
+/// Spawns a pyzmq CURVE server script with its keypair in `SRV_PUB` and
+/// `SRV_SEC`, with stdout and stderr piped.
+fn spawn_pyzmq_curve_server(
+    script: &str,
+    server_kp: &CurveKeypair,
+    what: &str,
+) -> std::process::Child {
+    python3_command()
+        .args(["-c", script])
+        .env("SRV_PUB", server_kp.public.to_z85())
+        .env("SRV_SEC", server_kp.secret.to_z85())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("spawn python3 {what}: {e:?}"))
+}
+
+/// Reads the ephemeral port a pyzmq server prints as its first stdout
+/// line. A blocking reader then collects up to `lines` further lines.
+async fn read_port_then_lines(
+    stdout: std::process::ChildStdout,
+    lines: usize,
+) -> (u16, tokio::task::JoinHandle<Vec<String>>) {
+    let (port_tx, port_rx) = tokio::sync::oneshot::channel();
+    let reader = tokio::task::spawn_blocking(move || {
+        use std::io::{BufRead, BufReader};
+
+        let mut r = BufReader::new(stdout);
+        let mut first = String::new();
+        r.read_line(&mut first).ok();
+        let _ = port_tx.send(first.trim().to_string());
+
+        let mut collected = Vec::new();
+        for _ in 0..lines {
+            let mut buf = String::new();
+            if r.read_line(&mut buf).unwrap_or(0) == 0 {
+                break;
+            }
+            collected.push(buf.trim().to_string());
+        }
+        collected
+    });
+
+    let port = tokio::time::timeout(Duration::from_secs(5), port_rx)
+        .await
+        .expect("python bind timed out")
+        .unwrap()
+        .parse()
+        .expect("python did not print a valid port");
+    (port, reader)
+}
+
 // ---------------------------------------------------------------------
 // Rust CURVE PULL <- pyzmq CURVE PUSH
 // ---------------------------------------------------------------------
@@ -238,9 +290,6 @@ async fn rust_curve_push_to_pyzmq_pull() {
 
     let server_kp = CurveKeypair::generate();
     let client_kp = CurveKeypair::generate();
-    let server_pub_z85 = server_kp.public.to_z85();
-    let server_sec_z85 = server_kp.secret.to_z85();
-    let server_pub_for_client = server_kp.public;
 
     // pyzmq PULL server: bind to an ephemeral port, print the port as
     // the first stdout line, recv 5 msgs, print each, then close.
@@ -259,45 +308,15 @@ s.close(linger=0)
 ctx.term()
 "#;
 
-    let mut child = python3_command()
-        .args(["-c", script])
-        .env("SRV_PUB", &server_pub_z85)
-        .env("SRV_SEC", &server_sec_z85)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn python3 pull");
-
-    // First stdout line is the ephemeral port.
+    let mut child = spawn_pyzmq_curve_server(script, &server_kp, "pull");
     let stdout = child.stdout.take().unwrap();
     let mut stderr = child.stderr.take().unwrap();
-    let (port_tx, port_rx) = tokio::sync::oneshot::channel();
-    let reader = tokio::task::spawn_blocking(move || {
-        use std::io::{BufRead, BufReader};
-        let mut r = BufReader::new(stdout);
-        let mut first = String::new();
-        r.read_line(&mut first).ok();
-        let _ = port_tx.send(first.trim().to_string());
-        let mut lines = Vec::new();
-        for _ in 0..5 {
-            let mut buf = String::new();
-            if r.read_line(&mut buf).unwrap_or(0) == 0 {
-                break;
-            }
-            lines.push(buf.trim().to_string());
-        }
-        lines
-    });
-    let port: u16 = tokio::time::timeout(Duration::from_secs(5), port_rx)
-        .await
-        .expect("python bind timed out")
-        .unwrap()
-        .parse()
-        .expect("python did not print a valid port");
+    // The five lines after the port are the received messages.
+    let (port, reader) = read_port_then_lines(stdout, 5).await;
 
     let push = Socket::new(
         SocketType::Push,
-        Options::default().curve_client(client_kp, server_pub_for_client),
+        Options::default().curve_client(client_kp, server_kp.public),
     );
     push.connect(loopback(port)).await.unwrap();
     wait_for_curve_handshake(&push).await;
@@ -463,9 +482,6 @@ async fn pyzmq_curve_pub_to_rust_sub() {
 
     let server_kp = CurveKeypair::generate();
     let client_kp = CurveKeypair::generate();
-    let server_pub_z85 = server_kp.public.to_z85();
-    let server_sec_z85 = server_kp.secret.to_z85();
-    let server_pub_for_client = server_kp.public;
 
     // pyzmq PUB server: bind to an ephemeral port, print the port as
     // the first stdout line, then publish 60 messages with 50ms spacing
@@ -486,35 +502,14 @@ s.close(linger=0)
 ctx.term()
 "#;
 
-    let mut child = python3_command()
-        .args(["-c", script])
-        .env("SRV_PUB", &server_pub_z85)
-        .env("SRV_SEC", &server_sec_z85)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn python3 pub");
-
+    let mut child = spawn_pyzmq_curve_server(script, &server_kp, "pub");
     let stdout = child.stdout.take().unwrap();
     let mut stderr = child.stderr.take().unwrap();
-    let (port_tx, port_rx) = tokio::sync::oneshot::channel();
-    tokio::task::spawn_blocking(move || {
-        use std::io::{BufRead, BufReader};
-        let mut r = BufReader::new(stdout);
-        let mut first = String::new();
-        r.read_line(&mut first).ok();
-        let _ = port_tx.send(first.trim().to_string());
-    });
-    let port: u16 = tokio::time::timeout(Duration::from_secs(5), port_rx)
-        .await
-        .expect("python bind timed out")
-        .unwrap()
-        .parse()
-        .expect("python did not print a valid port");
+    let (port, _reader) = read_port_then_lines(stdout, 0).await;
 
     let sub = Socket::new(
         SocketType::Sub,
-        Options::default().curve_client(client_kp, server_pub_for_client),
+        Options::default().curve_client(client_kp, server_kp.public),
     );
     sub.subscribe("").await.unwrap();
     sub.connect(loopback(port)).await.unwrap();

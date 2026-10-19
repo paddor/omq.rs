@@ -12,7 +12,7 @@ use super::{AnyConn, Endpoint, Error, InprocPeerSnapshot, InternalEvent, Monitor
 use crate::socket::dispatch::connect_any;
 use crate::socket::monitor::MonitorPublisher;
 use crate::transport::Canceled;
-use crate::transport::backoff::dial_with_backoff_from;
+use crate::transport::backoff::{DialRetry, dial_with_backoff_from};
 use crate::transport::inproc::{InprocRegistry, RecvConfig};
 use crate::transport::setup::DialSetup;
 
@@ -38,11 +38,17 @@ impl DialTask {
     pub(super) async fn run(mut self) {
         let mut first_deadline = self.first_deadline;
         let mut first_admission = self.first_admission.take();
-        let failed_attempts = self.failed_attempts.load(Ordering::Relaxed);
+        // A redial carries its failed attempts so a peer lost before READY
+        // keeps growing its backoff instead of retrying at once.
+        let retry = DialRetry {
+            policy: self.options.reconnect,
+            stop_conn_refused: self.options.reconnect_stop_conn_refused,
+            attempt: self.failed_attempts.load(Ordering::Relaxed),
+        };
+
         let result = dial_with_backoff_from(
             || self.attempt(first_deadline.take(), first_admission.take()),
-            self.options.reconnect,
-            self.options.reconnect_stop_conn_refused,
+            retry,
             &self.cancel,
             |retry_in, attempt| {
                 self.failed_attempts.store(attempt, Ordering::Relaxed);
@@ -52,7 +58,6 @@ impl DialTask {
                     attempt,
                 });
             },
-            failed_attempts,
         )
         .await;
         match result {

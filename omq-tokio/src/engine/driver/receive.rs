@@ -161,60 +161,181 @@ impl MessageDelivery<'_> {
     }
 }
 
+impl ReceiveRateLimiters<'_> {
+    #[cfg(target_os = "linux")]
+    fn is_unlimited(&self) -> bool {
+        self.connection.is_none() && self.ip.is_none()
+    }
+
+    /// One clock read per batch: every message in it is charged at `now`.
+    #[inline]
+    fn exceeded(&mut self, now: Instant) -> bool {
+        self.connection
+            .as_mut()
+            .is_some_and(|limiter| !limiter.allow(now))
+            || self
+                .ip
+                .is_some_and(|(limiter, ip)| !limiter.allow(*ip, now))
+    }
+}
+
+/// Where decoded messages come from: the ZMTP codec, an optional message
+/// transform with its output pool, and SHM payload state.
+pub(super) struct DecodeInput<'a> {
+    pub(super) connection: &'a mut Connection,
+    pub(super) decoder: &'a mut Option<MessageDecoder>,
+    pub(super) payload_pool: Option<&'a omq_proto::PayloadPool>,
+    #[cfg(target_os = "linux")]
+    pub(super) shm: Option<&'a crate::transport::shm::ShmState>,
+}
+
+impl DecodeInput<'_> {
+    /// SHM delivery moves message headers after carrier input is budgeted,
+    /// so untransformed SHM receives are charged one header each.
+    fn charges_headers(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.shm.is_some() && self.decoder.is_none()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
+    }
+}
+
+/// Budget and deferred-flush state of one `drain_decoded_messages` call.
+struct ReceiveBatch {
+    start: Instant,
+    profile: ReceiveProfile,
+    /// Sized by the first message of the batch.
+    budget: Option<DrainBudget>,
+    time_limit: Option<Duration>,
+    charges_headers: bool,
+    defer_flush: bool,
+    pending_flush: bool,
+}
+
+impl ReceiveBatch {
+    fn new(
+        input: &DecodeInput<'_>,
+        profile: ReceiveProfile,
+        delivery: &MessageDelivery<'_>,
+    ) -> Self {
+        let defer_codec = match input.decoder {
+            None => true,
+            #[cfg(feature = "lz4")]
+            Some(MessageDecoder::Lz4(_)) => true,
+            #[cfg(feature = "zstd")]
+            Some(MessageDecoder::Zstd(_)) => true,
+            #[cfg(not(any(feature = "lz4", feature = "zstd")))]
+            Some(_) => false,
+        };
+
+        // Throughput yring sinks publish once per batch instead of per message.
+        let defer_flush = defer_codec
+            && matches!(profile, ReceiveProfile::Throughput)
+            && delivery.sink.as_ref().is_some_and(RecvSink::is_yring);
+
+        Self {
+            start: Instant::now(),
+            profile,
+            budget: None,
+            time_limit: None,
+            charges_headers: input.charges_headers(),
+            defer_flush,
+            pending_flush: false,
+        }
+    }
+
+    #[inline]
+    fn cost(&self, message: &Message) -> usize {
+        if self.charges_headers {
+            std::mem::size_of::<Message>()
+        } else {
+            message.byte_len()
+        }
+    }
+
+    /// Deliver one message and charge it. `Some` ends the batch.
+    #[inline]
+    fn deliver(
+        &mut self,
+        message: Message,
+        msg_bytes: usize,
+        delivery: &mut MessageDelivery<'_>,
+    ) -> Option<DriverStep> {
+        let profile = self.profile;
+        let budget = self.budget.get_or_insert_with(|| {
+            self.time_limit = profile.time(msg_bytes);
+            profile.budget(msg_bytes)
+        });
+        if !delivery.send(message, self.defer_flush, &mut self.pending_flush) {
+            return Some(DriverStep::Close);
+        }
+
+        let budget_remains = budget.account(msg_bytes);
+        if delivery.blocked() {
+            return Some(DriverStep::Continue);
+        }
+
+        // Read the clock only every BATCH_TIME_CHECK_MSGS messages.
+        let time_check = budget.msgs().is_multiple_of(BATCH_TIME_CHECK_MSGS);
+        if !budget_remains
+            || (time_check
+                && self
+                    .time_limit
+                    .is_some_and(|limit| self.start.elapsed() >= limit))
+        {
+            return Some(DriverStep::Yield);
+        }
+
+        None
+    }
+}
+
 pub(super) fn drain_decoded_messages(
-    connection: &mut Connection,
-    decoder: &mut Option<MessageDecoder>,
+    input: DecodeInput<'_>,
     receive_profile: ReceiveProfile,
     mut delivery: MessageDelivery<'_>,
-    rate_limiters: ReceiveRateLimiters<'_>,
-    decoded_payload_pool: Option<&omq_proto::PayloadPool>,
-    #[cfg(target_os = "linux")] shm: Option<&crate::transport::shm::ShmState>,
+    mut rate_limiters: ReceiveRateLimiters<'_>,
 ) -> Result<DriverStep> {
-    let ReceiveRateLimiters {
-        connection: rate_connection,
-        ip: rate_ip,
-    } = rate_limiters;
     if !delivery.retry_pending() {
         return Ok(DriverStep::Close);
     }
     if delivery.blocked() {
         return Ok(DriverStep::Continue);
     }
+
+    // Untransformed, unlimited SHM input hands whole batches to a batch sink.
     #[cfg(target_os = "linux")]
-    if decoder.is_none()
-        && rate_connection.is_none()
-        && rate_ip.is_none()
-        && let Some(shm) = shm
+    if input.decoder.is_none()
+        && rate_limiters.is_unlimited()
+        && let Some(shm) = input.shm
         && let Some(sink) = delivery.sink.as_mut().and_then(RecvSink::batch_sink)
     {
         if !sink.enable_batches() {
             return Ok(DriverStep::Close);
         }
-        return drain_shm_batches(connection, shm, receive_profile, delivery);
+        return drain_shm_batches(input.connection, shm, receive_profile, delivery);
     }
-    let recv_batch_start = Instant::now();
-    let mut recv_budget = None;
-    let mut recv_batch_time = None;
-    let defer_codec = match decoder {
-        None => true,
-        #[cfg(feature = "lz4")]
-        Some(MessageDecoder::Lz4(_)) => true,
-        #[cfg(feature = "zstd")]
-        Some(MessageDecoder::Zstd(_)) => true,
-        #[cfg(not(any(feature = "lz4", feature = "zstd")))]
-        Some(_) => false,
-    };
-    let defer_yring_flush = defer_codec
-        && matches!(receive_profile, ReceiveProfile::Throughput)
-        && delivery.sink.as_ref().is_some_and(RecvSink::is_yring);
-    let mut pending_yring_flush = false;
+
+    let mut batch = ReceiveBatch::new(&input, receive_profile, &delivery);
+    let DecodeInput {
+        connection,
+        decoder,
+        payload_pool,
+        #[cfg(target_os = "linux")]
+        shm,
+    } = input;
     #[cfg(target_os = "linux")]
     let mut shm_guard = shm.map(|state| state.lock().expect("SHM connection"));
+
     loop {
         let m = match poll_decoded_message(
             connection,
             decoder,
-            decoded_payload_pool,
+            payload_pool,
             #[cfg(target_os = "linux")]
             shm_guard.as_deref_mut(),
         ) {
@@ -222,49 +343,24 @@ pub(super) fn drain_decoded_messages(
             Ok(DecodedReceive::Setup) => continue,
             Ok(DecodedReceive::Empty) => break,
             Err(error) => {
-                delivery.flush(&mut pending_yring_flush);
+                delivery.flush(&mut batch.pending_flush);
                 return Err(error);
             }
         };
-        let rate_limited = rate_connection
-            .as_mut()
-            .is_some_and(|limiter| !limiter.allow(recv_batch_start))
-            || rate_ip.is_some_and(|(limiter, ip)| !limiter.allow(*ip, recv_batch_start));
-        if rate_limited {
-            delivery.flush(&mut pending_yring_flush);
+
+        if rate_limiters.exceeded(batch.start) {
+            delivery.flush(&mut batch.pending_flush);
             return Err(Error::ReceiveRateLimitExceeded);
         }
-        let msg_bytes = m.byte_len();
-        #[cfg(target_os = "linux")]
-        let msg_bytes = if shm.is_some() && decoder.is_none() {
-            // SHM delivery moves message headers after carrier input is budgeted.
-            std::mem::size_of::<Message>()
-        } else {
-            msg_bytes
-        };
-        let budget = recv_budget.get_or_insert_with(|| {
-            recv_batch_time = receive_profile.time(msg_bytes);
-            receive_profile.budget(msg_bytes)
-        });
-        if !delivery.send(m, defer_yring_flush, &mut pending_yring_flush) {
-            delivery.flush(&mut pending_yring_flush);
-            return Ok(DriverStep::Close);
-        }
-        let budget_remains = budget.account(msg_bytes);
-        if delivery.blocked() {
-            delivery.flush(&mut pending_yring_flush);
-            return Ok(DriverStep::Continue);
-        }
-        let time_check = budget.msgs().is_multiple_of(BATCH_TIME_CHECK_MSGS);
-        if !budget_remains
-            || (time_check
-                && recv_batch_time.is_some_and(|limit| recv_batch_start.elapsed() >= limit))
-        {
-            delivery.flush(&mut pending_yring_flush);
-            return Ok(DriverStep::Yield);
+
+        let msg_bytes = batch.cost(&m);
+        if let Some(step) = batch.deliver(m, msg_bytes, &mut delivery) {
+            delivery.flush(&mut batch.pending_flush);
+            return Ok(step);
         }
     }
-    delivery.flush(&mut pending_yring_flush);
+
+    delivery.flush(&mut batch.pending_flush);
     Ok(DriverStep::Continue)
 }
 

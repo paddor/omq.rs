@@ -39,8 +39,13 @@ fn main() {
     });
 }
 
-async fn run_cell(transport: &str, peers: usize, size: usize, seq: usize) -> common::Cell {
-    let ep = common::endpoint(transport, seq);
+/// Bind one PUB and connect `peers` SUBs subscribed to everything.
+async fn connect_pub_subs(
+    transport: &str,
+    ep: omq_tokio::Endpoint,
+    peers: usize,
+    size: usize,
+) -> (Socket, Vec<Socket>) {
     let pub_ = Socket::new(SocketType::Pub, common::options(size));
     pub_.bind(ep.clone()).await.expect("bind PUB");
 
@@ -51,6 +56,7 @@ async fn run_cell(transport: &str, peers: usize, size: usize, seq: usize) -> com
         s.subscribe(Bytes::new()).await.expect("subscribe");
         subs.push(s);
     }
+
     if transport != "inproc" {
         let refs: Vec<&Socket> = subs.iter().collect();
         common::wait_connected(&refs).await;
@@ -59,11 +65,15 @@ async fn run_cell(transport: &str, peers: usize, size: usize, seq: usize) -> com
         let refs: Vec<&Socket> = subs.iter().collect();
         common::wait_subscribed(&pub_, &refs).await;
     }
+    (pub_, subs)
+}
 
-    let payload = common::payload(size);
-    let stop = Arc::new(AtomicBool::new(false));
-    let recv_count = Arc::new(AtomicUsize::new(0));
-
+/// Drain every SUB in the background until `stop`, counting messages.
+fn spawn_counting_receivers(
+    subs: Vec<Socket>,
+    stop: &Arc<AtomicBool>,
+    recv_count: &Arc<AtomicUsize>,
+) -> Vec<tokio::task::JoinHandle<()>> {
     let mut recv_handles = Vec::with_capacity(subs.len());
     for s in subs {
         let stop = stop.clone();
@@ -80,6 +90,17 @@ async fn run_cell(transport: &str, peers: usize, size: usize, seq: usize) -> com
             drop(s);
         }));
     }
+    recv_handles
+}
+
+async fn run_cell(transport: &str, peers: usize, size: usize, seq: usize) -> common::Cell {
+    let ep = common::endpoint(transport, seq);
+    let (pub_, subs) = connect_pub_subs(transport, ep, peers, size).await;
+
+    let payload = common::payload(size);
+    let stop = Arc::new(AtomicBool::new(false));
+    let recv_count = Arc::new(AtomicUsize::new(0));
+    let recv_handles = spawn_counting_receivers(subs, &stop, &recv_count);
 
     // warmup
     let warmup_end = Instant::now() + common::WARMUP_DURATION;

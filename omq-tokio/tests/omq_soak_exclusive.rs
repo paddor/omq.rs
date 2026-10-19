@@ -268,6 +268,52 @@ fn drain_disconnect_events(monitor: &mut tokio::sync::broadcast::Receiver<Exclus
     }
 }
 
+/// Every exclusive pairing, each bound from both sides.
+const SPECS: [Scenario; 7] = [
+    Scenario {
+        name: "pair",
+        bind_kind: SocketType::Pair,
+        connect_kind: SocketType::Pair,
+        flow: Flow::Pair,
+    },
+    Scenario {
+        name: "dealer-router",
+        bind_kind: SocketType::Router,
+        connect_kind: SocketType::Dealer,
+        flow: Flow::DealerRouter,
+    },
+    Scenario {
+        name: "router-dealer",
+        bind_kind: SocketType::Dealer,
+        connect_kind: SocketType::Router,
+        flow: Flow::DealerRouter,
+    },
+    Scenario {
+        name: "req-rep",
+        bind_kind: SocketType::Rep,
+        connect_kind: SocketType::Req,
+        flow: Flow::ReqRep,
+    },
+    Scenario {
+        name: "rep-req",
+        bind_kind: SocketType::Req,
+        connect_kind: SocketType::Rep,
+        flow: Flow::ReqRep,
+    },
+    Scenario {
+        name: "client-server",
+        bind_kind: SocketType::Server,
+        connect_kind: SocketType::Client,
+        flow: Flow::ClientServer,
+    },
+    Scenario {
+        name: "server-client",
+        bind_kind: SocketType::Client,
+        connect_kind: SocketType::Server,
+        flow: Flow::ClientServer,
+    },
+];
+
 #[test]
 fn soak_exclusive_all_supported_types() {
     let duration = soak_common::soak_duration();
@@ -275,52 +321,8 @@ fn soak_exclusive_all_supported_types() {
 
     let ctx = soak_common::build_context();
     ctx.block_on(async move {
-        let specs = [
-            Scenario {
-                name: "pair",
-                bind_kind: SocketType::Pair,
-                connect_kind: SocketType::Pair,
-                flow: Flow::Pair,
-            },
-            Scenario {
-                name: "dealer-router",
-                bind_kind: SocketType::Router,
-                connect_kind: SocketType::Dealer,
-                flow: Flow::DealerRouter,
-            },
-            Scenario {
-                name: "router-dealer",
-                bind_kind: SocketType::Dealer,
-                connect_kind: SocketType::Router,
-                flow: Flow::DealerRouter,
-            },
-            Scenario {
-                name: "req-rep",
-                bind_kind: SocketType::Rep,
-                connect_kind: SocketType::Req,
-                flow: Flow::ReqRep,
-            },
-            Scenario {
-                name: "rep-req",
-                bind_kind: SocketType::Req,
-                connect_kind: SocketType::Rep,
-                flow: Flow::ReqRep,
-            },
-            Scenario {
-                name: "client-server",
-                bind_kind: SocketType::Server,
-                connect_kind: SocketType::Client,
-                flow: Flow::ClientServer,
-            },
-            Scenario {
-                name: "server-client",
-                bind_kind: SocketType::Client,
-                connect_kind: SocketType::Server,
-                flow: Flow::ClientServer,
-            },
-        ];
         let mut states = Vec::new();
-        for spec in specs {
+        for spec in SPECS {
             states.push(make_state(spec).await);
         }
 
@@ -343,6 +345,8 @@ fn soak_exclusive_all_supported_types() {
             }
         }
 
+        // Each cycle drops its peer once, so every cycle must have produced
+        // exactly one disconnect event.
         for state in &mut states {
             assert!(state.cycles > 0, "{} had no cycles", state.spec.name);
             assert_eq!(

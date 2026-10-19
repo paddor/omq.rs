@@ -164,88 +164,104 @@ async fn receive_receipts_isolate_paused_quic_sources() {
         (SocketType::Gather, SocketType::Scatter),
         (SocketType::Peer, SocketType::Peer),
     ] {
-        let tls = tls_for(&["127.0.0.1"]);
-        let options = server_options(&tls)
-            .identity(Bytes::from_static(b"receiver"))
-            .recv_hwm(4);
-        let receiver = Socket::new(receive_type, options);
-        let bound = receiver.bind(quic(0)).await.unwrap();
-        let paused = Socket::new(
-            send_type,
-            client_options(&tls).identity(Bytes::from_static(b"paused")),
-        );
-        let healthy = Socket::new(
-            send_type,
-            client_options(&tls).identity(Bytes::from_static(b"healthy")),
-        );
-        for sender in [&paused, &healthy] {
-            sender.connect(bound.clone()).await.unwrap();
-            sender
-                .wait_connected(1, Duration::from_secs(10))
-                .await
-                .unwrap();
-        }
-        receiver
-            .wait_connected(2, Duration::from_secs(10))
+        check_paused_quic_source(receive_type, send_type).await;
+    }
+}
+
+/// Binds a receiver ("receiver", HWM 4) and connects two senders, "paused"
+/// and "healthy", each on its own QUIC connection.
+async fn connect_paused_and_healthy(
+    receive_type: SocketType,
+    send_type: SocketType,
+) -> (Socket, Socket, Socket) {
+    let tls = tls_for(&["127.0.0.1"]);
+    let options = server_options(&tls)
+        .identity(Bytes::from_static(b"receiver"))
+        .recv_hwm(4);
+    let receiver = Socket::new(receive_type, options);
+    let bound = receiver.bind(quic(0)).await.unwrap();
+
+    let paused = Socket::new(
+        send_type,
+        client_options(&tls).identity(Bytes::from_static(b"paused")),
+    );
+    let healthy = Socket::new(
+        send_type,
+        client_options(&tls).identity(Bytes::from_static(b"healthy")),
+    );
+    for sender in [&paused, &healthy] {
+        sender.connect(bound.clone()).await.unwrap();
+        sender
+            .wait_connected(1, Duration::from_secs(10))
             .await
             .unwrap();
-        let send = async |sender: &Socket, message: Message| {
-            if send_type == SocketType::Peer {
-                sender.send_to(b"receiver", message).await
-            } else {
-                sender.send(message).await
-            }
-            .unwrap();
-        };
-        send(&paused, Message::single("held")).await;
-        let (held, message) =
-            tokio::time::timeout(Duration::from_secs(10), receiver.recv_with_receipt(None))
-                .await
-                .unwrap()
-                .unwrap();
-        let source = held.lane().unwrap().clone();
-        assert_eq!(message, Message::single("held"));
-        for i in 0..8 {
-            send(&paused, Message::single(format!("queued-{i}"))).await;
-        }
-        assert!(matches!(
-            receiver.try_recv_with_receipt(Some(&source)),
-            Err(omq_tokio::Error::WouldBlock)
-        ));
-        send(&healthy, Message::single("healthy")).await;
-        let (receipt, body) =
-            tokio::time::timeout(Duration::from_secs(10), receiver.recv_with_receipt(None))
-                .await
-                .unwrap()
-                .unwrap();
-        assert_ne!(receipt.lane().unwrap(), &source);
-        assert_eq!(body, Message::single("healthy"));
-        drop(receipt);
-        receiver.unshift(held, message).unwrap();
-        let (receipt, body) = tokio::time::timeout(
-            Duration::from_secs(10),
-            receiver.recv_with_receipt(Some(&source)),
-        )
+    }
+
+    receiver
+        .wait_connected(2, Duration::from_secs(10))
+        .await
+        .unwrap();
+    (receiver, paused, healthy)
+}
+
+/// Sends to the receiver. PEER senders must address it by identity.
+async fn send_to_receiver(sender: &Socket, send_type: SocketType, message: Message) {
+    if send_type == SocketType::Peer {
+        sender.send_to(b"receiver", message).await
+    } else {
+        sender.send(message).await
+    }
+    .unwrap();
+}
+
+async fn recv_receipt_within(
+    receiver: &Socket,
+    source: Option<&omq_tokio::ReceiveLane>,
+) -> (omq_tokio::ReceiveReceipt, Message) {
+    tokio::time::timeout(Duration::from_secs(10), receiver.recv_with_receipt(source))
         .await
         .unwrap()
-        .unwrap();
-        assert_eq!(body, Message::single("held"));
-        drop(receipt);
-        for i in 0..8 {
-            let (receipt, body) = tokio::time::timeout(
-                Duration::from_secs(10),
-                receiver.recv_with_receipt(Some(&source)),
-            )
-            .await
-            .unwrap()
-            .unwrap();
-            assert_eq!(body, Message::single(format!("queued-{i}")));
-            drop(receipt);
-        }
-        paused.close().await.unwrap();
-        healthy.close().await.unwrap();
-        receiver.close().await.unwrap();
+        .unwrap()
+}
+
+async fn check_paused_quic_source(receive_type: SocketType, send_type: SocketType) {
+    let (receiver, paused, healthy) = connect_paused_and_healthy(receive_type, send_type).await;
+
+    send_to_receiver(&paused, send_type, Message::single("held")).await;
+    let (held, message) = recv_receipt_within(&receiver, None).await;
+    let source = held.lane().unwrap().clone();
+    assert_eq!(message, Message::single("held"));
+
+    // While "held" is claimed, its source's later messages stay queued.
+    for i in 0..8 {
+        send_to_receiver(&paused, send_type, Message::single(format!("queued-{i}"))).await;
     }
+    assert!(matches!(
+        receiver.try_recv_with_receipt(Some(&source)),
+        Err(omq_tokio::Error::WouldBlock)
+    ));
+
+    // The other QUIC connection still delivers.
+    send_to_receiver(&healthy, send_type, Message::single("healthy")).await;
+    let (receipt, body) = recv_receipt_within(&receiver, None).await;
+    assert_ne!(receipt.lane().unwrap(), &source);
+    assert_eq!(body, Message::single("healthy"));
+    drop(receipt);
+
+    // Unshift puts "held" back ahead of the queued messages.
+    receiver.unshift(held, message).unwrap();
+    let (receipt, body) = recv_receipt_within(&receiver, Some(&source)).await;
+    assert_eq!(body, Message::single("held"));
+    drop(receipt);
+    for i in 0..8 {
+        let (receipt, body) = recv_receipt_within(&receiver, Some(&source)).await;
+        assert_eq!(body, Message::single(format!("queued-{i}")));
+        drop(receipt);
+    }
+
+    paused.close().await.unwrap();
+    healthy.close().await.unwrap();
+    receiver.close().await.unwrap();
 }
 
 #[tokio::test]

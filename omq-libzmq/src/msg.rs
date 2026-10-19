@@ -102,6 +102,57 @@ const LARGE_MSG_SHARED_THRESHOLD: usize = 64;
 
 type FreeFn = unsafe extern "C" fn(*mut libc::c_void, *mut libc::c_void);
 
+/// Every field `OmqMsgRepr::init_fields` writes. Optional owners default to null.
+#[derive(Clone, Copy)]
+struct MsgFields {
+    kind: u8,
+    more: u8,
+    size: usize,
+    ptr: *mut u8,
+    free_fn: Option<FreeFn>,
+    hint: *mut libc::c_void,
+    boxed: *mut libc::c_void,
+    reserved: [u8; RESERVED_LEN],
+}
+
+impl MsgFields {
+    #[inline]
+    fn new(kind: u8, more: u8, size: usize, ptr: *mut u8) -> Self {
+        Self {
+            kind,
+            more,
+            size,
+            ptr,
+            free_fn: None,
+            hint: std::ptr::null_mut(),
+            boxed: std::ptr::null_mut(),
+            reserved: [0; RESERVED_LEN],
+        }
+    }
+
+    /// Caller-supplied release callback for `KIND_EXTERNAL` payloads.
+    #[inline]
+    fn free_fn(mut self, free_fn: Option<FreeFn>, hint: *mut libc::c_void) -> Self {
+        self.free_fn = free_fn;
+        self.hint = hint;
+        self
+    }
+
+    /// Box that owns the payload behind `ptr` (`Bytes` or `ReceivedFrame`).
+    #[inline]
+    fn boxed(mut self, boxed: *mut libc::c_void) -> Self {
+        self.boxed = boxed;
+        self
+    }
+
+    /// Routing ID and group bytes carried alongside the payload.
+    #[inline]
+    fn reserved(mut self, reserved: [u8; RESERVED_LEN]) -> Self {
+        self.reserved = reserved;
+        self
+    }
+}
+
 impl OmqMsgRepr {
     #[inline]
     fn clear(&mut self) {
@@ -196,27 +247,16 @@ impl OmqMsgRepr {
     }
 
     #[inline]
-    #[allow(clippy::too_many_arguments)]
-    fn init_fields(
-        &mut self,
-        kind: u8,
-        more: u8,
-        size: usize,
-        ptr: *mut u8,
-        free_fn: Option<FreeFn>,
-        hint: *mut libc::c_void,
-        boxed: *mut libc::c_void,
-        reserved: [u8; RESERVED_LEN],
-    ) {
+    fn init_fields(&mut self, fields: MsgFields) {
         self.clear();
-        self.bytes_mut()[OFF_KIND] = kind;
-        self.bytes_mut()[OFF_MORE] = more;
-        self.write_u64(OFF_SIZE, size as u64);
-        self.write_usize(OFF_PTR, ptr as usize);
-        self.write_usize(OFF_FREE_FN, free_fn.map_or(0, |f| f as usize));
-        self.write_usize(OFF_HINT, hint as usize);
-        self.write_usize(OFF_BOXED, boxed as usize);
-        self.reserved_mut().copy_from_slice(&reserved);
+        self.bytes_mut()[OFF_KIND] = fields.kind;
+        self.bytes_mut()[OFF_MORE] = fields.more;
+        self.write_u64(OFF_SIZE, fields.size as u64);
+        self.write_usize(OFF_PTR, fields.ptr as usize);
+        self.write_usize(OFF_FREE_FN, fields.free_fn.map_or(0, |f| f as usize));
+        self.write_usize(OFF_HINT, fields.hint as usize);
+        self.write_usize(OFF_BOXED, fields.boxed as usize);
+        self.reserved_mut().copy_from_slice(&fields.reserved);
     }
 
     #[inline]
@@ -283,23 +323,16 @@ pub extern "C" fn zmq_msg_init_size(msg: *mut OmqMsgRepr, size: usize) -> c_int 
     if msg.is_null() {
         return crate::error::fail(libc::EFAULT);
     }
+
     // SAFETY: libc::malloc is always safe to call; returns null on failure.
     let ptr = unsafe { libc::malloc(size).cast::<u8>() };
     if ptr.is_null() && size > 0 {
         return crate::error::fail(libc::ENOMEM);
     }
+
     // SAFETY: msg is non-null (checked above).
     let r = unsafe { repr(msg) };
-    r.init_fields(
-        KIND_HEAP,
-        0,
-        size,
-        ptr,
-        None,
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        [0; RESERVED_LEN],
-    );
+    r.init_fields(MsgFields::new(KIND_HEAP, 0, size, ptr));
     0
 }
 
@@ -319,18 +352,10 @@ pub extern "C" fn zmq_msg_init_data(
     if data.is_null() && size > 0 {
         return crate::error::fail(libc::EFAULT);
     }
+
     // SAFETY: msg is non-null (checked above).
     let r = unsafe { repr(msg) };
-    r.init_fields(
-        KIND_EXTERNAL,
-        0,
-        size,
-        data.cast(),
-        ffn,
-        hint,
-        std::ptr::null_mut(),
-        [0; RESERVED_LEN],
-    );
+    r.init_fields(MsgFields::new(KIND_EXTERNAL, 0, size, data.cast()).free_fn(ffn, hint));
     0
 }
 
@@ -483,96 +508,97 @@ pub extern "C" fn zmq_msg_copy(dst: *mut OmqMsgRepr, src: *const OmqMsgRepr) -> 
     if std::ptr::addr_eq(dst.cast_const(), src) {
         return 0;
     }
+
     zmq_msg_close(dst);
     // SAFETY: src is non-null (checked above).
     let s = unsafe { repr_ref(src) };
-    match s.kind() {
-        KIND_BYTES => {
-            // Clone the Bytes (increments the Arc refcount).
-            // SAFETY: boxed was created by Box::into_raw in zmq_msg_recv.
-            let boxed = s.boxed();
-            if boxed.is_null() {
-                return crate::error::fail(libc::EFAULT);
-            }
-            let original = unsafe { &*(boxed.cast::<Bytes>()) };
-            let cloned = Box::new(original.clone());
-            // SAFETY: dst was closed above and is ready for reinitialization.
-            let d = unsafe { repr(dst) };
-            d.init_fields(
-                KIND_BYTES,
-                s.more(),
-                s.size(),
-                cloned.as_ptr().cast_mut(),
-                None,
-                std::ptr::null_mut(),
-                Box::into_raw(cloned).cast::<libc::c_void>(),
-                s.reserved_array(),
-            );
-        }
-        KIND_BYTES_METADATA => {
-            let boxed = s.boxed();
-            if boxed.is_null() {
-                return crate::error::fail(libc::EFAULT);
-            }
-            // SAFETY: boxed was created by Box::into_raw in zmq_msg_recv.
-            let cloned = Box::new(unsafe { &*(boxed.cast::<ReceivedFrame>()) }.clone());
-            let data_ptr = cloned.bytes.as_ptr().cast_mut();
-            // SAFETY: dst was closed above and is ready for reinitialization.
-            unsafe { repr(dst) }.init_fields(
-                KIND_BYTES_METADATA,
-                s.more(),
-                s.size(),
-                data_ptr,
-                None,
-                std::ptr::null_mut(),
-                Box::into_raw(cloned).cast::<libc::c_void>(),
-                s.reserved_array(),
-            );
-        }
-        KIND_HEAP | KIND_EXTERNAL | KIND_HEAP_SHARED => {
-            // Deep copy into a new heap allocation.
-            let size = s.size();
-            let src_ptr = s.ptr();
-            if size > 0 && src_ptr.is_null() {
-                return crate::error::fail(libc::EFAULT);
-            }
-            let new_ptr = if size > 0 {
-                // SAFETY: libc::malloc is always safe to call.
-                let p = unsafe { libc::malloc(size).cast::<u8>() };
-                if p.is_null() {
-                    return crate::error::fail(libc::ENOMEM);
-                }
-                // SAFETY: s.ptr is valid for size bytes; p was just allocated.
-                unsafe { std::ptr::copy_nonoverlapping(src_ptr, p, size) };
-                p
-            } else {
-                std::ptr::null_mut()
-            };
-            // SAFETY: dst was closed above and is ready for reinitialization.
-            let d = unsafe { repr(dst) };
-            let kind = if s.kind() == KIND_EXTERNAL || size >= LARGE_MSG_SHARED_THRESHOLD {
-                KIND_HEAP_SHARED
-            } else {
-                KIND_HEAP
-            };
-            d.init_fields(
-                kind,
-                s.more(),
-                size,
-                new_ptr,
-                None,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                s.reserved_array(),
-            );
-        }
+    // SAFETY: dst is non-null (checked above), closed, and ready for reinitialization.
+    let d = unsafe { repr(dst) };
+
+    let copied = match s.kind() {
+        KIND_BYTES => copy_boxed_bytes(s, d),
+        KIND_BYTES_METADATA => copy_boxed_frame(s, d),
+        KIND_HEAP | KIND_EXTERNAL | KIND_HEAP_SHARED => copy_heap_payload(s, d),
         _ => {
             // Empty: just zero dst.
-            // SAFETY: dst is non-null (checked above).
-            unsafe { repr(dst).clear() };
+            d.clear();
+            Ok(())
         }
+    };
+
+    match copied {
+        Ok(()) => 0,
+        Err(errno) => crate::error::fail(errno),
     }
-    0
+}
+
+/// Share a `KIND_BYTES` payload by cloning its `Bytes` (refcount bump, no copy).
+fn copy_boxed_bytes(s: &OmqMsgRepr, d: &mut OmqMsgRepr) -> Result<(), c_int> {
+    let boxed = s.boxed();
+    if boxed.is_null() {
+        return Err(libc::EFAULT);
+    }
+
+    // SAFETY: boxed was created by Box::into_raw in zmq_msg_recv.
+    let original = unsafe { &*(boxed.cast::<Bytes>()) };
+    let cloned = Box::new(original.clone());
+
+    let fields = MsgFields::new(KIND_BYTES, s.more(), s.size(), cloned.as_ptr().cast_mut())
+        .boxed(Box::into_raw(cloned).cast::<libc::c_void>())
+        .reserved(s.reserved_array());
+    d.init_fields(fields);
+    Ok(())
+}
+
+/// Share a `KIND_BYTES_METADATA` payload; the clone also shares peer properties.
+fn copy_boxed_frame(s: &OmqMsgRepr, d: &mut OmqMsgRepr) -> Result<(), c_int> {
+    let boxed = s.boxed();
+    if boxed.is_null() {
+        return Err(libc::EFAULT);
+    }
+
+    // SAFETY: boxed was created by Box::into_raw in zmq_msg_recv.
+    let cloned = Box::new(unsafe { &*(boxed.cast::<ReceivedFrame>()) }.clone());
+    let data_ptr = cloned.bytes.as_ptr().cast_mut();
+
+    let fields = MsgFields::new(KIND_BYTES_METADATA, s.more(), s.size(), data_ptr)
+        .boxed(Box::into_raw(cloned).cast::<libc::c_void>())
+        .reserved(s.reserved_array());
+    d.init_fields(fields);
+    Ok(())
+}
+
+/// Deep copy a malloc'd or external payload into a new heap allocation.
+fn copy_heap_payload(s: &OmqMsgRepr, d: &mut OmqMsgRepr) -> Result<(), c_int> {
+    let size = s.size();
+    let src_ptr = s.ptr();
+    if size > 0 && src_ptr.is_null() {
+        return Err(libc::EFAULT);
+    }
+
+    let new_ptr = if size > 0 {
+        // SAFETY: libc::malloc is always safe to call.
+        let p = unsafe { libc::malloc(size).cast::<u8>() };
+        if p.is_null() {
+            return Err(libc::ENOMEM);
+        }
+        // SAFETY: s.ptr is valid for size bytes; p was just allocated.
+        unsafe { std::ptr::copy_nonoverlapping(src_ptr, p, size) };
+        p
+    } else {
+        std::ptr::null_mut()
+    };
+
+    // Copies of external or large payloads report ZMQ_SHARED like libzmq,
+    // which shares those payloads instead of copying them.
+    let kind = if s.kind() == KIND_EXTERNAL || size >= LARGE_MSG_SHARED_THRESHOLD {
+        KIND_HEAP_SHARED
+    } else {
+        KIND_HEAP
+    };
+
+    d.init_fields(MsgFields::new(kind, s.more(), size, new_ptr).reserved(s.reserved_array()));
+    Ok(())
 }
 
 /// Read a supported integer message property; return -1 with errno for an invalid property.
@@ -823,11 +849,13 @@ pub extern "C" fn zmq_msg_recv(
     if msg.is_null() || sock_ptr.is_null() {
         return crate::error::fail(libc::EFAULT);
     }
+
     // SAFETY: C callers pass null or a pointer from this API.
     let sock = match unsafe { crate::handle::socket(sock_ptr) } {
         Ok(socket) => socket,
         Err(errno) => return crate::error::fail(errno),
     };
+
     if sock
         .ctx
         .terminated
@@ -853,66 +881,17 @@ pub extern "C" fn zmq_msg_recv(
         Ok((frame, more, routing_id, properties)) => {
             zmq_msg_close(msg);
             let sz = frame.len();
+            // The routing ID rides in reserved bytes 0..4, read by zmq_msg_routing_id.
             let mut reserved = [0; RESERVED_LEN];
             reserved[..4].copy_from_slice(&routing_id.to_le_bytes());
+
             // SAFETY: msg was just closed above and is ready for reinitialization.
-            if let Some(properties) = properties {
-                let boxed = Box::new(ReceivedFrame::new(frame, &properties));
-                let data_ptr = boxed.bytes.as_ptr().cast_mut();
-                // SAFETY: msg was just closed above and is ready for reinitialization.
-                unsafe { repr(msg) }.init_fields(
-                    KIND_BYTES_METADATA,
-                    u8::from(more),
-                    sz,
-                    data_ptr,
-                    None,
-                    std::ptr::null_mut(),
-                    Box::into_raw(boxed).cast::<libc::c_void>(),
-                    reserved,
-                );
-            } else if sz <= 128 {
-                // Small frame: malloc + memcpy (1 alloc) instead of
-                // Box<Bytes> (2 allocs: Bytes::copy_from_slice + Box::new).
-                let ptr = if sz > 0 {
-                    // SAFETY: libc::malloc is always safe to call.
-                    let p = unsafe { libc::malloc(sz).cast::<u8>() };
-                    if p.is_null() {
-                        return crate::error::fail(libc::ENOMEM);
-                    }
-                    // SAFETY: frame is valid for sz bytes; p was just allocated.
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(frame.as_ptr(), p, sz);
-                    }
-                    p
-                } else {
-                    std::ptr::null_mut()
-                };
-                let r = unsafe { repr(msg) };
-                r.init_fields(
-                    KIND_HEAP,
-                    u8::from(more),
-                    sz,
-                    ptr,
-                    None,
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    reserved,
-                );
-            } else {
-                let boxed = Box::new(frame);
-                let data_ptr = boxed.as_ptr().cast_mut();
-                let r = unsafe { repr(msg) };
-                r.init_fields(
-                    KIND_BYTES,
-                    u8::from(more),
-                    sz,
-                    data_ptr,
-                    None,
-                    std::ptr::null_mut(),
-                    Box::into_raw(boxed).cast::<libc::c_void>(),
-                    reserved,
-                );
+            let r = unsafe { repr(msg) };
+            if let Err(errno) = store_received_frame(r, frame, u8::from(more), reserved, properties)
+            {
+                return crate::error::fail(errno);
             }
+
             match c_int::try_from(sz) {
                 Ok(n) => n,
                 Err(_) => crate::error::fail(libc::EMSGSIZE),
@@ -920,6 +899,52 @@ pub extern "C" fn zmq_msg_recv(
         }
         Err(e) => crate::error::fail(e),
     }
+}
+
+/// Store a received frame in a closed message, picking the cheapest representation.
+#[inline]
+fn store_received_frame(
+    r: &mut OmqMsgRepr,
+    frame: Bytes,
+    more: u8,
+    reserved: [u8; RESERVED_LEN],
+    properties: Option<Arc<omq_tokio::proto::PeerProperties>>,
+) -> Result<(), c_int> {
+    let sz = frame.len();
+
+    let fields = if let Some(properties) = properties {
+        // Authenticated peers: keep the properties for zmq_msg_gets.
+        let boxed = Box::new(ReceivedFrame::new(frame, &properties));
+        let data_ptr = boxed.bytes.as_ptr().cast_mut();
+        MsgFields::new(KIND_BYTES_METADATA, more, sz, data_ptr)
+            .boxed(Box::into_raw(boxed).cast::<libc::c_void>())
+    } else if sz <= 128 {
+        // Small frame: malloc + memcpy (1 alloc) instead of
+        // Box<Bytes> (2 allocs: Bytes::copy_from_slice + Box::new).
+        let ptr = if sz > 0 {
+            // SAFETY: libc::malloc is always safe to call.
+            let p = unsafe { libc::malloc(sz).cast::<u8>() };
+            if p.is_null() {
+                return Err(libc::ENOMEM);
+            }
+            // SAFETY: frame is valid for sz bytes; p was just allocated.
+            unsafe {
+                std::ptr::copy_nonoverlapping(frame.as_ptr(), p, sz);
+            }
+            p
+        } else {
+            std::ptr::null_mut()
+        };
+        MsgFields::new(KIND_HEAP, more, sz, ptr)
+    } else {
+        let boxed = Box::new(frame);
+        let data_ptr = boxed.as_ptr().cast_mut();
+        MsgFields::new(KIND_BYTES, more, sz, data_ptr)
+            .boxed(Box::into_raw(boxed).cast::<libc::c_void>())
+    };
+
+    r.init_fields(fields.reserved(reserved));
+    Ok(())
 }
 
 /// Extract a Bytes copy out of a msg without consuming ownership.
@@ -958,14 +983,7 @@ mod tests {
                 (KIND_BYTES, Box::into_raw(Box::new(original.clone())).cast())
             };
             message.init_fields(
-                kind,
-                1,
-                original.len(),
-                original.as_ptr().cast_mut(),
-                None,
-                std::ptr::null_mut(),
-                boxed,
-                [0; RESERVED_LEN],
+                MsgFields::new(kind, 1, original.len(), original.as_ptr().cast_mut()).boxed(boxed),
             );
             let pointer = zmq_msg_data(&raw mut message).cast::<u8>();
             assert_ne!(pointer.cast_const(), original.as_ptr());
@@ -992,14 +1010,8 @@ mod tests {
             storage: [0; MSG_WORDS],
         };
         message.init_fields(
-            KIND_BYTES,
-            0,
-            original.len(),
-            pointer,
-            None,
-            std::ptr::null_mut(),
-            Box::into_raw(Box::new(original)).cast(),
-            [0; RESERVED_LEN],
+            MsgFields::new(KIND_BYTES, 0, original.len(), pointer)
+                .boxed(Box::into_raw(Box::new(original)).cast()),
         );
         assert_eq!(zmq_msg_data(&raw mut message).cast::<u8>(), pointer);
         assert_eq!(zmq_msg_close(&raw mut message), 0);

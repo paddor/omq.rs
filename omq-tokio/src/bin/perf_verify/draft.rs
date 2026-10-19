@@ -76,69 +76,88 @@ pub(super) fn cases(cases: &mut Vec<Case>) {
         #[cfg(feature = "dart")]
         Transport::Dart,
     ] {
-        for pattern in [Pattern::ScatterGather, Pattern::RadioDish] {
-            for (size, suffix) in [(16, "16b"), (64, "64b"), (256, "256b")] {
-                #[cfg(feature = "dart")]
-                if matches!(transport, Transport::Dart)
-                    && matches!(pattern, Pattern::ScatterGather)
-                    && size != 64
-                {
-                    continue;
-                }
-                add(cases, suffix, Workload::new(transport, pattern, size));
-            }
-        }
-        let scatter = Workload::new(transport, Pattern::ScatterGather, 64);
-        add(
-            cases,
-            "64b_4p_bulk",
-            Workload {
-                destinations: 4,
-                bulk: true,
-                ..scatter
-            },
-        );
-        add(
-            cases,
-            "64b_8src",
-            Workload {
-                sources: 8,
-                ..scatter
-            },
-        );
-        add(
-            cases,
-            "64b_4p",
-            Workload {
-                destinations: 4,
-                ..Workload::new(transport, Pattern::RadioDish, 64)
-            },
-        );
+        add_size_cases(cases, transport);
+        add_fan_cases(cases, transport);
         #[cfg(target_os = "linux")]
         if matches!(transport, Transport::Shm) {
+            add_shm_cases(cases, transport);
+        }
+    }
+}
+
+/// One source and one destination at small sizes.
+fn add_size_cases(cases: &mut Vec<Case>, transport: Transport) {
+    for pattern in [Pattern::ScatterGather, Pattern::RadioDish] {
+        for (size, suffix) in [(16, "16b"), (64, "64b"), (256, "256b")] {
+            // DART SCATTER/GATHER is gated at 64 B only.
+            #[cfg(feature = "dart")]
+            if matches!(transport, Transport::Dart)
+                && matches!(pattern, Pattern::ScatterGather)
+                && size != 64
+            {
+                continue;
+            }
+            add(cases, suffix, Workload::new(transport, pattern, size));
+        }
+    }
+}
+
+/// 64 B fan-out (bulk SCATTER, RADIO) and fan-in (eight SCATTER sources).
+fn add_fan_cases(cases: &mut Vec<Case>, transport: Transport) {
+    let scatter = Workload::new(transport, Pattern::ScatterGather, 64);
+    add(
+        cases,
+        "64b_4p_bulk",
+        Workload {
+            destinations: 4,
+            bulk: true,
+            ..scatter
+        },
+    );
+    add(
+        cases,
+        "64b_8src",
+        Workload {
+            sources: 8,
+            ..scatter
+        },
+    );
+    add(
+        cases,
+        "64b_4p",
+        Workload {
+            destinations: 4,
+            ..Workload::new(transport, Pattern::RadioDish, 64)
+        },
+    );
+}
+
+/// SHM only: mixed SHM/TCP sources, and large bodies with and without a
+/// shared payload pool.
+#[cfg(target_os = "linux")]
+fn add_shm_cases(cases: &mut Vec<Case>, transport: Transport) {
+    let scatter = Workload::new(transport, Pattern::ScatterGather, 64);
+    add(
+        cases,
+        "64b_8src",
+        Workload {
+            sources: 8,
+            mixed: true,
+            ..scatter
+        },
+    );
+    for pattern in [Pattern::ScatterGather, Pattern::RadioDish] {
+        for (size, suffix) in [(4096, "4k"), (16 * 1024, "16k"), (1024 * 1024, "1m")] {
+            let workload = Workload::new(transport, pattern, size);
+            add(cases, suffix, workload);
             add(
                 cases,
-                "64b_8src",
+                suffix,
                 Workload {
-                    sources: 8,
-                    mixed: true,
-                    ..scatter
+                    pooled: true,
+                    ..workload
                 },
             );
-            for pattern in [Pattern::ScatterGather, Pattern::RadioDish] {
-                for (size, suffix) in [(4096, "4k"), (16 * 1024, "16k"), (1024 * 1024, "1m")] {
-                    let workload = Workload::new(transport, pattern, size);
-                    add(cases, suffix, workload);
-                    add(
-                        cases,
-                        suffix,
-                        Workload {
-                            pooled: true,
-                            ..workload
-                        },
-                    );
-                }
-            }
         }
     }
 }

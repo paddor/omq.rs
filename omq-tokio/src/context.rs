@@ -107,49 +107,17 @@ impl IoThreadPool {
 
         for i in 0..runtime_count {
             let (handle_tx, handle_rx) = mpsc::channel::<Handle>();
-            let cancel_i = cancel.clone();
             let thread_name = background_thread_name(context_name, runtime_count, i);
 
             let join = if i == 0 {
-                let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<BoxFuture>();
+                let (join, job_tx) = spawn_primary_thread(thread_name, cancel.clone(), handle_tx);
                 primary_job_tx = Some(job_tx);
-                thread::Builder::new()
-                    .name(thread_name)
-                    .spawn(move || {
-                        OWNED_IO_THREAD.set(true);
-                        let rt = build_current_thread_runtime();
-                        let _ = handle_tx.send(rt.handle().clone());
-                        rt.block_on(async move {
-                            // Jobs from different callers run concurrently, so
-                            // one long wait cannot delay another caller's bind.
-                            // Cancellation drops every unfinished job.
-                            let mut jobs = FuturesUnordered::new();
-                            loop {
-                                tokio::select! {
-                                    biased;
-                                    () = cancel_i.cancelled() => break,
-                                    job = job_rx.recv() => match job {
-                                        Some(fut) => jobs.push(fut),
-                                        None => break,
-                                    },
-                                    Some(()) = jobs.next(), if !jobs.is_empty() => {}
-                                }
-                            }
-                        });
-                    })
-                    .expect("omq: failed to spawn primary IO thread")
+                join
             } else {
-                thread::Builder::new()
-                    .name(thread_name)
-                    .spawn(move || {
-                        OWNED_IO_THREAD.set(true);
-                        let rt = build_current_thread_runtime();
-                        let _ = handle_tx.send(rt.handle().clone());
-                        rt.block_on(cancel_i.cancelled());
-                    })
-                    .expect("omq: failed to spawn IO thread")
+                spawn_data_thread(thread_name, cancel.clone(), handle_tx)
             };
 
+            // Each thread reports its runtime handle once the runtime is up.
             let handle = handle_rx.recv().expect("omq: runtime handle");
             threads.push(IoThread {
                 handle,
@@ -216,6 +184,63 @@ impl IoThreadPool {
             }
         }
     }
+}
+
+/// Runtime 0 also runs jobs submitted through the returned sender.
+fn spawn_primary_thread(
+    name: String,
+    cancel: CancellationToken,
+    handle_tx: mpsc::Sender<Handle>,
+) -> (
+    thread::JoinHandle<()>,
+    tokio::sync::mpsc::UnboundedSender<BoxFuture>,
+) {
+    let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<BoxFuture>();
+
+    let join = thread::Builder::new()
+        .name(name)
+        .spawn(move || {
+            OWNED_IO_THREAD.set(true);
+            let rt = build_current_thread_runtime();
+            let _ = handle_tx.send(rt.handle().clone());
+            rt.block_on(async move {
+                // Jobs from different callers run concurrently, so
+                // one long wait cannot delay another caller's bind.
+                // Cancellation drops every unfinished job.
+                let mut jobs = FuturesUnordered::new();
+                loop {
+                    tokio::select! {
+                        biased;
+                        () = cancel.cancelled() => break,
+                        job = job_rx.recv() => match job {
+                            Some(fut) => jobs.push(fut),
+                            None => break,
+                        },
+                        Some(()) = jobs.next(), if !jobs.is_empty() => {}
+                    }
+                }
+            });
+        })
+        .expect("omq: failed to spawn primary IO thread");
+
+    (join, job_tx)
+}
+
+/// Data runtimes only drive spawned tasks until the context is canceled.
+fn spawn_data_thread(
+    name: String,
+    cancel: CancellationToken,
+    handle_tx: mpsc::Sender<Handle>,
+) -> thread::JoinHandle<()> {
+    thread::Builder::new()
+        .name(name)
+        .spawn(move || {
+            OWNED_IO_THREAD.set(true);
+            let rt = build_current_thread_runtime();
+            let _ = handle_tx.send(rt.handle().clone());
+            rt.block_on(cancel.cancelled());
+        })
+        .expect("omq: failed to spawn IO thread")
 }
 
 fn background_thread_name(prefix: &str, runtime_count: usize, index: usize) -> String {

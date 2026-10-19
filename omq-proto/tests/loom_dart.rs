@@ -9,7 +9,8 @@ use std::time::Duration;
 use loom::sync::{Arc, Mutex};
 use loom::thread;
 use omq_proto::dart::{
-    Admission, AdmissionCounter, CreditCounter, Ecn, Packet, Session, SessionConfig, Status,
+    Admission, AdmissionCounter, CreditCounter, DataBatch, Ecn, Packet, Receipt, Session,
+    SessionConfig, Status,
 };
 use omq_proto::{DartCongestion, Message};
 
@@ -39,10 +40,8 @@ fn status(serial: u64, ack: u64, credit: u64) -> Packet<'static> {
 fn receive(core: &mut Session, sequence: u64) {
     if core.classify(2, sequence) == Admission::Accept {
         core.commit_receive(
-            sequence,
+            Receipt::new(sequence, Ecn::NotEct, Duration::ZERO),
             Message::from_slice(&sequence.to_le_bytes()),
-            Ecn::NotEct,
-            Duration::ZERO,
         );
     }
 }
@@ -87,11 +86,9 @@ fn reordered_arrivals_deliver_in_order() {
 fn receive_fragment(core: &mut Session, sequence: u64) {
     if core.classify(2, sequence) == Admission::Accept {
         assert!(core.commit_fragment(
-            sequence,
+            Receipt::new(sequence, Ecn::NotEct, Duration::ZERO),
             (sequence == 0).then_some(2048),
-            Message::single(vec![sequence as u8; 1024]),
-            Ecn::NotEct,
-            Duration::ZERO
+            Message::single(vec![sequence as u8; 1024])
         ));
     }
 }
@@ -166,10 +163,8 @@ fn concurrent_duplicate_arrivals_ack_once() {
 fn receive_direct(core: &mut Session, sequence: u64) {
     if core.classify(2, sequence) == Admission::Accept {
         core.commit_receive_with_delivery(
-            sequence,
+            Receipt::new(sequence, Ecn::NotEct, Duration::ZERO),
             Message::from_slice(&sequence.to_le_bytes()),
-            Ecn::NotEct,
-            Duration::ZERO,
             |message| {
                 assert_eq!(message.part_slice(0).unwrap(), sequence.to_le_bytes());
                 Ok(())
@@ -217,20 +212,16 @@ fn rejected_direct_delivery_prevents_successor_bypass() {
         session(2, 1),
         |s| {
             assert!(!s.commit_receive_with_delivery(
-                0,
+                Receipt::new(0, Ecn::NotEct, Duration::ZERO),
                 Message::from_slice(&0u64.to_le_bytes()),
-                Ecn::NotEct,
-                Duration::ZERO,
-                Err,
+                Err
             ));
         },
         |s| {
             assert!(!s.commit_receive_with_delivery(
-                1,
+                Receipt::new(1, Ecn::NotEct, Duration::ZERO),
                 Message::from_slice(&1u64.to_le_bytes()),
-                Ecn::NotEct,
-                Duration::ZERO,
-                |_| panic!("predecessor is not delivered"),
+                |_| panic!("predecessor is not delivered")
             ));
         },
         |s| {
@@ -254,9 +245,7 @@ fn receive_packed(core: &mut Session) {
     let length = sender
         .prepare_packed_data(
             0,
-            Duration::ZERO,
-            false,
-            &mut 0,
+            &mut DataBatch::new(Duration::ZERO, false),
             &mut bytes,
             &mut Vec::with_capacity(2),
         )
@@ -273,10 +262,8 @@ fn receive_packed(core: &mut Session) {
         let sequence = first + offset as u64;
         if core.classify(session, sequence) == Admission::Accept {
             core.commit_receive(
-                sequence,
+                Receipt::new(sequence, Ecn::NotEct, Duration::ZERO),
                 Message::from_slice(payload),
-                Ecn::NotEct,
-                Duration::ZERO,
             );
         }
     }

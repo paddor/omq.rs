@@ -52,28 +52,54 @@ fn recv_frame(sock: *mut c_void, buf: &mut [u8]) -> &[u8] {
     &buf[..rc as usize]
 }
 
+/// ROUTER with HWM 1 toward a DEALER "slow" that has announced itself, so the
+/// ROUTER knows its route. Returns `(router, dealer)`.
+fn connect_slow_dealer(ctx: *mut c_void, mandatory: i32) -> (*mut c_void, *mut c_void) {
+    let router = zmq_socket(ctx, ZMQ_ROUTER);
+    let dealer = zmq_socket(ctx, ZMQ_DEALER);
+    let addr = CString::new(format!("inproc://router-full-{mandatory}")).unwrap();
+    set_timeo(router, ZMQ_LINGER, 0);
+    set_timeo(dealer, ZMQ_LINGER, 0);
+    set_timeo(router, ZMQ_SNDHWM, 1);
+    set_timeo(dealer, ZMQ_RCVHWM, 1);
+    set_timeo(router, ZMQ_ROUTER_MANDATORY, mandatory);
+    set_timeo(router, ZMQ_RCVTIMEO, TIMEOUT_MS);
+    set_timeo(router, ZMQ_SNDTIMEO, 50);
+    set_timeo(dealer, ZMQ_RCVTIMEO, TIMEOUT_MS);
+    set_identity(dealer, b"slow");
+    assert_eq!(zmq_bind(router, addr.as_ptr()), 0);
+    assert_eq!(zmq_connect(dealer, addr.as_ptr()), 0);
+
+    assert_eq!(zmq_send(dealer, b"ready".as_ptr().cast(), 5, 0), 5);
+    let mut buf = [0u8; 64];
+    assert_eq!(recv_frame(router, &mut buf), b"slow");
+    assert_eq!(recv_frame(router, &mut buf), b"ready");
+    (router, dealer)
+}
+
+/// Drain queued [header, body] messages without blocking; return the count.
+fn drain_header_body(dealer: *mut c_void, buf: &mut [u8]) -> usize {
+    let mut received = 0;
+    loop {
+        let rc = zmq_recv(dealer, buf.as_mut_ptr().cast(), buf.len(), ZMQ_DONTWAIT);
+        if rc < 0 {
+            return received;
+        }
+        assert_eq!(rc, 6);
+        assert_eq!(&buf[..6], b"header");
+        assert!(rcvmore(dealer));
+        assert_eq!(recv_frame(dealer, buf), b"body");
+        assert!(!rcvmore(dealer));
+        received += 1;
+    }
+}
+
 #[test]
 fn router_full_destination_drop_and_mandatory_backpressure() {
     for mandatory in [0, 1] {
         let ctx = zmq_ctx_new();
-        let router = zmq_socket(ctx, ZMQ_ROUTER);
-        let dealer = zmq_socket(ctx, ZMQ_DEALER);
-        let addr = CString::new(format!("inproc://router-full-{mandatory}")).unwrap();
-        set_timeo(router, ZMQ_LINGER, 0);
-        set_timeo(dealer, ZMQ_LINGER, 0);
-        set_timeo(router, ZMQ_SNDHWM, 1);
-        set_timeo(dealer, ZMQ_RCVHWM, 1);
-        set_timeo(router, ZMQ_ROUTER_MANDATORY, mandatory);
-        set_timeo(router, ZMQ_RCVTIMEO, TIMEOUT_MS);
-        set_timeo(router, ZMQ_SNDTIMEO, 50);
-        set_timeo(dealer, ZMQ_RCVTIMEO, TIMEOUT_MS);
-        set_identity(dealer, b"slow");
-        assert_eq!(zmq_bind(router, addr.as_ptr()), 0);
-        assert_eq!(zmq_connect(dealer, addr.as_ptr()), 0);
-        assert_eq!(zmq_send(dealer, b"ready".as_ptr().cast(), 5, 0), 5);
+        let (router, dealer) = connect_slow_dealer(ctx, mandatory);
         let mut buf = [0u8; 64];
-        assert_eq!(recv_frame(router, &mut buf), b"slow");
-        assert_eq!(recv_frame(router, &mut buf), b"ready");
 
         let send = |flags| {
             assert_eq!(
@@ -86,6 +112,8 @@ fn router_full_destination_drop_and_mandatory_backpressure() {
             );
             zmq_send(router, b"body".as_ptr().cast(), 4, flags)
         };
+
+        // Fill the route: mandatory sends hit EAGAIN, default sends drop silently.
         let mut accepted = 0;
         for _ in 0..64 {
             if send(ZMQ_DONTWAIT) == -1 {
@@ -103,23 +131,13 @@ fn router_full_destination_drop_and_mandatory_backpressure() {
             assert_eq!(accepted, 64);
             assert_eq!(send(0), 4, "blocking default ROUTER must also drop on full");
         }
-        let mut received = 0;
-        loop {
-            let rc = zmq_recv(dealer, buf.as_mut_ptr().cast(), buf.len(), ZMQ_DONTWAIT);
-            if rc < 0 {
-                break;
-            }
-            assert_eq!(rc, 6);
-            assert_eq!(&buf[..6], b"header");
-            assert!(rcvmore(dealer));
-            assert_eq!(recv_frame(dealer, &mut buf), b"body");
-            assert!(!rcvmore(dealer));
-            received += 1;
-        }
+
+        let received = drain_header_body(dealer, &mut buf);
         assert!(received > 0 && received < 64);
         if mandatory == 1 {
             assert_eq!(received, accepted);
         }
+
         assert_eq!(send(0), 4, "send must work again after drainage");
         assert_eq!(recv_frame(dealer, &mut buf), b"header");
         assert_eq!(recv_frame(dealer, &mut buf), b"body");
@@ -275,6 +293,29 @@ fn dealer_router_tcp() {
     zmq_ctx_term(ctx);
 }
 
+/// After the identity frame, skip any delimiter frames and receive the
+/// payload into `payload`; return its length.
+fn recv_payload_after_identity(router: *mut c_void, payload: &mut [u8]) -> usize {
+    let mut plen = 0;
+    loop {
+        let more = rcvmore(router);
+        if !more {
+            break;
+        }
+        let rc = zmq_recv(router, payload.as_mut_ptr().cast(), payload.len(), 0);
+        assert!(rc >= 0);
+        plen = rc as usize;
+        if !rcvmore(router) {
+            break;
+        }
+    }
+
+    if plen == 0 {
+        plen = zmq_recv(router, payload.as_mut_ptr().cast(), payload.len(), 0) as usize;
+    }
+    plen
+}
+
 /// Multiple DEALERs -> one ROUTER
 #[test]
 fn multiple_dealers_one_router() {
@@ -312,24 +353,8 @@ fn multiple_dealers_one_router() {
             id.len()
         };
 
-        // Drain to payload.
         let mut payload = [0u8; 64];
-        let mut plen = 0;
-        loop {
-            let more = rcvmore(router);
-            if !more {
-                break;
-            }
-            let rc = zmq_recv(router, payload.as_mut_ptr().cast(), payload.len(), 0);
-            assert!(rc >= 0);
-            plen = rc as usize;
-            if !rcvmore(router) {
-                break;
-            }
-        }
-        if plen == 0 {
-            plen = zmq_recv(router, payload.as_mut_ptr().cast(), payload.len(), 0) as usize;
-        }
+        let plen = recv_payload_after_identity(router, &mut payload);
         assert!(plen > 0);
 
         // Echo.
@@ -353,6 +378,25 @@ fn multiple_dealers_one_router() {
     }
     zmq_close(router);
     zmq_ctx_term(ctx);
+}
+
+/// Relay every frame of one message from `from` to `to`, keeping SNDMORE.
+fn forward_message(from: *mut c_void, to: *mut c_void, buf: &mut [u8]) {
+    loop {
+        let rc = zmq_recv(from, buf.as_mut_ptr().cast(), buf.len(), 0);
+        assert!(rc >= 0);
+        let more = rcvmore(from);
+        let send_flags = if more { ZMQ_SNDMORE } else { 0 };
+        zmq_send(
+            to,
+            buf[..rc as usize].as_ptr().cast(),
+            rc as usize,
+            send_flags,
+        );
+        if !more {
+            break;
+        }
+    }
 }
 
 /// REQ talking through a ROUTER/DEALER proxy.
@@ -387,21 +431,7 @@ fn req_through_dealer_router() {
 
     // Proxy: router_fe -> dealer_be (forward all frames including routing envelope).
     let mut buf = [0u8; 256];
-    loop {
-        let rc = zmq_recv(router_fe, buf.as_mut_ptr().cast(), buf.len(), 0);
-        assert!(rc >= 0);
-        let more = rcvmore(router_fe);
-        let send_flags = if more { ZMQ_SNDMORE } else { 0 };
-        zmq_send(
-            dealer_be,
-            buf[..rc as usize].as_ptr().cast(),
-            rc as usize,
-            send_flags,
-        );
-        if !more {
-            break;
-        }
-    }
+    forward_message(router_fe, dealer_be, &mut buf);
 
     // REP receives "query".
     let rc = zmq_recv(rep, buf.as_mut_ptr().cast(), buf.len(), 0);
@@ -412,21 +442,7 @@ fn req_through_dealer_router() {
     zmq_send(rep, b"answer".as_ptr().cast(), 6, 0);
 
     // Proxy: dealer_be -> router_fe (forward all frames including routing envelope).
-    loop {
-        let rc = zmq_recv(dealer_be, buf.as_mut_ptr().cast(), buf.len(), 0);
-        assert!(rc >= 0);
-        let more = rcvmore(dealer_be);
-        let send_flags = if more { ZMQ_SNDMORE } else { 0 };
-        zmq_send(
-            router_fe,
-            buf[..rc as usize].as_ptr().cast(),
-            rc as usize,
-            send_flags,
-        );
-        if !more {
-            break;
-        }
-    }
+    forward_message(dealer_be, router_fe, &mut buf);
 
     // REQ receives "answer".
     let rc = zmq_recv(req, buf.as_mut_ptr().cast(), buf.len(), 0);

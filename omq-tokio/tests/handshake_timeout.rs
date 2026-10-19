@@ -11,10 +11,27 @@ use omq_tokio::endpoint::Host;
 use omq_tokio::options::ReconnectPolicy;
 use omq_tokio::{Endpoint, Message, MonitorEvent, Options, Socket, SocketType};
 
-#[tokio::test]
-async fn null_refusal_stops_only_its_endpoint() {
+/// Accepts one connection and refuses it with a NULL greeting followed by
+/// a fatal ERROR command with reason "auth".
+async fn refuse_next_with_null_error(listener: &tokio::net::TcpListener) {
     use omq_tokio::proto::greeting::{Greeting, MechanismName};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let (mut peer, _) = listener.accept().await.unwrap();
+    peer.read_exact(&mut [0; 64]).await.unwrap();
+
+    let mut greeting = bytes::BytesMut::new();
+    Greeting::current(MechanismName::NULL, false).encode(&mut greeting);
+    peer.write_all(&greeting).await.unwrap();
+
+    // Command frame (flag 0x04), 11 bytes: name "ERROR", reason "auth".
+    peer.write_all(b"\x04\x0b\x05ERROR\x04auth").await.unwrap();
+    peer.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn null_refusal_stops_only_its_endpoint() {
+    use omq_tokio::proto::greeting::MechanismName;
 
     let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
         .await
@@ -22,6 +39,8 @@ async fn null_refusal_stops_only_its_endpoint() {
     let refused_endpoint: Endpoint = format!("tcp://{}", listener.local_addr().unwrap())
         .parse()
         .unwrap();
+
+    // A second, healthy route shows the refusal stops only its own endpoint.
     let healthy = Socket::new(SocketType::Pull, Options::default());
     let healthy_endpoint = healthy.bind("tcp://127.0.0.1:0").await.unwrap();
     let push = Socket::new(
@@ -32,16 +51,10 @@ async fn null_refusal_stops_only_its_endpoint() {
     push.wait_connected(1, Duration::from_secs(1))
         .await
         .unwrap();
+
     let mut monitor = push.monitor();
     push.connect(refused_endpoint.clone()).await.unwrap();
-    let (mut peer, _) = listener.accept().await.unwrap();
-    peer.read_exact(&mut [0; 64]).await.unwrap();
-    let mut greeting = bytes::BytesMut::new();
-    Greeting::current(MechanismName::NULL, false).encode(&mut greeting);
-    peer.write_all(&greeting).await.unwrap();
-    peer.write_all(b"\x04\x0b\x05ERROR\x04auth").await.unwrap();
-    peer.shutdown().await.unwrap();
-    drop(peer);
+    refuse_next_with_null_error(&listener).await;
 
     let (endpoint, refusal) = tokio::time::timeout(Duration::from_secs(1), async {
         loop {
@@ -66,6 +79,7 @@ async fn null_refusal_stops_only_its_endpoint() {
             .is_err(),
         "fatal ERROR must stop automatic retries"
     );
+
     push.send(Message::single("healthy route")).await.unwrap();
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(1), healthy.recv())

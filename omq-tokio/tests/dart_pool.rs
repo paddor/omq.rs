@@ -6,7 +6,7 @@ use std::cell::Cell;
 use omq_proto::dart;
 use omq_tokio::diagnostics::dart_stats;
 use omq_tokio::message::Message;
-use omq_tokio::transport::dart::{DartIo, ReceiveBatch};
+use omq_tokio::transport::dart::{DartIo, ReceiveBatch, SegmentBatch};
 use omq_tokio::{Error, Options, PayloadPool, Socket, SocketType};
 
 struct CountingAllocator;
@@ -164,20 +164,91 @@ fn native_blocking_send_and_parked_receive_do_not_allocate() {
     assert_eq!(count, 0, "native blocking send/receive after warmup");
 }
 
-#[test]
-fn native_blocking_send_on_full_pipe_does_not_allocate() {
-    use std::sync::{Arc, Condvar, Mutex};
-    use std::time::Duration;
+/// Pause flag shared with a task that blocks the single IO thread.
+type IoPause = std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>;
 
-    // Resume the IO thread even if an assertion fails while it is paused.
-    struct Resume(Arc<(Mutex<bool>, Condvar)>);
-    impl Drop for Resume {
-        fn drop(&mut self) {
-            let (resumed, wake) = &*self.0;
+/// Resumes the IO thread on drop, even if an assertion fails while it is
+/// paused.
+struct Resume(IoPause);
+
+impl Drop for Resume {
+    fn drop(&mut self) {
+        let (resumed, wake) = &*self.0;
+        *resumed.lock().unwrap() = true;
+        wake.notify_one();
+    }
+}
+
+/// Blocks the context's IO thread with a task that waits on the returned
+/// guard. Returns once the task is running, so the pipe cannot drain.
+fn pause_io_thread(context: &omq_tokio::Context) -> Resume {
+    let resume = Resume(std::sync::Arc::default());
+    let pause = resume.0.clone();
+    let (entered, paused) = std::sync::mpsc::sync_channel(0);
+
+    context.handle().spawn(async move {
+        let (resumed, wake) = &*pause;
+        let mut guard = resumed.lock().unwrap();
+        entered.send(()).unwrap();
+        while !*guard {
+            guard = wake.wait(guard).unwrap();
+        }
+    });
+
+    paused.recv().unwrap();
+    resume
+}
+
+/// Spins until the sender has seen `expected` DART acknowledgements.
+fn wait_for_acknowledged(sender: &omq_tokio::blocking::Socket, expected: u64) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    while dart_stats(sender).acknowledged < expected {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "ACK retirement stalled"
+        );
+        std::thread::yield_now();
+    }
+}
+
+/// Sends `body` into the full pipe while a scoped thread resumes the IO
+/// thread after 2 ms, so the send parks first. Returns the allocations made
+/// by the send, counted from iteration 2 on (earlier ones are warmup).
+fn send_while_resuming(
+    sender: &omq_tokio::blocking::Socket,
+    body: Message,
+    resume: &Resume,
+    iteration: u64,
+) -> usize {
+    let mut allocations = 0;
+    std::thread::scope(|scope| {
+        let release = resume.0.clone();
+        scope.spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            let (resumed, wake) = &*release;
             *resumed.lock().unwrap() = true;
             wake.notify_one();
+        });
+
+        if iteration >= 2 {
+            TRACE_FIRST.with(|trace| {
+                trace.set(iteration == 2 && std::env::var_os("OMQ_ALLOC_TRACE").is_some());
+            });
+            ALLOCATIONS.with(|count| count.set(Some(0)));
         }
-    }
+
+        let result = sender.send(body);
+        if iteration >= 2 {
+            allocations = ALLOCATIONS.with(|count| count.replace(None).unwrap());
+        }
+        result.unwrap();
+    });
+    allocations
+}
+
+#[test]
+fn native_blocking_send_on_full_pipe_does_not_allocate() {
+    use std::time::Duration;
 
     let context = omq_tokio::Context::with_name("hf-full-alloc");
     let sender = context.blocking_socket(SocketType::Scatter, Options::default().send_hwm(1));
@@ -189,55 +260,23 @@ fn native_blocking_send_on_full_pipe_does_not_allocate() {
     for socket in [&sender, &receiver] {
         socket.wait_connected(1, Duration::from_secs(3)).unwrap();
     }
+
     let mut allocations = 0;
     for iteration in 0..18 {
         // Receipt, rather than popping the send ring, now frees HWM capacity.
         // Let the previous iteration's ACK retire before pausing its IO owner.
-        let deadline = std::time::Instant::now() + Duration::from_secs(1);
-        while dart_stats(&sender).acknowledged < iteration * 2 {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "ACK retirement stalled"
-            );
-            std::thread::yield_now();
-        }
-        let resume = Resume(Arc::new((Mutex::new(false), Condvar::new())));
-        let pause = resume.0.clone();
-        let (entered, paused) = std::sync::mpsc::sync_channel(0);
-        context.handle().spawn(async move {
-            let (resumed, wake) = &*pause;
-            let mut guard = resumed.lock().unwrap();
-            entered.send(()).unwrap();
-            while !*guard {
-                guard = wake.wait(guard).unwrap();
-            }
-        });
-        paused.recv().unwrap();
+        wait_for_acknowledged(&sender, iteration * 2);
+
+        // With the IO thread paused, HWM 1 admits one message and the
+        // second finds the pipe full.
+        let resume = pause_io_thread(&context);
         sender.try_send(message(&pool, 16)).unwrap();
         let body = match sender.try_send(message(&pool, 16)) {
             Err(omq_tokio::TrySendError::Full(body)) => body,
             result => panic!("paused full pipe returned {result:?}"),
         };
-        std::thread::scope(|scope| {
-            let release = resume.0.clone();
-            scope.spawn(move || {
-                std::thread::sleep(Duration::from_millis(2));
-                let (resumed, wake) = &*release;
-                *resumed.lock().unwrap() = true;
-                wake.notify_one();
-            });
-            if iteration >= 2 {
-                TRACE_FIRST.with(|trace| {
-                    trace.set(iteration == 2 && std::env::var_os("OMQ_ALLOC_TRACE").is_some());
-                });
-                ALLOCATIONS.with(|count| count.set(Some(0)));
-            }
-            let result = sender.send(body);
-            if iteration >= 2 {
-                allocations += ALLOCATIONS.with(|count| count.replace(None).unwrap());
-            }
-            result.unwrap();
-        });
+        allocations += send_while_resuming(&sender, body, &resume, iteration);
+
         for _ in 0..2 {
             assert_eq!(
                 receiver
@@ -248,6 +287,7 @@ fn native_blocking_send_on_full_pipe_does_not_allocate() {
             );
         }
     }
+
     sender.close().unwrap();
     receiver.close().unwrap();
     context.term();
@@ -577,8 +617,8 @@ async fn reusable_udp_io_and_segmentation_do_not_allocate() {
                 while sent < length {
                     sender.writable().await.unwrap();
                     ALLOCATIONS.with(|count| count.set(Some(0)));
-                    let result =
-                        sender.try_send_segments(target, None, None, &output[sent..length], stride);
+                    let batch = SegmentBatch::new(target, &output[sent..length], stride);
+                    let result = sender.try_send_segments(batch);
                     let count = ALLOCATIONS.with(|count| count.replace(None).unwrap());
                     if iteration > 0 {
                         allocations += count;

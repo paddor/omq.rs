@@ -25,11 +25,12 @@ impl<'a> PeerLifecycle<'a> {
                 .connection_removed(peer_id, p.route_id);
             if self.driver.socket_type == SocketType::Req {
                 self.driver
+                    .shared
                     .req_awaiting_reply
                     .peer_disconnected(p.route_id, peer_id);
             }
             if p.ready {
-                self.driver.ready_peer_count_shared.remove();
+                self.driver.shared.ready_peers.remove();
             }
         }
         self.publish_disconnect(peer.as_ref(), reason);
@@ -98,6 +99,7 @@ impl<'a> PeerLifecycle<'a> {
         match self.driver.socket_type {
             SocketType::Req | SocketType::Rep if self.driver.ready_peer_count() == 0 => {
                 self.driver
+                    .shared
                     .type_state
                     .lock()
                     .expect("type_state")

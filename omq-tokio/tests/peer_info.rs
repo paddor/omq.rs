@@ -125,12 +125,15 @@ async fn snapshots_and_diagnostics_across_transports() {
     }
 }
 
+/// CURVE server whose authenticator records each peer's public key as its
+/// user id and adds a fixed "Role" metadata entry.
 #[cfg(feature = "curve")]
-async fn curve_handover(kind: SocketType) {
-    use omq_tokio::{
-        AuthenticationResult, Authenticator, CurveKeypair, CurveServerOptions, PeerPublicKey,
-    };
-    let context = Context::with_config(ContextConfig { io_threads: 2 });
+fn curve_identity_server(
+    context: &Context,
+    kind: SocketType,
+) -> (IdentitySocket, omq_tokio::CurvePublicKey) {
+    use omq_tokio::{AuthenticationResult, Authenticator, CurveKeypair, CurveServerOptions};
+
     let server_key = CurveKeypair::generate();
     let server_public = server_key.public;
     let mut server_options = CurveServerOptions::default();
@@ -139,6 +142,7 @@ async fn curve_handover(kind: SocketType) {
             .with_user_id(Bytes::copy_from_slice(&peer.public_key))
             .with_metadata(vec![("Role".into(), Bytes::from_static(b"reader"))])
     }));
+
     let server = context
         .socket(
             kind,
@@ -146,18 +150,81 @@ async fn curve_handover(kind: SocketType) {
         )
         .identity_routing()
         .unwrap();
+    (server, server_public)
+}
+
+/// CURVE client on the shared "same-route" identity with a fresh keypair.
+/// Returns the socket and its public key.
+#[cfg(feature = "curve")]
+fn same_route_client(
+    context: &Context,
+    kind: SocketType,
+    server_public: omq_tokio::CurvePublicKey,
+) -> (Socket, [u8; 32]) {
+    let key = omq_tokio::CurveKeypair::generate();
+    let public = *key.public.as_bytes();
+    let socket = context.socket(kind, options("same-route").curve_client(key, server_public));
+    (socket, public)
+}
+
+#[cfg(feature = "curve")]
+async fn wait_for_disconnect(monitor: &mut omq_tokio::MonitorStream) {
+    tokio::time::timeout(DEADLINE, async {
+        while !matches!(
+            monitor.recv().await.unwrap(),
+            omq_tokio::MonitorEvent::Disconnected { .. }
+        ) {}
+    })
+    .await
+    .unwrap();
+}
+
+/// The snapshot keeps the key, user id, and metadata that its own
+/// connection authenticated with.
+#[cfg(feature = "curve")]
+fn assert_curve_authentication(identity: &Identity, key: [u8; 32]) {
+    let auth = &identity.peer_info().authentication;
+    assert_eq!(auth.public_key, Some(omq_tokio::PeerPublicKey::Curve(key)));
+    assert_eq!(auth.user_id.as_deref(), Some(key.as_slice()));
+    assert_eq!(
+        auth.metadata,
+        vec![("Role".into(), Bytes::from_static(b"reader"))]
+    );
+}
+
+/// A PEER client sees the server's key, and no user id, since only the
+/// server runs an authenticator.
+#[cfg(feature = "curve")]
+async fn assert_peer_reply_names_server(
+    server: &IdentitySocket,
+    client: &Socket,
+    client_identity: &Identity,
+    server_public: omq_tokio::CurvePublicKey,
+) {
+    server
+        .send_to(client_identity, Message::single("reply"))
+        .await
+        .unwrap();
+    let (identity, _) = receive(&client.identity_routing().unwrap()).await;
+    assert_eq!(
+        identity.peer_info().authentication.public_key,
+        Some(omq_tokio::PeerPublicKey::Curve(*server_public.as_bytes()))
+    );
+    assert!(identity.peer_info().authentication.user_id.is_none());
+}
+
+#[cfg(feature = "curve")]
+async fn curve_handover(kind: SocketType) {
+    let context = Context::with_config(ContextConfig { io_threads: 2 });
+    let (server, server_public) = curve_identity_server(&context, kind);
     let endpoint = server.bind(test_support::tcp_loopback(0)).await.unwrap();
     let client_kind = if kind == SocketType::Peer {
         kind
     } else {
         SocketType::Dealer
     };
-    let old_key = CurveKeypair::generate();
-    let old_public = *old_key.public.as_bytes();
-    let old = context.socket(
-        client_kind,
-        options("same-route").curve_client(old_key, server_public),
-    );
+
+    let (old, old_public) = same_route_client(&context, client_kind, server_public);
     old.connect(endpoint.clone()).await.unwrap();
     old.wait_connected(1, DEADLINE).await.unwrap();
     server.wait_connected(1, DEADLINE).await.unwrap();
@@ -167,59 +234,40 @@ async fn curve_handover(kind: SocketType) {
         .await
         .unwrap()
         .unwrap();
+
     // Another key may reuse the route only after its holder disconnects.
     let mut monitor = server.monitor();
     old.close().await.unwrap();
-    tokio::time::timeout(DEADLINE, async {
-        while !matches!(
-            monitor.recv().await.unwrap(),
-            omq_tokio::MonitorEvent::Disconnected { .. }
-        ) {}
-    })
-    .await
-    .unwrap();
-    let new_key = CurveKeypair::generate();
-    let new_public = *new_key.public.as_bytes();
-    let replacement = context.socket(
-        client_kind,
-        options("same-route").curve_client(new_key, server_public),
-    );
+    wait_for_disconnect(&mut monitor).await;
+
+    let (replacement, new_public) = same_route_client(&context, client_kind, server_public);
     replacement.connect(endpoint).await.unwrap();
     ready(&mut monitor).await;
     replacement.wait_connected(1, DEADLINE).await.unwrap();
     send(&replacement, "new").await;
     let (new_identity, body) = receive(&server).await;
     assert_eq!(body, Message::single("new"));
+
+    // Both identities carry the same route bytes, but each keeps the
+    // snapshot of the connection that delivered its message.
     let old_identity = old_message.pop_identity().unwrap();
     assert_eq!(old_message, Message::single("old"));
     assert_eq!(old_identity.as_ref(), new_identity.as_ref());
     assert_ne!(old_identity, new_identity);
     for (identity, key) in [(&old_identity, old_public), (&new_identity, new_public)] {
-        let auth = &identity.peer_info().authentication;
-        assert_eq!(auth.public_key, Some(PeerPublicKey::Curve(key)));
-        assert_eq!(auth.user_id.as_deref(), Some(key.as_slice()));
-        assert_eq!(
-            auth.metadata,
-            vec![("Role".into(), Bytes::from_static(b"reader"))]
-        );
+        assert_curve_authentication(identity, key);
     }
+
     if kind == SocketType::Peer {
-        server
-            .send_to(&new_identity, Message::single("reply"))
-            .await
-            .unwrap();
-        let (identity, _) = receive(&replacement.identity_routing().unwrap()).await;
-        assert_eq!(
-            identity.peer_info().authentication.public_key,
-            Some(PeerPublicKey::Curve(*server_public.as_bytes()))
-        );
-        assert!(identity.peer_info().authentication.user_id.is_none());
+        assert_peer_reply_names_server(&server, &replacement, &new_identity, server_public).await;
     }
+
     replacement.close().await.unwrap();
     server.into_inner().close().await.unwrap();
+    // The snapshot outlives the socket that produced it.
     assert_eq!(
         old_identity.peer_info().authentication.public_key,
-        Some(PeerPublicKey::Curve(old_public))
+        Some(omq_tokio::PeerPublicKey::Curve(old_public))
     );
 }
 

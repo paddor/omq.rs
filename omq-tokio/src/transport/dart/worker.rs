@@ -42,6 +42,13 @@ struct Timestamp {
     epoch: Instant,
 }
 
+impl Timestamp {
+    /// Session clock: time since the endpoint started.
+    fn elapsed(self) -> Duration {
+        self.at.duration_since(self.epoch)
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct ReadyPeer {
     pub(crate) endpoint_id: u64,
@@ -73,6 +80,16 @@ impl std::fmt::Debug for EndpointCommand {
     }
 }
 
+/// Socket-side queues and lifecycle handles registered for one peer.
+pub(crate) struct PeerQueues {
+    pub(crate) commands: crate::engine::control_inbox::Receiver,
+    pub(crate) data: crate::engine::data_inbox::Receiver,
+    pub(crate) pipe: Option<SendPipeConsumer>,
+    pub(crate) sink: Option<RecvSink>,
+    pub(crate) cancel: CancellationToken,
+    pub(crate) completion: crate::engine::peer_completion::CompletionProgress,
+}
+
 /// Registered socket queues, owned by the endpoint rather than a pump task.
 pub(crate) struct PeerIo {
     pub(crate) commands: crate::engine::control_inbox::Receiver,
@@ -98,6 +115,15 @@ struct PeerTurn {
     deadline: Instant,
 }
 
+/// Outcome of one endpoint loop pass.
+struct Pass {
+    /// Received, serviced, or still buffered work; skip parking.
+    active: bool,
+    deadline: Instant,
+    /// A send hit `WouldBlock`; wake on socket writability.
+    blocked: bool,
+}
+
 struct Pending {
     handshake: Handshake,
     socket_type: SocketType,
@@ -109,6 +135,25 @@ struct Pending {
     _slot: Option<OwnedSemaphorePermit>,
 }
 
+impl Pending {
+    /// Start a handshake lease without a pending slot.
+    fn new(
+        handshake: Handshake,
+        socket_type: SocketType,
+        identity: Option<Bytes>,
+        now: Instant,
+    ) -> Self {
+        Self {
+            handshake,
+            socket_type,
+            identity,
+            expires: now + LEASE,
+            retry: now,
+            _slot: None,
+        }
+    }
+}
+
 struct Peer {
     handshake: Handshake,
     generation: u64,
@@ -117,6 +162,8 @@ struct Peer {
     expires: Instant,
     retry: Instant,
     reported: bool,
+    /// Whether the carrier reports ECN for this source's address family.
+    ecn_supported: bool,
     session: Option<Session>,
     pool: Option<super::pool::ReceivePool>,
     receive_buffers: super::pool::ReceiveBuffers,
@@ -146,9 +193,9 @@ impl Peer {
         generation: u64,
         mut io: Box<PeerIo>,
         shared: &SocketState,
-        ecn_supported: bool,
         signal: &Arc<DataSignal>,
     ) {
+        // A late activation can name a replaced, expired, or active peer.
         if self.generation != generation || self.expires <= Instant::now() || self.io.is_some() {
             return;
         }
@@ -158,8 +205,10 @@ impl Peer {
             self.io = Some(io);
             return;
         }
+
         io.connect_signal(signal);
         io.register_space(signal);
+
         let options = shared.options;
         self.pool = Some(super::pool::receiver(
             shared.receive_pool(),
@@ -177,16 +226,19 @@ impl Peer {
             SessionConfig {
                 window: options.window_messages,
                 congestion: options.congestion,
-                ecn: options.ecn == DartEcn::Auto && ecn_supported,
+                ecn: options.ecn == DartEcn::Auto && self.ecn_supported,
                 max_send_rate: options.max_send_rate,
             },
         ));
+        // Byte-limited ingress grants receive credit as its budget admits it.
         if self.ingress.is_some() {
             self.session.as_mut().unwrap().pace_receive_credit();
         }
+        // Budget gates wake the endpoint through its data signal.
         if self.ingress.is_some() || self.egress.is_some() {
             self.budget_waker = std::task::Waker::from(Arc::new(BudgetWake(signal.clone())));
         }
+
         self.io = Some(io);
     }
 }
@@ -214,6 +266,8 @@ struct Routes {
     order: Vec<SocketAddr>,
     cursor: usize,
     remaining: usize,
+    /// Generation of the most recently admitted peer.
+    generation: u64,
 }
 
 impl Routes {
@@ -247,6 +301,40 @@ impl Stage {
     }
 }
 
+/// Mutable state owned by the endpoint task.
+struct TaskState {
+    /// Origin of every session clock.
+    epoch: Instant,
+    signal: Arc<DataSignal>,
+    routes: Routes,
+    batch: ReceiveBatch,
+    stage: Stage,
+    control: [u8; MAX_DATAGRAM],
+    /// End of the spin window that follows activity.
+    spin_until: Instant,
+    /// Earliest next socket receive after a receive error.
+    receive_retry: Instant,
+    /// Start of the current cooperative polling turn.
+    turn_started: Instant,
+}
+
+impl TaskState {
+    fn new(io: &DartIo) -> Self {
+        let epoch = Instant::now();
+        Self {
+            epoch,
+            signal: Arc::new(DataSignal::new()),
+            routes: Routes::default(),
+            batch: ReceiveBatch::new(io.gro_segments()),
+            stage: Stage::new(),
+            control: [0; MAX_DATAGRAM],
+            spin_until: epoch,
+            receive_retry: epoch,
+            turn_started: epoch,
+        }
+    }
+}
+
 pub(crate) struct EndpointWorker {
     pub(crate) network: crate::network_limit::Lane,
     pub(crate) max_message_size: Option<usize>,
@@ -270,122 +358,116 @@ fn fresh_session() -> u64 {
 
 impl EndpointWorker {
     pub(crate) async fn run(mut self) {
-        let epoch = Instant::now();
+        let mut task = TaskState::new(&self.io);
         let mut timer = super::io::Deadline::new();
-        let signal = Arc::new(DataSignal::new());
-        let mut routes = Routes::default();
-        let mut generation = 0;
-        let mut batch = ReceiveBatch::new(self.io.gro_segments());
-        let mut stage = Stage::new();
-        let mut control = [0; MAX_DATAGRAM];
-        let mut spin_until = epoch;
-        let mut receive_retry = epoch;
         let continuous = self.spin == Duration::MAX;
         let coalesce_polls = !self.spin.is_zero();
-        let mut turn_started = epoch;
         loop {
             if self.cancel.is_cancelled() {
                 break;
             }
+
             let mut now = Instant::now();
             // Keep explicit polling on this task for a bounded turn. Yielding
             // after every empty probe also polls the reactor on each probe.
-            if coalesce_polls && now.duration_since(turn_started) >= TURN {
+            if coalesce_polls && now.duration_since(task.turn_started) >= TURN {
                 tokio::task::yield_now().await;
                 now = Instant::now();
-                turn_started = now;
+                task.turn_started = now;
                 if self.cancel.is_cancelled() {
                     break;
                 }
             }
-            signal.begin_drain();
-            if let Some(pool) = self.shared.receive_pool() {
-                pool.reclaim();
-            }
-            if !self.drain_commands(&mut routes, &signal) {
+
+            let Some(pass) = self.run_pass(&mut task, now) else {
                 break;
-            }
-            self.ensure_connector(&mut routes, now);
-            let mut stats = DartStats::default();
-            let polling = self.latency && !self.spin.is_zero() && (continuous || now < spin_until);
-            let received = if now >= receive_retry {
-                self.drain(
-                    &mut batch,
-                    &mut routes,
-                    &mut generation,
-                    Timestamp { at: now, epoch },
-                    polling,
-                    &mut stats,
-                )
-            } else {
-                0
             };
-            if stats.receive_failures != 0 {
-                receive_retry = now + Duration::from_millis(1);
-            }
-            let (worked, mut deadline, blocked) = self.service(
-                &mut routes,
-                epoch,
-                &signal,
-                &mut stage,
-                &mut control,
-                &mut stats,
-            );
-            if receive_retry > now {
-                deadline = deadline.min(receive_retry);
-            }
-            self.shared.counters.add(stats);
-            let more = batch.has_pending_datagrams();
-            signal.clear_after(true);
-            if received != 0 || worked || more {
+            if pass.active {
                 if !continuous {
-                    spin_until = now + self.spin;
+                    task.spin_until = now + self.spin;
                 }
                 if !coalesce_polls {
                     tokio::task::yield_now().await;
                 }
                 continue;
             }
-            if (continuous || now < spin_until) && !self.spin.is_zero() && now >= receive_retry {
+
+            if (continuous || now < task.spin_until)
+                && !self.spin.is_zero()
+                && now >= task.receive_retry
+            {
                 if self.latency {
                     // Direct polling in drain processes a packet immediately,
                     // without another loop through commands and timers first.
                     std::hint::spin_loop();
                 } else {
-                    self.probe_spin(&mut batch, &mut receive_retry);
+                    self.probe_spin(&mut task.batch, &mut task.receive_retry);
                 }
                 if !coalesce_polls {
                     tokio::task::yield_now().await;
                 }
                 continue;
             }
+
             tokio::select! {
                 biased;
                 () = self.cancel.cancelled() => break,
                 command = self.commands.recv() => match command {
-                    Some(command) => self.activate(command, &mut routes, &signal),
+                    Some(command) => self.activate(command, &mut task.routes, &task.signal),
                     None => break,
                 },
-                () = signal.ready() => {},
-                () = timer.wait(deadline) => {},
-                result = self.io.writable(), if blocked => { if result.is_err() { break; } },
-                result = self.io.readable(), if Instant::now() >= receive_retry => { if result.is_err() { break; } },
+                () = task.signal.ready() => {},
+                () = timer.wait(pass.deadline) => {},
+                result = self.io.writable(), if pass.blocked => { if result.is_err() { break; } },
+                result = self.io.readable(), if Instant::now() >= task.receive_retry => { if result.is_err() { break; } },
             }
         }
+    }
+
+    /// One bounded pass: lifecycle commands, socket receive, then peer
+    /// service. Returns `None` once the command channel closes.
+    fn run_pass(&mut self, task: &mut TaskState, now: Instant) -> Option<Pass> {
+        task.signal.begin_drain();
+        if let Some(pool) = self.shared.receive_pool() {
+            pool.reclaim();
+        }
+        if !self.drain_commands(&mut task.routes, &task.signal) {
+            return None;
+        }
+        self.ensure_connector(&mut task.routes, now);
+
+        let mut stats = DartStats::default();
+        let received = if now >= task.receive_retry {
+            self.drain(task, now, &mut stats)
+        } else {
+            0
+        };
+        if stats.receive_failures != 0 {
+            task.receive_retry = now + Duration::from_millis(1);
+        }
+
+        let (worked, mut deadline, blocked) = self.service(task, &mut stats);
+        if task.receive_retry > now {
+            deadline = deadline.min(task.receive_retry);
+        }
+        self.shared.counters.add(stats);
+
+        let more = task.batch.has_pending_datagrams();
+        task.signal.clear_after(true);
+        Some(Pass {
+            active: received != 0 || worked || more,
+            deadline,
+            blocked,
+        })
     }
 
     fn ensure_connector(&self, routes: &mut Routes, now: Instant) {
         if let Some(target) = self.target
             && !routes.map.contains_key(&target)
         {
-            self.insert_pending(
-                target,
-                Handshake::connector(fresh_session()),
-                self.socket_type,
-                None,
-                now,
-                routes,
-            );
+            let handshake = Handshake::connector(fresh_session());
+            let pending = Pending::new(handshake, self.socket_type, None, now);
+            self.insert_pending(target, pending, routes);
         }
     }
 
@@ -414,18 +496,8 @@ impl EndpointWorker {
         }
     }
 
-    fn insert_pending(
-        &self,
-        source: SocketAddr,
-        handshake: Handshake,
-        socket_type: SocketType,
-        identity: Option<Bytes>,
-        now: Instant,
-        routes: &mut Routes,
-    ) {
-        let slot = if handshake.is_connector() {
-            None
-        } else {
+    fn insert_pending(&self, source: SocketAddr, mut pending: Pending, routes: &mut Routes) {
+        if !pending.handshake.is_connector() {
             // Never answer a new source that could not take a ready slot.
             if !routes.map.contains_key(&source) && self.shared.peers.available_permits() == 0 {
                 return;
@@ -433,20 +505,17 @@ impl EndpointWorker {
             let Ok(slot) = self.shared.pending.clone().try_acquire_owned() else {
                 return;
             };
-            Some(slot)
-        };
-        let pending = Pending {
-            handshake,
-            socket_type,
-            identity,
-            expires: now + LEASE,
-            retry: now,
-            _slot: slot,
-        };
+            pending = Pending {
+                _slot: Some(slot),
+                ..pending
+            };
+        }
+
         if let Some(route) = routes.map.get_mut(&source) {
             route.pending = Some(pending);
             return;
         }
+
         let index = routes.order.len();
         routes.order.push(source);
         routes.map.insert(
@@ -472,59 +541,20 @@ impl EndpointWorker {
         let Some(peer) = &mut route.peer else {
             return;
         };
-        peer.install_io(
-            generation,
-            io,
-            &self.shared,
-            self.io.ecn_receive_supported(source.ip()) == Some(true),
-            signal,
-        );
+        peer.install_io(generation, io, &self.shared, signal);
     }
 
-    fn handshake(
-        &self,
-        source: SocketAddr,
-        ready: Ready<'_>,
-        now: Instant,
-        routes: &mut Routes,
-        generation: &mut u64,
-    ) {
+    fn handshake(&self, source: SocketAddr, ready: Ready<'_>, now: Instant, routes: &mut Routes) {
         if !dart::supports(ready.socket_type)
             || !omq_proto::is_compatible(self.socket_type, ready.socket_type)
             || self.target.is_some_and(|target| target != source)
         {
             return;
         }
-        let existing = routes.map.get(&source);
         if ready.phase == Phase::Hello {
-            let same = existing.is_some_and(|route| {
-                route
-                    .pending
-                    .as_ref()
-                    .is_some_and(|pending| pending.handshake.remote() == ready.session)
-                    || route
-                        .peer
-                        .as_ref()
-                        .is_some_and(|peer| peer.handshake.remote() == ready.session)
-            });
-            if !same {
-                // Exclusive CHANNEL cannot admit a second source while live.
-                if self.socket_type == SocketType::Channel
-                    && existing.is_none()
-                    && routes.map.values().any(|route| route.peer.is_some())
-                {
-                    return;
-                }
-                self.insert_pending(
-                    source,
-                    Handshake::listener(fresh_session(), ready.session),
-                    ready.socket_type,
-                    ready.identity.map(Bytes::copy_from_slice),
-                    now,
-                    routes,
-                );
-            }
+            self.admit_hello(source, ready, now, routes);
         }
+
         let Some(route) = routes.map.get_mut(&source) else {
             return;
         };
@@ -535,40 +565,10 @@ impl EndpointWorker {
             pending.socket_type = ready.socket_type;
             pending.identity = ready.identity.map(Bytes::copy_from_slice);
             if pending.handshake.confirmed() {
-                if route.permit.is_none() {
-                    let Ok(permit) = self.shared.peers.clone().try_acquire_owned() else {
-                        // Every ready slot is taken; this source stays out.
-                        route.pending = None;
-                        return;
-                    };
-                    route.permit = Some(permit);
-                }
-                let Some(next) = generation.checked_add(1) else {
-                    return;
-                };
-                *generation = next;
-                let pending = route.pending.take().expect("confirmed handshake");
-                route.peer = Some(Peer {
-                    handshake: pending.handshake,
-                    generation: next,
-                    socket_type: pending.socket_type,
-                    identity: pending.identity,
-                    expires: now + LEASE,
-                    retry: now,
-                    reported: false,
-                    session: None,
-                    pool: None,
-                    receive_buffers: super::pool::ReceiveBuffers::default(),
-                    returns: Arc::new(CreditCounter::default()),
-                    io: None,
-                    sampled: dart::SessionStats::default(),
-                    send_retry: Duration::ZERO,
-                    ingress: self.network.ingress(),
-                    egress: self.network.egress(),
-                    budget_waker: std::task::Waker::noop().clone(),
-                });
+                self.promote(source, route, now, &mut routes.generation);
             }
         } else if let Some(peer) = &mut route.peer {
+            // An established peer accepts READY only from the same socket.
             if peer.socket_type != ready.socket_type || peer.identity.as_deref() != ready.identity {
                 return;
             }
@@ -576,6 +576,78 @@ impl EndpointWorker {
                 peer.expires = now + LEASE;
             }
         }
+    }
+
+    /// Start a listener handshake unless this HELLO repeats a known session.
+    fn admit_hello(&self, source: SocketAddr, ready: Ready<'_>, now: Instant, routes: &mut Routes) {
+        let existing = routes.map.get(&source);
+        let same = existing.is_some_and(|route| {
+            route
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pending.handshake.remote() == ready.session)
+                || route
+                    .peer
+                    .as_ref()
+                    .is_some_and(|peer| peer.handshake.remote() == ready.session)
+        });
+        if same {
+            return;
+        }
+
+        // Exclusive CHANNEL cannot admit a second source while live.
+        if self.socket_type == SocketType::Channel
+            && existing.is_none()
+            && routes.map.values().any(|route| route.peer.is_some())
+        {
+            return;
+        }
+
+        let pending = Pending::new(
+            Handshake::listener(fresh_session(), ready.session),
+            ready.socket_type,
+            ready.identity.map(Bytes::copy_from_slice),
+            now,
+        );
+        self.insert_pending(source, pending, routes);
+    }
+
+    /// Turn a confirmed handshake into a peer once it holds a ready slot.
+    fn promote(&self, source: SocketAddr, route: &mut Route, now: Instant, generation: &mut u64) {
+        if route.permit.is_none() {
+            let Ok(permit) = self.shared.peers.clone().try_acquire_owned() else {
+                // Every ready slot is taken; this source stays out.
+                route.pending = None;
+                return;
+            };
+            route.permit = Some(permit);
+        }
+        let Some(next) = generation.checked_add(1) else {
+            return;
+        };
+        *generation = next;
+
+        let pending = route.pending.take().expect("confirmed handshake");
+        route.peer = Some(Peer {
+            handshake: pending.handshake,
+            generation: next,
+            socket_type: pending.socket_type,
+            identity: pending.identity,
+            expires: now + LEASE,
+            retry: now,
+            reported: false,
+            ecn_supported: self.io.ecn_receive_supported(source.ip()) == Some(true),
+            session: None,
+            pool: None,
+            receive_buffers: super::pool::ReceiveBuffers::default(),
+            returns: Arc::new(CreditCounter::default()),
+            io: None,
+            sampled: dart::SessionStats::default(),
+            send_retry: Duration::ZERO,
+            ingress: self.network.ingress(),
+            egress: self.network.egress(),
+            budget_waker: std::task::Waker::noop().clone(),
+        });
     }
 }
 

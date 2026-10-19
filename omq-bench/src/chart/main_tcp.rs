@@ -1,6 +1,7 @@
 use super::common::{
     C_LIBZMQ, C_LIBZMQ_2T, C_MONOCOQUE, C_OMQ_1T, C_OMQ_2T, C_OMQ_CT, C_OMQ_MT, C_OMQ_SPIN, C_R0Z,
-    C_RZMQ_IOURING, C_TMQ, C_ZMQRS, Impl, draw_latency_single_panel_with_versions,
+    C_RZMQ_IOURING, C_TMQ, C_ZMQRS, ChartSpec, CpuColumns, Impl,
+    draw_latency_single_panel_with_versions,
     draw_throughput_dual_panel_fixed_2m_msgs_with_versions,
     draw_throughput_dual_panel_with_versions, load_latency, load_tput, out_dir,
 };
@@ -189,18 +190,19 @@ pub(crate) fn generate() {
     let (tput, msgs, cpu) = load_tput("throughput", "tcp", None, PUSHPULL_IMPLS);
     if !tput.is_empty() {
         let out = dir.join("main_pushpull_tcp.svg");
-        draw_throughput_dual_panel_fixed_2m_msgs_with_versions(
-            &out,
-            "PUSH/PULL throughput, TCP loopback, 2-process",
-            TPUT_SIZES,
-            PUSHPULL_IMPLS,
-            &tput,
-            &msgs,
-            &cpu,
-            "snd CPU%",
-            "rcv CPU%",
-        )
-        .expect("draw pushpull chart");
+        let spec = ChartSpec {
+            out_path: &out,
+            title: "PUSH/PULL throughput, TCP loopback, 2-process",
+            sizes: TPUT_SIZES,
+            impls: PUSHPULL_IMPLS,
+        };
+        let columns = CpuColumns {
+            cpu: &cpu,
+            snd_label: "snd CPU%",
+            rcv_label: "rcv CPU%",
+        };
+        draw_throughput_dual_panel_fixed_2m_msgs_with_versions(&spec, &tput, &msgs, &columns)
+            .expect("draw pushpull chart");
         eprintln!("Written: {}", out.display());
     }
 
@@ -208,18 +210,19 @@ pub(crate) fn generate() {
     let (tput, msgs, cpu) = load_tput("pub_sub", "tcp", Some(32), PUBSUB_IMPLS);
     if !tput.is_empty() {
         let out = dir.join("main_pubsub_tcp.svg");
-        draw_throughput_dual_panel_with_versions(
-            &out,
-            "PUB/SUB throughput (32 peers), TCP loopback, 2-process",
-            PUBSUB_SIZES,
-            PUBSUB_IMPLS,
-            &tput,
-            &msgs,
-            &cpu,
-            "snd CPU%",
-            "",
-        )
-        .expect("draw pubsub chart");
+        let spec = ChartSpec {
+            out_path: &out,
+            title: "PUB/SUB throughput (32 peers), TCP loopback, 2-process",
+            sizes: PUBSUB_SIZES,
+            impls: PUBSUB_IMPLS,
+        };
+        let columns = CpuColumns {
+            cpu: &cpu,
+            snd_label: "snd CPU%",
+            rcv_label: "",
+        };
+        draw_throughput_dual_panel_with_versions(&spec, &tput, &msgs, &columns)
+            .expect("draw pubsub chart");
         eprintln!("Written: {}", out.display());
     }
 
@@ -227,15 +230,13 @@ pub(crate) fn generate() {
     let (lat, cpu) = load_latency("tcp", LAT_SIZES, REQREP_IMPLS);
     if !lat.is_empty() {
         let out = dir.join("main_reqrep_tcp.svg");
-        draw_latency_single_panel_with_versions(
-            &out,
-            "REQ/REP latency, TCP loopback, 2-process",
-            LAT_SIZES,
-            REQREP_IMPLS,
-            &lat,
-            &cpu,
-        )
-        .expect("draw reqrep chart");
+        let spec = ChartSpec {
+            out_path: &out,
+            title: "REQ/REP latency, TCP loopback, 2-process",
+            sizes: LAT_SIZES,
+            impls: REQREP_IMPLS,
+        };
+        draw_latency_single_panel_with_versions(&spec, &lat, &cpu).expect("draw reqrep chart");
         eprintln!("Written: {}", out.display());
     }
 }

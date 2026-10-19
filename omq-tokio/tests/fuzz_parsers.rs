@@ -3,7 +3,6 @@
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_lossless,
-    clippy::too_many_lines,
     clippy::collapsible_if,
     clippy::missing_panics_doc,
     clippy::items_after_statements,
@@ -419,78 +418,73 @@ fn fuzz_endpoint_parse() {
     }
 }
 
+fn random_host(rng: &mut StdRng) -> omq_tokio::endpoint::Host {
+    use omq_tokio::endpoint::Host;
+
+    match rng.random_range(0..3) {
+        0 => Host::Ip(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+            rng.random(),
+            rng.random(),
+            rng.random(),
+            rng.random(),
+        ))),
+        1 => Host::Ip(std::net::IpAddr::V6(std::net::Ipv6Addr::new(
+            rng.random(),
+            rng.random(),
+            rng.random(),
+            rng.random(),
+            rng.random(),
+            rng.random(),
+            rng.random(),
+            rng.random(),
+        ))),
+        _ => Host::Name("example.com".to_string()),
+    }
+}
+
+/// Picks a transport for `host`. Arms whose feature is disabled, and the
+/// unused selector values, fall back to plain TCP.
+fn random_endpoint(rng: &mut StdRng, host: omq_tokio::endpoint::Host) -> omq_tokio::Endpoint {
+    use omq_tokio::Endpoint;
+
+    let port: u16 = rng.random_range(1..=65535);
+    let path = format!("/{}", rng.random_range(0..100));
+    // Only some arms use the path; keep it bound in every feature set.
+    let _ = &path;
+
+    match rng.random_range(0..10) {
+        0 => Endpoint::Tcp { host, port },
+        #[cfg(feature = "lz4")]
+        1 => Endpoint::Lz4Tcp { host, port },
+        #[cfg(feature = "ws")]
+        3 => Endpoint::Ws { host, port, path },
+        #[cfg(feature = "ws")]
+        4 => Endpoint::Wss { host, port, path },
+        #[cfg(all(feature = "lz4", feature = "ws"))]
+        5 => Endpoint::Lz4Ws { host, port, path },
+        #[cfg(feature = "quic")]
+        6 => Endpoint::Quic { host, port },
+        _ => Endpoint::Tcp { host, port },
+    }
+}
+
 /// Valid endpoints must survive display → parse roundtrip.
 #[test]
 fn fuzz_endpoint_roundtrip() {
     use omq_tokio::Endpoint;
-    use omq_tokio::endpoint::Host;
     use std::str::FromStr;
+
     let mut rng = rng();
     for i in 0..iters() / 4 {
-        let host = match rng.random_range(0..3) {
-            0 => Host::Ip(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
-                rng.random(),
-                rng.random(),
-                rng.random(),
-                rng.random(),
-            ))),
-            1 => Host::Ip(std::net::IpAddr::V6(std::net::Ipv6Addr::new(
-                rng.random(),
-                rng.random(),
-                rng.random(),
-                rng.random(),
-                rng.random(),
-                rng.random(),
-                rng.random(),
-                rng.random(),
-            ))),
-            _ => Host::Name("example.com".to_string()),
-        };
-        let port: u16 = rng.random_range(1..=65535);
-        let path = format!("/{}", rng.random_range(0..100));
-        let ep = match rng.random_range(0..10) {
-            0 => Endpoint::Tcp {
-                host: host.clone(),
-                port,
-            },
-            #[cfg(feature = "lz4")]
-            1 => Endpoint::Lz4Tcp {
-                host: host.clone(),
-                port,
-            },
-            #[cfg(feature = "ws")]
-            3 => Endpoint::Ws {
-                host: host.clone(),
-                port,
-                path: path.clone(),
-            },
-            #[cfg(feature = "ws")]
-            4 => Endpoint::Wss {
-                host: host.clone(),
-                port,
-                path: path.clone(),
-            },
-            #[cfg(all(feature = "lz4", feature = "ws"))]
-            5 => Endpoint::Lz4Ws {
-                host: host.clone(),
-                port,
-                path: path.clone(),
-            },
-            #[cfg(feature = "quic")]
-            6 => Endpoint::Quic {
-                host: host.clone(),
-                port,
-            },
-            _ => Endpoint::Tcp {
-                host: host.clone(),
-                port,
-            },
-        };
+        let host = random_host(&mut rng);
+        let ep = random_endpoint(&mut rng, host);
+
         let s = ep.to_string();
         let parsed = Endpoint::from_str(&s).unwrap_or_else(|e| {
             panic!("failed to parse roundtrip of {ep:?} → {s:?}: {e}");
         });
         assert_eq!(ep, parsed, "roundtrip mismatch for {s:?}");
+
         if i % 50_000 == 0 {
             eprintln!("endpoint_roundtrip iter {i}");
         }
@@ -841,6 +835,121 @@ fn corrupt_wire(data: &[u8], rng: &mut StdRng) -> Vec<u8> {
     wire
 }
 
+/// READY body with a valid `Socket-Type: PUSH`, ready for more properties.
+fn push_ready_prefix() -> BytesMut {
+    let mut body = BytesMut::new();
+    body.put_u8(5);
+    body.put_slice(b"READY");
+    put_prop(&mut body, b"Socket-Type", b"PUSH");
+    body
+}
+
+/// Appends one property: u8 name length, name, u32 value length, value.
+fn put_prop(body: &mut BytesMut, name: &[u8], value: &[u8]) {
+    body.put_u8(name.len() as u8);
+    body.put_slice(name);
+    body.put_u32(value.len() as u32);
+    body.put_slice(value);
+}
+
+/// Short property name mixing valid and arbitrary bytes.
+fn random_name_ready(rng: &mut StdRng) -> Result<command::Command, Error> {
+    let name_len: u8 = rng.random_range(0..=20);
+    let mut name = Vec::with_capacity(name_len as usize);
+    for _ in 0..name_len {
+        if rng.random_bool(0.5) {
+            name.push(VALID_PROP_CHARS[rng.random_range(0..VALID_PROP_CHARS.len())]);
+        } else {
+            name.push(rng.random());
+        }
+    }
+
+    let mut body = push_ready_prefix();
+    put_prop(&mut body, &name, b"v");
+    command::decode(body.freeze())
+}
+
+/// One-byte property name; checks accept/reject against the name charset.
+fn one_byte_name_ready(rng: &mut StdRng) -> Result<command::Command, Error> {
+    let byte: u8 = rng.random();
+    let mut body = push_ready_prefix();
+    put_prop(&mut body, &[byte], b"v");
+    let r = command::decode(body.freeze());
+
+    let valid = byte.is_ascii_alphanumeric()
+        || byte == b'-'
+        || byte == b'_'
+        || byte == b'.'
+        || byte == b'+';
+    match &r {
+        Ok(_) => assert!(valid, "accepted invalid prop name byte 0x{byte:02x}"),
+        Err(e) => assert!(!valid, "rejected valid prop name byte 0x{byte:02x}: {e}"),
+    }
+
+    r
+}
+
+/// Builds and decodes the READY body for one adversarial property scenario.
+fn adversarial_ready(scenario: i32, rng: &mut StdRng) -> Result<command::Command, Error> {
+    match scenario {
+        // Random name length, random chars (mix valid/invalid)
+        0 => random_name_ready(rng),
+        // Boundary-length property name (254, 255 bytes)
+        1 => {
+            let name_len = if rng.random_bool(0.5) { 254 } else { 255 };
+            let name: Vec<u8> = (0..name_len)
+                .map(|_| VALID_PROP_CHARS[rng.random_range(0..VALID_PROP_CHARS.len())])
+                .collect();
+            let mut body = push_ready_prefix();
+            put_prop(&mut body, &name, b"yes");
+            command::decode(body.freeze())
+        }
+        // Duplicate Socket-Type
+        2 => {
+            let mut body = push_ready_prefix();
+            put_prop(&mut body, b"Socket-Type", b"PULL");
+            command::decode(body.freeze())
+        }
+        // Duplicate Identity
+        3 => {
+            let mut body = push_ready_prefix();
+            put_prop(&mut body, b"Identity", b"aaa");
+            put_prop(&mut body, b"Identity", b"bbb");
+            command::decode(body.freeze())
+        }
+        // Many properties (50-200), all valid
+        4 => {
+            let n_props = rng.random_range(50..=200);
+            let mut body = push_ready_prefix();
+            for j in 0..n_props {
+                put_prop(&mut body, format!("X-Prop-{j}").as_bytes(), b"v");
+            }
+            command::decode(body.freeze())
+        }
+        // Truncation: build valid properties, cut at random offset
+        5 => {
+            let mut body = push_ready_prefix();
+            put_prop(&mut body, b"X-Foo", b"0123456789");
+            let full = body.freeze();
+            let cut = rng.random_range(0..=full.len());
+            command::decode(full.slice(..cut))
+        }
+        // Declared value length >> actual remaining bytes
+        6 => {
+            let mut body = push_ready_prefix();
+            body.put_u8(5);
+            body.put_slice(b"X-Big");
+            // Declare huge value length but provide tiny payload
+            body.put_u32(rng.random_range(1000..=u16::MAX as u32));
+            let actual = random_bytes(rng, 10);
+            body.put_slice(&actual);
+            command::decode(body.freeze())
+        }
+        // Every possible byte value in a 1-char property name
+        _ => one_byte_name_ready(rng),
+    }
+}
+
 /// Property parsing stress: boundary-length names (1, 127, 254, 255),
 /// every byte value in names, many properties, truncation at every
 /// offset within the property list, duplicate well-known properties,
@@ -850,164 +959,8 @@ fn fuzz_property_adversarial() {
     let mut rng = rng();
     for i in 0..iters() / 2 {
         let scenario = rng.random_range(0..8);
-        let result = match scenario {
-            // Random name length, random chars (mix valid/invalid)
-            0 => {
-                let name_len: u8 = rng.random_range(0..=20);
-                let mut name = Vec::with_capacity(name_len as usize);
-                for _ in 0..name_len {
-                    if rng.random_bool(0.5) {
-                        name.push(VALID_PROP_CHARS[rng.random_range(0..VALID_PROP_CHARS.len())]);
-                    } else {
-                        name.push(rng.random());
-                    }
-                }
-                let mut body = BytesMut::new();
-                body.put_u8(5);
-                body.put_slice(b"READY");
-                body.put_u8(11);
-                body.put_slice(b"Socket-Type");
-                body.put_u32(4);
-                body.put_slice(b"PUSH");
-                body.put_u8(name_len);
-                body.put_slice(&name);
-                body.put_u32(1);
-                body.put_u8(b'v');
-                command::decode(body.freeze())
-            }
-            // Boundary-length property name (254, 255 bytes)
-            1 => {
-                let name_len = if rng.random_bool(0.5) { 254 } else { 255 };
-                let name: Vec<u8> = (0..name_len)
-                    .map(|_| VALID_PROP_CHARS[rng.random_range(0..VALID_PROP_CHARS.len())])
-                    .collect();
-                let mut body = BytesMut::new();
-                body.put_u8(5);
-                body.put_slice(b"READY");
-                body.put_u8(11);
-                body.put_slice(b"Socket-Type");
-                body.put_u32(4);
-                body.put_slice(b"PUSH");
-                body.put_u8(name_len as u8);
-                body.put_slice(&name);
-                body.put_u32(3);
-                body.put_slice(b"yes");
-                command::decode(body.freeze())
-            }
-            // Duplicate Socket-Type
-            2 => {
-                let mut body = BytesMut::new();
-                body.put_u8(5);
-                body.put_slice(b"READY");
-                body.put_u8(11);
-                body.put_slice(b"Socket-Type");
-                body.put_u32(4);
-                body.put_slice(b"PUSH");
-                body.put_u8(11);
-                body.put_slice(b"Socket-Type");
-                body.put_u32(4);
-                body.put_slice(b"PULL");
-                command::decode(body.freeze())
-            }
-            // Duplicate Identity
-            3 => {
-                let mut body = BytesMut::new();
-                body.put_u8(5);
-                body.put_slice(b"READY");
-                body.put_u8(11);
-                body.put_slice(b"Socket-Type");
-                body.put_u32(4);
-                body.put_slice(b"PUSH");
-                body.put_u8(8);
-                body.put_slice(b"Identity");
-                body.put_u32(3);
-                body.put_slice(b"aaa");
-                body.put_u8(8);
-                body.put_slice(b"Identity");
-                body.put_u32(3);
-                body.put_slice(b"bbb");
-                command::decode(body.freeze())
-            }
-            // Many properties (50-200), all valid
-            4 => {
-                let n_props = rng.random_range(50..=200);
-                let mut body = BytesMut::new();
-                body.put_u8(5);
-                body.put_slice(b"READY");
-                body.put_u8(11);
-                body.put_slice(b"Socket-Type");
-                body.put_u32(4);
-                body.put_slice(b"PUSH");
-                for j in 0..n_props {
-                    let name = format!("X-Prop-{j}");
-                    body.put_u8(name.len() as u8);
-                    body.put_slice(name.as_bytes());
-                    body.put_u32(1);
-                    body.put_u8(b'v');
-                }
-                command::decode(body.freeze())
-            }
-            // Truncation: build valid properties, cut at random offset
-            5 => {
-                let mut body = BytesMut::new();
-                body.put_u8(5);
-                body.put_slice(b"READY");
-                body.put_u8(11);
-                body.put_slice(b"Socket-Type");
-                body.put_u32(4);
-                body.put_slice(b"PUSH");
-                body.put_u8(5);
-                body.put_slice(b"X-Foo");
-                body.put_u32(10);
-                body.put_slice(b"0123456789");
-                let full = body.freeze();
-                let cut = rng.random_range(0..=full.len());
-                command::decode(full.slice(..cut))
-            }
-            // Declared value length >> actual remaining bytes
-            6 => {
-                let mut body = BytesMut::new();
-                body.put_u8(5);
-                body.put_slice(b"READY");
-                body.put_u8(11);
-                body.put_slice(b"Socket-Type");
-                body.put_u32(4);
-                body.put_slice(b"PUSH");
-                body.put_u8(5);
-                body.put_slice(b"X-Big");
-                // Declare huge value length but provide tiny payload
-                body.put_u32(rng.random_range(1000..=u16::MAX as u32));
-                let actual = random_bytes(&mut rng, 10);
-                body.put_slice(&actual);
-                command::decode(body.freeze())
-            }
-            // Every possible byte value in a 1-char property name
-            _ => {
-                let byte: u8 = rng.random();
-                let mut body = BytesMut::new();
-                body.put_u8(5);
-                body.put_slice(b"READY");
-                body.put_u8(11);
-                body.put_slice(b"Socket-Type");
-                body.put_u32(4);
-                body.put_slice(b"PUSH");
-                body.put_u8(1);
-                body.put_u8(byte);
-                body.put_u32(1);
-                body.put_u8(b'v');
-                let r = command::decode(body.freeze());
-                let valid = byte.is_ascii_alphanumeric()
-                    || byte == b'-'
-                    || byte == b'_'
-                    || byte == b'.'
-                    || byte == b'+';
-                match &r {
-                    Ok(_) => assert!(valid, "accepted invalid prop name byte 0x{byte:02x}"),
-                    Err(e) => assert!(!valid, "rejected valid prop name byte 0x{byte:02x}: {e}"),
-                }
-                r
-            }
-        };
+        let result = adversarial_ready(scenario, &mut rng);
+
         // scenarios 2-3 (duplicate props) must always be rejected
         if scenario == 2 {
             assert!(result.is_err(), "duplicate Socket-Type must be rejected");
@@ -1019,6 +972,7 @@ fn fuzz_property_adversarial() {
         if scenario == 6 {
             assert!(result.is_err(), "declared len >> actual must be rejected");
         }
+
         let _ = result;
         if i % 50_000 == 0 {
             eprintln!("property_adversarial iter {i}");

@@ -3,6 +3,7 @@
 
 use crate::engine::SendPipeProducer;
 use crate::engine::send_pipe::SendPreparation;
+use crate::routing::peer_outbound::PeerOutbound;
 use arc_swap::{ArcSwap, ArcSwapOption};
 use std::sync::Weak;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -79,6 +80,39 @@ impl Route {
         }
     }
 
+    /// Offer a message to this clone's lane producer for the route, or to the
+    /// shared target. Returns the result and the signal to wait on if full.
+    fn push(
+        &self,
+        lane: Option<&Lane>,
+        message: Message,
+        preparation: SendPreparation,
+        data: &crate::engine::data_inbox::SenderLanes,
+    ) -> (
+        core::result::Result<(), SendPipeError>,
+        Option<Arc<StateSignal>>,
+    ) {
+        if let Some(lane) = lane {
+            let mut producer = lane.producer.lock().expect("peer producer poisoned");
+            return match producer.as_mut() {
+                Some(producer) => {
+                    let result = producer.try_send_prepared(message, preparation);
+                    (result, Some(producer.space_available()))
+                }
+                None => (Err(SendPipeError::Closed(message)), None),
+            };
+        }
+
+        let mut target = self.target.lock().expect("peer send queue poisoned");
+        match target.as_mut() {
+            Some(target) => (
+                target.try_send_prepared(message, preparation, data),
+                target.space_available(),
+            ),
+            None => (Err(SendPipeError::Closed(message)), None),
+        }
+    }
+
     fn ready(&self) -> bool {
         let target = self.target.lock().expect("peer send queue poisoned");
         match target.as_ref() {
@@ -95,6 +129,16 @@ impl Route {
 #[derive(Debug)]
 struct Lane {
     producer: Mutex<Option<SendPipeProducer>>,
+}
+
+/// How one PEER send picks its route and prepares the message.
+#[derive(Clone, Copy)]
+struct SendAddress<'a> {
+    /// Explicit routing identity, or `None` to read it from the first frame.
+    identity: Option<&'a [u8]>,
+    /// Unknown identities fail instead of dropping the message.
+    mandatory: bool,
+    preparation: SendPreparation,
 }
 
 /// Each Socket clone owns its cache. Only registration changes the cache;
@@ -340,13 +384,13 @@ impl PeerRoutes {
         mandatory: bool,
         lanes: &SenderLanes,
     ) -> core::result::Result<(), TrySendError> {
-        match self.try_send_inner(
-            None,
-            message,
+        let address = SendAddress {
+            identity: None,
             mandatory,
-            lanes,
-            SendPreparation::StripIdentity,
-        ) {
+            preparation: SendPreparation::StripIdentity,
+        };
+
+        match self.try_send_inner(address, message, lanes) {
             Ok(Ok(())) => Ok(()),
             Ok(Err(SendRetry::Full(message, _))) => Err(TrySendError::Full(message)),
             Err(Error::Closed) => Err(TrySendError::Closed),
@@ -361,36 +405,36 @@ impl PeerRoutes {
         mandatory: bool,
         lanes: &SenderLanes,
     ) -> Result<core::result::Result<(), SendRetry>> {
-        self.try_send_inner(
-            Some(identity),
-            message,
+        let address = SendAddress {
+            identity: Some(identity),
             mandatory,
-            lanes,
-            SendPreparation::Plain,
-        )
+            preparation: SendPreparation::Plain,
+        };
+
+        self.try_send_inner(address, message, lanes)
     }
 
     fn try_send_inner(
         &self,
-        identity: Option<&[u8]>,
+        address: SendAddress<'_>,
         mut message: Message,
-        mandatory: bool,
         lanes: &SenderLanes,
-        preparation: SendPreparation,
     ) -> Result<core::result::Result<(), SendRetry>> {
         if self.admission_closed.load(Ordering::Acquire) {
             return Err(Error::Closed);
         }
+
         // One replacement retry keeps churn from turning a send into an
         // unbounded loop. The async caller yields on a further replacement.
         for _ in 0..2 {
             let table = self.table.load();
             let table = table.as_ref().ok_or(Error::Closed)?;
-            let identity = identity
+            let identity = address
+                .identity
                 .or_else(|| message.part_slice(0))
                 .ok_or(Error::Unroutable)?;
             let Some(route) = table.get(identity) else {
-                return if mandatory {
+                return if address.mandatory {
                     Err(Error::Unroutable)
                 } else {
                     Ok(Ok(()))
@@ -398,35 +442,19 @@ impl PeerRoutes {
             };
             if route
                 .max_bytes
-                .is_some_and(|limit| preparation.bytes(&message) > limit)
+                .is_some_and(|limit| address.preparation.bytes(&message) > limit)
             {
                 return Err(Error::Protocol(
                     "PEER message exceeds connection byte budget".into(),
                 ));
             }
+
             let lane = match lanes.get(route, table) {
                 Ok(lane) => lane,
                 Err(space) => return Ok(Err(SendRetry::Full(message, space))),
             };
-            let (result, space) = if let Some(lane) = lane {
-                let mut producer = lane.producer.lock().expect("peer producer poisoned");
-                match producer.as_mut() {
-                    Some(producer) => {
-                        let result = producer.try_send_prepared(message, preparation);
-                        (result, Some(producer.space_available()))
-                    }
-                    None => (Err(SendPipeError::Closed(message)), None),
-                }
-            } else {
-                let mut target = route.target.lock().expect("peer send queue poisoned");
-                match target.as_mut() {
-                    Some(target) => (
-                        target.try_send_prepared(message, preparation, &lanes.data),
-                        target.space_available(),
-                    ),
-                    None => (Err(SendPipeError::Closed(message)), None),
-                }
-            };
+            let (result, space) =
+                route.push(lane.as_deref(), message, address.preparation, &lanes.data);
             match result {
                 Ok(()) => return Ok(Ok(())),
                 #[cfg(feature = "dart")]
@@ -456,32 +484,13 @@ impl PeerRoutes {
             .as_ref()
             .and_then(|table| table.get(identity).cloned());
         let Some(route) = route else { return };
+
         let lane = lanes.table.load().get(&route.id).cloned();
         if let Some(lane) = lane {
-            let waiting = {
-                let producer = lane.producer.lock().expect("peer producer poisoned");
-                producer.as_ref().map(SendPipeProducer::space_available)
-            };
-            if let Some(space) = waiting {
-                space
-                    .wait_until(|| {
-                        if self.admission_closed.load(Ordering::Acquire) {
-                            return true;
-                        }
-                        lane.producer
-                            .lock()
-                            .expect("peer producer poisoned")
-                            .as_ref()
-                            .is_none_or(|p| {
-                                !Arc::ptr_eq(&space, &p.space_available())
-                                    || !p.is_alive()
-                                    || p.is_below_lwm()
-                            })
-                    })
-                    .await;
-            }
+            self.wait_lane_space(&lane).await;
             return;
         }
+
         let outbound = route
             .target
             .lock()
@@ -489,27 +498,72 @@ impl PeerRoutes {
             .as_ref()
             .and_then(|target| target.outbound(&lanes.data));
         if let Some(outbound) = outbound {
-            if let Some(space) = outbound.inbox_space() {
-                space
-                    .wait_until(|| {
-                        self.admission_closed.load(Ordering::Acquire)
-                            || route.target.lock().expect("peer target poisoned").is_none()
-                            || outbound.send_ready()
-                    })
-                    .await;
-            } else {
-                outbound.wait_capacity().await;
-            }
+            self.wait_outbound_space(&route, &outbound).await;
             return;
         }
+
+        self.wait_route_space(&route).await;
+    }
+
+    /// Wait until this clone's lane producer drains below its low-water mark,
+    /// is replaced or dies, or admission closes.
+    async fn wait_lane_space(&self, lane: &Lane) {
+        let waiting = {
+            let producer = lane.producer.lock().expect("peer producer poisoned");
+            producer.as_ref().map(SendPipeProducer::space_available)
+        };
+        let Some(space) = waiting else {
+            return;
+        };
+
+        space
+            .wait_until(|| {
+                if self.admission_closed.load(Ordering::Acquire) {
+                    return true;
+                }
+                lane.producer
+                    .lock()
+                    .expect("peer producer poisoned")
+                    .as_ref()
+                    .is_none_or(|p| {
+                        !Arc::ptr_eq(&space, &p.space_available())
+                            || !p.is_alive()
+                            || p.is_below_lwm()
+                    })
+            })
+            .await;
+    }
+
+    async fn wait_outbound_space(&self, route: &Route, outbound: &PeerOutbound) {
+        let Some(space) = outbound.inbox_space() else {
+            outbound.wait_capacity().await;
+            return;
+        };
+
+        space
+            .wait_until(|| {
+                self.admission_closed.load(Ordering::Acquire)
+                    || route.target.lock().expect("peer target poisoned").is_none()
+                    || outbound.send_ready()
+            })
+            .await;
+    }
+
+    /// Wait on the route's own space signal. Pipes have a readiness check;
+    /// other targets wait for the next signal generation.
+    async fn wait_route_space(&self, route: &Route) {
         let Some(space) = &route.space else {
             tokio::task::yield_now().await;
             return;
         };
+
+        // Snapshot the generation before checking, so a change in between
+        // still ends the wait below.
         let seen = space.generation();
         if self.admission_closed.load(Ordering::Acquire) || route.ready() {
             return;
         }
+
         let pipe = matches!(
             route
                 .target

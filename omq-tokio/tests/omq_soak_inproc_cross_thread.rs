@@ -11,6 +11,50 @@ use std::time::{Duration, Instant};
 
 use omq_tokio::{Message, Options, Socket, SocketType};
 
+/// Receives on its own task until `stop`, then drains whatever is left.
+fn spawn_receiver(
+    pull: Socket,
+    recvd: Arc<AtomicU64>,
+    stop: Arc<AtomicBool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while !stop.load(Ordering::Relaxed) {
+            if let Ok(Ok(_)) = tokio::time::timeout(Duration::from_millis(100), pull.recv()).await {
+                recvd.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        // Drain remaining.
+        while let Ok(Ok(_)) = tokio::time::timeout(Duration::from_millis(100), pull.recv()).await {
+            recvd.fetch_add(1, Ordering::Relaxed);
+        }
+    })
+}
+
+/// Sends from the calling task for `duration`, logging every 30 s.
+async fn send_for(push: &Socket, duration: Duration, sent: &AtomicU64, recvd: &AtomicU64) {
+    let start = Instant::now();
+    let mut last_log = start;
+
+    while start.elapsed() < duration {
+        if let Ok(Ok(())) =
+            tokio::time::timeout(Duration::from_millis(100), push.send(Message::single("x"))).await
+        {
+            sent.fetch_add(1, Ordering::Relaxed);
+        }
+
+        if last_log.elapsed() >= Duration::from_secs(30) {
+            let s = sent.load(Ordering::Relaxed);
+            let r = recvd.load(Ordering::Relaxed);
+            eprintln!(
+                "[inproc_xthread] {:.0}s, sent {s}, recvd {r}",
+                start.elapsed().as_secs_f64(),
+            );
+            last_log = Instant::now();
+        }
+    }
+}
+
 #[test]
 fn soak_inproc_cross_thread() {
     let duration = soak_common::soak_duration();
@@ -32,48 +76,10 @@ fn soak_inproc_cross_thread() {
         push.connect(ep).await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        let recv_recvd = recvd.clone();
-        let recv_stop = stop.clone();
-        let pull_clone = pull.clone();
-        let recv_task = tokio::spawn(async move {
-            while !recv_stop.load(Ordering::Relaxed) {
-                if let Ok(Ok(_)) =
-                    tokio::time::timeout(Duration::from_millis(100), pull_clone.recv()).await
-                {
-                    recv_recvd.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-            // Drain remaining.
-            while let Ok(Ok(_)) =
-                tokio::time::timeout(Duration::from_millis(100), pull_clone.recv()).await
-            {
-                recv_recvd.fetch_add(1, Ordering::Relaxed);
-            }
-        });
-
-        let push_sent = sent.clone();
-        let push_recvd = recvd.clone();
-        let start = Instant::now();
-        let mut last_log = start;
-
-        while start.elapsed() < duration {
-            if let Ok(Ok(())) =
-                tokio::time::timeout(Duration::from_millis(100), push.send(Message::single("x")))
-                    .await
-            {
-                push_sent.fetch_add(1, Ordering::Relaxed);
-            }
-
-            if last_log.elapsed() >= Duration::from_secs(30) {
-                let s = push_sent.load(Ordering::Relaxed);
-                let r = push_recvd.load(Ordering::Relaxed);
-                eprintln!(
-                    "[inproc_xthread] {:.0}s, sent {s}, recvd {r}",
-                    start.elapsed().as_secs_f64(),
-                );
-                last_log = Instant::now();
-            }
-        }
+        // Sender and receiver run on different tasks, so with a multi-thread
+        // context the inproc ring is crossed between threads.
+        let recv_task = spawn_receiver(pull.clone(), recvd.clone(), stop.clone());
+        send_for(&push, duration, &sent, &recvd).await;
 
         push.close().await.unwrap();
 

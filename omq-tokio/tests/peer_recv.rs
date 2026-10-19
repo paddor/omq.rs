@@ -114,17 +114,92 @@ async fn identity_view_preserves_targeted_claims_and_explicit_body_sends() {
     client.into_inner().close().await.unwrap();
 }
 
-async fn source_backpressure(endpoint: Endpoint) {
-    let context = Context::with_config(ContextConfig { io_threads: 2 });
-    let server = context.socket(SocketType::Peer, options("server"));
+async fn recv_within(socket: &Socket) -> Message {
+    tokio::time::timeout(DEADLINE, socket.recv())
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+/// Binds a "server" PEER on `endpoint`, connects PEERs "a" and "b" to it,
+/// and waits until every side sees its connections.
+async fn server_with_clients(
+    context: &Context,
+    endpoint: Endpoint,
+    server_options: Options,
+    a_options: Options,
+    b_options: Options,
+) -> (Socket, Socket, Socket) {
+    let server = context.socket(SocketType::Peer, server_options);
     let endpoint = server.bind(endpoint).await.unwrap();
-    let a = context.socket(SocketType::Peer, options("a"));
-    let b = context.socket(SocketType::Peer, options("b"));
+    let a = context.socket(SocketType::Peer, a_options);
+    let b = context.socket(SocketType::Peer, b_options);
     a.connect(endpoint.clone()).await.unwrap();
     b.connect(endpoint).await.unwrap();
+
     connected(&a).await;
     connected(&b).await;
     server.wait_connected(2, DEADLINE).await.unwrap();
+    (server, a, b)
+}
+
+/// With A's source paused and saturated, B still reaches the server and
+/// the server can still reply to A.
+async fn assert_b_and_replies_progress(
+    server: &Socket,
+    receiving: &Socket,
+    a: &Socket,
+    b: &Socket,
+) {
+    b.send(Message::multipart(["server", "healthy"]))
+        .await
+        .unwrap();
+    let healthy = recv_within(receiving).await;
+    assert_eq!(healthy.part_slice(0), Some(b"b".as_slice()));
+    assert_eq!(healthy.part_slice(1), Some(b"healthy".as_slice()));
+
+    server
+        .send(Message::multipart(["a", "reply while paused"]))
+        .await
+        .unwrap();
+    let reply = recv_within(a).await;
+    assert_eq!(reply.part_slice(1), Some(b"reply while paused".as_slice()));
+}
+
+/// Claims `source`, then shows that a second targeted wait on it stays
+/// pending until the socket closes.
+async fn assert_targeted_wait_ends_on_close(
+    server: Socket,
+    receiving: &Socket,
+    source: &omq_tokio::ReceiveLane,
+) {
+    let (receipt, _) = server.recv_with_receipt(Some(source)).await.unwrap();
+    let mut waiting = Box::pin(receiving.recv_with_receipt(Some(source)));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), waiting.as_mut())
+            .await
+            .is_err()
+    );
+
+    server.close().await.unwrap();
+    assert!(matches!(
+        tokio::time::timeout(DEADLINE, waiting).await.unwrap(),
+        Err(Error::Closed)
+    ));
+    drop(receipt);
+}
+
+async fn source_backpressure(endpoint: Endpoint) {
+    let context = Context::with_config(ContextConfig { io_threads: 2 });
+    let (server, a, b) = server_with_clients(
+        &context,
+        endpoint,
+        options("server"),
+        options("a"),
+        options("b"),
+    )
+    .await;
+
     a.send(Message::multipart(["server", "held"]))
         .await
         .unwrap();
@@ -134,6 +209,7 @@ async fn source_backpressure(endpoint: Endpoint) {
         .unwrap();
     assert_eq!(receipt.identity(), Some(b"a".as_slice()));
     let source = receipt.lane().unwrap().clone();
+
     // Another application handle cannot overtake a live receipt.
     let receiving = server.clone();
     a.send(Message::multipart(["server", "next"]))
@@ -144,74 +220,91 @@ async fn source_backpressure(endpoint: Endpoint) {
         Err(Error::WouldBlock)
     ));
     server.unshift(receipt, message).unwrap();
+
     // Saturate only A. Outbound replies and B must remain usable.
     saturate(&a, "server").await;
-    b.send(Message::multipart(["server", "healthy"]))
-        .await
-        .unwrap();
-    let healthy = tokio::time::timeout(DEADLINE, receiving.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(healthy.part_slice(0), Some(b"b".as_slice()));
-    assert_eq!(healthy.part_slice(1), Some(b"healthy".as_slice()));
-    server
-        .send(Message::multipart(["a", "reply while paused"]))
-        .await
-        .unwrap();
-    let reply = tokio::time::timeout(DEADLINE, a.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(reply.part_slice(1), Some(b"reply while paused".as_slice()));
+    assert_b_and_replies_progress(&server, &receiving, &a, &b).await;
+
+    // An unshifted message stays at the head of its lane, and the claim
+    // keeps untargeted receives from reading past it.
     for _ in 0..3 {
         let (receipt, message) = receiving.try_recv_with_receipt(Some(&source)).unwrap();
         assert_eq!(message.part_slice(0), Some(b"held".as_slice()));
         assert!(matches!(server.try_recv(), Err(Error::WouldBlock)));
         receiving.unshift(receipt, message).unwrap();
     }
+
     let (receipt, _) = server.try_recv_with_receipt(Some(&source)).unwrap();
     drop(receipt);
-    let next = tokio::time::timeout(DEADLINE, receiving.recv())
-        .await
-        .unwrap()
-        .unwrap();
+    let next = recv_within(&receiving).await;
     assert_eq!(next.part_slice(1), Some(b"next".as_slice()));
+
     // A targeted wait on an outstanding claim must terminate on close.
-    let (receipt, _) = server.recv_with_receipt(Some(&source)).await.unwrap();
-    let mut waiting = Box::pin(receiving.recv_with_receipt(Some(&source)));
-    assert!(
-        tokio::time::timeout(Duration::from_millis(10), waiting.as_mut())
-            .await
-            .is_err()
-    );
-    server.close().await.unwrap();
-    assert!(matches!(
-        tokio::time::timeout(DEADLINE, waiting).await.unwrap(),
-        Err(Error::Closed)
-    ));
-    drop(receipt);
+    assert_targeted_wait_ends_on_close(server, &receiving, &source).await;
     a.close().await.unwrap();
     b.close().await.unwrap();
+}
+
+/// Sends large messages from `a` until one send stays pending for 100 ms.
+async fn fill_until_backpressure(a: &Socket, payload: &Bytes) {
+    tokio::time::timeout(DEADLINE, async {
+        // Inproc's bounded relay has 1024 slots in addition to socket queues.
+        for _ in 0..4096 {
+            let message = Message::multipart([Bytes::from_static(b"server"), payload.clone()]);
+            match tokio::time::timeout(Duration::from_millis(100), a.send(message)).await {
+                Err(_) => return,
+                Ok(result) => result.unwrap(),
+            }
+        }
+        panic!("paused large-message source did not backpressure");
+    })
+    .await
+    .unwrap();
+}
+
+/// B's large messages keep arriving while A's paused lane is claimed and
+/// unshifted between them.
+async fn assert_large_b_progresses(
+    server: &Socket,
+    b: &Socket,
+    source: &omq_tokio::ReceiveLane,
+    payload: &Bytes,
+) {
+    for _ in 0..3 {
+        b.send(Message::multipart([
+            Bytes::from_static(b"server"),
+            payload.clone(),
+        ]))
+        .await
+        .unwrap();
+        let (receipt, body) = tokio::time::timeout(DEADLINE, server.recv_with_receipt(None))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.identity(), Some(b"b".as_slice()));
+        assert_eq!(body.part_slice(0).unwrap().len(), payload.len());
+        drop((receipt, body));
+
+        let (receipt, body) = server.try_recv_with_receipt(Some(source)).unwrap();
+        assert_eq!(body.part_slice(0).unwrap().len(), payload.len());
+        server.unshift(receipt, body).unwrap();
+    }
 }
 
 async fn large_source_backpressure(endpoint: Endpoint) {
     const SIZE: usize = 8 * 1024 * 1024;
     let context = Context::with_config(ContextConfig { io_threads: 2 });
-    let server = context.socket(
-        SocketType::Peer,
+    let (server, a, b) = server_with_clients(
+        &context,
+        endpoint,
         options("server")
             .max_message_size(SIZE + 1024)
             .peer_recv_max_bytes(16 * 1024 * 1024),
-    );
-    let endpoint = server.bind(endpoint).await.unwrap();
-    let a = context.socket(SocketType::Peer, options("a").max_message_size(SIZE + 1024));
-    let b = context.socket(SocketType::Peer, options("b").max_message_size(SIZE + 1024));
-    a.connect(endpoint.clone()).await.unwrap();
-    b.connect(endpoint).await.unwrap();
-    server.wait_connected(2, DEADLINE).await.unwrap();
-    connected(&a).await;
-    connected(&b).await;
+        options("a").max_message_size(SIZE + 1024),
+        options("b").max_message_size(SIZE + 1024),
+    )
+    .await;
+
     let payload = Bytes::from(vec![7; SIZE]);
     a.send(Message::multipart([
         Bytes::from_static(b"server"),
@@ -227,56 +320,25 @@ async fn large_source_backpressure(endpoint: Endpoint) {
     let source = receipt.lane().unwrap().clone();
     server.unshift(receipt, body).unwrap();
 
-    tokio::time::timeout(DEADLINE, async {
-        // Inproc's bounded relay has 1024 slots in addition to socket queues.
-        for _ in 0..4096 {
-            let message = Message::multipart([Bytes::from_static(b"server"), payload.clone()]);
-            match tokio::time::timeout(Duration::from_millis(100), a.send(message)).await {
-                Err(_) => return,
-                Ok(result) => result.unwrap(),
-            }
-        }
-        panic!("paused large-message source did not backpressure");
-    })
-    .await
-    .unwrap();
+    // A's lane stays paused behind the unshifted message, so its sends
+    // must eventually block on the receive byte budget.
+    fill_until_backpressure(&a, &payload).await;
+    assert_large_b_progresses(&server, &b, &source, &payload).await;
 
-    for _ in 0..3 {
-        b.send(Message::multipart([
-            Bytes::from_static(b"server"),
-            payload.clone(),
-        ]))
-        .await
-        .unwrap();
-        let (receipt, body) = tokio::time::timeout(DEADLINE, server.recv_with_receipt(None))
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(receipt.identity(), Some(b"b".as_slice()));
-        assert_eq!(body.part_slice(0).unwrap().len(), SIZE);
-        drop((receipt, body));
-        let (receipt, body) = server.try_recv_with_receipt(Some(&source)).unwrap();
-        assert_eq!(body.part_slice(0).unwrap().len(), SIZE);
-        server.unshift(receipt, body).unwrap();
-    }
     server
         .send(Message::multipart(["a", "reply while paused"]))
         .await
         .unwrap();
-    let reply = tokio::time::timeout(DEADLINE, a.recv())
-        .await
-        .unwrap()
-        .unwrap();
+    let reply = recv_within(&a).await;
     assert_eq!(reply.part_slice(1), Some(b"reply while paused".as_slice()));
 
+    // Consuming the held message resumes A's lane.
     let (receipt, body) = server.try_recv_with_receipt(Some(&source)).unwrap();
     drop((receipt, body));
-    let next = tokio::time::timeout(DEADLINE, server.recv())
-        .await
-        .unwrap()
-        .unwrap();
+    let next = recv_within(&server).await;
     assert_eq!(next.part_slice(0), Some(b"a".as_slice()));
     assert_eq!(next.part_slice(1).unwrap().len(), SIZE);
+
     server.close().await.unwrap();
     a.close().await.unwrap();
     b.close().await.unwrap();
@@ -308,25 +370,15 @@ async fn inproc_source_receipts_propagate_pressure_and_keep_other_peers_progress
     .await;
 }
 
-async fn exercise(endpoint: Endpoint) {
-    let context = Context::with_config(ContextConfig { io_threads: 2 });
-    let server = context.socket(SocketType::Peer, options("server"));
-    let endpoint = server.bind(endpoint).await.unwrap();
-    let a = context.socket(SocketType::Peer, options("a"));
-    let b = context.socket(SocketType::Peer, options("b"));
-    a.connect(endpoint.clone()).await.unwrap();
-    b.connect(endpoint).await.unwrap();
-    connected(&a).await;
-    connected(&b).await;
-    server.wait_connected(2, DEADLINE).await.unwrap();
-    // Receive on an application thread, not either OMQ I/O thread. Bulk
-    // receives preserve each peer's FIFO without assigning peers to workers.
-    let receiving = server.clone();
-    let worker = std::thread::spawn(move || {
+/// Echoes 128 messages from each of "a" and "b" back to their sender on
+/// its own runtime thread, checking per-peer FIFO across bulk receives.
+fn spawn_echo_worker(receiving: Socket) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
+
         runtime.block_on(async {
             let mut next = [0u32; 2];
             let mut batch = Vec::new();
@@ -336,6 +388,7 @@ async fn exercise(endpoint: Endpoint) {
                     .await
                     .unwrap()
                     .unwrap();
+
                 for message in batch.drain(..) {
                     let index = match message.part_slice(0).unwrap() {
                         b"a" => 0,
@@ -347,11 +400,29 @@ async fn exercise(endpoint: Endpoint) {
                         Some(next[index].to_le_bytes().as_slice())
                     );
                     next[index] += 1;
+                    // The identity frame routes the echo back to its sender.
                     receiving.send(message).await.unwrap();
                 }
             }
         });
-    });
+    })
+}
+
+async fn exercise(endpoint: Endpoint) {
+    let context = Context::with_config(ContextConfig { io_threads: 2 });
+    let (server, a, b) = server_with_clients(
+        &context,
+        endpoint,
+        options("server"),
+        options("a"),
+        options("b"),
+    )
+    .await;
+
+    // Receive on an application thread, not either OMQ I/O thread. Bulk
+    // receives preserve each peer's FIFO without assigning peers to workers.
+    let worker = spawn_echo_worker(server.clone());
+
     for sequence in 0u32..128 {
         for client in [&a, &b] {
             client
@@ -362,17 +433,16 @@ async fn exercise(endpoint: Endpoint) {
                 .await
                 .unwrap();
         }
+
         for client in [&a, &b] {
-            let message = tokio::time::timeout(DEADLINE, client.recv())
-                .await
-                .unwrap()
-                .unwrap();
+            let message = recv_within(client).await;
             assert_eq!(
                 message.part_slice(1),
                 Some(sequence.to_le_bytes().as_slice())
             );
         }
     }
+
     worker.join().unwrap();
     server.close().await.unwrap();
     a.close().await.unwrap();
@@ -413,58 +483,32 @@ async fn full_queue(endpoint: Endpoint, heartbeat: bool) {
     full_queue_with_threads(endpoint, heartbeat, 2).await;
 }
 
-async fn full_queue_with_threads(endpoint: Endpoint, heartbeat: bool, io_threads: usize) {
-    let context = Context::with_config(ContextConfig { io_threads });
-    let mut server_options = options("server");
+fn with_heartbeat(options: Options, heartbeat: bool) -> Options {
     if heartbeat {
-        server_options = server_options
+        options
             .heartbeat_interval(Duration::from_millis(50))
-            .heartbeat_timeout(Duration::from_millis(200));
+            .heartbeat_timeout(Duration::from_millis(200))
+    } else {
+        options
     }
-    let server = context.socket(SocketType::Peer, server_options);
-    let endpoint = server.bind(endpoint).await.unwrap();
-    let mut client_options = options("a");
-    if heartbeat {
-        client_options = client_options
-            .heartbeat_interval(Duration::from_millis(50))
-            .heartbeat_timeout(Duration::from_millis(200));
+}
+
+/// Sends `count` "busy" messages from `client` to "server".
+async fn send_busy(client: &Socket, count: usize) {
+    for _ in 0..count {
+        client
+            .send(Message::multipart([
+                Bytes::from_static(b"server"),
+                Bytes::from_static(b"busy"),
+            ]))
+            .await
+            .unwrap();
     }
-    let a = context.socket(SocketType::Peer, client_options);
-    let b = context.socket(SocketType::Peer, options("b"));
-    a.connect(endpoint.clone()).await.unwrap();
-    b.connect(endpoint).await.unwrap();
-    connected(&a).await;
-    connected(&b).await;
-    server.wait_connected(2, DEADLINE).await.unwrap();
-    for _ in 0..32 {
-        a.send(Message::multipart([
-            Bytes::from_static(b"server"),
-            Bytes::from_static(b"busy"),
-        ]))
-        .await
-        .unwrap();
-    }
-    // Keep A's 16-slot receive ring full for multiple heartbeat deadlines.
-    // Outgoing replies must progress before we drain any server input.
-    tokio::time::sleep(Duration::from_millis(650)).await;
-    b.send(Message::multipart([
-        Bytes::from_static(b"server"),
-        Bytes::from_static(b"independent"),
-    ]))
-    .await
-    .unwrap();
-    server
-        .send(Message::multipart([
-            Bytes::from_static(b"a"),
-            Bytes::from_static(b"reply while full"),
-        ]))
-        .await
-        .unwrap();
-    let reply = tokio::time::timeout(DEADLINE, a.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(reply.part_slice(1), Some(b"reply while full".as_slice()));
+}
+
+/// Receives A's 32 queued messages and B's one "independent" message,
+/// in any interleaving, and returns the per-peer counts.
+async fn count_a_and_b(server: &Socket) -> [usize; 2] {
     let mut counts = [0; 2];
     tokio::time::timeout(DEADLINE, async {
         for _ in 0..33 {
@@ -481,16 +525,46 @@ async fn full_queue_with_threads(endpoint: Endpoint, heartbeat: bool, io_threads
     })
     .await
     .unwrap();
-    assert_eq!(counts, [32, 1]);
-    // A full peer queue must not delay zero-linger shutdown either.
-    for _ in 0..32 {
-        b.send(Message::multipart([
-            Bytes::from_static(b"server"),
-            Bytes::from_static(b"busy"),
+    counts
+}
+
+async fn full_queue_with_threads(endpoint: Endpoint, heartbeat: bool, io_threads: usize) {
+    let context = Context::with_config(ContextConfig { io_threads });
+    let (server, a, b) = server_with_clients(
+        &context,
+        endpoint,
+        with_heartbeat(options("server"), heartbeat),
+        with_heartbeat(options("a"), heartbeat),
+        options("b"),
+    )
+    .await;
+
+    send_busy(&a, 32).await;
+    // Keep A's 16-slot receive ring full for multiple heartbeat deadlines.
+    // Outgoing replies must progress before we drain any server input.
+    tokio::time::sleep(Duration::from_millis(650)).await;
+
+    b.send(Message::multipart([
+        Bytes::from_static(b"server"),
+        Bytes::from_static(b"independent"),
+    ]))
+    .await
+    .unwrap();
+    server
+        .send(Message::multipart([
+            Bytes::from_static(b"a"),
+            Bytes::from_static(b"reply while full"),
         ]))
         .await
         .unwrap();
-    }
+    let reply = recv_within(&a).await;
+    assert_eq!(reply.part_slice(1), Some(b"reply while full".as_slice()));
+
+    // Nothing queued was lost while A's ring stayed full.
+    assert_eq!(count_a_and_b(&server).await, [32, 1]);
+
+    // A full peer queue must not delay zero-linger shutdown either.
+    send_busy(&b, 32).await;
     tokio::time::timeout(DEADLINE, server.close())
         .await
         .unwrap()
@@ -656,6 +730,35 @@ async fn rejected_replacement_does_not_evict_live_identity() {
     server.close().await.unwrap();
 }
 
+/// Sends "before handover" from `client` and returns the sender identity
+/// snapshot the server attached to it.
+async fn send_and_snapshot(client: &Socket, server: &Socket) -> omq_tokio::Identity {
+    client
+        .send(Message::multipart(["server", "before handover"]))
+        .await
+        .unwrap();
+    let message = recv_within(server).await;
+    assert_eq!(message.part_slice(1), Some(b"before handover".as_slice()));
+    message.sender_identity().unwrap().clone()
+}
+
+/// Connects a new client with the same identity and waits for the server
+/// to complete its handshake, which hands the route over to it.
+async fn connect_replacement(
+    context: &Context,
+    server: &Socket,
+    endpoint: &Endpoint,
+    client_options: Options,
+) -> Socket {
+    let mut monitor = server.monitor();
+    let replacement = context.socket(SocketType::Peer, client_options);
+    replacement.connect(endpoint.clone()).await.unwrap();
+
+    test_support::wait_for_handshake_on(&mut monitor).await;
+    connected(&replacement).await;
+    replacement
+}
+
 #[tokio::test]
 async fn reconnect_churn_discards_stale_backlogs_and_reclaims_retired_rings() {
     for endpoint in [
@@ -672,39 +775,29 @@ async fn reconnect_churn_discards_stale_backlogs_and_reclaims_retired_rings() {
         current.connect(endpoint.clone()).await.unwrap();
         connected(&current).await;
         connected(&server).await;
+
         let mut snapshots = Vec::new();
         for _ in 0..160 {
-            current
-                .send(Message::multipart(["server", "before handover"]))
-                .await
-                .unwrap();
-            let message = tokio::time::timeout(DEADLINE, server.recv())
-                .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(message.part_slice(1), Some(b"before handover".as_slice()));
-            let snapshot = message.sender_identity().unwrap().clone();
+            // Each connection generation gets a distinct identity snapshot.
+            let snapshot = send_and_snapshot(&current, &server).await;
             assert!(snapshots.iter().all(|old| *old != snapshot));
             snapshots.push(snapshot);
+
+            // Leave a backlog the handover must discard.
             for _ in 0..16 {
                 current
                     .send(Message::multipart(["server", "stale"]))
                     .await
                     .unwrap();
             }
-            let mut monitor = server.monitor();
-            let replacement = context.socket(SocketType::Peer, client_options.clone());
-            replacement.connect(endpoint.clone()).await.unwrap();
-            test_support::wait_for_handshake_on(&mut monitor).await;
-            connected(&replacement).await;
+
+            let replacement =
+                connect_replacement(&context, &server, &endpoint, client_options.clone()).await;
             replacement
                 .send(Message::multipart(["server", "current"]))
                 .await
                 .unwrap();
-            let message = tokio::time::timeout(DEADLINE, server.recv())
-                .await
-                .unwrap()
-                .unwrap();
+            let message = recv_within(&server).await;
             assert_eq!(message.part_slice(1), Some(b"current".as_slice()));
             current.close().await.unwrap();
             // More generations than the 128-slot default prove retired
@@ -723,7 +816,96 @@ async fn reconnect_churn_discards_stale_backlogs_and_reclaims_retired_rings() {
     }
 }
 
-#[expect(clippy::too_many_lines)]
+/// A floods 32 messages, B and C send one each. All 34 arrive, and B's
+/// message is echoed back through a sender clone while A's backlog drains.
+async fn assert_quiet_peers_progress(
+    server: &Socket,
+    echo: &Socket,
+    a: &Socket,
+    b: &Socket,
+    c: &Socket,
+) {
+    for _ in 0..32 {
+        a.send(Message::multipart(["server", "busy"]))
+            .await
+            .unwrap();
+    }
+    b.send(Message::multipart(["server", "independent"]))
+        .await
+        .unwrap();
+    c.send(Message::multipart(["server", "other peer"]))
+        .await
+        .unwrap();
+
+    tokio::time::timeout(DEADLINE, async {
+        let mut counts = [0; 3];
+        for _ in 0..34 {
+            let message = server.recv().await.unwrap();
+            match message.part_slice(0).unwrap() {
+                b"a" => counts[0] += 1,
+                b"b" => {
+                    counts[1] += 1;
+                    echo.send(message).await.unwrap();
+                }
+                b"c" => {
+                    counts[2] += 1;
+                    assert_eq!(message.part_slice(1), Some(b"other peer".as_slice()));
+                }
+                identity => panic!("unexpected identity: {identity:?}"),
+            }
+        }
+        assert_eq!(counts, [32, 1, 1]);
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        recv_within(b).await.part_slice(1),
+        Some(b"independent".as_slice())
+    );
+}
+
+/// Sends from both sender clones to B and C reach them while A's outbound
+/// path is saturated.
+async fn assert_send_isolation(senders: &[Socket; 2], b: &Socket, c: &Socket) {
+    senders[0]
+        .send(Message::multipart(["b", "send isolation"]))
+        .await
+        .unwrap();
+    assert_eq!(
+        recv_within(b).await.part_slice(1),
+        Some(b"send isolation".as_slice())
+    );
+
+    senders[1]
+        .send(Message::multipart(["c", "other reply"]))
+        .await
+        .unwrap();
+    assert_eq!(
+        recv_within(c).await.part_slice(1),
+        Some(b"other reply".as_slice())
+    );
+}
+
+/// A receive canceled by its timeout must not consume the next message.
+async fn assert_canceled_recv_consumes_nothing(receiver: &Socket, sender: &Socket, c: &Socket) {
+    assert!(
+        tokio::time::timeout(Duration::from_millis(5), receiver.recv())
+            .await
+            .is_err()
+    );
+
+    c.send(Message::multipart(["server", "after cancel"]))
+        .await
+        .unwrap();
+    let message = recv_within(receiver).await;
+    sender.send(message).await.unwrap();
+    assert_eq!(
+        recv_within(c).await.part_slice(1),
+        Some(b"after cancel".as_slice())
+    );
+}
+
 async fn overload_matrix_case(endpoint: Endpoint, io_threads: usize) {
     let context = Context::with_config(ContextConfig { io_threads });
     let server = context.socket(SocketType::Peer, options("server"));
@@ -737,100 +919,19 @@ async fn overload_matrix_case(endpoint: Endpoint, io_threads: usize) {
         connected(client).await;
     }
     server.wait_connected(3, DEADLINE).await.unwrap();
+
     // A exceeds its ring. Quiet peers must still make progress.
-    for _ in 0..32 {
-        a.send(Message::multipart(["server", "busy"]))
-            .await
-            .unwrap();
-    }
-    b.send(Message::multipart(["server", "independent"]))
-        .await
-        .unwrap();
-    c.send(Message::multipart(["server", "other peer"]))
-        .await
-        .unwrap();
-    tokio::time::timeout(DEADLINE, async {
-        let mut counts = [0; 3];
-        for _ in 0..34 {
-            let message = server.recv().await.unwrap();
-            match message.part_slice(0).unwrap() {
-                b"a" => counts[0] += 1,
-                b"b" => {
-                    counts[1] += 1;
-                    senders[0].send(message).await.unwrap();
-                }
-                b"c" => {
-                    counts[2] += 1;
-                    assert_eq!(message.part_slice(1), Some(b"other peer".as_slice()));
-                }
-                identity => panic!("unexpected identity: {identity:?}"),
-            }
-        }
-        assert_eq!(counts, [32, 1, 1]);
-    })
-    .await
-    .unwrap();
-    assert_eq!(
-        tokio::time::timeout(DEADLINE, b.recv())
-            .await
-            .unwrap()
-            .unwrap()
-            .part_slice(1),
-        Some(b"independent".as_slice())
-    );
+    assert_quiet_peers_progress(&server, &senders[0], &a, &b, &c).await;
 
     // A stops receiving. Prove a send remains blocked after transient driver
     // scheduling has had time to drain, then cancel that pending admission.
     saturate(&server, "a").await;
-    senders[0]
-        .send(Message::multipart(["b", "send isolation"]))
-        .await
-        .unwrap();
-    assert_eq!(
-        tokio::time::timeout(DEADLINE, b.recv())
-            .await
-            .unwrap()
-            .unwrap()
-            .part_slice(1),
-        Some(b"send isolation".as_slice())
-    );
-    senders[1]
-        .send(Message::multipart(["c", "other reply"]))
-        .await
-        .unwrap();
-    assert_eq!(
-        tokio::time::timeout(DEADLINE, c.recv())
-            .await
-            .unwrap()
-            .unwrap()
-            .part_slice(1),
-        Some(b"other reply".as_slice())
-    );
+    assert_send_isolation(&senders, &b, &c).await;
 
-    let sender = &senders[1];
-    let receiver = server.clone();
     // Sending and receiving are independent; canceled receive consumes nothing.
-    assert!(
-        tokio::time::timeout(Duration::from_millis(5), receiver.recv())
-            .await
-            .is_err()
-    );
-    c.send(Message::multipart(["server", "after cancel"]))
-        .await
-        .unwrap();
-    let message = tokio::time::timeout(DEADLINE, receiver.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    sender.send(message).await.unwrap();
-    assert_eq!(
-        tokio::time::timeout(DEADLINE, c.recv())
-            .await
-            .unwrap()
-            .unwrap()
-            .part_slice(1),
-        Some(b"after cancel".as_slice())
-    );
+    let receiver = server.clone();
+    assert_canceled_recv_consumes_nothing(&receiver, &senders[1], &c).await;
+
     tokio::time::timeout(DEADLINE, server.close())
         .await
         .unwrap()
@@ -899,48 +1000,56 @@ async fn socket_clones_and_concurrently_shared_handle_preserve_sender_fifo() {
     }
 }
 
+fn fifo_options(
+    identity: &'static str,
+    hwm: u32,
+    profile: omq_tokio::options::WorkloadProfile,
+) -> Options {
+    options(identity)
+        .send_hwm(hwm)
+        .recv_hwm(hwm)
+        .workload_profile(profile)
+}
+
+/// Spawns four tasks sending 128 sequenced messages each. Tasks 0 and 1
+/// share one handle, tasks 2 and 3 use their own clones.
+fn spawn_fifo_senders(client: &Socket) -> Vec<tokio::task::JoinHandle<()>> {
+    let shared = std::sync::Arc::new(client.clone());
+    (0u8..4)
+        .map(|index| {
+            let sender = if index < 2 {
+                shared.clone()
+            } else {
+                std::sync::Arc::new(client.clone())
+            };
+            tokio::spawn(async move {
+                for sequence in 0u8..128 {
+                    sender
+                        .send(Message::multipart([
+                            Bytes::from_static(b"server"),
+                            Bytes::from(vec![index, sequence]),
+                        ]))
+                        .await
+                        .unwrap();
+                }
+            })
+        })
+        .collect()
+}
+
 async fn shared_sender_fifo(hwm: u32, profile: omq_tokio::options::WorkloadProfile) {
     for io_threads in [1, 2, 4] {
         let context = Context::with_config(ContextConfig { io_threads });
-        let server = context.socket(
-            SocketType::Peer,
-            options("server")
-                .send_hwm(hwm)
-                .recv_hwm(hwm)
-                .workload_profile(profile),
-        );
+        let server = context.socket(SocketType::Peer, fifo_options("server", hwm, profile));
         let endpoint = server.bind(test_support::tcp_loopback(0)).await.unwrap();
-        let client = context.socket(
-            SocketType::Peer,
-            options("client")
-                .send_hwm(hwm)
-                .recv_hwm(hwm)
-                .workload_profile(profile),
-        );
+        let client = context.socket(SocketType::Peer, fifo_options("client", hwm, profile));
         client.connect(endpoint).await.unwrap();
         connected(&client).await;
         connected(&server).await;
-        let shared = std::sync::Arc::new(client.clone());
-        let senders: Vec<_> = (0u8..4)
-            .map(|index| {
-                let sender = if index < 2 {
-                    shared.clone()
-                } else {
-                    std::sync::Arc::new(client.clone())
-                };
-                tokio::spawn(async move {
-                    for sequence in 0u8..128 {
-                        sender
-                            .send(Message::multipart([
-                                Bytes::from_static(b"server"),
-                                Bytes::from(vec![index, sequence]),
-                            ]))
-                            .await
-                            .unwrap();
-                    }
-                })
-            })
-            .collect();
+
+        let senders = spawn_fifo_senders(&client);
+
+        // Senders interleave freely, but each one's sequence stays in order.
         let mut next = [0usize; 4];
         tokio::time::timeout(DEADLINE, async {
             for _ in 0..512 {
@@ -957,10 +1066,12 @@ async fn shared_sender_fifo(hwm: u32, profile: omq_tokio::options::WorkloadProfi
                 senders.iter().map(tokio::task::JoinHandle::is_finished).collect::<Vec<_>>()
             );
         });
+
         for sender in senders {
             sender.await.unwrap();
         }
         assert_eq!(next, [128; 4]);
+
         server.close().await.unwrap();
         client.close().await.unwrap();
     }

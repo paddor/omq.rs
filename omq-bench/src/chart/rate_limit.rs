@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 
 use super::common::{
-    C_OMQ_1T, C_OMQ_CT, CpuData, Impl, ValMap, draw_throughput_dual_panel, out_dir,
+    C_OMQ_1T, C_OMQ_CT, ChartSpec, CpuColumns, CpuData, Impl, ValMap, draw_throughput_dual_panel,
+    out_dir,
 };
 use crate::bench::pushpull_rate_limit::{BURST, CACHE, RATE, Row, SIZES, link};
 use crate::jsonl;
@@ -99,9 +100,33 @@ pub(crate) fn generate() {
         eprintln!("No complete TCP rate-limit campaign; chart unchanged");
         return;
     }
+
+    let (msgs, tput, cpu) = series_data(&selected);
+
+    let dir = out_dir().join("pushpull");
+    std::fs::create_dir_all(&dir).expect("chart directory");
+    let path = dir.join("tcp_rate_limit.svg");
+    let spec = ChartSpec {
+        out_path: &path,
+        title: "PUSH/PULL TCP, 2-process, 1000 Mbit/s netem; limiter: 800 Mbit/s, 1 MB burst",
+        sizes: SIZES,
+        impls: SERIES,
+    };
+    let columns = CpuColumns {
+        cpu: &cpu,
+        snd_label: "snd CPU%",
+        rcv_label: "rcv CPU%",
+    };
+    draw_throughput_dual_panel(&spec, &tput, &msgs, &columns).expect("draw TCP rate-limit chart");
+    eprintln!("Written: {}", path.display());
+}
+
+/// Message rate, MB/s, and mean CPU% per series from the selected medians.
+fn series_data(selected: &[Row]) -> (ValMap, ValMap, BTreeMap<String, CpuData>) {
     let mut msgs = ValMap::new();
     let mut tput = ValMap::new();
     let mut cpu = BTreeMap::new();
+
     for series in SERIES {
         let rows: Vec<_> = selected
             .iter()
@@ -115,41 +140,26 @@ pub(crate) fn generate() {
                 .or_default()
                 .insert(series.key.into(), row.msgs_s() * row.msg_size as f64 / 1e6);
         }
+
         cpu.insert(
             series.key.into(),
             CpuData {
-                sender: Some(
-                    rows.iter()
-                        .map(|row| row.sender_cpu / row.elapsed * 100.0)
-                        .sum::<f64>()
-                        / rows.len() as f64,
-                ),
-                receiver: Some(
-                    rows.iter()
-                        .map(|row| row.receiver_cpu / row.elapsed * 100.0)
-                        .sum::<f64>()
-                        / rows.len() as f64,
-                ),
+                sender: Some(mean_cpu_pct(&rows, |row| row.sender_cpu)),
+                receiver: Some(mean_cpu_pct(&rows, |row| row.receiver_cpu)),
                 runtime_workers: None,
             },
         );
     }
-    let dir = out_dir().join("pushpull");
-    std::fs::create_dir_all(&dir).expect("chart directory");
-    let path = dir.join("tcp_rate_limit.svg");
-    draw_throughput_dual_panel(
-        &path,
-        "PUSH/PULL TCP, 2-process, 1000 Mbit/s netem; limiter: 800 Mbit/s, 1 MB burst",
-        SIZES,
-        SERIES,
-        &tput,
-        &msgs,
-        &cpu,
-        "snd CPU%",
-        "rcv CPU%",
-    )
-    .expect("draw TCP rate-limit chart");
-    eprintln!("Written: {}", path.display());
+
+    (msgs, tput, cpu)
+}
+
+/// Mean over rows of CPU seconds per elapsed second, in percent.
+fn mean_cpu_pct(rows: &[&Row], cpu_seconds: impl Fn(&Row) -> f64) -> f64 {
+    rows.iter()
+        .map(|row| cpu_seconds(row) / row.elapsed * 100.0)
+        .sum::<f64>()
+        / rows.len() as f64
 }
 
 #[cfg(test)]

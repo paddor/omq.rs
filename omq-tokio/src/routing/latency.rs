@@ -425,7 +425,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{LatencySend, Peer};
-    use crate::engine::transmit_slot::PeerTransmitSlot;
+    use crate::engine::transmit_slot::{PeerTransmitSlot, SlotConfig};
     use crate::engine::{ActorPeerDriverHandle, PeerDriverCommand};
     use crate::routing::peer_outbound::PeerOutbound;
     use omq_proto::frame_buffer::ARENA_THRESHOLD;
@@ -467,16 +467,14 @@ mod tests {
     async fn direct_writer_full_inbox_waits_for_space_signal() {
         let mut send = LatencySend::new(&Options::default().send_hwm(1));
         let submitter = send.submitter();
-        let slot = PeerTransmitSlot::new(
+        let slot = PeerTransmitSlot::with_config(
             7,
-            false,
-            None,
-            None,
-            ARENA_THRESHOLD,
-            1024,
-            1024 * 1024,
-            1,
-            crate::engine::framing::WireFraming::Zmtp,
+            SlotConfig {
+                arena_cap: 1024,
+                cap: 1024 * 1024,
+                msg_cap: 1,
+                ..SlotConfig::default()
+            },
         );
         slot.handshake_done.store(true, Ordering::Release);
         let (handle, mut receiver) = direct_peer_handle(slot.clone());
@@ -561,16 +559,14 @@ mod tests {
     fn state_prefers_peer_space_before_pending_space() {
         let mut send = LatencySend::new(&Options::default().send_hwm(1));
         let _pending = send.make_connect_pipe(1);
-        let slot = PeerTransmitSlot::new(
+        let slot = PeerTransmitSlot::with_config(
             2,
-            false,
-            None,
-            None,
-            ARENA_THRESHOLD,
-            1024,
-            1024 * 1024,
-            1,
-            crate::engine::framing::WireFraming::Zmtp,
+            SlotConfig {
+                arena_cap: 1024,
+                cap: 1024 * 1024,
+                msg_cap: 1,
+                ..SlotConfig::default()
+            },
         );
         let (handle, _receiver) = direct_peer_handle(slot.clone());
         send.connection_added(2, &handle);

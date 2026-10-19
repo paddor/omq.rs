@@ -422,25 +422,12 @@ async fn pub_sub_zstd_io_lane_try_send_auto_train_dict_for_late_subscriber() {
     run_pub_sub_zstd_io_lane_auto_train_dict_for_late_subscriber(FanoutSendMode::TrySend).await;
 }
 
-async fn run_pub_sub_zstd_io_lane_auto_train_dict_for_late_subscriber(mode: FanoutSendMode) {
-    let ctx = Context::with_config(ContextConfig { io_threads: 4 });
-    let mut opts = Options::default()
-        .compression_auto_train(true)
-        .send_hwm(2048)
-        .recv_hwm(2048);
-    opts.xpub_nodrop = true;
-    let publisher = ctx.socket(SocketType::Pub, opts.clone());
+/// Binds `publisher` on an ephemeral `zstd+tcp://` port and returns the
+/// endpoint with the resolved port.
+async fn bind_zstd_publisher(publisher: &Socket) -> Endpoint {
     let mut mon = publisher.monitor();
-    // Keep subscriber drivers outside the publisher's pool so its four
-    // initial connections train every IO lane before the late peer arrives.
-    let subscriber_ctx = Context::current();
-    let decoded_subs: Vec<_> = (0..4)
-        .map(|_| subscriber_ctx.socket(SocketType::Sub, opts.clone()))
-        .collect();
-    let raw = subscriber_ctx.socket(SocketType::Sub, Options::default().recv_hwm(64));
-
     publisher.bind(zstd_loopback(0)).await.unwrap();
-    let ep = loop {
+    loop {
         if let MonitorEvent::Listening {
             endpoint: Endpoint::ZstdTcp { port, .. },
         } = tokio::time::timeout(Duration::from_secs(5), mon.recv())
@@ -450,7 +437,51 @@ async fn run_pub_sub_zstd_io_lane_auto_train_dict_for_late_subscriber(mode: Fano
         {
             break zstd_loopback(port);
         }
-    };
+    }
+}
+
+/// Similar JSON quotes, so the publisher can train a useful dictionary.
+fn quote_payload(seq: u64) -> Bytes {
+    Bytes::from(format!(
+        "{{\"kind\":\"quote\",\"venue\":\"XNAS\",\"symbol\":\"OMQ\",\"seq\":{seq},\"pad\":\"{}\"}}",
+        "A".repeat(256)
+    ))
+}
+
+/// The raw (non-decoding) subscriber sees the wire: the trained dictionary
+/// first, then a zstd frame.
+async fn expect_raw_dict_then_frame(raw: &Socket) {
+    let dict = tokio::time::timeout(Duration::from_secs(5), raw.recv())
+        .await
+        .expect("raw subscriber did not receive dictionary")
+        .unwrap();
+    let dict_part = dict.part_bytes(0).unwrap();
+    assert_eq!(&dict_part[..4], &ZDICT_MAGIC);
+
+    let compressed = tokio::time::timeout(Duration::from_secs(5), raw.recv())
+        .await
+        .expect("raw subscriber did not receive compressed payload")
+        .unwrap();
+    let compressed_part = compressed.part_bytes(0).unwrap();
+    assert_eq!(&compressed_part[..4], &ZSTD_MAGIC);
+}
+
+async fn run_pub_sub_zstd_io_lane_auto_train_dict_for_late_subscriber(mode: FanoutSendMode) {
+    let ctx = Context::with_config(ContextConfig { io_threads: 4 });
+    let mut opts = Options::default()
+        .compression_auto_train(true)
+        .send_hwm(2048)
+        .recv_hwm(2048);
+    opts.xpub_nodrop = true;
+    let publisher = ctx.socket(SocketType::Pub, opts.clone());
+    // Keep subscriber drivers outside the publisher's pool so its four
+    // initial connections train every IO lane before the late peer arrives.
+    let subscriber_ctx = Context::current();
+    let decoded_subs: Vec<_> = (0..4)
+        .map(|_| subscriber_ctx.socket(SocketType::Sub, opts.clone()))
+        .collect();
+    let raw = subscriber_ctx.socket(SocketType::Sub, Options::default().recv_hwm(64));
+    let ep = bind_zstd_publisher(&publisher).await;
 
     for (index, sub) in decoded_subs.iter().enumerate() {
         sub.connect(ep.clone()).await.unwrap();
@@ -458,14 +489,10 @@ async fn run_pub_sub_zstd_io_lane_auto_train_dict_for_late_subscriber(mode: Fano
         expect_subscribed(&publisher, (index + 1) as u64, "decoded subscriber").await;
     }
 
-    let payload = |seq: u64| {
-        Bytes::from(format!(
-            "{{\"kind\":\"quote\",\"venue\":\"XNAS\",\"symbol\":\"OMQ\",\"seq\":{seq},\"pad\":\"{}\"}}",
-            "A".repeat(256)
-        ))
-    };
+    // Training traffic. Every decoded subscriber sees the tail, so each
+    // IO lane has trained its dictionary.
     for seq in 0..128 {
-        send_fanout(&publisher, Message::single(payload(seq)), mode).await;
+        send_fanout(&publisher, Message::single(quote_payload(seq)), mode).await;
     }
     for (idx, sub) in decoded_subs.iter().enumerate() {
         expect_payload_seq_at_least(sub, 127, &format!("decoded sub {idx} training tail")).await;
@@ -484,25 +511,12 @@ async fn run_pub_sub_zstd_io_lane_auto_train_dict_for_late_subscriber(mode: Fano
     expect_subscribed(&publisher, decoded_subs.len() as u64 + 1, "raw subscriber").await;
 
     for seq in 128..132 {
-        send_fanout(&publisher, Message::single(payload(seq)), mode).await;
+        send_fanout(&publisher, Message::single(quote_payload(seq)), mode).await;
     }
-
-    let dict = tokio::time::timeout(Duration::from_secs(5), raw.recv())
-        .await
-        .expect("raw subscriber did not receive dictionary")
-        .unwrap();
-    let dict_part = dict.part_bytes(0).unwrap();
-    assert_eq!(&dict_part[..4], &ZDICT_MAGIC);
-
-    let compressed = tokio::time::timeout(Duration::from_secs(5), raw.recv())
-        .await
-        .expect("raw subscriber did not receive compressed payload")
-        .unwrap();
-    let compressed_part = compressed.part_bytes(0).unwrap();
-    assert_eq!(&compressed_part[..4], &ZSTD_MAGIC);
+    expect_raw_dict_then_frame(&raw).await;
 
     for seq in 128..132 {
-        let expected = payload(seq);
+        let expected = quote_payload(seq);
         for (idx, sub) in decoded_subs.iter().enumerate() {
             expect_payload(sub, &expected, &format!("decoded sub {idx} late seq {seq}")).await;
         }

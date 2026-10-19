@@ -680,44 +680,53 @@ fn next_random(seed: &mut u64) -> usize {
     *seed as usize
 }
 
-async fn drain_large_messages_until(
-    consumer: &mut yring::Consumer<Message>,
-    space: &StateSignal,
+/// Test side of a yring receive sink carrying patterned large payloads.
+struct LargeReceiver {
+    consumer: yring::Consumer<Message>,
+    space: Arc<StateSignal>,
     msg_size: usize,
-    next_recv: &mut usize,
-    target: usize,
-    wait: bool,
-) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while *next_recv < target {
-        if consumer.prefetch() == 0 && consumer.is_empty() {
-            if !wait || Instant::now() >= deadline {
-                break;
+    /// Sequence number of the next expected message.
+    next: usize,
+}
+
+impl LargeReceiver {
+    /// Check messages in order until `target` arrived. With `wait`, poll up
+    /// to 10 s and require the target; otherwise stop once the ring is empty.
+    async fn drain_until(&mut self, target: usize, wait: bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while self.next < target {
+            if self.consumer.prefetch() == 0 && self.consumer.is_empty() {
+                if !wait || Instant::now() >= deadline {
+                    break;
+                }
+                tokio::task::yield_now().await;
+                continue;
             }
-            tokio::task::yield_now().await;
-            continue;
+
+            let mut released = false;
+            while let Some(item) = self.consumer.pop() {
+                released = true;
+                let data = item.part_bytes(0).unwrap();
+                assert_eq!(
+                    data.as_ref(),
+                    patterned_payload(self.msg_size, self.next as u64)
+                );
+                self.next += 1;
+            }
+            // Popped slots return to the producer only on release.
+            if released {
+                self.consumer.release();
+                self.space.notify_changed();
+            }
         }
-        let mut released = false;
-        while let Some(item) = consumer.pop() {
-            released = true;
-            let data = item.part_bytes(0).unwrap();
-            assert_eq!(
-                data.as_ref(),
-                patterned_payload(msg_size, *next_recv as u64)
+
+        if wait {
+            assert!(
+                self.next >= target,
+                "received {} large messages, expected {target}",
+                self.next,
             );
-            *next_recv += 1;
         }
-        if released {
-            consumer.release();
-            space.notify_changed();
-        }
-    }
-    if wait {
-        assert!(
-            *next_recv >= target,
-            "received {} large messages, expected {target}",
-            *next_recv,
-        );
     }
 }
 
@@ -829,4 +838,136 @@ async fn write_owned_until_idle(
             .await
             .unwrap();
     }
+}
+
+type DriverTask = tokio::task::JoinHandle<Result<()>>;
+
+/// Test ends of a server/client driver pair. Only the client has a data
+/// inbox.
+struct PairEnds {
+    server_control: mpsc::Sender<PeerDriverCommand>,
+    client_control: mpsc::Sender<PeerDriverCommand>,
+    client_data: mpsc::Sender<PeerDriverData>,
+    server_events: mpsc::Receiver<(u64, PeerEvent)>,
+    client_events: mpsc::Receiver<(u64, PeerEvent)>,
+    server_cancel: CancellationToken,
+    client_cancel: CancellationToken,
+}
+
+/// Shape of a server/client driver pair over one in-memory duplex.
+struct PairSpec {
+    duplex: usize,
+    server: ConnectionConfig,
+    client: ConnectionConfig,
+    /// Server event mailbox capacity.
+    server_events: usize,
+    /// Client data inbox capacity.
+    client_data: usize,
+    server_driver: PeerDriverConfig,
+    client_driver: PeerDriverConfig,
+}
+
+impl PairSpec {
+    /// PAIR sockets over a 4 KiB duplex with default driver settings.
+    fn pair(server_events: usize, client_data: usize) -> Self {
+        Self {
+            duplex: 4096,
+            server: ConnectionConfig::new(Role::Server, SocketType::Pair),
+            client: ConnectionConfig::new(Role::Client, SocketType::Pair),
+            server_events,
+            client_data,
+            server_driver: PeerDriverConfig::default(),
+            client_driver: PeerDriverConfig::default(),
+        }
+    }
+}
+
+/// Unstarted server and client drivers for `spec`.
+fn pair_drivers(
+    spec: PairSpec,
+) -> (
+    ConnectionDriver<DuplexStream>,
+    ConnectionDriver<DuplexStream>,
+    PairEnds,
+) {
+    let (server_stream, client_stream) = tokio::io::duplex(spec.duplex);
+    let (server_control, server_inbox) = mpsc::channel(8);
+    let (client_control, client_inbox) = mpsc::channel(8);
+    let (client_data, client_data_inbox) = mpsc::channel(spec.client_data);
+    let (server_event_tx, server_events) = mpsc::channel(spec.server_events);
+    let (client_event_tx, client_events) = mpsc::channel(8);
+    let ends = PairEnds {
+        server_control,
+        client_control,
+        client_data,
+        server_events,
+        client_events,
+        server_cancel: CancellationToken::new(),
+        client_cancel: CancellationToken::new(),
+    };
+
+    let server = ConnectionDriver::with_config(
+        server_stream,
+        Connection::new(spec.server),
+        server_inbox,
+        server_event_tx,
+        1,
+        ends.server_cancel.clone(),
+        spec.server_driver,
+    );
+    let client = ConnectionDriver::with_config(
+        client_stream,
+        Connection::new(spec.client),
+        client_inbox,
+        client_event_tx,
+        2,
+        ends.client_cancel.clone(),
+        spec.client_driver,
+    )
+    .with_data_inbox(client_data_inbox);
+    (server, client, ends)
+}
+
+/// Spawn both drivers, wait for both handshakes, and open both data planes.
+async fn start_pair(
+    server: ConnectionDriver<DuplexStream>,
+    client: ConnectionDriver<DuplexStream>,
+    ends: &mut PairEnds,
+) -> (DriverTask, DriverTask) {
+    let server_task = tokio::spawn(server.run());
+    let client_task = tokio::spawn(client.run());
+    activate_after_handshakes(
+        [&mut ends.server_events, &mut ends.client_events],
+        [&ends.server_control, &ends.client_control],
+    )
+    .await;
+
+    (server_task, client_task)
+}
+
+/// Wait for each handshake in order, then open each data plane in order.
+async fn activate_after_handshakes(
+    events: [&mut mpsc::Receiver<(u64, PeerEvent)>; 2],
+    controls: [&mpsc::Sender<PeerDriverCommand>; 2],
+) {
+    for events in events {
+        assert!(matches!(
+            events.recv().await.unwrap().1,
+            PeerEvent::Event(Event::HandshakeSucceeded { .. })
+        ));
+    }
+    for control in controls {
+        control
+            .send(PeerDriverCommand::ActivateDataPlane)
+            .await
+            .unwrap();
+    }
+}
+
+async fn join_ok(task: DriverTask) {
+    tokio::time::timeout(Duration::from_millis(500), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
 }

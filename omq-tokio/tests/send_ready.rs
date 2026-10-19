@@ -375,79 +375,96 @@ async fn libzmq_fanout_preserves_lossy_internal_admission_on_clones() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn lossy_fanout_try_send_and_readiness_track_internal_capacity() {
-    use futures::{FutureExt, SinkExt};
-    use std::future::Future;
-    use std::task::Context as TaskContext;
-
     let ctx = Context::current();
     for kind in [SocketType::Pub, SocketType::XPub] {
         for policy in [omq_tokio::OnMute::DropNewest, omq_tokio::OnMute::DropOldest] {
-            let publisher = ctx.socket(kind, Options::default().send_hwm(1).on_mute(policy));
-            let subscriber = ctx.socket(SocketType::Sub, Options::default());
-            let endpoint = publisher.bind(test_support::tcp_loopback(0)).await.unwrap();
-            subscriber.subscribe("").await.unwrap();
-            subscriber.connect(endpoint).await.unwrap();
-            publisher.wait_subscribed(1, TIMEOUT).await.unwrap();
-
-            publisher.try_send(Message::from("first")).unwrap();
-            let message = Message::multipart(["topic", "retry"]);
-            let Err(TrySendError::Full(returned)) = publisher.try_send(message.clone()) else {
-                panic!("full internal lane must return the unsent message");
-            };
-            assert_eq!(returned, message);
-            assert!(!publisher.send_ready());
-            assert!(!publisher.clone().send_ready());
-            assert!(!publisher.clone_shared().send_ready());
-
-            let mut canceled = Box::pin(publisher.wait_send_ready());
-            assert!(canceled.as_mut().now_or_never().is_none());
-            drop(canceled);
-            let wake = Arc::new(CountWake::default());
-            let waker = Waker::from(wake.clone());
-            let mut task = TaskContext::from_waker(&waker);
-            let mut wait = Box::pin(publisher.wait_send_ready());
-            assert!(wait.as_mut().poll(&mut task).is_pending());
-
-            // Ordinary send remains lossy, including at the internal ring.
-            publisher
-                .send(Message::from("dropped"))
-                .now_or_never()
-                .expect("lossy send waited for internal capacity")
-                .unwrap();
-            {
-                let sink = publisher.sink();
-                futures::pin_mut!(sink);
-                sink.send(Message::from("sink-dropped"))
-                    .now_or_never()
-                    .expect("ordinary sink waited for internal capacity")
-                    .unwrap();
-            }
-            assert!(!publisher.send_ready());
-            assert_eq!(wake.count.load(Ordering::SeqCst), 0);
-
-            assert_eq!(subscriber.recv().await.unwrap(), Message::from("first"));
-            assert!(wake.count.load(Ordering::SeqCst) > 0, "missing space wake");
-            tokio::time::timeout(TIMEOUT, wait).await.unwrap();
-            assert!(publisher.send_ready());
-            // Readiness reserves no capacity: another clone can consume it.
-            publisher
-                .clone()
-                .try_send(Message::from("competing"))
-                .unwrap();
-            let Err(TrySendError::Full(returned)) = publisher.try_send(returned) else {
-                panic!("retry must observe capacity consumed by another clone");
-            };
-            assert_eq!(returned, message);
-            assert_eq!(subscriber.recv().await.unwrap(), Message::from("competing"));
-            tokio::time::timeout(TIMEOUT, publisher.wait_send_ready())
-                .await
-                .unwrap();
-            publisher.try_send(returned).unwrap();
-            assert_eq!(subscriber.recv().await.unwrap(), message);
-            publisher.close().await.unwrap();
-            subscriber.close().await.unwrap();
+            check_lossy_fanout_readiness(&ctx, kind, policy).await;
         }
     }
+}
+
+/// Ordinary `send` and sink sends on a full lossy lane complete at once
+/// and drop the message instead of waiting for capacity.
+fn assert_ordinary_sends_drop(publisher: &omq_tokio::Socket) {
+    use futures::{FutureExt, SinkExt};
+
+    publisher
+        .send(Message::from("dropped"))
+        .now_or_never()
+        .expect("lossy send waited for internal capacity")
+        .unwrap();
+
+    let sink = publisher.sink();
+    futures::pin_mut!(sink);
+    sink.send(Message::from("sink-dropped"))
+        .now_or_never()
+        .expect("ordinary sink waited for internal capacity")
+        .unwrap();
+}
+
+async fn check_lossy_fanout_readiness(ctx: &Context, kind: SocketType, policy: omq_tokio::OnMute) {
+    use futures::FutureExt;
+    use std::future::Future;
+    use std::task::Context as TaskContext;
+
+    let publisher = ctx.socket(kind, Options::default().send_hwm(1).on_mute(policy));
+    let subscriber = ctx.socket(SocketType::Sub, Options::default());
+    let endpoint = publisher.bind(test_support::tcp_loopback(0)).await.unwrap();
+    subscriber.subscribe("").await.unwrap();
+    subscriber.connect(endpoint).await.unwrap();
+    publisher.wait_subscribed(1, TIMEOUT).await.unwrap();
+
+    // HWM 1: the second try_send finds the internal lane full and returns
+    // the message for retry. Every handle reports not ready.
+    publisher.try_send(Message::from("first")).unwrap();
+    let message = Message::multipart(["topic", "retry"]);
+    let Err(TrySendError::Full(returned)) = publisher.try_send(message.clone()) else {
+        panic!("full internal lane must return the unsent message");
+    };
+    assert_eq!(returned, message);
+    assert!(!publisher.send_ready());
+    assert!(!publisher.clone().send_ready());
+    assert!(!publisher.clone_shared().send_ready());
+
+    // A dropped wait must not leave a stale registration behind.
+    let mut canceled = Box::pin(publisher.wait_send_ready());
+    assert!(canceled.as_mut().now_or_never().is_none());
+    drop(canceled);
+    let wake = Arc::new(CountWake::default());
+    let waker = Waker::from(wake.clone());
+    let mut task = TaskContext::from_waker(&waker);
+    let mut wait = Box::pin(publisher.wait_send_ready());
+    assert!(wait.as_mut().poll(&mut task).is_pending());
+
+    // Ordinary send remains lossy, including at the internal ring.
+    assert_ordinary_sends_drop(&publisher);
+    assert!(!publisher.send_ready());
+    assert_eq!(wake.count.load(Ordering::SeqCst), 0);
+
+    assert_eq!(subscriber.recv().await.unwrap(), Message::from("first"));
+    assert!(wake.count.load(Ordering::SeqCst) > 0, "missing space wake");
+    tokio::time::timeout(TIMEOUT, wait).await.unwrap();
+    assert!(publisher.send_ready());
+
+    // Readiness reserves no capacity: another clone can consume it.
+    publisher
+        .clone()
+        .try_send(Message::from("competing"))
+        .unwrap();
+    let Err(TrySendError::Full(returned)) = publisher.try_send(returned) else {
+        panic!("retry must observe capacity consumed by another clone");
+    };
+    assert_eq!(returned, message);
+    assert_eq!(subscriber.recv().await.unwrap(), Message::from("competing"));
+
+    tokio::time::timeout(TIMEOUT, publisher.wait_send_ready())
+        .await
+        .unwrap();
+    publisher.try_send(returned).unwrap();
+    assert_eq!(subscriber.recv().await.unwrap(), message);
+
+    publisher.close().await.unwrap();
+    subscriber.close().await.unwrap();
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -527,17 +544,52 @@ async fn lossy_fanout_full_does_not_publish_to_inproc_before_retry() {
     wire.close().await.unwrap();
 }
 
-#[test]
-fn lossy_pub_blocking_readiness_distinguishes_native_and_binding_sockets() {
-    struct ResumeIo(Option<std::sync::mpsc::Sender<()>>);
-    impl Drop for ResumeIo {
-        fn drop(&mut self) {
-            if let Some(resume) = self.0.take() {
-                let _ = resume.send(());
-            }
+/// Releases a parked IO thread on drop, even if an assertion fails first.
+struct ResumeIo(Option<std::sync::mpsc::Sender<()>>);
+
+impl Drop for ResumeIo {
+    fn drop(&mut self) {
+        if let Some(resume) = self.0.take() {
+            let _ = resume.send(());
         }
     }
+}
 
+/// Parks the context's single IO thread in a task until the returned guard
+/// drops, so queued messages cannot drain meanwhile.
+fn park_io_thread(ctx: &Context) -> ResumeIo {
+    let (parked_tx, parked_rx) = std::sync::mpsc::channel();
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+    let resume = ResumeIo(Some(resume_tx));
+
+    ctx.handle().spawn(async move {
+        parked_tx.send(()).unwrap();
+        let _ = resume_rx.recv();
+    });
+
+    parked_rx.recv_timeout(TIMEOUT).unwrap();
+    resume
+}
+
+/// Ordinary blocking sends retain drop-on-full behavior, even with an
+/// expired deadline or a cancellation that was already requested.
+fn assert_blocking_sends_drop(publisher: &omq_tokio::blocking::Socket) {
+    publisher.send(Message::from("dropped")).unwrap();
+    publisher
+        .send_timeout(Message::from("timed"), Duration::ZERO)
+        .unwrap();
+
+    let cancel = omq_tokio::blocking::BlockingRecvCancel::new();
+    cancel.cancel();
+    assert!(
+        publisher
+            .send_cancelable(Message::from("canceled"), &cancel)
+            .unwrap()
+    );
+}
+
+#[test]
+fn lossy_pub_blocking_readiness_distinguishes_native_and_binding_sockets() {
     for compatibility in [false, true] {
         let ctx = Context::new();
         let options = Options::default().send_hwm(1);
@@ -552,14 +604,9 @@ fn lossy_pub_blocking_readiness_distinguishes_native_and_binding_sockets() {
         subscriber.connect(endpoint).unwrap();
         publisher.wait_subscribed(1, TIMEOUT).unwrap();
 
-        let (parked_tx, parked_rx) = std::sync::mpsc::channel();
-        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
-        let resume = ResumeIo(Some(resume_tx));
-        ctx.handle().spawn(async move {
-            parked_tx.send(()).unwrap();
-            let _ = resume_rx.recv();
-        });
-        parked_rx.recv_timeout(TIMEOUT).unwrap();
+        // With the IO thread parked, native sockets see HWM 1 as full. The
+        // libzmq-compatible socket stays ready.
+        let resume = park_io_thread(&ctx);
         publisher.try_send(Message::from("first")).unwrap();
         let result = publisher.clone().try_send(Message::from("retry"));
         assert_eq!(publisher.send_ready(), compatibility);
@@ -568,23 +615,14 @@ fn lossy_pub_blocking_readiness_distinguishes_native_and_binding_sockets() {
         } else {
             assert!(matches!(result, Err(TrySendError::Full(_))));
         }
-        // Ordinary blocking sends retain drop-on-full behavior, even with an
-        // expired deadline or a cancellation that was already requested.
-        publisher.send(Message::from("dropped")).unwrap();
-        publisher
-            .send_timeout(Message::from("timed"), Duration::ZERO)
-            .unwrap();
-        let cancel = omq_tokio::blocking::BlockingRecvCancel::new();
-        cancel.cancel();
-        assert!(
-            publisher
-                .send_cancelable(Message::from("canceled"), &cancel)
-                .unwrap()
-        );
+        assert_blocking_sends_drop(&publisher);
+
         let wake = Arc::new(CountWake::default());
         wake.thread.set(std::thread::current()).unwrap();
         let _registration = publisher.register_send_waker(Waker::from(wake.clone()));
         assert_eq!(wake.count.load(Ordering::SeqCst), 0);
+
+        // Resuming the IO thread drains the queue and must fire the waker.
         drop(resume);
         wait_for(
             || wake.count.load(Ordering::SeqCst) > 0,

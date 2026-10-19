@@ -72,6 +72,15 @@ pub(crate) struct ZapService {
     state: Mutex<State>,
 }
 
+/// Handshake facts sent to the ZAP handler in one request.
+#[derive(Debug)]
+pub(crate) struct ZapQuery<'a> {
+    pub domain: &'a str,
+    pub address: &'a str,
+    pub identity: &'a [u8],
+    pub peer: &'a omq_tokio::MechanismPeerInfo,
+}
+
 impl ZapService {
     pub(crate) fn bind(&self, handler: &Arc<OmqSocket>) -> Result<(), i32> {
         let kind = match handler.socket_type {
@@ -132,17 +141,18 @@ impl ZapService {
         }
     }
 
+    /// Ask the bound ZAP handler to authorize one handshake, blocking the
+    /// handshake task until it replies or `timeout` passes.
     pub(crate) fn authorize(
         &self,
-        domain: &str,
-        address: &str,
-        identity: &[u8],
-        peer: &omq_tokio::MechanismPeerInfo,
+        query: &ZapQuery<'_>,
         timeout: Duration,
     ) -> omq_tokio::AuthenticationResult {
-        let Ok(request) = build_request(domain, address, identity, peer) else {
+        let Ok(request) = build_request(query.domain, query.address, query.identity, query.peer)
+        else {
             return internal_error();
         };
+
         let route_id = self.next_route_id.fetch_add(1, Ordering::Relaxed);
         let exchange = Arc::new(Exchange {
             route_id,

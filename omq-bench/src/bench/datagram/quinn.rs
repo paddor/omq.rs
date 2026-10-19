@@ -21,12 +21,16 @@ pub(crate) fn run(mut args: QuinnArgs) {
     let mut certificates = Command::new(&args.binary);
     certificates.arg("certs").arg(&directory.0);
     print!("{}", capture(&mut certificates));
+    let run = QuinnRun {
+        args: &args,
+        directory: &directory.0,
+    };
     rounds(
         &args.common,
         &[16, 1024],
         &[16, 1024],
         |kind, size, repeat, position| {
-            let mut row = measure(&args, &directory.0, kind, size);
+            let mut row = run.measure(kind, size);
             row.as_object_mut()
                 .unwrap()
                 .extend(provenance.as_object().unwrap().clone());
@@ -41,110 +45,117 @@ pub(crate) fn run(mut args: QuinnArgs) {
     );
 }
 
-fn command(
-    args: &QuinnArgs,
-    directory: &Path,
-    peer_side: Side,
-    role: &str,
-    endpoint: &str,
-    size: u64,
-) -> Command {
-    let (app, io) = if peer_side == Side::Send {
-        (0, 1)
-    } else {
-        (5, 3)
-    };
-    let mut command = Command::new(&args.binary);
-    command
-        .args([
-            role,
-            endpoint,
-            &size.to_string(),
-            &args.duration.to_string(),
-            &args.iterations.to_string(),
-            &args.warmup.to_string(),
-            &args.layout,
-            &args.app_spin.to_string(),
-            &args.io_spin.to_string(),
-        ])
-        .arg(directory)
-        .args([
-            args.common.cpus[app].to_string(),
-            args.common.cpus[io].to_string(),
-            args.batch.to_string(),
-            args.event_interval.to_string(),
-        ]);
-    let profile_side = if args.common.profile_side.as_deref().unwrap_or("send") == "receive" {
-        Side::Receive
-    } else {
-        Side::Send
-    };
-    peers::profiled(
-        command,
-        args.common
-            .profile
-            .as_deref()
-            .filter(|_| peer_side == profile_side),
-        role,
-        size,
-    )
+/// Settings and certificate directory shared by every peer of one run.
+struct QuinnRun<'a> {
+    args: &'a QuinnArgs,
+    directory: &'a Path,
 }
 
-fn measure(args: &QuinnArgs, directory: &Path, kind: &str, size: u64) -> Value {
-    let mut peers = Peers::new(Duration::from_secs_f64(60.0_f64.max(args.duration + 10.0)));
-    let (receive_role, send_role) = if kind == "throughput" {
-        ("receive", "send")
-    } else {
-        ("server", "client")
-    };
-    peers.spawn(
-        Side::Receive,
-        &mut command(
-            args,
-            directory,
-            Side::Receive,
-            receive_role,
-            "127.0.0.1:0",
+impl QuinnRun<'_> {
+    fn command(&self, peer_side: Side, role: &str, endpoint: &str, size: u64) -> Command {
+        let args = self.args;
+        // CPU slots of the app and IO threads: sender on 0/1, receiver on 5/3.
+        let (app, io) = if peer_side == Side::Send {
+            (0, 1)
+        } else {
+            (5, 3)
+        };
+
+        let mut command = Command::new(&args.binary);
+        command
+            .args([
+                role,
+                endpoint,
+                &size.to_string(),
+                &args.duration.to_string(),
+                &args.iterations.to_string(),
+                &args.warmup.to_string(),
+                &args.layout,
+                &args.app_spin.to_string(),
+                &args.io_spin.to_string(),
+            ])
+            .arg(self.directory)
+            .args([
+                args.common.cpus[app].to_string(),
+                args.common.cpus[io].to_string(),
+                args.batch.to_string(),
+                args.event_interval.to_string(),
+            ]);
+
+        let profile_side = if args.common.profile_side.as_deref().unwrap_or("send") == "receive" {
+            Side::Receive
+        } else {
+            Side::Send
+        };
+        peers::profiled(
+            command,
+            args.common
+                .profile
+                .as_deref()
+                .filter(|_| peer_side == profile_side),
+            role,
             size,
-        ),
-    );
-    let bound = peers.wait_json(Side::Receive, "bound");
-    peers.spawn(
-        Side::Send,
-        &mut command(
-            args,
-            directory,
-            Side::Send,
-            send_role,
-            bound["endpoint"].as_str().unwrap(),
-            size,
-        ),
-    );
-    let ready = json!({"receive":peers.wait_json(Side::Receive, "ready"), "send":peers.wait_json(Side::Send, "ready")});
-    let start = timestamp() + 200_000_000;
-    peers.command(Side::Receive, start);
-    peers.command(Side::Send, start);
-    let sender = peers.wait_json(Side::Send, "result");
-    if kind == "latency" {
-        peers.command(Side::Receive, "STOP");
+        )
     }
-    let receiver = peers.wait_json(Side::Receive, "result");
-    peers.command(Side::Send, "STOP");
-    peers.finish();
-    let mut row = json!({"timestamp_ns":timestamp(), "kind":kind, "transport":"quinn-datagram",
-        "msg_size":size, "duration_seconds":args.duration, "layout":args.layout,
-        "io_threads":if args.layout == "multi" { 2 } else { 1 },
-        "application_future":if args.layout == "split" { "Handle::block_on" } else { "spawned task" },
-        "app_spin_us":args.app_spin, "io_spin_us":args.io_spin, "cpus":args.common.cpu_csv(),
-        "event_interval":args.event_interval, "batch_messages":args.batch, "batch_bytes":65536,
-        "io_adapter":if args.io_spin == 0 { "stock Tokio" } else { "speculative UDP" },
-        "datagram_queue_bytes":8 * 1024 * 1024, "send_api":"send_datagram_wait (throughput); send_datagram (RTT)",
-        "throughput_payload":"immutable reusable Bytes; warmup tag 0, measured tag 1",
-        "cipher":"TLS_AES_128_GCM_SHA256", "controller":"default Cubic",
-        "ready":ready, "sender":sender, "receiver":receiver, "profiled":args.common.profile.is_some(),
-        "measurement_order":args.common.order});
-    verify(&mut row, args, kind, size);
-    row
+
+    fn measure(&self, kind: &str, size: u64) -> Value {
+        let args = self.args;
+        let mut peers = Peers::new(Duration::from_secs_f64(60.0_f64.max(args.duration + 10.0)));
+        let (receive_role, send_role) = if kind == "throughput" {
+            ("receive", "send")
+        } else {
+            ("server", "client")
+        };
+
+        // The receiver binds port 0 and reports the endpoint for the sender.
+        peers.spawn(
+            Side::Receive,
+            &mut self.command(Side::Receive, receive_role, "127.0.0.1:0", size),
+        );
+        let bound = peers.wait_json(Side::Receive, "bound");
+        peers.spawn(
+            Side::Send,
+            &mut self.command(
+                Side::Send,
+                send_role,
+                bound["endpoint"].as_str().unwrap(),
+                size,
+            ),
+        );
+
+        // Both sides start at one wall-clock time 200 ms out.
+        let ready = json!({"receive":peers.wait_json(Side::Receive, "ready"), "send":peers.wait_json(Side::Send, "ready")});
+        let start = timestamp() + 200_000_000;
+        peers.command(Side::Receive, start);
+        peers.command(Side::Send, start);
+
+        // The latency server echoes until told to stop. Both senders get STOP
+        // once the receiver has reported.
+        let sender = peers.wait_json(Side::Send, "result");
+
+        if kind == "latency" {
+            peers.command(Side::Receive, "STOP");
+        }
+
+        let receiver = peers.wait_json(Side::Receive, "result");
+        peers.command(Side::Send, "STOP");
+        peers.finish();
+
+        let mut row = json!({"timestamp_ns":timestamp(), "kind":kind, "transport":"quinn-datagram",
+            "msg_size":size, "duration_seconds":args.duration, "layout":args.layout,
+            "io_threads":if args.layout == "multi" { 2 } else { 1 },
+            "application_future":if args.layout == "split" { "Handle::block_on" } else { "spawned task" },
+            "app_spin_us":args.app_spin, "io_spin_us":args.io_spin, "cpus":args.common.cpu_csv(),
+            "event_interval":args.event_interval, "batch_messages":args.batch, "batch_bytes":65536,
+            "io_adapter":if args.io_spin == 0 { "stock Tokio" } else { "speculative UDP" },
+            "datagram_queue_bytes":8 * 1024 * 1024, "send_api":"send_datagram_wait (throughput); send_datagram (RTT)",
+            "throughput_payload":"immutable reusable Bytes; warmup tag 0, measured tag 1",
+            "cipher":"TLS_AES_128_GCM_SHA256", "controller":"default Cubic",
+            "ready":ready, "sender":sender, "receiver":receiver, "profiled":args.common.profile.is_some(),
+            "measurement_order":args.common.order});
+        verify(&mut row, args, kind, size);
+        row
+    }
 }
 
 fn verify(row: &mut Value, args: &QuinnArgs, kind: &str, size: u64) {

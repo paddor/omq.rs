@@ -3,8 +3,7 @@
 
 use super::{FanOutMode, FanOutSend};
 use crate::engine::codec::CodecProfile;
-use crate::engine::framing::WireFraming;
-use crate::engine::transmit_slot::PeerTransmitSlot;
+use crate::engine::transmit_slot::{PeerTransmitSlot, SlotConfig};
 use crate::engine::{ConnectionDriver, PeerDriverCommand, PeerDriverHandle, PeerEvent};
 use bytes::Bytes;
 use omq_proto::Message;
@@ -34,16 +33,17 @@ impl ProbePeer {
         let (data_inbox, data) = mpsc::channel(64);
         let (remote_inbox, remote_commands) = mpsc::channel(16);
         let cancel = CancellationToken::new();
-        let slot = PeerTransmitSlot::new(
+        let slot = PeerTransmitSlot::with_config(
             id,
-            kind.is_some(),
-            kind.map(|kind| CodecProfile::new(kind, options)),
-            None,
-            4096,
-            16384,
-            512 * 1024,
-            1024,
-            WireFraming::Zmtp,
+            SlotConfig {
+                has_transform: kind.is_some(),
+                codec_profile: kind.map(|kind| CodecProfile::new(kind, options)),
+                arena_threshold: 4096,
+                arena_cap: 16384,
+                cap: 512 * 1024,
+                msg_cap: 1024,
+                ..SlotConfig::default()
+            },
         );
         let mut sender = ConnectionDriver::new(
             outgoing,
@@ -87,6 +87,25 @@ impl ProbePeer {
             ],
         }
     }
+
+    /// Activate both drivers and register the sender as fan-out peer `id`
+    /// subscribed to `topic`.
+    async fn attach(&self, id: u64, fanout: &mut FanOutSend) {
+        self.handle
+            .inbox
+            .send(PeerDriverCommand::ActivateDataPlane)
+            .await
+            .unwrap();
+        self.remote_inbox
+            .send(PeerDriverCommand::ActivateDataPlane)
+            .await
+            .unwrap();
+
+        fanout.connection_added(id, self.handle.clone().into(), 0);
+        if let Some(ack) = fanout.peer_subscribe(id, Bytes::from_static(b"topic")) {
+            ack.await.unwrap();
+        }
+    }
 }
 
 async fn run_probe(messages: usize, size: usize, kinds: &[Option<CompressionKind>]) -> Duration {
@@ -113,6 +132,7 @@ async fn run_message_probe(
         .enumerate()
         .map(|(id, kind)| ProbePeer::spawn(id as u64, *kind, &options, &events))
         .collect();
+    // Both drivers of every pair finish their handshake.
     for _ in 0..peers.len() * 2 {
         assert!(matches!(
             receive.recv().await.unwrap().1,
@@ -120,23 +140,39 @@ async fn run_message_probe(
         ));
     }
     for (id, peer) in peers.iter().enumerate() {
-        peer.handle
-            .inbox
-            .send(PeerDriverCommand::ActivateDataPlane)
-            .await
-            .unwrap();
-        peer.remote_inbox
-            .send(PeerDriverCommand::ActivateDataPlane)
-            .await
-            .unwrap();
-        fanout.connection_added(id as u64, peer.handle.clone().into(), 0);
-        if let Some(ack) = fanout.peer_subscribe(id as u64, Bytes::from_static(b"topic")) {
-            ack.await.unwrap();
+        peer.attach(id as u64, &mut fanout).await;
+    }
+
+    let received = count_deliveries(receive, peers.len(), messages, message.clone());
+    let submitter = fanout.submitter();
+    let start = Instant::now();
+    for _ in 0..messages {
+        submitter.send(message.clone()).await.unwrap();
+    }
+    received.await.unwrap();
+    let elapsed = start.elapsed();
+
+    fanout.shutdown();
+    for peer in &peers {
+        peer.handle.cancel.cancel();
+    }
+    for peer in peers {
+        for task in peer.tasks {
+            task.await.unwrap().unwrap();
         }
     }
-    let expected = message.clone();
-    let peer_count = peers.len();
-    let received = tokio::spawn(async move {
+    elapsed
+}
+
+/// Receive `messages` copies per peer pair and check each one. Receiving
+/// drivers have odd ids; pair `n` owns ids `2n` and `2n + 1`.
+fn count_deliveries(
+    mut receive: mpsc::Receiver<(u64, PeerEvent)>,
+    peer_count: usize,
+    messages: usize,
+    expected: Message,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
         let mut counts = vec![0; peer_count];
         for _ in 0..messages * peer_count {
             let (id, event) = receive.recv().await.unwrap();
@@ -148,24 +184,7 @@ async fn run_message_probe(
             counts[id as usize / 2] += 1;
         }
         assert!(counts.iter().all(|count| *count == messages));
-    });
-    let submitter = fanout.submitter();
-    let start = Instant::now();
-    for _ in 0..messages {
-        submitter.send(message.clone()).await.unwrap();
-    }
-    received.await.unwrap();
-    let elapsed = start.elapsed();
-    fanout.shutdown();
-    for peer in &peers {
-        peer.handle.cancel.cancel();
-    }
-    for peer in peers {
-        for task in peer.tasks {
-            task.await.unwrap().unwrap();
-        }
-    }
-    elapsed
+    })
 }
 
 #[tokio::test]

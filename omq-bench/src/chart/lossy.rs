@@ -6,7 +6,7 @@ use plotters::coord::types::RangedCoordf64;
 use plotters::prelude::*;
 use serde_json::Value;
 
-use super::common::{self, Impl};
+use super::common::{self, CpuColumns, Impl};
 use crate::jsonl;
 
 const LOSSES: &[u64] = &[0, 1000, 10_000, 50_000];
@@ -140,22 +140,16 @@ fn verified(row: &Value) -> bool {
 
 fn load() -> Data {
     let mut rows = jsonl::load_jsonl::<Value>(&jsonl::cache_dir().join("lossy.jsonl"));
+    // Oldest first, so each group ends up with the newest runs.
     rows.sort_by_key(|(_, row)| row["timestamp_ns"].as_u64().unwrap_or(0));
     let mut groups: BTreeMap<Key, Vec<Value>> = BTreeMap::new();
+
     for (_, row) in rows {
         if !eligible(&row) || !verified(&row) {
             continue;
         }
-        let key = match row["transport"].as_str() {
-            Some("dart") if row["dart_wire_version"] == 1 && row["dart_window_messages"] == 256 => {
-                match row["congestion"].as_str() {
-                    Some("lan") => "dart-lan",
-                    Some("adaptive") => "dart-adaptive",
-                    _ => continue,
-                }
-            }
-            Some("quic") => "quic",
-            _ => continue,
+        let Some(key) = series_key(&row) else {
+            continue;
         };
         let size = row["msg_size"].as_u64().unwrap_or(0);
         let kind = row["kind"].as_str().unwrap().to_owned();
@@ -165,6 +159,7 @@ fn load() -> Data {
         {
             continue;
         }
+
         let group = groups
             .entry((
                 row["netem"]["loss_ppm"].as_u64().unwrap(),
@@ -173,55 +168,86 @@ fn load() -> Data {
                 key.into(),
             ))
             .or_default();
-        if group.last().is_some_and(|last| {
-            last["binary_sha256"] != row["binary_sha256"] || last["cpus"] != row["cpus"]
-        }) {
-            group.clear();
-        }
-        if group
-            .iter()
-            .any(|old| old["timestamp_ns"] == row["timestamp_ns"])
-        {
-            continue;
-        }
-        group.push(row);
-        if group.len() > 3 {
-            group.remove(0);
-        }
+        push_run(group, row);
     }
+
     groups
         .into_iter()
-        .filter_map(|(key, group)| {
-            if group.len() != 3 {
-                return None;
-            }
-            let mut values: Vec<_> = group
-                .iter()
-                .map(|row| {
-                    if key.2 == "throughput" {
-                        row["msgs_s"].as_f64().unwrap_or(0.0) * key.1 as f64 * 8.0 / 1e6
-                    } else {
-                        row["p99_us"].as_f64().unwrap_or(0.0) / 1000.0
-                    }
-                })
-                .collect();
-            if values
-                .iter()
-                .any(|value| !value.is_finite() || *value <= 0.0)
-            {
-                return None;
-            }
-            values.sort_by(f64::total_cmp);
-            Some((
-                key,
-                Summary {
-                    min: values[0],
-                    median: values[1],
-                    max: values[2],
-                },
-            ))
-        })
+        .filter_map(|(key, group)| summarize(key, &group))
         .collect()
+}
+
+/// Series key of a DART or QUIC row, or `None` for other transports and
+/// other DART settings.
+fn series_key(row: &Value) -> Option<&'static str> {
+    match row["transport"].as_str() {
+        Some("dart") if row["dart_wire_version"] == 1 && row["dart_window_messages"] == 256 => {
+            match row["congestion"].as_str() {
+                Some("lan") => Some("dart-lan"),
+                Some("adaptive") => Some("dart-adaptive"),
+                _ => None,
+            }
+        }
+        Some("quic") => Some("quic"),
+        _ => None,
+    }
+}
+
+/// Appends a run and keeps the newest three. A new binary or CPU set
+/// restarts the group, and a repeated timestamp is a duplicate row.
+fn push_run(group: &mut Vec<Value>, row: Value) {
+    if group.last().is_some_and(|last| {
+        last["binary_sha256"] != row["binary_sha256"] || last["cpus"] != row["cpus"]
+    }) {
+        group.clear();
+    }
+
+    if group
+        .iter()
+        .any(|old| old["timestamp_ns"] == row["timestamp_ns"])
+    {
+        return;
+    }
+
+    group.push(row);
+    if group.len() > 3 {
+        group.remove(0);
+    }
+}
+
+/// Median and range of a complete three-run group: payload Mbps for
+/// throughput, p99 ms for latency.
+fn summarize(key: Key, group: &[Value]) -> Option<(Key, Summary)> {
+    if group.len() != 3 {
+        return None;
+    }
+
+    let mut values: Vec<_> = group
+        .iter()
+        .map(|row| {
+            if key.2 == "throughput" {
+                row["msgs_s"].as_f64().unwrap_or(0.0) * key.1 as f64 * 8.0 / 1e6
+            } else {
+                row["p99_us"].as_f64().unwrap_or(0.0) / 1000.0
+            }
+        })
+        .collect();
+    if values
+        .iter()
+        .any(|value| !value.is_finite() || *value <= 0.0)
+    {
+        return None;
+    }
+
+    values.sort_by(f64::total_cmp);
+    Some((
+        key,
+        Summary {
+            min: values[0],
+            median: values[1],
+            max: values[2],
+        },
+    ))
 }
 
 fn draw_series<Y: Ranged<ValueType = f64> + ValueFormatter<f64>>(
@@ -275,48 +301,36 @@ fn draw_series<Y: Ranged<ValueType = f64> + ValueFormatter<f64>>(
     Ok(())
 }
 
-fn draw(path: &std::path::Path, data: &Data) -> DrawResult {
-    let (width, height) = (1200, 500);
-    let root = SVGBackend::new(path, (width, height)).into_drawing_area();
-    root.fill(&common::BACKGROUND_COLOR)?;
-    let (header, body) = root.split_vertically(75);
-    header.draw(&Text::new(
-        "100 Mbps shared between directions | 1 ms delay each way | MTU 1500 | netem random loss",
-        (600, 53),
-        ("sans-serif", 12)
-            .into_font()
-            .color(&common::TEXT_COLOR)
-            .pos(plotters::style::text_anchor::Pos::new(
-                plotters::style::text_anchor::HPos::Center,
-                plotters::style::text_anchor::VPos::Center,
-            )),
-    ))?;
-    let (plots, footer) = body.split_vertically(320);
-    for (area, panel) in plots.split_evenly((1, 3)).iter().zip(PANELS) {
-        let mut builder = ChartBuilder::on(area);
-        builder
-            .caption(
-                panel.title,
-                ("sans-serif", 12).into_font().color(&common::TEXT_COLOR),
-            )
-            .margin(10)
-            .x_label_area_size(45)
-            .y_label_area_size(60);
-        if panel.kind == "throughput" {
-            let mut chart = builder.build_cartesian_2d(0.0..3.0, 0.0..100.0)?;
-            draw_series(&mut chart, panel, data)?;
-        } else {
-            let mut chart = builder.build_cartesian_2d(0.0..3.0, (1.0..100.0).log_scale())?;
-            draw_series(&mut chart, panel, data)?;
-        }
+fn draw_panel(
+    area: &DrawingArea<SVGBackend<'_>, plotters::coord::Shift>,
+    panel: &Panel,
+    data: &Data,
+) -> DrawResult {
+    let mut builder = ChartBuilder::on(area);
+    builder
+        .caption(
+            panel.title,
+            ("sans-serif", 12).into_font().color(&common::TEXT_COLOR),
+        )
+        .margin(10)
+        .x_label_area_size(45)
+        .y_label_area_size(60);
+
+    // Throughput tops out at the 100 Mbps link rate. RTT spans decades, so
+    // it gets a log axis.
+    if panel.kind == "throughput" {
+        let mut chart = builder.build_cartesian_2d(0.0..3.0, 0.0..100.0)?;
+        draw_series(&mut chart, panel, data)?;
+    } else {
+        let mut chart = builder.build_cartesian_2d(0.0..3.0, (1.0..100.0).log_scale())?;
+        draw_series(&mut chart, panel, data)?;
     }
-    common::draw_legend_table(
-        &footer,
-        &IMPLS.iter().collect::<Vec<_>>(),
-        &BTreeMap::new(),
-        "",
-        "",
-    )?;
+
+    Ok(())
+}
+
+/// Method notes, drawn right of the legend table.
+fn draw_notes(footer: &DrawingArea<SVGBackend<'_>, plotters::coord::Shift>) -> DrawResult {
     for (index, note) in [
         "Dots: median of 3 runs; whiskers: min-max across runs.",
         "Throughput: 0.2 s warmup, 3 s received window; higher is better.",
@@ -335,8 +349,43 @@ fn draw(path: &std::path::Path, data: &Data) -> DrawResult {
                 .color(&common::MUTED_TEXT_COLOR),
         ))?;
     }
+
+    Ok(())
+}
+
+fn draw(path: &std::path::Path, data: &Data) -> DrawResult {
+    let (width, height) = (1200, 500);
+    let root = SVGBackend::new(path, (width, height)).into_drawing_area();
+    root.fill(&common::BACKGROUND_COLOR)?;
+
+    let (header, body) = root.split_vertically(75);
+    header.draw(&Text::new(
+        "100 Mbps shared between directions | 1 ms delay each way | MTU 1500 | netem random loss",
+        (600, 53),
+        ("sans-serif", 12)
+            .into_font()
+            .color(&common::TEXT_COLOR)
+            .pos(plotters::style::text_anchor::Pos::new(
+                plotters::style::text_anchor::HPos::Center,
+                plotters::style::text_anchor::VPos::Center,
+            )),
+    ))?;
+
+    let (plots, footer) = body.split_vertically(320);
+    for (area, panel) in plots.split_evenly((1, 3)).iter().zip(PANELS) {
+        draw_panel(area, panel, data)?;
+    }
+
+    let columns = CpuColumns {
+        cpu: &BTreeMap::new(),
+        snd_label: "",
+        rcv_label: "",
+    };
+    common::draw_legend_table(&footer, &IMPLS.iter().collect::<Vec<_>>(), &columns)?;
+    draw_notes(&footer)?;
     root.present()?;
     drop(root);
+
     common::postprocess_svg(
         path,
         width,

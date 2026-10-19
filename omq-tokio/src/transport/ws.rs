@@ -157,14 +157,27 @@ pub(crate) struct WsConnected {
     pub leftover: bytes::Bytes,
 }
 
+/// Address and scheme of one WS/WSS dial.
+pub(crate) struct WsTarget<'a> {
+    pub(crate) host: &'a omq_proto::endpoint::Host,
+    pub(crate) port: u16,
+    pub(crate) path: &'a str,
+    /// `wss://`: wrap the TCP stream in TLS before the HTTP upgrade.
+    pub(crate) tls: bool,
+}
+
 pub(crate) async fn connect(
-    host: &omq_proto::endpoint::Host,
-    port: u16,
-    path: &str,
-    tls: bool,
+    target: WsTarget<'_>,
     wss_tls: &omq_proto::options::WssTls,
     mechanism: &omq_proto::MechanismSetup,
 ) -> Result<WsConnected> {
+    let WsTarget {
+        host,
+        port,
+        path,
+        tls,
+    } = target;
+
     ws_handshake::validate_ws_address(host, path)?;
     let addrs = match host {
         omq_proto::endpoint::Host::Wildcard => {

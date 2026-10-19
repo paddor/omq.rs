@@ -84,6 +84,68 @@ fn random_ipc_or_tcp(rng: &mut StdRng) -> Endpoint {
     }
 }
 
+/// Random ordering of {connect, subscribe(prefix)} ops on the SUB sockets,
+/// then connects any SUB the sequence skipped and subscribes everyone.
+async fn random_sub_actions(rng: &mut StdRng, subs: &[Socket], ep: &Endpoint) {
+    let n_subs = subs.len();
+
+    // Connects happen at most once per sub.
+    let mut connected = vec![false; n_subs];
+    let total_actions = rng.random_range(n_subs..=n_subs * 4);
+    for _ in 0..total_actions {
+        let i = rng.random_range(0..n_subs);
+        let action = rng.random_range(0..4);
+        match action {
+            0 if !connected[i] => {
+                let _ = subs[i].connect(ep.clone()).await;
+                connected[i] = true;
+            }
+            1 => {
+                let prefix = if rng.random_bool(0.5) {
+                    Bytes::new()
+                } else {
+                    Bytes::from(format!("topic{}", rng.random_range(0..3)))
+                };
+                let _ = subs[i].subscribe(prefix).await;
+            }
+            2 => {
+                let prefix = Bytes::from(format!("topic{}", rng.random_range(0..3)));
+                let _ = subs[i].unsubscribe(prefix).await;
+            }
+            _ => {
+                let _ = subs[i].connections().await;
+            }
+        }
+    }
+
+    // Ensure all subs are connected at least once.
+    for i in 0..n_subs {
+        if !connected[i] {
+            let _ = subs[i].connect(ep.clone()).await;
+        }
+        let _ = subs[i].subscribe(Bytes::new()).await;
+    }
+}
+
+/// Drive a probe-and-receive cycle until every sub gets at least one
+/// message or we hit a 1 s deadline. Verifies the random action sequence
+/// didn't break delivery.
+async fn probe_subscribers(pub_: &Socket, subs: &[Socket]) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    let mut got = vec![false; subs.len()];
+    while std::time::Instant::now() < deadline && got.iter().any(|&g| !g) {
+        let _ = pub_.send(Message::single("probe")).await;
+        for (i, s) in subs.iter().enumerate() {
+            if got[i] {
+                continue;
+            }
+            if let Ok(Ok(_)) = tokio::time::timeout(Duration::from_millis(20), s.recv()).await {
+                got[i] = true;
+            }
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fuzz_pub_sub_action_sequences() {
     let mut rng = rng();
@@ -102,59 +164,8 @@ async fn fuzz_pub_sub_action_sequences() {
             subs.push(Socket::new(SocketType::Sub, Options::default()));
         }
 
-        // Random ordering of {connect, subscribe(prefix)} ops on the
-        // SUB sockets. Connects happen at most once per sub.
-        let mut connected = vec![false; n_subs];
-        let total_actions = rng.random_range(n_subs..=n_subs * 4);
-        for _ in 0..total_actions {
-            let i = rng.random_range(0..n_subs);
-            let action = rng.random_range(0..4);
-            match action {
-                0 if !connected[i] => {
-                    let _ = subs[i].connect(ep.clone()).await;
-                    connected[i] = true;
-                }
-                1 => {
-                    let prefix = if rng.random_bool(0.5) {
-                        Bytes::new()
-                    } else {
-                        Bytes::from(format!("topic{}", rng.random_range(0..3)))
-                    };
-                    let _ = subs[i].subscribe(prefix).await;
-                }
-                2 => {
-                    let prefix = Bytes::from(format!("topic{}", rng.random_range(0..3)));
-                    let _ = subs[i].unsubscribe(prefix).await;
-                }
-                _ => {
-                    let _ = subs[i].connections().await;
-                }
-            }
-        }
-        // Ensure all subs are connected at least once.
-        for i in 0..n_subs {
-            if !connected[i] {
-                let _ = subs[i].connect(ep.clone()).await;
-            }
-            let _ = subs[i].subscribe(Bytes::new()).await;
-        }
-
-        // Drive a probe-and-receive cycle until every sub gets at least
-        // one message or we hit a 1 s deadline. Verifies the random
-        // action sequence didn't break delivery.
-        let deadline = std::time::Instant::now() + Duration::from_secs(1);
-        let mut got = vec![false; n_subs];
-        while std::time::Instant::now() < deadline && got.iter().any(|&g| !g) {
-            let _ = pub_.send(Message::single("probe")).await;
-            for (i, s) in subs.iter().enumerate() {
-                if got[i] {
-                    continue;
-                }
-                if let Ok(Ok(_)) = tokio::time::timeout(Duration::from_millis(20), s.recv()).await {
-                    got[i] = true;
-                }
-            }
-        }
+        random_sub_actions(&mut rng, &subs, &ep).await;
+        probe_subscribers(&pub_, &subs).await;
         // We allow not-all-got - some action sequences (e.g. immediate
         // unsubscribe) intentionally produce that. The bug we're
         // hunting is a panic / hang / driver tear-down, not non-delivery.

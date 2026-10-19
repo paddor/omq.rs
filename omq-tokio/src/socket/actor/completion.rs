@@ -303,23 +303,23 @@ mod tests {
         let blocking = crate::socket::recv::BlockingRecvWaker::new();
         let (recv, consumer, _, _) = crate::socket::recv::recv_pipe(16, blocking.clone());
         let (_, commands) = mpsc::channel(16);
-        let driver = SocketDriver::new(
-            socket_type,
-            options.clone(),
-            commands,
-            recv,
-            CancellationToken::new(),
-            crate::socket::monitor::MonitorPublisher::new(),
-            crate::routing::SendStrategy::for_socket_type(socket_type, &options, &pool),
-            crate::socket::recv::SpscHandles::new(blocking, false),
-            Arc::new(std::sync::Mutex::new(super::super::TypeState::new())),
-            Arc::new(crate::socket::handle::ReqAwaitingReply::default()),
-            None,
-            Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            Arc::new(crate::socket::handle::ReadyPeers::default()),
-            pool,
-            Arc::new(crate::transport::inproc::InprocRegistry::new()),
-        );
+        let send_strategy =
+            crate::routing::SendStrategy::for_socket_type(socket_type, &options, &pool);
+        let link = super::super::HandleLink {
+            cmd_rx: commands,
+            recv_tx: recv,
+            cancel: CancellationToken::new(),
+            monitor: crate::socket::monitor::MonitorPublisher::new(),
+            spsc: crate::socket::recv::SpscHandles::new(blocking, false),
+            peer_recv_routes: None,
+            shared: super::super::HandleShared::new(),
+        };
+        let env = super::super::DriverEnv {
+            io_pool: pool,
+            inproc_registry: Arc::new(crate::transport::inproc::InprocRegistry::new()),
+            recv_sink_config: None,
+        };
+        let driver = SocketDriver::new(socket_type, options, send_strategy, link, env);
         (driver, consumer)
     }
 
@@ -476,21 +476,54 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn completion_preserves_ready_identity_commands_and_pending_receive() {
-        let (mut driver, mut receive) = fixture();
-        driver.setup_admission = crate::transport::setup::Admission::new(1);
-        let mut monitor = driver.monitor.subscribe();
-        insert_pending_peer(&mut driver, 7);
-        driver
-            .handle_peer_completion(PeerCompletion {
-                peer_id: 7,
-                admitted_events: 3,
-                reason: DisconnectReason::Error("original wire failure".into()),
-                stream_disconnect: StreamDisconnect::None,
-            })
-            .await;
-        assert!(driver.setup_admission.try_acquire().is_none());
+    fn peer_completion(
+        admitted_events: u64,
+        reason: DisconnectReason,
+        stream_disconnect: StreamDisconnect,
+    ) -> PeerCompletion {
+        PeerCompletion {
+            peer_id: 7,
+            admitted_events,
+            reason,
+            stream_disconnect,
+        }
+    }
+
+    /// Fill the 16-slot receive pipe so the next receive blocks.
+    fn fill_receive_pipe(driver: &SocketDriver) {
+        for _ in 0..16 {
+            driver.recv_tx.try_send(Message::single("filler")).unwrap();
+        }
+    }
+
+    /// Take one message so the blocked receive fits, then retire peer 7.
+    async fn free_slot_and_retire(
+        driver: &mut SocketDriver,
+        receive: &mut yring::Consumer<Message>,
+    ) {
+        receive.pop().unwrap();
+        receive.release();
+        driver.retry_pending_receive();
+        driver.retire_completed_peer(7).await;
+    }
+
+    fn assert_fillers(receive: &mut yring::Consumer<Message>, count: usize) {
+        for _ in 0..count {
+            assert_eq!(
+                receive.pop().unwrap().part_slice(0),
+                Some(b"filler".as_slice())
+            );
+        }
+    }
+
+    fn assert_routed(message: &Message, identity: &[u8], body: &[u8]) {
+        assert_eq!(message.len(), 2);
+        assert_eq!(message.part_slice(0), Some(identity));
+        assert_eq!(message.part_slice(1), Some(body));
+    }
+
+    /// Complete the handshake of pending peer 7 as a DEALER named "peer".
+    async fn ready_dealer(driver: &mut SocketDriver) {
         driver
             .handle_peer_output(
                 7,
@@ -503,6 +536,22 @@ mod tests {
                 }),
             )
             .await;
+    }
+
+    #[tokio::test]
+    async fn completion_preserves_ready_identity_commands_and_pending_receive() {
+        let (mut driver, mut receive) = fixture();
+        driver.setup_admission = crate::transport::setup::Admission::new(1);
+        let mut monitor = driver.monitor.subscribe();
+        insert_pending_peer(&mut driver, 7);
+
+        // Completion arrives first; the admitted events still run in order.
+        let reason = DisconnectReason::Error("original wire failure".into());
+        driver
+            .handle_peer_completion(peer_completion(3, reason, StreamDisconnect::None))
+            .await;
+        assert!(driver.setup_admission.try_acquire().is_none());
+        ready_dealer(&mut driver).await;
         assert!(driver.peers.get(&7).unwrap().ready);
         assert!(matches!(
             monitor.try_recv().unwrap(),
@@ -522,9 +571,9 @@ mod tests {
             monitor.try_recv().unwrap(),
             MonitorEvent::PeerCommand { .. }
         ));
-        for _ in 0..16 {
-            driver.recv_tx.try_send(Message::single("filler")).unwrap();
-        }
+
+        // The last event blocks on a full pipe and holds the peer back.
+        fill_receive_pipe(&driver);
         driver
             .handle_peer_output(7, PeerEvent::Event(Event::Message(Message::single("last"))))
             .await;
@@ -536,11 +585,9 @@ mod tests {
             monitor.try_recv(),
             Err(MonitorTryRecvError::Empty)
         ));
+
         assert_eq!(receive.prefetch(), 16);
-        receive.pop().unwrap();
-        receive.release();
-        driver.retry_pending_receive();
-        driver.retire_completed_peer(7).await;
+        free_slot_and_retire(&mut driver, &mut receive).await;
         assert!(!driver.peers.contains_key(&7));
         assert!(driver.pending_receive.is_none());
         assert!(
@@ -548,17 +595,9 @@ mod tests {
             if peer.peer_identity.as_deref() == Some(b"peer".as_slice())
                 && matches!(&reason, DisconnectReason::Error(reason) if reason == "original wire failure"))
         );
-        for _ in 0..15 {
-            assert_eq!(
-                receive.pop().unwrap().part_slice(0),
-                Some(b"filler".as_slice())
-            );
-        }
+        assert_fillers(&mut receive, 15);
         receive.prefetch();
-        let last = receive.pop().unwrap();
-        assert_eq!(last.len(), 2);
-        assert_eq!(last.part_slice(0), Some(b"peer".as_slice()));
-        assert_eq!(last.part_slice(1), Some(b"last".as_slice()));
+        assert_routed(&receive.pop().unwrap(), b"peer", b"last");
     }
 
     #[tokio::test]
@@ -571,11 +610,10 @@ mod tests {
         peer.pending_handshake = false;
         peer.handshake_admission = None;
         peer.identity = identity.clone();
-        driver.ready_peer_count_shared.set(1);
+        driver.shared.ready_peers.set(1);
         driver.recv_strategy.connection_added(7, identity.clone());
-        for _ in 0..16 {
-            driver.recv_tx.try_send(Message::single("filler")).unwrap();
-        }
+
+        fill_receive_pipe(&driver);
         driver
             .handle_peer_output(
                 7,
@@ -583,57 +621,34 @@ mod tests {
             )
             .await;
         driver
-            .handle_peer_completion(PeerCompletion {
-                peer_id: 7,
-                admitted_events: 1,
-                reason: DisconnectReason::PeerClosed,
-                stream_disconnect: StreamDisconnect::Pending,
-            })
+            .handle_peer_completion(peer_completion(
+                1,
+                DisconnectReason::PeerClosed,
+                StreamDisconnect::Pending,
+            ))
             .await;
         assert!(driver.peers.contains_key(&7));
+
+        // Admitting the data queues the terminal receive, which blocks too.
         receive.prefetch();
-        receive.pop().unwrap();
-        receive.release();
-        driver.retry_pending_receive();
-        driver.retire_completed_peer(7).await;
+        free_slot_and_retire(&mut driver, &mut receive).await;
         driver.drain_stream_disconnects().await;
         assert!(driver.peers.contains_key(&7));
-        assert_eq!(
-            driver
-                .peers
-                .get(&7)
-                .unwrap()
-                .completion
-                .as_ref()
-                .unwrap()
-                .stream_disconnect,
-            StreamDisconnect::None
+        let completion = driver.peers.get(&7).unwrap().completion.as_ref().unwrap();
+        assert_eq!(completion.stream_disconnect, StreamDisconnect::None);
+        assert_routed(
+            &driver.pending_receive.as_ref().unwrap().message,
+            &identity,
+            b"",
         );
-        let terminal = &driver.pending_receive.as_ref().unwrap().message;
-        assert_eq!(terminal.len(), 2);
-        assert_eq!(terminal.part_slice(0), Some(identity.as_ref()));
-        assert_eq!(terminal.part_slice(1), Some(b"".as_slice()));
-        receive.pop().unwrap();
-        receive.release();
-        driver.retry_pending_receive();
-        driver.retire_completed_peer(7).await;
+
+        free_slot_and_retire(&mut driver, &mut receive).await;
         assert!(!driver.peers.contains_key(&7));
-        assert_eq!(driver.ready_peer_count_shared.get(), 0);
-        for _ in 0..14 {
-            assert_eq!(
-                receive.pop().unwrap().part_slice(0),
-                Some(b"filler".as_slice())
-            );
-        }
+        assert_eq!(driver.shared.ready_peers.get(), 0);
+        assert_fillers(&mut receive, 14);
         receive.prefetch();
-        let data = receive.pop().unwrap();
-        let terminal = receive.pop().unwrap();
-        assert_eq!(data.len(), 2);
-        assert_eq!(data.part_slice(0), Some(identity.as_ref()));
-        assert_eq!(data.part_slice(1), Some(b"older data".as_slice()));
-        assert_eq!(terminal.len(), 2);
-        assert_eq!(terminal.part_slice(0), Some(identity.as_ref()));
-        assert_eq!(terminal.part_slice(1), Some(b"".as_slice()));
+        assert_routed(&receive.pop().unwrap(), &identity, b"older data");
+        assert_routed(&receive.pop().unwrap(), &identity, b"");
     }
 
     #[tokio::test]
@@ -700,7 +715,7 @@ mod tests {
         driver
             .recv_strategy
             .connection_added(7, peer.identity.clone());
-        driver.ready_peer_count_shared.set(1);
+        driver.shared.ready_peers.set(1);
         driver.pending_receive = Some(super::super::PendingReceive {
             peer_id: 8,
             message: Message::single("other peer"),

@@ -44,17 +44,23 @@ pub(super) fn first_frame_slice(msg: &Message) -> &[u8] {
     msg.part_slice(0).unwrap_or_default()
 }
 
+/// Subscription and group state that selects a peer's publications.
+pub(super) struct PeerFilter<'a> {
+    pub(super) subscriptions: &'a SubscriptionSet,
+    pub(super) groups: &'a FxHashSet<Bytes>,
+    pub(super) any_groups: bool,
+}
+
+#[inline]
 pub(super) fn peer_matches(
     mode: FanOutMode,
-    subscriptions: &SubscriptionSet,
-    groups: &FxHashSet<Bytes>,
-    any_groups: bool,
+    peer: &PeerFilter<'_>,
     topic: &[u8],
     group: Option<&[u8]>,
 ) -> bool {
     match (mode, group) {
-        (FanOutMode::Group, Some(grp)) => any_groups || groups.contains(grp),
-        (FanOutMode::SubscriptionPrefix, _) => subscriptions.matches(topic),
+        (FanOutMode::Group, Some(grp)) => peer.any_groups || peer.groups.contains(grp),
+        (FanOutMode::SubscriptionPrefix, _) => peer.subscriptions.matches(topic),
         (FanOutMode::Group, None) => false,
     }
 }

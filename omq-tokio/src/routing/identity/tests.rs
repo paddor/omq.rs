@@ -10,27 +10,15 @@ async fn stream_full_lane_preserves_backpressure_and_other_peers() {
     let mut send = IdentitySend::new(SocketType::Stream, &Options::default());
     let (data_inbox, mut receiver) = crate::engine::data_inbox::channel(1);
     let (other_inbox, mut other_receiver) = crate::engine::data_inbox::channel(1);
-    let make_handle = |data_inbox| ActorPeerDriverHandle {
-        inbox: tokio::sync::mpsc::channel(1).0.into(),
-        data_inbox,
-        cancel: tokio_util::sync::CancellationToken::new(),
-        transmit_slot: None,
-        direct_tcp_writer: None,
-        send_pipe: None,
-        inproc: None,
-    };
-    send.connection_added(
-        7,
-        make_handle(data_inbox),
-        Bytes::from_static(b"slow"),
-        false,
-    );
+    let slow = Bytes::from_static(b"slow");
+    send.connection_added(7, inbox_handle(data_inbox), slow, false);
     send.connection_added(
         8,
-        make_handle(other_inbox),
+        inbox_handle(other_inbox),
         Bytes::from_static(b"fast"),
         false,
     );
+
     let submitter = send.submitter();
     submitter
         .try_send(Message::multipart(["slow", "first"]))
@@ -73,6 +61,19 @@ async fn stream_full_lane_preserves_backpressure_and_other_peers() {
         receiver.recv().await.unwrap(),
         PeerDriverData::SendMessage(message) if message == Message::single("next")
     ));
+}
+
+/// A peer handle whose only data route is `data_inbox`.
+fn inbox_handle(data_inbox: crate::engine::data_inbox::Sender) -> ActorPeerDriverHandle {
+    ActorPeerDriverHandle {
+        inbox: tokio::sync::mpsc::channel(1).0.into(),
+        data_inbox,
+        cancel: tokio_util::sync::CancellationToken::new(),
+        transmit_slot: None,
+        direct_tcp_writer: None,
+        send_pipe: None,
+        inproc: None,
+    }
 }
 
 #[test]
@@ -429,26 +430,14 @@ fn full_peer_retry_preserves_all_frames_and_metadata() {
                     if let Some(id) = routing_id {
                         message = message.with_routing_id(id);
                     }
-                    let expected = message.clone();
-                    let large_part = (0..message.len())
-                        .find(|&i| message.part_slice(i).unwrap().len() == large.len());
                     submitter
                         .try_send(Message::with_prefix(
                             identity.clone(),
                             Message::single("occupied"),
                         ))
                         .unwrap();
-                    for _ in 0..8 {
-                        message = match submitter.try_send(message) {
-                            Err(TrySendError::Full(returned)) => returned,
-                            other => panic!("expected Full, got {other:?}"),
-                        };
-                        assert_eq!(message, expected);
-                        assert_eq!(message.routing_id(), routing_id);
-                        if let Some(index) = large_part {
-                            assert_eq!(message.part_slice(index).unwrap().as_ptr(), large.as_ptr());
-                        }
-                    }
+                    message = assert_full_retries(&submitter, message, &large);
+
                     let mut drained = Vec::new();
                     assert_eq!(pipe_rx.drain_into(&mut drained, 2, usize::MAX), 1);
                     assert_eq!(drained.pop().unwrap(), Message::single("occupied"));
@@ -459,6 +448,27 @@ fn full_peer_retry_preserves_all_frames_and_metadata() {
             }
         }
     }
+}
+
+/// Retry a send into a full peer queue. Every refusal hands back the same
+/// message, metadata, and large payload storage.
+fn assert_full_retries(submitter: &Submitter, mut message: Message, large: &Bytes) -> Message {
+    let expected = message.clone();
+    let large_part =
+        (0..message.len()).find(|&i| message.part_slice(i).unwrap().len() == large.len());
+
+    for _ in 0..8 {
+        message = match submitter.try_send(message) {
+            Err(TrySendError::Full(returned)) => returned,
+            other => panic!("expected Full, got {other:?}"),
+        };
+        assert_eq!(message, expected);
+        assert_eq!(message.routing_id(), expected.routing_id());
+        if let Some(index) = large_part {
+            assert_eq!(message.part_slice(index).unwrap().as_ptr(), large.as_ptr());
+        }
+    }
+    message
 }
 
 #[tokio::test]

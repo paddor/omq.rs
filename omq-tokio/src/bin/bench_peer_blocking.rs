@@ -96,98 +96,132 @@ fn install_signals() {
     }
 }
 
-#[allow(clippy::too_many_lines)]
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     #[cfg(any(feature = "ws", feature = "quic"))]
     ws_bench_config::set_endpoint(args.get(2).map(String::as_str));
     let ctx = omq_tokio::Context::with_config(omq_tokio::ContextConfig::from_env());
-    if let Ok(value) = std::env::var("OMQ_BENCH_EGRESS_BYTE_LIMIT") {
-        let (rate, burst) = value
-            .split_once(',')
-            .expect("OMQ_BENCH_EGRESS_BYTE_LIMIT must be BYTES_PER_SECOND,BURST_BYTES");
-        ctx.set_network_rate_limits(omq_tokio::NetworkRateLimits {
-            ingress: None,
-            egress: Some(omq_tokio::ByteRateLimit::new(
-                rate.parse().expect("egress bytes per second"),
-                burst.parse().expect("egress burst bytes"),
-            )),
-        })
-        .expect("configure context byte limit");
-    }
+    configure_egress_limit(&ctx);
     let n = ctx.io_threads();
     eprintln!("runtime: blocking, {n} IO thread(s)");
     install_signals();
 
-    match args.get(1).map(String::as_str) {
+    let mode = args.get(1).map(String::as_str);
+    let handled = run_pipeline_mode(&ctx, mode, &args)
+        || run_pattern_mode(&ctx, mode, &args)
+        || run_inproc_mode(&ctx, mode, &args);
+    if !handled {
+        print_usage();
+        std::process::exit(1);
+    }
+}
+
+/// `OMQ_BENCH_EGRESS_BYTE_LIMIT=BYTES_PER_SECOND,BURST_BYTES` caps context egress.
+fn configure_egress_limit(ctx: &omq_tokio::Context) {
+    let Ok(value) = std::env::var("OMQ_BENCH_EGRESS_BYTE_LIMIT") else {
+        return;
+    };
+    let (rate, burst) = value
+        .split_once(',')
+        .expect("OMQ_BENCH_EGRESS_BYTE_LIMIT must be BYTES_PER_SECOND,BURST_BYTES");
+    ctx.set_network_rate_limits(omq_tokio::NetworkRateLimits {
+        ingress: None,
+        egress: Some(omq_tokio::ByteRateLimit::new(
+            rate.parse().expect("egress bytes per second"),
+            burst.parse().expect("egress burst bytes"),
+        )),
+    })
+    .expect("configure context byte limit");
+}
+
+/// PUSH/PULL modes over a network endpoint. Returns false for other modes.
+fn run_pipeline_mode(ctx: &omq_tokio::Context, mode: Option<&str>, args: &[String]) -> bool {
+    match mode {
         Some("push") => {
             let ep = parse_ep(&args[2]);
             let size: usize = args[3].parse().expect("msg_size");
             let peers: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
-            run_push(&ctx, ep, size, peers);
+            run_push(ctx, ep, size, peers);
         }
         Some("pull") => {
             let ep = parse_ep(&args[2]);
             let size: usize = args[3].parse().expect("msg_size");
             let duration: f64 = args[4].parse().expect("duration_secs");
-            run_pull(&ctx, ep, size, Duration::from_secs_f64(duration));
+            run_pull(ctx, ep, size, Duration::from_secs_f64(duration));
         }
         Some("pull-bind") => {
             let ep = parse_ep(&args[2]);
             let size: usize = args[3].parse().expect("msg_size");
             let duration: f64 = args[4].parse().expect("duration_secs");
-            run_pull_bind(&ctx, ep, size, Duration::from_secs_f64(duration));
+            run_pull_bind(ctx, ep, size, Duration::from_secs_f64(duration));
         }
         Some("multi-pull") => {
             let ep = parse_ep(&args[2]);
             let size: usize = args[3].parse().expect("msg_size");
             let duration: f64 = args[4].parse().expect("duration_secs");
             let count: usize = args[5].parse().expect("socket_count");
-            run_multi_pull(&ctx, ep, size, Duration::from_secs_f64(duration), count);
+            run_multi_pull(ctx, ep, size, Duration::from_secs_f64(duration), count);
         }
         Some("multi-push") => {
             let ep = parse_ep(&args[2]);
             let size: usize = args[3].parse().expect("msg_size");
             let count: usize = args[4].parse().expect("socket_count");
             let duration = args.get(5).and_then(|s| s.parse().ok());
-            run_multi_push(&ctx, ep, size, count, duration);
+            run_multi_push(ctx, ep, size, count, duration);
         }
+        _ => return false,
+    }
+    true
+}
+
+/// PUB/SUB and REQ/REP modes over a network endpoint. Returns false for
+/// other modes.
+fn run_pattern_mode(ctx: &omq_tokio::Context, mode: Option<&str>, args: &[String]) -> bool {
+    match mode {
         Some("pub") => {
             let ep = parse_ep(&args[2]);
             let size: usize = args[3].parse().expect("msg_size");
             let peers: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
-            run_pub(&ctx, ep, size, peers);
+            run_pub(ctx, ep, size, peers);
         }
         Some("multi-sub") => {
             let ep = parse_ep(&args[2]);
             let size: usize = args[3].parse().expect("msg_size");
             let duration: f64 = args[4].parse().expect("duration_secs");
             let count: usize = args[5].parse().expect("socket_count");
-            run_multi_sub(&ctx, ep, size, Duration::from_secs_f64(duration), count);
+            run_multi_sub(ctx, ep, size, Duration::from_secs_f64(duration), count);
         }
         Some("rep") => {
             let ep = parse_ep(&args[2]);
             let size: usize = args[3].parse().expect("msg_size");
-            run_rep(&ctx, ep, size);
+            run_rep(ctx, ep, size);
         }
         Some("req") => {
             let ep = parse_ep(&args[2]);
             let size: usize = args[3].parse().expect("msg_size");
             let iterations: usize = args[4].parse().expect("iterations");
             let warmup: usize = args[5].parse().expect("warmup");
-            run_req(&ctx, ep, size, iterations, warmup);
+            run_req(ctx, ep, size, iterations, warmup);
         }
+        _ => return false,
+    }
+    true
+}
+
+/// In-process modes. Returns false for other modes.
+fn run_inproc_mode(ctx: &omq_tokio::Context, mode: Option<&str>, args: &[String]) -> bool {
+    match mode {
         Some("inproc") => {
             let name = args[2].clone();
             let size: usize = args[3].parse().expect("msg_size");
             let duration: f64 = args[4].parse().expect("duration_secs");
-            run_inproc(&ctx, name, size, Duration::from_secs_f64(duration));
+            run_inproc(ctx, name, size, Duration::from_secs_f64(duration));
         }
         Some("inproc-2ut") => {
             let name = args[2].clone();
             let size: usize = args[3].parse().expect("msg_size");
             let duration: f64 = args[4].parse().expect("duration_secs");
-            run_inproc_2ut(&ctx, name, size, Duration::from_secs_f64(duration));
+            run_inproc_2ut(ctx, name, size, Duration::from_secs_f64(duration));
         }
         Some("inproc-2ut-blocking") => {
             let name = args[2].clone();
@@ -198,38 +232,34 @@ fn main() {
                 .cloned()
                 .or_else(|| std::env::var("OMQ_BENCH_HWM").ok());
             let hwm = hwm.map_or(1000, |value| value.parse().expect("hwm"));
-            blocking_inproc::run(&ctx, name, size, Duration::from_secs_f64(duration), hwm);
+            blocking_inproc::run(ctx, name, size, Duration::from_secs_f64(duration), hwm);
         }
         Some("inproc-latency") => {
             let name = args[2].clone();
             let size: usize = args[3].parse().expect("msg_size");
             let iterations: usize = args[4].parse().expect("iterations");
             let warmup: usize = args[5].parse().expect("warmup");
-            run_inproc_latency(&ctx, name, size, iterations, warmup);
+            run_inproc_latency(ctx, name, size, iterations, warmup);
         }
-        _ => {
-            eprintln!("usage: bench_peer_blocking push <addr> <size> [peers]");
-            eprintln!("       bench_peer_blocking pull <addr> <size> <duration_secs>");
-            eprintln!("       bench_peer_blocking pull-bind <addr> <size> <duration_secs>");
-            eprintln!(
-                "       bench_peer_blocking multi-pull <addr> <size> <duration_secs> <count>"
-            );
-            eprintln!("       bench_peer_blocking multi-push <addr> <size> <count>");
-            eprintln!("       bench_peer_blocking pub <addr> <size>");
-            eprintln!("       bench_peer_blocking multi-sub <addr> <size> <duration_secs> <count>");
-            eprintln!("       bench_peer_blocking rep <addr> <size>");
-            eprintln!("       bench_peer_blocking req <addr> <size> <iterations> <warmup>");
-            eprintln!("       bench_peer_blocking inproc <name> <size> <duration_secs>");
-            eprintln!("       bench_peer_blocking inproc-2ut <name> <size> <duration_secs>");
-            eprintln!(
-                "       bench_peer_blocking inproc-2ut-blocking <name> <size> <duration_secs> [hwm]"
-            );
-            eprintln!(
-                "       bench_peer_blocking inproc-latency <name> <size> <iterations> <warmup>"
-            );
-            std::process::exit(1);
-        }
+        _ => return false,
     }
+    true
+}
+
+fn print_usage() {
+    eprintln!("usage: bench_peer_blocking push <addr> <size> [peers]");
+    eprintln!("       bench_peer_blocking pull <addr> <size> <duration_secs>");
+    eprintln!("       bench_peer_blocking pull-bind <addr> <size> <duration_secs>");
+    eprintln!("       bench_peer_blocking multi-pull <addr> <size> <duration_secs> <count>");
+    eprintln!("       bench_peer_blocking multi-push <addr> <size> <count>");
+    eprintln!("       bench_peer_blocking pub <addr> <size>");
+    eprintln!("       bench_peer_blocking multi-sub <addr> <size> <duration_secs> <count>");
+    eprintln!("       bench_peer_blocking rep <addr> <size>");
+    eprintln!("       bench_peer_blocking req <addr> <size> <iterations> <warmup>");
+    eprintln!("       bench_peer_blocking inproc <name> <size> <duration_secs>");
+    eprintln!("       bench_peer_blocking inproc-2ut <name> <size> <duration_secs>");
+    eprintln!("       bench_peer_blocking inproc-2ut-blocking <name> <size> <duration_secs> [hwm]");
+    eprintln!("       bench_peer_blocking inproc-latency <name> <size> <iterations> <warmup>");
 }
 
 // --- Options -----------------------------------------------------------------
@@ -381,74 +411,75 @@ fn xorshift32(state: &mut u32) -> u32 {
     x
 }
 
-fn json_record(out: &mut String, state: &mut u32) {
-    const LEVELS: &[&str] = &["DEBUG", "INFO", "WARN", "ERROR", "TRACE"];
-    const SERVICES: &[&str] = &[
-        "api-gateway",
-        "auth-svc",
-        "order-svc",
-        "payment-svc",
-        "notify-svc",
-        "inventory-svc",
-        "shipping-svc",
-        "billing-svc",
-        "search-svc",
-        "user-svc",
-        "session-svc",
-        "analytics-svc",
-        "cache-svc",
-        "config-svc",
-        "audit-svc",
-        "rate-limiter",
-    ];
-    const METHODS: &[&str] = &["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"];
-    const PATHS: &[&str] = &[
-        "/v1/widgets",
-        "/v1/users",
-        "/v1/orders",
-        "/v2/events",
-        "/v1/health",
-        "/v1/sessions",
-        "/v1/payments",
-        "/v2/search",
-        "/v1/inventory",
-        "/v1/shipping",
-        "/v1/analytics",
-        "/v2/config",
-    ];
-    const REGIONS: &[&str] = &[
-        "us-east-1",
-        "us-west-2",
-        "eu-west-1",
-        "ap-south-1",
-        "eu-central-1",
-        "ap-northeast-1",
-        "sa-east-1",
-        "ca-central-1",
-    ];
-    const STATUSES: &[u16] = &[
-        200, 201, 202, 204, 301, 302, 304, 400, 401, 403, 404, 405, 409, 422, 429, 500, 502, 503,
-        504,
-    ];
-    const MSGS: &[&str] = &[
-        "request handled successfully",
-        "resource created",
-        "cache miss, fetched from origin",
-        "rate limit approaching threshold",
-        "upstream timeout, retrying",
-        "authentication token refreshed",
-        "database connection pool exhausted",
-        "circuit breaker tripped",
-        "message queued for async processing",
-        "TLS handshake completed",
-        "request routed to fallback backend",
-        "payload validation passed",
-        "idempotency key matched existing result",
-        "graceful shutdown initiated",
-        "health check passed all probes",
-        "retry attempt succeeded after backoff",
-    ];
+const LEVELS: &[&str] = &["DEBUG", "INFO", "WARN", "ERROR", "TRACE"];
+const SERVICES: &[&str] = &[
+    "api-gateway",
+    "auth-svc",
+    "order-svc",
+    "payment-svc",
+    "notify-svc",
+    "inventory-svc",
+    "shipping-svc",
+    "billing-svc",
+    "search-svc",
+    "user-svc",
+    "session-svc",
+    "analytics-svc",
+    "cache-svc",
+    "config-svc",
+    "audit-svc",
+    "rate-limiter",
+];
+const METHODS: &[&str] = &["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"];
+const PATHS: &[&str] = &[
+    "/v1/widgets",
+    "/v1/users",
+    "/v1/orders",
+    "/v2/events",
+    "/v1/health",
+    "/v1/sessions",
+    "/v1/payments",
+    "/v2/search",
+    "/v1/inventory",
+    "/v1/shipping",
+    "/v1/analytics",
+    "/v2/config",
+];
+const REGIONS: &[&str] = &[
+    "us-east-1",
+    "us-west-2",
+    "eu-west-1",
+    "ap-south-1",
+    "eu-central-1",
+    "ap-northeast-1",
+    "sa-east-1",
+    "ca-central-1",
+];
+const STATUSES: &[u16] = &[
+    200, 201, 202, 204, 301, 302, 304, 400, 401, 403, 404, 405, 409, 422, 429, 500, 502, 503, 504,
+];
+const MSGS: &[&str] = &[
+    "request handled successfully",
+    "resource created",
+    "cache miss, fetched from origin",
+    "rate limit approaching threshold",
+    "upstream timeout, retrying",
+    "authentication token refreshed",
+    "database connection pool exhausted",
+    "circuit breaker tripped",
+    "message queued for async processing",
+    "TLS handshake completed",
+    "request routed to fallback backend",
+    "payload validation passed",
+    "idempotency key matched existing result",
+    "graceful shutdown initiated",
+    "health check passed all probes",
+    "retry attempt succeeded after backoff",
+];
 
+/// Append one newline-terminated JSON access-log record with fields drawn
+/// from the xorshift stream in `state`.
+fn json_record(out: &mut String, state: &mut u32) {
     let trace_id = xorshift32(state);
     let span_id = xorshift32(state);
     let user_id = xorshift32(state);
@@ -698,7 +729,6 @@ fn run_pull_bind(ctx: &omq_tokio::Context, ep: Endpoint, size: usize, duration: 
     println!("{count} {elapsed:.6} {size} {cpu:.6}");
 }
 
-#[expect(clippy::cast_precision_loss)]
 #[allow(clippy::needless_pass_by_value)]
 fn run_multi_pull(
     ctx: &omq_tokio::Context,
@@ -723,12 +753,35 @@ fn run_multi_pull(
 
     let started = Arc::new(AtomicBool::new(false));
     let stop = Arc::new(AtomicBool::new(false));
+    let handles = spawn_pull_drainers(sockets, drain_batch, &started, &stop);
 
-    let handles: Vec<_> = sockets
+    // Let the drainers reach steady state before the measured window opens.
+    std::thread::sleep(Duration::from_millis(500));
+    let cpu_before = cpu_time_secs();
+    let t0 = Instant::now();
+    started.store(true, Ordering::Release);
+    std::thread::sleep(duration);
+    stop.store(true, Ordering::Release);
+    let elapsed = t0.elapsed().as_secs_f64();
+    let per_socket: Vec<u64> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    let cpu = cpu_time_secs() - cpu_before;
+
+    print_multi_pull(&per_socket, elapsed, size, cpu);
+}
+
+/// One drain thread per socket. Each counts messages received in whole
+/// `drain_batch` turns that start after `started` and end before `stop`.
+fn spawn_pull_drainers(
+    sockets: Vec<blocking::Socket>,
+    drain_batch: usize,
+    started: &Arc<AtomicBool>,
+    stop: &Arc<AtomicBool>,
+) -> Vec<std::thread::JoinHandle<u64>> {
+    sockets
         .into_iter()
         .map(|sock| {
-            let started = Arc::clone(&started);
-            let stop = Arc::clone(&stop);
+            let started = Arc::clone(started);
+            let stop = Arc::clone(stop);
             std::thread::spawn(move || {
                 let mut count = 0_u64;
                 loop {
@@ -754,17 +807,13 @@ fn run_multi_pull(
                 count
             })
         })
-        .collect();
+        .collect()
+}
 
-    std::thread::sleep(Duration::from_millis(500));
-    let cpu_before = cpu_time_secs();
-    let t0 = Instant::now();
-    started.store(true, Ordering::Release);
-    std::thread::sleep(duration);
-    stop.store(true, Ordering::Release);
-    let elapsed = t0.elapsed().as_secs_f64();
-    let per_socket: Vec<u64> = handles.into_iter().map(|h| h.join().unwrap()).collect();
-    let cpu = cpu_time_secs() - cpu_before;
+/// Print totals, per-socket rate spread and quantiles, then every rate.
+#[expect(clippy::cast_precision_loss)]
+fn print_multi_pull(per_socket: &[u64], elapsed: f64, size: usize, cpu: f64) {
+    let socket_count = per_socket.len();
     let total: u64 = per_socket.iter().sum();
     let per_min = per_socket.iter().copied().min().unwrap_or(0);
     let per_max = per_socket.iter().copied().max().unwrap_or(0);
@@ -817,6 +866,7 @@ fn run_multi_push(
         .map(|_| Arc::new(AtomicU64::new(0)))
         .collect();
     wait_for_start_barrier();
+
     let _handles: Vec<_> = sockets
         .into_iter()
         .zip(counters.iter().cloned())
@@ -844,12 +894,19 @@ fn run_multi_push(
             })
         })
         .collect();
+
+    // Without a duration the senders run until the process is killed.
     let Some(duration) = duration else {
         std::thread::park();
         return;
     };
     std::thread::sleep(Duration::from_secs_f64(duration));
-    let elapsed = duration;
+    print_multi_push(&counters, duration, size);
+}
+
+/// Print totals and the per-socket send rate spread and quantiles.
+fn print_multi_push(counters: &[Arc<AtomicU64>], elapsed: f64, size: usize) {
+    let socket_count = counters.len();
     let rates: Vec<f64> = counters
         .iter()
         .map(|c| c.load(Ordering::Relaxed) as f64 / elapsed)
@@ -1153,13 +1210,35 @@ fn run_inproc_2ut(ctx: &omq_tokio::Context, name: String, size: usize, duration:
         .expect("wait for inproc connection");
 
     let payload = bench_payload(size);
+    // Both threads start together; the receiver stops the sender when its
+    // timed window ends.
     let barrier = Arc::new(std::sync::Barrier::new(2));
     let stop = Arc::new(AtomicBool::new(false));
 
-    let sender_barrier = Arc::clone(&barrier);
-    let sender_stop = Arc::clone(&stop);
-    let sender_push = push.clone();
-    let sender = std::thread::spawn(move || {
+    let sender = spawn_2ut_sender(
+        push.clone(),
+        payload,
+        Arc::clone(&barrier),
+        Arc::clone(&stop),
+    );
+    let receiver = spawn_2ut_receiver(pull.clone(), barrier, Arc::clone(&stop), duration);
+
+    let (count, elapsed) = receiver.join().expect("receiver thread");
+    sender.join().expect("sender thread");
+    let _ = pull.close();
+    let _ = push.close();
+    println!("{count} {:.6} {size}", elapsed.as_secs_f64());
+}
+
+/// Spin on `try_send` until `stop`. Inline-sized payloads build a fresh
+/// inline message each time; larger ones clone one shared message.
+fn spawn_2ut_sender(
+    sender_push: blocking::Socket,
+    payload: Bytes,
+    sender_barrier: Arc<std::sync::Barrier>,
+    sender_stop: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
         sender_barrier.wait();
         if payload.len() <= omq_tokio::message::MAX_INLINE_MESSAGE {
             loop {
@@ -1185,16 +1264,23 @@ fn run_inproc_2ut(ctx: &omq_tokio::Context, name: String, size: usize, duration:
                 }
             }
         }
-    });
+    })
+}
 
-    let receiver_barrier = barrier;
-    let receiver_stop = Arc::clone(&stop);
-    let receiver_pull = pull.clone();
-    let receiver = std::thread::spawn(move || {
+/// Spin on `try_recv` for `duration`, then set `stop`. Returns the message
+/// count and the measured window.
+fn spawn_2ut_receiver(
+    receiver_pull: blocking::Socket,
+    receiver_barrier: Arc<std::sync::Barrier>,
+    receiver_stop: Arc<AtomicBool>,
+    duration: Duration,
+) -> std::thread::JoinHandle<(u64, Duration)> {
+    std::thread::spawn(move || {
         receiver_barrier.wait();
         let start = Instant::now();
         let deadline = start + duration;
         let mut count = 0u64;
+        // Read the clock only every 10k polls.
         let mut until_timer_check = 10_000usize;
         loop {
             match receiver_pull.try_recv() {
@@ -1211,13 +1297,7 @@ fn run_inproc_2ut(ctx: &omq_tokio::Context, name: String, size: usize, duration:
         }
         receiver_stop.store(true, Ordering::Release);
         (count, start.elapsed())
-    });
-
-    let (count, elapsed) = receiver.join().expect("receiver thread");
-    sender.join().expect("sender thread");
-    let _ = pull.close();
-    let _ = push.close();
-    println!("{count} {:.6} {size}", elapsed.as_secs_f64());
+    })
 }
 
 fn run_inproc_latency(

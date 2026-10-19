@@ -4,12 +4,25 @@ use super::{
     SocketDriver, SocketType, ZmtpEvent, generated_identity, mpsc, peer_ident_socket_addr,
     supports_groups, supports_subscribe,
 };
+use crate::routing::AddedPeer;
 use crate::socket::actor::lifecycle::PeerLifecycle;
-use crate::socket::actor::peer_materialize::{ByteStreamConnection, PeerSetup};
+use crate::socket::actor::peer_materialize::{ByteStreamConnection, PeerSetup, new_peer_entry};
 use omq_proto::WorkloadProfile;
 #[cfg(any(feature = "ws", feature = "quic"))]
 use omq_proto::endpoint::Endpoint;
 use std::sync::atomic::Ordering;
+
+/// A peer just marked ready, with what its activation still needs.
+struct ReadiedPeer {
+    handle: super::PeerDriverHandle,
+    route_id: u64,
+    /// Subscriptions to replay once the data plane is active.
+    subs_replay: Vec<bytes::Bytes>,
+    peer_ident: PeerIdent,
+    io_thread: usize,
+    became_ready: bool,
+    event: MonitorEvent,
+}
 
 impl SocketDriver {
     pub(super) async fn handle_internal_event(&mut self, evt: InternalEvent) {
@@ -76,10 +89,44 @@ impl SocketDriver {
 
     async fn handle_peer_closed(&mut self, peer_id: u64, reason: DisconnectReason) {
         let refused = matches!(reason, DisconnectReason::HandshakeRefused(_));
-        if let Some(peer) = self.peers.get(&peer_id)
-            && peer.pending_handshake
+        self.publish_close_failure(peer_id, &reason, refused);
+
+        let Some(mut peer) = PeerLifecycle::new(self).remove_peer(peer_id, reason) else {
+            return;
+        };
+        if let Some(task) = peer.task.take() {
+            super::stop_peer_task(task).await;
+        }
+
+        #[cfg(feature = "dart")]
+        if matches!(peer.endpoint, omq_proto::Endpoint::Dart { .. }) {
+            self.dart_peer_closed(peer_id);
+            return;
+        }
+        // A refused handshake would be refused again; stop dialing.
+        if refused {
+            if peer.is_client {
+                self.dialers
+                    .retain(|dialer| dialer.route_id != peer.route_id);
+            }
+            return;
+        }
+        if peer.is_client
+            && !self.closing
+            && !matches!(peer.options.reconnect, ReconnectPolicy::Disabled)
         {
-            let reason_text = match &reason {
+            self.redial_closed_peer(&peer);
+        }
+    }
+
+    /// Monitor events for a peer that failed before or during its handshake.
+    fn publish_close_failure(&self, peer_id: u64, reason: &DisconnectReason, refused: bool) {
+        let Some(peer) = self.peers.get(&peer_id) else {
+            return;
+        };
+
+        if peer.pending_handshake {
+            let reason_text = match reason {
                 DisconnectReason::Error(text) => Some(text.clone()),
                 DisconnectReason::HandshakeRefused(refusal) => Some(refusal.to_string()),
                 _ => None,
@@ -92,50 +139,30 @@ impl SocketDriver {
                 });
             }
         }
-        if refused
-            && let Some(peer) = self.peers.get(&peer_id)
-            && peer.is_client
-        {
+
+        if refused && peer.is_client {
             self.monitor.publish(MonitorEvent::ConnectStopped {
                 endpoint: peer.endpoint.clone(),
                 reason: reason.clone(),
             });
         }
-        if let Some(mut peer) = PeerLifecycle::new(self).remove_peer(peer_id, reason) {
-            if let Some(task) = peer.task.take() {
-                super::stop_peer_task(task).await;
-            }
-            #[cfg(feature = "dart")]
-            if matches!(peer.endpoint, omq_proto::Endpoint::Dart { .. }) {
-                self.dart_peer_closed(peer_id);
-                return;
-            }
-            if refused {
-                if peer.is_client {
-                    self.dialers
-                        .retain(|dialer| dialer.route_id != peer.route_id);
-                }
-                return;
-            }
-            if peer.is_client
-                && !self.closing
-                && !matches!(peer.options.reconnect, ReconnectPolicy::Disabled)
-            {
-                let ep = peer.endpoint.clone();
-                // Transport success does not reset backoff: READY does.
-                let failed_attempts = if peer.ready {
-                    1
-                } else {
-                    self.dialers
-                        .iter()
-                        .find(|dialer| dialer.route_id == peer.route_id)
-                        .map_or(0, |dialer| dialer.failed_attempts.load(Ordering::Relaxed))
-                        .saturating_add(1)
-                };
-                self.dialers.retain(|d| d.endpoint != ep);
-                self.start_redial(ep, peer.options.clone(), failed_attempts);
-            }
-        }
+    }
+
+    /// Restart the dial loop for a lost client peer, carrying its backoff.
+    fn redial_closed_peer(&mut self, peer: &PeerEntry) {
+        let ep = peer.endpoint.clone();
+        // Transport success does not reset backoff: READY does.
+        let failed_attempts = if peer.ready {
+            1
+        } else {
+            self.dialers
+                .iter()
+                .find(|dialer| dialer.route_id == peer.route_id)
+                .map_or(0, |dialer| dialer.failed_attempts.load(Ordering::Relaxed))
+                .saturating_add(1)
+        };
+        self.dialers.retain(|d| d.endpoint != ep);
+        self.start_redial(ep, peer.options.clone(), failed_attempts);
     }
 
     fn evict_peer_for_handover(&mut self, peer_id: u64) {
@@ -188,7 +215,7 @@ impl SocketDriver {
     /// there can no longer be answered, so alternation resets.
     pub(super) fn remove_connect_route(&mut self, route_id: u64) {
         self.send_strategy.connect_pipe_removed(route_id);
-        self.req_awaiting_reply.route_removed(route_id);
+        self.shared.req_awaiting_reply.route_removed(route_id);
     }
 
     fn take_dialer_send_pipe(&mut self, route_id: u64) -> Option<crate::engine::SendPipeConsumer> {
@@ -198,10 +225,6 @@ impl SocketDriver {
             .and_then(|d| d.send_pipe_rx.take())
     }
 
-    #[cfg_attr(
-        not(any(feature = "ws", feature = "quic")),
-        expect(clippy::unused_self)
-    )]
     /// A routing identity in use stays with its principal. Handover needs the
     /// same mechanism, CURVE key, PLAIN username, and authenticator user ID.
     fn identity_held_by_other_principal(
@@ -225,6 +248,10 @@ impl SocketDriver {
             || held.user_id != authentication.user_id
     }
 
+    #[cfg_attr(
+        not(any(feature = "ws", feature = "quic")),
+        expect(clippy::unused_self)
+    )]
     fn can_accept_carrier_peer(&self, peer_id: u64, identity: &bytes::Bytes) -> bool {
         #[cfg(feature = "ws")]
         if let Some(allowed) = self.carrier_ready_capacity(
@@ -371,18 +398,15 @@ impl SocketDriver {
         &mut self,
         stream: AnyStream,
         peer_ident: PeerIdent,
-        PeerSetup {
-            endpoint,
-            is_server,
-            route_id,
-            options,
-            send_pipe_rx,
-        }: PeerSetup,
+        mut peer: PeerSetup,
     ) {
         let peer_id = self.next_peer_id;
         self.next_peer_id += 1;
-        let identity = generated_identity(if is_server { peer_id } else { route_id });
-        if is_server {
+        // Bind side names peers by peer id. Connect side keeps the route id
+        // that connect() already reported.
+        let route_id = peer.route_id;
+        let identity = generated_identity(if peer.is_server { peer_id } else { route_id });
+        if peer.is_server {
             self.last_stream_routing_id = Some(identity.clone());
         }
 
@@ -396,15 +420,19 @@ impl SocketDriver {
         let assignment = self.io_pool.reserve_thread();
         let io_thread = assignment.index();
         let migrate = self.io_pool.has_dedicated_io_threads();
+        let raw_peer = crate::transport::stream_raw::RawPeer {
+            peer_id,
+            peer_out: crate::engine::actor_output::PeerOutput::actor(peer_output),
+            cancel: &self.cancel,
+            completion,
+            capacity: self.options.send_queue_capacity(),
+            pool: peer.options.recv_payload_pool.clone(),
+            send_pipe: peer.send_pipe_rx.take(),
+        };
+
         let (handle, task) = crate::transport::stream_raw::spawn_on(
             stream,
-            peer_id,
-            crate::engine::actor_output::PeerOutput::actor(peer_output),
-            &self.cancel,
-            completion,
-            self.options.send_queue_capacity(),
-            options.recv_payload_pool.clone(),
-            send_pipe_rx,
+            raw_peer,
             &self.io_pool,
             assignment,
             move |stream| {
@@ -417,40 +445,23 @@ impl SocketDriver {
             },
         );
 
-        self.peers.insert(
-            peer_id,
-            PeerEntry {
-                local_address: None,
-                remote_address: None,
-                options,
-                ident: peer_ident,
-                handle: handle.clone(),
-                ready: true,
-                pending_handshake: false,
-                handshake_admission: None,
-                handled_events: 0,
-                handled_control: 0,
-                completion: None,
-                identity: identity.clone(),
-                info: None,
-                endpoint,
-                is_client: !is_server,
-                route_id,
-                inproc_inbound: None,
-                task: Some(task),
-                io_thread,
-            },
-        );
-        self.ready_peer_count_shared.add();
+        let mut entry = new_peer_entry(peer, peer_ident, handle.clone(), None, io_thread);
+        // Raw STREAM has no handshake, so the peer is ready at once.
+        entry.ready = true;
+        entry.pending_handshake = false;
+        entry.identity = identity.clone();
+        entry.task = Some(task);
+        self.peers.insert(peer_id, entry);
+        self.shared.ready_peers.add();
 
-        self.send_strategy.connection_added(
+        self.send_strategy.connection_added(AddedPeer {
             peer_id,
             route_id,
             handle,
-            identity.clone(),
-            false,
+            identity: identity.clone(),
+            is_inproc: false,
             io_thread,
-        );
+        });
         self.recv_strategy.connection_added(peer_id, identity);
     }
 
@@ -491,7 +502,8 @@ impl SocketDriver {
                 let message = self.recv_strategy.wrap_for_transform(peer_id, msg);
                 let message = if self.type_state_needs_transform() {
                     message.and_then(|wrapped| {
-                        self.type_state
+                        self.shared
+                            .type_state
                             .lock()
                             .expect("type_state")
                             .post_recv(self.socket_type, wrapped)
@@ -513,7 +525,6 @@ impl SocketDriver {
         }
     }
 
-    #[expect(clippy::too_many_lines)]
     pub(super) async fn handle_handshake_succeeded(
         &mut self,
         peer_id: u64,
@@ -524,53 +535,13 @@ impl SocketDriver {
             .identity
             .clone()
             .unwrap_or_else(|| generated_identity(peer_id));
-        let rejection =
-            if !self.can_accept_ready_peer() || !self.can_accept_carrier_peer(peer_id, &identity) {
-                Some("socket peer limit reached")
-            } else if self.identity_held_by_other_principal(
-                peer_id,
-                &identity,
-                &peer_properties.authentication,
-            ) {
-                Some("routing identity in use by another principal")
-            } else {
-                None
-            };
-        if let Some(reason) = rejection {
-            let (endpoint, peer_ident) = {
-                let Some(p) = self.peers.get(&peer_id) else {
-                    return;
-                };
-                (p.endpoint.clone(), p.ident.clone())
-            };
-            self.monitor.publish(MonitorEvent::HandshakeFailed {
-                endpoint,
-                peer_ident,
-                reason: reason.into(),
-            });
-            // Let the driver report closure through the ordinary lifecycle.
-            // Removing/aborting it here loses that event and strands an
-            // outbound dialer after a local admission rejection.
-            if let Some(peer) = self.peers.get(&peer_id) {
-                peer.handle.cancel.cancel();
-            }
+        if let Some(reason) = self.handshake_rejection(peer_id, &identity, &peer_properties) {
+            self.reject_handshake(peer_id, reason);
             return;
         }
-        let Some(peer) = self.peers.get(&peer_id) else {
+
+        let Some(info) = self.ready_peer_info(peer_id, peer_minor, &peer_properties) else {
             return;
-        };
-        let info = PeerInfo {
-            authentication: peer_properties.authentication.clone(),
-            diagnostics: omq_proto::PeerDiagnostics {
-                endpoint: peer.endpoint.to_string(),
-                local_address: peer.local_address.clone(),
-                remote_address: peer.remote_address.clone(),
-            },
-            connection_id: peer_id,
-            peer_address: peer_ident_socket_addr(&peer.ident),
-            peer_identity: peer_properties.identity.clone(),
-            peer_properties: peer_properties.clone(),
-            zmtp_version: Self::peer_protocol_version(&peer.endpoint, peer_minor),
         };
         let sender = omq_proto::Identity::new(&identity, info);
         // The compact snapshot is published before any data plane can run.
@@ -585,30 +556,122 @@ impl SocketDriver {
         {
             self.evict_peer_for_handover(old_id);
         }
-        let (handle, route_id, subs_replay, peer_ident, io_thread, became_ready, ready_event) = {
-            let Some(p) = self.peers.get_mut(&peer_id) else {
-                return;
-            };
-            let became_ready = !p.ready;
-            p.ready = true;
-            p.pending_handshake = false;
-            p.handshake_admission = None;
-            p.identity = identity.clone();
-            p.info = Some(info.clone());
-            let ready_event = MonitorEvent::HandshakeSucceeded {
+
+        let Some(ready) = self.mark_peer_ready(peer_id, &identity, info) else {
+            return;
+        };
+        self.add_ready_routes(peer_id, &ready, identity, sender);
+        self.monitor.publish(ready.event);
+
+        // Replies must be routable before a different I/O/application thread
+        // can observe readiness or the first incoming message.
+        if ready.handle.inbox.send(activation).await.is_err() {
+            // The driver may already have completed with an admitted data
+            // prefix behind READY. Its reliable closure result retires the
+            // peer after that prefix; removing it here loses routing state.
+            return;
+        }
+        self.replay_state_to_peer(&ready.handle, ready.subs_replay)
+            .await;
+    }
+
+    /// Why a handshaked peer cannot become ready, if it cannot.
+    fn handshake_rejection(
+        &self,
+        peer_id: u64,
+        identity: &bytes::Bytes,
+        peer_properties: &omq_proto::proto::command::PeerProperties,
+    ) -> Option<&'static str> {
+        if !self.can_accept_ready_peer() || !self.can_accept_carrier_peer(peer_id, identity) {
+            Some("socket peer limit reached")
+        } else if self.identity_held_by_other_principal(
+            peer_id,
+            identity,
+            &peer_properties.authentication,
+        ) {
+            Some("routing identity in use by another principal")
+        } else {
+            None
+        }
+    }
+
+    fn reject_handshake(&self, peer_id: u64, reason: &str) {
+        let Some(peer) = self.peers.get(&peer_id) else {
+            return;
+        };
+        self.monitor.publish(MonitorEvent::HandshakeFailed {
+            endpoint: peer.endpoint.clone(),
+            peer_ident: peer.ident.clone(),
+            reason: reason.into(),
+        });
+
+        // Let the driver report closure through the ordinary lifecycle.
+        // Removing/aborting it here loses that event and strands an
+        // outbound dialer after a local admission rejection.
+        peer.handle.cancel.cancel();
+    }
+
+    fn ready_peer_info(
+        &self,
+        peer_id: u64,
+        peer_minor: u8,
+        peer_properties: &std::sync::Arc<omq_proto::proto::command::PeerProperties>,
+    ) -> Option<PeerInfo> {
+        let peer = self.peers.get(&peer_id)?;
+        Some(PeerInfo {
+            authentication: peer_properties.authentication.clone(),
+            diagnostics: omq_proto::PeerDiagnostics {
+                endpoint: peer.endpoint.to_string(),
+                local_address: peer.local_address.clone(),
+                remote_address: peer.remote_address.clone(),
+            },
+            connection_id: peer_id,
+            peer_address: peer_ident_socket_addr(&peer.ident),
+            peer_identity: peer_properties.identity.clone(),
+            peer_properties: peer_properties.clone(),
+            zmtp_version: Self::peer_protocol_version(&peer.endpoint, peer_minor),
+        })
+    }
+
+    /// Flip the peer entry to ready. Returns what activation still needs.
+    fn mark_peer_ready(
+        &mut self,
+        peer_id: u64,
+        identity: &bytes::Bytes,
+        info: PeerInfo,
+    ) -> Option<ReadiedPeer> {
+        let p = self.peers.get_mut(&peer_id)?;
+        let became_ready = !p.ready;
+        p.ready = true;
+        p.pending_handshake = false;
+        // Dropping the admission frees a pending-handshake slot.
+        p.handshake_admission = None;
+        p.identity = identity.clone();
+        p.info = Some(info.clone());
+
+        Some(ReadiedPeer {
+            handle: p.handle.clone(),
+            route_id: p.route_id,
+            subs_replay: self.subscriptions.clone(),
+            peer_ident: p.ident.clone(),
+            io_thread: p.io_thread,
+            became_ready,
+            event: MonitorEvent::HandshakeSucceeded {
                 endpoint: p.endpoint.clone(),
                 peer: info,
-            };
-            (
-                p.handle.clone(),
-                p.route_id,
-                self.subscriptions.clone(),
-                p.ident.clone(),
-                p.io_thread,
-                became_ready,
-                ready_event,
-            )
-        };
+            },
+        })
+    }
+
+    /// Make the ready peer routable for sends and replies.
+    fn add_ready_routes(
+        &mut self,
+        peer_id: u64,
+        ready: &ReadiedPeer,
+        identity: bytes::Bytes,
+        sender: omq_proto::Identity,
+    ) {
+        // RADIO over DART fans out to every peer; the receiver filters.
         #[cfg(feature = "dart")]
         let any_groups = self.socket_type == SocketType::Radio
             && self
@@ -617,23 +680,30 @@ impl SocketDriver {
                 .is_some_and(|peer| matches!(peer.endpoint, omq_proto::Endpoint::Dart { .. }));
         #[cfg(not(feature = "dart"))]
         let any_groups = false;
+
         if self.socket_type == SocketType::Req {
-            self.req_awaiting_reply.peer_connected(route_id, peer_id);
+            self.shared
+                .req_awaiting_reply
+                .peer_connected(ready.route_id, peer_id);
         }
         if any_groups {
-            self.send_strategy
-                .connection_added_any_groups(peer_id, handle.clone(), io_thread);
-        } else {
-            self.send_strategy.connection_added(
+            self.send_strategy.connection_added_any_groups(
                 peer_id,
-                route_id,
-                handle.clone(),
-                identity.clone(),
-                matches!(peer_ident, PeerIdent::Inproc(_)),
-                io_thread,
+                ready.handle.clone(),
+                ready.io_thread,
             );
+        } else {
+            self.send_strategy.connection_added(AddedPeer {
+                peer_id,
+                route_id: ready.route_id,
+                handle: ready.handle.clone(),
+                identity,
+                is_inproc: matches!(ready.peer_ident, PeerIdent::Inproc(_)),
+                io_thread: ready.io_thread,
+            });
         }
         self.recv_strategy.admitted(peer_id, sender.clone());
+
         // Replies are routable now, so the peer may deliver into this
         // socket's receive queue.
         if let Some((port, mut open)) = self
@@ -646,19 +716,9 @@ impl SocketDriver {
             }
             port.open(open);
         }
-        if became_ready {
-            self.ready_peer_count_shared.add();
+        if ready.became_ready {
+            self.shared.ready_peers.add();
         }
-        self.monitor.publish(ready_event);
-        // Replies must be routable before a different I/O/application thread
-        // can observe readiness or the first incoming message.
-        if handle.inbox.send(activation).await.is_err() {
-            // The driver may already have completed with an admitted data
-            // prefix behind READY. Its reliable closure result retires the
-            // peer after that prefix; removing it here loses routing state.
-            return;
-        }
-        self.replay_state_to_peer(&handle, subs_replay).await;
     }
 
     fn receive_activation(
@@ -736,10 +796,10 @@ impl SocketDriver {
 
     fn count_subscription_after(&self, applied: Option<tokio::sync::oneshot::Receiver<()>>) {
         let Some(applied) = applied else {
-            self.subscribe_count.fetch_add(1, Ordering::Release);
+            self.shared.subscribe_count.fetch_add(1, Ordering::Release);
             return;
         };
-        let subscribe_count = self.subscribe_count.clone();
+        let subscribe_count = self.shared.subscribe_count.clone();
         std::mem::drop(tokio::spawn(async move {
             if applied.await.is_ok() {
                 subscribe_count.fetch_add(1, Ordering::Release);
@@ -922,238 +982,587 @@ pub(super) async fn inproc_peer_driver(
     mut ctx: InprocDriverCtx,
 ) {
     let mut completion = std::mem::take(&mut ctx.completion);
-    inproc_peer_driver_body(inbox, data_inbox, in_rx, out, ctx, &mut completion).await;
+    let channels = InprocChannels {
+        inbox,
+        data_inbox,
+        in_rx,
+        out,
+    };
+    inproc_peer_driver_body(channels, ctx, &mut completion).await;
+    // Report completion only after every relay resource is dropped.
     let _ = completion.complete(DisconnectReason::PeerClosed);
 }
 
-#[expect(clippy::too_many_lines)]
 async fn inproc_peer_driver_body(
-    mut inbox: crate::engine::control_inbox::Receiver,
-    mut data_inbox: crate::engine::data_inbox::Receiver,
-    mut in_rx: crate::transport::inproc::RelayReceiver,
-    out: crate::transport::inproc::RelaySender,
+    channels: InprocChannels,
     ctx: InprocDriverCtx,
     completion: &mut crate::engine::peer_completion::CompletionProgress,
 ) {
-    use crate::engine::{PeerDriverCommand, PeerDriverData, PeerEvent};
-    use omq_proto::TrySendError;
-    use omq_proto::proto::greeting::ZMTP_MINOR;
+    let (mut relay, outside) = InprocRelay::new(channels, ctx);
+    // Declared after the relay, so the port closes before the relay's
+    // channels and sinks drop.
+    let _port_guard = InprocPortGuard(relay.inbound.clone());
 
-    let InprocDriverCtx {
-        mut peer_out,
-        peer_control,
-        notify_xpub,
-        peer_id,
-        cancel,
-        peer_props,
-        max_message_size,
-        recv_direct,
-        socket_close_state,
-        mut recv_sink,
-        mut send_pipe_rx,
-        blocking_recv_waker,
-        inbound,
-        outbound,
-        completion: _,
-    } = ctx;
-    let _port_guard = InprocPortGuard(inbound.clone());
-    let mut pending_in = None;
-    let mut pending_notification = None;
-    let mut pending_control = None;
-    let control_credit = peer_control.reserve();
-    tokio::pin!(control_credit);
-    let mut control_prefix = 1;
-    let mut pending_command = None;
-    let mut pending_out: std::collections::VecDeque<Message> = std::collections::VecDeque::new();
-    let mut send_pipe_batch = Vec::new();
-    let mut data_plane_active = false;
-    let mut data_inbox_open = true;
-    let mut control_open = true;
-    let mut receive_open = true;
-    let mut close_requested = false;
-    let mut close_deadline: Option<std::time::Instant> = None;
-    let mut discard_receive = false;
-    let mut budget = omq_proto::flow::DrainBudget::new(64, 64 * 1024);
-
-    let handshake = ZmtpEvent::HandshakeSucceeded {
-        peer_minor: ZMTP_MINOR,
-        peer_properties: std::sync::Arc::new(peer_props),
-    };
-    tokio::select! {
-        biased;
-        () = cancel.cancelled() => return,
-        result = peer_control.send((peer_id, PeerEvent::Event(handshake))) => {
-            if result.is_err() { return; }
-            completion.note_event();
-        }
+    if !relay
+        .announce_handshake(&outside.peer_control, outside.peer_props, completion)
+        .await
+    {
+        return;
     }
-    peer_out.set_control_prefix(control_prefix);
-    let result: () = async {
+
+    relay.run(&outside.peer_control, completion).await;
+    outside.blocking_recv_waker.wake();
+}
+
+/// Channel ends between the actor, this peer task, and the inproc partner.
+struct InprocChannels {
+    inbox: crate::engine::control_inbox::Receiver,
+    data_inbox: crate::engine::data_inbox::Receiver,
+    in_rx: crate::transport::inproc::RelayReceiver,
+    out: crate::transport::inproc::RelaySender,
+}
+
+/// Driver context the relay loop does not own. `peer_control` stays
+/// outside because the loop's pinned credit reservation borrows it.
+struct RelayOutside {
+    peer_control: mpsc::Sender<(u64, crate::engine::PeerEvent)>,
+    peer_props: omq_proto::proto::command::PeerProperties,
+    blocking_recv_waker: std::sync::Arc<crate::socket::recv::BlockingRecvWaker>,
+}
+
+/// Lanes that can still deliver. A closed lane is never polled again.
+struct RelayLanes {
+    /// Actor data inbox (outbound sends).
+    data_inbox: bool,
+    /// Partner command lane.
+    control: bool,
+    /// Partner data lane.
+    receive: bool,
+}
+
+struct RelayClosing {
+    /// The actor asked to drain and close.
+    requested: bool,
+    deadline: Option<std::time::Instant>,
+    /// The socket closed its receive side. Drop inbound data until the
+    /// partner and the actor are done.
+    discard_receive: bool,
+}
+
+/// State of one inproc peer task: relay buffers, close flags, and the
+/// channels and sinks they move messages between.
+struct InprocRelay {
+    /// Inbound message waiting for receive space.
+    pending_in: Option<Message>,
+    /// XPUB notification that must follow its control event.
+    pending_notification: Option<Message>,
+    /// Inbound command waiting for actor control credit.
+    pending_control: Option<ZmtpEvent>,
+    /// Count of control events sent to the actor. Data published after a
+    /// prefix is not delivered before those events are handled.
+    control_prefix: u64,
+    /// Outbound command waiting for partner control space.
+    pending_command: Option<omq_proto::proto::Command>,
+    /// Outbound messages waiting for partner data space.
+    pending_out: std::collections::VecDeque<Message>,
+    send_pipe_batch: Vec<Message>,
+    data_plane_active: bool,
+    open: RelayLanes,
+    closing: RelayClosing,
+    budget: omq_proto::flow::DrainBudget,
+    outbound: Option<crate::transport::inproc::InprocSender>,
+    inbound: Option<std::sync::Arc<crate::transport::inproc::InprocPort>>,
+    send_pipe_rx: Option<crate::engine::SendPipeConsumer>,
+    recv_sink: Option<crate::engine::RecvSink>,
+    socket_close_state: std::sync::Arc<crate::socket::recv::SharedRecvPipe>,
+    recv_direct: Option<std::sync::Arc<crate::socket::recv::SharedRecvPipe>>,
+    max_message_size: Option<usize>,
+    cancel: tokio_util::sync::CancellationToken,
+    peer_id: u64,
+    notify_xpub: bool,
+    peer_out: crate::engine::actor_output::PeerOutput,
+    out: crate::transport::inproc::RelaySender,
+    in_rx: crate::transport::inproc::RelayReceiver,
+    data_inbox: crate::engine::data_inbox::Receiver,
+    inbox: crate::engine::control_inbox::Receiver,
+}
+
+impl InprocRelay {
+    fn new(channels: InprocChannels, ctx: InprocDriverCtx) -> (Self, RelayOutside) {
+        let InprocDriverCtx {
+            peer_out,
+            peer_control,
+            notify_xpub,
+            peer_id,
+            cancel,
+            peer_props,
+            max_message_size,
+            recv_direct,
+            socket_close_state,
+            recv_sink,
+            send_pipe_rx,
+            blocking_recv_waker,
+            inbound,
+            outbound,
+            completion: _,
+        } = ctx;
+
+        let relay = Self {
+            pending_in: None,
+            pending_notification: None,
+            pending_control: None,
+            control_prefix: 1,
+            pending_command: None,
+            pending_out: std::collections::VecDeque::new(),
+            send_pipe_batch: Vec::new(),
+            data_plane_active: false,
+            open: RelayLanes {
+                data_inbox: true,
+                control: true,
+                receive: true,
+            },
+            closing: RelayClosing {
+                requested: false,
+                deadline: None,
+                discard_receive: false,
+            },
+            budget: omq_proto::flow::DrainBudget::new(64, 64 * 1024),
+            outbound,
+            inbound,
+            send_pipe_rx,
+            recv_sink,
+            socket_close_state,
+            recv_direct,
+            max_message_size,
+            cancel,
+            peer_id,
+            notify_xpub,
+            peer_out,
+            out: channels.out,
+            in_rx: channels.in_rx,
+            data_inbox: channels.data_inbox,
+            inbox: channels.inbox,
+        };
+        let outside = RelayOutside {
+            peer_control,
+            peer_props,
+            blocking_recv_waker,
+        };
+        (relay, outside)
+    }
+
+    /// Report the synthetic handshake. False if the task must stop.
+    async fn announce_handshake(
+        &mut self,
+        peer_control: &mpsc::Sender<(u64, crate::engine::PeerEvent)>,
+        peer_props: omq_proto::proto::command::PeerProperties,
+        completion: &mut crate::engine::peer_completion::CompletionProgress,
+    ) -> bool {
+        use crate::engine::PeerEvent;
+        use omq_proto::proto::greeting::ZMTP_MINOR;
+
+        let handshake = ZmtpEvent::HandshakeSucceeded {
+            peer_minor: ZMTP_MINOR,
+            peer_properties: std::sync::Arc::new(peer_props),
+        };
+        tokio::select! {
+            biased;
+            () = self.cancel.cancelled() => return false,
+            result = peer_control.send((self.peer_id, PeerEvent::Event(handshake))) => {
+                if result.is_err() { return false; }
+                completion.note_event();
+            }
+        }
+
+        self.peer_out.set_control_prefix(self.control_prefix);
+        true
+    }
+
+    /// Relay until close, cancel, or either side drops. Every arm is
+    /// bounded by `budget`; control lanes are checked before data.
+    async fn run(
+        &mut self,
+        peer_control: &mpsc::Sender<(u64, crate::engine::PeerEvent)>,
+        completion: &mut crate::engine::peer_completion::CompletionProgress,
+    ) {
+        let control_credit = peer_control.reserve();
+        tokio::pin!(control_credit);
+
         loop {
-            if budget.exhausted() {
-                inbox.release_consumed();
-                data_inbox.release_consumed();
-                in_rx.control.release_consumed();
-                in_rx.data.release_consumed();
-                budget.reset();
-                tokio::task::yield_now().await;
+            self.yield_if_exhausted().await;
+            if !self.deliver_pending_in(completion) || self.finished() {
+                return;
             }
-            if !discard_receive && recv_sink.as_mut().is_some_and(|sink| !sink.retry_peer_pending()) {
-                if socket_close_state.is_closed() { discard_receive = true; } else { return; }
-            }
-            if close_requested || discard_receive { pending_in = None; }
-            if let Some(message) = pending_in.take() {
-                let result = if let Some(port) = &inbound {
-                    port.try_send(message).map_err(|error| match error {
-                        crate::engine::SendPipeError::Full(message) => TrySendError::Full(message),
-                        crate::engine::SendPipeError::Closed(_) => TrySendError::Closed,
-                        #[cfg(feature = "dart")]
-                        crate::engine::SendPipeError::Invalid(_) => unreachable!("receive output has no transport send validator"),
-                    })
-                } else if let Some(sink) = &mut recv_sink {
-                    sink.try_deliver(message)
-                } else if let Some(pipe) = &recv_direct {
-                    pipe.try_send(message)
-                } else {
-                    match peer_out.try_send(peer_id, message, false) {
-                        Ok(()) => { completion.note_event(); Ok(()) }
-                        Err(crate::engine::SendPipeError::Full(message)) => Err(TrySendError::Full(message)),
-                        Err(crate::engine::SendPipeError::Closed(_)) => Err(TrySendError::Closed),
-                        #[cfg(feature = "dart")]
-                        Err(crate::engine::SendPipeError::Invalid(_)) => unreachable!("receive output has no transport send validator"),
-                    }
-                };
-                match result {
-                    Ok(()) => {},
-                    Err(TrySendError::Full(message)) => pending_in = Some(message),
-                    Err(_) if socket_close_state.is_closed() => discard_receive = true,
-                    Err(_) => return,
-                }
-            }
-            if close_requested
-                && pending_command.is_none()
-                && pending_out.is_empty()
-                && inbox.is_empty()
-                && data_inbox.is_empty()
-                && send_pipe_rx.as_ref().is_none_or(crate::engine::SendPipeConsumer::is_empty)
-                && outbound.as_ref().is_none_or(crate::transport::inproc::InprocSender::is_empty)
-            { return; }
-            if !control_open && !receive_open && pending_in.is_none() && pending_control.is_none() { return; }
-            let recv_blocked = !discard_receive && !close_requested && recv_sink.as_ref().is_some_and(crate::engine::RecvSink::peer_blocked);
-            let actor_space = pending_in.is_some() && inbound.is_none() && recv_sink.is_none() && recv_direct.is_none();
+
+            let recv_blocked = self.recv_blocked();
+            let actor_space = self.waits_for_actor_space();
+            let close_deadline = self.closing.deadline;
             tokio::select! {
                 biased;
-                () = cancel.cancelled() => return,
+                () = self.cancel.cancelled() => return,
                 () = async { tokio::time::sleep_until(close_deadline.unwrap().into()).await; }, if close_deadline.is_some() => return,
-                cmd = async {
-                    if pending_command.is_some() { inbox.recv_lifecycle().await } else { inbox.recv().await }
-                } => match cmd {
-                    Some(PeerDriverCommand::ActivateDataPlane) => data_plane_active = true,
-                    Some(PeerDriverCommand::ActivateWithRecvSink(sink)) => { recv_sink = Some(sink); data_plane_active = true; }
-                    Some(PeerDriverCommand::SendCommand(command)) => {
-                        let _ = budget.account(inproc_command_size(&command));
-                        pending_command = Some(command);
-                    }
-                    Some(PeerDriverCommand::DrainAndClose { deadline }) => {
-                        if !close_requested {
-                            close_requested = true;
-                            close_deadline = deadline;
-                            data_inbox.close();
-                            if let Some(port) = &inbound { port.close(); }
-                        }
-                    }
-                    Some(PeerDriverCommand::Close) | None => return,
-                },
-                result = out.control.ready(), if pending_command.is_some() => {
-                    if result.is_err() { return; }
-                    let command = pending_command.take().unwrap();
-                    let _ = budget.account(inproc_command_size(&command));
-                    match out.control.try_send(command) {
-                        Ok(()) => {},
-                        Err(mpsc::error::TrySendError::Full(command)) => pending_command = Some(command),
-                        Err(mpsc::error::TrySendError::Closed(_)) => return,
-                    }
-                },
-                command = in_rx.control.recv(), if control_open && data_plane_active && pending_control.is_none() => match command {
-                    Some(_) if close_requested || discard_receive => {},
-                    Some(command) => {
-                        let _ = budget.account(inproc_command_size(&command));
-                        let event = ZmtpEvent::Command(command);
-                        if notify_xpub { pending_notification = crate::engine::peer_events::xpub_notification(&event); }
-                        pending_control = Some(event);
-                    }
-                    None => control_open = false,
-                },
-                permit = &mut control_credit, if pending_control.is_some() && (pending_notification.is_none() || (pending_in.is_none() && peer_out.has_capacity())) => {
+                cmd = next_command(&mut self.inbox, self.pending_command.is_some()) => {
+                    if !self.on_command(cmd) { return; }
+                }
+                result = self.out.control.ready(), if self.pending_command.is_some() => {
+                    if result.is_err() || !self.flush_command() { return; }
+                }
+                command = self.in_rx.control.recv(), if self.open.control && self.data_plane_active && self.pending_control.is_none() => {
+                    self.on_partner_command(command);
+                }
+                permit = &mut control_credit, if self.pending_control.is_some() && (self.pending_notification.is_none() || (self.pending_in.is_none() && self.peer_out.has_capacity())) => {
                     let Ok(permit) = permit else { return; };
-                    permit.send((peer_id, PeerEvent::Event(pending_control.take().unwrap())));
-                    completion.note_event();
-                    control_prefix = control_prefix.wrapping_add(1);
-                    peer_out.set_control_prefix(control_prefix);
-                    if let Some(notification) = pending_notification.take() {
-                        match peer_out.try_send(peer_id, notification, true) {
-                            Ok(()) => completion.note_event(),
-                            Err(crate::engine::SendPipeError::Full(_)) => unreachable!("single producer retained notification capacity"),
-                            Err(crate::engine::SendPipeError::Closed(_)) => return,
-                            #[cfg(feature = "dart")]
-                            Err(crate::engine::SendPipeError::Invalid(_)) => unreachable!("receive output has no transport send validator"),
-                        }
-                    }
+                    if !self.forward_control(permit, completion) { return; }
                     control_credit.set(peer_control.reserve());
-                },
-                result = peer_out.ready(), if actor_space || (pending_notification.is_some() && !peer_out.has_capacity()) => {
+                }
+                result = self.peer_out.ready(), if actor_space || (self.pending_notification.is_some() && !self.peer_out.has_capacity()) => {
                     if result.is_err() { return; }
-                },
-                result = out.data.ready(), if !pending_out.is_empty() && pending_command.is_none() => {
-                    if result.is_err() { return; }
-                    let message = pending_out.pop_front().unwrap();
-                    let _ = budget.account(message.byte_len());
-                    match out.data.try_send(message) {
-                        Ok(()) => {},
-                        Err(mpsc::error::TrySendError::Full(message)) => pending_out.push_front(message),
-                        Err(mpsc::error::TrySendError::Closed(_)) => return,
-                    }
-                },
-                data = data_inbox.recv(), if data_inbox_open && data_plane_active && pending_out.is_empty() => match data {
-                    Some(PeerDriverData::SendMessage(message)) => { let _ = budget.account(message.byte_len()); pending_out.push_back(message); },
-                    Some(PeerDriverData::SendEncoded(_)) => {},
-                    None => data_inbox_open = false,
-                },
-                () = async { send_pipe_rx.as_ref().unwrap().ready().await; }, if send_pipe_rx.is_some() && data_plane_active && pending_out.is_empty() => {
-                    let send_pipe_rx = send_pipe_rx.as_mut().unwrap();
-                    let drained = send_pipe_rx.drain_into(&mut send_pipe_batch, crate::routing::OUTBOUND_BATCH_MAX_MSGS, omq_proto::flow::max_batch_bytes());
-                    if drained == 0 {
-                        if send_pipe_rx.is_disconnected() { return; }
-                        continue;
-                    }
-                    for message in send_pipe_batch.drain(..) {
-                        let _ = budget.account(message.byte_len());
-                        pending_out.push_back(message);
-                    }
-                },
-                () = async { outbound.as_ref().unwrap().deliver_backlog().await; }, if data_plane_active && outbound.as_ref().is_some_and(|sender| !sender.is_empty()) => {},
-                () = async {
-                    if let Some(port) = &inbound {
-                        let space = port.space();
-                        space.wait_until(|| port.has_space()).await;
-                    } else if let Some(sink) = &mut recv_sink { sink.receive_space_ready().await; }
-                    else { recv_direct.as_ref().unwrap().space_ready().await; }
-                }, if (pending_in.is_some() && !actor_space) || recv_blocked => {},
-
-                message = in_rx.data.recv(), if receive_open && data_plane_active && !recv_blocked && pending_in.is_none() && pending_control.is_none() => match message {
-                    Some(_) if close_requested || discard_receive => {},
-                    Some(message) => {
-                        let _ = budget.account(message.byte_len());
-                        if max_message_size.is_some_and(|max| message.max_message_size_len() > max) { return; }
-                        pending_in = Some(message);
-                    }
-                    None => receive_open = false,
-                },
+                }
+                result = self.out.data.ready(), if !self.pending_out.is_empty() && self.pending_command.is_none() => {
+                    if result.is_err() || !self.flush_data() { return; }
+                }
+                data = self.data_inbox.recv(), if self.open.data_inbox && self.data_plane_active && self.pending_out.is_empty() => {
+                    self.on_data(data);
+                }
+                () = send_pipe_ready(self.send_pipe_rx.as_ref()), if self.send_pipe_rx.is_some() && self.data_plane_active && self.pending_out.is_empty() => {
+                    if !self.drain_send_pipe() { return; }
+                }
+                () = deliver_backlog(self.outbound.as_ref()), if self.data_plane_active && self.outbound.as_ref().is_some_and(|sender| !sender.is_empty()) => {}
+                () = receive_space(self.inbound.as_ref(), self.recv_sink.as_mut(), self.recv_direct.as_ref()), if (self.pending_in.is_some() && !actor_space) || recv_blocked => {}
+                message = self.in_rx.data.recv(), if self.open.receive && self.data_plane_active && !recv_blocked && self.pending_in.is_none() && self.pending_control.is_none() => {
+                    if !self.on_partner_message(message) { return; }
+                }
             }
         }
-    }.await;
-    let () = result;
-    blocking_recv_waker.wake();
+    }
+
+    /// Once a turn spent its budget, publish consumed credits and let other
+    /// tasks run before starting the next turn.
+    async fn yield_if_exhausted(&mut self) {
+        if !self.budget.exhausted() {
+            return;
+        }
+
+        self.inbox.release_consumed();
+        self.data_inbox.release_consumed();
+        self.in_rx.control.release_consumed();
+        self.in_rx.data.release_consumed();
+        self.budget.reset();
+        tokio::task::yield_now().await;
+    }
+
+    /// Retry the held inbound message. False if the task must stop.
+    fn deliver_pending_in(
+        &mut self,
+        completion: &mut crate::engine::peer_completion::CompletionProgress,
+    ) -> bool {
+        use omq_proto::TrySendError;
+
+        if !self.closing.discard_receive
+            && self
+                .recv_sink
+                .as_mut()
+                .is_some_and(|sink| !sink.retry_peer_pending())
+        {
+            // A sink that refuses its retry is gone. That is only expected
+            // once the socket closed its receive side.
+            if self.socket_close_state.is_closed() {
+                self.closing.discard_receive = true;
+            } else {
+                return false;
+            }
+        }
+        if self.closing.requested || self.closing.discard_receive {
+            self.pending_in = None;
+        }
+
+        let Some(message) = self.pending_in.take() else {
+            return true;
+        };
+        match self.try_deliver(message, completion) {
+            Ok(()) => {}
+            Err(TrySendError::Full(message)) => self.pending_in = Some(message),
+            Err(_) if self.socket_close_state.is_closed() => self.closing.discard_receive = true,
+            Err(_) => return false,
+        }
+        true
+    }
+
+    /// Deliver one inbound message to the first available route: receive
+    /// port, sink, shared pipe, then the actor.
+    fn try_deliver(
+        &mut self,
+        message: Message,
+        completion: &mut crate::engine::peer_completion::CompletionProgress,
+    ) -> Result<(), omq_proto::TrySendError> {
+        use crate::engine::SendPipeError;
+        use omq_proto::TrySendError;
+
+        if let Some(port) = &self.inbound {
+            port.try_send(message).map_err(|error| match error {
+                SendPipeError::Full(message) => TrySendError::Full(message),
+                SendPipeError::Closed(_) => TrySendError::Closed,
+                #[cfg(feature = "dart")]
+                SendPipeError::Invalid(_) => {
+                    unreachable!("receive output has no transport send validator")
+                }
+            })
+        } else if let Some(sink) = &mut self.recv_sink {
+            sink.try_deliver(message)
+        } else if let Some(pipe) = &self.recv_direct {
+            pipe.try_send(message)
+        } else {
+            match self.peer_out.try_send(self.peer_id, message, false) {
+                Ok(()) => {
+                    completion.note_event();
+                    Ok(())
+                }
+                Err(SendPipeError::Full(message)) => Err(TrySendError::Full(message)),
+                Err(SendPipeError::Closed(_)) => Err(TrySendError::Closed),
+                #[cfg(feature = "dart")]
+                Err(SendPipeError::Invalid(_)) => {
+                    unreachable!("receive output has no transport send validator")
+                }
+            }
+        }
+    }
+
+    /// True once a requested close drained every outbound queue, or both
+    /// partner lanes closed with nothing left to hand over.
+    fn finished(&self) -> bool {
+        let drained = self.closing.requested
+            && self.pending_command.is_none()
+            && self.pending_out.is_empty()
+            && self.inbox.is_empty()
+            && self.data_inbox.is_empty()
+            && self
+                .send_pipe_rx
+                .as_ref()
+                .is_none_or(crate::engine::SendPipeConsumer::is_empty)
+            && self
+                .outbound
+                .as_ref()
+                .is_none_or(crate::transport::inproc::InprocSender::is_empty);
+        let partner_gone = !self.open.control
+            && !self.open.receive
+            && self.pending_in.is_none()
+            && self.pending_control.is_none();
+        drained || partner_gone
+    }
+
+    fn recv_blocked(&self) -> bool {
+        !self.closing.discard_receive
+            && !self.closing.requested
+            && self
+                .recv_sink
+                .as_ref()
+                .is_some_and(crate::engine::RecvSink::peer_blocked)
+    }
+
+    /// The held inbound message can only go to the actor.
+    fn waits_for_actor_space(&self) -> bool {
+        self.pending_in.is_some()
+            && self.inbound.is_none()
+            && self.recv_sink.is_none()
+            && self.recv_direct.is_none()
+    }
+
+    /// Apply an actor command. False if the task must stop.
+    fn on_command(&mut self, cmd: Option<crate::engine::PeerDriverCommand>) -> bool {
+        use crate::engine::PeerDriverCommand;
+
+        match cmd {
+            Some(PeerDriverCommand::ActivateDataPlane) => self.data_plane_active = true,
+            Some(PeerDriverCommand::ActivateWithRecvSink(sink)) => {
+                self.recv_sink = Some(sink);
+                self.data_plane_active = true;
+            }
+            Some(PeerDriverCommand::SendCommand(command)) => {
+                let _ = self.budget.account(inproc_command_size(&command));
+                self.pending_command = Some(command);
+            }
+            Some(PeerDriverCommand::DrainAndClose { deadline }) => {
+                // Stop taking new sends and inbound data; queued output
+                // still drains until `finished` or the deadline.
+                if !self.closing.requested {
+                    self.closing.requested = true;
+                    self.closing.deadline = deadline;
+                    self.data_inbox.close();
+                    if let Some(port) = &self.inbound {
+                        port.close();
+                    }
+                }
+            }
+            Some(PeerDriverCommand::Close) | None => return false,
+        }
+        true
+    }
+
+    /// Send the held command to the partner. False if the partner is gone.
+    fn flush_command(&mut self) -> bool {
+        let command = self.pending_command.take().unwrap();
+        let _ = self.budget.account(inproc_command_size(&command));
+        match self.out.control.try_send(command) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(command)) => self.pending_command = Some(command),
+            Err(mpsc::error::TrySendError::Closed(_)) => return false,
+        }
+        true
+    }
+
+    fn on_partner_command(&mut self, command: Option<omq_proto::proto::Command>) {
+        match command {
+            Some(_) if self.closing.requested || self.closing.discard_receive => {}
+            Some(command) => {
+                let _ = self.budget.account(inproc_command_size(&command));
+                let event = ZmtpEvent::Command(command);
+                if self.notify_xpub {
+                    self.pending_notification =
+                        crate::engine::peer_events::xpub_notification(&event);
+                }
+                self.pending_control = Some(event);
+            }
+            None => self.open.control = false,
+        }
+    }
+
+    /// Hand the held control event to the actor, then its XPUB
+    /// notification. False if the actor's data output closed.
+    fn forward_control(
+        &mut self,
+        permit: mpsc::Permit<'_, (u64, crate::engine::PeerEvent)>,
+        completion: &mut crate::engine::peer_completion::CompletionProgress,
+    ) -> bool {
+        use crate::engine::{PeerEvent, SendPipeError};
+
+        let event = self.pending_control.take().unwrap();
+        permit.send((self.peer_id, PeerEvent::Event(event)));
+        completion.note_event();
+        self.control_prefix = self.control_prefix.wrapping_add(1);
+        self.peer_out.set_control_prefix(self.control_prefix);
+
+        let Some(notification) = self.pending_notification.take() else {
+            return true;
+        };
+        // The arm's precondition checked capacity for this notification.
+        match self.peer_out.try_send(self.peer_id, notification, true) {
+            Ok(()) => completion.note_event(),
+            Err(SendPipeError::Full(_)) => {
+                unreachable!("single producer retained notification capacity")
+            }
+            Err(SendPipeError::Closed(_)) => return false,
+            #[cfg(feature = "dart")]
+            Err(SendPipeError::Invalid(_)) => {
+                unreachable!("receive output has no transport send validator")
+            }
+        }
+        true
+    }
+
+    /// Send the next queued message to the partner. False if it is gone.
+    fn flush_data(&mut self) -> bool {
+        let message = self.pending_out.pop_front().unwrap();
+        let _ = self.budget.account(message.byte_len());
+        match self.out.data.try_send(message) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(message)) => self.pending_out.push_front(message),
+            Err(mpsc::error::TrySendError::Closed(_)) => return false,
+        }
+        true
+    }
+
+    fn on_data(&mut self, data: Option<crate::engine::PeerDriverData>) {
+        use crate::engine::PeerDriverData;
+
+        match data {
+            Some(PeerDriverData::SendMessage(message)) => {
+                let _ = self.budget.account(message.byte_len());
+                self.pending_out.push_back(message);
+            }
+            // Encoded wire bytes are for ZMTP peers. Inproc has no wire.
+            Some(PeerDriverData::SendEncoded(_)) => {}
+            None => self.open.data_inbox = false,
+        }
+    }
+
+    /// Move one batch from the send pipe to `pending_out`. False once the
+    /// pipe's producers are gone.
+    fn drain_send_pipe(&mut self) -> bool {
+        let send_pipe_rx = self.send_pipe_rx.as_mut().unwrap();
+        let drained = send_pipe_rx.drain_into(
+            &mut self.send_pipe_batch,
+            crate::routing::OUTBOUND_BATCH_MAX_MSGS,
+            omq_proto::flow::max_batch_bytes(),
+        );
+        if drained == 0 {
+            return !send_pipe_rx.is_disconnected();
+        }
+
+        for message in self.send_pipe_batch.drain(..) {
+            let _ = self.budget.account(message.byte_len());
+            self.pending_out.push_back(message);
+        }
+        true
+    }
+
+    /// Hold one partner message for delivery. False if it breaks the
+    /// size limit, which ends the connection.
+    fn on_partner_message(&mut self, message: Option<Message>) -> bool {
+        match message {
+            Some(_) if self.closing.requested || self.closing.discard_receive => {}
+            Some(message) => {
+                let _ = self.budget.account(message.byte_len());
+                if self
+                    .max_message_size
+                    .is_some_and(|max| message.max_message_size_len() > max)
+                {
+                    return false;
+                }
+                self.pending_in = Some(message);
+            }
+            None => self.open.receive = false,
+        }
+        true
+    }
+}
+
+/// While an outbound command is held, only lifecycle commands are taken,
+/// so the next `SendCommand` cannot overwrite it.
+async fn next_command(
+    inbox: &mut crate::engine::control_inbox::Receiver,
+    lifecycle_only: bool,
+) -> Option<crate::engine::PeerDriverCommand> {
+    if lifecycle_only {
+        inbox.recv_lifecycle().await
+    } else {
+        inbox.recv().await
+    }
+}
+
+/// Only polled when the arm is enabled, which requires a pipe.
+async fn send_pipe_ready(pipe: Option<&crate::engine::SendPipeConsumer>) {
+    pipe.unwrap().ready().await;
+}
+
+/// Only polled when the arm is enabled, which requires a sender.
+async fn deliver_backlog(sender: Option<&crate::transport::inproc::InprocSender>) {
+    sender.unwrap().deliver_backlog().await;
+}
+
+/// Wait for space on whichever route takes inbound messages.
+async fn receive_space(
+    inbound: Option<&std::sync::Arc<crate::transport::inproc::InprocPort>>,
+    recv_sink: Option<&mut crate::engine::RecvSink>,
+    recv_direct: Option<&std::sync::Arc<crate::socket::recv::SharedRecvPipe>>,
+) {
+    if let Some(port) = inbound {
+        let space = port.space();
+        space.wait_until(|| port.has_space()).await;
+    } else if let Some(sink) = recv_sink {
+        sink.receive_space_ready().await;
+    } else {
+        recv_direct.unwrap().space_ready().await;
+    }
 }
 
 fn inproc_command_size(command: &omq_proto::proto::Command) -> usize {
@@ -1184,7 +1593,51 @@ mod tests {
     use super::*;
     use crate::engine::{PeerDriverCommand, PeerEvent};
     use omq_proto::inproc::InboundFrame;
+    use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
+
+    /// Context for PAIR peer 7 with no sinks, routes, or size limit. Also
+    /// returns the socket receive pipe and its consumer, which must stay
+    /// alive for the pipe to accept messages.
+    fn pair_ctx(
+        peer_control: mpsc::Sender<(u64, PeerEvent)>,
+        peer_out: crate::engine::actor_output::PeerOutput,
+        completion: crate::engine::peer_completion::CompletionProgress,
+        cancel: CancellationToken,
+    ) -> (
+        InprocDriverCtx,
+        Arc<crate::socket::recv::SharedRecvPipe>,
+        yring::Consumer<Message>,
+    ) {
+        let blocking = crate::socket::recv::BlockingRecvWaker::new();
+        let (recv, consumer, _, _) = crate::socket::recv::recv_pipe(16, blocking.clone());
+        let ctx = InprocDriverCtx {
+            peer_out,
+            peer_control,
+            notify_xpub: false,
+            completion,
+            peer_id: 7,
+            cancel,
+            peer_props: omq_proto::proto::command::PeerProperties::default()
+                .with_socket_type(SocketType::Pair),
+            max_message_size: None,
+            recv_direct: None,
+            socket_close_state: recv.clone(),
+            recv_sink: None,
+            send_pipe_rx: None,
+            blocking_recv_waker: blocking,
+            inbound: None,
+            outbound: None,
+        };
+        (ctx, recv, consumer)
+    }
+
+    fn unknown_command(name: &'static str) -> InboundFrame {
+        InboundFrame::Command(Box::new(omq_proto::proto::Command::Unknown {
+            name: name.into(),
+            body: bytes::Bytes::new(),
+        }))
+    }
 
     #[tokio::test]
     async fn inproc_completion_joins_with_its_handshake_mailbox_full() {
@@ -1194,33 +1647,15 @@ mod tests {
         let (out, mut outgoing) = crate::transport::inproc::relay_channel(1);
         let (peer_out, mut events) = mpsc::channel(1);
         let (completion, finished) = crate::engine::peer_completion::CompletionProgress::reserve(7);
-        let blocking = crate::socket::recv::BlockingRecvWaker::new();
-        let (recv, _consumer, _, _) = crate::socket::recv::recv_pipe(16, blocking.clone());
+        let (ctx, _recv, _consumer) = pair_ctx(
+            peer_out.clone(),
+            peer_out.into(),
+            completion,
+            CancellationToken::new(),
+        );
         commands.try_send(PeerDriverCommand::Close).unwrap();
-        let mut task = tokio::spawn(inproc_peer_driver(
-            inbox,
-            data_inbox,
-            in_rx,
-            out,
-            InprocDriverCtx {
-                peer_control: peer_out.clone(),
-                peer_out: peer_out.into(),
-                notify_xpub: false,
-                completion,
-                peer_id: 7,
-                cancel: CancellationToken::new(),
-                peer_props: omq_proto::proto::command::PeerProperties::default()
-                    .with_socket_type(SocketType::Pair),
-                max_message_size: None,
-                recv_direct: None,
-                socket_close_state: recv,
-                recv_sink: None,
-                send_pipe_rx: None,
-                blocking_recv_waker: blocking,
-                inbound: None,
-                outbound: None,
-            },
-        ));
+
+        let mut task = tokio::spawn(inproc_peer_driver(inbox, data_inbox, in_rx, out, ctx));
         let result = tokio::time::timeout(Duration::from_millis(100), &mut task).await;
         if result.is_err() {
             task.abort();
@@ -1228,6 +1663,7 @@ mod tests {
         result
             .expect("inproc closure waited for data-mailbox credit")
             .unwrap();
+
         let result = finished.await.unwrap();
         assert_eq!(result.admitted_events, 1);
         assert_eq!(result.reason, omq_proto::DisconnectReason::PeerClosed);
@@ -1250,47 +1686,23 @@ mod tests {
             let (completion, finished) =
                 crate::engine::peer_completion::CompletionProgress::reserve(7);
             let cancel = CancellationToken::new();
-            let blocking = crate::socket::recv::BlockingRecvWaker::new();
-            let (recv, _consumer, _, _) = crate::socket::recv::recv_pipe(16, blocking.clone());
-            let mut task = tokio::spawn(inproc_peer_driver(
-                inbox,
-                data_inbox,
-                in_rx,
-                out,
-                InprocDriverCtx {
-                    peer_control: peer_out.clone(),
-                    peer_out: peer_out.into(),
-                    notify_xpub: false,
-                    completion,
-                    peer_id: 7,
-                    cancel: cancel.clone(),
-                    peer_props: omq_proto::proto::command::PeerProperties::default()
-                        .with_socket_type(SocketType::Pair),
-                    max_message_size: None,
-                    recv_direct: None,
-                    socket_close_state: recv,
-                    recv_sink: None,
-                    send_pipe_rx: None,
-                    blocking_recv_waker: blocking,
-                    inbound: None,
-                    outbound: None,
-                },
-            ));
+            let (ctx, _recv, _consumer) = pair_ctx(
+                peer_out.clone(),
+                peer_out.into(),
+                completion,
+                cancel.clone(),
+            );
+            let mut task = tokio::spawn(inproc_peer_driver(inbox, data_inbox, in_rx, out, ctx));
             assert!(matches!(
                 events.recv().await.unwrap().1,
                 PeerEvent::Event(ZmtpEvent::HandshakeSucceeded { .. })
             ));
+
+            // Admit one command and one message, then stop the task by `mode`.
             commands
                 .try_send(PeerDriverCommand::ActivateDataPlane)
                 .unwrap();
-            incoming
-                .try_send(InboundFrame::Command(Box::new(
-                    omq_proto::proto::Command::Unknown {
-                        name: "OLDER".into(),
-                        body: bytes::Bytes::new(),
-                    },
-                )))
-                .unwrap();
+            incoming.try_send(unknown_command("OLDER")).unwrap();
             incoming
                 .try_send(InboundFrame::Message(Message::single("last")))
                 .unwrap();
@@ -1306,6 +1718,7 @@ mod tests {
                 "abort" => task.abort(),
                 _ => commands.try_send(PeerDriverCommand::Close).unwrap(),
             }
+
             let result = tokio::time::timeout(Duration::from_millis(500), &mut task)
                 .await
                 .expect("inproc completion waited for its admitted prefix to drain");
@@ -1328,6 +1741,7 @@ mod tests {
             assert!(events.recv().await.is_none());
         }
     }
+
     #[tokio::test]
     async fn inproc_control_progresses_while_actor_data_is_full() {
         for mode in ["actor", "sink", "port"] {
@@ -1344,45 +1758,26 @@ mod tests {
             let (completion, finished) =
                 crate::engine::peer_completion::CompletionProgress::reserve(7);
             let cancel = CancellationToken::new();
-            let blocking = crate::socket::recv::BlockingRecvWaker::new();
-            let (recv, _consumer, _, _) = crate::socket::recv::recv_pipe(16, blocking.clone());
+            let (mut ctx, recv, _consumer) =
+                pair_ctx(control, peer_out, completion, cancel.clone());
+
+            // Fill every receive route `mode` can use, so data stays blocked.
             for _ in 0..16 {
                 recv.try_send(Message::single("occupied")).unwrap();
             }
-            let inbound = (mode == "port").then(crate::transport::inproc::InprocPort::new);
-            if let Some(port) = &inbound {
+            ctx.inbound = (mode == "port").then(crate::transport::inproc::InprocPort::new);
+            if let Some(port) = &ctx.inbound {
                 port.open(crate::transport::inproc::OpenPort {
                     sink: crate::engine::RecvSink::Channel(recv.clone()),
                     identity: None,
                     max_message_size: None,
-                    cancel: cancel.clone(),
+                    cancel,
                 });
             }
-            let sink = (mode == "sink").then(|| crate::engine::RecvSink::Channel(recv.clone()));
-            let task = tokio::spawn(inproc_peer_driver(
-                inbox,
-                data_inbox,
-                in_rx,
-                out,
-                InprocDriverCtx {
-                    peer_out,
-                    peer_control: control,
-                    notify_xpub: false,
-                    completion,
-                    peer_id: 7,
-                    cancel,
-                    peer_props: omq_proto::proto::command::PeerProperties::default()
-                        .with_socket_type(SocketType::Pair),
-                    max_message_size: None,
-                    recv_direct: None,
-                    socket_close_state: recv,
-                    recv_sink: sink,
-                    send_pipe_rx: None,
-                    blocking_recv_waker: blocking,
-                    inbound,
-                    outbound: None,
-                },
-            ));
+            ctx.recv_sink =
+                (mode == "sink").then(|| crate::engine::RecvSink::Channel(recv.clone()));
+            let task = tokio::spawn(inproc_peer_driver(inbox, data_inbox, in_rx, out, ctx));
+
             events.recv().await.unwrap();
             commands
                 .try_send(PeerDriverCommand::ActivateDataPlane)
@@ -1391,14 +1786,8 @@ mod tests {
                 .try_send(InboundFrame::Message(Message::single("blocked")))
                 .unwrap();
             tokio::task::yield_now().await;
-            incoming
-                .try_send(InboundFrame::Command(Box::new(
-                    omq_proto::proto::Command::Unknown {
-                        name: "CONTROL".into(),
-                        body: bytes::Bytes::new(),
-                    },
-                )))
-                .unwrap();
+            incoming.try_send(unknown_command("CONTROL")).unwrap();
+
             let event = tokio::time::timeout(Duration::from_millis(500), events.recv())
                 .await
                 .expect("data backpressure buried inproc control")

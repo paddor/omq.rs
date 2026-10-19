@@ -79,6 +79,16 @@ pub(crate) fn rep_reply_with_envelope(envelope: &RepEnvelope, body: &Message) ->
     )
 }
 
+/// A peer that just became routable, as handed to the send strategy.
+pub(crate) struct AddedPeer {
+    pub(crate) peer_id: u64,
+    pub(crate) route_id: u64,
+    pub(crate) handle: ActorPeerDriverHandle,
+    pub(crate) identity: Bytes,
+    pub(crate) is_inproc: bool,
+    pub(crate) io_thread: usize,
+}
+
 /// Send-side policy.
 #[derive(Debug)]
 pub(crate) enum SendStrategy {
@@ -399,15 +409,16 @@ impl SendStrategy {
         }
     }
 
-    pub(crate) fn connection_added(
-        &mut self,
-        peer_id: u64,
-        route_id: u64,
-        handle: ActorPeerDriverHandle,
-        peer_identity: Bytes,
-        is_inproc: bool,
-        io_thread: usize,
-    ) {
+    pub(crate) fn connection_added(&mut self, peer: AddedPeer) {
+        let AddedPeer {
+            peer_id,
+            route_id,
+            handle,
+            identity: peer_identity,
+            is_inproc,
+            io_thread,
+        } = peer;
+
         match self {
             Self::None => {}
             Self::RoundRobin(s) => s.connection_added(route_id, &handle, is_inproc),

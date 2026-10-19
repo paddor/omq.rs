@@ -202,6 +202,15 @@ pub(super) async fn sleep_until_opt(deadline: Option<Instant>) {
     }
 }
 
+/// Wait for an optional token. Pair with a select `if` guard: a missing
+/// token never fires.
+pub(super) async fn cancelled_opt(token: Option<&tokio_util::sync::CancellationToken>) {
+    match token {
+        Some(token) => token.cancelled().await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
 /// A queued heartbeat owns one prefix of the codec transmit queue. Writes
 /// from arenas/slots do not advance it. Writer admission does not acknowledge
 /// remote delivery, especially through ordered TCP/WS or TLS buffering.
@@ -238,6 +247,11 @@ impl Heartbeat {
                 .and_then(|d| u16::try_from(d.as_millis() / 100).ok())
                 .unwrap_or(0),
         }
+    }
+
+    /// `timeout` after the last input, if both exist.
+    pub(super) fn since_last_input(&self, timeout: Option<Duration>) -> Option<Instant> {
+        timeout.and_then(|timeout| self.last_input.checked_add(timeout))
     }
 
     pub(super) fn activate(&mut self, connection: &Connection) {

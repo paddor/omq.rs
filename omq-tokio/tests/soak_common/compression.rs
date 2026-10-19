@@ -52,23 +52,88 @@ fn message(seq: u64) -> Message {
     }
 }
 
+/// One compression stream variant run in parallel with the others.
+#[derive(Clone, Copy)]
+struct StreamCase {
+    label: &'static str,
+    /// Train a dictionary from early traffic.
+    train: bool,
+    /// Disable compression so only the offload and arena paths run.
+    raw: bool,
+}
+
+fn stream_options(case: StreamCase) -> omq_tokio::Options {
+    let mut options = soak_common::soak_options()
+        .send_hwm(1000)
+        .recv_hwm(if case.raw { 1 } else { 4 })
+        .max_message_size(300 * 1024)
+        .compression_auto_train(case.train)
+        .compression_offload_threshold(Some(4096));
+
+    if case.raw {
+        // A threshold no message reaches keeps every frame uncompressed.
+        options = options.compression_threshold(usize::MAX);
+    }
+
+    options
+}
+
+async fn produce(push: &Socket, label: &str, deadline: Instant, progress: &Progress) -> u64 {
+    let mut seq = 0;
+    while Instant::now() < deadline {
+        tokio::time::timeout(IO_TIMEOUT, push.send(message(seq)))
+            .await
+            .unwrap_or_else(|_| panic!("{label} send stalled at {seq}"))
+            .unwrap();
+        seq += 1;
+        progress.sent.store(seq, Ordering::Relaxed);
+    }
+
+    tokio::time::timeout(IO_TIMEOUT, push.send(Message::single(END)))
+        .await
+        .expect("end marker send stalled")
+        .unwrap();
+
+    seq
+}
+
+async fn consume(pull: &Socket, label: &str, progress: &Progress) -> u64 {
+    let mut seq = 0;
+    loop {
+        let got = tokio::time::timeout(IO_TIMEOUT, pull.recv())
+            .await
+            .unwrap_or_else(|_| panic!("{label} receive stalled at {seq}"))
+            .unwrap();
+        if got == Message::single(END) {
+            break;
+        }
+
+        // The generator is deterministic, so a single PUSH/PULL pair must
+        // deliver exactly the sequence that was sent.
+        assert!(
+            got == message(seq),
+            "{label} corrupt or reordered message {seq}"
+        );
+        seq += 1;
+        progress.received.store(seq, Ordering::Relaxed);
+
+        // Force the tiny receive HWM to stop and resume a decoded arena.
+        if seq.is_multiple_of(1024) {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    }
+
+    seq
+}
+
 async fn stream(
     kind: CompressionKind,
-    label: &'static str,
-    train: bool,
-    raw: bool,
+    case: StreamCase,
     deadline: Instant,
     progress: Arc<Progress>,
 ) -> u64 {
-    let mut options = soak_common::soak_options()
-        .send_hwm(1000)
-        .recv_hwm(if raw { 1 } else { 4 })
-        .max_message_size(300 * 1024)
-        .compression_auto_train(train)
-        .compression_offload_threshold(Some(4096));
-    if raw {
-        options = options.compression_threshold(usize::MAX);
-    }
+    let label = case.label;
+    let options = stream_options(case);
     let pull = Socket::new(SocketType::Pull, options.clone());
     let endpoint = pull
         .bind(format!("{}+tcp://127.0.0.1:0", kind.scheme_prefix()))
@@ -77,46 +142,11 @@ async fn stream(
     let push = Socket::new(SocketType::Push, options);
     push.connect(endpoint).await.unwrap();
 
-    let producer = async {
-        let mut seq = 0;
-        while Instant::now() < deadline {
-            tokio::time::timeout(IO_TIMEOUT, push.send(message(seq)))
-                .await
-                .unwrap_or_else(|_| panic!("{label} send stalled at {seq}"))
-                .unwrap();
-            seq += 1;
-            progress.sent.store(seq, Ordering::Relaxed);
-        }
-        tokio::time::timeout(IO_TIMEOUT, push.send(Message::single(END)))
-            .await
-            .expect("end marker send stalled")
-            .unwrap();
-        seq
-    };
-    let consumer = async {
-        let mut seq = 0;
-        loop {
-            let got = tokio::time::timeout(IO_TIMEOUT, pull.recv())
-                .await
-                .unwrap_or_else(|_| panic!("{label} receive stalled at {seq}"))
-                .unwrap();
-            if got == Message::single(END) {
-                break;
-            }
-            assert!(
-                got == message(seq),
-                "{label} corrupt or reordered message {seq}"
-            );
-            seq += 1;
-            progress.received.store(seq, Ordering::Relaxed);
-            // Force the tiny receive HWM to stop and resume a decoded arena.
-            if seq.is_multiple_of(1024) {
-                tokio::time::sleep(Duration::from_millis(2)).await;
-            }
-        }
-        seq
-    };
-    let (sent, received) = tokio::join!(producer, consumer);
+    let (sent, received) = tokio::join!(
+        produce(&push, label, deadline, &progress),
+        consume(&pull, label, &progress),
+    );
+
     assert_eq!(
         sent, received,
         "{label} did not drain every accepted message"
@@ -125,12 +155,14 @@ async fn stream(
         received > 2048,
         "{label} did not cover the complete size cycle"
     );
+
     tokio::time::timeout(IO_TIMEOUT, async {
         push.close().await.unwrap();
         pull.close().await.unwrap();
     })
     .await
     .expect("compression sockets failed to close");
+
     eprintln!("[{label}] drained and verified {received} messages");
     received
 }
@@ -139,11 +171,13 @@ pub(super) fn run(kind: CompressionKind) {
     let duration = soak_common::soak_duration();
     let monitor = soak_common::ResourceMonitor::start();
     let context = soak_common::build_context();
+
     context.block_on(async move {
         let start = Instant::now();
         let deadline = start + duration;
         let mut tasks = tokio::task::JoinSet::new();
         let mut counters = Vec::new();
+
         for (label, train, raw) in [
             ("no-dict", false, false),
             ("auto-dict", true, false),
@@ -151,10 +185,15 @@ pub(super) fn run(kind: CompressionKind) {
         ] {
             let progress = Arc::new(Progress::default());
             counters.push((label, progress.clone()));
-            tasks.spawn(stream(kind, label, train, raw, deadline, progress));
+            let case = StreamCase { label, train, raw };
+            tasks.spawn(stream(kind, case, deadline, progress));
         }
+
+        // The first tick fires immediately; consume it so progress lines
+        // start after 30 s.
         let mut interval = tokio::time::interval(Duration::from_secs(30));
         interval.tick().await;
+
         let mut total = 0;
         while !tasks.is_empty() {
             tokio::select! {
@@ -173,6 +212,7 @@ pub(super) fn run(kind: CompressionKind) {
                 }
             }
         }
+
         assert!(start.elapsed() >= duration);
         eprintln!(
             "[{}] done: {total} messages fully verified and drained in {:.1}s",
@@ -180,6 +220,8 @@ pub(super) fn run(kind: CompressionKind) {
             start.elapsed().as_secs_f64(),
         );
     });
+
+    // Drop the runtime before the leak check so its buffers are released.
     drop(context);
     monitor.stop().assert_no_leak(kind.scheme_prefix());
 }

@@ -4,7 +4,9 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
-use super::super::common::{self, FairnessEntry, FairnessMap, ValMap};
+use super::super::common::{
+    self, ChartSpec, CpuColumns, FairnessEntry, FairnessMap, ThroughputRow, ValMap,
+};
 use super::super::shm;
 use crate::jsonl;
 
@@ -49,12 +51,12 @@ fn eligible(row: &Value) -> bool {
                 })))
 }
 
-pub(super) fn generate() -> Result<(), Box<dyn std::error::Error>> {
-    let rows = jsonl::load_jsonl::<Value>(&jsonl::cache_dir().join("dart-radiodish.jsonl"));
-    if rows.is_empty() {
-        return Ok(());
-    }
-    let mut cohorts = BTreeMap::<(String, String), BTreeMap<(u64, u64, String), Value>>::new();
+/// Rows of one run and binary, keyed by readers, size, and impl.
+type Cohort = BTreeMap<(u64, u64, String), Value>;
+
+/// Groups eligible rows by run ID and binary digest.
+fn cohorts(rows: Vec<(usize, Value)>) -> BTreeMap<(String, String), Cohort> {
+    let mut cohorts = BTreeMap::<(String, String), Cohort>::new();
     for (_, row) in rows {
         if !eligible(&row) {
             continue;
@@ -75,6 +77,63 @@ pub(super) fn generate() -> Result<(), Box<dyn std::error::Error>> {
                 row,
             );
     }
+
+    cohorts
+}
+
+/// Bandwidth, message rate, and round spread per size for one reader count.
+fn reader_panel(readers: u64, cohort: &Cohort) -> (ValMap, ValMap, FairnessMap) {
+    let mut messages = ValMap::new();
+    let mut bandwidth = ValMap::new();
+    let mut spread = FairnessMap::new();
+
+    for &size in SIZES {
+        for implementation in &super::IMPLS[..3] {
+            let row = &cohort[&(readers, size, implementation.key.into())];
+            let mut rates: Vec<_> = row["rounds"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|round| round["msgs_s"].as_f64().unwrap())
+                .collect();
+            rates.sort_by(f64::total_cmp);
+
+            // Three rounds give min, median, and max. The box spans the
+            // midpoints between them.
+            messages
+                .entry(size)
+                .or_default()
+                .insert(implementation.key.into(), rates[1]);
+            bandwidth
+                .entry(size)
+                .or_default()
+                .insert(implementation.key.into(), rates[1] * size as f64 / 1e6);
+            spread.entry(size).or_default().insert(
+                implementation.key.into(),
+                FairnessEntry {
+                    min: rates[0],
+                    p25: rates[0].midpoint(rates[1]),
+                    median: rates[1],
+                    p75: rates[1].midpoint(rates[2]),
+                    max: rates[2],
+                },
+            );
+        }
+    }
+
+    (bandwidth, messages, spread)
+}
+
+pub(super) fn generate() -> Result<(), Box<dyn std::error::Error>> {
+    let rows = jsonl::load_jsonl::<Value>(&jsonl::cache_dir().join("dart-radiodish.jsonl"));
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    let cohorts = cohorts(rows);
+
+    // Run IDs start with a UTC timestamp, so the last complete cohort is the
+    // newest one.
     let implementations = &super::IMPLS[..3];
     let ((run, digest), cohort) = cohorts
         .iter()
@@ -82,62 +141,40 @@ pub(super) fn generate() -> Result<(), Box<dyn std::error::Error>> {
         .find(|(_, cohort)| cohort.len() == READERS.len() * SIZES.len() * implementations.len())
         .ok_or("missing complete DART RADIO/DISH cohort; run scripts/run_shm_pubsub.rb --dart --recv-pool")?;
     eprintln!("DART RADIO/DISH: run={run}, binary={digest}");
-    let mut panels = Vec::new();
-    for &readers in READERS {
-        let mut messages = ValMap::new();
-        let mut bandwidth = ValMap::new();
-        let mut spread = FairnessMap::new();
-        for &size in SIZES {
-            for implementation in implementations {
-                let row = &cohort[&(readers, size, implementation.key.into())];
-                let mut rates: Vec<_> = row["rounds"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|round| round["msgs_s"].as_f64().unwrap())
-                    .collect();
-                rates.sort_by(f64::total_cmp);
-                messages
-                    .entry(size)
-                    .or_default()
-                    .insert(implementation.key.into(), rates[1]);
-                bandwidth
-                    .entry(size)
-                    .or_default()
-                    .insert(implementation.key.into(), rates[1] * size as f64 / 1e6);
-                spread.entry(size).or_default().insert(
-                    implementation.key.into(),
-                    FairnessEntry {
-                        min: rates[0],
-                        p25: rates[0].midpoint(rates[1]),
-                        median: rates[1],
-                        p75: rates[1].midpoint(rates[2]),
-                        max: rates[2],
-                    },
-                );
-            }
-        }
-        panels.push((readers, bandwidth, messages, spread));
-    }
-    let rows: Vec<_> = panels
+
+    let panels: Vec<_> = READERS
         .iter()
-        .map(|(readers, bandwidth, messages, _)| (*readers, bandwidth, messages))
+        .map(|&readers| (readers, reader_panel(readers, cohort)))
         .collect();
-    let spread: Vec<_> = panels.iter().map(|(_, _, _, spread)| spread).collect();
+    let rows: Vec<ThroughputRow<'_>> = panels
+        .iter()
+        .map(|(readers, (bandwidth, messages, spread))| ThroughputRow {
+            peers: *readers,
+            tput: bandwidth,
+            msgs: messages,
+            fairness: Some(spread),
+        })
+        .collect();
+
     let directory = common::out_dir().join("dart");
     std::fs::create_dir_all(&directory)?;
     let path = directory.join("radiodish.svg");
+    let spec = ChartSpec {
+        out_path: &path,
+        title: "RADIO/DISH throughput per subscriber, DART / TCP loopback",
+        sizes: SIZES,
+        impls: implementations,
+    };
+    let columns = CpuColumns {
+        cpu: &BTreeMap::new(),
+        snd_label: "",
+        rcv_label: "",
+    };
     common::draw_multirow_throughput(
-        &path,
-        "RADIO/DISH throughput per subscriber, DART / TCP loopback",
+        &spec,
         &rows,
-        SIZES,
-        implementations,
-        &BTreeMap::new(),
+        &columns,
         &|readers| format!("{readers} subscribers, payload pools, median and range of 3"),
-        "",
-        "",
-        Some(&spread),
         common::detect_hardware().as_deref(),
     )?;
     eprintln!("Written: {}", path.display());

@@ -1,9 +1,9 @@
-use std::process::Command;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use super::pushpull_compression::{run_cell, run_in_netem};
+use super::pushpull_compression::{Cell, peer_sha256, run_cell, run_in_netem};
 use crate::cli::{CompressionLinkArgs, PushpullRateLimitArgs};
 use crate::jsonl::{self, CompressionLink};
 use crate::process;
@@ -69,17 +69,8 @@ pub(crate) fn run(args: &PushpullRateLimitArgs) {
     }) {
         return;
     }
-    let hash = Command::new("sha256sum")
-        .arg(&binary)
-        .output()
-        .expect("hash benchmark peer");
-    assert!(hash.status.success());
-    let binary_sha256 = String::from_utf8(hash.stdout)
-        .expect("UTF-8 peer hash")
-        .split_whitespace()
-        .next()
-        .expect("peer hash")
-        .to_owned();
+
+    let binary_sha256 = peer_sha256(&binary);
     let run_id = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -92,9 +83,16 @@ pub(crate) fn run(args: &PushpullRateLimitArgs) {
     } else {
         "unbound"
     };
-    let limit = format!("{RATE},{BURST}");
-    let receiver_env = [("OMQ_IO_THREADS", "1")];
-    let cache = jsonl::cache_dir().join(CACHE);
+    let campaign = Campaign {
+        binary: &binary,
+        binary_sha256: &binary_sha256,
+        run_id: &run_id,
+        affinity,
+        settings: &settings,
+        rounds: args.rounds,
+        cache: jsonl::cache_dir().join(CACHE),
+    };
+
     for &size in sizes {
         // Use identical intervals for both series, including at large sizes.
         let duration = args.duration.max(110.0 * (size + 9) as f64 / RATE as f64);
@@ -106,49 +104,71 @@ pub(crate) fn run(args: &PushpullRateLimitArgs) {
                 [true, false]
             };
             for limited in order {
-                let mut sender_env = receiver_env.to_vec();
-                if limited {
-                    sender_env.push(("OMQ_BENCH_EGRESS_BYTE_LIMIT", limit.as_str()));
-                }
-                let sample = run_cell(
-                    &binary,
-                    "tcp",
-                    size,
-                    duration,
-                    1.0,
-                    &sender_env,
-                    &receiver_env,
-                );
-                let row = Row {
-                    run_id: run_id.clone(),
-                    binary_sha256: binary_sha256.clone(),
-                    transport: "tcp".into(),
-                    processes: 2,
-                    io_threads: 1,
-                    cpu_affinity: affinity.into(),
-                    netem: settings.clone(),
-                    egress_bytes_per_second: limited.then_some(RATE),
-                    burst_bytes: limited.then_some(BURST),
-                    msg_size: size,
-                    repeat,
-                    rounds: args.rounds,
-                    warmup_seconds: 1.0,
-                    duration_seconds: duration,
-                    count: sample.count,
-                    elapsed: sample.elapsed,
-                    sender_cpu: sample.sender_cpu,
-                    receiver_cpu: sample.receiver_cpu,
-                    payload_verified: true,
-                };
-                eprintln!(
-                    "{size:>8} B  {:>8}  round {repeat}/{}  {:>10.0} msg/s  {:>7.2} Mbit/s",
-                    if limited { "800 Mbit" } else { "uncapped" },
-                    args.rounds,
-                    row.msgs_s(),
-                    row.msgs_s() * size as f64 * 8.0 / 1e6,
-                );
-                jsonl::append_jsonl(&cache, &row);
+                campaign.measure(size, duration, repeat, limited);
             }
         }
+    }
+}
+
+/// Settings shared by every cell of one rate-limit campaign.
+struct Campaign<'a> {
+    binary: &'a Path,
+    binary_sha256: &'a str,
+    run_id: &'a str,
+    affinity: &'a str,
+    settings: &'a CompressionLink,
+    rounds: u32,
+    cache: PathBuf,
+}
+
+impl Campaign<'_> {
+    /// Measures one cell, with or without the sender egress limit, and
+    /// appends its row.
+    fn measure(&self, size: u64, duration: f64, repeat: u32, limited: bool) {
+        let limit = format!("{RATE},{BURST}");
+        let receiver_env = [("OMQ_IO_THREADS", "1")];
+        let mut sender_env = receiver_env.to_vec();
+        if limited {
+            sender_env.push(("OMQ_BENCH_EGRESS_BYTE_LIMIT", limit.as_str()));
+        }
+
+        let cell = Cell {
+            blocking: self.binary,
+            transport: "tcp",
+            size,
+            duration,
+            warmup: 1.0,
+        };
+        let sample = run_cell(&cell, &sender_env, &receiver_env);
+
+        let row = Row {
+            run_id: self.run_id.to_owned(),
+            binary_sha256: self.binary_sha256.to_owned(),
+            transport: "tcp".into(),
+            processes: 2,
+            io_threads: 1,
+            cpu_affinity: self.affinity.into(),
+            netem: self.settings.clone(),
+            egress_bytes_per_second: limited.then_some(RATE),
+            burst_bytes: limited.then_some(BURST),
+            msg_size: size,
+            repeat,
+            rounds: self.rounds,
+            warmup_seconds: 1.0,
+            duration_seconds: duration,
+            count: sample.count,
+            elapsed: sample.elapsed,
+            sender_cpu: sample.sender_cpu,
+            receiver_cpu: sample.receiver_cpu,
+            payload_verified: true,
+        };
+        eprintln!(
+            "{size:>8} B  {:>8}  round {repeat}/{}  {:>10.0} msg/s  {:>7.2} Mbit/s",
+            if limited { "800 Mbit" } else { "uncapped" },
+            self.rounds,
+            row.msgs_s(),
+            row.msgs_s() * size as f64 * 8.0 / 1e6,
+        );
+        jsonl::append_jsonl(&self.cache, &row);
     }
 }

@@ -32,6 +32,19 @@ fn pair_with_send_pool(capacity: usize, pool: SendPool) -> (Connection, Connecti
     (sender, receiver)
 }
 
+/// Decode one received record and drain any further batch messages.
+fn decode_all(receiver: &mut Connection, wire: Message) -> Vec<Message> {
+    let mut messages = vec![receiver.decode_received(wire).unwrap()];
+    messages.extend(std::iter::from_fn(|| receiver.poll_received()));
+    messages
+}
+
+/// Assert `view` sits at `offset` in the receiver's import of a region.
+fn assert_mapped_at(receiver: &Connection, id: u32, token: u64, view: &[u8], offset: usize) {
+    let region = receiver.find_region(id, token).unwrap();
+    assert_eq!(view.as_ptr() as usize, region.address() + offset);
+}
+
 #[test]
 fn data_descriptor_before_lease_table_is_rejected() {
     let (first, second) = UnixStream::pair().unwrap();
@@ -795,14 +808,8 @@ fn copied_batches_share_storage_and_keep_every_recipient_view_alive() {
     assert_eq!(sender1.leased_messages, messages.len());
     transfer(&mut sender1, &mut receiver1);
     transfer(&mut sender2, &mut receiver2);
-    let mut first = vec![receiver1.decode_received(wire1).unwrap()];
-    let mut second = vec![receiver2.decode_received(wire2).unwrap()];
-    while let Some(message) = receiver1.poll_received() {
-        first.push(message);
-    }
-    while let Some(message) = receiver2.poll_received() {
-        second.push(message);
-    }
+    let first = decode_all(&mut receiver1, wire1);
+    let second = decode_all(&mut receiver2, wire2);
     assert_eq!(first, messages);
     assert_eq!(second, messages);
     assert!(
@@ -811,15 +818,14 @@ fn copied_batches_share_storage_and_keep_every_recipient_view_alive() {
             .all(|message| message.last_payload().unwrap().as_chunk().is_none()),
         "grouped bodies must retain compact shared-owner envelopes"
     );
-    let region = receiver1
-        .find_region(slot.mapping.id, slot.mapping.token)
-        .unwrap();
+
+    // Body 1 follows the 2-byte header, the u64 size table, and the
+    // 16-byte body 0.
     let payload_offset =
         packed.as_ptr() as usize - slot.mapping.address() + 2 + messages.len() * 8 + 16;
-    assert_eq!(
-        first[1].part_slice(1).unwrap().as_ptr() as usize,
-        region.address() + payload_offset
-    );
+    let view = first[1].part_slice(1).unwrap();
+    let mapping = &slot.mapping;
+    assert_mapped_at(&receiver1, mapping.id, mapping.token, view, payload_offset);
     let view1 = first[4].part_bytes(1).unwrap();
     let view2 = second[2].part_bytes(1).unwrap();
     drop(first);
@@ -977,23 +983,28 @@ fn reference_batches_reject_heap_metadata_without_retaining_sources() {
     assert_eq!(sources.available(), 2);
 }
 
+/// Four grouped, routed messages whose bodies fill pooled `size` slots.
+fn grouped_source_messages(sources: &omq_proto::PayloadPool, size: usize) -> Vec<Message> {
+    (0..4)
+        .map(|index| {
+            Message::with_prefix(
+                b"group".as_slice().into(),
+                sources
+                    .try_message(size, |bytes| bytes.fill(index))
+                    .unwrap()
+                    .unwrap(),
+            )
+            .with_routing_id(7)
+        })
+        .collect()
+}
+
 #[test]
 fn reference_batches_keep_source_slots_until_the_final_recipient_view() {
     for size in [16384, 1024 * 1024] {
         let sources = payload_pool([(size, 4)]).unwrap();
         let metadata = payload_pool([(BATCH_MAX_BYTES.next_power_of_two(), 1)]).unwrap();
-        let messages: Vec<_> = (0..4)
-            .map(|index| {
-                Message::with_prefix(
-                    b"group".as_slice().into(),
-                    sources
-                        .try_message(size, |bytes| bytes.fill(index))
-                        .unwrap()
-                        .unwrap(),
-                )
-                .with_routing_id(7)
-            })
-            .collect();
+        let messages = grouped_source_messages(&sources, size);
         let batch = prepare_reference_batch(&metadata, &messages.iter().collect::<Vec<_>>())
             .unwrap()
             .unwrap();
@@ -1003,14 +1014,8 @@ fn reference_batches_keep_source_slots_until_the_final_recipient_view() {
         let wire2 = sender2.encode_record(&batch, 4, 3).unwrap().unwrap();
         transfer(&mut sender1, &mut receiver1);
         transfer(&mut sender2, &mut receiver2);
-        let mut first = vec![receiver1.decode_received(wire1).unwrap()];
-        let mut second = vec![receiver2.decode_received(wire2).unwrap()];
-        while let Some(message) = receiver1.poll_received() {
-            first.push(message);
-        }
-        while let Some(message) = receiver2.poll_received() {
-            second.push(message);
-        }
+        let first = decode_all(&mut receiver1, wire1);
+        let second = decode_all(&mut receiver2, wire2);
         for (index, message) in first.iter().enumerate() {
             assert!(
                 message.last_payload().unwrap().as_chunk().is_none(),
@@ -1018,17 +1023,14 @@ fn reference_batches_keep_source_slots_until_the_final_recipient_view() {
             );
             assert_eq!(message.part_slice(1).unwrap(), vec![index as u8; size]);
             assert_eq!(message.part_slice(0), Some(b"group".as_slice()));
-            let reference = batch::references(batch.part_slice(1).unwrap()).unwrap()[index];
-            let mapping = receiver1
-                .find_region(reference.id, reference.token)
-                .unwrap();
-            let offset =
-                read_u64(batch.part_slice(1).unwrap(), 2 + 4 * 8 + index * 20 + 12) as usize;
-            assert_eq!(
-                message.part_slice(1).unwrap().as_ptr() as usize,
-                mapping.address() + offset
-            );
+            // Each 20-byte entry (id, token, offset) has the offset at byte 12.
+            let records = batch.part_slice(1).unwrap();
+            let reference = batch::references(records).unwrap()[index];
+            let offset = read_u64(records, 2 + 4 * 8 + index * 20 + 12) as usize;
+            let view = message.part_slice(1).unwrap();
+            assert_mapped_at(&receiver1, reference.id, reference.token, view, offset);
         }
+
         let view = first[0].part_bytes(1).unwrap();
         drop(messages);
         drop(batch);
@@ -1269,11 +1271,17 @@ fn malformed_batches_and_logical_size_limits_release_their_lease() {
 #[test]
 fn batch_size_tables_use_u64_and_reject_truncated_or_overflowing_lengths() {
     let metadata = payload_pool([(BATCH_MAX_BYTES.next_power_of_two(), 1)]).unwrap();
+    check_copied_size_table(&metadata);
+    check_reference_size_table(&metadata);
+}
+
+/// Copied batches store u64 body sizes; any truncated table is rejected.
+fn check_copied_size_table(metadata: &omq_proto::PayloadPool) {
     let small = [
         Message::with_group("group", "abc"),
         Message::with_group("group", "d"),
     ];
-    let copied = prepare_batch(&metadata, &small.iter().collect::<Vec<_>>())
+    let copied = prepare_batch(metadata, &small.iter().collect::<Vec<_>>())
         .unwrap()
         .unwrap();
     let bytes = copied.part_slice(1).unwrap();
@@ -1293,7 +1301,11 @@ fn batch_size_tables_use_u64_and_reject_truncated_or_overflowing_lengths() {
         );
     }
     drop(copied);
+}
 
+/// Reference batches reject sizes beyond `isize::MAX`, and on 64-bit hosts
+/// a size above `u32::MAX` must not decode against a smaller slot.
+fn check_reference_size_table(metadata: &omq_proto::PayloadPool) {
     let sources = payload_pool([(128, 2)]).unwrap();
     let large: Vec<_> = [100, 128]
         .into_iter()
@@ -1307,7 +1319,7 @@ fn batch_size_tables_use_u64_and_reject_truncated_or_overflowing_lengths() {
             )
         })
         .collect();
-    let referenced = prepare_reference_batch(&metadata, &large.iter().collect::<Vec<_>>())
+    let referenced = prepare_reference_batch(metadata, &large.iter().collect::<Vec<_>>())
         .unwrap()
         .unwrap();
     let bytes = referenced.part_slice(1).unwrap();
@@ -1640,37 +1652,47 @@ fn descriptor_transfer_works_when_procfs_fd_access_is_denied() {
     assert_eq!(held.part_slice(0).unwrap(), &[7; 128]);
 }
 
+/// One pooled `size` slot whose 64-byte chunks hold their index.
+fn filled_slab(pool: &omq_proto::PayloadPool, size: usize) -> bytes::Bytes {
+    let mut buffer = pool.try_buffer(size).unwrap();
+    for (seq, body) in buffer
+        .writable()
+        .as_chunks_mut::<64>()
+        .0
+        .iter_mut()
+        .enumerate()
+    {
+        body.fill(seq as u8);
+    }
+    buffer.set_len(size).unwrap();
+    buffer.into_payload().into()
+}
+
+/// One message per 64-byte slab slice, optionally behind a group frame.
+fn slab_messages(slab: &bytes::Bytes, grouped: bool) -> Vec<Message> {
+    (0..slab.len())
+        .step_by(64)
+        .map(|offset| {
+            let message = Message::from(slab.slice(offset..offset + 64));
+            if grouped {
+                Message::with_prefix(bytes::Bytes::from_static(b"slab"), message)
+            } else {
+                message
+            }
+        })
+        .collect()
+}
+
 #[test]
 fn slab_slices_keep_the_whole_slot_until_every_recipient_releases() {
     for size in [1024, 2048, 4096, 16384] {
         for grouped in [false, true] {
             let pool = payload_pool([(size, 1)]).unwrap();
-            let mut buffer = pool.try_buffer(size).unwrap();
-            for (seq, body) in buffer
-                .writable()
-                .as_chunks_mut::<64>()
-                .0
-                .iter_mut()
-                .enumerate()
-            {
-                body.fill(seq as u8);
-            }
-            buffer.set_len(size).unwrap();
-            let slab: bytes::Bytes = buffer.into_payload().into();
+            let slab = filled_slab(&pool, size);
             if size.is_multiple_of(4096) {
                 assert!((slab.as_ptr() as usize).is_multiple_of(4096));
             }
-            let messages: Vec<_> = (0..size)
-                .step_by(64)
-                .map(|offset| {
-                    let message = Message::from(slab.slice(offset..offset + 64));
-                    if grouped {
-                        Message::with_prefix(bytes::Bytes::from_static(b"slab"), message)
-                    } else {
-                        message
-                    }
-                })
-                .collect();
+            let messages = slab_messages(&slab, grouped);
             let metadata = payload_pool([(8192, 1)]).unwrap();
             let batch = prepare_reference_batch(&metadata, &messages.iter().collect::<Vec<_>>())
                 .unwrap()
@@ -1687,10 +1709,8 @@ fn slab_slices_keep_the_whole_slot_until_every_recipient_releases() {
                 .unwrap();
             transfer(&mut first_sender, &mut first_reader);
             transfer(&mut second_sender, &mut second_reader);
-            let mut first = vec![first_reader.decode_received(first_wire).unwrap()];
-            first.extend(std::iter::from_fn(|| first_reader.poll_received()));
-            let mut second = vec![second_reader.decode_received(second_wire).unwrap()];
-            second.extend(std::iter::from_fn(|| second_reader.poll_received()));
+            let first = decode_all(&mut first_reader, first_wire);
+            let second = decode_all(&mut second_reader, second_wire);
             assert_eq!(first, messages);
             assert_eq!(second, messages);
             let held = second[size / 128]
@@ -1751,21 +1771,46 @@ fn inline_batch_releases_metadata_before_split_cursors_are_received() {
     assert!(batch.pop_front().is_none());
 }
 
+/// Eight pooled 128-byte bodies filled with their index.
+fn lazy_messages(pool: &omq_proto::PayloadPool, grouped: bool) -> Vec<Message> {
+    (0..8_u8)
+        .map(|seq| {
+            let message = pool.message(128, |body| body.fill(seq)).unwrap();
+            if grouped {
+                Message::with_prefix(bytes::Bytes::from_static(b"lazy"), message)
+            } else {
+                message
+            }
+        })
+        .collect()
+}
+
+/// Pop exactly `seqs` from `cursor` under routing ID 19 into `retained`.
+fn pop_lazy_range(
+    cursor: &mut crate::ReceivedBatch,
+    seqs: std::ops::Range<u8>,
+    grouped: bool,
+    retained: &mut Vec<Message>,
+) {
+    cursor.set_routing_id(19);
+    for seq in seqs {
+        let message = cursor.pop_front().unwrap();
+        assert_eq!(message.routing_id(), Some(19));
+        assert_eq!(body(&message).unwrap(), &[seq; 128]);
+        if grouped {
+            assert_eq!(message.part_slice(0), Some(b"lazy".as_slice()));
+        }
+        retained.push(message);
+    }
+    assert!(cursor.pop_front().is_none());
+}
+
 #[test]
 fn lazy_batches_split_without_views_and_retain_storage_after_connection_close() {
     for kind in [BatchKind::Copied, BatchKind::Referenced] {
         for grouped in [false, true] {
             let pool = payload_pool([(128, 8)]).unwrap();
-            let messages: Vec<_> = (0..8_u8)
-                .map(|seq| {
-                    let message = pool.message(128, |body| body.fill(seq)).unwrap();
-                    if grouped {
-                        Message::with_prefix(bytes::Bytes::from_static(b"lazy"), message)
-                    } else {
-                        message
-                    }
-                })
-                .collect();
+            let messages = lazy_messages(&pool, grouped);
             let (mut sender, mut receiver) = pair(8);
             let prepared = sender
                 .prepare_batch(&messages.iter().collect::<Vec<_>>(), kind)
@@ -1792,20 +1837,9 @@ fn lazy_batches_split_without_views_and_retain_storage_after_connection_close() 
             let mut middle = batch.take_prefix(2);
             assert_eq!(batch.len(), 3);
             let mut retained = Vec::new();
-            for (cursor, start, end) in
-                [(&mut middle, 3, 5), (&mut batch, 5, 8), (&mut first, 0, 3)]
-            {
-                cursor.set_routing_id(19);
-                for seq in start..end {
-                    let message = cursor.pop_front().unwrap();
-                    assert_eq!(message.routing_id(), Some(19));
-                    assert_eq!(body(&message).unwrap(), &[seq; 128]);
-                    if grouped {
-                        assert_eq!(message.part_slice(0), Some(b"lazy".as_slice()));
-                    }
-                    retained.push(message);
-                }
-                assert!(cursor.pop_front().is_none());
+            // Drain the split cursors out of order; each keeps its range.
+            for (cursor, seqs) in [(&mut middle, 3..5), (&mut batch, 5..8), (&mut first, 0..3)] {
+                pop_lazy_range(cursor, seqs, grouped, &mut retained);
             }
             let last = retained
                 .pop()

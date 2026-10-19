@@ -1,5 +1,5 @@
 use super::*;
-use crate::engine::transmit_slot::{PeerTransmitSlot, TryFrameResult};
+use crate::engine::transmit_slot::{PeerTransmitSlot, SlotConfig, TryFrameResult};
 use crate::engine::write_ownership::WriteOwnership;
 use omq_proto::Message;
 use std::collections::VecDeque;
@@ -38,17 +38,14 @@ fn fixture(step: io::Result<usize>) -> (DirectWriteState<ScriptedWrite>, Arc<Pee
         },
         ownership: WriteOwnership::new(),
     };
-    let slot = PeerTransmitSlot::new(
-        1,
-        false,
-        None,
-        None,
-        4096,
-        4096,
-        8192,
-        4,
-        crate::engine::framing::WireFraming::Zmtp,
-    );
+    let config = SlotConfig {
+        arena_threshold: 4096,
+        arena_cap: 4096,
+        cap: 8192,
+        msg_cap: 4,
+        ..SlotConfig::default()
+    };
+    let slot = PeerTransmitSlot::with_config(1, config);
     slot.handshake_done.store(true, Ordering::Release);
     (state, slot)
 }

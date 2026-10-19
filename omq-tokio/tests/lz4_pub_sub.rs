@@ -45,6 +45,57 @@ async fn bind_lz4_loopback(sock: &Socket) -> Endpoint {
     }
 }
 
+/// Connects `count` SUBs that decode `lz4+tcp://` and waits until the
+/// publisher has seen all their subscriptions.
+async fn connect_decoded_subs(
+    publisher: &Socket,
+    ep: &Endpoint,
+    opts: &Options,
+    count: usize,
+) -> Vec<Socket> {
+    let mut decoded_subs = Vec::with_capacity(count);
+    for _ in 0..count {
+        let sub = Socket::new(SocketType::Sub, opts.clone());
+        sub.connect(ep.clone()).await.unwrap();
+        sub.subscribe(bytes::Bytes::new()).await.unwrap();
+        decoded_subs.push(sub);
+    }
+
+    publisher
+        .wait_subscribed(count as u64, FAN_OUT_READY_TIMEOUT)
+        .await
+        .expect("subscriptions did not arrive");
+    decoded_subs
+}
+
+/// Connects a plain-TCP SUB to the `lz4+tcp://` port. It receives the
+/// compressed wire frames undecoded, so tests can inspect LZ4 tags.
+async fn connect_raw_sub(publisher: &Socket, ep: &Endpoint, total_subscribers: usize) -> Socket {
+    let raw_sub = Socket::new(SocketType::Sub, Options::default());
+    raw_sub.connect(tcp_from_lz4(ep)).await.unwrap();
+    raw_sub.subscribe(bytes::Bytes::new()).await.unwrap();
+
+    publisher
+        .wait_subscribed(total_subscribers as u64, FAN_OUT_READY_TIMEOUT)
+        .await
+        .expect("raw subscriber subscription did not arrive");
+    raw_sub
+}
+
+/// Receives the next raw wire message and checks its 4-byte LZ4 tag.
+async fn expect_raw_tag(raw_sub: &Socket, tag: &[u8; 4], missing: &str, wrong: &str) {
+    let msg = tokio::time::timeout(Duration::from_secs(5), raw_sub.recv())
+        .await
+        .expect(missing)
+        .unwrap();
+    let part = msg.part_bytes(0).unwrap();
+    assert!(
+        part.starts_with(tag),
+        "{wrong}, got prefix {:?}",
+        &part[..part.len().min(4)]
+    );
+}
+
 #[tokio::test]
 async fn sub_duplicate_lz4_tcp_connect_is_ignored() {
     let publisher = Socket::new(SocketType::Pub, Options::default());
@@ -105,26 +156,8 @@ async fn pub_sub_lz4_io_lane_fan_out_ships_dict_to_late_subscriber() {
 
     let publisher = Socket::new(SocketType::Pub, opts.clone());
     let ep = bind_lz4_loopback(&publisher).await;
-
-    let mut decoded_subs = Vec::with_capacity(N_DECODED_SUBS);
-    for _ in 0..N_DECODED_SUBS {
-        let sub = Socket::new(SocketType::Sub, opts.clone());
-        sub.connect(ep.clone()).await.unwrap();
-        sub.subscribe(bytes::Bytes::new()).await.unwrap();
-        decoded_subs.push(sub);
-    }
-    publisher
-        .wait_subscribed(N_DECODED_SUBS as u64, FAN_OUT_READY_TIMEOUT)
-        .await
-        .expect("subscriptions did not arrive");
-
-    let raw_sub = Socket::new(SocketType::Sub, Options::default());
-    raw_sub.connect(tcp_from_lz4(&ep)).await.unwrap();
-    raw_sub.subscribe(bytes::Bytes::new()).await.unwrap();
-    publisher
-        .wait_subscribed((N_DECODED_SUBS + 1) as u64, FAN_OUT_READY_TIMEOUT)
-        .await
-        .expect("raw subscriber subscription did not arrive");
+    let decoded_subs = connect_decoded_subs(&publisher, &ep, &opts, N_DECODED_SUBS).await;
+    let raw_sub = connect_raw_sub(&publisher, &ep, N_DECODED_SUBS + 1).await;
 
     let payload1 = bytes::Bytes::from(format!("{sample}{}", " ".repeat(256)));
     let payload2 = bytes::Bytes::from(format!("{sample}{}", " ".repeat(300)));
@@ -137,38 +170,29 @@ async fn pub_sub_lz4_io_lane_fan_out_ships_dict_to_late_subscriber() {
         .await
         .unwrap();
 
-    let dict_msg = tokio::time::timeout(Duration::from_secs(5), raw_sub.recv())
-        .await
-        .expect("raw subscriber did not receive dictionary shipment")
-        .unwrap();
-    let dict_part = dict_msg.part_bytes(0).unwrap();
-    assert!(
-        dict_part.starts_with(b"LZ4D"),
-        "first raw message must be the LZ4 dictionary shipment, got prefix {:?}",
-        &dict_part[..dict_part.len().min(4)]
-    );
-
-    let raw_payload1 = tokio::time::timeout(Duration::from_secs(5), raw_sub.recv())
-        .await
-        .expect("raw subscriber did not receive first compressed payload")
-        .unwrap();
-    let raw_part1 = raw_payload1.part_bytes(0).unwrap();
-    assert!(
-        raw_part1.starts_with(b"LZ4B"),
-        "first payload should use the shipped dictionary, got prefix {:?}",
-        &raw_part1[..raw_part1.len().min(4)]
-    );
-
-    let raw_payload2 = tokio::time::timeout(Duration::from_secs(5), raw_sub.recv())
-        .await
-        .expect("raw subscriber did not receive second compressed payload")
-        .unwrap();
-    let raw_part2 = raw_payload2.part_bytes(0).unwrap();
-    assert!(
-        raw_part2.starts_with(b"LZ4B"),
-        "second payload should remain dictionary-compressed, got prefix {:?}",
-        &raw_part2[..raw_part2.len().min(4)]
-    );
+    // The raw subscriber sees the wire: one dictionary shipment, then
+    // dictionary-compressed blocks.
+    expect_raw_tag(
+        &raw_sub,
+        b"LZ4D",
+        "raw subscriber did not receive dictionary shipment",
+        "first raw message must be the LZ4 dictionary shipment",
+    )
+    .await;
+    expect_raw_tag(
+        &raw_sub,
+        b"LZ4B",
+        "raw subscriber did not receive first compressed payload",
+        "first payload should use the shipped dictionary",
+    )
+    .await;
+    expect_raw_tag(
+        &raw_sub,
+        b"LZ4B",
+        "raw subscriber did not receive second compressed payload",
+        "second payload should remain dictionary-compressed",
+    )
+    .await;
 
     for (idx, sub) in decoded_subs.iter().enumerate() {
         let got1 = tokio::time::timeout(Duration::from_secs(5), sub.recv())
@@ -193,19 +217,10 @@ async fn pub_sub_lz4_io_lane_fan_out_auto_trains_dict_for_late_subscriber() {
     let opts = Options::default().compression_auto_train(true);
     let publisher = Socket::new(SocketType::Pub, opts.clone());
     let ep = bind_lz4_loopback(&publisher).await;
+    let decoded_subs = connect_decoded_subs(&publisher, &ep, &opts, N_DECODED_SUBS).await;
 
-    let mut decoded_subs = Vec::with_capacity(N_DECODED_SUBS);
-    for _ in 0..N_DECODED_SUBS {
-        let sub = Socket::new(SocketType::Sub, opts.clone());
-        sub.connect(ep.clone()).await.unwrap();
-        sub.subscribe(bytes::Bytes::new()).await.unwrap();
-        decoded_subs.push(sub);
-    }
-    publisher
-        .wait_subscribed(N_DECODED_SUBS as u64, FAN_OUT_READY_TIMEOUT)
-        .await
-        .expect("subscriptions did not arrive");
-
+    // Feed enough similar payloads for the publisher to train a dictionary
+    // before the raw subscriber joins.
     for i in 0..N_TRAINING_MSGS {
         let payload = bytes::Bytes::from(format!(
             "{{\"kind\":\"quote\",\"venue\":\"XNAS\",\"symbol\":\"OMQ\",\"seq\":{i},\"bid\":101.25,\"ask\":101.27,\"depth\":[10125,10126,10127],\"pad\":\"{}\"}}",
@@ -226,13 +241,8 @@ async fn pub_sub_lz4_io_lane_fan_out_auto_trains_dict_for_late_subscriber() {
                 .unwrap();
         }
     }
-    let raw_sub = Socket::new(SocketType::Sub, Options::default());
-    raw_sub.connect(tcp_from_lz4(&ep)).await.unwrap();
-    raw_sub.subscribe(bytes::Bytes::new()).await.unwrap();
-    publisher
-        .wait_subscribed((N_DECODED_SUBS + 1) as u64, FAN_OUT_READY_TIMEOUT)
-        .await
-        .expect("raw subscriber subscription did not arrive");
+
+    let raw_sub = connect_raw_sub(&publisher, &ep, N_DECODED_SUBS + 1).await;
 
     let late_payload = bytes::Bytes::from(format!(
         "{{\"kind\":\"quote\",\"venue\":\"XNAS\",\"symbol\":\"OMQ\",\"seq\":1000,\"bid\":101.25,\"ask\":101.27,\"depth\":[10125,10126,10127],\"pad\":\"{}\"}}",
@@ -246,27 +256,20 @@ async fn pub_sub_lz4_io_lane_fan_out_auto_trains_dict_for_late_subscriber() {
     .expect("publisher send timed out for late payload")
     .unwrap();
 
-    let dict_msg = tokio::time::timeout(Duration::from_secs(5), raw_sub.recv())
-        .await
-        .expect("raw subscriber did not receive auto-trained dictionary shipment")
-        .unwrap();
-    let dict_part = dict_msg.part_bytes(0).unwrap();
-    assert!(
-        dict_part.starts_with(b"LZ4D"),
-        "first raw late message must be the auto-trained LZ4 dictionary, got prefix {:?}",
-        &dict_part[..dict_part.len().min(4)]
-    );
-
-    let compressed = tokio::time::timeout(Duration::from_secs(5), raw_sub.recv())
-        .await
-        .expect("raw subscriber did not receive dictionary-compressed late payload")
-        .unwrap();
-    let compressed_part = compressed.part_bytes(0).unwrap();
-    assert!(
-        compressed_part.starts_with(b"LZ4B"),
-        "late payload should use the auto-trained dictionary, got prefix {:?}",
-        &compressed_part[..compressed_part.len().min(4)]
-    );
+    expect_raw_tag(
+        &raw_sub,
+        b"LZ4D",
+        "raw subscriber did not receive auto-trained dictionary shipment",
+        "first raw late message must be the auto-trained LZ4 dictionary",
+    )
+    .await;
+    expect_raw_tag(
+        &raw_sub,
+        b"LZ4B",
+        "raw subscriber did not receive dictionary-compressed late payload",
+        "late payload should use the auto-trained dictionary",
+    )
+    .await;
 
     for (idx, sub) in decoded_subs.iter().enumerate() {
         let got = tokio::time::timeout(Duration::from_secs(5), sub.recv())

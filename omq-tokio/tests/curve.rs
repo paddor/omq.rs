@@ -16,7 +16,10 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use omq_tokio::endpoint::Host;
-use omq_tokio::{CurveKeypair, CurveServerOptions, Endpoint, Message, Options, Socket, SocketType};
+use omq_tokio::{
+    CurveKeypair, CurvePublicKey, CurveServerOptions, Endpoint, Message, Options, Socket,
+    SocketType,
+};
 
 fn tcp_ep(port: u16) -> Endpoint {
     use std::net::{IpAddr, Ipv4Addr};
@@ -202,14 +205,13 @@ fn handshake_completed(resp: &[u8]) -> bool {
     resp.len() > 64 + 172 && resp.windows(8).skip(64 + 170).any(|w| w == b"\x07MESSAGE")
 }
 
-#[test]
-fn curve_rejects_captured_hello_initiate_replay() {
-    let server_kp = CurveKeypair::generate();
-    let server_pub = server_kp.public;
-    let client_kp = CurveKeypair::generate();
-
+/// Runs a CURVE PUSH server on its own runtime until `stop_rx` fires.
+/// It keeps sending, so any completed handshake yields MESSAGE frames.
+fn spawn_curve_push_server(
+    server_kp: CurveKeypair,
+    stop_rx: mpsc::Receiver<()>,
+) -> (std::thread::JoinHandle<()>, String) {
     let (url_tx, url_rx) = mpsc::channel::<String>();
-    let (stop_tx, stop_rx) = mpsc::channel::<()>();
     let server = std::thread::spawn(move || {
         tokio::runtime::Runtime::new()
             .unwrap()
@@ -218,6 +220,7 @@ fn curve_rejects_captured_hello_initiate_replay() {
                     Socket::new(SocketType::Push, Options::default().curve_server(server_kp));
                 let ep = push.bind(tcp_ep(0)).await.unwrap();
                 url_tx.send(url_of(&ep)).unwrap();
+
                 while stop_rx.try_recv().is_err() {
                     let _ = tokio::time::timeout(
                         Duration::from_millis(100),
@@ -228,50 +231,78 @@ fn curve_rejects_captured_hello_initiate_replay() {
                 }
             });
     });
-    let server_addr = url_rx.recv().unwrap();
 
-    let (proxy_addr, cap) = recording_proxy(server_addr.clone());
-    {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let pull = Socket::new(
-                SocketType::Pull,
-                Options::default().curve_client(client_kp, server_pub),
-            );
-            let ep: Endpoint = format!("tcp://{proxy_addr}").parse().unwrap();
-            pull.connect(ep).await.unwrap();
-            tokio::time::timeout(Duration::from_secs(8), pull.recv())
-                .await
-                .expect("legit handshake timed out")
-                .expect("legit handshake failed");
-        });
-    }
-    std::thread::sleep(Duration::from_millis(200));
+    (server, url_rx.recv().unwrap())
+}
 
-    let captured = cap.lock().unwrap().clone();
-    let prefix = handshake_prefix(&captured).expect("could not split handshake prefix");
+/// Completes one legitimate CURVE handshake through `proxy_addr` and
+/// receives one message, so the proxy captures a full HELLO+INITIATE.
+fn run_legit_curve_pull(proxy_addr: &str, client_kp: CurveKeypair, server_pub: CurvePublicKey) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let pull = Socket::new(
+            SocketType::Pull,
+            Options::default().curve_client(client_kp, server_pub),
+        );
+        let ep: Endpoint = format!("tcp://{proxy_addr}").parse().unwrap();
+        pull.connect(ep).await.unwrap();
 
-    let greeting_only = replay(&server_addr, &prefix[..64]);
+        tokio::time::timeout(Duration::from_secs(8), pull.recv())
+            .await
+            .expect("legit handshake timed out")
+            .expect("legit handshake failed");
+    });
+}
+
+/// Controls for the replay harness: a lone greeting, a corrupted INITIATE
+/// box, and a corrupted cookie must all fail. Otherwise a rejected verbatim
+/// replay would prove nothing.
+fn assert_replay_controls_rejected(server_addr: &str, prefix: &[u8]) {
+    let greeting_only = replay(server_addr, &prefix[..64]);
     assert!(
         !handshake_completed(&greeting_only),
         "control failed: greeting alone completed handshake"
     );
 
-    let mut bad_box = prefix.clone();
+    // The INITIATE box sits at the end of the prefix.
+    let mut bad_box = prefix.to_vec();
     let off = bad_box.len() - 100;
     bad_box[off] ^= 0x01;
     assert!(
-        !handshake_completed(&replay(&server_addr, &bad_box)),
+        !handshake_completed(&replay(server_addr, &bad_box)),
         "control failed: corrupted INITIATE box was accepted"
     );
 
-    let mut bad_cookie = prefix.clone();
+    // This offset lands inside the cookie that INITIATE echoes back.
+    let mut bad_cookie = prefix.to_vec();
     bad_cookie[268 + 20] ^= 0x01;
     assert!(
-        !handshake_completed(&replay(&server_addr, &bad_cookie)),
+        !handshake_completed(&replay(server_addr, &bad_cookie)),
         "control failed: corrupted cookie was accepted"
     );
+}
 
+#[test]
+fn curve_rejects_captured_hello_initiate_replay() {
+    let server_kp = CurveKeypair::generate();
+    let server_pub = server_kp.public;
+    let client_kp = CurveKeypair::generate();
+
+    let (stop_tx, stop_rx) = mpsc::channel::<()>();
+    let (server, server_addr) = spawn_curve_push_server(server_kp, stop_rx);
+
+    // Record one legitimate handshake through a TCP proxy. The sleep lets
+    // the proxy threads copy the last bytes into the capture buffer.
+    let (proxy_addr, cap) = recording_proxy(server_addr.clone());
+    run_legit_curve_pull(&proxy_addr, client_kp, server_pub);
+    std::thread::sleep(Duration::from_millis(200));
+
+    let captured = cap.lock().unwrap().clone();
+    let prefix = handshake_prefix(&captured).expect("could not split handshake prefix");
+    assert_replay_controls_rejected(&server_addr, &prefix);
+
+    // The replayed INITIATE answers the cookie of an old WELCOME, so the
+    // server must refuse it even though every byte was once valid.
     let resp = replay(&server_addr, &prefix);
     let accepted = handshake_completed(&resp);
 
@@ -467,25 +498,16 @@ async fn curve_authenticator_identity_matches_router_message() {
     );
     let ep = router.bind(auth_ep("auth-router-identity")).await.unwrap();
 
-    let dealer_one = Socket::new(
-        SocketType::Dealer,
-        Options::default()
-            .identity(bytes::Bytes::from_static(b"client-one"))
-            .curve_client(CurveKeypair::generate(), server_pub),
-    );
+    let dealer_one = curve_dealer(b"client-one", server_pub);
     dealer_one.connect(ep.clone()).await.unwrap();
-
-    let dealer_two = Socket::new(
-        SocketType::Dealer,
-        Options::default()
-            .identity(bytes::Bytes::from_static(b"client-two"))
-            .curve_client(CurveKeypair::generate(), server_pub),
-    );
+    let dealer_two = curve_dealer(b"client-two", server_pub);
     dealer_two.connect(ep).await.unwrap();
 
     dealer_one.send(Message::single("from-one")).await.unwrap();
     dealer_two.send(Message::single("from-two")).await.unwrap();
 
+    // ROUTER prefixes each message with the peer identity. It must be the
+    // same identity the authenticator saw for that peer.
     let mut identities_by_message = Vec::new();
     for _ in 0..2 {
         let message = tokio::time::timeout(Duration::from_secs(1), router.recv())
@@ -515,6 +537,16 @@ async fn curve_authenticator_identity_matches_router_message() {
             bytes::Bytes::from_static(b"client-two"),
         ]
     );
+}
+
+/// CURVE client DEALER with a fresh keypair and a fixed routing identity.
+fn curve_dealer(identity: &'static [u8], server_pub: CurvePublicKey) -> Socket {
+    Socket::new(
+        SocketType::Dealer,
+        Options::default()
+            .identity(bytes::Bytes::from_static(identity))
+            .curve_client(CurveKeypair::generate(), server_pub),
+    )
 }
 
 #[tokio::test]

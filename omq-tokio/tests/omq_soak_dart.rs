@@ -483,36 +483,65 @@ fn resource_snapshot() -> (usize, usize) {
     (fds, rss)
 }
 
+/// Every flow under both congestion modes; alternate flows use the latency
+/// profile.
+async fn build_scenarios(workload: Workload) -> Vec<Scenario> {
+    let mut scenarios = Vec::new();
+    for congestion in [DartCongestion::Adaptive, DartCongestion::Lan] {
+        for (index, flow) in Flow::ALL.into_iter().enumerate() {
+            scenarios
+                .push(Scenario::new(flow, congestion, workload, index.is_multiple_of(2)).await);
+        }
+    }
+    scenarios
+}
+
+async fn finish_scenarios(workload: Workload, scenarios: Vec<Scenario>) {
+    for scenario in scenarios {
+        assert!(
+            scenario.cycles >= SIZES.len() as u64,
+            "{:?} did not cover all sizes",
+            scenario.flow
+        );
+        eprintln!(
+            "[dart_{workload:?}] {:?}/{:?}: cycles={} messages={}",
+            scenario.flow, scenario.options.dart.congestion, scenario.cycles, scenario.sequence
+        );
+        scenario.close().await;
+    }
+}
+
 fn run(workload: Workload) {
     let duration = soak_common::soak_duration();
     let monitor = soak_common::ResourceMonitor::start();
     let baseline_fds = resource_snapshot().0;
     let ctx = soak_common::build_context();
+
     ctx.block_on(async move {
-        let mut scenarios = Vec::new();
-        for congestion in [DartCongestion::Adaptive, DartCongestion::Lan] {
-            for (index, flow) in Flow::ALL.into_iter().enumerate() {
-                scenarios
-                    .push(Scenario::new(flow, congestion, workload, index.is_multiple_of(2)).await);
-            }
-        }
+        let mut scenarios = build_scenarios(workload).await;
+
         let started = Instant::now();
         let mut last_report = started;
         let mut last_churn = started;
         let mut churn_index = 0;
         let mut index = 0;
         let mut tracker = soak_common::ThroughputTracker::new(Duration::from_secs(10));
+
+        // Round-robin one cycle per scenario so every flow advances evenly.
         while started.elapsed() < duration {
             match workload {
                 Workload::Backpressure => scenarios[index].backpressure().await,
                 _ => scenarios[index].burst().await,
             }
             index = (index + 1) % scenarios.len();
+
+            // Recovery churns one scenario every 3 s, also round-robin.
             if workload == Workload::Recovery && last_churn.elapsed() >= Duration::from_secs(3) {
                 scenarios[churn_index].churn().await;
                 churn_index = (churn_index + 1) % scenarios.len();
                 last_churn = Instant::now();
             }
+
             let messages = scenarios.iter().map(|scenario| scenario.sequence).sum();
             tracker.record(messages);
             if last_report.elapsed() >= Duration::from_secs(30) {
@@ -525,24 +554,20 @@ fn run(workload: Workload) {
                 last_report = Instant::now();
             }
         }
+
+        // Only the sustained workload runs at a steady rate; backpressure
+        // and churn make throughput intentionally uneven.
         if workload == Workload::Sustained {
             tracker.assert_stable("dart_sustained");
         }
-        for scenario in scenarios {
-            assert!(
-                scenario.cycles >= SIZES.len() as u64,
-                "{:?} did not cover all sizes",
-                scenario.flow
-            );
-            eprintln!(
-                "[dart_{workload:?}] {:?}/{:?}: cycles={} messages={}",
-                scenario.flow, scenario.options.dart.congestion, scenario.cycles, scenario.sequence
-            );
-            scenario.close().await;
-        }
+
+        finish_scenarios(workload, scenarios).await;
     });
+
+    // Let the dropped runtime release sockets before counting FDs.
     drop(ctx);
     std::thread::sleep(Duration::from_millis(250));
+
     let final_fds = resource_snapshot().0;
     assert!(
         final_fds <= baseline_fds + 2,

@@ -9,8 +9,8 @@ Your application sends messages, OMQ handles the network. Queues all the way!
   patterns, compatible wire protocol, and a drop-in C API.
 - **High throughput, low latency.** Millions of messages per second,
   low p99 latency, and scalable background IO. See the [benchmarks](#performance).
-- **Compression.** LZ4/Zstd transports save bandwidth without changing application
-  messages.
+- **Compression.** LZ4 and adaptive Zstd transports save bandwidth without changing
+  application messages.
 - **One API across transports.** inproc, IPC, TCP, UDP, WebSocket, QUIC, DART, and
   SHM. Sockets handle framing, reconnection, and back-pressure.
 - **Language support.** Rust plus [bindings](#workspace) for C/C++, Python,
@@ -138,7 +138,7 @@ It needs no libzmq, libsodium, or C compiler. Optional features:
 | `plain` | PLAIN username/password authentication (RFC 24) |
 | `curve` | CURVE authentication and encryption (RFC 26) |
 | `lz4` | `lz4+tcp://` compression ([RFC](doc/lz4-rfc.md)) |
-| `zstd` | Experimental `zstd+tcp://` compression |
+| `zstd` | Experimental `zstd+tcp://` compression, with a level that adapts to the sender bottleneck |
 | `ws` | WebSocket (`ws://`) and verified TLS (`wss://`) |
 | `quic` | TLS-encrypted QUIC (`quic://`): [overview](doc/udp_transports.md#quic), [example](examples/quic.rs) |
 | `dart` | Reliable ordered UDP (`dart://`) for low latency: [overview](doc/udp_transports.md#dart), [RFC](doc/dart-rfc.md) |

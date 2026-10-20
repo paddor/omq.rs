@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-10-20
+
+### Changed
+
+- Bundle `omq-libzmq` 0.5.26 with adaptive Zstd levels, `ZMQ_TCP_MAXRT`
+  support, handle type checks, and atomic multipart sends across `EAGAIN`.
+
 ### Fixed
 
 - `Monitor.ReceiveAsync` throws `OperationCanceledException` when `Dispose`

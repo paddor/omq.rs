@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.2.8] - 2026-10-20
+
+### Changed
+
+- Bundle `omq-libzmq` 0.5.26 with adaptive Zstd levels, `ZMQ_TCP_MAXRT`
+  support, handle type checks, and atomic multipart sends across `EAGAIN`.
+
 ## [0.2.7] - 2026-10-16
 
 ### Changed

@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-20
+
+### Changed
+
+- Bundle `omq-tokio` 0.30.0 and `omq-proto` 0.34.0 with adaptive Zstd
+  levels, handshake flood limits, and wakeup and lifecycle fixes.
+
 ## [0.5.0] - 2026-10-16
 
 ### Added

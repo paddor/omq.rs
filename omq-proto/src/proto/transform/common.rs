@@ -54,6 +54,7 @@ pub(super) fn body_budget(parts: usize, limit: Option<usize>) -> Result<Option<u
 
 /// Reject a declared decoded size that `compressed` input bytes cannot
 /// produce at `max_ratio`, before anything is allocated for it.
+#[cfg(any(feature = "lz4", test))]
 pub(super) fn check_expansion(
     declared: usize,
     compressed: usize,

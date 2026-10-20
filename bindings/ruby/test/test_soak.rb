@@ -190,10 +190,14 @@ class SoakTest < Minitest::Test
     pull = OMQ.rs(:pull, linger: 0, recv_timeout: 5)
     endpoint = pull.bind("tcp://127.0.0.1:0")
     push = OMQ.rs(:push, linger: 0, send_timeout: 5, reconnect_interval: 0.01)
+    monitor = push.monitor
     push.connect(endpoint).wait_for_peer(timeout: 5)
     push << "before"
     assert_equal ["before"], pull.recv
     pull.close
+
+    # A message sent before PUSH sees the disconnect may go to the old peer.
+    loop { break if monitor.recv(timeout: 5)[:event] == :disconnected }
 
     pull = OMQ.rs(:pull, linger: 0, recv_timeout: 5)
     pull.bind(endpoint)

@@ -52,13 +52,21 @@ public sealed class Monitor : IDisposable
     {
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, stopping.Token);
         var poller = new Poller(); poller.Add(reader, PollEvents.Readable);
-        Message? message;
-        while (!reader.TryReceive(out message))
+        while (true)
         {
+            // A poll woken by Dispose's final event sees the cancellation first.
             linked.Token.ThrowIfCancellationRequested();
+            try
+            {
+                if (reader.TryReceive(out Message? message)) return Parse(message!);
+            }
+            // Dispose closes the reader after cancelling, so a receive racing it is cancelled.
+            catch (OmqClosedException) when (linked.IsCancellationRequested)
+            {
+                throw new OperationCanceledException(linked.Token);
+            }
             await poller.WaitAsync(TimeSpan.FromMilliseconds(100), linked.Token).ConfigureAwait(false);
         }
-        return Parse(message!);
     }
 
     /// Stops monitoring and closes the monitor reader.

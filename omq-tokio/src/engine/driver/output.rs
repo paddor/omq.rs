@@ -206,35 +206,51 @@ impl QueuedOutput {
             .as_mut()
             .expect("deferred data requires inbox")
             .batch();
-        match first {
-            PeerDriverData::SendMessage(first) => {
-                self.encoding.batch_encode(
-                    &first,
-                    || match batch.try_recv() {
-                        Ok(PeerDriverData::SendMessage(message)) => Some(message),
-                        Ok(data @ PeerDriverData::SendEncoded(_)) => {
-                            self.deferred = Some(data);
-                            None
-                        }
-                        Err(_) => None,
-                    },
-                    connection,
-                    &mut self.frames,
-                )?;
+        let limited = match first {
+            PeerDriverData::SendMessage(first) => self.encoding.batch_encode(
+                &first,
+                || match batch.try_recv() {
+                    Ok(PeerDriverData::SendMessage(message)) => Some(message),
+                    Ok(data @ PeerDriverData::SendEncoded(_)) => {
+                        self.deferred = Some(data);
+                        None
+                    }
+                    Err(_) => None,
+                },
+                connection,
+                &mut self.frames,
+            )?,
+            PeerDriverData::SendEncoded(chunks) => {
+                self.frames.push_shared_chunks(&chunks);
+                false
             }
-            PeerDriverData::SendEncoded(chunks) => self.frames.push_shared_chunks(&chunks),
+        };
+        let input_full = batch.finish();
+        if self.encoding.adapts_level() {
+            let backlogged =
+                self.deferred.is_some() || self.data.as_ref().is_some_and(|data| !data.is_empty());
+            self.encoding.note_batch(backlogged, limited, input_full);
         }
         Ok(())
     }
 
     fn stage_pipe_batch(&mut self, connection: &mut Connection) -> Result<()> {
         if let Some(first) = self.pipe_batch.pop() {
-            self.encoding.batch_encode(
+            let limited = self.encoding.batch_encode(
                 &first,
                 || self.pipe_batch.pop(),
                 connection,
                 &mut self.frames,
             )?;
+            if self.encoding.adapts_level() {
+                let backlogged = !self.pipe_batch.is_empty()
+                    || self.pipe.as_ref().is_some_and(|pipe| !pipe.is_empty());
+                let input_full = self
+                    .pipe
+                    .as_mut()
+                    .is_some_and(SendPipeConsumer::take_freed_full);
+                self.encoding.note_batch(backlogged, limited, input_full);
+            }
         }
         Ok(())
     }

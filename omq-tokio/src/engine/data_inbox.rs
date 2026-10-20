@@ -169,15 +169,47 @@ pub(crate) struct Admission {
 impl Admission {
     // Only consumed/acknowledged messages enter this batch. Unsent permits
     // keep their own credits, including during cancellation and close.
-    fn accumulate(pending: &mut Option<Self>, mut admission: Self) {
+    // Returns whether a replaced admission's lane was full.
+    fn accumulate(pending: &mut Option<Self>, mut admission: Self) -> bool {
         if let Some(current) = pending
             && Arc::ptr_eq(&current.lane, &admission.lane)
         {
             current.count += admission.count;
             admission.count = 0;
+            false
         } else {
-            *pending = Some(admission);
+            pending
+                .replace(admission)
+                .is_some_and(|mut previous| previous.release())
         }
+    }
+
+    /// Return the credits to the lane. Whether the lane was full.
+    fn release(&mut self) -> bool {
+        let count = std::mem::take(&mut self.count);
+        if count == 0 {
+            return false;
+        }
+        let full =
+            self.lane.queued.fetch_sub(count, Ordering::AcqRel) == self.lane.template.capacity;
+        if full {
+            self.lane.space.notify_changed();
+            #[cfg(feature = "dart")]
+            self.lane.template.shared.notify_native_progress();
+        }
+        let remaining = self
+            .lane
+            .template
+            .shared
+            .admitted
+            .fetch_sub(count, Ordering::AcqRel);
+        if remaining & !CLOSED == count {
+            self.lane.template.shared.notify_close_progress();
+        }
+        if remaining == (CLOSED | count) {
+            self.lane.template.shared.drained.wake();
+        }
+        full
     }
 
     #[cfg(feature = "dart")]
@@ -191,26 +223,7 @@ impl Admission {
 
 impl Drop for Admission {
     fn drop(&mut self) {
-        if self.count == 0 {
-            return;
-        }
-        if self.lane.queued.fetch_sub(self.count, Ordering::AcqRel) == self.lane.template.capacity {
-            self.lane.space.notify_changed();
-            #[cfg(feature = "dart")]
-            self.lane.template.shared.notify_native_progress();
-        }
-        let remaining = self
-            .lane
-            .template
-            .shared
-            .admitted
-            .fetch_sub(self.count, Ordering::AcqRel);
-        if remaining & !CLOSED == self.count {
-            self.lane.template.shared.notify_close_progress();
-        }
-        if remaining == (CLOSED | self.count) {
-            self.lane.template.shared.drained.wake();
-        }
+        self.release();
     }
 }
 
@@ -219,21 +232,35 @@ impl Drop for Admission {
 pub(crate) struct Batch<'a> {
     receiver: &'a mut Receiver,
     admission: Option<Admission>,
+    /// A consumed message came from a full lane.
+    freed_full: bool,
 }
 
 impl Batch<'_> {
     pub(crate) fn try_recv(&mut self) -> Result<PeerDriverData, legacy::error::TryRecvError> {
         let (data, admission) = self.receiver.try_recv_admitted()?;
         if let Some(admission) = admission {
-            Admission::accumulate(&mut self.admission, admission);
+            self.freed_full |= Admission::accumulate(&mut self.admission, admission);
         }
         Ok(data)
+    }
+
+    /// Return the consumed credits. Whether that freed space in a full lane.
+    pub(crate) fn finish(mut self) -> bool {
+        self.release_admission()
+    }
+
+    fn release_admission(&mut self) -> bool {
+        if let Some(mut admission) = self.admission.take() {
+            self.freed_full |= admission.release();
+        }
+        self.freed_full
     }
 }
 
 impl Drop for Batch<'_> {
     fn drop(&mut self) {
-        drop(self.admission.take());
+        self.release_admission();
         self.receiver.release_consumed();
     }
 }
@@ -664,6 +691,7 @@ impl Receiver {
         Batch {
             receiver: self,
             admission: None,
+            freed_full: false,
         }
     }
 
@@ -834,6 +862,23 @@ mod tests {
             receiver.try_recv(),
             Err(legacy::error::TryRecvError::Empty)
         ));
+    }
+
+    #[test]
+    fn finished_batch_reports_a_full_lane() {
+        let (root, mut receiver) = channel(3);
+        let sender = SenderLanes::default().bind(&root);
+        sender.try_send(message(0)).unwrap();
+        let mut batch = receiver.batch();
+        assert_eq!(value(batch.try_recv().unwrap()), 0);
+        assert!(!batch.finish());
+
+        for n in 1..4 {
+            sender.try_send(message(n)).unwrap();
+        }
+        let mut batch = receiver.batch();
+        assert_eq!(value(batch.try_recv().unwrap()), 1);
+        assert!(batch.finish());
     }
 
     #[tokio::test]

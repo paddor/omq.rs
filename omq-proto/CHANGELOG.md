@@ -7,8 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- `Options::compression_level_range` and `CompressionOptions::level_range`
+  set the adaptive Zstd level range.
+
 ### Changed
 
+- Zstd encoders adapt their level within -7..=4 through zrip's
+  `AdaptiveLevel` unless `compression_level` fixes it.
+- Compression arenas admit messages up to 8 KiB of inner frame bytes, up
+  from 4 KiB.
 - Require `lz4rip` 0.12.1 and `zrip` 0.8.13. LZ4 decodes fresh heap buffers
   with `decompress_append`.
 

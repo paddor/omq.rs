@@ -160,11 +160,11 @@ unknown sentinel MUST close the connection.
 
 ### 6.2 Compression level
 
-This specification suggests **level 1** as an implementation default.
-This keeps encode throughput high while improving wire ratio over
-negative fast levels. This is not a wire requirement. Implementations
-may choose any default level that fits their deployment goals, and
-bandwidth-constrained deployments may choose higher levels such as 3.
+This specification suggests **level -1** as an implementation default.
+The level is not a wire requirement; implementations may choose another
+default, and bandwidth-constrained deployments may choose higher levels.
+A sender may change the level between frames, for example to follow link
+or CPU limits.
 
 The compression level is a sender choice and is not communicated on the
 wire. The receiver decodes any valid Zstandard frame regardless of the
@@ -533,7 +533,7 @@ unbounded.
 | Arena header            | 16 bytes                                      |
 | Maximum decoded arena   | 65536 bytes                                   |
 | Maximum arena messages/parts | 256 / 4096                              |
-| Suggested default level | 1                                             |
+| Suggested default level | -1                                            |
 | Min compress, no dict   | 512 bytes                                     |
 | Min compress, with dict | 64 bytes                                      |
 | Max dictionary size     | 8 KiB                                         |

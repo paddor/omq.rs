@@ -40,7 +40,12 @@ impl CompressionPool {
     pub(crate) fn try_take(self: &Arc<Self>, primary: &MessageEncoder) -> Option<EncoderLoan> {
         {
             let mut pool = self.encoders.lock().unwrap();
-            if let Some(pos) = pool.iter().position(|e| e.variant_matches(primary)) {
+            // Prefer an encoder whose context already has the primary's level.
+            let pos = pool
+                .iter()
+                .position(|e| e.variant_matches(primary) && e.level() == primary.level())
+                .or_else(|| pool.iter().position(|e| e.variant_matches(primary)));
+            if let Some(pos) = pos {
                 let mut encoder = pool.swap_remove(pos);
                 drop(pool);
                 self.in_flight.fetch_add(1, Ordering::Relaxed);

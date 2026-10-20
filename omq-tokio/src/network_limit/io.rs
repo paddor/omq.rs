@@ -1,6 +1,7 @@
 use std::io::{self, IoSlice};
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
 use bytes::{Buf, Bytes};
 use smallvec::SmallVec;
@@ -55,11 +56,23 @@ impl<R: AsyncRead + Unpin> AsyncRead for PacedRead<R> {
 pub(crate) struct PacedWrite<W> {
     inner: W,
     gate: Option<Gate>,
+    stalls: Option<StallClock>,
+}
+
+/// Time from a refused write to the next accepted byte. Pacing waits count.
+#[derive(Debug, Default)]
+struct StallClock {
+    since: Option<Instant>,
+    total: Duration,
 }
 
 impl<W> PacedWrite<W> {
     pub(crate) fn new(inner: W, gate: Option<Gate>) -> Self {
-        Self { inner, gate }
+        Self {
+            inner,
+            gate,
+            stalls: None,
+        }
     }
 
     pub(crate) fn cancel_wait(&mut self) {
@@ -67,20 +80,50 @@ impl<W> PacedWrite<W> {
             gate.cancel_wait();
         }
     }
+
+    /// Start measuring write stalls for compression-level adaptation.
+    pub(crate) fn track_stalls(&mut self) {
+        self.stalls.get_or_insert_with(StallClock::default);
+    }
+
+    /// Take the stalled time since the last call. An ongoing stall counts
+    /// up to `now` and continues from there.
+    pub(crate) fn take_stalled(&mut self, now: Instant) -> Duration {
+        let Some(clock) = &mut self.stalls else {
+            return Duration::ZERO;
+        };
+        if let Some(since) = &mut clock.since {
+            clock.total += now.saturating_duration_since(*since);
+            *since = now;
+        }
+        std::mem::take(&mut clock.total)
+    }
+
+    fn note_progress(&mut self, result: &Poll<io::Result<usize>>) {
+        let Some(clock) = &mut self.stalls else {
+            return;
+        };
+        match result {
+            Poll::Pending => {
+                clock.since.get_or_insert_with(Instant::now);
+            }
+            Poll::Ready(Ok(written)) if *written > 0 => {
+                if let Some(since) = clock.since.take() {
+                    clock.total += since.elapsed();
+                }
+            }
+            Poll::Ready(_) => {}
+        }
+    }
 }
 
-impl<W: AsyncWrite + Unpin> AsyncWrite for PacedWrite<W> {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        let this = self.get_mut();
-        let Some(gate) = &mut this.gate else {
-            return Pin::new(&mut this.inner).poll_write(cx, buf);
+impl<W: AsyncWrite + Unpin> PacedWrite<W> {
+    fn poll_paced_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+        let Some(gate) = &mut self.gate else {
+            return Pin::new(&mut self.inner).poll_write(cx, buf);
         };
         let n = std::task::ready!(gate.poll(cx, buf.len(), 1));
-        let result = Pin::new(&mut this.inner).poll_write(cx, &buf[..n]);
+        let result = Pin::new(&mut self.inner).poll_write(cx, &buf[..n]);
         gate.finish(
             n,
             match &result {
@@ -91,14 +134,13 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for PacedWrite<W> {
         result
     }
 
-    fn poll_write_vectored(
-        self: Pin<&mut Self>,
+    fn poll_paced_write_vectored(
+        &mut self,
         cx: &mut Context<'_>,
         bufs: &[IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
-        let this = self.get_mut();
-        let Some(gate) = &mut this.gate else {
-            return Pin::new(&mut this.inner).poll_write_vectored(cx, bufs);
+        let Some(gate) = &mut self.gate else {
+            return Pin::new(&mut self.inner).poll_write_vectored(cx, bufs);
         };
         let wanted = bufs
             .iter()
@@ -114,7 +156,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for PacedWrite<W> {
             left -= len;
             limited.push(IoSlice::new(&buf[..len]));
         }
-        let result = Pin::new(&mut this.inner).poll_write_vectored(cx, &limited);
+        let result = Pin::new(&mut self.inner).poll_write_vectored(cx, &limited);
         gate.finish(
             n,
             match &result {
@@ -122,6 +164,30 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for PacedWrite<W> {
                 _ => 0,
             },
         );
+        result
+    }
+}
+
+impl<W: AsyncWrite + Unpin> AsyncWrite for PacedWrite<W> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        let result = this.poll_paced_write(cx, buf);
+        this.note_progress(&result);
+        result
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        let result = this.poll_paced_write_vectored(cx, bufs);
+        this.note_progress(&result);
         result
     }
 

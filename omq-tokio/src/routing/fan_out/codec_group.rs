@@ -31,11 +31,10 @@ impl CodecGroup {
     )]
     pub(super) fn new(profile: Option<CodecProfile>) -> Result<Self> {
         let encoder = if let Some(profile) = &profile {
-            MessageEncoder::for_compression_kind(
+            fixed_level(MessageEncoder::for_compression_kind(
                 profile.kind(),
                 &profile.options().compression_auto_train(false),
-            )?
-            .map(|(encoder, _)| encoder)
+            )?)
         } else {
             None
         };
@@ -94,8 +93,10 @@ impl CodecGroup {
                     .options()
                     .compression_auto_train(false)
                     .compression_dict(dict);
-                self.encoder = MessageEncoder::for_compression_kind(profile.kind(), &options)?
-                    .map(|(encoder, _)| encoder);
+                self.encoder = fixed_level(MessageEncoder::for_compression_kind(
+                    profile.kind(),
+                    &options,
+                )?);
             }
         }
         Ok(())
@@ -133,4 +134,15 @@ impl CodecGroup {
     pub(super) fn dictionary(&self) -> Option<&Message> {
         self.dictionary.as_ref()
     }
+}
+
+/// One shared encoding serves peers with different links, so fan-out keeps
+/// the adaptive starting level.
+fn fixed_level(
+    pair: Option<(MessageEncoder, omq_proto::proto::transform::MessageDecoder)>,
+) -> Option<MessageEncoder> {
+    pair.map(|(mut encoder, _)| {
+        encoder.fix_level();
+        encoder
+    })
 }

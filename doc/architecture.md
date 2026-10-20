@@ -243,6 +243,10 @@ ZMTP framing; LZ4 and Zstd combine queued small messages into bounded arenas.
 Receivers retain a decoded arena and admit its messages in order under normal
 backpressure, while compatible fan-out peers share encoded arenas.
 Dictionary shipment is ordered and scoped to each connection.
+Zstd connection drivers report the sender's bottleneck to zrip's
+`AdaptiveLevel`: a blocked transport or idle input raises the level. A full
+send queue, or a backlog larger than one batch, lowers it. Fan-out lanes keep
+a fixed level.
 The [LZ4 RFC](lz4-rfc.md) and [Zstd RFC](zstd-rfc.md) define their wire formats.
 
 Endpoint URIs select carriers and optional transforms. Bind/connect capture

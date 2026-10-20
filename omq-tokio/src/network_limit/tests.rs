@@ -273,6 +273,29 @@ fn fractional_refill_repays_debt_even_with_all_burst_credit_held() {
     assert_eq!(b.available, 0);
 }
 
+#[tokio::test]
+async fn tracked_writer_reports_time_refused_by_the_transport() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (writer, mut reader) = tokio::io::duplex(4);
+    let mut writer = PacedWrite::new(writer, None);
+    writer.track_stalls();
+    assert_eq!(writer.write(&[1; 4]).await.unwrap(), 4);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), writer.write(&[2; 4]))
+            .await
+            .is_err()
+    );
+    let mut buf = [0; 4];
+    reader.read_exact(&mut buf).await.unwrap();
+    assert_eq!(writer.write(&[3; 4]).await.unwrap(), 4);
+    let stalled = writer.take_stalled(std::time::Instant::now());
+    assert!(stalled >= Duration::from_millis(20), "{stalled:?}");
+    assert_eq!(
+        writer.take_stalled(std::time::Instant::now()),
+        Duration::ZERO
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn short_and_pending_writes_return_unused_credit() {
     use tokio::io::AsyncWriteExt;

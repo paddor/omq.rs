@@ -19,6 +19,8 @@
 //! This split lets runtime code hold encoder and decoder state
 //! independently so dict-compressed sends do not contend with reads.
 
+#[cfg(feature = "zstd")]
+mod adaptive;
 /// Bounded inner framing shared by compression transports.
 #[cfg(any(feature = "lz4", feature = "zstd"))]
 pub mod arena;
@@ -43,6 +45,26 @@ use crate::error::Result;
 use crate::message::Message;
 use crate::options::Options;
 use crate::proto::mechanism::MechanismSetup;
+
+/// Minimum wall time of one compression-level adaptation window.
+pub const ADAPT_WINDOW: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Transport conditions a sender observed over one adaptation window.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OutputWindow {
+    /// Wall time covered by the window.
+    pub elapsed: std::time::Duration,
+    /// Time the transport accepted no bytes.
+    pub blocked: std::time::Duration,
+    /// Encoded batches.
+    pub batches: u32,
+    /// Batches that ended with more input queued.
+    pub backlogged: u32,
+    /// Backlogged batches that stopped at their size or time limit.
+    pub overflowed: u32,
+    /// Batches that freed space in a full input queue.
+    pub input_full: u32,
+}
 
 /// Compression transform selected by an endpoint scheme.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -314,9 +336,14 @@ impl MessageEncoder {
         if let Some(t) = options.compression_threshold {
             enc = enc.with_threshold(t);
         }
-        if let Some(level) = options.compression_level {
-            enc = enc.with_level(level);
-        }
+        enc = if let Some(level) = options.compression_level {
+            enc.with_level(level)
+        } else {
+            let (min, max) = options
+                .compression_level_range
+                .unwrap_or(zstd::DEFAULT_LEVEL_RANGE);
+            enc.with_level_range(min, max)
+        };
         let mut dec = ZstdDecoder::new().with_max_message_size(options.max_message_size);
         if let Some(m) = options.max_recv_dict_size {
             dec = dec.with_max_recv_dict_size(m);
@@ -404,6 +431,77 @@ impl MessageEncoder {
             (Self::Lz4(me), Self::Lz4(primary)) => me.sync_offload_config(primary),
             #[cfg(feature = "zstd")]
             (Self::Zstd(me), Self::Zstd(primary)) => me.sync_offload_config(primary),
+            _ => {}
+        }
+    }
+
+    /// Current compression level, for codecs with levels.
+    pub fn level(&self) -> Option<i32> {
+        match self {
+            #[cfg(feature = "lz4")]
+            Self::Lz4(_) => None,
+            #[cfg(feature = "zstd")]
+            Self::Zstd(t) => Some(t.level()),
+            #[cfg(not(any(feature = "lz4", feature = "zstd")))]
+            _ => unreachable!(),
+        }
+    }
+
+    /// Whether the encoder adapts its compression level to sender conditions.
+    pub fn is_adaptive(&self) -> bool {
+        match self {
+            #[cfg(feature = "lz4")]
+            Self::Lz4(_) => false,
+            #[cfg(feature = "zstd")]
+            Self::Zstd(t) => t.is_adaptive(),
+            #[cfg(not(any(feature = "lz4", feature = "zstd")))]
+            _ => unreachable!(),
+        }
+    }
+
+    /// Whether enough input was compressed to close an adaptation window.
+    pub fn adaptation_ready(&self) -> bool {
+        match self {
+            #[cfg(feature = "lz4")]
+            Self::Lz4(_) => false,
+            #[cfg(feature = "zstd")]
+            Self::Zstd(t) => t.adaptation_ready(),
+            #[cfg(not(any(feature = "lz4", feature = "zstd")))]
+            _ => unreachable!(),
+        }
+    }
+
+    /// Close an adaptation window and pick the level for the next one.
+    #[allow(unused_variables)]
+    pub fn adapt_level(&mut self, output: OutputWindow) {
+        match self {
+            #[cfg(feature = "lz4")]
+            Self::Lz4(_) => {}
+            #[cfg(feature = "zstd")]
+            Self::Zstd(t) => t.adapt_level(output),
+            #[cfg(not(any(feature = "lz4", feature = "zstd")))]
+            _ => unreachable!(),
+        }
+    }
+
+    /// Stop adapting and keep the current level.
+    pub fn fix_level(&mut self) {
+        match self {
+            #[cfg(feature = "lz4")]
+            Self::Lz4(_) => {}
+            #[cfg(feature = "zstd")]
+            Self::Zstd(t) => t.fix_level(),
+            #[cfg(not(any(feature = "lz4", feature = "zstd")))]
+            _ => unreachable!(),
+        }
+    }
+
+    /// Count a finished offload encoder's work toward this encoder's window.
+    pub fn absorb_offload_stats(&mut self, offload: &mut Self) {
+        #[allow(unreachable_patterns)]
+        match (self, offload) {
+            #[cfg(feature = "zstd")]
+            (Self::Zstd(me), Self::Zstd(offload)) => me.absorb_offload_stats(offload),
             _ => {}
         }
     }

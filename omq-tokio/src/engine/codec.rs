@@ -16,6 +16,7 @@ pub(crate) struct CodecProfile {
     auto_train: bool,
     threshold: Option<usize>,
     level: Option<i32>,
+    level_range: Option<(i32, i32)>,
     dict_capacity: Option<usize>,
     max_message_size: Option<usize>,
     max_recv_dict_size: Option<usize>,
@@ -53,6 +54,7 @@ impl CodecProfile {
             auto_train: options.compression_auto_train,
             threshold: options.compression_threshold,
             level: options.compression_level,
+            level_range: options.compression_level_range,
             dict_capacity: options.compression_dict_capacity,
             max_message_size: options.max_message_size,
             max_recv_dict_size: options.max_recv_dict_size,
@@ -73,7 +75,16 @@ impl CodecProfile {
         let level = match self.kind {
             #[cfg(feature = "zstd")]
             CompressionKind::Zstd => Some(match self.level {
-                None | Some(0) => omq_proto::proto::transform::zstd::DEFAULT_LEVEL,
+                // Fan-out encoders keep the adaptive starting level.
+                None => {
+                    use omq_proto::proto::transform::zstd::{
+                        DEFAULT_LEVEL_RANGE, adaptive_start_level,
+                    };
+                    let (min, max) = self.level_range.unwrap_or(DEFAULT_LEVEL_RANGE);
+                    adaptive_start_level(min, max)
+                }
+                // Explicit zero uses zrip's library default, not OMQ's.
+                Some(0) => 1,
                 Some(level) => level,
             }),
             _ => None,
@@ -97,6 +108,7 @@ impl CodecProfile {
             compression_auto_train: self.auto_train,
             compression_threshold: self.threshold,
             compression_level: self.level,
+            compression_level_range: self.level_range,
             compression_dict_capacity: self.dict_capacity,
             max_message_size: self.max_message_size,
             max_recv_dict_size: self.max_recv_dict_size,
@@ -268,7 +280,7 @@ mod sharing_tests {
             let first = Options::default();
             let second = Options::default()
                 .compression_threshold(512)
-                .compression_level(0)
+                .compression_level(-1)
                 .compression_dict_capacity(8192);
             let mut second = second;
             second.max_recv_dict_size = Some(128);
@@ -277,7 +289,7 @@ mod sharing_tests {
             assert_ne!(original, configured);
             assert_eq!(original.sharing_key(), configured.sharing_key());
             assert_eq!(configured.options().max_recv_dict_size, Some(128));
-            assert_eq!(configured.options().compression_level, Some(0));
+            assert_eq!(configured.options().compression_level, Some(-1));
             assert_same_wire(kind, &first, &second);
             #[cfg(feature = "lz4")]
             if kind == CompressionKind::Lz4 {
@@ -288,7 +300,7 @@ mod sharing_tests {
             }
             #[cfg(feature = "zstd")]
             if kind == CompressionKind::Zstd {
-                assert_eq!(
+                assert_ne!(
                     original.sharing_key(),
                     CodecProfile::new(kind, &Options::default().compression_level(1)).sharing_key()
                 );
@@ -298,6 +310,23 @@ mod sharing_tests {
                 );
             }
         }
+    }
+
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn zstd_zero_level_uses_library_default() {
+        let kind = CompressionKind::Zstd;
+        let zero = Options::default().compression_level(0);
+        let one = Options::default().compression_level(1);
+        assert_eq!(
+            CodecProfile::new(kind, &zero).sharing_key(),
+            CodecProfile::new(kind, &one).sharing_key()
+        );
+        assert_same_wire(kind, &zero, &one);
+        assert_ne!(
+            CodecProfile::new(kind, &zero).sharing_key(),
+            CodecProfile::new(kind, &Options::default()).sharing_key()
+        );
     }
 
     #[test]
@@ -354,8 +383,7 @@ mod sharing_tests {
                 .clone()
                 .compression_auto_train(true)
                 .compression_dict_capacity(0)
-                .compression_threshold(64)
-                .compression_level(0);
+                .compression_threshold(64);
             second.max_recv_dict_size = Some(dictionary.len() - 1);
             let original = CodecProfile::new(kind, &first);
             let configured = CodecProfile::new(kind, &second);

@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.26] - 2026-10-20
+
+### Added
+
+- `ZMQ_TCP_MAXRT` sets the TCP user timeout instead of being ignored.
+
+### Fixed
+
+- Context and socket handles carry libzmq's tags, so passing the wrong handle
+  type fails with `ENOTSOCK` or `EFAULT` instead of corrupting memory.
+- `zmq_ctx_term` frees the context handle only after it completes and waits
+  for lingering closes and async send callbacks.
+- Blocking calls return `ETERM` when the context shuts down and fail with
+  `EDEADLK` on an OMQ IO thread.
+- Multipart sends stay atomic across `EAGAIN`, so retrying the final frame
+  delivers the whole message.
+- `zmq_timers_execute` skips timers cancelled by an earlier callback.
+- Received message storage is writable on demand, and async sends complete
+  when the context shuts down.
+- `ZMQ_SNDHWM` and `ZMQ_RCVHWM` near `INT_MAX` no longer abort bind or
+  connect.
+- ZAP handlers run off the IO thread, so a slow handler no longer stalls other
+  connections.
+- Bundle `omq-tokio` 0.30.0 and `omq-proto` 0.34.0.
+
 ## [0.5.25] - 2026-10-16
 
 ### Added

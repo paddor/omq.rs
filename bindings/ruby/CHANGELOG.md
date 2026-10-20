@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-10-20
+
+### Changed
+
+- Bundle `omq-tokio` 0.30.0 and `omq-proto` 0.34.0 with adaptive Zstd
+  levels, handshake flood limits, and wakeup and lifecycle fixes.
+
+### Fixed
+
+- Socket construction no longer releases the GVL under the materialization
+  lock, and close serializes with wrapper setup.
+
 ## [0.2.6] - 2026-10-16
 
 ### Changed

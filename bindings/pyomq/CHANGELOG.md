@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-10-20
+
+### Added
+
+- `TCP_MAXRT` sets the TCP user timeout instead of being ignored.
+
+### Changed
+
+- Incomplete PLAIN or CURVE options no longer fall back to NULL. Either
+  PLAIN credential selects PLAIN, any CURVE option selects CURVE, a CURVE
+  server derives a missing public key from its secret key, and other gaps
+  raise `ValueError` at bind or connect.
+- `RECONNECT_IVL_MAX=0` turns backoff off, as in libzmq.
+- Bundle `omq-tokio` 0.30.0 and `omq-proto` 0.34.0 with adaptive Zstd
+  levels, handshake flood limits, and wakeup and lifecycle fixes.
+
 ## [0.26.0] - 2026-10-16
 
 ### Added

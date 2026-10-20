@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-10-20
+
+### Changed
+
+- Bundle `omq-tokio` 0.30.0 and `omq-proto` 0.34.0 with adaptive Zstd
+  levels, handshake flood limits, and wakeup and lifecycle fixes.
+
+### Fixed
+
+- A peer that resets a connection no longer terminates the Go program with
+  SIGPIPE.
+
 ## [0.1.7] - 2026-10-16
 
 ### Changed

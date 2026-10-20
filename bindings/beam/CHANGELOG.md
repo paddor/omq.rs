@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-10-20
+
+### Changed
+
+- Bundle `omq-tokio` 0.30.0 and `omq-proto` 0.34.0 with adaptive Zstd
+  levels, handshake flood limits, and wakeup and lifecycle fixes.
+
+### Fixed
+
+- Incomplete mechanism options are rejected, and credential setup
+  serializes with socket materialization.
+
 ## [0.2.5] - 2026-10-16
 
 ### Changed

@@ -11,6 +11,7 @@ pub(crate) fn run(args: PushpullLz4Args) {
         quick: args.quick,
         dict_sizes: args.dict_sizes,
         level: None,
+        level_range: None,
         link: args.link,
     });
 }

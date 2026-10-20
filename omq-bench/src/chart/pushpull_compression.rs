@@ -6,46 +6,52 @@ use plotters::coord::types::RangedCoordf64;
 use plotters::prelude::*;
 
 use super::common::{
-    AXIS_COLOR, BACKGROUND_COLOR, GRID_COLOR, Impl, MUTED_TEXT_COLOR, TEXT_COLOR, ValMap,
+    AXIS_COLOR, BACKGROUND_COLOR, GRID_COLOR, MUTED_TEXT_COLOR, TEXT_COLOR, ValMap,
     append_row_titles, detect_hardware, fmt_gbps, fmt_msgs, fmt_size, nice_axis, out_dir,
     postprocess_svg,
 };
 use crate::jsonl::{self, PushpullLz4Row};
 
+/// One codec's bench cache and the workload its rows must match.
+pub(crate) struct Source {
+    pub(crate) cache_file: &'static str,
+    pub(crate) pattern: &'static str,
+    pub(crate) level_range: Option<[i32; 2]>,
+    pub(crate) warmup_seconds: f64,
+    pub(crate) arena_bytes: u64,
+}
+
+/// A chart line: rows of `source` whose transport, plus `+dict` for 2 KiB
+/// dictionary runs, equals `key`.
 pub(crate) struct Series {
     pub(crate) key: &'static str,
     pub(crate) label: &'static str,
     pub(crate) color: RGBColor,
+    pub(crate) source: &'static Source,
 }
 
 pub(crate) struct CompressionChart {
-    pub(crate) cache_file: &'static str,
-    pub(crate) pattern_prefix: &'static str,
-    pub(crate) dict_pattern: &'static str,
-    pub(crate) dict_series_key: &'static str,
     pub(crate) output_file: &'static str,
     pub(crate) title: &'static str,
     pub(crate) series: &'static [Series],
-    pub(crate) compression_level: Option<i32>,
-    pub(crate) payload: &'static str,
-    pub(crate) arena_bytes: u64,
     pub(crate) sizes: &'static [u64],
+    /// Link Mbps or send rate of each panel, top to bottom, and its title.
+    pub(crate) panels: &'static [(u64, &'static str)],
 }
 
-const LINK_SPEEDS: &[(u32, &str)] = &[
-    (1000, "1 Gbps netem link"),
-    (100, "100 Mbps netem link"),
-    (10, "10 Mbps netem link"),
-];
+/// Median repeat of each (panel, series key, size) cell.
+pub(crate) type Cells = BTreeMap<(u64, &'static str, u64), PushpullLz4Row>;
+
+const PAYLOAD: &str = "structured-varied-v1";
 const CPU_PANEL_MAX: f64 = 200.0;
-const LEGEND_ROW_H: u32 = 16;
+pub(crate) const LEGEND_ROW_H: u32 = 16;
 
 struct CompressionData {
     msgs: BTreeMap<String, f64>,
     cpu_pct: BTreeMap<String, f64>,
 }
 
-type LinkData = BTreeMap<u32, BTreeMap<u64, CompressionData>>;
+type LinkData = BTreeMap<u64, BTreeMap<u64, CompressionData>>;
 
 fn matches_payload(row: &PushpullLz4Row, payload: &str, arena_bytes: u64) -> bool {
     row.payload.as_deref() == Some(payload)
@@ -55,100 +61,95 @@ fn matches_payload(row: &PushpullLz4Row, payload: &str, arena_bytes: u64) -> boo
                 && row.arena_bytes == Some(arena_bytes)))
 }
 
-fn load_data(chart: &CompressionChart, sizes: &[u64]) -> LinkData {
-    let path = jsonl::cache_dir().join(chart.cache_file);
-    let rows: Vec<(usize, PushpullLz4Row)> = jsonl::load_jsonl(&path);
+/// Loads every series' cache and keeps complete cells. `panel` places a row
+/// in a chart panel, or rejects it.
+pub(crate) fn load_cells(
+    chart: &CompressionChart,
+    panel: impl Fn(&PushpullLz4Row) -> Option<u64>,
+) -> Cells {
+    let mut files: Vec<&str> = chart.series.iter().map(|s| s.source.cache_file).collect();
+    files.sort_unstable();
+    files.dedup();
 
-    let mut groups: BTreeMap<(u32, String, u64), Vec<PushpullLz4Row>> = BTreeMap::new();
+    let mut groups: BTreeMap<(u64, &'static str, u64), Vec<PushpullLz4Row>> = BTreeMap::new();
+    for file in files {
+        let rows: Vec<(usize, PushpullLz4Row)> = jsonl::load_jsonl(&jsonl::cache_dir().join(file));
+        for (_, row) in rows {
+            let Some(key) = series_key(&row) else {
+                continue;
+            };
+            let Some(series) = chart
+                .series
+                .iter()
+                .find(|series| series.source.cache_file == file && series.key == key)
+            else {
+                continue;
+            };
+            if !chart.sizes.contains(&row.msg_size) || !eligible(series.source, &row) {
+                continue;
+            }
+            let Some(panel) = panel(&row) else {
+                continue;
+            };
 
-    for (_, row) in rows {
-        let Some(rate) = eligible_rate(chart, sizes, &row) else {
-            continue;
-        };
-
-        let series_key = if row.pattern == chart.dict_pattern && row.dict_size == Some(2048) {
-            chart.dict_series_key.to_string()
-        } else {
-            row.transport.clone()
-        };
-
-        if !chart.series.iter().any(|series| series.key == series_key) {
-            continue;
+            // A newer run restarts the group, and a rerun repeat replaces the
+            // older copy of that repeat.
+            let group = groups.entry((panel, series.key, row.msg_size)).or_default();
+            if group.last().is_some_and(|last| last.run_id != row.run_id) {
+                group.clear();
+            }
+            group.retain(|old| old.repeat != row.repeat);
+            group.push(row);
         }
-
-        // A newer run restarts the group, and a rerun repeat replaces the
-        // older copy of that repeat.
-        let group = groups.entry((rate, series_key, row.msg_size)).or_default();
-        if group.last().is_some_and(|last| last.run_id != row.run_id) {
-            group.clear();
-        }
-        group.retain(|old| old.repeat != row.repeat);
-        group.push(row);
     }
 
-    let mut out: LinkData = BTreeMap::new();
-    for ((rate, series, size), group) in groups {
-        let Some(row) = median_repeat(group) else {
-            continue;
-        };
-        let entry = out
-            .entry(rate)
-            .or_default()
-            .entry(size)
-            .or_insert_with(|| CompressionData {
-                msgs: BTreeMap::new(),
-                cpu_pct: BTreeMap::new(),
-            });
-        entry.msgs.insert(series.clone(), row.msgs_s.unwrap());
-        entry
-            .cpu_pct
-            .insert(series, row.cpu_time.unwrap() / row.elapsed.unwrap() * 100.0);
-    }
-
-    out
+    groups
+        .into_iter()
+        .filter_map(|(cell, group)| Some((cell, median_repeat(group)?)))
+        .collect()
 }
 
-/// Link rate of a row from the standard netem and workload setup, or `None`
-/// for any other row.
-fn eligible_rate(chart: &CompressionChart, sizes: &[u64], row: &PushpullLz4Row) -> Option<u32> {
-    let link = row.netem.as_ref()?;
-    if link.delay_us != 1000
-        || link.mtu != 1500
-        || !link.shared_rate
-        || link.segmentation_offloads
-        || link.placement != "tcp-ingress-ifb"
-        || row.rounds != Some(3)
-        || row.warmup_seconds != Some(0.5)
-        || row
+/// Transport, plus `+dict` for 2 KiB dictionary runs.
+fn series_key(row: &PushpullLz4Row) -> Option<String> {
+    match row.dict_size {
+        None => Some(row.transport.clone()),
+        Some(2048) => Some(format!("{}+dict", row.transport)),
+        Some(_) => None,
+    }
+}
+
+/// Whether a row comes from the standard workload of its source.
+fn eligible(source: &Source, row: &PushpullLz4Row) -> bool {
+    row.pattern.starts_with(source.pattern)
+        && row.rounds == Some(3)
+        && row.warmup_seconds == Some(source.warmup_seconds)
+        && row
             .duration_seconds
-            .is_none_or(|seconds| !seconds.is_finite() || seconds < 2.0)
-        || !matches_payload(row, chart.payload, chart.arena_bytes)
-        || row.payload_seed != Some(4242)
-        || row.cpu_affinity.as_deref() != Some("sender=1-2,receiver=3-4")
-        || row
+            .is_some_and(|seconds| seconds.is_finite() && seconds >= 2.0)
+        && matches_payload(row, PAYLOAD, source.arena_bytes)
+        && row.payload_seed == Some(4242)
+        && row.cpu_affinity.as_deref() == Some("sender=1-2,receiver=3-4")
+        && row
             .binary_sha256
             .as_ref()
-            .is_none_or(|hash| hash.len() != 64)
-        || !LINK_SPEEDS.iter().any(|(rate, _)| *rate == link.rate_mbps)
-    {
-        return None;
-    }
+            .is_some_and(|hash| hash.len() == 64)
+        && (row.transport == "tcp"
+            || (row.compression_level.is_none()
+                && row.compression_level_range == source.level_range))
+}
 
-    if !row.pattern.starts_with(chart.pattern_prefix) {
-        return None;
-    }
-    if !sizes.contains(&row.msg_size) {
-        return None;
-    }
-    if let Some(level) = chart.compression_level
-        && row
-            .compression_level
-            .is_some_and(|row_level| row_level != level)
-    {
-        return None;
-    }
-
-    Some(link.rate_mbps)
+/// Link rate of a full-speed run over the standard netem link.
+fn link_rate(chart: &CompressionChart, row: &PushpullLz4Row) -> Option<u64> {
+    let link = row.netem.as_ref()?;
+    let rate = u64::from(link.rate_mbps);
+    (row.send_rate.is_none()
+        && link.delay_us == 1000
+        && link.mtu == 1500
+        && link.shared_rate
+        && !link.segmentation_offloads
+        && link.placement == "tcp-ingress-ifb"
+        && chart.panels.iter().any(|(panel, _)| *panel == rate))
+    .then_some(rate)
 }
 
 /// Median-throughput repeat of a complete group: repeats 1 to 3 from one
@@ -207,19 +208,6 @@ fn measured(data: &BTreeMap<u64, CompressionData>) -> (ValMap, ValMap, ValMap) {
     (tput, msgs, cpu)
 }
 
-fn series_as_impls(chart: &CompressionChart) -> Vec<Impl> {
-    chart
-        .series
-        .iter()
-        .map(|s| Impl {
-            key: s.key,
-            label: s.label,
-            threads: "-",
-            color: s.color,
-        })
-        .collect()
-}
-
 /// Size index against msg/s (primary) or GB/s (secondary).
 type Coord = Cartesian2d<RangedCoordf64, RangedCoordf64>;
 type DualChart<'a, 'b> = DualCoordChartContext<'a, SVGBackend<'b>, Coord, Coord>;
@@ -227,34 +215,23 @@ type DualChart<'a, 'b> = DualCoordChartContext<'a, SVGBackend<'b>, Coord, Coord>
 /// X-axis sizes and the series drawn in each link row.
 struct RowSeries<'a> {
     sizes: &'a [u64],
-    present: &'a [&'a Impl],
+    present: &'a [&'a Series],
 }
 
 pub(crate) fn generate(chart: &CompressionChart) {
-    let sizes = chart.sizes;
-    let data = load_data(chart, sizes);
-    if data.is_empty() {
+    let cells = load_cells(chart, |row| link_rate(chart, row));
+    if cells.is_empty() {
         return;
     }
-    assert_complete(chart, &data);
+    assert_complete(chart, &cells);
+    let data = link_data(&cells);
 
     let dir = out_dir().join("pushpull");
     std::fs::create_dir_all(&dir).ok();
     let out = dir.join(chart.output_file);
+    let present: Vec<&Series> = chart.series.iter().collect();
 
-    let impls = series_as_impls(chart);
-    let present: Vec<&Impl> = impls
-        .iter()
-        .filter(|imp| {
-            data.values().any(|sizes| {
-                sizes
-                    .values()
-                    .any(|compression| compression.msgs.contains_key(imp.key))
-            })
-        })
-        .collect();
-
-    let row_count = LINK_SPEEDS.len() as u32;
+    let row_count = chart.panels.len() as u32;
     let panel_h = 280u32;
     let row_gap = 60u32;
     // Series rows plus room for the two method notes at the bottom.
@@ -269,12 +246,12 @@ pub(crate) fn generate(chart: &CompressionChart) {
     root.fill(&BACKGROUND_COLOR).unwrap();
 
     let series = RowSeries {
-        sizes,
+        sizes: chart.sizes,
         present: &present,
     };
     let mut row_titles: Vec<(u32, String)> = Vec::new();
 
-    for (idx, &(rate, label)) in LINK_SPEEDS.iter().enumerate() {
+    for (idx, &(rate, label)) in chart.panels.iter().enumerate() {
         let y_top = top_margin + idx as u32 * (panel_h + row_gap);
         let row_area = root.clone().shrink((0, y_top), (width, panel_h));
 
@@ -283,7 +260,20 @@ pub(crate) fn generate(chart: &CompressionChart) {
     }
 
     let table_area = root.clone().shrink((0, chart_total), (width, table_h));
-    draw_legend(&table_area, &present, chart.payload, table_h);
+    draw_legend(
+        &table_area,
+        &present,
+        &[
+            "--- dashed = msg/s (left axis)",
+            "\u{2500}\u{2500}\u{2500} solid = payload/s (right axis)",
+            "... dotted = sender CPU% (0-200%)",
+        ],
+        &[
+            "Measured netem: shared rate, 1 ms/direction, MTU 1500; segmentation offloads off.",
+            "Median of 3; 0.5 s warmup (1 s Zstd), >=2 s measurement; varied binary/JSON.",
+        ],
+        table_h,
+    );
 
     root.present().unwrap();
     drop(root);
@@ -294,16 +284,36 @@ pub(crate) fn generate(chart: &CompressionChart) {
     eprintln!("Written: {}", out.display());
 }
 
-/// Panics unless every link speed, size, and series has a measured cell.
-fn assert_complete(chart: &CompressionChart, data: &LinkData) {
-    for &(rate, _) in LINK_SPEEDS {
+/// msg/s and sender CPU% per link rate, size, and series.
+fn link_data(cells: &Cells) -> LinkData {
+    let mut out: LinkData = BTreeMap::new();
+    for (&(rate, series, size), row) in cells {
+        let entry = out
+            .entry(rate)
+            .or_default()
+            .entry(size)
+            .or_insert_with(|| CompressionData {
+                msgs: BTreeMap::new(),
+                cpu_pct: BTreeMap::new(),
+            });
+        entry.msgs.insert(series.to_owned(), row.msgs_s.unwrap());
+        entry.cpu_pct.insert(
+            series.to_owned(),
+            row.cpu_time.unwrap() / row.elapsed.unwrap() * 100.0,
+        );
+    }
+    out
+}
+
+/// Panics unless every panel, size, and series has a measured cell.
+pub(crate) fn assert_complete(chart: &CompressionChart, cells: &Cells) {
+    for &(panel, _) in chart.panels {
         for &size in chart.sizes {
             for series in chart.series {
                 assert!(
-                    data.get(&rate)
-                        .and_then(|sizes| sizes.get(&size))
-                        .is_some_and(|cell| cell.msgs.contains_key(series.key)),
-                    "missing measured compression cohort: {rate} Mbps, {size} B, {}",
+                    cells.contains_key(&(panel, series.key, size)),
+                    "missing measured compression cohort: {panel} ({}), {size} B, {}",
+                    chart.output_file,
                     series.key,
                 );
             }
@@ -522,10 +532,11 @@ fn draw_gbs_lines(chart_area: &mut DualChart<'_, '_>, series: &RowSeries<'_>, tp
 }
 
 /// Line style key, series swatches, and method notes below the rows.
-fn draw_legend(
+pub(crate) fn draw_legend(
     table_area: &DrawingArea<SVGBackend<'_>, Shift>,
-    present: &[&Impl],
-    payload: &str,
+    present: &[&Series],
+    key_lines: &[&str],
+    notes: &[&str; 2],
     table_h: u32,
 ) {
     let style_val = ("sans-serif", 11).into_font().color(&TEXT_COLOR);
@@ -535,58 +546,89 @@ fn draw_legend(
     let col_note = 380i32;
 
     // Line style tells the metric, color tells the series.
-    for (text, y) in [
-        ("--- dashed = msg/s (left axis)", 4),
-        (
-            "\u{2500}\u{2500}\u{2500} solid = payload/s (right axis)",
-            18,
-        ),
-        ("... dotted = sender CPU% (0-200%)", 32),
-    ] {
+    for (i, text) in key_lines.iter().enumerate() {
+        #[expect(clippy::cast_possible_wrap)]
+        let y = 4 + i as i32 * 14;
         table_area
             .draw_text(text, &style_dim, (col_note, y))
             .unwrap();
     }
 
-    for (i, imp) in present.iter().enumerate() {
+    for (i, series) in present.iter().enumerate() {
         #[expect(clippy::cast_possible_wrap)]
         let y = 4 + i as i32 * LEGEND_ROW_H.cast_signed();
 
         table_area
             .draw(&PathElement::new(
                 vec![(col_swatch, y + 6), (col_swatch + 14, y + 6)],
-                imp.color.stroke_width(2),
+                series.color.stroke_width(2),
             ))
             .unwrap();
         table_area
-            .draw_text(imp.label, &style_val, (col_name, y))
+            .draw_text(series.label, &style_val, (col_name, y))
             .unwrap();
     }
 
     let note_y = table_h.cast_signed() - 25;
-    table_area
-        .draw_text(
-            "Measured netem: shared rate, 1 ms/direction, MTU 1500; segmentation offloads off.",
-            &style_dim,
-            (78, note_y),
-        )
-        .unwrap();
-    table_area
-        .draw_text(
-            if payload == "structured-varied-v1" {
-                "Median of 3; 0.5 s warmup, >=2 s measurement; varied binary/JSON; 2 KiB dict."
-            } else {
-                "Median of 3; 0.5 s active warmup, >=2 s measurement; JSON; 2 KiB dictionary."
-            },
-            &style_dim,
-            (78, note_y + 13),
-        )
-        .unwrap();
+    for (i, note) in notes.iter().enumerate() {
+        #[expect(clippy::cast_possible_wrap)]
+        let y = note_y + i as i32 * 13;
+        table_area.draw_text(note, &style_dim, (78, y)).unwrap();
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn zstd_row() -> PushpullLz4Row {
+        serde_json::from_value(serde_json::json!({
+            "run_id": "test", "pattern": "pushpull_zstd", "transport": "zstd+tcp",
+            "peers": 1, "msg_size": 64, "wire_bytes": 70,
+            "payload": "structured-varied-v1", "payload_seed": 4242,
+            "payload_corpus_messages": 4096, "arena_bytes": 32768,
+            "rounds": 3, "warmup_seconds": 1.0, "duration_seconds": 2.0,
+            "cpu_affinity": "sender=1-2,receiver=3-4", "binary_sha256": "a".repeat(64),
+            "netem": {
+                "rate_mbps": 1000, "delay_us": 1000, "mtu": 1500,
+                "shared_rate": true, "segmentation_offloads": false,
+                "placement": "tcp-ingress-ifb"
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn zstd_rows_need_the_adaptive_range() {
+        let source = &super::super::compression::ZSTD;
+        let mut row = zstd_row();
+        for (level, range) in [
+            (None, Some([-7, 4])),
+            (None, None),
+            (None, Some([-7, -1])),
+            (Some(-1), None),
+            (Some(1), None),
+        ] {
+            row.compression_level = level;
+            row.compression_level_range = range;
+            row.transport = "zstd+tcp".into();
+            assert_eq!(eligible(source, &row), range == Some([-7, 4]));
+            row.transport = "tcp".into();
+            assert!(eligible(source, &row));
+        }
+    }
+
+    #[test]
+    fn saturation_panels_exclude_paced_rows() {
+        let chart = &super::super::compression::SATURATION;
+        let mut row = zstd_row();
+        assert_eq!(link_rate(chart, &row), Some(1000));
+        row.send_rate = Some(1000);
+        assert_eq!(link_rate(chart, &row), None);
+        row.send_rate = None;
+        row.netem.as_mut().unwrap().rate_mbps = 1;
+        assert_eq!(link_rate(chart, &row), None);
+    }
 
     #[test]
     fn varied_chart_rejects_repeated_or_mismatched_workloads() {

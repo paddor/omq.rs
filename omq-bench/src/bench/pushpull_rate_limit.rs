@@ -66,6 +66,7 @@ pub(crate) fn run(args: &PushpullRateLimitArgs) {
         link_mbps: Some(settings.rate_mbps),
         link_delay_us: settings.delay_us,
         warmup_seconds: 1.0,
+        send_rate: None,
     }) {
         return;
     }

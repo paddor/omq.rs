@@ -279,6 +279,17 @@ fn bench_options(msg_size: usize) -> Options {
     if let Ok(val) = std::env::var("OMQ_BENCH_ZSTD_LEVEL") {
         o = o.compression_level(val.parse().expect("OMQ_BENCH_ZSTD_LEVEL"));
     }
+    if let Ok(val) = std::env::var("OMQ_BENCH_ZSTD_LEVEL_RANGE") {
+        let (min, max) = val
+            .split_once(',')
+            .and_then(|(min, max)| Some((min.parse().ok()?, max.parse().ok()?)))
+            .expect("OMQ_BENCH_ZSTD_LEVEL_RANGE");
+        o = o.compression_level_range(min, max);
+    }
+    if let Ok(val) = std::env::var("OMQ_BENCH_OFFLOAD_THRESHOLD") {
+        let threshold = (val != "off").then(|| val.parse().expect("OMQ_BENCH_OFFLOAD_THRESHOLD"));
+        o = o.compression_offload_threshold(threshold);
+    }
     if let Ok(val) = std::env::var("OMQ_BENCH_ARENA_THRESHOLD") {
         o = o.arena_threshold(val.parse().expect("OMQ_BENCH_ARENA_THRESHOLD"));
     }
@@ -601,8 +612,12 @@ fn run_push(ctx: &omq_tokio::Context, ep: Endpoint, size: usize, peers: usize) {
     if let Some(corpus) = corpus {
         wait_for_warmup_barrier();
         wait_for_start_barrier();
+        let mut pacer = Pacer::from_env();
         loop {
             for message in &corpus {
+                if let Some(pacer) = &mut pacer {
+                    pacer.wait();
+                }
                 send_fast(&push, message.clone());
             }
         }
@@ -623,6 +638,43 @@ fn run_push(ctx: &omq_tokio::Context, ep: Endpoint, size: usize, peers: usize) {
     let msg = Message::single(payload.clone());
     loop {
         send_fast(&push, msg.clone());
+    }
+}
+
+/// Spaces corpus sends `OMQ_BENCH_SEND_RATE` messages per second apart. A
+/// sender more than 1 ms behind skips ahead, so a stall does not become one
+/// large batch.
+struct Pacer {
+    interval: Duration,
+    next: Instant,
+}
+
+impl Pacer {
+    fn from_env() -> Option<Self> {
+        let rate: f64 = std::env::var("OMQ_BENCH_SEND_RATE")
+            .ok()?
+            .parse()
+            .expect("OMQ_BENCH_SEND_RATE");
+        assert!(rate > 0.0, "OMQ_BENCH_SEND_RATE must be positive");
+        // The default 50 us timer slack would stretch short intervals.
+        #[cfg(target_os = "linux")]
+        unsafe {
+            libc::prctl(libc::PR_SET_TIMERSLACK, 1 as libc::c_ulong);
+        }
+        Some(Self {
+            interval: Duration::from_secs_f64(1.0 / rate),
+            next: Instant::now(),
+        })
+    }
+
+    fn wait(&mut self) {
+        let now = Instant::now();
+        if self.next > now {
+            std::thread::sleep(self.next - now);
+        } else if now - self.next > Duration::from_millis(1) {
+            self.next = now;
+        }
+        self.next += self.interval;
     }
 }
 
@@ -655,7 +707,9 @@ fn run_compression_pull(
     let payload = bench_payload(size);
     let mut index = 0;
     let batch = (64 * 1024 / size).clamp(1, 64);
-    let mut receive_until = |deadline: Instant| {
+    // Reads through the first batch at or after `deadline`, so intervals start
+    // and end on message arrivals. Slow links deliver few large messages.
+    let mut receive_through = |deadline: Instant| {
         let mut count = 0u64;
         loop {
             let mut received = 0u64;
@@ -678,26 +732,61 @@ fn run_compression_pull(
                 }
                 received += 1;
             }
-            // Exclude the entire batch that crosses the measurement boundary.
-            if Instant::now() >= deadline {
-                return count;
-            }
-            count += received;
             if received == 0 {
                 std::thread::yield_now();
+                continue;
+            }
+            count += received;
+            let now = Instant::now();
+            if now >= deadline {
+                return (count, now);
             }
         }
     };
-    let _ = receive_until(Instant::now() + warmup_duration());
+    let (_, start) = receive_through(Instant::now() + warmup_duration());
     let sender_pid = std::env::var("OMQ_BENCH_SENDER_PID").expect("compression sender PID");
     let sender_before = process_cpu_time(&sender_pid);
     let receiver_before = cpu_time_secs();
-    let start = Instant::now();
-    let count = receive_until(start + duration);
-    let elapsed = start.elapsed().as_secs_f64();
+    let wire_before = tcp_bytes_received();
+    let (count, end) = receive_through(start + duration);
+    let wire_bytes = tcp_bytes_received() - wire_before;
+    let elapsed = (end - start).as_secs_f64();
     let receiver_cpu = cpu_time_secs() - receiver_before;
     let sender_cpu = process_cpu_time(&sender_pid) - sender_before;
-    println!("{count} {elapsed:.9} {size} {receiver_cpu:.9} {sender_cpu:.9}");
+    println!("{count} {elapsed:.9} {size} {receiver_cpu:.9} {sender_cpu:.9} {wire_bytes}");
+}
+
+/// TCP payload bytes received on all sockets of this process.
+#[cfg(target_os = "linux")]
+fn tcp_bytes_received() -> u64 {
+    let mut total = 0;
+    for entry in std::fs::read_dir("/proc/self/fd").expect("list open files") {
+        let name = entry.expect("open file entry").file_name();
+        let Ok(fd) = name.to_string_lossy().parse::<libc::c_int>() else {
+            continue;
+        };
+        let mut info = std::mem::MaybeUninit::<libc::tcp_info>::zeroed();
+        let mut len = std::mem::size_of::<libc::tcp_info>() as libc::socklen_t;
+        // Other files and non-TCP sockets fail with ENOTSOCK or EOPNOTSUPP.
+        let status = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::IPPROTO_TCP,
+                libc::TCP_INFO,
+                info.as_mut_ptr().cast(),
+                &raw mut len,
+            )
+        };
+        if status == 0 {
+            total += unsafe { info.assume_init() }.tcpi_bytes_received;
+        }
+    }
+    total
+}
+
+#[cfg(not(target_os = "linux"))]
+fn tcp_bytes_received() -> u64 {
+    0
 }
 
 #[cfg(target_os = "linux")]

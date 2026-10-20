@@ -153,6 +153,8 @@ pub(crate) struct PushpullLz4Row {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compression_level: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub compression_level_range: Option<[i32; 2]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub netem: Option<CompressionLink>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repeat: Option<u32>,
@@ -174,6 +176,12 @@ pub(crate) struct PushpullLz4Row {
     pub payload_corpus_messages: Option<u64>,
     #[serde(alias = "lz4_arena_bytes", skip_serializing_if = "Option::is_none")]
     pub arena_bytes: Option<u64>,
+    /// Paced sender rate in messages per second; unset sends at full speed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub send_rate: Option<u64>,
+    /// TCP payload bytes received during the measured interval.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub received_wire_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

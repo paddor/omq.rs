@@ -1,6 +1,6 @@
 [package]
 name = "omq-libzmq"
-version = "0.5.25"
+version = "0.5.26"
 edition.workspace = true
 rust-version.workspace = true
 autotests = false
@@ -24,7 +24,7 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 workspace = true
 
 [dependencies]
-omq-tokio = { path = "../omq-tokio", version = "0.29.0", features = ["plain", "curve", "lz4", "zstd", "ws"] }
+omq-tokio = { path = "../omq-tokio", version = "0.30.0", features = ["plain", "curve", "lz4", "zstd", "ws"] }
 yring = "0.3.20"
 tokio = { version = "1.53.3", features = ["rt", "sync", "time"] }
 bytes = "1.12.1"

@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The last large message of a batch compresses inline on the driver instead
   of on the compression pool.
 
+### Fixed
+
+- Owned IO threads block SIGPIPE. A peer that resets a connection during a
+  write no longer terminates host processes that keep the default SIGPIPE
+  action, such as Go programs.
+
 ## [0.29.0] - 2026-10-16
 
 ### Breaking

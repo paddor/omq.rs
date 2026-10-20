@@ -26,8 +26,8 @@ lz4 = ["omq-proto/lz4"]
 zstd = ["omq-proto/zstd"]
 ws = ["omq-proto/ws", "dep:rustls", "dep:rustls-native-certs", "dep:rustls-pki-types", "dep:tokio-rustls"]
 # Raw OMQ over QUIC (`quic://`). Quinn with rustls/ring; no OMQ compression.
-quic = ["omq-proto/quic", "dep:quinn", "dep:nix", "dep:rustls", "dep:rustls-native-certs", "dep:rustls-pki-types"]
-dart = ["omq-proto/dart", "dep:quinn-udp", "dep:nix", "nix/time"]
+quic = ["omq-proto/quic", "dep:quinn", "nix/socket", "dep:rustls", "dep:rustls-native-certs", "dep:rustls-pki-types"]
+dart = ["omq-proto/dart", "dep:quinn-udp", "nix/socket", "nix/time"]
 # Enables the fuzz test suites (`tests/fuzz_*.rs`). Off by default -
 # those targets do ~1 M iterations each and dominate runtime of
 # `cargo test`. Run with `cargo test --features fuzz`.
@@ -64,9 +64,11 @@ tokio-rustls = { version = "0.26.6", optional = true }
 quinn = { version = "0.11.12", optional = true, default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 quinn-udp = { version = "0.6.3", optional = true, default-features = false }
 
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31", default-features = false, features = ["signal"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 omq-shm = { path = "../omq-shm", version = "0.2.1" }
-nix = { version = "0.31", optional = true, default-features = false, features = ["socket"] }
 
 [dev-dependencies]
 serde_json = "1.0.154"

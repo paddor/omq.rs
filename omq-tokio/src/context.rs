@@ -201,6 +201,7 @@ fn spawn_primary_thread(
         .name(name)
         .spawn(move || {
             OWNED_IO_THREAD.set(true);
+            block_sigpipe();
             let rt = build_current_thread_runtime();
             let _ = handle_tx.send(rt.handle().clone());
             rt.block_on(async move {
@@ -236,6 +237,7 @@ fn spawn_data_thread(
         .name(name)
         .spawn(move || {
             OWNED_IO_THREAD.set(true);
+            block_sigpipe();
             let rt = build_current_thread_runtime();
             let _ = handle_tx.send(rt.handle().clone());
             rt.block_on(cancel.cancelled());
@@ -1011,9 +1013,25 @@ impl Drop for ContextCore {
 fn build_current_thread_runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
+        .on_thread_start(block_sigpipe)
         .build()
         .expect("omq: failed to build current_thread runtime")
 }
+
+/// Keeps SIGPIPE pending on this thread, so writes to a reset peer fail with
+/// `EPIPE` instead. Rust binaries ignore SIGPIPE, but library hosts such as Go
+/// keep the default action on non-Go threads, which terminates the process.
+#[cfg(unix)]
+fn block_sigpipe() {
+    use nix::sys::signal::{SigSet, SigmaskHow, Signal, pthread_sigmask};
+
+    let mut set = SigSet::empty();
+    set.add(Signal::SIGPIPE);
+    pthread_sigmask(SigmaskHow::SIG_BLOCK, Some(&set), None).expect("omq: failed to block SIGPIPE");
+}
+
+#[cfg(not(unix))]
+fn block_sigpipe() {}
 
 #[cfg(test)]
 mod tests {
@@ -1031,6 +1049,32 @@ mod tests {
                 .unwrap();
         }));
         name_rx.recv_timeout(Duration::from_secs(1)).unwrap()
+    }
+
+    #[cfg(unix)]
+    fn sigpipe_blocked() -> bool {
+        use nix::sys::signal::{SigSet, Signal};
+
+        SigSet::thread_get_mask().unwrap().contains(Signal::SIGPIPE)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn io_threads_block_sigpipe() {
+        let pool = IoThreadPool::new_with_context_name(2, Some("sigpipe".to_owned()));
+        for thread in &pool.threads {
+            let (tx, rx) = mpsc::channel();
+            let blocking_tx = tx.clone();
+            drop(thread.handle.spawn(async move {
+                tx.send(sigpipe_blocked()).unwrap();
+            }));
+            drop(thread.handle.spawn_blocking(move || {
+                blocking_tx.send(sigpipe_blocked()).unwrap();
+            }));
+            assert!(rx.recv_timeout(Duration::from_secs(1)).unwrap());
+            assert!(rx.recv_timeout(Duration::from_secs(1)).unwrap());
+        }
+        pool.shutdown();
     }
 
     #[test]

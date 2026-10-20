@@ -789,7 +789,7 @@ fn decode_payload(
             .expect("selected slot fits decoded body");
         return Ok(buffer.into_payload());
     }
-    // lz4rip appends directly into spare capacity and exposes only initialized bytes.
+    // lz4rip decodes straight into the Vec, so the body is never copied.
     let mut body = Vec::with_capacity(size);
     decode(DecodeBuffer::Append(&mut body))?;
     Ok(Payload::from_bytes(Bytes::from(body)))

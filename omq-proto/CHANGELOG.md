@@ -9,8 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Require `lz4rip` 0.11.11 and use its `decompress_append` API for fresh heap
-  buffers, avoiding zero-filling before LZ4 arena and block decoding on 64-bit.
+- Require `lz4rip` 0.12.1 and `zrip` 0.8.13. LZ4 decodes fresh heap buffers
+  with `decompress_append`.
 
 ## [0.33.0] - 2026-10-16
 

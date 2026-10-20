@@ -533,9 +533,9 @@ dependencies = [
 
 [[package]]
 name = "lz4rip"
-version = "0.11.11"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b47a139ab5b03caf5b71ef425d3b7520684c204932384dc9801acda8d72c070"
+checksum = "44d2d90f8780c813b8c8e9ba4a462c30c03463a7b092e237342a96177635ed18"
 dependencies = [
  "lz4rip-core",
  "lz4rip-decode",
@@ -544,24 +544,24 @@ dependencies = [
 
 [[package]]
 name = "lz4rip-core"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a0db28ac02bab14bd1c008a850c271686acbe8055303f5a48bd5162ce98c16a"
+checksum = "687eec55dae7866f9a8cf785555aa81ea02ebed8a13c7079c4a4f59c2de46e92"
 
 [[package]]
 name = "lz4rip-decode"
-version = "0.10.5"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b592da8199663e7fafb3fab0b9eacacfe7aedce01298941a65bd9bae5edbb37"
+checksum = "bd92d97be818770dc15bf1562ee2986e0ab2197155fb41bddd8305ba963a6a7e"
 dependencies = [
  "lz4rip-core",
 ]
 
 [[package]]
 name = "lz4rip-encode"
-version = "0.10.9"
+version = "0.10.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82ec236f58b6212f8c9fb065615a345fe29f5cce7d5b44200557be486350895f"
+checksum = "19d07fb7d01f4fe624c9b63f942671e32088794647bce814d3960b89580554b2"
 dependencies = [
  "lz4rip-core",
 ]

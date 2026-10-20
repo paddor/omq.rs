@@ -218,6 +218,23 @@ After Hex shows `omq` 0.2.0, dry-run/audit and publish the Gleam wrapper:
 (cd bindings/beam/gleam && ~/src/gleam/target/release/gleam publish)
 ```
 
+Gleam 1.14.0 `gleam publish` and `gleam docs publish` can fail with
+`400 Bad Request` while Mix and Rebar3 publish with the same key. Upload the
+exported tarball and the built docs through the Hex API instead:
+
+```sh
+cd bindings/beam/gleam
+version=0.2.6
+curl -fsS -X POST 'https://hex.pm/api/publish?replace=false' \
+  -H "authorization: $HEX_API_KEY" -H 'content-type: application/octet-stream' \
+  --data-binary @build/omq_gleam-$version.tar
+~/src/gleam/target/release/gleam docs build
+tar -C build/dev/docs/omq_gleam -czf build/omq_gleam-$version-docs.tar.gz .
+curl -fsS -X POST "https://hex.pm/api/packages/omq_gleam/releases/$version/docs" \
+  -H "authorization: $HEX_API_KEY" -H 'content-type: application/octet-stream' \
+  --data-binary @build/omq_gleam-$version-docs.tar.gz
+```
+
 For token-based publishing, Mix and Rebar3 read `HEX_API_KEY`; Gleam reads
 `HEXPM_API_KEY`. Pass `--repo hexpm` to `rebar3 hex publish` so Rebar3 loads
 the repository token from the environment. Prefer the interactive commands above for the first publish

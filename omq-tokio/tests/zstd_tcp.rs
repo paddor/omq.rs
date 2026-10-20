@@ -191,7 +191,13 @@ async fn arenas_keep_order_across_large_compression_offloads() {
         push.connect(endpoint).await.unwrap();
         let expected: Vec<_> = (0..300u32)
             .map(|index| {
-                let mut bytes = vec![b'x'; if index % 31 == 0 { 128 * 1024 } else { 128 }];
+                // Runs of large messages hold and offload in turn around arenas.
+                let size = match index % 31 {
+                    0..=2 => 16 * 1024,
+                    3 => 128 * 1024,
+                    _ => 128,
+                };
+                let mut bytes = vec![b'x'; size];
                 bytes[..4].copy_from_slice(&index.to_le_bytes());
                 Message::single(bytes)
             })

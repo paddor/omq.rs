@@ -77,7 +77,7 @@ impl MessageRateLimit {
 /// Complete codec-parameter snapshot for one bind/connect operation.
 ///
 /// The endpoint selects the codec kind. These parameters replace the socket's
-/// five compression settings; `None` selects the codec default, not inheritance.
+/// six compression settings; `None` selects the codec default, not inheritance.
 /// Construct from `&Options` to retain defaults before changing selected fields.
 /// Mechanism and decoder size limits come from the socket configuration.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -88,8 +88,10 @@ pub struct CompressionOptions {
     pub auto_train: bool,
     /// Minimum part size to attempt compression.
     pub threshold: Option<usize>,
-    /// Zstd compression level; ignored by LZ4.
+    /// Fixed Zstd compression level; ignored by LZ4.
     pub level: Option<i32>,
+    /// Adaptive Zstd level range, used without a fixed level; ignored by LZ4.
+    pub level_range: Option<(i32, i32)>,
     /// Training dictionary capacity.
     pub dict_capacity: Option<usize>,
 }
@@ -101,6 +103,7 @@ impl From<&Options> for CompressionOptions {
             auto_train: options.compression_auto_train,
             threshold: options.compression_threshold,
             level: options.compression_level,
+            level_range: options.compression_level_range,
             dict_capacity: options.compression_dict_capacity,
         }
     }
@@ -410,10 +413,17 @@ pub struct Options {
     /// `None` uses defaults that depend on the codec and dictionary presence.
     pub compression_threshold: Option<usize>,
 
-    /// Compression level for `zstd+tcp://`. `None` uses the transport
-    /// default. Supported zrip levels are -8..=4; level 0 maps to zrip's
-    /// library default (currently level 1). Ignored by `lz4+tcp://`.
+    /// Fixed compression level for `zstd+tcp://`. `None` adapts the level
+    /// within `compression_level_range`. Supported zrip levels are -8..=4;
+    /// level 0 maps to zrip's library default (currently level 1). Ignored by
+    /// `lz4+tcp://`.
     pub compression_level: Option<i32>,
+
+    /// Adaptive level range for `zstd+tcp://` when `compression_level` is
+    /// unset. `None` adapts within -7..=4. Each connection raises the level
+    /// while the transport limits throughput or input is idle, and lowers it
+    /// while compression limits throughput. Ignored by `lz4+tcp://`.
+    pub compression_level_range: Option<(i32, i32)>,
 
     /// Auto-train dict capacity in bytes. Controls the maximum size of
     /// the dictionary produced by auto-training. Default: 2048.
@@ -425,9 +435,10 @@ pub struct Options {
     pub max_recv_dict_size: Option<usize>,
 
     /// Minimum message size (bytes) before compression is offloaded to
-    /// a background thread (tokio backend only). Messages smaller than
-    /// this are compressed inline on the driver task. `None` disables
-    /// offloading entirely. Default: `Some(8192)`.
+    /// a background thread (tokio backend only). Smaller messages, and
+    /// the last large message of a batch, are compressed inline on the
+    /// driver task. `None` disables offloading entirely. Default:
+    /// `Some(8192)`.
     pub compression_offload_threshold: Option<usize>,
 
     /// Switch the recv path to a sized one-shot read for any inbound
@@ -809,6 +820,7 @@ impl Default for Options {
             compression_auto_train: false,
             compression_threshold: None,
             compression_level: None,
+            compression_level_range: None,
             compression_dict_capacity: None,
             max_recv_dict_size: None,
             compression_offload_threshold: Some(8192),
@@ -920,6 +932,13 @@ impl Options {
         {
             return Err(crate::error::Error::Config(format!(
                 "zstd compression level must be {ZSTD_LEVEL_MIN}..={ZSTD_LEVEL_MAX}, got {level}",
+            )));
+        }
+        if let Some((min, max)) = self.compression_level_range
+            && !(ZSTD_LEVEL_MIN <= min && min <= max && max <= ZSTD_LEVEL_MAX)
+        {
+            return Err(crate::error::Error::Config(format!(
+                "zstd compression level range must be within {ZSTD_LEVEL_MIN}..={ZSTD_LEVEL_MAX} with min <= max, got {min}..={max}",
             )));
         }
         Ok(())
@@ -1479,13 +1498,25 @@ impl Options {
         self
     }
 
-    /// Set the `zstd+tcp://` compression level.
+    /// Set a fixed `zstd+tcp://` compression level.
     ///
-    /// Supported zrip levels are -8..=4. Level 0 maps to zrip's library
-    /// default, currently level 1. Ignored by LZ4 compression.
+    /// Without a fixed level, each connection adapts its level within
+    /// `compression_level_range`. Supported zrip levels are -8..=4. Level 0
+    /// maps to zrip's library default, currently level 1. Ignored by LZ4
+    /// compression.
     #[must_use]
     pub fn compression_level(mut self, level: i32) -> Self {
         self.compression_level = Some(level);
+        self
+    }
+
+    /// Adapt the `zstd+tcp://` level within `min..=max` (default -7..=4).
+    ///
+    /// A fixed `compression_level` takes precedence. Level 0 is skipped and
+    /// -8 runs as -7. Ignored by LZ4 compression.
+    #[must_use]
+    pub fn compression_level_range(mut self, min: i32, max: i32) -> Self {
+        self.compression_level_range = Some((min, max));
         self
     }
 
@@ -1955,6 +1986,16 @@ mod tests {
         assert!(Options::new().compression_level(4).validate().is_ok());
         assert!(Options::new().compression_level(5).validate().is_err());
         assert!(Options::new().compression_level(-9).validate().is_err());
+        for (min, max, valid) in [
+            (-8, 4, true),
+            (2, 2, true),
+            (3, 2, false),
+            (-9, 4, false),
+            (-1, 5, false),
+        ] {
+            let options = Options::new().compression_level_range(min, max);
+            assert_eq!(options.validate().is_ok(), valid, "{min}..={max}");
+        }
     }
 
     #[cfg(feature = "curve")]

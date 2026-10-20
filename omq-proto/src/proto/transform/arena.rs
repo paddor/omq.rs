@@ -12,6 +12,9 @@ pub const MAX_ARENA_BYTES: usize = 64 * 1024;
 pub const MAX_ARENA_MESSAGES: usize = 256;
 /// Maximum total parts in a compression arena, including empty parts.
 pub const MAX_ARENA_PARTS: usize = 4096;
+/// Maximum inner wire size of one message in a compression arena. Larger than
+/// the plain zero-copy threshold: compressed output is a new buffer anyway.
+pub const MAX_ARENA_MESSAGE_BYTES: usize = 8 * 1024;
 
 /// Exact inner wire size, eligible only for small, complete messages.
 #[must_use]
@@ -25,7 +28,7 @@ pub fn arena_message_size(message: &Message) -> Option<usize> {
             .saturating_add(part.len())
             .saturating_add(if part.len() > 255 { 9 } else { 2 });
     });
-    (size <= crate::frame_buffer::ARENA_THRESHOLD).then_some(size)
+    (size <= MAX_ARENA_MESSAGE_BYTES).then_some(size)
 }
 
 fn invalid() -> Error {

@@ -252,6 +252,9 @@ where
 
         session.start_data_plane();
         let mut io = PacedIo::new(reader, writer, &network);
+        if session.output.encoding.adapts_level() {
+            io.writer.track_stalls();
+        }
         let authenticated_sender = session
             .recv_direct
             .as_ref()
@@ -441,6 +444,7 @@ impl Session<'_> {
             if self.stage_output(data_plane_open).await? == Flow::Exit {
                 return Ok(());
             }
+            self.adapt_compression_level(io);
 
             let turn = self.plan_turn(io, control_exhausted, data_plane_open);
             if self.wait(io, waits, &turn).await? == Flow::Exit {
@@ -629,6 +633,15 @@ impl Session<'_> {
         }
 
         Ok(Flow::Next)
+    }
+
+    /// Close a due compression-level window with the writer's stalled time.
+    fn adapt_compression_level<R, W>(&mut self, io: &mut PacedIo<R, W>) {
+        if self.output.encoding.level_window_due() {
+            let now = Instant::now();
+            let blocked = io.writer.take_stalled(now);
+            self.output.encoding.adapt_level(now, blocked);
+        }
     }
 
     /// Whether a graceful close may shut the transport down now: every

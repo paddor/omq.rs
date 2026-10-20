@@ -109,6 +109,8 @@ pub(crate) struct SendPipeConsumer {
     data_signal: Arc<DataSignal>,
     space_available: Arc<StateSignal>,
     above_lwm: Arc<AtomicBool>,
+    /// A drain freed space for a producer that found the queue full.
+    freed_full: bool,
 }
 
 pub(crate) fn send_pipe(capacity: usize) -> (SendPipeProducer, SendPipeConsumer) {
@@ -152,6 +154,7 @@ pub(crate) fn send_pipe_with_mode(
             data_signal,
             space_available,
             above_lwm,
+            freed_full: false,
         },
     )
 }
@@ -185,6 +188,7 @@ pub(crate) fn peer_send_pipe(
             data_signal,
             space_available,
             above_lwm,
+            freed_full: false,
         },
     )
 }
@@ -749,6 +753,12 @@ impl SendPipeConsumer {
         }
     }
 
+    /// Whether a drain freed space for a producer that found the queue full
+    /// since the last call. Peer and conflate pipes never report one.
+    pub(crate) fn take_freed_full(&mut self) -> bool {
+        std::mem::take(&mut self.freed_full)
+    }
+
     /// Transfer Queue entries directly into the IO owner's storage. The
     /// callback can stop after an entry consumes the remaining destination
     /// capacity, leaving the following entries in the ring.
@@ -781,6 +791,7 @@ impl SendPipeConsumer {
             if consumer.len() <= consumer.capacity() / SEND_PIPE_LWM_DIVISOR
                 && self.above_lwm.swap(false, Ordering::AcqRel)
             {
+                self.freed_full = true;
                 self.space_available.notify_changed();
             }
         }
@@ -812,6 +823,7 @@ impl SendPipeConsumer {
             data_signal,
             space_available,
             above_lwm,
+            freed_full,
         } = self;
         data_signal.begin_drain();
         if let SendPipeConsumerInner::Peer(peer) = inner {
@@ -843,6 +855,7 @@ impl SendPipeConsumer {
             if consumer.len() <= consumer.capacity() / SEND_PIPE_LWM_DIVISOR
                 && above_lwm.swap(false, Ordering::AcqRel)
             {
+                *freed_full = true;
                 space_available.notify_changed();
             }
         }
@@ -1274,9 +1287,12 @@ mod tests {
         let mut batch = Vec::new();
         assert_eq!(rx.drain_into(&mut batch, 1, usize::MAX), 1);
         assert!(tx.above_lwm.load(Ordering::Acquire));
+        assert!(!rx.take_freed_full());
 
         assert_eq!(rx.drain_into(&mut batch, 1, usize::MAX), 1);
         assert!(!tx.above_lwm.load(Ordering::Acquire));
+        assert!(rx.take_freed_full());
+        assert!(!rx.take_freed_full());
     }
 
     #[test]

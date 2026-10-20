@@ -4,20 +4,24 @@
 //! The ZDICT magic (`37 A4 30 EC`) is the shipment discriminator. Compressed
 //! parts are raw Zstd frames and must carry `Frame_Content_Size`.
 
+use std::time::Instant;
+
 use bytes::{Bytes, BytesMut};
 use smallvec::SmallVec;
+use zrip::adaptive::{AdaptiveLevel, CompressStats, MIN_WINDOW_BYTES};
 use zrip::dict::Dictionary;
 use zrip::{CompressContext, DecompressContext};
 
 use crate::error::{Error, Result};
 use crate::message::{Message, Payload};
 
-use super::TransformedOut;
+use super::adaptive;
 use super::arena::{self, DecodedArena};
 pub use super::arena::{MAX_ARENA_BYTES, MAX_ARENA_MESSAGES, MAX_ARENA_PARTS, arena_message_size};
 use super::common::{
     ENVELOPE_PLAIN, SENTINEL_PLAIN, body_budget, plaintext_payload, take_budget, validate_dict,
 };
+use super::{OutputWindow, TransformedOut};
 
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
 const ZDICT_MAGIC: [u8; 4] = [0x37, 0xA4, 0x30, 0xEC];
@@ -33,10 +37,21 @@ const USER_DICT_ID_MAX: u32 = 0x7FFF_FFFF;
 
 /// Maximum dictionary shipment size in bytes.
 pub const MAX_DICT_BYTES: usize = 8 * 1024;
-/// Default Zstd compression level.
-pub const DEFAULT_LEVEL: i32 = 1;
+/// Default Zstd compression level, and the adaptive starting level.
+pub const DEFAULT_LEVEL: i32 = -1;
+/// Default adaptive level range when no fixed level is configured.
+pub const DEFAULT_LEVEL_RANGE: (i32, i32) = (-7, 4);
 /// Default trained dictionary capacity in bytes.
 pub const DEFAULT_DICT_CAPACITY: usize = 2048;
+
+/// Starting level of an encoder that adapts within `min..=max`.
+///
+/// # Panics
+/// If `min..=max` holds no supported level.
+#[must_use]
+pub fn adaptive_start_level(min: i32, max: i32) -> i32 {
+    AdaptiveLevel::new(min..=max, DEFAULT_LEVEL).level()
+}
 
 /// Sender target for naturally queued arenas. Zero disables arena batching.
 #[must_use]
@@ -87,6 +102,9 @@ pub struct ZstdEncoder {
     max_message_size: Option<usize>,
     level: i32,
     cctx: Option<CompressContext>,
+    adaptive: Option<AdaptiveLevel>,
+    // Counted for an adaptive primary and its offload encoders.
+    stats: Option<CompressStats>,
     train: Option<TrainState>,
     threshold_override: Option<usize>,
     dict_capacity: usize,
@@ -100,6 +118,7 @@ impl std::fmt::Debug for ZstdEncoder {
             .field("send_dict_shipped", &self.send_dict_shipped)
             .field("max_message_size", &self.max_message_size)
             .field("level", &self.level)
+            .field("adaptive", &self.adaptive.is_some())
             .field(
                 "auto_train",
                 &self
@@ -119,6 +138,8 @@ impl Default for ZstdEncoder {
             max_message_size: None,
             level: DEFAULT_LEVEL,
             cctx: None,
+            adaptive: None,
+            stats: None,
             train: None,
             threshold_override: None,
             dict_capacity: DEFAULT_DICT_CAPACITY,
@@ -179,12 +200,90 @@ impl ZstdEncoder {
         })
     }
 
-    /// Set the Zstd compression level and invalidate cached encoder contexts.
+    /// Set a fixed Zstd compression level and invalidate cached encoder contexts.
     #[must_use]
     pub fn with_level(mut self, level: i32) -> Self {
-        self.level = level;
-        self.cctx = None;
+        self.fix_level();
+        self.set_level(level);
         self
+    }
+
+    /// Adapt the level within `min..=max`, starting near [`DEFAULT_LEVEL`].
+    /// The connection driver reports each window through [`Self::adapt_level`].
+    ///
+    /// # Panics
+    /// If `min..=max` holds no supported level.
+    #[must_use]
+    pub fn with_level_range(mut self, min: i32, max: i32) -> Self {
+        let controller = AdaptiveLevel::new(min..=max, DEFAULT_LEVEL);
+        self.set_level(controller.level());
+        self.adaptive = Some(controller);
+        self.stats = Some(CompressStats::default());
+        self
+    }
+
+    /// Current compression level.
+    #[must_use]
+    pub fn level(&self) -> i32 {
+        self.level
+    }
+
+    /// Whether the level adapts to sender conditions.
+    #[must_use]
+    pub fn is_adaptive(&self) -> bool {
+        self.adaptive.is_some()
+    }
+
+    /// Stop adapting and keep the current level.
+    pub fn fix_level(&mut self) {
+        self.adaptive = None;
+        self.stats = None;
+    }
+
+    /// Whether enough input was compressed to close an adaptation window.
+    #[must_use]
+    pub fn adaptation_ready(&self) -> bool {
+        self.adaptive.is_some()
+            && self
+                .stats
+                .is_some_and(|stats| stats.plain >= MIN_WINDOW_BYTES)
+    }
+
+    /// Close an adaptation window and pick the level for the next one.
+    pub fn adapt_level(&mut self, output: OutputWindow) {
+        let Some(controller) = self.adaptive.as_mut() else {
+            return;
+        };
+        let stats = self
+            .stats
+            .replace(CompressStats::default())
+            .unwrap_or_default();
+        let level = controller.update(stats, adaptive::bottleneck(output));
+        self.set_level(level);
+    }
+
+    /// Count an offload encoder's work done at the current level.
+    pub fn absorb_offload_stats(&mut self, offload: &mut Self) {
+        if let Some(stats) = self.stats.as_mut()
+            && let Some(work) = offload.stats.take()
+            && offload.level == self.level
+        {
+            stats.merge(work);
+        }
+    }
+
+    fn set_level(&mut self, level: i32) {
+        if self.level != level {
+            self.level = level;
+            // An invalid level fails when the next compression builds a context.
+            if self
+                .cctx
+                .as_mut()
+                .is_some_and(|cctx| cctx.set_level(level).is_err())
+            {
+                self.cctx = None;
+            }
+        }
     }
 
     /// Set the maximum outbound message body size; `None` removes the limit.
@@ -221,6 +320,8 @@ impl ZstdEncoder {
             max_message_size: self.max_message_size,
             level: self.level,
             cctx: None,
+            adaptive: None,
+            stats: self.stats.map(|_| CompressStats::default()),
             train: None,
             threshold_override: self.threshold_override,
             dict_capacity: self.dict_capacity,
@@ -247,10 +348,8 @@ impl ZstdEncoder {
     pub fn sync_offload_config(&mut self, primary: &Self) {
         debug_assert!(self.can_offload() && primary.can_offload());
         self.sync_dict(primary);
-        if self.level != primary.level {
-            self.cctx = None;
-            self.level = primary.level;
-        }
+        self.set_level(primary.level);
+        self.stats = primary.stats.map(|_| CompressStats::default());
         self.max_message_size = primary.max_message_size;
         self.threshold_override = primary.threshold_override;
         self.dict_capacity = primary.dict_capacity;
@@ -316,14 +415,17 @@ impl ZstdEncoder {
         let mut out = self.ship_dictionary();
         let compressed = if size >= self.effective_threshold() {
             self.ensure_cctx()?;
-            Some(
-                self.cctx
-                    .as_mut()
-                    .unwrap()
-                    .compress(&self.arena_buf)
-                    .map_err(|e| compress_err(&e))?,
-            )
-            .filter(|compressed| compressed.len() < size)
+            let started = self.stats.is_some().then(Instant::now);
+            let compressed = self
+                .cctx
+                .as_mut()
+                .unwrap()
+                .compress(&self.arena_buf)
+                .map_err(|e| compress_err(&e))?;
+            if let (Some(started), Some(stats)) = (started, self.stats.as_mut()) {
+                stats.record(size, compressed.len(), started.elapsed());
+            }
+            Some(compressed).filter(|compressed| compressed.len() < size)
         } else {
             None
         };
@@ -387,10 +489,17 @@ impl ZstdEncoder {
         if plain.len() < self.effective_threshold() {
             return Ok(plaintext_payload(&plain));
         }
+        self.ensure_cctx()?;
+        let started = self.stats.is_some().then(Instant::now);
         let compressed = self
-            .ensure_cctx()?
+            .cctx
+            .as_mut()
+            .unwrap()
             .compress(&plain)
             .map_err(|e| compress_err(&e))?;
+        if let (Some(started), Some(stats)) = (started, self.stats.as_mut()) {
+            stats.record(plain.len(), compressed.len(), started.elapsed());
+        }
         if compressed.len() >= plain.len().saturating_sub(ENVELOPE_PLAIN) {
             return Ok(plaintext_payload(&plain));
         }
@@ -727,6 +836,84 @@ mod tests {
             #[cfg(feature = "lz4")]
             MessageEncoder::Lz4(_) => panic!("expected zstd encoder"),
         }
+    }
+
+    #[test]
+    fn unset_level_adapts_and_fixed_level_pins() {
+        use crate::options::Options;
+        use crate::proto::transform::{CompressionKind, MessageEncoder};
+
+        let encoder = |options: &Options| match MessageEncoder::for_compression_kind(
+            CompressionKind::Zstd,
+            options,
+        )
+        .unwrap()
+        .unwrap()
+        .0
+        {
+            MessageEncoder::Zstd(encoder) => encoder,
+            #[cfg(feature = "lz4")]
+            MessageEncoder::Lz4(_) => panic!("expected zstd encoder"),
+        };
+        let adaptive = encoder(&Options::new());
+        assert!(adaptive.is_adaptive());
+        assert_eq!(adaptive.level(), DEFAULT_LEVEL);
+        let ranged = encoder(&Options::new().compression_level_range(1, 4));
+        assert!(ranged.is_adaptive());
+        assert_eq!(ranged.level(), 1);
+        let fixed = encoder(
+            &Options::new()
+                .compression_level_range(1, 4)
+                .compression_level(-3),
+        );
+        assert!(!fixed.is_adaptive());
+        assert_eq!(fixed.level(), -3);
+    }
+
+    #[test]
+    fn adapted_level_changes_frames_and_offload_work_counts_only_at_that_level() {
+        use std::fmt::Write as _;
+        let mut body = String::new();
+        for index in 0..8192 {
+            write!(body, "{{\"id\":{},\"v\":{}}}", index % 97, index % 13).unwrap();
+        }
+        let message = Message::single(body.into_bytes()[..64 * 1024].to_vec());
+        let mut encoder = ZstdEncoder::new().with_level_range(-7, 4);
+        let mut decoder = ZstdDecoder::new();
+        let before = encoder.encode(&message).unwrap().remove(0);
+        assert!(!encoder.adaptation_ready());
+        for _ in 0..3 {
+            encoder.encode(&message).unwrap();
+        }
+        assert!(encoder.adaptation_ready());
+        let window = OutputWindow {
+            elapsed: std::time::Duration::from_millis(100),
+            blocked: std::time::Duration::from_millis(100),
+            batches: 1,
+            backlogged: 1,
+            overflowed: 0,
+            input_full: 0,
+        };
+        encoder.adapt_level(window);
+        assert_eq!(encoder.level(), 1);
+        assert!(!encoder.adaptation_ready());
+        let after = encoder.encode(&message).unwrap().remove(0);
+        assert_ne!(before, after);
+        for wire in [before, after] {
+            assert_eq!(decoder.decode(wire).unwrap(), Some(message.clone()));
+        }
+
+        let mut offload = encoder.new_offload();
+        offload.encode(&message).unwrap();
+        encoder.stats = Some(CompressStats::default());
+        encoder.absorb_offload_stats(&mut offload);
+        assert!(encoder.stats.unwrap().plain > 0);
+        let mut stale = encoder.new_offload();
+        stale.encode(&message).unwrap();
+        encoder.set_level(-1);
+        encoder.stats = Some(CompressStats::default());
+        encoder.absorb_offload_stats(&mut stale);
+        assert_eq!(encoder.stats.unwrap().plain, 0);
     }
 
     #[test]

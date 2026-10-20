@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Zstd connections adapt their compression level to the sender's bottleneck:
+  a blocked transport or idle input raises it, a full send queue or a backlog
+  larger than one batch lowers it. Fan-out lanes keep a fixed level.
+- The last large message of a batch compresses inline on the driver instead
+  of on the compression pool.
+
 ## [0.29.0] - 2026-10-16
 
 ### Breaking

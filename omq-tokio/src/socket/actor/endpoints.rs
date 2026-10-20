@@ -442,6 +442,7 @@ impl SocketDriver {
             options.compression_auto_train = compression.auto_train;
             options.compression_threshold = compression.threshold;
             options.compression_level = compression.level;
+            options.compression_level_range = compression.level_range;
             options.compression_dict_capacity = compression.dict_capacity;
         }
         if let Some(dict) = &options.compression_dict

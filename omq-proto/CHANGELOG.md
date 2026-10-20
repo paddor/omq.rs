@@ -7,10 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.0] - 2026-10-20
+
 ### Breaking
 
 - `Options::compression_level_range` and `CompressionOptions::level_range`
   set the adaptive Zstd level range.
+- `Options` gains `tcp_user_timeout`, `ConnectionConfig` gains
+  `defer_authentication`, and `PeerAuthentication` gains `username`.
+- DART session and fragment functions take grouped argument structs.
+
+### Added
+
+- `Options::tcp_user_timeout` sets `TCP_USER_TIMEOUT` on TCP streams on Linux
+  and Android. It is off by default.
+- `ConnectionConfig::defer_authentication` parks server authenticator calls
+  as an `AuthenticationRequest` until `complete_authentication` supplies the
+  decision.
+- `Connection::accepts_input` exposes the input admission predicate shared by
+  codec drivers.
+- `Options::send_queue_capacity`, `Options::recv_queue_capacity`, and
+  `options::queue_capacity` clamp HWM-sized allocations to 1..=1,048,576
+  messages.
 
 ### Changed
 
@@ -20,6 +38,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from 4 KiB.
 - Require `lz4rip` 0.12.1 and `zrip` 0.8.13. LZ4 decodes fresh heap buffers
   with `decompress_append`.
+- `Options::validate` rejects zero reconnect intervals. Use
+  `ReconnectPolicy::Disabled` to turn reconnects off.
+- READY decoding drops peer-supplied local-only properties such as `User-Id`
+  and `Peer-Address` for every mechanism and caps READY at 256 properties.
+  DART READY caps at 16 properties.
+- DART answers a peer's first valid STATUS with its current STATUS, as the
+  RFC now requires.
+
+### Fixed
+
+- Decoded messages have a finite budget, 1 GiB by default, even without
+  `max_message_size`. LZ4B and LZ4M check expansion before reserving output.
+- DART bodies reserved by out-of-order FIRST fragments are bounded to 64 MiB
+  beyond one waiting body.
+- Receive size limits allow CURVE frame overhead and heartbeat traffic
+  without loosening decoded message limits.
 
 ## [0.33.0] - 2026-10-16
 

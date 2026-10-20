@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-10-20
+
+### Breaking
+
+- Require `omq-proto` 0.34.0.
+- `DartIo::try_send_segments` takes a grouped argument struct.
+
+### Added
+
+- `Context::set_network_rate_limits` shares ingress and egress byte budgets
+  across owned IO lanes for TCP, compressed TCP, STREAM, UDP, DART, QUIC, and
+  WebSocket.
+- `Options::tcp_user_timeout` sets `TCP_USER_TIMEOUT` on TCP streams on Linux
+  and Android.
+- SHM accepts every socket type except STREAM. Messages with large envelopes
+  travel as one multipart record.
+- `Context::on_io_thread` reports whether the caller runs on an OMQ IO
+  thread.
+
 ### Changed
 
 - Zstd connections adapt their compression level to the sender's bottleneck:
@@ -14,12 +33,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   larger than one batch lowers it. Fan-out lanes keep a fixed level.
 - The last large message of a batch compresses inline on the driver instead
   of on the compression pool.
+- Handshake authenticators run on the blocking pool instead of the IO thread.
+- ROUTER and PEER reject a new connection that claims a routing identity held
+  by a different principal.
+- Outbound dials have their own handshake admission pool, and one remote host
+  may hold at most an eighth of the inbound slots. Loopback peers are exempt.
+- QUIC listeners send Retry to unvalidated Initials once half of their setup
+  slots are taken.
+- The per-IP receive rate limit keys on the host: the IPv4 address or the
+  IPv6 /64.
+- SHM payload regions are write-sealed and the preface is `OMQSHM08`, so
+  older SHM peers cannot connect. SHM binds replace only stale sockets.
+- Windows TCP binds no longer set `SO_REUSEADDR`, and IPC named pipe binds
+  fail when another server owns the name.
+- DART RADIO/DISH honors the full send HWM and delivers small grouped
+  messages inline.
 
 ### Fixed
 
 - Owned IO threads block SIGPIPE. A peer that resets a connection during a
   write no longer terminates host processes that keep the default SIGPIPE
   action, such as Go programs.
+- The socket actor never waits on a stalled peer. Protocol commands overflow
+  in order, fan-out lane control never blocks, and `subscribe` and `join`
+  backpressure the caller instead.
+- Round-robin and exclusive senders wake on any usable pipe, concurrent async
+  receivers hand wakes on, and queue ends and drivers wake their counterparts
+  on every exit path.
+- Full inproc routes publish space when their connect backlog clears.
+- User receive wakers run after receive guards release, so a waker may call
+  `try_recv`.
+- PEER readiness matches what drains and admission accept.
+- Close and unbind stop listener and UDP tasks and wait for them, so the
+  address is free on return. Removed dialer entries stop their redial tasks.
+- An IPC listener unlinks its socket file only while it still owns it.
+- REQ resets alternation when the connect route holding its pending request
+  is removed.
+- Dropped compression offloads free their pool slot.
+- Concurrent `Context::block_on` jobs run side by side.
+- Named `udp://` connects resolve through the DNS workers instead of blocking
+  the actor.
+- The proxy loop yields during sustained input and polls its control socket.
+- The DISH receive loop is budgeted and drops unjoined groups without
+  copying.
+- HWM values near `INT_MAX` no longer abort on huge queue allocations.
+- Unconfirmed DART handshakes no longer hold ready slots or trigger repeated
+  WELCOMEs, and a lost initial STATUS no longer stalls credit for a second.
+- Exclusive sockets survive PING bursts, and a send dropped mid-write closes
+  the connection instead of leaving a truncated frame.
+- SHM senders tolerate hostile receivers. Batch tables are copied once on
+  receive, only eventfds are accepted as notifiers, imported descriptors are
+  closed after mapping, and local closes always wake credit waiters.
 
 ## [0.29.0] - 2026-10-16
 

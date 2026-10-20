@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `Monitor.ReceiveAsync` throws `OperationCanceledException` when `Dispose`
+  stops the monitor mid-receive, instead of `OmqClosedException` from the
+  closed reader.
+
 ## [0.2.5] - 2026-10-16
 
 ### Changed

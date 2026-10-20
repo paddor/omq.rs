@@ -44,10 +44,8 @@ pub(crate) enum ChartSub {
     Dart,
     /// Dart and QUIC throughput and RTT over simulated lossy links.
     Lossy,
-    /// PUB/SUB LZ4 compression chart.
-    Lz4,
-    /// PUSH/PULL Zstd compression chart.
-    Zstd,
+    /// PUSH/PULL LZ4 and Zstd charts: saturated links and fixed send rates.
+    Compression,
     /// PUSH/PULL over a 1 Gbit/s link with an 800 Mbit/s egress limit.
     RateLimit,
 }
@@ -241,17 +239,19 @@ pub(crate) struct PushpullLz4Args {
     pub quick: bool,
 
     /// Dict sizes to train (comma-separated).
-    #[arg(long, value_delimiter = ',', default_values_t = [2048])]
+    #[arg(long, value_delimiter = ',')]
     pub dict_sizes: Vec<u64>,
 }
 
 #[derive(Parser)]
+// The adaptive level settles within about 1 s.
+#[command(mut_arg("warmup_seconds", |arg| arg.default_value("1")))]
 pub(crate) struct PushpullZstdArgs {
     #[command(flatten)]
     pub link: CompressionLinkArgs,
 
     /// Transports (comma-separated).
-    #[arg(long, default_value = "tcp,zstd+tcp")]
+    #[arg(long, default_value = "zstd+tcp")]
     pub transports: String,
 
     /// Message sizes (comma-separated).
@@ -271,12 +271,21 @@ pub(crate) struct PushpullZstdArgs {
     pub quick: bool,
 
     /// Dict sizes to train (comma-separated).
-    #[arg(long, value_delimiter = ',', default_values_t = [2048])]
+    #[arg(long, value_delimiter = ',')]
     pub dict_sizes: Vec<u64>,
 
-    /// Zstd compression level (-8..=4). Omitted uses transport default.
+    /// Fixed Zstd compression level (-8..=4) instead of `--level-range`.
     #[arg(long)]
     pub level: Option<i32>,
+
+    /// Range the adaptive Zstd level moves within.
+    #[arg(
+        long,
+        value_delimiter = ',',
+        default_value = "-7,4",
+        allow_negative_numbers = true
+    )]
+    pub level_range: Vec<i32>,
 }
 
 #[derive(Parser)]
@@ -307,6 +316,10 @@ pub(crate) struct CompressionLinkArgs {
     /// Active receiver warmup, in seconds.
     #[arg(long, default_value_t = 0.5)]
     pub warmup_seconds: f64,
+
+    /// Pace the sender at this many messages per second over plain loopback.
+    #[arg(long, conflicts_with = "link_mbps", value_parser = clap::value_parser!(u64).range(1..))]
+    pub send_rate: Option<u64>,
 }
 
 #[derive(Parser)]

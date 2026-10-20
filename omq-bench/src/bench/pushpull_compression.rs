@@ -18,6 +18,7 @@ pub(crate) struct Config {
     pub quick: bool,
     pub dict_sizes: Vec<u64>,
     pub level: Option<i32>,
+    pub level_range: Option<[i32; 2]>,
     pub link: CompressionLinkArgs,
 }
 
@@ -32,6 +33,8 @@ pub(crate) struct Measurement {
     pub elapsed: f64,
     pub sender_cpu: f64,
     pub receiver_cpu: f64,
+    /// TCP payload bytes the receiver read during the interval.
+    pub wire_bytes: u64,
 }
 
 // Positional shell arguments keep paths and user arguments out of shell code.
@@ -48,7 +51,8 @@ ip link add ifb0 type ifb
 ip link set ifb0 up
 tc qdisc add dev lo clsact
 tc filter add dev lo ingress protocol ip pref 1 flower ip_proto tcp action mirred egress redirect dev ifb0
-tc qdisc add dev ifb0 root netem limit 10000 delay "${delay}us" rate "${rate}mbit"
+export OMQ_BENCH_NETEM="limit 10000 delay ${delay}us rate ${rate}mbit"
+tc qdisc add dev ifb0 root netem $OMQ_BENCH_NETEM
 trap 'tc -s qdisc show dev ifb0' EXIT
 "$@"
 "#;
@@ -84,7 +88,11 @@ fn utility(peers: &Peers, args: &[&str], env: &[(&str, &str)], timeout: Duration
     process::capture(&command, env, None, timeout).expect("compression utility failed or timed out")
 }
 
-fn environment<'a>(dict: Option<&'a str>, level: Option<&'a str>) -> Vec<(&'static str, &'a str)> {
+fn environment<'a>(
+    dict: Option<&'a str>,
+    level: Option<&'a str>,
+    level_range: Option<&'a str>,
+) -> Vec<(&'static str, &'a str)> {
     let mut env = vec![
         ("OMQ_BENCH_PAYLOAD", "structured-varied-v1"),
         ("OMQ_BENCH_JSON_SEED", "4242"),
@@ -94,6 +102,9 @@ fn environment<'a>(dict: Option<&'a str>, level: Option<&'a str>) -> Vec<(&'stat
     }
     if let Some(level) = level {
         env.push(("OMQ_BENCH_ZSTD_LEVEL", level));
+    }
+    if let Some(range) = level_range {
+        env.push(("OMQ_BENCH_ZSTD_LEVEL_RANGE", range));
     }
     env
 }
@@ -112,6 +123,7 @@ pub(crate) fn run_cell(
     sender_env: &[(&str, &str)],
     receiver_env: &[(&str, &str)],
 ) -> Measurement {
+    reset_netem_queue();
     let binary = cell.blocking.to_str().expect("peer path");
     // Measurements are serial; both peers exit before this port is reused.
     let endpoint = format!("{}://127.0.0.1:17500", cell.transport);
@@ -145,13 +157,32 @@ pub(crate) fn run_cell(
     parse_measurement(&output, cell.size)
 }
 
-/// Parses `count elapsed size receiver_cpu sender_cpu` from the receiver.
+/// Drops packets of finished connections from the netem queue. At slow rates
+/// they would hold up the next connection and share its link.
+fn reset_netem_queue() {
+    let Ok(netem) = std::env::var("OMQ_BENCH_NETEM") else {
+        return;
+    };
+    for args in [
+        vec!["qdisc", "del", "dev", "ifb0", "root"],
+        ["qdisc", "add", "dev", "ifb0", "root", "netem"]
+            .into_iter()
+            .chain(netem.split_whitespace())
+            .collect(),
+    ] {
+        let status = Command::new("tc").args(args).status().expect("run tc");
+        assert!(status.success(), "reset netem queue");
+    }
+}
+
+/// Parses `count elapsed size receiver_cpu sender_cpu wire_bytes` from the
+/// receiver.
 fn parse_measurement(output: &str, size: u64) -> Measurement {
     let fields: Vec<f64> = output
         .split_whitespace()
         .map(|field| field.parse().expect("invalid compression measurement"))
         .collect();
-    assert_eq!(fields.len(), 5, "incomplete compression measurement");
+    assert_eq!(fields.len(), 6, "incomplete compression measurement");
     assert!(
         fields
             .iter()
@@ -159,19 +190,21 @@ fn parse_measurement(output: &str, size: u64) -> Measurement {
     );
     assert!(fields[0] > 0.0 && fields[1] > 0.0);
 
-    let reported_size: u64 = output
-        .split_whitespace()
-        .nth(2)
-        .expect("reported payload size")
-        .parse()
-        .expect("integer payload size");
-    assert_eq!(reported_size, size, "incorrect payload size");
+    let integer = |index: usize| -> u64 {
+        output
+            .split_whitespace()
+            .nth(index)
+            .and_then(|field| field.parse().ok())
+            .expect("integer measurement field")
+    };
+    assert_eq!(integer(2), size, "incorrect payload size");
 
     Measurement {
         count: fields[0],
         elapsed: fields[1],
         sender_cpu: fields[4],
         receiver_cpu: fields[3],
+        wire_bytes: integer(5),
     }
 }
 
@@ -189,15 +222,24 @@ impl Sweep<'_> {
     fn measure(&self, transport: &str, dictionary: Option<(&str, u64)>) {
         let config = self.config;
         let level = config.level.map(|value| value.to_string());
-        let env = environment(dictionary.map(|(path, _)| path), level.as_deref());
+        let level_range = config.level_range.map(|[min, max]| format!("{min},{max}"));
+        let send_rate = config.link.send_rate.map(|rate| rate.to_string());
+        let mut env = environment(
+            dictionary.map(|(path, _)| path),
+            level.as_deref(),
+            level_range.as_deref(),
+        );
+        if let Some(rate) = &send_rate {
+            env.push(("OMQ_BENCH_SEND_RATE", rate));
+        }
         let cache = jsonl::cache_dir().join(format!("results_pushpull_{}.jsonl", config.feature));
 
         for &size in self.sizes {
             let wire_bytes = self.wire_bytes(transport, size, &env);
-            // Slow links need enough large messages to avoid integer-count steps.
+            // Intervals span whole messages; slow links still average a few.
             let cell_duration = config.link.link_mbps.map_or(self.duration, |rate| {
                 self.duration
-                    .max((110.0 * wire_bytes as f64 * 8.0 / (f64::from(rate) * 1e6)).min(40.0))
+                    .max((10.0 * wire_bytes as f64 * 8.0 / (f64::from(rate) * 1e6)).min(20.0))
             });
             let cell = Cell {
                 blocking: &self.peers.blocking,
@@ -219,6 +261,7 @@ impl Sweep<'_> {
                     msgs_s: Some(msgs_s),
                     mbps: Some(mbps),
                     repeat: Some(repeat),
+                    received_wire_bytes: Some(sample.wire_bytes),
                     ..base.clone()
                 };
 
@@ -228,9 +271,10 @@ impl Sweep<'_> {
 
                 eprintln!(
                     "{transport}{} size={size} round={repeat}/{}: {msgs_s:.0} msg/s, \
-                     {mbps:.3} MB/s, sender CPU={:.1}%",
+                     {mbps:.3} MB/s, wire ratio {:.2}, sender CPU={:.1}%",
                     if dictionary.is_some() { "+dict" } else { "" },
                     self.rounds,
+                    sample.count * size as f64 / sample.wire_bytes.max(1) as f64,
                     sample.sender_cpu / sample.elapsed * 100.0,
                 );
             }
@@ -291,6 +335,7 @@ impl Sweep<'_> {
             mbps: None,
             dict_size: dictionary.map(|(_, capacity)| capacity),
             compression_level: config.level,
+            compression_level_range: config.level_range,
             netem,
             repeat: None,
             rounds: Some(self.rounds),
@@ -302,6 +347,8 @@ impl Sweep<'_> {
             payload_seed: Some(4242),
             payload_corpus_messages: Some((64 * 1024 * 1024 / cell.size).clamp(2, 4096)),
             arena_bytes: Some(arena_bytes(config.feature)),
+            send_rate: config.link.send_rate,
+            received_wire_bytes: None,
         }
     }
 
@@ -321,7 +368,7 @@ impl Sweep<'_> {
         utility(
             self.peers,
             &[action, &path, &capacity.to_string()],
-            &environment(None, None),
+            &environment(None, None, None),
             Duration::from_secs(30),
         );
 
@@ -367,7 +414,8 @@ pub(crate) fn run(config: &Config) {
         return;
     }
 
-    let sha256 = config.link.link_mbps.map(|_| peer_sha256(&blocking));
+    let sha256 = (config.link.link_mbps.is_some() || config.link.send_rate.is_some())
+        .then(|| peer_sha256(&blocking));
     let peers = Peers {
         blocking,
         utility: utility_path,

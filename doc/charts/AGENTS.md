@@ -10,8 +10,7 @@ cargo run --release -p omq-bench -- chart main      # main overview only
 cargo run --release -p omq-bench -- chart comparison # per-transport
 cargo run --release -p omq-bench -- chart pubsub    # PUB/SUB + CURVE
 cargo run --release -p omq-bench -- chart fanio     # fan-out/fan-in
-cargo run --release -p omq-bench -- chart lz4       # LZ4 compression
-cargo run --release -p omq-bench -- chart zstd      # Zstd compression
+cargo run --release -p omq-bench -- chart compression # LZ4 and Zstd
 ```
 
 A chart refresh without new benchmarks just re-renders existing data.
@@ -136,41 +135,43 @@ min to max, boxes span p25 to p75. Only impls with `peer_min`..`peer_max`
 data in the JSONL get whiskers (currently omq impls only). Data fields:
 `peer_min`, `peer_p25`, `peer_median`, `peer_p75`, `peer_max`.
 
-## LZ4 chart (1 file)
+## Compression charts (2 files)
 
-Data: `results_pushpull_lz4.jsonl`, patterns `pushpull_lz4` and
-`pushpull_lz4_dict`.
+Data: `results_pushpull_lz4.jsonl` and `results_pushpull_zstd.jsonl`,
+patterns `pushpull_{lz4,zstd}` and `pushpull_{lz4,zstd}_dict`.
 
-`pushpull/lz4_tcp.svg`: measured PUSH/PULL over private Linux netem links
-(1 Gbps, 100 Mbps, 10 Mbps shared between directions). Each row: single panel with
-dual Y-axes (dashed msg/s left, solid GB/s right) across all sizes.
-Series: tcp, lz4+tcp, lz4+tcp+dict. Sizes: 16B, 32B, 64B..256KiB (9 points).
-Thin dotted lines show measured sender CPU% at each datapoint, on a fixed 0–200%
-panel scale.
-Payload: `structured-varied-v1`, seed 4242. Cycle 4096 distinct messages,
-reduced to fit 64 MiB at large sizes: medium-entropy binary at 16/32 B,
-JSON with recurring keys and varying values at >=64 B. Dict: 2 KiB,
-trained on separate seed-1 samples. Require recorded corpus size and a
-16 KiB arena cap; exclude repeated-payload cohorts.
-Bench: `omq_bench run pushpull-lz4 --link-mbps RATE` (1IO). MTU 1500,
-1 ms/direction, offloads off; 0.5 s active warmup, at least 2 s receive interval,
-three retained repeats. Charts require complete measured cohorts and exclude
-old projections. Use `OMQ_BENCH_TASKSET=1` for sender CPUs 1-2, receiver 3-4.
+`pushpull/compression_tcp.svg`: full-speed PUSH/PULL over private Linux netem
+links (1 Gbps, 100 Mbps, 10 Mbps shared between directions). Each row: single
+panel with dual Y-axes (dashed msg/s left, solid GB/s right) across all sizes.
+Series: tcp (from the LZ4 runs), lz4+tcp (blue), zstd+tcp (red). No dictionary
+series: queued messages share arenas at full speed. Sizes: 16B, 32B,
+64B..256KiB (9 points). Thin dotted lines show measured sender CPU% at each
+datapoint, on a fixed 0–200% panel scale.
+Bench: `omq_bench run pushpull-{lz4,zstd} --link-mbps RATE` (1IO). MTU 1500,
+1 ms/direction, offloads off. Exclude rows with `send_rate`.
+
+`pushpull/compression_fixed_load.svg`: one row per paced send rate (1k, 10k,
+100k, 1M msg/s) over plain loopback. Left axis: wire ratio, payload bytes over
+TCP payload bytes received (`received_wire_bytes`); right axis: sender CPU%.
+Series: lz4+tcp, lz4+tcp + dict, zstd+tcp, zstd+tcp + dict. Hollow markers:
+received rate under 95% of the send rate.
+Bench: `omq_bench run pushpull-{lz4,zstd} --send-rate RATE --dict-sizes 2048`.
+Exclude rows with `netem`.
+
+Both: payload `structured-varied-v1`, seed 4242. Cycle 4096 distinct messages,
+reduced to fit 64 MiB at large sizes: medium-entropy binary at 16/32 B, JSON
+with recurring keys and varying values at >=64 B. Dict: 2 KiB, trained on
+separate seed-1 samples. Require recorded corpus size and arena cap (16 KiB
+LZ4, 32 KiB Zstd); exclude repeated-payload cohorts. Zstd uses the adaptive
+level (-7..4); exclude fixed-level rows. Warmup 0.5 s (1 s Zstd), at least 2 s
+receive interval starting and ending on message arrivals, three retained
+repeats. Charts require complete measured cohorts. Use `OMQ_BENCH_TASKSET=1`
+for sender CPUs 1-2, receiver 3-4.
 
 Historical caveat: before `d6f07c40a` (2026-07-31), the blocking sender ignored
 the JSON and dictionary settings. Its throughput used repeated `x` bytes,
 while wire-size probes used JSON. Do not compare those old throughput rows
 with current JSON/dictionary runs.
-
-## Zstd chart (1 file)
-
-Data: `results_pushpull_zstd.jsonl`, patterns `pushpull_zstd` and
-`pushpull_zstd_dict`.
-
-`pushpull/zstd_tcp.svg` uses the same nine sizes, varied binary/JSON corpus,
-measured links, and 2 KiB dictionary target as LZ4, at Zstd level 1 with
-32 KiB arenas. Require recorded corpus size and arena cap; exclude repeated-payload runs.
-Bench: `omq_bench run pushpull-zstd --level 1 --link-mbps RATE`.
 
 ## Reliable DART charts
 

@@ -1,37 +1,45 @@
 # Compression Transport Benchmarks
 
-Structured payloads over TCP between two processes. Linux netem
-emulates shared 1 Gbps, 100 Mbps, and 10 Mbps links with 1 ms delay in each
-direction, MTU 1500, and segmentation offloads disabled. Charts use the
-median of three measurements after active receiver warmup.
+Structured payloads over TCP between two processes. The saturation chart
+sends at full speed over Linux netem links: shared 1 Gbps, 100 Mbps, and
+10 Mbps with 1 ms delay in each direction, MTU 1500, and segmentation
+offloads disabled. The fixed-load chart paces the sender over loopback.
+Charts use the median of three measurements after active receiver warmup.
 Dictionary auto-training is off by default. When enabled, the default
 dictionary capacity is 2 KiB.
 
 Both codecs cycle a prebuilt corpus of distinct messages: medium-entropy binary
 records at 16/32 B, JSON events with recurring keys and varying values at
 64 B and above. Receivers verify the full sequence; dictionary training uses
-separate samples. Earlier repeated-payload runs are excluded from both charts.
+separate samples. Repeated-payload runs are excluded.
 
 Payload throughput = received msg/s x uncompressed size. Sender CPU is
 measured during the same receive interval; it includes application and IO.
+Wire ratio = payload bytes / TCP payload bytes received in that interval.
 
-- `lz4+tcp://` and `zstd+tcp://`: batch queued small messages into arenas
+- `lz4+tcp://` and `zstd+tcp://`: batch queued messages up to 8 KiB into arenas
   (16 KiB LZ4, 32 KiB Zstd), sharing compression history without a dictionary.
   Larger messages use per-part compression.
-- Zstd uses level 1.
+- Zstd adapts its level within -7..4 to the sender bottleneck.
 - Auto-dict: trains once, ships once per direction per connection, then
   lowers the small-message compression threshold.
 
-### LZ4
+### Saturated links
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/lz4_tcp.svg" alt="PUSH/PULL lz4+tcp over netem links" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/compression_tcp.svg" alt="PUSH/PULL lz4+tcp and zstd+tcp over netem links" width="850">
 </p>
 
-### Zstd
+### Fixed send rates
+
+At low rates, messages leave one at a time and compress alone. Small messages
+then compress well only with a dictionary, which lowers the compression
+threshold to 64 B and supplies shared history. When messages queue up, as at
+1M msg/s, they share arenas, and messages from 256 B compress well without a
+dictionary.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/zstd_tcp.svg" alt="PUSH/PULL zstd+tcp over netem links" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/compression_fixed_load.svg" alt="PUSH/PULL lz4+tcp and zstd+tcp wire ratio at fixed send rates" width="850">
 </p>
 
 Wire formats:

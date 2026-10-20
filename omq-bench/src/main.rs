@@ -38,8 +38,7 @@ fn main() {
             Some(ChartSub::Quic) => chart::quic::generate(),
             Some(ChartSub::Dart) => chart::dart::generate(),
             Some(ChartSub::Lossy) => chart::lossy::generate(),
-            Some(ChartSub::Lz4) => chart::lz4::generate(),
-            Some(ChartSub::Zstd) => chart::zstd::generate(),
+            Some(ChartSub::Compression) => chart::compression::generate(),
             Some(ChartSub::RateLimit) => chart::rate_limit::generate(),
             None => {
                 chart::main_tcp::generate();
@@ -50,8 +49,7 @@ fn main() {
                 chart::quic::generate();
                 chart::dart::generate();
                 chart::lossy::generate();
-                chart::lz4::generate();
-                chart::zstd::generate();
+                chart::compression::generate();
                 chart::rate_limit::generate();
             }
         },

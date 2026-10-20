@@ -686,6 +686,13 @@ fn bench_options(msg_size: usize) -> Options {
     if let Ok(val) = std::env::var("OMQ_BENCH_ZSTD_LEVEL") {
         o = o.compression_level(val.parse().expect("OMQ_BENCH_ZSTD_LEVEL"));
     }
+    if let Ok(val) = std::env::var("OMQ_BENCH_ZSTD_LEVEL_RANGE") {
+        let (min, max) = val
+            .split_once(',')
+            .and_then(|(min, max)| Some((min.parse().ok()?, max.parse().ok()?)))
+            .expect("OMQ_BENCH_ZSTD_LEVEL_RANGE");
+        o = o.compression_level_range(min, max);
+    }
     if let Ok(val) = std::env::var("OMQ_BENCH_ARENA_THRESHOLD") {
         o = o.arena_threshold(val.parse().expect("OMQ_BENCH_ARENA_THRESHOLD"));
     }

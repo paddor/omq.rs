@@ -1,13 +1,13 @@
 mod common;
 pub(crate) mod comparison;
+pub(crate) mod compression;
+mod compression_load;
 pub(crate) mod dart;
 pub(crate) mod fanio;
 pub(crate) mod lossy;
-pub(crate) mod lz4;
 pub(crate) mod main_tcp;
 pub(crate) mod pubsub;
 mod pushpull_compression;
 pub(crate) mod quic;
 pub(crate) mod rate_limit;
 pub(crate) mod shm;
-pub(crate) mod zstd;

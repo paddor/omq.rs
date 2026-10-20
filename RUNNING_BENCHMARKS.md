@@ -579,39 +579,36 @@ cargo run --release -p omq-bench -- run mechanism tokio --chart-sizes
 cargo run --release -p omq-bench -- chart mechanism
 ```
 
-### PUB/SUB LZ4 Compression Chart
-
-```sh
-cargo run --release -p omq-bench -- run pubsub-lz4 --chart
-```
-
-Or bench and chart separately:
-
-```sh
-cargo run --release -p omq-bench -- run pubsub-lz4
-cargo run --release -p omq-bench -- chart pubsub-lz4
-```
-
 ### Compression Chart
 
-The LZ4 and Zstd charts use measured Linux netem links. Each invocation
-creates a private user/network namespace; it needs `unshare`, `ip`, `tc`,
-and `ethtool`, with unprivileged user namespaces enabled.
+The saturation chart uses measured Linux netem links. Each `--link-mbps`
+invocation creates a private user/network namespace; it needs `unshare`, `ip`,
+`tc`, and `ethtool`, with unprivileged user namespaces enabled. The fixed-load
+chart paces the sender with `--send-rate` over plain loopback.
 
 ```sh
 for rate in 1000 100 10; do
   OMQ_BENCH_TASKSET=1 cargo run --release -p omq-bench -- run pushpull-lz4 --link-mbps "$rate"
-  OMQ_BENCH_TASKSET=1 cargo run --release -p omq-bench -- run pushpull-zstd --level 1 --link-mbps "$rate"
+  OMQ_BENCH_TASKSET=1 cargo run --release -p omq-bench -- run pushpull-zstd --link-mbps "$rate"
 done
-cargo run --release -p omq-bench -- chart lz4
-cargo run --release -p omq-bench -- chart zstd
+for rate in 1000 10000 100000 1000000; do
+  OMQ_BENCH_TASKSET=1 cargo run --release -p omq-bench -- run pushpull-lz4 --send-rate "$rate" --transports lz4+tcp --dict-sizes 2048
+  OMQ_BENCH_TASKSET=1 cargo run --release -p omq-bench -- run pushpull-zstd --send-rate "$rate" --dict-sizes 2048
+done
+cargo run --release -p omq-bench -- chart compression
 ```
 
-Rates include both directions' IP traffic; delay is 1 ms each way and MTU
-is 1500. Segmentation offloads are disabled. Three repeats use 0.5 s active
-warmup and at least a 2 s receive interval, extended for large messages on
-slow links. Payloads are checked; boundary-crossing
-batches are excluded. Sender CPU covers the measured interval only.
+The tcp baseline comes from the LZ4 runs. `--send-rate` sleeps between
+messages and skips ahead after falling more than 1 ms behind. The receiver
+records TCP payload bytes from `TCP_INFO` for the wire ratio; the chart marks
+cells below 95% of the send rate.
+
+Link rates include both directions' IP traffic; delay is 1 ms each way and MTU
+is 1500. Segmentation offloads are disabled. Each cell starts with an empty
+netem queue. Three repeats use 0.5 s active warmup (1 s for Zstd) and at least
+a 2 s receive interval, extended for large messages on slow links. Intervals
+start and end on message arrivals, and payloads are checked. Sender CPU covers
+the measured interval only.
 
 Both codecs use `structured-varied-v1`: 4096 distinct prebuilt messages, reduced
 to fit 64 MiB for large sizes. Sizes 16/32 B use binary records; sizes >=64 B
@@ -619,6 +616,9 @@ use JSON events with varying IDs, symbols, prices, quantities, and times.
 The receiver checks every payload in order across warmup and measurement.
 Dictionary training uses a separate seed. Cache rows record corpus size and
 arena cap; both charts exclude repeated-payload results.
+`pushpull-zstd` adapts the level within `--level-range` (default -7,4) and
+records `compression_level_range`. A fixed `--level` replaces adaptation; the
+charts exclude those rows.
 
 ### pyomq Bindings Charts
 

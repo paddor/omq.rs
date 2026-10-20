@@ -75,10 +75,10 @@ ZeroMQ Guide patterns to OMQ.
 </details>
 
 <details>
-<summary>LZ4 PUSH/PULL throughput</summary>
+<summary>Compressed PUSH/PULL throughput</summary>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/lz4_tcp.svg" alt="LZ4 PUSH/PULL throughput over TCP" width="950">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/compression_tcp.svg" alt="LZ4 and Zstd PUSH/PULL throughput over TCP" width="950">
 </p>
 
 [Full compression transport benchmarks (LZ4 and Zstd)](BENCHMARKS_COMPRESSION.md)

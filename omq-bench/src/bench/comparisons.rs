@@ -646,20 +646,8 @@ fn build_source(source: &str, peer_features: &[&str], needs_mt_runtime: bool) ->
             run_build(&["gcc", "-O2", "-o", out, src, "-lzmq", "-lpthread"]);
             PathBuf::from(out)
         }
-        "zmq.rs" => {
-            run_build_in_dir(
-                &["cargo", "build", "--release", "-q"],
-                "scripts/zmqrs_bench_peer",
-            );
-            PathBuf::from("scripts/zmqrs_bench_peer/target/release/omq_zmqrs_bench_peer")
-        }
-        "r0z-async" | "tmq" | "monocoque-tokio-ct" => build_external_comparison_peer(source),
-        "rzmq" => {
-            run_build_in_dir(
-                &["cargo", "build", "--release", "-q"],
-                "scripts/rzmq_bench_peer",
-            );
-            PathBuf::from("scripts/rzmq_bench_peer/target/release/omq_rzmq_bench_peer")
+        "r0z-async" | "tmq" | "monocoque-tokio-ct" | "zmq.rs" | "rzmq" => {
+            build_external_comparison_peer(source)
         }
         _ => panic!("unknown impl source: {source}"),
     }
@@ -682,6 +670,12 @@ fn build_external_comparison_peer(source: &str) -> PathBuf {
             "omq_monocoque_bench_peer",
             &[],
         ),
+        "zmq.rs" => {
+            process::build_external_peer("scripts/zmqrs_bench_peer", "omq_zmqrs_bench_peer", &[])
+        }
+        "rzmq" => {
+            process::build_external_peer("scripts/rzmq_bench_peer", "omq_rzmq_bench_peer", &[])
+        }
         _ => unreachable!("not an external comparison peer: {source}"),
     }
 }
@@ -693,16 +687,6 @@ fn run_build(cmd: &[&str]) {
         .status()
         .unwrap_or_else(|e| panic!("failed to run {cmd:?}: {e}"));
     assert!(status.success(), "build failed: {cmd:?}");
-}
-
-fn run_build_in_dir(cmd: &[&str], dir: &str) {
-    eprintln!("  building: {} (in {dir})", cmd.join(" "));
-    let status = std::process::Command::new(cmd[0])
-        .args(&cmd[1..])
-        .current_dir(dir)
-        .status()
-        .unwrap_or_else(|e| panic!("failed to run {cmd:?} in {dir}: {e}"));
-    assert!(status.success(), "build failed: {cmd:?} in {dir}");
 }
 
 // ---- Measurement integrity ------------------------------------------------

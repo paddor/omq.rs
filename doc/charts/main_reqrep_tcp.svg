@@ -87,21 +87,21 @@ p99 round-trip latency; whiskers: p50 to p99.9 (lower is better)
 4 KiB
 </text>
 <polyline fill="none" opacity="1" stroke="#9CA3AF" stroke-width="1" points="792,572 792,577 "/>
-<polyline fill="none" opacity="0.65" stroke="#10B981" stroke-width="1" points="96,452 96,404 "/>
-<polyline fill="none" opacity="0.65" stroke="#10B981" stroke-width="1" points="87,452 104,452 "/>
-<polyline fill="none" opacity="0.65" stroke="#10B981" stroke-width="1" points="87,404 104,404 "/>
-<polyline fill="none" opacity="0.65" stroke="#10B981" stroke-width="1" points="270,451 270,342 "/>
-<polyline fill="none" opacity="0.65" stroke="#10B981" stroke-width="1" points="261,451 279,451 "/>
-<polyline fill="none" opacity="0.65" stroke="#10B981" stroke-width="1" points="261,342 279,342 "/>
-<polyline fill="none" opacity="0.65" stroke="#10B981" stroke-width="1" points="444,447 444,410 "/>
-<polyline fill="none" opacity="0.65" stroke="#10B981" stroke-width="1" points="435,447 453,447 "/>
-<polyline fill="none" opacity="0.65" stroke="#10B981" stroke-width="1" points="435,410 453,410 "/>
-<polyline fill="none" opacity="0.65" stroke="#10B981" stroke-width="1" points="618,442 618,403 "/>
-<polyline fill="none" opacity="0.65" stroke="#10B981" stroke-width="1" points="609,442 627,442 "/>
-<polyline fill="none" opacity="0.65" stroke="#10B981" stroke-width="1" points="609,403 627,403 "/>
-<polyline fill="none" opacity="0.65" stroke="#10B981" stroke-width="1" points="792,443 792,289 "/>
-<polyline fill="none" opacity="0.65" stroke="#10B981" stroke-width="1" points="784,443 801,443 "/>
-<polyline fill="none" opacity="0.65" stroke="#10B981" stroke-width="1" points="784,289 801,289 "/>
+<polyline fill="none" opacity="0.65" stroke="#10B981" stroke-width="1" points="96,444 96,345 "/>
+<polyline fill="none" opacity="0.65" stroke="#10B981" stroke-width="1" points="87,444 104,444 "/>
+<polyline fill="none" opacity="0.65" stroke="#10B981" stroke-width="1" points="87,345 104,345 "/>
+<polyline fill="none" opacity="0.65" stroke="#10B981" stroke-width="1" points="270,453 270,308 "/>
+<polyline fill="none" opacity="0.65" stroke="#10B981" stroke-width="1" points="261,453 279,453 "/>
+<polyline fill="none" opacity="0.65" stroke="#10B981" stroke-width="1" points="261,308 279,308 "/>
+<polyline fill="none" opacity="0.65" stroke="#10B981" stroke-width="1" points="444,451 444,225 "/>
+<polyline fill="none" opacity="0.65" stroke="#10B981" stroke-width="1" points="435,451 453,451 "/>
+<polyline fill="none" opacity="0.65" stroke="#10B981" stroke-width="1" points="435,225 453,225 "/>
+<polyline fill="none" opacity="0.65" stroke="#10B981" stroke-width="1" points="618,446 618,336 "/>
+<polyline fill="none" opacity="0.65" stroke="#10B981" stroke-width="1" points="609,446 627,446 "/>
+<polyline fill="none" opacity="0.65" stroke="#10B981" stroke-width="1" points="609,336 627,336 "/>
+<polyline fill="none" opacity="0.65" stroke="#10B981" stroke-width="1" points="792,448 792,319 "/>
+<polyline fill="none" opacity="0.65" stroke="#10B981" stroke-width="1" points="784,448 801,448 "/>
+<polyline fill="none" opacity="0.65" stroke="#10B981" stroke-width="1" points="784,319 801,319 "/>
 <polyline fill="none" opacity="0.65" stroke="#60A5FA" stroke-width="1" points="96,495 96,470 "/>
 <polyline fill="none" opacity="0.65" stroke="#60A5FA" stroke-width="1" points="87,495 104,495 "/>
 <polyline fill="none" opacity="0.65" stroke="#60A5FA" stroke-width="1" points="87,470 104,470 "/>
@@ -222,12 +222,12 @@ p99 round-trip latency; whiskers: p50 to p99.9 (lower is better)
 <polyline fill="none" opacity="0.65" stroke="#FACC15" stroke-width="1" points="792,381 792,221 "/>
 <polyline fill="none" opacity="0.65" stroke="#FACC15" stroke-width="1" points="784,381 801,381 "/>
 <polyline fill="none" opacity="0.65" stroke="#FACC15" stroke-width="1" points="784,221 801,221 "/>
-<polyline fill="none" opacity="1" stroke="#10B981" stroke-width="2" points="96,431 270,427 444,427 618,420 792,413 "/>
-<circle cx="96" cy="431" r="2.5" opacity="1" fill="#10B981" stroke="none" stroke-width="1"/>
+<polyline fill="none" opacity="1" stroke="#10B981" stroke-width="2" points="96,415 270,427 444,425 618,422 792,409 "/>
+<circle cx="96" cy="415" r="2.5" opacity="1" fill="#10B981" stroke="none" stroke-width="1"/>
 <circle cx="270" cy="427" r="2.5" opacity="1" fill="#10B981" stroke="none" stroke-width="1"/>
-<circle cx="444" cy="427" r="2.5" opacity="1" fill="#10B981" stroke="none" stroke-width="1"/>
-<circle cx="618" cy="420" r="2.5" opacity="1" fill="#10B981" stroke="none" stroke-width="1"/>
-<circle cx="792" cy="413" r="2.5" opacity="1" fill="#10B981" stroke="none" stroke-width="1"/>
+<circle cx="444" cy="425" r="2.5" opacity="1" fill="#10B981" stroke="none" stroke-width="1"/>
+<circle cx="618" cy="422" r="2.5" opacity="1" fill="#10B981" stroke="none" stroke-width="1"/>
+<circle cx="792" cy="409" r="2.5" opacity="1" fill="#10B981" stroke="none" stroke-width="1"/>
 <polyline fill="none" opacity="1" stroke="#60A5FA" stroke-width="2" points="96,478 270,482 444,479 618,478 792,473 "/>
 <circle cx="96" cy="478" r="2.5" opacity="1" fill="#60A5FA" stroke="none" stroke-width="1"/>
 <circle cx="270" cy="482" r="2.5" opacity="1" fill="#60A5FA" stroke="none" stroke-width="1"/>
@@ -391,7 +391,7 @@ zmq.rs v0.6.0
 </text>
 <polyline fill="none" opacity="1" stroke="#10B981" stroke-width="2" points="78,754 92,754 "/>
 <text x="98" y="748" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
-rzmq-iouring v0.5.26
+rzmq-iouring v0.5.28
 </text>
 <text x="250" y="748" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
 6 MT
@@ -400,6 +400,6 @@ rzmq-iouring v0.5.26
 95%
 </text>
 <text x="450" y="748" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
-113%
+105%
 </text>
 </svg>

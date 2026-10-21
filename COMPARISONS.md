@@ -12,7 +12,7 @@ Comparisons with other messaging and RPC protocols live in
 - `libzmq v4.3.5`
 - `tmq v0.5.0`
 - `zeromq v0.6.0`
-- `rzmq v0.5.24` in its normal and io_uring modes
+- `rzmq v0.5.28` in its normal and io_uring modes
 - OMQ from this repository
 
 ## Methodology

@@ -28,6 +28,10 @@ pub(super) struct PendingWrite {
     pub(super) remaining: usize,
     pub(super) arena: Vec<u8>,
     pub(super) arena_offset: usize,
+    /// The transport accepted bytes since its last flush. TLS keeps
+    /// ciphertext after a partial socket write and sends it only on a later
+    /// write or flush.
+    pub(super) unflushed: bool,
 }
 
 /// Owned chunks at least this long reach the writer uncopied.
@@ -206,7 +210,8 @@ impl PendingWrite {
 
 /// Make bounded wire progress. This future is polled directly by the main
 /// `select!`; if control wins, all destructively drained chunks remain owned
-/// by `pending` and the write can safely resume later.
+/// by `pending` and the write can safely resume later. Once all output is
+/// written, flush whatever the transport still holds.
 pub(super) async fn write_driver_progress<W: DriverWrite>(
     writer: &mut W,
     eq: &mut FrameBuffer,
@@ -259,17 +264,41 @@ pub(super) async fn write_driver_progress<W: DriverWrite>(
             // select may cancel this future on its next pending write.
             heartbeat.advance(written);
             written
+        } else if pending.unflushed {
+            writer.flush().await?;
+            pending.unflushed = false;
+            return Ok(());
         } else {
             return Ok(());
         };
+        pending.unflushed = true;
 
-        let budget_remains = budget.account(written);
-        let work_remains =
-            !pending.is_empty() || !eq.is_empty() || connection.has_pending_transmit();
-        if !budget_remains || !work_remains || started.elapsed() >= OUTBOUND_BATCH_TIME {
+        if !budget.account(written) || started.elapsed() >= OUTBOUND_BATCH_TIME {
             return Ok(());
         }
     }
+}
+
+/// Write queued handshake output, then flush once everything is written:
+/// a TLS writer may still hold the end of the handshake.
+pub(super) async fn write_handshake_progress<W>(
+    writer: &mut W,
+    eq: &mut FrameBuffer,
+    drain_buf: &mut Vec<Bytes>,
+    connection: &mut Connection,
+    unflushed: &mut bool,
+) -> io::Result<usize>
+where
+    W: AsyncWrite + Unpin,
+{
+    if eq.is_empty() && !connection.has_pending_transmit() {
+        writer.flush().await?;
+        *unflushed = false;
+        return Ok(0);
+    }
+    *unflushed = true;
+    flush_frame_buffer(writer, eq, drain_buf).await?;
+    flush_once(writer, connection).await
 }
 
 /// Flush the `FrameBuffer` to the writer. Drains chunks into a

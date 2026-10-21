@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Connection drivers flush the transport once all output is written. WSS no
+  longer leaves the tail of a burst or its CLOSE frame buffered in TLS after
+  a partial socket write, which stalled delivery and linger.
+
 ## [0.30.0] - 2026-10-20
 
 ### Breaking

@@ -396,6 +396,7 @@ impl Session<'_> {
             pending_input_error: &mut self.pending_input_error,
             eq: &mut self.output.frames,
             drain_buf: &mut self.drain_buf,
+            unflushed: &mut self.output.pending.unflushed,
         }
     }
 

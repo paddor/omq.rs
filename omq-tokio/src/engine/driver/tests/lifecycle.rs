@@ -54,6 +54,38 @@ async fn message_roundtrip_over_inproc() {
 }
 
 #[tokio::test]
+async fn message_roundtrip_flushes_buffering_writers() {
+    let (server_stream, client_stream) = tokio::io::duplex(64 * 1024);
+    let (client, mut client_events, server, mut server_events) =
+        stream_pair(BufferedDuplex(server_stream), BufferedDuplex(client_stream));
+    let timeout = Duration::from_secs(2);
+
+    // The handshake completes only if both drivers flush its tail.
+    let c = tokio::time::timeout(timeout, client_events.recv()).await;
+    let s = tokio::time::timeout(timeout, server_events.recv()).await;
+    assert!(matches!(c, Ok(Some(Event::HandshakeSucceeded { .. }))));
+    assert!(matches!(s, Ok(Some(Event::HandshakeSucceeded { .. }))));
+
+    for handle in [&client, &server] {
+        handle
+            .inbox
+            .send(PeerDriverCommand::ActivateDataPlane)
+            .await
+            .unwrap();
+    }
+    client
+        .data_inbox
+        .send(PeerDriverData::SendMessage(Message::single("hello")))
+        .await
+        .unwrap();
+
+    match tokio::time::timeout(timeout, server_events.recv()).await {
+        Ok(Some(Event::Message(m))) => assert_eq!(m.part_bytes(0).unwrap(), &b"hello"[..]),
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn send_pipe_to_yring_preserves_large_payload_under_partial_io() {
     let (server_stream, client_stream) = tokio::io::duplex(16 * 1024);
     send_pipe_to_yring_large_payload_harness(server_stream, client_stream, 32).await;

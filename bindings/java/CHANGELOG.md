@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-10-22
+
+### Changed
+
+- Bundle `omq-tokio` 0.30.1 with SHM send pool fixes.
+
 ## [0.5.1] - 2026-10-20
 
 ### Changed

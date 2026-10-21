@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.27] - 2026-10-22
+
+### Fixed
+
+- WSS connections no longer stall with the end of a burst buffered in TLS.
+- Bundle `omq-tokio` 0.30.1.
+
 ## [0.5.26] - 2026-10-20
 
 ### Added

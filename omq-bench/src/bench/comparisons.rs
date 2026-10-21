@@ -23,7 +23,6 @@ const DEFAULT_ROUNDS: u32 = 1;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ImplClass {
     Classic,
-    IoUring,
     Curve,
 }
 
@@ -335,38 +334,6 @@ static IMPLS: &[ImplDef] = &[
         env: &[],
     },
     ImplDef {
-        name: "rzmq",
-        binary_from: None,
-        prefix: "r",
-        class: Some(ImplClass::Classic),
-        main: true,
-        transports: &[Tcp, Inproc, Ipc],
-        inproc_tput_subcmd: "inproc",
-        inproc_lat_subcmd: "inproc-latency",
-        inproc_pubsub_subcmd: "inproc-pubsub",
-        pub_needs_peer_count: false,
-        fanout_subcmd: "push",
-        fanio_needs_peer_count: false,
-        supports_pubsub: true,
-        env: &[],
-    },
-    ImplDef {
-        name: "rzmq-iouring",
-        binary_from: Some("rzmq"),
-        prefix: "R",
-        class: Some(ImplClass::IoUring),
-        main: true,
-        transports: &[Tcp, Inproc, Ipc],
-        inproc_tput_subcmd: "inproc",
-        inproc_lat_subcmd: "inproc-latency",
-        inproc_pubsub_subcmd: "inproc-pubsub",
-        pub_needs_peer_count: false,
-        fanout_subcmd: "push",
-        fanio_needs_peer_count: false,
-        supports_pubsub: true,
-        env: &[("RZMQ_IO_URING", "1")],
-    },
-    ImplDef {
         name: "libzmq-curve-1t",
         binary_from: Some("libzmq"),
         prefix: "lc1",
@@ -438,10 +405,7 @@ fn find_impl(name: &str) -> Option<&'static ImplDef> {
 
 impl ImplDef {
     fn uses_mt_runtime(&self) -> bool {
-        matches!(
-            self.name,
-            "omq-tokio-mt" | "zmq.rs" | "rzmq" | "rzmq-iouring"
-        )
+        matches!(self.name, "omq-tokio-mt" | "zmq.rs")
     }
 
     fn affinity(&self, cpus: &'static str) -> Option<&'static str> {
@@ -537,7 +501,7 @@ fn next_addr_id() -> u64 {
 }
 
 fn uses_filesystem_ipc(impl_name: &str) -> bool {
-    matches!(impl_name, "zmq.rs" | "rzmq" | "rzmq-iouring")
+    impl_name == "zmq.rs"
 }
 
 fn addr_for(
@@ -646,7 +610,7 @@ fn build_source(source: &str, peer_features: &[&str], needs_mt_runtime: bool) ->
             run_build(&["gcc", "-O2", "-o", out, src, "-lzmq", "-lpthread"]);
             PathBuf::from(out)
         }
-        "r0z-async" | "tmq" | "monocoque-tokio-ct" | "zmq.rs" | "rzmq" => {
+        "r0z-async" | "tmq" | "monocoque-tokio-ct" | "zmq.rs" => {
             build_external_comparison_peer(source)
         }
         _ => panic!("unknown impl source: {source}"),
@@ -672,9 +636,6 @@ fn build_external_comparison_peer(source: &str) -> PathBuf {
         ),
         "zmq.rs" => {
             process::build_external_peer("scripts/zmqrs_bench_peer", "omq_zmqrs_bench_peer", &[])
-        }
-        "rzmq" => {
-            process::build_external_peer("scripts/rzmq_bench_peer", "omq_rzmq_bench_peer", &[])
         }
         _ => unreachable!("not an external comparison peer: {source}"),
     }
@@ -1370,14 +1331,14 @@ fn run_fanin_once(cell: &Cell<'_>, peers: u64, duration: f64) -> CellResult {
     }
 }
 
-/// Waits for the fan-in PUSH side. The zmq.rs and rzmq push peers do not
-/// stop on their own, so they are killed and report no per-peer rates.
+/// Waits for the fan-in PUSH side. The zmq.rs push peer does not stop on
+/// its own, so it is killed and reports no per-peer rates.
 fn finish_fanin_push(
     push_proc: &mut process::ProcessGuard,
     def: &ImplDef,
     timeout: Duration,
 ) -> Option<String> {
-    let timed_push = !matches!(def.name, "zmq.rs" | "rzmq" | "rzmq-iouring");
+    let timed_push = def.name != "zmq.rs";
     if timed_push {
         push_proc.wait_with_output(timeout)
     } else {

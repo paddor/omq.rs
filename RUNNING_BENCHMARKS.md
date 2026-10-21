@@ -51,7 +51,6 @@ an `omq_aeron_peer` executable symlink.
 | `omq_r0z_bench_peer` | `scripts/r0z_bench_peer/` | r0z-async |
 | `omq_monocoque_bench_peer` | `scripts/monocoque_bench_peer/` | monocoque-tokio-ct |
 | `omq_zmqrs_bench_peer` | `scripts/zmqrs_bench_peer/` | zmq.rs |
-| `omq_rzmq_bench_peer` | `scripts/rzmq_bench_peer/` | rzmq, rzmq-iouring |
 
 The `tmq` and `r0z-async` baselines use current-thread Tokio runtimes and one
 libzmq IO thread. `tmq` uses its own libzmq bindings; `r0z-async` uses r0z.
@@ -533,7 +532,7 @@ cargo run --release -p omq-bench -- chart comparison
 
 Latency rounds retain the median-p99 run with its matching p50 and p99.9.
 
-Full refresh after omq/rzmq changes (all impls, all transports):
+Full refresh after omq changes (all impls, all transports):
 
 ```sh
 test -f .chart_hw

@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-10-22
+
+### Changed
+
+- Bundle `omq-tokio` 0.30.1 with SHM send pool fixes. WSS connections no
+  longer stall with the end of a burst buffered in TLS.
+
 ## [0.2.6] - 2026-10-20
 
 ### Changed

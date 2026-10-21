@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.1] - 2026-10-21
+
+### Changed
+
+- The automatic SHM send pool rebalances size classes under budget pressure.
+  Batch and multipart record classes take at most a quarter of the cap, and a
+  full class below the send HWM grows when the budget allows, so classes
+  created late are not starved of slots.
+- SHM connections return completed lease credit from the front of the window
+  instead of rescanning the whole window when credit runs out, which removes
+  periodic tail-latency spikes.
+
 ## [0.30.0] - 2026-10-20
 
 ### Breaking

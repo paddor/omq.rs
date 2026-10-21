@@ -418,6 +418,16 @@ impl Connection {
     }
 
     fn reclaim(&mut self, needed: usize) {
+        // Leases usually complete in publication order. Returning them from
+        // the front on every encode keeps credit flowing a few at a time,
+        // instead of one scan of the whole window per HWM of messages.
+        while let Some(lease) = self.active.front()
+            && lease_completed(&self.outgoing, &self.peer, lease.index, lease.generation)
+        {
+            let lease = self.active.pop_front().expect("completed active lease");
+            self.free.push_back(lease.index);
+            self.leased_messages -= lease.messages;
+        }
         if self.hwm - self.leased_messages >= needed {
             return;
         }

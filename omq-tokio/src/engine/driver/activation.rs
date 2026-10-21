@@ -6,7 +6,7 @@ use super::{
         COMMAND_DRAIN_BUDGET, cancelled_opt, handle_pre_activation_inbox_command, sleep_until_opt,
     },
     read::StreamRead,
-    write::{flush_frame_buffer, flush_once, mark_peer_dead},
+    write::{mark_peer_dead, write_handshake_progress},
 };
 use crate::engine::{
     actor_output::PeerOutput,
@@ -81,6 +81,7 @@ pub(super) struct Activation<'a, 'events> {
     pub(super) pending_input_error: &'a mut Option<Error>,
     pub(super) eq: &'a mut FrameBuffer,
     pub(super) drain_buf: &'a mut Vec<Bytes>,
+    pub(super) unflushed: &'a mut bool,
 }
 
 impl<'events> Activation<'_, 'events> {
@@ -109,7 +110,8 @@ impl<'events> Activation<'_, 'events> {
             }
             self.start_authentication(&mut authentication);
 
-            let want_write = self.connection.has_pending_transmit() || !self.eq.is_empty();
+            let want_write =
+                self.connection.has_pending_transmit() || !self.eq.is_empty() || *self.unflushed;
             let resume_input = self.pending_input_error.is_none()
                 && !self.connection.input_blocked_on_output()
                 && self.connection.has_pending_input();
@@ -150,10 +152,8 @@ impl<'events> Activation<'_, 'events> {
 
                 res = reader.read_buf(&mut self.read.buffer), if want_read => self.on_read(res),
 
-                res = async {
-                    flush_frame_buffer(writer, self.eq, self.drain_buf).await?;
-                    flush_once(writer, self.connection).await
-                }, if want_write => self.on_flushed(res),
+                res = write_handshake_progress(writer, self.eq, self.drain_buf, self.connection, self.unflushed),
+                    if want_write => self.on_flushed(res),
 
                 () = tokio::task::yield_now(), if !self.peer_events.has_pending() && (self.peer_events.needs_drain() || resume_input) => {
                     if !self.peer_events.needs_drain() {

@@ -214,10 +214,26 @@ impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for ChoppyReader<R> {
     }
 }
 
+/// Duplex whose writer holds accepted bytes until a later write or flush,
+/// as TLS does after a partial socket write.
+#[derive(Debug)]
+struct BufferedDuplex(DuplexStream);
+
+impl DriverStream for BufferedDuplex {
+    type Reader = tokio::io::ReadHalf<DuplexStream>;
+    type Writer = tokio::io::BufWriter<tokio::io::WriteHalf<DuplexStream>>;
+
+    fn split(self, _fast_write: bool) -> (Self::Reader, Self::Writer) {
+        let (reader, writer) = tokio::io::split(self.0);
+        (reader, tokio::io::BufWriter::new(writer))
+    }
+}
+
 impl DriverWrite for StalledShutdownWriter {}
 #[cfg(feature = "plain")]
 impl DriverWrite for GreetingOnlyWriter {}
 impl<W: AsyncWrite + Send + Unpin + 'static> DriverWrite for ChoppyWriter<W> {}
+impl DriverWrite for tokio::io::BufWriter<tokio::io::WriteHalf<DuplexStream>> {}
 
 #[derive(Debug)]
 struct ChoppyWriter<W> {
@@ -493,7 +509,19 @@ async fn inproc_pair(
     EventAdapter,
 ) {
     let (server_stream, client_stream) = tokio::io::duplex(64 * 1024);
+    stream_pair(server_stream, client_stream)
+}
 
+/// Spawn a PULL server and a PUSH client driver over the given streams.
+fn stream_pair<S: DriverStream + Send + 'static>(
+    server_stream: S,
+    client_stream: S,
+) -> (
+    PeerDriverHandle,
+    EventAdapter,
+    PeerDriverHandle,
+    EventAdapter,
+) {
     let server_connection = Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pull));
     let client_connection = Connection::new(
         ConnectionConfig::new(Role::Client, SocketType::Push).identity(Bytes::from_static(b"c")),

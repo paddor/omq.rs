@@ -49,7 +49,10 @@ impl QueuedOutput {
     }
 
     pub(super) fn has_pending_write(&self, connection: &Connection) -> bool {
-        !self.pending.is_empty() || !self.frames.is_empty() || connection.has_pending_transmit()
+        !self.pending.is_empty()
+            || !self.frames.is_empty()
+            || connection.has_pending_transmit()
+            || self.pending.unflushed
     }
 
     pub(super) fn idle(&self, connection: &Connection) -> bool {

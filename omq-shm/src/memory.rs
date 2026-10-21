@@ -22,6 +22,10 @@ impl Budget {
         self.used.load(Ordering::Acquire)
     }
 
+    pub(crate) fn maximum(&self) -> Option<usize> {
+        self.maximum
+    }
+
     pub(crate) fn remaining(&self) -> usize {
         self.maximum
             .unwrap_or(usize::MAX)

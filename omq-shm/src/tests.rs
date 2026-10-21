@@ -539,6 +539,17 @@ fn repeated_publication_keeps_completed_lease_bookkeeping_bounded() {
 }
 
 #[test]
+fn completed_leases_return_before_credit_runs_out() {
+    let body = Message::from_slice(&[7; 256]);
+    let (mut sender, mut receiver) = pair(64);
+    for _ in 0..1024 {
+        drop(delivered(&mut sender, &mut receiver, &body));
+        // Only the lease published by this encode may still be active.
+        assert!(sender.active.len() <= 1);
+    }
+}
+
+#[test]
 fn copied_body_framing_preserves_envelopes_and_uses_no_lease() {
     let (mut sender, _receiver) = pair(1);
     let mut frames = omq_proto::frame_buffer::FrameBuffer::new();

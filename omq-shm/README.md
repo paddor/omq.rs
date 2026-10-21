@@ -74,9 +74,11 @@ socket/context teardown. Futex credit waits leave control and shutdown reachable
 
 `Options::shm_max_memory(bytes)` caps automatic outbound region bytes across
 the socket, including headers and alignment padding. Default: 64 MiB.
-Idle classes are reclaimed; retained owners/leases stay charged. Unavailable
-storage uses shared carrier delivery. `Some(0)` disables automatic allocation;
-`None` removes the cap.
+Body classes start with their send-HWM window when it fits; batch and multipart
+record classes take at most a quarter of the cap. Full classes double while the
+cap allows, and idle classes are reclaimed. Retained owners/leases stay charged.
+Unavailable storage uses shared carrier delivery. `Some(0)` disables automatic
+allocation; `None` removes the cap.
 
 Explicit producer pools, received mappings, completion/carrier tables, and heap queues
 are excluded. Message-count HWM and `max_message_size` are separate limits.

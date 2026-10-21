@@ -574,13 +574,13 @@ fn draw_mom_legend_table(
 fn mom_client_crate_label(key: &str) -> &'static str {
     match key {
         key if key.starts_with("omq-") => "omq-tokio",
-        "grpc-rust" => "tonic v0.12.3",
-        "rabbitmq" => "lapin v2.5.5",
-        "aeron-udp-2proc" => "Aeron v1.51.0",
-        "nats" => "async-nats v0.42.0",
-        "redis-streams" => "redis v0.32.7",
+        "grpc-rust" => "tonic v0.14.6",
+        "rabbitmq" => "lapin v4.12.3",
+        "aeron-udp-2proc" => "Aeron v1.53.3",
+        "nats" => "async-nats v0.50.0",
+        "redis-streams" => "redis v1.7.1",
         "zenoh-tcp-2proc" => "zenoh v1.10.1",
-        "iroh-quic-2proc" => "iroh v1.3.0",
+        "iroh-quic-2proc" => "iroh v1.4.0",
         "iceoryx2-shm-2proc" => "iceoryx2 v0.10.0",
         _ => "",
     }
@@ -1358,26 +1358,11 @@ pub(crate) fn draw_latency_brokered_with_versions(
     cpu: &BTreeMap<String, CpuData>,
     local: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let present: Vec<&Impl> = spec
-        .impls
-        .iter()
-        .filter(|imp| {
-            spec.sizes.iter().any(|size| {
-                lat.get(size)
-                    .is_some_and(|values| values.contains_key(imp.key))
-            })
-        })
-        .collect();
-    let (spinning, no_spin): (Vec<&Impl>, Vec<&Impl>) = present
-        .iter()
-        .copied()
-        .partition(|imp| is_spinning_mom(imp));
-    // Spin variants share their base series' legend row.
-    let legend: Vec<&Impl> = present
-        .iter()
-        .copied()
-        .filter(|imp| !imp.key.ends_with("-spin50"))
-        .collect();
+    let MomLatencySeries {
+        no_spin,
+        spinning,
+        legend,
+    } = mom_latency_series(spec, lat);
 
     let (top_h, bottom_h) = if local { (300, 300) } else { (540, 340) };
     let chart_h = top_h + bottom_h;
@@ -1389,14 +1374,7 @@ pub(crate) fn draw_latency_brokered_with_versions(
     let (chart_area, table_area) = root.split_vertically(chart_h);
     let (top, bottom) = chart_area.split_vertically(top_h);
 
-    let (top_caption, bottom_caption) = if local {
-        ("No receive spin", "50 \u{03bc}s OMQ spin; iceoryx2 polling")
-    } else {
-        (
-            "No explicit receive spin",
-            "50 \u{03bc}s OMQ spin; Aeron busy polling",
-        )
-    };
+    let (top_caption, bottom_caption) = mom_latency_captions(local);
     let top_panel = Panel {
         sizes: spec.sizes,
         present: &no_spin,
@@ -1429,6 +1407,53 @@ pub(crate) fn draw_latency_brokered_with_versions(
         spec.title,
         hardware.as_deref(),
     )
+}
+
+/// MOM latency series with data, split by panel. Spin variants share their
+/// base series' legend row.
+struct MomLatencySeries<'a> {
+    no_spin: Vec<&'a Impl>,
+    spinning: Vec<&'a Impl>,
+    legend: Vec<&'a Impl>,
+}
+
+fn mom_latency_series<'a>(spec: &ChartSpec<'a>, lat: &LatencyMap) -> MomLatencySeries<'a> {
+    let present: Vec<&Impl> = spec
+        .impls
+        .iter()
+        .filter(|imp| {
+            spec.sizes.iter().any(|size| {
+                lat.get(size)
+                    .is_some_and(|values| values.contains_key(imp.key))
+            })
+        })
+        .collect();
+    let (spinning, no_spin) = present
+        .iter()
+        .copied()
+        .partition(|imp| is_spinning_mom(imp));
+    let legend = present
+        .iter()
+        .copied()
+        .filter(|imp| !imp.key.ends_with("-spin50"))
+        .collect();
+    MomLatencySeries {
+        no_spin,
+        spinning,
+        legend,
+    }
+}
+
+/// Top and bottom panel captions of the network or local MOM latency chart.
+fn mom_latency_captions(local: bool) -> (&'static str, &'static str) {
+    if local {
+        ("No receive spin", "50 \u{03bc}s OMQ spin; iceoryx2 polling")
+    } else {
+        (
+            "No explicit receive spin",
+            "50 \u{03bc}s OMQ spin; Aeron busy polling",
+        )
+    }
 }
 
 /// Series measured with receive spinning or busy polling.

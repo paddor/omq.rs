@@ -529,6 +529,30 @@ The optional `omq_mom_bench` executable provides broker adapters. Run it with
 `cargo run --release -p omq-bench --features mom-bench --bin omq_mom_bench -- --help`.
 Rival adapters: [scripts/rivals](scripts/rivals/README.md).
 
+Brokers run one at a time in Podman with host networking, pinned to CPUs 3-4
+through `taskset`; rootless Podman has no cpuset controller.
+`OMQ_MOM_BENCH_PIN=1` places brokered clients on CPUs 1 and 2, and the gRPC
+client and server on CPUs 1-2 and 3-4. NATS needs `max_payload: 8MB` for the
+largest sizes.
+
+```sh
+printf 'listen: 127.0.0.1:4222\nmax_payload: 8MB\n' > /mnt/bench/tmp/nats.conf
+taskset -c 3-4 podman run -d --name omq-bench-nats --network host \
+  -v /mnt/bench/tmp/nats.conf:/etc/nats/nats.conf:ro \
+  docker.io/library/nats:2-alpine -c /etc/nats/nats.conf
+taskset -c 3-4 podman run -d --name omq-bench-redis --network host \
+  docker.io/library/redis:8-alpine redis-server --bind 127.0.0.1 --save '' --appendonly no
+taskset -c 3-4 podman run -d --name omq-bench-rabbit --network host \
+  docker.io/library/rabbitmq:4-alpine
+OMQ_MOM_BENCH_PIN=1 omq_mom_bench --impl nats --mode throughput --run-id nats-throughput
+OMQ_MOM_BENCH_PIN=1 omq_mom_bench --impl nats --mode latency \
+  --latency-iterations 10000 --latency-warmup 2000 --run-id nats-latency-r1
+```
+
+Broker and rival RTT points come from three latency runs; each size keeps the
+run with the middle p99. Derived rows record `source_run_id` and
+`cohort_run_ids`.
+
 - `scripts/rivals/run_fanout.rb` writes `~/.cache/omq/mom-fanout.jsonl`.
 - Each of three rounds (at least 3 seconds of publishing) verifies delivery to all 1/4/32
   subscribers. The score includes the slowest subscriber's drain.
@@ -536,7 +560,7 @@ Rival adapters: [scripts/rivals](scripts/rivals/README.md).
   series fills producer slots without allocation fallback.
 - Zenoh uses one session per subscriber and blocking FIFO receive over TCP or
   Unix sockets. RabbitMQ uses a fanout exchange with one queue per subscriber;
-  start a local broker first.
+  start the RabbitMQ container above without `taskset` first.
 - Publisher CPUs: 1-2. Subscriber CPUs: 3-4. Optional sizes: 128 KiB, 1 MiB,
   8 MiB. Incomplete cohorts fail chart generation.
 

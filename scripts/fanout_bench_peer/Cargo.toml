@@ -15,7 +15,7 @@ path = "src/main.rs"
 omq-tokio = { path = "../../omq-tokio", features = ["dart", "quic"] }
 iceoryx2 = "=0.10.0"
 zenoh = { version = "=1.10.1", default-features = false, features = ["transport_tcp", "transport_unixsock-stream"] }
-lapin = "2"
+lapin = "4"
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 futures-util = "0.3"
 zmq = "0.10"

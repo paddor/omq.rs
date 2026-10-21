@@ -118,6 +118,21 @@ fn spin_argument(budget: u64, continuous: bool) -> String {
     }
 }
 
+/// Receiver bind endpoint. Network transports bind port 0 and report the
+/// endpoint for the sender; IPC binds a fresh socket path, returned for
+/// cleanup.
+fn receive_endpoint(transport: &str) -> (String, Option<std::path::PathBuf>) {
+    if transport != "ipc" {
+        return (format!("{transport}://127.0.0.1:0"), None);
+    }
+    let path = std::env::temp_dir().join(format!(
+        "omq-mom-{}-{}.sock",
+        std::process::id(),
+        timestamp()
+    ));
+    (format!("ipc://{}", path.display()), Some(path))
+}
+
 fn measure(args: &DartArgs, transport: &str, kind: &str, size: u64) -> Value {
     let timeout = Duration::from_secs_f64(
         40.0_f64.max(args.warmup_seconds + args.duration + args.drain_seconds + 10.0),
@@ -129,17 +144,7 @@ fn measure(args: &DartArgs, transport: &str, kind: &str, size: u64) -> Value {
         ("server", "client")
     };
 
-    // The receiver binds port 0 and reports the endpoint for the sender.
-    let ipc_path = std::env::temp_dir().join(format!(
-        "omq-mom-{}-{}.sock",
-        std::process::id(),
-        timestamp()
-    ));
-    let endpoint = if transport == "ipc" {
-        format!("ipc://{}", ipc_path.display())
-    } else {
-        format!("{transport}://127.0.0.1:0")
-    };
+    let (endpoint, ipc_path) = receive_endpoint(transport);
     peers.spawn(
         Side::Receive,
         &mut command(args, Side::Receive, receive_role, &endpoint, size).0,
@@ -168,8 +173,8 @@ fn measure(args: &DartArgs, transport: &str, kind: &str, size: u64) -> Value {
     }
     let receiver = peers.wait_json(Side::Receive, "result");
     peers.finish();
-    if transport == "ipc" {
-        let _ = std::fs::remove_file(ipc_path);
+    if let Some(path) = ipc_path {
+        let _ = std::fs::remove_file(path);
     }
 
     let mut row = json!({"timestamp_ns":timestamp(), "kind":kind, "transport":transport,

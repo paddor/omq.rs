@@ -41,7 +41,7 @@ const NETWORK: &[Impl] = &[
     Impl {
         key: "rabbitmq",
         label: "AMQP 0-9-1",
-        threads: "RabbitMQ",
+        threads: "RabbitMQ 4.4.0",
         color: common::C_RABBITMQ,
     },
     Impl {
@@ -53,13 +53,13 @@ const NETWORK: &[Impl] = &[
     Impl {
         key: "nats",
         label: "NATS",
-        threads: "nats-server",
+        threads: "nats-server 2.15.1",
         color: common::C_NATS,
     },
     Impl {
         key: "redis-streams",
         label: "Redis Streams",
-        threads: "Redis",
+        threads: "Redis 8.10.2",
         color: common::C_REDIS,
     },
     Impl {
@@ -441,9 +441,17 @@ fn require_points<T>(
 }
 
 pub(crate) fn generate() {
+    // Fan-out cohorts are checked first, so missing data fails before any
+    // chart is written.
     let fanout = super::moms_fanout::prepare();
     let directory = common::out_dir().join("moms");
     std::fs::create_dir_all(&directory).expect("create MOM chart directory");
+    draw_throughput_charts(&directory);
+    draw_latency_charts(&directory);
+    super::moms_fanout::draw(&fanout);
+}
+
+fn draw_throughput_charts(directory: &std::path::Path) {
     for (name, sizes, base) in [
         ("network", THROUGHPUT_SIZES, NETWORK),
         ("local", LOCAL_SIZES, LOCAL),
@@ -478,6 +486,9 @@ pub(crate) fn generate() {
         .expect("draw MOM throughput chart");
         eprintln!("Written: {}", path.display());
     }
+}
+
+fn draw_latency_charts(directory: &std::path::Path) {
     for (name, sizes, base) in [
         ("network", LATENCY_SIZES, NETWORK),
         ("local", LOCAL_LATENCY_SIZES, LOCAL),
@@ -501,7 +512,6 @@ pub(crate) fn generate() {
             .expect("draw MOM latency chart");
         eprintln!("Written: {}", path.display());
     }
-    super::moms_fanout::draw(&fanout);
 }
 
 #[cfg(test)]

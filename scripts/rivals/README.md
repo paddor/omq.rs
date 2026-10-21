@@ -53,9 +53,9 @@ cargo fmt --manifest-path scripts/iceoryx2_bench_peer/Cargo.toml
 cargo clippy --manifest-path scripts/iceoryx2_bench_peer/Cargo.toml --all-targets -- -D warnings
 cargo build --manifest-path scripts/iceoryx2_bench_peer/Cargo.toml --release
 
-export AERON_JAR=/mnt/bench/tmp/aeron-all-1.51.0.jar
+export AERON_JAR=/mnt/bench/tmp/aeron-all-1.53.3.jar
 export AERON_CLASSES=/mnt/bench/tmp/aeron-classes
-curl -fsSL https://repo.maven.apache.org/maven2/io/aeron/aeron-all/1.51.0/aeron-all-1.51.0.jar -o "$AERON_JAR"
+curl -fsSL https://repo.maven.apache.org/maven2/io/aeron/aeron-all/1.53.3/aeron-all-1.53.3.jar -o "$AERON_JAR"
 mkdir -p "$AERON_CLASSES"
 ln -sf "$(command -v java)" "$CARGO_TARGET_DIR/release/omq_aeron_peer"
 javac -cp "$AERON_JAR" -d "$AERON_CLASSES" scripts/rivals/AeronUdpPeer.java

@@ -1,39 +1,58 @@
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 use futures_util::StreamExt;
+use lapin::options::{BasicConsumeOptions, BasicPublishOptions, QueueDeclareOptions};
+use lapin::types::{FieldTable, ShortString};
+use lapin::{BasicProperties, Channel, Connection, ConnectionProperties, Consumer, Queue};
 
 use super::{
-    Args, BenchResult, CpuWindow, LatencyMeter, LatencyResult, ProducerFiles, clean_paths,
-    measure_receive, run_paths, spawn_producer, spawn_responder, stop_requested, wait_for_marker,
-    write_marker,
+    Args, BenchResult, CpuWindow, LatencyMeter, LatencyResult, ProducerFiles, ProducerRun,
+    ResponderRun, clean_paths, measure_receive, run_paths, spawn_producer, spawn_responder,
+    stop_requested, wait_for_marker, write_marker,
 };
 
 fn queue_name(token: &str, size: usize) -> String {
     format!("omq-bench-rust-{token}-{size}")
 }
 
-pub(crate) async fn producer(
-    url: &str,
-    token: &str,
-    size: usize,
-    warmup: Duration,
-    stop_file: &Path,
-) -> Result<f64> {
-    use lapin::{BasicProperties, Connection, ConnectionProperties, options::BasicPublishOptions};
+/// Declares a transient queue that the broker drops with this connection.
+/// An empty name lets the broker pick one.
+async fn declare_queue(channel: &Channel, name: &str) -> Result<Queue> {
+    let options = QueueDeclareOptions {
+        durable: false,
+        exclusive: true,
+        auto_delete: true,
+        ..QueueDeclareOptions::default()
+    };
+    Ok(channel
+        .queue_declare(name.into(), options, FieldTable::default())
+        .await?)
+}
 
-    let queue = queue_name(token, size);
-    let payload = vec![b'x'; size];
+/// Starts a consumer without acknowledgements.
+async fn consume(channel: &Channel, queue: &str, tag: &str) -> Result<Consumer> {
+    let options = BasicConsumeOptions {
+        no_ack: true,
+        ..BasicConsumeOptions::default()
+    };
+    Ok(channel
+        .basic_consume(queue.into(), tag.into(), options, FieldTable::default())
+        .await?)
+}
+
+pub(crate) async fn producer(url: &str, run: &ProducerRun<'_>) -> Result<f64> {
+    let queue = ShortString::from(queue_name(run.token, run.size));
+    let payload = vec![b'x'; run.size];
     let conn = Connection::connect(url, ConnectionProperties::default()).await?;
     let ch = conn.create_channel().await?;
     let mut sent = 0_u64;
-    let mut cpu = CpuWindow::new(warmup);
+    let mut cpu = CpuWindow::new(run.warmup);
     loop {
         let confirm = ch
             .basic_publish(
-                "",
-                &queue,
+                ShortString::default(),
+                queue.clone(),
                 BasicPublishOptions::default(),
                 &payload,
                 BasicProperties::default().with_delivery_mode(1),
@@ -42,165 +61,85 @@ pub(crate) async fn producer(
         confirm.await?;
         sent += 1;
         cpu.sample_start()?;
-        if stop_requested(stop_file, sent, 1) {
+        if stop_requested(run.stop_file, sent, 1) {
             break;
         }
     }
-    conn.close(0, "done").await?;
+    conn.close(0, "done".into()).await?;
     cpu.finish()
 }
 
-pub(crate) async fn bench(args: &Args, token: &str, size: usize) -> Result<BenchResult> {
-    use lapin::{
-        Connection, ConnectionProperties,
-        options::{BasicConsumeOptions, QueueDeclareOptions, QueueDeleteOptions},
-        types::FieldTable,
-    };
-
-    let queue = queue_name(token, size);
-    let conn = Connection::connect(&args.rabbitmq_url, ConnectionProperties::default()).await?;
-    let consume_ch = conn.create_channel().await?;
-    consume_ch
-        .queue_declare(
-            &queue,
-            QueueDeclareOptions {
-                durable: false,
-                exclusive: true,
-                auto_delete: true,
-                ..QueueDeclareOptions::default()
-            },
-            FieldTable::default(),
-        )
-        .await?;
-    let mut consumer = consume_ch
-        .basic_consume(
-            &queue,
-            "omq-bench-rust",
-            BasicConsumeOptions {
-                no_ack: true,
-                ..BasicConsumeOptions::default()
-            },
-            FieldTable::default(),
-        )
-        .await?;
-
-    let paths = run_paths(token, size);
-    clean_paths(&paths)?;
-    let mut producer = spawn_producer(
-        args,
-        "rabbitmq",
-        size,
-        token,
-        ProducerFiles {
-            start: &paths.0,
-            stop: &paths.1,
-            result: &paths.2,
-            grpc_port: None,
-        },
-    )?;
-    write_marker(&paths.0)?;
-
-    let warmup = Duration::from_secs_f64(args.warmup);
-    let warmup_deadline = Instant::now() + warmup;
-    while Instant::now() < warmup_deadline {
-        let remaining = warmup_deadline.saturating_duration_since(Instant::now());
+/// Receives until `deadline`, checking payload sizes. Returns the count.
+async fn receive_until(consumer: &mut Consumer, deadline: Instant, size: usize) -> Result<u64> {
+    let mut count = 0_u64;
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
         match tokio::time::timeout(remaining, consumer.next()).await {
             Ok(Some(delivery)) => {
                 let delivery = delivery?;
                 if delivery.data.len() != size {
                     bail!("bad RabbitMQ payload size");
                 }
+                count += 1;
             }
             Ok(None) | Err(_) => break,
         }
     }
+    Ok(count)
+}
+
+pub(crate) async fn bench(args: &Args, token: &str, size: usize) -> Result<BenchResult> {
+    use lapin::options::QueueDeleteOptions;
+
+    let queue = queue_name(token, size);
+    let conn = Connection::connect(&args.rabbitmq_url, ConnectionProperties::default()).await?;
+    let consume_ch = conn.create_channel().await?;
+    declare_queue(&consume_ch, &queue).await?;
+    let mut consumer = consume(&consume_ch, &queue, "omq-bench-rust").await?;
+
+    let paths = run_paths(token, size);
+    clean_paths(&paths)?;
+    let files = ProducerFiles::new(&paths);
+    let mut producer = spawn_producer(args, "rabbitmq", size, token, files)?;
+    write_marker(files.start)?;
+
+    // Warmup deliveries are checked, not counted.
+    let warmup_deadline = Instant::now() + Duration::from_secs_f64(args.warmup);
+    receive_until(&mut consumer, warmup_deadline, size).await?;
 
     let result = measure_receive(
         args,
-        &paths.1,
-        &paths.2,
+        files,
         &mut producer,
         "rabbitmq",
-        |deadline| async move {
-            let mut count = 0_u64;
-            while Instant::now() < deadline {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                match tokio::time::timeout(remaining, consumer.next()).await {
-                    Ok(Some(delivery)) => {
-                        let delivery = delivery?;
-                        if delivery.data.len() != size {
-                            bail!("bad RabbitMQ payload size");
-                        }
-                        count += 1;
-                    }
-                    Ok(None) | Err(_) => break,
-                }
-            }
-            Ok(count)
-        },
+        |deadline| async move { receive_until(&mut consumer, deadline, size).await },
     )
     .await?;
     let _ = consume_ch
-        .queue_delete(&queue, QueueDeleteOptions::default())
+        .queue_delete(queue.into(), QueueDeleteOptions::default())
         .await;
-    conn.close(0, "done").await?;
+    conn.close(0, "done".into()).await?;
     Ok(result)
 }
 
-pub(crate) async fn responder(
-    url: &str,
-    token: &str,
-    size: usize,
-    ready_file: &Path,
-    stop_file: &Path,
-    iterations: u64,
+/// Echoes `run.iterations` requests to their reply-to queues.
+async fn echo_requests(
+    channel: &Channel,
+    consumer: &mut Consumer,
+    run: &ResponderRun<'_>,
 ) -> Result<()> {
-    use lapin::{
-        BasicProperties, Connection, ConnectionProperties,
-        options::{BasicConsumeOptions, BasicPublishOptions, QueueDeclareOptions},
-        types::FieldTable,
-    };
-
-    let queue = queue_name(token, size);
-    let conn = Connection::connect(url, ConnectionProperties::default()).await?;
-    let channel = conn.create_channel().await?;
-    channel
-        .queue_declare(
-            &queue,
-            QueueDeclareOptions {
-                durable: false,
-                exclusive: true,
-                auto_delete: true,
-                ..QueueDeclareOptions::default()
-            },
-            FieldTable::default(),
-        )
-        .await?;
-    let mut consumer = channel
-        .basic_consume(
-            &queue,
-            "omq-bench-rpc-responder",
-            BasicConsumeOptions {
-                no_ack: true,
-                ..BasicConsumeOptions::default()
-            },
-            FieldTable::default(),
-        )
-        .await?;
-    write_marker(ready_file)?;
-
-    for _ in 0..iterations {
+    for _ in 0..run.iterations {
         let delivery = consumer
             .next()
             .await
             .ok_or_else(|| anyhow::anyhow!("RabbitMQ request consumer closed"))??;
-        if delivery.data.len() != size {
+        if delivery.data.len() != run.size {
             bail!("bad RabbitMQ request payload size");
         }
         let reply_to = delivery
             .properties
             .reply_to()
-            .as_ref()
+            .clone()
             .ok_or_else(|| anyhow::anyhow!("RabbitMQ request missing reply-to"))?;
         let properties = delivery
             .properties
@@ -211,142 +150,109 @@ pub(crate) async fn responder(
             });
         let _confirm = channel
             .basic_publish(
-                "",
-                reply_to.as_str(),
+                ShortString::default(),
+                reply_to,
                 BasicPublishOptions::default(),
                 &delivery.data,
                 properties,
             )
             .await?;
     }
-    while !stop_file.exists() {
+    Ok(())
+}
+
+pub(crate) async fn responder(url: &str, run: &ResponderRun<'_>) -> Result<()> {
+    let queue = queue_name(run.token, run.size);
+    let conn = Connection::connect(url, ConnectionProperties::default()).await?;
+    let channel = conn.create_channel().await?;
+    declare_queue(&channel, &queue).await?;
+    let mut consumer = consume(&channel, &queue, "omq-bench-rpc-responder").await?;
+    write_marker(run.ready_file)?;
+
+    echo_requests(&channel, &mut consumer, run).await?;
+    while !run.stop_file.exists() {
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
-    conn.close(0, "done").await?;
+    conn.close(0, "done".into()).await?;
     Ok(())
 }
 
 pub(crate) async fn latency(args: &Args, token: &str, size: usize) -> Result<LatencyResult> {
-    use lapin::{
-        Connection, ConnectionProperties,
-        options::{BasicConsumeOptions, QueueDeclareOptions},
-        types::FieldTable,
-    };
-
     let paths = run_paths(token, size);
     clean_paths(&paths)?;
-    let queue = queue_name(token, size);
     let conn = Connection::connect(&args.rabbitmq_url, ConnectionProperties::default()).await?;
     let channel = conn.create_channel().await?;
-    let reply_queue = channel
-        .queue_declare(
-            "",
-            QueueDeclareOptions {
-                durable: false,
-                exclusive: true,
-                auto_delete: true,
-                ..QueueDeclareOptions::default()
-            },
-            FieldTable::default(),
-        )
-        .await?
-        .name()
-        .to_string();
-    let mut replies = channel
-        .basic_consume(
-            &reply_queue,
-            "omq-bench-rpc-requester",
-            BasicConsumeOptions {
-                no_ack: true,
-                ..BasicConsumeOptions::default()
-            },
-            FieldTable::default(),
-        )
-        .await?;
+    let reply_queue = declare_queue(&channel, "").await?.name().clone();
+    let replies = consume(&channel, reply_queue.as_str(), "omq-bench-rpc-requester").await?;
+    let mut rpc = Rpc {
+        channel: &channel,
+        replies,
+        queue: queue_name(token, size).into(),
+        reply_queue,
+        correlation_id: token,
+    };
 
-    let responder = spawn_responder(
-        args,
-        "rabbitmq",
-        size,
-        token,
-        ProducerFiles {
-            start: &paths.0,
-            stop: &paths.1,
-            result: &paths.2,
-            grpc_port: None,
-        },
-    )?;
+    let files = ProducerFiles::new(&paths);
+    let responder = spawn_responder(args, "rabbitmq", size, token, files)?;
     let mut meter = LatencyMeter::new("rabbitmq", args.latency_iterations, responder)?;
     wait_for_marker(&paths.0, meter.responder_mut()).await?;
     let payload = vec![b'x'; size];
 
     for _ in 0..args.latency_warmup {
-        rabbit_roundtrip(
-            &channel,
-            &mut replies,
-            &queue,
-            &reply_queue,
-            token,
-            &payload,
-        )
-        .await?;
+        rpc.roundtrip(&payload).await?;
     }
 
     meter.begin()?;
     for _ in 0..args.latency_iterations {
         let start = Instant::now();
-        rabbit_roundtrip(
-            &channel,
-            &mut replies,
-            &queue,
-            &reply_queue,
-            token,
-            &payload,
-        )
-        .await?;
+        rpc.roundtrip(&payload).await?;
         meter.record(start.elapsed())?;
     }
     let result = meter.finish_gracefully(&paths.1).await?;
-    conn.close(0, "done").await?;
+    conn.close(0, "done".into()).await?;
     Ok(result)
 }
 
-async fn rabbit_roundtrip(
-    channel: &lapin::Channel,
-    replies: &mut lapin::Consumer,
-    queue: &str,
-    reply_queue: &str,
-    correlation_id: &str,
-    payload: &[u8],
-) -> Result<()> {
-    use lapin::{BasicProperties, options::BasicPublishOptions};
+/// Requester side of one RPC queue pair.
+struct Rpc<'a> {
+    channel: &'a Channel,
+    replies: Consumer,
+    queue: ShortString,
+    reply_queue: ShortString,
+    correlation_id: &'a str,
+}
 
-    let properties = BasicProperties::default()
-        .with_reply_to(reply_queue.into())
-        .with_correlation_id(correlation_id.into());
-    let _confirm = channel
-        .basic_publish(
-            "",
-            queue,
-            BasicPublishOptions::default(),
-            payload,
-            properties,
-        )
-        .await?;
-    let delivery = tokio::time::timeout(Duration::from_secs(5), replies.next())
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("RabbitMQ reply consumer closed"))??;
-    if delivery.data.len() != payload.len() {
-        bail!("bad RabbitMQ response payload size");
+impl Rpc<'_> {
+    async fn roundtrip(&mut self, payload: &[u8]) -> Result<()> {
+        let properties = BasicProperties::default()
+            .with_reply_to(self.reply_queue.clone())
+            .with_correlation_id(self.correlation_id.into());
+        let _confirm = self
+            .channel
+            .basic_publish(
+                ShortString::default(),
+                self.queue.clone(),
+                BasicPublishOptions::default(),
+                payload,
+                properties,
+            )
+            .await?;
+
+        let delivery = tokio::time::timeout(Duration::from_secs(5), self.replies.next())
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("RabbitMQ reply consumer closed"))??;
+        if delivery.data.len() != payload.len() {
+            bail!("bad RabbitMQ response payload size");
+        }
+        if delivery
+            .properties
+            .correlation_id()
+            .as_ref()
+            .map(ShortString::as_str)
+            != Some(self.correlation_id)
+        {
+            bail!("bad RabbitMQ response correlation ID");
+        }
+        Ok(())
     }
-    if delivery
-        .properties
-        .correlation_id()
-        .as_ref()
-        .map(lapin::types::ShortString::as_str)
-        != Some(correlation_id)
-    {
-        bail!("bad RabbitMQ response correlation ID");
-    }
-    Ok(())
 }

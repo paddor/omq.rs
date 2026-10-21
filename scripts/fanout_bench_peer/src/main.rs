@@ -204,7 +204,11 @@ enum Port {
         zenoh::pubsub::Subscriber<zenoh::handlers::FifoChannelHandler<zenoh::sample::Sample>>,
         zenoh::Session,
     ),
-    RabbitPublisher(lapin::Channel, Arc<RabbitResources>, String),
+    RabbitPublisher(
+        lapin::Channel,
+        Arc<RabbitResources>,
+        lapin::types::ShortString,
+    ),
     RabbitSubscriber(lapin::Consumer, lapin::Channel, Arc<RabbitResources>),
 }
 
@@ -380,7 +384,7 @@ impl Port {
                     let channel = resources.connection.create_channel().await?;
                     channel
                         .exchange_declare(
-                            &exchange,
+                            exchange.as_str().into(),
                             lapin::ExchangeKind::Fanout,
                             ExchangeDeclareOptions {
                                 auto_delete: true,
@@ -392,12 +396,12 @@ impl Port {
                     Ok::<_, lapin::Error>(channel)
                 })?;
                 if publisher {
-                    Ok(Self::RabbitPublisher(channel, resources, exchange))
+                    Ok(Self::RabbitPublisher(channel, resources, exchange.into()))
                 } else {
                     let consumer = resources.runtime.block_on(async {
                         let queue = channel
                             .queue_declare(
-                                "",
+                                "".into(),
                                 QueueDeclareOptions {
                                     exclusive: true,
                                     auto_delete: true,
@@ -408,17 +412,17 @@ impl Port {
                             .await?;
                         channel
                             .queue_bind(
-                                queue.name().as_str(),
-                                &exchange,
-                                "",
+                                queue.name().clone(),
+                                exchange.as_str().into(),
+                                "".into(),
                                 QueueBindOptions::default(),
                                 FieldTable::default(),
                             )
                             .await?;
                         channel
                             .basic_consume(
-                                queue.name().as_str(),
-                                "",
+                                queue.name().clone(),
+                                "".into(),
                                 BasicConsumeOptions {
                                     no_ack: true,
                                     ..BasicConsumeOptions::default()
@@ -462,8 +466,8 @@ impl Port {
             Self::ZenohPublisher(port, _session) => port.put(bytes.to_vec()).wait()?,
             Self::RabbitPublisher(channel, resources, exchange) => {
                 resources.runtime.block_on(channel.basic_publish(
-                    exchange,
-                    "",
+                    exchange.clone(),
+                    "".into(),
                     BasicPublishOptions::default(),
                     bytes,
                     BasicProperties::default(),
@@ -625,11 +629,12 @@ fn subscribe(config: &Config, mut port: Port) -> Result<(), Error> {
     Ok(())
 }
 
-fn publish(config: &Config, port: &Port) -> Result<(), Error> {
-    let listener = UnixListener::bind(config.control())?;
-    listener.set_nonblocking(true)?;
-    std::fs::write(config.directory.join("ready"), b"ready")?;
-    let started = Instant::now();
+/// Accepts every reader's control connection.
+fn accept_readers(
+    config: &Config,
+    listener: &UnixListener,
+    started: Instant,
+) -> Result<Vec<(UnixStream, bool)>, Error> {
     let mut readers = Vec::with_capacity(config.readers);
     while readers.len() < config.readers {
         match listener.accept() {
@@ -646,9 +651,18 @@ fn publish(config: &Config, port: &Port) -> Result<(), Error> {
             return Err("connection timeout".into());
         }
     }
+    Ok(readers)
+}
+
+/// Publishes probes until every reader reports that it receives them.
+fn await_readiness(
+    port: &Port,
+    readers: &mut [(UnixStream, bool)],
+    started: Instant,
+) -> Result<(), Error> {
     while readers.iter().any(|(_, ready)| !ready) {
         port.send(&PROBE.to_le_bytes(), false)?;
-        for (stream, ready) in &mut readers {
+        for (stream, ready) in readers.iter_mut() {
             if !*ready {
                 match stream.read(&mut [0]) {
                     Ok(1) => *ready = true,
@@ -662,10 +676,85 @@ fn publish(config: &Config, port: &Port) -> Result<(), Error> {
         }
         std::thread::sleep(Duration::from_millis(1));
     }
+    Ok(())
+}
+
+/// Reads each reader's count and receive interval for one round. Every
+/// reader must have received all `sent` messages.
+fn collect_acks(
+    readers: &mut [(UnixStream, bool)],
+    round: u64,
+    sent: u64,
+) -> Result<(Vec<u64>, Vec<f64>), Error> {
+    let mut counts = Vec::with_capacity(readers.len());
+    let mut elapsed = Vec::with_capacity(readers.len());
+    for (id, (stream, _)) in readers.iter_mut().enumerate() {
+        let mut ack = [0; 16];
+        stream
+            .read_exact(&mut ack)
+            .map_err(|error| format!("reader {id} round {round} acknowledgment failed: {error}"))?;
+        let count = u64::from_le_bytes(ack[..8].try_into()?);
+        let seconds = f64::from_le_bytes(ack[8..].try_into()?);
+        if count != sent || !seconds.is_finite() || seconds <= 0.0 {
+            return Err(format!(
+                "delivery mismatch: sent {sent}, reader {count}, elapsed {seconds}"
+            )
+            .into());
+        }
+        counts.push(count);
+        elapsed.push(seconds);
+    }
+    Ok((counts, elapsed))
+}
+
+/// One verified measurement round.
+struct RoundResult {
+    round: u64,
+    sent: u64,
+    sender_elapsed: f64,
+    counts: Vec<u64>,
+    elapsed: Vec<f64>,
+}
+
+/// Prints one round as a JSON result line. The rate includes the slowest
+/// reader's drain.
+fn print_round(config: &Config, result: &RoundResult) {
+    let RoundResult {
+        round,
+        sent,
+        sender_elapsed,
+        ref counts,
+        ref elapsed,
+    } = *result;
+    let total_elapsed = elapsed.iter().copied().fold(sender_elapsed, f64::max);
+    let rate = sent as f64 / total_elapsed;
+    println!(
+        "{}",
+        json!({"event":"result", "implementation":config.implementation,
+        "msg_size":config.size,"readers":config.readers,"round":round,
+        "recv_mode":if config.implementation.starts_with("omq-") || config.implementation.starts_with("zenoh-") || config.implementation == "rabbitmq-tcp" { Some("blocking") } else { None },
+        "recv_spin_us":if config.implementation.starts_with("omq-") { Some(config.recv_spin_us) } else { None },
+        "io_spin_us":if config.implementation.starts_with("omq-") { Some(0) } else { None },
+        "offered":sent,"reader_counts":counts,"reader_elapsed":elapsed,
+        "sender_elapsed":sender_elapsed,"elapsed":total_elapsed,"msgs_s":rate,
+        "aggregate_msgs_s":rate * config.readers as f64,"mbps":rate * config.size as f64 / 1e6,
+        "missing":0,"duplicates":0,"gaps":0,"corrupt":0})
+    );
+}
+
+fn publish(config: &Config, port: &Port) -> Result<(), Error> {
+    let listener = UnixListener::bind(config.control())?;
+    listener.set_nonblocking(true)?;
+    std::fs::write(config.directory.join("ready"), b"ready")?;
+    let started = Instant::now();
+    let mut readers = accept_readers(config, &listener, started)?;
+    await_readiness(port, &mut readers, started)?;
     for (stream, _) in &readers {
         stream.set_nonblocking(false)?;
         stream.set_read_timeout(Some(config.drain_deadline()))?;
     }
+
+    // Round 0 is the warmup and is not reported.
     let mut bytes = vec![0xa5; config.size];
     let batch = config.send_batch();
     for round in 0..4_u64 {
@@ -684,39 +773,17 @@ fn publish(config: &Config, port: &Port) -> Result<(), Error> {
         if std::env::var_os("OMQ_FANOUT_DEBUG").is_some() {
             eprintln!("publisher round {round}: {sent} messages in {sender_elapsed}s; marker sent");
         }
-        let mut counts = Vec::with_capacity(config.readers);
-        let mut elapsed = Vec::with_capacity(config.readers);
-        for (id, (stream, _)) in readers.iter_mut().enumerate() {
-            let mut ack = [0; 16];
-            stream.read_exact(&mut ack).map_err(|error| {
-                format!("reader {id} round {round} acknowledgment failed: {error}")
-            })?;
-            let count = u64::from_le_bytes(ack[..8].try_into()?);
-            let seconds = f64::from_le_bytes(ack[8..].try_into()?);
-            if count != sent || !seconds.is_finite() || seconds <= 0.0 {
-                return Err(format!(
-                    "delivery mismatch: sent {sent}, reader {count}, elapsed {seconds}"
-                )
-                .into());
-            }
-            counts.push(count);
-            elapsed.push(seconds);
-        }
+
+        let (counts, elapsed) = collect_acks(&mut readers, round, sent)?;
         if round > 0 {
-            let total_elapsed = elapsed.iter().copied().fold(sender_elapsed, f64::max);
-            let rate = sent as f64 / total_elapsed;
-            println!(
-                "{}",
-                json!({"event":"result", "implementation":config.implementation,
-                "msg_size":config.size,"readers":config.readers,"round":round,
-                "recv_mode":if config.implementation.starts_with("omq-") || config.implementation.starts_with("zenoh-") || config.implementation == "rabbitmq-tcp" { Some("blocking") } else { None },
-                "recv_spin_us":if config.implementation.starts_with("omq-") { Some(config.recv_spin_us) } else { None },
-                "io_spin_us":if config.implementation.starts_with("omq-") { Some(0) } else { None },
-                "offered":sent,"reader_counts":counts,"reader_elapsed":elapsed,
-                "sender_elapsed":sender_elapsed,"elapsed":total_elapsed,"msgs_s":rate,
-                "aggregate_msgs_s":rate * config.readers as f64,"mbps":rate * config.size as f64 / 1e6,
-                "missing":0,"duplicates":0,"gaps":0,"corrupt":0})
-            );
+            let result = RoundResult {
+                round,
+                sent,
+                sender_elapsed,
+                counts,
+                elapsed,
+            };
+            print_round(config, &result);
         }
     }
     for (stream, _) in &mut readers {

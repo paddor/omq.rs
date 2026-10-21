@@ -95,18 +95,11 @@ pub(crate) async fn bench(args: &Args, token: &str, size: usize) -> Result<Bench
     let port_file = std::env::temp_dir().join(format!("omq-mom-{token}-{size}.grpc-port"));
     remove_if_exists(&port_file)?;
 
-    let mut producer = spawn_producer(
-        args,
-        "grpc-rust",
-        size,
-        token,
-        ProducerFiles {
-            start: &paths.0,
-            stop: &paths.1,
-            result: &paths.2,
-            grpc_port: Some(&port_file),
-        },
-    )?;
+    let files = ProducerFiles {
+        grpc_port: Some(&port_file),
+        ..ProducerFiles::new(&paths)
+    };
+    let mut producer = spawn_producer(args, "grpc-rust", size, token, files)?;
     let port = wait_port(&port_file).await?;
     let mut grpc = client(&format!("127.0.0.1:{port}")).await?;
     let mut stream = grpc.stream(Blob { data: Vec::new() }).await?.into_inner();
@@ -160,18 +153,11 @@ pub(crate) async fn latency(args: &Args, token: &str, size: usize) -> Result<Lat
     let port_file = std::env::temp_dir().join(format!("omq-mom-{token}-{size}.grpc-port"));
     remove_if_exists(&port_file)?;
 
-    let responder = spawn_responder(
-        args,
-        "grpc-rust",
-        size,
-        token,
-        ProducerFiles {
-            start: &paths.0,
-            stop: &paths.1,
-            result: &paths.2,
-            grpc_port: Some(&port_file),
-        },
-    )?;
+    let files = ProducerFiles {
+        grpc_port: Some(&port_file),
+        ..ProducerFiles::new(&paths)
+    };
+    let responder = spawn_responder(args, "grpc-rust", size, token, files)?;
     let mut meter = LatencyMeter::new("grpc-rust", args.latency_iterations, responder)?;
     let port = wait_port(&port_file).await?;
     let mut grpc = client(&format!("127.0.0.1:{port}")).await?;

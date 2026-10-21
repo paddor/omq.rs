@@ -1,18 +1,18 @@
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 use bytes::Bytes;
 use futures_util::StreamExt;
 use iggy::prelude::{
-    AutoCommit, Client, DirectConfig, Identifier, IggyClient, IggyExpiry, IggyMessage,
-    MaxTopicSize, MessageClient, Partitioning, PollingStrategy, StreamClient,
+    AutoCommit, Client, DirectConfig, Identifier, IggyClient, IggyConsumer, IggyExpiry,
+    IggyMessage, IggyProducer, MaxTopicSize, MessageClient, Partitioning, PollingStrategy,
+    StreamClient,
 };
 
 use super::{
     Args, BenchResult, CpuWindow, IggyCommit, LatencyMeter, LatencyResult, ProducerFiles,
-    clean_paths, measure_receive, run_paths, spawn_producer, spawn_responder, stop_requested,
-    wait_for_marker, workload, write_marker,
+    ProducerRun, ResponderRun, clean_paths, measure_receive, run_paths, spawn_producer,
+    spawn_responder, stop_requested, wait_for_marker, workload, write_marker,
 };
 
 const TOPIC: &str = "messages";
@@ -101,17 +101,39 @@ async fn connect(url: &str) -> Result<IggyClient> {
     Ok(client)
 }
 
-pub(crate) async fn producer(
-    url: &str,
-    token: &str,
-    size: usize,
-    warmup: Duration,
-    stop_file: &Path,
-    commit: IggyCommit,
-) -> Result<f64> {
-    let stream = stream_name(token, size);
+/// Consumer of one partition from offset 0, without auto commit or a poll
+/// interval.
+fn offset_consumer(
+    client: &IggyClient,
+    group: &str,
+    stream: &str,
+    topic: &str,
+    length: usize,
+) -> Result<IggyConsumer> {
+    Ok(client
+        .consumer(group, stream, topic, PARTITION_ID)?
+        .polling_strategy(PollingStrategy::offset(0))
+        .batch_length(u32::try_from(length)?)
+        .auto_commit(AutoCommit::Disabled)
+        .without_poll_interval()
+        .build())
+}
+
+/// Direct producer of single-message batches to an existing topic.
+fn single_producer(client: &IggyClient, stream: &str, topic: &str) -> Result<IggyProducer> {
+    Ok(client
+        .producer(stream, topic)?
+        .do_not_create_stream_if_not_exists()
+        .do_not_create_topic_if_not_exists()
+        .partitioning(Partitioning::partition_id(PARTITION_ID))
+        .direct(DirectConfig::builder().batch_length(1).build())
+        .build())
+}
+
+pub(crate) async fn producer(url: &str, run: &ProducerRun<'_>, commit: IggyCommit) -> Result<f64> {
+    let stream = stream_name(run.token, run.size);
     let client = connect(url).await?;
-    let length = batch_length(size);
+    let length = batch_length(run.size);
     let producer = client
         .producer(&stream, TOPIC)?
         .do_not_create_stream_if_not_exists()
@@ -125,20 +147,20 @@ pub(crate) async fn producer(
         .build();
     producer.init().await?;
 
-    let batches = make_corpus(size, length)?;
+    let batches = make_corpus(run.size, length)?;
     let stream_id = Identifier::try_from(stream.as_str())?;
     let topic_id = Identifier::try_from(TOPIC)?;
     let mut next_batch = 0;
     let check_every = u64::try_from(length)?;
     let mut sent = 0_u64;
-    let mut cpu = CpuWindow::new(warmup);
+    let mut cpu = CpuWindow::new(run.warmup);
     loop {
         producer.send(make_messages(&batches[next_batch])?).await?;
         commit_if_requested(&client, &stream_id, &topic_id, commit).await?;
         next_batch = (next_batch + 1) % batches.len();
         sent += check_every;
         cpu.sample_start()?;
-        if stop_requested(stop_file, sent, check_every) {
+        if stop_requested(run.stop_file, sent, check_every) {
             break;
         }
     }
@@ -147,13 +169,10 @@ pub(crate) async fn producer(
     cpu.finish()
 }
 
-pub(crate) async fn bench(args: &Args, token: &str, size: usize) -> Result<BenchResult> {
-    let stream = stream_name(token, size);
-    let client = connect(&args.iggy_url).await?;
-    let length = batch_length(size);
-
+/// Creates the throughput stream and topic through a short-lived producer.
+async fn create_stream(client: &IggyClient, stream: &str, length: usize) -> Result<()> {
     let setup = client
-        .producer(&stream, TOPIC)?
+        .producer(stream, TOPIC)?
         .create_stream_if_not_exists()
         .create_topic_if_not_exists(
             1,
@@ -170,67 +189,54 @@ pub(crate) async fn bench(args: &Args, token: &str, size: usize) -> Result<Bench
         .build();
     setup.init().await?;
     setup.shutdown().await;
+    Ok(())
+}
 
-    let mut consumer = client
-        .consumer(token, &stream, TOPIC, PARTITION_ID)?
-        .polling_strategy(PollingStrategy::offset(0))
-        .batch_length(u32::try_from(length)?)
-        .auto_commit(AutoCommit::Disabled)
-        .without_poll_interval()
-        .build();
-    consumer.init().await?;
-
-    let paths = run_paths(token, size);
-    clean_paths(&paths)?;
-    let mut producer = spawn_producer(
-        args,
-        "iggy",
-        size,
-        token,
-        ProducerFiles {
-            start: &paths.0,
-            stop: &paths.1,
-            result: &paths.2,
-            grpc_port: None,
-        },
-    )?;
-    write_marker(&paths.0)?;
-
-    let warmup_deadline = Instant::now() + Duration::from_secs_f64(args.warmup);
-    let mut next_offset = 0;
-    while Instant::now() < warmup_deadline {
-        let remaining = warmup_deadline.saturating_duration_since(Instant::now());
+/// Receives until `deadline`, checking sizes and contiguous offsets.
+/// Returns the count.
+async fn receive_until(
+    consumer: &mut IggyConsumer,
+    deadline: Instant,
+    size: usize,
+    next_offset: &mut u64,
+) -> Result<u64> {
+    let mut count = 0_u64;
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
         match tokio::time::timeout(remaining, consumer.next()).await {
             Ok(Some(Ok(message))) => {
-                check_record(&message.message, size, &mut next_offset)?;
+                check_record(&message.message, size, next_offset)?;
+                count += 1;
             }
             Ok(Some(Err(err))) => bail!(err),
             Ok(None) | Err(_) => break,
         }
     }
+    Ok(count)
+}
 
-    let result = measure_receive(
-        args,
-        &paths.1,
-        &paths.2,
-        &mut producer,
-        "iggy",
-        |deadline| async move {
-            let mut count = 0_u64;
-            while Instant::now() < deadline {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                match tokio::time::timeout(remaining, consumer.next()).await {
-                    Ok(Some(Ok(message))) => {
-                        check_record(&message.message, size, &mut next_offset)?;
-                        count += 1;
-                    }
-                    Ok(Some(Err(err))) => bail!(err),
-                    Ok(None) | Err(_) => break,
-                }
-            }
-            Ok(count)
-        },
-    )
+pub(crate) async fn bench(args: &Args, token: &str, size: usize) -> Result<BenchResult> {
+    let stream = stream_name(token, size);
+    let client = connect(&args.iggy_url).await?;
+    let length = batch_length(size);
+    create_stream(&client, &stream, length).await?;
+    let mut consumer = offset_consumer(&client, token, &stream, TOPIC, length)?;
+    consumer.init().await?;
+
+    let paths = run_paths(token, size);
+    clean_paths(&paths)?;
+    let files = ProducerFiles::new(&paths);
+    let mut producer = spawn_producer(args, "iggy", size, token, files)?;
+    write_marker(files.start)?;
+
+    // Warmup deliveries are checked, not counted; offsets carry over.
+    let warmup_deadline = Instant::now() + Duration::from_secs_f64(args.warmup);
+    let mut next_offset = 0;
+    receive_until(&mut consumer, warmup_deadline, size, &mut next_offset).await?;
+
+    let result = measure_receive(args, files, &mut producer, "iggy", |deadline| async move {
+        receive_until(&mut consumer, deadline, size, &mut next_offset).await
+    })
     .await?;
 
     client.delete_stream(&Identifier::try_from(stream)?).await?;
@@ -238,42 +244,22 @@ pub(crate) async fn bench(args: &Args, token: &str, size: usize) -> Result<Bench
     Ok(result)
 }
 
-pub(crate) async fn responder(
-    url: &str,
-    token: &str,
-    size: usize,
-    ready_file: &Path,
-    stop_file: &Path,
-    iterations: u64,
-    commit: IggyCommit,
-) -> Result<()> {
-    let stream = stream_name(token, size);
+pub(crate) async fn responder(url: &str, run: &ResponderRun<'_>, commit: IggyCommit) -> Result<()> {
+    let stream = stream_name(run.token, run.size);
     let client = connect(url).await?;
-    let producer = client
-        .producer(&stream, RESPONSE_TOPIC)?
-        .do_not_create_stream_if_not_exists()
-        .do_not_create_topic_if_not_exists()
-        .partitioning(Partitioning::partition_id(PARTITION_ID))
-        .direct(DirectConfig::builder().batch_length(1).build())
-        .build();
+    let producer = single_producer(&client, &stream, RESPONSE_TOPIC)?;
     producer.init().await?;
-    let mut consumer = client
-        .consumer(token, &stream, REQUEST_TOPIC, PARTITION_ID)?
-        .polling_strategy(PollingStrategy::offset(0))
-        .batch_length(1)
-        .auto_commit(AutoCommit::Disabled)
-        .without_poll_interval()
-        .build();
+    let mut consumer = offset_consumer(&client, run.token, &stream, REQUEST_TOPIC, 1)?;
     consumer.init().await?;
     let stream_id = Identifier::try_from(stream.as_str())?;
     let response_topic_id = Identifier::try_from(RESPONSE_TOPIC)?;
-    write_marker(ready_file)?;
+    write_marker(run.ready_file)?;
 
-    for _ in 0..iterations {
+    for _ in 0..run.iterations {
         let message = tokio::time::timeout(Duration::from_secs(5), consumer.next())
             .await?
             .ok_or_else(|| anyhow::anyhow!("Iggy request consumer closed"))??;
-        if message.message.payload.len() != size {
+        if message.message.payload.len() != run.size {
             bail!("bad Iggy request payload size");
         }
         producer
@@ -283,7 +269,7 @@ pub(crate) async fn responder(
     }
     // Keep the process alive for the final CPU snapshot, without issuing a
     // poll that would be canceled while shutting down its TCP connection.
-    while !stop_file.exists() {
+    while !run.stop_file.exists() {
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
     producer.shutdown().await;
@@ -323,84 +309,82 @@ async fn setup_latency_topics(client: &IggyClient, stream: &str) -> Result<()> {
     Ok(())
 }
 
+/// Requester side of the request/response topic pair.
+struct Rpc<'a> {
+    client: &'a IggyClient,
+    producer: IggyProducer,
+    consumer: IggyConsumer,
+    stream_id: Identifier,
+    request_topic_id: Identifier,
+    commit: IggyCommit,
+    size: usize,
+}
+
+impl Rpc<'_> {
+    async fn roundtrip(&mut self, request: Bytes) -> Result<()> {
+        self.producer.send(vec![make_message(request)?]).await?;
+        commit_if_requested(
+            self.client,
+            &self.stream_id,
+            &self.request_topic_id,
+            self.commit,
+        )
+        .await?;
+        let response = tokio::time::timeout(Duration::from_secs(5), self.consumer.next())
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Iggy response consumer closed"))??;
+        if response.message.payload.len() != self.size {
+            bail!("bad Iggy response payload size");
+        }
+        Ok(())
+    }
+}
+
 pub(crate) async fn latency(args: &Args, token: &str, size: usize) -> Result<LatencyResult> {
     let stream = stream_name(token, size);
     let client = connect(&args.iggy_url).await?;
     setup_latency_topics(&client, &stream).await?;
 
-    let producer = client
-        .producer(&stream, REQUEST_TOPIC)?
-        .do_not_create_stream_if_not_exists()
-        .do_not_create_topic_if_not_exists()
-        .partitioning(Partitioning::partition_id(PARTITION_ID))
-        .direct(DirectConfig::builder().batch_length(1).build())
-        .build();
+    let producer = single_producer(&client, &stream, REQUEST_TOPIC)?;
     producer.init().await?;
-    let mut consumer = client
-        .consumer(token, &stream, RESPONSE_TOPIC, PARTITION_ID)?
-        .polling_strategy(PollingStrategy::offset(0))
-        .batch_length(1)
-        .auto_commit(AutoCommit::Disabled)
-        .without_poll_interval()
-        .build();
+    let mut consumer = offset_consumer(&client, token, &stream, RESPONSE_TOPIC, 1)?;
     consumer.init().await?;
 
     let paths = run_paths(token, size);
     clean_paths(&paths)?;
-    let responder = spawn_responder(
-        args,
-        "iggy",
-        size,
-        token,
-        ProducerFiles {
-            start: &paths.0,
-            stop: &paths.1,
-            result: &paths.2,
-            grpc_port: None,
-        },
-    )?;
+    let files = ProducerFiles::new(&paths);
+    let responder = spawn_responder(args, "iggy", size, token, files)?;
     let mut meter = LatencyMeter::new("iggy", args.latency_iterations, responder)?;
     wait_for_marker(&paths.0, meter.responder_mut()).await?;
     let requests = (0..workload::LATENCY_CORPUS_RECORDS)
         .map(|sequence| workload::record(size, sequence as u64))
         .collect::<Vec<_>>();
-    let stream_id = Identifier::try_from(stream.as_str())?;
-    let request_topic_id = Identifier::try_from(REQUEST_TOPIC)?;
+    let mut rpc = Rpc {
+        client: &client,
+        producer,
+        consumer,
+        stream_id: Identifier::try_from(stream.as_str())?,
+        request_topic_id: Identifier::try_from(REQUEST_TOPIC)?,
+        commit: args.iggy_commit,
+        size,
+    };
     let mut next_request = 0;
 
     for _ in 0..args.latency_warmup {
-        producer
-            .send(vec![make_message(requests[next_request].clone())?])
-            .await?;
-        commit_if_requested(&client, &stream_id, &request_topic_id, args.iggy_commit).await?;
+        rpc.roundtrip(requests[next_request].clone()).await?;
         next_request = (next_request + 1) % requests.len();
-        let response = tokio::time::timeout(Duration::from_secs(5), consumer.next())
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Iggy response consumer closed"))??;
-        if response.message.payload.len() != size {
-            bail!("bad Iggy response payload size");
-        }
     }
 
     meter.begin()?;
     for _ in 0..args.latency_iterations {
         let start = Instant::now();
-        producer
-            .send(vec![make_message(requests[next_request].clone())?])
-            .await?;
-        commit_if_requested(&client, &stream_id, &request_topic_id, args.iggy_commit).await?;
+        rpc.roundtrip(requests[next_request].clone()).await?;
         next_request = (next_request + 1) % requests.len();
-        let response = tokio::time::timeout(Duration::from_secs(5), consumer.next())
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Iggy response consumer closed"))??;
-        if response.message.payload.len() != size {
-            bail!("bad Iggy response payload size");
-        }
         meter.record(start.elapsed())?;
     }
 
     let result = meter.finish_gracefully(&paths.1).await?;
-    producer.shutdown().await;
+    rpc.producer.shutdown().await;
     client.delete_stream(&Identifier::try_from(stream)?).await?;
     client.shutdown().await?;
     Ok(result)

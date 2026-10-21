@@ -170,6 +170,46 @@ pub(crate) struct ProducerFiles<'a> {
     pub(crate) grpc_port: Option<&'a Path>,
 }
 
+impl<'a> ProducerFiles<'a> {
+    /// Files of one run from `run_paths`, without a gRPC port file.
+    pub(crate) fn new(paths: &'a (PathBuf, PathBuf, PathBuf)) -> Self {
+        Self {
+            start: &paths.0,
+            stop: &paths.1,
+            result: &paths.2,
+            grpc_port: None,
+        }
+    }
+}
+
+/// Settings a spawned producer reads from its arguments.
+pub(crate) struct ProducerRun<'a> {
+    pub(crate) token: &'a str,
+    pub(crate) size: usize,
+    pub(crate) warmup: Duration,
+    pub(crate) stop_file: &'a Path,
+}
+
+/// Settings a spawned responder reads from its arguments.
+pub(crate) struct ResponderRun<'a> {
+    pub(crate) token: &'a str,
+    pub(crate) size: usize,
+    pub(crate) ready_file: &'a Path,
+    pub(crate) stop_file: &'a Path,
+    /// Warmup plus measured requests. Responders that finish on their own
+    /// answer this many, then wait for the stop file.
+    pub(crate) iterations: u64,
+}
+
+/// Which worker process to spawn, and the run it serves.
+#[derive(Clone, Copy)]
+struct WorkerSpec<'a> {
+    impl_name: &'a str,
+    role: Role,
+    size: usize,
+    token: &'a str,
+}
+
 impl CpuWindow {
     pub(crate) fn new(warmup: Duration) -> Self {
         Self {
@@ -503,7 +543,13 @@ pub(crate) fn spawn_producer(
     token: &str,
     files: ProducerFiles<'_>,
 ) -> Result<std::process::Child> {
-    spawn_worker(args, impl_name, Role::Producer, size, token, files)
+    let spec = WorkerSpec {
+        impl_name,
+        role: Role::Producer,
+        size,
+        token,
+    };
+    spawn_worker(args, spec, files)
 }
 
 pub(crate) fn spawn_responder(
@@ -513,32 +559,46 @@ pub(crate) fn spawn_responder(
     token: &str,
     files: ProducerFiles<'_>,
 ) -> Result<std::process::Child> {
-    spawn_worker(args, impl_name, Role::Responder, size, token, files)
+    let spec = WorkerSpec {
+        impl_name,
+        role: Role::Responder,
+        size,
+        token,
+    };
+    spawn_worker(args, spec, files)
+}
+
+/// This executable, under `taskset` when `OMQ_MOM_BENCH_PIN` is set.
+fn worker_command(impl_name: &str, role: Role) -> Result<Command> {
+    let exe = std::env::current_exe()?;
+    if std::env::var_os("OMQ_MOM_BENCH_PIN").is_none() {
+        return Ok(Command::new(exe));
+    }
+
+    let cpus = match (impl_name == "grpc-rust", role) {
+        (true, Role::Producer) => "1-2",
+        (true, Role::Responder) => "3-4",
+        (false, Role::Producer) => "1",
+        (false, Role::Responder) => "2",
+        (_, Role::Coordinator) => bail!("cannot spawn coordinator as worker"),
+    };
+    let mut cmd = Command::new("taskset");
+    cmd.arg("-c").arg(cpus).arg(exe);
+    Ok(cmd)
 }
 
 fn spawn_worker(
     args: &Args,
-    impl_name: &str,
-    role: Role,
-    size: usize,
-    token: &str,
+    spec: WorkerSpec<'_>,
     files: ProducerFiles<'_>,
 ) -> Result<std::process::Child> {
-    let exe = std::env::current_exe()?;
-    let mut cmd = if std::env::var_os("OMQ_MOM_BENCH_PIN").is_some() {
-        let cpus = match (impl_name == "grpc-rust", role) {
-            (true, Role::Producer) => "1-2",
-            (true, Role::Responder) => "3-4",
-            (false, Role::Producer) => "1",
-            (false, Role::Responder) => "2",
-            (_, Role::Coordinator) => bail!("cannot spawn coordinator as worker"),
-        };
-        let mut cmd = Command::new("taskset");
-        cmd.arg("-c").arg(cpus).arg(exe);
-        cmd
-    } else {
-        Command::new(exe)
-    };
+    let WorkerSpec {
+        impl_name,
+        role,
+        size,
+        token,
+    } = spec;
+    let mut cmd = worker_command(impl_name, role)?;
     cmd.arg("--role")
         .arg(match role {
             Role::Producer => "producer",
@@ -604,23 +664,18 @@ async fn run_producer(args: &Args) -> Result<()> {
         return grpc::producer(size, start_file, port_file).await;
     }
     wait_for_file(start_file);
-    let warmup = Duration::from_secs_f64(args.warmup);
+    let run = ProducerRun {
+        token,
+        size,
+        warmup: Duration::from_secs_f64(args.warmup),
+        stop_file,
+    };
     let cpu_time = match impl_name.as_str() {
-        "nats" => nats::producer(&args.nats_url, token, size, warmup, stop_file).await?,
-        "rabbitmq" => rabbit::producer(&args.rabbitmq_url, token, size, warmup, stop_file).await?,
-        "kafka" => kafka::producer(&args.kafka_url, token, size, warmup, stop_file)?,
-        "redis-streams" => redis::producer(&args.redis_url, token, size, warmup, stop_file)?,
-        "iggy" => {
-            iggy::producer(
-                &args.iggy_url,
-                token,
-                size,
-                warmup,
-                stop_file,
-                args.iggy_commit,
-            )
-            .await?
-        }
+        "nats" => nats::producer(&args.nats_url, &run).await?,
+        "rabbitmq" => rabbit::producer(&args.rabbitmq_url, &run).await?,
+        "kafka" => kafka::producer(&args.kafka_url, &run)?,
+        "redis-streams" => redis::producer(&args.redis_url, &run)?,
+        "iggy" => iggy::producer(&args.iggy_url, &run, args.iggy_commit).await?,
         other => bail!("unknown impl {other}"),
     };
     write_push_cpu(result_file, cpu_time)
@@ -631,58 +686,37 @@ async fn run_responder(args: &Args) -> Result<()> {
     let size = args.sizes.as_deref().context("size missing")?.parse()?;
     let token = args.token.as_deref().context("token missing")?;
     let ready_file = args.start_file.as_deref().context("ready file missing")?;
+    if impl_name == "grpc-rust" {
+        let port_file = args
+            .grpc_port_file
+            .as_deref()
+            .context("gRPC port file missing")?;
+        return grpc::producer(size, ready_file, port_file).await;
+    }
+
+    let run = ResponderRun {
+        token,
+        size,
+        ready_file,
+        stop_file: args.stop_file.as_deref().context("stop file missing")?,
+        iterations: args
+            .latency_warmup
+            .checked_add(args.latency_iterations)
+            .context("latency iteration count overflow")?,
+    };
     match impl_name.as_str() {
-        "grpc-rust" => {
-            let port_file = args
-                .grpc_port_file
-                .as_deref()
-                .context("gRPC port file missing")?;
-            grpc::producer(size, ready_file, port_file).await
-        }
-        "nats" => nats::responder(&args.nats_url, token, size, ready_file).await,
-        "rabbitmq" => {
-            let stop_file = args.stop_file.as_deref().context("stop file missing")?;
-            let iterations = args
-                .latency_warmup
-                .checked_add(args.latency_iterations)
-                .context("latency iteration count overflow")?;
-            rabbit::responder(
-                &args.rabbitmq_url,
-                token,
-                size,
-                ready_file,
-                stop_file,
-                iterations,
-            )
-            .await
-        }
-        "kafka" => kafka::responder(&args.kafka_url, token, size, ready_file).await,
-        "redis-streams" => redis::responder(&args.redis_url, token, size, ready_file),
-        "iggy" => {
-            let stop_file = args.stop_file.as_deref().context("stop file missing")?;
-            let iterations = args
-                .latency_warmup
-                .checked_add(args.latency_iterations)
-                .context("latency iteration count overflow")?;
-            iggy::responder(
-                &args.iggy_url,
-                token,
-                size,
-                ready_file,
-                stop_file,
-                iterations,
-                args.iggy_commit,
-            )
-            .await
-        }
+        "nats" => nats::responder(&args.nats_url, &run).await,
+        "rabbitmq" => rabbit::responder(&args.rabbitmq_url, &run).await,
+        "kafka" => kafka::responder(&args.kafka_url, &run).await,
+        "redis-streams" => redis::responder(&args.redis_url, &run),
+        "iggy" => iggy::responder(&args.iggy_url, &run, args.iggy_commit).await,
         other => bail!("unknown impl {other}"),
     }
 }
 
 pub(crate) async fn measure_receive<F, Fut>(
     args: &Args,
-    stop_file: &Path,
-    result_file: &Path,
+    files: ProducerFiles<'_>,
     producer: &mut std::process::Child,
     impl_name: &str,
     receive: F,
@@ -704,12 +738,7 @@ where
         .zip(broker_start)
         .and_then(|(pid, start)| process_cpu_secs(pid).ok().map(|end| end - start));
 
-    write_marker(stop_file)?;
-    let status = producer.wait()?;
-    if !status.success() {
-        bail!("producer failed: {status}");
-    }
-    let push_cpu_time = read_push_cpu(result_file)?;
+    let push_cpu_time = stop_producer(files, producer)?;
 
     Ok(BenchResult {
         count,
@@ -718,6 +747,19 @@ where
         push_cpu_time,
         broker_cpu_time,
     })
+}
+
+/// Signals the producer to stop, waits for it, and returns its CPU time.
+pub(crate) fn stop_producer(
+    files: ProducerFiles<'_>,
+    producer: &mut std::process::Child,
+) -> Result<f64> {
+    write_marker(files.stop)?;
+    let status = producer.wait()?;
+    if !status.success() {
+        bail!("producer failed: {status}");
+    }
+    read_push_cpu(files.result)
 }
 
 pub(crate) fn run_paths(token: &str, size: usize) -> (PathBuf, PathBuf, PathBuf) {
@@ -749,22 +791,7 @@ async fn main() -> Result<()> {
         Role::Coordinator => {}
     }
 
-    let default_sizes = match args.mode {
-        Mode::Throughput => default_sizes(),
-        Mode::Latency => LATENCY_SIZES
-            .iter()
-            .map(usize::to_string)
-            .collect::<Vec<_>>()
-            .join(","),
-    };
-    let sizes = args
-        .sizes
-        .as_deref()
-        .unwrap_or(&default_sizes)
-        .split(',')
-        .filter(|s| !s.is_empty())
-        .map(str::parse::<usize>)
-        .collect::<Result<Vec<_>, _>>()?;
+    let sizes = requested_sizes(&args)?;
     for impl_name in &args.impls {
         let result_impl_name = result_impl_name(&args, impl_name);
         for &size in &sizes {
@@ -775,61 +802,105 @@ async fn main() -> Result<()> {
             );
             match args.mode {
                 Mode::Throughput => {
-                    let result = match impl_name.as_str() {
-                        "nats" => nats::bench(&args, &token, size).await?,
-                        "grpc-rust" => grpc::bench(&args, &token, size).await?,
-                        "rabbitmq" => rabbit::bench(&args, &token, size).await?,
-                        "kafka" => kafka::bench(&args, &token, size).await?,
-                        "redis-streams" => redis::bench(&args, &token, size).await?,
-                        "iggy" => iggy::bench(&args, &token, size).await?,
-                        other => bail!("unknown impl {other}"),
-                    };
-                    append_row(&args.run_id, &result_impl_name, size, &result)?;
-                    let msgs_s = result.count as f64 / result.elapsed;
-                    let mbps = result.count as f64 * size as f64 / result.elapsed / 1_000_000.0;
-                    let broker_cpu = result.broker_cpu_time.map_or(String::new(), |v| {
-                        format!(" broker_cpu={:.0}%", v / result.elapsed * 100.0)
-                    });
-                    println!(
-                        "{result_impl_name:16} {size:8} B  {msgs_s:12.0} msg/s  {mbps:10.1} MB/s  snd_cpu={:.0}%{} rcv_cpu={:.0}%",
-                        result.push_cpu_time / result.elapsed * 100.0,
-                        broker_cpu,
-                        result.pull_cpu_time / result.elapsed * 100.0
-                    );
+                    run_throughput(&args, impl_name, &result_impl_name, size, &token).await?;
                 }
                 Mode::Latency => {
-                    let result = match impl_name.as_str() {
-                        "nats" => nats::latency(&args, &token, size).await?,
-                        "grpc-rust" => grpc::latency(&args, &token, size).await?,
-                        "rabbitmq" => rabbit::latency(&args, &token, size).await?,
-                        "kafka" => kafka::latency(&args, &token, size).await?,
-                        "redis-streams" => redis::latency(&args, &token, size).await?,
-                        "iggy" => iggy::latency(&args, &token, size).await?,
-                        other => bail!("unknown impl {other}"),
-                    };
-                    append_latency_row(
-                        &args.run_id,
-                        &result_impl_name,
-                        size,
-                        args.latency_iterations,
-                        &result,
-                    )?;
-                    let broker_cpu = result.broker_cpu_time.map_or(String::new(), |v| {
-                        format!(" broker_cpu={:.0}%", v / result.elapsed * 100.0)
-                    });
-                    println!(
-                        "{result_impl_name:16} {size:8} B  p50={:9.1} us  p99={:9.1} us  p99.9={:9.1} us  max={:9.1} us  req_cpu={:.0}%{} rep_cpu={:.0}%",
-                        result.p50_us,
-                        result.p99_us,
-                        result.p999_us,
-                        result.max_us,
-                        result.req_cpu_time / result.elapsed * 100.0,
-                        broker_cpu,
-                        result.rep_cpu_time / result.elapsed * 100.0,
-                    );
+                    run_latency(&args, impl_name, &result_impl_name, size, &token).await?;
                 }
             }
         }
     }
+    Ok(())
+}
+
+/// `--sizes`, or the chart sizes of the selected mode.
+fn requested_sizes(args: &Args) -> Result<Vec<usize>> {
+    let default_sizes = match args.mode {
+        Mode::Throughput => default_sizes(),
+        Mode::Latency => LATENCY_SIZES
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<_>>()
+            .join(","),
+    };
+    Ok(args
+        .sizes
+        .as_deref()
+        .unwrap_or(&default_sizes)
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .map(str::parse::<usize>)
+        .collect::<Result<Vec<_>, _>>()?)
+}
+
+async fn run_throughput(
+    args: &Args,
+    impl_name: &str,
+    result_impl_name: &str,
+    size: usize,
+    token: &str,
+) -> Result<()> {
+    let result = match impl_name {
+        "nats" => nats::bench(args, token, size).await?,
+        "grpc-rust" => grpc::bench(args, token, size).await?,
+        "rabbitmq" => rabbit::bench(args, token, size).await?,
+        "kafka" => kafka::bench(args, token, size).await?,
+        "redis-streams" => redis::bench(args, token, size).await?,
+        "iggy" => iggy::bench(args, token, size).await?,
+        other => bail!("unknown impl {other}"),
+    };
+    append_row(&args.run_id, result_impl_name, size, &result)?;
+
+    let msgs_s = result.count as f64 / result.elapsed;
+    let mbps = result.count as f64 * size as f64 / result.elapsed / 1_000_000.0;
+    let broker_cpu = result.broker_cpu_time.map_or(String::new(), |v| {
+        format!(" broker_cpu={:.0}%", v / result.elapsed * 100.0)
+    });
+    println!(
+        "{result_impl_name:16} {size:8} B  {msgs_s:12.0} msg/s  {mbps:10.1} MB/s  snd_cpu={:.0}%{} rcv_cpu={:.0}%",
+        result.push_cpu_time / result.elapsed * 100.0,
+        broker_cpu,
+        result.pull_cpu_time / result.elapsed * 100.0
+    );
+    Ok(())
+}
+
+async fn run_latency(
+    args: &Args,
+    impl_name: &str,
+    result_impl_name: &str,
+    size: usize,
+    token: &str,
+) -> Result<()> {
+    let result = match impl_name {
+        "nats" => nats::latency(args, token, size).await?,
+        "grpc-rust" => grpc::latency(args, token, size).await?,
+        "rabbitmq" => rabbit::latency(args, token, size).await?,
+        "kafka" => kafka::latency(args, token, size).await?,
+        "redis-streams" => redis::latency(args, token, size).await?,
+        "iggy" => iggy::latency(args, token, size).await?,
+        other => bail!("unknown impl {other}"),
+    };
+    append_latency_row(
+        &args.run_id,
+        result_impl_name,
+        size,
+        args.latency_iterations,
+        &result,
+    )?;
+
+    let broker_cpu = result.broker_cpu_time.map_or(String::new(), |v| {
+        format!(" broker_cpu={:.0}%", v / result.elapsed * 100.0)
+    });
+    println!(
+        "{result_impl_name:16} {size:8} B  p50={:9.1} us  p99={:9.1} us  p99.9={:9.1} us  max={:9.1} us  req_cpu={:.0}%{} rep_cpu={:.0}%",
+        result.p50_us,
+        result.p99_us,
+        result.p999_us,
+        result.max_us,
+        result.req_cpu_time / result.elapsed * 100.0,
+        broker_cpu,
+        result.rep_cpu_time / result.elapsed * 100.0,
+    );
     Ok(())
 }

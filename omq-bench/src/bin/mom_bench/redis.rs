@@ -1,12 +1,11 @@
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
 use super::{
-    Args, BenchResult, CpuWindow, LatencyMeter, LatencyResult, ProducerFiles, broker_pid,
-    clean_paths, process_cpu_secs, read_push_cpu, run_paths, self_cpu_secs, spawn_producer,
-    spawn_responder, stop_requested, wait_for_marker, write_marker,
+    Args, BenchResult, CpuWindow, LatencyMeter, LatencyResult, ProducerFiles, ProducerRun,
+    ResponderRun, broker_pid, clean_paths, process_cpu_secs, run_paths, self_cpu_secs,
+    spawn_producer, spawn_responder, stop_producer, stop_requested, wait_for_marker, write_marker,
 };
 
 fn rpc_keys(token: &str, size: usize) -> (String, String) {
@@ -16,19 +15,13 @@ fn rpc_keys(token: &str, size: usize) -> (String, String) {
     )
 }
 
-pub(crate) fn producer(
-    url: &str,
-    token: &str,
-    size: usize,
-    warmup: Duration,
-    stop_file: &Path,
-) -> Result<f64> {
-    let key = format!("omq:bench:rust:{token}:{size}");
-    let payload = vec![b'x'; size];
+pub(crate) fn producer(url: &str, run: &ProducerRun<'_>) -> Result<f64> {
+    let key = format!("omq:bench:rust:{}:{}", run.token, run.size);
+    let payload = vec![b'x'; run.size];
     let client = redis::Client::open(url)?;
     let mut conn = client.get_connection()?;
     let mut sent = 0_u64;
-    let mut cpu = CpuWindow::new(warmup);
+    let mut cpu = CpuWindow::new(run.warmup);
     loop {
         let _: String = redis::cmd("XADD")
             .arg(&key)
@@ -41,11 +34,85 @@ pub(crate) fn producer(
             .query(&mut conn)?;
         sent += 1;
         cpu.sample_start()?;
-        if stop_requested(stop_file, sent, 1) {
+        if stop_requested(run.stop_file, sent, 1) {
             break;
         }
     }
     cpu.finish()
+}
+
+/// Blocking stream reader of one throughput run.
+struct StreamReader {
+    conn: redis::Connection,
+    key: String,
+    size: usize,
+    last_id: String,
+    /// Looked up before the warmup, as `podman inspect` takes a while.
+    broker_pid: Option<u32>,
+}
+
+/// Counts and CPU times of one measured receive window.
+struct ReceiveWindow {
+    count: u64,
+    elapsed: f64,
+    pull_cpu_time: f64,
+    broker_cpu_time: Option<f64>,
+}
+
+impl StreamReader {
+    /// Reads one batch of up to 1024 entries, checking payload sizes.
+    /// Returns the number of entries read.
+    fn read_batch(&mut self) -> Result<u64> {
+        let value: redis::Value = redis::cmd("XREAD")
+            .arg("COUNT")
+            .arg(1024)
+            .arg("BLOCK")
+            .arg(50)
+            .arg("STREAMS")
+            .arg(&self.key)
+            .arg(&self.last_id)
+            .query(&mut self.conn)?;
+        let mut count = 0_u64;
+        for (entry_id, body) in parse_xread(value)? {
+            if body.len() != self.size {
+                bail!("bad Redis payload size");
+            }
+            self.last_id = entry_id;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    /// Drains the warmup, then measures one window of `duration`.
+    fn run(mut self, warmup: Duration, duration: Duration) -> Result<ReceiveWindow> {
+        let warmup_deadline = Instant::now() + warmup;
+        while Instant::now() < warmup_deadline {
+            self.read_batch()?;
+        }
+
+        let broker_pid = self.broker_pid;
+        let broker_start = broker_pid.and_then(|pid| process_cpu_secs(pid).ok());
+        let pull_start = self_cpu_secs()?;
+        let start = Instant::now();
+        let deadline = start + duration;
+        let mut count = 0_u64;
+        while Instant::now() < deadline {
+            count += self.read_batch()?;
+        }
+        let elapsed = start.elapsed().as_secs_f64();
+        let pull_cpu_time = self_cpu_secs()? - pull_start;
+        let broker_cpu_time = broker_pid
+            .zip(broker_start)
+            .and_then(|(pid, start)| process_cpu_secs(pid).ok().map(|end| end - start));
+
+        let _: () = redis::cmd("DEL").arg(&self.key).query(&mut self.conn)?;
+        Ok(ReceiveWindow {
+            count,
+            elapsed,
+            pull_cpu_time,
+            broker_cpu_time,
+        })
+    }
 }
 
 pub(crate) async fn bench(args: &Args, token: &str, size: usize) -> Result<BenchResult> {
@@ -56,89 +123,27 @@ pub(crate) async fn bench(args: &Args, token: &str, size: usize) -> Result<Bench
 
     let paths = run_paths(token, size);
     clean_paths(&paths)?;
-    let mut producer = spawn_producer(
-        args,
-        "redis-streams",
-        size,
-        token,
-        ProducerFiles {
-            start: &paths.0,
-            stop: &paths.1,
-            result: &paths.2,
-            grpc_port: None,
-        },
-    )?;
-    write_marker(&paths.0)?;
+    let files = ProducerFiles::new(&paths);
+    let mut producer = spawn_producer(args, "redis-streams", size, token, files)?;
+    write_marker(files.start)?;
 
     let warmup = Duration::from_secs_f64(args.warmup);
     let duration = Duration::from_secs_f64(args.duration);
-    let broker_pid_for_measure = broker_pid("redis-streams");
-    let (count, elapsed, pull_cpu_time, broker_cpu_time) =
-        tokio::task::spawn_blocking(move || -> Result<_> {
-            let mut last_id = "$".to_string();
-            let warmup_deadline = Instant::now() + warmup;
-            while Instant::now() < warmup_deadline {
-                let value: redis::Value = redis::cmd("XREAD")
-                    .arg("COUNT")
-                    .arg(1024)
-                    .arg("BLOCK")
-                    .arg(50)
-                    .arg("STREAMS")
-                    .arg(&key)
-                    .arg(&last_id)
-                    .query(&mut conn)?;
-                for (entry_id, body) in parse_xread(value)? {
-                    if body.len() != size {
-                        bail!("bad Redis payload size");
-                    }
-                    last_id = entry_id;
-                }
-            }
-
-            let broker_start = broker_pid_for_measure.and_then(|pid| process_cpu_secs(pid).ok());
-            let pull_start = self_cpu_secs()?;
-            let start = Instant::now();
-            let deadline = start + duration;
-            let mut count = 0_u64;
-            while Instant::now() < deadline {
-                let value: redis::Value = redis::cmd("XREAD")
-                    .arg("COUNT")
-                    .arg(1024)
-                    .arg("BLOCK")
-                    .arg(50)
-                    .arg("STREAMS")
-                    .arg(&key)
-                    .arg(&last_id)
-                    .query(&mut conn)?;
-                for (entry_id, body) in parse_xread(value)? {
-                    if body.len() != size {
-                        bail!("bad Redis payload size");
-                    }
-                    last_id = entry_id;
-                    count += 1;
-                }
-            }
-            let elapsed = start.elapsed().as_secs_f64();
-            let pull_cpu_time = self_cpu_secs()? - pull_start;
-            let broker_cpu_time = broker_pid_for_measure
-                .zip(broker_start)
-                .and_then(|(pid, start)| process_cpu_secs(pid).ok().map(|end| end - start));
-            let _: () = redis::cmd("DEL").arg(&key).query(&mut conn)?;
-            Ok((count, elapsed, pull_cpu_time, broker_cpu_time))
-        })
-        .await??;
-    write_marker(&paths.1)?;
-    let status = producer.wait()?;
-    if !status.success() {
-        bail!("producer failed: {status}");
-    }
-    let push_cpu_time = read_push_cpu(&paths.2)?;
+    let reader = StreamReader {
+        conn,
+        key,
+        size,
+        last_id: "$".to_string(),
+        broker_pid: broker_pid("redis-streams"),
+    };
+    let window = tokio::task::spawn_blocking(move || reader.run(warmup, duration)).await??;
+    let push_cpu_time = stop_producer(files, &mut producer)?;
     Ok(BenchResult {
-        count,
-        elapsed,
-        pull_cpu_time,
+        count: window.count,
+        elapsed: window.elapsed,
+        pull_cpu_time: window.pull_cpu_time,
         push_cpu_time,
-        broker_cpu_time,
+        broker_cpu_time: window.broker_cpu_time,
     })
 }
 
@@ -189,16 +194,16 @@ fn parse_xread(value: redis::Value) -> Result<Vec<(String, Vec<u8>)>> {
     Ok(out)
 }
 
-pub(crate) fn responder(url: &str, token: &str, size: usize, ready_file: &Path) -> Result<()> {
-    let (request_key, response_key) = rpc_keys(token, size);
+pub(crate) fn responder(url: &str, run: &ResponderRun<'_>) -> Result<()> {
+    let (request_key, response_key) = rpc_keys(run.token, run.size);
     let client = redis::Client::open(url)?;
     let mut conn = client.get_connection()?;
     let mut last_id = "0-0".to_string();
-    write_marker(ready_file)?;
+    write_marker(run.ready_file)?;
 
     loop {
         let (entry_id, payload) = xread_one(&mut conn, &request_key, &last_id)?;
-        if payload.len() != size {
+        if payload.len() != run.size {
             bail!("bad Redis request payload size");
         }
         last_id = entry_id;
@@ -224,18 +229,8 @@ pub(crate) async fn latency(args: &Args, token: &str, size: usize) -> Result<Lat
         .arg(&request_key)
         .arg(&response_key)
         .query(&mut conn)?;
-    let responder = spawn_responder(
-        args,
-        "redis-streams",
-        size,
-        token,
-        ProducerFiles {
-            start: &paths.0,
-            stop: &paths.1,
-            result: &paths.2,
-            grpc_port: None,
-        },
-    )?;
+    let files = ProducerFiles::new(&paths);
+    let responder = spawn_responder(args, "redis-streams", size, token, files)?;
     let mut meter = LatencyMeter::new("redis-streams", args.latency_iterations, responder)?;
     wait_for_marker(&paths.0, meter.responder_mut()).await?;
     let payload = vec![b'x'; size];

@@ -69,102 +69,112 @@ fn verified(row: &Value, implementation: &str, size: u64, readers: u64) -> bool 
     let base = implementation
         .strip_suffix("-spin50")
         .unwrap_or(implementation);
-    if base.starts_with("omq-")
-        && (row["recv_mode"] != "blocking"
-            || row["recv_spin_us"] != if base == implementation { 0 } else { 50 }
-            || row["io_spin_us"] != 0
-            || row["queue_capacity"] != 1000)
-    {
-        return false;
+    omq_receive_policy(row, base, base != implementation)
+        && external_receive_policy(row, base)
+        && shm_storage(row, base)
+        && cohort_layout(row, base, size, readers)
+        && rounds_verified(row, readers)
+}
+
+/// OMQ cohorts use blocking receive, HWM 1000, no IO spin, and the receive
+/// spin of their series.
+fn omq_receive_policy(row: &Value, implementation: &str, spin50: bool) -> bool {
+    !implementation.starts_with("omq-")
+        || (row["recv_mode"] == "blocking"
+            && row["recv_spin_us"] == if spin50 { 50 } else { 0 }
+            && row["io_spin_us"] == 0
+            && row["queue_capacity"] == 1000)
+}
+
+/// OMQ SHM cohorts publish ordinary or pooled messages under the default
+/// SHM memory limit.
+fn shm_storage(row: &Value, implementation: &str) -> bool {
+    if !implementation.starts_with("omq-shm") {
+        return true;
     }
-    if !external_receive_policy(row, base) {
-        return false;
-    }
-    let implementation = base;
+    let pool = implementation == "omq-shm-pool";
+    row["transport"] == "shm"
+        && row["storage"] == if pool { "preallocated-shm" } else { "ordinary" }
+        && row["pool_slots"] == if pool { 1024 } else { 0 }
+        && row["shm_max_memory"] == omq_tokio::options::DEFAULT_SHM_MAX_MEMORY
+}
+
+/// Cohort identity, timing, CPU placement, and process layout. Aeron with
+/// 32 readers runs one receiver process and Media Driver per reader.
+fn cohort_layout(row: &Value, implementation: &str, size: u64, readers: u64) -> bool {
     let separate_aeron = implementation.starts_with("aeron-") && readers == 32;
-    if implementation.starts_with("omq-shm")
-        && (row["transport"] != "shm"
-            || row["storage"]
-                != if implementation == "omq-shm-pool" {
-                    "preallocated-shm"
-                } else {
-                    "ordinary"
-                }
-            || row["pool_slots"]
-                != if implementation == "omq-shm-pool" {
-                    1024
-                } else {
-                    0
-                }
-            || row["shm_max_memory"] != omq_tokio::options::DEFAULT_SHM_MAX_MEMORY)
-    {
-        return false;
-    }
-    if row["kind"] != "pub_sub_verified"
-        || row["impl"] != implementation
-        || row["msg_size"] != size
-        || row["peers"] != readers
-        || row["subscriber_processes"] != if separate_aeron { readers } else { 1 }
-        || row["subscriber_threads"] != if separate_aeron { 1 } else { readers }
-        || row["process_layout"]
-            != if separate_aeron {
+    let layout = row["kind"] == "pub_sub_verified"
+        && row["impl"] == implementation
+        && row["msg_size"] == size
+        && row["peers"] == readers
+        && row["subscriber_processes"] == if separate_aeron { readers } else { 1 }
+        && row["subscriber_threads"] == if separate_aeron { 1 } else { readers }
+        && row["process_layout"]
+            == if separate_aeron {
                 "independent-receiver-processes"
             } else {
                 "two-process-shared-receiver"
             }
-        || row["warmup_seconds"] != 1
-        || row["seconds"] != 3
-        || row["publisher_cpus"] != "1,2"
-        || row["subscriber_cpus"] != "3,4"
-        || row["copy_in"] != true
-        || row["binary_sha256"].as_str().is_none()
-    {
-        return false;
-    }
-    if separate_aeron
-        && (row["receiver_context"] != "per-process"
-            || row["media_drivers"] != if implementation == "aeron-ipc" { 1 } else { 33 }
-            || (implementation == "aeron-udp" && row["udp_delivery"] != "mdc-dynamic-min"))
-    {
-        return false;
-    }
+        && row["warmup_seconds"] == 1
+        && row["seconds"] == 3
+        && row["publisher_cpus"] == "1,2"
+        && row["subscriber_cpus"] == "3,4"
+        && row["copy_in"] == true
+        && row["binary_sha256"].as_str().is_some();
+    layout
+        && (!separate_aeron
+            || (row["receiver_context"] == "per-process"
+                && row["media_drivers"] == if implementation == "aeron-ipc" { 1 } else { 33 }
+                && (implementation != "aeron-udp" || row["udp_delivery"] == "mdc-dynamic-min")))
+}
+
+/// Three rounds, each delivering every offered message to every reader.
+fn rounds_verified(row: &Value, readers: u64) -> bool {
     let Some(rounds) = row["rounds"].as_array().filter(|rounds| rounds.len() == 3) else {
         return false;
     };
-    rounds.iter().enumerate().all(|(index, round)| {
-        let offered = round["offered"].as_u64().unwrap_or(0);
-        let Some(counts) = round["reader_counts"].as_array() else {
-            return false;
-        };
-        let Some(times) = round["reader_elapsed"].as_array() else {
-            return false;
-        };
-        let sender = round["sender_elapsed"].as_f64().unwrap_or(0.0);
-        let elapsed = round["elapsed"].as_f64().unwrap_or(0.0);
-        let rate = round["msgs_s"].as_f64().unwrap_or(0.0);
-        let slowest = times
+    rounds
+        .iter()
+        .enumerate()
+        .all(|(index, round)| round_verified(index, round, readers))
+}
+
+/// One round: complete reader counts, positive reader intervals, at least
+/// 3 s of publishing, and a rate over the slowest reader's drain.
+fn round_verified(index: usize, round: &Value, readers: u64) -> bool {
+    let offered = round["offered"].as_u64().unwrap_or(0);
+    let Some(counts) = round["reader_counts"].as_array() else {
+        return false;
+    };
+    let Some(times) = round["reader_elapsed"].as_array() else {
+        return false;
+    };
+    let sender = round["sender_elapsed"].as_f64().unwrap_or(0.0);
+    let elapsed = round["elapsed"].as_f64().unwrap_or(0.0);
+    let rate = round["msgs_s"].as_f64().unwrap_or(0.0);
+    let slowest = times
+        .iter()
+        .filter_map(Value::as_f64)
+        .fold(sender, f64::max);
+
+    round["round"] == index + 1
+        && offered > 0
+        && counts.len() as u64 == readers
+        && counts.iter().all(|count| count.as_u64() == Some(offered))
+        && times.len() as u64 == readers
+        && times
             .iter()
-            .filter_map(Value::as_f64)
-            .fold(sender, f64::max);
-        round["round"] == index + 1
-            && offered > 0
-            && counts.len() as u64 == readers
-            && counts.iter().all(|count| count.as_u64() == Some(offered))
-            && times.len() as u64 == readers
-            && times
-                .iter()
-                .all(|time| time.as_f64().is_some_and(|v| v.is_finite() && v > 0.0))
-            && sender.is_finite()
-            && sender >= 3.0
-            && elapsed.is_finite()
-            && (elapsed - slowest).abs() < 1e-6
-            && rate.is_finite()
-            && rate > 0.0
-            && (rate - offered as f64 / elapsed).abs() < rate * 1e-6
-            && ["missing", "duplicates", "gaps", "corrupt"]
-                .iter()
-                .all(|field| round[field] == 0)
-    })
+            .all(|time| time.as_f64().is_some_and(|v| v.is_finite() && v > 0.0))
+        && sender.is_finite()
+        && sender >= 3.0
+        && elapsed.is_finite()
+        && (elapsed - slowest).abs() < 1e-6
+        && rate.is_finite()
+        && rate > 0.0
+        && (rate - offered as f64 / elapsed).abs() < rate * 1e-6
+        && ["missing", "duplicates", "gaps", "corrupt"]
+            .iter()
+            .all(|field| round[field] == 0)
 }
 
 pub(super) fn prepare() -> Vec<Chart> {
@@ -185,52 +195,10 @@ pub(super) fn prepare() -> Vec<Chart> {
             LOCAL,
         ),
     ] {
-        let mut rows = Vec::new();
-        for &readers in READERS {
-            let mut bandwidth = ValMap::new();
-            let mut messages = ValMap::new();
-            let mut spread = FairnessMap::new();
-            for implementation in implementations {
-                for &size in SIZES {
-                    let row = cached
-                        .iter()
-                        .rev()
-                        .find(|row| verified(row, implementation.key, size, readers))
-                        .unwrap_or_else(|| {
-                            panic!(
-                                "missing verified fan-out cohort: {} {size} B {readers} readers; run scripts/rivals/run_fanout.rb",
-                                implementation.key
-                            )
-                        });
-                    let mut rates: Vec<_> = row["rounds"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .map(|round| round["msgs_s"].as_f64().unwrap())
-                        .collect();
-                    rates.sort_by(f64::total_cmp);
-                    messages
-                        .entry(size)
-                        .or_default()
-                        .insert(implementation.key.into(), rates[1]);
-                    bandwidth
-                        .entry(size)
-                        .or_default()
-                        .insert(implementation.key.into(), rates[1] * size as f64 / 1e6);
-                    spread.entry(size).or_default().insert(
-                        implementation.key.into(),
-                        FairnessEntry {
-                            min: rates[0],
-                            p25: rates[0].midpoint(rates[1]),
-                            median: rates[1],
-                            p75: rates[1].midpoint(rates[2]),
-                            max: rates[2],
-                        },
-                    );
-                }
-            }
-            rows.push((readers, bandwidth, messages, spread));
-        }
+        let rows = READERS
+            .iter()
+            .map(|&readers| reader_row(&cached, implementations, readers))
+            .collect();
         charts.push(Chart {
             filename,
             title,
@@ -239,6 +207,64 @@ pub(super) fn prepare() -> Vec<Chart> {
         });
     }
     charts
+}
+
+/// One chart row: the median of three verified rounds per implementation
+/// and size, with all three rounds as the spread.
+fn reader_row(
+    cached: &[Value],
+    implementations: &[Impl],
+    readers: u64,
+) -> (u64, ValMap, ValMap, FairnessMap) {
+    let mut bandwidth = ValMap::new();
+    let mut messages = ValMap::new();
+    let mut spread = FairnessMap::new();
+    for implementation in implementations {
+        for &size in SIZES {
+            let row = cached
+                .iter()
+                .rev()
+                .find(|row| verified(row, implementation.key, size, readers))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "missing verified fan-out cohort: {} {size} B {readers} readers; run scripts/rivals/run_fanout.rb",
+                        implementation.key
+                    )
+                });
+            let rates = sorted_round_rates(row);
+            messages
+                .entry(size)
+                .or_default()
+                .insert(implementation.key.into(), rates[1]);
+            bandwidth
+                .entry(size)
+                .or_default()
+                .insert(implementation.key.into(), rates[1] * size as f64 / 1e6);
+            spread.entry(size).or_default().insert(
+                implementation.key.into(),
+                FairnessEntry {
+                    min: rates[0],
+                    p25: rates[0].midpoint(rates[1]),
+                    median: rates[1],
+                    p75: rates[1].midpoint(rates[2]),
+                    max: rates[2],
+                },
+            );
+        }
+    }
+    (readers, bandwidth, messages, spread)
+}
+
+/// Per-round message rates of a verified row, ascending.
+fn sorted_round_rates(row: &Value) -> Vec<f64> {
+    let mut rates: Vec<_> = row["rounds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|round| round["msgs_s"].as_f64().unwrap())
+        .collect();
+    rates.sort_by(f64::total_cmp);
+    rates
 }
 
 pub(super) fn draw(charts: &[Chart]) {

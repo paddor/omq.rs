@@ -115,8 +115,8 @@ jobs:
       - id: matrix
         run: |
           if [[ "${{ github.event_name }}" == "schedule" || "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo 'test_matrix={"include":[{"toolchain":"1.93","os":"ubuntu-latest"},{"toolchain":"beta","os":"ubuntu-latest"},{"toolchain":"stable","os":"macos-15"},{"toolchain":"stable","os":"windows-latest","target":"x86_64-pc-windows-msvc"}]}' >> "$GITHUB_OUTPUT"
-            echo 'lint_matrix={"include":[{"name":"Linux","kind":"rust","os":"ubuntu-latest"},{"name":"Linux beta","kind":"rust","os":"ubuntu-latest","toolchain":"beta"},{"name":"macOS Intel","kind":"rust","os":"macos-15-intel"},{"name":"macOS ARM64","kind":"rust","os":"macos-15"},{"name":"Windows","kind":"rust","os":"windows-latest"},{"name":"pyomq","kind":"pyomq","os":"ubuntu-latest"}]}' >> "$GITHUB_OUTPUT"
+            echo 'test_matrix={"include":[{"toolchain":"1.93","os":"ubuntu-latest"},{"toolchain":"stable","os":"macos-15"},{"toolchain":"stable","os":"windows-latest","target":"x86_64-pc-windows-msvc"}]}' >> "$GITHUB_OUTPUT"
+            echo 'lint_matrix={"include":[{"name":"Linux","kind":"rust","os":"ubuntu-latest"},{"name":"macOS Intel","kind":"rust","os":"macos-15-intel"},{"name":"macOS ARM64","kind":"rust","os":"macos-15"},{"name":"Windows","kind":"rust","os":"windows-latest"},{"name":"pyomq","kind":"pyomq","os":"ubuntu-latest"}]}' >> "$GITHUB_OUTPUT"
             echo 'pyomq_matrix={"include":[{"python-version":"3.12","os":"ubuntu-latest"},{"python-version":"3.14","os":"ubuntu-latest"},{"python-version":"3.14","os":"windows-latest"},{"python-version":"3.14","os":"macos-15"}]}' >> "$GITHUB_OUTPUT"
             echo 'java_matrix={"include":[{"os":"ubuntu-latest","java":"21"},{"os":"ubuntu-latest","java":"25"},{"os":"macos-15","java":"21"},{"os":"macos-15","java":"25"},{"os":"windows-latest","java":"21"},{"os":"windows-latest","java":"25"}]}' >> "$GITHUB_OUTPUT"
             echo 'ruby_matrix={"include":[{"ruby":"3.3","os":"ubuntu-latest"},{"ruby":"4.0","os":"ubuntu-latest","cztop":true},{"ruby":"truffleruby","os":"ubuntu-latest"},{"ruby":"4.0","os":"macos-15"}]}' >> "$GITHUB_OUTPUT"
@@ -397,11 +397,6 @@ jobs:
       - name: cargo nextest (macOS)
         if: runner.os == 'macOS'
         run: cargo nextest run --profile ci --workspace --test-threads=1
-      - name: cargo nextest (beta features)
-        if: matrix.toolchain == 'beta'
-        run: >-
-          cargo nextest run --profile ci --workspace
-          --features "plain curve lz4 zstd ws quic dart copy-stats bench-mt-runtime"
 
   encryption:
     name: encryption (curve, ${{ matrix.os }})

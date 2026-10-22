@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CURVE seals each MESSAGE frame once, in place in the connection output
   buffer, and decrypts small frames into inline payloads. MESSAGE boxes use
   `salsabox`, a SIMD XSalsa20-Poly1305.
+- CURVE handshake boxes and cookies use `salsabox` too. `crypto_box` and
+  `crypto_secretbox` are no longer dependencies.
 
 ## [0.34.0] - 2026-10-20
 

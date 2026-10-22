@@ -31,7 +31,7 @@ All opt-in. Default build needs no C compiler and no crypto deps.
 | Feature | Adds | Dependencies |
 |---------|------|--------------|
 | `plain` | PLAIN mechanism | none |
-| `curve` | CURVE mechanism (RFC 26) | `crypto_box`, `crypto_secretbox` |
+| `curve` | CURVE mechanism (RFC 26) | `salsabox`, `x25519-dalek` |
 | `lz4` | LZ4 compression | `lz4rip` |
 | `zstd` | zstd compression | `zrip` |
 | `ws` | WebSocket transport | - (backends add `rustls`) |

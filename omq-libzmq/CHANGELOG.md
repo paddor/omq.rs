@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `zmq_curve_public` and CURVE server setup derive public keys through
+  `CurveSecretKey::derive_public`. `crypto_box` is no longer a dependency.
+
 ## [0.5.27] - 2026-10-22
 
 ### Fixed

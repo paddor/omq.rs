@@ -416,9 +416,7 @@ impl SocketOverlay {
 /// libzmq stores only the CURVE server secret key; derive the public half from it.
 fn curve_server_setup(secret_key: &[u8; 32]) -> MechanismSetup {
     let sec = omq_tokio::CurveSecretKey::from_bytes(*secret_key);
-    let crypto_sec = crypto_box::SecretKey::from(*secret_key);
-    let crypto_pub = crypto_sec.public_key();
-    let pubk = omq_tokio::CurvePublicKey::from_bytes(*crypto_pub.as_bytes());
+    let pubk = sec.derive_public();
 
     MechanismSetup::CurveServer {
         our_keypair: omq_tokio::CurveKeypair {

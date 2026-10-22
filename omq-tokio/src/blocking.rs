@@ -612,6 +612,28 @@ impl Socket {
         self.ctx.block_on(async move { s.connections().await })
     }
 
+    /// Return the generation of the ready connection set.
+    pub fn connections_generation(&self) -> u64 {
+        self.inner.connections_generation()
+    }
+
+    /// Wait until the connection generation differs from `seen`.
+    ///
+    /// Returns the new generation, or `Error::Timeout` when `timeout`
+    /// expires first.
+    pub fn connections_changed(&self, seen: u64, timeout: Duration) -> Result<u64> {
+        let s = self.inner.clone_shared();
+        let deadline = crate::socket::deadline_after(timeout).map(tokio::time::Instant::from_std);
+        self.ctx.block_on(async move {
+            match deadline {
+                Some(deadline) => tokio::time::timeout_at(deadline, s.connections_changed(seen))
+                    .await
+                    .map_err(|_| Error::Timeout)?,
+                None => s.connections_changed(seen).await,
+            }
+        })
+    }
+
     /// Close this socket with its configured linger setting.
     pub fn close(self) -> Result<()> {
         let s = self.inner;
@@ -650,6 +672,26 @@ mod tests {
         let pull = ctx.blocking_socket(SocketType::Pull, Options::default());
         pull.bind(endpoint.clone()).unwrap();
         pull
+    }
+
+    #[test]
+    fn connections_changed_times_out_then_sees_peer() {
+        let ctx = Context::new();
+        let endpoint = endpoint("blocking-conn-changed");
+        let pull = blocking_pull(&ctx, &endpoint);
+        let seen = pull.connections_generation();
+        assert!(matches!(
+            pull.connections_changed(seen, Duration::from_millis(20)),
+            Err(Error::Timeout)
+        ));
+
+        let push = ctx.blocking_socket(SocketType::Push, Options::default());
+        push.connect(endpoint).unwrap();
+        let changed = pull
+            .connections_changed(seen, Duration::from_secs(2))
+            .unwrap();
+        assert_ne!(changed, seen);
+        assert_eq!(pull.connections().unwrap().len(), 1);
     }
 
     #[test]

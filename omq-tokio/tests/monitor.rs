@@ -63,6 +63,47 @@ async fn monitor_capacity_bounds_retained_events() {
 }
 
 #[tokio::test]
+async fn connections_changed_tracks_ready_set_until_close() {
+    let ep = inproc_ep("conn-changed");
+    let server = Socket::new(SocketType::Pull, Options::default());
+    server.bind(ep.clone()).await.unwrap();
+    let watcher = server.clone_shared();
+    let initial = server.connections_generation();
+
+    let client = Socket::new(SocketType::Push, Options::default());
+    client.connect(ep).await.unwrap();
+    let joined = tokio::time::timeout(Duration::from_secs(2), server.connections_changed(initial))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(joined, initial);
+    assert_eq!(server.connections().await.unwrap().len(), 1);
+    assert_eq!(server.connections_changed(initial).await.unwrap(), joined);
+
+    client.close().await.unwrap();
+    let left = tokio::time::timeout(Duration::from_secs(2), server.connections_changed(joined))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(left, joined);
+    assert!(server.connections().await.unwrap().is_empty());
+
+    server.close().await.unwrap();
+    let closed = tokio::time::timeout(Duration::from_secs(2), async {
+        let mut seen = left;
+        loop {
+            match watcher.connections_changed(seen).await {
+                Ok(generation) => seen = generation,
+                Err(error) => return error,
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(matches!(closed, omq_tokio::Error::Closed));
+}
+
+#[tokio::test]
 async fn monitor_full_lifecycle_on_pair() {
     let ep = inproc_ep("mon-lifecycle");
     let server = Socket::new(SocketType::Pair, Options::default());

@@ -26,8 +26,8 @@ pub use omq_proto::monitor::{
 /// may lag (see [`omq_proto::Options::monitor_capacity`]). Do not use
 /// monitor events for readiness gating in production. Use
 /// [`crate::Socket::wait_connected`] or [`crate::Socket::connections`] for
-/// routing
-/// readiness.
+/// routing readiness, and [`crate::Socket::connections_changed`] to track
+/// the connection set.
 #[derive(Debug)]
 pub struct MonitorStream {
     rx: broadcast::Receiver<MonitorEvent>,

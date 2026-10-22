@@ -134,6 +134,9 @@ N-to-1 PUSH/PULL over TCP.
   <img src="doc/charts/pubsub/ipc.svg" alt="PUB/SUB throughput: IPC" width="850">
 </p>
 
+The CURVE chart pins the publisher to CPUs 1-2 and the subscriber process to
+CPUs 3-4.
+
 <p align="center">
   <img src="doc/charts/pubsub/curve_tcp.svg" alt="CURVE PUB/SUB throughput: TCP" width="850">
 </p>

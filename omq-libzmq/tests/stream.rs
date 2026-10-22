@@ -18,6 +18,8 @@ fn accept_raw(listener: &TcpListener) -> TcpStream {
     loop {
         match listener.accept() {
             Ok((peer, _)) => {
+                // macOS and Windows accept in the listener's nonblocking mode.
+                peer.set_nonblocking(false).unwrap();
                 peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
                 return peer;
             }

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.35.0] - 2026-10-22
+
+### Breaking
+
+- `Options` has new public fields, so exhaustive struct literals must add
+  them.
+
 ### Added
 
 - `Options::monitor_capacity` sets the monitor event queue capacity.

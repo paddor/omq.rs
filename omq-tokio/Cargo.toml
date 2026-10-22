@@ -1,6 +1,6 @@
 [package]
 name = "omq-tokio"
-version = "0.30.2"
+version = "0.31.0"
 edition.workspace = true
 rust-version.workspace = true
 autotests = false
@@ -68,7 +68,7 @@ quinn-udp = { version = "0.6.3", optional = true, default-features = false }
 nix = { version = "0.31", default-features = false, features = ["signal"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-omq-shm = { path = "../omq-shm", version = "0.2.4" }
+omq-shm = { path = "../omq-shm", version = "0.3.0" }
 
 [dev-dependencies]
 serde_json = "1.0.154"

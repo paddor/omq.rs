@@ -192,6 +192,7 @@ pub(super) struct DecodeInput<'a> {
 impl DecodeInput<'_> {
     /// SHM delivery moves message headers after carrier input is budgeted,
     /// so untransformed SHM receives are charged one header each.
+    #[cfg_attr(not(target_os = "linux"), expect(clippy::unused_self))]
     fn charges_headers(&self) -> bool {
         #[cfg(target_os = "linux")]
         {
@@ -472,7 +473,6 @@ pub(super) fn poll_received_locked(
     Ok(connection.poll_message())
 }
 
-#[cfg_attr(not(target_os = "linux"), expect(clippy::unnecessary_wraps))]
 pub(super) fn poll_received_message(
     connection: &mut Connection,
     #[cfg(target_os = "linux")] shm: Option<&crate::transport::shm::ShmState>,

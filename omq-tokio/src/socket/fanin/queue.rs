@@ -128,6 +128,7 @@ impl Queue {
             indices: FxHashMap::default(),
         }
     }
+    #[cfg_attr(not(target_os = "linux"), expect(clippy::unused_self))]
     pub(super) fn register(&mut self, id: mpsc::LaneId) {
         #[cfg(target_os = "linux")]
         {

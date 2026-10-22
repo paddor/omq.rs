@@ -199,7 +199,8 @@ where
     /// Application-data output: one socket-owned fanring producer, or the
     /// caller's combined Tokio queue for a standalone driver.
     peer_out: PeerOutput,
-    notify_xpub: bool,
+    /// Peer SUBSCRIBE admission and XPUB receive notifications.
+    subscriptions: super::peer_events::SubscriptionGate,
     /// Socket-owned drivers publish codec protocol events independently of
     /// the bounded application-data mailbox. Standalone drivers keep their
     /// supplied combined channel and its event ordering.

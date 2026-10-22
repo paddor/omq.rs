@@ -1,4 +1,4 @@
-//! Prefix-subscription matcher for PUB-side filtering.
+//! Prefix-subscription matcher and SUBSCRIBE admission for PUB-side filtering.
 //!
 //! Backed by `patricia_tree::PatriciaMap` so the per-message match is
 //! O(M) on the topic length, not O(N×M) on subscription count. The
@@ -6,7 +6,11 @@
 //! as an explicit count - it would otherwise be an awkward special
 //! case for `get_longest_common_prefix` against an empty stored key.
 
+use std::sync::Arc;
+
 use patricia_tree::PatriciaMap;
+
+use crate::proto::command::PeerProperties;
 
 /// Reference-counted topic prefixes used for subscription matching.
 #[derive(Debug, Default, Clone)]
@@ -55,6 +59,46 @@ impl SubscriptionSet {
             return true;
         }
         self.set.get_longest_common_prefix(topic).is_some()
+    }
+}
+
+/// One SUBSCRIBE that a PUB or XPUB socket received from a peer.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct SubscriptionRequest<'a> {
+    /// Requested topic prefix. Empty subscribes to every topic.
+    pub prefix: &'a [u8],
+    /// READY properties of the requesting peer. `authentication` holds the
+    /// locally verified facts; the other fields are peer claims.
+    pub peer: &'a PeerProperties,
+}
+
+/// Admission callback for SUBSCRIBE commands on PUB and XPUB sockets.
+///
+/// Called once per SUBSCRIBE, on the connection task, so it must not block.
+/// A rejected subscription is not registered, not counted, not reported to
+/// monitors, and not surfaced on XPUB receive. CANCEL is not filtered.
+#[derive(Clone)]
+pub struct SubscriptionAdmission(Arc<dyn Fn(&SubscriptionRequest<'_>) -> bool + Send + Sync>);
+
+impl SubscriptionAdmission {
+    /// Create an admission callback; false rejects the subscription.
+    pub fn new<F>(f: F) -> Self
+    where
+        F: Fn(&SubscriptionRequest<'_>) -> bool + Send + Sync + 'static,
+    {
+        Self(Arc::new(f))
+    }
+
+    /// Ask the callback whether `peer` may subscribe to `prefix`.
+    pub fn admits(&self, prefix: &[u8], peer: &PeerProperties) -> bool {
+        (self.0)(&SubscriptionRequest { prefix, peer })
+    }
+}
+
+impl std::fmt::Debug for SubscriptionAdmission {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SubscriptionAdmission(<closure>)")
     }
 }
 

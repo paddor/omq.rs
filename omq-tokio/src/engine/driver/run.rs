@@ -329,7 +329,7 @@ where
             .or_else(|| heartbeat.since_last_input(self.config.handshake_timeout));
 
         let session = Session {
-            peer_events: PeerEventDispatch::for_xpub(self.notify_xpub),
+            peer_events: PeerEventDispatch::new(self.subscriptions),
             poll_until: None,
             pending_input_error: None,
             pending_receive: None,

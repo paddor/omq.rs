@@ -4,6 +4,7 @@ use super::{
     SocketDriver, SocketType, ZmtpEvent, generated_identity, mpsc, peer_ident_socket_addr,
     supports_groups, supports_subscribe,
 };
+use crate::engine::peer_events::SubscriptionGate;
 use crate::routing::AddedPeer;
 use crate::socket::actor::lifecycle::PeerLifecycle;
 use crate::socket::actor::peer_materialize::{ByteStreamConnection, PeerSetup, new_peer_entry};
@@ -865,6 +866,10 @@ impl SocketDriver {
         };
         match tag {
             0x01 => {
+                // A rejected subscription is consumed, so XPUB never sees it.
+                if !self.admits_subscription(peer_id, prefix) {
+                    return true;
+                }
                 self.send_strategy
                     .peer_subscribe(peer_id, bytes::Bytes::copy_from_slice(prefix));
                 self.socket_type != SocketType::XPub
@@ -875,6 +880,25 @@ impl SocketDriver {
             }
             _ => false,
         }
+    }
+
+    /// Peer SUBSCRIBE handling for one connection. Admission applies to PUB
+    /// and XPUB; only XPUB surfaces subscriptions as messages.
+    pub(super) fn subscription_gate(&self) -> SubscriptionGate {
+        let admission = matches!(self.socket_type, SocketType::Pub | SocketType::XPub)
+            .then(|| self.options.subscription_admission.clone())
+            .flatten();
+        SubscriptionGate::new(self.socket_type == SocketType::XPub, admission)
+    }
+
+    fn admits_subscription(&self, peer_id: u64, prefix: &[u8]) -> bool {
+        let Some(admission) = self.options.subscription_admission.as_ref() else {
+            return true;
+        };
+        self.peers
+            .get(&peer_id)
+            .and_then(|peer| peer.info.as_ref())
+            .is_some_and(|info| admission.admits(prefix, &info.peer_properties))
     }
 
     async fn replay_state_to_peer(
@@ -940,7 +964,7 @@ impl SocketDriver {
 /// `engine::ConnectionDriver` / ZMTP codec stack for in-process peers.
 pub(super) struct InprocDriverCtx {
     pub(super) peer_out: crate::engine::actor_output::PeerOutput,
-    pub(super) notify_xpub: bool,
+    pub(super) subscriptions: SubscriptionGate,
     pub(super) peer_control: mpsc::Sender<(u64, crate::engine::PeerEvent)>,
     pub(super) completion: crate::engine::peer_completion::CompletionProgress,
     pub(super) peer_id: u64,
@@ -1079,7 +1103,7 @@ struct InprocRelay {
     max_message_size: Option<usize>,
     cancel: tokio_util::sync::CancellationToken,
     peer_id: u64,
-    notify_xpub: bool,
+    subscriptions: SubscriptionGate,
     peer_out: crate::engine::actor_output::PeerOutput,
     out: crate::transport::inproc::RelaySender,
     in_rx: crate::transport::inproc::RelayReceiver,
@@ -1092,7 +1116,7 @@ impl InprocRelay {
         let InprocDriverCtx {
             peer_out,
             peer_control,
-            notify_xpub,
+            subscriptions,
             peer_id,
             cancel,
             peer_props,
@@ -1136,7 +1160,7 @@ impl InprocRelay {
             max_message_size,
             cancel,
             peer_id,
-            notify_xpub,
+            subscriptions,
             peer_out,
             out: channels.out,
             in_rx: channels.in_rx,
@@ -1165,6 +1189,7 @@ impl InprocRelay {
             peer_minor: ZMTP_MINOR,
             peer_properties: std::sync::Arc::new(peer_props),
         };
+        self.subscriptions.observe(&handshake);
         tokio::select! {
             biased;
             () = self.cancel.cancelled() => return false,
@@ -1416,10 +1441,10 @@ impl InprocRelay {
             Some(command) => {
                 let _ = self.budget.account(inproc_command_size(&command));
                 let event = ZmtpEvent::Command(command);
-                if self.notify_xpub {
-                    self.pending_notification =
-                        crate::engine::peer_events::xpub_notification(&event);
+                if !self.subscriptions.admits(&event) {
+                    return;
                 }
+                self.pending_notification = self.subscriptions.notification(&event);
                 self.pending_control = Some(event);
             }
             None => self.open.control = false,
@@ -1614,7 +1639,7 @@ mod tests {
         let ctx = InprocDriverCtx {
             peer_out,
             peer_control,
-            notify_xpub: false,
+            subscriptions: SubscriptionGate::default(),
             completion,
             peer_id: 7,
             cancel,

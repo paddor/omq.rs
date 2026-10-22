@@ -315,14 +315,12 @@ fn configure_actor_driver(
     setup: Option<&crate::transport::setup::SetupState>,
     profile: WireProfile,
 ) -> ConnectionDriver<AnyStream> {
-    // XPUB surfaces subscriptions as messages, so the driver reports them.
-    let notify_xpub = socket.socket_type == SocketType::XPub;
     let latency_polling = local_latency_polling(socket, &peer.endpoint, profile.latency);
     let receive_profile =
         ReceiveProfile::from_workload_for_socket(profile.workload, socket.socket_type);
 
     peer_driver
-        .with_actor_control(socket.peer_control_tx.clone(), notify_xpub)
+        .with_actor_control(socket.peer_control_tx.clone(), socket.subscription_gate())
         .with_setup_deadline(
             setup.and_then(|state| state.deadline),
             setup.map(|state| state.cancel.clone()),
@@ -604,7 +602,7 @@ fn spawn_inproc_driver(
 
     let ctx = InprocDriverCtx {
         peer_out: crate::engine::actor_output::PeerOutput::actor(peer_output),
-        notify_xpub: socket.socket_type == SocketType::XPub,
+        subscriptions: socket.subscription_gate(),
         peer_control: socket.peer_control_tx.clone(),
         completion,
         peer_id,

@@ -1,12 +1,15 @@
 //! Bounded codec-event admission into the socket actor mailbox.
 
 use std::mem::size_of;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use omq_proto::flow::DrainBudget;
 use omq_proto::proto::command::PeerProperties;
 use omq_proto::proto::{Command, Connection, Event};
+use omq_proto::subscription::SubscriptionAdmission;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
 
 use super::driver::PeerEvent;
 use super::peer_completion::CompletionProgress;
@@ -21,8 +24,8 @@ pub(super) struct PeerEventDispatch {
     needs_drain: bool,
     handshake_admitted: bool,
     admitted: u64,
-    notify_xpub: bool,
     notification: Option<omq_proto::Message>,
+    subscriptions: SubscriptionGate,
 }
 
 impl PeerEventDispatch {
@@ -42,9 +45,9 @@ impl PeerEventDispatch {
         self.handshake_admitted
     }
 
-    pub(super) fn for_xpub(notify_xpub: bool) -> Self {
+    pub(super) fn new(subscriptions: SubscriptionGate) -> Self {
         Self {
-            notify_xpub,
+            subscriptions,
             ..Self::default()
         }
     }
@@ -151,34 +154,37 @@ impl PeerEventDispatch {
             {
                 sink.set_peer_properties(peer_properties.clone());
             }
+            self.subscriptions.observe(&event);
 
             let bytes = event_work_bytes(&event);
-            if self.notify_xpub {
-                self.notification = xpub_notification(&event);
-            }
-            // The XPUB notification rides the data output right after its
-            // event, so both wait together when that output has no room.
-            if self.notification.is_some() && (!data_clear || !output.has_capacity()) {
-                self.pending = Some(event);
-                return true;
-            }
-
-            let handshake = matches!(event, Event::HandshakeSucceeded { .. });
-            match mailbox.try_send((peer_id, PeerEvent::Event(event))) {
-                Ok(()) => {
-                    self.admitted = self.admitted.wrapping_add(1);
-                    self.handshake_admitted |= handshake;
-                    completion.note_event();
-                }
-                Err(mpsc::error::TrySendError::Full((_, PeerEvent::Event(event)))) => {
+            // A rejected SUBSCRIBE still costs budget but never reaches the
+            // actor or XPUB receive.
+            if self.subscriptions.admits(&event) {
+                self.notification = self.subscriptions.notification(&event);
+                // The XPUB notification rides the data output right after its
+                // event, so both wait together when that output has no room.
+                if self.notification.is_some() && (!data_clear || !output.has_capacity()) {
                     self.pending = Some(event);
                     return true;
                 }
-                Err(mpsc::error::TrySendError::Closed(_)) => return false,
-                Err(mpsc::error::TrySendError::Full(_)) => unreachable!("codec event admission"),
-            }
-            if !self.send_notification(output, peer_id, completion) {
-                return false;
+
+                let handshake = matches!(event, Event::HandshakeSucceeded { .. });
+                match mailbox.try_send((peer_id, PeerEvent::Event(event))) {
+                    Ok(()) => {
+                        self.admitted = self.admitted.wrapping_add(1);
+                        self.handshake_admitted |= handshake;
+                        completion.note_event();
+                    }
+                    Err(TrySendError::Full((_, PeerEvent::Event(event)))) => {
+                        self.pending = Some(event);
+                        return true;
+                    }
+                    Err(TrySendError::Closed(_)) => return false,
+                    Err(TrySendError::Full(_)) => unreachable!("codec event admission"),
+                }
+                if !self.send_notification(output, peer_id, completion) {
+                    return false;
+                }
             }
 
             if !budget.account(bytes) || started.elapsed() >= Duration::from_millis(1) {
@@ -201,7 +207,60 @@ pub(super) struct EventRoute<'a> {
     pub(super) completion: &'a mut CompletionProgress,
 }
 
-pub(crate) fn xpub_notification(event: &Event) -> Option<omq_proto::Message> {
+/// Peer SUBSCRIBE handling for one connection: PUB/XPUB admission and XPUB
+/// receive notifications. Remembers the peer's READY properties so the
+/// admission callback can see who is asking.
+#[derive(Debug, Default)]
+pub(crate) struct SubscriptionGate {
+    notify_xpub: bool,
+    admission: Option<SubscriptionAdmission>,
+    peer: Option<Arc<PeerProperties>>,
+}
+
+impl SubscriptionGate {
+    pub(crate) fn new(notify_xpub: bool, admission: Option<SubscriptionAdmission>) -> Self {
+        Self {
+            notify_xpub,
+            admission,
+            peer: None,
+        }
+    }
+
+    /// Keep the peer properties from the handshake for later SUBSCRIBEs.
+    pub(crate) fn observe(&mut self, event: &Event) {
+        if let Event::HandshakeSucceeded {
+            peer_properties, ..
+        } = event
+            && self.admission.is_some()
+        {
+            self.peer = Some(peer_properties.clone());
+        }
+    }
+
+    /// False for a SUBSCRIBE the admission callback rejects. Fails closed
+    /// if no handshake was observed.
+    pub(crate) fn admits(&self, event: &Event) -> bool {
+        let (Some(admission), Event::Command(Command::Subscribe(prefix))) =
+            (&self.admission, event)
+        else {
+            return true;
+        };
+        self.peer
+            .as_deref()
+            .is_some_and(|peer| admission.admits(prefix, peer))
+    }
+
+    /// XPUB surfaces admitted SUBSCRIBE and CANCEL commands as messages.
+    pub(crate) fn notification(&self, event: &Event) -> Option<omq_proto::Message> {
+        if self.notify_xpub {
+            xpub_notification(event)
+        } else {
+            None
+        }
+    }
+}
+
+fn xpub_notification(event: &Event) -> Option<omq_proto::Message> {
     let (tag, prefix) = match event {
         Event::Command(Command::Subscribe(prefix)) => (0x01, prefix),
         Event::Command(Command::Cancel(prefix)) => (0x00, prefix),

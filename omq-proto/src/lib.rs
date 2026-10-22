@@ -61,3 +61,4 @@ pub use proto::mechanism::{
 pub use proto::mechanism::{CurveKeypair, CurvePublicKey, CurveSecretKey, CurveServerOptions};
 pub use proto::transform::CompressionKind;
 pub use proto::{SocketType, is_compatible};
+pub use subscription::{SubscriptionAdmission, SubscriptionRequest};

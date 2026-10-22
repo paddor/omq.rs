@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Socket::connections_generation` and `Socket::connections_changed` track
   changes to the ready connection set without the lossy monitor stream.
   The blocking socket has both, with a timeout on the wait.
+- PUB and XPUB apply `Options::subscription_admission` to SUBSCRIBE commands
+  and ZMTP 3.0 subscribe messages on every transport. A rejected
+  subscription is not registered, counted, reported to monitors, or surfaced
+  on XPUB receive.
 
 ### Changed
 

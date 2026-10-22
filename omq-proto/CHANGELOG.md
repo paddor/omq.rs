@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `Options::monitor_capacity` sets the monitor event queue capacity.
   Default 256.
+- `Options::subscription_admission` takes a callback that admits or rejects
+  each SUBSCRIBE on PUB and XPUB. It sees a `SubscriptionRequest` with the
+  prefix and the peer's READY properties, including its authentication.
 
 ### Changed
 

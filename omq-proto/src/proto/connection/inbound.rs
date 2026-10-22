@@ -366,7 +366,7 @@ impl Connection {
     #[inline]
     fn decode_assembled_frame(&mut self, flags: FrameFlags, payload: Payload) -> Result<()> {
         #[cfg(feature = "curve")]
-        const CURVE_MESSAGE_PREFIX: &[u8] = b"\x07MESSAGE";
+        use super::super::mechanism::curve::MESSAGE_PREFIX as CURVE_MESSAGE_PREFIX;
 
         // CURVE: wire body is `\x07 "MESSAGE" nonce(8) box(flags(1) || data)`.
         // The MORE and COMMAND bits live in the *encrypted* inner flags byte
@@ -375,7 +375,7 @@ impl Connection {
         // COMMAND-flagged for CURVE traffic.
         #[cfg(feature = "curve")]
         if let Some(FrameTransform::Curve(tx)) = self.transform.as_mut() {
-            let body = payload.as_bytes();
+            let body = payload.as_slice();
             if body.len() >= CURVE_MESSAGE_PREFIX.len()
                 && &body[..CURVE_MESSAGE_PREFIX.len()] == CURVE_MESSAGE_PREFIX
             {
@@ -397,11 +397,11 @@ impl Connection {
     }
 
     #[cfg(feature = "curve")]
-    fn dispatch_decrypted(&mut self, command: bool, more: bool, plaintext: Bytes) -> Result<()> {
+    fn dispatch_decrypted(&mut self, command: bool, more: bool, plaintext: Payload) -> Result<()> {
         if command {
-            self.decode_post_handshake_command(plaintext)?;
+            self.decode_post_handshake_command(plaintext.as_bytes())?;
         } else {
-            self.absorb_data_frame(more, Payload::from_bytes(plaintext))?;
+            self.absorb_data_frame(more, plaintext)?;
         }
         Ok(())
     }

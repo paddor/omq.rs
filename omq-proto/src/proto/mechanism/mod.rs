@@ -762,14 +762,12 @@ impl FrameTransform {
         match self {
             #[cfg(feature = "curve")]
             Self::Curve(tx) => {
-                let plaintext = part.as_bytes();
-                let body = tx.encrypt_message(more, false, &plaintext)?;
-                let wire = CurveTransform::message_command_frame(&body);
                 let flags = if more {
                     FrameFlags::MORE
                 } else {
                     FrameFlags::LAST
                 };
+                let wire = tx.encrypt_message_frame(flags, part.as_slice())?;
                 Ok((flags, wire))
             }
         }

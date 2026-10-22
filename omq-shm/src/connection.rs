@@ -18,13 +18,13 @@ use crate::process::Process;
 use crate::wire::{self, MULTIPART, READER_CLOSED, REFERENCE_BATCH, STATE_BITS};
 use crate::{MAX_LEASES, PREFACE_SIZE, SendPool, batch, socket};
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 use crate::pool::find_slot;
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 use crate::wire::{BODY, COPIED};
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 use crate::{BATCH_MAX_BYTES, BatchKind, COPY_THRESHOLD, body};
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 use omq_proto::Payload;
 
 /// Per-connection SHM encoding and lease state. Used by IO drivers and lanes;

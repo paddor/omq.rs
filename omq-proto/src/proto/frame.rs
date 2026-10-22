@@ -69,26 +69,29 @@ pub fn encode_frame_into(frame: &Frame, out: &mut VecDeque<Bytes>, scratch: &mut
     if scratch.capacity() < MAX_FRAME_HEADER_LEN {
         *scratch = BytesMut::with_capacity(64 * 1024);
     }
-    let size = frame.payload.len();
-    let mut flags = 0u8;
-    if frame.flags.more {
-        flags |= FLAG_MORE;
-    }
-    if frame.flags.command {
-        flags |= FLAG_COMMAND;
-    }
-    if size > MAX_SHORT_FRAME_SIZE {
-        flags |= FLAG_LONG;
-        scratch.put_u8(flags);
-        scratch.put_u64(size as u64);
-    } else {
-        scratch.put_u8(flags);
-        scratch.put_u8(size as u8);
-    }
+    write_header(scratch, frame.flags, frame.payload.len());
     out.push_back(scratch.split().freeze());
     let b = frame.payload.as_bytes();
     if !b.is_empty() {
         out.push_back(b);
+    }
+}
+
+/// Append the header of a frame with `flags` and `payload_len` bytes.
+pub(crate) fn write_header(buf: &mut BytesMut, flags: FrameFlags, payload_len: usize) {
+    let mut bits = 0u8;
+    if flags.more {
+        bits |= FLAG_MORE;
+    }
+    if flags.command {
+        bits |= FLAG_COMMAND;
+    }
+    if payload_len > MAX_SHORT_FRAME_SIZE {
+        buf.put_u8(bits | FLAG_LONG);
+        buf.put_u64(payload_len as u64);
+    } else {
+        buf.put_u8(bits);
+        buf.put_u8(payload_len as u8);
     }
 }
 

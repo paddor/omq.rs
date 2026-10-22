@@ -1,7 +1,8 @@
 //! CURVE mechanism: 4-message handshake (HELLO / WELCOME / INITIATE /
 //! READY) plus per-frame MESSAGE encryption. Wire format follows RFC 26.
 //!
-//! Crypto: X25519 DH + XSalsa20-Poly1305 via `crypto_box::SalsaBox`.
+//! Crypto: X25519 DH + XSalsa20-Poly1305. Handshake boxes use
+//! `crypto_box::SalsaBox`; MESSAGE frames use `salsabox`.
 //! This module is just protocol layout + state machine.
 //!
 //!
@@ -16,18 +17,20 @@
 //! key is consumed when INITIATE is processed.
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use crypto_box::aead::{Aead, AeadInPlace};
-use crypto_box::{Nonce, SalsaBox, Tag};
+use crypto_box::aead::Aead;
+use crypto_box::{Nonce, SalsaBox};
 use rand::Rng;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 use super::curve_cookie::CurveCookieKey;
 use super::{CurveKeypair, CurvePublicKey, CurveServerOptions, MechanismStep, try_error_command};
 use crate::error::{Error, Result};
+use crate::message::{FrameFlags, MAX_INLINE_PAYLOAD, Payload};
 use crate::proto::command::{self, Command, PeerProperties};
 
 /// `NaCl` `crypto_box` construction via the `crypto_box` crate: X25519
-/// DH + `HSalsa20` key derivation + XSalsa20-Poly1305 AEAD.
+/// DH + `HSalsa20` key derivation + XSalsa20-Poly1305 AEAD. Used for the
+/// handshake boxes; MESSAGE frames use `salsabox`.
 struct CurveBox {
     inner: SalsaBox,
 }
@@ -54,23 +57,6 @@ impl CurveBox {
     ) -> core::result::Result<Vec<u8>, crypto_box::aead::Error> {
         self.inner.decrypt(&Nonce::from(*nonce), ciphertext)
     }
-
-    fn encrypt_in_place_detached(&self, nonce: &[u8; 24], buf: &mut [u8]) -> [u8; 16] {
-        self.inner
-            .encrypt_in_place_detached(&Nonce::from(*nonce), b"", buf)
-            .expect("SalsaBox::encrypt infallible without AAD")
-            .into()
-    }
-
-    fn decrypt_in_place_detached(
-        &self,
-        nonce: &[u8; 24],
-        buf: &mut [u8],
-        tag: &[u8; 16],
-    ) -> core::result::Result<(), crypto_box::aead::Error> {
-        self.inner
-            .decrypt_in_place_detached(&Nonce::from(*nonce), b"", buf, &Tag::from(*tag))
-    }
 }
 
 impl std::fmt::Debug for CurveBox {
@@ -86,6 +72,13 @@ const NONCE_MESSAGE_C: &[u8; 16] = b"CurveZMQMESSAGEC";
 const NONCE_MESSAGE_S: &[u8; 16] = b"CurveZMQMESSAGES";
 const NONCE_WELCOME_PREFIX: &[u8; 8] = b"WELCOME-";
 const NONCE_VOUCH_PREFIX: &[u8; 8] = b"VOUCH---";
+
+/// Command name that starts every MESSAGE frame payload.
+pub(crate) const MESSAGE_PREFIX: &[u8; 8] = b"\x07MESSAGE";
+/// MESSAGE payload offset of the Poly1305 tag, after prefix and nonce.
+const MESSAGE_TAG_OFFSET: usize = MESSAGE_PREFIX.len() + 8;
+/// MESSAGE payload offset of the box, after the tag.
+const MESSAGE_BOX_OFFSET: usize = MESSAGE_TAG_OFFSET + 16;
 
 /// Construct a 24-byte nonce as `prefix(16) || counter_be(8)`.
 fn nonce_short(prefix: &[u8; 16], counter: u64) -> [u8; 24] {
@@ -125,7 +118,7 @@ fn validate_dh_not_zero(our_secret: &StaticSecret, peer_public: &[u8; 32]) -> Re
 /// MESSAGE commands, decrypts incoming MESSAGE commands.
 pub struct CurveTransform {
     /// Box keyed on (our transient secret, peer transient public).
-    salsa: CurveBox,
+    salsa: salsabox::BoxKey,
     /// Outgoing MESSAGE nonce counter.
     out_counter: u64,
     /// Incoming MESSAGE nonce counter. Must increase monotonically (RFC 26).
@@ -146,52 +139,69 @@ impl std::fmt::Debug for CurveTransform {
 }
 
 impl CurveTransform {
-    /// Encrypt a single frame's payload, returning the body of the MESSAGE
-    /// command after the `\x07MESSAGE` name prefix:
-    /// `nonce(8) || box(flags(1) || plaintext)`. The flags byte lives *inside*
-    /// the encrypted plaintext per RFC 26 / libzmq and carries MORE (0x01) and
-    /// COMMAND (0x02), so a wrapped ZMTP command (e.g. SUBSCRIBE) is told apart
-    /// from application data by the peer.
-    pub(crate) fn encrypt_message(
-        &mut self,
-        more: bool,
-        command: bool,
-        plaintext: &[u8],
-    ) -> Result<Bytes> {
+    /// MESSAGE frame payload length for `plaintext_len` bytes of frame data.
+    pub(crate) const fn message_frame_len(plaintext_len: usize) -> usize {
+        MESSAGE_BOX_OFFSET + 1 + plaintext_len
+    }
+
+    /// Reserve the nonce counter of the next outgoing MESSAGE.
+    pub(crate) fn next_out_counter(&mut self) -> Result<u64> {
         self.out_counter = self
             .out_counter
             .checked_add(1)
             .ok_or_else(|| Error::Protocol("CURVE outbound nonce counter exhausted".into()))?;
-        let nonce = nonce_short(&self.out_prefix, self.out_counter);
-        let pt_len = 1 + plaintext.len();
-        // NaCl wire layout: nonce(8) || tag(16) || ciphertext.
-        let mut buf = BytesMut::with_capacity(8 + 16 + pt_len);
-        buf.put_slice(&self.out_counter.to_be_bytes());
-        buf.put_slice(&[0u8; 16]); // placeholder for tag
-        buf.put_u8(u8::from(more) | (u8::from(command) << 1));
-        buf.extend_from_slice(plaintext);
-        let tag = self
-            .salsa
-            .encrypt_in_place_detached(&nonce, &mut buf[8 + 16..]);
-        buf[8..8 + 16].copy_from_slice(&tag);
-        Ok(buf.freeze())
+        Ok(self.out_counter)
     }
 
-    /// Wrap an encrypted body in the `\x07MESSAGE` ZMTP command frame.
-    pub(crate) fn message_command_frame(body: &[u8]) -> Bytes {
-        let mut wire = BytesMut::with_capacity(8 + body.len());
-        wire.put_u8(b"MESSAGE".len() as u8);
-        wire.put_slice(b"MESSAGE");
-        wire.put_slice(body);
-        wire.freeze()
+    /// Append one MESSAGE frame payload with nonce `counter` to `out`:
+    /// `\x07MESSAGE || nonce(8) || tag(16) || box(flags(1) || plaintext)`.
+    /// The flags byte lives *inside* the box per RFC 26 / libzmq and carries
+    /// MORE (0x01) and COMMAND (0x02), so a wrapped ZMTP command (e.g.
+    /// SUBSCRIBE) is told apart from application data by the peer. The
+    /// plaintext is copied once and encrypted in place.
+    pub(crate) fn seal_message_into(
+        &self,
+        counter: u64,
+        flags: FrameFlags,
+        plaintext: &[u8],
+        out: &mut BytesMut,
+    ) {
+        let start = out.len();
+        out.reserve(Self::message_frame_len(plaintext.len()));
+        out.put_slice(MESSAGE_PREFIX);
+        out.put_slice(&counter.to_be_bytes());
+        out.put_bytes(0, 16); // placeholder for tag
+        out.put_u8(u8::from(flags.more) | (u8::from(flags.command) << 1));
+        out.extend_from_slice(plaintext);
+        let nonce = nonce_short(&self.out_prefix, counter);
+        let tag = self
+            .salsa
+            .encrypt_detached(&nonce, &mut out[start + MESSAGE_BOX_OFFSET..]);
+        out[start + MESSAGE_TAG_OFFSET..start + MESSAGE_BOX_OFFSET].copy_from_slice(&tag);
+    }
+
+    /// Encrypt a single frame into a new MESSAGE frame payload. See
+    /// [`Self::seal_message_into`] for the layout.
+    pub(crate) fn encrypt_message_frame(
+        &mut self,
+        flags: FrameFlags,
+        plaintext: &[u8],
+    ) -> Result<Bytes> {
+        let counter = self.next_out_counter()?;
+        let mut out = BytesMut::with_capacity(Self::message_frame_len(plaintext.len()));
+        self.seal_message_into(counter, flags, plaintext, &mut out);
+        Ok(out.freeze())
     }
 
     /// Decrypt a MESSAGE command body (post-`\x07MESSAGE` prefix). Returns
     /// `(more, command, plaintext)`. Body layout: `nonce(8) || box(flags(1) || data)`.
     /// The inner flags byte carries libzmq's msg flags — MORE (0x01) and COMMAND
     /// (0x02) — so a CURVE-wrapped ZMTP command (e.g. SUBSCRIBE) can be told apart
-    /// from application data.
-    pub(crate) fn decrypt_message(&mut self, body: &[u8]) -> Result<(bool, bool, Bytes)> {
+    /// from application data. Small plaintexts decrypt on the stack into an
+    /// inline payload.
+    pub(crate) fn decrypt_message(&mut self, body: &[u8]) -> Result<(bool, bool, Payload)> {
+        const INLINE_BOX: usize = 1 + MAX_INLINE_PAYLOAD;
+
         if body.len() < 8 + 16 + 1 {
             return Err(Error::Protocol("MESSAGE command too short".into()));
         }
@@ -205,21 +215,26 @@ impl CurveTransform {
         let nonce = nonce_short(&self.in_prefix, counter);
         let tag: [u8; 16] = body[8..8 + 16].try_into().unwrap();
         let ct = &body[8 + 16..];
-        let mut buf = BytesMut::with_capacity(ct.len());
-        buf.extend_from_slice(ct);
-        self.salsa
-            .decrypt_in_place_detached(&nonce, &mut buf, &tag)
-            .map_err(|_| Error::Protocol("CURVE decrypt failed".into()))?;
-        if buf.is_empty() {
-            return Err(Error::Protocol(
-                "CURVE MESSAGE plaintext missing flags".into(),
-            ));
-        }
-        let more = buf[0] & 0x01 != 0;
-        let command = buf[0] & 0x02 != 0;
+        let decrypt_failed = |_| Error::Protocol("CURVE decrypt failed".into());
+        let (flags, plaintext) = if ct.len() <= INLINE_BOX {
+            let mut stack = [0u8; INLINE_BOX];
+            let buf = &mut stack[..ct.len()];
+            buf.copy_from_slice(ct);
+            self.salsa
+                .decrypt_detached(&nonce, buf, &tag)
+                .map_err(decrypt_failed)?;
+            (buf[0], Payload::from_slice(&buf[1..]))
+        } else {
+            let mut buf = BytesMut::from(ct);
+            self.salsa
+                .decrypt_detached(&nonce, &mut buf, &tag)
+                .map_err(decrypt_failed)?;
+            let flags = buf[0];
+            buf.advance(1);
+            (flags, Payload::from_bytes(buf.freeze()))
+        };
         self.in_counter = counter;
-        buf.advance(1);
-        Ok((more, command, buf.freeze()))
+        Ok((flags & 0x01 != 0, flags & 0x02 != 0, plaintext))
     }
 }
 
@@ -229,7 +244,8 @@ fn build_transform(
     out_counter: u64,
     is_server: bool,
 ) -> CurveTransform {
-    let salsa = CurveBox::new(peer_eph_public, our_eph_secret);
+    let shared = our_eph_secret.diffie_hellman(peer_eph_public);
+    let salsa = salsabox::BoxKey::from_shared_secret(shared.as_bytes());
     let (out_prefix, in_prefix) = if is_server {
         (*NONCE_MESSAGE_S, *NONCE_MESSAGE_C)
     } else {
@@ -1147,29 +1163,36 @@ mod tests {
         let mut s_tx = server.build_transform().unwrap();
         let mut c_tx = client.build_transform().unwrap();
 
-        let body = c_tx.encrypt_message(false, false, b"hello server").unwrap();
-        let (more, _command, pt) = s_tx.decrypt_message(&body).unwrap();
+        let body = c_tx
+            .encrypt_message_frame(FrameFlags::LAST, b"hello server")
+            .unwrap();
+        let (more, _command, pt) = s_tx.decrypt_message(&body[MESSAGE_PREFIX.len()..]).unwrap();
         assert!(!more);
-        assert_eq!(&pt[..], b"hello server");
+        assert_eq!(pt.as_slice(), b"hello server");
 
-        let body = s_tx.encrypt_message(true, false, b"hi client").unwrap();
-        let (more, _command, pt) = c_tx.decrypt_message(&body).unwrap();
+        let body = s_tx
+            .encrypt_message_frame(FrameFlags::MORE, b"hi client")
+            .unwrap();
+        let (more, _command, pt) = c_tx.decrypt_message(&body[MESSAGE_PREFIX.len()..]).unwrap();
         assert!(more);
-        assert_eq!(&pt[..], b"hi client");
+        assert_eq!(pt.as_slice(), b"hi client");
 
         // The COMMAND bit must round-trip independently of MORE: it's what lets a
         // CURVE-wrapped ZMTP command (e.g. SUBSCRIBE) be told apart from application data
         // on the far side. Dropping it silently turned every SUBSCRIBE into data, so a PUB
         // never registered a (libzmq) SUB's subscription and the SUB received nothing.
         for (more, command) in [(false, false), (true, false), (false, true), (true, true)] {
-            let body = c_tx.encrypt_message(more, command, b"payload").unwrap();
-            let (got_more, got_command, pt) = s_tx.decrypt_message(&body).unwrap();
+            let body = c_tx
+                .encrypt_message_frame(FrameFlags { more, command }, b"payload")
+                .unwrap();
+            let (got_more, got_command, pt) =
+                s_tx.decrypt_message(&body[MESSAGE_PREFIX.len()..]).unwrap();
             assert_eq!(got_more, more, "MORE bit changed over CURVE");
             assert_eq!(
                 got_command, command,
                 "COMMAND bit lost over CURVE (more={more})"
             );
-            assert_eq!(&pt[..], b"payload");
+            assert_eq!(pt.as_slice(), b"payload");
         }
     }
 

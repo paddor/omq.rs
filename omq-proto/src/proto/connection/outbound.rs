@@ -30,15 +30,9 @@ impl Connection {
             // CURVE post-handshake: commands traverse MESSAGE encryption.
             // The inner flags byte carries COMMAND (0x02) for the peer.
             #[cfg(feature = "curve")]
-            if self.is_ready()
-                && let Some(FrameTransform::Curve(tx)) = self.transform.as_mut()
-            {
-                let plaintext = body.freeze();
-                let enc = tx
-                    .encrypt_message(false, true, &plaintext)
+            if self.is_ready() && self.has_frame_transform() {
+                self.emit_curve_frame(crate::message::FrameFlags::COMMAND, &body)
                     .map_err(|_| Error::Protocol("command encryption failed".into()))?;
-                let wire = CurveTransform::message_command_frame(&enc);
-                self.emit_command_frame(wire);
                 continue;
             }
 
@@ -255,18 +249,53 @@ impl Connection {
     /// COMMAND (0x02) is clear since this is application data.
     #[cfg(feature = "curve")]
     fn send_part_curve(&mut self, more: bool, part: &Payload) -> Result<()> {
-        let Some(FrameTransform::Curve(tx)) = self.transform.as_mut() else {
-            unreachable!("send_part_curve called without curve transform");
-        };
-        let plaintext = part.as_bytes();
-        let body = tx.encrypt_message(more, false, &plaintext)?;
-        let wire = CurveTransform::message_command_frame(&body);
         let flags = if more {
             crate::message::FrameFlags::MORE
         } else {
             crate::message::FrameFlags::LAST
         };
-        self.emit_frame(flags, Payload::from_bytes(wire));
+        self.emit_curve_frame(flags, part.as_slice())
+    }
+
+    /// Encrypt `plaintext` as one MESSAGE frame. `flags` set both the outer
+    /// frame flags and the inner MORE and COMMAND bits. The frame header and
+    /// payload become one chunk: small frames share the header scratch
+    /// allocation, larger ones get their own. The plaintext is copied once
+    /// and encrypted in place.
+    #[cfg(feature = "curve")]
+    fn emit_curve_frame(
+        &mut self,
+        flags: crate::message::FrameFlags,
+        plaintext: &[u8],
+    ) -> Result<()> {
+        let Some(FrameTransform::Curve(tx)) = self.transform.as_mut() else {
+            unreachable!("emit_curve_frame called without curve transform");
+        };
+        #[cfg(feature = "ws")]
+        if self.ws_role.is_some() {
+            let wire = tx.encrypt_message_frame(flags, plaintext)?;
+            self.emit_frame(flags, Payload::from_bytes(wire));
+            return Ok(());
+        }
+        let counter = tx.next_out_counter()?;
+        let len = CurveTransform::message_frame_len(plaintext.len());
+        let total = frame::header_len_for(len) + len;
+        let chunk = if total <= crate::frame_buffer::ARENA_THRESHOLD {
+            let scratch = &mut self.header_scratch;
+            if scratch.capacity() - scratch.len() < total {
+                *scratch = BytesMut::with_capacity(64 * 1024);
+            }
+            frame::write_header(scratch, flags, len);
+            tx.seal_message_into(counter, flags, plaintext, scratch);
+            scratch.split().freeze()
+        } else {
+            let mut owned = BytesMut::with_capacity(total);
+            frame::write_header(&mut owned, flags, len);
+            tx.seal_message_into(counter, flags, plaintext, &mut owned);
+            owned.freeze()
+        };
+        self.out_bytes_total += chunk.len();
+        self.out_chunks.push_back(chunk);
         Ok(())
     }
 

@@ -22,7 +22,7 @@ workspace = true
 #   lz4       lz4+tcp:// transport (pure Rust; lz4rip)
 #   zstd      zstd+tcp:// transport (pure Rust; zrip)
 default = []
-curve = ["dep:crypto_box", "dep:crypto_secretbox", "dep:subtle", "dep:x25519-dalek", "dep:zeroize"]
+curve = ["dep:crypto_box", "dep:crypto_secretbox", "dep:salsabox", "dep:subtle", "dep:x25519-dalek", "dep:zeroize"]
 plain = []
 lz4 = ["dep:lz4rip"]
 zstd = ["dep:zrip"]
@@ -38,6 +38,7 @@ concurrent-queue = "2.5.0"
 bytes = "1.12.1"
 crypto_box = { version = "0.9", optional = true }
 crypto_secretbox = { version = "0.1", optional = true }
+salsabox = { version = "0.1", path = "../../salsabox", optional = true }
 subtle = { version = "2.6", optional = true }
 x25519-dalek = { version = "3", features = ["static_secrets", "getrandom"], optional = true }
 rand = "0.10.3"

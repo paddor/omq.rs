@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- CURVE seals each MESSAGE frame once, in place in the connection output
+  buffer, and decrypts small frames into inline payloads. MESSAGE boxes use
+  `salsabox`, a SIMD XSalsa20-Poly1305.
+
 ## [0.34.0] - 2026-10-20
 
 ### Breaking

@@ -520,7 +520,7 @@ pub(super) fn references(bytes: &[u8]) -> Result<Vec<Reference>> {
         .collect()
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(miri, target_pointer_width = "64")))]
 pub(super) fn decode_references(
     message: &Message,
     maximum: Option<usize>,

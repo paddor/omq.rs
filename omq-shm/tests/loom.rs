@@ -1,4 +1,4 @@
-#![cfg(all(loom, target_os = "linux"))]
+#![cfg(all(loom, target_os = "linux", target_pointer_width = "64"))]
 
 //! Small-state interleavings of the production transitions, not shadow algorithms.
 
@@ -9,6 +9,8 @@ use sync::{Arc, Mutex};
 
 #[path = "../src/coordination.rs"]
 mod coordination;
+// The send pool reads the budget maximum; these models do not.
+#[expect(dead_code)]
 #[path = "../src/memory.rs"]
 mod memory;
 

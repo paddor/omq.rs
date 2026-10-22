@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.0] - 2026-10-22
+
 ### Added
 
 - `Socket::connections_generation` and `Socket::connections_changed` track
@@ -21,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The monitor event queue holds 256 events by default, up from 64, and
   follows `Options::monitor_capacity`.
+- Depend on `omq-proto` 0.35 and `omq-shm` 0.3.
 
 ### Fixed
 

@@ -1,6 +1,6 @@
 [package]
 name = "omq-shm"
-version = "0.2.3"
+version = "0.3.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -18,7 +18,7 @@ workspace = true
 arc-swap = "1.9.2"
 bytes = "1.12.1"
 concurrent-queue = "2.5.0"
-omq-proto = { path = "../omq-proto", version = "0.34.0" }
+omq-proto = { path = "../omq-proto", version = "0.35.0" }
 rand = "0.10.3"
 rustix = { version = "1.1", features = ["event", "fs", "mm", "net", "pipe", "process", "thread"] }
 

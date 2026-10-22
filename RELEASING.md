@@ -83,7 +83,9 @@ GitHub releases. Configuration lives in `release-plz.toml`.
 
 ## Steps
 
-1. **Review the release-plz PR.** Verify semver bumps.
+1. **Review the release-plz PR.** Verify semver bumps. A minor `omq-proto`
+   bump needs minor bumps of `omq-shm`, `omq-tokio`, and `omq-libzmq`, not
+   release-plz's patch: their APIs expose `omq-proto` types.
 
 2. **Curate changelogs.** For each bumped crate, insert a new
    `## [x.y.z]` section below `## [Unreleased]`. Never modify existing

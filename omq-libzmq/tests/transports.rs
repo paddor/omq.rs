@@ -5,7 +5,7 @@ mod helpers;
 
 use std::ffi::{CString, c_void};
 use std::mem::size_of;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use omq_zmq::{
     zmq_bind, zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_term, zmq_recv, zmq_send,
@@ -48,6 +48,24 @@ fn set_i32(sock: *mut c_void, opt: i32, value: i32) {
         "setsockopt {opt} failed, errno={}",
         omq_zmq::zmq_errno()
     );
+}
+
+/// Publish `msg` until `sub` receives it. PUB drops messages sent before
+/// the subscription arrives, so a single send races the connection.
+fn publish_until_received(pub_: *mut c_void, sub: *mut c_void, msg: &[u8]) {
+    set_timeo(sub, 100);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut buf = [0u8; 64];
+    loop {
+        let len = i32::try_from(msg.len()).unwrap();
+        assert_eq!(zmq_send(pub_, msg.as_ptr().cast(), msg.len(), 0), len);
+        let rc = zmq_recv(sub, buf.as_mut_ptr().cast(), buf.len(), 0);
+        if rc >= 0 {
+            assert_eq!(&buf[..usize::try_from(rc).unwrap()], msg);
+            return;
+        }
+        assert!(Instant::now() < deadline, "SUB never received the message");
+    }
 }
 
 fn set_bytes(sock: *mut c_void, opt: i32, data: &[u8]) {
@@ -146,15 +164,7 @@ fn ipc_pub_sub() {
     zmq_bind(pub_, addr.as_ptr());
     zmq_setsockopt(sub, ZMQ_SUBSCRIBE, b"".as_ptr().cast(), 0);
     zmq_connect(sub, addr.as_ptr());
-    std::thread::sleep(Duration::from_millis(100));
-    set_timeo(sub, 2000);
-
-    zmq_send(pub_, b"ipc-pub".as_ptr().cast(), 7, 0);
-
-    let mut buf = [0u8; 64];
-    let rc = zmq_recv(sub, buf.as_mut_ptr().cast(), buf.len(), 0);
-    assert_eq!(rc, 7);
-    assert_eq!(&buf[..7], b"ipc-pub");
+    publish_until_received(pub_, sub, b"ipc-pub");
 
     zmq_close(sub);
     zmq_close(pub_);
@@ -205,15 +215,7 @@ fn ipc_abstract_pub_sub() {
     zmq_bind(pub_, addr.as_ptr());
     zmq_setsockopt(sub, ZMQ_SUBSCRIBE, b"".as_ptr().cast(), 0);
     zmq_connect(sub, addr.as_ptr());
-    std::thread::sleep(Duration::from_millis(100));
-    set_timeo(sub, 2000);
-
-    zmq_send(pub_, b"ipc-pub".as_ptr().cast(), 7, 0);
-
-    let mut buf = [0u8; 64];
-    let rc = zmq_recv(sub, buf.as_mut_ptr().cast(), buf.len(), 0);
-    assert_eq!(rc, 7);
-    assert_eq!(&buf[..7], b"ipc-pub");
+    publish_until_received(pub_, sub, b"ipc-pub");
 
     zmq_close(sub);
     zmq_close(pub_);
@@ -231,15 +233,7 @@ fn tcp_pub_sub() {
     let addr = helpers::bind_random_tcp(pub_);
     zmq_setsockopt(sub, ZMQ_SUBSCRIBE, b"".as_ptr().cast(), 0);
     zmq_connect(sub, addr.as_ptr());
-    std::thread::sleep(Duration::from_millis(100));
-    set_timeo(sub, 2000);
-
-    zmq_send(pub_, b"tcp-pub".as_ptr().cast(), 7, 0);
-
-    let mut buf = [0u8; 64];
-    let rc = zmq_recv(sub, buf.as_mut_ptr().cast(), buf.len(), 0);
-    assert_eq!(rc, 7);
-    assert_eq!(&buf[..7], b"tcp-pub");
+    publish_until_received(pub_, sub, b"tcp-pub");
 
     zmq_close(sub);
     zmq_close(pub_);
@@ -258,20 +252,8 @@ fn tcp_pub_sub_multiple_subscribers() {
     zmq_setsockopt(sub2, ZMQ_SUBSCRIBE, b"".as_ptr().cast(), 0);
     zmq_connect(sub1, addr.as_ptr());
     zmq_connect(sub2, addr.as_ptr());
-    std::thread::sleep(Duration::from_millis(100));
-    set_timeo(sub1, 2000);
-    set_timeo(sub2, 2000);
-
-    zmq_send(pub_, b"multi".as_ptr().cast(), 5, 0);
-
-    let mut buf1 = [0u8; 64];
-    let mut buf2 = [0u8; 64];
-    let rc1 = zmq_recv(sub1, buf1.as_mut_ptr().cast(), buf1.len(), 0);
-    let rc2 = zmq_recv(sub2, buf2.as_mut_ptr().cast(), buf2.len(), 0);
-    assert_eq!(rc1, 5);
-    assert_eq!(rc2, 5);
-    assert_eq!(&buf1[..5], b"multi");
-    assert_eq!(&buf2[..5], b"multi");
+    publish_until_received(pub_, sub1, b"multi");
+    publish_until_received(pub_, sub2, b"multi");
 
     zmq_close(sub1);
     zmq_close(sub2);

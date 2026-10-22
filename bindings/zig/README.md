@@ -44,8 +44,8 @@ zig build test
 - `Socket.join(allocator, group)` and `Socket.leave(allocator, group)` manage
   DISH groups.
 - `Socket.sendGroup(allocator, group, data, flags)` sends RADIO messages.
-- `Socket.setInt`, `Socket.getInt`, `Socket.setBytes`, and typed helpers cover
-  pyomq/libzmq options plus OMQ extensions: on-mute policy, compression knobs,
+- Typed `Socket.set*` helpers (`setLinger`, `setHighWaterMark`,
+  `setIdentity`, and more) cover pyomq/libzmq options plus OMQ extensions: on-mute policy, compression knobs,
   arena threshold, PLAIN/CURVE security, identity, timeouts, HWM, and routing.
 - `omq.poll()` wraps `zmq_poll`.
 - `Poller` gives register/modify/unregister and returns active events.

@@ -40,8 +40,8 @@ down and reconnects.
 |------|--------|--------|------|
 | Async connect + SO_ERROR | Manual non-blocking + getsockopt | Runtime-native `TcpStream::connect` | **=** equivalent |
 | EINTR during connect | Normalize to EINPROGRESS | Runtime handles | **~** |
-| Connect timeout | Separate timer (`connect_timeout`) | Handshake timeout (30s default) covers it | **~** combined timeout |
-| ECONNREFUSED + stop flag | `RECONNECT_STOP_CONN_REFUSED` -> no retry | No equivalent flag; always retries | **X** |
+| Connect timeout | Separate timer (`connect_timeout`) | Handshake timeout (10s default) covers it | **~** combined timeout |
+| ECONNREFUSED + stop flag | `RECONNECT_STOP_CONN_REFUSED` -> no retry | `reconnect_stop_conn_refused` / `ZMQ_RECONNECT_STOP` | **=** |
 | Solaris ENOPROTOOPT compat | Treat as errno=0 | Not handled | **X** niche |
 
 ---
@@ -53,7 +53,7 @@ down and reconnects.
 | Accept error classification | Per-platform acceptable errno lists; abort on unknown | Any accept error backs off 50 ms and retries | **~** less granular; no event |
 | EMFILE/ENFILE | In acceptable list (but TODO: no special handling) | Backoff and retry through generic accept error path | **=** |
 | Post-accept tune failure | Emit EVENT_ACCEPT_FAILED, skip engine | Accepted connection is dropped; accept loop retries | **~** no event |
-| accept4(SOCK_CLOEXEC) | Used where available | Not explicitly set | **X** |
+| accept4(SOCK_CLOEXEC) | Used where available | Set by mio on accept | **=** |
 | SO_EXCLUSIVEADDRUSE (Windows) | Yes (not SO_REUSEADDR) | Not set, OS default | **X** |
 | SO_REUSEADDR (POSIX) | Explicit | Set before bind via socket2 | **=** |
 | TCP accept filters (allowlist) | Address-based accept filtering | Not implemented | **X** |
@@ -69,10 +69,10 @@ down and reconnects.
 | Keepalive (time/interval/retries) | Yes, platform-specific | Yes, via socket2 `TcpKeepalive` | **=** |
 | TCP_USER_TIMEOUT (Linux) | Yes | Yes, opt-in `tcp_user_timeout` / `ZMQ_TCP_MAXRT` | **=** |
 | TCP_MAXRT (Windows) | Yes | No | **X** |
-| SO_NOSIGPIPE (macOS/BSD) | Yes | No (relies on runtime) | **~** tokio uses MSG_NOSIGNAL on send |
+| SO_NOSIGPIPE (macOS/BSD) | Yes | No | **~** OMQ IO threads block SIGPIPE |
 | SO_BUSY_POLL (Linux) | Yes | No | **X** |
 | SIO_LOOPBACK_FAST_PATH (Win) | Yes | No | **X** |
-| SOCK_CLOEXEC / FD_CLOEXEC | Yes | No | **X** |
+| SOCK_CLOEXEC / FD_CLOEXEC | Yes | Set by socket2 and mio | **=** |
 | SO_BINDTODEVICE (Linux) | Yes | No | **X** |
 | TOS / IP priority | Yes | No | **X** |
 
@@ -97,8 +97,8 @@ down and reconnects.
 | Exponential backoff | Double each attempt, cap at max | Exponential with +/-10% jitter | **=** better (jitter) |
 | Fixed interval + jitter (no max) | base + random % base | `Fixed(d)` with +/-10% jitter | **=** |
 | Overflow guard | INT_MAX cap | Duration arithmetic; no overflow risk | **=** |
-| RECONNECT_STOP_CONN_REFUSED | Stop on ECONNREFUSED | Not implemented | **X** |
-| RECONNECT_STOP_HANDSHAKE_FAILED | Reclassify as protocol_error | Protocol errors don't retry; timeout/IO do | **~** similar effect |
+| RECONNECT_STOP_CONN_REFUSED | Stop on ECONNREFUSED | `reconnect_stop_conn_refused` | **=** |
+| RECONNECT_STOP_HANDSHAKE_FAILED | Reclassify as protocol_error | A peer's fatal handshake ERROR stops redial (`ConnectStopped`); local protocol, timeout, and IO errors retry | **~** similar effect |
 | RECONNECT_STOP_AFTER_DISCONNECT | Stop after zmq_disconnect() | CancellationToken on disconnect | **=** equivalent |
 | Resubscription on reconnect | Hiccup pipe -> SUB/XSUB/DISH resend subs | Subscriptions re-sent on new connection | **=** |
 
@@ -120,7 +120,7 @@ down and reconnects.
 | Area | libzmq | omq.rs | Gap? |
 |------|--------|--------|------|
 | HWM enforcement | per-pipe complete-message credits | Per-pipe/ring message caps; transmit slots separate, so effective capacity can exceed one `send_hwm` | **~** |
-| LWM re-activation at half | (hwm+1)/2 triggers activate_write | Channel internal (flume/async_channel) | **~** |
+| LWM re-activation at half | (hwm+1)/2 triggers activate_write | yring/fanring rings with `DataSignal` wakeups | **~** |
 | Round-robin HWM exceeded | Blocks / EAGAIN to user | Block / DropNewest / DropOldest | **=** superset |
 | PUB/XPUB mute | Drop on HWM (`XPUB_NODROP` excepted) | Drop on HWM (`xpub_nodrop` excepted) | **=** |
 | Pipe termination FSM | 6-state machine with delimiter protocol | Channel close + CancellationToken | **~** simpler |
@@ -153,9 +153,9 @@ down and reconnects.
 | PLAIN | Username/password in HELLO, policy through ZAP | Same | **=** |
 | CURVE (RFC 26) | Full, with optional ZAP policy | Same; native API also supports inline authenticators | **=** |
 | ZAP protocol | Context-local inproc REP/ROUTER handler | Same application-facing protocol | **=** |
-| Socket type compat check | 18-type matrix | 18-type matrix | **=** |
+| Socket type compat check | 18-type matrix | 19-type matrix (STREAM has no ZMTP) | **=** |
 | Mechanism mismatch | EVENT + protocol_error | Error::HandshakeFailed | **=** |
-| CURVE nonce replay check | nonce <= previous -> INVALID_SEQUENCE | Nonce exhaustion check; replay? | **~** verify |
+| CURVE nonce replay check | nonce <= previous -> INVALID_SEQUENCE | nonce <= previous -> `Error::Protocol` | **=** |
 | ZAP "300" silent disconnect | No ERROR sent to peer | Same | **=** |
 
 ---
@@ -187,7 +187,7 @@ down and reconnects.
 | BIND_FAILED | Not emitted (bind is sync, returns Result) | **~** |
 | ACCEPTED | `Accepted` | **=** |
 | ACCEPT_FAILED | Not emitted | **X** |
-| CLOSED | `Closed` | **=** |
+| CLOSED | Not emitted | **X** |
 | CLOSE_FAILED | Not emitted | **X** |
 | DISCONNECTED | `Disconnected` (with reason enum) | **=** better |
 | MONITOR_STOPPED | `Closed` | **=** |
@@ -196,6 +196,7 @@ down and reconnects.
 | HANDSHAKE_FAILED_PROTOCOL | `HandshakeFailed` (unified) | **~** no separate code |
 | HANDSHAKE_FAILED_AUTH | `HandshakeFailed` | **~** no separate code |
 | none | `PeerCommand` (ERROR + unknown cmds) | **=** omq-only |
+| none | `ConnectStopped` (redial stopped after a fatal handshake refusal) | **=** omq-only |
 
 ---
 
@@ -222,9 +223,6 @@ down and reconnects.
   of SO_REUSEADDR. Prevents port hijacking on Windows.
 - **TCP_MAXRT (Windows):** Caps kernel-level retransmit time. omq.rs sets
   `TCP_USER_TIMEOUT` on Linux and Android only.
-- **SOCK_CLOEXEC / FD_CLOEXEC:** Prevents fd leak to child processes on
-  fork+exec. Not critical for typical Rust programs (no fork), but matters
-  if the process spawns children.
 - **SO_BUSY_POLL, SIO_LOOPBACK_FAST_PATH, TOS/priority:** Performance
   knobs. Low priority.
 
@@ -232,8 +230,6 @@ down and reconnects.
 
 - **Accept failure observability:** Per-accept failures back off and
   retry, but no `ACCEPT_FAILED` monitor event exposes them to users.
-- **RECONNECT_STOP_CONN_REFUSED:** No way to tell omq.rs "stop retrying
-  if the peer actively refuses." Always retries until socket close.
 
 ### Features
 

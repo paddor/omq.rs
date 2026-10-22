@@ -6,7 +6,7 @@ and HWM block/drop policy remain socket responsibilities.
 
 ## Setup and HTTP policy
 
-WS/WSS requires a finite `handshake_timeout`, default 30 s. One absolute
+WS/WSS requires a finite `handshake_timeout`, default 10 s. One absolute
 deadline covers DNS/connect, TLS, HTTP upgrade, and ZMTP authentication.
 Outbound setup acquires socket admission before DNS; accepted connections
 acquire it before TLS/HTTP work. Admission survives the handoff to the actor

@@ -184,10 +184,11 @@ Language bindings:
 - [COMPARISONS.md](COMPARISONS.md): cross-implementation comparison charts.
 - [PROTOCOL_COMPARISONS.md][other-protocol-comparisons]: throughput and
   request/reply-like latency against other messaging and RPC protocols.
-- [BENCHMARKS_COMPRESSION.md](BENCHMARKS_COMPRESSION.md): lz4+tcp
-  throughput on bandwidth-limited links.
-- [doc/architecture.md](doc/architecture.md): architecture and tokio
-  backend internals.
+- [BENCHMARKS_COMPRESSION.md](BENCHMARKS_COMPRESSION.md): LZ4 and Zstd
+  transport throughput on bandwidth-limited links.
+- [doc/architecture.md](doc/architecture.md): components, threads, and
+  message paths.
+- [doc/bindings.md](doc/bindings.md): C and language bindings.
 - [doc/libzmq/semantics.md](doc/libzmq/semantics.md): exact compatibility
   notes for no-peer sends, linger, and HWM.
 - [doc/lz4-rfc.md](doc/lz4-rfc.md): LZ4 compression transport wire

@@ -120,11 +120,6 @@ Each binary speaks a subcommand protocol:
 - `inproc <name> <size> <duration>`: in-process PUSH/PULL.
 - `rep <addr> <size>` / `req <addr> <size> <iters> <warmup>`: latency.
 
-The `grpc-rust` baseline uses plaintext gRPC over TCP between separate
-processes. PUSH/PULL uses one server-streaming RPC carrying opaque byte
-blobs. REQ/REP uses unary `Echo` RPCs. TLS, compression, retries, and
-application-level QoS are disabled.
-
 Results go to `~/.cache/omq/comparisons.jsonl`. APPEND-ONLY!
 
 OMQ PUSH/PULL sends reuse immutable bodies; tiny messages stay inline. Each send
@@ -570,13 +565,6 @@ auto-includes CURVE impls from the same family as the selected impls
 cargo run --release -p omq-bench -- run comparisons \
   --omq --curve --transport tcp --no-throughput --no-latency
 cargo run --release -p omq-bench -- chart pubsub
-```
-
-### Mechanism Chart
-
-```sh
-cargo run --release -p omq-bench -- run mechanism tokio --chart-sizes
-cargo run --release -p omq-bench -- chart mechanism
 ```
 
 ### Compression Chart

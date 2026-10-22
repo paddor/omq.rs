@@ -278,4 +278,4 @@ git -c push.followTags=false push origin omq-zig-v0.1.0
 
 ## Crates To Check
 
-`omq-proto`, `omq-tokio`, `omq-libzmq`, `pyomq`.
+`omq-proto`, `omq-shm`, `omq-tokio`, `omq-libzmq`, `pyomq`.

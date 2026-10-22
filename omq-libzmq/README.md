@@ -9,7 +9,7 @@ in other languages) to link against omq instead of libzmq.
 ## Features
 
 - **Transports:** `inproc://`, `tcp://`, `ipc://` (including Windows named
-  pipes), `ws://`, `wss://`, and `quic://` with the optional `quic` feature
+  pipes), `udp://`, `ws://`, `wss://`, and `quic://` with the optional `quic` feature
 - **Socket Types:** Standard ZMQ types except DGRAM (PUSH/PULL, PUB/SUB,
   REQ/REP, DEALER/ROUTER, etc.)
 - **Security:** NULL, PLAIN, and CURVE policy through standard ZAP; CURVE

@@ -126,15 +126,26 @@ static int bench_curve_enabled(void) {
 
 static void setup_curve_server(void *sock) {
     int as_server = 1;
-    zmq_setsockopt(sock, ZMQ_CURVE_SERVER, &as_server, sizeof(as_server));
-    zmq_setsockopt(sock, ZMQ_CURVE_PUBLICKEY, CURVE_SERVER_PUBLIC, 40);
-    zmq_setsockopt(sock, ZMQ_CURVE_SECRETKEY, CURVE_SERVER_SECRET, 40);
+    if (zmq_setsockopt(sock, ZMQ_CURVE_SERVER, &as_server, sizeof(as_server)) != 0
+        || zmq_setsockopt(sock, ZMQ_CURVE_PUBLICKEY, CURVE_SERVER_PUBLIC, 40) != 0
+        || zmq_setsockopt(sock, ZMQ_CURVE_SECRETKEY, CURVE_SERVER_SECRET, 40) != 0)
+        die("zmq_setsockopt CURVE server");
 }
 
 static void setup_curve_client(void *sock) {
-    zmq_setsockopt(sock, ZMQ_CURVE_PUBLICKEY, CURVE_CLIENT_PUBLIC, 40);
-    zmq_setsockopt(sock, ZMQ_CURVE_SECRETKEY, CURVE_CLIENT_SECRET, 40);
-    zmq_setsockopt(sock, ZMQ_CURVE_SERVERKEY, CURVE_SERVER_PUBLIC, 40);
+    if (zmq_setsockopt(sock, ZMQ_CURVE_PUBLICKEY, CURVE_CLIENT_PUBLIC, 40) != 0
+        || zmq_setsockopt(sock, ZMQ_CURVE_SECRETKEY, CURVE_CLIENT_SECRET, 40) != 0
+        || zmq_setsockopt(sock, ZMQ_CURVE_SERVERKEY, CURVE_SERVER_PUBLIC, 40) != 0)
+        die("zmq_setsockopt CURVE client");
+}
+
+/* Binding sockets act as CURVE servers, connecting sockets as clients. */
+static void bench_curve_bind(void *sock) {
+    if (bench_curve_enabled()) setup_curve_server(sock);
+}
+
+static void bench_curve_connect(void *sock) {
+    if (bench_curve_enabled()) setup_curve_client(sock);
 }
 
 static void report_bound_port(void *ctx, void *sock) {
@@ -432,7 +443,7 @@ static void run_multi_sub(void *ctx, const char *addr, int size,
     for (int i = 0; i < count; i++) {
         sockets[i] = zmq_socket(ctx, ZMQ_SUB);
         if (!sockets[i]) die("zmq_socket SUB");
-        if (bench_curve_enabled()) setup_curve_client(sockets[i]);
+        bench_curve_connect(sockets[i]);
         if (zmq_setsockopt(sockets[i], ZMQ_SUBSCRIBE, "", 0) != 0)
             die("subscribe");
         if (zmq_connect(sockets[i], addr) != 0) die("zmq_connect");
@@ -496,6 +507,7 @@ int main(int argc, char **argv) {
     if (strcmp(role, "push") == 0) {
         void *sock = zmq_socket(ctx, ZMQ_PUSH);
         if (!sock) die("zmq_socket PUSH");
+        bench_curve_bind(sock);
         if (zmq_bind(sock, addr) != 0) die("zmq_bind");
         report_bound_port(ctx, sock);
         wait_for_start_barrier();
@@ -516,6 +528,7 @@ int main(int argc, char **argv) {
 
         void *sock = zmq_socket(ctx, ZMQ_PULL);
         if (!sock) die("zmq_socket PULL");
+        bench_curve_connect(sock);
         if (zmq_connect(sock, addr) != 0) die("zmq_connect");
         wait_for_start_barrier();
 
@@ -566,6 +579,7 @@ done:;
     } else if (strcmp(role, "push-connect") == 0) {
         void *sock = zmq_socket(ctx, ZMQ_PUSH);
         if (!sock) die("zmq_socket PUSH");
+        bench_curve_connect(sock);
         if (zmq_connect(sock, addr) != 0) die("zmq_connect");
         wait_for_start_barrier();
 
@@ -585,6 +599,7 @@ done:;
 
         void *sock = zmq_socket(ctx, ZMQ_PULL);
         if (!sock) die("zmq_socket PULL");
+        bench_curve_bind(sock);
         if (zmq_bind(sock, addr) != 0) die("zmq_bind");
         report_bound_port(ctx, sock);
         wait_for_start_barrier();
@@ -697,7 +712,7 @@ done_inproc:;
         if (!sock) die("zmq_socket PUB");
         int block = 1;
         zmq_setsockopt(sock, ZMQ_XPUB_NODROP, &block, sizeof(block));
-        if (bench_curve_enabled()) setup_curve_server(sock);
+        bench_curve_bind(sock);
         if (zmq_bind(sock, addr) != 0) die("zmq_bind");
         report_bound_port(ctx, sock);
         wait_for_start_barrier();
@@ -718,7 +733,7 @@ done_inproc:;
 
         void *sock = zmq_socket(ctx, ZMQ_SUB);
         if (!sock) die("zmq_socket SUB");
-        if (bench_curve_enabled()) setup_curve_client(sock);
+        bench_curve_connect(sock);
         zmq_setsockopt(sock, ZMQ_SUBSCRIBE, "", 0);
         if (zmq_connect(sock, addr) != 0) die("zmq_connect");
         wait_for_start_barrier();
@@ -870,6 +885,7 @@ done_inproc_pubsub:;
         for (int i = 0; i < count; i++) {
             sockets[i] = zmq_socket(ctx, ZMQ_PULL);
             if (!sockets[i]) die("zmq_socket PULL");
+            bench_curve_connect(sockets[i]);
             if (zmq_connect(sockets[i], addr) != 0) die("zmq_connect");
             workers[i].sock = sockets[i];
             atomic_store(&workers[i].counter, 0);
@@ -941,6 +957,7 @@ done_inproc_pubsub:;
         for (int i = 0; i < count; i++) {
             sockets[i] = zmq_socket(ctx, ZMQ_PUSH);
             if (!sockets[i]) die("zmq_socket PUSH");
+            bench_curve_connect(sockets[i]);
             if (zmq_connect(sockets[i], addr) != 0) die("zmq_connect");
             workers[i].sock = sockets[i];
             workers[i].size = size;
@@ -997,6 +1014,7 @@ done_inproc_pubsub:;
 
     } else if (strcmp(role, "rep") == 0) {
         void *sock = latency_socket(ctx, 0);
+        bench_curve_bind(sock);
         if (zmq_bind(sock, addr) != 0) die("zmq_bind");
         report_bound_port(ctx, sock);
 
@@ -1010,6 +1028,7 @@ done_inproc_pubsub:;
 
         int routed = latency_socket_type(1) == ZMQ_ROUTER;
         void *sock = latency_socket(ctx, 1);
+        bench_curve_connect(sock);
         if (zmq_connect(sock, addr) != 0) die("zmq_connect");
 
         struct timespec sleep_ts = {0, 200000000};

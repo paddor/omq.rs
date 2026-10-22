@@ -8,6 +8,7 @@ use crate::engine::{
     actor_output::{DataSender, PeerOutput},
     compression_pool::CompressionPool,
     peer_completion::CompletionProgress,
+    peer_events::SubscriptionGate,
     rate_limit::SharedIpRateLimiter,
     send_pipe::SendPipeConsumer,
     transmit_slot::PeerTransmitSlot,
@@ -124,7 +125,7 @@ where
             config,
             completion: CompletionProgress::default(),
             peer_control: None,
-            notify_xpub: false,
+            subscriptions: SubscriptionGate::default(),
             setup_deadline: None,
             setup_cancel: None,
             encoder: None,
@@ -156,9 +157,9 @@ where
     pub(crate) fn with_actor_control(
         mut self,
         control: mpsc::Sender<(u64, PeerEvent)>,
-        notify_xpub: bool,
+        subscriptions: SubscriptionGate,
     ) -> Self {
-        self.notify_xpub = notify_xpub;
+        self.subscriptions = subscriptions;
         self.peer_control = Some(control);
         self
     }

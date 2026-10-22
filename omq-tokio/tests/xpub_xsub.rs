@@ -546,3 +546,107 @@ async fn sub_control_stays_responsive_when_an_xpub_never_reads() {
         .expect("backpressured subscribe outlived close")
         .unwrap();
 }
+
+/// Admits "allowed" prefixes from the peer whose identity is "sub-a".
+fn admit_allowed_from_sub_a() -> Options {
+    Options::default().subscription_admission(|request| {
+        request.prefix.starts_with(b"allowed")
+            && request.peer.identity.as_deref() == Some(b"sub-a".as_slice())
+    })
+}
+
+#[tokio::test]
+async fn pub_subscription_admission_skips_rejected_prefixes() {
+    for endpoint in ["tcp://127.0.0.1:0", "inproc://pub-subscription-admission"] {
+        let pub_ = Socket::new(SocketType::Pub, admit_allowed_from_sub_a());
+        let endpoint = pub_.bind(endpoint).await.unwrap();
+        let sub = Socket::new(SocketType::Sub, Options::default().identity("sub-a"));
+        // Rejected first: once the accepted one counts, both were checked.
+        sub.subscribe("denied.").await.unwrap();
+        sub.subscribe("allowed.").await.unwrap();
+        sub.connect(endpoint).await.unwrap();
+        let subscribed = pub_
+            .wait_subscribed(1, Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert_eq!(subscribed, 1);
+
+        pub_.send(Message::single("denied.x")).await.unwrap();
+        pub_.send(Message::single("allowed.x")).await.unwrap();
+        let received = tokio::time::timeout(Duration::from_secs(2), sub.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received.part_bytes(0).unwrap().as_ref(), b"allowed.x");
+    }
+}
+
+#[tokio::test]
+async fn xpub_hides_rejected_subscriptions() {
+    for endpoint in ["tcp://127.0.0.1:0", "inproc://xpub-subscription-admission"] {
+        let xpub = Socket::new(SocketType::XPub, admit_allowed_from_sub_a());
+        let endpoint = xpub.bind(endpoint).await.unwrap();
+        let sub = Socket::new(SocketType::Sub, Options::default().identity("sub-a"));
+        sub.subscribe("denied.").await.unwrap();
+        sub.subscribe("allowed.").await.unwrap();
+        sub.connect(endpoint).await.unwrap();
+
+        let notification = tokio::time::timeout(Duration::from_secs(2), xpub.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            notification.part_bytes(0).unwrap().as_ref(),
+            b"\x01allowed."
+        );
+    }
+}
+
+#[tokio::test]
+async fn pub_subscription_admission_applies_to_zmtp30_subscribe() {
+    use std::io::{Read, Write};
+
+    let pub_ = Socket::new(
+        SocketType::Pub,
+        Options::default().subscription_admission(|request| request.prefix != b"foo"),
+    );
+    let Endpoint::Tcp { port, .. } = pub_.bind(tcp_loopback(0)).await.unwrap() else {
+        unreachable!("TCP bind");
+    };
+    let addr = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel::<Vec<u8>>();
+    std::thread::spawn(move || {
+        let mut stream = std::net::TcpStream::connect(addr).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        stream.write_all(&zmtp30_sub_greeting()).unwrap();
+        let mut peer_greeting = [0u8; 64];
+        stream.read_exact(&mut peer_greeting).unwrap();
+        stream.write_all(SUB_READY).unwrap();
+        let _ = read_zmtp_frame(&mut stream);
+        // DATA \x01foo (rejected), then DATA \x01bar (admitted).
+        stream
+            .write_all(&[0x00, 0x04, 0x01, b'f', b'o', b'o'])
+            .unwrap();
+        stream
+            .write_all(&[0x00, 0x04, 0x01, b'b', b'a', b'r'])
+            .unwrap();
+        let _ = result_tx.send(read_zmtp_frame(&mut stream));
+    });
+
+    // Legacy subscriptions are not counted, so publish until one arrives.
+    let publish = async {
+        loop {
+            pub_.send(Message::single("foo.x")).await.unwrap();
+            pub_.send(Message::single("bar.x")).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    let received = tokio::select! {
+        received = result_rx => received.unwrap(),
+        () = publish => unreachable!(),
+        () = tokio::time::sleep(Duration::from_secs(3)) => panic!("raw peer received nothing"),
+    };
+    assert_eq!(received, b"bar.x");
+}

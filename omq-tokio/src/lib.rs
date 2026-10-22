@@ -53,6 +53,7 @@ pub use omq_proto::{CurveKeypair, CurvePublicKey, CurveSecretKey, CurveServerOpt
 pub use omq_proto::{DartCongestion, DartEcn, DartOptions};
 pub use omq_proto::{Identity, IpcPath, PeerAuthentication, PeerDiagnostics, PeerPublicKey};
 pub use omq_proto::{PayloadBuffer, PayloadLengthError, PayloadPool};
+pub use omq_proto::{SubscriptionAdmission, SubscriptionRequest};
 /// Preallocate shared-memory storage in an ordinary `PayloadPool` (Linux).
 #[cfg(target_os = "linux")]
 pub use omq_shm::payload_pool as shm_payload_pool;

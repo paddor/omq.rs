@@ -18,6 +18,7 @@ use crate::proto::mechanism::{Authenticator, MechanismPeerInfo};
 #[cfg(feature = "curve")]
 use crate::proto::mechanism::{CurveKeypair, CurvePublicKey, CurveServerOptions};
 use crate::socket_ref::SocketRef;
+use crate::subscription::{SubscriptionAdmission, SubscriptionRequest};
 /// Upper bound for `Options::compression_dict`. Compression transports cap
 /// dictionaries at 8 KiB. Inlined as a const so the `compression_dict`
 /// setter works regardless of which compression features are enabled.
@@ -488,6 +489,11 @@ pub struct Options {
     /// overwritten. Must be in `1..=MAX_QUEUE_CAPACITY`.
     pub monitor_capacity: usize,
 
+    /// PUB/XPUB: admission callback for each SUBSCRIBE from a peer. `None`
+    /// admits every subscription. Ignored by other socket types.
+    /// See [`SubscriptionAdmission`] for what a rejection skips.
+    pub subscription_admission: Option<SubscriptionAdmission>,
+
     /// TLS configuration for `wss://` endpoints. Ignored for non-WSS
     /// transports. Requires the `ws` feature.
     #[cfg(feature = "ws")]
@@ -840,6 +846,7 @@ impl Default for Options {
             xpub_nodrop: false,
             reconnect_stop_conn_refused: false,
             monitor_capacity: DEFAULT_MONITOR_CAPACITY,
+            subscription_admission: None,
             #[cfg(feature = "quic")]
             quic: QuicOptions::default(),
             #[cfg(feature = "dart")]
@@ -1400,6 +1407,17 @@ impl Options {
     #[must_use]
     pub fn monitor_capacity(mut self, events: usize) -> Self {
         self.monitor_capacity = events;
+        self
+    }
+
+    /// Admit or reject each SUBSCRIBE a PUB/XPUB socket receives.
+    /// See [`Self::subscription_admission`].
+    #[must_use]
+    pub fn subscription_admission<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&SubscriptionRequest<'_>) -> bool + Send + Sync + 'static,
+    {
+        self.subscription_admission = Some(SubscriptionAdmission::new(f));
         self
     }
 

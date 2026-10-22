@@ -91,8 +91,21 @@ pub async fn connect(endpoint: &Endpoint) -> Result<UdpSocket> {
         SocketAddr::V6(_) => "[::]:0".parse::<SocketAddr>().unwrap(),
     };
     let sock = UdpSocket::bind(local).await?;
+    grow_send_buffer(&sock);
     sock.connect(target).await?;
     Ok(sock)
+}
+
+/// BSD kernels reject datagrams larger than the send buffer, which starts at
+/// 9216 bytes on macOS. Grow it to fit `MAX_DATAGRAM_SIZE`; never shrink it.
+fn grow_send_buffer(sock: &UdpSocket) {
+    let sock = socket2::SockRef::from(sock);
+    if sock
+        .send_buffer_size()
+        .is_ok_and(|size| size < MAX_DATAGRAM_SIZE)
+    {
+        let _ = sock.set_send_buffer_size(MAX_DATAGRAM_SIZE);
+    }
 }
 
 fn parts(endpoint: &Endpoint) -> Result<(&Host, u16)> {
@@ -192,5 +205,36 @@ mod tests {
         let (group, body) = decode_datagram(&buf[..n]).unwrap();
         assert_eq!(&group[..], b"news");
         assert_eq!(&body[..], b"hello");
+    }
+
+    #[tokio::test]
+    async fn connect_sends_datagrams_above_the_macos_default_buffer() {
+        use std::net::Ipv4Addr;
+
+        let host = Host::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let listener = bind(&Endpoint::Udp {
+            group: None,
+            host: host.clone(),
+            port: 0,
+        })
+        .await
+        .unwrap();
+        let sender = connect(&Endpoint::Udp {
+            group: None,
+            host,
+            port: listener.local_addr().unwrap().port(),
+        })
+        .await
+        .unwrap();
+
+        let body = vec![7u8; 16 * 1024];
+        sender
+            .send(&encode_datagram(b"g", &body).unwrap())
+            .await
+            .unwrap();
+
+        let mut buf = vec![0u8; MAX_DATAGRAM_SIZE];
+        let (n, _from) = listener.recv_from(&mut buf).await.unwrap();
+        assert_eq!(decode_datagram(&buf[..n]).unwrap().1, body);
     }
 }

@@ -4,7 +4,7 @@ use std::hint::black_box;
 use std::time::Instant;
 
 fn main() {
-    let cipher = salsabox::BoxKey::from_shared_secret(&[0x42; 32]);
+    let cipher = salsabox::BoxKey::from_shared_secret(&[0x42; 32]).unwrap();
     let nonce = [0x11; 24];
     for size in [128, 2_048, 8_192] {
         let mut payload = vec![0xAC; size];

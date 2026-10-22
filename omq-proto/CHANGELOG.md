@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `salsabox`, a SIMD XSalsa20-Poly1305.
 - CURVE handshake boxes and cookies use `salsabox` too. `crypto_box` and
   `crypto_secretbox` are no longer dependencies.
+- CURVE rejects low-order peer keys when it derives each box key, in
+  constant time and without a second X25519 operation.
 
 ## [0.34.0] - 2026-10-20
 

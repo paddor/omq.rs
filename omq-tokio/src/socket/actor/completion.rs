@@ -309,7 +309,9 @@ mod tests {
             cmd_rx: commands,
             recv_tx: recv,
             cancel: CancellationToken::new(),
-            monitor: crate::socket::monitor::MonitorPublisher::new(),
+            monitor: crate::socket::monitor::MonitorPublisher::new(
+                omq_proto::options::DEFAULT_MONITOR_CAPACITY,
+            ),
             spsc: crate::socket::recv::SpscHandles::new(blocking, false),
             peer_recv_routes: None,
             shared: super::super::HandleShared::new(),

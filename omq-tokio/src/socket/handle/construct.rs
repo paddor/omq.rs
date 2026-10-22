@@ -165,7 +165,7 @@ impl Socket {
         let cancel = CancellationToken::new();
         let (cmd_tx, cmd_rx) = mpsc::channel(options.send_queue_capacity().max(16));
         let driver_linger = options.linger;
-        let monitor = MonitorPublisher::new();
+        let monitor = MonitorPublisher::new(options.monitor_capacity);
         let send_strategy = SendStrategy::for_socket_type(socket_type, &options, placement.io_pool)
             .with_compatibility(compatibility);
         let send_submitter = send_strategy.submitter();

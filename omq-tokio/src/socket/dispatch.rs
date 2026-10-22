@@ -948,7 +948,9 @@ mod tests {
                     admission: crate::transport::setup::Admission::new(128),
                     timeout: std::time::Duration::from_secs(30),
                     cancel: tokio_util::sync::CancellationToken::new(),
-                    monitor: crate::socket::monitor::MonitorPublisher::new(),
+                    monitor: crate::socket::monitor::MonitorPublisher::new(
+                        omq_proto::options::DEFAULT_MONITOR_CAPACITY,
+                    ),
                     io_pool: crate::context::IoPoolHandle::none(),
                 },
             },

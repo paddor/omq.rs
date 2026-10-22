@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Options::monitor_capacity` sets the monitor event queue capacity.
+  Default 256.
+
 ### Changed
 
 - CURVE seals each MESSAGE frame once, in place in the connection output

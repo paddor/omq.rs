@@ -39,6 +39,9 @@ pub const DEFAULT_SHM_MAX_MEMORY: usize = 64 * 1024 * 1024;
 /// Default PEER per-connection queue byte budget and single-message limit.
 pub const DEFAULT_PEER_MAX_BYTES: usize = 16 * 1024 * 1024;
 
+/// Default per-socket monitor event queue capacity.
+pub const DEFAULT_MONITOR_CAPACITY: usize = 256;
+
 /// Largest message queue allocated for one HWM. Queues preallocate their
 /// capacity, so larger HWM values behave as this limit.
 pub const MAX_QUEUE_CAPACITY: usize = 1 << 20;
@@ -478,6 +481,13 @@ pub struct Options {
     /// Stop reconnecting on `ECONNREFUSED` (`ZMQ_RECONNECT_STOP`).
     pub reconnect_stop_conn_refused: bool,
 
+    /// Monitor event queue capacity, shared by all monitors of this socket.
+    /// Default 256. A monitor that falls further behind observes `Lagged`
+    /// and resumes at the oldest retained event. Slots are allocated on the
+    /// first `monitor()` call and keep their last event alive until
+    /// overwritten. Must be in `1..=MAX_QUEUE_CAPACITY`.
+    pub monitor_capacity: usize,
+
     /// TLS configuration for `wss://` endpoints. Ignored for non-WSS
     /// transports. Requires the `ws` feature.
     #[cfg(feature = "ws")]
@@ -829,6 +839,7 @@ impl Default for Options {
             transmit_slot_cap: None,
             xpub_nodrop: false,
             reconnect_stop_conn_refused: false,
+            monitor_capacity: DEFAULT_MONITOR_CAPACITY,
             #[cfg(feature = "quic")]
             quic: QuicOptions::default(),
             #[cfg(feature = "dart")]
@@ -872,6 +883,11 @@ impl Options {
             return Err(crate::error::Error::Config(
                 "max_pending_handshakes must be greater than zero".into(),
             ));
+        }
+        if !(1..=MAX_QUEUE_CAPACITY).contains(&self.monitor_capacity) {
+            return Err(crate::error::Error::Config(format!(
+                "monitor_capacity must be in 1..={MAX_QUEUE_CAPACITY}"
+            )));
         }
 
         self.validate_reconnect()?;
@@ -1377,6 +1393,13 @@ impl Options {
     #[must_use]
     pub fn transmit_slot_cap(mut self, bytes: usize) -> Self {
         self.transmit_slot_cap = Some(bytes);
+        self
+    }
+
+    /// Set the monitor event queue capacity. See [`Self::monitor_capacity`].
+    #[must_use]
+    pub fn monitor_capacity(mut self, events: usize) -> Self {
+        self.monitor_capacity = events;
         self
     }
 
@@ -1930,6 +1953,26 @@ mod tests {
             ..Options::default()
         };
         assert!(o.validate().is_err());
+    }
+
+    #[test]
+    fn validates_monitor_capacity() {
+        assert_eq!(
+            Options::default().monitor_capacity,
+            DEFAULT_MONITOR_CAPACITY
+        );
+        for capacity in [0, MAX_QUEUE_CAPACITY + 1] {
+            let options = Options::default().monitor_capacity(capacity);
+            assert!(matches!(options.validate(), Err(crate::Error::Config(_))));
+        }
+        for capacity in [1, MAX_QUEUE_CAPACITY] {
+            assert!(
+                Options::default()
+                    .monitor_capacity(capacity)
+                    .validate()
+                    .is_ok()
+            );
+        }
     }
 
     #[test]

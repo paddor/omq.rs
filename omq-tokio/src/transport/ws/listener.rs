@@ -187,7 +187,7 @@ mod tests {
                     admission: admission.clone(),
                     timeout: Duration::from_secs(30),
                     cancel: CancellationToken::new(),
-                    monitor: MonitorPublisher::new(),
+                    monitor: MonitorPublisher::new(omq_proto::options::DEFAULT_MONITOR_CAPACITY),
                     io_pool: crate::context::IoPoolHandle::none(),
                 },
                 &omq_proto::Options::default(),

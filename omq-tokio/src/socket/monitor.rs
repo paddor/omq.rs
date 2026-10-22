@@ -3,7 +3,8 @@
 //! `Socket::monitor()` returns a [`MonitorStream`], a pull-style handle
 //! (really a `broadcast::Receiver`) delivering owned [`MonitorEvent`]s.
 //!
-//! The underlying broadcast channel has finite capacity (default 64).
+//! The underlying broadcast channel has finite capacity
+//! ([`omq_proto::Options::monitor_capacity`], default 256).
 //! If a subscriber lags behind, it observes a `Lagged` error and
 //! resumes from the current event.
 //!
@@ -19,13 +20,10 @@ pub use omq_proto::monitor::{
     PeerCommandKind, PeerIdent, PeerInfo,
 };
 
-/// Capacity of the per-socket monitor broadcast channel.
-pub(crate) const MONITOR_CAPACITY: usize = 64;
-
 /// Pull-style monitor stream. Drop to stop receiving events.
 ///
 /// Monitor events are diagnostic. Under sustained data-plane load they
-/// may lag (the broadcast channel has a 64-slot buffer). Do not use
+/// may lag (see [`omq_proto::Options::monitor_capacity`]). Do not use
 /// monitor events for readiness gating in production. Use
 /// [`crate::Socket::wait_connected`] or [`crate::Socket::connections`] for
 /// routing
@@ -65,12 +63,14 @@ impl MonitorStream {
 #[derive(Debug, Clone)]
 pub(crate) struct MonitorPublisher {
     tx: Arc<Mutex<Option<broadcast::Sender<MonitorEvent>>>>,
+    capacity: usize,
 }
 
 impl MonitorPublisher {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(capacity: usize) -> Self {
         Self {
             tx: Arc::new(Mutex::new(None)),
+            capacity,
         }
     }
 
@@ -86,7 +86,7 @@ impl MonitorPublisher {
     pub(crate) fn subscribe(&self) -> MonitorStream {
         let mut tx = self.tx.lock().expect("monitor publisher");
         let tx = tx.get_or_insert_with(|| {
-            let (tx, _) = broadcast::channel(MONITOR_CAPACITY);
+            let (tx, _) = broadcast::channel(self.capacity);
             tx
         });
         MonitorStream::new(tx.subscribe())

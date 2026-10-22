@@ -8,6 +8,8 @@ authors.workspace = true
 repository.workspace = true
 description = "Linux shared-memory transport for OMQ."
 readme = "README.md"
+keywords = ["zeromq", "shared-memory", "ipc", "zero-copy", "linux"]
+categories = ["network-programming", "os::linux-apis", "memory-management"]
 
 [lints]
 workspace = true

@@ -59,7 +59,8 @@ async fn wait_connections_at_most(sock: &Socket, max: usize, timeout: Duration) 
 #[tokio::test]
 async fn undrained_monitor_lags_without_blocking_socket() {
     let ep = inproc_ep("resource-monitor-lag");
-    let router = Socket::new(SocketType::Router, Options::default());
+    // 80 dealers emit about 240 events, well past this capacity.
+    let router = Socket::new(SocketType::Router, Options::default().monitor_capacity(64));
     let mut mon = router.monitor();
     router.bind(ep.clone()).await.unwrap();
 

@@ -146,7 +146,7 @@ mod tests {
             cancel: CancellationToken::new(),
             tx,
             admission: Some(admission.clone()),
-            monitor: MonitorPublisher::new(),
+            monitor: MonitorPublisher::new(omq_proto::options::DEFAULT_MONITOR_CAPACITY),
         };
         let (mut first, _first_client) = connection().await;
         assert!(task.admit(&mut first));

@@ -44,6 +44,25 @@ async fn monitor_listening_event_on_bind() {
 }
 
 #[tokio::test]
+async fn monitor_capacity_bounds_retained_events() {
+    let s = Socket::new(SocketType::Pull, Options::default().monitor_capacity(1));
+    let mut mon = s.monitor();
+    s.bind(inproc_ep("mon-capacity-a")).await.unwrap();
+    s.bind(inproc_ep("mon-capacity-b")).await.unwrap();
+
+    assert!(matches!(
+        mon.try_recv(),
+        Err(omq_tokio::MonitorTryRecvError::Lagged(1))
+    ));
+    match mon.try_recv() {
+        Ok(MonitorEvent::Listening {
+            endpoint: Endpoint::Inproc { name },
+        }) => assert_eq!(name, "mon-capacity-b"),
+        other => panic!("expected second Listening, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn monitor_full_lifecycle_on_pair() {
     let ep = inproc_ep("mon-lifecycle");
     let server = Socket::new(SocketType::Pair, Options::default());

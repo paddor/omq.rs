@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The monitor event queue holds 256 events by default, up from 64, and
+  follows `Options::monitor_capacity`.
+
 ### Fixed
 
 - RADIO over UDP sends datagrams larger than 9 KiB on macOS. The send buffer

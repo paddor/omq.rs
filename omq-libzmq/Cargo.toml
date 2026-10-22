@@ -30,7 +30,6 @@ tokio = { version = "1.53.3", features = ["rt", "sync", "time"] }
 bytes = "1.12.1"
 flume = { version = "0.12", default-features = false, features = ["async"] }
 rustc-hash = "2.1.3"
-crypto_box = "0.9"
 libc = "0.2.190"
 
 [target.'cfg(windows)'.dependencies]

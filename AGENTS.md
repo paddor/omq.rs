@@ -33,7 +33,7 @@ is covered by `tests/coverage_matrix.rs`.
 | feature | adds | deps |
 |---------|------|------|
 | `plain` | PLAIN auth (RFC 24) | - |
-| `curve` | CURVE handshake (RFC 26) | `crypto_box`, `crypto_secretbox` |
+| `curve` | CURVE handshake (RFC 26) | `salsabox`, `x25519-dalek` |
 | `lz4` | `lz4+tcp://` transform | `lz4rip` |
 | `ws` | `ws://` / `wss://` WebSocket transport | `rustls`, `rustls-native-certs` (backend-level) |
 | `quic` | `quic://` raw OMQ over QUIC (TLS 1.3, ALPN `omq-zmtp/1`) | `quinn` (backend-level) |

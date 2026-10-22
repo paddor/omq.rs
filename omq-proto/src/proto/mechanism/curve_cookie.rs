@@ -7,9 +7,8 @@
 
 use std::time::{Duration, Instant};
 
-use crypto_secretbox::aead::{Aead, KeyInit};
-use crypto_secretbox::{Nonce, XSalsa20Poly1305};
 use rand::Rng;
+use salsabox::SecretBox;
 use zeroize::Zeroizing;
 
 use crate::error::{Error, Result};
@@ -27,7 +26,7 @@ fn nonce_long(prefix: &[u8; 8], suffix: &[u8; 16]) -> [u8; 24] {
 
 #[derive(Debug)]
 pub(crate) struct CurveCookieKey {
-    key: Zeroizing<[u8; 32]>,
+    key: SecretBox,
     created_at: Instant,
     lifetime: Duration,
 }
@@ -41,29 +40,24 @@ impl CurveCookieKey {
         let mut k = Zeroizing::new([0u8; 32]);
         rand::rng().fill_bytes(k.as_mut());
         Self {
-            key: k,
+            key: SecretBox::from_key(&k),
             created_at: Instant::now(),
             lifetime,
         }
     }
 
     /// Seal `C'(32) || s'(32)` under the current key. Returns the
-    /// 96-byte cookie: `nonce_suffix(16) || ciphertext(80)`.
+    /// 96-byte cookie: `nonce_suffix(16) || tag(16) || ciphertext(64)`.
     pub(crate) fn encrypt_cookie(&self, cp: &[u8; 32], sn_secret: &[u8; 32]) -> Vec<u8> {
         let mut suffix = [0u8; 16];
         rand::rng().fill_bytes(&mut suffix);
         let nonce = nonce_long(NONCE_COOKIE_PREFIX, &suffix);
-        let mut plaintext = [0u8; 64];
-        plaintext[..32].copy_from_slice(cp);
-        plaintext[32..].copy_from_slice(sn_secret);
-        let ciphertext = XSalsa20Poly1305::new_from_slice(&*self.key)
-            .expect("cookie key has 32 bytes")
-            .encrypt(&Nonce::from(nonce), &plaintext[..])
-            .expect("cookie encrypt infallible");
-        let mut out = Vec::with_capacity(96);
-        out.extend_from_slice(&suffix);
-        out.extend_from_slice(&ciphertext);
-        debug_assert_eq!(out.len(), 96);
+        let mut out = vec![0u8; 96];
+        out[..16].copy_from_slice(&suffix);
+        out[32..64].copy_from_slice(cp);
+        out[64..].copy_from_slice(sn_secret);
+        let tag = self.key.encrypt_detached(&nonce, &mut out[32..]);
+        out[16..32].copy_from_slice(&tag);
         out
     }
 
@@ -76,26 +70,18 @@ impl CurveCookieKey {
             return Err(Error::HandshakeFailed("CURVE cookie expired".into()));
         }
         let suffix: [u8; 16] = cookie[..16].try_into().unwrap();
-        let ciphertext = &cookie[16..];
+        let tag: [u8; 16] = cookie[16..32].try_into().unwrap();
         let nonce = nonce_long(NONCE_COOKIE_PREFIX, &suffix);
 
-        let plaintext = Self::try_decrypt(&self.key, &nonce, ciphertext)?;
+        let mut plaintext = Zeroizing::new([0u8; 64]);
+        plaintext.copy_from_slice(&cookie[32..]);
+        self.key
+            .decrypt_detached(&nonce, &mut *plaintext, &tag)
+            .map_err(|_| Error::HandshakeFailed("CURVE cookie invalid".into()))?;
 
-        if plaintext.len() != 64 {
-            return Err(Error::HandshakeFailed(
-                "CURVE cookie plaintext wrong length".into(),
-            ));
-        }
         let cp: [u8; 32] = plaintext[..32].try_into().unwrap();
         let sn_secret: [u8; 32] = plaintext[32..].try_into().unwrap();
         Ok((cp, sn_secret))
-    }
-
-    fn try_decrypt(key: &[u8; 32], nonce: &[u8; 24], ciphertext: &[u8]) -> Result<Vec<u8>> {
-        XSalsa20Poly1305::new_from_slice(key)
-            .expect("cookie key has 32 bytes")
-            .decrypt(&Nonce::from(*nonce), ciphertext)
-            .map_err(|_| Error::HandshakeFailed("CURVE cookie invalid".into()))
     }
 
     #[cfg(test)]

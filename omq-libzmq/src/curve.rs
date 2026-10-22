@@ -44,10 +44,7 @@ pub extern "C" fn zmq_curve_public(
     let Ok(sec) = omq_tokio::CurveSecretKey::from_z85(sec_str) else {
         return crate::error::fail(libc::EINVAL);
     };
-    let crypto_sec = crypto_box::SecretKey::from(*sec.as_bytes());
-    let crypto_pub = crypto_sec.public_key();
-    let pub_key = omq_tokio::CurvePublicKey::from_bytes(*crypto_pub.as_bytes());
-    let pub_z85 = pub_key.to_z85();
+    let pub_z85 = sec.derive_public().to_z85();
     // SAFETY: z85_public_key is non-null (checked above); at least 41 bytes available.
     unsafe {
         std::ptr::copy_nonoverlapping(pub_z85.as_ptr(), z85_public_key.cast(), 40);

@@ -709,7 +709,9 @@ jobs:
     name: 32-bit linux (${{ matrix.target }})
     needs: [changes, linux-gate]
     if: needs.changes.outputs.code == 'true' && needs.changes.outputs.full == 'true'
-    runs-on: ubuntu-latest
+    # On the Ubuntu 26.04 runner, socket calls from the i686 cross image
+    # (glibc 2.23) fail with ENOSYS.
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     strategy:
       fail-fast: false

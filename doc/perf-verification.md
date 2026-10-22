@@ -14,6 +14,8 @@ at 256B with 2 IO threads, and 16B inproc PUSH/PULL.
 Four-subscriber rates count aggregate deliveries; the 32-subscriber
 gate reports the average per subscriber. Inproc shares one context;
 wire cases use separate contexts. Measurement excludes tagged warmup.
+Draft cases measure SCATTER/GATHER and RADIO/DISH over TCP, inproc, IPC,
+SHM, and DART, with fan-in/fan-out and SHM pool variants.
 
 With their features enabled, QUIC covers PUSH/PULL and four-subscriber
 PUB/SUB; DART covers SCATTER/GATHER. Both cover 16B, 256B, and 1KiB
@@ -57,6 +59,8 @@ p50_256b_us=50
 [inproc_pushpull_1io]
 16b_msgs_s=1000000
 ```
+
+The smoke gate adds loose draft-socket, SHM, and DART cases.
 
 Use measured local baselines for throughput thresholds. A
 missing file runs a smaller smoke gate with loose thresholds:

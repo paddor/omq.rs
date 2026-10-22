@@ -378,7 +378,7 @@ When the receiver encounters a dictionary part:
 2. Install the complete message body as the decompression dictionary for
    this connection. The leading `37 A4 30 EC` bytes are part of the ZDICT
    blob and MUST NOT be stripped.
-4. Discard the message. It is not delivered to the application.
+3. Discard the message. It is not delivered to the application.
 
 If all parts of a ZMTP message are dictionary parts (which is always
 the case, since dictionary messages are single-part), the receiver

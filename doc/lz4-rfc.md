@@ -5,7 +5,7 @@
 | Status   | Draft                                                                 |
 | Revision | 2                                                                     |
 | Editor   | Patrik Wenger                                                         |
-| Scheme   | `lz4+tcp://`                                                          |
+| Scheme   | `lz4+tcp://`, `lz4+ws://`                                             |
 | Requires | [RFC 37/ZMTP 3.1](https://rfc.zeromq.org/spec/37/), LZ4 block format |
 
 
@@ -16,7 +16,8 @@ ZMTP 3.1 transport. After a plain-TCP handshake, data uses sentinel-framed
 parts or bounded arenas containing several complete messages, with optional
 LZ4 block compression. An optional dictionary
 (user-supplied or automatically trained) is shipped in-band exactly once
-per direction per connection.
+per direction per connection. `lz4+ws://` applies the same transform over
+ZWS.
 
 
 ## 2. Language

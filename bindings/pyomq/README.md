@@ -10,10 +10,10 @@ port. Drop-in pyzmq replacement on the common path.
   XPUB, XSUB, and STREAM.
 - Draft sockets: SERVER, CLIENT, RADIO, DISH, GATHER, SCATTER, PEER, and
   CHANNEL.
-- `tcp://`, `ipc://`, `inproc://`, verified TLS `quic://`, and `udp://`
-  transports (`udp://` is RADIO/DISH only).
-- Optional `plain`, `curve`, `lz4`, `zstd`, and `quic` features in the published
-  wheel.
+- `tcp://`, `ipc://`, `inproc://`, verified TLS `quic://`, `dart://`, and
+  `udp://` transports (`udp://` is RADIO/DISH only).
+- Optional `plain`, `curve`, `lz4`, `zstd`, `quic`, and `dart` features in the
+  published wheel.
 - Built on [`omq-tokio`](https://github.com/paddor/omq.rs/tree/main/omq-tokio);
   runtime work runs on a dedicated background thread and Python calls release
   the GIL across the runtime trip.
@@ -26,15 +26,14 @@ Requires Python **3.12+**. Wheels use the `cp312-abi3` stable ABI.
 
 ```sh
 uv pip install pyomq
-uv pip install 'pyomq[test]'   # adds pytest, pyzmq for the interop suite
 ```
 
-The standard build includes optional features: plain, curve, lz4, zstd, quic.
+The standard build includes optional features: plain, curve, lz4, zstd, quic,
+dart.
 Use `pyomq.has("curve")` at runtime to check availability.
 
-Published wheels currently target Linux. Other platforms can build from
-sdist when the local Rust/Python toolchain supports them. Windows pyomq
-support is not complete on `main` yet.
+Published wheels target Linux, macOS, and Windows on x86-64 and ARM64. Other
+platforms can build from sdist.
 
 ## Usage
 
@@ -128,9 +127,8 @@ See [COMPARISONS.md](https://github.com/paddor/omq.rs/blob/main/COMPARISONS.md) 
 
 pyomq's `proxy()` forwards directly between sockets on the tokio runtime,
 no Python per-message overhead. pyzmq's `zmq.proxy()` calls libzmq's
-C-level `zmq_proxy`. PUSH/PULL forwarding is throughput-bound and pyomq is
-~1.8x faster. REQ/REP proxy is latency-bound (4 TCP hops per round-trip);
-pyomq is ~1.9x faster thanks to direct socket forwarding.
+C-level `zmq_proxy`. PUSH/PULL forwarding is throughput-bound; REQ/REP proxy
+is latency-bound (4 TCP hops per round-trip).
 
 Run `scripts/update_perf.py` (after `maturin develop --release`) to re-measure, regenerate the chart, and update the proxy table.
 
@@ -252,7 +250,7 @@ router.send_to(identity, [b"reply"])  # route bytes may now select a replacement
 ```sh
 cd bindings/pyomq
 uv venv && source .venv/bin/activate
-uv pip install maturin pytest pyzmq
+uv pip install maturin pyzmq pytest pytest-asyncio pytest-timeout
 maturin develop --release
 pytest -v
 ```

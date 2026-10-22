@@ -246,7 +246,7 @@ The scheduled `.github/workflows/ci.yml` run also runs, on Linux only:
 
 `.github/workflows/extended.yml` runs Sundays at 03:00 UTC and on
 `workflow_dispatch` (with `soak_duration_secs` / `fuzz_scale` inputs):
-the fuzz targets at 100M / 2000 iters, the soak suite in five groups,
+the fuzz targets at 100M / 2000 iters, the soak suite (one job per soak test),
 the `--ignored` stress tests, libzmq draft interop (`ws://`,
 RADIO/DISH, and draft socket types).
 

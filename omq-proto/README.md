@@ -19,7 +19,7 @@ payloads are below 4 GiB.
 | Greeting / handshake | ZMTP 3.0/3.1 negotiation and mechanism dispatch |
 | Mechanisms | NULL, PLAIN, CURVE |
 | Transforms | LZ4 and zstd frame-level compression |
-| `Endpoint` | Parser for `tcp://`, `ipc://` (Unix sockets / Windows named pipes), `inproc://`, `udp://`, `lz4+tcp://`, `zstd+tcp://`, `ws://`, `wss://` |
+| `Endpoint` | Parser for `tcp://`, `ipc://` (Unix sockets / Windows named pipes), `inproc://`, `shm://`, `udp://`, `lz4+tcp://`, `lz4+ws://`, `zstd+tcp://`, `ws://`, `wss://`, `quic://`, `dart://` |
 | `SocketType` | 20 types (11 stable, 8 draft, plus STREAM) with compatibility matrix |
 | `SubscriptionSet` | Prefix-trie for PUB/SUB topic filtering |
 | Monitor types | `MonitorEvent`, `DisconnectReason`, `PeerInfo` |
@@ -35,6 +35,8 @@ All opt-in. Default build needs no C compiler and no crypto deps.
 | `lz4` | LZ4 compression | `lz4rip` |
 | `zstd` | zstd compression | `zrip` |
 | `ws` | WebSocket transport | - (backends add `rustls`) |
+| `quic` | QUIC transport | - (backends add `quinn`) |
+| `dart` | DART reliable datagram transport | - (backends add `quinn-udp`) |
 
 ## License
 

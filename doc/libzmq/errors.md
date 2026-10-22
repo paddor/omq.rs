@@ -286,8 +286,8 @@ Three-region pipe segmentation: `[0, matching)`, `[0, active)`,
 - VSM: iterates without incrementing index.
 - Large messages: pre-allocates `matching - 1` refs, calls `rm_refs(failed)`
   on failure to prevent ref leaks.
-- A single slow subscriber exceeding HWM blocks entire distribution (unless
-  `ZMQ_XPUB_NODROP`).
+- A subscriber at HWM is skipped and loses the message. With
+  `ZMQ_XPUB_NODROP`, the send fails with EAGAIN instead.
 
 ### Multi-part atomicity
 

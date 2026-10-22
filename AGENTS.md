@@ -8,8 +8,8 @@ out-of-tree (maturin etc.).
 - **`omq-proto`** -- sans-I/O ZMTP 3.x core. Codec (`Connection`),
   message/payload types, greeting + frame state machines, mechanism
   handshakes (NULL / PLAIN / CURVE), compression transforms
-  (lz4), endpoint parsing, options, subscription matcher. No async, no I/O.
-- **`omq-tokio`** -- multi-thread tokio backend. **Default backend.**
+  (lz4, zstd), endpoint parsing, options, subscription matcher. No async, no I/O.
+- **`omq-tokio`** -- tokio backend. **Default backend.**
   Works on Linux, macOS, and Windows.
 - **`omq-shm`** -- Linux shared mappings, payload storage, remote leases,
   and ancillary IO. Isolates unsafe SHM operations from the core/backend.
@@ -19,7 +19,8 @@ out-of-tree (maturin etc.).
 - **`omq-bench`** -- benchmark runner and SVG chart generator. Drives
   cross-implementation peers and reads/writes append-only JSONL data in
   `~/.cache/omq/`.
-- **`bindings/pyomq`** -- PyO3 wrapper over `omq-tokio`.
+- **`bindings/`** -- language bindings over `omq-tokio` or `omq-libzmq`
+  ([`doc/bindings.md`](doc/bindings.md)).
 
 The queue crates `yring` and `fanring` are external dependencies maintained
 in [fanring.rs](https://github.com/paddor/fanring.rs). Queue tests, Loom,
@@ -35,6 +36,7 @@ is covered by `tests/coverage_matrix.rs`.
 | `plain` | PLAIN auth (RFC 24) | - |
 | `curve` | CURVE handshake (RFC 26) | `salsabox`, `x25519-dalek` |
 | `lz4` | `lz4+tcp://` transform | `lz4rip` |
+| `zstd` | `zstd+tcp://` transform | `zrip` |
 | `ws` | `ws://` / `wss://` WebSocket transport | `rustls`, `rustls-native-certs` (backend-level) |
 | `quic` | `quic://` raw OMQ over QUIC (TLS 1.3, ALPN `omq-zmtp/1`) | `quinn` (backend-level) |
 | `dart` | `dart://` reliable ordered messages with fragmentation | `quinn-udp`, Linux `nix` (backend-level) |
@@ -47,32 +49,33 @@ is covered by `tests/coverage_matrix.rs`.
 Three-layer split: `omq-proto` (sans-I/O ZMTP codec) -> `omq-tokio`
 backend -> user `Socket` API. Two queues per socket: one inbound,
 one outbound. Per-connection driver tasks bridge queues and wire.
-`Context` owns a tokio runtime on a dedicated OS thread (1 IO thread
-/ current_thread by default, multi_thread for N > 1).
+`Context` owns N `current_thread` tokio runtimes on dedicated OS threads
+(default 1); N > 1 adds a control runtime for socket actors.
 `Context::current()` wraps an existing runtime for embedded use.
 Full detail in `doc/`:
 [`architecture.md`](doc/architecture.md),
-[`libzmq/`](doc/libzmq/).
+[`bindings.md`](doc/bindings.md), [`libzmq/`](doc/libzmq/).
 Transport RFCs:
-[`lz4-rfc.md`](doc/lz4-rfc.md), [`quic-rfc.md`](doc/quic-rfc.md),
+[`lz4-rfc.md`](doc/lz4-rfc.md), [`zstd-rfc.md`](doc/zstd-rfc.md),
+[`quic-rfc.md`](doc/quic-rfc.md),
 [`dart-rfc.md`](doc/dart-rfc.md).
 Shared-memory architecture: [`omq-shm/README.md`](omq-shm/README.md).
 
 **omq-proto key types.** `Connection`: ZMTP codec state machine
 (`handle_input`/`poll_event`/`send_message`/`poll_transmit`).
 `FrameBuffer`: arena (16 KiB TCP/WS, 64 KiB IPC) + entry-based framer
-used by both backends. Frame headers are always written into the arena.
+used by `omq-tokio` and `omq-shm`. Frame headers are always written into the arena.
 Small messages (<4 KiB `ARENA_THRESHOLD`) go contiguously into the arena
 (1 iovec per batch). Large payloads are tracked as external `Bytes`
 entries (zero-copy gather-write). `Message`: 64 B, inline up to 55 B.
 `Payload`: 64 B, inline up to 62 B.
 
 **omq-tokio hot path.** `SocketDriver` actor owns peer table and
-type state. Send bypass: `Socket::send` skips actor for non-REQ/REP
-via `SendSubmitter` (flume MPMC). Per-peer `PeerTransmitSlot`
+type state. Send bypass: `Socket::send` skips the actor for every
+socket type via `SendSubmitter` (one variant per routing strategy). Per-peer `PeerTransmitSlot`
 (`FrameBuffer` under `std::sync::Mutex`, nanosecond hold): handle
 frames, driver flushes via `DataSignal` select arm. `PeerOutbound`
-enum (`Wire`/`Inbox`) dispatches fan-out/identity/exclusive to
+enum (`Wire`/`Inbox`/`Inproc`) dispatches fan-out/identity/exclusive to
 per-peer slots without pump tasks. Latency-profile TCP peers may use
 a stateless `DirectTcpWriter` for one immediate nonblocking vectored
 write of the slot (arena plus large payloads); partial writes stay in
@@ -84,7 +87,7 @@ and one bounded producer per connection. Socket clones share the receive drain;
 application-aware dispatch stays outside OMQ. Outbound PEER traffic uses
 per-clone/per-destination fanring producers consumed by the connection I/O task.
 PUB fan-out lane workers
-(`LaneWorker`) use split channels: a `yring` control channel
+(`LaneWorker`) use split channels: a `ControlQueue` control channel
 (drained unconditionally) and a `yring` data channel (drained up to
 `DrainBudget::WORKER`). All producer-to-consumer signaling uses
 `DataSignal` (transmit slot, send pipe, lane workers).
@@ -118,8 +121,8 @@ Quick reference:
 
 ```sh
 cargo build --workspace
-cargo fmt                                # pre-commit hook checks this
-cargo clippy --workspace --all-targets   # pre-commit hook checks this
+cargo fmt                                # required before commit
+cargo clippy --workspace --all-targets   # required before commit
 ./scripts/test-all.sh                    # full sweep + local perf gate
 OMQ_SKIP_PERF=1 ./scripts/test-all.sh    # skip local perf gate
 ```
@@ -286,11 +289,10 @@ queue must be capped by both message count AND byte count
 other tasks.
 
 **One wake per batch, not per push.** Producer-to-consumer signaling
-uses `DataSignal` (atomic flag + `Notify`). `mark()` fires
-`notify_one` only on the `false` to `true` transition of the
-pending flag. Consumer `clear()`s the flag before draining, then
-calls `rearm_if_nonempty()` to self-wake if data remains. For
-budget-interrupted drains where the consumer knows data remains,
-`reschedule()` fires `notify_one` unconditionally (bypasses the
-coalescing check). Never replace `DataSignal` with bare
+uses `DataSignal` (`AtomicU8` idle/pending/draining/dirty state +
+`Notify`). `mark()` wakes only on the idle-to-pending transition.
+The consumer calls `begin_drain()` before draining and
+`clear_after(is_empty)` after; it re-fires if data remains or a
+producer marked during the drain. For budget-interrupted drains,
+`reschedule()` wakes unconditionally. Never replace `DataSignal` with bare
 `Notify::notify_one()` per push.

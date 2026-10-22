@@ -1,7 +1,7 @@
 # omq-tokio
 
-Tokio backend for [omq](https://crates.io/crates/omq). Multi-threaded, actor-based.
-Default backend when you `cargo add omq`. Works on Linux, macOS, and Windows.
+Tokio backend for OMQ, actor-based with one or more IO threads. Works on
+Linux, macOS, and Windows. Install with `cargo add omq-tokio --rename omq`.
 
 Built on [omq-proto](https://crates.io/crates/omq-proto) and
 [tokio](https://crates.io/crates/tokio).
@@ -11,7 +11,7 @@ Built on [omq-proto](https://crates.io/crates/omq-proto) and
 | | |
 |-|-|
 | Multi-threaded | Concurrent `send`/`recv` from multiple tasks is safe |
-| Actor with bypass | `SocketDriver` owns mutable socket state. Common send/recv paths bypass it for non-REQ/REP sockets. |
+| Actor with bypass | `SocketDriver` owns mutable socket state. Sends bypass it for every socket type; receives bypass it except for ROUTER and REP. |
 | Arena encoding | Small messages (< 4 KiB by default) pack into a `FrameBuffer` arena. Larger payloads use zero-copy gather-write. Override with `Options::arena_threshold`. |
 | Bounded wakeups | Per-peer transmit slots and `yring` send pipes use `DataSignal` to coalesce wakeups without losing readiness. |
 
@@ -39,8 +39,6 @@ let msg = pull.recv().await?;
 Use `Socket::new(...)` when you want the socket driver on the caller's
 active tokio runtime. Use `ctx.socket(...)` when OMQ should own IO runtime
 threads.
-
-`cargo add omq` picks this backend by default.
 
 Full [API documentation](https://docs.rs/omq-tokio/latest/omq_tokio/).
 

@@ -118,7 +118,8 @@ contains a one-byte name length, that many ASCII name bytes, a four-byte
 big-endian value length, and that many value bytes. Names contain 1 to 255
 bytes and are case-sensitive. Duplicate names, malformed lengths, missing
 required fields, incompatible socket pairs, or unsupported versions MUST
-prevent admission. Unknown properties MUST be ignored.
+prevent admission. Unknown properties MUST be ignored. A READY carries at
+most 16 properties.
 
 | Required property | Value |
 | --- | --- |
@@ -129,7 +130,8 @@ prevent admission. Unknown properties MUST be ignored.
 | `Phase` | One byte: HELLO=0, WELCOME=1, CONFIRM=2 |
 | `Reply-Requested` | One byte: 0 or 1; compatibility metadata |
 
-`Identity` is REQUIRED for PEER and contains 1 to 255 bytes. An unconfigured
+`Identity` is REQUIRED for PEER and contains 1 to 255 bytes; the first byte
+MUST NOT be 0x00. An unconfigured
 PEER identity MUST remain stable for the socket lifetime. Identities and
 local SERVER routing IDs MUST NOT appear in message datagrams.
 

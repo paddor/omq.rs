@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Socket::connections_generation` and `Socket::connections_changed` track
+  changes to the ready connection set without the lossy monitor stream.
+  The blocking socket has both, with a timeout on the wait.
+
 ### Changed
 
 - The monitor event queue holds 256 events by default, up from 64, and

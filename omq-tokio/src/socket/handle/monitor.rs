@@ -130,6 +130,27 @@ impl Socket {
             .map_err(|_| Error::Closed)?;
         rx.await.map_err(|_| Error::Closed)
     }
+
+    /// Generation of the ready connection set. It advances whenever a peer
+    /// becomes ready or a ready peer goes away, so every change to
+    /// [`Self::connections`] moves it. Unlike monitor events, it never lags.
+    pub fn connections_generation(&self) -> u64 {
+        self.inner.ready_peer_count.changed.generation()
+    }
+
+    /// Wait until the connection generation differs from `seen` and return
+    /// the new generation. Take `seen` before the [`Self::connections`]
+    /// snapshot it describes, so no change between the two is missed.
+    /// Returns `Err(Error::Closed)` once the socket is closing and `seen`
+    /// is current.
+    pub async fn connections_changed(&self, seen: u64) -> Result<u64> {
+        let changed = &self.inner.ready_peer_count.changed;
+        tokio::select! {
+            biased;
+            () = changed.changed_after(seen) => Ok(changed.generation()),
+            () = self.inner.cmd_tx.closed() => Err(Error::Closed),
+        }
+    }
 }
 
 /// Ready peer count, shared by a socket's handles and its actor. Every

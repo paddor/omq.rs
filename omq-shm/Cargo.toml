@@ -20,7 +20,7 @@ omq-proto = { path = "../omq-proto", version = "0.34.0" }
 rand = "0.10.3"
 rustix = { version = "1.1", features = ["event", "fs", "mm", "net", "pipe", "process", "thread"] }
 
-[dev-dependencies]
+[target.'cfg(target_pointer_width = "64")'.dev-dependencies]
 loom = "0.7"
 
 [[test]]

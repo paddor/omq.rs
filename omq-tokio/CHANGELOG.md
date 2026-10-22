@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.1] - 2026-10-22
+
+### Fixed
+
+- Require `omq-shm` 0.2.1. Fresh installs resolved later 0.2.x releases,
+  which depend on `omq-proto` 0.34, and failed to build.
+
 ## [0.29.0] - 2026-10-16
 
 ### Breaking

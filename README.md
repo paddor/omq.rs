@@ -49,8 +49,9 @@ The application can await `bind`, `connect`, `send`, and `recv` on any runtime
 like Tokio or Compio. OMQ handles the network on its own background IO threads.
 Port `0` selects a free TCP port, returned by `bind()`.
 
-More examples in [examples/zguide/](examples/zguide/), a port of the
-ZeroMQ Guide patterns to OMQ.
+New to ZeroMQ? Start with [GETTING_STARTED.md](GETTING_STARTED.md). More
+examples in [examples/zguide/](examples/zguide/), a port of the ZeroMQ Guide
+patterns to OMQ.
 
 ## Performance
 

@@ -294,7 +294,8 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="$LIBZMQ_PREFIX" \
             -DENABLE_DRAFTS=ON -DENABLE_WS=ON \
-            -DBUILD_TESTS=OFF -DWITH_DOC=OFF
+            -DBUILD_TESTS=OFF -DWITH_DOC=OFF \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5
           cmake --build /tmp/libzmq-build -j"$(nproc)"
           cmake --install /tmp/libzmq-build
       - name: build zmq_ws_peer helper

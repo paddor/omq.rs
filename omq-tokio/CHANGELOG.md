@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- RADIO over UDP sends datagrams larger than 9 KiB on macOS. The send buffer
+  now fits the largest datagram, which BSD kernels require.
+
 ## [0.30.1] - 2026-10-22
 
 ### Changed

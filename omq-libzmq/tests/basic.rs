@@ -437,27 +437,26 @@ fn shutdown_during_blocked_send(ctx: *mut c_void, sock: *mut c_void) -> (i32, i3
     let handle = std::thread::spawn(move || {
         let sock = sock_addr as *mut c_void;
         // A connect-side pipe moves into the peer's queue once the peer is
-        // ready, so refill until a pass after a pause queues nothing.
+        // ready, which frees capacity after the queue looked full. Refill
+        // whenever a blocking send still succeeds.
         let mut queued = 0;
-        loop {
-            let before = queued;
+        let result = loop {
             while zmq_send(sock, b"x".as_ptr().cast(), 1, ZMQ_DONTWAIT) == 1 {
                 queued += 1;
                 assert!(queued < 1024, "send never blocked");
             }
-            if queued == before && queued > 0 {
-                break;
+            let rc = zmq_send(sock, b"x".as_ptr().cast(), 1, 0);
+            if rc != 1 {
+                break (rc, omq_zmq::zmq_errno());
             }
-            std::thread::sleep(Duration::from_millis(20));
-            if queued == 0 {
-                break;
-            }
-        }
-        let rc = zmq_send(sock, b"x".as_ptr().cast(), 1, 0);
-        done_tx.send((rc, omq_zmq::zmq_errno())).expect("done");
+            queued += 1;
+            assert!(queued < 1024, "send never blocked");
+        };
+        done_tx.send(result).expect("done");
     });
-    assert!(
-        done_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+    assert_eq!(
+        done_rx.recv_timeout(Duration::from_millis(200)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout),
         "send should block"
     );
     assert_eq!(zmq_ctx_shutdown(ctx), 0);

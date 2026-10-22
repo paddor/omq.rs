@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-10-22
+
+### Changed
+
+- Bundle `omq-tokio` 0.31.0. CURVE is faster and rejects low-order
+  peer keys. RADIO over UDP sends large datagrams on macOS.
+
 ## [0.5.2] - 2026-10-22
 
 ### Changed

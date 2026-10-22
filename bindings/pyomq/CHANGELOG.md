@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.2] - 2026-10-22
+
+### Changed
+
+- Bundle `omq-tokio` 0.31.0. CURVE is faster and rejects low-order
+  peer keys. RADIO over UDP sends large datagrams on macOS.
+
 ## [0.27.1] - 2026-10-22
 
 ### Changed

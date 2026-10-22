@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.2.8] - 2026-10-22
+
+### Changed
+
+- Bundle `omq-libzmq` 0.6.0. CURVE is faster and rejects low-order
+  peer keys. RADIO over UDP sends large datagrams on macOS.
+
 ## [0.2.7] - 2026-10-22
 
 ### Changed

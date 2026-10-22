@@ -201,13 +201,34 @@ messages into bounded arenas. Dictionaries ship once per connection and
 direction. Zstd drivers adapt their level to the bottleneck; fan-out lanes use
 a fixed level. Wire formats: [LZ4 RFC](lz4-rfc.md), [Zstd RFC](zstd-rfc.md).
 
-## Scheduling and signals
+## Batching and signals
+
+OMQ batches naturally: the application sends one message at a time, and
+batches form from whatever queues up while a task is busy. Nothing waits to
+fill a batch, so an idle socket sends at once and a loaded one sends in bulk.
+
+- **Send:** callers append to a ring. `DataSignal` wakes the driver only on
+  the empty-to-pending edge, so a burst of sends costs one wakeup. Queued
+  small messages collect in one `FrameBuffer` arena, and the driver writes
+  everything queued with one vectored write.
+- **Compression:** LZ4 and Zstd pack queued small messages into one arena,
+  which also improves the ratio.
+- **Fan-out:** a lane worker drains its ring in batches and encodes each batch
+  once per codec group.
+- **Receive:** one read decodes many frames, and the driver publishes them to
+  the receive lane once per batch. `recv_many_into` and `recv_batching` let
+  the application take bursts too.
+
+Messages cross threads through bounded `yring` and `fanring` rings. Each I/O
+thread owns its drivers and lane outright, so I/O threads never contend with
+each other. The remaining locks guard short appends: a peer's transmit slot, a
+ring producer shared by socket clones, and publication across lanes.
 
 Every drain loop is bounded by message and byte budgets, so tasks revisit
 control, shutdown, and the other I/O direction. A task blocked on a full queue
 keeps its pending item; retries keep order and never decode twice.
-`DataSignal` coalesces data wakeups to one per batch. `StateSignal` reports
-capacity and route changes. Signals schedule work; queues own the messages.
+`StateSignal` reports capacity and route changes. Signals schedule work;
+queues own the messages.
 
 ## Inproc
 

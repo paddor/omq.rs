@@ -33,11 +33,10 @@ struct CurveBox {
 }
 
 impl CurveBox {
-    fn new(peer_public: &PublicKey, our_secret: &StaticSecret) -> Self {
-        let shared = our_secret.diffie_hellman(peer_public);
-        Self {
-            inner: salsabox::BoxKey::from_shared_secret(shared.as_bytes()),
-        }
+    fn new(peer_public: &PublicKey, our_secret: &StaticSecret) -> Result<Self> {
+        Ok(Self {
+            inner: box_key(peer_public, our_secret)?,
+        })
     }
 
     fn encrypt(&self, nonce: &[u8; 24], plaintext: &[u8]) -> Vec<u8> {
@@ -102,21 +101,15 @@ fn nonce_long(prefix: &[u8; 8], suffix: &[u8; 16]) -> [u8; 24] {
     n
 }
 
-/// Reject low-order Curve25519 public keys that force the X25519 shared
-/// secret to all-zeros, making session encryption predictable.
-fn validate_dh_not_zero(our_secret: &StaticSecret, peer_public: &[u8; 32]) -> Result<()> {
-    let pub_ = PublicKey::from(*peer_public);
-    if our_secret
-        .diffie_hellman(&pub_)
-        .to_bytes()
-        .iter()
-        .all(|&b| b == 0)
-    {
-        return Err(Error::HandshakeFailed(
+/// X25519 DH plus `HSalsa20` key derivation. Rejects low-order peer keys,
+/// which force an all-zero shared secret and a predictable box key.
+fn box_key(peer_public: &PublicKey, our_secret: &StaticSecret) -> Result<salsabox::BoxKey> {
+    let shared = our_secret.diffie_hellman(peer_public);
+    salsabox::BoxKey::from_shared_secret(shared.as_bytes()).ok_or_else(|| {
+        Error::HandshakeFailed(
             "X25519 produced all-zero shared secret (low-order public key)".into(),
-        ));
-    }
-    Ok(())
+        )
+    })
 }
 
 /// Per-direction frame transform: encrypts outgoing application frames as
@@ -248,21 +241,20 @@ fn build_transform(
     peer_eph_public: &PublicKey,
     out_counter: u64,
     is_server: bool,
-) -> CurveTransform {
-    let shared = our_eph_secret.diffie_hellman(peer_eph_public);
-    let salsa = salsabox::BoxKey::from_shared_secret(shared.as_bytes());
+) -> Result<CurveTransform> {
+    let salsa = box_key(peer_eph_public, our_eph_secret)?;
     let (out_prefix, in_prefix) = if is_server {
         (*NONCE_MESSAGE_S, *NONCE_MESSAGE_C)
     } else {
         (*NONCE_MESSAGE_C, *NONCE_MESSAGE_S)
     };
-    CurveTransform {
+    Ok(CurveTransform {
         salsa,
         out_counter,
         in_counter: 0,
         out_prefix,
         in_prefix,
-    }
+    })
 }
 
 // =====================================================================
@@ -508,7 +500,7 @@ impl CurveClient {
         let counter = self.next_out_counter()?;
         let nonce = nonce_short(NONCE_HELLO, counter);
         let signature_box =
-            CurveBox::new(&self.peer_lt_public, self.eph_secret()).encrypt(&nonce, &[0u8; 64][..]);
+            CurveBox::new(&self.peer_lt_public, self.eph_secret())?.encrypt(&nonce, &[0u8; 64][..]);
         let mut body = BytesMut::with_capacity(194);
         body.put_u8(0x01);
         body.put_u8(0x00);
@@ -529,7 +521,7 @@ impl CurveClient {
         let welcome_suffix: [u8; 16] = body[..16].try_into().unwrap();
         let welcome_box = &body[16..];
         let nonce = nonce_long(NONCE_WELCOME_PREFIX, &welcome_suffix);
-        let pt = CurveBox::new(&self.peer_lt_public, self.eph_secret())
+        let pt = CurveBox::new(&self.peer_lt_public, self.eph_secret())?
             .decrypt(&nonce, welcome_box)
             .map_err(|_| Error::HandshakeFailed("CURVE WELCOME decrypt failed".into()))?;
         if pt.len() != 128 {
@@ -541,8 +533,6 @@ impl CurveClient {
         let sp_bytes: [u8; 32] = pt[..32].try_into().unwrap();
         let cookie = pt[32..].to_vec();
         debug_assert_eq!(cookie.len(), 96);
-
-        validate_dh_not_zero(self.eph_secret(), &sp_bytes)?;
 
         let peer_eph_public = PublicKey::from(sp_bytes);
 
@@ -584,7 +574,7 @@ impl CurveClient {
         vouch_pt[32..].copy_from_slice(self.peer_lt_public.as_bytes());
         // RFC 26: vouch box is sealed by the client's long-term secret to
         // the SERVER'S TRANSIENT public key (S_eph), NOT the long-term one.
-        let vouch_box = CurveBox::new(peer_eph_public, &self.our_lt_secret)
+        let vouch_box = CurveBox::new(peer_eph_public, &self.our_lt_secret)?
             .encrypt(&vouch_nonce, &vouch_pt[..]);
 
         // Initiate plaintext = C_long_pub(32) + vouch_suffix(16) + vouch_box(80) + metadata.
@@ -597,7 +587,7 @@ impl CurveClient {
 
         let nonce = nonce_short(NONCE_INITIATE, counter);
         let init_box =
-            CurveBox::new(peer_eph_public, our_eph_secret).encrypt(&nonce, init_pt.as_slice());
+            CurveBox::new(peer_eph_public, our_eph_secret)?.encrypt(&nonce, init_pt.as_slice());
 
         let mut body = BytesMut::with_capacity(96 + 8 + init_box.len());
         body.put_slice(&self.received_cookie);
@@ -620,7 +610,7 @@ impl CurveClient {
             unreachable!();
         };
         let nonce = nonce_short(NONCE_READY, counter);
-        let pt = CurveBox::new(peer_eph_public, our_eph_secret)
+        let pt = CurveBox::new(peer_eph_public, our_eph_secret)?
             .decrypt(&nonce, ready_box)
             .map_err(|_| Error::HandshakeFailed("CURVE READY decrypt failed".into()))?;
         let mut props = decode_metadata(&pt)?;
@@ -654,12 +644,7 @@ impl CurveClient {
                 "CURVE transform requested before handshake complete".into(),
             ));
         };
-        Ok(build_transform(
-            our_eph_secret,
-            peer_eph_public,
-            self.out_counter,
-            false,
-        ))
+        build_transform(our_eph_secret, peer_eph_public, self.out_counter, false)
     }
 }
 
@@ -758,7 +743,7 @@ impl CurveServer {
         match (name.as_ref(), &self.state) {
             (b"HELLO", CurveServerState::Init) => {
                 let (our_eph_secret, peer_eph_public) = self.parse_hello(&body)?;
-                let welcome = self.build_welcome(&our_eph_secret, &peer_eph_public);
+                let welcome = self.build_welcome(&our_eph_secret, &peer_eph_public)?;
                 out.push(Command::Unknown {
                     name: Bytes::from_static(b"WELCOME"),
                     body: welcome,
@@ -851,11 +836,9 @@ impl CurveServer {
         let counter = u64::from_be_bytes(body[106..114].try_into().unwrap());
         let signature_box = &body[114..194];
 
-        validate_dh_not_zero(&self.our_lt_secret, &cp_bytes)?;
-
         let cp = PublicKey::from(cp_bytes);
         let nonce = nonce_short(NONCE_HELLO, counter);
-        let pt = CurveBox::new(&cp, &self.our_lt_secret)
+        let pt = CurveBox::new(&cp, &self.our_lt_secret)?
             .decrypt(&nonce, signature_box)
             .map_err(|_| Error::HandshakeFailed("CURVE HELLO signature invalid".into()))?;
         if pt.len() != 64 || pt.iter().any(|&b| b != 0) {
@@ -872,7 +855,7 @@ impl CurveServer {
         &mut self,
         our_eph_secret: &StaticSecret,
         peer_eph_public: &PublicKey,
-    ) -> Bytes {
+    ) -> Result<Bytes> {
         let our_eph_public = PublicKey::from(our_eph_secret);
         let mut welcome_suffix = [0u8; 16];
         rand::rng().fill_bytes(&mut welcome_suffix);
@@ -887,14 +870,14 @@ impl CurveServer {
         let mut welcome_pt = Vec::with_capacity(128);
         welcome_pt.extend_from_slice(our_eph_public.as_bytes());
         welcome_pt.extend_from_slice(&cookie);
-        let welcome_box = CurveBox::new(peer_eph_public, &self.our_lt_secret)
+        let welcome_box = CurveBox::new(peer_eph_public, &self.our_lt_secret)?
             .encrypt(&welcome_nonce, welcome_pt.as_slice());
 
         let mut body = BytesMut::with_capacity(160);
         body.put_slice(&welcome_suffix);
         body.put_slice(&welcome_box);
 
-        body.freeze()
+        Ok(body.freeze())
     }
 
     fn parse_initiate(&mut self, body: &[u8]) -> Result<(PeerProperties, [u8; 32])> {
@@ -914,7 +897,7 @@ impl CurveServer {
         let cp = PublicKey::from(cp_bytes);
 
         let nonce = nonce_short(NONCE_INITIATE, counter);
-        let init_pt = CurveBox::new(&cp, &sn_secret)
+        let init_pt = CurveBox::new(&cp, &sn_secret)?
             .decrypt(&nonce, init_box)
             .map_err(|_| Error::HandshakeFailed("CURVE INITIATE decrypt failed".into()))?;
         if init_pt.len() < 32 + 16 + 80 {
@@ -927,8 +910,6 @@ impl CurveServer {
         let client_lt_bytes: [u8; 32] = init_pt[..32].try_into().unwrap();
         let vouch = &init_pt[32..128];
         let metadata = &init_pt[128..];
-
-        validate_dh_not_zero(&sn_secret, &client_lt_bytes)?;
 
         let cl = PublicKey::from(client_lt_bytes);
         Self::verify_vouch(&sn_secret, &self.our_lt_public, vouch, &cl, &cp)?;
@@ -955,7 +936,7 @@ impl CurveServer {
         let (vouch_suffix, vouch_box) = vouch.split_at(16);
         let vouch_suffix: &[u8; 16] = vouch_suffix.try_into().unwrap();
         let vouch_nonce = nonce_long(NONCE_VOUCH_PREFIX, vouch_suffix);
-        let vouch_pt = CurveBox::new(cl, our_eph_secret)
+        let vouch_pt = CurveBox::new(cl, our_eph_secret)?
             .decrypt(&vouch_nonce, vouch_box)
             .map_err(|_| Error::HandshakeFailed("CURVE VOUCH invalid".into()))?;
         if vouch_pt.len() != 64
@@ -984,7 +965,7 @@ impl CurveServer {
         let nonce = nonce_short(NONCE_READY, counter);
         let metadata = encode_metadata(&self.our_props)?;
         let ready_box =
-            CurveBox::new(peer_eph_public, our_eph_secret).encrypt(&nonce, metadata.as_slice());
+            CurveBox::new(peer_eph_public, our_eph_secret)?.encrypt(&nonce, metadata.as_slice());
         let mut body = BytesMut::with_capacity(8 + ready_box.len());
         body.put_slice(&counter.to_be_bytes());
         body.put_slice(&ready_box);
@@ -1002,12 +983,7 @@ impl CurveServer {
                 "CURVE transform requested before handshake complete".into(),
             ));
         };
-        Ok(build_transform(
-            our_eph_secret,
-            peer_eph_public,
-            self.out_counter,
-            true,
-        ))
+        build_transform(our_eph_secret, peer_eph_public, self.out_counter, true)
     }
 }
 
@@ -1408,6 +1384,37 @@ mod tests {
             body: body.freeze(),
         };
         let r = server.on_command(cmd, &mut s_out);
-        assert!(matches!(r, Err(Error::HandshakeFailed(_))));
+        assert!(matches!(r, Err(Error::HandshakeFailed(msg)) if msg.contains("low-order")));
+    }
+
+    #[test]
+    fn rejects_low_order_server_ephemeral() {
+        let server_kp = CurveKeypair::generate();
+        let mut client = CurveMechanism::new_client(CurveKeypair::generate(), server_kp.public);
+        let mut c_out = Vec::new();
+        client
+            .start(&mut c_out, dummy_props(SocketType::Push))
+            .unwrap();
+        let Some(Command::Unknown { body: hello, .. }) = c_out.pop() else {
+            panic!("expected HELLO");
+        };
+        let cp = PublicKey::from(<[u8; 32]>::try_from(&hello[74..106]).unwrap());
+
+        // A valid WELCOME from the server's long-term key that carries
+        // S' = identity.
+        let server_secret = StaticSecret::from(*server_kp.secret.as_bytes());
+        let suffix = [7u8; 16];
+        let welcome_box = CurveBox::new(&cp, &server_secret)
+            .unwrap()
+            .encrypt(&nonce_long(NONCE_WELCOME_PREFIX, &suffix), &[0u8; 128]);
+        let mut body = BytesMut::with_capacity(160);
+        body.put_slice(&suffix);
+        body.put_slice(&welcome_box);
+        let cmd = Command::Unknown {
+            name: Bytes::from_static(b"WELCOME"),
+            body: body.freeze(),
+        };
+        let r = client.on_command(cmd, &mut c_out);
+        assert!(matches!(r, Err(Error::HandshakeFailed(msg)) if msg.contains("low-order")));
     }
 }

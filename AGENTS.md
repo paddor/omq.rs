@@ -8,7 +8,8 @@ out-of-tree (maturin etc.).
 - **`omq-proto`** -- sans-I/O ZMTP 3.x core. Codec (`Connection`),
   message/payload types, greeting + frame state machines, mechanism
   handshakes (NULL / PLAIN / CURVE), compression transforms
-  (lz4, zstd), endpoint parsing, options, subscription matcher. No async, no I/O.
+  (lz4, zstd), endpoint parsing, options, subscription matcher. No async,
+  no I/O.
 - **`omq-tokio`** -- tokio backend. **Default backend.**
   Works on Linux, macOS, and Windows.
 - **`omq-shm`** -- Linux shared mappings, payload storage, remote leases,
@@ -44,70 +45,39 @@ is covered by `tests/coverage_matrix.rs`.
 | `soak` | soak test suites | - |
 | `copy-stats` | per-site message copy counters for `omq_copy_budget` | - |
 
-## Architecture summary
+## Architecture
 
-Three-layer split: `omq-proto` (sans-I/O ZMTP codec) -> `omq-tokio`
-backend -> user `Socket` API. Two queues per socket: one inbound,
-one outbound. Per-connection driver tasks bridge queues and wire.
-`Context` owns N `current_thread` tokio runtimes on dedicated OS threads
-(default 1); N > 1 adds a control runtime for socket actors.
-`Context::current()` wraps an existing runtime for embedded use.
-Full detail in `doc/`:
-[`architecture.md`](doc/architecture.md),
-[`bindings.md`](doc/bindings.md), [`libzmq/`](doc/libzmq/).
-Transport RFCs:
-[`lz4-rfc.md`](doc/lz4-rfc.md), [`zstd-rfc.md`](doc/zstd-rfc.md),
-[`quic-rfc.md`](doc/quic-rfc.md),
-[`dart-rfc.md`](doc/dart-rfc.md).
-Shared-memory architecture: [`omq-shm/README.md`](omq-shm/README.md).
+[`doc/architecture.md`](doc/architecture.md) covers components, threads, and
+message paths; [`doc/bindings.md`](doc/bindings.md) covers bindings. Transport
+RFCs: [`lz4`](doc/lz4-rfc.md), [`zstd`](doc/zstd-rfc.md),
+[`quic`](doc/quic-rfc.md), [`dart`](doc/dart-rfc.md). SHM:
+[`omq-shm/README.md`](omq-shm/README.md). Key types:
 
-**omq-proto key types.** `Connection`: ZMTP codec state machine
-(`handle_input`/`poll_event`/`send_message`/`poll_transmit`).
-`FrameBuffer`: arena (16 KiB TCP/WS, 64 KiB IPC) + entry-based framer
-used by `omq-tokio` and `omq-shm`. Frame headers are always written into the arena.
-Small messages (<4 KiB `ARENA_THRESHOLD`) go contiguously into the arena
-(1 iovec per batch). Large payloads are tracked as external `Bytes`
-entries (zero-copy gather-write). `Message`: 64 B, inline up to 55 B.
-`Payload`: 64 B, inline up to 62 B.
-
-**omq-tokio hot path.** `SocketDriver` actor owns peer table and
-type state. Send bypass: `Socket::send` skips the actor for every
-socket type via `SendSubmitter` (one variant per routing strategy). Per-peer `PeerTransmitSlot`
-(`FrameBuffer` under `std::sync::Mutex`, nanosecond hold): handle
-frames, driver flushes via `DataSignal` select arm. `PeerOutbound`
-enum (`Wire`/`Inbox`/`Inproc`) dispatches fan-out/identity/exclusive to
-per-peer slots without pump tasks. Latency-profile TCP peers may use
-a stateless `DirectTcpWriter` for one immediate nonblocking vectored
-write of the slot (arena plus large payloads); partial writes stay in
-`PeerTransmitSlot` and are
-flushed by the driver. Recv bypass: `ConnectionDriver`
-pushes straight to user `recv_tx` for PULL/SUB/REQ/etc. REP/ROUTER
-go through actor for identity routing. PEER uses one socket-owned fanring receiver
-and one bounded producer per connection. Socket clones share the receive drain;
-application-aware dispatch stays outside OMQ. Outbound PEER traffic uses
-per-clone/per-destination fanring producers consumed by the connection I/O task.
-PUB fan-out lane workers
-(`LaneWorker`) use split channels: a `ControlQueue` control channel
-(drained unconditionally) and a `yring` data channel (drained up to
-`DrainBudget::WORKER`). All producer-to-consumer signaling uses
-`DataSignal` (transmit slot, send pipe, lane workers).
-
-**Inproc.** No ZMTP. Each direction of a connection is one `yring`
-sized `send_hwm` (sender) + `recv_hwm` (receiver). The receiving
-socket owns it: the consumer is a per-peer source of `SpscAwareRecv`,
-the producer sits behind an `InprocPort` that the peer's send strategy
-pushes into from the calling thread (`InprocSender`, used through
-`SendPipeProducer` and `PeerOutbound`). No IO-thread task touches a
-message. ROUTER identity and SERVER routing ID are attached at the
-port; REP envelopes are split in the receive drain. Fan-out senders
-treat inproc subscribers as fallback peers: the calling thread matches
-subscriptions and pushes into each ring (lanes serve wire peers only).
-`inproc_peer_driver` carries commands and lifecycle only, plus a relay
-into the port for senders without a direct route (PEER, `conflate`).
-Connect-side round-robin endpoints allocate a pre-ready send pipe at
-`connect()`; its content moves into the ring first when the peer is
-ready. Bind-side round-robin sockets with no ready pipe mute like
-libzmq.
+- `Connection` (omq-proto): sans-I/O ZMTP codec
+  (`handle_input`/`poll_event`/`send_message`/`poll_transmit`).
+- `FrameBuffer`: arena (16 KiB TCP/WS, 64 KiB IPC) plus entries. Headers and
+  messages under `ARENA_THRESHOLD` (4 KiB) go into the arena; larger payloads
+  go out by gather write. Used by omq-tokio and omq-shm.
+- `Message` and `Payload`: 64 B, inline up to 55 B and 62 B.
+- `SocketDriver`: per-socket actor owning the peer table and type state.
+- `SendSubmitter`: send path for every socket type, bypassing the actor.
+- `PeerTransmitSlot`: per-peer `FrameBuffer` under a short-held
+  `std::sync::Mutex`; handles frame, drivers flush. Latency-profile TCP may
+  write once directly through `DirectTcpWriter`.
+- `PeerOutbound` (`Wire`/`Inbox`/`Inproc`): per-peer dispatch without pump
+  tasks.
+- `ConnectionDriver`: per-connection wire task. Receives bypass the actor
+  except ROUTER and REP.
+- `LaneWorker`: fan-out lane with a `ControlQueue` drained every iteration and
+  a `yring` data ring bounded by `DrainBudget`.
+- PEER: one socket-owned fanring receiver; outbound per-clone,
+  per-destination fanring producers.
+- Inproc: one `yring` per direction (`send_hwm` + `recv_hwm`) owned by the
+  receiver behind an `InprocPort`; senders push from the calling thread
+  through `InprocSender`. `inproc_peer_driver` carries commands and lifecycle,
+  plus relays for PEER and `conflate`.
+- Connect-side round-robin sockets get a pre-ready send pipe at `connect()`;
+  bind-side ones without a ready peer mute.
 
 ## Build / test / bench / charts / releasing
 
@@ -147,7 +117,8 @@ Lints: `missing_debug_implementations` = **deny**,
 ## Conventions
 
 - Run benchmarks and profilers on this host only. Never run them over SSH.
-- Keep benchmark HWM independent of batch limits and pool capacity. SHM charts use HWM 1000.
+- Keep benchmark HWM independent of batch limits and pool capacity. SHM
+  charts use HWM 1000.
 - **HARD RULE: Never create documentation files unless the user explicitly
   asks to create them.** Feature work does not authorize new docs; update
   existing files instead.
@@ -173,97 +144,45 @@ Lints: `missing_debug_implementations` = **deny**,
 simple, readable code over clever abstractions. Maintainability
 beats micro-optimization where performance is not critical.
 
-## ZMQ fundamentals
+## Socket fundamentals
 
-ZMQ sockets are opaque message queues that abstract away the network.
-The user sends and receives messages. The socket handles connections,
-reconnections, framing, and multiplexing internally. The transport
-(TCP, IPC, inproc, UDP) is chosen by endpoint URI and is transparent
-to the application.
+The user-facing crash course is [`GETTING_STARTED.md`](GETTING_STARTED.md).
+These rules bind every change. Reliability is non-negotiable: never propose a
+fix that weakens self-healing or trades reliability for convenience.
 
-**Reliability is non-negotiable.** Self-healing, silent
-back-pressure, no user-visible errors from peer failures. Never
-propose a fix that weakens self-healing or trades reliability for
-convenience. Core guarantees:
+- Send/recv never fail because of peers. Only misuse (protocol violations) or
+  a closed socket return errors.
+- Connect-before-bind works; never blame connection order.
+- Sockets reconnect with backoff; applications never manage connections.
+- Heartbeats detect dead peers, not slow ones. Never expect them to resolve
+  slow-consumer backpressure.
+- Messages are atomic: delivered whole or not at all.
+- HWM means backpressure, not errors. Fan-out (`PUB`, `XPUB`, `RADIO`) drops
+  for mute peers unless `xpub_nodrop`; round-robin and exclusive sockets block
+  per `OnMute`.
+- Fast peers never starve slow ones; slow peers never block fast ones.
+  Receives fair-queue across connections.
+- Control commands (subscribe, cancel, add/remove peer, shutdown) use their
+  own channels, drained every iteration, never behind a data backlog.
+- One socket binds several transports at once; inproc has no kernel or
+  serialization.
+- omq-tokio sockets can be shared across tasks; omq-libzmq keeps one socket
+  per thread.
 
-- **Send/recv never fail due to peers.** Peer disconnects,
-  TCP drops, slow consumers: no errors. Reconnects automatically.
-  Only user-visible send errors: protocol violations or socket closed.
-- **Connect-before-bind works.** `connect()` retries until the
-  remote `bind()` appears. Never blame connection ordering.
-- **Automatic reconnection.** Configurable backoff. The
-  application does not manage connection lifecycle.
-- **Heartbeats detect dead peers, not slow ones.** A slow peer
-  that still responds to PINGs is alive. Heartbeat timeout only
-  fires when a peer stops responding entirely. Never assume
-  heartbeat will resolve a slow-consumer backpressure situation.
-- **Messages are atomic.** Delivered in full or not at all.
-- **HWM back-pressure, not errors.** When the outbound queue is
-  full, fan-out sockets (`PUB`, `XPUB`, `RADIO`) drop on mute
-  unless `xpub_nodrop` is set. Round-robin/exclusive sockets
-  default to blocking, configurable via `OnMute`. It does not
-  return an error.
-- **No peer starvation.** Fast peers MUST NOT starve slow peers,
-  and slow peers MUST NOT block fast peers.
-- **Control plane never starves.** Subscribe, cancel, add-peer,
-  remove-peer, and shutdown commands must always be reachable
-  within bounded time, regardless of data throughput. Never mix
-  control commands into a data channel where they can be buried
-  behind an unbounded backlog. Separate channels, drain control
-  unconditionally every iteration.
-- **Fair fan-in.** Consumer fair-queues across all connections.
-- **Transport-agnostic.** Bind TCP and IPC simultaneously. Inproc
-  is in-process (no kernel, no serialization).
-- **Thread safety.** One socket, one thread. omq-tokio relaxes
-  this for async; omq-libzmq does not.
+20 socket types in 10 pairs, checked during the handshake:
 
-## Socket types
-
-20 types in 10 pairs. Compatibility is checked during ZMTP handshake.
-
-**Pipeline (one-way, round-robin/fair-queue):**
-- **PUSH/PULL** -- load distribution. PUSH round-robins across
-  PULLs. PULL fair-queues from PUSHes.
-- **SCATTER/GATHER** -- Same as PUSH/PULL but single-frame
-  only (rejects multipart).
-
-**Pub/sub (fan-out, topic-filtered):**
-- **PUB/SUB** -- PUB fans out to all SUBs. SUB subscribes by
-  prefix (`subscribe`/`unsubscribe`). PUB filters per subscriber.
-  Mute subs drop by default (`OnMute`/`xpub_nodrop` control this).
-- **XPUB/XSUB** -- raw pub/sub. XPUB surfaces subscribe/
-  unsubscribe as receivable messages. XSUB sends subscribe commands
-  explicitly. Used to build proxies (XSUB-XPUB).
-- **RADIO/DISH** -- group-based pub/sub. RADIO requires a
-  group on every message (`Message::with_group`). DISH joins/leaves
-  groups (`join`/`leave`). UDP transport supported.
-
-**Request/reply (strict alternation):**
-- **REQ/REP** -- synchronous request/reply. REQ enforces
-  send-recv-send-recv. REP enforces recv-send-recv-send. REQ
-  prepends empty delimiter frame. REP strips it, saves envelope,
-  restores on send.
-- **DEALER/ROUTER** -- async request/reply. DEALER is REQ without
-  the FSM (free send/recv). ROUTER prepends identity frame on recv,
-  routes by identity frame on send. `router_mandatory`: error on
-  unknown identity. Handover: new peer with same identity evicts
-  old, unless it authenticated as a different principal.
-- **CLIENT/SERVER** CLIENT is DEALER without multipart.
-  SERVER is ROUTER without multipart. Routing via `routing_id`
-  field instead of identity frame.
-
-**Exclusive (1:1):**
-- **PAIR** -- bidirectional 1:1. Exactly one peer. No fan-out, no
-  round-robin, no identity.
-- **CHANNEL** Same as PAIR but single-frame only.
-- **PEER** N:N bidirectional with identity routing (like
-  ROUTER but peers are also PEER, not DEALER).
-
-**Raw TCP:**
-- **STREAM** -- raw TCP bridge. No ZMTP framing between peers.
-  Recv prepends peer identity frame (like ROUTER). Send requires
-  identity frame prefix to select target peer. TCP-only (rejects
-  IPC/inproc). Accepts connections from non-ZMQ clients.
+| Pair | Semantics |
+| --- | --- |
+| PUSH/PULL, SCATTER/GATHER | Round-robin out, fair-queue in; SCATTER/GATHER are single-part |
+| PUB/SUB | PUB filters by subscribed prefix per subscriber |
+| XPUB/XSUB | Subscriptions surface as messages; used for proxies |
+| RADIO/DISH | Exact groups (`Message::with_group`, `join`/`leave`); UDP too |
+| REQ/REP | Strict alternation; REQ adds an empty delimiter, REP saves and restores the envelope |
+| DEALER/ROUTER | Free alternation; ROUTER prepends and routes by identity, errors on unknown identity with `router_mandatory`; a new peer with the same identity evicts the old one unless authenticated as a different principal |
+| CLIENT/SERVER | Single-part DEALER/ROUTER; SERVER routes by `routing_id` |
+| PAIR, CHANNEL | Exactly one peer; CHANNEL is single-part |
+| PEER | N:N, identity routing in both directions |
+| STREAM | Raw TCP only, no ZMTP; identity frame selects the peer |
 
 ## Performance invariants
 
@@ -278,10 +197,10 @@ fan-out lane runs on each IO thread. Duplicating compression across
 lanes is cheaper than serializing through a shared encoder mutex or
 adding scheduling hops to a single compression worker.
 
-**LZ4 dict: one shipment per direction per connection.** The LZ4
-RFC (doc/lz4-rfc.md Sec. 7.2) requires at most one LZ4D dict
-shipment per direction per connection. A second shipment closes the
-connection. Never re-ship a dict on an existing connection.
+**Compression dict: one shipment per direction per connection.** The
+LZ4 and Zstd RFCs (doc/lz4-rfc.md and doc/zstd-rfc.md, Sec. 7.2) allow
+at most one dictionary per direction per connection. A second shipment
+closes the connection. Never re-ship a dict on an existing connection.
 
 **Budget every drain loop.** Every loop that drains a channel or
 queue must be capped by both message count AND byte count

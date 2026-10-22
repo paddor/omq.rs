@@ -372,9 +372,17 @@ async fn connect_before_bind_and_reconnect_after_rebind() {
     assert_eq!(recv(&pull).await.part_bytes(0).unwrap(), &b"first"[..]);
 
     pull.close().await.unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
     let pull = Socket::new(SocketType::Pull, server_options(&tls));
-    pull.bind(quic(port)).await.unwrap();
+    // The old UDP port frees once its closed connection has drained.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while let Err(error) = pull.bind(quic(port)).await {
+        assert!(
+            matches!(&error, omq_tokio::Error::Io(e) if e.kind() == std::io::ErrorKind::AddrInUse)
+                && tokio::time::Instant::now() < deadline,
+            "rebind: {error}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     push.send(Message::single("second")).await.unwrap();
     assert_eq!(recv(&pull).await.part_bytes(0).unwrap(), &b"second"[..]);
 }

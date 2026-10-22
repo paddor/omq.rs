@@ -4,6 +4,7 @@ require_relative "test_helper"
 
 class LifecycleTest < Minitest::Test
   def test_close_during_materialization_finishes
+    skip "TracePoint :c_call is unsupported on TruffleRuby" if RUBY_ENGINE == "truffleruby"
     script = <<~'RUBY'
       50.times do |index|
         socket = OMQ.rs(:pull, linger: 0)

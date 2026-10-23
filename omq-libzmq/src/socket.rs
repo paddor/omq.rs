@@ -851,13 +851,37 @@ pub extern "C" fn zmq_connect_peer(sock_ptr: *mut c_void, _addr: *const libc::c_
     0
 }
 
-/// Unsupported peer-disconnect entry point; return -1 with ENOTSUP for a valid socket.
+/// Close one SERVER peer by routing id; return zero or -1 with errno.
+/// Unknown ids fail with EHOSTUNREACH. Other socket types, including PEER,
+/// fail with ENOTSUP.
 #[unsafe(no_mangle)]
-pub extern "C" fn zmq_disconnect_peer(sock_ptr: *mut c_void, _routing_id: u32) -> c_int {
+pub extern "C" fn zmq_disconnect_peer(sock_ptr: *mut c_void, routing_id: u32) -> c_int {
     if sock_ptr.is_null() {
         return fail(crate::error::ENOTSOCK);
     }
-    fail(crate::error::ENOTSUP)
+    // SAFETY: C callers pass null or a pointer from this API.
+    let sock = match unsafe { crate::handle::socket(sock_ptr) } {
+        Ok(sock) => sock,
+        Err(errno) => return fail(errno),
+    };
+    if sock.ctx.is_effectively_terminated() {
+        return fail(ETERM);
+    }
+    if sock.socket_type != SocketType::Server {
+        return fail(crate::error::ENOTSUP);
+    }
+    // An unmaterialized socket has no peers.
+    let Some(inner) = sock.inner.get() else {
+        return fail(libc::EHOSTUNREACH);
+    };
+
+    let result = with_socket(&sock.ctx, inner, move |s| async move {
+        let Some(peer) = s.peer_info(routing_id).await? else {
+            return Err(omq_tokio::error::Error::Unroutable);
+        };
+        s.disconnect_peer(peer.connection_id).await
+    });
+    result_to_rc(&result)
 }
 
 /// Join a null-terminated DISH group; return zero or -1 with errno.

@@ -128,6 +128,8 @@ their order; clone once per sending task, not per message.
 - `wait_connected(n, timeout)` waits for `n` ready peers.
 - `connections()` lists ready peers; `connections_changed(seen)` waits for
   the set to change, without missing updates.
+- `disconnect_peer(connection_id)` closes one connection. The peer reconnects
+  as after any drop.
 - `monitor()` streams lifecycle events for diagnostics. It is lossy under
   load; do not gate application logic on it.
 

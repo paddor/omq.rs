@@ -219,4 +219,20 @@ impl Socket {
             .map_err(|_| Error::Closed)?;
         rx.await.map_err(|_| Error::Closed)?
     }
+
+    /// Close one peer connection by `connection_id`, as listed by
+    /// [`Self::connections`]. Its queued messages are dropped. The peer heals
+    /// like after any drop: a dialed peer redials with backoff, and an
+    /// accepted peer reconnects from its side, so a SUB resubscribes through
+    /// `Options::subscription_admission`. Returns `Error::Unroutable` if no
+    /// such connection exists.
+    pub async fn disconnect_peer(&self, connection_id: u64) -> Result<()> {
+        let (ack, rx) = oneshot::channel();
+        self.inner
+            .cmd_tx
+            .send(SocketCommand::DisconnectPeer { connection_id, ack })
+            .await
+            .map_err(|_| Error::Closed)?;
+        rx.await.map_err(|_| Error::Closed)?
+    }
 }

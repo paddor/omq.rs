@@ -139,7 +139,7 @@ const FUNCTION_MATRIX: &[FunctionEntry] = &[
     },
     FunctionEntry {
         name: "zmq_disconnect_peer",
-        status: FunctionStatus::Unsupported,
+        status: FunctionStatus::Partial,
     },
     FunctionEntry {
         name: "zmq_errno",

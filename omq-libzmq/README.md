@@ -43,9 +43,10 @@ The bundled `zmq.h` tracks the libzmq 4.3.6 C ABI and is compiled against
 cppzmq by `scripts/test-cppzmq.sh`.
 
 Draft/legacy helper APIs needed by modern bindings are link-compatible.
-Unsupported draft behavior returns `ENOTSUP`; this currently includes peer
-connect/disconnect, monitor v2 pipe stats, peer state, `zmq_ppoll` with a
-signal mask, and deprecated iovec send/recv. `zmq_poller_fd` returns `EINVAL`
+Unsupported draft behavior returns `ENOTSUP`; this currently includes
+`zmq_connect_peer`, `zmq_disconnect_peer` on PEER sockets, monitor v2 pipe
+stats, peer state, `zmq_ppoll` with a signal mask, and deprecated iovec
+send/recv. `zmq_disconnect_peer` works on SERVER sockets. `zmq_poller_fd` returns `EINVAL`
 because this poller is emulated over `zmq_poll` and has no native pollable fd.
 
 WSS TLS options (`ZMQ_WSS_KEY_PEM`, `ZMQ_WSS_CERT_PEM`, `ZMQ_WSS_TRUST_PEM`,

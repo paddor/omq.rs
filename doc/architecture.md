@@ -157,7 +157,8 @@ set. Lane control uses its own channel, drained every iteration.
 
 PUB and XPUB pass each peer SUBSCRIBE through `Options::subscription_admission`
 before registration; rejected ones never reach XPUB receive and surface as
-`SubscribeRejected` monitor events.
+`SubscribeRejected` monitor events. `disconnect_peer()` closes one connection;
+its reconnect resubscribes through admission.
 
 ROUTER routes by identity, SERVER by routing ID, and REP by the saved request
 route. PEER routes by identity in both directions; outbound PEER sends use

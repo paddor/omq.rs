@@ -1302,7 +1302,7 @@ option_parity_rejections_test() ->
     ?assertMatch({error, badarg, _}, omq:setsockopt(Sock, omq_on_mute, 99)),
     ok = omq:setsockopt(Sock, omq_compression_level, 1),
     ?assertEqual({ok, 1}, omq:getsockopt(Sock, omq_compression_level)),
-    ?assertMatch({error, badarg, _}, omq:setsockopt(Sock, omq_compression_level, -9)),
+    ?assertMatch({error, badarg, _}, omq:setsockopt(Sock, omq_compression_level, -8)),
     ?assertMatch({error, badarg, _}, omq:setsockopt(Sock, omq_compression_level, 5)),
     Dict = <<"my-dict-bytes-1234">>,
     ?assertEqual({ok, <<>>}, omq:getsockopt(Sock, omq_compression_dict)),

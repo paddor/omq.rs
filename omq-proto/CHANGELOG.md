@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- `zstd+tcp://` compression levels are -7..=4. zrip dropped level -8, so
+  `Options::validate` now rejects it.
+
 ## [0.35.0] - 2026-10-22
 
 ### Breaking

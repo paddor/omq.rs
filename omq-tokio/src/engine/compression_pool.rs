@@ -249,7 +249,7 @@ mod tests {
         let message = Message::single(body);
         let (old, _) = MessageEncoder::for_compression_kind(
             CompressionKind::Zstd,
-            &Options::default().compression_level(-8),
+            &Options::default().compression_level(-7),
         )
         .unwrap()
         .unwrap();

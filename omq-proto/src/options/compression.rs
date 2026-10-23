@@ -68,7 +68,7 @@ impl Options {
     /// Set a fixed `zstd+tcp://` compression level.
     ///
     /// Without a fixed level, each connection adapts its level within
-    /// `compression_level_range`. Supported zrip levels are -8..=4. Level 0
+    /// `compression_level_range`. Supported zrip levels are -7..=4. Level 0
     /// maps to zrip's library default, currently level 1. Ignored by LZ4
     /// compression.
     #[must_use]
@@ -79,8 +79,8 @@ impl Options {
 
     /// Adapt the `zstd+tcp://` level within `min..=max` (default -7..=4).
     ///
-    /// A fixed `compression_level` takes precedence. Level 0 is skipped and
-    /// -8 runs as -7. Ignored by LZ4 compression.
+    /// A fixed `compression_level` takes precedence. Level 0 is skipped.
+    /// Ignored by LZ4 compression.
     #[must_use]
     pub fn compression_level_range(mut self, min: i32, max: i32) -> Self {
         self.compression_level_range = Some((min, max));

@@ -274,7 +274,7 @@ pub(crate) struct PushpullZstdArgs {
     #[arg(long, value_delimiter = ',')]
     pub dict_sizes: Vec<u64>,
 
-    /// Fixed Zstd compression level (-8..=4) instead of `--level-range`.
+    /// Fixed Zstd compression level (-7..=4) instead of `--level-range`.
     #[arg(long)]
     pub level: Option<i32>,
 

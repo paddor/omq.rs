@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `omq_compression_level` accepts -7..=4. zrip dropped level -8.
+
 ## [0.2.8] - 2026-10-22
 
 ### Changed

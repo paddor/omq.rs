@@ -27,7 +27,7 @@ public final class Socket implements AutoCloseable {
     private static final long NONE = -1;
     private static final int ZMTP_MAX_SHORT_STRING_BYTES = 255;
     private static final int COMPRESSION_DICT_MAX_BYTES = 8 * 1024;
-    private static final int ZSTD_LEVEL_MIN = -8;
+    private static final int ZSTD_LEVEL_MIN = -7;
     private static final int ZSTD_LEVEL_MAX = 4;
     private static final long MAX_HEARTBEAT_TTL_MILLIS = 6_553_500;
 

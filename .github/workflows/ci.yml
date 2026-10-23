@@ -33,6 +33,7 @@ jobs:
       run_go: ${{ steps.scope.outputs.go == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
       run_lua: ${{ steps.scope.outputs.lua == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
       run_dotnet: ${{ steps.scope.outputs.dotnet == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+      run_zig: ${{ steps.scope.outputs.zig == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
       run_ruby: ${{ steps.scope.outputs.ruby == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
       run_node: ${{ steps.scope.outputs.node == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     steps:
@@ -97,6 +98,15 @@ jobs:
               - 'Cargo.lock'
               - '.cargo/**'
               - '.editorconfig'
+              - '.github/workflows/ci.yml'
+            zig:
+              - 'bindings/zig/**'
+              - 'omq-libzmq/**'
+              - 'omq-proto/**'
+              - 'omq-tokio/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.cargo/**'
               - '.github/workflows/ci.yml'
             ruby:
               - 'bindings/ruby/**'
@@ -279,6 +289,27 @@ jobs:
         env:
           OMQ_LUA: /usr/bin/lua5.4
         run: ./scripts/test-lua.sh
+
+  zig-test:
+    name: zig test
+    needs: [changes, linux-gate]
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.run_zig == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: build native library
+        run: cargo build --release -p omq-libzmq
+      - name: zig fmt
+        run: zig fmt --check bindings/zig/build.zig bindings/zig/src bindings/zig/tests bindings/zig/scripts
+      - name: zig tests
+        working-directory: bindings/zig
+        run: zig build test --summary all
 
   ruby-lint:
     name: ruby lint
@@ -940,6 +971,7 @@ jobs:
         go-test,
         lua-lint,
         lua-test,
+        zig-test,
         ruby-lint,
         ruby-test,
         dotnet-lint,

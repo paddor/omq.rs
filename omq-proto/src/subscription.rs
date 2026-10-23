@@ -78,7 +78,8 @@ pub struct SubscriptionRequest<'a> {
 /// Called once per SUBSCRIBE, on the connection task, so it must not block.
 /// A rejected subscription is not registered, not counted, and not surfaced on
 /// XPUB receive. Monitors see it as `MonitorEvent::SubscribeRejected`. CANCEL
-/// is not filtered.
+/// is not filtered. Revoke an admitted subscription by disconnecting the peer;
+/// its reconnect resubscribes through this callback.
 #[derive(Clone)]
 pub struct SubscriptionAdmission(Arc<dyn Fn(&SubscriptionRequest<'_>) -> bool + Send + Sync>);
 

@@ -6,10 +6,12 @@
 //! - ZMTP 3.0 compatibility: PUB accepts `\x01<topic>` data-frame subscriptions
 //!   from legacy peers that do not use the SUBSCRIBE command.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use omq_proto::endpoint::Host;
-use omq_tokio::{Endpoint, Message, MonitorEvent, Options, Socket, SocketType};
+use omq_tokio::{Endpoint, Error, Message, MonitorEvent, Options, Socket, SocketType};
 
 fn tcp_loopback(port: u16) -> Endpoint {
     Endpoint::Tcp {
@@ -645,6 +647,64 @@ async fn rejected_subscription_reaches_monitors() {
         assert_eq!(connections.len(), 1);
         assert_eq!(rejected, Some(connections[0].connection_id));
         assert_eq!(received, rejected);
+    }
+}
+
+/// Disconnecting a peer revokes its subscriptions: its reconnect resubscribes
+/// through admission, which now rejects the prefix.
+#[tokio::test]
+async fn pub_disconnect_peer_revokes_subscription() {
+    for endpoint in ["tcp://127.0.0.1:0", "inproc://pub-disconnect-peer-revokes"] {
+        let allowed = Arc::new(AtomicBool::new(true));
+        let admission = allowed.clone();
+        let pub_ = Socket::new(
+            SocketType::Pub,
+            Options::default().subscription_admission(move |_| admission.load(Ordering::Acquire)),
+        );
+        let mut monitor = pub_.monitor();
+        let endpoint = pub_.bind(endpoint).await.unwrap();
+        let sub = Socket::new(SocketType::Sub, Options::default());
+        sub.subscribe("topic").await.unwrap();
+        sub.connect(endpoint).await.unwrap();
+        pub_.wait_subscribed(1, Duration::from_secs(2))
+            .await
+            .unwrap();
+
+        pub_.send(Message::single("topic.1")).await.unwrap();
+        let received = tokio::time::timeout(Duration::from_secs(2), sub.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received.part_bytes(0).unwrap().as_ref(), b"topic.1");
+
+        allowed.store(false, Ordering::Release);
+        let revoked = pub_.connections().await.unwrap()[0].connection_id;
+        pub_.disconnect_peer(revoked).await.unwrap();
+        assert!(matches!(
+            pub_.disconnect_peer(revoked).await,
+            Err(Error::Unroutable)
+        ));
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let MonitorEvent::SubscribeRejected { connection_id, .. } =
+                    monitor.recv().await.unwrap()
+                {
+                    assert_ne!(connection_id, revoked);
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("reconnect did not resubscribe");
+
+        pub_.send(Message::single("topic.2")).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), sub.recv())
+                .await
+                .is_err(),
+            "revoked subscription still delivered"
+        );
     }
 }
 

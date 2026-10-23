@@ -41,6 +41,63 @@ async fn disconnect_unregistered_endpoint_errors() {
 }
 
 #[tokio::test]
+async fn disconnect_peer_unknown_connection_errors() {
+    let s = Socket::new(SocketType::Pull, Options::default());
+    let r = s.disconnect_peer(1).await;
+    assert!(matches!(r, Err(Error::Unroutable)), "got {r:?}");
+}
+
+#[tokio::test]
+async fn disconnect_peer_redials_a_dialed_peer() {
+    let pull = Socket::new(SocketType::Pull, Options::default());
+    let endpoint = pull.bind(tcp_loopback(0)).await.unwrap();
+    let push = Socket::new(SocketType::Push, Options::default());
+    let mut mon = push.monitor();
+    push.connect(endpoint).await.unwrap();
+    push.wait_connected(1, Duration::from_secs(2))
+        .await
+        .unwrap();
+    let first = push.connections().await.unwrap()[0].connection_id;
+
+    let seen = push.connections_generation();
+    push.disconnect_peer(first).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let omq_tokio::MonitorEvent::Disconnected { peer, reason, .. } =
+                mon.recv().await.unwrap()
+            {
+                assert_eq!(peer.connection_id, first);
+                assert_eq!(reason, omq_tokio::DisconnectReason::LocalClose);
+                break;
+            }
+        }
+    })
+    .await
+    .expect("no Disconnected event");
+
+    // The dialer redials under a new connection id.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let mut seen = seen;
+        loop {
+            seen = push.connections_changed(seen).await.unwrap();
+            let connections = push.connections().await.unwrap();
+            if connections.iter().any(|c| c.connection_id != first) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("dialer did not redial");
+
+    push.send(Message::single("after")).await.unwrap();
+    let msg = tokio::time::timeout(Duration::from_secs(2), pull.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(msg.part_bytes(0).unwrap().as_ref(), b"after");
+}
+
+#[tokio::test]
 async fn unbind_then_rebind_succeeds() {
     let pull = Socket::new(SocketType::Pull, Options::default());
     let mut mon = pull.monitor();

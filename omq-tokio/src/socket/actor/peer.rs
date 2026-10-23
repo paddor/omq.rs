@@ -92,9 +92,28 @@ impl SocketDriver {
         let refused = matches!(reason, DisconnectReason::HandshakeRefused(_));
         self.publish_close_failure(peer_id, &reason, refused);
 
-        let Some(mut peer) = PeerLifecycle::new(self).remove_peer(peer_id, reason) else {
+        let Some(peer) = PeerLifecycle::new(self).remove_peer(peer_id, reason) else {
             return;
         };
+        self.finish_peer_close(peer_id, peer, refused).await;
+    }
+
+    /// Close one peer on request. The connection heals like any dropped one:
+    /// a dialed peer redials and an accepted peer reconnects from its side.
+    pub(super) async fn disconnect_peer(&mut self, peer_id: u64) -> omq_proto::Result<()> {
+        let Some(peer) =
+            PeerLifecycle::new(self).remove_peer(peer_id, DisconnectReason::LocalClose)
+        else {
+            return Err(omq_proto::Error::Unroutable);
+        };
+        peer.handle.cancel.cancel();
+        self.finish_peer_close(peer_id, peer, false).await;
+        Ok(())
+    }
+
+    /// Stop a removed peer's task, then redial it if its route stays live.
+    #[cfg_attr(not(feature = "dart"), expect(unused_variables))]
+    async fn finish_peer_close(&mut self, peer_id: u64, mut peer: PeerEntry, refused: bool) {
         if let Some(task) = peer.task.take() {
             super::stop_peer_task(task).await;
         }

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Socket::disconnect_peer` closes one connection by `connection_id`. The
+  peer heals as after any drop: a dialed peer redials and an accepted peer
+  reconnects. A PUB can revoke admitted subscriptions this way, since the
+  reconnect resubscribes through `Options::subscription_admission`. The
+  blocking socket has it too.
+
 ### Changed
 
 - PUB and XPUB report each rejected SUBSCRIBE to monitors as

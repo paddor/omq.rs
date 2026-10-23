@@ -153,6 +153,50 @@ fn server_client_roundtrip() {
     zmq_ctx_term(ctx);
 }
 
+/// Send from CLIENT until SERVER receives, and return the routing ID.
+fn server_routing_id(server: *mut c_void, client: *mut c_void) -> u32 {
+    for _ in 0..50 {
+        assert_eq!(zmq_send(client, b"ping".as_ptr().cast(), 4, 0), 4);
+        let mut msg = ZmqMsg::zeroed();
+        assert_eq!(zmq_msg_init(msg.0.as_mut_ptr().cast()), 0);
+        let rc = zmq_msg_recv(msg.0.as_mut_ptr().cast(), server, 0);
+        let routing_id = zmq_msg_routing_id(msg.0.as_ptr().cast());
+        zmq_msg_close(msg.0.as_mut_ptr().cast());
+        if rc == 4 {
+            return routing_id;
+        }
+    }
+    panic!("SERVER received nothing");
+}
+
+/// SERVER closes one peer by routing ID; the CLIENT redials under a new one.
+#[test]
+fn server_disconnect_peer_by_routing_id() {
+    let ctx = zmq_ctx_new();
+    let server = zmq_socket(ctx, ZMQ_SERVER);
+    let client = zmq_socket(ctx, ZMQ_CLIENT);
+    let addr = helpers::bind_random_tcp(server);
+    zmq_connect(client, addr.as_ptr());
+    set_timeo(server, 100);
+    set_timeo(client, 2000);
+
+    let first = server_routing_id(server, client);
+    assert_eq!(zmq_disconnect_peer(server, first), 0);
+    assert_eq!(zmq_disconnect_peer(server, first), -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EHOSTUNREACH);
+    assert_eq!(zmq_disconnect_peer(server, 0), -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EHOSTUNREACH);
+    assert_eq!(zmq_disconnect_peer(client, 1), -1);
+    assert_eq!(omq_zmq::zmq_errno(), ZMQ_ENOTSUP);
+
+    let second = server_routing_id(server, client);
+    assert_ne!(second, first);
+
+    zmq_close(client);
+    zmq_close(server);
+    zmq_ctx_term(ctx);
+}
+
 /// SCATTER/GATHER over TCP.
 #[test]
 fn scatter_gather_tcp() {

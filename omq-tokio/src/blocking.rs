@@ -574,6 +574,13 @@ impl Socket {
             .block_on(async move { s.disconnect(endpoint).await })
     }
 
+    /// Close one peer connection by id. See [`crate::Socket::disconnect_peer`].
+    pub fn disconnect_peer(&self, connection_id: u64) -> Result<()> {
+        let s = self.inner.clone_shared();
+        self.ctx
+            .block_on(async move { s.disconnect_peer(connection_id).await })
+    }
+
     /// Return status for one live connection id.
     pub fn connection_info(&self, connection_id: u64) -> Result<Option<ConnectionStatus>> {
         let s = self.inner.clone_shared();
@@ -692,6 +699,23 @@ mod tests {
             .unwrap();
         assert_ne!(changed, seen);
         assert_eq!(pull.connections().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn disconnect_peer_closes_a_known_connection_once() {
+        let ctx = Context::new();
+        let endpoint = endpoint("blocking-disconnect-peer");
+        let pull = blocking_pull(&ctx, &endpoint);
+        let push = ctx.blocking_socket(SocketType::Push, Options::default());
+        push.connect(endpoint).unwrap();
+        pull.wait_connected(1, Duration::from_secs(2)).unwrap();
+
+        let connection_id = pull.connections().unwrap()[0].connection_id;
+        pull.disconnect_peer(connection_id).unwrap();
+        assert!(matches!(
+            pull.disconnect_peer(connection_id),
+            Err(Error::Unroutable)
+        ));
     }
 
     #[test]

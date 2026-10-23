@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `zmq_disconnect_peer` closes one SERVER peer by routing id. Unknown ids
+  fail with `EHOSTUNREACH`. PEER sockets still return `ENOTSUP`.
+
 ### Changed
 
 - `OMQ_COMPRESSION_LEVEL` accepts -7..=4. zrip dropped level -8, which now

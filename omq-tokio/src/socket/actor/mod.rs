@@ -101,6 +101,11 @@ pub(crate) enum SocketCommand {
         endpoint: Endpoint,
         ack: oneshot::Sender<Result<()>>,
     },
+    /// Close one live or pending peer keyed by `connection_id`.
+    DisconnectPeer {
+        connection_id: u64,
+        ack: oneshot::Sender<Result<()>>,
+    },
     /// Snapshot the live status of one peer keyed by `connection_id`.
     QueryConnection {
         connection_id: u64,
@@ -731,6 +736,9 @@ impl SocketDriver {
             }
             SocketCommand::Disconnect { endpoint, ack } => {
                 let _ = ack.send(self.disconnect(&endpoint).await);
+            }
+            SocketCommand::DisconnectPeer { connection_id, ack } => {
+                let _ = ack.send(self.disconnect_peer(connection_id).await);
             }
             SocketCommand::QueryConnection { connection_id, ack } => {
                 let _ = ack.send(self.peer_status(connection_id));

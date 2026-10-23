@@ -31,10 +31,13 @@ use super::{Listener, PeerIdent, Transport};
 #[cfg(unix)]
 pub type IpcStream = UnixStream;
 
+/// Platform-specific IPC stream type: one end of a named pipe.
 #[cfg(target_os = "windows")]
 #[derive(Debug)]
 pub enum IpcStream {
+    /// Pipe accepted by a listener.
     Server(NamedPipeServer),
+    /// Pipe opened by a dialer.
     Client(NamedPipeClient),
 }
 

@@ -18,6 +18,7 @@
 //! Connected no-peer round-robin sends queue in a connect-side pre-ready pipe
 //! unless `omq-libzmq` has `ZMQ_IMMEDIATE=1`.
 #![forbid(unsafe_code)]
+#![warn(missing_docs)]
 
 #[cfg(not(target_has_atomic = "64"))]
 compile_error!("omq-tokio requires target_has_atomic = \"64\"");

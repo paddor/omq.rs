@@ -3,13 +3,13 @@
 
 use std::ffi::c_int;
 
-use super::{
-    QuicOverlay, none_if_empty, read_bytes, read_i32, read_string, write_bytes, write_i32,
-    write_string,
+use super::QuicOverlay;
+use super::raw::{
+    none_if_empty, read_bytes, read_i32, read_string, write_bytes, write_i32, write_string,
 };
 use crate::error::fail;
 
-use super::{
+use super::codes::{
     OMQ_QUIC_CERT_PEM, OMQ_QUIC_KEY_PEM, OMQ_QUIC_MAX_READY_PEERS, OMQ_QUIC_SERVER_NAME,
     OMQ_QUIC_STREAM_WINDOW, OMQ_QUIC_TRUST_PEM, OMQ_QUIC_TRUST_SYSTEM,
 };

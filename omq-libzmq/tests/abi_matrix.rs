@@ -976,32 +976,39 @@ fn exported_functions_from_header() -> Vec<String> {
 fn no_mangle_functions_from_source() -> Vec<String> {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut names = Vec::new();
+    let mut dirs = vec![manifest.join("src")];
 
-    for entry in std::fs::read_dir(manifest.join("src")).expect("src dir") {
-        let entry = entry.expect("src dir entry");
-        if entry.path().extension().and_then(|s| s.to_str()) != Some("rs") {
-            continue;
-        }
-
-        let source = std::fs::read_to_string(entry.path()).expect("source file");
-        let mut armed = false;
-        for line in source.lines().map(str::trim) {
-            if line == "#[unsafe(no_mangle)]" {
-                armed = true;
-                continue;
-            }
-            if armed
-                && line.starts_with("pub extern \"C\" fn ")
-                && let Some(name) = line.split_whitespace().nth(4)
-            {
-                names.push(name.split('(').next().unwrap_or(name).to_owned());
-                armed = false;
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(dir).expect("src dir") {
+            let path = entry.expect("src dir entry").path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
+                collect_no_mangle_functions(&path, &mut names);
             }
         }
     }
 
     names.sort();
     names
+}
+
+fn collect_no_mangle_functions(path: &Path, names: &mut Vec<String>) {
+    let source = std::fs::read_to_string(path).expect("source file");
+    let mut armed = false;
+    for line in source.lines().map(str::trim) {
+        if line == "#[unsafe(no_mangle)]" {
+            armed = true;
+            continue;
+        }
+        if armed
+            && line.starts_with("pub extern \"C\" fn ")
+            && let Some(name) = line.split_whitespace().nth(4)
+        {
+            names.push(name.split('(').next().unwrap_or(name).to_owned());
+            armed = false;
+        }
+    }
 }
 
 fn function_name_from_decl(decl: &str) -> String {

@@ -63,7 +63,7 @@ impl Connection {
     fn drive(&mut self) -> Result<()> {
         self.input.pending = false;
         #[cfg(feature = "ws")]
-        if self.ws_role.is_some() {
+        if self.ws.role.is_some() {
             return self.drive_ws();
         }
         self.drive_zmtp()
@@ -274,8 +274,8 @@ impl Connection {
         self.validate_receive_frame(hdr.flags, hdr.payload_len)?;
         // Complete single-part data messages need no frame or multipart assembly.
         if !self.has_frame_transform()
-            && self.pending_parts.is_empty()
-            && !self.discarding_multipart
+            && self.assembly.parts.is_empty()
+            && !self.assembly.discarding
             && !hdr.flags.command
             && !hdr.flags.more
             && self.in_buf.len() >= hdr.header_len + hdr.payload_len
@@ -300,7 +300,7 @@ impl Connection {
             } else {
                 let payload = self
                     .in_buf
-                    .split_to_with_pool(hdr.payload_len, self.recv_payload_pool.as_ref());
+                    .split_to_with_pool(hdr.payload_len, self.assembly.payload_pool.as_ref());
                 self.messages.push_back(Message::from_payload(payload));
             }
             return Ok(true);
@@ -308,7 +308,7 @@ impl Connection {
         let pool = if self.has_frame_transform() {
             None
         } else {
-            self.recv_payload_pool.as_ref()
+            self.assembly.payload_pool.as_ref()
         };
         let Some(frame) = frame::try_decode_frame_with_header(&mut self.in_buf, hdr, pool)? else {
             return Ok(false);
@@ -346,8 +346,8 @@ impl Connection {
             }
             // For unwrapped data the header also determines the multipart
             // total. Reject it before allocating or collecting another body.
-            if self.pending_size != 0 && !flags.command && !self.has_frame_transform() {
-                let size = self.pending_size.saturating_add(frame_size);
+            if self.assembly.size != 0 && !flags.command && !self.has_frame_transform() {
+                let size = self.assembly.size.saturating_add(frame_size);
                 if size > max {
                     return Err(Error::MessageTooLarge { size, max });
                 }
@@ -428,32 +428,32 @@ impl Connection {
 
     #[inline]
     fn absorb_data_frame(&mut self, more: bool, payload: Payload) -> Result<bool> {
-        if self.discarding_multipart {
-            self.discarding_multipart = more;
+        if self.assembly.discarding {
+            self.assembly.discarding = more;
             return Ok(true);
         }
         if more && self.config.socket_type.requires_single_frame() {
-            self.discarding_multipart = true;
+            self.assembly.discarding = true;
             return Ok(true);
         }
         #[cfg(feature = "ws")]
-        if self.ws_role.is_some() && self.pending_parts.len() >= super::ws::MAX_PARTS {
+        if self.ws.role.is_some() && self.assembly.parts.len() >= super::ws::MAX_PARTS {
             return Err(Error::Protocol("WS multipart part limit exceeded".into()));
         }
         let size = payload.len() + size_of::<Payload>();
-        self.pending_size = self.pending_size.saturating_add(size);
+        self.assembly.size = self.assembly.size.saturating_add(size);
         if let Some(max) = self.config.data_size_limit()
-            && self.pending_size > max
+            && self.assembly.size > max
         {
             return Err(Error::MessageTooLarge {
-                size: self.pending_size,
+                size: self.assembly.size,
                 max,
             });
         }
         if more {
-            self.pending_parts.push(payload);
-        } else if self.pending_parts.is_empty() {
-            self.pending_size = 0;
+            self.assembly.parts.push(payload);
+        } else if self.assembly.parts.is_empty() {
+            self.assembly.size = 0;
             let s = payload.as_slice();
             let msg = if s.len() <= crate::message::MAX_INLINE_MESSAGE {
                 Message::from_inline(s)
@@ -462,9 +462,9 @@ impl Connection {
             };
             self.messages.push_back(msg);
         } else {
-            self.pending_parts.push(payload);
-            let parts = self.pending_parts.take();
-            self.pending_size = 0;
+            self.assembly.parts.push(payload);
+            let parts = self.assembly.parts.take();
+            self.assembly.size = 0;
             let msg = Message::from_parts(parts);
             self.messages.push_back(msg);
         }
@@ -486,9 +486,7 @@ impl Connection {
                 let pong = Command::Pong { context };
                 let before = self.pending_transmit_size();
                 self.write_outbound_commands(&[pong])?;
-                let after = self.pending_transmit_size();
-                self.pending_pong_bytes = self.pending_pong_bytes.saturating_add(after - before);
-                self.pong_queued_through = after;
+                self.out.pong_queued(before);
             }
             Command::Pong { .. } => {
                 // Engine tracks last-received timestamp on every byte; PONG
@@ -540,7 +538,7 @@ impl Connection {
             return Ok(None);
         }
         #[cfg(feature = "ws")]
-        if self.ws_role.is_some() {
+        if self.ws.role.is_some() {
             return Ok(None);
         }
         let Some(hdr) = frame::peek_frame_header(&self.in_buf)? else {

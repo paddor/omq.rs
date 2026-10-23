@@ -74,7 +74,7 @@ impl<B: FragmentBuffer> Session<B> {
         // Permit at most one extra datagram to bound per-fragment overhead.
         let payload = length + 8 + metadata;
         let minimum = payload.div_ceil(MAX_FRAGMENT_BODY).max(2);
-        let count = if self.send_cursor < self.send_next {
+        let count = if self.send.cursor < self.send.next {
             (minimum..=minimum + 1)
                 .find(|count| payload.is_multiple_of(*count))
                 .unwrap_or(minimum)
@@ -83,13 +83,14 @@ impl<B: FragmentBuffer> Session<B> {
         };
         let chunk = payload.div_ceil(count);
         let Some(end) = self
-            .send_next
+            .send
+            .next
             .checked_add(count as u64)
             .filter(|end| *end <= u64::MAX - self.config.window as u64)
         else {
             return Err(message);
         };
-        self.sending = Some(FragmentSend {
+        self.send.sending = Some(FragmentSend {
             message,
             offset: 0,
             chunk,
@@ -101,7 +102,7 @@ impl<B: FragmentBuffer> Session<B> {
     pub(super) fn fill_fragments(&mut self) -> bool {
         let mut budget = crate::flow::DrainBudget::new(64, 64_000);
         while self.outstanding() < self.config.window && !budget.exhausted() {
-            let Some(pending) = &mut self.sending else {
+            let Some(pending) = &mut self.send.sending else {
                 break;
             };
             let grouped = pending.message.len() == 2;
@@ -136,12 +137,12 @@ impl<B: FragmentBuffer> Session<B> {
                 in_flight: false,
                 bytes: header + chunk,
             };
-            let index = self.index(self.send_next);
-            self.tx[index] = Some(sent);
-            self.send_next += 1;
+            let index = self.index(self.send.next);
+            self.send.tx[index] = Some(sent);
+            self.send.next += 1;
             let _ = budget.account(chunk);
             if part.last {
-                self.sending = None;
+                self.send.sending = None;
             }
         }
         budget.msgs() != 0
@@ -152,9 +153,9 @@ impl<B: FragmentBuffer> Session<B> {
     /// so out-of-order FIRSTs cannot each reserve a large body. A refused
     /// FIRST stays unacknowledged and the sender retransmits it.
     pub fn may_reserve_ahead(&self, length: u64) -> bool {
-        self.reserved_ahead == 0
+        self.receive.reserved_ahead == 0
             || usize::try_from(length).is_ok_and(|length| {
-                self.reserved_ahead.saturating_add(length) <= RESERVE_AHEAD_LIMIT
+                self.receive.reserved_ahead.saturating_add(length) <= RESERVE_AHEAD_LIMIT
             })
     }
 
@@ -190,7 +191,7 @@ impl<B: FragmentBuffer> Session<B> {
                 return false;
             }
 
-            self.reserved_ahead += length;
+            self.receive.reserved_ahead += length;
             FragmentReceive::First(Assembly {
                 body,
                 length,
@@ -205,48 +206,48 @@ impl<B: FragmentBuffer> Session<B> {
         };
 
         let index = self.index(receipt.sequence);
-        self.fragments[index] = Some(fragment);
+        self.receive.fragments[index] = Some(fragment);
         self.commit_receive(receipt, message);
         true
     }
 
     /// Whether fragment assembly encountered an invalid sequence or body length.
     pub const fn receive_failed(&self) -> bool {
-        self.receive_failed
+        self.receive.failed
     }
 
     pub(super) fn take_fragmented(&mut self, finish: impl FnOnce(B) -> Payload) -> Option<Message> {
         let mut budget = crate::flow::DrainBudget::new(64, 64_000);
-        while self.deliver_next < self.receive_next && !budget.exhausted() {
-            let index = self.index(self.deliver_next);
-            let fragment = self.fragments[index].take();
+        while self.receive.deliver_next < self.receive.next && !budget.exhausted() {
+            let index = self.index(self.receive.deliver_next);
+            let fragment = self.receive.fragments[index].take();
             if let Some(FragmentReceive::First(assembly)) = &fragment {
-                self.reserved_ahead -= assembly.length;
+                self.receive.reserved_ahead -= assembly.length;
             }
             match fragment {
-                Some(FragmentReceive::First(assembly)) if self.assembly.is_none() => {
-                    self.assembly = Some(assembly);
+                Some(FragmentReceive::First(assembly)) if self.receive.assembly.is_none() => {
+                    self.receive.assembly = Some(assembly);
                 }
-                Some(FragmentReceive::Continuation) if self.assembly.is_some() => {}
+                Some(FragmentReceive::Continuation) if self.receive.assembly.is_some() => {}
                 _ => {
-                    self.receive_failed = true;
+                    self.receive.failed = true;
                     return None;
                 }
             }
-            let message = self.rx[index].take().expect("retained fragment");
+            let message = self.receive.rx[index].take().expect("retained fragment");
             let chunk = message
                 .part_slice(usize::from(message.len() == 2))
                 .expect("chunk");
-            let assembly = self.assembly.as_mut().expect("FIRST assembly");
+            let assembly = self.receive.assembly.as_mut().expect("FIRST assembly");
             if chunk.len() > assembly.length - assembly.body.as_ref().len() {
-                self.receive_failed = true;
+                self.receive.failed = true;
                 return None;
             }
             assembly.body.append(chunk);
             let _ = budget.account(chunk.len());
-            self.deliver_next += 1;
+            self.receive.deliver_next += 1;
             if assembly.body.as_ref().len() == assembly.length {
-                let assembly = self.assembly.take().expect("complete body");
+                let assembly = self.receive.assembly.take().expect("complete body");
                 let mut message = Message::from(finish(assembly.body));
                 if let Some(group) = assembly.group {
                     message = Message::with_prefix(group, message);

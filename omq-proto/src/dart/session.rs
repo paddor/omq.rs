@@ -12,7 +12,10 @@ mod fragment;
 pub use fragment::FragmentBuffer;
 use fragment::{Assembly, FragmentPiece, FragmentReceive, FragmentSend};
 
+mod congestion;
 mod transmit;
+
+use congestion::{Congestion, Pacing};
 
 const STATUS_INTERVAL: Duration = Duration::from_micros(50);
 const PROBE_INTERVAL: Duration = Duration::from_secs(1);
@@ -185,61 +188,86 @@ pub enum Admission {
 /// One ordered message sequence per peer and direction. All tables allocate
 /// at construction. Only this owner mutates sequencing or congestion state.
 #[derive(Debug)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "Independent transport and protocol state flags"
-)]
 pub struct Session<B: FragmentBuffer = Vec<u8>> {
     local: u64,
     remote: u64,
     config: SessionConfig,
     packed_mtu: usize,
+    send: SendWindow,
+    receive: ReceiveWindow<B>,
+    peer: PeerFeedback,
+    control: ControlState,
+    ecn: EcnState,
+    congestion: Congestion,
+    pacing: Pacing,
+    stats: SessionStats,
+}
+
+/// Retained outbound sequence units.
+#[derive(Debug)]
+struct SendWindow {
     tx: Box<[Option<Sent>]>,
+    /// Message still being cut into fragments.
+    sending: Option<FragmentSend>,
+    /// Oldest unacknowledged sequence position.
+    base: u64,
+    /// Next sequence position to submit.
+    next: u64,
+    /// Next sequence position to transmit.
+    cursor: u64,
+    /// Retained units marked for repair.
+    repairs: usize,
+}
+
+/// Retained inbound sequence units and receive credit.
+#[derive(Debug)]
+struct ReceiveWindow<B: FragmentBuffer> {
     rx: Box<[Option<Message>]>,
     fragments: Box<[Option<FragmentReceive<B>>]>,
     /// Bodies reserved by FIRST fragments still waiting in the window.
     reserved_ahead: usize,
-    sending: Option<FragmentSend>,
     assembly: Option<Assembly<B>>,
-    receive_failed: bool,
-    send_base: u64,
-    send_next: u64,
-    send_cursor: u64,
-    peer_credit: u64,
-    peer_ack: u64,
-    peer_ack_at: Duration,
-    receive_next: u64,
+    failed: bool,
+    /// Cumulative receipt position.
+    next: u64,
     deliver_next: u64,
-    receive_credit: u64,
-    paced_receive: bool,
+    credit: u64,
+    paced: bool,
     received: u64,
     released: u64,
-    advertised_credit: u64,
+}
+
+/// Latest STATUS the peer sent.
+#[derive(Debug)]
+struct PeerFeedback {
+    serial: u64,
+    ack: u64,
+    /// When `ack` last advanced.
+    ack_at: Duration,
+    credit: u64,
+    ecn: [u64; 5],
+}
+
+/// Outgoing STATUS, NAK, and PROBE scheduling.
+#[derive(Debug)]
+struct ControlState {
     status_serial: u64,
-    peer_status_serial: u64,
     status_pending: bool,
     status_at: Duration,
     status_messages: usize,
     status_threshold: usize,
+    advertised_credit: u64,
     gap_high: u64,
     nak_at: Duration,
     probe_at: Duration,
-    ecn_counts: [u64; 5],
-    peer_ecn: [u64; 5],
+}
+
+#[derive(Debug)]
+struct EcnState {
+    enabled: bool,
+    /// Received ECN marks, in `Status::counts` order.
+    counts: [u64; 5],
     marked_sent: u64,
-    ecn_enabled: bool,
-    flight: usize,
-    cwnd: usize,
-    ssthresh: usize,
-    recovery_end: u64,
-    rtt: Duration,
-    rttvar: Duration,
-    pacing_rate: Option<u64>,
-    pacing_bytes: usize,
-    pacing_delay: Duration,
-    pace_at: Duration,
-    repairs: usize,
-    stats: SessionStats,
 }
 
 impl Session {
@@ -289,50 +317,52 @@ impl<B: FragmentBuffer> Session<B> {
             remote,
             config,
             packed_mtu: super::MAX_PACKED_DATAGRAM,
-            tx: (0..window).map(|_| None).collect(),
-            rx: (0..window).map(|_| None).collect(),
-            fragments: (0..window).map(|_| None).collect(),
-            reserved_ahead: 0,
-            sending: None,
-            assembly: None,
-            receive_failed: false,
-            send_base: 0,
-            send_next: 0,
-            send_cursor: 0,
-            peer_credit: 0,
-            peer_ack: 0,
-            peer_ack_at: Duration::ZERO,
-            receive_next: 0,
-            deliver_next: 0,
-            receive_credit: window as u64,
-            paced_receive: false,
-            received: 0,
-            released: 0,
-            advertised_credit: 0,
-            status_serial: 0,
-            peer_status_serial: 0,
-            status_pending: true,
-            status_at: Duration::ZERO,
-            status_messages: 0,
-            status_threshold: (window / 4).clamp(1, 128),
-            gap_high: 0,
-            nak_at: Duration::ZERO,
-            probe_at: PROBE_INTERVAL,
-            ecn_counts: [0; 5],
-            peer_ecn: [0; 5],
-            marked_sent: 0,
-            ecn_enabled: config.ecn && config.congestion == DartCongestion::Adaptive,
-            flight: 0,
-            cwnd: 10 * MAX_DATAGRAM,
-            ssthresh: usize::MAX,
-            recovery_end: 0,
-            rtt: INITIAL_RTT,
-            rttvar: INITIAL_RTT / 2,
-            pacing_rate: None,
-            pacing_bytes: 0,
-            pacing_delay: Duration::ZERO,
-            pace_at: Duration::ZERO,
-            repairs: 0,
+            send: SendWindow {
+                tx: (0..window).map(|_| None).collect(),
+                sending: None,
+                base: 0,
+                next: 0,
+                cursor: 0,
+                repairs: 0,
+            },
+            receive: ReceiveWindow {
+                rx: (0..window).map(|_| None).collect(),
+                fragments: (0..window).map(|_| None).collect(),
+                reserved_ahead: 0,
+                assembly: None,
+                failed: false,
+                next: 0,
+                deliver_next: 0,
+                credit: window as u64,
+                paced: false,
+                received: 0,
+                released: 0,
+            },
+            peer: PeerFeedback {
+                serial: 0,
+                ack: 0,
+                ack_at: Duration::ZERO,
+                credit: 0,
+                ecn: [0; 5],
+            },
+            control: ControlState {
+                status_serial: 0,
+                status_pending: true,
+                status_at: Duration::ZERO,
+                status_messages: 0,
+                status_threshold: (window / 4).clamp(1, 128),
+                advertised_credit: 0,
+                gap_high: 0,
+                nak_at: Duration::ZERO,
+                probe_at: PROBE_INTERVAL,
+            },
+            ecn: EcnState {
+                enabled: config.ecn && config.congestion == DartCongestion::Adaptive,
+                counts: [0; 5],
+                marked_sent: 0,
+            },
+            congestion: Congestion::new(),
+            pacing: Pacing::default(),
             stats: SessionStats::default(),
         };
         session.update_pacing_rate();
@@ -357,77 +387,78 @@ impl<B: FragmentBuffer> Session<B> {
     }
     /// Return available submission slots; zero while fragment submission is pending.
     pub fn send_capacity(&self) -> usize {
-        if self.is_exhausted() || self.sending.is_some() {
+        if self.is_exhausted() || self.send.sending.is_some() {
             return 0;
         }
         ((self.config.window - self.outstanding()) as u64)
-            .min(u64::MAX - self.config.window as u64 - self.send_next) as usize
+            .min(u64::MAX - self.config.window as u64 - self.send.next) as usize
     }
     /// Return retained outbound sequence units awaiting retirement.
     pub const fn outstanding(&self) -> usize {
-        (self.send_next - self.send_base) as usize
+        (self.send.next - self.send.base) as usize
     }
     /// Whether outgoing data currently uses ECN marking.
     pub const fn ecn_enabled(&self) -> bool {
-        self.ecn_enabled
+        self.ecn.enabled
     }
     /// Return the first sequence position not cumulatively received.
     pub const fn next_receive(&self) -> u64 {
-        self.receive_next
+        self.receive.next
     }
     /// Return the exclusive end of local receive credit.
     pub const fn receive_right_edge(&self) -> u64 {
-        self.receive_credit
+        self.receive.credit
     }
 
     /// Defer initial and returned receive credit to the transport's byte pacer.
     /// Must be called before the first control packet or receive operation.
     pub fn pace_receive_credit(&mut self) {
-        assert_eq!(self.status_serial, 0);
-        assert_eq!(self.received, 0);
-        self.paced_receive = true;
-        self.receive_credit = 0;
+        assert_eq!(self.control.status_serial, 0);
+        assert_eq!(self.receive.received, 0);
+        self.receive.paced = true;
+        self.receive.credit = 0;
     }
 
     /// Available storage units not yet admitted by the byte pacer.
     pub fn pending_receive_credit(&self) -> u64 {
-        self.released + self.config.window as u64 - self.receive_credit
+        self.receive.released + self.config.window as u64 - self.receive.credit
     }
 
     /// Admit storage units after reserving their transport byte allowance.
     pub fn grant_receive_credit(&mut self, count: usize) {
-        assert!(self.paced_receive);
+        assert!(self.receive.paced);
         assert!(count as u64 <= self.pending_receive_credit());
-        self.receive_credit = self
-            .receive_credit
+        self.receive.credit = self
+            .receive
+            .credit
             .checked_add(count as u64)
             .expect("session credit exhausted");
-        self.status_pending |= count != 0;
+        self.control.status_pending |= count != 0;
     }
 
     /// Accepted sequence units, excluding duplicate datagrams.
     pub const fn received_units(&self) -> u64 {
-        self.received
+        self.receive.received
     }
     /// Return the next sequence position awaiting initial transmission.
     pub const fn next_send(&self) -> u64 {
-        self.send_cursor
+        self.send.cursor
     }
     /// Return the exclusive end of submitted outbound sequence units.
     pub const fn submitted(&self) -> u64 {
-        self.send_next
+        self.send.next
     }
     /// Return the first outbound sequence position not yet retired.
     pub const fn acknowledged_position(&self) -> u64 {
-        self.send_base
+        self.send.base
     }
     /// Return the congestion window in wire bytes.
     pub const fn congestion_window(&self) -> usize {
-        self.cwnd
+        self.congestion.cwnd
     }
     /// Return transmitted wire bytes awaiting acknowledgment or repair.
     pub const fn bytes_in_flight(&self) -> usize {
-        self.flight
+        self.congestion.flight
     }
 
     /// Retry locally oversized packets using the baseline datagram bound.
@@ -438,7 +469,9 @@ impl<B: FragmentBuffer> Session<B> {
     /// Retire this incarnation before any wire position or serial can wrap.
     pub fn is_exhausted(&self) -> bool {
         let limit = u64::MAX - self.config.window as u64;
-        self.send_next >= limit || self.receive_credit >= limit || self.status_serial == u64::MAX
+        self.send.next >= limit
+            || self.receive.credit >= limit
+            || self.control.status_serial == u64::MAX
     }
 
     /// Retain one immutable body, optionally prefixed with a RADIO group.
@@ -452,7 +485,7 @@ impl<B: FragmentBuffer> Session<B> {
             crate::SocketType::Channel
         };
         if super::validate_message(valid, &message, false).is_err()
-            || self.sending.is_some()
+            || self.send.sending.is_some()
             || self.outstanding() == self.config.window
             || self.is_exhausted()
         {
@@ -470,9 +503,9 @@ impl<B: FragmentBuffer> Session<B> {
         if body.len() > MAX_BODY || bytes > MAX_DATAGRAM {
             return self.submit_fragmented(message);
         }
-        let sequence = self.send_next;
+        let sequence = self.send.next;
         let index = self.index(sequence);
-        self.tx[index] = Some(Sent {
+        self.send.tx[index] = Some(Sent {
             fragment: None,
             bytes,
             message,
@@ -482,7 +515,7 @@ impl<B: FragmentBuffer> Session<B> {
             repair: false,
             in_flight: false,
         });
-        self.send_next += 1;
+        self.send.next += 1;
         Ok(sequence)
     }
 
@@ -493,12 +526,12 @@ impl<B: FragmentBuffer> Session<B> {
     /// Classify before copying. Duplicate arrivals still solicit feedback, so
     /// a lost cumulative ACK cannot strand sender retention.
     pub fn classify(&mut self, session: u64, sequence: u64) -> Admission {
-        if session != self.local || sequence >= self.receive_credit {
+        if session != self.local || sequence >= self.receive.credit {
             return Admission::OutsideWindow;
         }
-        if sequence < self.receive_next || self.rx[self.index(sequence)].is_some() {
+        if sequence < self.receive.next || self.receive.rx[self.index(sequence)].is_some() {
             self.stats.duplicates += 1;
-            self.status_pending = true;
+            self.control.status_pending = true;
             return Admission::Duplicate;
         }
         Admission::Accept
@@ -508,19 +541,19 @@ impl<B: FragmentBuffer> Session<B> {
     /// delivery positions are separate while application queues are full.
     pub fn commit_receive(&mut self, receipt: Receipt, message: Message) {
         let sequence = receipt.sequence;
-        assert!(sequence >= self.receive_next && sequence < self.receive_credit);
+        assert!(sequence >= self.receive.next && sequence < self.receive.credit);
         let index = self.index(sequence);
-        assert!(self.rx[index].is_none());
+        assert!(self.receive.rx[index].is_none());
 
-        if sequence != self.receive_next {
+        if sequence != self.receive.next {
             self.stats.reordered += 1;
         }
-        self.rx[index] = Some(message);
+        self.receive.rx[index] = Some(message);
         self.record_receive(receipt);
 
         // In-order receipt without a retained successor needs no prefix scan.
-        if sequence == self.receive_next && self.rx[self.index(sequence + 1)].is_none() {
-            self.receive_next += 1;
+        if sequence == self.receive.next && self.receive.rx[self.index(sequence + 1)].is_none() {
+            self.receive.next += 1;
         } else {
             self.advance_receipt();
         }
@@ -539,10 +572,10 @@ impl<B: FragmentBuffer> Session<B> {
         let sequence = receipt.sequence;
         // Only the next in-order unit, outside fragment assembly and without
         // shared storage, may skip its receive slot.
-        if sequence != self.receive_next
-            || sequence != self.deliver_next
-            || self.assembly.is_some()
-            || self.fragments[self.index(sequence)].is_some()
+        if sequence != self.receive.next
+            || sequence != self.receive.deliver_next
+            || self.receive.assembly.is_some()
+            || self.receive.fragments[self.index(sequence)].is_some()
             || match &message.inner {
                 MessageInner::Empty | MessageInner::Inline { .. } => false,
                 _ => message.retained_size() != Some(std::mem::size_of::<Message>()),
@@ -552,13 +585,13 @@ impl<B: FragmentBuffer> Session<B> {
             return false;
         }
 
-        assert!(sequence < self.receive_credit);
-        assert!(self.rx[self.index(sequence)].is_none());
+        assert!(sequence < self.receive.credit);
+        assert!(self.receive.rx[self.index(sequence)].is_none());
         let Err(message) = deliver(message) else {
             self.record_receive(receipt);
-            self.receive_next += 1;
-            self.deliver_next += 1;
-            if self.rx[self.index(self.receive_next)].is_some() {
+            self.receive.next += 1;
+            self.receive.deliver_next += 1;
+            if self.receive.rx[self.index(self.receive.next)].is_some() {
                 self.advance_receipt();
             }
             // Inline delivery retains no storage, so its credit returns now.
@@ -571,34 +604,37 @@ impl<B: FragmentBuffer> Session<B> {
     }
 
     fn record_receive(&mut self, receipt: Receipt) {
-        self.received += 1;
+        self.receive.received += 1;
         // Index order matches `Status::counts`.
-        self.ecn_counts[match receipt.ecn {
+        self.ecn.counts[match receipt.ecn {
             Ecn::Ect0 => 0,
             Ecn::Ect1 => 1,
             Ecn::Ce => 2,
             Ecn::NotEct => 3,
             Ecn::Unavailable => 4,
         }] += 1;
-        self.gap_high = self.gap_high.max(receipt.sequence.saturating_add(1));
+        self.control.gap_high = self
+            .control
+            .gap_high
+            .max(receipt.sequence.saturating_add(1));
 
-        self.status_messages += 1;
-        if self.status_messages >= self.status_threshold {
-            self.status_pending = true;
+        self.control.status_messages += 1;
+        if self.control.status_messages >= self.control.status_threshold {
+            self.control.status_pending = true;
         }
-        self.status_at = self.status_at.min(receipt.now + STATUS_INTERVAL);
+        self.control.status_at = self.control.status_at.min(receipt.now + STATUS_INTERVAL);
     }
 
     fn advance_receipt(&mut self) -> bool {
         let mut budget = crate::flow::DrainBudget::new(64, 64_000);
-        while self.receive_next < self.deliver_next + self.config.window as u64
+        while self.receive.next < self.receive.deliver_next + self.config.window as u64
             && !budget.exhausted()
         {
-            let Some(message) = &self.rx[self.index(self.receive_next)] else {
+            let Some(message) = &self.receive.rx[self.index(self.receive.next)] else {
                 break;
             };
             let _ = budget.account(message.byte_len());
-            self.receive_next += 1;
+            self.receive.next += 1;
         }
         budget.msgs() != 0
     }
@@ -607,7 +643,7 @@ impl<B: FragmentBuffer> Session<B> {
     /// Call before parking; `next_deadline` exposes unfinished progress.
     pub fn poll_progress(&mut self) -> bool {
         let received = self.advance_receipt();
-        self.status_pending |= received;
+        self.control.status_pending |= received;
         let retired = self.retire_acknowledged();
         let filled = self.fill_fragments();
         received || retired || filled
@@ -615,20 +651,22 @@ impl<B: FragmentBuffer> Session<B> {
 
     /// Whether local receive, retirement, or fragmentation work remains.
     pub fn has_progress(&self) -> bool {
-        self.send_base < self.peer_ack
-            || (self.sending.is_some() && self.outstanding() < self.config.window)
-            || (self.assembly.is_some() && self.deliver_next < self.receive_next)
-            || (self.receive_next < self.receive_credit
-                && self.rx[self.index(self.receive_next)].is_some())
+        self.send.base < self.peer.ack
+            || (self.send.sending.is_some() && self.outstanding() < self.config.window)
+            || (self.receive.assembly.is_some() && self.receive.deliver_next < self.receive.next)
+            || (self.receive.next < self.receive.credit
+                && self.receive.rx[self.index(self.receive.next)].is_some())
     }
 
     /// Borrow the next deliverable unfragmented message, if available.
     pub fn front(&self) -> Option<&Message> {
-        if self.assembly.is_some() || self.fragments[self.index(self.deliver_next)].is_some() {
+        if self.receive.assembly.is_some()
+            || self.receive.fragments[self.index(self.receive.deliver_next)].is_some()
+        {
             return None;
         }
-        (self.deliver_next < self.receive_next)
-            .then(|| self.rx[self.index(self.deliver_next)].as_ref())
+        (self.receive.deliver_next < self.receive.next)
+            .then(|| self.receive.rx[self.index(self.receive.deliver_next)].as_ref())
             .flatten()
     }
 
@@ -638,45 +676,48 @@ impl<B: FragmentBuffer> Session<B> {
         &mut self,
         finish: impl FnOnce(B) -> crate::message::Payload,
     ) -> Option<Message> {
-        if self.assembly.is_some() || self.fragments[self.index(self.deliver_next)].is_some() {
+        if self.receive.assembly.is_some()
+            || self.receive.fragments[self.index(self.receive.deliver_next)].is_some()
+        {
             return self.take_fragmented(finish);
         }
         self.front()?;
-        let index = self.index(self.deliver_next);
-        let message = self.rx[index].take();
-        self.deliver_next += 1;
+        let index = self.index(self.receive.deliver_next);
+        let message = self.receive.rx[index].take();
+        self.receive.deliver_next += 1;
         message
     }
 
     /// Put back a message whose application queue rejected ownership.
     pub fn restore_received(&mut self, message: Message) {
-        assert!(self.deliver_next > 0);
-        self.deliver_next -= 1;
-        let index = self.index(self.deliver_next);
-        assert!(self.rx[index].replace(message).is_none());
+        assert!(self.receive.deliver_next > 0);
+        self.receive.deliver_next -= 1;
+        let index = self.index(self.receive.deliver_next);
+        assert!(self.receive.rx[index].replace(message).is_none());
     }
 
     /// Storage release, including arbitrary-order final clone drops. The
     /// advertised right edge never shrinks and never exceeds real capacity.
     pub fn release_receive(&mut self, count: usize) {
-        assert!(count as u64 <= self.received - self.released);
-        assert!(count as u64 <= self.deliver_next - self.released);
+        assert!(count as u64 <= self.receive.received - self.receive.released);
+        assert!(count as u64 <= self.receive.deliver_next - self.receive.released);
         // The sender knows only the advertised edge. Reopen that window
         // immediately, even if earlier returns were coalesced locally.
-        let was_closed = self.advertised_credit == self.receive_next;
-        self.released += count as u64;
-        if self.paced_receive {
+        let was_closed = self.control.advertised_credit == self.receive.next;
+        self.receive.released += count as u64;
+        if self.receive.paced {
             return;
         }
-        self.receive_credit = self
-            .receive_credit
+        self.receive.credit = self
+            .receive
+            .credit
             .checked_add(count as u64)
             .expect("session credit exhausted");
         if was_closed
-            || self.receive_credit - self.advertised_credit
+            || self.receive.credit - self.control.advertised_credit
                 >= (self.config.window / 2).max(1) as u64
         {
-            self.status_pending = true;
+            self.control.status_pending = true;
         }
     }
 
@@ -693,30 +734,31 @@ impl<B: FragmentBuffer> Session<B> {
                 let Some(end) = first.checked_add(u64::from(count)) else {
                     return false;
                 };
-                if count == 0 || end > self.send_cursor {
+                if count == 0 || end > self.send.cursor {
                     return false;
                 }
                 let mut lost = false;
                 let mut budget = crate::flow::DrainBudget::new(64, 64_000);
-                for sequence in first.max(self.peer_ack)..end {
+                for sequence in first.max(self.peer.ack)..end {
                     if budget.exhausted() {
                         break;
                     }
-                    let bytes = self.tx[self.index(sequence)]
+                    let bytes = self.send.tx[self.index(sequence)]
                         .as_ref()
                         .expect("retained NAK")
                         .bytes;
                     let _ = budget.account(bytes);
                     let index = self.index(sequence);
-                    if let Some(sent) = &mut self.tx[index]
-                        && (sent.attempts == 1 || now.saturating_sub(sent.last) >= self.rtt)
+                    if let Some(sent) = &mut self.send.tx[index]
+                        && (sent.attempts == 1
+                            || now.saturating_sub(sent.last) >= self.congestion.rtt)
                     {
                         if !sent.repair {
-                            self.repairs += 1;
+                            self.send.repairs += 1;
                         }
                         sent.repair = true;
                         if sent.in_flight {
-                            self.flight -= sent.bytes;
+                            self.congestion.flight -= sent.bytes;
                             sent.in_flight = false;
                         }
                         lost = true;
@@ -728,12 +770,12 @@ impl<B: FragmentBuffer> Session<B> {
                 true
             }
             Packet::Probe { session, next } if session == self.local => {
-                if next > self.receive_credit {
+                if next > self.receive.credit {
                     return false;
                 }
-                self.gap_high = self.gap_high.max(next);
-                self.status_pending = true;
-                self.nak_at = self.nak_at.min(now);
+                self.control.gap_high = self.control.gap_high.max(next);
+                self.control.status_pending = true;
+                self.control.nak_at = self.control.nak_at.min(now);
                 true
             }
             _ => false,
@@ -741,34 +783,34 @@ impl<B: FragmentBuffer> Session<B> {
     }
 
     fn status(&mut self, status: Status, now: Duration) -> bool {
-        if status.serial <= self.peer_status_serial {
+        if status.serial <= self.peer.serial {
             return true;
         }
-        if status.ack < self.peer_ack
-            || status.ack > self.send_cursor
-            || status.credit < self.peer_credit
+        if status.ack < self.peer.ack
+            || status.ack > self.send.cursor
+            || status.credit < self.peer.credit
             || status.credit < status.ack
             || status.credit - status.ack > 65_536
             || status
                 .counts
                 .iter()
                 .try_fold(0u64, |total, count| total.checked_add(*count))
-                .is_none_or(|total| total > self.send_cursor || total < status.ack)
-            || status.counts.iter().zip(self.peer_ecn).any(|(a, b)| *a < b)
+                .is_none_or(|total| total > self.send.cursor || total < status.ack)
+            || status.counts.iter().zip(self.peer.ecn).any(|(a, b)| *a < b)
         {
             return false;
         }
-        if self.ecn_enabled {
+        if self.ecn.enabled {
             let marked = status.counts[0].saturating_add(status.counts[2]);
             if status.counts[1] != 0
                 || status.counts[3] != 0
                 || status.counts[4] != 0
                 || marked < status.ack
-                || marked > self.marked_sent
+                || marked > self.ecn.marked_sent
             {
-                self.ecn_enabled = false;
+                self.ecn.enabled = false;
                 self.stats.ecn_failures += 1;
-            } else if status.counts[2] > self.peer_ecn[2] {
+            } else if status.counts[2] > self.peer.ecn[2] {
                 self.congest();
             }
         }
@@ -776,17 +818,17 @@ impl<B: FragmentBuffer> Session<B> {
         // The first peer STATUS proves its session is installed. Our initial
         // STATUS may have arrived before then and been dropped, leaving the
         // peer without credit until the idle interval. Repeat it now.
-        if self.peer_status_serial == 0 {
-            self.status_pending = true;
+        if self.peer.serial == 0 {
+            self.control.status_pending = true;
         }
 
-        self.peer_status_serial = status.serial;
-        self.peer_ecn = status.counts;
-        self.peer_credit = status.credit;
-        if status.ack > self.peer_ack {
-            self.peer_ack_at = now;
+        self.peer.serial = status.serial;
+        self.peer.ecn = status.counts;
+        self.peer.credit = status.credit;
+        if status.ack > self.peer.ack {
+            self.peer.ack_at = now;
         }
-        self.peer_ack = status.ack;
+        self.peer.ack = status.ack;
         self.retire_acknowledged();
         true
     }
@@ -795,46 +837,38 @@ impl<B: FragmentBuffer> Session<B> {
         let mut acknowledged_bytes = 0;
         let mut sample_at = None;
         let mut budget = crate::flow::DrainBudget::new(128, 64_000);
-        while self.send_base < self.peer_ack && !budget.exhausted() {
-            let index = self.index(self.send_base);
-            let sent = self.tx[index]
+        while self.send.base < self.peer.ack && !budget.exhausted() {
+            let index = self.index(self.send.base);
+            let sent = self.send.tx[index]
                 .as_ref()
                 .expect("retained acknowledged message");
             if sent.in_flight {
-                self.flight -= sent.bytes;
+                self.congestion.flight -= sent.bytes;
             }
             if sent.repair {
-                self.repairs -= 1;
+                self.send.repairs -= 1;
             }
             acknowledged_bytes += sent.bytes;
             let _ = budget.account(sent.bytes);
             if sent.attempts == 1 {
                 sample_at = Some(sent.first.expect("submitted transmit"));
             }
-            self.send_base += 1;
+            self.send.base += 1;
             self.stats.acknowledged += u64::from(sent.fragment.is_none_or(|part| part.last));
-            self.tx[index] = None;
+            self.send.tx[index] = None;
         }
         // One feedback timestamp represents the entire acknowledged prefix.
         // Sample its newest unretransmitted message once per bounded turn.
         if let Some(first) = sample_at {
-            let sample = self.peer_ack_at.saturating_sub(first);
-            self.rttvar = (self.rttvar * 3 + self.rtt.abs_diff(sample)) / 4;
-            self.rtt = (self.rtt * 7 + sample) / 8;
+            let sample = self.peer.ack_at.saturating_sub(first);
+            self.congestion.sample_rtt(sample);
         }
         if self.config.congestion == DartCongestion::Adaptive
             && acknowledged_bytes != 0
-            && self.send_base >= self.recovery_end
+            && self.send.base >= self.congestion.recovery_end
         {
-            let increment = if self.cwnd < self.ssthresh {
-                acknowledged_bytes
-            } else {
-                (MAX_DATAGRAM * acknowledged_bytes / self.cwnd).max(1)
-            };
-            self.cwnd = self
-                .cwnd
-                .saturating_add(increment)
-                .min(self.config.window * MAX_DATAGRAM);
+            self.congestion
+                .grow(acknowledged_bytes, self.config.window * MAX_DATAGRAM);
         }
         if acknowledged_bytes != 0 {
             self.update_pacing_rate();
@@ -844,28 +878,25 @@ impl<B: FragmentBuffer> Session<B> {
 
     fn congest(&mut self) {
         if self.config.congestion == DartCongestion::Adaptive
-            && (self.recovery_end == 0 || self.send_base >= self.recovery_end)
+            && (self.congestion.recovery_end == 0 || self.send.base >= self.congestion.recovery_end)
         {
-            self.cwnd = (self.cwnd / 2).max(2 * MAX_DATAGRAM);
-            self.ssthresh = self.cwnd;
-            self.recovery_end = self.send_cursor;
+            self.congestion.back_off(self.send.cursor);
             self.update_pacing_rate();
         }
     }
 
     fn update_pacing_rate(&mut self) {
-        self.pacing_bytes = 0;
-        self.pacing_rate = self.config.max_send_rate.or_else(|| {
-            (self.config.congestion == DartCongestion::Adaptive)
-                .then(|| (self.cwnd as f64 / self.rtt.as_secs_f64().max(0.000_001)) as u64)
+        let rate = self.config.max_send_rate.or_else(|| {
+            (self.config.congestion == DartCongestion::Adaptive).then(|| self.congestion.rate())
         });
+        self.pacing.set_rate(rate);
     }
 
     fn rto(&self) -> Duration {
-        let attempts = self.tx[self.index(self.peer_ack)]
+        let attempts = self.send.tx[self.index(self.peer.ack)]
             .as_ref()
             .map_or(1, |sent| sent.attempts);
-        (self.rtt + self.rttvar * 4)
+        (self.congestion.rtt + self.congestion.rttvar * 4)
             .max(MIN_RTO)
             .saturating_mul(1 << attempts.saturating_sub(1).min(10))
             .min(PROBE_INTERVAL)
@@ -873,18 +904,18 @@ impl<B: FragmentBuffer> Session<B> {
 
     /// Schedule overdue repair and update congestion state using caller time.
     pub fn handle_timeout(&mut self, now: Duration) {
-        if self.peer_ack < self.send_cursor {
-            let index = self.index(self.peer_ack);
+        if self.peer.ack < self.send.cursor {
+            let index = self.index(self.peer.ack);
             let rto = self.rto();
-            if let Some(sent) = &mut self.tx[index]
-                && now.saturating_sub(sent.last.max(self.peer_ack_at)) >= rto
+            if let Some(sent) = &mut self.send.tx[index]
+                && now.saturating_sub(sent.last.max(self.peer.ack_at)) >= rto
             {
                 if !sent.repair {
-                    self.repairs += 1;
+                    self.send.repairs += 1;
                 }
                 sent.repair = true;
                 if sent.in_flight {
-                    self.flight -= sent.bytes;
+                    self.congestion.flight -= sent.bytes;
                     sent.in_flight = false;
                 }
                 self.congest();
@@ -894,24 +925,25 @@ impl<B: FragmentBuffer> Session<B> {
 
     /// Return the next absolute protocol deadline; zero requests immediate progress.
     pub fn next_deadline(&self, now: Duration) -> Duration {
-        let mut deadline = self.status_at.min(self.probe_at);
-        if self.status_pending || self.has_progress() {
+        let mut deadline = self.control.status_at.min(self.control.probe_at);
+        if self.control.status_pending || self.has_progress() {
             return Duration::ZERO;
         }
-        if self.receive_next < self.gap_high {
-            deadline = deadline.min(self.nak_at);
+        if self.receive.next < self.control.gap_high {
+            deadline = deadline.min(self.control.nak_at);
         }
-        if self.peer_ack < self.send_cursor {
-            let sent = self.tx[self.index(self.peer_ack)]
+        if self.peer.ack < self.send.cursor {
+            let sent = self.send.tx[self.index(self.peer.ack)]
                 .as_ref()
                 .expect("retained flight");
             // Advancing cumulative receipt restarts the retransmission timer.
             // Unchanged ACKs and credit-only feedback cannot postpone repair.
-            deadline = deadline.min(sent.last.max(self.peer_ack_at) + self.rto());
+            deadline = deadline.min(sent.last.max(self.peer.ack_at) + self.rto());
         }
-        if self.pace_at > now && (self.send_cursor < self.send_next || self.next_repair().is_some())
+        if self.pacing.next_at > now
+            && (self.send.cursor < self.send.next || self.next_repair().is_some())
         {
-            deadline = deadline.min(self.pace_at);
+            deadline = deadline.min(self.pacing.next_at);
         }
         deadline
     }

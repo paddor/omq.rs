@@ -175,7 +175,7 @@ const defaultCompressionLevel = int64(-1 << 63)
 const (
 	zmtpMaxShortStringBytes = 255
 	compressionDictMaxBytes = 8 * 1024
-	zstdLevelMin            = -8
+	zstdLevelMin            = -7
 	zstdLevelMax            = 4
 	maxHeartbeatTTLMillis   = 6_553_500
 )
@@ -693,7 +693,7 @@ func CompressionDefaultThreshold() SocketOption {
 func CompressionLevel(level int) SocketOption {
 	return trackedOption(func(handle *nativeSocket) error {
 		if level < zstdLevelMin || level > zstdLevelMax {
-			return &ConfigError{Err: "zstd compression level must be -8..=4"}
+			return &ConfigError{Err: "zstd compression level must be -7..=4"}
 		}
 		return setCompressionLevelNative(handle, int64(level))
 	}, func(options *SocketOptions) {

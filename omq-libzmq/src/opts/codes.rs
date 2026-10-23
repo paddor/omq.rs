@@ -155,6 +155,6 @@ pub(super) const OMQ_ON_MUTE_DROP_OLDEST: c_int = 2;
 pub(super) const OMQ_WORKLOAD_DEFAULT: c_int = -1;
 pub(super) const OMQ_WORKLOAD_THROUGHPUT: c_int = 0;
 pub(super) const OMQ_WORKLOAD_LATENCY: c_int = 1;
-pub(super) const ZSTD_LEVEL_MIN: i32 = -8;
+pub(super) const ZSTD_LEVEL_MIN: i32 = -7;
 pub(super) const ZSTD_LEVEL_MAX: i32 = 4;
 pub(super) const COMPRESSION_DICT_MAX: usize = 8 * 1024;

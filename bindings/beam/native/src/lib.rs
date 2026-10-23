@@ -1456,7 +1456,7 @@ fn setsockopt<'a>(
             };
         }
         1005 => {
-            if !(-8..=4).contains(&int_value) {
+            if !(-7..=4).contains(&int_value) {
                 return err_term(env, atoms::badarg(), "invalid compression level");
             }
             options.compression_level = Some(int_value as i32);

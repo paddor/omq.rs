@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `OMQ_COMPRESSION_LEVEL` accepts -7..=4. zrip dropped level -8.
+
 ## [0.27.2] - 2026-10-22
 
 ### Changed

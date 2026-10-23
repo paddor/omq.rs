@@ -9,7 +9,7 @@ use crate::proto::mechanism::MechanismSetup;
 /// setter works regardless of which compression features are enabled.
 const COMPRESSION_DICT_MAX: usize = 8 * 1024;
 
-const ZSTD_LEVEL_MIN: i32 = -8;
+const ZSTD_LEVEL_MIN: i32 = -7;
 
 const ZSTD_LEVEL_MAX: i32 = 4;
 

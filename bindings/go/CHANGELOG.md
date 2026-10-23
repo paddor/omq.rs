@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `CompressionLevel` accepts -7..=4. zrip dropped level -8.
+
 ## [0.1.10] - 2026-10-22
 
 ### Changed

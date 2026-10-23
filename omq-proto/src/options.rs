@@ -388,7 +388,7 @@ pub struct Options {
     pub compression_threshold: Option<usize>,
 
     /// Fixed compression level for `zstd+tcp://`. `None` adapts the level
-    /// within `compression_level_range`. Supported zrip levels are -8..=4;
+    /// within `compression_level_range`. Supported zrip levels are -7..=4;
     /// level 0 maps to zrip's library default (currently level 1). Ignored by
     /// `lz4+tcp://`.
     pub compression_level: Option<i32>,

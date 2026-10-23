@@ -27,7 +27,7 @@ use omq_tokio as backend;
 #[cfg(feature = "quic")]
 mod quic;
 
-const ZSTD_LEVEL_MIN: i32 = -8;
+const ZSTD_LEVEL_MIN: i32 = -7;
 const ZSTD_LEVEL_MAX: i32 = 4;
 
 #[cfg(feature = "curve")]

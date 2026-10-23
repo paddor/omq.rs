@@ -686,7 +686,7 @@ fn omq_compression_options_roundtrip() {
     assert_eq!(set_i32(s, OMQ_COMPRESSION_LEVEL, 1), 0);
     assert_eq!(get_i32(s, OMQ_COMPRESSION_LEVEL), 1);
 
-    assert_eq!(set_i32(s, OMQ_COMPRESSION_LEVEL, -9), -1);
+    assert_eq!(set_i32(s, OMQ_COMPRESSION_LEVEL, -8), -1);
     assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
     assert_eq!(get_i32(s, OMQ_COMPRESSION_LEVEL), 1);
 

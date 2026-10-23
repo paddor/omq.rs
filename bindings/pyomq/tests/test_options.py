@@ -399,7 +399,7 @@ def test_compression_level_round_trip():
 def test_compression_level_rejects_invalid():
     ctx, s = _push()
     try:
-        for level in (-9, 5):
+        for level in (-8, 5):
             with pytest.raises((zmq.ZMQError, ValueError)):
                 s.setsockopt(zmq.OMQ_COMPRESSION_LEVEL, level)
     finally:

@@ -320,15 +320,15 @@ fn rejects_zero_reconnect_intervals() {
 #[test]
 fn validates_zstd_compression_level() {
     assert!(Options::new().compression_level(1).validate().is_ok());
-    assert!(Options::new().compression_level(-8).validate().is_ok());
+    assert!(Options::new().compression_level(-7).validate().is_ok());
     assert!(Options::new().compression_level(4).validate().is_ok());
     assert!(Options::new().compression_level(5).validate().is_err());
-    assert!(Options::new().compression_level(-9).validate().is_err());
+    assert!(Options::new().compression_level(-8).validate().is_err());
     for (min, max, valid) in [
-        (-8, 4, true),
+        (-7, 4, true),
         (2, 2, true),
         (3, 2, false),
-        (-9, 4, false),
+        (-8, 4, false),
         (-1, 5, false),
     ] {
         let options = Options::new().compression_level_range(min, max);

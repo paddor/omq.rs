@@ -5,6 +5,7 @@
 //! (lz4), endpoint parsing, options, and the prefix-
 //! subscription matcher. None of this depends on a runtime.
 #![forbid(unsafe_code)]
+#![warn(missing_docs)]
 
 pub mod backoff;
 pub mod copy_stats;

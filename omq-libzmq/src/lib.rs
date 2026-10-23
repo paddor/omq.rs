@@ -16,6 +16,7 @@
 //! `ZMQ_DONTWAIT` or `ZMQ_SNDTIMEO=0` returns `EAGAIN`.
 
 #![deny(unsafe_op_in_unsafe_fn)]
+#![warn(missing_docs)]
 // Crate-level: 53 of 64 extern "C" fns trigger this lint. Per-function
 // #[expect] would be pure noise for a C API crate.
 #![expect(clippy::not_unsafe_ptr_arg_deref)]

@@ -361,8 +361,8 @@ impl Connection {
     /// either auto-answer / surface a command or accumulate a data frame
     /// into the pending message.
     ///
-    /// Shared between [`try_advance_ready`] (frame parsed from `in_buf`)
-    /// and [`supply_payload`] (frame body delivered out-of-band by a
+    /// Shared between [`Self::try_advance_ready`] (frame parsed from `in_buf`)
+    /// and [`Self::supply_payload`] (frame body delivered out-of-band by a
     /// direct-recv backend).
     #[inline]
     fn decode_assembled_frame(&mut self, flags: FrameFlags, payload: Payload) -> Result<()> {

@@ -163,6 +163,7 @@ fn rcvmore(sock_arc: &OmqSocket) -> bool {
         crate::send_recv::authenticated_recv_has_more(sock_arc)
     } else {
         sock_arc
+            .recv
             .drain_nonempty
             .load(std::sync::atomic::Ordering::Relaxed)
     }
@@ -213,6 +214,7 @@ fn poll_events(sock_arc: &OmqSocket) -> i32 {
         sock_arc.ctx.zap.has_input(sock_arc.id)
     } else {
         sock_arc
+            .recv
             .drain_nonempty
             .load(std::sync::atomic::Ordering::Relaxed)
     };

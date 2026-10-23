@@ -65,7 +65,8 @@ fn check_immediate(items: &mut [ZmqPollItem]) -> i32 {
 
 /// Whether a socket has a buffered message or frame to receive.
 pub(crate) fn recv_ready(sock: &OmqSocket) -> bool {
-    sock.drain_nonempty
+    sock.recv
+        .drain_nonempty
         .load(std::sync::atomic::Ordering::Relaxed)
         || sock.recv_has_data()
         || crate::send_recv::authenticated_recv_has_data(sock)

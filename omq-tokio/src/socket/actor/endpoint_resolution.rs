@@ -319,7 +319,7 @@ impl SocketDriver {
         options: Arc<Options>,
         ack: Ack,
     ) {
-        if self.pending_endpoints.len() == MAX_PENDING_ENDPOINTS {
+        if self.endpoints.pending_endpoints.len() == MAX_PENDING_ENDPOINTS {
             ack.error(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::WouldBlock,
                 "pending endpoint resolution limit reached",
@@ -331,14 +331,14 @@ impl SocketDriver {
         let admission = (kind == Kind::Connect
             && self.socket_type != super::SocketType::Stream
             && !matches!(endpoint, Endpoint::Udp { .. }))
-        .then(|| self.dial_admission.clone());
+        .then(|| self.endpoints.dial_admission.clone());
         let setup_timeout = super::endpoints::dial_setup_timeout(&endpoint, &options);
         let id = self.next_peer_id;
         self.next_peer_id += 1;
-        let cancel = self.cancel.child_token();
+        let cancel = self.link.cancel.child_token();
         let task_cancel = cancel.clone();
         let task_endpoint = endpoint.clone();
-        let tx = self.internal_tx.clone();
+        let tx = self.mail.internal_tx.clone();
         let task = tokio::spawn(
             EndpointTask {
                 id,
@@ -351,7 +351,7 @@ impl SocketDriver {
             }
             .run(ack),
         );
-        self.pending_endpoints.insert(
+        self.endpoints.pending_endpoints.insert(
             id,
             PendingEndpoint {
                 options,
@@ -369,10 +369,10 @@ impl SocketDriver {
         ack: Ack,
         result: Result<ResolvedEndpoint>,
     ) {
-        let Some(pending) = self.pending_endpoints.remove(&id) else {
+        let Some(pending) = self.endpoints.pending_endpoints.remove(&id) else {
             return;
         };
-        if pending.cancel.is_cancelled() || ack.is_canceled() || self.closing {
+        if pending.cancel.is_cancelled() || ack.is_canceled() || self.close.started {
             return;
         }
         match (ack, result) {
@@ -427,7 +427,7 @@ impl SocketDriver {
 
     pub(super) fn cancel_pending_endpoints(&self, endpoint: Option<(&Endpoint, Kind)>) -> bool {
         let mut canceled = false;
-        for pending in self.pending_endpoints.values() {
+        for pending in self.endpoints.pending_endpoints.values() {
             if endpoint
                 .is_none_or(|(target, kind)| target == &pending.original && kind == pending.kind)
             {

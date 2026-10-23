@@ -60,20 +60,20 @@ pub(crate) fn try_recv_message(sock: &OmqSocket) -> Result<Option<omq_tokio::Mes
         return Ok(item.map(|item| item.0));
     }
 
-    if sock.drain_nonempty.load(Ordering::Relaxed) {
-        let Ok(mut drain) = sock.recv_drain.lock() else {
+    if sock.recv.drain_nonempty.load(Ordering::Relaxed) {
+        let Ok(mut drain) = sock.recv.drain.lock() else {
             return Err(ETERM);
         };
         if !drain.is_empty() {
             let parts: Vec<Bytes> = drain.drain(..).collect();
-            sock.drain_nonempty.store(false, Ordering::Relaxed);
+            sock.recv.drain_nonempty.store(false, Ordering::Relaxed);
             return Ok(Some(omq_tokio::Message::multipart(parts)));
         }
-        sock.drain_nonempty.store(false, Ordering::Relaxed);
+        sock.recv.drain_nonempty.store(false, Ordering::Relaxed);
     }
 
     // SAFETY: libzmq sockets are accessed by at most one application thread.
-    let Some(cons) = (unsafe { sock.recv_cons.get() }) else {
+    let Some(cons) = (unsafe { sock.recv.consumers.get() }) else {
         return Err(ETERM);
     };
     if let Some(popped) = try_pop_dual(cons, sock) {
@@ -226,7 +226,7 @@ fn send_zap_bytes(sock: &OmqSocket, data: &[u8], flags: c_int, ret_len: c_int) -
         return fail(crate::error::EFSM);
     }
     // SAFETY: libzmq sockets are accessed by at most one application thread.
-    let accum = unsafe { sock.send_accum.get() };
+    let accum = unsafe { sock.send.accum.get() };
     if flags & ZMQ_SNDMORE != 0 {
         accum.push(Bytes::copy_from_slice(data));
         return ret_len;
@@ -259,7 +259,7 @@ fn can_queue_without_ready_peer(sock: &OmqSocket) -> bool {
         return false;
     }
     // SAFETY: libzmq sockets are accessed by at most one application thread.
-    *unsafe { sock.queue_without_ready_peer.get() }
+    *unsafe { sock.send.queue_without_ready_peer.get() }
 }
 
 fn wait_for_ready_peer(sock: &OmqSocket, sndtimeo: i64) -> Result<(), c_int> {
@@ -300,6 +300,7 @@ fn ensure_libzmq_send_route(sock: &OmqSocket, flags: c_int, sndtimeo: i64) -> Re
         sock.socket_type,
         omq_tokio::SocketType::Req | omq_tokio::SocketType::Rep
     ) && (sock
+        .recv
         .drain_nonempty
         .load(std::sync::atomic::Ordering::Relaxed)
         || authenticated_recv_has_more(sock))
@@ -411,9 +412,9 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
     }
 
     // SAFETY: libzmq sockets are accessed by at most one application thread.
-    let accum = unsafe { sock.send_accum.get() };
+    let accum = unsafe { sock.send.accum.get() };
     // SAFETY: libzmq sockets are accessed by at most one application thread.
-    let retry = unsafe { sock.send_retry.get() };
+    let retry = unsafe { sock.send.retry.get() };
 
     // If SNDMORE: buffer and return immediately.
     if flags & ZMQ_SNDMORE != 0 {
@@ -497,7 +498,7 @@ fn send_stream_frame(
     sndtimeo: i64,
 ) -> c_int {
     // SAFETY: libzmq sockets are accessed by at most one application thread.
-    let accum = unsafe { sock.send_accum.get() };
+    let accum = unsafe { sock.send.accum.get() };
 
     if accum.is_empty() {
         if flags & ZMQ_SNDMORE == 0 {

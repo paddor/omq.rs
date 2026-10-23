@@ -114,11 +114,23 @@ pub enum MonitorEvent {
     /// sockets when the subscription is registered in the send-side
     /// prefix filter.
     SubscribeReceived {
+        /// Stable per-socket id of the subscribing connection.
+        connection_id: u64,
         /// Subscribed prefix.
+        prefix: Bytes,
+    },
+    /// `Options::subscription_admission` rejected a SUBSCRIBE on a PUB/XPUB
+    /// socket. The prefix was not registered. The peer is not told.
+    SubscribeRejected {
+        /// Stable per-socket id of the subscribing connection.
+        connection_id: u64,
+        /// Rejected prefix.
         prefix: Bytes,
     },
     /// A remote peer sent a CANCEL command (unsubscribe).
     UnsubscribeReceived {
+        /// Stable per-socket id of the canceling connection.
+        connection_id: u64,
         /// Unsubscribed prefix.
         prefix: Bytes,
     },

@@ -240,7 +240,11 @@ fn prepare_wire_driver(
         link,
         peer_driver_config(socket, &peer.endpoint),
     )
-    .with_actor_data_inbox(data_inbox_rx);
+    .with_actor_data_inbox(data_inbox_rx)
+    .with_actor_control(
+        socket.mail.peer_control_tx.clone(),
+        socket.subscription_gate(peer_id),
+    );
     let peer_driver = configure_actor_driver(socket, peer_driver, &peer, setup.as_ref(), profile);
     let peer_driver = attach_transforms(socket, peer_driver, transforms);
     #[cfg(target_os = "linux")]
@@ -312,8 +316,7 @@ fn prepare_wire_carrier(
     })
 }
 
-/// Wire the driver to the actor: control events, setup deadline, close
-/// state, and receive tuning.
+/// Wire the driver's setup deadline, close state, and receive tuning.
 fn configure_actor_driver(
     socket: &SocketDriver,
     peer_driver: ConnectionDriver<AnyStream>,
@@ -326,10 +329,6 @@ fn configure_actor_driver(
         ReceiveProfile::from_workload_for_socket(profile.workload, socket.socket_type);
 
     peer_driver
-        .with_actor_control(
-            socket.mail.peer_control_tx.clone(),
-            socket.subscription_gate(),
-        )
         .with_setup_deadline(
             setup.and_then(|state| state.deadline),
             setup.map(|state| state.cancel.clone()),

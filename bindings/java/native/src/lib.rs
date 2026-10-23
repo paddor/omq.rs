@@ -1731,7 +1731,7 @@ fn monitor_event_parts(event: NativeMonitorEvent) -> EventParts<'static> {
             command_name: None,
             command_body: None,
         },
-        NativeMonitorEvent::SubscribeReceived { prefix } => EventParts {
+        NativeMonitorEvent::SubscribeReceived { prefix, .. } => EventParts {
             kind: "SUBSCRIBE_RECEIVED",
             endpoint: None,
             peer: None,
@@ -1744,7 +1744,7 @@ fn monitor_event_parts(event: NativeMonitorEvent) -> EventParts<'static> {
             command_name: None,
             command_body: None,
         },
-        NativeMonitorEvent::UnsubscribeReceived { prefix } => EventParts {
+        NativeMonitorEvent::UnsubscribeReceived { prefix, .. } => EventParts {
             kind: "UNSUBSCRIBE_RECEIVED",
             endpoint: None,
             peer: None,

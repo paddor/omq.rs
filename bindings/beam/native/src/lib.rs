@@ -494,11 +494,11 @@ fn monitor_event_term<'a>(env: Env<'a>, event: MonitorEvent) -> Term<'a> {
             map = put(map, atoms::connection_id(), peer.connection_id);
             put(map, atoms::reason(), disconnect_reason_term(env, &reason))
         }
-        MonitorEvent::SubscribeReceived { prefix } => {
+        MonitorEvent::SubscribeReceived { prefix, .. } => {
             map = put(map, atoms::event(), atoms::subscribe_received());
             put(map, atoms::prefix(), bytes_term(env, &prefix))
         }
-        MonitorEvent::UnsubscribeReceived { prefix } => {
+        MonitorEvent::UnsubscribeReceived { prefix, .. } => {
             map = put(map, atoms::event(), atoms::unsubscribe_received());
             put(map, atoms::prefix(), bytes_term(env, &prefix))
         }

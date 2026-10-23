@@ -11,6 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `zstd+tcp://` compression levels are -7..=4. zrip dropped level -8, so
   `Options::validate` now rejects it.
+- `MonitorEvent::SubscribeReceived` and `UnsubscribeReceived` carry the
+  peer's `connection_id`. Patterns that list every field must add it.
+
+### Added
+
+- `MonitorEvent::SubscribeRejected` reports a SUBSCRIBE that
+  `Options::subscription_admission` rejected, with the peer's
+  `connection_id`.
 
 ## [0.35.0] - 2026-10-22
 

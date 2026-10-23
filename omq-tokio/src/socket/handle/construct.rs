@@ -190,7 +190,7 @@ impl Socket {
         let driver = SocketDriver::new(socket_type, options, send_strategy, link, env);
         #[cfg(feature = "dart")]
         let dart = driver.dart.clone();
-        let payload_pools = driver.payload_pools.clone();
+        let payload_pools = driver.resources.payload_pools.clone();
         let actor_task = spawn_driver(driver, placement.io_pool);
 
         Ok(Self {

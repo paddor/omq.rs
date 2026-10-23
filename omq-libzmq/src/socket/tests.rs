@@ -11,7 +11,7 @@ fn receive_signal_retains_its_descriptor_after_socket_close() {
     // SAFETY: this test owns the live socket handle.
     let sock = unsafe { crate::handle::socket(socket) }.unwrap();
     let fd = sock.notify.recv_fd();
-    let sink = sock.recv_sink_config.get().unwrap().take_sink().unwrap();
+    let sink = sock.recv.sink_config.get().unwrap().take_sink().unwrap();
     let omq_tokio::engine::RecvSink::Yring(sink) = sink else {
         panic!("expected direct receive sink");
     };

@@ -55,9 +55,8 @@ impl SocketDriver {
                 // The route owns its original options even when a completed
                 // transport waits behind newer endpoint operations.
                 let Some(options) = self
-                    .dialers
-                    .iter()
-                    .find(|dialer| dialer.route_id == route_id)
+                    .endpoints
+                    .dialer(route_id)
                     .map(|dialer| dialer.options.clone())
                 else {
                     return;
@@ -75,7 +74,8 @@ impl SocketDriver {
                 );
             }
             InternalEvent::ConnectGaveUp { endpoint, route_id } => {
-                self.dialers
+                self.endpoints
+                    .dialers
                     .retain(|d| !(d.route_id == route_id && d.endpoint == endpoint));
                 self.remove_connect_route(route_id);
             }
@@ -107,13 +107,14 @@ impl SocketDriver {
         // A refused handshake would be refused again; stop dialing.
         if refused {
             if peer.is_client {
-                self.dialers
+                self.endpoints
+                    .dialers
                     .retain(|dialer| dialer.route_id != peer.route_id);
             }
             return;
         }
         if peer.is_client
-            && !self.closing
+            && !self.close.started
             && !matches!(peer.options.reconnect, ReconnectPolicy::Disabled)
         {
             self.redial_closed_peer(&peer);
@@ -133,7 +134,7 @@ impl SocketDriver {
                 _ => None,
             };
             if let Some(reason_text) = reason_text {
-                self.monitor.publish(MonitorEvent::HandshakeFailed {
+                self.link.monitor.publish(MonitorEvent::HandshakeFailed {
                     endpoint: peer.endpoint.clone(),
                     peer_ident: peer.ident.clone(),
                     reason: reason_text,
@@ -142,7 +143,7 @@ impl SocketDriver {
         }
 
         if refused && peer.is_client {
-            self.monitor.publish(MonitorEvent::ConnectStopped {
+            self.link.monitor.publish(MonitorEvent::ConnectStopped {
                 endpoint: peer.endpoint.clone(),
                 reason: reason.clone(),
             });
@@ -156,13 +157,14 @@ impl SocketDriver {
         let failed_attempts = if peer.ready {
             1
         } else {
-            self.dialers
+            self.endpoints
+                .dialers
                 .iter()
                 .find(|dialer| dialer.route_id == peer.route_id)
                 .map_or(0, |dialer| dialer.failed_attempts.load(Ordering::Relaxed))
                 .saturating_add(1)
         };
-        self.dialers.retain(|d| d.endpoint != ep);
+        self.endpoints.dialers.retain(|d| d.endpoint != ep);
         self.start_redial(ep, peer.options.clone(), failed_attempts);
     }
 
@@ -184,7 +186,7 @@ impl SocketDriver {
     /// needs no receive check here: its only peer type is RADIO, which
     /// sends `[group, body]` and nothing else.
     pub(super) fn inproc_direct_inbound(&self) -> bool {
-        self.authenticated_recv_sink.is_none()
+        self.resources.authenticated_recv_sink.is_none()
             && !matches!(
                 self.socket_type,
                 SocketType::Pub
@@ -215,12 +217,13 @@ impl SocketDriver {
     /// Drop a connect route's pre-ready send pipe. A REQ request queued
     /// there can no longer be answered, so alternation resets.
     pub(super) fn remove_connect_route(&mut self, route_id: u64) {
-        self.send_strategy.connect_pipe_removed(route_id);
-        self.shared.req_awaiting_reply.route_removed(route_id);
+        self.routing.send_strategy.connect_pipe_removed(route_id);
+        self.link.shared.req_awaiting_reply.route_removed(route_id);
     }
 
     fn take_dialer_send_pipe(&mut self, route_id: u64) -> Option<crate::engine::SendPipeConsumer> {
-        self.dialers
+        self.endpoints
+            .dialers
             .iter_mut()
             .find(|d| d.route_id == route_id)
             .and_then(|d| d.send_pipe_rx.take())
@@ -235,6 +238,7 @@ impl SocketDriver {
         authentication: &omq_proto::PeerAuthentication,
     ) -> bool {
         let Some(held) = self
+            .routing
             .send_strategy
             .peer_for_identity(identity)
             .filter(|&old_id| old_id != peer_id)
@@ -296,6 +300,7 @@ impl SocketDriver {
             .filter(|peer| peer.ready && family(&peer.endpoint))
             .count();
         let replaced = self
+            .routing
             .send_strategy
             .peer_for_identity(identity)
             .filter(|&old_id| old_id != peer_id)
@@ -308,7 +313,7 @@ impl SocketDriver {
         // During linger, the handshake may complete after begin_close().
         // Spawn anyway so queued messages can drain; teardown cancels once
         // the queue empties or linger expires.
-        if self.closing && self.send_strategy.is_drained() {
+        if self.close.started && self.routing.send_strategy.is_drained() {
             return;
         }
         if self.socket_type != SocketType::Stream
@@ -325,11 +330,11 @@ impl SocketDriver {
             if setup.is_none() {
                 let source = peer_ident_socket_addr(peer_ident).map(|address| address.ip());
                 let Some(admission) = crate::transport::setup::PendingHandshake::acquire(
-                    &self.setup_admission,
+                    &self.endpoints.setup_admission,
                     None,
                     source,
                 ) else {
-                    self.monitor.publish(MonitorEvent::HandshakeFailed {
+                    self.link.monitor.publish(MonitorEvent::HandshakeFailed {
                         endpoint: peer.endpoint.clone(),
                         peer_ident: peer_ident.clone(),
                         reason: "socket pending-handshake limit reached".into(),
@@ -338,7 +343,7 @@ impl SocketDriver {
                 };
                 *setup = Some(crate::transport::setup::SetupState {
                     deadline: None,
-                    cancel: self.cancel.clone(),
+                    cancel: self.link.cancel.clone(),
                     admission,
                 });
             }
@@ -357,7 +362,7 @@ impl SocketDriver {
                 connection_id: conn_id,
             }
         };
-        self.monitor.publish(event);
+        self.link.monitor.publish(event);
         self.spawn_any_conn(conn, peer);
     }
 
@@ -413,18 +418,18 @@ impl SocketDriver {
 
         let (completion, receiver) =
             crate::engine::peer_completion::CompletionProgress::reserve(peer_id);
-        self.peer_completions.push(receiver);
+        self.mail.peer_completions.push(receiver);
 
-        let Ok(peer_output) = self.peer_out_tx.try_register() else {
+        let Ok(peer_output) = self.mail.peer_out_tx.try_register() else {
             return;
         };
-        let assignment = self.io_pool.reserve_thread();
+        let assignment = self.resources.io_pool.reserve_thread();
         let io_thread = assignment.index();
-        let migrate = self.io_pool.has_dedicated_io_threads();
+        let migrate = self.resources.io_pool.has_dedicated_io_threads();
         let raw_peer = crate::transport::stream_raw::RawPeer {
             peer_id,
             peer_out: crate::engine::actor_output::PeerOutput::actor(peer_output),
-            cancel: &self.cancel,
+            cancel: &self.link.cancel,
             completion,
             capacity: self.options.send_queue_capacity(),
             pool: peer.options.recv_payload_pool.clone(),
@@ -434,7 +439,7 @@ impl SocketDriver {
         let (handle, task) = crate::transport::stream_raw::spawn_on(
             stream,
             raw_peer,
-            &self.io_pool,
+            &self.resources.io_pool,
             assignment,
             move |stream| {
                 use crate::socket::dispatch::Migratable;
@@ -453,9 +458,9 @@ impl SocketDriver {
         entry.identity = identity.clone();
         entry.task = Some(task);
         self.peers.insert(peer_id, entry);
-        self.shared.ready_peers.add();
+        self.link.shared.ready_peers.add();
 
-        self.send_strategy.connection_added(AddedPeer {
+        self.routing.send_strategy.connection_added(AddedPeer {
             peer_id,
             route_id,
             handle,
@@ -463,7 +468,9 @@ impl SocketDriver {
             is_inproc: false,
             io_thread,
         });
-        self.recv_strategy.connection_added(peer_id, identity);
+        self.routing
+            .recv_strategy
+            .connection_added(peer_id, identity);
     }
 
     /// Inproc fast path: skip the ZMTP codec entirely. The peer's
@@ -486,7 +493,7 @@ impl SocketDriver {
                     .await;
             }
             ZmtpEvent::Message(msg) => {
-                if self.closing {
+                if self.close.started {
                     return;
                 }
                 if !self.peers.get(&peer_id).is_some_and(|p| p.ready) {
@@ -500,10 +507,11 @@ impl SocketDriver {
                 if self.handle_legacy_subscribe(peer_id, &msg) {
                     return;
                 }
-                let message = self.recv_strategy.wrap_for_transform(peer_id, msg);
+                let message = self.routing.recv_strategy.wrap_for_transform(peer_id, msg);
                 let message = if self.type_state_needs_transform() {
                     message.and_then(|wrapped| {
-                        self.shared
+                        self.link
+                            .shared
                             .type_state
                             .lock()
                             .expect("type_state")
@@ -552,7 +560,7 @@ impl SocketDriver {
         let Some(activation) = self.receive_activation(peer_id, &sender) else {
             return;
         };
-        if let Some(old_id) = self.send_strategy.peer_for_identity(&identity)
+        if let Some(old_id) = self.routing.send_strategy.peer_for_identity(&identity)
             && old_id != peer_id
         {
             self.evict_peer_for_handover(old_id);
@@ -562,7 +570,7 @@ impl SocketDriver {
             return;
         };
         self.add_ready_routes(peer_id, &ready, identity, sender);
-        self.monitor.publish(ready.event);
+        self.link.monitor.publish(ready.event);
 
         // Replies must be routable before a different I/O/application thread
         // can observe readiness or the first incoming message.
@@ -600,7 +608,7 @@ impl SocketDriver {
         let Some(peer) = self.peers.get(&peer_id) else {
             return;
         };
-        self.monitor.publish(MonitorEvent::HandshakeFailed {
+        self.link.monitor.publish(MonitorEvent::HandshakeFailed {
             endpoint: peer.endpoint.clone(),
             peer_ident: peer.ident.clone(),
             reason: reason.into(),
@@ -653,7 +661,7 @@ impl SocketDriver {
         Some(ReadiedPeer {
             handle: p.handle.clone(),
             route_id: p.route_id,
-            subs_replay: self.subscriptions.clone(),
+            subs_replay: self.routing.subscriptions.clone(),
             peer_ident: p.ident.clone(),
             io_thread: p.io_thread,
             became_ready,
@@ -683,18 +691,19 @@ impl SocketDriver {
         let any_groups = false;
 
         if self.socket_type == SocketType::Req {
-            self.shared
+            self.link
+                .shared
                 .req_awaiting_reply
                 .peer_connected(ready.route_id, peer_id);
         }
         if any_groups {
-            self.send_strategy.connection_added_any_groups(
+            self.routing.send_strategy.connection_added_any_groups(
                 peer_id,
                 ready.handle.clone(),
                 ready.io_thread,
             );
         } else {
-            self.send_strategy.connection_added(AddedPeer {
+            self.routing.send_strategy.connection_added(AddedPeer {
                 peer_id,
                 route_id: ready.route_id,
                 handle: ready.handle.clone(),
@@ -703,7 +712,7 @@ impl SocketDriver {
                 io_thread: ready.io_thread,
             });
         }
-        self.recv_strategy.admitted(peer_id, sender.clone());
+        self.routing.recv_strategy.admitted(peer_id, sender.clone());
 
         // Replies are routable now, so the peer may deliver into this
         // socket's receive queue.
@@ -718,7 +727,7 @@ impl SocketDriver {
             port.open(open);
         }
         if ready.became_ready {
-            self.shared.ready_peers.add();
+            self.link.shared.ready_peers.add();
         }
     }
 
@@ -727,7 +736,7 @@ impl SocketDriver {
         peer_id: u64,
         identity: &omq_proto::Identity,
     ) -> Option<crate::engine::PeerDriverCommand> {
-        let Some(routes) = &mut self.peer_recv_routes else {
+        let Some(routes) = &mut self.link.peer_recv_routes else {
             return Some(crate::engine::PeerDriverCommand::ActivateDataPlane);
         };
         let peer = self.peers.get(&peer_id)?;
@@ -737,7 +746,7 @@ impl SocketDriver {
             )),
             Err(error) => {
                 if let Some(peer) = self.peers.get(&peer_id) {
-                    self.monitor.publish(MonitorEvent::HandshakeFailed {
+                    self.link.monitor.publish(MonitorEvent::HandshakeFailed {
                         endpoint: peer.endpoint.clone(),
                         peer_ident: peer.ident.clone(),
                         reason: error.to_string(),
@@ -761,27 +770,32 @@ impl SocketDriver {
         use omq_proto::proto::Command;
         match cmd {
             Command::Subscribe(prefix) => {
-                let applied = self.send_strategy.peer_subscribe(peer_id, prefix.clone());
+                let applied = self
+                    .routing
+                    .send_strategy
+                    .peer_subscribe(peer_id, prefix.clone());
                 self.count_subscription_after(applied);
-                self.monitor.publish(MonitorEvent::SubscribeReceived {
+                self.link.monitor.publish(MonitorEvent::SubscribeReceived {
                     prefix: prefix.clone(),
                 });
             }
             Command::Cancel(prefix) => {
-                self.send_strategy.peer_cancel(peer_id, &prefix);
-                self.monitor.publish(MonitorEvent::UnsubscribeReceived {
-                    prefix: prefix.clone(),
-                });
+                self.routing.send_strategy.peer_cancel(peer_id, &prefix);
+                self.link
+                    .monitor
+                    .publish(MonitorEvent::UnsubscribeReceived {
+                        prefix: prefix.clone(),
+                    });
             }
             Command::Join(group) => {
-                self.send_strategy.peer_join(peer_id, &group);
-                self.monitor.publish(MonitorEvent::JoinReceived {
+                self.routing.send_strategy.peer_join(peer_id, &group);
+                self.link.monitor.publish(MonitorEvent::JoinReceived {
                     group: group.clone(),
                 });
             }
             Command::Leave(group) => {
-                self.send_strategy.peer_leave(peer_id, &group);
-                self.monitor.publish(MonitorEvent::LeaveReceived {
+                self.routing.send_strategy.peer_leave(peer_id, &group);
+                self.link.monitor.publish(MonitorEvent::LeaveReceived {
                     group: group.clone(),
                 });
             }
@@ -797,10 +811,13 @@ impl SocketDriver {
 
     fn count_subscription_after(&self, applied: Option<tokio::sync::oneshot::Receiver<()>>) {
         let Some(applied) = applied else {
-            self.shared.subscribe_count.fetch_add(1, Ordering::Release);
+            self.link
+                .shared
+                .subscribe_count
+                .fetch_add(1, Ordering::Release);
             return;
         };
-        let subscribe_count = self.shared.subscribe_count.clone();
+        let subscribe_count = self.link.shared.subscribe_count.clone();
         std::mem::drop(tokio::spawn(async move {
             if applied.await.is_ok() {
                 subscribe_count.fetch_add(1, Ordering::Release);
@@ -810,7 +827,7 @@ impl SocketDriver {
 
     pub(super) fn stage_receive(&mut self, peer_id: u64, message: Message) {
         debug_assert!(self.pending_receive.is_none());
-        let properties = if self.authenticated_recv_sink.is_some() {
+        let properties = if self.resources.authenticated_recv_sink.is_some() {
             let Some(properties) = self
                 .peers
                 .get(&peer_id)
@@ -837,12 +854,13 @@ impl SocketDriver {
             return;
         };
         let result = if let Some(properties) = &pending.properties {
-            self.authenticated_recv_sink
+            self.resources
+                .authenticated_recv_sink
                 .as_ref()
                 .expect("authenticated receive sink configured")
                 .try_send_authenticated(pending.message, properties.clone())
         } else {
-            self.recv_tx.try_send(pending.message)
+            self.link.recv_tx.try_send(pending.message)
         };
         match result {
             Ok(()) => {}
@@ -870,12 +888,13 @@ impl SocketDriver {
                 if !self.admits_subscription(peer_id, prefix) {
                     return true;
                 }
-                self.send_strategy
+                self.routing
+                    .send_strategy
                     .peer_subscribe(peer_id, bytes::Bytes::copy_from_slice(prefix));
                 self.socket_type != SocketType::XPub
             }
             0x00 => {
-                self.send_strategy.peer_cancel(peer_id, prefix);
+                self.routing.send_strategy.peer_cancel(peer_id, prefix);
                 self.socket_type != SocketType::XPub
             }
             _ => false,
@@ -917,7 +936,8 @@ impl SocketDriver {
             }
         }
         if supports_groups(self.socket_type) {
-            let groups: Vec<bytes::Bytes> = self.joined_groups.load().iter().cloned().collect();
+            let groups: Vec<bytes::Bytes> =
+                self.routing.joined_groups.load().iter().cloned().collect();
             for group in groups {
                 let _ = handle
                     .inbox
@@ -939,7 +959,7 @@ impl SocketDriver {
         let Some(info) = peer.info.clone() else {
             return;
         };
-        self.monitor.publish(MonitorEvent::PeerCommand {
+        self.link.monitor.publish(MonitorEvent::PeerCommand {
             endpoint: peer.endpoint.clone(),
             peer: info,
             command,

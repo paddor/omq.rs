@@ -1,6 +1,5 @@
 //! Socket handle and `zmq_socket`/close/bind/connect/unbind/disconnect.
 
-use std::collections::VecDeque;
 use std::ffi::{CStr, c_int, c_void};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
@@ -21,6 +20,9 @@ use crate::notify::{NotifyHandle, PlatformNotifyHandle, RecvNotify};
 use crate::opts::{LingerSetting, MechanismOverlay, SocketOverlay};
 
 mod monitor;
+mod state;
+
+pub(crate) use state::{RecvState, SendState};
 
 pub use monitor::{
     zmq_socket_get_peer_state, zmq_socket_monitor, zmq_socket_monitor_pipes_stats,
@@ -92,64 +94,31 @@ pub(crate) struct OmqSocket {
     pub overlay: Mutex<SocketOverlay>,
     pub sndtimeo_ms: AtomicI64,
     pub rcvtimeo_ms: AtomicI64,
-    /// Accumulator for SNDMORE multipart assembly.
-    pub send_accum: crate::local_cell::LocalCell<Vec<Bytes>>,
-    /// `send_accum` holds frames kept after the final frame would block.
-    pub send_retry: crate::local_cell::LocalCell<bool>,
-    /// Leftover frames from a multipart recv (RCVMORE).
-    pub recv_drain: Mutex<VecDeque<Bytes>>,
-    /// True when `recv_drain` is non-empty. Checked without the lock so the
-    /// mutex is skipped entirely on the common single-frame recv path.
-    pub drain_nonempty: AtomicBool,
-    /// Dual yring consumers. `fast` is filled directly by the first
-    /// peer's `ConnectionDriver` (bypasses `async_channel` + recv pump).
-    /// `pump` is filled by the recv pump task for second+ peers.
-    /// Accessed only from the `zmq_recv` caller thread.
-    pub recv_cons: crate::local_cell::LocalCell<Option<RecvConsumers>>,
-    /// Dedicated receive queue for ZAP-authenticated sockets. Each item keeps
-    /// the authenticated peer properties attached to its message.
-    pub authenticated_recv: crate::local_cell::LocalCell<
-        Option<tokio::sync::mpsc::Receiver<omq_tokio::engine::AuthenticatedRecvItem>>,
-    >,
-    /// Remaining frames and properties from a partially received
-    /// authenticated multipart message.
-    pub authenticated_recv_drain:
-        crate::local_cell::LocalCell<VecDeque<(Bytes, Arc<omq_tokio::proto::PeerProperties>)>>,
+    pub send: SendState,
+    pub recv: RecvState,
     /// The inner omq-tokio socket. Send+Sync, stored directly.
     pub inner: std::sync::OnceLock<Arc<omq_tokio::Socket>>,
-    /// Backpressure: recv pump waits on this when the recv ring is full.
-    pub recv_space: std::sync::OnceLock<Arc<StateSignal>>,
-    /// Shared config for recycling the recv fast yring on peer churn.
-    pub recv_sink_config: std::sync::OnceLock<Arc<omq_tokio::engine::RecvSinkConfig>>,
     pub last_endpoint: Mutex<Option<String>>,
     pub notify: Arc<PlatformNotifyHandle>,
     /// True for the REP socket bound to the reserved ZAP endpoint.
     pub(crate) zap_handler: AtomicBool,
     pub bound_or_connected: AtomicBool,
     pub connect_count: AtomicUsize,
-    /// Frozen inverse of `ZMQ_IMMEDIATE`, captured at first bind/connect.
-    /// Read only from the app-facing socket thread after materialization.
-    pub queue_without_ready_peer: crate::local_cell::LocalCell<bool>,
-    pub recv_pump: std::sync::OnceLock<tokio::task::JoinHandle<()>>,
 }
 
 impl OmqSocket {
     pub(crate) fn recv_has_data(&self) -> bool {
         // SAFETY: libzmq sockets are accessed by at most one application thread.
-        let Some(consumers) = unsafe { self.recv_cons.get() }.as_mut() else {
+        let Some(consumers) = unsafe { self.recv.consumers.get() }.as_mut() else {
             return false;
         };
-        consumers.refresh(self.recv_sink_config.get());
+        consumers.refresh(self.recv.sink_config.get());
         !consumers.fast.is_empty() || !consumers.pump.is_empty()
     }
 
     fn allow_thread_migration(&self) {
-        self.send_accum.allow_thread_migration();
-        self.send_retry.allow_thread_migration();
-        self.recv_cons.allow_thread_migration();
-        self.authenticated_recv.allow_thread_migration();
-        self.authenticated_recv_drain.allow_thread_migration();
-        self.queue_without_ready_peer.allow_thread_migration();
+        self.send.allow_thread_migration();
+        self.recv.allow_thread_migration();
     }
 }
 
@@ -234,23 +203,14 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
         overlay: Mutex::new(overlay),
         sndtimeo_ms: AtomicI64::new(-1),
         rcvtimeo_ms: AtomicI64::new(-1),
-        send_accum: crate::local_cell::LocalCell::new(Vec::new()),
-        send_retry: crate::local_cell::LocalCell::new(false),
-        recv_drain: Mutex::new(VecDeque::new()),
-        drain_nonempty: AtomicBool::new(false),
-        recv_cons: crate::local_cell::LocalCell::new(None),
-        authenticated_recv: crate::local_cell::LocalCell::new(None),
-        authenticated_recv_drain: crate::local_cell::LocalCell::new(VecDeque::new()),
+        send: SendState::new(queue_without_ready_peer),
+        recv: RecvState::new(),
         inner: std::sync::OnceLock::new(),
-        recv_space: std::sync::OnceLock::new(),
-        recv_sink_config: std::sync::OnceLock::new(),
         last_endpoint: Mutex::new(None),
         notify,
         zap_handler: AtomicBool::new(false),
         bound_or_connected: AtomicBool::new(false),
         connect_count: AtomicUsize::new(0),
-        queue_without_ready_peer: crate::local_cell::LocalCell::new(queue_without_ready_peer),
-        recv_pump: std::sync::OnceLock::new(),
     });
     sock.ctx.socket_opened();
     sock.ctx.register_socket(&sock);
@@ -445,7 +405,7 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) -> Result<(), c_int> {
     }
     // SAFETY: materialization runs before hot-path send ownership and freezes
     // bind/connect-scoped options for this socket.
-    *unsafe { sock.queue_without_ready_peer.get_unchecked() } = queue_without_ready_peer;
+    *unsafe { sock.send.queue_without_ready_peer.get_unchecked() } = queue_without_ready_peer;
 
     let socket_type = sock.socket_type;
 
@@ -454,17 +414,17 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) -> Result<(), c_int> {
     let (pump_prod, pump_cons) = yring::spsc(cap);
     // SAFETY: materialization happens before user recv access and must not
     // bind the later app-facing owner thread.
-    *unsafe { sock.recv_cons.get_unchecked() } = Some(RecvConsumers {
+    *unsafe { sock.recv.consumers.get_unchecked() } = Some(RecvConsumers {
         fast: fast_cons,
         pump: pump_cons,
         prefer_pump: false,
     });
 
     let recv_space = Arc::new(StateSignal::new());
-    let _ = sock.recv_space.set(recv_space.clone());
+    let _ = sock.recv.space.set(recv_space.clone());
 
     let recv_sink_cfg = build_recv_sink(sock, cap, needs_zap, fast_prod, recv_space.clone());
-    let _ = sock.recv_sink_config.set(recv_sink_cfg.clone());
+    let _ = sock.recv.sink_config.set(recv_sink_cfg.clone());
 
     // Enter the tokio runtime context so that Socket::new (which calls
     // tokio::spawn internally for its driver task) and the recv pump
@@ -476,7 +436,7 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) -> Result<(), c_int> {
     let recv_pump = spawn_recv_pump(sock, &inner, pump_prod, recv_space);
 
     let _ = sock.inner.set(inner);
-    let _ = sock.recv_pump.set(recv_pump);
+    let _ = sock.recv.pump.set(recv_pump);
     Ok(())
 }
 
@@ -496,7 +456,7 @@ fn build_recv_sink(
     let recv_sink = if needs_zap {
         let (sink, receiver) = omq_tokio::engine::RecvSink::authenticated(cap, signal_cb.clone());
         // SAFETY: like recv_cons, this is set before any user recv access.
-        *unsafe { sock.authenticated_recv.get_unchecked() } = Some(receiver);
+        *unsafe { sock.recv.authenticated.get_unchecked() } = Some(receiver);
         sink
     } else {
         omq_tokio::engine::RecvSink::Yring(omq_tokio::engine::YringSink {
@@ -552,9 +512,9 @@ pub extern "C" fn zmq_close(sock_ptr: *mut c_void) -> c_int {
     // Drop its consumer before signaling so the driver observes closure.
     // SAFETY: close has exclusive socket access; the last recv may have run
     // on a different thread before ownership returned to this caller.
-    let consumers = unsafe { arc.recv_cons.get_unchecked() }.take();
+    let consumers = unsafe { arc.recv.consumers.get_unchecked() }.take();
     drop(consumers);
-    if let Some(space) = arc.recv_space.get() {
+    if let Some(space) = arc.recv.space.get() {
         space.notify_changed();
     }
 
@@ -562,7 +522,7 @@ pub extern "C" fn zmq_close(sock_ptr: *mut c_void) -> c_int {
         arc.ctx.zap.unbind(arc.id);
     }
 
-    if let Some(h) = arc.recv_pump.get() {
+    if let Some(h) = arc.recv.pump.get() {
         h.abort();
     }
     let linger = arc

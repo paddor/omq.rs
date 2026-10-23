@@ -21,6 +21,7 @@ pub(super) fn attach_recv_bypass(
     }
 
     let has_authenticated_sink = socket
+        .resources
         .recv_sink_config
         .as_ref()
         .is_some_and(|config| config.authenticated_sink().is_some());
@@ -30,16 +31,16 @@ pub(super) fn attach_recv_bypass(
         attach_yring_recv_bypass(socket, peer_driver, peer_id, rep_latency)
     } else if rep_latency {
         peer_driver.with_recv_sink(crate::engine::RecvSink::rep(
-            crate::engine::RecvSink::Channel(socket.recv_tx.clone()),
+            crate::engine::RecvSink::Channel(socket.link.recv_tx.clone()),
             peer_id,
         ))
     } else if matches!(socket.socket_type, SocketType::Server | SocketType::Req) {
         peer_driver.with_recv_sink(crate::engine::RecvSink::server(
-            crate::engine::RecvSink::Channel(socket.recv_tx.clone()),
+            crate::engine::RecvSink::Channel(socket.link.recv_tx.clone()),
             server_routing_id(peer_id).expect("SERVER/REQ peer ID checked"),
         ))
     } else {
-        peer_driver.with_recv_direct(socket.recv_tx.clone())
+        peer_driver.with_recv_direct(socket.link.recv_tx.clone())
     }
 }
 
@@ -50,6 +51,7 @@ fn attach_yring_recv_bypass(
     rep_latency: bool,
 ) -> ConnectionDriver<AnyStream> {
     if let Some(sink) = socket
+        .resources
         .recv_sink_config
         .as_ref()
         .and_then(|config| config.authenticated_sink())
@@ -65,22 +67,23 @@ fn attach_yring_recv_bypass(
             peer_driver.with_recv_sink(sink)
         };
     }
-    if let Some(slot) = socket.spsc.conflate_slot.as_ref() {
+    if let Some(slot) = socket.link.spsc.conflate_slot.as_ref() {
         return peer_driver.with_recv_sink(crate::engine::RecvSink::Conflate(slot.clone()));
     }
 
     let sink = socket
+        .resources
         .recv_sink_config
         .as_ref()
         .and_then(|cfg| cfg.take_sink_for_peer(peer_id))
         .unwrap_or_else(|| {
-            if let Some(fanin) = &socket.spsc.fanin {
-                return fanin_recv_sink(fanin, &socket.recv_tx);
+            if let Some(fanin) = &socket.link.spsc.fanin {
+                return fanin_recv_sink(fanin, &socket.link.recv_tx);
             }
             let cap = socket.options.recv_queue_capacity().max(16);
             let (prod, cons) = yring::spsc(cap);
-            let recv_signal = socket.spsc.recv_signal.clone();
-            let blocking_waker = socket.spsc.blocking_recv_waker.clone();
+            let recv_signal = socket.link.spsc.recv_signal.clone();
+            let blocking_waker = socket.link.spsc.blocking_recv_waker.clone();
             let space = Arc::new(StateSignal::new());
             let sink = crate::engine::RecvSink::Yring(crate::engine::YringSink {
                 producer: prod,

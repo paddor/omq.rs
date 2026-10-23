@@ -119,7 +119,7 @@ async fn attach_on_route(
         },
     };
     driver.handle_internal_event(event).await;
-    let (id, event) = driver.peer_control_rx.recv().await.unwrap();
+    let (id, event) = driver.mail.peer_control_rx.recv().await.unwrap();
     assert!(matches!(
         event,
         PeerEvent::Event(Event::HandshakeSucceeded { .. })
@@ -141,7 +141,7 @@ async fn attach_on_route(
         )))
         .await
         .unwrap();
-    let (id, event) = driver.peer_control_rx.recv().await.unwrap();
+    let (id, event) = driver.mail.peer_control_rx.recv().await.unwrap();
     assert!(matches!(
         event,
         PeerEvent::Event(Event::Command(Command::Subscribe(_)))
@@ -151,8 +151,8 @@ async fn attach_on_route(
 }
 
 async fn stop_dial_transport(driver: &mut SocketDriver) -> u64 {
-    assert_eq!(driver.dialers.len(), 1);
-    let dialer = &mut driver.dialers[0];
+    assert_eq!(driver.endpoints.dialers.len(), 1);
+    let dialer = &mut driver.endpoints.dialers[0];
     dialer.cancel.cancel();
     dialer.task.abort();
     let _ = (&mut dialer.task).await;
@@ -160,7 +160,7 @@ async fn stop_dial_transport(driver: &mut SocketDriver) -> u64 {
 }
 
 async fn stop(driver: &mut SocketDriver, peers: Vec<RemoteWire>) {
-    driver.send_strategy.shutdown();
+    driver.routing.send_strategy.shutdown();
     for peer in driver.peers.values() {
         peer.handle.cancel.cancel();
     }
@@ -247,9 +247,9 @@ async fn connect_by_name(
             ack,
         })
         .await;
-    assert_eq!(driver.pending_endpoints.len(), 1);
+    assert_eq!(driver.endpoints.pending_endpoints.len(), 1);
     (
-        *driver.pending_endpoints.keys().next().unwrap(),
+        *driver.endpoints.pending_endpoints.keys().next().unwrap(),
         pending_ack,
     )
 }
@@ -273,6 +273,7 @@ async fn finish_connect(driver: &mut SocketDriver, id: u64, resolved: Endpoint) 
 
 async fn publish(driver: &SocketDriver, message: &Message) {
     driver
+        .routing
         .send_strategy
         .submitter()
         .send(message.clone())
@@ -293,8 +294,8 @@ async fn resolution_handoff_and_peer_reconnect_retain_the_operation_snapshot() {
             let (mut driver, _consumer) = fixture_for(SocketType::Pub);
             driver.options.reconnect = ReconnectPolicy::Fixed(Duration::from_millis(10));
             // Hold the only admission so the dialer cannot connect on its own.
-            driver.setup_admission = crate::transport::setup::Admission::new(1);
-            let held = driver.setup_admission.try_acquire().unwrap();
+            driver.endpoints.setup_admission = crate::transport::setup::Admission::new(1);
+            let held = driver.endpoints.setup_admission.try_acquire().unwrap();
             let resolved = endpoint(kind);
             let (id, _pending_ack) = connect_by_name(&mut driver, &resolved).await;
 
@@ -304,7 +305,7 @@ async fn resolution_handoff_and_peer_reconnect_retain_the_operation_snapshot() {
             driver.options.reconnect = ReconnectPolicy::Disabled;
             finish_connect(&mut driver, id, resolved.clone()).await;
             let route = stop_dial_transport(&mut driver).await;
-            let original = driver.dialers[0].options.clone();
+            let original = driver.endpoints.dialers[0].options.clone();
             assert_eq!(original.compression_threshold, Some(64));
             assert_eq!(
                 original.reconnect,
@@ -321,7 +322,7 @@ async fn resolution_handoff_and_peer_reconnect_retain_the_operation_snapshot() {
             assert!(Arc::ptr_eq(&driver.peers[&peer_id].options, &original));
 
             // The redial after a drop reuses the same snapshot.
-            let held = driver.setup_admission.try_acquire().unwrap();
+            let held = driver.endpoints.setup_admission.try_acquire().unwrap();
             remote.cancel.cancel();
             remote.task.await.unwrap().unwrap();
             driver
@@ -331,7 +332,7 @@ async fn resolution_handoff_and_peer_reconnect_retain_the_operation_snapshot() {
                 })
                 .await;
             let route = stop_dial_transport(&mut driver).await;
-            assert!(Arc::ptr_eq(&driver.dialers[0].options, &original));
+            assert!(Arc::ptr_eq(&driver.endpoints.dialers[0].options, &original));
             drop(held);
 
             let mut remote = attach_on_route(&mut driver, resolved, original, Some(route)).await;

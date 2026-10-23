@@ -82,7 +82,10 @@ impl SocketDriver {
         if !self.socket_type_ignores_duplicate_connect() {
             return false;
         }
-        self.dialers.iter().any(|d| &d.endpoint == endpoint)
+        self.endpoints
+            .dialers
+            .iter()
+            .any(|d| &d.endpoint == endpoint)
             || self
                 .peers
                 .values()
@@ -100,23 +103,23 @@ impl SocketDriver {
         }
         let pending =
             self.cancel_pending_endpoints(Some((endpoint, super::endpoint_resolution::Kind::Bind)));
-        let before = self.listeners.len() + self.udp_listeners.len();
+        let before = self.endpoints.listeners.len() + self.endpoints.udp_listeners.len();
         // Wait for each task so the address is free when unbind returns.
-        let (mut removed, kept) = std::mem::take(&mut self.listeners)
+        let (mut removed, kept) = std::mem::take(&mut self.endpoints.listeners)
             .into_iter()
             .partition::<Vec<_>, _>(|l| &l.endpoint == endpoint);
-        self.listeners = kept;
+        self.endpoints.listeners = kept;
         for l in &mut removed {
             super::stop_endpoint_task(&l.cancel, &mut l.task).await;
         }
-        let (mut removed, kept) = std::mem::take(&mut self.udp_listeners)
+        let (mut removed, kept) = std::mem::take(&mut self.endpoints.udp_listeners)
             .into_iter()
             .partition::<Vec<_>, _>(|l| &l.endpoint == endpoint);
-        self.udp_listeners = kept;
+        self.endpoints.udp_listeners = kept;
         for l in &mut removed {
             super::stop_endpoint_task(&l.cancel, &mut l.task).await;
         }
-        if pending || self.listeners.len() + self.udp_listeners.len() < before {
+        if pending || self.endpoints.listeners.len() + self.endpoints.udp_listeners.len() < before {
             Ok(())
         } else {
             Err(Error::Unroutable)
@@ -136,14 +139,14 @@ impl SocketDriver {
 
         let pending = self
             .cancel_pending_endpoints(Some((endpoint, super::endpoint_resolution::Kind::Connect)));
-        let before = self.dialers.len() + self.udp_dialers.len();
+        let before = self.endpoints.dialers.len() + self.endpoints.udp_dialers.len();
 
         self.remove_dialers_to(endpoint);
         let removed_udp_peers = self.remove_udp_dialers_to(endpoint);
         let removed_live_peers = self.stop_client_peers_to(endpoint).await;
 
         if pending
-            || self.dialers.len() + self.udp_dialers.len() < before
+            || self.endpoints.dialers.len() + self.endpoints.udp_dialers.len() < before
             || removed_udp_peers > 0
             || removed_live_peers > 0
         {
@@ -156,7 +159,7 @@ impl SocketDriver {
     /// Stop the dial loops for `endpoint` and drop their connect routes.
     fn remove_dialers_to(&mut self, endpoint: &Endpoint) {
         let mut removed_routes = Vec::new();
-        self.dialers.retain(|d| {
+        self.endpoints.dialers.retain(|d| {
             if &d.endpoint == endpoint {
                 d.cancel.cancel();
                 removed_routes.push(d.route_id);
@@ -176,7 +179,7 @@ impl SocketDriver {
         // Cancel matching UDP dialers AND tell the SendStrategy the
         // synthetic peer is gone so RADIO stops queuing through it.
         let mut removed_peers = Vec::new();
-        self.udp_dialers.retain(|d| {
+        self.endpoints.udp_dialers.retain(|d| {
             if &d.endpoint == endpoint {
                 d.cancel.cancel();
                 removed_peers.push(d.peer_id);
@@ -189,7 +192,7 @@ impl SocketDriver {
         let removed = removed_peers.len();
         for pid in removed_peers {
             // UDP dialers use their peer id as route id.
-            self.send_strategy.connection_removed(pid, pid);
+            self.routing.send_strategy.connection_removed(pid, pid);
         }
         removed
     }
@@ -240,7 +243,7 @@ impl SocketDriver {
             ));
         }
 
-        let network = self.io_pool.network_primary();
+        let network = self.resources.io_pool.network_primary();
         network.validate_datagrams(crate::transport::udp::MAX_DATAGRAM_SIZE)?;
         let sock = crate::transport::udp::bind(&endpoint).await?;
         let local = sock.local_addr()?;
@@ -252,26 +255,26 @@ impl SocketDriver {
             },
             _ => unreachable!("checked above"),
         };
-        self.monitor.publish(MonitorEvent::Listening {
+        self.link.monitor.publish(MonitorEvent::Listening {
             endpoint: resolved.clone(),
         });
 
-        let cancel = self.cancel.child_token();
+        let cancel = self.link.cancel.child_token();
         let delivery = crate::socket::udp::DishDelivery {
-            recv_tx: self.recv_tx.clone(),
-            joined: self.joined_groups.clone(),
-            pool: self.payload_pools.receive(),
+            recv_tx: self.link.recv_tx.clone(),
+            joined: self.routing.joined_groups.clone(),
+            pool: self.resources.payload_pools.receive(),
         };
         let task = spawn_dish_listener(
             sock,
             delivery,
             cancel.clone(),
-            &self.io_pool,
-            self.io_pool.reserve_thread(),
+            &self.resources.io_pool,
+            self.resources.io_pool.reserve_thread(),
         );
 
         let ret = resolved.clone();
-        self.udp_listeners.push(UdpListenerEntry {
+        self.endpoints.udp_listeners.push(UdpListenerEntry {
             endpoint: resolved,
             cancel,
             task,
@@ -289,43 +292,50 @@ impl SocketDriver {
             ));
         }
 
-        let network = self.io_pool.network_primary();
+        let network = self.resources.io_pool.network_primary();
         network.validate_datagrams(crate::transport::udp::MAX_DATAGRAM_SIZE)?;
         let sock = crate::transport::udp::connect(&endpoint).await?;
         let peer_id = self.next_peer_id;
         self.next_peer_id += 1;
 
-        let cancel = self.cancel.child_token();
+        let cancel = self.link.cancel.child_token();
         let (inbox_tx, inbox_rx) = crate::engine::control_inbox::channel(64);
         let (data_inbox_tx, data_inbox_rx) =
             crate::engine::data_inbox::channel(self.options.send_queue_capacity());
-        let assignment = self.io_pool.reserve_thread();
+        let assignment = self.resources.io_pool.reserve_thread();
         let index = assignment.index();
         let inboxes = crate::socket::udp::RadioInboxes {
             control: inbox_rx,
             data: data_inbox_rx,
         };
-        let task = spawn_radio_sender(sock, inboxes, cancel.clone(), &self.io_pool, assignment);
+        let task = spawn_radio_sender(
+            sock,
+            inboxes,
+            cancel.clone(),
+            &self.resources.io_pool,
+            assignment,
+        );
 
         let handle = fake_handle(inbox_tx, data_inbox_tx, cancel.clone());
 
         // Register the synthetic peer with SendStrategy as an
         // any-groups RADIO target - UDP DISH never sends JOIN, so the
         // sender must fan out unconditionally. The receiver filters.
-        self.send_strategy
+        self.routing
+            .send_strategy
             .connection_added_any_groups(peer_id, handle, index);
 
         // Synthesise Connected so users see the same monitor signal
         // they'd get for any other transport. PeerIdent is the
         // post-connect remote address when known.
         let peer_ident = PeerIdent::Path(format!("{endpoint}"));
-        self.monitor.publish(MonitorEvent::Connected {
+        self.link.monitor.publish(MonitorEvent::Connected {
             endpoint: endpoint.clone(),
             peer_ident,
             connection_id: peer_id,
         });
 
-        self.udp_dialers.push(UdpDialerEntry {
+        self.endpoints.udp_dialers.push(UdpDialerEntry {
             endpoint,
             cancel,
             peer_id,
@@ -364,13 +374,13 @@ impl SocketDriver {
             ));
         }
         {
-            let mut groups = (**self.joined_groups.load()).clone();
+            let mut groups = (**self.routing.joined_groups.load()).clone();
             if joining {
                 groups.insert(group.clone());
             } else {
                 groups.remove(&group);
             }
-            self.joined_groups.store(Arc::new(groups));
+            self.routing.joined_groups.store(Arc::new(groups));
         }
         // Replay to data-plane-ready peers. Pending peers pick up the join
         // via `handle_peer_event(HandshakeSucceeded)`'s replay loop. UDP DISH
@@ -397,9 +407,9 @@ impl SocketDriver {
             ));
         }
         if subscribe {
-            self.subscriptions.push(prefix.clone());
-        } else if let Some(pos) = self.subscriptions.iter().position(|p| p == &prefix) {
-            self.subscriptions.remove(pos);
+            self.routing.subscriptions.push(prefix.clone());
+        } else if let Some(pos) = self.routing.subscriptions.iter().position(|p| p == &prefix) {
+            self.routing.subscriptions.remove(pos);
         }
         // Broadcast to every data-plane-ready peer. Pending peers are skipped;
         // `handle_peer_event(HandshakeSucceeded)` replays `self.subscriptions`
@@ -436,7 +446,7 @@ impl SocketDriver {
         compression: Option<omq_proto::CompressionOptions>,
     ) -> Arc<Options> {
         let mut options = self.options.clone();
-        options.recv_payload_pool = self.payload_pools.receive();
+        options.recv_payload_pool = self.resources.payload_pools.receive();
         if let Some(compression) = compression {
             options.compression_dict = compression.dict;
             options.compression_auto_train = compression.auto_train;
@@ -477,9 +487,9 @@ impl SocketDriver {
         reject_encrypted_inproc(&endpoint, &options.mechanism)?;
 
         let snapshot = self.inproc_snapshot();
-        let cancel = self.cancel.child_token();
+        let cancel = self.link.cancel.child_token();
         let bound = bind_any(
-            &self.inproc_registry,
+            &self.resources.inproc_registry,
             &endpoint,
             &snapshot,
             &self.inproc_config(&options),
@@ -501,11 +511,11 @@ impl SocketDriver {
         crate::socket::dispatch::CarrierAccept {
             options,
             setup: crate::transport::setup::AcceptSetup {
-                admission: self.setup_admission.clone(),
+                admission: self.endpoints.setup_admission.clone(),
                 timeout: carrier_setup_timeout(endpoint, options),
                 cancel: cancel.clone(),
-                monitor: self.monitor.clone(),
-                io_pool: self.io_pool.clone(),
+                monitor: self.link.monitor.clone(),
+                io_pool: self.resources.io_pool.clone(),
             },
         }
     }
@@ -519,7 +529,7 @@ impl SocketDriver {
         cancel: tokio_util::sync::CancellationToken,
     ) -> Endpoint {
         let resolved = bound.endpoint;
-        self.monitor.publish(MonitorEvent::Listening {
+        self.link.monitor.publish(MonitorEvent::Listening {
             endpoint: resolved.clone(),
         });
 
@@ -528,14 +538,14 @@ impl SocketDriver {
                 endpoint: resolved.clone(),
                 options,
                 cancel: cancel.clone(),
-                tx: self.internal_tx.clone(),
+                tx: self.mail.internal_tx.clone(),
                 admission: (self.socket_type != SocketType::Stream)
-                    .then(|| self.setup_admission.clone()),
-                monitor: self.monitor.clone(),
+                    .then(|| self.endpoints.setup_admission.clone()),
+                monitor: self.link.monitor.clone(),
             }
             .run(bound.listener),
         );
-        self.listeners.push(ListenerEntry {
+        self.endpoints.listeners.push(ListenerEntry {
             endpoint: resolved.clone(),
             cancel,
             task,
@@ -585,22 +595,22 @@ impl SocketDriver {
         let send_pipe_rx = if self.socket_type == SocketType::Stream {
             let identity = super::generated_identity(route_id);
             self.last_stream_routing_id = Some(identity.clone());
-            Some(self.send_strategy.make_stream_connect_pipe(
+            Some(self.routing.send_strategy.make_stream_connect_pipe(
                 route_id,
                 identity,
                 self.options.send_queue_capacity(),
             ))
         } else {
-            self.send_strategy.make_connect_pipe(route_id)
+            self.routing.send_strategy.make_connect_pipe(route_id)
         };
 
-        let cancel = self.cancel.child_token();
+        let cancel = self.link.cancel.child_token();
         let failed_attempts = Arc::new(std::sync::atomic::AtomicU32::new(failed_attempts));
         // Inproc and raw STREAM have no ZMTP handshake to admit.
         let setup = crate::transport::setup::DialSetup {
             admission: (!matches!(endpoint, Endpoint::Inproc { .. })
                 && self.socket_type != SocketType::Stream)
-                .then(|| self.dial_admission.clone()),
+                .then(|| self.endpoints.dial_admission.clone()),
             timeout: dial_setup_timeout(&endpoint, &options),
             cancel: cancel.clone(),
         };
@@ -611,21 +621,21 @@ impl SocketDriver {
                 options: options.clone(),
                 route_id,
                 cancel: cancel.clone(),
-                tx: self.internal_tx.clone(),
-                monitor: self.monitor.clone(),
+                tx: self.mail.internal_tx.clone(),
+                monitor: self.link.monitor.clone(),
                 snapshot: self.inproc_snapshot(),
                 recv: self.inproc_config(&options),
-                registry: self.inproc_registry.clone(),
+                registry: self.resources.inproc_registry.clone(),
                 setup,
                 first_deadline: first.deadline,
                 first_admission: first.admission,
                 failed_attempts: failed_attempts.clone(),
-                io_pool: self.io_pool.clone(),
+                io_pool: self.resources.io_pool.clone(),
             }
             .run(),
         );
 
-        self.dialers.push(DialerEntry {
+        self.endpoints.dialers.push(DialerEntry {
             options,
             endpoint,
             cancel,

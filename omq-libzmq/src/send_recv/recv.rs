@@ -76,7 +76,7 @@ fn zmq_recv_impl(sock: &OmqSocket, buf: *mut libc::c_void, buf_len: usize, flags
     }
 
     // Multipart drain: leftover frames use the Bytes-returning path.
-    if sock.drain_nonempty.load(Ordering::Relaxed) {
+    if sock.recv.drain_nonempty.load(Ordering::Relaxed) {
         return zmq_recv_via_frame(sock, buf, buf_len, flags);
     }
 
@@ -84,7 +84,7 @@ fn zmq_recv_impl(sock: &OmqSocket, buf: *mut libc::c_void, buf_len: usize, flags
     // Avoids the Bytes::copy_from_slice that pop_recv_frame/decompose_message
     // would do for inline messages.
     // SAFETY: libzmq sockets are accessed by at most one application thread.
-    let Some(cons) = (unsafe { sock.recv_cons.get() }) else {
+    let Some(cons) = (unsafe { sock.recv.consumers.get() }) else {
         return fail(ETERM);
     };
 
@@ -154,7 +154,7 @@ fn zmq_recv_via_frame(
 /// full-ring pop. Avoid waking the producer on every normal recv.
 #[inline]
 pub(super) fn signal_recv_space_if_full(sock: &OmqSocket, released_full_slot: bool) {
-    if released_full_slot && let Some(cfg) = sock.recv_sink_config.get() {
+    if released_full_slot && let Some(cfg) = sock.recv.sink_config.get() {
         cfg.notify_space();
     }
 }
@@ -171,21 +171,21 @@ fn pop_zap_frame(sock: &OmqSocket, rcvtimeo: i64, dontwait: bool) -> Result<(Byt
 
 pub(crate) fn authenticated_recv_configured(sock: &OmqSocket) -> bool {
     // SAFETY: libzmq sockets are accessed by at most one application thread.
-    unsafe { sock.authenticated_recv.get() }.is_some()
+    unsafe { sock.recv.authenticated.get() }.is_some()
 }
 
 pub(crate) fn authenticated_recv_has_data(sock: &OmqSocket) -> bool {
     // SAFETY: libzmq sockets are accessed by at most one application thread.
-    let queued = unsafe { sock.authenticated_recv.get() }
+    let queued = unsafe { sock.recv.authenticated.get() }
         .as_ref()
         .is_some_and(|receiver| !receiver.is_empty());
     // SAFETY: same socket-thread invariant as above.
-    queued || !unsafe { sock.authenticated_recv_drain.get() }.is_empty()
+    queued || !unsafe { sock.recv.authenticated_drain.get() }.is_empty()
 }
 
 pub(crate) fn authenticated_recv_has_more(sock: &OmqSocket) -> bool {
     // SAFETY: libzmq sockets are accessed by at most one application thread.
-    !unsafe { sock.authenticated_recv_drain.get() }.is_empty()
+    !unsafe { sock.recv.authenticated_drain.get() }.is_empty()
 }
 
 type AuthenticatedMessage = (omq_tokio::Message, Arc<omq_tokio::proto::PeerProperties>);
@@ -194,7 +194,7 @@ pub(super) fn try_recv_authenticated_message(
     sock: &OmqSocket,
 ) -> Result<Option<AuthenticatedMessage>, c_int> {
     // SAFETY: libzmq sockets are accessed by at most one application thread.
-    let Some(receiver) = (unsafe { sock.authenticated_recv.get() }).as_mut() else {
+    let Some(receiver) = (unsafe { sock.recv.authenticated.get() }).as_mut() else {
         return Err(ETERM);
     };
     let mut budget = DrainBudget::WORKER;
@@ -238,7 +238,7 @@ pub(crate) fn pop_recv_frame_with_properties(
     }
 
     // SAFETY: libzmq sockets are accessed by at most one application thread.
-    let drain = unsafe { sock.authenticated_recv_drain.get() };
+    let drain = unsafe { sock.recv.authenticated_drain.get() };
     if let Some((frame, properties)) = drain.pop_front() {
         return Ok((frame, !drain.is_empty(), Some(properties)));
     }
@@ -266,22 +266,22 @@ pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, b
     }
 
     // Drain leftover frames from a partially-consumed multipart message.
-    if sock.drain_nonempty.load(Ordering::Relaxed) {
-        let Ok(mut drain) = sock.recv_drain.lock() else {
+    if sock.recv.drain_nonempty.load(Ordering::Relaxed) {
+        let Ok(mut drain) = sock.recv.drain.lock() else {
             return Err(ETERM);
         };
         if let Some(frame) = drain.pop_front() {
             let more = !drain.is_empty();
             if !more {
-                sock.drain_nonempty.store(false, Ordering::Relaxed);
+                sock.recv.drain_nonempty.store(false, Ordering::Relaxed);
             }
             return Ok((frame, more));
         }
-        sock.drain_nonempty.store(false, Ordering::Relaxed);
+        sock.recv.drain_nonempty.store(false, Ordering::Relaxed);
     }
 
     // SAFETY: libzmq sockets are accessed by at most one application thread.
-    let Some(cons) = (unsafe { sock.recv_cons.get() }) else {
+    let Some(cons) = (unsafe { sock.recv.consumers.get() }) else {
         return Err(ETERM);
     };
 
@@ -314,7 +314,7 @@ pub(crate) fn pop_recv_server_message(
     let rcvtimeo = sock.rcvtimeo_ms.load(Ordering::Relaxed);
     let dontwait = (flags & ZMQ_DONTWAIT) != 0 || rcvtimeo == 0;
     // SAFETY: libzmq sockets are accessed by at most one application thread.
-    let Some(cons) = (unsafe { sock.recv_cons.get() }) else {
+    let Some(cons) = (unsafe { sock.recv.consumers.get() }) else {
         return Err(ETERM);
     };
     if let Some(popped) = try_pop_dual(cons, sock) {
@@ -361,7 +361,7 @@ pub(super) fn try_pop_dual(
     cons: &mut crate::socket::RecvConsumers,
     sock: &crate::socket::OmqSocket,
 ) -> Option<PoppedMessage> {
-    cons.refresh(sock.recv_sink_config.get());
+    cons.refresh(sock.recv.sink_config.get());
     let mut released_full_slot = false;
     let mut budget = DrainBudget::WORKER;
     while !budget.exhausted() {
@@ -417,9 +417,10 @@ fn stash_remaining_parts(sock: &OmqSocket, msg: &omq_tokio::Message, start: usiz
     let nparts = msg.len();
     let next = start + 1;
     if next < nparts {
-        sock.drain_nonempty
+        sock.recv
+            .drain_nonempty
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        let mut drain = sock.recv_drain.lock().expect("recv_drain");
+        let mut drain = sock.recv.drain.lock().expect("recv_drain");
         for i in next..nparts {
             if let Some(b) = msg.part_bytes(i) {
                 drain.push_back(b);
@@ -443,8 +444,8 @@ fn decompose_message(sock: &OmqSocket, msg: &omq_tokio::Message) -> Result<(Byte
 
     let remaining = start + 1;
     if remaining < nparts {
-        sock.drain_nonempty.store(true, Ordering::Relaxed);
-        let Ok(mut drain) = sock.recv_drain.lock() else {
+        sock.recv.drain_nonempty.store(true, Ordering::Relaxed);
+        let Ok(mut drain) = sock.recv.drain.lock() else {
             return Err(ETERM);
         };
         for i in remaining..nparts {

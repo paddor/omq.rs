@@ -173,7 +173,7 @@ impl ZapService {
                 return internal_error();
             };
             handler.inbox.push_back(Arc::clone(&exchange));
-            socket.drain_nonempty.store(true, Ordering::Release);
+            socket.recv.drain_nonempty.store(true, Ordering::Release);
             state.exchanges.insert(route_id, Arc::clone(&exchange));
             socket
         };
@@ -375,7 +375,10 @@ fn update_readable(handler: &Handler) {
         || ((handler.kind == HandlerKind::Router || handler.rep_reply_route.is_none())
             && !handler.inbox.is_empty());
     if let Some(socket) = handler.socket.upgrade() {
-        socket.drain_nonempty.store(readable, Ordering::Release);
+        socket
+            .recv
+            .drain_nonempty
+            .store(readable, Ordering::Release);
     }
 }
 

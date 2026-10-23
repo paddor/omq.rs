@@ -17,24 +17,29 @@ impl<'a> PeerLifecycle<'a> {
         peer_id: u64,
         reason: DisconnectReason,
     ) -> Option<PeerEntry> {
-        self.driver.recv_strategy.connection_removed(peer_id);
+        self.driver
+            .routing
+            .recv_strategy
+            .connection_removed(peer_id);
         let peer = self.driver.peers.remove(&peer_id);
         if let Some(ref p) = peer {
             self.driver
+                .routing
                 .send_strategy
                 .connection_removed(peer_id, p.route_id);
             if self.driver.socket_type == SocketType::Req {
                 self.driver
+                    .link
                     .shared
                     .req_awaiting_reply
                     .peer_disconnected(p.route_id, peer_id);
             }
             if p.ready {
-                self.driver.shared.ready_peers.remove();
+                self.driver.link.shared.ready_peers.remove();
             }
         }
         self.publish_disconnect(peer.as_ref(), reason);
-        self.driver.spsc.remove_empty_tcp_consumer(peer_id);
+        self.driver.link.spsc.remove_empty_tcp_consumer(peer_id);
         self.invalidate_transmit_slot(peer.as_ref());
         self.refill_recv_sink(peer_id);
         self.reset_type_state_if_last_peer();
@@ -54,27 +59,36 @@ impl<'a> PeerLifecycle<'a> {
             spin_probe,
             consumer: crate::engine::receive_cell::ReceiveCell::new(
                 consumer,
-                self.driver.spsc.receive_handles.clone(),
+                self.driver.link.spsc.receive_handles.clone(),
             ),
             batch_remaining: std::sync::atomic::AtomicUsize::new(0),
             batch_popped: std::sync::atomic::AtomicUsize::new(0),
             space,
             peer_id,
         });
-        self.driver.spsc.tcp_consumers.write().unwrap().push(entry);
+        self.driver
+            .link
+            .spsc
+            .tcp_consumers
+            .write()
+            .unwrap()
+            .push(entry);
         self.bump_recv_consumers();
-        self.driver.spsc.activated.notify_changed();
+        self.driver.link.spsc.activated.notify_changed();
     }
 
     fn publish_disconnect(&self, peer: Option<&PeerEntry>, reason: DisconnectReason) {
         if let Some(peer) = peer
             && let Some(ref info) = peer.info
         {
-            self.driver.monitor.publish(MonitorEvent::Disconnected {
-                endpoint: peer.endpoint.clone(),
-                peer: info.clone(),
-                reason,
-            });
+            self.driver
+                .link
+                .monitor
+                .publish(MonitorEvent::Disconnected {
+                    endpoint: peer.endpoint.clone(),
+                    peer: info.clone(),
+                    reason,
+                });
         }
     }
 
@@ -90,7 +104,7 @@ impl<'a> PeerLifecycle<'a> {
     fn refill_recv_sink(&self, peer_id: u64) {
         // Refill the RecvSink slot so the next wire peer gets the fast
         // yring path instead of falling back to the recv pump.
-        if let Some(ref config) = self.driver.recv_sink_config {
+        if let Some(ref config) = self.driver.resources.recv_sink_config {
             config.peer_disconnected(peer_id);
         }
     }
@@ -99,6 +113,7 @@ impl<'a> PeerLifecycle<'a> {
         match self.driver.socket_type {
             SocketType::Req | SocketType::Rep if self.driver.ready_peer_count() == 0 => {
                 self.driver
+                    .link
                     .shared
                     .type_state
                     .lock()
@@ -111,6 +126,7 @@ impl<'a> PeerLifecycle<'a> {
 
     fn bump_recv_consumers(&self) {
         self.driver
+            .link
             .spsc
             .consumer_generation
             .fetch_add(1, Ordering::Release);

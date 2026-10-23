@@ -50,10 +50,10 @@ pub(super) async fn inproc_peer_driver(
 ) {
     let mut completion = std::mem::take(&mut ctx.completion);
     let channels = InprocChannels {
-        inbox,
-        data_inbox,
-        in_rx,
         out,
+        in_rx,
+        data_inbox,
+        inbox,
     };
     inproc_peer_driver_body(channels, ctx, &mut completion).await;
     // Report completion only after every relay resource is dropped.
@@ -83,10 +83,10 @@ async fn inproc_peer_driver_body(
 
 /// Channel ends between the actor, this peer task, and the inproc partner.
 struct InprocChannels {
-    inbox: crate::engine::control_inbox::Receiver,
-    data_inbox: crate::engine::data_inbox::Receiver,
-    in_rx: crate::transport::inproc::RelayReceiver,
     out: crate::transport::inproc::RelaySender,
+    in_rx: crate::transport::inproc::RelayReceiver,
+    data_inbox: crate::engine::data_inbox::Receiver,
+    inbox: crate::engine::control_inbox::Receiver,
 }
 
 /// Driver context the relay loop does not own. `peer_control` stays
@@ -119,19 +119,10 @@ struct RelayClosing {
 /// State of one inproc peer task: relay buffers, close flags, and the
 /// channels and sinks they move messages between.
 struct InprocRelay {
-    /// Inbound message waiting for receive space.
-    pending_in: Option<Message>,
-    /// XPUB notification that must follow its control event.
-    pending_notification: Option<Message>,
-    /// Inbound command waiting for actor control credit.
-    pending_control: Option<ZmtpEvent>,
+    pending: RelayPending,
     /// Count of control events sent to the actor. Data published after a
     /// prefix is not delivered before those events are handled.
     control_prefix: u64,
-    /// Outbound command waiting for partner control space.
-    pending_command: Option<omq_proto::proto::Command>,
-    /// Outbound messages waiting for partner data space.
-    pending_out: std::collections::VecDeque<Message>,
     send_pipe_batch: Vec<Message>,
     data_plane_active: bool,
     open: RelayLanes,
@@ -148,10 +139,22 @@ struct InprocRelay {
     peer_id: u64,
     subscriptions: SubscriptionGate,
     peer_out: crate::engine::actor_output::PeerOutput,
-    out: crate::transport::inproc::RelaySender,
-    in_rx: crate::transport::inproc::RelayReceiver,
-    data_inbox: crate::engine::data_inbox::Receiver,
-    inbox: crate::engine::control_inbox::Receiver,
+    channels: InprocChannels,
+}
+
+/// Work waiting for space elsewhere, retried every turn.
+#[derive(Default)]
+struct RelayPending {
+    /// Inbound message waiting for receive space.
+    inbound: Option<Message>,
+    /// XPUB notification that must follow its control event.
+    notification: Option<Message>,
+    /// Inbound command waiting for actor control credit.
+    control: Option<ZmtpEvent>,
+    /// Outbound command waiting for partner control space.
+    command: Option<omq_proto::proto::Command>,
+    /// Outbound messages waiting for partner data space.
+    outbound: std::collections::VecDeque<Message>,
 }
 
 impl InprocRelay {
@@ -175,12 +178,8 @@ impl InprocRelay {
         } = ctx;
 
         let relay = Self {
-            pending_in: None,
-            pending_notification: None,
-            pending_control: None,
+            pending: RelayPending::default(),
             control_prefix: 1,
-            pending_command: None,
-            pending_out: std::collections::VecDeque::new(),
             send_pipe_batch: Vec::new(),
             data_plane_active: false,
             open: RelayLanes {
@@ -205,10 +204,7 @@ impl InprocRelay {
             peer_id,
             subscriptions,
             peer_out,
-            out: channels.out,
-            in_rx: channels.in_rx,
-            data_inbox: channels.data_inbox,
-            inbox: channels.inbox,
+            channels,
         };
         let outside = RelayOutside {
             peer_control,
@@ -269,35 +265,35 @@ impl InprocRelay {
                 biased;
                 () = self.cancel.cancelled() => return,
                 () = async { tokio::time::sleep_until(close_deadline.unwrap().into()).await; }, if close_deadline.is_some() => return,
-                cmd = next_command(&mut self.inbox, self.pending_command.is_some()) => {
+                cmd = next_command(&mut self.channels.inbox, self.pending.command.is_some()) => {
                     if !self.on_command(cmd) { return; }
                 }
-                result = self.out.control.ready(), if self.pending_command.is_some() => {
+                result = self.channels.out.control.ready(), if self.pending.command.is_some() => {
                     if result.is_err() || !self.flush_command() { return; }
                 }
-                command = self.in_rx.control.recv(), if self.open.control && self.data_plane_active && self.pending_control.is_none() => {
+                command = self.channels.in_rx.control.recv(), if self.open.control && self.data_plane_active && self.pending.control.is_none() => {
                     self.on_partner_command(command);
                 }
-                permit = &mut control_credit, if self.pending_control.is_some() && (self.pending_notification.is_none() || (self.pending_in.is_none() && self.peer_out.has_capacity())) => {
+                permit = &mut control_credit, if self.pending.control.is_some() && (self.pending.notification.is_none() || (self.pending.inbound.is_none() && self.peer_out.has_capacity())) => {
                     let Ok(permit) = permit else { return; };
                     if !self.forward_control(permit, completion) { return; }
                     control_credit.set(peer_control.reserve());
                 }
-                result = self.peer_out.ready(), if actor_space || (self.pending_notification.is_some() && !self.peer_out.has_capacity()) => {
+                result = self.peer_out.ready(), if actor_space || (self.pending.notification.is_some() && !self.peer_out.has_capacity()) => {
                     if result.is_err() { return; }
                 }
-                result = self.out.data.ready(), if !self.pending_out.is_empty() && self.pending_command.is_none() => {
+                result = self.channels.out.data.ready(), if !self.pending.outbound.is_empty() && self.pending.command.is_none() => {
                     if result.is_err() || !self.flush_data() { return; }
                 }
-                data = self.data_inbox.recv(), if self.open.data_inbox && self.data_plane_active && self.pending_out.is_empty() => {
+                data = self.channels.data_inbox.recv(), if self.open.data_inbox && self.data_plane_active && self.pending.outbound.is_empty() => {
                     self.on_data(data);
                 }
-                () = send_pipe_ready(self.send_pipe_rx.as_ref()), if self.send_pipe_rx.is_some() && self.data_plane_active && self.pending_out.is_empty() => {
+                () = send_pipe_ready(self.send_pipe_rx.as_ref()), if self.send_pipe_rx.is_some() && self.data_plane_active && self.pending.outbound.is_empty() => {
                     if !self.drain_send_pipe() { return; }
                 }
                 () = deliver_backlog(self.outbound.as_ref()), if self.data_plane_active && self.outbound.as_ref().is_some_and(|sender| !sender.is_empty()) => {}
-                () = receive_space(self.inbound.as_ref(), self.recv_sink.as_mut(), self.recv_direct.as_ref()), if (self.pending_in.is_some() && !actor_space) || recv_blocked => {}
-                message = self.in_rx.data.recv(), if self.open.receive && self.data_plane_active && !recv_blocked && self.pending_in.is_none() && self.pending_control.is_none() => {
+                () = receive_space(self.inbound.as_ref(), self.recv_sink.as_mut(), self.recv_direct.as_ref()), if (self.pending.inbound.is_some() && !actor_space) || recv_blocked => {}
+                message = self.channels.in_rx.data.recv(), if self.open.receive && self.data_plane_active && !recv_blocked && self.pending.inbound.is_none() && self.pending.control.is_none() => {
                     if !self.on_partner_message(message) { return; }
                 }
             }
@@ -311,10 +307,10 @@ impl InprocRelay {
             return;
         }
 
-        self.inbox.release_consumed();
-        self.data_inbox.release_consumed();
-        self.in_rx.control.release_consumed();
-        self.in_rx.data.release_consumed();
+        self.channels.inbox.release_consumed();
+        self.channels.data_inbox.release_consumed();
+        self.channels.in_rx.control.release_consumed();
+        self.channels.in_rx.data.release_consumed();
         self.budget.reset();
         tokio::task::yield_now().await;
     }
@@ -341,15 +337,15 @@ impl InprocRelay {
             }
         }
         if self.closing.requested || self.closing.discard_receive {
-            self.pending_in = None;
+            self.pending.inbound = None;
         }
 
-        let Some(message) = self.pending_in.take() else {
+        let Some(message) = self.pending.inbound.take() else {
             return true;
         };
         match self.try_deliver(message, completion) {
             Ok(()) => {}
-            Err(TrySendError::Full(message)) => self.pending_in = Some(message),
+            Err(TrySendError::Full(message)) => self.pending.inbound = Some(message),
             Err(_) if self.socket_close_state.is_closed() => self.closing.discard_receive = true,
             Err(_) => return false,
         }
@@ -399,10 +395,10 @@ impl InprocRelay {
     /// partner lanes closed with nothing left to hand over.
     fn finished(&self) -> bool {
         let drained = self.closing.requested
-            && self.pending_command.is_none()
-            && self.pending_out.is_empty()
-            && self.inbox.is_empty()
-            && self.data_inbox.is_empty()
+            && self.pending.command.is_none()
+            && self.pending.outbound.is_empty()
+            && self.channels.inbox.is_empty()
+            && self.channels.data_inbox.is_empty()
             && self
                 .send_pipe_rx
                 .as_ref()
@@ -413,8 +409,8 @@ impl InprocRelay {
                 .is_none_or(crate::transport::inproc::InprocSender::is_empty);
         let partner_gone = !self.open.control
             && !self.open.receive
-            && self.pending_in.is_none()
-            && self.pending_control.is_none();
+            && self.pending.inbound.is_none()
+            && self.pending.control.is_none();
         drained || partner_gone
     }
 
@@ -429,7 +425,7 @@ impl InprocRelay {
 
     /// The held inbound message can only go to the actor.
     fn waits_for_actor_space(&self) -> bool {
-        self.pending_in.is_some()
+        self.pending.inbound.is_some()
             && self.inbound.is_none()
             && self.recv_sink.is_none()
             && self.recv_direct.is_none()
@@ -447,7 +443,7 @@ impl InprocRelay {
             }
             Some(PeerDriverCommand::SendCommand(command)) => {
                 let _ = self.budget.account(inproc_command_size(&command));
-                self.pending_command = Some(command);
+                self.pending.command = Some(command);
             }
             Some(PeerDriverCommand::DrainAndClose { deadline }) => {
                 // Stop taking new sends and inbound data; queued output
@@ -455,7 +451,7 @@ impl InprocRelay {
                 if !self.closing.requested {
                     self.closing.requested = true;
                     self.closing.deadline = deadline;
-                    self.data_inbox.close();
+                    self.channels.data_inbox.close();
                     if let Some(port) = &self.inbound {
                         port.close();
                     }
@@ -468,11 +464,11 @@ impl InprocRelay {
 
     /// Send the held command to the partner. False if the partner is gone.
     fn flush_command(&mut self) -> bool {
-        let command = self.pending_command.take().unwrap();
+        let command = self.pending.command.take().unwrap();
         let _ = self.budget.account(inproc_command_size(&command));
-        match self.out.control.try_send(command) {
+        match self.channels.out.control.try_send(command) {
             Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(command)) => self.pending_command = Some(command),
+            Err(mpsc::error::TrySendError::Full(command)) => self.pending.command = Some(command),
             Err(mpsc::error::TrySendError::Closed(_)) => return false,
         }
         true
@@ -487,8 +483,8 @@ impl InprocRelay {
                 if !self.subscriptions.admits(&event) {
                     return;
                 }
-                self.pending_notification = self.subscriptions.notification(&event);
-                self.pending_control = Some(event);
+                self.pending.notification = self.subscriptions.notification(&event);
+                self.pending.control = Some(event);
             }
             None => self.open.control = false,
         }
@@ -503,13 +499,13 @@ impl InprocRelay {
     ) -> bool {
         use crate::engine::{PeerEvent, SendPipeError};
 
-        let event = self.pending_control.take().unwrap();
+        let event = self.pending.control.take().unwrap();
         permit.send((self.peer_id, PeerEvent::Event(event)));
         completion.note_event();
         self.control_prefix = self.control_prefix.wrapping_add(1);
         self.peer_out.set_control_prefix(self.control_prefix);
 
-        let Some(notification) = self.pending_notification.take() else {
+        let Some(notification) = self.pending.notification.take() else {
             return true;
         };
         // The arm's precondition checked capacity for this notification.
@@ -529,11 +525,13 @@ impl InprocRelay {
 
     /// Send the next queued message to the partner. False if it is gone.
     fn flush_data(&mut self) -> bool {
-        let message = self.pending_out.pop_front().unwrap();
+        let message = self.pending.outbound.pop_front().unwrap();
         let _ = self.budget.account(message.byte_len());
-        match self.out.data.try_send(message) {
+        match self.channels.out.data.try_send(message) {
             Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(message)) => self.pending_out.push_front(message),
+            Err(mpsc::error::TrySendError::Full(message)) => {
+                self.pending.outbound.push_front(message);
+            }
             Err(mpsc::error::TrySendError::Closed(_)) => return false,
         }
         true
@@ -545,7 +543,7 @@ impl InprocRelay {
         match data {
             Some(PeerDriverData::SendMessage(message)) => {
                 let _ = self.budget.account(message.byte_len());
-                self.pending_out.push_back(message);
+                self.pending.outbound.push_back(message);
             }
             // Encoded wire bytes are for ZMTP peers. Inproc has no wire.
             Some(PeerDriverData::SendEncoded(_)) => {}
@@ -568,7 +566,7 @@ impl InprocRelay {
 
         for message in self.send_pipe_batch.drain(..) {
             let _ = self.budget.account(message.byte_len());
-            self.pending_out.push_back(message);
+            self.pending.outbound.push_back(message);
         }
         true
     }
@@ -586,7 +584,7 @@ impl InprocRelay {
                 {
                     return false;
                 }
-                self.pending_in = Some(message);
+                self.pending.inbound = Some(message);
             }
             None => self.open.receive = false,
         }

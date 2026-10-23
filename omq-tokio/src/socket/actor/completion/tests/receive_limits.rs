@@ -75,7 +75,7 @@ async fn accept_remote(
             options,
         })
         .await;
-    let (id, event) = actor.peer_control_rx.recv().await.unwrap();
+    let (id, event) = actor.mail.peer_control_rx.recv().await.unwrap();
     assert!(matches!(
         event,
         PeerEvent::Event(Event::HandshakeSucceeded { .. })
@@ -143,6 +143,7 @@ async fn receive_boundary(
             .unwrap();
     }
     let received = actor
+        .mail
         .peer_out_rx
         .as_mut()
         .unwrap()
@@ -162,7 +163,7 @@ async fn receive_boundary(
         .unwrap()
         .await
         .unwrap();
-    actor.send_strategy.shutdown();
+    actor.routing.send_strategy.shutdown();
     remote.cancel.cancel();
     let _ = remote.task.await.unwrap();
 }
@@ -184,7 +185,7 @@ async fn assert_oversize_closes_peer(
     ]));
     remote.send(encoder, &excess).await;
 
-    let completion = actor.peer_completions.next().await.unwrap().unwrap();
+    let completion = actor.mail.peer_completions.next().await.unwrap().unwrap();
     assert_eq!(completion.peer_id, remote.id);
     assert!(
         matches!(&completion.reason, omq_proto::DisconnectReason::Error(reason)
@@ -192,7 +193,7 @@ async fn assert_oversize_closes_peer(
         "{completion:?}"
     );
     assert!(matches!(
-        actor.peer_out_rx.as_mut().unwrap().try_recv(),
+        actor.mail.peer_out_rx.as_mut().unwrap().try_recv(),
         Err(fanring::mpsc::TryRecvError::Empty)
     ));
 }

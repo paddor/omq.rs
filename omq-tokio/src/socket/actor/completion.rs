@@ -13,7 +13,7 @@ impl SocketDriver {
     /// Check protocol control before the biased select, even with a full
     /// application receive pipe or continuously ready caller commands.
     pub(super) async fn drain_peer_control(&mut self) {
-        let Ok((mut peer_id, mut output)) = self.peer_control_rx.try_recv() else {
+        let Ok((mut peer_id, mut output)) = self.mail.peer_control_rx.try_recv() else {
             return;
         };
         let mut budget = DrainBudget::new(64, 64 * 1024);
@@ -29,7 +29,7 @@ impl SocketDriver {
             if !budget.account(bytes) || started.elapsed() >= Duration::from_millis(1) {
                 break;
             }
-            let Ok(next) = self.peer_control_rx.try_recv() else {
+            let Ok(next) = self.mail.peer_control_rx.try_recv() else {
                 break;
             };
             (peer_id, output) = next;
@@ -51,7 +51,7 @@ impl SocketDriver {
         if self.pending_receive.is_some() {
             return;
         }
-        let Some(data) = &self.pending_peer_data else {
+        let Some(data) = &self.mail.pending_peer_data else {
             return;
         };
         if self
@@ -61,11 +61,11 @@ impl SocketDriver {
         {
             return;
         }
-        let data = self.pending_peer_data.take().unwrap();
+        let data = self.mail.pending_peer_data.take().unwrap();
         if data.notification {
             if let Some(peer) = self.peers.get_mut(&data.peer_id) {
                 peer.handled_events = peer.handled_events.wrapping_add(1);
-                if peer.ready && !self.closing {
+                if peer.ready && !self.close.started {
                     self.stage_receive(data.peer_id, data.message);
                 }
             }
@@ -91,10 +91,13 @@ impl SocketDriver {
         let mut yield_pending = false;
         loop {
             let bytes = data.message.byte_len();
-            self.pending_peer_data = Some(data);
+            self.mail.pending_peer_data = Some(data);
             self.retry_peer_data().await;
             let remains = budget.account(bytes);
-            if self.pending_receive.is_some() || self.pending_peer_data.is_some() || self.closing {
+            if self.pending_receive.is_some()
+                || self.mail.pending_peer_data.is_some()
+                || self.close.started
+            {
                 break;
             }
             if !remains
@@ -104,12 +107,12 @@ impl SocketDriver {
                 yield_pending = true;
                 break;
             }
-            let Ok(next) = self.peer_out_rx.as_mut().unwrap().try_recv() else {
+            let Ok(next) = self.mail.peer_out_rx.as_mut().unwrap().try_recv() else {
                 break;
             };
             data = next;
         }
-        self.peer_out_rx.as_mut().unwrap().release_consumed();
+        self.mail.peer_out_rx.as_mut().unwrap().release_consumed();
         if yield_pending {
             tokio::task::yield_now().await;
         }
@@ -122,7 +125,7 @@ impl SocketDriver {
         // actual actor waker. A no-op waker adds registration churn and leaves
         // a pending result unable to wake this task until another poll.
         std::future::poll_fn(|context| {
-            Poll::Ready(match self.peer_completions.poll_next_unpin(context) {
+            Poll::Ready(match self.mail.peer_completions.poll_next_unpin(context) {
                 Poll::Ready(result) => result,
                 Poll::Pending => None,
             })
@@ -134,7 +137,7 @@ impl SocketDriver {
     /// caller commands or endpoint events remain continuously ready. Results
     /// cannot accumulate behind those producers. Each pass is bounded.
     pub(super) async fn drain_peer_completions(&mut self) {
-        if self.peer_completions.is_empty() {
+        if self.mail.peer_completions.is_empty() {
             return;
         }
         let Some(mut result) = self.ready_peer_completion().await else {
@@ -213,7 +216,7 @@ impl SocketDriver {
         match peer.completion.as_mut().unwrap().stream_disconnect {
             StreamDisconnect::Pending => {
                 peer.completion.as_mut().unwrap().stream_disconnect = StreamDisconnect::Queued;
-                self.stream_disconnects.push_back(peer_id);
+                self.mail.stream_disconnects.push_back(peer_id);
                 return;
             }
             StreamDisconnect::Queued => return,
@@ -231,13 +234,13 @@ impl SocketDriver {
     }
 
     pub(super) async fn drain_stream_disconnects(&mut self) {
-        if self.pending_receive.is_some() || self.stream_disconnects.is_empty() {
+        if self.pending_receive.is_some() || self.mail.stream_disconnects.is_empty() {
             return;
         }
         let mut budget = DrainBudget::new(16, 64 * 1024);
         let started = Instant::now();
         while self.pending_receive.is_none() {
-            let Some(peer_id) = self.stream_disconnects.pop_front() else {
+            let Some(peer_id) = self.mail.stream_disconnects.pop_front() else {
                 break;
             };
             if let Some(completion) = self
@@ -351,7 +354,7 @@ mod tests {
                 pending_handshake: true,
                 handshake_admission: Some(
                     crate::transport::setup::PendingHandshake::acquire(
-                        &driver.setup_admission,
+                        &driver.endpoints.setup_admission,
                         None,
                         None,
                     )
@@ -380,14 +383,14 @@ mod tests {
         peer.ready = true;
         peer.handled_control = 1;
         peer.handled_events = 1;
-        driver.pending_peer_data = Some(crate::engine::actor_output::ActorData {
+        driver.mail.pending_peer_data = Some(crate::engine::actor_output::ActorData {
             peer_id: 7,
             message: Message::single("\x01topic"),
             notification: true,
             control_prefix: 2,
         });
         driver.retry_peer_data().await;
-        assert!(driver.pending_peer_data.is_some());
+        assert!(driver.mail.pending_peer_data.is_some());
         assert_eq!(receive.prefetch(), 0);
         driver
             .handle_peer_control(
@@ -407,10 +410,14 @@ mod tests {
             .await;
         assert!(driver.peers.contains_key(&7));
         for _ in 0..16 {
-            driver.recv_tx.try_send(Message::single("filler")).unwrap();
+            driver
+                .link
+                .recv_tx
+                .try_send(Message::single("filler"))
+                .unwrap();
         }
         driver.retry_peer_data().await;
-        assert!(driver.pending_peer_data.is_none());
+        assert!(driver.mail.pending_peer_data.is_none());
         assert!(driver.pending_receive.is_some());
         assert!(driver.peers.contains_key(&7));
         receive.prefetch();
@@ -435,15 +442,16 @@ mod tests {
         for (size, expected) in [(1, 64), (40 * 1024, 2)] {
             let (mut driver, _old_receive) = fixture();
             let (pipe, _receive, _, _) =
-                crate::socket::recv::recv_pipe(256, driver.spsc.blocking_recv_waker.clone());
-            driver.recv_tx = pipe;
+                crate::socket::recv::recv_pipe(256, driver.link.spsc.blocking_recv_waker.clone());
+            driver.link.recv_tx = pipe;
             insert_pending_peer(&mut driver, 7);
             driver.peers.get_mut(&7).unwrap().ready = true;
             driver
+                .routing
                 .recv_strategy
                 .connection_added(7, bytes::Bytes::from_static(b"peer"));
             let mut output = crate::engine::actor_output::PeerOutput::actor(
-                driver.peer_out_tx.try_register().unwrap(),
+                driver.mail.peer_out_tx.try_register().unwrap(),
             );
             let body = bytes::Bytes::from(vec![0; size]);
             for _ in 0..256 {
@@ -456,6 +464,7 @@ mod tests {
                 Err(crate::engine::SendPipeError::Full(_))
             ));
             let first = driver
+                .mail
                 .peer_out_rx
                 .as_mut()
                 .unwrap()
@@ -494,7 +503,11 @@ mod tests {
     /// Fill the 16-slot receive pipe so the next receive blocks.
     fn fill_receive_pipe(driver: &SocketDriver) {
         for _ in 0..16 {
-            driver.recv_tx.try_send(Message::single("filler")).unwrap();
+            driver
+                .link
+                .recv_tx
+                .try_send(Message::single("filler"))
+                .unwrap();
         }
     }
 
@@ -543,8 +556,8 @@ mod tests {
     #[tokio::test]
     async fn completion_preserves_ready_identity_commands_and_pending_receive() {
         let (mut driver, mut receive) = fixture();
-        driver.setup_admission = crate::transport::setup::Admission::new(1);
-        let mut monitor = driver.monitor.subscribe();
+        driver.endpoints.setup_admission = crate::transport::setup::Admission::new(1);
+        let mut monitor = driver.link.monitor.subscribe();
         insert_pending_peer(&mut driver, 7);
 
         // Completion arrives first; the admitted events still run in order.
@@ -552,7 +565,7 @@ mod tests {
         driver
             .handle_peer_completion(peer_completion(3, reason, StreamDisconnect::None))
             .await;
-        assert!(driver.setup_admission.try_acquire().is_none());
+        assert!(driver.endpoints.setup_admission.try_acquire().is_none());
         ready_dealer(&mut driver).await;
         assert!(driver.peers.get(&7).unwrap().ready);
         assert!(matches!(
@@ -612,8 +625,11 @@ mod tests {
         peer.pending_handshake = false;
         peer.handshake_admission = None;
         peer.identity = identity.clone();
-        driver.shared.ready_peers.set(1);
-        driver.recv_strategy.connection_added(7, identity.clone());
+        driver.link.shared.ready_peers.set(1);
+        driver
+            .routing
+            .recv_strategy
+            .connection_added(7, identity.clone());
 
         fill_receive_pipe(&driver);
         driver
@@ -646,7 +662,7 @@ mod tests {
 
         free_slot_and_retire(&mut driver, &mut receive).await;
         assert!(!driver.peers.contains_key(&7));
-        assert_eq!(driver.shared.ready_peers.get(), 0);
+        assert_eq!(driver.link.shared.ready_peers.get(), 0);
         assert_fillers(&mut receive, 14);
         receive.prefetch();
         assert_routed(&receive.pop().unwrap(), &identity, b"older data");
@@ -664,19 +680,19 @@ mod tests {
         for peer_id in 0..100 {
             let (publisher, receiver) =
                 crate::engine::peer_completion::CompletionProgress::reserve(peer_id);
-            driver.peer_completions.push(receiver);
+            driver.mail.peer_completions.push(receiver);
             drop(publisher);
         }
         driver.drain_peer_completions().await;
-        assert!((84..100).contains(&driver.peer_completions.len()));
+        assert!((84..100).contains(&driver.mail.peer_completions.len()));
         assert_eq!(driver.pending_receive.as_ref().unwrap().peer_id, 200);
         for _ in 0..100 {
-            if driver.peer_completions.is_empty() {
+            if driver.mail.peer_completions.is_empty() {
                 break;
             }
             driver.drain_peer_completions().await;
         }
-        assert!(driver.peer_completions.is_empty());
+        assert!(driver.mail.peer_completions.is_empty());
     }
 
     #[tokio::test]
@@ -686,7 +702,7 @@ mod tests {
         insert_pending_peer(&mut driver, 7);
         let (mut publisher, receiver) =
             crate::engine::peer_completion::CompletionProgress::reserve(7);
-        driver.peer_completions.push(receiver);
+        driver.mail.peer_completions.push(receiver);
         let counter = Arc::new(WakeCounter::default());
         let waker = futures::task::waker(counter.clone());
         let mut context = std::task::Context::from_waker(&waker);
@@ -715,9 +731,10 @@ mod tests {
         peer.handshake_admission = None;
         peer.identity = bytes::Bytes::from_static(b"closed stream");
         driver
+            .routing
             .recv_strategy
             .connection_added(7, peer.identity.clone());
-        driver.shared.ready_peers.set(1);
+        driver.link.shared.ready_peers.set(1);
         driver.pending_receive = Some(super::super::PendingReceive {
             peer_id: 8,
             message: Message::single("other peer"),
@@ -744,11 +761,11 @@ mod tests {
         );
         assert!(driver.peers.contains_key(&7));
         driver.retire_completed_peer(7).await;
-        assert_eq!(driver.stream_disconnects.len(), 1);
+        assert_eq!(driver.mail.stream_disconnects.len(), 1);
         driver.retry_pending_receive();
         driver.drain_stream_disconnects().await;
         assert!(!driver.peers.contains_key(&7));
-        assert!(driver.stream_disconnects.is_empty());
+        assert!(driver.mail.stream_disconnects.is_empty());
         receive.prefetch();
         assert_eq!(
             receive.pop().unwrap().part_slice(0),
@@ -763,8 +780,8 @@ mod tests {
     #[tokio::test]
     async fn pending_handshake_completion_releases_admission_with_another_receive_blocked() {
         let (mut driver, _receive) = fixture();
-        driver.setup_admission = crate::transport::setup::Admission::new(1);
-        let mut monitor = driver.monitor.subscribe();
+        driver.endpoints.setup_admission = crate::transport::setup::Admission::new(1);
+        let mut monitor = driver.link.monitor.subscribe();
         insert_pending_peer(&mut driver, 7);
         driver.pending_receive = Some(super::super::PendingReceive {
             peer_id: 8,
@@ -780,7 +797,7 @@ mod tests {
             })
             .await;
         assert!(!driver.peers.contains_key(&7));
-        assert!(driver.setup_admission.try_acquire().is_some());
+        assert!(driver.endpoints.setup_admission.try_acquire().is_some());
         assert_eq!(driver.pending_receive.as_ref().unwrap().peer_id, 8);
         assert!(
             matches!(monitor.try_recv().unwrap(), MonitorEvent::HandshakeFailed { reason, .. }

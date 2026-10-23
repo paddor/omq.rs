@@ -74,8 +74,8 @@ fn pacing_cache_preserves_delays_across_sizes_and_rates() {
     for rate in [10_000_000, 3_000_000, u64::MAX, 1] {
         session.config.max_send_rate = Some(rate);
         session.update_pacing_rate();
-        assert_eq!(session.pacing_bytes, 0);
-        let now = session.pace_at + Duration::from_secs(1);
+        assert_eq!(session.pacing.bytes, 0);
+        let now = session.pacing.next_at + Duration::from_secs(1);
         let mut tokens = Vec::new();
         for size in sizes {
             let sequence = session.submit(Message::from_slice(&vec![7; size])).unwrap();
@@ -89,8 +89,8 @@ fn pacing_cache_preserves_delays_across_sizes_and_rates() {
             expected +=
                 Duration::from_nanos(((DATA_HEADER + size) as u64 * 1_000_000_000 / rate).max(1));
             session.commit_transmit(token, now);
-            assert_eq!(session.pace_at, expected);
-            assert_eq!(session.pacing_bytes, DATA_HEADER + size);
+            assert_eq!(session.pacing.next_at, expected);
+            assert_eq!(session.pacing.bytes, DATA_HEADER + size);
         }
     }
 }
@@ -99,10 +99,10 @@ fn pacing_cache_preserves_delays_across_sizes_and_rates() {
 fn send_capacity_stops_a_batch_before_sequence_exhaustion() {
     let mut session = session(2);
     let near_limit = u64::MAX - 3;
-    session.send_base = near_limit;
-    session.peer_ack = near_limit;
-    session.send_cursor = near_limit;
-    session.send_next = near_limit;
+    session.send.base = near_limit;
+    session.peer.ack = near_limit;
+    session.send.cursor = near_limit;
+    session.send.next = near_limit;
     assert_eq!(session.send_capacity(), 1);
     assert_eq!(session.submit(Message::single("last")).unwrap(), near_limit);
     assert_eq!(session.send_capacity(), 0);
@@ -156,7 +156,7 @@ fn ack_retirement_and_nak_marking_have_message_and_byte_budgets() {
             },
             Duration::ZERO,
         );
-        assert!(session.repairs <= 64);
+        assert!(session.send.repairs <= 64);
         let ack = Status {
             serial: 2,
             ack: 256,
@@ -170,6 +170,6 @@ fn ack_retirement_and_nak_marking_have_message_and_byte_budgets() {
         }
         while session.poll_progress() {}
         assert_eq!(session.outstanding(), 0);
-        assert_eq!(session.repairs, 0);
+        assert_eq!(session.send.repairs, 0);
     }
 }

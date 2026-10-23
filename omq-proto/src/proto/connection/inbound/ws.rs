@@ -40,7 +40,7 @@ impl Connection {
     pub(super) fn drive_ws(&mut self) -> Result<()> {
         use crate::proto::ws_codec;
 
-        let peer_role = match self.ws_role.unwrap() {
+        let peer_role = match self.ws.role.unwrap() {
             ws_codec::WsRole::Client => ws_codec::WsRole::Server,
             ws_codec::WsRole::Server => ws_codec::WsRole::Client,
         };
@@ -54,7 +54,7 @@ impl Connection {
             let before = self.in_buf.len();
             self.clear_peer_ttl_if_input_buffered();
 
-            let progressed = if self.ws_control.skip_payload > 0 {
+            let progressed = if self.ws.control.skip_payload > 0 {
                 self.skip_ws_payload()
             } else {
                 self.step_ws_frame(peer_role)?
@@ -71,7 +71,8 @@ impl Connection {
     #[inline]
     fn skip_ws_payload(&mut self) -> bool {
         let take = self
-            .ws_control
+            .ws
+            .control
             .skip_payload
             .min(self.in_buf.len())
             .min(crate::proto::connection::ws::SERVICE_BYTES);
@@ -80,7 +81,7 @@ impl Connection {
         }
 
         self.in_buf.advance(take);
-        self.ws_control.skip_payload -= take;
+        self.ws.control.skip_payload -= take;
         true
     }
 
@@ -91,11 +92,11 @@ impl Connection {
         use crate::proto::ws_codec;
 
         if matches!(self.state, State::Ready)
-            && !self.ws_close_sent
+            && !self.ws.close_sent
             && !self.has_frame_transform()
-            && self.pending_parts.is_empty()
-            && !self.discarding_multipart
-            && self.ws_fragment.is_none()
+            && self.assembly.parts.is_empty()
+            && !self.assembly.discarding
+            && self.ws.fragment.is_none()
             && let Some(advanced) = self.try_advance_ready_ws(peer_role)?
         {
             return Ok(advanced);
@@ -111,14 +112,14 @@ impl Connection {
             .ok_or_else(|| Error::Protocol("WS frame size overflow".into()))?;
 
         // After our CLOSE, data frames are skipped without buffering them.
-        if self.ws_close_sent
+        if self.ws.close_sent
             && matches!(
                 ws_hdr.opcode,
                 ws_codec::OP_BINARY_CODE | ws_codec::OP_CONTINUATION_CODE
             )
         {
             self.in_buf.advance(ws_hdr.header_len);
-            self.ws_control.skip_payload = payload_len;
+            self.ws.control.skip_payload = payload_len;
             return Ok(true);
         }
         if self.in_buf.len() < total_frame {
@@ -143,7 +144,7 @@ impl Connection {
                 if ws_hdr.opcode == ws_codec::OP_BINARY_CODE
                     && ws_hdr.fin
                     && !ws_hdr.masked
-                    && self.ws_fragment.is_none()
+                    && self.ws.fragment.is_none()
                 {
                     self.handle_unmasked_ws_binary(payload_len)?;
                 } else {
@@ -190,7 +191,7 @@ impl Connection {
                 "WS frame too large: {payload_len} bytes (max {cap})"
             )));
         }
-        if !self.ws_close_sent {
+        if !self.ws.close_sent {
             self.validate_ws_receive_header(header, payload_len)?;
         }
         Ok(payload_len)
@@ -204,7 +205,7 @@ impl Connection {
         use crate::proto::{ws_codec, zws};
         let (total, flag) = match header.opcode {
             ws_codec::OP_BINARY_CODE => {
-                if self.ws_fragment.is_some() {
+                if self.ws.fragment.is_some() {
                     return Err(Error::Protocol(
                         "new WS binary frame before fragmented message completed".into(),
                     ));
@@ -216,7 +217,7 @@ impl Connection {
                 (payload_len, flag)
             }
             ws_codec::OP_CONTINUATION_CODE => {
-                let Some(fragment) = self.ws_fragment.as_ref() else {
+                let Some(fragment) = self.ws.fragment.as_ref() else {
                     return Err(Error::Protocol(
                         "WS continuation frame without initial binary frame".into(),
                     ));
@@ -429,7 +430,7 @@ impl Connection {
         let raw = self.take_ws_payload(payload_len, ws_hdr);
         match ws_hdr.opcode {
             ws_codec::OP_BINARY_CODE => {
-                if self.ws_fragment.is_some() {
+                if self.ws.fragment.is_some() {
                     return Err(Error::Protocol(
                         "new WS binary frame before fragmented message completed".into(),
                     ));
@@ -437,7 +438,7 @@ impl Connection {
                 if ws_hdr.fin {
                     self.dispatch_ws_payload(raw)
                 } else {
-                    self.ws_fragment = Some(crate::proto::connection::ws::Fragment {
+                    self.ws.fragment = Some(crate::proto::connection::ws::Fragment {
                         bytes: raw,
                         count: 1,
                     });
@@ -445,7 +446,7 @@ impl Connection {
                 }
             }
             ws_codec::OP_CONTINUATION_CODE => {
-                let Some(mut fragment) = self.ws_fragment.take() else {
+                let Some(mut fragment) = self.ws.fragment.take() else {
                     return Err(Error::Protocol(
                         "WS continuation frame without initial binary frame".into(),
                     ));
@@ -469,7 +470,7 @@ impl Connection {
                 if ws_hdr.fin {
                     self.dispatch_ws_payload(fragment.bytes)
                 } else {
-                    self.ws_fragment = Some(fragment);
+                    self.ws.fragment = Some(fragment);
                     Ok(())
                 }
             }
@@ -512,7 +513,7 @@ impl Connection {
     ) -> Result<()> {
         let payload = self.take_ws_payload(payload_len, ws_hdr);
         let code = crate::proto::ws_codec::validate_close_payload(&payload)?;
-        if !self.ws_close_sent {
+        if !self.ws.close_sent {
             if let Some(code) = code {
                 self.send_ws_close(code);
             } else {

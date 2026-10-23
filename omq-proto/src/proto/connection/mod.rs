@@ -20,6 +20,7 @@
 
 mod inbound;
 mod outbound;
+mod output;
 #[cfg(feature = "ws")]
 mod ws;
 
@@ -303,51 +304,25 @@ pub struct Connection {
     peer_greeting: Bytes,
     peer_minor: u8,
     in_buf: ChunkedInputBuf,
-    /// Outbound bytes pending transmit, kept as a queue of `Bytes` so the
-    /// engine can gather-write via `writev` / `sendmsg` instead of
-    /// memcpy'ing every frame into a contiguous buffer.
-    out_chunks: VecDeque<Bytes>,
-    /// Per-connection scratch for frame-header encoding. Each header
-    /// (1-9 bytes) is written into this buffer and split off as a
-    /// `Bytes` that shares the underlying allocation. Amortises the
-    /// per-frame `BytesMut::with_capacity(9)` to roughly one alloc per
-    /// 7000 frames (64 KiB / 9). Refilled when capacity falls below
-    /// `MAX_FRAME_HEADER_LEN`.
-    header_scratch: BytesMut,
-    /// Number of bytes already consumed from the front chunk on a
-    /// partial write. Always strictly less than `out_chunks[0].len()`
-    /// (or 0 when the queue is empty).
-    front_consumed: usize,
-    /// Cached sum of `out_chunks[i].len()` for all i. Maintained at
-    /// every push/pop so `pending_transmit_size` runs in O(1) instead
-    /// of iterating the whole queue on every drain-loop call.
-    out_bytes_total: usize,
-    /// Conservative reply-byte count until the last queued PONG is written.
-    pending_pong_bytes: usize,
-    /// Remaining output prefix through that PONG, including earlier data.
-    pong_queued_through: usize,
+    out: output::OutputQueue,
     events: VecDeque<Event>,
     messages: VecDeque<Message>,
-    pending_parts: Parts,
-    recv_payload_pool: Option<crate::PayloadPool>,
-    pending_size: usize,
-    discarding_multipart: bool,
+    assembly: Assembly,
     peer_heartbeat_ttl: u16,
     input: InputState,
-    /// WebSocket role for this connection. `None` = ZMTP byte-stream.
-    /// When set, `emit_frame` wraps ZMTP frames in WS binary frame
-    /// headers and pushes directly into `out_chunks`; inbound `drive()`
-    /// parses WS frame headers before decoding ZMTP.
     #[cfg(feature = "ws")]
-    ws_role: Option<super::ws_codec::WsRole>,
-    /// Whether we have sent a WS close frame.
-    #[cfg(feature = "ws")]
-    ws_close_sent: bool,
-    /// Partially assembled fragmented WebSocket binary message.
-    #[cfg(feature = "ws")]
-    ws_fragment: Option<ws::Fragment>,
-    #[cfg(feature = "ws")]
-    ws_control: ws::Control,
+    ws: ws::WsState,
+}
+
+/// Multipart message being received.
+#[derive(Debug)]
+struct Assembly {
+    parts: Parts,
+    /// Body bytes plus one payload slot per part, checked against the limit.
+    size: usize,
+    /// Dropping the rest of a multipart message this socket type rejects.
+    discarding: bool,
+    payload_pool: Option<crate::PayloadPool>,
 }
 
 impl Connection {
@@ -367,28 +342,19 @@ impl Connection {
             our_greeting: Bytes::new(),
             peer_greeting: Bytes::new(),
             in_buf: ChunkedInputBuf::new(),
-            out_chunks: VecDeque::new(),
-            header_scratch: BytesMut::with_capacity(64 * 1024),
-            front_consumed: 0,
-            out_bytes_total: 0,
-            pending_pong_bytes: 0,
-            pong_queued_through: 0,
+            out: output::OutputQueue::new(),
             events: VecDeque::new(),
             messages: VecDeque::new(),
-            pending_parts: Vec::new().into(),
-            recv_payload_pool: None,
-            pending_size: 0,
-            discarding_multipart: false,
+            assembly: Assembly {
+                parts: Vec::new().into(),
+                size: 0,
+                discarding: false,
+                payload_pool: None,
+            },
             peer_heartbeat_ttl: 0,
             input: InputState::default(),
             #[cfg(feature = "ws")]
-            ws_role,
-            #[cfg(feature = "ws")]
-            ws_close_sent: false,
-            #[cfg(feature = "ws")]
-            ws_fragment: None,
-            #[cfg(feature = "ws")]
-            ws_control: ws::Control::default(),
+            ws: ws::WsState::new(ws_role),
             config,
         };
         #[cfg(feature = "ws")]
@@ -405,8 +371,8 @@ impl Connection {
     #[must_use]
     pub fn recv_message_pool(mut self, pool: &MessagePool) -> Self {
         let mut parts = pool.take();
-        parts.extend(self.pending_parts.drain(..));
-        self.pending_parts = parts;
+        parts.extend(self.assembly.parts.drain(..));
+        self.assembly.parts = parts;
         self
     }
 
@@ -415,7 +381,7 @@ impl Connection {
     /// ordinary owned storage. Inline payloads skip checkout.
     #[must_use]
     pub fn recv_payload_pool(mut self, pool: &crate::PayloadPool) -> Self {
-        self.recv_payload_pool = Some(pool.clone());
+        self.assembly.payload_pool = Some(pool.clone());
         self
     }
 
@@ -426,7 +392,7 @@ impl Connection {
         if size <= crate::message::MAX_INLINE_PAYLOAD {
             return None;
         }
-        self.recv_payload_pool.as_ref()?.try_buffer(size)
+        self.assembly.payload_pool.as_ref()?.try_buffer(size)
     }
 
     /// Initialize the connection in ZWS mode: skip the greeting,
@@ -460,8 +426,7 @@ impl Connection {
         g.encode(&mut buf);
         let bytes = buf.freeze();
         self.our_greeting = bytes.clone();
-        self.out_bytes_total += bytes.len();
-        self.out_chunks.push_back(bytes);
+        self.out.push(bytes);
     }
 
     /// Whether the handshake is complete. Claiming an inbound payload does
@@ -515,13 +480,13 @@ impl Connection {
     /// encoded as WS binary frames, not raw ZMTP frames.
     #[cfg(feature = "ws")]
     pub fn is_ws(&self) -> bool {
-        self.ws_role.is_some()
+        self.ws.role.is_some()
     }
 
     /// The WS role for this connection, if any.
     #[cfg(feature = "ws")]
     pub fn ws_role(&self) -> Option<super::ws_codec::WsRole> {
-        self.ws_role
+        self.ws.role
     }
 
     /// Permanently close the connection; further input is rejected.

@@ -80,7 +80,7 @@ fn fragment_count_restarts_only_after_completed_binary_message() {
         connection
             .handle_input(frame(false, OP_BINARY_CODE, &[FLAG_FINAL]))
             .unwrap();
-        connection.ws_fragment.as_mut().unwrap().count = MAX_FRAGMENTS - 1;
+        connection.ws.fragment.as_mut().unwrap().count = MAX_FRAGMENTS - 1;
         connection
             .handle_input(frame(true, OP_CONTINUATION_CODE, b"body"))
             .unwrap();
@@ -173,11 +173,12 @@ fn pong_flood_keeps_one_staged_frame_and_latest_pending_payload() {
     connection
         .handle_input(frame(true, OP_PING_CODE, b"latest"))
         .unwrap();
-    assert_eq!(connection.out_chunks.len(), 1);
+    assert_eq!(connection.out.chunk_count(), 1);
     assert_eq!(connection.poll_transmit(), first.slice(1..));
     assert_eq!(
         connection
-            .ws_control
+            .ws
+            .control
             .pending_pong
             .as_ref()
             .unwrap()
@@ -185,7 +186,7 @@ fn pong_flood_keeps_one_staged_frame_and_latest_pending_payload() {
         b"latest"
     );
     connection.advance_transmit(first.len() - 1);
-    assert!(connection.ws_control.pending_pong.is_none());
+    assert!(connection.ws.control.pending_pong.is_none());
     let latest = connection.poll_transmit();
     let mut input = crate::proto::chunked_buf::ChunkedInputBuf::new();
     input.push(latest.clone());
@@ -210,7 +211,7 @@ fn close_discards_pending_pong_and_prevents_new_pong_output() {
         .handle_input(frame(true, OP_PING_CODE, b"pending"))
         .unwrap();
     connection.send_ws_close(1000);
-    assert!(connection.ws_control.pending_pong.is_none());
+    assert!(connection.ws.control.pending_pong.is_none());
     let pending = connection.pending_transmit_size();
     connection
         .handle_input(frame(true, OP_PING_CODE, b"ignored"))
@@ -228,9 +229,9 @@ fn closing_discards_spanning_data_without_assembly_then_accepts_close() {
     connection
         .handle_input(frame(false, OP_BINARY_CODE, &[FLAG_FINAL, 7]))
         .unwrap();
-    assert!(connection.ws_fragment.is_some());
+    assert!(connection.ws.fragment.is_some());
     connection.send_ws_close(1000);
-    assert!(connection.ws_fragment.is_none());
+    assert!(connection.ws.fragment.is_none());
     let mut header = BytesMut::new();
     let _ =
         crate::proto::ws_codec::encode_ws_binary_header(&mut header, 1024 * 1024, WsRole::Server);
@@ -243,10 +244,10 @@ fn closing_discards_spanning_data_without_assembly_then_accepts_close() {
             connection.resume_input().unwrap();
         }
         assert!(connection.in_buf.is_empty());
-        assert!(connection.ws_fragment.is_none());
+        assert!(connection.ws.fragment.is_none());
         assert!(connection.poll_message().is_none());
     }
-    assert_eq!(connection.ws_control.skip_payload, 0);
+    assert_eq!(connection.ws.control.skip_payload, 0);
     connection
         .handle_input(frame(
             true,
@@ -389,7 +390,7 @@ fn masked_binary_copies_split_input_once_with_the_correct_mask_offset() {
     let wire = wire.freeze();
     for chunk_size in [1, 3, 7, 62, 1024, 4096, wire.len()] {
         let mut connection = ready();
-        connection.ws_role = Some(WsRole::Server);
+        connection.ws.role = Some(WsRole::Server);
         let mut offset = 0;
         while offset < wire.len() {
             let end = (offset + chunk_size).min(wire.len());

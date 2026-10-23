@@ -11,6 +11,8 @@
 //! PONG coalescing bounds backlog, but ordered data can still delay control.
 
 use bytes::BytesMut;
+
+use super::WsRole;
 use std::time::{Duration, Instant};
 
 pub(super) const MAX_PARTS: usize = 65_536;
@@ -41,6 +43,31 @@ impl Service {
         self.frames < SERVICE_FRAMES
             && self.bytes < SERVICE_BYTES
             && (!self.frames.is_multiple_of(64) || self.started.elapsed() < SERVICE_TIME)
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct WsState {
+    /// WebSocket role for this connection. `None` = ZMTP byte-stream.
+    /// When set, `emit_frame` wraps ZMTP frames in WS binary frame
+    /// headers and queues them for output; inbound `drive()` parses WS
+    /// frame headers before decoding ZMTP.
+    pub(super) role: Option<WsRole>,
+    /// Whether we have sent a WS close frame.
+    pub(super) close_sent: bool,
+    /// Partially assembled fragmented WebSocket binary message.
+    pub(super) fragment: Option<Fragment>,
+    pub(super) control: Control,
+}
+
+impl WsState {
+    pub(super) fn new(role: Option<WsRole>) -> Self {
+        Self {
+            role,
+            close_sent: false,
+            fragment: None,
+            control: Control::default(),
+        }
     }
 }
 

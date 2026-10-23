@@ -30,7 +30,7 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "overlapping calls hand off a !Send guard that never spans an await",
     ),
     (
-        "omq-tokio/src/socket/recv.rs",
+        "omq-tokio/src/socket/recv/blocking.rs",
         "std::hint::spin_loop();",
         "configured latency spin, bounded by a deadline and interrupt checks",
     ),

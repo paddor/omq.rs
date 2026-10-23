@@ -46,7 +46,9 @@ fn collect_violations(root: &Path, allowed: &Path, violations: &mut Vec<String>)
             collect_violations(&path, allowed, violations);
             continue;
         }
-        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") || path == allowed {
+        // The signal module and its child modules, such as its tests.
+        let in_signal_module = path == allowed || path.starts_with(allowed.with_extension(""));
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") || in_signal_module {
             continue;
         }
         let text = fs::read_to_string(&path).expect("read source file");

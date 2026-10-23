@@ -9,7 +9,7 @@
 use std::time::Duration;
 
 use omq_proto::endpoint::Host;
-use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
+use omq_tokio::{Endpoint, Message, MonitorEvent, Options, Socket, SocketType};
 
 fn tcp_loopback(port: u16) -> Endpoint {
     Endpoint::Tcp {
@@ -62,7 +62,7 @@ async fn connect_fresh_subscriber(publisher: &Socket, endpoint: Endpoint) -> Soc
 
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
-            if let omq_tokio::MonitorEvent::SubscribeReceived { prefix } =
+            if let omq_tokio::MonitorEvent::SubscribeReceived { prefix, .. } =
                 monitor.recv().await.unwrap()
                 && prefix.as_ref() == b"fresh"
             {
@@ -603,6 +603,52 @@ async fn xpub_hides_rejected_subscriptions() {
 }
 
 #[tokio::test]
+async fn rejected_subscription_reaches_monitors() {
+    for endpoint in [
+        "tcp://127.0.0.1:0",
+        "inproc://subscription-rejection-monitor",
+    ] {
+        let pub_ = Socket::new(SocketType::Pub, admit_allowed_from_sub_a());
+        let mut monitor = pub_.monitor();
+        let endpoint = pub_.bind(endpoint).await.unwrap();
+        let sub = Socket::new(SocketType::Sub, Options::default().identity("sub-a"));
+        sub.subscribe("denied.").await.unwrap();
+        sub.subscribe("allowed.").await.unwrap();
+        sub.connect(endpoint).await.unwrap();
+
+        let (mut rejected, mut received) = (None, None);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while rejected.is_none() || received.is_none() {
+                match monitor.recv().await.unwrap() {
+                    MonitorEvent::SubscribeRejected {
+                        connection_id,
+                        prefix,
+                    } => {
+                        assert_eq!(prefix.as_ref(), b"denied.");
+                        rejected = Some(connection_id);
+                    }
+                    MonitorEvent::SubscribeReceived {
+                        connection_id,
+                        prefix,
+                    } => {
+                        assert_eq!(prefix.as_ref(), b"allowed.");
+                        received = Some(connection_id);
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("subscription monitor events");
+
+        let connections = pub_.connections().await.unwrap();
+        assert_eq!(connections.len(), 1);
+        assert_eq!(rejected, Some(connections[0].connection_id));
+        assert_eq!(received, rejected);
+    }
+}
+
+#[tokio::test]
 async fn pub_subscription_admission_applies_to_zmtp30_subscribe() {
     use std::io::{Read, Write};
 
@@ -610,6 +656,7 @@ async fn pub_subscription_admission_applies_to_zmtp30_subscribe() {
         SocketType::Pub,
         Options::default().subscription_admission(|request| request.prefix != b"foo"),
     );
+    let mut monitor = pub_.monitor();
     let Endpoint::Tcp { port, .. } = pub_.bind(tcp_loopback(0)).await.unwrap() else {
         unreachable!("TCP bind");
     };
@@ -649,4 +696,14 @@ async fn pub_subscription_admission_applies_to_zmtp30_subscribe() {
         () = tokio::time::sleep(Duration::from_secs(3)) => panic!("raw peer received nothing"),
     };
     assert_eq!(received, b"bar.x");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let MonitorEvent::SubscribeRejected { prefix, .. } = monitor.recv().await.unwrap() {
+                assert_eq!(prefix.as_ref(), b"foo");
+                break;
+            }
+        }
+    })
+    .await
+    .expect("legacy rejection not reported");
 }

@@ -1730,13 +1730,13 @@ fn event_to_c(event: NativeMonitorEvent) -> OmqGoEvent {
             fill_monitor_peer(&mut out, peer);
             out.reason = string_to_raw(disconnect_reason(reason));
         }
-        NativeMonitorEvent::SubscribeReceived { prefix } => {
+        NativeMonitorEvent::SubscribeReceived { prefix, .. } => {
             out.kind = string_to_raw("SUBSCRIBE_RECEIVED".to_string());
             let (data, len) = bytes_to_event_data(prefix);
             out.data = data;
             out.data_len = len;
         }
-        NativeMonitorEvent::UnsubscribeReceived { prefix } => {
+        NativeMonitorEvent::UnsubscribeReceived { prefix, .. } => {
             out.kind = string_to_raw("UNSUBSCRIBE_RECEIVED".to_string());
             let (data, len) = bytes_to_event_data(prefix);
             out.data = data;

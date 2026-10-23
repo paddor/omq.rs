@@ -14,6 +14,7 @@ use tokio::sync::mpsc::error::TrySendError;
 use super::driver::PeerEvent;
 use super::peer_completion::CompletionProgress;
 use super::recv_sink::RecvSink;
+use crate::socket::monitor::{MonitorEvent, MonitorPublisher};
 
 /// Retain one popped event until its actual mailbox permit is available.
 /// Existing codec events precede decoded-message admission. Pausing input
@@ -213,12 +214,30 @@ pub(super) struct EventRoute<'a> {
 #[derive(Debug, Default)]
 pub(crate) struct SubscriptionGate {
     notify_xpub: bool,
-    admission: Option<SubscriptionAdmission>,
+    admission: Option<GateAdmission>,
     peer: Option<Arc<PeerProperties>>,
 }
 
+/// Admission callback plus where its rejections are reported.
+#[derive(Debug)]
+struct GateAdmission {
+    callback: SubscriptionAdmission,
+    monitor: MonitorPublisher,
+    connection_id: u64,
+}
+
 impl SubscriptionGate {
-    pub(crate) fn new(notify_xpub: bool, admission: Option<SubscriptionAdmission>) -> Self {
+    pub(crate) fn new(
+        notify_xpub: bool,
+        admission: Option<SubscriptionAdmission>,
+        monitor: &MonitorPublisher,
+        connection_id: u64,
+    ) -> Self {
+        let admission = admission.map(|callback| GateAdmission {
+            callback,
+            monitor: monitor.clone(),
+            connection_id,
+        });
         Self {
             notify_xpub,
             admission,
@@ -237,17 +256,25 @@ impl SubscriptionGate {
         }
     }
 
-    /// False for a SUBSCRIBE the admission callback rejects. Fails closed
-    /// if no handshake was observed.
+    /// False for a SUBSCRIBE the admission callback rejects; monitors see
+    /// `SubscribeRejected`. Fails closed if no handshake was observed.
     pub(crate) fn admits(&self, event: &Event) -> bool {
         let (Some(admission), Event::Command(Command::Subscribe(prefix))) =
             (&self.admission, event)
         else {
             return true;
         };
-        self.peer
+        let admitted = self
+            .peer
             .as_deref()
-            .is_some_and(|peer| admission.admits(prefix, peer))
+            .is_some_and(|peer| admission.callback.admits(prefix, peer));
+        if !admitted {
+            admission.monitor.publish(MonitorEvent::SubscribeRejected {
+                connection_id: admission.connection_id,
+                prefix: prefix.clone(),
+            });
+        }
+        admitted
     }
 
     /// XPUB surfaces admitted SUBSCRIBE and CANCEL commands as messages.

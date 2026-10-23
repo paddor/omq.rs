@@ -248,12 +248,12 @@ fn subscription_event(event: &omq_tokio::MonitorEvent) -> Option<MonitorEventDat
     };
 
     let data = match event {
-        SubscribeReceived { prefix } => MonitorEventData {
+        SubscribeReceived { prefix, .. } => MonitorEventData {
             event_type: "subscribe_received",
             endpoint: None,
             detail: vec![("prefix", MonitorValue::Bytes(prefix.clone()))],
         },
-        UnsubscribeReceived { prefix } => MonitorEventData {
+        UnsubscribeReceived { prefix, .. } => MonitorEventData {
             event_type: "unsubscribe_received",
             endpoint: None,
             detail: vec![("prefix", MonitorValue::Bytes(prefix.clone()))],

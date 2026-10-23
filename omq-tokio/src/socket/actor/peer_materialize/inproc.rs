@@ -140,7 +140,7 @@ fn spawn_inproc_driver(
 
     let ctx = InprocDriverCtx {
         peer_out: crate::engine::actor_output::PeerOutput::actor(peer_output),
-        subscriptions: socket.subscription_gate(),
+        subscriptions: socket.subscription_gate(peer_id),
         peer_control: socket.mail.peer_control_tx.clone(),
         completion,
         peer_id,

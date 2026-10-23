@@ -27,7 +27,9 @@ async fn wait_for_unsubscribe(mon: &mut MonitorStream, prefix: &[u8]) {
     let fut = async {
         loop {
             match mon.recv().await {
-                Ok(MonitorEvent::UnsubscribeReceived { prefix: got }) if got.as_ref() == prefix => {
+                Ok(MonitorEvent::UnsubscribeReceived { prefix: got, .. })
+                    if got.as_ref() == prefix =>
+                {
                     return;
                 }
                 Ok(_) => {}

@@ -776,6 +776,7 @@ impl SocketDriver {
                     .peer_subscribe(peer_id, prefix.clone());
                 self.count_subscription_after(applied);
                 self.link.monitor.publish(MonitorEvent::SubscribeReceived {
+                    connection_id: peer_id,
                     prefix: prefix.clone(),
                 });
             }
@@ -784,6 +785,7 @@ impl SocketDriver {
                 self.link
                     .monitor
                     .publish(MonitorEvent::UnsubscribeReceived {
+                        connection_id: peer_id,
                         prefix: prefix.clone(),
                     });
             }
@@ -903,21 +905,34 @@ impl SocketDriver {
 
     /// Peer SUBSCRIBE handling for one connection. Admission applies to PUB
     /// and XPUB; only XPUB surfaces subscriptions as messages.
-    pub(super) fn subscription_gate(&self) -> SubscriptionGate {
+    pub(super) fn subscription_gate(&self, peer_id: u64) -> SubscriptionGate {
         let admission = matches!(self.socket_type, SocketType::Pub | SocketType::XPub)
             .then(|| self.options.subscription_admission.clone())
             .flatten();
-        SubscriptionGate::new(self.socket_type == SocketType::XPub, admission)
+        SubscriptionGate::new(
+            self.socket_type == SocketType::XPub,
+            admission,
+            &self.link.monitor,
+            peer_id,
+        )
     }
 
     fn admits_subscription(&self, peer_id: u64, prefix: &[u8]) -> bool {
         let Some(admission) = self.options.subscription_admission.as_ref() else {
             return true;
         };
-        self.peers
+        let admitted = self
+            .peers
             .get(&peer_id)
             .and_then(|peer| peer.info.as_ref())
-            .is_some_and(|info| admission.admits(prefix, &info.peer_properties))
+            .is_some_and(|info| admission.admits(prefix, &info.peer_properties));
+        if !admitted {
+            self.link.monitor.publish(MonitorEvent::SubscribeRejected {
+                connection_id: peer_id,
+                prefix: bytes::Bytes::copy_from_slice(prefix),
+            });
+        }
+        admitted
     }
 
     async fn replay_state_to_peer(

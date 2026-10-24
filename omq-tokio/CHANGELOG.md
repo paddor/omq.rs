@@ -21,6 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MonitorEvent::SubscribeRejected`. Subscribe and cancel events carry the
   peer's `connection_id`.
 
+### Fixed
+
+- PUB and XPUB report subscribe and cancel messages (the ZMTP 3.0 form) to
+  monitors as `SubscribeReceived` and `UnsubscribeReceived`, like the
+  commands. `wait_subscribed` counts them too.
+
 ## [0.31.0] - 2026-10-22
 
 ### Added

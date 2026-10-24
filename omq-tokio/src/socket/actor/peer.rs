@@ -893,29 +893,31 @@ impl SocketDriver {
         }
     }
 
-    /// Handle legacy ZMTP 3.0 subscribe/cancel (single-frame message with
-    /// 0x01/0x00 prefix). Returns true if the message was consumed.
+    /// Handle a subscribe/cancel sent as a single-frame message with a
+    /// 0x01/0x00 prefix (ZMTP 3.0 style, accepted from any peer). It is
+    /// registered and reported like the SUBSCRIBE/CANCEL command. Returns
+    /// true if the message was consumed.
     fn handle_legacy_subscribe(&mut self, peer_id: u64, msg: &Message) -> bool {
+        use omq_proto::proto::Command;
         if !matches!(self.socket_type, SocketType::Pub | SocketType::XPub) || msg.len() != 1 {
             return false;
         }
         let body = msg.part_bytes(0).unwrap_or_default();
-        let Some((tag, prefix)) = body.split_first() else {
+        let Some(&tag) = body.first() else {
             return false;
         };
+        let prefix = body.slice(1..);
         match tag {
             0x01 => {
                 // A rejected subscription is consumed, so XPUB never sees it.
-                if !self.admits_subscription(peer_id, prefix) {
+                if !self.admits_subscription(peer_id, &prefix) {
                     return true;
                 }
-                self.routing
-                    .send_strategy
-                    .peer_subscribe(peer_id, bytes::Bytes::copy_from_slice(prefix));
+                self.handle_peer_command(peer_id, Command::Subscribe(prefix));
                 self.socket_type != SocketType::XPub
             }
             0x00 => {
-                self.routing.send_strategy.peer_cancel(peer_id, prefix);
+                self.handle_peer_command(peer_id, Command::Cancel(prefix));
                 self.socket_type != SocketType::XPub
             }
             _ => false,

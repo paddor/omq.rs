@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.0] - 2026-10-24
+
 ### Added
 
 - `Socket::disconnect_peer` closes one connection by `connection_id`. The
@@ -26,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - PUB and XPUB report each rejected SUBSCRIBE to monitors as
   `MonitorEvent::SubscribeRejected`. Subscribe and cancel events carry the
   peer's `connection_id`.
+- Depend on `omq-proto` 0.36 and `omq-shm` 0.4.
 
 ### Fixed
 

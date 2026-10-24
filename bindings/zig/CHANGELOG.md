@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-10-24
+
+### Changed
+
+- `setCompressionLevel` accepts -7..=4. zrip dropped level -8.
+- Bundle `omq-libzmq` 0.7.0.
+
 ## [0.1.8] - 2026-10-22
 
 ### Changed

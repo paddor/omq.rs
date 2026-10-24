@@ -710,6 +710,84 @@ async fn pub_disconnect_peer_revokes_subscription() {
     }
 }
 
+/// The snapshot lists every ready peer, subscribed or not, and the stream
+/// carries only the changes after it.
+#[tokio::test]
+async fn monitor_with_subscriptions_snapshots_ready_peers() {
+    for endpoint in ["tcp://127.0.0.1:0", "inproc://monitor-with-subscriptions"] {
+        let pub_ = Socket::new(SocketType::Pub, Options::default());
+        let endpoint = pub_.bind(endpoint).await.unwrap();
+        let quiet = Socket::new(SocketType::Sub, Options::default().identity("quiet"));
+        quiet.connect(endpoint.clone()).await.unwrap();
+        let busy = Socket::new(SocketType::Sub, Options::default().identity("busy"));
+        busy.subscribe("b.").await.unwrap();
+        busy.subscribe("a.").await.unwrap();
+        busy.connect(endpoint.clone()).await.unwrap();
+        pub_.wait_connected(2, Duration::from_secs(2))
+            .await
+            .unwrap();
+        pub_.wait_subscribed(2, Duration::from_secs(2))
+            .await
+            .unwrap();
+
+        let (mut monitor, mut peers) = pub_.monitor_with_subscriptions().await.unwrap();
+        peers.sort_by_key(|p| p.peer.peer_identity.clone());
+        let snapshot: Vec<_> = peers
+            .iter()
+            .map(|p| (p.peer.peer_identity.clone().unwrap(), p.prefixes.clone()))
+            .collect();
+        assert_eq!(
+            snapshot,
+            [
+                ("busy".into(), vec!["a.".into(), "b.".into()]),
+                ("quiet".into(), vec![]),
+            ]
+        );
+        let busy_id = peers[0].peer.connection_id;
+        let quiet_id = peers[1].peer.connection_id;
+
+        quiet.subscribe("c.").await.unwrap();
+        drop(busy);
+        let late = Socket::new(SocketType::Sub, Options::default().identity("late"));
+        late.connect(endpoint).await.unwrap();
+
+        let (mut subscribed, mut disconnected, mut handshaked) = (false, false, false);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !(subscribed && disconnected && handshaked) {
+                match monitor.recv().await.unwrap() {
+                    MonitorEvent::SubscribeReceived {
+                        connection_id,
+                        prefix,
+                    } => {
+                        assert_eq!((connection_id, prefix.as_ref()), (quiet_id, &b"c."[..]));
+                        subscribed = true;
+                    }
+                    MonitorEvent::Disconnected { peer, .. } => {
+                        assert_eq!(peer.connection_id, busy_id);
+                        disconnected = true;
+                    }
+                    MonitorEvent::HandshakeSucceeded { peer, .. } => {
+                        assert_eq!(peer.peer_identity.as_deref(), Some(&b"late"[..]));
+                        handshaked = true;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("changes after the snapshot");
+    }
+}
+
+#[tokio::test]
+async fn monitor_with_subscriptions_requires_pub_or_xpub() {
+    let sub = Socket::new(SocketType::Sub, Options::default());
+    assert!(matches!(
+        sub.monitor_with_subscriptions().await,
+        Err(Error::Protocol(_))
+    ));
+}
+
 /// The next `count` subscribe, reject, and cancel monitor events.
 async fn subscription_events(
     monitor: &mut MonitorStream,

@@ -25,7 +25,7 @@ pub use handle::Socket;
 pub use identity::IdentitySocket;
 pub use monitor::{
     ConnectionStatus, DisconnectReason, MonitorEvent, MonitorRecvError, MonitorStream,
-    MonitorTryRecvError, PeerCommandKind, PeerIdent, PeerInfo,
+    MonitorTryRecvError, PeerCommandKind, PeerIdent, PeerInfo, PeerSubscriptions,
 };
 pub use peer_recv::{ReceiveLane, ReceiveReceipt, UnshiftError};
 pub use pools::SocketPools;

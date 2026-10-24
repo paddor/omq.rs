@@ -192,6 +192,17 @@ pub struct ConnectionStatus {
     pub peer_info: Option<PeerInfo>,
 }
 
+/// One ready PUB or XPUB peer and its registered subscriptions, returned by
+/// `Socket::monitor_with_subscriptions`.
+#[derive(Debug, Clone)]
+pub struct PeerSubscriptions {
+    /// Peer metadata, as in `MonitorEvent::HandshakeSucceeded`.
+    pub peer: PeerInfo,
+    /// Admitted prefixes, sorted. A prefix subscribed twice and not
+    /// canceled appears twice, once per `SubscribeReceived`.
+    pub prefixes: Vec<Bytes>,
+}
+
 /// Why a connection was closed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]

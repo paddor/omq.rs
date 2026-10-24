@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 
 pub use omq_proto::monitor::{
     ConnectionStatus, DisconnectReason, MonitorEvent, MonitorRecvError, MonitorTryRecvError,
-    PeerCommandKind, PeerIdent, PeerInfo,
+    PeerCommandKind, PeerIdent, PeerInfo, PeerSubscriptions,
 };
 
 /// Pull-style monitor stream. Drop to stop receiving events.

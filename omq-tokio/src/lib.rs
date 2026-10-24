@@ -76,6 +76,6 @@ pub use network_limit::{ByteRateLimit, NetworkRateLimits};
 pub use proxy::{Proxy, ProxyExit};
 pub use socket::{
     ConnectionStatus, DisconnectReason, IdentitySocket, MonitorEvent, MonitorRecvError,
-    MonitorStream, MonitorTryRecvError, PeerCommandKind, PeerIdent, PeerInfo, ReceiveLane,
-    ReceiveReceipt, Socket, SocketPools, UnshiftError,
+    MonitorStream, MonitorTryRecvError, PeerCommandKind, PeerIdent, PeerInfo, PeerSubscriptions,
+    ReceiveLane, ReceiveReceipt, Socket, SocketPools, UnshiftError,
 };

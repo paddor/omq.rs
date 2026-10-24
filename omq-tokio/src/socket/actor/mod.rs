@@ -32,7 +32,8 @@ use super::dispatch::{
     preflight_connect_endpoint_resolution,
 };
 use super::monitor::{
-    ConnectionStatus, DisconnectReason, MonitorEvent, MonitorPublisher, PeerCommandKind, PeerInfo,
+    ConnectionStatus, DisconnectReason, MonitorEvent, MonitorPublisher, MonitorStream,
+    PeerCommandKind, PeerInfo, PeerSubscriptions,
 };
 use super::type_state::TypeState;
 use super::udp::{
@@ -120,6 +121,11 @@ pub(crate) enum SocketCommand {
     QueryConnections {
         ack: oneshot::Sender<Vec<ConnectionStatus>>,
     },
+    /// Subscribe a monitor stream and snapshot every ready peer's
+    /// subscriptions in the same actor step.
+    MonitorWithSubscriptions {
+        ack: oneshot::Sender<(MonitorStream, Vec<PeerSubscriptions>)>,
+    },
     QueryStreamRoutingId {
         ack: oneshot::Sender<Option<bytes::Bytes>>,
     },
@@ -133,6 +139,16 @@ pub(crate) enum SocketCommand {
 pub(crate) enum CloseLinger {
     Configured,
     Override(Option<Duration>),
+}
+
+impl CloseLinger {
+    /// The linger this close uses, given the socket's configured one.
+    pub(crate) fn resolve(self, configured: Option<Duration>) -> Option<Duration> {
+        match self {
+            Self::Configured => configured,
+            Self::Override(value) => value,
+        }
+    }
 }
 
 /// Events produced inside the driver (listeners accepting, connections
@@ -749,15 +765,14 @@ impl SocketDriver {
             SocketCommand::QueryConnections { ack } => {
                 let _ = ack.send(self.ready_connections());
             }
+            SocketCommand::MonitorWithSubscriptions { ack } => {
+                let _ = ack.send(self.monitor_with_subscriptions());
+            }
             SocketCommand::QueryStreamRoutingId { ack } => {
                 let _ = ack.send(self.last_stream_routing_id.clone());
             }
             SocketCommand::Close { ack, linger } => {
-                let linger = match linger {
-                    CloseLinger::Configured => self.options.linger,
-                    CloseLinger::Override(value) => value,
-                };
-                self.begin_close(ack, linger);
+                self.begin_close(ack, linger.resolve(self.options.linger));
             }
         }
     }
@@ -785,6 +800,26 @@ impl SocketDriver {
             .iter()
             .filter_map(|(id, peer)| peer.ready.then(|| self.peer_status(*id)).flatten())
             .collect()
+    }
+
+    /// The actor marks peers ready, registers subscriptions, and removes
+    /// peers in the same steps that publish the matching monitor events, so
+    /// the new stream carries exactly the changes after this snapshot.
+    fn monitor_with_subscriptions(&self) -> (MonitorStream, Vec<PeerSubscriptions>) {
+        let monitor = self.link.monitor.subscribe();
+        let mut peers: Vec<_> = self
+            .peers
+            .iter()
+            .filter(|(_, peer)| peer.ready)
+            .filter_map(|(id, peer)| {
+                Some(PeerSubscriptions {
+                    peer: peer.info.clone()?,
+                    prefixes: self.routing.send_strategy.peer_subscriptions(*id),
+                })
+            })
+            .collect();
+        peers.sort_unstable_by_key(|peer| peer.peer.connection_id);
+        (monitor, peers)
     }
 
     fn begin_close(&mut self, ack: Option<oneshot::Sender<Result<()>>>, linger: Option<Duration>) {

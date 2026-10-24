@@ -60,6 +60,13 @@ impl SubscriptionSet {
         }
         self.set.get_longest_common_prefix(topic).is_some()
     }
+
+    /// Each subscribed prefix with its count, sorted by prefix.
+    pub fn iter(&self) -> impl Iterator<Item = (Vec<u8>, u64)> + '_ {
+        let all = (self.subscribe_all != 0).then(|| (Vec::new(), self.subscribe_all));
+        all.into_iter()
+            .chain(self.set.iter().map(|(prefix, &count)| (prefix, count)))
+    }
 }
 
 /// One SUBSCRIBE that a PUB or XPUB socket received from a peer.
@@ -151,6 +158,22 @@ mod tests {
         assert!(s.matches(b"x"));
         s.remove(b"x");
         assert!(!s.matches(b"x"));
+    }
+
+    #[test]
+    fn iter_lists_prefixes_with_counts() {
+        let mut s = SubscriptionSet::new();
+        s.add(b"b");
+        s.add(b"a");
+        s.add(b"ab");
+        s.add(b"a");
+        s.add(b"");
+        s.remove(b"ab");
+        let prefixes: Vec<_> = s.iter().collect();
+        assert_eq!(
+            prefixes,
+            [(b"".to_vec(), 1), (b"a".to_vec(), 2), (b"b".to_vec(), 1)]
+        );
     }
 
     #[test]

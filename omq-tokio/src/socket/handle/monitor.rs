@@ -1,6 +1,6 @@
 use super::Socket;
 use crate::socket::actor::SocketCommand;
-use crate::socket::monitor::{ConnectionStatus, MonitorStream, PeerInfo};
+use crate::socket::monitor::{ConnectionStatus, MonitorStream, PeerInfo, PeerSubscriptions};
 use futures::channel::oneshot;
 use omq_proto::{
     error::{Error, Result},
@@ -14,6 +14,31 @@ impl Socket {
     /// onward. Cheap: backed by a broadcast channel.
     pub fn monitor(&self) -> MonitorStream {
         self.inner.monitor.subscribe()
+    }
+
+    /// Subscribe to monitor events and snapshot every ready peer with its
+    /// registered subscriptions, in one step. PUB and XPUB only.
+    ///
+    /// The stream starts right after the snapshot: its
+    /// `HandshakeSucceeded`, `SubscribeReceived`, `UnsubscribeReceived`, and
+    /// `Disconnected` events are exactly the changes since. After
+    /// `MonitorRecvError::Lagged`, call this again to rebuild a subscription
+    /// table without losing or repeating a change.
+    pub async fn monitor_with_subscriptions(
+        &self,
+    ) -> Result<(MonitorStream, Vec<PeerSubscriptions>)> {
+        if !matches!(self.inner.socket_type, SocketType::Pub | SocketType::XPub) {
+            return Err(Error::Protocol(
+                "monitor_with_subscriptions is only valid on PUB and XPUB sockets".into(),
+            ));
+        }
+        let (ack, rx) = oneshot::channel();
+        self.inner
+            .cmd_tx
+            .send(SocketCommand::MonitorWithSubscriptions { ack })
+            .await
+            .map_err(|_| Error::Closed)?;
+        rx.await.map_err(|_| Error::Closed)
     }
 
     /// Snapshot the live status of one connected peer by `connection_id`.

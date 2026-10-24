@@ -11,7 +11,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use omq_proto::endpoint::Host;
-use omq_tokio::{Endpoint, Error, Message, MonitorEvent, Options, Socket, SocketType};
+use omq_tokio::{
+    Endpoint, Error, Message, MonitorEvent, MonitorStream, Options, Socket, SocketType,
+};
 
 fn tcp_loopback(port: u16) -> Endpoint {
     Endpoint::Tcp {
@@ -708,6 +710,37 @@ async fn pub_disconnect_peer_revokes_subscription() {
     }
 }
 
+/// The next `count` subscribe, reject, and cancel monitor events.
+async fn subscription_events(
+    monitor: &mut MonitorStream,
+    count: usize,
+) -> Vec<(&'static str, u64, Vec<u8>)> {
+    let mut events = Vec::new();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while events.len() < count {
+            let (kind, connection_id, prefix) = match monitor.recv().await.unwrap() {
+                MonitorEvent::SubscribeRejected {
+                    connection_id,
+                    prefix,
+                } => ("rejected", connection_id, prefix),
+                MonitorEvent::SubscribeReceived {
+                    connection_id,
+                    prefix,
+                } => ("subscribed", connection_id, prefix),
+                MonitorEvent::UnsubscribeReceived {
+                    connection_id,
+                    prefix,
+                } => ("unsubscribed", connection_id, prefix),
+                _ => continue,
+            };
+            events.push((kind, connection_id, prefix.to_vec()));
+        }
+    })
+    .await
+    .expect("subscription monitor events");
+    events
+}
+
 #[tokio::test]
 async fn pub_subscription_admission_applies_to_zmtp30_subscribe() {
     use std::io::{Read, Write};
@@ -722,6 +755,7 @@ async fn pub_subscription_admission_applies_to_zmtp30_subscribe() {
     };
     let addr = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
     let (result_tx, result_rx) = tokio::sync::oneshot::channel::<Vec<u8>>();
+    let (cancel_tx, cancel_rx) = std::sync::mpsc::channel::<()>();
     std::thread::spawn(move || {
         let mut stream = std::net::TcpStream::connect(addr).unwrap();
         stream
@@ -740,30 +774,36 @@ async fn pub_subscription_admission_applies_to_zmtp30_subscribe() {
             .write_all(&[0x00, 0x04, 0x01, b'b', b'a', b'r'])
             .unwrap();
         let _ = result_tx.send(read_zmtp_frame(&mut stream));
+        // DATA \x00bar cancels. Stay connected until the test ends.
+        if cancel_rx.recv().is_ok() {
+            stream
+                .write_all(&[0x00, 0x04, 0x00, b'b', b'a', b'r'])
+                .unwrap();
+        }
+        let _ = cancel_rx.recv();
     });
 
-    // Legacy subscriptions are not counted, so publish until one arrives.
-    let publish = async {
-        loop {
-            pub_.send(Message::single("foo.x")).await.unwrap();
-            pub_.send(Message::single("bar.x")).await.unwrap();
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    };
-    let received = tokio::select! {
-        received = result_rx => received.unwrap(),
-        () = publish => unreachable!(),
-        () = tokio::time::sleep(Duration::from_secs(3)) => panic!("raw peer received nothing"),
-    };
+    // The rejected subscription arrives first, so one counted subscription
+    // means both were processed.
+    pub_.wait_subscribed(1, Duration::from_secs(3))
+        .await
+        .unwrap();
+    pub_.send(Message::single("foo.x")).await.unwrap();
+    pub_.send(Message::single("bar.x")).await.unwrap();
+    let received = tokio::time::timeout(Duration::from_secs(3), result_rx)
+        .await
+        .expect("raw peer received nothing")
+        .unwrap();
     assert_eq!(received, b"bar.x");
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            if let MonitorEvent::SubscribeRejected { prefix, .. } = monitor.recv().await.unwrap() {
-                assert_eq!(prefix.as_ref(), b"foo");
-                break;
-            }
-        }
-    })
-    .await
-    .expect("legacy rejection not reported");
+    cancel_tx.send(()).unwrap();
+
+    let connection_id = pub_.connections().await.unwrap()[0].connection_id;
+    assert_eq!(
+        subscription_events(&mut monitor, 3).await,
+        [
+            ("rejected", connection_id, b"foo".to_vec()),
+            ("subscribed", connection_id, b"bar".to_vec()),
+            ("unsubscribed", connection_id, b"bar".to_vec()),
+        ]
+    );
 }

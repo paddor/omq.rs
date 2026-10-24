@@ -42,7 +42,7 @@ pub use message::{
 };
 pub use monitor::{
     ConnectionStatus, DisconnectReason, MonitorEvent, MonitorRecvError, MonitorTryRecvError,
-    PeerCommandKind, PeerIdent, PeerInfo,
+    PeerCommandKind, PeerIdent, PeerInfo, PeerSubscriptions,
 };
 #[cfg(feature = "quic")]
 pub use options::QuicOptions;

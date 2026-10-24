@@ -28,10 +28,7 @@ impl Socket {
 
     async fn close_inner(self, linger: CloseLinger) -> Result<()> {
         let (ack, rx) = oneshot::channel();
-        let effective_linger = match linger {
-            CloseLinger::Configured => self.inner.linger,
-            CloseLinger::Override(value) => value,
-        };
+        let effective_linger = linger.resolve(self.inner.linger);
         let close = SocketCommand::Close {
             ack: Some(ack),
             linger,

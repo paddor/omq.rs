@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `MonitorEvent::SubscribeRejected` reports a SUBSCRIBE that
   `Options::subscription_admission` rejected, with the peer's
   `connection_id`.
+- `PeerSubscriptions` pairs a ready peer's `PeerInfo` with its registered
+  prefixes.
+- `SubscriptionSet::iter` lists each subscribed prefix with its count.
 
 ## [0.35.0] - 2026-10-22
 

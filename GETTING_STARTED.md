@@ -132,6 +132,9 @@ their order; clone once per sending task, not per message.
   as after any drop.
 - `monitor()` streams lifecycle events for diagnostics. It is lossy under
   load; do not gate application logic on it.
+- `monitor_with_subscriptions()` on PUB and XPUB returns a fresh monitor
+  stream and every ready peer's subscriptions, taken in one step. Call it
+  again after a lag to rebuild exactly.
 
 ## Next steps
 

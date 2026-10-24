@@ -494,6 +494,14 @@ impl SendStrategy {
         None
     }
 
+    /// The peer's registered SUBSCRIBE prefixes. Empty except for `FanOut`.
+    pub(crate) fn peer_subscriptions(&self, peer_id: u64) -> Vec<Bytes> {
+        match self {
+            Self::FanOut(s) => s.peer_subscriptions(peer_id),
+            _ => Vec::new(),
+        }
+    }
+
     /// Record a CANCEL from a peer. No-op except for `FanOut`.
     pub(crate) fn peer_cancel(&self, peer_id: u64, prefix: &[u8]) {
         if let Self::FanOut(s) = self {

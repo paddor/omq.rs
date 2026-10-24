@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reconnects. A PUB can revoke admitted subscriptions this way, since the
   reconnect resubscribes through `Options::subscription_admission`. The
   blocking socket has it too.
+- `Socket::monitor_with_subscriptions` on PUB and XPUB returns a new monitor
+  stream and every ready peer's `PeerInfo` with its registered prefixes,
+  taken in one actor step. The stream carries exactly the handshake,
+  subscribe, cancel, and disconnect events after the snapshot, so a monitor
+  that lagged can rebuild its subscription table. The blocking socket has it
+  too.
 
 ### Changed
 

@@ -706,6 +706,22 @@ impl FanOutSend {
         None
     }
 
+    /// The peer's registered prefixes, sorted, one entry per subscription.
+    pub(crate) fn peer_subscriptions(&self, peer_id: u64) -> Vec<Bytes> {
+        let g = self.inner.lock().expect("fanout inner poisoned");
+        let Some(peer) = g.peers.get(&peer_id) else {
+            return Vec::new();
+        };
+        let mut prefixes = Vec::new();
+        for (prefix, count) in peer.subscriptions.iter() {
+            let prefix = Bytes::from(prefix);
+            for _ in 0..count {
+                prefixes.push(prefix.clone());
+            }
+        }
+        prefixes
+    }
+
     pub(crate) fn peer_cancel(&self, peer_id: u64, prefix: &[u8]) {
         let mut g = self.inner.lock().expect("fanout inner poisoned");
         if let Some(p) = g.peers.get_mut(&peer_id) {

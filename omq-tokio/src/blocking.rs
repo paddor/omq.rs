@@ -26,7 +26,7 @@ use omq_proto::message::Message;
 
 use crate::context::Context;
 use crate::socket::handle::Socket as AsyncSocket;
-use crate::socket::monitor::{ConnectionStatus, MonitorStream, PeerInfo};
+use crate::socket::monitor::{ConnectionStatus, MonitorStream, PeerInfo, PeerSubscriptions};
 pub use crate::socket::recv::BlockingRecvCancel;
 
 /// Limits and cancellation for one [`Socket::dispatch`] call.
@@ -579,6 +579,15 @@ impl Socket {
         let s = self.inner.clone_shared();
         self.ctx
             .block_on(async move { s.disconnect_peer(connection_id).await })
+    }
+
+    /// Subscribe to monitor events and snapshot every ready peer's
+    /// subscriptions in one step. See
+    /// [`crate::Socket::monitor_with_subscriptions`].
+    pub fn monitor_with_subscriptions(&self) -> Result<(MonitorStream, Vec<PeerSubscriptions>)> {
+        let s = self.inner.clone_shared();
+        self.ctx
+            .block_on(async move { s.monitor_with_subscriptions().await })
     }
 
     /// Return status for one live connection id.

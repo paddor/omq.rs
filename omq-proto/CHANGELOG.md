@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.36.0] - 2026-10-24
+
 ### Breaking
 
 - `zstd+tcp://` compression levels are -7..=4. zrip dropped level -8, so

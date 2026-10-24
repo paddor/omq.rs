@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-24
+
 ### Added
 
 - `zmq_disconnect_peer` closes one SERVER peer by routing id. Unknown ids
@@ -16,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `OMQ_COMPRESSION_LEVEL` accepts -7..=4. zrip dropped level -8, which now
   fails with `EINVAL`.
+- Bundle `omq-tokio` 0.32.0.
 
 ## [0.6.0] - 2026-10-22
 

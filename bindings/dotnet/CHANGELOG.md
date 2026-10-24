@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.2.9] - 2026-10-24
+
+### Changed
+
+- Bundle `omq-libzmq` 0.7.0.
+
 ## [0.2.8] - 2026-10-22
 
 ### Changed

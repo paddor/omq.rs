@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.2.10] - 2026-10-24
+
+### Changed
+
+- Bundle `omq-tokio` 0.32.0.
+
 ## [0.2.9] - 2026-10-22
 
 ### Changed

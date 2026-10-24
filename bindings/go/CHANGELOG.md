@@ -2,9 +2,13 @@
 
 ## [Unreleased]
 
+## [0.1.11] - 2026-10-24
+
 ### Changed
 
 - `CompressionLevel` accepts -7..=4. zrip dropped level -8.
+- Bundle `omq-tokio` 0.32.0. Monitors report subscribe and cancel
+  messages from ZMTP 3.0 peers.
 
 ## [0.1.10] - 2026-10-22
 

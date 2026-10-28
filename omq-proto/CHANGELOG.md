@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Message::into_bytes()` and `TryFrom<Message> for Bytes` move a single
+  part out as `Bytes` without copying heap-backed data. Messages without
+  exactly one part are returned unchanged. `Payload::into_bytes()` does the
+  same for one payload.
+
+### Changed
+
+- `From<Payload> for Bytes` moves the payload's `Bytes` or shared owner out
+  instead of cloning it.
+
 ## [0.36.0] - 2026-10-24
 
 ### Breaking

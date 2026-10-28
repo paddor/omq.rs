@@ -42,10 +42,21 @@ impl Message {
 
     /// Remove and return the first part as `Bytes`.
     pub fn pop_front(&mut self) -> Option<Bytes> {
-        self.pop_front_payload().map(|payload| match payload.inner {
-            PayloadInner::Single(bytes) | PayloadInner::Accounted { bytes, .. } => bytes,
-            _ => payload.as_bytes(),
-        })
+        self.pop_front_payload().map(Payload::into_bytes)
+    }
+
+    /// Convert a single-part message into its `Bytes`.
+    ///
+    /// Heap-backed parts move out without copying. Small inline parts are
+    /// copied. A `SERVER` routing ID is dropped; call
+    /// [`Message::take_routing_id`] first to keep it.
+    ///
+    /// Returns the message unchanged if it does not have exactly one part.
+    pub fn into_bytes(mut self) -> Result<Bytes, Self> {
+        if self.len() != 1 {
+            return Err(self);
+        }
+        Ok(self.pop_front().expect("one part"))
     }
 
     /// Remove the first part without materializing inline bytes on the heap.
@@ -300,7 +311,7 @@ impl Message {
             p @ Payload {
                 inner: PayloadInner::Identity(_),
             } => return Self::from_payloads_vec(vec![empty, p]),
-            p => MessageInner::EmptyDelimitedBytes(p.as_bytes()),
+            p => MessageInner::EmptyDelimitedBytes(p.into_bytes()),
         };
         Self { inner }
     }

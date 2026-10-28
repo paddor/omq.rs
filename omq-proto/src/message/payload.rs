@@ -165,6 +165,21 @@ impl Payload {
         }
     }
 
+    /// Converts the payload into a single contiguous `Bytes`.
+    ///
+    /// Like [`Payload::as_bytes`], but moves a `Bytes` chunk or shared owner
+    /// out instead of cloning it. Inline data is still copied.
+    #[inline]
+    pub fn into_bytes(self) -> Bytes {
+        match self.inner {
+            PayloadInner::Identity(identity) => identity.to_bytes(),
+            PayloadInner::Empty => Bytes::new(),
+            PayloadInner::Inline { data, len } => Bytes::copy_from_slice(&data[..usize::from(len)]),
+            PayloadInner::Single(bytes) | PayloadInner::Accounted { bytes, .. } => bytes,
+            PayloadInner::Shared(owner) => Bytes::from_owner(owner),
+        }
+    }
+
     /// Borrow as a contiguous byte slice.
     #[inline]
     pub fn as_slice(&self) -> &[u8] {
@@ -238,9 +253,8 @@ impl From<String> for Payload {
 }
 
 impl From<Payload> for Bytes {
-    /// Equivalent to `payload.as_bytes()`. Clones an existing Bytes chunk,
-    /// copies inline data, or allocates a shared-owner adapter without copying.
+    /// Equivalent to [`Payload::into_bytes`].
     fn from(p: Payload) -> Bytes {
-        p.as_bytes()
+        p.into_bytes()
     }
 }

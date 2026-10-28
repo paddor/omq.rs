@@ -78,6 +78,26 @@ fn payload_into_bytes_via_from() {
 }
 
 #[test]
+fn payload_into_bytes_moves_heap_chunks() {
+    let b = Bytes::from(vec![7u8; 128]);
+    let ptr = b.as_ptr();
+    let got = Payload::from_bytes(b).into_bytes();
+    assert!(std::ptr::addr_eq(got.as_ptr(), ptr));
+
+    let accounted = Payload::from_slice(&[8u8; 128]);
+    let ptr = accounted.as_slice().as_ptr();
+    let got = accounted.into_bytes();
+    assert!(std::ptr::addr_eq(got.as_ptr(), ptr));
+    assert_eq!(got, vec![8u8; 128]);
+}
+
+#[test]
+fn payload_into_bytes_copies_inline() {
+    assert_eq!(Payload::inline(b"hello").into_bytes(), &b"hello"[..]);
+    assert_eq!(Payload::new().into_bytes(), Bytes::new());
+}
+
+#[test]
 fn payload_size_of() {
     assert_eq!(std::mem::size_of::<Payload>(), 64);
 }

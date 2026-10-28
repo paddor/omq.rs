@@ -141,7 +141,7 @@ type RawStopped = BoxFuture<'static, Result<Option<quinn::VarInt>, quinn::Stoppe
 
 enum Shutdown {
     Open,
-    Acknowledging(RawStopped),
+    Acknowledging(Option<RawStopped>),
     AwaitingPeerClose(BoxFuture<'static, ()>),
     Done,
 }
@@ -234,18 +234,21 @@ impl AsyncWrite for QuicSendHalf {
                     this.stream.finish()?;
                     this.shutdown = Shutdown::Acknowledging(this.stream.raw_stopped());
                 }
-                Shutdown::Acknowledging(raw) => match ready!(this.stream.poll_stopped(raw, cx)) {
-                    Completion::Acknowledged => {
-                        this.shutdown = Shutdown::AwaitingPeerClose(this.shared.carrier.closed());
+                Shutdown::Acknowledging(raw) => {
+                    match ready!(this.stream.poll_stopped(raw.as_mut(), cx)) {
+                        Completion::Acknowledged => {
+                            this.shutdown =
+                                Shutdown::AwaitingPeerClose(this.shared.carrier.closed());
+                        }
+                        Completion::PeerStopped => {
+                            return Poll::Ready(Err(io::Error::new(
+                                io::ErrorKind::BrokenPipe,
+                                "QUIC peer stopped the data stream",
+                            )));
+                        }
+                        Completion::Failed(e) => return Poll::Ready(Err(e)),
                     }
-                    Completion::PeerStopped => {
-                        return Poll::Ready(Err(io::Error::new(
-                            io::ErrorKind::BrokenPipe,
-                            "QUIC peer stopped the data stream",
-                        )));
-                    }
-                    Completion::Failed(e) => return Poll::Ready(Err(e)),
-                },
+                }
                 Shutdown::AwaitingPeerClose(closed) => {
                     ready!(closed.as_mut().poll(cx));
                     this.shared.completed.store(true, Ordering::Release);

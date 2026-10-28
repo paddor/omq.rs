@@ -35,6 +35,8 @@ pub extern "C" fn zmq_has(capability: *const libc::c_char) -> c_int {
         "ipc" | "inproc" | "tcp" | "udp" | "zmtp3" | "curve" | "plain" => 1,
         #[cfg(feature = "quic")]
         "quic" => 1,
+        #[cfg(feature = "webtransport")]
+        "webtransport" => 1,
         _ => 0,
     }
 }

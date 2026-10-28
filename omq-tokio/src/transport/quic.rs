@@ -1,9 +1,11 @@
-//! OMQ over QUIC for native `quic://` peers.
+//! OMQ over QUIC: native clients use `quic://`; WebTransport joins the same
+//! listener when compiled with the `webtransport` feature.
 //!
 //! One QUIC connection per OMQ peer. The connector opens two bidirectional
-//! streams: one carries unchanged ZMTP, the
-//! other carries carrier liveness records. Stream ID 0 carries data; stream
-//! ID 4 carries liveness. TLS 1.3, verified certificates, no 0-RTT, no OMQ
+//! streams: one carries unchanged ZMTP, the other carries carrier liveness
+//! records. Raw QUIC fixes the roles by stream ID (0 data, 4 liveness);
+//! WebTransport marks them with 8-byte role prefaces because its stream IDs
+//! are not fixed. TLS 1.3, verified certificates, no 0-RTT, no OMQ
 //! DATAGRAMs, no OMQ compression.
 
 use std::cell::RefCell;
@@ -30,6 +32,8 @@ mod liveness;
 mod reuseport;
 mod stream;
 mod udp;
+#[cfg(feature = "webtransport")]
+mod web;
 
 use carrier::{Carrier, RecvHalf, SendHalf};
 use listener_group::ListenerGroup;
@@ -208,7 +212,7 @@ pub(crate) async fn connect(
     let server_name =
         crate::transport::tls::server_name(host, options.quic.server_name.as_deref())?;
     let server_name = server_name.to_str().into_owned();
-    let client = config::client(&options.quic)?;
+    let client = config::client(&options.quic, config::Profile::Raw)?;
     let liveness = LivenessConfig::from_options(options);
     let buffers = (options.recv_buffer_size, options.send_buffer_size);
     let lease = pool.reserve_thread();
@@ -266,6 +270,29 @@ async fn open_raw_roles(connection: quinn::Connection, deadline: Option<Instant>
 
 type PendingSetup = BoxFuture<'static, (SocketAddr, Result<(QuicStream, SetupState)>)>;
 
+/// Per-listener settings for every accepted connection's setup.
+#[derive(Clone, Debug)]
+struct AcceptPolicy {
+    liveness: LivenessConfig,
+    /// WebTransport resource and Origin policy for `h3` connections.
+    #[cfg(feature = "webtransport")]
+    web: Arc<web::Policy>,
+}
+
+impl AcceptPolicy {
+    #[cfg_attr(not(feature = "webtransport"), expect(clippy::unnecessary_wraps))]
+    fn new(options: &Options) -> Result<Self> {
+        Ok(Self {
+            liveness: LivenessConfig::from_options(options),
+            #[cfg(feature = "webtransport")]
+            web: Arc::new(web::Policy::new(
+                &options.quic.webtransport_path,
+                &options.quic,
+            )?),
+        })
+    }
+}
+
 /// Bound QUIC listener. Accepted Initials receive nonwaiting socket and
 /// listener admission before TLS; excess Initials are ignored so clients
 /// retransmit. One absolute deadline covers TLS, stream roles, and the
@@ -277,7 +304,7 @@ pub(crate) struct QuicListener {
     local: Endpoint,
     monitor_endpoint: Endpoint,
     setup: AcceptSetup,
-    liveness: LivenessConfig,
+    policy: AcceptPolicy,
     listener_admission: Admission,
     pending: FuturesUnordered<PendingSetup>,
 }
@@ -303,7 +330,7 @@ impl QuicListener {
         endpoints: Arc<ListenerGroup>,
         generation: u64,
         setup: AcceptSetup,
-        options: &Options,
+        policy: AcceptPolicy,
     ) -> Result<Self> {
         let local = endpoints[0].udp.local_addr().map_err(Error::Io)?;
         let local = Endpoint::Quic {
@@ -316,7 +343,7 @@ impl QuicListener {
             monitor_endpoint: local.clone(),
             local,
             setup,
-            liveness: LivenessConfig::from_options(options),
+            policy,
             listener_admission: Admission::new(LISTENER_SETUPS as usize),
             pending: FuturesUnordered::new(),
         })
@@ -388,7 +415,7 @@ impl QuicListener {
         };
         let endpoint = self.endpoints[index].udp.clone();
         let group = self.endpoints.clone();
-        let liveness = self.liveness;
+        let policy = self.policy.clone();
         let pool = self.setup.io_pool.clone();
         // Keep connection crypto, timers, liveness and OMQ IO together.
         // Prefer the receiving endpoint's reactor, but do not let random
@@ -400,7 +427,7 @@ impl QuicListener {
         };
         self.pending.push(Box::pin(async move {
             let accepted = on_io_thread(&pool, &lease, async move {
-                accept_setup(incoming, endpoint, group, liveness, deadline).await
+                accept_setup(incoming, endpoint, group, policy, deadline).await
             });
             let result = accepted
                 .await
@@ -468,7 +495,7 @@ async fn accept_setup(
     incoming: quinn::Incoming,
     endpoint: Arc<UdpEndpoint>,
     group: Arc<ListenerGroup>,
-    liveness: LivenessConfig,
+    policy: AcceptPolicy,
     deadline: Instant,
 ) -> Result<QuicStream> {
     let connecting = incoming
@@ -480,7 +507,7 @@ async fn accept_setup(
         .map_err(|_| timeout())?
         .map_err(|e| Error::HandshakeFailed(format!("QUIC handshake: {e}")))?;
     let closer = connection.clone();
-    let roles = tokio::time::timeout_at(deadline.into(), accept_roles(connection)).await;
+    let roles = tokio::time::timeout_at(deadline.into(), accept_roles(connection, &policy)).await;
     // An immediately ready result must not bypass an expired deadline.
     let roles = match roles {
         Ok(Ok(roles)) if Instant::now() < deadline => Ok(roles),
@@ -492,7 +519,7 @@ async fn accept_setup(
         Ok(Err(e)) => Err(e),
     };
     match roles {
-        Ok(roles) => Ok(roles.establish(endpoint, Some(group), liveness)),
+        Ok(roles) => Ok(roles.establish(endpoint, Some(group), policy.liveness)),
         Err(e) => {
             closer.close(quinn::VarInt::from_u32(code::SETUP_ERROR), b"");
             Err(e)
@@ -500,8 +527,14 @@ async fn accept_setup(
     }
 }
 
-/// Validate ALPN and accept the native data and liveness streams.
-async fn accept_roles(connection: quinn::Connection) -> Result<Roles> {
+/// Dispatch by authenticated ALPN, never by sniffing payload bytes. Native
+/// peers must open the data and liveness streams by ID.
+async fn accept_roles(connection: quinn::Connection, policy: &AcceptPolicy) -> Result<Roles> {
+    #[cfg(feature = "webtransport")]
+    if config::check_alpn(&connection, config::H3_ALPN).is_ok() {
+        return web::accept_roles(connection, &policy.web).await;
+    }
+    let _ = policy;
     config::check_alpn(&connection, ALPN)?;
     let accept = |e: quinn::ConnectionError| Error::HandshakeFailed(format!("QUIC accept: {e}"));
     let (data_send, data_recv) = connection.accept_bi().await.map_err(accept)?;
@@ -518,7 +551,9 @@ async fn accept_roles(connection: quinn::Connection) -> Result<Roles> {
     })
 }
 
-/// Bind a QUIC listener. Requires the configured server certificate.
+/// Bind a QUIC listener. With the `webtransport` feature it also accepts
+/// HTTP/3 WebTransport at `quic.webtransport_path` on the same UDP socket.
+/// Requires the configured server certificate.
 pub(crate) async fn bind(
     endpoint: &Endpoint,
     setup: AcceptSetup,
@@ -532,10 +567,11 @@ pub(crate) async fn bind(
             )));
         }
     };
+    let policy = AcceptPolicy::new(options)?;
     let handshakes = u32::try_from(options.max_pending_handshakes)
         .unwrap_or(u32::MAX)
         .min(LISTENER_SETUPS);
-    let server = config::server(&options.quic, handshakes)?;
+    let server = config::server(&options.quic, handshakes, config::Profile::listener())?;
     let addr = match host {
         Host::Wildcard => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port),
         Host::Ip(ip) => SocketAddr::new(*ip, port),
@@ -549,7 +585,7 @@ pub(crate) async fn bind(
     let _bind_guard = ListenerGroup::bind_guard().await;
     if let Some(group) = ListenerGroup::cached(addr) {
         let generation = group.claim(&server, setup.cancel.clone(), options)?;
-        return QuicListener::new(group, generation, setup, options);
+        return QuicListener::new(group, generation, setup, policy);
     }
     let sockets = listener_sockets(addr, setup.io_pool.thread_count())?;
     let count = sockets.len();
@@ -576,7 +612,7 @@ pub(crate) async fn bind(
     }
     let local = endpoints[0].udp.local_addr().map_err(Error::Io)?;
     let group = ListenerGroup::new(local, endpoints, setup.cancel.clone());
-    QuicListener::new(group, 1, setup, options)
+    QuicListener::new(group, 1, setup, policy)
 }
 
 #[cfg(test)]

@@ -93,7 +93,15 @@ impl Fixture {
         tls.alpn_protocols = vec![alpn.to_vec()];
         let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls).unwrap();
         let mut client = quinn::ClientConfig::new(Arc::new(crypto));
-        client.transport_config(Arc::new(config::transport(&options, false)));
+        #[cfg(feature = "webtransport")]
+        let profile = if alpn == config::H3_ALPN {
+            config::Profile::Web
+        } else {
+            config::Profile::Raw
+        };
+        #[cfg(not(feature = "webtransport"))]
+        let profile = config::Profile::Raw;
+        client.transport_config(Arc::new(config::transport(&options, false, profile)));
         let endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
         endpoint
             .connect_with(client, self.addr, "127.0.0.1")
@@ -116,6 +124,7 @@ async fn closed_code(connection: &quinn::Connection) -> Option<u32> {
 }
 
 #[tokio::test]
+#[cfg(not(feature = "webtransport"))]
 async fn alpn_mismatch_fails_the_tls_handshake() {
     let fixture = listener(Options::default(), Duration::from_secs(5)).await;
     let result = fixture.raw_client(b"h3").await;
@@ -146,7 +155,7 @@ impl ConnectorFixture {
         options.quic.trust_pem = options.quic.server_cert_pem.clone();
         options.quic.trust_system = false;
         let endpoint = quinn::Endpoint::server(
-            config::server(&options.quic, 4).unwrap(),
+            config::server(&options.quic, 4, config::Profile::Raw).unwrap(),
             "127.0.0.1:0".parse().unwrap(),
         )
         .unwrap();
@@ -670,7 +679,7 @@ fn skewed_initials_still_balance_connection_work_and_transfer_data() {
         assert_eq!(listener.endpoints.len(), 2);
         let address = listener.endpoints[0].udp.local_addr().unwrap();
         let endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
-        let mut client_config = config::client(&options.quic).unwrap();
+        let mut client_config = config::client(&options.quic, config::Profile::Raw).unwrap();
         client_config.initial_dst_cid_provider(Arc::new(|| {
             let mut bytes: [u8; 20] = rand::random();
             bytes[0] = 0; // Every Initial enters listener endpoint zero.
@@ -696,7 +705,10 @@ fn skewed_initials_still_balance_connection_work_and_transfer_data() {
         }
         assert_eq!(assigned, [2, 2]);
         for (client, accepted, _) in &mut peers {
-            let SendHalf::Raw(send) = &mut client.data.0;
+            #[allow(irrefutable_let_patterns)]
+            let SendHalf::Raw(send) = &mut client.data.0 else {
+                unreachable!("native roles")
+            };
             send.write_all(b"ping").await.unwrap();
             let mut buf = [0; 4];
             accepted.read_exact(&mut buf).await.unwrap();
@@ -706,6 +718,124 @@ fn skewed_initials_still_balance_connection_work_and_transfer_data() {
             assert_eq!(&buf, b"pong");
         }
     });
+}
+
+#[cfg(feature = "webtransport")]
+mod web_wire {
+    use super::*;
+
+    async fn web_listener(allowed: &[&str]) -> Fixture {
+        let mut options = Options::default();
+        options.quic.allowed_origins = allowed.iter().map(|o| (*o).to_string()).collect();
+        listener_at("quic://127.0.0.1:0", options, Duration::from_secs(5)).await
+    }
+
+    async fn web_session(
+        fixture: &Fixture,
+        origin: Option<&str>,
+    ) -> std::result::Result<omq_webtrans_quinn::Session, String> {
+        web_session_at(fixture, origin, "/omq").await
+    }
+
+    async fn web_session_at(
+        fixture: &Fixture,
+        origin: Option<&str>,
+        path: &str,
+    ) -> std::result::Result<omq_webtrans_quinn::Session, String> {
+        let connection = fixture.raw_client(config::H3_ALPN).await?;
+        let url: url::Url = format!("https://127.0.0.1:{}{path}", fixture.addr.port())
+            .parse()
+            .unwrap();
+        omq_webtrans_quinn::Session::connect_with_origin(connection, url, origin.map(str::to_owned))
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    #[tokio::test]
+    async fn origin_policy_allows_listed_and_missing_origins_only() {
+        let fixture = web_listener(&["https://app.example.com"]).await;
+        assert!(web_session(&fixture, None).await.is_ok(), "native client");
+        assert!(
+            web_session(&fixture, Some("https://APP.example.com:443"))
+                .await
+                .is_ok(),
+            "normalized allowed origin"
+        );
+        let denied = web_session(&fixture, Some("https://evil.example.com")).await;
+        assert!(denied.is_err(), "unlisted origin must be rejected");
+        let null = web_session(&fixture, Some("null")).await;
+        assert!(null.is_err(), "opaque origin must be rejected");
+    }
+
+    #[tokio::test]
+    async fn webtransport_path_is_configured_on_quic_bind() {
+        let mut options = Options::default();
+        options.quic.webtransport_path = "/custom".into();
+        let fixture = listener(options, Duration::from_secs(5)).await;
+        assert!(web_session_at(&fixture, None, "/omq").await.is_err());
+        assert!(web_session_at(&fixture, None, "/custom").await.is_ok());
+    }
+
+    async fn assert_closed(connection: &quinn::Connection) {
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), connection.closed())
+                .await
+                .is_ok(),
+            "invalid roles did not close the peer"
+        );
+    }
+
+    async fn roles_with_prefaces(first: [u8; 8], second: [u8; 8]) -> (Fixture, quinn::Connection) {
+        let fixture = web_listener(&[]).await;
+        let session = web_session(&fixture, None).await.unwrap();
+        let connection = (*session).clone();
+        let (mut a, a_recv) = session.open_bi().await.unwrap();
+        let (mut b, b_recv) = session.open_bi().await.unwrap();
+        a.write_all(&first).await.unwrap();
+        b.write_all(&second).await.unwrap();
+        // Dropped receive halves would stop the listener liveness preface.
+        std::mem::forget((session, a_recv, b_recv));
+        (fixture, connection)
+    }
+
+    #[tokio::test]
+    async fn web_roles_accept_either_order_and_reject_bad_prefaces() {
+        let (mut fixture, _connection) =
+            roles_with_prefaces(liveness::PREFACE, super::super::web::DATA_PREFACE).await;
+        assert!(fixture.next().await.is_some(), "liveness first is valid");
+
+        let (mut fixture, connection) = roles_with_prefaces(
+            super::super::web::DATA_PREFACE,
+            super::super::web::DATA_PREFACE,
+        )
+        .await;
+        assert!(fixture.next().await.is_none(), "duplicate role delivered");
+        assert_closed(&connection).await;
+
+        let (mut fixture, connection) =
+            roles_with_prefaces(*b"OMQX\x01\0\0\0", liveness::PREFACE).await;
+        assert!(fixture.next().await.is_none(), "unknown role delivered");
+        assert_closed(&connection).await;
+    }
+
+    #[tokio::test]
+    async fn web_session_rejects_a_third_stream() {
+        let (mut fixture, connection) =
+            roles_with_prefaces(super::super::web::DATA_PREFACE, liveness::PREFACE).await;
+        let _stream = fixture.next().await.expect("peer delivered");
+        let extra = connection.open_bi().await;
+        if let Ok((mut send, _)) = extra {
+            // A raw bidi stream without the WebTransport signal is invalid
+            // HTTP/3; either layer may close the connection.
+            let _ = send.write_all(b"extra").await;
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), connection.closed())
+                .await
+                .is_ok(),
+            "extra stream did not close the peer"
+        );
+    }
 }
 
 #[tokio::test]

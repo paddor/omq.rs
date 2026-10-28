@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   part out as `Bytes` without copying heap-backed data. Messages without
   exactly one part are returned unchanged. `Payload::into_bytes()` does the
   same for one payload.
+- `webtransport` feature: `QuicOptions::webtransport_path` (default `/omq`)
+  and `QuicOptions::allowed_origins` configure WebTransport on `quic://`
+  listeners. `proto::web_address` is public with `ws` or `webtransport`.
 
 ### Changed
 

@@ -370,3 +370,11 @@ fn quic_scheme_requires_feature() {
         Error::UnsupportedScheme(s) if s == "quic"
     ));
 }
+
+#[test]
+fn webtransport_has_no_separate_omq_scheme() {
+    assert!(matches!(
+        "h3+quic://host:4433/omq".parse::<Endpoint>(),
+        Err(Error::UnsupportedScheme(s)) if s == "h3+quic"
+    ));
+}

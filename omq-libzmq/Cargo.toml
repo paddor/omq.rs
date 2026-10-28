@@ -15,6 +15,7 @@ categories = ["network-programming", "api-bindings"]
 [features]
 # QUIC carriers are optional: they add Quinn and rustls/ring to the library.
 quic = ["omq-tokio/quic"]
+webtransport = ["quic", "omq-tokio/webtransport"]
 
 [lib]
 name = "omq_zmq"

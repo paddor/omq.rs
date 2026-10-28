@@ -2,7 +2,7 @@
 
 ## Workspace layout
 
-Five-crate Cargo workspace; `bindings/` is excluded and built
+Seven-crate Cargo workspace; `bindings/` is excluded and built
 out-of-tree (maturin etc.).
 
 - **`omq-proto`** -- sans-I/O ZMTP 3.x core. Codec (`Connection`),
@@ -20,6 +20,9 @@ out-of-tree (maturin etc.).
 - **`omq-bench`** -- benchmark runner and SVG chart generator. Drives
   cross-implementation peers and reads/writes append-only JSONL data in
   `~/.cache/omq/`.
+- **`vendor/omq-webtrans-proto`**, **`vendor/omq-webtrans-quinn`** --
+  MIT-licensed WebTransport over HTTP/3 code adapted from `webtrans` 0.6.0
+  for the `webtransport` feature.
 - **`bindings/`** -- language bindings over `omq-tokio` or `omq-libzmq`
   ([`doc/bindings.md`](doc/bindings.md)).
 
@@ -40,6 +43,7 @@ is covered by `tests/coverage_matrix.rs`.
 | `zstd` | `zstd+tcp://` transform | `zrip` |
 | `ws` | `ws://` / `wss://` WebSocket transport | `rustls`, `rustls-native-certs` (backend-level) |
 | `quic` | `quic://` raw OMQ over QUIC (TLS 1.3, ALPN `omq-zmtp/1`) | `quinn` (backend-level) |
+| `webtransport` | `quic://` listeners also accept WebTransport over HTTP/3; browsers use `https://` | `omq-webtrans-quinn`, `omq-webtrans-proto` (backend-level) |
 | `dart` | `dart://` reliable ordered messages with fragmentation | `quinn-udp`, Linux `nix` (backend-level) |
 | `fuzz` | fuzz test suites | - |
 | `soak` | soak test suites | - |

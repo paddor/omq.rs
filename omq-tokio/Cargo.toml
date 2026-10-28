@@ -27,6 +27,8 @@ zstd = ["omq-proto/zstd"]
 ws = ["omq-proto/ws", "dep:rustls", "dep:rustls-native-certs", "dep:rustls-pki-types", "dep:tokio-rustls"]
 # Raw OMQ over QUIC (`quic://`). Quinn with rustls/ring; no OMQ compression.
 quic = ["omq-proto/quic", "dep:quinn", "nix/socket", "dep:rustls", "dep:rustls-native-certs", "dep:rustls-pki-types"]
+# `quic://` listeners also accept WebTransport over HTTP/3 (draft-02, draft-07).
+webtransport = ["quic", "omq-proto/webtransport", "dep:omq-webtrans-quinn"]
 dart = ["omq-proto/dart", "dep:quinn-udp", "nix/socket", "nix/time"]
 # Enables the fuzz test suites (`tests/fuzz_*.rs`). Off by default -
 # those targets do ~1 M iterations each and dominate runtime of
@@ -63,6 +65,7 @@ rustls-pki-types = { version = "1.14", optional = true }
 tokio-rustls = { version = "0.26.6", optional = true }
 quinn = { version = "0.11.12", optional = true, default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 quinn-udp = { version = "0.6.3", optional = true, default-features = false }
+omq-webtrans-quinn = { path = "../vendor/omq-webtrans-quinn", version = "0.1.0", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["signal"] }
@@ -75,6 +78,7 @@ serde_json = "1.0.154"
 tokio = { version = "1.53.3", features = ["test-util", "rt-multi-thread"] }
 rcgen = "0.14.10"
 xxhash-rust = { version = "0.8.19", features = ["xxh3"] }
+url = "2.5.8"
 
 [target.'cfg(target_pointer_width = "64")'.dev-dependencies]
 loom = "0.7"
@@ -669,6 +673,11 @@ path = "tests/wss_cert_reject.rs"
 name = "omq_quic_basic"
 path = "tests/quic_basic.rs"
 required-features = ["quic"]
+
+[[test]]
+name = "omq_webtransport_basic"
+path = "tests/webtransport_basic.rs"
+required-features = ["webtransport"]
 
 [[test]]
 name = "omq_quic_lifecycle"

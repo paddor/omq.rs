@@ -83,6 +83,29 @@ fn debug_redacts_plain_client_password() {
     assert!(!debug.contains("password-sentinel"));
 }
 
+#[cfg(feature = "webtransport")]
+#[test]
+fn webtransport_path_requires_an_absolute_safe_resource() {
+    for path in ["relative", "/a b", "/ok\r\nX: bad"] {
+        let mut options = Options::default();
+        options.quic.webtransport_path = path.into();
+        assert!(options.validate().is_err(), "accepted {path:?}");
+    }
+    let mut options = Options::default();
+    options.quic.webtransport_path = "/custom?topic=x".into();
+    assert!(options.validate().is_ok());
+}
+
+#[cfg(feature = "webtransport")]
+#[test]
+fn webtransport_origins_must_be_explicit_web_origins() {
+    let mut options = Options::default();
+    options.quic.allowed_origins = vec!["null".into()];
+    assert!(options.validate().is_err());
+    options.quic.allowed_origins = vec!["https://app.example.com".into()];
+    assert!(options.validate().is_ok());
+}
+
 #[cfg(feature = "plain")]
 #[test]
 fn fixed_plain_credentials_match_exactly() {

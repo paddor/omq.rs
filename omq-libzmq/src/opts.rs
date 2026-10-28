@@ -114,6 +114,10 @@ pub(crate) struct QuicOverlay {
     pub server_name: Option<String>,
     pub trust_system: bool,
     pub stream_window: i32,
+    #[cfg(feature = "webtransport")]
+    pub allowed_origins: Vec<String>,
+    #[cfg(feature = "webtransport")]
+    pub webtransport_path: String,
     pub max_ready_peers: i32,
 }
 
@@ -127,6 +131,10 @@ impl std::fmt::Debug for QuicOverlay {
         debug.field("server_name", &self.server_name);
         debug.field("trust_system", &self.trust_system);
         debug.field("stream_window", &self.stream_window);
+        #[cfg(feature = "webtransport")]
+        debug.field("allowed_origins", &self.allowed_origins);
+        #[cfg(feature = "webtransport")]
+        debug.field("webtransport_path", &self.webtransport_path);
         debug.field("max_ready_peers", &self.max_ready_peers);
         debug.finish()
     }
@@ -143,6 +151,10 @@ impl Default for QuicOverlay {
             server_name: None,
             trust_system: true,
             stream_window: i32::try_from(defaults.stream_window).unwrap_or(i32::MAX),
+            #[cfg(feature = "webtransport")]
+            allowed_origins: Vec::new(),
+            #[cfg(feature = "webtransport")]
+            webtransport_path: defaults.webtransport_path,
             max_ready_peers: i32::try_from(defaults.max_ready_peers).unwrap_or(i32::MAX),
         }
     }
@@ -159,6 +171,10 @@ impl QuicOverlay {
             server_name: self.server_name.clone(),
             stream_window: u32::try_from(self.stream_window).expect("validated window"),
             max_ready_peers: usize::try_from(self.max_ready_peers).expect("validated limit"),
+            #[cfg(feature = "webtransport")]
+            allowed_origins: self.allowed_origins.clone(),
+            #[cfg(feature = "webtransport")]
+            webtransport_path: self.webtransport_path.clone(),
             ..omq_tokio::options::QuicOptions::default()
         }
     }

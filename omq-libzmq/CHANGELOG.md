@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `webtransport` feature: `OMQ_QUIC_ALLOWED_ORIGINS` (1017) and
+  `OMQ_QUIC_WEBTRANSPORT_PATH` (1019) configure WebTransport on `quic://`
+  listeners. `zmq_has("webtransport")` reports it.
+
 ## [0.7.0] - 2026-10-24
 
 ### Added

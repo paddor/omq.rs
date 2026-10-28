@@ -142,12 +142,14 @@ It needs no libzmq, libsodium, or C compiler. Optional features:
 | `zstd` | Experimental `zstd+tcp://` compression, with a level that adapts to the sender bottleneck |
 | `ws` | WebSocket (`ws://`) and verified TLS (`wss://`) |
 | `quic` | TLS-encrypted QUIC (`quic://`): [overview](doc/udp_transports.md#quic), [example](examples/quic.rs) |
+| `webtransport` | Browser WebTransport over HTTP/3 on `quic://` listeners ([RFC](doc/quic-rfc.md#11-webtransport-profile)) |
 | `dart` | Reliable ordered UDP (`dart://`) for low latency: [overview](doc/udp_transports.md#dart), [RFC](doc/dart-rfc.md) |
 
 ## Workspace
 
-Five Cargo workspace crates. The protocol core and tokio backend forbid
-unsafe Rust. SHM transport and native interfaces isolate unsafe operations.
+Seven Cargo workspace crates. The protocol core, tokio backend, and
+WebTransport crates forbid unsafe Rust. SHM transport and native interfaces
+isolate unsafe operations.
 
 | Crate | What it does |
 |-------|--------------|
@@ -156,6 +158,7 @@ unsafe Rust. SHM transport and native interfaces isolate unsafe operations.
 | [`omq-shm`](omq-shm/) | Linux shared-memory transport |
 | [`omq-libzmq`](omq-libzmq/) | libzmq-compatible C interface (`libomq_zmq` dynamic/static library) |
 | [`omq-bench`](omq-bench/) | Benchmark runner and SVG chart generator |
+| [`omq-webtrans-proto`](vendor/omq-webtrans-proto/), [`omq-webtrans-quinn`](vendor/omq-webtrans-quinn/) | WebTransport over HTTP/3, adapted from `webtrans` (MIT) |
 
 Language bindings:
 
@@ -195,7 +198,7 @@ Language bindings:
 - [doc/lz4-rfc.md](doc/lz4-rfc.md): LZ4 compression transport wire
   format and dictionary shipping rules.
 - [doc/quic-rfc.md](doc/quic-rfc.md): native QUIC transport, TLS verification,
-  liveness, and reconnect rules.
+  liveness, reconnect rules, and the WebTransport profile.
 - [doc/udp_transports.md](doc/udp_transports.md): UDP, QUIC, and DART purposes,
   configuration, and benchmarks over loopback and lossy links.
 - [omq-shm/README.md](omq-shm/README.md): shared-memory transport on Linux.

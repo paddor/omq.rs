@@ -1,4 +1,5 @@
-//! ASCII authority, resource, and browser-origin validation for WebSocket.
+//! ASCII authority, resource, and browser-origin validation shared by the
+//! WebSocket and WebTransport carriers.
 
 use std::net::{IpAddr, Ipv6Addr};
 

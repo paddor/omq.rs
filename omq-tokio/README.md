@@ -60,10 +60,17 @@ On PEER, PULL, and GATHER, keeping a receipt pauses its receive lane; dropping
 it resumes drainage. `receipt.lane()` returns a `ReceiveLane` for targeted
 receives, and `unshift(receipt, message)` leaves the message pending on that lane.
 
-### QUIC
+### QUIC and WebTransport
 
 The `quic` feature adds `quic://` endpoints. See the
 [QUIC example](../examples/quic.rs) for certificate and trust setup.
+
+With `webtransport`, the same listener also accepts WebTransport over HTTP/3
+at `https://host:port/omq` (or `quic.webtransport_path`). Browser clients
+implement the stream mapping in the [QUIC RFC](../doc/quic-rfc.md) and need
+`quic.allowed_origins`. Draft-02 (Chromium, Firefox) and draft-07 (Safari)
+are supported; draft-16 needs `RESET_STREAM_AT`, which Quinn does not ship
+yet.
 
 ### Shared memory (Linux)
 

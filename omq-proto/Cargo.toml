@@ -28,6 +28,7 @@ lz4 = ["dep:lz4rip"]
 zstd = ["dep:zrip"]
 ws = []
 quic = []
+webtransport = ["quic"]
 dart = []
 soak = []
 # Counts data-path copies of message bytes (`copy_stats`). Test-only.

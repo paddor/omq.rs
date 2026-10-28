@@ -277,9 +277,11 @@ wait_for_perf_quiet() {
 # that work before the test suite.
 run omq_cargo clippy --all-targets --no-deps -- -D warnings
 run omq_cargo clippy -p omq-libzmq --all-targets --no-deps -- -D warnings
+run omq_cargo clippy -p omq-webtrans-proto -p omq-webtrans-quinn --all-targets --no-deps -- -D warnings
 run omq_cargo_with_rust_tools test
 run omq_cargo_with_rust_tools test -p omq-libzmq
 run omq_cargo_with_rust_tools test -p omq-bench
+run omq_cargo_with_rust_tools test -p omq-webtrans-proto -p omq-webtrans-quinn
 if command -v "${CXX:-c++}" >/dev/null 2>&1 \
     && command -v pkg-config >/dev/null 2>&1 \
     && pkg-config --exists cppzmq; then
@@ -335,6 +337,8 @@ par run omq_cargo_with_rust_tools test -p omq-tokio  --features "lz4 ws" --test 
 par run omq_cargo_with_rust_tools test -p omq-proto  --features "quic lz4 zstd" --test omq_proto_endpoint
 par run omq_cargo_with_rust_tools test -p omq-tokio  --features quic --test omq_quic_basic --test omq_quic_lifecycle --test omq_quic_network --lib
 par run omq_cargo_with_rust_tools test -p omq-libzmq --features quic
+par run omq_cargo_with_rust_tools test -p omq-tokio  --features webtransport --test omq_webtransport_basic --test omq_quic_basic --lib
+par run omq_cargo_with_rust_tools test -p omq-libzmq --features webtransport --test omq_libzmq_quic
 par run omq_cargo_with_rust_tools test -p omq-tokio  --features plain --test omq_interop_pyzmq_plain
 par run omq_cargo_with_rust_tools test -p omq-tokio  --features curve --test omq_interop_pyzmq_curve
 par_wait
@@ -344,7 +348,7 @@ par_wait
 #    cross-feature interactions and internal #[cfg(feature)] items
 #    inside otherwise-ungated test files (connect_before_bind lz4).
 # ---------------------------------------------------------------- #
-all_features='plain curve lz4 zstd ws quic dart'
+all_features='plain curve lz4 zstd ws quic webtransport dart'
 par run omq_cargo_with_rust_tools test -p omq-proto  --features "$all_features"
 par run omq_cargo_with_rust_tools test -p omq-tokio  --features "$all_features"
 par_wait
@@ -354,7 +358,7 @@ par_wait
 #    `OMQ_FUZZ=1`.
 # ---------------------------------------------------------------- #
 if [[ "${OMQ_FUZZ:-}" == "1" ]]; then
-    par run omq_cargo_with_rust_tools test -p omq-tokio  --features "fuzz plain curve lz4 zstd ws quic" --release
+    par run omq_cargo_with_rust_tools test -p omq-tokio  --features "fuzz plain curve lz4 zstd ws quic webtransport" --release
     par_wait
 fi
 

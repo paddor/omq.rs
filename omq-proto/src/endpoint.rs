@@ -102,7 +102,9 @@ pub enum Endpoint {
         path: String,
     },
     /// `quic://host:port` OMQ over QUIC (UDP port, TLS 1.3).
-    /// Uses ALPN `omq-zmtp/1`. Never compressed.
+    /// Native clients use ALPN `omq-zmtp/1`. With `webtransport`, the
+    /// listener also accepts browser WebTransport clients over HTTP/3 on this
+    /// port. Never compressed.
     #[cfg(feature = "quic")]
     Quic {
         /// Local bind address or remote host.

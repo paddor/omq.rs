@@ -562,9 +562,21 @@ jobs:
           cargo nextest run --profile ci -p omq-tokio --features "quic plain curve"
           --lib --test omq_quic_basic --test omq_quic_lifecycle --test omq_quic_network
           --test-threads=1
+      - name: WebTransport
+        run: >-
+          cargo nextest run --profile ci -p omq-tokio --features webtransport
+          --lib --test omq_webtransport_basic --test omq_quic_basic
+          -E 'binary(omq_webtransport_basic) | binary(omq_quic_basic) | test(/^transport::quic::/)'
+          ${{ runner.os == 'macOS' && '--test-threads=1' || '' }}
+      - name: WebTransport crates
+        run: cargo nextest run --profile ci -p omq-webtrans-proto -p omq-webtrans-quinn
       - name: C API QUIC
         run: >-
           cargo nextest run --profile ci -p omq-libzmq --features quic
+          --test omq_libzmq_quic --test-threads=1
+      - name: C API WebTransport
+        run: >-
+          cargo nextest run --profile ci -p omq-libzmq --features webtransport
           --test omq_libzmq_quic --test-threads=1
 
   interop:

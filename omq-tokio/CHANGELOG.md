@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `webtransport` feature: `quic://` listeners also accept WebTransport over
+  HTTP/3 at `https://host:port/omq` on the same UDP port, dispatched by
+  ALPN. Draft-02 (Chromium, Firefox) and draft-07 (Safari) are negotiated;
+  draft-16 waits for `RESET_STREAM_AT` in Quinn. CONNECT path and Origin are
+  checked against `quic.webtransport_path` and `quic.allowed_origins`. One
+  session carries one ZMTP peer on two role-prefixed streams.
+
 ## [0.32.0] - 2026-10-24
 
 ### Added

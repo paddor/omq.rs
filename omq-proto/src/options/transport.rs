@@ -120,9 +120,19 @@ pub struct QuicOptions {
     /// Transport keepalive only; carrier liveness follows the heartbeat
     /// options.
     pub keep_alive_interval: Duration,
-    /// Maximum ready QUIC connections across this socket's endpoints.
-    /// Default 1024; must be nonzero.
+    /// Maximum ready QUIC connections across this socket's endpoints,
+    /// raw and WebTransport together. Default 1024; must be nonzero.
     pub max_ready_peers: usize,
+    /// WebTransport resource path on `quic://` listeners. Default `/omq`.
+    /// Browsers connect to `https://host:port/path`.
+    #[cfg(feature = "webtransport")]
+    pub webtransport_path: String,
+    /// Allowed browser origins for `quic://` listeners, for example
+    /// `https://app.example.com`. Empty by default: CONNECT requests carrying
+    /// Origin are rejected. Native clients may omit Origin. Origin is not
+    /// authentication. Requires the `webtransport` feature.
+    #[cfg(feature = "webtransport")]
+    pub allowed_origins: Vec<String>,
 }
 
 #[cfg(feature = "quic")]
@@ -141,6 +151,10 @@ impl std::fmt::Debug for QuicOptions {
         debug.field("idle_timeout", &self.idle_timeout);
         debug.field("keep_alive_interval", &self.keep_alive_interval);
         debug.field("max_ready_peers", &self.max_ready_peers);
+        #[cfg(feature = "webtransport")]
+        debug.field("webtransport_path", &self.webtransport_path);
+        #[cfg(feature = "webtransport")]
+        debug.field("allowed_origins", &self.allowed_origins);
         debug.finish()
     }
 }
@@ -182,6 +196,18 @@ impl QuicOptions {
                 "quic.max_ready_peers must be greater than zero".into(),
             ));
         }
+        #[cfg(feature = "webtransport")]
+        crate::proto::web_address::validate_ws_address(
+            &crate::endpoint::Host::Name("localhost".into()),
+            &self.webtransport_path,
+        )
+        .map_err(|_| crate::error::Error::Config("invalid quic.webtransport_path".into()))?;
+        #[cfg(feature = "webtransport")]
+        for origin in &self.allowed_origins {
+            crate::proto::web_address::normalize_ws_origin(origin).map_err(|_| {
+                crate::error::Error::Config(format!("invalid quic.allowed_origins entry {origin}"))
+            })?;
+        }
         Ok(())
     }
 }
@@ -199,6 +225,10 @@ impl Default for QuicOptions {
             idle_timeout: Duration::from_secs(10),
             keep_alive_interval: Duration::from_secs(2),
             max_ready_peers: 1024,
+            #[cfg(feature = "webtransport")]
+            webtransport_path: "/omq".into(),
+            #[cfg(feature = "webtransport")]
+            allowed_origins: Vec::new(),
         }
     }
 }

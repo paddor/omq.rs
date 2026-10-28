@@ -283,7 +283,9 @@ extern "C" {
 #define OMQ_QUIC_SERVER_NAME        1014
 #define OMQ_QUIC_TRUST_SYSTEM       1015
 #define OMQ_QUIC_STREAM_WINDOW      1016
+#define OMQ_QUIC_ALLOWED_ORIGINS    1017
 #define OMQ_QUIC_MAX_READY_PEERS    1018
+#define OMQ_QUIC_WEBTRANSPORT_PATH  1019
 #define OMQ_ARENA_THRESHOLD         10001
 
 #define OMQ_ON_MUTE_BLOCK           0
@@ -359,13 +361,16 @@ extern "C" {
     fail with EBUSY. Pending handshakes have a separate limit.
 
     OMQ_QUIC_* options configure quic:// endpoints when the
-    library is built with the `quic` feature; zmq_has("quic") reports it.
-    CERT_PEM and
+    library is built with the `quic` (and `webtransport`) features;
+    zmq_has("quic") and zmq_has("webtransport") report them. CERT_PEM and
     KEY_PEM are the bind certificate chain and key; TRUST_PEM adds connect
     trust anchors; TRUST_SYSTEM (int32_t, default 1) uses the platform store;
     SERVER_NAME overrides the verified name. There is no insecure mode.
     STREAM_WINDOW is an int32_t per-stream receive window in bytes (16 KiB
-    to 256 MiB, default 1 MiB).
+    to 256 MiB, default 1 MiB). ALLOWED_ORIGINS is a newline-separated list
+    of browser origins for quic:// listeners (webtransport builds only).
+    WEBTRANSPORT_PATH is the HTTP/3 resource path (default /omq); browsers
+    connect to https://host:port/omq when webtransport is enabled.
     MAX_READY_PEERS caps ready QUIC connections (default 1024). All must be
     set before backend materialization; later changes fail with EBUSY.
     Unknown to builds without the features (EINVAL).

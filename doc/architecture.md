@@ -278,7 +278,7 @@ which never lag. `wait_connected()` gates on readiness.
 | `tcp://`, `ipc://` | Byte streams with ZMTP framing |
 | `shm://` | Unix rendezvous, shared carrier ring and payload references (Linux, all but STREAM) |
 | `ws://`, `wss://` | ZWS over WebSocket, optionally TLS |
-| `quic://` | ZMTP byte stream over QUIC (Quinn, TLS 1.3) |
+| `quic://` | ZMTP byte stream over QUIC (Quinn, TLS 1.3); listeners also accept WebTransport with `webtransport` |
 | `inproc://` | Context-local message transfer without ZMTP |
 | `udp://` | RADIO/DISH datagrams |
 | `dart://` | Reliable ordered messages over UDP |

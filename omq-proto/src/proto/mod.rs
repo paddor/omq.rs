@@ -21,7 +21,7 @@ pub mod frame;
 pub mod greeting;
 pub mod mechanism;
 pub mod transform;
-#[cfg(feature = "ws")]
+#[cfg(any(feature = "ws", feature = "webtransport"))]
 pub mod web_address;
 #[cfg(feature = "ws")]
 pub(crate) mod ws_codec;

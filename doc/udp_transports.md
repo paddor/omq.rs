@@ -24,6 +24,11 @@ host name using system or explicit trust roots. TLS authenticates the server;
 client authentication uses ZMTP
 mechanisms. QUIC provides adaptive congestion control and retransmission.
 
+With the `webtransport` feature, the same `quic://` listener also accepts
+browsers over WebTransport at `https://host:port/omq`. Set
+`options.quic.allowed_origins` for browser origins. The
+[QUIC RFC](quic-rfc.md#11-webtransport-profile) defines the stream mapping.
+
 ### Loopback benchmarks
 
 These PUSH/PULL and REQ/REP charts compare QUIC with CURVE/TCP. They use different

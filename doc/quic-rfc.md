@@ -7,7 +7,8 @@
 
 This document specifies `quic://host:port`, the native OMQ profile for
 carrying ZMTP 3.x over QUIC v1 and TLS 1.3. One OMQ peer is one QUIC
-connection, with ALPN `omq-zmtp/1`.
+connection, with ALPN `omq-zmtp/1`. Section 11 adds an optional
+WebTransport profile for browsers on the same listener.
 
 ## 1. Preamble
 
@@ -21,8 +22,8 @@ defined in [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119) and
 
 ## 2. Scope
 
-This profile does not use HTTP/3, WebTransport, QUIC DATAGRAMs, or OMQ
-compression.
+The native profile does not use HTTP/3, WebTransport, QUIC DATAGRAMs, or
+OMQ compression.
 
 Socket compatibility, identities, subscriptions, multipart boundaries,
 and ZMTP mechanisms have their usual meanings. STREAM remains TCP-only.
@@ -187,3 +188,68 @@ received packets to another lane. It provides
 authenticated server transport and liveness independent of data credit.
 It does not promise higher throughput or lower latency than TCP. Compare
 against encrypted TCP when measuring encryption cost.
+
+## 11. WebTransport Profile
+
+This profile is optional. A listener that supports it serves browsers
+next to native peers on the same UDP port and dispatches by negotiated
+ALPN: `omq-zmtp/1` selects the native profile, `h3` selects WebTransport
+over HTTP/3. A listener MUST NOT infer a profile from application bytes
+or fall back to another profile. An `h3` connection without an accepted
+session is not an OMQ peer. WebTransport over HTTP/2 is not supported.
+
+### 11.1 Resource and Origin
+
+Browsers connect to `https://host:port/omq`. The resource is listener
+configuration (`QuicOptions::webtransport_path`, C option
+`OMQ_QUIC_WEBTRANSPORT_PATH`), not part of the `quic://` endpoint. The
+listener compares the CONNECT path and query with it exactly and answers
+a mismatch with HTTP 404.
+
+A CONNECT request that carries Origin MUST match the listener's allowlist
+(`QuicOptions::allowed_origins`, `OMQ_QUIC_ALLOWED_ORIGINS`), or it gets
+HTTP 403. Matching normalizes the HTTP(S) scheme, host case, and default
+port; opaque origins are invalid. The default allowlist is empty.
+Non-browser clients MAY omit Origin. Origin is not peer authentication.
+
+Browsers must discover HTTP/3 for the HTTPS origin, for example through
+an HTTPS DNS record or `Alt-Svc`. `requireUnreliable: true` prevents
+HTTP/2 fallback where supported.
+
+### 11.2 Draft Negotiation
+
+HTTP/3 SETTINGS select the draft:
+
+| Draft | Server SETTINGS | `:protocol` | Stream reset | Clients |
+| --- | --- | --- | --- | --- |
+| 02 | `0x2b603742` = 1 | `webtransport` | `RESET_STREAM` | Chromium, Firefox |
+| 07 | `0xc671706a` > 0 | `webtransport` | `RESET_STREAM` | Safari 26 |
+| 16 | `0x2c7cf000` = 1 | `webtransport-h3` | `RESET_STREAM_AT` | none yet |
+
+Both peers MUST negotiate HTTP/3 datagrams (`0x33` = 1) and QUIC DATAGRAM
+support; OMQ sends no datagrams. Draft-02 wins over draft-07. Draft-16
+requires the QUIC `reset_stream_at` transport parameter from both peers;
+its stream resets keep the session header as the Reliable Size. A
+listener without `RESET_STREAM_AT` MUST NOT advertise draft-16. A CONNECT
+token that does not match the negotiated draft is rejected.
+
+### 11.3 Streams
+
+One accepted session is one ZMTP peer. The client opens exactly two
+bidirectional session streams. Their IDs are not fixed, so each
+client-to-server stream starts with a role preface after WebTransport's
+stream header:
+
+| Role | Client-to-server | Server-to-client |
+| --- | --- | --- |
+| Data | `4f 4d 51 44 01 00 00 00` ("OMQD"), then ZMTP | ZMTP |
+| Liveness | `OMQL` preface, then records | `OMQL` preface, then records |
+
+The roles MAY arrive in either order. An unknown or duplicate role, or a
+third session stream, closes the peer. The listener writes its liveness
+preface after both client prefaces. HTTP/3 control and QPACK streams are
+not OMQ streams.
+
+Liveness, heartbeats, admission, close, and linger follow Sections 5 to 9.
+The setup deadline also covers SETTINGS and CONNECT. Application close
+codes travel in a CloseWebTransportSession capsule.

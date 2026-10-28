@@ -1,4 +1,8 @@
-//! Stream and connection wrappers for native QUIC peers.
+//! One concrete type per role for raw QUIC and WebTransport streams.
+//!
+//! Enum dispatch keeps both profiles on the same data/liveness code without
+//! boxing or trait objects. WebTransport streams are Quinn streams behind the
+//! session's stream-type prefix, so their costs match the raw profile.
 
 use std::future::Future;
 use std::io;
@@ -9,22 +13,36 @@ use bytes::Bytes;
 use futures::future::BoxFuture;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-/// Owner of the peer's QUIC connection.
+/// Owner of the peer's QUIC connection or WebTransport session.
 #[derive(Clone)]
 pub(super) enum Carrier {
     Raw(quinn::Connection),
+    #[cfg(feature = "webtransport")]
+    Web(Box<omq_webtrans_quinn::Session>),
 }
 
 impl Carrier {
     pub(super) fn connection(&self) -> &quinn::Connection {
         match self {
             Self::Raw(connection) => connection,
+            #[cfg(feature = "webtransport")]
+            Self::Web(session) => session,
         }
     }
 
     pub(super) fn close(&self, code: u32) {
         match self {
             Self::Raw(connection) => connection.close(quinn::VarInt::from_u32(code), b""),
+            // Session close spawns its capsule writer; without a runtime,
+            // close the connection directly.
+            #[cfg(feature = "webtransport")]
+            Self::Web(session) if tokio::runtime::Handle::try_current().is_ok() => {
+                session.close(code, b"");
+            }
+            #[cfg(feature = "webtransport")]
+            Self::Web(session) => session
+                .connection()
+                .close(quinn::VarInt::from_u32(code), b""),
         }
     }
 
@@ -44,16 +62,37 @@ impl Carrier {
                 stream = connection.accept_bi() => stream.is_ok(),
                 stream = connection.accept_uni() => stream.is_ok(),
             },
+            #[cfg(feature = "webtransport")]
+            Self::Web(session) => tokio::select! {
+                stream = session.accept_bi() => stream.is_ok(),
+                stream = session.accept_uni() => stream.is_ok(),
+            },
         }
+    }
+}
+
+#[cfg(feature = "webtransport")]
+trait SessionConnection {
+    fn connection(&self) -> &quinn::Connection;
+}
+
+#[cfg(feature = "webtransport")]
+impl SessionConnection for omq_webtrans_quinn::Session {
+    fn connection(&self) -> &quinn::Connection {
+        self
     }
 }
 
 pub(super) enum SendHalf {
     Raw(quinn::SendStream),
+    #[cfg(feature = "webtransport")]
+    Web(omq_webtrans_quinn::SendStream),
 }
 
 pub(super) enum RecvHalf {
     Raw(quinn::RecvStream),
+    #[cfg(feature = "webtransport")]
+    Web(omq_webtrans_quinn::RecvStream),
 }
 
 /// Stream outcome after FIN.
@@ -71,6 +110,8 @@ impl SendHalf {
     ) -> Poll<io::Result<usize>> {
         match self {
             Self::Raw(stream) => AsyncWrite::poll_write(Pin::new(stream), cx, buf),
+            #[cfg(feature = "webtransport")]
+            Self::Web(stream) => AsyncWrite::poll_write(Pin::new(stream), cx, buf),
         }
     }
 
@@ -87,31 +128,52 @@ impl SendHalf {
             Self::Raw(stream) => pin!(stream.write_chunks(bufs))
                 .poll(cx)
                 .map(|result| result.map(|written| written.bytes).map_err(io::Error::from)),
+            #[cfg(feature = "webtransport")]
+            Self::Web(stream) => pin!(stream.write_chunks(bufs)).poll(cx).map(|result| {
+                result
+                    .map(|written| written.bytes)
+                    .map_err(io::Error::other)
+            }),
         }
     }
 
     pub(super) fn finish(&mut self) -> io::Result<()> {
         match self {
             Self::Raw(stream) => stream.finish().map_err(io::Error::other),
+            #[cfg(feature = "webtransport")]
+            Self::Web(stream) => stream.finish().map_err(io::Error::other),
         }
     }
 
-    /// Keep the stopped future across polls.
+    /// Raw streams keep their stopped future across polls. WebTransport's
+    /// wrapper recreates its future; Quinn's stopped future is cancel-safe.
+    #[cfg_attr(not(feature = "webtransport"), expect(clippy::unnecessary_wraps))]
     pub(super) fn raw_stopped(
         &self,
-    ) -> BoxFuture<'static, Result<Option<quinn::VarInt>, quinn::StoppedError>> {
+    ) -> Option<BoxFuture<'static, Result<Option<quinn::VarInt>, quinn::StoppedError>>> {
         match self {
-            Self::Raw(stream) => Box::pin(stream.stopped()),
+            Self::Raw(stream) => Some(Box::pin(stream.stopped())),
+            #[cfg(feature = "webtransport")]
+            Self::Web(_) => None,
         }
     }
 
     pub(super) fn poll_stopped(
         &mut self,
-        raw: &mut BoxFuture<'static, Result<Option<quinn::VarInt>, quinn::StoppedError>>,
+        raw: Option<&mut BoxFuture<'static, Result<Option<quinn::VarInt>, quinn::StoppedError>>>,
         cx: &mut Context<'_>,
     ) -> Poll<Completion> {
         match self {
-            Self::Raw(_) => Poll::Ready(match ready!(raw.as_mut().poll(cx)) {
+            Self::Raw(_) => {
+                let stopped = raw.expect("raw stream keeps its stopped future");
+                Poll::Ready(match ready!(stopped.as_mut().poll(cx)) {
+                    Ok(None) => Completion::Acknowledged,
+                    Ok(Some(_)) => Completion::PeerStopped,
+                    Err(e) => Completion::Failed(io::Error::other(e)),
+                })
+            }
+            #[cfg(feature = "webtransport")]
+            Self::Web(stream) => Poll::Ready(match ready!(pin!(stream.stopped()).poll(cx)) {
                 Ok(None) => Completion::Acknowledged,
                 Ok(Some(_)) => Completion::PeerStopped,
                 Err(e) => Completion::Failed(io::Error::other(e)),
@@ -128,6 +190,8 @@ impl RecvHalf {
     ) -> Poll<io::Result<()>> {
         match self {
             Self::Raw(stream) => AsyncRead::poll_read(Pin::new(stream), cx, buf),
+            #[cfg(feature = "webtransport")]
+            Self::Web(stream) => AsyncRead::poll_read(Pin::new(stream), cx, buf),
         }
     }
 }
@@ -145,13 +209,19 @@ impl SendHalf {
             Self::Raw(stream) => {
                 let _ = stream.set_priority(1);
             }
+            #[cfg(feature = "webtransport")]
+            Self::Web(stream) => {
+                let _ = stream.set_priority(1);
+            }
         }
     }
 
-    /// Cancel-safe: Quinn admits bytes atomically.
+    /// Cancel-safe: both stream types admit bytes atomically.
     pub(super) async fn write(&mut self, buf: &[u8]) -> Option<usize> {
         match self {
             Self::Raw(stream) => stream.write(buf).await.ok(),
+            #[cfg(feature = "webtransport")]
+            Self::Web(stream) => stream.write(buf).await.ok(),
         }
     }
 }
@@ -164,6 +234,13 @@ impl RecvHalf {
                 Ok(Some(n)) => CtlRead::Data(n),
                 Ok(None) => CtlRead::Finished,
                 Err(quinn::ReadError::ConnectionLost(_)) => CtlRead::Lost,
+                Err(_) => CtlRead::Failed,
+            },
+            #[cfg(feature = "webtransport")]
+            Self::Web(stream) => match stream.read(buf).await {
+                Ok(Some(n)) => CtlRead::Data(n),
+                Ok(None) => CtlRead::Finished,
+                Err(omq_webtrans_quinn::ReadError::SessionError(_)) => CtlRead::Lost,
                 Err(_) => CtlRead::Failed,
             },
         }

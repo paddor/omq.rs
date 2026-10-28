@@ -5,6 +5,8 @@ members = [
     "omq-shm",
     "omq-tokio",
     "omq-libzmq",
+    "vendor/omq-webtrans-proto",
+    "vendor/omq-webtrans-quinn",
 ]
 default-members = ["omq-proto", "omq-tokio"]
 # Bindings live in their own subtree. Each is its own build root - Python's

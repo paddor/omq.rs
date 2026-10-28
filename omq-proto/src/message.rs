@@ -392,6 +392,15 @@ impl From<Payload> for Message {
     }
 }
 
+impl TryFrom<Message> for Bytes {
+    type Error = Message;
+
+    /// Equivalent to [`Message::into_bytes`].
+    fn try_from(msg: Message) -> Result<Bytes, Message> {
+        msg.into_bytes()
+    }
+}
+
 /// Synthesize a 9-byte routing identity for a peer that did not provide one.
 ///
 /// The leading null byte marks the identity as auto-generated (libzmq

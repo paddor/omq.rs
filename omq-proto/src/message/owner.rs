@@ -196,6 +196,23 @@ mod tests {
     }
 
     #[test]
+    fn into_bytes_moves_the_shared_owner_reference() {
+        let releases = Arc::new(AtomicUsize::new(0));
+        let owner = Arc::new(Owner {
+            bytes: vec![7; 128],
+            releases: releases.clone(),
+        });
+        let pointer = owner.bytes.as_ptr();
+        let weak = Arc::downgrade(&owner);
+        let bytes = Payload::from_shared_owner(owner).into_bytes();
+        assert_eq!(bytes.as_ptr(), pointer);
+        assert_eq!(releases.load(Ordering::Relaxed), 0);
+        drop(bytes);
+        assert_eq!(releases.load(Ordering::Relaxed), 1);
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
     fn shared_payload_clones_and_bytes_views_release_their_own_references() {
         for size in [0, 1, 128, 8192] {
             let releases = Arc::new(AtomicUsize::new(0));

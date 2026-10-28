@@ -44,7 +44,7 @@ impl Message {
             },
             MessageInner::Single(payload) => MessageInner::RoutedBytes {
                 routing_id,
-                data: payload.as_bytes(),
+                data: payload.into_bytes(),
             },
             other => MessageInner::RoutedMulti {
                 routing_id,

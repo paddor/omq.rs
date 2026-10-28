@@ -46,6 +46,54 @@ fn try_as_parts_empty() {
 }
 
 #[test]
+fn message_into_bytes_moves_heap_part() {
+    let b = Bytes::from(vec![7u8; 128]);
+    let ptr = b.as_ptr();
+    let got = Message::single(b).into_bytes().unwrap();
+    assert!(std::ptr::addr_eq(got.as_ptr(), ptr));
+    assert_eq!(got, vec![7u8; 128]);
+}
+
+#[test]
+fn message_into_bytes_copies_inline_part() {
+    assert_eq!(Message::from_slice(b"hi").into_bytes().unwrap(), &b"hi"[..]);
+    assert_eq!(Message::from_slice(b"").into_bytes().unwrap(), Bytes::new());
+}
+
+#[test]
+fn message_into_bytes_drops_routing_id() {
+    let small = Message::from_slice(b"hi").with_routing_id(7);
+    assert_eq!(small.into_bytes().unwrap(), &b"hi"[..]);
+
+    let b = Bytes::from(vec![7u8; 128]);
+    let ptr = b.as_ptr();
+    let large = Message::single(b).with_routing_id(7);
+    let got = large.into_bytes().unwrap();
+    assert!(std::ptr::addr_eq(got.as_ptr(), ptr));
+}
+
+#[test]
+fn message_into_bytes_returns_message_unless_one_part() {
+    let multi = Message::multipart(["a", "b"]);
+    assert_eq!(multi.clone().into_bytes().unwrap_err(), multi);
+
+    let delimited = Message::from_slice(b"body").prepend_empty_delimiter();
+    assert_eq!(delimited.clone().into_bytes().unwrap_err(), delimited);
+
+    assert!(Message::new().into_bytes().unwrap_err().is_empty());
+}
+
+#[test]
+fn message_try_into_bytes() {
+    let got: Bytes = Message::from_slice(b"hi").try_into().unwrap();
+    assert_eq!(got, &b"hi"[..]);
+
+    let multi = Message::multipart(["a", "b"]);
+    let err = Bytes::try_from(multi.clone()).unwrap_err();
+    assert_eq!(err, multi);
+}
+
+#[test]
 fn message_single() {
     let m = Message::single("hello");
     assert_eq!(m.len(), 1);

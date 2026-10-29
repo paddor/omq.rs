@@ -150,8 +150,9 @@ new Sub({
 The listener must list the page origin in `QuicOptions::allowed_origins`.
 Each connection requests `allowPooling: false` and `requireUnreliable: true`,
 so every OMQ peer gets its own HTTP/3 QUIC connection.
-The OMQ listener supports both the draft-02 handshake used by current
-Chromium and Firefox and draft-16 with Quickie's `RESET_STREAM_AT` extension.
+The listener negotiates WebTransport draft-02 (Chromium, Firefox) and
+draft-07 (Safari). Draft-16 needs QUIC `RESET_STREAM_AT`, which stock Quinn
+lacks; no browser requires it yet.
 
 ### Robustness Options
 
@@ -193,7 +194,7 @@ changes under development, not an older release.
 Run `npm run test:browser` for the headless browser interop tests. The
 WebTransport spec probes Chromium and Firefox against the fixture's
 `quic://` listener, trusting its ten-day certificate by hash. It checks
-the full message exchange with both browsers. Set `OMQ_TEST_CHROMIUM` or
+the message exchange, flushing on close, and liveness in both browsers. Set `OMQ_TEST_CHROMIUM` or
 `OMQ_TEST_FIREFOX` to test a browser executable outside Playwright's pinned
 versions. The WebSocket spec runs in Firefox. It
 starts a Rust WebSocket peer, serves a temporary browser bundle, and verifies

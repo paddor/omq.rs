@@ -212,9 +212,9 @@ HTTP 403. Matching normalizes the HTTP(S) scheme, host case, and default
 port; opaque origins are invalid. The default allowlist is empty.
 Non-browser clients MAY omit Origin. Origin is not peer authentication.
 
-Browsers must discover HTTP/3 for the HTTPS origin, for example through
-an HTTPS DNS record or `Alt-Svc`. `requireUnreliable: true` prevents
-HTTP/2 fallback where supported.
+Browsers open WebTransport sessions over HTTP/3 directly; no HTTPS DNS
+record or `Alt-Svc` is needed. `requireUnreliable: true` prevents HTTP/2
+fallback where supported.
 
 ### 11.2 Draft Negotiation
 

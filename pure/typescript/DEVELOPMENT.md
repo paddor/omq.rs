@@ -28,10 +28,10 @@ npm run test:browser
 ```
 
 `test/webtransport-browser.playwright.mjs` starts the fixture's
-`webtransport-browser` mode, which binds `h3+quic://` REP, PUB, and PULL
-endpoints with a ten-day ECDSA certificate. Chromium and Firefox trust it
+`webtransport-browser` mode, which binds `quic://` REP, PUB, PULL, and state
+REP listeners with a ten-day ECDSA certificate. Chromium and Firefox trust it
 through `serverCertificateHashes`; nothing disables certificate
-verification.
+verification. The liveness test freezes the fixture with `SIGSTOP`.
 
 The browser suite starts a Rust WebSocket peer from the workspace `omq-tokio`
 fixture, serves a temporary browser bundle, and checks native browser

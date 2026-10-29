@@ -86,6 +86,7 @@ class FakeWebTransport {
   static last: FakeWebTransport | null = null;
   readonly ready = Promise.resolve();
   readonly streams: PeerStream[] = [];
+  readonly streamOptions: (WebTransportSendStreamOptions | undefined)[] = [];
   closedWith: WebTransportCloseInfo | null = null;
   private resolveClosed!: () => void;
   readonly closed = new Promise<void>((
@@ -99,7 +100,8 @@ class FakeWebTransport {
     FakeWebTransport.last = this;
   }
 
-  createBidirectionalStream() {
+  createBidirectionalStream(options?: WebTransportSendStreamOptions) {
+    this.streamOptions.push(options);
     const side = {
       readable: null as unknown as ReadableStream<Uint8Array>,
       writable: null as unknown as WritableStream<Uint8Array>,
@@ -145,6 +147,7 @@ async function readyDealer(opts: Partial<ConnectionOptions> = {}) {
   const wt = FakeWebTransport.last!;
   const [data, liveness] = wt.streams as [PeerStream, PeerStream];
   await data.readExact(DATA_PREFACE.byteLength);
+  await liveness.toClient.write(LIVENESS_PREFACE);
   const decoder = new ZmtpDecoder();
   decoder.push(await data.readExact(64));
   await data.toClient.write(encodeGreeting("NULL"));
@@ -191,7 +194,16 @@ describe("WebTransport ZMTP connection", () => {
     const [data, liveness] = wt.streams as [PeerStream, PeerStream];
     expect(await data.readExact(8)).toEqual(DATA_PREFACE);
     expect(await liveness.readExact(8)).toEqual(LIVENESS_PREFACE);
-    const greeting = await data.readExact(64);
+    expect(wt.streamOptions[1]?.sendOrder).toBe(1);
+
+    // ZMTP waits for the peer's liveness preface.
+    const greetingRead = data.readExact(64);
+    let early = false;
+    void greetingRead.then(() => (early = true));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(early).toBe(false);
+    await liveness.toClient.write(LIVENESS_PREFACE);
+    const greeting = await greetingRead;
     expect(greeting[12]).toBe("N".charCodeAt(0));
 
     await data.toClient.write(encodeGreeting("NULL"));
@@ -290,8 +302,10 @@ describe("WebTransport ZMTP connection", () => {
           new Uint8Array([7, 0, 0, 0, 0, 0, 0, 0, 1]),
         );
       } else if (scenario === "fin") {
+        await liveness.toClient.write(LIVENESS_PREFACE);
         await data.toClient.close();
       } else {
+        await liveness.toClient.write(LIVENESS_PREFACE);
         await data.toClient.write(encodeGreeting("PLAIN", true));
       }
       await until(() => wt.closedWith !== null);
@@ -319,7 +333,11 @@ describe("WebTransport ZMTP connection", () => {
       onCommand: (_c, name) => commands.push(name),
     });
     await until(() => (FakeWebTransport.last?.streams.length ?? 0) === 2);
-    const data = FakeWebTransport.last!.streams[0]!;
+    const [data, liveness] = FakeWebTransport.last!.streams as [
+      PeerStream,
+      PeerStream,
+    ];
+    await liveness.toClient.write(LIVENESS_PREFACE);
     await data.toClient.write(encodeGreeting("NULL"));
     await data.toClient.write(
       encodeCommandFrame(encodeReady("XSUB", new Uint8Array(0))),

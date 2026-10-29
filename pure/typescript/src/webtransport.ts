@@ -90,6 +90,8 @@ export class WebTransportConnection implements PeerConnection {
   private dataWriter: WritableStreamDefaultWriter<Uint8Array> | null = null;
   private livenessWriter: WritableStreamDefaultWriter<Uint8Array> | null = null;
   private readers: ReadableStreamDefaultReader<Uint8Array>[] = [];
+  /** Data stream waiting for the peer's liveness preface. */
+  private pendingData: ReadableStream<Uint8Array> | null = null;
   private decoder: ZmtpDecoder;
   private handshake: ZmtpHandshake;
   private sends: SendQueue;
@@ -144,21 +146,32 @@ export class WebTransportConnection implements PeerConnection {
     await transport.ready;
     if (this.isClosed) return;
     const data = await transport.createBidirectionalStream();
-    const liveness = await transport.createBidirectionalStream();
+    // Liveness outranks data in the send scheduler (QUIC RFC Sec. 6).
+    const liveness = await transport.createBidirectionalStream({
+      sendOrder: 1,
+    });
     if (this.isClosed) return;
     this.dataWriter = data.writable.getWriter();
     this.livenessWriter = liveness.writable.getWriter();
-    const mechanism = this.opts.plain ? "PLAIN" : "NULL";
-    // Write both role prefaces at once; never wait for the peer first.
-    void this.dataWriter
-      .write(concat(DATA_PREFACE, encodeGreeting(mechanism)))
-      .catch(() => {});
+    // Role prefaces first. ZMTP starts once the peer's liveness preface
+    // arrives, as in the native profile (QUIC RFC Sec. 4).
+    void this.dataWriter.write(DATA_PREFACE).catch(() => {});
     void this.livenessWriter.write(LIVENESS_PREFACE).catch(() => {});
+    this.pendingData = data.readable;
     this.state = "handshaking";
     this.lastRecordAt = Date.now();
-    void this.readData(data.readable.getReader());
     void this.readLiveness(liveness.readable.getReader());
     this.startHeartbeat();
+  }
+
+  /** Write our ZMTP greeting and start reading the data stream. */
+  private startZmtp(): void {
+    const readable = this.pendingData;
+    this.pendingData = null;
+    if (!readable || !this.dataWriter) return;
+    const mechanism = this.opts.plain ? "PLAIN" : "NULL";
+    void this.dataWriter.write(encodeGreeting(mechanism)).catch(() => {});
+    void this.readData(readable.getReader());
   }
 
   private async readData(reader: ReadableStreamDefaultReader<Uint8Array>) {
@@ -240,6 +253,7 @@ export class WebTransportConnection implements PeerConnection {
               throw new Error("Invalid liveness preface");
             }
             prefaceDone = true;
+            this.startZmtp();
             continue;
           }
           const value64 = new DataView(unit.buffer, unit.byteOffset)
@@ -378,6 +392,7 @@ export class WebTransportConnection implements PeerConnection {
   private releaseStreams(): void {
     for (const reader of this.readers) void reader.cancel().catch(() => {});
     this.readers = [];
+    this.pendingData = null;
     this.livenessWriter = null;
   }
 

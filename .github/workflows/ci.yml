@@ -36,6 +36,7 @@ jobs:
       run_zig: ${{ steps.scope.outputs.zig == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
       run_ruby: ${{ steps.scope.outputs.ruby == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
       run_node: ${{ steps.scope.outputs.node == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+      run_typescript: ${{ steps.scope.outputs.typescript == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v3
@@ -122,6 +123,14 @@ jobs:
               - 'bindings/node/**'
               - '.github/workflows/ci.yml'
               - '.github/workflows/release-node.yml'
+            typescript:
+              - 'pure/typescript/**'
+              - 'omq-proto/**'
+              - 'omq-tokio/**'
+              - 'vendor/**'
+              - 'Cargo.toml'
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/release-omq-ts-*.yml'
       - id: matrix
         run: |
           if [[ "${{ github.event_name }}" == "schedule" || "${{ github.event_name }}" == "workflow_dispatch" ]]; then
@@ -217,6 +226,70 @@ jobs:
           node --check scripts/prepare-release.js
           version="$(node -p 'require("./package.json").version')"
           npm run release:prepare -- "$version" --dry-run
+
+  typescript:
+    name: OMQ.ts
+    needs: [changes]
+    if: needs.changes.outputs.run_typescript == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: pure/typescript
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: pure/typescript/package-lock.json
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+          cache: true
+      - name: install dependencies
+        run: npm ci
+      - name: check, lint, and unit tests
+        run: npm run ci
+
+  typescript-interop:
+    name: OMQ.ts interop
+    needs: [changes]
+    if: needs.changes.outputs.run_typescript == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: pure/typescript
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: pure/typescript/test/fixtures/omq-rs-peer
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: pure/typescript/package-lock.json
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+          cache: true
+      - name: install dependencies
+        run: npm ci
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('pure/typescript/package-lock.json') }}
+      - name: install browsers
+        run: npx playwright install --with-deps firefox chromium
+      - name: build fixture
+        run: cargo build --manifest-path test/fixtures/omq-rs-peer/Cargo.toml
+      - name: Node.js interop
+        run: npm run test:interop
+      - name: browser interop
+        run: npm run test:browser
 
   go-test:
     name: go test
@@ -989,6 +1062,8 @@ jobs:
         dotnet-lint,
         dotnet,
         node-package,
+        typescript,
+        typescript-interop,
       ]
     runs-on: ubuntu-latest
     if: always()

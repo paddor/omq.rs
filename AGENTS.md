@@ -2,8 +2,8 @@
 
 ## Workspace layout
 
-Seven-crate Cargo workspace; `bindings/` is excluded and built
-out-of-tree (maturin etc.).
+Seven-crate Cargo workspace; `bindings/` and `pure/` are excluded and built
+out-of-tree (maturin, npm, etc.).
 
 - **`omq-proto`** -- sans-I/O ZMTP 3.x core. Codec (`Connection`),
   message/payload types, greeting + frame state machines, mechanism
@@ -25,6 +25,10 @@ out-of-tree (maturin etc.).
   for the `webtransport` feature.
 - **`bindings/`** -- language bindings over `omq-tokio` or `omq-libzmq`
   ([`doc/bindings.md`](doc/bindings.md)).
+- **`pure/`** -- OMQ implementations in other languages that speak ZMTP
+  without the Rust engine. `pure/typescript` is OMQ.ts, the browser client
+  (`ws://`, `wss://`, `lz4+ws://`, WebTransport); its interop fixture builds
+  against the workspace `omq-tokio`.
 
 The queue crates `yring` and `fanring` are external dependencies maintained
 in [fanring.rs](https://github.com/paddor/fanring.rs). Queue tests, Loom,

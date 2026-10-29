@@ -14,7 +14,7 @@ Build the npm package output:
 npm run build:npm
 ```
 
-Run the live Node.js interop suite against the crates.io `omq-tokio` fixture:
+Run the live Node.js interop suite against the workspace `omq-tokio` fixture:
 
 ```sh
 npm run test:interop
@@ -33,7 +33,7 @@ endpoints with a ten-day ECDSA certificate. Chromium and Firefox trust it
 through `serverCertificateHashes`; nothing disables certificate
 verification.
 
-The browser suite starts a Rust WebSocket peer from the crates.io `omq-tokio`
+The browser suite starts a Rust WebSocket peer from the workspace `omq-tokio`
 fixture, serves a temporary browser bundle, and checks native browser
 `WebSocket` plus WASM compression paths. It covers `ws://`, `wss://`, PLAIN
 auth, reconnect, and connect-before-bind retries. It also covers `lz4+ws://`.
@@ -45,16 +45,17 @@ Playwright writes `test-results/` and `playwright-report/`; both are ignored.
 
 ## CI
 
-GitHub Actions runs `npm run ci` on every push and pull request. The interop job
-installs Firefox and runs `npm run test:interop` plus `npm run test:browser`
-against the crates.io `omq-tokio` fixture.
+The omq.rs `ci.yml` runs `npm run ci` and both interop suites when
+`pure/typescript/`, `omq-proto/`, `omq-tokio/`, or `vendor/` change. The
+fixture builds against the workspace, so Rust transport changes are tested
+before release. The interop job installs Firefox and Chromium.
 
 ## Releasing
 
 ### npm
 
-`@paddor/omq` publishes to npm from `.github/workflows/release-npm.yml`. The
-workflow version comes from an `omq-npm-v*` tag or the manual
+`@paddor/omq` publishes to npm from `.github/workflows/release-omq-ts-npm.yml`
+in omq.rs. The workflow version comes from an `omq-ts-v*` tag or the manual
 `workflow_dispatch` input. It runs checks, lint, tests, `deno publish
 --dry-run`, packs the tarball, smoke-tests an installed tarball, then publishes
 from the `npm` environment.
@@ -64,19 +65,26 @@ configure a trusted publisher for `@paddor/omq` before tagging:
 
 ```text
 GitHub owner: paddor
-GitHub repository: omq.ts
-Workflow filename: release-npm.yml
+GitHub repository: omq.rs
+Workflow filename: release-omq-ts-npm.yml
 Environment name: npm
 Allowed action: npm publish
 ```
 
 If the package does not exist yet, trusted publishing may need a bootstrap
 publish first. Add a publish-capable GitHub Actions secret named `NPM_TOKEN`,
-run `.github/workflows/release-npm.yml`, then remove or rotate that token and
-configure the trusted publisher before the next CI release.
+run `.github/workflows/release-omq-ts-npm.yml`, then remove or rotate that
+token and configure the trusted publisher before the next CI release.
 
 ```sh
-git tag -a omq-npm-v0.2.3 -m "omq.ts npm 0.2.3"
-git push origin omq-npm-v0.2.3
-gh run watch --repo paddor/omq.ts --exit-status
+git tag -a omq-ts-v0.2.3 -m "OMQ.ts 0.2.3"
+git push origin omq-ts-v0.2.3
+gh run watch --repo paddor/omq.rs --exit-status
 ```
+
+### JSR
+
+`.github/workflows/release-omq-ts-jsr.yml` runs `deno publish` on `main`
+pushes that touch `pure/typescript/` and on `workflow_dispatch`. JSR publishes
+through GitHub Actions OIDC, so the `@paddor/omq` JSR package must be linked to
+the `paddor/omq.rs` repository.

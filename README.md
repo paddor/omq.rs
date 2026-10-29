@@ -15,6 +15,7 @@ Your application sends messages, OMQ handles the network. Queues all the way!
   SHM. Sockets handle framing, reconnection, and back-pressure.
 - **Language support.** Rust plus [bindings](#workspace) for C/C++, Python,
   Ruby, Go, Java, Node.js, .NET, Lua, BEAM, Zig, and Crystal.
+  [OMQ.ts](pure/typescript/) is a TypeScript browser client.
 
 ## Usage
 
@@ -176,12 +177,16 @@ Language bindings:
 | Zig | [`OMQ.zig`](bindings/zig/): C API wrapper |
 | Crystal | [`omq-binding.cr`](https://github.com/paddor/omq-binding.cr): native binding |
 
+Pure implementations speak ZMTP without the Rust engine:
+
+| Language | Implementation |
+|----------|----------------|
+| TypeScript | [`OMQ.ts`](pure/typescript/): browser client over `ws://`, `wss://`, `lz4+ws://`, and WebTransport |
+
 ## Sister projects
 
 - [OMQ.rb](https://github.com/zeromq/omq.rb): Ruby implementation with
   compatible compression and an optional Rust backend.
-- [OMQ.ts](https://github.com/paddor/omq.ts): TypeScript implementation
-  for browsers using the ZWS transport.
 
 ## Further reading
 

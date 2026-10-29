@@ -110,9 +110,10 @@ HWM.
 ## Continuous integration
 
 PR and `main` CI run Linux fmt, clippy, default workspace tests, DART and QUIC
-MSRV checks, and binding smoke tests. The full matrix runs Saturdays and on
-`workflow_dispatch`: macOS, Windows, 32-bit Linux, compression, CURVE, pyzmq
-and cppzmq interop, fuzz smoke, packaging, and binding versions.
+MSRV checks, binding smoke tests, and OMQ.ts checks plus browser interop. The
+full matrix runs Saturdays and on `workflow_dispatch`: macOS, Windows, 32-bit
+Linux, compression, CURVE, pyzmq and cppzmq interop, fuzz smoke, packaging,
+and binding versions.
 
 `extended.yml` runs Sundays and on `workflow_dispatch`: long fuzz runs, one
 soak job per soak test, `--ignored` stress tests, libzmq draft interop

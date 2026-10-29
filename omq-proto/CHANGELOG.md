@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.37.0] - 2026-10-29
+
+### Breaking
+
+- With `webtransport`, `QuicOptions` has two more public fields. Exhaustive
+  struct literals need `..QuicOptions::default()`.
+
 ### Added
 
 - `Message::into_bytes()` and `TryFrom<Message> for Bytes` move a single

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.33.0] - 2026-10-29
+
 ### Added
 
 - `webtransport` feature: `quic://` listeners also accept WebTransport over
@@ -15,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   draft-16 waits for `RESET_STREAM_AT` in Quinn. CONNECT path and Origin are
   checked against `quic.webtransport_path` and `quic.allowed_origins`. One
   session carries one ZMTP peer on two role-prefixed streams.
+
+### Changed
+
+- Depend on `omq-proto` 0.37 and `omq-shm` 0.5.
 
 ## [0.32.0] - 2026-10-24
 

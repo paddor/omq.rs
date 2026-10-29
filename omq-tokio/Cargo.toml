@@ -1,6 +1,6 @@
 [package]
 name = "omq-tokio"
-version = "0.32.1"
+version = "0.33.0"
 edition.workspace = true
 rust-version.workspace = true
 autotests = false
@@ -71,7 +71,7 @@ omq-webtrans-quinn = { path = "../vendor/omq-webtrans-quinn", version = "0.1.0",
 nix = { version = "0.31", default-features = false, features = ["signal"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-omq-shm = { path = "../omq-shm", version = "0.4.1" }
+omq-shm = { path = "../omq-shm", version = "0.5.0" }
 
 [dev-dependencies]
 serde_json = "1.0.154"

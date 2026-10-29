@@ -220,30 +220,83 @@ async function runInPage(page, endpoints, hash) {
 
 test.setTimeout(420_000);
 
-for (const browser of ["chromium", "firefox"]) {
-  test(`${browser} WebTransport interop with omq.rs quic listener`, async ({ browserName, page }) => {
-    test.skip(browserName !== browser, `runs on ${browser}`);
-    const root = await prepareSite();
-    const site = await startSite(root);
-    const fixture = await startFixture(site.origin);
-    try {
-      await page.goto(`${site.origin}/`);
-      const results = await runInPage(page, fixture.endpoints, fixture.hash);
-      expect(results.error, fixture.stderr()).toBeUndefined();
-      expect(results).toEqual({
-        echo: 50,
-        multipart: 3,
-        middlePart: 2,
-        largeOk: true,
-        subTopic: "wt.topic",
-        subOrdered: true,
-        pulled: 200,
-        pulledAfterClose: 300,
+/** Serve the bundle, start the Rust fixture, and open the page. */
+async function withFixture(page, body) {
+  const root = await prepareSite();
+  const site = await startSite(root);
+  const fixture = await startFixture(site.origin);
+  try {
+    await page.goto(`${site.origin}/`);
+    await body(fixture);
+  } finally {
+    await stop(fixture.child);
+    site.server.close();
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+test("WebTransport interop with omq.rs quic listener", async ({ page }) => {
+  await withFixture(page, async (fixture) => {
+    const results = await runInPage(page, fixture.endpoints, fixture.hash);
+    expect(results.error, fixture.stderr()).toBeUndefined();
+    expect(results).toEqual({
+      echo: 50,
+      multipart: 3,
+      middlePart: 2,
+      largeOk: true,
+      subTopic: "wt.topic",
+      subOrdered: true,
+      pulled: 200,
+      pulledAfterClose: 300,
+    });
+  });
+});
+
+test("WebTransport liveness keeps idle peers and drops frozen ones", async ({ page }) => {
+  test.skip(process.platform === "win32", "freezes the fixture with SIGSTOP");
+  await withFixture(page, async (fixture) => {
+    const idle = await page.evaluate(async ({ endpoints, hash }) => {
+      const { Message, Req } = await import("./omq.js");
+      const errors = [];
+      const req = new Req({
+        reconnect: false,
+        handshakeTimeoutMs: 10_000,
+        heartbeatIntervalMs: 100,
+        heartbeatTimeoutMs: 500,
+        webTransport: {
+          serverCertificateHashes: [{
+            algorithm: "sha-256",
+            value: new Uint8Array(hash),
+          }],
+        },
+        onError: (error) => errors.push(error.message),
       });
+      globalThis.liveness = { req, errors };
+      const echo = (text) =>
+        Promise.race([
+          req.send(new Message(text)),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error(`${text} timeout`)), 10_000)
+          ),
+        ]);
+      req.connect(endpoints["/rep"]);
+      await echo("before");
+      // Idle three timeouts long; PING/PONG records keep the peer alive.
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      const reply = await echo("after");
+      return { reply: reply.string(0), errors: [...errors] };
+    }, { endpoints: fixture.endpoints, hash: fixture.hash });
+    expect(idle).toEqual({ reply: "after", errors: [] });
+
+    process.kill(fixture.child.pid, "SIGSTOP");
+    try {
+      await expect.poll(
+        () => page.evaluate(() => globalThis.liveness.errors),
+        { timeout: 5_000 },
+      ).toContainEqual(expect.stringContaining("Liveness timeout"));
     } finally {
-      await stop(fixture.child);
-      site.server.close();
-      await rm(root, { recursive: true, force: true });
+      process.kill(fixture.child.pid, "SIGCONT");
+      await page.evaluate(() => globalThis.liveness.req.close());
     }
   });
-}
+});

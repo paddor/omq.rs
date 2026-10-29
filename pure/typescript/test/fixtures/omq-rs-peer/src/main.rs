@@ -720,15 +720,23 @@ async fn channel_bind(endpoint: Endpoint, expected: String, reply: String, auth:
     tokio::time::sleep(Duration::from_millis(200)).await;
 }
 
-async fn router_bind(
-    endpoint: Endpoint,
-    identity: String,
-    request_a: String,
-    request_b: String,
-    reply_a: String,
-    reply_b: String,
-    auth: &str,
-) {
+/// Two-part request and reply bodies from the command line.
+struct Exchange {
+    request: [String; 2],
+    reply: [String; 2],
+}
+
+impl Exchange {
+    fn from_args(args: &mut impl Iterator<Item = String>) -> Self {
+        let mut next = |what| args.next().expect(what);
+        Self {
+            request: [next("request a"), next("request b")],
+            reply: [next("reply a"), next("reply b")],
+        }
+    }
+}
+
+async fn router_bind(endpoint: Endpoint, identity: String, exchange: Exchange, auth: &str) {
     let router = Socket::new(SocketType::Router, options(auth));
     let bound = router.bind(endpoint).await.expect("router bind");
     print_endpoint(&bound);
@@ -738,9 +746,10 @@ async fn router_bind(
         .expect("router recv timed out")
         .expect("router recv");
     assert_eq!(msg.part_bytes(0).unwrap(), identity.as_bytes());
-    assert_eq!(msg.part_bytes(1).unwrap(), request_a.as_bytes());
-    assert_eq!(msg.part_bytes(2).unwrap(), request_b.as_bytes());
+    assert_eq!(msg.part_bytes(1).unwrap(), exchange.request[0].as_bytes());
+    assert_eq!(msg.part_bytes(2).unwrap(), exchange.request[1].as_bytes());
 
+    let [reply_a, reply_b] = exchange.reply;
     router
         .send(Message::multipart([
             Bytes::from(identity),
@@ -752,15 +761,7 @@ async fn router_bind(
     tokio::time::sleep(Duration::from_millis(200)).await;
 }
 
-async fn dealer_bind(
-    endpoint: Endpoint,
-    identity: String,
-    request_a: String,
-    request_b: String,
-    reply_a: String,
-    reply_b: String,
-    auth: &str,
-) {
+async fn dealer_bind(endpoint: Endpoint, identity: String, exchange: Exchange, auth: &str) {
     let dealer = Socket::new(
         SocketType::Dealer,
         options_with_identity(auth, Bytes::from(identity)),
@@ -770,7 +771,7 @@ async fn dealer_bind(
 
     wait_handshake(&dealer).await;
     dealer
-        .send(Message::multipart([request_a, request_b]))
+        .send(Message::multipart(exchange.request))
         .await
         .expect("dealer send");
 
@@ -778,18 +779,11 @@ async fn dealer_bind(
         .await
         .expect("dealer recv timed out")
         .expect("dealer recv");
-    assert_eq!(msg.part_bytes(0).unwrap(), reply_a.as_bytes());
-    assert_eq!(msg.part_bytes(1).unwrap(), reply_b.as_bytes());
+    assert_eq!(msg.part_bytes(0).unwrap(), exchange.reply[0].as_bytes());
+    assert_eq!(msg.part_bytes(1).unwrap(), exchange.reply[1].as_bytes());
 }
 
-async fn pair_bind(
-    endpoint: Endpoint,
-    request_a: String,
-    request_b: String,
-    reply_a: String,
-    reply_b: String,
-    auth: &str,
-) {
+async fn pair_bind(endpoint: Endpoint, exchange: Exchange, auth: &str) {
     let pair = Socket::new(SocketType::Pair, options(auth));
     let bound = pair.bind(endpoint).await.expect("pair bind");
     print_endpoint(&bound);
@@ -798,10 +792,10 @@ async fn pair_bind(
         .await
         .expect("pair recv timed out")
         .expect("pair recv");
-    assert_eq!(msg.part_bytes(0).unwrap(), request_a.as_bytes());
-    assert_eq!(msg.part_bytes(1).unwrap(), request_b.as_bytes());
+    assert_eq!(msg.part_bytes(0).unwrap(), exchange.request[0].as_bytes());
+    assert_eq!(msg.part_bytes(1).unwrap(), exchange.request[1].as_bytes());
 
-    pair.send(Message::multipart([reply_a, reply_b]))
+    pair.send(Message::multipart(exchange.reply))
         .await
         .expect("pair send");
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -954,37 +948,22 @@ async fn main() {
         "router-bind" => {
             let endpoint: Endpoint = args.next().expect("endpoint").parse().unwrap();
             let identity = args.next().expect("identity");
-            let request_a = args.next().expect("request a");
-            let request_b = args.next().expect("request b");
-            let reply_a = args.next().expect("reply a");
-            let reply_b = args.next().expect("reply b");
+            let exchange = Exchange::from_args(&mut args);
             let auth = args.next().unwrap_or_else(|| "null".to_string());
-            router_bind(
-                endpoint, identity, request_a, request_b, reply_a, reply_b, &auth,
-            )
-            .await;
+            router_bind(endpoint, identity, exchange, &auth).await;
         }
         "dealer-bind" => {
             let endpoint: Endpoint = args.next().expect("endpoint").parse().unwrap();
             let identity = args.next().expect("identity");
-            let request_a = args.next().expect("request a");
-            let request_b = args.next().expect("request b");
-            let reply_a = args.next().expect("reply a");
-            let reply_b = args.next().expect("reply b");
+            let exchange = Exchange::from_args(&mut args);
             let auth = args.next().unwrap_or_else(|| "null".to_string());
-            dealer_bind(
-                endpoint, identity, request_a, request_b, reply_a, reply_b, &auth,
-            )
-            .await;
+            dealer_bind(endpoint, identity, exchange, &auth).await;
         }
         "pair-bind" => {
             let endpoint: Endpoint = args.next().expect("endpoint").parse().unwrap();
-            let request_a = args.next().expect("request a");
-            let request_b = args.next().expect("request b");
-            let reply_a = args.next().expect("reply a");
-            let reply_b = args.next().expect("reply b");
+            let exchange = Exchange::from_args(&mut args);
             let auth = args.next().unwrap_or_else(|| "null".to_string());
-            pair_bind(endpoint, request_a, request_b, reply_a, reply_b, &auth).await;
+            pair_bind(endpoint, exchange, &auth).await;
         }
         "xpub-bind" => {
             let endpoint: Endpoint = args.next().expect("endpoint").parse().unwrap();

@@ -69,6 +69,8 @@ export interface ConnectionOptions {
   heartbeatIntervalMs?: number;
   /** WebTransport liveness timeout; defaults to the interval. */
   heartbeatTimeoutMs?: number;
+  /** WebTransport close: wait for sent messages to reach the peer. */
+  lingerMs?: number;
   /** Called after ZMTP READY/PLAIN handshake succeeds. */
   onReady?: (conn: PeerConnection) => void;
   /** Called for each decoded application message. */

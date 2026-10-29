@@ -76,6 +76,12 @@ export interface SocketOptions {
   heartbeatIntervalMs?: number;
   /** WebTransport liveness timeout in milliseconds; defaults to the interval. */
   heartbeatTimeoutMs?: number;
+  /**
+   * WebTransport close: how long messages whose send resolved may take to
+   * reach the peer. Defaults to 5000. `0` discards them, like native OMQ's
+   * default linger. `ws://` closes always flush.
+   */
+  lingerMs?: number;
   /** Called when a connection or protocol error occurs. */
   onError?: (error: Error) => void;
 }
@@ -205,6 +211,7 @@ export abstract class Socket {
       webTransport: this.opts.webTransport,
       heartbeatIntervalMs: this.opts.heartbeatIntervalMs,
       heartbeatTimeoutMs: this.opts.heartbeatTimeoutMs,
+      lingerMs: this.opts.lingerMs,
       onReady: (conn) => this.onConnectionReady(conn),
       onMessage: (conn, msg) => this.onConnectionMessage(conn, msg),
       onCommand: (conn, name, body) => this.onCommand(conn, name, body),

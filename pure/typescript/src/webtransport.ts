@@ -47,6 +47,11 @@ export const LIVENESS_PREFACE = new Uint8Array([
 const RECORD_LENGTH = 9;
 const PING = 0x01;
 const PONG = 0x02;
+/** Default time `close()` waits for sent messages to reach the peer. */
+export const DEFAULT_LINGER_MS = 5_000;
+/** QUIC RFC application close codes. */
+const CLOSE_COMPLETED = 0x00;
+const CLOSE_ABORTED = 0x05;
 
 /** Require the browser's WebTransport URL scheme. */
 export function webTransportUrl(url: string): string {
@@ -391,7 +396,15 @@ export class WebTransportConnection implements PeerConnection {
     void this.dataWriter.write(encodeCommandFrame(payload)).catch(() => {});
   }
 
+  /**
+   * Close the connection. Queued sends are rejected. Messages whose send
+   * already resolved still reach the peer within `lingerMs`.
+   */
   close(): void {
+    this.shutdown(this.state === "ready");
+  }
+
+  private shutdown(linger: boolean): void {
     const queued = this.sendQueue.splice(0);
     this.queuedSends -= queued.length;
     const error = new Error("Connection closed");
@@ -399,19 +412,54 @@ export class WebTransportConnection implements PeerConnection {
     for (const timer of this.timers) clearTimeout(timer);
     this.timers = [];
     this.clearHandshakeTimer();
-    for (const reader of this.readers) void reader.cancel().catch(() => {});
-    this.readers = [];
-    this.dataWriter = null;
-    this.livenessWriter = null;
     const transport = this.transport;
+    const dataWriter = this.dataWriter;
     this.transport = null;
+    this.dataWriter = null;
     this.state = "closed";
+    if (transport) {
+      void this.closeTransport(transport, linger ? dataWriter : null);
+    } else {
+      this.releaseStreams();
+    }
+    this.onTransportClosed();
+  }
+
+  /**
+   * Finish the data stream after the writes already queued on it, then
+   * wait for the peer to close the session after it reads EOF (QUIC RFC
+   * Sec. 8). Liveness stays open and keeps answering PINGs meanwhile;
+   * ending it early would be a protocol violation.
+   */
+  private async closeTransport(
+    transport: WebTransport,
+    dataWriter: WritableStreamDefaultWriter<Uint8Array> | null,
+  ): Promise<void> {
+    const lingerMs = this.opts.lingerMs ?? DEFAULT_LINGER_MS;
+    let code = CLOSE_ABORTED;
+    if (dataWriter && lingerMs > 0) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const expired = new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), lingerMs);
+      });
+      const flushed = dataWriter.close()
+        .then(() => transport.closed)
+        .then(() => true, () => false);
+      if (await Promise.race([flushed, expired])) code = CLOSE_COMPLETED;
+      clearTimeout(timer);
+    }
+    this.releaseStreams();
     try {
-      transport?.close({ closeCode: 0, reason: "" });
+      transport.close({ closeCode: code, reason: "" });
     } catch {
       // Already closed.
     }
-    this.onTransportClosed();
+  }
+
+  private releaseStreams(): void {
+    for (const reader of this.readers) void reader.cancel().catch(() => {});
+    this.readers = [];
+    this.livenessWriter = null;
   }
 
   private onTransportClosed(): void {
@@ -429,7 +477,7 @@ export class WebTransportConnection implements PeerConnection {
   private closeWithError(reason: string): void {
     if (this.state === "closed") return;
     this.opts.onError?.(this, new Error(reason));
-    this.close();
+    this.shutdown(false);
   }
 
   private handshakeTimer: ReturnType<typeof setTimeout> | null = null;

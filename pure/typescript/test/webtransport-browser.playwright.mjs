@@ -184,17 +184,31 @@ async function runInPage(page, endpoints, hash) {
       const state = new Req(opts);
       sockets.push(state);
       state.connect(endpoints["/state"]);
-      let pulled = 0;
-      for (let attempt = 0; attempt < 100 && pulled < 200; attempt++) {
-        const reply = await withTimeout(
-          state.send(new Message("count")),
-          10_000,
-          "state",
-        );
-        pulled = Number(reply.string(0));
-        if (pulled < 200) await new Promise((r) => setTimeout(r, 50));
+      const pulledCount = async (expected) => {
+        let pulled = 0;
+        for (let attempt = 0; attempt < 100 && pulled < expected; attempt++) {
+          const reply = await withTimeout(
+            state.send(new Message("count")),
+            10_000,
+            "state",
+          );
+          pulled = Number(reply.string(0));
+          if (pulled < expected) await new Promise((r) => setTimeout(r, 50));
+        }
+        return pulled;
+      };
+      results.pulled = await pulledCount(200);
+
+      // Sends that resolved before close() still reach the peer.
+      const closing = new Push(opts);
+      closing.connect(endpoints["/pull"]);
+      await withTimeout(closing.ready(), 10_000, "push ready");
+      const chunk = new Uint8Array(16 * 1024);
+      for (let i = 0; i < 100; i++) {
+        await withTimeout(closing.send(new Message(chunk)), 10_000, "push");
       }
-      results.pulled = pulled;
+      closing.close();
+      results.pulledAfterClose = await pulledCount(300);
     } catch (error) {
       results.error = String(error?.stack ?? error);
     } finally {
@@ -224,6 +238,7 @@ for (const browser of ["chromium", "firefox"]) {
         subTopic: "wt.topic",
         subOrdered: true,
         pulled: 200,
+        pulledAfterClose: 300,
       });
     } finally {
       await stop(fixture.child);

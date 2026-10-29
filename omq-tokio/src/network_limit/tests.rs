@@ -24,7 +24,7 @@ fn outstanding_grants_still_occupy_burst_capacity() {
     }
     assert_eq!(b.available, 0);
     assert_eq!(b.held, 100);
-    b.service(start + Duration::from_secs(60));
+    b.service(start + Duration::from_mins(1));
     assert_eq!(b.held, 100);
     // The first lane reports old spending after a minute. No historical
     // refill can be applied to capacity that was still reserved until now.
@@ -34,10 +34,10 @@ fn outstanding_grants_still_occupy_burst_capacity() {
         .reports
         .spent
         .store(spent, Ordering::Release);
-    b.service(start + Duration::from_secs(60));
+    b.service(start + Duration::from_mins(1));
     assert_eq!(b.available, 0);
     assert_eq!(b.held, 100 - spent);
-    b.service(start + Duration::from_secs(60) + Duration::from_millis(10));
+    b.service(start + Duration::from_mins(1) + Duration::from_millis(10));
     assert_eq!(b.held, 101 - spent);
 }
 

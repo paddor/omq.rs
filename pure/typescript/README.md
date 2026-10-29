@@ -194,9 +194,9 @@ changes under development, not an older release.
 Run `npm run test:browser` for the headless browser interop tests. The
 WebTransport spec probes Chromium and Firefox against the fixture's
 `quic://` listener, trusting its ten-day certificate by hash. It checks
-the message exchange, flushing on close, and liveness in both browsers. Set `OMQ_TEST_CHROMIUM` or
-`OMQ_TEST_FIREFOX` to test a browser executable outside Playwright's pinned
-versions. The WebSocket spec runs in Firefox. It
+the message exchange, flushing on close, and liveness in both browsers.
+Set `OMQ_TEST_CHROMIUM` or `OMQ_TEST_FIREFOX` to test a browser executable
+outside Playwright's pinned versions. The WebSocket spec runs in Firefox. It
 starts a Rust WebSocket peer, serves a temporary browser bundle, and verifies
 the same paths through native browser `WebSocket` and WASM LZ4, including
 `wss://`. The harness passes the temporary page origin explicitly to Rust

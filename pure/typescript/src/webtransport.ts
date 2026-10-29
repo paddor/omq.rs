@@ -1,18 +1,13 @@
-import {
-  decodeCommand,
-  decodeErrorReason,
-  decodeReadyProperties,
-  encodePlainHello,
-  encodePlainInitiate,
-  encodePong,
-  encodeReady,
-  isCompatibleSocketType,
-  isSocketTypeName,
-  type PeerProperties,
-} from "./command.ts";
+import { decodeCommand, type PeerProperties } from "./command.ts";
 import type { ConnectionOptions } from "./connection.ts";
 import { Message } from "./message.ts";
-import type { ConnectionState, PeerConnection } from "./peer_connection.ts";
+import {
+  type ConnectionState,
+  handleHeartbeat,
+  type PeerConnection,
+  SendQueue,
+  ZmtpHandshake,
+} from "./peer_connection.ts";
 import {
   encodeCommandFrame,
   encodeGreeting,
@@ -82,14 +77,6 @@ function encodeRecord(kind: number, value: bigint): Uint8Array<ArrayBuffer> {
   return record;
 }
 
-interface QueuedSend {
-  msg: Message;
-  resolve: () => void;
-  reject: (error: Error) => void;
-}
-
-type PlainState = "awaiting-welcome" | "awaiting-ready";
-
 /**
  * ZMTP 3.1 over one WebTransport session: an ordered data stream carrying
  * unchanged ZMTP frames and a liveness stream carrying PING/PONG records.
@@ -104,10 +91,8 @@ export class WebTransportConnection implements PeerConnection {
   private livenessWriter: WritableStreamDefaultWriter<Uint8Array> | null = null;
   private readers: ReadableStreamDefaultReader<Uint8Array>[] = [];
   private decoder: ZmtpDecoder;
-  private plainState: PlainState | null = null;
-  private sendQueue: QueuedSend[] = [];
-  private sending = false;
-  private queuedSends = 0;
+  private handshake: ZmtpHandshake;
+  private sends: SendQueue;
   private closeEmitted = false;
   private timers: ReturnType<typeof setTimeout>[] = [];
   private pingNonce = 0n;
@@ -118,6 +103,11 @@ export class WebTransportConnection implements PeerConnection {
   constructor(url: string, private readonly opts: ConnectionOptions) {
     this.url = url;
     this.decoder = new ZmtpDecoder({ maxMessageSize: opts.maxMessageSize });
+    this.handshake = new ZmtpHandshake(opts, (p) => this.sendCommand(p));
+    this.sends = new SendQueue(
+      opts.sendHighWaterMark,
+      (msg) => this.sendNow(msg),
+    );
     if (typeof WebTransport === "undefined") {
       throw new Error("WebTransport is not available in this runtime");
     }
@@ -194,8 +184,12 @@ export class WebTransportConnection implements PeerConnection {
       this.onGreeting(event.greeting);
     } else if (event.type === "command") {
       const cmd = decodeCommand(event.payload);
-      if (this.state === "handshaking") this.handleHandshakeCommand(cmd);
-      else this.handleCommand(cmd);
+      if (this.state === "handshaking") {
+        const props = this.handshake.handle(cmd);
+        if (props) this.completeHandshake(props);
+      } else if (!handleHeartbeat(cmd, (p) => this.sendCommand(p))) {
+        this.opts.onCommand?.(this, cmd.name, cmd.body);
+      }
     } else if (this.state === "ready") {
       this.opts.onMessage?.(this, Message.fromParts(event.parts));
     } else {
@@ -210,65 +204,17 @@ export class WebTransportConnection implements PeerConnection {
         `Peer mechanism ${greeting.mechanism}, expected ${expected}`,
       );
     }
-    if (this.opts.plain) {
-      if (!greeting.asServer) throw new Error("PLAIN peer is not a server");
-      this.plainState = "awaiting-welcome";
-      this.sendCommand(
-        encodePlainHello(this.opts.plain.username, this.opts.plain.password),
-      );
-    } else {
-      this.sendCommand(encodeReady(this.opts.socketType, this.opts.identity));
+    if (this.opts.plain && !greeting.asServer) {
+      throw new Error("PLAIN peer is not a server");
     }
+    this.handshake.start();
   }
 
-  private handleHandshakeCommand(cmd: { name: string; body: Uint8Array }) {
-    if (cmd.name === "ERROR") {
-      throw new Error(`Peer sent ERROR: ${decodeErrorReason(cmd.body)}`);
-    }
-    if (this.plainState === "awaiting-welcome") {
-      if (cmd.name !== "WELCOME" || cmd.body.byteLength !== 0) {
-        throw new Error(`Expected empty WELCOME, got ${cmd.name}`);
-      }
-      this.plainState = "awaiting-ready";
-      this.sendCommand(
-        encodePlainInitiate(this.opts.socketType, this.opts.identity),
-      );
-      return;
-    }
-    if (cmd.name !== "READY") {
-      throw new Error(`Expected READY, got ${cmd.name}`);
-    }
-    this.completeHandshake(cmd.body);
-  }
-
-  private completeHandshake(body: Uint8Array): void {
-    this.peerProperties = decodeReadyProperties(body);
-    const peerType = this.peerProperties.socketType;
-    if (!peerType || !isSocketTypeName(peerType)) {
-      throw new Error(`Invalid peer socket type: ${peerType}`);
-    }
-    if (!isCompatibleSocketType(this.opts.socketType, peerType)) {
-      throw new Error(
-        `Incompatible socket types: ours=${this.opts.socketType} peer=${peerType}`,
-      );
-    }
-    this.plainState = null;
+  private completeHandshake(props: PeerProperties): void {
+    this.peerProperties = props;
     this.state = "ready";
     this.clearHandshakeTimer();
     this.opts.onReady?.(this);
-  }
-
-  private handleCommand(cmd: { name: string; body: Uint8Array }): void {
-    if (cmd.name === "PING") {
-      // ZMTP PING stays valid on the data stream; answer it in order.
-      if (cmd.body.byteLength < 2) throw new Error("PING body missing TTL");
-      const context = cmd.body.subarray(2);
-      if (context.byteLength > 16) throw new Error("PING context too long");
-      this.sendCommand(encodePong(context));
-      return;
-    }
-    if (cmd.name === "PONG") return;
-    this.opts.onCommand?.(this, cmd.name, cmd.body);
   }
 
   private async readLiveness(reader: ReadableStreamDefaultReader<Uint8Array>) {
@@ -354,31 +300,7 @@ export class WebTransportConnection implements PeerConnection {
     if (this.state !== "ready" || !this.dataWriter) {
       throw new Error("Connection not ready");
     }
-    if (
-      this.opts.sendHighWaterMark !== undefined &&
-      this.queuedSends >= this.opts.sendHighWaterMark
-    ) {
-      return Promise.reject(new Error("Send high water mark reached"));
-    }
-    return new Promise((resolve, reject) => {
-      this.queuedSends++;
-      this.sendQueue.push({ msg, resolve, reject });
-      this.drainSendQueue();
-    });
-  }
-
-  private drainSendQueue(): void {
-    if (this.sending) return;
-    const item = this.sendQueue.shift();
-    if (!item) return;
-    this.sending = true;
-    this.sendNow(item.msg)
-      .then(item.resolve, item.reject)
-      .finally(() => {
-        this.queuedSends--;
-        this.sending = false;
-        this.drainSendQueue();
-      });
+    return this.sends.push(msg);
   }
 
   /** One contiguous write per message; waits for stream backpressure. */
@@ -405,10 +327,7 @@ export class WebTransportConnection implements PeerConnection {
   }
 
   private shutdown(linger: boolean): void {
-    const queued = this.sendQueue.splice(0);
-    this.queuedSends -= queued.length;
-    const error = new Error("Connection closed");
-    for (const item of queued) item.reject(error);
+    this.sends.rejectQueued(new Error("Connection closed"));
     for (const timer of this.timers) clearTimeout(timer);
     this.timers = [];
     this.clearHandshakeTimer();

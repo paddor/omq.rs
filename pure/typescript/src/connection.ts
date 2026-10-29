@@ -1,13 +1,5 @@
 import {
   decodeCommand,
-  decodeErrorReason,
-  decodeReadyProperties,
-  encodePlainHello,
-  encodePlainInitiate,
-  encodePong,
-  encodeReady,
-  isCompatibleSocketType,
-  isSocketTypeName,
   type PeerProperties,
   type SocketTypeName,
 } from "./command.ts";
@@ -19,7 +11,13 @@ import {
   Lz4Encoder,
 } from "./lz4.ts";
 import { Message } from "./message.ts";
-import type { ConnectionState, PeerConnection } from "./peer_connection.ts";
+import {
+  type ConnectionState,
+  handleHeartbeat,
+  type PeerConnection,
+  SendQueue,
+  ZmtpHandshake,
+} from "./peer_connection.ts";
 import {
   decodeZwsFrame,
   encodeCommandFrame,
@@ -30,7 +28,6 @@ import {
 } from "./zws.ts";
 
 export type { ConnectionState } from "./peer_connection.ts";
-type PlainHandshakeState = "awaiting-welcome" | "awaiting-ready";
 
 /** WebTransport-specific connection settings. */
 export interface WebTransportOptions {
@@ -83,12 +80,6 @@ export interface ConnectionOptions {
   onError?: (conn: PeerConnection, error: Error) => void;
 }
 
-interface QueuedSend {
-  msg: Message;
-  resolve: () => void;
-  reject: (error: Error) => void;
-}
-
 function errorFromUnknown(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
@@ -125,10 +116,8 @@ export class Connection implements PeerConnection {
   private lz4Encoder: Lz4Encoder | null = null;
   private useLz4: boolean;
   private closeEmitted = false;
-  private plainState: PlainHandshakeState | null = null;
-  private sendQueue: QueuedSend[] = [];
-  private sending = false;
-  private queuedSends = 0;
+  private handshake: ZmtpHandshake;
+  private sends: SendQueue;
   private handshakeTimer: ReturnType<typeof setTimeout> | null = null;
   /** Peer READY properties after the ZMTP handshake completes. */
   peerProperties: PeerProperties | null = null;
@@ -137,6 +126,11 @@ export class Connection implements PeerConnection {
   constructor(url: string, opts: ConnectionOptions) {
     this.url = url;
     this.opts = opts;
+    this.handshake = new ZmtpHandshake(opts, (p) => this.sendCommand(p));
+    this.sends = new SendQueue(
+      opts.sendHighWaterMark,
+      (msg) => this.sendNow(msg),
+    );
     this.useLz4 = url.startsWith("lz4+ws://");
     const wsUrl = this.useLz4 ? url.replace(/^lz4\+/, "") : url;
     if (!wsUrl.startsWith("ws://") && !wsUrl.startsWith("wss://")) {
@@ -209,33 +203,7 @@ export class Connection implements PeerConnection {
     if (!this.ws || this.state !== "ready") {
       throw new Error("Connection not ready");
     }
-    if (
-      this.opts.sendHighWaterMark !== undefined &&
-      this.queuedSends >= this.opts.sendHighWaterMark
-    ) {
-      return Promise.reject(new Error("Send high water mark reached"));
-    }
-
-    return new Promise((resolve, reject) => {
-      this.queuedSends++;
-      this.sendQueue.push({ msg, resolve, reject });
-      this.drainSendQueue();
-    });
-  }
-
-  private drainSendQueue(): void {
-    if (this.sending) return;
-    const item = this.sendQueue.shift();
-    if (!item) return;
-
-    this.sending = true;
-    this.sendNow(item.msg)
-      .then(item.resolve, item.reject)
-      .finally(() => {
-        this.queuedSends--;
-        this.sending = false;
-        this.drainSendQueue();
-      });
+    return this.sends.push(msg);
   }
 
   private async sendNow(msg: Message): Promise<void> {
@@ -300,10 +268,7 @@ export class Connection implements PeerConnection {
     this.lz4Decoder = null;
     this.lz4Encoder?.free();
     this.lz4Encoder = null;
-    const error = new Error("Connection closed");
-    const queued = this.sendQueue.splice(0);
-    this.queuedSends -= queued.length;
-    for (const item of queued) item.reject(error);
+    this.sends.rejectQueued(new Error("Connection closed"));
     const ws = this.ws;
     this.state = "closed";
     this.ws = null;
@@ -313,14 +278,7 @@ export class Connection implements PeerConnection {
 
   private onOpen(): void {
     this.state = "handshaking";
-    if (this.opts.plain) {
-      this.plainState = "awaiting-welcome";
-      this.sendCommand(
-        encodePlainHello(this.opts.plain.username, this.opts.plain.password),
-      );
-    } else {
-      this.sendCommand(encodeReady(this.opts.socketType, this.opts.identity));
-    }
+    this.handshake.start();
   }
 
   private onWsMessage(ev: MessageEvent): void {
@@ -341,8 +299,8 @@ export class Connection implements PeerConnection {
         this.closeWithError("Expected command during handshake");
         return;
       }
-      const cmd = decodeCommand(frame.payload);
-      this.handleHandshakeCommand(cmd);
+      const props = this.handshake.handle(decodeCommand(frame.payload));
+      if (props) this.completeHandshake(props);
       return;
     }
 
@@ -416,98 +374,15 @@ export class Connection implements PeerConnection {
 
   private handleCommand(payload: Uint8Array): void {
     const cmd = decodeCommand(payload);
-    if (cmd.name === "PING") {
-      this.handlePing(cmd.body);
-      return;
-    }
-    if (cmd.name === "PONG") {
-      if (cmd.body.byteLength > 16) throw new Error("PONG context too long");
-      return;
-    }
+    if (handleHeartbeat(cmd, (p) => this.sendCommand(p))) return;
     this.opts.onCommand?.(this, cmd.name, cmd.body);
   }
 
-  private handleHandshakeCommand(cmd: {
-    name: string;
-    body: Uint8Array;
-  }): void {
-    if (cmd.name === "ERROR") {
-      this.closeWithError(`Peer sent ERROR: ${decodeErrorReason(cmd.body)}`);
-      return;
-    }
-
-    if (this.opts.plain) {
-      this.handlePlainHandshakeCommand(cmd);
-      return;
-    }
-
-    if (cmd.name !== "READY") {
-      this.closeWithError(`Expected READY, got ${cmd.name}`);
-      return;
-    }
-    this.completeHandshake(cmd.body);
-  }
-
-  private handlePlainHandshakeCommand(cmd: {
-    name: string;
-    body: Uint8Array;
-  }): void {
-    if (this.plainState === "awaiting-welcome") {
-      if (cmd.name !== "WELCOME") {
-        this.closeWithError(`Expected WELCOME, got ${cmd.name}`);
-        return;
-      }
-      if (cmd.body.byteLength !== 0) {
-        this.closeWithError("WELCOME body must be empty");
-        return;
-      }
-      this.plainState = "awaiting-ready";
-      this.sendCommand(
-        encodePlainInitiate(this.opts.socketType, this.opts.identity),
-      );
-      return;
-    }
-
-    if (this.plainState === "awaiting-ready") {
-      if (cmd.name !== "READY") {
-        this.closeWithError(`Expected READY, got ${cmd.name}`);
-        return;
-      }
-      this.completeHandshake(cmd.body);
-      return;
-    }
-
-    this.closeWithError("PLAIN handshake not started");
-  }
-
-  private completeHandshake(body: Uint8Array): void {
-    this.peerProperties = decodeReadyProperties(body);
-    const peerType = this.peerProperties.socketType;
-    if (!peerType) {
-      this.closeWithError("READY missing Socket-Type");
-      return;
-    }
-    if (!isSocketTypeName(peerType)) {
-      this.closeWithError(`Unknown peer socket type: ${peerType}`);
-      return;
-    }
-    if (!isCompatibleSocketType(this.opts.socketType, peerType)) {
-      this.closeWithError(
-        `Incompatible socket types: ours=${this.opts.socketType} peer=${peerType}`,
-      );
-      return;
-    }
-    this.plainState = null;
+  private completeHandshake(props: PeerProperties): void {
+    this.peerProperties = props;
     this.state = "ready";
     this.clearHandshakeTimer();
     this.opts.onReady?.(this);
-  }
-
-  private handlePing(body: Uint8Array): void {
-    if (body.byteLength < 2) throw new Error("PING body missing TTL");
-    const context = body.subarray(2);
-    if (context.byteLength > 16) throw new Error("PING context too long");
-    this.sendCommand(encodePong(context));
   }
 
   private startHandshakeTimer(): void {

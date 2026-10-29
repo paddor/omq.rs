@@ -1,8 +1,10 @@
-name: jsr-publish
+name: Release OMQ.ts JSR
 
 on:
   push:
     branches: [main]
+    paths:
+      - "pure/typescript/**"
   workflow_dispatch:
 
 jobs:
@@ -11,8 +13,11 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    defaults:
+      run:
+        working-directory: pure/typescript
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x

@@ -183,10 +183,10 @@ queue drop.
 
 ### Live Interop Tests
 
-Run `npm run test:interop` from this repo to start real `omq-tokio` WebSocket
-peers from the local `../omq.rs` checkout and verify NULL, PLAIN, and
-`lz4+ws://` traffic. The Rust fixture depends directly on that sibling checkout
-so tests exercise transport changes under development, not an older release.
+Run `npm run test:interop` from this directory to start real `omq-tokio`
+WebSocket peers and verify NULL, PLAIN, and `lz4+ws://` traffic. The Rust
+fixture depends on the workspace `omq-tokio`, so tests exercise transport
+changes under development, not an older release.
 
 Run `npm run test:browser` for the headless browser interop tests. The
 WebTransport spec probes Chromium and Firefox against the fixture's

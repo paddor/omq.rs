@@ -1,9 +1,9 @@
-name: Release omq.ts npm
+name: Release OMQ.ts npm
 
 on:
   push:
     tags:
-      - "omq-npm-v*"
+      - "omq-ts-v*"
   workflow_dispatch:
     inputs:
       version:
@@ -20,8 +20,11 @@ jobs:
     timeout-minutes: 15
     outputs:
       version: ${{ steps.version.outputs.version }}
+    defaults:
+      run:
+        working-directory: pure/typescript
     steps:
-      - name: Checkout omq.ts
+      - name: Checkout
         uses: actions/checkout@v7
 
       - name: Set up Node.js
@@ -29,6 +32,7 @@ jobs:
         with:
           node-version: 24
           cache: npm
+          cache-dependency-path: pure/typescript/package-lock.json
 
       - name: Set up Deno
         uses: denoland/setup-deno@v2
@@ -44,7 +48,7 @@ jobs:
         shell: bash
         run: |
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            echo "version=${GITHUB_REF_NAME#omq-npm-v}" >> "$GITHUB_OUTPUT"
+            echo "version=${GITHUB_REF_NAME#omq-ts-v}" >> "$GITHUB_OUTPUT"
           else
             echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
           fi
@@ -64,7 +68,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: npm-release-tarball
-          path: release-tarballs/*.tgz
+          path: pure/typescript/release-tarballs/*.tgz
           retention-days: 7
 
   smoke:

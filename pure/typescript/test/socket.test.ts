@@ -155,7 +155,7 @@ function dataFramesAfterReady(ws: MockWebSocket): Uint8Array[][] {
   return messages;
 }
 
-// ─── Push ───────────────────────────────────────────────────────────
+// --- Push -----------------------------------------------------------
 
 describe("Push", () => {
   it("sends message after connection is ready", async () => {
@@ -248,7 +248,7 @@ describe("Push", () => {
   });
 });
 
-// ─── Pull ───────────────────────────────────────────────────────────
+// --- Pull -----------------------------------------------------------
 
 describe("Pull", () => {
   it("receives messages via recv()", async () => {
@@ -344,7 +344,7 @@ describe("Pull", () => {
   });
 });
 
-// ─── Sub ────────────────────────────────────────────────────────────
+// --- Sub ------------------------------------------------------------
 
 describe("Sub", () => {
   it("sends SUBSCRIBE commands after handshake", () => {
@@ -477,7 +477,7 @@ describe("Sub", () => {
   });
 });
 
-// ─── Req ────────────────────────────────────────────────────────────
+// --- Req ------------------------------------------------------------
 
 describe("Req", () => {
   it("sends with empty delimiter and receives reply", async () => {
@@ -617,7 +617,7 @@ describe("Req", () => {
   });
 });
 
-// ─── Rep ────────────────────────────────────────────────────────────
+// --- Rep ------------------------------------------------------------
 
 describe("Rep", () => {
   it("receives request with delimiter stripped", async () => {
@@ -778,7 +778,7 @@ describe("Rep", () => {
   });
 });
 
-// ─── Pub ────────────────────────────────────────────────────────────
+// --- Pub ------------------------------------------------------------
 
 describe("Pub", () => {
   it("sends to peers with matching subscriptions", async () => {
@@ -895,7 +895,7 @@ describe("Pub", () => {
   });
 });
 
-// ─── XPub ───────────────────────────────────────────────────────────
+// --- XPub -----------------------------------------------------------
 
 describe("XPub", () => {
   it("surfaces SUBSCRIBE as 0x01-prefixed message", async () => {
@@ -954,7 +954,7 @@ describe("XPub", () => {
   });
 });
 
-// ─── XSub ───────────────────────────────────────────────────────────
+// --- XSub -----------------------------------------------------------
 
 describe("XSub", () => {
   it("translates 0x01 send to SUBSCRIBE command", async () => {
@@ -1090,7 +1090,7 @@ describe("XSub", () => {
   });
 });
 
-// ─── Dealer ─────────────────────────────────────────────────────────
+// --- Dealer ---------------------------------------------------------
 
 describe("Dealer", () => {
   it("sends messages round-robin", async () => {
@@ -1171,7 +1171,7 @@ describe("Dealer", () => {
   });
 });
 
-// ─── Router ─────────────────────────────────────────────────────────
+// --- Router ---------------------------------------------------------
 
 describe("Router", () => {
   it("prepends peer identity to received messages", async () => {
@@ -1286,7 +1286,7 @@ describe("Router", () => {
   });
 });
 
-// ─── Pair ───────────────────────────────────────────────────────────
+// --- Pair -----------------------------------------------------------
 
 describe("Pair", () => {
   it("sends and receives", async () => {
@@ -1333,7 +1333,7 @@ describe("Pair", () => {
   });
 });
 
-// ─── Client (draft) ─────────────────────────────────────────────────
+// --- Client (draft) -------------------------------------------------
 
 describe("Client", () => {
   it("announces CLIENT socket type", () => {
@@ -1361,7 +1361,7 @@ describe("Client", () => {
   });
 });
 
-// ─── Server (draft) ─────────────────────────────────────────────────
+// --- Server (draft) -------------------------------------------------
 
 describe("Server", () => {
   it("announces SERVER socket type", () => {
@@ -1451,7 +1451,7 @@ describe("Server", () => {
   });
 });
 
-// ─── Gather (draft) ─────────────────────────────────────────────────
+// --- Gather (draft) -------------------------------------------------
 
 describe("Gather", () => {
   it("announces GATHER socket type", () => {
@@ -1477,7 +1477,7 @@ describe("Gather", () => {
   });
 });
 
-// ─── Scatter (draft) ────────────────────────────────────────────────
+// --- Scatter (draft) ------------------------------------------------
 
 describe("Scatter", () => {
   it("announces SCATTER socket type", () => {
@@ -1502,7 +1502,7 @@ describe("Scatter", () => {
   });
 });
 
-// ─── Radio (draft) ──────────────────────────────────────────────────
+// --- Radio (draft) --------------------------------------------------
 
 describe("Radio", () => {
   it("announces RADIO socket type", () => {
@@ -1592,7 +1592,7 @@ describe("Radio", () => {
   });
 });
 
-// ─── Dish (draft) ───────────────────────────────────────────────────
+// --- Dish (draft) ---------------------------------------------------
 
 describe("Dish", () => {
   it("announces DISH socket type", () => {
@@ -1696,7 +1696,7 @@ describe("Dish", () => {
   });
 });
 
-// ─── Peer (draft) ───────────────────────────────────────────────────
+// --- Peer (draft) ---------------------------------------------------
 
 describe("Peer", () => {
   it("announces PEER socket type", () => {
@@ -1744,7 +1744,7 @@ describe("Peer", () => {
   });
 });
 
-// ─── Channel (draft) ────────────────────────────────────────────────
+// --- Channel (draft) ------------------------------------------------
 
 describe("Channel", () => {
   it("announces CHANNEL socket type", () => {
@@ -1780,7 +1780,7 @@ describe("Channel", () => {
   });
 });
 
-// ─── Draft single-frame validation ──────────────────────────────────
+// --- Draft single-frame validation ----------------------------------
 
 describe("Draft single-frame validation", () => {
   it("rejects multipart CLIENT sends", async () => {
@@ -1849,7 +1849,7 @@ describe("Draft single-frame validation", () => {
   });
 });
 
-// ─── Socket connection management ───────────────────────────────────
+// --- Socket connection management -----------------------------------
 
 describe("Socket connection management", () => {
   it("connect is idempotent for same URL", () => {
@@ -2195,7 +2195,7 @@ describe("Socket connection management", () => {
   });
 });
 
-// ─── Push with identity ─────────────────────────────────────────────
+// --- Push with identity ---------------------------------------------
 
 describe("Push with identity", () => {
   it("sends identity in READY handshake", async () => {

@@ -124,7 +124,9 @@ an `https://` WebTransport URL. Once established, the connection carries
 ZMTP 3.1 on one ordered stream and liveness records on a second stream;
 the same socket classes,
 PLAIN authentication, reconnect, and subscription replay apply. OMQ
-compression is not available on WebTransport.
+compression is not available on WebTransport. `close()` still delivers
+messages whose `send()` resolved, waiting up to `lingerMs` (default 5000)
+for the peer to read them.
 
 ```ts
 const req = new Req({

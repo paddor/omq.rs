@@ -5,6 +5,7 @@ import {
   encodeReady,
   encodeSubscribe,
 } from "../src/command.ts";
+import type { ConnectionOptions } from "../src/connection.ts";
 import { Message } from "../src/message.ts";
 import type { PeerConnection } from "../src/peer_connection.ts";
 import {
@@ -55,6 +56,21 @@ class PeerStream {
     return out;
   }
 
+  /** Read until the client finishes the stream. */
+  async readToEnd(): Promise<Uint8Array> {
+    for (;;) {
+      const { value, done } = await this.reader.read();
+      if (done) break;
+      const next = new Uint8Array(this.pending.byteLength + value.byteLength);
+      next.set(this.pending, 0);
+      next.set(value, this.pending.byteLength);
+      this.pending = next;
+    }
+    const out = this.pending;
+    this.pending = new Uint8Array(0);
+    return out;
+  }
+
   async readAvailable(): Promise<Uint8Array> {
     if (this.pending.byteLength > 0) {
       const out = this.pending;
@@ -96,6 +112,11 @@ class FakeWebTransport {
     this.closedWith = info;
     this.resolveClosed();
   }
+
+  /** The server closes the session, as after reading data EOF. */
+  peerClose(): void {
+    this.resolveClosed();
+  }
 }
 
 const original = (globalThis as { WebTransport?: unknown }).WebTransport;
@@ -111,6 +132,28 @@ async function until(predicate: () => boolean): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
   expect(predicate()).toBe(true);
+}
+
+/** Open a NULL DEALER connection and complete the handshake as ROUTER. */
+async function readyDealer(opts: Partial<ConnectionOptions> = {}) {
+  const conn = new WebTransportConnection("https://127.0.0.1:1/omq", {
+    socketType: "DEALER",
+    identity: new Uint8Array(0),
+    ...opts,
+  });
+  await until(() => (FakeWebTransport.last?.streams.length ?? 0) === 2);
+  const wt = FakeWebTransport.last!;
+  const [data, liveness] = wt.streams as [PeerStream, PeerStream];
+  await data.readExact(DATA_PREFACE.byteLength);
+  const decoder = new ZmtpDecoder();
+  decoder.push(await data.readExact(64));
+  await data.toClient.write(encodeGreeting("NULL"));
+  await data.toClient.write(
+    encodeCommandFrame(encodeReady("ROUTER", new Uint8Array(0))),
+  );
+  await events(data, decoder, 1);
+  await until(() => conn.isReady);
+  return { conn, wt, data, liveness, decoder };
 }
 
 async function events(stream: PeerStream, decoder: ZmtpDecoder, count: number) {
@@ -181,7 +224,38 @@ describe("WebTransport ZMTP connection", () => {
     if (sent?.type !== "message") throw new Error("expected message");
     expect(sent.parts[0]).toEqual(new Uint8Array([9, 9]));
     conn.close();
+    expect(await data.readToEnd()).toEqual(new Uint8Array(0));
+    expect(wt.closedWith).toBeNull();
+    wt.peerClose();
+    await until(() => wt.closedWith !== null);
     expect(wt.closedWith?.closeCode).toBe(0);
+  });
+
+  it("flushes resolved sends and finishes the data stream on close", async () => {
+    const { conn, wt, data, decoder } = await readyDealer();
+    const wire = data.readToEnd();
+    for (let i = 0; i < 3; i++) {
+      await conn.send(Message.fromParts([new Uint8Array([i])]));
+    }
+    conn.close();
+    expect(conn.connectionState).toBe("closed");
+    const parts = decoder.push(await wire).map((event) =>
+      event.type === "message" ? event.parts[0]![0] : -1
+    );
+    expect(parts).toEqual([0, 1, 2]);
+    expect(wt.closedWith).toBeNull();
+    wt.peerClose();
+    await until(() => wt.closedWith !== null);
+    expect(wt.closedWith?.closeCode).toBe(0);
+  });
+
+  it("aborts when the peer does not close within lingerMs", async () => {
+    for (const lingerMs of [20, 0]) {
+      const { conn, wt } = await readyDealer({ lingerMs });
+      conn.close();
+      await until(() => wt.closedWith !== null);
+      expect(wt.closedWith?.closeCode).toBe(5);
+    }
   });
 
   it("answers liveness PINGs with the newest nonce", async () => {

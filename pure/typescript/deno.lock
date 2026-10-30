@@ -478,6 +478,7 @@
     ],
     "packageJson": {
       "dependencies": [
+        "npm:@paddor/lz4rip@~0.2.20",
         "npm:@playwright/test@^1.62.0",
         "npm:@types/node@^26.1.2",
         "npm:typescript@^7.0.2",

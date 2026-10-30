@@ -31,12 +31,13 @@ async function prepareStaticSite() {
   await copyFile(join(browserDir, "app.js"), join(dir, "app.js"));
   await mkdir(join(dir, "pkg"), { recursive: true });
   await copyFile(wasmPath, join(dir, "pkg/lz4rip_wasm_bg.wasm"));
+  // Resolve JavaScript from node_modules to match the WASM copied above.
   await execFileAsync("deno", [
     "bundle",
     "--platform",
     "browser",
-    "--config",
-    join(repoRoot, "deno.json"),
+    "--no-config",
+    "--node-modules-dir=manual",
     join(browserDir, "browser_entry.ts"),
     "-o",
     join(dir, "omq.js"),

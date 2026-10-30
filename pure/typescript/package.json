@@ -63,7 +63,7 @@
     "build:npm": "node -e \"fs.rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.npm.json",
     "prepack": "npm run build:npm",
     "pack:dry": "npm pack --dry-run",
-    "check": "deno check src/mod.ts",
+    "check": "deno check --frozen src/mod.ts",
     "lint": "deno lint",
     "test": "vitest run --maxWorkers 2",
     "test:interop": "OMQ_TS_INTEROP=1 vitest run test/interop.test.ts --test-timeout 120000",

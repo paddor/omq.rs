@@ -72,7 +72,7 @@
     "ci": "npm run check && npm run lint && npm test && deno publish --dry-run --allow-dirty"
   },
   "dependencies": {
-    "@paddor/lz4rip": "https://npm.jsr.io/~/11/@jsr/paddor__lz4rip/0.2.8.tgz"
+    "@paddor/lz4rip": "^0.2.20"
   },
   "devDependencies": {
     "@playwright/test": "^1.62.0",

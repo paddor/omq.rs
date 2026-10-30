@@ -120,6 +120,15 @@ Each binary speaks a subcommand protocol:
 - `inproc <name> <size> <duration>`: in-process PUSH/PULL.
 - `rep <addr> <size>` / `req <addr> <size> <iters> <warmup>`: latency.
 
+Remoc comparison (requires Rust 1.95):
+
+```sh
+cargo run --release -p omq-bench -- run comparisons \
+  --impl remoc --impl omq-tokio-ct --transport tcp --no-pubsub \
+  --sizes 64,1024,4096 --duration 3 --rounds 3 --id remoc-YYYYMMDD
+cargo run --release -p omq-bench -- chart remoc
+```
+
 The `grpc-rust` baseline uses plaintext gRPC over TCP between separate
 processes. PUSH/PULL uses one server-streaming RPC carrying opaque byte
 blobs. REQ/REP uses unary `Echo` RPCs. TLS, compression, retries, and

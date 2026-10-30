@@ -79,6 +79,22 @@ use TransportKind::{Inproc, Ipc, Quic, Tcp, Ws};
 
 static IMPLS: &[ImplDef] = &[
     ImplDef {
+        name: "remoc",
+        binary_from: None,
+        prefix: "R",
+        class: None,
+        main: false,
+        transports: &[Tcp],
+        inproc_tput_subcmd: "",
+        inproc_lat_subcmd: "",
+        inproc_pubsub_subcmd: "",
+        pub_needs_peer_count: false,
+        fanout_subcmd: "",
+        fanio_needs_peer_count: false,
+        supports_pubsub: false,
+        env: &[],
+    },
+    ImplDef {
         name: "omq-tokio-ct",
         binary_from: None,
         prefix: "t",
@@ -631,6 +647,9 @@ fn build_peers(
 /// Builds the peer binary of one implementation source.
 fn build_source(source: &str, peer_features: &[&str], needs_mt_runtime: bool) -> PathBuf {
     match source {
+        "remoc" => {
+            process::build_external_peer("scripts/remoc_bench_peer", "remoc_bench_peer", &[])
+        }
         "omq-tokio-ct" => {
             // The MT variant reuses this binary with the MT runtime built in.
             let mut features = peer_features.to_vec();

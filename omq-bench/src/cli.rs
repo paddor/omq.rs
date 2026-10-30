@@ -32,6 +32,8 @@ pub(crate) enum ChartSub {
     },
     /// Main TCP overview charts.
     Main,
+    /// Remoc versus OMQ, plus the network protocol overview.
+    Remoc,
     /// Direct, RPC, and brokered messaging comparisons.
     Mom,
     /// Verified local and network fan-out comparisons only.

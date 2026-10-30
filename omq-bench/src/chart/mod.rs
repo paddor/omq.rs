@@ -12,4 +12,5 @@ pub(crate) mod pubsub;
 mod pushpull_compression;
 pub(crate) mod quic;
 pub(crate) mod rate_limit;
+pub(crate) mod remoc;
 pub(crate) mod shm;

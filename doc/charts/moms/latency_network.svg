@@ -1,7 +1,7 @@
-<svg viewBox="0 0 850 1070" xmlns="http://www.w3.org/2000/svg" font-family="system-ui, -apple-system, sans-serif">
-<rect x="0" y="0" width="850" height="1070" opacity="1" fill="#000000" stroke="none"/>
+<svg viewBox="0 0 850 1086" xmlns="http://www.w3.org/2000/svg" font-family="system-ui, -apple-system, sans-serif">
+<rect x="0" y="0" width="850" height="1086" opacity="1" fill="#000000" stroke="none"/>
 <text x="425" y="17" text-anchor="middle" font-family="sans-serif" font-size="14" font-weight="bold" fill="#F9FAFB">Echo RTT, network</text>
-<text x="425" y="31" text-anchor="middle" font-family="sans-serif" font-size="10" fill="#9CA3AF">Intel(R) Core(TM) i7-8700B CPU @ 3.20GHz, performance governor, turbo off</text>
+<text x="425" y="31" text-anchor="middle" font-family="sans-serif" font-size="10" fill="#9CA3AF">Intel(R) Core(TM) i7-8700B CPU @ 3.20GHz</text>
 <text x="415" y="41" dy="0.76em" text-anchor="middle" font-family="sans-serif" font-size="9.67741935483871" opacity="1" fill="#E5E7EB">
 No explicit receive spin
 </text>
@@ -244,6 +244,21 @@ No explicit receive spin
 <polyline fill="none" opacity="0.65" stroke="#EF4444" stroke-width="1" points="797,383 797,354 "/>
 <polyline fill="none" opacity="0.65" stroke="#EF4444" stroke-width="1" points="790,383 804,383 "/>
 <polyline fill="none" opacity="0.65" stroke="#EF4444" stroke-width="1" points="790,354 804,354 "/>
+<polyline fill="none" opacity="0.65" stroke="#C4B5FD" stroke-width="1" points="91,335 91,313 "/>
+<polyline fill="none" opacity="0.65" stroke="#C4B5FD" stroke-width="1" points="84,335 98,335 "/>
+<polyline fill="none" opacity="0.65" stroke="#C4B5FD" stroke-width="1" points="84,313 98,313 "/>
+<polyline fill="none" opacity="0.65" stroke="#C4B5FD" stroke-width="1" points="373,333 373,318 "/>
+<polyline fill="none" opacity="0.65" stroke="#C4B5FD" stroke-width="1" points="366,333 380,333 "/>
+<polyline fill="none" opacity="0.65" stroke="#C4B5FD" stroke-width="1" points="366,318 380,318 "/>
+<polyline fill="none" opacity="0.65" stroke="#C4B5FD" stroke-width="1" points="515,336 515,314 "/>
+<polyline fill="none" opacity="0.65" stroke="#C4B5FD" stroke-width="1" points="508,336 522,336 "/>
+<polyline fill="none" opacity="0.65" stroke="#C4B5FD" stroke-width="1" points="508,314 522,314 "/>
+<polyline fill="none" opacity="0.65" stroke="#C4B5FD" stroke-width="1" points="656,335 656,307 "/>
+<polyline fill="none" opacity="0.65" stroke="#C4B5FD" stroke-width="1" points="649,335 663,335 "/>
+<polyline fill="none" opacity="0.65" stroke="#C4B5FD" stroke-width="1" points="649,307 663,307 "/>
+<polyline fill="none" opacity="0.65" stroke="#C4B5FD" stroke-width="1" points="797,333 797,311 "/>
+<polyline fill="none" opacity="0.65" stroke="#C4B5FD" stroke-width="1" points="790,333 804,333 "/>
+<polyline fill="none" opacity="0.65" stroke="#C4B5FD" stroke-width="1" points="790,311 804,311 "/>
 <polyline fill="none" opacity="1" stroke="#A78BFA" stroke-width="2" points="91,330 232,326 373,330 515,329 656,328 797,318 "/>
 <circle cx="91" cy="330" r="2.5" opacity="1" fill="#A78BFA" stroke="none" stroke-width="1"/>
 <circle cx="232" cy="326" r="2.5" opacity="1" fill="#A78BFA" stroke="none" stroke-width="1"/>
@@ -307,6 +322,12 @@ No explicit receive spin
 <circle cx="515" cy="381" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
 <circle cx="656" cy="380" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
 <circle cx="797" cy="373" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
+<polyline fill="none" opacity="1" stroke="#C4B5FD" stroke-width="2" points="91,326 373,324 515,327 656,326 797,323 "/>
+<circle cx="91" cy="326" r="2.5" opacity="1" fill="#C4B5FD" stroke="none" stroke-width="1"/>
+<circle cx="373" cy="324" r="2.5" opacity="1" fill="#C4B5FD" stroke="none" stroke-width="1"/>
+<circle cx="515" cy="327" r="2.5" opacity="1" fill="#C4B5FD" stroke="none" stroke-width="1"/>
+<circle cx="656" cy="326" r="2.5" opacity="1" fill="#C4B5FD" stroke="none" stroke-width="1"/>
+<circle cx="797" cy="323" r="2.5" opacity="1" fill="#C4B5FD" stroke="none" stroke-width="1"/>
 <text x="415" y="581" dy="0.76em" text-anchor="middle" font-family="sans-serif" font-size="9.67741935483871" opacity="1" fill="#E5E7EB">
 50 μs OMQ spin; Aeron busy polling
 </text>
@@ -476,19 +497,19 @@ crate
 <text x="455" y="884" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
 runtime / broker
 </text>
-<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="78,906 92,906 "/>
+<polyline fill="none" opacity="1" stroke="#C4B5FD" stroke-width="2" points="78,906 92,906 "/>
 <text x="98" y="900" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
-OMQ / TCP
+Remoc / Postbag
 </text>
 <text x="290" y="900" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
-omq-tokio
+remoc v0.20.5
 </text>
 <text x="455" y="900" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
-1 IO
+CT
 </text>
-<polyline fill="none" opacity="1" stroke="#1D4ED8" stroke-width="2" points="78,922 92,922 "/>
+<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="78,922 92,922 "/>
 <text x="98" y="916" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
-OMQ / QUIC
+OMQ / TCP
 </text>
 <text x="290" y="916" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
 omq-tokio
@@ -496,9 +517,9 @@ omq-tokio
 <text x="455" y="916" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
 1 IO
 </text>
-<polyline fill="none" opacity="1" stroke="#FFB74D" stroke-width="2" points="78,938 92,938 "/>
+<polyline fill="none" opacity="1" stroke="#1D4ED8" stroke-width="2" points="78,938 92,938 "/>
 <text x="98" y="932" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
-OMQ / DART
+OMQ / QUIC
 </text>
 <text x="290" y="932" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
 omq-tokio
@@ -506,65 +527,75 @@ omq-tokio
 <text x="455" y="932" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
 1 IO
 </text>
-<polyline fill="none" opacity="1" stroke="#F472B6" stroke-width="2" points="78,954 92,954 "/>
+<polyline fill="none" opacity="1" stroke="#FFB74D" stroke-width="2" points="78,954 92,954 "/>
 <text x="98" y="948" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
-gRPC over HTTP/2
+OMQ / DART
 </text>
 <text x="290" y="948" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
-tonic v0.14.6
+omq-tokio
 </text>
-<polyline fill="none" opacity="1" stroke="#60A5FA" stroke-width="2" points="78,970 92,970 "/>
+<text x="455" y="948" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
+1 IO
+</text>
+<polyline fill="none" opacity="1" stroke="#F472B6" stroke-width="2" points="78,970 92,970 "/>
 <text x="98" y="964" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
-AMQP 0-9-1
+gRPC over HTTP/2
 </text>
 <text x="290" y="964" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
-lapin v4.12.3
+tonic v0.14.6
 </text>
-<text x="455" y="964" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
-RabbitMQ 4.4.0
-</text>
-<polyline fill="none" opacity="1" stroke="#94A3B8" stroke-width="2" points="78,986 92,986 "/>
+<polyline fill="none" opacity="1" stroke="#60A5FA" stroke-width="2" points="78,986 92,986 "/>
 <text x="98" y="980" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
-Aeron / UDP
+AMQP 0-9-1
 </text>
 <text x="290" y="980" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
-Aeron v1.53.3
+lapin v4.12.3
 </text>
 <text x="455" y="980" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
-1 IO (SHARED)
+RabbitMQ 4.4.0
 </text>
-<polyline fill="none" opacity="1" stroke="#22D3EE" stroke-width="2" points="78,1002 92,1002 "/>
+<polyline fill="none" opacity="1" stroke="#94A3B8" stroke-width="2" points="78,1002 92,1002 "/>
 <text x="98" y="996" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
-NATS
+Aeron / UDP
 </text>
 <text x="290" y="996" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
-async-nats v0.50.0
+Aeron v1.53.3
 </text>
 <text x="455" y="996" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
-nats-server 2.15.1
+1 IO (SHARED)
 </text>
-<polyline fill="none" opacity="1" stroke="#84CC16" stroke-width="2" points="78,1018 92,1018 "/>
+<polyline fill="none" opacity="1" stroke="#22D3EE" stroke-width="2" points="78,1018 92,1018 "/>
 <text x="98" y="1012" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
-Redis Streams
+NATS
 </text>
 <text x="290" y="1012" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
-redis v1.7.1
+async-nats v0.50.0
 </text>
 <text x="455" y="1012" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
-Redis 8.10.2
+nats-server 2.15.1
 </text>
-<polyline fill="none" opacity="1" stroke="#FFFFFF" stroke-width="2" points="78,1034 92,1034 "/>
+<polyline fill="none" opacity="1" stroke="#84CC16" stroke-width="2" points="78,1034 92,1034 "/>
 <text x="98" y="1028" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
-zenoh / TCP
+Redis Streams
 </text>
 <text x="290" y="1028" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
-zenoh v1.10.1
+redis v1.7.1
 </text>
-<polyline fill="none" opacity="1" stroke="#A78BFA" stroke-width="2" points="78,1050 92,1050 "/>
+<text x="455" y="1028" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
+Redis 8.10.2
+</text>
+<polyline fill="none" opacity="1" stroke="#FFFFFF" stroke-width="2" points="78,1050 92,1050 "/>
 <text x="98" y="1044" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
-iroh / QUIC
+zenoh / TCP
 </text>
 <text x="290" y="1044" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
+zenoh v1.10.1
+</text>
+<polyline fill="none" opacity="1" stroke="#A78BFA" stroke-width="2" points="78,1066 92,1066 "/>
+<text x="98" y="1060" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
+iroh / QUIC
+</text>
+<text x="290" y="1060" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
 iroh v1.4.0
 </text>
 </svg>

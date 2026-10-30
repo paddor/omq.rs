@@ -3,6 +3,8 @@
 - Same-host measurements; delivery and persistence semantics differ.
 - Workloads: [adapters](scripts/rivals/README.md) and
   [run commands](RUNNING_BENCHMARKS.md).
+- Remoc uses typed `Bytes` blobs with Serde/Postbag, remote MPSC channels for
+  throughput, and generated echo RPC for latency.
 
 ## One-flow PUSH/PULL throughput
 

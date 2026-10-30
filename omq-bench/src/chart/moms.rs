@@ -11,9 +11,17 @@ const THROUGHPUT_SIZES: &[u64] = &[
     16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 262_144, 4_194_304, 8_388_608,
 ];
 const LATENCY_SIZES: &[u64] = &[16, 32, 64, 256, 1024, 4096];
+// The comparison runner's default request/reply cohort has five sizes.
+const REMOC_LATENCY_SIZES: &[u64] = &[16, 64, 256, 1024, 4096];
 const LOCAL_SIZES: &[u64] = &[16, 64, 256, 1024, 4096, 16384, 8_388_608];
 const LOCAL_LATENCY_SIZES: &[u64] = &[16, 64, 256, 1024, 4096];
 const NETWORK: &[Impl] = &[
+    Impl {
+        key: "remoc",
+        label: "Remoc / Postbag",
+        threads: "CT",
+        color: common::C_REMOC,
+    },
     Impl {
         key: "omq-tokio-1t",
         label: "OMQ / TCP",
@@ -380,6 +388,11 @@ fn latency(impls: &[Impl], sizes: &[u64]) -> (LatencyMap, BTreeMap<String, CpuDa
         jsonl::load_jsonl(&jsonl::cache_dir().join("comparisons.jsonl"));
     for imp in impls {
         let spin = if imp.key.ends_with("-spin50") { 50 } else { 0 };
+        let sizes = if imp.key == "remoc" {
+            REMOC_LATENCY_SIZES
+        } else {
+            sizes
+        };
         if let Some(shm_key) = local_shm_key(imp.key) {
             for (size, row) in local_shm_rows("shm-reqrep", shm_key, sizes, Some(spin)) {
                 latency.entry(size).or_default().insert(
@@ -428,6 +441,11 @@ fn require_points<T>(
     for imp in impls.iter().filter(|imp| {
         kind == "latency" || imp.key.starts_with("omq-") || imp.key.ends_with("-2proc")
     }) {
+        let sizes = if imp.key == "remoc" && kind == "latency" {
+            REMOC_LATENCY_SIZES
+        } else {
+            sizes
+        };
         for size in sizes {
             assert!(
                 values
@@ -446,16 +464,26 @@ pub(crate) fn generate() {
     let fanout = super::moms_fanout::prepare();
     let directory = common::out_dir().join("moms");
     std::fs::create_dir_all(&directory).expect("create MOM chart directory");
-    draw_throughput_charts(&directory);
-    draw_latency_charts(&directory);
+    draw_throughput_charts(&directory, false);
+    draw_latency_charts(&directory, false);
     super::moms_fanout::draw(&fanout);
 }
 
-fn draw_throughput_charts(directory: &std::path::Path) {
+pub(crate) fn generate_network() {
+    let directory = common::out_dir().join("moms");
+    std::fs::create_dir_all(&directory).expect("create MOM chart directory");
+    draw_throughput_charts(&directory, true);
+    draw_latency_charts(&directory, true);
+}
+
+fn draw_throughput_charts(directory: &std::path::Path, network_only: bool) {
     for (name, sizes, base) in [
         ("network", THROUGHPUT_SIZES, NETWORK),
         ("local", LOCAL_SIZES, LOCAL),
     ] {
+        if network_only && name != "network" {
+            continue;
+        }
         let (bandwidth, messages, cpu) = throughput(base);
         require_points(&messages, sizes, base, "throughput");
         let path = directory.join(format!("throughput_{name}.svg"));
@@ -488,11 +516,14 @@ fn draw_throughput_charts(directory: &std::path::Path) {
     }
 }
 
-fn draw_latency_charts(directory: &std::path::Path) {
+fn draw_latency_charts(directory: &std::path::Path, network_only: bool) {
     for (name, sizes, base) in [
         ("network", LATENCY_SIZES, NETWORK),
         ("local", LOCAL_LATENCY_SIZES, LOCAL),
     ] {
+        if network_only && name != "network" {
+            continue;
+        }
         let impls = latency_impls(base);
         let (latency, cpu) = latency(&impls, sizes);
         require_points(&latency, sizes, &impls, "latency");

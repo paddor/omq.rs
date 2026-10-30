@@ -113,6 +113,7 @@ pub(crate) const C_AERON: RGBColor = RGBColor(148, 163, 184);
 pub(crate) const C_NATS: RGBColor = RGBColor(34, 211, 238);
 pub(crate) const C_REDIS: RGBColor = RGBColor(132, 204, 22);
 pub(crate) const C_ZENOH: RGBColor = RGBColor(255, 255, 255);
+pub(crate) const C_REMOC: RGBColor = RGBColor(196, 181, 253);
 pub(crate) const C_IROH: RGBColor = RGBColor(167, 139, 250);
 pub(crate) const C_RZMQ_IOURING: RGBColor = RGBColor(16, 185, 129);
 
@@ -573,6 +574,7 @@ fn draw_mom_legend_table(
 
 fn mom_client_crate_label(key: &str) -> &'static str {
     match key {
+        "remoc" => "remoc v0.20.5",
         key if key.starts_with("omq-") => "omq-tokio",
         "grpc-rust" => "tonic v0.14.6",
         "rabbitmq" => "lapin v4.12.3",

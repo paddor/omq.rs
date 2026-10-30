@@ -8,6 +8,7 @@ Generated SVGs. Do not hand-edit. Data source: `~/.cache/omq/*.jsonl`.
 cargo run --release -p omq-bench -- chart          # all charts
 cargo run --release -p omq-bench -- chart main      # main overview only
 cargo run --release -p omq-bench -- chart mom       # other protocol comparisons
+cargo run --release -p omq-bench -- chart remoc     # Remoc versus OMQ
 cargo run --release -p omq-bench -- chart comparison # per-transport
 cargo run --release -p omq-bench -- chart pubsub    # PUB/SUB + CURVE
 cargo run --release -p omq-bench -- chart fanio     # fan-out/fan-in
@@ -50,6 +51,10 @@ implementations, except the DART charts, which also include Aeron.
 All other secondary charts in `doc/charts/` show OMQ and libzmq only.
 
 ## MOM charts (6 files)
+
+Remoc uses the comparison runner's five latency sizes: 16 B, 64 B, 256 B,
+1 KiB, and 4 KiB. The focused `remoc_pushpull_tcp.svg` and
+`remoc_rpc_tcp.svg` use Remoc and OMQ CT results from the same run.
 
 - `omq_bench chart mom` writes six SVGs in `moms/`; `chart mom-fanout`
   writes the two PUB/SUB SVGs. Require complete, verified cohorts.

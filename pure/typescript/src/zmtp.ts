@@ -94,13 +94,27 @@ export function encodeCommandFrame(
  */
 export function encodeMessage(parts: Uint8Array[]): Uint8Array<ArrayBuffer> {
   if (parts.length === 0) throw new Error("Message has no parts");
+  const out = new Uint8Array(messageWireSize(parts));
+  writeMessage(parts, out, 0);
+  return out;
+}
+
+/** Frame headers plus bodies of one message. */
+export function messageWireSize(parts: Uint8Array[]): number {
   let size = 0;
   for (const part of parts) {
     size += (part.byteLength <= 255 ? 2 : 9) + part.byteLength;
   }
-  const out = new Uint8Array(size);
-  const view = new DataView(out.buffer);
-  let offset = 0;
+  return size;
+}
+
+/** Write one message's data frames at `offset`; returns the end offset. */
+export function writeMessage(
+  parts: Uint8Array[],
+  out: Uint8Array,
+  offset: number,
+): number {
+  const view = new DataView(out.buffer, out.byteOffset, out.byteLength);
   for (let i = 0; i < parts.length; i++) {
     const part = parts[i]!;
     const more = i < parts.length - 1 ? ZMTP_FLAG_MORE : 0;
@@ -115,7 +129,7 @@ export function encodeMessage(parts: Uint8Array[]): Uint8Array<ArrayBuffer> {
     out.set(part, offset);
     offset += part.byteLength;
   }
-  return out;
+  return offset;
 }
 
 /**

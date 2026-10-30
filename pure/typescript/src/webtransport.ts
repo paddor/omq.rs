@@ -108,7 +108,7 @@ export class WebTransportConnection implements PeerConnection {
     this.handshake = new ZmtpHandshake(opts, (p) => this.sendCommand(p));
     this.sends = new SendQueue(
       opts.sendHighWaterMark,
-      (msg) => this.sendNow(msg),
+      ([msg]) => this.sendNow(msg!),
     );
     if (typeof WebTransport === "undefined") {
       throw new Error("WebTransport is not available in this runtime");

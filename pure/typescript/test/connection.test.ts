@@ -196,6 +196,53 @@ describe("Connection", () => {
     }
   });
 
+  it("sends queued LZ4 messages as one LZ4A arena", async () => {
+    const conn = new Connection("lz4+ws://localhost:8087", {
+      socketType: "PUSH",
+      identity: new Uint8Array(0),
+    });
+    const ws = await waitForWebSocket();
+    ws.simulateOpen();
+    ws.simulateMessage(serverReady("PULL"));
+    ws.sentFrames = [];
+
+    // The first send writes alone; the next two queue behind it.
+    await Promise.all([
+      conn.send(new Message("first")),
+      conn.send(new Message("second", "part")),
+      conn.send(new Message("third")),
+    ]);
+
+    expect(ws.sentFrames.length).toBe(2);
+    const arena = ws.sentFrames[1]!;
+    expect(arena[0]).toBe(FLAG_FINAL);
+    const decoded = new Lz4Decoder().decodeMessages([arena.subarray(1)]);
+    expect(decoded.map((parts) => Message.fromParts(parts).parts)).toEqual([
+      new Message("second", "part").parts,
+      new Message("third").parts,
+    ]);
+  });
+
+  it("stops delivering an LZ4A arena once the connection closes", async () => {
+    const onMessage = vi.fn((conn: { close(): void }) => conn.close());
+    new Connection("lz4+ws://localhost:8087", {
+      socketType: "PULL",
+      identity: new Uint8Array(0),
+      onMessage,
+    });
+    const ws = await waitForWebSocket();
+    ws.simulateOpen();
+    ws.simulateMessage(serverReady("PUSH"));
+
+    const [arena] = new Lz4Encoder().encodeArena([
+      [new TextEncoder().encode("a")],
+      [new TextEncoder().encode("b")],
+    ]);
+    ws.simulateMessage(encodeZwsFrame(FLAG_FINAL, arena![0]!));
+
+    expect(onMessage).toHaveBeenCalledTimes(1);
+  });
+
   it("sends READY command on open", () => {
     new Connection("ws://localhost:8081", {
       socketType: "SUB",

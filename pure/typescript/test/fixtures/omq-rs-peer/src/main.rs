@@ -589,6 +589,42 @@ async fn push_bind(endpoint: Endpoint, payload: String, auth: &str) {
     tokio::time::sleep(Duration::from_millis(200)).await;
 }
 
+/// Short and long inner frames, compressible enough for LZ4A arenas.
+fn burst_message(prefix: &str, index: usize) -> Message {
+    Message::multipart([
+        Bytes::from(format!("{prefix}-{index}")),
+        Bytes::from("x".repeat(index % 600)),
+    ])
+}
+
+async fn push_burst_bind(endpoint: Endpoint, prefix: String, count: usize, auth: &str) {
+    let push = Socket::new(SocketType::Push, options(auth));
+    let bound = push.bind(endpoint).await.expect("push bind");
+    print_endpoint(&bound);
+
+    wait_handshake(&push).await;
+    for index in 0..count {
+        push.send(burst_message(&prefix, index))
+            .await
+            .expect("push send");
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+}
+
+async fn pull_burst_bind(endpoint: Endpoint, prefix: String, count: usize, auth: &str) {
+    let pull = Socket::new(SocketType::Pull, options(auth));
+    let bound = pull.bind(endpoint).await.expect("pull bind");
+    print_endpoint(&bound);
+
+    for index in 0..count {
+        let msg = tokio::time::timeout(Duration::from_secs(10), pull.recv())
+            .await
+            .expect("pull recv timed out")
+            .expect("pull recv");
+        assert_eq!(msg, burst_message(&prefix, index));
+    }
+}
+
 async fn rep_bind(endpoint: Endpoint, expected: String, reply: String, auth: &str) {
     let rep = Socket::new(SocketType::Rep, options(auth));
     let bound = rep.bind(endpoint).await.expect("rep bind");
@@ -865,6 +901,17 @@ async fn main() {
             let payload = args.next().expect("payload");
             let auth = args.next().unwrap_or_else(|| "null".to_string());
             push_bind(endpoint, payload, &auth).await;
+        }
+        "push-burst-bind" | "pull-burst-bind" => {
+            let endpoint: Endpoint = args.next().expect("endpoint").parse().unwrap();
+            let prefix = args.next().expect("prefix");
+            let count = args.next().expect("count").parse().expect("count");
+            let auth = args.next().unwrap_or_else(|| "null".to_string());
+            if mode == "push-burst-bind" {
+                push_burst_bind(endpoint, prefix, count, &auth).await;
+            } else {
+                pull_burst_bind(endpoint, prefix, count, &auth).await;
+            }
         }
         "pull-restart-bind" => {
             let endpoint: Endpoint = args.next().expect("endpoint").parse().unwrap();

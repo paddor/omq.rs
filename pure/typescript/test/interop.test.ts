@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { createServer as createNetServer } from "node:net";
 import { createInterface } from "node:readline";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { initSyncFromBytes } from "@paddor/lz4rip";
 import {
   Channel,
@@ -25,7 +25,7 @@ import {
   XPub,
   XSub,
 } from "../src/mod.ts";
-import { initLz4FromBytes } from "../src/lz4.ts";
+import { initLz4FromBytes, Lz4Decoder, Lz4Encoder } from "../src/lz4.ts";
 
 interface Peer {
   child: ChildProcessWithoutNullStreams;
@@ -304,6 +304,101 @@ async function rustPushToTsPull(
     );
   } finally {
     pull.close();
+  }
+}
+
+const BURST_COUNT = 200;
+
+/** Mirrors the fixture's `burst_message`. */
+function burstMessage(prefix: string, index: number): Message {
+  return new Message(`${prefix}-${index}`, "x".repeat(index % 600));
+}
+
+async function rustPushBurstToTsPull(
+  endpoint: string,
+  prefix: string,
+): Promise<void> {
+  const peer = await startPeer([
+    "push-burst-bind",
+    endpoint,
+    prefix,
+    String(BURST_COUNT),
+  ]);
+  const errors: Error[] = [];
+  const pull = new Pull({
+    reconnect: false,
+    onError: (error) => errors.push(error),
+  });
+  const decode = vi.spyOn(Lz4Decoder.prototype, "decodeMessages");
+  try {
+    pull.connect(peer.endpoint);
+    for (let index = 0; index < BURST_COUNT; index++) {
+      const msg = await withTimeout(
+        pull.recv(),
+        5_000,
+        () =>
+          `TS PULL burst recv ${index} timed out errors=${
+            errors.map((e) => e.message).join("; ")
+          } rust=${peer.stderr()}`,
+      );
+      expect(msg.parts).toEqual(burstMessage(prefix, index).parts);
+    }
+    const arenas = decode.mock.results.filter((result) =>
+      result.type === "return" && result.value.length > 1
+    );
+    expect(arenas.length).toBeGreaterThan(0);
+    await withTimeout(
+      waitForExit(peer),
+      5_000,
+      () => `Rust PUSH did not exit after TS burst\n${peer.stderr()}`,
+    );
+  } finally {
+    decode.mockRestore();
+    pull.close();
+  }
+}
+
+async function tsPushBurstToRustPull(
+  endpoint: string,
+  prefix: string,
+): Promise<void> {
+  const peer = await startPeer([
+    "pull-burst-bind",
+    endpoint,
+    prefix,
+    String(BURST_COUNT),
+  ]);
+  const errors: Error[] = [];
+  const push = new Push({
+    reconnect: false,
+    onError: (error) => errors.push(error),
+  });
+  const encodeArena = vi.spyOn(Lz4Encoder.prototype, "encodeArena");
+  try {
+    push.connect(peer.endpoint);
+    await withTimeout(push.ready(), 5_000, () => `TS PUSH not ready`);
+    // Unawaited sends queue up behind the first, so they share arenas.
+    const sends = Array.from(
+      { length: BURST_COUNT },
+      (_, index) => push.send(burstMessage(prefix, index)),
+    );
+    await withTimeout(
+      Promise.all(sends),
+      5_000,
+      () =>
+        `TS PUSH burst timed out errors=${
+          errors.map((e) => e.message).join("; ")
+        } rust=${peer.stderr()}`,
+    );
+    expect(encodeArena).toHaveBeenCalled();
+    await withTimeout(
+      waitForExit(peer),
+      5_000,
+      () => `Rust PULL did not exit after TS burst\n${peer.stderr()}`,
+    );
+  } finally {
+    encodeArena.mockRestore();
+    push.close();
   }
 }
 
@@ -925,6 +1020,14 @@ describeInterop("omq.rs WebSocket interop", () => {
 
   it("receives from Rust PUSH on TypeScript PULL over lz4+ws", async () => {
     await rustPushToTsPull("lz4+ws://127.0.0.1:0/", "rust-lz4-to-ts");
+  }, 120_000);
+
+  it("receives a Rust PUSH burst in LZ4A arenas over lz4+ws", async () => {
+    await rustPushBurstToTsPull("lz4+ws://127.0.0.1:0/", "rust-burst");
+  }, 120_000);
+
+  it("sends a TypeScript PUSH burst in LZ4A arenas over lz4+ws", async () => {
+    await tsPushBurstToRustPull("lz4+ws://127.0.0.1:0/", "ts-burst");
   }, 120_000);
 
   it("connects TypeScript PUSH before Rust PULL bind over ws", async () => {

@@ -129,7 +129,8 @@ export class Connection implements PeerConnection {
     this.handshake = new ZmtpHandshake(opts, (p) => this.sendCommand(p));
     this.sends = new SendQueue(
       opts.sendHighWaterMark,
-      (msg) => this.sendNow(msg),
+      (msgs) => this.sendNow(msgs),
+      (queued) => this.lz4Encoder?.arenaLength(queued) ?? 1,
     );
     this.useLz4 = url.startsWith("lz4+ws://");
     const wsUrl = this.useLz4 ? url.replace(/^lz4\+/, "") : url;
@@ -206,31 +207,28 @@ export class Connection implements PeerConnection {
     return this.sends.push(msg);
   }
 
-  private async sendNow(msg: Message): Promise<void> {
+  /** Several messages arrive only from LZ4 `arenaLength` batching. */
+  private async sendNow(msgs: Message[]): Promise<void> {
     if (!this.ws || this.state !== "ready") {
       throw new Error("Connection not ready");
     }
 
-    if (this.useLz4 && this.lz4Encoder) {
-      const encoded = this.lz4Encoder.encodeMessage(
-        msg.parts.map((p) => p),
-      );
-      for (const wireMsg of encoded) {
-        const frames = encodeDataFrames({ parts: wireMsg });
-        for (const frame of frames) {
-          const wait = this.waitForWritable();
-          if (wait) await wait;
-          this.ws.send(frame);
-        }
-      }
-    } else {
-      const frames = encodeDataFrames(msg);
-      for (const frame of frames) {
+    for (const parts of this.encodeWire(msgs)) {
+      for (const frame of encodeDataFrames({ parts })) {
         const wait = this.waitForWritable();
         if (wait) await wait;
         this.ws.send(frame);
       }
     }
+  }
+
+  private encodeWire(msgs: Message[]): Uint8Array[][] {
+    const encoder = this.lz4Encoder;
+    if (!encoder) return msgs.map((msg) => msg.parts);
+    if (msgs.length > 1) {
+      return encoder.encodeArena(msgs.map((msg) => msg.parts));
+    }
+    return encoder.encodeMessage(msgs[0]!.parts);
   }
 
   private waitForWritable(): Promise<void> | null {
@@ -327,28 +325,29 @@ export class Connection implements PeerConnection {
       const rawParts = this.pendingParts;
       this.pendingParts = [];
 
-      let parts: Uint8Array[];
       if (this.useLz4 && this.lz4Decoder) {
-        const decoded = this.lz4Decoder.decodeMessage(rawParts);
-        if (decoded === null) return;
-        parts = decoded;
-      } else {
-        if (this.opts.maxMessageSize !== undefined) {
-          let total = 0;
-          for (const part of rawParts) {
-            total += part.byteLength;
-            if (total > this.opts.maxMessageSize) {
-              this.closeWithError(
-                `Message size ${total} exceeds max ${this.opts.maxMessageSize}`,
-              );
-              return;
-            }
-          }
+        for (const parts of this.lz4Decoder.decodeMessages(rawParts)) {
+          // onMessage can close mid-arena, e.g. on receive HWM overflow.
+          if (this.connectionState === "closed") return;
+          this.opts.onMessage?.(this, Message.fromParts(parts));
         }
-        parts = rawParts;
+        return;
       }
 
-      this.opts.onMessage?.(this, Message.fromParts(parts));
+      if (this.opts.maxMessageSize !== undefined) {
+        let total = 0;
+        for (const part of rawParts) {
+          total += part.byteLength;
+          if (total > this.opts.maxMessageSize) {
+            this.closeWithError(
+              `Message size ${total} exceeds max ${this.opts.maxMessageSize}`,
+            );
+            return;
+          }
+        }
+      }
+
+      this.opts.onMessage?.(this, Message.fromParts(rawParts));
     }
   }
 

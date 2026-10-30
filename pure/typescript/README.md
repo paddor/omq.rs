@@ -90,6 +90,10 @@ sub.connect("lz4+ws://broker.example.com/sub");
 TypeScript senders reject individual LZ4 parts at the 1 GiB multi-block
 boundary. Split huge payloads at the application layer.
 
+`lz4+ws://` implements [LZ4 revision 2](https://github.com/paddor/omq.rs/blob/main/doc/lz4-rfc.md):
+small messages already queued behind a send share one `LZ4A` arena, and
+arenas from omq.rs peers are decoded.
+
 ### PLAIN Authentication
 
 Use PLAIN when the WebSocket server requires username/password auth. Prefer

@@ -148,8 +148,10 @@ interface QueuedSend {
 }
 
 /**
- * Writes one message at a time, in order. A send resolves when `write`
- * resolves, that is, once the carrier accepted the whole message.
+ * Writes queued messages in order. `batchLength` picks how many leading
+ * queued messages one `write` carries; it never waits for more to arrive.
+ * A send resolves when the write carrying it resolves, that is, once the
+ * carrier accepted the whole message.
  */
 export class SendQueue {
   private items: QueuedSend[] = [];
@@ -159,7 +161,8 @@ export class SendQueue {
 
   constructor(
     private readonly highWaterMark: number | undefined,
-    private readonly write: (msg: Message) => Promise<void>,
+    private readonly write: (msgs: Message[]) => Promise<void>,
+    private readonly batchLength?: (queued: Iterable<Message>) => number,
   ) {}
 
   push(msg: Message): Promise<void> {
@@ -183,16 +186,23 @@ export class SendQueue {
   }
 
   private drain(): void {
-    if (this.sending) return;
-    const item = this.items.shift();
-    if (!item) return;
+    if (this.sending || this.items.length === 0) return;
+    const count = Math.max(1, this.batchLength?.(this.queuedMessages()) ?? 1);
+    const batch = this.items.splice(0, count);
     this.sending = true;
-    this.write(item.msg)
-      .then(item.resolve, item.reject)
+    this.write(batch.map((item) => item.msg))
+      .then(
+        () => batch.forEach((item) => item.resolve()),
+        (error) => batch.forEach((item) => item.reject(error)),
+      )
       .finally(() => {
-        this.pending--;
+        this.pending -= batch.length;
         this.sending = false;
         this.drain();
       });
+  }
+
+  private *queuedMessages(): Iterable<Message> {
+    for (const item of this.items) yield item.msg;
   }
 }

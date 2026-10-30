@@ -3,12 +3,20 @@ import type {
   Decompressor as DecompressorInstance,
 } from "@paddor/lz4rip";
 
+import {
+  messageWireSize,
+  writeMessage,
+  ZMTP_FLAG_LONG,
+  ZMTP_FLAG_MORE,
+} from "./zmtp.ts";
+
 type Lz4Module = typeof import("@paddor/lz4rip");
 
 const SENTINEL_PLAIN = 0x00000000;
 const SENTINEL_LZ4B = 0x4c5a3442; // "LZ4B"
 const SENTINEL_LZ4M = 0x4c5a344d; // "LZ4M"
 const SENTINEL_LZ4D = 0x4c5a3444; // "LZ4D"
+const SENTINEL_LZ4A = 0x4c5a3441; // "LZ4A"
 
 const MAX_DICT_BYTES = 8192;
 const LZ4M_BLOCK_SIZE = 0x40000000;
@@ -16,6 +24,17 @@ const LZ4_MAX_EXPANSION = 255;
 const MAX_TS_SEND_PART_SIZE = LZ4M_BLOCK_SIZE - 1;
 const MIN_COMPRESS_NO_DICT = 512;
 const MIN_COMPRESS_WITH_DICT = 128;
+
+// Arena: sentinel, mode u8, reserved[3], decoded_size u32 LE,
+// messages u32 LE, then raw or LZ4-compressed ZMTP data frames.
+const ARENA_HEADER = 16;
+const ARENA_MODE_LZ4 = 1;
+const MAX_ARENA_BYTES = 64 * 1024;
+const MAX_ARENA_MESSAGES = 256;
+const MAX_ARENA_PARTS = 4096;
+// Sender policy, as in omq-proto: small messages, 16 KiB arenas.
+const MAX_ARENA_MESSAGE_BYTES = 8 * 1024;
+const ARENA_TARGET_BYTES = 16 * 1024;
 
 let lz4Module: Lz4Module | null = null;
 let lz4Init: Promise<void> | null = null;
@@ -122,6 +141,70 @@ function rejectImplausibleCompressedSize(
 /** Return whether a compressed transport part carries an LZ4 dictionary. */
 export function isLz4DictionaryShipment(data: Uint8Array): boolean {
   return data.byteLength >= 4 && readSentinel(data) === SENTINEL_LZ4D;
+}
+
+function isArena(data: Uint8Array): boolean {
+  return data.byteLength >= 4 && readSentinel(data) === SENTINEL_LZ4A;
+}
+
+/** Inner wire size of a message small enough for an arena. */
+function arenaMessageSize(parts: Uint8Array[]): number | undefined {
+  if (parts.length === 0 || parts.length > MAX_ARENA_PARTS) return undefined;
+  const size = messageWireSize(parts);
+  return size <= MAX_ARENA_MESSAGE_BYTES ? size : undefined;
+}
+
+/**
+ * Validate a decoded arena completely, then split it into messages. Parts
+ * are views into `bytes`.
+ */
+function splitArena(
+  bytes: Uint8Array,
+  count: number,
+  maxMessageSize: number | undefined,
+): Uint8Array[][] {
+  const invalid = () => new Error("Invalid LZ4A arena");
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const messages: Uint8Array[][] = [];
+  let parts: Uint8Array[] = [];
+  let partCount = 0;
+  let messageSize = 0;
+  let offset = 0;
+
+  while (offset < bytes.byteLength) {
+    if (offset + 2 > bytes.byteLength) throw invalid();
+    const flags = bytes[offset]!;
+    if (flags & ~(ZMTP_FLAG_MORE | ZMTP_FLAG_LONG)) throw invalid();
+    let start = offset + 2;
+    let length = bytes[offset + 1]!;
+    if (flags & ZMTP_FLAG_LONG) {
+      start = offset + 9;
+      if (start > bytes.byteLength) throw invalid();
+      const long = view.getBigUint64(offset + 1, false);
+      if (long > BigInt(bytes.byteLength - start)) throw invalid();
+      length = Number(long);
+    }
+    const end = start + length;
+    if (end > bytes.byteLength || ++partCount > MAX_ARENA_PARTS) {
+      throw invalid();
+    }
+    messageSize += length;
+    if (maxMessageSize !== undefined && messageSize > maxMessageSize) {
+      throw new Error(
+        `Message size ${messageSize} exceeds max ${maxMessageSize}`,
+      );
+    }
+    parts.push(bytes.subarray(start, end));
+    offset = end;
+    if ((flags & ZMTP_FLAG_MORE) === 0) {
+      messages.push(parts);
+      parts = [];
+      messageSize = 0;
+    }
+  }
+
+  if (parts.length > 0 || messages.length !== count) throw invalid();
+  return messages;
 }
 
 /** Stateful decoder for the omq LZ4 transport envelope. */
@@ -232,6 +315,23 @@ export class Lz4Decoder {
     return decoded;
   }
 
+  /**
+   * Decode one wire message into application messages: none for a
+   * dictionary shipment, several for an `LZ4A` arena.
+   */
+  decodeMessages(parts: Uint8Array[]): Uint8Array[][] {
+    this.assertOpen();
+    const first = parts[0];
+    if (first && isArena(first)) {
+      if (parts.length !== 1) {
+        throw new Error("LZ4A arena must be single-part");
+      }
+      return this.decodeArena(first);
+    }
+    const decoded = this.decodeMessage(parts);
+    return decoded === null ? [] : [decoded];
+  }
+
   /** Release native WASM decoder memory. Safe to call more than once. */
   free(): void {
     if (this.freed) return;
@@ -304,6 +404,37 @@ export class Lz4Decoder {
 
     return { result, consumed: decompressedSize };
   }
+
+  /** @ignore */
+  private decodeArena(data: Uint8Array): Uint8Array[][] {
+    const invalid = () => new Error("Invalid LZ4A arena envelope");
+    if (
+      data.byteLength < ARENA_HEADER ||
+      data.byteLength > ARENA_HEADER + MAX_ARENA_BYTES
+    ) {
+      throw invalid();
+    }
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    const mode = data[4]!;
+    const size = view.getUint32(8, true);
+    const count = view.getUint32(12, true);
+    if (
+      mode > ARENA_MODE_LZ4 || data[5] !== 0 || data[6] !== 0 ||
+      data[7] !== 0 || size < 1 || size > MAX_ARENA_BYTES || count < 1 ||
+      count > MAX_ARENA_MESSAGES
+    ) {
+      throw invalid();
+    }
+
+    const body = data.subarray(ARENA_HEADER);
+    const decoded = mode === ARENA_MODE_LZ4
+      ? this.decompressor.decompress(body, size)
+      : body;
+    if (decoded.byteLength !== size) {
+      throw new Error("LZ4A arena size mismatch");
+    }
+    return splitArena(decoded, count, this.maxMessageSize);
+  }
 }
 
 /** Stateful encoder for the omq LZ4 transport envelope. */
@@ -330,13 +461,14 @@ export class Lz4Encoder {
     this.blockSize = blockSize;
   }
 
+  /** @ignore Smallest part or arena worth compressing. */
+  private get threshold(): number {
+    return this.sendDict ? MIN_COMPRESS_WITH_DICT : MIN_COMPRESS_NO_DICT;
+  }
+
   /** @ignore */
   private encodePart(plaintext: Uint8Array): Uint8Array {
-    const threshold = this.sendDict
-      ? MIN_COMPRESS_WITH_DICT
-      : MIN_COMPRESS_NO_DICT;
-
-    if (plaintext.byteLength < threshold) {
+    if (plaintext.byteLength < this.threshold) {
       return wrapPlain(plaintext);
     }
 
@@ -365,13 +497,74 @@ export class Lz4Encoder {
   /** Encode one multipart message, including dictionary shipment if needed. */
   encodeMessage(parts: Uint8Array[]): Uint8Array[][] {
     this.assertOpen();
-    const encoded = parts.map((p) => this.encodePart(p));
-    if (!this.dictShipped && this.sendDict) {
-      this.dictShipped = true;
-      const dictMsg = buildDictShipment(this.sendDict);
-      return [[dictMsg], encoded];
+    return this.withDictShipment(parts.map((p) => this.encodePart(p)));
+  }
+
+  /**
+   * How many leading queued messages fit in one `LZ4A` arena. Below 2,
+   * send the first message alone with `encodeMessage`.
+   */
+  arenaLength(queued: Iterable<{ parts: Uint8Array[] }>): number {
+    let count = 0;
+    let bytes = 0;
+    let parts = 0;
+    for (const msg of queued) {
+      const size = arenaMessageSize(msg.parts);
+      if (
+        size === undefined || bytes + size > ARENA_TARGET_BYTES ||
+        count === MAX_ARENA_MESSAGES ||
+        parts + msg.parts.length > MAX_ARENA_PARTS
+      ) {
+        break;
+      }
+      count++;
+      bytes += size;
+      parts += msg.parts.length;
     }
-    return [encoded];
+    return count;
+  }
+
+  /** Encode messages as one arena, after a dictionary shipment if needed. */
+  encodeArena(messages: Uint8Array[][]): Uint8Array[][] {
+    this.assertOpen();
+    let size = 0;
+    let parts = 0;
+    for (const msg of messages) {
+      const msgSize = arenaMessageSize(msg);
+      if (msgSize === undefined) {
+        throw new Error("Message is not eligible for an LZ4A arena");
+      }
+      size += msgSize;
+      parts += msg.length;
+    }
+    if (
+      messages.length < 1 || messages.length > MAX_ARENA_MESSAGES ||
+      size > MAX_ARENA_BYTES || parts > MAX_ARENA_PARTS
+    ) {
+      throw new Error("LZ4A arena exceeds limits");
+    }
+
+    let arena = new Uint8Array(ARENA_HEADER + size);
+    let offset = ARENA_HEADER;
+    for (const msg of messages) offset = writeMessage(msg, arena, offset);
+    if (size >= this.threshold) {
+      const compressed = this.compressor.compress(
+        arena.subarray(ARENA_HEADER),
+      );
+      if (compressed.byteLength < size) {
+        arena = new Uint8Array(ARENA_HEADER + compressed.byteLength);
+        arena.set(compressed, ARENA_HEADER);
+        arena[4] = ARENA_MODE_LZ4;
+      }
+    }
+    arena[0] = 0x4c; // 'L'
+    arena[1] = 0x5a; // 'Z'
+    arena[2] = 0x34; // '4'
+    arena[3] = 0x41; // 'A'
+    const view = new DataView(arena.buffer);
+    view.setUint32(8, size, true);
+    view.setUint32(12, messages.length, true);
+    return this.withDictShipment([arena]);
   }
 
   /** Release native WASM encoder memory. Safe to call more than once. */
@@ -384,6 +577,13 @@ export class Lz4Encoder {
   /** @ignore */
   private assertOpen(): void {
     if (this.freed) throw new Error("LZ4 encoder closed");
+  }
+
+  /** @ignore The dictionary ships once, before the first payload using it. */
+  private withDictShipment(wire: Uint8Array[]): Uint8Array[][] {
+    if (this.dictShipped || !this.sendDict) return [wire];
+    this.dictShipped = true;
+    return [[buildDictShipment(this.sendDict)], wire];
   }
 
   /** @ignore */

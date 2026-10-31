@@ -6,8 +6,10 @@ use std::collections::BTreeMap;
 #[derive(Default)]
 struct CpuAccum {
     sender_sum: f64,
+    broker_sum: f64,
     receiver_sum: f64,
     sender_count: u32,
+    broker_count: u32,
     receiver_count: u32,
     runtime_workers: Option<usize>,
 }
@@ -23,6 +25,11 @@ impl CpuAccum {
         self.receiver_count += 1;
     }
 
+    fn add_broker_pct(&mut self, pct: f64) {
+        self.broker_sum += pct;
+        self.broker_count += 1;
+    }
+
     fn add_sender(&mut self, cpu_time: f64, elapsed: f64) {
         self.add_sender_pct(cpu_time / elapsed * 100.0);
     }
@@ -31,10 +38,15 @@ impl CpuAccum {
         self.add_receiver_pct(cpu_time / elapsed * 100.0);
     }
 
+    fn add_broker(&mut self, cpu_time: f64, elapsed: f64) {
+        self.add_broker_pct(cpu_time / elapsed * 100.0);
+    }
+
     fn into_data(self) -> CpuData {
         CpuData {
             runtime_workers: self.runtime_workers,
             sender: (self.sender_count > 0).then(|| self.sender_sum / f64::from(self.sender_count)),
+            broker: (self.broker_count > 0).then(|| self.broker_sum / f64::from(self.broker_count)),
             receiver: (self.receiver_count > 0)
                 .then(|| self.receiver_sum / f64::from(self.receiver_count)),
         }
@@ -52,6 +64,9 @@ pub(crate) fn merge_cpu_data<'a>(
             accum.runtime_workers = data.runtime_workers.or(accum.runtime_workers);
             if let Some(sender) = data.sender {
                 accum.add_sender_pct(sender);
+            }
+            if let Some(broker) = data.broker {
+                accum.add_broker_pct(broker);
             }
             if let Some(receiver) = data.receiver {
                 accum.add_receiver_pct(receiver);
@@ -75,7 +90,6 @@ pub(crate) fn load_tput(
 
     let path = jsonl::cache_dir().join("comparisons.jsonl");
     let rows: Vec<(usize, ComparisonRow)> = jsonl::load_jsonl(&path);
-    let keys: Vec<&str> = impls.iter().map(|i| i.key).collect();
 
     let mut tput: ValMap = BTreeMap::new();
     let mut msgs: ValMap = BTreeMap::new();
@@ -85,38 +99,41 @@ pub(crate) fn load_tput(
         if row.transport != transport || row.kind != kind {
             continue;
         }
-        if !keys.contains(&row.impl_name.as_str()) {
+        let Some(chart_key) = chart_key_for(impls, &row.impl_name, transport) else {
             continue;
-        }
+        };
         if let Some(p) = peers
             && row.peers != Some(p)
         {
             continue;
         }
-        let key = (row.impl_name.clone(), row.msg_size);
+        let key = (chart_key.to_string(), row.msg_size);
         latest.insert(key, row);
     }
 
     let mut cpu_sums: BTreeMap<String, CpuAccum> = BTreeMap::new();
 
-    for row in latest.into_values() {
+    for ((chart_key, _), row) in latest {
         if let Some(v) = row.mbps {
             tput.entry(row.msg_size)
                 .or_default()
-                .insert(row.impl_name.clone(), v);
+                .insert(chart_key.clone(), v);
         }
         if let Some(v) = row.msgs_s {
             msgs.entry(row.msg_size)
                 .or_default()
-                .insert(row.impl_name.clone(), v);
+                .insert(chart_key.clone(), v);
         }
         if let Some(elapsed) = row.elapsed
             && elapsed > 0.0
         {
-            let e = cpu_sums.entry(row.impl_name.clone()).or_default();
+            let e = cpu_sums.entry(chart_key).or_default();
             e.runtime_workers = row.runtime_workers.or(e.runtime_workers);
             if let Some(push) = row.push_cpu_time.or(row.pub_cpu_time) {
                 e.add_sender(push, elapsed);
+            }
+            if let Some(broker) = row.broker_cpu_time {
+                e.add_broker(broker, elapsed);
             }
             if let Some(pull) = row.pull_cpu_time {
                 e.add_receiver(pull, elapsed);
@@ -134,6 +151,31 @@ pub(crate) fn load_tput(
         .collect();
 
     (tput, msgs, cpu)
+}
+
+/// Chart key whose series `impl_name` rows feed on `transport`. Charts with
+/// an `omq-quic` series read OMQ QUIC rows recorded as `omq-tokio-1t`.
+fn chart_key_for(impls: &[Impl], impl_name: &str, transport: &str) -> Option<&'static str> {
+    let map_omq_quic = impls.iter().any(|imp| imp.key == "omq-quic");
+    impls
+        .iter()
+        .map(|imp| imp.key)
+        .find(|&key| comparison_impl_key(key, transport, map_omq_quic) == Some(impl_name))
+}
+
+fn comparison_impl_key<'a>(
+    chart_key: &'a str,
+    transport: &str,
+    map_omq_quic: bool,
+) -> Option<&'a str> {
+    if !map_omq_quic {
+        return Some(chart_key);
+    }
+    match (chart_key, transport) {
+        ("omq-tokio-1t" | "omq-tokio-1t-spin50", "quic") => None,
+        ("omq-quic", "quic") => Some("omq-tokio-1t"),
+        _ => Some(chart_key),
+    }
 }
 
 pub(crate) fn load_fairness(
@@ -201,7 +243,6 @@ pub(crate) fn load_latency(
 
     let path = jsonl::cache_dir().join("comparisons.jsonl");
     let rows: Vec<(usize, ComparisonRow)> = jsonl::load_jsonl(&path);
-    let keys: Vec<&str> = impls.iter().map(|i| i.key).collect();
 
     let mut lat: LatencyMap = BTreeMap::new();
     let mut latest: BTreeMap<(String, u64), ComparisonRow> = BTreeMap::new();
@@ -221,30 +262,33 @@ pub(crate) fn load_latency(
         {
             continue;
         }
-        if !keys.contains(&row.impl_name.as_str()) {
+        let Some(chart_key) = chart_key_for(impls, &row.impl_name, transport) else {
             continue;
-        }
+        };
         if !sizes.contains(&row.msg_size) {
             continue;
         }
-        let key = (row.impl_name.clone(), row.msg_size);
+        let key = (chart_key.to_string(), row.msg_size);
         latest.insert(key, row);
     }
 
     let mut cpu_sums: BTreeMap<String, CpuAccum> = BTreeMap::new();
 
-    for row in latest.into_values() {
+    for ((chart_key, _), row) in latest {
         if let (Some(p50), Some(p99), Some(p999)) = (row.p50_us, row.p99_us, row.p999_us) {
             lat.entry(row.msg_size)
                 .or_default()
-                .insert(row.impl_name.clone(), LatencyEntry { p50, p99, p999 });
+                .insert(chart_key.clone(), LatencyEntry { p50, p99, p999 });
         }
         if let Some(elapsed) = row.elapsed
             && elapsed > 0.0
         {
-            let e = cpu_sums.entry(row.impl_name.clone()).or_default();
+            let e = cpu_sums.entry(chart_key).or_default();
             if let Some(req) = row.req_cpu_time {
                 e.add_sender(req, elapsed);
+            }
+            if let Some(broker) = row.broker_cpu_time {
+                e.add_broker(broker, elapsed);
             }
             if let (Some(total), Some(req)) = (row.cpu_time, row.req_cpu_time) {
                 e.add_receiver(total - req, elapsed);

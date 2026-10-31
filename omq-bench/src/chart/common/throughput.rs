@@ -1,6 +1,6 @@
 //! Throughput panels: msgs/s and GB/s, dual and multirow.
 
-use super::legend::{draw_legend_table_with_versions, legend_table_height};
+use super::legend::{draw_legend_table_with_versions, draw_mom_legend_table, legend_table_height};
 use super::{
     AXIS_COLOR, BACKGROUND_COLOR, ChartSpec, CpuColumns, FairnessMap, GRID_COLOR, Impl,
     LARGE_START, LegendVersionMode, MsgAxisMode, Panel, SMALL_CUTOFF, TEXT_COLOR, ThroughputRow,
@@ -21,10 +21,31 @@ enum GbsScale {
 
 /// Axis and legend options of a dual-panel throughput chart.
 #[derive(Clone, Copy)]
-struct DualPanelStyle {
+struct DualPanelStyle<'a> {
     msg_axis: MsgAxisMode,
     gbs_scale: GbsScale,
     version_mode: LegendVersionMode,
+    chart_h: u32,
+    msg_ticks: usize,
+    /// Broker CPU header of the MOM legend; `None` keeps the thread legend.
+    mom_broker_label: Option<&'a str>,
+}
+
+impl DualPanelStyle<'_> {
+    const fn standard(
+        msg_axis: MsgAxisMode,
+        gbs_scale: GbsScale,
+        version_mode: LegendVersionMode,
+    ) -> Self {
+        Self {
+            msg_axis,
+            gbs_scale,
+            version_mode,
+            chart_h: 340,
+            msg_ticks: N_TICKS,
+            mom_broker_label: None,
+        }
+    }
 }
 
 pub(crate) fn draw_throughput_dual_panel(
@@ -33,11 +54,8 @@ pub(crate) fn draw_throughput_dual_panel(
     msgs: &ValMap,
     columns: &CpuColumns<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let style = DualPanelStyle {
-        msg_axis: MsgAxisMode::Auto,
-        gbs_scale: GbsScale::Linear,
-        version_mode: LegendVersionMode::Hide,
-    };
+    let style =
+        DualPanelStyle::standard(MsgAxisMode::Auto, GbsScale::Linear, LegendVersionMode::Hide);
     draw_dual_panel(spec, tput, msgs, columns, style)
 }
 
@@ -47,11 +65,11 @@ pub(crate) fn draw_throughput_dual_panel_with_versions(
     msgs: &ValMap,
     columns: &CpuColumns<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let style = DualPanelStyle {
-        msg_axis: MsgAxisMode::Auto,
-        gbs_scale: GbsScale::Linear,
-        version_mode: LegendVersionMode::ShowOtherImpls,
-    };
+    let style = DualPanelStyle::standard(
+        MsgAxisMode::Auto,
+        GbsScale::Linear,
+        LegendVersionMode::ShowOtherImpls,
+    );
     draw_dual_panel(spec, tput, msgs, columns, style)
 }
 
@@ -61,11 +79,11 @@ pub(crate) fn draw_throughput_dual_panel_fixed_2m_msgs_with_versions(
     msgs: &ValMap,
     columns: &CpuColumns<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let style = DualPanelStyle {
-        msg_axis: MsgAxisMode::Fixed2M,
-        gbs_scale: GbsScale::Linear,
-        version_mode: LegendVersionMode::ShowOtherImpls,
-    };
+    let style = DualPanelStyle::standard(
+        MsgAxisMode::Fixed2M,
+        GbsScale::Linear,
+        LegendVersionMode::ShowOtherImpls,
+    );
     draw_dual_panel(spec, tput, msgs, columns, style)
 }
 
@@ -77,10 +95,28 @@ pub(crate) fn draw_throughput_dual_panel_log_gbs(
     msgs: &ValMap,
     columns: &CpuColumns<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let style = DualPanelStyle::standard(MsgAxisMode::Auto, GbsScale::Log, LegendVersionMode::Hide);
+    draw_dual_panel(spec, tput, msgs, columns, style)
+}
+
+/// Dual-panel MOM throughput chart: taller panels, finer msg/s ticks, and
+/// the MOM legend with a broker CPU column.
+pub(crate) fn draw_throughput_dual_panel_brokered_with_versions(
+    spec: &ChartSpec<'_>,
+    tput: &ValMap,
+    msgs: &ValMap,
+    columns: &CpuColumns<'_>,
+    broker_label: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     let style = DualPanelStyle {
-        msg_axis: MsgAxisMode::Auto,
-        gbs_scale: GbsScale::Log,
-        version_mode: LegendVersionMode::Hide,
+        chart_h: 520,
+        msg_ticks: 10,
+        mom_broker_label: Some(broker_label),
+        ..DualPanelStyle::standard(
+            MsgAxisMode::Auto,
+            GbsScale::Linear,
+            LegendVersionMode::ShowOtherImpls,
+        )
     };
     draw_dual_panel(spec, tput, msgs, columns, style)
 }
@@ -134,7 +170,7 @@ fn draw_dual_panel(
     tput: &ValMap,
     msgs: &ValMap,
     columns: &CpuColumns<'_>,
-    style: DualPanelStyle,
+    style: DualPanelStyle<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let present: Vec<&Impl> = spec
         .impls
@@ -143,7 +179,7 @@ fn draw_dual_panel(
         .collect();
     let (small, large) = split_sizes(spec.sizes);
 
-    let chart_h = 340u32;
+    let chart_h = style.chart_h;
     let total_h = chart_h + legend_table_height(present.len());
     let width = 950u32;
     let hw_label = detect_hardware();
@@ -158,7 +194,9 @@ fn draw_dual_panel(
             sizes: &small,
             present: &present,
         };
-        let axis = style.msg_axis.bounds(peak_msgs(&small, msgs), N_TICKS);
+        let axis = style
+            .msg_axis
+            .bounds(peak_msgs(&small, msgs), style.msg_ticks);
         draw_msgs_panel(&left_area, &panel, msgs, axis, None)?;
     }
 
@@ -176,7 +214,11 @@ fn draw_dual_panel(
         }
     }
 
-    draw_legend_table_with_versions(&table_area, &present, columns, style.version_mode)?;
+    if let Some(broker_label) = style.mom_broker_label {
+        draw_mom_legend_table(&table_area, &present, columns, broker_label)?;
+    } else {
+        draw_legend_table_with_versions(&table_area, &present, columns, style.version_mode)?;
+    }
     root.present()?;
     drop(root);
 
@@ -440,6 +482,43 @@ pub(crate) fn draw_multirow_throughput(
     row_title_fn: &dyn Fn(u64) -> String,
     hw_label: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let style = MultirowStyle {
+        row_title_fn,
+        hw_label,
+        gbs_scale: GbsScale::Linear,
+    };
+    draw_multirow(spec, rows, columns, &style)
+}
+
+/// Same as `draw_multirow_throughput` but the GB/s panels use a log10 Y axis.
+pub(crate) fn draw_multirow_throughput_log_gbs(
+    spec: &ChartSpec<'_>,
+    rows: &[ThroughputRow<'_>],
+    columns: &CpuColumns<'_>,
+    row_title_fn: &dyn Fn(u64) -> String,
+    hw_label: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let style = MultirowStyle {
+        row_title_fn,
+        hw_label,
+        gbs_scale: GbsScale::Log,
+    };
+    draw_multirow(spec, rows, columns, &style)
+}
+
+/// Row titles, subtitle, and GB/s scale of a multi-row throughput chart.
+struct MultirowStyle<'a> {
+    row_title_fn: &'a dyn Fn(u64) -> String,
+    hw_label: Option<&'a str>,
+    gbs_scale: GbsScale,
+}
+
+fn draw_multirow(
+    spec: &ChartSpec<'_>,
+    rows: &[ThroughputRow<'_>],
+    columns: &CpuColumns<'_>,
+    style: &MultirowStyle<'_>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let present: Vec<&Impl> = spec
         .impls
         .iter()
@@ -477,10 +556,16 @@ pub(crate) fn draw_multirow_throughput(
         let row_area = root.clone().shrink((0, y_top), (width, panel_h));
 
         // Titles go into the gap above each row once plotters is done.
-        row_titles.push((y_top - 6, row_title_fn(row.peers)));
+        row_titles.push((y_top - 6, (style.row_title_fn)(row.peers)));
 
         let (left_area, right_area) = row_area.split_horizontally(width / 2 - 10);
-        draw_throughput_row((&left_area, &right_area), &small_panel, &large_panel, row)?;
+        draw_throughput_row(
+            (&left_area, &right_area),
+            &small_panel,
+            &large_panel,
+            row,
+            style.gbs_scale,
+        )?;
     }
 
     let table_area = root.clone().shrink((0, chart_total), (width, table_h));
@@ -489,7 +574,7 @@ pub(crate) fn draw_multirow_throughput(
     root.present()?;
     drop(root);
 
-    postprocess_svg(spec.out_path, width, total_h, spec.title, hw_label)?;
+    postprocess_svg(spec.out_path, width, total_h, spec.title, style.hw_label)?;
     append_row_titles(spec.out_path, width, &row_titles)
 }
 
@@ -503,6 +588,7 @@ fn draw_throughput_row(
     small: &Panel<'_>,
     large: &Panel<'_>,
     row: &ThroughputRow<'_>,
+    gbs_scale: GbsScale,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let gbs_axis = nice_axis(peak_gbs(large.sizes, row.tput), N_TICKS);
     let msgs_axis = nice_axis(peak_msgs(small.sizes, row.msgs), N_TICKS);
@@ -512,7 +598,12 @@ fn draw_throughput_row(
     }
 
     if !large.sizes.is_empty() && gbs_axis.0 > 0.0 {
-        draw_gbs_panel(right_area, large, row.tput, gbs_axis, row.fairness)?;
+        match gbs_scale {
+            GbsScale::Linear => {
+                draw_gbs_panel(right_area, large, row.tput, gbs_axis, row.fairness)?;
+            }
+            GbsScale::Log => draw_gbs_panel_log(right_area, large, row.tput, row.fairness)?,
+        }
     }
     Ok(())
 }

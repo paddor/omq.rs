@@ -12,13 +12,15 @@ mod load;
 mod throughput;
 
 pub(crate) use latency::{
-    auto_lat_range, draw_latency_single_panel, draw_latency_single_panel_100us,
-    draw_latency_single_panel_with_versions, draw_multirow_latency,
+    auto_lat_range, draw_latency_brokered_with_versions, draw_latency_single_panel,
+    draw_latency_single_panel_100us, draw_latency_single_panel_with_versions,
+    draw_multirow_latency,
 };
 pub(crate) use legend::draw_legend_table;
 pub(crate) use load::{load_fairness, load_latency, load_tput, merge_cpu_data};
 pub(crate) use throughput::{
-    draw_multirow_throughput, draw_throughput_dual_panel,
+    draw_multirow_throughput, draw_multirow_throughput_log_gbs, draw_throughput_dual_panel,
+    draw_throughput_dual_panel_brokered_with_versions,
     draw_throughput_dual_panel_fixed_2m_msgs_with_versions, draw_throughput_dual_panel_log_gbs,
     draw_throughput_dual_panel_with_versions,
 };
@@ -36,6 +38,7 @@ pub(crate) const MUTED_TEXT_COLOR: RGBColor = RGBColor(156, 163, 175);
 pub(crate) const TITLE_FILL: &str = "#F9FAFB";
 pub(crate) const MUTED_FILL: &str = "#9CA3AF";
 
+#[derive(Clone, Copy)]
 pub(crate) struct Impl {
     pub key: &'static str,
     pub label: &'static str,
@@ -55,6 +58,7 @@ pub(crate) type LatencyMap = BTreeMap<u64, BTreeMap<String, LatencyEntry>>;
 
 pub(crate) struct CpuData {
     pub sender: Option<f64>,
+    pub broker: Option<f64>,
     pub receiver: Option<f64>,
     pub runtime_workers: Option<usize>,
 }
@@ -109,6 +113,7 @@ enum LegendVersionMode {
 pub(crate) const C_LIBZMQ: RGBColor = RGBColor(250, 204, 21);
 pub(crate) const C_LIBZMQ_2T: RGBColor = RGBColor(245, 158, 11);
 pub(crate) const C_OMQ_1T: RGBColor = RGBColor(239, 68, 68);
+pub(crate) const C_OMQ_QUIC: RGBColor = RGBColor(29, 78, 216);
 pub(crate) const C_OMQ_SPIN: RGBColor = RGBColor(251, 146, 60);
 pub(crate) const C_OMQ_CT: RGBColor = RGBColor(251, 113, 133);
 pub(crate) const C_OMQ_MT: RGBColor = RGBColor(249, 115, 22);
@@ -118,6 +123,14 @@ pub(crate) const C_ZMQRS: RGBColor = RGBColor(96, 165, 250);
 pub(crate) const C_MONOCOQUE: RGBColor = RGBColor(37, 99, 235);
 pub(crate) const C_R0Z: RGBColor = RGBColor(34, 211, 238);
 pub(crate) const C_TMQ: RGBColor = RGBColor(168, 85, 247);
+pub(crate) const C_GRPC: RGBColor = RGBColor(244, 114, 182);
+pub(crate) const C_RABBITMQ: RGBColor = RGBColor(96, 165, 250);
+pub(crate) const C_AERON: RGBColor = RGBColor(148, 163, 184);
+pub(crate) const C_NATS: RGBColor = RGBColor(34, 211, 238);
+pub(crate) const C_REDIS: RGBColor = RGBColor(132, 204, 22);
+pub(crate) const C_ZENOH: RGBColor = RGBColor(255, 255, 255);
+pub(crate) const C_REMOC: RGBColor = RGBColor(196, 181, 253);
+pub(crate) const C_IROH: RGBColor = RGBColor(167, 139, 250);
 pub(crate) const C_RZMQ_IOURING: RGBColor = RGBColor(16, 185, 129);
 
 // formatting
@@ -230,7 +243,8 @@ pub(crate) fn detect_hardware() -> Option<String> {
         .or_else(|| hw_conf.get("postfix").cloned());
     let prefix = std::env::var("OMQ_HW_PREFIX")
         .ok()
-        .or_else(|| hw_conf.get("prefix").cloned());
+        .or_else(|| hw_conf.get("prefix").cloned())
+        .or_else(cpu_model);
 
     match (prefix, postfix) {
         (Some(prefix), Some(postfix)) => Some(format!("{prefix}, {postfix}")),
@@ -238,6 +252,16 @@ pub(crate) fn detect_hardware() -> Option<String> {
         (None, Some(postfix)) => Some(postfix),
         (None, None) => None,
     }
+}
+
+fn cpu_model() -> Option<String> {
+    let cpuinfo = std::fs::read_to_string("/proc/cpuinfo").ok()?;
+    cpuinfo.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        (key.trim() == "model name")
+            .then(|| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
 }
 
 fn read_chart_hw() -> BTreeMap<String, String> {

@@ -136,8 +136,8 @@ bindings/beam/doc/charts/bindings.svg
 The script reads repo-root `.chart_hw` when present:
 
 ```text
-prefix=Linux VM on a 2018 Mac Mini
-postfix=6 cores, performance governor, turbo off
+prefix=<CPU model>
+postfix=performance governor, turbo off
 ```
 
 Useful flags:

@@ -62,7 +62,7 @@ pub(crate) struct DartArgs {
     pub common: CommonArgs,
     #[arg(long)]
     pub binary: PathBuf,
-    #[arg(long, default_value = "dart,tcp", value_delimiter = ',', value_parser = ["dart", "tcp", "quic"])]
+    #[arg(long, default_value = "dart,tcp", value_delimiter = ',', value_parser = ["dart", "tcp", "quic", "ipc"])]
     pub transport: Vec<String>,
     #[arg(long, default_value_t = 3.0)]
     pub duration: f64,

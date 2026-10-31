@@ -1,6 +1,6 @@
 //! Latency panels: single, multirow, and percentile ranges.
 
-use super::legend::{draw_legend_table_with_versions, legend_table_height};
+use super::legend::{draw_legend_table_with_versions, draw_mom_legend_table, legend_table_height};
 use super::{
     AXIS_COLOR, BACKGROUND_COLOR, ChartSpec, CpuColumns, CpuData, GRID_COLOR, Impl, LatencyEntry,
     LatencyMap, LegendVersionMode, Panel, TEXT_COLOR, detect_hardware, draw_legend_table,
@@ -62,6 +62,245 @@ pub(crate) fn draw_latency_single_panel_with_versions(
         annotate_clipped: false,
     };
     draw_latency_single_panel_with_layout(spec, lat, cpu, layout)
+}
+
+/// MOM request/reply chart: series without spinning on top, spinning or
+/// polling series below. Network axes are logarithmic, local axes linear.
+pub(crate) fn draw_latency_brokered_with_versions(
+    spec: &ChartSpec<'_>,
+    lat: &LatencyMap,
+    cpu: &BTreeMap<String, CpuData>,
+    local: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let MomLatencySeries {
+        no_spin,
+        spinning,
+        legend,
+    } = mom_latency_series(spec, lat);
+
+    let (top_h, bottom_h) = if local { (300, 300) } else { (540, 340) };
+    let chart_h = top_h + bottom_h;
+    let total_h = chart_h + 30 + legend.len() as u32 * 16;
+    let width = 850u32;
+    let hardware = detect_hardware();
+    let root = SVGBackend::new(spec.out_path, (width, total_h)).into_drawing_area();
+    root.fill(&BACKGROUND_COLOR)?;
+    let (chart_area, table_area) = root.split_vertically(chart_h);
+    let (top, bottom) = chart_area.split_vertically(top_h);
+
+    let (top_caption, bottom_caption) = mom_latency_captions(local);
+    let top_panel = Panel {
+        sizes: spec.sizes,
+        present: &no_spin,
+    };
+    draw_mom_latency_panel(&top, top_caption, &top_panel, lat, local.then_some(20.0))?;
+    let bottom_panel = Panel {
+        sizes: spec.sizes,
+        present: &spinning,
+    };
+    draw_mom_latency_panel(
+        &bottom,
+        bottom_caption,
+        &bottom_panel,
+        lat,
+        local.then_some(5.0),
+    )?;
+
+    let columns = CpuColumns {
+        cpu,
+        snd_label: "",
+        rcv_label: "",
+    };
+    draw_mom_legend_table(&table_area, &legend, &columns, "")?;
+    root.present()?;
+    drop(root);
+    postprocess_svg(
+        spec.out_path,
+        width,
+        total_h,
+        spec.title,
+        hardware.as_deref(),
+    )
+}
+
+/// MOM latency series with data, split by panel. Spin variants share their
+/// base series' legend row.
+struct MomLatencySeries<'a> {
+    no_spin: Vec<&'a Impl>,
+    spinning: Vec<&'a Impl>,
+    legend: Vec<&'a Impl>,
+}
+
+fn mom_latency_series<'a>(spec: &ChartSpec<'a>, lat: &LatencyMap) -> MomLatencySeries<'a> {
+    let present: Vec<&Impl> = spec
+        .impls
+        .iter()
+        .filter(|imp| {
+            spec.sizes.iter().any(|size| {
+                lat.get(size)
+                    .is_some_and(|values| values.contains_key(imp.key))
+            })
+        })
+        .collect();
+    let (spinning, no_spin) = present
+        .iter()
+        .copied()
+        .partition(|imp| is_spinning_mom(imp));
+    let legend = present
+        .iter()
+        .copied()
+        .filter(|imp| !imp.key.ends_with("-spin50"))
+        .collect();
+    MomLatencySeries {
+        no_spin,
+        spinning,
+        legend,
+    }
+}
+
+/// Top and bottom panel captions of the network or local MOM latency chart.
+fn mom_latency_captions(local: bool) -> (&'static str, &'static str) {
+    if local {
+        ("No receive spin", "50 \u{03bc}s OMQ spin; iceoryx2 polling")
+    } else {
+        (
+            "No explicit receive spin",
+            "50 \u{03bc}s OMQ spin; Aeron busy polling",
+        )
+    }
+}
+
+/// Series measured with receive spinning or busy polling.
+fn is_spinning_mom(imp: &Impl) -> bool {
+    imp.key.ends_with("-spin50") || matches!(imp.key, "aeron-udp-2proc" | "iceoryx2-shm-2proc")
+}
+
+/// Linear axis with `tick_us` steps, or a log10 axis with 1/2/5 ticks per
+/// decade. Returns the axis, its bounds, and the log axis floor in us.
+fn mom_latency_axis(
+    min_p50: f64,
+    max_p999: f64,
+    tick_us: Option<f64>,
+) -> (LatencyAxis, std::ops::Range<f64>, f64) {
+    let log_min_us = 10.0_f64.powf(min_p50.log10().floor()).max(0.1);
+    let (axis_min, axis_max, ticks) = if let Some(step) = tick_us {
+        let max = ((max_p999 * 1.1 / step).ceil() * step).max(step);
+        let ticks = (0..=(max / step) as usize)
+            .map(|index| index as f64 * step)
+            .collect();
+        (0.0, max, ticks)
+    } else {
+        let min = log_min_us.log10();
+        let max = (max_p999 * 1.25).log10().max(min + 1.0);
+        let ticks = (min.floor() as i32..=max.ceil() as i32)
+            .flat_map(|decade| {
+                [1.0_f64, 2.0, 5.0].map(move |factor| f64::from(decade) + factor.log10())
+            })
+            .filter(|tick| *tick >= min - 1e-9 && *tick <= max + 1e-9)
+            .collect();
+        (min, max, ticks)
+    };
+    let bounds = axis_min..axis_max;
+    (
+        LatencyAxis(bounds.clone().into(), ticks),
+        bounds,
+        log_min_us,
+    )
+}
+
+/// Latency values in plot units: microseconds on a linear axis, log10
+/// microseconds (floored at `log_min_us`) otherwise.
+fn mom_plot_latency(lat: &LatencyMap, tick_us: Option<f64>, log_min_us: f64) -> LatencyMap {
+    let plot_us = |value: f64| {
+        if tick_us.is_some() {
+            value
+        } else {
+            value.max(log_min_us).log10()
+        }
+    };
+    lat.iter()
+        .map(|(&size, values)| {
+            let values = values
+                .iter()
+                .map(|(key, entry)| {
+                    let entry = LatencyEntry {
+                        p50: plot_us(entry.p50),
+                        p99: plot_us(entry.p99),
+                        p999: plot_us(entry.p999),
+                    };
+                    (key.clone(), entry)
+                })
+                .collect();
+            (size, values)
+        })
+        .collect()
+}
+
+fn draw_mom_latency_panel(
+    area: &DrawingArea<SVGBackend<'_>, plotters::coord::Shift>,
+    caption: &str,
+    panel: &Panel<'_>,
+    lat: &LatencyMap,
+    tick_us: Option<f64>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let sizes = panel.sizes;
+    let (min_p50, max_p999) = panel
+        .present
+        .iter()
+        .flat_map(|imp| sizes.iter().filter_map(|size| lat.get(size)?.get(imp.key)))
+        .fold((f64::INFINITY, 0.0_f64), |(lo, hi), entry| {
+            (lo.min(entry.p50), hi.max(entry.p999))
+        });
+    let (axis, bounds, log_min_us) = mom_latency_axis(min_p50, max_p999, tick_us);
+    let plot_lat = mom_plot_latency(lat, tick_us, log_min_us);
+
+    let mut chart = ChartBuilder::on(area)
+        .caption(caption, ("sans-serif", 12).into_font().color(&TEXT_COLOR))
+        .set_label_area_size(LabelAreaPosition::Bottom, 28)
+        .set_label_area_size(LabelAreaPosition::Left, 60)
+        .margin_top(36)
+        .margin_left(10)
+        .margin_right(30)
+        .build_cartesian_2d(-0.15..(sizes.len() - 1) as f64 + 0.15, axis)?;
+
+    chart
+        .configure_mesh()
+        .x_labels(sizes.len())
+        .x_label_formatter(&|value| {
+            sizes
+                .get(value.round() as usize)
+                .map_or(String::new(), |&size| fmt_size(size))
+        })
+        .y_label_formatter(&|value| {
+            if tick_us.is_some() {
+                format!("{value:.0} \u{03bc}s")
+            } else {
+                fmt_us(10.0_f64.powf(*value))
+            }
+        })
+        .y_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
+        .x_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
+        .light_line_style(TRANSPARENT)
+        .bold_line_style(GRID_COLOR)
+        .axis_style(AXIS_COLOR)
+        .draw()?;
+
+    draw_latency_ranges(&mut chart, panel, &plot_lat, bounds, false)?;
+
+    for imp in panel.present.iter().rev() {
+        let points: Vec<(f64, f64)> = sizes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, size)| {
+                let entry = plot_lat.get(size)?.get(imp.key)?;
+                Some((index as f64, entry.p99))
+            })
+            .collect();
+        if !points.is_empty() {
+            draw_line_with_dots(&mut chart, &points, imp.color)?;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn draw_latency_single_panel_100us(

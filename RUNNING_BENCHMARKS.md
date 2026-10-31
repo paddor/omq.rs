@@ -92,6 +92,20 @@ show only the interesting process's CPU:
 
 ## Updating charts
 
+Remoc comparison (requires Rust 1.95):
+
+```sh
+cargo run --release -p omq-bench -- run comparisons \
+  --impl remoc --impl omq-tokio-ct --transport tcp --no-pubsub \
+  --sizes 64,1024,4096 --duration 3 --rounds 3 --id remoc-YYYYMMDD
+cargo run --release -p omq-bench -- chart remoc
+```
+
+The `grpc-rust` baseline uses plaintext gRPC over TCP between separate
+processes. PUSH/PULL uses one server-streaming RPC carrying opaque byte
+blobs. REQ/REP uses unary `Echo` RPCs. TLS, compression, retries, and
+application-level QoS are disabled.
+
 ### Main TCP charts
 
 `doc/charts/main_{pushpull,pubsub,reqrep}_tcp.svg`. Rebench OMQ only, or all
@@ -266,6 +280,86 @@ cargo run --release -p omq-bench -- run dart --binary path/to/omq_dart_bench_pee
   --profile /mnt/bench/tmp/dart-profile --profile-side receive
 perf report --stdio --no-inline -g none \
   -i /mnt/bench/tmp/dart-profile/gather-16.data
+```
+
+### MOM Charts
+
+- `omq_bench chart mom` writes six network/local throughput, RTT, and PUB/SUB
+  SVGs in `doc/charts/moms/`.
+- RTT uses request/reply workloads and complete rival runs. Network axes are
+  logarithmic; local axes are linear with 20 μs top and 5 μs bottom ticks.
+  Network panels separate no-spin and spin results; all network lines are
+  solid. The bottom panel includes Aeron busy polling. DART also spins IO.
+- Local RTT separates no-spin and spin results into two panels. Iceoryx2
+  polling is in the bottom panel; all lines are solid.
+- PUB/SUB rates are per subscriber. Left msg/s lines are dashed; right GB/s
+  lines are solid.
+
+Build `omq_dart_bench_peer` with `dart quic`, then collect both OMQ network
+latency cohorts. Local IPC/SHM RTT comes from the SHM REQ/REP sweep above.
+The six CPU IDs place sender caller/IO on 1/2 and receiver IO/caller on 3/4.
+
+```sh
+for spin in 0 50; do
+  omq_bench run dart --binary path/to/omq_dart_bench_peer \
+    --transport tcp,quic,dart --congestion adaptive --kind latency \
+    --spin "$spin" --io-spin "$spin" --cpus 1,2,0,3,5,4 \
+    --sizes 16,32,64,256,1024,4096 --iterations 10000 --warmup 2000 --repeats 3 \
+    --output "$HOME/.cache/omq/mom-omq.jsonl"
+done
+omq_bench run dart --binary path/to/omq_dart_bench_peer \
+  --transport dart --congestion adaptive --kind throughput --window-messages 512 \
+  --spin 50 --io-spin 50 --cpus 1,2,0,3,5,4 --warmup-seconds 1 --repeats 3 \
+  --sizes 16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,262144,4194304,8388608 \
+  --output "$HOME/.cache/omq/mom-omq.jsonl"
+omq_bench chart mom
+```
+
+The optional `omq_mom_bench` executable provides broker adapters. Run it with
+`cargo run --release -p omq-bench --features mom-bench --bin omq_mom_bench -- --help`.
+Rival adapters: [scripts/rivals](scripts/rivals/README.md).
+
+Brokers run one at a time in Podman with host networking, pinned to CPUs 3-4
+through `taskset`; rootless Podman has no cpuset controller.
+`OMQ_MOM_BENCH_PIN=1` places brokered clients on CPUs 1 and 2, and the gRPC
+client and server on CPUs 1-2 and 3-4. NATS needs `max_payload: 8MB` for the
+largest sizes.
+
+```sh
+printf 'listen: 127.0.0.1:4222\nmax_payload: 8MB\n' > /mnt/bench/tmp/nats.conf
+taskset -c 3-4 podman run -d --name omq-bench-nats --network host \
+  -v /mnt/bench/tmp/nats.conf:/etc/nats/nats.conf:ro \
+  docker.io/library/nats:2-alpine -c /etc/nats/nats.conf
+taskset -c 3-4 podman run -d --name omq-bench-redis --network host \
+  docker.io/library/redis:8-alpine redis-server --bind 127.0.0.1 --save '' --appendonly no
+taskset -c 3-4 podman run -d --name omq-bench-rabbit --network host \
+  docker.io/library/rabbitmq:4-alpine
+OMQ_MOM_BENCH_PIN=1 omq_mom_bench --impl nats --mode throughput --run-id nats-throughput
+OMQ_MOM_BENCH_PIN=1 omq_mom_bench --impl nats --mode latency \
+  --latency-iterations 10000 --latency-warmup 2000 --run-id nats-latency-r1
+```
+
+Broker and rival RTT points come from three latency runs; each size keeps the
+run with the middle p99. Derived rows record `source_run_id` and
+`cohort_run_ids`.
+
+- `scripts/rivals/run_fanout.rb` writes `~/.cache/omq/mom-fanout.jsonl`.
+- Each of three rounds (at least 3 seconds of publishing) verifies delivery to all 1/4/32
+  subscribers. The score includes the slowest subscriber's drain.
+- OMQ uses HWM 1000 and blocking receive. SHM uses RADIO/DISH; the pooled
+  series fills producer slots without allocation fallback.
+- Zenoh uses one session per subscriber and blocking FIFO receive over TCP or
+  Unix sockets. RabbitMQ uses a fanout exchange with one queue per subscriber;
+  start the RabbitMQ container above without `taskset` first.
+- Publisher CPUs: 1-2. Subscriber CPUs: 3-4. Optional sizes: 128 KiB, 1 MiB,
+  8 MiB. Incomplete cohorts fail chart generation.
+
+Refresh verified fan-out:
+
+```sh
+ruby scripts/rivals/run_fanout.rb --impls omq-tcp,omq-quic,omq-dart,omq-ipc,omq-shm,omq-shm-pool
+ruby scripts/rivals/run_fanout.rb --impls zenoh-tcp,rabbitmq-tcp,zenoh-unix
+omq_bench chart mom-fanout
 ```
 
 ### Quinn DATAGRAM baseline

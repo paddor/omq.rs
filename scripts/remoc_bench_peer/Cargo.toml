@@ -1,0 +1,33 @@
+[workspace]
+
+[package]
+name = "remoc_bench_peer"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+
+[dependencies]
+anyhow = "1"
+bytes = { version = "1", features = ["serde"] }
+libc = "0.2"
+omq-tokio = { path = "../../omq-tokio", default-features = false }
+remoc = { version = "=0.20.5", default-features = false, features = ["rch", "rtc"] }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "net", "rt", "time"] }
+
+[lints.rust]
+missing_debug_implementations = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unreachable_pub = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+cast_precision_loss = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+[profile.release]
+debug = "line-tables-only"

@@ -191,3 +191,82 @@ pub(super) fn draw_legend_table_with_versions(
     }
     Ok(())
 }
+
+/// Legend table of the MOM charts: protocol, client crate, runtime or
+/// broker, and the CPU columns that have a header.
+pub(super) fn draw_mom_legend_table(
+    table_area: &DrawingArea<SVGBackend<'_>, plotters::coord::Shift>,
+    impls: &[&Impl],
+    columns: &CpuColumns<'_>,
+    broker_label: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let style_hdr = ("sans-serif", 11).into_font().color(&MUTED_TEXT_COLOR);
+    let style_val = ("sans-serif", 11).into_font().color(&TEXT_COLOR);
+    let style_dim = ("sans-serif", 11).into_font().color(&MUTED_TEXT_COLOR);
+
+    let col_swatch = 78;
+    let col_name = col_swatch + 20;
+    let (col_crate, col_meta, col_snd, col_broker, col_rcv) = (290, 455, 555, 655, 765);
+    let row_h = 16i32;
+
+    let headers = [
+        ("protocol", col_name),
+        ("crate", col_crate),
+        ("runtime / broker", col_meta),
+        (columns.snd_label, col_snd),
+        (broker_label, col_broker),
+        (columns.rcv_label, col_rcv),
+    ];
+    for (header, col) in headers {
+        if !header.is_empty() {
+            table_area.draw_text(header, &style_hdr, (col, 4))?;
+        }
+    }
+
+    for (i, imp) in impls.iter().enumerate() {
+        #[expect(clippy::cast_possible_wrap)]
+        let y = 20 + i as i32 * row_h;
+
+        table_area.draw(&PathElement::new(
+            vec![(col_swatch, y + 6), (col_swatch + 14, y + 6)],
+            imp.color.stroke_width(2),
+        ))?;
+        table_area.draw_text(imp.label, &style_val, (col_name, y))?;
+        let client = mom_client_crate_label(imp.key);
+        table_area.draw_text(client, &style_dim, (col_crate, y))?;
+        if !imp.threads.is_empty() {
+            table_area.draw_text(imp.threads, &style_dim, (col_meta, y))?;
+        }
+
+        let Some(cd) = columns.cpu.get(imp.key) else {
+            continue;
+        };
+        let cells = [
+            (columns.snd_label, cd.sender, col_snd),
+            (broker_label, cd.broker, col_broker),
+            (columns.rcv_label, cd.receiver, col_rcv),
+        ];
+        for (header, value, col) in cells {
+            if let (false, Some(v)) = (header.is_empty(), value) {
+                table_area.draw_text(&format!("{v:.0}%"), &style_dim, (col, y))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn mom_client_crate_label(key: &str) -> &'static str {
+    match key {
+        "remoc" => "remoc v0.20.5",
+        key if key.starts_with("omq-") => "omq-tokio",
+        "grpc-rust" => "tonic v0.14.6",
+        "rabbitmq" => "lapin v4.12.3",
+        "aeron-udp-2proc" => "Aeron v1.53.3",
+        "nats" => "async-nats v0.50.0",
+        "redis-streams" => "redis v1.7.1",
+        "zenoh-tcp-2proc" => "zenoh v1.10.1",
+        "iroh-quic-2proc" => "iroh v1.4.0",
+        "iceoryx2-shm-2proc" => "iceoryx2 v0.10.0",
+        _ => "",
+    }
+}

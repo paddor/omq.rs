@@ -56,6 +56,9 @@ pub(super) fn build_peers(
 /// Builds the peer binary of one implementation source.
 fn build_source(source: &str, peer_features: &[&str], needs_mt_runtime: bool) -> PathBuf {
     match source {
+        "remoc" => {
+            process::build_external_peer("scripts/remoc_bench_peer", "remoc_bench_peer", &[])
+        }
         "omq-tokio-ct" => {
             // The MT variant reuses this binary with the MT runtime built in.
             let mut features = peer_features.to_vec();

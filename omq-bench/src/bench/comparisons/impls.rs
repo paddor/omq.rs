@@ -59,6 +59,22 @@ pub(crate) struct ImplDef {
 
 pub(super) static IMPLS: &[ImplDef] = &[
     ImplDef {
+        name: "remoc",
+        binary_from: None,
+        prefix: "R",
+        class: None,
+        main: false,
+        transports: &[Tcp],
+        inproc_tput_subcmd: "",
+        inproc_lat_subcmd: "",
+        inproc_pubsub_subcmd: "",
+        pub_needs_peer_count: false,
+        fanout_subcmd: "",
+        fanio_needs_peer_count: false,
+        supports_pubsub: false,
+        env: &[],
+    },
+    ImplDef {
         name: "omq-tokio-ct",
         binary_from: None,
         prefix: "t",

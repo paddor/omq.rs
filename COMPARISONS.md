@@ -62,6 +62,22 @@ blocking API.
   <img src="doc/charts/main_pushpull_tcp.svg" alt="PUSH/PULL throughput: TCP implementations" width="950">
 </p>
 
+## Producer/Consumer Throughput
+
+Direct ZMTP/TCP, gRPC streaming over HTTP/2, brokered queues, Redis Streams,
+zenoh/TCP, Aeron/UDP, and iroh/QUIC over loopback. Transport and delivery
+semantics differ; the legend identifies each transport.
+See [other protocol comparisons](PROTOCOL_COMPARISONS.md) for the setup and
+latency chart.
+
+<p align="center">
+  <img src="doc/charts/moms/throughput_network.svg" alt="Network producer/consumer throughput" width="950">
+</p>
+
+<p align="center">
+  <img src="doc/charts/moms/throughput_local.svg" alt="Local producer/consumer throughput" width="950">
+</p>
+
 <p align="center">
   <img src="doc/charts/pushpull/tcp.svg" alt="PUSH/PULL throughput: TCP" width="850">
 </p>

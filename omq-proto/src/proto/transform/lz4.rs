@@ -39,8 +39,9 @@ use crate::message::{Message, Payload};
 
 use super::TransformedOut;
 use super::common::{
-    ENVELOPE_PLAIN, SENTINEL_PLAIN, SendDict, body_budget, build_dict_shipment, check_expansion,
-    plaintext_payload, take_budget, validate_dict,
+    ENVELOPE_PLAIN, SENTINEL_PLAIN, SendDict, body_budget, build_dict_shipment,
+    check_dict_shipment, check_expansion, decode_plain, plaintext_payload, take_budget,
+    validate_dict, wire_limit,
 };
 
 const SENTINEL_LZ4B: [u8; 4] = *b"LZ4B";
@@ -578,9 +579,7 @@ impl Lz4Decoder {
                 .saturating_add(blocks.saturating_mul(4 + 20))
                 .saturating_add(parts.saturating_mul(ENVELOPE_LZ4B));
             let setup = ENVELOPE_PLAIN + self.max_recv_dict_size + size_of::<Payload>();
-            data.max(setup)
-                .max(arena::HEADER + MAX_ARENA_BYTES + size_of::<Payload>())
-                .min(isize::MAX.unsigned_abs())
+            wire_limit(data, setup)
         })
     }
 
@@ -592,7 +591,7 @@ impl Lz4Decoder {
     ) -> Result<Option<Message>> {
         let mut parts = msg.into_parts_payload();
         let multipart = parts.len() > 1;
-        for (idx, part) in parts.iter_mut().enumerate() {
+        for part in parts.iter_mut() {
             let bytes = part.as_bytes();
             if bytes.len() < 4 {
                 return Err(Error::Protocol(
@@ -601,11 +600,7 @@ impl Lz4Decoder {
             }
             let sentinel: [u8; 4] = bytes[..4].try_into().unwrap();
             match sentinel {
-                SENTINEL_PLAIN => {
-                    let body_len = bytes.len() - 4;
-                    take_budget(&mut budget_left, body_len)?;
-                    *part = Payload::from_bytes(bytes.slice(4..));
-                }
+                SENTINEL_PLAIN => *part = decode_plain(&bytes, &mut budget_left)?,
                 SENTINEL_LZ4B => {
                     *part = decode_lz4b(
                         &bytes[4..],
@@ -625,18 +620,14 @@ impl Lz4Decoder {
                     )?;
                 }
                 SENTINEL_LZ4D => {
-                    if multipart || idx != 0 {
-                        return Err(Error::Protocol(
-                            "LZ4D dict shipment must be a single-part message".into(),
-                        ));
-                    }
-                    if self.decompressor.is_some() {
-                        return Err(Error::Protocol(
-                            "LZ4D shipped twice on the same connection".into(),
-                        ));
-                    }
                     let dict = bytes.slice(4..);
-                    validate_dict(&dict, "LZ4", self.max_recv_dict_size)?;
+                    check_dict_shipment(
+                        &dict,
+                        multipart,
+                        self.decompressor.is_some(),
+                        "LZ4",
+                        self.max_recv_dict_size,
+                    )?;
                     self.decompressor = Some(Decompressor::with_dict(&dict));
                     return Ok(None);
                 }

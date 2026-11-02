@@ -20,8 +20,8 @@ use super::adaptive;
 use super::arena::{self, DecodedArena};
 pub use super::arena::{MAX_ARENA_BYTES, MAX_ARENA_MESSAGES, MAX_ARENA_PARTS, arena_message_size};
 use super::common::{
-    ENVELOPE_PLAIN, SENTINEL_PLAIN, SendDict, body_budget, plaintext_payload, take_budget,
-    validate_dict,
+    ENVELOPE_PLAIN, SENTINEL_PLAIN, SendDict, body_budget, check_dict_shipment, decode_plain,
+    plaintext_payload, take_budget, validate_dict, wire_limit,
 };
 use super::{OutputWindow, TransformedOut};
 
@@ -573,9 +573,7 @@ impl ZstdDecoder {
             // largest per-part overhead is the four-byte passthrough prefix.
             let data = limit.saturating_add(parts.saturating_mul(ENVELOPE_PLAIN));
             let setup = self.max_recv_dict_size + size_of::<Payload>();
-            data.max(setup)
-                .max(arena::HEADER + MAX_ARENA_BYTES + size_of::<Payload>())
-                .min(isize::MAX.unsigned_abs())
+            wire_limit(data, setup)
         })
     }
 
@@ -586,7 +584,7 @@ impl ZstdDecoder {
     ) -> Result<Option<Message>> {
         let mut parts = msg.into_parts_payload();
         let multipart = parts.len() > 1;
-        for (idx, part) in parts.iter_mut().enumerate() {
+        for part in parts.iter_mut() {
             let bytes = part.as_bytes();
             if bytes.len() < 4 {
                 return Err(Error::Protocol(
@@ -595,24 +593,16 @@ impl ZstdDecoder {
             }
             let sentinel: [u8; 4] = bytes[..4].try_into().unwrap();
             match sentinel {
-                SENTINEL_PLAIN => {
-                    let body_len = bytes.len() - 4;
-                    take_budget(&mut budget_left, body_len)?;
-                    *part = Payload::from_bytes(bytes.slice(4..));
-                }
+                SENTINEL_PLAIN => *part = decode_plain(&bytes, &mut budget_left)?,
                 ZSTD_MAGIC => *part = self.decode_zstd(&bytes, &mut budget_left)?,
                 ZDICT_MAGIC => {
-                    if multipart || idx != 0 {
-                        return Err(Error::Protocol(
-                            "zstd dict shipment must be a single-part message".into(),
-                        ));
-                    }
-                    if self.recv_dict.is_some() {
-                        return Err(Error::Protocol(
-                            "zstd dict shipped twice on the same connection".into(),
-                        ));
-                    }
-                    validate_dict(&bytes, "Zstd", self.max_recv_dict_size)?;
+                    check_dict_shipment(
+                        &bytes,
+                        multipart,
+                        self.recv_dict.is_some(),
+                        "Zstd",
+                        self.max_recv_dict_size,
+                    )?;
                     let dict = Dictionary::from_bytes(&bytes).map_err(|e| decompress_err(&e))?;
                     self.dctx = DecompressContext::with_dict(dict);
                     self.recv_dict = Some(bytes);

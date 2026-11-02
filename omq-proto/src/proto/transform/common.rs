@@ -208,6 +208,44 @@ pub(super) fn validate_dict(dict: &Bytes, label: &str, max_bytes: usize) -> Resu
     Ok(())
 }
 
+/// Strip the plaintext sentinel from a received part, charging its body to
+/// `budget`.
+#[inline]
+pub(super) fn decode_plain(bytes: &Bytes, budget: &mut Option<usize>) -> Result<Payload> {
+    take_budget(budget, bytes.len() - ENVELOPE_PLAIN)?;
+    Ok(Payload::from_bytes(bytes.slice(ENVELOPE_PLAIN..)))
+}
+
+/// Accept a received dict shipment only as a single-part message, at most
+/// once per connection (`installed`), and within `max_bytes`.
+pub(super) fn check_dict_shipment(
+    dict: &Bytes,
+    multipart: bool,
+    installed: bool,
+    label: &str,
+    max_bytes: usize,
+) -> Result<()> {
+    if multipart {
+        return Err(Error::Protocol(format!(
+            "{label} dict shipment must be a single-part message"
+        )));
+    }
+    if installed {
+        return Err(Error::Protocol(format!(
+            "{label} dict shipped twice on the same connection"
+        )));
+    }
+    validate_dict(dict, label, max_bytes)
+}
+
+/// Framer limit for a decoder: the larger of its data and dict-setup bounds,
+/// and never below one full arena.
+pub(super) fn wire_limit(data: usize, setup: usize) -> usize {
+    data.max(setup)
+        .max(super::arena::HEADER + super::arena::MAX_ARENA_BYTES + size_of::<Payload>())
+        .min(isize::MAX.unsigned_abs())
+}
+
 /// Build a single-part ZMTP message carrying a dict shipment:
 /// `sentinel | dict_bytes`.
 #[cfg(feature = "lz4")]

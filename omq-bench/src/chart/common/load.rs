@@ -1,6 +1,7 @@
 //! Load benchmark JSONL rows into chart maps.
 
 use super::{CpuData, FairnessEntry, FairnessMap, Impl, LatencyEntry, LatencyMap, ValMap};
+use crate::jsonl::{self, ComparisonRow};
 use std::collections::BTreeMap;
 
 #[derive(Default)]
@@ -59,10 +60,48 @@ pub(crate) fn merge_cpu_data<'a>(
         }
     }
 
+    into_cpu(cpu_sums)
+}
+
+/// Average CPU percentages per implementation.
+fn into_cpu(cpu_sums: BTreeMap<String, CpuAccum>) -> BTreeMap<String, CpuData> {
     cpu_sums
         .into_iter()
         .map(|(name, accum)| (name, accum.into_data()))
         .collect()
+}
+
+/// `comparisons.jsonl` rows of `kind` over `transport` from `impls`, in file
+/// order. When `peers` is set, the peer count must match too.
+fn matching_rows(
+    kind: &str,
+    transport: &str,
+    peers: Option<u64>,
+    impls: &[Impl],
+) -> Vec<ComparisonRow> {
+    let path = jsonl::cache_dir().join("comparisons.jsonl");
+    let keys: Vec<&str> = impls.iter().map(|i| i.key).collect();
+    jsonl::load_jsonl::<ComparisonRow>(&path)
+        .into_iter()
+        .map(|(_, row)| row)
+        .filter(|row| {
+            row.transport == transport
+                && row.kind == kind
+                && keys.contains(&row.impl_name.as_str())
+                && peers.is_none_or(|p| row.peers == Some(p))
+        })
+        .collect()
+}
+
+/// The last row per implementation and size, ordered by both.
+fn latest_per_point(
+    rows: impl IntoIterator<Item = ComparisonRow>,
+) -> impl Iterator<Item = ComparisonRow> {
+    let mut latest: BTreeMap<(String, u64), ComparisonRow> = BTreeMap::new();
+    for row in rows {
+        latest.insert((row.impl_name.clone(), row.msg_size), row);
+    }
+    latest.into_values()
 }
 
 pub(crate) fn load_tput(
@@ -71,35 +110,11 @@ pub(crate) fn load_tput(
     peers: Option<u64>,
     impls: &[Impl],
 ) -> (ValMap, ValMap, BTreeMap<String, CpuData>) {
-    use crate::jsonl::{self, ComparisonRow};
-
-    let path = jsonl::cache_dir().join("comparisons.jsonl");
-    let rows: Vec<(usize, ComparisonRow)> = jsonl::load_jsonl(&path);
-    let keys: Vec<&str> = impls.iter().map(|i| i.key).collect();
-
     let mut tput: ValMap = BTreeMap::new();
     let mut msgs: ValMap = BTreeMap::new();
-    let mut latest: BTreeMap<(String, u64), ComparisonRow> = BTreeMap::new();
-
-    for (_, row) in rows {
-        if row.transport != transport || row.kind != kind {
-            continue;
-        }
-        if !keys.contains(&row.impl_name.as_str()) {
-            continue;
-        }
-        if let Some(p) = peers
-            && row.peers != Some(p)
-        {
-            continue;
-        }
-        let key = (row.impl_name.clone(), row.msg_size);
-        latest.insert(key, row);
-    }
-
     let mut cpu_sums: BTreeMap<String, CpuAccum> = BTreeMap::new();
 
-    for row in latest.into_values() {
+    for row in latest_per_point(matching_rows(kind, transport, peers, impls)) {
         if let Some(v) = row.mbps {
             tput.entry(row.msg_size)
                 .or_default()
@@ -128,40 +143,20 @@ pub(crate) fn load_tput(
         }
     }
 
-    let cpu = cpu_sums
-        .into_iter()
-        .map(|(name, accum)| (name, accum.into_data()))
-        .collect();
-
-    (tput, msgs, cpu)
+    (tput, msgs, into_cpu(cpu_sums))
 }
 
+/// Per-peer rate spread per size and implementation, from the last row of
+/// each that has spread data.
 pub(crate) fn load_fairness(
     kind: &str,
     transport: &str,
     peers: Option<u64>,
     impls: &[Impl],
 ) -> FairnessMap {
-    use crate::jsonl::{self, ComparisonRow};
-
-    let path = jsonl::cache_dir().join("comparisons.jsonl");
-    let rows: Vec<(usize, ComparisonRow)> = jsonl::load_jsonl(&path);
-    let keys: Vec<&str> = impls.iter().map(|i| i.key).collect();
-
     let mut fairness: FairnessMap = BTreeMap::new();
 
-    for (_, row) in &rows {
-        if row.transport != transport || row.kind != kind {
-            continue;
-        }
-        if !keys.contains(&row.impl_name.as_str()) {
-            continue;
-        }
-        if let Some(p) = peers
-            && row.peers != Some(p)
-        {
-            continue;
-        }
+    for row in matching_rows(kind, transport, peers, impls) {
         let spread = row.spread();
         if let (Some(min), Some(p25), Some(median), Some(p75), Some(max)) = (
             spread.min,
@@ -172,7 +167,7 @@ pub(crate) fn load_fairness(
         ) && median > 0.0
         {
             fairness.entry(row.msg_size).or_default().insert(
-                row.impl_name.clone(),
+                row.impl_name,
                 FairnessEntry {
                     min,
                     p25,
@@ -192,43 +187,24 @@ pub(crate) fn load_latency(
     sizes: &[u64],
     impls: &[Impl],
 ) -> (LatencyMap, BTreeMap<String, CpuData>) {
-    use crate::jsonl::{self, ComparisonRow};
-
-    let path = jsonl::cache_dir().join("comparisons.jsonl");
-    let rows: Vec<(usize, ComparisonRow)> = jsonl::load_jsonl(&path);
-    let keys: Vec<&str> = impls.iter().map(|i| i.key).collect();
+    // Only default REQ/REP rows feed the REQ/REP charts.
+    let rows = matching_rows("latency", transport, None, impls)
+        .into_iter()
+        .filter(|row| {
+            row.latency_pair
+                .as_deref()
+                .is_none_or(|pair| pair == "req-rep")
+                && row
+                    .workload_profile
+                    .as_deref()
+                    .is_none_or(|profile| profile == "default")
+                && sizes.contains(&row.msg_size)
+        });
 
     let mut lat: LatencyMap = BTreeMap::new();
-    let mut latest: BTreeMap<(String, u64), ComparisonRow> = BTreeMap::new();
-
-    for (_, row) in rows {
-        if row.transport != transport || row.kind != "latency" {
-            continue;
-        }
-        if row
-            .latency_pair
-            .as_deref()
-            .is_some_and(|pair| pair != "req-rep")
-            || row
-                .workload_profile
-                .as_deref()
-                .is_some_and(|profile| profile != "default")
-        {
-            continue;
-        }
-        if !keys.contains(&row.impl_name.as_str()) {
-            continue;
-        }
-        if !sizes.contains(&row.msg_size) {
-            continue;
-        }
-        let key = (row.impl_name.clone(), row.msg_size);
-        latest.insert(key, row);
-    }
-
     let mut cpu_sums: BTreeMap<String, CpuAccum> = BTreeMap::new();
 
-    for row in latest.into_values() {
+    for row in latest_per_point(rows) {
         if let (Some(p50), Some(p99), Some(p999)) = (row.p50_us, row.p99_us, row.p999_us) {
             lat.entry(row.msg_size)
                 .or_default()
@@ -247,10 +223,5 @@ pub(crate) fn load_latency(
         }
     }
 
-    let cpu = cpu_sums
-        .into_iter()
-        .map(|(name, accum)| (name, accum.into_data()))
-        .collect();
-
-    (lat, cpu)
+    (lat, into_cpu(cpu_sums))
 }

@@ -398,8 +398,6 @@ impl Submitter {
     }
 }
 
-impl ActivePipes {}
-
 /// Round-robin send strategy.
 #[derive(Debug)]
 pub(crate) struct RoundRobinSend {

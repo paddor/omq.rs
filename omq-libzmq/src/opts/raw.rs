@@ -73,7 +73,7 @@ pub(super) fn read_key(optval: *const libc::c_void, optvallen: usize) -> Option<
     None
 }
 
-pub(super) fn write_i32(optval: *mut libc::c_void, optvallen: *mut usize, val: i32) -> c_int {
+pub(crate) fn write_i32(optval: *mut libc::c_void, optvallen: *mut usize, val: i32) -> c_int {
     if optval.is_null() || optvallen.is_null() {
         return crate::error::fail(libc::EFAULT);
     }
@@ -126,7 +126,7 @@ pub(super) fn write_bytes(optval: *mut libc::c_void, optvallen: *mut usize, data
     0
 }
 
-pub(super) fn write_string(optval: *mut libc::c_void, optvallen: *mut usize, data: &[u8]) -> c_int {
+pub(crate) fn write_string(optval: *mut libc::c_void, optvallen: *mut usize, data: &[u8]) -> c_int {
     if optval.is_null() || optvallen.is_null() {
         return crate::error::fail(libc::EFAULT);
     }

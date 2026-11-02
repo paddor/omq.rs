@@ -186,8 +186,8 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
     // Context-level ZMQ_IPV6 and ZMQ_BLOCKY seed the per-socket defaults;
     // non-blocky contexts default new sockets to zero linger like libzmq.
     let overlay = SocketOverlay {
-        ipv6: ctx.ipv6.load(Ordering::Acquire),
-        linger: if ctx.blocky.load(Ordering::Acquire) {
+        ipv6: ctx.options.ipv6.load(Ordering::Acquire),
+        linger: if ctx.options.blocky.load(Ordering::Acquire) {
             LingerSetting::Unset
         } else {
             LingerSetting::Finite(std::time::Duration::ZERO)
@@ -237,7 +237,7 @@ fn socket_preconditions<'a>(
     let Some(socket_type) = map_socket_type(type_int) else {
         return Err(libc::EINVAL);
     };
-    if ctx.socket_count.load(Ordering::Relaxed) >= ctx.max_sockets.load(Ordering::Relaxed) {
+    if ctx.socket_count.load(Ordering::Relaxed) >= ctx.options.max_sockets.load(Ordering::Relaxed) {
         return Err(libc::EMFILE);
     }
     Ok((ctx, socket_type))

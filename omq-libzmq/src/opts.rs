@@ -37,6 +37,7 @@ mod set_security;
 
 use codes::DEFAULT_HANDSHAKE_IVL_MS;
 pub use get::zmq_getsockopt;
+pub(crate) use raw::{write_i32, write_string};
 pub use set::zmq_setsockopt;
 pub use set_security::{OmqPlainCredential, omq_socket_set_plain_server_credentials};
 

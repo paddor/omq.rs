@@ -387,6 +387,7 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
 
     let max = sock
         .ctx
+        .options
         .max_msg_size
         .load(std::sync::atomic::Ordering::Relaxed);
     if max > 0 && len > max as usize {
@@ -587,6 +588,7 @@ pub(crate) fn send_message(
 ) -> c_int {
     let max = sock
         .ctx
+        .options
         .max_msg_size
         .load(std::sync::atomic::Ordering::Relaxed);
     if max > 0 && msg.byte_len() > max as usize {

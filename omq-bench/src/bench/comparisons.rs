@@ -347,20 +347,12 @@ impl ComparisonRun<'_> {
         }
         eprintln!("\n=== Throughput / {} ===", transport.as_str());
         print_throughput_header(&impls);
-        for &size in self.sizes {
-            let mut cells = Vec::with_capacity(impls.len());
-            for &name in &impls {
-                let cell = self.cell(name, transport, size);
-                let result = run_throughput_cell(&cell, self.duration, self.rounds);
-                self.record_cell(&cell, CellKind::Throughput, None, &result);
-                cells.push(if size >= 1024 {
-                    fmt_gbps(result.mbps)
-                } else {
-                    fmt_rate(result.msgs_s)
-                });
-            }
-            print_table_row(&fmt_size(size), &cells, 14);
-        }
+        run_table(self.sizes, &impls, 14, |name, size| {
+            let cell = self.cell(name, transport, size);
+            let result = run_throughput_cell(&cell, self.duration, self.rounds);
+            self.record_cell(&cell, CellKind::Throughput, None, &result);
+            fmt_full(&result, size)
+        });
     }
 
     fn run_latency(&self, transport: TransportKind, active: &[&str]) {
@@ -394,16 +386,12 @@ impl ComparisonRun<'_> {
                     timeout: self.args.latency_timeout,
                 };
 
-                for &size in &sizes {
-                    let mut cells = Vec::with_capacity(impls.len());
-                    for &name in &impls {
-                        let cell = self.cell(name, transport, size);
-                        let result = self.measure_latency(&cell, &workload);
-                        self.record_latency(&cell, &workload, &result);
-                        cells.push(format!("{:.1}", result.p99_us));
-                    }
-                    print_table_row(&fmt_size(size), &cells, 14);
-                }
+                run_table(&sizes, &impls, 14, |name, size| {
+                    let cell = self.cell(name, transport, size);
+                    let result = self.measure_latency(&cell, &workload);
+                    self.record_latency(&cell, &workload, &result);
+                    format!("{:.1}", result.p99_us)
+                });
             }
         }
     }
@@ -459,27 +447,16 @@ impl ComparisonRun<'_> {
             let label = if curve { "CURVE PubSub" } else { "PubSub" };
             eprintln!("\n=== {label} {peers}p / {} ===", transport.as_str());
             print_throughput_header(impls);
-            for &size in &sizes {
-                let mut cells = Vec::with_capacity(impls.len());
-                for &name in impls {
-                    let cell = self.cell(name, transport, size);
-                    let result =
-                        run_pubsub_cell(&cell, peers, self.duration, self.rounds, self.args);
-                    self.record_cell(&cell, CellKind::PubSub, Some(peers), &result);
-                    cells.push(if curve {
-                        if size >= 1024 {
-                            fmt_gbps(result.mbps)
-                        } else {
-                            fmt_rate(result.msgs_s)
-                        }
-                    } else if size >= 1024 {
-                        format!("{:.1}", result.mbps / 1000.0)
-                    } else {
-                        format!("{:.0}", result.msgs_s / 1000.0)
-                    });
+            run_table(&sizes, impls, if curve { 14 } else { 8 }, |name, size| {
+                let cell = self.cell(name, transport, size);
+                let result = run_pubsub_cell(&cell, peers, self.duration, self.rounds, self.args);
+                self.record_cell(&cell, CellKind::PubSub, Some(peers), &result);
+                if curve {
+                    fmt_full(&result, size)
+                } else {
+                    fmt_compact(&result, size)
                 }
-                print_table_row(&fmt_size(size), &cells, if curve { 14 } else { 8 });
-            }
+            });
         }
     }
 
@@ -513,26 +490,16 @@ impl ComparisonRun<'_> {
         for &peers in peer_counts {
             eprintln!("\n=== {label} {peers}p / {} ===", transport.as_str());
             print_throughput_header(&impls);
-            for &size in &sizes {
-                let mut cells = Vec::with_capacity(impls.len());
-                for &name in &impls {
-                    let cell = self.cell(name, transport, size);
-                    let result = match kind {
-                        CellKind::FanOut => {
-                            run_fanout_cell(&cell, peers, self.duration, self.rounds)
-                        }
-                        CellKind::FanIn => run_fanin_cell(&cell, peers, self.duration, self.rounds),
-                        _ => unreachable!(),
-                    };
-                    self.record_cell(&cell, kind, Some(peers), &result);
-                    cells.push(if size >= 1024 {
-                        format!("{:.1}", result.mbps / 1000.0)
-                    } else {
-                        format!("{:.0}", result.msgs_s / 1000.0)
-                    });
-                }
-                print_table_row(&fmt_size(size), &cells, 8);
-            }
+            run_table(&sizes, &impls, 8, |name, size| {
+                let cell = self.cell(name, transport, size);
+                let result = match kind {
+                    CellKind::FanOut => run_fanout_cell(&cell, peers, self.duration, self.rounds),
+                    CellKind::FanIn => run_fanin_cell(&cell, peers, self.duration, self.rounds),
+                    _ => unreachable!(),
+                };
+                self.record_cell(&cell, kind, Some(peers), &result);
+                fmt_compact(&result, size)
+            });
         }
     }
 }
@@ -666,6 +633,21 @@ fn print_latency_header(impls: &[&str]) {
     eprintln!("  (p99 us)");
 }
 
+/// Measures every implementation at every size and prints one row per size
+/// with `width`-wide cells. `measure` runs and records one cell and returns
+/// its text.
+fn run_table(
+    sizes: &[u64],
+    impls: &[&str],
+    width: usize,
+    mut measure: impl FnMut(&str, u64) -> String,
+) {
+    for &size in sizes {
+        let cells: Vec<String> = impls.iter().map(|&name| measure(name, size)).collect();
+        print_table_row(&fmt_size(size), &cells, width);
+    }
+}
+
 fn print_table_row(label: &str, cells: &[String], width: usize) {
     use std::fmt::Write as _;
 
@@ -674,6 +656,24 @@ fn print_table_row(label: &str, cells: &[String], width: usize) {
         write!(&mut line, "  {cell:>width$}").expect("write to string");
     }
     eprintln!("{line}");
+}
+
+/// Bandwidth from 1 KiB, message rate below.
+fn fmt_full(result: &CellResult, size: u64) -> String {
+    if size >= 1024 {
+        fmt_gbps(result.mbps)
+    } else {
+        fmt_rate(result.msgs_s)
+    }
+}
+
+/// GB/s from 1 KiB, thousand messages per second below.
+fn fmt_compact(result: &CellResult, size: u64) -> String {
+    if size >= 1024 {
+        format!("{:.1}", result.mbps / 1000.0)
+    } else {
+        format!("{:.0}", result.msgs_s / 1000.0)
+    }
 }
 
 fn fmt_rate(val: f64) -> String {

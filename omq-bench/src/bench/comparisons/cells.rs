@@ -165,7 +165,7 @@ pub(super) fn run_throughput_cell(cell: &Cell<'_>, duration: f64, rounds: u32) -
 
 fn run_throughput_once(cell: &Cell<'_>, duration: f64) -> CellResult {
     if cell.transport == TransportKind::Inproc {
-        return run_inproc_throughput(cell, duration);
+        return run_inproc_cell(cell, cell.def.inproc_tput_subcmd, &[], duration);
     }
 
     let def = cell.def;
@@ -223,19 +223,21 @@ fn run_throughput_once(cell: &Cell<'_>, duration: f64) -> CellResult {
     }
 }
 
-/// Inproc runs both sides in one process on the measured CPUs.
-fn run_inproc_throughput(cell: &Cell<'_>, duration: f64) -> CellResult {
+/// Inproc runs both sides in one process on the measured CPUs: `subcmd`
+/// with the name, size, duration, then `extra` arguments.
+fn run_inproc_cell(cell: &Cell<'_>, subcmd: &str, extra: &[&str], duration: f64) -> CellResult {
     let def = cell.def;
     let name = cell.addr();
     let size_str = cell.size.to_string();
     let dur_str = format!("{duration:.1}");
-    let cmd = [
+    let mut cmd = vec![
         cell.binary.to_str().unwrap(),
-        def.inproc_tput_subcmd,
+        subcmd,
         &name,
         &size_str,
         &dur_str,
     ];
+    cmd.extend_from_slice(extra);
     let env: Vec<(&str, &str)> = def.env.to_vec();
 
     if let Some((out, cpu)) = process::capture_with_cpu(
@@ -281,7 +283,8 @@ fn run_pubsub_once(
     args: &ComparisonsArgs,
 ) -> CellResult {
     if cell.transport == TransportKind::Inproc {
-        return run_inproc_pubsub(cell, peers, duration);
+        let peers = peers.to_string();
+        return run_inproc_cell(cell, cell.def.inproc_pubsub_subcmd, &[&peers], duration);
     }
 
     let def = cell.def;
@@ -364,41 +367,6 @@ fn subscriber_env<'a>(
     }
 
     env
-}
-
-fn run_inproc_pubsub(cell: &Cell<'_>, peers: u64, duration: f64) -> CellResult {
-    let def = cell.def;
-    let name = cell.addr();
-    let size_str = cell.size.to_string();
-    let dur_str = format!("{duration:.1}");
-    let peers_str = peers.to_string();
-    let cmd = [
-        cell.binary.to_str().unwrap(),
-        def.inproc_pubsub_subcmd,
-        &name,
-        &size_str,
-        &dur_str,
-        &peers_str,
-    ];
-    let env: Vec<(&str, &str)> = def.env.to_vec();
-
-    if let Some((out, cpu)) = process::capture_with_cpu(
-        &cmd,
-        &env,
-        def.affinity(process::MEASURED_CPU),
-        process::peer_timeout(duration),
-    ) && let Some(r) = parse::parse_throughput(&out, cell.size)
-    {
-        return CellResult {
-            msgs_s: r.msgs_s,
-            mbps: r.mbps,
-            elapsed: r.elapsed,
-            push_cpu: Some(cpu),
-            ..zero_result(duration)
-        };
-    }
-
-    zero_result(duration)
 }
 
 pub(super) fn run_fanout_cell(

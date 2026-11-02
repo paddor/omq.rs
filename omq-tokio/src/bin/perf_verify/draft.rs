@@ -9,8 +9,12 @@ use bytes::Bytes;
 use omq_tokio::{Message, PayloadPool, SocketType, TrySendError, blocking::Socket};
 
 use super::affinity::Side;
-use super::measurement::Window;
-use super::{Case, SETTINGS, Transport, Workload as CaseWorkload, context, count_blocking_many};
+use super::cases::{Case, Workload as CaseWorkload};
+use super::measurement::{
+    MEASURED_TAG, Window, count_blocking_many, send_blocking_batch_until_with, tagged_payload,
+};
+use super::transport::Transport;
+use super::{SETTINGS, context};
 
 const HWM: u32 = 1000;
 const BATCH: usize = 256;
@@ -299,7 +303,7 @@ fn transfer(senders: &[Socket], receivers: Vec<Socket>, workload: Workload) -> f
     let window = Window::new(Instant::now(), SETTINGS.warmup, SETTINGS.measure);
     window_tx.send(window).expect("draft measurement start");
     let mut queued = VecDeque::with_capacity(BATCH);
-    for (tag, deadline) in [(0, window.start), (super::MEASURED_TAG, window.end)] {
+    for (tag, deadline) in [(0, window.start), (MEASURED_TAG, window.end)] {
         let template = message(workload, None, tag);
         while Instant::now() < deadline {
             for sender in senders {
@@ -321,7 +325,7 @@ fn transfer(senders: &[Socket], receivers: Vec<Socket>, workload: Workload) -> f
                     }
                     queued.clear();
                 } else {
-                    super::send_blocking_batch_until_with(
+                    send_blocking_batch_until_with(
                         sender,
                         || {
                             if pool.is_some() {
@@ -360,7 +364,7 @@ fn storage(workload: Workload) -> Option<PayloadPool> {
 
 fn message(workload: Workload, pool: Option<&PayloadPool>, tag: u8) -> Message {
     let body = pool.map_or_else(
-        || super::tagged_payload(workload.size, tag),
+        || tagged_payload(workload.size, tag),
         |pool| {
             pool.message(workload.size, |bytes| bytes.fill(tag))
                 .expect("pooled draft body")

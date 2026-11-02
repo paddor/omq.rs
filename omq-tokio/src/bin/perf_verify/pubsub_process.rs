@@ -1,11 +1,11 @@
 //! Two-process PUB/SUB measurement: child roles and the published rate.
 
 use super::affinity::Side;
-use super::measurement::Window;
-use super::{
-    PUBSUB_32P_MEASURE, PUBSUB_32P_WARMUP, SETTINGS, context, count_blocking_many, duration_env,
-    payload, send_blocking_batch_until, tagged_payload, tcp_zero,
+use super::measurement::{
+    Window, count_blocking_many, payload, send_blocking_batch_until, tagged_payload,
 };
+use super::transport::tcp_zero;
+use super::{PUBSUB_32P_MEASURE, PUBSUB_32P_WARMUP, SETTINGS, context, duration_env};
 use bytes::Bytes;
 use omq_tokio::{Endpoint, Options, SocketType};
 use std::io::{BufRead, Write};

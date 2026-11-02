@@ -13,6 +13,7 @@ use omq_tokio::{Endpoint, Message, Options, SocketType, TrySendError, blocking};
 
 mod bench_common;
 mod blocking_inproc;
+mod json_payload;
 mod latency_common;
 mod payload_corpus;
 mod pushpull_common;
@@ -23,15 +24,13 @@ mod ws_bench_config;
 mod fanin;
 #[path = "bench_peer_blocking/inproc.rs"]
 mod inproc;
-#[path = "bench_peer_blocking/payload.rs"]
-mod payload;
 #[path = "bench_peer_blocking/pubsub.rs"]
 mod pubsub;
 
 use bench_common::{ModeArgs, RecvWindow, cpu_time_secs, quantile, warmup_duration};
 use fanin::{run_multi_pull, run_multi_push};
 use inproc::{run_inproc, run_inproc_2ut, run_inproc_latency};
-use payload::bench_payload;
+use json_payload::bench_payload;
 use pubsub::{run_multi_sub, run_pub};
 
 fn multi_pull_drain_batch(size: usize) -> usize {

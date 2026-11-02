@@ -31,6 +31,7 @@ use bytes::Bytes;
 use omq_tokio::{Endpoint, Error, Message, Options, Socket, SocketType};
 
 mod bench_common;
+mod json_payload;
 mod latency_common;
 mod payload_corpus;
 mod pushpull_common;
@@ -47,12 +48,13 @@ mod payload;
 mod pubsub;
 
 use fanin::{drain_pending, run_multi_pull, run_multi_push};
+use json_payload::bench_payload;
 use latency::{run_inproc_latency, run_rep, run_rep_exclusive, run_req, run_req_exclusive};
 #[cfg(feature = "lz4")]
 use payload::train_lz4_json_dict;
 #[cfg(feature = "zstd")]
 use payload::train_zstd_json_dict;
-use payload::{bench_payload, wire_size};
+use payload::wire_size;
 use pubsub::{run_inproc_pubsub, run_multi_sub, run_pub, run_sub};
 
 use bench_common::{ModeArgs, RecvWindow, cpu_time_secs, warmup_duration};

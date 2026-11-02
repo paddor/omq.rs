@@ -1,11 +1,11 @@
 //! Multi-socket receive modes with per-socket fairness.
 
-use super::payload::bench_payload;
 use super::{
     MULTI_PULL_DRAIN_BATCH, RECV_BATCH_BYTES, RecvWindow, bench_options_client, cpu_time_secs,
     recv_before_deadline, run_push_loop, wait_for_start_barrier, wait_for_warmup_barrier,
     warmup_duration,
 };
+use crate::json_payload::bench_payload;
 use omq_tokio::{Endpoint, Socket, SocketType};
 use std::time::{Duration, Instant};
 

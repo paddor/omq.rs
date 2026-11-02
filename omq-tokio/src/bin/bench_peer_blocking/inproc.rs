@@ -1,7 +1,7 @@
 //! Inproc throughput and latency modes.
 
-use super::payload::bench_payload;
 use super::{StartStop, bench_options, bench_recv_spin, latency_common, send_fast};
+use crate::json_payload::bench_payload;
 use bytes::Bytes;
 use omq_tokio::{Endpoint, Message, Options, SocketType, TrySendError, blocking};
 use std::sync::atomic::Ordering;

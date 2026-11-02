@@ -1,10 +1,10 @@
 //! Multi-socket PUSH/PULL modes with per-socket counts.
 
-use super::payload::bench_payload;
 use super::{
     RecvWindow, bench_options_client, cpu_time_secs, drain_warmup, multi_pull_drain_batch,
     quantile, send_fast, wait_for_start_barrier,
 };
+use crate::json_payload::bench_payload;
 use omq_tokio::{Endpoint, Message, SocketType, blocking};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

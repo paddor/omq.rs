@@ -1,12 +1,12 @@
 //! PUB/SUB modes.
 
 use super::fanin::{measure_fair_recv, warm_up_receivers};
-use super::payload::bench_payload;
 use super::{
     bench_options, bench_options_client, bench_options_server, cpu_time_secs, eprint_pull_summary,
     recv_before_deadline, report_bound_port, run_push_warmup, wait_for_start_barrier,
     wait_for_warmup_barrier,
 };
+use crate::json_payload::bench_payload;
 use bytes::Bytes;
 use omq_tokio::{Endpoint, Message, MonitorEvent, Socket, SocketType};
 use std::time::{Duration, Instant};

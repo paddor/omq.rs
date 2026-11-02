@@ -1,10 +1,10 @@
 //! PUB/SUB modes.
 
-use super::payload::bench_payload;
 use super::{
     RecvWindow, bench_options_client, bench_options_server, cpu_time_secs, multi_pull_drain_batch,
     report_bound_port, send_fast, wait_for_start_barrier, wait_for_warmup_barrier, warmup_duration,
 };
+use crate::json_payload::bench_payload;
 use bytes::Bytes;
 use omq_tokio::{Endpoint, Message, SocketType, blocking};
 use std::sync::Arc;

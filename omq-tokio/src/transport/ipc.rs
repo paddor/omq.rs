@@ -52,70 +52,7 @@ impl std::fmt::Display for IpcStream {
 }
 
 #[cfg(target_os = "windows")]
-impl tokio::io::AsyncRead for IpcStream {
-    fn poll_read(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        match &mut *self {
-            Self::Server(server) => std::pin::Pin::new(server).poll_read(cx, buf),
-            Self::Client(client) => std::pin::Pin::new(client).poll_read(cx, buf),
-        }
-    }
-}
-
-#[cfg(target_os = "windows")]
-impl tokio::io::AsyncWrite for IpcStream {
-    fn poll_write(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &[u8],
-    ) -> std::task::Poll<std::io::Result<usize>> {
-        match &mut *self {
-            Self::Server(server) => std::pin::Pin::new(server).poll_write(cx, buf),
-            Self::Client(client) => std::pin::Pin::new(client).poll_write(cx, buf),
-        }
-    }
-
-    fn poll_flush(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        match &mut *self {
-            Self::Server(server) => std::pin::Pin::new(server).poll_flush(cx),
-            Self::Client(client) => std::pin::Pin::new(client).poll_flush(cx),
-        }
-    }
-
-    fn poll_shutdown(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        match &mut *self {
-            Self::Server(server) => std::pin::Pin::new(server).poll_shutdown(cx),
-            Self::Client(client) => std::pin::Pin::new(client).poll_shutdown(cx),
-        }
-    }
-
-    fn poll_write_vectored(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        bufs: &[std::io::IoSlice<'_>],
-    ) -> std::task::Poll<std::io::Result<usize>> {
-        match &mut *self {
-            Self::Server(server) => std::pin::Pin::new(server).poll_write_vectored(cx, bufs),
-            Self::Client(client) => std::pin::Pin::new(client).poll_write_vectored(cx, bufs),
-        }
-    }
-
-    fn is_write_vectored(&self) -> bool {
-        match self {
-            Self::Server(server) => server.is_write_vectored(),
-            Self::Client(client) => client.is_write_vectored(),
-        }
-    }
-}
+super::delegate_async_io!(IpcStream { Server, Client });
 
 /// Interprocess transport using Unix sockets or Windows named pipes.
 #[derive(Debug)]

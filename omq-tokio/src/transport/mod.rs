@@ -17,6 +17,76 @@ use omq_proto::endpoint::Endpoint;
 use omq_proto::error::Result;
 pub use omq_proto::monitor::PeerIdent;
 
+/// Implements `AsyncRead` and `AsyncWrite` for an enum whose variants each
+/// wrap one stream by forwarding every call to the active variant. Variants
+/// may carry `cfg` attributes.
+#[cfg(any(feature = "ws", target_os = "windows"))]
+macro_rules! delegate_async_io {
+    ($name:ident { $($(#[$meta:meta])* $variant:ident),+ $(,)? }) => {
+        impl tokio::io::AsyncRead for $name {
+            fn poll_read(
+                self: std::pin::Pin<&mut Self>,
+                cx: &mut std::task::Context<'_>,
+                buf: &mut tokio::io::ReadBuf<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                match self.get_mut() {
+                    $($(#[$meta])* Self::$variant(s) => std::pin::Pin::new(s).poll_read(cx, buf),)+
+                }
+            }
+        }
+
+        impl tokio::io::AsyncWrite for $name {
+            fn poll_write(
+                self: std::pin::Pin<&mut Self>,
+                cx: &mut std::task::Context<'_>,
+                buf: &[u8],
+            ) -> std::task::Poll<std::io::Result<usize>> {
+                match self.get_mut() {
+                    $($(#[$meta])* Self::$variant(s) => std::pin::Pin::new(s).poll_write(cx, buf),)+
+                }
+            }
+
+            fn poll_write_vectored(
+                self: std::pin::Pin<&mut Self>,
+                cx: &mut std::task::Context<'_>,
+                bufs: &[std::io::IoSlice<'_>],
+            ) -> std::task::Poll<std::io::Result<usize>> {
+                match self.get_mut() {
+                    $($(#[$meta])* Self::$variant(s) => {
+                        std::pin::Pin::new(s).poll_write_vectored(cx, bufs)
+                    })+
+                }
+            }
+
+            fn is_write_vectored(&self) -> bool {
+                match self {
+                    $($(#[$meta])* Self::$variant(s) => s.is_write_vectored(),)+
+                }
+            }
+
+            fn poll_flush(
+                self: std::pin::Pin<&mut Self>,
+                cx: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                match self.get_mut() {
+                    $($(#[$meta])* Self::$variant(s) => std::pin::Pin::new(s).poll_flush(cx),)+
+                }
+            }
+
+            fn poll_shutdown(
+                self: std::pin::Pin<&mut Self>,
+                cx: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                match self.get_mut() {
+                    $($(#[$meta])* Self::$variant(s) => std::pin::Pin::new(s).poll_shutdown(cx),)+
+                }
+            }
+        }
+    };
+}
+#[cfg(any(feature = "ws", target_os = "windows"))]
+pub(crate) use delegate_async_io;
+
 pub mod backoff;
 #[cfg(feature = "dart")]
 pub mod dart;

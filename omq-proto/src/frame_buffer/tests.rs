@@ -174,27 +174,6 @@ fn advance_through_arena_only_queue() {
 }
 
 #[test]
-fn put_back_partial_write() {
-    let mut eq = FrameBuffer::new();
-    let msg = Message::from(Bytes::from_static(&[0xAB; 100]));
-    eq.frame_gather(&msg);
-    assert!(!eq.is_empty());
-
-    let mut buf = Vec::new();
-    eq.drain(&mut buf, 1024);
-    let total: usize = buf.iter().map(Bytes::len).sum();
-    assert!(total > 0);
-
-    eq.put_back_unwritten(buf, 5);
-    assert!(!eq.is_empty());
-
-    let mut buf2 = Vec::new();
-    eq.drain(&mut buf2, 1024);
-    let remaining: usize = buf2.iter().map(Bytes::len).sum();
-    assert_eq!(remaining, total - 5);
-}
-
-#[test]
 fn arena_and_gather_ordering() {
     let mut eq = FrameBuffer::new();
     let small = Message::from(Bytes::from_static(&[1; 64]));

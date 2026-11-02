@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `FrameBuffer::frame_rep` and `FrameBuffer::take_arena_bytes`. Nothing
   used them outside tests. `FrameBuffer::frame_prefixed_inline` and
   `frame_prefixed_gather` are private; call `frame_prefixed`.
+- `FrameBuffer::put_back_unwritten`. Nothing used it outside tests.
 
 ## [0.37.0] - 2026-10-29
 

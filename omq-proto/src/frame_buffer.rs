@@ -596,33 +596,6 @@ impl FrameBuffer {
             }
         }
     }
-
-    /// Restore drained chunks at the front after skipping `written` bytes.
-    pub fn put_back_unwritten(&mut self, returned: Vec<Bytes>, written: usize) {
-        let mut consumed = 0usize;
-        let mut to_restore: Vec<Bytes> = Vec::new();
-        for chunk in returned {
-            if consumed >= written {
-                self.total_bytes += chunk.len();
-                to_restore.push(chunk);
-            } else if consumed + chunk.len() <= written {
-                consumed += chunk.len();
-            } else {
-                let skip = written - consumed;
-                consumed = written;
-                let tail = chunk.slice(skip..);
-                self.total_bytes += tail.len();
-                to_restore.push(tail);
-            }
-        }
-        for chunk in to_restore.into_iter().rev() {
-            self.entries.push_front(Entry::External {
-                bytes: chunk,
-                protected: false,
-                continues: false,
-            });
-        }
-    }
 }
 
 impl Entry {

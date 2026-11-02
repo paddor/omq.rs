@@ -2,7 +2,7 @@ use crate::cli::CompressionArgs;
 use crate::jsonl::{self, CompressionRow};
 use crate::process;
 
-use std::path::PathBuf;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
 const CHART_SIZES: &[u64] = &[
@@ -10,14 +10,10 @@ const CHART_SIZES: &[u64] = &[
     524_288,
 ];
 
-static mut PORT_COUNTER: u16 = 18500;
+static PORT_COUNTER: AtomicU16 = AtomicU16::new(18500);
 
 fn next_port() -> u16 {
-    unsafe {
-        let p = PORT_COUNTER;
-        PORT_COUNTER += 1;
-        p
-    }
+    PORT_COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
 fn size_label(n: u64) -> String {
@@ -28,30 +24,6 @@ fn size_label(n: u64) -> String {
     } else {
         format!("{n} B")
     }
-}
-
-fn build_peer() -> PathBuf {
-    let bin = PathBuf::from("target/release/omq_bench_peer_tokio");
-    if bin.exists() {
-        return bin;
-    }
-    eprintln!("  building omq_bench_peer_tokio (lz4)...");
-    let status = std::process::Command::new("cargo")
-        .args([
-            "build",
-            "--release",
-            "-p",
-            "omq-tokio",
-            "--bin",
-            "omq_bench_peer_tokio",
-            "--features",
-            "lz4",
-            "-q",
-        ])
-        .status()
-        .expect("failed to run cargo build");
-    assert!(status.success(), "build failed");
-    bin
 }
 
 fn get_wire_size(binary: &str, transport: &str, size: u64, dict_file: Option<&str>) -> u64 {
@@ -151,7 +123,8 @@ pub(crate) fn run(args: CompressionArgs) {
     };
 
     let transports: Vec<&str> = args.transports.split(',').collect();
-    let binary = build_peer();
+    eprintln!("  building omq_bench_peer_tokio (lz4)...");
+    let binary = process::build_omq_peer("omq_bench_peer_tokio", &["lz4"]);
     let binary_str = binary.to_str().unwrap();
     let run_id = make_run_id();
     let jsonl_path = jsonl::cache_dir().join("results_compression_tokio.jsonl");

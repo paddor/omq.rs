@@ -49,7 +49,7 @@ impl Submitter {
     // Called with the peer table locked. Every generation change happens
     // under that same lock, so cached routes cannot miss a membership change.
     pub(super) fn native_targets(&self, peers: &FanOutInner) -> Option<(Arc<Snapshot>, bool)> {
-        if !matches!(self.mode, FanOutMode::Group)
+        if !matches!(self.config.mode, FanOutMode::Group)
             || !peers.peers.values().filter(|peer| peer.lane.is_none()).all(|peer| {
                 peer.filter.any_groups()
                     && matches!(&peer.target, PeerOutbound::Inbox(inbox) if inbox.is_native_dart())
@@ -57,7 +57,7 @@ impl Submitter {
         {
             return None;
         }
-        let generation = self.generation.load(Ordering::Acquire);
+        let generation = self.shared.generation.load(Ordering::Acquire);
         let mut cache = self.native.lock().expect("native fanout cache poisoned");
         if cache
             .snapshot
@@ -70,29 +70,29 @@ impl Submitter {
                 .filter(|peer| peer.is_active_fallback())
                 .map(|peer| {
                     let target = peer.target.bind(&self.data_lanes);
-                    if self.mute_policy == FanOutMutePolicy::Block {
+                    if self.config.mute_policy == FanOutMutePolicy::Block {
                         let PeerOutbound::Inbox(inbox) = &target else {
                             unreachable!("native fanout snapshot")
                         };
-                        inbox.observe_native_progress(&self.native_progress);
+                        inbox.observe_native_progress(&self.shared.native_progress);
                     }
                     target
                 })
                 .collect();
-            if self.mute_policy == FanOutMutePolicy::Block
+            if self.config.mute_policy == FanOutMutePolicy::Block
                 && !targets.is_empty()
                 && cache.masks.is_none()
             {
                 // DART admission enforces this socket-wide peer cap. Size
                 // masks once so topology changes cannot grow waiter storage.
-                let words = self.native_peer_limit.div_ceil(64);
+                let words = self.config.native_peer_limit.div_ceil(64);
                 cache.masks = Some(Arc::new(Masks(Mutex::new(
-                    (0..self.native_pending_limit)
+                    (0..self.config.native_pending_limit)
                         .map(|_| vec![0; words])
                         .collect(),
                 ))));
             }
-            debug_assert!(targets.len() <= self.native_peer_limit);
+            debug_assert!(targets.len() <= self.config.native_peer_limit);
             let masks = cache.masks.clone();
             cache.snapshot = Some(Arc::new(Snapshot {
                 generation,
@@ -121,14 +121,14 @@ impl Submitter {
         while remaining != 0 {
             // Keep this generation for the entire scan, including budget
             // yields. Space can become available for an earlier target.
-            let seen = self.native_progress.generation();
+            let seen = self.shared.native_progress.generation();
             let mut cursor = 0;
             while cursor < snapshot.targets.len() {
                 if self.lanes.admission_closed() {
                     return;
                 }
                 {
-                    let _publishing = self.publish.lock().expect("fanout publish poisoned");
+                    let _publishing = self.shared.publish.lock().expect("fanout publish poisoned");
                     remaining -= pending.deliver_burst(&snapshot.targets, message, &mut cursor);
                 }
                 if cursor < snapshot.targets.len() {
@@ -140,7 +140,7 @@ impl Submitter {
                 tokio::select! {
                     biased;
                     () = self.lanes.admission_stopped() => return,
-                    () = self.native_progress.changed_after(seen) => {}
+                    () = self.shared.native_progress.changed_after(seen) => {}
                 }
             }
         }
@@ -152,13 +152,13 @@ impl Submitter {
         loop {
             // Read the generation before checking, so a release between the
             // check and the wait still wakes us.
-            let seen = self.native_progress.generation();
+            let seen = self.shared.native_progress.generation();
             let mask = masks.0.lock().expect("native fanout masks poisoned").pop();
             if let Some(mut delivered) = mask {
                 delivered.fill(0);
                 return Some(Pending {
                     masks,
-                    progress: &self.native_progress,
+                    progress: &self.shared.native_progress,
                     delivered,
                 });
             }
@@ -166,7 +166,7 @@ impl Submitter {
             tokio::select! {
                 biased;
                 () = self.lanes.admission_stopped() => return None,
-                () = self.native_progress.changed_after(seen) => {}
+                () = self.shared.native_progress.changed_after(seen) => {}
             }
         }
     }

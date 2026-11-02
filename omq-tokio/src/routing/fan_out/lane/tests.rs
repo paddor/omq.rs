@@ -154,6 +154,7 @@ fn full_radio_sender() -> (
     let (lanes, receivers) = paused_lanes(2);
     sender.lanes = Arc::new(lanes);
     sender
+        .shared
         .lane_peer_count
         .store(2, std::sync::atomic::Ordering::Release);
 

@@ -340,7 +340,7 @@ impl SendSubmitter {
 impl SendStrategy {
     pub(crate) fn with_compatibility(mut self, compatibility: SendCompatibility) -> Self {
         if let Self::FanOut(send) = &mut self {
-            send.compatibility = compatibility;
+            send.set_compatibility(compatibility);
         }
         self
     }

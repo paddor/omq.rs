@@ -4,6 +4,7 @@ use super::payload::bench_payload;
 use super::{
     MULTI_PULL_DRAIN_BATCH, RECV_BATCH_BYTES, bench_options_client, cpu_time_secs, quantile,
     recv_before_deadline, run_push_loop, wait_for_start_barrier, wait_for_warmup_barrier,
+    warmup_duration,
 };
 use omq_tokio::{Endpoint, Socket, SocketType};
 use std::time::{Duration, Instant};
@@ -38,11 +39,7 @@ pub(super) struct RecvWindow {
 /// elapses, then wait at the start barrier.
 pub(super) async fn warm_up_receivers(sockets: &[omq_tokio::Socket]) {
     wait_for_warmup_barrier().await;
-    let warmup_deadline = Instant::now()
-        + std::env::var("OMQ_BENCH_WARMUP_MS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .map_or(Duration::ZERO, Duration::from_millis);
+    let warmup_deadline = Instant::now() + warmup_duration();
 
     let mut warmup_handles = Vec::with_capacity(sockets.len());
     for sock in sockets {

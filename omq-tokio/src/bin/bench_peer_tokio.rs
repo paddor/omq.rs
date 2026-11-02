@@ -27,16 +27,10 @@ use std::time::{Duration, Instant};
 const MULTI_PULL_DRAIN_BATCH: usize = 64;
 const RECV_BATCH_BYTES: usize = 1024 * 1024;
 
-fn quantile(sorted: &[f64], probability: f64) -> f64 {
-    let index = ((sorted.len().saturating_sub(1)) as f64 * probability).round() as usize;
-    sorted[index.min(sorted.len().saturating_sub(1))]
-}
-
 use bytes::Bytes;
-use omq_tokio::endpoint::Host;
 use omq_tokio::{Endpoint, Error, Message, Options, Socket, SocketType};
-use std::net::Ipv4Addr;
 
+mod bench_common;
 mod latency_common;
 mod payload_corpus;
 mod pushpull_common;
@@ -61,25 +55,7 @@ use payload::train_zstd_json_dict;
 use payload::{bench_payload, wire_size};
 use pubsub::{run_inproc_pubsub, run_multi_sub, run_pub, run_sub};
 
-fn parse_ep(s: &str) -> Endpoint {
-    if let Ok(port) = s.parse::<u16>() {
-        return Endpoint::Tcp {
-            host: Host::Ip(Ipv4Addr::LOCALHOST.into()),
-            port,
-        };
-    }
-    if let Some((ip, port_str)) = s.split_once(':')
-        && let Ok(addr) = ip.parse::<Ipv4Addr>()
-        && let Ok(port) = port_str.parse::<u16>()
-    {
-        return Endpoint::Tcp {
-            host: Host::Ip(addr.into()),
-            port,
-        };
-    }
-    s.parse()
-        .expect("valid endpoint (port, ip:port, or full URI)")
-}
+use bench_common::{ModeArgs, cpu_time_secs, quantile, warmup_duration};
 
 async fn report_bound_port(ctx: &omq_tokio::Context, ep: &Endpoint) {
     let port = match ep {
@@ -114,11 +90,6 @@ async fn report_bound_port(ctx: &omq_tokio::Context, ep: &Endpoint) {
     // Keep the socket alive so the driver task flushes the message.
     // The bench process exits via SIGTERM/SIGALRM anyway.
     std::mem::forget(coord);
-}
-
-#[cfg(unix)]
-extern "C" fn exit_on_signal(_sig: libc::c_int) {
-    unsafe { libc::_exit(0) };
 }
 
 fn main() {
@@ -165,30 +136,11 @@ fn main() {
     }
 }
 
-/// Exit cleanly on SIGTERM/SIGINT, and after 60 s as a hang guard.
-fn install_signals() {
-    #[cfg(unix)]
-    unsafe {
-        libc::signal(
-            libc::SIGTERM,
-            exit_on_signal as *const () as libc::sighandler_t,
-        );
-        libc::signal(
-            libc::SIGINT,
-            exit_on_signal as *const () as libc::sighandler_t,
-        );
-        libc::signal(
-            libc::SIGALRM,
-            exit_on_signal as *const () as libc::sighandler_t,
-        );
-        libc::alarm(60);
-    }
-}
-
 async fn async_main(args: Vec<String>, ctx: omq_tokio::Context) {
-    install_signals();
+    bench_common::install_signals();
 
     let mode = args.get(1).map(String::as_str);
+    let args = ModeArgs(&args);
     let handled = run_pipeline_mode(&ctx, mode, &args).await
         || run_pattern_mode(&ctx, mode, &args).await
         || run_inproc_mode(mode, &args).await
@@ -200,49 +152,30 @@ async fn async_main(args: Vec<String>, ctx: omq_tokio::Context) {
 }
 
 /// PUSH/PULL modes over a network endpoint. Returns false for other modes.
-async fn run_pipeline_mode(ctx: &omq_tokio::Context, mode: Option<&str>, args: &[String]) -> bool {
+async fn run_pipeline_mode(
+    ctx: &omq_tokio::Context,
+    mode: Option<&str>,
+    args: &ModeArgs<'_>,
+) -> bool {
     match mode {
         Some("push") => {
-            let ep = parse_ep(&args[2]);
-            let size: usize = args[3].parse().expect("msg_size");
-            let peers = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
-            run_push(ctx, ep, size, peers).await;
+            let peers = args.optional(4).unwrap_or(0);
+            run_push(ctx, args.ep(), args.size(), peers).await;
         }
         Some("pub-fanout") => {
-            let ep = parse_ep(&args[2]);
-            let size: usize = args[3].parse().expect("msg_size");
-            let peers: usize = args[4].parse().expect("peers");
-            run_push_fanout(ctx, ep, size, peers).await;
+            let (ep, size) = (args.ep(), args.size());
+            run_push_fanout(ctx, ep, size, args.parse(4, "peers")).await;
         }
-        Some("pull") => {
-            let ep = parse_ep(&args[2]);
-            let size: usize = args[3].parse().expect("msg_size");
-            let duration: f64 = args[4].parse().expect("duration_secs");
-            run_pull(ctx, ep, size, Duration::from_secs_f64(duration)).await;
-        }
-        Some("push-connect") => {
-            let ep = parse_ep(&args[2]);
-            let size: usize = args[3].parse().expect("msg_size");
-            run_push_connect(ctx, ep, size).await;
-        }
-        Some("pull-bind") => {
-            let ep = parse_ep(&args[2]);
-            let size: usize = args[3].parse().expect("msg_size");
-            let duration: f64 = args[4].parse().expect("duration_secs");
-            run_pull_bind(ctx, ep, size, Duration::from_secs_f64(duration)).await;
-        }
+        Some("pull") => run_pull(ctx, args.ep(), args.size(), args.secs(4)).await,
+        Some("push-connect") => run_push_connect(ctx, args.ep(), args.size()).await,
+        Some("pull-bind") => run_pull_bind(ctx, args.ep(), args.size(), args.secs(4)).await,
         Some("multi-pull") => {
-            let ep = parse_ep(&args[2]);
-            let size: usize = args[3].parse().expect("msg_size");
-            let duration: f64 = args[4].parse().expect("duration_secs");
-            let count: usize = args[5].parse().expect("socket_count");
-            run_multi_pull(ctx, ep, size, Duration::from_secs_f64(duration), count).await;
+            let (ep, size, duration) = (args.ep(), args.size(), args.secs(4));
+            run_multi_pull(ctx, ep, size, duration, args.parse(5, "socket_count")).await;
         }
         Some("multi-push") => {
-            let ep = parse_ep(&args[2]);
-            let size: usize = args[3].parse().expect("msg_size");
-            let count: usize = args[4].parse().expect("socket_count");
-            run_multi_push(ctx, ep, size, count).await;
+            let (ep, size) = (args.ep(), args.size());
+            run_multi_push(ctx, ep, size, args.parse(4, "socket_count")).await;
         }
         _ => return false,
     }
@@ -251,50 +184,32 @@ async fn run_pipeline_mode(ctx: &omq_tokio::Context, mode: Option<&str>, args: &
 
 /// REQ/REP and PUB/SUB modes over a network endpoint. Returns false for
 /// other modes.
-async fn run_pattern_mode(ctx: &omq_tokio::Context, mode: Option<&str>, args: &[String]) -> bool {
+async fn run_pattern_mode(
+    ctx: &omq_tokio::Context,
+    mode: Option<&str>,
+    args: &ModeArgs<'_>,
+) -> bool {
     match mode {
-        Some("rep") => {
-            let ep = parse_ep(&args[2]);
-            let size: usize = args[3].parse().expect("msg_size");
-            run_rep(ctx, ep, size).await;
-        }
-        Some("rep-exclusive") => {
-            let ep = parse_ep(&args[2]);
-            let size: usize = args[3].parse().expect("msg_size");
-            run_rep_exclusive(ctx, ep, size).await;
-        }
+        Some("rep") => run_rep(ctx, args.ep(), args.size()).await,
+        Some("rep-exclusive") => run_rep_exclusive(ctx, args.ep(), args.size()).await,
         Some("req") => {
-            let ep = parse_ep(&args[2]);
-            let size: usize = args[3].parse().expect("msg_size");
-            let iterations: usize = args[4].parse().expect("iterations");
-            let warmup: usize = args[5].parse().expect("warmup");
-            run_req(ctx, ep, size, iterations, warmup).await;
+            let (ep, size) = (args.ep(), args.size());
+            let iterations = args.parse(4, "iterations");
+            run_req(ctx, ep, size, iterations, args.parse(5, "warmup")).await;
         }
         Some("req-exclusive") => {
-            let ep = parse_ep(&args[2]);
-            let size: usize = args[3].parse().expect("msg_size");
-            let iterations: usize = args[4].parse().expect("iterations");
-            let warmup: usize = args[5].parse().expect("warmup");
-            run_req_exclusive(ep, size, iterations, warmup).await;
+            let (ep, size) = (args.ep(), args.size());
+            let iterations = args.parse(4, "iterations");
+            run_req_exclusive(ep, size, iterations, args.parse(5, "warmup")).await;
         }
         Some("pub") => {
-            let ep = parse_ep(&args[2]);
-            let size: usize = args[3].parse().expect("msg_size");
-            let peers: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
-            run_pub(ctx, ep, size, peers).await;
+            let peers = args.optional(4).unwrap_or(0);
+            run_pub(ctx, args.ep(), args.size(), peers).await;
         }
-        Some("sub") => {
-            let ep = parse_ep(&args[2]);
-            let size: usize = args[3].parse().expect("msg_size");
-            let duration: f64 = args[4].parse().expect("duration_secs");
-            run_sub(ctx, ep, size, Duration::from_secs_f64(duration)).await;
-        }
+        Some("sub") => run_sub(ctx, args.ep(), args.size(), args.secs(4)).await,
         Some("multi-sub") => {
-            let ep = parse_ep(&args[2]);
-            let size: usize = args[3].parse().expect("msg_size");
-            let duration: f64 = args[4].parse().expect("duration_secs");
-            let count: usize = args[5].parse().expect("socket_count");
-            run_multi_sub(ctx, ep, size, Duration::from_secs_f64(duration), count).await;
+            let (ep, size, duration) = (args.ep(), args.size(), args.secs(4));
+            run_multi_sub(ctx, ep, size, duration, args.parse(5, "socket_count")).await;
         }
         _ => return false,
     }
@@ -302,27 +217,17 @@ async fn run_pattern_mode(ctx: &omq_tokio::Context, mode: Option<&str>, args: &[
 }
 
 /// In-process modes. Returns false for other modes.
-async fn run_inproc_mode(mode: Option<&str>, args: &[String]) -> bool {
+async fn run_inproc_mode(mode: Option<&str>, args: &ModeArgs<'_>) -> bool {
     match mode {
-        Some("inproc") => {
-            let name = args[2].clone();
-            let size: usize = args[3].parse().expect("msg_size");
-            let duration: f64 = args[4].parse().expect("duration_secs");
-            run_inproc(name, size, Duration::from_secs_f64(duration)).await;
-        }
+        Some("inproc") => run_inproc(args.name(), args.size(), args.secs(4)).await,
         Some("inproc-pubsub") => {
-            let name = args[2].clone();
-            let size: usize = args[3].parse().expect("msg_size");
-            let duration: f64 = args[4].parse().expect("duration_secs");
-            let peers: usize = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(1);
-            run_inproc_pubsub(name, size, Duration::from_secs_f64(duration), peers).await;
+            let (name, size, duration) = (args.name(), args.size(), args.secs(4));
+            run_inproc_pubsub(name, size, duration, args.optional(5).unwrap_or(1)).await;
         }
         Some("inproc-latency") => {
-            let name = args[2].clone();
-            let size: usize = args[3].parse().expect("msg_size");
-            let iterations: usize = args[4].parse().expect("iterations");
-            let warmup: usize = args[5].parse().expect("warmup");
-            run_inproc_latency(name, size, iterations, warmup).await;
+            let (name, size) = (args.name(), args.size());
+            let iterations = args.parse(4, "iterations");
+            run_inproc_latency(name, size, iterations, args.parse(5, "warmup")).await;
         }
         _ => return false,
     }
@@ -331,25 +236,21 @@ async fn run_inproc_mode(mode: Option<&str>, args: &[String]) -> bool {
 
 /// Offline helpers: wire-size estimates and dictionary training. Returns
 /// false for other modes.
-fn run_tool_mode(mode: Option<&str>, args: &[String]) -> bool {
+fn run_tool_mode(mode: Option<&str>, args: &ModeArgs<'_>) -> bool {
     match mode {
-        Some("wire-size") => {
-            let ep = parse_ep(&args[2]);
-            let size: usize = args[3].parse().expect("msg_size");
-            println!("{}", wire_size(&ep, size));
-        }
+        Some("wire-size") => println!("{}", wire_size(&args.ep(), args.size())),
         #[cfg(feature = "lz4")]
         Some("train-dict") => {
-            let path = &args[2];
-            let capacity: usize = args.get(3).map_or(2048, |s| s.parse().expect("capacity"));
+            let path = &args.0[2];
+            let capacity: usize = args.0.get(3).map_or(2048, |s| s.parse().expect("capacity"));
             let dict = train_lz4_json_dict(capacity);
             std::fs::write(path, &dict).expect("write dict file");
             eprintln!("Trained {} byte dict -> {path}", dict.len());
         }
         #[cfg(feature = "zstd")]
         Some("train-zstd-dict") => {
-            let path = &args[2];
-            let capacity: usize = args.get(3).map_or(2048, |s| s.parse().expect("capacity"));
+            let path = &args.0[2];
+            let capacity: usize = args.0.get(3).map_or(2048, |s| s.parse().expect("capacity"));
             let dict = train_zstd_json_dict(capacity);
             std::fs::write(path, &dict).expect("write dict file");
             eprintln!("Trained {} byte zstd dict -> {path}", dict.len());
@@ -376,41 +277,14 @@ fn print_usage() {
 }
 
 async fn wait_for_start_barrier() {
-    let Some(start_at) = std::env::var("OMQ_BENCH_START_AT")
-        .ok()
-        .and_then(|v| v.parse::<f64>().ok())
-    else {
-        return;
-    };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0.0, |d| d.as_secs_f64());
-    if start_at > now {
-        tokio::time::sleep(Duration::from_secs_f64(start_at - now)).await;
+    if let Some(delay) = bench_common::start_delay() {
+        tokio::time::sleep(delay).await;
     }
 }
 
 async fn wait_for_warmup_barrier() {
-    let warmup = std::env::var("OMQ_BENCH_WARMUP_MS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .map(Duration::from_millis);
-    let Some(warmup) = warmup else {
-        wait_for_start_barrier().await;
-        return;
-    };
-    let Some(start_at) = std::env::var("OMQ_BENCH_START_AT")
-        .ok()
-        .and_then(|v| v.parse::<f64>().ok())
-    else {
-        return;
-    };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0.0, |d| d.as_secs_f64());
-    let warmup_at = start_at - warmup.as_secs_f64();
-    if warmup_at > now {
-        tokio::time::sleep(Duration::from_secs_f64(warmup_at - now)).await;
+    if let Some(delay) = bench_common::warmup_delay() {
+        tokio::time::sleep(delay).await;
     }
 }
 
@@ -471,11 +345,7 @@ async fn run_push_loop(sock: &Socket, payload: &Bytes) {
 }
 
 async fn run_push_warmup(sock: &Socket, payload: &Bytes) {
-    let duration = std::env::var("OMQ_BENCH_WARMUP_MS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .map_or(Duration::ZERO, Duration::from_millis);
-    let deadline = Instant::now() + duration;
+    let deadline = Instant::now() + warmup_duration();
     while Instant::now() < deadline {
         send_fast(sock, Message::from_slice(payload)).await;
         tokio::time::sleep(Duration::from_millis(1)).await;
@@ -533,79 +403,31 @@ async fn recv_loop(sock: &Socket, duration: Duration, size: usize) -> (u64, f64)
 }
 
 fn bench_options(msg_size: usize) -> Options {
-    let mut o = Options::default();
-    #[cfg(any(feature = "ws", feature = "quic"))]
-    ws_bench_config::configure(&mut o);
-    if msg_size >= 2 * 1024 * 1024 {
-        let buf = msg_size * 2;
-        o = o.recv_buffer_size(buf).send_buffer_size(buf);
-    }
-    if let Ok(path) = std::env::var("OMQ_BENCH_DICT_FILE") {
-        let dict = Bytes::from(std::fs::read(&path).expect("read dict file"));
-        o = o.compression_dict(dict);
-    }
-    if let Ok(val) = std::env::var("OMQ_BENCH_ZSTD_LEVEL") {
-        o = o.compression_level(val.parse().expect("OMQ_BENCH_ZSTD_LEVEL"));
-    }
-    if let Ok(val) = std::env::var("OMQ_BENCH_ZSTD_LEVEL_RANGE") {
-        let (min, max) = val
-            .split_once(',')
-            .and_then(|(min, max)| Some((min.parse().ok()?, max.parse().ok()?)))
-            .expect("OMQ_BENCH_ZSTD_LEVEL_RANGE");
-        o = o.compression_level_range(min, max);
-    }
-    if let Ok(val) = std::env::var("OMQ_BENCH_ARENA_THRESHOLD") {
-        o = o.arena_threshold(val.parse().expect("OMQ_BENCH_ARENA_THRESHOLD"));
-    }
-    o
+    bench_common::env_options(Options::default(), msg_size)
 }
 
 fn bench_options_server(msg_size: usize) -> Options {
     let o = bench_options(msg_size);
-    match mechanism_env().as_deref() {
+    match bench_common::mechanism_env().as_deref() {
         None | Some("null") => o,
         #[cfg(feature = "plain")]
         Some("plain") => o.plain_server(|_| true),
         #[cfg(feature = "curve")]
-        Some("curve") => o.curve_server(bench_curve_server_keypair()),
+        Some("curve") => bench_common::curve_server(o),
         Some(other) => panic!("unknown OMQ_BENCH_MECHANISM: {other}"),
     }
 }
 
 fn bench_options_client(msg_size: usize) -> Options {
     let o = bench_options(msg_size);
-    match mechanism_env().as_deref() {
+    match bench_common::mechanism_env().as_deref() {
         None | Some("null") => o,
         #[cfg(feature = "plain")]
         Some("plain") => o.plain_client("bench", "bench"),
         #[cfg(feature = "curve")]
-        Some("curve") => {
-            let client_kp = bench_curve_client_keypair();
-            let server_pub = bench_curve_server_keypair().public;
-            o.curve_client(client_kp, server_pub)
-        }
+        Some("curve") => bench_common::curve_client(o),
         Some(other) => panic!("unknown OMQ_BENCH_MECHANISM: {other}"),
     }
-}
-
-fn mechanism_env() -> Option<String> {
-    std::env::var("OMQ_BENCH_MECHANISM")
-        .ok()
-        .map(|s| s.to_ascii_lowercase())
-}
-
-#[cfg(feature = "curve")]
-fn bench_curve_server_keypair() -> omq_tokio::CurveKeypair {
-    let secret = omq_tokio::CurveSecretKey::from_bytes([0x01; 32]);
-    let public = secret.derive_public();
-    omq_tokio::CurveKeypair { public, secret }
-}
-
-#[cfg(feature = "curve")]
-fn bench_curve_client_keypair() -> omq_tokio::CurveKeypair {
-    let secret = omq_tokio::CurveSecretKey::from_bytes([0x02; 32]);
-    let public = secret.derive_public();
-    omq_tokio::CurveKeypair { public, secret }
 }
 
 async fn run_push(ctx: &omq_tokio::Context, ep: Endpoint, size: usize, peers: usize) {
@@ -730,29 +552,4 @@ fn with_commas(s: &str) -> String {
     }
     out.push_str(dec_part);
     out
-}
-
-#[cfg(unix)]
-fn timeval_secs(tv: &libc::timeval) -> f64 {
-    let sec = u64::try_from(tv.tv_sec).unwrap_or(0);
-    let usec = u64::try_from(tv.tv_usec).unwrap_or(0);
-    (Duration::from_secs(sec) + Duration::from_micros(usec)).as_secs_f64()
-}
-
-#[cfg(unix)]
-fn cpu_time_secs() -> f64 {
-    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
-    unsafe {
-        libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr());
-        let usage = usage.assume_init();
-        let user = timeval_secs(&usage.ru_utime);
-        let sys = timeval_secs(&usage.ru_stime);
-        user + sys
-    }
-}
-
-#[cfg(windows)]
-fn cpu_time_secs() -> f64 {
-    // Windows doesn't have rusage; return 0.0 as a placeholder.
-    0.0
 }

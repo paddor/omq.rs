@@ -84,7 +84,7 @@ pub async fn bind(endpoint: &Endpoint) -> Result<UdpSocket> {
 /// shared DNS workers; failure surfaces as `io::Error`.
 pub async fn connect(endpoint: &Endpoint) -> Result<UdpSocket> {
     let (host, port) = parts(endpoint)?;
-    let target = host_to_lookup(host, port).await?;
+    let target = super::dns::connect_addrs(host, port).await?[0];
     // Bind to ephemeral local; let the OS pick the address family.
     let local = match target {
         SocketAddr::V4(_) => "0.0.0.0:0".parse::<SocketAddr>().unwrap(),
@@ -114,26 +114,6 @@ fn parts(endpoint: &Endpoint) -> Result<(&Host, u16)> {
         other => Err(Error::InvalidEndpoint(format!(
             "udp transport got non-udp endpoint: {other}"
         ))),
-    }
-}
-
-async fn host_to_lookup(host: &Host, port: u16) -> Result<SocketAddr> {
-    match host {
-        Host::Ip(ip) => Ok(SocketAddr::new(*ip, port)),
-        Host::Wildcard => Err(Error::InvalidEndpoint(
-            "udp connect cannot target a wildcard host".into(),
-        )),
-        // Never block a runtime thread on a system lookup.
-        Host::Name(name) => super::dns::resolve(name, port)
-            .await?
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
-                Error::Io(std::io::Error::other(format!(
-                    "no addresses for {name}:{port}"
-                )))
-            }),
-        _ => unreachable!(),
     }
 }
 

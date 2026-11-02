@@ -10,8 +10,6 @@
 //! Compression is available on eligible plain `lz4+ws`; WSS and CURVE disable
 //! OMQ compression. Encoding stays on connection drivers or fan-out workers.
 
-use std::net::SocketAddr;
-
 use tokio::net::TcpStream;
 
 use omq_proto::error::{Error, Result};
@@ -172,17 +170,8 @@ pub(crate) async fn connect(
     } = target;
 
     ws_handshake::validate_ws_address(host, path)?;
-    let addrs = match host {
-        omq_proto::endpoint::Host::Wildcard => {
-            return Err(Error::InvalidEndpoint(
-                "cannot connect to wildcard host".into(),
-            ));
-        }
-        omq_proto::endpoint::Host::Ip(ip) => vec![SocketAddr::new(*ip, port)],
-        omq_proto::endpoint::Host::Name(name) => crate::transport::dns::resolve(name, port).await?,
-        _ => unreachable!(),
-    };
-    let stream = connect_any_resolved(addrs).await?;
+    let addrs = crate::transport::dns::connect_addrs(host, port).await?;
+    let stream = crate::transport::tcp::connect_any(addrs).await?;
     let _ = stream.set_nodelay(true);
 
     let mut transport = if tls {
@@ -207,19 +196,6 @@ pub(crate) async fn connect(
         transport,
         leftover,
     })
-}
-
-async fn connect_any_resolved(addrs: Vec<SocketAddr>) -> Result<TcpStream> {
-    let mut last_err = None;
-    for addr in addrs {
-        match TcpStream::connect(addr).await {
-            Ok(stream) => return Ok(stream),
-            Err(e) => last_err = Some(e),
-        }
-    }
-    Err(Error::Io(last_err.unwrap_or_else(|| {
-        std::io::Error::other("no addresses to connect")
-    })))
 }
 
 fn build_tls_connector(wss_tls: &omq_proto::options::WssTls) -> Result<tokio_rustls::TlsConnector> {

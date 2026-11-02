@@ -5,12 +5,13 @@
 //! releases its future while an active OS lookup keeps occupying its worker.
 
 use std::io;
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use futures::channel::oneshot;
 
+use omq_proto::endpoint::Host;
 use omq_proto::{Error, Result};
 
 const WORKERS: usize = 4;
@@ -146,6 +147,38 @@ pub(crate) async fn resolve(host: &str, port: u16) -> Result<Vec<SocketAddr>> {
         Ok(resolver) => resolver.resolve(host, port).await,
         Err(error) => Err(Error::Io(io::Error::other(error.to_string()))),
     }
+}
+
+/// Address to bind: the IPv4 wildcard, a literal IP, or the first DNS result.
+pub(crate) async fn bind_addr(host: &Host, port: u16) -> Result<SocketAddr> {
+    match host {
+        Host::Wildcard => Ok(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port)),
+        Host::Ip(ip) => Ok(SocketAddr::new(*ip, port)),
+        Host::Name(name) => Ok(resolve_name(name, port).await?[0]),
+        _ => unreachable!(),
+    }
+}
+
+/// Addresses to dial, in resolver order. Never empty.
+pub(crate) async fn connect_addrs(host: &Host, port: u16) -> Result<Vec<SocketAddr>> {
+    match host {
+        Host::Wildcard => Err(Error::InvalidEndpoint(
+            "cannot connect to wildcard host".into(),
+        )),
+        Host::Ip(ip) => Ok(vec![SocketAddr::new(*ip, port)]),
+        Host::Name(name) => resolve_name(name, port).await,
+        _ => unreachable!(),
+    }
+}
+
+async fn resolve_name(name: &str, port: u16) -> Result<Vec<SocketAddr>> {
+    let addrs = resolve(name, port).await?;
+    if addrs.is_empty() {
+        return Err(Error::Io(io::Error::other(format!(
+            "no addresses for {name}:{port}"
+        ))));
+    }
+    Ok(addrs)
 }
 
 #[cfg(test)]

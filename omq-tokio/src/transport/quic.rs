@@ -129,14 +129,7 @@ async fn resolve_connect(host: &Host, port: u16) -> Result<Vec<SocketAddr>> {
             "QUIC connect requires a port".into(),
         ));
     }
-    match host {
-        Host::Wildcard => Err(Error::InvalidEndpoint(
-            "cannot connect to wildcard host".into(),
-        )),
-        Host::Ip(ip) => Ok(vec![SocketAddr::new(*ip, port)]),
-        Host::Name(name) => crate::transport::dns::resolve(name, port).await,
-        _ => unreachable!(),
-    }
+    crate::transport::dns::connect_addrs(host, port).await
 }
 
 thread_local! {
@@ -572,20 +565,7 @@ pub(crate) async fn bind(
         .unwrap_or(u32::MAX)
         .min(LISTENER_SETUPS);
     let server = config::server(&options.quic, handshakes, config::Profile::listener())?;
-    let addr = match host {
-        Host::Wildcard => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port),
-        Host::Ip(ip) => SocketAddr::new(*ip, port),
-        Host::Name(name) => crate::transport::dns::resolve(name, port)
-            .await?
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
-                Error::Io(std::io::Error::other(format!(
-                    "no addresses for {name}:{port}"
-                )))
-            })?,
-        _ => unreachable!(),
-    };
+    let addr = crate::transport::dns::bind_addr(host, port).await?;
     let _bind_guard = ListenerGroup::bind_guard().await;
     if let Some(group) = ListenerGroup::cached(addr) {
         let generation = group.claim(&server, setup.cancel.clone(), options)?;

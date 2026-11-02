@@ -6,7 +6,7 @@
 //! message traffic.
 
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 
 use tokio::net::{TcpListener as TokioTcpListener, TcpStream};
 
@@ -33,7 +33,7 @@ impl Transport for TcpTransport {
                 "TCP transport got non-TCP endpoint: {endpoint}"
             )));
         };
-        let addr = resolve_bind(host, *port).await?;
+        let addr = super::dns::bind_addr(host, *port).await?;
         let listener = reuse_addr_bind(addr)?;
         let local = listener.local_addr()?;
         let bound = Endpoint::Tcp {
@@ -52,7 +52,9 @@ impl Transport for TcpTransport {
                 "TCP transport got non-TCP endpoint: {endpoint}"
             )));
         };
-        connect_any_resolved(resolve_connect(host, *port).await?).await
+        let stream = connect_any(super::dns::connect_addrs(host, *port).await?).await?;
+        stream.set_nodelay(true)?;
+        Ok(stream)
     }
 }
 
@@ -96,46 +98,12 @@ pub(crate) fn reuse_addr_bind(addr: SocketAddr) -> Result<TokioTcpListener> {
     ))?)
 }
 
-async fn resolve_bind(host: &Host, port: u16) -> Result<SocketAddr> {
-    match host {
-        Host::Wildcard => Ok(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port)),
-        Host::Ip(ip) => Ok(SocketAddr::new(*ip, port)),
-        Host::Name(name) => resolve_first(name, port).await,
-        _ => unreachable!(),
-    }
-}
-
-async fn resolve_connect(host: &Host, port: u16) -> Result<Vec<SocketAddr>> {
-    match host {
-        Host::Wildcard => Err(Error::InvalidEndpoint(
-            "cannot connect to wildcard host".into(),
-        )),
-        Host::Ip(ip) => Ok(vec![SocketAddr::new(*ip, port)]),
-        Host::Name(name) => resolve_all(name, port).await,
-        _ => unreachable!(),
-    }
-}
-
-async fn resolve_first(host: &str, port: u16) -> Result<SocketAddr> {
-    resolve_all(host, port)
-        .await?
-        .into_iter()
-        .next()
-        .ok_or_else(|| Error::Io(io::Error::other(format!("no addresses for {host}:{port}"))))
-}
-
-async fn resolve_all(host: &str, port: u16) -> Result<Vec<SocketAddr>> {
-    super::dns::resolve(host, port).await
-}
-
-async fn connect_any_resolved(addrs: Vec<SocketAddr>) -> Result<TcpStream> {
+/// Dial `addrs` in order and return the first stream that connects.
+pub(crate) async fn connect_any(addrs: Vec<SocketAddr>) -> Result<TcpStream> {
     let mut last_err = None;
     for addr in addrs {
         match TcpStream::connect(addr).await {
-            Ok(stream) => {
-                stream.set_nodelay(true)?;
-                return Ok(stream);
-            }
+            Ok(stream) => return Ok(stream),
             Err(e) => last_err = Some(e),
         }
     }
@@ -147,6 +115,7 @@ async fn connect_any_resolved(addrs: Vec<SocketAddr>) -> Result<TcpStream> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::{IpAddr, Ipv4Addr};
 
     fn loopback_port_zero() -> Endpoint {
         Endpoint::Tcp {
@@ -208,7 +177,7 @@ mod tests {
         let good_addr = listener.local_addr().unwrap();
         drop(bad);
 
-        let connect = tokio::spawn(connect_any_resolved(vec![bad_addr, good_addr]));
+        let connect = tokio::spawn(connect_any(vec![bad_addr, good_addr]));
         let (_accepted, _) = listener.accept().await.unwrap();
         let stream = connect.await.unwrap().unwrap();
 

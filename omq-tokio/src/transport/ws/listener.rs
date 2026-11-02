@@ -118,7 +118,6 @@ pub(crate) async fn bind(
     setup: AcceptSetup,
     options: &omq_proto::Options,
 ) -> Result<WsListener> {
-    use std::net::{IpAddr, Ipv4Addr};
     let (host, port, path) = match endpoint {
         Endpoint::Ws { host, port, path } | Endpoint::Wss { host, port, path } => {
             (host, *port, path)
@@ -131,20 +130,7 @@ pub(crate) async fn bind(
     };
     omq_proto::proto::ws_handshake::validate_ws_address(host, path)?;
     let policy = std::sync::Arc::new(super::upgrade::ServerPolicy::new(path, options)?);
-    let addr = match host {
-        Host::Wildcard => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port),
-        Host::Ip(ip) => SocketAddr::new(*ip, port),
-        Host::Name(name) => crate::transport::dns::resolve(name, port)
-            .await?
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
-                Error::Io(std::io::Error::other(format!(
-                    "no addresses for {name}:{port}"
-                )))
-            })?,
-        _ => unreachable!(),
-    };
+    let addr = crate::transport::dns::bind_addr(host, port).await?;
     let listener = crate::transport::tcp::reuse_addr_bind(addr)?;
     let local = listener.local_addr().map_err(Error::Io)?;
     let resolved = match endpoint {

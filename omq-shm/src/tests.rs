@@ -4,6 +4,7 @@ use std::time::Duration;
 use super::*;
 use crate::mapping::{HEADER, read_u64};
 use crate::pool::LOOKUP;
+use crate::test_support::grouped;
 use crate::wire::REFERENCE_SIZE;
 use crate::{
     BATCH_MAX_MESSAGES, COPIED_BATCH_MAX_BODY, MULTIPART_ENVELOPE_THRESHOLD, is_pooled,
@@ -994,28 +995,14 @@ fn reference_batches_reject_heap_metadata_without_retaining_sources() {
     assert_eq!(sources.available(), 2);
 }
 
-/// Four grouped, routed messages whose bodies fill pooled `size` slots.
-fn grouped_source_messages(sources: &omq_proto::PayloadPool, size: usize) -> Vec<Message> {
-    (0..4)
-        .map(|index| {
-            Message::with_prefix(
-                b"group".as_slice().into(),
-                sources
-                    .try_message(size, |bytes| bytes.fill(index))
-                    .unwrap()
-                    .unwrap(),
-            )
-            .with_routing_id(7)
-        })
-        .collect()
-}
-
 #[test]
 fn reference_batches_keep_source_slots_until_the_final_recipient_view() {
     for size in [16384, 1024 * 1024] {
         let sources = payload_pool([(size, 4)]).unwrap();
         let metadata = payload_pool([(BATCH_MAX_BYTES.next_power_of_two(), 1)]).unwrap();
-        let messages = grouped_source_messages(&sources, size);
+        let messages: Vec<_> = (0..4)
+            .map(|index| grouped(&sources, b"group", size, index))
+            .collect();
         let batch = prepare_reference_batch(&metadata, &messages.iter().collect::<Vec<_>>())
             .unwrap()
             .unwrap();

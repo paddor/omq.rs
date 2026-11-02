@@ -2,10 +2,7 @@
 #![forbid(unsafe_code)]
 
 use std::collections::VecDeque;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::{Arc, atomic::Ordering};
 
 use crate::{
     batch,
@@ -15,18 +12,18 @@ use crate::{
     mapping::{DATA, HEADER, LEASES, Mapping},
     pool::find_slot,
     process::Process,
+    test_support::grouped,
     views::Views,
     wire, *,
 };
 use omq_proto::{Message, Payload};
 
 fn table(count: usize) -> Arc<Table> {
-    Arc::new(Table {
-        mapping: Mapping::create(Carrier::length(count), LEASES).unwrap(),
+    Arc::new(Table::new(
+        Mapping::create(Carrier::length(count), LEASES).unwrap(),
         count,
-        stopped: AtomicBool::new(false),
-        carrier: Carrier::testing(count),
-    })
+        Carrier::testing(count),
+    ))
 }
 
 fn publish(
@@ -406,14 +403,6 @@ fn carrier_wraparound_partial_slices_and_returned_space_do_not_overlap() {
     assert!(output[4..].iter().all(|&byte| byte == 9));
 }
 
-fn grouped(pool: &omq_proto::PayloadPool, size: usize, value: u8) -> Message {
-    Message::with_prefix(
-        b"g".as_slice().into(),
-        pool.message(size, |body| body.fill(value)).unwrap(),
-    )
-    .with_routing_id(7)
-}
-
 #[test]
 fn single_frame_batches_retain_storage_and_release_the_final_view() {
     for referenced in [false, true] {
@@ -732,7 +721,10 @@ fn reference_run_validation_checks_every_body_and_retains_empty_views() {
 fn referenced_batches_retain_every_source_until_all_recipient_views_release() {
     let sources = payload_pool([(256, 2)]).unwrap();
     let metadata = payload_pool([(256, 1)]).unwrap();
-    let messages = [grouped(&sources, 128, 7), grouped(&sources, 256, 9)];
+    let messages = [
+        grouped(&sources, b"g", 128, 7),
+        grouped(&sources, b"g", 256, 9),
+    ];
     let packed = prepare_reference_batch(&metadata, &[&messages[0], &messages[1]])
         .unwrap()
         .unwrap();
@@ -794,7 +786,10 @@ fn malformed_batches_and_reference_records_never_dereference_invalid_coordinates
     }
     let sources = payload_pool([(128, 2)]).unwrap();
     let metadata = payload_pool([(256, 1)]).unwrap();
-    let messages = [grouped(&sources, 128, 7), grouped(&sources, 128, 9)];
+    let messages = [
+        grouped(&sources, b"g", 128, 7),
+        grouped(&sources, b"g", 128, 9),
+    ];
     let packed = prepare_reference_batch(&metadata, &[&messages[0], &messages[1]])
         .unwrap()
         .unwrap();
@@ -1018,7 +1013,10 @@ fn preface_and_reference_roundtrips_check_identity_and_truncation() {
 fn unpublished_reference_batch_releases_sources_after_final_local_owner() {
     let sources = payload_pool([(128, 2)]).unwrap();
     let metadata = payload_pool([(256, 1)]).unwrap();
-    let messages = [grouped(&sources, 128, 7), grouped(&sources, 128, 9)];
+    let messages = [
+        grouped(&sources, b"g", 128, 7),
+        grouped(&sources, b"g", 128, 9),
+    ];
     let packed = prepare_reference_batch(&metadata, &[&messages[0], &messages[1]])
         .unwrap()
         .unwrap();

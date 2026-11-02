@@ -6,7 +6,7 @@ use std::fs::File;
 use std::io::{self, IoSlice};
 use std::os::fd::AsFd;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 
 mod codec;
 
@@ -107,12 +107,11 @@ impl Connection {
     ) -> io::Result<Self> {
         let peer = Arc::new(Process::peer(socket)?);
         let count = hwm.clamp(1, MAX_LEASES);
-        let outgoing = Arc::new(Table {
-            mapping: Mapping::create(crate::carrier::Carrier::length(count), LEASES)?,
+        let outgoing = Arc::new(Table::new(
+            Mapping::create(crate::carrier::Carrier::length(count), LEASES)?,
             count,
-            stopped: AtomicBool::new(false),
-            carrier: crate::carrier::Carrier::new(count, true)?,
-        });
+            crate::carrier::Carrier::new(count, true)?,
+        ));
         outgoing
             .mapping
             .atomic64(crate::carrier::COUNT_OFFSET)
@@ -331,12 +330,11 @@ impl Connection {
             {
                 return Err(invalid("invalid SHM lease descriptor"));
             }
-            self.incoming = Some(Arc::new(Table {
+            self.incoming = Some(Arc::new(Table::new(
                 mapping,
                 count,
-                stopped: AtomicBool::new(false),
-                carrier: crate::carrier::Carrier::new(count, false)?,
-            }));
+                crate::carrier::Carrier::new(count, false)?,
+            )));
             return Ok(());
         }
         if self.incoming.is_none() {

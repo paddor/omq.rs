@@ -25,6 +25,15 @@ pub(super) struct Table {
 }
 
 impl Table {
+    pub(super) fn new(mapping: Mapping, count: usize, carrier: crate::carrier::Carrier) -> Self {
+        Self {
+            mapping,
+            count,
+            stopped: AtomicBool::new(false),
+            carrier,
+        }
+    }
+
     pub(super) fn borrow(&self, reference: wire::Reference) -> Result<()> {
         if reference.lease >= self.count
             || reference.generation == 0

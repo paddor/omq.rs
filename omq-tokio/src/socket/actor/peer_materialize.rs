@@ -141,11 +141,9 @@ struct WireProfile {
 
 impl WireProfile {
     fn new(socket: &SocketDriver, endpoint: &Endpoint, transforms: Option<&CodecSetup>) -> Self {
-        let workload = workload_profile(socket);
         Self {
-            workload,
-            latency: workload == WorkloadProfile::Latency
-                && !socket.options.mechanism.has_frame_transform(),
+            workload: crate::socket::effective_workload(socket.socket_type, &socket.options),
+            latency: crate::socket::latency_profile(socket.socket_type, &socket.options),
             has_transforms: transforms.is_some() || matches!(endpoint, Endpoint::Shm(_)),
         }
     }
@@ -645,16 +643,6 @@ fn peer_driver_config(socket: &SocketDriver, endpoint: &Endpoint) -> PeerDriverC
     }
     let _ = endpoint;
     config
-}
-
-fn workload_profile(socket: &SocketDriver) -> WorkloadProfile {
-    socket.options.workload_profile.unwrap_or(
-        if matches!(socket.socket_type, SocketType::Req | SocketType::Rep) {
-            WorkloadProfile::Latency
-        } else {
-            WorkloadProfile::Throughput
-        },
-    )
 }
 
 fn split_direct_tcp_writer(

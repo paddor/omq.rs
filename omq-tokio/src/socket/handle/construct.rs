@@ -275,18 +275,10 @@ fn prepare_options(socket_type: SocketType, options: &mut Options) -> Result<()>
 /// REQ/REP default to the latency profile. Frame transforms (compression)
 /// always use the throughput receive path.
 fn recv_tuning(socket_type: SocketType, options: &Options) -> RecvTuning {
-    let default = if matches!(socket_type, SocketType::Req | SocketType::Rep) {
-        omq_proto::WorkloadProfile::Latency
-    } else {
-        omq_proto::WorkloadProfile::Throughput
-    };
-    let latency = options.workload_profile.unwrap_or(default)
-        == omq_proto::WorkloadProfile::Latency
-        && !options.mechanism.has_frame_transform();
-
     RecvTuning {
         // REP admits one complete request per receive call.
-        latency_profile: latency || socket_type == SocketType::Rep,
+        latency_profile: crate::socket::latency_profile(socket_type, options)
+            || socket_type == SocketType::Rep,
         batching: options.recv_batching && supports_recv_batching(socket_type),
         spin: options.recv_spin,
     }

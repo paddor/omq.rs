@@ -8,7 +8,6 @@ use crate::engine::peer_events::SubscriptionGate;
 use crate::routing::AddedPeer;
 use crate::socket::actor::lifecycle::PeerLifecycle;
 use crate::socket::actor::peer_materialize::{ByteStreamConnection, PeerSetup, new_peer_entry};
-use omq_proto::WorkloadProfile;
 #[cfg(any(feature = "ws", feature = "quic"))]
 use omq_proto::endpoint::Endpoint;
 use std::sync::atomic::Ordering;
@@ -1002,14 +1001,7 @@ impl SocketDriver {
 
 impl SocketDriver {
     pub(super) fn uses_latency_profile(&self) -> bool {
-        self.options.workload_profile.unwrap_or(
-            if matches!(self.socket_type, SocketType::Req | SocketType::Rep) {
-                WorkloadProfile::Latency
-            } else {
-                WorkloadProfile::Throughput
-            },
-        ) == WorkloadProfile::Latency
-            && !self.options.mechanism.has_frame_transform()
+        crate::socket::latency_profile(self.socket_type, &self.options)
     }
 }
 

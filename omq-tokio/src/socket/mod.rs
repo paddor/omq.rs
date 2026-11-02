@@ -33,3 +33,25 @@ pub use pools::SocketPools;
 pub(crate) fn deadline_after(timeout: std::time::Duration) -> Option<std::time::Instant> {
     std::time::Instant::now().checked_add(timeout)
 }
+
+/// Workload profile after socket-type defaults: REQ and REP default to
+/// latency, every other type to throughput.
+pub(crate) fn effective_workload(
+    socket_type: omq_proto::SocketType,
+    options: &omq_proto::Options,
+) -> omq_proto::WorkloadProfile {
+    use omq_proto::{SocketType, WorkloadProfile};
+    options.workload_profile.unwrap_or(match socket_type {
+        SocketType::Req | SocketType::Rep => WorkloadProfile::Latency,
+        _ => WorkloadProfile::Throughput,
+    })
+}
+
+/// Latency workload on a mechanism without a frame transform.
+pub(crate) fn latency_profile(
+    socket_type: omq_proto::SocketType,
+    options: &omq_proto::Options,
+) -> bool {
+    effective_workload(socket_type, options) == omq_proto::WorkloadProfile::Latency
+        && !options.mechanism.has_frame_transform()
+}

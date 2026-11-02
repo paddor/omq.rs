@@ -7,8 +7,8 @@ use plotters::coord::types::RangedCoordf64;
 use plotters::prelude::*;
 
 use super::common::{
-    AXIS_COLOR, BACKGROUND_COLOR, GRID_COLOR, TEXT_COLOR, append_row_titles, detect_hardware,
-    fmt_size, nice_axis, out_dir, postprocess_svg,
+    AXIS_COLOR, BACKGROUND_COLOR, TEXT_COLOR, append_row_titles, detect_hardware, draw_size_mesh,
+    nice_axis, out_dir, postprocess_svg,
 };
 use super::pushpull_compression::{
     Cells, CompressionChart, LEGEND_ROW_H, Series, assert_complete, draw_legend, load_cells,
@@ -180,29 +180,14 @@ fn configure_axes(
     ratio_ticks: usize,
     (cpu_max, cpu_ticks): (f64, usize),
 ) {
-    chart_area
-        .configure_mesh()
-        .x_labels(sizes.len())
-        .x_label_formatter(&|v| {
-            sizes
-                .get(v.round() as usize)
-                .map_or(String::new(), |&s| fmt_size(s))
-        })
-        .y_labels(ratio_ticks + 1)
-        .y_label_formatter(&|v| {
-            if v.fract().abs() < 1e-9 {
-                format!("{v:.0}x")
-            } else {
-                format!("{v:.1}x")
-            }
-        })
-        .y_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
-        .x_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
-        .light_line_style(TRANSPARENT)
-        .bold_line_style(GRID_COLOR)
-        .axis_style(AXIS_COLOR)
-        .draw()
-        .unwrap();
+    let ratio_label = |v: &f64| {
+        if v.fract().abs() < 1e-9 {
+            format!("{v:.0}x")
+        } else {
+            format!("{v:.1}x")
+        }
+    };
+    draw_size_mesh(chart_area, sizes, Some(ratio_ticks + 1), &ratio_label).unwrap();
 
     // Low rates use a few percent of a core, so small axes get a decimal.
     let decimals = usize::from(cpu_max < 10.0);

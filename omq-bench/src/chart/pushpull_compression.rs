@@ -6,9 +6,8 @@ use plotters::coord::types::RangedCoordf64;
 use plotters::prelude::*;
 
 use super::common::{
-    AXIS_COLOR, BACKGROUND_COLOR, GRID_COLOR, MUTED_TEXT_COLOR, TEXT_COLOR, ValMap,
-    append_row_titles, detect_hardware, fmt_gbps, fmt_msgs, fmt_size, nice_axis, out_dir,
-    postprocess_svg,
+    AXIS_COLOR, BACKGROUND_COLOR, MUTED_TEXT_COLOR, TEXT_COLOR, ValMap, append_row_titles,
+    detect_hardware, draw_size_mesh, fmt_gbps, fmt_msgs, nice_axis, out_dir, postprocess_svg,
 };
 use crate::jsonl::{self, PushpullLz4Row};
 use crate::process;
@@ -375,23 +374,7 @@ fn configure_axes(
     msgs_ticks: usize,
     gbs_ticks: usize,
 ) {
-    chart_area
-        .configure_mesh()
-        .x_labels(sizes.len())
-        .x_label_formatter(&|v| {
-            sizes
-                .get(v.round() as usize)
-                .map_or(String::new(), |&s| fmt_size(s))
-        })
-        .y_labels(msgs_ticks + 1)
-        .y_label_formatter(&|v| fmt_msgs(*v))
-        .y_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
-        .x_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
-        .light_line_style(TRANSPARENT)
-        .bold_line_style(GRID_COLOR)
-        .axis_style(AXIS_COLOR)
-        .draw()
-        .unwrap();
+    draw_size_mesh(chart_area, sizes, Some(msgs_ticks + 1), &|v| fmt_msgs(*v)).unwrap();
 
     // Whole-MB/s labels would repeat on the 10 Mbps row (1.25 MB/s max), so
     // values under 10 MB/s get one decimal.

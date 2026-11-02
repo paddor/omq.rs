@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::Path;
 
-use plotters::coord::ranged1d::Ranged;
+use plotters::coord::ranged1d::{Ranged, ValueFormatter};
 use plotters::coord::types::RangedCoordf64;
 use plotters::prelude::*;
 
@@ -383,6 +383,39 @@ fn draw_whiskers<DB: DrawingBackend>(
 }
 
 // chart drawing helpers
+
+/// Draws the mesh of a chart indexed by message size: one x label per size,
+/// `y_label` text on the y axis (`y_labels` of them when set), and the grid
+/// and axis colors.
+pub(crate) fn draw_size_mesh<DB, Y>(
+    chart: &mut ChartContext<'_, DB, Cartesian2d<RangedCoordf64, Y>>,
+    sizes: &[u64],
+    y_labels: Option<usize>,
+    y_label: &dyn Fn(&f64) -> String,
+) -> Result<(), DrawingAreaErrorKind<DB::ErrorType>>
+where
+    DB: DrawingBackend,
+    Y: Ranged<ValueType = f64> + ValueFormatter<f64>,
+{
+    let x_label = |v: &f64| {
+        sizes
+            .get(v.round() as usize)
+            .map_or(String::new(), |&s| fmt_size(s))
+    };
+    let mut mesh = chart.configure_mesh();
+    mesh.x_labels(sizes.len())
+        .x_label_formatter(&x_label)
+        .y_label_formatter(y_label)
+        .y_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
+        .x_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
+        .light_line_style(TRANSPARENT)
+        .bold_line_style(GRID_COLOR)
+        .axis_style(AXIS_COLOR);
+    if let Some(count) = y_labels {
+        mesh.y_labels(count);
+    }
+    mesh.draw()
+}
 
 /// Whether `values` holds a point for `key` at any of `sizes`.
 fn has_point<V>(values: &BTreeMap<u64, BTreeMap<String, V>>, sizes: &[u64], key: &str) -> bool {

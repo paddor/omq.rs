@@ -2,9 +2,9 @@
 
 use super::legend::{draw_legend_table_with_versions, legend_table_height};
 use super::{
-    AXIS_COLOR, BACKGROUND_COLOR, ChartSpec, CpuColumns, CpuData, GRID_COLOR, Impl, LatencyEntry,
-    LatencyMap, LegendVersionMode, Panel, TEXT_COLOR, detect_hardware, draw_legend_table,
-    draw_line_with_dots, fmt_size, fmt_us, has_point, nice_axis, postprocess_svg,
+    BACKGROUND_COLOR, ChartSpec, CpuColumns, CpuData, Impl, LatencyEntry, LatencyMap,
+    LegendVersionMode, Panel, TEXT_COLOR, detect_hardware, draw_legend_table, draw_line_with_dots,
+    draw_size_mesh, fmt_us, has_point, nice_axis, postprocess_svg,
 };
 use plotters::coord::ranged1d::{DefaultFormatting, KeyPointHint, Ranged, ValueFormatter};
 use plotters::coord::types::RangedCoordf64;
@@ -169,21 +169,7 @@ fn draw_latency_panel<DB: DrawingBackend, Y: Ranged<ValueType = f64> + ValueForm
         .margin_right(30)
         .build_cartesian_2d(-0.15..(n - 1) as f64 + 0.15, lat_axis)?;
 
-    chart
-        .configure_mesh()
-        .x_labels(n)
-        .x_label_formatter(&|v| {
-            sizes
-                .get(v.round() as usize)
-                .map_or(String::new(), |&s| fmt_size(s))
-        })
-        .y_label_formatter(&|v| format!("{v:.0} \u{03bc}s"))
-        .y_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
-        .x_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
-        .light_line_style(TRANSPARENT)
-        .bold_line_style(GRID_COLOR)
-        .axis_style(AXIS_COLOR)
-        .draw()?;
+    draw_size_mesh(&mut chart, sizes, None, &|v| format!("{v:.0} \u{03bc}s"))?;
 
     draw_latency_ranges(
         &mut chart,

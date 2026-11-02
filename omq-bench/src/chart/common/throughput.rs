@@ -2,11 +2,10 @@
 
 use super::legend::{draw_legend_table_with_versions, legend_table_height};
 use super::{
-    AXIS_COLOR, BACKGROUND_COLOR, ChartSpec, CpuColumns, FairnessMap, GRID_COLOR, Impl,
-    LARGE_START, LegendVersionMode, MsgAxisMode, Panel, SMALL_CUTOFF, TEXT_COLOR, ThroughputRow,
-    ValMap, append_row_titles, detect_hardware, draw_legend_table, draw_line_with_dots,
-    draw_whiskers, fmt_gbps, fmt_msgs, fmt_size, has_point, nice_axis, postprocess_svg,
-    series_points,
+    BACKGROUND_COLOR, ChartSpec, CpuColumns, FairnessMap, Impl, LARGE_START, LegendVersionMode,
+    MsgAxisMode, Panel, SMALL_CUTOFF, TEXT_COLOR, ThroughputRow, ValMap, append_row_titles,
+    detect_hardware, draw_legend_table, draw_line_with_dots, draw_size_mesh, draw_whiskers,
+    fmt_gbps, fmt_msgs, has_point, nice_axis, postprocess_svg, series_points,
 };
 use plotters::prelude::*;
 
@@ -175,22 +174,7 @@ fn draw_msgs_panel(
         .margin_right(20)
         .build_cartesian_2d(0.0..(sizes.len() - 1) as f64, 0.0..msgs_max)?;
 
-    chart
-        .configure_mesh()
-        .x_labels(sizes.len())
-        .x_label_formatter(&|v| {
-            sizes
-                .get(v.round() as usize)
-                .map_or(String::new(), |&s| fmt_size(s))
-        })
-        .y_labels(n_ticks + 1)
-        .y_label_formatter(&|v| fmt_msgs(*v))
-        .y_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
-        .x_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
-        .light_line_style(TRANSPARENT)
-        .bold_line_style(GRID_COLOR)
-        .axis_style(AXIS_COLOR)
-        .draw()?;
+    draw_size_mesh(&mut chart, sizes, Some(n_ticks + 1), &|v| fmt_msgs(*v))?;
 
     if let Some(fair) = fairness {
         draw_whiskers(&mut chart, panel, msgs, fair, std::convert::identity);
@@ -240,22 +224,7 @@ fn draw_gbs_panel(
         .margin_right(10)
         .build_cartesian_2d(0.0..(sizes.len() - 1) as f64, 0.0..gbs_max)?;
 
-    chart
-        .configure_mesh()
-        .x_labels(sizes.len())
-        .x_label_formatter(&|v| {
-            sizes
-                .get(v.round() as usize)
-                .map_or(String::new(), |&s| fmt_size(s))
-        })
-        .y_labels(n_ticks + 1)
-        .y_label_formatter(&|v| fmt_gbps(*v))
-        .y_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
-        .x_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
-        .light_line_style(TRANSPARENT)
-        .bold_line_style(GRID_COLOR)
-        .axis_style(AXIS_COLOR)
-        .draw()?;
+    draw_size_mesh(&mut chart, sizes, Some(n_ticks + 1), &|v| fmt_gbps(*v))?;
 
     if let Some(fair) = fairness {
         // Whiskers scale around the plotted value, so they need GB/s too.
@@ -356,25 +325,8 @@ fn draw_gbs_panel_log(
         .margin_right(10)
         .build_cartesian_2d(0.0..(sizes.len() - 1) as f64, lo..hi)?;
 
-    chart
-        .configure_mesh()
-        .x_labels(sizes.len())
-        .y_labels((hi - lo) as usize + 1)
-        .x_label_formatter(&|v| {
-            sizes
-                .get(v.round() as usize)
-                .map_or(String::new(), |&s| fmt_size(s))
-        })
-        .y_label_formatter(&|v| {
-            let gbs = 10.0_f64.powf(*v);
-            fmt_gbps(gbs)
-        })
-        .y_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
-        .x_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
-        .light_line_style(TRANSPARENT)
-        .bold_line_style(GRID_COLOR)
-        .axis_style(AXIS_COLOR)
-        .draw()?;
+    let decades = Some((hi - lo) as usize + 1);
+    draw_size_mesh(&mut chart, sizes, decades, &|v| fmt_gbps(10.0_f64.powf(*v)))?;
 
     if let Some(fairness) = fairness {
         draw_whiskers(&mut chart, panel, &gbs_tput, fairness, f64::log10);

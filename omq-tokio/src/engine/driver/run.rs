@@ -36,13 +36,7 @@ use omq_proto::{
         transform::{MessageDecoder, TransformedOut},
     },
 };
-use std::{
-    future::Future,
-    net::IpAddr,
-    pin::Pin,
-    sync::{Arc, atomic::Ordering},
-    time::Instant,
-};
+use std::{future::Future, net::IpAddr, pin::Pin, sync::Arc, time::Instant};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -751,6 +745,6 @@ impl Session<'_> {
     fn slot_handshake_done(&self) -> bool {
         self.transmit_slot
             .as_ref()
-            .is_some_and(|slot| slot.handshake_done.load(Ordering::Acquire))
+            .is_some_and(|slot| slot.is_handshake_done())
     }
 }

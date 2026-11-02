@@ -10,11 +10,7 @@ use omq_proto::{
     proto::Connection,
 };
 use smallvec::SmallVec;
-use std::{
-    io,
-    sync::{Arc, atomic::Ordering},
-    time::Instant,
-};
+use std::{io, sync::Arc, time::Instant};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 /// Wire chunks removed from a [`FrameBuffer`] but not yet accepted by the
@@ -342,10 +338,10 @@ pub(super) fn enable_transmit_slot_after_handshake(
 ) {
     if let Some(slot) = slot
         && connection.is_ready()
-        && !slot.handshake_done.load(Ordering::Relaxed)
+        && !slot.is_handshake_done()
         && !connection.has_frame_transform()
     {
-        slot.handshake_done.store(true, Ordering::Release);
+        slot.mark_handshake_done();
     }
 }
 

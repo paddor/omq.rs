@@ -4,7 +4,7 @@ use tokio::time::{Duration, timeout};
 
 fn test_slot() -> Arc<PeerTransmitSlot> {
     let slot = PeerTransmitSlot::with_config(1, SlotConfig::default());
-    slot.handshake_done.store(true, Ordering::Release);
+    slot.mark_handshake_done();
     slot
 }
 
@@ -114,7 +114,7 @@ fn fanout_drop_oldest_slot_keeps_newest_messages() {
             ..SlotConfig::default()
         },
     );
-    slot.handshake_done.store(true, Ordering::Release);
+    slot.mark_handshake_done();
 
     let first = Message::single("first");
     let second = Message::single("second");
@@ -142,7 +142,7 @@ fn fanout_drop_oldest_slot_keeps_protected_entry() {
             ..SlotConfig::default()
         },
     );
-    slot.handshake_done.store(true, Ordering::Release);
+    slot.mark_handshake_done();
 
     let dict = Message::single("dict");
     let payload = Message::single("payload");
@@ -177,7 +177,7 @@ fn fanout_drop_oldest_shares_large_bodies_and_evicts_whole_messages() {
             ..SlotConfig::default()
         },
     );
-    slot.handshake_done.store(true, Ordering::Release);
+    slot.mark_handshake_done();
     let bodies: Vec<Bytes> = (0..3u8)
         .map(|tag| Bytes::from(vec![tag; 64 * 1024]))
         .collect();

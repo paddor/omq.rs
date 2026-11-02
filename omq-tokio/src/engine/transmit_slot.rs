@@ -62,14 +62,46 @@ pub(crate) struct PeerTransmitSlot {
     pub(crate) dead: AtomicBool,
     pub(crate) peer_id: u64,
     queued_msgs: AtomicUsize,
-    fanout_dict_queued: AtomicBool,
-    fanout_dict_shipped: AtomicBool,
-    fanout_active: AtomicBool,
     above_lwm: AtomicBool,
-    fanout_reactivation: Mutex<Option<FanOutReactivation>>,
+    fan_out: FanOutState,
+    shm: SlotShm,
+}
+
+/// Per-slot fan-out state: dictionary shipment and mute reactivation.
+struct FanOutState {
+    dict_queued: AtomicBool,
+    dict_shipped: AtomicBool,
+    active: AtomicBool,
+    reactivation: Mutex<Option<FanOutReactivation>>,
+}
+
+impl FanOutState {
+    fn new() -> Self {
+        Self {
+            dict_queued: AtomicBool::new(false),
+            dict_shipped: AtomicBool::new(false),
+            active: AtomicBool::new(true),
+            reactivation: Mutex::new(None),
+        }
+    }
+}
+
+/// SHM encoding state, set once after a SHM handshake.
+struct SlotShm {
     #[cfg(target_os = "linux")]
-    shm: OnceLock<crate::transport::shm::ShmState>,
-    shm_credit_blocked: AtomicBool,
+    state: OnceLock<crate::transport::shm::ShmState>,
+    /// The last encode found no free lease; cleared when credit returns.
+    credit_blocked: AtomicBool,
+}
+
+impl SlotShm {
+    fn new() -> Self {
+        Self {
+            #[cfg(target_os = "linux")]
+            state: OnceLock::new(),
+            credit_blocked: AtomicBool::new(false),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -156,27 +188,25 @@ impl PeerTransmitSlot {
             dead: AtomicBool::new(false),
             peer_id,
             queued_msgs: AtomicUsize::new(0),
-            fanout_dict_queued: AtomicBool::new(false),
-            fanout_dict_shipped: AtomicBool::new(false),
-            fanout_active: AtomicBool::new(true),
             above_lwm: AtomicBool::new(false),
-            fanout_reactivation: Mutex::new(None),
-            #[cfg(target_os = "linux")]
-            shm: OnceLock::new(),
-            shm_credit_blocked: AtomicBool::new(false),
+            fan_out: FanOutState::new(),
+            shm: SlotShm::new(),
         })
     }
 
     #[cfg(target_os = "linux")]
     pub(crate) fn set_shm(&self, state: crate::transport::shm::ShmState) {
-        self.shm.set(state).expect("SHM slot initialized once");
+        self.shm
+            .state
+            .set(state)
+            .expect("SHM slot initialized once");
     }
 
     #[cfg_attr(not(target_os = "linux"), expect(clippy::unused_self))]
     pub(crate) fn is_shm(&self) -> bool {
         #[cfg(target_os = "linux")]
         {
-            self.shm.get().is_some()
+            self.shm.state.get().is_some()
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -186,11 +216,11 @@ impl PeerTransmitSlot {
 
     #[cfg(target_os = "linux")]
     pub(crate) fn shm_credit_blocked(&self) -> bool {
-        self.shm_credit_blocked.load(Ordering::Acquire)
+        self.shm.credit_blocked.load(Ordering::Acquire)
     }
 
     pub(crate) fn shm_credit_returned(&self) {
-        self.shm_credit_blocked.store(false, Ordering::Release);
+        self.shm.credit_blocked.store(false, Ordering::Release);
         self.space_available.notify_changed();
         let eq = self.eq.lock().expect("transmit_slot eq poisoned");
         let below_lwm =
@@ -242,19 +272,19 @@ impl PeerTransmitSlot {
     ) -> TryFrameResult {
         #[cfg(target_os = "linux")]
         {
-            let Some(state) = self.shm.get() else {
+            let Some(state) = self.shm.state.get() else {
                 return TryFrameResult::Ineligible;
             };
             if self.is_dead() {
                 return TryFrameResult::Dead;
             }
-            if !self.handshake_done.load(Ordering::Acquire) {
+            if !self.is_handshake_done() {
                 return TryFrameResult::Ineligible;
             }
             // Wire-space wakes do not return borrowed SHM leases. Keep the
             // failed encode's credit snapshot until the driver wakes us for
             // returned credit instead of rescanning the payload pool.
-            if self.shm_credit_blocked.load(Ordering::Acquire) {
+            if self.shm.credit_blocked.load(Ordering::Acquire) {
                 return TryFrameResult::Full;
             }
             let Some(mut eq) = self.lock_live() else {
@@ -279,7 +309,7 @@ impl PeerTransmitSlot {
                     TryFrameResult::Ok
                 }
                 Ok(false) => {
-                    self.shm_credit_blocked.store(true, Ordering::Release);
+                    self.shm.credit_blocked.store(true, Ordering::Release);
                     drop(eq);
                     // The driver must arm its futex wait even with no wire bytes.
                     self.signal_encoded();
@@ -314,6 +344,21 @@ impl PeerTransmitSlot {
         result
     }
 
+    #[inline]
+    pub(crate) fn is_dead(&self) -> bool {
+        self.dead.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    pub(crate) fn is_handshake_done(&self) -> bool {
+        self.handshake_done.load(Ordering::Acquire)
+    }
+
+    /// Open the slot to caller-thread encoding once the codec is ready.
+    pub(crate) fn mark_handshake_done(&self) {
+        self.handshake_done.store(true, Ordering::Release);
+    }
+
     pub(crate) fn set_direct_writer(&self, writer: Arc<crate::socket::dispatch::DirectTcpWriter>) {
         self.direct_writer.get_or_init(|| writer);
     }
@@ -326,7 +371,7 @@ impl PeerTransmitSlot {
         if self.is_dead() {
             return TryFrameResult::Dead;
         }
-        if !self.handshake_done.load(Ordering::Acquire) {
+        if !self.is_handshake_done() {
             return TryFrameResult::Ineligible;
         }
 
@@ -537,7 +582,7 @@ impl PeerTransmitSlot {
         }
         eq.push_raw_message(&chunks, protected);
         if protected {
-            self.fanout_dict_queued.store(true, Ordering::Release);
+            self.fan_out.dict_queued.store(true, Ordering::Release);
         }
         queued_msgs += 1;
         self.commit(&eq, queued_msgs);
@@ -557,35 +602,37 @@ impl PeerTransmitSlot {
 
     #[inline]
     pub(crate) fn fanout_dict_shipped(&self) -> bool {
-        self.fanout_dict_shipped.load(Ordering::Acquire)
+        self.fan_out.dict_shipped.load(Ordering::Acquire)
     }
 
     #[inline]
     pub(crate) fn fanout_dict_queued_or_shipped(&self) -> bool {
-        self.fanout_dict_queued.load(Ordering::Acquire) || self.fanout_dict_shipped()
+        self.fan_out.dict_queued.load(Ordering::Acquire) || self.fanout_dict_shipped()
     }
 
     #[inline]
     pub(crate) fn mark_fanout_dict_shipped(&self) {
-        self.fanout_dict_queued.store(false, Ordering::Release);
-        self.fanout_dict_shipped.store(true, Ordering::Release);
+        self.fan_out.dict_queued.store(false, Ordering::Release);
+        self.fan_out.dict_shipped.store(true, Ordering::Release);
     }
 
     #[inline]
     pub(crate) fn fanout_active(&self) -> bool {
-        self.fanout_active.load(Ordering::Acquire)
+        self.fan_out.active.load(Ordering::Acquire)
     }
 
     #[inline]
     pub(crate) fn deactivate_fanout(&self) -> bool {
-        self.fanout_active
+        self.fan_out
+            .active
             .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
     }
 
     pub(crate) fn set_fanout_reactivation(&self, cb: FanOutReactivation) {
         *self
-            .fanout_reactivation
+            .fan_out
+            .reactivation
             .lock()
             .expect("transmit_slot fanout_reactivation poisoned") = Some(cb);
     }
@@ -724,19 +771,14 @@ impl PeerTransmitSlot {
             self.queued_msgs.store(0, Ordering::Relaxed);
             std::mem::replace(&mut *eq, FrameBuffer::one_shot())
         };
-        self.fanout_dict_queued.store(false, Ordering::Relaxed);
-        self.fanout_dict_shipped.store(false, Ordering::Relaxed);
-        self.fanout_active.store(false, Ordering::Relaxed);
+        self.fan_out.dict_queued.store(false, Ordering::Relaxed);
+        self.fan_out.dict_shipped.store(false, Ordering::Relaxed);
+        self.fan_out.active.store(false, Ordering::Relaxed);
         self.above_lwm.store(false, Ordering::Relaxed);
         drop(ownership);
         self.data_signal.wake_all();
         self.space_available.notify_changed();
         drop(retired);
-    }
-
-    #[inline]
-    fn is_dead(&self) -> bool {
-        self.dead.load(Ordering::Acquire)
     }
 
     /// Lock the queue, or `None` if `mark_dead` won the race for it.
@@ -778,14 +820,16 @@ impl PeerTransmitSlot {
     fn claim_reactivation(&self, below_lwm: bool) -> bool {
         below_lwm
             && self
-                .fanout_active
+                .fan_out
+                .active
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
     }
 
     fn notify_reactivation(&self) {
         if let Some(cb) = self
-            .fanout_reactivation
+            .fan_out
+            .reactivation
             .lock()
             .expect("transmit_slot fanout_reactivation poisoned")
             .clone()

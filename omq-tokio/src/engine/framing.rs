@@ -39,7 +39,6 @@ mod tests {
     use omq_proto::Message;
     use omq_proto::proto::SocketType;
     use omq_proto::proto::connection::{Connection, ConnectionConfig, Role};
-    use std::sync::atomic::Ordering;
 
     fn connection(framing: WireFraming, server: bool) -> Connection {
         let role = if server { Role::Server } else { Role::Client };
@@ -104,7 +103,7 @@ mod tests {
                     ..SlotConfig::default()
                 },
             );
-            slot.handshake_done.store(true, Ordering::Release);
+            slot.mark_handshake_done();
             let messages = [
                 Message::single(Bytes::new()),
                 Message::single("tiny"),

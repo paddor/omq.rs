@@ -523,7 +523,7 @@ fn immediate_tcp_write_unlocks_reserved_producer_before_buffer_release() {
             ..SlotConfig::default()
         },
     );
-    slot.handshake_done.store(true, Ordering::Release);
+    slot.mark_handshake_done();
     let writer = Arc::new(DirectTcpWriter::new(tcp));
     writer.publish_idle(|| true);
     let (root, _receiver) = channel(4);

@@ -21,7 +21,7 @@ use omq_proto::{
     flow::DrainBudget,
     proto::Connection,
 };
-use std::{future::Future, io, pin::Pin, sync::atomic::Ordering, time::Instant};
+use std::{future::Future, io, pin::Pin, time::Instant};
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
     sync::mpsc,
@@ -280,7 +280,7 @@ impl<'events> Activation<'_, 'events> {
         if self
             .transmit_slot
             .as_ref()
-            .is_some_and(|slot| slot.dead.load(Ordering::Acquire))
+            .is_some_and(|slot| slot.is_dead())
         {
             return Ok(PreActivationStep::Close);
         }

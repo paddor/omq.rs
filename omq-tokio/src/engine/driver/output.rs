@@ -14,7 +14,7 @@ use crate::{
 use omq_proto::{
     Message, Result, flow::max_batch_bytes, frame_buffer::FrameBuffer, proto::Connection,
 };
-use std::{sync::atomic::Ordering, time::Instant};
+use std::time::Instant;
 
 #[derive(Debug)]
 pub(super) struct QueuedOutput {
@@ -104,7 +104,7 @@ impl QueuedOutput {
             || !self.pipe_batch.is_empty()
             || self.deferred.is_some()
             || input_failed
-            || !slot.handshake_done.load(Ordering::Acquire)
+            || !slot.is_handshake_done()
         {
             return;
         }

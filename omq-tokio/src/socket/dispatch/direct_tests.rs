@@ -3,7 +3,6 @@ use crate::engine::transmit_slot::{PeerTransmitSlot, SlotConfig, TryFrameResult}
 use crate::engine::write_ownership::WriteOwnership;
 use omq_proto::Message;
 use std::collections::VecDeque;
-use std::sync::atomic::Ordering;
 
 #[derive(Debug)]
 struct ScriptedWrite {
@@ -46,7 +45,7 @@ fn fixture(step: io::Result<usize>) -> (DirectWriteState<ScriptedWrite>, Arc<Pee
         ..SlotConfig::default()
     };
     let slot = PeerTransmitSlot::with_config(1, config);
-    slot.handshake_done.store(true, Ordering::Release);
+    slot.mark_handshake_done();
     (state, slot)
 }
 

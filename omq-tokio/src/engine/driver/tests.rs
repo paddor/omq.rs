@@ -928,6 +928,16 @@ fn pair_drivers(
     PairEnds,
 ) {
     let (server_stream, client_stream) = tokio::io::duplex(spec.duplex);
+    pair_drivers_over(server_stream, client_stream, spec)
+}
+
+/// Unstarted server and client drivers for `spec` over the given streams.
+/// `spec.duplex` does not apply.
+fn pair_drivers_over<S: DriverStream, C: DriverStream>(
+    server_stream: S,
+    client_stream: C,
+    spec: PairSpec,
+) -> (ConnectionDriver<S>, ConnectionDriver<C>, PairEnds) {
     let (server_control, server_inbox) = mpsc::channel(8);
     let (client_control, client_inbox) = mpsc::channel(8);
     let (client_data, client_data_inbox) = mpsc::channel(spec.client_data);
@@ -966,11 +976,15 @@ fn pair_drivers(
 }
 
 /// Spawn both drivers, wait for both handshakes, and open both data planes.
-async fn start_pair(
-    server: ConnectionDriver<DuplexStream>,
-    client: ConnectionDriver<DuplexStream>,
+async fn start_pair<S, C>(
+    server: ConnectionDriver<S>,
+    client: ConnectionDriver<C>,
     ends: &mut PairEnds,
-) -> (DriverTask, DriverTask) {
+) -> (DriverTask, DriverTask)
+where
+    S: DriverStream + Send + 'static,
+    C: DriverStream + Send + 'static,
+{
     let server_task = tokio::spawn(server.run());
     let client_task = tokio::spawn(client.run());
     activate_after_handshakes(

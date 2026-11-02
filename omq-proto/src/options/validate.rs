@@ -3,11 +3,7 @@
 use super::{MAX_QUEUE_CAPACITY, Options, ReconnectPolicy};
 #[cfg(any(feature = "plain", feature = "curve"))]
 use crate::proto::mechanism::MechanismSetup;
-
-/// Upper bound for `Options::compression_dict`. Compression transports cap
-/// dictionaries at 8 KiB. Inlined as a const so the `compression_dict`
-/// setter works regardless of which compression features are enabled.
-const COMPRESSION_DICT_MAX: usize = 8 * 1024;
+use crate::proto::transform::MAX_DICT_BYTES;
 
 const ZSTD_LEVEL_MIN: i32 = -7;
 
@@ -85,10 +81,10 @@ impl Options {
 
     fn validate_compression(&self) -> crate::error::Result<()> {
         if let Some(ref dict) = self.compression_dict
-            && (dict.is_empty() || dict.len() > COMPRESSION_DICT_MAX)
+            && (dict.is_empty() || dict.len() > MAX_DICT_BYTES)
         {
             return Err(crate::error::Error::Config(format!(
-                "compression dict must be 1..={COMPRESSION_DICT_MAX} bytes, got {}",
+                "compression dict must be 1..={MAX_DICT_BYTES} bytes, got {}",
                 dict.len()
             )));
         }

@@ -22,6 +22,17 @@ pub(super) const SENTINEL_PLAIN: [u8; 4] = [0, 0, 0, 0];
 /// On-wire envelope size of a plaintext part: the 4-byte sentinel.
 pub(super) const ENVELOPE_PLAIN: usize = 4;
 
+/// Below this part size, plaintext passthrough always wins net of the 4-byte
+/// envelope (RFC Sec. 5.4).
+pub(super) const MIN_COMPRESS_NO_DICT: usize = 512;
+
+/// Below this part size, plaintext passthrough wins when a dict is installed.
+/// At 64 B and up, dict compression achieves a ratio above 50%.
+pub(super) const MIN_COMPRESS_WITH_DICT: usize = 64;
+
+/// Default auto-train dictionary capacity in bytes.
+pub const DEFAULT_DICT_CAPACITY: usize = 2048;
+
 /// Subtract `take` from the running per-message decompression budget;
 /// refuse with [`Error::MessageTooLarge`] if it would go negative.
 /// `budget = None` means unlimited.

@@ -15,19 +15,20 @@ use zrip::{CompressContext, DecompressContext};
 use crate::error::{Error, Result};
 use crate::message::{Message, Payload};
 
+pub use super::MAX_DICT_BYTES;
 use super::adaptive;
 use super::arena::{self, DecodedArena};
 pub use super::arena::{MAX_ARENA_BYTES, MAX_ARENA_MESSAGES, MAX_ARENA_PARTS, arena_message_size};
+pub use super::common::DEFAULT_DICT_CAPACITY;
 use super::common::{
-    ENVELOPE_PLAIN, SENTINEL_PLAIN, body_budget, plaintext_payload, take_budget, validate_dict,
+    ENVELOPE_PLAIN, MIN_COMPRESS_NO_DICT, MIN_COMPRESS_WITH_DICT, SENTINEL_PLAIN, body_budget,
+    plaintext_payload, take_budget, validate_dict,
 };
 use super::{OutputWindow, TransformedOut};
 
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
 const ZDICT_MAGIC: [u8; 4] = [0x37, 0xA4, 0x30, 0xEC];
 const ARENA_SENTINEL: [u8; 4] = *b"ZSTA";
-const MIN_COMPRESS_NO_DICT: usize = 512;
-const MIN_COMPRESS_WITH_DICT: usize = 64;
 const MAX_DECOMPRESSED_SIZE: usize = super::common::DEFAULT_DECODED_MESSAGE_LIMIT;
 const TRAIN_MAX_SAMPLES: usize = 1000;
 const TRAIN_MAX_BYTES: usize = 100 * 1024;
@@ -35,14 +36,10 @@ const TRAIN_MAX_SAMPLE_LEN: usize = 2048;
 const USER_DICT_ID_MIN: u32 = 32_768;
 const USER_DICT_ID_MAX: u32 = 0x7FFF_FFFF;
 
-/// Maximum dictionary shipment size in bytes.
-pub const MAX_DICT_BYTES: usize = 8 * 1024;
 /// Default Zstd compression level, and the adaptive starting level.
 pub const DEFAULT_LEVEL: i32 = -1;
 /// Default adaptive level range when no fixed level is configured.
 pub const DEFAULT_LEVEL_RANGE: (i32, i32) = (-7, 4);
-/// Default trained dictionary capacity in bytes.
-pub const DEFAULT_DICT_CAPACITY: usize = 2048;
 
 /// Starting level of an encoder that adapts within `min..=max`.
 ///

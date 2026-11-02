@@ -39,8 +39,9 @@ use crate::message::{Message, Payload};
 
 use super::TransformedOut;
 use super::common::{
-    ENVELOPE_PLAIN, SENTINEL_PLAIN, body_budget, build_dict_shipment, check_expansion,
-    plaintext_payload, take_budget, validate_dict,
+    DEFAULT_DICT_CAPACITY, ENVELOPE_PLAIN, MIN_COMPRESS_NO_DICT, MIN_COMPRESS_WITH_DICT,
+    SENTINEL_PLAIN, body_budget, build_dict_shipment, check_expansion, plaintext_payload,
+    take_budget, validate_dict,
 };
 
 const SENTINEL_LZ4B: [u8; 4] = *b"LZ4B";
@@ -62,20 +63,7 @@ const LZ4M_BLOCK_SIZE: usize = 0x4000_0000;
 /// allocation even when no `max_message_size` budget is configured.
 const LZ4_MAX_EXPANSION: usize = 255;
 
-/// Below this size, plaintext passthrough always wins net of the 4-byte
-/// envelope. Matches `omq-lz4` RFC §5.4.
-const MIN_COMPRESS_NO_DICT: usize = 512;
-
-/// Below this size, plaintext passthrough wins when a dict is installed.
-/// At 64B+, dict compression achieves >50% ratio and the epoch-based
-/// compressor cost is negligible relative to wire savings.
-const MIN_COMPRESS_WITH_DICT: usize = 64;
-
-/// Maximum LZ4 dictionary size in bytes (RFC §6.2).
-pub const MAX_DICT_BYTES: usize = 8192;
-
-/// Default auto-train dictionary capacity in bytes.
-const DEFAULT_DICT_CAPACITY: usize = 2048;
+pub use super::MAX_DICT_BYTES;
 
 fn decode_len(declared: u64, label: &str) -> Result<usize> {
     let size = usize::try_from(declared)

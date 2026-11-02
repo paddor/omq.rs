@@ -49,6 +49,10 @@ use crate::proto::mechanism::MechanismSetup;
 /// Minimum wall time of one compression-level adaptation window.
 pub const ADAPT_WINDOW: std::time::Duration = std::time::Duration::from_millis(100);
 
+/// Largest compression dictionary in bytes (RFC Sec. 6.2), shipped or trained.
+/// Ungated so option validation works without compression features.
+pub const MAX_DICT_BYTES: usize = 8 * 1024;
+
 /// Transport conditions a sender observed over one adaptation window.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct OutputWindow {
@@ -227,17 +231,15 @@ impl MessageEncoder {
     /// Callers cache this at handshake time and bypass the encoder mutex for
     /// sub-threshold messages.
     pub fn passthrough_info(&self) -> Option<(bytes::Bytes, usize)> {
-        #[allow(unused)]
-        const SENTINEL: &[u8] = &[0u8, 0, 0, 0];
         match self {
             #[cfg(feature = "lz4")]
             Self::Lz4(t) => Some((
-                bytes::Bytes::from_static(SENTINEL),
+                bytes::Bytes::from_static(&common::SENTINEL_PLAIN),
                 t.passthrough_threshold()?,
             )),
             #[cfg(feature = "zstd")]
             Self::Zstd(t) => Some((
-                bytes::Bytes::from_static(SENTINEL),
+                bytes::Bytes::from_static(&common::SENTINEL_PLAIN),
                 t.passthrough_threshold()?,
             )),
             #[cfg(not(any(feature = "lz4", feature = "zstd")))]

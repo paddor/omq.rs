@@ -297,9 +297,7 @@ impl Submitter {
         }
 
         if !fallback_targets.is_empty() {
-            let mut deactivate = |target: &PeerOutbound| self.deactivate_target(target);
-            fallback::dispatch_to_targets(fallback_targets, msg, self.mute_policy, &mut deactivate)
-                .map_err(omq_proto::error::TrySendError::Error)?;
+            self.publish_fallback_lossy(fallback_targets, msg);
         }
 
         Ok(())
@@ -335,13 +333,7 @@ impl Submitter {
         }
 
         if !fallback_targets.is_empty() {
-            let mut deactivate = |target: &PeerOutbound| self.deactivate_target(target);
-            fallback::dispatch_to_targets(
-                fallback_targets,
-                msg,
-                self.mute_policy,
-                &mut deactivate,
-            )?;
+            self.publish_fallback_lossy(fallback_targets, msg);
         }
         if has_lane_peers {
             lanes.dispatch(LaneDispatch { msg: msg.clone() }).await;
@@ -395,6 +387,16 @@ impl Submitter {
             fallback::dispatch_blocking(fallback_targets, msg, lanes, &self.publish).await;
         };
         tokio::join!(fallback, native);
+    }
+
+    /// Publish to fallback peers under a lossy policy; full peers drop.
+    fn publish_fallback_lossy(&self, targets: &[PeerOutbound], msg: &Message) {
+        let publication = fallback::FallbackPublication {
+            targets,
+            msg,
+            policy: self.mute_policy,
+        };
+        publication.dispatch(&mut |target| self.deactivate_target(target));
     }
 
     fn publish_fallback(targets: &[PeerOutbound], msg: &Message) -> bool {

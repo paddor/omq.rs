@@ -8,7 +8,6 @@ use crate::engine::transmit_slot::{PeerTransmitSlot, TryFrameResult};
 use crate::engine::{PeerDriverData, SendPipeError};
 use crate::routing::peer_outbound::PeerOutbound;
 use crate::transport::inproc::{Admission, InprocSender};
-use omq_proto::error::Result;
 use omq_proto::fan_out_frame::{
     FanOutFrame, clear_fan_out_frame, encode_fan_out_message, finish_fan_out_frame,
 };
@@ -119,147 +118,109 @@ pub(super) async fn dispatch_blocking(
     }
 }
 
-pub(super) fn dispatch_to_targets(
-    targets: &[PeerOutbound],
-    msg: &Message,
-    mute_policy: FanOutMutePolicy,
-    deactivate: &mut impl FnMut(&PeerOutbound),
-) -> Result<()> {
-    match targets.len() {
-        0 => Ok(()),
-        1 if mute_policy != FanOutMutePolicy::DropOldest => match targets[0].try_encode(msg) {
-            TryFrameResult::Full => {
-                if mute_policy == FanOutMutePolicy::DropNewest {
-                    deactivate(&targets[0]);
-                }
-                Ok(())
-            }
-            _ => Ok(()),
-        },
-        _ => {
-            // Inproc rings and inboxes take the message itself, so a set
-            // without a wire peer has nothing to encode.
-            if targets.iter().any(PeerOutbound::requires_per_peer_encoding)
-                || !targets.iter().any(PeerOutbound::is_wire)
-            {
-                for t in targets {
-                    if t.try_encode(msg) == TryFrameResult::Full
-                        && mute_policy == FanOutMutePolicy::DropNewest
-                    {
-                        deactivate(t);
-                    }
-                }
-                return Ok(());
-            }
-
-            #[cfg(feature = "ws")]
-            if targets.iter().any(PeerOutbound::is_ws) {
-                for t in targets {
-                    if t.try_encode(msg) == TryFrameResult::Full
-                        && mute_policy == FanOutMutePolicy::DropNewest
-                    {
-                        deactivate(t);
-                    }
-                }
-                return Ok(());
-            }
-
-            thread_local! {
-                static ARENA: RefCell<FrameBuffer> = RefCell::new(
-                    FrameBuffer::one_shot(),
-                );
-                static CHUNKS: RefCell<Vec<Bytes>> = const { RefCell::new(Vec::new()) };
-            }
-            ARENA.with(|cell| {
-                let eq = &mut *cell.borrow_mut();
-                encode_fan_out_message(eq, msg, targets.len(), FAN_OUT_TOTAL_COPY_BUDGET);
-                CHUNKS.with(|drain| {
-                    let chunks = &mut *drain.borrow_mut();
-                    let frame =
-                        finish_fan_out_frame(eq, chunks, targets.len(), FAN_OUT_TOTAL_COPY_BUDGET);
-                    dispatch_frame(frame, targets, msg, mute_policy, deactivate);
-                    clear_fan_out_frame(eq, chunks);
-                    Ok(())
-                })
-            })
-        }
-    }
+/// One publication to the fallback peers that matched it.
+pub(super) struct FallbackPublication<'a> {
+    pub(super) targets: &'a [PeerOutbound],
+    pub(super) msg: &'a Message,
+    pub(super) policy: FanOutMutePolicy,
 }
 
-fn push_to_peers(
-    targets: &[PeerOutbound],
-    msg: &Message,
-    mute_policy: FanOutMutePolicy,
-    deactivate: &mut impl FnMut(&PeerOutbound),
-    push_wire: impl Fn(&PeerTransmitSlot, FanOutMutePolicy) -> TryFrameResult,
-) {
-    for t in targets {
-        match t {
-            PeerOutbound::Wire { slot, .. } => {
-                if mute_policy == FanOutMutePolicy::DropNewest && !slot.fanout_active() {
-                    continue;
-                }
-                if push_wire(slot, mute_policy) == TryFrameResult::Full
-                    && mute_policy == FanOutMutePolicy::DropNewest
-                {
-                    deactivate(t);
-                }
-            }
-            PeerOutbound::Inbox(tx) => {
-                let _ = tx.try_send(PeerDriverData::SendMessage(msg.clone()));
-            }
-            PeerOutbound::Inproc(sender) => {
-                let _ = sender.try_send_prepared(msg.clone(), SendPreparation::Plain);
-            }
+impl FallbackPublication<'_> {
+    /// Deliver to every target without waiting. Wire peers share one frame
+    /// unless a peer needs its own encoding.
+    pub(super) fn dispatch(&self, deactivate: &mut impl FnMut(&PeerOutbound)) {
+        if self.encodes_per_peer() {
+            self.encode_each(deactivate);
+            return;
         }
-    }
-}
-
-/// Push one shared fan-out frame to every wire target. Arena frames are
-/// pushed without signaling, then each slot is signaled once.
-fn dispatch_frame(
-    frame: FanOutFrame<'_>,
-    targets: &[PeerOutbound],
-    msg: &Message,
-    mute_policy: FanOutMutePolicy,
-    deactivate: &mut impl FnMut(&PeerOutbound),
-) {
-    match frame {
-        FanOutFrame::Arena(raw) => {
-            let frame = FanOutFrame::Arena(raw);
-            push_to_peers(
-                targets,
-                msg,
-                mute_policy,
-                deactivate,
-                |slot, policy| match policy {
-                    FanOutMutePolicy::DropOldest => slot.try_push_fanout_drop_oldest(&frame),
-                    FanOutMutePolicy::DropNewest | FanOutMutePolicy::Block => {
-                        slot.try_push_pre_framed_no_signal(raw)
-                    }
-                },
+        thread_local! {
+            static ARENA: RefCell<FrameBuffer> = RefCell::new(
+                FrameBuffer::one_shot(),
             );
-            for t in targets {
-                if let PeerOutbound::Wire { slot, .. } = t {
+            static CHUNKS: RefCell<Vec<Bytes>> = const { RefCell::new(Vec::new()) };
+        }
+        let recipients = self.targets.len();
+        ARENA.with(|cell| {
+            let eq = &mut *cell.borrow_mut();
+            encode_fan_out_message(eq, self.msg, recipients, FAN_OUT_TOTAL_COPY_BUDGET);
+            CHUNKS.with(|drain| {
+                let chunks = &mut *drain.borrow_mut();
+                let frame = finish_fan_out_frame(eq, chunks, recipients, FAN_OUT_TOTAL_COPY_BUDGET);
+                self.push_frame(&frame, deactivate);
+                clear_fan_out_frame(eq, chunks);
+            });
+        });
+    }
+
+    /// Inproc rings and inboxes take the message itself, so a set without a
+    /// wire peer has nothing to share. One target under a non-evicting policy
+    /// encodes directly.
+    fn encodes_per_peer(&self) -> bool {
+        let targets = self.targets;
+        if (targets.len() == 1 && self.policy != FanOutMutePolicy::DropOldest)
+            || targets.iter().any(PeerOutbound::requires_per_peer_encoding)
+            || !targets.iter().any(PeerOutbound::is_wire)
+        {
+            return true;
+        }
+        #[cfg(feature = "ws")]
+        if targets.iter().any(PeerOutbound::is_ws) {
+            return true;
+        }
+        false
+    }
+
+    fn encode_each(&self, deactivate: &mut impl FnMut(&PeerOutbound)) {
+        for target in self.targets {
+            if target.try_encode(self.msg) == TryFrameResult::Full
+                && self.policy == FanOutMutePolicy::DropNewest
+            {
+                deactivate(target);
+            }
+        }
+    }
+
+    /// Push one shared fan-out frame to every wire target. Arena frames are
+    /// pushed without signaling, then each slot is signaled once.
+    fn push_frame(&self, frame: &FanOutFrame<'_>, deactivate: &mut impl FnMut(&PeerOutbound)) {
+        let drop_newest = self.policy == FanOutMutePolicy::DropNewest;
+        for target in self.targets {
+            match target {
+                PeerOutbound::Wire { slot, .. } => {
+                    if drop_newest && !slot.fanout_active() {
+                        continue;
+                    }
+                    if push_wire(slot, frame, self.policy) == TryFrameResult::Full && drop_newest {
+                        deactivate(target);
+                    }
+                }
+                PeerOutbound::Inbox(tx) => {
+                    let _ = tx.try_send(PeerDriverData::SendMessage(self.msg.clone()));
+                }
+                PeerOutbound::Inproc(sender) => {
+                    let _ = sender.try_send_prepared(self.msg.clone(), SendPreparation::Plain);
+                }
+            }
+        }
+        if matches!(frame, FanOutFrame::Arena(_)) {
+            for target in self.targets {
+                if let PeerOutbound::Wire { slot, .. } = target {
                     slot.signal_encoded();
                 }
             }
         }
-        FanOutFrame::Chunks(encoded) => {
-            let frame = FanOutFrame::Chunks(encoded);
-            push_to_peers(
-                targets,
-                msg,
-                mute_policy,
-                deactivate,
-                |slot, policy| match policy {
-                    FanOutMutePolicy::DropOldest => slot.try_push_fanout_drop_oldest(&frame),
-                    FanOutMutePolicy::DropNewest | FanOutMutePolicy::Block => {
-                        slot.try_push_encoded(encoded)
-                    }
-                },
-            );
-        }
+    }
+}
+
+fn push_wire(
+    slot: &PeerTransmitSlot,
+    frame: &FanOutFrame<'_>,
+    policy: FanOutMutePolicy,
+) -> TryFrameResult {
+    match (policy, frame) {
+        (FanOutMutePolicy::DropOldest, _) => slot.try_push_fanout_drop_oldest(frame),
+        (_, FanOutFrame::Arena(raw)) => slot.try_push_pre_framed_no_signal(raw),
+        (_, FanOutFrame::Chunks(encoded)) => slot.try_push_encoded(encoded),
     }
 }
 
@@ -456,15 +417,14 @@ mod tests {
         let mut deactivated = false;
 
         for body in ["first", "second", "third"] {
-            dispatch_to_targets(
-                std::slice::from_ref(&target),
-                &Message::single(body),
-                FanOutMutePolicy::DropOldest,
-                &mut |_| {
-                    deactivated = true;
-                },
-            )
-            .unwrap();
+            FallbackPublication {
+                targets: std::slice::from_ref(&target),
+                msg: &Message::single(body),
+                policy: FanOutMutePolicy::DropOldest,
+            }
+            .dispatch(&mut |_| {
+                deactivated = true;
+            });
         }
 
         let mut actual = Vec::new();
@@ -486,17 +446,16 @@ mod tests {
         let mut deactivated = Vec::new();
 
         for body in ["first", "second", "third"] {
-            dispatch_to_targets(
-                &outbounds,
-                &Message::single(body),
-                FanOutMutePolicy::DropNewest,
-                &mut |target| {
-                    if let PeerOutbound::Wire { slot, .. } = target {
-                        deactivated.push(slot.peer_id);
-                    }
-                },
-            )
-            .unwrap();
+            FallbackPublication {
+                targets: &outbounds,
+                msg: &Message::single(body),
+                policy: FanOutMutePolicy::DropNewest,
+            }
+            .dispatch(&mut |target| {
+                if let PeerOutbound::Wire { slot, .. } = target {
+                    deactivated.push(slot.peer_id);
+                }
+            });
         }
 
         for slot in [&slot1, &slot2] {
@@ -533,7 +492,12 @@ mod tests {
             },
         ];
 
-        dispatch_to_targets(&targets, &msg, FanOutMutePolicy::DropNewest, &mut |_| {}).unwrap();
+        FallbackPublication {
+            targets: &targets,
+            msg: &msg,
+            policy: FanOutMutePolicy::DropNewest,
+        }
+        .dispatch(&mut |_| {});
 
         assert!(slot1.is_empty());
         assert!(slot2.is_empty());

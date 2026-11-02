@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use crate::cli::CompressionLinkArgs;
 use crate::jsonl::{self, CompressionLink, PushpullLz4Row};
@@ -303,19 +303,11 @@ impl Sweep<'_> {
         dictionary: Option<(&str, u64)>,
     ) -> PushpullLz4Row {
         let config = self.config;
-        let netem = config.link.link_mbps.map(|rate_mbps| CompressionLink {
-            rate_mbps,
-            delay_us: config.link.link_delay_us,
-            mtu: 1500,
-            shared_rate: true,
-            segmentation_offloads: false,
-            placement: "tcp-ingress-ifb".to_owned(),
-        });
-        let affinity = if std::env::var_os("OMQ_BENCH_TASKSET").is_some() {
-            "sender=1-2,receiver=3-4"
-        } else {
-            "unbound"
-        };
+        let netem = config
+            .link
+            .link_mbps
+            .map(|rate_mbps| CompressionLink::ifb(rate_mbps, config.link.link_delay_us));
+        let affinity = process::affinity_label();
 
         PushpullLz4Row {
             run_id: self.run_id.to_owned(),
@@ -427,11 +419,7 @@ pub(crate) fn run(config: &Config) {
         CHART_SIZES
     });
     assert!(sizes.iter().all(|size| *size > 0));
-    let run_id = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("benchmark timestamp")
-        .as_nanos()
-        .to_string();
+    let run_id = super::unix_nanos().to_string();
     let transports: Vec<_> = config.transports.split(',').collect();
     let compressed = format!("{}+tcp", config.feature);
     assert!(

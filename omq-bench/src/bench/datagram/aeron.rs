@@ -4,11 +4,12 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+use crate::bench::unix_nanos;
+
 use super::args::AeronArgs;
 use super::peers::{Peers, Side};
 use super::{
-    LATENCY_SIZES, THROUGHPUT_SIZES, TempDir, capture, digest, record, rounds, timestamp,
-    validate_cpus,
+    LATENCY_SIZES, THROUGHPUT_SIZES, TempDir, capture, digest, record, rounds, validate_cpus,
 };
 
 pub(crate) fn run(mut args: AeronArgs) {
@@ -31,7 +32,7 @@ pub(crate) fn run(mut args: AeronArgs) {
             let directory = TempDir::new("dart-aeron");
             let mut row = measure(&args, &directory.0, kind, size);
             row.as_object_mut().unwrap().extend(
-                json!({"timestamp_ns":timestamp(),
+                json!({"timestamp_ns":unix_nanos(),
             "kind":kind, "transport":"aeron", "msg_size":size, "cpus":args.common.cpu_csv(),
             "binary_sha256":binary_sha, "aeron_version":"1.53.3", "threading":"shared",
             "publication":"exclusive", "congestion":"static-window",

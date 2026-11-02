@@ -198,6 +198,20 @@ pub(crate) struct CompressionLink {
     pub placement: String,
 }
 
+impl CompressionLink {
+    /// Shared-rate link shaped on TCP ingress through an IFB device.
+    pub(crate) fn ifb(rate_mbps: u32, delay_us: u32) -> Self {
+        Self {
+            rate_mbps,
+            delay_us,
+            mtu: 1500,
+            shared_rate: true,
+            segmentation_offloads: false,
+            placement: "tcp-ingress-ifb".to_owned(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CompressionRow {
     pub run_id: String,

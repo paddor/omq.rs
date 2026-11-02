@@ -3,11 +3,12 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
+use crate::bench::unix_nanos;
+
 use super::args::DartArgs;
 use super::peers::{self, Peers, Side};
 use super::{
-    LATENCY_SIZES, THROUGHPUT_SIZES, count, number, provenance, record, rounds, timestamp,
-    validate_cpus,
+    LATENCY_SIZES, THROUGHPUT_SIZES, count, number, provenance, record, rounds, validate_cpus,
 };
 
 pub(crate) fn run(mut args: DartArgs) {
@@ -93,7 +94,7 @@ fn command(
         .filter(|_| role == "client")
         .map(|path| {
             let transport = endpoint.split(':').next().unwrap();
-            let path = path.join(format!("{transport}-{size}-{}.csv", timestamp()));
+            let path = path.join(format!("{transport}-{size}-{}.csv", unix_nanos()));
             command.env("OMQ_DART_RTT_SAMPLES", &path);
             path
         });
@@ -156,7 +157,7 @@ fn measure(args: &DartArgs, transport: &str, kind: &str, size: u64) -> Value {
 
     // Both sides start at one wall-clock time 200 ms out. The latency
     // server echoes until told to stop.
-    let start = timestamp() + 200_000_000;
+    let start = unix_nanos() + 200_000_000;
     peers.command(Side::Receive, start);
     peers.command(Side::Send, start);
     let sender = peers.wait_json(Side::Send, "result");
@@ -166,7 +167,7 @@ fn measure(args: &DartArgs, transport: &str, kind: &str, size: u64) -> Value {
     let receiver = peers.wait_json(Side::Receive, "result");
     peers.finish();
 
-    let mut row = json!({"timestamp_ns":timestamp(), "kind":kind, "transport":transport,
+    let mut row = json!({"timestamp_ns":unix_nanos(), "kind":kind, "transport":transport,
         "msg_size":size, "spin_us":args.spin, "io_spin_us":args.io_spin,
         "continuous_spin":args.continuous_spin, "continuous_io_spin":args.continuous_io_spin,
         "cpus":args.common.cpu_csv(), "sender":sender, "receiver":receiver,

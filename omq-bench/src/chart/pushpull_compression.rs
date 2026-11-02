@@ -11,6 +11,7 @@ use super::common::{
     postprocess_svg,
 };
 use crate::jsonl::{self, PushpullLz4Row};
+use crate::process;
 
 /// One codec's bench cache and the workload its rows must match.
 pub(crate) struct Source {
@@ -128,7 +129,7 @@ fn eligible(source: &Source, row: &PushpullLz4Row) -> bool {
             .is_some_and(|seconds| seconds.is_finite() && seconds >= 2.0)
         && matches_payload(row, PAYLOAD, source.arena_bytes)
         && row.payload_seed == Some(4242)
-        && row.cpu_affinity.as_deref() == Some("sender=1-2,receiver=3-4")
+        && row.cpu_affinity.as_deref() == Some(process::TASKSET_AFFINITY)
         && row
             .binary_sha256
             .as_ref()

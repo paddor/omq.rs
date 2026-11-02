@@ -6,6 +6,7 @@ use super::common::{
 };
 use crate::bench::pushpull_rate_limit::{BURST, CACHE, RATE, Row, SIZES, link};
 use crate::jsonl;
+use crate::process;
 
 const SERIES: &[Impl] = &[
     Impl {
@@ -27,7 +28,7 @@ fn eligible(row: &Row) -> bool {
     row.transport == "tcp"
         && row.processes == 2
         && row.io_threads == 1
-        && row.cpu_affinity == "sender=1-2,receiver=3-4"
+        && row.cpu_affinity == process::TASKSET_AFFINITY
         && row.netem == link()
         && matches!(
             (row.egress_bytes_per_second, row.burst_bytes),

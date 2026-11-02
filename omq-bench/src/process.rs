@@ -9,6 +9,18 @@ use std::time::{Duration, Instant};
 // Optional legacy affinity masks. Disabled unless OMQ_BENCH_TASKSET is set.
 pub(crate) const MEASURED_CPU: &str = "1-2";
 pub(crate) const OTHER_CPU: &str = "3-4";
+/// `cpu_affinity` recorded when `OMQ_BENCH_TASKSET` pins sender and receiver.
+pub(crate) const TASKSET_AFFINITY: &str = "sender=1-2,receiver=3-4";
+
+/// The `cpu_affinity` value for a new row: pinned or `unbound`.
+pub(crate) fn affinity_label() -> &'static str {
+    if std::env::var_os("OMQ_BENCH_TASKSET").is_some() {
+        TASKSET_AFFINITY
+    } else {
+        "unbound"
+    }
+}
+
 const MAX_PROC_LIFETIME: Duration = Duration::from_mins(1);
 
 static LIVE_PROCS: OnceLock<Mutex<HashMap<u32, Instant>>> = OnceLock::new();

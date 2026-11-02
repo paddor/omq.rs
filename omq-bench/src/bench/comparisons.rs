@@ -1,3 +1,5 @@
+use super::make_run_id;
+use crate::chart::fmt_size;
 use crate::cli::ComparisonsArgs;
 use crate::jsonl::{self, ComparisonRow};
 use crate::process;
@@ -96,36 +98,6 @@ fn addr_for(
             format!("bench-cmp-{prefix}-{uid}")
         }
     }
-}
-
-// ---- Size formatting ------------------------------------------------------
-
-pub(crate) fn size_label(n: u64) -> String {
-    if n >= 1_048_576 {
-        format!("{} MiB", n / 1_048_576)
-    } else if n >= 1024 {
-        format!("{} KiB", n / 1024)
-    } else {
-        format!("{n} B")
-    }
-}
-
-// ---- Run ID ---------------------------------------------------------------
-
-fn make_run_id(name: Option<&str>) -> String {
-    let ts = chrono_like_utc_now();
-    match name {
-        Some(n) => format!("{ts}-{n}"),
-        None => ts,
-    }
-}
-
-fn chrono_like_utc_now() -> String {
-    let output = std::process::Command::new("date")
-        .args(["-u", "+%Y%m%dT%H%M%SZ"])
-        .output()
-        .expect("failed to run date");
-    String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
 // ---- Cell functions -------------------------------------------------------
@@ -431,7 +403,7 @@ impl ComparisonRun<'_> {
                     fmt_rate(result.msgs_s)
                 });
             }
-            print_table_row(&size_label(size), &cells, 14);
+            print_table_row(&fmt_size(size), &cells, 14);
         }
     }
 
@@ -474,7 +446,7 @@ impl ComparisonRun<'_> {
                         self.record_latency(&cell, &workload, &result);
                         cells.push(format!("{:.1}", result.p99_us));
                     }
-                    print_table_row(&size_label(size), &cells, 14);
+                    print_table_row(&fmt_size(size), &cells, 14);
                 }
             }
         }
@@ -550,7 +522,7 @@ impl ComparisonRun<'_> {
                         format!("{:.0}", result.msgs_s / 1000.0)
                     });
                 }
-                print_table_row(&size_label(size), &cells, if curve { 14 } else { 8 });
+                print_table_row(&fmt_size(size), &cells, if curve { 14 } else { 8 });
             }
         }
     }
@@ -603,7 +575,7 @@ impl ComparisonRun<'_> {
                         format!("{:.0}", result.msgs_s / 1000.0)
                     });
                 }
-                print_table_row(&size_label(size), &cells, 8);
+                print_table_row(&fmt_size(size), &cells, 8);
             }
         }
     }

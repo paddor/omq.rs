@@ -223,16 +223,6 @@ impl FrameBuffer {
         &self.arena[self.arena_mark as usize..]
     }
 
-    /// Copy and clear arena-only output; requires no queued entries.
-    pub fn take_arena_bytes(&mut self) -> Bytes {
-        copy_stats::record(Site::ArenaDrain, self.arena.len());
-        let frozen = Bytes::copy_from_slice(&self.arena);
-        self.arena.clear();
-        self.arena_mark = 0;
-        self.total_bytes = 0;
-        frozen
-    }
-
     /// Append already framed bytes to the arena.
     pub fn push_pre_framed(&mut self, data: &[u8]) {
         self.reserve_arena(data.len());
@@ -363,7 +353,7 @@ impl FrameBuffer {
     }
 
     /// Encode each part with a payload prefix contiguously into the arena.
-    pub fn frame_prefixed_inline(&mut self, prefix: &Bytes, msg: &Message) {
+    fn frame_prefixed_inline(&mut self, prefix: &Bytes, msg: &Message) {
         self.reserve_arena(msg.byte_len() + prefix.len() * msg.len() + msg.len() * 9);
         let before = self.arena.len();
         frame::encode_message_prefixed_flat(prefix, msg, &mut self.arena);
@@ -381,39 +371,6 @@ impl FrameBuffer {
         }
     }
 
-    /// Frame a REP reply without first materializing its routing envelope as
-    /// a `Message`. The peer identity is local routing metadata; the wire
-    /// shape is `[empty delimiter, body...]`.
-    pub fn frame_rep(&mut self, _identity: &Bytes, msg: &Message) {
-        self.frame_rep_gather(msg);
-    }
-
-    fn frame_rep_gather(&mut self, msg: &Message) {
-        self.reserve_arena((msg.len() + 1) * 9);
-        let before = self.arena.len();
-        frame::write_frame_header(&mut self.arena, !msg.is_empty(), 0);
-        self.total_bytes += self.arena.len() - before;
-        if msg.is_empty() {
-            return;
-        }
-        let parts = msg.parts_payload();
-        for (i, part) in parts.iter().enumerate() {
-            let before = self.arena.len();
-            frame::write_frame_header(&mut self.arena, i + 1 < parts.len(), part.len());
-            self.total_bytes += self.arena.len() - before;
-            self.commit_arena_range();
-            let bytes = part.as_bytes();
-            if !bytes.is_empty() {
-                self.total_bytes += bytes.len();
-                self.entries.push_back(Entry::External {
-                    bytes,
-                    protected: false,
-                    continues: false,
-                });
-            }
-        }
-    }
-
     /// Encode prefixed parts using the configured arena threshold.
     pub fn frame_prefixed(&mut self, prefix: &Bytes, msg: &Message) {
         if msg.byte_len() + prefix.len() * msg.len() < self.arena_threshold {
@@ -424,7 +381,7 @@ impl FrameBuffer {
     }
 
     /// Encode prefixed headers and retain prefixes and payloads as shared entries.
-    pub fn frame_prefixed_gather(&mut self, prefix: &Bytes, msg: &Message) {
+    fn frame_prefixed_gather(&mut self, prefix: &Bytes, msg: &Message) {
         let parts = msg.parts_payload();
         let n = parts.len();
         self.reserve_arena(n * 9);

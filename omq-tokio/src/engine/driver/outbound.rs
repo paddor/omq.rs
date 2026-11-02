@@ -131,25 +131,14 @@ impl OutboundState {
         let started = Instant::now();
         // With offload on, small messages also enter the ordered pipeline as
         // ready results, so they cannot overtake a large offload on the wire.
-        let use_pipeline = self.offload_threshold > 0
-            && self
-                .encoder
-                .as_ref()
-                .is_some_and(MessageEncoder::can_offload)
-            && self.compression_pool.is_some();
+        let use_pipeline = self.offload_enabled();
         let mut held = None;
         let mut encode = |message: &Message, held: &mut Option<Message>| -> Result<()> {
             if use_pipeline {
                 self.pipeline_message(message.clone(), held);
                 Ok(())
             } else {
-                encode_msg(
-                    message,
-                    &mut self.encoder,
-                    connection,
-                    eq,
-                    self.passthrough.as_ref(),
-                )
+                self.encode(message, connection, eq)
             }
         };
 
@@ -255,13 +244,7 @@ impl OutboundState {
         connection: &Connection,
         eq: &mut FrameBuffer,
     ) -> Result<()> {
-        if self.offload_threshold > 0
-            && self.compression_pool.is_some()
-            && self
-                .encoder
-                .as_ref()
-                .is_some_and(MessageEncoder::can_offload)
-        {
+        if self.offload_enabled() {
             self.pipeline_message(message, held);
             return Ok(());
         }
@@ -278,26 +261,106 @@ impl OutboundState {
         if message.byte_len() >= self.offload_threshold {
             *held = Some(message);
         } else {
-            submit_to_pipeline(
-                &message,
-                self.encoder.as_mut().unwrap(),
-                self.compression_pool.as_ref().unwrap(),
-                self.offload_threshold,
-                &mut self.offload_pipeline,
-            );
+            self.submit(&message);
         }
     }
 
     fn offload_held(&mut self, held: &mut Option<Message>) {
         if let Some(message) = held.take() {
-            submit_to_pipeline(
-                &message,
-                self.encoder.as_mut().unwrap(),
-                self.compression_pool.as_ref().unwrap(),
-                self.offload_threshold,
-                &mut self.offload_pipeline,
-            );
+            self.submit(&message);
         }
+    }
+
+    /// Whether ordered compression offloads are on.
+    fn offload_enabled(&self) -> bool {
+        self.offload_threshold > 0
+            && self.compression_pool.is_some()
+            && self
+                .encoder
+                .as_ref()
+                .is_some_and(MessageEncoder::can_offload)
+    }
+
+    /// Submit one message to the offload pipeline. Messages of at least
+    /// `offload_threshold` bytes go to `spawn_blocking` with a pool encoder;
+    /// small messages and pool-exhausted fallbacks encode on the driver.
+    fn submit(&mut self, msg: &Message) {
+        let encoder = self.encoder.as_mut().unwrap();
+        #[cfg(any(feature = "lz4", feature = "zstd"))]
+        if msg.byte_len() >= self.offload_threshold
+            && let Some(mut loan) = self.compression_pool.as_ref().unwrap().try_take(encoder)
+        {
+            let msg = msg.clone();
+            let handle = tokio::task::spawn_blocking(move || {
+                let result = loan.encoder.encode(&msg);
+                (Some(loan), result)
+            });
+            self.offload_pipeline.push_back(Box::pin(async move {
+                match handle.await {
+                    Ok(pair) => pair,
+                    Err(_) => (
+                        None,
+                        Err(Error::Protocol("compression offload task panicked".into())),
+                    ),
+                }
+            }));
+            return;
+        }
+        let result = encoder.encode(msg);
+        self.offload_pipeline
+            .push_back(Box::pin(futures::future::ready((None, result))));
+    }
+
+    /// Encode one message into `FrameBuffer`. When a compression encoder
+    /// is active, the message is transformed first; the resulting wire
+    /// message(s) are then framed into EQ. When no encoder is present the
+    /// message is framed directly. Sub-threshold messages on compression
+    /// transports take a sentinel-prefix fast path that avoids the encoder
+    /// entirely.
+    ///
+    /// The only path that still goes through `connection.send_message` is
+    /// when a frame-level transform (CURVE) is active, since those encrypt
+    /// at the ZMTP frame layer and need the connection's internal state.
+    pub(super) fn encode(
+        &mut self,
+        msg: &Message,
+        connection: &mut Connection,
+        eq: &mut FrameBuffer,
+    ) -> Result<()> {
+        #[cfg(feature = "ws")]
+        if connection.is_ws() && !connection.has_frame_transform() {
+            let masked = ws_masked(connection);
+            if let Some(enc) = self.encoder.as_mut() {
+                for wire in enc.encode(msg)? {
+                    eq.frame_ws(&wire, masked);
+                }
+            } else {
+                eq.frame_ws(msg, masked);
+            }
+            return Ok(());
+        }
+        if connection.has_frame_transform() {
+            if let Some(enc) = self.encoder.as_mut() {
+                for wire in enc.encode(msg)? {
+                    connection.send_message(&wire)?;
+                }
+            } else {
+                connection.send_message(msg)?;
+            }
+            return Ok(());
+        }
+        if let Some((sentinel, threshold)) = &self.passthrough
+            && msg.iter().all(|b| b.len() < *threshold)
+        {
+            eq.frame_prefixed(sentinel, msg);
+        } else if let Some(enc) = self.encoder.as_mut() {
+            for wire in enc.encode(msg)? {
+                eq.frame(&wire);
+            }
+        } else {
+            eq.frame(msg);
+        }
+        Ok(())
     }
 
     /// Compress the batch's last large message on this thread. Offloading
@@ -326,13 +389,7 @@ impl OutboundState {
             return Ok(());
         }
         if messages.len() == 1 && self.offload_pipeline.is_empty() {
-            return encode_msg(
-                &messages[0],
-                &mut self.encoder,
-                connection,
-                eq,
-                self.passthrough.as_ref(),
-            );
+            return self.encode(&messages[0], connection, eq);
         }
         let encoder = self.encoder.as_mut().unwrap();
         let wire = if messages.len() == 1 {
@@ -489,41 +546,6 @@ pub(super) type OffloadPipeline = FuturesOrdered<
     >,
 >;
 
-/// Submit one message to the offload pipeline. Large messages (above
-/// `threshold`) get `spawn_blocking` via a pool encoder; small messages
-/// and pool-exhausted fallbacks are encoded inline on the driver thread.
-#[allow(unused_variables)]
-pub(super) fn submit_to_pipeline(
-    msg: &Message,
-    encoder: &mut MessageEncoder,
-    pool: &Arc<CompressionPool>,
-    threshold: usize,
-    pipeline: &mut OffloadPipeline,
-) {
-    #[cfg(any(feature = "lz4", feature = "zstd"))]
-    if msg.byte_len() >= threshold
-        && let Some(mut loan) = pool.try_take(encoder)
-    {
-        let msg = msg.clone();
-        let handle = tokio::task::spawn_blocking(move || {
-            let result = loan.encoder.encode(&msg);
-            (Some(loan), result)
-        });
-        pipeline.push_back(Box::pin(async move {
-            match handle.await {
-                Ok(pair) => pair,
-                Err(_) => (
-                    None,
-                    Err(Error::Protocol("compression offload task panicked".into())),
-                ),
-            }
-        }));
-        return;
-    }
-    let result = encoder.encode(msg);
-    pipeline.push_back(Box::pin(futures::future::ready((None, result))));
-}
-
 #[allow(unused_variables)]
 pub(super) fn drain_offload_result(
     loan: Option<EncoderLoan>,
@@ -535,12 +557,7 @@ pub(super) fn drain_offload_result(
         loan.restore();
     }
     #[cfg(feature = "ws")]
-    let ws = connection.is_ws().then(|| {
-        matches!(
-            connection.ws_role(),
-            Some(omq_proto::proto::connection::WsRole::Client)
-        )
-    });
+    let ws = connection.is_ws().then(|| ws_masked(connection));
     for wire in frames? {
         #[cfg(feature = "ws")]
         if let Some(masked) = ws {
@@ -552,60 +569,13 @@ pub(super) fn drain_offload_result(
     Ok(())
 }
 
-/// Encode one message into `FrameBuffer`. When a compression encoder
-/// is active, the message is transformed first; the resulting wire
-/// message(s) are then framed into EQ. When no encoder is present the
-/// message is framed directly. Sub-threshold messages on compression
-/// transports take a sentinel-prefix fast path that avoids the encoder
-/// entirely.
-///
-/// The only path that still goes through `connection.send_message` is when a
-/// frame-level transform (CURVE) is active, since those
-/// encrypt at the ZMTP frame layer and need the connection's internal state.
-pub(super) fn encode_msg(
-    msg: &Message,
-    encoder: &mut Option<MessageEncoder>,
-    connection: &mut Connection,
-    eq: &mut FrameBuffer,
-    passthrough: Option<&(Bytes, usize)>,
-) -> Result<()> {
-    #[cfg(feature = "ws")]
-    if connection.is_ws() && !connection.has_frame_transform() {
-        let masked = matches!(
-            connection.ws_role(),
-            Some(omq_proto::proto::connection::WsRole::Client)
-        );
-        if let Some(enc) = encoder.as_mut() {
-            for wire in enc.encode(msg)? {
-                eq.frame_ws(&wire, masked);
-            }
-        } else {
-            eq.frame_ws(msg, masked);
-        }
-        return Ok(());
-    }
-    if connection.has_frame_transform() {
-        if let Some(enc) = encoder.as_mut() {
-            for wire in enc.encode(msg)? {
-                connection.send_message(&wire)?;
-            }
-        } else {
-            connection.send_message(msg)?;
-        }
-        return Ok(());
-    }
-    if let Some((sentinel, threshold)) = passthrough
-        && msg.iter().all(|b| b.len() < *threshold)
-    {
-        eq.frame_prefixed(sentinel, msg);
-    } else if let Some(enc) = encoder.as_mut() {
-        for wire in enc.encode(msg)? {
-            eq.frame(&wire);
-        }
-    } else {
-        eq.frame(msg);
-    }
-    Ok(())
+/// WebSocket clients mask the frames they send.
+#[cfg(feature = "ws")]
+fn ws_masked(connection: &Connection) -> bool {
+    matches!(
+        connection.ws_role(),
+        Some(omq_proto::proto::connection::WsRole::Client)
+    )
 }
 
 #[cfg(all(test, feature = "zstd"))]

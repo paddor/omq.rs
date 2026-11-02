@@ -14,8 +14,10 @@ fn peer_info_debug_redacts_plain_password() {
     assert!(!debug.contains("password-sentinel"));
 }
 
+use super::null::NullState;
 use super::*;
 use crate::proto::SocketType;
+use bytes::Bytes;
 
 #[test]
 fn null_authentication_properties_override_peer_claims() {

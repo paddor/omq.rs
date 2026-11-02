@@ -283,109 +283,19 @@ pub(super) async fn write_driver_progress<W: DriverWrite>(
 /// a TLS writer may still hold the end of the handshake.
 pub(super) async fn write_handshake_progress<W>(
     writer: &mut W,
-    eq: &mut FrameBuffer,
-    drain_buf: &mut Vec<Bytes>,
     connection: &mut Connection,
     unflushed: &mut bool,
 ) -> io::Result<usize>
 where
     W: AsyncWrite + Unpin,
 {
-    if eq.is_empty() && !connection.has_pending_transmit() {
+    if !connection.has_pending_transmit() {
         writer.flush().await?;
         *unflushed = false;
         return Ok(0);
     }
     *unflushed = true;
-    flush_frame_buffer(writer, eq, drain_buf).await?;
     flush_once(writer, connection).await
-}
-
-/// Flush the `FrameBuffer` to the writer. Drains chunks into a
-/// reusable `Vec<Bytes>`, builds `IoSlice` refs, and does one
-/// `write_vectored`. On partial write, unwritten chunks are restored
-/// to the queue front.
-pub(crate) async fn flush_frame_buffer<W>(
-    writer: &mut W,
-    eq: &mut FrameBuffer,
-    drain_buf: &mut Vec<Bytes>,
-) -> io::Result<()>
-where
-    W: AsyncWrite + Unpin,
-{
-    if eq.has_arena_only() {
-        loop {
-            let len = eq.arena_bytes().len();
-            if len == 0 {
-                return Ok(());
-            }
-            let n = {
-                let data = eq.arena_bytes();
-                writer.write_vectored(&[io::IoSlice::new(data)]).await?
-            };
-            if n == 0 {
-                return Err(io::Error::new(io::ErrorKind::WriteZero, "write returned 0"));
-            }
-            eq.advance_arena(n);
-        }
-    }
-
-    loop {
-        drain_buf.clear();
-        eq.drain(drain_buf, 1024);
-        if drain_buf.is_empty() {
-            return Ok(());
-        }
-        let total: usize = drain_buf.iter().map(Bytes::len).sum();
-        let iovecs: SmallVec<[io::IoSlice<'_>; 64]> =
-            drain_buf.iter().map(|b| io::IoSlice::new(b)).collect();
-        let n = writer.write_vectored(&iovecs).await?;
-        drop(iovecs);
-        if n == 0 {
-            return Err(io::Error::new(io::ErrorKind::WriteZero, "write returned 0"));
-        }
-        if n < total {
-            let drained = std::mem::take(drain_buf);
-            eq.put_back_unwritten(drained, n);
-        }
-    }
-}
-
-#[cfg(test)]
-pub(super) async fn write_chunks<W>(writer: &mut W, chunks: &mut Vec<Bytes>) -> io::Result<()>
-where
-    W: AsyncWrite + Unpin,
-{
-    let mut remaining: usize = chunks.iter().map(Bytes::len).sum();
-    while remaining > 0 {
-        let iovecs: SmallVec<[io::IoSlice<'_>; 64]> =
-            chunks.iter().map(|b| io::IoSlice::new(b)).collect();
-        let n = writer.write_vectored(&iovecs).await?;
-        drop(iovecs);
-        if n == 0 {
-            return Err(io::Error::new(io::ErrorKind::WriteZero, "write returned 0"));
-        }
-        remaining -= n;
-        if remaining == 0 {
-            chunks.clear();
-        } else {
-            let mut skip = n;
-            let mut first_kept = 0;
-            for (i, chunk) in chunks.iter().enumerate() {
-                if skip >= chunk.len() {
-                    skip -= chunk.len();
-                    first_kept = i + 1;
-                } else {
-                    break;
-                }
-            }
-            chunks.drain(..first_kept);
-            if skip > 0 && !chunks.is_empty() {
-                chunks[0] = chunks[0].slice(skip..);
-            }
-        }
-    }
-    Ok(())
 }
 
 /// One write attempt. Uses `write_vectored` so multi-chunk frame

@@ -234,6 +234,8 @@ impl DriverWrite for StalledShutdownWriter {}
 impl DriverWrite for GreetingOnlyWriter {}
 impl<W: AsyncWrite + Send + Unpin + 'static> DriverWrite for ChoppyWriter<W> {}
 impl DriverWrite for tokio::io::BufWriter<tokio::io::WriteHalf<DuplexStream>> {}
+impl DriverWrite for PartialVectoredWriter {}
+impl DriverWrite for ScriptedVectoredWriter {}
 
 #[derive(Debug)]
 struct ChoppyWriter<W> {
@@ -854,8 +856,8 @@ fn mixed_frames(eq: &mut FrameBuffer) -> (Vec<u8>, Vec<usize>) {
     (expected, large_starts)
 }
 
-async fn write_owned_until_idle(
-    writer: &mut OwnedChunkWriter,
+async fn write_until_idle<W: DriverWrite>(
+    writer: &mut W,
     eq: &mut FrameBuffer,
     pending: &mut PendingWrite,
     connection: &mut Connection,
@@ -866,6 +868,13 @@ async fn write_owned_until_idle(
             .await
             .unwrap();
     }
+}
+
+/// Write `eq` through the driver write path, without codec output.
+async fn write_frames<W: DriverWrite>(writer: &mut W, eq: &mut FrameBuffer) {
+    let mut connection = Connection::new(ConnectionConfig::new(Role::Client, SocketType::Push));
+    let _ = drain_transmit(&mut connection);
+    write_until_idle(writer, eq, &mut PendingWrite::default(), &mut connection).await;
 }
 
 type DriverTask = tokio::task::JoinHandle<Result<()>>;

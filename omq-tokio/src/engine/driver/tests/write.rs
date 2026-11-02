@@ -2,17 +2,13 @@ use super::*;
 use crate::engine::transmit_slot::SlotConfig;
 
 #[tokio::test]
-async fn flush_frame_buffer_preserves_large_payload_after_partial_write() {
+async fn driver_write_preserves_large_payload_after_partial_write() {
     const MSG_SIZE: usize = 1024 * 1024;
     let payload = (0..MSG_SIZE).map(|i| (i & 0xFF) as u8).collect::<Vec<_>>();
     let mut eq = FrameBuffer::one_shot();
     eq.frame(&Message::single(Bytes::from(payload.clone())));
-
-    let mut drain_buf = Vec::new();
     let mut writer = PartialVectoredWriter::new(9 + 632_554, 65_537);
-    flush_frame_buffer(&mut writer, &mut eq, &mut drain_buf)
-        .await
-        .unwrap();
+    write_frames(&mut writer, &mut eq).await;
 
     assert!(eq.is_empty());
     assert_eq!(writer.out.len(), 9 + MSG_SIZE);
@@ -78,7 +74,7 @@ async fn selected_write_cancellation_preserves_external_chunks() {
 }
 
 #[tokio::test]
-async fn flush_frame_buffer_preserves_large_payloads_after_partial_write_matrix() {
+async fn driver_write_preserves_large_payloads_after_partial_write_matrix() {
     const MSG_SIZE: usize = 1024 * 1024;
     const CAPS: &[(usize, usize)] = &[
         (1, 16_384),
@@ -106,12 +102,8 @@ async fn flush_frame_buffer_preserves_large_payloads_after_partial_write_matrix(
         for payload in &payloads {
             eq.frame(&Message::single(Bytes::copy_from_slice(payload)));
         }
-
-        let mut drain_buf = Vec::new();
         let mut writer = PartialVectoredWriter::new(first_cap, next_cap);
-        flush_frame_buffer(&mut writer, &mut eq, &mut drain_buf)
-            .await
-            .unwrap();
+        write_frames(&mut writer, &mut eq).await;
 
         assert!(eq.is_empty());
         assert_eq!(
@@ -122,7 +114,7 @@ async fn flush_frame_buffer_preserves_large_payloads_after_partial_write_matrix(
 }
 
 #[tokio::test]
-async fn flush_frame_buffer_preserves_large_payloads_after_scripted_partial_writes() {
+async fn driver_write_preserves_large_payloads_after_scripted_partial_writes() {
     const MSG_SIZE: usize = 1024 * 1024;
     let payloads = (0..4)
         .map(|seq| patterned_payload(MSG_SIZE, seq))
@@ -154,18 +146,15 @@ async fn flush_frame_buffer_preserves_large_payloads_after_scripted_partial_writ
         131_071,
         262_147,
     ];
-    let mut drain_buf = Vec::new();
     let mut writer = ScriptedVectoredWriter::new(caps, 17_003);
-    flush_frame_buffer(&mut writer, &mut eq, &mut drain_buf)
-        .await
-        .unwrap();
+    write_frames(&mut writer, &mut eq).await;
 
     assert!(eq.is_empty());
     assert_eq!(writer.out, expected);
 }
 
 #[tokio::test]
-async fn flush_frame_buffer_matches_reference_under_random_partial_writes() {
+async fn driver_write_matches_reference_under_random_partial_writes() {
     const LENGTHS: &[usize] = &[
         16,
         62,
@@ -210,12 +199,8 @@ async fn flush_frame_buffer_matches_reference_under_random_partial_writes() {
                 _ => (next_random(&mut seed) % 262_147) + 1,
             })
             .collect::<Vec<_>>();
-
-        let mut drain_buf = Vec::new();
         let mut writer = ScriptedVectoredWriter::new(caps, 37_111);
-        flush_frame_buffer(&mut writer, &mut eq, &mut drain_buf)
-            .await
-            .unwrap();
+        write_frames(&mut writer, &mut eq).await;
 
         assert!(eq.is_empty(), "case={case}");
         assert_eq!(writer.out, expected, "case={case}");
@@ -230,7 +215,6 @@ async fn reused_lazy_frame_buffer_matches_reference_under_partial_writes() {
         omq_proto::frame_buffer::ARENA_THRESHOLD,
         omq_proto::frame_buffer::ARENA_INITIAL_CAP,
     );
-    let mut drain_buf = Vec::new();
     let mut writer = ScriptedVectoredWriter::new(caps, 23_011);
     let mut expected = Vec::new();
 
@@ -239,48 +223,10 @@ async fn reused_lazy_frame_buffer_matches_reference_under_partial_writes() {
         let payload = patterned_payload(len, seq);
         push_expected_single_frame(&mut expected, &payload);
         eq.frame(&Message::single(Bytes::from(payload)));
-        flush_frame_buffer(&mut writer, &mut eq, &mut drain_buf)
-            .await
-            .unwrap();
+        write_frames(&mut writer, &mut eq).await;
         assert!(eq.is_empty(), "seq={seq}");
     }
 
-    assert_eq!(writer.out, expected);
-}
-
-#[tokio::test]
-async fn write_chunks_preserves_large_payloads_after_scripted_partial_writes() {
-    const MSG_SIZE: usize = 1024 * 1024;
-    let payloads = (0..3)
-        .map(|seq| patterned_payload(MSG_SIZE, seq))
-        .collect::<Vec<_>>();
-    let mut expected = Vec::new();
-    let mut chunks = Vec::new();
-    for payload in &payloads {
-        let mut header = Vec::with_capacity(9);
-        header.push(0x02);
-        header.extend_from_slice(&(MSG_SIZE as u64).to_be_bytes());
-        expected.extend_from_slice(&header);
-        expected.extend_from_slice(payload);
-        chunks.push(Bytes::from(header));
-        chunks.push(Bytes::copy_from_slice(payload));
-    }
-
-    let caps = [
-        1,
-        8,
-        9,
-        17,
-        4_097,
-        9 + 632_558,
-        65_537,
-        262_147,
-        9 + MSG_SIZE - 4,
-    ];
-    let mut writer = ScriptedVectoredWriter::new(caps, 23_011);
-    write_chunks(&mut writer, &mut chunks).await.unwrap();
-
-    assert_eq!(chunks, [] as [Bytes; 0]);
     assert_eq!(writer.out, expected);
 }
 
@@ -293,7 +239,7 @@ async fn owned_chunk_writer_receives_payloads_without_copies() {
     let mut pending = PendingWrite::default();
     let mut writer = OwnedChunkWriter::new([], usize::MAX);
 
-    write_owned_until_idle(&mut writer, &mut eq, &mut pending, &mut connection).await;
+    write_until_idle(&mut writer, &mut eq, &mut pending, &mut connection).await;
 
     assert_eq!(writer.out, expected);
     for start in large_starts {
@@ -346,7 +292,7 @@ async fn owned_chunk_writer_receives_few_chunks_for_mid_size_frames() {
     let mut pending = PendingWrite::default();
     let mut writer = OwnedChunkWriter::new([], usize::MAX);
 
-    write_owned_until_idle(&mut writer, &mut eq, &mut pending, &mut connection).await;
+    write_until_idle(&mut writer, &mut eq, &mut pending, &mut connection).await;
 
     assert_eq!(writer.out, expected);
     // 64 headers and 64 payloads, about 257 KiB, in runs of 64 KiB.
@@ -401,7 +347,7 @@ async fn owned_chunk_writer_preserves_bytes_under_partial_writes() {
         let mut pending = PendingWrite::default();
         let mut writer = OwnedChunkWriter::new([], cap);
 
-        write_owned_until_idle(&mut writer, &mut eq, &mut pending, &mut connection).await;
+        write_until_idle(&mut writer, &mut eq, &mut pending, &mut connection).await;
 
         assert_eq!(writer.out, expected, "cap {cap}");
     }
@@ -436,6 +382,6 @@ async fn owned_chunk_write_cancellation_keeps_staged_chunks() {
 
     writer.caps.pop_front();
 
-    write_owned_until_idle(&mut writer, &mut eq, &mut pending, &mut connection).await;
+    write_until_idle(&mut writer, &mut eq, &mut pending, &mut connection).await;
     assert_eq!(writer.out, expected);
 }

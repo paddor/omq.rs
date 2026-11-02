@@ -27,7 +27,6 @@ use crate::engine::{
     transmit_slot::PeerTransmitSlot,
 };
 use crate::network_limit::{PacedRead, PacedWrite};
-use bytes::Bytes;
 use omq_proto::{
     DisconnectReason, Message, PayloadPool,
     error::{Error, Result},
@@ -152,7 +151,6 @@ struct Session<'c> {
     handshake_deadline: Option<Instant>,
     heartbeat: Heartbeat,
     _slot_lifetime: TransmitSlotLifetime,
-    drain_buf: Vec<Bytes>,
     output: QueuedOutput,
     read: StreamRead,
     latency_profile: bool,
@@ -334,7 +332,6 @@ where
             handshake_deadline,
             heartbeat,
             _slot_lifetime: TransmitSlotLifetime(self.transmit_slot.clone()),
-            drain_buf: Vec::new(),
             output,
             read: StreamRead::new(receive.profile),
             latency_profile,
@@ -390,13 +387,13 @@ impl Session<'_> {
             config: &self.config,
             last_input: &mut self.heartbeat.last_input,
             pending_input_error: &mut self.pending_input_error,
-            eq: &mut self.output.frames,
-            drain_buf: &mut self.drain_buf,
             unflushed: &mut self.output.pending.unflushed,
         }
     }
 
     fn start_data_plane(&mut self) {
+        // Setup writes only codec output; data framing starts here.
+        debug_assert!(self.output.frames.is_empty());
         enable_transmit_slot_after_handshake(self.transmit_slot.as_deref(), &self.connection);
         self.heartbeat.activate(&self.connection);
     }

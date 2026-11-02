@@ -15,12 +15,10 @@ use crate::engine::{
     peer_events::{EventRoute, PeerEventDispatch},
     transmit_slot::PeerTransmitSlot,
 };
-use bytes::Bytes;
 use omq_proto::{
     AuthenticationResult, AuthenticationStatus,
     error::{Error, Result},
     flow::DrainBudget,
-    frame_buffer::FrameBuffer,
     proto::Connection,
 };
 use std::{future::Future, io, pin::Pin, sync::atomic::Ordering, time::Instant};
@@ -79,8 +77,6 @@ pub(super) struct Activation<'a, 'events> {
     pub(super) config: &'a PeerDriverConfig,
     pub(super) last_input: &'a mut Instant,
     pub(super) pending_input_error: &'a mut Option<Error>,
-    pub(super) eq: &'a mut FrameBuffer,
-    pub(super) drain_buf: &'a mut Vec<Bytes>,
     pub(super) unflushed: &'a mut bool,
 }
 
@@ -110,8 +106,7 @@ impl<'events> Activation<'_, 'events> {
             }
             self.start_authentication(&mut authentication);
 
-            let want_write =
-                self.connection.has_pending_transmit() || !self.eq.is_empty() || *self.unflushed;
+            let want_write = self.connection.has_pending_transmit() || *self.unflushed;
             let resume_input = self.pending_input_error.is_none()
                 && !self.connection.input_blocked_on_output()
                 && self.connection.has_pending_input();
@@ -152,7 +147,7 @@ impl<'events> Activation<'_, 'events> {
 
                 res = reader.read_buf(&mut self.read.buffer), if want_read => self.on_read(res),
 
-                res = write_handshake_progress(writer, self.eq, self.drain_buf, self.connection, self.unflushed),
+                res = write_handshake_progress(writer, self.connection, self.unflushed),
                     if want_write => self.on_flushed(res),
 
                 () = tokio::task::yield_now(), if !self.peer_events.has_pending() && (self.peer_events.needs_drain() || resume_input) => {
@@ -317,7 +312,6 @@ impl<'events> Activation<'_, 'events> {
         if self.pending_input_error.is_some()
             && !self.peer_events.blocked()
             && !self.connection.has_pending_transmit()
-            && self.eq.is_empty()
         {
             return Err(self.pending_input_error.take().unwrap());
         }

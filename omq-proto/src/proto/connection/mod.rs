@@ -393,7 +393,14 @@ impl Connection {
     /// mechanism commands as ZWS frames.
     #[cfg(feature = "ws")]
     fn init_ws_mode(&mut self) {
-        use super::command::PeerProperties;
+        if self.start_mechanism().is_err() {
+            self.state = State::Closed;
+        }
+    }
+
+    /// Enter the mechanism handshake and queue its opening commands. Commands
+    /// produced before a start error are still queued.
+    fn start_mechanism(&mut self) -> Result<()> {
         self.state = State::MechanismHandshake;
         let mut our_props = PeerProperties::default().with_socket_type(self.config.socket_type);
         if !self.config.identity.is_empty() {
@@ -401,9 +408,8 @@ impl Connection {
         }
         let mut cmds = Vec::new();
         let result = self.mechanism.start(&mut cmds, our_props);
-        if self.write_outbound_commands(&cmds).is_err() || result.is_err() {
-            self.state = State::Closed;
-        }
+        self.write_outbound_commands(&cmds)?;
+        result
     }
 
     fn queue_greeting(&mut self) {

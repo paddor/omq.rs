@@ -7,7 +7,7 @@ use crate::error::{Error, Result};
 use crate::flow::DrainBudget;
 use crate::message::{FrameFlags, Message, Payload};
 
-use super::super::command::{self, Command, PeerProperties};
+use super::super::command::{self, Command};
 use super::super::greeting::{self, MechanismName, effective_minor};
 use super::super::mechanism::{AuthenticationRequest, AuthenticationResult, MechanismStep};
 use super::super::{frame, is_compatible};
@@ -176,16 +176,7 @@ impl Connection {
         } else {
             effective_minor(g.minor)
         };
-        self.state = State::MechanismHandshake;
-
-        let mut our_props = PeerProperties::default().with_socket_type(self.config.socket_type);
-        if !self.config.identity.is_empty() {
-            our_props = our_props.with_identity(self.config.identity.clone());
-        }
-        let mut cmds = Vec::new();
-        let result = self.mechanism.start(&mut cmds, our_props);
-        self.write_outbound_commands(&cmds)?;
-        result?;
+        self.start_mechanism()?;
         Ok(true)
     }
 

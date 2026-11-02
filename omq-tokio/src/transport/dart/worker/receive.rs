@@ -1,7 +1,7 @@
 //! DART packet validation and receive delivery.
 
 use std::io;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use bytes::Bytes;
 use omq_proto::dart::{self, Admission, Ecn, PackedMessages, Packet, Receipt};
@@ -58,9 +58,7 @@ struct PackedUnits<'a> {
 
 impl EndpointWorker {
     pub(super) fn drain(&self, task: &mut TaskState, now: Instant, stats: &mut DartStats) -> usize {
-        let polling = self.latency
-            && !self.spin.is_zero()
-            && (self.spin == Duration::MAX || now < task.spin_until);
+        let polling = self.latency && self.spinning(now, task.spin_until);
 
         let TaskState {
             batch,
@@ -195,7 +193,12 @@ impl EndpointWorker {
         else {
             return;
         };
-        if peer.expires <= now || peer.io.as_ref().is_some_and(|io| io.cancel.is_cancelled()) {
+        if peer.lease.expires <= now
+            || peer
+                .io
+                .as_ref()
+                .is_some_and(|io| io.queues.cancel.is_cancelled())
+        {
             return;
         }
         let Some(session) = &peer.session else {
@@ -206,7 +209,7 @@ impl EndpointWorker {
         // Ingress charged one MAX_DATAGRAM per admitted unit up front;
         // settle that against the datagram's real size.
         if self.receive_packet(peer, decoded, arrival, stats)
-            && let Some(ingress) = &mut peer.ingress
+            && let Some(ingress) = &mut peer.pacing.ingress
         {
             let accepted = peer.session.as_ref().unwrap().received_units() - before;
             ingress.reconcile(
@@ -312,11 +315,11 @@ impl EndpointWorker {
     ) {
         let session = peer.session.as_mut().expect("admitted receive session");
         match session.classify(unit.session, unit.sequence) {
-            Admission::Duplicate => peer.expires = arrival.timestamp.at + LEASE,
+            Admission::Duplicate => peer.lease.expires = arrival.timestamp.at + LEASE,
             Admission::OutsideWindow => {}
             Admission::Accept => {
                 if self.accept_data(peer, unit, arrival, stats) {
-                    peer.expires = arrival.timestamp.at + LEASE;
+                    peer.lease.expires = arrival.timestamp.at + LEASE;
                 }
             }
         }
@@ -372,7 +375,7 @@ impl EndpointWorker {
         let session = peer.session.as_mut().expect("admitted receive session");
         match session.classify(unit.session, unit.sequence) {
             Admission::Duplicate => {
-                peer.expires = now + LEASE;
+                peer.lease.expires = now + LEASE;
                 return;
             }
             Admission::OutsideWindow => return,
@@ -386,7 +389,7 @@ impl EndpointWorker {
         };
         if length.is_some_and(|length| !self.message_size_allowed(length, group)) {
             // Reject before reserving or acknowledging any fragment.
-            peer.expires = now;
+            peer.lease.expires = now;
             return;
         }
         if length.is_some_and(|length| !session.may_reserve_ahead(length)) {
@@ -406,10 +409,10 @@ impl EndpointWorker {
         if session.commit_fragment_with(receipt, length, message, |length| {
             ReceiveBody::reserve(peer.pool.as_ref().expect("receiver pool"), length)
         }) {
-            peer.expires = now + LEASE;
+            peer.lease.expires = now + LEASE;
         } else {
             stats.invalid_datagrams += 1;
-            peer.expires = now;
+            peer.lease.expires = now;
         }
     }
 
@@ -426,7 +429,7 @@ impl EndpointWorker {
             return false;
         };
         if !self.message_size_allowed(body.len() as u64, group) {
-            peer.expires = Instant::now();
+            peer.lease.expires = Instant::now();
             return false;
         }
 
@@ -488,7 +491,7 @@ impl Peer {
             return;
         }
 
-        self.expires = arrival.timestamp.at + LEASE;
+        self.lease.expires = arrival.timestamp.at + LEASE;
         if matches!(decoded, Packet::Status(_))
             && let Some(io) = &mut self.io
         {
@@ -514,7 +517,7 @@ impl Peer {
 
         if let Some(io) = &mut self.io
             && io.active
-            && let Some(sink) = &mut io.sink
+            && let Some(sink) = &mut io.queues.sink
         {
             let delivered = session.commit_receive_with_delivery(receipt, message, |message| {
                 match sink.try_deliver_deferred(message, &mut io.pending_flush) {
@@ -522,7 +525,7 @@ impl Peer {
                     Err(TrySendError::Full(message)) => Err(message),
                     // A closed receiver consumed the value; retain a rebuilt copy.
                     Err(_) => {
-                        io.cancel.cancel();
+                        io.queues.cancel.cancel();
                         Err(inline())
                     }
                 }

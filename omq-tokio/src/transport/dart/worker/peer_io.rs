@@ -12,21 +12,8 @@ use crate::engine::{PeerDriverCommand, PeerDriverData};
 
 impl PeerIo {
     pub(crate) fn new(queues: PeerQueues, window: usize) -> Self {
-        let PeerQueues {
-            commands,
-            data,
-            pipe,
-            sink,
-            cancel,
-            completion,
-        } = queues;
         Self {
-            commands,
-            data,
-            pipe,
-            sink,
-            cancel,
-            completion,
+            queues,
             active: false,
             draining: false,
             deadline: None,
@@ -39,25 +26,27 @@ impl PeerIo {
     }
 
     pub(super) fn connect_signal(&self, signal: &Arc<DataSignal>) {
-        self.commands.dart_forward_to(signal.clone());
-        self.data.dart_forward_to(signal.clone());
-        if let Some(pipe) = &self.pipe {
+        self.queues.commands.dart_forward_to(signal.clone());
+        self.queues.data.dart_forward_to(signal.clone());
+        if let Some(pipe) = &self.queues.pipe {
             pipe.dart_forward_to(signal.clone());
         }
     }
 
     pub(super) fn register_space(&mut self, signal: &Arc<DataSignal>) {
-        if let Some(sink) = &mut self.sink {
+        if let Some(sink) = &mut self.queues.sink {
             sink.dart_forward_to(signal);
         }
     }
 
     pub(super) fn controls(&mut self, signal: &Arc<DataSignal>, now: Instant) -> bool {
-        if self.cancel.is_cancelled() || self.deadline.is_some_and(|deadline| now >= deadline) {
+        if self.queues.cancel.is_cancelled()
+            || self.deadline.is_some_and(|deadline| now >= deadline)
+        {
             return false;
         }
         for _ in 0..MESSAGES {
-            let Ok(command) = self.commands.try_recv() else {
+            let Ok(command) = self.queues.commands.try_recv() else {
                 break;
             };
             match command {
@@ -68,14 +57,14 @@ impl PeerIo {
                 }
                 PeerDriverCommand::ActivateDataPlane => self.active = true,
                 PeerDriverCommand::ActivateWithRecvSink(sink) => {
-                    self.sink = Some(sink);
+                    self.queues.sink = Some(sink);
                     self.register_space(signal);
                     self.active = true;
                 }
                 PeerDriverCommand::SendCommand(_) => {}
             }
         }
-        self.commands.release_consumed();
+        self.queues.commands.release_consumed();
         true
     }
 
@@ -90,7 +79,7 @@ impl PeerIo {
         }
         let (mut count, mut bytes) = self.refill_pipe(session, limit);
         while count < limit && bytes < BYTES && session.send_capacity() != 0 {
-            let Some((data, admission)) = self.data.dart_try_recv() else {
+            let Some((data, admission)) = self.queues.data.dart_try_recv() else {
                 break;
             };
             if let PeerDriverData::SendMessage(message) = data {
@@ -102,12 +91,12 @@ impl PeerIo {
                 count += 1;
             }
         }
-        self.data.release_consumed();
+        self.queues.data.release_consumed();
         count
     }
 
     fn refill_pipe(&mut self, session: &mut Session, limit: usize) -> (usize, usize) {
-        let Some(pipe) = &mut self.pipe else {
+        let Some(pipe) = &mut self.queues.pipe else {
             return (0, 0);
         };
         if self.deferred.is_empty() {
@@ -164,7 +153,7 @@ impl PeerIo {
             pipes += 1;
         }
         if pipes != 0
-            && let Some(pipe) = &self.pipe
+            && let Some(pipe) = &self.queues.pipe
         {
             pipe.dart_acknowledge(pipes);
         }
@@ -190,7 +179,7 @@ impl PeerIo {
         if !self.active {
             return 0;
         }
-        let Some(sink) = &mut self.sink else {
+        let Some(sink) = &mut self.queues.sink else {
             return 0;
         };
         let mut count = 0;
@@ -235,7 +224,7 @@ impl PeerIo {
                     break;
                 }
                 Err(_) => {
-                    self.cancel.cancel();
+                    self.queues.cancel.cancel();
                     break;
                 }
             }
@@ -247,11 +236,12 @@ impl PeerIo {
 
 impl Drop for PeerIo {
     fn drop(&mut self) {
-        if let Some(sink) = &mut self.sink {
+        if let Some(sink) = &mut self.queues.sink {
             sink.flush_delivery(&mut self.pending_flush);
         }
-        self.cancel.cancel();
+        self.queues.cancel.cancel();
         let _ = self
+            .queues
             .completion
             .complete(omq_proto::DisconnectReason::PeerClosed);
     }

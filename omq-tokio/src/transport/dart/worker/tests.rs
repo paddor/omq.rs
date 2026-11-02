@@ -5,12 +5,14 @@ use omq_proto::{DartCongestion, PayloadPool, TrySendError};
 
 fn peer() -> Peer {
     Peer {
-        handshake: Handshake::listener(2, 1),
+        lease: Lease {
+            handshake: Handshake::listener(2, 1),
+            socket_type: SocketType::Scatter,
+            identity: None,
+            expires: Instant::now() + LEASE,
+            retry: Instant::now(),
+        },
         generation: 2,
-        socket_type: SocketType::Scatter,
-        identity: None,
-        expires: Instant::now() + LEASE,
-        retry: Instant::now(),
         reported: false,
         ecn_supported: false,
         session: None,
@@ -20,9 +22,11 @@ fn peer() -> Peer {
         io: None,
         sampled: dart::SessionStats::default(),
         send_retry: Duration::ZERO,
-        ingress: None,
-        egress: None,
-        budget_waker: std::task::Waker::noop().clone(),
+        pacing: PeerPacing {
+            ingress: None,
+            egress: None,
+            waker: std::task::Waker::noop().clone(),
+        },
     }
 }
 
@@ -86,7 +90,7 @@ fn radio_hwm_above_one_batch_counts_queued_and_unacknowledged_messages() {
         "duplicate ACK is inert"
     );
     drop(permits);
-    io.data = data;
+    io.queues.data = data;
 }
 
 #[test]
@@ -98,7 +102,7 @@ fn leaving_a_group_returns_retained_inline_credit() {
     );
     let mut io = queues();
     io.active = true;
-    io.sink = Some(RecvSink::Fanin(crate::socket::fanin::Sink::owned(
+    io.queues.sink = Some(RecvSink::Fanin(crate::socket::fanin::Sink::owned(
         queue.register().unwrap(),
     )));
     let mut peer = peer();
@@ -141,7 +145,7 @@ fn partial_ack_returns_exact_credits_and_keeps_unsent_reservations() {
         io.admissions.push_back((sequence, admission));
     }
     data.release_consumed();
-    io.data = data;
+    io.queues.data = data;
     io.acknowledge(0);
     assert!(matches!(
         sender.try_reserve_owned(),
@@ -156,16 +160,16 @@ fn partial_ack_returns_exact_credits_and_keeps_unsent_reservations() {
     ));
     io.acknowledge(2);
     assert_eq!(io.admissions.len(), 2);
-    io.data.close();
+    io.queues.data.close();
     io.acknowledge(4);
     assert!(io.admissions.is_empty());
-    assert!(!io.data.is_empty());
+    assert!(!io.queues.data.is_empty());
     drop((first, second));
-    assert!(!io.data.is_empty());
+    assert!(!io.queues.data.is_empty());
     drop(unsent);
-    assert!(io.data.is_empty());
+    assert!(io.queues.data.is_empty());
     assert!(matches!(
-        io.data.try_recv(),
+        io.queues.data.try_recv(),
         Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
     ));
 }
@@ -174,7 +178,7 @@ fn partial_ack_returns_exact_credits_and_keeps_unsent_reservations() {
 fn late_activation_cannot_replace_a_new_generation() {
     let mut peer = peer();
     let old = queues();
-    let cancel = old.cancel.clone();
+    let cancel = old.queues.cancel.clone();
     peer.install_io(1, old, &state(), &Arc::new(DataSignal::new()));
     assert!(cancel.is_cancelled());
     assert!(peer.io.is_none());
@@ -187,11 +191,11 @@ fn expired_or_cancelled_activation_never_installs_storage() {
         let mut peer = peer();
         let io = queues();
         if expired {
-            peer.expires = Instant::now();
+            peer.lease.expires = Instant::now();
         } else {
-            io.cancel.cancel();
+            io.queues.cancel.cancel();
         }
-        let cancel = io.cancel.clone();
+        let cancel = io.queues.cancel.clone();
         peer.install_io(2, io, &state(), &Arc::new(DataSignal::new()));
         assert!(cancel.is_cancelled());
         assert!(peer.pool.is_none());
@@ -202,7 +206,7 @@ fn expired_or_cancelled_activation_never_installs_storage() {
 fn cancelled_activation_retires_the_current_handshake() {
     let mut peer = peer();
     let io = queues();
-    io.cancel.cancel();
+    io.queues.cancel.cancel();
     let signal = Arc::new(DataSignal::new());
     peer.install_io(2, io, &state(), &signal);
     assert!(peer.session.is_none());
@@ -219,9 +223,9 @@ fn repeated_activation_preserves_the_original_queues() {
     let signal = Arc::new(DataSignal::new());
     let mut peer = peer();
     peer.install_io(2, queues(), &state(), &signal);
-    let live = peer.io.as_ref().unwrap().cancel.clone();
+    let live = peer.io.as_ref().unwrap().queues.cancel.clone();
     let repeated = queues();
-    let rejected = repeated.cancel.clone();
+    let rejected = repeated.queues.cancel.clone();
     peer.install_io(2, repeated, &state(), &signal);
     assert!(rejected.is_cancelled());
     assert!(!live.is_cancelled());
@@ -236,7 +240,7 @@ fn cancellation_is_rechecked_on_every_control_turn() {
     let mut io = queues();
     let signal = Arc::new(DataSignal::new());
     assert!(io.controls(&signal, Instant::now()));
-    io.cancel.cancel();
+    io.queues.cancel.cancel();
     assert!(!io.controls(&signal, Instant::now()));
 }
 
@@ -244,7 +248,7 @@ fn cancellation_is_rechecked_on_every_control_turn() {
 fn a_closed_delivery_window_does_not_block_lifecycle_control() {
     let (sender, receiver) = crate::engine::control_inbox::channel(8);
     let mut io = queues();
-    io.commands = receiver;
+    io.queues.commands = receiver;
     let signal = Arc::new(DataSignal::new());
     io.connect_signal(&signal);
     sender
@@ -313,10 +317,11 @@ fn teardown_publishes_pending_inline_delivery() {
         crate::socket::recv::BlockingRecvWaker::new(),
     );
     let mut io = queues();
-    io.sink = Some(RecvSink::Fanin(crate::socket::fanin::Sink::owned(
+    io.queues.sink = Some(RecvSink::Fanin(crate::socket::fanin::Sink::owned(
         queue.register().unwrap(),
     )));
-    io.sink
+    io.queues
+        .sink
         .as_mut()
         .unwrap()
         .try_deliver_deferred(Message::from_slice(b"last"), &mut io.pending_flush)

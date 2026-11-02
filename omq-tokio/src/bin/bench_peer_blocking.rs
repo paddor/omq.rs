@@ -28,7 +28,7 @@ mod payload;
 #[path = "bench_peer_blocking/pubsub.rs"]
 mod pubsub;
 
-use bench_common::{ModeArgs, cpu_time_secs, quantile, warmup_duration};
+use bench_common::{ModeArgs, RecvWindow, cpu_time_secs, quantile, warmup_duration};
 use fanin::{run_multi_pull, run_multi_push};
 use inproc::{run_inproc, run_inproc_2ut, run_inproc_latency};
 use payload::bench_payload;
@@ -600,18 +600,5 @@ fn run_req(ctx: &omq_tokio::Context, ep: Endpoint, size: usize, iterations: usiz
     let cpu = cpu_time_secs() - cpu_before;
     let elapsed = t_wall.elapsed().as_secs_f64();
 
-    rtts.sort_unstable();
-    let p50 = percentile(&rtts, 50.0);
-    let p99 = percentile(&rtts, 99.0);
-    let p999 = percentile(&rtts, 99.9);
-    let max = percentile(&rtts, 100.0);
-    println!("{p50:.3} {p99:.3} {p999:.3} {max:.3} {iterations} {cpu:.6} {elapsed:.6}");
-}
-
-fn percentile(sorted: &[u64], p: f64) -> f64 {
-    if sorted.is_empty() {
-        return 0.0;
-    }
-    let idx = ((sorted.len() as f64 * p / 100.0) as usize).min(sorted.len() - 1);
-    sorted[idx] as f64 / 1_000.0
+    latency_common::print_rtts(rtts, iterations, Some(cpu), elapsed);
 }

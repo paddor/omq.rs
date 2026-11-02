@@ -54,12 +54,7 @@ pub(super) async fn run_inproc_latency(
     }
     let elapsed = wall_start.elapsed().as_secs_f64();
 
-    rtts.sort_unstable();
-    let p50 = percentile(&rtts, 50.0);
-    let p99 = percentile(&rtts, 99.0);
-    let p999 = percentile(&rtts, 99.9);
-    let max = percentile(&rtts, 100.0);
-    println!("{p50:.3} {p99:.3} {p999:.3} {max:.3} {iterations} 0 {elapsed:.6}");
+    latency_common::print_rtts(rtts, iterations, None, elapsed);
 }
 
 pub(super) async fn run_rep(ctx: &omq_tokio::Context, ep: Endpoint, size: usize) {
@@ -131,12 +126,7 @@ pub(super) async fn run_req(
     let cpu = cpu_time_secs() - cpu_before;
     let elapsed = t_wall.elapsed().as_secs_f64();
 
-    rtts.sort_unstable();
-    let p50 = percentile(&rtts, 50.0);
-    let p99 = percentile(&rtts, 99.0);
-    let p999 = percentile(&rtts, 99.9);
-    let max = percentile(&rtts, 100.0);
-    println!("{p50:.3} {p99:.3} {p999:.3} {max:.3} {iterations} {cpu:.6} {elapsed:.6}");
+    latency_common::print_rtts(rtts, iterations, Some(cpu), elapsed);
 }
 
 pub(super) async fn run_req_exclusive(ep: Endpoint, size: usize, iterations: usize, warmup: usize) {
@@ -164,18 +154,5 @@ pub(super) async fn run_req_exclusive(ep: Endpoint, size: usize, iterations: usi
     let cpu = cpu_time_secs() - cpu_before;
     let elapsed = t_wall.elapsed().as_secs_f64();
 
-    rtts.sort_unstable();
-    let p50 = percentile(&rtts, 50.0);
-    let p99 = percentile(&rtts, 99.0);
-    let p999 = percentile(&rtts, 99.9);
-    let max = percentile(&rtts, 100.0);
-    println!("{p50:.3} {p99:.3} {p999:.3} {max:.3} {iterations} {cpu:.6} {elapsed:.6}");
-}
-
-fn percentile(sorted: &[u64], p: f64) -> f64 {
-    if sorted.is_empty() {
-        return 0.0;
-    }
-    let idx = ((sorted.len() as f64 * p / 100.0) as usize).min(sorted.len() - 1);
-    sorted[idx] as f64 / 1_000.0
+    latency_common::print_rtts(rtts, iterations, Some(cpu), elapsed);
 }

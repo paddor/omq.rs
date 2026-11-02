@@ -1,7 +1,7 @@
 //! Inproc throughput and latency modes.
 
 use super::payload::bench_payload;
-use super::{StartStop, bench_options, bench_recv_spin, latency_common, percentile, send_fast};
+use super::{StartStop, bench_options, bench_recv_spin, latency_common, send_fast};
 use bytes::Bytes;
 use omq_tokio::{Endpoint, Message, Options, SocketType, TrySendError, blocking};
 use std::sync::atomic::Ordering;
@@ -206,10 +206,5 @@ pub(super) fn run_inproc_latency(
     }
     let elapsed = t_wall.elapsed().as_secs_f64();
 
-    rtts.sort_unstable();
-    let p50 = percentile(&rtts, 50.0);
-    let p99 = percentile(&rtts, 99.0);
-    let p999 = percentile(&rtts, 99.9);
-    let max = percentile(&rtts, 100.0);
-    println!("{p50:.3} {p99:.3} {p999:.3} {max:.3} {iterations} 0 {elapsed:.6}");
+    latency_common::print_rtts(rtts, iterations, None, elapsed);
 }

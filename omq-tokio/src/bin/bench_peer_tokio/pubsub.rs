@@ -1,6 +1,6 @@
 //! PUB/SUB modes.
 
-use super::fanin::{RecvWindow, measure_fair_recv, warm_up_receivers};
+use super::fanin::{measure_fair_recv, warm_up_receivers};
 use super::payload::bench_payload;
 use super::{
     bench_options, bench_options_client, bench_options_server, cpu_time_secs, eprint_pull_summary,
@@ -171,7 +171,6 @@ pub(super) async fn run_inproc_pubsub(name: String, size: usize, duration: Durat
     println!("{count} {elapsed:.6} {size}");
 }
 
-#[expect(clippy::cast_precision_loss)]
 pub(super) async fn run_multi_sub(
     ctx: &omq_tokio::Context,
     ep: Endpoint,
@@ -188,23 +187,7 @@ pub(super) async fn run_multi_sub(
     }
 
     warm_up_receivers(&sockets).await;
-    let RecvWindow {
-        per_socket,
-        elapsed,
-        cpu,
-    } = measure_fair_recv(sockets, duration, size).await;
-
-    let total: u64 = per_socket.iter().sum();
-    let per_min = per_socket.iter().copied().min().unwrap_or(0);
-    let per_max = per_socket.iter().copied().max().unwrap_or(0);
-    let per_min_rate = per_min as f64 / elapsed;
-    let per_max_rate = per_max as f64 / elapsed;
-    println!(
-        "{total} {elapsed:.6} {size} {cpu:.6} {socket_count} {per_min_rate:.1} {per_max_rate:.1}"
-    );
-    eprintln!(
-        "multi-sub: {socket_count} sockets, {:.0} msg/s total, \
-         per-socket [{per_min_rate:.0}, {per_max_rate:.0}] msg/s",
-        total as f64 / elapsed,
-    );
+    measure_fair_recv(sockets, duration, size)
+        .await
+        .print_multi_sub(size);
 }

@@ -156,6 +156,76 @@ pub(crate) fn quantile(sorted: &[f64], probability: f64) -> f64 {
     sorted[index.min(sorted.len().saturating_sub(1))]
 }
 
+/// Per-socket receive counts over one measured window.
+pub(crate) struct RecvWindow {
+    pub(crate) per_socket: Vec<u64>,
+    pub(crate) elapsed: f64,
+    pub(crate) cpu: f64,
+}
+
+impl RecvWindow {
+    /// Print totals, per-socket rate spread and quantiles, then every rate.
+    pub(crate) fn print_multi_pull(&self, size: usize) {
+        let Self { elapsed, cpu, .. } = *self;
+        let socket_count = self.per_socket.len();
+        let (total, per_min_rate, per_max_rate) = self.spread();
+        let mut rates: Vec<f64> = self
+            .per_socket
+            .iter()
+            .map(|&count| count as f64 / elapsed)
+            .collect();
+        rates.sort_unstable_by(f64::total_cmp);
+        println!(
+            "{total} {elapsed:.6} {size} {cpu:.6} {socket_count} {per_min_rate:.1} \
+             {per_max_rate:.1} {:.1} {:.1} {:.1} {:.1} {:.1}",
+            quantile(&rates, 0.10),
+            quantile(&rates, 0.25),
+            quantile(&rates, 0.50),
+            quantile(&rates, 0.75),
+            quantile(&rates, 0.90),
+        );
+        print!(" ");
+        for rate in &rates {
+            print!("{rate:.1} ");
+        }
+        println!();
+        self.eprint_summary("multi-pull");
+    }
+
+    /// Print totals and the per-socket rate spread.
+    pub(crate) fn print_multi_sub(&self, size: usize) {
+        let Self { elapsed, cpu, .. } = *self;
+        let socket_count = self.per_socket.len();
+        let (total, per_min_rate, per_max_rate) = self.spread();
+        println!(
+            "{total} {elapsed:.6} {size} {cpu:.6} {socket_count} {per_min_rate:.1} {per_max_rate:.1}"
+        );
+        self.eprint_summary("multi-sub");
+    }
+
+    /// Total count and the slowest and fastest per-socket rates.
+    fn spread(&self) -> (u64, f64, f64) {
+        let total: u64 = self.per_socket.iter().sum();
+        let per_min = self.per_socket.iter().copied().min().unwrap_or(0);
+        let per_max = self.per_socket.iter().copied().max().unwrap_or(0);
+        (
+            total,
+            per_min as f64 / self.elapsed,
+            per_max as f64 / self.elapsed,
+        )
+    }
+
+    fn eprint_summary(&self, mode: &str) {
+        let socket_count = self.per_socket.len();
+        let (total, per_min_rate, per_max_rate) = self.spread();
+        eprintln!(
+            "{mode}: {socket_count} sockets, {:.0} msg/s total, \
+             per-socket [{per_min_rate:.0}, {per_max_rate:.0}] msg/s",
+            total as f64 / self.elapsed,
+        );
+    }
+}
+
 /// `OMQ_BENCH_WARMUP_MS`, zero when unset.
 pub(crate) fn warmup_duration() -> Duration {
     std::env::var("OMQ_BENCH_WARMUP_MS")

@@ -55,7 +55,7 @@ use payload::train_zstd_json_dict;
 use payload::{bench_payload, wire_size};
 use pubsub::{run_inproc_pubsub, run_multi_sub, run_pub, run_sub};
 
-use bench_common::{ModeArgs, cpu_time_secs, quantile, warmup_duration};
+use bench_common::{ModeArgs, RecvWindow, cpu_time_secs, warmup_duration};
 
 async fn report_bound_port(ctx: &omq_tokio::Context, ep: &Endpoint) {
     let port = match ep {

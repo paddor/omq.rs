@@ -5,6 +5,8 @@
 //! own IO thread; send/recv block the calling thread via
 //! `Context::block_on`.
 
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -386,6 +388,23 @@ fn send_fast(sock: &blocking::Socket, msg: Message) {
         Ok(()) => {}
         Err(TrySendError::Full(msg)) => sock.send(msg).unwrap(),
         Err(e) => panic!("try_send failed: {e}"),
+    }
+}
+
+/// Start barrier and stop flag shared by the sender and receiver threads of
+/// a two-thread inproc run. The receiver sets `stop` when its window ends.
+#[derive(Clone)]
+struct StartStop {
+    barrier: Arc<Barrier>,
+    stop: Arc<AtomicBool>,
+}
+
+impl StartStop {
+    fn new() -> Self {
+        Self {
+            barrier: Arc::new(Barrier::new(2)),
+            stop: Arc::new(AtomicBool::new(false)),
+        }
     }
 }
 

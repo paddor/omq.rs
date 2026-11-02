@@ -1,10 +1,11 @@
 //! Two application threads using blocking send/recv, with no receive spin.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use omq_tokio::{Context, Endpoint, Message, Options, SocketType};
+
+use super::StartStop;
 
 pub(super) fn run(ctx: &Context, name: String, size: usize, duration: Duration, hwm: u32) {
     assert!(hwm > 0, "benchmark HWM must be positive");
@@ -18,10 +19,10 @@ pub(super) fn run(ctx: &Context, name: String, size: usize, duration: Duration, 
     push.wait_connected(1, Duration::from_secs(5))
         .expect("wait for inproc connection");
 
-    let barrier = Arc::new(std::sync::Barrier::new(2));
-    let stop = Arc::new(AtomicBool::new(false));
+    let signals = StartStop::new();
     let payload = super::bench_payload(size);
-    let sender = spawn_sender(push.clone(), payload, size, barrier.clone(), stop.clone());
+    let sender = spawn_sender(push.clone(), payload, signals.clone());
+    let StartStop { barrier, stop } = signals;
 
     let receiver_pull = pull.clone();
     let receiver_push = push;
@@ -63,13 +64,15 @@ pub(super) fn run(ctx: &Context, name: String, size: usize, duration: Duration, 
 fn spawn_sender(
     sender_push: omq_tokio::blocking::Socket,
     payload: bytes::Bytes,
-    size: usize,
-    sender_barrier: Arc<std::sync::Barrier>,
-    sender_stop: Arc<AtomicBool>,
+    signals: StartStop,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
+        let StartStop {
+            barrier: sender_barrier,
+            stop: sender_stop,
+        } = signals;
         sender_barrier.wait();
-        if size <= omq_tokio::message::MAX_INLINE_MESSAGE {
+        if payload.len() <= omq_tokio::message::MAX_INLINE_MESSAGE {
             while !sender_stop.load(Ordering::Acquire) {
                 if let Err(error) = sender_push.send(Message::from_slice(&payload)) {
                     assert!(sender_stop.load(Ordering::Acquire), "send failed: {error}");

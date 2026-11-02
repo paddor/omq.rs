@@ -4,7 +4,7 @@
 
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use bytes::Bytes;
 use smallvec::SmallVec;
@@ -75,6 +75,13 @@ pub(crate) struct PeerTransmitSlot {
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct DrainOutcome {
     pub(crate) space_available: bool,
+}
+
+/// Wakes owed after a drain, decided while `eq` is held.
+#[derive(Debug, Clone, Copy)]
+struct DrainSettle {
+    space_available: bool,
+    reactivate: bool,
 }
 
 impl std::fmt::Debug for PeerTransmitSlot {
@@ -188,20 +195,10 @@ impl PeerTransmitSlot {
         let eq = self.eq.lock().expect("transmit_slot eq poisoned");
         let below_lwm =
             self.is_below_lwm(eq.total_bytes(), self.queued_msgs.load(Ordering::Relaxed));
-        let reactivate = below_lwm
-            && self
-                .fanout_active
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok();
+        let reactivate = self.claim_reactivation(below_lwm);
         drop(eq);
-        if reactivate
-            && let Some(cb) = self
-                .fanout_reactivation
-                .lock()
-                .expect("transmit_slot fanout_reactivation poisoned")
-                .clone()
-        {
-            cb(self.peer_id);
+        if reactivate {
+            self.notify_reactivation();
         }
     }
 
@@ -248,7 +245,7 @@ impl PeerTransmitSlot {
             let Some(state) = self.shm.get() else {
                 return TryFrameResult::Ineligible;
             };
-            if self.dead.load(Ordering::Acquire) {
+            if self.is_dead() {
                 return TryFrameResult::Dead;
             }
             if !self.handshake_done.load(Ordering::Acquire) {
@@ -260,15 +257,13 @@ impl PeerTransmitSlot {
             if self.shm_credit_blocked.load(Ordering::Acquire) {
                 return TryFrameResult::Full;
             }
-            let mut eq = self.eq.lock().expect("transmit_slot eq poisoned");
-            if self.dead.load(Ordering::Acquire) {
+            let Some(mut eq) = self.lock_live() else {
                 return TryFrameResult::Dead;
-            }
+            };
             if eq.total_bytes() >= self.cap
                 || self.queued_msgs.load(Ordering::Relaxed) + count > self.msg_cap
             {
-                self.above_lwm.store(true, Ordering::Relaxed);
-                return TryFrameResult::Full;
+                return self.full();
             }
             let mut state = state.lock().expect("SHM connection");
             let result = match record {
@@ -328,17 +323,16 @@ impl PeerTransmitSlot {
     }
 
     pub(crate) fn try_encode_without_signal(&self, msg: &Message) -> TryFrameResult {
-        if self.dead.load(Ordering::Acquire) {
+        if self.is_dead() {
             return TryFrameResult::Dead;
         }
         if !self.handshake_done.load(Ordering::Acquire) {
             return TryFrameResult::Ineligible;
         }
 
-        let mut eq = self.eq.lock().expect("transmit_slot eq poisoned");
-        if self.dead.load(Ordering::Acquire) {
+        let Some(mut eq) = self.lock_live() else {
             return TryFrameResult::Dead;
-        }
+        };
         let decision = decide_handle_frame(
             HandleFrameState {
                 uses_crypto: false,
@@ -365,8 +359,7 @@ impl PeerTransmitSlot {
                 eq.frame_prefixed(sentinel, msg);
             }
             HandleFrameDecision::Full => {
-                self.above_lwm.store(true, Ordering::Relaxed);
-                return TryFrameResult::Full;
+                return self.full();
             }
             HandleFrameDecision::Ineligible => return TryFrameResult::Ineligible,
         }
@@ -386,46 +379,40 @@ impl PeerTransmitSlot {
 
     /// Admit one encoded publication; the caller signals accepted batches.
     pub(crate) fn try_push_encoded_no_signal(&self, chunks: &[Bytes]) -> TryFrameResult {
-        if self.dead.load(Ordering::Acquire) {
+        if self.is_dead() {
             return TryFrameResult::Dead;
         }
         let bytes = chunks.iter().map(Bytes::len).sum();
-        let mut eq = self.eq.lock().expect("transmit_slot eq poisoned");
-        if self.dead.load(Ordering::Acquire) {
+        let Some(mut eq) = self.lock_live() else {
             return TryFrameResult::Dead;
-        }
+        };
         let queued_msgs = self.queued_msgs.load(Ordering::Relaxed);
         if queued_msgs >= self.msg_cap
             || (queued_msgs > 0 && eq.total_bytes().saturating_add(bytes) >= self.cap)
         {
-            self.above_lwm.store(true, Ordering::Relaxed);
-            return TryFrameResult::Full;
+            return self.full();
         }
         eq.push_shared_chunks(chunks);
         // Count writers are serialized by eq, including drains and disconnects.
         let queued = queued_msgs + 1;
-        self.queued_msgs.store(queued, Ordering::Relaxed);
-        self.mark_above_lwm_if_needed(eq.total_bytes(), queued);
+        self.commit(&eq, queued);
         TryFrameResult::Ok
     }
 
     pub(crate) fn try_push_pre_framed_no_signal(&self, data: &[u8]) -> TryFrameResult {
-        if self.dead.load(Ordering::Acquire) {
+        if self.is_dead() {
             return TryFrameResult::Dead;
         }
-        let mut eq = self.eq.lock().expect("transmit_slot eq poisoned");
-        if self.dead.load(Ordering::Acquire) {
+        let Some(mut eq) = self.lock_live() else {
             return TryFrameResult::Dead;
-        }
+        };
         if self.is_full(&eq) {
-            self.above_lwm.store(true, Ordering::Relaxed);
-            return TryFrameResult::Full;
+            return self.full();
         }
         eq.push_pre_framed(data);
         // Count writers are serialized by eq, including drains and disconnects.
         let queued = self.queued_msgs.load(Ordering::Relaxed) + 1;
-        self.queued_msgs.store(queued, Ordering::Relaxed);
-        self.mark_above_lwm_if_needed(eq.total_bytes(), queued);
+        self.commit(&eq, queued);
         TryFrameResult::Ok
     }
 
@@ -434,10 +421,9 @@ impl PeerTransmitSlot {
     /// increase this available space while the lane encodes.
     #[cfg(any(feature = "lz4", feature = "zstd"))]
     pub(crate) fn arena_credit(&self) -> (usize, usize) {
-        let eq = self.eq.lock().expect("transmit_slot eq poisoned");
-        if self.dead.load(Ordering::Acquire) {
+        let Some(eq) = self.lock_live() else {
             return (0, 0);
-        }
+        };
         (
             self.msg_cap
                 .saturating_sub(self.queued_msgs.load(Ordering::Relaxed)),
@@ -456,23 +442,20 @@ impl PeerTransmitSlot {
             FanOutFrame::Arena(data) => data.len(),
             FanOutFrame::Chunks(chunks) => chunks.iter().map(Bytes::len).sum(),
         };
-        let mut eq = self.eq.lock().expect("transmit_slot eq poisoned");
-        if self.dead.load(Ordering::Acquire) {
+        let Some(mut eq) = self.lock_live() else {
             return TryFrameResult::Dead;
-        }
+        };
         let queued = self.queued_msgs.load(Ordering::Relaxed);
         if queued.saturating_add(messages) > self.msg_cap
             || eq.total_bytes().saturating_add(bytes) >= self.cap
         {
-            self.above_lwm.store(true, Ordering::Relaxed);
-            return TryFrameResult::Full;
+            return self.full();
         }
         match frame {
             FanOutFrame::Arena(data) => eq.push_pre_framed(data),
             FanOutFrame::Chunks(chunks) => eq.push_shared_chunks(chunks),
         }
-        self.queued_msgs.store(queued + messages, Ordering::Relaxed);
-        self.mark_above_lwm_if_needed(eq.total_bytes(), queued + messages);
+        self.commit(&eq, queued + messages);
         TryFrameResult::Ok
     }
 
@@ -484,13 +467,12 @@ impl PeerTransmitSlot {
         ends: &[usize],
         start: usize,
     ) -> (usize, TryFrameResult) {
-        if self.dead.load(Ordering::Acquire) {
+        if self.is_dead() {
             return (start, TryFrameResult::Dead);
         }
-        let mut eq = self.eq.lock().expect("transmit_slot eq poisoned");
-        if self.dead.load(Ordering::Acquire) {
+        let Some(mut eq) = self.lock_live() else {
             return (start, TryFrameResult::Dead);
-        }
+        };
         let offset = if start == 0 { 0 } else { ends[start - 1] };
         let queued = self.queued_msgs.load(Ordering::Relaxed);
         let bytes = eq.total_bytes();
@@ -508,14 +490,12 @@ impl PeerTransmitSlot {
         if next != start {
             eq.push_pre_framed(&data[offset..end]);
             let queued = queued + next - start;
-            self.queued_msgs.store(queued, Ordering::Relaxed);
-            self.mark_above_lwm_if_needed(eq.total_bytes(), queued);
+            self.commit(&eq, queued);
         }
         let result = if next == ends.len() {
             TryFrameResult::Ok
         } else {
-            self.above_lwm.store(true, Ordering::Relaxed);
-            TryFrameResult::Full
+            self.full()
         };
         (next, result)
     }
@@ -536,24 +516,22 @@ impl PeerTransmitSlot {
         frame: &FanOutFrame<'_>,
         protected: bool,
     ) -> TryFrameResult {
-        if self.dead.load(Ordering::Acquire) {
+        if self.is_dead() {
             return TryFrameResult::Dead;
         }
         // Queue each encoded fan-out message as one entry or chunk group so
         // full-slot eviction removes the oldest whole message.
         let chunks = fanout_frame_chunks(frame);
         let len = chunks.iter().map(Bytes::len).sum::<usize>();
-        let mut eq = self.eq.lock().expect("transmit_slot eq poisoned");
-        if self.dead.load(Ordering::Acquire) {
+        let Some(mut eq) = self.lock_live() else {
             return TryFrameResult::Dead;
-        }
+        };
         let mut queued_msgs = self.queued_msgs.load(Ordering::Relaxed);
         while queued_msgs > 0
             && (eq.total_bytes().saturating_add(len) >= self.cap || queued_msgs >= self.msg_cap)
         {
             if !eq.pop_oldest_unprotected_entry() {
-                self.above_lwm.store(true, Ordering::Relaxed);
-                return TryFrameResult::Full;
+                return self.full();
             }
             queued_msgs = queued_msgs.saturating_sub(1);
         }
@@ -562,8 +540,7 @@ impl PeerTransmitSlot {
             self.fanout_dict_queued.store(true, Ordering::Release);
         }
         queued_msgs += 1;
-        self.queued_msgs.store(queued_msgs, Ordering::Relaxed);
-        self.mark_above_lwm_if_needed(eq.total_bytes(), queued_msgs);
+        self.commit(&eq, queued_msgs);
         drop(eq);
         self.signal_encoded();
         TryFrameResult::Ok
@@ -627,25 +604,15 @@ impl PeerTransmitSlot {
         eq.clear_arena();
         self.data_signal.begin_drain();
         self.queued_msgs.store(0, Ordering::Relaxed);
-        let below_lwm = self.is_below_lwm(0, 0);
-        let space_available = below_lwm && self.above_lwm.swap(false, Ordering::AcqRel);
-        let reactivate = below_lwm
-            && self
-                .fanout_active
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok();
+        let settled = self.settle_after_drain(0, 0);
         drop(eq);
         self.clear_data_signal_and_rearm();
-        if reactivate
-            && let Some(cb) = self
-                .fanout_reactivation
-                .lock()
-                .expect("transmit_slot fanout_reactivation poisoned")
-                .clone()
-        {
-            cb(self.peer_id);
+        if settled.reactivate {
+            self.notify_reactivation();
         }
-        Some(DrainOutcome { space_available })
+        Some(DrainOutcome {
+            space_available: settled.space_available,
+        })
     }
 
     /// One caller-thread write of the queued bytes. Large payloads are
@@ -673,26 +640,14 @@ impl PeerTransmitSlot {
             self.queued_msgs.store(0, Ordering::Relaxed);
         }
         let queued_msgs = self.queued_msgs.load(Ordering::Relaxed);
-        let below_lwm = self.is_below_lwm(eq_bytes, queued_msgs);
-        let space_available = below_lwm && self.above_lwm.swap(false, Ordering::AcqRel);
-        let reactivate = below_lwm
-            && self
-                .fanout_active
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok();
+        let settled = self.settle_after_drain(eq_bytes, queued_msgs);
         drop(eq);
         self.clear_data_signal_and_rearm();
-        if space_available {
+        if settled.space_available {
             self.space_available.notify_changed();
         }
-        if reactivate
-            && let Some(cb) = self
-                .fanout_reactivation
-                .lock()
-                .expect("transmit_slot fanout_reactivation poisoned")
-                .clone()
-        {
-            cb(self.peer_id);
+        if settled.reactivate {
+            self.notify_reactivation();
         }
 
         Ok(())
@@ -736,27 +691,17 @@ impl PeerTransmitSlot {
             self.queued_msgs.store(0, Ordering::Relaxed);
         }
         let queued_msgs = self.queued_msgs.load(Ordering::Relaxed);
-        let below_lwm = self.is_below_lwm(eq_bytes, queued_msgs);
-        let space_available = below_lwm && self.above_lwm.swap(false, Ordering::AcqRel);
-        let reactivate = below_lwm
-            && self
-                .fanout_active
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok();
+        let settled = self.settle_after_drain(eq_bytes, queued_msgs);
         drop(eq);
         if eq_empty {
             self.clear_data_signal_and_rearm();
         }
-        if reactivate
-            && let Some(cb) = self
-                .fanout_reactivation
-                .lock()
-                .expect("transmit_slot fanout_reactivation poisoned")
-                .clone()
-        {
-            cb(self.peer_id);
+        if settled.reactivate {
+            self.notify_reactivation();
         }
-        DrainOutcome { space_available }
+        DrainOutcome {
+            space_available: settled.space_available,
+        }
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -787,6 +732,66 @@ impl PeerTransmitSlot {
         self.data_signal.wake_all();
         self.space_available.notify_changed();
         drop(retired);
+    }
+
+    #[inline]
+    fn is_dead(&self) -> bool {
+        self.dead.load(Ordering::Acquire)
+    }
+
+    /// Lock the queue, or `None` if `mark_dead` won the race for it.
+    #[inline]
+    fn lock_live(&self) -> Option<MutexGuard<'_, FrameBuffer>> {
+        let eq = self.eq.lock().expect("transmit_slot eq poisoned");
+        if self.is_dead() { None } else { Some(eq) }
+    }
+
+    /// Refuse a message for lack of credit; the next drain below the LWM
+    /// reports space.
+    #[inline]
+    fn full(&self) -> TryFrameResult {
+        self.above_lwm.store(true, Ordering::Relaxed);
+        TryFrameResult::Full
+    }
+
+    /// Record `queued` messages after a push. Count writers are serialized
+    /// by `eq`.
+    #[inline]
+    fn commit(&self, eq: &FrameBuffer, queued: usize) {
+        self.queued_msgs.store(queued, Ordering::Relaxed);
+        self.mark_above_lwm_if_needed(eq.total_bytes(), queued);
+    }
+
+    /// Decide under `eq` whether a drain freed space and reactivates fan-out.
+    #[inline]
+    fn settle_after_drain(&self, queued_bytes: usize, queued_messages: usize) -> DrainSettle {
+        let below_lwm = self.is_below_lwm(queued_bytes, queued_messages);
+        let space_available = below_lwm && self.above_lwm.swap(false, Ordering::AcqRel);
+        DrainSettle {
+            space_available,
+            reactivate: self.claim_reactivation(below_lwm),
+        }
+    }
+
+    /// Claim the fan-out reactivation once the queue fell below the LWM.
+    #[inline]
+    fn claim_reactivation(&self, below_lwm: bool) -> bool {
+        below_lwm
+            && self
+                .fanout_active
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+    }
+
+    fn notify_reactivation(&self) {
+        if let Some(cb) = self
+            .fanout_reactivation
+            .lock()
+            .expect("transmit_slot fanout_reactivation poisoned")
+            .clone()
+        {
+            cb(self.peer_id);
+        }
     }
 
     fn is_full(&self, eq: &FrameBuffer) -> bool {

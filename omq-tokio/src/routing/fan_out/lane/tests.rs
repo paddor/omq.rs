@@ -19,6 +19,7 @@ use super::{
 };
 use crate::engine::control_queue::ControlQueue;
 use crate::engine::transmit_slot::SlotConfig;
+use crate::routing::poll_once;
 
 fn paused_lanes(count: usize) -> (FanOutLanes, Vec<yring::Consumer<Message>>) {
     let lanes = test_lanes(count);
@@ -615,10 +616,6 @@ fn shm_reference_batches_do_not_charge_application_payload_bytes() {
     let (_, count, referenced) = worker.prepare_shm_batch(&batch).unwrap();
     assert!(referenced);
     assert_eq!(count, batch.len());
-}
-
-fn poll_once<F: std::future::Future>(future: std::pin::Pin<&mut F>) -> std::task::Poll<F::Output> {
-    future.poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
 }
 
 #[tokio::test]

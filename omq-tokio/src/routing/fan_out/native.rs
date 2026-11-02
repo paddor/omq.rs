@@ -250,13 +250,8 @@ impl Cache {
 mod tests {
     use super::*;
     use crate::engine::{ActorPeerDriverHandle, PeerDriverData, data_inbox};
+    use crate::routing::poll_once;
     use omq_proto::{Options, SocketType};
-
-    fn poll_once<F: Future>(future: std::pin::Pin<&mut F>) -> std::task::Poll<F::Output> {
-        future.poll(&mut std::task::Context::from_waker(
-            futures::task::noop_waker_ref(),
-        ))
-    }
 
     fn peer(capacity: usize) -> (ActorPeerDriverHandle, data_inbox::Receiver) {
         let (control, _) = tokio::sync::mpsc::channel(1);

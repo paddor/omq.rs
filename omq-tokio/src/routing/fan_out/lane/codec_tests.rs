@@ -1,6 +1,7 @@
 use super::*;
 use crate::engine::codec::CodecProfile;
 use crate::engine::transmit_slot::{SlotConfig, TryFrameResult};
+use omq_proto::options::Options;
 use omq_proto::proto::transform::{CompressionKind, MessageDecoder, MessageEncoder};
 
 fn kinds() -> Vec<Option<CompressionKind>> {

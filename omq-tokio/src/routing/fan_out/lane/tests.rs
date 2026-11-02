@@ -13,10 +13,11 @@ use omq_proto::proto::transform::CompressionKind;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
+use super::distributor::{FanOutLaneState, LaneDistributor, LaneEndpoint, LaneInput};
 use super::filter::PeerFilterState;
 use super::{
-    FanOutLaneState, FanOutLanes, FanOutMode, FanOutMutePolicy, LaneAdmission, LaneControl,
-    LaneDistributor, LaneEndpoint, LaneInput, LanePeer, LanePeerAdd, LaneWorker,
+    FanOutLanes, FanOutMode, FanOutMutePolicy, LaneAdmission, LaneControl, LanePeer, LanePeerAdd,
+    LaneWorker,
 };
 use crate::engine::control_queue::ControlQueue;
 use crate::engine::transmit_slot::SlotConfig;

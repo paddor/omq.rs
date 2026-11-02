@@ -297,11 +297,6 @@ pub struct Connection {
     /// commands.
     #[cfg(feature = "curve")]
     transform: Option<FrameTransform>,
-    /// 64-byte ZMTP greeting we sent (captured at `queue_greeting` time)
-    /// + 64-byte greeting we received (captured during decode). Both
-    ///   are retained for protocol diagnostics.
-    our_greeting: Bytes,
-    peer_greeting: Bytes,
     peer_minor: u8,
     in_buf: ChunkedInputBuf,
     out: output::OutputQueue,
@@ -339,8 +334,6 @@ impl Connection {
             mechanism,
             #[cfg(feature = "curve")]
             transform: None,
-            our_greeting: Bytes::new(),
-            peer_greeting: Bytes::new(),
             in_buf: ChunkedInputBuf::new(),
             out: output::OutputQueue::new(),
             events: VecDeque::new(),
@@ -407,12 +400,7 @@ impl Connection {
             our_props = our_props.with_identity(self.config.identity.clone());
         }
         let mut cmds = Vec::new();
-        let result = self.mechanism.start(
-            &mut cmds,
-            our_props,
-            &self.our_greeting,
-            &self.peer_greeting,
-        );
+        let result = self.mechanism.start(&mut cmds, our_props);
         if self.write_outbound_commands(&cmds).is_err() || result.is_err() {
             self.state = State::Closed;
         }
@@ -424,9 +412,7 @@ impl Connection {
         let g = Greeting::current(mech, as_server);
         let mut buf = BytesMut::new();
         g.encode(&mut buf);
-        let bytes = buf.freeze();
-        self.our_greeting = bytes.clone();
-        self.out.push(bytes);
+        self.out.push(buf.freeze());
     }
 
     /// Whether the handshake is complete. Claiming an inbound payload does

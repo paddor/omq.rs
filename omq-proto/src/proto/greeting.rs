@@ -169,10 +169,8 @@ pub fn peek_major(buf: &[u8]) -> Result<Option<u8>> {
 }
 
 /// Try to decode a full greeting from `buf`. On success, consumes
-/// [`GREETING_LEN`] bytes and returns the parsed greeting alongside
-/// the raw 64 wire bytes - the latter is needed by transcript-binding
-/// mechanisms that hash the exact bytes the peer sent.
-pub(crate) fn try_decode(buf: &mut ChunkedInputBuf) -> Result<Option<(Greeting, bytes::Bytes)>> {
+/// [`GREETING_LEN`] bytes and returns the parsed greeting.
+pub(crate) fn try_decode(buf: &mut ChunkedInputBuf) -> Result<Option<Greeting>> {
     let Some(sniff) = buf.peek_array::<VERSION_SNIFF_LEN>() else {
         return Ok(None);
     };
@@ -183,8 +181,7 @@ pub(crate) fn try_decode(buf: &mut ChunkedInputBuf) -> Result<Option<(Greeting, 
         return Ok(None);
     }
     let raw: [u8; GREETING_LEN] = buf.peek_array::<GREETING_LEN>().expect("len checked");
-    let raw_payload = buf.split_to(GREETING_LEN);
-    let raw_bytes = raw_payload.as_bytes();
+    buf.advance(GREETING_LEN);
     let major = raw[10];
     let minor = raw[11];
     if major < ZMTP_MAJOR {
@@ -207,15 +204,12 @@ pub(crate) fn try_decode(buf: &mut ChunkedInputBuf) -> Result<Option<(Greeting, 
         1 => true,
         _ => return Err(Error::Protocol("invalid as-server flag".into())),
     };
-    Ok(Some((
-        Greeting {
-            major,
-            minor,
-            mechanism,
-            as_server,
-        },
-        raw_bytes,
-    )))
+    Ok(Some(Greeting {
+        major,
+        minor,
+        mechanism,
+        as_server,
+    }))
 }
 
 /// Compute the effective ZMTP minor for the session: `min(our, peer)`.
@@ -244,9 +238,8 @@ mod tests {
     fn encode_decode_roundtrip() {
         let g = Greeting::current(MechanismName::NULL, true);
         let mut buf = encode_to_buf(&g);
-        let (decoded, raw) = try_decode(&mut buf).unwrap().unwrap();
+        let decoded = try_decode(&mut buf).unwrap().unwrap();
         assert_eq!(decoded, g);
-        assert_eq!(raw.len(), GREETING_LEN);
         assert!(buf.is_empty());
     }
 
@@ -297,7 +290,7 @@ mod tests {
             as_server: false,
         };
         let mut buf = encode_to_buf(&g);
-        let (decoded, _) = try_decode(&mut buf).unwrap().unwrap();
+        let decoded = try_decode(&mut buf).unwrap().unwrap();
         assert_eq!(decoded.minor, 0);
     }
 
@@ -331,7 +324,7 @@ mod tests {
     fn server_flag() {
         let s = Greeting::current(MechanismName::NULL, true);
         let mut buf = encode_to_buf(&s);
-        let (d, _) = try_decode(&mut buf).unwrap().unwrap();
+        let d = try_decode(&mut buf).unwrap().unwrap();
         assert!(d.as_server);
     }
 
@@ -340,7 +333,7 @@ mod tests {
         let mut g = Greeting::current(MechanismName::NULL, false);
         g.major = 4;
         let mut buf = encode_to_buf(&g);
-        let (decoded, _) = try_decode(&mut buf).unwrap().unwrap();
+        let decoded = try_decode(&mut buf).unwrap().unwrap();
         assert_eq!(decoded.major, 4);
     }
 

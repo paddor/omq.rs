@@ -612,17 +612,13 @@ impl SecurityMechanism {
     }
 
     /// Kick off the mechanism after greetings have been exchanged. Any
-    /// immediate outbound commands get pushed onto `out`. Greeting
-    /// bytes are ignored by NULL and CURVE.
+    /// immediate outbound commands get pushed onto `out`.
     #[cfg_attr(not(feature = "curve"), allow(clippy::unnecessary_wraps))]
     pub(crate) fn start(
         &mut self,
         out: &mut Vec<Command>,
         our_props: PeerProperties,
-        our_greeting: &[u8],
-        peer_greeting: &[u8],
     ) -> Result<()> {
-        let _ = (our_greeting, peer_greeting);
         match self {
             Self::Null(m) => m.start(out, our_props),
             #[cfg(feature = "curve")]

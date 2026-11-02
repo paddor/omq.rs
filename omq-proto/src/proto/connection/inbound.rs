@@ -153,7 +153,7 @@ impl Connection {
     }
 
     fn try_advance_greeting(&mut self) -> Result<bool> {
-        let Some((g, raw)) = greeting::try_decode(&mut self.in_buf)? else {
+        let Some(g) = greeting::try_decode(&mut self.in_buf)? else {
             return Ok(false);
         };
         let our_mech = self.config.mechanism_name();
@@ -176,7 +176,6 @@ impl Connection {
         } else {
             effective_minor(g.minor)
         };
-        self.peer_greeting = raw;
         self.state = State::MechanismHandshake;
 
         let mut our_props = PeerProperties::default().with_socket_type(self.config.socket_type);
@@ -184,15 +183,7 @@ impl Connection {
             our_props = our_props.with_identity(self.config.identity.clone());
         }
         let mut cmds = Vec::new();
-        // CURVE/NULL ignore the greeting bytes after capture.
-        // Pass both directions so the mechanism can compute the
-        // transcript correctly regardless of role.
-        let result = self.mechanism.start(
-            &mut cmds,
-            our_props,
-            &self.our_greeting,
-            &self.peer_greeting,
-        );
+        let result = self.mechanism.start(&mut cmds, our_props);
         self.write_outbound_commands(&cmds)?;
         result?;
         Ok(true)

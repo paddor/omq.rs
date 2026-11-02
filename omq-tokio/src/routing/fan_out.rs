@@ -84,7 +84,6 @@ pub(crate) struct Submitter {
     changed: Arc<crate::engine::signal::StateSignal>,
     mode: FanOutMode,
     send_count: Arc<AtomicU32>,
-    xpub_nodrop: bool,
     mute_policy: FanOutMutePolicy,
     compatibility: super::SendCompatibility,
     #[cfg(feature = "dart")]
@@ -184,7 +183,6 @@ impl Submitter {
             changed: self.changed.clone(),
             mode: self.mode,
             send_count: self.send_count.clone(),
-            xpub_nodrop: self.xpub_nodrop,
             mute_policy: self.mute_policy,
             compatibility: self.compatibility,
             #[cfg(feature = "dart")]
@@ -521,7 +519,6 @@ pub(crate) struct FanOutSend {
     generation: Arc<AtomicU64>,
     changed: Arc<crate::engine::signal::StateSignal>,
     mode: FanOutMode,
-    xpub_nodrop: bool,
     mute_policy: FanOutMutePolicy,
     pub(super) compatibility: super::SendCompatibility,
     #[cfg(feature = "dart")]
@@ -619,7 +616,6 @@ impl FanOutSend {
             generation,
             changed: Arc::new(crate::engine::signal::StateSignal::new()),
             mode,
-            xpub_nodrop: options.xpub_nodrop,
             mute_policy,
             compatibility: super::SendCompatibility::Native,
             #[cfg(feature = "dart")]
@@ -648,7 +644,6 @@ impl FanOutSend {
             changed: self.changed.clone(),
             mode: self.mode,
             send_count: Arc::new(AtomicU32::new(0)),
-            xpub_nodrop: self.xpub_nodrop,
             mute_policy: self.mute_policy,
             compatibility: self.compatibility,
             #[cfg(feature = "dart")]

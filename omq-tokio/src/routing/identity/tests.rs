@@ -630,6 +630,60 @@ async fn send_retry_changes_wait_queue_after_handover_before_registration() {
 }
 
 #[tokio::test]
+async fn server_send_retry_changes_wait_queue_after_replacement() {
+    let options = Options::default().workload_profile(omq_proto::WorkloadProfile::Throughput);
+    let mut send = IdentitySend::new(SocketType::Server, &options);
+    let submitter = send.submitter();
+    let (old_tx, _old_rx) = send_pipe(1);
+    send.connection_added(7, peer_handle(old_tx), Bytes::from_static(b"peer"), false);
+    assert!(matches!(
+        submitter.try_send_server_to(7, Message::single("old queued")),
+        Ok(Ok(()))
+    ));
+    let body = Message::single("pending body");
+    let Err(SendRetry::Full(returned, old_space)) =
+        submitter.try_send_server_to(7, body.clone()).unwrap()
+    else {
+        panic!("old peer must be full");
+    };
+
+    // The replacement and its old-queue notification happen before the retry
+    // captures the old signal's generation. No further old wake will arrive.
+    send.connection_removed(7);
+    let (mut new_tx, mut new_rx) = send_pipe(1);
+    new_tx.try_send(Message::single("new queued")).unwrap();
+    send.connection_added(7, peer_handle(new_tx), Bytes::from_static(b"peer"), false);
+    let old_space = old_space.expect("pipe space signal");
+    let seen = old_space.generation();
+    assert!(old_space.changed_after(seen).now_or_never().is_none());
+
+    let retried = tokio::time::timeout(
+        Duration::from_secs(1),
+        submitter.retry_server_full(7, returned, Some(old_space.clone())),
+    )
+    .await
+    .expect("replacement retry must not wait on the retired queue")
+    .unwrap();
+    let Err(SendRetry::Full(returned, new_space)) = retried else {
+        panic!("replacement peer must still be full");
+    };
+    assert_eq!(returned, body);
+
+    let wait = submitter.retry_server_full(7, returned, new_space);
+    tokio::pin!(wait);
+    assert!(wait.as_mut().now_or_never().is_none());
+    let mut received = Vec::new();
+    assert_eq!(new_rx.drain_into(&mut received, 1, usize::MAX), 1);
+    assert_eq!(received.pop().unwrap(), Message::single("new queued"));
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), wait).await,
+        Ok(Ok(Ok(())))
+    ));
+    assert_eq!(new_rx.drain_into(&mut received, 2, usize::MAX), 1);
+    assert_eq!(received.pop().unwrap(), body);
+}
+
+#[tokio::test]
 async fn pending_send_follows_full_replacement_until_it_drains() {
     for fanring in [false, true] {
         let send_pipe = |capacity| {

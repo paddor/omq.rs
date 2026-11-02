@@ -282,53 +282,26 @@ impl Submitter {
         msg: Message,
         space: Option<Arc<StateSignal>>,
     ) -> Result<core::result::Result<(), SendRetry>> {
-        let Some(space) = space else {
-            tokio::task::yield_now().await;
-            return self.try_send_to(identity, msg);
-        };
-        let seen = space.generation();
-        let changed = space.changed_after(seen);
-        tokio::pin!(changed);
-        let Err(SendRetry::Full(returned, next_space)) = self.try_send_to(identity, msg)? else {
-            return Ok(Ok(()));
-        };
-        if !next_space
-            .as_ref()
-            .is_some_and(|next| Arc::ptr_eq(&space, next))
-        {
-            // Handover may have notified the old queue before we captured its
-            // generation. Never wait there after retrying a replacement queue.
-            tokio::task::yield_now().await;
-            return Ok(Err(SendRetry::Full(returned, next_space)));
-        }
-        changed.await;
-        self.try_send_to(identity, returned)
+        retry_full(|msg| self.try_send_to(identity, msg), msg, space).await
+    }
+
+    async fn retry_server_full(
+        &self,
+        peer_id: u64,
+        msg: Message,
+        space: Option<Arc<StateSignal>>,
+    ) -> Result<core::result::Result<(), SendRetry>> {
+        retry_full(|msg| self.try_send_server_to(peer_id, msg), msg, space).await
     }
 
     pub(crate) async fn send_server(&self, mut msg: Message) -> Result<()> {
         let routing_id = take_server_routing_id(&mut msg)?;
         let peer_id = u64::from(routing_id - 1);
-        loop {
-            let retry = self.try_send_server_to(peer_id, msg)?;
-            match retry {
-                Ok(()) => return Ok(()),
-                Err(SendRetry::Full(returned, space)) => {
-                    msg = returned;
-                    let Some(space) = space else {
-                        tokio::task::yield_now().await;
-                        continue;
-                    };
-                    let seen = space.generation();
-                    let changed = space.changed_after(seen);
-                    tokio::pin!(changed);
-                    match self.try_send_server_to(peer_id, msg)? {
-                        Ok(()) => return Ok(()),
-                        Err(SendRetry::Full(returned, _)) => msg = returned,
-                    }
-                    changed.await;
-                }
-            }
+        let mut retry = self.try_send_server_to(peer_id, msg)?;
+        while let Err(SendRetry::Full(returned, space)) = retry {
+            retry = self.retry_server_full(peer_id, returned, space).await?;
         }
+        Ok(())
     }
 
     pub(crate) fn try_send_server(
@@ -675,6 +648,35 @@ impl Submitter {
             }
         }
     }
+}
+
+/// Waits for `space` to change after a full send, then retries once.
+async fn retry_full(
+    try_send: impl Fn(Message) -> Result<core::result::Result<(), SendRetry>>,
+    msg: Message,
+    space: Option<Arc<StateSignal>>,
+) -> Result<core::result::Result<(), SendRetry>> {
+    let Some(space) = space else {
+        tokio::task::yield_now().await;
+        return try_send(msg);
+    };
+    let seen = space.generation();
+    let changed = space.changed_after(seen);
+    tokio::pin!(changed);
+    let Err(SendRetry::Full(returned, next_space)) = try_send(msg)? else {
+        return Ok(Ok(()));
+    };
+    if !next_space
+        .as_ref()
+        .is_some_and(|next| Arc::ptr_eq(&space, next))
+    {
+        // Handover may have notified the old queue before we captured its
+        // generation. Never wait there after retrying a replacement queue.
+        tokio::task::yield_now().await;
+        return Ok(Err(SendRetry::Full(returned, next_space)));
+    }
+    changed.await;
+    try_send(returned)
 }
 
 fn take_server_routing_id(msg: &mut Message) -> Result<u32> {

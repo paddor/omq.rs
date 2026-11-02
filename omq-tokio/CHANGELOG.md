@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A DART peer attaching after socket close or last-handle drop gets a
   closed receive queue, like wire peers, instead of filling an unread one.
+- A blocking SERVER send no longer waits on a stale queue signal when the
+  peer's send queue changes while it is full.
 
 ## [0.33.0] - 2026-10-29
 

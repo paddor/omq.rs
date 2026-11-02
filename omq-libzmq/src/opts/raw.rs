@@ -1,6 +1,5 @@
 //! Read and write raw option values at the C boundary.
 
-use crate::error::fail;
 use std::ffi::c_int;
 
 pub(super) fn read_i32(optval: *const libc::c_void, optvallen: usize) -> Option<i32> {
@@ -73,102 +72,117 @@ pub(super) fn read_key(optval: *const libc::c_void, optvallen: usize) -> Option<
     None
 }
 
-pub(crate) fn write_i32(optval: *mut libc::c_void, optvallen: *mut usize, val: i32) -> c_int {
-    if optval.is_null() || optvallen.is_null() {
-        return crate::error::fail(libc::EFAULT);
-    }
-    // SAFETY: optvallen is non-null (checked above); reading the available size.
-    let avail = unsafe { *optvallen };
-    if avail < 4 {
-        return crate::error::fail(libc::EINVAL);
-    }
-    // SAFETY: optval is non-null with at least 4 bytes available (checked above).
-    unsafe {
-        std::ptr::write_bytes(optval.cast::<u8>(), 0, avail);
-        std::ptr::write_unaligned(optval.cast::<i32>(), val);
-        *optvallen = 4;
-    }
-    0
+/// Caller storage for a `zmq_getsockopt`-style value: a buffer and its
+/// in/out length. Writers zero-fill as libzmq does where noted and set the
+/// written length; they fail with `EFAULT` for null pointers and `EINVAL`
+/// for a short buffer.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct OptOut {
+    ptr: *mut libc::c_void,
+    len: *mut usize,
 }
 
-pub(super) fn write_i64(optval: *mut libc::c_void, optvallen: *mut usize, val: i64) -> c_int {
-    if optval.is_null() || optvallen.is_null() {
-        return crate::error::fail(libc::EFAULT);
+impl OptOut {
+    pub(crate) fn new(ptr: *mut libc::c_void, len: *mut usize) -> Self {
+        Self { ptr, len }
     }
-    // SAFETY: optvallen is non-null (checked above).
-    let avail = unsafe { *optvallen };
-    if avail < 8 {
-        return crate::error::fail(libc::EINVAL);
-    }
-    // SAFETY: optval is non-null with at least 8 bytes available (checked above).
-    unsafe {
-        std::ptr::write_bytes(optval.cast::<u8>(), 0, avail);
-        std::ptr::write_unaligned(optval.cast::<i64>(), val);
-        *optvallen = 8;
-    }
-    0
-}
 
-pub(super) fn write_bytes(optval: *mut libc::c_void, optvallen: *mut usize, data: &[u8]) -> c_int {
-    if optval.is_null() || optvallen.is_null() {
-        return crate::error::fail(libc::EFAULT);
-    }
-    // SAFETY: optvallen is non-null (checked above).
-    let avail = unsafe { *optvallen };
-    if avail < data.len() {
-        return crate::error::fail(libc::EINVAL);
-    }
-    // SAFETY: optval is non-null with at least data.len() bytes available.
-    unsafe {
-        std::ptr::copy_nonoverlapping(data.as_ptr(), optval.cast::<u8>(), data.len());
-        *optvallen = data.len();
-    }
-    0
-}
-
-pub(crate) fn write_string(optval: *mut libc::c_void, optvallen: *mut usize, data: &[u8]) -> c_int {
-    if optval.is_null() || optvallen.is_null() {
-        return crate::error::fail(libc::EFAULT);
-    }
-    // SAFETY: optvallen is non-null (checked above).
-    let avail = unsafe { *optvallen };
-    let needed = data.len() + 1;
-    if avail < needed {
-        return fail(libc::EINVAL);
-    }
-    // SAFETY: optval is non-null with at least `needed` bytes available.
-    unsafe {
-        std::ptr::copy_nonoverlapping(data.as_ptr(), optval.cast::<u8>(), data.len());
-        *optval.cast::<u8>().add(data.len()) = 0;
-        *optvallen = needed;
-    }
-    0
-}
-
-pub(super) fn write_key(optval: *mut libc::c_void, optvallen: *mut usize, key: &[u8; 32]) -> c_int {
-    if optval.is_null() || optvallen.is_null() {
-        return crate::error::fail(libc::EFAULT);
-    }
-    // SAFETY: optvallen is non-null (checked above).
-    let avail = unsafe { *optvallen };
-    if avail >= 41
-        && let Ok(z85) = omq_tokio::proto::z85::encode(key)
-    {
-        // SAFETY: optval has at least 41 bytes available (checked above).
-        unsafe {
-            std::ptr::copy_nonoverlapping(z85.as_ptr(), optval.cast::<u8>(), 40);
-            *(optval.cast::<u8>()).add(40) = 0;
-            *optvallen = 41;
+    /// Available buffer size, after the null checks.
+    fn avail(self) -> Result<usize, c_int> {
+        if self.ptr.is_null() || self.len.is_null() {
+            return Err(libc::EFAULT);
         }
-        return 0;
+        // SAFETY: len is non-null (checked above); reading the available size.
+        Ok(unsafe { *self.len })
     }
-    if avail >= 32 {
-        // SAFETY: optval has at least 32 bytes available (checked above).
-        unsafe {
-            std::ptr::copy_nonoverlapping(key.as_ptr(), optval.cast::<u8>(), 32);
-            *optvallen = 32;
+
+    /// Zero the whole buffer, then write a native-endian integer.
+    fn scalar<const N: usize>(self, value: [u8; N]) -> Result<(), c_int> {
+        let avail = self.avail()?;
+        if avail < N {
+            return Err(libc::EINVAL);
         }
-        return 0;
+        // SAFETY: ptr is non-null with at least N of `avail` bytes writable
+        // (checked above); len is non-null.
+        unsafe {
+            std::ptr::write_bytes(self.ptr.cast::<u8>(), 0, avail);
+            std::ptr::copy_nonoverlapping(value.as_ptr(), self.ptr.cast::<u8>(), N);
+            *self.len = N;
+        }
+        Ok(())
     }
-    crate::error::fail(libc::EINVAL)
+
+    pub(crate) fn i32(self, value: i32) -> Result<(), c_int> {
+        self.scalar(value.to_ne_bytes())
+    }
+
+    pub(crate) fn i64(self, value: i64) -> Result<(), c_int> {
+        self.scalar(value.to_ne_bytes())
+    }
+
+    pub(crate) fn bytes(self, data: &[u8]) -> Result<(), c_int> {
+        let avail = self.avail()?;
+        if avail < data.len() {
+            return Err(libc::EINVAL);
+        }
+        // SAFETY: ptr is non-null with at least data.len() bytes available.
+        unsafe {
+            std::ptr::copy_nonoverlapping(data.as_ptr(), self.ptr.cast::<u8>(), data.len());
+            *self.len = data.len();
+        }
+        Ok(())
+    }
+
+    /// Write `data` plus a NUL terminator.
+    pub(crate) fn string(self, data: &[u8]) -> Result<(), c_int> {
+        let avail = self.avail()?;
+        let needed = data.len() + 1;
+        if avail < needed {
+            return Err(libc::EINVAL);
+        }
+        // SAFETY: ptr is non-null with at least `needed` bytes available.
+        unsafe {
+            std::ptr::copy_nonoverlapping(data.as_ptr(), self.ptr.cast::<u8>(), data.len());
+            *self.ptr.cast::<u8>().add(data.len()) = 0;
+            *self.len = needed;
+        }
+        Ok(())
+    }
+
+    /// [`string`](Self::string), then zero the rest of the buffer.
+    pub(crate) fn padded_string(self, data: &[u8]) -> Result<(), c_int> {
+        let avail = self.avail()?;
+        self.string(data)?;
+        let needed = data.len() + 1;
+        // SAFETY: the string fit, so ptr is non-null with `avail >= needed`
+        // writable bytes.
+        unsafe { std::ptr::write_bytes(self.ptr.cast::<u8>().add(needed), 0, avail - needed) };
+        Ok(())
+    }
+
+    /// A CURVE key as 40 Z85 characters plus NUL when the buffer has room,
+    /// else as 32 raw bytes.
+    pub(crate) fn key(self, key: &[u8; 32]) -> Result<(), c_int> {
+        let avail = self.avail()?;
+        if avail >= 41
+            && let Ok(z85) = omq_tokio::proto::z85::encode(key)
+        {
+            // SAFETY: ptr has at least 41 bytes available (checked above).
+            unsafe {
+                std::ptr::copy_nonoverlapping(z85.as_ptr(), self.ptr.cast::<u8>(), 40);
+                *(self.ptr.cast::<u8>()).add(40) = 0;
+                *self.len = 41;
+            }
+            return Ok(());
+        }
+        if avail >= 32 {
+            // SAFETY: ptr has at least 32 bytes available (checked above).
+            unsafe {
+                std::ptr::copy_nonoverlapping(key.as_ptr(), self.ptr.cast::<u8>(), 32);
+                *self.len = 32;
+            }
+            return Ok(());
+        }
+        Err(libc::EINVAL)
+    }
 }

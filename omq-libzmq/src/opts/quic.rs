@@ -3,10 +3,8 @@
 
 use std::ffi::c_int;
 
-use super::QuicOverlay;
-use super::raw::{
-    none_if_empty, read_bytes, read_i32, read_string, write_bytes, write_i32, write_string,
-};
+use super::raw::{OptOut, none_if_empty, read_bytes, read_i32, read_string};
+use super::{QuicOverlay, overlay};
 use crate::error::fail;
 
 #[cfg(feature = "webtransport")]
@@ -112,44 +110,31 @@ fn set_path(quic: &mut QuicOverlay, optval: *const libc::c_void, len: usize) -> 
         .map(|()| quic.webtransport_path = path)
 }
 
-/// `None` when `option` is not a QUIC option.
+/// `Ok(false)` when `option` is not a QUIC option.
 pub(super) fn get(
     sock: &crate::socket::OmqSocket,
     option: c_int,
-    optval: *mut libc::c_void,
-    optvallen: *mut usize,
-) -> Option<c_int> {
+    out: OptOut,
+) -> Result<bool, c_int> {
     if !is_quic_option(option) {
-        return None;
+        return Ok(false);
     }
-    let Ok(overlay) = sock.overlay.lock() else {
-        return Some(fail(crate::error::ETERM));
-    };
+    let overlay = overlay(sock)?;
     let quic = &overlay.quic;
-    let bytes =
-        |value: &Option<Vec<u8>>| write_bytes(optval, optvallen, value.as_deref().unwrap_or(b""));
-    Some(match option {
+    let bytes = |value: &Option<Vec<u8>>| out.bytes(value.as_deref().unwrap_or(b""));
+    match option {
         OMQ_QUIC_CERT_PEM => bytes(&quic.cert_pem),
         OMQ_QUIC_KEY_PEM => bytes(&quic.key_pem),
         OMQ_QUIC_TRUST_PEM => bytes(&quic.trust_pem),
-        OMQ_QUIC_SERVER_NAME => write_string(
-            optval,
-            optvallen,
-            quic.server_name.as_deref().unwrap_or("").as_bytes(),
-        ),
-        OMQ_QUIC_TRUST_SYSTEM => write_i32(optval, optvallen, i32::from(quic.trust_system)),
-        OMQ_QUIC_STREAM_WINDOW => write_i32(optval, optvallen, quic.stream_window),
-        OMQ_QUIC_MAX_READY_PEERS => write_i32(optval, optvallen, quic.max_ready_peers),
+        OMQ_QUIC_SERVER_NAME => out.string(quic.server_name.as_deref().unwrap_or("").as_bytes()),
+        OMQ_QUIC_TRUST_SYSTEM => out.i32(i32::from(quic.trust_system)),
+        OMQ_QUIC_STREAM_WINDOW => out.i32(quic.stream_window),
+        OMQ_QUIC_MAX_READY_PEERS => out.i32(quic.max_ready_peers),
         #[cfg(feature = "webtransport")]
-        OMQ_QUIC_ALLOWED_ORIGINS => write_bytes(
-            optval,
-            optvallen,
-            quic.allowed_origins.join("\n").as_bytes(),
-        ),
+        OMQ_QUIC_ALLOWED_ORIGINS => out.bytes(quic.allowed_origins.join("\n").as_bytes()),
         #[cfg(feature = "webtransport")]
-        OMQ_QUIC_WEBTRANSPORT_PATH => {
-            write_string(optval, optvallen, quic.webtransport_path.as_bytes())
-        }
+        OMQ_QUIC_WEBTRANSPORT_PATH => out.string(quic.webtransport_path.as_bytes()),
         _ => unreachable!("checked QUIC option"),
-    })
+    }?;
+    Ok(true)
 }

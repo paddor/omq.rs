@@ -37,9 +37,16 @@ mod set_security;
 
 use codes::DEFAULT_HANDSHAKE_IVL_MS;
 pub use get::zmq_getsockopt;
-pub(crate) use raw::{write_i32, write_string};
+pub(crate) use raw::OptOut;
 pub use set::zmq_setsockopt;
 pub use set_security::{OmqPlainCredential, omq_socket_set_plain_server_credentials};
+
+/// Lock the socket's overlay, or `ETERM` when the lock is poisoned.
+fn overlay(
+    sock: &crate::socket::OmqSocket,
+) -> Result<std::sync::MutexGuard<'_, SocketOverlay>, std::ffi::c_int> {
+    sock.overlay.lock().map_err(|_| crate::error::ETERM)
+}
 
 #[derive(Clone, Debug)]
 #[expect(clippy::struct_excessive_bools)]

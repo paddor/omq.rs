@@ -12,7 +12,7 @@ use tokio::runtime::Handle;
 
 use crate::error::c_try;
 use crate::notify::NotifyHandle;
-use crate::opts::{write_i32, write_string};
+use crate::opts::OptOut;
 
 /// Per-context: lazily-created `omq_tokio::Context` and ZMQ state.
 pub(crate) struct OmqContext {
@@ -531,30 +531,16 @@ pub extern "C" fn zmq_ctx_get_ext(
     if option == ZMQ_THREAD_NAME_PREFIX {
         // SAFETY: C callers pass null or a pointer from this API.
         let ctx = c_try!(unsafe { crate::handle::context(ctx_ptr) });
-        return write_padded_string(optval, optvallen, ctx.thread_name_prefix().as_bytes());
+        let out = OptOut::new(optval, optvallen);
+        c_try!(out.padded_string(ctx.thread_name_prefix().as_bytes()));
+        return 0;
     }
     let value = zmq_ctx_get(ctx_ptr, option);
     if value == -1 && option != ZMQ_MAX_MSGSZ {
         return -1;
     }
-    write_i32(optval, optvallen, value)
-}
-
-/// `write_string`, then zero the rest of the buffer as libzmq does.
-fn write_padded_string(optval: *mut c_void, optvallen: *mut usize, bytes: &[u8]) -> c_int {
-    if optvallen.is_null() {
-        return crate::error::fail(libc::EFAULT);
-    }
-    // SAFETY: optvallen is non-null (checked above).
-    let avail = unsafe { *optvallen };
-    let rc = write_string(optval, optvallen, bytes);
-    if rc == 0 {
-        let needed = bytes.len() + 1;
-        // SAFETY: write_string succeeded, so optval is non-null with
-        // `avail >= needed` writable bytes.
-        unsafe { std::ptr::write_bytes(optval.cast::<u8>().add(needed), 0, avail - needed) };
-    }
-    rc
+    c_try!(OptOut::new(optval, optvallen).i32(value));
+    0
 }
 
 #[cfg(test)]
@@ -567,17 +553,17 @@ mod tests {
     fn padded_string_zeroes_the_rest_of_the_buffer() {
         let mut buf = [0xFF_u8; 8];
         let mut len = buf.len();
-        let rc = write_padded_string(buf.as_mut_ptr().cast(), &raw mut len, b"omq");
-        assert_eq!(rc, 0);
+        let rc = OptOut::new(buf.as_mut_ptr().cast(), &raw mut len).padded_string(b"omq");
+        assert_eq!(rc, Ok(()));
         assert_eq!(len, 4);
         assert_eq!(&buf, b"omq\0\0\0\0\0");
 
         let mut small = 3;
-        let rc = write_padded_string(buf.as_mut_ptr().cast(), &raw mut small, b"omq");
-        assert_eq!(rc, -1);
+        let rc = OptOut::new(buf.as_mut_ptr().cast(), &raw mut small).padded_string(b"omq");
+        assert_eq!(rc, Err(libc::EINVAL));
         assert_eq!(small, 3);
-        let rc = write_padded_string(buf.as_mut_ptr().cast(), std::ptr::null_mut(), b"omq");
-        assert_eq!(rc, -1);
+        let rc = OptOut::new(buf.as_mut_ptr().cast(), std::ptr::null_mut()).padded_string(b"omq");
+        assert_eq!(rc, Err(libc::EFAULT));
     }
 
     #[test]

@@ -34,8 +34,54 @@ enum RuntimeMode {
     CurrentPoll,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Role {
+    Scatter,
+    Gather,
+    Client,
+    Server,
+}
+
+impl Role {
+    fn parse(name: &str) -> Self {
+        match name {
+            "scatter" => Self::Scatter,
+            "gather" => Self::Gather,
+            "client" => Self::Client,
+            "server" => Self::Server,
+            _ => panic!("unknown role"),
+        }
+    }
+
+    fn socket_type(self) -> SocketType {
+        match self {
+            Self::Scatter => SocketType::Scatter,
+            Self::Gather => SocketType::Gather,
+            Self::Client => SocketType::Client,
+            Self::Server => SocketType::Server,
+        }
+    }
+
+    fn receiving(self) -> bool {
+        matches!(self, Self::Gather | Self::Server)
+    }
+
+    /// CLIENT/SERVER round trips; SCATTER/GATHER measure throughput.
+    fn latency(self) -> bool {
+        matches!(self, Self::Client | Self::Server)
+    }
+}
+
+/// Spin budgets and DART settings applied to the socket options.
+struct Tuning {
+    spin: Duration,
+    io_spin: Duration,
+    window_messages: usize,
+    congestion: DartCongestion,
+}
+
 struct Config {
-    role: String,
+    role: Role,
     endpoint: omq_tokio::Endpoint,
     size: usize,
     duration: Duration,
@@ -43,10 +89,7 @@ struct Config {
     warmup: usize,
     throughput_warmup: Duration,
     drain: Duration,
-    spin: Duration,
-    io_spin: Duration,
-    window_messages: usize,
-    congestion: DartCongestion,
+    tuning: Tuning,
     runtime: RuntimeMode,
 }
 
@@ -73,7 +116,7 @@ impl Config {
         assert!(io_spin <= Duration::from_micros(50) || io_spin == Duration::MAX);
         assert!(runtime == RuntimeMode::Owned || (spin.is_zero() && io_spin.is_zero()));
         Self {
-            role: args[1].clone(),
+            role: Role::parse(&args[1]),
             endpoint: args[2].parse().expect("endpoint"),
             size,
             duration: Duration::from_secs_f64(args[4].parse().expect("seconds")),
@@ -87,51 +130,81 @@ impl Config {
                 std::env::var("OMQ_DART_DRAIN_SECS")
                     .map_or(2.0, |value| value.parse().expect("drain seconds")),
             ),
-            spin,
-            io_spin,
-            window_messages: std::env::var("OMQ_DART_WINDOW_MESSAGES")
-                .map_or(256, |value| value.parse().expect("window_messages")),
-            runtime,
-            congestion: match args[9].as_str() {
-                "lan" => DartCongestion::Lan,
-                "adaptive" => DartCongestion::Adaptive,
-                _ => panic!("unknown congestion mode"),
+            tuning: Tuning {
+                spin,
+                io_spin,
+                window_messages: std::env::var("OMQ_DART_WINDOW_MESSAGES")
+                    .map_or(256, |value| value.parse().expect("window_messages")),
+                congestion: match args[9].as_str() {
+                    "lan" => DartCongestion::Lan,
+                    "adaptive" => DartCongestion::Adaptive,
+                    _ => panic!("unknown congestion mode"),
+                },
             },
+            runtime,
         }
     }
 
-    fn socket_type(&self) -> SocketType {
-        match self.role.as_str() {
-            "scatter" => SocketType::Scatter,
-            "gather" => SocketType::Gather,
-            "client" => SocketType::Client,
-            "server" => SocketType::Server,
-            _ => panic!("unknown role"),
-        }
+    /// Native DART endpoint rather than TCP or QUIC.
+    fn native(&self) -> bool {
+        matches!(self.endpoint, omq_tokio::Endpoint::Dart { .. })
     }
 
-    fn receiving(&self) -> bool {
-        matches!(self.role.as_str(), "gather" | "server")
+    /// Every DART role but SCATTER receives into a payload pool.
+    fn recv_pool(&self) -> bool {
+        self.native() && self.role != Role::Scatter
+    }
+
+    /// Send-side body pool; receivers have none.
+    fn send_pool(&self) -> Option<PayloadPool> {
+        (!self.role.receiving()).then(|| {
+            let (slot_bytes, slots) = if self.native() {
+                (POOL_SLOT_BYTES, POOL_SLOTS)
+            } else {
+                (1024, 1024)
+            };
+            PayloadPool::new([(slot_bytes, slots)]).unwrap()
+        })
     }
 
     fn options(&self) -> Options {
-        let mut options = Options::default().recv_spin(self.spin);
-        options.workload_profile = Some(if matches!(self.role.as_str(), "client" | "server") {
+        let tuning = &self.tuning;
+        let mut options = Options::default().recv_spin(tuning.spin);
+        options.workload_profile = Some(if self.role.latency() {
             WorkloadProfile::Latency
         } else {
             WorkloadProfile::Throughput
         });
-        options.recv_batching = matches!(self.role.as_str(), "scatter" | "gather");
-        options.dart.io_spin = self.io_spin;
-        options.dart.window_messages = self.window_messages;
-        options.dart.congestion = self.congestion;
-        if matches!(self.endpoint, omq_tokio::Endpoint::Dart { .. }) && self.role != "scatter" {
+        options.recv_batching = !self.role.latency();
+        options.dart.io_spin = tuning.io_spin;
+        options.dart.window_messages = tuning.window_messages;
+        options.dart.congestion = tuning.congestion;
+        if self.recv_pool() {
             options.recv_payload_pool =
                 Some(PayloadPool::new([(POOL_SLOT_BYTES, POOL_SLOTS)]).unwrap());
         }
         #[cfg(feature = "quic")]
         ws_bench_config::configure(&mut options);
         options
+    }
+
+    /// The coordinator's ready event: placement, offloads, and DART setup.
+    fn ready_event(&self, affinity: &affinity::Affinity, offloads: &str) -> String {
+        let wire_version = if self.native() {
+            omq_proto::dart::VERSION.to_string()
+        } else {
+            "null".into()
+        };
+        let (capacity, slot_bytes) = if self.recv_pool() {
+            (POOL_SLOTS, POOL_SLOT_BYTES)
+        } else {
+            (0, 0)
+        };
+        format!(
+            "{{\"event\":\"ready\",\"affinity\":\"{}\",\"offloads\":{offloads},\"dart_wire_version\":{wire_version},\"dart_window_messages\":{},\"recv_pool_capacity\":{capacity},\"recv_pool_slot_bytes\":{slot_bytes}}}",
+            affinity.description(),
+            self.tuning.window_messages,
+        )
     }
 }
 
@@ -146,6 +219,12 @@ fn spin_budget(argument: &str) -> Duration {
 fn emit(event: &str) {
     println!("{event}");
     std::io::stdout().flush().unwrap();
+}
+
+fn emit_bound(endpoint: &omq_tokio::Endpoint) {
+    emit(&format!(
+        "{{\"event\":\"bound\",\"endpoint\":\"{endpoint}\"}}"
+    ));
 }
 
 fn offloads(socket: &Socket) -> String {
@@ -282,7 +361,7 @@ impl<'a> BodySource<'a> {
     }
 }
 
-fn scatter(socket: &Socket, config: &Config, native: bool, pool: &PayloadPool, at: Instant) {
+fn scatter(socket: &Socket, config: &Config, pool: &PayloadPool, at: Instant) {
     let mut bodies = BodySource::new(pool, config.size);
     let measure_at = at + config.throughput_warmup;
     let until = measure_at + config.duration;
@@ -290,7 +369,7 @@ fn scatter(socket: &Socket, config: &Config, native: bool, pool: &PayloadPool, a
     let mut counts = ScatterCounts::default();
     let mut sequence = 0u64;
     let mut wait = CapacityWait {
-        spin: config.spin,
+        spin: config.tuning.spin,
         deadline: None,
     };
     let mut now = at;
@@ -340,14 +419,15 @@ fn scatter(socket: &Socket, config: &Config, native: bool, pool: &PayloadPool, a
 
     drop(pending);
     std::thread::sleep((config.drain / 2).min(Duration::from_secs(1)));
-    if native {
+    if config.native() {
         let all_offered = counts.offered + counts.warmup_offered;
         wait_acknowledged(socket, all_offered, until + config.drain, &mut wait);
     }
-    scatter_result(socket, config, native, &counts);
+    scatter_result(socket, config, &counts);
 }
 
-fn scatter_result(socket: &Socket, config: &Config, native: bool, counts: &ScatterCounts) {
+fn scatter_result(socket: &Socket, config: &Config, counts: &ScatterCounts) {
+    let native = config.native();
     let ScatterCounts {
         offered,
         warmup_offered,
@@ -476,8 +556,7 @@ impl GatherTally {
 }
 
 fn gather(socket: &Socket, config: &Config, at: Instant) {
-    let recycle_pooled = matches!(config.endpoint, omq_tokio::Endpoint::Dart { .. })
-        && config.size > omq_tokio::message::MAX_INLINE_MESSAGE;
+    let recycle_pooled = config.native() && config.size > omq_tokio::message::MAX_INLINE_MESSAGE;
     let until = at + config.throughput_warmup + config.duration;
     let cancel = timed_cancel(until + config.drain);
     let mut batch = Vec::with_capacity(256);
@@ -649,42 +728,31 @@ fn main() {
         return;
     }
 
-    let placement = if config.receiving() {
+    let placement = if config.role.receiving() {
         affinity::Side::Receiver
     } else {
         affinity::Side::Sender
     };
     let context = Context::with_name("dartbench");
     affinity.pin_context("dartbench", 1, placement);
-    affinity.pin(if config.receiving() { 5 } else { 0 });
-    let native = matches!(config.endpoint, omq_tokio::Endpoint::Dart { .. });
-    let socket = context.blocking_socket(config.socket_type(), config.options());
-    let pool = (!config.receiving()).then(|| {
-        if native {
-            PayloadPool::new([(2048, 8192)]).unwrap()
-        } else {
-            PayloadPool::new([(1024, 1024)]).unwrap()
-        }
-    });
+    affinity.pin(if config.role.receiving() { 5 } else { 0 });
+    let socket = context.blocking_socket(config.role.socket_type(), config.options());
+    let pool = config.send_pool();
 
-    if config.receiving() {
-        let endpoint = socket.bind(config.endpoint.clone()).unwrap();
-        emit(&format!(
-            "{{\"event\":\"bound\",\"endpoint\":\"{endpoint}\"}}"
-        ));
+    if config.role.receiving() {
+        emit_bound(&socket.bind(config.endpoint.clone()).unwrap());
     } else {
         socket.connect(config.endpoint.clone()).unwrap();
     }
     socket.wait_connected(1, SETUP_TIMEOUT).unwrap();
-    emit_ready(&socket, &config, &affinity, native);
+    emit(&config.ready_event(&affinity, &offloads(&socket)));
 
     let at = start();
-    match config.role.as_str() {
-        "scatter" => scatter(&socket, &config, native, pool.as_ref().unwrap(), at),
-        "gather" => gather(&socket, &config, at),
-        "client" => client(&socket, &config, pool.as_ref().unwrap()),
-        "server" => server(&socket),
-        _ => unreachable!(),
+    match config.role {
+        Role::Scatter => scatter(&socket, &config, pool.as_ref().unwrap(), at),
+        Role::Gather => gather(&socket, &config, at),
+        Role::Client => client(&socket, &config, pool.as_ref().unwrap()),
+        Role::Server => server(&socket),
     }
     socket.close().unwrap();
     context.term();
@@ -693,8 +761,8 @@ fn main() {
 /// Run a latency role on the caller's current-thread runtime instead of an
 /// owned OMQ context.
 fn run_current_runtime(config: &Config, affinity: &affinity::Affinity) {
-    assert!(matches!(config.role.as_str(), "client" | "server"));
-    affinity.pin(if config.receiving() { 5 } else { 0 });
+    assert!(config.role.latency());
+    affinity.pin(if config.role.receiving() { 5 } else { 0 });
     // A poll interval of 1 checks IO on every scheduler tick.
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -706,29 +774,4 @@ fn run_current_runtime(config: &Config, affinity: &affinity::Affinity) {
         .build()
         .unwrap()
         .block_on(current::run(config, affinity));
-}
-
-/// Tell the coordinator the peer is connected, with placement and DART setup.
-fn emit_ready(socket: &Socket, config: &Config, affinity: &affinity::Affinity, native: bool) {
-    let wire_version = if native {
-        omq_proto::dart::VERSION.to_string()
-    } else {
-        "null".into()
-    };
-    emit(&format!(
-        "{{\"event\":\"ready\",\"affinity\":\"{}\",\"offloads\":{},\"dart_wire_version\":{wire_version},\"dart_window_messages\":{},\"recv_pool_capacity\":{},\"recv_pool_slot_bytes\":{}}}",
-        affinity.description(),
-        offloads(socket),
-        config.window_messages,
-        if native && config.role != "scatter" {
-            POOL_SLOTS
-        } else {
-            0
-        },
-        if native && config.role != "scatter" {
-            POOL_SLOT_BYTES
-        } else {
-            0
-        },
-    ));
 }

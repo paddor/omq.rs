@@ -7,41 +7,21 @@ use omq_tokio::diagnostics::{dart_capabilities, dart_stats};
 use omq_tokio::{Context, PayloadPool, Socket};
 use tokio_util::sync::CancellationToken;
 
-use super::{Config, RuntimeMode, SETUP_TIMEOUT, affinity, emit, format_offloads, make_body};
+use super::{
+    Config, RuntimeMode, SETUP_TIMEOUT, affinity, emit, emit_bound, format_offloads, make_body,
+};
 
 pub(super) async fn run(config: &Config, affinity: &affinity::Affinity) {
     let context = Context::current();
-    let socket = context.socket(config.socket_type(), config.options());
-    let native = matches!(config.endpoint, omq_tokio::Endpoint::Dart { .. });
-    let pool = (!config.receiving()).then(|| {
-        if native {
-            PayloadPool::new([(2048, 8192)]).unwrap()
-        } else {
-            PayloadPool::new([(1024, 1024)]).unwrap()
-        }
-    });
-    if config.receiving() {
-        let endpoint = socket.bind(config.endpoint.clone()).await.unwrap();
-        emit(&format!(
-            "{{\"event\":\"bound\",\"endpoint\":\"{endpoint}\"}}"
-        ));
+    let socket = context.socket(config.role.socket_type(), config.options());
+    let pool = config.send_pool();
+    if config.role.receiving() {
+        emit_bound(&socket.bind(config.endpoint.clone()).await.unwrap());
     } else {
         socket.connect(config.endpoint.clone()).await.unwrap();
     }
     socket.wait_connected(1, SETUP_TIMEOUT).await.unwrap();
-    let version = if native {
-        omq_proto::dart::VERSION.to_string()
-    } else {
-        "null".into()
-    };
-    emit(&format!(
-        "{{\"event\":\"ready\",\"affinity\":\"{}\",\"offloads\":{},\"dart_wire_version\":{version},\"dart_window_messages\":{},\"recv_pool_capacity\":{},\"recv_pool_slot_bytes\":{}}}",
-        affinity.description(),
-        format_offloads(dart_capabilities(&socket)),
-        config.window_messages,
-        if native { super::POOL_SLOTS } else { 0 },
-        if native { super::POOL_SLOT_BYTES } else { 0 },
-    ));
+    emit(&config.ready_event(affinity, &format_offloads(dart_capabilities(&socket))));
     // Keep driving connection setup and maintenance while awaiting the
     // runner's barrier. Stdin never blocks the current-thread runtime.
     tokio::task::spawn_blocking(super::start).await.unwrap();
@@ -56,7 +36,7 @@ pub(super) async fn run(config: &Config, affinity: &affinity::Affinity) {
             }
         })
     });
-    if config.receiving() {
+    if config.role.receiving() {
         server(&socket).await;
     } else {
         client(&socket, config, pool.as_ref().unwrap()).await;

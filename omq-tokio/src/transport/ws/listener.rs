@@ -138,7 +138,11 @@ pub(crate) async fn bind(
             .await?
             .into_iter()
             .next()
-            .ok_or_else(|| Error::InvalidEndpoint(format!("DNS lookup failed for {name}")))?,
+            .ok_or_else(|| {
+                Error::Io(std::io::Error::other(format!(
+                    "no addresses for {name}:{port}"
+                )))
+            })?,
         _ => unreachable!(),
     };
     let listener = crate::transport::tcp::reuse_addr_bind(addr)?;

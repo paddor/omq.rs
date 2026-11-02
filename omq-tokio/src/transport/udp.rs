@@ -128,7 +128,11 @@ async fn host_to_lookup(host: &Host, port: u16) -> Result<SocketAddr> {
             .await?
             .into_iter()
             .next()
-            .ok_or_else(|| Error::InvalidEndpoint(format!("udp: no address for {name}"))),
+            .ok_or_else(|| {
+                Error::Io(std::io::Error::other(format!(
+                    "no addresses for {name}:{port}"
+                )))
+            }),
         _ => unreachable!(),
     }
 }

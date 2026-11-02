@@ -35,7 +35,11 @@ pub(crate) fn load_jsonl<T: DeserializeOwned>(path: &Path) -> Vec<(usize, T)> {
 }
 
 /// Append a single row to a JSONL file, creating directories as needed.
+/// Setting `OMQ_BENCH_NO_WRITE` (any value) skips the write.
 pub(crate) fn append_jsonl<T: Serialize>(path: &Path, row: &T) {
+    if std::env::var_os("OMQ_BENCH_NO_WRITE").is_some() {
+        return;
+    }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).ok();
     }

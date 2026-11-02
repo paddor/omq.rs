@@ -333,8 +333,10 @@ impl SocketDriver {
             && !matches!(endpoint, Endpoint::Udp { .. }))
         .then(|| self.endpoints.dial_admission.clone());
         let setup_timeout = super::endpoints::dial_setup_timeout(&endpoint, &options);
-        let id = self.next_peer_id;
-        self.next_peer_id += 1;
+        let Some(id) = self.alloc_id() else {
+            ack.error(Error::Config("peer ID exhausted".into()));
+            return;
+        };
         let cancel = self.link.cancel.child_token();
         let task_cancel = cancel.clone();
         let task_endpoint = endpoint.clone();

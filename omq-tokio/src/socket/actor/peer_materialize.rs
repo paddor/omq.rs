@@ -15,7 +15,8 @@ mod inproc;
 mod recv_bypass;
 
 pub(super) use inproc::spawn_inproc_peer;
-use recv_bypass::{attach_recv_bypass, can_bypass_actor_recv, server_routing_id};
+pub(super) use recv_bypass::server_routing_id;
+use recv_bypass::{attach_recv_bypass, can_bypass_actor_recv};
 
 const PEER_INBOX_CAP: usize = 64;
 
@@ -515,21 +516,30 @@ fn allocate_peer_id(socket: &mut SocketDriver) -> Option<u64> {
     if socket.close.started && socket.routing.send_strategy.is_drained() {
         return None;
     }
-    let peer_id = next_peer_id(socket);
-    if matches!(
-        socket.socket_type,
-        SocketType::Server | SocketType::Req | SocketType::Rep
-    ) && server_routing_id(peer_id).is_none()
-    {
-        return None;
-    }
-    Some(peer_id)
+    socket.alloc_routable_peer_id()
 }
 
-fn next_peer_id(socket: &mut SocketDriver) -> u64 {
-    let peer_id = socket.next_peer_id;
-    socket.next_peer_id += 1;
-    peer_id
+impl SocketDriver {
+    /// Take the next peer or route ID. Peers and routes share one space.
+    pub(super) fn alloc_id(&mut self) -> Option<u64> {
+        let id = self.next_peer_id;
+        self.next_peer_id = id.checked_add(1)?;
+        Some(id)
+    }
+
+    /// Take a peer ID. SERVER, REQ, and REP route by `peer_id + 1` as u32,
+    /// so IDs past that range are refused.
+    pub(super) fn alloc_routable_peer_id(&mut self) -> Option<u64> {
+        let peer_id = self.alloc_id()?;
+        if matches!(
+            self.socket_type,
+            SocketType::Server | SocketType::Req | SocketType::Rep
+        ) && server_routing_id(peer_id).is_none()
+        {
+            return None;
+        }
+        Some(peer_id)
+    }
 }
 
 fn wire_framing(stream: &AnyStream, is_server: bool) -> WireFraming {

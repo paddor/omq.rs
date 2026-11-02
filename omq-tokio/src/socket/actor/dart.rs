@@ -102,10 +102,8 @@ impl SocketDriver {
             }
         };
 
-        let id = self.next_peer_id;
-        self.next_peer_id = self
-            .next_peer_id
-            .checked_add(1)
+        let id = self
+            .alloc_id()
             .ok_or_else(|| Error::Config("peer ID exhausted".into()))?;
         let route_id = id;
         let pipe = if connect {
@@ -234,7 +232,7 @@ impl SocketDriver {
         // A connect endpoint carries one peer at a time; a new generation
         // replaces the previous one.
         self.retire_dart_connect_generation(index).await;
-        let Some(peer_id) = self.next_dart_peer_id() else {
+        let Some(peer_id) = self.alloc_routable_peer_id() else {
             return;
         };
 
@@ -252,21 +250,6 @@ impl SocketDriver {
         let properties = ready_properties(ready);
         self.handle_handshake_succeeded(peer_id, 0, properties)
             .await;
-    }
-
-    /// Allocate a peer id. SERVER and REQ route by `peer_id + 1` as u32, so
-    /// ids past that range are refused.
-    fn next_dart_peer_id(&mut self) -> Option<u64> {
-        let next = self.next_peer_id.checked_add(1)?;
-        let peer_id = self.next_peer_id;
-        if matches!(self.socket_type, SocketType::Server | SocketType::Req)
-            && u32::try_from(next).is_err()
-        {
-            return None;
-        }
-
-        self.next_peer_id = next;
-        Some(peer_id)
     }
 
     /// Register a ready DART peer and build the IO half the endpoint worker
@@ -369,7 +352,7 @@ impl SocketDriver {
         if matches!(self.socket_type, SocketType::Server | SocketType::Req) {
             RecvSink::server(
                 sink,
-                u32::try_from(peer_id + 1).expect("checked server route"),
+                super::peer_materialize::server_routing_id(peer_id).expect("checked server route"),
             )
         } else {
             sink
@@ -393,27 +376,28 @@ impl SocketDriver {
     }
 
     pub(super) fn dart_peer_closed(&mut self, peer_id: u64) {
-        let Some(entry) = self
+        let Some(index) = self
             .endpoints
             .dart_endpoints
-            .iter_mut()
-            .find(|entry| entry.connect && entry.active_peer == Some(peer_id))
+            .iter()
+            .position(|entry| entry.connect && entry.active_peer == Some(peer_id))
         else {
             return;
         };
+        let entry = &mut self.endpoints.dart_endpoints[index];
         entry.active_peer = None;
         if self.close.started || entry.cancel.is_cancelled() {
             return;
         }
-        let Some(next) = self.next_peer_id.checked_add(1) else {
+        let Some(route_id) = self.alloc_id() else {
             return;
         };
-        entry.route_id = self.next_peer_id;
-        self.next_peer_id = next;
+        let entry = &mut self.endpoints.dart_endpoints[index];
+        entry.route_id = route_id;
         entry.pipe = self
             .routing
             .send_strategy
-            .make_dart_connect_pipe(entry.route_id, self.socket_type);
+            .make_dart_connect_pipe(route_id, self.socket_type);
     }
 
     pub(super) async fn stop_dart_endpoints(&mut self, target: Option<(&Endpoint, bool)>) -> bool {

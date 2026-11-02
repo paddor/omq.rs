@@ -295,8 +295,9 @@ impl SocketDriver {
         let network = self.resources.io_pool.network_primary();
         network.validate_datagrams(crate::transport::udp::MAX_DATAGRAM_SIZE)?;
         let sock = crate::transport::udp::connect(&endpoint).await?;
-        let peer_id = self.next_peer_id;
-        self.next_peer_id += 1;
+        let peer_id = self
+            .alloc_id()
+            .ok_or_else(|| Error::Config("peer ID exhausted".into()))?;
 
         let cancel = self.link.cancel.child_token();
         let (inbox_tx, inbox_rx) = crate::engine::control_inbox::channel(64);
@@ -587,8 +588,9 @@ impl SocketDriver {
         first: FirstAttempt,
         failed_attempts: u32,
     ) {
-        let route_id = self.next_peer_id;
-        self.next_peer_id += 1;
+        let Some(route_id) = self.alloc_id() else {
+            return;
+        };
 
         // STREAM assigns the routing id at connect() so callers can query and
         // address the peer before it connects.

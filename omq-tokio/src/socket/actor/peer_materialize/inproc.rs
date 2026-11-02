@@ -1,7 +1,7 @@
 //! Inproc peer setup: ports, send and receive paths, and the peer driver.
 
 use super::{
-    PEER_INBOX_CAP, PeerSetup, can_bypass_actor_recv, make_send_pipe, new_peer_entry, next_peer_id,
+    PEER_INBOX_CAP, PeerSetup, can_bypass_actor_recv, make_send_pipe, new_peer_entry,
     server_routing_id,
 };
 use crate::engine::SendPipeConsumer;
@@ -180,15 +180,7 @@ fn admit_inproc_peer(socket: &mut SocketDriver, peer_type: SocketType) -> Option
         return None;
     }
 
-    let peer_id = next_peer_id(socket);
-    if matches!(
-        socket.socket_type,
-        SocketType::Server | SocketType::Req | SocketType::Rep
-    ) && server_routing_id(peer_id).is_none()
-    {
-        return None;
-    }
-    Some(peer_id)
+    socket.alloc_routable_peer_id()
 }
 
 /// Pick the inproc send route: the handle-side pipe and, when sends go

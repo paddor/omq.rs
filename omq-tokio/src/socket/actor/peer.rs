@@ -424,8 +424,9 @@ impl SocketDriver {
         peer_ident: PeerIdent,
         mut peer: PeerSetup,
     ) {
-        let peer_id = self.next_peer_id;
-        self.next_peer_id += 1;
+        let Some(peer_id) = self.alloc_id() else {
+            return;
+        };
         // Bind side names peers by peer id. Connect side keeps the route id
         // that connect() already reported.
         let route_id = peer.route_id;
@@ -518,7 +519,8 @@ impl SocketDriver {
                     return;
                 }
                 if matches!(self.socket_type, SocketType::Req | SocketType::Rep) {
-                    let routing_id = u32::try_from(peer_id + 1).expect("REQ/REP peer ID checked");
+                    let routing_id = super::peer_materialize::server_routing_id(peer_id)
+                        .expect("REQ/REP peer ID checked");
                     self.stage_receive(peer_id, msg.with_routing_id(routing_id));
                     return;
                 }

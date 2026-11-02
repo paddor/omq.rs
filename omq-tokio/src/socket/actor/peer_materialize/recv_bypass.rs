@@ -138,7 +138,7 @@ pub(super) fn can_bypass_actor_recv(t: SocketType) -> bool {
     )
 }
 
-pub(super) fn server_routing_id(peer_id: u64) -> Option<u32> {
+pub(in crate::socket::actor) fn server_routing_id(peer_id: u64) -> Option<u32> {
     peer_id.checked_add(1).and_then(|id| u32::try_from(id).ok())
 }
 

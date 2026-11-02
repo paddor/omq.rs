@@ -249,7 +249,7 @@ impl SpscAwareRecv {
     }
 
     fn try_drain_queues(&self) -> DrainResult {
-        if let Some(peer) = &self.peer_recv {
+        if let Some(peer) = &self.handles.peer_recv {
             return match peer.lock().try_recv() {
                 Ok(message) => DrainResult::Message(message),
                 Err(Error::Closed) => DrainResult::Closed,
@@ -275,7 +275,7 @@ impl SpscAwareRecv {
         // Only enter a signaling drain when no single ready item was returned.
         // A failed fast probe is followed by another queue check after these
         // fences, before clearing signals or allowing the caller to park.
-        self.recv_signal.begin_drain();
+        self.handles.recv_signal.begin_drain();
         self.recv_pipe_notify.begin_drain();
         if let Some(msg) = self.take_conflate_message() {
             return DrainResult::Message(msg);
@@ -296,12 +296,12 @@ impl SpscAwareRecv {
         }
         if result.is_none()
             && all_empty
-            && (self.recv_signal.clear_after(all_empty)
+            && (self.handles.recv_signal.clear_after(all_empty)
                 || self
                     .recv_pipe_notify
                     .clear_after(state.recv_consumer.is_empty()))
         {
-            self.blocking_recv_waker.wake();
+            self.handles.blocking_recv_waker.wake();
         }
         drop(guard);
 
@@ -317,11 +317,13 @@ impl SpscAwareRecv {
     }
 
     pub(super) fn refresh_snapshot(&self, state: &mut DrainState) {
-        let current_gen = self.consumer_generation.load(Ordering::Acquire);
+        let current_gen = self.handles.consumer_generation.load(Ordering::Acquire);
         if state.generation == current_gen {
             return;
         }
-        state.tcp.clone_from(&self.tcp_consumers.read().unwrap());
+        state
+            .tcp
+            .clone_from(&self.handles.tcp_consumers.read().unwrap());
         state.generation = current_gen;
     }
 
@@ -360,7 +362,7 @@ impl SpscAwareRecv {
         let peer_source_count = tcp_len;
         // Batching bulk calls take one peer's whole window before moving
         // on. Everything else rotates peers after each message.
-        let batching = bulk && self.recv_batching;
+        let batching = bulk && self.tuning.batching;
         let limit = if !latency && peer_source_count > 1 && !batching {
             DrainLimit::One
         } else {

@@ -19,7 +19,7 @@ impl SpscAwareRecv {
                 DrainResult::Closed => return Err(Error::Closed),
                 DrainResult::Empty => {}
             }
-            let waiter = waiter.get_or_insert_with(|| self.blocking_recv_waker.register());
+            let waiter = waiter.get_or_insert_with(|| self.handles.blocking_recv_waker.register());
             waiter.prepare_sleep();
             match self.try_drain() {
                 DrainResult::Message(msg) => {
@@ -81,7 +81,7 @@ impl SpscAwareRecv {
                     woke_without_message = false;
                 }
             }
-            let waiter = waiter.get_or_insert_with(|| self.blocking_recv_waker.register());
+            let waiter = waiter.get_or_insert_with(|| self.handles.blocking_recv_waker.register());
             waiter.prepare_sleep();
             match self.try_drain() {
                 DrainResult::Message(msg) => {
@@ -128,7 +128,7 @@ impl SpscAwareRecv {
         &self,
         waker: std::task::Waker,
     ) -> crate::engine::signal::WakerRegistration {
-        self.blocking_recv_waker.register_waker(waker)
+        self.handles.blocking_recv_waker.register_waker(waker)
     }
 
     pub(crate) fn blocking_recv_until(&self, deadline: Instant) -> Result<Message> {
@@ -139,7 +139,7 @@ impl SpscAwareRecv {
                 DrainResult::Closed => return Err(Error::Closed),
                 DrainResult::Empty => {}
             }
-            let waiter = waiter.get_or_insert_with(|| self.blocking_recv_waker.register());
+            let waiter = waiter.get_or_insert_with(|| self.handles.blocking_recv_waker.register());
             waiter.prepare_sleep();
             match self.try_drain() {
                 DrainResult::Message(msg) => {
@@ -175,11 +175,11 @@ impl SpscAwareRecv {
         interrupted: impl Fn() -> bool,
     ) -> DrainResult {
         let result = self.try_drain();
-        if !matches!(result, DrainResult::Empty) || self.recv_spin.is_zero() {
+        if !matches!(result, DrainResult::Empty) || self.tuning.spin.is_zero() {
             return result;
         }
-        let spin_deadline = (self.recv_spin != Duration::MAX)
-            .then(|| crate::socket::deadline_after(self.recv_spin))
+        let spin_deadline = (self.tuning.spin != Duration::MAX)
+            .then(|| crate::socket::deadline_after(self.tuning.spin))
             .flatten();
         let deadline = match (deadline, spin_deadline) {
             (Some(timeout), Some(spin)) => Some(timeout.min(spin)),
@@ -237,9 +237,9 @@ impl SpscAwareRecv {
         // The full empty drain established these signals before spinning.
         // Deliveries and pipe closure mark them; source changes bump the
         // generation. An idle probe needs no mutable consumer access.
-        if self.recv_signal.is_idle()
+        if self.handles.recv_signal.is_idle()
             && self.recv_pipe_notify.is_idle()
-            && self.consumer_generation.load(Ordering::Acquire) == generation
+            && self.handles.consumer_generation.load(Ordering::Acquire) == generation
         {
             return DrainResult::Empty;
         }

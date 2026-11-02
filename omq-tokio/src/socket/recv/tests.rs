@@ -105,7 +105,7 @@ fn spawn_first_waiter(
 
 fn wait_until_parked(recv: &SpscAwareRecv, thread: &std::thread::Thread) {
     let deadline = Instant::now() + Duration::from_secs(1);
-    while !recv.blocking_recv_waker.has_waiter(thread.id()) {
+    while !recv.handles.blocking_recv_waker.has_waiter(thread.id()) {
         assert!(Instant::now() < deadline);
         std::thread::yield_now();
     }
@@ -181,7 +181,7 @@ fn concurrent_blocking_waiters_preserve_cancel_timeout_and_close() {
 fn concurrent_blocking_receivers_each_receive_from_one_batch() {
     let (recv, _, pipe) = bulk_receiver(0, 16, false);
     let recv = Arc::new(recv);
-    let waker = recv.blocking_recv_waker.clone();
+    let waker = recv.handles.blocking_recv_waker.clone();
     let (done_tx, done_rx) = std::sync::mpsc::channel();
     let mut workers = Vec::new();
     for _ in 0..2 {
@@ -229,7 +229,7 @@ fn concurrent_blocking_receivers_each_receive_from_one_batch() {
 fn overflowing_spin_duration_respects_receive_deadline() {
     for latency in [false, true] {
         let (mut recv, _, _pipe) = bulk_receiver(0, 16, latency);
-        recv.recv_spin = Duration::from_secs(u64::MAX);
+        recv.tuning.spin = Duration::from_secs(u64::MAX);
         assert!(matches!(
             recv.blocking_recv_timeout(Duration::ZERO),
             Err(omq_proto::Error::Timeout)
@@ -242,8 +242,8 @@ fn blocking_recv_spin_observes_delivery_and_close_before_and_after_parking() {
     for spin in [Duration::from_micros(50), Duration::from_secs(5)] {
         for close in [false, true] {
             let (mut recv, _, pipe) = bulk_receiver(0, 16, false);
-            recv.recv_spin = spin;
-            let waker = recv.blocking_recv_waker.clone();
+            recv.tuning.spin = spin;
+            let waker = recv.handles.blocking_recv_waker.clone();
             let (done_tx, done_rx) = std::sync::mpsc::channel();
             let (started_tx, started_rx) = std::sync::mpsc::channel();
             let worker = std::thread::spawn(move || {
@@ -286,13 +286,13 @@ fn blocking_recv_spin_observes_delivery_and_close_before_and_after_parking() {
 fn single_ring_spinning_observes_delivery_new_sources_and_close_in_both_profiles() {
     for latency in [false, true] {
         let (mut recv, mut producers, pipe) = bulk_receiver(1, 8, latency);
-        recv.recv_spin = Duration::MAX;
-        Arc::get_mut(&mut recv.tcp_consumers.write().unwrap()[0])
+        recv.tuning.spin = Duration::MAX;
+        Arc::get_mut(&mut recv.handles.tcp_consumers.write().unwrap()[0])
             .unwrap()
             .spin_probe = true;
-        let peers = recv.tcp_consumers.clone();
-        let generation = recv.consumer_generation.clone();
-        let signal = recv.recv_signal.clone();
+        let peers = recv.handles.tcp_consumers.clone();
+        let generation = recv.handles.consumer_generation.clone();
+        let signal = recv.handles.recv_signal.clone();
         let (done, received) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
             for _ in 0..3 {
@@ -385,7 +385,7 @@ fn bulk_releases_partial_windows_and_notifies_space() {
     for latency in [false, true] {
         let (recv, mut producers, _pipe) = bulk_receiver(4, 4, latency);
         preload(&mut producers, 4, 16);
-        let peers = recv.tcp_consumers.read().unwrap().clone();
+        let peers = recv.handles.tcp_consumers.read().unwrap().clone();
         let generations: Vec<_> = peers.iter().map(|p| p.space.generation()).collect();
         let mut out = Vec::new();
         assert_eq!(recv.try_recv_many_into(5, &mut out).unwrap(), 5);
@@ -435,7 +435,7 @@ fn bulk_first_message_exhausting_limit_still_releases_its_slot() {
 fn bulk_oversized_and_multipart_messages_stay_atomic() {
     for batching in [false, true] {
         let (mut recv, mut producers, _pipe) = bulk_receiver(2, 4, false);
-        recv.recv_batching = batching;
+        recv.tuning.batching = batching;
         let huge = Message::from_slice(&vec![7; RECV_BATCH_BYTES + 1]);
         let multipart = Message::multipart([vec![1; 40_000], vec![2; 40_000]]);
         producers[0].push(huge.clone()).unwrap();
@@ -484,8 +484,10 @@ fn bulk_disconnect_drains_unread_data_then_accepts_new_peer() {
     let (mut producer, peer) = tcp_consumer(99);
     producer.push(Message::from_slice(b"reconnected")).unwrap();
     producer.flush();
-    recv.tcp_consumers.write().unwrap().push(peer);
-    recv.consumer_generation.fetch_add(1, Ordering::Release);
+    recv.handles.tcp_consumers.write().unwrap().push(peer);
+    recv.handles
+        .consumer_generation
+        .fetch_add(1, Ordering::Release);
     drop(producer);
     pipe.close();
     assert_eq!(recv.try_recv_many_into(256, &mut out).unwrap(), 1);
@@ -523,7 +525,7 @@ async fn bulk_shared_pipe_releases_partial_batch_and_preserves_partial_success()
 #[tokio::test]
 async fn bulk_fair_rounds_include_peer_and_shared_sources() {
     let (recv, mut producers, pipe) = bulk_receiver(2, 4, false);
-    let first = recv.tcp_consumers.read().unwrap()[0].clone();
+    let first = recv.handles.tcp_consumers.read().unwrap()[0].clone();
     let generation = first.space.generation();
     preload(&mut producers, 4, 16);
     for seq in 0..4 {
@@ -556,8 +558,8 @@ async fn bulk_empty_drain_racing_arrival_keeps_receive_wakeup() {
 
 async fn check_bulk_wakeup(batching: bool) {
     let (mut recv, mut producers, _pipe) = bulk_receiver(2, 4, false);
-    recv.recv_batching = batching;
-    let signal = recv.recv_signal.clone();
+    recv.tuning.batching = batching;
+    let signal = recv.handles.recv_signal.clone();
     let sender = tokio::spawn(async move {
         for seq in 0_u32..2000 {
             let peer = seq as usize % 2;

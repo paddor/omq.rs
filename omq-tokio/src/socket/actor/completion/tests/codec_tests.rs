@@ -153,9 +153,7 @@ async fn attach_on_route(
 async fn stop_dial_transport(driver: &mut SocketDriver) -> u64 {
     assert_eq!(driver.endpoints.dialers.len(), 1);
     let dialer = &mut driver.endpoints.dialers[0];
-    dialer.cancel.cancel();
-    dialer.task.abort();
-    let _ = (&mut dialer.task).await;
+    dialer.task.stop().await;
     dialer.route_id
 }
 

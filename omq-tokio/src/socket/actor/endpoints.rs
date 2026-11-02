@@ -2,10 +2,10 @@ use omq_proto::Options;
 use std::sync::Arc;
 
 use super::{
-    ConnectionStatus, DialerEntry, DisconnectReason, Endpoint, Error, ListenerEntry, MonitorEvent,
-    PeerIdent, PeerInfo, Result, SocketDriver, SocketType, UdpDialerEntry, UdpListenerEntry,
-    bind_any, fake_handle, reject_encrypted_inproc, spawn_dish_listener, spawn_radio_sender,
-    supports_groups, supports_subscribe,
+    ConnectionStatus, DialerEntry, DisconnectReason, Endpoint, EndpointTask, Error, MonitorEvent,
+    PeerIdent, PeerInfo, Result, SocketDriver, SocketType, UdpDialerEntry, bind_any, fake_handle,
+    reject_encrypted_inproc, spawn_dish_listener, spawn_radio_sender, supports_groups,
+    supports_subscribe,
 };
 use crate::socket::actor::lifecycle::PeerLifecycle;
 
@@ -85,7 +85,7 @@ impl SocketDriver {
         self.endpoints
             .dialers
             .iter()
-            .any(|d| &d.endpoint == endpoint)
+            .any(|d| &d.task.endpoint == endpoint)
             || self
                 .peers
                 .values()
@@ -103,23 +103,10 @@ impl SocketDriver {
         }
         let pending =
             self.cancel_pending_endpoints(Some((endpoint, super::endpoint_resolution::Kind::Bind)));
-        let before = self.endpoints.listeners.len() + self.endpoints.udp_listeners.len();
         // Wait for each task so the address is free when unbind returns.
-        let (mut removed, kept) = std::mem::take(&mut self.endpoints.listeners)
-            .into_iter()
-            .partition::<Vec<_>, _>(|l| &l.endpoint == endpoint);
-        self.endpoints.listeners = kept;
-        for l in &mut removed {
-            super::stop_endpoint_task(&l.cancel, &mut l.task).await;
-        }
-        let (mut removed, kept) = std::mem::take(&mut self.endpoints.udp_listeners)
-            .into_iter()
-            .partition::<Vec<_>, _>(|l| &l.endpoint == endpoint);
-        self.endpoints.udp_listeners = kept;
-        for l in &mut removed {
-            super::stop_endpoint_task(&l.cancel, &mut l.task).await;
-        }
-        if pending || self.endpoints.listeners.len() + self.endpoints.udp_listeners.len() < before {
+        let removed = super::stop_matching(&mut self.endpoints.listeners, endpoint).await
+            + super::stop_matching(&mut self.endpoints.udp_listeners, endpoint).await;
+        if pending || removed > 0 {
             Ok(())
         } else {
             Err(Error::Unroutable)
@@ -158,16 +145,13 @@ impl SocketDriver {
 
     /// Stop the dial loops for `endpoint` and drop their connect routes.
     fn remove_dialers_to(&mut self, endpoint: &Endpoint) {
-        let mut removed_routes = Vec::new();
-        self.endpoints.dialers.retain(|d| {
-            if &d.endpoint == endpoint {
-                d.cancel.cancel();
-                removed_routes.push(d.route_id);
-                false
-            } else {
-                true
-            }
-        });
+        // Dropping an entry stops its task.
+        let removed_routes: Vec<u64> = self
+            .endpoints
+            .dialers
+            .extract_if(.., |d| d.task.endpoint == *endpoint)
+            .map(|d| d.route_id)
+            .collect();
 
         for route_id in removed_routes {
             self.remove_connect_route(route_id);
@@ -178,16 +162,12 @@ impl SocketDriver {
     fn remove_udp_dialers_to(&mut self, endpoint: &Endpoint) -> usize {
         // Cancel matching UDP dialers AND tell the SendStrategy the
         // synthetic peer is gone so RADIO stops queuing through it.
-        let mut removed_peers = Vec::new();
-        self.endpoints.udp_dialers.retain(|d| {
-            if &d.endpoint == endpoint {
-                d.cancel.cancel();
-                removed_peers.push(d.peer_id);
-                false
-            } else {
-                true
-            }
-        });
+        let removed_peers: Vec<u64> = self
+            .endpoints
+            .udp_dialers
+            .extract_if(.., |d| d.task.endpoint == *endpoint)
+            .map(|d| d.peer_id)
+            .collect();
 
         let removed = removed_peers.len();
         for pid in removed_peers {
@@ -274,7 +254,7 @@ impl SocketDriver {
         );
 
         let ret = resolved.clone();
-        self.endpoints.udp_listeners.push(UdpListenerEntry {
+        self.endpoints.udp_listeners.push(EndpointTask {
             endpoint: resolved,
             cancel,
             task,
@@ -337,10 +317,12 @@ impl SocketDriver {
         });
 
         self.endpoints.udp_dialers.push(UdpDialerEntry {
-            endpoint,
-            cancel,
+            task: EndpointTask {
+                endpoint,
+                cancel,
+                task,
+            },
             peer_id,
-            task,
         });
         Ok(())
     }
@@ -546,7 +528,7 @@ impl SocketDriver {
             }
             .run(bound.listener),
         );
-        self.endpoints.listeners.push(ListenerEntry {
+        self.endpoints.listeners.push(EndpointTask {
             endpoint: resolved.clone(),
             cancel,
             task,
@@ -638,13 +620,15 @@ impl SocketDriver {
         );
 
         self.endpoints.dialers.push(DialerEntry {
+            task: EndpointTask {
+                endpoint,
+                cancel,
+                task,
+            },
             options,
-            endpoint,
-            cancel,
             route_id,
             send_pipe_rx,
             failed_attempts,
-            task,
         });
     }
 

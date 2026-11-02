@@ -37,8 +37,7 @@ use super::monitor::{
 };
 use super::type_state::TypeState;
 use super::udp::{
-    JoinedGroups, UdpDialerEntry, UdpListenerEntry, fake_handle, new_joined_groups,
-    spawn_dish_listener, spawn_radio_sender,
+    JoinedGroups, fake_handle, new_joined_groups, spawn_dish_listener, spawn_radio_sender,
 };
 use crate::routing::{
     RecvStrategy, SendStrategy, max_peer_count, supports_groups, supports_subscribe,
@@ -240,45 +239,55 @@ async fn stop_peer_task(task: JoinHandle<()>) {
     let _ = tokio::time::timeout(PEER_TASK_JOIN_TIMEOUT, task).await;
 }
 
-/// Stop an endpoint task and wait until it has released its socket.
-async fn stop_endpoint_task(cancel: &CancellationToken, task: &mut JoinHandle<()>) {
-    cancel.cancel();
-    task.abort();
-    let _ = tokio::time::timeout(PEER_TASK_JOIN_TIMEOUT, task).await;
-}
-
-struct ListenerEntry {
+/// The task serving one listener or dialer. Dropping it cancels and aborts
+/// the task: a detached listener would keep its port bound, and a detached
+/// dialer would keep redialing, after unbind, disconnect, or close.
+struct EndpointTask {
     endpoint: Endpoint,
     cancel: CancellationToken,
     task: JoinHandle<()>,
 }
 
-impl Drop for ListenerEntry {
-    /// A detached listener would keep accepting, and keep its port bound,
-    /// after unbind or close.
+impl EndpointTask {
+    /// Stop the task and wait until it has released its socket.
+    async fn stop(&mut self) {
+        self.cancel.cancel();
+        self.task.abort();
+        let _ = tokio::time::timeout(PEER_TASK_JOIN_TIMEOUT, &mut self.task).await;
+    }
+}
+
+impl Drop for EndpointTask {
     fn drop(&mut self) {
         self.cancel.cancel();
         self.task.abort();
     }
+}
+
+/// Stop the tasks serving `endpoint`. Returns how many were removed.
+async fn stop_matching(tasks: &mut Vec<EndpointTask>, endpoint: &Endpoint) -> usize {
+    let mut removed: Vec<_> = tasks
+        .extract_if(.., |task| task.endpoint == *endpoint)
+        .collect();
+    for task in &mut removed {
+        task.stop().await;
+    }
+    removed.len()
 }
 
 struct DialerEntry {
+    task: EndpointTask,
     options: Arc<Options>,
-    endpoint: Endpoint,
-    cancel: CancellationToken,
     route_id: u64,
     send_pipe_rx: Option<crate::engine::SendPipeConsumer>,
     failed_attempts: Arc<std::sync::atomic::AtomicU32>,
-    task: JoinHandle<()>,
 }
 
-impl Drop for DialerEntry {
-    /// A dialer leaves the table only when it must stop. A detached task
-    /// would keep redialing, even after the socket closed.
-    fn drop(&mut self) {
-        self.cancel.cancel();
-        self.task.abort();
-    }
+/// One outbound UDP RADIO sender. Its synthetic peer ID is also its send
+/// route, so teardown can call `connection_removed`.
+struct UdpDialerEntry {
+    task: EndpointTask,
+    peer_id: u64,
 }
 
 struct PendingReceive {
@@ -415,11 +424,11 @@ impl Mailboxes {
 
 /// Bound, dialed, and resolving endpoints, plus setup admission.
 struct EndpointTable {
-    listeners: Vec<ListenerEntry>,
+    listeners: Vec<EndpointTask>,
     dialers: Vec<DialerEntry>,
     pending_endpoints: FxHashMap<u64, endpoint_resolution::PendingEndpoint>,
     /// UDP DISH listeners.
-    udp_listeners: Vec<UdpListenerEntry>,
+    udp_listeners: Vec<EndpointTask>,
     /// UDP RADIO outbound dialers.
     udp_dialers: Vec<UdpDialerEntry>,
     #[cfg(feature = "dart")]
@@ -463,7 +472,7 @@ impl EndpointTable {
             l.cancel.cancel();
         }
         for d in &self.dialers {
-            d.cancel.cancel();
+            d.task.cancel.cancel();
         }
     }
 }
@@ -947,11 +956,11 @@ impl SocketDriver {
             }
         }
 
-        for mut l in self.endpoints.listeners.drain(..) {
-            stop_endpoint_task(&l.cancel, &mut l.task).await;
+        for mut listener in self.endpoints.listeners.drain(..) {
+            listener.stop().await;
         }
-        for mut l in self.endpoints.udp_listeners.drain(..) {
-            stop_endpoint_task(&l.cancel, &mut l.task).await;
+        for mut listener in self.endpoints.udp_listeners.drain(..) {
+            listener.stop().await;
         }
         // Dropping an entry cancels and aborts its task.
         self.endpoints.dialers.clear();

@@ -22,7 +22,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::engine::{ActorPeerDriverHandle, PeerDriverCommand, PeerDriverData};
 use crate::transport::udp;
-use omq_proto::endpoint::Endpoint;
 use omq_proto::message::Message;
 
 /// Joined-groups set, shared between the socket actor (mutated by
@@ -32,39 +31,6 @@ pub(crate) type JoinedGroups = Arc<ArcSwap<FxHashSet<Bytes>>>;
 
 pub(crate) fn new_joined_groups() -> JoinedGroups {
     Arc::new(ArcSwap::from_pointee(FxHashSet::default()))
-}
-
-/// One bound UDP listener (DISH side). Cancelling the token tears down
-/// the listener task, which closes the underlying socket.
-pub(crate) struct UdpListenerEntry {
-    pub endpoint: Endpoint,
-    pub cancel: CancellationToken,
-    pub task: JoinHandle<()>,
-}
-
-impl Drop for UdpListenerEntry {
-    /// A detached listener would keep the UDP port bound after unbind or close.
-    fn drop(&mut self) {
-        self.cancel.cancel();
-        self.task.abort();
-    }
-}
-
-/// One outbound UDP "connection" (RADIO side). Holds the synthetic
-/// peer id under which the `SendStrategy` registered the sender, so
-/// teardown can call `connection_removed`.
-pub(crate) struct UdpDialerEntry {
-    pub endpoint: Endpoint,
-    pub cancel: CancellationToken,
-    pub peer_id: u64,
-    pub task: JoinHandle<()>,
-}
-
-impl Drop for UdpDialerEntry {
-    fn drop(&mut self) {
-        self.cancel.cancel();
-        self.task.abort();
-    }
 }
 
 /// Where a DISH listener delivers matching datagrams.

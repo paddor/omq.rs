@@ -75,7 +75,7 @@ impl SocketDriver {
             InternalEvent::ConnectGaveUp { endpoint, route_id } => {
                 self.endpoints
                     .dialers
-                    .retain(|d| !(d.route_id == route_id && d.endpoint == endpoint));
+                    .retain(|d| !(d.route_id == route_id && d.task.endpoint == endpoint));
                 self.remove_connect_route(route_id);
             }
             InternalEvent::PeerEvent { peer_id, event } => {
@@ -182,7 +182,7 @@ impl SocketDriver {
                 .map_or(0, |dialer| dialer.failed_attempts.load(Ordering::Relaxed))
                 .saturating_add(1)
         };
-        self.endpoints.dialers.retain(|d| d.endpoint != ep);
+        self.endpoints.dialers.retain(|d| d.task.endpoint != ep);
         self.start_redial(ep, peer.options.clone(), failed_attempts);
     }
 

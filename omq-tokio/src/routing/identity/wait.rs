@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use crate::engine::SendPipeProducer;
 use crate::engine::signal::StateSignal;
 use crate::routing::peer_outbound::PeerOutbound;
 use omq_proto::message::Message;
@@ -111,18 +112,17 @@ impl Submitter {
         };
         let (peer_id, waiting, outbound) = {
             let state = self.inner.lock().expect("identity inner poisoned");
-            let peer = state
-                .identity_to_peer
-                .get(identity)
-                .and_then(|id| state.peers.get(id));
-            match peer {
-                Some(peer) => (
-                    *state.identity_to_peer.get(identity).unwrap(),
-                    peer.target.space_available(),
-                    peer.target.outbound(&self.data_lanes),
-                ),
-                None => return,
-            }
+            let Some(peer_id) = state.route_id(identity) else {
+                return;
+            };
+            let Some(peer) = state.peers.get(&peer_id) else {
+                return;
+            };
+            (
+                peer_id,
+                peer.target.space_available(),
+                peer.target.outbound(&self.data_lanes),
+            )
         };
         if let Some(target) = outbound {
             self.wait_outbound(peer_id, &target, Some(identity)).await;
@@ -138,10 +138,7 @@ impl Submitter {
         if g.closed {
             return true;
         }
-        let peer = g
-            .identity_to_peer
-            .get(identity)
-            .and_then(|id| g.peers.get(id));
+        let peer = g.route_id(identity).and_then(|id| g.peers.get(&id));
         let Some(IdentityPeer {
             target: PeerTarget::Pipe(pipe) | PeerTarget::RepInproc(pipe),
             ..
@@ -149,9 +146,7 @@ impl Submitter {
         else {
             return true;
         };
-        // A replaced/removed pipe wakes its old signal on drop. Retry routing
-        // instead of parking on that old generation after a reconnect.
-        !Arc::ptr_eq(waiting, &pipe.space_available()) || !pipe.is_alive() || pipe.is_below_lwm()
+        pipe_progressed(pipe, waiting)
     }
 
     pub(crate) async fn wait_peer_send_progress(&self, peer_id: u64) {
@@ -177,9 +172,7 @@ impl Submitter {
                             .get(&peer_id)
                             .is_none_or(|peer| match &peer.target {
                                 PeerTarget::Pipe(pipe) | PeerTarget::RepInproc(pipe) => {
-                                    !Arc::ptr_eq(&space, &pipe.space_available())
-                                        || !pipe.is_alive()
-                                        || pipe.is_below_lwm()
+                                    pipe_progressed(pipe, &space)
                                 }
                                 _ => true,
                             })
@@ -211,4 +204,11 @@ impl Submitter {
             })
             .await;
     }
+}
+
+/// Whether a send waiting on `waiting` may retry. A replaced or removed pipe
+/// wakes its old signal on drop, so retry routing instead of parking on that
+/// old generation after a reconnect.
+fn pipe_progressed(pipe: &SendPipeProducer, waiting: &Arc<StateSignal>) -> bool {
+    !Arc::ptr_eq(waiting, &pipe.space_available()) || !pipe.is_alive() || pipe.is_below_lwm()
 }

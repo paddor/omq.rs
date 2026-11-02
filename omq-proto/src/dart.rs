@@ -397,19 +397,34 @@ pub fn encode_fragment(
         return None;
     }
 
-    output[0] = if length.is_some() { 0x81 } else { 0x82 };
-    output[1..9].copy_from_slice(&session.to_le_bytes());
-    output[9..17].copy_from_slice(&sequence.to_le_bytes());
+    let tag = if length.is_some() { 0x81 } else { 0x82 };
+    write_sequenced_header(output, tag, session, sequence);
     if let Some(length) = length {
-        output[17..25].copy_from_slice(&length.to_le_bytes());
+        output[DATA_HEADER..FIRST_HEADER].copy_from_slice(&length.to_le_bytes());
     }
     if let Some(group) = group {
-        output[prefix] = group.len() as u8;
-        output[prefix + 1..header_len].copy_from_slice(group);
+        write_group(&mut output[prefix..header_len], group);
     }
 
     output[header_len..].copy_from_slice(body);
     Some(size)
+}
+
+/// Write the tag, destination session, and sequence that open DATA and
+/// fragment datagrams.
+#[inline]
+fn write_sequenced_header(output: &mut [u8], tag: u8, session: u64, sequence: u64) {
+    output[0] = tag;
+    output[1..9].copy_from_slice(&session.to_le_bytes());
+    output[9..DATA_HEADER].copy_from_slice(&sequence.to_le_bytes());
+}
+
+/// Write a RADIO group as its length byte and bytes into exactly
+/// `1 + group.len()` bytes of `output`.
+#[inline]
+fn write_group(output: &mut [u8], group: &[u8]) {
+    output[0] = group.len() as u8;
+    output[1..].copy_from_slice(group);
 }
 
 /// A validated outer datagram. Socket-pair validation remains with the caller.
@@ -509,12 +524,9 @@ pub fn encode_sequenced_data(
     if length > MAX_DATAGRAM || output.len() < length {
         return None;
     }
-    output[0] = 1;
-    output[1..9].copy_from_slice(&session.to_le_bytes());
-    output[9..17].copy_from_slice(&sequence.to_le_bytes());
+    write_sequenced_header(output, 1, session, sequence);
     if let Some(group) = group {
-        output[DATA_HEADER] = group.len() as u8;
-        output[DATA_HEADER + 1..header].copy_from_slice(group);
+        write_group(&mut output[DATA_HEADER..header], group);
     }
     output[header..length].copy_from_slice(body);
     Some(length)

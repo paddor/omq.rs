@@ -379,16 +379,20 @@ impl IoPoolHandle {
             .is_some_and(|pool| pool.data_thread_offset() != 0)
     }
 
+    fn lease(&self, index: usize) -> IoThreadLease {
+        IoThreadLease {
+            pool: self.pool.clone(),
+            index,
+        }
+    }
+
     /// Reserve the least-loaded IO thread for one driver future.
     pub(crate) fn reserve_thread(&self) -> IoThreadLease {
         let index = match &self.pool {
             None => 0,
             Some(pool) => pool.assign_thread(),
         };
-        IoThreadLease {
-            pool: self.pool.clone(),
-            index,
-        }
+        self.lease(index)
     }
 
     /// Prefer the transport's reactor when it is among the least-loaded lanes.
@@ -398,10 +402,7 @@ impl IoPoolHandle {
             .pool
             .as_ref()
             .map_or(0, |pool| pool.assign_thread_preferred(preferred));
-        IoThreadLease {
-            pool: self.pool.clone(),
-            index,
-        }
+        self.lease(index)
     }
 
     /// Reserve data IO thread `index` regardless of its current load.
@@ -412,10 +413,7 @@ impl IoPoolHandle {
                 .load
                 .fetch_add(1, Ordering::Relaxed);
         }
-        IoThreadLease {
-            pool: self.pool.clone(),
-            index,
-        }
+        self.lease(index)
     }
 
     /// Alive tasks per owned runtime, control runtime first when present.
@@ -816,23 +814,9 @@ impl Context {
 
     /// Create an async socket on this context's runtime.
     pub fn socket(&self, socket_type: SocketType, options: Options) -> Socket {
-        assert!(
-            !self.inner.terminated.load(Ordering::Acquire),
-            "Context::socket() called on a terminated context"
-        );
-        assert!(
-            self.inner.is_owner_process(),
-            "Context::socket() called on a context inherited across fork"
-        );
-        self.inner.freeze_network();
-        let _guard = self.inner.primary_handle().enter();
-        let io_pool = self.inner.io_pool_handle();
-        Socket::new_with_io_pool(
-            socket_type,
-            options,
-            &io_pool,
-            self.inner.inproc_registry.clone(),
-        )
+        self.new_socket("Context::socket()", |io_pool, registry| {
+            Socket::new_with_io_pool(socket_type, options, io_pool, registry)
+        })
     }
 
     #[doc(hidden)]
@@ -842,23 +826,17 @@ impl Context {
         options: Options,
         config: Arc<crate::engine::RecvSinkConfig>,
     ) -> Socket {
-        assert!(
-            !self.inner.terminated.load(Ordering::Acquire),
-            "Context::socket_with_recv_sink_config() called on a terminated context"
-        );
-        assert!(
-            self.inner.is_owner_process(),
-            "Context::socket_with_recv_sink_config() called on a context inherited across fork"
-        );
-        self.inner.freeze_network();
-        let _guard = self.inner.primary_handle().enter();
-        let io_pool = self.inner.io_pool_handle();
-        Socket::new_with_recv_sink_config_and_io_pool(
-            socket_type,
-            options,
-            config,
-            &io_pool,
-            self.inner.inproc_registry.clone(),
+        self.new_socket(
+            "Context::socket_with_recv_sink_config()",
+            |io_pool, registry| {
+                Socket::new_with_recv_sink_config_and_io_pool(
+                    socket_type,
+                    options,
+                    config,
+                    io_pool,
+                    registry,
+                )
+            },
         )
     }
 
@@ -870,23 +848,9 @@ impl Context {
         options: Options,
         recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
     ) -> Socket {
-        assert!(
-            !self.inner.terminated.load(Ordering::Acquire),
-            "Context::socket_for_libzmq() called on a terminated context"
-        );
-        assert!(
-            self.inner.is_owner_process(),
-            "Context::socket_for_libzmq() called on a context inherited across fork"
-        );
-        self.inner.freeze_network();
-        let _guard = self.inner.primary_handle().enter();
-        Socket::new_for_libzmq(
-            socket_type,
-            options,
-            recv_sink_config,
-            &self.inner.io_pool_handle(),
-            self.inner.inproc_registry.clone(),
-        )
+        self.new_socket("Context::socket_for_libzmq()", |io_pool, registry| {
+            Socket::new_for_libzmq(socket_type, options, recv_sink_config, io_pool, registry)
+        })
     }
 
     /// Construct a blocking binding socket with libzmq send semantics.
@@ -903,6 +867,34 @@ impl Context {
         crate::blocking::Socket::new(
             self.socket_for_libzmq(socket_type, options, None),
             self.clone(),
+        )
+    }
+
+    /// Panic unless this context is live and owned by this process.
+    fn assert_usable(&self, caller: &str) {
+        assert!(
+            !self.inner.terminated.load(Ordering::Acquire),
+            "{caller} called on a terminated context"
+        );
+        assert!(
+            self.inner.is_owner_process(),
+            "{caller} called on a context inherited across fork"
+        );
+    }
+
+    /// Build a socket on the primary runtime once the context is checked
+    /// and its network limits are frozen.
+    fn new_socket(
+        &self,
+        caller: &str,
+        build: impl FnOnce(&IoPoolHandle, Arc<crate::transport::inproc::InprocRegistry>) -> Socket,
+    ) -> Socket {
+        self.assert_usable(caller);
+        self.inner.freeze_network();
+        let _guard = self.inner.primary_handle().enter();
+        build(
+            &self.inner.io_pool_handle(),
+            self.inner.inproc_registry.clone(),
         )
     }
 
@@ -927,14 +919,7 @@ impl Context {
                  (created with Context::current())"
             );
         };
-        assert!(
-            !self.inner.terminated.load(Ordering::Acquire),
-            "Context::block_on() called on a terminated context"
-        );
-        assert!(
-            self.inner.is_owner_process(),
-            "Context::block_on() called on a context inherited across fork"
-        );
+        self.assert_usable("Context::block_on()");
         let guard = pool.primary_job_tx.lock().expect("job_tx poisoned");
         let job_tx = guard
             .as_ref()

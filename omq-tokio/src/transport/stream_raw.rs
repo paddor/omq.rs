@@ -62,12 +62,12 @@ pub(crate) fn spawn_on<T: DriverStream + Send + 'static>(
     let index = assignment.index();
     let network = io_pool.network_on(index);
     let link = RawLink {
-        peer_id,
-        peer_out,
-        inbox: inbox_rx,
-        data_inbox: data_inbox_rx,
-        pool,
         send_pipe,
+        pool,
+        data_inbox: data_inbox_rx,
+        inbox: inbox_rx,
+        peer_out,
+        peer_id,
     };
 
     let task = io_pool.spawn_on(index, async move {
@@ -118,14 +118,33 @@ fn spawn<T: DriverStream + Send + 'static>(
     spawn_on(stream, peer, &io, io.reserve_thread(), Ok)
 }
 
-/// Actor-side endpoints of one STREAM peer.
+/// Actor-side endpoints of one STREAM peer, in drop order.
 struct RawLink {
-    peer_id: u64,
-    peer_out: PeerOutput,
-    inbox: control_inbox::Receiver,
-    data_inbox: data_inbox::Receiver,
-    pool: Option<crate::PayloadPool>,
     send_pipe: Option<SendPipeConsumer>,
+    pool: Option<crate::PayloadPool>,
+    data_inbox: data_inbox::Receiver,
+    inbox: control_inbox::Receiver,
+    peer_out: PeerOutput,
+    peer_id: u64,
+}
+
+/// Outbound bytes not yet fully written.
+struct PendingWrite {
+    bytes: Bytes,
+    /// Length of the written prefix.
+    offset: usize,
+}
+
+impl PendingWrite {
+    fn remaining(&self) -> &[u8] {
+        &self.bytes[self.offset..]
+    }
+}
+
+/// A draining close in progress.
+#[derive(Clone, Copy)]
+struct Linger {
+    deadline: Option<std::time::Instant>,
 }
 
 /// One STREAM connection. Fields drop in declaration order, which keeps the
@@ -134,22 +153,14 @@ struct RawDriver<R, W> {
     /// Inbound bytes waiting for actor mailbox space. Starts as the empty
     /// connect notification.
     pending_event: Option<Message>,
-    /// Outbound bytes not yet fully written, and the written prefix length.
-    pending: Option<Bytes>,
-    pending_offset: usize,
-    closing: bool,
-    deadline: Option<std::time::Instant>,
+    pending: Option<PendingWrite>,
+    linger: Option<Linger>,
     budget: DrainBudget,
     buf: Vec<u8>,
     writer: PacedWrite<W>,
     reader: PacedRead<R>,
     _network: crate::network_limit::Lane,
-    send_pipe: Option<SendPipeConsumer>,
-    pool: Option<crate::PayloadPool>,
-    data_inbox: data_inbox::Receiver,
-    inbox: control_inbox::Receiver,
-    peer_out: PeerOutput,
-    peer_id: u64,
+    link: RawLink,
 }
 
 impl<R, W> RawDriver<R, W> {
@@ -161,20 +172,13 @@ impl<R, W> RawDriver<R, W> {
         Self {
             pending_event: Some(Message::single(Bytes::new())),
             pending: None,
-            pending_offset: 0,
-            closing: false,
-            deadline: None,
+            linger: None,
             budget: DrainBudget::new(64, 64 * 1024),
             buf: vec![0u8; 64 * 1024],
             writer: PacedWrite::new(writer, network.egress()),
             reader: PacedRead::new(reader, network.ingress()),
             _network: network,
-            send_pipe: link.send_pipe,
-            pool: link.pool,
-            data_inbox: link.data_inbox,
-            inbox: link.inbox,
-            peer_out: link.peer_out,
-            peer_id: link.peer_id,
+            link,
         }
     }
 }
@@ -189,15 +193,15 @@ where
             // Commands, writes, and reads share one budget per turn; yield
             // once it is spent so other tasks on this runtime run.
             if self.budget.exhausted() {
-                self.inbox.release_consumed();
-                self.data_inbox.release_consumed();
+                self.link.inbox.release_consumed();
+                self.link.data_inbox.release_consumed();
                 self.budget.reset();
                 tokio::task::yield_now().await;
             }
             let _ = self.budget.account(0);
 
             // Release pacing reservations for directions this turn skips.
-            if self.closing || self.pending_event.is_some() {
+            if self.linger.is_some() || self.pending_event.is_some() {
                 self.reader.cancel_wait();
             }
             if self.pending.is_none() {
@@ -224,7 +228,11 @@ where
             return true;
         };
 
-        match self.peer_out.try_send(self.peer_id, message, false) {
+        match self
+            .link
+            .peer_out
+            .try_send(self.link.peer_id, message, false)
+        {
             Ok(()) => completion.note_event(),
             Err(crate::engine::SendPipeError::Full(message)) => {
                 self.pending_event = Some(message);
@@ -240,11 +248,12 @@ where
 
     /// A draining close has written every accepted output.
     fn drained(&self) -> bool {
-        self.closing
+        self.linger.is_some()
             && self.pending.is_none()
-            && self.inbox.is_empty()
-            && self.data_inbox.is_empty()
+            && self.link.inbox.is_empty()
+            && self.link.data_inbox.is_empty()
             && self
+                .link
                 .send_pipe
                 .as_ref()
                 .is_none_or(SendPipeConsumer::is_empty)
@@ -252,36 +261,42 @@ where
 
     /// Shut the write side down, bounded by cancellation and linger.
     async fn shutdown(&mut self, cancel: &CancellationToken) {
+        let deadline = self.linger_deadline();
         tokio::select! {
             biased;
             () = cancel.cancelled() => {},
-            () = async { tokio::time::sleep_until(self.deadline.unwrap().into()).await; },
-                if self.deadline.is_some() => {},
+            () = async { tokio::time::sleep_until(deadline.unwrap().into()).await; },
+                if deadline.is_some() => {},
             _ = self.writer.shutdown() => {},
         }
     }
 
+    fn linger_deadline(&self) -> Option<std::time::Instant> {
+        self.linger.and_then(|linger| linger.deadline)
+    }
+
     /// Wait for one event and serve it. Returns `false` to stop the driver.
     async fn serve(&mut self, cancel: &CancellationToken) -> bool {
+        let deadline = self.linger_deadline();
         tokio::select! {
             biased;
             () = cancel.cancelled() => false,
-            () = async { tokio::time::sleep_until(self.deadline.unwrap().into()).await; },
-                if self.deadline.is_some() => false,
-            cmd = self.inbox.recv() => self.on_command(cmd.as_ref()),
-            result = self.peer_out.ready(), if self.pending_event.is_some() => result.is_ok(),
+            () = async { tokio::time::sleep_until(deadline.unwrap().into()).await; },
+                if deadline.is_some() => false,
+            cmd = self.link.inbox.recv() => self.on_command(cmd.as_ref()),
+            result = self.link.peer_out.ready(), if self.pending_event.is_some() => result.is_ok(),
             written = async {
-                self.writer.write(&self.pending.as_ref().unwrap()[self.pending_offset..]).await
+                self.writer.write(self.pending.as_ref().unwrap().remaining()).await
             }, if self.pending.is_some() => self.on_written(written.ok()),
-            n = self.reader.read(&mut self.buf), if !self.closing && self.pending_event.is_none() => {
+            n = self.reader.read(&mut self.buf), if self.linger.is_none() && self.pending_event.is_none() => {
                 self.on_read(n.ok())
             },
-            data = self.data_inbox.recv(),
-                if self.pending.is_none() && (!self.closing || !self.data_inbox.is_empty()) => {
+            data = self.link.data_inbox.recv(),
+                if self.pending.is_none() && (self.linger.is_none() || !self.link.data_inbox.is_empty()) => {
                 self.on_data(data)
             },
-            () = async { self.send_pipe.as_ref().unwrap().ready().await },
-                if self.pending.is_none() && self.send_pipe.is_some() => self.on_pipe_ready(),
+            () = async { self.link.send_pipe.as_ref().unwrap().ready().await },
+                if self.pending.is_none() && self.link.send_pipe.is_some() => self.on_pipe_ready(),
         }
     }
 
@@ -293,10 +308,11 @@ where
             }
             // The first drain request fixes the linger deadline.
             Some(PeerDriverCommand::DrainAndClose { deadline }) => {
-                if !self.closing {
-                    self.closing = true;
-                    self.deadline = *deadline;
-                    self.data_inbox.close();
+                if self.linger.is_none() {
+                    self.linger = Some(Linger {
+                        deadline: *deadline,
+                    });
+                    self.link.data_inbox.close();
                 }
             }
         }
@@ -309,10 +325,10 @@ where
             return false;
         };
 
-        self.pending_offset += written;
-        if self.pending_offset == self.pending.as_ref().unwrap().len() {
+        let pending = self.pending.as_mut().unwrap();
+        pending.offset += written;
+        if pending.offset == pending.bytes.len() {
             self.pending = None;
-            self.pending_offset = 0;
         }
         true
     }
@@ -325,7 +341,7 @@ where
 
         let _ = self.budget.account(n);
         let bytes = &self.buf[..n];
-        let message = if let Some(pool) = &self.pool {
+        let message = if let Some(pool) = &self.link.pool {
             let Ok(message) = pool.message(n, |out| out.copy_from_slice(bytes)) else {
                 return false;
             };
@@ -347,7 +363,7 @@ where
 
     /// Take at most one message from the connect pipe.
     fn on_pipe_ready(&mut self) -> bool {
-        let pipe = self.send_pipe.as_mut().unwrap();
+        let pipe = self.link.send_pipe.as_mut().unwrap();
         let mut next = None;
         pipe.drain_queue_with(1, 64 * 1024, |message| {
             next = Some(message);
@@ -368,7 +384,10 @@ where
         if data.is_empty() {
             return false;
         }
-        self.pending = Some(data);
+        self.pending = Some(PendingWrite {
+            bytes: data,
+            offset: 0,
+        });
         true
     }
 }

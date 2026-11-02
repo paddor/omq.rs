@@ -1,7 +1,7 @@
 //! Run one benchmark cell: spawn peers, measure, and collect the result.
 
 use super::impls::{ImplDef, TransportKind, latency_env, latency_rep_subcmd, latency_req_subcmd};
-use super::{addr_for, cleanup_ipc_addr};
+use super::{cleanup_ipc_addr, next_addr_id, uses_filesystem_ipc};
 use crate::cli::ComparisonsArgs;
 use crate::coord::CoordSocket;
 use crate::parse;
@@ -70,14 +70,37 @@ pub(super) struct Cell<'a> {
 }
 
 impl Cell<'_> {
+    /// Bind address. WS ports are offset by prefix; IPC and inproc names are
+    /// unique per call.
     fn addr(&self) -> String {
-        addr_for(
-            self.transport,
-            self.def.prefix,
-            0,
-            self.base_port,
-            self.def.name,
-        )
+        let prefix = self.def.prefix;
+        let uid = next_addr_id();
+        match self.transport {
+            TransportKind::Tcp | TransportKind::Quic => "0".to_string(),
+            TransportKind::Ws => {
+                let offset: u16 = match prefix {
+                    "t" => 0,
+                    "u" => 100,
+                    "z" => 200,
+                    "Y" => 300,
+                    "Z" => 400,
+                    "q" => 500,
+                    "r" => 600,
+                    "R" => 700,
+                    _ => 800,
+                };
+                let port = self.base_port + offset;
+                format!("ws://127.0.0.1:{port}/")
+            }
+            TransportKind::Ipc => {
+                if uses_filesystem_ipc(self.def.name) {
+                    format!("ipc:///tmp/omq-bench-cmp-{prefix}-{uid}")
+                } else {
+                    format!("ipc://@omq-bench-cmp-{prefix}-{uid}")
+                }
+            }
+            TransportKind::Inproc => format!("bench-cmp-{prefix}-{uid}"),
+        }
     }
 
     fn cleanup(&self, addr: &str) {
@@ -209,7 +232,7 @@ fn run_throughput_once(cell: &Cell<'_>, duration: f64) -> CellResult {
         ],
         &env,
         def.affinity(process::OTHER_CPU),
-        Duration::from_secs(duration as u64 + 30),
+        process::peer_timeout(duration),
     );
 
     let push_cpu = process::read_proc_cpu(pusher.guard.pid());
@@ -251,7 +274,7 @@ fn run_inproc_throughput(cell: &Cell<'_>, duration: f64) -> CellResult {
         &cmd,
         &env,
         def.affinity(process::MEASURED_CPU),
-        Duration::from_secs(duration as u64 + 30),
+        process::peer_timeout(duration),
     ) && let Some(r) = parse::parse_throughput(&out, cell.size)
     {
         // Blocking inproc peers report their own CPU seconds; prefer those.
@@ -333,7 +356,7 @@ fn run_pubsub_once(
         ],
         &sub_env,
         sub_cpus,
-        Duration::from_secs(duration as u64 + 30),
+        process::peer_timeout(duration),
     );
 
     let pub_cpu = process::read_proc_cpu(publisher.guard.pid());
@@ -395,7 +418,7 @@ fn run_inproc_pubsub(cell: &Cell<'_>, peers: u64, duration: f64) -> CellResult {
         &cmd,
         &env,
         def.affinity(process::MEASURED_CPU),
-        Duration::from_secs(duration as u64 + 30),
+        process::peer_timeout(duration),
     ) && let Some(r) = parse::parse_throughput(&out, cell.size)
     {
         return CellResult {
@@ -445,7 +468,7 @@ fn run_fanout_once(cell: &Cell<'_>, peers: u64, duration: f64) -> CellResult {
     let (mut pull_procs, peers_per_process) =
         spawn_fanout_receivers(cell, &pusher.connect_addr, peers, duration, &pull_env);
 
-    let timeout = Duration::from_secs(duration as u64 + 30);
+    let timeout = process::peer_timeout(duration);
     let mut pull_results = Vec::new();
     for pull_proc in &mut pull_procs {
         if let Some(output) = pull_proc.wait_with_output(timeout)
@@ -610,7 +633,7 @@ fn run_fanin_once(cell: &Cell<'_>, peers: u64, duration: f64) -> CellResult {
         def.affinity(process::OTHER_CPU),
     );
 
-    let timeout = Duration::from_secs(duration as u64 + 30);
+    let timeout = process::peer_timeout(duration);
     let pull_output = puller.guard.wait_with_output(timeout);
     let push_cpu = process::read_proc_cpu(push_proc.pid());
     let push_output = finish_fanin_push(&mut push_proc, def, timeout);

@@ -390,6 +390,11 @@ pub(crate) fn capture(
     proc.wait_with_output(timeout)
 }
 
+/// Capture timeout for a peer that measures for `duration` seconds.
+pub(crate) fn peer_timeout(duration: f64) -> Duration {
+    Duration::from_secs(duration as u64 + 30)
+}
+
 /// Read CPU time (user + system) for a process from /proc.
 pub(crate) fn read_proc_cpu(pid: u32) -> f64 {
     let path = format!("/proc/{pid}/stat");

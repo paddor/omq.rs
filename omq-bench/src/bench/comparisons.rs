@@ -62,44 +62,6 @@ fn uses_filesystem_ipc(impl_name: &str) -> bool {
     matches!(impl_name, "zmq.rs" | "rzmq" | "rzmq-iouring")
 }
 
-fn addr_for(
-    transport: TransportKind,
-    prefix: &str,
-    idx: u64,
-    base_port: u16,
-    impl_name: &str,
-) -> String {
-    let uid = next_addr_id();
-    match transport {
-        TransportKind::Tcp | TransportKind::Quic => "0".to_string(),
-        TransportKind::Ws => {
-            let offset: u16 = match prefix {
-                "t" => 0,
-                "u" => 100,
-                "z" => 200,
-                "Y" => 300,
-                "Z" => 400,
-                "q" => 500,
-                "r" => 600,
-                "R" => 700,
-                _ => 800,
-            };
-            let port = base_port + offset + idx as u16;
-            format!("ws://127.0.0.1:{port}/")
-        }
-        TransportKind::Ipc => {
-            if uses_filesystem_ipc(impl_name) {
-                format!("ipc:///tmp/omq-bench-cmp-{prefix}-{uid}")
-            } else {
-                format!("ipc://@omq-bench-cmp-{prefix}-{uid}")
-            }
-        }
-        TransportKind::Inproc => {
-            format!("bench-cmp-{prefix}-{uid}")
-        }
-    }
-}
-
 // ---- Cell functions -------------------------------------------------------
 
 fn cleanup_ipc_addr(addr: &str, impl_name: &str) {

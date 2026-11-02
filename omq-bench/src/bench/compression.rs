@@ -74,7 +74,7 @@ fn run_cell(
         &[binary, "pull", &ep, &size_str, &dur_str],
         &env,
         Some(process::OTHER_CPU),
-        Duration::from_secs(duration as u64 + 30),
+        process::peer_timeout(duration),
     );
 
     let push_cpu = process::read_proc_cpu(push_proc.pid());

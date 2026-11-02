@@ -164,20 +164,20 @@ fn assert_transforms_roundtrip(server: &CurveMechanism, client: &CurveMechanism)
 }
 
 #[test]
-fn encode_metadata_rejects_overlong_property_name() {
+fn encode_properties_rejects_overlong_property_name() {
     let mut props = dummy_props(SocketType::Push);
     let long_name = "x".repeat(256);
     props.add(long_name, Bytes::from_static(b"v"));
-    let err = encode_metadata(&props).unwrap_err();
+    let err = command::encode_properties(&props).unwrap_err();
     assert!(err.to_string().contains("property name too long"), "{err}");
 }
 
 #[test]
-fn encode_metadata_accepts_max_length_property_name() {
+fn encode_properties_accepts_max_length_property_name() {
     let mut props = dummy_props(SocketType::Push);
     let name = "x".repeat(255);
     props.add(name, Bytes::from_static(b"v"));
-    assert!(encode_metadata(&props).is_ok());
+    assert!(command::encode_properties(&props).is_ok());
 }
 
 #[test]

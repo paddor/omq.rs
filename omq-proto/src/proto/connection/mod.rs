@@ -29,7 +29,7 @@ use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 #[cfg(any(feature = "curve", test))]
 use crate::message::Payload;
 use crate::message::{FrameFlags, Message, MessagePool, Parts};
@@ -47,16 +47,8 @@ use super::frame;
 /// mechanism untouched.
 #[expect(clippy::needless_pass_by_value)]
 fn decode_command_raw(body: bytes::Bytes) -> Result<Command> {
-    if body.is_empty() {
-        return Err(Error::Protocol("empty command frame".into()));
-    }
-    let name_len = body[0] as usize;
-    if body.len() < 1 + name_len {
-        return Err(Error::Protocol("command truncated in name".into()));
-    }
-    let name = body.slice(1..=name_len);
-    let rest = body.slice(1 + name_len..);
-    Ok(Command::Unknown { name, body: rest })
+    let (name, body) = super::command::split_name(&body)?;
+    Ok(Command::Unknown { name, body })
 }
 use super::SocketType;
 use super::greeting::{self, Greeting, MechanismName};

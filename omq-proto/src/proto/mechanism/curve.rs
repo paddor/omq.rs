@@ -426,7 +426,7 @@ impl CurveClient {
         self.our_props = our_props;
         let hello_body = self.build_hello()?;
         out.push(Command::Unknown {
-            name: Bytes::from_static(b"HELLO"),
+            name: Bytes::from_static(command::NAME_HELLO),
             body: hello_body,
         });
         let CurveClientState::Init {
@@ -454,16 +454,20 @@ impl CurveClient {
             )));
         };
         match name.as_ref() {
-            b"WELCOME" if matches!(self.state, Some(CurveClientState::AwaitingWelcome { .. })) => {
+            command::NAME_WELCOME
+                if matches!(self.state, Some(CurveClientState::AwaitingWelcome { .. })) =>
+            {
                 self.process_welcome(&body)?;
                 let initiate = self.build_initiate()?;
                 out.push(Command::Unknown {
-                    name: Bytes::from_static(b"INITIATE"),
+                    name: Bytes::from_static(command::NAME_INITIATE),
                     body: initiate,
                 });
                 Ok(MechanismStep::Continue)
             }
-            b"READY" if matches!(self.state, Some(CurveClientState::AwaitingReady { .. })) => {
+            command::NAME_READY
+                if matches!(self.state, Some(CurveClientState::AwaitingReady { .. })) =>
+            {
                 let peer_props = self.parse_ready(&body)?;
                 Ok(MechanismStep::Complete {
                     peer_properties: peer_props,
@@ -578,7 +582,7 @@ impl CurveClient {
             .encrypt(&vouch_nonce, &vouch_pt[..]);
 
         // Initiate plaintext = C_long_pub(32) + vouch_suffix(16) + vouch_box(80) + metadata.
-        let metadata = encode_metadata(&our_props)?;
+        let metadata = command::encode_properties(&our_props)?;
         let mut init_pt = Vec::with_capacity(32 + 16 + 80 + metadata.len());
         init_pt.extend_from_slice(&our_lt_public_bytes);
         init_pt.extend_from_slice(&vouch_suffix);
@@ -613,7 +617,7 @@ impl CurveClient {
         let pt = CurveBox::new(peer_eph_public, our_eph_secret)?
             .decrypt(&nonce, ready_box)
             .map_err(|_| Error::HandshakeFailed("CURVE READY decrypt failed".into()))?;
-        let mut props = decode_metadata(&pt)?;
+        let mut props = command::decode_properties(&pt)?;
         let authentication = std::sync::Arc::make_mut(&mut props.authentication);
         authentication.mechanism = Some(crate::proto::MechanismName::CURVE);
         authentication.public_key =
@@ -741,17 +745,17 @@ impl CurveServer {
             )));
         };
         match (name.as_ref(), &self.state) {
-            (b"HELLO", CurveServerState::Init) => {
+            (command::NAME_HELLO, CurveServerState::Init) => {
                 let (our_eph_secret, peer_eph_public) = self.parse_hello(&body)?;
                 let welcome = self.build_welcome(&our_eph_secret, &peer_eph_public)?;
                 out.push(Command::Unknown {
-                    name: Bytes::from_static(b"WELCOME"),
+                    name: Bytes::from_static(command::NAME_WELCOME),
                     body: welcome,
                 });
                 self.state = CurveServerState::AwaitingInitiate;
                 Ok(MechanismStep::Continue)
             }
-            (b"INITIATE", CurveServerState::AwaitingInitiate) => {
+            (command::NAME_INITIATE, CurveServerState::AwaitingInitiate) => {
                 let (mut peer_props, peer_public_key) = self.parse_initiate(&body)?;
                 let authentication = std::sync::Arc::make_mut(&mut peer_props.authentication);
                 authentication.mechanism = Some(crate::proto::MechanismName::CURVE);
@@ -810,7 +814,7 @@ impl CurveServer {
     ) -> Result<MechanismStep> {
         let ready = self.build_ready()?;
         out.push(Command::Unknown {
-            name: Bytes::from_static(b"READY"),
+            name: Bytes::from_static(command::NAME_READY),
             body: ready,
         });
         Ok(MechanismStep::Complete {
@@ -914,7 +918,7 @@ impl CurveServer {
         let cl = PublicKey::from(client_lt_bytes);
         Self::verify_vouch(&sn_secret, &self.our_lt_public, vouch, &cl, &cp)?;
 
-        let props = decode_metadata(metadata)?;
+        let props = command::decode_properties(metadata)?;
 
         self.state = CurveServerState::Done {
             our_eph_secret: sn_secret,
@@ -963,7 +967,7 @@ impl CurveServer {
             ));
         };
         let nonce = nonce_short(NONCE_READY, counter);
-        let metadata = encode_metadata(&self.our_props)?;
+        let metadata = command::encode_properties(&self.our_props)?;
         let ready_box =
             CurveBox::new(peer_eph_public, our_eph_secret)?.encrypt(&nonce, metadata.as_slice());
         let mut body = BytesMut::with_capacity(8 + ready_box.len());
@@ -985,25 +989,6 @@ impl CurveServer {
         };
         build_transform(our_eph_secret, peer_eph_public, self.out_counter, true)
     }
-}
-
-// =====================================================================
-// Metadata encoding (shared)
-// =====================================================================
-
-fn encode_metadata(props: &PeerProperties) -> Result<Vec<u8>> {
-    for (k, _) in &props.other {
-        if k.len() > 255 {
-            return Err(Error::Protocol("property name too long".into()));
-        }
-    }
-    let mut out = BytesMut::new();
-    command::encode_properties_inner(props, &mut out);
-    Ok(out.to_vec())
-}
-
-fn decode_metadata(body: &[u8]) -> Result<PeerProperties> {
-    command::decode_properties_inner(Bytes::copy_from_slice(body))
 }
 
 // =====================================================================

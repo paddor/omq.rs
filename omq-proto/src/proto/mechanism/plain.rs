@@ -170,7 +170,7 @@ impl PlainClient {
     fn start(&mut self, out: &mut Vec<Command>, our_props: PeerProperties) -> Result<()> {
         self.our_props = our_props;
         out.push(Command::Unknown {
-            name: Bytes::from_static(b"HELLO"),
+            name: Bytes::from_static(command::NAME_HELLO),
             body: encode_hello(&self.username, &self.password)?,
         });
         self.state = PlainClientState::AwaitingWelcome;
@@ -180,18 +180,18 @@ impl PlainClient {
     fn on_command(&mut self, cmd: Command, out: &mut Vec<Command>) -> Result<MechanismStep> {
         match (&self.state, cmd) {
             (PlainClientState::AwaitingWelcome, Command::Unknown { name, .. })
-                if name.as_ref() == b"WELCOME" =>
+                if name.as_ref() == command::NAME_WELCOME =>
             {
-                let metadata = command::encode_properties(&self.our_props);
+                let metadata = command::encode_properties(&self.our_props)?;
                 out.push(Command::Unknown {
-                    name: Bytes::from_static(b"INITIATE"),
+                    name: Bytes::from_static(command::NAME_INITIATE),
                     body: Bytes::from(metadata),
                 });
                 self.state = PlainClientState::AwaitingReady;
                 Ok(MechanismStep::Continue)
             }
             (PlainClientState::AwaitingReady, Command::Unknown { name, body })
-                if name.as_ref() == b"READY" =>
+                if name.as_ref() == command::NAME_READY =>
             {
                 let peer_properties = command::decode_properties(&body)?;
                 self.state = PlainClientState::Done;
@@ -215,7 +215,7 @@ impl PlainServer {
     fn on_command(&mut self, cmd: Command, out: &mut Vec<Command>) -> Result<MechanismStep> {
         match (&self.state, cmd) {
             (PlainServerState::AwaitingHello, Command::Unknown { name, body })
-                if name.as_ref() == b"HELLO" =>
+                if name.as_ref() == command::NAME_HELLO =>
             {
                 let (username, password) = decode_hello(&body)?;
                 self.username = Some(username.clone());
@@ -234,7 +234,7 @@ impl PlainServer {
                 self.welcome(result, out)
             }
             (PlainServerState::AwaitingInitiate, Command::Unknown { name, body })
-                if name.as_ref() == b"INITIATE" =>
+                if name.as_ref() == command::NAME_INITIATE =>
             {
                 let mut peer_properties = command::decode_properties(&body)?;
                 if let Some(authentication) = self.authentication.take() {
@@ -242,9 +242,9 @@ impl PlainServer {
                 }
                 std::sync::Arc::make_mut(&mut peer_properties.authentication).username =
                     self.username.take();
-                let metadata = command::encode_properties(&self.our_props);
+                let metadata = command::encode_properties(&self.our_props)?;
                 out.push(Command::Unknown {
-                    name: Bytes::from_static(b"READY"),
+                    name: Bytes::from_static(command::NAME_READY),
                     body: Bytes::from(metadata),
                 });
                 self.state = PlainServerState::Done;
@@ -269,7 +269,7 @@ impl PlainServer {
         self.authentication = Some(result);
         self.state = PlainServerState::AwaitingInitiate;
         out.push(Command::Unknown {
-            name: Bytes::from_static(b"WELCOME"),
+            name: Bytes::from_static(command::NAME_WELCOME),
             body: Bytes::new(),
         });
         Ok(MechanismStep::Continue)
@@ -570,7 +570,7 @@ mod tests {
             .on_command(
                 Command::Unknown {
                     name: Bytes::from_static(b"INITIATE"),
-                    body: Bytes::from(command::encode_properties(&client_properties)),
+                    body: Bytes::from(command::encode_properties(&client_properties).unwrap()),
                 },
                 &mut out,
             )

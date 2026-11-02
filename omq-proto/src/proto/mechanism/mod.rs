@@ -213,7 +213,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 
-use super::command::{Command, PeerProperties};
+use super::command::{self, Command, NAME_ERROR, NAME_READY, PeerProperties};
 use super::greeting::MechanismName;
 use crate::error::{Error, Result};
 
@@ -273,7 +273,7 @@ fn try_error_command(cmd: &Command, mechanism: MechanismName) -> Option<Error> {
     let Command::Unknown { ref name, ref body } = *cmd else {
         return None;
     };
-    if name.as_ref() != b"ERROR" {
+    if name.as_ref() != NAME_ERROR {
         return None;
     }
     let reason = if body.is_empty() {
@@ -558,17 +558,6 @@ fn check_authentication(
         "{mechanism} authentication failed with status {}",
         result.status.code()
     )))
-}
-
-/// Re-wrap a raw command body with its name length prefix so it can be
-/// fed to `command::decode`. Used by `NullMechanism` to parse the property
-/// list inside a raw `Unknown { name: "READY", body }`.
-fn prepend_name(name: &[u8], body: &[u8]) -> bytes::Bytes {
-    let mut out = bytes::BytesMut::with_capacity(1 + name.len() + body.len());
-    out.extend_from_slice(&[name.len() as u8]);
-    out.extend_from_slice(name);
-    out.extend_from_slice(body);
-    out.freeze()
 }
 
 #[derive(Debug)]
@@ -859,44 +848,34 @@ impl NullMechanism {
         if let Some(err) = try_error_command(&cmd, MechanismName::NULL) {
             return Err(err);
         }
-        match (self.state, cmd) {
-            (NullState::AwaitingReady, Command::Ready(mut props)) => {
-                if let Some(authentication) = self.authentication.take() {
-                    authentication.apply_to(&mut props, MechanismName::NULL);
-                }
-                self.state = NullState::Done;
-                Ok(MechanismStep::Complete {
-                    peer_properties: props,
-                })
-            }
-            // Connection's mechanism handshake stage hands us raw commands
-            // as `Unknown` (so CURVE can see opaque bodies). Parse the
-            // property list ourselves for NULL.
-            (NullState::AwaitingReady, Command::Unknown { name, body })
-                if name.as_ref() == b"READY" =>
-            {
-                let mut props = super::command::decode(prepend_name(b"READY", &body)).and_then(
-                    |c| match c {
-                        Command::Ready(p) => Ok(p),
-                        _ => Err(Error::HandshakeFailed("READY parse mismatch".into())),
-                    },
-                )?;
-                if let Some(authentication) = self.authentication.take() {
-                    authentication.apply_to(&mut props, MechanismName::NULL);
-                }
-                self.state = NullState::Done;
-                Ok(MechanismStep::Complete {
-                    peer_properties: props,
-                })
-            }
-            (NullState::AwaitingReady, other) => Err(Error::HandshakeFailed(format!(
-                "expected READY, got {:?}",
-                other.kind()
-            ))),
-            (st, _) => Err(Error::HandshakeFailed(format!(
-                "NULL mechanism in state {st:?} received command"
-            ))),
+        if self.state != NullState::AwaitingReady {
+            return Err(Error::HandshakeFailed(format!(
+                "NULL mechanism in state {:?} received command",
+                self.state
+            )));
         }
+        // Connection's mechanism handshake stage hands us raw commands
+        // as `Unknown` (so CURVE can see opaque bodies). Parse the
+        // property list ourselves for NULL.
+        let mut props = match cmd {
+            Command::Ready(props) => props,
+            Command::Unknown { name, body } if name.as_ref() == NAME_READY => {
+                command::decode_properties_inner(body)?
+            }
+            other => {
+                return Err(Error::HandshakeFailed(format!(
+                    "expected READY, got {:?}",
+                    other.kind()
+                )));
+            }
+        };
+        if let Some(authentication) = self.authentication.take() {
+            authentication.apply_to(&mut props, MechanismName::NULL);
+        }
+        self.state = NullState::Done;
+        Ok(MechanismStep::Complete {
+            peer_properties: props,
+        })
     }
 }
 

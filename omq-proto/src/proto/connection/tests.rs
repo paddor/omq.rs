@@ -1,4 +1,5 @@
 use super::*;
+use crate::error::Error;
 use bytes::{BufMut, BytesMut};
 
 fn ready_connection(max_message_size: Option<usize>) -> Connection {

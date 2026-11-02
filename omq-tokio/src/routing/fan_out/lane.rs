@@ -536,11 +536,7 @@ impl FanOutLanes {
     }
 
     pub(super) async fn dispatch(&self, mut dispatch: LaneDispatch) {
-        let admission = if self.mute_policy.is_lossy() {
-            LaneAdmission::Drop
-        } else {
-            LaneAdmission::Backpressure
-        };
+        let admission = self.mute_policy.lane_admission();
         loop {
             let wait = {
                 let mut dist = self.distributor.lock().expect("distributor poisoned");

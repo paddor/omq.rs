@@ -67,7 +67,7 @@ impl Submitter {
             let targets: Box<[_]> = peers
                 .peers
                 .values()
-                .filter(|peer| peer.lane.is_none() && peer.fanout_active)
+                .filter(|peer| peer.is_active_fallback())
                 .map(|peer| {
                     let target = peer.target.bind(&self.data_lanes);
                     if self.mute_policy == FanOutMutePolicy::Block {

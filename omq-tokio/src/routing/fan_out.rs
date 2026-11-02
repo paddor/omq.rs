@@ -67,6 +67,15 @@ impl FanOutMutePolicy {
     pub(super) fn is_lossy(self) -> bool {
         !matches!(self, Self::Block)
     }
+
+    /// Lane queue admission under this policy: lossy policies drop.
+    fn lane_admission(self) -> LaneAdmission {
+        if self.is_lossy() {
+            LaneAdmission::Drop
+        } else {
+            LaneAdmission::Backpressure
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -211,7 +220,7 @@ impl Submitter {
         let targets = g
             .peers
             .values()
-            .filter(|peer| peer.lane.is_none() && peer.fanout_active)
+            .filter(|peer| peer.is_active_fallback())
             .filter(|peer| {
                 all_subscribe_all || filter::peer_matches(self.mode, &peer.filter(), topic, group)
             })
@@ -414,7 +423,7 @@ impl Submitter {
         peers
             .peers
             .values()
-            .filter(|peer| peer.lane.is_none() && peer.fanout_active)
+            .filter(|peer| peer.is_active_fallback())
             .map(|peer| peer.target.bind(&self.data_lanes))
             .find(|target| !target.send_ready())
     }
@@ -465,12 +474,7 @@ impl Submitter {
         &self,
         msg: Message,
     ) -> core::result::Result<(), omq_proto::error::TrySendError> {
-        let admission = if self.mute_policy.is_lossy() {
-            LaneAdmission::Drop
-        } else {
-            LaneAdmission::Backpressure
-        };
-        self.try_send_with_admission(msg, admission)
+        self.try_send_with_admission(msg, self.mute_policy.lane_admission())
     }
 
     fn try_send_with_admission(
@@ -553,6 +557,11 @@ struct FanOutPeer {
 }
 
 impl FanOutPeer {
+    /// An active peer without a lane: the caller publishes to it directly.
+    fn is_active_fallback(&self) -> bool {
+        self.lane.is_none() && self.fanout_active
+    }
+
     fn filter(&self) -> filter::PeerFilter<'_> {
         filter::PeerFilter {
             subscriptions: &self.subscriptions,

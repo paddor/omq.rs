@@ -1,7 +1,7 @@
 use super::common::{
     self, C_LIBZMQ, C_OMQ_1T, C_OMQ_CT, C_OMQ_EXCLUSIVE, C_OMQ_SPIN, COMPARISON_LATENCY_SIZES,
-    COMPARISON_SIZES, ChartSpec, CpuColumns, Impl, draw_latency_single_panel,
-    draw_throughput_dual_panel, load_latency, load_tput, out_dir,
+    COMPARISON_SIZES, ChartSpec, CpuColumns, DualPanelStyle, Impl, LatencyLayout,
+    draw_latency_single_panel, draw_throughput_dual_panel, load_latency, load_tput, out_dir,
 };
 
 const TCP_TPUT_IMPLS: &[Impl] = &[
@@ -191,13 +191,13 @@ pub(crate) fn generate() {
                 rcv_label: "rcv CPU%",
             };
 
-            if tc.log_gbs {
-                common::draw_throughput_dual_panel_log_gbs(&spec, &tput, &msgs, &columns)
-                    .expect("draw pushpull chart");
+            let style = if tc.log_gbs {
+                DualPanelStyle::LOG_GBS
             } else {
-                draw_throughput_dual_panel(&spec, &tput, &msgs, &columns)
-                    .expect("draw pushpull chart");
-            }
+                DualPanelStyle::PLAIN
+            };
+            draw_throughput_dual_panel(&spec, &tput, &msgs, &columns, style)
+                .expect("draw pushpull chart");
             eprintln!("Written: {}", out.display());
         }
 
@@ -215,7 +215,8 @@ pub(crate) fn generate() {
                 sizes: COMPARISON_LATENCY_SIZES,
                 impls: tc.lat_impls,
             };
-            draw_latency_single_panel(&spec, &lat, &cpu, range).expect("draw reqrep chart");
+            draw_latency_single_panel(&spec, &lat, &cpu, LatencyLayout::auto(range))
+                .expect("draw reqrep chart");
             eprintln!("Written: {}", out.display());
         }
     }

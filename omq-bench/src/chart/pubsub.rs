@@ -3,8 +3,8 @@ use std::path::Path;
 
 use super::common::{
     C_LIBZMQ, C_LIBZMQ_2T, C_OMQ_1T, C_OMQ_2T, COMPARISON_SIZES, ChartSpec, CpuColumns, CpuData,
-    Impl, ThroughputRow, ValMap, draw_multirow_throughput, draw_throughput_dual_panel, load_tput,
-    merge_cpu_data, out_dir,
+    DualPanelStyle, Impl, ThroughputRow, ValMap, draw_multirow_throughput,
+    draw_throughput_dual_panel, load_tput, merge_cpu_data, out_dir,
 };
 
 const PUBSUB_IMPLS: &[Impl] = &[
@@ -94,7 +94,8 @@ pub(crate) fn generate() {
             snd_label: "snd CPU%",
             rcv_label: "rcv CPU%",
         };
-        draw_throughput_dual_panel(&spec, &tput, &msgs, &columns).expect("draw curve chart");
+        draw_throughput_dual_panel(&spec, &tput, &msgs, &columns, DualPanelStyle::PLAIN)
+            .expect("draw curve chart");
         eprintln!("Written: {}", out.display());
     }
 }

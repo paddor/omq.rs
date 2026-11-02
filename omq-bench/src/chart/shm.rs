@@ -428,16 +428,11 @@ fn generate_pubsub(cache: &Path, directory: &Path, cached_baselines: bool) -> Ch
         sizes: SIZES,
         impls: IMPLS,
     };
-    let columns = CpuColumns {
-        cpu: &BTreeMap::new(),
-        snd_label: "",
-        rcv_label: "",
-    };
 
     common::draw_multirow_throughput(
         &spec,
         &rows,
-        &columns,
+        &CpuColumns::NONE,
         &|readers| format!("{readers} subscribers"),
         hardware_subtitle().as_deref(),
     )?;

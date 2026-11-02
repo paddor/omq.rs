@@ -5,7 +5,8 @@ use super::{
     AXIS_COLOR, BACKGROUND_COLOR, ChartSpec, CpuColumns, FairnessMap, GRID_COLOR, Impl,
     LARGE_START, LegendVersionMode, MsgAxisMode, Panel, SMALL_CUTOFF, TEXT_COLOR, ThroughputRow,
     ValMap, append_row_titles, detect_hardware, draw_legend_table, draw_line_with_dots,
-    draw_whiskers, fmt_gbps, fmt_msgs, fmt_size, nice_axis, postprocess_svg, series_points,
+    draw_whiskers, fmt_gbps, fmt_msgs, fmt_size, has_point, nice_axis, postprocess_svg,
+    series_points,
 };
 use plotters::prelude::*;
 
@@ -21,75 +22,38 @@ enum GbsScale {
 
 /// Axis and legend options of a dual-panel throughput chart.
 #[derive(Clone, Copy)]
-struct DualPanelStyle {
+pub(crate) struct DualPanelStyle {
     msg_axis: MsgAxisMode,
     gbs_scale: GbsScale,
     version_mode: LegendVersionMode,
 }
 
-pub(crate) fn draw_throughput_dual_panel(
-    spec: &ChartSpec<'_>,
-    tput: &ValMap,
-    msgs: &ValMap,
-    columns: &CpuColumns<'_>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let style = DualPanelStyle {
+impl DualPanelStyle {
+    /// Auto msg/s axis, linear GB/s axis, no version column.
+    pub(crate) const PLAIN: Self = Self {
         msg_axis: MsgAxisMode::Auto,
         gbs_scale: GbsScale::Linear,
         version_mode: LegendVersionMode::Hide,
     };
-    draw_dual_panel(spec, tput, msgs, columns, style)
-}
 
-pub(crate) fn draw_throughput_dual_panel_with_versions(
-    spec: &ChartSpec<'_>,
-    tput: &ValMap,
-    msgs: &ValMap,
-    columns: &CpuColumns<'_>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let style = DualPanelStyle {
-        msg_axis: MsgAxisMode::Auto,
-        gbs_scale: GbsScale::Linear,
+    /// `PLAIN` with library versions for the other implementations.
+    pub(crate) const WITH_VERSIONS: Self = Self {
         version_mode: LegendVersionMode::ShowOtherImpls,
+        ..Self::PLAIN
     };
-    draw_dual_panel(spec, tput, msgs, columns, style)
-}
 
-pub(crate) fn draw_throughput_dual_panel_fixed_2m_msgs_with_versions(
-    spec: &ChartSpec<'_>,
-    tput: &ValMap,
-    msgs: &ValMap,
-    columns: &CpuColumns<'_>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let style = DualPanelStyle {
+    /// `WITH_VERSIONS` with the msg/s axis fixed at 2M.
+    pub(crate) const FIXED_2M_MSGS_WITH_VERSIONS: Self = Self {
         msg_axis: MsgAxisMode::Fixed2M,
-        gbs_scale: GbsScale::Linear,
-        version_mode: LegendVersionMode::ShowOtherImpls,
+        ..Self::WITH_VERSIONS
     };
-    draw_dual_panel(spec, tput, msgs, columns, style)
-}
 
-/// Same as `draw_throughput_dual_panel` but the GB/s panel uses a log10
-/// Y axis. Used for inproc where throughput spans orders of magnitude.
-pub(crate) fn draw_throughput_dual_panel_log_gbs(
-    spec: &ChartSpec<'_>,
-    tput: &ValMap,
-    msgs: &ValMap,
-    columns: &CpuColumns<'_>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let style = DualPanelStyle {
-        msg_axis: MsgAxisMode::Auto,
+    /// `PLAIN` with a log10 GB/s axis, for inproc where throughput spans
+    /// orders of magnitude.
+    pub(crate) const LOG_GBS: Self = Self {
         gbs_scale: GbsScale::Log,
-        version_mode: LegendVersionMode::Hide,
+        ..Self::PLAIN
     };
-    draw_dual_panel(spec, tput, msgs, columns, style)
-}
-
-/// Whether `values` holds a point for `key` at any of `sizes`.
-fn has_point(values: &ValMap, sizes: &[u64], key: &str) -> bool {
-    sizes
-        .iter()
-        .any(|s| values.get(s).is_some_and(|m| m.contains_key(key)))
 }
 
 /// Splits sizes into the msg/s panel and the GB/s panel. The ranges overlap
@@ -129,7 +93,7 @@ fn peak_gbs(sizes: &[u64], tput: &ValMap) -> f64 {
 
 /// Draws msg/s for small sizes on the left, GB/s for large sizes on the
 /// right, and the legend table below both panels.
-fn draw_dual_panel(
+pub(crate) fn draw_throughput_dual_panel(
     spec: &ChartSpec<'_>,
     tput: &ValMap,
     msgs: &ValMap,

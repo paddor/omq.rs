@@ -3,7 +3,6 @@
 use super::{ChartResult, IMPLS, RateMaps, SIZES, Target, common};
 use common::{ChartSpec, CpuColumns, LatencyEntry, LatencyMap};
 use serde_json::Value;
-use std::collections::BTreeMap;
 use std::path::Path;
 
 const TIMED_BATCH_MESSAGES: u64 = 256;
@@ -144,16 +143,11 @@ fn throughput(directory: &Path, rows: &[Value]) -> ChartResult {
         sizes: SIZES,
         impls: IMPLS,
     };
-    let columns = CpuColumns {
-        cpu: &BTreeMap::new(),
-        snd_label: "",
-        rcv_label: "",
-    };
 
     common::draw_multirow_throughput(
         &spec,
         &[maps.row(1)],
-        &columns,
+        &CpuColumns::NONE,
         &|_| "1 sender / 1 receiver".into(),
         super::hardware_subtitle().as_deref(),
     )?;

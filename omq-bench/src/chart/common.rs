@@ -12,16 +12,11 @@ mod load;
 mod throughput;
 
 pub(crate) use latency::{
-    auto_lat_range, draw_latency_single_panel, draw_latency_single_panel_100us,
-    draw_latency_single_panel_with_versions, draw_multirow_latency,
+    LatencyLayout, auto_lat_range, draw_latency_single_panel, draw_multirow_latency,
 };
 pub(crate) use legend::draw_legend_table;
 pub(crate) use load::{load_fairness, load_latency, load_tput, merge_cpu_data};
-pub(crate) use throughput::{
-    draw_multirow_throughput, draw_throughput_dual_panel,
-    draw_throughput_dual_panel_fixed_2m_msgs_with_versions, draw_throughput_dual_panel_log_gbs,
-    draw_throughput_dual_panel_with_versions,
-};
+pub(crate) use throughput::{DualPanelStyle, draw_multirow_throughput, draw_throughput_dual_panel};
 
 pub(crate) const COMPARISON_SIZES: &[u64] = &[16, 64, 256, 1024, 4096, 16384];
 pub(crate) const COMPARISON_LATENCY_SIZES: &[u64] = &[16, 64, 256, 1024, 4096];
@@ -82,6 +77,15 @@ pub(crate) struct CpuColumns<'a> {
     pub cpu: &'a BTreeMap<String, CpuData>,
     pub snd_label: &'a str,
     pub rcv_label: &'a str,
+}
+
+impl CpuColumns<'static> {
+    /// No CPU data and no CPU columns.
+    pub(crate) const NONE: Self = Self {
+        cpu: &BTreeMap::new(),
+        snd_label: "",
+        rcv_label: "",
+    };
 }
 
 /// One row of a multi-row throughput chart.
@@ -379,6 +383,13 @@ fn draw_whiskers<DB: DrawingBackend>(
 }
 
 // chart drawing helpers
+
+/// Whether `values` holds a point for `key` at any of `sizes`.
+fn has_point<V>(values: &BTreeMap<u64, BTreeMap<String, V>>, sizes: &[u64], key: &str) -> bool {
+    sizes
+        .iter()
+        .any(|s| values.get(s).is_some_and(|m| m.contains_key(key)))
+}
 
 /// Plot points of one series: x is the size index, y is `map(value)`.
 /// Sizes without a value, or where `map` returns `None`, are skipped.

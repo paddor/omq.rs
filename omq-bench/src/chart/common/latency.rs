@@ -4,7 +4,7 @@ use super::legend::{draw_legend_table_with_versions, legend_table_height};
 use super::{
     AXIS_COLOR, BACKGROUND_COLOR, ChartSpec, CpuColumns, CpuData, GRID_COLOR, Impl, LatencyEntry,
     LatencyMap, LegendVersionMode, Panel, TEXT_COLOR, detect_hardware, draw_legend_table,
-    draw_line_with_dots, fmt_size, fmt_us, nice_axis, postprocess_svg,
+    draw_line_with_dots, fmt_size, fmt_us, has_point, nice_axis, postprocess_svg,
 };
 use plotters::coord::ranged1d::{DefaultFormatting, KeyPointHint, Ranged, ValueFormatter};
 use plotters::coord::types::RangedCoordf64;
@@ -12,7 +12,8 @@ use plotters::prelude::*;
 use plotters::style::text_anchor::{HPos, Pos, VPos};
 use std::collections::BTreeMap;
 
-struct LatencyAxis(RangedCoordf64, Vec<f64>);
+/// Linear latency axis with fixed tick positions.
+pub(crate) struct LatencyAxis(RangedCoordf64, Vec<f64>);
 
 impl Ranged for LatencyAxis {
     type ValueType = f64;
@@ -31,67 +32,57 @@ impl Ranged for LatencyAxis {
     }
 }
 
-pub(crate) fn draw_latency_single_panel(
-    spec: &ChartSpec<'_>,
-    lat: &LatencyMap,
-    cpu: &BTreeMap<String, CpuData>,
-    lat_range: (f64, f64),
-) -> Result<(), Box<dyn std::error::Error>> {
-    let axis: RangedCoordf64 = (lat_range.0..lat_range.1).into();
-    let layout = LatencyLayout {
-        axis,
-        chart_h: 340,
-        version_mode: LegendVersionMode::Hide,
-        annotate_clipped: false,
-    };
-    draw_latency_single_panel_with_layout(spec, lat, cpu, layout)
-}
-
-pub(crate) fn draw_latency_single_panel_with_versions(
-    spec: &ChartSpec<'_>,
-    lat: &LatencyMap,
-    cpu: &BTreeMap<String, CpuData>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let layout = LatencyLayout {
-        axis: LatencyAxis(
-            (0.0..250.0).into(),
-            (0..=250).step_by(25).map(f64::from).collect(),
-        ),
-        chart_h: 600,
-        version_mode: LegendVersionMode::ShowOtherImpls,
-        annotate_clipped: false,
-    };
-    draw_latency_single_panel_with_layout(spec, lat, cpu, layout)
-}
-
-pub(crate) fn draw_latency_single_panel_100us(
-    spec: &ChartSpec<'_>,
-    lat: &LatencyMap,
-    cpu: &BTreeMap<String, CpuData>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // The axis starts at 1 us, so that gets its own tick before the 10 us
-    // steps.
-    let ticks = std::iter::once(1.0)
-        .chain((10..=100).step_by(10).map(f64::from))
-        .collect();
-    let layout = LatencyLayout {
-        axis: LatencyAxis((1.0..100.0).into(), ticks),
-        chart_h: 600,
-        version_mode: LegendVersionMode::Hide,
-        annotate_clipped: true,
-    };
-    draw_latency_single_panel_with_layout(spec, lat, cpu, layout)
-}
-
 /// Y axis, chart height, and legend options of a single latency panel chart.
-struct LatencyLayout<Y> {
+pub(crate) struct LatencyLayout<Y> {
     axis: Y,
     chart_h: u32,
     version_mode: LegendVersionMode,
     annotate_clipped: bool,
 }
 
-fn draw_latency_single_panel_with_layout<Y: Ranged<ValueType = f64> + ValueFormatter<f64>>(
+impl LatencyLayout<RangedCoordf64> {
+    /// Automatic ticks over `range`, 340 px high.
+    pub(crate) fn auto(range: (f64, f64)) -> Self {
+        Self {
+            axis: (range.0..range.1).into(),
+            chart_h: 340,
+            version_mode: LegendVersionMode::Hide,
+            annotate_clipped: false,
+        }
+    }
+}
+
+impl LatencyLayout<LatencyAxis> {
+    /// 0 to 250 us in 25 us steps, 600 px high, with library versions.
+    pub(crate) fn up_to_250us_with_versions() -> Self {
+        Self {
+            axis: LatencyAxis(
+                (0.0..250.0).into(),
+                (0..=250).step_by(25).map(f64::from).collect(),
+            ),
+            chart_h: 600,
+            version_mode: LegendVersionMode::ShowOtherImpls,
+            annotate_clipped: false,
+        }
+    }
+
+    /// 1 to 100 us, 600 px high, with overflowing ranges labeled.
+    pub(crate) fn up_to_100us() -> Self {
+        // The axis starts at 1 us, so that gets its own tick before the 10 us
+        // steps.
+        let ticks = std::iter::once(1.0)
+            .chain((10..=100).step_by(10).map(f64::from))
+            .collect();
+        Self {
+            axis: LatencyAxis((1.0..100.0).into(), ticks),
+            chart_h: 600,
+            version_mode: LegendVersionMode::Hide,
+            annotate_clipped: true,
+        }
+    }
+}
+
+pub(crate) fn draw_latency_single_panel<Y: Ranged<ValueType = f64> + ValueFormatter<f64>>(
     spec: &ChartSpec<'_>,
     lat: &LatencyMap,
     cpu: &BTreeMap<String, CpuData>,
@@ -100,11 +91,7 @@ fn draw_latency_single_panel_with_layout<Y: Ranged<ValueType = f64> + ValueForma
     let present: Vec<&Impl> = spec
         .impls
         .iter()
-        .filter(|imp| {
-            spec.sizes
-                .iter()
-                .any(|s| lat.get(s).is_some_and(|m| m.contains_key(imp.key)))
-        })
+        .filter(|imp| has_point(lat, spec.sizes, imp.key))
         .collect();
 
     let total_h = layout.chart_h + legend_table_height(present.len());
@@ -245,14 +232,7 @@ pub(crate) fn draw_multirow_latency(
     let present: Vec<_> = spec
         .impls
         .iter()
-        .filter(|imp| {
-            rows.iter().any(|(_, lat)| {
-                sizes.iter().any(|size| {
-                    lat.get(size)
-                        .is_some_and(|values| values.contains_key(imp.key))
-                })
-            })
-        })
+        .filter(|imp| rows.iter().any(|(_, lat)| has_point(lat, sizes, imp.key)))
         .collect();
 
     let width = 850;
@@ -288,13 +268,7 @@ pub(crate) fn draw_multirow_latency(
     let legend = root
         .clone()
         .shrink((0, chart_height), (width, legend_height));
-    let no_cpu = BTreeMap::new();
-    let columns = CpuColumns {
-        cpu: &no_cpu,
-        snd_label: "",
-        rcv_label: "",
-    };
-    draw_legend_table(&legend, &present, &columns)?;
+    draw_legend_table(&legend, &present, &CpuColumns::NONE)?;
     root.present()?;
     drop(root);
 

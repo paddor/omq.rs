@@ -9,9 +9,9 @@ use std::collections::BTreeMap;
 use plotters::style::RGBColor;
 
 use super::common::{
-    self, C_OMQ_1T, C_OMQ_2T, COMPARISON_SIZES, ChartSpec, CpuColumns, CpuData, FairnessMap, Impl,
-    LatencyMap, ThroughputRow, ValMap, draw_latency_single_panel, draw_multirow_throughput,
-    draw_throughput_dual_panel_fixed_2m_msgs_with_versions, load_fairness, load_latency, load_tput,
+    self, C_OMQ_1T, C_OMQ_2T, COMPARISON_SIZES, ChartSpec, CpuColumns, CpuData, DualPanelStyle,
+    FairnessMap, Impl, LatencyLayout, LatencyMap, ThroughputRow, ValMap, draw_latency_single_panel,
+    draw_multirow_throughput, draw_throughput_dual_panel, load_fairness, load_latency, load_tput,
     merge_cpu_data, out_dir,
 };
 
@@ -251,7 +251,8 @@ pub(crate) fn generate() {
             snd_label: "snd CPU%",
             rcv_label: "rcv CPU%",
         };
-        draw_throughput_dual_panel_fixed_2m_msgs_with_versions(&spec, &tput, &msgs, &columns)
+        let style = DualPanelStyle::FIXED_2M_MSGS_WITH_VERSIONS;
+        draw_throughput_dual_panel(&spec, &tput, &msgs, &columns, style)
             .expect("draw QUIC pushpull chart");
         eprintln!("Written: {}", out.display());
     }
@@ -265,8 +266,8 @@ pub(crate) fn generate() {
             sizes: LAT_SIZES,
             impls: SINGLE_PEER_IMPLS,
         };
-        draw_latency_single_panel(&spec, &lat, &cpu, common::auto_lat_range(&lat))
-            .expect("draw QUIC reqrep chart");
+        let layout = LatencyLayout::auto(common::auto_lat_range(&lat));
+        draw_latency_single_panel(&spec, &lat, &cpu, layout).expect("draw QUIC reqrep chart");
         eprintln!("Written: {}", out.display());
     }
 

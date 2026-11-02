@@ -272,13 +272,14 @@ fn draw_throughput(directory: &Path, bandwidth: &ValMap, messages: &ValMap) {
         sizes: THROUGHPUT_SIZES,
         impls: IMPLS,
     };
-    let columns = CpuColumns {
-        cpu: &BTreeMap::new(),
-        snd_label: "",
-        rcv_label: "",
-    };
-    common::draw_throughput_dual_panel(&spec, bandwidth, messages, &columns)
-        .expect("draw DART throughput chart");
+    common::draw_throughput_dual_panel(
+        &spec,
+        bandwidth,
+        messages,
+        &CpuColumns::NONE,
+        common::DualPanelStyle::PLAIN,
+    )
+    .expect("draw DART throughput chart");
     eprintln!("Written: {}", path.display());
 }
 
@@ -306,7 +307,12 @@ fn draw_latency(directory: &Path, latency: &LatencyMap) {
         sizes: LATENCY_SIZES,
         impls: &implementations,
     };
-    common::draw_latency_single_panel_100us(&spec, latency, &BTreeMap::new())
-        .expect("draw DART latency chart");
+    common::draw_latency_single_panel(
+        &spec,
+        latency,
+        &BTreeMap::new(),
+        common::LatencyLayout::up_to_100us(),
+    )
+    .expect("draw DART latency chart");
     eprintln!("Written: {}", path.display());
 }

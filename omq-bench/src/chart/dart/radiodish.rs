@@ -134,15 +134,10 @@ pub(super) fn generate() -> Result<(), Box<dyn std::error::Error>> {
         sizes: SIZES,
         impls: implementations,
     };
-    let columns = CpuColumns {
-        cpu: &BTreeMap::new(),
-        snd_label: "",
-        rcv_label: "",
-    };
     common::draw_multirow_throughput(
         &spec,
         &rows,
-        &columns,
+        &CpuColumns::NONE,
         &|readers| format!("{readers} subscribers, payload pools, median and range of 3"),
         common::detect_hardware().as_deref(),
     )?;

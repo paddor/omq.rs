@@ -376,12 +376,11 @@ fn draw(path: &std::path::Path, data: &Data) -> DrawResult {
         draw_panel(area, panel, data)?;
     }
 
-    let columns = CpuColumns {
-        cpu: &BTreeMap::new(),
-        snd_label: "",
-        rcv_label: "",
-    };
-    common::draw_legend_table(&footer, &IMPLS.iter().collect::<Vec<_>>(), &columns)?;
+    common::draw_legend_table(
+        &footer,
+        &IMPLS.iter().collect::<Vec<_>>(),
+        &CpuColumns::NONE,
+    )?;
     draw_notes(&footer)?;
     root.present()?;
     drop(root);

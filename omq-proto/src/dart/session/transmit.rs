@@ -77,8 +77,7 @@ impl<B: FragmentBuffer> Session<B> {
         output: &mut [u8],
     ) -> Option<(Transmit, usize)> {
         let remote = self.remote;
-        let prepared =
-            self.prepare_parts(sequence, batch.now, batch.grouped, batch.reserved_bytes)?;
+        let prepared = self.prepare_parts(sequence, &batch)?;
         let length = prepared.encode(remote, sequence, output)?;
         Some((prepared.token, length))
     }
@@ -133,8 +132,7 @@ impl<B: FragmentBuffer> Session<B> {
         let count = self.plan_packed(first, limit, output)?;
         // PACKED needs two messages; a single one keeps DATA framing.
         if count < 2 {
-            let prepared =
-                self.prepare_parts(first, batch.now, batch.grouped, batch.reserved_bytes)?;
+            let prepared = self.prepare_parts(first, batch)?;
             let length = prepared.encode(remote, first, output)?;
             batch.reserved_bytes += prepared.bytes;
             return Some((prepared.token, length, 1));
@@ -270,13 +268,12 @@ impl<B: FragmentBuffer> Session<B> {
     }
 
     #[inline]
-    fn prepare_parts(
-        &mut self,
-        sequence: u64,
-        now: Duration,
-        grouped: bool,
-        reserved_bytes: usize,
-    ) -> Option<Prepared<'_>> {
+    fn prepare_parts(&mut self, sequence: u64, batch: &DataBatch) -> Option<Prepared<'_>> {
+        let DataBatch {
+            now,
+            grouped,
+            reserved_bytes,
+        } = *batch;
         if sequence < self.peer.ack || sequence >= self.send.next {
             return None;
         }

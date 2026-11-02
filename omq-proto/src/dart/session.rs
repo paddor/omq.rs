@@ -7,7 +7,6 @@ use crate::message::MessageInner;
 use crate::{DartCongestion, Message};
 
 use super::{DATA_HEADER, MAX_BODY, MAX_DATAGRAM, Packet, Status};
-#[path = "fragment.rs"]
 mod fragment;
 pub use fragment::FragmentBuffer;
 use fragment::{Assembly, FragmentPiece, FragmentReceive, FragmentSend};

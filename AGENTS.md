@@ -115,9 +115,10 @@ cargo clippy --workspace --all-targets --all-features # feature-gated paths
 (cd bindings/pyomq && cargo clippy --all-targets)     # separate workspace
 ```
 
-`#[allow]` vs `#[expect]`: use `#[expect]` by default. Use `#[allow]`
-only when the lint fires in some feature combinations but not others
-(the expectation would be unfulfilled when the lint is silent).
+Fix warnings instead of silencing them. For a demonstrated false positive,
+use the narrowest `#[expect(lint, reason = "...")]`. Use `#[allow]` only
+when the lint fires in some feature combinations but not others (the
+expectation would be unfulfilled when the lint is silent).
 
 Lints: `missing_debug_implementations` = **deny**,
 `unsafe_op_in_unsafe_fn` = **deny**, clippy `pedantic` = **warn**.
@@ -147,10 +148,57 @@ Lints: `missing_debug_implementations` = **deny**,
 - `main` branch is protected. All changes go through PRs.
 - Commit messages describe OMQ changes and checks only. Do not mention
   downstream applications.
+- `CHANGELOG.md`: extend `## [Unreleased]` only. Never edit a released
+  section.
 
-**Readability off the hot path.** Outside the hot path, prefer
-simple, readable code over clever abstractions. Maintainability
-beats micro-optimization where performance is not critical.
+## Code quality
+
+API design:
+
+- Keep public APIs small and hard to misuse. Default to private or
+  `pub(crate)`. Do not leak implementation types or private errors in
+  public signatures.
+- Take borrowed inputs (`&str`, `&[u8]`, `&T`) when ownership is not
+  needed. Take `impl Into<...>` where the callee keeps the data, so callers
+  hand over a buffer without a copy.
+- Prefer standard traits (`From`/`TryFrom`, `Default`, `Display`,
+  `FromStr`, `AsRef`). Add an inherent `new`, `get` or `to_*` only when no
+  trait fits.
+- Document every public item, with `# Errors` and `# Panics` where they
+  apply. Make functions `const` where possible.
+
+Code shape:
+
+- One concern per module. Split a source file past about 800 lines (tests
+  excluded) into submodules along its concerns. Unit tests go in a sibling
+  `tests.rs`.
+- Functions stay under 60 lines and 5 parameters (`clippy.toml`). When
+  arguments travel together, pass a named struct. A flat `match` with one
+  arm per command or socket type may `#[expect(clippy::too_many_lines)]`.
+- Group struct fields that change together into a named sub-struct. A
+  struct with more than about 12 fields usually hides one.
+- Logic repeated across socket types, transports or crates lives in one
+  shared helper, not in copies.
+- Off the hot path, plain readable code beats clever code.
+
+Safety and errors:
+
+- `omq-proto` and the `omq-tokio` library forbid `unsafe`. `omq-shm`
+  (mappings, ancillary IO) and `omq-libzmq` (C ABI) hold the unsafe code:
+  keep each block small, with a `// SAFETY:` comment.
+- Library errors use `thiserror`. Public error enums are `#[non_exhaustive]`
+  and keep their source chain with `#[from]`/`#[source]`.
+- No `unwrap`, `expect` or panic in production code for recoverable
+  failures. Peer input never panics. Check lengths and limits before
+  allocating.
+
+Tests:
+
+- Every new or changed function is exercised by a test. Unit tests sit next
+  to private logic; public behavior goes in `tests/`. Name tests by
+  behavior.
+- Add a regression test before fixing a bug.
+- Wait on events with a timeout, not on sleeps.
 
 ## Socket fundamentals
 
@@ -192,7 +240,32 @@ fix that weakens self-healing or trades reliability for convenience.
 | PEER | N:N, identity routing in both directions |
 | STREAM | Raw TCP only, no ZMTP; identity frame selects the peer |
 
+## Concurrency
+
+- No lost wakes: make a state change visible before signaling, and check
+  the condition after registering the wait.
+- Never hold a lock guard across `.await`. Keep lock holds short. Comment
+  the order where two locks nest.
+- Every spawned task, timer, waiter and registry entry has an owner that
+  removes it on every exit path, including errors and cancellation. Prefer
+  drop guards to manual cleanup.
+- `select!` arms must be cancel-safe, or say why losing the branch is fine.
+- Use the weakest correct atomic ordering, and comment why.
+- Bound every queue and buffer a peer can fill, by count or bytes.
+
 ## Performance invariants
+
+Profile before optimizing. Change measured hotspots. Back performance
+claims with before and after numbers from release builds.
+
+- Message paths do not allocate or copy per message. Amortize copies into
+  arenas (`FrameBuffer`). Watch for hidden copies in `BytesMut::reserve`.
+- Walk a collection once. Fuse filter, count and collect passes; use the
+  entry API instead of `contains` then `insert`.
+- Reuse buffers: `clear` keeps capacity. Use `Box<[T]>` or `[T; N]` for
+  storage that never grows.
+- Per-connection memory matters: keep idle peers small and box one-off
+  futures.
 
 **Caller thread: enqueue only.** The caller thread pushes raw
 `Message` values into send pipes or lane rings. Encoding, framing,

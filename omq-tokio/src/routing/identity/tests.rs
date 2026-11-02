@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use super::*;
 use crate::engine::send_pipe;
+use crate::engine::{PeerDriverData, SendPipeProducer};
 
 #[tokio::test]
 async fn stream_full_lane_preserves_backpressure_and_other_peers() {

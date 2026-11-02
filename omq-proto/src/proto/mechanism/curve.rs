@@ -72,6 +72,48 @@ impl std::fmt::Debug for CurveBox {
     }
 }
 
+/// Our transient secret and the peer's transient public key. They key the
+/// READY and INITIATE boxes and every MESSAGE.
+struct SessionKeys {
+    our_eph_secret: StaticSecret,
+    peer_eph_public: PublicKey,
+}
+
+impl SessionKeys {
+    fn curve_box(&self) -> Result<CurveBox> {
+        CurveBox::new(&self.peer_eph_public, &self.our_eph_secret)
+    }
+
+    fn transform(&self, out_counter: u64, is_server: bool) -> Result<CurveTransform> {
+        build_transform(
+            &self.our_eph_secret,
+            &self.peer_eph_public,
+            out_counter,
+            is_server,
+        )
+    }
+}
+
+/// Overflow error of the handshake nonce counter.
+const HANDSHAKE_COUNTER_EXHAUSTED: &str = "CURVE handshake nonce counter exhausted";
+
+/// Advance a nonce counter and return the new value. `exhausted` is the
+/// error text on overflow.
+#[inline]
+fn next_counter(counter: &mut u64, exhausted: &'static str) -> Result<u64> {
+    *counter = counter
+        .checked_add(1)
+        .ok_or_else(|| Error::Protocol(exhausted.into()))?;
+    Ok(*counter)
+}
+
+/// Record CURVE and the peer's long-term public key in its properties.
+fn stamp_peer_key(props: &mut PeerProperties, public_key: [u8; 32]) {
+    let authentication = std::sync::Arc::make_mut(&mut props.authentication);
+    authentication.mechanism = Some(super::MechanismName::CURVE);
+    authentication.public_key = Some(crate::PeerPublicKey::Curve(public_key));
+}
+
 const NONCE_HELLO: &[u8; 16] = b"CurveZMQHELLO---";
 const NONCE_INITIATE: &[u8; 16] = b"CurveZMQINITIATE";
 const NONCE_READY: &[u8; 16] = b"CurveZMQREADY---";

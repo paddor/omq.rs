@@ -5,7 +5,7 @@ use x25519_dalek::{PublicKey, StaticSecret};
 
 use super::{
     MESSAGE_BOX_OFFSET, MESSAGE_PREFIX, MESSAGE_TAG_OFFSET, NONCE_MESSAGE_C, NONCE_MESSAGE_S,
-    box_key, nonce_short,
+    box_key, next_counter, nonce_short,
 };
 use crate::error::{Error, Result};
 use crate::message::{FrameFlags, MAX_INLINE_PAYLOAD, Payload};
@@ -42,11 +42,10 @@ impl CurveTransform {
 
     /// Reserve the nonce counter of the next outgoing MESSAGE.
     pub(crate) fn next_out_counter(&mut self) -> Result<u64> {
-        self.out_counter = self
-            .out_counter
-            .checked_add(1)
-            .ok_or_else(|| Error::Protocol("CURVE outbound nonce counter exhausted".into()))?;
-        Ok(self.out_counter)
+        next_counter(
+            &mut self.out_counter,
+            "CURVE outbound nonce counter exhausted",
+        )
     }
 
     /// Append one MESSAGE frame payload with nonce `counter` to `out`:

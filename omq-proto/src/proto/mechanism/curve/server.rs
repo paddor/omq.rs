@@ -10,8 +10,9 @@ use super::super::{
     MechanismPeerInfo, MechanismStep, check_authentication, try_error_command,
 };
 use super::{
-    CurveBox, CurveTransform, NONCE_HELLO, NONCE_INITIATE, NONCE_READY, NONCE_VOUCH_PREFIX,
-    NONCE_WELCOME_PREFIX, build_transform, nonce_long, nonce_short,
+    CurveBox, CurveTransform, HANDSHAKE_COUNTER_EXHAUSTED, NONCE_HELLO, NONCE_INITIATE,
+    NONCE_READY, NONCE_VOUCH_PREFIX, NONCE_WELCOME_PREFIX, SessionKeys, next_counter, nonce_long,
+    nonce_short, stamp_peer_key,
 };
 use crate::error::{Error, Result};
 use crate::proto::command::{self, Command, PeerProperties};
@@ -41,10 +42,7 @@ impl std::fmt::Debug for CurveServer {
 pub(super) enum CurveServerState {
     Init,
     AwaitingInitiate,
-    Done {
-        our_eph_secret: StaticSecret,
-        peer_eph_public: PublicKey,
-    },
+    Done(SessionKeys),
 }
 
 impl std::fmt::Debug for CurveServerState {
@@ -52,7 +50,7 @@ impl std::fmt::Debug for CurveServerState {
         match self {
             Self::Init => f.write_str("Init"),
             Self::AwaitingInitiate => f.write_str("AwaitingInitiate"),
-            Self::Done { .. } => f.write_str("Done"),
+            Self::Done(_) => f.write_str("Done"),
         }
     }
 }
@@ -79,14 +77,6 @@ impl CurveServer {
             auth: AuthGate::default(),
             pending_props: None,
         }
-    }
-
-    fn next_out_counter(&mut self) -> Result<u64> {
-        self.out_counter = self
-            .out_counter
-            .checked_add(1)
-            .ok_or_else(|| Error::Protocol("CURVE handshake nonce counter exhausted".into()))?;
-        Ok(self.out_counter)
     }
 
     pub(super) fn start(&mut self, our_props: PeerProperties) {
@@ -121,9 +111,7 @@ impl CurveServer {
             }
             (command::NAME_INITIATE, CurveServerState::AwaitingInitiate) => {
                 let (mut peer_props, peer_public_key) = self.parse_initiate(&body)?;
-                let authentication = std::sync::Arc::make_mut(&mut peer_props.authentication);
-                authentication.mechanism = Some(crate::proto::MechanismName::CURVE);
-                authentication.public_key = Some(crate::PeerPublicKey::Curve(peer_public_key));
+                stamp_peer_key(&mut peer_props, peer_public_key);
                 // parse_initiate transitions state to Done.
                 let Some(auth) = &self.authenticator else {
                     return self.send_ready(out, peer_props);
@@ -261,11 +249,14 @@ impl CurveServer {
             .take()
             .ok_or_else(|| Error::HandshakeFailed("CURVE cookie key unavailable".into()))?;
         let (cp_bytes, sn_secret_bytes) = cookie_key.decrypt_cookie(cookie_bytes)?;
-        let sn_secret = StaticSecret::from(sn_secret_bytes);
-        let cp = PublicKey::from(cp_bytes);
+        let keys = SessionKeys {
+            our_eph_secret: StaticSecret::from(sn_secret_bytes),
+            peer_eph_public: PublicKey::from(cp_bytes),
+        };
 
         let nonce = nonce_short(NONCE_INITIATE, counter);
-        let init_pt = CurveBox::new(&cp, &sn_secret)?
+        let init_pt = keys
+            .curve_box()?
             .decrypt(&nonce, init_box)
             .map_err(|_| Error::HandshakeFailed("CURVE INITIATE decrypt failed".into()))?;
         if init_pt.len() < 32 + 16 + 80 {
@@ -280,35 +271,31 @@ impl CurveServer {
         let metadata = &init_pt[128..];
 
         let cl = PublicKey::from(client_lt_bytes);
-        Self::verify_vouch(&sn_secret, &self.our_lt_public, vouch, &cl, &cp)?;
+        Self::verify_vouch(&keys, &self.our_lt_public, vouch, &cl)?;
 
         let props = command::decode_properties(metadata)?;
 
-        self.state = CurveServerState::Done {
-            our_eph_secret: sn_secret,
-            peer_eph_public: cp,
-        };
+        self.state = CurveServerState::Done(keys);
         Ok((props, *cl.as_bytes()))
     }
 
-    /// Check that the client long-term key `cl` vouches for its ephemeral
-    /// key `expected_cp` toward this server. `vouch` is the 16-byte nonce
-    /// suffix followed by the box.
+    /// Check that the client long-term key `cl` vouches for its transient
+    /// key in `keys` toward this server. `vouch` is the 16-byte nonce suffix
+    /// followed by the box.
     fn verify_vouch(
-        our_eph_secret: &StaticSecret,
+        keys: &SessionKeys,
         our_lt_public: &PublicKey,
         vouch: &[u8],
         cl: &PublicKey,
-        expected_cp: &PublicKey,
     ) -> Result<()> {
         let (vouch_suffix, vouch_box) = vouch.split_at(16);
         let vouch_suffix: &[u8; 16] = vouch_suffix.try_into().unwrap();
         let vouch_nonce = nonce_long(NONCE_VOUCH_PREFIX, vouch_suffix);
-        let vouch_pt = CurveBox::new(cl, our_eph_secret)?
+        let vouch_pt = CurveBox::new(cl, &keys.our_eph_secret)?
             .decrypt(&vouch_nonce, vouch_box)
             .map_err(|_| Error::HandshakeFailed("CURVE VOUCH invalid".into()))?;
         if vouch_pt.len() != 64
-            || &vouch_pt[..32] != expected_cp.as_bytes()
+            || &vouch_pt[..32] != keys.peer_eph_public.as_bytes()
             || &vouch_pt[32..] != our_lt_public.as_bytes()
         {
             return Err(Error::HandshakeFailed(
@@ -319,21 +306,15 @@ impl CurveServer {
     }
 
     fn build_ready(&mut self) -> Result<Bytes> {
-        let counter = self.next_out_counter()?;
-        let CurveServerState::Done {
-            ref our_eph_secret,
-            ref peer_eph_public,
-            ..
-        } = self.state
-        else {
+        let counter = next_counter(&mut self.out_counter, HANDSHAKE_COUNTER_EXHAUSTED)?;
+        let CurveServerState::Done(keys) = &self.state else {
             return Err(Error::HandshakeFailed(
                 "CURVE READY requested before INITIATE".into(),
             ));
         };
         let nonce = nonce_short(NONCE_READY, counter);
         let metadata = command::encode_properties(&self.our_props)?;
-        let ready_box =
-            CurveBox::new(peer_eph_public, our_eph_secret)?.encrypt(&nonce, metadata.as_slice());
+        let ready_box = keys.curve_box()?.encrypt(&nonce, metadata.as_slice());
         let mut body = BytesMut::with_capacity(8 + ready_box.len());
         body.put_slice(&counter.to_be_bytes());
         body.put_slice(&ready_box);
@@ -341,16 +322,11 @@ impl CurveServer {
     }
 
     pub(super) fn build_transform(&self) -> Result<CurveTransform> {
-        let CurveServerState::Done {
-            ref our_eph_secret,
-            ref peer_eph_public,
-            ..
-        } = self.state
-        else {
+        let CurveServerState::Done(keys) = &self.state else {
             return Err(Error::HandshakeFailed(
                 "CURVE transform requested before handshake complete".into(),
             ));
         };
-        build_transform(our_eph_secret, peer_eph_public, self.out_counter, true)
+        keys.transform(self.out_counter, true)
     }
 }

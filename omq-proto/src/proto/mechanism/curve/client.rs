@@ -6,8 +6,9 @@ use x25519_dalek::{PublicKey, StaticSecret};
 
 use super::super::{CurveKeypair, CurvePublicKey, MechanismName, MechanismStep, try_error_command};
 use super::{
-    CurveBox, CurveTransform, NONCE_HELLO, NONCE_INITIATE, NONCE_READY, NONCE_VOUCH_PREFIX,
-    NONCE_WELCOME_PREFIX, build_transform, nonce_long, nonce_short,
+    CurveBox, CurveTransform, HANDSHAKE_COUNTER_EXHAUSTED, NONCE_HELLO, NONCE_INITIATE,
+    NONCE_READY, NONCE_VOUCH_PREFIX, NONCE_WELCOME_PREFIX, SessionKeys, next_counter, nonce_long,
+    nonce_short, stamp_peer_key,
 };
 use crate::error::{Error, Result};
 use crate::proto::command::{self, Command, PeerProperties};
@@ -30,32 +31,24 @@ impl std::fmt::Debug for CurveClient {
     }
 }
 
+/// Client handshake phase. Before WELCOME only our transient secret exists.
 enum CurveClientState {
-    Init {
-        our_eph_secret: StaticSecret,
-        our_eph_public: PublicKey,
-    },
-    AwaitingWelcome {
-        our_eph_secret: StaticSecret,
-        our_eph_public: PublicKey,
-    },
-    AwaitingReady {
-        our_eph_secret: StaticSecret,
-        peer_eph_public: PublicKey,
-    },
-    Done {
-        our_eph_secret: StaticSecret,
-        peer_eph_public: PublicKey,
-    },
+    /// HELLO not yet sent.
+    Init(StaticSecret),
+    /// HELLO sent.
+    AwaitingWelcome(StaticSecret),
+    /// INITIATE sent.
+    AwaitingReady(SessionKeys),
+    Done(SessionKeys),
 }
 
 impl std::fmt::Debug for CurveClientState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Init { .. } => f.write_str("Init"),
-            Self::AwaitingWelcome { .. } => f.write_str("AwaitingWelcome"),
-            Self::AwaitingReady { .. } => f.write_str("AwaitingReady"),
-            Self::Done { .. } => f.write_str("Done"),
+            Self::Init(_) => f.write_str("Init"),
+            Self::AwaitingWelcome(_) => f.write_str("AwaitingWelcome"),
+            Self::AwaitingReady(_) => f.write_str("AwaitingReady"),
+            Self::Done(_) => f.write_str("Done"),
         }
     }
 }
@@ -67,7 +60,6 @@ impl CurveClient {
         let our_lt_public = PublicKey::from(*our_keypair.public.as_bytes());
         let peer_lt_public = PublicKey::from(*server_public.as_bytes());
         let our_eph_secret = StaticSecret::random();
-        let our_eph_public = PublicKey::from(&our_eph_secret);
         Self {
             our_lt_secret,
             our_lt_public,
@@ -75,19 +67,8 @@ impl CurveClient {
             our_props: PeerProperties::default(),
             out_counter: 0,
             received_cookie: Vec::new(),
-            state: Some(CurveClientState::Init {
-                our_eph_secret,
-                our_eph_public,
-            }),
+            state: Some(CurveClientState::Init(our_eph_secret)),
         }
-    }
-
-    fn next_out_counter(&mut self) -> Result<u64> {
-        self.out_counter = self
-            .out_counter
-            .checked_add(1)
-            .ok_or_else(|| Error::Protocol("CURVE handshake nonce counter exhausted".into()))?;
-        Ok(self.out_counter)
     }
 
     pub(super) fn start(
@@ -101,17 +82,10 @@ impl CurveClient {
             name: Bytes::from_static(command::NAME_HELLO),
             body: hello_body,
         });
-        let CurveClientState::Init {
-            our_eph_secret,
-            our_eph_public,
-        } = self.state.take().unwrap()
-        else {
+        let Some(CurveClientState::Init(our_eph_secret)) = self.state.take() else {
             unreachable!();
         };
-        self.state = Some(CurveClientState::AwaitingWelcome {
-            our_eph_secret,
-            our_eph_public,
-        });
+        self.state = Some(CurveClientState::AwaitingWelcome(our_eph_secret));
         Ok(())
     }
 
@@ -131,7 +105,7 @@ impl CurveClient {
         };
         match name.as_ref() {
             command::NAME_WELCOME
-                if matches!(self.state, Some(CurveClientState::AwaitingWelcome { .. })) =>
+                if matches!(self.state, Some(CurveClientState::AwaitingWelcome(_))) =>
             {
                 self.process_welcome(&body)?;
                 let initiate = self.build_initiate()?;
@@ -142,7 +116,7 @@ impl CurveClient {
                 Ok(MechanismStep::Continue)
             }
             command::NAME_READY
-                if matches!(self.state, Some(CurveClientState::AwaitingReady { .. })) =>
+                if matches!(self.state, Some(CurveClientState::AwaitingReady(_))) =>
             {
                 let peer_props = self.parse_ready(&body)?;
                 Ok(MechanismStep::Complete {
@@ -157,27 +131,26 @@ impl CurveClient {
         }
     }
 
+    /// Our transient secret before WELCOME.
     fn eph_secret(&self) -> &StaticSecret {
-        match self.state.as_ref().unwrap() {
-            CurveClientState::Init { our_eph_secret, .. }
-            | CurveClientState::AwaitingWelcome { our_eph_secret, .. }
-            | CurveClientState::AwaitingReady { our_eph_secret, .. }
-            | CurveClientState::Done { our_eph_secret, .. } => our_eph_secret,
+        match self.state.as_ref() {
+            Some(CurveClientState::Init(secret) | CurveClientState::AwaitingWelcome(secret)) => {
+                secret
+            }
+            _ => unreachable!("transient secret is consumed by WELCOME"),
         }
     }
 
-    fn eph_public(&self) -> &PublicKey {
-        match self.state.as_ref().unwrap() {
-            CurveClientState::Init { our_eph_public, .. }
-            | CurveClientState::AwaitingWelcome { our_eph_public, .. } => our_eph_public,
-            CurveClientState::AwaitingReady { .. } | CurveClientState::Done { .. } => {
-                panic!("ephemeral public not available in this state");
-            }
+    /// Session keys after WELCOME.
+    fn session_keys(&self) -> &SessionKeys {
+        match self.state.as_ref() {
+            Some(CurveClientState::AwaitingReady(keys) | CurveClientState::Done(keys)) => keys,
+            _ => unreachable!("session keys exist only after WELCOME"),
         }
     }
 
     fn build_hello(&mut self) -> Result<Bytes> {
-        let counter = self.next_out_counter()?;
+        let counter = next_counter(&mut self.out_counter, HANDSHAKE_COUNTER_EXHAUSTED)?;
         let nonce = nonce_short(NONCE_HELLO, counter);
         let signature_box =
             CurveBox::new(&self.peer_lt_public, self.eph_secret())?.encrypt(&nonce, &[0u8; 64][..]);
@@ -185,7 +158,7 @@ impl CurveClient {
         body.put_u8(0x01);
         body.put_u8(0x00);
         body.put_bytes(0, 72);
-        body.put_slice(self.eph_public().as_bytes());
+        body.put_slice(PublicKey::from(self.eph_secret()).as_bytes());
         body.put_slice(&counter.to_be_bytes());
         body.put_slice(&signature_box);
         Ok(body.freeze())
@@ -217,29 +190,21 @@ impl CurveClient {
         let peer_eph_public = PublicKey::from(sp_bytes);
 
         // Transition: AwaitingWelcome -> AwaitingReady, moving ephemeral secret
-        let CurveClientState::AwaitingWelcome { our_eph_secret, .. } = self.state.take().unwrap()
-        else {
+        let Some(CurveClientState::AwaitingWelcome(our_eph_secret)) = self.state.take() else {
             unreachable!();
         };
-        self.state = Some(CurveClientState::AwaitingReady {
+        self.state = Some(CurveClientState::AwaitingReady(SessionKeys {
             our_eph_secret,
             peer_eph_public,
-        });
+        }));
         // Stash cookie for build_initiate.
         self.received_cookie = cookie;
         Ok(())
     }
 
     fn build_initiate(&mut self) -> Result<Bytes> {
-        let counter = self.next_out_counter()?;
-
-        let Some(CurveClientState::AwaitingReady {
-            ref our_eph_secret,
-            ref peer_eph_public,
-        }) = self.state
-        else {
-            unreachable!();
-        };
+        let counter = next_counter(&mut self.out_counter, HANDSHAKE_COUNTER_EXHAUSTED)?;
+        let keys = self.session_keys();
 
         let our_props = self.our_props.clone();
         let our_lt_public_bytes = *self.our_lt_public.as_bytes();
@@ -250,11 +215,11 @@ impl CurveClient {
         rand::rng().fill_bytes(&mut vouch_suffix);
         let vouch_nonce = nonce_long(NONCE_VOUCH_PREFIX, &vouch_suffix);
         let mut vouch_pt = [0u8; 64];
-        vouch_pt[..32].copy_from_slice(PublicKey::from(our_eph_secret).as_bytes());
+        vouch_pt[..32].copy_from_slice(PublicKey::from(&keys.our_eph_secret).as_bytes());
         vouch_pt[32..].copy_from_slice(self.peer_lt_public.as_bytes());
         // RFC 26: vouch box is sealed by the client's long-term secret to
         // the SERVER'S TRANSIENT public key (S_eph), NOT the long-term one.
-        let vouch_box = CurveBox::new(peer_eph_public, &self.our_lt_secret)?
+        let vouch_box = CurveBox::new(&keys.peer_eph_public, &self.our_lt_secret)?
             .encrypt(&vouch_nonce, &vouch_pt[..]);
 
         // Initiate plaintext = C_long_pub(32) + vouch_suffix(16) + vouch_box(80) + metadata.
@@ -266,8 +231,7 @@ impl CurveClient {
         init_pt.extend_from_slice(&metadata);
 
         let nonce = nonce_short(NONCE_INITIATE, counter);
-        let init_box =
-            CurveBox::new(peer_eph_public, our_eph_secret)?.encrypt(&nonce, init_pt.as_slice());
+        let init_box = keys.curve_box()?.encrypt(&nonce, init_pt.as_slice());
 
         let mut body = BytesMut::with_capacity(96 + 8 + init_box.len());
         body.put_slice(&self.received_cookie);
@@ -282,48 +246,29 @@ impl CurveClient {
         }
         let counter = u64::from_be_bytes(body[..8].try_into().unwrap());
         let ready_box = &body[8..];
-        let Some(CurveClientState::AwaitingReady {
-            ref our_eph_secret,
-            ref peer_eph_public,
-        }) = self.state
-        else {
-            unreachable!();
-        };
         let nonce = nonce_short(NONCE_READY, counter);
-        let pt = CurveBox::new(peer_eph_public, our_eph_secret)?
+        let pt = self
+            .session_keys()
+            .curve_box()?
             .decrypt(&nonce, ready_box)
             .map_err(|_| Error::HandshakeFailed("CURVE READY decrypt failed".into()))?;
         let mut props = command::decode_properties(&pt)?;
-        let authentication = std::sync::Arc::make_mut(&mut props.authentication);
-        authentication.mechanism = Some(crate::proto::MechanismName::CURVE);
-        authentication.public_key =
-            Some(crate::PeerPublicKey::Curve(*self.peer_lt_public.as_bytes()));
+        stamp_peer_key(&mut props, *self.peer_lt_public.as_bytes());
 
         // Transition to Done, moving keys.
-        let CurveClientState::AwaitingReady {
-            our_eph_secret,
-            peer_eph_public,
-        } = self.state.take().unwrap()
-        else {
+        let Some(CurveClientState::AwaitingReady(keys)) = self.state.take() else {
             unreachable!();
         };
-        self.state = Some(CurveClientState::Done {
-            our_eph_secret,
-            peer_eph_public,
-        });
+        self.state = Some(CurveClientState::Done(keys));
         Ok(props)
     }
 
     pub(super) fn build_transform(&self) -> Result<CurveTransform> {
-        let Some(CurveClientState::Done {
-            ref our_eph_secret,
-            ref peer_eph_public,
-        }) = self.state
-        else {
+        let Some(CurveClientState::Done(keys)) = &self.state else {
             return Err(Error::HandshakeFailed(
                 "CURVE transform requested before handshake complete".into(),
             ));
         };
-        build_transform(our_eph_secret, peer_eph_public, self.out_counter, false)
+        keys.transform(self.out_counter, false)
     }
 }

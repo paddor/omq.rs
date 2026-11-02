@@ -68,37 +68,16 @@ impl LatencySend {
         }
     }
 
-    pub(crate) fn make_connect_pipe(&mut self, route_id: u64) -> SendPipeConsumer {
-        self.make_connect_pipe_inner(
-            route_id,
-            #[cfg(feature = "dart")]
-            None,
-        )
-    }
-
-    #[cfg(feature = "dart")]
-    pub(crate) fn make_dart_connect_pipe(
-        &mut self,
-        route_id: u64,
-        socket_type: omq_proto::SocketType,
-    ) -> SendPipeConsumer {
-        self.make_connect_pipe_inner(route_id, Some(socket_type))
-    }
-
-    fn make_connect_pipe_inner(
+    /// Allocate a connect-side pre-ready pipe. DART sockets pass their type so
+    /// the pipe validates messages.
+    pub(crate) fn make_connect_pipe(
         &mut self,
         route_id: u64,
         #[cfg(feature = "dart")] dart: Option<omq_proto::SocketType>,
     ) -> SendPipeConsumer {
         let (tx, rx) = crate::engine::send_pipe(self.pipe_cap);
         #[cfg(feature = "dart")]
-        let tx = {
-            let mut tx = tx;
-            if let Some(kind) = dart {
-                tx.set_dart(kind);
-            }
-            tx
-        };
+        let tx = super::with_dart(tx, dart);
         let mut state = self.state.lock().expect("latency send state");
         state.remove_route(route_id);
         state.pending.push(PendingPipe { route_id, tx });
@@ -558,7 +537,11 @@ mod tests {
     #[test]
     fn state_prefers_peer_space_before_pending_space() {
         let mut send = LatencySend::new(&Options::default().send_hwm(1));
-        let _pending = send.make_connect_pipe(1);
+        let _pending = send.make_connect_pipe(
+            1,
+            #[cfg(feature = "dart")]
+            None,
+        );
         let slot = PeerTransmitSlot::with_config(
             2,
             SlotConfig {

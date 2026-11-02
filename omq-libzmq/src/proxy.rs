@@ -13,6 +13,7 @@
 //! waits behind another and nothing polls on a timer.
 
 use crate::consts;
+use crate::error::c_try;
 use crate::poll::{ZmqFd, ZmqPollItem, recv_ready};
 use crate::send_recv::{
     SendMessageAttempt, SpawnedSend, map_send_err, spawn_send_message, try_recv_message,
@@ -467,9 +468,6 @@ pub extern "C" fn zmq_proxy_steerable(
     capture: *mut c_void,
     control: *mut c_void,
 ) -> libc::c_int {
-    let proxy = match ProxyCtx::new(frontend, backend, capture, control) {
-        Ok(proxy) => proxy,
-        Err(e) => return crate::error::fail(e),
-    };
+    let proxy = c_try!(ProxyCtx::new(frontend, backend, capture, control));
     proxy.run()
 }

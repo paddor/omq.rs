@@ -16,6 +16,7 @@ use std::ffi::c_int;
 use std::sync::Arc;
 
 use crate::consts;
+use crate::error::c_try;
 use crate::socket::OmqSocket;
 
 #[cfg(unix)]
@@ -122,10 +123,7 @@ pub extern "C" fn zmq_poll(
     nitems: c_int,
     timeout_ms: libc::c_long,
 ) -> c_int {
-    let items_slice = match poll_items(items, nitems) {
-        Ok(items) => items,
-        Err(errno) => return crate::error::fail(errno),
-    };
+    let items_slice = c_try!(poll_items(items, nitems));
 
     let ready = check_immediate(items_slice);
     if ready > 0 || timeout_ms == 0 {

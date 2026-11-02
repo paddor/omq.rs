@@ -15,7 +15,7 @@ use omq_tokio::engine::StateSignal;
 use std::os::raw::c_char;
 
 use crate::context::{OmqContext, next_socket_id};
-use crate::error::{ETERM, fail, map_omq_err, set_errno};
+use crate::error::{ETERM, c_try, fail, map_omq_err, set_errno};
 use crate::notify::{NotifyHandle, PlatformNotifyHandle, RecvNotify};
 use crate::opts::{LingerSetting, MechanismOverlay, SocketOverlay};
 
@@ -151,18 +151,25 @@ fn map_socket_type(t: c_int) -> Option<SocketType> {
 
 /// Run an async op against the socket's inner Arc on the context runtime and
 /// block the calling thread until completion. Fails with `ETERM` when the
-/// context shuts down first and `EDEADLK` on an OMQ IO thread.
-pub(crate) fn with_socket<F, Fut, T>(
-    ctx: &Arc<OmqContext>,
+/// context shuts down first, `EDEADLK` on an OMQ IO thread, and the mapped
+/// errno when the op fails.
+pub(crate) fn run_on_socket<F, Fut, T>(
+    sock: &OmqSocket,
     inner: &Arc<omq_tokio::Socket>,
     op: F,
 ) -> Result<T, c_int>
 where
-    F: FnOnce(Arc<omq_tokio::Socket>) -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = T> + Send + 'static,
+    F: FnOnce(Arc<omq_tokio::Socket>) -> Fut,
+    Fut: std::future::Future<Output = omq_tokio::Result<T>> + Send + 'static,
     T: Send + 'static,
 {
-    crate::blocking::run(ctx, op(inner.clone()))
+    crate::blocking::run(&sock.ctx, op(inner.clone()))?.map_err(|error| map_omq_err(&error))
+}
+
+/// Materialize the backend socket and borrow it.
+pub(crate) fn materialized(sock: &Arc<OmqSocket>) -> Result<&Arc<omq_tokio::Socket>, c_int> {
+    ensure_materialized(sock)?;
+    sock.inner.get().ok_or(ETERM)
 }
 
 /// Create a socket handle of the requested type in a context; return null with errno on
@@ -250,10 +257,7 @@ pub extern "C" fn omq_socket_allow_thread_migration(sock_ptr: *mut c_void) -> c_
         return fail(libc::EFAULT);
     }
     // SAFETY: C callers pass null or a pointer from this API.
-    let socket = match unsafe { crate::handle::socket(sock_ptr) } {
-        Ok(socket) => socket,
-        Err(errno) => return fail(errno),
-    };
+    let socket = c_try!(unsafe { crate::handle::socket(sock_ptr) });
     socket.allow_thread_migration();
     0
 }
@@ -498,15 +502,9 @@ fn spawn_recv_pump(
 /// Close the socket handle; accepted output follows its configured linger policy.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_close(sock_ptr: *mut c_void) -> c_int {
-    if sock_ptr.is_null() {
-        return fail(crate::error::ENOTSOCK);
-    }
     // SAFETY: C callers pass null or a pointer from this API; on success
     // close owns the socket and the handle is gone.
-    let arc = match unsafe { crate::handle::take_socket(sock_ptr) } {
-        Ok(socket) => socket,
-        Err(errno) => return fail(errno),
-    };
+    let arc = c_try!(unsafe { crate::handle::take_socket(sock_ptr) });
 
     // A full direct receive ring may have a driver waiting for space.
     // Drop its consumer before signaling so the driver observes closure.
@@ -569,20 +567,18 @@ pub extern "C" fn zmq_close(sock_ptr: *mut c_void) -> c_int {
 ///
 /// # Safety
 ///
-/// `sock_ptr` must be a valid `*mut Arc<OmqSocket>` or null (returns EFAULT).
-/// `addr` must be a valid C string pointer or null (returns EFAULT).
+/// `sock_ptr` must be null or readable for a handle tag (null returns
+/// `ENOTSOCK`). `addr` must be a valid C string pointer or null (returns
+/// `EFAULT`).
 unsafe fn parse_endpoint_args<'a>(
     sock_ptr: *mut c_void,
     addr: *const c_char,
 ) -> Result<(&'a Arc<OmqSocket>, String, Endpoint), c_int> {
-    if sock_ptr.is_null() {
-        return Err(crate::error::ENOTSOCK);
-    }
+    // SAFETY: C callers pass null or a pointer from this API.
+    let sock = unsafe { crate::handle::socket(sock_ptr) }?;
     if addr.is_null() {
         return Err(libc::EFAULT);
     }
-    // SAFETY: C callers pass null or a pointer from this API.
-    let sock = unsafe { crate::handle::socket(sock_ptr) }?;
     if sock.ctx.is_effectively_terminated() {
         return Err(ETERM);
     }
@@ -610,35 +606,22 @@ unsafe fn parse_endpoint_args<'a>(
 ///
 /// # Safety
 ///
-/// `sock_ptr` must be a valid `*mut Arc<OmqSocket>` or null.
+/// `sock_ptr` must be null or readable for a handle tag.
 /// `cstr` must be a valid C string pointer or null.
 unsafe fn parse_group_args<'a>(
     sock_ptr: *mut c_void,
     cstr: *const c_char,
 ) -> Result<(&'a Arc<OmqSocket>, Bytes), c_int> {
-    if sock_ptr.is_null() {
-        return Err(crate::error::ENOTSOCK);
-    }
+    // SAFETY: C callers pass null or a pointer from this API.
+    let sock = unsafe { crate::handle::socket(sock_ptr) }?;
     if cstr.is_null() {
         return Err(libc::EFAULT);
     }
-    // SAFETY: C callers pass null or a pointer from this API.
-    let sock = unsafe { crate::handle::socket(sock_ptr) }?;
     // SAFETY: cstr is non-null (checked above); caller guarantees a valid C string.
     let Ok(g) = unsafe { CStr::from_ptr(cstr) }.to_str() else {
         return Err(libc::EINVAL);
     };
     Ok((sock, Bytes::copy_from_slice(g.as_bytes())))
-}
-
-/// Map the two-level `Result<Result<T, omq Error>, errno>` returned by
-/// `with_socket` to a C return code (0 on success).
-fn result_to_rc<T>(result: &Result<Result<T, omq_tokio::error::Error>, c_int>) -> c_int {
-    match result {
-        Ok(Ok(_)) => 0,
-        Ok(Err(e)) => fail(map_omq_err(e)),
-        Err(errno) => fail(*errno),
-    }
 }
 
 /// Read codec parameters for this operation even after backend materialization.
@@ -661,15 +644,10 @@ fn compression_options_for_endpoint(
 /// Bind a null-terminated endpoint URI; return zero or -1 with errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_bind(sock_ptr: *mut c_void, addr: *const libc::c_char) -> c_int {
-    let (sock, addr_str, mut endpoint) = match unsafe { parse_endpoint_args(sock_ptr, addr) } {
-        Ok(t) => t,
-        Err(e) => return fail(e),
-    };
+    let (sock, addr_str, mut endpoint) = c_try!(unsafe { parse_endpoint_args(sock_ptr, addr) });
 
     if addr_str == crate::zap::ENDPOINT {
-        if let Err(error) = sock.ctx.zap.bind(sock) {
-            return fail(error);
-        }
+        c_try!(sock.ctx.zap.bind(sock));
         sock.zap_handler.store(true, Ordering::Release);
         sock.bound_or_connected.store(true, Ordering::Release);
         if let Ok(mut ep) = sock.last_endpoint.lock() {
@@ -688,50 +666,29 @@ pub extern "C" fn zmq_bind(sock_ptr: *mut c_void, addr: *const libc::c_char) -> 
     if ov.ipv6 {
         endpoint = ipv6_rewrite_wildcard(endpoint);
     }
-    let compression = match compression_options_for_endpoint(&ov, &endpoint) {
-        Ok(compression) => compression,
-        Err(error) => return fail(error),
-    };
+    let compression = c_try!(compression_options_for_endpoint(&ov, &endpoint));
     drop(ov);
 
-    if let Err(error) = ensure_materialized(sock) {
-        return fail(error);
-    }
-
-    let Some(inner) = sock.inner.get() else {
-        return fail(ETERM);
-    };
-
-    let result = with_socket(&sock.ctx, inner, move |s| async move {
+    let inner = c_try!(materialized(sock));
+    let resolved = c_try!(run_on_socket(sock, inner, move |s| async move {
         if let Some(compression) = compression {
             s.bind_with_compression_options(endpoint.clone(), compression)
                 .await?;
         } else {
             s.bind(endpoint.clone()).await?;
         }
-        let resolved = s.last_bound_endpoint().map(|ep| ep.to_string());
-        Ok::<_, omq_tokio::error::Error>(resolved)
-    });
-
-    match result {
-        Ok(Ok(resolved)) => {
-            if let Ok(mut ep) = sock.last_endpoint.lock() {
-                *ep = resolved.or(Some(addr_str));
-            }
-            0
-        }
-        Ok(Err(ref e)) => fail(map_omq_err(e)),
-        Err(errno) => fail(errno),
+        Ok(s.last_bound_endpoint().map(|ep| ep.to_string()))
+    }));
+    if let Ok(mut ep) = sock.last_endpoint.lock() {
+        *ep = resolved.or(Some(addr_str));
     }
+    0
 }
 
 /// Register a null-terminated endpoint URI for connection and automatic reconnection.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_connect(sock_ptr: *mut c_void, addr: *const libc::c_char) -> c_int {
-    let (sock, addr_str, endpoint) = match unsafe { parse_endpoint_args(sock_ptr, addr) } {
-        Ok(t) => t,
-        Err(e) => return fail(e),
-    };
+    let (sock, addr_str, endpoint) = c_try!(unsafe { parse_endpoint_args(sock_ptr, addr) });
 
     if addr_str == crate::zap::ENDPOINT {
         return fail(libc::EINVAL);
@@ -744,49 +701,29 @@ pub extern "C" fn zmq_connect(sock_ptr: *mut c_void, addr: *const libc::c_char) 
         let Ok(overlay) = sock.overlay.lock() else {
             return fail(ETERM);
         };
-        match compression_options_for_endpoint(&overlay, &endpoint) {
-            Ok(compression) => compression,
-            Err(error) => return fail(error),
-        }
+        c_try!(compression_options_for_endpoint(&overlay, &endpoint))
     };
 
-    if let Err(error) = ensure_materialized(sock) {
-        return fail(error);
-    }
-
-    let Some(inner) = sock.inner.get() else {
-        return fail(ETERM);
-    };
-
-    let result = with_socket(&sock.ctx, inner, move |s| async move {
+    let inner = c_try!(materialized(sock));
+    c_try!(run_on_socket(sock, inner, move |s| async move {
         if let Some(compression) = compression {
             s.connect_with_compression_options(endpoint, compression)
                 .await
         } else {
             s.connect(endpoint).await
         }
-    });
-
-    match result {
-        Ok(Ok(())) => {
-            sock.connect_count.fetch_add(1, Ordering::AcqRel);
-            if let Ok(mut ep) = sock.last_endpoint.lock() {
-                *ep = Some(addr_str);
-            }
-            0
-        }
-        Ok(Err(ref e)) => fail(map_omq_err(e)),
-        Err(errno) => fail(errno),
+    }));
+    sock.connect_count.fetch_add(1, Ordering::AcqRel);
+    if let Ok(mut ep) = sock.last_endpoint.lock() {
+        *ep = Some(addr_str);
     }
+    0
 }
 
 /// Remove a bound endpoint by its null-terminated URI; return zero or -1 with errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_unbind(sock_ptr: *mut c_void, addr: *const libc::c_char) -> c_int {
-    let (sock, addr_str, endpoint) = match unsafe { parse_endpoint_args(sock_ptr, addr) } {
-        Ok(t) => t,
-        Err(e) => return fail(e),
-    };
+    let (sock, addr_str, endpoint) = c_try!(unsafe { parse_endpoint_args(sock_ptr, addr) });
 
     if addr_str == crate::zap::ENDPOINT && sock.zap_handler.swap(false, Ordering::AcqRel) {
         sock.ctx.zap.unbind(sock.id);
@@ -800,44 +737,31 @@ pub extern "C" fn zmq_unbind(sock_ptr: *mut c_void, addr: *const libc::c_char) -
     let Some(inner) = sock.inner.get() else {
         return fail(ETERM);
     };
-
-    let result = with_socket(&sock.ctx, inner, move |s| async move {
+    c_try!(run_on_socket(sock, inner, move |s| async move {
         s.unbind(endpoint).await
-    });
-
-    result_to_rc(&result)
+    }));
+    0
 }
 
 /// Remove a connected endpoint and stop retries; return zero or -1 with errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_disconnect(sock_ptr: *mut c_void, addr: *const libc::c_char) -> c_int {
-    let (sock, _addr_str, endpoint) = match unsafe { parse_endpoint_args(sock_ptr, addr) } {
-        Ok(t) => t,
-        Err(e) => return fail(e),
-    };
+    let (sock, _addr_str, endpoint) = c_try!(unsafe { parse_endpoint_args(sock_ptr, addr) });
 
     let Some(inner) = sock.inner.get() else {
         return fail(ETERM);
     };
-
-    let result = with_socket(&sock.ctx, inner, move |s| async move {
+    c_try!(run_on_socket(sock, inner, move |s| async move {
         s.disconnect(endpoint).await
-    });
-
-    match result {
-        Ok(Ok(())) => {
-            // Atomic::try_update is unstable on MSRV 1.93.
-            #[allow(deprecated)]
-            let _ = sock
-                .connect_count
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                    Some(n.saturating_sub(1))
-                });
-            0
-        }
-        Ok(Err(ref e)) => fail(map_omq_err(e)),
-        Err(errno) => fail(errno),
-    }
+    }));
+    // Atomic::try_update is unstable on MSRV 1.93.
+    #[allow(deprecated)]
+    let _ = sock
+        .connect_count
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+            Some(n.saturating_sub(1))
+        });
+    0
 }
 
 /// Unsupported peer-connect entry point; return zero with ENOTSUP for a valid socket.
@@ -856,14 +780,8 @@ pub extern "C" fn zmq_connect_peer(sock_ptr: *mut c_void, _addr: *const libc::c_
 /// fail with ENOTSUP.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_disconnect_peer(sock_ptr: *mut c_void, routing_id: u32) -> c_int {
-    if sock_ptr.is_null() {
-        return fail(crate::error::ENOTSOCK);
-    }
     // SAFETY: C callers pass null or a pointer from this API.
-    let sock = match unsafe { crate::handle::socket(sock_ptr) } {
-        Ok(sock) => sock,
-        Err(errno) => return fail(errno),
-    };
+    let sock = c_try!(unsafe { crate::handle::socket(sock_ptr) });
     if sock.ctx.is_effectively_terminated() {
         return fail(ETERM);
     }
@@ -875,47 +793,35 @@ pub extern "C" fn zmq_disconnect_peer(sock_ptr: *mut c_void, routing_id: u32) ->
         return fail(libc::EHOSTUNREACH);
     };
 
-    let result = with_socket(&sock.ctx, inner, move |s| async move {
+    c_try!(run_on_socket(sock, inner, move |s| async move {
         let Some(peer) = s.peer_info(routing_id).await? else {
             return Err(omq_tokio::error::Error::Unroutable);
         };
         s.disconnect_peer(peer.connection_id).await
-    });
-    result_to_rc(&result)
+    }));
+    0
 }
 
 /// Join a null-terminated DISH group; return zero or -1 with errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_join(sock_ptr: *mut c_void, group: *const libc::c_char) -> c_int {
-    let (sock, g) = match unsafe { parse_group_args(sock_ptr, group) } {
-        Ok(t) => t,
-        Err(e) => return fail(e),
-    };
-    if let Err(error) = ensure_materialized(sock) {
-        return fail(error);
-    }
-    let Some(inner) = sock.inner.get() else {
-        return fail(ETERM);
-    };
-    let result = with_socket(&sock.ctx, inner, move |s| async move { s.join(g).await });
-    result_to_rc(&result)
+    let (sock, g) = c_try!(unsafe { parse_group_args(sock_ptr, group) });
+    let inner = c_try!(materialized(sock));
+    c_try!(run_on_socket(sock, inner, move |s| async move {
+        s.join(g).await
+    }));
+    0
 }
 
 /// Leave a null-terminated DISH group; return zero or -1 with errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_leave(sock_ptr: *mut c_void, group: *const libc::c_char) -> c_int {
-    let (sock, g) = match unsafe { parse_group_args(sock_ptr, group) } {
-        Ok(t) => t,
-        Err(e) => return fail(e),
-    };
-    if let Err(error) = ensure_materialized(sock) {
-        return fail(error);
-    }
-    let Some(inner) = sock.inner.get() else {
-        return fail(ETERM);
-    };
-    let result = with_socket(&sock.ctx, inner, move |s| async move { s.leave(g).await });
-    result_to_rc(&result)
+    let (sock, g) = c_try!(unsafe { parse_group_args(sock_ptr, group) });
+    let inner = c_try!(materialized(sock));
+    c_try!(run_on_socket(sock, inner, move |s| async move {
+        s.leave(g).await
+    }));
+    0
 }
 
 async fn push_to_pump(

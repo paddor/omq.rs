@@ -10,6 +10,8 @@ use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
 
+use crate::error::c_try;
+
 // kind discriminants
 #[expect(dead_code)]
 const KIND_EMPTY: u8 = 0;
@@ -746,10 +748,7 @@ pub extern "C" fn zmq_msg_send(
     }
 
     // SAFETY: C callers pass null or a pointer from this API.
-    let sock_arc = match unsafe { crate::handle::socket(sock) } {
-        Ok(socket) => socket,
-        Err(errno) => return crate::error::fail(errno),
-    };
+    let sock_arc = c_try!(unsafe { crate::handle::socket(sock) });
 
     let group = msg_group_bytes(msg);
     let routing_id = zmq_msg_routing_id(msg);
@@ -851,10 +850,7 @@ pub extern "C" fn zmq_msg_recv(
     }
 
     // SAFETY: C callers pass null or a pointer from this API.
-    let sock = match unsafe { crate::handle::socket(sock_ptr) } {
-        Ok(socket) => socket,
-        Err(errno) => return crate::error::fail(errno),
-    };
+    let sock = c_try!(unsafe { crate::handle::socket(sock_ptr) });
 
     if sock
         .ctx

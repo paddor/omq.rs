@@ -10,6 +10,7 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use omq_tokio::engine::StateSignal;
 use tokio::runtime::Handle;
 
+use crate::error::c_try;
 use crate::notify::NotifyHandle;
 use crate::opts::{write_i32, write_string};
 
@@ -292,14 +293,8 @@ pub extern "C" fn zmq_init(io_threads: c_int) -> *mut libc::c_void {
 /// Stop context activity and wake blocked socket calls without releasing the context handle.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_ctx_shutdown(ctx_ptr: *mut libc::c_void) -> c_int {
-    if ctx_ptr.is_null() {
-        return crate::error::fail(libc::EFAULT);
-    }
     // SAFETY: C callers pass null or a pointer from this API.
-    let ctx = match unsafe { crate::handle::context(ctx_ptr) } {
-        Ok(ctx) => ctx,
-        Err(errno) => return crate::error::fail(errno),
-    };
+    let ctx = c_try!(unsafe { crate::handle::context(ctx_ptr) });
     ctx.shutdown();
     0
 }
@@ -317,10 +312,7 @@ pub extern "C" fn zmq_ctx_term(ctx_ptr: *mut libc::c_void) -> c_int {
     // SAFETY: the handle stays valid until this call frees it below. Other
     // threads may still pass it to zmq_socket or zmq_ctx_get while term
     // waits; they must see ETERM.
-    let arc = match unsafe { crate::handle::context(ctx_ptr) } {
-        Ok(ctx) => ctx.clone(),
-        Err(errno) => return crate::error::fail(errno),
-    };
+    let arc = c_try!(unsafe { crate::handle::context(ctx_ptr) }).clone();
 
     // Signal termination to all io threads and wake blocking socket calls.
     arc.shutdown();
@@ -365,10 +357,7 @@ pub extern "C" fn omq_ctx_share_key(
         return crate::error::fail(libc::EFAULT);
     }
     // SAFETY: C callers pass null or a pointer from this API.
-    let ctx = match unsafe { crate::handle::context(ctx_ptr) } {
-        Ok(ctx) => ctx,
-        Err(errno) => return crate::error::fail(errno),
-    };
+    let ctx = c_try!(unsafe { crate::handle::context(ctx_ptr) });
     if ctx.is_effectively_terminated() {
         return crate::error::fail(crate::error::ETERM);
     }
@@ -422,14 +411,8 @@ const ZMQ_BLOCKY: c_int = 70;
 /// Set an integer context option; return zero on success or -1 with errno on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_ctx_set(ctx_ptr: *mut libc::c_void, option: c_int, value: c_int) -> c_int {
-    if ctx_ptr.is_null() {
-        return crate::error::fail(libc::EFAULT);
-    }
     // SAFETY: C callers pass null or a pointer from this API.
-    let ctx = match unsafe { crate::handle::context(ctx_ptr) } {
-        Ok(ctx) => ctx,
-        Err(errno) => return crate::error::fail(errno),
-    };
+    let ctx = c_try!(unsafe { crate::handle::context(ctx_ptr) });
     match option {
         ZMQ_IO_THREADS => {
             if value < 0 || ctx.socket_count.load(Ordering::Acquire) != 0 || ctx.ctx.get().is_some()
@@ -476,14 +459,8 @@ pub extern "C" fn zmq_ctx_set(ctx_ptr: *mut libc::c_void, option: c_int, value: 
 /// Read an integer context option; return -1 with errno on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_ctx_get(ctx_ptr: *mut libc::c_void, option: c_int) -> c_int {
-    if ctx_ptr.is_null() {
-        return crate::error::fail(libc::EFAULT);
-    }
     // SAFETY: C callers pass null or a pointer from this API.
-    let ctx = match unsafe { crate::handle::context(ctx_ptr) } {
-        Ok(ctx) => ctx,
-        Err(errno) => return crate::error::fail(errno),
-    };
+    let ctx = c_try!(unsafe { crate::handle::context(ctx_ptr) });
     match option {
         ZMQ_IO_THREADS => ctx.options.configured_io_threads.load(Ordering::Acquire),
         ZMQ_MAX_SOCKETS | ZMQ_SOCKET_LIMIT => ctx.options.max_sockets.load(Ordering::Relaxed),
@@ -525,10 +502,7 @@ pub extern "C" fn zmq_ctx_set_ext(
             return crate::error::fail(libc::EINVAL);
         };
         // SAFETY: C callers pass null or a pointer from this API.
-        let ctx = match unsafe { crate::handle::context(ctx_ptr) } {
-            Ok(ctx) => ctx,
-            Err(errno) => return crate::error::fail(errno),
-        };
+        let ctx = c_try!(unsafe { crate::handle::context(ctx_ptr) });
         return match ctx.set_thread_name_prefix(prefix.to_owned()) {
             Ok(()) => 0,
             Err(()) => crate::error::fail(libc::EINVAL),
@@ -556,10 +530,7 @@ pub extern "C" fn zmq_ctx_get_ext(
     }
     if option == ZMQ_THREAD_NAME_PREFIX {
         // SAFETY: C callers pass null or a pointer from this API.
-        let ctx = match unsafe { crate::handle::context(ctx_ptr) } {
-            Ok(ctx) => ctx,
-            Err(errno) => return crate::error::fail(errno),
-        };
+        let ctx = c_try!(unsafe { crate::handle::context(ctx_ptr) });
         return write_padded_string(optval, optvallen, ctx.thread_name_prefix().as_bytes());
     }
     let value = zmq_ctx_get(ctx_ptr, option);

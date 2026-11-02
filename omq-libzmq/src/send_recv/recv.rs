@@ -2,7 +2,7 @@
 
 use super::{ZmqIovec, block_recv_result, checked_c_int_len};
 use crate::consts::ZMQ_DONTWAIT;
-use crate::error::{ETERM, fail};
+use crate::error::{ETERM, c_try, fail};
 use crate::notify::NotifyHandle;
 use crate::socket::OmqSocket;
 use bytes::Bytes;
@@ -23,10 +23,7 @@ pub extern "C" fn zmq_recv(
         return fail(libc::EFAULT);
     }
     // SAFETY: C callers pass null or a pointer from this API.
-    let sock = match unsafe { crate::handle::socket(sock_ptr) } {
-        Ok(socket) => socket,
-        Err(errno) => return fail(errno),
-    };
+    let sock = c_try!(unsafe { crate::handle::socket(sock_ptr) });
     if sock.ctx.is_effectively_terminated() {
         return fail(ETERM);
     }

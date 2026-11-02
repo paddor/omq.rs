@@ -9,7 +9,7 @@ use super::codes::*;
 #[cfg(feature = "quic")]
 use super::quic;
 use super::raw::{write_bytes, write_i32, write_i64, write_key, write_string};
-use crate::error::fail;
+use crate::error::{c_try, fail};
 #[cfg(unix)]
 use crate::notify::NotifyHandle;
 use crate::socket::OmqSocket;
@@ -48,15 +48,8 @@ pub extern "C" fn zmq_getsockopt(
     optval: *mut libc::c_void,
     optvallen: *mut usize,
 ) -> c_int {
-    if sock.is_null() {
-        return crate::error::fail(crate::error::ENOTSOCK);
-    }
-
     // SAFETY: C callers pass null or a pointer from this API.
-    let sock_arc = match unsafe { crate::handle::socket(sock) } {
-        Ok(socket) => socket,
-        Err(errno) => return crate::error::fail(errno),
-    };
+    let sock_arc = c_try!(unsafe { crate::handle::socket(sock) });
 
     #[cfg(feature = "quic")]
     if let Some(rc) = quic::get(sock_arc, option, optval, optvallen) {
@@ -460,14 +453,13 @@ fn get_routing_option(
             if sock_arc.socket_type == SocketType::Stream
                 && let Some(inner) = sock_arc.inner.get()
             {
-                match crate::socket::with_socket(&sock_arc.ctx, inner, |socket| async move {
+                match crate::socket::run_on_socket(sock_arc, inner, |socket| async move {
                     socket.last_stream_routing_id().await
                 }) {
-                    Ok(Ok(Some(identity))) => {
+                    Ok(Some(identity)) => {
                         return Some(write_bytes(optval, optvallen, &identity));
                     }
-                    Ok(Ok(None)) => {}
-                    Ok(Err(error)) => return Some(fail(crate::error::map_omq_err(&error))),
+                    Ok(None) => {}
                     Err(errno) => return Some(fail(errno)),
                 }
             }

@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 
 use crate::consts::{ZMQ_DONTWAIT, ZMQ_SNDMORE};
-use crate::error::{ETERM, fail, map_omq_err};
+use crate::error::{ETERM, c_try, fail, map_omq_err};
 use crate::notify::NotifyHandle;
-use crate::socket::OmqSocket;
+use crate::socket::{OmqSocket, materialized, run_on_socket};
 
 mod recv;
 
@@ -270,13 +270,14 @@ fn wait_for_ready_peer(sock: &OmqSocket, sndtimeo: i64) -> Result<(), c_int> {
         return Ok(());
     }
 
-    let result = if sndtimeo > 0 {
+    // `map_omq_err` turns a timeout into EAGAIN.
+    if sndtimeo > 0 {
         let timeout = Duration::from_millis(sndtimeo as u64);
-        crate::socket::with_socket(&sock.ctx, inner, move |s| async move {
+        run_on_socket(sock, inner, move |s| async move {
             s.wait_connected(1, timeout).await.map(|_| ())
         })
     } else {
-        crate::socket::with_socket(&sock.ctx, inner, move |s| async move {
+        run_on_socket(sock, inner, move |s| async move {
             loop {
                 match s.wait_connected(1, Duration::from_hours(24)).await {
                     Ok(_) => return Ok(()),
@@ -285,13 +286,6 @@ fn wait_for_ready_peer(sock: &OmqSocket, sndtimeo: i64) -> Result<(), c_int> {
                 }
             }
         })
-    };
-
-    match result {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(omq_tokio::Error::Timeout)) => Err(libc::EAGAIN),
-        Ok(Err(ref e)) => Err(map_omq_err(e)),
-        Err(errno) => Err(errno),
     }
 }
 
@@ -404,9 +398,7 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
     }
 
     let sndtimeo = sock.sndtimeo_ms.load(std::sync::atomic::Ordering::Relaxed);
-    if let Err(e) = ensure_libzmq_send_route(sock, flags, sndtimeo) {
-        return fail(e);
-    }
+    c_try!(ensure_libzmq_send_route(sock, flags, sndtimeo));
 
     if sock.socket_type == omq_tokio::SocketType::Stream {
         return send_stream_frame(sock, data, ret_len, flags, sndtimeo);
@@ -461,12 +453,7 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
 /// XSUB data frames are subscription commands: a leading 0x01 subscribes,
 /// 0x00 unsubscribes, and any other first byte subscribes to the whole frame.
 fn send_xsub_subscription(sock: &Arc<OmqSocket>, data: &[u8], ret_len: c_int) -> c_int {
-    if let Err(error) = crate::socket::ensure_materialized(sock) {
-        return fail(error);
-    }
-    let Some(inner) = sock.inner.get() else {
-        return fail(ETERM);
-    };
+    let inner = c_try!(materialized(sock));
 
     let bytes = Bytes::copy_from_slice(data);
     let (subscribe, prefix) = match bytes[0] {
@@ -475,18 +462,14 @@ fn send_xsub_subscription(sock: &Arc<OmqSocket>, data: &[u8], ret_len: c_int) ->
         _ => (true, bytes),
     };
 
-    let result = crate::socket::with_socket(&sock.ctx, inner, move |s| async move {
+    c_try!(run_on_socket(sock, inner, move |s| async move {
         if subscribe {
             s.subscribe(prefix).await
         } else {
             s.unsubscribe(prefix).await
         }
-    });
-    match result {
-        Ok(Ok(())) => ret_len,
-        Ok(Err(ref e)) => fail(crate::error::map_omq_err(e)),
-        Err(errno) => fail(errno),
-    }
+    }));
+    ret_len
 }
 
 /// STREAM frames come in [identity, data] pairs. The identity frame must
@@ -505,9 +488,7 @@ fn send_stream_frame(
         if flags & ZMQ_SNDMORE == 0 {
             return fail(libc::EINVAL);
         }
-        if let Err(error) = prepare_stream_route(sock, data, flags, sndtimeo) {
-            return fail(error);
-        }
+        c_try!(prepare_stream_route(sock, data, flags, sndtimeo));
         accum.push(Bytes::copy_from_slice(data));
         return ret_len;
     }
@@ -559,15 +540,14 @@ fn prepare_stream_route(
     flags: c_int,
     sndtimeo: i64,
 ) -> Result<(), c_int> {
-    crate::socket::ensure_materialized(sock)?;
-    let inner = sock.inner.get().ok_or(ETERM)?;
+    let inner = materialized(sock)?;
     match inner.check_stream_route(identity) {
         Ok(()) => return Ok(()),
         Err(omq_tokio::Error::WouldBlock) if flags & ZMQ_DONTWAIT == 0 && sndtimeo != 0 => {}
         Err(error) => return Err(map_omq_err(&error)),
     }
     let identity = Bytes::copy_from_slice(identity);
-    let result = crate::socket::with_socket(&sock.ctx, inner, move |socket| async move {
+    run_on_socket(sock, inner, move |socket| async move {
         let ready = socket.wait_stream_route(identity);
         if sndtimeo > 0 {
             tokio::time::timeout(Duration::from_millis(sndtimeo as u64), ready)
@@ -576,8 +556,7 @@ fn prepare_stream_route(
         } else {
             ready.await
         }
-    });
-    result?.map_err(|error| map_omq_err(&error))
+    })
 }
 
 pub(crate) fn send_message(
@@ -607,9 +586,7 @@ pub(crate) fn send_message(
     if flags & ZMQ_SNDMORE != 0 {
         return fail(libc::EINVAL);
     }
-    if let Err(e) = ensure_libzmq_send_route(sock, flags, sndtimeo) {
-        return fail(e);
-    }
+    c_try!(ensure_libzmq_send_route(sock, flags, sndtimeo));
     submit_message(sock, msg, ret_len, flags, sndtimeo)
 }
 
@@ -708,10 +685,7 @@ pub extern "C" fn zmq_send(
         return fail(libc::EFAULT);
     }
     // SAFETY: C callers pass null or a pointer from this API.
-    let sock = match unsafe { crate::handle::socket(sock_ptr) } {
-        Ok(socket) => socket,
-        Err(errno) => return fail(errno),
-    };
+    let sock = c_try!(unsafe { crate::handle::socket(sock_ptr) });
     if sock.ctx.is_effectively_terminated() {
         return fail(ETERM);
     }

@@ -16,6 +16,18 @@ pub(crate) fn fail(e: c_int) -> c_int {
     -1
 }
 
+/// Unwrap a `Result<T, errno>`, or set errno and return -1 from the
+/// enclosing C entry point.
+macro_rules! c_try {
+    ($result:expr) => {
+        match $result {
+            Ok(value) => value,
+            Err(errno) => return $crate::error::fail(errno),
+        }
+    };
+}
+pub(crate) use c_try;
+
 // ZMQ-specific error codes (HAUSNUMERO = 156384712).
 pub(crate) const ENOTSUP: c_int = 156_384_713;
 pub(crate) const EPROTONOSUPPORT: c_int = 156_384_714;

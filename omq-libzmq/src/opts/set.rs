@@ -13,7 +13,7 @@ use super::set_security::{
     set_curve_client_option, set_curve_option, set_plain_client_option, set_plain_server_option,
     set_ws_option, set_wss_option,
 };
-use crate::error::fail;
+use crate::error::{c_try, fail};
 use crate::socket::OmqSocket;
 use bytes::Bytes;
 use omq_tokio::options::{OnMute, WorkloadProfile};
@@ -50,15 +50,8 @@ pub extern "C" fn zmq_setsockopt(
     optval: *const libc::c_void,
     optvallen: usize,
 ) -> c_int {
-    if sock.is_null() {
-        return crate::error::fail(crate::error::ENOTSOCK);
-    }
-
     // SAFETY: C callers pass null or a pointer from this API.
-    let sock_arc = match unsafe { crate::handle::socket(sock) } {
-        Ok(socket) => socket,
-        Err(errno) => return crate::error::fail(errno),
-    };
+    let sock_arc = c_try!(unsafe { crate::handle::socket(sock) });
 
     #[cfg(feature = "quic")]
     if let Some(rc) = quic::set(sock_arc, option, optval, optvallen) {
@@ -546,24 +539,16 @@ fn do_subscribe(
             std::slice::from_raw_parts(optval.cast::<u8>(), optvallen)
         })
     };
-    if let Err(error) = crate::socket::ensure_materialized(sock_arc) {
-        return crate::error::fail(error);
-    }
-    let Some(inner) = sock_arc.inner.get() else {
-        return crate::error::fail(crate::error::ETERM);
-    };
+    let inner = c_try!(crate::socket::materialized(sock_arc));
     let result = if subscribe {
-        crate::socket::with_socket(&sock_arc.ctx, inner, move |s| async move {
+        crate::socket::run_on_socket(sock_arc, inner, move |s| async move {
             s.subscribe(prefix).await
         })
     } else {
-        crate::socket::with_socket(&sock_arc.ctx, inner, move |s| async move {
+        crate::socket::run_on_socket(sock_arc, inner, move |s| async move {
             s.unsubscribe(prefix).await
         })
     };
-    match result {
-        Ok(Ok(())) => 0,
-        Ok(Err(ref e)) => crate::error::fail(crate::error::map_omq_err(e)),
-        Err(errno) => crate::error::fail(errno),
-    }
+    c_try!(result);
+    0
 }

@@ -7,7 +7,7 @@
 use super::codes::*;
 use super::raw::{none_if_empty, read_bytes, read_i32, read_key, read_string};
 use super::{MechanismOverlay, SecretBytes};
-use crate::error::fail;
+use crate::error::{c_try, fail};
 use crate::socket::OmqSocket;
 use std::ffi::c_int;
 use std::sync::Arc;
@@ -353,10 +353,7 @@ pub extern "C" fn omq_socket_set_plain_server_credentials(
         return fail(libc::EINVAL);
     }
     // SAFETY: C callers pass null or a pointer from this API.
-    let socket = match unsafe { crate::handle::socket(sock) } {
-        Ok(socket) => socket,
-        Err(errno) => return fail(errno),
-    };
+    let socket = c_try!(unsafe { crate::handle::socket(sock) });
     if socket
         .bound_or_connected
         .load(std::sync::atomic::Ordering::Acquire)
@@ -375,14 +372,14 @@ pub extern "C" fn omq_socket_set_plain_server_credentials(
         return fail(libc::ENOMEM);
     }
     for entry in entries {
-        let username = match copy_plain_credential_field(entry.username, entry.username_size) {
-            Ok(value) => value,
-            Err(errno) => return fail(errno),
-        };
-        let password = match copy_plain_credential_field(entry.password, entry.password_size) {
-            Ok(value) => value,
-            Err(errno) => return fail(errno),
-        };
+        let username = c_try!(copy_plain_credential_field(
+            entry.username,
+            entry.username_size
+        ));
+        let password = c_try!(copy_plain_credential_field(
+            entry.password,
+            entry.password_size
+        ));
         copied.push((username, password));
     }
     lock_overlay!(socket).mechanism = MechanismOverlay::PlainServerCredentials {

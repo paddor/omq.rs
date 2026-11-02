@@ -314,10 +314,6 @@ pub(crate) fn postprocess_svg(
     Ok(())
 }
 
-// legend table
-
-// data loading
-
 // fairness whiskers
 
 fn draw_whiskers<DB: DrawingBackend>(

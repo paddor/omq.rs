@@ -149,9 +149,8 @@ pub(crate) fn load_fairness(
     let keys: Vec<&str> = impls.iter().map(|i| i.key).collect();
 
     let mut fairness: FairnessMap = BTreeMap::new();
-    let mut seen: BTreeMap<(String, u64), usize> = BTreeMap::new();
 
-    for (seq, row) in &rows {
+    for (_, row) in &rows {
         if row.transport != transport || row.kind != kind {
             continue;
         }
@@ -163,11 +162,6 @@ pub(crate) fn load_fairness(
         {
             continue;
         }
-        let key = (row.impl_name.clone(), row.msg_size);
-        if seen.get(&key).is_some_and(|&prev| *seq < prev) {
-            continue;
-        }
-        seen.insert(key, *seq);
         if let (Some(min), Some(p25), Some(median), Some(p75), Some(max)) = (
             row.peer_min,
             row.peer_p25,

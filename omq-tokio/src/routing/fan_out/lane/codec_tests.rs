@@ -19,27 +19,16 @@ fn worker(
     mute_policy: FanOutMutePolicy,
 ) -> (LaneWorker, Arc<ControlQueue<LaneControl>>) {
     let (_data_tx, data_rx) = yring::spsc(4);
-    let ctrl = Arc::new(ControlQueue::new());
-    (
-        LaneWorker {
-            #[cfg(target_os = "linux")]
-            shm_pool: omq_shm::SendPool::new(16, None),
-            data_rx,
-            ctrl: ctrl.clone(),
-            ctrl_batch: VecDeque::new(),
-            data_signal: Arc::new(DataSignal::new()),
-            data_space: Arc::new(StateSignal::new()),
-            mode,
-            mute_policy,
-            peers: FxHashMap::default(),
-            subscribe_all_count: 0,
-            eq: FrameBuffer::one_shot(),
-            chunks: Vec::new(),
-            codec_groups: std::array::from_fn(|_| None),
-            exited: Arc::new(AtomicBool::new(false)),
-        },
-        ctrl,
-    )
+    let worker = LaneWorker::new(
+        data_rx,
+        Arc::new(StateSignal::new()),
+        mode,
+        mute_policy,
+        #[cfg(target_os = "linux")]
+        omq_shm::SendPool::new(16, None),
+    );
+    let ctrl = worker.ctrl.clone();
+    (worker, ctrl)
 }
 
 fn profile(kind: Option<CompressionKind>, options: &Options) -> Option<CodecProfile> {

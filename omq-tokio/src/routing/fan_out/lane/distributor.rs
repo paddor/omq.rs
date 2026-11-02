@@ -1,7 +1,6 @@
 //! Producer side of the fan-out lanes: the per-lane control endpoints, the
 //! publication distributor, and lane worker spawning.
 
-use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -13,7 +12,6 @@ use tokio::sync::oneshot;
 use crate::engine::codec::CodecSharingKey;
 use crate::engine::control_queue::ControlQueue;
 use crate::engine::signal::{DataSignal, StateSignal};
-use omq_proto::frame_buffer::FrameBuffer;
 use omq_proto::message::Message;
 use omq_proto::options::Options;
 
@@ -114,43 +112,29 @@ impl LaneTemplate {
         index: usize,
         io_pool: &crate::context::IoPoolHandle,
     ) -> (LaneInput, LaneEndpoint) {
-        let ctrl = Arc::new(ControlQueue::new());
         let (data_tx, data_rx) = yring::spsc(self.pipe_cap);
-        let data_signal = Arc::new(DataSignal::new());
-        let exited = Arc::new(AtomicBool::new(false));
-
+        let worker = LaneWorker::new(
+            data_rx,
+            self.space.clone(),
+            self.mode,
+            self.mute_policy,
+            #[cfg(target_os = "linux")]
+            self.shm_pool.clone(),
+        );
         let input = LaneInput {
             tx: data_tx,
-            signal: data_signal.clone(),
-            exited: exited.clone(),
+            signal: worker.data_signal.clone(),
+            exited: worker.exited.clone(),
         };
-        let worker = LaneWorker {
-            #[cfg(target_os = "linux")]
-            shm_pool: self.shm_pool.clone(),
-            data_rx,
-            ctrl: ctrl.clone(),
-            ctrl_batch: VecDeque::new(),
-            data_signal: data_signal.clone(),
-            data_space: self.space.clone(),
-            mode: self.mode,
-            mute_policy: self.mute_policy,
-            peers: FxHashMap::default(),
-            subscribe_all_count: 0,
-            eq: FrameBuffer::one_shot(),
-            chunks: Vec::new(),
-            codec_groups: std::array::from_fn(|_| None),
-            exited: exited.clone(),
-        };
-        io_pool.spawn_on(index, worker.run());
-
         let endpoint = LaneEndpoint {
-            ctrl,
-            data_signal,
-            exited,
+            ctrl: worker.ctrl.clone(),
+            data_signal: worker.data_signal.clone(),
+            exited: worker.exited.clone(),
             peer_count: 0,
             codec_groups: std::array::from_fn(|_| None),
             peer_groups: FxHashMap::default(),
         };
+        io_pool.spawn_on(index, worker.run());
         (input, endpoint)
     }
 }

@@ -86,6 +86,16 @@ struct LanePeer {
 }
 
 impl LanePeer {
+    fn new(slot: Arc<PeerTransmitSlot>, any_groups: bool, codec_group: usize) -> Self {
+        Self {
+            filter: PeerFilterState::new(any_groups),
+            dict_shipped: slot.fanout_dict_shipped(),
+            codec_group,
+            needs_flush: false,
+            slot,
+        }
+    }
+
     /// The group dictionary went out ahead of this peer's payloads.
     fn mark_dict_shipped(&mut self) {
         self.dict_shipped = true;
@@ -162,6 +172,33 @@ impl std::fmt::Debug for LaneWorker {
 }
 
 impl LaneWorker {
+    /// A worker without peers that drains `data_rx`.
+    fn new(
+        data_rx: yring::Consumer<Message>,
+        data_space: Arc<StateSignal>,
+        mode: FanOutMode,
+        mute_policy: FanOutMutePolicy,
+        #[cfg(target_os = "linux")] shm_pool: omq_shm::SendPool,
+    ) -> Self {
+        Self {
+            #[cfg(target_os = "linux")]
+            shm_pool,
+            data_rx,
+            ctrl: Arc::new(ControlQueue::new()),
+            ctrl_batch: VecDeque::new(),
+            data_signal: Arc::new(DataSignal::new()),
+            data_space,
+            mode,
+            mute_policy,
+            peers: FxHashMap::default(),
+            subscribe_all_count: 0,
+            eq: FrameBuffer::one_shot(),
+            chunks: Vec::new(),
+            codec_groups: std::array::from_fn(|_| None),
+            exited: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
     async fn run(mut self) {
         let mut scratch = LaneScratch::new();
 
@@ -378,13 +415,7 @@ impl LaneWorker {
 
         self.peers.insert(
             add.peer_id,
-            LanePeer {
-                filter: PeerFilterState::new(add.any_groups),
-                dict_shipped: add.slot.fanout_dict_shipped(),
-                codec_group,
-                needs_flush: false,
-                slot: add.slot,
-            },
+            LanePeer::new(add.slot, add.any_groups, codec_group),
         );
     }
 

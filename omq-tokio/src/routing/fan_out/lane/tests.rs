@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
@@ -14,7 +13,6 @@ use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
 use super::distributor::{FanOutLaneState, LaneDistributor, LaneEndpoint, LaneInput};
-use super::filter::PeerFilterState;
 use super::{
     FanOutLanes, FanOutMode, FanOutMutePolicy, LaneAdmission, LaneControl, LanePeer, LanePeerAdd,
     LaneWorker,
@@ -399,24 +397,8 @@ async fn nodrop_dispatch_returns_if_worker_exited_before_send() {
 #[tokio::test]
 async fn empty_data_drain_clears_stale_signal() {
     let (_data_tx, data_rx) = yring::spsc::<Message>(4);
-    let data_signal = Arc::new(crate::engine::signal::DataSignal::new());
-    let worker = LaneWorker {
-        #[cfg(target_os = "linux")]
-        shm_pool: omq_shm::SendPool::new(16, None),
-        data_rx,
-        ctrl: Arc::new(ControlQueue::new()),
-        ctrl_batch: VecDeque::new(),
-        data_signal: data_signal.clone(),
-        data_space: Arc::new(crate::engine::signal::StateSignal::new()),
-        mode: FanOutMode::SubscriptionPrefix,
-        mute_policy: FanOutMutePolicy::DropNewest,
-        peers: FxHashMap::default(),
-        subscribe_all_count: 0,
-        eq: FrameBuffer::one_shot(),
-        chunks: Vec::new(),
-        codec_groups: test_plain_groups(),
-        exited: Arc::new(AtomicBool::new(false)),
-    };
+    let worker = test_worker(data_rx, FanOutMutePolicy::DropNewest);
+    let data_signal = worker.data_signal.clone();
 
     data_signal.mark();
     data_signal.begin_drain();
@@ -437,34 +419,8 @@ async fn empty_data_drain_clears_stale_signal() {
 fn drop_oldest_lossy_dispatch_keeps_newest_per_peer_frames() {
     let (_data_tx, data_rx) = yring::spsc::<Message>(4);
     let slot = test_slot_with_msg_cap(7, 2);
-    let mut peers = FxHashMap::default();
-    peers.insert(
-        7,
-        LanePeer {
-            filter: subscribe_all(),
-            slot: slot.clone(),
-            dict_shipped: false,
-            codec_group: 0,
-            needs_flush: false,
-        },
-    );
-    let mut worker = LaneWorker {
-        #[cfg(target_os = "linux")]
-        shm_pool: omq_shm::SendPool::new(16, None),
-        data_rx,
-        ctrl: Arc::new(ControlQueue::new()),
-        ctrl_batch: VecDeque::new(),
-        data_signal: Arc::new(crate::engine::signal::DataSignal::new()),
-        data_space: Arc::new(crate::engine::signal::StateSignal::new()),
-        mode: FanOutMode::SubscriptionPrefix,
-        mute_policy: FanOutMutePolicy::DropOldest,
-        peers,
-        subscribe_all_count: 1,
-        eq: FrameBuffer::one_shot(),
-        chunks: Vec::new(),
-        codec_groups: test_plain_groups(),
-        exited: Arc::new(AtomicBool::new(false)),
-    };
+    let mut worker = test_worker(data_rx, FanOutMutePolicy::DropOldest);
+    add_subscribed_peer(&mut worker, &slot);
     let mut touched = SmallVec::new();
 
     for body in ["first", "second", "third"] {
@@ -534,69 +490,18 @@ fn single_peer_worker(
     mute_policy: FanOutMutePolicy,
     codec_groups: [Option<super::CodecGroup>; super::MAX_CODEC_GROUPS],
 ) -> LaneWorker {
-    let mut peers = FxHashMap::default();
-    peers.insert(
-        7,
-        LanePeer {
-            filter: subscribe_all(),
-            slot: slot.clone(),
-            dict_shipped: false,
-            codec_group: 0,
-            needs_flush: false,
-        },
-    );
-
-    LaneWorker {
-        #[cfg(target_os = "linux")]
-        shm_pool: omq_shm::SendPool::new(16, None),
-        data_rx,
-        ctrl: Arc::new(ControlQueue::new()),
-        ctrl_batch: VecDeque::new(),
-        data_signal: Arc::new(crate::engine::signal::DataSignal::new()),
-        data_space: Arc::new(crate::engine::signal::StateSignal::new()),
-        mode: FanOutMode::SubscriptionPrefix,
-        mute_policy,
-        peers,
-        subscribe_all_count: 1,
-        eq: FrameBuffer::one_shot(),
-        chunks: Vec::new(),
-        codec_groups,
-        exited: Arc::new(AtomicBool::new(false)),
-    }
+    let mut worker = test_worker(data_rx, mute_policy);
+    worker.codec_groups = codec_groups;
+    add_subscribed_peer(&mut worker, slot);
+    worker
 }
 
 #[test]
 fn drop_newest_lossy_dispatch_keeps_oldest_per_peer_frames() {
     let (_data_tx, data_rx) = yring::spsc::<Message>(4);
     let slot = test_slot_with_msg_cap(7, 2);
-    let mut peers = FxHashMap::default();
-    peers.insert(
-        7,
-        LanePeer {
-            filter: subscribe_all(),
-            slot: slot.clone(),
-            dict_shipped: false,
-            codec_group: 0,
-            needs_flush: false,
-        },
-    );
-    let mut worker = LaneWorker {
-        #[cfg(target_os = "linux")]
-        shm_pool: omq_shm::SendPool::new(16, None),
-        data_rx,
-        ctrl: Arc::new(ControlQueue::new()),
-        ctrl_batch: VecDeque::new(),
-        data_signal: Arc::new(crate::engine::signal::DataSignal::new()),
-        data_space: Arc::new(crate::engine::signal::StateSignal::new()),
-        mode: FanOutMode::SubscriptionPrefix,
-        mute_policy: FanOutMutePolicy::DropNewest,
-        peers,
-        subscribe_all_count: 1,
-        eq: FrameBuffer::one_shot(),
-        chunks: Vec::new(),
-        codec_groups: test_plain_groups(),
-        exited: Arc::new(AtomicBool::new(false)),
-    };
+    let mut worker = test_worker(data_rx, FanOutMutePolicy::DropNewest);
+    add_subscribed_peer(&mut worker, &slot);
     let mut touched = SmallVec::new();
 
     for body in ["first", "second", "third"] {
@@ -614,42 +519,12 @@ fn batch_worker(
     slots: &[Arc<crate::engine::transmit_slot::PeerTransmitSlot>],
 ) -> (LaneWorker, Arc<ControlQueue<LaneControl>>) {
     let (_data_tx, data_rx) = yring::spsc(4);
-    let ctrl = Arc::new(ControlQueue::new());
-    let peers = slots
-        .iter()
-        .map(|slot| {
-            (
-                slot.peer_id,
-                LanePeer {
-                    filter: subscribe_all(),
-                    slot: slot.clone(),
-                    dict_shipped: false,
-                    codec_group: 0,
-                    needs_flush: false,
-                },
-            )
-        })
-        .collect();
-    (
-        LaneWorker {
-            #[cfg(target_os = "linux")]
-            shm_pool: omq_shm::SendPool::new(16, None),
-            data_rx,
-            ctrl: ctrl.clone(),
-            ctrl_batch: VecDeque::new(),
-            data_signal: Arc::new(crate::engine::signal::DataSignal::new()),
-            data_space: Arc::new(crate::engine::signal::StateSignal::new()),
-            mode: FanOutMode::SubscriptionPrefix,
-            mute_policy,
-            peers,
-            subscribe_all_count: slots.len(),
-            eq: FrameBuffer::one_shot(),
-            chunks: Vec::new(),
-            codec_groups: test_plain_groups(),
-            exited: Arc::new(AtomicBool::new(false)),
-        },
-        ctrl,
-    )
+    let mut worker = test_worker(data_rx, mute_policy);
+    for slot in slots {
+        add_subscribed_peer(&mut worker, slot);
+    }
+    let ctrl = worker.ctrl.clone();
+    (worker, ctrl)
 }
 
 fn batch_wire(worker: &LaneWorker) -> (FrameBuffer, SmallVec<[usize; 8]>) {
@@ -892,11 +767,29 @@ fn test_endpoint() -> LaneEndpoint {
     }
 }
 
-/// A peer filter subscribed to every topic.
-fn subscribe_all() -> PeerFilterState {
-    let mut filter = PeerFilterState::new(false);
-    filter.subscribe(b"");
-    filter
+/// An idle subscription-prefix worker on plain codec groups.
+fn test_worker(data_rx: yring::Consumer<Message>, mute_policy: FanOutMutePolicy) -> LaneWorker {
+    let mut worker = LaneWorker::new(
+        data_rx,
+        Arc::new(crate::engine::signal::StateSignal::new()),
+        FanOutMode::SubscriptionPrefix,
+        mute_policy,
+        #[cfg(target_os = "linux")]
+        omq_shm::SendPool::new(16, None),
+    );
+    worker.codec_groups = test_plain_groups();
+    worker
+}
+
+/// Add `slot` as a peer on codec group 0 that subscribes to every topic.
+fn add_subscribed_peer(
+    worker: &mut LaneWorker,
+    slot: &Arc<crate::engine::transmit_slot::PeerTransmitSlot>,
+) {
+    let mut peer = LanePeer::new(slot.clone(), false, 0);
+    peer.filter.subscribe(b"");
+    worker.peers.insert(slot.peer_id, peer);
+    worker.subscribe_all_count += 1;
 }
 
 fn test_slot(peer_id: u64) -> Arc<crate::engine::transmit_slot::PeerTransmitSlot> {

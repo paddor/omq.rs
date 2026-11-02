@@ -1,8 +1,6 @@
 //! Publication dispatch under a blocking mute policy.
 
-use super::{
-    GroupPeers, LaneDispatch, LaneWorker, Parked, PendingPeer, PreparedFrame, frame_publication,
-};
+use super::{GroupPeers, LaneWorker, Parked, PendingPeer, PreparedFrame, frame_publication};
 use crate::engine::transmit_slot::TryFrameResult;
 use crate::routing::fan_out::FAN_OUT_TOTAL_COPY_BUDGET;
 use futures::{StreamExt, stream::FuturesUnordered};
@@ -17,7 +15,7 @@ impl LaneWorker {
     pub(super) fn dispatch_group_ready(
         &mut self,
         target: GroupPeers<'_>,
-        dispatch: &LaneDispatch,
+        msg: &Message,
         touched: &mut SmallVec<[u64; 32]>,
         pending: &mut SmallVec<[PendingPeer; 8]>,
     ) {
@@ -25,14 +23,14 @@ impl LaneWorker {
             return;
         }
         if self.is_shm_group(target.group) {
-            self.dispatch_shm_group(target.peers, dispatch, touched, Some(pending));
+            self.dispatch_shm_group(target.peers, msg, touched, Some(pending));
             return;
         }
 
         let group = self.codec_groups[target.group]
             .as_mut()
             .expect("matched codec group");
-        let Ok(wire_messages) = group.encode(&dispatch.msg) else {
+        let Ok(wire_messages) = group.encode(msg) else {
             return;
         };
         let dictionary = group.dictionary().cloned();

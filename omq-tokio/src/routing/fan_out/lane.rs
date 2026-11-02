@@ -76,23 +76,6 @@ pub(super) struct LanePeerAdd {
     pub(super) any_groups: bool,
 }
 
-#[derive(Clone, Debug)]
-pub(super) struct LaneDispatch {
-    pub(super) msg: Message,
-}
-
-#[derive(Clone, Debug)]
-enum LaneData {
-    Dispatch(LaneDispatch),
-}
-
-impl LaneData {
-    fn byte_len(&self) -> usize {
-        let Self::Dispatch(dispatch) = self;
-        dispatch.msg.byte_len()
-    }
-}
-
 #[derive(Debug)]
 struct LanePeer {
     filter: PeerFilterState,
@@ -141,7 +124,7 @@ struct LaneDistributor {
 }
 
 struct LaneInput {
-    tx: yring::Producer<LaneData>,
+    tx: yring::Producer<Message>,
     signal: Arc<DataSignal>,
     exited: Arc<AtomicBool>,
 }
@@ -194,7 +177,7 @@ impl std::fmt::Debug for FanOutLanes {
 struct LaneWorker {
     #[cfg(target_os = "linux")]
     shm_pool: omq_shm::SendPool,
-    data_rx: yring::Consumer<LaneData>,
+    data_rx: yring::Consumer<Message>,
     ctrl: Arc<ControlQueue<LaneControl>>,
     ctrl_batch: VecDeque<LaneControl>,
     data_signal: Arc<DataSignal>,
@@ -214,7 +197,7 @@ struct LaneWorker {
 struct LaneScratch {
     /// Peers with newly framed output, signaled once per batch.
     touched: SmallVec<[u64; 32]>,
-    batch: SmallVec<[LaneData; 32]>,
+    batch: SmallVec<[Message; 32]>,
     /// Plain multi-message frame and the end offset of each message in it.
     wire: FrameBuffer,
     ends: SmallVec<[usize; PLAIN_BATCH_MESSAGES]>,
@@ -477,23 +460,23 @@ impl FanOutLanes {
     /// Publish directly into each active IO lane's queue.
     pub(super) fn try_dispatch(
         &self,
-        dispatch: LaneDispatch,
+        msg: Message,
         admission: LaneAdmission,
     ) -> core::result::Result<(), omq_proto::TrySendError> {
         let mut dist = self.distributor.lock().expect("distributor poisoned");
         if self.admission_closed.load(Ordering::Acquire) {
             return Err(omq_proto::TrySendError::Closed);
         }
-        self.publish(&mut dist, dispatch, admission)
-            .map_err(|returned| omq_proto::TrySendError::Full(returned.msg))
+        self.publish(&mut dist, msg, admission)
+            .map_err(omq_proto::TrySendError::Full)
     }
 
     fn publish(
         &self,
         dist: &mut LaneDistributor,
-        dispatch: LaneDispatch,
+        msg: Message,
         admission: LaneAdmission,
-    ) -> core::result::Result<(), LaneDispatch> {
+    ) -> core::result::Result<(), Message> {
         let mut selected: SmallVec<[usize; 4]> = SmallVec::new();
         for (index, input) in dist.lanes.iter_mut().enumerate() {
             if !self.active_flags[index].load(Ordering::Acquire)
@@ -506,7 +489,7 @@ impl FanOutLanes {
                 input.tx.flush();
                 input.signal.mark();
                 if admission == LaneAdmission::Backpressure {
-                    return Err(dispatch);
+                    return Err(msg);
                 }
             } else {
                 selected.push(index);
@@ -514,23 +497,22 @@ impl FanOutLanes {
         }
         // This lock owns every producer. Capacity cannot be stolen between
         // admission and publication; a disconnected consumer may drop data.
-        let data = LaneData::Dispatch(dispatch);
         if let Some(last) = selected.pop() {
             for index in selected {
                 let input = &mut dist.lanes[index];
-                let _ = input.tx.push(data.clone());
+                let _ = input.tx.push(msg.clone());
                 input.tx.flush();
                 input.signal.mark();
             }
             let input = &mut dist.lanes[last];
-            let _ = input.tx.push(data);
+            let _ = input.tx.push(msg);
             input.tx.flush();
             input.signal.mark();
         }
         Ok(())
     }
 
-    pub(super) async fn dispatch(&self, mut dispatch: LaneDispatch) {
+    pub(super) async fn dispatch(&self, mut msg: Message) {
         let admission = self.mute_policy.lane_admission();
         loop {
             let wait = {
@@ -541,10 +523,10 @@ impl FanOutLanes {
                 // Snapshot before admission: any worker's release or exit
                 // must remain observable when a full queue makes us wait.
                 let seen = dist.space.generation();
-                match self.publish(&mut dist, dispatch, admission) {
+                match self.publish(&mut dist, msg, admission) {
                     Ok(()) => return,
                     Err(returned) => {
-                        dispatch = returned;
+                        msg = returned;
                         (dist.space.clone(), seen)
                     }
                 }
@@ -674,7 +656,7 @@ impl LaneWorker {
 
     /// Pop one budgeted batch from the data ring. Returns whether anything
     /// was popped; senders waiting for ring space are woken then.
-    fn receive_batch(&mut self, batch: &mut SmallVec<[LaneData; 32]>) -> bool {
+    fn receive_batch(&mut self, batch: &mut SmallVec<[Message; 32]>) -> bool {
         let mut budget = DrainBudget::WORKER;
         // SHM-only lanes charge per-record send work, not payload bytes.
         #[cfg(target_os = "linux")]
@@ -682,17 +664,16 @@ impl LaneWorker {
         let mut drained = false;
 
         self.data_rx.prefetch();
-        while let Some(data) = self.data_rx.pop() {
+        while let Some(msg) = self.data_rx.pop() {
             drained = true;
-            let msg_bytes = data.byte_len();
+            let msg_bytes = msg.byte_len();
             #[cfg(target_os = "linux")]
             let msg_bytes = if shm_only {
-                let LaneData::Dispatch(dispatch) = &data;
-                omq_shm::send_work_bytes(&dispatch.msg)
+                omq_shm::send_work_bytes(&msg)
             } else {
                 msg_bytes
             };
-            batch.push(data);
+            batch.push(msg);
             if !budget.account(msg_bytes) {
                 break;
             }
@@ -749,7 +730,7 @@ impl LaneWorker {
                 self.dispatch_plain_batch(wire, &scratch.ends, &mut scratch.touched)
                     .await
             } else {
-                self.handle_data(&scratch.batch[next], &mut scratch.touched)
+                self.dispatch(&scratch.batch[next], &mut scratch.touched)
                     .await
             };
             if shutdown {
@@ -795,11 +776,6 @@ impl LaneWorker {
         self.ctrl_batch = batch;
         self.ctrl.finish_drain();
         shutdown
-    }
-
-    async fn handle_data(&mut self, data: &LaneData, touched: &mut SmallVec<[u64; 32]>) -> bool {
-        let LaneData::Dispatch(dispatch) = data;
-        self.dispatch(dispatch, touched).await
     }
 
     fn handle_control(&mut self, cmd: LaneControl) -> bool {
@@ -882,15 +858,11 @@ impl LaneWorker {
         }
     }
 
-    async fn dispatch(
-        &mut self,
-        dispatch: &LaneDispatch,
-        touched: &mut SmallVec<[u64; 32]>,
-    ) -> bool {
-        let targets = self.matching_peer_groups(dispatch);
+    async fn dispatch(&mut self, msg: &Message, touched: &mut SmallVec<[u64; 32]>) -> bool {
+        let targets = self.matching_peer_groups(msg);
         if self.mute_policy.is_lossy() {
             for (group, peers) in targets.iter().enumerate() {
-                self.dispatch_group_lossy(GroupPeers { group, peers }, dispatch, touched);
+                self.dispatch_group_lossy(GroupPeers { group, peers }, msg, touched);
             }
             return false;
         }
@@ -900,7 +872,7 @@ impl LaneWorker {
         let mut pending = SmallVec::<[PendingPeer; 8]>::new();
         for (group, peers) in targets.iter().enumerate() {
             let target = GroupPeers { group, peers };
-            self.dispatch_group_ready(target, dispatch, touched, &mut pending);
+            self.dispatch_group_ready(target, msg, touched, &mut pending);
         }
         self.finish_pending(&mut pending, touched).await
     }
@@ -912,10 +884,7 @@ impl LaneWorker {
             .shm
     }
 
-    fn matching_peer_groups(
-        &self,
-        dispatch: &LaneDispatch,
-    ) -> [SmallVec<[u64; 32]>; MAX_CODEC_GROUPS] {
+    fn matching_peer_groups(&self, msg: &Message) -> [SmallVec<[u64; 32]>; MAX_CODEC_GROUPS] {
         let mut groups: [SmallVec<[u64; 32]>; MAX_CODEC_GROUPS] =
             std::array::from_fn(|_| SmallVec::new());
         let all_subscribe_all =
@@ -926,9 +895,9 @@ impl LaneWorker {
                     || filter::peer_matches(
                         self.mode,
                         &peer.filter,
-                        dispatch.msg.part_slice(0).unwrap_or_default(),
+                        msg.part_slice(0).unwrap_or_default(),
                         matches!(self.mode, FanOutMode::Group)
-                            .then(|| dispatch.msg.part_slice(0).unwrap_or_default()),
+                            .then(|| msg.part_slice(0).unwrap_or_default()),
                     ))
             {
                 groups[peer.codec_group].push(peer_id);

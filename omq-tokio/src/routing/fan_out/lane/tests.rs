@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use omq_proto::fan_out_frame::{build_fan_out_frame, clear_fan_out_frame};
 use omq_proto::frame_buffer::FrameBuffer;
+use omq_proto::message::Message;
 #[cfg(feature = "lz4")]
 use omq_proto::options::Options;
 #[cfg(feature = "lz4")]
@@ -15,13 +16,12 @@ use smallvec::SmallVec;
 use super::filter::PeerFilterState;
 use super::{
     FanOutLaneState, FanOutLanes, FanOutMode, FanOutMutePolicy, LaneAdmission, LaneControl,
-    LaneData, LaneDispatch, LaneDistributor, LaneEndpoint, LaneInput, LanePeer, LanePeerAdd,
-    LaneWorker,
+    LaneDistributor, LaneEndpoint, LaneInput, LanePeer, LanePeerAdd, LaneWorker,
 };
 use crate::engine::control_queue::ControlQueue;
 use crate::engine::transmit_slot::SlotConfig;
 
-fn paused_lanes(count: usize) -> (FanOutLanes, Vec<yring::Consumer<LaneData>>) {
+fn paused_lanes(count: usize) -> (FanOutLanes, Vec<yring::Consumer<Message>>) {
     let lanes = test_lanes(count);
     let mut receivers = Vec::new();
     for (index, input) in lanes
@@ -40,11 +40,9 @@ fn paused_lanes(count: usize) -> (FanOutLanes, Vec<yring::Consumer<LaneData>>) {
     (lanes, receivers)
 }
 
-fn pop_dispatch(receiver: &mut yring::Consumer<LaneData>) -> Option<omq_proto::Message> {
+fn pop_dispatch(receiver: &mut yring::Consumer<Message>) -> Option<omq_proto::Message> {
     receiver.prefetch();
-    let result = receiver
-        .pop()
-        .map(|LaneData::Dispatch(dispatch)| dispatch.msg);
+    let result = receiver.pop();
     receiver.release();
     result
 }
@@ -82,10 +80,7 @@ fn strict_admission_is_atomic_across_lanes_but_lossy_dispatch_skips_full_lanes()
             Some("first".into())
         );
         lanes
-            .try_dispatch(
-                super::LaneDispatch { msg: message },
-                LaneAdmission::Backpressure,
-            )
+            .try_dispatch(message, LaneAdmission::Backpressure)
             .unwrap();
         for receiver in &mut receivers {
             assert_eq!(pop_dispatch(receiver), Some("retry".into()));
@@ -148,7 +143,7 @@ async fn native_readiness_observes_inactive_lanes_worker_exit_and_close() {
 /// A RADIO sender over two paused lanes whose one-slot rings are full.
 fn full_radio_sender() -> (
     crate::routing::fan_out::FanOutSend,
-    Vec<yring::Consumer<LaneData>>,
+    Vec<yring::Consumer<Message>>,
 ) {
     let mut sender = crate::routing::fan_out::FanOutSend::new(
         omq_proto::SocketType::Radio,
@@ -264,7 +259,7 @@ fn linger_counts_distributor_and_secondary_worker_owned_batches() {
 
 #[tokio::test]
 async fn dispatch_waits_for_space_signal_when_nodrop_ring_full() {
-    let (data_tx, mut data_rx) = yring::spsc::<LaneData>(1);
+    let (data_tx, mut data_rx) = yring::spsc::<Message>(1);
     let data_space = Arc::new(crate::engine::signal::StateSignal::new());
     let lanes = FanOutLanes {
         #[cfg(target_os = "linux")]
@@ -290,25 +285,25 @@ async fn dispatch_waits_for_space_signal_when_nodrop_ring_full() {
     let send_second = lanes.dispatch(test_dispatch("two"));
     tokio::pin!(send_second);
     tokio::select! {
-        () = &mut send_second => panic!("dispatch completed while ring stayed full"),
+        () = &mut send_second => panic!("msg completed while ring stayed full"),
         () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
     }
 
     data_rx.prefetch();
-    let first = data_rx.pop().expect("first dispatch present");
-    let LaneData::Dispatch(first) = first;
-    assert_eq!(first.msg.part_bytes(0).unwrap().as_ref(), b"one");
+    let first = data_rx.pop().expect("first msg present");
+    let first = first;
+    assert_eq!(first.part_bytes(0).unwrap().as_ref(), b"one");
     data_rx.release();
     data_space.notify_changed();
 
     tokio::time::timeout(std::time::Duration::from_secs(1), send_second)
         .await
-        .expect("dispatch did not wake after space signal");
+        .expect("msg did not wake after space signal");
 }
 
 #[tokio::test]
 async fn nodrop_dispatch_returns_when_worker_exits_before_dropping_ring() {
-    let (data_tx, data_rx) = yring::spsc::<LaneData>(1);
+    let (data_tx, data_rx) = yring::spsc::<Message>(1);
     let data_space = Arc::new(crate::engine::signal::StateSignal::new());
     let lanes = FanOutLanes {
         #[cfg(target_os = "linux")]
@@ -333,7 +328,7 @@ async fn nodrop_dispatch_returns_when_worker_exits_before_dropping_ring() {
     let send_second = lanes.dispatch(test_dispatch("two"));
     tokio::pin!(send_second);
     tokio::select! {
-        () = &mut send_second => panic!("dispatch completed while ring stayed full"),
+        () = &mut send_second => panic!("msg completed while ring stayed full"),
         () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
     }
 
@@ -345,7 +340,7 @@ async fn nodrop_dispatch_returns_when_worker_exits_before_dropping_ring() {
     data_space.notify_changed();
     tokio::time::timeout(std::time::Duration::from_secs(1), send_second)
         .await
-        .expect("dispatch kept waiting on a ring nothing drains");
+        .expect("msg kept waiting on a ring nothing drains");
     assert!(
         lanes.is_empty(),
         "an exited worker leaves nothing to linger on"
@@ -358,7 +353,7 @@ async fn nodrop_dispatch_returns_if_worker_exited_before_send() {
     use futures::FutureExt;
 
     for drop_ring in [false, true] {
-        let (data_tx, data_rx) = yring::spsc::<LaneData>(1);
+        let (data_tx, data_rx) = yring::spsc::<Message>(1);
         let mut data_rx = Some(data_rx);
         let data_space = Arc::new(crate::engine::signal::StateSignal::new());
         let lanes = FanOutLanes {
@@ -395,14 +390,14 @@ async fn nodrop_dispatch_returns_if_worker_exited_before_send() {
                 .dispatch(test_dispatch("two"))
                 .now_or_never()
                 .is_some(),
-            "dispatch missed the final worker wake (drop_ring={drop_ring})"
+            "msg missed the final worker wake (drop_ring={drop_ring})"
         );
     }
 }
 
 #[tokio::test]
 async fn empty_data_drain_clears_stale_signal() {
-    let (_data_tx, data_rx) = yring::spsc::<LaneData>(4);
+    let (_data_tx, data_rx) = yring::spsc::<Message>(4);
     let data_signal = Arc::new(crate::engine::signal::DataSignal::new());
     let worker = LaneWorker {
         #[cfg(target_os = "linux")]
@@ -439,7 +434,7 @@ async fn empty_data_drain_clears_stale_signal() {
 
 #[test]
 fn drop_oldest_lossy_dispatch_keeps_newest_per_peer_frames() {
-    let (_data_tx, data_rx) = yring::spsc::<LaneData>(4);
+    let (_data_tx, data_rx) = yring::spsc::<Message>(4);
     let slot = test_slot_with_msg_cap(7, 2);
     let mut peers = FxHashMap::default();
     peers.insert(
@@ -486,7 +481,7 @@ fn drop_oldest_lossy_dispatch_keeps_newest_per_peer_frames() {
 #[cfg(feature = "lz4")]
 #[test]
 fn drop_oldest_lossy_dispatch_keeps_dict_with_first_payload() {
-    let (_data_tx, data_rx) = yring::spsc::<LaneData>(4);
+    let (_data_tx, data_rx) = yring::spsc::<Message>(4);
     let slot = test_slot_with_msg_cap(7, 1);
     let options = Options::default().compression_dict(Bytes::from_static(b"shared-dict"));
     let mut codec_groups = std::array::from_fn(|_| None);
@@ -533,7 +528,7 @@ fn drop_oldest_lossy_dispatch_keeps_dict_with_first_payload() {
 /// A worker with one subscribe-all peer 7 on codec group 0.
 #[cfg(feature = "lz4")]
 fn single_peer_worker(
-    data_rx: yring::Consumer<LaneData>,
+    data_rx: yring::Consumer<Message>,
     slot: &Arc<crate::engine::transmit_slot::PeerTransmitSlot>,
     mute_policy: FanOutMutePolicy,
     codec_groups: [Option<super::CodecGroup>; super::MAX_CODEC_GROUPS],
@@ -571,7 +566,7 @@ fn single_peer_worker(
 
 #[test]
 fn drop_newest_lossy_dispatch_keeps_oldest_per_peer_frames() {
-    let (_data_tx, data_rx) = yring::spsc::<LaneData>(4);
+    let (_data_tx, data_rx) = yring::spsc::<Message>(4);
     let slot = test_slot_with_msg_cap(7, 2);
     let mut peers = FxHashMap::default();
     peers.insert(
@@ -659,7 +654,7 @@ fn batch_worker(
 fn batch_wire(worker: &LaneWorker) -> (FrameBuffer, SmallVec<[usize; 8]>) {
     let batch: Vec<_> = ["0", "1", "2", "3", "4", "5", "6", "7", "8"]
         .into_iter()
-        .map(|body| LaneData::Dispatch(test_dispatch(body)))
+        .map(test_dispatch)
         .collect();
     let mut wire = FrameBuffer::new();
     let mut ends = SmallVec::new();
@@ -682,15 +677,13 @@ async fn shm_dispatch_keeps_ready_peers_progressing_under_both_mute_policies() {
                     .store(true, std::sync::atomic::Ordering::Release);
             }
             let (mut worker, _control) = batch_worker(policy, &[slow.clone(), fast.clone()]);
-            let dispatch = LaneDispatch {
-                msg: omq_proto::Message::with_group("group", vec![7; size]),
-            };
+            let msg = omq_proto::Message::with_group("group", vec![7; size]);
             let mut touched = SmallVec::new();
             let mut pending = SmallVec::new();
             for _ in 0..2 {
                 worker.dispatch_shm_group(
                     &[7, 8],
-                    &dispatch,
+                    &msg,
                     &mut touched,
                     (policy == FanOutMutePolicy::Block).then_some(&mut pending),
                 );
@@ -740,9 +733,7 @@ fn shm_reference_batches_do_not_charge_application_payload_bytes() {
     let batch: Vec<_> = (0..9)
         .map(|_| {
             let body = pool.message(SIZE, |bytes| bytes.fill(7)).unwrap();
-            LaneData::Dispatch(LaneDispatch {
-                msg: omq_proto::Message::with_prefix(Bytes::from_static(b"group"), body),
-            })
+            omq_proto::Message::with_prefix(Bytes::from_static(b"group"), body)
         })
         .collect();
     let (_, count, referenced) = worker.prepare_shm_batch(&batch).unwrap();
@@ -762,9 +753,9 @@ async fn plain_batch_retries_only_blocked_suffix_and_wakes_ready_peers() {
         batch_worker(FanOutMutePolicy::Block, &[slow.clone(), fast.clone()]);
     let (wire, ends) = batch_wire(&worker);
     let mut touched = SmallVec::new();
-    let dispatch = worker.dispatch_plain_batch(wire.uncommitted_arena(), &ends, &mut touched);
-    tokio::pin!(dispatch);
-    assert!(poll_once(dispatch.as_mut()).is_pending());
+    let msg = worker.dispatch_plain_batch(wire.uncommitted_arena(), &ends, &mut touched);
+    tokio::pin!(msg);
+    assert!(poll_once(msg.as_mut()).is_pending());
     assert!(
         !fast.data_signal.is_idle(),
         "ready peers must wake before waiting for slow peers"
@@ -781,7 +772,7 @@ async fn plain_batch_retries_only_blocked_suffix_and_wakes_ready_peers() {
     for turn in 0..3 {
         assert!(slow.drain(&mut slow_received, 1024).space_available);
         slow.space_available.notify_changed();
-        let result = poll_once(dispatch.as_mut());
+        let result = poll_once(msg.as_mut());
         if turn < 2 {
             assert!(result.is_pending());
         } else {
@@ -803,11 +794,11 @@ async fn plain_batch_services_shutdown_while_peer_stays_full() {
     let (mut worker, control) = batch_worker(FanOutMutePolicy::Block, std::slice::from_ref(&slow));
     let (wire, ends) = batch_wire(&worker);
     let mut touched = SmallVec::new();
-    let dispatch = worker.dispatch_plain_batch(wire.uncommitted_arena(), &ends, &mut touched);
-    tokio::pin!(dispatch);
-    assert!(poll_once(dispatch.as_mut()).is_pending());
+    let msg = worker.dispatch_plain_batch(wire.uncommitted_arena(), &ends, &mut touched);
+    tokio::pin!(msg);
+    assert!(poll_once(msg.as_mut()).is_pending());
     control.push(LaneControl::Shutdown);
-    assert_eq!(poll_once(dispatch.as_mut()), std::task::Poll::Ready(true));
+    assert_eq!(poll_once(msg.as_mut()), std::task::Poll::Ready(true));
     assert!(
         !slow.data_signal.is_idle(),
         "shutdown must not hide accepted data"
@@ -927,9 +918,8 @@ fn test_slot_with_msg_cap(
     )
 }
 
-fn test_dispatch(body: &str) -> LaneDispatch {
-    let msg = omq_proto::message::Message::from_slice(body.as_bytes());
-    LaneDispatch { msg }
+fn test_dispatch(body: &str) -> Message {
+    Message::from_slice(body.as_bytes())
 }
 
 fn encoded_dispatch(body: &str) -> Bytes {

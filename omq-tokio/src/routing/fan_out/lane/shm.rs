@@ -1,8 +1,6 @@
 //! SHM batch and group dispatch for fan-out lanes.
 
-#[cfg(target_os = "linux")]
-use super::LaneData;
-use super::{LaneDispatch, LaneWorker, Parked, PendingPeer, PreparedFrame};
+use super::{LaneWorker, Parked, PendingPeer, PreparedFrame};
 use crate::engine::transmit_slot::{PeerTransmitSlot, TryFrameResult};
 use crate::routing::fan_out::FanOutMutePolicy;
 #[cfg(target_os = "linux")]
@@ -18,7 +16,7 @@ impl LaneWorker {
     /// record. Returns the record, how many publications it covers, and
     /// whether bodies are pool references rather than copies.
     #[cfg(target_os = "linux")]
-    pub(super) fn prepare_shm_batch(&self, batch: &[LaneData]) -> Option<(Message, usize, bool)> {
+    pub(super) fn prepare_shm_batch(&self, batch: &[Message]) -> Option<(Message, usize, bool)> {
         if batch.len() < SHM_BATCH_MIN_MESSAGES
             || !matches!(self.mode, FanOutMode::Group)
             || self.peers.is_empty()
@@ -34,8 +32,8 @@ impl LaneWorker {
             .map(|peer| peer.slot.message_capacity())
             .min()?
             .min(omq_shm::BATCH_MAX_MESSAGES);
-        let LaneData::Dispatch(first) = &batch[0];
-        let shape = ShmBatchShape::new(&first.msg)?;
+        let first = &batch[0];
+        let shape = ShmBatchShape::new(first)?;
         let mut messages = shape.collect(batch, limit)?;
 
         if shape.referenced {
@@ -52,13 +50,12 @@ impl LaneWorker {
     #[cfg(target_os = "linux")]
     pub(super) async fn dispatch_shm_batch(
         &mut self,
-        message: Message,
+        msg: Message,
         count: usize,
         referenced: bool,
         touched: &mut SmallVec<[u64; 32]>,
     ) -> bool {
-        let dispatch = LaneDispatch { msg: message };
-        let targets = self.matching_peer_groups(&dispatch);
+        let targets = self.matching_peer_groups(&msg);
         let mut pending = SmallVec::<[PendingPeer; 8]>::new();
         let mut parked = Parked::new(&mut pending);
         for peers in targets {
@@ -68,12 +65,12 @@ impl LaneWorker {
                 };
                 match peer
                     .slot
-                    .try_encode_shm_batch_no_signal(&dispatch.msg, count, referenced)
+                    .try_encode_shm_batch_no_signal(&msg, count, referenced)
                 {
                     TryFrameResult::Ok => Self::touch_peer(peer_id, peer, touched),
                     TryFrameResult::Full if self.mute_policy == FanOutMutePolicy::Block => {
                         parked.park(peer_id, &peer.slot, None, || {
-                            PreparedFrame::ShmBatch(dispatch.msg.clone(), count, referenced)
+                            PreparedFrame::ShmBatch(msg.clone(), count, referenced)
                         });
                     }
                     TryFrameResult::Full => {
@@ -89,23 +86,23 @@ impl LaneWorker {
     pub(super) fn dispatch_shm_group(
         &mut self,
         peer_ids: &[u64],
-        dispatch: &LaneDispatch,
+        msg: &Message,
         touched: &mut SmallVec<[u64; 32]>,
         pending: Option<&mut SmallVec<[PendingPeer; 8]>>,
     ) {
         debug_assert!(pending.is_some() || self.mute_policy == FanOutMutePolicy::DropNewest);
-        let multipart = self.prepare_shm_multipart(dispatch);
+        let multipart = self.prepare_shm_multipart(msg);
         let prepared = multipart
             .is_none()
-            .then(|| self.prepare_shm_publication(dispatch))
+            .then(|| self.prepare_shm_publication(msg))
             .flatten();
-        let dispatch = prepared.as_ref().unwrap_or(dispatch);
-        let copied = multipart.is_none() && Self::shm_copied_body(&dispatch.msg);
+        let msg = prepared.as_ref().unwrap_or(msg);
+        let copied = multipart.is_none() && Self::shm_copied_body(msg);
         #[cfg(target_os = "linux")]
         if copied {
             // Copied records are identical for every recipient. Reference
             // records below instead reserve a distinct lease per connection.
-            omq_shm::frame_copied(&dispatch.msg, &mut self.eq);
+            omq_shm::frame_copied(msg, &mut self.eq);
         }
         let mut parked = pending.map(Parked::new);
         for &peer_id in peer_ids {
@@ -118,7 +115,7 @@ impl LaneWorker {
             } else if let Some(record) = &multipart {
                 Self::try_encode_shm_multipart(&peer.slot, record)
             } else {
-                peer.slot.try_encode_shm_no_signal(&dispatch.msg)
+                peer.slot.try_encode_shm_no_signal(msg)
             };
             match result {
                 TryFrameResult::Ok => Self::touch_peer(peer_id, peer, touched),
@@ -133,7 +130,7 @@ impl LaneWorker {
                         } else if let Some(record) = &multipart {
                             PreparedFrame::ShmMultipart(record.clone())
                         } else {
-                            PreparedFrame::Shm(dispatch.msg.clone())
+                            PreparedFrame::Shm(msg.clone())
                         }
                     });
                 }
@@ -161,21 +158,16 @@ impl LaneWorker {
 
     /// Copy a large-envelope publication once into one shared multipart record.
     #[cfg_attr(not(target_os = "linux"), expect(clippy::unused_self))]
-    fn prepare_shm_multipart(&self, dispatch: &LaneDispatch) -> Option<Message> {
+    fn prepare_shm_multipart(&self, msg: &Message) -> Option<Message> {
         #[cfg(target_os = "linux")]
         {
-            omq_shm::uses_multipart_record(&dispatch.msg)
-                .then(|| {
-                    self.shm_pool
-                        .prepare_multipart(&dispatch.msg)
-                        .ok()
-                        .flatten()
-                })
+            omq_shm::uses_multipart_record(msg)
+                .then(|| self.shm_pool.prepare_multipart(msg).ok().flatten())
                 .flatten()
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = dispatch;
+            let _ = msg;
             None
         }
     }
@@ -196,18 +188,14 @@ impl LaneWorker {
     }
 
     #[cfg_attr(not(target_os = "linux"), expect(clippy::unused_self))]
-    fn prepare_shm_publication(&self, dispatch: &LaneDispatch) -> Option<LaneDispatch> {
+    fn prepare_shm_publication(&self, msg: &Message) -> Option<Message> {
         #[cfg(target_os = "linux")]
         {
-            self.shm_pool
-                .prepare(&dispatch.msg)
-                .ok()
-                .flatten()
-                .map(|msg| LaneDispatch { msg })
+            self.shm_pool.prepare(msg).ok().flatten()
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = dispatch;
+            let _ = msg;
             None
         }
     }
@@ -259,7 +247,7 @@ impl<'m> ShmBatchShape<'m> {
     /// `None` when a candidate has no body part.
     fn collect<'b>(
         &self,
-        batch: &'b [LaneData],
+        batch: &'b [Message],
         limit: usize,
     ) -> Option<SmallVec<[&'b Message; omq_shm::BATCH_MAX_MESSAGES]>> {
         // The record starts with a u16 member count.
@@ -267,16 +255,15 @@ impl<'m> ShmBatchShape<'m> {
         let mut budget = DrainBudget::new(limit, omq_shm::BATCH_MAX_BYTES);
         let mut messages = SmallVec::new();
 
-        for data in batch.iter().take(limit) {
-            let LaneData::Dispatch(dispatch) = data;
-            if dispatch.msg.len() != 2
-                || dispatch.msg.part_slice(0) != self.first.part_slice(0)
-                || (self.referenced && LaneWorker::shm_copied_body(&dispatch.msg))
+        for msg in batch.iter().take(limit) {
+            if msg.len() != 2
+                || msg.part_slice(0) != self.first.part_slice(0)
+                || (self.referenced && LaneWorker::shm_copied_body(msg))
             {
                 break;
             }
 
-            let body_length = dispatch.msg.part_slice(1)?.len();
+            let body_length = msg.part_slice(1)?.len();
             let bytes = if self.referenced {
                 omq_shm::REFERENCE_ENTRY_BYTES
             } else {
@@ -291,7 +278,7 @@ impl<'m> ShmBatchShape<'m> {
                 break;
             }
 
-            messages.push(&dispatch.msg);
+            messages.push(msg);
             if !budget.account(bytes) {
                 break;
             }

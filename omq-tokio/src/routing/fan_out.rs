@@ -34,7 +34,7 @@ use omq_proto::proto::SocketType;
 
 use super::peer_outbound::PeerOutbound;
 pub(crate) use filter::FanOutMode;
-use lane::{FanOutLanes, LaneAdmission, LaneDispatch};
+use lane::{FanOutLanes, LaneAdmission};
 
 /// Total bytes copied into per-peer wire queues before switching to
 /// shared `Bytes` chunks. This is fan-out specific. Do not change
@@ -240,8 +240,8 @@ impl Submitter {
         if self.fallback_peer_count.load(Ordering::Relaxed) == 0 {
             let lane_count = self.lane_peer_count.load(Ordering::Acquire);
             if lane_count > 0 {
-                let dispatch = LaneDispatch { msg: msg.clone() };
-                lanes.try_dispatch(dispatch, admission)?;
+                let msg = msg.clone();
+                lanes.try_dispatch(msg, admission)?;
             }
             return Ok(());
         }
@@ -266,7 +266,7 @@ impl Submitter {
                     .expect("native fanout cache poisoned")
                     .publish(fallback_targets, msg, || {
                         if has_lane_peers {
-                            lanes.try_dispatch(LaneDispatch { msg: msg.clone() }, admission)?;
+                            lanes.try_dispatch(msg.clone(), admission)?;
                         }
                         Ok(())
                     })?;
@@ -280,8 +280,8 @@ impl Submitter {
                 return Err(omq_proto::error::TrySendError::Full(msg.clone()));
             };
             if has_lane_peers {
-                let dispatch = LaneDispatch { msg: msg.clone() };
-                lanes.try_dispatch(dispatch, admission)?;
+                let msg = msg.clone();
+                lanes.try_dispatch(msg, admission)?;
             }
             for permit in permits {
                 permit.send(msg.clone());
@@ -292,7 +292,7 @@ impl Submitter {
         // A failed lane admission must leave fallback peers untouched so the
         // caller can retry the complete publication without duplicates.
         if has_lane_peers {
-            lanes.try_dispatch(LaneDispatch { msg: msg.clone() }, admission)?;
+            lanes.try_dispatch(msg.clone(), admission)?;
         }
 
         if !fallback_targets.is_empty() {
@@ -312,7 +312,7 @@ impl Submitter {
         if self.fallback_peer_count.load(Ordering::Relaxed) == 0 {
             let lane_count = self.lane_peer_count.load(Ordering::Acquire);
             if lane_count > 0 {
-                lanes.dispatch(LaneDispatch { msg: msg.clone() }).await;
+                lanes.dispatch(msg.clone()).await;
             }
             return Ok(());
         }
@@ -335,7 +335,7 @@ impl Submitter {
             self.publish_fallback_lossy(fallback_targets, msg);
         }
         if has_lane_peers {
-            lanes.dispatch(LaneDispatch { msg: msg.clone() }).await;
+            lanes.dispatch(msg.clone()).await;
         }
         Ok(())
     }
@@ -369,7 +369,7 @@ impl Submitter {
 
         let native = async {
             if has_lane_peers {
-                lanes.dispatch(LaneDispatch { msg: msg.clone() }).await;
+                lanes.dispatch(msg.clone()).await;
             }
         };
         if published {

@@ -1,6 +1,6 @@
 //! Publication dispatch under a lossy mute policy.
 
-use super::{GroupPeers, LaneDispatch, LanePeer, LaneWorker, frame_publication};
+use super::{GroupPeers, LanePeer, LaneWorker, frame_publication};
 use crate::engine::transmit_slot::TryFrameResult;
 use crate::routing::fan_out::{FAN_OUT_TOTAL_COPY_BUDGET, FanOutMutePolicy};
 use omq_proto::fan_out_frame::{FanOutFrame, build_fan_out_frame, clear_fan_out_frame};
@@ -9,13 +9,9 @@ use smallvec::SmallVec;
 
 impl LaneWorker {
     #[cfg(test)]
-    pub(super) fn dispatch_lossy(
-        &mut self,
-        dispatch: &LaneDispatch,
-        touched: &mut SmallVec<[u64; 32]>,
-    ) {
-        for (group, peers) in self.matching_peer_groups(dispatch).iter().enumerate() {
-            self.dispatch_group_lossy(GroupPeers { group, peers }, dispatch, touched);
+    pub(super) fn dispatch_lossy(&mut self, msg: &Message, touched: &mut SmallVec<[u64; 32]>) {
+        for (group, peers) in self.matching_peer_groups(msg).iter().enumerate() {
+            self.dispatch_group_lossy(GroupPeers { group, peers }, msg, touched);
         }
     }
 
@@ -24,21 +20,21 @@ impl LaneWorker {
     pub(super) fn dispatch_group_lossy(
         &mut self,
         target: GroupPeers<'_>,
-        dispatch: &LaneDispatch,
+        msg: &Message,
         touched: &mut SmallVec<[u64; 32]>,
     ) {
         if target.peers.is_empty() {
             return;
         }
         if self.is_shm_group(target.group) {
-            self.dispatch_shm_group(target.peers, dispatch, touched, None);
+            self.dispatch_shm_group(target.peers, msg, touched, None);
             return;
         }
 
         let group = self.codec_groups[target.group]
             .as_mut()
             .expect("matched codec group");
-        let Ok(wire_messages) = group.encode(&dispatch.msg) else {
+        let Ok(wire_messages) = group.encode(msg) else {
             return;
         };
         let dict_msg = group.dictionary().cloned();

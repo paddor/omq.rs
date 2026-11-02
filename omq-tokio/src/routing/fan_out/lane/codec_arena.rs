@@ -1,6 +1,6 @@
 //! Shared codec arenas: one encode per codec group, gather-written to each peer.
 
-use super::{GroupPeers, LaneData, LaneWorker};
+use super::{GroupPeers, LaneWorker};
 use crate::engine::transmit_slot::TryFrameResult;
 use crate::routing::fan_out::codec_group::{CodecGroup, MAX_CODEC_GROUPS};
 use crate::routing::fan_out::{FAN_OUT_TOTAL_COPY_BUDGET, FanOutMutePolicy};
@@ -15,13 +15,13 @@ impl LaneWorker {
     /// Partial credit, changed filters and oldest eviction use scalar dispatch.
     pub(super) async fn dispatch_codec_arena(
         &mut self,
-        batch: &[LaneData],
+        batch: &[Message],
         touched: &mut SmallVec<[u64; 32]>,
     ) -> (usize, bool) {
         if batch.len() < 2 || self.mute_policy == FanOutMutePolicy::DropOldest {
             return (0, false);
         }
-        let LaneData::Dispatch(first) = &batch[0];
+        let first = &batch[0];
         let targets = self.matching_peer_groups(first);
         if !self.codec_arena_targets_ready(&targets) {
             return (0, false);
@@ -49,7 +49,7 @@ impl LaneWorker {
     /// every target's message and byte credit.
     fn codec_arena_members<'b>(
         &self,
-        batch: &'b [LaneData],
+        batch: &'b [Message],
         targets: &[SmallVec<[u64; 32]>; MAX_CODEC_GROUPS],
     ) -> SmallVec<[&'b Message; 32]> {
         use omq_proto::proto::transform::arena::{
@@ -74,21 +74,20 @@ impl LaneWorker {
         let mut messages = SmallVec::new();
         let mut bytes = 0;
         let mut parts = 0;
-        for data in batch.iter().take(max_messages) {
-            let LaneData::Dispatch(dispatch) = data;
-            let Some(size) = arena_message_size(&dispatch.msg) else {
+        for msg in batch.iter().take(max_messages) {
+            let Some(size) = arena_message_size(msg) else {
                 break;
             };
             if bytes + size > capacity
-                || parts + dispatch.msg.len() > MAX_ARENA_PARTS
-                || self.matching_peer_groups(dispatch) != *targets
+                || parts + msg.len() > MAX_ARENA_PARTS
+                || self.matching_peer_groups(msg) != *targets
                 || bytes + size + CODEC_ARENA_FRAME_OVERHEAD > max_bytes
             {
                 break;
             }
             bytes += size;
-            parts += dispatch.msg.len();
-            messages.push(&dispatch.msg);
+            parts += msg.len();
+            messages.push(msg);
         }
 
         messages
@@ -142,12 +141,11 @@ impl LaneWorker {
     /// one publication at a time. Returns `true` on shutdown.
     async fn dispatch_arena_fallback(
         &mut self,
-        members: &[LaneData],
+        members: &[Message],
         fallback: &[(usize, u64)],
         touched: &mut SmallVec<[u64; 32]>,
     ) -> bool {
-        for data in members {
-            let LaneData::Dispatch(dispatch) = data;
+        for msg in members {
             let mut pending = SmallVec::new();
             for &(group, id) in fallback {
                 let target = GroupPeers {
@@ -155,9 +153,9 @@ impl LaneWorker {
                     peers: &[id],
                 };
                 if self.mute_policy.is_lossy() {
-                    self.dispatch_group_lossy(target, dispatch, touched);
+                    self.dispatch_group_lossy(target, msg, touched);
                 } else {
-                    self.dispatch_group_ready(target, dispatch, touched, &mut pending);
+                    self.dispatch_group_ready(target, msg, touched, &mut pending);
                 }
             }
             if self.finish_pending(&mut pending, touched).await {

@@ -42,18 +42,42 @@ pub(crate) fn parse_blocking_inproc_stats(output: &str) -> Option<BlockingInproc
     })
 }
 
+/// Per-peer rate spread of a multi-peer run. Values a peer does not
+/// report stay `None`.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct PeerSpread {
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    pub p10: Option<f64>,
+    pub p25: Option<f64>,
+    pub median: Option<f64>,
+    pub p75: Option<f64>,
+    pub p90: Option<f64>,
+}
+
+impl PeerSpread {
+    /// Nearest-rank quantiles of ascending `rates`; all `None` when empty.
+    pub(crate) fn from_sorted(rates: &[f64]) -> Self {
+        let quantile = |p: f64| {
+            (!rates.is_empty()).then(|| rates[((rates.len() - 1) as f64 * p).round() as usize])
+        };
+        Self {
+            min: quantile(0.0),
+            max: quantile(1.0),
+            p10: quantile(0.10),
+            p25: quantile(0.25),
+            median: quantile(0.50),
+            p75: quantile(0.75),
+            p90: quantile(0.90),
+        }
+    }
+}
+
+/// Multi-socket throughput: the per-peer `rate`, the spread across peers,
+/// and every per-peer rate the peer printed.
 pub(crate) struct MultiThroughputResult {
-    pub msgs_s: f64,
-    pub mbps: f64,
-    pub elapsed: f64,
-    pub pull_cpu: Option<f64>,
-    pub peer_min: Option<f64>,
-    pub peer_max: Option<f64>,
-    pub peer_p10: Option<f64>,
-    pub peer_p25: Option<f64>,
-    pub peer_median: Option<f64>,
-    pub peer_p75: Option<f64>,
-    pub peer_p90: Option<f64>,
+    pub rate: ThroughputResult,
+    pub spread: PeerSpread,
     pub peer_rates: Vec<f64>,
 }
 
@@ -116,17 +140,21 @@ pub(crate) fn parse_multi_throughput(
     let msgs_s = total / elapsed / peers_f;
     let mbps = (total * size as f64) / elapsed / 1_000_000.0;
     Some(MultiThroughputResult {
-        msgs_s,
-        mbps,
-        elapsed,
-        pull_cpu: Some(cpu),
-        peer_min: Some(min_rate),
-        peer_max: Some(max_rate),
-        peer_p10: percentile(7),
-        peer_p25: percentile(8),
-        peer_median: percentile(9),
-        peer_p75: percentile(10),
-        peer_p90: percentile(11),
+        rate: ThroughputResult {
+            msgs_s,
+            mbps,
+            elapsed,
+            pull_cpu: Some(cpu),
+        },
+        spread: PeerSpread {
+            min: Some(min_rate),
+            max: Some(max_rate),
+            p10: percentile(7),
+            p25: percentile(8),
+            median: percentile(9),
+            p75: percentile(10),
+            p90: percentile(11),
+        },
         peer_rates: parts
             .get(12..)
             .unwrap_or(&[])
@@ -165,7 +193,21 @@ pub(crate) fn parse_latency(output: &str) -> Option<LatencyResult> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_blocking_inproc_stats, parse_throughput};
+    use super::{PeerSpread, parse_blocking_inproc_stats, parse_throughput};
+
+    #[test]
+    fn spread_takes_nearest_rank_quantiles() {
+        assert_eq!(PeerSpread::from_sorted(&[]), PeerSpread::default());
+        let rates: Vec<f64> = (1..=11).map(f64::from).collect();
+        let spread = PeerSpread::from_sorted(&rates);
+        assert_eq!(spread.min, Some(1.0));
+        assert_eq!(spread.p10, Some(2.0));
+        assert_eq!(spread.p25, Some(4.0));
+        assert_eq!(spread.median, Some(6.0));
+        assert_eq!(spread.p75, Some(9.0));
+        assert_eq!(spread.p90, Some(10.0));
+        assert_eq!(spread.max, Some(11.0));
+    }
 
     #[test]
     fn blocking_stats_preserve_throughput_and_normalize_switches() {

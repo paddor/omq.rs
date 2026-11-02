@@ -1,3 +1,4 @@
+use crate::parse::PeerSpread;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
@@ -134,6 +135,33 @@ pub(crate) struct ComparisonRow {
     pub zero_transport: Option<bool>,
 }
 
+impl ComparisonRow {
+    /// The `peer_*` fields as one spread.
+    pub(crate) fn spread(&self) -> PeerSpread {
+        PeerSpread {
+            min: self.peer_min,
+            max: self.peer_max,
+            p10: self.peer_p10,
+            p25: self.peer_p25,
+            median: self.peer_median,
+            p75: self.peer_p75,
+            p90: self.peer_p90,
+        }
+    }
+
+    /// Stores `spread` in the flat `peer_*` fields, which keep their JSONL
+    /// names and order.
+    pub(crate) fn set_spread(&mut self, spread: PeerSpread) {
+        self.peer_min = spread.min;
+        self.peer_max = spread.max;
+        self.peer_p10 = spread.p10;
+        self.peer_p25 = spread.p25;
+        self.peer_median = spread.median;
+        self.peer_p75 = spread.p75;
+        self.peer_p90 = spread.p90;
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct PushpullLz4Row {
     pub run_id: String,
@@ -232,4 +260,32 @@ pub(crate) struct CompressionRow {
     pub msgs_s: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dict_size: Option<u64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ComparisonRow;
+    use crate::parse::PeerSpread;
+
+    /// Real `comparisons.jsonl` rows, with and without spread percentiles.
+    const ROWS: [&str; 2] = [
+        r#"{"run_id":"20261022T120130Z-curve-audit-libzmq2t-pinned","impl":"libzmq-curve-2t","kind":"pub_sub","transport":"tcp","msg_size":16384,"peers":16,"msgs_s":2918.8458115418844,"mbps":765.1579164208357,"elapsed":3.00003,"cpu_time":9.470172,"pull_cpu_time":5.950172,"pub_cpu_time":3.52,"peer_min":2795.0,"peer_max":3043.6,"peer_p10":2795.3,"peer_p25":2797.6,"peer_median":3040.0,"peer_p75":3040.0,"peer_p90":3043.6}"#,
+        r#"{"run_id":"20261022T114934Z-curve-audit","impl":"omq-curve-2t","kind":"pub_sub","transport":"tcp","msg_size":16384,"peers":16,"msgs_s":5299.725633516245,"mbps":1389.2912764724824,"elapsed":3.000002,"cpu_time":11.087748999999999,"pull_cpu_time":5.617749,"pub_cpu_time":5.47,"peer_min":5211.7,"peer_max":5341.7}"#,
+    ];
+
+    #[test]
+    fn spread_round_trips_real_comparison_rows() {
+        for line in ROWS {
+            let row: ComparisonRow = serde_json::from_str(line).unwrap();
+            let mut rebuilt = row.clone();
+            rebuilt.set_spread(PeerSpread::default());
+            assert!(!serde_json::to_string(&rebuilt).unwrap().contains("peer_"));
+            rebuilt.set_spread(row.spread());
+            let json = serde_json::to_string(&rebuilt).unwrap();
+            assert_eq!(json, serde_json::to_string(&row).unwrap());
+            // serde_json may parse a float one ULP off, so compare values too.
+            let value = |text: &str| serde_json::from_str::<serde_json::Value>(text).unwrap();
+            assert_eq!(value(&json), value(line));
+        }
+    }
 }

@@ -252,13 +252,7 @@ impl ComparisonRun<'_> {
                     .clone_from(&self.args.pubsub_receiver_cpus);
             }
         }
-        row.peer_min = result.peer_min;
-        row.peer_max = result.peer_max;
-        row.peer_p10 = result.peer_p10;
-        row.peer_p25 = result.peer_p25;
-        row.peer_median = result.peer_median;
-        row.peer_p75 = result.peer_p75;
-        row.peer_p90 = result.peer_p90;
+        row.set_spread(result.spread);
         row.zero_transport = (result.msgs_s == 0.0).then_some(true);
         jsonl::append_jsonl(self.jsonl_path, &row);
     }

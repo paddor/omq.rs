@@ -9,6 +9,7 @@ use crate::process;
 use std::path::Path;
 use std::time::Duration;
 
+#[derive(Default)]
 pub(super) struct CellResult {
     pub(super) blocking_inproc: Option<parse::BlockingInprocStats>,
     pub(super) msgs_s: f64,
@@ -16,46 +17,13 @@ pub(super) struct CellResult {
     pub(super) elapsed: f64,
     pub(super) push_cpu: Option<f64>,
     pub(super) pull_cpu: Option<f64>,
-    pub(super) peer_min: Option<f64>,
-    pub(super) peer_max: Option<f64>,
-    pub(super) peer_p10: Option<f64>,
-    pub(super) peer_p25: Option<f64>,
-    pub(super) peer_median: Option<f64>,
-    pub(super) peer_p75: Option<f64>,
-    pub(super) peer_p90: Option<f64>,
-}
-
-impl CellResult {
-    /// Copies the per-peer rate spread of a multi-peer measurement.
-    fn with_spread(self, spread: &parse::MultiThroughputResult) -> Self {
-        Self {
-            peer_min: spread.peer_min,
-            peer_max: spread.peer_max,
-            peer_p10: spread.peer_p10,
-            peer_p25: spread.peer_p25,
-            peer_median: spread.peer_median,
-            peer_p75: spread.peer_p75,
-            peer_p90: spread.peer_p90,
-            ..self
-        }
-    }
+    pub(super) spread: parse::PeerSpread,
 }
 
 fn zero_result(duration: f64) -> CellResult {
     CellResult {
-        blocking_inproc: None,
-        msgs_s: 0.0,
-        mbps: 0.0,
         elapsed: duration,
-        push_cpu: None,
-        pull_cpu: None,
-        peer_min: None,
-        peer_max: None,
-        peer_p10: None,
-        peer_p25: None,
-        peer_median: None,
-        peer_p75: None,
-        peer_p90: None,
+        ..CellResult::default()
     }
 }
 
@@ -369,14 +337,14 @@ fn run_pubsub_once(
         return zero_result(duration);
     };
     CellResult {
-        msgs_s: r.msgs_s,
-        mbps: r.mbps,
-        elapsed: r.elapsed,
+        msgs_s: r.rate.msgs_s,
+        mbps: r.rate.mbps,
+        elapsed: r.rate.elapsed,
         push_cpu: Some(pub_cpu),
-        pull_cpu: r.pull_cpu,
+        pull_cpu: r.rate.pull_cpu,
+        spread: r.spread,
         ..zero_result(duration)
     }
-    .with_spread(&r)
 }
 
 /// Subscriber environment with the optional receiver tuning from the CLI.
@@ -547,25 +515,20 @@ impl FanoutReceivers<'_> {
         let total_msgs: f64 = self
             .results
             .iter()
-            .map(|r| r.msgs_s * self.peers_per_process as f64 * r.elapsed)
+            .map(|r| r.rate.msgs_s * self.peers_per_process as f64 * r.rate.elapsed)
             .sum();
-        let elapsed = self.results.iter().map(|r| r.elapsed).fold(0.0, f64::max);
+        let elapsed = self
+            .results
+            .iter()
+            .map(|r| r.rate.elapsed)
+            .fold(0.0, f64::max);
         let mut peer_rates: Vec<f64> = self
             .results
             .iter()
             .flat_map(|r| r.peer_rates.iter().copied())
             .collect();
         peer_rates.sort_unstable_by(f64::total_cmp);
-        let cpu: f64 = self.results.iter().filter_map(|r| r.pull_cpu).sum();
-
-        // Nearest-rank quantile over the sorted rates.
-        let quantile = |p: f64| {
-            if peer_rates.is_empty() {
-                None
-            } else {
-                Some(peer_rates[((peer_rates.len() - 1) as f64 * p).round() as usize])
-            }
-        };
+        let cpu: f64 = self.results.iter().filter_map(|r| r.rate.pull_cpu).sum();
 
         CellResult {
             blocking_inproc: None,
@@ -574,13 +537,7 @@ impl FanoutReceivers<'_> {
             elapsed,
             push_cpu: Some(push_cpu),
             pull_cpu: Some(cpu),
-            peer_min: quantile(0.0),
-            peer_max: quantile(1.0),
-            peer_p10: quantile(0.10),
-            peer_p25: quantile(0.25),
-            peer_median: quantile(0.50),
-            peer_p75: quantile(0.75),
-            peer_p90: quantile(0.90),
+            spread: parse::PeerSpread::from_sorted(&peer_rates),
         }
     }
 }
@@ -643,21 +600,20 @@ fn run_fanin_once(cell: &Cell<'_>, peers: u64, duration: f64) -> CellResult {
     let Some(r) = pull_output.and_then(|output| parse::parse_throughput(&output, cell.size)) else {
         return zero_result(duration);
     };
-    let result = CellResult {
+    // Push peers that were killed report no per-peer rates.
+    let spread = push_output
+        .as_deref()
+        .and_then(|output| parse::parse_multi_throughput(output, cell.size, peers))
+        .map(|multi| multi.spread)
+        .unwrap_or_default();
+    CellResult {
         msgs_s: r.msgs_s,
         mbps: r.mbps,
         elapsed: r.elapsed,
         push_cpu: Some(push_cpu),
         pull_cpu: Some(r.pull_cpu.unwrap_or(pull_cpu_proc)),
+        spread,
         ..zero_result(duration)
-    };
-
-    match push_output
-        .as_deref()
-        .and_then(|output| parse::parse_multi_throughput(output, cell.size, peers))
-    {
-        Some(spread) => result.with_spread(&spread),
-        None => result,
     }
 }
 

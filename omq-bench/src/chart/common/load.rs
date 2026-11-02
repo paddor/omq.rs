@@ -162,12 +162,13 @@ pub(crate) fn load_fairness(
         {
             continue;
         }
+        let spread = row.spread();
         if let (Some(min), Some(p25), Some(median), Some(p75), Some(max)) = (
-            row.peer_min,
-            row.peer_p25,
-            row.peer_median,
-            row.peer_p75,
-            row.peer_max,
+            spread.min,
+            spread.p25,
+            spread.median,
+            spread.p75,
+            spread.max,
         ) && median > 0.0
         {
             fairness.entry(row.msg_size).or_default().insert(

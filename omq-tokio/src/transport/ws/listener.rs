@@ -7,30 +7,20 @@
 //! have a separate socket-wide `WsOptions::max_ready_peers` limit.
 
 use std::net::SocketAddr;
-use std::time::Instant;
 
-use futures::StreamExt;
-use futures::future::BoxFuture;
-use futures::stream::FuturesUnordered;
 use tokio::net::{TcpListener, TcpStream};
 
 use super::{WsUpgraded, accept};
-use crate::transport::setup::AcceptSetup;
-use crate::transport::setup::{Admission, PendingHandshake, SetupState};
+use crate::transport::setup::{AcceptBudget, AcceptSetup, SetupQueue, SetupState};
 use omq_proto::endpoint::{Endpoint, Host};
 use omq_proto::{Error, Result};
-
-type PendingAccept = BoxFuture<'static, (SocketAddr, Result<(WsUpgraded, SetupState)>)>;
 
 pub(crate) struct WsListener {
     pub(crate) inner: TcpListener,
     endpoint: Endpoint,
-    monitor_endpoint: Endpoint,
     pub(crate) tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
-    setup: AcceptSetup,
     policy: std::sync::Arc<super::upgrade::ServerPolicy>,
-    listener_admission: Admission,
-    pending: FuturesUnordered<PendingAccept>,
+    queue: SetupQueue<WsUpgraded>,
 }
 
 impl WsListener {
@@ -39,25 +29,18 @@ impl WsListener {
     }
 
     pub(crate) fn set_monitor_endpoint(&mut self, endpoint: Endpoint) {
-        self.monitor_endpoint = endpoint;
+        self.queue.set_monitor_endpoint(endpoint);
     }
 
     pub(crate) async fn accept(&mut self) -> Result<(WsUpgraded, SocketAddr, SetupState)> {
-        // Every completed upgrade consumed at most one bounded HTTP header.
-        // Yield during raw-accept/rejection floods even when all futures are ready.
-        let mut budget = omq_proto::flow::DrainBudget::new(32, 128 * 1024);
+        let mut budget = AcceptBudget::new();
         loop {
-            if !budget.account(4096) {
-                tokio::task::yield_now().await;
-                budget = omq_proto::flow::DrainBudget::new(32, 128 * 1024);
-            }
+            budget.charge().await;
             tokio::select! {
                 biased;
-                () = self.setup.cancel.cancelled() => return Err(Error::Closed),
-                Some((addr, result)) = self.pending.next(), if !self.pending.is_empty() => {
-                    match result {
-                        Ok((accepted, setup)) => return Ok((accepted, addr, setup)),
-                        Err(error) => self.reject(addr, error.to_string()),
+                ready = self.queue.next_ready() => {
+                    if let Some(ready) = ready? {
+                        return Ok(ready);
                     }
                 }
                 result = self.inner.accept() => {
@@ -69,26 +52,12 @@ impl WsListener {
     }
 
     fn start_setup(&mut self, stream: TcpStream, addr: SocketAddr) {
-        let Some(admission) = PendingHandshake::acquire(
-            &self.setup.admission,
-            Some(&self.listener_admission),
-            Some(addr.ip()),
-        ) else {
-            self.reject(addr, "pending-handshake limit reached".into());
+        let Ok((setup, deadline)) = self.queue.admit(addr) else {
             return;
-        };
-        let Some(deadline) = Instant::now().checked_add(self.setup.timeout) else {
-            self.reject(addr, "transport setup timeout exceeds clock range".into());
-            return;
-        };
-        let setup = SetupState {
-            deadline: Some(deadline),
-            cancel: self.setup.cancel.clone(),
-            admission,
         };
         let tls_acceptor = self.tls_acceptor.clone();
         let policy = self.policy.clone();
-        self.pending.push(Box::pin(async move {
+        self.queue.push(async move {
             let result = tokio::time::timeout_at(
                 deadline.into(),
                 accept(stream, tls_acceptor.as_ref(), &policy),
@@ -98,17 +67,7 @@ impl WsListener {
             .and_then(std::convert::identity)
             .map(|accepted| (accepted, setup));
             (addr, result)
-        }));
-    }
-
-    fn reject(&self, addr: SocketAddr, reason: String) {
-        self.setup
-            .monitor
-            .publish(omq_proto::MonitorEvent::HandshakeFailed {
-                endpoint: self.monitor_endpoint.clone(),
-                peer_ident: omq_proto::monitor::PeerIdent::Socket(addr),
-                reason,
-            });
+        });
     }
 }
 
@@ -148,13 +107,10 @@ pub(crate) async fn bind(
     };
     Ok(WsListener {
         inner: listener,
-        monitor_endpoint: resolved.clone(),
+        queue: SetupQueue::new(setup, resolved.clone(), 32),
         endpoint: resolved,
         tls_acceptor,
-        setup,
         policy,
-        listener_admission: Admission::new(32),
-        pending: FuturesUnordered::new(),
     })
 }
 
@@ -162,6 +118,7 @@ pub(crate) async fn bind(
 mod tests {
     use super::*;
     use crate::socket::monitor::MonitorPublisher;
+    use crate::transport::setup::Admission;
     use std::time::Duration;
     use tokio_util::sync::CancellationToken;
 
@@ -191,7 +148,7 @@ mod tests {
                 let (stream, peer) = listener.inner.accept().await.unwrap();
                 listener.start_setup(stream, peer);
             }
-            assert_eq!(listener.pending.len(), expected);
+            assert_eq!(listener.queue.len(), expected);
             let free: Vec<_> = (expected..socket_limit)
                 .map(|_| admission.try_acquire().unwrap())
                 .collect();

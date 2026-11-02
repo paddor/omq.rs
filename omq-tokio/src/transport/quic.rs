@@ -13,16 +13,11 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Weak};
 use std::time::Instant;
 
-use futures::StreamExt;
-use futures::future::BoxFuture;
-use futures::stream::FuturesUnordered;
-
 use omq_proto::endpoint::{Endpoint, Host};
 use omq_proto::{Error, Options, Result};
 
 use crate::context::{IoPoolHandle, IoThreadLease};
-use crate::transport::setup::AcceptSetup;
-use crate::transport::setup::{Admission, PendingHandshake, SetupState};
+use crate::transport::setup::{AcceptBudget, AcceptSetup, Refusal, SetupQueue, SetupState};
 
 mod carrier;
 mod config;
@@ -261,8 +256,6 @@ async fn open_raw_roles(connection: quinn::Connection, deadline: Option<Instant>
     }
 }
 
-type PendingSetup = BoxFuture<'static, (SocketAddr, Result<(QuicStream, SetupState)>)>;
-
 /// Per-listener settings for every accepted connection's setup.
 #[derive(Clone, Debug)]
 struct AcceptPolicy {
@@ -295,11 +288,8 @@ pub(crate) struct QuicListener {
     endpoints: Arc<ListenerGroup>,
     generation: u64,
     local: Endpoint,
-    monitor_endpoint: Endpoint,
-    setup: AcceptSetup,
     policy: AcceptPolicy,
-    listener_admission: Admission,
-    pending: FuturesUnordered<PendingSetup>,
+    queue: SetupQueue<QuicStream>,
 }
 
 impl std::fmt::Debug for QuicListener {
@@ -307,7 +297,7 @@ impl std::fmt::Debug for QuicListener {
         f.debug_struct("QuicListener")
             .field("local", &self.local)
             .field("endpoints", &self.endpoints.len())
-            .field("pending", &self.pending.len())
+            .field("pending", &self.queue.len())
             .finish_non_exhaustive()
     }
 }
@@ -333,12 +323,9 @@ impl QuicListener {
         Ok(Self {
             endpoints,
             generation,
-            monitor_endpoint: local.clone(),
+            queue: SetupQueue::new(setup, local.clone(), LISTENER_SETUPS as usize),
             local,
-            setup,
             policy,
-            listener_admission: Admission::new(LISTENER_SETUPS as usize),
-            pending: FuturesUnordered::new(),
         })
     }
 
@@ -347,23 +334,18 @@ impl QuicListener {
     }
 
     pub(crate) fn set_monitor_endpoint(&mut self, endpoint: Endpoint) {
-        self.monitor_endpoint = endpoint;
+        self.queue.set_monitor_endpoint(endpoint);
     }
 
     pub(crate) async fn accept(&mut self) -> Result<(QuicStream, SocketAddr, SetupState)> {
-        let mut budget = omq_proto::flow::DrainBudget::new(32, 128 * 1024);
+        let mut budget = AcceptBudget::new();
         loop {
-            if !budget.account(4096) {
-                tokio::task::yield_now().await;
-                budget = omq_proto::flow::DrainBudget::new(32, 128 * 1024);
-            }
+            budget.charge().await;
             tokio::select! {
                 biased;
-                () = self.setup.cancel.cancelled() => return Err(Error::Closed),
-                Some((addr, result)) = self.pending.next(), if !self.pending.is_empty() => {
-                    match result {
-                        Ok((stream, setup)) => return Ok((stream, addr, setup)),
-                        Err(error) => self.reject(addr, error.to_string()),
+                ready = self.queue.next_ready() => {
+                    if let Some(ready) = ready? {
+                        return Ok(ready);
                     }
                 }
                 incoming = next_incoming(&self.endpoints) => match incoming {
@@ -379,37 +361,29 @@ impl QuicListener {
         // A spoofed source never receives the Retry token. Once half of this
         // listener's setup slots are taken, admit only validated addresses.
         if !incoming.remote_address_validated()
-            && self.listener_admission.in_use() >= LISTENER_SETUPS as usize / 2
+            && self.queue.listener_in_use() >= LISTENER_SETUPS as usize / 2
         {
             if let Err(error) = incoming.retry() {
                 error.into_incoming().ignore();
             }
             return;
         }
-        let Some(admission) = PendingHandshake::acquire(
-            &self.setup.admission,
-            Some(&self.listener_admission),
-            Some(addr.ip()),
-        ) else {
+        let (setup, deadline) = match self.queue.admit(addr) {
+            Ok(admitted) => admitted,
             // Clients retransmit Initials once capacity returns.
-            incoming.ignore();
-            self.reject(addr, "pending-handshake limit reached".into());
-            return;
-        };
-        let Some(deadline) = Instant::now().checked_add(self.setup.timeout) else {
-            incoming.refuse();
-            self.reject(addr, "transport setup timeout exceeds clock range".into());
-            return;
-        };
-        let setup = SetupState {
-            deadline: Some(deadline),
-            cancel: self.setup.cancel.clone(),
-            admission,
+            Err(Refusal::Full) => {
+                incoming.ignore();
+                return;
+            }
+            Err(Refusal::Clock) => {
+                incoming.refuse();
+                return;
+            }
         };
         let endpoint = self.endpoints[index].udp.clone();
         let group = self.endpoints.clone();
         let policy = self.policy.clone();
-        let pool = self.setup.io_pool.clone();
+        let pool = self.queue.io_pool().clone();
         // Keep connection crypto, timers, liveness and OMQ IO together.
         // Prefer the receiving endpoint's reactor, but do not let random
         // Initial connection IDs pile all connection work onto one lane.
@@ -418,7 +392,7 @@ impl QuicListener {
         } else {
             pool.reserve_thread()
         };
-        self.pending.push(Box::pin(async move {
+        self.queue.push(async move {
             let accepted = on_io_thread(&pool, &lease, async move {
                 accept_setup(incoming, endpoint, group, policy, deadline).await
             });
@@ -426,17 +400,7 @@ impl QuicListener {
                 .await
                 .map(|stream| (stream.with_io_lease(lease), setup));
             (addr, result)
-        }));
-    }
-
-    fn reject(&self, addr: SocketAddr, reason: String) {
-        self.setup
-            .monitor
-            .publish(omq_proto::MonitorEvent::HandshakeFailed {
-                endpoint: self.monitor_endpoint.clone(),
-                peer_ident: omq_proto::monitor::PeerIdent::Socket(addr),
-                reason,
-            });
+        });
     }
 }
 

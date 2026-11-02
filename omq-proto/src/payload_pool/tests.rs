@@ -1,4 +1,5 @@
 use super::*;
+use std::cell::RefCell;
 const BUFFER_CAPACITY: usize = 2048;
 
 #[test]

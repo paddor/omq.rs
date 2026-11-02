@@ -28,6 +28,20 @@ pub struct MechanismPeerInfo {
     pub password: Option<String>,
 }
 
+impl MechanismPeerInfo {
+    /// Info for `mechanism` with no key, identity, address, or credentials.
+    pub(crate) fn new(mechanism: MechanismName) -> Self {
+        Self {
+            mechanism,
+            public_key: [0; 32],
+            identity: None,
+            peer_address: None,
+            username: None,
+            password: None,
+        }
+    }
+}
+
 impl std::fmt::Debug for MechanismPeerInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MechanismPeerInfo")
@@ -223,28 +237,45 @@ impl AuthenticationRequest {
     }
 }
 
-/// Runs a server mechanism's authenticator inline, or parks the call for the
-/// I/O driver when the connection defers authentication.
-#[derive(Debug, Default)]
-pub(crate) struct AuthGate {
+/// Server-side admission: the authenticator and the peer address it sees.
+/// Runs the authenticator inline, or parks the call for the I/O driver when
+/// the connection defers authentication.
+#[derive(Debug)]
+pub(crate) struct ServerAuth {
+    authenticator: Authenticator,
+    peer_address: Option<String>,
     pub(super) defer: bool,
     pub(super) waiting: bool,
     pub(super) request: Option<Box<AuthenticationRequest>>,
 }
 
-impl AuthGate {
+impl ServerAuth {
+    pub(super) fn new(authenticator: Authenticator, peer_address: Option<String>) -> Self {
+        Self {
+            authenticator,
+            peer_address,
+            defer: false,
+            waiting: false,
+            request: None,
+        }
+    }
+
+    /// Peer info for `mechanism` with the transport address filled in.
+    pub(super) fn peer_info(&self, mechanism: MechanismName) -> MechanismPeerInfo {
+        MechanismPeerInfo {
+            peer_address: self.peer_address.clone(),
+            ..MechanismPeerInfo::new(mechanism)
+        }
+    }
+
     /// The decision now, or `None` while the parked call waits for the driver.
-    pub(super) fn decide(
-        &mut self,
-        authenticator: &Authenticator,
-        peer: MechanismPeerInfo,
-    ) -> Option<AuthenticationResult> {
+    pub(super) fn decide(&mut self, peer: MechanismPeerInfo) -> Option<AuthenticationResult> {
         if !self.defer {
-            return Some(authenticator.authenticate(&peer));
+            return Some(self.authenticator.authenticate(&peer));
         }
         self.waiting = true;
         self.request = Some(Box::new(AuthenticationRequest {
-            authenticator: authenticator.clone(),
+            authenticator: self.authenticator.clone(),
             peer,
         }));
         None
@@ -252,12 +283,17 @@ impl AuthGate {
 
     pub(super) fn finish(&mut self) -> Result<()> {
         if !self.waiting {
-            return Err(Error::Protocol("no authentication is pending".into()));
+            return Err(no_pending_authentication());
         }
         self.waiting = false;
         self.request = None;
         Ok(())
     }
+}
+
+/// Error for a decision that no parked authenticator call awaits.
+pub(super) fn no_pending_authentication() -> Error {
+    Error::Protocol("no authentication is pending".into())
 }
 
 /// Queue the mechanism `ERROR` for a failed decision and fail the handshake.

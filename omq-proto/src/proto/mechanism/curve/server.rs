@@ -6,8 +6,8 @@ use x25519_dalek::{PublicKey, StaticSecret};
 
 use super::super::curve_cookie::CurveCookieKey;
 use super::super::{
-    AuthGate, AuthenticationResult, Authenticator, CurveKeypair, CurveServerOptions, MechanismName,
-    MechanismPeerInfo, MechanismStep, check_authentication, try_error_command,
+    AuthenticationResult, CurveKeypair, CurveServerOptions, MechanismName, MechanismPeerInfo,
+    MechanismStep, ServerAuth, check_authentication, no_pending_authentication, try_error_command,
 };
 use super::{
     CurveBox, CurveTransform, HANDSHAKE_COUNTER_EXHAUSTED, NONCE_HELLO, NONCE_INITIATE,
@@ -22,12 +22,11 @@ pub(crate) struct CurveServer {
     our_lt_public: PublicKey,
     cookie_lifetime: std::time::Duration,
     pub(super) cookie_key: Option<CurveCookieKey>,
-    authenticator: Option<Authenticator>,
-    peer_address: Option<String>,
+    /// Admission after vouch verification; `None` admits every client.
+    pub(super) auth: Option<ServerAuth>,
     our_props: PeerProperties,
     out_counter: u64,
     pub(super) state: CurveServerState,
-    pub(super) auth: AuthGate,
     pending_props: Option<PeerProperties>,
 }
 
@@ -69,12 +68,12 @@ impl CurveServer {
             our_lt_public,
             cookie_lifetime: options.cookie_lifetime,
             cookie_key: None,
-            authenticator: options.authenticator,
-            peer_address,
+            auth: options
+                .authenticator
+                .map(|authenticator| ServerAuth::new(authenticator, peer_address)),
             our_props: PeerProperties::default(),
             out_counter: 0,
             state: CurveServerState::Init,
-            auth: AuthGate::default(),
             pending_props: None,
         }
     }
@@ -113,18 +112,15 @@ impl CurveServer {
                 let (mut peer_props, peer_public_key) = self.parse_initiate(&body)?;
                 stamp_peer_key(&mut peer_props, peer_public_key);
                 // parse_initiate transitions state to Done.
-                let Some(auth) = &self.authenticator else {
+                let Some(auth) = &mut self.auth else {
                     return self.send_ready(out, peer_props);
                 };
                 let peer = MechanismPeerInfo {
-                    mechanism: crate::proto::greeting::MechanismName::CURVE,
                     public_key: peer_public_key,
                     identity: peer_props.identity.clone(),
-                    peer_address: self.peer_address.clone(),
-                    username: None,
-                    password: None,
+                    ..auth.peer_info(MechanismName::CURVE)
                 };
-                let Some(result) = self.auth.decide(auth, peer) else {
+                let Some(result) = auth.decide(peer) else {
                     self.pending_props = Some(peer_props);
                     return Ok(MechanismStep::Continue);
                 };
@@ -143,7 +139,10 @@ impl CurveServer {
         result: AuthenticationResult,
         out: &mut Vec<Command>,
     ) -> Result<MechanismStep> {
-        self.auth.finish()?;
+        let Some(auth) = &mut self.auth else {
+            return Err(no_pending_authentication());
+        };
+        auth.finish()?;
         let peer_props = self.pending_props.take().unwrap_or_default();
         self.admit(result, out, peer_props)
     }

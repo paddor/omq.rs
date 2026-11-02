@@ -212,15 +212,15 @@ impl CurveMechanism {
         }
     }
 
-    pub(super) fn auth_gate(&mut self) -> Option<&mut super::AuthGate> {
+    pub(super) fn auth_gate(&mut self) -> Option<&mut super::ServerAuth> {
         match self {
             Self::Client(_) => None,
-            Self::Server(s) => Some(&mut s.auth),
+            Self::Server(s) => s.auth.as_mut(),
         }
     }
 
     pub(super) fn awaiting_authentication(&self) -> bool {
-        matches!(self, Self::Server(s) if s.auth.waiting)
+        matches!(self, Self::Server(s) if s.auth.as_ref().is_some_and(|auth| auth.waiting))
     }
 
     pub(super) fn complete_authentication(
@@ -229,7 +229,7 @@ impl CurveMechanism {
         out: &mut Vec<Command>,
     ) -> Result<MechanismStep> {
         match self {
-            Self::Client(_) => Err(Error::Protocol("no authentication is pending".into())),
+            Self::Client(_) => Err(super::no_pending_authentication()),
             Self::Server(s) => s.complete_authentication(result, out),
         }
     }

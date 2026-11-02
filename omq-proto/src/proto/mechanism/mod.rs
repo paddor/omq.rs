@@ -26,12 +26,12 @@ pub(crate) use plain::PlainMechanism;
 
 mod auth;
 mod null;
-pub(crate) use auth::AuthGate;
-use auth::check_authentication;
+pub(crate) use auth::ServerAuth;
 pub use auth::{
     AuthenticationRequest, AuthenticationResult, AuthenticationStatus, Authenticator,
     MechanismPeerInfo,
 };
+use auth::{check_authentication, no_pending_authentication};
 pub(crate) use null::NullMechanism;
 
 /// Security-mechanism configuration passed to [`crate::proto::Connection::new`] and
@@ -383,7 +383,7 @@ impl SecurityMechanism {
     /// Whether the handshake waits for an authenticator decision.
     pub(crate) fn awaiting_authentication(&self) -> bool {
         match self {
-            Self::Null(m) => m.auth.waiting,
+            Self::Null(m) => m.auth.as_ref().is_some_and(|auth| auth.waiting),
             #[cfg(feature = "curve")]
             Self::Curve(m) => m.awaiting_authentication(),
             #[cfg(feature = "plain")]
@@ -406,13 +406,9 @@ impl SecurityMechanism {
         }
     }
 
-    #[cfg_attr(
-        not(any(feature = "curve", feature = "plain")),
-        expect(clippy::unnecessary_wraps, reason = "client mechanisms have no gate")
-    )]
-    fn auth_gate(&mut self) -> Option<&mut AuthGate> {
+    fn auth_gate(&mut self) -> Option<&mut ServerAuth> {
         match self {
-            Self::Null(m) => Some(&mut m.auth),
+            Self::Null(m) => m.auth.as_mut(),
             #[cfg(feature = "curve")]
             Self::Curve(m) => m.auth_gate(),
             #[cfg(feature = "plain")]

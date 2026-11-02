@@ -10,8 +10,8 @@
 use bytes::{BufMut, Bytes, BytesMut};
 
 use super::{
-    AuthGate, AuthenticationResult, Authenticator, MechanismPeerInfo, MechanismStep,
-    check_authentication, try_error_command,
+    AuthenticationResult, Authenticator, MechanismPeerInfo, MechanismStep, ServerAuth,
+    check_authentication, no_pending_authentication, try_error_command,
 };
 use crate::error::{Error, Result};
 use crate::proto::command::{self, Command, PeerProperties};
@@ -51,12 +51,10 @@ enum PlainClientState {
 
 #[derive(Debug)]
 pub(crate) struct PlainServer {
-    authenticator: Authenticator,
-    peer_address: Option<String>,
+    auth: ServerAuth,
     our_props: PeerProperties,
     username: Option<String>,
     authentication: Option<AuthenticationResult>,
-    auth: AuthGate,
     state: PlainServerState,
 }
 
@@ -80,17 +78,15 @@ impl PlainMechanism {
         peer_address: Option<String>,
     ) -> Self {
         Self::Server(PlainServer {
-            authenticator,
-            peer_address,
+            auth: ServerAuth::new(authenticator, peer_address),
             our_props: PeerProperties::default(),
             username: None,
             authentication: None,
-            auth: AuthGate::default(),
             state: PlainServerState::NotStarted,
         })
     }
 
-    pub(super) fn auth_gate(&mut self) -> Option<&mut AuthGate> {
+    pub(super) fn auth_gate(&mut self) -> Option<&mut ServerAuth> {
         match self {
             Self::Client(_) => None,
             Self::Server(s) => Some(&mut s.auth),
@@ -107,7 +103,7 @@ impl PlainMechanism {
         out: &mut Vec<Command>,
     ) -> Result<MechanismStep> {
         match self {
-            Self::Client(_) => Err(Error::Protocol("no authentication is pending".into())),
+            Self::Client(_) => Err(no_pending_authentication()),
             Self::Server(s) => {
                 s.auth.finish()?;
                 s.welcome(result, out)
@@ -220,14 +216,11 @@ impl PlainServer {
                 let (username, password) = decode_hello(&body)?;
                 self.username = Some(username.clone());
                 let peer = MechanismPeerInfo {
-                    mechanism: MechanismName::PLAIN,
-                    public_key: [0; 32],
-                    identity: None,
-                    peer_address: self.peer_address.clone(),
                     username: Some(username),
                     password: Some(password),
+                    ..self.auth.peer_info(MechanismName::PLAIN)
                 };
-                let Some(result) = self.auth.decide(&self.authenticator, peer) else {
+                let Some(result) = self.auth.decide(peer) else {
                     self.state = PlainServerState::AwaitingAuthentication;
                     return Ok(MechanismStep::Continue);
                 };

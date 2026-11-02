@@ -3,8 +3,8 @@
 use super::super::command::{self, Command, NAME_READY, PeerProperties};
 use super::super::greeting::MechanismName;
 use super::{
-    AuthGate, AuthenticationResult, Authenticator, MechanismPeerInfo, MechanismStep,
-    check_authentication, try_error_command,
+    AuthenticationResult, Authenticator, MechanismStep, ServerAuth, check_authentication,
+    no_pending_authentication, try_error_command,
 };
 use crate::error::{Error, Result};
 
@@ -12,10 +12,9 @@ use crate::error::{Error, Result};
 #[derive(Debug)]
 pub(crate) struct NullMechanism {
     pub(super) state: NullState,
-    authenticator: Option<Authenticator>,
-    peer_address: Option<String>,
+    /// Admission for a NULL server; `None` admits every peer.
+    pub(super) auth: Option<ServerAuth>,
     authentication: Option<AuthenticationResult>,
-    pub(super) auth: AuthGate,
     pending_props: Option<PeerProperties>,
 }
 
@@ -31,18 +30,15 @@ impl NullMechanism {
     pub(crate) fn new() -> Self {
         Self {
             state: NullState::NotStarted,
-            authenticator: None,
-            peer_address: None,
+            auth: None,
             authentication: None,
-            auth: AuthGate::default(),
             pending_props: None,
         }
     }
 
     pub(crate) fn new_server(authenticator: Authenticator, peer_address: Option<String>) -> Self {
         Self {
-            authenticator: Some(authenticator),
-            peer_address,
+            auth: Some(ServerAuth::new(authenticator, peer_address)),
             ..Self::new()
         }
     }
@@ -52,18 +48,11 @@ impl NullMechanism {
         out: &mut Vec<Command>,
         our_props: PeerProperties,
     ) -> Result<()> {
-        let Some(authenticator) = &self.authenticator else {
+        let Some(auth) = &mut self.auth else {
             return self.send_ready(None, out, our_props);
         };
-        let peer = MechanismPeerInfo {
-            mechanism: MechanismName::NULL,
-            public_key: [0; 32],
-            identity: None,
-            peer_address: self.peer_address.clone(),
-            username: None,
-            password: None,
-        };
-        let Some(result) = self.auth.decide(authenticator, peer) else {
+        let peer = auth.peer_info(MechanismName::NULL);
+        let Some(result) = auth.decide(peer) else {
             self.pending_props = Some(our_props);
             self.state = NullState::AwaitingAuthentication;
             return Ok(());
@@ -76,7 +65,10 @@ impl NullMechanism {
         result: AuthenticationResult,
         out: &mut Vec<Command>,
     ) -> Result<MechanismStep> {
-        self.auth.finish()?;
+        let Some(auth) = &mut self.auth else {
+            return Err(no_pending_authentication());
+        };
+        auth.finish()?;
         let our_props = self.pending_props.take().unwrap_or_default();
         self.send_ready(Some(result), out, our_props)?;
         Ok(MechanismStep::Continue)

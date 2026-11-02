@@ -17,16 +17,15 @@
 
 use x25519_dalek::{PublicKey, StaticSecret};
 
-use super::{CurveKeypair, CurvePublicKey, CurveServerOptions, MechanismStep};
 use crate::error::{Error, Result};
-use crate::proto::command::{Command, PeerProperties};
+use crate::proto::command::PeerProperties;
 
 mod client;
 mod server;
 mod transform;
 
-use client::CurveClient;
-use server::CurveServer;
+pub(crate) use client::CurveClient;
+pub(crate) use server::CurveServer;
 pub use transform::CurveTransform;
 use transform::build_transform;
 
@@ -157,89 +156,6 @@ fn box_key(peer_public: &PublicKey, our_secret: &StaticSecret) -> Result<salsabo
             "X25519 produced all-zero shared secret (low-order public key)".into(),
         )
     })
-}
-
-// =====================================================================
-// Outer dispatch enum — same public interface as before
-// =====================================================================
-
-#[derive(Debug)]
-pub(crate) enum CurveMechanism {
-    Client(CurveClient),
-    Server(CurveServer),
-}
-
-impl CurveMechanism {
-    pub(crate) fn new_client(our_keypair: CurveKeypair, server_public: CurvePublicKey) -> Self {
-        Self::Client(CurveClient::new(our_keypair, server_public))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn new_server(our_keypair: CurveKeypair, options: CurveServerOptions) -> Self {
-        Self::new_server_with_peer_address(our_keypair, options, None)
-    }
-
-    pub(crate) fn new_server_with_peer_address(
-        our_keypair: CurveKeypair,
-        options: CurveServerOptions,
-        peer_address: Option<String>,
-    ) -> Self {
-        Self::Server(CurveServer::new(our_keypair, options, peer_address))
-    }
-
-    pub(crate) fn start(
-        &mut self,
-        out: &mut Vec<Command>,
-        our_props: PeerProperties,
-    ) -> Result<()> {
-        match self {
-            Self::Client(c) => c.start(out, our_props),
-            Self::Server(s) => {
-                s.start(our_props);
-                Ok(())
-            }
-        }
-    }
-
-    pub(crate) fn on_command(
-        &mut self,
-        cmd: Command,
-        out: &mut Vec<Command>,
-    ) -> Result<MechanismStep> {
-        match self {
-            Self::Client(c) => c.on_command(cmd, out),
-            Self::Server(s) => s.on_command(cmd, out),
-        }
-    }
-
-    pub(super) fn auth_gate(&mut self) -> Option<&mut super::ServerAuth> {
-        match self {
-            Self::Client(_) => None,
-            Self::Server(s) => s.auth.as_mut(),
-        }
-    }
-
-    pub(super) fn awaiting_authentication(&self) -> bool {
-        matches!(self, Self::Server(s) if s.auth.as_ref().is_some_and(|auth| auth.waiting))
-    }
-
-    pub(super) fn complete_authentication(
-        &mut self,
-        result: super::AuthenticationResult,
-        out: &mut Vec<Command>,
-    ) -> Result<MechanismStep> {
-        match self {
-            Self::Client(_) => Err(super::no_pending_authentication()),
-            Self::Server(s) => s.complete_authentication(result, out),
-        }
-    }
-
-    pub(crate) fn build_transform(&self) -> Result<CurveTransform> {
-        match self {
-            Self::Client(c) => c.build_transform(),
-            Self::Server(s) => s.build_transform(),
-        }
-    }
 }
 
 #[cfg(test)]

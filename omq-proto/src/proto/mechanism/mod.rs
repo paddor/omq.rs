@@ -12,7 +12,7 @@ mod curve_cookie;
 #[cfg(feature = "curve")]
 pub mod curve_keys;
 #[cfg(feature = "curve")]
-pub(crate) use curve::{CurveMechanism, CurveTransform};
+pub(crate) use curve::{CurveClient, CurveServer, CurveTransform};
 #[cfg(feature = "curve")]
 pub use curve_keys::{CurveKeypair, CurvePublicKey, CurveSecretKey};
 
@@ -22,7 +22,7 @@ use curve_cookie::DEFAULT_COOKIE_LIFETIME;
 #[cfg(feature = "plain")]
 pub mod plain;
 #[cfg(feature = "plain")]
-pub(crate) use plain::PlainMechanism;
+pub(crate) use plain::{PlainClient, PlainServer};
 
 mod auth;
 mod null;
@@ -186,8 +186,6 @@ impl MechanismSetup {
     }
 
     pub(crate) fn build(self, peer_address: Option<String>) -> SecurityMechanism {
-        #[cfg(not(feature = "plain"))]
-        let _ = peer_address;
         match self {
             Self::Null => SecurityMechanism::Null(NullMechanism::new()),
             Self::NullServer { authenticator } => {
@@ -197,23 +195,21 @@ impl MechanismSetup {
             Self::CurveServer {
                 our_keypair,
                 options,
-            } => SecurityMechanism::Curve(CurveMechanism::new_server_with_peer_address(
-                our_keypair,
-                options,
-                peer_address,
-            )),
+            } => {
+                SecurityMechanism::CurveServer(CurveServer::new(our_keypair, options, peer_address))
+            }
             #[cfg(feature = "curve")]
             Self::CurveClient {
                 our_keypair,
                 server_public,
-            } => SecurityMechanism::Curve(CurveMechanism::new_client(our_keypair, server_public)),
+            } => SecurityMechanism::CurveClient(CurveClient::new(our_keypair, server_public)),
             #[cfg(feature = "plain")]
-            Self::PlainServer { authenticator } => SecurityMechanism::Plain(
-                PlainMechanism::new_server_with_peer_address(authenticator, peer_address),
-            ),
+            Self::PlainServer { authenticator } => {
+                SecurityMechanism::PlainServer(PlainServer::new(authenticator, peer_address))
+            }
             #[cfg(feature = "plain")]
             Self::PlainClient { username, password } => {
-                SecurityMechanism::Plain(PlainMechanism::new_client(username, password))
+                SecurityMechanism::PlainClient(PlainClient::new(username, password))
             }
         }
     }
@@ -308,18 +304,21 @@ pub(crate) enum MechanismStep {
 }
 
 #[derive(Debug)]
-// `CurveMechanism` carries tens of bytes of inline
-// state (counters, prefixes, transient keys) while `NullMechanism` is one
-// enum tag. Boxing them would push every connection through an extra
-// allocation on the hot handshake path; we keep the inline shape on
-// purpose.
+// The CURVE roles carry tens of bytes of inline state (counters, keys,
+// cookie key) while `NullMechanism` is small. Boxing them would push every
+// connection through an extra allocation on the hot handshake path; we
+// keep the inline shape on purpose.
 #[cfg_attr(feature = "curve", allow(clippy::large_enum_variant))]
 pub(crate) enum SecurityMechanism {
     Null(NullMechanism),
     #[cfg(feature = "curve")]
-    Curve(CurveMechanism),
+    CurveClient(CurveClient),
+    #[cfg(feature = "curve")]
+    CurveServer(CurveServer),
     #[cfg(feature = "plain")]
-    Plain(PlainMechanism),
+    PlainClient(PlainClient),
+    #[cfg(feature = "plain")]
+    PlainServer(PlainServer),
 }
 
 impl SecurityMechanism {
@@ -328,15 +327,14 @@ impl SecurityMechanism {
         match self {
             Self::Null(_) => MechanismName::NULL,
             #[cfg(feature = "curve")]
-            Self::Curve(_) => MechanismName::CURVE,
+            Self::CurveClient(_) | Self::CurveServer(_) => MechanismName::CURVE,
             #[cfg(feature = "plain")]
-            Self::Plain(_) => MechanismName::PLAIN,
+            Self::PlainClient(_) | Self::PlainServer(_) => MechanismName::PLAIN,
         }
     }
 
     /// Kick off the mechanism after greetings have been exchanged. Any
     /// immediate outbound commands get pushed onto `out`.
-    #[cfg_attr(not(feature = "curve"), allow(clippy::unnecessary_wraps))]
     pub(crate) fn start(
         &mut self,
         out: &mut Vec<Command>,
@@ -345,9 +343,19 @@ impl SecurityMechanism {
         match self {
             Self::Null(m) => m.start(out, our_props),
             #[cfg(feature = "curve")]
-            Self::Curve(m) => m.start(out, our_props),
+            Self::CurveClient(c) => c.start(out, our_props),
+            #[cfg(feature = "curve")]
+            Self::CurveServer(s) => {
+                s.start(our_props);
+                Ok(())
+            }
             #[cfg(feature = "plain")]
-            Self::Plain(m) => m.start(out, our_props),
+            Self::PlainClient(c) => c.start(out, our_props),
+            #[cfg(feature = "plain")]
+            Self::PlainServer(s) => {
+                s.start(our_props);
+                Ok(())
+            }
         }
     }
 
@@ -360,35 +368,33 @@ impl SecurityMechanism {
         match self {
             Self::Null(m) => m.on_command(cmd, out),
             #[cfg(feature = "curve")]
-            Self::Curve(m) => m.on_command(cmd, out),
+            Self::CurveClient(c) => c.on_command(cmd, out),
+            #[cfg(feature = "curve")]
+            Self::CurveServer(s) => s.on_command(cmd, out),
             #[cfg(feature = "plain")]
-            Self::Plain(m) => m.on_command(cmd, out),
+            Self::PlainClient(c) => c.on_command(cmd, out),
+            #[cfg(feature = "plain")]
+            Self::PlainServer(s) => s.on_command(cmd, out),
         }
     }
 
     /// Park authenticator calls for the I/O driver instead of running them.
     pub(crate) fn set_defer_authentication(&mut self, defer: bool) {
-        if let Some(gate) = self.auth_gate() {
-            gate.defer = defer;
+        if let Some(auth) = self.server_auth_mut() {
+            auth.defer = defer;
         }
     }
 
     /// The parked authenticator call, handed out once.
     pub(crate) fn take_authentication_request(&mut self) -> Option<AuthenticationRequest> {
-        self.auth_gate()
-            .and_then(|gate| gate.request.take())
+        self.server_auth_mut()
+            .and_then(|auth| auth.request.take())
             .map(|request| *request)
     }
 
     /// Whether the handshake waits for an authenticator decision.
     pub(crate) fn awaiting_authentication(&self) -> bool {
-        match self {
-            Self::Null(m) => m.auth.as_ref().is_some_and(|auth| auth.waiting),
-            #[cfg(feature = "curve")]
-            Self::Curve(m) => m.awaiting_authentication(),
-            #[cfg(feature = "plain")]
-            Self::Plain(m) => m.awaiting_authentication(),
-        }
+        self.server_auth().is_some_and(|auth| auth.waiting)
     }
 
     /// Resume the handshake with the authenticator's decision.
@@ -400,19 +406,42 @@ impl SecurityMechanism {
         match self {
             Self::Null(m) => m.complete_authentication(result, out),
             #[cfg(feature = "curve")]
-            Self::Curve(m) => m.complete_authentication(result, out),
+            Self::CurveServer(s) => s.complete_authentication(result, out),
             #[cfg(feature = "plain")]
-            Self::Plain(m) => m.complete_authentication(result, out),
+            Self::PlainServer(s) => s.complete_authentication(result, out),
+            #[cfg(feature = "curve")]
+            Self::CurveClient(_) => Err(no_pending_authentication()),
+            #[cfg(feature = "plain")]
+            Self::PlainClient(_) => Err(no_pending_authentication()),
         }
     }
 
-    fn auth_gate(&mut self) -> Option<&mut ServerAuth> {
+    /// Server admission state; `None` for clients and open servers.
+    fn server_auth(&self) -> Option<&ServerAuth> {
+        match self {
+            Self::Null(m) => m.auth.as_ref(),
+            #[cfg(feature = "curve")]
+            Self::CurveServer(s) => s.auth.as_ref(),
+            #[cfg(feature = "plain")]
+            Self::PlainServer(s) => Some(&s.auth),
+            #[cfg(feature = "curve")]
+            Self::CurveClient(_) => None,
+            #[cfg(feature = "plain")]
+            Self::PlainClient(_) => None,
+        }
+    }
+
+    fn server_auth_mut(&mut self) -> Option<&mut ServerAuth> {
         match self {
             Self::Null(m) => m.auth.as_mut(),
             #[cfg(feature = "curve")]
-            Self::Curve(m) => m.auth_gate(),
+            Self::CurveServer(s) => s.auth.as_mut(),
             #[cfg(feature = "plain")]
-            Self::Plain(m) => m.auth_gate(),
+            Self::PlainServer(s) => Some(&mut s.auth),
+            #[cfg(feature = "curve")]
+            Self::CurveClient(_) => None,
+            #[cfg(feature = "plain")]
+            Self::PlainClient(_) => None,
         }
     }
 
@@ -420,13 +449,14 @@ impl SecurityMechanism {
     /// CURVE produces a per-part MESSAGE-command transform.
     #[cfg(feature = "curve")]
     pub(crate) fn build_transform(&self) -> Result<Option<FrameTransform>> {
-        match self {
-            Self::Null(_) => Ok(None),
-            #[cfg(feature = "curve")]
-            Self::Curve(m) => m.build_transform().map(|t| Some(FrameTransform::Curve(t))),
+        let transform = match self {
+            Self::CurveClient(c) => c.build_transform()?,
+            Self::CurveServer(s) => s.build_transform()?,
+            Self::Null(_) => return Ok(None),
             #[cfg(feature = "plain")]
-            Self::Plain(_) => Ok(None),
-        }
+            Self::PlainClient(_) | Self::PlainServer(_) => return Ok(None),
+        };
+        Ok(Some(FrameTransform::Curve(transform)))
     }
 }
 

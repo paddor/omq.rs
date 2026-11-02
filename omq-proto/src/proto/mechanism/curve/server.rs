@@ -23,7 +23,7 @@ pub(crate) struct CurveServer {
     cookie_lifetime: std::time::Duration,
     pub(super) cookie_key: Option<CurveCookieKey>,
     /// Admission after vouch verification; `None` admits every client.
-    pub(super) auth: Option<ServerAuth>,
+    pub(crate) auth: Option<ServerAuth>,
     our_props: PeerProperties,
     out_counter: u64,
     pub(super) state: CurveServerState,
@@ -56,7 +56,7 @@ impl std::fmt::Debug for CurveServerState {
 
 impl CurveServer {
     #[expect(clippy::needless_pass_by_value)]
-    pub(super) fn new(
+    pub(crate) fn new(
         our_keypair: CurveKeypair,
         options: CurveServerOptions,
         peer_address: Option<String>,
@@ -78,12 +78,12 @@ impl CurveServer {
         }
     }
 
-    pub(super) fn start(&mut self, our_props: PeerProperties) {
+    pub(crate) fn start(&mut self, our_props: PeerProperties) {
         self.our_props = our_props;
         self.state = CurveServerState::Init;
     }
 
-    pub(super) fn on_command(
+    pub(crate) fn on_command(
         &mut self,
         cmd: Command,
         out: &mut Vec<Command>,
@@ -134,7 +134,7 @@ impl CurveServer {
         }
     }
 
-    pub(super) fn complete_authentication(
+    pub(crate) fn complete_authentication(
         &mut self,
         result: AuthenticationResult,
         out: &mut Vec<Command>,
@@ -320,7 +320,7 @@ impl CurveServer {
         Ok(body.freeze())
     }
 
-    pub(super) fn build_transform(&self) -> Result<CurveTransform> {
+    pub(crate) fn build_transform(&self) -> Result<CurveTransform> {
         let CurveServerState::Done(keys) = &self.state else {
             return Err(Error::HandshakeFailed(
                 "CURVE transform requested before handshake complete".into(),

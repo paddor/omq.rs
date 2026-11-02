@@ -55,7 +55,7 @@ impl std::fmt::Debug for CurveClientState {
 
 impl CurveClient {
     #[expect(clippy::needless_pass_by_value)]
-    pub(super) fn new(our_keypair: CurveKeypair, server_public: CurvePublicKey) -> Self {
+    pub(crate) fn new(our_keypair: CurveKeypair, server_public: CurvePublicKey) -> Self {
         let our_lt_secret = StaticSecret::from(*our_keypair.secret.as_bytes());
         let our_lt_public = PublicKey::from(*our_keypair.public.as_bytes());
         let peer_lt_public = PublicKey::from(*server_public.as_bytes());
@@ -71,7 +71,7 @@ impl CurveClient {
         }
     }
 
-    pub(super) fn start(
+    pub(crate) fn start(
         &mut self,
         out: &mut Vec<Command>,
         our_props: PeerProperties,
@@ -89,7 +89,7 @@ impl CurveClient {
         Ok(())
     }
 
-    pub(super) fn on_command(
+    pub(crate) fn on_command(
         &mut self,
         cmd: Command,
         out: &mut Vec<Command>,
@@ -263,7 +263,7 @@ impl CurveClient {
         Ok(props)
     }
 
-    pub(super) fn build_transform(&self) -> Result<CurveTransform> {
+    pub(crate) fn build_transform(&self) -> Result<CurveTransform> {
         let Some(CurveClientState::Done(keys)) = &self.state else {
             return Err(Error::HandshakeFailed(
                 "CURVE transform requested before handshake complete".into(),

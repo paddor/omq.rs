@@ -11,17 +11,11 @@ use bytes::{BufMut, Bytes, BytesMut};
 
 use super::{
     AuthenticationResult, Authenticator, MechanismPeerInfo, MechanismStep, ServerAuth,
-    check_authentication, no_pending_authentication, try_error_command,
+    check_authentication, try_error_command,
 };
 use crate::error::{Error, Result};
 use crate::proto::command::{self, Command, PeerProperties};
 use crate::proto::greeting::MechanismName;
-
-#[derive(Debug)]
-pub(crate) enum PlainMechanism {
-    Client(PlainClient),
-    Server(PlainServer),
-}
 
 pub(crate) struct PlainClient {
     username: String,
@@ -51,7 +45,7 @@ enum PlainClientState {
 
 #[derive(Debug)]
 pub(crate) struct PlainServer {
-    auth: ServerAuth,
+    pub(super) auth: ServerAuth,
     our_props: PeerProperties,
     username: Option<String>,
     authentication: Option<AuthenticationResult>,
@@ -67,95 +61,13 @@ enum PlainServerState {
     Done,
 }
 
-impl PlainMechanism {
-    #[cfg(test)]
-    pub(crate) fn new_server(authenticator: Authenticator) -> Self {
-        Self::new_server_with_peer_address(authenticator, None)
-    }
-
-    pub(crate) fn new_server_with_peer_address(
-        authenticator: Authenticator,
-        peer_address: Option<String>,
-    ) -> Self {
-        Self::Server(PlainServer {
-            auth: ServerAuth::new(authenticator, peer_address),
-            our_props: PeerProperties::default(),
-            username: None,
-            authentication: None,
-            state: PlainServerState::NotStarted,
-        })
-    }
-
-    pub(super) fn auth_gate(&mut self) -> Option<&mut ServerAuth> {
-        match self {
-            Self::Client(_) => None,
-            Self::Server(s) => Some(&mut s.auth),
-        }
-    }
-
-    pub(super) fn awaiting_authentication(&self) -> bool {
-        matches!(self, Self::Server(s) if s.auth.waiting)
-    }
-
-    pub(super) fn complete_authentication(
-        &mut self,
-        result: AuthenticationResult,
-        out: &mut Vec<Command>,
-    ) -> Result<MechanismStep> {
-        match self {
-            Self::Client(_) => Err(no_pending_authentication()),
-            Self::Server(s) => {
-                s.auth.finish()?;
-                s.welcome(result, out)
-            }
-        }
-    }
-
-    pub(crate) fn new_client(username: String, password: String) -> Self {
-        Self::Client(PlainClient {
-            username,
-            password,
-            our_props: PeerProperties::default(),
-            state: PlainClientState::NotStarted,
-        })
-    }
-
-    pub(crate) fn start(
-        &mut self,
-        out: &mut Vec<Command>,
-        our_props: PeerProperties,
-    ) -> Result<()> {
-        match self {
-            Self::Client(c) => c.start(out, our_props),
-            Self::Server(s) => {
-                s.start(our_props);
-                Ok(())
-            }
-        }
-    }
-
-    pub(crate) fn on_command(
-        &mut self,
-        cmd: Command,
-        out: &mut Vec<Command>,
-    ) -> Result<MechanismStep> {
-        if let Some(err) = try_error_command(&cmd, super::MechanismName::PLAIN) {
-            return Err(err);
-        }
-        match self {
-            Self::Client(c) => c.on_command(cmd, out),
-            Self::Server(s) => s.on_command(cmd, out),
-        }
-    }
-}
-
 #[cfg(test)]
 mod debug_tests {
-    use super::PlainMechanism;
+    use super::PlainClient;
 
     #[test]
     fn plain_client_debug_redacts_password() {
-        let client = PlainMechanism::new_client("alice".into(), "password-sentinel".into());
+        let client = PlainClient::new("alice".into(), "password-sentinel".into());
         let debug = format!("{client:?}");
         assert!(debug.contains("password: \"<redacted>\""));
         assert!(!debug.contains("password-sentinel"));
@@ -163,7 +75,20 @@ mod debug_tests {
 }
 
 impl PlainClient {
-    fn start(&mut self, out: &mut Vec<Command>, our_props: PeerProperties) -> Result<()> {
+    pub(super) fn new(username: String, password: String) -> Self {
+        Self {
+            username,
+            password,
+            our_props: PeerProperties::default(),
+            state: PlainClientState::NotStarted,
+        }
+    }
+
+    pub(super) fn start(
+        &mut self,
+        out: &mut Vec<Command>,
+        our_props: PeerProperties,
+    ) -> Result<()> {
         self.our_props = our_props;
         out.push(Command::Unknown {
             name: Bytes::from_static(command::NAME_HELLO),
@@ -173,7 +98,14 @@ impl PlainClient {
         Ok(())
     }
 
-    fn on_command(&mut self, cmd: Command, out: &mut Vec<Command>) -> Result<MechanismStep> {
+    pub(super) fn on_command(
+        &mut self,
+        cmd: Command,
+        out: &mut Vec<Command>,
+    ) -> Result<MechanismStep> {
+        if let Some(err) = try_error_command(&cmd, MechanismName::PLAIN) {
+            return Err(err);
+        }
         match (&self.state, cmd) {
             (PlainClientState::AwaitingWelcome, Command::Unknown { name, .. })
                 if name.as_ref() == command::NAME_WELCOME =>
@@ -203,12 +135,29 @@ impl PlainClient {
 }
 
 impl PlainServer {
-    fn start(&mut self, our_props: PeerProperties) {
+    pub(super) fn new(authenticator: Authenticator, peer_address: Option<String>) -> Self {
+        Self {
+            auth: ServerAuth::new(authenticator, peer_address),
+            our_props: PeerProperties::default(),
+            username: None,
+            authentication: None,
+            state: PlainServerState::NotStarted,
+        }
+    }
+
+    pub(super) fn start(&mut self, our_props: PeerProperties) {
         self.our_props = our_props;
         self.state = PlainServerState::AwaitingHello;
     }
 
-    fn on_command(&mut self, cmd: Command, out: &mut Vec<Command>) -> Result<MechanismStep> {
+    pub(super) fn on_command(
+        &mut self,
+        cmd: Command,
+        out: &mut Vec<Command>,
+    ) -> Result<MechanismStep> {
+        if let Some(err) = try_error_command(&cmd, MechanismName::PLAIN) {
+            return Err(err);
+        }
         match (&self.state, cmd) {
             (PlainServerState::AwaitingHello, Command::Unknown { name, body })
                 if name.as_ref() == command::NAME_HELLO =>
@@ -253,6 +202,15 @@ impl PlainServer {
 }
 
 impl PlainServer {
+    pub(super) fn complete_authentication(
+        &mut self,
+        result: AuthenticationResult,
+        out: &mut Vec<Command>,
+    ) -> Result<MechanismStep> {
+        self.auth.finish()?;
+        self.welcome(result, out)
+    }
+
     fn welcome(
         &mut self,
         result: AuthenticationResult,
@@ -330,7 +288,11 @@ fn decode_hello(body: &[u8]) -> Result<(String, String)> {
 mod tests {
     use super::*;
     use crate::proto::SocketType;
-    use crate::proto::mechanism::AuthenticationStatus;
+    use crate::proto::mechanism::{AuthenticationStatus, SecurityMechanism};
+
+    fn new_server(authenticator: Authenticator) -> PlainServer {
+        PlainServer::new(authenticator, None)
+    }
 
     #[test]
     fn hello_encode_decode_roundtrip() {
@@ -374,7 +336,7 @@ mod tests {
 
     #[test]
     fn client_start_emits_hello() {
-        let mut m = PlainMechanism::new_client("user".into(), "pass".into());
+        let mut m = PlainClient::new("user".into(), "pass".into());
         let mut out = Vec::new();
         m.start(
             &mut out,
@@ -395,7 +357,7 @@ mod tests {
 
     #[test]
     fn server_start_emits_nothing() {
-        let mut m = PlainMechanism::new_server(Authenticator::new(|_| true));
+        let mut m = SecurityMechanism::PlainServer(new_server(Authenticator::new(|_| true)));
         let mut out = Vec::new();
         m.start(
             &mut out,
@@ -407,8 +369,8 @@ mod tests {
 
     #[test]
     fn full_handshake_succeeds() {
-        let mut client = PlainMechanism::new_client("u".into(), "p".into());
-        let mut server = PlainMechanism::new_server(Authenticator::new(|peer| {
+        let mut client = PlainClient::new("u".into(), "p".into());
+        let mut server = new_server(Authenticator::new(|peer| {
             peer.username.as_deref() == Some("u") && peer.password.as_deref() == Some("p")
         }));
 
@@ -421,12 +383,7 @@ mod tests {
                 PeerProperties::default().with_socket_type(SocketType::Push),
             )
             .unwrap();
-        server
-            .start(
-                &mut s_out,
-                PeerProperties::default().with_socket_type(SocketType::Pull),
-            )
-            .unwrap();
+        server.start(PeerProperties::default().with_socket_type(SocketType::Pull));
         assert_eq!(c_out.len(), 1); // HELLO
         assert!(s_out.is_empty());
 
@@ -467,21 +424,15 @@ mod tests {
             (AuthenticationStatus::Denied, Some("400")),
             (AuthenticationStatus::InternalError, Some("500")),
         ] {
-            let mut server =
-                PlainMechanism::new_server(Authenticator::new_with_result(move |_| {
-                    AuthenticationResult {
-                        status,
-                        user_id: None,
-                        metadata: Vec::new(),
-                    }
-                }));
+            let mut server = new_server(Authenticator::new_with_result(move |_| {
+                AuthenticationResult {
+                    status,
+                    user_id: None,
+                    metadata: Vec::new(),
+                }
+            }));
             let mut out = Vec::new();
-            server
-                .start(
-                    &mut out,
-                    PeerProperties::default().with_socket_type(SocketType::Pull),
-                )
-                .unwrap();
+            server.start(PeerProperties::default().with_socket_type(SocketType::Pull));
 
             let hello = Command::Unknown {
                 name: Bytes::from_static(b"HELLO"),
@@ -500,7 +451,7 @@ mod tests {
 
     #[test]
     fn successful_authentication_attaches_user_id_and_metadata() {
-        let mut server = PlainMechanism::new_server(Authenticator::new_with_result(|_| {
+        let mut server = new_server(Authenticator::new_with_result(|_| {
             AuthenticationResult::allow()
                 .with_user_id(Bytes::from_static(b"alice"))
                 .with_metadata(vec![("Role".into(), Bytes::from_static(b"administrator"))])
@@ -536,14 +487,9 @@ mod tests {
 
     /// Run HELLO and INITIATE as `alice`, whose INITIATE forges
     /// `User-Id` and `Role`. Returns the server's view of the client.
-    fn complete_forged_handshake(server: &mut PlainMechanism) -> PeerProperties {
+    fn complete_forged_handshake(server: &mut PlainServer) -> PeerProperties {
         let mut out = Vec::new();
-        server
-            .start(
-                &mut out,
-                PeerProperties::default().with_socket_type(SocketType::Pull),
-            )
-            .unwrap();
+        server.start(PeerProperties::default().with_socket_type(SocketType::Pull));
         server
             .on_command(
                 Command::Unknown {
@@ -594,7 +540,7 @@ mod tests {
 
     #[test]
     fn unexpected_command_rejected() {
-        let mut client = PlainMechanism::new_client("u".into(), "p".into());
+        let mut client = PlainClient::new("u".into(), "p".into());
         let mut out = Vec::new();
         client
             .start(

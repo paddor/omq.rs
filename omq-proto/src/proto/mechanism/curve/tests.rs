@@ -3,6 +3,8 @@ use super::*;
 use crate::message::FrameFlags;
 use crate::proto::SocketType;
 use crate::proto::command;
+use crate::proto::command::Command;
+use crate::proto::mechanism::{CurveKeypair, CurveServerOptions, MechanismStep};
 use bytes::{BufMut, Bytes, BytesMut};
 
 fn dummy_props(t: SocketType) -> PeerProperties {
@@ -26,16 +28,14 @@ fn full_handshake_and_transform_roundtrip() {
             .with_user_id(Bytes::from_static(b"alice"))
             .with_metadata(vec![("Role".into(), Bytes::from_static(b"reader"))])
     }));
-    let mut server = CurveMechanism::new_server(server_kp.clone(), options);
-    let mut client = CurveMechanism::new_client(client_kp.clone(), server_kp.public);
+    let mut server = CurveServer::new(server_kp.clone(), options, None);
+    let mut client = CurveClient::new(client_kp.clone(), server_kp.public);
 
-    let mut s_out = Vec::new();
+    let s_out = Vec::new();
     let mut c_out = Vec::new();
 
     // Both call start.
-    server
-        .start(&mut s_out, dummy_props(SocketType::Pull))
-        .unwrap();
+    server.start(dummy_props(SocketType::Pull));
     let mut client_properties = dummy_props(SocketType::Push);
     for name in ["User-Id", "user-id", "Role", "role"] {
         client_properties.add(name, Bytes::from_static(b"forged"));
@@ -52,8 +52,8 @@ fn full_handshake_and_transform_roundtrip() {
 
 /// Pump commands both ways until both sides complete.
 fn pump_handshake(
-    server: &mut CurveMechanism,
-    client: &mut CurveMechanism,
+    server: &mut CurveServer,
+    client: &mut CurveClient,
     mut s_out: Vec<Command>,
     mut c_out: Vec<Command>,
 ) -> (MechanismStep, MechanismStep) {
@@ -130,7 +130,7 @@ fn assert_client_saw_server(step: MechanismStep, server_kp: &CurveKeypair) {
 }
 
 /// Build transforms and verify roundtrip in both directions.
-fn assert_transforms_roundtrip(server: &CurveMechanism, client: &CurveMechanism) {
+fn assert_transforms_roundtrip(server: &CurveServer, client: &CurveClient) {
     let mut s_tx = server.build_transform().unwrap();
     let mut c_tx = client.build_transform().unwrap();
 
@@ -188,8 +188,8 @@ fn encode_properties_accepts_max_length_property_name() {
 fn server_rejects_wrong_client_long_term() {
     let server_kp = CurveKeypair::generate();
     let client_kp = CurveKeypair::generate();
-    let mut server = CurveMechanism::new_server(server_kp.clone(), test_server_options());
-    let mut client = CurveMechanism::new_client(client_kp, server_kp.public);
+    let mut server = CurveServer::new(server_kp.clone(), test_server_options(), None);
+    let mut client = CurveClient::new(client_kp, server_kp.public);
 
     let mut c_out = Vec::new();
     let mut s_out = Vec::new();
@@ -204,7 +204,7 @@ fn server_rejects_wrong_client_long_term() {
             name: name.clone(),
             body: Bytes::from(bad),
         };
-        let _ = server.start(&mut s_out, dummy_props(SocketType::Pull));
+        server.start(dummy_props(SocketType::Pull));
         let r = server.on_command(bad_cmd, &mut s_out);
         assert!(matches!(r, Err(Error::HandshakeFailed(_))));
     } else {
@@ -216,14 +216,12 @@ fn server_rejects_wrong_client_long_term() {
 fn server_drops_ephemeral_secret_after_welcome() {
     let server_kp = CurveKeypair::generate();
     let client_kp = CurveKeypair::generate();
-    let mut server = CurveMechanism::new_server(server_kp.clone(), test_server_options());
-    let mut client = CurveMechanism::new_client(client_kp, server_kp.public);
+    let mut server = CurveServer::new(server_kp.clone(), test_server_options(), None);
+    let mut client = CurveClient::new(client_kp, server_kp.public);
 
     let mut s_out = Vec::new();
     let mut c_out = Vec::new();
-    server
-        .start(&mut s_out, dummy_props(SocketType::Pull))
-        .unwrap();
+    server.start(dummy_props(SocketType::Pull));
     client
         .start(&mut c_out, dummy_props(SocketType::Push))
         .unwrap();
@@ -233,10 +231,7 @@ fn server_drops_ephemeral_secret_after_welcome() {
         server.on_command(cmd, &mut s_out).unwrap();
     }
     // The state is AwaitingInitiate, which has no ephemeral key fields.
-    let CurveMechanism::Server(ref s) = server else {
-        panic!("expected Server");
-    };
-    assert!(matches!(s.state, CurveServerState::AwaitingInitiate));
+    assert!(matches!(server.state, CurveServerState::AwaitingInitiate));
 }
 
 #[test]
@@ -244,19 +239,15 @@ fn server_rejects_initiate_replayed_on_new_connection() {
     let server_kp = CurveKeypair::generate();
     let client_kp = CurveKeypair::generate();
 
-    let mut server = CurveMechanism::new_server(server_kp.clone(), test_server_options());
-    let mut replay_server = CurveMechanism::new_server(server_kp.clone(), test_server_options());
-    let mut client = CurveMechanism::new_client(client_kp, server_kp.public);
+    let mut server = CurveServer::new(server_kp.clone(), test_server_options(), None);
+    let mut replay_server = CurveServer::new(server_kp.clone(), test_server_options(), None);
+    let mut client = CurveClient::new(client_kp, server_kp.public);
 
     let mut s_out = Vec::new();
     let mut c_out = Vec::new();
     let mut replay_out = Vec::new();
-    server
-        .start(&mut s_out, dummy_props(SocketType::Pull))
-        .unwrap();
-    replay_server
-        .start(&mut replay_out, dummy_props(SocketType::Pull))
-        .unwrap();
+    server.start(dummy_props(SocketType::Pull));
+    replay_server.start(dummy_props(SocketType::Pull));
     client
         .start(&mut c_out, dummy_props(SocketType::Push))
         .unwrap();
@@ -283,14 +274,12 @@ fn server_consumes_cookie_key_on_initiate() {
     let server_kp = CurveKeypair::generate();
     let client_kp = CurveKeypair::generate();
 
-    let mut server = CurveMechanism::new_server(server_kp.clone(), test_server_options());
-    let mut client = CurveMechanism::new_client(client_kp, server_kp.public);
+    let mut server = CurveServer::new(server_kp.clone(), test_server_options(), None);
+    let mut client = CurveClient::new(client_kp, server_kp.public);
 
     let mut s_out = Vec::new();
     let mut c_out = Vec::new();
-    server
-        .start(&mut s_out, dummy_props(SocketType::Pull))
-        .unwrap();
+    server.start(dummy_props(SocketType::Pull));
     client
         .start(&mut c_out, dummy_props(SocketType::Push))
         .unwrap();
@@ -320,14 +309,12 @@ fn server_rejects_expired_cookie() {
     let server_kp = CurveKeypair::generate();
     let client_kp = CurveKeypair::generate();
 
-    let mut server = CurveMechanism::new_server(server_kp.clone(), test_server_options());
-    let mut client = CurveMechanism::new_client(client_kp, server_kp.public);
+    let mut server = CurveServer::new(server_kp.clone(), test_server_options(), None);
+    let mut client = CurveClient::new(client_kp, server_kp.public);
 
     let mut s_out = Vec::new();
     let mut c_out = Vec::new();
-    server
-        .start(&mut s_out, dummy_props(SocketType::Pull))
-        .unwrap();
+    server.start(dummy_props(SocketType::Pull));
     client
         .start(&mut c_out, dummy_props(SocketType::Push))
         .unwrap();
@@ -336,10 +323,7 @@ fn server_rejects_expired_cookie() {
     for cmd in c_out.drain(..) {
         server.on_command(cmd, &mut s_out).unwrap();
     }
-    let CurveMechanism::Server(ref mut s) = server else {
-        panic!("expected Server");
-    };
-    s.cookie_key.as_mut().unwrap().expire_now();
+    server.cookie_key.as_mut().unwrap().expire_now();
 
     // WELCOME -> INITIATE
     for cmd in s_out.drain(..) {
@@ -354,11 +338,9 @@ fn server_rejects_expired_cookie() {
 #[test]
 fn rejects_low_order_client_ephemeral() {
     let server_kp = CurveKeypair::generate();
-    let mut server = CurveMechanism::new_server(server_kp, test_server_options());
+    let mut server = CurveServer::new(server_kp, test_server_options(), None);
     let mut s_out = Vec::new();
-    server
-        .start(&mut s_out, dummy_props(SocketType::Pull))
-        .unwrap();
+    server.start(dummy_props(SocketType::Pull));
 
     // Construct a HELLO with C' = [0; 32] (the identity point).
     let mut body = BytesMut::with_capacity(194);
@@ -379,7 +361,7 @@ fn rejects_low_order_client_ephemeral() {
 #[test]
 fn rejects_low_order_server_ephemeral() {
     let server_kp = CurveKeypair::generate();
-    let mut client = CurveMechanism::new_client(CurveKeypair::generate(), server_kp.public);
+    let mut client = CurveClient::new(CurveKeypair::generate(), server_kp.public);
     let mut c_out = Vec::new();
     client
         .start(&mut c_out, dummy_props(SocketType::Push))

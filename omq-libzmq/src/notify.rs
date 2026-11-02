@@ -504,12 +504,16 @@ pub(crate) mod windows {
     impl RecvNotify {
         #[inline]
         pub(crate) fn signal(self) {
+            // SAFETY: SetEvent takes the handle by value and touches no Rust
+            // memory. The owning WindowsNotifyHandle outlives this copy; a
+            // null handle (failed CreateEventW) only makes the call fail.
             unsafe {
                 let _ = SetEvent(self.event);
             }
         }
 
         pub(crate) fn drain(self) {
+            // SAFETY: as in `signal`; ResetEvent only touches kernel state.
             unsafe {
                 let _ = ResetEvent(self.event);
             }
@@ -524,6 +528,8 @@ pub(crate) mod windows {
             } else {
                 timeout_ms as u32
             };
+            // SAFETY: as in `signal`; the wait reads no Rust memory, and a
+            // null handle returns WAIT_FAILED.
             let rc = unsafe { WaitForSingleObject(self.event, wait_ms) };
             rc == WAIT_OBJECT_0
         }
@@ -547,7 +553,10 @@ pub(crate) mod windows {
 
     impl WindowsNotifyHandle {
         pub(crate) fn new() -> Self {
+            // SAFETY: no security attributes and no name, so no pointers are
+            // passed. Each call returns a new manual-reset event or an error.
             let recv_event = unsafe { CreateEventW(None, true, false, None) };
+            // SAFETY: as above.
             let send_event = unsafe { CreateEventW(None, true, false, None) };
             Self {
                 recv_event: recv_event.ok(),
@@ -559,11 +568,14 @@ pub(crate) mod windows {
     impl Drop for WindowsNotifyHandle {
         fn drop(&mut self) {
             if let Some(handle) = self.recv_event.take() {
+                // SAFETY: `handle` came from CreateEventW and `take()` makes
+                // this its only close. No RecvNotify copy outlives `self`.
                 unsafe {
                     let _ = CloseHandle(handle);
                 }
             }
             if let Some(handle) = self.send_event.take() {
+                // SAFETY: as above.
                 unsafe {
                     let _ = CloseHandle(handle);
                 }
@@ -574,6 +586,8 @@ pub(crate) mod windows {
     impl NotifyHandle for WindowsNotifyHandle {
         fn signal_recv(&self) {
             if let Some(handle) = self.recv_event {
+                // SAFETY: `handle` is an open event owned by `self`; SetEvent
+                // touches no Rust memory.
                 unsafe {
                     let _ = SetEvent(handle);
                 }
@@ -582,6 +596,7 @@ pub(crate) mod windows {
 
         fn signal_send(&self) {
             if let Some(handle) = self.send_event {
+                // SAFETY: as in `signal_recv`.
                 unsafe {
                     let _ = SetEvent(handle);
                 }
@@ -673,6 +688,9 @@ pub(crate) mod windows {
         pub(crate) fn prepare_for_wait(&mut self) {
             for batch in &self.batches {
                 for handle in batch {
+                    // SAFETY: each handle is an open event of a socket in the
+                    // poll items; the caller keeps those sockets open for the
+                    // whole poll. ResetEvent touches no Rust memory.
                     unsafe {
                         let _ = ResetEvent(*handle);
                     }
@@ -699,6 +717,8 @@ pub(crate) mod windows {
             } else {
                 timeout_ms as u32
             };
+            // SAFETY: the slice is borrowed for the call and holds 1 to 64
+            // (MAXIMUM_WAIT_OBJECTS) open events, as in `prepare_for_wait`.
             unsafe {
                 WaitForMultipleObjects(&self.batches[0], false, wait_timeout);
             }
@@ -713,6 +733,8 @@ pub(crate) mod windows {
                 for handle in batch {
                     let (item_idx, event_type) = self.handle_map[map_idx];
                     map_idx += 1;
+                    // SAFETY: open event, as in `prepare_for_wait`; a zero
+                    // timeout only tests the state.
                     let rc = unsafe { WaitForSingleObject(*handle, 0) };
                     if rc == WAIT_OBJECT_0 {
                         if items[item_idx].revents == 0 {

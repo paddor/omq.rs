@@ -45,16 +45,58 @@ pub(super) fn first_frame_slice(msg: &Message) -> &[u8] {
 }
 
 /// Subscription and group state that selects a peer's publications.
-pub(super) struct PeerFilter<'a> {
-    pub(super) subscriptions: &'a SubscriptionSet,
-    pub(super) groups: &'a FxHashSet<Bytes>,
-    pub(super) any_groups: bool,
+#[derive(Debug)]
+pub(super) struct PeerFilterState {
+    subscriptions: SubscriptionSet,
+    groups: FxHashSet<Bytes>,
+    any_groups: bool,
+}
+
+impl PeerFilterState {
+    pub(super) fn new(any_groups: bool) -> Self {
+        Self {
+            subscriptions: SubscriptionSet::new(),
+            groups: FxHashSet::default(),
+            any_groups,
+        }
+    }
+
+    pub(super) fn subscriptions(&self) -> &SubscriptionSet {
+        &self.subscriptions
+    }
+
+    #[cfg(feature = "dart")]
+    pub(super) fn any_groups(&self) -> bool {
+        self.any_groups
+    }
+
+    pub(super) fn is_subscribe_all(&self) -> bool {
+        self.subscriptions.is_subscribe_all()
+    }
+
+    /// Returns whether the peer became subscribe-all.
+    pub(super) fn subscribe(&mut self, prefix: &[u8]) -> bool {
+        add_subscription(&mut self.subscriptions, prefix)
+    }
+
+    /// Returns whether the peer stopped being subscribe-all.
+    pub(super) fn cancel(&mut self, prefix: &[u8]) -> bool {
+        remove_subscription(&mut self.subscriptions, prefix)
+    }
+
+    pub(super) fn join(&mut self, group: Bytes) {
+        self.groups.insert(group);
+    }
+
+    pub(super) fn leave(&mut self, group: &[u8]) {
+        self.groups.remove(group);
+    }
 }
 
 #[inline]
 pub(super) fn peer_matches(
     mode: FanOutMode,
-    peer: &PeerFilter<'_>,
+    peer: &PeerFilterState,
     topic: &[u8],
     group: Option<&[u8]>,
 ) -> bool {
@@ -65,13 +107,13 @@ pub(super) fn peer_matches(
     }
 }
 
-pub(super) fn add_subscription(subscriptions: &mut SubscriptionSet, prefix: &[u8]) -> bool {
+fn add_subscription(subscriptions: &mut SubscriptionSet, prefix: &[u8]) -> bool {
     let was_all = subscriptions.is_subscribe_all();
     subscriptions.add(prefix);
     !was_all && subscriptions.is_subscribe_all()
 }
 
-pub(super) fn remove_subscription(subscriptions: &mut SubscriptionSet, prefix: &[u8]) -> bool {
+fn remove_subscription(subscriptions: &mut SubscriptionSet, prefix: &[u8]) -> bool {
     let was_all = subscriptions.is_subscribe_all();
     subscriptions.remove(prefix);
     was_all && !subscriptions.is_subscribe_all()

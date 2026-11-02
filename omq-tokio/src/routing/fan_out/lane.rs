@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use tokio::sync::oneshot;
 
@@ -11,7 +11,6 @@ use crate::engine::codec::CodecSharingKey;
 use crate::engine::control_queue::ControlQueue;
 use crate::engine::signal::{DataSignal, StateSignal};
 use crate::engine::transmit_slot::PeerTransmitSlot;
-use crate::routing::subscription::SubscriptionSet;
 use omq_proto::flow::DrainBudget;
 use omq_proto::frame_buffer::FrameBuffer;
 use omq_proto::message::Message;
@@ -19,7 +18,7 @@ use omq_proto::options::Options;
 
 use super::FanOutMutePolicy;
 use super::codec_group::{CodecGroup, MAX_CODEC_GROUPS};
-use super::filter::{self, FanOutMode};
+use super::filter::{self, FanOutMode, PeerFilterState};
 
 mod blocking;
 #[cfg(any(feature = "lz4", feature = "zstd"))]
@@ -96,9 +95,7 @@ impl LaneData {
 
 #[derive(Debug)]
 struct LanePeer {
-    subscriptions: SubscriptionSet,
-    groups: FxHashSet<Bytes>,
-    any_groups: bool,
+    filter: PeerFilterState,
     slot: Arc<PeerTransmitSlot>,
     dict_shipped: bool,
     codec_group: usize,
@@ -110,14 +107,6 @@ impl LanePeer {
     fn mark_dict_shipped(&mut self) {
         self.dict_shipped = true;
         self.slot.mark_fanout_dict_shipped();
-    }
-
-    fn filter(&self) -> filter::PeerFilter<'_> {
-        filter::PeerFilter {
-            subscriptions: &self.subscriptions,
-            groups: &self.groups,
-            any_groups: self.any_groups,
-        }
     }
 }
 
@@ -823,7 +812,7 @@ impl LaneWorker {
                 ack,
             } => {
                 if let Some(peer) = self.peers.get_mut(&peer_id)
-                    && filter::add_subscription(&mut peer.subscriptions, &prefix)
+                    && peer.filter.subscribe(&prefix)
                 {
                     self.subscribe_all_count += 1;
                 }
@@ -833,19 +822,19 @@ impl LaneWorker {
             }
             LaneControl::Cancel { peer_id, prefix } => {
                 if let Some(peer) = self.peers.get_mut(&peer_id)
-                    && filter::remove_subscription(&mut peer.subscriptions, &prefix)
+                    && peer.filter.cancel(&prefix)
                 {
                     self.subscribe_all_count = self.subscribe_all_count.saturating_sub(1);
                 }
             }
             LaneControl::Join { peer_id, group } => {
                 if let Some(peer) = self.peers.get_mut(&peer_id) {
-                    peer.groups.insert(group);
+                    peer.filter.join(group);
                 }
             }
             LaneControl::Leave { peer_id, group } => {
                 if let Some(peer) = self.peers.get_mut(&peer_id) {
-                    peer.groups.remove(group.as_ref());
+                    peer.filter.leave(&group);
                 }
             }
             LaneControl::Shutdown => return true,
@@ -867,9 +856,7 @@ impl LaneWorker {
         self.peers.insert(
             add.peer_id,
             LanePeer {
-                subscriptions: SubscriptionSet::new(),
-                groups: FxHashSet::default(),
-                any_groups: add.any_groups,
+                filter: PeerFilterState::new(add.any_groups),
                 dict_shipped: add.slot.fanout_dict_shipped(),
                 codec_group,
                 needs_flush: false,
@@ -882,7 +869,7 @@ impl LaneWorker {
         let Some(peer) = self.peers.remove(&peer_id) else {
             return;
         };
-        if peer.subscriptions.is_subscribe_all() {
+        if peer.filter.is_subscribe_all() {
             self.subscribe_all_count = self.subscribe_all_count.saturating_sub(1);
         }
 
@@ -938,7 +925,7 @@ impl LaneWorker {
                 && (all_subscribe_all
                     || filter::peer_matches(
                         self.mode,
-                        &peer.filter(),
+                        &peer.filter,
                         dispatch.msg.part_slice(0).unwrap_or_default(),
                         matches!(self.mode, FanOutMode::Group)
                             .then(|| dispatch.msg.part_slice(0).unwrap_or_default()),

@@ -1,9 +1,8 @@
 //! Peer admission, lane compatibility, and capacity reactivation.
 
 use super::lane::LanePeerAdd;
-use super::{FanOutPeer, FanOutSend, PeerOutbound, SubscriptionSet};
+use super::{FanOutPeer, FanOutSend, PeerOutbound};
 use crate::engine::ActorPeerDriverHandle;
-use rustc_hash::FxHashSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -46,9 +45,7 @@ impl FanOutSend {
         inner.peers.insert(
             peer_id,
             FanOutPeer {
-                subscriptions: SubscriptionSet::new(),
-                groups: FxHashSet::default(),
-                any_groups,
+                filter: super::filter::PeerFilterState::new(any_groups),
                 target,
                 lane,
                 fanout_active: true,

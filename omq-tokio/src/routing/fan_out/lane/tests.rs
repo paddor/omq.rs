@@ -9,18 +9,17 @@ use omq_proto::frame_buffer::FrameBuffer;
 use omq_proto::options::Options;
 #[cfg(feature = "lz4")]
 use omq_proto::proto::transform::CompressionKind;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
-use crate::engine::control_queue::ControlQueue;
-use crate::engine::transmit_slot::SlotConfig;
-use crate::routing::subscription::SubscriptionSet;
-
+use super::filter::PeerFilterState;
 use super::{
     FanOutLaneState, FanOutLanes, FanOutMode, FanOutMutePolicy, LaneAdmission, LaneControl,
     LaneData, LaneDispatch, LaneDistributor, LaneEndpoint, LaneInput, LanePeer, LanePeerAdd,
     LaneWorker,
 };
+use crate::engine::control_queue::ControlQueue;
+use crate::engine::transmit_slot::SlotConfig;
 
 fn paused_lanes(count: usize) -> (FanOutLanes, Vec<yring::Consumer<LaneData>>) {
     let lanes = test_lanes(count);
@@ -442,15 +441,11 @@ async fn empty_data_drain_clears_stale_signal() {
 fn drop_oldest_lossy_dispatch_keeps_newest_per_peer_frames() {
     let (_data_tx, data_rx) = yring::spsc::<LaneData>(4);
     let slot = test_slot_with_msg_cap(7, 2);
-    let mut subscriptions = SubscriptionSet::new();
-    subscriptions.add(b"");
     let mut peers = FxHashMap::default();
     peers.insert(
         7,
         LanePeer {
-            subscriptions,
-            groups: FxHashSet::default(),
-            any_groups: false,
+            filter: subscribe_all(),
             slot: slot.clone(),
             dict_shipped: false,
             codec_group: 0,
@@ -543,15 +538,11 @@ fn single_peer_worker(
     mute_policy: FanOutMutePolicy,
     codec_groups: [Option<super::CodecGroup>; super::MAX_CODEC_GROUPS],
 ) -> LaneWorker {
-    let mut subscriptions = SubscriptionSet::new();
-    subscriptions.add(b"");
     let mut peers = FxHashMap::default();
     peers.insert(
         7,
         LanePeer {
-            subscriptions,
-            groups: FxHashSet::default(),
-            any_groups: false,
+            filter: subscribe_all(),
             slot: slot.clone(),
             dict_shipped: false,
             codec_group: 0,
@@ -582,15 +573,11 @@ fn single_peer_worker(
 fn drop_newest_lossy_dispatch_keeps_oldest_per_peer_frames() {
     let (_data_tx, data_rx) = yring::spsc::<LaneData>(4);
     let slot = test_slot_with_msg_cap(7, 2);
-    let mut subscriptions = SubscriptionSet::new();
-    subscriptions.add(b"");
     let mut peers = FxHashMap::default();
     peers.insert(
         7,
         LanePeer {
-            subscriptions,
-            groups: FxHashSet::default(),
-            any_groups: false,
+            filter: subscribe_all(),
             slot: slot.clone(),
             dict_shipped: false,
             codec_group: 0,
@@ -635,14 +622,10 @@ fn batch_worker(
     let peers = slots
         .iter()
         .map(|slot| {
-            let mut subscriptions = SubscriptionSet::new();
-            subscriptions.add(b"");
             (
                 slot.peer_id,
                 LanePeer {
-                    subscriptions,
-                    groups: FxHashSet::default(),
-                    any_groups: false,
+                    filter: subscribe_all(),
                     slot: slot.clone(),
                     dict_shipped: false,
                     codec_group: 0,
@@ -915,6 +898,13 @@ fn test_endpoint() -> LaneEndpoint {
         codec_groups: std::array::from_fn(|_| None),
         peer_groups: FxHashMap::default(),
     }
+}
+
+/// A peer filter subscribed to every topic.
+fn subscribe_all() -> PeerFilterState {
+    let mut filter = PeerFilterState::new(false);
+    filter.subscribe(b"");
+    filter
 }
 
 fn test_slot(peer_id: u64) -> Arc<crate::engine::transmit_slot::PeerTransmitSlot> {

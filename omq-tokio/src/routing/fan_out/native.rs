@@ -51,7 +51,7 @@ impl Submitter {
     pub(super) fn native_targets(&self, peers: &FanOutInner) -> Option<(Arc<Snapshot>, bool)> {
         if !matches!(self.mode, FanOutMode::Group)
             || !peers.peers.values().filter(|peer| peer.lane.is_none()).all(|peer| {
-                peer.any_groups
+                peer.filter.any_groups()
                     && matches!(&peer.target, PeerOutbound::Inbox(inbox) if inbox.is_native_dart())
             })
         {

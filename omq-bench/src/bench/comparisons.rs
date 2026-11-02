@@ -100,36 +100,6 @@ fn addr_for(
 
 // ---- Build ----------------------------------------------------------------
 
-// ---- Measurement integrity ------------------------------------------------
-
-struct MeasurementTracker {
-    issues: Vec<String>,
-}
-
-impl MeasurementTracker {
-    fn new() -> Self {
-        Self { issues: Vec::new() }
-    }
-
-    #[allow(dead_code)]
-    fn note(&mut self, present: bool, ctx: &str, what: &str) -> bool {
-        if !present {
-            self.issues.push(format!("{ctx}: missing {what}"));
-        }
-        present
-    }
-
-    fn check(&self) {
-        if !self.issues.is_empty() {
-            eprintln!("\nMeasurement issues:");
-            for issue in &self.issues {
-                eprintln!("  - {issue}");
-            }
-            std::process::exit(1);
-        }
-    }
-}
-
 // ---- Size formatting ------------------------------------------------------
 
 pub(crate) fn size_label(n: u64) -> String {
@@ -666,7 +636,6 @@ pub(crate) fn run(args: &ComparisonsArgs) {
     let base_port = args.base_port.unwrap_or_else(random_base_port);
     let run_id = make_run_id(args.id.as_deref());
     let jsonl_path = jsonl::cache_dir().join("comparisons.jsonl");
-    let tracker = MeasurementTracker::new();
     let run = ComparisonRun {
         args,
         sizes: &sizes,
@@ -685,7 +654,6 @@ pub(crate) fn run(args: &ComparisonsArgs) {
     if args.curve {
         run.run_curve_pubsub();
     }
-    tracker.check();
     eprintln!("\nResults appended to {}", jsonl_path.display());
 }
 

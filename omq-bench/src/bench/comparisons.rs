@@ -594,14 +594,12 @@ pub(crate) fn run(args: &ComparisonsArgs) {
     exit_on_unknown_impls(&impl_names);
     let transports = selected_transports(args);
 
-    let needs_ws = transports.contains(&TransportKind::Ws);
-    let needs_quic = transports.contains(&TransportKind::Quic);
-    if needs_quic {
+    if transports.contains(&TransportKind::Quic) {
         crate::tls::install_bench_credentials();
     }
-    let needs_curve = args.curve || impl_names.iter().any(|name| name.contains("curve"));
     eprintln!("Building peers...");
-    let binaries = build_peers(&impl_names, needs_ws, needs_quic, needs_curve);
+    let features = peer_features(args, &impl_names, &transports);
+    let binaries = build_peers(&impl_names, &features);
 
     let base_port = args.base_port.unwrap_or_else(random_base_port);
     let run_id = make_run_id(args.id.as_deref());
@@ -625,6 +623,25 @@ pub(crate) fn run(args: &ComparisonsArgs) {
         run.run_curve_pubsub();
     }
     eprintln!("\nResults appended to {}", jsonl_path.display());
+}
+
+/// OMQ peer Cargo features that the selected transports and impls need.
+fn peer_features(
+    args: &ComparisonsArgs,
+    impl_names: &[&str],
+    transports: &[TransportKind],
+) -> Vec<&'static str> {
+    let mut features = Vec::new();
+    if transports.contains(&TransportKind::Ws) {
+        features.push("ws");
+    }
+    if transports.contains(&TransportKind::Quic) {
+        features.push("quic");
+    }
+    if args.curve || impl_names.iter().any(|name| name.contains("curve")) {
+        features.push("curve");
+    }
+    features
 }
 
 /// Seconds per cell and rounds per cell: CLI, then environment, then

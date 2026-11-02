@@ -169,3 +169,25 @@ fn connect_timeout_caps_handshake_ivl_in_milliseconds() {
         Some(Duration::from_millis(10))
     );
 }
+
+#[test]
+fn fixed_option_lists_are_disjoint() {
+    use super::codes::{
+        EMPTY_BYTES, EMPTY_STRING, ONE_I32, READ_ONLY, ZERO_I32, ZERO_I64, is_ignored_on_set,
+    };
+
+    let lists = [
+        ONE_I32,
+        ZERO_I32,
+        ZERO_I64,
+        EMPTY_STRING,
+        EMPTY_BYTES,
+        READ_ONLY,
+    ];
+    let mut seen = std::collections::HashSet::new();
+    for code in lists.iter().flat_map(|list| list.iter()) {
+        assert!(seen.insert(*code), "option {code} listed twice");
+        assert!(is_ignored_on_set(*code));
+    }
+    assert_eq!(seen.len(), 62);
+}

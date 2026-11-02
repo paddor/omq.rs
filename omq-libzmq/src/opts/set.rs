@@ -42,75 +42,6 @@ const SET_OPTIONS: [SetOption; 15] = [
     set_wss_option,
 ];
 
-/// Accepted and ignored. `ZMQ_ROUTER_HANDOVER` is always on in omq; the rest
-/// are read-only or configure features omq does not implement.
-const IGNORED_SET_OPTIONS: [c_int; 64] = [
-    ZMQ_ROUTER_HANDOVER,
-    ZMQ_AFFINITY,
-    ZMQ_RATE,
-    ZMQ_RECOVERY_IVL,
-    ZMQ_MULTICAST_HOPS,
-    ZMQ_RCVMORE,
-    ZMQ_FD,
-    ZMQ_EVENTS,
-    ZMQ_TYPE,
-    ZMQ_LAST_ENDPOINT,
-    ZMQ_TCP_ACCEPT_FILTER,
-    ZMQ_ROUTER_RAW,
-    ZMQ_MECHANISM,
-    ZMQ_TOS,
-    ZMQ_IPC_FILTER_PID,
-    ZMQ_IPC_FILTER_UID,
-    ZMQ_IPC_FILTER_GID,
-    ZMQ_CONNECT_ROUTING_ID,
-    ZMQ_GSSAPI_SERVER,
-    ZMQ_GSSAPI_PRINCIPAL,
-    ZMQ_GSSAPI_SERVICE_PRINCIPAL,
-    ZMQ_GSSAPI_PLAINTEXT,
-    ZMQ_SOCKS_PROXY,
-    ZMQ_BLOCKY,
-    ZMQ_XPUB_MANUAL,
-    ZMQ_XPUB_WELCOME_MSG,
-    ZMQ_STREAM_NOTIFY,
-    ZMQ_INVERT_MATCHING,
-    ZMQ_XPUB_VERBOSER,
-    ZMQ_THREAD_SAFE,
-    ZMQ_MULTICAST_MAXTPDU,
-    ZMQ_VMCI_BUFFER_SIZE,
-    ZMQ_VMCI_BUFFER_MIN_SIZE,
-    ZMQ_VMCI_BUFFER_MAX_SIZE,
-    ZMQ_VMCI_CONNECT_TIMEOUT,
-    ZMQ_USE_FD,
-    ZMQ_GSSAPI_PRINCIPAL_NAMETYPE,
-    ZMQ_GSSAPI_SERVICE_PRINCIPAL_NAMETYPE,
-    ZMQ_BINDTODEVICE,
-    ZMQ_LOOPBACK_FASTPATH,
-    ZMQ_METADATA,
-    ZMQ_MULTICAST_LOOP,
-    ZMQ_ROUTER_NOTIFY,
-    ZMQ_XPUB_MANUAL_LAST_VALUE,
-    ZMQ_SOCKS_USERNAME,
-    ZMQ_SOCKS_PASSWORD,
-    ZMQ_IN_BATCH_SIZE,
-    ZMQ_OUT_BATCH_SIZE,
-    ZMQ_ONLY_FIRST_SUBSCRIBE,
-    ZMQ_HELLO_MSG,
-    ZMQ_DISCONNECT_MSG,
-    ZMQ_PRIORITY,
-    ZMQ_BUSY_POLL,
-    ZMQ_HICCUP_MSG,
-    ZMQ_XSUB_VERBOSE_UNSUBSCRIBE,
-    ZMQ_TOPICS_COUNT,
-    ZMQ_NORM_MODE,
-    ZMQ_NORM_UNICAST_NACK,
-    ZMQ_NORM_BUFFER_SIZE,
-    ZMQ_NORM_SEGMENT_SIZE,
-    ZMQ_NORM_BLOCK_SIZE,
-    ZMQ_NORM_NUM_PARITY,
-    ZMQ_NORM_NUM_AUTOPARITY,
-    ZMQ_NORM_PUSH,
-];
-
 /// Set a socket option from caller storage; return zero or -1 with errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_setsockopt(
@@ -140,7 +71,7 @@ pub extern "C" fn zmq_setsockopt(
         }
     }
 
-    if IGNORED_SET_OPTIONS.contains(&option) {
+    if is_ignored_on_set(option) {
         0
     } else {
         crate::error::fail(libc::EINVAL)

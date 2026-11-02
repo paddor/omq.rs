@@ -21,7 +21,7 @@ use std::sync::Arc;
 /// One category of `zmq_getsockopt` options; `None` when `option` is not in it.
 type GetOption = fn(&Arc<OmqSocket>, c_int, *mut libc::c_void, *mut usize) -> Option<c_int>;
 
-const GET_OPTIONS: [GetOption; 16] = [
+const GET_OPTIONS: [GetOption; 15] = [
     get_queue_option,
     get_state_option,
     get_message_option,
@@ -37,7 +37,6 @@ const GET_OPTIONS: [GetOption; 16] = [
     get_ws_option,
     get_wss_option,
     get_fixed_option,
-    get_unsupported_option,
 ];
 
 /// Write a socket option into caller storage and update its length; return zero or -1 with
@@ -703,7 +702,8 @@ fn get_wss_option(
     Some(rc)
 }
 
-/// Options with fixed values: always-on behavior or unsupported features.
+/// Options with fixed values: always-on behavior or unsupported features
+/// (see the code lists in `codes`).
 fn get_fixed_option(
     _sock: &Arc<OmqSocket>,
     option: c_int,
@@ -711,75 +711,13 @@ fn get_fixed_option(
     optvallen: *mut usize,
 ) -> Option<c_int> {
     let rc = match option {
-        ZMQ_ROUTER_HANDOVER | ZMQ_BLOCKY | ZMQ_STREAM_NOTIFY => write_i32(optval, optvallen, 1),
         ZMQ_MULTICAST_MAXTPDU => write_i32(optval, optvallen, 1500),
         ZMQ_USE_FD => write_i32(optval, optvallen, -1),
-        ZMQ_AFFINITY
-        | ZMQ_VMCI_BUFFER_SIZE
-        | ZMQ_VMCI_BUFFER_MIN_SIZE
-        | ZMQ_VMCI_BUFFER_MAX_SIZE => write_i64(optval, optvallen, 0),
-        ZMQ_TCP_ACCEPT_FILTER
-        | ZMQ_SOCKS_PROXY
-        | ZMQ_CONNECT_ROUTING_ID
-        | ZMQ_GSSAPI_PRINCIPAL
-        | ZMQ_GSSAPI_SERVICE_PRINCIPAL
-        | ZMQ_BINDTODEVICE
-        | ZMQ_METADATA
-        | ZMQ_SOCKS_USERNAME
-        | ZMQ_SOCKS_PASSWORD => write_string(optval, optvallen, b""),
-        ZMQ_XPUB_WELCOME_MSG | ZMQ_HELLO_MSG | ZMQ_DISCONNECT_MSG | ZMQ_HICCUP_MSG => {
-            write_bytes(optval, optvallen, b"")
-        }
-        _ => return None,
-    };
-
-    Some(rc)
-}
-
-/// Unsupported integer options read as zero.
-fn get_unsupported_option(
-    _sock: &Arc<OmqSocket>,
-    option: c_int,
-    optval: *mut libc::c_void,
-    optvallen: *mut usize,
-) -> Option<c_int> {
-    let rc = match option {
-        ZMQ_RATE
-        | ZMQ_RECOVERY_IVL
-        | ZMQ_MULTICAST_HOPS
-        | ZMQ_TOS
-        | ZMQ_IPC_FILTER_PID
-        | ZMQ_IPC_FILTER_UID
-        | ZMQ_IPC_FILTER_GID
-        | ZMQ_ROUTER_RAW
-        | ZMQ_GSSAPI_SERVER
-        | ZMQ_GSSAPI_PLAINTEXT
-        | ZMQ_XPUB_MANUAL
-        | ZMQ_INVERT_MATCHING
-        | ZMQ_XPUB_VERBOSER
-        | ZMQ_THREAD_SAFE
-        | ZMQ_VMCI_CONNECT_TIMEOUT
-        | ZMQ_GSSAPI_PRINCIPAL_NAMETYPE
-        | ZMQ_GSSAPI_SERVICE_PRINCIPAL_NAMETYPE
-        | ZMQ_LOOPBACK_FASTPATH
-        | ZMQ_MULTICAST_LOOP
-        | ZMQ_ROUTER_NOTIFY
-        | ZMQ_XPUB_MANUAL_LAST_VALUE
-        | ZMQ_IN_BATCH_SIZE
-        | ZMQ_OUT_BATCH_SIZE
-        | ZMQ_ONLY_FIRST_SUBSCRIBE
-        | ZMQ_PRIORITY
-        | ZMQ_BUSY_POLL
-        | ZMQ_XSUB_VERBOSE_UNSUBSCRIBE
-        | ZMQ_TOPICS_COUNT
-        | ZMQ_NORM_MODE
-        | ZMQ_NORM_UNICAST_NACK
-        | ZMQ_NORM_BUFFER_SIZE
-        | ZMQ_NORM_SEGMENT_SIZE
-        | ZMQ_NORM_BLOCK_SIZE
-        | ZMQ_NORM_NUM_PARITY
-        | ZMQ_NORM_NUM_AUTOPARITY
-        | ZMQ_NORM_PUSH => write_i32(optval, optvallen, 0),
+        _ if ONE_I32.contains(&option) => write_i32(optval, optvallen, 1),
+        _ if ZERO_I32.contains(&option) => write_i32(optval, optvallen, 0),
+        _ if ZERO_I64.contains(&option) => write_i64(optval, optvallen, 0),
+        _ if EMPTY_STRING.contains(&option) => write_string(optval, optvallen, b""),
+        _ if EMPTY_BYTES.contains(&option) => write_bytes(optval, optvallen, b""),
         _ => return None,
     };
 

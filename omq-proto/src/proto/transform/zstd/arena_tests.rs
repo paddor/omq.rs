@@ -28,15 +28,6 @@ fn compressed_arena_rejects_trailing_frames_and_content_size_mismatch() {
     assert_eq!(decode(&mut decoder, wire), vec![message; 32]);
 }
 
-fn raw(body: &[u8], count: u32) -> Message {
-    let mut bytes = Vec::from(ARENA_SENTINEL);
-    bytes.extend_from_slice(&[0; 4]);
-    bytes.extend_from_slice(&u32::try_from(body.len()).unwrap().to_le_bytes());
-    bytes.extend_from_slice(&count.to_le_bytes());
-    bytes.extend_from_slice(body);
-    Message::single(bytes)
-}
-
 fn decode(decoder: &mut ZstdDecoder, wire: Message) -> Vec<Message> {
     let mut messages: Vec<_> = decoder.decode(wire).unwrap().into_iter().collect();
     while let Some(message) = decoder.poll_message() {
@@ -100,7 +91,7 @@ fn arena_limit_is_per_logical_message_and_counts_payload_slots() {
         decoder.decode_with_payload_slots(wire),
         Err(Error::MessageTooLarge { .. })
     ));
-    let bad = raw(&[0, 1, b'a', 1, 1, b'b', 0, 1, b'c'], 2);
+    let bad = arena::raw_arena(ARENA_SENTINEL, &[0, 1, b'a', 1, 1, b'b', 0, 1, b'c'], 2);
     assert!(
         ZstdDecoder::new()
             .with_max_message_size(Some(1))
@@ -112,19 +103,21 @@ fn arena_limit_is_per_logical_message_and_counts_payload_slots() {
 #[test]
 fn arena_rejects_bad_headers_frames_and_trailing_data_before_delivery() {
     for wire in [
-        raw(&[1, 0], 1),
-        raw(&[4, 0], 1),
-        raw(&[8, 0], 1),
-        raw(&[0, 2, b'a'], 1),
-        raw(&[2, 0], 1),
-        raw(&[0, 0, 0], 1),
-        raw(&[0, 0], 0),
-        raw(&[0, 0], 2),
-        raw(&[], 1),
+        arena::raw_arena(ARENA_SENTINEL, &[1, 0], 1),
+        arena::raw_arena(ARENA_SENTINEL, &[4, 0], 1),
+        arena::raw_arena(ARENA_SENTINEL, &[8, 0], 1),
+        arena::raw_arena(ARENA_SENTINEL, &[0, 2, b'a'], 1),
+        arena::raw_arena(ARENA_SENTINEL, &[2, 0], 1),
+        arena::raw_arena(ARENA_SENTINEL, &[0, 0, 0], 1),
+        arena::raw_arena(ARENA_SENTINEL, &[0, 0], 0),
+        arena::raw_arena(ARENA_SENTINEL, &[0, 0], 2),
+        arena::raw_arena(ARENA_SENTINEL, &[], 1),
     ] {
         assert!(ZstdDecoder::new().decode(wire).is_err());
     }
-    let valid = raw(&[0, 0, 0, 0], 2).part_bytes(0).unwrap();
+    let valid = arena::raw_arena(ARENA_SENTINEL, &[0, 0, 0, 0], 2)
+        .part_bytes(0)
+        .unwrap();
     for (offset, value) in [(4, 2), (5, 1), (6, 1), (7, 1), (10, 2), (15, 1)] {
         let mut bytes = valid.to_vec();
         bytes[offset] = value;
@@ -144,7 +137,11 @@ fn arena_rejects_bad_headers_frames_and_trailing_data_before_delivery() {
     );
     assert!(
         ZstdDecoder::new()
-            .decode(raw(&vec![0; 2 * (MAX_ARENA_PARTS + 1)], 2))
+            .decode(arena::raw_arena(
+                ARENA_SENTINEL,
+                &vec![0; 2 * (MAX_ARENA_PARTS + 1)],
+                2
+            ))
             .is_err()
     );
 }

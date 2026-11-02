@@ -71,7 +71,7 @@ pub(super) fn selected_impl_names(args: &ComparisonsArgs) -> Vec<&str> {
             .map(|imp| imp.name)
             .collect()
     };
-    if args.curve {
+    if args.curve.enabled {
         let families: Vec<&str> = names
             .iter()
             .filter_map(|name| name.split('-').next())
@@ -116,7 +116,7 @@ pub(super) fn peer_features(
     if transports.contains(&TransportKind::Quic) {
         features.push("quic");
     }
-    if args.curve || impl_names.iter().any(|name| name.contains("curve")) {
+    if args.curve.enabled || impl_names.iter().any(|name| name.contains("curve")) {
         features.push("curve");
     }
     features

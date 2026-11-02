@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use crate::cli::CompressionLinkArgs;
+use crate::cli::{CompressionLinkArgs, PushpullCompressionArgs};
 use crate::jsonl::{self, CompressionLink, PushpullLz4Row};
 use crate::process;
 
@@ -11,15 +11,9 @@ const QUICK_SIZES: &[u64] = &[64, 1024, 16384];
 
 pub(crate) struct Config {
     pub feature: &'static str,
-    pub transports: String,
-    pub sizes: Option<Vec<u64>>,
-    pub duration: f64,
-    pub rounds: u32,
-    pub quick: bool,
-    pub dict_sizes: Vec<u64>,
+    pub common: PushpullCompressionArgs,
     pub level: Option<i32>,
     pub level_range: Option<[i32; 2]>,
-    pub link: CompressionLinkArgs,
 }
 
 struct Peers {
@@ -223,7 +217,7 @@ impl Sweep<'_> {
         let config = self.config;
         let level = config.level.map(|value| value.to_string());
         let level_range = config.level_range.map(|[min, max]| format!("{min},{max}"));
-        let send_rate = config.link.send_rate.map(|rate| rate.to_string());
+        let send_rate = config.common.link.send_rate.map(|rate| rate.to_string());
         let mut env = environment(
             dictionary.map(|(path, _)| path),
             level.as_deref(),
@@ -237,7 +231,7 @@ impl Sweep<'_> {
         for &size in self.sizes {
             let wire_bytes = self.wire_bytes(transport, size, &env);
             // Intervals span whole messages; slow links still average a few.
-            let cell_duration = config.link.link_mbps.map_or(self.duration, |rate| {
+            let cell_duration = config.common.link.link_mbps.map_or(self.duration, |rate| {
                 self.duration
                     .max((10.0 * wire_bytes as f64 * 8.0 / (f64::from(rate) * 1e6)).min(20.0))
             });
@@ -246,7 +240,7 @@ impl Sweep<'_> {
                 transport,
                 size,
                 duration: cell_duration,
-                warmup: config.link.warmup_seconds,
+                warmup: config.common.link.warmup_seconds,
             };
             let base = self.base_row(&cell, wire_bytes, dictionary);
 
@@ -265,7 +259,7 @@ impl Sweep<'_> {
                     ..base.clone()
                 };
 
-                if !config.quick {
+                if !config.common.quick {
                     jsonl::append_jsonl(&cache, &row);
                 }
 
@@ -304,9 +298,10 @@ impl Sweep<'_> {
     ) -> PushpullLz4Row {
         let config = self.config;
         let netem = config
+            .common
             .link
             .link_mbps
-            .map(|rate_mbps| CompressionLink::ifb(rate_mbps, config.link.link_delay_us));
+            .map(|rate_mbps| CompressionLink::ifb(rate_mbps, config.common.link.link_delay_us));
         let affinity = process::affinity_label();
 
         PushpullLz4Row {
@@ -331,7 +326,7 @@ impl Sweep<'_> {
             netem,
             repeat: None,
             rounds: Some(self.rounds),
-            warmup_seconds: Some(config.link.warmup_seconds),
+            warmup_seconds: Some(config.common.link.warmup_seconds),
             duration_seconds: Some(cell.duration),
             binary_sha256: self.peers.sha256.clone(),
             cpu_affinity: Some(affinity.to_owned()),
@@ -339,7 +334,7 @@ impl Sweep<'_> {
             payload_seed: Some(4242),
             payload_corpus_messages: Some((64 * 1024 * 1024 / cell.size).clamp(2, 4096)),
             arena_bytes: Some(arena_bytes(config.feature)),
-            send_rate: config.link.send_rate,
+            send_rate: config.common.link.send_rate,
             received_wire_bytes: None,
         }
     }
@@ -398,29 +393,30 @@ pub(crate) fn peer_sha256(binary: &Path) -> String {
 }
 
 pub(crate) fn run(config: &Config) {
-    assert!(config.duration.is_finite() && config.duration > 0.0);
-    assert!(config.link.warmup_seconds.is_finite() && config.link.warmup_seconds >= 0.0);
-    assert!(config.rounds > 0);
+    let common = &config.common;
+    assert!(common.duration.is_finite() && common.duration > 0.0);
+    assert!(common.link.warmup_seconds.is_finite() && common.link.warmup_seconds >= 0.0);
+    assert!(common.rounds > 0);
     let [blocking, utility_path] = process::build_compression_peers(config.feature);
-    if run_in_netem(&config.link) {
+    if run_in_netem(&common.link) {
         return;
     }
 
-    let sha256 = (config.link.link_mbps.is_some() || config.link.send_rate.is_some())
+    let sha256 = (common.link.link_mbps.is_some() || common.link.send_rate.is_some())
         .then(|| peer_sha256(&blocking));
     let peers = Peers {
         blocking,
         utility: utility_path,
         sha256,
     };
-    let sizes = config.sizes.as_deref().unwrap_or(if config.quick {
+    let sizes = common.sizes.as_deref().unwrap_or(if common.quick {
         QUICK_SIZES
     } else {
         CHART_SIZES
     });
     assert!(sizes.iter().all(|size| *size > 0));
     let run_id = super::unix_nanos().to_string();
-    let transports: Vec<_> = config.transports.split(',').collect();
+    let transports: Vec<_> = common.transports.split(',').collect();
     let compressed = format!("{}+tcp", config.feature);
     assert!(
         transports
@@ -434,13 +430,13 @@ pub(crate) fn run(config: &Config) {
         peers: &peers,
         sizes,
         run_id: &run_id,
-        rounds: if config.quick { 1 } else { config.rounds },
-        duration: if config.quick { 1.5 } else { config.duration },
+        rounds: if common.quick { 1 } else { common.rounds },
+        duration: if common.quick { 1.5 } else { common.duration },
     };
     for transport in &transports {
         sweep.measure(transport, None);
     }
-    for &capacity in &config.dict_sizes {
+    for &capacity in &common.dict_sizes {
         sweep.measure_dictionary(
             capacity,
             &compressed,

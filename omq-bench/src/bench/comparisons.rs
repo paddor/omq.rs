@@ -153,10 +153,10 @@ impl ComparisonRun<'_> {
             CellKind::PubSub => {
                 row.pub_cpu_time = result.push_cpu;
                 row.pull_cpu_time = result.pull_cpu;
-                row.receiver_io_threads = self.args.pubsub_receiver_io_threads;
-                row.receiver_workers = self.args.pubsub_receiver_workers;
+                row.receiver_io_threads = self.args.pubsub.pubsub_receiver_io_threads;
+                row.receiver_workers = self.args.pubsub.pubsub_receiver_workers;
                 row.receiver_cpus
-                    .clone_from(&self.args.pubsub_receiver_cpus);
+                    .clone_from(&self.args.pubsub.pubsub_receiver_cpus);
             }
         }
         row.set_spread(result.spread);
@@ -225,19 +225,24 @@ impl ComparisonRun<'_> {
         if !self.args.no_latency {
             self.run_latency(transport, &active);
         }
-        if !self.args.no_pubsub && transport != TransportKind::Inproc {
+        if !self.args.pubsub.no_pubsub && transport != TransportKind::Inproc {
             let pubsub_impls: Vec<&str> = active
                 .iter()
                 .copied()
                 .filter(|name| find_impl(name).unwrap().supports_pubsub && self.multi_peer(name))
                 .collect();
-            self.run_pubsub(transport, &pubsub_impls, &self.args.pubsub_peers, false);
+            self.run_pubsub(
+                transport,
+                &pubsub_impls,
+                &self.args.pubsub.pubsub_peers,
+                false,
+            );
         }
         if matches!(transport, TransportKind::Tcp | TransportKind::Quic) {
-            if self.args.fanout {
+            if self.args.fanio.fanout {
                 self.run_fanio(transport, &active, CellKind::FanOut);
             }
-            if self.args.fanin {
+            if self.args.fanio.fanin {
                 self.run_fanio(transport, &active, CellKind::FanIn);
             }
         }
@@ -285,13 +290,7 @@ impl ComparisonRun<'_> {
                     transport.as_str()
                 );
                 print_latency_header(&impls);
-                let workload = LatencyWorkload {
-                    pair,
-                    profile,
-                    iterations: self.args.latency_iterations,
-                    warmup: self.args.latency_warmup,
-                    timeout: self.args.latency_timeout,
-                };
+                let workload = LatencyWorkload::new(pair, profile, &self.args.latency);
 
                 run_table(&sizes, &impls, 14, |name, size| {
                     let cell = self.cell(name, transport, size);
@@ -356,7 +355,8 @@ impl ComparisonRun<'_> {
             print_throughput_header(impls);
             run_table(&sizes, impls, if curve { 14 } else { 8 }, |name, size| {
                 let cell = self.cell(name, transport, size);
-                let result = run_pubsub_cell(&cell, peers, self.duration, self.rounds, self.args);
+                let result =
+                    run_pubsub_cell(&cell, peers, self.duration, self.rounds, &self.args.pubsub);
                 self.record_cell(&cell, CellKind::PubSub, Some(peers), &result);
                 if curve {
                     fmt_full(&result, size)
@@ -378,7 +378,12 @@ impl ComparisonRun<'_> {
             })
             .collect();
         if !impls.is_empty() {
-            self.run_pubsub(TransportKind::Tcp, &impls, &[self.args.curve_peers], true);
+            self.run_pubsub(
+                TransportKind::Tcp,
+                &impls,
+                &[self.args.curve.curve_peers],
+                true,
+            );
         }
     }
 
@@ -390,8 +395,8 @@ impl ComparisonRun<'_> {
             .collect();
         let sizes = self.chart_sizes();
         let (label, peer_counts) = match kind {
-            CellKind::FanOut => ("FanOut", &self.args.fanout_peers),
-            CellKind::FanIn => ("FanIn", &self.args.fanin_peers),
+            CellKind::FanOut => ("FanOut", &self.args.fanio.fanout_peers),
+            CellKind::FanIn => ("FanIn", &self.args.fanio.fanin_peers),
             _ => unreachable!(),
         };
         for &peers in peer_counts {
@@ -413,7 +418,8 @@ impl ComparisonRun<'_> {
 
 pub(crate) fn run(args: &ComparisonsArgs) {
     assert!(
-        args.pubsub_receiver_cpus.is_none() || std::env::var_os("OMQ_BENCH_TASKSET").is_some(),
+        args.pubsub.pubsub_receiver_cpus.is_none()
+            || std::env::var_os("OMQ_BENCH_TASKSET").is_some(),
         "--pubsub-receiver-cpus requires OMQ_BENCH_TASKSET"
     );
     process::install_reaper();
@@ -449,7 +455,7 @@ pub(crate) fn run(args: &ComparisonsArgs) {
     for &transport in &transports {
         run.run_transport(transport);
     }
-    if args.curve {
+    if args.curve.enabled {
         run.run_curve_pubsub();
     }
     eprintln!("\nResults appended to {}", jsonl_path.display());

@@ -2,7 +2,7 @@
 
 use super::impls::{ImplDef, TransportKind};
 use super::{cleanup_ipc_addr, next_addr_id, uses_filesystem_ipc};
-use crate::cli::ComparisonsArgs;
+use crate::cli::PubsubArgs;
 use crate::coord::CoordSocket;
 use crate::parse;
 use crate::process;
@@ -277,17 +277,12 @@ pub(super) fn run_pubsub_cell(
     peers: u64,
     duration: f64,
     rounds: u32,
-    args: &ComparisonsArgs,
+    pubsub: &PubsubArgs,
 ) -> CellResult {
-    representative_of(rounds, |_| run_pubsub_once(cell, peers, duration, args))
+    representative_of(rounds, |_| run_pubsub_once(cell, peers, duration, pubsub))
 }
 
-fn run_pubsub_once(
-    cell: &Cell<'_>,
-    peers: u64,
-    duration: f64,
-    args: &ComparisonsArgs,
-) -> CellResult {
+fn run_pubsub_once(cell: &Cell<'_>, peers: u64, duration: f64, pubsub: &PubsubArgs) -> CellResult {
     if cell.transport == TransportKind::Inproc {
         let peers = peers.to_string();
         return run_inproc_cell(cell, cell.def.inproc_pubsub_subcmd, &[&peers], duration);
@@ -299,8 +294,8 @@ fn run_pubsub_once(
     let peers_str = peers.to_string();
     let addr = cell.addr();
 
-    let receiver_io = args.pubsub_receiver_io_threads.map(|n| n.to_string());
-    let receiver_workers = args.pubsub_receiver_workers.map(|n| n.to_string());
+    let receiver_io = pubsub.pubsub_receiver_io_threads.map(|n| n.to_string());
+    let receiver_workers = pubsub.pubsub_receiver_workers.map(|n| n.to_string());
     let start_at = start_at();
     let mut pub_env: Vec<(&str, &str)> = def.env.to_vec();
     let mut sub_env = subscriber_env(def, receiver_io.as_deref(), receiver_workers.as_deref());
@@ -321,7 +316,7 @@ fn run_pubsub_once(
     // --pubsub-receiver-cpus only replaces a pinned default.
     let sub_cpus = def
         .affinity(process::OTHER_CPU)
-        .map(|default| args.pubsub_receiver_cpus.as_deref().unwrap_or(default));
+        .map(|default| pubsub.pubsub_receiver_cpus.as_deref().unwrap_or(default));
     let sub_output = process::capture(
         &[
             cell.peer_binary.to_str().unwrap(),

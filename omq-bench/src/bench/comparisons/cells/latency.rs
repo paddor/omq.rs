@@ -4,6 +4,7 @@ use super::{BinderCmd, Cell, spawn_binder};
 use crate::bench::comparisons::impls::{
     TransportKind, latency_env, latency_rep_subcmd, latency_req_subcmd,
 };
+use crate::cli::LatencyArgs;
 use crate::parse;
 use crate::process;
 use std::time::Duration;
@@ -27,6 +28,18 @@ pub(crate) struct LatencyWorkload<'a> {
     pub(crate) warmup: u64,
     /// Expected run time in seconds; peers get 30 s on top.
     pub(crate) timeout: u64,
+}
+
+impl<'a> LatencyWorkload<'a> {
+    pub(crate) fn new(pair: &'a str, profile: &'a str, args: &LatencyArgs) -> Self {
+        Self {
+            pair,
+            profile,
+            iterations: args.latency_iterations,
+            warmup: args.latency_warmup,
+            timeout: args.latency_timeout,
+        }
+    }
 }
 
 #[expect(clippy::similar_names)]

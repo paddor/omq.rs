@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
 #[command(name = "omq_bench", about = "OMQ benchmark runner")]
@@ -144,6 +144,34 @@ pub(crate) struct ComparisonsArgs {
     #[arg(long, value_delimiter = ',', default_value = "default", value_parser = ["default", "latency", "throughput"])]
     pub latency_profiles: Vec<String>,
 
+    #[command(flatten)]
+    pub pubsub: PubsubArgs,
+
+    #[command(flatten)]
+    pub latency: LatencyArgs,
+
+    #[command(flatten)]
+    pub fanio: FanioArgs,
+
+    #[command(flatten)]
+    pub curve: CurveArgs,
+
+    /// Base port for WS transport.
+    #[arg(long)]
+    pub base_port: Option<u16>,
+
+    /// Run ID suffix.
+    #[arg(long)]
+    pub id: Option<String>,
+
+    /// Quick run: 3 sizes, 1 round, 1.5s.
+    #[arg(long)]
+    pub quick_run: bool,
+}
+
+/// PUB/SUB comparison options.
+#[derive(Args)]
+pub(crate) struct PubsubArgs {
     /// Skip pub/sub measurements.
     #[arg(long)]
     pub no_pubsub: bool,
@@ -163,7 +191,15 @@ pub(crate) struct ComparisonsArgs {
     /// Receiver CPU mask for PUB/SUB (requires `OMQ_BENCH_TASKSET`).
     #[arg(long)]
     pub pubsub_receiver_cpus: Option<String>,
+}
 
+/// Iterations, warmup, and timeout of every latency cell.
+#[derive(Args)]
+#[expect(
+    clippy::struct_field_names,
+    reason = "field names give the --latency-* flags and value names"
+)]
+pub(crate) struct LatencyArgs {
     /// Latency iterations.
     #[arg(long, default_value_t = 5000)]
     pub latency_iterations: u64,
@@ -175,7 +211,11 @@ pub(crate) struct ComparisonsArgs {
     /// Latency timeout in seconds.
     #[arg(long, default_value_t = 15)]
     pub latency_timeout: u64,
+}
 
+/// Fan-out and fan-in comparison options.
+#[derive(Args)]
+pub(crate) struct FanioArgs {
     /// Enable fan-out benchmarks.
     #[arg(long)]
     pub fanout: bool,
@@ -191,30 +231,23 @@ pub(crate) struct ComparisonsArgs {
     /// Fan-in peer counts (comma-separated).
     #[arg(long, value_delimiter = ',', default_values_t = [4, 32])]
     pub fanin_peers: Vec<u64>,
+}
 
+/// CURVE comparison options.
+#[derive(Args)]
+pub(crate) struct CurveArgs {
     /// Enable CURVE benchmarks.
-    #[arg(long)]
-    pub curve: bool,
+    #[arg(long = "curve")]
+    pub enabled: bool,
 
     /// CURVE pub/sub peer count.
     #[arg(long, default_value_t = 16)]
     pub curve_peers: u64,
-
-    /// Base port for WS transport.
-    #[arg(long)]
-    pub base_port: Option<u16>,
-
-    /// Run ID suffix.
-    #[arg(long)]
-    pub id: Option<String>,
-
-    /// Quick run: 3 sizes, 1 round, 1.5s.
-    #[arg(long)]
-    pub quick_run: bool,
 }
 
-#[derive(Parser)]
-pub(crate) struct PushpullLz4Args {
+/// Options shared by the LZ4 and Zstd PUSH/PULL compression benchmarks.
+#[derive(Args)]
+pub(crate) struct PushpullCompressionArgs {
     #[command(flatten)]
     pub link: CompressionLinkArgs,
 
@@ -244,35 +277,18 @@ pub(crate) struct PushpullLz4Args {
 }
 
 #[derive(Parser)]
+pub(crate) struct PushpullLz4Args {
+    #[command(flatten)]
+    pub common: PushpullCompressionArgs,
+}
+
+#[derive(Parser)]
 // The adaptive level settles within about 1 s.
 #[command(mut_arg("warmup_seconds", |arg| arg.default_value("1")))]
+#[command(mut_arg("transports", |arg| arg.default_value("zstd+tcp")))]
 pub(crate) struct PushpullZstdArgs {
     #[command(flatten)]
-    pub link: CompressionLinkArgs,
-
-    /// Transports (comma-separated).
-    #[arg(long, default_value = "zstd+tcp")]
-    pub transports: String,
-
-    /// Message sizes (comma-separated).
-    #[arg(long, value_delimiter = ',')]
-    pub sizes: Option<Vec<u64>>,
-
-    /// Duration per measurement in seconds.
-    #[arg(long, default_value_t = 2.0)]
-    pub duration: f64,
-
-    /// Measurements per cell (all rounds are retained).
-    #[arg(long, default_value_t = 3)]
-    pub rounds: u32,
-
-    /// Quick mode: 3 sizes, 1 round, 1.5s.
-    #[arg(long)]
-    pub quick: bool,
-
-    /// Dict sizes to train (comma-separated).
-    #[arg(long, value_delimiter = ',')]
-    pub dict_sizes: Vec<u64>,
+    pub common: PushpullCompressionArgs,
 
     /// Fixed Zstd compression level (-7..=4) instead of `--level-range`.
     #[arg(long)]
@@ -339,4 +355,62 @@ pub(crate) struct CompressionArgs {
     /// Dict sizes to train (comma-separated).
     #[arg(long, value_delimiter = ',', default_values_t = [2048])]
     pub dict_sizes: Vec<u64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Cli, Command, RunSub};
+    use clap::{CommandFactory, Parser};
+
+    fn run(args: &[&str]) -> RunSub {
+        let cli = Cli::try_parse_from([&["omq_bench", "run"], args].concat()).unwrap();
+        let Command::Run { sub } = cli.command else {
+            panic!("not a run command");
+        };
+        sub
+    }
+
+    #[test]
+    fn command_definition_is_valid() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn compression_commands_keep_their_own_defaults() {
+        let RunSub::PushpullLz4(lz4) = run(&["pushpull-lz4"]) else {
+            panic!("not pushpull-lz4");
+        };
+        assert_eq!(lz4.common.transports, "tcp,lz4+tcp");
+        assert!((lz4.common.link.warmup_seconds - 0.5).abs() < f64::EPSILON);
+        let RunSub::PushpullZstd(zstd) = run(&["pushpull-zstd"]) else {
+            panic!("not pushpull-zstd");
+        };
+        assert_eq!(zstd.common.transports, "zstd+tcp");
+        assert!((zstd.common.link.warmup_seconds - 1.0).abs() < f64::EPSILON);
+        assert_eq!(zstd.level_range, [-7, 4]);
+    }
+
+    #[test]
+    fn grouped_comparison_flags_keep_their_names() {
+        let RunSub::Comparisons(args) = run(&[
+            "comparisons",
+            "--curve",
+            "--curve-peers=8",
+            "--no-pubsub",
+            "--pubsub-receiver-workers=2",
+            "--latency-iterations=10",
+            "--fanin",
+            "--fanout-peers=2,3",
+        ]) else {
+            panic!("not comparisons");
+        };
+        assert!(args.curve.enabled);
+        assert_eq!(args.curve.curve_peers, 8);
+        assert!(args.pubsub.no_pubsub);
+        assert_eq!(args.pubsub.pubsub_receiver_workers, Some(2));
+        assert_eq!(args.latency.latency_iterations, 10);
+        assert_eq!(args.latency.latency_warmup, 500);
+        assert!(args.fanio.fanin && !args.fanio.fanout);
+        assert_eq!(args.fanio.fanout_peers, [2, 3]);
+    }
 }

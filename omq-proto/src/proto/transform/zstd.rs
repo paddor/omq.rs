@@ -55,13 +55,7 @@ pub fn adaptive_start_level(min: i32, max: i32) -> i32 {
 #[must_use]
 pub fn arena_capacity() -> usize {
     static CAPACITY: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *CAPACITY.get_or_init(|| {
-        std::env::var("OMQ_ZSTD_ARENA_BYTES")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(32 * 1024)
-            .min(MAX_ARENA_BYTES)
-    })
+    *CAPACITY.get_or_init(|| arena::capacity_from_env("OMQ_ZSTD_ARENA_BYTES", 32 * 1024))
 }
 
 /// Train a bounded ZDICT dictionary; return `None` for unusable samples or output.
@@ -387,21 +381,7 @@ impl ZstdEncoder {
     /// # Errors
     /// Rejects empty or oversized arenas and compression failures.
     pub fn encode_arena(&mut self, messages: &[&Message]) -> Result<TransformedOut> {
-        let mut size = 0usize;
-        let mut parts = 0usize;
-        for message in messages {
-            size =
-                size.saturating_add(arena_message_size(message).ok_or_else(|| {
-                    Error::Protocol("message is not eligible for Zstd arena".into())
-                })?);
-            parts = parts.saturating_add(message.len());
-        }
-        if !(1..=MAX_ARENA_MESSAGES).contains(&messages.len())
-            || size > MAX_ARENA_BYTES
-            || parts > MAX_ARENA_PARTS
-        {
-            return Err(Error::Protocol("Zstd arena exceeds limits".into()));
-        }
+        let size = arena::check_batch(messages, "Zstd")?;
         self.arena_buf.clear();
         self.arena_buf.reserve(size);
         for message in messages {
@@ -429,10 +409,12 @@ impl ZstdEncoder {
         };
         let body = compressed.as_deref().unwrap_or(&self.arena_buf);
         let mut wire = BytesMut::with_capacity(arena::HEADER + body.len());
-        wire.extend_from_slice(&ARENA_SENTINEL);
-        wire.extend_from_slice(&[u8::from(compressed.is_some()), 0, 0, 0]);
-        wire.extend_from_slice(&u32::try_from(size).unwrap().to_le_bytes());
-        wire.extend_from_slice(&u32::try_from(messages.len()).unwrap().to_le_bytes());
+        wire.extend_from_slice(&arena::encode_header(
+            ARENA_SENTINEL,
+            compressed.is_some(),
+            size,
+            messages.len(),
+        ));
         wire.extend_from_slice(body);
         out.push(Message::single(wire.freeze()));
         Ok(out)
@@ -511,7 +493,7 @@ pub struct ZstdDecoder {
     max_message_size: Option<usize>,
     max_recv_dict_size: usize,
     dctx: DecompressContext,
-    arena: Option<DecodedArena>,
+    arena: arena::PendingArena,
 }
 
 impl std::fmt::Debug for ZstdDecoder {
@@ -530,7 +512,7 @@ impl Default for ZstdDecoder {
             max_message_size: None,
             max_recv_dict_size: MAX_DICT_BYTES,
             dctx: DecompressContext::new(),
-            arena: None,
+            arena: arena::PendingArena::default(),
         }
     }
 }
@@ -561,9 +543,7 @@ impl ZstdDecoder {
     /// # Errors
     /// Returns errors for invalid envelopes, dictionaries, sizes, or compressed data.
     pub fn decode(&mut self, msg: Message) -> Result<Option<Message>> {
-        if self.has_pending_messages() {
-            return Err(Error::Protocol("undrained Zstd arena".into()));
-        }
+        self.arena.ensure_drained("Zstd")?;
         if Self::is_arena(&msg) {
             return self.decode_arena(&msg, false);
         }
@@ -572,18 +552,13 @@ impl ZstdDecoder {
 
     /// Drain an already decoded arena before accepting another wire message.
     pub fn poll_message(&mut self) -> Option<Message> {
-        let arena = self.arena.as_mut()?;
-        let message = arena.next();
-        if arena.is_empty() {
-            self.arena = None;
-        }
-        message
+        self.arena.poll()
     }
 
     /// Whether an arena still contains undelivered messages.
     #[must_use]
     pub fn has_pending_messages(&self) -> bool {
-        self.arena.is_some()
+        self.arena.is_pending()
     }
 
     fn is_arena(msg: &Message) -> bool {
@@ -592,46 +567,34 @@ impl ZstdDecoder {
     }
 
     fn decode_arena(&mut self, msg: &Message, payload_slots: bool) -> Result<Option<Message>> {
-        let invalid = || Error::Protocol("invalid Zstd arena envelope".into());
+        let invalid = || arena::invalid_envelope("Zstd");
         let bytes = msg.part_bytes(0).ok_or_else(invalid)?;
-        if msg.len() != 1 || bytes.len() < arena::HEADER || bytes[4] > 1 || bytes[5..8] != [0; 3] {
-            return Err(invalid());
-        }
-        let size = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
-        let count = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
-        if !(1..=MAX_ARENA_BYTES).contains(&size)
-            || !(1..=MAX_ARENA_MESSAGES).contains(&count)
-            || bytes.len() > arena::HEADER + MAX_ARENA_BYTES
-        {
-            return Err(invalid());
-        }
+        let arena::ArenaHeader {
+            compressed,
+            size,
+            count,
+        } = arena::parse_header(msg.len(), &bytes, "Zstd")?;
         let body = bytes.slice(arena::HEADER..);
-        let payload = if bytes[4] == 0 {
-            if body.len() != size {
-                return Err(invalid());
-            }
-            Payload::from_bytes(Bytes::copy_from_slice(&body))
-        } else {
+        let payload = if compressed {
             let payload = self.decode_zstd(&body, &mut Some(size))?;
             if payload.len() != size {
                 return Err(invalid());
             }
             payload
+        } else {
+            Payload::from_bytes(Bytes::copy_from_slice(&body))
         };
-        self.arena = Some(DecodedArena::new(
+        Ok(self.arena.start(DecodedArena::new(
             payload.as_bytes(),
             payload.retained_size().unwrap_or(size),
             count,
             self.max_message_size,
             payload_slots,
-        )?);
-        Ok(self.poll_message())
+        )?))
     }
 
     pub(super) fn decode_with_payload_slots(&mut self, msg: Message) -> Result<Option<Message>> {
-        if self.has_pending_messages() {
-            return Err(Error::Protocol("undrained Zstd arena".into()));
-        }
+        self.arena.ensure_drained("Zstd")?;
         if Self::is_arena(&msg) {
             return self.decode_arena(&msg, true);
         }

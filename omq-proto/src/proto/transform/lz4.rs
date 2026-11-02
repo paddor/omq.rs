@@ -378,21 +378,7 @@ impl Lz4Encoder {
     /// # Errors
     /// Rejects empty or oversized arenas and compression failures.
     pub fn encode_arena(&mut self, messages: &[&Message]) -> Result<TransformedOut> {
-        let mut size = 0usize;
-        let mut parts = 0usize;
-        for message in messages {
-            size =
-                size.saturating_add(arena_message_size(message).ok_or_else(|| {
-                    Error::Protocol("message is not eligible for LZ4 arena".into())
-                })?);
-            parts = parts.saturating_add(message.len());
-        }
-        if !(1..=MAX_ARENA_MESSAGES).contains(&messages.len())
-            || size > MAX_ARENA_BYTES
-            || parts > MAX_ARENA_PARTS
-        {
-            return Err(Error::Protocol("LZ4 arena exceeds limits".into()));
-        }
+        let size = arena::check_batch(messages, "LZ4")?;
         self.arena_buf.clear();
         self.arena_buf.reserve(size);
         for message in messages {
@@ -416,11 +402,12 @@ impl Lz4Encoder {
         if compressed.is_none() {
             self.out_buf[arena::HEADER..arena::HEADER + size].copy_from_slice(&self.arena_buf);
         }
-        self.out_buf[..4].copy_from_slice(&arena::SENTINEL);
-        self.out_buf[4] = u8::from(compressed.is_some());
-        self.out_buf[5..8].fill(0);
-        self.out_buf[8..12].copy_from_slice(&u32::try_from(size).unwrap().to_le_bytes());
-        self.out_buf[12..16].copy_from_slice(&u32::try_from(messages.len()).unwrap().to_le_bytes());
+        self.out_buf[..arena::HEADER].copy_from_slice(&arena::encode_header(
+            arena::SENTINEL,
+            compressed.is_some(),
+            size,
+            messages.len(),
+        ));
         out.push(Message::single(Bytes::copy_from_slice(
             &self.out_buf[..arena::HEADER + length],
         )));
@@ -488,7 +475,7 @@ impl Lz4Encoder {
 /// Receive-side per-connection LZ4 state.
 #[derive(Debug)]
 pub struct Lz4Decoder {
-    arena: Option<arena::DecodedArena>,
+    arena: arena::PendingArena,
     /// Inbound decompressor, created on receipt of the peer's LZ4D shipment.
     decompressor: Option<Decompressor>,
     /// Decompression budget, in bytes. `None` = use the absolute ceiling.
@@ -502,7 +489,7 @@ pub struct Lz4Decoder {
 impl Default for Lz4Decoder {
     fn default() -> Self {
         Self {
-            arena: None,
+            arena: arena::PendingArena::default(),
             decompressor: None,
             max_message_size: None,
             block_size: LZ4M_BLOCK_SIZE,
@@ -554,9 +541,7 @@ impl Lz4Decoder {
     /// # Errors
     /// Returns errors for invalid envelopes, dictionaries, sizes, or compressed data.
     pub fn decode(&mut self, msg: Message) -> Result<Option<Message>> {
-        if self.has_pending_messages() {
-            return Err(Error::Protocol("undrained LZ4 arena".into()));
-        }
+        self.arena.ensure_drained("LZ4")?;
         if Self::is_arena(&msg) {
             return self.decode_arena(&msg, false, None);
         }
@@ -565,18 +550,13 @@ impl Lz4Decoder {
 
     /// Drain an already decoded arena before accepting another wire message.
     pub fn poll_message(&mut self) -> Option<Message> {
-        let arena = self.arena.as_mut()?;
-        let message = arena.next();
-        if arena.is_empty() {
-            self.arena = None;
-        }
-        message
+        self.arena.poll()
     }
 
     /// Whether an arena still contains undelivered messages.
     #[must_use]
     pub fn has_pending_messages(&self) -> bool {
-        self.arena.is_some()
+        self.arena.is_pending()
     }
 
     fn is_arena(msg: &Message) -> bool {
@@ -590,26 +570,15 @@ impl Lz4Decoder {
         payload_slots: bool,
         pool: Option<&crate::PayloadPool>,
     ) -> Result<Option<Message>> {
-        let invalid = || Error::Protocol("invalid LZ4 arena envelope".into());
+        let invalid = || arena::invalid_envelope("LZ4");
         let bytes = msg.part_slice(0).ok_or_else(invalid)?;
-        if msg.len() != 1 || bytes.len() < arena::HEADER || bytes[4] > 1 || bytes[5..8] != [0; 3] {
-            return Err(invalid());
-        }
-        let size = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
-        let count = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
-        if !(1..=MAX_ARENA_BYTES).contains(&size)
-            || !(1..=MAX_ARENA_MESSAGES).contains(&count)
-            || bytes.len() > arena::HEADER + MAX_ARENA_BYTES
-        {
-            return Err(invalid());
-        }
+        let arena::ArenaHeader {
+            compressed,
+            size,
+            count,
+        } = arena::parse_header(msg.len(), bytes, "LZ4")?;
         let data = &bytes[arena::HEADER..];
-        let payload = if bytes[4] == 0 {
-            if data.len() != size {
-                return Err(invalid());
-            }
-            Payload::from_bytes(Bytes::copy_from_slice(data))
-        } else {
+        let payload = if compressed {
             decode_payload(size, pool, |mut out| {
                 let length = out
                     .decompress(data, self.decompressor.as_ref(), 0..size)
@@ -619,16 +588,17 @@ impl Lz4Decoder {
                 }
                 Ok(())
             })?
+        } else {
+            Payload::from_bytes(Bytes::copy_from_slice(data))
         };
         let retained = payload.retained_size().unwrap_or(size);
-        self.arena = Some(arena::DecodedArena::new(
+        Ok(self.arena.start(arena::DecodedArena::new(
             payload.as_bytes(),
             retained,
             count,
             self.max_message_size,
             payload_slots,
-        )?);
-        Ok(self.poll_message())
+        )?))
     }
 
     pub(super) fn decode_with_payload_slots(
@@ -636,9 +606,7 @@ impl Lz4Decoder {
         msg: Message,
         pool: Option<&crate::PayloadPool>,
     ) -> Result<Option<Message>> {
-        if self.has_pending_messages() {
-            return Err(Error::Protocol("undrained LZ4 arena".into()));
-        }
+        self.arena.ensure_drained("LZ4")?;
         if Self::is_arena(&msg) {
             return self.decode_arena(&msg, true, pool);
         }

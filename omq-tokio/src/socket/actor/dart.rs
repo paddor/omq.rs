@@ -339,9 +339,12 @@ impl SocketDriver {
         let sink = if let Some(slot) = &self.link.spsc.conflate_slot {
             RecvSink::Conflate(slot.clone())
         } else if let Some(fanin) = &self.link.spsc.fanin {
-            match fanin.register_dart(self.options.recv_queue_capacity()) {
-                Some(producer) => RecvSink::Fanin(crate::socket::fanin::Sink::owned(producer)),
-                None => RecvSink::Channel(self.link.recv_tx.clone()),
+            if let Some(producer) = fanin.register_dart(self.options.recv_queue_capacity()) {
+                RecvSink::Fanin(crate::socket::fanin::Sink::owned(producer))
+            } else {
+                // Close/drop shut fan-in down first: keep receive closed.
+                self.link.recv_tx.close();
+                RecvSink::Channel(self.link.recv_tx.clone())
             }
         } else {
             let (producer, consumer) = yring::spsc(self.options.recv_queue_capacity());
@@ -592,4 +595,52 @@ fn ready_properties(ready: ReadyPeer) -> Arc<PeerProperties> {
             ("Transport".into(), Bytes::from_static(b"DART")),
         ],
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::socket::actor::{DriverEnv, HandleLink, HandleShared};
+    use omq_proto::Message;
+    use omq_proto::error::TrySendError;
+
+    #[tokio::test]
+    async fn late_peer_after_fanin_close_gets_closed_receive() {
+        let options = Options::default();
+        let pool = crate::context::IoPoolHandle::none();
+        let blocking = crate::socket::recv::BlockingRecvWaker::new();
+        let (recv_tx, _consumer, _, _) = crate::socket::recv::recv_pipe(16, blocking.clone());
+        let mut spsc = crate::socket::recv::SpscHandles::new(blocking.clone(), false);
+        let fanin = crate::socket::fanin::Fanin::new(16, spsc.recv_signal.clone(), blocking);
+        spsc.fanin = Some(fanin.clone());
+        let (_, cmd_rx) = mpsc::channel(1);
+        let link = HandleLink {
+            cmd_rx,
+            recv_tx: recv_tx.clone(),
+            cancel: CancellationToken::new(),
+            monitor: crate::socket::monitor::MonitorPublisher::new(16),
+            spsc,
+            peer_recv_routes: None,
+            shared: HandleShared::new(),
+        };
+        let env = DriverEnv {
+            io_pool: pool.clone(),
+            inproc_registry: Arc::new(crate::transport::inproc::InprocRegistry::new()),
+            recv_sink_config: None,
+        };
+        let send_strategy =
+            crate::routing::SendStrategy::for_socket_type(SocketType::Pull, &options, &pool);
+        let mut driver = SocketDriver::new(SocketType::Pull, options, send_strategy, link, env);
+
+        // Last-handle drop closes fan-in before a late DART peer attaches.
+        fanin.close();
+        let RecvSink::Channel(pipe) = driver.dart_recv_sink(0) else {
+            panic!("late attachment must use the shared receive pipe");
+        };
+        assert!(Arc::ptr_eq(&pipe, &recv_tx));
+        assert!(matches!(
+            pipe.try_send(Message::single("late-peer")),
+            Err(TrySendError::Closed)
+        ));
+    }
 }

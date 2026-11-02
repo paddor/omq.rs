@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A DART peer attaching after socket close or last-handle drop gets a
+  closed receive queue, like wire peers, instead of filling an unread one.
+
 ## [0.33.0] - 2026-10-29
 
 ### Added

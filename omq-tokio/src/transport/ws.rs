@@ -122,9 +122,9 @@ impl tokio::io::AsyncWrite for WsTransport {
 
 // ---- Bind / Accept / Connect ----
 
-/// Result of a WebSocket accept: the upgraded stream + any leftover
-/// bytes read past the HTTP headers (may contain WS frames).
-pub(crate) struct WsAccepted {
+/// An upgraded WebSocket stream plus any bytes read past the HTTP headers
+/// (may contain WS frames).
+pub(crate) struct WsUpgraded {
     pub transport: WsTransport,
     pub leftover: bytes::Bytes,
 }
@@ -133,7 +133,7 @@ async fn accept(
     stream: TcpStream,
     tls_acceptor: Option<&tokio_rustls::TlsAcceptor>,
     policy: &upgrade::ServerPolicy,
-) -> Result<WsAccepted> {
+) -> Result<WsUpgraded> {
     let _ = stream.set_nodelay(true);
     let mut transport = if let Some(acc) = tls_acceptor {
         let tls = acc.accept(stream).await.map_err(Error::Io)?;
@@ -144,17 +144,10 @@ async fn accept(
 
     let leftover = upgrade::accept(&mut transport, policy).await?;
 
-    Ok(WsAccepted {
+    Ok(WsUpgraded {
         transport,
         leftover,
     })
-}
-
-/// Result of a WebSocket connect: the upgraded stream + any leftover
-/// bytes read past the HTTP response headers.
-pub(crate) struct WsConnected {
-    pub transport: WsTransport,
-    pub leftover: bytes::Bytes,
 }
 
 /// Address and scheme of one WS/WSS dial.
@@ -170,7 +163,7 @@ pub(crate) async fn connect(
     target: WsTarget<'_>,
     wss_tls: &omq_proto::options::WssTls,
     mechanism: &omq_proto::MechanismSetup,
-) -> Result<WsConnected> {
+) -> Result<WsUpgraded> {
     let WsTarget {
         host,
         port,
@@ -210,7 +203,7 @@ pub(crate) async fn connect(
     )
     .await?;
 
-    Ok(WsConnected {
+    Ok(WsUpgraded {
         transport,
         leftover,
     })

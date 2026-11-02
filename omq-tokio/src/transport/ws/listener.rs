@@ -14,13 +14,13 @@ use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
 use tokio::net::{TcpListener, TcpStream};
 
-use super::{WsAccepted, accept};
+use super::{WsUpgraded, accept};
 use crate::transport::setup::AcceptSetup;
 use crate::transport::setup::{Admission, PendingHandshake, SetupState};
 use omq_proto::endpoint::{Endpoint, Host};
 use omq_proto::{Error, Result};
 
-type PendingAccept = BoxFuture<'static, (SocketAddr, Result<(WsAccepted, SetupState)>)>;
+type PendingAccept = BoxFuture<'static, (SocketAddr, Result<(WsUpgraded, SetupState)>)>;
 
 pub(crate) struct WsListener {
     pub(crate) inner: TcpListener,
@@ -42,7 +42,7 @@ impl WsListener {
         self.monitor_endpoint = endpoint;
     }
 
-    pub(crate) async fn accept(&mut self) -> Result<(WsAccepted, SocketAddr, SetupState)> {
+    pub(crate) async fn accept(&mut self) -> Result<(WsUpgraded, SocketAddr, SetupState)> {
         // Every completed upgrade consumed at most one bounded HTTP header.
         // Yield during raw-accept/rejection floods even when all futures are ready.
         let mut budget = omq_proto::flow::DrainBudget::new(32, 128 * 1024);

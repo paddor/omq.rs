@@ -1,5 +1,4 @@
 use super::make_run_id;
-use crate::chart::fmt_size;
 use crate::cli::ComparisonsArgs;
 use crate::jsonl::{self, ComparisonRow};
 use crate::process;
@@ -10,6 +9,8 @@ use std::path::{Path, PathBuf};
 mod build;
 mod cells;
 mod impls;
+mod select;
+mod table;
 
 use build::build_peers;
 use cells::{
@@ -17,37 +18,14 @@ use cells::{
     run_latency_cell, run_pubsub_cell, run_throughput_cell,
 };
 use impls::{
-    IMPLS, ImplClass, ImplDef, TransportKind, find_impl, latency_env, supports_fanio,
+    ImplClass, ImplDef, TransportKind, find_impl, latency_env, supports_fanio,
     supports_latency_pair, supports_pushpull,
 };
-
-const COMPARISON_CHART_SIZES: &[u64] = &[16, 64, 256, 1024, 4096, 16384];
-const MAIN_EXTRA_CHART_SIZES: &[u64] = &[
-    32, 128, 512, 2048, 8192, 32768, 262_144, 4_194_304, 8_388_608,
-];
-const QUICK_SIZES: &[u64] = &[64, 1024, 4096];
-
-const LATENCY_MAX_SIZE: u64 = 4096;
-
-const DEFAULT_DURATION: f64 = 3.0;
-const QUICK_DURATION: f64 = 1.5;
-const DEFAULT_ROUNDS: u32 = 1;
-
-fn all_chart_sizes() -> Vec<u64> {
-    let mut sizes: Vec<u64> = COMPARISON_CHART_SIZES.to_vec();
-    sizes.extend(MAIN_EXTRA_CHART_SIZES);
-    sizes.sort_unstable();
-    sizes.dedup();
-    sizes
-}
-
-fn latency_sizes_from(sizes: &[u64]) -> Vec<u64> {
-    sizes
-        .iter()
-        .copied()
-        .filter(|&s| s <= LATENCY_MAX_SIZE)
-        .collect()
-}
+use select::{
+    COMPARISON_CHART_SIZES, duration_and_rounds, exit_on_unknown_impls, latency_sizes_from,
+    peer_features, random_base_port, selected_impl_names, selected_sizes, selected_transports,
+};
+use table::{fmt_compact, fmt_full, print_latency_header, print_throughput_header, run_table};
 
 // ---- Address generation ---------------------------------------------------
 
@@ -74,77 +52,6 @@ fn cleanup_ipc_addr(addr: &str, impl_name: &str) {
 }
 
 // ---- Orchestration --------------------------------------------------------
-
-fn selected_sizes(args: &ComparisonsArgs) -> Vec<u64> {
-    let sizes = if let Some(sizes) = &args.sizes {
-        sizes.clone()
-    } else if args.quick_run {
-        QUICK_SIZES.to_vec()
-    } else {
-        all_chart_sizes()
-    };
-    if !args.allow_non_chart_sizes {
-        let chart = all_chart_sizes();
-        for &size in &sizes {
-            if !chart.contains(&size) {
-                eprintln!(
-                    "warning: size {size} is not a chart size, use --allow-non-chart-sizes to override"
-                );
-            }
-        }
-    }
-    sizes
-}
-
-fn selected_impl_names(args: &ComparisonsArgs) -> Vec<&str> {
-    let mut names: Vec<&str> = if args.omq {
-        let mut names = vec!["omq-tokio-1t", "omq-tokio-2t"];
-        for name in &args.impls {
-            if !names.contains(&name.as_str()) {
-                names.push(name);
-            }
-        }
-        names
-    } else if !args.impls.is_empty() {
-        args.impls.iter().map(String::as_str).collect()
-    } else {
-        IMPLS
-            .iter()
-            .filter(|imp| imp.main)
-            .map(|imp| imp.name)
-            .collect()
-    };
-    if args.curve {
-        let families: Vec<&str> = names
-            .iter()
-            .filter_map(|name| name.split('-').next())
-            .collect();
-        for imp in IMPLS {
-            if imp.class == Some(ImplClass::Curve)
-                && !names.contains(&imp.name)
-                && imp
-                    .name
-                    .split('-')
-                    .next()
-                    .is_some_and(|family| families.contains(&family))
-            {
-                names.push(imp.name);
-            }
-        }
-    }
-    names
-}
-
-fn random_base_port() -> u16 {
-    let mut buf = [0u8; 2];
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut file| {
-            use std::io::Read;
-            file.read_exact(&mut buf)
-        })
-        .ok();
-    20_000 + (u16::from_le_bytes(buf) % 20_000)
-}
 
 #[derive(Clone, Copy, Debug)]
 enum CellKind {
@@ -546,152 +453,6 @@ pub(crate) fn run(args: &ComparisonsArgs) {
         run.run_curve_pubsub();
     }
     eprintln!("\nResults appended to {}", jsonl_path.display());
-}
-
-/// OMQ peer Cargo features that the selected transports and impls need.
-fn peer_features(
-    args: &ComparisonsArgs,
-    impl_names: &[&str],
-    transports: &[TransportKind],
-) -> Vec<&'static str> {
-    let mut features = Vec::new();
-    if transports.contains(&TransportKind::Ws) {
-        features.push("ws");
-    }
-    if transports.contains(&TransportKind::Quic) {
-        features.push("quic");
-    }
-    if args.curve || impl_names.iter().any(|name| name.contains("curve")) {
-        features.push("curve");
-    }
-    features
-}
-
-/// Seconds per cell and rounds per cell: CLI, then environment, then
-/// defaults. Quick runs override both.
-fn duration_and_rounds(args: &ComparisonsArgs) -> (f64, u32) {
-    let duration = if args.quick_run {
-        QUICK_DURATION
-    } else {
-        args.duration
-            .or_else(|| std::env::var("OMQ_BENCH_DURATION").ok()?.parse().ok())
-            .unwrap_or(DEFAULT_DURATION)
-    };
-    let rounds = if args.quick_run {
-        1
-    } else {
-        args.rounds
-            .or_else(|| std::env::var("OMQ_BENCH_ROUNDS").ok()?.parse().ok())
-            .unwrap_or(DEFAULT_ROUNDS)
-    };
-    (duration, rounds)
-}
-
-fn exit_on_unknown_impls(impl_names: &[&str]) {
-    for &name in impl_names {
-        if find_impl(name).is_none() {
-            eprintln!("unknown impl: {name}");
-            eprintln!(
-                "available: {}",
-                IMPLS
-                    .iter()
-                    .map(|imp| imp.name)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-            std::process::exit(1);
-        }
-    }
-}
-
-fn selected_transports(args: &ComparisonsArgs) -> Vec<TransportKind> {
-    args.transport
-        .iter()
-        .map(|transport| match transport {
-            crate::cli::Transport::Tcp => TransportKind::Tcp,
-            crate::cli::Transport::Ipc => TransportKind::Ipc,
-            crate::cli::Transport::Inproc => TransportKind::Inproc,
-            crate::cli::Transport::Ws => TransportKind::Ws,
-            crate::cli::Transport::Quic => TransportKind::Quic,
-        })
-        .collect()
-}
-
-fn print_throughput_header(impls: &[&str]) {
-    eprint!("{:>8}", "");
-    for &name in impls {
-        eprint!("  {name:>14}");
-    }
-    eprintln!();
-}
-
-fn print_latency_header(impls: &[&str]) {
-    eprint!("{:>8}", "");
-    for &name in impls {
-        eprint!("  {name:>14}");
-    }
-    eprintln!("  (p99 us)");
-}
-
-/// Measures every implementation at every size and prints one row per size
-/// with `width`-wide cells. `measure` runs and records one cell and returns
-/// its text.
-fn run_table(
-    sizes: &[u64],
-    impls: &[&str],
-    width: usize,
-    mut measure: impl FnMut(&str, u64) -> String,
-) {
-    for &size in sizes {
-        let cells: Vec<String> = impls.iter().map(|&name| measure(name, size)).collect();
-        print_table_row(&fmt_size(size), &cells, width);
-    }
-}
-
-fn print_table_row(label: &str, cells: &[String], width: usize) {
-    use std::fmt::Write as _;
-
-    let mut line = format!("{label:>8}");
-    for cell in cells {
-        write!(&mut line, "  {cell:>width$}").expect("write to string");
-    }
-    eprintln!("{line}");
-}
-
-/// Bandwidth from 1 KiB, message rate below.
-fn fmt_full(result: &CellResult, size: u64) -> String {
-    if size >= 1024 {
-        fmt_gbps(result.mbps)
-    } else {
-        fmt_rate(result.msgs_s)
-    }
-}
-
-/// GB/s from 1 KiB, thousand messages per second below.
-fn fmt_compact(result: &CellResult, size: u64) -> String {
-    if size >= 1024 {
-        format!("{:.1}", result.mbps / 1000.0)
-    } else {
-        format!("{:.0}", result.msgs_s / 1000.0)
-    }
-}
-
-fn fmt_rate(val: f64) -> String {
-    if val >= 1_000_000.0 {
-        format!("{:.2}M msg/s", val / 1_000_000.0)
-    } else if val >= 1000.0 {
-        format!("{:.0}K msg/s", val / 1000.0)
-    } else {
-        format!("{val:.0} msg/s")
-    }
-}
-
-fn fmt_gbps(val: f64) -> String {
-    if val >= 1000.0 {
-        format!("{:.2} GB/s", val / 1000.0)
-    } else {
-        format!("{val:.0} MB/s")
-    }
 }
 
 #[cfg(test)]

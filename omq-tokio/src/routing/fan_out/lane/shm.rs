@@ -2,7 +2,7 @@
 
 #[cfg(target_os = "linux")]
 use super::LaneData;
-use super::{LaneDispatch, LaneWorker, PendingPeer, PreparedFrame};
+use super::{LaneDispatch, LaneWorker, Parked, PendingPeer, PreparedFrame};
 use crate::engine::transmit_slot::{PeerTransmitSlot, TryFrameResult};
 use crate::routing::fan_out::FanOutMutePolicy;
 #[cfg(target_os = "linux")]
@@ -12,7 +12,6 @@ use omq_proto::fan_out_frame::FanOutFrame;
 use omq_proto::flow::DrainBudget;
 use omq_proto::message::Message;
 use smallvec::SmallVec;
-use std::sync::Arc;
 
 impl LaneWorker {
     /// Pack a run of same-envelope group publications into one SHM batch
@@ -61,7 +60,7 @@ impl LaneWorker {
         let dispatch = LaneDispatch { msg: message };
         let targets = self.matching_peer_groups(&dispatch);
         let mut pending = SmallVec::<[PendingPeer; 8]>::new();
-        let mut payload = None;
+        let mut parked = Parked::new(&mut pending);
         for peers in targets {
             for peer_id in peers {
                 let Some(peer) = self.peers.get_mut(&peer_id) else {
@@ -73,20 +72,8 @@ impl LaneWorker {
                 {
                     TryFrameResult::Ok => Self::touch_peer(peer_id, peer, touched),
                     TryFrameResult::Full if self.mute_policy == FanOutMutePolicy::Block => {
-                        let payload = payload
-                            .get_or_insert_with(|| {
-                                Arc::new(PreparedFrame::ShmBatch(
-                                    dispatch.msg.clone(),
-                                    count,
-                                    referenced,
-                                ))
-                            })
-                            .clone();
-                        pending.push(PendingPeer {
-                            peer_id,
-                            slot: peer.slot.clone(),
-                            payload,
-                            dictionary: None,
+                        parked.park(peer_id, &peer.slot, None, || {
+                            PreparedFrame::ShmBatch(dispatch.msg.clone(), count, referenced)
                         });
                     }
                     TryFrameResult::Full => {
@@ -104,7 +91,7 @@ impl LaneWorker {
         peer_ids: &[u64],
         dispatch: &LaneDispatch,
         touched: &mut SmallVec<[u64; 32]>,
-        mut pending: Option<&mut SmallVec<[PendingPeer; 8]>>,
+        pending: Option<&mut SmallVec<[PendingPeer; 8]>>,
     ) {
         debug_assert!(pending.is_some() || self.mute_policy == FanOutMutePolicy::DropNewest);
         let multipart = self.prepare_shm_multipart(dispatch);
@@ -120,7 +107,7 @@ impl LaneWorker {
             // records below instead reserve a distinct lease per connection.
             omq_shm::frame_copied(&dispatch.msg, &mut self.eq);
         }
-        let mut payload = None;
+        let mut parked = pending.map(Parked::new);
         for &peer_id in peer_ids {
             let Some(peer) = self.peers.get_mut(&peer_id) else {
                 continue;
@@ -136,28 +123,18 @@ impl LaneWorker {
             match result {
                 TryFrameResult::Ok => Self::touch_peer(peer_id, peer, touched),
                 TryFrameResult::Full => {
-                    let Some(pending) = pending.as_mut() else {
+                    let Some(parked) = parked.as_mut() else {
                         peer.slot.deactivate_fanout();
                         continue;
                     };
-                    let payload = payload
-                        .get_or_insert_with(|| {
-                            Arc::new(if copied {
-                                PreparedFrame::from_frame(&FanOutFrame::Arena(
-                                    self.eq.arena_bytes(),
-                                ))
-                            } else if let Some(record) = &multipart {
-                                PreparedFrame::ShmMultipart(record.clone())
-                            } else {
-                                PreparedFrame::Shm(dispatch.msg.clone())
-                            })
-                        })
-                        .clone();
-                    pending.push(PendingPeer {
-                        peer_id,
-                        slot: peer.slot.clone(),
-                        payload,
-                        dictionary: None,
+                    parked.park(peer_id, &peer.slot, None, || {
+                        if copied {
+                            PreparedFrame::from_frame(&FanOutFrame::Arena(self.eq.arena_bytes()))
+                        } else if let Some(record) = &multipart {
+                            PreparedFrame::ShmMultipart(record.clone())
+                        } else {
+                            PreparedFrame::Shm(dispatch.msg.clone())
+                        }
                     });
                 }
                 TryFrameResult::Dead | TryFrameResult::Ineligible => {}

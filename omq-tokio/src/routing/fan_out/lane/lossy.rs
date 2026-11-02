@@ -58,9 +58,13 @@ impl LaneWorker {
             &wire_messages,
             payload_peer_ids.len(),
         );
+        let lossy = LossyPush {
+            policy: self.mute_policy,
+            protected: false,
+        };
         for peer_id in payload_peer_ids {
             if let Some(peer) = self.peers.get_mut(&peer_id) {
-                Self::push_frame_to_peer_lossy(self.mute_policy, peer_id, peer, &encoded, touched);
+                lossy.push(peer_id, peer, &encoded, touched);
             }
         }
         clear_fan_out_frame(&mut self.eq, &mut self.chunks);
@@ -83,18 +87,16 @@ impl LaneWorker {
             FAN_OUT_TOTAL_COPY_BUDGET,
         );
 
+        let lossy = LossyPush {
+            policy: self.mute_policy,
+            protected: true,
+        };
         for &peer_id in peer_ids {
             let Some(peer) = self.peers.get_mut(&peer_id) else {
                 continue;
             };
             let dict_ready = peer.slot.fanout_dict_queued_or_shipped()
-                || Self::push_protected_frame_to_peer_lossy(
-                    self.mute_policy,
-                    peer_id,
-                    peer,
-                    &encoded,
-                    touched,
-                );
+                || lossy.push(peer_id, peer, &encoded, touched);
             if dict_ready {
                 payload_peer_ids.push(peer_id);
             }
@@ -102,74 +104,6 @@ impl LaneWorker {
         clear_fan_out_frame(&mut self.eq, &mut self.chunks);
 
         payload_peer_ids
-    }
-
-    fn push_frame_to_peer_lossy(
-        mute_policy: FanOutMutePolicy,
-        peer_id: u64,
-        peer: &mut LanePeer,
-        frame: &FanOutFrame<'_>,
-        touched: &mut SmallVec<[u64; 32]>,
-    ) -> bool {
-        let push = LossyPush {
-            policy: mute_policy,
-            protected: false,
-        };
-        Self::push_frame_to_peer_lossy_inner(push, peer_id, peer, frame, touched)
-    }
-
-    fn push_protected_frame_to_peer_lossy(
-        mute_policy: FanOutMutePolicy,
-        peer_id: u64,
-        peer: &mut LanePeer,
-        frame: &FanOutFrame<'_>,
-        touched: &mut SmallVec<[u64; 32]>,
-    ) -> bool {
-        let push = LossyPush {
-            policy: mute_policy,
-            protected: true,
-        };
-        Self::push_frame_to_peer_lossy_inner(push, peer_id, peer, frame, touched)
-    }
-
-    /// Returns whether the peer took the frame.
-    fn push_frame_to_peer_lossy_inner(
-        push: LossyPush,
-        peer_id: u64,
-        peer: &mut LanePeer,
-        frame: &FanOutFrame<'_>,
-        touched: &mut SmallVec<[u64; 32]>,
-    ) -> bool {
-        let result = match push.policy {
-            FanOutMutePolicy::DropOldest if push.protected => {
-                peer.slot.try_push_protected_fanout_drop_oldest(frame)
-            }
-            FanOutMutePolicy::DropOldest => peer.slot.try_push_fanout_drop_oldest(frame),
-            FanOutMutePolicy::DropNewest | FanOutMutePolicy::Block => match frame {
-                FanOutFrame::Arena(raw) => peer.slot.try_push_pre_framed_no_signal(raw),
-                FanOutFrame::Chunks(chunks) => peer.slot.try_push_encoded_no_signal(chunks),
-            },
-        };
-
-        match result {
-            TryFrameResult::Ok => {
-                // Under DropOldest the slot marks a protected dictionary shipped
-                // once it drains it. Here it is only queued.
-                if push.protected && push.policy != FanOutMutePolicy::DropOldest {
-                    peer.dict_shipped = true;
-                    peer.slot.mark_fanout_dict_shipped();
-                }
-                Self::touch_peer(peer_id, peer, touched);
-                true
-            }
-            TryFrameResult::Dead | TryFrameResult::Ineligible => false,
-            TryFrameResult::Full => {
-                if push.policy == FanOutMutePolicy::DropNewest {
-                    peer.slot.deactivate_fanout();
-                }
-                false
-            }
-        }
     }
 }
 
@@ -179,4 +113,44 @@ impl LaneWorker {
 pub(super) struct LossyPush {
     policy: FanOutMutePolicy,
     protected: bool,
+}
+
+impl LossyPush {
+    /// Returns whether the peer took the frame.
+    fn push(
+        self,
+        peer_id: u64,
+        peer: &mut LanePeer,
+        frame: &FanOutFrame<'_>,
+        touched: &mut SmallVec<[u64; 32]>,
+    ) -> bool {
+        let result = match self.policy {
+            FanOutMutePolicy::DropOldest if self.protected => {
+                peer.slot.try_push_protected_fanout_drop_oldest(frame)
+            }
+            FanOutMutePolicy::DropOldest => peer.slot.try_push_fanout_drop_oldest(frame),
+            FanOutMutePolicy::DropNewest | FanOutMutePolicy::Block => {
+                LaneWorker::try_push_frame(&peer.slot, frame)
+            }
+        };
+
+        match result {
+            TryFrameResult::Ok => {
+                // Under DropOldest the slot marks a protected dictionary shipped
+                // once it drains it. Here it is only queued.
+                if self.protected && self.policy != FanOutMutePolicy::DropOldest {
+                    peer.mark_dict_shipped();
+                }
+                LaneWorker::touch_peer(peer_id, peer, touched);
+                true
+            }
+            TryFrameResult::Dead | TryFrameResult::Ineligible => false,
+            TryFrameResult::Full => {
+                if self.policy == FanOutMutePolicy::DropNewest {
+                    peer.slot.deactivate_fanout();
+                }
+                false
+            }
+        }
+    }
 }

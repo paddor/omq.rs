@@ -1,6 +1,8 @@
 //! Publication dispatch under a blocking mute policy.
 
-use super::{GroupPeers, LaneDispatch, LaneWorker, PendingPeer, PreparedFrame, frame_publication};
+use super::{
+    GroupPeers, LaneDispatch, LaneWorker, Parked, PendingPeer, PreparedFrame, frame_publication,
+};
 use crate::engine::transmit_slot::TryFrameResult;
 use crate::routing::fan_out::FAN_OUT_TOTAL_COPY_BUDGET;
 use futures::{StreamExt, stream::FuturesUnordered};
@@ -44,7 +46,7 @@ impl LaneWorker {
             &wire_messages,
             target.peers.len(),
         );
-        let mut owned_payload = None;
+        let mut parked = Parked::new(pending);
         for &peer_id in target.peers {
             let Some(peer) = self.peers.get_mut(&peer_id) else {
                 continue;
@@ -59,14 +61,9 @@ impl LaneWorker {
             match result {
                 TryFrameResult::Ok => Self::touch_peer(peer_id, peer, touched),
                 TryFrameResult::Full => {
-                    let payload = owned_payload
-                        .get_or_insert_with(|| Arc::new(PreparedFrame::from_frame(&frame)))
-                        .clone();
-                    pending.push(PendingPeer {
-                        peer_id,
-                        slot: peer.slot.clone(),
-                        payload,
-                        dictionary: if needs_dict { owned_dict.clone() } else { None },
+                    let dictionary = if needs_dict { owned_dict.clone() } else { None };
+                    parked.park(peer_id, &peer.slot, dictionary, || {
+                        PreparedFrame::from_frame(&frame)
                     });
                 }
                 TryFrameResult::Dead | TryFrameResult::Ineligible => {}
@@ -101,8 +98,7 @@ impl LaneWorker {
             }
 
             if Self::try_push_frame(&peer.slot, &frame) == TryFrameResult::Ok {
-                peer.dict_shipped = true;
-                peer.slot.mark_fanout_dict_shipped();
+                peer.mark_dict_shipped();
                 Self::touch_peer(peer_id, peer, touched);
             } else {
                 owned_dict.get_or_insert_with(|| Arc::new(PreparedFrame::from_frame(&frame)));
@@ -134,8 +130,7 @@ impl LaneWorker {
                 if let Some(dict) = &target.dictionary {
                     match Self::try_push_frame(&target.slot, &dict.as_frame()) {
                         TryFrameResult::Ok => {
-                            peer.dict_shipped = true;
-                            target.slot.mark_fanout_dict_shipped();
+                            peer.mark_dict_shipped();
                             Self::touch_peer(target.peer_id, peer, touched);
                             target.dictionary = None;
                         }

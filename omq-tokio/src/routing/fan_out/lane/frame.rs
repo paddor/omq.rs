@@ -8,6 +8,7 @@ use omq_proto::fan_out_frame::{FanOutFrame, encode_fan_out_message, finish_fan_o
 use omq_proto::frame_buffer::FrameBuffer;
 use omq_proto::message::Message;
 use omq_proto::proto::transform::TransformedOut;
+use smallvec::SmallVec;
 use std::sync::Arc;
 
 /// Owned only when a ready-path admission blocks. Large chunks stay shared.
@@ -66,6 +67,41 @@ pub(super) struct PendingPeer {
     pub(super) slot: Arc<PeerTransmitSlot>,
     pub(super) payload: Arc<PreparedFrame>,
     pub(super) dictionary: Option<Arc<PreparedFrame>>,
+}
+
+/// Peers of one publication that wait for room. They share one owned
+/// payload, built when the first peer parks.
+pub(super) struct Parked<'a> {
+    pending: &'a mut SmallVec<[PendingPeer; 8]>,
+    payload: Option<Arc<PreparedFrame>>,
+}
+
+impl<'a> Parked<'a> {
+    pub(super) fn new(pending: &'a mut SmallVec<[PendingPeer; 8]>) -> Self {
+        Self {
+            pending,
+            payload: None,
+        }
+    }
+
+    pub(super) fn park(
+        &mut self,
+        peer_id: u64,
+        slot: &Arc<PeerTransmitSlot>,
+        dictionary: Option<Arc<PreparedFrame>>,
+        payload: impl FnOnce() -> PreparedFrame,
+    ) {
+        let payload = self
+            .payload
+            .get_or_insert_with(|| Arc::new(payload()))
+            .clone();
+        self.pending.push(PendingPeer {
+            peer_id,
+            slot: slot.clone(),
+            payload,
+            dictionary,
+        });
+    }
 }
 
 /// Matched recipients of one codec group.

@@ -29,7 +29,7 @@ mod lossy;
 mod plain_batch;
 mod shm;
 
-use frame::{GroupPeers, PendingPeer, PreparedFrame, frame_publication};
+use frame::{GroupPeers, Parked, PendingPeer, PreparedFrame, frame_publication};
 
 const PLAIN_BATCH_MESSAGES: usize = 8;
 const PLAIN_BATCH_BYTES: usize = 16 * 1024;
@@ -106,6 +106,12 @@ struct LanePeer {
 }
 
 impl LanePeer {
+    /// The group dictionary went out ahead of this peer's payloads.
+    fn mark_dict_shipped(&mut self) {
+        self.dict_shipped = true;
+        self.slot.mark_fanout_dict_shipped();
+    }
+
     fn filter(&self) -> filter::PeerFilter<'_> {
         filter::PeerFilter {
             subscriptions: &self.subscriptions,

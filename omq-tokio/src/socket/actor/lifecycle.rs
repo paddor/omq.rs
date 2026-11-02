@@ -112,13 +112,7 @@ impl<'a> PeerLifecycle<'a> {
     fn reset_type_state_if_last_peer(&mut self) {
         match self.driver.socket_type {
             SocketType::Req | SocketType::Rep if self.driver.ready_peer_count() == 0 => {
-                self.driver
-                    .link
-                    .shared
-                    .type_state
-                    .lock()
-                    .expect("type_state")
-                    .on_peer_disconnected();
+                self.driver.routing.type_state.on_peer_disconnected();
             }
             _ => {}
         }

@@ -14,8 +14,8 @@ mod peer_materialize;
 
 pub(crate) use peer::spawn_driver;
 
+use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Mutex};
 
 use rustc_hash::FxHashMap;
 use std::time::{Duration, Instant};
@@ -302,9 +302,6 @@ pub(crate) struct HandleLink {
 /// State the socket handle reads or updates without an actor hop.
 #[derive(Clone)]
 pub(crate) struct HandleShared {
-    /// REQ / REP envelope + alternation state, so `Socket::send` can call
-    /// `pre_send` without an actor hop.
-    pub(crate) type_state: Arc<Mutex<TypeState>>,
     /// REQ alternation flag for lock-free send/recv on REQ. The actor resets
     /// it on peer disconnect.
     pub(crate) req_awaiting_reply: Arc<crate::socket::handle::ReqAwaitingReply>,
@@ -315,7 +312,6 @@ pub(crate) struct HandleShared {
 impl HandleShared {
     pub(crate) fn new() -> Self {
         Self {
-            type_state: Arc::new(Mutex::new(TypeState::new())),
             req_awaiting_reply: Arc::default(),
             subscribe_count: Arc::new(AtomicU64::new(0)),
             ready_peers: Arc::default(),
@@ -484,6 +480,8 @@ struct Routing {
     /// UDP listener tasks via `Arc<Mutex<HashSet<Bytes>>>` so JOIN /
     /// LEAVE is visible without a control channel.
     joined_groups: JoinedGroups,
+    /// REQ / REP / DISH receive transform and envelope state.
+    type_state: TypeState,
 }
 
 /// Runtime resources and receive sinks the actor hands to its peers.
@@ -539,6 +537,7 @@ impl SocketDriver {
                 recv_strategy: RecvStrategy::for_socket_type(socket_type),
                 subscriptions: Vec::new(),
                 joined_groups: new_joined_groups(),
+                type_state: TypeState::new(),
             },
             resources,
             #[cfg(feature = "dart")]

@@ -529,11 +529,8 @@ impl SocketDriver {
                 let message = self.routing.recv_strategy.wrap_for_transform(peer_id, msg);
                 let message = if self.type_state_needs_transform() {
                     message.and_then(|wrapped| {
-                        self.link
-                            .shared
+                        self.routing
                             .type_state
-                            .lock()
-                            .expect("type_state")
                             .post_recv(self.socket_type, wrapped)
                             .ok()
                             .flatten()

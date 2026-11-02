@@ -104,9 +104,9 @@ impl MessageRateLimit {
 ///   pipe at `connect()` time. Sends may queue there before the peer reaches
 ///   READY. Native OMQ has no `ZMQ_IMMEDIATE` option to disable that queue.
 
-// Compression fields (compression_dict through compression_offload_threshold)
-// could be grouped into a sub-struct, but the public API change would touch
-// every backend file that accesses them.
+// Keep `Options` flat. It is the public option set that users, bindings and
+// omq-libzmq set field by field. Do not group fields into sub-structs, even
+// though it exceeds the ~12-field guideline in AGENTS.md.
 #[derive(Clone, Debug)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct Options {

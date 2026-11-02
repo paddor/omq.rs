@@ -45,8 +45,10 @@ mod stream;
 mod write;
 
 pub(crate) use builder::ActorLink;
+pub(crate) use control::{heartbeat_timeout, sleep_until_opt, ttl_deciseconds};
 pub(crate) use receive::ReceiveProfile;
 pub use stream::{ChunkWrite, DriverStream, DriverWrite};
+pub(crate) use write::check_written;
 
 const OUTBOUND_BATCH_TIME: Duration = Duration::from_millis(1);
 const BATCH_TIME_CHECK_MSGS: usize = 32;

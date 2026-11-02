@@ -17,6 +17,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 
+use crate::engine::driver::{check_written, heartbeat_timeout, sleep_until_opt, ttl_deciseconds};
 use crate::{Endpoint, Error, Message, ReconnectPolicy, Result, SocketType};
 
 /// Configuration for a caller-driven [`Socket`].
@@ -308,8 +309,9 @@ impl Socket {
             self.ensure_connected().await?;
             let io_timeout = self.options.io_timeout;
             let heartbeat_interval = self.options.heartbeat_interval;
-            let heartbeat_timeout = effective_heartbeat_timeout(&self.options);
-            let heartbeat_ttl = heartbeat_ttl_deciseconds(self.options.heartbeat_ttl);
+            let heartbeat_timeout =
+                heartbeat_timeout(heartbeat_interval, self.options.heartbeat_timeout);
+            let heartbeat_ttl = ttl_deciseconds(self.options.heartbeat_ttl);
             let result = run_timeout(
                 io_timeout,
                 recv_live(
@@ -351,7 +353,10 @@ impl Socket {
     /// sockets never run a background task.
     pub async fn maintain(&mut self) -> Result<()> {
         self.ensure_connected().await?;
-        let heartbeat_timeout = effective_heartbeat_timeout(&self.options);
+        let heartbeat_timeout = heartbeat_timeout(
+            self.options.heartbeat_interval,
+            self.options.heartbeat_timeout,
+        );
         let input_result = drain_ready_input(self.live.as_mut().expect("connected"));
         if let Err(error) = input_result {
             self.mark_disconnected(&error);
@@ -382,7 +387,7 @@ impl Socket {
         {
             queue_ping(
                 live,
-                heartbeat_ttl_deciseconds(self.options.heartbeat_ttl),
+                ttl_deciseconds(self.options.heartbeat_ttl),
                 heartbeat_timeout.expect("heartbeat interval supplies timeout"),
                 now,
             )?;
@@ -758,10 +763,10 @@ async fn recv_live(
                 result?;
                 flush_and_settle(live).await?;
             }
-            () = sleep_until(heartbeat_deadline), if heartbeat_deadline.is_some() => {
+            () = sleep_until_opt(heartbeat_deadline), if heartbeat_deadline.is_some() => {
                 return Err(Error::Timeout);
             }
-            () = sleep_until(ping_deadline), if ping_deadline.is_some() => {
+            () = sleep_until_opt(ping_deadline), if ping_deadline.is_some() => {
                 let now = Instant::now();
                 queue_ping(
                     live,
@@ -773,24 +778,6 @@ async fn recv_live(
             }
         }
     }
-}
-
-async fn sleep_until(deadline: Option<Instant>) {
-    match deadline {
-        Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
-        None => std::future::pending().await,
-    }
-}
-
-fn heartbeat_ttl_deciseconds(ttl: Option<Duration>) -> u16 {
-    ttl.and_then(|duration| u16::try_from(duration.as_millis() / 100).ok())
-        .unwrap_or(0)
-}
-
-fn effective_heartbeat_timeout(options: &Options) -> Option<Duration> {
-    options
-        .heartbeat_interval
-        .map(|interval| options.heartbeat_timeout.unwrap_or(interval))
 }
 
 fn queue_ping(
@@ -847,14 +834,8 @@ async fn flush_live(live: &mut LiveConnection) -> Result<()> {
     // Unwritten bytes stay queued in the codec, so cancellation is safe here.
     while live.connection.has_pending_transmit() {
         let chunks = live.connection.transmit_chunks_capped(64);
-        let n = live.stream.write_vectored(&chunks).await?;
+        let n = check_written(live.stream.write_vectored(&chunks).await?)?;
         drop(chunks);
-        if n == 0 {
-            return Err(Error::Io(io::Error::new(
-                io::ErrorKind::WriteZero,
-                "exclusive socket write returned zero",
-            )));
-        }
         live.connection.advance_transmit(n);
     }
     Ok(())

@@ -226,20 +226,15 @@ pub(super) async fn write_driver_progress<W: DriverWrite>(
         let written = if owned && pending.has_chunks() {
             let owned_writer = writer.chunk_writer().expect("owned-chunk writer");
             let chunks = pending.chunks_mut();
-            let written =
-                std::future::poll_fn(|cx| owned_writer.poll_write_chunks(cx, chunks)).await?;
-            if written == 0 {
-                return Err(io::Error::new(io::ErrorKind::WriteZero, "write returned 0"));
-            }
+            let written = check_written(
+                std::future::poll_fn(|cx| owned_writer.poll_write_chunks(cx, chunks)).await?,
+            )?;
             pending.advance_owned(written);
             written
         } else if !pending.is_empty() {
             let iovecs = pending.io_slices();
-            let written = writer.write_vectored(&iovecs).await?;
+            let written = check_written(writer.write_vectored(&iovecs).await?)?;
             drop(iovecs);
-            if written == 0 {
-                return Err(io::Error::new(io::ErrorKind::WriteZero, "write returned 0"));
-            }
             pending.advance(written);
             written
         } else if owned && !eq.is_empty() {
@@ -248,11 +243,8 @@ pub(super) async fn write_driver_progress<W: DriverWrite>(
         } else if eq.has_arena_only() {
             let written = {
                 let data = eq.arena_bytes();
-                writer.write_vectored(&[io::IoSlice::new(data)]).await?
+                check_written(writer.write_vectored(&[io::IoSlice::new(data)]).await?)?
             };
-            if written == 0 {
-                return Err(io::Error::new(io::ErrorKind::WriteZero, "write returned 0"));
-            }
             eq.advance_arena(written);
             written
         } else if !eq.is_empty() {
@@ -298,6 +290,16 @@ where
     flush_once(writer, connection).await
 }
 
+/// A write that accepts no bytes cannot make progress: fail it.
+#[inline]
+pub(crate) fn check_written(n: usize) -> io::Result<usize> {
+    if n == 0 {
+        Err(io::Error::new(io::ErrorKind::WriteZero, "write returned 0"))
+    } else {
+        Ok(n)
+    }
+}
+
 /// One write attempt. Uses `write_vectored` so multi-chunk frame
 /// payloads (compression sentinels, CURVE nonces, etc.) hit the kernel
 /// as a single gather-write - no userspace memcpy. Partial writes are
@@ -310,11 +312,8 @@ where
     if chunks.is_empty() {
         return Ok(0);
     }
-    let n = writer.write_vectored(&chunks).await?;
+    let n = check_written(writer.write_vectored(&chunks).await?)?;
     drop(chunks);
-    if n == 0 {
-        return Err(io::Error::new(io::ErrorKind::WriteZero, "write returned 0"));
-    }
     connection.advance_transmit(n);
     Ok(n)
 }

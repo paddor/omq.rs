@@ -195,7 +195,7 @@ pub(super) fn handle_pre_activation_inbox_command(
 
 /// Sleep until an `Option<Instant>`. Returns immediately if `None`, which
 /// paired with a select `if` guard means this branch won't fire.
-pub(super) async fn sleep_until_opt(deadline: Option<Instant>) {
+pub(crate) async fn sleep_until_opt(deadline: Option<Instant>) {
     match deadline {
         Some(t) => tokio::time::sleep_until(t.into()).await,
         None => std::future::pending::<()>().await,
@@ -209,6 +209,21 @@ pub(super) async fn cancelled_opt(token: Option<&tokio_util::sync::CancellationT
         Some(token) => token.cancelled().await,
         None => std::future::pending::<()>().await,
     }
+}
+
+/// Silence allowed after a PING: the configured timeout, else the interval.
+/// `None` without a heartbeat interval.
+pub(crate) fn heartbeat_timeout(
+    interval: Option<Duration>,
+    timeout: Option<Duration>,
+) -> Option<Duration> {
+    interval.map(|interval| timeout.unwrap_or(interval))
+}
+
+/// PING TTL in deciseconds; 0 when unset or too large for the field.
+pub(crate) fn ttl_deciseconds(ttl: Option<Duration>) -> u16 {
+    ttl.and_then(|ttl| u16::try_from(ttl.as_millis() / 100).ok())
+        .unwrap_or(0)
 }
 
 /// A queued heartbeat owns one prefix of the codec transmit queue. Writes
@@ -238,14 +253,9 @@ impl Heartbeat {
             deadline: None,
             was_recv_blocked: false,
             interval: config.heartbeat_interval,
-            timeout: config
-                .heartbeat_timeout
-                .or(config.heartbeat_interval)
+            timeout: heartbeat_timeout(config.heartbeat_interval, config.heartbeat_timeout)
                 .unwrap_or(Duration::MAX),
-            ttl_deciseconds: config
-                .heartbeat_ttl
-                .and_then(|d| u16::try_from(d.as_millis() / 100).ok())
-                .unwrap_or(0),
+            ttl_deciseconds: ttl_deciseconds(config.heartbeat_ttl),
         }
     }
 

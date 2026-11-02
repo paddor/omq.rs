@@ -27,7 +27,7 @@ mod ws;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
 
 use crate::error::Result;
 #[cfg(any(feature = "curve", test))]
@@ -454,7 +454,7 @@ impl Connection {
     /// Emit pre-encrypted frames produced by
     /// [`FrameTransform::encrypt_message`] into the outbound buffer.
     #[cfg(feature = "curve")]
-    pub fn emit_encrypted_frames(&mut self, frames: &[(FrameFlags, Bytes)]) {
+    pub fn emit_encrypted_frames(&mut self, frames: &[(FrameFlags, bytes::Bytes)]) {
         for (flags, payload) in frames {
             self.emit_frame(*flags, Payload::from_bytes(payload.clone()));
         }

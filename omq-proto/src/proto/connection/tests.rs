@@ -1,6 +1,6 @@
 use super::*;
 use crate::error::Error;
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 
 fn ready_connection(max_message_size: Option<usize>) -> Connection {
     let mut cfg = ConnectionConfig::new(Role::Server, SocketType::Pull);

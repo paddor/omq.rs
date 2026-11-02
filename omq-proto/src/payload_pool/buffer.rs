@@ -3,7 +3,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-use super::{PayloadPool, PayloadRelease, Storage, same_returns};
+use super::{Credit, PayloadPool, PayloadRelease, Storage, same_returns};
 use crate::message::{Message, Payload};
 
 /// Exclusive fixed-size writable storage. [`Self::into_message`] freezes it.
@@ -137,7 +137,7 @@ impl AsRef<[u8]> for PayloadBuffer {
 impl Drop for PayloadBuffer {
     fn drop(&mut self) {
         if let Some(storage) = self.storage.take() {
-            storage.release_owner(false);
+            storage.release_owner(Credit::Reservation);
         }
     }
 }

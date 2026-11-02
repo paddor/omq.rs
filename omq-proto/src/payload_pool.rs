@@ -115,6 +115,15 @@ struct Pool {
     reclaim_budget: DrainBudget,
 }
 
+/// Whether a returned slot reopens receive credit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Credit {
+    /// Final release of a frozen payload: publish the returned position.
+    Publish,
+    /// Unused checkout: return the storage without publishing credit.
+    Reservation,
+}
+
 #[derive(Debug)]
 struct Storage {
     bytes: StorageBytes,
@@ -135,12 +144,12 @@ impl PayloadOwner for Storage {
     }
 
     fn release(self: Arc<Self>) {
-        self.release_owner(true);
+        self.release_owner(Credit::Publish);
     }
 }
 
 impl Storage {
-    fn release_owner(self: Arc<Self>, credited: bool) {
+    fn release_owner(self: Arc<Self>, credit: Credit) {
         let mut storage = Some(self);
         let _ = RECYCLE.try_with(|recycle| {
             let Ok(mut recycle) = recycle.try_borrow_mut() else {
@@ -163,7 +172,7 @@ impl Storage {
             }
             let owner = storage.take().expect("unreleased storage");
             if Arc::strong_count(&owner) == 1 && owner.bytes.reusable() {
-                recycle.push(owner, credited);
+                recycle.push(owner, credit);
             } else {
                 let pool = recycle.pool.as_ref().expect("active pool").clone();
                 owner.defer(&pool);
@@ -172,25 +181,27 @@ impl Storage {
         let Some(storage) = storage else {
             return;
         };
-        storage.release_one(credited);
+        storage.release_one(credit);
     }
 
-    fn return_one(self: Arc<Self>, pool: &Pool, credited: bool) {
-        let returns = credited.then(|| self.returns.clone()).flatten();
+    fn return_one(self: Arc<Self>, pool: &Pool, credit: Credit) {
+        let returns = (credit == Credit::Publish)
+            .then(|| self.returns.clone())
+            .flatten();
         pool.free.push(self);
         if let Some(returns) = returns {
             returns.publish(1);
         }
     }
 
-    fn release_one(self: Arc<Self>, credited: bool) {
+    fn release_one(self: Arc<Self>, credit: Credit) {
         let Some(pool) = self.pool.upgrade() else {
             return;
         };
         // Storage is private and has no Weak references. A unique strong
         // owner cannot race a clone, so it can return without locking.
         if Arc::strong_count(&self) == 1 && self.bytes.reusable() {
-            self.return_one(&pool, credited);
+            self.return_one(&pool, credit);
             return;
         }
         self.defer(&pool);
@@ -243,7 +254,7 @@ impl Pool {
             if Arc::strong_count(&owner) == 1 && owner.bytes.reusable() {
                 self.queued[owner.slot].store(false, Ordering::Relaxed);
                 self.pending_count.fetch_sub(1, Ordering::Relaxed);
-                owner.return_one(self, true);
+                owner.return_one(self, Credit::Publish);
                 returned += 1;
                 if returned == requested {
                     break;

@@ -3,7 +3,7 @@
 use std::cell::RefCell;
 use std::sync::Arc;
 
-use super::{PayloadRelease, Pool, Storage, TRANSFER, same_returns};
+use super::{Credit, PayloadRelease, Pool, Storage, TRANSFER, same_returns};
 
 // Returned owners are staged only during a synchronous drain. No free buffer
 // remains hidden in TLS after the call, including during panic unwinding.
@@ -27,8 +27,10 @@ impl Recycling {
         self.count = 0;
     }
 
-    pub(super) fn push(&mut self, owner: Arc<Storage>, credited: bool) {
-        let returns = credited.then_some(owner.returns.as_ref()).flatten();
+    pub(super) fn push(&mut self, owner: Arc<Storage>, credit: Credit) {
+        let returns = (credit == Credit::Publish)
+            .then_some(owner.returns.as_ref())
+            .flatten();
         if self.count != 0 && !same_returns(self.returns.as_ref(), returns) {
             self.flush();
         }

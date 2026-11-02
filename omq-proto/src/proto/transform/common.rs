@@ -33,6 +33,101 @@ pub(super) const MIN_COMPRESS_WITH_DICT: usize = 64;
 /// Default auto-train dictionary capacity in bytes.
 pub(super) const DEFAULT_DICT_CAPACITY: usize = 2048;
 
+/// Send-side dictionary and threshold state shared by compression encoders.
+#[derive(Clone, Debug)]
+pub(super) struct SendDict {
+    /// Outbound dict, validated or trained. Shipped once, then used for
+    /// every subsequent part.
+    pub(super) dict: Option<Bytes>,
+    /// Whether the dict has been written to the wire.
+    pub(super) shipped: bool,
+    /// User override for the compression threshold.
+    pub(super) threshold_override: Option<usize>,
+    /// Decompression budget copy for the passthrough threshold.
+    pub(super) max_message_size: Option<usize>,
+    /// Target dict size for auto-training.
+    pub(super) dict_capacity: usize,
+}
+
+impl SendDict {
+    pub(super) fn new(dict: Option<Bytes>) -> Self {
+        Self {
+            dict,
+            shipped: false,
+            threshold_override: None,
+            max_message_size: None,
+            dict_capacity: DEFAULT_DICT_CAPACITY,
+        }
+    }
+
+    /// Smallest part or arena size worth compressing.
+    #[inline]
+    pub(super) fn effective_threshold(&self) -> usize {
+        self.threshold_override.unwrap_or(if self.dict.is_some() {
+            MIN_COMPRESS_WITH_DICT
+        } else {
+            MIN_COMPRESS_NO_DICT
+        })
+    }
+
+    /// Part size below which encoding always passes plaintext through.
+    /// `None` while a dict or auto-training (`training`) can lower it.
+    pub(super) fn passthrough_threshold(&self, training: bool) -> Option<usize> {
+        if self.threshold_override.is_some() {
+            Some(self.effective_threshold())
+        } else if training || self.dict.is_some() {
+            None
+        } else {
+            Some(MIN_COMPRESS_NO_DICT)
+        }
+    }
+
+    /// Whether no shipment is pending and no training is running.
+    pub(super) fn can_offload(&self, training: bool) -> bool {
+        !training && (self.dict.is_none() || self.shipped)
+    }
+
+    /// Whether both hold the same dict bytes, or neither holds one.
+    pub(super) fn same_dict(&self, other: &Self) -> bool {
+        match (&self.dict, &other.dict) {
+            (None, None) => true,
+            (Some(a), Some(b)) => a.as_ptr() == b.as_ptr() && a.len() == b.len(),
+            _ => false,
+        }
+    }
+
+    /// The dict if it still needs shipping; it is then marked shipped.
+    pub(super) fn take_shipment(&mut self) -> Option<&Bytes> {
+        if self.shipped {
+            return None;
+        }
+        let dict = self.dict.as_ref()?;
+        self.shipped = true;
+        Some(dict)
+    }
+
+    /// Install a trained dict. It ships ahead of the next encoded message.
+    pub(super) fn install(&mut self, dict: Bytes) {
+        self.dict = Some(dict);
+        self.shipped = false;
+    }
+
+    /// State for an offload encoder: same dict and settings, never shipped.
+    pub(super) fn offload(&self) -> Self {
+        Self {
+            shipped: true,
+            ..self.clone()
+        }
+    }
+
+    /// Copy the primary's settings. The dict is synchronized separately.
+    pub(super) fn sync_settings(&mut self, primary: &Self) {
+        self.max_message_size = primary.max_message_size;
+        self.threshold_override = primary.threshold_override;
+        self.dict_capacity = primary.dict_capacity;
+    }
+}
+
 /// Subtract `take` from the running per-message decompression budget;
 /// refuse with [`Error::MessageTooLarge`] if it would go negative.
 /// `budget = None` means unlimited.

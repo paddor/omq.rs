@@ -20,8 +20,8 @@ use super::adaptive;
 use super::arena::{self, DecodedArena};
 pub use super::arena::{MAX_ARENA_BYTES, MAX_ARENA_MESSAGES, MAX_ARENA_PARTS, arena_message_size};
 use super::common::{
-    ENVELOPE_PLAIN, MIN_COMPRESS_NO_DICT, MIN_COMPRESS_WITH_DICT, SENTINEL_PLAIN, body_budget,
-    plaintext_payload, take_budget, validate_dict,
+    ENVELOPE_PLAIN, SENTINEL_PLAIN, SendDict, body_budget, plaintext_payload, take_budget,
+    validate_dict,
 };
 use super::{OutputWindow, TransformedOut};
 
@@ -89,26 +89,23 @@ struct TrainState {
 
 /// Per-part Zstd encoder with optional static or trained dictionary.
 pub struct ZstdEncoder {
-    send_dict: Option<Bytes>,
-    send_dict_shipped: bool,
-    max_message_size: Option<usize>,
+    /// Outbound dict, shipment flag, and thresholds.
+    send: SendDict,
     level: i32,
     cctx: Option<CompressContext>,
     adaptive: Option<AdaptiveLevel>,
     // Counted for an adaptive primary and its offload encoders.
     stats: Option<CompressStats>,
     train: Option<TrainState>,
-    threshold_override: Option<usize>,
-    dict_capacity: usize,
     arena_buf: BytesMut,
 }
 
 impl std::fmt::Debug for ZstdEncoder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ZstdEncoder")
-            .field("send_dict_len", &self.send_dict.as_ref().map(Bytes::len))
-            .field("send_dict_shipped", &self.send_dict_shipped)
-            .field("max_message_size", &self.max_message_size)
+            .field("send_dict_len", &self.send.dict.as_ref().map(Bytes::len))
+            .field("send_dict_shipped", &self.send.shipped)
+            .field("max_message_size", &self.send.max_message_size)
             .field("level", &self.level)
             .field("adaptive", &self.adaptive.is_some())
             .field(
@@ -125,16 +122,12 @@ impl std::fmt::Debug for ZstdEncoder {
 impl Default for ZstdEncoder {
     fn default() -> Self {
         Self {
-            send_dict: None,
-            send_dict_shipped: false,
-            max_message_size: None,
+            send: SendDict::new(None),
             level: DEFAULT_LEVEL,
             cctx: None,
             adaptive: None,
             stats: None,
             train: None,
-            threshold_override: None,
-            dict_capacity: DEFAULT_DICT_CAPACITY,
             arena_buf: BytesMut::new(),
         }
     }
@@ -149,7 +142,7 @@ impl ZstdEncoder {
     /// Train one outbound dictionary unless a static dictionary is configured.
     #[must_use]
     pub fn with_auto_train(mut self) -> Self {
-        if self.send_dict.is_none() {
+        if self.send.dict.is_none() {
             self.train = Some(TrainState {
                 samples: Vec::with_capacity(64),
                 total_bytes: 0,
@@ -161,14 +154,14 @@ impl ZstdEncoder {
     /// Set the minimum part size at which compression is attempted.
     #[must_use]
     pub fn with_threshold(mut self, threshold: usize) -> Self {
-        self.threshold_override = Some(threshold);
+        self.send.threshold_override = Some(threshold);
         self
     }
 
     /// Set trained dictionary capacity, capped at the protocol limit.
     #[must_use]
     pub fn with_dict_capacity(mut self, capacity: usize) -> Self {
-        self.dict_capacity = capacity.min(MAX_DICT_BYTES);
+        self.send.dict_capacity = capacity.min(MAX_DICT_BYTES);
         self
     }
 
@@ -186,7 +179,7 @@ impl ZstdEncoder {
         Dictionary::from_bytes(&dict)
             .map_err(|e| Error::Protocol(format!("invalid zstd dictionary: {e}")))?;
         Ok(Self {
-            send_dict: Some(dict),
+            send: SendDict::new(Some(dict)),
             train: None,
             ..Self::default()
         })
@@ -281,55 +274,38 @@ impl ZstdEncoder {
     /// Set the maximum outbound message body size; `None` removes the limit.
     #[must_use]
     pub fn with_max_message_size(mut self, max: Option<usize>) -> Self {
-        self.max_message_size = max;
+        self.send.max_message_size = max;
         self
     }
 
     /// Return a guaranteed per-part plaintext threshold, or `None` if dynamic.
     pub fn passthrough_threshold(&self) -> Option<usize> {
-        if self.threshold_override.is_some() {
-            Some(self.effective_threshold())
-        } else if self.train.is_some() {
-            None
-        } else if self.send_dict.is_none() {
-            Some(MIN_COMPRESS_NO_DICT)
-        } else {
-            None
-        }
+        self.send.passthrough_threshold(self.train.is_some())
     }
 
     /// Whether encoding requires neither training nor a dictionary shipment.
     pub fn can_offload(&self) -> bool {
-        self.train.is_none() && (self.send_dict.is_none() || self.send_dict_shipped)
+        self.send.can_offload(self.train.is_some())
     }
 
     /// Create an independent encoder sharing configuration and dictionary bytes.
     #[must_use]
     pub fn new_offload(&self) -> Self {
         Self {
-            send_dict: self.send_dict.clone(),
-            send_dict_shipped: true,
-            max_message_size: self.max_message_size,
+            send: self.send.offload(),
             level: self.level,
             cctx: None,
             adaptive: None,
             stats: self.stats.map(|_| CompressStats::default()),
             train: None,
-            threshold_override: self.threshold_override,
-            dict_capacity: self.dict_capacity,
             arena_buf: BytesMut::new(),
         }
     }
 
     /// Copy the primary encoder's dictionary and invalidate stale contexts.
     pub fn sync_dict(&mut self, primary: &Self) {
-        let same = match (&self.send_dict, &primary.send_dict) {
-            (None, None) => true,
-            (Some(a), Some(b)) => a.as_ptr() == b.as_ptr() && a.len() == b.len(),
-            _ => false,
-        };
-        if !same {
-            self.send_dict.clone_from(&primary.send_dict);
+        if !self.send.same_dict(&primary.send) {
+            self.send.dict.clone_from(&primary.send.dict);
             self.cctx = None;
         }
     }
@@ -342,9 +318,7 @@ impl ZstdEncoder {
         self.sync_dict(primary);
         self.set_level(primary.level);
         self.stats = primary.stats.map(|_| CompressStats::default());
-        self.max_message_size = primary.max_message_size;
-        self.threshold_override = primary.threshold_override;
-        self.dict_capacity = primary.dict_capacity;
+        self.send.sync_settings(&primary.send);
     }
 
     /// Encode message parts, emitting at most one preceding dictionary shipment.
@@ -367,11 +341,8 @@ impl ZstdEncoder {
 
     fn ship_dictionary(&mut self) -> TransformedOut {
         let mut out = SmallVec::new();
-        if let Some(dict) = self.send_dict.clone()
-            && !self.send_dict_shipped
-        {
-            out.push(Message::single(dict));
-            self.send_dict_shipped = true;
+        if let Some(dict) = self.send.take_shipment() {
+            out.push(Message::single(dict.clone()));
         }
         out
     }
@@ -391,7 +362,7 @@ impl ZstdEncoder {
             crate::proto::frame::encode_message_flat(message, &mut self.arena_buf);
         }
         let mut out = self.ship_dictionary();
-        let compressed = if size >= self.effective_threshold() {
+        let compressed = if size >= self.send.effective_threshold() {
             self.ensure_cctx()?;
             let started = self.stats.is_some().then(Instant::now);
             let compressed = self
@@ -420,15 +391,6 @@ impl ZstdEncoder {
         Ok(out)
     }
 
-    fn effective_threshold(&self) -> usize {
-        self.threshold_override
-            .unwrap_or(if self.send_dict.is_some() {
-                MIN_COMPRESS_WITH_DICT
-            } else {
-                MIN_COMPRESS_NO_DICT
-            })
-    }
-
     fn maybe_train(&mut self, plain: &[u8]) {
         let Some(state) = self.train.as_mut() else {
             return;
@@ -443,17 +405,16 @@ impl ZstdEncoder {
         }
         let state = self.train.take().unwrap();
         let samples: Vec<&[u8]> = state.samples.iter().map(Vec::as_slice).collect();
-        let Some(dict) = train_zdict(&samples, self.dict_capacity) else {
+        let Some(dict) = train_zdict(&samples, self.send.dict_capacity) else {
             return;
         };
-        self.send_dict = Some(dict);
-        self.send_dict_shipped = false;
+        self.send.install(dict);
         self.cctx = None;
     }
 
     fn ensure_cctx(&mut self) -> Result<&mut CompressContext> {
         if self.cctx.is_none() {
-            let ctx = if let Some(dict_raw) = &self.send_dict {
+            let ctx = if let Some(dict_raw) = &self.send.dict {
                 let dict = Dictionary::from_bytes(dict_raw).map_err(|e| decompress_err(&e))?;
                 CompressContext::with_dict(self.level, dict).map_err(|e| compress_err(&e))?
             } else {
@@ -466,7 +427,7 @@ impl ZstdEncoder {
 
     fn encode_part(&mut self, part: &Payload) -> Result<Payload> {
         let plain = part.as_bytes();
-        if plain.len() < self.effective_threshold() {
+        if plain.len() < self.send.effective_threshold() {
             return Ok(plaintext_payload(&plain));
         }
         self.ensure_cctx()?;

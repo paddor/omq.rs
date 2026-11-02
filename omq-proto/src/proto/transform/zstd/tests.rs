@@ -236,12 +236,12 @@ fn auto_train_ships_dict_and_blocks_offload() {
         for part in wire {
             let _ = dec.decode(part).unwrap();
         }
-        if enc.send_dict.is_some() {
+        if enc.send.dict.is_some() {
             break;
         }
     }
-    assert!(enc.send_dict.is_some(), "auto-train never produced dict");
-    let dict = enc.send_dict.clone().unwrap();
+    assert!(enc.send.dict.is_some(), "auto-train never produced dict");
+    let dict = enc.send.dict.clone().unwrap();
     assert_eq!(&dict[..4], &ZDICT_MAGIC);
     let id = u32::from_le_bytes(dict[4..8].try_into().unwrap());
     assert!((USER_DICT_ID_MIN..=USER_DICT_ID_MAX).contains(&id));

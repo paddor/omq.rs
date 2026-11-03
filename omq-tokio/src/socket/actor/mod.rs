@@ -14,6 +14,7 @@ mod lifecycle;
 mod link;
 mod listener;
 mod peer;
+mod peer_entry;
 mod peer_materialize;
 mod subscriptions;
 mod udp_endpoints;
@@ -21,6 +22,7 @@ mod udp_endpoints;
 use close::{CloseState, PEER_TASK_JOIN_TIMEOUT, stop_peer_task};
 pub(crate) use link::{CloseLinger, DriverEnv, HandleLink, HandleShared, SocketCommand};
 pub(crate) use peer::spawn_driver;
+use peer_entry::{PeerEntry, PeerHandshake, PeerOrigin, Side};
 
 use std::sync::Arc;
 
@@ -96,74 +98,6 @@ enum InternalEvent {
         peer_id: u64,
         reason: DisconnectReason,
     },
-}
-
-/// The endpoint operation a peer or endpoint came from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Side {
-    /// Accepted on, or bound to, a local endpoint.
-    Bind,
-    /// Dialed through `connect()`.
-    Connect,
-}
-
-impl Side {
-    const fn is_connect(self) -> bool {
-        matches!(self, Self::Connect)
-    }
-}
-
-struct PeerEntry {
-    /// Immutable endpoint-generation configuration, including reconnects.
-    options: Arc<Options>,
-    ident: PeerIdent,
-    local_address: Option<PeerIdent>,
-    remote_address: Option<PeerIdent>,
-    handle: PeerDriverHandle,
-    /// True after this peer is eligible for data-plane routing. For
-    /// ZMTP byte streams this flips on `HandshakeSucceeded`; pre-auth
-    /// peers stay pending and must not count against socket-type peer
-    /// limits.
-    ready: bool,
-    /// True only for byte-stream peers still inside the ZMTP handshake.
-    /// Inproc has a synthetic handshake and raw STREAM has no ZMTP
-    /// handshake, so neither consumes the pending-handshake cap.
-    pending_handshake: bool,
-    handshake_admission: Option<crate::transport::setup::PendingHandshake>,
-    handled_events: u64,
-    handled_control: u64,
-    completion: Option<crate::engine::peer_completion::PeerCompletion>,
-    /// Set on `HandshakeSucceeded` (the peer's READY property or server-
-    /// generated default). Stays empty if the peer sent no identity.
-    identity: bytes::Bytes,
-    /// Populated on `HandshakeSucceeded` so Disconnected events can carry
-    /// the last-known identity / properties.
-    info: Option<PeerInfo>,
-    /// Endpoint this peer arrived at (bind side) or dialed to (connect
-    /// side). Surfaced in monitor events.
-    endpoint: Endpoint,
-    /// Dialed or accepted. Dialed peers redial after a mid-session drop.
-    side: Side,
-    /// Send-strategy route id. For connect-side round-robin pipes this is
-    /// allocated at `connect()` time and can differ from the peer id.
-    route_id: u64,
-    /// Inproc receive port and its sink, opened once this peer is ready.
-    inproc_inbound: Option<(
-        Arc<crate::transport::inproc::InprocPort>,
-        crate::transport::inproc::OpenPort,
-    )>,
-    task: Option<JoinHandle<()>>,
-    /// Logical data IO thread index used by routing. The driver future owns
-    /// its load reservation; raw STREAM currently runs on the actor runtime.
-    io_thread: usize,
-}
-
-impl PeerEntry {
-    /// Cancel the peer's driver and take its task to join.
-    fn cancel_task(&mut self) -> Option<JoinHandle<()>> {
-        self.handle.cancel.cancel();
-        self.task.take()
-    }
 }
 
 /// The task serving one listener or dialer. Dropping it cancels and aborts
@@ -648,7 +582,12 @@ impl SocketDriver {
     fn ready_connections(&self) -> Vec<ConnectionStatus> {
         self.peers
             .iter()
-            .filter_map(|(id, peer)| peer.ready.then(|| self.peer_status(*id)).flatten())
+            .filter_map(|(id, peer)| {
+                peer.handshake
+                    .ready
+                    .then(|| self.peer_status(*id))
+                    .flatten()
+            })
             .collect()
     }
 
@@ -660,10 +599,10 @@ impl SocketDriver {
         let mut peers: Vec<_> = self
             .peers
             .iter()
-            .filter(|(_, peer)| peer.ready)
+            .filter(|(_, peer)| peer.handshake.ready)
             .filter_map(|(id, peer)| {
                 Some(PeerSubscriptions {
-                    peer: peer.info.clone()?,
+                    peer: peer.handshake.info.clone()?,
                     prefixes: self.routing.send_strategy.peer_subscriptions(*id),
                 })
             })
@@ -675,7 +614,7 @@ impl SocketDriver {
 
 impl SocketDriver {
     pub(super) fn ready_peer_count(&self) -> usize {
-        self.peers.values().filter(|p| p.ready).count()
+        self.peers.values().filter(|p| p.handshake.ready).count()
     }
 
     pub(super) fn can_accept_ready_peer(&self) -> bool {

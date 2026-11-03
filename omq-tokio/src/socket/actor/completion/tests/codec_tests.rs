@@ -210,8 +210,8 @@ async fn queued_generations_materialize_original_codec_settings_after_defaults_c
                 }
             }
             for peer in driver.peers.values() {
-                assert_eq!(peer.options.max_message_size, Some(8192));
-                assert_eq!(peer.options.max_recv_dict_size, Some(4096));
+                assert_eq!(peer.origin.options.max_message_size, Some(8192));
+                assert_eq!(peer.origin.options.max_recv_dict_size, Some(4096));
             }
             stop(&mut driver, peers).await;
         }
@@ -316,7 +316,10 @@ async fn resolution_handoff_and_peer_reconnect_retain_the_operation_snapshot() {
             publish(&driver, &message).await;
             remote.assert_publication(&message).await;
             let peer_id = *driver.peers.keys().next().unwrap();
-            assert!(Arc::ptr_eq(&driver.peers[&peer_id].options, &original));
+            assert!(Arc::ptr_eq(
+                &driver.peers[&peer_id].origin.options,
+                &original
+            ));
 
             // The redial after a drop reuses the same snapshot.
             let held = driver.endpoints.setup_admission.try_acquire().unwrap();

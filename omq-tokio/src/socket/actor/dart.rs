@@ -11,8 +11,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::peer_materialize::{FaninProducer, PeerChannels, fanin_recv_sink, wrap_routed_sink};
 use super::{
-    Endpoint, Error, MonitorEvent, PeerDriverHandle, PeerEntry, PeerIdent, Result, Side,
-    SocketDriver, SocketType,
+    Endpoint, Error, MonitorEvent, PeerDriverHandle, PeerEntry, PeerIdent, PeerOrigin, Result,
+    Side, SocketDriver, SocketType,
 };
 use crate::engine::{RecvSink, SendPipeConsumer};
 use crate::transport::dart::{
@@ -390,9 +390,9 @@ impl SocketDriver {
             .peers
             .iter()
             .filter(|(_, peer)| {
-                removed
-                    .iter()
-                    .any(|entry| peer.endpoint == entry.endpoint && peer.side == entry.side)
+                removed.iter().any(|entry| {
+                    peer.origin.endpoint == entry.endpoint && peer.origin.side == entry.side
+                })
             })
             .map(|(&id, _)| id)
             .collect();
@@ -472,27 +472,17 @@ impl Entry {
     }
 
     fn peer_entry(&self, ident: PeerIdent, handle: PeerDriverHandle, route_id: u64) -> PeerEntry {
-        PeerEntry {
-            local_address: None,
-            remote_address: Some(ident.clone()),
+        let origin = PeerOrigin {
             options: self.options.clone(),
-            ident,
-            handle,
-            ready: false,
-            pending_handshake: false,
-            handshake_admission: None,
-            handled_events: 0,
-            handled_control: 0,
-            completion: None,
-            identity: Bytes::new(),
-            info: None,
             endpoint: self.endpoint.clone(),
             side: self.side,
             route_id,
-            inproc_inbound: None,
-            task: None,
+            local_address: None,
+            remote_address: Some(ident.clone()),
+            ident,
             io_thread: self.io_thread,
-        }
+        };
+        PeerEntry::new(origin, handle)
     }
 }
 

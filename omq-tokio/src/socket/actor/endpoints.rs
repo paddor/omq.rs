@@ -88,7 +88,7 @@ impl SocketDriver {
             || self
                 .peers
                 .values()
-                .any(|peer| peer.side.is_connect() && &peer.endpoint == endpoint)
+                .any(|peer| peer.origin.side.is_connect() && &peer.origin.endpoint == endpoint)
     }
 
     #[cfg_attr(
@@ -165,7 +165,7 @@ impl SocketDriver {
             .peers
             .iter()
             .filter_map(|(id, peer)| {
-                if peer.side.is_connect() && &peer.endpoint == endpoint {
+                if peer.origin.side.is_connect() && &peer.origin.endpoint == endpoint {
                     Some(*id)
                 } else {
                     None
@@ -196,15 +196,15 @@ impl SocketDriver {
         let peer = self.peers.get(&connection_id)?;
         Some(ConnectionStatus {
             connection_id,
-            endpoint: peer.endpoint.clone(),
-            identity: peer.identity.clone(),
-            peer_info: peer.info.clone(),
+            endpoint: peer.origin.endpoint.clone(),
+            identity: peer.handshake.identity.clone(),
+            peer_info: peer.handshake.info.clone(),
         })
     }
 
     pub(super) fn server_peer_info(&self, routing_id: u32) -> Option<PeerInfo> {
         let connection_id = u64::from(routing_id.checked_sub(1)?);
-        self.peers.get(&connection_id)?.info.clone()
+        self.peers.get(&connection_id)?.handshake.info.clone()
     }
 
     pub(super) async fn bind(

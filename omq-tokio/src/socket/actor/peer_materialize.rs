@@ -2,8 +2,8 @@ use std::sync::{Arc, Mutex};
 
 use super::{
     AnyStream, ConnectionConfig, ConnectionDriver, Endpoint, PeerDriverConfig, PeerDriverHandle,
-    PeerEntry, PeerIdent, Role, Side, SocketDriver, SocketType, ZmtpConnection,
-    peer_ident_socket_addr,
+    PeerEntry, PeerHandshake, PeerIdent, PeerOrigin, Role, Side, SocketDriver, SocketType,
+    ZmtpConnection, peer_ident_socket_addr,
 };
 use crate::engine::codec::CodecSetup;
 use crate::engine::driver::{ActorLink, ReceiveProfile};
@@ -62,6 +62,22 @@ pub(super) struct PeerSetup {
     pub(super) route_id: u64,
     pub(super) send_pipe_rx: Option<SendPipeConsumer>,
     pub(super) options: Arc<Options>,
+}
+
+impl PeerSetup {
+    /// Origin of the peer this setup registers, without socket addresses.
+    pub(super) fn into_origin(self, io_thread: usize) -> PeerOrigin {
+        PeerOrigin {
+            options: self.options,
+            endpoint: self.endpoint,
+            side: self.side,
+            route_id: self.route_id,
+            ident: self.ident,
+            local_address: None,
+            remote_address: None,
+            io_thread,
+        }
+    }
 }
 
 pub(super) struct ByteStreamConnection {
@@ -241,8 +257,21 @@ fn prepare_wire_driver(
     let peer_driver = attach_recv_bypass(socket, peer_driver, peer_id);
     let peer_driver = peer_driver.with_network(peer_network(socket, &peer.endpoint, io_thread));
 
-    let mut entry = new_peer_entry(peer, handle, setup, io_thread);
-    (entry.local_address, entry.remote_address) = addresses;
+    // spawn_on_handshake gave every ZMTP byte stream a handshake admission.
+    debug_assert!(setup.is_some());
+    let (local_address, remote_address) = addresses;
+    let origin = PeerOrigin {
+        local_address,
+        remote_address,
+        ..peer.into_origin(io_thread)
+    };
+    let entry = PeerEntry {
+        handshake: PeerHandshake {
+            admission: setup.map(|state| state.admission),
+            ..PeerHandshake::default()
+        },
+        ..PeerEntry::new(origin, handle)
+    };
     Some((peer_driver, entry, io_assignment))
 }
 
@@ -295,37 +324,6 @@ fn configure_actor_driver(
         .with_socket_close_state(socket.link.recv_tx.clone())
         .with_latency_polling(latency_polling)
         .with_receive_profile(receive_profile)
-}
-
-/// Entry for a peer that has not finished its handshake. `setup` carries
-/// the pending-handshake admission, if any.
-pub(super) fn new_peer_entry(
-    peer: PeerSetup,
-    handle: PeerDriverHandle,
-    setup: Option<crate::transport::setup::SetupState>,
-    io_thread: usize,
-) -> PeerEntry {
-    PeerEntry {
-        local_address: None,
-        remote_address: None,
-        options: peer.options,
-        ident: peer.ident,
-        handle,
-        ready: false,
-        pending_handshake: true,
-        handshake_admission: setup.map(|state| state.admission),
-        handled_events: 0,
-        handled_control: 0,
-        completion: None,
-        identity: bytes::Bytes::new(),
-        info: None,
-        endpoint: peer.endpoint,
-        side: peer.side,
-        route_id: peer.route_id,
-        inproc_inbound: None,
-        task: None,
-        io_thread,
-    }
 }
 
 fn attach_ip_rate_limit(

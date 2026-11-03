@@ -1,8 +1,15 @@
 //! Raw STREAM peers: no handshake, ready at once.
 
-use super::{AnyStream, PeerSetup, Side, SocketDriver, new_peer_entry};
+use super::{AnyStream, PeerDriverHandle, PeerEntry, PeerHandshake, PeerSetup, Side, SocketDriver};
 use crate::routing::AddedPeer;
 use crate::socket::actor::generated_identity;
+
+/// A spawned raw STREAM task with its handle and IO thread.
+struct RawStreamTask {
+    handle: PeerDriverHandle,
+    task: tokio::task::JoinHandle<()>,
+    io_thread: usize,
+}
 
 impl SocketDriver {
     pub(in crate::socket::actor) fn spawn_stream_connection(
@@ -24,11 +31,51 @@ impl SocketDriver {
             self.last_stream_routing_id = Some(identity.clone());
         }
 
-        let completion = self.reserve_completion(peer_id);
-
-        let Ok(peer_output) = self.mail.peer_out_tx.try_register() else {
+        let Some(RawStreamTask {
+            handle,
+            task,
+            io_thread,
+        }) = self.spawn_raw_stream(stream, peer_id, &mut peer)
+        else {
             return;
         };
+
+        // Raw STREAM has no handshake, so the peer is ready at once.
+        let entry = PeerEntry {
+            handshake: PeerHandshake {
+                ready: true,
+                identity: identity.clone(),
+                ..PeerHandshake::default()
+            },
+            task: Some(task),
+            ..PeerEntry::new(peer.into_origin(io_thread), handle.clone())
+        };
+        self.peers.insert(peer_id, entry);
+        self.link.shared.ready_peers.add();
+
+        self.routing.send_strategy.connection_added(AddedPeer {
+            peer_id,
+            route_id,
+            handle,
+            identity: identity.clone(),
+            is_inproc: false,
+            io_thread,
+        });
+        self.routing
+            .recv_strategy
+            .connection_added(peer_id, identity);
+    }
+
+    /// Start the raw byte relay for a STREAM peer on a reserved IO thread.
+    fn spawn_raw_stream(
+        &mut self,
+        stream: AnyStream,
+        peer_id: u64,
+        peer: &mut PeerSetup,
+    ) -> Option<RawStreamTask> {
+        let completion = self.reserve_completion(peer_id);
+
+        let peer_output = self.mail.peer_out_tx.try_register().ok()?;
         let assignment = self.resources.io_pool.reserve_thread();
         let io_thread = assignment.index();
         let migrate = self.resources.io_pool.has_dedicated_io_threads();
@@ -56,26 +103,10 @@ impl SocketDriver {
                 }
             },
         );
-
-        let mut entry = new_peer_entry(peer, handle.clone(), None, io_thread);
-        // Raw STREAM has no handshake, so the peer is ready at once.
-        entry.ready = true;
-        entry.pending_handshake = false;
-        entry.identity = identity.clone();
-        entry.task = Some(task);
-        self.peers.insert(peer_id, entry);
-        self.link.shared.ready_peers.add();
-
-        self.routing.send_strategy.connection_added(AddedPeer {
-            peer_id,
-            route_id,
+        Some(RawStreamTask {
             handle,
-            identity: identity.clone(),
-            is_inproc: false,
+            task,
             io_thread,
-        });
-        self.routing
-            .recv_strategy
-            .connection_added(peer_id, identity);
+        })
     }
 }

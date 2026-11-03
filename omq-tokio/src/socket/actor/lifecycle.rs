@@ -26,15 +26,15 @@ impl<'a> PeerLifecycle<'a> {
             self.driver
                 .routing
                 .send_strategy
-                .connection_removed(peer_id, p.route_id);
+                .connection_removed(peer_id, p.origin.route_id);
             if self.driver.socket_type == SocketType::Req {
                 self.driver
                     .link
                     .shared
                     .req_awaiting_reply
-                    .peer_disconnected(p.route_id, peer_id);
+                    .peer_disconnected(p.origin.route_id, peer_id);
             }
-            if p.ready {
+            if p.handshake.ready {
                 self.driver.link.shared.ready_peers.remove();
             }
         }
@@ -102,13 +102,13 @@ impl<'a> PeerLifecycle<'a> {
 
     fn publish_disconnect(&self, peer: Option<&PeerEntry>, reason: DisconnectReason) {
         if let Some(peer) = peer
-            && let Some(ref info) = peer.info
+            && let Some(ref info) = peer.handshake.info
         {
             self.driver
                 .link
                 .monitor
                 .publish(MonitorEvent::Disconnected {
-                    endpoint: peer.endpoint.clone(),
+                    endpoint: peer.origin.endpoint.clone(),
                     peer: info.clone(),
                     reason,
                 });

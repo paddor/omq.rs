@@ -1,7 +1,7 @@
 //! Inproc peer setup: ports, send and receive paths, and the peer driver.
 
 use super::recv_bypass::{FaninProducer, fanin_recv_sink, wrap_routed_sink};
-use super::{PeerChannels, PeerSetup, can_bypass_actor_recv, make_send_pipe, new_peer_entry};
+use super::{PeerChannels, PeerEntry, PeerSetup, can_bypass_actor_recv, make_send_pipe};
 use crate::engine::send_pipe::SendPipeProducerHandle;
 use crate::engine::{RecvSink, SendPipeConsumer};
 use crate::socket::actor::inproc_driver::{
@@ -79,10 +79,11 @@ fn register_inproc_peer(
 
     handle.send_pipe = send_pipe;
     handle.inproc.clone_from(&outbound);
-    let mut entry = new_peer_entry(peer, handle, None, io_assignment.index());
     // Inproc's synthetic handshake never holds a pending-handshake slot.
-    entry.pending_handshake = false;
-    entry.inproc_inbound = inproc_inbound;
+    let entry = PeerEntry {
+        inproc_inbound,
+        ..PeerEntry::new(peer.into_origin(io_assignment.index()), handle)
+    };
     socket.peers.insert(peer_id, entry);
 
     InprocDriverEnds {

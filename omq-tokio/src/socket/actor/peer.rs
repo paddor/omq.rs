@@ -96,20 +96,20 @@ impl SocketDriver {
         }
 
         #[cfg(feature = "dart")]
-        if matches!(peer.endpoint, omq_proto::Endpoint::Dart { .. }) {
+        if matches!(peer.origin.endpoint, omq_proto::Endpoint::Dart { .. }) {
             self.dart_peer_closed(peer_id);
             return;
         }
         // A refused handshake would be refused again; stop dialing.
         if refused {
-            if peer.side.is_connect() {
-                self.drop_dial_route(peer.route_id);
+            if peer.origin.side.is_connect() {
+                self.drop_dial_route(peer.origin.route_id);
             }
             return;
         }
-        if peer.side.is_connect()
+        if peer.origin.side.is_connect()
             && !self.close.started
-            && !matches!(peer.options.reconnect, ReconnectPolicy::Disabled)
+            && !matches!(peer.origin.options.reconnect, ReconnectPolicy::Disabled)
         {
             self.redial_closed_peer(&peer);
         }
@@ -121,7 +121,7 @@ impl SocketDriver {
             return;
         };
 
-        if peer.pending_handshake {
+        if peer.pending_handshake() {
             let reason_text = match reason {
                 DisconnectReason::Error(text) => Some(text.clone()),
                 DisconnectReason::HandshakeRefused(refusal) => Some(refusal.to_string()),
@@ -134,9 +134,9 @@ impl SocketDriver {
             }
         }
 
-        if refused && peer.side.is_connect() {
+        if refused && peer.origin.side.is_connect() {
             self.link.monitor.publish(MonitorEvent::ConnectStopped {
-                endpoint: peer.endpoint.clone(),
+                endpoint: peer.origin.endpoint.clone(),
                 reason: reason.clone(),
             });
         }
@@ -144,20 +144,20 @@ impl SocketDriver {
 
     /// Restart the dial loop for a lost client peer, carrying its backoff.
     fn redial_closed_peer(&mut self, peer: &PeerEntry) {
-        let ep = peer.endpoint.clone();
+        let ep = peer.origin.endpoint.clone();
         // Transport success does not reset backoff: READY does.
-        let failed_attempts = if peer.ready {
+        let failed_attempts = if peer.handshake.ready {
             1
         } else {
             self.endpoints
                 .dialers
                 .iter()
-                .find(|dialer| dialer.route_id == peer.route_id)
+                .find(|dialer| dialer.route_id == peer.origin.route_id)
                 .map_or(0, |dialer| dialer.failed_attempts.load(Ordering::Relaxed))
                 .saturating_add(1)
         };
         self.endpoints.dialers.retain(|d| d.task.endpoint != ep);
-        self.start_redial(ep, peer.options.clone(), failed_attempts);
+        self.start_redial(ep, peer.origin.options.clone(), failed_attempts);
     }
 
     pub(super) fn evict_peer_for_handover(&mut self, peer_id: u64) {
@@ -311,7 +311,7 @@ impl SocketDriver {
                 if self.close.started {
                     return;
                 }
-                if !self.peers.get(&peer_id).is_some_and(|p| p.ready) {
+                if !self.peers.get(&peer_id).is_some_and(|p| p.handshake.ready) {
                     return;
                 }
                 if matches!(self.socket_type, SocketType::Req | SocketType::Rep) {
@@ -340,7 +340,7 @@ impl SocketDriver {
                 }
             }
             ZmtpEvent::Command(cmd) => {
-                if self.peers.get(&peer_id).is_some_and(|p| p.ready) {
+                if self.peers.get(&peer_id).is_some_and(|p| p.handshake.ready) {
                     self.handle_peer_command(peer_id, cmd);
                 }
             }
@@ -353,7 +353,7 @@ impl SocketDriver {
             let Some(properties) = self
                 .peers
                 .get(&peer_id)
-                .and_then(|peer| peer.info.as_ref())
+                .and_then(|peer| peer.handshake.info.as_ref())
                 .map(|info| info.peer_properties.clone())
             else {
                 self.begin_close(None, Some(Duration::ZERO));
@@ -408,17 +408,6 @@ pub(crate) fn spawn_driver(
     io_pool: &crate::context::IoPoolHandle,
 ) -> tokio::task::JoinHandle<()> {
     io_pool.spawn_primary(async move { driver.run().await })
-}
-
-impl PeerEntry {
-    /// Monitor event for a handshake this peer failed.
-    pub(super) fn handshake_failed(&self, reason: impl Into<String>) -> MonitorEvent {
-        MonitorEvent::HandshakeFailed {
-            endpoint: self.endpoint.clone(),
-            peer_ident: self.ident.clone(),
-            reason: reason.into(),
-        }
-    }
 }
 
 impl PeerSetup {

@@ -2,7 +2,7 @@
 //! activation.
 
 use super::{
-    MonitorEvent, PeerIdent, PeerInfo, SocketDriver, SocketType, generated_identity,
+    MonitorEvent, PeerHandshake, PeerIdent, PeerInfo, SocketDriver, SocketType, generated_identity,
     peer_ident_socket_addr,
 };
 use crate::routing::AddedPeer;
@@ -35,7 +35,7 @@ impl SocketDriver {
             .send_strategy
             .peer_for_identity(identity)
             .filter(|&old_id| old_id != peer_id)
-            .and_then(|old_id| self.peers.get(&old_id)?.info.as_ref())
+            .and_then(|old_id| self.peers.get(&old_id)?.handshake.info.as_ref())
         else {
             return false;
         };
@@ -84,13 +84,13 @@ impl SocketDriver {
         limit: usize,
     ) -> Option<bool> {
         let candidate = self.peers.get(&peer_id)?;
-        if !family(&candidate.endpoint) || candidate.ready {
+        if !family(&candidate.origin.endpoint) || candidate.handshake.ready {
             return None;
         }
         let ready = self
             .peers
             .values()
-            .filter(|peer| peer.ready && family(&peer.endpoint))
+            .filter(|peer| peer.handshake.ready && family(&peer.origin.endpoint))
             .count();
         let replaced = self
             .routing
@@ -98,7 +98,7 @@ impl SocketDriver {
             .peer_for_identity(identity)
             .filter(|&old_id| old_id != peer_id)
             .and_then(|old_id| self.peers.get(&old_id))
-            .is_some_and(|peer| peer.ready && family(&peer.endpoint));
+            .is_some_and(|peer| peer.handshake.ready && family(&peer.origin.endpoint));
         Some(ready.saturating_sub(usize::from(replaced)) < limit)
     }
 
@@ -194,15 +194,15 @@ impl SocketDriver {
         Some(PeerInfo {
             authentication: peer_properties.authentication.clone(),
             diagnostics: omq_proto::PeerDiagnostics {
-                endpoint: peer.endpoint.to_string(),
-                local_address: peer.local_address.clone(),
-                remote_address: peer.remote_address.clone(),
+                endpoint: peer.origin.endpoint.to_string(),
+                local_address: peer.origin.local_address.clone(),
+                remote_address: peer.origin.remote_address.clone(),
             },
             connection_id: peer_id,
-            peer_address: peer_ident_socket_addr(&peer.ident),
+            peer_address: peer_ident_socket_addr(&peer.origin.ident),
             peer_identity: peer_properties.identity.clone(),
             peer_properties: peer_properties.clone(),
-            zmtp_version: Self::peer_protocol_version(&peer.endpoint, peer_minor),
+            zmtp_version: Self::peer_protocol_version(&peer.origin.endpoint, peer_minor),
         })
     }
 
@@ -214,23 +214,24 @@ impl SocketDriver {
         info: PeerInfo,
     ) -> Option<ReadiedPeer> {
         let p = self.peers.get_mut(&peer_id)?;
-        let became_ready = !p.ready;
-        p.ready = true;
-        p.pending_handshake = false;
+        let became_ready = !p.handshake.ready;
         // Dropping the admission frees a pending-handshake slot.
-        p.handshake_admission = None;
-        p.identity = identity.clone();
-        p.info = Some(info.clone());
+        p.handshake = PeerHandshake {
+            ready: true,
+            admission: None,
+            identity: identity.clone(),
+            info: Some(info.clone()),
+        };
 
         Some(ReadiedPeer {
             handle: p.handle.clone(),
-            route_id: p.route_id,
+            route_id: p.origin.route_id,
             subs_replay: self.routing.subscriptions.clone(),
-            peer_ident: p.ident.clone(),
-            io_thread: p.io_thread,
+            peer_ident: p.origin.ident.clone(),
+            io_thread: p.origin.io_thread,
             became_ready,
             event: MonitorEvent::HandshakeSucceeded {
-                endpoint: p.endpoint.clone(),
+                endpoint: p.origin.endpoint.clone(),
                 peer: info,
             },
         })
@@ -247,10 +248,9 @@ impl SocketDriver {
         // RADIO over DART fans out to every peer; the receiver filters.
         #[cfg(feature = "dart")]
         let any_groups = self.socket_type == SocketType::Radio
-            && self
-                .peers
-                .get(&peer_id)
-                .is_some_and(|peer| matches!(peer.endpoint, omq_proto::Endpoint::Dart { .. }));
+            && self.peers.get(&peer_id).is_some_and(|peer| {
+                matches!(peer.origin.endpoint, omq_proto::Endpoint::Dart { .. })
+            });
         #[cfg(not(feature = "dart"))]
         let any_groups = false;
 

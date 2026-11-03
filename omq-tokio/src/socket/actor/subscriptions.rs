@@ -124,7 +124,7 @@ impl SocketDriver {
         let admitted = self
             .peers
             .get(&peer_id)
-            .and_then(|peer| peer.info.as_ref())
+            .and_then(|peer| peer.handshake.info.as_ref())
             .is_some_and(|info| admission.admits(prefix, &info.peer_properties));
         if !admitted {
             self.link.monitor.publish(MonitorEvent::SubscribeRejected {
@@ -171,11 +171,11 @@ impl SocketDriver {
         let Some(peer) = self.peers.get(&peer_id) else {
             return;
         };
-        let Some(info) = peer.info.clone() else {
+        let Some(info) = peer.handshake.info.clone() else {
             return;
         };
         self.link.monitor.publish(MonitorEvent::PeerCommand {
-            endpoint: peer.endpoint.clone(),
+            endpoint: peer.origin.endpoint.clone(),
             peer: info,
             command,
         });
@@ -249,7 +249,7 @@ impl SocketDriver {
     ) -> Vec<crate::engine::control_inbox::Sender> {
         let mut backlogged = Vec::new();
         for p in self.peers.values() {
-            if !p.ready {
+            if !p.handshake.ready {
                 continue;
             }
             let inbox = &p.handle.inbox;

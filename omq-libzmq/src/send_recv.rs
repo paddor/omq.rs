@@ -19,7 +19,7 @@ pub(crate) use recv::{
     authenticated_recv_configured, authenticated_recv_has_data, authenticated_recv_has_more,
     pop_recv_frame_with_properties, pop_recv_server_message_with_properties,
 };
-use recv::{signal_recv_space_if_full, try_pop_dual, try_recv_authenticated_message};
+use recv::{try_pop_dual, try_recv_authenticated_message};
 pub use recv::{zmq_recv, zmq_recviov};
 
 #[repr(C)]
@@ -76,11 +76,7 @@ pub(crate) fn try_recv_message(sock: &OmqSocket) -> Result<Option<omq_tokio::Mes
     let Some(cons) = (unsafe { sock.recv.consumers.get() }) else {
         return Err(ETERM);
     };
-    if let Some(popped) = try_pop_dual(cons, sock) {
-        signal_recv_space_if_full(sock, popped.released_full_slot);
-        return Ok(Some(popped.message));
-    }
-    Ok(None)
+    Ok(try_pop_dual(cons, sock))
 }
 
 /// Non-blocking full-message send used by `zmq_proxy`.
@@ -385,40 +381,18 @@ fn block_recv_result<T>(
     if wait.nonblocking {
         return Err(libc::EAGAIN);
     }
-    if wait.rcvtimeo > 0 {
-        let deadline = Instant::now().checked_add(Duration::from_millis(wait.rcvtimeo as u64));
-        loop {
-            if sock.ctx.is_effectively_terminated() {
-                return Err(ETERM);
-            }
-            let ms = match deadline {
-                Some(deadline) => {
-                    let remaining = deadline.saturating_duration_since(Instant::now());
-                    if remaining.is_zero() {
-                        return Err(libc::EAGAIN);
-                    }
-                    remaining.as_millis().min(i32::MAX as u128) as c_int
-                }
-                None => i32::MAX,
-            };
-            let recv_notify = sock.notify.recv_notifier();
-            if recv_notify.wait_for_readable(ms) {
-                recv_notify.drain();
-            }
-            if sock.ctx.is_effectively_terminated() {
-                return Err(ETERM);
-            }
-            if let Some(val) = try_pop()? {
-                return Ok(val);
-            }
-        }
-    }
+    let deadline = if wait.rcvtimeo > 0 {
+        Instant::now().checked_add(Duration::from_millis(wait.rcvtimeo as u64))
+    } else {
+        None
+    };
     loop {
         if sock.ctx.is_effectively_terminated() {
             return Err(ETERM);
         }
+        let ms = next_wait_ms(wait, deadline)?;
         let recv_notify = sock.notify.recv_notifier();
-        if recv_notify.wait_for_readable(100) {
+        if recv_notify.wait_for_readable(ms) {
             recv_notify.drain();
         }
         if sock.ctx.is_effectively_terminated() {
@@ -428,6 +402,23 @@ fn block_recv_result<T>(
             return Ok(val);
         }
     }
+}
+
+/// How long the next readiness wait may take: 100 ms slices without a
+/// timeout, else the time left before `deadline`, or `EAGAIN` once it has
+/// passed. A deadline past `Instant`'s range waits in `i32::MAX` slices.
+fn next_wait_ms(wait: RecvWait, deadline: Option<Instant>) -> Result<c_int, c_int> {
+    if wait.rcvtimeo <= 0 {
+        return Ok(100);
+    }
+    let Some(deadline) = deadline else {
+        return Ok(i32::MAX);
+    };
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(libc::EAGAIN);
+    }
+    Ok(remaining.as_millis().min(i32::MAX as u128) as c_int)
 }
 
 /// Core send dispatch. Takes a raw slice to avoid heap-allocating a `Bytes`

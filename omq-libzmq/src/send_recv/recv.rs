@@ -58,17 +58,8 @@ fn zmq_recv_impl(sock: &OmqSocket, buf: *mut libc::c_void, buf_len: usize, flags
     }
 
     if authenticated_recv_configured(sock) {
-        return match pop_recv_frame_with_properties(sock, flags) {
-            Ok((frame, _, _)) => {
-                let frame_len = frame.len();
-                copy_to_buf(buf, buf_len, &frame);
-                match checked_c_int_len(frame_len) {
-                    Ok(size) => size,
-                    Err(error) => fail(error),
-                }
-            }
-            Err(error) => fail(error),
-        };
+        let (frame, _, _) = c_try!(pop_recv_frame_with_properties(sock, flags));
+        return c_try!(copy_out(buf, buf_len, &frame));
     }
 
     // Multipart drain: leftover frames use the Bytes-returning path.
@@ -79,26 +70,9 @@ fn zmq_recv_impl(sock: &OmqSocket, buf: *mut libc::c_void, buf_len: usize, flags
     // Fast path: pop Message from yring, borrow first frame directly.
     // Avoids the Bytes::copy_from_slice that pop_recv_frame/decompose_message
     // would do for inline messages.
-    // SAFETY: libzmq sockets are accessed by at most one application thread.
-    let Some(cons) = (unsafe { sock.recv.consumers.get() }) else {
-        return fail(ETERM);
-    };
-
-    if let Some(popped) = try_pop_dual(cons, sock) {
-        signal_recv_space_if_full(sock, popped.released_full_slot);
-        return recv_msg_to_buf(sock, &popped.message, buf, buf_len);
-    }
-
-    match block_recv_result(sock, RecvWait::new(sock, flags), || {
-        let Some(popped) = try_pop_dual(cons, sock) else {
-            return Ok(None);
-        };
-        signal_recv_space_if_full(sock, popped.released_full_slot);
-        Ok(Some(recv_msg_to_buf(sock, &popped.message, buf, buf_len)))
-    }) {
-        Ok(n) => n,
-        Err(e) => fail(e),
-    }
+    c_try!(pop_message(sock, flags, |message| {
+        recv_msg_to_buf(sock, &message, buf, buf_len)
+    }))
 }
 
 /// Borrow the first frame of a Message and copy into the user buffer.
@@ -109,15 +83,10 @@ fn recv_msg_to_buf(
     m: &omq_tokio::Message,
     buf: *mut libc::c_void,
     buf_len: usize,
-) -> c_int {
+) -> Result<c_int, c_int> {
     let start = msg_start_index(sock, m);
-    let data = m.get(start).unwrap_or(&[]);
-    copy_to_buf(buf, buf_len, data);
-    stash_remaining_parts(sock, m, start);
-    match checked_c_int_len(data.len()) {
-        Ok(n) => n,
-        Err(e) => fail(e),
-    }
+    stash_remaining_parts(sock, m, start)?;
+    copy_out(buf, buf_len, m.get(start).unwrap_or(&[]))
 }
 
 /// Fallback for `zmq_recv` when multipart drain is non-empty.
@@ -127,23 +96,34 @@ fn zmq_recv_via_frame(
     buf_len: usize,
     flags: c_int,
 ) -> c_int {
-    match pop_recv_frame(sock, flags) {
-        Ok((frame, _more)) => {
-            let frame_len = frame.len();
-            copy_to_buf(buf, buf_len, &frame);
-            match checked_c_int_len(frame_len) {
-                Ok(n) => n,
-                Err(e) => fail(e),
-            }
-        }
-        Err(e) => fail(e),
+    let (frame, _more) = c_try!(pop_recv_frame(sock, flags));
+    c_try!(copy_out(buf, buf_len, &frame))
+}
+
+/// Pop one message from the direct receive rings and `map` it, waiting per
+/// `flags` and `ZMQ_RCVTIMEO` while both rings are empty.
+#[inline]
+fn pop_message<T>(
+    sock: &OmqSocket,
+    flags: c_int,
+    mut map: impl FnMut(omq_tokio::Message) -> Result<T, c_int>,
+) -> Result<T, c_int> {
+    // SAFETY: libzmq sockets are accessed by at most one application thread.
+    let Some(cons) = (unsafe { sock.recv.consumers.get() }) else {
+        return Err(ETERM);
+    };
+    if let Some(message) = try_pop_dual(cons, sock) {
+        return map(message);
     }
+    block_recv_result(sock, RecvWait::new(sock, flags), || {
+        try_pop_dual(cons, sock).map(&mut map).transpose()
+    })
 }
 
 /// Signal the recv pump that space is available in the recv ring after a
 /// full-ring pop. Avoid waking the producer on every normal recv.
 #[inline]
-pub(super) fn signal_recv_space_if_full(sock: &OmqSocket, released_full_slot: bool) {
+fn signal_recv_space_if_full(sock: &OmqSocket, released_full_slot: bool) {
     if released_full_slot && let Some(cfg) = sock.recv.sink_config.get() {
         cfg.notify_space();
     }
@@ -243,9 +223,8 @@ pub(crate) fn pop_recv_frame_with_properties(
 pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, bool), c_int> {
     use std::sync::atomic::Ordering;
 
-    let wait = RecvWait::new(sock, flags);
     if sock.zap_handler.load(Ordering::Acquire) {
-        return pop_zap_frame(sock, wait);
+        return pop_zap_frame(sock, RecvWait::new(sock, flags));
     }
 
     // Drain leftover frames from a partially-consumed multipart message.
@@ -263,23 +242,7 @@ pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, b
         sock.recv.drain_nonempty.store(false, Ordering::Relaxed);
     }
 
-    // SAFETY: libzmq sockets are accessed by at most one application thread.
-    let Some(cons) = (unsafe { sock.recv.consumers.get() }) else {
-        return Err(ETERM);
-    };
-
-    if let Some(popped) = try_pop_dual(cons, sock) {
-        signal_recv_space_if_full(sock, popped.released_full_slot);
-        return decompose_message(sock, &popped.message);
-    }
-
-    block_recv_result(sock, wait, || {
-        let Some(popped) = try_pop_dual(cons, sock) else {
-            return Ok(None);
-        };
-        signal_recv_space_if_full(sock, popped.released_full_slot);
-        decompose_message(sock, &popped.message).map(Some)
-    })
+    pop_message(sock, flags, |message| decompose_message(sock, &message))
 }
 
 /// Pop one complete SERVER message so `zmq_msg_recv` can preserve routing ID
@@ -288,22 +251,7 @@ pub(crate) fn pop_recv_server_message(
     sock: &OmqSocket,
     flags: c_int,
 ) -> Result<omq_tokio::Message, c_int> {
-    let wait = RecvWait::new(sock, flags);
-    // SAFETY: libzmq sockets are accessed by at most one application thread.
-    let Some(cons) = (unsafe { sock.recv.consumers.get() }) else {
-        return Err(ETERM);
-    };
-    if let Some(popped) = try_pop_dual(cons, sock) {
-        signal_recv_space_if_full(sock, popped.released_full_slot);
-        return Ok(popped.message);
-    }
-    block_recv_result(sock, wait, || {
-        let Some(popped) = try_pop_dual(cons, sock) else {
-            return Ok(None);
-        };
-        signal_recv_space_if_full(sock, popped.released_full_slot);
-        Ok(Some(popped.message))
-    })
+    pop_message(sock, flags, Ok)
 }
 
 pub(crate) fn pop_recv_server_message_with_properties(
@@ -324,16 +272,11 @@ pub(crate) fn pop_recv_server_message_with_properties(
     pop_recv_server_message(sock, flags).map(|message| (message, None))
 }
 
-pub(super) struct PoppedMessage {
-    pub(super) message: omq_tokio::Message,
-    pub(super) released_full_slot: bool,
-}
-
 #[inline]
 pub(super) fn try_pop_dual(
     cons: &mut crate::socket::RecvConsumers,
     sock: &crate::socket::OmqSocket,
-) -> Option<PoppedMessage> {
+) -> Option<omq_tokio::Message> {
     cons.refresh(sock.recv.sink_config.get());
     let mut released_full_slot = false;
     let mut budget = DrainBudget::WORKER;
@@ -345,10 +288,8 @@ pub(super) fn try_pop_dual(
         let _ = budget.account(message.byte_len());
         settle_recv_fd(sock, cons);
         if let Some(message) = prepare_external_recv(sock, message) {
-            return Some(PoppedMessage {
-                message,
-                released_full_slot,
-            });
+            signal_recv_space_if_full(sock, released_full_slot);
+            return Some(message);
         }
     }
     signal_recv_space_if_full(sock, released_full_slot);
@@ -386,49 +327,43 @@ fn msg_start_index(sock: &OmqSocket, msg: &omq_tokio::Message) -> usize {
     0
 }
 
-fn stash_remaining_parts(sock: &OmqSocket, msg: &omq_tokio::Message, start: usize) {
+/// Queue the frames after `start` for the following receives; return
+/// whether any follow. `ETERM` when the drain lock is poisoned.
+fn stash_remaining_parts(
+    sock: &OmqSocket,
+    msg: &omq_tokio::Message,
+    start: usize,
+) -> Result<bool, c_int> {
     let nparts = msg.len();
     let next = start + 1;
-    if next < nparts {
-        sock.recv
-            .drain_nonempty
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        let mut drain = sock.recv.drain.lock().expect("recv_drain");
-        for i in next..nparts {
-            if let Some(b) = msg.part_bytes(i) {
-                drain.push_back(b);
-            }
+    if next >= nparts {
+        return Ok(false);
+    }
+    sock.recv
+        .drain_nonempty
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let Ok(mut drain) = sock.recv.drain.lock() else {
+        return Err(ETERM);
+    };
+    for i in next..nparts {
+        if let Some(b) = msg.part_bytes(i) {
+            drain.push_back(b);
         }
     }
+    Ok(true)
 }
 
 fn decompose_message(sock: &OmqSocket, msg: &omq_tokio::Message) -> Result<(Bytes, bool), c_int> {
-    use std::sync::atomic::Ordering;
-
-    let nparts = msg.len();
-
     let start = msg_start_index(sock, msg);
-    if nparts <= 1 && start == 0 {
-        let head = msg.part_bytes(0).unwrap_or_default();
-        return Ok((head, false));
-    }
-
     let head = msg.part_bytes(start).unwrap_or_default();
+    let more = stash_remaining_parts(sock, msg, start)?;
+    Ok((head, more))
+}
 
-    let remaining = start + 1;
-    if remaining < nparts {
-        sock.recv.drain_nonempty.store(true, Ordering::Relaxed);
-        let Ok(mut drain) = sock.recv.drain.lock() else {
-            return Err(ETERM);
-        };
-        for i in remaining..nparts {
-            if let Some(b) = msg.part_bytes(i) {
-                drain.push_back(b);
-            }
-        }
-    }
-
-    Ok((head, remaining < nparts))
+/// Copy `data` into the caller buffer, truncating; return its full length.
+fn copy_out(buf: *mut libc::c_void, buf_len: usize, data: &[u8]) -> Result<c_int, c_int> {
+    copy_to_buf(buf, buf_len, data);
+    checked_c_int_len(data.len())
 }
 
 fn copy_to_buf(buf: *mut libc::c_void, buf_len: usize, src: &[u8]) {

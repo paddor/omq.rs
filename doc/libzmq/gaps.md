@@ -19,7 +19,7 @@ implements today. See `errors.md` for the full libzmq catalog and
 |------|--------|--------|------|
 | EAGAIN/EWOULDBLOCK/EINTR | Explicit normalize + return 0 | Implicit via async runtime | **~** runtime handles it |
 | ECONNRESET/EPIPE/ETIMEDOUT | Return -1 (peer failure) | Fatal, driver exits -> reconnect | **=** |
-| Partial writes | Advance pointer, retry on POLLOUT | `put_back_unwritten` re-queues | **=** |
+| Partial writes | Advance pointer, retry on POLLOUT | `FrameBuffer::advance` / `PendingWrite::advance` keep the unwritten tail | **=** |
 | Clean close (read=0) | Set `errno=EPIPE`, return -1 | `UnexpectedEof`, driver exits | **=** |
 | WSAENOBUFS on send (Windows) | Return 0 (transient, KB201213) | Not handled | **X** |
 | FreeBSD close() ECONNRESET | Silently accepted in destructor | Not handled | **X** |

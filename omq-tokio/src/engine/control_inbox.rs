@@ -5,7 +5,8 @@
 //! socket. Their volume follows subscriptions and joins, not data.
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::sync::mpsc;
 
 use super::{PeerDriverCommand, signal::StateSignal, single_inbox};
@@ -19,13 +20,64 @@ struct Pending {
     closed: bool,
 }
 
+impl Pending {
+    fn occupied(&self) -> bool {
+        self.activation.is_some() || self.close.is_some() || !self.overflow.is_empty()
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct Lifecycle {
     pending: Mutex<Pending>,
+    /// Whether `pending` holds a command. Written under the lock, read
+    /// without it so an idle driver turn skips the lock.
+    occupied: AtomicBool,
     changed: StateSignal,
     receive: futures::task::AtomicWaker,
     #[cfg(feature = "dart")]
     endpoint: std::sync::OnceLock<Arc<super::signal::DataSignal>>,
+}
+
+impl Lifecycle {
+    fn lock(&self) -> PendingGuard<'_> {
+        PendingGuard {
+            pending: self.pending.lock().expect("control lifecycle poisoned"),
+            occupied: &self.occupied,
+        }
+    }
+
+    /// Whether a lifecycle or overflow command may be pending. Acquire pairs
+    /// with the guard's Release store, so a woken receiver sees the flag.
+    fn may_be_occupied(&self) -> bool {
+        self.occupied.load(Ordering::Acquire)
+    }
+}
+
+/// Lock on `Pending` that republishes `occupied` before it unlocks.
+struct PendingGuard<'a> {
+    pending: MutexGuard<'a, Pending>,
+    occupied: &'a AtomicBool,
+}
+
+impl std::ops::Deref for PendingGuard<'_> {
+    type Target = Pending;
+
+    fn deref(&self) -> &Pending {
+        &self.pending
+    }
+}
+
+impl std::ops::DerefMut for PendingGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Pending {
+        &mut self.pending
+    }
+}
+
+impl Drop for PendingGuard<'_> {
+    fn drop(&mut self) {
+        self.occupied
+            .store(self.pending.occupied(), Ordering::Release);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -50,6 +102,7 @@ pub(crate) fn channel(capacity: usize) -> (Sender, Receiver) {
     let (tx, rx) = single_inbox::channel(capacity);
     let lifecycle = Arc::new(Lifecycle {
         pending: Mutex::new(Pending::default()),
+        occupied: AtomicBool::new(false),
         changed: StateSignal::new(),
         receive: futures::task::AtomicWaker::new(),
         #[cfg(feature = "dart")]
@@ -86,10 +139,7 @@ impl Sender {
             };
             return sender.try_send(command);
         };
-        let mut pending = lifecycle
-            .pending
-            .lock()
-            .expect("control lifecycle poisoned");
+        let mut pending = lifecycle.lock();
         if pending.closed {
             return Err(mpsc::error::TrySendError::Closed(command));
         }
@@ -175,12 +225,7 @@ impl Sender {
         let Self::Owned { lifecycle, .. } = self else {
             return false;
         };
-        !lifecycle
-            .pending
-            .lock()
-            .expect("control lifecycle poisoned")
-            .overflow
-            .is_empty()
+        !lifecycle.lock().overflow.is_empty()
     }
 
     /// Wait until no protocol command waits behind a full ring, or the lane
@@ -192,10 +237,7 @@ impl Sender {
         lifecycle
             .changed
             .wait_until(|| {
-                let pending = lifecycle
-                    .pending
-                    .lock()
-                    .expect("control lifecycle poisoned");
+                let pending = lifecycle.lock();
                 pending.closed || pending.overflow.is_empty()
             })
             .await;
@@ -224,10 +266,10 @@ impl Receiver {
     }
 
     fn take_lifecycle(lifecycle: &Lifecycle) -> Option<PeerDriverCommand> {
-        let mut pending = lifecycle
-            .pending
-            .lock()
-            .expect("control lifecycle poisoned");
+        if !lifecycle.may_be_occupied() {
+            return None;
+        }
+        let mut pending = lifecycle.lock();
         if matches!(pending.close, Some(PeerDriverCommand::Close)) {
             return pending.close.take();
         }
@@ -237,12 +279,10 @@ impl Receiver {
     /// Overflow holds only commands newer than every ring entry, so it is
     /// read after the ring is empty.
     fn take_overflow(lifecycle: &Lifecycle) -> Option<PeerDriverCommand> {
-        let command = lifecycle
-            .pending
-            .lock()
-            .expect("control lifecycle poisoned")
-            .overflow
-            .pop_front();
+        if !lifecycle.may_be_occupied() {
+            return None;
+        }
+        let command = lifecycle.lock().overflow.pop_front();
         if command.is_some() {
             // Wakes callers waiting in `Sender::protocol_drained`.
             lifecycle.changed.notify_changed();
@@ -297,11 +337,7 @@ impl Receiver {
                 commands,
                 lifecycle,
             } => {
-                lifecycle
-                    .pending
-                    .lock()
-                    .expect("control lifecycle poisoned")
-                    .closed = true;
+                lifecycle.lock().closed = true;
                 commands.close();
                 lifecycle.changed.notify_changed();
                 lifecycle.receive.wake();
@@ -315,16 +351,7 @@ impl Receiver {
             Self::Owned {
                 commands,
                 lifecycle,
-            } => {
-                let pending = lifecycle
-                    .pending
-                    .lock()
-                    .expect("control lifecycle poisoned");
-                commands.is_empty()
-                    && pending.activation.is_none()
-                    && pending.close.is_none()
-                    && pending.overflow.is_empty()
-            }
+            } => commands.is_empty() && !lifecycle.may_be_occupied(),
         }
     }
 
@@ -339,10 +366,7 @@ impl Drop for Receiver {
     fn drop(&mut self) {
         self.close();
         if let Self::Owned { lifecycle, .. } = self {
-            let mut pending = lifecycle
-                .pending
-                .lock()
-                .expect("control lifecycle poisoned");
+            let mut pending = lifecycle.lock();
             let activation = pending.activation.take();
             let close = pending.close.take();
             let overflow = std::mem::take(&mut pending.overflow);

@@ -478,6 +478,14 @@ impl Connection {
         self.messages.pop_front()
     }
 
+    /// Whether a decoded application message waits for
+    /// [`poll_message`](Self::poll_message).
+    #[inline]
+    #[must_use]
+    pub fn has_messages(&self) -> bool {
+        !self.messages.is_empty()
+    }
+
     /// Swap the internal message queue with `dest`. O(1) — exchanges
     /// three machine words regardless of queue length. Use this to
     /// batch-drain all pending messages in one operation.

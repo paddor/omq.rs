@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Connection::has_messages` reports whether a decoded message waits for
+  `poll_message`.
+
 ### Changed
 
 - `FrameBuffer::frame_ws` takes a `WsRole` instead of a masking flag, and

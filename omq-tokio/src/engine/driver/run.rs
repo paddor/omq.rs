@@ -37,7 +37,7 @@ use omq_proto::{
 };
 use std::{future::Future, net::IpAddr, pin::Pin, sync::Arc, time::Instant};
 use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
+use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 
 mod activation;
 mod wait;
@@ -97,6 +97,10 @@ impl<R, W> PacedIo<R, W> {
 /// Pinned waits and event routes that borrow locals of `run_inner_body`.
 struct Waits<'w, D, F, G, A, H> {
     shm_peer_death: Pin<&'w mut D>,
+    /// Only SHM connections can lose their peer process.
+    watch_shm_peer: bool,
+    /// Registered once per driver, not once per turn.
+    cancelled: Pin<&'w mut WaitForCancellationFutureOwned>,
     control: ControlCredit<'w, F, G>,
     authenticated: ControlCredit<'w, A, H>,
     event_out: &'w mpsc::Sender<(u64, PeerEvent)>,
@@ -343,9 +347,13 @@ where
             .and_then(RecvSink::authenticated_sender);
         let authenticated_credit = reserve_authenticated(authenticated_sender.as_ref());
         tokio::pin!(authenticated_credit);
+        let cancelled = session.cancel.clone().cancelled_owned();
+        tokio::pin!(cancelled);
 
         let mut waits = Waits {
             shm_peer_death: shm_peer_death.as_mut(),
+            watch_shm_peer: session.receive.shm.is_some(),
+            cancelled: cancelled.as_mut(),
             control: ControlCredit::new(control_credit.as_mut(), || event_out.reserve()),
             authenticated: ControlCredit::new(authenticated_credit.as_mut(), || {
                 reserve_authenticated(authenticated_sender.as_ref())

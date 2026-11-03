@@ -35,8 +35,8 @@ impl Session<'_> {
     {
         tokio::select! {
             biased;
-            exited = &mut waits.shm_peer_death => exited.map(|()| Flow::Exit),
-            () = self.cancel.cancelled() => Ok(self.on_cancel()),
+            exited = &mut waits.shm_peer_death, if waits.watch_shm_peer => exited.map(|()| Flow::Exit),
+            () = &mut waits.cancelled => Ok(self.on_cancel()),
 
             () = sleep_until_opt(self.control.deadline()), if self.control.deadline().is_some() => Ok(Flow::Exit),
 

@@ -337,12 +337,29 @@ pub(super) fn drain_decoded_messages(
         let msg_bytes = batch.cost(&m);
         if let Some(step) = batch.deliver(m, msg_bytes, &mut delivery) {
             delivery.flush(&mut batch.pending_flush);
+            // A latency batch is one message. Its spent budget yields only to
+            // other ready input: yielding with nothing ready costs a reactor
+            // poll per message.
+            if step == DriverStep::Yield
+                && receive_profile != ReceiveProfile::Throughput
+                && shm_guard.is_none()
+                && !decoded_input_ready(connection, decoder.as_ref())
+            {
+                return Ok(DriverStep::Continue);
+            }
             return Ok(step);
         }
     }
 
     delivery.flush(&mut batch.pending_flush);
     Ok(DriverStep::Continue)
+}
+
+/// Whether another message can be decoded without reading the transport.
+fn decoded_input_ready(connection: &Connection, decoder: Option<&MessageDecoder>) -> bool {
+    connection.has_messages()
+        || connection.has_pending_input()
+        || decoder.is_some_and(MessageDecoder::has_pending_messages)
 }
 
 enum DecodedReceive {

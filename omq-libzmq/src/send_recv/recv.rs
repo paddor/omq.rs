@@ -1,7 +1,6 @@
 //! `zmq_recv`, frame popping, and authenticated receives.
 
-use super::{ZmqIovec, block_recv_result, checked_c_int_len};
-use crate::consts::ZMQ_DONTWAIT;
+use super::{RecvWait, ZmqIovec, block_recv_result, checked_c_int_len};
 use crate::error::{ETERM, c_try, fail};
 use crate::notify::NotifyHandle;
 use crate::socket::OmqSocket;
@@ -90,13 +89,7 @@ fn zmq_recv_impl(sock: &OmqSocket, buf: *mut libc::c_void, buf_len: usize, flags
         return recv_msg_to_buf(sock, &popped.message, buf, buf_len);
     }
 
-    let rcvtimeo = sock.rcvtimeo_ms.load(Ordering::Relaxed);
-    let dontwait = (flags & ZMQ_DONTWAIT) != 0 || rcvtimeo == 0;
-    if dontwait {
-        return fail(libc::EAGAIN);
-    }
-
-    match block_recv_result(sock, rcvtimeo, || {
+    match block_recv_result(sock, RecvWait::new(sock, flags), || {
         let Some(popped) = try_pop_dual(cons, sock) else {
             return Ok(None);
         };
@@ -156,14 +149,11 @@ pub(super) fn signal_recv_space_if_full(sock: &OmqSocket, released_full_slot: bo
     }
 }
 
-fn pop_zap_frame(sock: &OmqSocket, rcvtimeo: i64, dontwait: bool) -> Result<(Bytes, bool), c_int> {
+fn pop_zap_frame(sock: &OmqSocket, wait: RecvWait) -> Result<(Bytes, bool), c_int> {
     if let Some(frame) = sock.ctx.zap.try_recv_frame(sock.id)? {
         return Ok(frame);
     }
-    if dontwait {
-        return Err(libc::EAGAIN);
-    }
-    block_recv_result(sock, rcvtimeo, || sock.ctx.zap.try_recv_frame(sock.id))
+    block_recv_result(sock, wait, || sock.ctx.zap.try_recv_frame(sock.id))
 }
 
 pub(crate) fn authenticated_recv_configured(sock: &OmqSocket) -> bool {
@@ -215,14 +205,11 @@ fn pop_authenticated_message(
     sock: &OmqSocket,
     flags: c_int,
 ) -> Result<AuthenticatedMessage, c_int> {
-    let rcvtimeo = sock.rcvtimeo_ms.load(std::sync::atomic::Ordering::Relaxed);
+    let wait = RecvWait::new(sock, flags);
     if let Some(item) = try_recv_authenticated_message(sock)? {
         return Ok(item);
     }
-    if flags & ZMQ_DONTWAIT != 0 || rcvtimeo == 0 {
-        return Err(libc::EAGAIN);
-    }
-    block_recv_result(sock, rcvtimeo, || try_recv_authenticated_message(sock))
+    block_recv_result(sock, wait, || try_recv_authenticated_message(sock))
 }
 
 /// Pop one frame while retaining ZAP properties for `zmq_msg_gets`.
@@ -256,10 +243,9 @@ pub(crate) fn pop_recv_frame_with_properties(
 pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, bool), c_int> {
     use std::sync::atomic::Ordering;
 
-    let rcvtimeo = sock.rcvtimeo_ms.load(Ordering::Relaxed);
-    let dontwait = (flags & ZMQ_DONTWAIT) != 0 || rcvtimeo == 0;
+    let wait = RecvWait::new(sock, flags);
     if sock.zap_handler.load(Ordering::Acquire) {
-        return pop_zap_frame(sock, rcvtimeo, dontwait);
+        return pop_zap_frame(sock, wait);
     }
 
     // Drain leftover frames from a partially-consumed multipart message.
@@ -287,11 +273,7 @@ pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, b
         return decompose_message(sock, &popped.message);
     }
 
-    if dontwait {
-        return Err(libc::EAGAIN);
-    }
-
-    block_recv_result(sock, rcvtimeo, || {
+    block_recv_result(sock, wait, || {
         let Some(popped) = try_pop_dual(cons, sock) else {
             return Ok(None);
         };
@@ -306,10 +288,7 @@ pub(crate) fn pop_recv_server_message(
     sock: &OmqSocket,
     flags: c_int,
 ) -> Result<omq_tokio::Message, c_int> {
-    use std::sync::atomic::Ordering;
-
-    let rcvtimeo = sock.rcvtimeo_ms.load(Ordering::Relaxed);
-    let dontwait = (flags & ZMQ_DONTWAIT) != 0 || rcvtimeo == 0;
+    let wait = RecvWait::new(sock, flags);
     // SAFETY: libzmq sockets are accessed by at most one application thread.
     let Some(cons) = (unsafe { sock.recv.consumers.get() }) else {
         return Err(ETERM);
@@ -318,10 +297,7 @@ pub(crate) fn pop_recv_server_message(
         signal_recv_space_if_full(sock, popped.released_full_slot);
         return Ok(popped.message);
     }
-    if dontwait {
-        return Err(libc::EAGAIN);
-    }
-    block_recv_result(sock, rcvtimeo, || {
+    block_recv_result(sock, wait, || {
         let Some(popped) = try_pop_dual(cons, sock) else {
             return Ok(None);
         };

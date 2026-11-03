@@ -262,7 +262,45 @@ fn can_queue_without_ready_peer(sock: &OmqSocket) -> bool {
     *unsafe { sock.send.queue_without_ready_peer.get() }
 }
 
-fn wait_for_ready_peer(sock: &OmqSocket, sndtimeo: i64) -> Result<(), c_int> {
+/// One send call's settings: the caller's flags and the socket's
+/// `ZMQ_SNDTIMEO`, read once per call.
+#[derive(Clone, Copy, Debug)]
+struct SendCall {
+    /// Byte count returned on success.
+    ret_len: c_int,
+    flags: c_int,
+    /// Milliseconds; negative waits forever, zero never waits.
+    sndtimeo: i64,
+}
+
+impl SendCall {
+    #[inline]
+    fn new(sock: &OmqSocket, ret_len: c_int, flags: c_int) -> Self {
+        Self {
+            ret_len,
+            flags,
+            sndtimeo: sock.sndtimeo_ms.load(std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+
+    /// `ZMQ_DONTWAIT` or a zero send timeout.
+    #[inline]
+    fn dontwait(self) -> bool {
+        (self.flags & ZMQ_DONTWAIT) != 0 || self.sndtimeo == 0
+    }
+
+    #[inline]
+    fn more(self) -> bool {
+        self.flags & ZMQ_SNDMORE != 0
+    }
+
+    /// The send timeout, or `None` when it is not positive.
+    fn timeout(self) -> Option<Duration> {
+        (self.sndtimeo > 0).then(|| Duration::from_millis(self.sndtimeo as u64))
+    }
+}
+
+fn wait_for_ready_peer(sock: &OmqSocket, timeout: Option<Duration>) -> Result<(), c_int> {
     let Some(inner) = sock.inner.get() else {
         return Err(ETERM);
     };
@@ -271,8 +309,7 @@ fn wait_for_ready_peer(sock: &OmqSocket, sndtimeo: i64) -> Result<(), c_int> {
     }
 
     // `map_omq_err` turns a timeout into EAGAIN.
-    if sndtimeo > 0 {
-        let timeout = Duration::from_millis(sndtimeo as u64);
+    if let Some(timeout) = timeout {
         run_on_socket(sock, inner, move |s| async move {
             s.wait_connected(1, timeout).await.map(|_| ())
         })
@@ -289,7 +326,7 @@ fn wait_for_ready_peer(sock: &OmqSocket, sndtimeo: i64) -> Result<(), c_int> {
     }
 }
 
-fn ensure_libzmq_send_route(sock: &OmqSocket, flags: c_int, sndtimeo: i64) -> Result<(), c_int> {
+fn ensure_libzmq_send_route(sock: &OmqSocket, call: SendCall) -> Result<(), c_int> {
     if matches!(
         sock.socket_type,
         omq_tokio::SocketType::Req | omq_tokio::SocketType::Rep
@@ -313,19 +350,43 @@ fn ensure_libzmq_send_route(sock: &OmqSocket, flags: c_int, sndtimeo: i64) -> Re
     if inner.ready_peer_count() != 0 {
         return Ok(());
     }
-    if (flags & ZMQ_DONTWAIT) != 0 || sndtimeo == 0 {
+    if call.dontwait() {
         return Err(libc::EAGAIN);
     }
-    wait_for_ready_peer(sock, sndtimeo)
+    wait_for_ready_peer(sock, call.timeout())
 }
 
+/// How long one receive call may wait, read once per call.
+#[derive(Clone, Copy, Debug)]
+struct RecvWait {
+    /// `ZMQ_DONTWAIT` or a zero receive timeout.
+    nonblocking: bool,
+    /// `ZMQ_RCVTIMEO` in milliseconds; negative waits forever.
+    rcvtimeo: i64,
+}
+
+impl RecvWait {
+    fn new(sock: &OmqSocket, flags: c_int) -> Self {
+        let rcvtimeo = sock.rcvtimeo_ms.load(std::sync::atomic::Ordering::Relaxed);
+        Self {
+            nonblocking: (flags & ZMQ_DONTWAIT) != 0 || rcvtimeo == 0,
+            rcvtimeo,
+        }
+    }
+}
+
+/// Wait for `try_pop` to yield a value, or `EAGAIN` right away for a
+/// nonblocking call.
 fn block_recv_result<T>(
     sock: &OmqSocket,
-    rcvtimeo: i64,
+    wait: RecvWait,
     mut try_pop: impl FnMut() -> Result<Option<T>, c_int>,
 ) -> Result<T, c_int> {
-    if rcvtimeo > 0 {
-        let deadline = Instant::now().checked_add(Duration::from_millis(rcvtimeo as u64));
+    if wait.nonblocking {
+        return Err(libc::EAGAIN);
+    }
+    if wait.rcvtimeo > 0 {
+        let deadline = Instant::now().checked_add(Duration::from_millis(wait.rcvtimeo as u64));
         loop {
             if sock.ctx.is_effectively_terminated() {
                 return Err(ETERM);
@@ -397,11 +458,11 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
         return send_xsub_subscription(sock, data, ret_len);
     }
 
-    let sndtimeo = sock.sndtimeo_ms.load(std::sync::atomic::Ordering::Relaxed);
-    c_try!(ensure_libzmq_send_route(sock, flags, sndtimeo));
+    let call = SendCall::new(sock, ret_len, flags);
+    c_try!(ensure_libzmq_send_route(sock, call));
 
     if sock.socket_type == omq_tokio::SocketType::Stream {
-        return send_stream_frame(sock, data, ret_len, flags, sndtimeo);
+        return send_stream_frame(sock, data, call);
     }
 
     // SAFETY: libzmq sockets are accessed by at most one application thread.
@@ -410,14 +471,14 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
     let retry = unsafe { sock.send.retry.get() };
 
     // If SNDMORE: buffer and return immediately.
-    if flags & ZMQ_SNDMORE != 0 {
+    if call.more() {
         if std::mem::take(retry) {
             // The caller restarted the message after a would-block, rather
             // than retrying its final frame.
             accum.clear();
         }
         if accum.is_empty()
-            && let Err(errno) = admit_first_frame(sock, flags, sndtimeo)
+            && let Err(errno) = admit_first_frame(sock, call)
         {
             return fail(errno);
         }
@@ -436,7 +497,7 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
         omq_tokio::Message::multipart(v)
     };
 
-    match submit_message_or_return(sock, msg, ret_len, flags, sndtimeo) {
+    match submit_message_or_return(sock, msg, call) {
         Ok(rc) => rc,
         Err(unsent) => {
             // Messages are atomic: keep the staged frames so retrying this
@@ -474,29 +535,23 @@ fn send_xsub_subscription(sock: &Arc<OmqSocket>, data: &[u8], ret_len: c_int) ->
 
 /// STREAM frames come in [identity, data] pairs. The identity frame must
 /// carry SNDMORE and is staged until its data frame arrives.
-fn send_stream_frame(
-    sock: &Arc<OmqSocket>,
-    data: &[u8],
-    ret_len: c_int,
-    flags: c_int,
-    sndtimeo: i64,
-) -> c_int {
+fn send_stream_frame(sock: &Arc<OmqSocket>, data: &[u8], call: SendCall) -> c_int {
     // SAFETY: libzmq sockets are accessed by at most one application thread.
     let accum = unsafe { sock.send.accum.get() };
 
     if accum.is_empty() {
-        if flags & ZMQ_SNDMORE == 0 {
+        if !call.more() {
             return fail(libc::EINVAL);
         }
-        c_try!(prepare_stream_route(sock, data, flags, sndtimeo));
+        c_try!(prepare_stream_route(sock, data, call));
         accum.push(Bytes::copy_from_slice(data));
-        return ret_len;
+        return call.ret_len;
     }
 
     let message = omq_tokio::Message::multipart([accum[0].clone(), Bytes::copy_from_slice(data)]);
     // STREAM data always ends the pair. Keep the identity on EAGAIN so
     // the caller can retry the same data frame.
-    let result = submit_message(sock, message, ret_len, flags & !ZMQ_SNDMORE, sndtimeo);
+    let result = submit_message(sock, message, call);
     if result >= 0 || crate::error::zmq_errno() != libc::EAGAIN {
         accum.clear();
     }
@@ -506,7 +561,7 @@ fn send_stream_frame(
 /// libzmq applies HWM at a message's first frame, so a would-block never
 /// splits a message. Round-robin and exclusive sockets check readiness here,
 /// before staging frames that could otherwise fail only at the last one.
-fn admit_first_frame(sock: &Arc<OmqSocket>, flags: c_int, sndtimeo: i64) -> Result<(), c_int> {
+fn admit_first_frame(sock: &Arc<OmqSocket>, call: SendCall) -> Result<(), c_int> {
     use omq_tokio::SocketType;
     if !matches!(
         sock.socket_type,
@@ -514,17 +569,18 @@ fn admit_first_frame(sock: &Arc<OmqSocket>, flags: c_int, sndtimeo: i64) -> Resu
     ) {
         return Ok(());
     }
-    let dontwait = (flags & ZMQ_DONTWAIT) != 0 || sndtimeo == 0;
+    let dontwait = call.dontwait();
+    let timeout = call.timeout();
     let Some(inner) = sock.inner.get() else {
         return Ok(());
     };
-    if (!dontwait && sndtimeo < 0) || inner.send_ready() {
+    // A blocking send without a timeout waits at its final frame instead.
+    if (!dontwait && timeout.is_none()) || inner.send_ready() {
         return Ok(());
     }
-    if dontwait {
+    let Some(timeout) = timeout.filter(|_| !dontwait) else {
         return Err(libc::EAGAIN);
-    }
-    let timeout = Duration::from_millis(sndtimeo as u64);
+    };
     let s = inner.clone();
     match crate::blocking::block_on(&sock.ctx, async move {
         tokio::time::timeout(timeout, s.wait_send_ready()).await
@@ -537,20 +593,20 @@ fn admit_first_frame(sock: &Arc<OmqSocket>, flags: c_int, sndtimeo: i64) -> Resu
 fn prepare_stream_route(
     sock: &Arc<OmqSocket>,
     identity: &[u8],
-    flags: c_int,
-    sndtimeo: i64,
+    call: SendCall,
 ) -> Result<(), c_int> {
     let inner = materialized(sock)?;
     match inner.check_stream_route(identity) {
         Ok(()) => return Ok(()),
-        Err(omq_tokio::Error::WouldBlock) if flags & ZMQ_DONTWAIT == 0 && sndtimeo != 0 => {}
+        Err(omq_tokio::Error::WouldBlock) if !call.dontwait() => {}
         Err(error) => return Err(map_omq_err(&error)),
     }
     let identity = Bytes::copy_from_slice(identity);
+    let timeout = call.timeout();
     run_on_socket(sock, inner, move |socket| async move {
         let ready = socket.wait_stream_route(identity);
-        if sndtimeo > 0 {
-            tokio::time::timeout(Duration::from_millis(sndtimeo as u64), ready)
+        if let Some(timeout) = timeout {
+            tokio::time::timeout(timeout, ready)
                 .await
                 .unwrap_or(Err(omq_tokio::Error::WouldBlock))
         } else {
@@ -582,12 +638,12 @@ pub(crate) fn send_message(
             Err(error) => fail(error),
         };
     }
-    let sndtimeo = sock.sndtimeo_ms.load(std::sync::atomic::Ordering::Relaxed);
-    if flags & ZMQ_SNDMORE != 0 {
+    let call = SendCall::new(sock, ret_len, flags);
+    if call.more() {
         return fail(libc::EINVAL);
     }
-    c_try!(ensure_libzmq_send_route(sock, flags, sndtimeo));
-    submit_message(sock, msg, ret_len, flags, sndtimeo)
+    c_try!(ensure_libzmq_send_route(sock, call));
+    submit_message(sock, msg, call)
 }
 
 pub(crate) fn map_send_err(sock: &OmqSocket, error: &omq_tokio::Error) -> c_int {
@@ -602,29 +658,21 @@ pub(crate) fn map_send_err(sock: &OmqSocket, error: &omq_tokio::Error) -> c_int 
     }
 }
 
-fn submit_message(
-    sock: &Arc<OmqSocket>,
-    msg: omq_tokio::Message,
-    ret_len: c_int,
-    flags: c_int,
-    sndtimeo: i64,
-) -> c_int {
-    submit_message_or_return(sock, msg, ret_len, flags, sndtimeo)
-        .unwrap_or_else(|_| fail(libc::EAGAIN))
+fn submit_message(sock: &Arc<OmqSocket>, msg: omq_tokio::Message, call: SendCall) -> c_int {
+    submit_message_or_return(sock, msg, call).unwrap_or_else(|_| fail(libc::EAGAIN))
 }
 
 /// Submit `msg`, or hand it back unsent when the send would block (EAGAIN).
 fn submit_message_or_return(
     sock: &Arc<OmqSocket>,
     msg: omq_tokio::Message,
-    ret_len: c_int,
-    flags: c_int,
-    sndtimeo: i64,
+    call: SendCall,
 ) -> Result<c_int, omq_tokio::Message> {
     let Some(inner) = sock.inner.get() else {
         return Ok(fail(ETERM));
     };
-    let dontwait = (flags & ZMQ_DONTWAIT) != 0 || sndtimeo == 0;
+    let ret_len = call.ret_len;
+    let dontwait = call.dontwait();
 
     match inner.try_send(msg) {
         Ok(()) => Ok(ret_len),
@@ -648,8 +696,8 @@ fn submit_message_or_return(
                 }
             }
             let s = inner.clone();
-            let timeout = (sndtimeo > 0)
-                .then(|| Duration::from_millis(sndtimeo as u64))
+            let timeout = call
+                .timeout()
                 .filter(|timeout| Instant::now().checked_add(*timeout).is_some());
             // Context shutdown ends either wait with ETERM.
             let Some(timeout) = timeout else {

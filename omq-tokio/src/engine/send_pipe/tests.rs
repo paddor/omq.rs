@@ -1,6 +1,9 @@
 use tokio::time::{Duration, timeout};
 
 use super::*;
+#[cfg(feature = "dart")]
+use std::collections::VecDeque;
+use std::sync::atomic::Ordering;
 
 #[test]
 fn deferred_sends_publish_before_full_returns() {

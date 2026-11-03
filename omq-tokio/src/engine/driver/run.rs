@@ -1,8 +1,8 @@
 //! Connection lifecycle and ordered service of the driver's selected waits.
 
 use super::{
-    ConnectionDriver, DriverStep, DriverStream, DriverWrite, PeerDriverConfig, PeerEvent,
-    PreActivationStep, ReceiveProfile, RecvSink,
+    ConnectionDriver, DriverStep, DriverStream, DriverWrite, IPC_LATENCY_POLL_WINDOW,
+    PeerDriverConfig, PeerEvent, PreActivationStep, ReceiveProfile, RecvSink,
     activation::{Activation, ControlCredit, ControlPermit},
     control::{ControlState, Heartbeat, close_error_reason},
     outbound::OutboundState,
@@ -116,6 +116,68 @@ struct ReceivePath {
     decoder: Option<MessageDecoder>,
 }
 
+/// Latency workload settings and the IPC busy-poll window.
+struct LatencyPolling {
+    /// Stage the latency-routed transmit slot and poll it before reads.
+    profile: bool,
+    /// Keep owned IPC latency drivers runnable briefly after wire progress.
+    enabled: bool,
+    until: Option<Instant>,
+}
+
+impl LatencyPolling {
+    fn new(profile: bool, enabled: bool) -> Self {
+        Self {
+            profile,
+            enabled,
+            until: None,
+        }
+    }
+
+    /// Wire progress reopens the poll window.
+    fn note_progress(&mut self) {
+        if self.enabled {
+            self.until = Instant::now().checked_add(IPC_LATENCY_POLL_WINDOW);
+        }
+    }
+}
+
+/// Decoded messages on their way to the socket.
+struct Delivery {
+    /// A decoded message waiting for receive space or an actor permit.
+    pending: Option<Message>,
+    /// Discarding input for a closed receive side left more to discard.
+    discard_pending: bool,
+    /// The user receive pipe; once closed, input is discarded.
+    close_state: Option<Arc<crate::socket::recv::SharedRecvPipe>>,
+    sink: Option<RecvSink>,
+}
+
+impl Delivery {
+    fn new(
+        sink: Option<RecvSink>,
+        close_state: Option<Arc<crate::socket::recv::SharedRecvPipe>>,
+    ) -> Self {
+        Self {
+            pending: None,
+            discard_pending: false,
+            close_state,
+            sink,
+        }
+    }
+
+    /// A decoded message waits for space on the receive path.
+    fn message_blocked(&self) -> bool {
+        self.pending.is_some() || self.sink.as_ref().is_some_and(RecvSink::peer_blocked)
+    }
+
+    fn receive_closed(&self) -> bool {
+        self.close_state
+            .as_ref()
+            .is_some_and(|state| state.is_closed())
+    }
+}
+
 /// Gates for one turn's select, computed after all non-blocking work.
 #[expect(clippy::struct_excessive_bools, reason = "independent select gates")]
 struct Turn {
@@ -137,23 +199,18 @@ struct Turn {
 /// slot dead), then queued output, then the driver's own resources.
 struct Session<'c> {
     peer_events: PeerEventDispatch,
-    poll_until: Option<Instant>,
+    latency: LatencyPolling,
     pending_input_error: Option<Error>,
-    pending_receive: Option<Message>,
-    discard_pending: bool,
     control: ControlState,
     handshake_deadline: Option<Instant>,
     heartbeat: Heartbeat,
     _slot_lifetime: TransmitSlotLifetime,
     output: QueuedOutput,
     read: StreamRead,
-    latency_profile: bool,
     shm_driver: shm::Driver,
-    latency_polling: bool,
     receive: ReceivePath,
-    socket_close_state: Option<Arc<crate::socket::recv::SharedRecvPipe>>,
     transmit_slot: Option<Arc<PeerTransmitSlot>>,
-    recv_direct: Option<RecvSink>,
+    delivery: Delivery,
     config: PeerDriverConfig,
     cancel: CancellationToken,
     outlet: PeerOutlet<'c>,
@@ -242,7 +299,8 @@ where
             io.writer.track_stalls();
         }
         let authenticated_sender = session
-            .recv_direct
+            .delivery
+            .sink
             .as_ref()
             .and_then(RecvSink::authenticated_sender);
         let authenticated_credit = reserve_authenticated(authenticated_sender.as_ref());
@@ -316,26 +374,21 @@ where
 
         let session = Session {
             peer_events: PeerEventDispatch::new(self.subscriptions),
-            poll_until: None,
+            latency: LatencyPolling::new(latency_profile, self.latency_polling),
             pending_input_error: None,
-            pending_receive: None,
-            discard_pending: false,
             control: ControlState::default(),
             handshake_deadline,
             heartbeat,
             _slot_lifetime: TransmitSlotLifetime(self.transmit_slot.clone()),
             output,
             read: StreamRead::new(receive.profile),
-            latency_profile,
             shm_driver: shm::Driver::new(
                 #[cfg(target_os = "linux")]
                 receive.shm.clone(),
             ),
-            latency_polling: self.latency_polling,
             receive,
-            socket_close_state: self.socket_close_state,
             transmit_slot: self.transmit_slot,
-            recv_direct: self.recv_direct,
+            delivery: Delivery::new(self.recv_direct, self.socket_close_state),
             config: self.config,
             cancel: self.cancel,
             outlet: PeerOutlet::new(self.peer_out, self.peer_id, completion),
@@ -366,7 +419,7 @@ impl Session<'_> {
             peer_events: &mut self.peer_events,
             event_out,
             outlet: self.outlet.view(),
-            recv_direct: &mut self.recv_direct,
+            recv_direct: &mut self.delivery.sink,
             transmit_slot: self.transmit_slot.as_deref(),
             cancel: &self.cancel,
             setup_cancel,
@@ -490,8 +543,8 @@ impl Session<'_> {
     ) -> Result<bool> {
         // Protocol events on a separate mailbox remain reachable while
         // data waits. Standalone combined mailboxes retain their prefix.
-        if separate_control || self.pending_receive.is_none() {
-            let data_clear = self.pending_receive.is_none();
+        if separate_control || self.delivery.pending.is_none() {
+            let data_clear = self.delivery.pending.is_none();
             let route = EventRoute {
                 mailbox: event_out,
                 outlet: self.outlet.view(),
@@ -499,7 +552,7 @@ impl Session<'_> {
             if !self.peer_events.drive(
                 &mut self.connection,
                 route,
-                self.recv_direct.as_mut(),
+                self.delivery.sink.as_mut(),
                 data_clear,
             ) {
                 return Ok(false);
@@ -534,10 +587,10 @@ impl Session<'_> {
 
         if self.control.discard_receive {
             // A dropped pending message no longer owns the reserved permit.
-            if self.pending_receive.take().is_some() {
+            if self.delivery.pending.take().is_some() {
                 authenticated.rearm();
             }
-            self.discard_pending = discard_received_messages(
+            self.delivery.discard_pending = discard_received_messages(
                 &mut self.connection,
                 #[cfg(target_os = "linux")]
                 self.receive.shm.as_ref(),
@@ -550,7 +603,7 @@ impl Session<'_> {
             DriverStep::Yield => Ok(Flow::Again),
             // Closing the user receive pipe must not discard accepted
             // transmit work before the drain command reaches us.
-            DriverStep::Close if self.receive_closed() => {
+            DriverStep::Close if self.delivery.receive_closed() => {
                 self.control.discard_receive = true;
                 Ok(Flow::Next)
             }
@@ -569,9 +622,9 @@ impl Session<'_> {
         };
 
         let delivery = MessageDelivery {
-            sink: &mut self.recv_direct,
+            sink: &mut self.delivery.sink,
             outlet: self.outlet.view(),
-            pending: &mut self.pending_receive,
+            pending: &mut self.delivery.pending,
             reserved_admission,
             expected_parts: receive.parts,
         };
@@ -582,12 +635,6 @@ impl Session<'_> {
         };
 
         drain_decoded_messages(input, receive.profile, delivery, rate_limiters)
-    }
-
-    fn receive_closed(&self) -> bool {
-        self.socket_close_state
-            .as_ref()
-            .is_some_and(|state| state.is_closed())
     }
 
     /// Stage queued application output once the data plane is open.
@@ -607,7 +654,7 @@ impl Session<'_> {
             DriverStep::Yield => tokio::task::yield_now().await,
             DriverStep::Close => return Ok(Flow::Exit),
         }
-        if self.latency_profile {
+        if self.latency.profile {
             self.output.stage_latency_slot(&self.connection, slot);
         }
 
@@ -627,12 +674,7 @@ impl Session<'_> {
     /// accepted input and output is drained.
     fn shutdown_ready(&mut self, data_plane_open: bool) -> bool {
         let receive_drained = self.control.discard_receive
-            || (self.pending_receive.is_none()
-                && !self
-                    .recv_direct
-                    .as_ref()
-                    .is_some_and(RecvSink::peer_blocked)
-                && !self.peer_events.blocked());
+            || (!self.delivery.message_blocked() && !self.peer_events.blocked());
         let drained = self.control.is_closing()
             && self.inbox.is_empty()
             && receive_drained
@@ -663,12 +705,7 @@ impl Session<'_> {
 
         let want_write = self.output.has_pending_write(&self.connection);
         let can_accept_data = data_plane_open && self.output.idle(&self.connection);
-        let message_blocked = !self.control.discard_receive
-            && (self.pending_receive.is_some()
-                || self
-                    .recv_direct
-                    .as_ref()
-                    .is_some_and(RecvSink::peer_blocked));
+        let message_blocked = !self.control.discard_receive && self.delivery.message_blocked();
         // Bound automatic replies without stopping reads for application
         // output: two peers with pending data must still read each other.
         let replies_blocked = self.connection.input_blocked_on_output();
@@ -677,7 +714,7 @@ impl Session<'_> {
         let want_read = self.pending_input_error.is_none()
             && !recv_blocked
             && self.connection.accepts_input()
-            && !self.discard_pending
+            && !self.delivery.discard_pending
             && !self.connection.is_closed();
 
         // Release pacing reservations for directions this turn will not use.
@@ -725,10 +762,11 @@ impl Session<'_> {
         // its cross-process wake disabled.
         let closing = self.control.is_closing();
         let poll_transport = self
-            .poll_until
+            .latency
+            .until
             .is_some_and(|deadline| !closing && !recv_blocked && Instant::now() < deadline);
         self.shm_driver
-            .receive_polling(self.latency_polling && poll_transport);
+            .receive_polling(self.latency.enabled && poll_transport);
 
         poll_transport
     }

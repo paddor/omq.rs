@@ -310,11 +310,11 @@ impl Submitter {
         for _ in 0..count {
             let index = state.cursor % count;
             state.cursor = (index + 1) % count;
-            match state.peers[index]
-                .target
-                .bind(&self.data_lanes)
-                .try_send(msg)
-            {
+            match state.peers[index].target.try_send_in(
+                &self.data_lanes,
+                msg,
+                crate::engine::send_pipe::SendPreparation::Plain,
+            ) {
                 Ok(()) => return Ok(state.peers[index].id),
                 #[cfg(feature = "dart")]
                 Err(SendPipeError::Invalid(error)) => {

@@ -36,6 +36,11 @@ impl ControlState {
         connection: &mut Connection,
         input_failed: bool,
     ) -> Result<DriverStep> {
+        // An empty inbox costs two loads here. A closed or dropped lane wakes
+        // the control arm of the driver select instead.
+        if inbox.is_empty() {
+            return Ok(DriverStep::Continue);
+        }
         let mut budget = COMMAND_DRAIN_BUDGET;
         let step = loop {
             match inbox.try_recv() {

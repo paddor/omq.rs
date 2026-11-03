@@ -308,7 +308,15 @@ impl Receiver {
     }
 
     pub(crate) async fn recv(&mut self) -> Option<PeerDriverCommand> {
-        futures::future::poll_fn(|cx| match self {
+        futures::future::poll_fn(|cx| self.poll_recv(cx)).await
+    }
+
+    /// A pending poll leaves every source registered with `cx`.
+    pub(crate) fn poll_recv(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<PeerDriverCommand>> {
+        match self {
             Self::Legacy(receiver) => receiver.poll_recv(cx),
             Self::Owned {
                 commands,
@@ -326,8 +334,7 @@ impl Receiver {
                         }),
                 }
             }
-        })
-        .await
+        }
     }
 
     pub(crate) fn close(&mut self) {

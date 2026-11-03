@@ -23,6 +23,7 @@ use crate::engine::{
     peer_events::{EventRoute, PeerEventDispatch},
     rate_limit::{SharedIpRateLimiter, TokenBucket},
     reserve_authenticated,
+    signal::{WakeGate, WokenGate},
     transmit_slot::PeerTransmitSlot,
 };
 use crate::network_limit::{PacedRead, PacedWrite};
@@ -95,12 +96,15 @@ impl<R, W> PacedIo<R, W> {
 }
 
 /// Pinned waits and event routes that borrow locals of `run_inner_body`.
-struct Waits<'w, D, F, G, A, H> {
+struct Waits<'w, D, F, G, A, H, S> {
     shm_peer_death: Pin<&'w mut D>,
     /// Only SHM connections can lose their peer process.
     watch_shm_peer: bool,
-    /// Registered once per driver, not once per turn.
-    cancelled: Pin<&'w mut WaitForCancellationFutureOwned>,
+    /// Registered once per driver, polled only after cancellation woke it.
+    cancelled: WokenGate<Pin<&'w mut WaitForCancellationFutureOwned>>,
+    /// Polls the control inbox only after a command or close woke it.
+    inbox_gate: WakeGate,
+    slot: SlotWait<'w, S>,
     control: ControlCredit<'w, F, G>,
     authenticated: ControlCredit<'w, A, H>,
     event_out: &'w mpsc::Sender<(u64, PeerEvent)>,
@@ -108,6 +112,40 @@ struct Waits<'w, D, F, G, A, H> {
     separate_control: bool,
     /// Decoded messages wait for a reserved authenticated-queue permit.
     reserved_admission: bool,
+}
+
+/// Transmit-slot wakeup that stays registered across turns, plus the function
+/// that re-arms it after it fires. The future type cannot be named.
+struct SlotWait<'p, S> {
+    ready: WokenGate<Pin<&'p mut S>>,
+    arm: fn(Option<Arc<PeerTransmitSlot>>) -> S,
+    slot: Option<Arc<PeerTransmitSlot>>,
+}
+
+impl<'p, S> SlotWait<'p, S> {
+    fn new(
+        ready: Pin<&'p mut S>,
+        arm: fn(Option<Arc<PeerTransmitSlot>>) -> S,
+        slot: Option<Arc<PeerTransmitSlot>>,
+    ) -> Self {
+        Self {
+            ready: WokenGate::new(ready),
+            arm,
+            slot,
+        }
+    }
+
+    fn rearm(&mut self) {
+        self.ready.set((self.arm)(self.slot.clone()));
+    }
+}
+
+/// Transmit-slot wakeup. Pending forever without a slot.
+async fn slot_ready(slot: Option<Arc<PeerTransmitSlot>>) {
+    match slot {
+        Some(slot) => slot.data_signal.ready().await,
+        None => std::future::pending().await,
+    }
 }
 
 /// Inbound decode and delivery settings.
@@ -347,13 +385,15 @@ where
             .and_then(RecvSink::authenticated_sender);
         let authenticated_credit = reserve_authenticated(authenticated_sender.as_ref());
         tokio::pin!(authenticated_credit);
-        let cancelled = session.cancel.clone().cancelled_owned();
-        tokio::pin!(cancelled);
+        let cancelled = std::pin::pin!(session.cancel.clone().cancelled_owned());
+        let slot_wait = std::pin::pin!(slot_ready(session.transmit_slot.clone()));
 
         let mut waits = Waits {
             shm_peer_death: shm_peer_death.as_mut(),
             watch_shm_peer: session.receive.shm.is_some(),
-            cancelled: cancelled.as_mut(),
+            cancelled: WokenGate::new(cancelled),
+            inbox_gate: WakeGate::new(),
+            slot: SlotWait::new(slot_wait, slot_ready, session.transmit_slot.clone()),
             control: ControlCredit::new(control_credit.as_mut(), || event_out.reserve()),
             authenticated: ControlCredit::new(authenticated_credit.as_mut(), || {
                 reserve_authenticated(authenticated_sender.as_ref())
@@ -483,10 +523,10 @@ impl<'c> Session<'c> {
     /// Run turns until the connection closes. A turn services control,
     /// codec events, receives, and queued output without blocking, then
     /// parks in one select over every wait.
-    async fn serve<'e, 'x, R, W, D, F, G, A, H>(
+    async fn serve<'e, 'x, R, W, D, F, G, A, H, S>(
         &mut self,
         io: &mut PacedIo<R, W>,
-        waits: &mut Waits<'_, D, F, G, A, H>,
+        waits: &mut Waits<'_, D, F, G, A, H, S>,
     ) -> Result<()>
     where
         R: tokio::io::AsyncRead + Unpin,
@@ -496,6 +536,7 @@ impl<'c> Session<'c> {
         G: Fn() -> F,
         A: Future<Output = AuthenticatedPermit<'x>>,
         H: Fn() -> A,
+        S: Future<Output = ()>,
     {
         loop {
             let Some(control_exhausted) = self.service_control().await? else {

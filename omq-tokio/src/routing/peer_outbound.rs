@@ -92,6 +92,26 @@ impl PeerOutbound {
         msg: Message,
         preparation: SendPreparation,
     ) -> Result<(), SendPipeError> {
+        self.try_send_through(None, msg, preparation)
+    }
+
+    /// Send through this socket clone's inbox lane. Unlike [`Self::bind`], it
+    /// copies only the lane handle.
+    pub(crate) fn try_send_in(
+        &self,
+        lanes: &crate::engine::data_inbox::SenderLanes,
+        msg: Message,
+        preparation: SendPreparation,
+    ) -> Result<(), SendPipeError> {
+        self.try_send_through(Some(lanes), msg, preparation)
+    }
+
+    fn try_send_through(
+        &self,
+        lanes: Option<&crate::engine::data_inbox::SenderLanes>,
+        msg: Message,
+        preparation: SendPreparation,
+    ) -> Result<(), SendPipeError> {
         #[cfg(feature = "dart")]
         self.validate_dart(&msg, matches!(preparation, SendPreparation::StripIdentity))
             .map_err(SendPipeError::Invalid)?;
@@ -100,10 +120,22 @@ impl PeerOutbound {
                 slot,
                 inbox,
                 direct,
-            } => (inbox, direct.as_ref().map(|writer| (slot, writer.lock()))),
+            } => (inbox, direct.as_ref().map(|writer| (slot, writer))),
             Self::Inbox(inbox) => (inbox, None),
             Self::Inproc(sender) => return sender.try_send_prepared(msg, preparation),
         };
+        let bound;
+        let inbox = match lanes {
+            Some(lanes) => {
+                bound = lanes.bind(inbox);
+                &bound
+            }
+            None => inbox,
+        };
+        let direct = direct.map(|(slot, writer)| (slot, writer.lock()));
+        // OPTIMIZE: a direct write takes and returns an inbox permit only to
+        // count as accepted work against graceful close. Counting it in the
+        // inbox admission alone would skip the lane lock and lane counters.
         if direct.as_ref().is_some_and(|(_, state)| state.is_closed()) {
             return Err(SendPipeError::Closed(msg));
         }
@@ -268,6 +300,34 @@ mod tests {
             panic!("message")
         };
         assert_eq!(first.part_slice(0), Some(b"older".as_slice()));
+    }
+
+    #[test]
+    fn send_in_uses_one_lane_per_socket_clone() {
+        use crate::engine::data_inbox::{SenderLanes, channel};
+        use crate::engine::send_pipe::SendPreparation;
+
+        let (root, mut receiver) = channel(1);
+        let target = PeerOutbound::Inbox(root);
+        let first = SenderLanes::default();
+        let second = SenderLanes::default();
+        let send = |lanes, body: &[u8]| {
+            target.try_send_in(lanes, Message::from_slice(body), SendPreparation::Plain)
+        };
+        assert!(send(&first, b"a").is_ok());
+        assert!(matches!(
+            send(&first, b"b"),
+            Err(crate::engine::SendPipeError::Full(_))
+        ));
+        assert!(send(&second, b"c").is_ok());
+
+        let mut batch = receiver.batch();
+        let mut bodies = Vec::new();
+        while let Ok(PeerDriverData::SendMessage(message)) = batch.try_recv() {
+            bodies.push(message.part_slice(0).unwrap().to_vec());
+        }
+        bodies.sort();
+        assert_eq!(bodies, [b"a".to_vec(), b"c".to_vec()]);
     }
 
     #[test]

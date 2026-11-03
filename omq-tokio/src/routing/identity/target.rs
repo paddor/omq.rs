@@ -67,7 +67,7 @@ impl PeerTarget {
         }
         match self {
             Self::Pipe(p) | Self::RepInproc(p) => p.try_send_prepared(msg, preparation),
-            Self::Direct(target) => target.bind(lanes).try_send_prepared(msg, preparation),
+            Self::Direct(target) => target.try_send_in(lanes, msg, preparation),
             Self::Inbox(tx) => match lanes.bind(tx).try_reserve() {
                 Ok(permit) => {
                     permit.send(PeerDriverData::SendMessage(preparation.prepare(msg)));

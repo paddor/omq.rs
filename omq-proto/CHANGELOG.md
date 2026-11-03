@@ -7,12 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `FrameBuffer::frame_ws` takes a `WsRole` instead of a masking flag, and
+  `proto::frame::encode_message_flat_ws` takes a `WsRole`. A client role
+  masks. Both use the codec's WebSocket header encoder.
+
 ### Removed
 
 - `FrameBuffer::frame_rep` and `FrameBuffer::take_arena_bytes`. Nothing
   used them outside tests. `FrameBuffer::frame_prefixed_inline` and
   `frame_prefixed_gather` are private; call `frame_prefixed`.
 - `FrameBuffer::put_back_unwritten`. Nothing used it outside tests.
+- `proto::frame::encode_message_flat_ws_masked`. Call `encode_message_flat_ws`
+  with `WsRole::Client`.
 
 ## [0.37.0] - 2026-10-29
 

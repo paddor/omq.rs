@@ -25,7 +25,17 @@ impl WireFraming {
         }
     }
 
+    /// Role for outgoing ZWS frames; ZMTP framing never frames WS.
     #[cfg(feature = "ws")]
+    #[inline]
+    pub(crate) fn ws_send_role(self) -> WsRole {
+        match self {
+            Self::Zws(role) => role,
+            Self::Zmtp => WsRole::Server,
+        }
+    }
+
+    #[cfg(all(test, feature = "ws"))]
     pub(crate) fn is_masked(self) -> bool {
         matches!(self, Self::Zws(WsRole::Client))
     }

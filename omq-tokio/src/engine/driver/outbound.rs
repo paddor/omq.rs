@@ -329,13 +329,13 @@ impl OutboundState {
     ) -> Result<()> {
         #[cfg(feature = "ws")]
         if connection.is_ws() && !connection.has_frame_transform() {
-            let masked = ws_masked(connection);
+            let role = ws_send_role(connection);
             if let Some(enc) = self.encoder.as_mut() {
                 for wire in enc.encode(msg)? {
-                    eq.frame_ws(&wire, masked);
+                    eq.frame_ws(&wire, role);
                 }
             } else {
-                eq.frame_ws(msg, masked);
+                eq.frame_ws(msg, role);
             }
             return Ok(());
         }
@@ -557,11 +557,11 @@ pub(super) fn drain_offload_result(
         loan.restore();
     }
     #[cfg(feature = "ws")]
-    let ws = connection.is_ws().then(|| ws_masked(connection));
+    let ws = connection.is_ws().then(|| ws_send_role(connection));
     for wire in frames? {
         #[cfg(feature = "ws")]
-        if let Some(masked) = ws {
-            eq.frame_ws(&wire, masked);
+        if let Some(role) = ws {
+            eq.frame_ws(&wire, role);
             continue;
         }
         eq.frame(&wire);
@@ -569,13 +569,12 @@ pub(super) fn drain_offload_result(
     Ok(())
 }
 
-/// WebSocket clients mask the frames they send.
+/// Role for outgoing ZWS frames; WebSocket clients mask them.
 #[cfg(feature = "ws")]
-fn ws_masked(connection: &Connection) -> bool {
-    matches!(
-        connection.ws_role(),
-        Some(omq_proto::proto::connection::WsRole::Client)
-    )
+fn ws_send_role(connection: &Connection) -> omq_proto::proto::connection::WsRole {
+    connection
+        .ws_role()
+        .unwrap_or(omq_proto::proto::connection::WsRole::Server)
 }
 
 #[cfg(all(test, feature = "zstd"))]

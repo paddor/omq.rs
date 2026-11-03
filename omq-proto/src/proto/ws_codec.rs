@@ -176,6 +176,7 @@ fn check_control_frame(opcode: u8, fin: bool, payload_len: u64) -> Result<()> {
 ///
 /// Returns the mask key if `role == Client` (caller must mask the payload).
 /// `payload_len` includes the ZWS flag byte.
+#[inline]
 pub(crate) fn encode_ws_binary_header(
     scratch: &mut BytesMut,
     payload_len: usize,
@@ -185,6 +186,7 @@ pub(crate) fn encode_ws_binary_header(
 }
 
 /// Write a WebSocket frame header for any opcode into `scratch`.
+#[inline]
 fn encode_ws_header(
     scratch: &mut BytesMut,
     opcode: u8,

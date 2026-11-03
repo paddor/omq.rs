@@ -217,7 +217,7 @@ impl PeerTransmitSlot {
         match decision {
             HandleFrameDecision::Plain => eq.frame(msg),
             #[cfg(feature = "ws")]
-            HandleFrameDecision::WebSocket => eq.frame_ws(msg, self.framing.is_masked()),
+            HandleFrameDecision::WebSocket => eq.frame_ws(msg, self.framing.ws_send_role()),
             #[cfg(not(feature = "ws"))]
             HandleFrameDecision::WebSocket => unreachable!("ws disabled"),
             HandleFrameDecision::TransformPassthrough { sentinel } => {

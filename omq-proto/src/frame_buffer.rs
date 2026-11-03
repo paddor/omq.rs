@@ -338,16 +338,12 @@ impl FrameBuffer {
         }
     }
 
-    /// Encode ZWS frames into the arena, optionally applying client masking.
+    /// Encode ZWS frames into the arena; a client masks them.
     #[cfg(feature = "ws")]
-    pub fn frame_ws(&mut self, msg: &Message, masked: bool) {
+    pub fn frame_ws(&mut self, msg: &Message, role: crate::proto::connection::WsRole) {
         self.reserve_arena(msg.byte_len() + msg.len() * 14);
         let before = self.arena.len();
-        if masked {
-            frame::encode_message_flat_ws_masked(msg, &mut self.arena);
-        } else {
-            frame::encode_message_flat_ws(msg, &mut self.arena);
-        }
+        frame::encode_message_flat_ws(msg, &mut self.arena, role);
         copy_stats::record(Site::WebSocket, self.arena.len() - before);
         self.total_bytes += self.arena.len() - before;
     }

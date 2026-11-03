@@ -110,7 +110,8 @@ HWM.
 ## Continuous integration
 
 PR and `main` CI run Linux fmt, clippy, default workspace tests, DART and QUIC
-MSRV checks, binding smoke tests, and OMQ.ts checks plus browser interop. The
+MSRV checks, a macOS and Windows `cargo check` of the pure-Rust features,
+binding smoke tests, and OMQ.ts checks plus browser interop. The
 full matrix runs Saturdays and on `workflow_dispatch`: macOS, Windows, 32-bit
 Linux, compression, CURVE, pyzmq and cppzmq interop, fuzz smoke, packaging,
 and binding versions.

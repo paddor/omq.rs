@@ -202,7 +202,6 @@ async fn full_peer_queue_bounds_pending_delivery_and_leaves_decoder_remainder_in
                     connection: &mut connection,
                     decoder: &mut None,
                     payload_pool: None,
-                    #[cfg(target_os = "linux")]
                     shm: None,
                 },
                 ReceiveProfile::Throughput,
@@ -265,7 +264,6 @@ async fn latency_batch_yields_only_while_more_input_is_ready() {
                 connection: &mut connection,
                 decoder: &mut None,
                 payload_pool: None,
-                #[cfg(target_os = "linux")]
                 shm: None,
             },
             ReceiveProfile::Latency,

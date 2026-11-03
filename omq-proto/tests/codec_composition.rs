@@ -59,7 +59,7 @@ fn typed_and_uri_tcp_codecs_preserve_variants_and_resolved_addresses() {
             let uri = format!("{}+tcp://{address}", kind.scheme_prefix());
             assert_eq!(composed, uri.parse().unwrap());
             assert_eq!(composed.to_string(), uri);
-            assert_eq!(composed.underlying_tcp(), plain);
+            assert_eq!(composed.without_compression(), plain);
             assert_eq!(composed.clone().with_compression(kind).unwrap(), composed);
             let Endpoint::Tcp { host, port } = plain else {
                 panic!("plain TCP expected");
@@ -69,7 +69,7 @@ fn typed_and_uri_tcp_codecs_preserve_variants_and_resolved_addresses() {
             let expected: Endpoint = format!("{}+tcp://127.0.0.1:9876", kind.scheme_prefix())
                 .parse()
                 .unwrap();
-            assert_eq!(composed.rewrap_tcp(resolved), expected);
+            assert_eq!(composed.rewrap(resolved), expected);
         }
     }
 }
@@ -140,10 +140,10 @@ fn composed_ws_preserves_legacy_profile_and_validates_typed_headers() {
             .unwrap();
         let expected: Endpoint = format!("lz4+ws://{address}").parse().unwrap();
         assert_eq!(composed, expected);
-        assert_eq!(composed.underlying_ws(), plain);
+        assert_eq!(composed.without_compression(), plain);
         assert!(matches!(composed, Endpoint::Lz4Ws { .. }));
         assert_eq!(
-            composed.rewrap_ws("ws://127.0.0.1:9876/omq".parse().unwrap()),
+            composed.rewrap("ws://127.0.0.1:9876/omq".parse().unwrap()),
             "lz4+ws://127.0.0.1:9876/omq".parse().unwrap()
         );
     }

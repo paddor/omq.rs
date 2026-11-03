@@ -230,7 +230,7 @@ async fn connect_by_name(
     u64,
     futures::channel::oneshot::Receiver<omq_proto::Result<()>>,
 ) {
-    let named = resolved.rewrap_tcp(Endpoint::Tcp {
+    let named = resolved.rewrap(Endpoint::Tcp {
         host: omq_proto::endpoint::Host::Name("snapshot.invalid".into()),
         port: 1,
     });

@@ -69,15 +69,10 @@ impl SocketDriver {
             .map_err(|error| Error::Config(format!("invalid codec configuration: {error}")))?;
         #[cfg(feature = "ws")]
         if endpoint.is_ws_family() {
-            match endpoint {
-                Endpoint::Ws { host, path, .. } | Endpoint::Wss { host, path, .. } => {
-                    omq_proto::proto::ws_handshake::validate_ws_address(host, path)?;
-                }
-                #[cfg(feature = "lz4")]
-                Endpoint::Lz4Ws { host, path, .. } => {
-                    omq_proto::proto::ws_handshake::validate_ws_address(host, path)?;
-                }
-                _ => unreachable!(),
+            if let Endpoint::Ws { host, path, .. } | Endpoint::Wss { host, path, .. } =
+                &endpoint.without_compression()
+            {
+                omq_proto::proto::ws_handshake::validate_ws_address(host, path)?;
             }
             if options
                 .handshake_timeout

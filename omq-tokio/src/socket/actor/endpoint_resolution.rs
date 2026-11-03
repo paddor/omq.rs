@@ -90,7 +90,7 @@ pub(super) fn needs_dns(endpoint: &Endpoint) -> bool {
     }
     if endpoint.is_tcp_family() {
         return matches!(
-            endpoint.underlying_tcp(),
+            endpoint.without_compression(),
             Endpoint::Tcp {
                 host: Host::Name(_),
                 ..
@@ -100,7 +100,7 @@ pub(super) fn needs_dns(endpoint: &Endpoint) -> bool {
     #[cfg(feature = "ws")]
     if endpoint.is_ws_family() {
         return matches!(
-            endpoint.underlying_ws(),
+            endpoint.without_compression(),
             Endpoint::Ws {
                 host: Host::Name(_),
                 ..
@@ -176,13 +176,13 @@ async fn tcp_bind_address(endpoint: Endpoint) -> Result<Endpoint> {
     let Endpoint::Tcp {
         host: Host::Name(host),
         port,
-    } = endpoint.underlying_tcp()
+    } = endpoint.without_compression()
     else {
         unreachable!()
     };
 
     let address = first(&host, port).await?;
-    Ok(endpoint.rewrap_tcp(Endpoint::Tcp {
+    Ok(endpoint.rewrap(Endpoint::Tcp {
         host: Host::Ip(address.ip()),
         port,
     }))
@@ -191,7 +191,7 @@ async fn tcp_bind_address(endpoint: Endpoint) -> Result<Endpoint> {
 /// Resolve the WS/WSS host and keep scheme, path, and any wrapper.
 #[cfg(feature = "ws")]
 async fn ws_bind_address(endpoint: Endpoint) -> Result<Endpoint> {
-    let (host, port, path, tls) = match endpoint.underlying_ws() {
+    let (host, port, path, tls) = match endpoint.without_compression() {
         Endpoint::Ws {
             host: Host::Name(host),
             port,
@@ -212,7 +212,7 @@ async fn ws_bind_address(endpoint: Endpoint) -> Result<Endpoint> {
     } else {
         Endpoint::Ws { host, port, path }
     };
-    Ok(endpoint.rewrap_ws(resolved))
+    Ok(endpoint.rewrap(resolved))
 }
 
 async fn first(host: &str, port: u16) -> Result<SocketAddr> {

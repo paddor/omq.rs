@@ -319,79 +319,48 @@ impl Endpoint {
                 self.scheme()
             )));
         }
-        match self {
-            Self::Tcp { host, port } => Ok(kind.tcp_endpoint(host, port)),
+        #[cfg(feature = "ws")]
+        if let Self::Ws { host, path, .. } = &self {
+            crate::proto::ws_handshake::validate_ws_address(host, path)?;
+        }
+        Ok(self.attach_codec(kind))
+    }
+
+    /// The compressed variant for `kind` over this uncompressed carrier.
+    /// Callers check `kind.supports_carrier(self.scheme())` first.
+    #[cfg(any(feature = "lz4", feature = "zstd"))]
+    pub(crate) fn attach_codec(self, kind: CompressionKind) -> Self {
+        match (kind, self) {
+            #[cfg(feature = "lz4")]
+            (CompressionKind::Lz4, Self::Tcp { host, port }) => Self::Lz4Tcp { host, port },
+            #[cfg(feature = "zstd")]
+            (CompressionKind::Zstd, Self::Tcp { host, port }) => Self::ZstdTcp { host, port },
             #[cfg(all(feature = "lz4", feature = "ws"))]
-            Self::Ws { host, port, path } => {
-                crate::proto::ws_handshake::validate_ws_address(&host, &path)?;
-                Ok(Self::Lz4Ws { host, port, path })
+            (CompressionKind::Lz4, Self::Ws { host, port, path }) => {
+                Self::Lz4Ws { host, port, path }
             }
             _ => unreachable!("eligible codec carrier was validated"),
         }
     }
 
-    /// Strip the compression scheme prefix so the underlying TCP
-    /// transport sees a plain `tcp://` endpoint. Identity for plain
-    /// `tcp://`. Returns the endpoint unchanged for `ipc://` /
-    /// `inproc://` / `udp://`.
+    /// The same address without its codec prefix: `lz4+tcp://` becomes
+    /// `tcp://` and `lz4+ws://` becomes `ws://`. Uncompressed endpoints are
+    /// returned unchanged. Transports bind and connect this carrier.
     #[must_use]
-    pub fn underlying_tcp(&self) -> Endpoint {
+    pub fn without_compression(&self) -> Endpoint {
         match self {
             #[cfg(feature = "lz4")]
-            Endpoint::Lz4Tcp { host, port } => Endpoint::Tcp {
+            Self::Lz4Tcp { host, port } => Self::Tcp {
                 host: host.clone(),
                 port: *port,
             },
             #[cfg(feature = "zstd")]
-            Endpoint::ZstdTcp { host, port } => Endpoint::Tcp {
+            Self::ZstdTcp { host, port } => Self::Tcp {
                 host: host.clone(),
                 port: *port,
             },
-            _ => self.clone(),
-        }
-    }
-
-    /// Re-attach the original endpoint's scheme to a resolved address.
-    /// Used after binding through the underlying TCP transport so the
-    /// bound endpoint surfaced to the user still says `lz4+tcp://...`.
-    #[must_use]
-    pub fn rewrap_tcp(&self, resolved: Endpoint) -> Endpoint {
-        match (self, resolved) {
-            #[cfg(feature = "lz4")]
-            (Endpoint::Lz4Tcp { .. }, Endpoint::Tcp { host, port }) => {
-                Endpoint::Lz4Tcp { host, port }
-            }
-            #[cfg(feature = "zstd")]
-            (Endpoint::ZstdTcp { .. }, Endpoint::Tcp { host, port }) => {
-                Endpoint::ZstdTcp { host, port }
-            }
-            (_, resolved) => resolved,
-        }
-    }
-
-    /// Whether this endpoint rides on the TCP byte-stream transport.
-    /// Includes the compression-wrapped variants.
-    // Not matches!(): #[cfg] attributes are not allowed inside macro patterns.
-    pub fn is_tcp_family(&self) -> bool {
-        match self {
-            Endpoint::Tcp { .. } => true,
-            #[cfg(feature = "lz4")]
-            Endpoint::Lz4Tcp { .. } => true,
-            #[cfg(feature = "zstd")]
-            Endpoint::ZstdTcp { .. } => true,
-            _ => false,
-        }
-    }
-
-    /// Strip the compression scheme prefix so the underlying WS transport
-    /// sees a plain `ws://` endpoint. Identity for plain `ws://` / `wss://`
-    /// and all non-WS endpoints.
-    #[cfg(feature = "ws")]
-    #[must_use]
-    pub fn underlying_ws(&self) -> Endpoint {
-        match self {
-            #[cfg(feature = "lz4")]
-            Endpoint::Lz4Ws { host, port, path } => Endpoint::Ws {
+            #[cfg(all(feature = "lz4", feature = "ws"))]
+            Self::Lz4Ws { host, port, path } => Self::Ws {
                 host: host.clone(),
                 port: *port,
                 path: path.clone(),
@@ -400,31 +369,40 @@ impl Endpoint {
         }
     }
 
-    /// Re-attach the original endpoint's compression scheme to a
-    /// resolved WS address. Used after binding so the bound endpoint
-    /// surfaced to the user still says `lz4+ws://...`.
-    #[cfg(feature = "ws")]
+    /// Put this endpoint's codec back on `resolved`, its carrier address
+    /// after bind or DNS, so the bound endpoint still says `lz4+tcp://...`.
+    /// Returns `resolved` unchanged when this endpoint has no codec or
+    /// `resolved` uses another carrier.
     #[must_use]
-    pub fn rewrap_ws(&self, resolved: Endpoint) -> Endpoint {
-        match (self, resolved) {
-            #[cfg(feature = "lz4")]
-            (Endpoint::Lz4Ws { .. }, Endpoint::Ws { host, port, path }) => {
-                Endpoint::Lz4Ws { host, port, path }
-            }
-            (_, resolved) => resolved,
+    pub fn rewrap(&self, resolved: Endpoint) -> Endpoint {
+        #[cfg(any(feature = "lz4", feature = "zstd"))]
+        if let Some(kind) = CompressionKind::for_endpoint(self)
+            && resolved.scheme() == self.carrier_scheme()
+        {
+            return resolved.attach_codec(kind);
         }
+        resolved
     }
 
-    /// Whether this endpoint uses the WebSocket transport.
-    /// Includes the compression-wrapped variants.
+    /// Scheme without its codec prefix: `tcp` for `lz4+tcp`.
+    fn carrier_scheme(&self) -> &'static str {
+        let scheme = self.scheme();
+        scheme
+            .split_once('+')
+            .map_or(scheme, |(_, carrier)| carrier)
+    }
+
+    /// Whether this endpoint rides on the TCP byte-stream transport,
+    /// with or without a codec.
+    pub fn is_tcp_family(&self) -> bool {
+        self.carrier_scheme() == "tcp"
+    }
+
+    /// Whether this endpoint uses the WebSocket transport, with or
+    /// without a codec.
     #[cfg(feature = "ws")]
     pub fn is_ws_family(&self) -> bool {
-        match self {
-            Endpoint::Ws { .. } | Endpoint::Wss { .. } => true,
-            #[cfg(feature = "lz4")]
-            Endpoint::Lz4Ws { .. } => true,
-            _ => false,
-        }
+        matches!(self.carrier_scheme(), "ws" | "wss")
     }
 
     /// Whether this endpoint uses a QUIC carrier.
@@ -433,7 +411,8 @@ impl Endpoint {
         matches!(self, Endpoint::Quic { .. })
     }
 
-    /// Short scheme tag suitable for monitor / log output.
+    /// URI scheme, including any codec prefix (`lz4+tcp`). Suitable for
+    /// monitor and log output.
     pub fn scheme(&self) -> &'static str {
         match self {
             Endpoint::Tcp { .. } => "tcp",

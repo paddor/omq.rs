@@ -169,8 +169,8 @@ pub(super) async fn bind_any(
     #[cfg(any(feature = "ws", feature = "quic"))] carrier: CarrierAccept<'_>,
 ) -> Result<BoundListener> {
     if endpoint.is_tcp_family() {
-        let listener = AnyListener::Tcp(TcpTransport::bind(&endpoint.underlying_tcp()).await?);
-        let resolved = endpoint.rewrap_tcp(listener.local_endpoint().clone());
+        let listener = AnyListener::Tcp(TcpTransport::bind(&endpoint.without_compression()).await?);
+        let resolved = endpoint.rewrap(listener.local_endpoint().clone());
         return Ok(BoundListener {
             listener,
             endpoint: resolved,
@@ -223,7 +223,7 @@ pub(super) async fn bind_any(
 /// Bind a WS/WSS listener. WSS needs the server certificate and key.
 #[cfg(feature = "ws")]
 async fn bind_ws(endpoint: &Endpoint, carrier: CarrierAccept<'_>) -> Result<BoundListener> {
-    let plain = endpoint.underlying_ws();
+    let plain = endpoint.without_compression();
     let wss_tls = &carrier.options.wss_tls;
     let tls_acc = if matches!(plain, Endpoint::Wss { .. }) {
         let cert = wss_tls.server_cert_pem.as_deref().ok_or_else(|| {
@@ -242,7 +242,7 @@ async fn bind_ws(endpoint: &Endpoint, carrier: CarrierAccept<'_>) -> Result<Boun
     let mut ws_listener =
         crate::transport::ws::bind(&plain, tls_acc, carrier.setup, carrier.options).await?;
     // Report the bound port and keep any wrapper (e.g. lz4+ws://).
-    let resolved = endpoint.rewrap_ws(ws_listener.local_endpoint().clone());
+    let resolved = endpoint.rewrap(ws_listener.local_endpoint().clone());
     ws_listener.set_monitor_endpoint(resolved.clone());
     Ok(BoundListener {
         listener: AnyListener::Ws(ws_listener),
@@ -254,7 +254,7 @@ async fn bind_ws(endpoint: &Endpoint, carrier: CarrierAccept<'_>) -> Result<Boun
 /// No socket connect happens here; reconnect attempts resolve again later.
 pub(super) async fn preflight_connect_endpoint_resolution(endpoint: &Endpoint) -> Result<()> {
     if endpoint.is_tcp_family() {
-        let plain = endpoint.underlying_tcp();
+        let plain = endpoint.without_compression();
         let Endpoint::Tcp { host, port } = &plain else {
             unreachable!();
         };
@@ -262,7 +262,7 @@ pub(super) async fn preflight_connect_endpoint_resolution(endpoint: &Endpoint) -
     }
     #[cfg(feature = "ws")]
     if endpoint.is_ws_family() {
-        let plain = endpoint.underlying_ws();
+        let plain = endpoint.without_compression();
         let (host, port) = match &plain {
             Endpoint::Ws { host, port, .. } | Endpoint::Wss { host, port, .. } => (host, *port),
             _ => unreachable!(),
@@ -292,7 +292,7 @@ pub(super) async fn connect_any(
     #[cfg(any(feature = "ws", feature = "quic"))] carrier: CarrierConnect<'_>,
 ) -> Result<AnyConn> {
     if endpoint.is_tcp_family() {
-        let s = TcpTransport::connect(&endpoint.underlying_tcp()).await?;
+        let s = TcpTransport::connect(&endpoint.without_compression()).await?;
         return Ok(byte_stream(
             AnyStream::Tcp(s),
             peer_ident_for_endpoint(endpoint),
@@ -356,7 +356,7 @@ pub(super) async fn connect_any(
 /// the ZMTP stream.
 #[cfg(feature = "ws")]
 async fn connect_ws(endpoint: &Endpoint, carrier: CarrierConnect<'_>) -> Result<AnyConn> {
-    let plain = endpoint.underlying_ws();
+    let plain = endpoint.without_compression();
     let (host, port, path) = match &plain {
         Endpoint::Ws {
             host, port, path, ..

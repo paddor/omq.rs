@@ -170,12 +170,7 @@ impl CompressionKind {
     #[cfg(any(feature = "lz4", feature = "zstd"))]
     #[must_use]
     pub fn tcp_endpoint(self, host: Host, port: u16) -> Endpoint {
-        match self {
-            #[cfg(feature = "lz4")]
-            Self::Lz4 => Endpoint::Lz4Tcp { host, port },
-            #[cfg(feature = "zstd")]
-            Self::Zstd => Endpoint::ZstdTcp { host, port },
-        }
+        Endpoint::Tcp { host, port }.attach_codec(self)
     }
 }
 

@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Breaking:** `engine::ConnectionDriver::with_config` is replaced by the
   `with_driver_config` builder step after `ConnectionDriver::new`.
+- **Breaking:** `Endpoint::without_compression` replaces
+  `Endpoint::underlying_tcp` and `underlying_ws`; `Endpoint::rewrap` replaces
+  `rewrap_tcp` and `rewrap_ws` (re-exported from omq-proto).
 
 ### Fixed
 

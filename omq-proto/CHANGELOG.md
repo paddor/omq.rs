@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `encode_fan_out_message`, `finish_fan_out_frame` and `clear_fan_out_frame`.
   It owns the frame buffer and chunk list, and takes target count and copy
   budget as one `FanOutCost`.
+- `Endpoint::without_compression` replaces `Endpoint::underlying_tcp` and
+  `underlying_ws`; `Endpoint::rewrap` replaces `rewrap_tcp` and `rewrap_ws`.
+  Both handle every carrier and need no `ws` feature.
 
 ### Removed
 

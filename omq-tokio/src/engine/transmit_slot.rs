@@ -7,18 +7,22 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use bytes::Bytes;
-use smallvec::SmallVec;
 
 use super::codec::CodecProfile;
 use super::framing::WireFraming;
 use super::signal::{DataSignal, StateSignal};
 use omq_proto::copy_stats::{self, Site};
-use omq_proto::fan_out_frame::FanOutFrame;
 use omq_proto::frame_buffer::FrameBuffer;
 use omq_proto::handle_frame::{
     HandleFrameCaps, HandleFrameDecision, HandleFrameState, decide_handle_frame,
 };
 use omq_proto::message::Message;
+
+use fan_out::FanOutState;
+use shm::SlotShm;
+
+mod fan_out;
+mod shm;
 
 pub(crate) const TRANSMIT_SLOT_CAP_DEFAULT: usize = 512 * 1024;
 #[cfg(test)]
@@ -27,24 +31,12 @@ const TRANSMIT_SLOT_LWM_DIVISOR: usize = 2;
 /// Slices per direct write. The latency path queues few messages.
 const DIRECT_WRITE_SLICES: usize = 64;
 
-type FanOutReactivation = Arc<dyn Fn(u64) + Send + Sync + 'static>;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TryFrameResult {
     Ok,
     Dead,
     Full,
     Ineligible,
-}
-
-/// SHM record kinds published by per-recipient encoding.
-#[derive(Debug, Clone, Copy)]
-enum ShmRecord {
-    Body,
-    #[cfg(target_os = "linux")]
-    Batch(omq_shm::BatchKind),
-    #[cfg(target_os = "linux")]
-    Multipart,
 }
 
 pub(crate) struct PeerTransmitSlot {
@@ -65,43 +57,6 @@ pub(crate) struct PeerTransmitSlot {
     above_lwm: AtomicBool,
     fan_out: FanOutState,
     shm: SlotShm,
-}
-
-/// Per-slot fan-out state: dictionary shipment and mute reactivation.
-struct FanOutState {
-    dict_queued: AtomicBool,
-    dict_shipped: AtomicBool,
-    active: AtomicBool,
-    reactivation: Mutex<Option<FanOutReactivation>>,
-}
-
-impl FanOutState {
-    fn new() -> Self {
-        Self {
-            dict_queued: AtomicBool::new(false),
-            dict_shipped: AtomicBool::new(false),
-            active: AtomicBool::new(true),
-            reactivation: Mutex::new(None),
-        }
-    }
-}
-
-/// SHM encoding state, set once after a SHM handshake.
-struct SlotShm {
-    #[cfg(target_os = "linux")]
-    state: OnceLock<crate::transport::shm::ShmState>,
-    /// The last encode found no free lease; cleared when credit returns.
-    credit_blocked: AtomicBool,
-}
-
-impl SlotShm {
-    fn new() -> Self {
-        Self {
-            #[cfg(target_os = "linux")]
-            state: OnceLock::new(),
-            credit_blocked: AtomicBool::new(false),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -194,141 +149,6 @@ impl PeerTransmitSlot {
         })
     }
 
-    #[cfg(target_os = "linux")]
-    pub(crate) fn set_shm(&self, state: crate::transport::shm::ShmState) {
-        self.shm
-            .state
-            .set(state)
-            .expect("SHM slot initialized once");
-    }
-
-    #[cfg_attr(not(target_os = "linux"), expect(clippy::unused_self))]
-    pub(crate) fn is_shm(&self) -> bool {
-        #[cfg(target_os = "linux")]
-        {
-            self.shm.state.get().is_some()
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            false
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    pub(crate) fn shm_credit_blocked(&self) -> bool {
-        self.shm.credit_blocked.load(Ordering::Acquire)
-    }
-
-    pub(crate) fn shm_credit_returned(&self) {
-        self.shm.credit_blocked.store(false, Ordering::Release);
-        self.space_available.notify_changed();
-        let eq = self.eq.lock().expect("transmit_slot eq poisoned");
-        let below_lwm =
-            self.is_below_lwm(eq.total_bytes(), self.queued_msgs.load(Ordering::Relaxed));
-        let reactivate = self.claim_reactivation(below_lwm);
-        drop(eq);
-        if reactivate {
-            self.notify_reactivation();
-        }
-    }
-
-    /// Per-recipient SHM leases are created by the IO lane, after admission.
-    pub(crate) fn try_encode_shm_no_signal(&self, message: &Message) -> TryFrameResult {
-        self.try_encode_shm_record(message, 1, ShmRecord::Body)
-    }
-
-    #[cfg(target_os = "linux")]
-    pub(crate) fn try_encode_shm_batch_no_signal(
-        &self,
-        message: &Message,
-        count: usize,
-        referenced: bool,
-    ) -> TryFrameResult {
-        let record = if referenced {
-            ShmRecord::Batch(omq_shm::BatchKind::Referenced)
-        } else {
-            ShmRecord::Batch(omq_shm::BatchKind::Copied)
-        };
-        self.try_encode_shm_record(message, count, record)
-    }
-
-    /// Publish a record prepared once by the IO lane for every recipient.
-    #[cfg(target_os = "linux")]
-    pub(crate) fn try_encode_shm_multipart_no_signal(&self, record: &Message) -> TryFrameResult {
-        self.try_encode_shm_record(record, 1, ShmRecord::Multipart)
-    }
-
-    #[cfg(target_os = "linux")]
-    pub(crate) fn message_capacity(&self) -> usize {
-        self.msg_cap
-    }
-
-    #[cfg_attr(not(target_os = "linux"), expect(clippy::unused_self))]
-    fn try_encode_shm_record(
-        &self,
-        message: &Message,
-        count: usize,
-        record: ShmRecord,
-    ) -> TryFrameResult {
-        #[cfg(target_os = "linux")]
-        {
-            let Some(state) = self.shm.state.get() else {
-                return TryFrameResult::Ineligible;
-            };
-            if self.is_dead() {
-                return TryFrameResult::Dead;
-            }
-            if !self.is_handshake_done() {
-                return TryFrameResult::Ineligible;
-            }
-            // Wire-space wakes do not return borrowed SHM leases. Keep the
-            // failed encode's credit snapshot until the driver wakes us for
-            // returned credit instead of rescanning the payload pool.
-            if self.shm.credit_blocked.load(Ordering::Acquire) {
-                return TryFrameResult::Full;
-            }
-            let Some(mut eq) = self.lock_live() else {
-                return TryFrameResult::Dead;
-            };
-            if eq.total_bytes() >= self.cap
-                || self.queued_msgs.load(Ordering::Relaxed) + count > self.msg_cap
-            {
-                return self.full();
-            }
-            let mut state = state.lock().expect("SHM connection");
-            let result = match record {
-                ShmRecord::Body => state.encode_and_frame(message, &mut eq),
-                ShmRecord::Batch(kind) => state.encode_batch_and_frame(message, kind, &mut eq),
-                ShmRecord::Multipart => state.encode_multipart_and_frame(message, &mut eq),
-            };
-            drop(state);
-            match result {
-                Ok(true) => {
-                    let queued = self.queued_msgs.fetch_add(count, Ordering::Relaxed) + count;
-                    self.mark_above_lwm_if_needed(eq.total_bytes(), queued);
-                    TryFrameResult::Ok
-                }
-                Ok(false) => {
-                    self.shm.credit_blocked.store(true, Ordering::Release);
-                    drop(eq);
-                    // The driver must arm its futex wait even with no wire bytes.
-                    self.signal_encoded();
-                    TryFrameResult::Full
-                }
-                Err(_) => {
-                    drop(eq);
-                    self.mark_dead();
-                    TryFrameResult::Dead
-                }
-            }
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = (message, count, record);
-            TryFrameResult::Ineligible
-        }
-    }
-
     #[cfg(feature = "ws")]
     pub(crate) fn is_ws(&self) -> bool {
         self.framing.is_ws()
@@ -414,183 +234,7 @@ impl PeerTransmitSlot {
         TryFrameResult::Ok
     }
 
-    pub(crate) fn try_push_encoded(&self, chunks: &[Bytes]) -> TryFrameResult {
-        let result = self.try_push_encoded_no_signal(chunks);
-        if result == TryFrameResult::Ok {
-            self.signal_encoded();
-        }
-        result
-    }
-
-    /// Admit one encoded publication; the caller signals accepted batches.
-    pub(crate) fn try_push_encoded_no_signal(&self, chunks: &[Bytes]) -> TryFrameResult {
-        if self.is_dead() {
-            return TryFrameResult::Dead;
-        }
-        let bytes = chunks.iter().map(Bytes::len).sum();
-        let Some(mut eq) = self.lock_live() else {
-            return TryFrameResult::Dead;
-        };
-        let queued_msgs = self.queued_msgs.load(Ordering::Relaxed);
-        if queued_msgs >= self.msg_cap
-            || (queued_msgs > 0 && eq.total_bytes().saturating_add(bytes) >= self.cap)
-        {
-            return self.full();
-        }
-        eq.push_shared_chunks(chunks);
-        // Count writers are serialized by eq, including drains and disconnects.
-        let queued = queued_msgs + 1;
-        self.commit(&eq, queued);
-        TryFrameResult::Ok
-    }
-
-    pub(crate) fn try_push_pre_framed_no_signal(&self, data: &[u8]) -> TryFrameResult {
-        if self.is_dead() {
-            return TryFrameResult::Dead;
-        }
-        let Some(mut eq) = self.lock_live() else {
-            return TryFrameResult::Dead;
-        };
-        if self.is_full(&eq) {
-            return self.full();
-        }
-        eq.push_pre_framed(data);
-        // Count writers are serialized by eq, including drains and disconnects.
-        let queued = self.queued_msgs.load(Ordering::Relaxed) + 1;
-        self.commit(&eq, queued);
-        TryFrameResult::Ok
-    }
-
-    /// Conservative admission before compressing a shared arena. A lane is
-    /// the sole data writer of its compressed fan-out slots; drains can only
-    /// increase this available space while the lane encodes.
-    #[cfg(any(feature = "lz4", feature = "zstd"))]
-    pub(crate) fn arena_credit(&self) -> (usize, usize) {
-        let Some(eq) = self.lock_live() else {
-            return (0, 0);
-        };
-        (
-            self.msg_cap
-                .saturating_sub(self.queued_msgs.load(Ordering::Relaxed)),
-            self.cap.saturating_sub(eq.total_bytes().saturating_add(1)),
-        )
-    }
-
-    /// One indivisible carrier still consumes credit for every logical message.
-    #[cfg(any(feature = "lz4", feature = "zstd"))]
-    pub(crate) fn try_push_arena_no_signal(
-        &self,
-        frame: &FanOutFrame<'_>,
-        messages: usize,
-    ) -> TryFrameResult {
-        let bytes = match frame {
-            FanOutFrame::Arena(data) => data.len(),
-            FanOutFrame::Chunks(chunks) => chunks.iter().map(Bytes::len).sum(),
-        };
-        let Some(mut eq) = self.lock_live() else {
-            return TryFrameResult::Dead;
-        };
-        let queued = self.queued_msgs.load(Ordering::Relaxed);
-        if queued.saturating_add(messages) > self.msg_cap
-            || eq.total_bytes().saturating_add(bytes) >= self.cap
-        {
-            return self.full();
-        }
-        match frame {
-            FanOutFrame::Arena(data) => eq.push_pre_framed(data),
-            FanOutFrame::Chunks(chunks) => eq.push_shared_chunks(chunks),
-        }
-        self.commit(&eq, queued + messages);
-        TryFrameResult::Ok
-    }
-
-    /// Admit a prefix of complete publications under one lock. `ends` holds
-    /// their cumulative wire lengths; the caller retries any unaccepted suffix.
-    pub(crate) fn try_push_pre_framed_batch_no_signal(
-        &self,
-        data: &[u8],
-        ends: &[usize],
-        start: usize,
-    ) -> (usize, TryFrameResult) {
-        if self.is_dead() {
-            return (start, TryFrameResult::Dead);
-        }
-        let Some(mut eq) = self.lock_live() else {
-            return (start, TryFrameResult::Dead);
-        };
-        let offset = if start == 0 { 0 } else { ends[start - 1] };
-        let queued = self.queued_msgs.load(Ordering::Relaxed);
-        let bytes = eq.total_bytes();
-        let mut next = start;
-        let mut end = offset;
-        for &message_end in &ends[start..] {
-            // Match single-publication admission: the last accepted message
-            // may cross the byte cap, but never the message cap.
-            if queued + next - start >= self.msg_cap || bytes + end - offset >= self.cap {
-                break;
-            }
-            end = message_end;
-            next += 1;
-        }
-        if next != start {
-            eq.push_pre_framed(&data[offset..end]);
-            let queued = queued + next - start;
-            self.commit(&eq, queued);
-        }
-        let result = if next == ends.len() {
-            TryFrameResult::Ok
-        } else {
-            self.full()
-        };
-        (next, result)
-    }
-
-    pub(crate) fn try_push_fanout_drop_oldest(&self, frame: &FanOutFrame<'_>) -> TryFrameResult {
-        self.try_push_fanout_drop_oldest_with_protection(frame, false)
-    }
-
-    pub(crate) fn try_push_protected_fanout_drop_oldest(
-        &self,
-        frame: &FanOutFrame<'_>,
-    ) -> TryFrameResult {
-        self.try_push_fanout_drop_oldest_with_protection(frame, true)
-    }
-
-    fn try_push_fanout_drop_oldest_with_protection(
-        &self,
-        frame: &FanOutFrame<'_>,
-        protected: bool,
-    ) -> TryFrameResult {
-        if self.is_dead() {
-            return TryFrameResult::Dead;
-        }
-        // Queue each encoded fan-out message as one entry or chunk group so
-        // full-slot eviction removes the oldest whole message.
-        let chunks = fanout_frame_chunks(frame);
-        let len = chunks.iter().map(Bytes::len).sum::<usize>();
-        let Some(mut eq) = self.lock_live() else {
-            return TryFrameResult::Dead;
-        };
-        let mut queued_msgs = self.queued_msgs.load(Ordering::Relaxed);
-        while queued_msgs > 0
-            && (eq.total_bytes().saturating_add(len) >= self.cap || queued_msgs >= self.msg_cap)
-        {
-            if !eq.pop_oldest_unprotected_entry() {
-                return self.full();
-            }
-            queued_msgs = queued_msgs.saturating_sub(1);
-        }
-        eq.push_raw_message(&chunks, protected);
-        if protected {
-            self.fan_out.dict_queued.store(true, Ordering::Release);
-        }
-        queued_msgs += 1;
-        self.commit(&eq, queued_msgs);
-        drop(eq);
-        self.signal_encoded();
-        TryFrameResult::Ok
-    }
-
+    #[inline]
     pub(crate) fn signal_encoded(&self) {
         self.data_signal.mark();
     }
@@ -598,43 +242,6 @@ impl PeerTransmitSlot {
     #[inline]
     pub(crate) fn codec_profile(&self) -> Option<&CodecProfile> {
         self.codec_profile.as_ref()
-    }
-
-    #[inline]
-    pub(crate) fn fanout_dict_shipped(&self) -> bool {
-        self.fan_out.dict_shipped.load(Ordering::Acquire)
-    }
-
-    #[inline]
-    pub(crate) fn fanout_dict_queued_or_shipped(&self) -> bool {
-        self.fan_out.dict_queued.load(Ordering::Acquire) || self.fanout_dict_shipped()
-    }
-
-    #[inline]
-    pub(crate) fn mark_fanout_dict_shipped(&self) {
-        self.fan_out.dict_queued.store(false, Ordering::Release);
-        self.fan_out.dict_shipped.store(true, Ordering::Release);
-    }
-
-    #[inline]
-    pub(crate) fn fanout_active(&self) -> bool {
-        self.fan_out.active.load(Ordering::Acquire)
-    }
-
-    #[inline]
-    pub(crate) fn deactivate_fanout(&self) -> bool {
-        self.fan_out
-            .active
-            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-    }
-
-    pub(crate) fn set_fanout_reactivation(&self, cb: FanOutReactivation) {
-        *self
-            .fan_out
-            .reactivation
-            .lock()
-            .expect("transmit_slot fanout_reactivation poisoned") = Some(cb);
     }
 
     /// Arena-only fast path: if all queued data is in the
@@ -771,9 +378,7 @@ impl PeerTransmitSlot {
             self.queued_msgs.store(0, Ordering::Relaxed);
             std::mem::replace(&mut *eq, FrameBuffer::one_shot())
         };
-        self.fan_out.dict_queued.store(false, Ordering::Relaxed);
-        self.fan_out.dict_shipped.store(false, Ordering::Relaxed);
-        self.fan_out.active.store(false, Ordering::Relaxed);
+        self.fan_out.retire();
         self.above_lwm.store(false, Ordering::Relaxed);
         drop(ownership);
         self.data_signal.wake_all();
@@ -815,52 +420,22 @@ impl PeerTransmitSlot {
         }
     }
 
-    /// Claim the fan-out reactivation once the queue fell below the LWM.
     #[inline]
-    fn claim_reactivation(&self, below_lwm: bool) -> bool {
-        below_lwm
-            && self
-                .fan_out
-                .active
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-    }
-
-    fn notify_reactivation(&self) {
-        if let Some(cb) = self
-            .fan_out
-            .reactivation
-            .lock()
-            .expect("transmit_slot fanout_reactivation poisoned")
-            .clone()
-        {
-            cb(self.peer_id);
-        }
-    }
-
     fn is_full(&self, eq: &FrameBuffer) -> bool {
         eq.total_bytes() >= self.cap || self.queued_msgs.load(Ordering::Relaxed) >= self.msg_cap
     }
 
+    #[inline]
     fn mark_above_lwm_if_needed(&self, queued_bytes: usize, queued_messages: usize) {
         if !self.is_below_lwm(queued_bytes, queued_messages) {
             self.above_lwm.store(true, Ordering::Relaxed);
         }
     }
 
+    #[inline]
     fn is_below_lwm(&self, queued_bytes: usize, queued_messages: usize) -> bool {
         queued_bytes <= self.cap / TRANSMIT_SLOT_LWM_DIVISOR
             && queued_messages <= self.msg_cap / TRANSMIT_SLOT_LWM_DIVISOR
-    }
-}
-
-fn fanout_frame_chunks(frame: &FanOutFrame<'_>) -> SmallVec<[Bytes; 2]> {
-    match frame {
-        FanOutFrame::Arena(raw) => {
-            copy_stats::record(Site::FanOutChunk, raw.len());
-            smallvec::smallvec![Bytes::copy_from_slice(raw)]
-        }
-        FanOutFrame::Chunks(chunks) => chunks.iter().cloned().collect(),
     }
 }
 

@@ -1,5 +1,6 @@
+use super::fan_out::fanout_frame_chunks;
 use super::*;
-use omq_proto::fan_out_frame::{build_fan_out_frame, clear_fan_out_frame};
+use omq_proto::fan_out_frame::{FanOutFrame, build_fan_out_frame, clear_fan_out_frame};
 use tokio::time::{Duration, timeout};
 
 fn test_slot() -> Arc<PeerTransmitSlot> {

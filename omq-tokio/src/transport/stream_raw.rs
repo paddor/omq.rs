@@ -59,8 +59,7 @@ pub(crate) fn spawn_on<T: DriverStream + Send + 'static>(
     let child_cancel = cancel.child_token();
     let handle_cancel = child_cancel.clone();
     let mut completion = completion.with_stream_disconnect();
-    let index = assignment.index();
-    let network = io_pool.network_on(index);
+    let network = io_pool.network_on(assignment.index());
     let link = RawLink {
         send_pipe,
         pool,
@@ -70,8 +69,7 @@ pub(crate) fn spawn_on<T: DriverStream + Send + 'static>(
         peer_id,
     };
 
-    let task = io_pool.spawn_on(index, async move {
-        let _assignment = assignment;
+    let task = io_pool.spawn_leased(assignment, async move {
         let Ok(stream) = prepare(stream) else {
             let _ = completion.complete(omq_proto::DisconnectReason::PeerClosed);
             return;
@@ -82,15 +80,7 @@ pub(crate) fn spawn_on<T: DriverStream + Send + 'static>(
         let _ = completion.complete(omq_proto::DisconnectReason::PeerClosed);
     });
 
-    let handle = ActorPeerDriverHandle {
-        inbox: inbox_tx,
-        data_inbox: data_inbox_tx,
-        cancel: handle_cancel,
-        transmit_slot: None,
-        direct_tcp_writer: None,
-        send_pipe: None,
-        inproc: None,
-    };
+    let handle = ActorPeerDriverHandle::new(inbox_tx, data_inbox_tx, handle_cancel);
     (handle, task)
 }
 

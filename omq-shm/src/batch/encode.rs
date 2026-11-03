@@ -8,8 +8,8 @@ use omq_proto::{Message, Payload, PayloadPool, Result};
 use super::{
     BATCH_MAX_BYTES, BATCH_MAX_MESSAGES, BODY_OFFSET, BatchKind, COORDINATE_BYTES,
     COPIED_BATCH_MAX_BODY, MIN_STORAGE_BYTES, MULTIPART_ENVELOPE_THRESHOLD, REFERENCE_ENTRY_BYTES,
-    REGION_TOKEN, Reference, SIZE_BYTES, bodies_start, coordinate_slot, reference_table_end,
-    size_slot, write_count,
+    REGION_TOKEN, Reference, SIZE_BYTES, bodies_start, coordinate_slot, envelop,
+    reference_table_end, size_slot, write_count,
 };
 use crate::{
     COPY_THRESHOLD, Slot, find_slot,
@@ -139,17 +139,8 @@ pub(crate) fn prepare_references_validated(
     let Some(slot) = find_slot(body.part_slice(0).expect("batch metadata")) else {
         return Ok(None);
     };
-    let group = Arc::new(LeaseGroup::default());
-    sources.attach(&slot, &group);
-    let owner = Arc::new(PreparedBatch {
-        metadata: body.last_payload().expect("batch metadata"),
-        group,
-        _sources: sources.retained,
-    });
-    Ok(Some(with_envelope(
-        messages[0],
-        Message::from(Payload::from_shared_owner(owner)),
-    )))
+    let record = sources.into_record(&slot, body.last_payload().expect("batch metadata"));
+    Ok(Some(with_envelope(messages[0], record)))
 }
 
 /// Whether a message travels as one shared multipart record: 2 to 256 frames
@@ -235,12 +226,7 @@ impl MultipartFrames {
             } else {
                 let frame = payload.as_slice();
                 bytes[data..data + frame.len()].copy_from_slice(frame);
-                let reference = Reference {
-                    id: slot.mapping.id,
-                    token: slot.mapping.token,
-                    offset: base + data,
-                    length: frame.len(),
-                };
+                let reference = Reference::at(slot, base + data, frame.len());
                 data += frame.len();
                 reference
             };
@@ -273,18 +259,8 @@ pub(crate) fn prepare_multipart_validated(
     buffer
         .set_len(multipart_table_length(frames.payloads.len()))
         .expect("multipart table fits its slot");
-    let group = Arc::new(LeaseGroup::default());
-    sources.attach(&slot, &group);
-    let owner = Arc::new(PreparedBatch {
-        metadata: buffer.into_payload(),
-        group,
-        _sources: sources.retained,
-    });
-    let record = Message::from(Payload::from_shared_owner(owner));
-    Some(match message.routing_id() {
-        Some(id) => record.with_routing_id(id),
-        None => record,
-    })
+    let record = sources.into_record(&slot, buffer.into_payload());
+    Some(envelop(None, message.routing_id(), record))
 }
 
 struct Sources {
@@ -376,6 +352,19 @@ impl Sources {
         state.published_batch = Some(group.clone());
         state.regions.clone_from(&self.regions);
     }
+
+    /// Publish `metadata` from `slot` as one record that retains these
+    /// sources until every recipient completes it.
+    fn into_record(self, slot: &Slot, metadata: Payload) -> Message {
+        let group = Arc::new(LeaseGroup::default());
+        self.attach(slot, &group);
+        let owner = Arc::new(PreparedBatch {
+            metadata,
+            group,
+            _sources: self.retained,
+        });
+        Message::from(Payload::from_shared_owner(owner))
+    }
 }
 
 fn write_reference(bytes: &mut [u8], count: usize, index: usize, reference: Reference) {
@@ -390,14 +379,6 @@ fn write_reference(bytes: &mut [u8], count: usize, index: usize, reference: Refe
 }
 
 fn with_envelope(source: &Message, body: Message) -> Message {
-    let message = if source.len() == 2 {
-        Message::with_prefix(source.part_bytes(0).expect("batch envelope"), body)
-    } else {
-        body
-    };
-    if let Some(id) = source.routing_id() {
-        message.with_routing_id(id)
-    } else {
-        message
-    }
+    let prefix = (source.len() == 2).then(|| source.part_bytes(0).expect("batch envelope"));
+    envelop(prefix, source.routing_id(), body)
 }

@@ -102,13 +102,17 @@ fn slab_slices_keep_borrowed_views_live_while_another_slot_is_mutated() {
     let reference = publish(&packed, &table, 0, GENERATION_STEP, wire::REFERENCE_BATCH);
     let views = Views::new(1);
     let received = Message::from(borrow(&packed, &table, reference, &views));
-    let mut cursor = batch::ReceivedBatch::referenced(&received, None, &views, |id, token| {
-        regions
-            .iter()
-            .find(|region| region.id == id && region.token == token)
-            .cloned()
-    })
-    .unwrap();
+    let mut cx = batch::DecodeContext {
+        maximum: None,
+        views: &views,
+        region: |id: u32, token: u64| {
+            regions
+                .iter()
+                .find(|region| region.id == id && region.token == token)
+                .cloned()
+        },
+    };
+    let mut cursor = batch::ReceivedBatch::referenced(&received, &mut cx).unwrap();
     let held = cursor
         .pop_front()
         .unwrap()
@@ -1133,15 +1137,20 @@ fn received_cursor(
     let views = Views::new(1);
     let mut received = packed.clone();
     received.replace_last_payload(borrow(&packed, &table, reference, &views));
-    let cursor = if referenced {
-        ReceivedBatch::referenced(&received, None, &views, |id, token| {
+    let mut cx = batch::DecodeContext {
+        maximum: None,
+        views: &views,
+        region: |id: u32, token: u64| {
             regions
                 .iter()
                 .find(|region| region.id == id && region.token == token)
                 .cloned()
-        })
+        },
+    };
+    let cursor = if referenced {
+        ReceivedBatch::referenced(&received, &mut cx)
     } else {
-        ReceivedBatch::copied(&received, None, &views)
+        ReceivedBatch::copied(&received, &cx)
     }
     .unwrap();
     (cursor, metadata, table)

@@ -333,21 +333,18 @@ impl Connection {
             return self.decode(message).map(Received::Message);
         };
         let decoded = self.decode_record(message, kind)?;
+        let mut cx = batch::DecodeContext {
+            maximum: self.max_message_size,
+            views: &self.views,
+            region: |id, token| self.find_region(id, token).cloned(),
+        };
         if kind == MULTIPART {
-            return batch::multipart(&decoded, self.max_message_size, &self.views, |id, token| {
-                self.find_region(id, token).cloned()
-            })
-            .map(Received::Message);
+            return batch::multipart(&decoded, &mut cx).map(Received::Message);
         }
         let batch = if kind == COPIED_BATCH {
-            crate::ReceivedBatch::copied(&decoded, self.max_message_size, &self.views)?
+            crate::ReceivedBatch::copied(&decoded, &cx)?
         } else {
-            crate::ReceivedBatch::referenced(
-                &decoded,
-                self.max_message_size,
-                &self.views,
-                |id, token| self.find_region(id, token).cloned(),
-            )?
+            crate::ReceivedBatch::referenced(&decoded, &mut cx)?
         };
         Ok(Received::Batch(batch))
     }

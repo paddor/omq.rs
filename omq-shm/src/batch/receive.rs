@@ -9,12 +9,64 @@ use omq_proto::{Message, Payload, Result};
 
 use super::{
     BODY_OFFSET, COPIED_BATCH_MAX_BODY, MIN_STORAGE_BYTES, REGION_TOKEN, Reference, SIZE_BYTES,
-    bodies_start, coordinate_slot, count, reference_table_end, size_slot,
+    bodies_start, coordinate_slot, count, envelop, reference_table_end, size_slot,
 };
 use crate::{
     COPY_THRESHOLD,
     mapping::{Mapping, invalid, read_u32, read_u64},
 };
+
+/// What decoding a received record needs from its connection.
+pub(crate) struct DecodeContext<'a, R> {
+    /// `max_message_size`, if any.
+    pub(crate) maximum: Option<usize>,
+    pub(crate) views: &'a crate::views::Views,
+    /// Registered region lookup by id and token; copied batches skip it.
+    pub(crate) region: R,
+}
+
+impl<R> DecodeContext<'_, R> {
+    fn check_reference(
+        &self,
+        message: &Message,
+        mapping: &Mapping,
+        reference: Reference,
+    ) -> Result<()> {
+        if !mapping.contains(reference.offset, reference.length) {
+            return Err(invalid("SHM batch body exceeds region or message size limit").into());
+        }
+        crate::check_body_size(message, reference.length, self.maximum)
+    }
+
+    /// Validate the references following `first` that continue it in the
+    /// same region; return the run's entry count and byte length.
+    fn adjacent_references(
+        &self,
+        message: &Message,
+        mapping: &Mapping,
+        first: Reference,
+        references: &mut std::iter::Peekable<impl Iterator<Item = Reference>>,
+    ) -> Result<(usize, usize)> {
+        let mut count = 1;
+        let mut length = first.length;
+        while first.length != 0
+            && let Some(next) = references.peek().copied()
+        {
+            if next.id != first.id
+                || next.token != first.token
+                || next.offset != first.offset + length
+                || next.length == 0
+            {
+                break;
+            }
+            self.check_reference(message, mapping, next)?;
+            references.next();
+            count += 1;
+            length += next.length;
+        }
+        Ok((count, length))
+    }
+}
 
 #[cfg(test)]
 pub(crate) fn decode(
@@ -23,12 +75,21 @@ pub(crate) fn decode(
     views: &crate::views::Views,
     messages: &mut VecDeque<Message>,
 ) -> Result<()> {
-    let mut batch = ReceivedBatch::copied(message, maximum, views)?;
+    let cx = DecodeContext {
+        maximum,
+        views,
+        region: (),
+    };
+    drain_all(ReceivedBatch::copied(message, &cx)?, messages);
+    Ok(())
+}
+
+#[cfg(test)]
+fn drain_all(mut batch: ReceivedBatch, messages: &mut VecDeque<Message>) {
     messages.reserve(batch.len());
     while let Some(message) = batch.pop_front() {
         messages.push_back(message);
     }
-    Ok(())
 }
 
 /// Decode a reference table once. Callers use only the returned copy, never
@@ -68,11 +129,12 @@ pub(crate) fn decode_references(
     region: impl FnMut(u32, u64) -> Option<Arc<Mapping>>,
     messages: &mut VecDeque<Message>,
 ) -> Result<()> {
-    let mut batch = ReceivedBatch::referenced(message, maximum, views, region)?;
-    messages.reserve(batch.len());
-    while let Some(message) = batch.pop_front() {
-        messages.push_back(message);
-    }
+    let mut cx = DecodeContext {
+        maximum,
+        views,
+        region,
+    };
+    drain_all(ReceivedBatch::referenced(message, &mut cx)?, messages);
     Ok(())
 }
 
@@ -80,14 +142,12 @@ pub(crate) fn decode_references(
 /// the shared table is not read again after validation.
 pub(crate) fn multipart(
     message: &Message,
-    maximum: Option<usize>,
-    views: &crate::views::Views,
-    region: impl FnMut(u32, u64) -> Option<Arc<Mapping>>,
+    cx: &mut DecodeContext<'_, impl FnMut(u32, u64) -> Option<Arc<Mapping>>>,
 ) -> Result<Message> {
     if message.len() != 1 {
         return Err(invalid("invalid SHM multipart envelope").into());
     }
-    let mut frames = ReceivedBatch::referenced(message, maximum, views, region)?;
+    let mut frames = ReceivedBatch::referenced(message, cx)?;
     let ReceivedBacking::Referenced { bodies, .. } = &frames.storage.backing else {
         unreachable!("multipart records are referenced")
     };
@@ -95,7 +155,7 @@ pub(crate) fn multipart(
         bodies.len() * std::mem::size_of::<Payload>(),
         |size, body| size.saturating_add(body.length),
     );
-    if maximum.is_some_and(|maximum| size > maximum) {
+    if cx.maximum.is_some_and(|maximum| size > maximum) {
         return Err(invalid("SHM multipart message exceeds max_message_size").into());
     }
     let mut parts = Vec::with_capacity(frames.len());
@@ -119,45 +179,6 @@ impl AsRef<[u8]> for ReferencedRun {
         // The batch owner retains the lease for all of them.
         self.mapping.bytes(self.offset, self.length)
     }
-}
-
-fn check_reference(
-    message: &Message,
-    mapping: &Mapping,
-    reference: Reference,
-    maximum: Option<usize>,
-) -> Result<()> {
-    if !mapping.contains(reference.offset, reference.length) {
-        return Err(invalid("SHM batch body exceeds region or message size limit").into());
-    }
-    crate::check_body_size(message, reference.length, maximum)
-}
-
-fn adjacent_references(
-    message: &Message,
-    mapping: &Mapping,
-    first: Reference,
-    references: &mut std::iter::Peekable<impl Iterator<Item = Reference>>,
-    maximum: Option<usize>,
-) -> Result<(usize, usize)> {
-    let mut count = 1;
-    let mut length = first.length;
-    while first.length != 0
-        && let Some(next) = references.peek().copied()
-    {
-        if next.id != first.id
-            || next.token != first.token
-            || next.offset != first.offset + length
-            || next.length == 0
-        {
-            break;
-        }
-        check_reference(message, mapping, next, maximum)?;
-        references.next();
-        count += 1;
-        length += next.length;
-    }
-    Ok((count, length))
 }
 
 /// Validated SHM batch retained until application receive.
@@ -208,11 +229,7 @@ struct ReceivedRun {
 }
 
 impl ReceivedBatch {
-    pub(crate) fn copied(
-        message: &Message,
-        maximum: Option<usize>,
-        views: &crate::views::Views,
-    ) -> Result<Self> {
+    pub(crate) fn copied<R>(message: &Message, cx: &DecodeContext<'_, R>) -> Result<Self> {
         check_envelope(message)?;
         let bytes = crate::body(message)?;
         let count = count(bytes)?;
@@ -225,7 +242,7 @@ impl ReceivedBatch {
             if length > COPIED_BATCH_MAX_BODY {
                 return Err(invalid("SHM batch body exceeds message size limit").into());
             }
-            crate::check_body_size(message, length, maximum)?;
+            crate::check_body_size(message, length, cx.maximum)?;
             offset = offset
                 .checked_add(length)
                 .filter(|&end| end <= bytes.len())
@@ -256,28 +273,25 @@ impl ReceivedBatch {
                 ReceivedBacking::Copied(lengths.into_boxed_slice()),
             )
         };
-        Ok(Self::new(message, bytes, views, count, backing))
+        Ok(Self::new(message, bytes, cx.views, backing))
     }
 
     pub(crate) fn referenced(
         message: &Message,
-        maximum: Option<usize>,
-        views: &crate::views::Views,
-        mut region: impl FnMut(u32, u64) -> Option<Arc<Mapping>>,
+        cx: &mut DecodeContext<'_, impl FnMut(u32, u64) -> Option<Arc<Mapping>>>,
     ) -> Result<Self> {
         check_envelope(message)?;
         let bodies = references(crate::body(message)?)?;
-        let count = bodies.len();
         let owner = message.last_payload().expect("batch owner").as_bytes();
         let mut references = bodies.iter().copied().peekable();
         let mut runs = Vec::new();
         let mut end = 0;
         while let Some(reference) = references.next() {
-            let mapping = region(reference.id, reference.token)
+            let mapping = (cx.region)(reference.id, reference.token)
                 .ok_or_else(|| invalid("SHM batch region was not registered"))?;
-            check_reference(message, &mapping, reference, maximum)?;
+            cx.check_reference(message, &mapping, reference)?;
             let (run_count, length) =
-                adjacent_references(message, &mapping, reference, &mut references, maximum)?;
+                cx.adjacent_references(message, &mapping, reference, &mut references)?;
             let shared = (message.len() == 1 && run_count > 1).then(|| {
                 Bytes::from_owner(ReferencedRun {
                     mapping: mapping.clone(),
@@ -297,8 +311,7 @@ impl ReceivedBatch {
         Ok(Self::new(
             message,
             owner,
-            views,
-            count,
+            cx.views,
             ReceivedBacking::Referenced {
                 runs,
                 bodies: bodies
@@ -316,9 +329,13 @@ impl ReceivedBatch {
         message: &Message,
         bytes: Bytes,
         views: &crate::views::Views,
-        count: usize,
         backing: ReceivedBacking,
     ) -> Self {
+        let count = match &backing {
+            ReceivedBacking::Inline(messages) => messages.len(),
+            ReceivedBacking::Copied(lengths) => lengths.len(),
+            ReceivedBacking::Referenced { bodies, .. } => bodies.len(),
+        };
         Self {
             storage: Arc::new(ReceivedStorage {
                 bytes,
@@ -506,14 +523,7 @@ impl ReceivedBatch {
 
     #[inline]
     fn wrap(&self, message: Message) -> Message {
-        let message = match &self.storage.envelope {
-            Some(prefix) => Message::with_prefix(prefix.clone(), message),
-            None => message,
-        };
-        match self.routing_id {
-            Some(id) => message.with_routing_id(id),
-            None => message,
-        }
+        envelop(self.storage.envelope.clone(), self.routing_id, message)
     }
 }
 

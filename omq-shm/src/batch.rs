@@ -9,6 +9,7 @@
 
 #![forbid(unsafe_code)]
 
+use bytes::Bytes;
 use omq_proto::{Message, Result};
 
 use crate::mapping::invalid;
@@ -21,6 +22,7 @@ pub(crate) use encode::{
     prepare_references_validated, storage_length,
 };
 pub use encode::{prepare_batch, prepare_reference_batch, uses_multipart_record};
+pub(crate) use receive::DecodeContext;
 pub use receive::ReceivedBatch;
 #[cfg(test)]
 pub(crate) use receive::decode;
@@ -91,13 +93,34 @@ pub(super) struct Reference {
 }
 
 impl Reference {
-    fn in_slot(slot: &crate::Slot, body: &[u8]) -> Self {
+    fn at(slot: &crate::Slot, offset: usize, length: usize) -> Self {
         Self {
             id: slot.mapping.id,
             token: slot.mapping.token,
-            offset: body.as_ptr() as usize - slot.mapping.address(),
-            length: body.len(),
+            offset,
+            length,
         }
+    }
+
+    fn in_slot(slot: &crate::Slot, body: &[u8]) -> Self {
+        Self::at(
+            slot,
+            body.as_ptr() as usize - slot.mapping.address(),
+            body.len(),
+        )
+    }
+}
+
+/// Add a batch's shared envelope frame and routing ID to one of its messages.
+#[inline]
+fn envelop(prefix: Option<Bytes>, routing_id: Option<u32>, body: Message) -> Message {
+    let message = match prefix {
+        Some(prefix) => Message::with_prefix(prefix, body),
+        None => body,
+    };
+    match routing_id {
+        Some(id) => message.with_routing_id(id),
+        None => message,
     }
 }
 

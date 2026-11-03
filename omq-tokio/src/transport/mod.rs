@@ -20,7 +20,6 @@ pub use omq_proto::monitor::PeerIdent;
 /// Implements `AsyncRead` and `AsyncWrite` for an enum whose variants each
 /// wrap one stream by forwarding every call to the active variant. Variants
 /// may carry `cfg` attributes.
-#[cfg(any(feature = "ws", target_os = "windows"))]
 macro_rules! delegate_async_io {
     ($name:ident { $($(#[$meta:meta])* $variant:ident),+ $(,)? }) => {
         impl tokio::io::AsyncRead for $name {
@@ -84,7 +83,6 @@ macro_rules! delegate_async_io {
         }
     };
 }
-#[cfg(any(feature = "ws", target_os = "windows"))]
 pub(crate) use delegate_async_io;
 
 pub mod backoff;

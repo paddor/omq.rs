@@ -281,108 +281,15 @@ impl AsyncWrite for AnyWriteHalf {
     }
 }
 
-impl AsyncRead for AnyStream {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            Self::Tcp(s) => Pin::new(s).poll_read(cx, buf),
-            #[cfg(test)]
-            Self::Memory(s) => Pin::new(s).poll_read(cx, buf),
-            Self::Ipc(s) => Pin::new(s).poll_read(cx, buf),
-            #[cfg(target_os = "linux")]
-            Self::Shm(s) => Pin::new(s).poll_read(cx, buf),
-            #[cfg(feature = "ws")]
-            Self::Ws(s) => Pin::new(s).poll_read(cx, buf),
-            #[cfg(feature = "quic")]
-            Self::Quic(s) => Pin::new(s).poll_read(cx, buf),
-        }
-    }
-}
-
-impl AsyncWrite for AnyStream {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        match self.get_mut() {
-            Self::Tcp(s) => Pin::new(s).poll_write(cx, buf),
-            #[cfg(test)]
-            Self::Memory(s) => Pin::new(s).poll_write(cx, buf),
-            Self::Ipc(s) => Pin::new(s).poll_write(cx, buf),
-            #[cfg(target_os = "linux")]
-            Self::Shm(s) => Pin::new(s).poll_write(cx, buf),
-            #[cfg(feature = "ws")]
-            Self::Ws(s) => Pin::new(s).poll_write(cx, buf),
-            #[cfg(feature = "quic")]
-            Self::Quic(s) => Pin::new(s).poll_write(cx, buf),
-        }
-    }
-
-    fn poll_write_vectored(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        bufs: &[IoSlice<'_>],
-    ) -> Poll<io::Result<usize>> {
-        match self.get_mut() {
-            Self::Tcp(s) => Pin::new(s).poll_write_vectored(cx, bufs),
-            #[cfg(test)]
-            Self::Memory(s) => Pin::new(s).poll_write_vectored(cx, bufs),
-            Self::Ipc(s) => Pin::new(s).poll_write_vectored(cx, bufs),
-            #[cfg(target_os = "linux")]
-            Self::Shm(s) => Pin::new(s).poll_write_vectored(cx, bufs),
-            #[cfg(feature = "ws")]
-            Self::Ws(s) => Pin::new(s).poll_write_vectored(cx, bufs),
-            #[cfg(feature = "quic")]
-            Self::Quic(s) => Pin::new(s).poll_write_vectored(cx, bufs),
-        }
-    }
-
-    fn is_write_vectored(&self) -> bool {
-        match self {
-            Self::Tcp(s) => s.is_write_vectored(),
-            #[cfg(test)]
-            Self::Memory(s) => s.is_write_vectored(),
-            Self::Ipc(s) => s.is_write_vectored(),
-            #[cfg(target_os = "linux")]
-            Self::Shm(s) => s.is_write_vectored(),
-            #[cfg(feature = "ws")]
-            Self::Ws(s) => s.is_write_vectored(),
-            #[cfg(feature = "quic")]
-            Self::Quic(s) => s.is_write_vectored(),
-        }
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            Self::Tcp(s) => Pin::new(s).poll_flush(cx),
-            #[cfg(test)]
-            Self::Memory(s) => Pin::new(s).poll_flush(cx),
-            Self::Ipc(s) => Pin::new(s).poll_flush(cx),
-            #[cfg(target_os = "linux")]
-            Self::Shm(s) => Pin::new(s).poll_flush(cx),
-            #[cfg(feature = "ws")]
-            Self::Ws(s) => Pin::new(s).poll_flush(cx),
-            #[cfg(feature = "quic")]
-            Self::Quic(s) => Pin::new(s).poll_flush(cx),
-        }
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            Self::Tcp(s) => Pin::new(s).poll_shutdown(cx),
-            #[cfg(test)]
-            Self::Memory(s) => Pin::new(s).poll_shutdown(cx),
-            Self::Ipc(s) => Pin::new(s).poll_shutdown(cx),
-            #[cfg(target_os = "linux")]
-            Self::Shm(s) => Pin::new(s).poll_shutdown(cx),
-            #[cfg(feature = "ws")]
-            Self::Ws(s) => Pin::new(s).poll_shutdown(cx),
-            #[cfg(feature = "quic")]
-            Self::Quic(s) => Pin::new(s).poll_shutdown(cx),
-        }
-    }
-}
+crate::transport::delegate_async_io!(AnyStream {
+    #[cfg(test)]
+    Memory,
+    Tcp,
+    Ipc,
+    #[cfg(target_os = "linux")]
+    Shm,
+    #[cfg(feature = "ws")]
+    Ws,
+    #[cfg(feature = "quic")]
+    Quic,
+});

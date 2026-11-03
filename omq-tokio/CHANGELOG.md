@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.1] - 2026-11-03
+
+### Fixed
+
+- Builds on macOS and Windows again. 0.34.0 called a Linux-only receive
+  helper.
+
 ## [0.34.0] - 2026-11-03
 
 ### Changed

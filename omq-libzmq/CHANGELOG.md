@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-11-03
+
+### Changed
+
+- Bundle `omq-tokio` 0.34.2. Single-peer receives no longer allocate when a
+  message arrives mid-receive.
+
 ## [0.9.0] - 2026-11-03
 
 ### Changed

@@ -5,6 +5,7 @@ mod completion;
 #[cfg(feature = "dart")]
 mod dart;
 mod dialer;
+mod endpoint_options;
 mod endpoint_resolution;
 mod endpoints;
 mod handshake;
@@ -15,6 +16,7 @@ mod listener;
 mod peer;
 mod peer_materialize;
 mod subscriptions;
+mod udp_endpoints;
 
 use close::{CloseState, PEER_TASK_JOIN_TIMEOUT, stop_peer_task};
 pub(crate) use link::{CloseLinger, DriverEnv, HandleLink, HandleShared, SocketCommand};

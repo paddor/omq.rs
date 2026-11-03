@@ -19,7 +19,7 @@ use super::{
 };
 use crate::engine::control_queue::ControlQueue;
 use crate::engine::transmit_slot::SlotConfig;
-use crate::routing::poll_once;
+use crate::test_util::poll_once;
 
 fn paused_lanes(count: usize) -> (FanOutLanes, Vec<yring::Consumer<Message>>) {
     let lanes = test_lanes(count);

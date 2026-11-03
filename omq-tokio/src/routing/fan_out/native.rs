@@ -250,7 +250,7 @@ impl Cache {
 mod tests {
     use super::*;
     use crate::engine::{ActorPeerDriverHandle, PeerDriverData, data_inbox};
-    use crate::routing::poll_once;
+    use crate::test_util::poll_once;
     use omq_proto::{Options, SocketType};
 
     fn peer(capacity: usize) -> (ActorPeerDriverHandle, data_inbox::Receiver) {

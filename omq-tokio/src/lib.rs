@@ -79,3 +79,13 @@ pub use socket::{
     MonitorStream, MonitorTryRecvError, PeerCommandKind, PeerIdent, PeerInfo, PeerSubscriptions,
     ReceiveLane, ReceiveReceipt, Socket, SocketPools, UnshiftError,
 };
+
+/// Helpers shared by unit tests.
+#[cfg(test)]
+mod test_util {
+    /// Poll `future` once with a no-op waker.
+    pub(crate) fn poll_once<F: Future>(future: F) -> std::task::Poll<F::Output> {
+        let waker = std::task::Waker::noop();
+        std::pin::pin!(future).poll(&mut std::task::Context::from_waker(waker))
+    }
+}

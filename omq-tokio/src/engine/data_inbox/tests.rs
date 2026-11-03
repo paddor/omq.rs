@@ -1,11 +1,7 @@
 use super::*;
+use crate::test_util::poll_once;
 use omq_proto::Message;
-use std::task::Context;
 use std::time::Duration;
-
-fn poll_once<F: std::future::Future>(future: std::pin::Pin<&mut F>) -> Poll<F::Output> {
-    future.poll(&mut Context::from_waker(futures::task::noop_waker_ref()))
-}
 
 fn message(n: u8) -> PeerDriverData {
     PeerDriverData::SendMessage(Message::from_slice(&[n]))
@@ -291,7 +287,7 @@ async fn final_ack_batch_wakes_a_closed_receiver_and_close_progress() {
     let mut done = Box::pin(receiver.recv());
     assert!(
         done.as_mut()
-            .poll(&mut Context::from_waker(&waker))
+            .poll(&mut std::task::Context::from_waker(&waker))
             .is_pending()
     );
     let seen = progress.generation();

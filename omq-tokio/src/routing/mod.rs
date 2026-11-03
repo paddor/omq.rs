@@ -651,14 +651,6 @@ fn with_dart(
     tx
 }
 
-/// Poll `future` once with a no-op waker.
-#[cfg(test)]
-pub(crate) fn poll_once<F: std::future::Future>(
-    future: std::pin::Pin<&mut F>,
-) -> std::task::Poll<F::Output> {
-    future.poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
-}
-
 /// Recv-side policy.
 #[derive(Debug)]
 pub(crate) enum RecvStrategy {

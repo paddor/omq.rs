@@ -3,14 +3,13 @@
 use bytes::Bytes;
 use omq_proto::message::Message;
 use omq_proto::options::Options;
-use omq_proto::proto::transform::CompressionKind;
+use omq_proto::proto::transform::{CompressionKind, MAX_DICT_BYTES};
 
 const MAX_MESSAGES: usize = 100;
 const MAX_SAMPLES: usize = 1000;
 const MAX_BYTES: usize = 100 * 1024;
 const MAX_SAMPLE_LEN: usize = 2048;
 const MAX_PARTS_PER_MESSAGE: usize = 32;
-const MAX_DICT_BYTES: usize = 8192;
 
 #[derive(Debug)]
 pub(super) struct DictTraining {

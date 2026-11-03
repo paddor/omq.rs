@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A receive from a single peer no longer moves a message through the
+  staging queue, and allocates it, when the message arrives mid-receive.
+
 ## [0.34.1] - 2026-11-03
 
 ### Fixed

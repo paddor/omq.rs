@@ -268,7 +268,7 @@ impl SpscAwareRecv {
 
         self.refresh_snapshot(&mut guard);
         let state = &mut *guard;
-        if let Some(msg) = Self::try_single_peer_fast_path(state) {
+        if let Some(msg) = Self::try_single_peer(state).and_then(|drained| drained.message) {
             return DrainResult::Message(msg);
         }
 
@@ -280,14 +280,7 @@ impl SpscAwareRecv {
         if let Some(msg) = self.take_conflate_message() {
             return DrainResult::Message(msg);
         }
-        let mut budget = DrainBudget::new(RECV_BATCH_MESSAGES, RECV_BATCH_BYTES);
-        // The staging deque is empty here. Reuse its allocation for the
-        // queues' contiguous bulk output, then restore FIFO single receives.
-        let mut batch = Vec::from(std::mem::take(&mut state.batch));
-        let (latency_result, has_disconnected) =
-            self.drain_sources(state, &mut budget, false, &mut batch);
-        state.batch = batch.into();
-        let result = latency_result.or_else(|| state.batch.pop_front());
+        let (result, has_disconnected) = self.drain_fenced(state);
         let pipe_disconnected = state.recv_consumer.is_disconnected();
         let has_peers = !state.tcp.is_empty();
         let all_empty = Self::state_is_empty(state) && self.conflate_slot_empty();
@@ -327,9 +320,10 @@ impl SpscAwareRecv {
         state.generation = current_gen;
     }
 
-    fn try_single_peer_fast_path(state: &mut DrainState) -> Option<Message> {
-        // One ready source needs no application staging vector. LWM progress
-        // remains in the peer consumer; bulk calls keep their bounded scanner.
+    /// One ready source needs no application staging vector. LWM progress
+    /// remains in the peer consumer; bulk calls keep their bounded scanner.
+    /// `None` when the socket is not served by exactly one eligible peer.
+    fn try_single_peer(state: &DrainState) -> Option<SourceDrain> {
         if state.tcp.len() != 1
             || (!state.latency && state.tcp[0].capacity < RECV_BATCH_MESSAGES)
             || !state.recv_consumer.is_empty()
@@ -337,14 +331,33 @@ impl SpscAwareRecv {
             return None;
         }
         let mut budget = DrainBudget::new(1, RECV_BATCH_BYTES);
-        drain_peer_source(
+        Some(drain_peer_source(
             &state.tcp[0],
             true,
             &mut Vec::new(),
             &mut budget,
             DrainLimit::One,
+        ))
+    }
+
+    /// The queue check after the signal fences. An eligible single peer keeps
+    /// taking one message from its ring, so an arrival racing the fast probe
+    /// never reaches the staging deque. Other sockets drain in bulk.
+    fn drain_fenced(&self, state: &mut DrainState) -> (Option<Message>, bool) {
+        if let Some(drained) = Self::try_single_peer(state) {
+            return (drained.message, drained.disconnected);
+        }
+        let mut budget = DrainBudget::new(RECV_BATCH_MESSAGES, RECV_BATCH_BYTES);
+        // The staging deque is empty here. Reuse its allocation for the
+        // queues' contiguous bulk output, then restore FIFO single receives.
+        let mut batch = Vec::from(std::mem::take(&mut state.batch));
+        let (latency_result, has_disconnected) =
+            self.drain_sources(state, &mut budget, false, &mut batch);
+        state.batch = batch.into();
+        (
+            latency_result.or_else(|| state.batch.pop_front()),
+            has_disconnected,
         )
-        .message
     }
 
     pub(super) fn drain_sources(

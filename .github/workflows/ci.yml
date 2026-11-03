@@ -874,6 +874,40 @@ jobs:
           bash scripts/ci-cross-test-timeout.sh ${{ matrix.target }} -p omq-libzmq --test omq_libzmq_proxy
           bash scripts/ci-cross-test-timeout.sh ${{ matrix.target }} -p omq-libzmq --test omq_libzmq_draft
 
+  cross-check:
+    name: cross-target check (macOS, Windows)
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin,x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo check
+        # Catches Linux-only cfg gates on PRs; native macOS and Windows jobs
+        # run only in the full matrix. `ws` and `quic` pull in `ring`, whose C
+        # build needs a target toolchain, so only pure-Rust features are
+        # checked here.
+        run: |
+          features=(
+            omq-proto/plain
+            omq-proto/curve
+            omq-proto/lz4
+            omq-proto/zstd
+            omq-tokio/plain
+            omq-tokio/curve
+            omq-tokio/lz4
+            omq-tokio/zstd
+            omq-tokio/dart
+          )
+          cargo check -p omq-proto -p omq-tokio --lib \
+            --features "${features[*]}" \
+            --target x86_64-apple-darwin \
+            --target aarch64-apple-darwin \
+            --target x86_64-pc-windows-msvc
+
   lint:
     name: fmt + clippy (${{ matrix.name }})
     needs: [changes]
@@ -1048,6 +1082,7 @@ jobs:
         cppzmq,
         fuzz-smoke,
         linux-32bit,
+        cross-check,
         lint,
         pyomq-test,
         java-lint,

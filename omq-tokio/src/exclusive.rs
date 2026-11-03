@@ -7,18 +7,20 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use omq_proto::endpoint::Host;
-use omq_proto::message::generated_identity;
-use omq_proto::proto::command::Command;
-use omq_proto::proto::{Connection, ConnectionConfig, Event as ProtoEvent, Role};
 use omq_proto::type_state::TypeState;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 
-use crate::engine::driver::{check_written, heartbeat_timeout, sleep_until_opt, ttl_deciseconds};
 use crate::{Endpoint, Error, Message, ReconnectPolicy, Result, SocketType};
+use live::{
+    HeartbeatPlan, LiveConnection, accept_live, connect_live, drain_ready_input, flush_and_settle,
+    flush_live, queue_ping, recv_live, run_timeout,
+};
+
+mod live;
 
 /// Configuration for a caller-driven [`Socket`].
 #[derive(Clone, Debug)]
@@ -127,35 +129,6 @@ pub enum Event {
 }
 
 #[derive(Debug)]
-struct LiveConnection {
-    stream: TcpStream,
-    connection: Connection,
-    read_buf: BytesMut,
-    write_buf: BytesMut,
-    last_ping: Instant,
-    last_input: Instant,
-    heartbeat_deadline: Option<Instant>,
-    ping_sequence: u64,
-    peer_identity: Bytes,
-    /// A flat message write started and has not completed. A caller that
-    /// drops `send` mid-write leaves a truncated frame on the wire.
-    write_pending: bool,
-}
-
-impl LiveConnection {
-    fn silence_deadline(&self) -> Option<Instant> {
-        let peer = self
-            .connection
-            .peer_heartbeat_ttl()
-            .and_then(|ttl| self.last_input.checked_add(ttl));
-        match (self.heartbeat_deadline, peer) {
-            (Some(local), Some(peer)) => Some(local.min(peer)),
-            (local, peer) => local.or(peer),
-        }
-    }
-}
-
-#[derive(Debug)]
 enum Mode {
     Connect,
     Bind { listener: TcpListener },
@@ -181,12 +154,32 @@ pub struct Socket {
     reconnect_attempt: u32,
     retry_at: Option<Instant>,
     type_state: TypeState,
+    heartbeat: HeartbeatPlan,
     rep_request_pending: bool,
     server_routing_id: u32,
     closed: bool,
 }
 
 impl Socket {
+    fn new(kind: SocketType, endpoint: Endpoint, options: Options, mode: Mode) -> Self {
+        let (monitor, _) = broadcast::channel(1024);
+        Self {
+            kind,
+            endpoint,
+            heartbeat: HeartbeatPlan::new(&options),
+            options,
+            mode,
+            live: None,
+            monitor,
+            reconnect_attempt: 0,
+            retry_at: None,
+            type_state: TypeState::new(),
+            rep_request_pending: false,
+            server_routing_id: 0,
+            closed: false,
+        }
+    }
+
     /// Connect a caller-driven TCP socket to a URI string or typed endpoint.
     ///
     /// Currently supports `PAIR`, `DEALER`, `ROUTER`, `REQ`, `REP`,
@@ -198,21 +191,7 @@ impl Socket {
     ) -> Result<Self> {
         let endpoint = endpoint.try_into().map_err(Into::into)?;
         validate_connect_mode(socket_type, &endpoint, &options)?;
-        let (monitor, _) = broadcast::channel(1024);
-        let mut socket = Self {
-            kind: socket_type,
-            endpoint,
-            options,
-            mode: Mode::Connect,
-            live: None,
-            monitor,
-            reconnect_attempt: 0,
-            retry_at: None,
-            type_state: TypeState::new(),
-            rep_request_pending: false,
-            server_routing_id: 0,
-            closed: false,
-        };
+        let mut socket = Self::new(socket_type, endpoint, options, Mode::Connect);
         socket.establish().await?;
         Ok(socket)
     }
@@ -232,21 +211,7 @@ impl Socket {
         let endpoint = endpoint.try_into().map_err(Into::into)?;
         validate_bind_mode(socket_type, &endpoint, &options)?;
         let (listener, bound) = bind_tcp_listener(&endpoint).await?;
-        let (monitor, _) = broadcast::channel(1024);
-        let socket = Self {
-            kind: socket_type,
-            endpoint: bound.clone(),
-            options,
-            mode: Mode::Bind { listener },
-            live: None,
-            monitor,
-            reconnect_attempt: 0,
-            retry_at: None,
-            type_state: TypeState::new(),
-            rep_request_pending: false,
-            server_routing_id: 0,
-            closed: false,
-        };
+        let socket = Self::new(socket_type, bound.clone(), options, Mode::Bind { listener });
         Ok((socket, bound))
     }
 
@@ -272,25 +237,9 @@ impl Socket {
             let peer_identity = self.live.as_ref().expect("connected").peer_identity.clone();
             wire_message = strip_single_peer_identity(self.kind, &peer_identity, wire_message)?;
         }
-        let timeout = self.options.io_timeout;
-        let result = run_timeout(timeout, async {
-            let live = self.live.as_mut().expect("connected");
-            live.write_buf.clear();
-            live.connection
-                .send_message_flat(&wire_message, &mut live.write_buf);
-            live.write_pending = true;
-            live.stream
-                .write_all(&live.write_buf)
-                .await
-                .map_err(Error::Io)?;
-            live.write_pending = false;
-            Ok(())
-        })
-        .await;
-        if let Err(error) = result {
-            self.mark_disconnected(&error);
-            return Err(error);
-        }
+        let live = self.live.as_mut().expect("connected");
+        let result = run_timeout(self.options.io_timeout, live.write_message(&wire_message)).await;
+        self.disconnect_on_err(result)?;
         if self.kind == SocketType::Rep {
             self.rep_request_pending = false;
         }
@@ -307,28 +256,10 @@ impl Socket {
                 ));
             }
             self.ensure_connected().await?;
-            let io_timeout = self.options.io_timeout;
-            let heartbeat_interval = self.options.heartbeat_interval;
-            let heartbeat_timeout =
-                heartbeat_timeout(heartbeat_interval, self.options.heartbeat_timeout);
-            let heartbeat_ttl = ttl_deciseconds(self.options.heartbeat_ttl);
-            let result = run_timeout(
-                io_timeout,
-                recv_live(
-                    self.live.as_mut().expect("connected"),
-                    heartbeat_interval,
-                    heartbeat_timeout,
-                    heartbeat_ttl,
-                ),
-            )
-            .await;
-            let message = match result {
-                Ok(message) => message,
-                Err(error) => {
-                    self.mark_disconnected(&error);
-                    return Err(error);
-                }
-            };
+            let live = self.live.as_mut().expect("connected");
+            let result =
+                run_timeout(self.options.io_timeout, recv_live(live, self.heartbeat)).await;
+            let message = self.disconnect_on_err(result)?;
             let message = if self.kind == SocketType::Server {
                 message.with_routing_id(self.server_routing_id)
             } else if is_identity_routed(self.kind) {
@@ -353,49 +284,26 @@ impl Socket {
     /// sockets never run a background task.
     pub async fn maintain(&mut self) -> Result<()> {
         self.ensure_connected().await?;
-        let heartbeat_timeout = heartbeat_timeout(
-            self.options.heartbeat_interval,
-            self.options.heartbeat_timeout,
-        );
         let input_result = drain_ready_input(self.live.as_mut().expect("connected"));
-        if let Err(error) = input_result {
-            self.mark_disconnected(&error);
-            return Err(error);
-        }
-        let flush_result = run_timeout(
-            self.options.io_timeout,
-            flush_and_settle(self.live.as_mut().expect("connected")),
-        )
-        .await;
-        if let Err(error) = flush_result {
-            self.mark_disconnected(&error);
-            return Err(error);
-        }
+        self.disconnect_on_err(input_result)?;
+        let live = self.live.as_mut().expect("connected");
+        let flush_result = run_timeout(self.options.io_timeout, flush_and_settle(live)).await;
+        self.disconnect_on_err(flush_result)?;
         let now = Instant::now();
         let live = self.live.as_mut().expect("connected");
         if live
             .silence_deadline()
             .is_some_and(|deadline| now >= deadline)
         {
-            let error = Error::Timeout;
-            self.mark_disconnected(&error);
-            return Err(error);
+            return self.disconnect_on_err(Err(Error::Timeout));
         }
         if live.connection.peer_minor() >= 1
-            && let Some(interval) = self.options.heartbeat_interval
+            && let Some(interval) = self.heartbeat.interval
             && now.duration_since(live.last_ping) >= interval
         {
-            queue_ping(
-                live,
-                ttl_deciseconds(self.options.heartbeat_ttl),
-                heartbeat_timeout.expect("heartbeat interval supplies timeout"),
-                now,
-            )?;
+            queue_ping(live, self.heartbeat, now)?;
             let result = run_timeout(self.options.io_timeout, flush_live(live)).await;
-            if let Err(error) = result {
-                self.mark_disconnected(&error);
-                return Err(error);
-            }
+            self.disconnect_on_err(result)?;
         }
         Ok(())
     }
@@ -446,26 +354,8 @@ impl Socket {
 
     async fn establish(&mut self) -> Result<()> {
         let result = match &mut self.mode {
-            Mode::Connect => {
-                establish_connected_live(
-                    self.kind,
-                    &self.endpoint,
-                    self.options.identity.clone(),
-                    self.options.connect_timeout,
-                    self.options.handshake_timeout,
-                )
-                .await
-            }
-            Mode::Bind { listener } => {
-                establish_bound_live(
-                    self.kind,
-                    listener,
-                    self.options.identity.clone(),
-                    self.options.connect_timeout,
-                    self.options.handshake_timeout,
-                )
-                .await
-            }
+            Mode::Connect => connect_live(self.kind, &self.endpoint, &self.options).await,
+            Mode::Bind { listener } => accept_live(self.kind, listener, &self.options).await,
         };
         match result {
             Ok(live) => {
@@ -487,6 +377,14 @@ impl Socket {
                 Err(error)
             }
         }
+    }
+
+    /// Pass `result` through; an error first disconnects the peer.
+    fn disconnect_on_err<T>(&mut self, result: Result<T>) -> Result<T> {
+        if let Err(error) = &result {
+            self.mark_disconnected(error);
+        }
+        result
     }
 
     fn mark_disconnected(&mut self, error: &Error) {
@@ -621,103 +519,6 @@ async fn resolve_bind_addr(host: &Host, port: u16) -> Result<SocketAddr> {
     }
 }
 
-async fn establish_connected_live(
-    socket_type: SocketType,
-    endpoint: &Endpoint,
-    identity: Bytes,
-    connect_timeout: Duration,
-    handshake_timeout: Duration,
-) -> Result<LiveConnection> {
-    let Endpoint::Tcp { host, port } = endpoint else {
-        return Err(Error::Config(
-            "exclusive sockets currently support only tcp:// endpoints".into(),
-        ));
-    };
-    let host = host.to_string();
-    let stream = tokio::time::timeout(connect_timeout, TcpStream::connect((host.as_str(), *port)))
-        .await
-        .map_err(|_| timed_out("exclusive socket connect timeout"))??;
-    stream.set_nodelay(true)?;
-    let connection =
-        Connection::new(ConnectionConfig::new(Role::Client, socket_type).identity(identity));
-    let now = Instant::now();
-    let mut live = LiveConnection {
-        stream,
-        connection,
-        read_buf: BytesMut::with_capacity(4 * 1024),
-        write_buf: BytesMut::with_capacity(4 * 1024),
-        last_ping: now,
-        last_input: now,
-        heartbeat_deadline: None,
-        ping_sequence: 0,
-        peer_identity: Bytes::new(),
-        write_pending: false,
-    };
-    live.peer_identity = tokio::time::timeout(handshake_timeout, finish_handshake(&mut live))
-        .await
-        .map_err(|_| timed_out("exclusive socket handshake timeout"))??;
-    Ok(live)
-}
-
-async fn establish_bound_live(
-    socket_type: SocketType,
-    listener: &TcpListener,
-    identity: Bytes,
-    connect_timeout: Duration,
-    handshake_timeout: Duration,
-) -> Result<LiveConnection> {
-    let (stream, _) = tokio::time::timeout(connect_timeout, listener.accept())
-        .await
-        .map_err(|_| timed_out("exclusive socket accept timeout"))??;
-    stream.set_nodelay(true)?;
-    let connection =
-        Connection::new(ConnectionConfig::new(Role::Server, socket_type).identity(identity));
-    let now = Instant::now();
-    let mut live = LiveConnection {
-        stream,
-        connection,
-        read_buf: BytesMut::with_capacity(4 * 1024),
-        write_buf: BytesMut::with_capacity(4 * 1024),
-        last_ping: now,
-        last_input: now,
-        heartbeat_deadline: None,
-        ping_sequence: 0,
-        peer_identity: Bytes::new(),
-        write_pending: false,
-    };
-    live.peer_identity = tokio::time::timeout(handshake_timeout, finish_handshake(&mut live))
-        .await
-        .map_err(|_| timed_out("exclusive socket handshake timeout"))??;
-    Ok(live)
-}
-
-async fn finish_handshake(live: &mut LiveConnection) -> Result<Bytes> {
-    let mut peer_identity = None;
-    while !live.connection.is_ready() {
-        flush_live(live).await?;
-        if live.connection.is_ready() {
-            break;
-        }
-        read_live_once(live).await?;
-        while let Some(event) = live.connection.poll_event() {
-            if let ProtoEvent::HandshakeSucceeded {
-                peer_properties, ..
-            } = event
-            {
-                peer_identity = Some(
-                    peer_properties
-                        .identity
-                        .clone()
-                        .unwrap_or_else(|| generated_identity(0)),
-                );
-                break;
-            }
-        }
-    }
-    flush_and_settle(live).await?;
-    Ok(peer_identity.unwrap_or_else(|| generated_identity(0)))
-}
-
 fn is_identity_routed(socket_type: SocketType) -> bool {
     socket_type == SocketType::Router
 }
@@ -736,137 +537,6 @@ fn strip_single_peer_identity(
         return Err(Error::Unroutable);
     }
     Ok(message)
-}
-
-async fn recv_live(
-    live: &mut LiveConnection,
-    heartbeat_interval: Option<Duration>,
-    heartbeat_timeout: Option<Duration>,
-    heartbeat_ttl_deciseconds: u16,
-) -> Result<Message> {
-    loop {
-        if let Some(message) = live.connection.poll_message() {
-            return Ok(message);
-        }
-        if !live.connection.accepts_input() {
-            flush_and_settle(live).await?;
-            continue;
-        }
-
-        let ping_deadline = heartbeat_interval
-            .filter(|_| live.connection.peer_minor() >= 1)
-            .map(|interval| live.last_ping + interval);
-        let heartbeat_deadline = live.silence_deadline();
-        tokio::select! {
-            biased;
-            result = read_live_once(live) => {
-                result?;
-                flush_and_settle(live).await?;
-            }
-            () = sleep_until_opt(heartbeat_deadline), if heartbeat_deadline.is_some() => {
-                return Err(Error::Timeout);
-            }
-            () = sleep_until_opt(ping_deadline), if ping_deadline.is_some() => {
-                let now = Instant::now();
-                queue_ping(
-                    live,
-                    heartbeat_ttl_deciseconds,
-                    heartbeat_timeout.expect("heartbeat interval supplies timeout"),
-                    now,
-                )?;
-                flush_live(live).await?;
-            }
-        }
-    }
-}
-
-fn queue_ping(
-    live: &mut LiveConnection,
-    ttl_deciseconds: u16,
-    heartbeat_timeout: Duration,
-    now: Instant,
-) -> Result<()> {
-    live.ping_sequence = live.ping_sequence.wrapping_add(1);
-    let context = Bytes::copy_from_slice(&live.ping_sequence.to_le_bytes());
-    live.connection.send_command(&Command::Ping {
-        ttl_deciseconds,
-        context,
-    })?;
-    live.last_ping = now;
-    if live.heartbeat_deadline.is_none() {
-        live.heartbeat_deadline = now.checked_add(heartbeat_timeout);
-    }
-    Ok(())
-}
-
-fn note_inbound_traffic(live: &mut LiveConnection) {
-    live.last_input = Instant::now();
-    live.heartbeat_deadline = None;
-}
-
-async fn read_live_once(live: &mut LiveConnection) -> Result<()> {
-    let n = live.stream.read_buf(&mut live.read_buf).await?;
-    if n == 0 {
-        return Err(Error::Closed);
-    }
-    note_inbound_traffic(live);
-    live.connection.handle_input(live.read_buf.split().freeze())
-}
-
-fn drain_ready_input(live: &mut LiveConnection) -> Result<()> {
-    // Paused input resumes after the caller writes the reply backlog.
-    while live.connection.accepts_input() {
-        match live.stream.try_read_buf(&mut live.read_buf) {
-            Ok(0) => return Err(Error::Closed),
-            Ok(_) => {
-                note_inbound_traffic(live);
-                live.connection
-                    .handle_input(live.read_buf.split().freeze())?;
-            }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(()),
-            Err(error) => return Err(Error::Io(error)),
-        }
-    }
-    Ok(())
-}
-
-async fn flush_live(live: &mut LiveConnection) -> Result<()> {
-    // Unwritten bytes stay queued in the codec, so cancellation is safe here.
-    while live.connection.has_pending_transmit() {
-        let chunks = live.connection.transmit_chunks_capped(64);
-        let n = check_written(live.stream.write_vectored(&chunks).await?)?;
-        drop(chunks);
-        live.connection.advance_transmit(n);
-    }
-    Ok(())
-}
-
-/// Write queued output and resume input the core paused behind automatic
-/// replies. Returns once the connection accepts more wire input.
-async fn flush_and_settle(live: &mut LiveConnection) -> Result<()> {
-    loop {
-        flush_live(live).await?;
-        if live.connection.accepts_input() {
-            return Ok(());
-        }
-        live.connection.resume_input()?;
-    }
-}
-
-async fn run_timeout<T>(
-    timeout: Option<Duration>,
-    future: impl Future<Output = Result<T>>,
-) -> Result<T> {
-    match timeout {
-        Some(timeout) => tokio::time::timeout(timeout, future)
-            .await
-            .map_err(|_| timed_out("exclusive socket I/O timeout"))?,
-        None => future.await,
-    }
-}
-
-fn timed_out(message: &'static str) -> Error {
-    Error::Io(io::Error::new(io::ErrorKind::TimedOut, message))
 }
 
 #[cfg(test)]

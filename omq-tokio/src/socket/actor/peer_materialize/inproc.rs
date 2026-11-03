@@ -1,12 +1,9 @@
 //! Inproc peer setup: ports, send and receive paths, and the peer driver.
 
-use super::{
-    PeerChannels, PeerSetup, can_bypass_actor_recv, make_send_pipe, new_peer_entry,
-    server_routing_id,
-};
-use crate::engine::SendPipeConsumer;
+use super::recv_bypass::{FaninProducer, fanin_recv_sink, wrap_routed_sink};
+use super::{PeerChannels, PeerSetup, can_bypass_actor_recv, make_send_pipe, new_peer_entry};
 use crate::engine::send_pipe::SendPipeProducerHandle;
-use crate::engine::signal::StateSignal;
+use crate::engine::{RecvSink, SendPipeConsumer};
 use crate::socket::actor::inproc_driver::{
     InprocChannels, InprocDriverCtx, ReceiveRoutes, RelayOutside, SendRoutes, inproc_peer_driver,
 };
@@ -17,27 +14,14 @@ use std::sync::{Arc, Mutex};
 /// Receive sink for an inproc peer that has no receive port. Its
 /// messages are relayed by the peer task. Sockets with a fan-in queue
 /// always have a port, so that queue never appears here.
-fn inproc_sink(socket: &SocketDriver, peer_id: u64) -> Option<crate::engine::RecvSink> {
-    let recv_sink = take_inproc_recv_sink(socket, peer_id).or_else(|| {
-        socket
-            .link
-            .spsc
-            .conflate_slot
-            .as_ref()
-            .map(|slot| crate::engine::RecvSink::Conflate(slot.clone()))
-    });
-    if socket.socket_type == SocketType::Rep {
-        return recv_sink.map(|sink| crate::engine::RecvSink::rep(sink, peer_id));
+fn inproc_sink(socket: &SocketDriver, peer_id: u64) -> Option<RecvSink> {
+    let mut recv_sink = take_inproc_recv_sink(socket, peer_id).or_else(|| socket.conflate_sink());
+    if matches!(socket.socket_type, SocketType::Server | SocketType::Req) {
+        // Routed receives need a sink that tags each message.
+        recv_sink.get_or_insert_with(|| RecvSink::Channel(socket.link.recv_tx.clone()));
     }
-    if !matches!(socket.socket_type, SocketType::Server | SocketType::Req) {
-        return recv_sink;
-    }
-    let sink =
-        recv_sink.unwrap_or_else(|| crate::engine::RecvSink::Channel(socket.link.recv_tx.clone()));
-    Some(crate::engine::RecvSink::server(
-        sink,
-        server_routing_id(peer_id).expect("SERVER/REQ peer ID checked"),
-    ))
+    let rep = socket.socket_type == SocketType::Rep;
+    recv_sink.map(|sink| wrap_routed_sink(socket.socket_type, peer_id, sink, rep))
 }
 
 /// Inproc fast path: no codec, greeting, or frame headers. The peers
@@ -61,7 +45,7 @@ struct InprocDriverEnds {
     inbox: crate::engine::control_inbox::Receiver,
     data_inbox: crate::engine::data_inbox::Receiver,
     cancel: tokio_util::sync::CancellationToken,
-    recv_sink: Option<crate::engine::RecvSink>,
+    recv_sink: Option<RecvSink>,
     send_pipe_rx: Option<SendPipeConsumer>,
     outbound: Option<crate::transport::inproc::InprocSender>,
     io_assignment: crate::context::IoThreadLease,
@@ -221,7 +205,7 @@ fn inproc_receive_path(
     inbound: Option<&Arc<crate::transport::inproc::InprocPort>>,
     peer_send_hwm: usize,
     cancel: &tokio_util::sync::CancellationToken,
-) -> (Option<crate::engine::RecvSink>, Option<InprocInbound>) {
+) -> (Option<RecvSink>, Option<InprocInbound>) {
     // With a receive port, every inbound message enters this connection's
     // ring through it: the peer's own threads when it sends directly, this
     // peer task otherwise.
@@ -245,20 +229,9 @@ fn inproc_receive_path(
 /// socket's receive path drains it directly. Sockets that keep only the
 /// latest message, or that hand an external consumer their own ring, use
 /// that queue instead.
-fn inproc_port_sink(
-    socket: &mut SocketDriver,
-    peer_id: u64,
-    peer_send_hwm: usize,
-) -> crate::engine::RecvSink {
+fn inproc_port_sink(socket: &mut SocketDriver, peer_id: u64, peer_send_hwm: usize) -> RecvSink {
     let sink = take_inproc_recv_sink(socket, peer_id)
-        .or_else(|| {
-            socket
-                .link
-                .spsc
-                .conflate_slot
-                .as_ref()
-                .map(|slot| crate::engine::RecvSink::Conflate(slot.clone()))
-        })
+        .or_else(|| socket.conflate_sink())
         .unwrap_or_else(|| {
             let cap = socket
                 .options
@@ -267,46 +240,15 @@ fn inproc_port_sink(
             if let Some(fanin) = &socket.link.spsc.fanin
                 && fanin.source_aware()
             {
-                if let Some(producer) = fanin.register_with_capacity(cap) {
-                    return crate::engine::RecvSink::Fanin(crate::socket::fanin::Sink::owned(
-                        producer,
-                    ));
-                }
-                socket.link.recv_tx.close();
-                return crate::engine::RecvSink::Channel(socket.link.recv_tx.clone());
+                return fanin_recv_sink(fanin, &socket.link.recv_tx, FaninProducer::Inproc(cap));
             }
-            let (producer, consumer) = yring::spsc(cap);
-            let recv_signal = socket.link.spsc.recv_signal.clone();
-            let blocking_waker = socket.link.spsc.blocking_recv_waker.clone();
-            let space = Arc::new(StateSignal::new());
-            PeerLifecycle::new(socket).register_tcp_consumer(
-                consumer,
-                space.clone(),
-                peer_id,
-                false,
-            );
-            crate::engine::RecvSink::Yring(crate::engine::YringSink {
-                producer,
-                signal: Box::new(move || {
-                    recv_signal.mark();
-                    blocking_waker.wake();
-                }),
-                space,
-            })
+            PeerLifecycle::new(socket).yring_sink(peer_id, cap, false)
         });
-    if socket.socket_type == SocketType::Rep {
-        crate::engine::RecvSink::rep(sink, peer_id)
-    } else if matches!(socket.socket_type, SocketType::Server | SocketType::Req) {
-        crate::engine::RecvSink::server(
-            sink,
-            server_routing_id(peer_id).expect("SERVER/REQ peer ID checked"),
-        )
-    } else {
-        sink
-    }
+    let rep = socket.socket_type == SocketType::Rep;
+    wrap_routed_sink(socket.socket_type, peer_id, sink, rep)
 }
 
-fn take_inproc_recv_sink(socket: &SocketDriver, peer_id: u64) -> Option<crate::engine::RecvSink> {
+fn take_inproc_recv_sink(socket: &SocketDriver, peer_id: u64) -> Option<RecvSink> {
     if !can_bypass_actor_recv(socket.socket_type) && socket.socket_type != SocketType::Rep {
         return None;
     }

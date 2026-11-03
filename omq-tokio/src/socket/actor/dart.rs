@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use super::peer_materialize::PeerChannels;
+use super::peer_materialize::{FaninProducer, PeerChannels, fanin_recv_sink, wrap_routed_sink};
 use super::{
     Endpoint, Error, MonitorEvent, PeerDriverHandle, PeerEntry, PeerIdent, Result, SocketDriver,
     SocketType,
@@ -316,44 +316,16 @@ impl SocketDriver {
     }
 
     fn dart_recv_sink(&mut self, peer_id: u64) -> RecvSink {
-        let sink = if let Some(slot) = &self.link.spsc.conflate_slot {
-            RecvSink::Conflate(slot.clone())
-        } else if let Some(fanin) = &self.link.spsc.fanin {
-            if let Some(producer) = fanin.register_dart(self.options.recv_queue_capacity()) {
-                RecvSink::Fanin(crate::socket::fanin::Sink::owned(producer))
-            } else {
-                // Close/drop shut fan-in down first: keep receive closed.
-                self.link.recv_tx.close();
-                RecvSink::Channel(self.link.recv_tx.clone())
-            }
-        } else {
-            let (producer, consumer) = yring::spsc(self.options.recv_queue_capacity());
-            let signal = self.link.spsc.recv_signal.clone();
-            let blocking = self.link.spsc.blocking_recv_waker.clone();
-            let space = Arc::new(crate::engine::signal::StateSignal::new());
-            super::lifecycle::PeerLifecycle::new(self).register_tcp_consumer(
-                consumer,
-                space.clone(),
-                peer_id,
-                true,
-            );
-            RecvSink::Yring(crate::engine::YringSink {
-                producer,
-                signal: Box::new(move || {
-                    signal.mark();
-                    blocking.wake();
-                }),
-                space,
-            })
-        };
-        if matches!(self.socket_type, SocketType::Server | SocketType::Req) {
-            RecvSink::server(
-                sink,
-                super::peer_materialize::server_routing_id(peer_id).expect("checked server route"),
-            )
-        } else {
+        let capacity = self.options.recv_queue_capacity();
+        let sink = if let Some(sink) = self.conflate_sink() {
             sink
-        }
+        } else if let Some(fanin) = &self.link.spsc.fanin {
+            fanin_recv_sink(fanin, &self.link.recv_tx, FaninProducer::Dart(capacity))
+        } else {
+            super::lifecycle::PeerLifecycle::new(self).yring_sink(peer_id, capacity, true)
+        };
+        // DART carries no REQ/REP, so no REP envelope wrap.
+        wrap_routed_sink(self.socket_type, peer_id, sink, false)
     }
 
     async fn retire_dart_connect_generation(&mut self, index: usize) {

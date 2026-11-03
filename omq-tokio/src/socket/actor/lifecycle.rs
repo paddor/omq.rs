@@ -46,7 +46,30 @@ impl<'a> PeerLifecycle<'a> {
         peer
     }
 
-    pub(super) fn register_tcp_consumer(
+    /// New per-peer receive ring whose consumer joins the socket's receive
+    /// scan. Pushes wake async and blocking receivers.
+    pub(super) fn yring_sink(
+        &mut self,
+        peer_id: u64,
+        capacity: usize,
+        spin_probe: bool,
+    ) -> crate::engine::RecvSink {
+        let (producer, consumer) = yring::spsc(capacity);
+        let space = Arc::new(StateSignal::new());
+        self.register_tcp_consumer(consumer, space.clone(), peer_id, spin_probe);
+        let recv_signal = self.driver.link.spsc.recv_signal.clone();
+        let blocking_waker = self.driver.link.spsc.blocking_recv_waker.clone();
+        crate::engine::RecvSink::Yring(crate::engine::YringSink {
+            producer,
+            signal: Box::new(move || {
+                recv_signal.mark();
+                blocking_waker.wake();
+            }),
+            space,
+        })
+    }
+
+    fn register_tcp_consumer(
         &mut self,
         consumer: yring::Consumer<crate::Message>,
         space: Arc<StateSignal>,

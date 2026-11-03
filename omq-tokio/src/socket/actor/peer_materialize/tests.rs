@@ -1,4 +1,4 @@
-use super::recv_bypass::{can_use_yring_recv_bypass, fanin_recv_sink};
+use super::recv_bypass::{FaninProducer, can_use_yring_recv_bypass, fanin_recv_sink};
 use super::wire::supports_direct_tcp_writer;
 use super::*;
 
@@ -23,7 +23,9 @@ async fn fanin_attachment_tolerates_receive_shutdown_before_actor_close() {
     let signal = Arc::new(crate::engine::signal::DataSignal::new());
     let fanin = crate::socket::fanin::Fanin::new(16, signal, blocking.clone());
     let (recv_tx, _consumer, _, _) = crate::socket::recv::recv_pipe(16, blocking);
-    let crate::engine::RecvSink::Fanin(mut live) = fanin_recv_sink(&fanin, &recv_tx) else {
+    let crate::engine::RecvSink::Fanin(mut live) =
+        fanin_recv_sink(&fanin, &recv_tx, FaninProducer::Wire)
+    else {
         panic!("live receive side must retain the fan-in bypass");
     };
     assert!(live.push(omq_proto::Message::single("before-close")));
@@ -37,7 +39,9 @@ async fn fanin_attachment_tolerates_receive_shutdown_before_actor_close() {
     // channel close. A queued Accepted/Connected event can run meanwhile.
     fanin.close();
     assert!(!live.push(omq_proto::Message::single("after-close")));
-    let crate::engine::RecvSink::Channel(closed) = fanin_recv_sink(&fanin, &recv_tx) else {
+    let crate::engine::RecvSink::Channel(closed) =
+        fanin_recv_sink(&fanin, &recv_tx, FaninProducer::Wire)
+    else {
         panic!("late attachment must use a closed receive sink");
     };
     assert!(Arc::ptr_eq(&closed, &recv_tx));

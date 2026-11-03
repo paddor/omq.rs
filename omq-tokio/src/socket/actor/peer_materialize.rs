@@ -18,6 +18,8 @@ mod wire;
 
 pub(super) use inproc::spawn_inproc_peer;
 pub(super) use recv_bypass::server_routing_id;
+#[cfg(feature = "dart")]
+pub(super) use recv_bypass::{FaninProducer, fanin_recv_sink, wrap_routed_sink};
 use recv_bypass::{attach_recv_bypass, can_bypass_actor_recv};
 use wire::{
     TransmitProfile, WireCarrier, WireProfile, attach_direct_writer, attach_transmit_slot,

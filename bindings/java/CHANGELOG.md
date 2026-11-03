@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.5.6] - 2026-11-03
+
+### Changed
+
+- Bundle `omq-tokio` 0.34.2. Single-peer receives no longer allocate when a
+  message arrives mid-receive.
+
 ## [0.5.5] - 2026-11-03
 
 ### Changed

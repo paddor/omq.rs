@@ -1,6 +1,6 @@
 {
   "name": "@paddor/omq-node",
-  "version": "0.2.11",
+  "version": "0.2.12",
   "description": "Native Node.js binding for OMQ.rs",
   "license": "ISC",
   "type": "commonjs",

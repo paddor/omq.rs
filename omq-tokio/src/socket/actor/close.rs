@@ -174,10 +174,10 @@ impl SocketDriver {
         // cancel, so no caller writes into a peer that is shutting down.
         let mut peer_tasks = Vec::new();
         for p in self.peers.values() {
-            if let Some(ref slot) = p.handle.transmit_slot {
+            if let Some(ref slot) = p.handle.routes.transmit_slot {
                 slot.mark_dead();
             }
-            if let Some(ref pipe) = p.handle.send_pipe {
+            if let Some(ref pipe) = p.handle.routes.send_pipe {
                 let _ = pipe.lock().expect("send pipe poisoned").take();
             }
             p.handle.cancel.cancel();

@@ -403,6 +403,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{LatencySend, Peer};
+    use crate::engine::driver::DirectRoutes;
     use crate::engine::transmit_slot::{PeerTransmitSlot, SlotConfig};
     use crate::engine::{ActorPeerDriverHandle, PeerDriverCommand};
     use crate::routing::peer_outbound::PeerOutbound;
@@ -432,10 +433,11 @@ mod tests {
                 inbox: inbox.into(),
                 data_inbox: data_inbox.into(),
                 cancel: CancellationToken::new(),
-                transmit_slot: Some(slot),
-                direct_tcp_writer: Some(Arc::new(direct)),
-                send_pipe: None,
-                inproc: None,
+                routes: DirectRoutes {
+                    transmit_slot: Some(slot),
+                    direct_tcp_writer: Some(Arc::new(direct)),
+                    ..Default::default()
+                },
             },
             data_rx,
         )
@@ -503,10 +505,7 @@ mod tests {
                     inbox: tokio::sync::mpsc::channel(1).0.into(),
                     data_inbox: data_inbox.into(),
                     cancel: CancellationToken::new(),
-                    transmit_slot: None,
-                    direct_tcp_writer: None,
-                    send_pipe: None,
-                    inproc: None,
+                    routes: DirectRoutes::default(),
                 };
                 send.connection_added(id, &handle);
                 receivers.push(receiver);

@@ -118,7 +118,7 @@ impl<'a> PeerLifecycle<'a> {
     #[expect(clippy::unused_self)]
     fn invalidate_transmit_slot(&self, peer: Option<&PeerEntry>) {
         if let Some(peer) = peer
-            && let Some(ref slot) = peer.handle.transmit_slot
+            && let Some(ref slot) = peer.handle.routes.transmit_slot
         {
             slot.mark_dead();
         }

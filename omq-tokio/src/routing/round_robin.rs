@@ -453,12 +453,13 @@ impl RoundRobinSend {
         // A direct inproc route replaces the connect-side pipe. Dropping
         // that producer ends the pipe, and the route delivers what it still
         // holds before any later message.
-        if active.has_pipe(route_id) && handle.inproc.is_none() {
+        if active.has_pipe(route_id) && handle.routes.inproc.is_none() {
             self.active_changed.notify_changed();
             return;
         }
 
         let send_pipe = handle
+            .routes
             .send_pipe
             .as_ref()
             .and_then(|pipe| pipe.lock().expect("round_robin send pipe").take());
@@ -722,10 +723,10 @@ mod tests {
             inbox: inbox.into(),
             data_inbox: data_inbox.into(),
             cancel: CancellationToken::new(),
-            transmit_slot: None,
-            direct_tcp_writer: None,
-            send_pipe: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(send_pipe)))),
-            inproc: None,
+            routes: crate::engine::driver::DirectRoutes {
+                send_pipe: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(send_pipe)))),
+                ..Default::default()
+            },
         };
         send.connection_added(7, &handle, false);
 

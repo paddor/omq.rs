@@ -160,10 +160,10 @@ mod tests {
             inbox: inbox.into(),
             data_inbox: data_inbox.into(),
             cancel: CancellationToken::new(),
-            transmit_slot: Some(slot.clone()),
-            direct_tcp_writer: None,
-            send_pipe: None,
-            inproc: None,
+            routes: crate::engine::driver::DirectRoutes {
+                transmit_slot: Some(slot.clone()),
+                ..Default::default()
+            },
         };
         (slot, handle, data)
     }

@@ -3,6 +3,7 @@ use futures::FutureExt;
 use std::time::Duration;
 
 use super::*;
+use crate::engine::driver::DirectRoutes;
 use crate::engine::send_pipe;
 use crate::engine::{PeerDriverData, SendPipeProducer};
 
@@ -70,10 +71,7 @@ fn inbox_handle(data_inbox: crate::engine::data_inbox::Sender) -> ActorPeerDrive
         inbox: tokio::sync::mpsc::channel(1).0.into(),
         data_inbox,
         cancel: tokio_util::sync::CancellationToken::new(),
-        transmit_slot: None,
-        direct_tcp_writer: None,
-        send_pipe: None,
-        inproc: None,
+        routes: DirectRoutes::default(),
     }
 }
 
@@ -127,10 +125,7 @@ async fn default_router_drops_full_lane_and_can_send_to_another_peer() {
         inbox: tokio::sync::mpsc::channel(1).0.into(),
         data_inbox,
         cancel: tokio_util::sync::CancellationToken::new(),
-        transmit_slot: None,
-        direct_tcp_writer: None,
-        send_pipe: None,
-        inproc: None,
+        routes: DirectRoutes::default(),
     };
     send.connection_added(
         7,
@@ -191,10 +186,7 @@ async fn fallback_clones_have_separate_lanes_and_binding_copies_share_fifo() {
         inbox: tokio::sync::mpsc::channel(1).0.into(),
         data_inbox,
         cancel: tokio_util::sync::CancellationToken::new(),
-        transmit_slot: None,
-        direct_tcp_writer: None,
-        send_pipe: None,
-        inproc: None,
+        routes: DirectRoutes::default(),
     };
     send.connection_added(7, handle, Bytes::from_static(b"id"), false);
     let first = send.submitter();
@@ -350,10 +342,10 @@ fn try_send_reports_full_and_preserves_routing_frame() {
         inbox: tokio::sync::mpsc::channel(1).0.into(),
         data_inbox: tokio::sync::mpsc::channel(1).0.into(),
         cancel: tokio_util::sync::CancellationToken::new(),
-        transmit_slot: None,
-        direct_tcp_writer: None,
-        send_pipe: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(pipe_tx)))),
-        inproc: None,
+        routes: DirectRoutes {
+            send_pipe: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(pipe_tx)))),
+            ..Default::default()
+        },
     };
     send.connection_added(1, handle, Bytes::from_static(b"id"), false);
 
@@ -786,9 +778,9 @@ fn peer_handle(pipe: SendPipeProducer) -> ActorPeerDriverHandle {
         inbox: tokio::sync::mpsc::channel(1).0.into(),
         data_inbox: tokio::sync::mpsc::channel(1).0.into(),
         cancel: tokio_util::sync::CancellationToken::new(),
-        transmit_slot: None,
-        direct_tcp_writer: None,
-        send_pipe: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(pipe)))),
-        inproc: None,
+        routes: DirectRoutes {
+            send_pipe: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(pipe)))),
+            ..Default::default()
+        },
     }
 }

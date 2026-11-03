@@ -60,14 +60,14 @@ impl PeerOutbound {
     }
 
     pub(crate) fn from_handle(handle: &ActorPeerDriverHandle) -> Self {
-        if let Some(sender) = &handle.inproc {
+        if let Some(sender) = &handle.routes.inproc {
             return Self::Inproc(sender.clone());
         }
-        match handle.transmit_slot {
+        match handle.routes.transmit_slot {
             Some(ref slot) => Self::Wire {
                 slot: slot.clone(),
                 inbox: handle.data_inbox.clone(),
-                direct: handle.direct_tcp_writer.clone(),
+                direct: handle.routes.direct_tcp_writer.clone(),
             },
             None => Self::Inbox(handle.data_inbox.clone()),
         }

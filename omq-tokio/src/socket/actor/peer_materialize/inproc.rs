@@ -77,8 +77,8 @@ fn register_inproc_peer(
     );
     let io_assignment = socket.resources.io_pool.reserve_thread();
 
-    handle.send_pipe = send_pipe;
-    handle.inproc.clone_from(&outbound);
+    handle.routes.send_pipe = send_pipe;
+    handle.routes.inproc.clone_from(&outbound);
     // Inproc's synthetic handshake never holds a pending-handshake slot.
     let entry = PeerEntry {
         inproc_inbound,

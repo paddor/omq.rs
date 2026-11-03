@@ -288,10 +288,7 @@ mod tests {
                 inbox: inbox.into(),
                 data_inbox: data_inbox.into(),
                 cancel: tokio_util::sync::CancellationToken::new(),
-                transmit_slot: None,
-                direct_tcp_writer: None,
-                send_pipe: None,
-                inproc: None,
+                routes: crate::engine::driver::DirectRoutes::default(),
             },
             0,
         );

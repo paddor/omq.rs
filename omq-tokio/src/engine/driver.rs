@@ -121,11 +121,7 @@ pub struct PeerDriverHandle {
     pub data_inbox: mpsc::Sender<PeerDriverData>,
     /// Request immediate driver teardown.
     pub cancel: CancellationToken,
-    pub(crate) transmit_slot: Option<Arc<PeerTransmitSlot>>,
-    pub(crate) direct_tcp_writer: Option<Arc<crate::socket::direct_writer::DirectTcpWriter>>,
-    pub(crate) send_pipe: Option<SendPipeProducerHandle>,
-    /// Direct route into an inproc peer's receive queue.
-    pub(crate) inproc: Option<crate::transport::inproc::InprocSender>,
+    pub(crate) routes: DirectRoutes,
 }
 
 #[derive(Debug, Clone)]
@@ -135,6 +131,12 @@ pub(crate) struct ActorPeerDriverHandle {
     /// Fallback data plane for peers without a send pipe or transmit slot.
     pub data_inbox: super::data_inbox::Sender,
     pub cancel: CancellationToken,
+    pub(crate) routes: DirectRoutes,
+}
+
+/// Send routes that bypass the driver's `data_inbox`.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DirectRoutes {
     pub(crate) transmit_slot: Option<Arc<PeerTransmitSlot>>,
     pub(crate) direct_tcp_writer: Option<Arc<crate::socket::direct_writer::DirectTcpWriter>>,
     pub(crate) send_pipe: Option<SendPipeProducerHandle>,
@@ -153,10 +155,7 @@ impl ActorPeerDriverHandle {
             inbox,
             data_inbox,
             cancel,
-            transmit_slot: None,
-            direct_tcp_writer: None,
-            send_pipe: None,
-            inproc: None,
+            routes: DirectRoutes::default(),
         }
     }
 }
@@ -167,10 +166,7 @@ impl From<PeerDriverHandle> for ActorPeerDriverHandle {
             inbox: handle.inbox.into(),
             data_inbox: super::data_inbox::Sender::Legacy(handle.data_inbox),
             cancel: handle.cancel,
-            transmit_slot: handle.transmit_slot,
-            direct_tcp_writer: handle.direct_tcp_writer,
-            send_pipe: handle.send_pipe,
-            inproc: handle.inproc,
+            routes: handle.routes,
         }
     }
 }

@@ -294,7 +294,7 @@ impl SocketDriver {
         } else {
             Some(self.dart_recv_sink(peer_id))
         };
-        handle.send_pipe = send_pipe;
+        handle.routes.send_pipe = send_pipe;
 
         let ident = PeerIdent::Socket(source);
         self.link.monitor.publish(super::peer::connection_event(

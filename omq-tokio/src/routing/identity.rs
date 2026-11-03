@@ -521,7 +521,7 @@ impl IdentitySend {
     ) {
         let mut target = if self.latency_profile && self.peer.is_none() {
             PeerTarget::Direct(PeerOutbound::from_handle(&handle))
-        } else if let Some(ref pipe_handle) = handle.send_pipe {
+        } else if let Some(ref pipe_handle) = handle.routes.send_pipe {
             if let Some(pipe) = pipe_handle.lock().expect("identity send pipe").take() {
                 if self.rep_latency && is_inproc {
                     PeerTarget::RepInproc(pipe)

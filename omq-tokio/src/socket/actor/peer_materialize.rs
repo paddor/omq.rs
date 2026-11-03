@@ -296,9 +296,9 @@ fn attach_wire_send_path(
         send.carrier.direct_tcp_writer.as_ref(),
         send_pipe.as_ref(),
     );
-    handle.transmit_slot = transmit_slot;
-    handle.direct_tcp_writer = send.carrier.direct_tcp_writer;
-    handle.send_pipe = send_pipe;
+    handle.routes.transmit_slot = transmit_slot;
+    handle.routes.direct_tcp_writer = send.carrier.direct_tcp_writer;
+    handle.routes.send_pipe = send_pipe;
     peer_driver
 }
 

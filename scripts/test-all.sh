@@ -40,34 +40,11 @@ fi
 cd "$_repo_root"
 
 
-_resolve_rustup_tool() {
-    local tool=$1
-    rustup which "$tool" 2>/dev/null || command -v "$tool"
-}
-
-_setup_tool_wrappers() {
-    mkdir -p "$_tool_dir"
-    ln -sfn "$(_resolve_rustup_tool cargo)" "$_tool_dir/omq_cargo"
-    ln -sfn "$(_resolve_rustup_tool rustc)" "$_tool_dir/omq_rustc"
-    ln -sfn "$(_resolve_rustup_tool rustdoc)" "$_tool_dir/omq_rustdoc"
-    if command -v python3 >/dev/null 2>&1; then
-        ln -sfn "$(command -v python3)" "$_tool_dir/omq_python3"
-        export OMQ_PYTHON3="$_tool_dir/omq_python3"
-    fi
-    export PATH="$_tool_dir:$PATH"
-    export CARGO="$_tool_dir/omq_cargo"
-    export OMQ_RUSTC="$_tool_dir/omq_rustc"
-    export OMQ_RUSTDOC="$_tool_dir/omq_rustdoc"
-}
-
-_setup_python_tools() {
-    if command -v maturin >/dev/null 2>&1; then
-        ln -sfn "$(command -v maturin)" "$_tool_dir/omq_maturin"
-    fi
-    hash -r
-}
-
-_setup_tool_wrappers
+# Interop peers run as omq_python3. Build tools keep their own names.
+if command -v python3 >/dev/null 2>&1; then
+    ln -sfn "$(command -v python3)" "$_tool_dir/omq_python3"
+    export OMQ_PYTHON3="$_tool_dir/omq_python3"
+fi
 
 
 retries="${OMQ_TEST_RETRIES:-2}"
@@ -98,12 +75,8 @@ run() {
     done
 }
 
-omq_cargo_with_rust_tools() {
-    RUSTC="$OMQ_RUSTC" RUSTDOC="$OMQ_RUSTDOC" exec omq_cargo "$@"
-}
-
 if [[ "${OMQ_QUICK:-}" == "1" ]]; then
-    run omq_cargo_with_rust_tools nextest run --workspace
+    run cargo nextest run --workspace
     echo "quick tests passed"
     exit 0
 fi
@@ -222,7 +195,7 @@ _repo_perf_busy_processes() {
         cmd="$(tr '\0' ' ' <"$proc/cmdline" 2>/dev/null || true)"
         [[ -n "$cmd" ]] || continue
         case "$cmd" in
-            *omq_cargo*|*cargo*|*rustc*|*rustdoc*|*maturin*|*pytest*|\
+            *cargo*|*rustc*|*rustdoc*|*maturin*|*pytest*|\
             *target/debug/deps/*|*target/release/deps/*|\
             *target/debug/build/*|*target/release/build/*)
                 cwd="$(readlink "$proc/cwd" 2>/dev/null || true)"
@@ -275,13 +248,13 @@ wait_for_perf_quiet() {
 # ---------------------------------------------------------------- #
 # Clippy compiles all targets; a separate all-target build only duplicates
 # that work before the test suite.
-run omq_cargo clippy --all-targets --no-deps -- -D warnings
-run omq_cargo clippy -p omq-libzmq --all-targets --no-deps -- -D warnings
-run omq_cargo clippy -p omq-webtrans-proto -p omq-webtrans-quinn --all-targets --no-deps -- -D warnings
-run omq_cargo_with_rust_tools test
-run omq_cargo_with_rust_tools test -p omq-libzmq
-run omq_cargo_with_rust_tools test -p omq-bench
-run omq_cargo_with_rust_tools test -p omq-webtrans-proto -p omq-webtrans-quinn
+run cargo clippy --all-targets --no-deps -- -D warnings
+run cargo clippy -p omq-libzmq --all-targets --no-deps -- -D warnings
+run cargo clippy -p omq-webtrans-proto -p omq-webtrans-quinn --all-targets --no-deps -- -D warnings
+run cargo test
+run cargo test -p omq-libzmq
+run cargo test -p omq-bench
+run cargo test -p omq-webtrans-proto -p omq-webtrans-quinn
 if command -v "${CXX:-c++}" >/dev/null 2>&1 \
     && command -v pkg-config >/dev/null 2>&1 \
     && pkg-config --exists cppzmq; then
@@ -317,7 +290,7 @@ elif [[ "${OMQ_SKIP_PERF:-}" == "1" ]]; then
     echo "skip: OMQ_SKIP_PERF=1"
 else
     wait_for_perf_quiet
-    run omq_cargo_with_rust_tools run --release -q -p omq-tokio --features 'quic dart' --bin omq_perf_verify
+    run cargo run --release -q -p omq-tokio --features 'quic dart' --bin omq_perf_verify
 fi
 
 # ---------------------------------------------------------------- #
@@ -328,19 +301,19 @@ fi
 #    cross-feature interactions.
 # ---------------------------------------------------------------- #
 for feature in plain curve; do
-    par run omq_cargo_with_rust_tools test -p omq-tokio  --features "$feature" --test "omq_$feature"
+    par run cargo test -p omq-tokio  --features "$feature" --test "omq_$feature"
 done
-par run omq_cargo_with_rust_tools test -p omq-tokio  --features lz4 --test omq_lz4_tcp --test omq_lz4_pub_sub
-par run omq_cargo_with_rust_tools test -p omq-tokio  --features zstd --test omq_zstd_tcp
-par run omq_cargo_with_rust_tools test -p omq-proto  --features "lz4 ws" --test omq_proto_endpoint
-par run omq_cargo_with_rust_tools test -p omq-tokio  --features "lz4 ws" --test omq_lz4_ws
-par run omq_cargo_with_rust_tools test -p omq-proto  --features "quic lz4 zstd" --test omq_proto_endpoint
-par run omq_cargo_with_rust_tools test -p omq-tokio  --features quic --test omq_quic_basic --test omq_quic_lifecycle --test omq_quic_network --lib
-par run omq_cargo_with_rust_tools test -p omq-libzmq --features quic
-par run omq_cargo_with_rust_tools test -p omq-tokio  --features webtransport --test omq_webtransport_basic --test omq_quic_basic --lib
-par run omq_cargo_with_rust_tools test -p omq-libzmq --features webtransport --test omq_libzmq_quic
-par run omq_cargo_with_rust_tools test -p omq-tokio  --features plain --test omq_interop_pyzmq_plain
-par run omq_cargo_with_rust_tools test -p omq-tokio  --features curve --test omq_interop_pyzmq_curve
+par run cargo test -p omq-tokio  --features lz4 --test omq_lz4_tcp --test omq_lz4_pub_sub
+par run cargo test -p omq-tokio  --features zstd --test omq_zstd_tcp
+par run cargo test -p omq-proto  --features "lz4 ws" --test omq_proto_endpoint
+par run cargo test -p omq-tokio  --features "lz4 ws" --test omq_lz4_ws
+par run cargo test -p omq-proto  --features "quic lz4 zstd" --test omq_proto_endpoint
+par run cargo test -p omq-tokio  --features quic --test omq_quic_basic --test omq_quic_lifecycle --test omq_quic_network --lib
+par run cargo test -p omq-libzmq --features quic
+par run cargo test -p omq-tokio  --features webtransport --test omq_webtransport_basic --test omq_quic_basic --lib
+par run cargo test -p omq-libzmq --features webtransport --test omq_libzmq_quic
+par run cargo test -p omq-tokio  --features plain --test omq_interop_pyzmq_plain
+par run cargo test -p omq-tokio  --features curve --test omq_interop_pyzmq_curve
 par_wait
 
 # ---------------------------------------------------------------- #
@@ -349,8 +322,8 @@ par_wait
 #    inside otherwise-ungated test files (connect_before_bind lz4).
 # ---------------------------------------------------------------- #
 all_features='plain curve lz4 zstd ws quic webtransport dart'
-par run omq_cargo_with_rust_tools test -p omq-proto  --features "$all_features"
-par run omq_cargo_with_rust_tools test -p omq-tokio  --features "$all_features"
+par run cargo test -p omq-proto  --features "$all_features"
+par run cargo test -p omq-tokio  --features "$all_features"
 par_wait
 
 # ---------------------------------------------------------------- #
@@ -358,7 +331,7 @@ par_wait
 #    `OMQ_FUZZ=1`.
 # ---------------------------------------------------------------- #
 if [[ "${OMQ_FUZZ:-}" == "1" ]]; then
-    par run omq_cargo_with_rust_tools test -p omq-tokio  --features "fuzz plain curve lz4 zstd ws quic webtransport" --release
+    par run cargo test -p omq-tokio  --features "fuzz plain curve lz4 zstd ws quic webtransport" --release
     par_wait
 fi
 
@@ -367,19 +340,19 @@ fi
 #    are slow or expensive on developer machines.
 # ---------------------------------------------------------------- #
 if [[ "${OMQ_STRESS:-}" == "1" ]]; then
-    run omq_cargo_with_rust_tools test -p omq-tokio --test omq_stress_connect_before_bind -- --ignored
-    run omq_cargo_with_rust_tools test -p omq-tokio --test omq_push_pull -- --ignored
-    run omq_cargo_with_rust_tools test -p omq-tokio --test omq_transmit_slot_stress -- --ignored
+    run cargo test -p omq-tokio --test omq_stress_connect_before_bind -- --ignored
+    run cargo test -p omq-tokio --test omq_push_pull -- --ignored
+    run cargo test -p omq-tokio --test omq_transmit_slot_stress -- --ignored
 else
     echo "skip: OMQ_STRESS=1"
 fi
 
 if [[ "${OMQ_LOOM:-}" == "1" ]]; then
-    run omq_cargo_with_rust_tools test -p omq-tokio --test omq_loom_signal
-    run omq_cargo_with_rust_tools test -p omq-tokio --features dart --test omq_loom_dart_pool
-    RUSTFLAGS="${RUSTFLAGS:-} --cfg loom" run omq_cargo_with_rust_tools test -p omq-proto --features dart --test omq_proto_loom_dart
+    run cargo test -p omq-tokio --test omq_loom_signal
+    run cargo test -p omq-tokio --features dart --test omq_loom_dart_pool
+    RUSTFLAGS="${RUSTFLAGS:-} --cfg loom" run cargo test -p omq-proto --features dart --test omq_proto_loom_dart
     if [[ "$(uname -s)" == "Linux" ]]; then
-        RUSTFLAGS="${RUSTFLAGS:-} --cfg loom" run omq_cargo_with_rust_tools test -p omq-shm --test omq_shm_loom
+        RUSTFLAGS="${RUSTFLAGS:-} --cfg loom" run cargo test -p omq-shm --test omq_shm_loom
     fi
 else
     echo "skip: OMQ_LOOM=1"
@@ -393,14 +366,13 @@ fi
 if [[ "${OMQ_SKIP_PYOMQ:-}" == "1" ]]; then
     echo "skip: OMQ_SKIP_PYOMQ=1"
 elif [[ -d bindings/pyomq/.venv ]]; then
-    run omq_cargo_with_rust_tools build -p omq-tokio --features quic --example quic_interop_peer
+    run cargo build -p omq-tokio --features quic --example quic_interop_peer
     export OMQ_QUIC_INTEROP_REQUIRED=1
     pushd bindings/pyomq >/dev/null
     # shellcheck disable=SC1091
     source .venv/bin/activate
     pyomq_venv="$(realpath .venv)"
-    _setup_python_tools
-    run omq_maturin develop --release
+    run maturin develop --release
     # The checked-in venv may have been copied from another worktree; invoke
     # pytest through the active interpreter so its path cannot escape here.
     run "$pyomq_venv/bin/python" -m pytest -v

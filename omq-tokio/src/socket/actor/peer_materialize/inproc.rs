@@ -7,7 +7,9 @@ use super::{
 use crate::engine::SendPipeConsumer;
 use crate::engine::send_pipe::SendPipeProducerHandle;
 use crate::engine::signal::StateSignal;
-use crate::socket::actor::inproc_driver::{InprocDriverCtx, inproc_peer_driver};
+use crate::socket::actor::inproc_driver::{
+    InprocChannels, InprocDriverCtx, ReceiveRoutes, RelayOutside, SendRoutes, inproc_peer_driver,
+};
 use crate::socket::actor::lifecycle::PeerLifecycle;
 use crate::socket::actor::{InprocConn, SocketDriver, SocketType};
 use std::sync::{Arc, Mutex};
@@ -134,21 +136,30 @@ fn spawn_inproc_driver(
     let ctx = InprocDriverCtx {
         peer_out: crate::engine::actor_output::PeerOutput::actor(peer_output),
         subscriptions: socket.subscription_gate(peer_id),
-        peer_control: socket.mail.peer_control_tx.clone(),
         completion,
         peer_id,
         cancel: ends.cancel,
-        peer_props,
         max_message_size: socket.options.max_message_size,
-        recv_direct,
-        socket_close_state: socket.link.recv_tx.clone(),
-        recv_sink: ends.recv_sink,
-        send_pipe_rx: ends.send_pipe_rx,
-        blocking_recv_waker: socket.link.spsc.blocking_recv_waker.clone(),
-        inbound: conn.inbound,
-        outbound: ends.outbound,
+        receive: ReceiveRoutes {
+            inbound: conn.inbound,
+            recv_sink: ends.recv_sink,
+            recv_direct,
+            socket_close_state: socket.link.recv_tx.clone(),
+        },
+        send: SendRoutes::new(ends.outbound, ends.send_pipe_rx),
+        outside: RelayOutside {
+            peer_control: socket.mail.peer_control_tx.clone(),
+            peer_props,
+            blocking_recv_waker: socket.link.spsc.blocking_recv_waker.clone(),
+        },
     };
-    let driver = inproc_peer_driver(ends.inbox, ends.data_inbox, conn.in_rx, conn.out, ctx);
+    let channels = InprocChannels {
+        out: conn.out,
+        in_rx: conn.in_rx,
+        data_inbox: ends.data_inbox,
+        inbox: ends.inbox,
+    };
+    let driver = inproc_peer_driver(channels, ctx);
 
     let task = socket
         .resources

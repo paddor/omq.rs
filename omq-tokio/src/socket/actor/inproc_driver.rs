@@ -8,23 +8,106 @@ use crate::engine::peer_events::SubscriptionGate;
 pub(super) struct InprocDriverCtx {
     pub(super) peer_out: crate::engine::actor_output::PeerOutput,
     pub(super) subscriptions: SubscriptionGate,
-    pub(super) peer_control: mpsc::Sender<(u64, crate::engine::PeerEvent)>,
     pub(super) completion: crate::engine::peer_completion::CompletionProgress,
     pub(super) peer_id: u64,
     pub(super) cancel: tokio_util::sync::CancellationToken,
-    pub(super) peer_props: omq_proto::proto::command::PeerProperties,
     pub(super) max_message_size: Option<usize>,
-    pub(super) recv_direct: Option<std::sync::Arc<crate::socket::recv::SharedRecvPipe>>,
-    pub(super) socket_close_state: std::sync::Arc<crate::socket::recv::SharedRecvPipe>,
-    pub(super) recv_sink: Option<crate::engine::RecvSink>,
-    pub(super) send_pipe_rx: Option<crate::engine::SendPipeConsumer>,
-    pub(super) blocking_recv_waker: std::sync::Arc<crate::socket::recv::BlockingRecvWaker>,
+    pub(super) receive: ReceiveRoutes,
+    pub(super) send: SendRoutes,
+    pub(super) outside: RelayOutside,
+}
+
+/// Where inbound partner messages go: the receive port, else the sink,
+/// else the shared receive pipe, else the actor.
+pub(super) struct ReceiveRoutes {
     /// Receive port of this connection. The socket actor opens it; this
     /// task relays messages from a peer without a direct route and closes
     /// it on exit.
     pub(super) inbound: Option<std::sync::Arc<crate::transport::inproc::InprocPort>>,
+    pub(super) recv_sink: Option<crate::engine::RecvSink>,
+    pub(super) recv_direct: Option<std::sync::Arc<crate::socket::recv::SharedRecvPipe>>,
+    /// Tells whether the socket closed its receive side.
+    pub(super) socket_close_state: std::sync::Arc<crate::socket::recv::SharedRecvPipe>,
+}
+
+impl ReceiveRoutes {
+    /// Deliver one inbound message to the first route present. Without
+    /// one, `to_actor` takes it.
+    #[inline]
+    fn try_deliver(
+        &mut self,
+        message: Message,
+        to_actor: impl FnOnce(Message) -> Result<(), omq_proto::TrySendError>,
+    ) -> Result<(), omq_proto::TrySendError> {
+        use crate::engine::SendPipeError;
+        use omq_proto::TrySendError;
+
+        if let Some(port) = &self.inbound {
+            port.try_send(message).map_err(|error| match error {
+                SendPipeError::Full(message) => TrySendError::Full(message),
+                SendPipeError::Closed(_) => TrySendError::Closed,
+                #[cfg(feature = "dart")]
+                SendPipeError::Invalid(_) => {
+                    unreachable!("receive output has no transport send validator")
+                }
+            })
+        } else if let Some(sink) = &mut self.recv_sink {
+            sink.try_deliver(message)
+        } else if let Some(pipe) = &self.recv_direct {
+            pipe.try_send(message)
+        } else {
+            to_actor(message)
+        }
+    }
+
+    /// Wait for space on whichever route takes inbound messages. Only
+    /// polled when a route exists.
+    async fn space_ready(&mut self) {
+        if let Some(port) = &self.inbound {
+            let space = port.space();
+            space.wait_until(|| port.has_space()).await;
+        } else if let Some(sink) = &mut self.recv_sink {
+            sink.receive_space_ready().await;
+        } else {
+            self.recv_direct.as_ref().unwrap().space_ready().await;
+        }
+    }
+
+    /// Only the actor can take inbound messages.
+    #[inline]
+    fn actor_only(&self) -> bool {
+        self.inbound.is_none() && self.recv_sink.is_none() && self.recv_direct.is_none()
+    }
+
+    /// The sink holds back data for a full per-peer queue.
+    #[inline]
+    fn blocked(&self) -> bool {
+        self.recv_sink
+            .as_ref()
+            .is_some_and(crate::engine::RecvSink::peer_blocked)
+    }
+}
+
+/// Outbound queues this task drains toward the partner.
+pub(super) struct SendRoutes {
     /// Direct send route. This task only delivers its connect-side backlog.
-    pub(super) outbound: Option<crate::transport::inproc::InprocSender>,
+    outbound: Option<crate::transport::inproc::InprocSender>,
+    /// Handle-side send pipe, when sends do not go straight to the partner.
+    send_pipe_rx: Option<crate::engine::SendPipeConsumer>,
+    send_pipe_batch: Vec<Message>,
+}
+
+impl SendRoutes {
+    pub(super) fn new(
+        outbound: Option<crate::transport::inproc::InprocSender>,
+        send_pipe_rx: Option<crate::engine::SendPipeConsumer>,
+    ) -> Self {
+        Self {
+            outbound,
+            send_pipe_rx,
+            send_pipe_batch: Vec::new(),
+        }
+    }
 }
 
 /// Closes the receive port when the peer task ends, including by abort.
@@ -41,20 +124,8 @@ impl Drop for InprocPortGuard {
 /// Synthesizes `HandshakeSucceeded` immediately (no greeting exchange),
 /// then forwards Messages and Commands between the `SocketDriver`'s
 /// inbox and the partner's channels until either side drops.
-pub(super) async fn inproc_peer_driver(
-    inbox: crate::engine::control_inbox::Receiver,
-    data_inbox: crate::engine::data_inbox::Receiver,
-    in_rx: crate::transport::inproc::RelayReceiver,
-    out: crate::transport::inproc::RelaySender,
-    mut ctx: InprocDriverCtx,
-) {
+pub(super) async fn inproc_peer_driver(channels: InprocChannels, mut ctx: InprocDriverCtx) {
     let mut completion = std::mem::take(&mut ctx.completion);
-    let channels = InprocChannels {
-        out,
-        in_rx,
-        data_inbox,
-        inbox,
-    };
     inproc_peer_driver_body(channels, ctx, &mut completion).await;
     // Report completion only after every relay resource is dropped.
     let _ = completion.complete(DisconnectReason::PeerClosed);
@@ -68,7 +139,7 @@ async fn inproc_peer_driver_body(
     let (mut relay, outside) = InprocRelay::new(channels, ctx);
     // Declared after the relay, so the port closes before the relay's
     // channels and sinks drop.
-    let _port_guard = InprocPortGuard(relay.inbound.clone());
+    let _port_guard = InprocPortGuard(relay.receive.inbound.clone());
 
     if !relay
         .announce_handshake(&outside.peer_control, outside.peer_props, completion)
@@ -82,19 +153,19 @@ async fn inproc_peer_driver_body(
 }
 
 /// Channel ends between the actor, this peer task, and the inproc partner.
-struct InprocChannels {
-    out: crate::transport::inproc::RelaySender,
-    in_rx: crate::transport::inproc::RelayReceiver,
-    data_inbox: crate::engine::data_inbox::Receiver,
-    inbox: crate::engine::control_inbox::Receiver,
+pub(super) struct InprocChannels {
+    pub(super) out: crate::transport::inproc::RelaySender,
+    pub(super) in_rx: crate::transport::inproc::RelayReceiver,
+    pub(super) data_inbox: crate::engine::data_inbox::Receiver,
+    pub(super) inbox: crate::engine::control_inbox::Receiver,
 }
 
 /// Driver context the relay loop does not own. `peer_control` stays
 /// outside because the loop's pinned credit reservation borrows it.
-struct RelayOutside {
-    peer_control: mpsc::Sender<(u64, crate::engine::PeerEvent)>,
-    peer_props: omq_proto::proto::command::PeerProperties,
-    blocking_recv_waker: std::sync::Arc<crate::socket::recv::BlockingRecvWaker>,
+pub(super) struct RelayOutside {
+    pub(super) peer_control: mpsc::Sender<(u64, crate::engine::PeerEvent)>,
+    pub(super) peer_props: omq_proto::proto::command::PeerProperties,
+    pub(super) blocking_recv_waker: std::sync::Arc<crate::socket::recv::BlockingRecvWaker>,
 }
 
 /// Lanes that can still deliver. A closed lane is never polled again.
@@ -123,17 +194,12 @@ struct InprocRelay {
     /// Count of control events sent to the actor. Data published after a
     /// prefix is not delivered before those events are handled.
     control_prefix: u64,
-    send_pipe_batch: Vec<Message>,
     data_plane_active: bool,
     open: RelayLanes,
     closing: RelayClosing,
     budget: omq_proto::flow::DrainBudget,
-    outbound: Option<crate::transport::inproc::InprocSender>,
-    inbound: Option<std::sync::Arc<crate::transport::inproc::InprocPort>>,
-    send_pipe_rx: Option<crate::engine::SendPipeConsumer>,
-    recv_sink: Option<crate::engine::RecvSink>,
-    socket_close_state: std::sync::Arc<crate::socket::recv::SharedRecvPipe>,
-    recv_direct: Option<std::sync::Arc<crate::socket::recv::SharedRecvPipe>>,
+    receive: ReceiveRoutes,
+    send: SendRoutes,
     max_message_size: Option<usize>,
     cancel: tokio_util::sync::CancellationToken,
     peer_id: u64,
@@ -161,26 +227,19 @@ impl InprocRelay {
     fn new(channels: InprocChannels, ctx: InprocDriverCtx) -> (Self, RelayOutside) {
         let InprocDriverCtx {
             peer_out,
-            peer_control,
             subscriptions,
             peer_id,
             cancel,
-            peer_props,
             max_message_size,
-            recv_direct,
-            socket_close_state,
-            recv_sink,
-            send_pipe_rx,
-            blocking_recv_waker,
-            inbound,
-            outbound,
+            receive,
+            send,
+            outside,
             completion: _,
         } = ctx;
 
         let relay = Self {
             pending: RelayPending::default(),
             control_prefix: 1,
-            send_pipe_batch: Vec::new(),
             data_plane_active: false,
             open: RelayLanes {
                 data_inbox: true,
@@ -193,23 +252,14 @@ impl InprocRelay {
                 discard_receive: false,
             },
             budget: omq_proto::flow::DrainBudget::new(64, 64 * 1024),
-            outbound,
-            inbound,
-            send_pipe_rx,
-            recv_sink,
-            socket_close_state,
-            recv_direct,
+            receive,
+            send,
             max_message_size,
             cancel,
             peer_id,
             subscriptions,
             peer_out,
             channels,
-        };
-        let outside = RelayOutside {
-            peer_control,
-            peer_props,
-            blocking_recv_waker,
         };
         (relay, outside)
     }
@@ -288,11 +338,11 @@ impl InprocRelay {
                 data = self.channels.data_inbox.recv(), if self.open.data_inbox && self.data_plane_active && self.pending.outbound.is_empty() => {
                     self.on_data(data);
                 }
-                () = send_pipe_ready(self.send_pipe_rx.as_ref()), if self.send_pipe_rx.is_some() && self.data_plane_active && self.pending.outbound.is_empty() => {
+                () = send_pipe_ready(self.send.send_pipe_rx.as_ref()), if self.send.send_pipe_rx.is_some() && self.data_plane_active && self.pending.outbound.is_empty() => {
                     if !self.drain_send_pipe() { return; }
                 }
-                () = deliver_backlog(self.outbound.as_ref()), if self.data_plane_active && self.outbound.as_ref().is_some_and(|sender| !sender.is_empty()) => {}
-                () = receive_space(self.inbound.as_ref(), self.recv_sink.as_mut(), self.recv_direct.as_ref()), if (self.pending.inbound.is_some() && !actor_space) || recv_blocked => {}
+                () = deliver_backlog(self.send.outbound.as_ref()), if self.data_plane_active && self.send.outbound.as_ref().is_some_and(|sender| !sender.is_empty()) => {}
+                () = self.receive.space_ready(), if (self.pending.inbound.is_some() && !actor_space) || recv_blocked => {}
                 message = self.channels.in_rx.data.recv(), if self.open.receive && self.data_plane_active && !recv_blocked && self.pending.inbound.is_none() && self.pending.control.is_none() => {
                     if !self.on_partner_message(message) { return; }
                 }
@@ -324,13 +374,14 @@ impl InprocRelay {
 
         if !self.closing.discard_receive
             && self
+                .receive
                 .recv_sink
                 .as_mut()
                 .is_some_and(|sink| !sink.retry_peer_pending())
         {
             // A sink that refuses its retry is gone. That is only expected
             // once the socket closed its receive side.
-            if self.socket_close_state.is_closed() {
+            if self.receive.socket_close_state.is_closed() {
                 self.closing.discard_receive = true;
             } else {
                 return false;
@@ -346,7 +397,9 @@ impl InprocRelay {
         match self.try_deliver(message, completion) {
             Ok(()) => {}
             Err(TrySendError::Full(message)) => self.pending.inbound = Some(message),
-            Err(_) if self.socket_close_state.is_closed() => self.closing.discard_receive = true,
+            Err(_) if self.receive.socket_close_state.is_closed() => {
+                self.closing.discard_receive = true;
+            }
             Err(_) => return false,
         }
         true
@@ -362,20 +415,7 @@ impl InprocRelay {
         use crate::engine::SendPipeError;
         use omq_proto::TrySendError;
 
-        if let Some(port) = &self.inbound {
-            port.try_send(message).map_err(|error| match error {
-                SendPipeError::Full(message) => TrySendError::Full(message),
-                SendPipeError::Closed(_) => TrySendError::Closed,
-                #[cfg(feature = "dart")]
-                SendPipeError::Invalid(_) => {
-                    unreachable!("receive output has no transport send validator")
-                }
-            })
-        } else if let Some(sink) = &mut self.recv_sink {
-            sink.try_deliver(message)
-        } else if let Some(pipe) = &self.recv_direct {
-            pipe.try_send(message)
-        } else {
+        self.receive.try_deliver(message, |message| {
             match self.peer_out.try_send(self.peer_id, message, false) {
                 Ok(()) => {
                     completion.note_event();
@@ -388,7 +428,7 @@ impl InprocRelay {
                     unreachable!("receive output has no transport send validator")
                 }
             }
-        }
+        })
     }
 
     /// True once a requested close drained every outbound queue, or both
@@ -400,10 +440,12 @@ impl InprocRelay {
             && self.channels.inbox.is_empty()
             && self.channels.data_inbox.is_empty()
             && self
+                .send
                 .send_pipe_rx
                 .as_ref()
                 .is_none_or(crate::engine::SendPipeConsumer::is_empty)
             && self
+                .send
                 .outbound
                 .as_ref()
                 .is_none_or(crate::transport::inproc::InprocSender::is_empty);
@@ -415,20 +457,12 @@ impl InprocRelay {
     }
 
     fn recv_blocked(&self) -> bool {
-        !self.closing.discard_receive
-            && !self.closing.requested
-            && self
-                .recv_sink
-                .as_ref()
-                .is_some_and(crate::engine::RecvSink::peer_blocked)
+        !self.closing.discard_receive && !self.closing.requested && self.receive.blocked()
     }
 
     /// The held inbound message can only go to the actor.
     fn waits_for_actor_space(&self) -> bool {
-        self.pending.inbound.is_some()
-            && self.inbound.is_none()
-            && self.recv_sink.is_none()
-            && self.recv_direct.is_none()
+        self.pending.inbound.is_some() && self.receive.actor_only()
     }
 
     /// Apply an actor command. False if the task must stop.
@@ -438,7 +472,7 @@ impl InprocRelay {
         match cmd {
             Some(PeerDriverCommand::ActivateDataPlane) => self.data_plane_active = true,
             Some(PeerDriverCommand::ActivateWithRecvSink(sink)) => {
-                self.recv_sink = Some(sink);
+                self.receive.recv_sink = Some(sink);
                 self.data_plane_active = true;
             }
             Some(PeerDriverCommand::SendCommand(command)) => {
@@ -452,7 +486,7 @@ impl InprocRelay {
                     self.closing.requested = true;
                     self.closing.deadline = deadline;
                     self.channels.data_inbox.close();
-                    if let Some(port) = &self.inbound {
+                    if let Some(port) = &self.receive.inbound {
                         port.close();
                     }
                 }
@@ -554,9 +588,9 @@ impl InprocRelay {
     /// Move one batch from the send pipe to `pending_out`. False once the
     /// pipe's producers are gone.
     fn drain_send_pipe(&mut self) -> bool {
-        let send_pipe_rx = self.send_pipe_rx.as_mut().unwrap();
+        let send_pipe_rx = self.send.send_pipe_rx.as_mut().unwrap();
         let drained = send_pipe_rx.drain_into(
-            &mut self.send_pipe_batch,
+            &mut self.send.send_pipe_batch,
             crate::routing::OUTBOUND_BATCH_MAX_MSGS,
             omq_proto::flow::max_batch_bytes(),
         );
@@ -564,7 +598,7 @@ impl InprocRelay {
             return !send_pipe_rx.is_disconnected();
         }
 
-        for message in self.send_pipe_batch.drain(..) {
+        for message in self.send.send_pipe_batch.drain(..) {
             let _ = self.budget.account(message.byte_len());
             self.pending.outbound.push_back(message);
         }
@@ -613,22 +647,6 @@ async fn send_pipe_ready(pipe: Option<&crate::engine::SendPipeConsumer>) {
 /// Only polled when the arm is enabled, which requires a sender.
 async fn deliver_backlog(sender: Option<&crate::transport::inproc::InprocSender>) {
     sender.unwrap().deliver_backlog().await;
-}
-
-/// Wait for space on whichever route takes inbound messages.
-async fn receive_space(
-    inbound: Option<&std::sync::Arc<crate::transport::inproc::InprocPort>>,
-    recv_sink: Option<&mut crate::engine::RecvSink>,
-    recv_direct: Option<&std::sync::Arc<crate::socket::recv::SharedRecvPipe>>,
-) {
-    if let Some(port) = inbound {
-        let space = port.space();
-        space.wait_until(|| port.has_space()).await;
-    } else if let Some(sink) = recv_sink {
-        sink.receive_space_ready().await;
-    } else {
-        recv_direct.unwrap().space_ready().await;
-    }
 }
 
 fn inproc_command_size(command: &omq_proto::proto::Command) -> usize {

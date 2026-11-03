@@ -23,23 +23,43 @@ fn pair_ctx(
     let (recv, consumer, _, _) = crate::socket::recv::recv_pipe(16, blocking.clone());
     let ctx = InprocDriverCtx {
         peer_out,
-        peer_control,
         subscriptions: SubscriptionGate::default(),
         completion,
         peer_id: 7,
         cancel,
-        peer_props: omq_proto::proto::command::PeerProperties::default()
-            .with_socket_type(SocketType::Pair),
         max_message_size: None,
-        recv_direct: None,
-        socket_close_state: recv.clone(),
-        recv_sink: None,
-        send_pipe_rx: None,
-        blocking_recv_waker: blocking,
-        inbound: None,
-        outbound: None,
+        receive: ReceiveRoutes {
+            inbound: None,
+            recv_sink: None,
+            recv_direct: None,
+            socket_close_state: recv.clone(),
+        },
+        send: SendRoutes::new(None, None),
+        outside: RelayOutside {
+            peer_control,
+            peer_props: omq_proto::proto::command::PeerProperties::default()
+                .with_socket_type(SocketType::Pair),
+            blocking_recv_waker: blocking,
+        },
     };
     (ctx, recv, consumer)
+}
+
+/// Spawn the peer task over the given channel ends.
+fn spawn_relay(
+    inbox: crate::engine::control_inbox::Receiver,
+    data_inbox: crate::engine::data_inbox::Receiver,
+    in_rx: crate::transport::inproc::RelayReceiver,
+    out: crate::transport::inproc::RelaySender,
+    ctx: InprocDriverCtx,
+) -> tokio::task::JoinHandle<()> {
+    let channels = InprocChannels {
+        out,
+        in_rx,
+        data_inbox,
+        inbox,
+    };
+    tokio::spawn(inproc_peer_driver(channels, ctx))
 }
 
 fn unknown_command(name: &'static str) -> InboundFrame {
@@ -65,7 +85,7 @@ async fn inproc_completion_joins_with_its_handshake_mailbox_full() {
     );
     commands.try_send(PeerDriverCommand::Close).unwrap();
 
-    let mut task = tokio::spawn(inproc_peer_driver(inbox, data_inbox, in_rx, out, ctx));
+    let mut task = spawn_relay(inbox, data_inbox, in_rx, out, ctx);
     let result = tokio::time::timeout(Duration::from_millis(100), &mut task).await;
     if result.is_err() {
         task.abort();
@@ -101,7 +121,7 @@ async fn inproc_completion_counts_only_admitted_commands_and_messages() {
             completion,
             cancel.clone(),
         );
-        let mut task = tokio::spawn(inproc_peer_driver(inbox, data_inbox, in_rx, out, ctx));
+        let mut task = spawn_relay(inbox, data_inbox, in_rx, out, ctx);
         assert!(matches!(
             events.recv().await.unwrap().1,
             PeerEvent::Event(ZmtpEvent::HandshakeSucceeded { .. })
@@ -172,8 +192,8 @@ async fn inproc_control_progresses_while_actor_data_is_full() {
         for _ in 0..16 {
             recv.try_send(Message::single("occupied")).unwrap();
         }
-        ctx.inbound = (mode == "port").then(crate::transport::inproc::InprocPort::new);
-        if let Some(port) = &ctx.inbound {
+        ctx.receive.inbound = (mode == "port").then(crate::transport::inproc::InprocPort::new);
+        if let Some(port) = &ctx.receive.inbound {
             port.open(crate::transport::inproc::OpenPort {
                 sink: crate::engine::RecvSink::Channel(recv.clone()),
                 identity: None,
@@ -181,8 +201,9 @@ async fn inproc_control_progresses_while_actor_data_is_full() {
                 cancel,
             });
         }
-        ctx.recv_sink = (mode == "sink").then(|| crate::engine::RecvSink::Channel(recv.clone()));
-        let task = tokio::spawn(inproc_peer_driver(inbox, data_inbox, in_rx, out, ctx));
+        ctx.receive.recv_sink =
+            (mode == "sink").then(|| crate::engine::RecvSink::Channel(recv.clone()));
+        let task = spawn_relay(inbox, data_inbox, in_rx, out, ctx);
 
         events.recv().await.unwrap();
         commands

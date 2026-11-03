@@ -305,13 +305,5 @@ pub(crate) fn fake_handle(
     data_inbox: crate::engine::data_inbox::Sender,
     cancel: CancellationToken,
 ) -> ActorPeerDriverHandle {
-    ActorPeerDriverHandle {
-        inbox,
-        data_inbox,
-        cancel,
-        transmit_slot: None,
-        direct_tcp_writer: None,
-        send_pipe: None,
-        inproc: None,
-    }
+    ActorPeerDriverHandle::new(inbox, data_inbox, cancel)
 }

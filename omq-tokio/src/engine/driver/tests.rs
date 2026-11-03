@@ -953,24 +953,24 @@ fn pair_drivers_over<S: DriverStream, C: DriverStream>(
         client_cancel: CancellationToken::new(),
     };
 
-    let server = ConnectionDriver::with_config(
+    let server = ConnectionDriver::new(
         server_stream,
         Connection::new(spec.server),
         server_inbox,
         server_event_tx,
         1,
         ends.server_cancel.clone(),
-        spec.server_driver,
-    );
-    let client = ConnectionDriver::with_config(
+    )
+    .with_driver_config(spec.server_driver);
+    let client = ConnectionDriver::new(
         client_stream,
         Connection::new(spec.client),
         client_inbox,
         client_event_tx,
         2,
         ends.client_cancel.clone(),
-        spec.client_driver,
     )
+    .with_driver_config(spec.client_driver)
     .with_data_inbox(client_data_inbox);
     (server, client, ends)
 }

@@ -142,6 +142,25 @@ pub(crate) struct ActorPeerDriverHandle {
     pub(crate) inproc: Option<crate::transport::inproc::InprocSender>,
 }
 
+impl ActorPeerDriverHandle {
+    /// A handle with no direct route: data goes through `data_inbox`.
+    pub(crate) fn new(
+        inbox: super::control_inbox::Sender,
+        data_inbox: super::data_inbox::Sender,
+        cancel: CancellationToken,
+    ) -> Self {
+        Self {
+            inbox,
+            data_inbox,
+            cancel,
+            transmit_slot: None,
+            direct_tcp_writer: None,
+            send_pipe: None,
+            inproc: None,
+        }
+    }
+}
+
 impl From<PeerDriverHandle> for ActorPeerDriverHandle {
     fn from(handle: PeerDriverHandle) -> Self {
         Self {
@@ -196,7 +215,7 @@ where
     network: crate::network_limit::Lane,
     connection: Connection,
     inbox: super::control_inbox::Receiver,
-    data_inbox: Option<super::data_inbox::Receiver>,
+    output: OutputSetup,
     /// Application-data output: one socket-owned fanring producer, or the
     /// caller's combined Tokio queue for a standalone driver.
     peer_out: PeerOutput,
@@ -212,37 +231,79 @@ where
     config: PeerDriverConfig,
     setup_deadline: Option<Instant>,
     setup_cancel: Option<CancellationToken>,
-    /// Send-side message encoder (`lz4+tcp://`).
-    encoder: Option<MessageEncoder>,
-    /// Receive-side message decoder. Symmetric to `encoder`.
-    decoder: Option<MessageDecoder>,
     /// Direct recv channel. When set, inbound `Event::Message` frames are
     /// pushed straight into the user-facing recv channel without going through
     /// the `SocketDriver` actor's event loop. Only set for socket types where
     /// the recv path is a plain fair-queue delivery with no per-type
     /// post-processing (no `TypeState::post_recv`, no identity-prefix).
     recv_direct: Option<RecvSink>,
-    recv_parts: Option<usize>,
+    /// Per-peer encode slot: the socket handle encodes ZMTP frames into
+    /// this slot's `FrameBuffer`, and the driver flushes them to the
+    /// wire.
+    transmit_slot: Option<Arc<PeerTransmitSlot>>,
+    /// Keep owned IPC latency drivers runnable briefly after wire progress.
+    latency_polling: bool,
+    socket_close_state: Option<Arc<crate::socket::recv::SharedRecvPipe>>,
+    receive: ReceiveSetup,
+}
+
+/// Receive-side settings, moved into the run's receive path.
+#[derive(Debug)]
+struct ReceiveSetup {
+    /// Receive-side message decoder (`lz4+tcp://`).
+    decoder: Option<MessageDecoder>,
+    /// Exact part count of every valid message, if the socket type fixes it.
+    parts: Option<usize>,
+    profile: ReceiveProfile,
+    /// Output storage for decompressed payloads.
+    payload_pool: Option<omq_proto::PayloadPool>,
+    ip_rate_limiter: Option<(Arc<SharedIpRateLimiter>, IpAddr)>,
+    #[cfg(target_os = "linux")]
+    shm: Option<crate::transport::shm::ShmState>,
+}
+
+impl Default for ReceiveSetup {
+    fn default() -> Self {
+        Self {
+            decoder: None,
+            parts: None,
+            profile: ReceiveProfile::Throughput,
+            payload_pool: None,
+            ip_rate_limiter: None,
+            #[cfg(target_os = "linux")]
+            shm: None,
+        }
+    }
+}
+
+/// Send-side settings, moved into the run's queued output.
+#[derive(Debug)]
+struct OutputSetup {
+    /// Send-side message encoder (`lz4+tcp://`).
+    encoder: Option<MessageEncoder>,
     /// Shared pool of raw compression contexts for offloading large-message
     /// compression to blocking threads.
     compression_pool: Option<Arc<CompressionPool>>,
     /// Minimum message `byte_len` to trigger compression offloading.
     offload_threshold: usize,
-    /// Per-peer encode slot: the socket handle encodes ZMTP frames into
-    /// this slot's `FrameBuffer`, and the driver flushes them to the
-    /// wire.
-    transmit_slot: Option<Arc<PeerTransmitSlot>>,
     send_pipe_rx: Option<SendPipeConsumer>,
+    data_inbox: Option<super::data_inbox::Receiver>,
     arena_threshold: usize,
     arena_cap: usize,
-    receive_profile: ReceiveProfile,
-    /// Keep owned IPC latency drivers runnable briefly after wire progress.
-    latency_polling: bool,
-    decoded_payload_pool: Option<omq_proto::PayloadPool>,
-    recv_ip_rate_limiter: Option<(Arc<SharedIpRateLimiter>, IpAddr)>,
-    socket_close_state: Option<Arc<crate::socket::recv::SharedRecvPipe>>,
-    #[cfg(target_os = "linux")]
-    shm: Option<crate::transport::shm::ShmState>,
+}
+
+impl Default for OutputSetup {
+    fn default() -> Self {
+        Self {
+            encoder: None,
+            compression_pool: None,
+            offload_threshold: 0,
+            send_pipe_rx: None,
+            data_inbox: None,
+            arena_threshold: omq_proto::frame_buffer::ARENA_THRESHOLD,
+            arena_cap: omq_proto::frame_buffer::ARENA_INITIAL_CAP,
+        }
+    }
 }
 
 #[cfg(test)]

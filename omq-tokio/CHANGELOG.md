@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** `engine::ConnectionDriver::with_config` is replaced by the
+  `with_driver_config` builder step after `ConnectionDriver::new`.
+
 ### Fixed
 
 - A DART peer attaching after socket close or last-handle drop gets a

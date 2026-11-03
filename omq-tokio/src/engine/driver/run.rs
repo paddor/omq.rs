@@ -1,8 +1,8 @@
 //! Connection lifecycle and ordered service of the driver's selected waits.
 
 use super::{
-    ConnectionDriver, DriverStep, DriverStream, DriverWrite, IPC_LATENCY_POLL_WINDOW,
-    PeerDriverConfig, PeerEvent, PreActivationStep, ReceiveProfile, RecvSink,
+    ConnectionDriver, DriverStep, DriverStream, DriverWrite, IPC_LATENCY_POLL_WINDOW, OutputSetup,
+    PeerDriverConfig, PeerEvent, PreActivationStep, ReceiveProfile, ReceiveSetup, RecvSink,
     control::{ControlState, Heartbeat, close_error_reason},
     outbound::OutboundState,
     output::QueuedOutput,
@@ -116,6 +116,48 @@ struct ReceivePath {
     profile: ReceiveProfile,
     parts: Option<usize>,
     decoder: Option<MessageDecoder>,
+}
+
+impl ReceivePath {
+    fn new(setup: ReceiveSetup, config: &PeerDriverConfig) -> Self {
+        Self {
+            rate_limiter: config
+                .recv_rate_limit
+                .map(|limit| TokenBucket::new(limit, Instant::now())),
+            #[cfg(target_os = "linux")]
+            shm: setup.shm,
+            ip_rate_limiter: setup.ip_rate_limiter,
+            payload_pool: setup.payload_pool,
+            profile: setup.profile,
+            parts: setup.parts,
+            decoder: setup.decoder,
+        }
+    }
+}
+
+impl OutputSetup {
+    /// Build the run's queued output. `owned_chunks` says whether the writer
+    /// takes owned chunks.
+    fn into_queued(
+        self,
+        #[cfg(target_os = "linux")] shm: Option<crate::transport::shm::ShmState>,
+        owned_chunks: bool,
+    ) -> QueuedOutput {
+        let encoding = OutboundState::new(
+            self.encoder,
+            self.compression_pool,
+            self.offload_threshold,
+            #[cfg(target_os = "linux")]
+            shm,
+        );
+        QueuedOutput::new(
+            encoding,
+            FrameBuffer::with_config_lazy(self.arena_threshold, self.arena_cap),
+            self.send_pipe_rx,
+            self.data_inbox,
+            owned_chunks,
+        )
+    }
 }
 
 /// Latency workload settings and the IPC busy-poll window.
@@ -326,45 +368,18 @@ where
             .is_some_and(|deadline| Instant::now() >= deadline)
     }
 
-    /// Move the receive settings out ahead of the stream split.
-    fn take_receive_path(&mut self) -> ReceivePath {
-        ReceivePath {
-            rate_limiter: self
-                .config
-                .recv_rate_limit
-                .map(|limit| TokenBucket::new(limit, Instant::now())),
-            #[cfg(target_os = "linux")]
-            shm: self.shm.take(),
-            ip_rate_limiter: self.recv_ip_rate_limiter.take(),
-            payload_pool: self.decoded_payload_pool.take(),
-            profile: self.receive_profile,
-            parts: self.recv_parts,
-            decoder: self.decoder.take(),
-        }
-    }
-
     /// Split the driver into the run's session and the pieces that pinned
     /// waits borrow.
     fn into_session(
-        mut self,
+        self,
         completion: &mut CompletionProgress,
     ) -> (Wiring<T::Reader, T::Writer>, Session<'_>) {
-        let receive = self.take_receive_path();
+        let receive = ReceivePath::new(self.receive, &self.config);
         let latency_profile = !matches!(receive.profile, ReceiveProfile::Throughput);
         let (reader, mut writer) = self.stream.split(latency_profile);
-
-        let encoding = OutboundState::new(
-            self.encoder,
-            self.compression_pool,
-            self.offload_threshold,
+        let output = self.output.into_queued(
             #[cfg(target_os = "linux")]
             receive.shm.clone(),
-        );
-        let output = QueuedOutput::new(
-            encoding,
-            FrameBuffer::with_config_lazy(self.arena_threshold, self.arena_cap),
-            self.send_pipe_rx,
-            self.data_inbox,
             writer.chunk_writer().is_some(),
         );
 

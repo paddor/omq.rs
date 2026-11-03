@@ -1082,3 +1082,37 @@ fn dropping_a_ring_consumer_wakes_a_producer_waiting_for_space() {
     assert_ne!(space.generation(), seen);
     assert!(producer.is_consumer_dropped());
 }
+
+#[test]
+fn single_peer_receives_racing_arrivals_never_stage_messages() {
+    // Arrivals land at random points of the receive, including between the
+    // single-peer probe and the fenced drain. One eligible peer source must
+    // never move messages through the staging deque.
+    const COUNT: usize = 20_000;
+    let (recv, mut producers, _pipe) = bulk_receiver(1, RECV_BATCH_MESSAGES, false);
+    let mut producer = producers.pop().unwrap();
+    let pusher = std::thread::spawn(move || {
+        for index in 0..COUNT {
+            let mut message = Message::from_slice(&index.to_le_bytes());
+            while let Err(full) = producer.push(message) {
+                message = full;
+                std::hint::spin_loop();
+            }
+            producer.flush();
+            for _ in 0..index % 97 {
+                std::hint::spin_loop();
+            }
+        }
+    });
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut received = 0;
+    while received < COUNT {
+        assert!(Instant::now() < deadline, "received {received} of {COUNT}");
+        if let Ok(message) = recv.try_recv() {
+            assert_eq!(message.part_slice(0), Some(&received.to_le_bytes()[..]));
+            received += 1;
+        }
+    }
+    pusher.join().unwrap();
+    assert_eq!(recv.drain_state.lock().batch.capacity(), 0);
+}

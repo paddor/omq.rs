@@ -72,12 +72,7 @@ impl SocketDriver {
                 };
                 self.spawn_on_handshake(conn, peer);
             }
-            InternalEvent::ConnectGaveUp { endpoint, route_id } => {
-                self.endpoints
-                    .dialers
-                    .retain(|d| !(d.route_id == route_id && d.task.endpoint == endpoint));
-                self.remove_connect_route(route_id);
-            }
+            InternalEvent::ConnectGaveUp { route_id } => self.drop_dial_route(route_id),
             InternalEvent::PeerEvent { peer_id, event } => {
                 self.handle_peer_event(peer_id, event).await;
             }
@@ -125,9 +120,7 @@ impl SocketDriver {
         // A refused handshake would be refused again; stop dialing.
         if refused {
             if peer.is_client {
-                self.endpoints
-                    .dialers
-                    .retain(|dialer| dialer.route_id != peer.route_id);
+                self.drop_dial_route(peer.route_id);
             }
             return;
         }
@@ -152,11 +145,9 @@ impl SocketDriver {
                 _ => None,
             };
             if let Some(reason_text) = reason_text {
-                self.link.monitor.publish(MonitorEvent::HandshakeFailed {
-                    endpoint: peer.endpoint.clone(),
-                    peer_ident: peer.ident.clone(),
-                    reason: reason_text,
-                });
+                self.link
+                    .monitor
+                    .publish(peer.handshake_failed(reason_text));
             }
         }
 
@@ -235,6 +226,12 @@ impl SocketDriver {
     pub(super) fn remove_connect_route(&mut self, route_id: u64) {
         self.routing.send_strategy.connect_pipe_removed(route_id);
         self.link.shared.req_awaiting_reply.route_removed(route_id);
+    }
+
+    /// Stop dialing a route and drop its pre-ready send pipe.
+    pub(super) fn drop_dial_route(&mut self, route_id: u64) {
+        self.endpoints.dialers.retain(|d| d.route_id != route_id);
+        self.remove_connect_route(route_id);
     }
 
     fn take_dialer_send_pipe(&mut self, route_id: u64) -> Option<crate::engine::SendPipeConsumer> {
@@ -348,11 +345,8 @@ impl SocketDriver {
                     None,
                     source,
                 ) else {
-                    self.link.monitor.publish(MonitorEvent::HandshakeFailed {
-                        endpoint: peer.endpoint.clone(),
-                        peer_ident: peer.ident.clone(),
-                        reason: "socket pending-handshake limit reached".into(),
-                    });
+                    let reason = "socket pending-handshake limit reached";
+                    self.link.monitor.publish(peer.handshake_failed(reason));
                     return;
                 };
                 *setup = Some(crate::transport::setup::SetupState {
@@ -362,21 +356,12 @@ impl SocketDriver {
                 });
             }
         }
-        let conn_id = self.next_peer_id;
-        let event = if peer.is_server {
-            MonitorEvent::Accepted {
-                endpoint: peer.endpoint.clone(),
-                peer_ident: peer.ident.clone(),
-                connection_id: conn_id,
-            }
-        } else {
-            MonitorEvent::Connected {
-                endpoint: peer.endpoint.clone(),
-                peer_ident: peer.ident.clone(),
-                connection_id: conn_id,
-            }
-        };
-        self.link.monitor.publish(event);
+        self.link.monitor.publish(connection_event(
+            !peer.is_server,
+            peer.endpoint.clone(),
+            peer.ident.clone(),
+            self.next_peer_id,
+        ));
         self.spawn_any_conn(conn, peer);
     }
 
@@ -600,11 +585,7 @@ impl SocketDriver {
         let Some(peer) = self.peers.get(&peer_id) else {
             return;
         };
-        self.link.monitor.publish(MonitorEvent::HandshakeFailed {
-            endpoint: peer.endpoint.clone(),
-            peer_ident: peer.ident.clone(),
-            reason: reason.into(),
-        });
+        self.link.monitor.publish(peer.handshake_failed(reason));
 
         // Let the driver report closure through the ordinary lifecycle.
         // Removing/aborting it here loses that event and strands an
@@ -738,11 +719,9 @@ impl SocketDriver {
             )),
             Err(error) => {
                 if let Some(peer) = self.peers.get(&peer_id) {
-                    self.link.monitor.publish(MonitorEvent::HandshakeFailed {
-                        endpoint: peer.endpoint.clone(),
-                        peer_ident: peer.ident.clone(),
-                        reason: error.to_string(),
-                    });
+                    self.link
+                        .monitor
+                        .publish(peer.handshake_failed(error.to_string()));
                     peer.handle.cancel.cancel();
                 }
                 None
@@ -989,4 +968,48 @@ pub(crate) fn spawn_driver(
     io_pool: &crate::context::IoPoolHandle,
 ) -> tokio::task::JoinHandle<()> {
     io_pool.spawn_primary(async move { driver.run().await })
+}
+
+impl PeerEntry {
+    /// Monitor event for a handshake this peer failed.
+    pub(super) fn handshake_failed(&self, reason: impl Into<String>) -> MonitorEvent {
+        MonitorEvent::HandshakeFailed {
+            endpoint: self.endpoint.clone(),
+            peer_ident: self.ident.clone(),
+            reason: reason.into(),
+        }
+    }
+}
+
+impl PeerSetup {
+    /// Monitor event for a handshake this connection failed.
+    pub(super) fn handshake_failed(&self, reason: impl Into<String>) -> MonitorEvent {
+        MonitorEvent::HandshakeFailed {
+            endpoint: self.endpoint.clone(),
+            peer_ident: self.ident.clone(),
+            reason: reason.into(),
+        }
+    }
+}
+
+/// Connect endpoints report `Connected`, bind endpoints `Accepted`.
+pub(super) fn connection_event(
+    connect: bool,
+    endpoint: omq_proto::Endpoint,
+    peer_ident: PeerIdent,
+    connection_id: u64,
+) -> MonitorEvent {
+    if connect {
+        MonitorEvent::Connected {
+            endpoint,
+            peer_ident,
+            connection_id,
+        }
+    } else {
+        MonitorEvent::Accepted {
+            endpoint,
+            peer_ident,
+            connection_id,
+        }
+    }
 }

@@ -69,7 +69,6 @@ impl DialTask {
                     biased;
                     () = self.cancel.cancelled() => {}
                     _ = self.tx.send(InternalEvent::ConnectGaveUp {
-                        endpoint: self.endpoint,
                         route_id: self.route_id,
                     }) => {}
                 }

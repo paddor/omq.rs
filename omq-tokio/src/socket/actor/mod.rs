@@ -164,7 +164,6 @@ enum InternalEvent {
         route_id: u64,
     },
     ConnectGaveUp {
-        endpoint: Endpoint,
         route_id: u64,
     },
     PeerEvent {

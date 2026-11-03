@@ -293,9 +293,12 @@ impl SocketDriver {
         handle.send_pipe = send_pipe;
 
         let ident = PeerIdent::Socket(source);
-        self.link
-            .monitor
-            .publish(connection_event(connect, endpoint, ident.clone(), peer_id));
+        self.link.monitor.publish(super::peer::connection_event(
+            connect,
+            endpoint,
+            ident.clone(),
+            peer_id,
+        ));
         let peer = self.endpoints.dart_endpoints[index].peer_entry(ident, handle, route_id);
         self.peers.insert(peer_id, peer);
 
@@ -484,19 +487,10 @@ impl Entry {
         if !needed {
             return (None, None);
         }
+        // DART keeps its full capacity even with conflate.
         let cap = self.options.send_queue_capacity();
-        let (mut producer, consumer) = if socket_type == SocketType::Peer {
-            crate::engine::peer_send_pipe(cap, &self.options)
-        } else {
-            crate::engine::send_pipe_with_mode(
-                cap,
-                if self.options.conflate {
-                    crate::engine::SendPipeMode::Conflate
-                } else {
-                    crate::engine::SendPipeMode::Queue
-                },
-            )
-        };
+        let (mut producer, consumer) =
+            super::peer_materialize::new_peer_send_pipe(socket_type, &self.options, cap);
         producer.set_dart(socket_type);
         (Some(Arc::new(Mutex::new(Some(producer)))), Some(consumer))
     }
@@ -522,28 +516,6 @@ impl Entry {
             inproc_inbound: None,
             task: None,
             io_thread: self.io_thread,
-        }
-    }
-}
-
-/// Connect endpoints report `Connected`, bind endpoints `Accepted`.
-fn connection_event(
-    connect: bool,
-    endpoint: Endpoint,
-    peer_ident: PeerIdent,
-    connection_id: u64,
-) -> MonitorEvent {
-    if connect {
-        MonitorEvent::Connected {
-            endpoint,
-            peer_ident,
-            connection_id,
-        }
-    } else {
-        MonitorEvent::Accepted {
-            endpoint,
-            peer_ident,
-            connection_id,
         }
     }
 }

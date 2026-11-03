@@ -8,7 +8,7 @@ use crate::engine::codec::{CodecProfile, CodecSetup};
 use crate::engine::driver::{ActorLink, ReceiveProfile};
 use crate::engine::framing::WireFraming;
 use crate::engine::send_pipe::SendPipeProducerHandle;
-use crate::engine::{SendPipeConsumer, SendPipeMode};
+use crate::engine::{SendPipeConsumer, SendPipeMode, SendPipeProducer};
 use omq_proto::{Options, WorkloadProfile};
 
 mod inproc;
@@ -524,19 +524,11 @@ fn build_message_transforms(
             socket
                 .link
                 .monitor
-                .publish(omq_proto::MonitorEvent::HandshakeFailed {
-                    endpoint: peer.endpoint.clone(),
-                    peer_ident: peer.ident.clone(),
-                    reason: e.to_string(),
-                });
+                .publish(peer.handshake_failed(e.to_string()));
             // A bad codec config fails every retry the same way, so stop
             // dialing instead of reconnecting forever.
             if !peer.is_server {
-                socket
-                    .endpoints
-                    .dialers
-                    .retain(|d| d.route_id != peer.route_id);
-                socket.remove_connect_route(peer.route_id);
+                socket.drop_dial_route(peer.route_id);
             }
             Err(())
         }
@@ -864,20 +856,34 @@ fn make_send_pipe(
     if !socket.routing.send_strategy.needs_peer_send_pipe() {
         return (None, None);
     }
-    let (pipe_cap, pipe_mode) = if socket.options.conflate {
-        (1, SendPipeMode::Conflate)
+    let cap = if socket.options.conflate {
+        1
     } else {
-        (socket.options.send_queue_capacity(), SendPipeMode::Queue)
+        socket.options.send_queue_capacity()
     };
-    let (send_pipe, send_pipe_rx) = if socket.socket_type == SocketType::Peer {
-        crate::engine::peer_send_pipe(pipe_cap, &socket.options)
-    } else {
-        crate::engine::send_pipe_with_mode(pipe_cap, pipe_mode)
-    };
+    let (send_pipe, send_pipe_rx) = new_peer_send_pipe(socket.socket_type, &socket.options, cap);
     (
         Some(Arc::new(Mutex::new(Some(send_pipe)))),
         Some(send_pipe_rx),
     )
+}
+
+/// A peer's own send pipe. PEER has its own pipe kind; other types queue,
+/// or keep only the latest message with `conflate`.
+pub(super) fn new_peer_send_pipe(
+    socket_type: SocketType,
+    options: &Options,
+    cap: usize,
+) -> (SendPipeProducer, SendPipeConsumer) {
+    if socket_type == SocketType::Peer {
+        return crate::engine::peer_send_pipe(cap, options);
+    }
+    let mode = if options.conflate {
+        SendPipeMode::Conflate
+    } else {
+        SendPipeMode::Queue
+    };
+    crate::engine::send_pipe_with_mode(cap, mode)
 }
 
 fn spawn_wire_task(

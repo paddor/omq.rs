@@ -36,9 +36,7 @@ use super::monitor::{
     PeerCommandKind, PeerInfo, PeerSubscriptions,
 };
 use super::type_state::TypeState;
-use super::udp::{
-    JoinedGroups, fake_handle, new_joined_groups, spawn_dish_listener, spawn_radio_sender,
-};
+use super::udp::{JoinedGroups, new_joined_groups, spawn_dish_listener, spawn_radio_sender};
 use crate::routing::{
     RecvStrategy, SendStrategy, max_peer_count, supports_groups, supports_subscribe,
 };
@@ -237,6 +235,14 @@ async fn stop_peer_task(task: JoinHandle<()>) {
         task.abort();
     }
     let _ = tokio::time::timeout(PEER_TASK_JOIN_TIMEOUT, task).await;
+}
+
+impl PeerEntry {
+    /// Cancel the peer's driver and take its task to join.
+    fn cancel_task(&mut self) -> Option<JoinHandle<()>> {
+        self.handle.cancel.cancel();
+        self.task.take()
+    }
 }
 
 /// The task serving one listener or dialer. Dropping it cancels and aborts
@@ -914,14 +920,8 @@ impl SocketDriver {
         }
 
         for peer_id in disconnected {
-            if let Some(mut peer) = lifecycle::PeerLifecycle::new(self)
-                .remove_peer(peer_id, DisconnectReason::PeerClosed)
-            {
-                peer.handle.cancel.cancel();
-                if let Some(task) = peer.task.take() {
-                    stop_peer_task(task).await;
-                }
-            }
+            self.stop_removed_peer(peer_id, DisconnectReason::PeerClosed)
+                .await;
         }
 
         self.close.peers_requested = true;
@@ -983,6 +983,17 @@ impl SocketDriver {
 }
 
 impl SocketDriver {
+    /// Remove a peer, cancel its driver, and wait for its task.
+    async fn stop_removed_peer(&mut self, peer_id: u64, reason: DisconnectReason) {
+        let Some(mut peer) = lifecycle::PeerLifecycle::new(self).remove_peer(peer_id, reason)
+        else {
+            return;
+        };
+        if let Some(task) = peer.cancel_task() {
+            stop_peer_task(task).await;
+        }
+    }
+
     pub(super) fn ready_peer_count(&self) -> usize {
         self.peers.values().filter(|p| p.ready).count()
     }

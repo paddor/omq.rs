@@ -435,9 +435,7 @@ impl SocketDriver {
             self.last_stream_routing_id = Some(identity.clone());
         }
 
-        let (completion, receiver) =
-            crate::engine::peer_completion::CompletionProgress::reserve(peer_id);
-        self.mail.peer_completions.push(receiver);
+        let completion = self.reserve_completion(peer_id);
 
         let Ok(peer_output) = self.mail.peer_out_tx.try_register() else {
             return;

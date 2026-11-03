@@ -1,9 +1,10 @@
 use omq_proto::Options;
 use std::sync::Arc;
 
+use super::peer_materialize::PeerChannels;
 use super::{
     ConnectionStatus, DialerEntry, DisconnectReason, Endpoint, EndpointTask, Error, MonitorEvent,
-    PeerIdent, PeerInfo, Result, SocketDriver, SocketType, UdpDialerEntry, bind_any, fake_handle,
+    PeerIdent, PeerInfo, Result, SocketDriver, SocketType, UdpDialerEntry, bind_any,
     reject_encrypted_inproc, spawn_dish_listener, spawn_radio_sender, supports_groups,
     supports_subscribe,
 };
@@ -199,10 +200,7 @@ impl SocketDriver {
             if let Some(mut peer) =
                 PeerLifecycle::new(self).remove_peer(peer_id, DisconnectReason::LocalClose)
             {
-                peer.handle.cancel.cancel();
-                if let Some(task) = peer.task.take() {
-                    peer_tasks.push(task);
-                }
+                peer_tasks.extend(peer.cancel_task());
             }
         }
 
@@ -279,16 +277,15 @@ impl SocketDriver {
             .alloc_id()
             .ok_or_else(|| Error::Config("peer ID exhausted".into()))?;
 
-        let cancel = self.link.cancel.child_token();
-        let (inbox_tx, inbox_rx) = crate::engine::control_inbox::channel(64);
-        let (data_inbox_tx, data_inbox_rx) =
-            crate::engine::data_inbox::channel(self.options.send_queue_capacity());
+        let PeerChannels {
+            handle,
+            control,
+            data,
+        } = self.peer_channels();
+        let cancel = handle.cancel.clone();
         let assignment = self.resources.io_pool.reserve_thread();
         let index = assignment.index();
-        let inboxes = crate::socket::udp::RadioInboxes {
-            control: inbox_rx,
-            data: data_inbox_rx,
-        };
+        let inboxes = crate::socket::udp::RadioInboxes { control, data };
         let task = spawn_radio_sender(
             sock,
             inboxes,
@@ -296,8 +293,6 @@ impl SocketDriver {
             &self.resources.io_pool,
             assignment,
         );
-
-        let handle = fake_handle(inbox_tx, data_inbox_tx, cancel.clone());
 
         // Register the synthetic peer with SendStrategy as an
         // any-groups RADIO target - UDP DISH never sends JOIN, so the

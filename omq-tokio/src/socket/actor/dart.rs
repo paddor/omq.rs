@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use super::peer_materialize::PeerChannels;
 use super::{
     Endpoint, Error, MonitorEvent, PeerDriverHandle, PeerEntry, PeerIdent, Result, SocketDriver,
     SocketType,
@@ -207,12 +208,10 @@ impl SocketDriver {
             latency: options.workload_profile == Some(omq_proto::WorkloadProfile::Latency),
         };
 
-        let lease = carrier.lease;
-        let task = self.resources.io_pool.spawn_on(lease.index(), async move {
-            // The lease keeps this thread's load reservation for the worker's life.
-            let _lease = lease;
-            worker.run().await;
-        });
+        let task = self
+            .resources
+            .io_pool
+            .spawn_leased(carrier.lease, worker.run());
         (task, commands)
     }
 
@@ -261,13 +260,18 @@ impl SocketDriver {
         source: SocketAddr,
     ) -> (mpsc::Sender<EndpointCommand>, Box<PeerIo>) {
         let entry = &mut self.endpoints.dart_endpoints[index];
-        let (controls_tx, controls_rx) = crate::engine::control_inbox::channel(64);
-        let (data_tx, data_rx) = crate::engine::data_inbox::dart_channel(
-            entry.options.send_queue_capacity(),
-            self.socket_type,
+        let PeerChannels {
+            mut handle,
+            control,
+            data,
+        } = PeerChannels::new(
+            crate::engine::data_inbox::dart_channel(
+                entry.options.send_queue_capacity(),
+                self.socket_type,
+            ),
+            entry.cancel.child_token(),
         );
-
-        let cancel = entry.cancel.child_token();
+        let cancel = handle.cancel.clone();
         let options = entry.options.clone();
         let endpoint = entry.endpoint.clone();
         let connect = entry.connect;
@@ -286,15 +290,7 @@ impl SocketDriver {
         } else {
             Some(self.dart_recv_sink(peer_id))
         };
-        let handle = PeerDriverHandle {
-            inbox: controls_tx,
-            data_inbox: data_tx,
-            cancel: cancel.clone(),
-            transmit_slot: None,
-            direct_tcp_writer: None,
-            send_pipe,
-            inproc: None,
-        };
+        handle.send_pipe = send_pipe;
 
         let ident = PeerIdent::Socket(source);
         self.link
@@ -303,12 +299,10 @@ impl SocketDriver {
         let peer = self.endpoints.dart_endpoints[index].peer_entry(ident, handle, route_id);
         self.peers.insert(peer_id, peer);
 
-        let (completion, receiver) =
-            crate::engine::peer_completion::CompletionProgress::reserve(peer_id);
-        self.mail.peer_completions.push(receiver);
+        let completion = self.reserve_completion(peer_id);
         let queues = PeerQueues {
-            commands: controls_rx,
-            data: data_rx,
+            commands: control,
+            data,
             pipe,
             sink,
             cancel,
@@ -364,14 +358,8 @@ impl SocketDriver {
         let Some(peer_id) = entry.active_peer.filter(|_| entry.connect) else {
             return;
         };
-        if let Some(mut peer) = super::lifecycle::PeerLifecycle::new(self)
-            .remove_peer(peer_id, super::DisconnectReason::PeerClosed)
-        {
-            peer.handle.cancel.cancel();
-            if let Some(task) = peer.task.take() {
-                super::stop_peer_task(task).await;
-            }
-        }
+        self.stop_removed_peer(peer_id, super::DisconnectReason::PeerClosed)
+            .await;
         self.dart_peer_closed(peer_id);
     }
 
@@ -431,14 +419,8 @@ impl SocketDriver {
             .map(|(&id, _)| id)
             .collect();
         for peer_id in peers {
-            if let Some(mut peer) = super::lifecycle::PeerLifecycle::new(self)
-                .remove_peer(peer_id, super::DisconnectReason::LocalClose)
-            {
-                peer.handle.cancel.cancel();
-                if let Some(task) = peer.task.take() {
-                    super::stop_peer_task(task).await;
-                }
-            }
+            self.stop_removed_peer(peer_id, super::DisconnectReason::LocalClose)
+                .await;
         }
         for entry in removed {
             super::stop_peer_task(entry.task).await;

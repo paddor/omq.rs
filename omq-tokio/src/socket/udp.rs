@@ -20,7 +20,7 @@ use tokio::net::UdpSocket;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::engine::{ActorPeerDriverHandle, PeerDriverCommand, PeerDriverData};
+use crate::engine::{PeerDriverCommand, PeerDriverData};
 use crate::transport::udp;
 use omq_proto::message::Message;
 
@@ -51,10 +51,8 @@ pub(crate) fn spawn_dish_listener(
     io_pool: &crate::context::IoPoolHandle,
     assignment: crate::context::IoThreadLease,
 ) -> JoinHandle<()> {
-    let index = assignment.index();
-    let network = io_pool.network_on(index);
-    io_pool.spawn_on(index, async move {
-        let _assignment = assignment;
+    let network = io_pool.network_on(assignment.index());
+    io_pool.spawn_leased(assignment, async move {
         // Re-register the socket with this IO thread's reactor.
         let Ok(sock) = sock.into_std().and_then(UdpSocket::from_std) else {
             return;
@@ -173,10 +171,8 @@ pub(crate) fn spawn_radio_sender(
     io_pool: &crate::context::IoPoolHandle,
     assignment: crate::context::IoThreadLease,
 ) -> JoinHandle<()> {
-    let index = assignment.index();
-    let network = io_pool.network_on(index);
-    io_pool.spawn_on(index, async move {
-        let _assignment = assignment;
+    let network = io_pool.network_on(assignment.index());
+    io_pool.spawn_leased(assignment, async move {
         // Re-register the socket with this IO thread's reactor.
         let Ok(sock) = sock.into_std().and_then(UdpSocket::from_std) else {
             return;
@@ -295,15 +291,4 @@ fn radio_datagram(message: &Message) -> Option<Bytes> {
     let group = message.part_bytes(0).unwrap_or_default();
     let body = message.part_bytes(1).unwrap_or_default();
     udp::encode_datagram(&group, &body).ok()
-}
-
-/// Build a [`ActorPeerDriverHandle`] for a synthetic UDP RADIO peer. The handle's
-/// inbox feeds the sender task; its cancellation token tears the task
-/// down on `disconnect` / socket close.
-pub(crate) fn fake_handle(
-    inbox: crate::engine::control_inbox::Sender,
-    data_inbox: crate::engine::data_inbox::Sender,
-    cancel: CancellationToken,
-) -> ActorPeerDriverHandle {
-    ActorPeerDriverHandle::new(inbox, data_inbox, cancel)
 }

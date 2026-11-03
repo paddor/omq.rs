@@ -1,7 +1,7 @@
 //! Inproc peer setup: ports, send and receive paths, and the peer driver.
 
 use super::{
-    PEER_INBOX_CAP, PeerSetup, can_bypass_actor_recv, make_send_pipe, new_peer_entry,
+    PeerChannels, PeerSetup, can_bypass_actor_recv, make_send_pipe, new_peer_entry,
     server_routing_id,
 };
 use crate::engine::SendPipeConsumer;
@@ -9,7 +9,7 @@ use crate::engine::send_pipe::SendPipeProducerHandle;
 use crate::engine::signal::StateSignal;
 use crate::socket::actor::inproc_driver::{InprocDriverCtx, inproc_peer_driver};
 use crate::socket::actor::lifecycle::PeerLifecycle;
-use crate::socket::actor::{InprocConn, PeerDriverHandle, PeerIdent, SocketDriver, SocketType};
+use crate::socket::actor::{InprocConn, PeerIdent, SocketDriver, SocketType};
 use std::sync::{Arc, Mutex};
 
 /// Receive sink for an inproc peer that has no receive port. Its
@@ -72,11 +72,12 @@ fn register_inproc_peer(
     mut peer: PeerSetup,
     peer_ident: PeerIdent,
 ) -> InprocDriverEnds {
-    let (inbox_tx, inbox_rx) = crate::engine::control_inbox::channel(PEER_INBOX_CAP);
-    let (data_inbox_tx, data_inbox_rx) = crate::engine::data_inbox::channel(
-        PEER_INBOX_CAP.min(socket.options.send_queue_capacity()),
-    );
-    let cancel = socket.link.cancel.child_token();
+    let PeerChannels {
+        mut handle,
+        control,
+        data,
+    } = socket.peer_channels();
+    let cancel = handle.cancel.clone();
 
     let (send_pipe, send_pipe_rx, outbound) =
         inproc_send_path(socket, conn.outbound.take(), peer.send_pipe_rx.take());
@@ -89,15 +90,8 @@ fn register_inproc_peer(
     );
     let io_assignment = socket.resources.io_pool.reserve_thread();
 
-    let handle = PeerDriverHandle {
-        inbox: inbox_tx,
-        data_inbox: data_inbox_tx,
-        cancel: cancel.clone(),
-        transmit_slot: None,
-        direct_tcp_writer: None,
-        send_pipe,
-        inproc: outbound.clone(),
-    };
+    handle.send_pipe = send_pipe;
+    handle.inproc.clone_from(&outbound);
     let mut entry = new_peer_entry(peer, peer_ident, handle, None, io_assignment.index());
     // Inproc's synthetic handshake never holds a pending-handshake slot.
     entry.pending_handshake = false;
@@ -105,8 +99,8 @@ fn register_inproc_peer(
     socket.peers.insert(peer_id, entry);
 
     InprocDriverEnds {
-        inbox: inbox_rx,
-        data_inbox: data_inbox_rx,
+        inbox: control,
+        data_inbox: data,
         cancel,
         recv_sink,
         send_pipe_rx,
@@ -131,9 +125,7 @@ fn spawn_inproc_driver(
         && conn.inbound.is_none())
     .then(|| socket.link.recv_tx.clone());
 
-    let (completion, receiver) =
-        crate::engine::peer_completion::CompletionProgress::reserve(peer_id);
-    socket.mail.peer_completions.push(receiver);
+    let completion = socket.reserve_completion(peer_id);
     let Ok(peer_output) = socket.mail.peer_out_tx.try_register() else {
         return;
     };
@@ -157,17 +149,11 @@ fn spawn_inproc_driver(
     };
     let driver = inproc_peer_driver(ends.inbox, ends.data_inbox, conn.in_rx, conn.out, ctx);
 
-    let io_assignment = ends.io_assignment;
     let task = socket
         .resources
         .io_pool
-        .spawn_on(io_assignment.index(), async move {
-            let _io_assignment = io_assignment;
-            driver.await;
-        });
-    if let Some(peer) = socket.peers.get_mut(&peer_id) {
-        peer.task = Some(task);
-    }
+        .spawn_leased(ends.io_assignment, driver);
+    socket.set_peer_task(peer_id, task);
 }
 
 /// Allocate a peer id if this socket can take another ready peer of

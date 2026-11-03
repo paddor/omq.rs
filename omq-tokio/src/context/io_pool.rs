@@ -302,6 +302,22 @@ impl IoPoolHandle {
         }
     }
 
+    /// Spawn a future on the leased IO thread. The future owns the lease,
+    /// so the thread's load reservation lasts as long as the task.
+    pub(crate) fn spawn_leased<F>(
+        &self,
+        lease: IoThreadLease,
+        fut: F,
+    ) -> tokio::task::JoinHandle<F::Output>
+    where
+        F: Future<Output: Send> + Send + 'static,
+    {
+        self.spawn_on(lease.index(), async move {
+            let _lease = lease;
+            fut.await
+        })
+    }
+
     /// Whether tasks run on a runtime owned by OMQ.
     pub(crate) fn owns_runtime(&self) -> bool {
         self.pool.is_some()

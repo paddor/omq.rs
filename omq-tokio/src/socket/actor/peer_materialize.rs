@@ -20,6 +20,31 @@ use recv_bypass::{attach_recv_bypass, can_bypass_actor_recv};
 
 const PEER_INBOX_CAP: usize = 64;
 
+/// A new peer's actor handle plus the driver ends of its inboxes. The
+/// handle starts without direct routes.
+pub(super) struct PeerChannels {
+    pub(super) handle: PeerDriverHandle,
+    pub(super) control: crate::engine::control_inbox::Receiver,
+    pub(super) data: crate::engine::data_inbox::Receiver,
+}
+
+impl PeerChannels {
+    pub(super) fn new(
+        (data_tx, data): (
+            crate::engine::data_inbox::Sender,
+            crate::engine::data_inbox::Receiver,
+        ),
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Self {
+        let (control_tx, control) = crate::engine::control_inbox::channel(PEER_INBOX_CAP);
+        Self {
+            handle: PeerDriverHandle::new(control_tx, data_tx, cancel),
+            control,
+            data,
+        }
+    }
+}
+
 pub(super) struct PeerSetup {
     pub(super) endpoint: Endpoint,
     pub(super) is_server: bool,
@@ -49,9 +74,7 @@ pub(super) fn spawn_byte_stream_connection(socket: &mut SocketDriver, conn: Byte
         return;
     };
     socket.peers.insert(peer_id, entry);
-    let (completion, receiver) =
-        crate::engine::peer_completion::CompletionProgress::reserve(peer_id);
-    socket.mail.peer_completions.push(receiver);
+    let completion = socket.reserve_completion(peer_id);
     spawn_wire_task(
         socket,
         peer_id,
@@ -221,25 +244,25 @@ fn prepare_wire_driver(
     crate::context::IoThreadLease,
 )> {
     let (local_address, remote_address) = stream.addresses();
-    let (inbox_tx, inbox_rx) = crate::engine::control_inbox::channel(PEER_INBOX_CAP);
-    let (data_inbox_tx, data_inbox_rx) = crate::engine::data_inbox::channel(
-        PEER_INBOX_CAP.min(socket.options.send_queue_capacity()),
-    );
-    let child_cancel = socket.link.cancel.child_token();
+    let PeerChannels {
+        mut handle,
+        control,
+        data,
+    } = socket.peer_channels();
     let carrier_lease = take_carrier_io_lease(&mut stream);
 
     let profile = WireProfile::new(socket, &peer.endpoint, transforms.as_ref());
     let transmit = TransmitProfile::new(socket, &peer, transforms.as_ref(), profile, framing);
     let carrier = prepare_wire_carrier(socket, stream, &peer, profile)?;
 
-    let link = actor_link(socket, peer_id, inbox_rx, child_cancel.clone())?;
+    let link = actor_link(socket, peer_id, control, handle.cancel.clone())?;
     let peer_driver = ConnectionDriver::with_actor_config(
         carrier.stream,
         codec,
         link,
         peer_driver_config(socket, &peer.endpoint),
     )
-    .with_actor_data_inbox(data_inbox_rx)
+    .with_actor_data_inbox(data)
     .with_actor_control(
         socket.mail.peer_control_tx.clone(),
         socket.subscription_gate(peer_id),
@@ -272,15 +295,9 @@ fn prepare_wire_driver(
     let io_thread = io_assignment.index();
     let peer_driver = peer_driver.with_network(peer_network(socket, &peer.endpoint, io_thread));
 
-    let handle = PeerDriverHandle {
-        inbox: inbox_tx,
-        data_inbox: data_inbox_tx,
-        cancel: child_cancel,
-        transmit_slot,
-        direct_tcp_writer: carrier.direct_tcp_writer,
-        send_pipe,
-        inproc: None,
-    };
+    handle.transmit_slot = transmit_slot;
+    handle.direct_tcp_writer = carrier.direct_tcp_writer;
+    handle.send_pipe = send_pipe;
     let mut entry = new_peer_entry(peer, peer_ident, handle, setup, io_thread);
     entry.local_address = local_address;
     entry.remote_address = remote_address;
@@ -520,6 +537,34 @@ fn allocate_peer_id(socket: &mut SocketDriver) -> Option<u64> {
 }
 
 impl SocketDriver {
+    /// Channels for a wire, inproc, or UDP peer, cancelled with the socket.
+    pub(super) fn peer_channels(&self) -> PeerChannels {
+        PeerChannels::new(
+            crate::engine::data_inbox::channel(
+                PEER_INBOX_CAP.min(self.options.send_queue_capacity()),
+            ),
+            self.link.cancel.child_token(),
+        )
+    }
+
+    /// Reserve the completion slot a new peer task reports into.
+    pub(super) fn reserve_completion(
+        &mut self,
+        peer_id: u64,
+    ) -> crate::engine::peer_completion::CompletionProgress {
+        let (completion, receiver) =
+            crate::engine::peer_completion::CompletionProgress::reserve(peer_id);
+        self.mail.peer_completions.push(receiver);
+        completion
+    }
+
+    /// Record the task serving `peer_id`, if the peer is still registered.
+    pub(super) fn set_peer_task(&mut self, peer_id: u64, task: tokio::task::JoinHandle<()>) {
+        if let Some(peer) = self.peers.get_mut(&peer_id) {
+            peer.task = Some(task);
+        }
+    }
+
     /// Take the next peer or route ID. Peers and routes share one space.
     pub(super) fn alloc_id(&mut self) -> Option<u64> {
         let id = self.next_peer_id;
@@ -839,22 +884,21 @@ fn spawn_wire_task(
     peer_driver: ConnectionDriver<AnyStream>,
 ) {
     let needs_migration = socket.resources.io_pool.has_dedicated_io_threads();
-    let io_thread = io_assignment.index();
-    let task = socket.resources.io_pool.spawn_on(io_thread, async move {
-        let _io_assignment = io_assignment;
-        let peer_driver = if needs_migration {
-            match peer_driver.migrate_stream() {
-                Ok(driver) => driver,
-                Err(_) => return,
-            }
-        } else {
-            peer_driver
-        };
-        let _ = Box::pin(peer_driver.run()).await;
-    });
-    if let Some(peer) = socket.peers.get_mut(&peer_id) {
-        peer.task = Some(task);
-    }
+    let task = socket
+        .resources
+        .io_pool
+        .spawn_leased(io_assignment, async move {
+            let peer_driver = if needs_migration {
+                match peer_driver.migrate_stream() {
+                    Ok(driver) => driver,
+                    Err(_) => return,
+                }
+            } else {
+                peer_driver
+            };
+            let _ = Box::pin(peer_driver.run()).await;
+        });
+    socket.set_peer_task(peer_id, task);
 }
 
 #[cfg(test)]

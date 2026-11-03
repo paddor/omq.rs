@@ -2,6 +2,7 @@ use super::*;
 use bytes::Bytes;
 use omq_proto::proto::SocketType;
 use tokio::io::AsyncWrite;
+use tokio::net::TcpStream;
 #[cfg(unix)]
 use tokio::net::UnixStream;
 

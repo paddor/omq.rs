@@ -63,8 +63,7 @@ impl TransmitProfile {
 
 /// Send-side state from carrier-specific setup.
 pub(super) struct WireCarrier {
-    #[cfg(target_os = "linux")]
-    pub(super) shm: Option<crate::transport::shm::ShmState>,
+    pub(super) shm: Option<crate::engine::shm_state::ShmState>,
     pub(super) direct_tcp_writer: Option<Arc<crate::socket::direct_writer::DirectTcpWriter>>,
 }
 
@@ -82,6 +81,8 @@ pub(super) fn prepare_wire_carrier(
         &peer.options,
         &socket.resources.shm_send_pool,
     )?;
+    #[cfg(not(target_os = "linux"))]
+    let shm = None;
     let Ok((stream, direct_tcp_writer)) =
         split_direct_tcp_writer(socket, stream, &peer.endpoint, profile)
     else {
@@ -89,7 +90,6 @@ pub(super) fn prepare_wire_carrier(
     };
 
     let carrier = WireCarrier {
-        #[cfg(target_os = "linux")]
         shm,
         direct_tcp_writer,
     };

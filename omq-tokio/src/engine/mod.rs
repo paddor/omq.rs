@@ -26,6 +26,7 @@ pub(crate) mod receive_cell;
 mod recv_sink;
 pub(crate) use recv_sink::reserve_authenticated;
 pub(crate) mod send_pipe;
+pub(crate) mod shm_state;
 pub(crate) mod signal;
 pub(crate) mod single_inbox;
 pub(crate) mod transmit_slot;

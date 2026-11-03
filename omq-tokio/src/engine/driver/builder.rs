@@ -220,22 +220,13 @@ where
         self
     }
 
-    #[cfg(target_os = "linux")]
-    pub(crate) fn with_shm(mut self, state: Option<crate::transport::shm::ShmState>) -> Self {
+    pub(crate) fn with_shm(mut self, state: Option<crate::engine::shm_state::ShmState>) -> Self {
         self.receive.shm = state;
         self
     }
 
-    #[cfg_attr(not(target_os = "linux"), expect(clippy::unused_self))]
     pub(crate) fn uses_shm(&self) -> bool {
-        #[cfg(target_os = "linux")]
-        {
-            self.receive.shm.is_some()
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            false
-        }
+        self.receive.shm.is_some()
     }
 
     pub(crate) fn with_recv_parts(mut self, count: usize) -> Self {

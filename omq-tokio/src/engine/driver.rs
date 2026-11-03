@@ -258,8 +258,7 @@ struct ReceiveSetup {
     /// Output storage for decompressed payloads.
     payload_pool: Option<omq_proto::PayloadPool>,
     ip_rate_limiter: Option<(Arc<SharedIpRateLimiter>, IpAddr)>,
-    #[cfg(target_os = "linux")]
-    shm: Option<crate::transport::shm::ShmState>,
+    shm: Option<crate::engine::shm_state::ShmState>,
 }
 
 impl Default for ReceiveSetup {
@@ -270,7 +269,6 @@ impl Default for ReceiveSetup {
             profile: ReceiveProfile::Throughput,
             payload_pool: None,
             ip_rate_limiter: None,
-            #[cfg(target_os = "linux")]
             shm: None,
         }
     }

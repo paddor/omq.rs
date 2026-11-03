@@ -1,6 +1,5 @@
 //! Natural batching, ordered encoding, and compression offloads.
 
-#[cfg(target_os = "linux")]
 use super::shm;
 use super::{BATCH_TIME_CHECK_MSGS, OUTBOUND_BATCH_TIME};
 use crate::engine::compression_pool::{CompressionPool, EncoderLoan};
@@ -31,7 +30,6 @@ pub(super) struct OutboundState {
     pub(super) offload_threshold: usize,
     pub(super) offload_pipeline: OffloadPipeline,
     level_window: Option<LevelWindow>,
-    #[cfg(target_os = "linux")]
     shm: Option<shm::Outbound>,
 }
 
@@ -61,20 +59,19 @@ impl LevelWindow {
 
 impl std::fmt::Debug for OutboundState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut debug = f.debug_struct("OutboundState");
-        debug
+        f.debug_struct("OutboundState")
             .field("has_encoder", &self.encoder.is_some())
             .field("has_passthrough", &self.passthrough.is_some())
             .field("has_compression_pool", &self.compression_pool.is_some())
             .field("offload_threshold", &self.offload_threshold)
             .field("offload_pipeline_len", &self.offload_pipeline.len())
-            .field("level_window", &self.level_window);
-        #[cfg(target_os = "linux")]
-        debug.field("shm", &self.shm.is_some()).field(
-            "shm_pending",
-            &self.shm.as_ref().map_or(0, shm::Outbound::pending_len),
-        );
-        debug.finish()
+            .field("level_window", &self.level_window)
+            .field("shm", &self.shm.is_some())
+            .field(
+                "shm_pending",
+                &self.shm.as_ref().map_or(0, shm::Outbound::pending_len),
+            )
+            .finish()
     }
 }
 
@@ -83,7 +80,7 @@ impl OutboundState {
         encoder: Option<MessageEncoder>,
         compression_pool: Option<Arc<CompressionPool>>,
         offload_threshold: usize,
-        #[cfg(target_os = "linux")] shm_state: Option<crate::transport::shm::ShmState>,
+        shm_state: Option<crate::engine::shm_state::ShmState>,
     ) -> Self {
         let passthrough = encoder.as_ref().and_then(MessageEncoder::passthrough_info);
         let level_window = encoder
@@ -97,7 +94,6 @@ impl OutboundState {
             offload_threshold,
             offload_pipeline: FuturesOrdered::new(),
             level_window,
-            #[cfg(target_os = "linux")]
             shm: shm_state.map(shm::Outbound::new),
         }
     }
@@ -113,7 +109,6 @@ impl OutboundState {
         eq: &mut FrameBuffer,
     ) -> Result<bool> {
         let max_msgs = OUTBOUND_BATCH_MAX_MSGS;
-        #[cfg(target_os = "linux")]
         if let Some(shm) = &mut self.shm {
             return shm
                 .stage(first, try_recv, max_msgs, eq)
@@ -416,41 +411,18 @@ impl OutboundState {
         }
     }
 
-    #[cfg_attr(not(target_os = "linux"), expect(clippy::unused_self))]
     pub(super) fn has_pending_shm(&self) -> bool {
-        #[cfg(target_os = "linux")]
-        {
-            self.shm.as_ref().is_some_and(shm::Outbound::has_pending)
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            false
-        }
+        self.shm.as_ref().is_some_and(shm::Outbound::has_pending)
     }
 
-    #[cfg_attr(not(target_os = "linux"), expect(clippy::unused_self))]
     pub(super) fn uses_shm(&self) -> bool {
-        #[cfg(target_os = "linux")]
-        {
-            self.shm.is_some()
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            false
-        }
+        self.shm.is_some()
     }
 
-    #[cfg_attr(
-        not(target_os = "linux"),
-        expect(clippy::unused_self, clippy::unnecessary_wraps)
-    )]
     pub(super) fn drain_shm(&mut self, eq: &mut FrameBuffer) -> Result<()> {
-        #[cfg(target_os = "linux")]
         if let Some(shm) = &mut self.shm {
             shm.drain(eq)?;
         }
-        #[cfg(not(target_os = "linux"))]
-        let _ = eq;
         Ok(())
     }
 
@@ -589,13 +561,7 @@ mod tests {
         let (encoder, _) = MessageEncoder::for_compression_kind(CompressionKind::Zstd, options)
             .unwrap()
             .unwrap();
-        OutboundState::new(
-            Some(encoder),
-            None,
-            0,
-            #[cfg(target_os = "linux")]
-            None,
-        )
+        OutboundState::new(Some(encoder), None, 0, None)
     }
 
     fn level(state: &OutboundState) -> i32 {

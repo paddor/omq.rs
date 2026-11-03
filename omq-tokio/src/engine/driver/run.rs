@@ -109,8 +109,7 @@ struct Waits<'w, D, F, G, A, H> {
 /// Inbound decode and delivery settings.
 struct ReceivePath {
     rate_limiter: Option<TokenBucket>,
-    #[cfg(target_os = "linux")]
-    shm: Option<crate::transport::shm::ShmState>,
+    shm: Option<crate::engine::shm_state::ShmState>,
     ip_rate_limiter: Option<(Arc<SharedIpRateLimiter>, IpAddr)>,
     payload_pool: Option<PayloadPool>,
     profile: ReceiveProfile,
@@ -124,7 +123,6 @@ impl ReceivePath {
             rate_limiter: config
                 .recv_rate_limit
                 .map(|limit| TokenBucket::new(limit, Instant::now())),
-            #[cfg(target_os = "linux")]
             shm: setup.shm,
             ip_rate_limiter: setup.ip_rate_limiter,
             payload_pool: setup.payload_pool,
@@ -140,14 +138,13 @@ impl OutputSetup {
     /// takes owned chunks.
     fn into_queued(
         self,
-        #[cfg(target_os = "linux")] shm: Option<crate::transport::shm::ShmState>,
+        shm: Option<crate::engine::shm_state::ShmState>,
         owned_chunks: bool,
     ) -> QueuedOutput {
         let encoding = OutboundState::new(
             self.encoder,
             self.compression_pool,
             self.offload_threshold,
-            #[cfg(target_os = "linux")]
             shm,
         );
         QueuedOutput::new(
@@ -312,10 +309,7 @@ where
             peer_control,
             setup_cancel,
         } = wiring;
-        let shm_peer_death = shm::peer_death(
-            #[cfg(target_os = "linux")]
-            session.receive.shm.clone(),
-        );
+        let shm_peer_death = shm::peer_death(session.receive.shm.clone());
         tokio::pin!(shm_peer_death);
 
         // Socket-owned drivers publish codec events on a separate control
@@ -377,11 +371,9 @@ where
         let receive = ReceivePath::new(self.receive, &self.config);
         let latency_profile = !matches!(receive.profile, ReceiveProfile::Throughput);
         let (reader, mut writer) = self.stream.split(latency_profile);
-        let output = self.output.into_queued(
-            #[cfg(target_os = "linux")]
-            receive.shm.clone(),
-            writer.chunk_writer().is_some(),
-        );
+        let output = self
+            .output
+            .into_queued(receive.shm.clone(), writer.chunk_writer().is_some());
 
         // The transport's own setup deadline wins over the handshake timeout.
         let heartbeat = Heartbeat::new(&self.config);
@@ -399,10 +391,7 @@ where
             _slot_lifetime: TransmitSlotLifetime(self.transmit_slot.clone()),
             output,
             read: StreamRead::new(receive.profile),
-            shm_driver: shm::Driver::new(
-                #[cfg(target_os = "linux")]
-                receive.shm.clone(),
-            ),
+            shm_driver: shm::Driver::new(receive.shm.clone()),
             receive,
             transmit_slot: self.transmit_slot,
             delivery: Delivery::new(self.recv_direct, self.socket_close_state),
@@ -625,11 +614,8 @@ impl<'c> Session<'c> {
             if self.delivery.pending.take().is_some() {
                 authenticated.rearm();
             }
-            self.delivery.discard_pending = discard_received_messages(
-                &mut self.connection,
-                #[cfg(target_os = "linux")]
-                self.receive.shm.as_ref(),
-            )?;
+            self.delivery.discard_pending =
+                discard_received_messages(&mut self.connection, self.receive.shm.as_ref())?;
             return Ok(Flow::Next);
         }
 
@@ -652,7 +638,6 @@ impl<'c> Session<'c> {
             connection: &mut self.connection,
             decoder: &mut receive.decoder,
             payload_pool: receive.payload_pool.as_ref(),
-            #[cfg(target_os = "linux")]
             shm: receive.shm.as_ref(),
         };
 

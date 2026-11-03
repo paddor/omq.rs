@@ -1,9 +1,10 @@
 //! Decoded delivery, receive budgets, and rate limits.
 
-use super::{BATCH_TIME_CHECK_MSGS, DriverStep, RecvSink};
+use super::{BATCH_TIME_CHECK_MSGS, DriverStep, RecvSink, shm};
 use crate::engine::{
     actor_output::OutletRef,
     rate_limit::{SharedIpRateLimiter, TokenBucket},
+    shm_state::{self, ShmConnection, ShmState},
 };
 use omq_proto::{
     Message, WorkloadProfile,
@@ -179,23 +180,14 @@ pub(super) struct DecodeInput<'a> {
     pub(super) connection: &'a mut Connection,
     pub(super) decoder: &'a mut Option<MessageDecoder>,
     pub(super) payload_pool: Option<&'a omq_proto::PayloadPool>,
-    #[cfg(target_os = "linux")]
-    pub(super) shm: Option<&'a crate::transport::shm::ShmState>,
+    pub(super) shm: Option<&'a ShmState>,
 }
 
 impl DecodeInput<'_> {
     /// SHM delivery moves message headers after carrier input is budgeted,
     /// so untransformed SHM receives are charged one header each.
-    #[cfg_attr(not(target_os = "linux"), expect(clippy::unused_self))]
     fn charges_headers(&self) -> bool {
-        #[cfg(target_os = "linux")]
-        {
-            self.shm.is_some() && self.decoder.is_none()
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            false
-        }
+        self.shm.is_some() && self.decoder.is_none()
     }
 }
 
@@ -320,20 +312,14 @@ pub(super) fn drain_decoded_messages(
         connection,
         decoder,
         payload_pool,
-        #[cfg(target_os = "linux")]
         shm,
     } = input;
-    #[cfg(target_os = "linux")]
-    let mut shm_guard = shm.map(|state| state.lock().expect("SHM connection"));
+    let mut shm_guard = shm.map(shm_state::lock);
 
     loop {
-        let m = match poll_decoded_message(
-            connection,
-            decoder,
-            payload_pool,
-            #[cfg(target_os = "linux")]
-            shm_guard.as_deref_mut(),
-        ) {
+        let polled =
+            poll_decoded_message(connection, decoder, payload_pool, shm_guard.as_deref_mut());
+        let m = match polled {
             Ok(DecodedReceive::Message(message)) => message,
             Ok(DecodedReceive::Setup) => continue,
             Ok(DecodedReceive::Empty) => break,
@@ -369,17 +355,12 @@ fn poll_decoded_message(
     connection: &mut Connection,
     decoder: &mut Option<MessageDecoder>,
     pool: Option<&omq_proto::PayloadPool>,
-    #[cfg(target_os = "linux")] shm: Option<&mut omq_shm::Connection>,
+    shm: Option<&mut ShmConnection>,
 ) -> Result<DecodedReceive> {
     if let Some(message) = decoder.as_mut().and_then(MessageDecoder::poll_message) {
         return Ok(DecodedReceive::Message(message));
     }
-    let Some(wire) = poll_received_locked(
-        connection,
-        #[cfg(target_os = "linux")]
-        shm,
-    )?
-    else {
+    let Some(wire) = poll_received_locked(connection, shm)? else {
         return Ok(DecodedReceive::Empty);
     };
     let message = match decoder {
@@ -392,7 +373,7 @@ fn poll_decoded_message(
 #[cfg(target_os = "linux")]
 pub(super) fn drain_shm_batches(
     connection: &mut Connection,
-    shm: &crate::transport::shm::ShmState,
+    shm: &ShmState,
     profile: ReceiveProfile,
     mut delivery: MessageDelivery<'_>,
 ) -> Result<DriverStep> {
@@ -449,49 +430,32 @@ pub(super) fn drain_shm_batches(
     }
 }
 
-#[cfg_attr(not(target_os = "linux"), expect(clippy::unnecessary_wraps))]
-pub(super) fn poll_received_locked(
+fn poll_received_locked(
     connection: &mut Connection,
-    #[cfg(target_os = "linux")] shm: Option<&mut omq_shm::Connection>,
+    shm: Option<&mut ShmConnection>,
 ) -> Result<Option<Message>> {
-    #[cfg(target_os = "linux")]
     if let Some(state) = shm {
-        if let Some(message) = state.poll_received() {
-            return Ok(Some(message));
-        }
-        return connection
-            .poll_message()
-            .map(|message| state.decode_received(message))
-            .transpose();
+        return shm::poll_received(connection, state);
     }
     Ok(connection.poll_message())
 }
 
-pub(super) fn poll_received_message(
+fn poll_received_message(
     connection: &mut Connection,
-    #[cfg(target_os = "linux")] shm: Option<&crate::transport::shm::ShmState>,
+    shm: Option<&ShmState>,
 ) -> Result<Option<Message>> {
-    #[cfg(target_os = "linux")]
-    let mut guard = shm.map(|state| state.lock().expect("SHM connection"));
-    poll_received_locked(
-        connection,
-        #[cfg(target_os = "linux")]
-        guard.as_deref_mut(),
-    )
+    let mut guard = shm.map(shm_state::lock);
+    poll_received_locked(connection, guard.as_deref_mut())
 }
 
 /// Closed sockets no longer deliver receives, but must keep parsing control
 /// traffic while accepted output drains. Bound even the discard work.
 pub(super) fn discard_received_messages(
     connection: &mut Connection,
-    #[cfg(target_os = "linux")] shm: Option<&crate::transport::shm::ShmState>,
+    shm: Option<&ShmState>,
 ) -> Result<bool> {
     let mut budget = DrainBudget::new(256, 1024 * 1024);
-    while let Some(message) = poll_received_message(
-        connection,
-        #[cfg(target_os = "linux")]
-        shm,
-    )? {
+    while let Some(message) = poll_received_message(connection, shm)? {
         let bytes = message.byte_len();
         if !budget.account(bytes) {
             return Ok(true);

@@ -244,7 +244,6 @@ fn prepare_wire_driver(
     );
     let peer_driver = configure_actor_driver(socket, peer_driver, &peer, setup.as_ref(), profile);
     let peer_driver = attach_transforms(socket, peer_driver, transforms);
-    #[cfg(target_os = "linux")]
     let peer_driver = peer_driver.with_shm(carrier.shm.clone());
     let peer_driver = attach_ip_rate_limit(socket, peer_driver, &peer.ident);
 
@@ -286,7 +285,6 @@ fn attach_wire_send_path(
 ) -> ConnectionDriver<AnyStream> {
     let arena = send.transmit.arena;
     let transmit_slot = build_transmit_slot(socket, peer_id, send.transmit);
-    #[cfg(target_os = "linux")]
     if let (Some(slot), Some(state)) = (&transmit_slot, send.carrier.shm) {
         slot.set_shm(state);
     }

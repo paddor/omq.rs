@@ -1,12 +1,12 @@
 // SHM records encoded per recipient into the slot's FrameBuffer.
 
-#[cfg(target_os = "linux")]
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use omq_proto::message::Message;
 
 use super::{PeerTransmitSlot, TryFrameResult};
+use crate::engine::shm_state::ShmState;
 
 /// SHM record kinds published by per-recipient encoding.
 #[derive(Debug, Clone, Copy)]
@@ -20,8 +20,7 @@ enum ShmRecord {
 
 /// SHM encoding state, set once after a SHM handshake.
 pub(super) struct SlotShm {
-    #[cfg(target_os = "linux")]
-    state: OnceLock<crate::transport::shm::ShmState>,
+    state: OnceLock<ShmState>,
     /// The last encode found no free lease; cleared when credit returns.
     credit_blocked: AtomicBool,
 }
@@ -29,7 +28,6 @@ pub(super) struct SlotShm {
 impl SlotShm {
     pub(super) fn new() -> Self {
         Self {
-            #[cfg(target_os = "linux")]
             state: OnceLock::new(),
             credit_blocked: AtomicBool::new(false),
         }
@@ -37,27 +35,17 @@ impl SlotShm {
 }
 
 impl PeerTransmitSlot {
-    #[cfg(target_os = "linux")]
-    pub(crate) fn set_shm(&self, state: crate::transport::shm::ShmState) {
+    pub(crate) fn set_shm(&self, state: ShmState) {
         self.shm
             .state
             .set(state)
             .expect("SHM slot initialized once");
     }
 
-    #[cfg_attr(not(target_os = "linux"), expect(clippy::unused_self))]
     pub(crate) fn is_shm(&self) -> bool {
-        #[cfg(target_os = "linux")]
-        {
-            self.shm.state.get().is_some()
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            false
-        }
+        self.shm.state.get().is_some()
     }
 
-    #[cfg(target_os = "linux")]
     pub(crate) fn shm_credit_blocked(&self) -> bool {
         self.shm.credit_blocked.load(Ordering::Acquire)
     }

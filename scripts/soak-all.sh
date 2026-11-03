@@ -208,7 +208,11 @@ if [[ "${SOAK_SKIP_PREBUILD:-0}" != "1" ]]; then
   "$cargo_cmd" build --release --manifest-path bindings/go/native/Cargo.toml
   "$cargo_cmd" build --release --manifest-path bindings/java/native/Cargo.toml \
     --features plain,curve,lz4,zstd
-  mvn -f bindings/java/pom.xml -DskipNative=true -DskipTests test-compile
+  java_toolchains=()
+  if [[ -f bindings/java/toolchains.xml ]]; then
+    java_toolchains=(-t bindings/java/toolchains.xml)
+  fi
+  mvn "${java_toolchains[@]}" -f bindings/java/pom.xml -DskipNative=true -DskipTests test-compile
   "$cargo_cmd" build --release --manifest-path bindings/lua/native/Cargo.toml
   "$cargo_cmd" build --release --manifest-path bindings/node/Cargo.toml
   (

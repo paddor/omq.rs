@@ -75,12 +75,14 @@ fn get_queue_option(sock_arc: &Arc<OmqSocket>, option: c_int, out: OptOut) -> Re
     match option {
         ZMQ_SNDTIMEO => out.i32(
             sock_arc
-                .sndtimeo_ms
+                .send
+                .timeout_ms
                 .load(std::sync::atomic::Ordering::Relaxed) as i32,
         ),
         ZMQ_RCVTIMEO => out.i32(
             sock_arc
-                .rcvtimeo_ms
+                .recv
+                .timeout_ms
                 .load(std::sync::atomic::Ordering::Relaxed) as i32,
         ),
         ZMQ_SNDHWM => {
@@ -122,7 +124,7 @@ fn get_state_option(sock_arc: &Arc<OmqSocket>, option: c_int, out: OptOut) -> Re
         }
         ZMQ_EVENTS => out.i32(poll_events(sock_arc)),
         ZMQ_LAST_ENDPOINT => {
-            let Ok(ep) = sock_arc.last_endpoint.lock() else {
+            let Ok(ep) = sock_arc.endpoints.last.lock() else {
                 return Err(crate::error::ETERM);
             };
             let s = ep.as_deref().unwrap_or("");

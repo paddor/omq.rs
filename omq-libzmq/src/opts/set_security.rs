@@ -306,6 +306,7 @@ pub extern "C" fn omq_socket_set_plain_server_credentials(
     // SAFETY: C callers pass null or a pointer from this API.
     let socket = c_try!(unsafe { crate::handle::socket(sock) });
     if socket
+        .endpoints
         .bound_or_connected
         .load(std::sync::atomic::Ordering::Acquire)
     {

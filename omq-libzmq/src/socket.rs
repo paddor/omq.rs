@@ -2,7 +2,7 @@
 //! `endpoint`, backend creation in `materialize`.
 
 use std::ffi::{c_int, c_void};
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use omq_tokio::SocketType;
@@ -22,7 +22,7 @@ pub use endpoint::{
     zmq_leave, zmq_unbind,
 };
 pub(crate) use materialize::{RecvConsumers, ensure_materialized};
-pub(crate) use state::{RecvState, SendState};
+pub(crate) use state::{EndpointState, RecvState, SendState};
 
 pub use monitor::{
     zmq_socket_get_peer_state, zmq_socket_monitor, zmq_socket_monitor_pipes_stats,
@@ -38,18 +38,14 @@ pub(crate) struct OmqSocket {
     pub ctx: Arc<OmqContext>,
     pub socket_type: SocketType,
     pub overlay: Mutex<SocketOverlay>,
-    pub sndtimeo_ms: AtomicI64,
-    pub rcvtimeo_ms: AtomicI64,
     pub send: SendState,
     pub recv: RecvState,
     /// The inner omq-tokio socket. Send+Sync, stored directly.
     pub inner: std::sync::OnceLock<Arc<omq_tokio::Socket>>,
-    pub last_endpoint: Mutex<Option<String>>,
+    pub endpoints: EndpointState,
     pub notify: Arc<PlatformNotifyHandle>,
     /// True for the REP socket bound to the reserved ZAP endpoint.
     pub(crate) zap_handler: AtomicBool,
-    pub bound_or_connected: AtomicBool,
-    pub connect_count: AtomicUsize,
 }
 
 impl OmqSocket {
@@ -173,16 +169,12 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
         ctx: ctx.clone(),
         socket_type,
         overlay: Mutex::new(overlay),
-        sndtimeo_ms: AtomicI64::new(-1),
-        rcvtimeo_ms: AtomicI64::new(-1),
         send: SendState::new(queue_without_ready_peer),
         recv: RecvState::new(),
         inner: std::sync::OnceLock::new(),
-        last_endpoint: Mutex::new(None),
+        endpoints: EndpointState::new(),
         notify,
         zap_handler: AtomicBool::new(false),
-        bound_or_connected: AtomicBool::new(false),
-        connect_count: AtomicUsize::new(0),
     });
     sock.ctx.socket_opened();
     sock.ctx.register_socket(&sock);

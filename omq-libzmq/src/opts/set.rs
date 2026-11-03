@@ -86,13 +86,15 @@ fn set_queue_option(
         ZMQ_SNDTIMEO => {
             let v = optval.i32()?;
             sock_arc
-                .sndtimeo_ms
+                .send
+                .timeout_ms
                 .store(i64::from(v), std::sync::atomic::Ordering::Relaxed);
         }
         ZMQ_RCVTIMEO => {
             let v = optval.i32()?;
             sock_arc
-                .rcvtimeo_ms
+                .recv
+                .timeout_ms
                 .store(i64::from(v), std::sync::atomic::Ordering::Relaxed);
         }
         ZMQ_SNDHWM => {

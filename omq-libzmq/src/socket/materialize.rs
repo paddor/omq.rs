@@ -196,6 +196,7 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) -> Result<(), c_int> {
 
     // CAS guarantees exactly one thread wins the materialization race.
     if sock
+        .endpoints
         .bound_or_connected
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()

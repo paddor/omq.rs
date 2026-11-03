@@ -249,6 +249,7 @@ fn round_robin_send_mutes_without_ready_peer(sock: &OmqSocket) -> bool {
 
 fn can_queue_without_ready_peer(sock: &OmqSocket) -> bool {
     if sock
+        .endpoints
         .connect_count
         .load(std::sync::atomic::Ordering::Acquire)
         == 0
@@ -276,7 +277,10 @@ impl SendCall {
         Self {
             ret_len,
             flags,
-            sndtimeo: sock.sndtimeo_ms.load(std::sync::atomic::Ordering::Relaxed),
+            sndtimeo: sock
+                .send
+                .timeout_ms
+                .load(std::sync::atomic::Ordering::Relaxed),
         }
     }
 
@@ -364,7 +368,10 @@ struct RecvWait {
 
 impl RecvWait {
     fn new(sock: &OmqSocket, flags: c_int) -> Self {
-        let rcvtimeo = sock.rcvtimeo_ms.load(std::sync::atomic::Ordering::Relaxed);
+        let rcvtimeo = sock
+            .recv
+            .timeout_ms
+            .load(std::sync::atomic::Ordering::Relaxed);
         Self {
             nonblocking: (flags & ZMQ_DONTWAIT) != 0 || rcvtimeo == 0,
             rcvtimeo,

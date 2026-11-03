@@ -118,8 +118,10 @@ pub extern "C" fn zmq_bind(sock_ptr: *mut c_void, addr: *const libc::c_char) -> 
     if addr_str == crate::zap::ENDPOINT {
         c_try!(sock.ctx.zap.bind(sock));
         sock.zap_handler.store(true, Ordering::Release);
-        sock.bound_or_connected.store(true, Ordering::Release);
-        if let Ok(mut ep) = sock.last_endpoint.lock() {
+        sock.endpoints
+            .bound_or_connected
+            .store(true, Ordering::Release);
+        if let Ok(mut ep) = sock.endpoints.last.lock() {
             *ep = Some(addr_str);
         }
         return 0;
@@ -148,7 +150,7 @@ pub extern "C" fn zmq_bind(sock_ptr: *mut c_void, addr: *const libc::c_char) -> 
         }
         Ok(s.last_bound_endpoint().map(|ep| ep.to_string()))
     }));
-    if let Ok(mut ep) = sock.last_endpoint.lock() {
+    if let Ok(mut ep) = sock.endpoints.last.lock() {
         *ep = resolved.or(Some(addr_str));
     }
     0
@@ -182,8 +184,8 @@ pub extern "C" fn zmq_connect(sock_ptr: *mut c_void, addr: *const libc::c_char) 
             s.connect(endpoint).await
         }
     }));
-    sock.connect_count.fetch_add(1, Ordering::AcqRel);
-    if let Ok(mut ep) = sock.last_endpoint.lock() {
+    sock.endpoints.connect_count.fetch_add(1, Ordering::AcqRel);
+    if let Ok(mut ep) = sock.endpoints.last.lock() {
         *ep = Some(addr_str);
     }
     0
@@ -196,8 +198,10 @@ pub extern "C" fn zmq_unbind(sock_ptr: *mut c_void, addr: *const libc::c_char) -
 
     if addr_str == crate::zap::ENDPOINT && sock.zap_handler.swap(false, Ordering::AcqRel) {
         sock.ctx.zap.unbind(sock.id);
-        sock.bound_or_connected.store(false, Ordering::Release);
-        if let Ok(mut endpoint) = sock.last_endpoint.lock() {
+        sock.endpoints
+            .bound_or_connected
+            .store(false, Ordering::Release);
+        if let Ok(mut endpoint) = sock.endpoints.last.lock() {
             *endpoint = None;
         }
         return 0;
@@ -226,6 +230,7 @@ pub extern "C" fn zmq_disconnect(sock_ptr: *mut c_void, addr: *const libc::c_cha
     // Atomic::try_update is unstable on MSRV 1.93.
     #[allow(deprecated)]
     let _ = sock
+        .endpoints
         .connect_count
         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
             Some(n.saturating_sub(1))

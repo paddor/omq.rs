@@ -88,7 +88,7 @@ impl ZapService {
             omq_tokio::SocketType::Router => HandlerKind::Router,
             _ => return Err(libc::EINVAL),
         };
-        if handler.bound_or_connected.load(Ordering::Acquire) {
+        if handler.endpoints.bound_or_connected.load(Ordering::Acquire) {
             return Err(libc::EINVAL);
         }
         let mut state = self.state.lock().map_err(|_| ETERM)?;

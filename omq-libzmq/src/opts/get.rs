@@ -256,15 +256,15 @@ fn get_message_option(
 fn get_tuning_option(sock_arc: &Arc<OmqSocket>, option: c_int, out: OptOut) -> Result<bool, c_int> {
     match option {
         OMQ_COMPRESSION_LEVEL => {
-            let v = overlay(sock_arc)?.compression_level.unwrap_or(0);
+            let v = overlay(sock_arc)?.compression.level.unwrap_or(0);
             out.i32(v)
         }
         OMQ_COMPRESSION_DICT => {
             let ov = overlay(sock_arc)?;
-            out.bytes(ov.compression_dict.as_deref().unwrap_or(b""))
+            out.bytes(ov.compression.dict.as_deref().unwrap_or(b""))
         }
         OMQ_COMPRESSION_AUTO_TRAIN => {
-            let v = overlay(sock_arc)?.compression_auto_train;
+            let v = overlay(sock_arc)?.compression.auto_train;
             out.i32(i32::from(v))
         }
         OMQ_WORKLOAD_PROFILE => {
@@ -290,24 +290,27 @@ fn get_reconnect_option(
     match option {
         ZMQ_RECONNECT_IVL => {
             let v = overlay(sock_arc)?
-                .reconnect_ivl
+                .reconnect
+                .ivl
                 .map_or(-1, |d| d.as_millis() as i32);
             out.i32(v)
         }
         ZMQ_RECONNECT_IVL_MAX => {
             let v = overlay(sock_arc)?
-                .reconnect_ivl_max
+                .reconnect
+                .ivl_max
                 .map_or(0, |d| d.as_millis() as i32);
             out.i32(v)
         }
-        ZMQ_RECONNECT_STOP => out.i32(overlay(sock_arc)?.reconnect_stop),
+        ZMQ_RECONNECT_STOP => out.i32(overlay(sock_arc)?.reconnect.stop),
         ZMQ_HANDSHAKE_IVL => {
             let v = overlay(sock_arc)?
+                .reconnect
                 .handshake_ivl
                 .map_or(DEFAULT_HANDSHAKE_IVL_MS, |d| d.as_millis() as i32);
             out.i32(v)
         }
-        ZMQ_CONNECT_TIMEOUT => out.i32(overlay(sock_arc)?.connect_timeout),
+        ZMQ_CONNECT_TIMEOUT => out.i32(overlay(sock_arc)?.reconnect.connect_timeout),
         _ => return Ok(false),
     }?;
 
@@ -323,19 +326,22 @@ fn get_heartbeat_option(
     match option {
         ZMQ_HEARTBEAT_IVL => {
             let v = overlay(sock_arc)?
-                .heartbeat_ivl
+                .heartbeat
+                .ivl
                 .map_or(0, |d| d.as_millis() as i32);
             out.i32(v)
         }
         ZMQ_HEARTBEAT_TTL => {
             let v = overlay(sock_arc)?
-                .heartbeat_ttl
+                .heartbeat
+                .ttl
                 .map_or(0, |d| d.as_millis() as i32);
             out.i32(v)
         }
         ZMQ_HEARTBEAT_TIMEOUT => {
             let v = overlay(sock_arc)?
-                .heartbeat_timeout
+                .heartbeat
+                .timeout
                 .map_or(0, |d| d.as_millis() as i32);
             out.i32(v)
         }
@@ -349,29 +355,29 @@ fn get_heartbeat_option(
 fn get_tcp_option(sock_arc: &Arc<OmqSocket>, option: c_int, out: OptOut) -> Result<bool, c_int> {
     match option {
         ZMQ_TCP_KEEPALIVE => {
-            let v = overlay(sock_arc)?.tcp_keepalive;
+            let v = overlay(sock_arc)?.tcp.keepalive;
             out.i32(v)
         }
         ZMQ_TCP_KEEPALIVE_CNT => {
-            let v = overlay(sock_arc)?
-                .tcp_keepalive_cnt
-                .map_or(-1, |n| n as i32);
+            let v = overlay(sock_arc)?.tcp.cnt.map_or(-1, |n| n as i32);
             out.i32(v)
         }
         ZMQ_TCP_KEEPALIVE_IDLE => {
             let v = overlay(sock_arc)?
-                .tcp_keepalive_idle
+                .tcp
+                .idle
                 .map_or(-1, |d| d.as_secs() as i32);
             out.i32(v)
         }
         ZMQ_TCP_KEEPALIVE_INTVL => {
             let v = overlay(sock_arc)?
-                .tcp_keepalive_intvl
+                .tcp
+                .intvl
                 .map_or(-1, |d| d.as_secs() as i32);
             out.i32(v)
         }
         ZMQ_TCP_MAXRT => {
-            let v = overlay(sock_arc)?.tcp_maxrt;
+            let v = overlay(sock_arc)?.tcp.maxrt;
             out.i32(v)
         }
         _ => return Ok(false),
@@ -499,9 +505,9 @@ fn get_plain_option(sock_arc: &Arc<OmqSocket>, option: c_int, out: OptOut) -> Re
         }
         ZMQ_ZAP_DOMAIN => {
             let overlay = overlay(sock_arc)?;
-            out.string(overlay.zap_domain.as_bytes())
+            out.string(overlay.zap.domain.as_bytes())
         }
-        ZMQ_ZAP_ENFORCE_DOMAIN => out.i32(i32::from(overlay(sock_arc)?.zap_enforce_domain)),
+        ZMQ_ZAP_ENFORCE_DOMAIN => out.i32(i32::from(overlay(sock_arc)?.zap.enforce)),
         _ => return Ok(false),
     }?;
 
@@ -552,9 +558,9 @@ fn get_curve_option(sock_arc: &Arc<OmqSocket>, option: c_int, out: OptOut) -> Re
 /// WebSocket peer limit and origin policy.
 fn get_ws_option(sock_arc: &Arc<OmqSocket>, option: c_int, out: OptOut) -> Result<bool, c_int> {
     match option {
-        OMQ_WS_MAX_READY_PEERS => out.i32(overlay(sock_arc)?.ws_max_ready_peers),
+        OMQ_WS_MAX_READY_PEERS => out.i32(overlay(sock_arc)?.ws.max_ready_peers),
         OMQ_WS_ALLOWED_ORIGINS => {
-            out.bytes(overlay(sock_arc)?.ws_allowed_origins.join("\n").as_bytes())
+            out.bytes(overlay(sock_arc)?.ws.allowed_origins.join("\n").as_bytes())
         }
         _ => return Ok(false),
     }?;
@@ -568,24 +574,25 @@ fn get_wss_option(sock_arc: &Arc<OmqSocket>, option: c_int, out: OptOut) -> Resu
         ZMQ_WSS_KEY_PEM => {
             let ov = overlay(sock_arc)?;
             out.bytes(
-                ov.wss_key_pem
+                ov.wss
+                    .key_pem
                     .as_ref()
                     .map_or(&[][..], |key| key.0.as_slice()),
             )
         }
         ZMQ_WSS_CERT_PEM => {
             let ov = overlay(sock_arc)?;
-            out.bytes(ov.wss_cert_pem.as_deref().unwrap_or(b""))
+            out.bytes(ov.wss.cert_pem.as_deref().unwrap_or(b""))
         }
         ZMQ_WSS_TRUST_PEM => {
             let ov = overlay(sock_arc)?;
-            out.bytes(ov.wss_trust_pem.as_deref().unwrap_or(b""))
+            out.bytes(ov.wss.trust_pem.as_deref().unwrap_or(b""))
         }
         ZMQ_WSS_HOSTNAME => {
             let ov = overlay(sock_arc)?;
-            out.string(ov.wss_hostname.as_deref().unwrap_or("").as_bytes())
+            out.string(ov.wss.hostname.as_deref().unwrap_or("").as_bytes())
         }
-        ZMQ_WSS_TRUST_SYSTEM => out.i32(i32::from(overlay(sock_arc)?.wss_trust_system)),
+        ZMQ_WSS_TRUST_SYSTEM => out.i32(i32::from(overlay(sock_arc)?.wss.trust_system)),
         _ => return Ok(false),
     }?;
 

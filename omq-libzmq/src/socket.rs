@@ -17,7 +17,7 @@ use std::os::raw::c_char;
 use crate::context::{OmqContext, next_socket_id};
 use crate::error::{ETERM, c_try, fail, map_omq_err, set_errno};
 use crate::notify::{NotifyHandle, PlatformNotifyHandle, RecvNotify};
-use crate::opts::{LingerSetting, MechanismOverlay, SocketOverlay};
+use crate::opts::{LingerSetting, MechanismOverlay, SocketOverlay, ZapOverlay};
 
 mod monitor;
 mod state;
@@ -265,8 +265,7 @@ pub extern "C" fn omq_socket_allow_thread_migration(sock_ptr: *mut c_void) -> c_
 /// ZAP-related overlay values, snapshotted under the overlay lock.
 struct ZapSettings {
     mechanism: MechanismOverlay,
-    domain: String,
-    enforce: bool,
+    zap: ZapOverlay,
     identity: Bytes,
 }
 
@@ -288,8 +287,7 @@ impl MaterializeSettings {
             queue_without_ready_peer: !overlay.immediate,
             zap: ZapSettings {
                 mechanism: overlay.mechanism.clone(),
-                domain: overlay.zap_domain.clone(),
-                enforce: overlay.zap_enforce_domain,
+                zap: overlay.zap.clone(),
                 identity: overlay.identity.clone(),
             },
         }
@@ -305,8 +303,11 @@ fn configure_zap_authentication(
 ) -> Result<bool, c_int> {
     let ZapSettings {
         mechanism,
-        domain: zap_domain,
-        enforce: zap_enforce,
+        zap:
+            ZapOverlay {
+                domain: zap_domain,
+                enforce: zap_enforce,
+            },
         identity,
     } = zap_settings;
 
@@ -348,7 +349,16 @@ fn configure_zap_authentication(
         zap.authorize(&query, timeout)
     });
     let setup = std::mem::replace(&mut opts.mechanism, omq_tokio::MechanismSetup::Null);
-    opts.mechanism = match setup {
+    opts.mechanism = with_authenticator(setup, authenticator);
+    Ok(true)
+}
+
+/// Hand a server mechanism's authentication to `authenticator`.
+fn with_authenticator(
+    setup: omq_tokio::MechanismSetup,
+    authenticator: omq_tokio::Authenticator,
+) -> omq_tokio::MechanismSetup {
+    match setup {
         omq_tokio::MechanismSetup::Null => omq_tokio::MechanismSetup::NullServer { authenticator },
         omq_tokio::MechanismSetup::PlainServer { .. } => {
             omq_tokio::MechanismSetup::PlainServer { authenticator }
@@ -364,8 +374,7 @@ fn configure_zap_authentication(
             }
         }
         other => other,
-    };
-    Ok(true)
+    }
 }
 
 /// Materialize the omq-tokio socket on the io thread with current overlay

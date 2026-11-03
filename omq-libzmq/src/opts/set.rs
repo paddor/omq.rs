@@ -180,14 +180,14 @@ fn set_tuning_option(
             if !(ZSTD_LEVEL_MIN..=ZSTD_LEVEL_MAX).contains(&v) {
                 return Err(libc::EINVAL);
             }
-            overlay(sock_arc)?.compression_level = Some(v);
+            overlay(sock_arc)?.compression.level = Some(v);
         }
         OMQ_COMPRESSION_DICT => {
             let v = optval.bytes()?;
             if v.len() > COMPRESSION_DICT_MAX {
                 return Err(libc::EINVAL);
             }
-            overlay(sock_arc)?.compression_dict = if v.is_empty() {
+            overlay(sock_arc)?.compression.dict = if v.is_empty() {
                 None
             } else {
                 Some(Bytes::from(v))
@@ -195,7 +195,7 @@ fn set_tuning_option(
         }
         OMQ_COMPRESSION_AUTO_TRAIN => {
             let v = optval.i32()?;
-            overlay(sock_arc)?.compression_auto_train = v != 0;
+            overlay(sock_arc)?.compression.auto_train = v != 0;
         }
         OMQ_WORKLOAD_PROFILE => {
             let v = optval.i32()?;
@@ -221,7 +221,7 @@ fn set_reconnect_option(
     match option {
         ZMQ_RECONNECT_IVL => {
             let v = optval.i32()?;
-            overlay(sock_arc)?.reconnect_ivl = if v <= 0 {
+            overlay(sock_arc)?.reconnect.ivl = if v <= 0 {
                 None
             } else {
                 Some(Duration::from_millis(v as u64))
@@ -229,7 +229,7 @@ fn set_reconnect_option(
         }
         ZMQ_RECONNECT_IVL_MAX => {
             let v = optval.i32()?;
-            overlay(sock_arc)?.reconnect_ivl_max = if v <= 0 {
+            overlay(sock_arc)?.reconnect.ivl_max = if v <= 0 {
                 None
             } else {
                 Some(Duration::from_millis(v as u64))
@@ -237,11 +237,11 @@ fn set_reconnect_option(
         }
         ZMQ_RECONNECT_STOP => {
             let v = optval.i32()?;
-            overlay(sock_arc)?.reconnect_stop = v;
+            overlay(sock_arc)?.reconnect.stop = v;
         }
         ZMQ_HANDSHAKE_IVL => {
             let v = optval.i32()?;
-            overlay(sock_arc)?.handshake_ivl = if v <= 0 {
+            overlay(sock_arc)?.reconnect.handshake_ivl = if v <= 0 {
                 None
             } else {
                 Some(Duration::from_millis(v as u64))
@@ -249,7 +249,7 @@ fn set_reconnect_option(
         }
         ZMQ_CONNECT_TIMEOUT => {
             let v = optval.i32()?;
-            overlay(sock_arc)?.connect_timeout = v;
+            overlay(sock_arc)?.reconnect.connect_timeout = v;
         }
         _ => return Ok(false),
     }
@@ -266,7 +266,7 @@ fn set_heartbeat_option(
     match option {
         ZMQ_HEARTBEAT_IVL => {
             let v = optval.i32()?;
-            overlay(sock_arc)?.heartbeat_ivl = if v <= 0 {
+            overlay(sock_arc)?.heartbeat.ivl = if v <= 0 {
                 None
             } else {
                 Some(Duration::from_millis(v as u64))
@@ -274,7 +274,7 @@ fn set_heartbeat_option(
         }
         ZMQ_HEARTBEAT_TTL => {
             let v = optval.i32()?;
-            overlay(sock_arc)?.heartbeat_ttl = if v <= 0 {
+            overlay(sock_arc)?.heartbeat.ttl = if v <= 0 {
                 None
             } else {
                 Some(Duration::from_millis(v as u64))
@@ -282,7 +282,7 @@ fn set_heartbeat_option(
         }
         ZMQ_HEARTBEAT_TIMEOUT => {
             let v = optval.i32()?;
-            overlay(sock_arc)?.heartbeat_timeout = if v <= 0 {
+            overlay(sock_arc)?.heartbeat.timeout = if v <= 0 {
                 None
             } else {
                 Some(Duration::from_millis(v as u64))
@@ -299,15 +299,15 @@ fn set_tcp_option(sock_arc: &Arc<OmqSocket>, option: c_int, optval: OptIn) -> Re
     match option {
         ZMQ_TCP_KEEPALIVE => {
             let v = optval.i32()?;
-            overlay(sock_arc)?.tcp_keepalive = v;
+            overlay(sock_arc)?.tcp.keepalive = v;
         }
         ZMQ_TCP_KEEPALIVE_CNT => {
             let v = optval.i32()?;
-            overlay(sock_arc)?.tcp_keepalive_cnt = if v <= 0 { None } else { Some(v as u32) };
+            overlay(sock_arc)?.tcp.cnt = if v <= 0 { None } else { Some(v as u32) };
         }
         ZMQ_TCP_KEEPALIVE_IDLE => {
             let v = optval.i32()?;
-            overlay(sock_arc)?.tcp_keepalive_idle = if v <= 0 {
+            overlay(sock_arc)?.tcp.idle = if v <= 0 {
                 None
             } else {
                 Some(Duration::from_secs(v as u64))
@@ -315,7 +315,7 @@ fn set_tcp_option(sock_arc: &Arc<OmqSocket>, option: c_int, optval: OptIn) -> Re
         }
         ZMQ_TCP_KEEPALIVE_INTVL => {
             let v = optval.i32()?;
-            overlay(sock_arc)?.tcp_keepalive_intvl = if v <= 0 {
+            overlay(sock_arc)?.tcp.intvl = if v <= 0 {
                 None
             } else {
                 Some(Duration::from_secs(v as u64))
@@ -326,7 +326,7 @@ fn set_tcp_option(sock_arc: &Arc<OmqSocket>, option: c_int, optval: OptIn) -> Re
             if v < 0 {
                 return Err(libc::EINVAL);
             }
-            overlay(sock_arc)?.tcp_maxrt = v;
+            overlay(sock_arc)?.tcp.maxrt = v;
         }
         _ => return Ok(false),
     }

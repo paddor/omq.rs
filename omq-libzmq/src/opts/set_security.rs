@@ -36,11 +36,11 @@ pub(super) fn set_plain_server_option(
             if domain.len() > 255 || !domain.is_ascii() {
                 return Err(libc::EINVAL);
             }
-            overlay(sock_arc)?.zap_domain = domain;
+            overlay(sock_arc)?.zap.domain = domain;
         }
         ZMQ_ZAP_ENFORCE_DOMAIN => {
             let value = optval.i32()?;
-            overlay(sock_arc)?.zap_enforce_domain = value != 0;
+            overlay(sock_arc)?.zap.enforce = value != 0;
         }
         _ => return Ok(false),
     }
@@ -190,7 +190,7 @@ pub(super) fn set_ws_option(
             if value <= 0 {
                 return Err(libc::EINVAL);
             }
-            overlay(sock_arc)?.ws_max_ready_peers = value;
+            overlay(sock_arc)?.ws.max_ready_peers = value;
         }
         OMQ_WS_ALLOWED_ORIGINS => {
             // Security policy must take effect, never silently mutate an
@@ -199,7 +199,7 @@ pub(super) fn set_ws_option(
                 return Err(libc::EBUSY);
             }
             let origins = parse_origins(&optval.string()?)?;
-            overlay(sock_arc)?.ws_allowed_origins = origins;
+            overlay(sock_arc)?.ws.allowed_origins = origins;
         }
         _ => return Ok(false),
     }
@@ -216,23 +216,23 @@ pub(super) fn set_wss_option(
     match option {
         ZMQ_WSS_KEY_PEM => {
             let v = optval.bytes()?;
-            overlay(sock_arc)?.wss_key_pem = none_if_empty(v).map(SecretBytes);
+            overlay(sock_arc)?.wss.key_pem = none_if_empty(v).map(SecretBytes);
         }
         ZMQ_WSS_CERT_PEM => {
             let v = optval.bytes()?;
-            overlay(sock_arc)?.wss_cert_pem = none_if_empty(v);
+            overlay(sock_arc)?.wss.cert_pem = none_if_empty(v);
         }
         ZMQ_WSS_TRUST_PEM => {
             let v = optval.bytes()?;
-            overlay(sock_arc)?.wss_trust_pem = none_if_empty(v);
+            overlay(sock_arc)?.wss.trust_pem = none_if_empty(v);
         }
         ZMQ_WSS_HOSTNAME => {
             let v = optval.string()?;
-            overlay(sock_arc)?.wss_hostname = if v.is_empty() { None } else { Some(v) };
+            overlay(sock_arc)?.wss.hostname = if v.is_empty() { None } else { Some(v) };
         }
         ZMQ_WSS_TRUST_SYSTEM => {
             let v = optval.i32()?;
-            overlay(sock_arc)?.wss_trust_system = v != 0;
+            overlay(sock_arc)?.wss.trust_system = v != 0;
         }
         _ => return Ok(false),
     }

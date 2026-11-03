@@ -43,18 +43,24 @@ fn overlay_debug_redacts_mechanism_secrets() {
 #[test]
 fn overlay_debug_redacts_wss_private_key() {
     let overlay = SocketOverlay {
-        wss_key_pem: Some(SecretBytes(b"private-key-sentinel".to_vec())),
+        wss: WssOverlay {
+            key_pem: Some(SecretBytes(b"private-key-sentinel".to_vec())),
+            ..Default::default()
+        },
         ..Default::default()
     };
     let debug = format!("{overlay:?}");
-    assert!(debug.contains("wss_key_pem: Some(<redacted>)"));
+    assert!(debug.contains("key_pem: Some(<redacted>)"));
     assert!(!debug.contains("private-key-sentinel"));
 }
 
 #[test]
 fn handshake_ivl_is_milliseconds_in_options() {
     let overlay = SocketOverlay {
-        handshake_ivl: Some(Duration::from_millis(10)),
+        reconnect: ReconnectOverlay {
+            handshake_ivl: Some(Duration::from_millis(10)),
+            ..Default::default()
+        },
         ..Default::default()
     };
 
@@ -114,9 +120,11 @@ fn arena_threshold_maps_to_backend_options() {
 #[test]
 fn compression_fields_map_to_backend_options() {
     let overlay = SocketOverlay {
-        compression_level: Some(1),
-        compression_dict: Some(Bytes::from_static(b"dict")),
-        compression_auto_train: true,
+        compression: CompressionOverlay {
+            level: Some(1),
+            dict: Some(Bytes::from_static(b"dict")),
+            auto_train: true,
+        },
         ..Default::default()
     };
     let opts = overlay.to_options();
@@ -159,8 +167,11 @@ fn workload_profile_maps_to_backend_options() {
 #[test]
 fn connect_timeout_caps_handshake_ivl_in_milliseconds() {
     let overlay = SocketOverlay {
-        handshake_ivl: Some(Duration::from_secs(30)),
-        connect_timeout: 10,
+        reconnect: ReconnectOverlay {
+            handshake_ivl: Some(Duration::from_secs(30)),
+            connect_timeout: 10,
+            ..Default::default()
+        },
         ..Default::default()
     };
 

@@ -44,50 +44,192 @@ pub(crate) struct SocketOverlay {
     pub linger: LingerSetting,
     pub identity: Bytes,
     pub router_mandatory: bool,
-    pub reconnect_ivl: Option<Duration>,
-    pub reconnect_ivl_max: Option<Duration>,
-    pub heartbeat_ivl: Option<Duration>,
-    pub heartbeat_ttl: Option<Duration>,
-    pub heartbeat_timeout: Option<Duration>,
-    pub handshake_ivl: Option<Duration>,
+    pub reconnect: ReconnectOverlay,
+    pub heartbeat: HeartbeatOverlay,
     pub max_message_size: Option<usize>,
     pub arena_threshold: Option<usize>,
     pub conflate: bool,
-    pub tcp_keepalive: i32,
-    pub tcp_keepalive_cnt: Option<u32>,
-    pub tcp_keepalive_idle: Option<Duration>,
-    pub tcp_keepalive_intvl: Option<Duration>,
-    /// `ZMQ_TCP_MAXRT` in milliseconds; 0 keeps the system default.
-    pub tcp_maxrt: i32,
+    pub tcp: TcpOverlay,
     pub mechanism: MechanismOverlay,
-    pub zap_domain: String,
-    pub zap_enforce_domain: bool,
+    pub zap: ZapOverlay,
     pub sndbuf: Option<usize>,
     pub rcvbuf: Option<usize>,
     pub xpub_verbose: bool,
     pub on_mute: OnMute,
-    pub compression_level: Option<i32>,
-    pub compression_dict: Option<Bytes>,
-    pub compression_auto_train: bool,
+    pub compression: CompressionOverlay,
     pub workload_profile: Option<WorkloadProfile>,
     pub ipv6: bool,
     pub backlog: i32,
     pub immediate: bool,
-    pub connect_timeout: i32,
     pub probe_router: bool,
     pub req_correlate: bool,
     pub req_relaxed: bool,
     pub xpub_nodrop: bool,
-    pub reconnect_stop: i32,
-    pub wss_key_pem: Option<SecretBytes>,
-    pub wss_cert_pem: Option<Vec<u8>>,
-    pub wss_trust_pem: Option<Vec<u8>>,
-    pub wss_hostname: Option<String>,
-    pub wss_trust_system: bool,
-    pub ws_allowed_origins: Vec<String>,
-    pub ws_max_ready_peers: i32,
+    pub ws: WsOverlay,
+    pub wss: WssOverlay,
     #[cfg(feature = "quic")]
     pub quic: QuicOverlay,
+}
+
+/// Reconnect, connect, and handshake timing.
+#[derive(Clone, Debug)]
+pub(crate) struct ReconnectOverlay {
+    pub ivl: Option<Duration>,
+    pub ivl_max: Option<Duration>,
+    /// `ZMQ_RECONNECT_STOP` flags.
+    pub stop: i32,
+    pub handshake_ivl: Option<Duration>,
+    /// `ZMQ_CONNECT_TIMEOUT` in milliseconds; 0 or less is unset.
+    pub connect_timeout: i32,
+}
+
+impl Default for ReconnectOverlay {
+    fn default() -> Self {
+        Self {
+            ivl: Some(Duration::from_millis(100)),
+            ivl_max: None,
+            stop: 0,
+            handshake_ivl: None,
+            connect_timeout: 0,
+        }
+    }
+}
+
+impl ReconnectOverlay {
+    fn policy(&self) -> ReconnectPolicy {
+        match (self.ivl, self.ivl_max) {
+            (None, _) => ReconnectPolicy::Disabled,
+            (Some(min), None) => ReconnectPolicy::Fixed(min),
+            (Some(min), Some(max)) => ReconnectPolicy::Exponential { min, max },
+        }
+    }
+
+    /// A positive `ZMQ_CONNECT_TIMEOUT` also caps the handshake; the shorter limit wins.
+    fn handshake_timeout(&self) -> Option<Duration> {
+        match (self.handshake_ivl, self.connect_timeout) {
+            (Some(h), t) if t > 0 => Some(h.min(Duration::from_millis(t as u64))),
+            (None, t) if t > 0 => Some(Duration::from_millis(t as u64)),
+            (None, _) => Some(Duration::from_millis(DEFAULT_HANDSHAKE_IVL_MS as u64)),
+            (h, _) => h,
+        }
+    }
+}
+
+/// ZMTP heartbeat timing.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct HeartbeatOverlay {
+    pub ivl: Option<Duration>,
+    pub ttl: Option<Duration>,
+    pub timeout: Option<Duration>,
+}
+
+/// TCP keepalive and retransmit timeout.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TcpOverlay {
+    /// `ZMQ_TCP_KEEPALIVE`: 1 on, 0 off, else the system default.
+    pub keepalive: i32,
+    pub cnt: Option<u32>,
+    pub idle: Option<Duration>,
+    pub intvl: Option<Duration>,
+    /// `ZMQ_TCP_MAXRT` in milliseconds; 0 keeps the system default.
+    pub maxrt: i32,
+}
+
+impl TcpOverlay {
+    fn keepalive_options(&self) -> KeepAlive {
+        match self.keepalive {
+            1 => KeepAlive::Enabled {
+                idle: self.idle.unwrap_or(Duration::from_mins(1)),
+                intvl: self.intvl.unwrap_or(Duration::from_secs(10)),
+                cnt: self.cnt.unwrap_or(6),
+            },
+            0 => KeepAlive::Disabled,
+            _ => KeepAlive::Default,
+        }
+    }
+
+    fn user_timeout(&self) -> Option<Duration> {
+        u64::try_from(self.maxrt)
+            .ok()
+            .filter(|&ms| ms > 0)
+            .map(Duration::from_millis)
+    }
+}
+
+/// OMQ compression settings for `lz4+tcp://` and `zstd+tcp://`.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct CompressionOverlay {
+    pub level: Option<i32>,
+    pub dict: Option<Bytes>,
+    pub auto_train: bool,
+}
+
+/// ZAP domain and `ZMQ_ZAP_ENFORCE_DOMAIN`.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ZapOverlay {
+    pub domain: String,
+    pub enforce: bool,
+}
+
+/// WebSocket origin policy and peer limit.
+#[derive(Clone, Debug)]
+pub(crate) struct WsOverlay {
+    pub allowed_origins: Vec<String>,
+    pub max_ready_peers: i32,
+}
+
+impl Default for WsOverlay {
+    fn default() -> Self {
+        Self {
+            allowed_origins: Vec::new(),
+            max_ready_peers: 1024,
+        }
+    }
+}
+
+impl WsOverlay {
+    fn options(&self) -> omq_tokio::options::WsOptions {
+        omq_tokio::options::WsOptions {
+            allowed_origins: self.allowed_origins.clone(),
+            max_ready_peers: usize::try_from(self.max_ready_peers)
+                .expect("validated WS peer limit"),
+        }
+    }
+}
+
+/// WebSocket TLS material.
+#[derive(Clone, Debug)]
+pub(crate) struct WssOverlay {
+    pub key_pem: Option<SecretBytes>,
+    pub cert_pem: Option<Vec<u8>>,
+    pub trust_pem: Option<Vec<u8>>,
+    pub hostname: Option<String>,
+    pub trust_system: bool,
+}
+
+impl Default for WssOverlay {
+    fn default() -> Self {
+        Self {
+            key_pem: None,
+            cert_pem: None,
+            trust_pem: None,
+            hostname: None,
+            trust_system: true,
+        }
+    }
+}
+
+impl WssOverlay {
+    fn tls(&self) -> omq_tokio::options::WssTls {
+        omq_tokio::options::WssTls {
+            server_cert_pem: self.cert_pem.clone(),
+            server_key_pem: self.key_pem.as_ref().map(|key| key.0.clone()),
+            trust_pem: self.trust_pem.clone(),
+            hostname: self.hostname.clone(),
+            trust_system: self.trust_system,
+            accept_invalid_certs: false,
+        }
+    }
 }
 
 /// Keep the overlay's derived Debug without exposing a WSS private key.
@@ -184,47 +326,29 @@ impl Default for SocketOverlay {
             linger: LingerSetting::Unset,
             identity: Bytes::new(),
             router_mandatory: false,
-            reconnect_ivl: Some(Duration::from_millis(100)),
-            reconnect_ivl_max: None,
-            heartbeat_ivl: None,
-            heartbeat_ttl: None,
-            heartbeat_timeout: None,
-            handshake_ivl: None,
+            reconnect: ReconnectOverlay::default(),
+            heartbeat: HeartbeatOverlay::default(),
             max_message_size: None,
             arena_threshold: None,
             conflate: false,
-            tcp_keepalive: 0,
-            tcp_keepalive_cnt: None,
-            tcp_keepalive_idle: None,
-            tcp_keepalive_intvl: None,
-            tcp_maxrt: 0,
+            tcp: TcpOverlay::default(),
             mechanism: MechanismOverlay::Null,
-            zap_domain: String::new(),
-            zap_enforce_domain: false,
+            zap: ZapOverlay::default(),
             sndbuf: None,
             rcvbuf: None,
             xpub_verbose: false,
             on_mute: OnMute::Block,
-            compression_level: None,
-            compression_dict: None,
-            compression_auto_train: false,
+            compression: CompressionOverlay::default(),
             workload_profile: None,
             ipv6: false,
             backlog: 0,
             immediate: false,
-            connect_timeout: 0,
             probe_router: false,
             req_correlate: false,
             req_relaxed: false,
             xpub_nodrop: false,
-            reconnect_stop: 0,
-            wss_key_pem: None,
-            wss_cert_pem: None,
-            wss_trust_pem: None,
-            wss_hostname: None,
-            wss_trust_system: true,
-            ws_allowed_origins: Vec::new(),
-            ws_max_ready_peers: 1024,
+            ws: WsOverlay::default(),
+            wss: WssOverlay::default(),
             #[cfg(feature = "quic")]
             quic: QuicOverlay::default(),
         }
@@ -308,25 +432,6 @@ impl SocketOverlay {
         }
     }
 
-    fn keepalive(&self) -> KeepAlive {
-        match self.tcp_keepalive {
-            1 => KeepAlive::Enabled {
-                idle: self.tcp_keepalive_idle.unwrap_or(Duration::from_mins(1)),
-                intvl: self.tcp_keepalive_intvl.unwrap_or(Duration::from_secs(10)),
-                cnt: self.tcp_keepalive_cnt.unwrap_or(6),
-            },
-            0 => KeepAlive::Disabled,
-            _ => KeepAlive::Default,
-        }
-    }
-
-    fn tcp_user_timeout(&self) -> Option<Duration> {
-        u64::try_from(self.tcp_maxrt)
-            .ok()
-            .filter(|&ms| ms > 0)
-            .map(Duration::from_millis)
-    }
-
     pub(crate) fn to_options(&self) -> omq_tokio::Options {
         omq_tokio::Options {
             send_hwm: self.send_hwm.unwrap_or(DEFAULT_HWM as u32),
@@ -336,47 +441,29 @@ impl SocketOverlay {
             max_message_size: self.max_message_size,
             arena_threshold: self.arena_threshold,
             router_mandatory: self.router_mandatory,
-            heartbeat_interval: self.heartbeat_ivl,
-            heartbeat_ttl: self.heartbeat_ttl,
-            heartbeat_timeout: self.heartbeat_timeout,
-            handshake_timeout: self.handshake_timeout(),
+            heartbeat_interval: self.heartbeat.ivl,
+            heartbeat_ttl: self.heartbeat.ttl,
+            heartbeat_timeout: self.heartbeat.timeout,
+            handshake_timeout: self.reconnect.handshake_timeout(),
             conflate: self.conflate,
-            tcp_keepalive: self.keepalive(),
-            tcp_user_timeout: self.tcp_user_timeout(),
-            reconnect: self.reconnect_policy(),
+            tcp_keepalive: self.tcp.keepalive_options(),
+            tcp_user_timeout: self.tcp.user_timeout(),
+            reconnect: self.reconnect.policy(),
             send_buffer_size: self.sndbuf,
             recv_buffer_size: self.rcvbuf,
             mechanism: self.mechanism_setup(),
             on_mute: self.on_mute,
-            compression_level: self.compression_level,
-            compression_dict: self.compression_dict.clone(),
-            compression_auto_train: self.compression_auto_train,
+            compression_level: self.compression.level,
+            compression_dict: self.compression.dict.clone(),
+            compression_auto_train: self.compression.auto_train,
             workload_profile: self.workload_profile,
             xpub_nodrop: self.xpub_nodrop,
-            reconnect_stop_conn_refused: (self.reconnect_stop & 1) != 0,
-            ws: self.ws_options(),
-            wss_tls: self.wss_tls(),
+            reconnect_stop_conn_refused: (self.reconnect.stop & 1) != 0,
+            ws: self.ws.options(),
+            wss_tls: self.wss.tls(),
             #[cfg(feature = "quic")]
             quic: self.quic.options(),
             ..Default::default()
-        }
-    }
-
-    fn reconnect_policy(&self) -> ReconnectPolicy {
-        match (self.reconnect_ivl, self.reconnect_ivl_max) {
-            (None, _) => ReconnectPolicy::Disabled,
-            (Some(min), None) => ReconnectPolicy::Fixed(min),
-            (Some(min), Some(max)) => ReconnectPolicy::Exponential { min, max },
-        }
-    }
-
-    /// A positive `ZMQ_CONNECT_TIMEOUT` also caps the handshake; the shorter limit wins.
-    fn handshake_timeout(&self) -> Option<Duration> {
-        match (self.handshake_ivl, self.connect_timeout) {
-            (Some(h), t) if t > 0 => Some(h.min(Duration::from_millis(t as u64))),
-            (None, t) if t > 0 => Some(Duration::from_millis(t as u64)),
-            (None, _) => Some(Duration::from_millis(DEFAULT_HANDSHAKE_IVL_MS as u64)),
-            (h, _) => h,
         }
     }
 
@@ -409,25 +496,6 @@ impl SocketOverlay {
                 },
                 server_public: omq_tokio::CurvePublicKey::from_bytes(*server_key),
             },
-        }
-    }
-
-    fn ws_options(&self) -> omq_tokio::options::WsOptions {
-        omq_tokio::options::WsOptions {
-            allowed_origins: self.ws_allowed_origins.clone(),
-            max_ready_peers: usize::try_from(self.ws_max_ready_peers)
-                .expect("validated WS peer limit"),
-        }
-    }
-
-    fn wss_tls(&self) -> omq_tokio::options::WssTls {
-        omq_tokio::options::WssTls {
-            server_cert_pem: self.wss_cert_pem.clone(),
-            server_key_pem: self.wss_key_pem.as_ref().map(|key| key.0.clone()),
-            trust_pem: self.wss_trust_pem.clone(),
-            hostname: self.wss_hostname.clone(),
-            trust_system: self.wss_trust_system,
-            accept_invalid_certs: false,
         }
     }
 }

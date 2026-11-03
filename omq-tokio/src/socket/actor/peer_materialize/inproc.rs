@@ -9,7 +9,7 @@ use crate::engine::send_pipe::SendPipeProducerHandle;
 use crate::engine::signal::StateSignal;
 use crate::socket::actor::inproc_driver::{InprocDriverCtx, inproc_peer_driver};
 use crate::socket::actor::lifecycle::PeerLifecycle;
-use crate::socket::actor::{InprocConn, PeerIdent, SocketDriver, SocketType};
+use crate::socket::actor::{InprocConn, SocketDriver, SocketType};
 use std::sync::{Arc, Mutex};
 
 /// Receive sink for an inproc peer that has no receive port. Its
@@ -38,17 +38,19 @@ fn inproc_sink(socket: &SocketDriver, peer_id: u64) -> Option<crate::engine::Rec
     ))
 }
 
+/// Inproc fast path: no codec, greeting, or frame headers. The peers
+/// exchanged socket type and identity during connect, so the handshake
+/// succeeds at once and a small relay task carries messages and commands.
 pub(in crate::socket::actor) fn spawn_inproc_peer(
     socket: &mut SocketDriver,
     mut conn: InprocConn,
-    peer_ident: PeerIdent,
     peer: PeerSetup,
 ) {
     let Some(peer_id) = admit_inproc_peer(socket, conn.peer.socket_type) else {
         return;
     };
 
-    let ends = register_inproc_peer(socket, peer_id, &mut conn, peer, peer_ident);
+    let ends = register_inproc_peer(socket, peer_id, &mut conn, peer);
     spawn_inproc_driver(socket, peer_id, conn, ends);
 }
 
@@ -70,7 +72,6 @@ fn register_inproc_peer(
     peer_id: u64,
     conn: &mut InprocConn,
     mut peer: PeerSetup,
-    peer_ident: PeerIdent,
 ) -> InprocDriverEnds {
     let PeerChannels {
         mut handle,
@@ -92,7 +93,7 @@ fn register_inproc_peer(
 
     handle.send_pipe = send_pipe;
     handle.inproc.clone_from(&outbound);
-    let mut entry = new_peer_entry(peer, peer_ident, handle, None, io_assignment.index());
+    let mut entry = new_peer_entry(peer, handle, None, io_assignment.index());
     // Inproc's synthetic handshake never holds a pending-handshake slot.
     entry.pending_handshake = false;
     entry.inproc_inbound = inproc_inbound;

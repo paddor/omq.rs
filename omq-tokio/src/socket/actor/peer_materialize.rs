@@ -47,6 +47,7 @@ impl PeerChannels {
 
 pub(super) struct PeerSetup {
     pub(super) endpoint: Endpoint,
+    pub(super) ident: PeerIdent,
     pub(super) is_server: bool,
     pub(super) route_id: u64,
     pub(super) send_pipe_rx: Option<SendPipeConsumer>,
@@ -55,7 +56,6 @@ pub(super) struct PeerSetup {
 
 pub(super) struct ByteStreamConnection {
     pub(super) stream: AnyStream,
-    pub(super) peer_ident: PeerIdent,
     pub(super) peer: PeerSetup,
     pub(super) leftover: bytes::Bytes,
     pub(super) setup: Option<crate::transport::setup::SetupState>,
@@ -85,7 +85,6 @@ pub(super) fn spawn_byte_stream_connection(socket: &mut SocketDriver, conn: Byte
 
 struct WireCodecSetup {
     stream: AnyStream,
-    peer_ident: PeerIdent,
     peer: PeerSetup,
     setup: Option<crate::transport::setup::SetupState>,
     framing: WireFraming,
@@ -97,38 +96,18 @@ fn prepare_wire_codec(
     socket: &mut SocketDriver,
     ByteStreamConnection {
         stream,
-        peer_ident,
         peer,
         leftover,
         setup,
     }: ByteStreamConnection,
 ) -> Option<WireCodecSetup> {
     let framing = wire_framing(&stream, peer.is_server);
-    let Ok(transforms) = build_message_transforms(socket, &peer, &peer_ident) else {
+    let Ok(transforms) = build_message_transforms(socket, &peer) else {
         return None;
     };
 
-    // Compressed wire messages can exceed the logical limit; the decoder
-    // reports the wire allowance that matches it.
-    let receive_wire_limit = if matches!(peer.endpoint, Endpoint::Shm(_)) {
-        const REFERENCE_WIRE_BUDGET: usize = 1024;
-        // References are small, but a bounded automatic pool may carry an
-        // ordinary body on the Unix stream. Decoded SHM sizes are checked
-        // separately, including group/identity envelopes.
-        peer.options.max_message_size.map(|maximum| {
-            maximum
-                .saturating_add(std::mem::size_of::<u8>())
-                .max(REFERENCE_WIRE_BUDGET)
-        })
-    } else {
-        transforms
-            .as_ref()
-            .map_or(peer.options.max_message_size, |setup| {
-                setup.decoder.max_wire_message_size()
-            })
-    };
-
-    let mut codec = build_codec(socket, &peer, framing, &peer_ident, receive_wire_limit);
+    let wire_limit = receive_wire_limit(&peer, transforms.as_ref());
+    let mut codec = build_codec(socket, &peer, framing, wire_limit);
     // With transforms the decoder owns payload allocation, not the codec.
     if transforms.is_none()
         && let Some(pool) = &peer.options.recv_payload_pool
@@ -143,13 +122,32 @@ fn prepare_wire_codec(
 
     Some(WireCodecSetup {
         stream,
-        peer_ident,
         peer,
         setup,
         framing,
         transforms,
         codec,
     })
+}
+
+/// Largest wire message the decoder accepts. Compressed wire messages can
+/// exceed the logical limit; the decoder reports the matching allowance.
+fn receive_wire_limit(peer: &PeerSetup, transforms: Option<&CodecSetup>) -> Option<usize> {
+    if matches!(peer.endpoint, Endpoint::Shm(_)) {
+        const REFERENCE_WIRE_BUDGET: usize = 1024;
+        // References are small, but a bounded automatic pool may carry an
+        // ordinary body on the Unix stream. Decoded SHM sizes are checked
+        // separately, including group/identity envelopes.
+        peer.options.max_message_size.map(|maximum| {
+            maximum
+                .saturating_add(std::mem::size_of::<u8>())
+                .max(REFERENCE_WIRE_BUDGET)
+        })
+    } else {
+        transforms.map_or(peer.options.max_message_size, |setup| {
+            setup.decoder.max_wire_message_size()
+        })
+    }
 }
 
 /// Per-connection flags that steer wire driver setup.
@@ -200,12 +198,19 @@ impl TransmitProfile {
     }
 }
 
-/// The stream after carrier-specific setup.
+/// Send-side state from carrier-specific setup.
 struct WireCarrier {
-    stream: AnyStream,
     #[cfg(target_os = "linux")]
     shm: Option<crate::transport::shm::ShmState>,
     direct_tcp_writer: Option<Arc<crate::socket::dispatch::DirectTcpWriter>>,
+}
+
+/// What a wire peer's send path is built from.
+struct WireSend {
+    transmit: TransmitProfile,
+    carrier: WireCarrier,
+    /// The connect-side pipe that already took messages, if any.
+    send_pipe_rx: Option<SendPipeConsumer>,
 }
 
 /// Pair the peer mailbox with a fresh actor output registration.
@@ -231,7 +236,6 @@ fn prepare_wire_driver(
     peer_id: u64,
     WireCodecSetup {
         mut stream,
-        peer_ident,
         mut peer,
         setup,
         framing,
@@ -243,26 +247,26 @@ fn prepare_wire_driver(
     PeerEntry,
     crate::context::IoThreadLease,
 )> {
-    let (local_address, remote_address) = stream.addresses();
-    let PeerChannels {
-        mut handle,
-        control,
-        data,
-    } = socket.peer_channels();
-    let carrier_lease = take_carrier_io_lease(&mut stream);
+    let addresses = stream.addresses();
+    let channels = socket.peer_channels();
+    let mut handle = channels.handle;
+    // QUIC already placed its connection on an IO thread during setup.
+    let io_assignment = take_carrier_io_lease(&mut stream)
+        .unwrap_or_else(|| reserve_peer_io(&socket.resources.io_pool, &peer.endpoint));
+    let io_thread = io_assignment.index();
 
     let profile = WireProfile::new(socket, &peer.endpoint, transforms.as_ref());
     let transmit = TransmitProfile::new(socket, &peer, transforms.as_ref(), profile, framing);
-    let carrier = prepare_wire_carrier(socket, stream, &peer, profile)?;
+    let (stream, carrier) = prepare_wire_carrier(socket, stream, &peer, profile)?;
 
-    let link = actor_link(socket, peer_id, control, handle.cancel.clone())?;
+    let link = actor_link(socket, peer_id, channels.control, handle.cancel.clone())?;
     let peer_driver = ConnectionDriver::with_actor_config(
-        carrier.stream,
+        stream,
         codec,
         link,
         peer_driver_config(socket, &peer.endpoint),
     )
-    .with_actor_data_inbox(data)
+    .with_actor_data_inbox(channels.data)
     .with_actor_control(
         socket.mail.peer_control_tx.clone(),
         socket.subscription_gate(peer_id),
@@ -271,37 +275,49 @@ fn prepare_wire_driver(
     let peer_driver = attach_transforms(socket, peer_driver, transforms);
     #[cfg(target_os = "linux")]
     let peer_driver = peer_driver.with_shm(carrier.shm.clone());
-    let peer_driver = attach_ip_rate_limit(socket, peer_driver, &peer_ident);
+    let peer_driver = attach_ip_rate_limit(socket, peer_driver, &peer.ident);
 
-    let arena = transmit.arena;
-    let transmit_slot = build_transmit_slot(socket, peer_id, transmit);
+    let send = WireSend {
+        transmit,
+        carrier,
+        send_pipe_rx: peer.send_pipe_rx.take(),
+    };
+    let peer_driver = attach_wire_send_path(socket, peer_id, peer_driver, send, &mut handle);
+    let peer_driver = attach_recv_bypass(socket, peer_driver, peer_id);
+    let peer_driver = peer_driver.with_network(peer_network(socket, &peer.endpoint, io_thread));
+
+    let mut entry = new_peer_entry(peer, handle, setup, io_thread);
+    (entry.local_address, entry.remote_address) = addresses;
+    Some((peer_driver, entry, io_assignment))
+}
+
+/// Build the transmit slot and send pipe, attach them to the driver, and
+/// record them with any direct TCP writer on the peer's handle.
+fn attach_wire_send_path(
+    socket: &SocketDriver,
+    peer_id: u64,
+    peer_driver: ConnectionDriver<AnyStream>,
+    send: WireSend,
+    handle: &mut PeerDriverHandle,
+) -> ConnectionDriver<AnyStream> {
+    let arena = send.transmit.arena;
+    let transmit_slot = build_transmit_slot(socket, peer_id, send.transmit);
     #[cfg(target_os = "linux")]
-    if let (Some(slot), Some(state)) = (&transmit_slot, carrier.shm) {
+    if let (Some(slot), Some(state)) = (&transmit_slot, send.carrier.shm) {
         slot.set_shm(state);
     }
     let peer_driver = attach_transmit_slot(peer_driver, arena, transmit_slot.as_ref());
-    let (send_pipe, peer_driver) = attach_send_pipe(socket, peer_driver, peer.send_pipe_rx.take());
+    let (send_pipe, peer_driver) = attach_send_pipe(socket, peer_driver, send.send_pipe_rx);
     attach_direct_writer(
         socket.socket_type,
         transmit_slot.as_ref(),
-        carrier.direct_tcp_writer.as_ref(),
+        send.carrier.direct_tcp_writer.as_ref(),
         send_pipe.as_ref(),
     );
-
-    let peer_driver = attach_recv_bypass(socket, peer_driver, peer_id);
-    // QUIC already placed its connection on an IO thread during setup.
-    let io_assignment =
-        carrier_lease.unwrap_or_else(|| reserve_peer_io(&socket.resources.io_pool, &peer.endpoint));
-    let io_thread = io_assignment.index();
-    let peer_driver = peer_driver.with_network(peer_network(socket, &peer.endpoint, io_thread));
-
     handle.transmit_slot = transmit_slot;
-    handle.direct_tcp_writer = carrier.direct_tcp_writer;
+    handle.direct_tcp_writer = send.carrier.direct_tcp_writer;
     handle.send_pipe = send_pipe;
-    let mut entry = new_peer_entry(peer, peer_ident, handle, setup, io_thread);
-    entry.local_address = local_address;
-    entry.remote_address = remote_address;
-    Some((peer_driver, entry, io_assignment))
+    peer_driver
 }
 
 /// Wrap SHM carriers and split off a direct TCP writer where allowed.
@@ -310,7 +326,7 @@ fn prepare_wire_carrier(
     stream: AnyStream,
     peer: &PeerSetup,
     profile: WireProfile,
-) -> Option<WireCarrier> {
+) -> Option<(AnyStream, WireCarrier)> {
     #[cfg(target_os = "linux")]
     let (stream, shm) = prepare_shm_stream(
         stream,
@@ -324,12 +340,12 @@ fn prepare_wire_carrier(
         return None;
     };
 
-    Some(WireCarrier {
-        stream,
+    let carrier = WireCarrier {
         #[cfg(target_os = "linux")]
         shm,
         direct_tcp_writer,
-    })
+    };
+    Some((stream, carrier))
 }
 
 /// Wire the driver's setup deadline, close state, and receive tuning.
@@ -455,7 +471,6 @@ fn attach_direct_writer(
 /// the pending-handshake admission, if any.
 pub(super) fn new_peer_entry(
     peer: PeerSetup,
-    ident: PeerIdent,
     handle: PeerDriverHandle,
     setup: Option<crate::transport::setup::SetupState>,
     io_thread: usize,
@@ -464,7 +479,7 @@ pub(super) fn new_peer_entry(
         local_address: None,
         remote_address: None,
         options: peer.options,
-        ident,
+        ident: peer.ident,
         handle,
         ready: false,
         pending_handshake: true,
@@ -502,7 +517,6 @@ fn attach_ip_rate_limit(
 fn build_message_transforms(
     socket: &mut SocketDriver,
     peer: &PeerSetup,
-    peer_ident: &PeerIdent,
 ) -> core::result::Result<Option<CodecSetup>, ()> {
     match CodecSetup::for_endpoint(&peer.endpoint, &peer.options) {
         Ok(transforms) => Ok(transforms),
@@ -512,7 +526,7 @@ fn build_message_transforms(
                 .monitor
                 .publish(omq_proto::MonitorEvent::HandshakeFailed {
                     endpoint: peer.endpoint.clone(),
-                    peer_ident: peer_ident.clone(),
+                    peer_ident: peer.ident.clone(),
                     reason: e.to_string(),
                 });
             // A bad codec config fails every retry the same way, so stop
@@ -605,24 +619,8 @@ fn build_codec(
     socket: &SocketDriver,
     peer: &PeerSetup,
     framing: WireFraming,
-    peer_ident: &PeerIdent,
     receive_wire_limit: Option<usize>,
 ) -> ZmtpConnection {
-    let config = connection_config(socket, peer, framing, peer_ident, receive_wire_limit);
-    let mut codec = ZmtpConnection::new(config);
-    if let Some(pool) = &socket.options.recv_message_pool {
-        codec = codec.recv_message_pool(pool);
-    }
-    codec
-}
-
-fn connection_config(
-    socket: &SocketDriver,
-    peer: &PeerSetup,
-    framing: WireFraming,
-    peer_ident: &PeerIdent,
-    receive_wire_limit: Option<usize>,
-) -> ConnectionConfig {
     let options = &peer.options;
     let role = if peer.is_server {
         Role::Server
@@ -636,7 +634,7 @@ fn connection_config(
         .identity(options.identity.clone())
         .mechanism(options.mechanism.clone())
         .defer_authentication(true);
-    let peer_address = match peer_ident {
+    let peer_address = match &peer.ident {
         PeerIdent::Socket(address) => Some(address.ip().to_string()),
         PeerIdent::Path(path) => Some(path.clone()),
         _ => None,
@@ -661,7 +659,12 @@ fn connection_config(
     }
     #[cfg(not(feature = "ws"))]
     let _ = framing;
-    cfg
+
+    let codec = ZmtpConnection::new(cfg);
+    match &socket.options.recv_message_pool {
+        Some(pool) => codec.recv_message_pool(pool),
+        None => codec,
+    }
 }
 
 /// QUIC places its connection during setup; keep the OMQ driver with it.

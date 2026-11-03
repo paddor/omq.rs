@@ -1,8 +1,8 @@
 use super::{
-    AnyConn, AnyStream, DisconnectReason, Duration, InprocConn, InprocPeerSnapshot, InternalEvent,
-    Message, MonitorEvent, PeerCommandKind, PeerEntry, PeerIdent, PeerInfo, ReconnectPolicy,
-    SocketDriver, SocketType, ZmtpEvent, generated_identity, peer_ident_socket_addr,
-    supports_groups, supports_subscribe,
+    AnyConn, AnyStream, DisconnectReason, Duration, InprocPeerSnapshot, InternalEvent, Message,
+    MonitorEvent, PeerCommandKind, PeerEntry, PeerIdent, PeerInfo, ReconnectPolicy, SocketDriver,
+    SocketType, ZmtpEvent, generated_identity, peer_ident_socket_addr, supports_groups,
+    supports_subscribe,
 };
 use crate::engine::peer_events::SubscriptionGate;
 use crate::routing::AddedPeer;
@@ -39,6 +39,7 @@ impl SocketDriver {
             } => {
                 let peer = PeerSetup {
                     endpoint,
+                    ident: conn.peer_ident().clone(),
                     options,
                     is_server: true,
                     route_id: self.next_peer_id,
@@ -60,17 +61,15 @@ impl SocketDriver {
                 else {
                     return;
                 };
-                let send_pipe_rx = self.take_dialer_send_pipe(route_id);
-                self.spawn_on_handshake(
-                    conn,
-                    PeerSetup {
-                        endpoint,
-                        options,
-                        is_server: false,
-                        route_id,
-                        send_pipe_rx,
-                    },
-                );
+                let peer = PeerSetup {
+                    endpoint,
+                    ident: conn.peer_ident().clone(),
+                    options,
+                    is_server: false,
+                    route_id,
+                    send_pipe_rx: self.take_dialer_send_pipe(route_id),
+                };
+                self.spawn_on_handshake(conn, peer);
             }
             InternalEvent::ConnectGaveUp { endpoint, route_id } => {
                 self.endpoints
@@ -335,9 +334,7 @@ impl SocketDriver {
             return;
         }
         if self.socket_type != SocketType::Stream
-            && let AnyConn::ByteStream {
-                setup, peer_ident, ..
-            } = &mut conn
+            && let AnyConn::ByteStream { setup, .. } = &mut conn
         {
             if setup
                 .as_ref()
@@ -346,7 +343,7 @@ impl SocketDriver {
                 return;
             }
             if setup.is_none() {
-                let source = peer_ident_socket_addr(peer_ident).map(|address| address.ip());
+                let source = peer_ident_socket_addr(&peer.ident).map(|address| address.ip());
                 let Some(admission) = crate::transport::setup::PendingHandshake::acquire(
                     &self.endpoints.setup_admission,
                     None,
@@ -354,7 +351,7 @@ impl SocketDriver {
                 ) else {
                     self.link.monitor.publish(MonitorEvent::HandshakeFailed {
                         endpoint: peer.endpoint.clone(),
-                        peer_ident: peer_ident.clone(),
+                        peer_ident: peer.ident.clone(),
                         reason: "socket pending-handshake limit reached".into(),
                     });
                     return;
@@ -370,13 +367,13 @@ impl SocketDriver {
         let event = if peer.is_server {
             MonitorEvent::Accepted {
                 endpoint: peer.endpoint.clone(),
-                peer_ident: conn.peer_ident().clone(),
+                peer_ident: peer.ident.clone(),
                 connection_id: conn_id,
             }
         } else {
             MonitorEvent::Connected {
                 endpoint: peer.endpoint.clone(),
-                peer_ident: conn.peer_ident().clone(),
+                peer_ident: peer.ident.clone(),
                 connection_id: conn_id,
             }
         };
@@ -391,39 +388,30 @@ impl SocketDriver {
         match conn {
             AnyConn::ByteStream {
                 stream,
-                peer_ident,
                 leftover,
                 setup,
+                ..
             } => {
                 let _ = stream.apply_tcp_options(&peer.options);
                 if self.socket_type == SocketType::Stream {
-                    self.spawn_stream_connection(stream, peer_ident, peer);
+                    self.spawn_stream_connection(stream, peer);
                 } else {
-                    self.spawn_byte_stream_connection(ByteStreamConnection {
+                    let conn = ByteStreamConnection {
                         stream,
-                        peer_ident,
                         peer,
                         leftover,
                         setup,
-                    });
+                    };
+                    super::peer_materialize::spawn_byte_stream_connection(self, conn);
                 }
             }
-            AnyConn::Inproc { conn, peer_ident } => {
-                self.spawn_inproc_peer(conn, peer_ident, peer);
+            AnyConn::Inproc { conn, .. } => {
+                super::peer_materialize::spawn_inproc_peer(self, conn, peer);
             }
         }
     }
 
-    fn spawn_byte_stream_connection(&mut self, conn: ByteStreamConnection) {
-        super::peer_materialize::spawn_byte_stream_connection(self, conn);
-    }
-
-    fn spawn_stream_connection(
-        &mut self,
-        stream: AnyStream,
-        peer_ident: PeerIdent,
-        mut peer: PeerSetup,
-    ) {
+    fn spawn_stream_connection(&mut self, stream: AnyStream, mut peer: PeerSetup) {
         let Some(peer_id) = self.alloc_id() else {
             return;
         };
@@ -468,7 +456,7 @@ impl SocketDriver {
             },
         );
 
-        let mut entry = new_peer_entry(peer, peer_ident, handle.clone(), None, io_thread);
+        let mut entry = new_peer_entry(peer, handle.clone(), None, io_thread);
         // Raw STREAM has no handshake, so the peer is ready at once.
         entry.ready = true;
         entry.pending_handshake = false;
@@ -488,16 +476,6 @@ impl SocketDriver {
         self.routing
             .recv_strategy
             .connection_added(peer_id, identity);
-    }
-
-    /// Inproc fast path: skip the ZMTP codec entirely. The peer's
-    /// snapshot (socket type + identity) was exchanged during inproc
-    /// connect, so we synthesise `HandshakeSucceeded` immediately and
-    /// run a small peer task that forwards `Message`/`Command` through a
-    /// pair of `mpsc` channels - no greeting, no frame headers, no
-    /// state machine.
-    fn spawn_inproc_peer(&mut self, conn: InprocConn, peer_ident: PeerIdent, peer: PeerSetup) {
-        super::peer_materialize::spawn_inproc_peer(self, conn, peer_ident, peer);
     }
 
     async fn handle_peer_event(&mut self, peer_id: u64, event: ZmtpEvent) {

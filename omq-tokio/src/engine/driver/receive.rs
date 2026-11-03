@@ -157,7 +157,6 @@ impl MessageDelivery<'_> {
 }
 
 impl ReceiveRateLimiters<'_> {
-    #[cfg(target_os = "linux")]
     fn is_unlimited(&self) -> bool {
         self.connection.is_none() && self.ip.is_none()
     }

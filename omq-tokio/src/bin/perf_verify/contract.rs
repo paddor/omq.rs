@@ -13,8 +13,9 @@ use omq_tokio::options::WorkloadProfile;
 use omq_tokio::{Message, Options, SocketType};
 
 use super::affinity::Side;
-use super::measurement::Window;
-use super::{SETTINGS, context, payload, tcp_zero, transfer_blocking};
+use super::measurement::{Window, payload, transfer_blocking};
+use super::transport::tcp_zero;
+use super::{SETTINGS, context};
 
 /// The favored profile may be at most 15% slower than the other one.
 pub(super) const MIN_RATIO: f64 = 0.85;

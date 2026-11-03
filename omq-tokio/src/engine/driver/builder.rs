@@ -1,8 +1,8 @@
 //! Connection configuration before the driver is spawned.
 
 use super::{
-    ConnectionDriver, DriverStream, PeerDriverCommand, PeerDriverConfig, PeerDriverData, PeerEvent,
-    ReceiveProfile, RecvSink,
+    ConnectionDriver, DriverStream, OutputSetup, PeerDriverCommand, PeerDriverConfig,
+    PeerDriverData, PeerEvent, ReceiveProfile, ReceiveSetup, RecvSink,
 };
 use crate::engine::{
     actor_output::{DataSender, PeerOutput},
@@ -51,28 +51,6 @@ where
         peer_id: u64,
         cancel: CancellationToken,
     ) -> Self {
-        Self::with_config(
-            stream,
-            connection,
-            inbox,
-            peer_out,
-            peer_id,
-            cancel,
-            PeerDriverConfig::default(),
-        )
-    }
-
-    /// Create a standalone driver with explicit limits and receive configuration.
-    #[expect(clippy::too_many_arguments, reason = "public constructor API")]
-    pub fn with_config(
-        stream: T,
-        connection: Connection,
-        inbox: mpsc::Receiver<PeerDriverCommand>,
-        peer_out: mpsc::Sender<(u64, PeerEvent)>,
-        peer_id: u64,
-        cancel: CancellationToken,
-        config: PeerDriverConfig,
-    ) -> Self {
         let link = DriverLink {
             inbox: inbox.into(),
             peer_out: peer_out.into(),
@@ -80,7 +58,14 @@ where
             cancel,
         };
 
-        Self::with_output_config(stream, connection, link, config)
+        Self::with_output_config(stream, connection, link, PeerDriverConfig::default())
+    }
+
+    /// Replace the default limits and receive configuration.
+    #[must_use]
+    pub fn with_driver_config(mut self, config: PeerDriverConfig) -> Self {
+        self.config = config;
+        self
     }
 
     pub(crate) fn with_actor_config(
@@ -118,7 +103,7 @@ where
             network: crate::network_limit::Lane::default(),
             connection,
             inbox,
-            data_inbox: None,
+            output: OutputSetup::default(),
             peer_out,
             peer_id,
             cancel,
@@ -128,23 +113,11 @@ where
             subscriptions: SubscriptionGate::default(),
             setup_deadline: None,
             setup_cancel: None,
-            encoder: None,
-            decoder: None,
             recv_direct: None,
-            recv_parts: None,
-            compression_pool: None,
-            offload_threshold: 0,
             transmit_slot: None,
-            send_pipe_rx: None,
-            arena_threshold: omq_proto::frame_buffer::ARENA_THRESHOLD,
-            arena_cap: omq_proto::frame_buffer::ARENA_INITIAL_CAP,
-            receive_profile: ReceiveProfile::Throughput,
             latency_polling: false,
-            decoded_payload_pool: None,
-            recv_ip_rate_limiter: None,
             socket_close_state: None,
-            #[cfg(target_os = "linux")]
-            shm: None,
+            receive: ReceiveSetup::default(),
         }
     }
 
@@ -183,14 +156,14 @@ where
     /// Install the send-side encoder. Used by compression transports.
     #[must_use]
     pub fn with_encoder(mut self, encoder: MessageEncoder) -> Self {
-        self.encoder = Some(encoder);
+        self.output.encoder = Some(encoder);
         self
     }
 
     /// Install the receive-side decoder. Used by compression transports.
     #[must_use]
     pub fn with_decoder(mut self, decoder: MessageDecoder) -> Self {
-        self.decoder = Some(decoder);
+        self.receive.decoder = Some(decoder);
         self
     }
 
@@ -200,7 +173,7 @@ where
         mut self,
         pool: Option<omq_proto::PayloadPool>,
     ) -> Self {
-        self.decoded_payload_pool = pool;
+        self.receive.payload_pool = pool;
         self
     }
 
@@ -211,8 +184,8 @@ where
         pool: Arc<CompressionPool>,
         threshold: usize,
     ) -> Self {
-        self.compression_pool = Some(pool);
-        self.offload_threshold = threshold;
+        self.output.compression_pool = Some(pool);
+        self.output.offload_threshold = threshold;
         self
     }
 
@@ -247,26 +220,17 @@ where
         self
     }
 
-    #[cfg(target_os = "linux")]
-    pub(crate) fn with_shm(mut self, state: Option<crate::transport::shm::ShmState>) -> Self {
-        self.shm = state;
+    pub(crate) fn with_shm(mut self, state: Option<crate::engine::shm_state::ShmState>) -> Self {
+        self.receive.shm = state;
         self
     }
 
-    #[cfg_attr(not(target_os = "linux"), expect(clippy::unused_self))]
     pub(crate) fn uses_shm(&self) -> bool {
-        #[cfg(target_os = "linux")]
-        {
-            self.shm.is_some()
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            false
-        }
+        self.receive.shm.is_some()
     }
 
     pub(crate) fn with_recv_parts(mut self, count: usize) -> Self {
-        self.recv_parts = Some(count);
+        self.receive.parts = Some(count);
         self
     }
 
@@ -274,7 +238,7 @@ where
     /// messages into the sender; this driver drains and encodes locally.
     #[must_use]
     pub(crate) fn with_send_pipe(mut self, rx: SendPipeConsumer) -> Self {
-        self.send_pipe_rx = Some(rx);
+        self.output.send_pipe_rx = Some(rx);
         self
     }
 
@@ -287,29 +251,29 @@ where
     /// full or stalled outbound path cannot hide lifecycle commands.
     #[must_use]
     pub fn with_data_inbox(mut self, rx: mpsc::Receiver<PeerDriverData>) -> Self {
-        self.data_inbox = Some(crate::engine::data_inbox::Receiver::Legacy(rx));
+        self.output.data_inbox = Some(crate::engine::data_inbox::Receiver::Legacy(rx));
         self
     }
 
     pub(crate) fn with_actor_data_inbox(mut self, rx: crate::engine::data_inbox::Receiver) -> Self {
-        self.data_inbox = Some(rx);
+        self.output.data_inbox = Some(rx);
         self
     }
 
     #[must_use]
     pub(crate) fn with_arena_threshold(mut self, threshold: usize) -> Self {
-        self.arena_threshold = threshold;
+        self.output.arena_threshold = threshold;
         self
     }
 
     #[must_use]
     pub(crate) fn with_arena_cap(mut self, cap: usize) -> Self {
-        self.arena_cap = cap;
+        self.output.arena_cap = cap;
         self
     }
 
     pub(crate) fn with_receive_profile(mut self, profile: ReceiveProfile) -> Self {
-        self.receive_profile = profile;
+        self.receive.profile = profile;
         self
     }
 
@@ -327,7 +291,7 @@ where
         limiter: Arc<SharedIpRateLimiter>,
         ip: IpAddr,
     ) -> Self {
-        self.recv_ip_rate_limiter = Some((limiter, ip));
+        self.receive.ip_rate_limiter = Some((limiter, ip));
         self
     }
 

@@ -1,10 +1,9 @@
 //! Publication dispatch under a blocking mute policy.
 
-use super::{GroupPeers, LaneDispatch, LaneWorker, PendingPeer, PreparedFrame, frame_publication};
+use super::{GroupPeers, LaneWorker, Parked, PendingPeer, PreparedFrame, frame_publication};
 use crate::engine::transmit_slot::TryFrameResult;
-use crate::routing::fan_out::FAN_OUT_TOTAL_COPY_BUDGET;
+use crate::routing::fan_out::fan_out_cost;
 use futures::{StreamExt, stream::FuturesUnordered};
-use omq_proto::fan_out_frame::{build_fan_out_frame, clear_fan_out_frame};
 use omq_proto::message::Message;
 use smallvec::SmallVec;
 use std::sync::Arc;
@@ -15,7 +14,7 @@ impl LaneWorker {
     pub(super) fn dispatch_group_ready(
         &mut self,
         target: GroupPeers<'_>,
-        dispatch: &LaneDispatch,
+        msg: &Message,
         touched: &mut SmallVec<[u64; 32]>,
         pending: &mut SmallVec<[PendingPeer; 8]>,
     ) {
@@ -23,14 +22,14 @@ impl LaneWorker {
             return;
         }
         if self.is_shm_group(target.group) {
-            self.dispatch_shm_group(target.peers, dispatch, touched, Some(pending));
+            self.dispatch_shm_group(target.peers, msg, touched, Some(pending));
             return;
         }
 
         let group = self.codec_groups[target.group]
             .as_mut()
             .expect("matched codec group");
-        let Ok(wire_messages) = group.encode(&dispatch.msg) else {
+        let Ok(wire_messages) = group.encode(msg) else {
             return;
         };
         let dictionary = group.dictionary().cloned();
@@ -38,13 +37,8 @@ impl LaneWorker {
             .as_ref()
             .and_then(|dict| self.ship_dictionary_ready(dict, target.peers, touched));
 
-        let frame = frame_publication(
-            &mut self.eq,
-            &mut self.chunks,
-            &wire_messages,
-            target.peers.len(),
-        );
-        let mut owned_payload = None;
+        let frame = frame_publication(&mut self.encoder, &wire_messages, target.peers.len());
+        let mut parked = Parked::new(pending);
         for &peer_id in target.peers {
             let Some(peer) = self.peers.get_mut(&peer_id) else {
                 continue;
@@ -59,20 +53,15 @@ impl LaneWorker {
             match result {
                 TryFrameResult::Ok => Self::touch_peer(peer_id, peer, touched),
                 TryFrameResult::Full => {
-                    let payload = owned_payload
-                        .get_or_insert_with(|| Arc::new(PreparedFrame::from_frame(&frame)))
-                        .clone();
-                    pending.push(PendingPeer {
-                        peer_id,
-                        slot: peer.slot.clone(),
-                        payload,
-                        dictionary: if needs_dict { owned_dict.clone() } else { None },
+                    let dictionary = if needs_dict { owned_dict.clone() } else { None };
+                    parked.park(peer_id, &peer.slot, dictionary, || {
+                        PreparedFrame::from_frame(&frame)
                     });
                 }
                 TryFrameResult::Dead | TryFrameResult::Ineligible => {}
             }
         }
-        clear_fan_out_frame(&mut self.eq, &mut self.chunks);
+        self.encoder.clear();
     }
 
     /// Ship the group dictionary to peers that lack it. Returns an owned copy
@@ -83,13 +72,7 @@ impl LaneWorker {
         peer_ids: &[u64],
         touched: &mut SmallVec<[u64; 32]>,
     ) -> Option<Arc<PreparedFrame>> {
-        let frame = build_fan_out_frame(
-            &mut self.eq,
-            dict,
-            &mut self.chunks,
-            peer_ids.len(),
-            FAN_OUT_TOTAL_COPY_BUDGET,
-        );
+        let frame = self.encoder.build(dict, fan_out_cost(peer_ids.len()));
 
         let mut owned_dict = None;
         for &peer_id in peer_ids {
@@ -101,14 +84,13 @@ impl LaneWorker {
             }
 
             if Self::try_push_frame(&peer.slot, &frame) == TryFrameResult::Ok {
-                peer.dict_shipped = true;
-                peer.slot.mark_fanout_dict_shipped();
+                peer.mark_dict_shipped();
                 Self::touch_peer(peer_id, peer, touched);
             } else {
                 owned_dict.get_or_insert_with(|| Arc::new(PreparedFrame::from_frame(&frame)));
             }
         }
-        clear_fan_out_frame(&mut self.eq, &mut self.chunks);
+        self.encoder.clear();
 
         owned_dict
     }
@@ -134,8 +116,7 @@ impl LaneWorker {
                 if let Some(dict) = &target.dictionary {
                     match Self::try_push_frame(&target.slot, &dict.as_frame()) {
                         TryFrameResult::Ok => {
-                            peer.dict_shipped = true;
-                            target.slot.mark_fanout_dict_shipped();
+                            peer.mark_dict_shipped();
                             Self::touch_peer(target.peer_id, peer, touched);
                             target.dictionary = None;
                         }

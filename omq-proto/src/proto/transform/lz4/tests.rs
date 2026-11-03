@@ -1,3 +1,4 @@
+use super::super::common::{MIN_COMPRESS_NO_DICT, MIN_COMPRESS_WITH_DICT};
 use super::*;
 
 #[test]
@@ -495,10 +496,10 @@ fn new_offload_copies_config() {
         .with_block_size(TEST_BLOCK)
         .with_threshold(256);
     let offload = primary.new_offload();
-    assert_eq!(offload.send_dict.as_ref().unwrap(), &dict);
-    assert!(offload.send_dict_shipped);
+    assert_eq!(offload.send.dict.as_ref().unwrap(), &dict);
+    assert!(offload.send.shipped);
     assert_eq!(offload.block_size, TEST_BLOCK);
-    assert_eq!(offload.threshold_override, Some(256));
+    assert_eq!(offload.send.threshold_override, Some(256));
 }
 
 #[test]
@@ -531,9 +532,9 @@ fn sync_dict_noop_when_already_present() {
     let dict = Bytes::from_static(b"some-dict-bytes-here");
     let primary = Lz4Encoder::with_send_dict(dict.clone()).unwrap();
     let mut offload = primary.new_offload();
-    let ptr_before = offload.send_dict.as_ref().unwrap().as_ptr();
+    let ptr_before = offload.send.dict.as_ref().unwrap().as_ptr();
     offload.sync_dict(&primary);
-    assert_eq!(offload.send_dict.as_ref().unwrap().as_ptr(), ptr_before);
+    assert_eq!(offload.send.dict.as_ref().unwrap().as_ptr(), ptr_before);
 }
 
 fn compressible_payload(size: usize) -> Bytes {
@@ -570,7 +571,7 @@ fn auto_train_produces_dict_and_roundtrips() {
         }
     }
     assert!(enc.trainer.is_none(), "trainer consumed after saturation");
-    assert!(enc.send_dict.is_some(), "trained dict installed");
+    assert!(enc.send.dict.is_some(), "trained dict installed");
     assert!(dict_shipped, "trained dict shipped to decoder");
     assert!(enc.can_offload());
 
@@ -597,34 +598,34 @@ fn auto_train_threshold_drops_after_dict() {
         let _ = enc.encode(&Message::single(compressible_payload(256)));
     }
     assert!(enc.trainer.is_none());
-    assert_eq!(enc.effective_threshold(), MIN_COMPRESS_WITH_DICT);
+    assert_eq!(enc.send.effective_threshold(), MIN_COMPRESS_WITH_DICT);
 }
 
 #[test]
 fn sync_dict_propagates_trained_dict() {
     let mut primary = Lz4Encoder::new().with_auto_train();
     let mut offload = Lz4Encoder::new();
-    assert!(offload.send_dict.is_none());
+    assert!(offload.send.dict.is_none());
 
     // Trigger training on primary (>= 100 samples).
     for _ in 0..200 {
         let _ = primary.encode(&Message::single(compressible_payload(256)));
     }
-    assert!(primary.send_dict.is_some());
+    assert!(primary.send.dict.is_some());
 
     // Offload picks up the trained dict via sync.
     offload.sync_dict(&primary);
-    assert!(offload.send_dict.is_some());
+    assert!(offload.send.dict.is_some());
     assert_eq!(
-        offload.send_dict.as_ref().unwrap().as_ptr(),
-        primary.send_dict.as_ref().unwrap().as_ptr(),
+        offload.send.dict.as_ref().unwrap().as_ptr(),
+        primary.send.dict.as_ref().unwrap().as_ptr(),
     );
 }
 
 #[test]
 fn auto_train_with_custom_capacity() {
     let enc = Lz4Encoder::new().with_dict_capacity(4096).with_auto_train();
-    assert_eq!(enc.dict_capacity, 4096);
+    assert_eq!(enc.send.dict_capacity, 4096);
     assert!(enc.trainer.is_some());
 }
 

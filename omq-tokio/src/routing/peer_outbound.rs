@@ -11,7 +11,7 @@ pub(crate) enum PeerOutbound {
     Wire {
         slot: Arc<PeerTransmitSlot>,
         inbox: crate::engine::data_inbox::Sender,
-        direct: Option<Arc<crate::socket::dispatch::DirectTcpWriter>>,
+        direct: Option<Arc<crate::socket::direct_writer::DirectTcpWriter>>,
     },
     Inbox(crate::engine::data_inbox::Sender),
     /// Direct delivery into an inproc peer's receive queue.
@@ -60,14 +60,14 @@ impl PeerOutbound {
     }
 
     pub(crate) fn from_handle(handle: &ActorPeerDriverHandle) -> Self {
-        if let Some(sender) = &handle.inproc {
+        if let Some(sender) = &handle.routes.inproc {
             return Self::Inproc(sender.clone());
         }
-        match handle.transmit_slot {
+        match handle.routes.transmit_slot {
             Some(ref slot) => Self::Wire {
                 slot: slot.clone(),
                 inbox: handle.data_inbox.clone(),
-                direct: handle.direct_tcp_writer.clone(),
+                direct: handle.routes.direct_tcp_writer.clone(),
             },
             None => Self::Inbox(handle.data_inbox.clone()),
         }
@@ -224,11 +224,10 @@ mod tests {
     #[test]
     fn handshake_does_not_let_direct_send_overtake_inbox() {
         use crate::engine::transmit_slot::{PeerTransmitSlot, SlotConfig, TryFrameResult};
-        use crate::socket::dispatch::DirectTcpWriter;
+        use crate::socket::direct_writer::DirectTcpWriter;
         use std::io::Read;
         use std::net::{TcpListener, TcpStream};
         use std::sync::Arc;
-        use std::sync::atomic::Ordering;
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let tcp = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
@@ -255,7 +254,7 @@ mod tests {
             target.try_encode(&Message::from_slice(b"older")),
             TryFrameResult::Ok
         );
-        slot.handshake_done.store(true, Ordering::Release);
+        slot.mark_handshake_done();
         assert_eq!(
             target.try_encode(&Message::from_slice(b"newer")),
             TryFrameResult::Ok

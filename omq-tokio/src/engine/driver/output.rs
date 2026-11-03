@@ -2,7 +2,7 @@
 
 use super::{
     BATCH_TIME_CHECK_MSGS, DriverStep, OUTBOUND_BATCH_TIME, PeerDriverData,
-    outbound::{OutboundState, encode_msg},
+    outbound::OutboundState,
     write::{PendingWrite, claim_direct_writer},
 };
 use crate::{
@@ -14,7 +14,7 @@ use crate::{
 use omq_proto::{
     Message, Result, flow::max_batch_bytes, frame_buffer::FrameBuffer, proto::Connection,
 };
-use std::{sync::atomic::Ordering, time::Instant};
+use std::time::Instant;
 
 #[derive(Debug)]
 pub(super) struct QueuedOutput {
@@ -104,7 +104,7 @@ impl QueuedOutput {
             || !self.pipe_batch.is_empty()
             || self.deferred.is_some()
             || input_failed
-            || !slot.handshake_done.load(Ordering::Acquire)
+            || !slot.is_handshake_done()
         {
             return;
         }
@@ -267,13 +267,7 @@ impl QueuedOutput {
             let mut encoded = Ok(());
             if let Some((drained, _)) =
                 rx.drain_queue_with(OUTBOUND_BATCH_MAX_MSGS, max_batch_bytes(), |message| {
-                    encoded = encode_msg(
-                        &message,
-                        &mut self.encoding.encoder,
-                        connection,
-                        &mut self.frames,
-                        None,
-                    );
+                    encoded = self.encoding.encode(&message, connection, &mut self.frames);
                     count += 1;
                     encoded.is_ok()
                         && (!count.is_multiple_of(BATCH_TIME_CHECK_MSGS)

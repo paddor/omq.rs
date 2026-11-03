@@ -53,6 +53,8 @@ const LEASE_RECLAIM_BUDGET: omq_proto::flow::DrainBudget =
 
 #[cfg(all(test, miri))]
 mod miri_tests;
+#[cfg(test)]
+mod test_support;
 /// Maximum body size normally carried as copied bytes without a region lease.
 pub const COPY_THRESHOLD: usize = 55;
 /// Fixed transport preface length, before the ordinary ZMTP greeting.

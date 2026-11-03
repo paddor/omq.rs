@@ -2,12 +2,12 @@
 
 use super::LaneWorker;
 use crate::engine::transmit_slot::{PeerTransmitSlot, TryFrameResult};
-use crate::routing::fan_out::FAN_OUT_TOTAL_COPY_BUDGET;
+use crate::routing::fan_out::fan_out_cost;
 use bytes::Bytes;
-use omq_proto::fan_out_frame::{FanOutFrame, encode_fan_out_message, finish_fan_out_frame};
-use omq_proto::frame_buffer::FrameBuffer;
+use omq_proto::fan_out_frame::{FanOutEncoder, FanOutFrame};
 use omq_proto::message::Message;
 use omq_proto::proto::transform::TransformedOut;
+use smallvec::SmallVec;
 use std::sync::Arc;
 
 /// Owned only when a ready-path admission blocks. Large chunks stay shared.
@@ -68,6 +68,41 @@ pub(super) struct PendingPeer {
     pub(super) dictionary: Option<Arc<PreparedFrame>>,
 }
 
+/// Peers of one publication that wait for room. They share one owned
+/// payload, built when the first peer parks.
+pub(super) struct Parked<'a> {
+    pending: &'a mut SmallVec<[PendingPeer; 8]>,
+    payload: Option<Arc<PreparedFrame>>,
+}
+
+impl<'a> Parked<'a> {
+    pub(super) fn new(pending: &'a mut SmallVec<[PendingPeer; 8]>) -> Self {
+        Self {
+            pending,
+            payload: None,
+        }
+    }
+
+    pub(super) fn park(
+        &mut self,
+        peer_id: u64,
+        slot: &Arc<PeerTransmitSlot>,
+        dictionary: Option<Arc<PreparedFrame>>,
+        payload: impl FnOnce() -> PreparedFrame,
+    ) {
+        let payload = self
+            .payload
+            .get_or_insert_with(|| Arc::new(payload()))
+            .clone();
+        self.pending.push(PendingPeer {
+            peer_id,
+            slot: slot.clone(),
+            payload,
+            dictionary,
+        });
+    }
+}
+
 /// Matched recipients of one codec group.
 #[derive(Clone, Copy)]
 pub(super) struct GroupPeers<'a> {
@@ -77,15 +112,15 @@ pub(super) struct GroupPeers<'a> {
 
 /// Frame a group's encoded publication once for `recipients` peers.
 pub(super) fn frame_publication<'f>(
-    eq: &'f mut FrameBuffer,
-    chunks: &'f mut Vec<Bytes>,
+    encoder: &'f mut FanOutEncoder,
     wire: &TransformedOut,
     recipients: usize,
 ) -> FanOutFrame<'f> {
+    let cost = fan_out_cost(recipients);
     for message in wire {
-        encode_fan_out_message(eq, message, recipients, FAN_OUT_TOTAL_COPY_BUDGET);
+        encoder.encode(message, cost);
     }
-    finish_fan_out_frame(eq, chunks, recipients, FAN_OUT_TOTAL_COPY_BUDGET)
+    encoder.finish(cost)
 }
 
 impl LaneWorker {

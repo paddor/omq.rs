@@ -9,7 +9,6 @@ use omq_proto::{
     error::{Error, Result},
     proto::SocketType,
 };
-use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -22,6 +21,7 @@ mod monitor;
 mod receive;
 mod send;
 
+pub(crate) use construct::{Build, Placement};
 pub(crate) use monitor::ReadyPeers;
 pub use omq_proto::error::TrySendError;
 pub(crate) use send::ReqAwaitingReply;
@@ -84,14 +84,9 @@ struct Inner {
     send_submitter: SendSubmitter,
     /// Peer and envelope of the request admitted by application receive.
     rep_current: Arc<Mutex<Option<(u64, RepEnvelope)>>>,
-    /// REQ alternation flag. Avoids Mutex on the REQ hot path.
-    /// Shared with the actor for `on_peer_disconnected` reset.
-    req_awaiting_reply: Arc<ReqAwaitingReply>,
-    /// Subscription commands received from peers. Incremented by the
-    /// actor on each `Command::Subscribe`; read by `wait_subscribed`.
-    subscribe_count: Arc<AtomicU64>,
-    /// Peers that have completed handshaking and can accept data-plane sends.
-    ready_peer_count: Arc<ReadyPeers>,
+    /// REQ alternation, peer subscription count, and ready peers, shared
+    /// with the actor.
+    shared: super::actor::HandleShared,
     last_bound_endpoint: RwLock<Option<Endpoint>>,
     actor_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
@@ -160,7 +155,7 @@ impl Socket {
 
     #[doc(hidden)]
     pub fn ready_peer_count(&self) -> usize {
-        self.inner.ready_peer_count.get()
+        self.inner.shared.ready_peers.get()
     }
 
     pub(crate) fn same_socket(&self, other: &Self) -> bool {

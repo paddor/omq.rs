@@ -49,6 +49,26 @@ use crate::proto::mechanism::MechanismSetup;
 /// Minimum wall time of one compression-level adaptation window.
 pub const ADAPT_WINDOW: std::time::Duration = std::time::Duration::from_millis(100);
 
+/// Largest compression dictionary in bytes (RFC Sec. 6.2), shipped or trained.
+/// Ungated so option validation works without compression features.
+pub const MAX_DICT_BYTES: usize = 8 * 1024;
+
+/// Match an encoder or decoder on its codec and evaluate `$body` with
+/// `$codec` bound to that codec's state. Without compression features both
+/// enums are uninhabited.
+macro_rules! each_codec {
+    ($value:expr, $codec:ident => $body:expr) => {
+        match $value {
+            #[cfg(feature = "lz4")]
+            Self::Lz4($codec) => $body,
+            #[cfg(feature = "zstd")]
+            Self::Zstd($codec) => $body,
+            #[cfg(not(any(feature = "lz4", feature = "zstd")))]
+            _ => unreachable!("no compression codec is enabled"),
+        }
+    };
+}
+
 /// Transport conditions a sender observed over one adaptation window.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct OutputWindow {
@@ -150,12 +170,7 @@ impl CompressionKind {
     #[cfg(any(feature = "lz4", feature = "zstd"))]
     #[must_use]
     pub fn tcp_endpoint(self, host: Host, port: u16) -> Endpoint {
-        match self {
-            #[cfg(feature = "lz4")]
-            Self::Lz4 => Endpoint::Lz4Tcp { host, port },
-            #[cfg(feature = "zstd")]
-            Self::Zstd => Endpoint::ZstdTcp { host, port },
-        }
+        Endpoint::Tcp { host, port }.attach_codec(self)
     }
 }
 
@@ -210,14 +225,7 @@ impl MessageEncoder {
     /// Rejects invalid arenas and compression failures.
     #[allow(unused_variables)]
     pub fn encode_arena(&mut self, messages: &[&Message]) -> Result<TransformedOut> {
-        match self {
-            #[cfg(feature = "lz4")]
-            Self::Lz4(encoder) => encoder.encode_arena(messages),
-            #[cfg(feature = "zstd")]
-            Self::Zstd(encoder) => encoder.encode_arena(messages),
-            #[cfg(not(any(feature = "lz4", feature = "zstd")))]
-            _ => unreachable!("MessageEncoder is uninhabited without compression features"),
-        }
+        each_codec!(self, encoder => encoder.encode_arena(messages))
     }
 
     /// Returns `(sentinel, threshold)` when this encoder will always emit a
@@ -227,22 +235,10 @@ impl MessageEncoder {
     /// Callers cache this at handshake time and bypass the encoder mutex for
     /// sub-threshold messages.
     pub fn passthrough_info(&self) -> Option<(bytes::Bytes, usize)> {
-        #[allow(unused)]
-        const SENTINEL: &[u8] = &[0u8, 0, 0, 0];
-        match self {
-            #[cfg(feature = "lz4")]
-            Self::Lz4(t) => Some((
-                bytes::Bytes::from_static(SENTINEL),
-                t.passthrough_threshold()?,
-            )),
-            #[cfg(feature = "zstd")]
-            Self::Zstd(t) => Some((
-                bytes::Bytes::from_static(SENTINEL),
-                t.passthrough_threshold()?,
-            )),
-            #[cfg(not(any(feature = "lz4", feature = "zstd")))]
-            _ => unreachable!("MessageEncoder is uninhabited without compression features"),
-        }
+        each_codec!(self, encoder => Some((
+            bytes::Bytes::from_static(&common::SENTINEL_PLAIN),
+            encoder.passthrough_threshold()?,
+        )))
     }
 
     /// Build the per-connection encoder+decoder pair implied by an endpoint
@@ -355,18 +351,12 @@ impl MessageEncoder {
     }
 
     /// Transform an outbound user message into 1+ wire messages.
+    #[cfg_attr(
+        not(any(feature = "lz4", feature = "zstd")),
+        expect(unused_variables, reason = "uninhabited without codecs")
+    )]
     pub fn encode(&mut self, msg: &Message) -> Result<TransformedOut> {
-        match self {
-            #[cfg(feature = "lz4")]
-            Self::Lz4(t) => t.encode(msg),
-            #[cfg(feature = "zstd")]
-            Self::Zstd(t) => t.encode(msg),
-            #[cfg(not(any(feature = "lz4", feature = "zstd")))]
-            _ => {
-                let _ = msg;
-                unreachable!("MessageEncoder is uninhabited without compression features")
-            }
-        }
+        each_codec!(self, encoder => encoder.encode(msg))
     }
 
     /// Remove and return a leading dictionary-shipment message, when a
@@ -387,14 +377,7 @@ impl MessageEncoder {
 
     /// True when no dict shipment is pending and offloading is safe.
     pub fn can_offload(&self) -> bool {
-        match self {
-            #[cfg(feature = "lz4")]
-            Self::Lz4(t) => t.can_offload(),
-            #[cfg(feature = "zstd")]
-            Self::Zstd(t) => t.can_offload(),
-            #[cfg(not(any(feature = "lz4", feature = "zstd")))]
-            _ => unreachable!(),
-        }
+        each_codec!(self, encoder => encoder.can_offload())
     }
 
     /// Create a pool encoder with the same config but its own context.
@@ -522,27 +505,13 @@ impl MessageEncoder {
 impl MessageDecoder {
     /// Drain decoded arena messages before submitting another wire message.
     pub fn poll_message(&mut self) -> Option<Message> {
-        match self {
-            #[cfg(feature = "lz4")]
-            Self::Lz4(decoder) => decoder.poll_message(),
-            #[cfg(feature = "zstd")]
-            Self::Zstd(decoder) => decoder.poll_message(),
-            #[cfg(not(any(feature = "lz4", feature = "zstd")))]
-            _ => None,
-        }
+        each_codec!(self, decoder => decoder.poll_message())
     }
 
     /// Whether a decoded arena still has messages awaiting admission.
     #[must_use]
     pub fn has_pending_messages(&self) -> bool {
-        match self {
-            #[cfg(feature = "lz4")]
-            Self::Lz4(decoder) => decoder.has_pending_messages(),
-            #[cfg(feature = "zstd")]
-            Self::Zstd(decoder) => decoder.has_pending_messages(),
-            #[cfg(not(any(feature = "lz4", feature = "zstd")))]
-            _ => false,
-        }
+        each_codec!(self, decoder => decoder.has_pending_messages())
     }
 
     /// Framer limit for transformed body bytes plus payload slots. This allows
@@ -550,14 +519,7 @@ impl MessageDecoder {
     /// message limit. An explicitly unlimited decoded limit remains unlimited.
     #[must_use]
     pub fn max_wire_message_size(&self) -> Option<usize> {
-        match self {
-            #[cfg(feature = "lz4")]
-            Self::Lz4(t) => t.max_wire_message_size(),
-            #[cfg(feature = "zstd")]
-            Self::Zstd(t) => t.max_wire_message_size(),
-            #[cfg(not(any(feature = "lz4", feature = "zstd")))]
-            _ => unreachable!("MessageDecoder is uninhabited without compression features"),
-        }
+        each_codec!(self, decoder => decoder.max_wire_message_size())
     }
 
     /// Transform an inbound wire message. `None` means the message was

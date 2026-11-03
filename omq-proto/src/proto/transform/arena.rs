@@ -2,7 +2,7 @@
 
 use bytes::Bytes;
 
-use crate::proto::frame::{FLAG_LONG, FLAG_MORE};
+use crate::proto::frame::{FLAG_LONG, FLAG_MORE, message_wire_len};
 use crate::{Error, Message, Payload, Result};
 
 pub(crate) const HEADER: usize = 16;
@@ -22,13 +22,129 @@ pub fn arena_message_size(message: &Message) -> Option<usize> {
     if message.is_empty() || message.len() > MAX_ARENA_PARTS {
         return None;
     }
-    let mut size = 0usize;
-    message.iter_slices(|part| {
-        size = size
-            .saturating_add(part.len())
-            .saturating_add(if part.len() > 255 { 9 } else { 2 });
-    });
+    let size = message_wire_len(message);
     (size <= MAX_ARENA_MESSAGE_BYTES).then_some(size)
+}
+
+/// Sender arena target from environment variable `var`, capped at the
+/// protocol maximum.
+pub(crate) fn capacity_from_env(var: &str, default: usize) -> usize {
+    std::env::var(var)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+        .min(MAX_ARENA_BYTES)
+}
+
+/// Check a batch against the arena limits and return its decoded body size.
+pub(crate) fn check_batch(messages: &[&Message], label: &str) -> Result<usize> {
+    let mut size = 0usize;
+    let mut parts = 0usize;
+    for message in messages {
+        size = size.saturating_add(arena_message_size(message).ok_or_else(|| {
+            Error::Protocol(format!("message is not eligible for {label} arena"))
+        })?);
+        parts = parts.saturating_add(message.len());
+    }
+    if !(1..=MAX_ARENA_MESSAGES).contains(&messages.len())
+        || size > MAX_ARENA_BYTES
+        || parts > MAX_ARENA_PARTS
+    {
+        return Err(Error::Protocol(format!("{label} arena exceeds limits")));
+    }
+    Ok(size)
+}
+
+/// Arena header: sentinel, compressed flag, three zero bytes, then the
+/// decoded body size and message count as little-endian `u32`.
+#[inline]
+pub(crate) fn encode_header(
+    sentinel: [u8; 4],
+    compressed: bool,
+    size: usize,
+    count: usize,
+) -> [u8; HEADER] {
+    let mut header = [0; HEADER];
+    header[..4].copy_from_slice(&sentinel);
+    header[4] = u8::from(compressed);
+    header[8..12].copy_from_slice(&u32::try_from(size).unwrap().to_le_bytes());
+    header[12..16].copy_from_slice(&u32::try_from(count).unwrap().to_le_bytes());
+    header
+}
+
+/// Validated fields of a received arena header.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ArenaHeader {
+    pub(crate) compressed: bool,
+    pub(crate) size: usize,
+    pub(crate) count: usize,
+}
+
+/// Error for a malformed arena envelope of codec `label`.
+pub(crate) fn invalid_envelope(label: &str) -> Error {
+    Error::Protocol(format!("invalid {label} arena envelope"))
+}
+
+/// Validate the header of an arena message with `parts` parts whose first
+/// part is `bytes`. An uncompressed body must hold exactly the decoded size.
+#[inline]
+pub(crate) fn parse_header(parts: usize, bytes: &[u8], label: &str) -> Result<ArenaHeader> {
+    if parts != 1 || bytes.len() < HEADER || bytes[4] > 1 || bytes[5..8] != [0; 3] {
+        return Err(invalid_envelope(label));
+    }
+    let compressed = bytes[4] == 1;
+    let size = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+    let count = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+    if !(1..=MAX_ARENA_BYTES).contains(&size)
+        || !(1..=MAX_ARENA_MESSAGES).contains(&count)
+        || bytes.len() > HEADER + MAX_ARENA_BYTES
+        || (!compressed && bytes.len() - HEADER != size)
+    {
+        return Err(invalid_envelope(label));
+    }
+    Ok(ArenaHeader {
+        compressed,
+        size,
+        count,
+    })
+}
+
+/// Decoded arena messages not yet delivered. A decoder accepts no further
+/// wire message until this drains.
+#[derive(Debug, Default)]
+pub(crate) struct PendingArena(Option<DecodedArena>);
+
+impl PendingArena {
+    /// Hold a decoded arena and return its first message.
+    pub(crate) fn start(&mut self, arena: DecodedArena) -> Option<Message> {
+        self.0 = Some(arena);
+        self.poll()
+    }
+
+    /// Next undelivered message. The arena is released once empty.
+    #[inline]
+    pub(crate) fn poll(&mut self) -> Option<Message> {
+        let arena = self.0.as_mut()?;
+        let message = arena.next();
+        if arena.is_empty() {
+            self.0 = None;
+        }
+        message
+    }
+
+    #[inline]
+    pub(crate) fn is_pending(&self) -> bool {
+        self.0.is_some()
+    }
+
+    /// Refuse a new wire message while arena messages remain.
+    #[inline]
+    pub(crate) fn ensure_drained(&self, label: &str) -> Result<()> {
+        if self.is_pending() {
+            return Err(Error::Protocol(format!("undrained {label} arena")));
+        }
+        Ok(())
+    }
 }
 
 fn invalid() -> Error {
@@ -140,6 +256,17 @@ impl DecodedArena {
     pub(crate) fn is_empty(&self) -> bool {
         self.remaining == 0
     }
+}
+
+/// Uncompressed arena wire message around `body`, for codec tests.
+#[cfg(test)]
+pub(crate) fn raw_arena(sentinel: [u8; 4], body: &[u8], count: u32) -> Message {
+    let mut bytes = Vec::from(sentinel);
+    bytes.extend_from_slice(&[0; 4]);
+    bytes.extend_from_slice(&u32::try_from(body.len()).unwrap().to_le_bytes());
+    bytes.extend_from_slice(&count.to_le_bytes());
+    bytes.extend_from_slice(body);
+    Message::single(bytes)
 }
 
 #[cfg(test)]

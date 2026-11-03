@@ -1,9 +1,8 @@
 //! Connection lifecycle and ordered service of the driver's selected waits.
 
 use super::{
-    ConnectionDriver, DriverStep, DriverStream, DriverWrite, PeerDriverConfig, PeerEvent,
-    PreActivationStep, ReceiveProfile, RecvSink,
-    activation::{Activation, ControlCredit, ControlPermit},
+    ConnectionDriver, DriverStep, DriverStream, DriverWrite, IPC_LATENCY_POLL_WINDOW, OutputSetup,
+    PeerDriverConfig, PeerEvent, PreActivationStep, ReceiveProfile, ReceiveSetup, RecvSink,
     control::{ControlState, Heartbeat, close_error_reason},
     outbound::OutboundState,
     output::QueuedOutput,
@@ -13,11 +12,11 @@ use super::{
         drain_decoded_messages,
     },
     shm,
-    write::{TransmitSlotLifetime, enable_transmit_slot_after_handshake},
+    write::{TransmitSlotLifetime, enable_transmit_slot_after_handshake, mark_peer_dead},
 };
 use crate::engine::{
     AuthenticatedRecvItem,
-    actor_output::PeerOutput,
+    actor_output::PeerOutlet,
     compression_pool::EncoderLoan,
     control_inbox,
     peer_completion::CompletionProgress,
@@ -27,7 +26,6 @@ use crate::engine::{
     transmit_slot::PeerTransmitSlot,
 };
 use crate::network_limit::{PacedRead, PacedWrite};
-use bytes::Bytes;
 use omq_proto::{
     DisconnectReason, Message, PayloadPool,
     error::{Error, Result},
@@ -37,17 +35,14 @@ use omq_proto::{
         transform::{MessageDecoder, TransformedOut},
     },
 };
-use std::{
-    future::Future,
-    net::IpAddr,
-    pin::Pin,
-    sync::{Arc, atomic::Ordering},
-    time::Instant,
-};
+use std::{future::Future, net::IpAddr, pin::Pin, sync::Arc, time::Instant};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+mod activation;
 mod wait;
+
+use activation::{Activation, ControlCredit, ControlPermit};
 
 /// Outcome of reserving one slot on the authenticated receive queue.
 type AuthenticatedPermit<'a> =
@@ -114,13 +109,114 @@ struct Waits<'w, D, F, G, A, H> {
 /// Inbound decode and delivery settings.
 struct ReceivePath {
     rate_limiter: Option<TokenBucket>,
-    #[cfg(target_os = "linux")]
-    shm: Option<crate::transport::shm::ShmState>,
+    shm: Option<crate::engine::shm_state::ShmState>,
     ip_rate_limiter: Option<(Arc<SharedIpRateLimiter>, IpAddr)>,
     payload_pool: Option<PayloadPool>,
     profile: ReceiveProfile,
     parts: Option<usize>,
     decoder: Option<MessageDecoder>,
+}
+
+impl ReceivePath {
+    fn new(setup: ReceiveSetup, config: &PeerDriverConfig) -> Self {
+        Self {
+            rate_limiter: config
+                .recv_rate_limit
+                .map(|limit| TokenBucket::new(limit, Instant::now())),
+            shm: setup.shm,
+            ip_rate_limiter: setup.ip_rate_limiter,
+            payload_pool: setup.payload_pool,
+            profile: setup.profile,
+            parts: setup.parts,
+            decoder: setup.decoder,
+        }
+    }
+}
+
+impl OutputSetup {
+    /// Build the run's queued output. `owned_chunks` says whether the writer
+    /// takes owned chunks.
+    fn into_queued(
+        self,
+        shm: Option<crate::engine::shm_state::ShmState>,
+        owned_chunks: bool,
+    ) -> QueuedOutput {
+        let encoding = OutboundState::new(
+            self.encoder,
+            self.compression_pool,
+            self.offload_threshold,
+            shm,
+        );
+        QueuedOutput::new(
+            encoding,
+            FrameBuffer::with_config_lazy(self.arena_threshold, self.arena_cap),
+            self.send_pipe_rx,
+            self.data_inbox,
+            owned_chunks,
+        )
+    }
+}
+
+/// Latency workload settings and the IPC busy-poll window.
+struct LatencyPolling {
+    /// Stage the latency-routed transmit slot and poll it before reads.
+    profile: bool,
+    /// Keep owned IPC latency drivers runnable briefly after wire progress.
+    enabled: bool,
+    until: Option<Instant>,
+}
+
+impl LatencyPolling {
+    fn new(profile: bool, enabled: bool) -> Self {
+        Self {
+            profile,
+            enabled,
+            until: None,
+        }
+    }
+
+    /// Wire progress reopens the poll window.
+    fn note_progress(&mut self) {
+        if self.enabled {
+            self.until = Instant::now().checked_add(IPC_LATENCY_POLL_WINDOW);
+        }
+    }
+}
+
+/// Decoded messages on their way to the socket.
+struct Delivery {
+    /// A decoded message waiting for receive space or an actor permit.
+    pending: Option<Message>,
+    /// Discarding input for a closed receive side left more to discard.
+    discard_pending: bool,
+    /// The user receive pipe; once closed, input is discarded.
+    close_state: Option<Arc<crate::socket::recv::SharedRecvPipe>>,
+    sink: Option<RecvSink>,
+}
+
+impl Delivery {
+    fn new(
+        sink: Option<RecvSink>,
+        close_state: Option<Arc<crate::socket::recv::SharedRecvPipe>>,
+    ) -> Self {
+        Self {
+            pending: None,
+            discard_pending: false,
+            close_state,
+            sink,
+        }
+    }
+
+    /// A decoded message waits for space on the receive path.
+    fn message_blocked(&self) -> bool {
+        self.pending.is_some() || self.sink.as_ref().is_some_and(RecvSink::peer_blocked)
+    }
+
+    fn receive_closed(&self) -> bool {
+        self.close_state
+            .as_ref()
+            .is_some_and(|state| state.is_closed())
+    }
 }
 
 /// Gates for one turn's select, computed after all non-blocking work.
@@ -144,31 +240,23 @@ struct Turn {
 /// slot dead), then queued output, then the driver's own resources.
 struct Session<'c> {
     peer_events: PeerEventDispatch,
-    poll_until: Option<Instant>,
+    latency: LatencyPolling,
     pending_input_error: Option<Error>,
-    pending_receive: Option<Message>,
-    discard_pending: bool,
     control: ControlState,
     handshake_deadline: Option<Instant>,
     heartbeat: Heartbeat,
     _slot_lifetime: TransmitSlotLifetime,
-    drain_buf: Vec<Bytes>,
     output: QueuedOutput,
     read: StreamRead,
-    latency_profile: bool,
     shm_driver: shm::Driver,
-    latency_polling: bool,
     receive: ReceivePath,
-    socket_close_state: Option<Arc<crate::socket::recv::SharedRecvPipe>>,
     transmit_slot: Option<Arc<PeerTransmitSlot>>,
-    recv_direct: Option<RecvSink>,
+    delivery: Delivery,
     config: PeerDriverConfig,
     cancel: CancellationToken,
-    peer_id: u64,
-    peer_out: PeerOutput,
+    outlet: PeerOutlet<'c>,
     inbox: control_inbox::Receiver,
     connection: Connection,
-    completion: &'c mut CompletionProgress,
 }
 
 impl<T> ConnectionDriver<T>
@@ -221,15 +309,12 @@ where
             peer_control,
             setup_cancel,
         } = wiring;
-        let shm_peer_death = shm::peer_death(
-            #[cfg(target_os = "linux")]
-            session.receive.shm.clone(),
-        );
+        let shm_peer_death = shm::peer_death(session.receive.shm.clone());
         tokio::pin!(shm_peer_death);
 
         // Socket-owned drivers publish codec events on a separate control
         // mailbox. Standalone drivers share the caller's combined channel.
-        let legacy_events = session.peer_out.legacy_sender();
+        let legacy_events = session.outlet.output.legacy_sender();
         let event_out = peer_control
             .as_ref()
             .or(legacy_events.as_ref())
@@ -252,7 +337,8 @@ where
             io.writer.track_stalls();
         }
         let authenticated_sender = session
-            .recv_direct
+            .delivery
+            .sink
             .as_ref()
             .and_then(RecvSink::authenticated_sender);
         let authenticated_credit = reserve_authenticated(authenticated_sender.as_ref());
@@ -276,47 +362,18 @@ where
             .is_some_and(|deadline| Instant::now() >= deadline)
     }
 
-    /// Move the receive settings out ahead of the stream split.
-    fn take_receive_path(&mut self) -> ReceivePath {
-        ReceivePath {
-            rate_limiter: self
-                .config
-                .recv_rate_limit
-                .map(|limit| TokenBucket::new(limit, Instant::now())),
-            #[cfg(target_os = "linux")]
-            shm: self.shm.take(),
-            ip_rate_limiter: self.recv_ip_rate_limiter.take(),
-            payload_pool: self.decoded_payload_pool.take(),
-            profile: self.receive_profile,
-            parts: self.recv_parts,
-            decoder: self.decoder.take(),
-        }
-    }
-
     /// Split the driver into the run's session and the pieces that pinned
     /// waits borrow.
     fn into_session(
-        mut self,
+        self,
         completion: &mut CompletionProgress,
     ) -> (Wiring<T::Reader, T::Writer>, Session<'_>) {
-        let receive = self.take_receive_path();
+        let receive = ReceivePath::new(self.receive, &self.config);
         let latency_profile = !matches!(receive.profile, ReceiveProfile::Throughput);
         let (reader, mut writer) = self.stream.split(latency_profile);
-
-        let encoding = OutboundState::new(
-            self.encoder,
-            self.compression_pool,
-            self.offload_threshold,
-            #[cfg(target_os = "linux")]
-            receive.shm.clone(),
-        );
-        let output = QueuedOutput::new(
-            encoding,
-            FrameBuffer::with_config_lazy(self.arena_threshold, self.arena_cap),
-            self.send_pipe_rx,
-            self.data_inbox,
-            writer.chunk_writer().is_some(),
-        );
+        let output = self
+            .output
+            .into_queued(receive.shm.clone(), writer.chunk_writer().is_some());
 
         // The transport's own setup deadline wins over the handshake timeout.
         let heartbeat = Heartbeat::new(&self.config);
@@ -326,34 +383,23 @@ where
 
         let session = Session {
             peer_events: PeerEventDispatch::new(self.subscriptions),
-            poll_until: None,
+            latency: LatencyPolling::new(latency_profile, self.latency_polling),
             pending_input_error: None,
-            pending_receive: None,
-            discard_pending: false,
             control: ControlState::default(),
             handshake_deadline,
             heartbeat,
             _slot_lifetime: TransmitSlotLifetime(self.transmit_slot.clone()),
-            drain_buf: Vec::new(),
             output,
             read: StreamRead::new(receive.profile),
-            latency_profile,
-            shm_driver: shm::Driver::new(
-                #[cfg(target_os = "linux")]
-                receive.shm.clone(),
-            ),
-            latency_polling: self.latency_polling,
+            shm_driver: shm::Driver::new(receive.shm.clone()),
             receive,
-            socket_close_state: self.socket_close_state,
             transmit_slot: self.transmit_slot,
-            recv_direct: self.recv_direct,
+            delivery: Delivery::new(self.recv_direct, self.socket_close_state),
             config: self.config,
             cancel: self.cancel,
-            peer_id: self.peer_id,
-            peer_out: self.peer_out,
+            outlet: PeerOutlet::new(self.peer_out, self.peer_id, completion),
             inbox: self.inbox,
             connection: self.connection,
-            completion,
         };
 
         let wiring = Wiring {
@@ -367,36 +413,61 @@ where
     }
 }
 
-impl Session<'_> {
+impl<'c> Session<'c> {
     fn activation<'a, 'events>(
         &'a mut self,
         event_out: &'events mpsc::Sender<(u64, PeerEvent)>,
         setup_cancel: Option<&'a CancellationToken>,
-    ) -> Activation<'a, 'events> {
+    ) -> Activation<'a, 'c, 'events> {
         Activation {
-            connection: &mut self.connection,
-            inbox: &mut self.inbox,
-            peer_events: &mut self.peer_events,
+            session: self,
             event_out,
-            peer_out: &mut self.peer_out,
-            peer_id: self.peer_id,
-            recv_direct: &mut self.recv_direct,
-            completion: self.completion,
-            transmit_slot: self.transmit_slot.as_deref(),
-            cancel: &self.cancel,
             setup_cancel,
-            handshake_deadline: &mut self.handshake_deadline,
-            read: &mut self.read,
-            config: &self.config,
-            last_input: &mut self.heartbeat.last_input,
-            pending_input_error: &mut self.pending_input_error,
-            eq: &mut self.output.frames,
-            drain_buf: &mut self.drain_buf,
-            unflushed: &mut self.output.pending.unflushed,
         }
     }
 
+    /// Close the transmit slot so senders stop queueing to this peer.
+    fn mark_slot_dead(&self) {
+        mark_peer_dead(self.transmit_slot.as_deref());
+    }
+
+    /// Peer EOF: no later write can reach the peer.
+    fn close_on_eof(&mut self) {
+        self.mark_slot_dead();
+        self.cancel.cancel();
+        self.inbox.close();
+    }
+
+    /// Admit the retained codec event into its reserved mailbox slot.
+    /// Returns `false` once the actor is gone.
+    fn send_control(&mut self, permit: ControlPermit<'_>) -> bool {
+        let Ok(permit) = permit else {
+            return false;
+        };
+        self.peer_events.send_reserved(permit, self.outlet.view())
+    }
+
+    /// Admit pending codec events. Returns `false` once the actor is gone.
+    fn drive_peer_events(
+        &mut self,
+        event_out: &mpsc::Sender<(u64, PeerEvent)>,
+        data_clear: bool,
+    ) -> bool {
+        let route = EventRoute {
+            mailbox: event_out,
+            outlet: self.outlet.view(),
+        };
+        self.peer_events.drive(
+            &mut self.connection,
+            route,
+            self.delivery.sink.as_mut(),
+            data_clear,
+        )
+    }
+
     fn start_data_plane(&mut self) {
+        // Setup writes only codec output; data framing starts here.
+        debug_assert!(self.output.frames.is_empty());
         enable_transmit_slot_after_handshake(self.transmit_slot.as_deref(), &self.connection);
         self.heartbeat.activate(&self.connection);
     }
@@ -505,20 +576,9 @@ impl Session<'_> {
     ) -> Result<bool> {
         // Protocol events on a separate mailbox remain reachable while
         // data waits. Standalone combined mailboxes retain their prefix.
-        if separate_control || self.pending_receive.is_none() {
-            let data_clear = self.pending_receive.is_none();
-            let route = EventRoute {
-                mailbox: event_out,
-                output: &mut self.peer_out,
-                peer_id: self.peer_id,
-                completion: self.completion,
-            };
-            if !self.peer_events.drive(
-                &mut self.connection,
-                route,
-                self.recv_direct.as_mut(),
-                data_clear,
-            ) {
+        if separate_control || self.delivery.pending.is_none() {
+            let data_clear = self.delivery.pending.is_none();
+            if !self.drive_peer_events(event_out, data_clear) {
                 return Ok(false);
             }
         }
@@ -528,7 +588,8 @@ impl Session<'_> {
             return Err(self.pending_input_error.take().unwrap());
         }
 
-        self.peer_out
+        self.outlet
+            .output
             .set_control_prefix(self.peer_events.control_prefix());
         Ok(true)
     }
@@ -550,14 +611,11 @@ impl Session<'_> {
 
         if self.control.discard_receive {
             // A dropped pending message no longer owns the reserved permit.
-            if self.pending_receive.take().is_some() {
+            if self.delivery.pending.take().is_some() {
                 authenticated.rearm();
             }
-            self.discard_pending = discard_received_messages(
-                &mut self.connection,
-                #[cfg(target_os = "linux")]
-                self.receive.shm.as_ref(),
-            )?;
+            self.delivery.discard_pending =
+                discard_received_messages(&mut self.connection, self.receive.shm.as_ref())?;
             return Ok(Flow::Next);
         }
 
@@ -566,7 +624,7 @@ impl Session<'_> {
             DriverStep::Yield => Ok(Flow::Again),
             // Closing the user receive pipe must not discard accepted
             // transmit work before the drain command reaches us.
-            DriverStep::Close if self.receive_closed() => {
+            DriverStep::Close if self.delivery.receive_closed() => {
                 self.control.discard_receive = true;
                 Ok(Flow::Next)
             }
@@ -580,16 +638,13 @@ impl Session<'_> {
             connection: &mut self.connection,
             decoder: &mut receive.decoder,
             payload_pool: receive.payload_pool.as_ref(),
-            #[cfg(target_os = "linux")]
             shm: receive.shm.as_ref(),
         };
 
         let delivery = MessageDelivery {
-            sink: &mut self.recv_direct,
-            peer_out: &mut self.peer_out,
-            peer_id: self.peer_id,
-            completion: self.completion,
-            pending: &mut self.pending_receive,
+            sink: &mut self.delivery.sink,
+            outlet: self.outlet.view(),
+            pending: &mut self.delivery.pending,
             reserved_admission,
             expected_parts: receive.parts,
         };
@@ -600,12 +655,6 @@ impl Session<'_> {
         };
 
         drain_decoded_messages(input, receive.profile, delivery, rate_limiters)
-    }
-
-    fn receive_closed(&self) -> bool {
-        self.socket_close_state
-            .as_ref()
-            .is_some_and(|state| state.is_closed())
     }
 
     /// Stage queued application output once the data plane is open.
@@ -625,7 +674,7 @@ impl Session<'_> {
             DriverStep::Yield => tokio::task::yield_now().await,
             DriverStep::Close => return Ok(Flow::Exit),
         }
-        if self.latency_profile {
+        if self.latency.profile {
             self.output.stage_latency_slot(&self.connection, slot);
         }
 
@@ -645,12 +694,7 @@ impl Session<'_> {
     /// accepted input and output is drained.
     fn shutdown_ready(&mut self, data_plane_open: bool) -> bool {
         let receive_drained = self.control.discard_receive
-            || (self.pending_receive.is_none()
-                && !self
-                    .recv_direct
-                    .as_ref()
-                    .is_some_and(RecvSink::peer_blocked)
-                && !self.peer_events.blocked());
+            || (!self.delivery.message_blocked() && !self.peer_events.blocked());
         let drained = self.control.is_closing()
             && self.inbox.is_empty()
             && receive_drained
@@ -681,12 +725,7 @@ impl Session<'_> {
 
         let want_write = self.output.has_pending_write(&self.connection);
         let can_accept_data = data_plane_open && self.output.idle(&self.connection);
-        let message_blocked = !self.control.discard_receive
-            && (self.pending_receive.is_some()
-                || self
-                    .recv_direct
-                    .as_ref()
-                    .is_some_and(RecvSink::peer_blocked));
+        let message_blocked = !self.control.discard_receive && self.delivery.message_blocked();
         // Bound automatic replies without stopping reads for application
         // output: two peers with pending data must still read each other.
         let replies_blocked = self.connection.input_blocked_on_output();
@@ -695,7 +734,7 @@ impl Session<'_> {
         let want_read = self.pending_input_error.is_none()
             && !recv_blocked
             && self.connection.accepts_input()
-            && !self.discard_pending
+            && !self.delivery.discard_pending
             && !self.connection.is_closed();
 
         // Release pacing reservations for directions this turn will not use.
@@ -743,10 +782,11 @@ impl Session<'_> {
         // its cross-process wake disabled.
         let closing = self.control.is_closing();
         let poll_transport = self
-            .poll_until
+            .latency
+            .until
             .is_some_and(|deadline| !closing && !recv_blocked && Instant::now() < deadline);
         self.shm_driver
-            .receive_polling(self.latency_polling && poll_transport);
+            .receive_polling(self.latency.enabled && poll_transport);
 
         poll_transport
     }
@@ -754,6 +794,6 @@ impl Session<'_> {
     fn slot_handshake_done(&self) -> bool {
         self.transmit_slot
             .as_ref()
-            .is_some_and(|slot| slot.handshake_done.load(Ordering::Acquire))
+            .is_some_and(|slot| slot.is_handshake_done())
     }
 }

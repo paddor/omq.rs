@@ -213,11 +213,8 @@ impl<T> Drop for Receiver<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::poll_once;
     use std::time::Duration;
-
-    fn poll_once<F: Future>(future: std::pin::Pin<&mut F>) -> Poll<F::Output> {
-        future.poll(&mut Context::from_waker(futures::task::noop_waker_ref()))
-    }
 
     #[tokio::test]
     async fn copies_share_capacity_and_wake_all_waiters() {

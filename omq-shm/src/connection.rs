@@ -1,22 +1,24 @@
 //! Carrier registration and per-recipient lease state.
 #![forbid(unsafe_code)]
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{self, IoSlice};
 use std::os::fd::AsFd;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 
 mod codec;
+mod state;
 
 use omq_proto::{Message, SocketType};
 
-use crate::lease::{CreditWait, PENDING, Table, lease_completed};
+use crate::lease::{CreditWait, Table};
 use crate::mapping::{LEASES, Mapping, invalid};
 use crate::process::Process;
-use crate::wire::{self, MULTIPART, READER_CLOSED, REFERENCE_BATCH, STATE_BITS};
-use crate::{MAX_LEASES, PREFACE_SIZE, SendPool, batch, socket};
+use crate::wire::{self, READER_CLOSED};
+use crate::{MAX_LEASES, PREFACE_SIZE, SendPool, socket};
+use state::{InboundRegions, OutboundLeases, Registrations};
 
 #[cfg(all(test, not(miri)))]
 use crate::pool::find_slot;
@@ -34,21 +36,14 @@ pub struct Connection {
     peer: Arc<Process>,
     outgoing: Arc<Table>,
     incoming: Option<Arc<Table>>,
-    free: VecDeque<usize>,
-    active: VecDeque<ActiveLease>,
-    leased_messages: usize,
-    generation: u64,
+    leases: OutboundLeases,
     send_pool: SendPool,
-    regions: VecDeque<(u32, u64, Arc<Mapping>)>,
-    retired_regions: VecDeque<(u32, u64, Arc<Mapping>)>,
-    registered: VecDeque<(u32, u64)>,
-    descriptors: VecDeque<File>,
+    inbound: InboundRegions,
+    registrations: Registrations,
     blocked_sequence: u32,
-    hwm: usize,
     max_message_size: Option<usize>,
     received: Option<crate::ReceivedBatch>,
     views: crate::views::Views,
-    sent_descriptors: u64,
     received_descriptors: u64,
     receive_polling: bool,
 }
@@ -60,13 +55,6 @@ pub enum Received {
     Message(Message),
     /// Bodies retained together until the application receives them.
     Batch(crate::ReceivedBatch),
-}
-
-#[derive(Debug)]
-struct ActiveLease {
-    index: usize,
-    generation: u64,
-    messages: usize,
 }
 
 /// Whether a socket type supports SHM: every type except STREAM. Envelope
@@ -107,12 +95,11 @@ impl Connection {
     ) -> io::Result<Self> {
         let peer = Arc::new(Process::peer(socket)?);
         let count = hwm.clamp(1, MAX_LEASES);
-        let outgoing = Arc::new(Table {
-            mapping: Mapping::create(crate::carrier::Carrier::length(count), LEASES)?,
+        let outgoing = Arc::new(Table::new(
+            Mapping::create(crate::carrier::Carrier::length(count), LEASES)?,
             count,
-            stopped: AtomicBool::new(false),
-            carrier: crate::carrier::Carrier::new(count, true)?,
-        });
+            crate::carrier::Carrier::new(count, true)?,
+        ));
         outgoing
             .mapping
             .atomic64(crate::carrier::COUNT_OFFSET)
@@ -134,21 +121,14 @@ impl Connection {
             peer,
             outgoing,
             incoming: None,
-            free: (0..count).collect(),
-            active: VecDeque::with_capacity(count),
-            leased_messages: 0,
-            generation: 0,
+            leases: OutboundLeases::new(count),
             send_pool,
-            regions: VecDeque::new(),
-            retired_regions: VecDeque::new(),
-            registered: VecDeque::new(),
-            descriptors,
+            inbound: InboundRegions::default(),
+            registrations: Registrations::new(descriptors),
             blocked_sequence: 0,
-            hwm: count,
             max_message_size,
             received: None,
             views: crate::views::Views::new(count.max(crate::BATCH_MAX_MESSAGES)),
-            sent_descriptors: 0,
             received_descriptors: 0,
             receive_polling: false,
         })
@@ -170,10 +150,7 @@ impl Connection {
     /// Returns an error for a missing descriptor or incompatible/invalid preface.
     pub fn accept_preface(&mut self, bytes: &[u8; PREFACE_SIZE]) -> io::Result<()> {
         let preface = wire::Preface::decode(bytes)?;
-        let table = self
-            .incoming
-            .as_ref()
-            .ok_or_else(|| invalid("missing SHM lease descriptor"))?;
+        let table = self.incoming("missing SHM lease descriptor")?;
         if table.mapping.id != preface.id
             || table.mapping.token != preface.token
             || table.count != preface.count
@@ -193,12 +170,8 @@ impl Connection {
         if bytes.iter().all(|bytes| bytes.is_empty()) {
             return Ok(0);
         }
-        let written = socket::send(socket, bytes, &self.descriptors)?;
-        if written != 0 && !self.descriptors.is_empty() {
-            self.sent_descriptors = self
-                .sent_descriptors
-                .wrapping_add(self.descriptors.len() as u64);
-            self.descriptors.clear();
+        let written = socket::send(socket, bytes, &self.registrations.descriptors)?;
+        if written != 0 && self.registrations.mark_sent() {
             // Registration capacity also uses the persistent credit wait.
             self.outgoing.notify();
         }
@@ -221,10 +194,7 @@ impl Connection {
         }
         if count != 0 {
             self.received_descriptors = self.received_descriptors.wrapping_add(count as u64);
-            let incoming = self
-                .incoming
-                .as_ref()
-                .ok_or_else(|| invalid("missing SHM lease descriptor"))?;
+            let incoming = self.incoming("missing SHM lease descriptor")?;
             incoming
                 .carrier
                 .acknowledge_imports(&incoming.mapping, self.received_descriptors)?;
@@ -234,7 +204,7 @@ impl Connection {
 
     /// Whether descriptor registration must progress before publishing carrier bytes.
     pub fn has_pending_descriptors(&self) -> bool {
-        !self.descriptors.is_empty()
+        !self.registrations.descriptors.is_empty()
     }
 
     /// Publish a bounded prefix of already framed carrier bytes into shared memory.
@@ -244,7 +214,7 @@ impl Connection {
     /// Returns `WouldBlock` for registration/space pressure, or invalid shared state.
     pub fn try_write_carrier(&mut self, bytes: &[IoSlice<'_>]) -> io::Result<usize> {
         if self.has_pending_descriptors()
-            || self.outgoing.carrier.imported(&self.outgoing.mapping) != self.sent_descriptors
+            || self.outgoing.carrier.imported(&self.outgoing.mapping) != self.registrations.sent
         {
             return Err(io::ErrorKind::WouldBlock.into());
         }
@@ -265,10 +235,7 @@ impl Connection {
     /// # Errors
     /// Returns `WouldBlock` when empty, or an error for invalid shared cursors.
     pub fn try_read_carrier(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
-        let table = self
-            .incoming
-            .as_ref()
-            .ok_or_else(|| invalid("missing SHM carrier"))?;
+        let table = self.incoming("missing SHM carrier")?;
         table.carrier.read(&table.mapping, bytes)
     }
 
@@ -282,10 +249,7 @@ impl Connection {
     /// # Errors
     /// Returns an error for a missing carrier or invalid shared cursors.
     pub fn arm_carrier_read(&self) -> io::Result<bool> {
-        let table = self
-            .incoming
-            .as_ref()
-            .ok_or_else(|| invalid("missing SHM carrier"))?;
+        let table = self.incoming("missing SHM carrier")?;
         table
             .carrier
             .arm_reader(&table.mapping, self.receive_polling)
@@ -331,138 +295,26 @@ impl Connection {
             {
                 return Err(invalid("invalid SHM lease descriptor"));
             }
-            self.incoming = Some(Arc::new(Table {
+            self.incoming = Some(Arc::new(Table::new(
                 mapping,
                 count,
-                stopped: AtomicBool::new(false),
-                carrier: crate::carrier::Carrier::new(count, false)?,
-            }));
+                crate::carrier::Carrier::new(count, false)?,
+            )));
             return Ok(());
         }
-        if self.incoming.is_none() {
+        let Some(incoming) = &self.incoming else {
             return Err(invalid("missing SHM lease descriptor"));
-        }
-        let identity = (mapping.id, mapping.token);
-        self.regions
-            .retain(|(id, token, _)| (*id, *token) != identity);
-        self.retired_regions
-            .retain(|(id, token, _)| (*id, *token) != identity);
-        self.regions
-            .push_back((mapping.id, mapping.token, Arc::new(mapping)));
-        if self.regions.len() > socket::SEND_LIMIT {
-            // Both sides retain the last 64 registrations in wire order.
-            // Older regions remain discoverable while queued references need
-            // them; borrowed owners independently retain their mappings.
-            let pending = self.pending_regions();
-            self.retired_regions
-                .retain(|(id, token, _)| pending.contains(&(*id, *token)));
-            let region = self.regions.pop_front().expect("registered region");
-            if pending.contains(&(region.0, region.1)) {
-                self.retired_regions.push_back(region);
-            }
-            if self.retired_regions.len() > MAX_LEASES {
-                return Err(invalid("too many retained SHM regions"));
-            }
-        }
-        Ok(())
+        };
+        self.inbound.insert(mapping, incoming)
     }
 
-    fn pending_regions(&self) -> BTreeSet<(u32, u64)> {
-        let mut regions = BTreeSet::new();
-        if let Some(table) = &self.incoming {
-            for index in 0..table.count {
-                if table.cell(index).load(Ordering::Acquire) & STATE_BITS == PENDING {
-                    let id = table
-                        .coordinates(index, wire::REGION_ID)
-                        .load(Ordering::Relaxed) as u32;
-                    let token = table
-                        .coordinates(index, wire::REGION_TOKEN)
-                        .load(Ordering::Relaxed);
-                    regions.insert((id, token));
-                    let kind = table
-                        .coordinates(index, wire::RECORD_KIND)
-                        .load(Ordering::Relaxed);
-                    if (kind == u64::from(REFERENCE_BATCH) || kind == u64::from(MULTIPART))
-                        && let Some(mapping) = self.find_region(id, token)
-                    {
-                        let offset = table
-                            .coordinates(index, wire::BODY_OFFSET)
-                            .load(Ordering::Relaxed);
-                        let length = table
-                            .coordinates(index, wire::BODY_LENGTH)
-                            .load(Ordering::Relaxed);
-                        if let (Ok(offset), Ok(length)) =
-                            (usize::try_from(offset), usize::try_from(length))
-                            && mapping.contains(offset, length)
-                            && let Ok(references) = batch::references(mapping.bytes(offset, length))
-                        {
-                            regions.extend(
-                                references
-                                    .into_iter()
-                                    .map(|reference| (reference.id, reference.token)),
-                            );
-                        }
-                    }
-                }
-            }
-        }
-        regions
-    }
-
-    fn find_region(&self, id: u32, token: u64) -> Option<&Arc<Mapping>> {
-        self.regions
-            .iter()
-            .chain(self.retired_regions.iter())
-            .find(|(registered, nonce, _)| *registered == id && *nonce == token)
-            .map(|(_, _, mapping)| mapping)
+    /// The peer's lease table, or `missing` as an invalid-data error.
+    fn incoming(&self, missing: &str) -> io::Result<&Arc<Table>> {
+        self.incoming.as_ref().ok_or_else(|| invalid(missing))
     }
 
     fn reclaim(&mut self, needed: usize) {
-        // Leases usually complete in publication order. Returning them from
-        // the front on every encode keeps credit flowing a few at a time,
-        // instead of one scan of the whole window per HWM of messages.
-        while let Some(lease) = self.active.front()
-            && lease_completed(&self.outgoing, &self.peer, lease.index, lease.generation)
-        {
-            let lease = self.active.pop_front().expect("completed active lease");
-            self.free.push_back(lease.index);
-            self.leased_messages -= lease.messages;
-        }
-        if self.hwm - self.leased_messages >= needed {
-            return;
-        }
-        // Scan the complete bounded window before parking. A batch can need
-        // more credit even while a few unused positions remain in the table.
-        let mut budget = crate::LEASE_RECLAIM_BUDGET;
-        for _ in 0..self.active.len() {
-            if budget.exhausted() {
-                break;
-            }
-            let lease = self.active.pop_front().expect("active lease");
-            let _ = budget.account(std::mem::size_of::<ActiveLease>());
-            if lease_completed(&self.outgoing, &self.peer, lease.index, lease.generation) {
-                self.free.push_back(lease.index);
-                self.leased_messages -= lease.messages;
-            } else {
-                self.active.push_back(lease);
-            }
-        }
-    }
-
-    fn register_region(&mut self, mapping: &Mapping) -> io::Result<bool> {
-        let identity = (mapping.id, mapping.token);
-        if self.registered.contains(&identity) {
-            return Ok(true);
-        }
-        if self.descriptors.len() == socket::SEND_LIMIT {
-            return Ok(false);
-        }
-        self.descriptors.push_back(mapping.descriptor()?);
-        if self.registered.len() == socket::SEND_LIMIT {
-            self.registered.pop_front();
-        }
-        self.registered.push_back(identity);
-        Ok(true)
+        self.leases.reclaim(&self.outgoing, &self.peer, needed);
     }
 
     /// Prepare a persistent blocking wait after encode returned None.

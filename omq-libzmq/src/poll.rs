@@ -16,12 +16,25 @@ use std::ffi::c_int;
 use std::sync::Arc;
 
 use crate::consts;
+use crate::error::c_try;
 use crate::socket::OmqSocket;
 
 #[cfg(unix)]
 pub(crate) type ZmqFd = libc::c_int;
 #[cfg(windows)]
 pub(crate) type ZmqFd = usize;
+
+/// The fd reported for socket items and unset fd slots.
+pub(crate) fn invalid_fd() -> ZmqFd {
+    #[cfg(unix)]
+    {
+        -1
+    }
+    #[cfg(windows)]
+    {
+        ZmqFd::MAX
+    }
+}
 
 pub(crate) const ZMQ_POLLIN: libc::c_short = consts::ZMQ_POLLIN as libc::c_short;
 pub(crate) const ZMQ_POLLOUT: libc::c_short = consts::ZMQ_POLLOUT as libc::c_short;
@@ -122,10 +135,7 @@ pub extern "C" fn zmq_poll(
     nitems: c_int,
     timeout_ms: libc::c_long,
 ) -> c_int {
-    let items_slice = match poll_items(items, nitems) {
-        Ok(items) => items,
-        Err(errno) => return crate::error::fail(errno),
-    };
+    let items_slice = c_try!(poll_items(items, nitems));
 
     let ready = check_immediate(items_slice);
     if ready > 0 || timeout_ms == 0 {

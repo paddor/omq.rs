@@ -18,6 +18,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::engine::signal::StateSignal;
 
+#[cfg(any(feature = "ws", feature = "quic"))]
+mod queue;
+#[cfg(feature = "quic")]
+pub(crate) use queue::Refusal;
+#[cfg(any(feature = "ws", feature = "quic"))]
+pub(crate) use queue::{AcceptBudget, SetupQueue};
+
 /// One remote host may hold at most this share of a socket's pending
 /// handshakes, so a single source cannot fill the pool.
 const SOURCE_SHARE: usize = 8;

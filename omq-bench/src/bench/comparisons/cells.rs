@@ -1,14 +1,21 @@
 //! Run one benchmark cell: spawn peers, measure, and collect the result.
 
-use super::impls::{ImplDef, TransportKind, latency_env, latency_rep_subcmd, latency_req_subcmd};
-use super::{addr_for, cleanup_ipc_addr};
-use crate::cli::ComparisonsArgs;
+use super::impls::{ImplDef, TransportKind};
+use super::{cleanup_ipc_addr, next_addr_id, uses_filesystem_ipc};
+use crate::cli::PubsubArgs;
 use crate::coord::CoordSocket;
 use crate::parse;
 use crate::process;
 use std::path::Path;
 use std::time::Duration;
 
+mod fanio;
+mod latency;
+
+pub(super) use fanio::{run_fanin_cell, run_fanout_cell};
+pub(super) use latency::{LatencyResult, LatencyWorkload, run_latency_cell};
+
+#[derive(Default)]
 pub(super) struct CellResult {
     pub(super) blocking_inproc: Option<parse::BlockingInprocStats>,
     pub(super) msgs_s: f64,
@@ -16,46 +23,13 @@ pub(super) struct CellResult {
     pub(super) elapsed: f64,
     pub(super) push_cpu: Option<f64>,
     pub(super) pull_cpu: Option<f64>,
-    pub(super) peer_min: Option<f64>,
-    pub(super) peer_max: Option<f64>,
-    pub(super) peer_p10: Option<f64>,
-    pub(super) peer_p25: Option<f64>,
-    pub(super) peer_median: Option<f64>,
-    pub(super) peer_p75: Option<f64>,
-    pub(super) peer_p90: Option<f64>,
-}
-
-impl CellResult {
-    /// Copies the per-peer rate spread of a multi-peer measurement.
-    fn with_spread(self, spread: &parse::MultiThroughputResult) -> Self {
-        Self {
-            peer_min: spread.peer_min,
-            peer_max: spread.peer_max,
-            peer_p10: spread.peer_p10,
-            peer_p25: spread.peer_p25,
-            peer_median: spread.peer_median,
-            peer_p75: spread.peer_p75,
-            peer_p90: spread.peer_p90,
-            ..self
-        }
-    }
+    pub(super) spread: parse::PeerSpread,
 }
 
 fn zero_result(duration: f64) -> CellResult {
     CellResult {
-        blocking_inproc: None,
-        msgs_s: 0.0,
-        mbps: 0.0,
         elapsed: duration,
-        push_cpu: None,
-        pull_cpu: None,
-        peer_min: None,
-        peer_max: None,
-        peer_p10: None,
-        peer_p25: None,
-        peer_median: None,
-        peer_p75: None,
-        peer_p90: None,
+        ..CellResult::default()
     }
 }
 
@@ -70,14 +44,37 @@ pub(super) struct Cell<'a> {
 }
 
 impl Cell<'_> {
+    /// Bind address. WS ports are offset by prefix; IPC and inproc names are
+    /// unique per call.
     fn addr(&self) -> String {
-        addr_for(
-            self.transport,
-            self.def.prefix,
-            0,
-            self.base_port,
-            self.def.name,
-        )
+        let prefix = self.def.prefix;
+        let uid = next_addr_id();
+        match self.transport {
+            TransportKind::Tcp | TransportKind::Quic => "0".to_string(),
+            TransportKind::Ws => {
+                let offset: u16 = match prefix {
+                    "t" => 0,
+                    "u" => 100,
+                    "z" => 200,
+                    "Y" => 300,
+                    "Z" => 400,
+                    "q" => 500,
+                    "r" => 600,
+                    "R" => 700,
+                    _ => 800,
+                };
+                let port = self.base_port + offset;
+                format!("ws://127.0.0.1:{port}/")
+            }
+            TransportKind::Ipc => {
+                if uses_filesystem_ipc(self.def.name) {
+                    format!("ipc:///tmp/omq-bench-cmp-{prefix}-{uid}")
+                } else {
+                    format!("ipc://@omq-bench-cmp-{prefix}-{uid}")
+                }
+            }
+            TransportKind::Inproc => format!("bench-cmp-{prefix}-{uid}"),
+        }
     }
 
     fn cleanup(&self, addr: &str) {
@@ -174,7 +171,7 @@ pub(super) fn run_throughput_cell(cell: &Cell<'_>, duration: f64, rounds: u32) -
 
 fn run_throughput_once(cell: &Cell<'_>, duration: f64) -> CellResult {
     if cell.transport == TransportKind::Inproc {
-        return run_inproc_throughput(cell, duration);
+        return run_inproc_cell(cell, cell.def.inproc_tput_subcmd, &[], duration);
     }
 
     let def = cell.def;
@@ -209,7 +206,7 @@ fn run_throughput_once(cell: &Cell<'_>, duration: f64) -> CellResult {
         ],
         &env,
         def.affinity(process::OTHER_CPU),
-        Duration::from_secs(duration as u64 + 30),
+        process::peer_timeout(duration),
     );
 
     let push_cpu = process::read_proc_cpu(pusher.guard.pid());
@@ -232,26 +229,28 @@ fn run_throughput_once(cell: &Cell<'_>, duration: f64) -> CellResult {
     }
 }
 
-/// Inproc runs both sides in one process on the measured CPUs.
-fn run_inproc_throughput(cell: &Cell<'_>, duration: f64) -> CellResult {
+/// Inproc runs both sides in one process on the measured CPUs: `subcmd`
+/// with the name, size, duration, then `extra` arguments.
+fn run_inproc_cell(cell: &Cell<'_>, subcmd: &str, extra: &[&str], duration: f64) -> CellResult {
     let def = cell.def;
     let name = cell.addr();
     let size_str = cell.size.to_string();
     let dur_str = format!("{duration:.1}");
-    let cmd = [
+    let mut cmd = vec![
         cell.binary.to_str().unwrap(),
-        def.inproc_tput_subcmd,
+        subcmd,
         &name,
         &size_str,
         &dur_str,
     ];
+    cmd.extend_from_slice(extra);
     let env: Vec<(&str, &str)> = def.env.to_vec();
 
     if let Some((out, cpu)) = process::capture_with_cpu(
         &cmd,
         &env,
         def.affinity(process::MEASURED_CPU),
-        Duration::from_secs(duration as u64 + 30),
+        process::peer_timeout(duration),
     ) && let Some(r) = parse::parse_throughput(&out, cell.size)
     {
         // Blocking inproc peers report their own CPU seconds; prefer those.
@@ -278,19 +277,15 @@ pub(super) fn run_pubsub_cell(
     peers: u64,
     duration: f64,
     rounds: u32,
-    args: &ComparisonsArgs,
+    pubsub: &PubsubArgs,
 ) -> CellResult {
-    representative_of(rounds, |_| run_pubsub_once(cell, peers, duration, args))
+    representative_of(rounds, |_| run_pubsub_once(cell, peers, duration, pubsub))
 }
 
-fn run_pubsub_once(
-    cell: &Cell<'_>,
-    peers: u64,
-    duration: f64,
-    args: &ComparisonsArgs,
-) -> CellResult {
+fn run_pubsub_once(cell: &Cell<'_>, peers: u64, duration: f64, pubsub: &PubsubArgs) -> CellResult {
     if cell.transport == TransportKind::Inproc {
-        return run_inproc_pubsub(cell, peers, duration);
+        let peers = peers.to_string();
+        return run_inproc_cell(cell, cell.def.inproc_pubsub_subcmd, &[&peers], duration);
     }
 
     let def = cell.def;
@@ -299,8 +294,8 @@ fn run_pubsub_once(
     let peers_str = peers.to_string();
     let addr = cell.addr();
 
-    let receiver_io = args.pubsub_receiver_io_threads.map(|n| n.to_string());
-    let receiver_workers = args.pubsub_receiver_workers.map(|n| n.to_string());
+    let receiver_io = pubsub.pubsub_receiver_io_threads.map(|n| n.to_string());
+    let receiver_workers = pubsub.pubsub_receiver_workers.map(|n| n.to_string());
     let start_at = start_at();
     let mut pub_env: Vec<(&str, &str)> = def.env.to_vec();
     let mut sub_env = subscriber_env(def, receiver_io.as_deref(), receiver_workers.as_deref());
@@ -321,7 +316,7 @@ fn run_pubsub_once(
     // --pubsub-receiver-cpus only replaces a pinned default.
     let sub_cpus = def
         .affinity(process::OTHER_CPU)
-        .map(|default| args.pubsub_receiver_cpus.as_deref().unwrap_or(default));
+        .map(|default| pubsub.pubsub_receiver_cpus.as_deref().unwrap_or(default));
     let sub_output = process::capture(
         &[
             cell.peer_binary.to_str().unwrap(),
@@ -333,7 +328,7 @@ fn run_pubsub_once(
         ],
         &sub_env,
         sub_cpus,
-        Duration::from_secs(duration as u64 + 30),
+        process::peer_timeout(duration),
     );
 
     let pub_cpu = process::read_proc_cpu(publisher.guard.pid());
@@ -346,14 +341,14 @@ fn run_pubsub_once(
         return zero_result(duration);
     };
     CellResult {
-        msgs_s: r.msgs_s,
-        mbps: r.mbps,
-        elapsed: r.elapsed,
+        msgs_s: r.rate.msgs_s,
+        mbps: r.rate.mbps,
+        elapsed: r.rate.elapsed,
         push_cpu: Some(pub_cpu),
-        pull_cpu: r.pull_cpu,
+        pull_cpu: r.rate.pull_cpu,
+        spread: r.spread,
         ..zero_result(duration)
     }
-    .with_spread(&r)
 }
 
 /// Subscriber environment with the optional receiver tuning from the CLI.
@@ -373,417 +368,6 @@ fn subscriber_env<'a>(
     }
 
     env
-}
-
-fn run_inproc_pubsub(cell: &Cell<'_>, peers: u64, duration: f64) -> CellResult {
-    let def = cell.def;
-    let name = cell.addr();
-    let size_str = cell.size.to_string();
-    let dur_str = format!("{duration:.1}");
-    let peers_str = peers.to_string();
-    let cmd = [
-        cell.binary.to_str().unwrap(),
-        def.inproc_pubsub_subcmd,
-        &name,
-        &size_str,
-        &dur_str,
-        &peers_str,
-    ];
-    let env: Vec<(&str, &str)> = def.env.to_vec();
-
-    if let Some((out, cpu)) = process::capture_with_cpu(
-        &cmd,
-        &env,
-        def.affinity(process::MEASURED_CPU),
-        Duration::from_secs(duration as u64 + 30),
-    ) && let Some(r) = parse::parse_throughput(&out, cell.size)
-    {
-        return CellResult {
-            msgs_s: r.msgs_s,
-            mbps: r.mbps,
-            elapsed: r.elapsed,
-            push_cpu: Some(cpu),
-            ..zero_result(duration)
-        };
-    }
-
-    zero_result(duration)
-}
-
-pub(super) fn run_fanout_cell(
-    cell: &Cell<'_>,
-    peers: u64,
-    duration: f64,
-    rounds: u32,
-) -> CellResult {
-    representative_of(rounds, |_| run_fanout_once(cell, peers, duration))
-}
-
-fn run_fanout_once(cell: &Cell<'_>, peers: u64, duration: f64) -> CellResult {
-    let def = cell.def;
-    let size_str = cell.size.to_string();
-    let peers_str = peers.to_string();
-    let addr = cell.addr();
-
-    let start_at = start_at();
-    let mut push_env: Vec<(&str, &str)> = def.env.to_vec();
-    let mut pull_env: Vec<(&str, &str)> = def.env.to_vec();
-    push_start_env(&mut push_env, &start_at);
-    push_start_env(&mut pull_env, &start_at);
-
-    let tail = size_and_peers(&size_str, &peers_str, def.fanio_needs_peer_count);
-    let binder = BinderCmd {
-        head: [cell.binary.to_str().unwrap(), def.fanout_subcmd],
-        tail: &tail,
-        env: &push_env,
-        cpus: def.affinity(process::MEASURED_CPU),
-        role: "push",
-        settle: Duration::from_millis(100),
-    };
-    let mut pusher = spawn_binder(cell.transport, &addr, &binder);
-
-    let (mut pull_procs, peers_per_process) =
-        spawn_fanout_receivers(cell, &pusher.connect_addr, peers, duration, &pull_env);
-
-    let timeout = Duration::from_secs(duration as u64 + 30);
-    let mut pull_results = Vec::new();
-    for pull_proc in &mut pull_procs {
-        if let Some(output) = pull_proc.wait_with_output(timeout)
-            && let Some(result) =
-                parse::parse_multi_throughput(&output, cell.size, peers_per_process)
-        {
-            pull_results.push(result);
-        }
-    }
-
-    let push_cpu = process::read_proc_cpu(pusher.guard.pid());
-    pusher.guard.kill();
-    cell.cleanup(&addr);
-
-    if pull_results.is_empty() {
-        return zero_result(duration);
-    }
-
-    let receivers = FanoutReceivers {
-        results: &pull_results,
-        peers_per_process,
-        peers,
-    };
-    receivers.combine(cell.size, push_cpu)
-}
-
-/// Spawns the PULL side, split across `OMQ_BENCH_RECEIVER_PROCS` processes
-/// (default 1), and returns them with the peer count of each process.
-fn spawn_fanout_receivers(
-    cell: &Cell<'_>,
-    connect_addr: &str,
-    peers: u64,
-    duration: f64,
-    env: &[(&str, &str)],
-) -> (Vec<process::ProcessGuard>, u64) {
-    let receiver_processes = std::env::var("OMQ_BENCH_RECEIVER_PROCS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(1);
-    assert!(receiver_processes > 0 && peers.is_multiple_of(receiver_processes));
-    let peers_per_process = peers / receiver_processes;
-
-    let size_str = cell.size.to_string();
-    let dur_str = format!("{duration:.1}");
-    let local_peers_str = peers_per_process.to_string();
-    let mut pull_procs = Vec::new();
-    for _ in 0..receiver_processes {
-        pull_procs.push(process::spawn(
-            &[
-                cell.peer_binary.to_str().unwrap(),
-                "multi-pull",
-                connect_addr,
-                &size_str,
-                &dur_str,
-                &local_peers_str,
-            ],
-            env,
-            cell.def.affinity(process::OTHER_CPU),
-        ));
-    }
-
-    (pull_procs, peers_per_process)
-}
-
-/// Parsed results of all fan-out receiver processes.
-struct FanoutReceivers<'a> {
-    results: &'a [parse::MultiThroughputResult],
-    peers_per_process: u64,
-    peers: u64,
-}
-
-impl FanoutReceivers<'_> {
-    /// One cell result: total messages over the slowest receiver's elapsed
-    /// time, plus the spread of all per-peer rates.
-    fn combine(&self, size: u64, push_cpu: f64) -> CellResult {
-        let total_msgs: f64 = self
-            .results
-            .iter()
-            .map(|r| r.msgs_s * self.peers_per_process as f64 * r.elapsed)
-            .sum();
-        let elapsed = self.results.iter().map(|r| r.elapsed).fold(0.0, f64::max);
-        let mut peer_rates: Vec<f64> = self
-            .results
-            .iter()
-            .flat_map(|r| r.peer_rates.iter().copied())
-            .collect();
-        peer_rates.sort_unstable_by(f64::total_cmp);
-        let cpu: f64 = self.results.iter().filter_map(|r| r.pull_cpu).sum();
-
-        // Nearest-rank quantile over the sorted rates.
-        let quantile = |p: f64| {
-            if peer_rates.is_empty() {
-                None
-            } else {
-                Some(peer_rates[((peer_rates.len() - 1) as f64 * p).round() as usize])
-            }
-        };
-
-        CellResult {
-            blocking_inproc: None,
-            msgs_s: total_msgs / elapsed / self.peers as f64,
-            mbps: total_msgs * size as f64 / elapsed / 1_000_000.0,
-            elapsed,
-            push_cpu: Some(push_cpu),
-            pull_cpu: Some(cpu),
-            peer_min: quantile(0.0),
-            peer_max: quantile(1.0),
-            peer_p10: quantile(0.10),
-            peer_p25: quantile(0.25),
-            peer_median: quantile(0.50),
-            peer_p75: quantile(0.75),
-            peer_p90: quantile(0.90),
-        }
-    }
-}
-
-pub(super) fn run_fanin_cell(
-    cell: &Cell<'_>,
-    peers: u64,
-    duration: f64,
-    rounds: u32,
-) -> CellResult {
-    representative_of(rounds, |_| run_fanin_once(cell, peers, duration))
-}
-
-fn run_fanin_once(cell: &Cell<'_>, peers: u64, duration: f64) -> CellResult {
-    let def = cell.def;
-    let size_str = cell.size.to_string();
-    let dur_str = format!("{duration:.1}");
-    let peers_str = peers.to_string();
-    let addr = cell.addr();
-
-    let start_at = start_at();
-    let mut pull_env: Vec<(&str, &str)> = def.env.to_vec();
-    let mut push_env: Vec<(&str, &str)> = def.env.to_vec();
-    push_start_env(&mut pull_env, &start_at);
-    push_start_env(&mut push_env, &start_at);
-
-    // pull-bind binds on the measured CPU.
-    let binder = BinderCmd {
-        head: [cell.binary.to_str().unwrap(), "pull-bind"],
-        tail: &[&size_str, &dur_str],
-        env: &pull_env,
-        cpus: def.affinity(process::MEASURED_CPU),
-        role: "pull-bind",
-        settle: Duration::from_millis(100),
-    };
-    let mut puller = spawn_binder(cell.transport, &addr, &binder);
-    // Fan-in closes the coord socket as soon as the binder is ready.
-    drop(puller.coord.take());
-
-    let mut push_proc = process::spawn(
-        &[
-            cell.peer_binary.to_str().unwrap(),
-            "multi-push",
-            &puller.connect_addr,
-            &size_str,
-            &peers_str,
-            &dur_str,
-        ],
-        &push_env,
-        def.affinity(process::OTHER_CPU),
-    );
-
-    let timeout = Duration::from_secs(duration as u64 + 30);
-    let pull_output = puller.guard.wait_with_output(timeout);
-    let push_cpu = process::read_proc_cpu(push_proc.pid());
-    let push_output = finish_fanin_push(&mut push_proc, def, timeout);
-    let pull_cpu_proc = process::read_proc_cpu(puller.guard.pid());
-    cell.cleanup(&addr);
-
-    let Some(r) = pull_output.and_then(|output| parse::parse_throughput(&output, cell.size)) else {
-        return zero_result(duration);
-    };
-    let result = CellResult {
-        msgs_s: r.msgs_s,
-        mbps: r.mbps,
-        elapsed: r.elapsed,
-        push_cpu: Some(push_cpu),
-        pull_cpu: Some(r.pull_cpu.unwrap_or(pull_cpu_proc)),
-        ..zero_result(duration)
-    };
-
-    match push_output
-        .as_deref()
-        .and_then(|output| parse::parse_multi_throughput(output, cell.size, peers))
-    {
-        Some(spread) => result.with_spread(&spread),
-        None => result,
-    }
-}
-
-/// Waits for the fan-in PUSH side. The zmq.rs and rzmq push peers do not
-/// stop on their own, so they are killed and report no per-peer rates.
-fn finish_fanin_push(
-    push_proc: &mut process::ProcessGuard,
-    def: &ImplDef,
-    timeout: Duration,
-) -> Option<String> {
-    let timed_push = !matches!(def.name, "zmq.rs" | "rzmq" | "rzmq-iouring");
-    if timed_push {
-        push_proc.wait_with_output(timeout)
-    } else {
-        push_proc.kill();
-        None
-    }
-}
-
-pub(super) struct LatencyResult {
-    pub(super) p50_us: f64,
-    pub(super) p99_us: f64,
-    pub(super) p999_us: f64,
-    pub(super) max_us: f64,
-    pub(super) iterations: u64,
-    pub(super) cpu_time: Option<f64>,
-    pub(super) req_cpu: Option<f64>,
-    pub(super) elapsed: Option<f64>,
-}
-
-/// Latency settings shared by every cell of one socket pair and profile.
-pub(super) struct LatencyWorkload<'a> {
-    pub(super) pair: &'a str,
-    pub(super) profile: &'a str,
-    pub(super) iterations: u64,
-    pub(super) warmup: u64,
-    /// Expected run time in seconds; peers get 30 s on top.
-    pub(super) timeout: u64,
-}
-
-#[expect(clippy::similar_names)]
-pub(super) fn run_latency_cell(
-    cell: &Cell<'_>,
-    workload: &LatencyWorkload<'_>,
-) -> Option<LatencyResult> {
-    if cell.transport == TransportKind::Inproc {
-        return run_inproc_latency(cell, workload);
-    }
-
-    let def = cell.def;
-    let size_str = cell.size.to_string();
-    let iters_str = workload.iterations.to_string();
-    let warmup_str = workload.warmup.to_string();
-    let addr = cell.addr();
-    let env = latency_env(def, workload.pair, workload.profile);
-
-    // REP binds on the other CPUs; the timed REQ side runs on the measured
-    // CPUs.
-    let binder = BinderCmd {
-        head: [cell.peer_binary.to_str().unwrap(), latency_rep_subcmd(def)],
-        tail: &[&size_str],
-        env: &env,
-        cpus: def.affinity(process::OTHER_CPU),
-        role: "rep",
-        settle: Duration::from_millis(100),
-    };
-    let mut replier = spawn_binder(cell.transport, &addr, &binder);
-    // Latency closes the coord socket as soon as the binder is ready.
-    drop(replier.coord.take());
-
-    let req_output = process::capture(
-        &[
-            cell.binary.to_str().unwrap(),
-            latency_req_subcmd(def),
-            &replier.connect_addr,
-            &size_str,
-            &iters_str,
-            &warmup_str,
-        ],
-        &env,
-        def.affinity(process::MEASURED_CPU),
-        Duration::from_secs(workload.timeout + 30),
-    );
-
-    let rep_cpu = process::read_proc_cpu(replier.guard.pid());
-    replier.guard.kill();
-    cell.cleanup(&addr);
-
-    let r = parse::parse_latency(&req_output?)?;
-    validate_latency_result(&r, workload.iterations);
-
-    let req_cpu = r.req_cpu;
-    Some(LatencyResult {
-        p50_us: r.p50_us,
-        p99_us: r.p99_us,
-        p999_us: r.p999_us,
-        max_us: r.max_us,
-        iterations: r.iterations,
-        cpu_time: req_cpu.map(|req| req + rep_cpu),
-        req_cpu,
-        elapsed: r.elapsed,
-    })
-}
-
-fn run_inproc_latency(cell: &Cell<'_>, workload: &LatencyWorkload<'_>) -> Option<LatencyResult> {
-    let def = cell.def;
-    let name = cell.addr();
-    let size_str = cell.size.to_string();
-    let iters_str = workload.iterations.to_string();
-    let warmup_str = workload.warmup.to_string();
-    let env = latency_env(def, workload.pair, workload.profile);
-
-    let (out, cpu) = process::capture_with_cpu(
-        &[
-            cell.binary.to_str().unwrap(),
-            def.inproc_lat_subcmd,
-            &name,
-            &size_str,
-            &iters_str,
-            &warmup_str,
-        ],
-        &env,
-        def.affinity(process::MEASURED_CPU),
-        Duration::from_secs(workload.timeout + 30),
-    )?;
-    let r = parse::parse_latency(&out)?;
-    validate_latency_result(&r, workload.iterations);
-
-    // One process runs both sides, so all of its CPU counts as REQ CPU.
-    Some(LatencyResult {
-        p50_us: r.p50_us,
-        p99_us: r.p99_us,
-        p999_us: r.p999_us,
-        max_us: r.max_us,
-        iterations: r.iterations,
-        cpu_time: Some(cpu),
-        req_cpu: Some(cpu),
-        elapsed: r.elapsed,
-    })
-}
-
-fn validate_latency_result(result: &parse::LatencyResult, iterations: u64) {
-    assert_eq!(
-        result.iterations, iterations,
-        "incomplete latency measurement"
-    );
-    let quantiles = [result.p50_us, result.p99_us, result.p999_us, result.max_us];
-    assert!(quantiles.iter().all(|v| v.is_finite() && *v >= 0.0));
-    assert!(quantiles.windows(2).all(|pair| pair[0] <= pair[1]));
 }
 
 fn representative_of(rounds: u32, mut f: impl FnMut(u32) -> CellResult) -> CellResult {

@@ -5,21 +5,10 @@ use crate::process;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-pub(super) fn build_peers(
-    impl_names: &[&str],
-    needs_ws: bool,
-    needs_quic: bool,
-    needs_curve: bool,
-) -> HashMap<String, PathBuf> {
+/// Builds every selected peer once. `peer_features` are the OMQ peer Cargo
+/// features (`ws`, `quic`, `curve`).
+pub(super) fn build_peers(impl_names: &[&str], peer_features: &[&str]) -> HashMap<String, PathBuf> {
     let needs_mt_runtime = impl_names.contains(&"omq-tokio-mt");
-    let peer_features: Vec<&str> = [
-        (needs_ws, "ws"),
-        (needs_quic, "quic"),
-        (needs_curve, "curve"),
-    ]
-    .into_iter()
-    .filter_map(|(needed, feature)| needed.then_some(feature))
-    .collect();
 
     let sources: Vec<&str> = impl_names
         .iter()
@@ -33,7 +22,7 @@ pub(super) fn build_peers(
     let mut binaries: HashMap<String, PathBuf> = HashMap::new();
     for source in sources {
         if !binaries.contains_key(source) {
-            let binary = build_source(source, &peer_features, needs_mt_runtime);
+            let binary = build_source(source, peer_features, needs_mt_runtime);
             binaries.insert(source.to_string(), binary);
         }
     }

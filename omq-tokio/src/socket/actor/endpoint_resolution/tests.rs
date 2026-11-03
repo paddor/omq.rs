@@ -1,4 +1,5 @@
 use super::*;
+use crate::transport::dns::test_lookup::ScopedLookup;
 use crate::{Options, Socket, SocketType};
 #[cfg(feature = "ws")]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -16,32 +17,69 @@ async fn wait_stalled(count: usize) {
     .unwrap();
 }
 
-#[tokio::test]
-async fn initial_dns_failure_is_returned_for_bind_and_connect() {
-    let lookup = crate::transport::dns::test_lookup::ScopedLookup::new(13005, None);
-    let socket = Socket::new(SocketType::Sub, Options::default());
-    for scheme in [
-        "tcp",
+/// Every named transport, with a socket type that connects and one that
+/// binds it.
+fn named_endpoints(port: u16) -> Vec<(Endpoint, SocketType, SocketType)> {
+    let host = "omq-test-lookup.invalid";
+    [
+        (
+            format!("tcp://{host}:{port}"),
+            SocketType::Sub,
+            SocketType::Sub,
+        ),
         #[cfg(feature = "ws")]
-        "ws",
+        (
+            format!("ws://{host}:{port}/"),
+            SocketType::Sub,
+            SocketType::Sub,
+        ),
         #[cfg(feature = "ws")]
-        "wss",
+        (
+            format!("wss://{host}:{port}/"),
+            SocketType::Sub,
+            SocketType::Sub,
+        ),
         #[cfg(feature = "quic")]
-        "quic",
-    ] {
-        let suffix = if matches!(scheme, "ws" | "wss") {
-            "/"
-        } else {
-            ""
-        };
-        let endpoint: Endpoint = format!("{scheme}://omq-test-lookup.invalid:13005{suffix}")
-            .parse()
-            .unwrap();
-        assert!(matches!(
-            socket.connect(endpoint.clone()).await,
-            Err(Error::Io(_))
-        ));
-        assert!(matches!(socket.bind(endpoint).await, Err(Error::Io(_))));
+        (
+            format!("quic://{host}:{port}"),
+            SocketType::Sub,
+            SocketType::Sub,
+        ),
+        (
+            format!("udp://{host}:{port}"),
+            SocketType::Radio,
+            SocketType::Dish,
+        ),
+        #[cfg(feature = "dart")]
+        (
+            format!("dart://{host}:{port}"),
+            SocketType::Scatter,
+            SocketType::Gather,
+        ),
+    ]
+    .into_iter()
+    .map(|(endpoint, connect, bind)| (endpoint.parse().unwrap(), connect, bind))
+    .collect()
+}
+
+/// While DNS is out, bind and connect on every named transport fail with
+/// `Error::Io`, and the failure leaves no retry loop behind.
+async fn assert_initial_dns_outage_is_returned(lookup: &ScopedLookup, port: u16) {
+    let mut sockets = Vec::new();
+    for (endpoint, connect_type, bind_type) in named_endpoints(port) {
+        let connecting = Socket::new(connect_type, Options::default());
+        let connected = connecting.connect(endpoint.clone()).await;
+        assert!(
+            matches!(connected, Err(Error::Io(_))),
+            "connect {endpoint}: {connected:?}"
+        );
+        let binding = Socket::new(bind_type, Options::default());
+        let bound = binding.bind(endpoint.clone()).await;
+        assert!(
+            matches!(bound, Err(Error::Io(_))),
+            "bind {endpoint}: {bound:?}"
+        );
+        sockets.extend([connecting, binding]);
     }
     let calls = lookup.calls();
     tokio::time::sleep(Duration::from_millis(150)).await;
@@ -50,16 +88,30 @@ async fn initial_dns_failure_is_returned_for_bind_and_connect() {
         calls,
         "initial DNS failure must not create a retry loop"
     );
-    socket.subscribe("responsive").await.unwrap();
-    socket.close().await.unwrap();
+    for socket in sockets {
+        socket.close().await.unwrap();
+    }
 }
 
 #[tokio::test]
-async fn reconnect_dns_failure_retries_and_recovers_without_api_errors() {
+async fn initial_dns_failure_is_returned_for_bind_and_connect() {
+    let lookup = ScopedLookup::new(13005, None);
+    assert_initial_dns_outage_is_returned(&lookup, 13005).await;
+}
+
+#[tokio::test]
+async fn initial_empty_dns_result_is_returned_for_bind_and_connect() {
+    let lookup = ScopedLookup::new(13007, None);
+    lookup.set_empty();
+    assert_initial_dns_outage_is_returned(&lookup, 13007).await;
+}
+
+/// A DNS outage after a successful connect stays in the dialer's retry loop:
+/// sends keep working, and the socket reconnects once DNS answers again.
+async fn assert_reconnect_dns_outage_recovers(outage: impl FnOnce(&ScopedLookup)) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let lookup =
-        crate::transport::dns::test_lookup::ScopedLookup::new(address.port(), Some(address.ip()));
+    let lookup = ScopedLookup::new(address.port(), Some(address.ip()));
     let push = Socket::new(SocketType::Push, Options::default());
     let endpoint: Endpoint = format!("tcp://omq-test-lookup.invalid:{}", address.port())
         .parse()
@@ -67,7 +119,7 @@ async fn reconnect_dns_failure_retries_and_recovers_without_api_errors() {
     push.connect(endpoint).await.unwrap();
     let (peer, _) = listener.accept().await.unwrap();
     let before = lookup.calls();
-    lookup.set_address(None);
+    outage(&lookup);
     drop(peer);
     tokio::time::timeout(Duration::from_secs(1), async {
         while lookup.calls() < before + 2 {
@@ -75,6 +127,13 @@ async fn reconnect_dns_failure_retries_and_recovers_without_api_errors() {
         }
     })
     .await
+    .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        push.send(crate::Message::single("queued")),
+    )
+    .await
+    .expect("send blocked during a DNS outage")
     .unwrap();
     drop(listener);
     let pull = Socket::new(SocketType::Pull, Options::default());
@@ -86,13 +145,25 @@ async fn reconnect_dns_failure_retries_and_recovers_without_api_errors() {
     push.send(crate::Message::single("recovered"))
         .await
         .unwrap();
-    let message = tokio::time::timeout(Duration::from_secs(1), pull.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(message.part_bytes(0).unwrap(), &b"recovered"[..]);
+    for expected in ["queued", "recovered"] {
+        let message = tokio::time::timeout(Duration::from_secs(1), pull.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(message.part_bytes(0).unwrap(), expected.as_bytes());
+    }
     push.close().await.unwrap();
     pull.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn reconnect_dns_failure_retries_and_recovers_without_api_errors() {
+    assert_reconnect_dns_outage_recovers(|lookup| lookup.set_address(None)).await;
+}
+
+#[tokio::test]
+async fn reconnect_empty_dns_result_retries_and_recovers_without_api_errors() {
+    assert_reconnect_dns_outage_recovers(ScopedLookup::set_empty).await;
 }
 
 #[tokio::test]

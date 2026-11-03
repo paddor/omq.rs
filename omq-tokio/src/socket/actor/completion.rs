@@ -40,7 +40,7 @@ impl SocketDriver {
         if matches!(output, PeerEvent::Event(_))
             && let Some(peer) = self.peers.get_mut(&peer_id)
         {
-            peer.handled_control = peer.handled_control.wrapping_add(1);
+            peer.progress.handled_control = peer.progress.handled_control.wrapping_add(1);
         }
         self.handle_peer_output(peer_id, output).await;
     }
@@ -57,15 +57,15 @@ impl SocketDriver {
         if self
             .peers
             .get(&data.peer_id)
-            .is_some_and(|peer| peer.handled_control < data.control_prefix)
+            .is_some_and(|peer| peer.progress.handled_control < data.control_prefix)
         {
             return;
         }
         let data = self.mail.pending_peer_data.take().unwrap();
         if data.notification {
             if let Some(peer) = self.peers.get_mut(&data.peer_id) {
-                peer.handled_events = peer.handled_events.wrapping_add(1);
-                if peer.ready && !self.close.started {
+                peer.progress.handled_events = peer.progress.handled_events.wrapping_add(1);
+                if peer.handshake.ready && !self.close.started {
                     self.stage_receive(data.peer_id, data.message);
                 }
             }
@@ -173,7 +173,7 @@ impl SocketDriver {
         let event = match output {
             PeerEvent::Event(event) => {
                 if let Some(peer) = self.peers.get_mut(&peer_id) {
-                    peer.handled_events = peer.handled_events.wrapping_add(1);
+                    peer.progress.handled_events = peer.progress.handled_events.wrapping_add(1);
                 }
                 InternalEvent::PeerEvent { peer_id, event }
             }
@@ -189,8 +189,8 @@ impl SocketDriver {
     pub(super) async fn handle_peer_completion(&mut self, completion: PeerCompletion) {
         let peer_id = completion.peer_id;
         if let Some(peer) = self.peers.get_mut(&peer_id) {
-            debug_assert!(peer.completion.is_none());
-            peer.completion = Some(completion);
+            debug_assert!(peer.progress.completion.is_none());
+            peer.progress.completion = Some(completion);
             self.retire_completed_peer(peer_id).await;
         }
     }
@@ -207,15 +207,17 @@ impl SocketDriver {
             return;
         };
         if peer
+            .progress
             .completion
             .as_ref()
-            .is_none_or(|completion| completion.admitted_events != peer.handled_events)
+            .is_none_or(|completion| completion.admitted_events != peer.progress.handled_events)
         {
             return;
         }
-        match peer.completion.as_mut().unwrap().stream_disconnect {
+        match peer.progress.completion.as_mut().unwrap().stream_disconnect {
             StreamDisconnect::Pending => {
-                peer.completion.as_mut().unwrap().stream_disconnect = StreamDisconnect::Queued;
+                peer.progress.completion.as_mut().unwrap().stream_disconnect =
+                    StreamDisconnect::Queued;
                 self.mail.stream_disconnects.push_back(peer_id);
                 return;
             }
@@ -225,7 +227,7 @@ impl SocketDriver {
         let Some(peer) = self.peers.get_mut(&peer_id) else {
             return;
         };
-        let completion = peer.completion.take().unwrap();
+        let completion = peer.progress.completion.take().unwrap();
         self.handle_internal_event(InternalEvent::PeerClosed {
             peer_id,
             reason: completion.reason,
@@ -246,7 +248,7 @@ impl SocketDriver {
             if let Some(completion) = self
                 .peers
                 .get_mut(&peer_id)
-                .and_then(|peer| peer.completion.as_mut())
+                .and_then(|peer| peer.progress.completion.as_mut())
                 && completion.stream_disconnect == StreamDisconnect::Queued
             {
                 completion.stream_disconnect = StreamDisconnect::None;
@@ -273,7 +275,9 @@ impl SocketDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::socket::actor::{PeerDriverHandle, PeerEntry, PeerIdent, SocketType};
+    use crate::socket::actor::{
+        PeerDriverHandle, PeerEntry, PeerHandshake, PeerIdent, PeerOrigin, Side, SocketType,
+    };
     use crate::socket::monitor::{MonitorEvent, MonitorTryRecvError};
     use omq_proto::proto::{Command, Event, PeerProperties};
     use omq_proto::{Endpoint, Message, Options, ReconnectPolicy};
@@ -328,51 +332,53 @@ mod tests {
         (driver, consumer)
     }
 
-    fn insert_pending_peer(driver: &mut SocketDriver, peer_id: u64) {
+    fn insert_peer(driver: &mut SocketDriver, peer_id: u64, handshake: PeerHandshake) {
         let (inbox, commands) = mpsc::channel(1);
         let (data_inbox, data) = mpsc::channel(1);
         // READY may be queued after the driver has already exited.
         drop(commands);
         drop(data);
-        driver.peers.insert(
-            peer_id,
-            PeerEntry {
-                local_address: None,
-                remote_address: None,
-                options: Arc::new(driver.options.clone()),
-                ident: PeerIdent::Socket("127.0.0.1:12345".parse().unwrap()),
-                handle: PeerDriverHandle {
-                    inbox: inbox.into(),
-                    data_inbox: data_inbox.into(),
-                    cancel: CancellationToken::new(),
-                    transmit_slot: None,
-                    direct_tcp_writer: None,
-                    send_pipe: None,
-                    inproc: None,
-                },
-                ready: false,
-                pending_handshake: true,
-                handshake_admission: Some(
-                    crate::transport::setup::PendingHandshake::acquire(
-                        &driver.endpoints.setup_admission,
-                        None,
-                        None,
-                    )
-                    .unwrap(),
-                ),
-                handled_events: 0,
-                handled_control: 0,
-                completion: None,
-                identity: bytes::Bytes::new(),
-                info: None,
-                endpoint: "tcp://127.0.0.1:12345".parse::<Endpoint>().unwrap(),
-                is_client: false,
-                route_id: peer_id,
-                inproc_inbound: None,
-                task: None,
-                io_thread: 0,
-            },
-        );
+        let origin = PeerOrigin {
+            options: Arc::new(driver.options.clone()),
+            endpoint: "tcp://127.0.0.1:12345".parse::<Endpoint>().unwrap(),
+            side: Side::Bind,
+            route_id: peer_id,
+            ident: PeerIdent::Socket("127.0.0.1:12345".parse().unwrap()),
+            local_address: None,
+            remote_address: None,
+            io_thread: 0,
+        };
+        let handle =
+            PeerDriverHandle::new(inbox.into(), data_inbox.into(), CancellationToken::new());
+        let entry = PeerEntry {
+            handshake,
+            ..PeerEntry::new(origin, handle)
+        };
+        driver.peers.insert(peer_id, entry);
+    }
+
+    fn insert_pending_peer(driver: &mut SocketDriver, peer_id: u64) {
+        let admission = crate::transport::setup::PendingHandshake::acquire(
+            &driver.endpoints.setup_admission,
+            None,
+            None,
+        )
+        .unwrap();
+        let handshake = PeerHandshake {
+            admission: Some(admission),
+            ..PeerHandshake::default()
+        };
+        insert_peer(driver, peer_id, handshake);
+    }
+
+    /// A raw STREAM peer: ready at once, without a handshake slot.
+    fn insert_stream_peer(driver: &mut SocketDriver, peer_id: u64, identity: bytes::Bytes) {
+        let handshake = PeerHandshake {
+            ready: true,
+            identity,
+            ..PeerHandshake::default()
+        };
+        insert_peer(driver, peer_id, handshake);
     }
 
     #[tokio::test]
@@ -380,9 +386,9 @@ mod tests {
         let (mut driver, mut receive) = fixture_for(SocketType::XPub);
         insert_pending_peer(&mut driver, 7);
         let peer = driver.peers.get_mut(&7).unwrap();
-        peer.ready = true;
-        peer.handled_control = 1;
-        peer.handled_events = 1;
+        peer.handshake.ready = true;
+        peer.progress.handled_control = 1;
+        peer.progress.handled_events = 1;
         driver.mail.pending_peer_data = Some(crate::engine::actor_output::ActorData {
             peer_id: 7,
             message: Message::single("\x01topic"),
@@ -445,7 +451,7 @@ mod tests {
                 crate::socket::recv::recv_pipe(256, driver.link.spsc.blocking_recv_waker.clone());
             driver.link.recv_tx = pipe;
             insert_pending_peer(&mut driver, 7);
-            driver.peers.get_mut(&7).unwrap().ready = true;
+            driver.peers.get_mut(&7).unwrap().handshake.ready = true;
             driver
                 .routing
                 .recv_strategy
@@ -472,7 +478,7 @@ mod tests {
                 .await
                 .unwrap();
             driver.drain_peer_data(first).await;
-            let actual = driver.peers.get(&7).unwrap().handled_events;
+            let actual = driver.peers.get(&7).unwrap().progress.handled_events;
             assert!(actual > 0 && actual <= expected);
             assert!(driver.pending_receive.is_none());
             for _ in 0..actual {
@@ -567,7 +573,7 @@ mod tests {
             .await;
         assert!(driver.endpoints.setup_admission.try_acquire().is_none());
         ready_dealer(&mut driver).await;
-        assert!(driver.peers.get(&7).unwrap().ready);
+        assert!(driver.peers.get(&7).unwrap().handshake.ready);
         assert!(matches!(
             monitor.try_recv().unwrap(),
             MonitorEvent::HandshakeSucceeded { .. }
@@ -592,7 +598,7 @@ mod tests {
         driver
             .handle_peer_output(7, PeerEvent::Event(Event::Message(Message::single("last"))))
             .await;
-        assert_eq!(driver.peers.get(&7).unwrap().handled_events, 3);
+        assert_eq!(driver.peers.get(&7).unwrap().progress.handled_events, 3);
         assert_eq!(driver.pending_receive.as_ref().unwrap().peer_id, 7);
         driver.retire_completed_peer(7).await;
         assert!(driver.peers.contains_key(&7));
@@ -618,13 +624,8 @@ mod tests {
     #[tokio::test]
     async fn stream_disconnect_receive_follows_data_and_retains_identity_until_admission() {
         let (mut driver, mut receive) = fixture_for(SocketType::Stream);
-        insert_pending_peer(&mut driver, 7);
         let identity = bytes::Bytes::from_static(b"stream");
-        let peer = driver.peers.get_mut(&7).unwrap();
-        peer.ready = true;
-        peer.pending_handshake = false;
-        peer.handshake_admission = None;
-        peer.identity = identity.clone();
+        insert_stream_peer(&mut driver, 7, identity.clone());
         driver.link.shared.ready_peers.set(1);
         driver
             .routing
@@ -652,7 +653,14 @@ mod tests {
         free_slot_and_retire(&mut driver, &mut receive).await;
         driver.drain_stream_disconnects().await;
         assert!(driver.peers.contains_key(&7));
-        let completion = driver.peers.get(&7).unwrap().completion.as_ref().unwrap();
+        let completion = driver
+            .peers
+            .get(&7)
+            .unwrap()
+            .progress
+            .completion
+            .as_ref()
+            .unwrap();
         assert_eq!(completion.stream_disconnect, StreamDisconnect::None);
         assert_routed(
             &driver.pending_receive.as_ref().unwrap().message,
@@ -724,16 +732,9 @@ mod tests {
     #[tokio::test]
     async fn stream_disconnect_preserves_another_peers_blocked_receive() {
         let (mut driver, mut receive) = fixture_for(SocketType::Stream);
-        insert_pending_peer(&mut driver, 7);
-        let peer = driver.peers.get_mut(&7).unwrap();
-        peer.ready = true;
-        peer.pending_handshake = false;
-        peer.handshake_admission = None;
-        peer.identity = bytes::Bytes::from_static(b"closed stream");
-        driver
-            .routing
-            .recv_strategy
-            .connection_added(7, peer.identity.clone());
+        let identity = bytes::Bytes::from_static(b"closed stream");
+        insert_stream_peer(&mut driver, 7, identity.clone());
+        driver.routing.recv_strategy.connection_added(7, identity);
         driver.link.shared.ready_peers.set(1);
         driver.pending_receive = Some(super::super::PendingReceive {
             peer_id: 8,

@@ -8,10 +8,10 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
+use super::unix_nanos;
 use args::CommonArgs;
 
 pub(crate) const THROUGHPUT_SIZES: &[u64] = &[
@@ -20,15 +20,6 @@ pub(crate) const THROUGHPUT_SIZES: &[u64] = &[
 ];
 pub(crate) const LATENCY_SIZES: &[u64] =
     &[16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384];
-
-fn timestamp() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos()
-        .try_into()
-        .unwrap()
-}
 
 fn record(args: &CommonArgs, name: &str, row: &Value) {
     println!("{row}");
@@ -159,7 +150,7 @@ struct TempDir(PathBuf);
 impl TempDir {
     fn new(prefix: &str) -> Self {
         let path =
-            std::env::temp_dir().join(format!("{prefix}-{}-{}", std::process::id(), timestamp()));
+            std::env::temp_dir().join(format!("{prefix}-{}-{}", std::process::id(), unix_nanos()));
         std::fs::create_dir(&path).expect("create benchmark directory");
         Self(path)
     }

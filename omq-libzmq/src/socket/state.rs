@@ -1,7 +1,7 @@
 //! Send and receive state owned by the application thread.
 
 use std::collections::VecDeque;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use bytes::Bytes;
@@ -12,6 +12,8 @@ use crate::local_cell::LocalCell;
 
 #[derive(Debug)]
 pub(crate) struct SendState {
+    /// `ZMQ_SNDTIMEO` in milliseconds; -1 waits forever.
+    pub timeout_ms: AtomicI64,
     /// Accumulator for SNDMORE multipart assembly.
     pub accum: LocalCell<Vec<Bytes>>,
     /// `accum` holds frames kept after the final frame would block.
@@ -24,6 +26,7 @@ pub(crate) struct SendState {
 impl SendState {
     pub(super) fn new(queue_without_ready_peer: bool) -> Self {
         Self {
+            timeout_ms: AtomicI64::new(-1),
             accum: LocalCell::new(Vec::new()),
             retry: LocalCell::new(false),
             queue_without_ready_peer: LocalCell::new(queue_without_ready_peer),
@@ -39,6 +42,8 @@ impl SendState {
 
 #[derive(Debug)]
 pub(crate) struct RecvState {
+    /// `ZMQ_RCVTIMEO` in milliseconds; -1 waits forever.
+    pub timeout_ms: AtomicI64,
     /// Leftover frames from a multipart recv (RCVMORE).
     pub drain: Mutex<VecDeque<Bytes>>,
     /// True when `drain` is non-empty. Checked without the lock so the
@@ -66,6 +71,7 @@ pub(crate) struct RecvState {
 impl RecvState {
     pub(super) fn new() -> Self {
         Self {
+            timeout_ms: AtomicI64::new(-1),
             drain: Mutex::new(VecDeque::new()),
             drain_nonempty: AtomicBool::new(false),
             consumers: LocalCell::new(None),
@@ -81,5 +87,26 @@ impl RecvState {
         self.consumers.allow_thread_migration();
         self.authenticated.allow_thread_migration();
         self.authenticated_drain.allow_thread_migration();
+    }
+}
+
+/// Bind and connect bookkeeping.
+#[derive(Debug)]
+pub(crate) struct EndpointState {
+    /// `ZMQ_LAST_ENDPOINT`.
+    pub last: Mutex<Option<String>>,
+    /// Set by the first bind or connect, which freezes bind-time options.
+    pub bound_or_connected: AtomicBool,
+    /// Connected endpoints; queueing without a ready peer needs one.
+    pub connect_count: AtomicUsize,
+}
+
+impl EndpointState {
+    pub(super) fn new() -> Self {
+        Self {
+            last: Mutex::new(None),
+            bound_or_connected: AtomicBool::new(false),
+            connect_count: AtomicUsize::new(0),
+        }
     }
 }

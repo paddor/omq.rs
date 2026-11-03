@@ -179,23 +179,23 @@ impl EndpointWorker {
     ) -> Option<(bool, Instant)> {
         let now = pass.timestamp.at;
         let pending = route.pending.as_mut()?;
-        if pending.expires <= now {
+        if pending.lease.expires <= now {
             route.pending = None;
             return None;
         }
 
         // A listener answers each HELLO once and never resends
         // WELCOME on its own, so spoofed HELLOs cannot amplify.
-        let connector = pending.handshake.is_connector();
-        if connector && pending.retry <= now {
-            pending.handshake.retry();
-            pending.retry = now + RETRY;
+        let lease = &mut pending.lease;
+        let connector = lease.handshake.is_connector();
+        if connector {
+            lease.retry_due(now);
         }
-        let sent = self.send_handshake(source, &mut pending.handshake, pass.control, pass.stats);
+        let sent = self.send_handshake(source, &mut lease.handshake, pass.control, pass.stats);
         let wake = if connector {
-            pending.retry
+            lease.retry
         } else {
-            pending.expires
+            lease.expires
         };
         Some((sent, wake))
     }
@@ -210,7 +210,7 @@ impl EndpointWorker {
     ) -> Option<PeerTurn> {
         let now = pass.timestamp.at;
         let peer = route.peer.as_mut()?;
-        if peer.expires <= now
+        if peer.lease.expires <= now
             || peer
                 .io
                 .as_mut()
@@ -225,18 +225,17 @@ impl EndpointWorker {
                 endpoint_id: self.id,
                 source,
                 generation: peer.generation,
-                socket_type: peer.socket_type,
-                identity: peer.identity.clone(),
+                socket_type: peer.lease.socket_type,
+                identity: peer.lease.identity.clone(),
             });
         }
 
         // Until activation installs a session, resend the current phase on
         // the retry interval so a lost handshake packet is recovered.
-        if peer.session.is_none() && peer.retry <= now {
-            peer.handshake.retry();
-            peer.retry = now + RETRY;
+        if peer.session.is_none() {
+            peer.lease.retry_due(now);
         }
-        let sent = self.send_handshake(source, &mut peer.handshake, pass.control, pass.stats);
+        let sent = self.send_handshake(source, &mut peer.lease.handshake, pass.control, pass.stats);
 
         let mut turn = self.drive_peer(source, peer, pass);
         turn.worked |= sent;
@@ -258,7 +257,7 @@ impl EndpointWorker {
             worked: false,
             blocked: false,
             retire: false,
-            deadline: peer.retry,
+            deadline: peer.lease.retry,
         };
         if peer.session.is_none() || peer.io.is_none() {
             return turn;
@@ -289,8 +288,8 @@ impl EndpointWorker {
                 session,
                 stage: pass.stage,
                 stats: pass.stats,
-                egress: peer.egress.as_mut(),
-                waker: &peer.budget_waker,
+                egress: peer.pacing.egress.as_mut(),
+                waker: &peer.pacing.waker,
                 blocked: false,
             };
             turn.worked |= transmission.run(now);
@@ -400,7 +399,7 @@ impl Peer {
 
     /// Grant receive credit once the ingress byte budget admits it.
     fn admit_ingress(&mut self) -> bool {
-        let (Some(session), Some(ingress)) = (&mut self.session, &mut self.ingress) else {
+        let (Some(session), Some(ingress)) = (&mut self.session, &mut self.pacing.ingress) else {
             return false;
         };
         // Each newly admitted sequence can carry at most MAX_DATAGRAM
@@ -411,7 +410,7 @@ impl Peer {
             return false;
         }
 
-        let cx = Context::from_waker(&self.budget_waker);
+        let cx = Context::from_waker(&self.pacing.waker);
         let Poll::Ready(n) = ingress.poll(&cx, wanted, MAX_DATAGRAM) else {
             return false;
         };
@@ -431,8 +430,12 @@ impl Peer {
             || (io.draining
                 && session.outstanding() == 0
                 && io.deferred.is_empty()
-                && io.data.is_empty()
-                && io.pipe.as_ref().is_none_or(SendPipeConsumer::is_empty))
+                && io.queues.data.is_empty()
+                && io
+                    .queues
+                    .pipe
+                    .as_ref()
+                    .is_none_or(SendPipeConsumer::is_empty))
     }
 }
 

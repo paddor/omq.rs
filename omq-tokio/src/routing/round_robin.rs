@@ -398,8 +398,6 @@ impl Submitter {
     }
 }
 
-impl ActivePipes {}
-
 /// Round-robin send strategy.
 #[derive(Debug)]
 pub(crate) struct RoundRobinSend {
@@ -429,37 +427,16 @@ impl RoundRobinSend {
         }
     }
 
-    pub(crate) fn make_connect_pipe(&mut self, route_id: u64) -> SendPipeConsumer {
-        self.make_connect_pipe_inner(
-            route_id,
-            #[cfg(feature = "dart")]
-            None,
-        )
-    }
-
-    #[cfg(feature = "dart")]
-    pub(crate) fn make_dart_connect_pipe(
-        &mut self,
-        route_id: u64,
-        socket_type: omq_proto::SocketType,
-    ) -> SendPipeConsumer {
-        self.make_connect_pipe_inner(route_id, Some(socket_type))
-    }
-
-    fn make_connect_pipe_inner(
+    /// Allocate a connect-side pre-ready pipe. DART sockets pass their type so
+    /// the pipe validates messages.
+    pub(crate) fn make_connect_pipe(
         &mut self,
         route_id: u64,
         #[cfg(feature = "dart")] dart: Option<omq_proto::SocketType>,
     ) -> SendPipeConsumer {
         let (tx, rx) = crate::engine::send_pipe_with_mode(self.pipe_cap, self.pipe_mode);
         #[cfg(feature = "dart")]
-        let tx = {
-            let mut tx = tx;
-            if let Some(kind) = dart {
-                tx.set_dart(kind);
-            }
-            tx
-        };
+        let tx = super::with_dart(tx, dart);
         let mut active = self.active.lock();
         active.insert_pipe(route_id, tx);
         self.active_changed.notify_changed();
@@ -476,12 +453,13 @@ impl RoundRobinSend {
         // A direct inproc route replaces the connect-side pipe. Dropping
         // that producer ends the pipe, and the route delivers what it still
         // holds before any later message.
-        if active.has_pipe(route_id) && handle.inproc.is_none() {
+        if active.has_pipe(route_id) && handle.routes.inproc.is_none() {
             self.active_changed.notify_changed();
             return;
         }
 
         let send_pipe = handle
+            .routes
             .send_pipe
             .as_ref()
             .and_then(|pipe| pipe.lock().expect("round_robin send pipe").take());
@@ -549,10 +527,18 @@ mod tests {
     use std::collections::VecDeque;
     use tokio_util::sync::CancellationToken;
 
+    fn connect_pipe(send: &mut RoundRobinSend, route_id: u64) -> crate::engine::SendPipeConsumer {
+        send.make_connect_pipe(
+            route_id,
+            #[cfg(feature = "dart")]
+            None,
+        )
+    }
+
     #[test]
     fn batches_preserve_round_robin_order_and_scalar_cursor() {
         let mut send = RoundRobinSend::new(&Options::default().send_hwm(16));
-        let mut receivers: Vec<_> = (0..3).map(|id| send.make_connect_pipe(id)).collect();
+        let mut receivers: Vec<_> = (0..3).map(|id| connect_pipe(&mut send, id)).collect();
         let order: Vec<_> = send
             .active
             .lock()
@@ -578,7 +564,7 @@ mod tests {
     #[test]
     fn partial_full_batches_publish_and_reactivate_without_losing_messages() {
         let mut send = RoundRobinSend::new(&Options::default().send_hwm(2));
-        let mut receivers: Vec<_> = (0..2).map(|id| send.make_connect_pipe(id)).collect();
+        let mut receivers: Vec<_> = (0..2).map(|id| connect_pipe(&mut send, id)).collect();
         let submitter = send.submitter();
         let mut messages: VecDeque<_> = (0..7_u8).map(|seq| Message::from_slice(&[seq])).collect();
         assert_eq!(submitter.try_send_many(&mut messages, 7).unwrap(), 4);
@@ -603,8 +589,8 @@ mod tests {
     #[test]
     fn batch_skips_closed_peer_and_delivers_to_the_remaining_peer() {
         let mut send = RoundRobinSend::new(&Options::default().send_hwm(16));
-        let closed = send.make_connect_pipe(0);
-        let mut receiver = send.make_connect_pipe(1);
+        let closed = connect_pipe(&mut send, 0);
+        let mut receiver = connect_pipe(&mut send, 1);
         drop(closed);
         let submitter = send.submitter();
         let expected: Vec<_> = (0..7_u8).map(|seq| Message::from_slice(&[seq])).collect();
@@ -711,7 +697,7 @@ mod tests {
     fn connect_pipe_buffers_before_peer_ready() {
         let mut send = RoundRobinSend::new(&Options::default().send_hwm(1));
         let submitter = send.submitter();
-        let mut rx = send.make_connect_pipe(7);
+        let mut rx = connect_pipe(&mut send, 7);
 
         submitter.try_send(Message::single("pre")).unwrap();
         let err = submitter.try_send(Message::single("full")).unwrap_err();
@@ -726,7 +712,7 @@ mod tests {
     fn connection_added_reuses_connect_pipe() {
         let mut send = RoundRobinSend::new(&Options::default().send_hwm(2));
         let submitter = send.submitter();
-        let mut rx = send.make_connect_pipe(7);
+        let mut rx = connect_pipe(&mut send, 7);
 
         submitter.try_send(Message::single("pre")).unwrap();
 
@@ -737,10 +723,10 @@ mod tests {
             inbox: inbox.into(),
             data_inbox: data_inbox.into(),
             cancel: CancellationToken::new(),
-            transmit_slot: None,
-            direct_tcp_writer: None,
-            send_pipe: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(send_pipe)))),
-            inproc: None,
+            routes: crate::engine::driver::DirectRoutes {
+                send_pipe: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(send_pipe)))),
+                ..Default::default()
+            },
         };
         send.connection_added(7, &handle, false);
 

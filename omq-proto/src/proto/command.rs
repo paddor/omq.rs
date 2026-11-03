@@ -25,6 +25,12 @@ pub(crate) const NAME_PONG: &[u8] = b"PONG";
 pub(crate) const NAME_ERROR: &[u8] = b"ERROR";
 pub(crate) const NAME_JOIN: &[u8] = b"JOIN";
 pub(crate) const NAME_LEAVE: &[u8] = b"LEAVE";
+#[cfg(any(feature = "plain", feature = "curve"))]
+pub(crate) const NAME_HELLO: &[u8] = b"HELLO";
+#[cfg(any(feature = "plain", feature = "curve"))]
+pub(crate) const NAME_WELCOME: &[u8] = b"WELCOME";
+#[cfg(any(feature = "plain", feature = "curve"))]
+pub(crate) const NAME_INITIATE: &[u8] = b"INITIATE";
 
 /// Maximum context length inside PING / PONG bodies (RFC 37).
 pub const PING_CONTEXT_MAX: usize = 16;
@@ -208,18 +214,10 @@ pub fn encode(cmd: &Command, out: &mut BytesMut) {
 /// Parse a command from the payload bytes of a COMMAND-flagged frame.
 #[expect(clippy::needless_pass_by_value)]
 pub fn decode(body: Bytes) -> Result<Command> {
-    if body.is_empty() {
-        return Err(Error::Protocol("empty command frame".into()));
-    }
-    let name_len = body[0] as usize;
-    if body.len() < 1 + name_len {
-        return Err(Error::Protocol("command truncated in name".into()));
-    }
-    let name = body.slice(1..=name_len);
+    let (name, body) = split_name(&body)?;
     if name.is_empty() || !name.iter().all(u8::is_ascii_alphabetic) {
         return Err(Error::Protocol("invalid command name".into()));
     }
-    let body = body.slice(1 + name_len..);
 
     let cmd = match name.as_ref() {
         NAME_READY => Command::Ready(decode_properties_inner(body)?),
@@ -240,25 +238,38 @@ pub fn decode(body: Bytes) -> Result<Command> {
     Ok(cmd)
 }
 
+/// Split a command frame payload into its name and body. The name is not
+/// validated, so handshake commands can pass through raw.
+pub(crate) fn split_name(payload: &Bytes) -> Result<(Bytes, Bytes)> {
+    if payload.is_empty() {
+        return Err(Error::Protocol("empty command frame".into()));
+    }
+    let name_len = payload[0] as usize;
+    if payload.len() < 1 + name_len {
+        return Err(Error::Protocol("command truncated in name".into()));
+    }
+    Ok((payload.slice(1..=name_len), payload.slice(1 + name_len..)))
+}
+
 fn write_name(out: &mut BytesMut, name: &[u8]) {
     assert!(u8::try_from(name.len()).is_ok(), "command name too long");
     out.put_u8(name.len() as u8);
     out.put_slice(name);
 }
 
-/// Convenience wrapper used by PLAIN's encrypted-mechanism handshake.
-/// Encodes peer properties to a fresh `Vec<u8>`
-/// ready to embed in the handshake message body. Cfg-gated to
-/// avoid dead-code warnings in builds that don't include any
-/// mechanism that calls it.
-#[cfg(feature = "plain")]
-pub(crate) fn encode_properties(props: &PeerProperties) -> Vec<u8> {
+/// Encode peer properties into a PLAIN or CURVE handshake body. Rejects
+/// property names longer than 255 bytes.
+#[cfg(any(feature = "plain", feature = "curve"))]
+pub(crate) fn encode_properties(props: &PeerProperties) -> Result<Vec<u8>> {
+    if props.other.iter().any(|(name, _)| name.len() > 255) {
+        return Err(Error::Protocol("property name too long".into()));
+    }
     let mut buf = BytesMut::new();
     encode_properties_inner(props, &mut buf);
-    buf.to_vec()
+    Ok(buf.to_vec())
 }
 
-#[cfg(feature = "plain")]
+#[cfg(any(feature = "plain", feature = "curve"))]
 pub(crate) fn decode_properties(body: &[u8]) -> Result<PeerProperties> {
     decode_properties_inner(Bytes::copy_from_slice(body))
 }

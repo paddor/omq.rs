@@ -1,11 +1,10 @@
 use omq_proto::Options;
 use std::sync::Arc;
 
+use super::dialer::FirstAttempt;
 use super::{
-    ConnectionStatus, DialerEntry, DisconnectReason, Endpoint, Error, ListenerEntry, MonitorEvent,
-    PeerIdent, PeerInfo, Result, SocketDriver, SocketType, UdpDialerEntry, UdpListenerEntry,
-    bind_any, fake_handle, reject_encrypted_inproc, spawn_dish_listener, spawn_radio_sender,
-    supports_groups, supports_subscribe,
+    ConnectionStatus, DialerEntry, DisconnectReason, Endpoint, EndpointTask, Error, MonitorEvent,
+    PeerInfo, Result, Side, SocketDriver, SocketType, bind_any, reject_encrypted_inproc,
 };
 use crate::socket::actor::lifecycle::PeerLifecycle;
 
@@ -45,7 +44,7 @@ impl SocketDriver {
         } else if Self::is_dart_endpoint(&endpoint) {
             #[cfg(feature = "dart")]
             let _ = ack.send(
-                self.start_dart(endpoint.clone(), endpoint, options, true)
+                self.start_dart(endpoint.clone(), endpoint, options, Side::Connect)
                     .await
                     .map(|_| ()),
             );
@@ -85,11 +84,11 @@ impl SocketDriver {
         self.endpoints
             .dialers
             .iter()
-            .any(|d| &d.endpoint == endpoint)
+            .any(|d| &d.task.endpoint == endpoint)
             || self
                 .peers
                 .values()
-                .any(|peer| peer.is_client && &peer.endpoint == endpoint)
+                .any(|peer| peer.origin.side.is_connect() && &peer.origin.endpoint == endpoint)
     }
 
     #[cfg_attr(
@@ -98,28 +97,14 @@ impl SocketDriver {
     )]
     pub(super) async fn unbind(&mut self, endpoint: &Endpoint) -> Result<()> {
         #[cfg(feature = "dart")]
-        if self.stop_dart_endpoints(Some((endpoint, false))).await {
+        if self.stop_dart_endpoints(Some((endpoint, Side::Bind))).await {
             return Ok(());
         }
-        let pending =
-            self.cancel_pending_endpoints(Some((endpoint, super::endpoint_resolution::Kind::Bind)));
-        let before = self.endpoints.listeners.len() + self.endpoints.udp_listeners.len();
+        let pending = self.cancel_pending_endpoints(Some((endpoint, Side::Bind)));
         // Wait for each task so the address is free when unbind returns.
-        let (mut removed, kept) = std::mem::take(&mut self.endpoints.listeners)
-            .into_iter()
-            .partition::<Vec<_>, _>(|l| &l.endpoint == endpoint);
-        self.endpoints.listeners = kept;
-        for l in &mut removed {
-            super::stop_endpoint_task(&l.cancel, &mut l.task).await;
-        }
-        let (mut removed, kept) = std::mem::take(&mut self.endpoints.udp_listeners)
-            .into_iter()
-            .partition::<Vec<_>, _>(|l| &l.endpoint == endpoint);
-        self.endpoints.udp_listeners = kept;
-        for l in &mut removed {
-            super::stop_endpoint_task(&l.cancel, &mut l.task).await;
-        }
-        if pending || self.endpoints.listeners.len() + self.endpoints.udp_listeners.len() < before {
+        let removed = super::stop_matching(&mut self.endpoints.listeners, endpoint).await
+            + super::stop_matching(&mut self.endpoints.udp_listeners, endpoint).await;
+        if pending || removed > 0 {
             Ok(())
         } else {
             Err(Error::Unroutable)
@@ -133,12 +118,14 @@ impl SocketDriver {
     /// `Error::Unroutable` if no dialer or live client peer matches.
     pub(super) async fn disconnect(&mut self, endpoint: &Endpoint) -> Result<()> {
         #[cfg(feature = "dart")]
-        if self.stop_dart_endpoints(Some((endpoint, true))).await {
+        if self
+            .stop_dart_endpoints(Some((endpoint, Side::Connect)))
+            .await
+        {
             return Ok(());
         }
 
-        let pending = self
-            .cancel_pending_endpoints(Some((endpoint, super::endpoint_resolution::Kind::Connect)));
+        let pending = self.cancel_pending_endpoints(Some((endpoint, Side::Connect)));
         let before = self.endpoints.dialers.len() + self.endpoints.udp_dialers.len();
 
         self.remove_dialers_to(endpoint);
@@ -158,43 +145,17 @@ impl SocketDriver {
 
     /// Stop the dial loops for `endpoint` and drop their connect routes.
     fn remove_dialers_to(&mut self, endpoint: &Endpoint) {
-        let mut removed_routes = Vec::new();
-        self.endpoints.dialers.retain(|d| {
-            if &d.endpoint == endpoint {
-                d.cancel.cancel();
-                removed_routes.push(d.route_id);
-                false
-            } else {
-                true
-            }
-        });
+        // Dropping an entry stops its task.
+        let removed_routes: Vec<u64> = self
+            .endpoints
+            .dialers
+            .extract_if(.., |d| d.task.endpoint == *endpoint)
+            .map(|d| d.route_id)
+            .collect();
 
         for route_id in removed_routes {
             self.remove_connect_route(route_id);
         }
-    }
-
-    /// Returns how many UDP dialers to `endpoint` were removed.
-    fn remove_udp_dialers_to(&mut self, endpoint: &Endpoint) -> usize {
-        // Cancel matching UDP dialers AND tell the SendStrategy the
-        // synthetic peer is gone so RADIO stops queuing through it.
-        let mut removed_peers = Vec::new();
-        self.endpoints.udp_dialers.retain(|d| {
-            if &d.endpoint == endpoint {
-                d.cancel.cancel();
-                removed_peers.push(d.peer_id);
-                false
-            } else {
-                true
-            }
-        });
-
-        let removed = removed_peers.len();
-        for pid in removed_peers {
-            // UDP dialers use their peer id as route id.
-            self.routing.send_strategy.connection_removed(pid, pid);
-        }
-        removed
     }
 
     /// Stop live client-side peers dialed to `endpoint`. Returns how many
@@ -204,7 +165,7 @@ impl SocketDriver {
             .peers
             .iter()
             .filter_map(|(id, peer)| {
-                if peer.is_client && &peer.endpoint == endpoint {
+                if peer.origin.side.is_connect() && &peer.origin.endpoint == endpoint {
                     Some(*id)
                 } else {
                     None
@@ -219,10 +180,7 @@ impl SocketDriver {
             if let Some(mut peer) =
                 PeerLifecycle::new(self).remove_peer(peer_id, DisconnectReason::LocalClose)
             {
-                peer.handle.cancel.cancel();
-                if let Some(task) = peer.task.take() {
-                    peer_tasks.push(task);
-                }
+                peer_tasks.extend(peer.cancel_task());
             }
         }
 
@@ -232,235 +190,21 @@ impl SocketDriver {
         removed
     }
 
-    /// Bind a UDP DISH listener. Validates socket type, opens the
-    /// socket, registers the listener task, publishes
-    /// [`MonitorEvent::Listening`]. UDP listeners do not register a
-    /// peer entry - datagrams are pushed straight onto `recv_tx`.
-    pub(super) async fn bind_udp(&mut self, endpoint: Endpoint) -> Result<Endpoint> {
-        if self.socket_type != SocketType::Dish {
-            return Err(Error::Protocol(
-                "udp:// bind is only supported on DISH sockets".into(),
-            ));
-        }
-
-        let network = self.resources.io_pool.network_primary();
-        network.validate_datagrams(crate::transport::udp::MAX_DATAGRAM_SIZE)?;
-        let sock = crate::transport::udp::bind(&endpoint).await?;
-        let local = sock.local_addr()?;
-        let resolved = match &endpoint {
-            Endpoint::Udp { group, .. } => Endpoint::Udp {
-                group: group.clone(),
-                host: omq_proto::endpoint::Host::Ip(local.ip()),
-                port: local.port(),
-            },
-            _ => unreachable!("checked above"),
-        };
-        self.link.monitor.publish(MonitorEvent::Listening {
-            endpoint: resolved.clone(),
-        });
-
-        let cancel = self.link.cancel.child_token();
-        let delivery = crate::socket::udp::DishDelivery {
-            recv_tx: self.link.recv_tx.clone(),
-            joined: self.routing.joined_groups.clone(),
-            pool: self.resources.payload_pools.receive(),
-        };
-        let task = spawn_dish_listener(
-            sock,
-            delivery,
-            cancel.clone(),
-            &self.resources.io_pool,
-            self.resources.io_pool.reserve_thread(),
-        );
-
-        let ret = resolved.clone();
-        self.endpoints.udp_listeners.push(UdpListenerEntry {
-            endpoint: resolved,
-            cancel,
-            task,
-        });
-        Ok(ret)
-    }
-
-    /// Establish a UDP RADIO outbound. Validates socket type, opens
-    /// the socket, registers a synthetic peer with the `SendStrategy`
-    /// so `send` routes through the sender task's inbox.
-    pub(super) async fn start_dial_udp(&mut self, endpoint: Endpoint) -> Result<()> {
-        if self.socket_type != SocketType::Radio {
-            return Err(Error::Protocol(
-                "udp:// connect is only supported on RADIO sockets".into(),
-            ));
-        }
-
-        let network = self.resources.io_pool.network_primary();
-        network.validate_datagrams(crate::transport::udp::MAX_DATAGRAM_SIZE)?;
-        let sock = crate::transport::udp::connect(&endpoint).await?;
-        let peer_id = self.next_peer_id;
-        self.next_peer_id += 1;
-
-        let cancel = self.link.cancel.child_token();
-        let (inbox_tx, inbox_rx) = crate::engine::control_inbox::channel(64);
-        let (data_inbox_tx, data_inbox_rx) =
-            crate::engine::data_inbox::channel(self.options.send_queue_capacity());
-        let assignment = self.resources.io_pool.reserve_thread();
-        let index = assignment.index();
-        let inboxes = crate::socket::udp::RadioInboxes {
-            control: inbox_rx,
-            data: data_inbox_rx,
-        };
-        let task = spawn_radio_sender(
-            sock,
-            inboxes,
-            cancel.clone(),
-            &self.resources.io_pool,
-            assignment,
-        );
-
-        let handle = fake_handle(inbox_tx, data_inbox_tx, cancel.clone());
-
-        // Register the synthetic peer with SendStrategy as an
-        // any-groups RADIO target - UDP DISH never sends JOIN, so the
-        // sender must fan out unconditionally. The receiver filters.
-        self.routing
-            .send_strategy
-            .connection_added_any_groups(peer_id, handle, index);
-
-        // Synthesise Connected so users see the same monitor signal
-        // they'd get for any other transport. PeerIdent is the
-        // post-connect remote address when known.
-        let peer_ident = PeerIdent::Path(format!("{endpoint}"));
-        self.link.monitor.publish(MonitorEvent::Connected {
-            endpoint: endpoint.clone(),
-            peer_ident,
-            connection_id: peer_id,
-        });
-
-        self.endpoints.udp_dialers.push(UdpDialerEntry {
-            endpoint,
-            cancel,
-            peer_id,
-            task,
-        });
-        Ok(())
-    }
-
     /// Snapshot one peer as a [`ConnectionStatus`]. Returns `None` if no
     /// peer with that id exists.
     pub(super) fn peer_status(&self, connection_id: u64) -> Option<ConnectionStatus> {
         let peer = self.peers.get(&connection_id)?;
         Some(ConnectionStatus {
             connection_id,
-            endpoint: peer.endpoint.clone(),
-            identity: peer.identity.clone(),
-            peer_info: peer.info.clone(),
+            endpoint: peer.origin.endpoint.clone(),
+            identity: peer.handshake.identity.clone(),
+            peer_info: peer.handshake.info.clone(),
         })
     }
 
     pub(super) fn server_peer_info(&self, routing_id: u32) -> Option<PeerInfo> {
         let connection_id = u64::from(routing_id.checked_sub(1)?);
-        self.peers.get(&connection_id)?.info.clone()
-    }
-
-    /// Returns the peers whose protocol lane backlogged. The caller's ack
-    /// waits for them; the actor never does.
-    pub(super) fn apply_join(
-        &mut self,
-        group: bytes::Bytes,
-        joining: bool,
-    ) -> Result<Vec<crate::engine::control_inbox::Sender>> {
-        if !supports_groups(self.socket_type) {
-            return Err(Error::Protocol(
-                "socket type does not support join / leave".into(),
-            ));
-        }
-        {
-            let mut groups = (**self.routing.joined_groups.load()).clone();
-            if joining {
-                groups.insert(group.clone());
-            } else {
-                groups.remove(&group);
-            }
-            self.routing.joined_groups.store(Arc::new(groups));
-        }
-        // Replay to data-plane-ready peers. Pending peers pick up the join
-        // via `handle_peer_event(HandshakeSucceeded)`'s replay loop. UDP DISH
-        // listener tasks see the change through the shared set, no command
-        // needed.
-        let cmd = if joining {
-            omq_proto::proto::Command::Join(group)
-        } else {
-            omq_proto::proto::Command::Leave(group)
-        };
-        Ok(self.send_protocol_to_ready_peers(&cmd))
-    }
-
-    /// Returns the peers whose protocol lane backlogged. The caller's ack
-    /// waits for them; the actor never does.
-    pub(super) fn apply_subscription(
-        &mut self,
-        prefix: bytes::Bytes,
-        subscribe: bool,
-    ) -> Result<Vec<crate::engine::control_inbox::Sender>> {
-        if !supports_subscribe(self.socket_type) {
-            return Err(Error::Protocol(
-                "socket type does not support subscribe".into(),
-            ));
-        }
-        if subscribe {
-            self.routing.subscriptions.push(prefix.clone());
-        } else if let Some(pos) = self.routing.subscriptions.iter().position(|p| p == &prefix) {
-            self.routing.subscriptions.remove(pos);
-        }
-        // Broadcast to every data-plane-ready peer. Pending peers are skipped;
-        // `handle_peer_event(HandshakeSucceeded)` replays `self.subscriptions`
-        // for each peer as it transitions to ready.
-        let cmd = if subscribe {
-            omq_proto::proto::Command::Subscribe(prefix)
-        } else {
-            omq_proto::proto::Command::Cancel(prefix)
-        };
-        Ok(self.send_protocol_to_ready_peers(&cmd))
-    }
-
-    /// Queue `cmd` for every data-plane-ready peer without waiting.
-    fn send_protocol_to_ready_peers(
-        &self,
-        cmd: &omq_proto::proto::Command,
-    ) -> Vec<crate::engine::control_inbox::Sender> {
-        let mut backlogged = Vec::new();
-        for p in self.peers.values() {
-            if !p.ready {
-                continue;
-            }
-            let inbox = &p.handle.inbox;
-            let _ = inbox.try_send(crate::engine::PeerDriverCommand::SendCommand(cmd.clone()));
-            if inbox.protocol_backlogged() {
-                backlogged.push(inbox.clone());
-            }
-        }
-        backlogged
-    }
-
-    pub(super) fn capture_endpoint_options(
-        &self,
-        compression: Option<omq_proto::CompressionOptions>,
-    ) -> Arc<Options> {
-        let mut options = self.options.clone();
-        options.recv_payload_pool = self.resources.payload_pools.receive();
-        if let Some(compression) = compression {
-            options.compression_dict = compression.dict;
-            options.compression_auto_train = compression.auto_train;
-            options.compression_threshold = compression.threshold;
-            options.compression_level = compression.level;
-            options.compression_level_range = compression.level_range;
-            options.compression_dict_capacity = compression.dict_capacity;
-        }
-        if let Some(dict) = &options.compression_dict
-            && dict.len() <= 8192
-        {
-            options.compression_dict = Some(bytes::Bytes::copy_from_slice(dict));
-        }
-        Arc::new(options)
+        self.peers.get(&connection_id)?.handshake.info.clone()
     }
 
     pub(super) async fn bind(
@@ -473,7 +217,7 @@ impl SocketDriver {
         #[cfg(feature = "dart")]
         if matches!(endpoint, Endpoint::Dart { .. }) {
             return self
-                .start_dart(endpoint.clone(), endpoint, options, false)
+                .start_dart(endpoint.clone(), endpoint, options, Side::Bind)
                 .await;
         }
         if self.socket_type == SocketType::Stream && !endpoint.is_tcp_family() {
@@ -486,13 +230,10 @@ impl SocketDriver {
         }
         reject_encrypted_inproc(&endpoint, &options.mechanism)?;
 
-        let snapshot = self.inproc_snapshot();
         let cancel = self.link.cancel.child_token();
         let bound = bind_any(
-            &self.resources.inproc_registry,
             &endpoint,
-            &snapshot,
-            &self.inproc_config(&options),
+            &self.inproc_setup(&options),
             #[cfg(any(feature = "ws", feature = "quic"))]
             self.carrier_accept(&endpoint, &options, &cancel),
         )
@@ -545,7 +286,7 @@ impl SocketDriver {
             }
             .run(bound.listener),
         );
-        self.endpoints.listeners.push(ListenerEntry {
+        self.endpoints.listeners.push(EndpointTask {
             endpoint: resolved.clone(),
             cancel,
             task,
@@ -554,7 +295,7 @@ impl SocketDriver {
     }
 
     pub(super) fn start_dial(&mut self, endpoint: Endpoint, options: Arc<Options>) {
-        self.start_dial_with_deadline(endpoint, options, None, None);
+        self.start_dial_task(endpoint, options, FirstAttempt::default(), 0);
     }
 
     pub(super) fn start_redial(
@@ -566,29 +307,16 @@ impl SocketDriver {
         self.start_dial_task(endpoint, options, FirstAttempt::default(), failed_attempts);
     }
 
-    pub(super) fn start_dial_with_deadline(
-        &mut self,
-        endpoint: Endpoint,
-        options: Arc<Options>,
-        first_deadline: Option<std::time::Instant>,
-        first_admission: Option<crate::transport::setup::PendingHandshake>,
-    ) {
-        let first = FirstAttempt {
-            deadline: first_deadline,
-            admission: first_admission,
-        };
-        self.start_dial_task(endpoint, options, first, 0);
-    }
-
-    fn start_dial_task(
+    pub(super) fn start_dial_task(
         &mut self,
         endpoint: Endpoint,
         options: Arc<Options>,
         first: FirstAttempt,
         failed_attempts: u32,
     ) {
-        let route_id = self.next_peer_id;
-        self.next_peer_id += 1;
+        let Some(route_id) = self.alloc_id() else {
+            return;
+        };
 
         // STREAM assigns the routing id at connect() so callers can query and
         // address the peer before it connects.
@@ -601,7 +329,11 @@ impl SocketDriver {
                 self.options.send_queue_capacity(),
             ))
         } else {
-            self.routing.send_strategy.make_connect_pipe(route_id)
+            self.routing.send_strategy.make_connect_pipe(
+                route_id,
+                #[cfg(feature = "dart")]
+                None,
+            )
         };
 
         let cancel = self.link.cancel.child_token();
@@ -623,12 +355,9 @@ impl SocketDriver {
                 cancel: cancel.clone(),
                 tx: self.mail.internal_tx.clone(),
                 monitor: self.link.monitor.clone(),
-                snapshot: self.inproc_snapshot(),
-                recv: self.inproc_config(&options),
-                registry: self.resources.inproc_registry.clone(),
+                inproc: self.inproc_setup(&options),
                 setup,
-                first_deadline: first.deadline,
-                first_admission: first.admission,
+                first,
                 failed_attempts: failed_attempts.clone(),
                 io_pool: self.resources.io_pool.clone(),
             }
@@ -636,88 +365,17 @@ impl SocketDriver {
         );
 
         self.endpoints.dialers.push(DialerEntry {
+            task: EndpointTask {
+                endpoint,
+                cancel,
+                task,
+            },
             options,
-            endpoint,
-            cancel,
             route_id,
             send_pipe_rx,
             failed_attempts,
-            task,
         });
     }
-
-    pub(super) fn validate_setup_options(
-        &self,
-        endpoint: &Endpoint,
-        options: &Options,
-    ) -> Result<()> {
-        options.validate()?;
-        if matches!(endpoint, Endpoint::Shm(_)) {
-            #[cfg(not(target_os = "linux"))]
-            return Err(Error::UnsupportedScheme("shm requires Linux".into()));
-            #[cfg(target_os = "linux")]
-            {
-                if !omq_shm::supports(self.socket_type) {
-                    return Err(Error::Config(
-                        "shm:// does not support STREAM sockets".into(),
-                    ));
-                }
-                if !matches!(options.mechanism, omq_proto::MechanismConfig::Null) {
-                    return Err(Error::Config("shm:// requires the NULL mechanism".into()));
-                }
-            }
-        }
-        #[cfg(feature = "dart")]
-        if matches!(endpoint, Endpoint::Dart { .. }) {
-            return self.validate_dart_options(options);
-        }
-        // Validate the effective mechanism before DNS or carrier setup. The
-        // codec factory repeats this check for standalone sans-I/O callers.
-        let compression =
-            omq_proto::proto::transform::CompressionKind::for_endpoint_with_mechanism(
-                endpoint,
-                &options.mechanism,
-            )?;
-        if compression.is_some() && self.socket_type == SocketType::Stream {
-            return Err(Error::Config(
-                "OMQ compression is not supported on STREAM sockets".into(),
-            ));
-        }
-        let _ = crate::engine::codec::CodecSetup::for_endpoint(endpoint, options)
-            .map_err(|error| Error::Config(format!("invalid codec configuration: {error}")))?;
-        #[cfg(feature = "ws")]
-        if endpoint.is_ws_family() {
-            match endpoint {
-                Endpoint::Ws { host, path, .. } | Endpoint::Wss { host, path, .. } => {
-                    omq_proto::proto::ws_handshake::validate_ws_address(host, path)?;
-                }
-                #[cfg(feature = "lz4")]
-                Endpoint::Lz4Ws { host, path, .. } => {
-                    omq_proto::proto::ws_handshake::validate_ws_address(host, path)?;
-                }
-                _ => unreachable!(),
-            }
-            if options
-                .handshake_timeout
-                .and_then(|timeout| std::time::Instant::now().checked_add(timeout))
-                .is_none()
-            {
-                return Err(Error::Protocol(
-                    "WS/WSS requires a finite handshake_timeout".into(),
-                ));
-            }
-        }
-        #[cfg(not(feature = "ws"))]
-        let _ = endpoint;
-        Ok(())
-    }
-}
-
-/// Setup budget carried from DNS resolution into a dialer's first attempt.
-#[derive(Default)]
-struct FirstAttempt {
-    deadline: Option<std::time::Instant>,
-    admission: Option<crate::transport::setup::PendingHandshake>,
 }
 
 /// Listener setup deadline. QUIC always has a finite deadline.

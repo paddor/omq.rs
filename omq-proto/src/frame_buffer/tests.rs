@@ -174,27 +174,6 @@ fn advance_through_arena_only_queue() {
 }
 
 #[test]
-fn put_back_partial_write() {
-    let mut eq = FrameBuffer::new();
-    let msg = Message::from(Bytes::from_static(&[0xAB; 100]));
-    eq.frame_gather(&msg);
-    assert!(!eq.is_empty());
-
-    let mut buf = Vec::new();
-    eq.drain(&mut buf, 1024);
-    let total: usize = buf.iter().map(Bytes::len).sum();
-    assert!(total > 0);
-
-    eq.put_back_unwritten(buf, 5);
-    assert!(!eq.is_empty());
-
-    let mut buf2 = Vec::new();
-    eq.drain(&mut buf2, 1024);
-    let remaining: usize = buf2.iter().map(Bytes::len).sum();
-    assert_eq!(remaining, total - 5);
-}
-
-#[test]
 fn arena_and_gather_ordering() {
     let mut eq = FrameBuffer::new();
     let small = Message::from(Bytes::from_static(&[1; 64]));
@@ -284,42 +263,21 @@ fn has_arena_only_false_for_gather() {
 }
 
 #[test]
-fn rep_frame_keeps_identity_off_wire() {
-    let mut eq = FrameBuffer::one_shot();
-    let body = Message::single(Bytes::from_static(b"reply"));
-    eq.frame_rep(&Bytes::from_static(b"peer-id"), &body);
-
-    let mut actual = Vec::new();
-    eq.drain(&mut actual, 1024);
-    let actual: Vec<u8> = actual
-        .into_iter()
-        .flat_map(|chunk| chunk.to_vec())
-        .collect();
-
-    let expected_message = Message::multipart([Bytes::new(), Bytes::from_static(b"reply")]);
-    let mut expected = BytesMut::new();
-    crate::proto::frame::encode_message_flat(&expected_message, &mut expected);
-    assert_eq!(actual, expected.as_ref());
-}
-
-#[test]
-fn take_arena_bytes_round_trip() {
+fn push_pre_framed_round_trip() {
     let mut eq = FrameBuffer::one_shot();
     let msg = Message::from(Bytes::from_static(&[0xCC; 32]));
     eq.frame(&msg);
     assert!(eq.has_arena_only());
-
-    let frozen = eq.take_arena_bytes();
-    assert!(!frozen.is_empty());
-    assert!(eq.is_empty());
-    assert_eq!(eq.total_bytes(), 0);
+    let framed = Bytes::copy_from_slice(eq.uncommitted_arena());
+    assert!(!framed.is_empty());
 
     let mut eq2 = FrameBuffer::new();
-    eq2.push_pre_framed(&frozen);
+    eq2.push_pre_framed(&framed);
+    assert_eq!(eq2.total_bytes(), framed.len());
     let mut buf = Vec::new();
     eq2.drain(&mut buf, 1024);
     assert_eq!(buf.len(), 1);
-    assert_eq!(buf[0], frozen);
+    assert_eq!(buf[0], framed);
 }
 
 #[test]

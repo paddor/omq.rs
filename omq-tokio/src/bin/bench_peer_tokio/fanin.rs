@@ -1,10 +1,11 @@
 //! Multi-socket receive modes with per-socket fairness.
 
-use super::payload::bench_payload;
 use super::{
-    MULTI_PULL_DRAIN_BATCH, RECV_BATCH_BYTES, bench_options_client, cpu_time_secs, quantile,
+    MULTI_PULL_DRAIN_BATCH, RECV_BATCH_BYTES, RecvWindow, bench_options_client, cpu_time_secs,
     recv_before_deadline, run_push_loop, wait_for_start_barrier, wait_for_warmup_barrier,
+    warmup_duration,
 };
+use crate::json_payload::bench_payload;
 use omq_tokio::{Endpoint, Socket, SocketType};
 use std::time::{Duration, Instant};
 
@@ -23,26 +24,16 @@ pub(super) async fn run_multi_pull(
     }
 
     warm_up_receivers(&sockets).await;
-    let window = measure_fair_recv(sockets, duration, size).await;
-    print_multi_pull(&window, size);
-}
-
-/// Per-socket receive counts over one measured window.
-pub(super) struct RecvWindow {
-    pub(super) per_socket: Vec<u64>,
-    pub(super) elapsed: f64,
-    pub(super) cpu: f64,
+    measure_fair_recv(sockets, duration, size)
+        .await
+        .print_multi_pull(size);
 }
 
 /// Pass the warmup barrier, drain every socket until `OMQ_BENCH_WARMUP_MS`
 /// elapses, then wait at the start barrier.
 pub(super) async fn warm_up_receivers(sockets: &[omq_tokio::Socket]) {
     wait_for_warmup_barrier().await;
-    let warmup_deadline = Instant::now()
-        + std::env::var("OMQ_BENCH_WARMUP_MS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .map_or(Duration::ZERO, Duration::from_millis);
+    let warmup_deadline = Instant::now() + warmup_duration();
 
     let mut warmup_handles = Vec::with_capacity(sockets.len());
     for sock in sockets {
@@ -91,47 +82,6 @@ pub(super) async fn measure_fair_recv(
         cpu: cpu_time_secs() - cpu_before,
         per_socket: counters.iter().map(|c| c.load(AO::Relaxed)).collect(),
     }
-}
-
-/// Print totals, per-socket rate spread and quantiles, then every rate.
-#[expect(clippy::cast_precision_loss)]
-fn print_multi_pull(window: &RecvWindow, size: usize) {
-    let RecvWindow {
-        per_socket,
-        elapsed,
-        cpu,
-    } = window;
-    let (elapsed, cpu) = (*elapsed, *cpu);
-    let socket_count = per_socket.len();
-    let total: u64 = per_socket.iter().sum();
-    let per_min = per_socket.iter().copied().min().unwrap_or(0);
-    let per_max = per_socket.iter().copied().max().unwrap_or(0);
-    let per_min_rate = per_min as f64 / elapsed;
-    let per_max_rate = per_max as f64 / elapsed;
-    let mut rates: Vec<f64> = per_socket
-        .iter()
-        .map(|&count| count as f64 / elapsed)
-        .collect();
-    rates.sort_unstable_by(f64::total_cmp);
-    println!(
-        "{total} {elapsed:.6} {size} {cpu:.6} {socket_count} {per_min_rate:.1} \
-         {per_max_rate:.1} {:.1} {:.1} {:.1} {:.1} {:.1}",
-        quantile(&rates, 0.10),
-        quantile(&rates, 0.25),
-        quantile(&rates, 0.50),
-        quantile(&rates, 0.75),
-        quantile(&rates, 0.90),
-    );
-    print!(" ");
-    for rate in &rates {
-        print!("{rate:.1} ");
-    }
-    println!();
-    eprintln!(
-        "multi-pull: {socket_count} sockets, {:.0} msg/s total, \
-         per-socket [{per_min_rate:.0}, {per_max_rate:.0}] msg/s",
-        total as f64 / elapsed,
-    );
 }
 
 pub(super) async fn run_multi_push(

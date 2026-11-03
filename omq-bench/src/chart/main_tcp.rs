@@ -1,9 +1,7 @@
 use super::common::{
     C_LIBZMQ, C_LIBZMQ_2T, C_MONOCOQUE, C_OMQ_1T, C_OMQ_2T, C_OMQ_CT, C_OMQ_MT, C_OMQ_SPIN, C_R0Z,
-    C_RZMQ_IOURING, C_TMQ, C_ZMQRS, ChartSpec, CpuColumns, Impl,
-    draw_latency_single_panel_with_versions,
-    draw_throughput_dual_panel_fixed_2m_msgs_with_versions,
-    draw_throughput_dual_panel_with_versions, load_latency, load_tput, out_dir,
+    C_RZMQ_IOURING, C_TMQ, C_ZMQRS, ChartSpec, CpuColumns, DualPanelStyle, Impl, LatencyLayout,
+    draw_latency_single_panel, draw_throughput_dual_panel, load_latency, load_tput, out_dir,
 };
 
 const TPUT_SIZES: &[u64] = &[
@@ -201,7 +199,8 @@ pub(crate) fn generate() {
             snd_label: "snd CPU%",
             rcv_label: "rcv CPU%",
         };
-        draw_throughput_dual_panel_fixed_2m_msgs_with_versions(&spec, &tput, &msgs, &columns)
+        let style = DualPanelStyle::FIXED_2M_MSGS_WITH_VERSIONS;
+        draw_throughput_dual_panel(&spec, &tput, &msgs, &columns, style)
             .expect("draw pushpull chart");
         eprintln!("Written: {}", out.display());
     }
@@ -221,7 +220,7 @@ pub(crate) fn generate() {
             snd_label: "snd CPU%",
             rcv_label: "",
         };
-        draw_throughput_dual_panel_with_versions(&spec, &tput, &msgs, &columns)
+        draw_throughput_dual_panel(&spec, &tput, &msgs, &columns, DualPanelStyle::WITH_VERSIONS)
             .expect("draw pubsub chart");
         eprintln!("Written: {}", out.display());
     }
@@ -236,7 +235,8 @@ pub(crate) fn generate() {
             sizes: LAT_SIZES,
             impls: REQREP_IMPLS,
         };
-        draw_latency_single_panel_with_versions(&spec, &lat, &cpu).expect("draw reqrep chart");
+        let layout = LatencyLayout::up_to_250us_with_versions();
+        draw_latency_single_panel(&spec, &lat, &cpu, layout).expect("draw reqrep chart");
         eprintln!("Written: {}", out.display());
     }
 }

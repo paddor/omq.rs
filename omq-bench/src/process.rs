@@ -9,6 +9,18 @@ use std::time::{Duration, Instant};
 // Optional legacy affinity masks. Disabled unless OMQ_BENCH_TASKSET is set.
 pub(crate) const MEASURED_CPU: &str = "1-2";
 pub(crate) const OTHER_CPU: &str = "3-4";
+/// `cpu_affinity` recorded when `OMQ_BENCH_TASKSET` pins sender and receiver.
+pub(crate) const TASKSET_AFFINITY: &str = "sender=1-2,receiver=3-4";
+
+/// The `cpu_affinity` value for a new row: pinned or `unbound`.
+pub(crate) fn affinity_label() -> &'static str {
+    if std::env::var_os("OMQ_BENCH_TASKSET").is_some() {
+        TASKSET_AFFINITY
+    } else {
+        "unbound"
+    }
+}
+
 const MAX_PROC_LIFETIME: Duration = Duration::from_mins(1);
 
 static LIVE_PROCS: OnceLock<Mutex<HashMap<u32, Instant>>> = OnceLock::new();
@@ -378,20 +390,34 @@ pub(crate) fn capture(
     proc.wait_with_output(timeout)
 }
 
+/// Capture timeout for a peer that measures for `duration` seconds.
+pub(crate) fn peer_timeout(duration: f64) -> Duration {
+    Duration::from_secs(duration as u64 + 30)
+}
+
 /// Read CPU time (user + system) for a process from /proc.
 pub(crate) fn read_proc_cpu(pid: u32) -> f64 {
     let path = format!("/proc/{pid}/stat");
     let Ok(contents) = std::fs::read_to_string(&path) else {
         return 0.0;
     };
-    let fields: Vec<&str> = contents.split_whitespace().collect();
-    if fields.len() < 15 {
+    stat_cpu_ticks(&contents) / clk_tck()
+}
+
+/// User plus system clock ticks from a `/proc/<pid>/stat` line. `comm` may
+/// hold spaces or parentheses, so fields are counted after the last `)`.
+fn stat_cpu_ticks(contents: &str) -> f64 {
+    let Some((_, counters)) = contents.rsplit_once(')') else {
+        return 0.0;
+    };
+    // Field 3 (state) is index 0; utime and stime are fields 14 and 15.
+    let fields: Vec<&str> = counters.split_whitespace().collect();
+    if fields.len() < 13 {
         return 0.0;
     }
-    let utime: f64 = fields[13].parse().unwrap_or(0.0);
-    let stime: f64 = fields[14].parse().unwrap_or(0.0);
-    let clk_tck = clk_tck();
-    (utime + stime) / clk_tck
+    let utime: f64 = fields[11].parse().unwrap_or(0.0);
+    let stime: f64 = fields[12].parse().unwrap_or(0.0);
+    utime + stime
 }
 
 fn clk_tck() -> f64 {
@@ -450,6 +476,15 @@ impl WaitTimeout for Child {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stat_cpu_ticks_handles_spaces_and_parens_in_comm() {
+        let rest = "S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16";
+        assert_eq!(stat_cpu_ticks(&format!("42 (peer) {rest}")), 23.0);
+        assert_eq!(stat_cpu_ticks(&format!("42 (my peer) {rest}")), 23.0);
+        assert_eq!(stat_cpu_ticks(&format!("42 (a) (b c)) {rest}")), 23.0);
+        assert_eq!(stat_cpu_ticks("42 (peer) S 1"), 0.0);
+    }
 
     #[test]
     fn uses_reported_executable_without_assuming_target_directory() {

@@ -1,19 +1,24 @@
+use super::fan_out::fanout_frame_chunks;
 use super::*;
-use omq_proto::fan_out_frame::{build_fan_out_frame, clear_fan_out_frame};
+use omq_proto::fan_out_frame::{FanOutCost, FanOutEncoder, FanOutFrame};
 use tokio::time::{Duration, timeout};
+
+const ONE_PEER: FanOutCost = FanOutCost {
+    targets: 1,
+    copy_budget: 8 * 1024,
+};
 
 fn test_slot() -> Arc<PeerTransmitSlot> {
     let slot = PeerTransmitSlot::with_config(1, SlotConfig::default());
-    slot.handshake_done.store(true, Ordering::Release);
+    slot.mark_handshake_done();
     slot
 }
 
 fn fanout_bytes(msg: &Message) -> Bytes {
-    let mut eq = FrameBuffer::one_shot();
-    let mut chunks = Vec::new();
-    let frame = build_fan_out_frame(&mut eq, msg, &mut chunks, 1, 8 * 1024);
+    let mut encoder = FanOutEncoder::new();
+    let frame = encoder.build(msg, ONE_PEER);
     let wire: Vec<u8> = fanout_frame_chunks(&frame).concat();
-    clear_fan_out_frame(&mut eq, &mut chunks);
+    encoder.clear();
     Bytes::from(wire)
 }
 
@@ -114,18 +119,17 @@ fn fanout_drop_oldest_slot_keeps_newest_messages() {
             ..SlotConfig::default()
         },
     );
-    slot.handshake_done.store(true, Ordering::Release);
+    slot.mark_handshake_done();
 
     let first = Message::single("first");
     let second = Message::single("second");
     let third = Message::single("third");
 
-    let mut eq = FrameBuffer::one_shot();
-    let mut chunks = Vec::new();
+    let mut encoder = FanOutEncoder::new();
     for msg in [&first, &second, &third] {
-        let frame = build_fan_out_frame(&mut eq, msg, &mut chunks, 1, 8 * 1024);
+        let frame = encoder.build(msg, ONE_PEER);
         assert_eq!(slot.try_push_fanout_drop_oldest(&frame), TryFrameResult::Ok);
-        clear_fan_out_frame(&mut eq, &mut chunks);
+        encoder.clear();
     }
 
     let mut actual = Vec::new();
@@ -142,25 +146,24 @@ fn fanout_drop_oldest_slot_keeps_protected_entry() {
             ..SlotConfig::default()
         },
     );
-    slot.handshake_done.store(true, Ordering::Release);
+    slot.mark_handshake_done();
 
     let dict = Message::single("dict");
     let payload = Message::single("payload");
-    let mut eq = FrameBuffer::one_shot();
-    let mut chunks = Vec::new();
-    let dict_frame = build_fan_out_frame(&mut eq, &dict, &mut chunks, 1, 8 * 1024);
+    let mut encoder = FanOutEncoder::new();
+    let dict_frame = encoder.build(&dict, ONE_PEER);
     assert_eq!(
         slot.try_push_protected_fanout_drop_oldest(&dict_frame),
         TryFrameResult::Ok
     );
-    clear_fan_out_frame(&mut eq, &mut chunks);
+    encoder.clear();
 
-    let payload_frame = build_fan_out_frame(&mut eq, &payload, &mut chunks, 1, 8 * 1024);
+    let payload_frame = encoder.build(&payload, ONE_PEER);
     assert_eq!(
         slot.try_push_fanout_drop_oldest(&payload_frame),
         TryFrameResult::Full
     );
-    clear_fan_out_frame(&mut eq, &mut chunks);
+    encoder.clear();
 
     let mut actual = Vec::new();
     slot.drain(&mut actual, 1024);
@@ -177,18 +180,17 @@ fn fanout_drop_oldest_shares_large_bodies_and_evicts_whole_messages() {
             ..SlotConfig::default()
         },
     );
-    slot.handshake_done.store(true, Ordering::Release);
+    slot.mark_handshake_done();
     let bodies: Vec<Bytes> = (0..3u8)
         .map(|tag| Bytes::from(vec![tag; 64 * 1024]))
         .collect();
 
-    let mut eq = FrameBuffer::one_shot();
-    let mut chunks = Vec::new();
+    let mut encoder = FanOutEncoder::new();
     for body in &bodies {
         let msg = Message::single(body.clone());
-        let frame = build_fan_out_frame(&mut eq, &msg, &mut chunks, 1, 8 * 1024);
+        let frame = encoder.build(&msg, ONE_PEER);
         assert_eq!(slot.try_push_fanout_drop_oldest(&frame), TryFrameResult::Ok);
-        clear_fan_out_frame(&mut eq, &mut chunks);
+        encoder.clear();
     }
     let mut actual = Vec::new();
     slot.drain(&mut actual, 1024);

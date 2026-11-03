@@ -1,6 +1,9 @@
 //! LZ4 arena marker and sender configuration.
 
-pub(super) use super::super::arena::{DecodedArena, HEADER};
+pub(super) use super::super::arena::{
+    ArenaHeader, DecodedArena, HEADER, PendingArena, check_batch, encode_header, invalid_envelope,
+    parse_header,
+};
 pub use super::super::arena::{
     MAX_ARENA_BYTES, MAX_ARENA_MESSAGES, MAX_ARENA_PARTS, arena_message_size,
 };
@@ -11,30 +14,17 @@ pub(super) const SENTINEL: [u8; 4] = *b"LZ4A";
 #[must_use]
 pub fn arena_capacity() -> usize {
     static CAPACITY: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *CAPACITY.get_or_init(|| {
-        std::env::var("OMQ_LZ4_ARENA_BYTES")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(16 * 1024)
-            .min(MAX_ARENA_BYTES)
-    })
+    *CAPACITY
+        .get_or_init(|| super::super::arena::capacity_from_env("OMQ_LZ4_ARENA_BYTES", 16 * 1024))
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::{Lz4Decoder, Lz4Encoder, is_dict_shipment};
     use super::*;
+    use crate::proto::transform::arena::raw_arena;
     use crate::{Error, Message};
     use bytes::Bytes;
-
-    fn raw(body: &[u8], count: u32) -> Message {
-        let mut bytes = Vec::from(SENTINEL);
-        bytes.extend_from_slice(&[0; 4]);
-        bytes.extend_from_slice(&u32::try_from(body.len()).unwrap().to_le_bytes());
-        bytes.extend_from_slice(&count.to_le_bytes());
-        bytes.extend_from_slice(body);
-        Message::single(bytes)
-    }
 
     fn decode(decoder: &mut Lz4Decoder, wire: Message) -> Vec<Message> {
         let mut messages: Vec<_> = decoder.decode(wire).unwrap().into_iter().collect();
@@ -99,7 +89,7 @@ mod tests {
             decoder.decode_with_payload_slots(wire, None),
             Err(Error::MessageTooLarge { .. })
         ));
-        let bad = raw(&[0, 1, b'a', 1, 1, b'b', 0, 1, b'c'], 2);
+        let bad = raw_arena(SENTINEL, &[0, 1, b'a', 1, 1, b'b', 0, 1, b'c'], 2);
         assert!(
             Lz4Decoder::new()
                 .with_max_message_size(Some(1))
@@ -111,19 +101,19 @@ mod tests {
     #[test]
     fn arena_rejects_bad_headers_frames_and_trailing_data_before_delivery() {
         for wire in [
-            raw(&[1, 0], 1),
-            raw(&[4, 0], 1),
-            raw(&[8, 0], 1),
-            raw(&[0, 2, b'a'], 1),
-            raw(&[2, 0], 1),
-            raw(&[0, 0, 0], 1),
-            raw(&[0, 0], 0),
-            raw(&[0, 0], 2),
-            raw(&[], 1),
+            raw_arena(SENTINEL, &[1, 0], 1),
+            raw_arena(SENTINEL, &[4, 0], 1),
+            raw_arena(SENTINEL, &[8, 0], 1),
+            raw_arena(SENTINEL, &[0, 2, b'a'], 1),
+            raw_arena(SENTINEL, &[2, 0], 1),
+            raw_arena(SENTINEL, &[0, 0, 0], 1),
+            raw_arena(SENTINEL, &[0, 0], 0),
+            raw_arena(SENTINEL, &[0, 0], 2),
+            raw_arena(SENTINEL, &[], 1),
         ] {
             assert!(Lz4Decoder::new().decode(wire).is_err());
         }
-        let valid = raw(&[0, 0, 0, 0], 2).part_bytes(0).unwrap();
+        let valid = raw_arena(SENTINEL, &[0, 0, 0, 0], 2).part_bytes(0).unwrap();
         for (offset, value) in [(4, 2), (5, 1), (6, 1), (7, 1), (10, 2), (15, 1)] {
             let mut bytes = valid.to_vec();
             bytes[offset] = value;
@@ -143,7 +133,7 @@ mod tests {
         );
         assert!(
             Lz4Decoder::new()
-                .decode(raw(&vec![0; 2 * (MAX_ARENA_PARTS + 1)], 2))
+                .decode(raw_arena(SENTINEL, &vec![0; 2 * (MAX_ARENA_PARTS + 1)], 2))
                 .is_err()
         );
     }

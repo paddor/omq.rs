@@ -1,10 +1,10 @@
 //! Multi-socket PUSH/PULL modes with per-socket counts.
 
-use super::payload::bench_payload;
 use super::{
-    bench_options_client, cpu_time_secs, drain_warmup, multi_pull_drain_batch, quantile, send_fast,
-    wait_for_start_barrier,
+    RecvWindow, bench_options_client, cpu_time_secs, drain_warmup, multi_pull_drain_batch,
+    quantile, send_fast, wait_for_start_barrier,
 };
+use crate::json_payload::bench_payload;
 use omq_tokio::{Endpoint, Message, SocketType, blocking};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -47,7 +47,12 @@ pub(super) fn run_multi_pull(
     let per_socket: Vec<u64> = handles.into_iter().map(|h| h.join().unwrap()).collect();
     let cpu = cpu_time_secs() - cpu_before;
 
-    print_multi_pull(&per_socket, elapsed, size, cpu);
+    RecvWindow {
+        per_socket,
+        elapsed,
+        cpu,
+    }
+    .print_multi_pull(size);
 }
 
 /// One drain thread per socket. Each counts messages received in whole
@@ -89,41 +94,6 @@ fn spawn_pull_drainers(
             })
         })
         .collect()
-}
-
-/// Print totals, per-socket rate spread and quantiles, then every rate.
-#[expect(clippy::cast_precision_loss)]
-fn print_multi_pull(per_socket: &[u64], elapsed: f64, size: usize, cpu: f64) {
-    let socket_count = per_socket.len();
-    let total: u64 = per_socket.iter().sum();
-    let per_min = per_socket.iter().copied().min().unwrap_or(0);
-    let per_max = per_socket.iter().copied().max().unwrap_or(0);
-    let per_min_rate = per_min as f64 / elapsed;
-    let per_max_rate = per_max as f64 / elapsed;
-    let mut rates: Vec<f64> = per_socket
-        .iter()
-        .map(|&count| count as f64 / elapsed)
-        .collect();
-    rates.sort_unstable_by(f64::total_cmp);
-    println!(
-        "{total} {elapsed:.6} {size} {cpu:.6} {socket_count} {per_min_rate:.1} \
-         {per_max_rate:.1} {:.1} {:.1} {:.1} {:.1} {:.1}",
-        quantile(&rates, 0.10),
-        quantile(&rates, 0.25),
-        quantile(&rates, 0.50),
-        quantile(&rates, 0.75),
-        quantile(&rates, 0.90),
-    );
-    print!(" ");
-    for rate in &rates {
-        print!("{rate:.1} ");
-    }
-    println!();
-    eprintln!(
-        "multi-pull: {socket_count} sockets, {:.0} msg/s total, \
-         per-socket [{per_min_rate:.0}, {per_max_rate:.0}] msg/s",
-        total as f64 / elapsed,
-    );
 }
 
 #[allow(clippy::needless_pass_by_value)]

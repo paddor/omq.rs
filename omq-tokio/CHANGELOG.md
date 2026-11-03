@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** `engine::ConnectionDriver::with_config` is replaced by the
+  `with_driver_config` builder step after `ConnectionDriver::new`.
+- **Breaking:** `Endpoint::without_compression` replaces
+  `Endpoint::underlying_tcp` and `underlying_ws`; `Endpoint::rewrap` replaces
+  `rewrap_tcp` and `rewrap_ws` (re-exported from omq-proto).
+
+### Fixed
+
+- A DART peer attaching after socket close or last-handle drop gets a
+  closed receive queue, like wire peers, instead of filling an unread one.
+- A blocking SERVER send no longer waits on a stale queue signal when the
+  peer's send queue changes while it is full.
+- A hostname that resolves to no addresses fails `bind`, and UDP or DART
+  `connect`, with `Error::Io` like other DNS failures, instead of
+  `Error::InvalidEndpoint`. Only `bind` and `connect` report it; reconnects
+  keep retrying.
+
 ## [0.33.0] - 2026-10-29
 
 ### Added

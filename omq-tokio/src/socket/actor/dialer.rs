@@ -8,13 +8,19 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use super::{AnyConn, Endpoint, Error, InprocPeerSnapshot, InternalEvent, MonitorEvent, Result};
-use crate::socket::dispatch::connect_any;
+use super::{AnyConn, Endpoint, Error, InternalEvent, MonitorEvent, Result};
+use crate::socket::dispatch::{InprocSetup, connect_any};
 use crate::socket::monitor::MonitorPublisher;
 use crate::transport::Canceled;
 use crate::transport::backoff::{DialRetry, dial_with_backoff_from};
-use crate::transport::inproc::{InprocRegistry, RecvConfig};
-use crate::transport::setup::DialSetup;
+use crate::transport::setup::{DialSetup, PendingHandshake};
+
+/// Setup budget carried from DNS resolution into a dialer's first attempt.
+#[derive(Default)]
+pub(super) struct FirstAttempt {
+    pub(super) deadline: Option<std::time::Instant>,
+    pub(super) admission: Option<PendingHandshake>,
+}
 
 pub(super) struct DialTask {
     pub(super) endpoint: Endpoint,
@@ -23,12 +29,9 @@ pub(super) struct DialTask {
     pub(super) cancel: CancellationToken,
     pub(super) tx: mpsc::Sender<InternalEvent>,
     pub(super) monitor: MonitorPublisher,
-    pub(super) snapshot: InprocPeerSnapshot,
-    pub(super) recv: RecvConfig,
-    pub(super) registry: Arc<InprocRegistry>,
+    pub(super) inproc: InprocSetup,
     pub(super) setup: DialSetup,
-    pub(super) first_deadline: Option<std::time::Instant>,
-    pub(super) first_admission: Option<crate::transport::setup::PendingHandshake>,
+    pub(super) first: FirstAttempt,
     pub(super) failed_attempts: Arc<AtomicU32>,
     #[cfg_attr(not(feature = "quic"), expect(dead_code))]
     pub(super) io_pool: crate::context::IoPoolHandle,
@@ -36,8 +39,7 @@ pub(super) struct DialTask {
 
 impl DialTask {
     pub(super) async fn run(mut self) {
-        let mut first_deadline = self.first_deadline;
-        let mut first_admission = self.first_admission.take();
+        let mut first = std::mem::take(&mut self.first);
         // A redial carries its failed attempts so a peer lost before READY
         // keeps growing its backoff instead of retrying at once.
         let retry = DialRetry {
@@ -47,7 +49,7 @@ impl DialTask {
         };
 
         let result = dial_with_backoff_from(
-            || self.attempt(first_deadline.take(), first_admission.take()),
+            || self.attempt(std::mem::take(&mut first)),
             retry,
             &self.cancel,
             |retry_in, attempt| {
@@ -67,7 +69,6 @@ impl DialTask {
                     biased;
                     () = self.cancel.cancelled() => {}
                     _ = self.tx.send(InternalEvent::ConnectGaveUp {
-                        endpoint: self.endpoint,
                         route_id: self.route_id,
                     }) => {}
                 }
@@ -75,24 +76,18 @@ impl DialTask {
         }
     }
 
-    async fn attempt(
-        &self,
-        first_deadline: Option<std::time::Instant>,
-        first_admission: Option<crate::transport::setup::PendingHandshake>,
-    ) -> Result<()> {
+    async fn attempt(&self, first: FirstAttempt) -> Result<()> {
         // Fix the absolute deadline once so carriers can enforce it after
         // their transport handshake completes.
-        let deadline = self.setup.deadline(first_deadline)?;
+        let deadline = self.setup.deadline(first.deadline)?;
         let (mut conn, state) = match self
             .setup
             .run_until(
                 deadline,
-                first_admission,
+                first.admission,
                 connect_any(
-                    &self.registry,
                     &self.endpoint,
-                    &self.snapshot,
-                    &self.recv,
+                    &self.inproc,
                     #[cfg(any(feature = "ws", feature = "quic"))]
                     crate::socket::dispatch::CarrierConnect {
                         options: &self.options,

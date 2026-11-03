@@ -126,6 +126,28 @@ impl SocketPair {
     }
 }
 
+/// Sorts the round trips and prints the latency line the runner parses:
+/// p50, p99, p99.9 and max in microseconds, iterations, CPU seconds (a
+/// literal `0` when not measured), and elapsed seconds.
+pub(crate) fn print_rtts(mut rtts: Vec<u64>, iterations: usize, cpu: Option<f64>, elapsed: f64) {
+    rtts.sort_unstable();
+    let p50 = percentile(&rtts, 50.0);
+    let p99 = percentile(&rtts, 99.0);
+    let p999 = percentile(&rtts, 99.9);
+    let max = percentile(&rtts, 100.0);
+    let cpu = cpu.map_or_else(|| "0".to_owned(), |cpu| format!("{cpu:.6}"));
+    println!("{p50:.3} {p99:.3} {p999:.3} {max:.3} {iterations} {cpu} {elapsed:.6}");
+}
+
+/// Percentile `p` of ascending nanosecond samples, in microseconds.
+fn percentile(sorted: &[u64], p: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let idx = ((sorted.len() as f64 * p / 100.0) as usize).min(sorted.len() - 1);
+    sorted[idx] as f64 / 1_000.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -75,12 +75,9 @@ impl ShmStream {
     fn poll_preface(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         // Fixed 24-byte setup work; partial writes preserve their cursor.
         while self.sent < self.send.len() {
-            let written = std::task::ready!(poll_send(
-                &self.stream,
-                &self.state,
-                cx,
-                &[io::IoSlice::new(&self.send[self.sent..])]
-            ))?;
+            let written = std::task::ready!(
+                self.poll_send(cx, &[io::IoSlice::new(&self.send[self.sent..])])
+            )?;
             if written == 0 {
                 return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
             }
@@ -96,39 +93,16 @@ impl ShmStream {
     ) -> Poll<io::Result<usize>> {
         // Retry only a bounded number of stale notifier permits in one poll.
         for _ in 0..SIGNAL_POLL_LIMIT {
-            if self
-                .state
-                .lock()
-                .expect("SHM connection")
-                .has_pending_descriptors()
-            {
-                std::task::ready!(poll_send(
-                    &self.stream,
-                    &self.state,
-                    cx,
-                    &[io::IoSlice::new(&[0])]
-                ))?;
+            if self.conn().has_pending_descriptors() {
+                std::task::ready!(self.poll_send(cx, &[io::IoSlice::new(&[0])]))?;
             }
-            match self
-                .state
-                .lock()
-                .expect("SHM connection")
-                .try_write_carrier(bytes)
-            {
+            match self.conn().try_write_carrier(bytes) {
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
                 result => return Poll::Ready(result),
             }
-            self.state
-                .lock()
-                .expect("SHM connection")
-                .arm_carrier_write();
+            self.conn().arm_carrier_write();
             // The arm/recheck pair closes the space and registration wake race.
-            match self
-                .state
-                .lock()
-                .expect("SHM connection")
-                .try_write_carrier(bytes)
-            {
+            match self.conn().try_write_carrier(bytes) {
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
                 result => return Poll::Ready(result),
             }
@@ -144,12 +118,7 @@ impl ShmStream {
         bytes: &mut [u8],
     ) -> Poll<io::Result<usize>> {
         for _ in 0..SIGNAL_POLL_LIMIT {
-            match self
-                .state
-                .lock()
-                .expect("SHM connection")
-                .try_read_carrier(bytes)
-            {
+            match self.conn().try_read_carrier(bytes) {
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
                 result => return Poll::Ready(result),
             }
@@ -162,12 +131,7 @@ impl ShmStream {
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                 Poll::Pending => {}
             }
-            if self
-                .state
-                .lock()
-                .expect("SHM connection")
-                .arm_carrier_read()?
-            {
+            if self.conn().arm_carrier_read()? {
                 continue;
             }
             std::task::ready!(poll_signal(
@@ -183,10 +147,7 @@ impl ShmStream {
         std::task::ready!(self.stream.poll_read_ready(cx))?;
         let mut control = [0; CONTROL_READ_BYTES];
         let received = self.stream.try_io(Interest::READABLE, || {
-            self.state
-                .lock()
-                .expect("SHM connection")
-                .try_read(&self.stream, &mut control)
+            self.conn().try_read(&self.stream, &mut control)
         })?;
         if control[..received].iter().any(|&byte| byte != 0) {
             return Poll::Ready(Err(io::ErrorKind::InvalidData.into()));
@@ -197,14 +158,48 @@ impl ShmStream {
     fn read_before_eof(&self, bytes: &mut [u8]) -> io::Result<usize> {
         // Publication can race the empty read above. Drain the final published
         // bytes before reporting orderly EOF.
-        match self
-            .state
-            .lock()
-            .expect("SHM connection")
-            .try_read_carrier(bytes)
-        {
+        match self.conn().try_read_carrier(bytes) {
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(0),
             result => result,
+        }
+    }
+
+    fn conn(&self) -> std::sync::MutexGuard<'_, omq_shm::Connection> {
+        self.state.lock().expect("SHM connection")
+    }
+
+    fn poll_send(
+        &self,
+        cx: &mut Context<'_>,
+        bytes: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        loop {
+            std::task::ready!(self.stream.poll_write_ready(cx))?;
+            match self.stream.try_io(Interest::WRITABLE, || {
+                self.conn().try_write(&self.stream, bytes)
+            }) {
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                result => return Poll::Ready(result),
+            }
+        }
+    }
+
+    /// Read more of the peer's preface into `receive`.
+    fn poll_receive_preface(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<usize>> {
+        let stream = &self.stream;
+        let state = &self.state;
+        let unread = &mut self.receive[self.received..];
+        loop {
+            std::task::ready!(stream.poll_read_ready(cx))?;
+            match stream.try_io(Interest::READABLE, || {
+                state
+                    .lock()
+                    .expect("SHM connection")
+                    .try_read(stream, unread)
+            }) {
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                result => return Poll::Ready(result),
+            }
         }
     }
 }
@@ -228,46 +223,6 @@ fn poll_signal(signal: &AsyncFd<Arc<File>>, cx: &mut Context<'_>) -> Poll<io::Re
     }
 }
 
-fn poll_send(
-    stream: &UnixStream,
-    state: &ShmState,
-    cx: &mut Context<'_>,
-    bytes: &[io::IoSlice<'_>],
-) -> Poll<io::Result<usize>> {
-    loop {
-        std::task::ready!(stream.poll_write_ready(cx))?;
-        match stream.try_io(Interest::WRITABLE, || {
-            state
-                .lock()
-                .expect("SHM connection")
-                .try_write(stream, bytes)
-        }) {
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-            result => return Poll::Ready(result),
-        }
-    }
-}
-
-fn poll_receive(
-    stream: &UnixStream,
-    state: &ShmState,
-    cx: &mut Context<'_>,
-    bytes: &mut [u8],
-) -> Poll<io::Result<usize>> {
-    loop {
-        std::task::ready!(stream.poll_read_ready(cx))?;
-        match stream.try_io(Interest::READABLE, || {
-            state
-                .lock()
-                .expect("SHM connection")
-                .try_read(stream, bytes)
-        }) {
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-            result => return Poll::Ready(result),
-        }
-    }
-}
-
 impl AsyncRead for ShmStream {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -279,12 +234,7 @@ impl AsyncRead for ShmStream {
             return Poll::Ready(Ok(()));
         }
         if this.received < this.receive.len() {
-            let received = std::task::ready!(poll_receive(
-                &this.stream,
-                &this.state,
-                cx,
-                &mut this.receive[this.received..]
-            ))?;
+            let received = std::task::ready!(this.poll_receive_preface(cx))?;
             if received == 0 {
                 return Poll::Ready(Err(io::ErrorKind::UnexpectedEof.into()));
             }
@@ -293,14 +243,9 @@ impl AsyncRead for ShmStream {
                 cx.waker().wake_by_ref();
                 return Poll::Pending;
             }
-            this.state
-                .lock()
-                .expect("SHM connection")
-                .accept_preface(&this.receive)?;
+            this.conn().accept_preface(&this.receive)?;
             let signal = this
-                .state
-                .lock()
-                .expect("SHM connection")
+                .conn()
                 .carrier_reader_signal()
                 .ok_or(io::ErrorKind::InvalidData)?;
             this.reader_signal = Some(register_signal(signal)?);

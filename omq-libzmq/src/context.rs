@@ -10,26 +10,48 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use omq_tokio::engine::StateSignal;
 use tokio::runtime::Handle;
 
+use crate::error::c_try;
 use crate::notify::NotifyHandle;
+use crate::opts::OptOut;
 
 /// Per-context: lazily-created `omq_tokio::Context` and ZMQ state.
 pub(crate) struct OmqContext {
     pub(crate) ctx: OnceLock<omq_tokio::Context>,
-    pub(crate) configured_io_threads: AtomicI32,
     pub terminated: Arc<AtomicBool>,
     shutdown_signal: StateSignal,
     pub socket_count: AtomicI32,
     work_count: AtomicI32,
     socket_notify: (Mutex<()>, Condvar),
     sockets: Mutex<Vec<Weak<crate::socket::OmqSocket>>>,
-    pub max_sockets: AtomicI32,
-    pub max_msg_size: AtomicI64,
-    pub ipv6: AtomicBool,
-    pub blocky: AtomicBool,
-    pub zero_copy_recv: AtomicBool,
-    thread_name_prefix: Mutex<Option<String>>,
+    pub(crate) options: ContextOptions,
     pub(crate) zap: Arc<crate::zap::ZapService>,
     owns_io_context: bool,
+}
+
+/// Values set through `zmq_ctx_set` and `zmq_ctx_set_ext`.
+pub(crate) struct ContextOptions {
+    pub(crate) configured_io_threads: AtomicI32,
+    pub(crate) max_sockets: AtomicI32,
+    pub(crate) max_msg_size: AtomicI64,
+    pub(crate) ipv6: AtomicBool,
+    pub(crate) blocky: AtomicBool,
+    pub(crate) zero_copy_recv: AtomicBool,
+    thread_name_prefix: Mutex<Option<String>>,
+}
+
+impl Default for ContextOptions {
+    /// libzmq defaults.
+    fn default() -> Self {
+        Self {
+            configured_io_threads: AtomicI32::new(1),
+            max_sockets: AtomicI32::new(1023),
+            max_msg_size: AtomicI64::new(-1),
+            ipv6: AtomicBool::new(false),
+            blocky: AtomicBool::new(true),
+            zero_copy_recv: AtomicBool::new(true),
+            thread_name_prefix: Mutex::new(None),
+        }
+    }
 }
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -55,47 +77,32 @@ pub(crate) fn next_socket_id() -> u64 {
 }
 
 impl OmqContext {
-    fn new(n_io_threads: usize) -> Arc<Self> {
-        let n = n_io_threads;
-        Arc::new(Self {
+    fn build(io_threads: i32, owns_io_context: bool) -> Self {
+        Self {
             ctx: OnceLock::new(),
-            configured_io_threads: AtomicI32::new(i32::try_from(n).unwrap_or(i32::MAX)),
             terminated: Arc::new(AtomicBool::new(false)),
             shutdown_signal: StateSignal::new(),
             socket_count: AtomicI32::new(0),
             work_count: AtomicI32::new(0),
             socket_notify: (Mutex::new(()), Condvar::new()),
             sockets: Mutex::new(Vec::new()),
-            max_sockets: AtomicI32::new(1023),
-            max_msg_size: AtomicI64::new(-1),
-            ipv6: AtomicBool::new(false),
-            blocky: AtomicBool::new(true),
-            zero_copy_recv: AtomicBool::new(true),
-            thread_name_prefix: Mutex::new(None),
+            options: ContextOptions {
+                configured_io_threads: AtomicI32::new(io_threads),
+                ..ContextOptions::default()
+            },
             zap: Arc::new(crate::zap::ZapService::default()),
-            owns_io_context: true,
-        })
+            owns_io_context,
+        }
+    }
+
+    fn new(n_io_threads: usize) -> Arc<Self> {
+        let io_threads = i32::try_from(n_io_threads).unwrap_or(i32::MAX);
+        Arc::new(Self::build(io_threads, true))
     }
 
     fn from_io_context(ctx: omq_tokio::Context) -> Arc<Self> {
-        let out = Arc::new(Self {
-            ctx: OnceLock::new(),
-            configured_io_threads: AtomicI32::new(i32::try_from(ctx.io_threads()).unwrap_or(1)),
-            terminated: Arc::new(AtomicBool::new(false)),
-            shutdown_signal: StateSignal::new(),
-            socket_count: AtomicI32::new(0),
-            work_count: AtomicI32::new(0),
-            socket_notify: (Mutex::new(()), Condvar::new()),
-            sockets: Mutex::new(Vec::new()),
-            max_sockets: AtomicI32::new(1023),
-            max_msg_size: AtomicI64::new(-1),
-            ipv6: AtomicBool::new(false),
-            blocky: AtomicBool::new(true),
-            zero_copy_recv: AtomicBool::new(true),
-            thread_name_prefix: Mutex::new(None),
-            zap: Arc::new(crate::zap::ZapService::default()),
-            owns_io_context: false,
-        });
+        let io_threads = i32::try_from(ctx.io_threads()).unwrap_or(1);
+        let out = Arc::new(Self::build(io_threads, false));
         out.ctx
             .set(ctx)
             .expect("new imported context should be empty");
@@ -115,8 +122,13 @@ impl OmqContext {
         }
         // ZMQ_IO_THREADS=0 still runs one IO thread for connection setup,
         // the control plane, and receive paths that need a relay task.
-        let n = self.configured_io_threads.load(Ordering::Acquire).max(1);
+        let n = self
+            .options
+            .configured_io_threads
+            .load(Ordering::Acquire)
+            .max(1);
         let thread_name_prefix = self
+            .options
             .thread_name_prefix
             .lock()
             .expect("thread name prefix poisoned");
@@ -134,6 +146,7 @@ impl OmqContext {
 
     fn set_thread_name_prefix(&self, prefix: String) -> Result<(), ()> {
         let mut stored = self
+            .options
             .thread_name_prefix
             .lock()
             .expect("thread name prefix poisoned");
@@ -145,7 +158,8 @@ impl OmqContext {
     }
 
     fn thread_name_prefix(&self) -> String {
-        self.thread_name_prefix
+        self.options
+            .thread_name_prefix
             .lock()
             .expect("thread name prefix poisoned")
             .clone()
@@ -228,10 +242,16 @@ impl std::fmt::Debug for OmqContext {
             .field("terminated", &self.terminated.load(Ordering::Relaxed))
             .field("socket_count", &self.socket_count.load(Ordering::Relaxed))
             .field("work_count", &self.work_count.load(Ordering::Relaxed))
-            .field("max_sockets", &self.max_sockets.load(Ordering::Relaxed))
-            .field("max_msg_size", &self.max_msg_size.load(Ordering::Relaxed))
-            .field("ipv6", &self.ipv6.load(Ordering::Relaxed))
-            .field("blocky", &self.blocky.load(Ordering::Relaxed))
+            .field(
+                "max_sockets",
+                &self.options.max_sockets.load(Ordering::Relaxed),
+            )
+            .field(
+                "max_msg_size",
+                &self.options.max_msg_size.load(Ordering::Relaxed),
+            )
+            .field("ipv6", &self.options.ipv6.load(Ordering::Relaxed))
+            .field("blocky", &self.options.blocky.load(Ordering::Relaxed))
             .finish_non_exhaustive()
     }
 }
@@ -273,14 +293,8 @@ pub extern "C" fn zmq_init(io_threads: c_int) -> *mut libc::c_void {
 /// Stop context activity and wake blocked socket calls without releasing the context handle.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_ctx_shutdown(ctx_ptr: *mut libc::c_void) -> c_int {
-    if ctx_ptr.is_null() {
-        return crate::error::fail(libc::EFAULT);
-    }
     // SAFETY: C callers pass null or a pointer from this API.
-    let ctx = match unsafe { crate::handle::context(ctx_ptr) } {
-        Ok(ctx) => ctx,
-        Err(errno) => return crate::error::fail(errno),
-    };
+    let ctx = c_try!(unsafe { crate::handle::context(ctx_ptr) });
     ctx.shutdown();
     0
 }
@@ -298,10 +312,7 @@ pub extern "C" fn zmq_ctx_term(ctx_ptr: *mut libc::c_void) -> c_int {
     // SAFETY: the handle stays valid until this call frees it below. Other
     // threads may still pass it to zmq_socket or zmq_ctx_get while term
     // waits; they must see ETERM.
-    let arc = match unsafe { crate::handle::context(ctx_ptr) } {
-        Ok(ctx) => ctx.clone(),
-        Err(errno) => return crate::error::fail(errno),
-    };
+    let arc = c_try!(unsafe { crate::handle::context(ctx_ptr) }).clone();
 
     // Signal termination to all io threads and wake blocking socket calls.
     arc.shutdown();
@@ -346,10 +357,7 @@ pub extern "C" fn omq_ctx_share_key(
         return crate::error::fail(libc::EFAULT);
     }
     // SAFETY: C callers pass null or a pointer from this API.
-    let ctx = match unsafe { crate::handle::context(ctx_ptr) } {
-        Ok(ctx) => ctx,
-        Err(errno) => return crate::error::fail(errno),
-    };
+    let ctx = c_try!(unsafe { crate::handle::context(ctx_ptr) });
     if ctx.is_effectively_terminated() {
         return crate::error::fail(crate::error::ETERM);
     }
@@ -403,39 +411,39 @@ const ZMQ_BLOCKY: c_int = 70;
 /// Set an integer context option; return zero on success or -1 with errno on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_ctx_set(ctx_ptr: *mut libc::c_void, option: c_int, value: c_int) -> c_int {
-    if ctx_ptr.is_null() {
-        return crate::error::fail(libc::EFAULT);
-    }
     // SAFETY: C callers pass null or a pointer from this API.
-    let ctx = match unsafe { crate::handle::context(ctx_ptr) } {
-        Ok(ctx) => ctx,
-        Err(errno) => return crate::error::fail(errno),
-    };
+    let ctx = c_try!(unsafe { crate::handle::context(ctx_ptr) });
     match option {
         ZMQ_IO_THREADS => {
             if value < 0 || ctx.socket_count.load(Ordering::Acquire) != 0 || ctx.ctx.get().is_some()
             {
                 return crate::error::fail(libc::EINVAL);
             }
-            ctx.configured_io_threads.store(value, Ordering::Release);
+            ctx.options
+                .configured_io_threads
+                .store(value, Ordering::Release);
         }
         ZMQ_MAX_SOCKETS => {
             if value < 0 {
                 return crate::error::fail(libc::EINVAL);
             }
-            ctx.max_sockets.store(value, Ordering::Relaxed);
+            ctx.options.max_sockets.store(value, Ordering::Relaxed);
         }
         ZMQ_MAX_MSGSZ => {
-            ctx.max_msg_size.store(i64::from(value), Ordering::Relaxed);
+            ctx.options
+                .max_msg_size
+                .store(i64::from(value), Ordering::Relaxed);
         }
         ZMQ_IPV6_CTX => {
-            ctx.ipv6.store(value != 0, Ordering::Release);
+            ctx.options.ipv6.store(value != 0, Ordering::Release);
         }
         ZMQ_BLOCKY => {
-            ctx.blocky.store(value != 0, Ordering::Release);
+            ctx.options.blocky.store(value != 0, Ordering::Release);
         }
         ZMQ_ZERO_COPY_RECV => {
-            ctx.zero_copy_recv.store(value != 0, Ordering::Release);
+            ctx.options
+                .zero_copy_recv
+                .store(value != 0, Ordering::Release);
         }
         ZMQ_THREAD_NAME_PREFIX => {
             if ctx.set_thread_name_prefix(value.to_string()).is_err() {
@@ -451,23 +459,17 @@ pub extern "C" fn zmq_ctx_set(ctx_ptr: *mut libc::c_void, option: c_int, value: 
 /// Read an integer context option; return -1 with errno on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_ctx_get(ctx_ptr: *mut libc::c_void, option: c_int) -> c_int {
-    if ctx_ptr.is_null() {
-        return crate::error::fail(libc::EFAULT);
-    }
     // SAFETY: C callers pass null or a pointer from this API.
-    let ctx = match unsafe { crate::handle::context(ctx_ptr) } {
-        Ok(ctx) => ctx,
-        Err(errno) => return crate::error::fail(errno),
-    };
+    let ctx = c_try!(unsafe { crate::handle::context(ctx_ptr) });
     match option {
-        ZMQ_IO_THREADS => ctx.configured_io_threads.load(Ordering::Acquire),
-        ZMQ_MAX_SOCKETS | ZMQ_SOCKET_LIMIT => ctx.max_sockets.load(Ordering::Relaxed),
-        ZMQ_MAX_MSGSZ => ctx.max_msg_size.load(Ordering::Relaxed) as c_int,
+        ZMQ_IO_THREADS => ctx.options.configured_io_threads.load(Ordering::Acquire),
+        ZMQ_MAX_SOCKETS | ZMQ_SOCKET_LIMIT => ctx.options.max_sockets.load(Ordering::Relaxed),
+        ZMQ_MAX_MSGSZ => ctx.options.max_msg_size.load(Ordering::Relaxed) as c_int,
         ZMQ_MSG_T_SIZE => c_int::try_from(crate::msg::ZMQ_MSG_T_SIZE).unwrap_or(c_int::MAX),
-        ZMQ_ZERO_COPY_RECV => c_int::from(ctx.zero_copy_recv.load(Ordering::Acquire)),
+        ZMQ_ZERO_COPY_RECV => c_int::from(ctx.options.zero_copy_recv.load(Ordering::Acquire)),
         ZMQ_THREAD_NAME_PREFIX => ctx.thread_name_prefix().parse().unwrap_or(0),
-        ZMQ_IPV6_CTX => c_int::from(ctx.ipv6.load(Ordering::Acquire)),
-        ZMQ_BLOCKY => c_int::from(ctx.blocky.load(Ordering::Acquire)),
+        ZMQ_IPV6_CTX => c_int::from(ctx.options.ipv6.load(Ordering::Acquire)),
+        ZMQ_BLOCKY => c_int::from(ctx.options.blocky.load(Ordering::Acquire)),
         _ => crate::error::fail(libc::EINVAL),
     }
 }
@@ -500,10 +502,7 @@ pub extern "C" fn zmq_ctx_set_ext(
             return crate::error::fail(libc::EINVAL);
         };
         // SAFETY: C callers pass null or a pointer from this API.
-        let ctx = match unsafe { crate::handle::context(ctx_ptr) } {
-            Ok(ctx) => ctx,
-            Err(errno) => return crate::error::fail(errno),
-        };
+        let ctx = c_try!(unsafe { crate::handle::context(ctx_ptr) });
         return match ctx.set_thread_name_prefix(prefix.to_owned()) {
             Ok(()) => 0,
             Err(()) => crate::error::fail(libc::EINVAL),
@@ -531,55 +530,16 @@ pub extern "C" fn zmq_ctx_get_ext(
     }
     if option == ZMQ_THREAD_NAME_PREFIX {
         // SAFETY: C callers pass null or a pointer from this API.
-        let ctx = match unsafe { crate::handle::context(ctx_ptr) } {
-            Ok(ctx) => ctx,
-            Err(errno) => return crate::error::fail(errno),
-        };
-        return write_bytes(optval, optvallen, ctx.thread_name_prefix().as_bytes());
+        let ctx = c_try!(unsafe { crate::handle::context(ctx_ptr) });
+        let out = OptOut::new(optval, optvallen);
+        c_try!(out.padded_string(ctx.thread_name_prefix().as_bytes()));
+        return 0;
     }
     let value = zmq_ctx_get(ctx_ptr, option);
     if value == -1 && option != ZMQ_MAX_MSGSZ {
         return -1;
     }
-    write_i32(optval, optvallen, value)
-}
-
-fn write_i32(optval: *mut c_void, optvallen: *mut usize, value: c_int) -> c_int {
-    if optval.is_null() || optvallen.is_null() {
-        return crate::error::fail(libc::EFAULT);
-    }
-    // SAFETY: optvallen is non-null (checked above).
-    let avail = unsafe { *optvallen };
-    if avail < std::mem::size_of::<c_int>() {
-        return crate::error::fail(libc::EINVAL);
-    }
-    // SAFETY: output buffer is non-null and large enough (checked above).
-    unsafe {
-        std::ptr::write_bytes(optval.cast::<u8>(), 0, avail);
-        std::ptr::write_unaligned(optval.cast::<c_int>(), value);
-        *optvallen = std::mem::size_of::<c_int>();
-    }
-    0
-}
-
-fn write_bytes(optval: *mut c_void, optvallen: *mut usize, bytes: &[u8]) -> c_int {
-    if optval.is_null() || optvallen.is_null() {
-        return crate::error::fail(libc::EFAULT);
-    }
-    // SAFETY: optvallen is non-null (checked above).
-    let avail = unsafe { *optvallen };
-    let needed = bytes.len() + 1;
-    if avail < needed {
-        return crate::error::fail(libc::EINVAL);
-    }
-    // SAFETY: output buffer is non-null and large enough (checked above).
-    unsafe {
-        std::ptr::write_bytes(optval.cast::<u8>(), 0, avail);
-        if !bytes.is_empty() {
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), optval.cast::<u8>(), bytes.len());
-        }
-        *optvallen = needed;
-    }
+    c_try!(OptOut::new(optval, optvallen).i32(value));
     0
 }
 
@@ -588,6 +548,23 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+
+    #[test]
+    fn padded_string_zeroes_the_rest_of_the_buffer() {
+        let mut buf = [0xFF_u8; 8];
+        let mut len = buf.len();
+        let rc = OptOut::new(buf.as_mut_ptr().cast(), &raw mut len).padded_string(b"omq");
+        assert_eq!(rc, Ok(()));
+        assert_eq!(len, 4);
+        assert_eq!(&buf, b"omq\0\0\0\0\0");
+
+        let mut small = 3;
+        let rc = OptOut::new(buf.as_mut_ptr().cast(), &raw mut small).padded_string(b"omq");
+        assert_eq!(rc, Err(libc::EINVAL));
+        assert_eq!(small, 3);
+        let rc = OptOut::new(buf.as_mut_ptr().cast(), std::ptr::null_mut()).padded_string(b"omq");
+        assert_eq!(rc, Err(libc::EFAULT));
+    }
 
     #[test]
     fn final_close_and_work_wake_a_waiter_between_check_and_wait() {

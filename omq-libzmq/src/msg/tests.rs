@@ -4,9 +4,7 @@ use super::*;
 fn writable_received_data_detaches_shared_storage_and_preserves_metadata() {
     for metadata in [false, true] {
         let original = Bytes::from(vec![b'a'; 512]);
-        let mut message = OmqMsgRepr {
-            storage: [0; MSG_WORDS],
-        };
+        let mut message = OmqMsgRepr::zeroed();
         let (kind, boxed) = if metadata {
             let mut properties = omq_tokio::proto::PeerProperties::new();
             properties.add("User-Id", Bytes::from_static(b"alice"));
@@ -42,9 +40,7 @@ fn writable_received_data_detaches_shared_storage_and_preserves_metadata() {
 fn writable_received_data_reuses_unique_heap_storage() {
     let original = Bytes::from(vec![b'a'; 512]);
     let pointer = original.as_ptr().cast_mut();
-    let mut message = OmqMsgRepr {
-        storage: [0; MSG_WORDS],
-    };
+    let mut message = OmqMsgRepr::zeroed();
     message.init_fields(
         MsgFields::new(KIND_BYTES, 0, original.len(), pointer)
             .boxed(Box::into_raw(Box::new(original)).cast()),

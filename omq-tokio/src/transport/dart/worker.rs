@@ -92,12 +92,7 @@ pub(crate) struct PeerQueues {
 
 /// Registered socket queues, owned by the endpoint rather than a pump task.
 pub(crate) struct PeerIo {
-    pub(crate) commands: crate::engine::control_inbox::Receiver,
-    pub(crate) data: crate::engine::data_inbox::Receiver,
-    pub(crate) pipe: Option<SendPipeConsumer>,
-    pub(crate) sink: Option<RecvSink>,
-    pub(crate) cancel: CancellationToken,
-    pub(crate) completion: crate::engine::peer_completion::CompletionProgress,
+    queues: PeerQueues,
     active: bool,
     draining: bool,
     deadline: Option<Instant>,
@@ -124,13 +119,28 @@ struct Pass {
     blocked: bool,
 }
 
-struct Pending {
+/// Handshake state of one source and when it expires or resends.
+struct Lease {
     handshake: Handshake,
     socket_type: SocketType,
     identity: Option<Bytes>,
-    /// Fixed at the first HELLO; repeats never extend it.
     expires: Instant,
     retry: Instant,
+}
+
+impl Lease {
+    /// Resend the current handshake phase once its retry time passed.
+    fn retry_due(&mut self, now: Instant) {
+        if self.retry <= now {
+            self.handshake.retry();
+            self.retry = now + RETRY;
+        }
+    }
+}
+
+struct Pending {
+    /// Expiry is fixed at the first HELLO; repeats never extend it.
+    lease: Lease,
     /// Inbound handshakes hold a pending slot; our own connector does not.
     _slot: Option<OwnedSemaphorePermit>,
 }
@@ -144,23 +154,21 @@ impl Pending {
         now: Instant,
     ) -> Self {
         Self {
-            handshake,
-            socket_type,
-            identity,
-            expires: now + LEASE,
-            retry: now,
+            lease: Lease {
+                handshake,
+                socket_type,
+                identity,
+                expires: now + LEASE,
+                retry: now,
+            },
             _slot: None,
         }
     }
 }
 
 struct Peer {
-    handshake: Handshake,
+    lease: Lease,
     generation: u64,
-    socket_type: SocketType,
-    identity: Option<Bytes>,
-    expires: Instant,
-    retry: Instant,
     reported: bool,
     /// Whether the carrier reports ECN for this source's address family.
     ecn_supported: bool,
@@ -171,9 +179,14 @@ struct Peer {
     io: Option<Box<PeerIo>>,
     sampled: dart::SessionStats,
     send_retry: Duration,
+    pacing: PeerPacing,
+}
+
+/// Byte budgets of one peer and the waker their gates wake.
+struct PeerPacing {
     ingress: Option<crate::network_limit::Gate>,
     egress: Option<crate::network_limit::Gate>,
-    budget_waker: std::task::Waker,
+    waker: std::task::Waker,
 }
 
 struct BudgetWake(Arc<DataSignal>);
@@ -196,10 +209,13 @@ impl Peer {
         signal: &Arc<DataSignal>,
     ) {
         // A late activation can name a replaced, expired, or active peer.
-        if self.generation != generation || self.expires <= Instant::now() || self.io.is_some() {
+        if self.generation != generation
+            || self.lease.expires <= Instant::now()
+            || self.io.is_some()
+        {
             return;
         }
-        if io.cancel.is_cancelled() {
+        if io.queues.cancel.is_cancelled() {
             // Keep cancellation visible to drive(), which retires this
             // handshake. Discarding only the queues leaves READY retries live.
             self.io = Some(io);
@@ -221,8 +237,8 @@ impl Peer {
                 .map_or(0, |_| MESSAGES.min(options.window_messages)),
         );
         self.session = Some(Session::with_receive_buffers(
-            self.handshake.local(),
-            self.handshake.remote(),
+            self.lease.handshake.local(),
+            self.lease.handshake.remote(),
             SessionConfig {
                 window: options.window_messages,
                 congestion: options.congestion,
@@ -231,12 +247,12 @@ impl Peer {
             },
         ));
         // Byte-limited ingress grants receive credit as its budget admits it.
-        if self.ingress.is_some() {
+        if self.pacing.ingress.is_some() {
             self.session.as_mut().unwrap().pace_receive_credit();
         }
         // Budget gates wake the endpoint through its data signal.
-        if self.ingress.is_some() || self.egress.is_some() {
-            self.budget_waker = std::task::Waker::from(Arc::new(BudgetWake(signal.clone())));
+        if self.pacing.ingress.is_some() || self.pacing.egress.is_some() {
+            self.pacing.waker = std::task::Waker::from(Arc::new(BudgetWake(signal.clone())));
         }
 
         self.io = Some(io);
@@ -245,7 +261,7 @@ impl Peer {
 
 impl Drop for Peer {
     fn drop(&mut self) {
-        if let (Some(session), Some(ingress)) = (&self.session, &mut self.ingress) {
+        if let (Some(session), Some(ingress)) = (&self.session, &mut self.pacing.ingress) {
             let unused = session.receive_right_edge() - session.received_units();
             ingress.reconcile(unused * MAX_DATAGRAM as u64, 0);
         }
@@ -392,10 +408,7 @@ impl EndpointWorker {
                 continue;
             }
 
-            if (continuous || now < task.spin_until)
-                && !self.spin.is_zero()
-                && now >= task.receive_retry
-            {
+            if self.spinning(now, task.spin_until) && now >= task.receive_retry {
                 if self.latency {
                     // Direct polling in drain processes a packet immediately,
                     // without another loop through commands and timers first.
@@ -461,6 +474,11 @@ impl EndpointWorker {
         })
     }
 
+    /// Whether a spin window after activity is open.
+    fn spinning(&self, now: Instant, spin_until: Instant) -> bool {
+        !self.spin.is_zero() && (self.spin == Duration::MAX || now < spin_until)
+    }
+
     fn ensure_connector(&self, routes: &mut Routes, now: Instant) {
         if let Some(target) = self.target
             && !routes.map.contains_key(&target)
@@ -497,7 +515,7 @@ impl EndpointWorker {
     }
 
     fn insert_pending(&self, source: SocketAddr, mut pending: Pending, routes: &mut Routes) {
-        if !pending.handshake.is_connector() {
+        if !pending.lease.handshake.is_connector() {
             // Never answer a new source that could not take a ready slot.
             if !routes.map.contains_key(&source) && self.shared.peers.available_permits() == 0 {
                 return;
@@ -559,21 +577,24 @@ impl EndpointWorker {
             return;
         };
         if let Some(pending) = &mut route.pending {
-            if !pending.handshake.receive(ready) {
+            let lease = &mut pending.lease;
+            if !lease.handshake.receive(ready) {
                 return;
             }
-            pending.socket_type = ready.socket_type;
-            pending.identity = ready.identity.map(Bytes::copy_from_slice);
-            if pending.handshake.confirmed() {
+            lease.socket_type = ready.socket_type;
+            lease.identity = ready.identity.map(Bytes::copy_from_slice);
+            if lease.handshake.confirmed() {
                 self.promote(source, route, now, &mut routes.generation);
             }
         } else if let Some(peer) = &mut route.peer {
             // An established peer accepts READY only from the same socket.
-            if peer.socket_type != ready.socket_type || peer.identity.as_deref() != ready.identity {
+            let lease = &mut peer.lease;
+            if lease.socket_type != ready.socket_type || lease.identity.as_deref() != ready.identity
+            {
                 return;
             }
-            if peer.handshake.receive(ready) {
-                peer.expires = now + LEASE;
+            if lease.handshake.receive(ready) {
+                lease.expires = now + LEASE;
             }
         }
     }
@@ -585,11 +606,11 @@ impl EndpointWorker {
             route
                 .pending
                 .as_ref()
-                .is_some_and(|pending| pending.handshake.remote() == ready.session)
+                .is_some_and(|pending| pending.lease.handshake.remote() == ready.session)
                 || route
                     .peer
                     .as_ref()
-                    .is_some_and(|peer| peer.handshake.remote() == ready.session)
+                    .is_some_and(|peer| peer.lease.handshake.remote() == ready.session)
         });
         if same {
             return;
@@ -629,12 +650,12 @@ impl EndpointWorker {
 
         let pending = route.pending.take().expect("confirmed handshake");
         route.peer = Some(Peer {
-            handshake: pending.handshake,
+            lease: Lease {
+                expires: now + LEASE,
+                retry: now,
+                ..pending.lease
+            },
             generation: next,
-            socket_type: pending.socket_type,
-            identity: pending.identity,
-            expires: now + LEASE,
-            retry: now,
             reported: false,
             ecn_supported: self.io.ecn_receive_supported(source.ip()) == Some(true),
             session: None,
@@ -644,9 +665,11 @@ impl EndpointWorker {
             io: None,
             sampled: dart::SessionStats::default(),
             send_retry: Duration::ZERO,
-            ingress: self.network.ingress(),
-            egress: self.network.egress(),
-            budget_waker: std::task::Waker::noop().clone(),
+            pacing: PeerPacing {
+                ingress: self.network.ingress(),
+                egress: self.network.egress(),
+                waker: std::task::Waker::noop().clone(),
+            },
         });
     }
 }

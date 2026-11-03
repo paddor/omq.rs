@@ -1,5 +1,8 @@
+use super::live::{finish_handshake, read_live_once};
 use super::*;
 use crate::{Options as RegularOptions, Socket as RegularSocket};
+use omq_proto::proto::command::Command;
+use omq_proto::proto::{Connection, ConnectionConfig, Role};
 use tokio::net::TcpListener;
 
 async fn router() -> (RegularSocket, Endpoint) {
@@ -50,6 +53,14 @@ async fn regular_dealer_with_identity(identity: &'static [u8]) -> (RegularSocket
     (dealer, bound)
 }
 
+/// A hand-driven ROUTER peer on an accepted stream.
+fn server_live(stream: tokio::net::TcpStream) -> LiveConnection {
+    LiveConnection::new(
+        stream,
+        Connection::new(ConnectionConfig::new(Role::Server, SocketType::Router)),
+    )
+}
+
 async fn unresponsive_router() -> (Endpoint, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint: Endpoint = format!("tcp://{}", listener.local_addr().unwrap())
@@ -57,19 +68,7 @@ async fn unresponsive_router() -> (Endpoint, tokio::task::JoinHandle<()>) {
         .unwrap();
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
-        let now = Instant::now();
-        let mut live = LiveConnection {
-            stream,
-            connection: Connection::new(ConnectionConfig::new(Role::Server, SocketType::Router)),
-            read_buf: BytesMut::with_capacity(4 * 1024),
-            write_buf: BytesMut::with_capacity(4 * 1024),
-            last_ping: now,
-            last_input: now,
-            heartbeat_deadline: None,
-            ping_sequence: 0,
-            peer_identity: generated_identity(0),
-            write_pending: false,
-        };
+        let mut live = server_live(stream);
         finish_handshake(&mut live).await.unwrap();
         tokio::time::sleep(Duration::from_secs(1)).await;
     });
@@ -83,19 +82,7 @@ async fn router_replies_to_one_ping() -> (Endpoint, tokio::task::JoinHandle<()>)
         .unwrap();
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
-        let now = Instant::now();
-        let mut live = LiveConnection {
-            stream,
-            connection: Connection::new(ConnectionConfig::new(Role::Server, SocketType::Router)),
-            read_buf: BytesMut::with_capacity(4 * 1024),
-            write_buf: BytesMut::with_capacity(4 * 1024),
-            last_ping: now,
-            last_input: now,
-            heartbeat_deadline: None,
-            ping_sequence: 0,
-            peer_identity: generated_identity(0),
-            write_pending: false,
-        };
+        let mut live = server_live(stream);
         finish_handshake(&mut live).await.unwrap();
         read_live_once(&mut live).await.unwrap();
         flush_live(&mut live).await.unwrap();
@@ -591,19 +578,7 @@ async fn maintain_resumes_input_paused_behind_ping_replies() {
     let (sent_tx, sent_rx) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
-        let now = Instant::now();
-        let mut live = LiveConnection {
-            stream,
-            connection: Connection::new(ConnectionConfig::new(Role::Server, SocketType::Router)),
-            read_buf: BytesMut::with_capacity(4 * 1024),
-            write_buf: BytesMut::with_capacity(4 * 1024),
-            last_ping: now,
-            last_input: now,
-            heartbeat_deadline: None,
-            ping_sequence: 0,
-            peer_identity: generated_identity(0),
-            write_pending: false,
-        };
+        let mut live = server_live(stream);
         finish_handshake(&mut live).await.unwrap();
         // Enough replies to exceed the core's automatic reply backlog,
         // followed by data the client must still receive.

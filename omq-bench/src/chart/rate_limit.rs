@@ -1,11 +1,12 @@
 use std::collections::BTreeMap;
 
 use super::common::{
-    C_OMQ_1T, C_OMQ_CT, ChartSpec, CpuColumns, CpuData, Impl, ValMap, draw_throughput_dual_panel,
-    out_dir,
+    C_OMQ_1T, C_OMQ_CT, ChartSpec, CpuColumns, CpuData, DualPanelStyle, Impl, ValMap,
+    draw_throughput_dual_panel, out_dir,
 };
 use crate::bench::pushpull_rate_limit::{BURST, CACHE, RATE, Row, SIZES, link};
 use crate::jsonl;
+use crate::process;
 
 const SERIES: &[Impl] = &[
     Impl {
@@ -27,7 +28,7 @@ fn eligible(row: &Row) -> bool {
     row.transport == "tcp"
         && row.processes == 2
         && row.io_threads == 1
-        && row.cpu_affinity == "sender=1-2,receiver=3-4"
+        && row.cpu_affinity == process::TASKSET_AFFINITY
         && row.netem == link()
         && matches!(
             (row.egress_bytes_per_second, row.burst_bytes),
@@ -117,7 +118,8 @@ pub(crate) fn generate() {
         snd_label: "snd CPU%",
         rcv_label: "rcv CPU%",
     };
-    draw_throughput_dual_panel(&spec, &tput, &msgs, &columns).expect("draw TCP rate-limit chart");
+    draw_throughput_dual_panel(&spec, &tput, &msgs, &columns, DualPanelStyle::PLAIN)
+        .expect("draw TCP rate-limit chart");
     eprintln!("Written: {}", path.display());
 }
 

@@ -4,9 +4,11 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
+use crate::bench::unix_nanos;
+
 use super::args::QuinnArgs;
 use super::peers::{self, Peers, Side};
-use super::{TempDir, capture, count, provenance, record, rounds, timestamp, validate_cpus};
+use super::{TempDir, capture, count, provenance, record, rounds, validate_cpus};
 
 pub(crate) fn run(mut args: QuinnArgs) {
     validate_cpus(&args.common.cpus);
@@ -125,7 +127,7 @@ impl QuinnRun<'_> {
 
         // Both sides start at one wall-clock time 200 ms out.
         let ready = json!({"receive":peers.wait_json(Side::Receive, "ready"), "send":peers.wait_json(Side::Send, "ready")});
-        let start = timestamp() + 200_000_000;
+        let start = unix_nanos() + 200_000_000;
         peers.command(Side::Receive, start);
         peers.command(Side::Send, start);
 
@@ -141,7 +143,7 @@ impl QuinnRun<'_> {
         peers.command(Side::Send, "STOP");
         peers.finish();
 
-        let mut row = json!({"timestamp_ns":timestamp(), "kind":kind, "transport":"quinn-datagram",
+        let mut row = json!({"timestamp_ns":unix_nanos(), "kind":kind, "transport":"quinn-datagram",
             "msg_size":size, "duration_seconds":args.duration, "layout":args.layout,
             "io_threads":if args.layout == "multi" { 2 } else { 1 },
             "application_future":if args.layout == "split" { "Handle::block_on" } else { "spawned task" },

@@ -1,7 +1,7 @@
 //! `zmq_socket_monitor` and related peer-state calls.
 
-use super::{ensure_materialized, with_socket};
-use crate::error::{ETERM, fail, map_omq_err};
+use super::{materialized, run_on_socket};
+use crate::error::{ETERM, c_try, fail};
 use std::ffi::{CStr, c_int, c_void};
 use std::str::FromStr;
 
@@ -25,10 +25,7 @@ pub extern "C" fn zmq_socket_monitor(
         return 0;
     }
     // SAFETY: C callers pass null or a pointer from this API.
-    let sock = match unsafe { crate::handle::socket(sock_ptr) } {
-        Ok(socket) => socket,
-        Err(errno) => return fail(errno),
-    };
+    let sock = c_try!(unsafe { crate::handle::socket(sock_ptr) });
     // SAFETY: addr is non-null (checked above); caller guarantees a valid C string.
     let Ok(addr_str) = unsafe { CStr::from_ptr(addr) }.to_str() else {
         return fail(libc::EINVAL);
@@ -36,18 +33,12 @@ pub extern "C" fn zmq_socket_monitor(
     let addr_str = addr_str.to_owned();
     let events_mask = events as u16;
 
-    if let Err(error) = ensure_materialized(sock) {
-        return fail(error);
-    }
-
-    let Some(inner) = sock.inner.get() else {
-        return fail(ETERM);
-    };
+    let inner = c_try!(materialized(sock));
     let Some(monitor_ctx) = sock.ctx.io_context().cloned() else {
         return fail(ETERM);
     };
 
-    let result = with_socket(&sock.ctx, inner, move |s| async move {
+    c_try!(run_on_socket(sock, inner, move |s| async move {
         let mut stream = s.monitor();
 
         // Create a PAIR socket for publishing events, bind it to addr.
@@ -73,14 +64,9 @@ pub extern "C" fn zmq_socket_monitor(
             }
         });
 
-        Ok::<_, omq_tokio::error::Error>(())
-    });
-
-    match result {
-        Ok(Ok(())) => 0,
-        Ok(Err(ref e)) => fail(map_omq_err(e)),
-        Err(errno) => fail(errno),
-    }
+        Ok(())
+    }));
+    0
 }
 
 /// Configure a version-1 socket monitor; other versions return ENOTSUP.

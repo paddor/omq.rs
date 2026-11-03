@@ -3,7 +3,7 @@
 use std::ffi::{c_int, c_long, c_void};
 use std::time::{Duration, Instant};
 
-use crate::error::fail;
+use crate::error::{c_try, fail};
 
 type TimerFn = unsafe extern "C" fn(c_int, *mut c_void);
 
@@ -87,10 +87,7 @@ pub extern "C" fn zmq_timers_add(
     let Some(handler) = handler else {
         return fail(libc::EFAULT);
     };
-    let timers = match unsafe { timers(timers_ptr) } {
-        Ok(t) => t,
-        Err(e) => return fail(e),
-    };
+    let timers = c_try!(unsafe { timers(timers_ptr) });
     let id = timers.next_id;
     timers.next_id = timers.next_id.saturating_add(1).max(1);
     let interval = interval_from_ms(interval);
@@ -107,10 +104,7 @@ pub extern "C" fn zmq_timers_add(
 /// Remove a timer by ID; return zero or -1 with errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_timers_cancel(timers_ptr: *mut c_void, timer_id: c_int) -> c_int {
-    let timers = match unsafe { timers(timers_ptr) } {
-        Ok(t) => t,
-        Err(e) => return fail(e),
-    };
+    let timers = c_try!(unsafe { timers(timers_ptr) });
     let Some(idx) = find_timer(&timers.entries, timer_id) else {
         return fail(libc::EINVAL);
     };
@@ -126,10 +120,7 @@ pub extern "C" fn zmq_timers_set_interval(
     timer_id: c_int,
     interval: usize,
 ) -> c_int {
-    let timers = match unsafe { timers(timers_ptr) } {
-        Ok(t) => t,
-        Err(e) => return fail(e),
-    };
+    let timers = c_try!(unsafe { timers(timers_ptr) });
     let Some(idx) = find_timer(&timers.entries, timer_id) else {
         return fail(libc::EINVAL);
     };
@@ -142,10 +133,7 @@ pub extern "C" fn zmq_timers_set_interval(
 /// Restart a timer's deadline using its current interval; return zero or -1 with errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_timers_reset(timers_ptr: *mut c_void, timer_id: c_int) -> c_int {
-    let timers = match unsafe { timers(timers_ptr) } {
-        Ok(t) => t,
-        Err(e) => return fail(e),
-    };
+    let timers = c_try!(unsafe { timers(timers_ptr) });
     let Some(idx) = find_timer(&timers.entries, timer_id) else {
         return fail(libc::EINVAL);
     };
@@ -181,15 +169,12 @@ pub extern "C" fn zmq_timers_timeout(timers_ptr: *mut c_void) -> c_long {
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_timers_execute(timers_ptr: *mut c_void) -> c_int {
     let now = Instant::now();
-    let due: Vec<c_int> = match unsafe { timers(timers_ptr) } {
-        Ok(timers) => timers
-            .entries
-            .iter()
-            .filter(|entry| entry.next.is_some_and(|next| next <= now))
-            .map(|entry| entry.id)
-            .collect(),
-        Err(e) => return fail(e),
-    };
+    let due: Vec<c_int> = c_try!(unsafe { timers(timers_ptr) })
+        .entries
+        .iter()
+        .filter(|entry| entry.next.is_some_and(|next| next <= now))
+        .map(|entry| entry.id)
+        .collect();
 
     for id in due {
         let callback = {

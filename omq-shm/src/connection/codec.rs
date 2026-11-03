@@ -1,12 +1,10 @@
 //! SHM message encoding, decoding, and batch delivery.
 
-use super::{ActiveLease, Connection, Received};
+use super::{Connection, Received};
 use crate::lease::{Borrowed, Lease};
 use crate::mapping::invalid;
 use crate::pool::{Slot, find_slot};
-use crate::wire::{
-    self, BODY, COPIED, COPIED_BATCH, GENERATION_STEP, MULTIPART, READER_CLOSED, REFERENCE_BATCH,
-};
+use crate::wire::{self, BODY, COPIED, COPIED_BATCH, MULTIPART, READER_CLOSED, REFERENCE_BATCH};
 use crate::{
     BATCH_MAX_BYTES, BatchKind, COPY_THRESHOLD, batch, body, check_body_size, copied_record,
     replace_body, uses_multipart_record,
@@ -36,7 +34,7 @@ impl Connection {
         self.prepare_encode()?;
         // Check credit before copying frames into shared storage.
         self.reclaim(1);
-        if self.hwm == self.leased_messages {
+        if !self.leases.has_credit(1) {
             return Ok(None);
         }
         match self.send_pool.prepare_multipart(message)? {
@@ -57,7 +55,7 @@ impl Connection {
             return Ok(Some(copied_record(message)?));
         }
         self.reclaim(count);
-        if self.hwm - self.leased_messages < count {
+        if !self.leases.has_credit(count) {
             return Ok(None);
         }
         let prepared;
@@ -89,12 +87,12 @@ impl Connection {
                 return Err(invalid("SHM reference batch was not prepared").into());
             }
             for mapping in &state.regions {
-                if !self.register_region(mapping)? {
+                if !self.registrations.register(mapping)? {
                     return Ok(false);
                 }
             }
         }
-        Ok(self.register_region(&slot.mapping)?)
+        Ok(self.registrations.register(&slot.mapping)?)
     }
 
     /// Lease `source`, a body inside `slot`'s mapping, to the peer.
@@ -106,31 +104,22 @@ impl Connection {
         kind: u8,
     ) -> Result<wire::Reference> {
         let offset = source.as_ptr() as usize - slot.mapping.address();
-        let generation = self
-            .generation
-            .checked_add(GENERATION_STEP)
-            .ok_or_else(|| omq_proto::Error::Protocol("SHM lease generation exhausted".into()))?;
+        let (lease, generation) = self.leases.reserve(count)?;
         let reference = wire::Reference {
             kind,
             id: slot.mapping.id,
             token: slot.mapping.token,
             offset,
             length: source.len(),
-            lease: self.free.pop_front().expect("reserved lease credit"),
+            lease,
             generation,
         };
-        self.generation = generation;
-        self.leased_messages += count;
         // Publication acquires on borrow; paired fences prevent a racing
         // reader close and publication from both missing each other.
         if self.outgoing.publish(reference) {
             self.outgoing.notify();
         }
-        self.active.push_back(ActiveLease {
-            index: reference.lease,
-            generation,
-            messages: count,
-        });
+        self.leases.track(lease, generation, count);
         slot.track_lease(
             Lease {
                 table: self.outgoing.clone(),
@@ -190,7 +179,7 @@ impl Connection {
     /// Maximum logical messages that can share one outgoing batch.
     #[must_use]
     pub fn batch_capacity(&self) -> usize {
-        self.hwm.min(crate::BATCH_MAX_MESSAGES)
+        self.leases.hwm.min(crate::BATCH_MAX_MESSAGES)
     }
 
     /// Pack queued bodies into socket storage without waiting or exceeding HWM.
@@ -199,7 +188,7 @@ impl Connection {
     /// # Errors
     /// Returns an error for invalid counts, envelopes, or body sizes.
     pub fn prepare_batch(&self, messages: &[&Message], kind: BatchKind) -> Result<Option<Message>> {
-        if messages.len() > self.hwm {
+        if messages.len() > self.leases.hwm {
             return Ok(None);
         }
         self.send_pool.prepare_batch(messages, kind)
@@ -216,11 +205,8 @@ impl Connection {
         kind: BatchKind,
         frames: &mut omq_proto::frame_buffer::FrameBuffer,
     ) -> Result<bool> {
-        let body = message
-            .part_slice(message.len().saturating_sub(1))
-            .ok_or_else(|| invalid("missing SHM batch"))?;
-        let count = batch::count(body)?;
-        if count > self.hwm {
+        let count = batch::count(body(message)?)?;
+        if count > self.leases.hwm {
             return Err(invalid("SHM batch exceeds send HWM").into());
         }
         let Some(wire) = self.encode_record(message, count, kind.record())? else {
@@ -273,13 +259,10 @@ impl Connection {
     }
 
     fn borrow(&self, reference: wire::Reference, cached: bool) -> Result<Payload> {
-        let table = self
-            .incoming
-            .as_ref()
-            .ok_or_else(|| invalid("missing SHM preface"))?
-            .clone();
+        let table = self.incoming("missing SHM preface")?.clone();
         let mapping = self
-            .find_region(reference.id, reference.token)
+            .inbound
+            .find(reference.id, reference.token)
             .cloned()
             .ok_or_else(|| invalid("SHM region descriptor was not registered"))?;
         if !mapping.contains(reference.offset, reference.length) {
@@ -326,28 +309,23 @@ impl Connection {
         if self.received.is_some() {
             return Err(invalid("SHM batch must be drained before the next record").into());
         }
-        let kind = message
-            .part_slice(message.len().saturating_sub(1))
-            .and_then(|body| body.first().copied());
+        let kind = body(&message).ok().and_then(|body| body.first().copied());
         let Some(kind @ (COPIED_BATCH | REFERENCE_BATCH | MULTIPART)) = kind else {
             return self.decode(message).map(Received::Message);
         };
         let decoded = self.decode_record(message, kind)?;
+        let mut cx = batch::DecodeContext {
+            maximum: self.max_message_size,
+            views: &self.views,
+            region: |id, token| self.inbound.find(id, token).cloned(),
+        };
         if kind == MULTIPART {
-            return batch::multipart(&decoded, self.max_message_size, &self.views, |id, token| {
-                self.find_region(id, token).cloned()
-            })
-            .map(Received::Message);
+            return batch::multipart(&decoded, &mut cx).map(Received::Message);
         }
         let batch = if kind == COPIED_BATCH {
-            crate::ReceivedBatch::copied(&decoded, self.max_message_size, &self.views)?
+            crate::ReceivedBatch::copied(&decoded, &cx)?
         } else {
-            crate::ReceivedBatch::referenced(
-                &decoded,
-                self.max_message_size,
-                &self.views,
-                |id, token| self.find_region(id, token).cloned(),
-            )?
+            crate::ReceivedBatch::referenced(&decoded, &mut cx)?
         };
         Ok(Received::Batch(batch))
     }

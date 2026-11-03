@@ -508,7 +508,8 @@ async fn named_ws_bind_and_connect_keep_resource_and_original_server_name() {
         let server = Socket::new(SocketType::Pull, Options::default());
         let requested: Endpoint = format!("{scheme}://localhost:0/room?x=1").parse().unwrap();
         let bound = server.bind(requested).await.unwrap();
-        let (Endpoint::Ws { port, .. } | Endpoint::Wss { port, .. }) = bound.underlying_ws() else {
+        let (Endpoint::Ws { port, .. } | Endpoint::Wss { port, .. }) = bound.without_compression()
+        else {
             unreachable!()
         };
         let client = Socket::new(SocketType::Push, Options::default());

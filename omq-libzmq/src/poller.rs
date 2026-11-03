@@ -2,8 +2,8 @@
 
 use std::ffi::{c_int, c_short, c_void};
 
-use crate::error::fail;
-use crate::poll::{ZmqFd, ZmqPollItem};
+use crate::error::{c_try, fail};
+use crate::poll::{ZmqFd, ZmqPollItem, invalid_fd};
 
 #[derive(Clone, Copy, Debug)]
 enum PollerTarget {
@@ -30,17 +30,6 @@ pub struct ZmqPollerEvent {
     pub fd: ZmqFd,
     pub user_data: *mut c_void,
     pub events: c_short,
-}
-
-fn invalid_fd() -> ZmqFd {
-    #[cfg(unix)]
-    {
-        -1
-    }
-    #[cfg(windows)]
-    {
-        ZmqFd::MAX
-    }
 }
 
 fn fd_is_invalid(fd: ZmqFd) -> bool {
@@ -119,10 +108,7 @@ pub extern "C" fn zmq_poller_add(
     if socket.is_null() {
         return fail(crate::error::ENOTSOCK);
     }
-    let p = match unsafe { poller(poller_ptr) } {
-        Ok(p) => p,
-        Err(e) => return fail(e),
-    };
+    let p = c_try!(unsafe { poller(poller_ptr) });
     if socket_entry(&p.entries, socket).is_some() {
         return fail(libc::EINVAL);
     }
@@ -144,10 +130,7 @@ pub extern "C" fn zmq_poller_modify(
     if socket.is_null() {
         return fail(crate::error::ENOTSOCK);
     }
-    let p = match unsafe { poller(poller_ptr) } {
-        Ok(p) => p,
-        Err(e) => return fail(e),
-    };
+    let p = c_try!(unsafe { poller(poller_ptr) });
     let Some(idx) = socket_entry(&p.entries, socket) else {
         return fail(libc::EINVAL);
     };
@@ -161,10 +144,7 @@ pub extern "C" fn zmq_poller_remove(poller_ptr: *mut c_void, socket: *mut c_void
     if socket.is_null() {
         return fail(crate::error::ENOTSOCK);
     }
-    let p = match unsafe { poller(poller_ptr) } {
-        Ok(p) => p,
-        Err(e) => return fail(e),
-    };
+    let p = c_try!(unsafe { poller(poller_ptr) });
     let Some(idx) = socket_entry(&p.entries, socket) else {
         return fail(libc::EINVAL);
     };
@@ -184,10 +164,7 @@ pub extern "C" fn zmq_poller_add_fd(
     if fd_is_invalid(fd) {
         return fail(libc::EBADF);
     }
-    let p = match unsafe { poller(poller_ptr) } {
-        Ok(p) => p,
-        Err(e) => return fail(e),
-    };
+    let p = c_try!(unsafe { poller(poller_ptr) });
     if fd_entry(&p.entries, fd).is_some() {
         return fail(libc::EINVAL);
     }
@@ -206,10 +183,7 @@ pub extern "C" fn zmq_poller_modify_fd(
     fd: ZmqFd,
     events: c_short,
 ) -> c_int {
-    let p = match unsafe { poller(poller_ptr) } {
-        Ok(p) => p,
-        Err(e) => return fail(e),
-    };
+    let p = c_try!(unsafe { poller(poller_ptr) });
     let Some(idx) = fd_entry(&p.entries, fd) else {
         return fail(libc::EINVAL);
     };
@@ -220,10 +194,7 @@ pub extern "C" fn zmq_poller_modify_fd(
 /// Remove a registered native descriptor; return zero or -1 with errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_poller_remove_fd(poller_ptr: *mut c_void, fd: ZmqFd) -> c_int {
-    let p = match unsafe { poller(poller_ptr) } {
-        Ok(p) => p,
-        Err(e) => return fail(e),
-    };
+    let p = c_try!(unsafe { poller(poller_ptr) });
     let Some(idx) = fd_entry(&p.entries, fd) else {
         return fail(libc::EINVAL);
     };
@@ -254,10 +225,7 @@ pub extern "C" fn zmq_poller_wait_all(
         return fail(libc::EFAULT);
     }
 
-    let p = match unsafe { poller(poller_ptr) } {
-        Ok(p) => p,
-        Err(e) => return fail(e),
-    };
+    let p = c_try!(unsafe { poller(poller_ptr) });
 
     // `map[i]` is the entry index behind `poll_items[i]`; entries with no
     // interests are skipped.

@@ -14,17 +14,12 @@ use futures::channel::oneshot;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use super::{Endpoint, Error, InternalEvent, Result, SocketDriver};
+use super::dialer::FirstAttempt;
+use super::{Endpoint, Error, InternalEvent, Result, Side, SocketDriver};
 use crate::transport::setup::PendingHandshake;
 use omq_proto::endpoint::Host;
 
 const MAX_PENDING_ENDPOINTS: usize = 128;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Kind {
-    Bind,
-    Connect,
-}
 
 pub(super) enum Ack {
     Bind(oneshot::Sender<Result<Endpoint>>),
@@ -32,10 +27,10 @@ pub(super) enum Ack {
 }
 
 impl Ack {
-    fn kind(&self) -> Kind {
+    fn side(&self) -> Side {
         match self {
-            Self::Bind(_) => Kind::Bind,
-            Self::Connect(_) => Kind::Connect,
+            Self::Bind(_) => Side::Bind,
+            Self::Connect(_) => Side::Connect,
         }
     }
 
@@ -67,14 +62,13 @@ impl Ack {
 
 pub(super) struct ResolvedEndpoint {
     pub(super) endpoint: Endpoint,
-    pub(super) first_deadline: Option<Instant>,
-    pub(super) admission: Option<PendingHandshake>,
+    pub(super) first: FirstAttempt,
 }
 
 pub(super) struct PendingEndpoint {
     options: Arc<Options>,
     pub(super) original: Endpoint,
-    pub(super) kind: Kind,
+    pub(super) side: Side,
     pub(super) cancel: CancellationToken,
     task: JoinHandle<()>,
 }
@@ -96,7 +90,7 @@ pub(super) fn needs_dns(endpoint: &Endpoint) -> bool {
     }
     if endpoint.is_tcp_family() {
         return matches!(
-            endpoint.underlying_tcp(),
+            endpoint.without_compression(),
             Endpoint::Tcp {
                 host: Host::Name(_),
                 ..
@@ -106,7 +100,7 @@ pub(super) fn needs_dns(endpoint: &Endpoint) -> bool {
     #[cfg(feature = "ws")]
     if endpoint.is_ws_family() {
         return matches!(
-            endpoint.underlying_ws(),
+            endpoint.without_compression(),
             Endpoint::Ws {
                 host: Host::Name(_),
                 ..
@@ -182,13 +176,13 @@ async fn tcp_bind_address(endpoint: Endpoint) -> Result<Endpoint> {
     let Endpoint::Tcp {
         host: Host::Name(host),
         port,
-    } = endpoint.underlying_tcp()
+    } = endpoint.without_compression()
     else {
         unreachable!()
     };
 
     let address = first(&host, port).await?;
-    Ok(endpoint.rewrap_tcp(Endpoint::Tcp {
+    Ok(endpoint.rewrap(Endpoint::Tcp {
         host: Host::Ip(address.ip()),
         port,
     }))
@@ -197,7 +191,7 @@ async fn tcp_bind_address(endpoint: Endpoint) -> Result<Endpoint> {
 /// Resolve the WS/WSS host and keep scheme, path, and any wrapper.
 #[cfg(feature = "ws")]
 async fn ws_bind_address(endpoint: Endpoint) -> Result<Endpoint> {
-    let (host, port, path, tls) = match endpoint.underlying_ws() {
+    let (host, port, path, tls) = match endpoint.without_compression() {
         Endpoint::Ws {
             host: Host::Name(host),
             port,
@@ -218,20 +212,16 @@ async fn ws_bind_address(endpoint: Endpoint) -> Result<Endpoint> {
     } else {
         Endpoint::Ws { host, port, path }
     };
-    Ok(endpoint.rewrap_ws(resolved))
+    Ok(endpoint.rewrap(resolved))
 }
 
 async fn first(host: &str, port: u16) -> Result<SocketAddr> {
-    crate::transport::dns::resolve(host, port)
-        .await?
-        .into_iter()
-        .next()
-        .ok_or_else(|| Error::InvalidEndpoint(format!("DNS lookup failed for {host}")))
+    Ok(crate::transport::dns::resolve_name(host, port).await?[0])
 }
 
 struct EndpointTask {
     id: u64,
-    kind: Kind,
+    side: Side,
     endpoint: Endpoint,
     cancel: CancellationToken,
     admission: Option<crate::transport::setup::Admission>,
@@ -280,16 +270,18 @@ impl EndpointTask {
             .map_err(|_| Error::HandshakeFailed("DNS resolution timeout".into()))??;
         Ok(ResolvedEndpoint {
             endpoint,
-            first_deadline,
-            admission,
+            first: FirstAttempt {
+                deadline: first_deadline,
+                admission,
+            },
         })
     }
 
     async fn resolve(&self) -> Result<Endpoint> {
         loop {
-            let result = match self.kind {
-                Kind::Bind => bind_address(self.endpoint.clone()).await,
-                Kind::Connect => {
+            let result = match self.side {
+                Side::Bind => bind_address(self.endpoint.clone()).await,
+                Side::Connect => {
                     #[cfg(feature = "dart")]
                     if matches!(self.endpoint, Endpoint::Dart { .. }) {
                         return bind_address(self.endpoint.clone()).await;
@@ -326,15 +318,17 @@ impl SocketDriver {
             )));
             return;
         }
-        let kind = ack.kind();
+        let side = ack.side();
         // Datagram targets have no handshake to admit.
-        let admission = (kind == Kind::Connect
+        let admission = (side.is_connect()
             && self.socket_type != super::SocketType::Stream
             && !matches!(endpoint, Endpoint::Udp { .. }))
         .then(|| self.endpoints.dial_admission.clone());
         let setup_timeout = super::endpoints::dial_setup_timeout(&endpoint, &options);
-        let id = self.next_peer_id;
-        self.next_peer_id += 1;
+        let Some(id) = self.alloc_id() else {
+            ack.error(Error::Config("peer ID exhausted".into()));
+            return;
+        };
         let cancel = self.link.cancel.child_token();
         let task_cancel = cancel.clone();
         let task_endpoint = endpoint.clone();
@@ -342,7 +336,7 @@ impl SocketDriver {
         let task = tokio::spawn(
             EndpointTask {
                 id,
-                kind,
+                side,
                 endpoint: task_endpoint,
                 cancel: task_cancel,
                 admission,
@@ -356,7 +350,7 @@ impl SocketDriver {
             PendingEndpoint {
                 options,
                 original: endpoint,
-                kind,
+                side,
                 cancel,
                 task,
             },
@@ -384,7 +378,7 @@ impl SocketDriver {
                             resolved.endpoint,
                             pending.original.clone(),
                             pending.options.clone(),
-                            false,
+                            Side::Bind,
                         )
                         .await,
                     );
@@ -404,7 +398,7 @@ impl SocketDriver {
                             resolved.endpoint,
                             pending.original.clone(),
                             pending.options.clone(),
-                            true,
+                            Side::Connect,
                         )
                         .await
                         .map(|_| ()),
@@ -412,11 +406,11 @@ impl SocketDriver {
                     return;
                 }
                 if !self.should_ignore_duplicate_connect(&resolved.endpoint) {
-                    self.start_dial_with_deadline(
+                    self.start_dial_task(
                         resolved.endpoint,
                         pending.options.clone(),
-                        resolved.first_deadline,
-                        resolved.admission,
+                        resolved.first,
+                        0,
                     );
                 }
                 let _ = ack.send(Ok(()));
@@ -425,11 +419,11 @@ impl SocketDriver {
         }
     }
 
-    pub(super) fn cancel_pending_endpoints(&self, endpoint: Option<(&Endpoint, Kind)>) -> bool {
+    pub(super) fn cancel_pending_endpoints(&self, endpoint: Option<(&Endpoint, Side)>) -> bool {
         let mut canceled = false;
         for pending in self.endpoints.pending_endpoints.values() {
             if endpoint
-                .is_none_or(|(target, kind)| target == &pending.original && kind == pending.kind)
+                .is_none_or(|(target, side)| target == &pending.original && side == pending.side)
             {
                 pending.cancel.cancel();
                 canceled = true;

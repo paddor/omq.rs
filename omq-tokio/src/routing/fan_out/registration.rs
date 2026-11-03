@@ -1,9 +1,8 @@
 //! Peer admission, lane compatibility, and capacity reactivation.
 
 use super::lane::LanePeerAdd;
-use super::{FanOutPeer, FanOutSend, PeerOutbound, SubscriptionSet};
+use super::{FanOutPeer, FanOutSend, PeerOutbound};
 use crate::engine::ActorPeerDriverHandle;
-use rustc_hash::FxHashSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -37,18 +36,18 @@ impl FanOutSend {
         let target = PeerOutbound::from_handle(&handle);
         let lane = self.register_lane_peer(peer_id, &target, any_groups, io_thread);
         if lane.is_none() {
-            self.fallback_peer_count.fetch_add(1, Ordering::Release);
+            self.shared
+                .fallback_peer_count
+                .fetch_add(1, Ordering::Release);
         } else {
-            self.lane_peer_count.fetch_add(1, Ordering::Release);
+            self.shared.lane_peer_count.fetch_add(1, Ordering::Release);
         }
         self.observe_peer_reactivation(&target);
-        let mut inner = self.inner.lock().expect("fanout inner poisoned");
+        let mut inner = self.shared.inner.lock().expect("fanout inner poisoned");
         inner.peers.insert(
             peer_id,
             FanOutPeer {
-                subscriptions: SubscriptionSet::new(),
-                groups: FxHashSet::default(),
-                any_groups,
+                filter: super::filter::PeerFilterState::new(any_groups),
                 target,
                 lane,
                 fanout_active: true,
@@ -69,7 +68,7 @@ impl FanOutSend {
         };
         // Oldest eviction cannot discard an already published SHM lease.
         // Keep that policy on the raw-message driver queue.
-        if slot.is_shm() && self.mute_policy == super::FanOutMutePolicy::DropOldest {
+        if slot.is_shm() && self.config.mute_policy == super::FanOutMutePolicy::DropOldest {
             return None;
         }
         #[cfg(feature = "ws")]
@@ -90,15 +89,14 @@ impl FanOutSend {
         let PeerOutbound::Wire { slot, .. } = target else {
             return;
         };
-        let inner = Arc::downgrade(&self.inner);
-        let generation = self.generation.clone();
+        let shared = Arc::downgrade(&self.shared);
         slot.set_fanout_reactivation(Arc::new(move |peer_id| {
-            let Some(inner) = inner.upgrade() else {
+            let Some(shared) = shared.upgrade() else {
                 return;
             };
-            let mut inner = inner.lock().expect("fanout inner poisoned");
+            let mut inner = shared.inner.lock().expect("fanout inner poisoned");
             if inner.reactivate_fanout_peer(peer_id) {
-                generation.fetch_add(1, Ordering::Release);
+                shared.generation.fetch_add(1, Ordering::Release);
             }
         }));
     }
@@ -155,17 +153,17 @@ mod tests {
                 ..SlotConfig::default()
             },
         );
-        slot.handshake_done.store(true, Ordering::Release);
+        slot.mark_handshake_done();
         let (inbox, _commands) = mpsc::channel(1);
         let (data_inbox, data) = mpsc::channel(1);
         let handle = ActorPeerDriverHandle {
             inbox: inbox.into(),
             data_inbox: data_inbox.into(),
             cancel: CancellationToken::new(),
-            transmit_slot: Some(slot.clone()),
-            direct_tcp_writer: None,
-            send_pipe: None,
-            inproc: None,
+            routes: crate::engine::driver::DirectRoutes {
+                transmit_slot: Some(slot.clone()),
+                ..Default::default()
+            },
         };
         (slot, handle, data)
     }
@@ -204,8 +202,8 @@ mod tests {
             for (id, _, _, handle, _) in &peers {
                 register_subscribed(&mut sender, *id, handle).await;
             }
-            assert_eq!(sender.lane_peer_count.load(Ordering::Acquire), 1);
-            assert_eq!(sender.fallback_peer_count.load(Ordering::Acquire), 2);
+            assert_eq!(sender.shared.lane_peer_count.load(Ordering::Acquire), 1);
+            assert_eq!(sender.shared.fallback_peer_count.load(Ordering::Acquire), 2);
             sender
                 .submitter()
                 .try_send(Message::multipart(["topic", "payload"]))
@@ -228,8 +226,8 @@ mod tests {
                 assert_framed_publication(framing, &slot);
                 sender.connection_removed(id);
             }
-            assert_eq!(sender.lane_peer_count.load(Ordering::Acquire), 0);
-            assert_eq!(sender.fallback_peer_count.load(Ordering::Acquire), 0);
+            assert_eq!(sender.shared.lane_peer_count.load(Ordering::Acquire), 0);
+            assert_eq!(sender.shared.fallback_peer_count.load(Ordering::Acquire), 0);
             sender.shutdown();
         }
     }
@@ -257,7 +255,10 @@ mod tests {
             .collect();
         match framing {
             WireFraming::Zmtp => assert_eq!(wire, b"\x01\x05topic\x00\x07payload"),
-            WireFraming::Zws(_) => assert_zws_wire(&wire, framing.is_masked()),
+            WireFraming::Zws(_) => assert_zws_wire(
+                &wire,
+                framing.ws_send_role() == omq_proto::proto::connection::WsRole::Client,
+            ),
         }
     }
 
@@ -346,8 +347,8 @@ mod tests {
                 .unwrap();
             peers.push((slot, data, options));
         }
-        assert_eq!(sender.lane_peer_count.load(Ordering::Acquire), 2);
-        assert_eq!(sender.fallback_peer_count.load(Ordering::Acquire), 0);
+        assert_eq!(sender.shared.lane_peer_count.load(Ordering::Acquire), 2);
+        assert_eq!(sender.shared.fallback_peer_count.load(Ordering::Acquire), 0);
         let message = Message::single(bytes::Bytes::from(vec![0x5a; 256]));
         sender.submitter().try_send(message.clone()).unwrap();
         for (slot, mut data, options) in peers {
@@ -401,8 +402,11 @@ mod tests {
                 .unwrap();
             peers.push((slot, data));
         }
-        assert_eq!(sender.lane_peer_count.load(Ordering::Acquire), peer_count);
-        assert_eq!(sender.fallback_peer_count.load(Ordering::Acquire), 0);
+        assert_eq!(
+            sender.shared.lane_peer_count.load(Ordering::Acquire),
+            peer_count
+        );
+        assert_eq!(sender.shared.fallback_peer_count.load(Ordering::Acquire), 0);
         let message = Message::single(bytes::Bytes::from(vec![0x5a; 1024]));
         sender.submitter().try_send(message).unwrap();
         let expected = wait_for_wire(&peers[0].0).await;
@@ -440,8 +444,8 @@ mod tests {
             .unwrap();
         assert_eq!(wait_for_wire(&slot).await, b"\x00\x05plain");
         assert!(data.try_recv().is_err());
-        assert_eq!(sender.lane_peer_count.load(Ordering::Acquire), 1);
-        assert_eq!(sender.fallback_peer_count.load(Ordering::Acquire), 0);
+        assert_eq!(sender.shared.lane_peer_count.load(Ordering::Acquire), 1);
+        assert_eq!(sender.shared.fallback_peer_count.load(Ordering::Acquire), 0);
         sender.shutdown();
     }
 
@@ -465,8 +469,8 @@ mod tests {
             }
             peers.push((slot, data));
         }
-        assert_eq!(sender.lane_peer_count.load(Ordering::Acquire), 8);
-        assert_eq!(sender.fallback_peer_count.load(Ordering::Acquire), 1);
+        assert_eq!(sender.shared.lane_peer_count.load(Ordering::Acquire), 8);
+        assert_eq!(sender.shared.fallback_peer_count.load(Ordering::Acquire), 1);
         let message = Message::single("payload");
         sender.submitter().try_send(message.clone()).unwrap();
         let crate::engine::PeerDriverData::SendMessage(raw) = peers[8].1.try_recv().unwrap() else {
@@ -483,12 +487,12 @@ mod tests {
             .unwrap()
             .await
             .unwrap();
-        assert_eq!(sender.lane_peer_count.load(Ordering::Acquire), 8);
+        assert_eq!(sender.shared.lane_peer_count.load(Ordering::Acquire), 8);
         for id in 1..=9 {
             sender.connection_removed(id);
         }
-        assert_eq!(sender.lane_peer_count.load(Ordering::Acquire), 0);
-        assert_eq!(sender.fallback_peer_count.load(Ordering::Acquire), 0);
+        assert_eq!(sender.shared.lane_peer_count.load(Ordering::Acquire), 0);
+        assert_eq!(sender.shared.fallback_peer_count.load(Ordering::Acquire), 0);
         sender.shutdown();
     }
 }

@@ -1,11 +1,10 @@
 //! Inproc throughput and latency modes.
 
-use super::payload::bench_payload;
-use super::{bench_options, bench_recv_spin, latency_common, percentile, send_fast};
+use super::{StartStop, bench_options, bench_recv_spin, latency_common, send_fast};
+use crate::json_payload::bench_payload;
 use bytes::Bytes;
 use omq_tokio::{Endpoint, Message, Options, SocketType, TrySendError, blocking};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 pub(super) fn run_inproc(ctx: &omq_tokio::Context, name: String, size: usize, duration: Duration) {
@@ -67,16 +66,9 @@ pub(super) fn run_inproc_2ut(
     let payload = bench_payload(size);
     // Both threads start together; the receiver stops the sender when its
     // timed window ends.
-    let barrier = Arc::new(std::sync::Barrier::new(2));
-    let stop = Arc::new(AtomicBool::new(false));
-
-    let sender = spawn_2ut_sender(
-        push.clone(),
-        payload,
-        Arc::clone(&barrier),
-        Arc::clone(&stop),
-    );
-    let receiver = spawn_2ut_receiver(pull.clone(), barrier, Arc::clone(&stop), duration);
+    let signals = StartStop::new();
+    let sender = spawn_2ut_sender(push.clone(), payload, signals.clone());
+    let receiver = spawn_2ut_receiver(pull.clone(), signals, duration);
 
     let (count, elapsed) = receiver.join().expect("receiver thread");
     sender.join().expect("sender thread");
@@ -90,10 +82,13 @@ pub(super) fn run_inproc_2ut(
 fn spawn_2ut_sender(
     sender_push: blocking::Socket,
     payload: Bytes,
-    sender_barrier: Arc<std::sync::Barrier>,
-    sender_stop: Arc<AtomicBool>,
+    signals: StartStop,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
+        let StartStop {
+            barrier: sender_barrier,
+            stop: sender_stop,
+        } = signals;
         sender_barrier.wait();
         if payload.len() <= omq_tokio::message::MAX_INLINE_MESSAGE {
             loop {
@@ -126,11 +121,14 @@ fn spawn_2ut_sender(
 /// count and the measured window.
 fn spawn_2ut_receiver(
     receiver_pull: blocking::Socket,
-    receiver_barrier: Arc<std::sync::Barrier>,
-    receiver_stop: Arc<AtomicBool>,
+    signals: StartStop,
     duration: Duration,
 ) -> std::thread::JoinHandle<(u64, Duration)> {
     std::thread::spawn(move || {
+        let StartStop {
+            barrier: receiver_barrier,
+            stop: receiver_stop,
+        } = signals;
         receiver_barrier.wait();
         let start = Instant::now();
         let deadline = start + duration;
@@ -208,10 +206,5 @@ pub(super) fn run_inproc_latency(
     }
     let elapsed = t_wall.elapsed().as_secs_f64();
 
-    rtts.sort_unstable();
-    let p50 = percentile(&rtts, 50.0);
-    let p99 = percentile(&rtts, 99.0);
-    let p999 = percentile(&rtts, 99.9);
-    let max = percentile(&rtts, 100.0);
-    println!("{p50:.3} {p99:.3} {p999:.3} {max:.3} {iterations} 0 {elapsed:.6}");
+    latency_common::print_rtts(rtts, iterations, None, elapsed);
 }

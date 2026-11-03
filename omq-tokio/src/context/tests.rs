@@ -2,7 +2,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use super::{IoThreadPool, fit_context_name};
+use super::io_pool::{IoThreadPool, fit_context_name};
 
 fn thread_name(pool: &IoThreadPool, index: usize) -> String {
     let (name_tx, name_rx) = mpsc::channel();

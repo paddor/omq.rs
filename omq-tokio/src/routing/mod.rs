@@ -340,7 +340,7 @@ impl SendSubmitter {
 impl SendStrategy {
     pub(crate) fn with_compatibility(mut self, compatibility: SendCompatibility) -> Self {
         if let Self::FanOut(send) = &mut self {
-            send.compatibility = compatibility;
+            send.set_compatibility(compatibility);
         }
         self
     }
@@ -525,24 +525,24 @@ impl SendStrategy {
 
     /// Allocate a connect-side pre-ready pipe. The producer is immediately
     /// eligible for routing; the dialer keeps the consumer until a connection
-    /// completes the handshake.
-    pub(crate) fn make_connect_pipe(&mut self, route_id: u64) -> Option<SendPipeConsumer> {
-        match self {
-            Self::RoundRobin(s) => Some(s.make_connect_pipe(route_id)),
-            Self::Latency(s) => Some(s.make_connect_pipe(route_id)),
-            _ => None,
-        }
-    }
-
-    #[cfg(feature = "dart")]
-    pub(crate) fn make_dart_connect_pipe(
+    /// completes the handshake. DART sockets pass their type so the pipe
+    /// validates messages.
+    pub(crate) fn make_connect_pipe(
         &mut self,
         route_id: u64,
-        socket_type: SocketType,
+        #[cfg(feature = "dart")] dart: Option<SocketType>,
     ) -> Option<SendPipeConsumer> {
         match self {
-            Self::RoundRobin(s) => Some(s.make_dart_connect_pipe(route_id, socket_type)),
-            Self::Latency(s) => Some(s.make_dart_connect_pipe(route_id, socket_type)),
+            Self::RoundRobin(s) => Some(s.make_connect_pipe(
+                route_id,
+                #[cfg(feature = "dart")]
+                dart,
+            )),
+            Self::Latency(s) => Some(s.make_connect_pipe(
+                route_id,
+                #[cfg(feature = "dart")]
+                dart,
+            )),
             _ => None,
         }
     }
@@ -629,6 +629,18 @@ fn uses_latency_exclusive(t: SocketType, options: &Options) -> bool {
     !options.mechanism.has_frame_transform()
         && matches!(t, SocketType::Pair | SocketType::Channel)
         && options.workload_profile == Some(omq_proto::WorkloadProfile::Latency)
+}
+
+/// Connect-side pipes of DART sockets validate messages for their type.
+#[cfg(feature = "dart")]
+fn with_dart(
+    mut tx: crate::engine::SendPipeProducer,
+    dart: Option<SocketType>,
+) -> crate::engine::SendPipeProducer {
+    if let Some(kind) = dart {
+        tx.set_dart(kind);
+    }
+    tx
 }
 
 /// Recv-side policy.

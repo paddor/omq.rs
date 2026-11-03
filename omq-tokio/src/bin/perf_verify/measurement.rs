@@ -1,6 +1,12 @@
+use std::sync::{Arc, Barrier, mpsc};
+use std::thread;
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
+use omq_proto::flow::DrainBudget;
 use omq_tokio::Message;
+
+use super::SETTINGS;
 
 pub(super) const MEASURED_TAG: u8 = 0x5a;
 
@@ -122,6 +128,152 @@ pub(super) fn drain_ready(
     } else {
         result
     }
+}
+
+pub(super) fn payload(size: usize) -> Message {
+    tagged_payload(size, MEASURED_TAG)
+}
+
+pub(super) fn tagged_payload(size: usize, tag: u8) -> Message {
+    let bytes = vec![tag; size];
+    if size <= omq_tokio::message::MAX_INLINE_MESSAGE {
+        Message::from_slice(&bytes)
+    } else {
+        Message::single(Bytes::from(bytes))
+    }
+}
+
+pub(super) fn send_blocking_batch_until(
+    sock: &omq_tokio::blocking::Socket,
+    message: &Message,
+    deadline: Instant,
+) -> bool {
+    send_blocking_batch_until_with(sock, || message.clone(), deadline)
+}
+
+pub(super) fn send_blocking_batch_until_with(
+    sock: &omq_tokio::blocking::Socket,
+    mut message: impl FnMut() -> Message,
+    deadline: Instant,
+) -> bool {
+    if Instant::now() >= deadline {
+        return false;
+    }
+    let mut budget = DrainBudget::WORKER;
+    loop {
+        let mut msg = message();
+        let bytes = msg.byte_len();
+        loop {
+            match sock.try_send(msg) {
+                Ok(()) => break,
+                Err(omq_tokio::TrySendError::Full(returned)) => {
+                    if Instant::now() >= deadline {
+                        return false;
+                    }
+                    msg = returned;
+                    thread::yield_now();
+                }
+                Err(error) => panic!("perf send failed: {error}"),
+            }
+        }
+        if !budget.account(bytes) {
+            return true;
+        }
+    }
+}
+
+fn count_blocking(sock: &omq_tokio::blocking::Socket, window: Window) -> Received {
+    let mut counter = Counter::new(window);
+    loop {
+        let mut budget = DrainBudget::WORKER;
+        if drain_ready(
+            || sock.try_recv(),
+            &mut counter,
+            window,
+            &mut budget,
+            Instant::now,
+        ) == DrainResult::Deadline
+        {
+            break;
+        }
+        thread::yield_now();
+    }
+    counter.finish(Instant::now())
+}
+
+pub(super) fn transfer_blocking(
+    sender: &omq_tokio::blocking::Socket,
+    receiver: omq_tokio::blocking::Socket,
+    size: usize,
+) -> f64 {
+    transfer_blocking_many(sender, vec![receiver], size)
+}
+
+pub(super) fn count_blocking_many(
+    sockets: &[omq_tokio::blocking::Socket],
+    window: Window,
+) -> Received {
+    assert!(!sockets.is_empty(), "at least one receiver is required");
+    let mut counters: Vec<_> = sockets.iter().map(|_| Counter::new(window)).collect();
+    'receive: loop {
+        for (socket, counter) in sockets.iter().zip(&mut counters) {
+            let mut budget = DrainBudget::new(64, 64 * 1024);
+            if drain_ready(
+                || socket.try_recv(),
+                counter,
+                window,
+                &mut budget,
+                Instant::now,
+            ) == DrainResult::Deadline
+            {
+                break 'receive;
+            }
+        }
+        thread::yield_now();
+    }
+    let now = Instant::now();
+    counters
+        .into_iter()
+        .map(|counter| counter.finish(now))
+        .fold(
+            Received {
+                count: 0,
+                elapsed: now.duration_since(window.start),
+            },
+            Received::combine,
+        )
+}
+
+pub(super) fn transfer_blocking_many(
+    sender: &omq_tokio::blocking::Socket,
+    receivers: Vec<omq_tokio::blocking::Socket>,
+    size: usize,
+) -> f64 {
+    let (window_tx, window_rx) = mpsc::channel();
+    let ready = Arc::new(Barrier::new(2));
+    let receiver_ready = ready.clone();
+    let handle = thread::spawn(move || {
+        SETTINGS.affinity.pin(5);
+        receiver_ready.wait();
+        let window = window_rx.recv().expect("receive benchmark window");
+        if receivers.len() == 1 {
+            count_blocking(&receivers[0], window)
+        } else {
+            count_blocking_many(&receivers, window)
+        }
+    });
+    ready.wait();
+    let window = Window::new(Instant::now(), SETTINGS.warmup, SETTINGS.measure);
+    window_tx.send(window).expect("send benchmark window");
+    // Warm the actual data path while the receiver drains. Tags exclude any
+    // warmup backlog still in flight when measurement starts.
+    for (message, deadline) in [
+        (tagged_payload(size, 0), window.start),
+        (payload(size), window.end),
+    ] {
+        while send_blocking_batch_until(sender, &message, deadline) {}
+    }
+    handle.join().expect("receiver thread").rate()
 }
 
 #[cfg(test)]

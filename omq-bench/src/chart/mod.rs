@@ -11,3 +11,5 @@ mod pushpull_compression;
 pub(crate) mod quic;
 pub(crate) mod rate_limit;
 pub(crate) mod shm;
+
+pub(crate) use common::fmt_size;

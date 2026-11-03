@@ -33,6 +33,24 @@ struct Shared {
 }
 
 impl Shared {
+    /// Admission closed. Accepted values may still be queued.
+    #[inline]
+    fn is_closed(&self) -> bool {
+        self.admitted.load(Ordering::Acquire) & CLOSED != 0
+    }
+
+    /// No admitted value is reserved, queued, or awaiting release.
+    #[inline]
+    fn is_idle(&self) -> bool {
+        self.admitted.load(Ordering::Acquire) & !CLOSED == 0
+    }
+
+    /// Closed, and every admitted value was released.
+    #[inline]
+    fn is_drained(&self) -> bool {
+        self.admitted.load(Ordering::Acquire) == CLOSED
+    }
+
     fn notify_close_progress(&self) {
         if let Some(signal) = self.close_progress.get() {
             signal.notify_changed();
@@ -289,24 +307,12 @@ pub(crate) struct OwnedPermit(Admission);
 impl OwnedPermit {
     pub(crate) fn send(self, data: PeerDriverData) {
         let lane = self.0.lane.clone();
-        let mut producer = lane.producer.lock().expect("data producer poisoned");
-        let result = producer
-            .as_mut()
-            .expect("reserved producer")
-            .sender
-            .try_send(Queued {
-                data,
-                admission: self.0,
-            });
-        if let Some(signal) = lane.template.shared.endpoint.get() {
-            signal.mark();
-        }
-        // A payload destructor may reenter its owner. Unlock first.
-        drop(producer);
-        match result {
-            Ok(()) | Err(mpsc::TrySendError::Disconnected(_)) => {}
-            Err(mpsc::TrySendError::Full(_)) => unreachable!("reserved native data lane"),
-        }
+        let producer = lane.producer.lock().expect("data producer poisoned");
+        let queued = Queued {
+            data,
+            admission: self.0,
+        };
+        publish(producer, queued, lane.template.shared.endpoint.get());
     }
 }
 
@@ -315,29 +321,44 @@ impl Permit<'_> {
         match self {
             Self::Legacy(permit) => permit.send(data),
             Self::Owned {
-                mut producer,
+                producer,
                 admission,
             } => {
                 #[cfg(feature = "dart")]
                 let endpoint = admission.lane.template.shared.endpoint.get().cloned();
-                let result = producer
-                    .as_mut()
-                    .expect("reserved producer")
-                    .sender
-                    .try_send(Queued { data, admission });
-                #[cfg(feature = "dart")]
-                if let Some(signal) = endpoint {
-                    signal.mark();
-                }
-                // Payload destruction can enter a binding's buffer owner.
-                // Release the producer lock before dropping a disconnected send.
-                drop(producer);
-                match result {
-                    Ok(()) | Err(mpsc::TrySendError::Disconnected(_)) => {}
-                    Err(mpsc::TrySendError::Full(_)) => unreachable!("reserved data lane"),
-                }
+                publish(
+                    producer,
+                    Queued { data, admission },
+                    #[cfg(feature = "dart")]
+                    endpoint.as_ref(),
+                );
             }
         }
+    }
+}
+
+/// Push a reserved value into its lane and wake a DART endpoint.
+#[inline]
+fn publish(
+    mut producer: MutexGuard<'_, Option<Producer>>,
+    queued: Queued,
+    #[cfg(feature = "dart")] endpoint: Option<&Arc<super::signal::DataSignal>>,
+) {
+    let result = producer
+        .as_mut()
+        .expect("reserved producer")
+        .sender
+        .try_send(queued);
+    #[cfg(feature = "dart")]
+    if let Some(signal) = endpoint {
+        signal.mark();
+    }
+    // Payload destruction can enter a binding's buffer owner.
+    // Release the producer lock before dropping a disconnected send.
+    drop(producer);
+    match result {
+        Ok(()) | Err(mpsc::TrySendError::Disconnected(_)) => {}
+        Err(mpsc::TrySendError::Full(_)) => unreachable!("reserved data lane"),
     }
 }
 
@@ -389,25 +410,6 @@ fn channel_inner(
     )
 }
 
-#[cfg(feature = "dart")]
-impl Sender {
-    pub(crate) fn validate_dart(
-        &self,
-        message: &omq_proto::Message,
-        identity_prefix: bool,
-    ) -> omq_proto::Result<()> {
-        let kind = match self {
-            Self::Template(template) => template.dart,
-            Self::Lane(lane) => lane.template.dart,
-            Self::Legacy(_) => None,
-        };
-        if let Some(kind) = kind {
-            omq_proto::dart::validate_message(kind, message, identity_prefix)?;
-        }
-        Ok(())
-    }
-}
-
 impl Template {
     fn notify_registration(&self) {
         if self.shared.registration_hints.load(Ordering::Acquire)
@@ -427,7 +429,7 @@ impl Template {
 
 impl Lane {
     fn ready(&self, producer: &mut Option<Producer>) -> Result<bool, ReserveError> {
-        if self.template.shared.admitted.load(Ordering::Acquire) & CLOSED != 0 {
+        if self.template.shared.is_closed() {
             return Err(ReserveError::Closed(()));
         }
         if producer.is_none() {
@@ -474,33 +476,54 @@ impl Lane {
 }
 
 impl Sender {
+    /// The owned lane template; `None` for a legacy channel.
+    fn template(&self) -> Option<&Arc<Template>> {
+        match self {
+            Self::Template(template) => Some(template),
+            Self::Lane(lane) => Some(&lane.template),
+            Self::Legacy(_) => None,
+        }
+    }
+
     pub(crate) fn watch_close(&self, progress: &Arc<StateSignal>) {
-        let shared = match self {
-            Self::Template(template) => &template.shared,
-            Self::Lane(lane) => &lane.template.shared,
-            Self::Legacy(_) => return,
+        let Some(template) = self.template() else {
+            return;
         };
-        let existing = shared.close_progress.get_or_init(|| progress.clone());
+        let existing = template
+            .shared
+            .close_progress
+            .get_or_init(|| progress.clone());
         debug_assert!(Arc::ptr_eq(existing, progress));
     }
+
     #[cfg(feature = "dart")]
     pub(crate) fn observe_native_progress(&self, signal: &Arc<StateSignal>) {
-        let shared = match self {
-            Self::Template(template) => &template.shared,
-            Self::Lane(lane) => &lane.template.shared,
-            Self::Legacy(_) => unreachable!("native fanout uses owned data lanes"),
-        };
-        let existing = shared.native_progress.get_or_init(|| signal.clone());
+        let template = self
+            .template()
+            .expect("native fanout uses owned data lanes");
+        let existing = template
+            .shared
+            .native_progress
+            .get_or_init(|| signal.clone());
         debug_assert!(Arc::ptr_eq(existing, signal));
     }
 
     #[cfg(feature = "dart")]
     pub(crate) fn is_native_dart(&self) -> bool {
-        match self {
-            Self::Template(template) => template.dart.is_some(),
-            Self::Lane(lane) => lane.template.dart.is_some(),
-            Self::Legacy(_) => false,
+        self.template()
+            .is_some_and(|template| template.dart.is_some())
+    }
+
+    #[cfg(feature = "dart")]
+    pub(crate) fn validate_dart(
+        &self,
+        message: &omq_proto::Message,
+        identity_prefix: bool,
+    ) -> omq_proto::Result<()> {
+        if let Some(kind) = self.template().and_then(|template| template.dart) {
+            omq_proto::dart::validate_message(kind, message, identity_prefix)?;
         }
+        Ok(())
     }
 
     #[cfg(feature = "dart")]
@@ -552,22 +575,16 @@ impl Sender {
     pub(crate) fn is_closed(&self) -> bool {
         match self {
             Self::Legacy(sender) => sender.is_closed(),
-            Self::Template(template) => {
-                template.shared.admitted.load(Ordering::Acquire) & CLOSED != 0
-            }
-            Self::Lane(lane) => lane.template.shared.admitted.load(Ordering::Acquire) & CLOSED != 0,
+            Self::Template(template) => template.shared.is_closed(),
+            Self::Lane(lane) => lane.template.shared.is_closed(),
         }
     }
 
     pub(crate) fn is_empty(&self) -> bool {
         match self {
             Self::Legacy(sender) => sender.capacity() == sender.max_capacity(),
-            Self::Template(template) => {
-                template.shared.admitted.load(Ordering::Acquire) & !CLOSED == 0
-            }
-            Self::Lane(lane) => {
-                lane.template.shared.admitted.load(Ordering::Acquire) & !CLOSED == 0
-            }
+            Self::Template(template) => template.shared.is_idle(),
+            Self::Lane(lane) => lane.template.shared.is_idle(),
         }
     }
 
@@ -623,6 +640,36 @@ impl Sender {
             signal.changed_after(seen).await;
         }
     }
+
+    pub(crate) fn try_send(
+        &self,
+        data: PeerDriverData,
+    ) -> Result<(), legacy::error::TrySendError<PeerDriverData>> {
+        match self.try_reserve() {
+            Ok(permit) => {
+                permit.send(data);
+                Ok(())
+            }
+            Err(ReserveError::Full(())) => Err(legacy::error::TrySendError::Full(data)),
+            Err(ReserveError::Closed(())) => Err(legacy::error::TrySendError::Closed(data)),
+        }
+    }
+
+    pub(crate) async fn send(
+        &self,
+        mut data: PeerDriverData,
+    ) -> Result<(), legacy::error::SendError<PeerDriverData>> {
+        loop {
+            match self.try_send(data) {
+                Ok(()) => return Ok(()),
+                Err(legacy::error::TrySendError::Full(returned)) => data = returned,
+                Err(legacy::error::TrySendError::Closed(returned)) => {
+                    return Err(legacy::error::SendError(returned));
+                }
+            }
+            self.wait_capacity().await;
+        }
+    }
 }
 
 impl Receiver {
@@ -654,9 +701,7 @@ impl Receiver {
     pub(crate) fn is_empty(&self) -> bool {
         match self {
             Self::Legacy(receiver) => receiver.is_empty(),
-            Self::Owned { template, .. } => {
-                template.shared.admitted.load(Ordering::Acquire) & !CLOSED == 0
-            }
+            Self::Owned { template, .. } => template.shared.is_idle(),
         }
     }
 
@@ -675,7 +720,7 @@ impl Receiver {
                     .try_recv()
                     .map(|queued| (queued.data, Some(queued.admission)))
                     .map_err(|_| {
-                        if template.shared.admitted.load(Ordering::Acquire) == CLOSED {
+                        if template.shared.is_drained() {
                             legacy::error::TryRecvError::Disconnected
                         } else {
                             legacy::error::TryRecvError::Empty
@@ -700,7 +745,7 @@ impl Receiver {
             Self::Legacy(receiver) => receiver.poll_recv(cx),
             Self::Owned { receiver, template } => {
                 template.shared.drained.register(cx.waker());
-                if template.shared.admitted.load(Ordering::Acquire) == CLOSED {
+                if template.shared.is_drained() {
                     return Poll::Ready(None);
                 }
                 let result = receiver
@@ -731,38 +776,6 @@ impl Drop for Receiver {
 impl From<legacy::Sender<PeerDriverData>> for Sender {
     fn from(sender: legacy::Sender<PeerDriverData>) -> Self {
         Self::Legacy(sender)
-    }
-}
-
-impl Sender {
-    pub(crate) fn try_send(
-        &self,
-        data: PeerDriverData,
-    ) -> Result<(), legacy::error::TrySendError<PeerDriverData>> {
-        match self.try_reserve() {
-            Ok(permit) => {
-                permit.send(data);
-                Ok(())
-            }
-            Err(ReserveError::Full(())) => Err(legacy::error::TrySendError::Full(data)),
-            Err(ReserveError::Closed(())) => Err(legacy::error::TrySendError::Closed(data)),
-        }
-    }
-
-    pub(crate) async fn send(
-        &self,
-        mut data: PeerDriverData,
-    ) -> Result<(), legacy::error::SendError<PeerDriverData>> {
-        loop {
-            match self.try_send(data) {
-                Ok(()) => return Ok(()),
-                Err(legacy::error::TrySendError::Full(returned)) => data = returned,
-                Err(legacy::error::TrySendError::Closed(returned)) => {
-                    return Err(legacy::error::SendError(returned));
-                }
-            }
-            self.wait_capacity().await;
-        }
     }
 }
 

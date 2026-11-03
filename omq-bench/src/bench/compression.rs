@@ -1,8 +1,9 @@
+use crate::chart::fmt_size;
 use crate::cli::CompressionArgs;
 use crate::jsonl::{self, CompressionRow};
-use crate::process;
+use crate::{parse, process};
 
-use std::path::PathBuf;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
 const CHART_SIZES: &[u64] = &[
@@ -10,48 +11,10 @@ const CHART_SIZES: &[u64] = &[
     524_288,
 ];
 
-static mut PORT_COUNTER: u16 = 18500;
+static PORT_COUNTER: AtomicU16 = AtomicU16::new(18500);
 
 fn next_port() -> u16 {
-    unsafe {
-        let p = PORT_COUNTER;
-        PORT_COUNTER += 1;
-        p
-    }
-}
-
-fn size_label(n: u64) -> String {
-    if n >= 1_048_576 {
-        format!("{} MiB", n / 1_048_576)
-    } else if n >= 1024 {
-        format!("{} KiB", n / 1024)
-    } else {
-        format!("{n} B")
-    }
-}
-
-fn build_peer() -> PathBuf {
-    let bin = PathBuf::from("target/release/omq_bench_peer_tokio");
-    if bin.exists() {
-        return bin;
-    }
-    eprintln!("  building omq_bench_peer_tokio (lz4)...");
-    let status = std::process::Command::new("cargo")
-        .args([
-            "build",
-            "--release",
-            "-p",
-            "omq-tokio",
-            "--bin",
-            "omq_bench_peer_tokio",
-            "--features",
-            "lz4",
-            "-q",
-        ])
-        .status()
-        .expect("failed to run cargo build");
-    assert!(status.success(), "build failed");
-    bin
+    PORT_COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
 fn get_wire_size(binary: &str, transport: &str, size: u64, dict_file: Option<&str>) -> u64 {
@@ -111,35 +74,15 @@ fn run_cell(
         &[binary, "pull", &ep, &size_str, &dur_str],
         &env,
         Some(process::OTHER_CPU),
-        Duration::from_secs(duration as u64 + 30),
+        process::peer_timeout(duration),
     );
 
     let push_cpu = process::read_proc_cpu(push_proc.pid());
     push_proc.kill();
 
-    let output = pull_output?;
-    let parts: Vec<&str> = output.split_whitespace().collect();
-    if parts.len() < 2 {
-        return None;
-    }
-    let count: f64 = parts[0].parse().ok()?;
-    let elapsed: f64 = parts[1].parse().ok()?;
-    let pull_cpu: f64 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0.0);
-    if elapsed <= 0.0 || count <= 0.0 {
-        return None;
-    }
-    let msgs_s = count / elapsed;
-    let mbps = (count * size as f64) / elapsed / 1_000_000.0;
-    let cpu_time = push_cpu + pull_cpu;
-    Some((msgs_s, mbps, cpu_time))
-}
-
-fn make_run_id() -> String {
-    let output = std::process::Command::new("date")
-        .args(["-u", "+%Y%m%dT%H%M%SZ"])
-        .output()
-        .expect("failed to run date");
-    String::from_utf8_lossy(&output.stdout).trim().to_string()
+    let result = parse::parse_throughput(&pull_output?, size)?;
+    let cpu_time = push_cpu + result.pull_cpu.unwrap_or(0.0);
+    Some((result.msgs_s, result.mbps, cpu_time))
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -151,9 +94,10 @@ pub(crate) fn run(args: CompressionArgs) {
     };
 
     let transports: Vec<&str> = args.transports.split(',').collect();
-    let binary = build_peer();
+    eprintln!("  building omq_bench_peer_tokio (lz4)...");
+    let binary = process::build_omq_peer("omq_bench_peer_tokio", &["lz4"]);
     let binary_str = binary.to_str().unwrap();
-    let run_id = make_run_id();
+    let run_id = super::make_run_id(None);
     let jsonl_path = jsonl::cache_dir().join("results_compression_tokio.jsonl");
     let sweep = Sweep {
         binary: binary_str,
@@ -210,7 +154,7 @@ impl Sweep<'_> {
             eprintln!("\n=== {transport} {pattern} ===");
 
             for &size in self.sizes {
-                eprint!("{:>8}", size_label(size));
+                eprint!("{:>8}", fmt_size(size));
 
                 let wire_bytes = get_wire_size(self.binary, transport, size, dict_file);
 

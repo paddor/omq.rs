@@ -75,10 +75,10 @@ impl ProbePeer {
                 inbox,
                 data_inbox,
                 cancel,
-                transmit_slot: Some(slot),
-                direct_tcp_writer: None,
-                send_pipe: None,
-                inproc: None,
+                routes: crate::engine::driver::DirectRoutes {
+                    transmit_slot: Some(slot),
+                    ..Default::default()
+                },
             },
             remote_inbox,
             tasks: [

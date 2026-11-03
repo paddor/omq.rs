@@ -185,68 +185,37 @@ async fn producer_eof_preserves_the_final_send_pipe_batch() {
 
 #[tokio::test]
 async fn close_interrupts_stalled_outbound_write() {
-    let (server_stream, client_stream) = tokio::io::duplex(64);
-    let server_connection = Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pull));
-    let client_connection = Connection::new(
-        ConnectionConfig::new(Role::Client, SocketType::Push).identity(Bytes::from_static(b"c")),
-    );
-
-    let (server_inbox_tx, server_inbox_rx) = mpsc::channel(16);
-    let (client_inbox_tx, client_inbox_rx) = mpsc::channel(16);
-    let (_server_data_tx, server_data_rx) = mpsc::channel(16);
-    let (client_data_tx, client_data_rx) = mpsc::channel(16);
-    let (server_events_tx, mut server_events_rx) = mpsc::channel(1);
-    let (client_events_tx, mut client_events_rx) = mpsc::channel(1);
-    let server_cancel = CancellationToken::new();
-    let client_cancel = CancellationToken::new();
-
-    let server = ConnectionDriver::new(
-        server_stream,
-        server_connection,
-        server_inbox_rx,
-        server_events_tx,
-        0,
-        server_cancel.clone(),
-    )
-    .with_data_inbox(server_data_rx);
-    let client = ConnectionDriver::new(
-        client_stream,
-        client_connection,
-        client_inbox_rx,
-        client_events_tx,
-        1,
-        client_cancel.clone(),
-    )
-    .with_data_inbox(client_data_rx);
-    let server_task = tokio::spawn(Box::pin(server.run()));
-    let mut client_task = tokio::spawn(Box::pin(client.run()));
-    activate_after_handshakes(
-        [&mut client_events_rx, &mut server_events_rx],
-        [&client_inbox_tx, &server_inbox_tx],
-    )
-    .await;
+    let spec = PairSpec {
+        duplex: 64,
+        server: ConnectionConfig::new(Role::Server, SocketType::Pull),
+        client: ConnectionConfig::new(Role::Client, SocketType::Push)
+            .identity(Bytes::from_static(b"c")),
+        ..PairSpec::pair(1, 16)
+    };
+    let (server, client, mut ends) = pair_drivers(spec);
+    let (server_task, mut client_task) = start_pair(server, client, &mut ends).await;
 
     // Nothing drains server events, so the server stops reading and the
     // client writer stalls on the 64-byte duplex.
     let payload = Message::single(Bytes::from(vec![0xA5; 1024 * 1024]));
-    send_copies(&client_data_tx, &payload, 3).await;
+    send_copies(&ends.client_data, &payload, 3).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(!client_task.is_finished(), "writer did not reach the stall");
-    client_inbox_tx
+    ends.client_control
         .send(PeerDriverCommand::Close)
         .await
         .unwrap();
 
     let stopped = tokio::time::timeout(Duration::from_millis(250), &mut client_task).await;
     if stopped.is_err() {
-        client_cancel.cancel();
+        ends.client_cancel.cancel();
     }
-    server_cancel.cancel();
+    ends.server_cancel.cancel();
     assert!(stopped.is_ok(), "Close was trapped behind a stalled write");
 
     // No actor drains server events here. Release a queued message so the
     // driver can report Closed even when that one-slot channel is full.
-    drop(server_events_rx);
+    drop(ends.server_events);
     let _ = tokio::time::timeout(Duration::from_secs(1), server_task)
         .await
         .expect("server teardown stalled")
@@ -739,9 +708,7 @@ async fn send_pipe_to_yring_large_payload_harness<S, C>(
 
     let (server, client, mut ends) =
         large_payload_drivers(server_stream, client_stream, sink, send_pipe_rx);
-    let server_task = tokio::spawn(Box::pin(server.run()));
-    let client_task = tokio::spawn(Box::pin(client.run()));
-    ends.activate().await;
+    let (server_task, client_task) = start_pair(server, client, &mut ends).await;
 
     for seq in 0..msgs {
         let mut msg = Message::single(patterned_payload(MSG_SIZE, seq as u64));
@@ -764,8 +731,8 @@ async fn send_pipe_to_yring_large_payload_harness<S, C>(
     }
     receiver.drain_until(msgs, true).await;
 
-    ends.c_cancel.cancel();
-    ends.s_cancel.cancel();
+    ends.client_cancel.cancel();
+    ends.server_cancel.cancel();
     let client_result = tokio::time::timeout(Duration::from_secs(5), client_task)
         .await
         .expect("client driver did not stop")
@@ -778,81 +745,30 @@ async fn send_pipe_to_yring_large_payload_harness<S, C>(
     server_result.expect("server driver failed");
 }
 
-/// Test ends of the large-payload PULL server and PUSH client drivers.
-struct LargeEnds {
-    s_inbox_tx: mpsc::Sender<PeerDriverCommand>,
-    c_inbox_tx: mpsc::Sender<PeerDriverCommand>,
-    s_evt_rx: EventAdapter,
-    c_evt_rx: EventAdapter,
-    s_cancel: CancellationToken,
-    c_cancel: CancellationToken,
-}
-
-impl LargeEnds {
-    /// Wait for both handshakes, then open both data planes.
-    async fn activate(&mut self) {
-        self.c_evt_rx.recv().await.unwrap();
-        self.s_evt_rx.recv().await.unwrap();
-        for inbox in [&self.c_inbox_tx, &self.s_inbox_tx] {
-            inbox
-                .send(PeerDriverCommand::ActivateDataPlane)
-                .await
-                .unwrap();
-        }
-    }
-}
-
 /// A PULL server that receives into `sink` with large-frame reads, and a
 /// PUSH client that sends from `send_pipe`.
-fn large_payload_drivers<S, C>(
+fn large_payload_drivers<S: DriverStream, C: DriverStream>(
     server_stream: S,
     client_stream: C,
     sink: RecvSink,
     send_pipe: crate::engine::SendPipeConsumer,
-) -> (ConnectionDriver<S>, ConnectionDriver<C>, LargeEnds)
-where
-    S: DriverStream,
-    C: DriverStream,
-{
-    let (s_inbox_tx, s_inbox_rx) = mpsc::channel(16);
-    let (c_inbox_tx, c_inbox_rx) = mpsc::channel(16);
-    let (s_evt_tx, s_evt_rx) = mpsc::channel(16);
-    let (c_evt_tx, c_evt_rx) = mpsc::channel(16);
-    let ends = LargeEnds {
-        s_inbox_tx,
-        c_inbox_tx,
-        s_evt_rx: EventAdapter { rx: s_evt_rx },
-        c_evt_rx: EventAdapter { rx: c_evt_rx },
-        s_cancel: CancellationToken::new(),
-        c_cancel: CancellationToken::new(),
-    };
-
-    let server = ConnectionDriver::with_config(
-        server_stream,
-        Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pull)),
-        s_inbox_rx,
-        s_evt_tx,
-        0,
-        ends.s_cancel.clone(),
-        PeerDriverConfig {
+) -> (ConnectionDriver<S>, ConnectionDriver<C>, PairEnds) {
+    let spec = PairSpec {
+        server: ConnectionConfig::new(Role::Server, SocketType::Pull),
+        client: ConnectionConfig::new(Role::Client, SocketType::Push)
+            .identity(Bytes::from_static(b"c")),
+        server_driver: PeerDriverConfig {
             large_message_threshold: 128 * 1024,
             ..PeerDriverConfig::default()
         },
+        ..PairSpec::pair(16, 16)
+    };
+    let (server, client, ends) = pair_drivers_over(server_stream, client_stream, spec);
+    (
+        server.with_recv_sink(sink),
+        client.with_send_pipe(send_pipe),
+        ends,
     )
-    .with_recv_sink(sink);
-    let client = ConnectionDriver::new(
-        client_stream,
-        Connection::new(
-            ConnectionConfig::new(Role::Client, SocketType::Push)
-                .identity(Bytes::from_static(b"c")),
-        ),
-        c_inbox_rx,
-        c_evt_tx,
-        0,
-        ends.c_cancel.clone(),
-    )
-    .with_send_pipe(send_pipe);
-    (server, client, ends)
 }
 
 #[tokio::test]

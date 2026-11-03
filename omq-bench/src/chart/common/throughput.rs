@@ -2,10 +2,10 @@
 
 use super::legend::{draw_legend_table_with_versions, legend_table_height};
 use super::{
-    AXIS_COLOR, BACKGROUND_COLOR, ChartSpec, CpuColumns, FairnessMap, GRID_COLOR, Impl,
-    LARGE_START, LegendVersionMode, MsgAxisMode, Panel, SMALL_CUTOFF, TEXT_COLOR, ThroughputRow,
-    ValMap, append_row_titles, detect_hardware, draw_legend_table, draw_line_with_dots,
-    draw_whiskers, fmt_gbps, fmt_msgs, fmt_size, nice_axis, postprocess_svg, series_points,
+    BACKGROUND_COLOR, ChartSpec, CpuColumns, FairnessMap, Impl, LARGE_START, LegendVersionMode,
+    MsgAxisMode, Panel, SMALL_CUTOFF, TEXT_COLOR, ThroughputRow, ValMap, append_row_titles,
+    detect_hardware, draw_legend_table, draw_line_with_dots, draw_size_mesh, draw_whiskers,
+    fmt_gbps, fmt_msgs, has_point, nice_axis, postprocess_svg, series_points,
 };
 use plotters::prelude::*;
 
@@ -21,75 +21,38 @@ enum GbsScale {
 
 /// Axis and legend options of a dual-panel throughput chart.
 #[derive(Clone, Copy)]
-struct DualPanelStyle {
+pub(crate) struct DualPanelStyle {
     msg_axis: MsgAxisMode,
     gbs_scale: GbsScale,
     version_mode: LegendVersionMode,
 }
 
-pub(crate) fn draw_throughput_dual_panel(
-    spec: &ChartSpec<'_>,
-    tput: &ValMap,
-    msgs: &ValMap,
-    columns: &CpuColumns<'_>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let style = DualPanelStyle {
+impl DualPanelStyle {
+    /// Auto msg/s axis, linear GB/s axis, no version column.
+    pub(crate) const PLAIN: Self = Self {
         msg_axis: MsgAxisMode::Auto,
         gbs_scale: GbsScale::Linear,
         version_mode: LegendVersionMode::Hide,
     };
-    draw_dual_panel(spec, tput, msgs, columns, style)
-}
 
-pub(crate) fn draw_throughput_dual_panel_with_versions(
-    spec: &ChartSpec<'_>,
-    tput: &ValMap,
-    msgs: &ValMap,
-    columns: &CpuColumns<'_>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let style = DualPanelStyle {
-        msg_axis: MsgAxisMode::Auto,
-        gbs_scale: GbsScale::Linear,
+    /// `PLAIN` with library versions for the other implementations.
+    pub(crate) const WITH_VERSIONS: Self = Self {
         version_mode: LegendVersionMode::ShowOtherImpls,
+        ..Self::PLAIN
     };
-    draw_dual_panel(spec, tput, msgs, columns, style)
-}
 
-pub(crate) fn draw_throughput_dual_panel_fixed_2m_msgs_with_versions(
-    spec: &ChartSpec<'_>,
-    tput: &ValMap,
-    msgs: &ValMap,
-    columns: &CpuColumns<'_>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let style = DualPanelStyle {
+    /// `WITH_VERSIONS` with the msg/s axis fixed at 2M.
+    pub(crate) const FIXED_2M_MSGS_WITH_VERSIONS: Self = Self {
         msg_axis: MsgAxisMode::Fixed2M,
-        gbs_scale: GbsScale::Linear,
-        version_mode: LegendVersionMode::ShowOtherImpls,
+        ..Self::WITH_VERSIONS
     };
-    draw_dual_panel(spec, tput, msgs, columns, style)
-}
 
-/// Same as `draw_throughput_dual_panel` but the GB/s panel uses a log10
-/// Y axis. Used for inproc where throughput spans orders of magnitude.
-pub(crate) fn draw_throughput_dual_panel_log_gbs(
-    spec: &ChartSpec<'_>,
-    tput: &ValMap,
-    msgs: &ValMap,
-    columns: &CpuColumns<'_>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let style = DualPanelStyle {
-        msg_axis: MsgAxisMode::Auto,
+    /// `PLAIN` with a log10 GB/s axis, for inproc where throughput spans
+    /// orders of magnitude.
+    pub(crate) const LOG_GBS: Self = Self {
         gbs_scale: GbsScale::Log,
-        version_mode: LegendVersionMode::Hide,
+        ..Self::PLAIN
     };
-    draw_dual_panel(spec, tput, msgs, columns, style)
-}
-
-/// Whether `values` holds a point for `key` at any of `sizes`.
-fn has_point(values: &ValMap, sizes: &[u64], key: &str) -> bool {
-    sizes
-        .iter()
-        .any(|s| values.get(s).is_some_and(|m| m.contains_key(key)))
 }
 
 /// Splits sizes into the msg/s panel and the GB/s panel. The ranges overlap
@@ -129,7 +92,7 @@ fn peak_gbs(sizes: &[u64], tput: &ValMap) -> f64 {
 
 /// Draws msg/s for small sizes on the left, GB/s for large sizes on the
 /// right, and the legend table below both panels.
-fn draw_dual_panel(
+pub(crate) fn draw_throughput_dual_panel(
     spec: &ChartSpec<'_>,
     tput: &ValMap,
     msgs: &ValMap,
@@ -211,22 +174,7 @@ fn draw_msgs_panel(
         .margin_right(20)
         .build_cartesian_2d(0.0..(sizes.len() - 1) as f64, 0.0..msgs_max)?;
 
-    chart
-        .configure_mesh()
-        .x_labels(sizes.len())
-        .x_label_formatter(&|v| {
-            sizes
-                .get(v.round() as usize)
-                .map_or(String::new(), |&s| fmt_size(s))
-        })
-        .y_labels(n_ticks + 1)
-        .y_label_formatter(&|v| fmt_msgs(*v))
-        .y_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
-        .x_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
-        .light_line_style(TRANSPARENT)
-        .bold_line_style(GRID_COLOR)
-        .axis_style(AXIS_COLOR)
-        .draw()?;
+    draw_size_mesh(&mut chart, sizes, Some(n_ticks + 1), &|v| fmt_msgs(*v))?;
 
     if let Some(fair) = fairness {
         draw_whiskers(&mut chart, panel, msgs, fair, std::convert::identity);
@@ -276,22 +224,7 @@ fn draw_gbs_panel(
         .margin_right(10)
         .build_cartesian_2d(0.0..(sizes.len() - 1) as f64, 0.0..gbs_max)?;
 
-    chart
-        .configure_mesh()
-        .x_labels(sizes.len())
-        .x_label_formatter(&|v| {
-            sizes
-                .get(v.round() as usize)
-                .map_or(String::new(), |&s| fmt_size(s))
-        })
-        .y_labels(n_ticks + 1)
-        .y_label_formatter(&|v| fmt_gbps(*v))
-        .y_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
-        .x_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
-        .light_line_style(TRANSPARENT)
-        .bold_line_style(GRID_COLOR)
-        .axis_style(AXIS_COLOR)
-        .draw()?;
+    draw_size_mesh(&mut chart, sizes, Some(n_ticks + 1), &|v| fmt_gbps(*v))?;
 
     if let Some(fair) = fairness {
         // Whiskers scale around the plotted value, so they need GB/s too.
@@ -392,25 +325,8 @@ fn draw_gbs_panel_log(
         .margin_right(10)
         .build_cartesian_2d(0.0..(sizes.len() - 1) as f64, lo..hi)?;
 
-    chart
-        .configure_mesh()
-        .x_labels(sizes.len())
-        .y_labels((hi - lo) as usize + 1)
-        .x_label_formatter(&|v| {
-            sizes
-                .get(v.round() as usize)
-                .map_or(String::new(), |&s| fmt_size(s))
-        })
-        .y_label_formatter(&|v| {
-            let gbs = 10.0_f64.powf(*v);
-            fmt_gbps(gbs)
-        })
-        .y_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
-        .x_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
-        .light_line_style(TRANSPARENT)
-        .bold_line_style(GRID_COLOR)
-        .axis_style(AXIS_COLOR)
-        .draw()?;
+    let decades = Some((hi - lo) as usize + 1);
+    draw_size_mesh(&mut chart, sizes, decades, &|v| fmt_gbps(10.0_f64.powf(*v)))?;
 
     if let Some(fairness) = fairness {
         draw_whiskers(&mut chart, panel, &gbs_tput, fairness, f64::log10);

@@ -13,7 +13,8 @@
 //! waits behind another and nothing polls on a timer.
 
 use crate::consts;
-use crate::poll::{ZmqFd, ZmqPollItem, recv_ready};
+use crate::error::c_try;
+use crate::poll::{ZmqPollItem, invalid_fd, recv_ready};
 use crate::send_recv::{
     SendMessageAttempt, SpawnedSend, map_send_err, spawn_send_message, try_recv_message,
     try_send_message, zmq_recv,
@@ -26,17 +27,6 @@ const ZMQ_POLLIN: libc::c_short = consts::ZMQ_POLLIN as libc::c_short;
 const ZMQ_POLLOUT: libc::c_short = consts::ZMQ_POLLOUT as libc::c_short;
 const ZMQ_DONTWAIT: i32 = consts::ZMQ_DONTWAIT;
 const DEFAULT_PROXY_BURST_SIZE: usize = omq_tokio::proxy::DEFAULT_PROXY_BURST_SIZE;
-
-fn invalid_fd() -> ZmqFd {
-    #[cfg(unix)]
-    {
-        -1
-    }
-    #[cfg(windows)]
-    {
-        ZmqFd::MAX
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Direction {
@@ -467,9 +457,6 @@ pub extern "C" fn zmq_proxy_steerable(
     capture: *mut c_void,
     control: *mut c_void,
 ) -> libc::c_int {
-    let proxy = match ProxyCtx::new(frontend, backend, capture, control) {
-        Ok(proxy) => proxy,
-        Err(e) => return crate::error::fail(e),
-    };
+    let proxy = c_try!(ProxyCtx::new(frontend, backend, capture, control));
     proxy.run()
 }

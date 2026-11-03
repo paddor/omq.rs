@@ -1,9 +1,11 @@
-//! Benchmark payloads: random bytes or JSON records.
+//! Benchmark payloads for both bench peers: filler bytes or JSON
+//! access-log records.
 
 use bytes::Bytes;
 use std::fmt::Write as _;
 
-pub(super) fn bench_payload(size: usize) -> Bytes {
+/// `size` filler bytes, or JSON records with `OMQ_BENCH_PAYLOAD=json`.
+pub(crate) fn bench_payload(size: usize) -> Bytes {
     if std::env::var("OMQ_BENCH_PAYLOAD").as_deref() == Ok("json") {
         json_payload_random(size)
     } else {
@@ -11,9 +13,16 @@ pub(super) fn bench_payload(size: usize) -> Bytes {
     }
 }
 
-fn json_payload_random(target_bytes: usize) -> Bytes {
+/// JSON records cut to `target_bytes`, seeded from `OMQ_BENCH_JSON_SEED` or
+/// `/dev/urandom`.
+pub(crate) fn json_payload_random(target_bytes: usize) -> Bytes {
+    json_payload_seeded(target_bytes, rand_seed())
+}
+
+/// JSON records cut to `target_bytes`, from a fixed nonzero `seed`.
+pub(crate) fn json_payload_seeded(target_bytes: usize, seed: u32) -> Bytes {
     let mut out = String::with_capacity(target_bytes + 512);
-    let mut state: u32 = rand_seed();
+    let mut state: u32 = seed;
     while out.len() < target_bytes {
         json_record(&mut out, &mut state);
     }

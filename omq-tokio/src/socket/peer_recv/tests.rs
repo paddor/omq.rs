@@ -2,6 +2,7 @@ use super::*;
 use crate::socket::recv::{
     BlockingRecvWaker, RecvPipeEnds, RecvTuning, SpscAwareRecv, SpscHandles, recv_pipe,
 };
+use crate::test_util::poll_once;
 
 impl Default for RecvLimits {
     fn default() -> Self {
@@ -192,11 +193,6 @@ fn ordinary_receive(
     };
     let receiver = SpscAwareRecv::new(ends, handles, RecvTuning::default());
     (routes, receiver, pipe)
-}
-
-fn poll_once<F: std::future::Future>(future: F) -> std::task::Poll<F::Output> {
-    let waker = std::task::Waker::noop();
-    std::pin::pin!(future).poll(&mut std::task::Context::from_waker(waker))
 }
 
 fn register(routes: &mut PeerRecvRoutes, identity: &'static str) -> PeerRecvSink {

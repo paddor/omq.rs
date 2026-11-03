@@ -120,6 +120,7 @@ impl ExclusiveSend {
     #[expect(clippy::needless_pass_by_value)]
     pub(crate) fn connection_added(&mut self, peer_id: u64, handle: ActorPeerDriverHandle) {
         let send_pipe = handle
+            .routes
             .send_pipe
             .as_ref()
             .and_then(|pipe| pipe.lock().expect("exclusive send pipe").take());
@@ -176,10 +177,10 @@ mod tests {
             inbox: tokio::sync::mpsc::channel(1).0.into(),
             data_inbox: tokio::sync::mpsc::channel(1).0.into(),
             cancel: tokio_util::sync::CancellationToken::new(),
-            transmit_slot: None,
-            direct_tcp_writer: None,
-            send_pipe: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(producer)))),
-            inproc: None,
+            routes: crate::engine::driver::DirectRoutes {
+                send_pipe: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(producer)))),
+                ..Default::default()
+            },
         }
     }
 

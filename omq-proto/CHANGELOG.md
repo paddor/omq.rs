@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `FrameBuffer::frame_ws` takes a `WsRole` instead of a masking flag, and
+  `proto::frame::encode_message_flat_ws` takes a `WsRole`. A client role
+  masks. Both use the codec's WebSocket header encoder.
+- `fan_out_frame::FanOutEncoder` replaces `build_fan_out_frame`,
+  `encode_fan_out_message`, `finish_fan_out_frame` and `clear_fan_out_frame`.
+  It owns the frame buffer and chunk list, and takes target count and copy
+  budget as one `FanOutCost`.
+- `Endpoint::without_compression` replaces `Endpoint::underlying_tcp` and
+  `underlying_ws`; `Endpoint::rewrap` replaces `rewrap_tcp` and `rewrap_ws`.
+  Both handle every carrier and need no `ws` feature.
+
+### Removed
+
+- `FrameBuffer::frame_rep` and `FrameBuffer::take_arena_bytes`. Nothing
+  used them outside tests. `FrameBuffer::frame_prefixed_inline` and
+  `frame_prefixed_gather` are private; call `frame_prefixed`.
+- `FrameBuffer::put_back_unwritten`. Nothing used it outside tests.
+- `proto::frame::encode_message_flat_ws_masked`. Call `encode_message_flat_ws`
+  with `WsRole::Client`.
+
+### Performance
+
+- Small single-part messages are decoded straight into the receive queue
+  slot. TCP 16 B PUSH/PULL is about 6% faster, PUB/SUB about 12%.
+
 ## [0.37.0] - 2026-10-29
 
 ### Breaking

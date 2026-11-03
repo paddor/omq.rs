@@ -2,34 +2,86 @@ use std::sync::{Arc, Mutex};
 
 use super::{
     AnyStream, ConnectionConfig, ConnectionDriver, Endpoint, PeerDriverConfig, PeerDriverHandle,
-    PeerEntry, PeerIdent, Role, SocketDriver, SocketType, ZmtpConnection, peer_ident_socket_addr,
+    PeerEntry, PeerHandshake, PeerIdent, PeerOrigin, Role, Side, SocketDriver, SocketType,
+    ZmtpConnection, peer_ident_socket_addr,
 };
-use crate::engine::codec::{CodecProfile, CodecSetup};
+use crate::engine::codec::CodecSetup;
 use crate::engine::driver::{ActorLink, ReceiveProfile};
 use crate::engine::framing::WireFraming;
 use crate::engine::send_pipe::SendPipeProducerHandle;
-use crate::engine::{SendPipeConsumer, SendPipeMode};
-use omq_proto::{Options, WorkloadProfile};
+use crate::engine::{SendPipeConsumer, SendPipeMode, SendPipeProducer};
+use omq_proto::Options;
 
 mod inproc;
 mod recv_bypass;
+mod stream;
+mod wire;
 
 pub(super) use inproc::spawn_inproc_peer;
-use recv_bypass::{attach_recv_bypass, can_bypass_actor_recv, server_routing_id};
+pub(super) use recv_bypass::server_routing_id;
+#[cfg(feature = "dart")]
+pub(super) use recv_bypass::{FaninProducer, fanin_recv_sink, wrap_routed_sink};
+use recv_bypass::{attach_recv_bypass, can_bypass_actor_recv};
+use wire::{
+    TransmitProfile, WireCarrier, WireProfile, attach_direct_writer, attach_transmit_slot,
+    build_transmit_slot, local_latency_polling, peer_network, prepare_wire_carrier,
+    reserve_peer_io, take_carrier_io_lease,
+};
 
 const PEER_INBOX_CAP: usize = 64;
 
+/// A new peer's actor handle plus the driver ends of its inboxes. The
+/// handle starts without direct routes.
+pub(super) struct PeerChannels {
+    pub(super) handle: PeerDriverHandle,
+    pub(super) control: crate::engine::control_inbox::Receiver,
+    pub(super) data: crate::engine::data_inbox::Receiver,
+}
+
+impl PeerChannels {
+    pub(super) fn new(
+        (data_tx, data): (
+            crate::engine::data_inbox::Sender,
+            crate::engine::data_inbox::Receiver,
+        ),
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Self {
+        let (control_tx, control) = crate::engine::control_inbox::channel(PEER_INBOX_CAP);
+        Self {
+            handle: PeerDriverHandle::new(control_tx, data_tx, cancel),
+            control,
+            data,
+        }
+    }
+}
+
 pub(super) struct PeerSetup {
     pub(super) endpoint: Endpoint,
-    pub(super) is_server: bool,
+    pub(super) ident: PeerIdent,
+    pub(super) side: Side,
     pub(super) route_id: u64,
     pub(super) send_pipe_rx: Option<SendPipeConsumer>,
     pub(super) options: Arc<Options>,
 }
 
+impl PeerSetup {
+    /// Origin of the peer this setup registers, without socket addresses.
+    pub(super) fn into_origin(self, io_thread: usize) -> PeerOrigin {
+        PeerOrigin {
+            options: self.options,
+            endpoint: self.endpoint,
+            side: self.side,
+            route_id: self.route_id,
+            ident: self.ident,
+            local_address: None,
+            remote_address: None,
+            io_thread,
+        }
+    }
+}
+
 pub(super) struct ByteStreamConnection {
     pub(super) stream: AnyStream,
-    pub(super) peer_ident: PeerIdent,
     pub(super) peer: PeerSetup,
     pub(super) leftover: bytes::Bytes,
     pub(super) setup: Option<crate::transport::setup::SetupState>,
@@ -48,9 +100,7 @@ pub(super) fn spawn_byte_stream_connection(socket: &mut SocketDriver, conn: Byte
         return;
     };
     socket.peers.insert(peer_id, entry);
-    let (completion, receiver) =
-        crate::engine::peer_completion::CompletionProgress::reserve(peer_id);
-    socket.mail.peer_completions.push(receiver);
+    let completion = socket.reserve_completion(peer_id);
     spawn_wire_task(
         socket,
         peer_id,
@@ -61,7 +111,6 @@ pub(super) fn spawn_byte_stream_connection(socket: &mut SocketDriver, conn: Byte
 
 struct WireCodecSetup {
     stream: AnyStream,
-    peer_ident: PeerIdent,
     peer: PeerSetup,
     setup: Option<crate::transport::setup::SetupState>,
     framing: WireFraming,
@@ -73,38 +122,18 @@ fn prepare_wire_codec(
     socket: &mut SocketDriver,
     ByteStreamConnection {
         stream,
-        peer_ident,
         peer,
         leftover,
         setup,
     }: ByteStreamConnection,
 ) -> Option<WireCodecSetup> {
-    let framing = wire_framing(&stream, peer.is_server);
-    let Ok(transforms) = build_message_transforms(socket, &peer, &peer_ident) else {
+    let framing = wire_framing(&stream, peer.side);
+    let Ok(transforms) = build_message_transforms(socket, &peer) else {
         return None;
     };
 
-    // Compressed wire messages can exceed the logical limit; the decoder
-    // reports the wire allowance that matches it.
-    let receive_wire_limit = if matches!(peer.endpoint, Endpoint::Shm(_)) {
-        const REFERENCE_WIRE_BUDGET: usize = 1024;
-        // References are small, but a bounded automatic pool may carry an
-        // ordinary body on the Unix stream. Decoded SHM sizes are checked
-        // separately, including group/identity envelopes.
-        peer.options.max_message_size.map(|maximum| {
-            maximum
-                .saturating_add(std::mem::size_of::<u8>())
-                .max(REFERENCE_WIRE_BUDGET)
-        })
-    } else {
-        transforms
-            .as_ref()
-            .map_or(peer.options.max_message_size, |setup| {
-                setup.decoder.max_wire_message_size()
-            })
-    };
-
-    let mut codec = build_codec(socket, &peer, framing, &peer_ident, receive_wire_limit);
+    let wire_limit = receive_wire_limit(&peer, transforms.as_ref());
+    let mut codec = build_codec(socket, &peer, framing, wire_limit);
     // With transforms the decoder owns payload allocation, not the codec.
     if transforms.is_none()
         && let Some(pool) = &peer.options.recv_payload_pool
@@ -119,7 +148,6 @@ fn prepare_wire_codec(
 
     Some(WireCodecSetup {
         stream,
-        peer_ident,
         peer,
         setup,
         framing,
@@ -128,62 +156,32 @@ fn prepare_wire_codec(
     })
 }
 
-/// Per-connection flags that steer wire driver setup.
-#[derive(Clone, Copy)]
-struct WireProfile {
-    workload: WorkloadProfile,
-    /// Latency workload on a mechanism without a frame transform. Enables
-    /// direct writes, local polling, and small arenas.
-    latency: bool,
-    /// Compression or SHM rewrites outbound payloads.
-    has_transforms: bool,
-}
-
-impl WireProfile {
-    fn new(socket: &SocketDriver, endpoint: &Endpoint, transforms: Option<&CodecSetup>) -> Self {
-        let workload = workload_profile(socket);
-        Self {
-            workload,
-            latency: workload == WorkloadProfile::Latency
-                && !socket.options.mechanism.has_frame_transform(),
-            has_transforms: transforms.is_some() || matches!(endpoint, Endpoint::Shm(_)),
-        }
+/// Largest wire message the decoder accepts. Compressed wire messages can
+/// exceed the logical limit; the decoder reports the matching allowance.
+fn receive_wire_limit(peer: &PeerSetup, transforms: Option<&CodecSetup>) -> Option<usize> {
+    if matches!(peer.endpoint, Endpoint::Shm(_)) {
+        const REFERENCE_WIRE_BUDGET: usize = 1024;
+        // References are small, but a bounded automatic pool may carry an
+        // ordinary body on the Unix stream. Decoded SHM sizes are checked
+        // separately, including group/identity envelopes.
+        peer.options.max_message_size.map(|maximum| {
+            maximum
+                .saturating_add(std::mem::size_of::<u8>())
+                .max(REFERENCE_WIRE_BUDGET)
+        })
+    } else {
+        transforms.map_or(peer.options.max_message_size, |setup| {
+            setup.decoder.max_wire_message_size()
+        })
     }
 }
 
-/// How a wire peer encodes and frames outbound data in its transmit slot.
-struct TransmitProfile {
-    has_transforms: bool,
-    codec: Option<CodecProfile>,
-    passthrough: Option<(bytes::Bytes, usize)>,
-    arena: ArenaConfig,
-    framing: WireFraming,
-}
-
-impl TransmitProfile {
-    fn new(
-        socket: &SocketDriver,
-        peer: &PeerSetup,
-        transforms: Option<&CodecSetup>,
-        profile: WireProfile,
-        framing: WireFraming,
-    ) -> Self {
-        Self {
-            has_transforms: profile.has_transforms,
-            codec: transforms.map(|setup| setup.profile.clone()),
-            passthrough: codec_passthrough_info(transforms),
-            arena: arena_config(&peer.endpoint, profile.latency, socket),
-            framing,
-        }
-    }
-}
-
-/// The stream after carrier-specific setup.
-struct WireCarrier {
-    stream: AnyStream,
-    #[cfg(target_os = "linux")]
-    shm: Option<crate::transport::shm::ShmState>,
-    direct_tcp_writer: Option<Arc<crate::socket::dispatch::DirectTcpWriter>>,
+/// What a wire peer's send path is built from.
+struct WireSend {
+    transmit: TransmitProfile,
+    carrier: WireCarrier,
+    /// The connect-side pipe that already took messages, if any.
+    send_pipe_rx: Option<SendPipeConsumer>,
 }
 
 /// Pair the peer mailbox with a fresh actor output registration.
@@ -209,7 +207,6 @@ fn prepare_wire_driver(
     peer_id: u64,
     WireCodecSetup {
         mut stream,
-        peer_ident,
         mut peer,
         setup,
         framing,
@@ -221,99 +218,88 @@ fn prepare_wire_driver(
     PeerEntry,
     crate::context::IoThreadLease,
 )> {
-    let (local_address, remote_address) = stream.addresses();
-    let (inbox_tx, inbox_rx) = crate::engine::control_inbox::channel(PEER_INBOX_CAP);
-    let (data_inbox_tx, data_inbox_rx) = crate::engine::data_inbox::channel(
-        PEER_INBOX_CAP.min(socket.options.send_queue_capacity()),
-    );
-    let child_cancel = socket.link.cancel.child_token();
-    let carrier_lease = take_carrier_io_lease(&mut stream);
+    let addresses = stream.addresses();
+    let channels = socket.peer_channels();
+    let mut handle = channels.handle;
+    // QUIC already placed its connection on an IO thread during setup.
+    let io_assignment = take_carrier_io_lease(&mut stream)
+        .unwrap_or_else(|| reserve_peer_io(&socket.resources.io_pool, &peer.endpoint));
+    let io_thread = io_assignment.index();
 
     let profile = WireProfile::new(socket, &peer.endpoint, transforms.as_ref());
     let transmit = TransmitProfile::new(socket, &peer, transforms.as_ref(), profile, framing);
-    let carrier = prepare_wire_carrier(socket, stream, &peer, profile)?;
+    let (stream, carrier) = prepare_wire_carrier(socket, stream, &peer, profile)?;
 
-    let link = actor_link(socket, peer_id, inbox_rx, child_cancel.clone())?;
+    let link = actor_link(socket, peer_id, channels.control, handle.cancel.clone())?;
     let peer_driver = ConnectionDriver::with_actor_config(
-        carrier.stream,
+        stream,
         codec,
         link,
         peer_driver_config(socket, &peer.endpoint),
     )
-    .with_actor_data_inbox(data_inbox_rx)
+    .with_actor_data_inbox(channels.data)
     .with_actor_control(
         socket.mail.peer_control_tx.clone(),
         socket.subscription_gate(peer_id),
     );
     let peer_driver = configure_actor_driver(socket, peer_driver, &peer, setup.as_ref(), profile);
     let peer_driver = attach_transforms(socket, peer_driver, transforms);
-    #[cfg(target_os = "linux")]
     let peer_driver = peer_driver.with_shm(carrier.shm.clone());
-    let peer_driver = attach_ip_rate_limit(socket, peer_driver, &peer_ident);
+    let peer_driver = attach_ip_rate_limit(socket, peer_driver, &peer.ident);
 
-    let arena = transmit.arena;
-    let transmit_slot = build_transmit_slot(socket, peer_id, transmit);
-    #[cfg(target_os = "linux")]
-    if let (Some(slot), Some(state)) = (&transmit_slot, carrier.shm) {
-        slot.set_shm(state);
-    }
-    let peer_driver = attach_transmit_slot(peer_driver, arena, transmit_slot.as_ref());
-    let (send_pipe, peer_driver) = attach_send_pipe(socket, peer_driver, peer.send_pipe_rx.take());
-    attach_direct_writer(
-        socket.socket_type,
-        transmit_slot.as_ref(),
-        carrier.direct_tcp_writer.as_ref(),
-        send_pipe.as_ref(),
-    );
-
+    let send = WireSend {
+        transmit,
+        carrier,
+        send_pipe_rx: peer.send_pipe_rx.take(),
+    };
+    let peer_driver = attach_wire_send_path(socket, peer_id, peer_driver, send, &mut handle);
     let peer_driver = attach_recv_bypass(socket, peer_driver, peer_id);
-    // QUIC already placed its connection on an IO thread during setup.
-    let io_assignment =
-        carrier_lease.unwrap_or_else(|| reserve_peer_io(&socket.resources.io_pool, &peer.endpoint));
-    let io_thread = io_assignment.index();
     let peer_driver = peer_driver.with_network(peer_network(socket, &peer.endpoint, io_thread));
 
-    let handle = PeerDriverHandle {
-        inbox: inbox_tx,
-        data_inbox: data_inbox_tx,
-        cancel: child_cancel,
-        transmit_slot,
-        direct_tcp_writer: carrier.direct_tcp_writer,
-        send_pipe,
-        inproc: None,
+    // spawn_on_handshake gave every ZMTP byte stream a handshake admission.
+    debug_assert!(setup.is_some());
+    let (local_address, remote_address) = addresses;
+    let origin = PeerOrigin {
+        local_address,
+        remote_address,
+        ..peer.into_origin(io_thread)
     };
-    let mut entry = new_peer_entry(peer, peer_ident, handle, setup, io_thread);
-    entry.local_address = local_address;
-    entry.remote_address = remote_address;
+    let entry = PeerEntry {
+        handshake: PeerHandshake {
+            admission: setup.map(|state| state.admission),
+            ..PeerHandshake::default()
+        },
+        ..PeerEntry::new(origin, handle)
+    };
     Some((peer_driver, entry, io_assignment))
 }
 
-/// Wrap SHM carriers and split off a direct TCP writer where allowed.
-fn prepare_wire_carrier(
+/// Build the transmit slot and send pipe, attach them to the driver, and
+/// record them with any direct TCP writer on the peer's handle.
+fn attach_wire_send_path(
     socket: &SocketDriver,
-    stream: AnyStream,
-    peer: &PeerSetup,
-    profile: WireProfile,
-) -> Option<WireCarrier> {
-    #[cfg(target_os = "linux")]
-    let (stream, shm) = prepare_shm_stream(
-        stream,
-        &peer.endpoint,
-        &peer.options,
-        &socket.resources.shm_send_pool,
-    )?;
-    let Ok((stream, direct_tcp_writer)) =
-        split_direct_tcp_writer(socket, stream, &peer.endpoint, profile)
-    else {
-        return None;
-    };
-
-    Some(WireCarrier {
-        stream,
-        #[cfg(target_os = "linux")]
-        shm,
-        direct_tcp_writer,
-    })
+    peer_id: u64,
+    peer_driver: ConnectionDriver<AnyStream>,
+    send: WireSend,
+    handle: &mut PeerDriverHandle,
+) -> ConnectionDriver<AnyStream> {
+    let arena = send.transmit.arena;
+    let transmit_slot = build_transmit_slot(socket, peer_id, send.transmit);
+    if let (Some(slot), Some(state)) = (&transmit_slot, send.carrier.shm) {
+        slot.set_shm(state);
+    }
+    let peer_driver = attach_transmit_slot(peer_driver, arena, transmit_slot.as_ref());
+    let (send_pipe, peer_driver) = attach_send_pipe(socket, peer_driver, send.send_pipe_rx);
+    attach_direct_writer(
+        socket.socket_type,
+        transmit_slot.as_ref(),
+        send.carrier.direct_tcp_writer.as_ref(),
+        send_pipe.as_ref(),
+    );
+    handle.routes.transmit_slot = transmit_slot;
+    handle.routes.direct_tcp_writer = send.carrier.direct_tcp_writer;
+    handle.routes.send_pipe = send_pipe;
+    peer_driver
 }
 
 /// Wire the driver's setup deadline, close state, and receive tuning.
@@ -338,135 +324,6 @@ fn configure_actor_driver(
         .with_receive_profile(receive_profile)
 }
 
-fn attach_transmit_slot(
-    peer_driver: ConnectionDriver<AnyStream>,
-    arena: ArenaConfig,
-    slot: Option<&Arc<crate::engine::transmit_slot::PeerTransmitSlot>>,
-) -> ConnectionDriver<AnyStream> {
-    let peer_driver = peer_driver
-        .with_arena_threshold(arena.threshold)
-        .with_arena_cap(arena.cap);
-    match slot {
-        Some(slot) => peer_driver.with_transmit_slot(slot.clone()),
-        None => peer_driver,
-    }
-}
-
-/// Network limits apply to network transports only. Local carriers get an
-/// unlimited lane.
-fn peer_network(
-    socket: &SocketDriver,
-    endpoint: &Endpoint,
-    io_thread: usize,
-) -> crate::network_limit::Lane {
-    if matches!(
-        endpoint.scheme(),
-        "tcp" | "lz4+tcp" | "zstd+tcp" | "ws" | "wss" | "lz4+ws" | "quic"
-    ) {
-        socket.resources.io_pool.network_on(io_thread)
-    } else {
-        crate::network_limit::Lane::default()
-    }
-}
-
-fn local_latency_polling(socket: &SocketDriver, endpoint: &Endpoint, latency: bool) -> bool {
-    cfg!(unix)
-        && matches!(endpoint, Endpoint::Ipc(_) | Endpoint::Shm(_))
-        && latency
-        && socket.resources.io_pool.owns_runtime()
-}
-
-#[cfg(target_os = "linux")]
-fn prepare_shm_stream(
-    stream: AnyStream,
-    endpoint: &Endpoint,
-    options: &Options,
-    pool: &omq_shm::SendPool,
-) -> Option<(AnyStream, Option<crate::transport::shm::ShmState>)> {
-    if !matches!(endpoint, Endpoint::Shm(_)) {
-        return Some((stream, None));
-    }
-    let AnyStream::Ipc(ipc) = stream else {
-        return None;
-    };
-    let carrier = crate::transport::shm::ShmStream::new(ipc, options, pool.clone()).ok()?;
-    let state = carrier.state.clone();
-    Some((AnyStream::Shm(carrier), Some(state)))
-}
-
-fn reserve_peer_io(
-    pool: &crate::context::IoPoolHandle,
-    endpoint: &Endpoint,
-) -> crate::context::IoThreadLease {
-    #[cfg(target_os = "linux")]
-    if matches!(endpoint, Endpoint::Shm(_)) {
-        use std::hash::BuildHasher;
-        // Stable endpoint assignment keeps every subscriber and its publisher
-        // fan-out worker on one IO lane, including after reconnection.
-        let thread = rustc_hash::FxBuildHasher.hash_one(endpoint) as usize % pool.thread_count();
-        return pool.reserve_thread_at(thread);
-    }
-    #[cfg(not(target_os = "linux"))]
-    let _ = endpoint;
-    pool.reserve_thread()
-}
-
-fn codec_passthrough_info(setup: Option<&CodecSetup>) -> Option<(bytes::Bytes, usize)> {
-    setup
-        .and_then(|setup| setup.encoder.passthrough_info())
-        .map(|(bytes, threshold)| (bytes.clone(), threshold))
-}
-
-fn attach_direct_writer(
-    socket_type: SocketType,
-    slot: Option<&Arc<crate::engine::transmit_slot::PeerTransmitSlot>>,
-    writer: Option<&Arc<crate::socket::dispatch::DirectTcpWriter>>,
-    send_pipe: Option<&SendPipeProducerHandle>,
-) {
-    let (Some(slot), Some(writer)) = (slot, writer) else {
-        return;
-    };
-    slot.set_direct_writer(writer.clone());
-    if socket_type == SocketType::Peer
-        && let Some(handle) = send_pipe
-        && let Some(producer) = handle.lock().expect("peer send pipe").as_mut()
-    {
-        producer.set_direct_slot(slot.clone());
-    }
-}
-
-/// Entry for a peer that has not finished its handshake. `setup` carries
-/// the pending-handshake admission, if any.
-pub(super) fn new_peer_entry(
-    peer: PeerSetup,
-    ident: PeerIdent,
-    handle: PeerDriverHandle,
-    setup: Option<crate::transport::setup::SetupState>,
-    io_thread: usize,
-) -> PeerEntry {
-    PeerEntry {
-        local_address: None,
-        remote_address: None,
-        options: peer.options,
-        ident,
-        handle,
-        ready: false,
-        pending_handshake: true,
-        handshake_admission: setup.map(|state| state.admission),
-        handled_events: 0,
-        handled_control: 0,
-        completion: None,
-        identity: bytes::Bytes::new(),
-        info: None,
-        endpoint: peer.endpoint,
-        is_client: !peer.is_server,
-        route_id: peer.route_id,
-        inproc_inbound: None,
-        task: None,
-        io_thread,
-    }
-}
-
 fn attach_ip_rate_limit(
     socket: &SocketDriver,
     peer_driver: ConnectionDriver<AnyStream>,
@@ -486,7 +343,6 @@ fn attach_ip_rate_limit(
 fn build_message_transforms(
     socket: &mut SocketDriver,
     peer: &PeerSetup,
-    peer_ident: &PeerIdent,
 ) -> core::result::Result<Option<CodecSetup>, ()> {
     match CodecSetup::for_endpoint(&peer.endpoint, &peer.options) {
         Ok(transforms) => Ok(transforms),
@@ -494,19 +350,11 @@ fn build_message_transforms(
             socket
                 .link
                 .monitor
-                .publish(omq_proto::MonitorEvent::HandshakeFailed {
-                    endpoint: peer.endpoint.clone(),
-                    peer_ident: peer_ident.clone(),
-                    reason: e.to_string(),
-                });
+                .publish(peer.handshake_failed(e.to_string()));
             // A bad codec config fails every retry the same way, so stop
             // dialing instead of reconnecting forever.
-            if !peer.is_server {
-                socket
-                    .endpoints
-                    .dialers
-                    .retain(|d| d.route_id != peer.route_id);
-                socket.remove_connect_route(peer.route_id);
+            if peer.side.is_connect() {
+                socket.drop_dial_route(peer.route_id);
             }
             Err(())
         }
@@ -517,34 +365,70 @@ fn allocate_peer_id(socket: &mut SocketDriver) -> Option<u64> {
     if socket.close.started && socket.routing.send_strategy.is_drained() {
         return None;
     }
-    let peer_id = next_peer_id(socket);
-    if matches!(
-        socket.socket_type,
-        SocketType::Server | SocketType::Req | SocketType::Rep
-    ) && server_routing_id(peer_id).is_none()
-    {
-        return None;
+    socket.alloc_routable_peer_id()
+}
+
+impl SocketDriver {
+    /// Channels for a wire, inproc, or UDP peer, cancelled with the socket.
+    pub(super) fn peer_channels(&self) -> PeerChannels {
+        PeerChannels::new(
+            crate::engine::data_inbox::channel(
+                PEER_INBOX_CAP.min(self.options.send_queue_capacity()),
+            ),
+            self.link.cancel.child_token(),
+        )
     }
-    Some(peer_id)
+
+    /// Reserve the completion slot a new peer task reports into.
+    pub(super) fn reserve_completion(
+        &mut self,
+        peer_id: u64,
+    ) -> crate::engine::peer_completion::CompletionProgress {
+        let (completion, receiver) =
+            crate::engine::peer_completion::CompletionProgress::reserve(peer_id);
+        self.mail.peer_completions.push(receiver);
+        completion
+    }
+
+    /// Record the task serving `peer_id`, if the peer is still registered.
+    pub(super) fn set_peer_task(&mut self, peer_id: u64, task: tokio::task::JoinHandle<()>) {
+        if let Some(peer) = self.peers.get_mut(&peer_id) {
+            peer.task = Some(task);
+        }
+    }
+
+    /// Take the next peer or route ID. Peers and routes share one space.
+    pub(super) fn alloc_id(&mut self) -> Option<u64> {
+        let id = self.next_peer_id;
+        self.next_peer_id = id.checked_add(1)?;
+        Some(id)
+    }
+
+    /// Take a peer ID. SERVER, REQ, and REP route by `peer_id + 1` as u32,
+    /// so IDs past that range are refused.
+    pub(super) fn alloc_routable_peer_id(&mut self) -> Option<u64> {
+        let peer_id = self.alloc_id()?;
+        if matches!(
+            self.socket_type,
+            SocketType::Server | SocketType::Req | SocketType::Rep
+        ) && server_routing_id(peer_id).is_none()
+        {
+            return None;
+        }
+        Some(peer_id)
+    }
 }
 
-fn next_peer_id(socket: &mut SocketDriver) -> u64 {
-    let peer_id = socket.next_peer_id;
-    socket.next_peer_id += 1;
-    peer_id
-}
-
-fn wire_framing(stream: &AnyStream, is_server: bool) -> WireFraming {
+fn wire_framing(stream: &AnyStream, side: Side) -> WireFraming {
     #[cfg(feature = "ws")]
     if matches!(stream, AnyStream::Ws(_)) {
-        return WireFraming::Zws(if is_server {
-            omq_proto::proto::connection::WsRole::Server
-        } else {
-            omq_proto::proto::connection::WsRole::Client
+        return WireFraming::Zws(match side {
+            Side::Bind => omq_proto::proto::connection::WsRole::Server,
+            Side::Connect => omq_proto::proto::connection::WsRole::Client,
         });
     }
     #[cfg(not(feature = "ws"))]
-    let _ = (stream, is_server);
+    let _ = (stream, side);
     WireFraming::Zmtp
 }
 
@@ -552,29 +436,12 @@ fn build_codec(
     socket: &SocketDriver,
     peer: &PeerSetup,
     framing: WireFraming,
-    peer_ident: &PeerIdent,
     receive_wire_limit: Option<usize>,
 ) -> ZmtpConnection {
-    let config = connection_config(socket, peer, framing, peer_ident, receive_wire_limit);
-    let mut codec = ZmtpConnection::new(config);
-    if let Some(pool) = &socket.options.recv_message_pool {
-        codec = codec.recv_message_pool(pool);
-    }
-    codec
-}
-
-fn connection_config(
-    socket: &SocketDriver,
-    peer: &PeerSetup,
-    framing: WireFraming,
-    peer_ident: &PeerIdent,
-    receive_wire_limit: Option<usize>,
-) -> ConnectionConfig {
     let options = &peer.options;
-    let role = if peer.is_server {
-        Role::Server
-    } else {
-        Role::Client
+    let role = match peer.side {
+        Side::Bind => Role::Server,
+        Side::Connect => Role::Client,
     };
 
     // The driver runs authenticators on the blocking pool; a ZAP handler
@@ -583,7 +450,7 @@ fn connection_config(
         .identity(options.identity.clone())
         .mechanism(options.mechanism.clone())
         .defer_authentication(true);
-    let peer_address = match peer_ident {
+    let peer_address = match &peer.ident {
         PeerIdent::Socket(address) => Some(address.ip().to_string()),
         PeerIdent::Path(path) => Some(path.clone()),
         _ => None,
@@ -608,15 +475,11 @@ fn connection_config(
     }
     #[cfg(not(feature = "ws"))]
     let _ = framing;
-    cfg
-}
 
-/// QUIC places its connection during setup; keep the OMQ driver with it.
-fn take_carrier_io_lease(stream: &mut AnyStream) -> Option<crate::context::IoThreadLease> {
-    match stream {
-        #[cfg(feature = "quic")]
-        AnyStream::Quic(quic) => quic.take_io_lease(),
-        _ => None,
+    let codec = ZmtpConnection::new(cfg);
+    match &socket.options.recv_message_pool {
+        Some(pool) => codec.recv_message_pool(pool),
+        None => codec,
     }
 }
 
@@ -647,73 +510,6 @@ fn peer_driver_config(socket: &SocketDriver, endpoint: &Endpoint) -> PeerDriverC
     config
 }
 
-fn workload_profile(socket: &SocketDriver) -> WorkloadProfile {
-    socket.options.workload_profile.unwrap_or(
-        if matches!(socket.socket_type, SocketType::Req | SocketType::Rep) {
-            WorkloadProfile::Latency
-        } else {
-            WorkloadProfile::Throughput
-        },
-    )
-}
-
-fn split_direct_tcp_writer(
-    socket: &SocketDriver,
-    stream: AnyStream,
-    endpoint: &Endpoint,
-    profile: WireProfile,
-) -> Result<
-    (
-        AnyStream,
-        Option<Arc<crate::socket::dispatch::DirectTcpWriter>>,
-    ),
-    (),
-> {
-    // Direct writes bypass the egress limiter and any payload transform.
-    if socket.resources.io_pool.network_primary().has_egress()
-        || !profile.latency
-        || !supports_direct_tcp_writer(socket.socket_type)
-        || !matches!(endpoint, Endpoint::Tcp { .. })
-        || profile.has_transforms
-    {
-        return Ok((stream, None));
-    }
-
-    match stream {
-        AnyStream::Tcp(tcp) => {
-            let std_tcp = tcp.into_std().map_err(|_| ())?;
-            let direct_tcp = std_tcp.try_clone().map_err(|_| ())?;
-            let driver_tcp = tokio::net::TcpStream::from_std(std_tcp).map_err(|_| ())?;
-            let direct = Arc::new(crate::socket::dispatch::DirectTcpWriter::new(direct_tcp));
-            Ok((AnyStream::Tcp(driver_tcp), Some(direct)))
-        }
-        AnyStream::Ipc(ipc) => Ok((AnyStream::Ipc(ipc), None)),
-        #[cfg(target_os = "linux")]
-        AnyStream::Shm(shm) => Ok((AnyStream::Shm(shm), None)),
-        #[cfg(test)]
-        AnyStream::Memory(stream) => Ok((AnyStream::Memory(stream), None)),
-        #[cfg(feature = "ws")]
-        AnyStream::Ws(ws) => Ok((AnyStream::Ws(ws), None)),
-        #[cfg(feature = "quic")]
-        AnyStream::Quic(quic) => Ok((AnyStream::Quic(quic), None)),
-    }
-}
-
-fn supports_direct_tcp_writer(socket_type: SocketType) -> bool {
-    matches!(
-        socket_type,
-        SocketType::Req
-            | SocketType::Rep
-            | SocketType::Dealer
-            | SocketType::Router
-            | SocketType::Server
-            | SocketType::Client
-            | SocketType::Pair
-            | SocketType::Channel
-            | SocketType::Peer
-    )
-}
-
 fn attach_transforms(
     socket: &mut SocketDriver,
     peer_driver: ConnectionDriver<AnyStream>,
@@ -737,61 +533,6 @@ fn attach_transforms(
         peer_driver = peer_driver.with_compression_pool(pool, threshold);
     }
     peer_driver
-}
-
-#[derive(Clone, Copy)]
-struct ArenaConfig {
-    threshold: usize,
-    cap: usize,
-}
-
-fn arena_config(endpoint: &Endpoint, latency_profile: bool, socket: &SocketDriver) -> ArenaConfig {
-    let threshold = socket
-        .options
-        .arena_threshold
-        .unwrap_or(omq_proto::frame_buffer::ARENA_THRESHOLD);
-    let cap = if matches!(endpoint, Endpoint::Ipc(_) | Endpoint::Shm(_)) {
-        omq_proto::frame_buffer::ARENA_INITIAL_CAP_IPC
-    } else if latency_profile {
-        4 * 1024
-    } else {
-        omq_proto::frame_buffer::ARENA_INITIAL_CAP
-    };
-    ArenaConfig { threshold, cap }
-}
-
-fn build_transmit_slot(
-    socket: &SocketDriver,
-    peer_id: u64,
-    profile: TransmitProfile,
-) -> Option<Arc<crate::engine::transmit_slot::PeerTransmitSlot>> {
-    // Frame transforms (e.g. encryption) must encode on the driver, so
-    // handles cannot pre-frame into a slot.
-    if socket.options.mechanism.has_frame_transform()
-        || !socket.routing.send_strategy.needs_transmit_slot()
-    {
-        return None;
-    }
-
-    let transmit_slot_cap = socket
-        .options
-        .transmit_slot_cap
-        .unwrap_or(crate::engine::transmit_slot::TRANSMIT_SLOT_CAP_DEFAULT);
-    let transmit_slot_msg_cap = socket.options.send_queue_capacity();
-    let config = crate::engine::transmit_slot::SlotConfig {
-        has_transform: profile.has_transforms,
-        codec_profile: profile.codec,
-        transform_passthrough: profile.passthrough,
-        arena_threshold: profile.arena.threshold,
-        arena_cap: profile.arena.cap,
-        cap: transmit_slot_cap,
-        msg_cap: transmit_slot_msg_cap,
-        framing: profile.framing,
-    };
-
-    Some(crate::engine::transmit_slot::PeerTransmitSlot::with_config(
-        peer_id, config,
-    ))
 }
 
 fn attach_send_pipe(
@@ -818,20 +559,34 @@ fn make_send_pipe(
     if !socket.routing.send_strategy.needs_peer_send_pipe() {
         return (None, None);
     }
-    let (pipe_cap, pipe_mode) = if socket.options.conflate {
-        (1, SendPipeMode::Conflate)
+    let cap = if socket.options.conflate {
+        1
     } else {
-        (socket.options.send_queue_capacity(), SendPipeMode::Queue)
+        socket.options.send_queue_capacity()
     };
-    let (send_pipe, send_pipe_rx) = if socket.socket_type == SocketType::Peer {
-        crate::engine::peer_send_pipe(pipe_cap, &socket.options)
-    } else {
-        crate::engine::send_pipe_with_mode(pipe_cap, pipe_mode)
-    };
+    let (send_pipe, send_pipe_rx) = new_peer_send_pipe(socket.socket_type, &socket.options, cap);
     (
         Some(Arc::new(Mutex::new(Some(send_pipe)))),
         Some(send_pipe_rx),
     )
+}
+
+/// A peer's own send pipe. PEER has its own pipe kind; other types queue,
+/// or keep only the latest message with `conflate`.
+pub(super) fn new_peer_send_pipe(
+    socket_type: SocketType,
+    options: &Options,
+    cap: usize,
+) -> (SendPipeProducer, SendPipeConsumer) {
+    if socket_type == SocketType::Peer {
+        return crate::engine::peer_send_pipe(cap, options);
+    }
+    let mode = if options.conflate {
+        SendPipeMode::Conflate
+    } else {
+        SendPipeMode::Queue
+    };
+    crate::engine::send_pipe_with_mode(cap, mode)
 }
 
 fn spawn_wire_task(
@@ -841,22 +596,21 @@ fn spawn_wire_task(
     peer_driver: ConnectionDriver<AnyStream>,
 ) {
     let needs_migration = socket.resources.io_pool.has_dedicated_io_threads();
-    let io_thread = io_assignment.index();
-    let task = socket.resources.io_pool.spawn_on(io_thread, async move {
-        let _io_assignment = io_assignment;
-        let peer_driver = if needs_migration {
-            match peer_driver.migrate_stream() {
-                Ok(driver) => driver,
-                Err(_) => return,
-            }
-        } else {
-            peer_driver
-        };
-        let _ = Box::pin(peer_driver.run()).await;
-    });
-    if let Some(peer) = socket.peers.get_mut(&peer_id) {
-        peer.task = Some(task);
-    }
+    let task = socket
+        .resources
+        .io_pool
+        .spawn_leased(io_assignment, async move {
+            let peer_driver = if needs_migration {
+                match peer_driver.migrate_stream() {
+                    Ok(driver) => driver,
+                    Err(_) => return,
+                }
+            } else {
+                peer_driver
+            };
+            let _ = Box::pin(peer_driver.run()).await;
+        });
+    socket.set_peer_task(peer_id, task);
 }
 
 #[cfg(test)]

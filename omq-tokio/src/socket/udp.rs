@@ -20,9 +20,8 @@ use tokio::net::UdpSocket;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::engine::{ActorPeerDriverHandle, PeerDriverCommand, PeerDriverData};
+use crate::engine::{PeerDriverCommand, PeerDriverData};
 use crate::transport::udp;
-use omq_proto::endpoint::Endpoint;
 use omq_proto::message::Message;
 
 /// Joined-groups set, shared between the socket actor (mutated by
@@ -32,39 +31,6 @@ pub(crate) type JoinedGroups = Arc<ArcSwap<FxHashSet<Bytes>>>;
 
 pub(crate) fn new_joined_groups() -> JoinedGroups {
     Arc::new(ArcSwap::from_pointee(FxHashSet::default()))
-}
-
-/// One bound UDP listener (DISH side). Cancelling the token tears down
-/// the listener task, which closes the underlying socket.
-pub(crate) struct UdpListenerEntry {
-    pub endpoint: Endpoint,
-    pub cancel: CancellationToken,
-    pub task: JoinHandle<()>,
-}
-
-impl Drop for UdpListenerEntry {
-    /// A detached listener would keep the UDP port bound after unbind or close.
-    fn drop(&mut self) {
-        self.cancel.cancel();
-        self.task.abort();
-    }
-}
-
-/// One outbound UDP "connection" (RADIO side). Holds the synthetic
-/// peer id under which the `SendStrategy` registered the sender, so
-/// teardown can call `connection_removed`.
-pub(crate) struct UdpDialerEntry {
-    pub endpoint: Endpoint,
-    pub cancel: CancellationToken,
-    pub peer_id: u64,
-    pub task: JoinHandle<()>,
-}
-
-impl Drop for UdpDialerEntry {
-    fn drop(&mut self) {
-        self.cancel.cancel();
-        self.task.abort();
-    }
 }
 
 /// Where a DISH listener delivers matching datagrams.
@@ -85,10 +51,8 @@ pub(crate) fn spawn_dish_listener(
     io_pool: &crate::context::IoPoolHandle,
     assignment: crate::context::IoThreadLease,
 ) -> JoinHandle<()> {
-    let index = assignment.index();
-    let network = io_pool.network_on(index);
-    io_pool.spawn_on(index, async move {
-        let _assignment = assignment;
+    let network = io_pool.network_on(assignment.index());
+    io_pool.spawn_leased(assignment, async move {
         // Re-register the socket with this IO thread's reactor.
         let Ok(sock) = sock.into_std().and_then(UdpSocket::from_std) else {
             return;
@@ -146,13 +110,32 @@ async fn recv_datagram(
     };
 
     let (length, _) = sock.peek_from(buf).await?;
+    gated_io(
+        gate,
+        length,
+        || sock.try_recv_from(buf),
+        |cx| sock.poll_recv_ready(cx),
+        |(n, _)| *n,
+    )
+    .await
+}
+
+/// Run one datagram operation under a network gate. Takes `len` bytes of
+/// credit, tries the operation, and returns what it did not use. On
+/// `WouldBlock` all credit goes back while waiting for readiness.
+async fn gated_io<T>(
+    gate: &mut crate::network_limit::Gate,
+    len: usize,
+    mut try_op: impl FnMut() -> std::io::Result<T>,
+    mut poll_ready: impl FnMut(&mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>>,
+    used: impl Fn(&T) -> usize,
+) -> std::io::Result<T> {
     std::future::poll_fn(|cx| {
-        let n = std::task::ready!(gate.poll(cx, length, length));
-        match sock.try_recv_from(buf) {
+        let n = std::task::ready!(gate.poll(cx, len, len));
+        match try_op() {
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // Return the unused credit, then wait for readiness again.
                 gate.finish(n, 0);
-                match sock.poll_recv_ready(cx) {
+                match poll_ready(cx) {
                     std::task::Poll::Ready(Ok(())) => cx.waker().wake_by_ref(),
                     std::task::Poll::Ready(Err(e)) => return std::task::Poll::Ready(Err(e)),
                     std::task::Poll::Pending => {}
@@ -160,7 +143,7 @@ async fn recv_datagram(
                 std::task::Poll::Pending
             }
             result => {
-                gate.finish(n, result.as_ref().map_or(0, |(n, _)| *n));
+                gate.finish(n, result.as_ref().map_or(0, &used));
                 std::task::Poll::Ready(result)
             }
         }
@@ -207,10 +190,8 @@ pub(crate) fn spawn_radio_sender(
     io_pool: &crate::context::IoPoolHandle,
     assignment: crate::context::IoThreadLease,
 ) -> JoinHandle<()> {
-    let index = assignment.index();
-    let network = io_pool.network_on(index);
-    io_pool.spawn_on(index, async move {
-        let _assignment = assignment;
+    let network = io_pool.network_on(assignment.index());
+    io_pool.spawn_leased(assignment, async move {
         // Re-register the socket with this IO thread's reactor.
         let Ok(sock) = sock.into_std().and_then(UdpSocket::from_std) else {
             return;
@@ -298,25 +279,13 @@ async fn send_datagram(
         return sock.send(bytes).await;
     };
 
-    std::future::poll_fn(|cx| {
-        let n = std::task::ready!(gate.poll(cx, bytes.len(), bytes.len()));
-        match sock.try_send(bytes) {
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // Return the unused credit, then wait for readiness again.
-                gate.finish(n, 0);
-                match sock.poll_send_ready(cx) {
-                    std::task::Poll::Ready(Ok(())) => cx.waker().wake_by_ref(),
-                    std::task::Poll::Ready(Err(e)) => return std::task::Poll::Ready(Err(e)),
-                    std::task::Poll::Pending => {}
-                }
-                std::task::Poll::Pending
-            }
-            result => {
-                gate.finish(n, result.as_ref().map_or(0, |n| *n));
-                std::task::Poll::Ready(result)
-            }
-        }
-    })
+    gated_io(
+        gate,
+        bytes.len(),
+        || sock.try_send(bytes),
+        |cx| sock.poll_send_ready(cx),
+        |n| *n,
+    )
     .await
 }
 
@@ -329,23 +298,4 @@ fn radio_datagram(message: &Message) -> Option<Bytes> {
     let group = message.part_bytes(0).unwrap_or_default();
     let body = message.part_bytes(1).unwrap_or_default();
     udp::encode_datagram(&group, &body).ok()
-}
-
-/// Build a [`ActorPeerDriverHandle`] for a synthetic UDP RADIO peer. The handle's
-/// inbox feeds the sender task; its cancellation token tears the task
-/// down on `disconnect` / socket close.
-pub(crate) fn fake_handle(
-    inbox: crate::engine::control_inbox::Sender,
-    data_inbox: crate::engine::data_inbox::Sender,
-    cancel: CancellationToken,
-) -> ActorPeerDriverHandle {
-    ActorPeerDriverHandle {
-        inbox,
-        data_inbox,
-        cancel,
-        transmit_slot: None,
-        direct_tcp_writer: None,
-        send_pipe: None,
-        inproc: None,
-    }
 }

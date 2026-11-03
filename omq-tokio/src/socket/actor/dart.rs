@@ -9,9 +9,10 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use super::peer_materialize::{FaninProducer, PeerChannels, fanin_recv_sink, wrap_routed_sink};
 use super::{
-    Endpoint, Error, MonitorEvent, PeerDriverHandle, PeerEntry, PeerIdent, Result, SocketDriver,
-    SocketType,
+    Endpoint, Error, MonitorEvent, PeerDriverHandle, PeerEntry, PeerIdent, PeerOrigin, Result,
+    Side, SocketDriver, SocketType,
 };
 use crate::engine::{RecvSink, SendPipeConsumer};
 use crate::transport::dart::{
@@ -23,7 +24,7 @@ pub(super) struct Entry {
     id: u64,
     endpoint: Endpoint,
     original: Endpoint,
-    connect: bool,
+    side: Side,
     options: Arc<Options>,
     pub(super) cancel: CancellationToken,
     task: JoinHandle<()>,
@@ -82,16 +83,16 @@ impl SocketDriver {
         endpoint: Endpoint,
         original: Endpoint,
         options: Arc<Options>,
-        connect: bool,
+        side: Side,
     ) -> Result<Endpoint> {
         self.validate_dart_options(&options)?;
         if self.endpoints.dart_endpoints.len() >= 128 {
             return Err(Error::Config("DART endpoint limit reached".into()));
         }
 
-        let carrier = self.open_dart_carrier(&endpoint, &options, connect).await?;
+        let carrier = self.open_dart_carrier(&endpoint, &options, side).await?;
         let io_thread = carrier.lease.index();
-        let resolved = if connect {
+        let resolved = if side.is_connect() {
             endpoint
         } else {
             // Report the bound port, which differs from the request for port 0.
@@ -102,23 +103,21 @@ impl SocketDriver {
             }
         };
 
-        let id = self.next_peer_id;
-        self.next_peer_id = self
-            .next_peer_id
-            .checked_add(1)
+        let id = self
+            .alloc_id()
             .ok_or_else(|| Error::Config("peer ID exhausted".into()))?;
         let route_id = id;
-        let pipe = if connect {
+        let pipe = if side.is_connect() {
             self.routing
                 .send_strategy
-                .make_dart_connect_pipe(route_id, self.socket_type)
+                .make_connect_pipe(route_id, Some(self.socket_type))
         } else {
             None
         };
 
         let cancel = self.link.cancel.child_token();
         let (task, commands) = self.spawn_dart_worker(id, carrier, &options, cancel.clone());
-        if !connect {
+        if side == Side::Bind {
             self.link.monitor.publish(MonitorEvent::Listening {
                 endpoint: resolved.clone(),
             });
@@ -128,7 +127,7 @@ impl SocketDriver {
             id,
             endpoint: resolved.clone(),
             original,
-            connect,
+            side,
             options,
             cancel,
             task,
@@ -146,9 +145,9 @@ impl SocketDriver {
         &self,
         endpoint: &Endpoint,
         options: &Options,
-        connect: bool,
+        side: Side,
     ) -> Result<Carrier> {
-        let (socket, target) = prepare_socket(endpoint, options, connect)?;
+        let (socket, target) = prepare_socket(endpoint, options, side)?;
         let lease = self.resources.io_pool.reserve_thread();
         let io_thread = lease.index();
         let network = self.resources.io_pool.network_on(io_thread);
@@ -209,12 +208,10 @@ impl SocketDriver {
             latency: options.workload_profile == Some(omq_proto::WorkloadProfile::Latency),
         };
 
-        let lease = carrier.lease;
-        let task = self.resources.io_pool.spawn_on(lease.index(), async move {
-            // The lease keeps this thread's load reservation for the worker's life.
-            let _lease = lease;
-            worker.run().await;
-        });
+        let task = self
+            .resources
+            .io_pool
+            .spawn_leased(carrier.lease, worker.run());
         (task, commands)
     }
 
@@ -234,7 +231,7 @@ impl SocketDriver {
         // A connect endpoint carries one peer at a time; a new generation
         // replaces the previous one.
         self.retire_dart_connect_generation(index).await;
-        let Some(peer_id) = self.next_dart_peer_id() else {
+        let Some(peer_id) = self.alloc_routable_peer_id() else {
             return;
         };
 
@@ -254,21 +251,6 @@ impl SocketDriver {
             .await;
     }
 
-    /// Allocate a peer id. SERVER and REQ route by `peer_id + 1` as u32, so
-    /// ids past that range are refused.
-    fn next_dart_peer_id(&mut self) -> Option<u64> {
-        let next = self.next_peer_id.checked_add(1)?;
-        let peer_id = self.next_peer_id;
-        if matches!(self.socket_type, SocketType::Server | SocketType::Req)
-            && u32::try_from(next).is_err()
-        {
-            return None;
-        }
-
-        self.next_peer_id = next;
-        Some(peer_id)
-    }
-
     /// Register a ready DART peer and build the IO half the endpoint worker
     /// activates. Returns the worker's command sender with that IO.
     fn materialize_dart_peer(
@@ -278,19 +260,28 @@ impl SocketDriver {
         source: SocketAddr,
     ) -> (mpsc::Sender<EndpointCommand>, Box<PeerIo>) {
         let entry = &mut self.endpoints.dart_endpoints[index];
-        let (controls_tx, controls_rx) = crate::engine::control_inbox::channel(64);
-        let (data_tx, data_rx) = crate::engine::data_inbox::dart_channel(
-            entry.options.send_queue_capacity(),
-            self.socket_type,
+        let PeerChannels {
+            mut handle,
+            control,
+            data,
+        } = PeerChannels::new(
+            crate::engine::data_inbox::dart_channel(
+                entry.options.send_queue_capacity(),
+                self.socket_type,
+            ),
+            entry.cancel.child_token(),
         );
-
-        let cancel = entry.cancel.child_token();
+        let cancel = handle.cancel.clone();
         let options = entry.options.clone();
         let endpoint = entry.endpoint.clone();
-        let connect = entry.connect;
+        let side = entry.side;
         let commands = entry.commands.clone();
         // Connect endpoints keep the route allocated at connect() time.
-        let route_id = if connect { entry.route_id } else { peer_id };
+        let route_id = if side.is_connect() {
+            entry.route_id
+        } else {
+            peer_id
+        };
         let (send_pipe, pipe) = entry.make_send_pipe(
             self.socket_type,
             self.routing.send_strategy.needs_peer_send_pipe(),
@@ -303,29 +294,22 @@ impl SocketDriver {
         } else {
             Some(self.dart_recv_sink(peer_id))
         };
-        let handle = PeerDriverHandle {
-            inbox: controls_tx,
-            data_inbox: data_tx,
-            cancel: cancel.clone(),
-            transmit_slot: None,
-            direct_tcp_writer: None,
-            send_pipe,
-            inproc: None,
-        };
+        handle.routes.send_pipe = send_pipe;
 
         let ident = PeerIdent::Socket(source);
-        self.link
-            .monitor
-            .publish(connection_event(connect, endpoint, ident.clone(), peer_id));
+        self.link.monitor.publish(super::peer::connection_event(
+            side,
+            endpoint,
+            ident.clone(),
+            peer_id,
+        ));
         let peer = self.endpoints.dart_endpoints[index].peer_entry(ident, handle, route_id);
         self.peers.insert(peer_id, peer);
 
-        let (completion, receiver) =
-            crate::engine::peer_completion::CompletionProgress::reserve(peer_id);
-        self.mail.peer_completions.push(receiver);
+        let completion = self.reserve_completion(peer_id);
         let queues = PeerQueues {
-            commands: controls_rx,
-            data: data_rx,
+            commands: control,
+            data,
             pipe,
             sink,
             cancel,
@@ -336,91 +320,60 @@ impl SocketDriver {
     }
 
     fn dart_recv_sink(&mut self, peer_id: u64) -> RecvSink {
-        let sink = if let Some(slot) = &self.link.spsc.conflate_slot {
-            RecvSink::Conflate(slot.clone())
-        } else if let Some(fanin) = &self.link.spsc.fanin {
-            match fanin.register_dart(self.options.recv_queue_capacity()) {
-                Some(producer) => RecvSink::Fanin(crate::socket::fanin::Sink::owned(producer)),
-                None => RecvSink::Channel(self.link.recv_tx.clone()),
-            }
-        } else {
-            let (producer, consumer) = yring::spsc(self.options.recv_queue_capacity());
-            let signal = self.link.spsc.recv_signal.clone();
-            let blocking = self.link.spsc.blocking_recv_waker.clone();
-            let space = Arc::new(crate::engine::signal::StateSignal::new());
-            super::lifecycle::PeerLifecycle::new(self).register_tcp_consumer(
-                consumer,
-                space.clone(),
-                peer_id,
-                true,
-            );
-            RecvSink::Yring(crate::engine::YringSink {
-                producer,
-                signal: Box::new(move || {
-                    signal.mark();
-                    blocking.wake();
-                }),
-                space,
-            })
-        };
-        if matches!(self.socket_type, SocketType::Server | SocketType::Req) {
-            RecvSink::server(
-                sink,
-                u32::try_from(peer_id + 1).expect("checked server route"),
-            )
-        } else {
+        let capacity = self.options.recv_queue_capacity();
+        let sink = if let Some(sink) = self.conflate_sink() {
             sink
-        }
+        } else if let Some(fanin) = &self.link.spsc.fanin {
+            fanin_recv_sink(fanin, &self.link.recv_tx, FaninProducer::Dart(capacity))
+        } else {
+            super::lifecycle::PeerLifecycle::new(self).yring_sink(peer_id, capacity, true)
+        };
+        // DART carries no REQ/REP, so no REP envelope wrap.
+        wrap_routed_sink(self.socket_type, peer_id, sink, false)
     }
 
     async fn retire_dart_connect_generation(&mut self, index: usize) {
         let entry = &self.endpoints.dart_endpoints[index];
-        let Some(peer_id) = entry.active_peer.filter(|_| entry.connect) else {
+        let Some(peer_id) = entry.active_peer.filter(|_| entry.side.is_connect()) else {
             return;
         };
-        if let Some(mut peer) = super::lifecycle::PeerLifecycle::new(self)
-            .remove_peer(peer_id, super::DisconnectReason::PeerClosed)
-        {
-            peer.handle.cancel.cancel();
-            if let Some(task) = peer.task.take() {
-                super::stop_peer_task(task).await;
-            }
-        }
+        self.stop_removed_peer(peer_id, super::DisconnectReason::PeerClosed)
+            .await;
         self.dart_peer_closed(peer_id);
     }
 
     pub(super) fn dart_peer_closed(&mut self, peer_id: u64) {
-        let Some(entry) = self
+        let Some(index) = self
             .endpoints
             .dart_endpoints
-            .iter_mut()
-            .find(|entry| entry.connect && entry.active_peer == Some(peer_id))
+            .iter()
+            .position(|entry| entry.side.is_connect() && entry.active_peer == Some(peer_id))
         else {
             return;
         };
+        let entry = &mut self.endpoints.dart_endpoints[index];
         entry.active_peer = None;
         if self.close.started || entry.cancel.is_cancelled() {
             return;
         }
-        let Some(next) = self.next_peer_id.checked_add(1) else {
+        let Some(route_id) = self.alloc_id() else {
             return;
         };
-        entry.route_id = self.next_peer_id;
-        self.next_peer_id = next;
+        let entry = &mut self.endpoints.dart_endpoints[index];
+        entry.route_id = route_id;
         entry.pipe = self
             .routing
             .send_strategy
-            .make_dart_connect_pipe(entry.route_id, self.socket_type);
+            .make_connect_pipe(route_id, Some(self.socket_type));
     }
 
-    pub(super) async fn stop_dart_endpoints(&mut self, target: Option<(&Endpoint, bool)>) -> bool {
+    pub(super) async fn stop_dart_endpoints(&mut self, target: Option<(&Endpoint, Side)>) -> bool {
         let mut removed = Vec::new();
         let mut index = 0;
         while index < self.endpoints.dart_endpoints.len() {
             let entry = &self.endpoints.dart_endpoints[index];
-            if target.is_none_or(|(endpoint, connect)| {
-                entry.connect == connect
-                    && (endpoint == &entry.endpoint || endpoint == &entry.original)
+            if target.is_none_or(|(endpoint, side)| {
+                entry.side == side && (endpoint == &entry.endpoint || endpoint == &entry.original)
             }) {
                 let entry = self.endpoints.dart_endpoints.swap_remove(index);
                 entry.cancel.cancel();
@@ -437,21 +390,15 @@ impl SocketDriver {
             .peers
             .iter()
             .filter(|(_, peer)| {
-                removed
-                    .iter()
-                    .any(|entry| peer.endpoint == entry.endpoint && peer.is_client == entry.connect)
+                removed.iter().any(|entry| {
+                    peer.origin.endpoint == entry.endpoint && peer.origin.side == entry.side
+                })
             })
             .map(|(&id, _)| id)
             .collect();
         for peer_id in peers {
-            if let Some(mut peer) = super::lifecycle::PeerLifecycle::new(self)
-                .remove_peer(peer_id, super::DisconnectReason::LocalClose)
-            {
-                peer.handle.cancel.cancel();
-                if let Some(task) = peer.task.take() {
-                    super::stop_peer_task(task).await;
-                }
-            }
+            self.stop_removed_peer(peer_id, super::DisconnectReason::LocalClose)
+                .await;
         }
         for entry in removed {
             super::stop_peer_task(entry.task).await;
@@ -463,8 +410,9 @@ impl SocketDriver {
 fn prepare_socket(
     endpoint: &Endpoint,
     options: &Options,
-    connect: bool,
+    side: Side,
 ) -> Result<(std::net::UdpSocket, Option<SocketAddr>)> {
+    let connect = side.is_connect();
     let Endpoint::Dart { host, port } = endpoint else {
         unreachable!()
     };
@@ -507,7 +455,7 @@ impl Entry {
         Option<crate::engine::send_pipe::SendPipeProducerHandle>,
         Option<SendPipeConsumer>,
     ) {
-        if self.connect
+        if self.side.is_connect()
             && let Some(pipe) = self.pipe.take()
         {
             return (None, Some(pipe));
@@ -515,67 +463,26 @@ impl Entry {
         if !needed {
             return (None, None);
         }
+        // DART keeps its full capacity even with conflate.
         let cap = self.options.send_queue_capacity();
-        let (mut producer, consumer) = if socket_type == SocketType::Peer {
-            crate::engine::peer_send_pipe(cap, &self.options)
-        } else {
-            crate::engine::send_pipe_with_mode(
-                cap,
-                if self.options.conflate {
-                    crate::engine::SendPipeMode::Conflate
-                } else {
-                    crate::engine::SendPipeMode::Queue
-                },
-            )
-        };
+        let (mut producer, consumer) =
+            super::peer_materialize::new_peer_send_pipe(socket_type, &self.options, cap);
         producer.set_dart(socket_type);
         (Some(Arc::new(Mutex::new(Some(producer)))), Some(consumer))
     }
 
     fn peer_entry(&self, ident: PeerIdent, handle: PeerDriverHandle, route_id: u64) -> PeerEntry {
-        PeerEntry {
+        let origin = PeerOrigin {
+            options: self.options.clone(),
+            endpoint: self.endpoint.clone(),
+            side: self.side,
+            route_id,
             local_address: None,
             remote_address: Some(ident.clone()),
-            options: self.options.clone(),
             ident,
-            handle,
-            ready: false,
-            pending_handshake: false,
-            handshake_admission: None,
-            handled_events: 0,
-            handled_control: 0,
-            completion: None,
-            identity: Bytes::new(),
-            info: None,
-            endpoint: self.endpoint.clone(),
-            is_client: self.connect,
-            route_id,
-            inproc_inbound: None,
-            task: None,
             io_thread: self.io_thread,
-        }
-    }
-}
-
-/// Connect endpoints report `Connected`, bind endpoints `Accepted`.
-fn connection_event(
-    connect: bool,
-    endpoint: Endpoint,
-    peer_ident: PeerIdent,
-    connection_id: u64,
-) -> MonitorEvent {
-    if connect {
-        MonitorEvent::Connected {
-            endpoint,
-            peer_ident,
-            connection_id,
-        }
-    } else {
-        MonitorEvent::Accepted {
-            endpoint,
-            peer_ident,
-            connection_id,
-        }
+        };
+        PeerEntry::new(origin, handle)
     }
 }
 
@@ -592,4 +499,52 @@ fn ready_properties(ready: ReadyPeer) -> Arc<PeerProperties> {
             ("Transport".into(), Bytes::from_static(b"DART")),
         ],
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::socket::actor::{DriverEnv, HandleLink, HandleShared};
+    use omq_proto::Message;
+    use omq_proto::error::TrySendError;
+
+    #[tokio::test]
+    async fn late_peer_after_fanin_close_gets_closed_receive() {
+        let options = Options::default();
+        let pool = crate::context::IoPoolHandle::none();
+        let blocking = crate::socket::recv::BlockingRecvWaker::new();
+        let (recv_tx, _consumer, _, _) = crate::socket::recv::recv_pipe(16, blocking.clone());
+        let mut spsc = crate::socket::recv::SpscHandles::new(blocking.clone(), false);
+        let fanin = crate::socket::fanin::Fanin::new(16, spsc.recv_signal.clone(), blocking);
+        spsc.fanin = Some(fanin.clone());
+        let (_, cmd_rx) = mpsc::channel(1);
+        let link = HandleLink {
+            cmd_rx,
+            recv_tx: recv_tx.clone(),
+            cancel: CancellationToken::new(),
+            monitor: crate::socket::monitor::MonitorPublisher::new(16),
+            spsc,
+            peer_recv_routes: None,
+            shared: HandleShared::new(),
+        };
+        let env = DriverEnv {
+            io_pool: pool.clone(),
+            inproc_registry: Arc::new(crate::transport::inproc::InprocRegistry::new()),
+            recv_sink_config: None,
+        };
+        let send_strategy =
+            crate::routing::SendStrategy::for_socket_type(SocketType::Pull, &options, &pool);
+        let mut driver = SocketDriver::new(SocketType::Pull, options, send_strategy, link, env);
+
+        // Last-handle drop closes fan-in before a late DART peer attaches.
+        fanin.close();
+        let RecvSink::Channel(pipe) = driver.dart_recv_sink(0) else {
+            panic!("late attachment must use the shared receive pipe");
+        };
+        assert!(Arc::ptr_eq(&pipe, &recv_tx));
+        assert!(matches!(
+            pipe.try_send(Message::single("late-peer")),
+            Err(TrySendError::Closed)
+        ));
+    }
 }

@@ -1,3 +1,4 @@
+use super::make_run_id;
 use crate::cli::ComparisonsArgs;
 use crate::jsonl::{self, ComparisonRow};
 use crate::process;
@@ -8,6 +9,8 @@ use std::path::{Path, PathBuf};
 mod build;
 mod cells;
 mod impls;
+mod select;
+mod table;
 
 use build::build_peers;
 use cells::{
@@ -15,37 +18,14 @@ use cells::{
     run_latency_cell, run_pubsub_cell, run_throughput_cell,
 };
 use impls::{
-    IMPLS, ImplClass, ImplDef, TransportKind, find_impl, latency_env, supports_fanio,
+    ImplClass, ImplDef, TransportKind, find_impl, latency_env, supports_fanio,
     supports_latency_pair, supports_pushpull,
 };
-
-const COMPARISON_CHART_SIZES: &[u64] = &[16, 64, 256, 1024, 4096, 16384];
-const MAIN_EXTRA_CHART_SIZES: &[u64] = &[
-    32, 128, 512, 2048, 8192, 32768, 262_144, 4_194_304, 8_388_608,
-];
-const QUICK_SIZES: &[u64] = &[64, 1024, 4096];
-
-const LATENCY_MAX_SIZE: u64 = 4096;
-
-const DEFAULT_DURATION: f64 = 3.0;
-const QUICK_DURATION: f64 = 1.5;
-const DEFAULT_ROUNDS: u32 = 1;
-
-fn all_chart_sizes() -> Vec<u64> {
-    let mut sizes: Vec<u64> = COMPARISON_CHART_SIZES.to_vec();
-    sizes.extend(MAIN_EXTRA_CHART_SIZES);
-    sizes.sort_unstable();
-    sizes.dedup();
-    sizes
-}
-
-fn latency_sizes_from(sizes: &[u64]) -> Vec<u64> {
-    sizes
-        .iter()
-        .copied()
-        .filter(|&s| s <= LATENCY_MAX_SIZE)
-        .collect()
-}
+use select::{
+    COMPARISON_CHART_SIZES, duration_and_rounds, exit_on_unknown_impls, latency_sizes_from,
+    peer_features, random_base_port, selected_impl_names, selected_sizes, selected_transports,
+};
+use table::{fmt_compact, fmt_full, print_latency_header, print_throughput_header, run_table};
 
 // ---- Address generation ---------------------------------------------------
 
@@ -60,106 +40,6 @@ fn uses_filesystem_ipc(impl_name: &str) -> bool {
     matches!(impl_name, "zmq.rs" | "rzmq" | "rzmq-iouring")
 }
 
-fn addr_for(
-    transport: TransportKind,
-    prefix: &str,
-    idx: u64,
-    base_port: u16,
-    impl_name: &str,
-) -> String {
-    let uid = next_addr_id();
-    match transport {
-        TransportKind::Tcp | TransportKind::Quic => "0".to_string(),
-        TransportKind::Ws => {
-            let offset: u16 = match prefix {
-                "t" => 0,
-                "u" => 100,
-                "z" => 200,
-                "Y" => 300,
-                "Z" => 400,
-                "q" => 500,
-                "r" => 600,
-                "R" => 700,
-                _ => 800,
-            };
-            let port = base_port + offset + idx as u16;
-            format!("ws://127.0.0.1:{port}/")
-        }
-        TransportKind::Ipc => {
-            if uses_filesystem_ipc(impl_name) {
-                format!("ipc:///tmp/omq-bench-cmp-{prefix}-{uid}")
-            } else {
-                format!("ipc://@omq-bench-cmp-{prefix}-{uid}")
-            }
-        }
-        TransportKind::Inproc => {
-            format!("bench-cmp-{prefix}-{uid}")
-        }
-    }
-}
-
-// ---- Build ----------------------------------------------------------------
-
-// ---- Measurement integrity ------------------------------------------------
-
-struct MeasurementTracker {
-    issues: Vec<String>,
-}
-
-impl MeasurementTracker {
-    fn new() -> Self {
-        Self { issues: Vec::new() }
-    }
-
-    #[allow(dead_code)]
-    fn note(&mut self, present: bool, ctx: &str, what: &str) -> bool {
-        if !present {
-            self.issues.push(format!("{ctx}: missing {what}"));
-        }
-        present
-    }
-
-    fn check(&self) {
-        if !self.issues.is_empty() {
-            eprintln!("\nMeasurement issues:");
-            for issue in &self.issues {
-                eprintln!("  - {issue}");
-            }
-            std::process::exit(1);
-        }
-    }
-}
-
-// ---- Size formatting ------------------------------------------------------
-
-pub(crate) fn size_label(n: u64) -> String {
-    if n >= 1_048_576 {
-        format!("{} MiB", n / 1_048_576)
-    } else if n >= 1024 {
-        format!("{} KiB", n / 1024)
-    } else {
-        format!("{n} B")
-    }
-}
-
-// ---- Run ID ---------------------------------------------------------------
-
-fn make_run_id(name: Option<&str>) -> String {
-    let ts = chrono_like_utc_now();
-    match name {
-        Some(n) => format!("{ts}-{n}"),
-        None => ts,
-    }
-}
-
-fn chrono_like_utc_now() -> String {
-    let output = std::process::Command::new("date")
-        .args(["-u", "+%Y%m%dT%H%M%SZ"])
-        .output()
-        .expect("failed to run date");
-    String::from_utf8_lossy(&output.stdout).trim().to_string()
-}
-
 // ---- Cell functions -------------------------------------------------------
 
 fn cleanup_ipc_addr(addr: &str, impl_name: &str) {
@@ -172,77 +52,6 @@ fn cleanup_ipc_addr(addr: &str, impl_name: &str) {
 }
 
 // ---- Orchestration --------------------------------------------------------
-
-fn selected_sizes(args: &ComparisonsArgs) -> Vec<u64> {
-    let sizes = if let Some(sizes) = &args.sizes {
-        sizes.clone()
-    } else if args.quick_run {
-        QUICK_SIZES.to_vec()
-    } else {
-        all_chart_sizes()
-    };
-    if !args.allow_non_chart_sizes {
-        let chart = all_chart_sizes();
-        for &size in &sizes {
-            if !chart.contains(&size) {
-                eprintln!(
-                    "warning: size {size} is not a chart size, use --allow-non-chart-sizes to override"
-                );
-            }
-        }
-    }
-    sizes
-}
-
-fn selected_impl_names(args: &ComparisonsArgs) -> Vec<&str> {
-    let mut names: Vec<&str> = if args.omq {
-        let mut names = vec!["omq-tokio-1t", "omq-tokio-2t"];
-        for name in &args.impls {
-            if !names.contains(&name.as_str()) {
-                names.push(name);
-            }
-        }
-        names
-    } else if !args.impls.is_empty() {
-        args.impls.iter().map(String::as_str).collect()
-    } else {
-        IMPLS
-            .iter()
-            .filter(|imp| imp.main)
-            .map(|imp| imp.name)
-            .collect()
-    };
-    if args.curve {
-        let families: Vec<&str> = names
-            .iter()
-            .filter_map(|name| name.split('-').next())
-            .collect();
-        for imp in IMPLS {
-            if imp.class == Some(ImplClass::Curve)
-                && !names.contains(&imp.name)
-                && imp
-                    .name
-                    .split('-')
-                    .next()
-                    .is_some_and(|family| families.contains(&family))
-            {
-                names.push(imp.name);
-            }
-        }
-    }
-    names
-}
-
-fn random_base_port() -> u16 {
-    let mut buf = [0u8; 2];
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut file| {
-            use std::io::Read;
-            file.read_exact(&mut buf)
-        })
-        .ok();
-    20_000 + (u16::from_le_bytes(buf) % 20_000)
-}
 
 #[derive(Clone, Copy, Debug)]
 enum CellKind {
@@ -344,19 +153,13 @@ impl ComparisonRun<'_> {
             CellKind::PubSub => {
                 row.pub_cpu_time = result.push_cpu;
                 row.pull_cpu_time = result.pull_cpu;
-                row.receiver_io_threads = self.args.pubsub_receiver_io_threads;
-                row.receiver_workers = self.args.pubsub_receiver_workers;
+                row.receiver_io_threads = self.args.pubsub.pubsub_receiver_io_threads;
+                row.receiver_workers = self.args.pubsub.pubsub_receiver_workers;
                 row.receiver_cpus
-                    .clone_from(&self.args.pubsub_receiver_cpus);
+                    .clone_from(&self.args.pubsub.pubsub_receiver_cpus);
             }
         }
-        row.peer_min = result.peer_min;
-        row.peer_max = result.peer_max;
-        row.peer_p10 = result.peer_p10;
-        row.peer_p25 = result.peer_p25;
-        row.peer_median = result.peer_median;
-        row.peer_p75 = result.peer_p75;
-        row.peer_p90 = result.peer_p90;
+        row.set_spread(result.spread);
         row.zero_transport = (result.msgs_s == 0.0).then_some(true);
         jsonl::append_jsonl(self.jsonl_path, &row);
     }
@@ -422,19 +225,24 @@ impl ComparisonRun<'_> {
         if !self.args.no_latency {
             self.run_latency(transport, &active);
         }
-        if !self.args.no_pubsub && transport != TransportKind::Inproc {
+        if !self.args.pubsub.no_pubsub && transport != TransportKind::Inproc {
             let pubsub_impls: Vec<&str> = active
                 .iter()
                 .copied()
                 .filter(|name| find_impl(name).unwrap().supports_pubsub && self.multi_peer(name))
                 .collect();
-            self.run_pubsub(transport, &pubsub_impls, &self.args.pubsub_peers, false);
+            self.run_pubsub(
+                transport,
+                &pubsub_impls,
+                &self.args.pubsub.pubsub_peers,
+                false,
+            );
         }
         if matches!(transport, TransportKind::Tcp | TransportKind::Quic) {
-            if self.args.fanout {
+            if self.args.fanio.fanout {
                 self.run_fanio(transport, &active, CellKind::FanOut);
             }
-            if self.args.fanin {
+            if self.args.fanio.fanin {
                 self.run_fanio(transport, &active, CellKind::FanIn);
             }
         }
@@ -451,20 +259,12 @@ impl ComparisonRun<'_> {
         }
         eprintln!("\n=== Throughput / {} ===", transport.as_str());
         print_throughput_header(&impls);
-        for &size in self.sizes {
-            let mut cells = Vec::with_capacity(impls.len());
-            for &name in &impls {
-                let cell = self.cell(name, transport, size);
-                let result = run_throughput_cell(&cell, self.duration, self.rounds);
-                self.record_cell(&cell, CellKind::Throughput, None, &result);
-                cells.push(if size >= 1024 {
-                    fmt_gbps(result.mbps)
-                } else {
-                    fmt_rate(result.msgs_s)
-                });
-            }
-            print_table_row(&size_label(size), &cells, 14);
-        }
+        run_table(self.sizes, &impls, 14, |name, size| {
+            let cell = self.cell(name, transport, size);
+            let result = run_throughput_cell(&cell, self.duration, self.rounds);
+            self.record_cell(&cell, CellKind::Throughput, None, &result);
+            fmt_full(&result, size)
+        });
     }
 
     fn run_latency(&self, transport: TransportKind, active: &[&str]) {
@@ -490,24 +290,14 @@ impl ComparisonRun<'_> {
                     transport.as_str()
                 );
                 print_latency_header(&impls);
-                let workload = LatencyWorkload {
-                    pair,
-                    profile,
-                    iterations: self.args.latency_iterations,
-                    warmup: self.args.latency_warmup,
-                    timeout: self.args.latency_timeout,
-                };
+                let workload = LatencyWorkload::new(pair, profile, &self.args.latency);
 
-                for &size in &sizes {
-                    let mut cells = Vec::with_capacity(impls.len());
-                    for &name in &impls {
-                        let cell = self.cell(name, transport, size);
-                        let result = self.measure_latency(&cell, &workload);
-                        self.record_latency(&cell, &workload, &result);
-                        cells.push(format!("{:.1}", result.p99_us));
-                    }
-                    print_table_row(&size_label(size), &cells, 14);
-                }
+                run_table(&sizes, &impls, 14, |name, size| {
+                    let cell = self.cell(name, transport, size);
+                    let result = self.measure_latency(&cell, &workload);
+                    self.record_latency(&cell, &workload, &result);
+                    format!("{:.1}", result.p99_us)
+                });
             }
         }
     }
@@ -563,27 +353,17 @@ impl ComparisonRun<'_> {
             let label = if curve { "CURVE PubSub" } else { "PubSub" };
             eprintln!("\n=== {label} {peers}p / {} ===", transport.as_str());
             print_throughput_header(impls);
-            for &size in &sizes {
-                let mut cells = Vec::with_capacity(impls.len());
-                for &name in impls {
-                    let cell = self.cell(name, transport, size);
-                    let result =
-                        run_pubsub_cell(&cell, peers, self.duration, self.rounds, self.args);
-                    self.record_cell(&cell, CellKind::PubSub, Some(peers), &result);
-                    cells.push(if curve {
-                        if size >= 1024 {
-                            fmt_gbps(result.mbps)
-                        } else {
-                            fmt_rate(result.msgs_s)
-                        }
-                    } else if size >= 1024 {
-                        format!("{:.1}", result.mbps / 1000.0)
-                    } else {
-                        format!("{:.0}", result.msgs_s / 1000.0)
-                    });
+            run_table(&sizes, impls, if curve { 14 } else { 8 }, |name, size| {
+                let cell = self.cell(name, transport, size);
+                let result =
+                    run_pubsub_cell(&cell, peers, self.duration, self.rounds, &self.args.pubsub);
+                self.record_cell(&cell, CellKind::PubSub, Some(peers), &result);
+                if curve {
+                    fmt_full(&result, size)
+                } else {
+                    fmt_compact(&result, size)
                 }
-                print_table_row(&size_label(size), &cells, if curve { 14 } else { 8 });
-            }
+            });
         }
     }
 
@@ -598,7 +378,12 @@ impl ComparisonRun<'_> {
             })
             .collect();
         if !impls.is_empty() {
-            self.run_pubsub(TransportKind::Tcp, &impls, &[self.args.curve_peers], true);
+            self.run_pubsub(
+                TransportKind::Tcp,
+                &impls,
+                &[self.args.curve.curve_peers],
+                true,
+            );
         }
     }
 
@@ -610,40 +395,31 @@ impl ComparisonRun<'_> {
             .collect();
         let sizes = self.chart_sizes();
         let (label, peer_counts) = match kind {
-            CellKind::FanOut => ("FanOut", &self.args.fanout_peers),
-            CellKind::FanIn => ("FanIn", &self.args.fanin_peers),
+            CellKind::FanOut => ("FanOut", &self.args.fanio.fanout_peers),
+            CellKind::FanIn => ("FanIn", &self.args.fanio.fanin_peers),
             _ => unreachable!(),
         };
         for &peers in peer_counts {
             eprintln!("\n=== {label} {peers}p / {} ===", transport.as_str());
             print_throughput_header(&impls);
-            for &size in &sizes {
-                let mut cells = Vec::with_capacity(impls.len());
-                for &name in &impls {
-                    let cell = self.cell(name, transport, size);
-                    let result = match kind {
-                        CellKind::FanOut => {
-                            run_fanout_cell(&cell, peers, self.duration, self.rounds)
-                        }
-                        CellKind::FanIn => run_fanin_cell(&cell, peers, self.duration, self.rounds),
-                        _ => unreachable!(),
-                    };
-                    self.record_cell(&cell, kind, Some(peers), &result);
-                    cells.push(if size >= 1024 {
-                        format!("{:.1}", result.mbps / 1000.0)
-                    } else {
-                        format!("{:.0}", result.msgs_s / 1000.0)
-                    });
-                }
-                print_table_row(&size_label(size), &cells, 8);
-            }
+            run_table(&sizes, &impls, 8, |name, size| {
+                let cell = self.cell(name, transport, size);
+                let result = match kind {
+                    CellKind::FanOut => run_fanout_cell(&cell, peers, self.duration, self.rounds),
+                    CellKind::FanIn => run_fanin_cell(&cell, peers, self.duration, self.rounds),
+                    _ => unreachable!(),
+                };
+                self.record_cell(&cell, kind, Some(peers), &result);
+                fmt_compact(&result, size)
+            });
         }
     }
 }
 
 pub(crate) fn run(args: &ComparisonsArgs) {
     assert!(
-        args.pubsub_receiver_cpus.is_none() || std::env::var_os("OMQ_BENCH_TASKSET").is_some(),
+        args.pubsub.pubsub_receiver_cpus.is_none()
+            || std::env::var_os("OMQ_BENCH_TASKSET").is_some(),
         "--pubsub-receiver-cpus requires OMQ_BENCH_TASKSET"
     );
     process::install_reaper();
@@ -654,19 +430,16 @@ pub(crate) fn run(args: &ComparisonsArgs) {
     exit_on_unknown_impls(&impl_names);
     let transports = selected_transports(args);
 
-    let needs_ws = transports.contains(&TransportKind::Ws);
-    let needs_quic = transports.contains(&TransportKind::Quic);
-    if needs_quic {
+    if transports.contains(&TransportKind::Quic) {
         crate::tls::install_bench_credentials();
     }
-    let needs_curve = args.curve || impl_names.iter().any(|name| name.contains("curve"));
     eprintln!("Building peers...");
-    let binaries = build_peers(&impl_names, needs_ws, needs_quic, needs_curve);
+    let features = peer_features(args, &impl_names, &transports);
+    let binaries = build_peers(&impl_names, &features);
 
     let base_port = args.base_port.unwrap_or_else(random_base_port);
     let run_id = make_run_id(args.id.as_deref());
     let jsonl_path = jsonl::cache_dir().join("comparisons.jsonl");
-    let tracker = MeasurementTracker::new();
     let run = ComparisonRun {
         args,
         sizes: &sizes,
@@ -682,105 +455,10 @@ pub(crate) fn run(args: &ComparisonsArgs) {
     for &transport in &transports {
         run.run_transport(transport);
     }
-    if args.curve {
+    if args.curve.enabled {
         run.run_curve_pubsub();
     }
-    tracker.check();
     eprintln!("\nResults appended to {}", jsonl_path.display());
-}
-
-/// Seconds per cell and rounds per cell: CLI, then environment, then
-/// defaults. Quick runs override both.
-fn duration_and_rounds(args: &ComparisonsArgs) -> (f64, u32) {
-    let duration = if args.quick_run {
-        QUICK_DURATION
-    } else {
-        args.duration
-            .or_else(|| std::env::var("OMQ_BENCH_DURATION").ok()?.parse().ok())
-            .unwrap_or(DEFAULT_DURATION)
-    };
-    let rounds = if args.quick_run {
-        1
-    } else {
-        args.rounds
-            .or_else(|| std::env::var("OMQ_BENCH_ROUNDS").ok()?.parse().ok())
-            .unwrap_or(DEFAULT_ROUNDS)
-    };
-    (duration, rounds)
-}
-
-fn exit_on_unknown_impls(impl_names: &[&str]) {
-    for &name in impl_names {
-        if find_impl(name).is_none() {
-            eprintln!("unknown impl: {name}");
-            eprintln!(
-                "available: {}",
-                IMPLS
-                    .iter()
-                    .map(|imp| imp.name)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-            std::process::exit(1);
-        }
-    }
-}
-
-fn selected_transports(args: &ComparisonsArgs) -> Vec<TransportKind> {
-    args.transport
-        .iter()
-        .map(|transport| match transport {
-            crate::cli::Transport::Tcp => TransportKind::Tcp,
-            crate::cli::Transport::Ipc => TransportKind::Ipc,
-            crate::cli::Transport::Inproc => TransportKind::Inproc,
-            crate::cli::Transport::Ws => TransportKind::Ws,
-            crate::cli::Transport::Quic => TransportKind::Quic,
-        })
-        .collect()
-}
-
-fn print_throughput_header(impls: &[&str]) {
-    eprint!("{:>8}", "");
-    for &name in impls {
-        eprint!("  {name:>14}");
-    }
-    eprintln!();
-}
-
-fn print_latency_header(impls: &[&str]) {
-    eprint!("{:>8}", "");
-    for &name in impls {
-        eprint!("  {name:>14}");
-    }
-    eprintln!("  (p99 us)");
-}
-
-fn print_table_row(label: &str, cells: &[String], width: usize) {
-    use std::fmt::Write as _;
-
-    let mut line = format!("{label:>8}");
-    for cell in cells {
-        write!(&mut line, "  {cell:>width$}").expect("write to string");
-    }
-    eprintln!("{line}");
-}
-
-fn fmt_rate(val: f64) -> String {
-    if val >= 1_000_000.0 {
-        format!("{:.2}M msg/s", val / 1_000_000.0)
-    } else if val >= 1000.0 {
-        format!("{:.0}K msg/s", val / 1000.0)
-    } else {
-        format!("{val:.0} msg/s")
-    }
-}
-
-fn fmt_gbps(val: f64) -> String {
-    if val >= 1000.0 {
-        format!("{:.2} GB/s", val / 1000.0)
-    } else {
-        format!("{val:.0} MB/s")
-    }
 }
 
 #[cfg(test)]

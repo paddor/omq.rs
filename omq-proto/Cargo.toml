@@ -74,6 +74,10 @@ name = "omq_proto_endpoint"
 path = "tests/endpoint.rs"
 
 [[test]]
+name = "omq_proto_endpoint_schemes"
+path = "tests/endpoint_schemes.rs"
+
+[[test]]
 name = "omq_proto_codec_policy"
 path = "tests/codec_policy.rs"
 

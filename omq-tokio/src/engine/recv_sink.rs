@@ -68,13 +68,10 @@ impl RepRecvSink {
             pending_flush,
         );
         match result {
-            Err(TrySendError::Full(mut returned)) => {
-                let _ = returned.take_routing_id();
-                if let Some(routing_id) = original_routing_id {
-                    returned = returned.with_routing_id(routing_id);
-                }
-                Err(TrySendError::Full(returned))
-            }
+            Err(TrySendError::Full(returned)) => Err(TrySendError::Full(restore_routing_id(
+                returned,
+                original_routing_id,
+            ))),
             other => other,
         }
     }
@@ -604,14 +601,12 @@ impl RecvSink {
         let wrapped = matches!(self, Self::Server(_));
         match self.try_send_with_flush_mode(message, defer, pending) {
             Ok(()) => {}
-            Err(TrySendError::Full(mut message)) => {
-                if wrapped {
-                    let _ = message.take_routing_id();
-                    if let Some(id) = routing_id {
-                        message = message.with_routing_id(id);
-                    }
-                }
-                return Err(TrySendError::Full(message));
+            Err(TrySendError::Full(message)) => {
+                return Err(TrySendError::Full(if wrapped {
+                    restore_routing_id(message, routing_id)
+                } else {
+                    message
+                }));
             }
             Err(error) => return Err(error),
         }
@@ -638,14 +633,12 @@ impl RecvSink {
             #[cfg(not(feature = "dart"))]
             None
         };
-        if let Some(mut message) = returned {
-            if wrapped {
-                let _ = message.take_routing_id();
-                if let Some(id) = routing_id {
-                    message = message.with_routing_id(id);
-                }
-            }
-            return Err(TrySendError::Full(message));
+        if let Some(message) = returned {
+            return Err(TrySendError::Full(if wrapped {
+                restore_routing_id(message, routing_id)
+            } else {
+                message
+            }));
         }
         Ok(())
     }
@@ -698,15 +691,7 @@ impl RecvSink {
     }
 
     pub(crate) async fn receive_space_ready(&mut self) {
-        let mut unwrapped = self;
-        loop {
-            unwrapped = match unwrapped {
-                Self::Rep(rep) => rep.sink.as_mut(),
-                Self::Server(server) => server.sink.as_mut(),
-                _ => break,
-            };
-        }
-        match unwrapped {
+        match self.direct_inner() {
             Self::Channel(pipe) => pipe.space_ready().await,
             Self::Yring(sink) => {
                 sink.space
@@ -752,6 +737,16 @@ impl RecvSink {
             Self::Server(server) => server.sink.retry_peer_pending(),
             _ => true,
         }
+    }
+}
+
+/// Replace the routing ID a wrapper sink attached with the caller's original.
+#[inline]
+fn restore_routing_id(mut message: Message, original: Option<u32>) -> Message {
+    let _ = message.take_routing_id();
+    match original {
+        Some(routing_id) => message.with_routing_id(routing_id),
+        None => message,
     }
 }
 

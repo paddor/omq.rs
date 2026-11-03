@@ -2,10 +2,7 @@
 #![forbid(unsafe_code)]
 
 use std::collections::VecDeque;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::{Arc, atomic::Ordering};
 
 use crate::{
     batch,
@@ -15,18 +12,18 @@ use crate::{
     mapping::{DATA, HEADER, LEASES, Mapping},
     pool::find_slot,
     process::Process,
+    test_support::grouped,
     views::Views,
     wire, *,
 };
 use omq_proto::{Message, Payload};
 
 fn table(count: usize) -> Arc<Table> {
-    Arc::new(Table {
-        mapping: Mapping::create(Carrier::length(count), LEASES).unwrap(),
+    Arc::new(Table::new(
+        Mapping::create(Carrier::length(count), LEASES).unwrap(),
         count,
-        stopped: AtomicBool::new(false),
-        carrier: Carrier::testing(count),
-    })
+        Carrier::testing(count),
+    ))
 }
 
 fn publish(
@@ -105,13 +102,17 @@ fn slab_slices_keep_borrowed_views_live_while_another_slot_is_mutated() {
     let reference = publish(&packed, &table, 0, GENERATION_STEP, wire::REFERENCE_BATCH);
     let views = Views::new(1);
     let received = Message::from(borrow(&packed, &table, reference, &views));
-    let mut cursor = batch::ReceivedBatch::referenced(&received, None, &views, |id, token| {
-        regions
-            .iter()
-            .find(|region| region.id == id && region.token == token)
-            .cloned()
-    })
-    .unwrap();
+    let mut cx = batch::DecodeContext {
+        maximum: None,
+        views: &views,
+        region: |id: u32, token: u64| {
+            regions
+                .iter()
+                .find(|region| region.id == id && region.token == token)
+                .cloned()
+        },
+    };
+    let mut cursor = batch::ReceivedBatch::referenced(&received, &mut cx).unwrap();
     let held = cursor
         .pop_front()
         .unwrap()
@@ -404,14 +405,6 @@ fn carrier_wraparound_partial_slices_and_returned_space_do_not_overlap() {
     assert_eq!(carrier.read(&mapping, &mut output).unwrap(), capacity);
     assert_eq!(&output[..4], &[7; 4]);
     assert!(output[4..].iter().all(|&byte| byte == 9));
-}
-
-fn grouped(pool: &omq_proto::PayloadPool, size: usize, value: u8) -> Message {
-    Message::with_prefix(
-        b"g".as_slice().into(),
-        pool.message(size, |body| body.fill(value)).unwrap(),
-    )
-    .with_routing_id(7)
 }
 
 #[test]
@@ -732,7 +725,10 @@ fn reference_run_validation_checks_every_body_and_retains_empty_views() {
 fn referenced_batches_retain_every_source_until_all_recipient_views_release() {
     let sources = payload_pool([(256, 2)]).unwrap();
     let metadata = payload_pool([(256, 1)]).unwrap();
-    let messages = [grouped(&sources, 128, 7), grouped(&sources, 256, 9)];
+    let messages = [
+        grouped(&sources, b"g", 128, 7),
+        grouped(&sources, b"g", 256, 9),
+    ];
     let packed = prepare_reference_batch(&metadata, &[&messages[0], &messages[1]])
         .unwrap()
         .unwrap();
@@ -794,7 +790,10 @@ fn malformed_batches_and_reference_records_never_dereference_invalid_coordinates
     }
     let sources = payload_pool([(128, 2)]).unwrap();
     let metadata = payload_pool([(256, 1)]).unwrap();
-    let messages = [grouped(&sources, 128, 7), grouped(&sources, 128, 9)];
+    let messages = [
+        grouped(&sources, b"g", 128, 7),
+        grouped(&sources, b"g", 128, 9),
+    ];
     let packed = prepare_reference_batch(&metadata, &[&messages[0], &messages[1]])
         .unwrap()
         .unwrap();
@@ -1018,7 +1017,10 @@ fn preface_and_reference_roundtrips_check_identity_and_truncation() {
 fn unpublished_reference_batch_releases_sources_after_final_local_owner() {
     let sources = payload_pool([(128, 2)]).unwrap();
     let metadata = payload_pool([(256, 1)]).unwrap();
-    let messages = [grouped(&sources, 128, 7), grouped(&sources, 128, 9)];
+    let messages = [
+        grouped(&sources, b"g", 128, 7),
+        grouped(&sources, b"g", 128, 9),
+    ];
     let packed = prepare_reference_batch(&metadata, &[&messages[0], &messages[1]])
         .unwrap()
         .unwrap();
@@ -1135,15 +1137,20 @@ fn received_cursor(
     let views = Views::new(1);
     let mut received = packed.clone();
     received.replace_last_payload(borrow(&packed, &table, reference, &views));
-    let cursor = if referenced {
-        ReceivedBatch::referenced(&received, None, &views, |id, token| {
+    let mut cx = batch::DecodeContext {
+        maximum: None,
+        views: &views,
+        region: |id: u32, token: u64| {
             regions
                 .iter()
                 .find(|region| region.id == id && region.token == token)
                 .cloned()
-        })
+        },
+    };
+    let cursor = if referenced {
+        ReceivedBatch::referenced(&received, &mut cx)
     } else {
-        ReceivedBatch::copied(&received, None, &views)
+        ReceivedBatch::copied(&received, &cx)
     }
     .unwrap();
     (cursor, metadata, table)

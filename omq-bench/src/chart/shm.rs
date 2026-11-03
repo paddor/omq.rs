@@ -113,8 +113,17 @@ fn storage_matches(row: &Value, size: u64, latency: bool) -> bool {
                 })
 }
 
-pub(super) fn verified(row: &Value, implementation: &str, size: u64, readers: u64) -> bool {
-    if setup_rejected(row, implementation, size, readers) {
+/// One chart point: implementation, message size, and a family-specific
+/// mode (the reader count for RADIO/DISH).
+#[derive(Clone, Copy)]
+pub(super) struct Target<'a, M> {
+    pub(super) implementation: &'a str,
+    pub(super) size: u64,
+    pub(super) mode: M,
+}
+
+pub(super) fn verified(row: &Value, target: Target<'_, u64>) -> bool {
+    if setup_rejected(row, target) {
         return false;
     }
     let Some(rounds) = row["rounds"].as_array().filter(|rounds| rounds.len() == 3) else {
@@ -123,21 +132,32 @@ pub(super) fn verified(row: &Value, implementation: &str, size: u64, readers: u6
     rounds
         .iter()
         .enumerate()
-        .all(|(index, round)| round_verified(round, index, readers))
+        .all(|(index, round)| round_verified(round, index, target.mode))
 }
 
-/// Rejects rows from another setup. Inproc runs in one process across all
-/// four CPUs; the other transports pin the publisher and the shared
-/// receiver process to two CPUs each.
-fn setup_rejected(row: &Value, implementation: &str, size: u64, readers: u64) -> bool {
-    let inproc = implementation == "inproc";
-    row["kind"] != "shm_pubsub_verified"
+/// Rejects rows from another setup.
+fn setup_rejected(row: &Value, target: Target<'_, u64>) -> bool {
+    let readers = target.mode;
+    layout_rejected(row, target.implementation)
+        || row["kind"] != "shm_pubsub_verified"
         || row["profiled"] == true
-        || row["impl"] != implementation
-        || row["msg_size"] != size
+        || row["msg_size"] != target.size
         || row["peers"] != readers
         || row["socket_pair"] != "radio-dish"
         || row["subscriber_threads"] != readers
+        || row["receiver_context"] != "shared"
+        || row["warmup_seconds"] != 1
+        || row["seconds"] != 3
+        || !storage_matches(row, target.size, false)
+}
+
+/// Rejects rows of another implementation or CPU, process, or storage
+/// layout. Inproc runs in one process across all four CPUs; the other
+/// transports pin the sender and the shared receiver process to two CPUs
+/// each.
+fn layout_rejected(row: &Value, implementation: &str) -> bool {
+    let inproc = implementation == "inproc";
+    row["impl"] != implementation
         || row["subscriber_processes"] != u64::from(!inproc)
         || row["process_layout"]
             != if inproc {
@@ -147,16 +167,12 @@ fn setup_rejected(row: &Value, implementation: &str, size: u64, readers: u64) ->
             }
         || row["publisher_cpus"] != if inproc { "1,2,3,4" } else { "1,2" }
         || row["subscriber_cpus"] != if inproc { "1,2,3,4" } else { "3,4" }
-        || row["receiver_context"] != "shared"
         || row["io_threads_per_context"] != 1
         || row["storage"]
             != match implementation {
                 "shm-pool" => "preallocated-shm",
                 _ => "preallocated-heap",
             }
-        || row["warmup_seconds"] != 1
-        || row["seconds"] != 3
-        || !storage_matches(row, size, false)
 }
 
 /// Round `index` (zero-based) is valid when every reader got every offered
@@ -200,30 +216,89 @@ fn round_verified(round: &Value, index: usize, readers: u64) -> bool {
             .all(|field| round[field] == 0)
 }
 
-fn find<'a>(rows: &'a [Value], implementation: &str, size: u64, readers: u64) -> Option<&'a Value> {
-    rows.iter()
-        .rev()
-        .find(|row| verified(row, implementation, size, readers))
+fn find<'a>(rows: &'a [Value], target: Target<'_, u64>) -> Option<&'a Value> {
+    rows.iter().rev().find(|row| verified(row, target))
 }
 
+/// Complete when every implementation, reader count, and size has a
+/// verified row.
+fn pubsub_complete(rows: &[Value], implementations: &[Impl], sizes: &[u64]) -> bool {
+    implementations.iter().all(|implementation| {
+        READERS.iter().all(|&readers| {
+            sizes.iter().all(|&size| {
+                let target = Target {
+                    implementation: implementation.key,
+                    size,
+                    mode: readers,
+                };
+                find(rows, target).is_some()
+            })
+        })
+    })
+}
+
+/// Newest cohort that `complete` accepts for `implementations` and `sizes`.
 fn latest_complete<'a>(
     cohorts: &'a Cohorts,
     implementations: &[Impl],
     sizes: &[u64],
+    complete: &impl Fn(&[Value], &[Impl], &[u64]) -> bool,
 ) -> Option<&'a [Value]> {
     cohorts
         .values()
         .rev()
-        .find(|rows| {
-            implementations.iter().all(|implementation| {
-                READERS.iter().all(|&readers| {
-                    sizes
-                        .iter()
-                        .all(|&size| find(rows, implementation.key, size, readers).is_some())
-                })
-            })
-        })
+        .find(|rows| complete(rows, implementations, sizes))
         .map(Vec::as_slice)
+}
+
+/// Rows of the newest complete cohort per implementation group and size
+/// block, logged as `SHM {label}`. With cached baselines, inproc/IPC and SHM
+/// may come from different runs, and so may sizes below and above the
+/// large-pool threshold. `None` when a group or block has no complete cohort.
+fn select_cohorts(
+    cohorts: &Cohorts,
+    label: &str,
+    sizes: &[u64],
+    cached_baselines: bool,
+    complete: impl Fn(&[Value], &[Impl], &[u64]) -> bool,
+) -> Option<Vec<Value>> {
+    let groups = if cached_baselines {
+        vec![&IMPLS[..2], &IMPLS[2..]]
+    } else {
+        vec![IMPLS]
+    };
+    let mut selected = Vec::new();
+    for implementations in groups {
+        for sizes in size_blocks(sizes, cached_baselines) {
+            let cohort = latest_complete(cohorts, implementations, sizes, &complete)?;
+            eprintln!(
+                "SHM {label}: implementations={}, sizes={}..{}, run={}, binary={}",
+                implementations
+                    .iter()
+                    .map(|item| item.key)
+                    .collect::<Vec<_>>()
+                    .join(","),
+                sizes[0],
+                sizes[sizes.len() - 1],
+                cohort[0]["run_id"],
+                cohort[0]["binary_sha256"],
+            );
+            selected.extend(
+                cohort
+                    .iter()
+                    .filter(|row| {
+                        implementations
+                            .iter()
+                            .any(|implementation| row["impl"] == implementation.key)
+                            && row["msg_size"]
+                                .as_u64()
+                                .is_some_and(|size| sizes.contains(&size))
+                    })
+                    .cloned(),
+            );
+        }
+    }
+    Some(selected)
 }
 
 fn load_cohorts(cache: &Path, family: &str) -> Cohorts {
@@ -239,45 +314,73 @@ fn load_cohorts(cache: &Path, family: &str) -> Cohorts {
     cohorts
 }
 
-fn build_panels(rows: &[Value]) -> Vec<(u64, ValMap, ValMap, FairnessMap)> {
-    let mut panels = Vec::new();
-    for &readers in READERS {
-        let mut bandwidth = ValMap::new();
-        let mut messages = ValMap::new();
-        let mut spread = FairnessMap::new();
-        for implementation in IMPLS {
-            for &size in SIZES {
-                let row = find(rows, implementation.key, size, readers).unwrap();
-                let mut rates: Vec<_> = row["rounds"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|round| round["msgs_s"].as_f64().unwrap())
-                    .collect();
-                rates.sort_by(f64::total_cmp);
-                messages
-                    .entry(size)
-                    .or_default()
-                    .insert(implementation.key.into(), rates[1]);
-                bandwidth
-                    .entry(size)
-                    .or_default()
-                    .insert(implementation.key.into(), rates[1] * size as f64 / 1e6);
-                spread.entry(size).or_default().insert(
-                    implementation.key.into(),
-                    FairnessEntry {
-                        min: rates[0],
-                        p25: rates[0].midpoint(rates[1]),
-                        median: rates[1],
-                        p75: rates[1].midpoint(rates[2]),
-                        max: rates[2],
-                    },
-                );
-            }
-        }
-        panels.push((readers, bandwidth, messages, spread));
+/// Bandwidth, message rate, and round spread by size and implementation.
+#[derive(Default)]
+pub(super) struct RateMaps {
+    bandwidth: ValMap,
+    messages: ValMap,
+    spread: FairnessMap,
+}
+
+impl RateMaps {
+    /// Inserts the median of the row's three round rates. The spread box
+    /// spans the midpoints between min, median, and max.
+    pub(super) fn insert_round_rates(&mut self, row: &Value, implementation: &str, size: u64) {
+        let mut rates: Vec<_> = row["rounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|round| round["msgs_s"].as_f64().unwrap())
+            .collect();
+        rates.sort_by(f64::total_cmp);
+        self.messages
+            .entry(size)
+            .or_default()
+            .insert(implementation.into(), rates[1]);
+        self.bandwidth
+            .entry(size)
+            .or_default()
+            .insert(implementation.into(), rates[1] * size as f64 / 1e6);
+        self.spread.entry(size).or_default().insert(
+            implementation.into(),
+            FairnessEntry {
+                min: rates[0],
+                p25: rates[0].midpoint(rates[1]),
+                median: rates[1],
+                p75: rates[1].midpoint(rates[2]),
+                max: rates[2],
+            },
+        );
     }
-    panels
+
+    pub(super) fn row(&self, peers: u64) -> ThroughputRow<'_> {
+        ThroughputRow {
+            peers,
+            tput: &self.bandwidth,
+            msgs: &self.messages,
+            fairness: Some(&self.spread),
+        }
+    }
+}
+
+fn build_panels(rows: &[Value]) -> Vec<(u64, RateMaps)> {
+    READERS
+        .iter()
+        .map(|&readers| {
+            let mut maps = RateMaps::default();
+            for implementation in IMPLS {
+                for &size in SIZES {
+                    let target = Target {
+                        implementation: implementation.key,
+                        size,
+                        mode: readers,
+                    };
+                    maps.insert_round_rates(find(rows, target).unwrap(), implementation.key, size);
+                }
+            }
+            (readers, maps)
+        })
+        .collect()
 }
 
 pub(crate) fn generate(cached_baselines: bool) -> ChartResult {
@@ -310,17 +413,13 @@ fn generate_pubsub(cache: &Path, directory: &Path, cached_baselines: bool) -> Ch
     if cohorts.is_empty() {
         return Ok(());
     }
-    let selected = select_rows(&cohorts, cached_baselines)?;
+    let selected = select_cohorts(&cohorts, "pubsub", SIZES, cached_baselines, pubsub_complete)
+        .ok_or("missing complete SHM comparison cohort; run scripts/run_shm_pubsub.rb")?;
 
     let panels = build_panels(&selected);
     let rows: Vec<ThroughputRow<'_>> = panels
         .iter()
-        .map(|(readers, bandwidth, messages, spread)| ThroughputRow {
-            peers: *readers,
-            tput: bandwidth,
-            msgs: messages,
-            fairness: Some(spread),
-        })
+        .map(|(readers, maps)| maps.row(*readers))
         .collect();
     let path = directory.join("pubsub.svg");
     let spec = ChartSpec {
@@ -329,67 +428,16 @@ fn generate_pubsub(cache: &Path, directory: &Path, cached_baselines: bool) -> Ch
         sizes: SIZES,
         impls: IMPLS,
     };
-    let columns = CpuColumns {
-        cpu: &BTreeMap::new(),
-        snd_label: "",
-        rcv_label: "",
-    };
 
     common::draw_multirow_throughput(
         &spec,
         &rows,
-        &columns,
+        &CpuColumns::NONE,
         &|readers| format!("{readers} subscribers"),
         hardware_subtitle().as_deref(),
     )?;
     eprintln!("Written: {}", path.display());
     Ok(())
-}
-
-/// Rows of the newest complete cohort per implementation group and size
-/// block. With cached baselines, inproc/IPC and SHM may come from different
-/// runs, and so may sizes below and above the large-pool threshold.
-fn select_rows(cohorts: &Cohorts, cached_baselines: bool) -> ChartResult<Vec<Value>> {
-    let missing = "missing complete SHM comparison cohort; run scripts/run_shm_pubsub.rb";
-    let groups = if cached_baselines {
-        vec![&IMPLS[..2], &IMPLS[2..]]
-    } else {
-        vec![IMPLS]
-    };
-    let mut selected = Vec::new();
-
-    for implementations in groups {
-        for sizes in size_blocks(SIZES, cached_baselines) {
-            let cohort = latest_complete(cohorts, implementations, sizes).ok_or(missing)?;
-            eprintln!(
-                "SHM pubsub: implementations={}, sizes={}..{}, run={}, binary={}",
-                implementations
-                    .iter()
-                    .map(|item| item.key)
-                    .collect::<Vec<_>>()
-                    .join(","),
-                sizes[0],
-                sizes[sizes.len() - 1],
-                cohort[0]["run_id"],
-                cohort[0]["binary_sha256"],
-            );
-            selected.extend(
-                cohort
-                    .iter()
-                    .filter(|row| {
-                        implementations
-                            .iter()
-                            .any(|implementation| row["impl"] == implementation.key)
-                            && row["msg_size"]
-                                .as_u64()
-                                .is_some_and(|size| sizes.contains(&size))
-                    })
-                    .cloned(),
-            );
-        }
-    }
-
-    Ok(selected)
 }
 
 #[cfg(test)]
@@ -497,8 +545,12 @@ mod tests {
         for original in rows {
             let implementation = original["impl"].as_str().unwrap();
             let size = original["msg_size"].as_u64().unwrap();
-            let readers = original["peers"].as_u64().unwrap();
-            assert!(verified(&original, implementation, size, readers));
+            let target = Target {
+                implementation,
+                size,
+                mode: original["peers"].as_u64().unwrap(),
+            };
+            assert!(verified(&original, target));
             for field in [
                 "send_hwm",
                 "recv_hwm",
@@ -508,17 +560,17 @@ mod tests {
             ] {
                 let mut changed = original.clone();
                 changed[field] = json!(changed[field].as_u64().unwrap() + 1);
-                assert!(!verified(&changed, implementation, size, readers));
+                assert!(!verified(&changed, target));
             }
             if implementation.starts_with("shm") {
                 let mut historical = original.clone();
                 historical["pooled_batch_copy_threshold"] = Value::Null;
-                assert!(!verified(&historical, implementation, size, readers));
+                assert!(!verified(&historical, target));
             }
             if size >= LARGE_POOL_MIN_BODY {
                 let mut copied = original.clone();
                 copied["payload_fill"] = json!("memcpy");
-                assert!(!verified(&copied, implementation, size, readers));
+                assert!(!verified(&copied, target));
             }
         }
     }
@@ -580,15 +632,20 @@ mod tests {
             (("b".into(), "new-binary".into()), cohort("b", LARGE_SIZES)),
         ]);
         assert_eq!(
-            latest_complete(&cohorts, IMPLS, &SIZES[..SIZES.len() - LARGE_SIZES.len()]).unwrap()[0]
-                ["run_id"],
+            latest_complete(
+                &cohorts,
+                IMPLS,
+                &SIZES[..SIZES.len() - LARGE_SIZES.len()],
+                &pubsub_complete
+            )
+            .unwrap()[0]["run_id"],
             "a"
         );
         assert_eq!(
-            latest_complete(&cohorts, IMPLS, LARGE_SIZES).unwrap()[0]["run_id"],
+            latest_complete(&cohorts, IMPLS, LARGE_SIZES, &pubsub_complete).unwrap()[0]["run_id"],
             "b"
         );
-        assert!(latest_complete(&cohorts, IMPLS, SIZES).is_none());
+        assert!(latest_complete(&cohorts, IMPLS, SIZES, &pubsub_complete).is_none());
     }
 
     #[test]
@@ -601,18 +658,18 @@ mod tests {
             (("b".into(), "second-binary".into()), incomplete),
         ]);
         assert_eq!(
-            latest_complete(&cohorts, IMPLS, LARGE_SIZES).unwrap()[0]["run_id"],
+            latest_complete(&cohorts, IMPLS, LARGE_SIZES, &pubsub_complete).unwrap()[0]["run_id"],
             "a"
         );
         let mut mismatched = cohort("c", LARGE_SIZES);
         mismatched.last_mut().unwrap()["pool_slots"] = json!(1024);
         cohorts.insert(("c".into(), "third-binary".into()), mismatched);
         assert_eq!(
-            latest_complete(&cohorts, IMPLS, LARGE_SIZES).unwrap()[0]["run_id"],
+            latest_complete(&cohorts, IMPLS, LARGE_SIZES, &pubsub_complete).unwrap()[0]["run_id"],
             "a"
         );
         cohorts.remove(&("a".into(), "first-binary".into()));
-        assert!(latest_complete(&cohorts, IMPLS, LARGE_SIZES).is_none());
+        assert!(latest_complete(&cohorts, IMPLS, LARGE_SIZES, &pubsub_complete).is_none());
     }
 
     #[test]
@@ -625,7 +682,7 @@ mod tests {
             }
         }
         let cohorts = BTreeMap::from([(("old".into(), "old-binary".into()), rows)]);
-        assert!(latest_complete(&cohorts, &IMPLS[..1], SIZES).is_none());
-        assert!(latest_complete(&cohorts, &IMPLS[1..], SIZES).is_some());
+        assert!(latest_complete(&cohorts, &IMPLS[..1], SIZES, &pubsub_complete).is_none());
+        assert!(latest_complete(&cohorts, &IMPLS[1..], SIZES, &pubsub_complete).is_some());
     }
 }

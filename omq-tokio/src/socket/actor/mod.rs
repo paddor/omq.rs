@@ -1,24 +1,33 @@
 //! Socket actor: owns per-socket state, multiplexes commands + internal events.
 
+mod close;
 mod completion;
 #[cfg(feature = "dart")]
 mod dart;
 mod dialer;
+mod endpoint_options;
 mod endpoint_resolution;
 mod endpoints;
+mod handshake;
 mod inproc_driver;
 mod lifecycle;
+mod link;
 mod listener;
 mod peer;
+mod peer_entry;
 mod peer_materialize;
+mod subscriptions;
+mod udp_endpoints;
 
+use close::{CloseState, PEER_TASK_JOIN_TIMEOUT, stop_peer_task};
+pub(crate) use link::{CloseLinger, DriverEnv, HandleLink, HandleShared, SocketCommand};
 pub(crate) use peer::spawn_driver;
+use peer_entry::{PeerEntry, PeerHandshake, PeerOrigin, Side};
 
-use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use futures::StreamExt as _;
 use futures::channel::oneshot;
@@ -36,10 +45,7 @@ use super::monitor::{
     PeerCommandKind, PeerInfo, PeerSubscriptions,
 };
 use super::type_state::TypeState;
-use super::udp::{
-    JoinedGroups, UdpDialerEntry, UdpListenerEntry, fake_handle, new_joined_groups,
-    spawn_dish_listener, spawn_radio_sender,
-};
+use super::udp::{JoinedGroups, new_joined_groups, spawn_dish_listener, spawn_radio_sender};
 use crate::routing::{
     RecvStrategy, SendStrategy, max_peer_count, supports_groups, supports_subscribe,
 };
@@ -61,96 +67,6 @@ use crate::engine::{
     PeerDriverConfig, reserve_authenticated,
 };
 
-/// Byte-stream dispatch across TCP-shaped transports (TCP and IPC).
-/// Inproc does NOT go through this - it skips the ZMTP codec entirely
-/// and uses its own Message-typed channel pair (see `AnyConn`).
-#[derive(Debug)]
-pub(crate) enum SocketCommand {
-    Bind {
-        endpoint: Endpoint,
-        compression: Option<omq_proto::CompressionOptions>,
-        ack: oneshot::Sender<Result<Endpoint>>,
-    },
-    Connect {
-        endpoint: Endpoint,
-        compression: Option<omq_proto::CompressionOptions>,
-        ack: oneshot::Sender<Result<()>>,
-    },
-    Subscribe {
-        prefix: bytes::Bytes,
-        ack: oneshot::Sender<Result<()>>,
-    },
-    Unsubscribe {
-        prefix: bytes::Bytes,
-        ack: oneshot::Sender<Result<()>>,
-    },
-    Join {
-        group: bytes::Bytes,
-        ack: oneshot::Sender<Result<()>>,
-    },
-    Leave {
-        group: bytes::Bytes,
-        ack: oneshot::Sender<Result<()>>,
-    },
-    /// Tear down a previously-established listener for `endpoint`.
-    Unbind {
-        endpoint: Endpoint,
-        ack: oneshot::Sender<Result<()>>,
-    },
-    /// Tear down a previously-started dialer for `endpoint`.
-    Disconnect {
-        endpoint: Endpoint,
-        ack: oneshot::Sender<Result<()>>,
-    },
-    /// Close one live or pending peer keyed by `connection_id`.
-    DisconnectPeer {
-        connection_id: u64,
-        ack: oneshot::Sender<Result<()>>,
-    },
-    /// Snapshot the live status of one peer keyed by `connection_id`.
-    QueryConnection {
-        connection_id: u64,
-        ack: oneshot::Sender<Option<ConnectionStatus>>,
-    },
-    /// Snapshot one SERVER peer keyed by its message routing id.
-    QueryPeerInfo {
-        routing_id: u32,
-        ack: oneshot::Sender<Option<PeerInfo>>,
-    },
-    /// Snapshot every currently-connected peer.
-    QueryConnections {
-        ack: oneshot::Sender<Vec<ConnectionStatus>>,
-    },
-    /// Subscribe a monitor stream and snapshot every ready peer's
-    /// subscriptions in the same actor step.
-    MonitorWithSubscriptions {
-        ack: oneshot::Sender<(MonitorStream, Vec<PeerSubscriptions>)>,
-    },
-    QueryStreamRoutingId {
-        ack: oneshot::Sender<Option<bytes::Bytes>>,
-    },
-    Close {
-        ack: Option<oneshot::Sender<Result<()>>>,
-        linger: CloseLinger,
-    },
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum CloseLinger {
-    Configured,
-    Override(Option<Duration>),
-}
-
-impl CloseLinger {
-    /// The linger this close uses, given the socket's configured one.
-    pub(crate) fn resolve(self, configured: Option<Duration>) -> Option<Duration> {
-        match self {
-            Self::Configured => configured,
-            Self::Override(value) => value,
-        }
-    }
-}
-
 /// Events produced inside the driver (listeners accepting, connections
 /// emitting ZMTP events, etc.) and funnelled through one shared mpsc.
 enum InternalEvent {
@@ -167,7 +83,6 @@ enum InternalEvent {
         route_id: u64,
     },
     ConnectGaveUp {
-        endpoint: Endpoint,
         route_id: u64,
     },
     PeerEvent {
@@ -185,174 +100,61 @@ enum InternalEvent {
     },
 }
 
-struct PeerEntry {
-    /// Immutable endpoint-generation configuration, including reconnects.
-    options: Arc<Options>,
-    ident: PeerIdent,
-    local_address: Option<PeerIdent>,
-    remote_address: Option<PeerIdent>,
-    handle: PeerDriverHandle,
-    /// True after this peer is eligible for data-plane routing. For
-    /// ZMTP byte streams this flips on `HandshakeSucceeded`; pre-auth
-    /// peers stay pending and must not count against socket-type peer
-    /// limits.
-    ready: bool,
-    /// True only for byte-stream peers still inside the ZMTP handshake.
-    /// Inproc has a synthetic handshake and raw STREAM has no ZMTP
-    /// handshake, so neither consumes the pending-handshake cap.
-    pending_handshake: bool,
-    handshake_admission: Option<crate::transport::setup::PendingHandshake>,
-    handled_events: u64,
-    handled_control: u64,
-    completion: Option<crate::engine::peer_completion::PeerCompletion>,
-    /// Set on `HandshakeSucceeded` (the peer's READY property or server-
-    /// generated default). Stays empty if the peer sent no identity.
-    identity: bytes::Bytes,
-    /// Populated on `HandshakeSucceeded` so Disconnected events can carry
-    /// the last-known identity / properties.
-    info: Option<PeerInfo>,
-    /// Endpoint this peer arrived at (bind side) or dialed to (connect
-    /// side). Surfaced in monitor events.
-    endpoint: Endpoint,
-    /// True for dialer-initiated connections; false for listener-accepted.
-    /// Used to decide whether to restart the dial after a mid-session drop.
-    is_client: bool,
-    /// Send-strategy route id. For connect-side round-robin pipes this is
-    /// allocated at `connect()` time and can differ from the peer id.
-    route_id: u64,
-    /// Inproc receive port and its sink, opened once this peer is ready.
-    inproc_inbound: Option<(
-        Arc<crate::transport::inproc::InprocPort>,
-        crate::transport::inproc::OpenPort,
-    )>,
-    task: Option<JoinHandle<()>>,
-    /// Logical data IO thread index used by routing. The driver future owns
-    /// its load reservation; raw STREAM currently runs on the actor runtime.
-    io_thread: usize,
-}
-
-const PEER_TASK_JOIN_TIMEOUT: Duration = Duration::from_millis(100);
-
-async fn stop_peer_task(task: JoinHandle<()>) {
-    if !task.is_finished() {
-        task.abort();
-    }
-    let _ = tokio::time::timeout(PEER_TASK_JOIN_TIMEOUT, task).await;
-}
-
-/// Stop an endpoint task and wait until it has released its socket.
-async fn stop_endpoint_task(cancel: &CancellationToken, task: &mut JoinHandle<()>) {
-    cancel.cancel();
-    task.abort();
-    let _ = tokio::time::timeout(PEER_TASK_JOIN_TIMEOUT, task).await;
-}
-
-struct ListenerEntry {
+/// The task serving one listener or dialer. Dropping it cancels and aborts
+/// the task: a detached listener would keep its port bound, and a detached
+/// dialer would keep redialing, after unbind, disconnect, or close.
+struct EndpointTask {
     endpoint: Endpoint,
     cancel: CancellationToken,
     task: JoinHandle<()>,
 }
 
-impl Drop for ListenerEntry {
-    /// A detached listener would keep accepting, and keep its port bound,
-    /// after unbind or close.
+impl EndpointTask {
+    /// Stop the task and wait until it has released its socket.
+    async fn stop(&mut self) {
+        self.cancel.cancel();
+        self.task.abort();
+        let _ = tokio::time::timeout(PEER_TASK_JOIN_TIMEOUT, &mut self.task).await;
+    }
+}
+
+impl Drop for EndpointTask {
     fn drop(&mut self) {
         self.cancel.cancel();
         self.task.abort();
     }
+}
+
+/// Stop the tasks serving `endpoint`. Returns how many were removed.
+async fn stop_matching(tasks: &mut Vec<EndpointTask>, endpoint: &Endpoint) -> usize {
+    let mut removed: Vec<_> = tasks
+        .extract_if(.., |task| task.endpoint == *endpoint)
+        .collect();
+    for task in &mut removed {
+        task.stop().await;
+    }
+    removed.len()
 }
 
 struct DialerEntry {
+    task: EndpointTask,
     options: Arc<Options>,
-    endpoint: Endpoint,
-    cancel: CancellationToken,
     route_id: u64,
     send_pipe_rx: Option<crate::engine::SendPipeConsumer>,
     failed_attempts: Arc<std::sync::atomic::AtomicU32>,
-    task: JoinHandle<()>,
 }
 
-impl Drop for DialerEntry {
-    /// A dialer leaves the table only when it must stop. A detached task
-    /// would keep redialing, even after the socket closed.
-    fn drop(&mut self) {
-        self.cancel.cancel();
-        self.task.abort();
-    }
+/// One outbound UDP RADIO sender. Its synthetic peer ID is also its send
+/// route, so teardown can call `connection_removed`.
+struct UdpDialerEntry {
+    task: EndpointTask,
+    peer_id: u64,
 }
 
 struct PendingReceive {
     peer_id: u64,
     message: Message,
     properties: Option<Arc<omq_proto::proto::command::PeerProperties>>,
-}
-
-/// Actor-side ends of what a socket handle shares with its actor.
-pub(crate) struct HandleLink {
-    pub(crate) cmd_rx: mpsc::Receiver<SocketCommand>,
-    pub(crate) recv_tx: Arc<super::recv::SharedRecvPipe>,
-    pub(crate) cancel: CancellationToken,
-    pub(crate) monitor: MonitorPublisher,
-    pub(crate) spsc: super::recv::SpscHandles,
-    /// Producer side of native PEER receive routes.
-    pub(crate) peer_recv_routes: Option<super::peer_recv::PeerRecvRoutes>,
-    pub(crate) shared: HandleShared,
-}
-
-/// State the socket handle reads or updates without an actor hop.
-#[derive(Clone)]
-pub(crate) struct HandleShared {
-    /// REQ / REP envelope + alternation state, so `Socket::send` can call
-    /// `pre_send` without an actor hop.
-    pub(crate) type_state: Arc<Mutex<TypeState>>,
-    /// REQ alternation flag for lock-free send/recv on REQ. The actor resets
-    /// it on peer disconnect.
-    pub(crate) req_awaiting_reply: Arc<crate::socket::handle::ReqAwaitingReply>,
-    pub(crate) subscribe_count: Arc<AtomicU64>,
-    pub(crate) ready_peers: Arc<crate::socket::handle::ReadyPeers>,
-}
-
-impl HandleShared {
-    pub(crate) fn new() -> Self {
-        Self {
-            type_state: Arc::new(Mutex::new(TypeState::new())),
-            req_awaiting_reply: Arc::default(),
-            subscribe_count: Arc::new(AtomicU64::new(0)),
-            ready_peers: Arc::default(),
-        }
-    }
-}
-
-/// Where the actor runs, plus an optional caller-provided receive sink.
-pub(crate) struct DriverEnv {
-    pub(crate) io_pool: crate::context::IoPoolHandle,
-    pub(crate) inproc_registry: Arc<crate::transport::inproc::InprocRegistry>,
-    pub(crate) recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
-}
-
-/// Socket close progress.
-struct CloseState {
-    /// `begin_close` ran.
-    started: bool,
-    /// Every peer was asked to drain and close.
-    peers_requested: bool,
-    /// Signaled as send queues drain, so the actor can wait without polling.
-    progress: Arc<crate::engine::signal::StateSignal>,
-    /// Linger deadline. `None` waits for the drain without limit.
-    deadline: Option<Instant>,
-    ack: Option<oneshot::Sender<Result<()>>>,
-}
-
-impl CloseState {
-    fn new() -> Self {
-        Self {
-            started: false,
-            peers_requested: false,
-            progress: Arc::new(crate::engine::signal::StateSignal::new()),
-            deadline: None,
-            ack: None,
-        }
-    }
 }
 
 /// The socket actor.
@@ -419,11 +221,11 @@ impl Mailboxes {
 
 /// Bound, dialed, and resolving endpoints, plus setup admission.
 struct EndpointTable {
-    listeners: Vec<ListenerEntry>,
+    listeners: Vec<EndpointTask>,
     dialers: Vec<DialerEntry>,
     pending_endpoints: FxHashMap<u64, endpoint_resolution::PendingEndpoint>,
     /// UDP DISH listeners.
-    udp_listeners: Vec<UdpListenerEntry>,
+    udp_listeners: Vec<EndpointTask>,
     /// UDP RADIO outbound dialers.
     udp_dialers: Vec<UdpDialerEntry>,
     #[cfg(feature = "dart")]
@@ -467,7 +269,7 @@ impl EndpointTable {
             l.cancel.cancel();
         }
         for d in &self.dialers {
-            d.cancel.cancel();
+            d.task.cancel.cancel();
         }
     }
 }
@@ -484,6 +286,8 @@ struct Routing {
     /// UDP listener tasks via `Arc<Mutex<HashSet<Bytes>>>` so JOIN /
     /// LEAVE is visible without a control channel.
     joined_groups: JoinedGroups,
+    /// REQ / REP / DISH receive transform and envelope state.
+    type_state: TypeState,
 }
 
 /// Runtime resources and receive sinks the actor hands to its peers.
@@ -539,6 +343,7 @@ impl SocketDriver {
                 recv_strategy: RecvStrategy::for_socket_type(socket_type),
                 subscriptions: Vec::new(),
                 joined_groups: new_joined_groups(),
+                type_state: TypeState::new(),
             },
             resources,
             #[cfg(feature = "dart")]
@@ -628,12 +433,6 @@ impl SocketDriver {
             .and_then(crate::engine::RecvSink::authenticated_sender)
     }
 
-    fn linger_sleep(&self) -> Option<tokio::time::Sleep> {
-        self.close
-            .deadline
-            .map(|deadline| tokio::time::sleep_until(deadline.into()))
-    }
-
     /// Work done before every select: retry the blocked receive, then drain
     /// each backlog within its budget. Returns false once the actor must exit.
     async fn service_backlogs(&mut self, pending_peer: Option<u64>, retry_receive: bool) -> bool {
@@ -701,21 +500,6 @@ impl SocketDriver {
                 self.begin_close(None, self.options.linger);
             }
         }
-    }
-
-    fn close_drain_wait(&self) -> Option<u64> {
-        if !self.close.started || self.close.peers_requested {
-            return None;
-        }
-        self.routing.send_strategy.watch_close(&self.close.progress);
-        Some(self.close.progress.generation())
-    }
-
-    fn should_exit(&self) -> bool {
-        if !self.close.started {
-            return false;
-        }
-        self.close.peers_requested && self.peers.is_empty()
     }
 
     async fn handle_command(&mut self, cmd: SocketCommand) {
@@ -798,7 +582,12 @@ impl SocketDriver {
     fn ready_connections(&self) -> Vec<ConnectionStatus> {
         self.peers
             .iter()
-            .filter_map(|(id, peer)| peer.ready.then(|| self.peer_status(*id)).flatten())
+            .filter_map(|(id, peer)| {
+                peer.handshake
+                    .ready
+                    .then(|| self.peer_status(*id))
+                    .flatten()
+            })
             .collect()
     }
 
@@ -810,10 +599,10 @@ impl SocketDriver {
         let mut peers: Vec<_> = self
             .peers
             .iter()
-            .filter(|(_, peer)| peer.ready)
+            .filter(|(_, peer)| peer.handshake.ready)
             .filter_map(|(id, peer)| {
                 Some(PeerSubscriptions {
-                    peer: peer.info.clone()?,
+                    peer: peer.handshake.info.clone()?,
                     prefixes: self.routing.send_strategy.peer_subscriptions(*id),
                 })
             })
@@ -821,162 +610,11 @@ impl SocketDriver {
         peers.sort_unstable_by_key(|peer| peer.peer.connection_id);
         (monitor, peers)
     }
-
-    fn begin_close(&mut self, ack: Option<oneshot::Sender<Result<()>>>, linger: Option<Duration>) {
-        if self.close.started {
-            if let Some(a) = ack {
-                let _ = a.send(Ok(()));
-            }
-            return;
-        }
-
-        self.close.started = true;
-        self.close.deadline = linger.and_then(|d| Instant::now().checked_add(d));
-        self.link.cmd_rx.close();
-        self.routing.send_strategy.stop_admission();
-        self.cancel_pending_endpoints(None);
-        self.close.peers_requested = false;
-        self.close.ack = ack;
-        // Close the recv channel so any awaiting recv() returns Closed.
-        self.link.recv_tx.close();
-        if let Some(fanin) = &self.link.spsc.fanin {
-            fanin.close();
-        }
-        if let Some(routes) = &self.link.peer_recv_routes {
-            routes.close_receive();
-        }
-        // close() sets the closed flag; existing ring data can still be drained.
-        // Non-zero linger keeps endpoints alive so late peers can take queued
-        // sends before the deadline.
-        // If linger is zero, shut down the strategy now so in-flight
-        // pumps bail immediately.
-        if matches!(linger, Some(Duration::ZERO)) {
-            self.endpoints.cancel_all();
-            self.routing.send_strategy.shutdown();
-        }
-    }
-
-    async fn request_peer_close_if_drained(&mut self) -> bool {
-        if !self.close.started
-            || self.close.peers_requested
-            || !self.routing.send_strategy.is_drained()
-        {
-            return false;
-        }
-
-        let targets: Vec<_> = self
-            .peers
-            .iter()
-            .map(|(&peer_id, peer)| (peer_id, peer.handle.inbox.clone()))
-            .collect();
-        if targets.is_empty() {
-            self.close.peers_requested = true;
-            return false;
-        }
-
-        let cancel = self.link.cancel.clone();
-        let mut disconnected = Vec::new();
-        for (peer_id, inbox) in targets {
-            let send = inbox.send(PeerDriverCommand::DrainAndClose {
-                deadline: self.close.deadline,
-            });
-            let result = match self.close.deadline {
-                Some(deadline) => {
-                    let deadline = tokio::time::Instant::from_std(deadline);
-                    tokio::select! {
-                        biased;
-                        () = cancel.cancelled() => return true,
-                        res = tokio::time::timeout_at(deadline, send) => res,
-                    }
-                }
-                None => {
-                    tokio::select! {
-                        biased;
-                        () = cancel.cancelled() => return true,
-                        res = send => Ok(res),
-                    }
-                }
-            };
-
-            match result {
-                Ok(Ok(())) => {}
-                Ok(Err(_)) => disconnected.push(peer_id),
-                Err(_) => return true,
-            }
-        }
-
-        for peer_id in disconnected {
-            if let Some(mut peer) = lifecycle::PeerLifecycle::new(self)
-                .remove_peer(peer_id, DisconnectReason::PeerClosed)
-            {
-                peer.handle.cancel.cancel();
-                if let Some(task) = peer.task.take() {
-                    stop_peer_task(task).await;
-                }
-            }
-        }
-
-        self.close.peers_requested = true;
-        false
-    }
-
-    async fn teardown(&mut self) {
-        self.link.cmd_rx.close();
-        self.mail.internal_rx.close();
-        self.mail.peer_out_rx.take();
-        self.mail.pending_peer_data.take();
-        self.mail.peer_control_rx.close();
-        self.endpoints.pending_endpoints.clear();
-        self.routing.send_strategy.shutdown();
-        self.link.shared.ready_peers.set(0);
-
-        // Detach the handle-side send paths (dead slots, taken pipes) before
-        // cancel, so no caller writes into a peer that is shutting down.
-        let mut peer_tasks = Vec::new();
-        for p in self.peers.values() {
-            if let Some(ref slot) = p.handle.transmit_slot {
-                slot.mark_dead();
-            }
-            if let Some(ref pipe) = p.handle.send_pipe {
-                let _ = pipe.lock().expect("send pipe poisoned").take();
-            }
-            p.handle.cancel.cancel();
-        }
-        for (_, mut peer) in self.peers.drain() {
-            if let Some(task) = peer.task.take() {
-                peer_tasks.push(task);
-            }
-        }
-
-        for mut l in self.endpoints.listeners.drain(..) {
-            stop_endpoint_task(&l.cancel, &mut l.task).await;
-        }
-        for mut l in self.endpoints.udp_listeners.drain(..) {
-            stop_endpoint_task(&l.cancel, &mut l.task).await;
-        }
-        // Dropping an entry cancels and aborts its task.
-        self.endpoints.dialers.clear();
-        self.endpoints.udp_dialers.clear();
-        if let Some(pool) = self.resources.compression_pool.take() {
-            pool.clear();
-        }
-
-        for task in peer_tasks {
-            stop_peer_task(task).await;
-        }
-        #[cfg(feature = "dart")]
-        self.stop_dart_endpoints(None).await;
-
-        self.link.monitor.publish(MonitorEvent::Closed);
-        if let Some(ack) = self.close.ack.take() {
-            let _ = ack.send(Ok(()));
-        }
-    }
 }
 
 impl SocketDriver {
     pub(super) fn ready_peer_count(&self) -> usize {
-        self.peers.values().filter(|p| p.ready).count()
+        self.peers.values().filter(|p| p.handshake.ready).count()
     }
 
     pub(super) fn can_accept_ready_peer(&self) -> bool {

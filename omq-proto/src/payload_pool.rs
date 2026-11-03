@@ -1,13 +1,20 @@
 //! Explicit, transport-independent message preparation and reusable storage.
 #![deny(missing_docs)]
 
-use std::cell::RefCell;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 
 use crate::flow::DrainBudget;
 use crate::message::{Message, Payload, PayloadOwner};
+
+mod buffer;
+mod free_list;
+mod recycle;
+
+pub use buffer::{PayloadBuffer, PayloadLengthError};
+use free_list::FreeList;
+use recycle::{RECYCLE, recycling};
 
 /// Backend-provided fixed-size storage. Exclusive access is granted only
 /// after all local views and backend leases have returned.
@@ -108,134 +115,13 @@ struct Pool {
     reclaim_budget: DrainBudget,
 }
 
-// Scalar returns keep the ordinary concurrent-queue path. Batch returns
-// publish one group, including short groups. A group owns at least one slot,
-// so at most `capacity` groups can exist. Both queues allocate only at setup.
-#[derive(Debug)]
-struct FreeList {
-    singles: concurrent_queue::ConcurrentQueue<Arc<Storage>>,
-    batches: concurrent_queue::ConcurrentQueue<FreeBatch>,
-    available: AtomicUsize,
-}
-
-#[derive(Debug)]
-struct FreeBatch {
-    owners: [Option<Arc<Storage>>; TRANSFER],
-    count: usize,
-}
-
-impl FreeList {
-    fn new(capacity: usize) -> Self {
-        Self {
-            singles: concurrent_queue::ConcurrentQueue::bounded(capacity.max(1)),
-            batches: concurrent_queue::ConcurrentQueue::bounded(capacity.max(1)),
-            available: AtomicUsize::new(0),
-        }
-    }
-
-    fn push(&self, owner: Arc<Storage>) {
-        // Count before publication: a consumer may pop immediately afterward.
-        self.available.fetch_add(1, Ordering::Relaxed);
-        self.singles.push(owner).expect("one return per buffer");
-    }
-
-    fn push_batch(&self, owners: &mut [Option<Arc<Storage>>]) {
-        if owners.is_empty() {
-            return;
-        }
-        let batch = FreeBatch {
-            owners: std::array::from_fn(|index| {
-                if index < owners.len() {
-                    owners[index].take()
-                } else {
-                    None
-                }
-            }),
-            count: owners.len(),
-        };
-        self.available.fetch_add(batch.count, Ordering::Relaxed);
-        self.batches.push(batch).expect("one return per buffer");
-    }
-
-    fn pop(&self) -> Option<Arc<Storage>> {
-        if let Ok(owner) = self.singles.pop() {
-            self.available.fetch_sub(1, Ordering::Relaxed);
-            return Some(owner);
-        }
-        let mut batch = self.batches.pop().ok()?;
-        self.available.fetch_sub(1, Ordering::Relaxed);
-        let owner = batch.owners[0].take();
-        // Expand a returned group once. Scalar acquisitions must not rebuild
-        // and copy the shrinking remainder for every subsequent buffer.
-        for owner in &mut batch.owners[1..batch.count] {
-            self.singles
-                .push(owner.take().expect("returned owner"))
-                .expect("one return per buffer");
-        }
-        owner
-    }
-
-    fn pop_many(&self, limit: usize, output: &mut Vec<PayloadBuffer>) -> usize {
-        let limit = limit.min(TRANSFER).min(output.capacity() - output.len());
-        if limit == 0 {
-            return 0;
-        }
-        // Sparse traffic takes the same scalar path as ordinary acquisition.
-        if limit == 1 {
-            if let Some(owner) = self.pop() {
-                output.push(PayloadBuffer {
-                    storage: Some(owner),
-                    length: 0,
-                    returns: None,
-                    prepared: false,
-                });
-                return 1;
-            }
-            return 0;
-        }
-        let mut taken = 0;
-        while taken < limit {
-            if let Ok(mut batch) = self.batches.pop() {
-                self.available.fetch_sub(batch.count, Ordering::Relaxed);
-                let count = (limit - taken).min(batch.count);
-                for owner in &mut batch.owners[..count] {
-                    output.push(PayloadBuffer {
-                        storage: Some(owner.take().expect("returned owner")),
-                        length: 0,
-                        returns: None,
-                        prepared: false,
-                    });
-                }
-                self.push_batch(&mut batch.owners[count..batch.count]);
-                taken += count;
-            } else {
-                let mut count = 0;
-                while taken + count < limit {
-                    let Ok(owner) = self.singles.pop() else {
-                        break;
-                    };
-                    output.push(PayloadBuffer {
-                        storage: Some(owner),
-                        length: 0,
-                        returns: None,
-                        prepared: false,
-                    });
-                    count += 1;
-                }
-                if count != 0 {
-                    self.available.fetch_sub(count, Ordering::Relaxed);
-                }
-                taken += count;
-                break;
-            }
-        }
-        taken
-    }
-
-    fn len(&self) -> usize {
-        // Includes returns in flight. This snapshot is not a reservation.
-        self.available.load(Ordering::Relaxed)
-    }
+/// Whether a returned slot reopens receive credit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Credit {
+    /// Final release of a frozen payload: publish the returned position.
+    Publish,
+    /// Unused checkout: return the storage without publishing credit.
+    Reservation,
 }
 
 #[derive(Debug)]
@@ -258,12 +144,12 @@ impl PayloadOwner for Storage {
     }
 
     fn release(self: Arc<Self>) {
-        self.release_owner(true);
+        self.release_owner(Credit::Publish);
     }
 }
 
 impl Storage {
-    fn release_owner(self: Arc<Self>, credited: bool) {
+    fn release_owner(self: Arc<Self>, credit: Credit) {
         let mut storage = Some(self);
         let _ = RECYCLE.try_with(|recycle| {
             let Ok(mut recycle) = recycle.try_borrow_mut() else {
@@ -286,7 +172,7 @@ impl Storage {
             }
             let owner = storage.take().expect("unreleased storage");
             if Arc::strong_count(&owner) == 1 && owner.bytes.reusable() {
-                recycle.push(owner, credited);
+                recycle.push(owner, credit);
             } else {
                 let pool = recycle.pool.as_ref().expect("active pool").clone();
                 owner.defer(&pool);
@@ -295,25 +181,27 @@ impl Storage {
         let Some(storage) = storage else {
             return;
         };
-        storage.release_one(credited);
+        storage.release_one(credit);
     }
 
-    fn return_one(self: Arc<Self>, pool: &Pool, credited: bool) {
-        let returns = credited.then(|| self.returns.clone()).flatten();
+    fn return_one(self: Arc<Self>, pool: &Pool, credit: Credit) {
+        let returns = (credit == Credit::Publish)
+            .then(|| self.returns.clone())
+            .flatten();
         pool.free.push(self);
         if let Some(returns) = returns {
             returns.publish(1);
         }
     }
 
-    fn release_one(self: Arc<Self>, credited: bool) {
+    fn release_one(self: Arc<Self>, credit: Credit) {
         let Some(pool) = self.pool.upgrade() else {
             return;
         };
         // Storage is private and has no Weak references. A unique strong
         // owner cannot race a clone, so it can return without locking.
         if Arc::strong_count(&self) == 1 && self.bytes.reusable() {
-            self.return_one(&pool, credited);
+            self.return_one(&pool, credit);
             return;
         }
         self.defer(&pool);
@@ -366,7 +254,7 @@ impl Pool {
             if Arc::strong_count(&owner) == 1 && owner.bytes.reusable() {
                 self.queued[owner.slot].store(false, Ordering::Relaxed);
                 self.pending_count.fetch_sub(1, Ordering::Relaxed);
-                owner.return_one(self, true);
+                owner.return_one(self, Credit::Publish);
                 returned += 1;
                 if returned == requested {
                     break;
@@ -382,65 +270,6 @@ impl Pool {
 
 const TRANSFER: usize = 64;
 const TRANSFER_BYTES: usize = 64 * 1024;
-
-// Returned owners are staged only during a synchronous drain. No free buffer
-// remains hidden in TLS after the call, including during panic unwinding.
-struct Recycling {
-    active: bool,
-    pool: Option<Arc<Pool>>,
-    returns: Option<Arc<dyn PayloadRelease>>,
-    owners: [Option<Arc<Storage>>; TRANSFER],
-    count: usize,
-}
-
-impl Recycling {
-    fn flush(&mut self) {
-        let Some(pool) = &self.pool else {
-            return;
-        };
-        pool.free.push_batch(&mut self.owners[..self.count]);
-        if let Some(returns) = self.returns.take() {
-            returns.publish(self.count);
-        }
-        self.count = 0;
-    }
-
-    fn push(&mut self, owner: Arc<Storage>, credited: bool) {
-        let returns = credited.then_some(owner.returns.as_ref()).flatten();
-        if self.count != 0 && !same_returns(self.returns.as_ref(), returns) {
-            self.flush();
-        }
-        if self.count == 0 {
-            self.returns = returns.cloned();
-        }
-        self.owners[self.count] = Some(owner);
-        self.count += 1;
-        if self.count == TRANSFER {
-            self.flush();
-        }
-    }
-}
-
-thread_local! {
-    static RECYCLE: RefCell<Recycling> = const { RefCell::new(Recycling {
-        active: false, pool: None, returns: None, owners: [const { None }; TRANSFER], count: 0,
-    }) };
-}
-
-struct RecycleGuard(bool);
-
-impl Drop for RecycleGuard {
-    fn drop(&mut self) {
-        let _ = RECYCLE.try_with(|recycle| {
-            let mut recycle = recycle.borrow_mut();
-            recycle.flush();
-            if self.0 {
-                recycle.active = false;
-                recycle.pool = None;
-            }
-        });
-    }
-}
 
 impl PayloadPool {
     /// Preallocate each `(bytes_per_slot, slots)` size class.
@@ -821,159 +650,6 @@ fn owned_body(size: usize) -> crate::Result<Vec<u8>> {
         .map_err(|_| crate::Error::Config("payload allocation failed".into()))?;
     body.resize(size, 0);
     Ok(body)
-}
-
-fn recycling<R>(operation: impl FnOnce() -> R) -> R {
-    let installed = RECYCLE
-        .try_with(|recycle| {
-            let mut recycle = recycle.borrow_mut();
-            if recycle.active {
-                false
-            } else {
-                recycle.active = true;
-                recycle.pool = None;
-                true
-            }
-        })
-        .unwrap_or(false);
-    let _guard = RecycleGuard(installed);
-    operation()
-}
-
-/// Exclusive fixed-size writable storage. [`Self::into_message`] freezes it.
-///
-/// A new checkout starts empty but may retain previously written bytes.
-/// Dropping an unused buffer returns it to its pool. After freezing, the body
-/// remains checked out until its final message or byte view is dropped.
-/// Buffers never grow and can outlive their pool or any socket.
-#[derive(Debug)]
-pub struct PayloadBuffer {
-    storage: Option<Arc<Storage>>,
-    // The frozen payload captures this prefix length. Storage always exposes
-    // its fixed capacity, so freezing requires no second Arc uniqueness check.
-    length: usize,
-    // Unused reservations return storage without reopening receive credit.
-    returns: Option<Arc<dyn PayloadRelease>>,
-    prepared: bool,
-}
-
-/// Requested body length exceeds the fixed buffer capacity.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PayloadLengthError {
-    /// Requested body length in bytes.
-    pub requested: usize,
-    /// Fixed buffer capacity in bytes.
-    pub capacity: usize,
-}
-
-impl fmt::Display for PayloadLengthError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "payload length {} exceeds slot capacity {}",
-            self.requested, self.capacity,
-        )
-    }
-}
-
-impl std::error::Error for PayloadLengthError {}
-
-impl PayloadBuffer {
-    /// Fixed byte capacity of this buffer.
-    pub fn capacity(&self) -> usize {
-        self.storage
-            .as_ref()
-            .expect("live payload buffer")
-            .bytes
-            .len()
-    }
-
-    /// Declared body length in bytes, initially zero.
-    pub fn len(&self) -> usize {
-        self.length
-    }
-
-    /// Whether the declared body length is zero.
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    /// The entire writable capacity. Only the declared length is sent.
-    /// Writing does not change that length; call [`Self::set_len`] afterward.
-    pub fn writable(&mut self) -> &mut [u8] {
-        &mut self.prepare().bytes
-    }
-
-    fn prepare(&mut self) -> &mut Storage {
-        let storage = Arc::get_mut(self.storage.as_mut().expect("live buffer"))
-            .expect("writable buffer storage must be unique");
-        if !self.prepared {
-            storage.returns = self.returns.take();
-            self.prepared = true;
-        }
-        storage
-    }
-
-    /// Fill receive storage with connection-specific lifecycle callbacks.
-    #[doc(hidden)]
-    pub fn writable_received(&mut self, pool: &PayloadPool) -> &mut [u8] {
-        let storage = Arc::get_mut(self.storage.as_mut().expect("live buffer"))
-            .expect("writable buffer storage must be unique");
-        if !same_returns(storage.returns.as_ref(), pool.returns.as_ref()) {
-            storage.returns.clone_from(&pool.returns);
-        }
-        self.returns = None;
-        self.prepared = true;
-        &mut storage.bytes
-    }
-
-    /// Set the body length without growing storage.
-    /// The bytes must already be filled; this method does not clear them.
-    ///
-    /// # Errors
-    /// Returns [`PayloadLengthError`] when `length` exceeds capacity.
-    /// The previous length is preserved on error.
-    pub fn set_len(&mut self, length: usize) -> Result<(), PayloadLengthError> {
-        if length > self.capacity() {
-            return Err(PayloadLengthError {
-                requested: length,
-                capacity: self.capacity(),
-            });
-        }
-        self.length = length;
-        Ok(())
-    }
-
-    /// Freeze the declared prefix into an ordinary single-body message.
-    /// This consumes exclusive access without copying or allocating. Messages
-    /// and byte views retain the buffer until their final owner is dropped.
-    #[inline]
-    pub fn into_message(self) -> Message {
-        Message::from(self.into_payload())
-    }
-
-    /// Freeze the declared prefix into one message part without copying.
-    #[inline]
-    pub fn into_payload(mut self) -> Payload {
-        if !self.prepared {
-            self.prepare();
-        }
-        Payload::from_shared_owner_prefix(self.storage.take().expect("live buffer"), self.length)
-    }
-}
-
-impl AsRef<[u8]> for PayloadBuffer {
-    fn as_ref(&self) -> &[u8] {
-        &self.storage.as_ref().expect("live buffer").bytes[..self.length]
-    }
-}
-
-impl Drop for PayloadBuffer {
-    fn drop(&mut self) {
-        if let Some(storage) = self.storage.take() {
-            storage.release_owner(false);
-        }
-    }
 }
 
 #[cfg(test)]

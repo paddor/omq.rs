@@ -21,6 +21,7 @@ use tokio::time::Instant;
 
 use super::carrier::{Carrier, CtlRead, RecvHalf, SendHalf};
 use super::code;
+use crate::engine::driver::sleep_until_opt;
 
 pub(super) const PREFACE: [u8; 8] = [b'O', b'M', b'Q', b'L', 1, 0, 0, 0];
 const RECORD_LEN: usize = 9;
@@ -259,27 +260,20 @@ async fn serve(
                     unanswered_since.get_or_insert_with(Instant::now);
                 }
             }
-            () = sleep_until_opt(next_ping), if next_ping.is_some() => {
+            () = sleep_until_opt(next_ping.map(Instant::into_std)), if next_ping.is_some() => {
                 nonce = nonce.wrapping_add(1);
                 writer.ping = Some(nonce);
                 // A delayed runtime sends one probe, not a backlog of missed
                 // ticks. Unrepresentable deadlines behave as infinite waits.
                 next_ping = config.interval.and_then(|ivl| Instant::now().checked_add(ivl));
             }
-            () = sleep_until_opt(death), if death.is_some() => {
+            () = sleep_until_opt(death.map(Instant::into_std)), if death.is_some() => {
                 return Some(code::LIVENESS_TIMEOUT);
             }
             arrived = carrier.unexpected_stream() => {
                 return arrived.then_some(code::UNEXPECTED_STREAM);
             }
         }
-    }
-}
-
-async fn sleep_until_opt(at: Option<Instant>) {
-    match at {
-        Some(at) => tokio::time::sleep_until(at).await,
-        None => std::future::pending().await,
     }
 }
 

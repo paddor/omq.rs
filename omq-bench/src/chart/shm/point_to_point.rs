@@ -1,77 +1,68 @@
 //! Verified SCATTER/GATHER throughput and CLIENT/SERVER latency cohorts.
 
-use super::{ChartResult, IMPLS, SIZES, common};
-use common::{
-    ChartSpec, CpuColumns, FairnessEntry, FairnessMap, LatencyEntry, LatencyMap, ThroughputRow,
-    ValMap,
-};
+use super::{ChartResult, IMPLS, RateMaps, SIZES, Target, common};
+use common::{ChartSpec, CpuColumns, LatencyEntry, LatencyMap};
 use serde_json::Value;
-use std::collections::BTreeMap;
 use std::path::Path;
 
 const TIMED_BATCH_MESSAGES: u64 = 256;
 const TIMED_BATCH_BYTES: u64 = 1024 * 1024;
 
-fn verified(row: &Value, implementation: &str, size: u64, latency: bool, spin: u64) -> bool {
-    if setup_rejected(row, implementation, size, latency, spin) {
+/// Throughput, or latency with a receive spin in microseconds.
+#[derive(Clone, Copy)]
+struct Mode {
+    latency: bool,
+    spin: u64,
+}
+
+const THROUGHPUT: Mode = Mode {
+    latency: false,
+    spin: 0,
+};
+
+fn verified(row: &Value, target: Target<'_, Mode>) -> bool {
+    if setup_rejected(row, target) {
         return false;
     }
     let Some(rounds) = row["rounds"].as_array().filter(|rounds| rounds.len() == 3) else {
         return false;
     };
     rounds.iter().enumerate().all(|(index, round)| {
-        if round["round"] != index + 1 || round["verified"] != true {
-            return false;
-        }
-        if latency {
-            latency_round_verified(round)
-        } else {
-            throughput_round_verified(round)
-        }
+        round["verified"] == true
+            && if target.mode.latency {
+                round["round"] == index + 1 && latency_round_verified(round)
+            } else {
+                super::round_verified(round, index, 1)
+            }
     })
 }
 
 /// Rejects rows from another setup. Same CPU and process layout as the
 /// RADIO/DISH chart, with one blocking receiver.
-fn setup_rejected(row: &Value, implementation: &str, size: u64, latency: bool, spin: u64) -> bool {
-    let inproc = implementation == "inproc";
-    row["kind"]
-        != if latency {
-            "shm_reqrep_verified"
-        } else {
-            "shm_pushpull_verified"
-        }
+fn setup_rejected(row: &Value, target: Target<'_, Mode>) -> bool {
+    let Mode { latency, spin } = target.mode;
+    super::layout_rejected(row, target.implementation)
+        || row["kind"]
+            != if latency {
+                "shm_reqrep_verified"
+            } else {
+                "shm_pushpull_verified"
+            }
         || row["socket_pair"]
             != if latency {
                 "client-server"
             } else {
                 "scatter-gather"
             }
-        || row["impl"] != implementation
-        || row["msg_size"] != size
+        || row["msg_size"] != target.size
         || row["peers"] != 1
         || row["recv_mode"] != "blocking"
         || row["recv_spin_us"] != spin
         || row["send_spin_us"].as_u64().unwrap_or(0) != 0
         || row["workload_profile"] != if latency { "latency" } else { "throughput" }
-        || row["publisher_cpus"] != if inproc { "1,2,3,4" } else { "1,2" }
-        || row["subscriber_cpus"] != if inproc { "1,2,3,4" } else { "3,4" }
-        || row["process_layout"]
-            != if inproc {
-                "one-process-shared-context"
-            } else {
-                "two-process-shared-receiver"
-            }
-        || row["subscriber_processes"] != u64::from(!inproc)
         || row["subscriber_threads"] != 1
-        || row["io_threads_per_context"] != 1
-        || !super::storage_matches(row, size, latency)
-        || (!latency && row["sender_clock_batch"] != sender_clock_batch(size))
-        || row["storage"]
-            != match implementation {
-                "shm-pool" => "preallocated-shm",
-                _ => "preallocated-heap",
-            }
+        || !super::storage_matches(row, target.size, latency)
+        || (!latency && row["sender_clock_batch"] != sender_clock_batch(target.size))
 }
 
 /// Standard sample counts and positive, monotonic quantiles.
@@ -88,32 +79,6 @@ fn latency_round_verified(round: &Value) -> bool {
         })
 }
 
-/// The receiver got every offered message intact, and the rate matches
-/// offered / elapsed, where elapsed is the slower of the two sides.
-fn throughput_round_verified(round: &Value) -> bool {
-    let offered = round["offered"].as_u64().unwrap_or(0);
-    let sender = round["sender_elapsed"].as_f64().unwrap_or(0.0);
-    let receiver = round["reader_elapsed"][0].as_f64().unwrap_or(0.0);
-    let elapsed = round["elapsed"].as_f64().unwrap_or(0.0);
-    let rate = round["msgs_s"].as_f64().unwrap_or(0.0);
-
-    offered > 0
-        && round["reader_counts"]
-            .as_array()
-            .is_some_and(|counts| counts.len() == 1 && counts[0] == offered)
-        && sender.is_finite()
-        && sender >= 3.0
-        && receiver.is_finite()
-        && receiver > 0.0
-        && (elapsed - sender.max(receiver)).abs() < 1e-6
-        && rate.is_finite()
-        && rate > 0.0
-        && (rate - offered as f64 / elapsed).abs() < rate * 1e-6
-        && ["missing", "duplicates", "gaps", "corrupt"]
-            .iter()
-            .all(|field| round[field] == 0)
-}
-
 pub(super) fn sender_clock_batch(size: u64) -> u64 {
     if (56..super::SLAB_BYTES).contains(&size) {
         super::SLAB_BYTES / size
@@ -122,16 +87,8 @@ pub(super) fn sender_clock_batch(size: u64) -> u64 {
     }
 }
 
-fn find<'a>(
-    rows: &'a [Value],
-    implementation: &str,
-    size: u64,
-    latency: bool,
-    spin: u64,
-) -> Option<&'a Value> {
-    rows.iter()
-        .rev()
-        .find(|row| verified(row, implementation, size, latency, spin))
+fn find<'a>(rows: &'a [Value], target: Target<'_, Mode>) -> Option<&'a Value> {
+    rows.iter().rev().find(|row| verified(row, target))
 }
 
 fn load(cache: &Path, latency: bool, cached_baselines: bool) -> ChartResult<Option<Vec<Value>>> {
@@ -146,67 +103,39 @@ fn load(cache: &Path, latency: bool, cached_baselines: bool) -> ChartResult<Opti
     if cohorts.is_empty() {
         return Ok(None);
     }
-    let groups = if cached_baselines {
-        vec![&IMPLS[..2], &IMPLS[2..]]
-    } else {
-        vec![IMPLS]
+    // Complete when every implementation, size, and spin has a verified row.
+    let complete = |rows: &[Value], implementations: &[common::Impl], sizes: &[u64]| {
+        implementations.iter().all(|implementation| {
+            sizes.iter().all(|&size| {
+                spins.iter().all(|&spin| {
+                    let target = Target {
+                        implementation: implementation.key,
+                        size,
+                        mode: Mode { latency, spin },
+                    };
+                    find(rows, target).is_some()
+                })
+            })
+        })
     };
-    let mut selected = Vec::new();
-    for implementations in groups {
-        for sizes in super::size_blocks(sizes, cached_baselines) {
-            let cohort = cohorts
-                .values()
-                .rev()
-                .find(|rows| complete(rows, implementations, sizes, latency, spins))
-                .ok_or_else(|| format!("missing complete verified SHM {name} cohort"))?;
-            eprintln!(
-                "SHM {name}: implementations={}, sizes={}..{}, run={}, binary={}",
-                implementations
-                    .iter()
-                    .map(|item| item.key)
-                    .collect::<Vec<_>>()
-                    .join(","),
-                sizes[0],
-                sizes[sizes.len() - 1],
-                cohort[0]["run_id"],
-                cohort[0]["binary_sha256"]
-            );
-            selected.extend(
-                cohort
-                    .iter()
-                    .filter(|row| {
-                        implementations
-                            .iter()
-                            .any(|implementation| row["impl"] == implementation.key)
-                            && row["msg_size"]
-                                .as_u64()
-                                .is_some_and(|size| sizes.contains(&size))
-                    })
-                    .cloned(),
-            );
-        }
-    }
+    let selected = super::select_cohorts(&cohorts, name, sizes, cached_baselines, complete)
+        .ok_or_else(|| format!("missing complete verified SHM {name} cohort"))?;
     Ok(Some(selected))
 }
 
-fn complete(
-    rows: &[Value],
-    implementations: &[common::Impl],
-    sizes: &[u64],
-    latency: bool,
-    spins: &[u64],
-) -> bool {
-    implementations.iter().all(|implementation| {
-        sizes.iter().all(|&size| {
-            spins
-                .iter()
-                .all(|&spin| find(rows, implementation.key, size, latency, spin).is_some())
-        })
-    })
-}
-
+/// SCATTER/GATHER chart from the median of three rounds per point.
 fn throughput(directory: &Path, rows: &[Value]) -> ChartResult {
-    let (bandwidth, messages, spread) = throughput_maps(rows);
+    let mut maps = RateMaps::default();
+    for implementation in IMPLS {
+        for &size in SIZES {
+            let target = Target {
+                implementation: implementation.key,
+                size,
+                mode: THROUGHPUT,
+            };
+            maps.insert_round_rates(find(rows, target).unwrap(), implementation.key, size);
+        }
+    }
     let path = directory.join("pushpull.svg");
     let spec = ChartSpec {
         out_path: &path,
@@ -214,22 +143,11 @@ fn throughput(directory: &Path, rows: &[Value]) -> ChartResult {
         sizes: SIZES,
         impls: IMPLS,
     };
-    let row = ThroughputRow {
-        peers: 1,
-        tput: &bandwidth,
-        msgs: &messages,
-        fairness: Some(&spread),
-    };
-    let columns = CpuColumns {
-        cpu: &BTreeMap::new(),
-        snd_label: "",
-        rcv_label: "",
-    };
 
     common::draw_multirow_throughput(
         &spec,
-        &[row],
-        &columns,
+        &[maps.row(1)],
+        &CpuColumns::NONE,
         &|_| "1 sender / 1 receiver".into(),
         super::hardware_subtitle().as_deref(),
     )?;
@@ -237,53 +155,20 @@ fn throughput(directory: &Path, rows: &[Value]) -> ChartResult {
     Ok(())
 }
 
-/// Bandwidth, message rate, and round spread per size from the median of
-/// three rounds.
-fn throughput_maps(rows: &[Value]) -> (ValMap, ValMap, FairnessMap) {
-    let mut messages = ValMap::new();
-    let mut bandwidth = ValMap::new();
-    let mut spread = FairnessMap::new();
-
-    for implementation in IMPLS {
-        for &size in SIZES {
-            let row = find(rows, implementation.key, size, false, 0).unwrap();
-            let mut rates: Vec<_> = row["rounds"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|round| round["msgs_s"].as_f64().unwrap())
-                .collect();
-            rates.sort_by(f64::total_cmp);
-            messages
-                .entry(size)
-                .or_default()
-                .insert(implementation.key.into(), rates[1]);
-            bandwidth
-                .entry(size)
-                .or_default()
-                .insert(implementation.key.into(), rates[1] * size as f64 / 1e6);
-            spread.entry(size).or_default().insert(
-                implementation.key.into(),
-                FairnessEntry {
-                    min: rates[0],
-                    p25: rates[0].midpoint(rates[1]),
-                    median: rates[1],
-                    p75: rates[1].midpoint(rates[2]),
-                    max: rates[2],
-                },
-            );
-        }
-    }
-
-    (bandwidth, messages, spread)
-}
-
 fn latency(directory: &Path, rows: &[Value]) -> ChartResult {
     let mut panels = [LatencyMap::new(), LatencyMap::new()];
     for implementation in IMPLS {
         for &size in common::COMPARISON_LATENCY_SIZES {
             for (panel, spin) in panels.iter_mut().zip([0, 50]) {
-                let row = find(rows, implementation.key, size, true, spin).unwrap();
+                let target = Target {
+                    implementation: implementation.key,
+                    size,
+                    mode: Mode {
+                        latency: true,
+                        spin,
+                    },
+                };
+                let row = find(rows, target).unwrap();
                 let mut rounds: Vec<_> = row["rounds"].as_array().unwrap().iter().collect();
                 rounds.sort_by(|a, b| {
                     a["p99_us"]
@@ -360,11 +245,16 @@ mod tests {
             .unwrap()
             .clone();
         let implementation = row["impl"].as_str().unwrap().to_owned();
-        assert!(verified(&row, &implementation, 16, false, 0));
+        let target = |implementation| Target {
+            implementation,
+            size: 16,
+            mode: THROUGHPUT,
+        };
+        assert!(verified(&row, target(&implementation)));
         row.as_object_mut().unwrap().remove("sender_clock_batch");
-        assert!(!verified(&row, &implementation, 16, false, 0));
+        assert!(!verified(&row, target(&implementation)));
         row["sender_clock_batch"] = json!(1);
-        assert!(!verified(&row, &implementation, 16, false, 0));
+        assert!(!verified(&row, target(&implementation)));
     }
 
     fn write_rows(path: &Path, rows: &[Value]) {

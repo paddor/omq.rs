@@ -1,6 +1,6 @@
 //! Plain frame batches: encode several small messages per peer write.
 
-use super::{LaneData, LaneWorker, PLAIN_BATCH_BYTES, PLAIN_BATCH_MESSAGES, PendingBatchPeer};
+use super::{LaneWorker, Message, PLAIN_BATCH_BYTES, PLAIN_BATCH_MESSAGES, PendingBatchPeer};
 use crate::engine::transmit_slot::TryFrameResult;
 use crate::routing::fan_out::filter;
 use crate::routing::fan_out::{FAN_OUT_TOTAL_COPY_BUDGET, FanOutMutePolicy};
@@ -16,18 +16,17 @@ impl LaneWorker {
     /// retain their existing per-publication dispatch.
     pub(super) fn encode_plain_batch(
         &self,
-        batch: &[LaneData],
+        batch: &[Message],
         wire: &mut FrameBuffer,
         ends: &mut SmallVec<[usize; PLAIN_BATCH_MESSAGES]>,
     ) -> usize {
         if batch.len() < 2 || self.mute_policy == FanOutMutePolicy::DropOldest {
             return 0;
         }
-        let LaneData::Dispatch(first) = &batch[0];
+        let first = &batch[0];
         let first_max_bytes = first
-            .msg
             .byte_len()
-            .saturating_add(first.msg.len().saturating_mul(9));
+            .saturating_add(first.len().saturating_mul(9));
         if first_max_bytes.saturating_mul(self.peers.len()) > FAN_OUT_TOTAL_COPY_BUDGET
             || first_max_bytes >= omq_proto::frame_buffer::ARENA_THRESHOLD
             || !filter::all_peers_subscribe_all(
@@ -45,12 +44,8 @@ impl LaneWorker {
         wire.clear_arena();
         ends.clear();
         let mut budget = DrainBudget::new(PLAIN_BATCH_MESSAGES, PLAIN_BATCH_BYTES);
-        for data in batch.iter().take(PLAIN_BATCH_MESSAGES) {
-            let LaneData::Dispatch(dispatch) = data;
-            let max_bytes = dispatch
-                .msg
-                .byte_len()
-                .saturating_add(dispatch.msg.len().saturating_mul(9));
+        for msg in batch.iter().take(PLAIN_BATCH_MESSAGES) {
+            let max_bytes = msg.byte_len().saturating_add(msg.len().saturating_mul(9));
             if max_bytes.saturating_mul(self.peers.len()) > FAN_OUT_TOTAL_COPY_BUDGET
                 || max_bytes >= omq_proto::frame_buffer::ARENA_THRESHOLD
                 || wire.total_bytes().saturating_add(max_bytes) > PLAIN_BATCH_BYTES
@@ -58,7 +53,7 @@ impl LaneWorker {
                 break;
             }
             let start = wire.total_bytes();
-            wire.frame_inline(&dispatch.msg);
+            wire.frame_inline(msg);
             ends.push(wire.total_bytes());
             if !budget.account(wire.total_bytes() - start) {
                 break;

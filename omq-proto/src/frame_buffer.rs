@@ -223,16 +223,6 @@ impl FrameBuffer {
         &self.arena[self.arena_mark as usize..]
     }
 
-    /// Copy and clear arena-only output; requires no queued entries.
-    pub fn take_arena_bytes(&mut self) -> Bytes {
-        copy_stats::record(Site::ArenaDrain, self.arena.len());
-        let frozen = Bytes::copy_from_slice(&self.arena);
-        self.arena.clear();
-        self.arena_mark = 0;
-        self.total_bytes = 0;
-        frozen
-    }
-
     /// Append already framed bytes to the arena.
     pub fn push_pre_framed(&mut self, data: &[u8]) {
         self.reserve_arena(data.len());
@@ -295,35 +285,65 @@ impl FrameBuffer {
         }
     }
 
+    /// Reserve, encode into the arena, and account the bytes `encode` added.
+    #[inline]
+    fn encode_arena(&mut self, reserve: usize, site: Site, encode: impl FnOnce(&mut BytesMut)) {
+        self.reserve_arena(reserve);
+        let before = self.arena.len();
+        encode(&mut self.arena);
+        let added = self.arena.len() - before;
+        copy_stats::record(site, added);
+        self.total_bytes += added;
+    }
+
+    /// Write one frame header into the arena and commit it as an entry, so
+    /// an external payload can follow it.
+    #[inline]
+    fn push_frame_header(&mut self, more: bool, payload_len: usize) {
+        let before = self.arena.len();
+        frame::write_frame_header(&mut self.arena, more, payload_len);
+        self.total_bytes += self.arena.len() - before;
+        self.commit_arena_range();
+    }
+
+    /// Queue a shared chunk as its own unprotected entry. The pending arena
+    /// range must already be committed.
+    #[inline]
+    fn push_external(&mut self, bytes: Bytes) {
+        self.total_bytes += bytes.len();
+        self.entries.push_back(Entry::External {
+            bytes,
+            protected: false,
+            continues: false,
+        });
+    }
+
     /// Encode message headers and payloads contiguously into the arena.
     #[inline]
     pub fn frame_inline(&mut self, msg: &Message) {
-        self.reserve_arena(msg.byte_len() + msg.len() * 9);
-        let before = self.arena.len();
-        frame::encode_message_flat(msg, &mut self.arena);
-        copy_stats::record(Site::FrameInline, self.arena.len() - before);
-        self.total_bytes += self.arena.len() - before;
+        self.encode_arena(msg.byte_len() + msg.len() * 9, Site::FrameInline, |arena| {
+            frame::encode_message_flat(msg, arena);
+        });
     }
 
     /// Prefix only the final frame's payload, retaining earlier envelopes.
     /// Headers and payloads are encoded contiguously without a new message.
     pub fn frame_body_prefixed_inline(&mut self, prefix: &[u8], msg: &Message) {
-        self.reserve_arena(msg.byte_len() + prefix.len() + msg.len() * 9);
-        let before = self.arena.len();
-        let mut index = 0;
-        let count = msg.len();
-        msg.iter_slices(|part| {
-            index += 1;
-            let last = index == count;
-            let length = part.len() + if last { prefix.len() } else { 0 };
-            frame::write_frame_header(&mut self.arena, !last, length);
-            if last {
-                self.arena.extend_from_slice(prefix);
-            }
-            self.arena.extend_from_slice(part);
+        let reserve = msg.byte_len() + prefix.len() + msg.len() * 9;
+        self.encode_arena(reserve, Site::FrameInline, |arena| {
+            let mut index = 0;
+            let count = msg.len();
+            msg.iter_slices(|part| {
+                index += 1;
+                let last = index == count;
+                let length = part.len() + if last { prefix.len() } else { 0 };
+                frame::write_frame_header(arena, !last, length);
+                if last {
+                    arena.extend_from_slice(prefix);
+                }
+                arena.extend_from_slice(part);
+            });
         });
-        copy_stats::record(Site::FrameInline, self.arena.len() - before);
-        self.total_bytes += self.arena.len() - before;
     }
 
     /// Encode headers into the arena and retain shared payload entries.
@@ -332,43 +352,28 @@ impl FrameBuffer {
         let n = parts.len();
         self.reserve_arena(n * 9);
         for (i, part) in parts.iter().enumerate() {
-            let before = self.arena.len();
-            frame::write_frame_header(&mut self.arena, i + 1 < n, part.len());
-            self.total_bytes += self.arena.len() - before;
-            self.commit_arena_range();
+            self.push_frame_header(i + 1 < n, part.len());
             let b = part.as_bytes();
             if !b.is_empty() {
-                self.total_bytes += b.len();
-                self.entries.push_back(Entry::External {
-                    bytes: b,
-                    protected: false,
-                    continues: false,
-                });
+                self.push_external(b);
             }
         }
     }
 
-    /// Encode ZWS frames into the arena, optionally applying client masking.
+    /// Encode ZWS frames into the arena; a client masks them.
     #[cfg(feature = "ws")]
-    pub fn frame_ws(&mut self, msg: &Message, masked: bool) {
-        self.reserve_arena(msg.byte_len() + msg.len() * 14);
-        let before = self.arena.len();
-        if masked {
-            frame::encode_message_flat_ws_masked(msg, &mut self.arena);
-        } else {
-            frame::encode_message_flat_ws(msg, &mut self.arena);
-        }
-        copy_stats::record(Site::WebSocket, self.arena.len() - before);
-        self.total_bytes += self.arena.len() - before;
+    pub fn frame_ws(&mut self, msg: &Message, role: crate::proto::connection::WsRole) {
+        self.encode_arena(msg.byte_len() + msg.len() * 14, Site::WebSocket, |arena| {
+            frame::encode_message_flat_ws(msg, arena, role);
+        });
     }
 
     /// Encode each part with a payload prefix contiguously into the arena.
-    pub fn frame_prefixed_inline(&mut self, prefix: &Bytes, msg: &Message) {
-        self.reserve_arena(msg.byte_len() + prefix.len() * msg.len() + msg.len() * 9);
-        let before = self.arena.len();
-        frame::encode_message_prefixed_flat(prefix, msg, &mut self.arena);
-        copy_stats::record(Site::FrameInline, self.arena.len() - before);
-        self.total_bytes += self.arena.len() - before;
+    fn frame_prefixed_inline(&mut self, prefix: &Bytes, msg: &Message) {
+        let reserve = msg.byte_len() + prefix.len() * msg.len() + msg.len() * 9;
+        self.encode_arena(reserve, Site::FrameInline, |arena| {
+            frame::encode_message_prefixed_flat(prefix, msg, arena);
+        });
     }
 
     /// Encode a message using the configured arena threshold.
@@ -378,39 +383,6 @@ impl FrameBuffer {
             self.frame_inline(msg);
         } else {
             self.frame_gather(msg);
-        }
-    }
-
-    /// Frame a REP reply without first materializing its routing envelope as
-    /// a `Message`. The peer identity is local routing metadata; the wire
-    /// shape is `[empty delimiter, body...]`.
-    pub fn frame_rep(&mut self, _identity: &Bytes, msg: &Message) {
-        self.frame_rep_gather(msg);
-    }
-
-    fn frame_rep_gather(&mut self, msg: &Message) {
-        self.reserve_arena((msg.len() + 1) * 9);
-        let before = self.arena.len();
-        frame::write_frame_header(&mut self.arena, !msg.is_empty(), 0);
-        self.total_bytes += self.arena.len() - before;
-        if msg.is_empty() {
-            return;
-        }
-        let parts = msg.parts_payload();
-        for (i, part) in parts.iter().enumerate() {
-            let before = self.arena.len();
-            frame::write_frame_header(&mut self.arena, i + 1 < parts.len(), part.len());
-            self.total_bytes += self.arena.len() - before;
-            self.commit_arena_range();
-            let bytes = part.as_bytes();
-            if !bytes.is_empty() {
-                self.total_bytes += bytes.len();
-                self.entries.push_back(Entry::External {
-                    bytes,
-                    protected: false,
-                    continues: false,
-                });
-            }
         }
     }
 
@@ -424,30 +396,16 @@ impl FrameBuffer {
     }
 
     /// Encode prefixed headers and retain prefixes and payloads as shared entries.
-    pub fn frame_prefixed_gather(&mut self, prefix: &Bytes, msg: &Message) {
+    fn frame_prefixed_gather(&mut self, prefix: &Bytes, msg: &Message) {
         let parts = msg.parts_payload();
         let n = parts.len();
         self.reserve_arena(n * 9);
         for (i, part) in parts.iter().enumerate() {
-            let payload_len = prefix.len() + part.len();
-            let before = self.arena.len();
-            frame::write_frame_header(&mut self.arena, i + 1 < n, payload_len);
-            self.total_bytes += self.arena.len() - before;
-            self.commit_arena_range();
-            self.total_bytes += prefix.len();
-            self.entries.push_back(Entry::External {
-                bytes: prefix.clone(),
-                protected: false,
-                continues: false,
-            });
+            self.push_frame_header(i + 1 < n, prefix.len() + part.len());
+            self.push_external(prefix.clone());
             let b = part.as_bytes();
             if !b.is_empty() {
-                self.total_bytes += b.len();
-                self.entries.push_back(Entry::External {
-                    bytes: b,
-                    protected: false,
-                    continues: false,
-                });
+                self.push_external(b);
             }
         }
     }
@@ -532,12 +490,7 @@ impl FrameBuffer {
     pub fn push_shared_chunks(&mut self, chunks: &[Bytes]) {
         self.commit_arena_range();
         for chunk in chunks {
-            self.total_bytes += chunk.len();
-            self.entries.push_back(Entry::External {
-                bytes: chunk.clone(),
-                protected: false,
-                continues: false,
-            });
+            self.push_external(chunk.clone());
         }
     }
 
@@ -637,33 +590,6 @@ impl FrameBuffer {
                     continues: false,
                 };
             }
-        }
-    }
-
-    /// Restore drained chunks at the front after skipping `written` bytes.
-    pub fn put_back_unwritten(&mut self, returned: Vec<Bytes>, written: usize) {
-        let mut consumed = 0usize;
-        let mut to_restore: Vec<Bytes> = Vec::new();
-        for chunk in returned {
-            if consumed >= written {
-                self.total_bytes += chunk.len();
-                to_restore.push(chunk);
-            } else if consumed + chunk.len() <= written {
-                consumed += chunk.len();
-            } else {
-                let skip = written - consumed;
-                consumed = written;
-                let tail = chunk.slice(skip..);
-                self.total_bytes += tail.len();
-                to_restore.push(tail);
-            }
-        }
-        for chunk in to_restore.into_iter().rev() {
-            self.entries.push_front(Entry::External {
-                bytes: chunk,
-                protected: false,
-                continues: false,
-            });
         }
     }
 }

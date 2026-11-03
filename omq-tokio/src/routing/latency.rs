@@ -68,37 +68,16 @@ impl LatencySend {
         }
     }
 
-    pub(crate) fn make_connect_pipe(&mut self, route_id: u64) -> SendPipeConsumer {
-        self.make_connect_pipe_inner(
-            route_id,
-            #[cfg(feature = "dart")]
-            None,
-        )
-    }
-
-    #[cfg(feature = "dart")]
-    pub(crate) fn make_dart_connect_pipe(
-        &mut self,
-        route_id: u64,
-        socket_type: omq_proto::SocketType,
-    ) -> SendPipeConsumer {
-        self.make_connect_pipe_inner(route_id, Some(socket_type))
-    }
-
-    fn make_connect_pipe_inner(
+    /// Allocate a connect-side pre-ready pipe. DART sockets pass their type so
+    /// the pipe validates messages.
+    pub(crate) fn make_connect_pipe(
         &mut self,
         route_id: u64,
         #[cfg(feature = "dart")] dart: Option<omq_proto::SocketType>,
     ) -> SendPipeConsumer {
         let (tx, rx) = crate::engine::send_pipe(self.pipe_cap);
         #[cfg(feature = "dart")]
-        let tx = {
-            let mut tx = tx;
-            if let Some(kind) = dart {
-                tx.set_dart(kind);
-            }
-            tx
-        };
+        let tx = super::with_dart(tx, dart);
         let mut state = self.state.lock().expect("latency send state");
         state.remove_route(route_id);
         state.pending.push(PendingPipe { route_id, tx });
@@ -418,13 +397,13 @@ impl State {
 mod tests {
     use std::net::{TcpListener, TcpStream};
     use std::sync::Arc;
-    use std::sync::atomic::Ordering;
     use std::time::Duration;
 
     use bytes::Bytes;
     use tokio_util::sync::CancellationToken;
 
     use super::{LatencySend, Peer};
+    use crate::engine::driver::DirectRoutes;
     use crate::engine::transmit_slot::{PeerTransmitSlot, SlotConfig};
     use crate::engine::{ActorPeerDriverHandle, PeerDriverCommand};
     use crate::routing::peer_outbound::PeerOutbound;
@@ -446,7 +425,7 @@ mod tests {
         tokio::sync::mpsc::Receiver<crate::engine::PeerDriverData>,
     ) {
         let (tcp, _peer) = tcp_pair();
-        let direct = crate::socket::dispatch::DirectTcpWriter::new(tcp);
+        let direct = crate::socket::direct_writer::DirectTcpWriter::new(tcp);
         let (inbox, _rx) = tokio::sync::mpsc::channel::<PeerDriverCommand>(1);
         let (data_inbox, data_rx) = tokio::sync::mpsc::channel(1);
         (
@@ -454,10 +433,11 @@ mod tests {
                 inbox: inbox.into(),
                 data_inbox: data_inbox.into(),
                 cancel: CancellationToken::new(),
-                transmit_slot: Some(slot),
-                direct_tcp_writer: Some(Arc::new(direct)),
-                send_pipe: None,
-                inproc: None,
+                routes: DirectRoutes {
+                    transmit_slot: Some(slot),
+                    direct_tcp_writer: Some(Arc::new(direct)),
+                    ..Default::default()
+                },
             },
             data_rx,
         )
@@ -476,7 +456,7 @@ mod tests {
                 ..SlotConfig::default()
             },
         );
-        slot.handshake_done.store(true, Ordering::Release);
+        slot.mark_handshake_done();
         let (handle, mut receiver) = direct_peer_handle(slot.clone());
         send.connection_added(7, &handle);
 
@@ -525,10 +505,7 @@ mod tests {
                     inbox: tokio::sync::mpsc::channel(1).0.into(),
                     data_inbox: data_inbox.into(),
                     cancel: CancellationToken::new(),
-                    transmit_slot: None,
-                    direct_tcp_writer: None,
-                    send_pipe: None,
-                    inproc: None,
+                    routes: DirectRoutes::default(),
                 };
                 send.connection_added(id, &handle);
                 receivers.push(receiver);
@@ -558,7 +535,11 @@ mod tests {
     #[test]
     fn state_prefers_peer_space_before_pending_space() {
         let mut send = LatencySend::new(&Options::default().send_hwm(1));
-        let _pending = send.make_connect_pipe(1);
+        let _pending = send.make_connect_pipe(
+            1,
+            #[cfg(feature = "dart")]
+            None,
+        );
         let slot = PeerTransmitSlot::with_config(
             2,
             SlotConfig {

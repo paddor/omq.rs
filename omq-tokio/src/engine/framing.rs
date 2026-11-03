@@ -25,9 +25,14 @@ impl WireFraming {
         }
     }
 
+    /// Role for outgoing ZWS frames; ZMTP framing never frames WS.
     #[cfg(feature = "ws")]
-    pub(crate) fn is_masked(self) -> bool {
-        matches!(self, Self::Zws(WsRole::Client))
+    #[inline]
+    pub(crate) fn ws_send_role(self) -> WsRole {
+        match self {
+            Self::Zws(role) => role,
+            Self::Zmtp => WsRole::Server,
+        }
     }
 }
 
@@ -39,7 +44,6 @@ mod tests {
     use omq_proto::Message;
     use omq_proto::proto::SocketType;
     use omq_proto::proto::connection::{Connection, ConnectionConfig, Role};
-    use std::sync::atomic::Ordering;
 
     fn connection(framing: WireFraming, server: bool) -> Connection {
         let role = if server { Role::Server } else { Role::Client };
@@ -104,7 +108,7 @@ mod tests {
                     ..SlotConfig::default()
                 },
             );
-            slot.handshake_done.store(true, Ordering::Release);
+            slot.mark_handshake_done();
             let messages = [
                 Message::single(Bytes::new()),
                 Message::single("tiny"),

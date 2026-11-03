@@ -27,9 +27,9 @@ mod ws;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 #[cfg(any(feature = "curve", test))]
 use crate::message::Payload;
 use crate::message::{FrameFlags, Message, MessagePool, Parts};
@@ -47,16 +47,8 @@ use super::frame;
 /// mechanism untouched.
 #[expect(clippy::needless_pass_by_value)]
 fn decode_command_raw(body: bytes::Bytes) -> Result<Command> {
-    if body.is_empty() {
-        return Err(Error::Protocol("empty command frame".into()));
-    }
-    let name_len = body[0] as usize;
-    if body.len() < 1 + name_len {
-        return Err(Error::Protocol("command truncated in name".into()));
-    }
-    let name = body.slice(1..=name_len);
-    let rest = body.slice(1 + name_len..);
-    Ok(Command::Unknown { name, body: rest })
+    let (name, body) = super::command::split_name(&body)?;
+    Ok(Command::Unknown { name, body })
 }
 use super::SocketType;
 use super::greeting::{self, Greeting, MechanismName};
@@ -297,11 +289,6 @@ pub struct Connection {
     /// commands.
     #[cfg(feature = "curve")]
     transform: Option<FrameTransform>,
-    /// 64-byte ZMTP greeting we sent (captured at `queue_greeting` time)
-    /// + 64-byte greeting we received (captured during decode). Both
-    ///   are retained for protocol diagnostics.
-    our_greeting: Bytes,
-    peer_greeting: Bytes,
     peer_minor: u8,
     in_buf: ChunkedInputBuf,
     out: output::OutputQueue,
@@ -339,8 +326,6 @@ impl Connection {
             mechanism,
             #[cfg(feature = "curve")]
             transform: None,
-            our_greeting: Bytes::new(),
-            peer_greeting: Bytes::new(),
             in_buf: ChunkedInputBuf::new(),
             out: output::OutputQueue::new(),
             events: VecDeque::new(),
@@ -400,22 +385,23 @@ impl Connection {
     /// mechanism commands as ZWS frames.
     #[cfg(feature = "ws")]
     fn init_ws_mode(&mut self) {
-        use super::command::PeerProperties;
+        if self.start_mechanism().is_err() {
+            self.state = State::Closed;
+        }
+    }
+
+    /// Enter the mechanism handshake and queue its opening commands. Commands
+    /// produced before a start error are still queued.
+    fn start_mechanism(&mut self) -> Result<()> {
         self.state = State::MechanismHandshake;
         let mut our_props = PeerProperties::default().with_socket_type(self.config.socket_type);
         if !self.config.identity.is_empty() {
             our_props = our_props.with_identity(self.config.identity.clone());
         }
         let mut cmds = Vec::new();
-        let result = self.mechanism.start(
-            &mut cmds,
-            our_props,
-            &self.our_greeting,
-            &self.peer_greeting,
-        );
-        if self.write_outbound_commands(&cmds).is_err() || result.is_err() {
-            self.state = State::Closed;
-        }
+        let result = self.mechanism.start(&mut cmds, our_props);
+        self.write_outbound_commands(&cmds)?;
+        result
     }
 
     fn queue_greeting(&mut self) {
@@ -424,9 +410,7 @@ impl Connection {
         let g = Greeting::current(mech, as_server);
         let mut buf = BytesMut::new();
         g.encode(&mut buf);
-        let bytes = buf.freeze();
-        self.our_greeting = bytes.clone();
-        self.out.push(bytes);
+        self.out.push(buf.freeze());
     }
 
     /// Whether the handshake is complete. Claiming an inbound payload does
@@ -470,7 +454,7 @@ impl Connection {
     /// Emit pre-encrypted frames produced by
     /// [`FrameTransform::encrypt_message`] into the outbound buffer.
     #[cfg(feature = "curve")]
-    pub fn emit_encrypted_frames(&mut self, frames: &[(FrameFlags, Bytes)]) {
+    pub fn emit_encrypted_frames(&mut self, frames: &[(FrameFlags, bytes::Bytes)]) {
         for (flags, payload) in frames {
             self.emit_frame(*flags, Payload::from_bytes(payload.clone()));
         }

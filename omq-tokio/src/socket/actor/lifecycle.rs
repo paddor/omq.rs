@@ -26,15 +26,15 @@ impl<'a> PeerLifecycle<'a> {
             self.driver
                 .routing
                 .send_strategy
-                .connection_removed(peer_id, p.route_id);
+                .connection_removed(peer_id, p.origin.route_id);
             if self.driver.socket_type == SocketType::Req {
                 self.driver
                     .link
                     .shared
                     .req_awaiting_reply
-                    .peer_disconnected(p.route_id, peer_id);
+                    .peer_disconnected(p.origin.route_id, peer_id);
             }
-            if p.ready {
+            if p.handshake.ready {
                 self.driver.link.shared.ready_peers.remove();
             }
         }
@@ -46,7 +46,30 @@ impl<'a> PeerLifecycle<'a> {
         peer
     }
 
-    pub(super) fn register_tcp_consumer(
+    /// New per-peer receive ring whose consumer joins the socket's receive
+    /// scan. Pushes wake async and blocking receivers.
+    pub(super) fn yring_sink(
+        &mut self,
+        peer_id: u64,
+        capacity: usize,
+        spin_probe: bool,
+    ) -> crate::engine::RecvSink {
+        let (producer, consumer) = yring::spsc(capacity);
+        let space = Arc::new(StateSignal::new());
+        self.register_tcp_consumer(consumer, space.clone(), peer_id, spin_probe);
+        let recv_signal = self.driver.link.spsc.recv_signal.clone();
+        let blocking_waker = self.driver.link.spsc.blocking_recv_waker.clone();
+        crate::engine::RecvSink::Yring(crate::engine::YringSink {
+            producer,
+            signal: Box::new(move || {
+                recv_signal.mark();
+                blocking_waker.wake();
+            }),
+            space,
+        })
+    }
+
+    fn register_tcp_consumer(
         &mut self,
         consumer: yring::Consumer<crate::Message>,
         space: Arc<StateSignal>,
@@ -79,13 +102,13 @@ impl<'a> PeerLifecycle<'a> {
 
     fn publish_disconnect(&self, peer: Option<&PeerEntry>, reason: DisconnectReason) {
         if let Some(peer) = peer
-            && let Some(ref info) = peer.info
+            && let Some(ref info) = peer.handshake.info
         {
             self.driver
                 .link
                 .monitor
                 .publish(MonitorEvent::Disconnected {
-                    endpoint: peer.endpoint.clone(),
+                    endpoint: peer.origin.endpoint.clone(),
                     peer: info.clone(),
                     reason,
                 });
@@ -95,7 +118,7 @@ impl<'a> PeerLifecycle<'a> {
     #[expect(clippy::unused_self)]
     fn invalidate_transmit_slot(&self, peer: Option<&PeerEntry>) {
         if let Some(peer) = peer
-            && let Some(ref slot) = peer.handle.transmit_slot
+            && let Some(ref slot) = peer.handle.routes.transmit_slot
         {
             slot.mark_dead();
         }
@@ -112,13 +135,7 @@ impl<'a> PeerLifecycle<'a> {
     fn reset_type_state_if_last_peer(&mut self) {
         match self.driver.socket_type {
             SocketType::Req | SocketType::Rep if self.driver.ready_peer_count() == 0 => {
-                self.driver
-                    .link
-                    .shared
-                    .type_state
-                    .lock()
-                    .expect("type_state")
-                    .on_peer_disconnected();
+                self.driver.routing.type_state.on_peer_disconnected();
             }
             _ => {}
         }

@@ -11,8 +11,8 @@ use omq_proto::subscription::SubscriptionAdmission;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
 
+use super::actor_output::OutletRef;
 use super::driver::PeerEvent;
-use super::peer_completion::CompletionProgress;
 use super::recv_sink::RecvSink;
 use crate::socket::monitor::{MonitorEvent, MonitorPublisher};
 
@@ -70,21 +70,13 @@ impl PeerEventDispatch {
             && (!self.notification_pending() || (data_clear && output.has_capacity()))
     }
 
-    pub(super) fn send_notification(
-        &mut self,
-        output: &mut super::actor_output::PeerOutput,
-        peer_id: u64,
-        completion: &mut CompletionProgress,
-    ) -> bool {
+    pub(super) fn send_notification(&mut self, outlet: &mut OutletRef<'_>) -> bool {
         if self.notification.is_none() {
             return true;
         }
-        output.set_control_prefix(self.admitted);
-        match output.try_send(peer_id, self.notification.take().unwrap(), true) {
-            Ok(()) => {
-                completion.note_event();
-                true
-            }
+        outlet.output.set_control_prefix(self.admitted);
+        match outlet.try_send(self.notification.take().unwrap(), true) {
+            Ok(()) => true,
             Err(super::SendPipeError::Full(_)) => {
                 unreachable!("single producer retained notification capacity")
             }
@@ -99,22 +91,17 @@ impl PeerEventDispatch {
     pub(super) fn send_reserved(
         &mut self,
         permit: mpsc::Permit<'_, (u64, PeerEvent)>,
-        peer_id: u64,
-        completion: &mut CompletionProgress,
-        output: &mut super::actor_output::PeerOutput,
+        mut outlet: OutletRef<'_>,
     ) -> bool {
         let event = self.pending.take().expect("pending event admission guard");
-        self.note_admission(&event);
-        permit.send((peer_id, PeerEvent::Event(event)));
-        completion.note_event();
-        self.send_notification(output, peer_id, completion)
+        self.note_admission(is_handshake(&event));
+        outlet.send_event(permit, event);
+        self.send_notification(&mut outlet)
     }
 
-    fn note_admission(&mut self, event: &Event) {
+    fn note_admission(&mut self, handshake: bool) {
         self.admitted = self.admitted.wrapping_add(1);
-        if matches!(event, Event::HandshakeSucceeded { .. }) {
-            self.handshake_admitted = true;
-        }
+        self.handshake_admitted |= handshake;
     }
 
     /// Empty checks avoid clocks or reservations on the ordinary message path.
@@ -139,9 +126,7 @@ impl PeerEventDispatch {
         };
         let EventRoute {
             mailbox,
-            output,
-            peer_id,
-            completion,
+            mut outlet,
         } = route;
         let mut budget = DrainBudget::new(64, 64 * 1024);
         let started = Instant::now();
@@ -164,18 +149,14 @@ impl PeerEventDispatch {
                 self.notification = self.subscriptions.notification(&event);
                 // The XPUB notification rides the data output right after its
                 // event, so both wait together when that output has no room.
-                if self.notification.is_some() && (!data_clear || !output.has_capacity()) {
+                if self.notification.is_some() && (!data_clear || !outlet.output.has_capacity()) {
                     self.pending = Some(event);
                     return true;
                 }
 
-                let handshake = matches!(event, Event::HandshakeSucceeded { .. });
-                match mailbox.try_send((peer_id, PeerEvent::Event(event))) {
-                    Ok(()) => {
-                        self.admitted = self.admitted.wrapping_add(1);
-                        self.handshake_admitted |= handshake;
-                        completion.note_event();
-                    }
+                let handshake = is_handshake(&event);
+                match outlet.try_send_event(mailbox, event) {
+                    Ok(()) => self.note_admission(handshake),
                     Err(TrySendError::Full((_, PeerEvent::Event(event)))) => {
                         self.pending = Some(event);
                         return true;
@@ -183,7 +164,7 @@ impl PeerEventDispatch {
                     Err(TrySendError::Closed(_)) => return false,
                     Err(TrySendError::Full(_)) => unreachable!("codec event admission"),
                 }
-                if !self.send_notification(output, peer_id, completion) {
+                if !self.send_notification(&mut outlet) {
                     return false;
                 }
             }
@@ -203,9 +184,11 @@ impl PeerEventDispatch {
 /// Where one peer's admitted codec events go, and who accounts for them.
 pub(super) struct EventRoute<'a> {
     pub(super) mailbox: &'a mpsc::Sender<(u64, PeerEvent)>,
-    pub(super) output: &'a mut super::actor_output::PeerOutput,
-    pub(super) peer_id: u64,
-    pub(super) completion: &'a mut CompletionProgress,
+    pub(super) outlet: OutletRef<'a>,
+}
+
+fn is_handshake(event: &Event) -> bool {
+    matches!(event, Event::HandshakeSucceeded { .. })
 }
 
 /// Peer SUBSCRIBE handling for one connection: PUB/XPUB admission and XPUB

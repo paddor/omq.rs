@@ -4,9 +4,7 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
-use super::super::common::{
-    self, ChartSpec, CpuColumns, FairnessEntry, FairnessMap, ThroughputRow, ValMap,
-};
+use super::super::common::{self, ChartSpec, CpuColumns, ThroughputRow};
 use super::super::shm;
 use crate::jsonl;
 
@@ -37,7 +35,14 @@ fn eligible(row: &Value) -> bool {
         && row["recv_spin_us"] == 0
         && row["io_spin_us"] == 0
         && row["workload_profile"] == "throughput"
-        && shm::verified(row, implementation, size, readers)
+        && shm::verified(
+            row,
+            shm::Target {
+                implementation,
+                size,
+                mode: readers,
+            },
+        )
         && pooled_receive(row, size)
         && row["rounds"]
             .as_array()
@@ -81,47 +86,16 @@ fn cohorts(rows: Vec<(usize, Value)>) -> BTreeMap<(String, String), Cohort> {
     cohorts
 }
 
-/// Bandwidth, message rate, and round spread per size for one reader count.
-fn reader_panel(readers: u64, cohort: &Cohort) -> (ValMap, ValMap, FairnessMap) {
-    let mut messages = ValMap::new();
-    let mut bandwidth = ValMap::new();
-    let mut spread = FairnessMap::new();
-
+/// Median-of-three rates and round spread per size for one reader count.
+fn reader_panel(readers: u64, cohort: &Cohort) -> shm::RateMaps {
+    let mut maps = shm::RateMaps::default();
     for &size in SIZES {
         for implementation in &super::IMPLS[..3] {
             let row = &cohort[&(readers, size, implementation.key.into())];
-            let mut rates: Vec<_> = row["rounds"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|round| round["msgs_s"].as_f64().unwrap())
-                .collect();
-            rates.sort_by(f64::total_cmp);
-
-            // Three rounds give min, median, and max. The box spans the
-            // midpoints between them.
-            messages
-                .entry(size)
-                .or_default()
-                .insert(implementation.key.into(), rates[1]);
-            bandwidth
-                .entry(size)
-                .or_default()
-                .insert(implementation.key.into(), rates[1] * size as f64 / 1e6);
-            spread.entry(size).or_default().insert(
-                implementation.key.into(),
-                FairnessEntry {
-                    min: rates[0],
-                    p25: rates[0].midpoint(rates[1]),
-                    median: rates[1],
-                    p75: rates[1].midpoint(rates[2]),
-                    max: rates[2],
-                },
-            );
+            maps.insert_round_rates(row, implementation.key, size);
         }
     }
-
-    (bandwidth, messages, spread)
+    maps
 }
 
 pub(super) fn generate() -> Result<(), Box<dyn std::error::Error>> {
@@ -148,12 +122,7 @@ pub(super) fn generate() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
     let rows: Vec<ThroughputRow<'_>> = panels
         .iter()
-        .map(|(readers, (bandwidth, messages, spread))| ThroughputRow {
-            peers: *readers,
-            tput: bandwidth,
-            msgs: messages,
-            fairness: Some(spread),
-        })
+        .map(|(readers, maps)| maps.row(*readers))
         .collect();
 
     let directory = common::out_dir().join("dart");
@@ -165,15 +134,10 @@ pub(super) fn generate() -> Result<(), Box<dyn std::error::Error>> {
         sizes: SIZES,
         impls: implementations,
     };
-    let columns = CpuColumns {
-        cpu: &BTreeMap::new(),
-        snd_label: "",
-        rcv_label: "",
-    };
     common::draw_multirow_throughput(
         &spec,
         &rows,
-        &columns,
+        &CpuColumns::NONE,
         &|readers| format!("{readers} subscribers, payload pools, median and range of 3"),
         common::detect_hardware().as_deref(),
     )?;

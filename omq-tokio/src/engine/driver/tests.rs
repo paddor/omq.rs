@@ -234,6 +234,8 @@ impl DriverWrite for StalledShutdownWriter {}
 impl DriverWrite for GreetingOnlyWriter {}
 impl<W: AsyncWrite + Send + Unpin + 'static> DriverWrite for ChoppyWriter<W> {}
 impl DriverWrite for tokio::io::BufWriter<tokio::io::WriteHalf<DuplexStream>> {}
+impl DriverWrite for PartialVectoredWriter {}
+impl DriverWrite for ScriptedVectoredWriter {}
 
 #[derive(Debug)]
 struct ChoppyWriter<W> {
@@ -563,20 +565,14 @@ fn stream_pair<S: DriverStream + Send + 'static>(
             inbox: c_inbox_tx,
             data_inbox: c_data_tx,
             cancel: c_cancel,
-            transmit_slot: None,
-            direct_tcp_writer: None,
-            send_pipe: None,
-            inproc: None,
+            routes: DirectRoutes::default(),
         },
         EventAdapter { rx: c_evt_rx },
         PeerDriverHandle {
             inbox: s_inbox_tx,
             data_inbox: s_data_tx,
             cancel: s_cancel,
-            transmit_slot: None,
-            direct_tcp_writer: None,
-            send_pipe: None,
-            inproc: None,
+            routes: DirectRoutes::default(),
         },
         EventAdapter { rx: s_evt_rx },
     )
@@ -854,8 +850,8 @@ fn mixed_frames(eq: &mut FrameBuffer) -> (Vec<u8>, Vec<usize>) {
     (expected, large_starts)
 }
 
-async fn write_owned_until_idle(
-    writer: &mut OwnedChunkWriter,
+async fn write_until_idle<W: DriverWrite>(
+    writer: &mut W,
     eq: &mut FrameBuffer,
     pending: &mut PendingWrite,
     connection: &mut Connection,
@@ -866,6 +862,13 @@ async fn write_owned_until_idle(
             .await
             .unwrap();
     }
+}
+
+/// Write `eq` through the driver write path, without codec output.
+async fn write_frames<W: DriverWrite>(writer: &mut W, eq: &mut FrameBuffer) {
+    let mut connection = Connection::new(ConnectionConfig::new(Role::Client, SocketType::Push));
+    let _ = drain_transmit(&mut connection);
+    write_until_idle(writer, eq, &mut PendingWrite::default(), &mut connection).await;
 }
 
 type DriverTask = tokio::task::JoinHandle<Result<()>>;
@@ -919,6 +922,16 @@ fn pair_drivers(
     PairEnds,
 ) {
     let (server_stream, client_stream) = tokio::io::duplex(spec.duplex);
+    pair_drivers_over(server_stream, client_stream, spec)
+}
+
+/// Unstarted server and client drivers for `spec` over the given streams.
+/// `spec.duplex` does not apply.
+fn pair_drivers_over<S: DriverStream, C: DriverStream>(
+    server_stream: S,
+    client_stream: C,
+    spec: PairSpec,
+) -> (ConnectionDriver<S>, ConnectionDriver<C>, PairEnds) {
     let (server_control, server_inbox) = mpsc::channel(8);
     let (client_control, client_inbox) = mpsc::channel(8);
     let (client_data, client_data_inbox) = mpsc::channel(spec.client_data);
@@ -934,34 +947,38 @@ fn pair_drivers(
         client_cancel: CancellationToken::new(),
     };
 
-    let server = ConnectionDriver::with_config(
+    let server = ConnectionDriver::new(
         server_stream,
         Connection::new(spec.server),
         server_inbox,
         server_event_tx,
         1,
         ends.server_cancel.clone(),
-        spec.server_driver,
-    );
-    let client = ConnectionDriver::with_config(
+    )
+    .with_driver_config(spec.server_driver);
+    let client = ConnectionDriver::new(
         client_stream,
         Connection::new(spec.client),
         client_inbox,
         client_event_tx,
         2,
         ends.client_cancel.clone(),
-        spec.client_driver,
     )
+    .with_driver_config(spec.client_driver)
     .with_data_inbox(client_data_inbox);
     (server, client, ends)
 }
 
 /// Spawn both drivers, wait for both handshakes, and open both data planes.
-async fn start_pair(
-    server: ConnectionDriver<DuplexStream>,
-    client: ConnectionDriver<DuplexStream>,
+async fn start_pair<S, C>(
+    server: ConnectionDriver<S>,
+    client: ConnectionDriver<C>,
     ends: &mut PairEnds,
-) -> (DriverTask, DriverTask) {
+) -> (DriverTask, DriverTask)
+where
+    S: DriverStream + Send + 'static,
+    C: DriverStream + Send + 'static,
+{
     let server_task = tokio::spawn(server.run());
     let client_task = tokio::spawn(client.run());
     activate_after_handshakes(

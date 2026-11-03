@@ -119,6 +119,108 @@ pub(super) const ZMQ_NORM_NUM_PARITY: c_int = 122;
 pub(super) const ZMQ_NORM_NUM_AUTOPARITY: c_int = 123;
 pub(super) const ZMQ_NORM_PUSH: c_int = 124;
 
+// Options omq accepts but does not implement, grouped by the fixed value
+// `zmq_getsockopt` reports. `zmq_setsockopt` ignores all of them.
+
+/// Always on in omq; read as 1.
+pub(super) const ONE_I32: &[c_int] = &[ZMQ_ROUTER_HANDOVER, ZMQ_BLOCKY, ZMQ_STREAM_NOTIFY];
+
+/// Unsupported integer options; read as 0.
+pub(super) const ZERO_I32: &[c_int] = &[
+    ZMQ_RATE,
+    ZMQ_RECOVERY_IVL,
+    ZMQ_MULTICAST_HOPS,
+    ZMQ_TOS,
+    ZMQ_IPC_FILTER_PID,
+    ZMQ_IPC_FILTER_UID,
+    ZMQ_IPC_FILTER_GID,
+    ZMQ_ROUTER_RAW,
+    ZMQ_GSSAPI_SERVER,
+    ZMQ_GSSAPI_PLAINTEXT,
+    ZMQ_XPUB_MANUAL,
+    ZMQ_INVERT_MATCHING,
+    ZMQ_XPUB_VERBOSER,
+    ZMQ_THREAD_SAFE,
+    ZMQ_VMCI_CONNECT_TIMEOUT,
+    ZMQ_GSSAPI_PRINCIPAL_NAMETYPE,
+    ZMQ_GSSAPI_SERVICE_PRINCIPAL_NAMETYPE,
+    ZMQ_LOOPBACK_FASTPATH,
+    ZMQ_MULTICAST_LOOP,
+    ZMQ_ROUTER_NOTIFY,
+    ZMQ_XPUB_MANUAL_LAST_VALUE,
+    ZMQ_IN_BATCH_SIZE,
+    ZMQ_OUT_BATCH_SIZE,
+    ZMQ_ONLY_FIRST_SUBSCRIBE,
+    ZMQ_PRIORITY,
+    ZMQ_BUSY_POLL,
+    ZMQ_XSUB_VERBOSE_UNSUBSCRIBE,
+    ZMQ_TOPICS_COUNT,
+    ZMQ_NORM_MODE,
+    ZMQ_NORM_UNICAST_NACK,
+    ZMQ_NORM_BUFFER_SIZE,
+    ZMQ_NORM_SEGMENT_SIZE,
+    ZMQ_NORM_BLOCK_SIZE,
+    ZMQ_NORM_NUM_PARITY,
+    ZMQ_NORM_NUM_AUTOPARITY,
+    ZMQ_NORM_PUSH,
+];
+
+/// Unsupported 64-bit options; read as 0.
+pub(super) const ZERO_I64: &[c_int] = &[
+    ZMQ_AFFINITY,
+    ZMQ_VMCI_BUFFER_SIZE,
+    ZMQ_VMCI_BUFFER_MIN_SIZE,
+    ZMQ_VMCI_BUFFER_MAX_SIZE,
+];
+
+/// Unsupported string options; read as an empty C string.
+pub(super) const EMPTY_STRING: &[c_int] = &[
+    ZMQ_TCP_ACCEPT_FILTER,
+    ZMQ_SOCKS_PROXY,
+    ZMQ_CONNECT_ROUTING_ID,
+    ZMQ_GSSAPI_PRINCIPAL,
+    ZMQ_GSSAPI_SERVICE_PRINCIPAL,
+    ZMQ_BINDTODEVICE,
+    ZMQ_METADATA,
+    ZMQ_SOCKS_USERNAME,
+    ZMQ_SOCKS_PASSWORD,
+];
+
+/// Unsupported binary options; read as zero bytes.
+pub(super) const EMPTY_BYTES: &[c_int] = &[
+    ZMQ_XPUB_WELCOME_MSG,
+    ZMQ_HELLO_MSG,
+    ZMQ_DISCONNECT_MSG,
+    ZMQ_HICCUP_MSG,
+];
+
+/// Readable state that cannot be set.
+pub(super) const READ_ONLY: &[c_int] = &[
+    ZMQ_RCVMORE,
+    ZMQ_FD,
+    ZMQ_EVENTS,
+    ZMQ_TYPE,
+    ZMQ_LAST_ENDPOINT,
+    ZMQ_MECHANISM,
+];
+
+/// Whether `zmq_setsockopt` accepts `option` as a no-op: every fixed-value
+/// option (the lists above plus `ZMQ_MULTICAST_MAXTPDU` and `ZMQ_USE_FD`)
+/// and every read-only one.
+pub(super) fn is_ignored_on_set(option: c_int) -> bool {
+    matches!(option, ZMQ_MULTICAST_MAXTPDU | ZMQ_USE_FD)
+        || [
+            ONE_I32,
+            ZERO_I32,
+            ZERO_I64,
+            EMPTY_STRING,
+            EMPTY_BYTES,
+            READ_ONLY,
+        ]
+        .iter()
+        .any(|codes| codes.contains(&option))
+}
+
 pub(super) const ZMQ_POLLIN: c_int = crate::consts::ZMQ_POLLIN;
 pub(super) const ZMQ_POLLOUT: c_int = crate::consts::ZMQ_POLLOUT;
 

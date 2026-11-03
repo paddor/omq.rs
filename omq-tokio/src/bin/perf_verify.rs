@@ -3,20 +3,16 @@
 //! Thresholds are read from `.perf_hw`, which is intentionally ignored.
 //! Without that file, this command runs a smaller smoke gate.
 
-use std::collections::HashMap;
-#[cfg(feature = "quic")]
-use std::process::Command;
-use std::sync::atomic::Ordering;
-use std::sync::{Arc, Barrier, LazyLock, mpsc};
-use std::thread;
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use omq_proto::flow::DrainBudget;
-use omq_tokio::{Context, ContextConfig, Endpoint, Message, Options, SocketType};
+use omq_tokio::{Context, ContextConfig, Options, SocketType, blocking};
 
 #[path = "perf_verify/affinity.rs"]
 mod affinity;
+#[path = "perf_verify/cases.rs"]
+mod cases;
 #[path = "perf_verify/contract.rs"]
 mod contract;
 #[path = "perf_verify/draft.rs"]
@@ -25,11 +21,17 @@ mod draft;
 mod measurement;
 #[path = "perf_verify/pubsub_process.rs"]
 mod pubsub_process;
+#[path = "perf_verify/thresholds.rs"]
+mod thresholds;
+#[path = "perf_verify/transport.rs"]
+mod transport;
 
 use affinity::{Affinity, Side};
-use contract::{Pattern, Shape};
-use measurement::{Counter, DrainResult, MEASURED_TAG, Received, Window, drain_ready};
+use cases::{Case, Workload, cases};
+use measurement::{payload, transfer_blocking_many};
 use pubsub_process::{pubsub_process_published_rate, run_pubsub_pub_child, run_pubsub_sub_child};
+use thresholds::{ThresholdConfig, ThresholdMode, read_thresholds, should_measure, verify};
+use transport::{Transport, tcp_zero};
 
 struct Settings {
     affinity: Affinity,
@@ -73,226 +75,6 @@ struct Sample {
     name: String,
     value: f64,
     unit: &'static str,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ThresholdMode {
-    Hardware,
-    Smoke,
-}
-
-#[derive(Debug)]
-struct ThresholdConfig {
-    mode: ThresholdMode,
-    values: HashMap<String, f64>,
-}
-
-fn payload(size: usize) -> Message {
-    tagged_payload(size, MEASURED_TAG)
-}
-
-fn tagged_payload(size: usize, tag: u8) -> Message {
-    let bytes = vec![tag; size];
-    if size <= omq_tokio::message::MAX_INLINE_MESSAGE {
-        Message::from_slice(&bytes)
-    } else {
-        Message::single(Bytes::from(bytes))
-    }
-}
-
-fn tcp_zero() -> Endpoint {
-    "tcp://127.0.0.1:0".parse().expect("valid TCP endpoint")
-}
-
-fn inproc_endpoint() -> Endpoint {
-    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    format!(
-        "inproc://perf-gate-{}",
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    )
-    .parse()
-    .expect("valid inproc endpoint")
-}
-
-#[cfg(unix)]
-fn local_endpoint(scheme: &str) -> Endpoint {
-    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let id = NEXT.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("omq-perf-{}-{id}.{scheme}", std::process::id()));
-    format!("{scheme}://{}", path.display())
-        .parse()
-        .expect("local endpoint")
-}
-
-#[derive(Clone, Copy, Debug)]
-enum Transport {
-    Tcp,
-    Inproc,
-    #[cfg(unix)]
-    Ipc,
-    #[cfg(target_os = "linux")]
-    Shm,
-    #[cfg(feature = "quic")]
-    Quic,
-    #[cfg(feature = "dart")]
-    Dart,
-}
-
-impl Transport {
-    fn prefix(self) -> &'static str {
-        match self {
-            Self::Tcp => "",
-            Self::Inproc => "inproc_",
-            #[cfg(unix)]
-            Self::Ipc => "ipc_",
-            #[cfg(target_os = "linux")]
-            Self::Shm => "shm_",
-            #[cfg(feature = "quic")]
-            Self::Quic => "quic_",
-            #[cfg(feature = "dart")]
-            Self::Dart => "dart_",
-        }
-    }
-
-    fn endpoint(self) -> Endpoint {
-        match self {
-            Self::Tcp => tcp_zero(),
-            Self::Inproc => inproc_endpoint(),
-            #[cfg(unix)]
-            Self::Ipc => local_endpoint("ipc"),
-            #[cfg(target_os = "linux")]
-            Self::Shm => local_endpoint("shm"),
-            #[cfg(feature = "quic")]
-            Self::Quic => "quic://127.0.0.1:0".parse().expect("QUIC endpoint"),
-            #[cfg(feature = "dart")]
-            Self::Dart => "dart://127.0.0.1:0".parse().expect("DART endpoint"),
-        }
-    }
-
-    fn options(self) -> Options {
-        match self {
-            #[cfg(feature = "quic")]
-            Self::Quic => {
-                let (cert, key) = &*QUIC_CREDENTIALS;
-                Options {
-                    quic: omq_tokio::options::QuicOptions {
-                        server_cert_pem: Some(cert.clone()),
-                        server_key_pem: Some(key.clone()),
-                        trust_pem: Some(cert.clone()),
-                        trust_system: false,
-                        ..Default::default()
-                    },
-                    recv_buffer_size: Some(4 * 1024 * 1024),
-                    send_buffer_size: Some(4 * 1024 * 1024),
-                    ..Options::default()
-                }
-            }
-            _ => Options::default(),
-        }
-    }
-}
-
-#[cfg(feature = "quic")]
-static QUIC_CREDENTIALS: LazyLock<(Vec<u8>, Vec<u8>)> = LazyLock::new(|| {
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system clock")
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("omq-perf-tls-{}-{nonce}", std::process::id()));
-    std::fs::create_dir(&dir).expect("create benchmark TLS directory");
-    let cert = dir.join("cert.pem");
-    let key = dir.join("key.pem");
-    let output = Command::new("openssl")
-        .args([
-            "req",
-            "-x509",
-            "-newkey",
-            "ec",
-            "-pkeyopt",
-            "ec_paramgen_curve:prime256v1",
-            "-nodes",
-            "-days",
-            "1",
-            "-subj",
-            "/CN=127.0.0.1",
-            "-addext",
-            "subjectAltName=IP:127.0.0.1",
-            "-addext",
-            "basicConstraints=critical,CA:FALSE",
-            "-out",
-        ])
-        .arg(&cert)
-        .arg("-keyout")
-        .arg(&key)
-        .output()
-        .expect("openssl is required for QUIC performance gates");
-    assert!(
-        output.status.success(),
-        "generate benchmark TLS certificate: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let credentials = (
-        std::fs::read(&cert).expect("read benchmark certificate"),
-        std::fs::read(&key).expect("read benchmark key"),
-    );
-    std::fs::remove_dir_all(dir).expect("remove benchmark TLS directory");
-    credentials
-});
-
-fn smoke_thresholds() -> HashMap<String, f64> {
-    let mut thresholds = HashMap::from([
-        ("reqrep_ct.p50_256b_us".to_string(), 1_000.0),
-        ("pushpull_1io.16b_msgs_s".to_string(), 1_000_000.0),
-        ("pubsub_1io.16b_msgs_s".to_string(), 500_000.0),
-        ("inproc_pushpull_1io.16b_msgs_s".to_string(), 1_000_000.0),
-    ]);
-    draft::smoke_thresholds(&mut thresholds);
-    thresholds
-}
-
-fn read_thresholds() -> ThresholdConfig {
-    let contents = match std::fs::read_to_string(".perf_hw") {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return ThresholdConfig {
-                mode: ThresholdMode::Smoke,
-                values: smoke_thresholds(),
-            };
-        }
-        Err(error) => panic!("cannot read .perf_hw: {error}"),
-    };
-    println!("threshold file: .perf_hw");
-    let mut section = String::new();
-    let mut thresholds = HashMap::new();
-    for line in contents.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some(name) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
-            section = name.trim().to_string();
-            continue;
-        }
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        if let Ok(value) = value.trim().parse() {
-            thresholds.insert(format!("{section}.{}", key.trim()), value);
-        }
-    }
-    ThresholdConfig {
-        mode: ThresholdMode::Hardware,
-        values: thresholds,
-    }
-}
-
-fn should_measure(name: &str, config: &ThresholdConfig) -> bool {
-    // Profile contracts compare within one run and need no thresholds.
-    config.values.contains_key(name)
-        || (config.mode == ThresholdMode::Hardware
-            && !name.starts_with("quic_")
-            && !name.starts_with("dart_"))
-        || name.starts_with("contract_")
 }
 
 async fn reqrep_latency() -> f64 {
@@ -339,164 +121,61 @@ async fn reqrep_latency() -> f64 {
     samples[samples.len() / 2]
 }
 
-fn send_blocking_batch_until(
-    sock: &omq_tokio::blocking::Socket,
-    message: &Message,
-    deadline: Instant,
-) -> bool {
-    send_blocking_batch_until_with(sock, || message.clone(), deadline)
-}
-
-fn send_blocking_batch_until_with(
-    sock: &omq_tokio::blocking::Socket,
-    mut message: impl FnMut() -> Message,
-    deadline: Instant,
-) -> bool {
-    if Instant::now() >= deadline {
-        return false;
-    }
-    let mut budget = DrainBudget::WORKER;
-    loop {
-        let mut msg = message();
-        let bytes = msg.byte_len();
-        loop {
-            match sock.try_send(msg) {
-                Ok(()) => break,
-                Err(omq_tokio::TrySendError::Full(returned)) => {
-                    if Instant::now() >= deadline {
-                        return false;
-                    }
-                    msg = returned;
-                    thread::yield_now();
-                }
-                Err(error) => panic!("perf send failed: {error}"),
-            }
-        }
-        if !budget.account(bytes) {
-            return true;
-        }
-    }
-}
-
-fn count_blocking(sock: &omq_tokio::blocking::Socket, window: Window) -> Received {
-    let mut counter = Counter::new(window);
-    loop {
-        let mut budget = DrainBudget::WORKER;
-        if drain_ready(
-            || sock.try_recv(),
-            &mut counter,
-            window,
-            &mut budget,
-            Instant::now,
-        ) == DrainResult::Deadline
-        {
-            break;
-        }
-        thread::yield_now();
-    }
-    counter.finish(Instant::now())
-}
-
-fn transfer_blocking(
-    sender: &omq_tokio::blocking::Socket,
-    receiver: omq_tokio::blocking::Socket,
+/// Pins this blocking thread to CPU 0, connects the sockets `connect` makes
+/// on fresh receiver and sender contexts (one shared context when
+/// `shared`), measures the transfer rate, then terminates both contexts.
+/// `connect` returns the sender and the receivers.
+async fn measure_transfer(
+    io_threads: usize,
+    shared: bool,
     size: usize,
+    task: &'static str,
+    connect: impl FnOnce(&Context, &Context) -> (blocking::Socket, Vec<blocking::Socket>)
+    + Send
+    + 'static,
 ) -> f64 {
-    transfer_blocking_many(sender, vec![receiver], size)
-}
-
-fn count_blocking_many(sockets: &[omq_tokio::blocking::Socket], window: Window) -> Received {
-    assert!(!sockets.is_empty(), "at least one receiver is required");
-    let mut counters: Vec<_> = sockets.iter().map(|_| Counter::new(window)).collect();
-    'receive: loop {
-        for (socket, counter) in sockets.iter().zip(&mut counters) {
-            let mut budget = DrainBudget::new(64, 64 * 1024);
-            if drain_ready(
-                || socket.try_recv(),
-                counter,
-                window,
-                &mut budget,
-                Instant::now,
-            ) == DrainResult::Deadline
-            {
-                break 'receive;
-            }
-        }
-        thread::yield_now();
-    }
-    let now = Instant::now();
-    counters
-        .into_iter()
-        .map(|counter| counter.finish(now))
-        .fold(
-            Received {
-                count: 0,
-                elapsed: now.duration_since(window.start),
-            },
-            Received::combine,
-        )
-}
-
-fn transfer_blocking_many(
-    sender: &omq_tokio::blocking::Socket,
-    receivers: Vec<omq_tokio::blocking::Socket>,
-    size: usize,
-) -> f64 {
-    let (window_tx, window_rx) = mpsc::channel();
-    let ready = Arc::new(Barrier::new(2));
-    let receiver_ready = ready.clone();
-    let handle = thread::spawn(move || {
-        SETTINGS.affinity.pin(5);
-        receiver_ready.wait();
-        let window = window_rx.recv().expect("receive benchmark window");
-        if receivers.len() == 1 {
-            count_blocking(&receivers[0], window)
-        } else {
-            count_blocking_many(&receivers, window)
-        }
-    });
-    ready.wait();
-    let window = Window::new(Instant::now(), SETTINGS.warmup, SETTINGS.measure);
-    window_tx.send(window).expect("send benchmark window");
-    // Warm the actual data path while the receiver drains. Tags exclude any
-    // warmup backlog still in flight when measurement starts.
-    for (message, deadline) in [
-        (tagged_payload(size, 0), window.start),
-        (payload(size), window.end),
-    ] {
-        while send_blocking_batch_until(sender, &message, deadline) {}
-    }
-    handle.join().expect("receiver thread").rate()
-}
-
-async fn pipeline(size: usize, io_threads: usize, transport: Transport) -> f64 {
     tokio::task::spawn_blocking(move || {
         SETTINGS.affinity.pin(0);
         let receiver_ctx = context(io_threads, Side::Receiver);
-        let sender_ctx = if matches!(transport, Transport::Inproc) {
+        let sender_ctx = if shared {
             receiver_ctx.clone()
         } else {
             context(io_threads, Side::Sender)
         };
-        let (sender_type, receiver_type) = match transport {
-            #[cfg(feature = "dart")]
-            Transport::Dart => (SocketType::Scatter, SocketType::Gather),
-            _ => (SocketType::Push, SocketType::Pull),
-        };
-        let receiver = receiver_ctx.blocking_socket(receiver_type, transport.options());
-        let sender = sender_ctx.blocking_socket(sender_type, transport.options());
-        let endpoint = receiver.bind(transport.endpoint()).expect("pipeline bind");
-        sender.connect(endpoint).expect("pipeline connect");
-        receiver
-            .wait_connected(1, Duration::from_secs(1))
-            .expect("pipeline connect timeout");
-        let rate = transfer_blocking(&sender, receiver, size);
+        let (sender, receivers) = connect(&sender_ctx, &receiver_ctx);
+        let rate = transfer_blocking_many(&sender, receivers, size);
         sender_ctx.term();
         receiver_ctx.term();
         rate
     })
     .await
-    .expect("pipeline task")
+    .expect(task)
+}
+
+async fn pipeline(size: usize, io_threads: usize, transport: Transport) -> f64 {
+    let shared = matches!(transport, Transport::Inproc);
+    measure_transfer(
+        io_threads,
+        shared,
+        size,
+        "pipeline task",
+        move |sender_ctx, receiver_ctx| {
+            let (sender_type, receiver_type) = match transport {
+                #[cfg(feature = "dart")]
+                Transport::Dart => (SocketType::Scatter, SocketType::Gather),
+                _ => (SocketType::Push, SocketType::Pull),
+            };
+            let receiver = receiver_ctx.blocking_socket(receiver_type, transport.options());
+            let sender = sender_ctx.blocking_socket(sender_type, transport.options());
+            let endpoint = receiver.bind(transport.endpoint()).expect("pipeline bind");
+            sender.connect(endpoint).expect("pipeline connect");
+            receiver
+                .wait_connected(1, Duration::from_secs(1))
+                .expect("pipeline connect timeout");
+            (sender, vec![receiver])
+        },
+    )
+    .await
 }
 
 async fn fanin(
@@ -505,50 +184,64 @@ async fn fanin(
     receiver_type: SocketType,
     sender_type: SocketType,
 ) -> f64 {
-    tokio::task::spawn_blocking(move || {
-        SETTINGS.affinity.pin(0);
-        let receiver_ctx = context(io_threads, Side::Receiver);
-        let sender_ctx = context(io_threads, Side::Sender);
-        let receiver = receiver_ctx.blocking_socket(receiver_type, Options::default());
-        let sender = sender_ctx.blocking_socket(
-            sender_type,
-            Options::default().identity(Bytes::from_static(b"perf-client")),
-        );
-        let endpoint = receiver.bind(tcp_zero()).expect("receiver bind");
-        sender.connect(endpoint).expect("sender connect");
-        receiver
-            .wait_connected(1, Duration::from_secs(1))
-            .expect("receiver connect timeout");
-        let rate = transfer_blocking(&sender, receiver, size);
-        sender_ctx.term();
-        receiver_ctx.term();
-        rate
-    })
+    measure_transfer(
+        io_threads,
+        false,
+        size,
+        "fan-in task",
+        move |sender_ctx, receiver_ctx| {
+            let receiver = receiver_ctx.blocking_socket(receiver_type, Options::default());
+            let sender = sender_ctx.blocking_socket(
+                sender_type,
+                Options::default().identity(Bytes::from_static(b"perf-client")),
+            );
+            let endpoint = receiver.bind(tcp_zero()).expect("receiver bind");
+            sender.connect(endpoint).expect("sender connect");
+            receiver
+                .wait_connected(1, Duration::from_secs(1))
+                .expect("receiver connect timeout");
+            (sender, vec![receiver])
+        },
+    )
     .await
-    .expect("fan-in task")
+}
+
+/// Fan-in rates of the (receiver, sender) socket pairs `a` and `b`. Even
+/// rounds measure `b` first, so neither pair always runs first.
+async fn fanin_pair(
+    size: usize,
+    round: u32,
+    a: (SocketType, SocketType),
+    b: (SocketType, SocketType),
+) -> (f64, f64) {
+    if round.is_multiple_of(2) {
+        let b_rate = fanin(size, 1, b.0, b.1).await;
+        let a_rate = fanin(size, 1, a.0, a.1).await;
+        (a_rate, b_rate)
+    } else {
+        let a_rate = fanin(size, 1, a.0, a.1).await;
+        let b_rate = fanin(size, 1, b.0, b.1).await;
+        (a_rate, b_rate)
+    }
 }
 
 async fn compare_fanin() {
     for size in [16, 128, 1024] {
         for round in 1..=3 {
-            let (pull, gather) = if round % 2 == 0 {
-                let gather = fanin(size, 1, SocketType::Gather, SocketType::Scatter).await;
-                let pull = fanin(size, 1, SocketType::Pull, SocketType::Push).await;
-                (pull, gather)
-            } else {
-                let pull = fanin(size, 1, SocketType::Pull, SocketType::Push).await;
-                let gather = fanin(size, 1, SocketType::Gather, SocketType::Scatter).await;
-                (pull, gather)
-            };
-            let (router, server) = if round % 2 == 0 {
-                let server = fanin(size, 1, SocketType::Server, SocketType::Client).await;
-                let router = fanin(size, 1, SocketType::Router, SocketType::Dealer).await;
-                (router, server)
-            } else {
-                let router = fanin(size, 1, SocketType::Router, SocketType::Dealer).await;
-                let server = fanin(size, 1, SocketType::Server, SocketType::Client).await;
-                (router, server)
-            };
+            let (pull, gather) = fanin_pair(
+                size,
+                round,
+                (SocketType::Pull, SocketType::Push),
+                (SocketType::Gather, SocketType::Scatter),
+            )
+            .await;
+            let (router, server) = fanin_pair(
+                size,
+                round,
+                (SocketType::Router, SocketType::Dealer),
+                (SocketType::Server, SocketType::Client),
+            )
+            .await;
             println!(
                 "{size} B round {round}: PULL {pull:.0}, GATHER {gather:.0}, ROUTER {router:.0}, SERVER {server:.0} msg/s; GATHER/PULL {:.1}%, SERVER/ROUTER {:.1}%",
                 gather / pull * 100.0,
@@ -559,61 +252,28 @@ async fn compare_fanin() {
 }
 
 async fn pubsub(size: usize, io_threads: usize, peers: usize, transport: Transport) -> f64 {
-    tokio::task::spawn_blocking(move || {
-        SETTINGS.affinity.pin(0);
-        let pub_ctx = context(io_threads, Side::Sender);
-        let sub_ctx = context(io_threads, Side::Receiver);
-        let publisher = pub_ctx.blocking_socket(SocketType::Pub, transport.options());
-        let endpoint = publisher.bind(transport.endpoint()).expect("PUB bind");
-        let mut receivers = Vec::with_capacity(peers);
-        for _ in 0..peers {
-            let subscriber = sub_ctx.blocking_socket(SocketType::Sub, transport.options());
-            subscriber.connect(endpoint.clone()).expect("SUB connect");
-            subscriber.subscribe(Bytes::new()).expect("SUB subscribe");
-            receivers.push(subscriber);
-        }
-        publisher
-            .wait_subscribed(peers as u64, Duration::from_secs(5))
-            .expect("SUB subscribe timeout");
-        let rate = transfer_blocking_many(&publisher, receivers, size);
-        pub_ctx.term();
-        sub_ctx.term();
-        rate
-    })
+    measure_transfer(
+        io_threads,
+        false,
+        size,
+        "PUB/SUB task",
+        move |pub_ctx, sub_ctx| {
+            let publisher = pub_ctx.blocking_socket(SocketType::Pub, transport.options());
+            let endpoint = publisher.bind(transport.endpoint()).expect("PUB bind");
+            let mut receivers = Vec::with_capacity(peers);
+            for _ in 0..peers {
+                let subscriber = sub_ctx.blocking_socket(SocketType::Sub, transport.options());
+                subscriber.connect(endpoint.clone()).expect("SUB connect");
+                subscriber.subscribe(Bytes::new()).expect("SUB subscribe");
+                receivers.push(subscriber);
+            }
+            publisher
+                .wait_subscribed(peers as u64, Duration::from_secs(5))
+                .expect("SUB subscribe timeout");
+            (publisher, receivers)
+        },
+    )
     .await
-    .expect("PUB/SUB task")
-}
-
-fn verify(sample: &Sample, thresholds: &HashMap<String, f64>) -> bool {
-    let key = &sample.name;
-    println!("{:<24} {:>12.2} {}", sample.name, sample.value, sample.unit);
-    let contract = (sample.unit == "ratio").then_some(contract::MIN_RATIO);
-    match thresholds.get(key).or(contract.as_ref()) {
-        Some(limit) if sample.unit == "us" && sample.value > *limit => {
-            eprintln!(
-                "FAIL {key}: {:.2} above configured {:.2} {}",
-                sample.value, limit, sample.unit
-            );
-            false
-        }
-        Some(limit) if sample.unit == "us" => {
-            println!("  threshold (max): {:.2} {}", limit, sample.unit);
-            true
-        }
-        Some(limit) if sample.value < *limit => {
-            eprintln!(
-                "FAIL {key}: {:.2} below configured {:.2} {}",
-                sample.value, limit, sample.unit
-            );
-            false
-        }
-        Some(limit) => {
-            let direction = if sample.unit == "us" { "max" } else { "min" };
-            println!("  threshold ({direction}): {:.2} {}", limit, sample.unit);
-            true
-        }
-        None => true,
-    }
 }
 
 async fn run_mode(args: &[String]) -> bool {
@@ -653,165 +313,6 @@ async fn run_mode(args: &[String]) -> bool {
             true
         }
         _ => false,
-    }
-}
-
-#[derive(Debug)]
-enum Workload {
-    Draft(draft::Workload),
-    Reqrep,
-    Pipeline {
-        size: usize,
-        io_threads: usize,
-        transport: Transport,
-    },
-    Pubsub {
-        size: usize,
-        io_threads: usize,
-        peers: usize,
-        transport: Transport,
-    },
-    PubsubProcesses,
-    Contract {
-        pattern: Pattern,
-        shape: Shape,
-        size: usize,
-    },
-}
-
-#[derive(Debug)]
-struct Case {
-    name: String,
-    workload: Workload,
-}
-
-fn cases() -> Vec<Case> {
-    let mut cases = vec![Case {
-        name: "reqrep_ct.p50_256b_us".to_owned(),
-        workload: Workload::Reqrep,
-    }];
-    let transports = [
-        Transport::Tcp,
-        #[cfg(feature = "quic")]
-        Transport::Quic,
-        #[cfg(feature = "dart")]
-        Transport::Dart,
-    ];
-    for transport in transports {
-        for io_threads in [1, 2] {
-            add_pipeline_cases(&mut cases, transport, io_threads);
-            // DART has no PUB/SUB gate.
-            #[cfg(feature = "dart")]
-            if matches!(transport, Transport::Dart) {
-                continue;
-            }
-            add_pubsub_cases(&mut cases, transport, io_threads);
-        }
-    }
-
-    cases.push(Case {
-        name: "pubsub_2io.256b_32p_msgs_s".to_owned(),
-        workload: Workload::PubsubProcesses,
-    });
-    cases.push(Case {
-        name: "inproc_pushpull_1io.16b_msgs_s".to_owned(),
-        workload: Workload::Pipeline {
-            size: 16,
-            io_threads: 1,
-            transport: Transport::Inproc,
-        },
-    });
-    contract_cases(&mut cases);
-    draft::cases(&mut cases);
-    cases
-}
-
-/// PUSH/PULL (SCATTER/GATHER on DART) throughput. Sizes above 1 KiB are
-/// gated on TCP only.
-fn add_pipeline_cases(cases: &mut Vec<Case>, transport: Transport, io_threads: usize) {
-    let pipeline = match transport {
-        #[cfg(feature = "dart")]
-        Transport::Dart => "scattergather",
-        _ => "pushpull",
-    };
-    for (size, suffix) in [(16, "16b"), (256, "256b"), (1024, "1k"), (16 * 1024, "16k")] {
-        if size > 1024 && !matches!(transport, Transport::Tcp) {
-            continue;
-        }
-        cases.push(Case {
-            name: format!(
-                "{}{pipeline}_{io_threads}io.{suffix}_msgs_s",
-                transport.prefix()
-            ),
-            workload: Workload::Pipeline {
-                size,
-                io_threads,
-                transport,
-            },
-        });
-    }
-}
-
-/// PUB/SUB fan-out to four subscribers. Sizes above 1 KiB are gated on TCP
-/// only.
-fn add_pubsub_cases(cases: &mut Vec<Case>, transport: Transport, io_threads: usize) {
-    for (size, suffix) in [(16, "16b"), (256, "256b"), (1024, "1k"), (4096, "4k")] {
-        if size > 1024 && !matches!(transport, Transport::Tcp) {
-            continue;
-        }
-        cases.push(Case {
-            name: format!(
-                "{}pubsub_{io_threads}io.{suffix}_msgs_s",
-                transport.prefix()
-            ),
-            workload: Workload::Pubsub {
-                size,
-                io_threads,
-                peers: 4,
-                transport,
-            },
-        });
-    }
-}
-
-/// Round trips across socket types and peer counts, where a latency
-/// profile that copies or queues too much shows up as a loss to the
-/// throughput profile, and the reverse for one-way streams.
-fn contract_cases(cases: &mut Vec<Case>) {
-    // At 4 MiB a payload copy on the caller costs more than the profile gains.
-    let sizes = [(256, "256b"), (4 * 1024 * 1024, "4m")];
-    let round_trips = [
-        (Pattern::ReqRep, 1),
-        (Pattern::ReqRep, 8),
-        (Pattern::DealerRouter, 1),
-        (Pattern::DealerRouter, 8),
-        (Pattern::Peer, 1),
-        (Pattern::Peer, 8),
-        (Pattern::Pair, 1),
-    ];
-    for (pattern, peers) in round_trips {
-        for (size, suffix) in sizes {
-            cases.push(Case {
-                name: format!("contract_rr.{}_{peers}p_{suffix}", pattern.label()),
-                workload: Workload::Contract {
-                    pattern,
-                    shape: Shape::RoundTrip { peers },
-                    size,
-                },
-            });
-        }
-    }
-    for pattern in [Pattern::PushPull, Pattern::DealerRouter, Pattern::Pair] {
-        for (size, suffix) in [(64, "64b"), (16 * 1024, "16k")] {
-            cases.push(Case {
-                name: format!("contract_stream.{}_{suffix}", pattern.label()),
-                workload: Workload::Contract {
-                    pattern,
-                    shape: Shape::Stream,
-                    size,
-                },
-            });
-        }
     }
 }
 

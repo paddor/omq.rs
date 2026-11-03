@@ -55,7 +55,7 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "four bounded yields on the application thread before parking",
     ),
     (
-        "omq-libzmq/src/socket.rs",
+        "omq-libzmq/src/socket/materialize.rs",
         "std::hint::spin_loop();",
         "application thread waits for a concurrent materialization to publish",
     ),

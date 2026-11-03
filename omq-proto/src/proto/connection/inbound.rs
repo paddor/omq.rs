@@ -7,7 +7,7 @@ use crate::error::{Error, Result};
 use crate::flow::DrainBudget;
 use crate::message::{FrameFlags, Message, Payload};
 
-use super::super::command::{self, Command, PeerProperties};
+use super::super::command::{self, Command};
 use super::super::greeting::{self, MechanismName, effective_minor};
 use super::super::mechanism::{AuthenticationRequest, AuthenticationResult, MechanismStep};
 use super::super::{frame, is_compatible};
@@ -153,7 +153,7 @@ impl Connection {
     }
 
     fn try_advance_greeting(&mut self) -> Result<bool> {
-        let Some((g, raw)) = greeting::try_decode(&mut self.in_buf)? else {
+        let Some(g) = greeting::try_decode(&mut self.in_buf)? else {
             return Ok(false);
         };
         let our_mech = self.config.mechanism_name();
@@ -176,25 +176,7 @@ impl Connection {
         } else {
             effective_minor(g.minor)
         };
-        self.peer_greeting = raw;
-        self.state = State::MechanismHandshake;
-
-        let mut our_props = PeerProperties::default().with_socket_type(self.config.socket_type);
-        if !self.config.identity.is_empty() {
-            our_props = our_props.with_identity(self.config.identity.clone());
-        }
-        let mut cmds = Vec::new();
-        // CURVE/NULL ignore the greeting bytes after capture.
-        // Pass both directions so the mechanism can compute the
-        // transcript correctly regardless of role.
-        let result = self.mechanism.start(
-            &mut cmds,
-            our_props,
-            &self.our_greeting,
-            &self.peer_greeting,
-        );
-        self.write_outbound_commands(&cmds)?;
-        result?;
+        self.start_mechanism()?;
         Ok(true)
     }
 
@@ -282,21 +264,8 @@ impl Connection {
         {
             self.in_buf.advance(hdr.header_len);
             if hdr.payload_len <= crate::message::MAX_INLINE_MESSAGE {
-                self.messages.push_back(Message {
-                    inner: crate::message::MessageInner::Inline {
-                        len: hdr.payload_len as u8,
-                        data: [0; crate::message::MAX_INLINE_MESSAGE],
-                    },
-                });
-                let crate::message::MessageInner::Inline { data, .. } = &mut self
-                    .messages
-                    .back_mut()
-                    .expect("inserted inline message")
-                    .inner
-                else {
-                    unreachable!("inserted inline message");
-                };
-                self.in_buf.read_into(hdr.payload_len, data);
+                let body = Message::push_inline(&mut self.messages, hdr.payload_len);
+                self.in_buf.read_into(hdr.payload_len, body);
             } else {
                 let payload = self
                     .in_buf
@@ -455,12 +424,11 @@ impl Connection {
         } else if self.assembly.parts.is_empty() {
             self.assembly.size = 0;
             let s = payload.as_slice();
-            let msg = if s.len() <= crate::message::MAX_INLINE_MESSAGE {
-                Message::from_inline(s)
+            if s.len() <= crate::message::MAX_INLINE_MESSAGE {
+                Message::push_inline(&mut self.messages, s.len()).copy_from_slice(s);
             } else {
-                Message::from_payload(payload)
-            };
-            self.messages.push_back(msg);
+                self.messages.push_back(Message::from_payload(payload));
+            }
         } else {
             self.assembly.parts.push(payload);
             let parts = self.assembly.parts.take();

@@ -14,6 +14,8 @@
 //! A `Frame` is one ZMTP wire unit: flags plus a `Payload`. A `Message` is a
 //! logical sequence of parts where each part maps to one data Frame on the wire.
 
+use std::collections::VecDeque;
+
 use bytes::Bytes;
 
 mod access;
@@ -149,6 +151,36 @@ pub struct Message {
 }
 
 impl Message {
+    /// Inline message with no bytes. [`Self::push_inline`] fills it in place.
+    const EMPTY_INLINE: Self = Self {
+        inner: MessageInner::Inline {
+            len: 0,
+            data: [0; MAX_INLINE_MESSAGE],
+        },
+    };
+
+    /// Append an inline message of `len` bytes to `queue` and return its body
+    /// to fill. Decoders fill the queue slot in place: a message built on the
+    /// stack is written in pieces and reloaded whole, which defeats store
+    /// forwarding on every small message.
+    #[inline]
+    pub(crate) fn push_inline(queue: &mut VecDeque<Self>, len: usize) -> &mut [u8] {
+        debug_assert!(len <= MAX_INLINE_MESSAGE);
+        queue.push_back(Self::EMPTY_INLINE);
+        let Some(Self {
+            inner:
+                MessageInner::Inline {
+                    len: slot_len,
+                    data,
+                },
+        }) = queue.back_mut()
+        else {
+            unreachable!("inline message was just pushed");
+        };
+        *slot_len = len as u8;
+        &mut data[..len]
+    }
+
     /// Create an empty message.
     #[inline]
     pub fn new() -> Self {

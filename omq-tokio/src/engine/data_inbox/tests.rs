@@ -1,11 +1,7 @@
 use super::*;
+use crate::test_util::poll_once;
 use omq_proto::Message;
-use std::task::Context;
 use std::time::Duration;
-
-fn poll_once<F: std::future::Future>(future: std::pin::Pin<&mut F>) -> Poll<F::Output> {
-    future.poll(&mut Context::from_waker(futures::task::noop_waker_ref()))
-}
 
 fn message(n: u8) -> PeerDriverData {
     PeerDriverData::SendMessage(Message::from_slice(&[n]))
@@ -291,7 +287,7 @@ async fn final_ack_batch_wakes_a_closed_receiver_and_close_progress() {
     let mut done = Box::pin(receiver.recv());
     assert!(
         done.as_mut()
-            .poll(&mut Context::from_waker(&waker))
+            .poll(&mut std::task::Context::from_waker(&waker))
             .is_pending()
     );
     let seen = progress.generation();
@@ -493,7 +489,7 @@ fn coordinated_teardown_releases_queued_buffers_with_idle_clones_alive() {
 fn immediate_tcp_write_unlocks_reserved_producer_before_buffer_release() {
     use crate::engine::transmit_slot::{PeerTransmitSlot, SlotConfig};
     use crate::routing::peer_outbound::PeerOutbound;
-    use crate::socket::dispatch::DirectTcpWriter;
+    use crate::socket::direct_writer::DirectTcpWriter;
     use std::net::{TcpListener, TcpStream};
 
     #[derive(Debug)]
@@ -523,7 +519,7 @@ fn immediate_tcp_write_unlocks_reserved_producer_before_buffer_release() {
             ..SlotConfig::default()
         },
     );
-    slot.handshake_done.store(true, Ordering::Release);
+    slot.mark_handshake_done();
     let writer = Arc::new(DirectTcpWriter::new(tcp));
     writer.publish_idle(|| true);
     let (root, _receiver) = channel(4);

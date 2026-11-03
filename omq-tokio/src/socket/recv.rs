@@ -3,10 +3,10 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock, Weak};
+use std::sync::{Arc, RwLock, Weak};
 use std::time::Duration;
 
-use omq_proto::error::{Error, Result, TrySendError};
+use omq_proto::error::{Error, Result};
 use omq_proto::flow::DrainBudget;
 use omq_proto::message::Message;
 
@@ -15,8 +15,10 @@ use crate::engine::signal::{DataSignal, StateSignal};
 
 mod blocking;
 mod drain;
+mod pipe;
 
 use drain::{DrainLimit, DrainResult, DrainState, RingDrain, drain_peer_source};
+pub(crate) use pipe::{ConflateRecvSlot, RecvPipeEnds, SharedRecvPipe, recv_pipe};
 
 /// Shared recv data signal. All inproc producers mark this.
 pub(crate) type SpscRecvSignal = Arc<DataSignal>;
@@ -77,191 +79,6 @@ impl std::fmt::Debug for TcpYringConsumer {
 
 pub(crate) type TcpConsumers = Arc<RwLock<Vec<Arc<TcpYringConsumer>>>>;
 
-/// Receive-side conflate storage. Producers overwrite the single slot;
-/// the socket recv path observes only the latest unread message.
-pub(crate) struct ConflateRecvSlot {
-    slot: Mutex<Option<Message>>,
-    notify: Arc<DataSignal>,
-    closed: AtomicBool,
-    blocking_waker: Arc<BlockingRecvWaker>,
-}
-
-impl std::fmt::Debug for ConflateRecvSlot {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ConflateRecvSlot")
-            .field("closed", &self.closed.load(Ordering::Relaxed))
-            .finish_non_exhaustive()
-    }
-}
-
-impl ConflateRecvSlot {
-    pub(crate) fn new(
-        notify: Arc<DataSignal>,
-        blocking_waker: Arc<BlockingRecvWaker>,
-    ) -> Arc<Self> {
-        Arc::new(Self {
-            slot: Mutex::new(None),
-            notify,
-            closed: AtomicBool::new(false),
-            blocking_waker,
-        })
-    }
-
-    pub(crate) fn send_latest(&self, msg: Message) -> bool {
-        if self.closed.load(Ordering::Acquire) {
-            return false;
-        }
-        *self.slot.lock().unwrap() = Some(msg);
-        self.notify.mark();
-        self.blocking_waker.wake();
-        true
-    }
-
-    fn take(&self) -> Option<Message> {
-        self.slot.lock().unwrap().take()
-    }
-
-    fn is_empty(&self) -> bool {
-        self.slot.lock().unwrap().is_none()
-    }
-
-    fn close(&self) {
-        self.closed.store(true, Ordering::Release);
-        self.slot.lock().unwrap().take();
-        self.notify.wake_all();
-        self.blocking_waker.wake();
-    }
-}
-
-// ---------------------------------------------------------------------------
-// SharedRecvPipe: MPSC yring-based recv channel
-// ---------------------------------------------------------------------------
-
-/// Shared recv pipe. Replaces `async_channel` for the socket recv path.
-///
-/// Producers (actor, connection drivers) hold `Arc<SharedRecvPipe>` and
-/// call [`send`](Self::send). The single consumer
-/// ([`SpscAwareRecv`]) owns the `yring::Consumer` and drains it.
-///
-/// Zero heap allocations on both sides. The yring is pre-allocated at
-/// construction. Data and space wakeups go through stateful signals.
-pub(crate) struct SharedRecvPipe {
-    producer: Mutex<yring::Producer<Message>>,
-    notify: Arc<DataSignal>,
-    space: Arc<StateSignal>,
-    closed: AtomicBool,
-    blocking_waker: Arc<BlockingRecvWaker>,
-}
-
-impl std::fmt::Debug for SharedRecvPipe {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SharedRecvPipe")
-            .field("closed", &self.closed.load(Ordering::Relaxed))
-            .finish_non_exhaustive()
-    }
-}
-
-impl SharedRecvPipe {
-    pub(crate) fn is_closed(&self) -> bool {
-        self.closed.load(Ordering::Acquire)
-    }
-
-    /// Try one prepared delivery without parking the socket actor.
-    pub(crate) fn try_send(&self, msg: Message) -> core::result::Result<(), TrySendError> {
-        let mut producer = self.producer.lock().unwrap();
-        if self.is_closed() || producer.is_consumer_dropped() {
-            return Err(TrySendError::Closed);
-        }
-        producer.push(msg).map_err(TrySendError::Full)?;
-        producer.flush();
-        drop(producer);
-        self.notify.mark();
-        self.blocking_waker.wake();
-        Ok(())
-    }
-
-    /// Signal notified when the consumer releases slots or the pipe closes.
-    pub(crate) fn space_signal(&self) -> Arc<StateSignal> {
-        self.space.clone()
-    }
-
-    /// Whether a push can make progress now. A closed pipe reports `true`
-    /// so a waiting producer retries and observes the closure.
-    pub(crate) fn has_space(&self) -> bool {
-        let mut producer = self.producer.lock().unwrap();
-        self.is_closed() || producer.is_consumer_dropped() || !producer.is_full()
-    }
-
-    pub(crate) async fn space_ready(&self) {
-        self.space
-            .wait_until(|| {
-                let mut producer = self.producer.lock().unwrap();
-                self.is_closed() || producer.is_consumer_dropped() || !producer.is_full()
-            })
-            .await;
-    }
-
-    /// Blocking send. Waits for space if the ring is full.
-    pub(crate) async fn send(&self, msg: Message) -> Result<()> {
-        let mut item = msg;
-        loop {
-            let seen = self.space.generation();
-            let space_changed = self.space.changed_after(seen);
-            tokio::pin!(space_changed);
-
-            {
-                let mut prod = self.producer.lock().unwrap();
-                if self.closed.load(Ordering::Acquire) || prod.is_consumer_dropped() {
-                    return Err(Error::Closed);
-                }
-                match prod.push(item) {
-                    Ok(()) => {
-                        prod.flush();
-                        drop(prod);
-                        self.notify.mark();
-                        self.blocking_waker.wake();
-                        return Ok(());
-                    }
-                    Err(returned) => {
-                        item = returned;
-                    }
-                }
-            }
-            space_changed.await;
-        }
-    }
-
-    /// Close the pipe. New sends return `Error::Closed`. Existing
-    /// messages in the ring can still be drained by the consumer.
-    pub(crate) fn close(&self) {
-        self.closed.store(true, Ordering::Release);
-        if let Ok(mut prod) = self.producer.lock() {
-            prod.close();
-        }
-        self.notify.wake_all();
-        self.space.notify_changed();
-        self.blocking_waker.wake();
-    }
-}
-
-impl Drop for SharedRecvPipe {
-    fn drop(&mut self) {
-        if !*self.closed.get_mut() {
-            self.producer.get_mut().unwrap().close();
-        }
-        self.notify.wake_all();
-        self.space.notify_changed();
-        self.blocking_waker.wake();
-    }
-}
-
-/// Receiver-side ends of a [`recv_pipe`].
-pub(crate) struct RecvPipeEnds {
-    pub(crate) consumer: yring::Consumer<Message>,
-    pub(crate) notify: Arc<DataSignal>,
-    pub(crate) space: Arc<StateSignal>,
-}
-
 /// Receive-path settings fixed when the socket is built.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct RecvTuning {
@@ -269,34 +86,6 @@ pub(crate) struct RecvTuning {
     pub(crate) latency_profile: bool,
     pub(crate) batching: bool,
     pub(crate) spin: Duration,
-}
-
-/// Create a recv pipe pair.
-///
-/// Returns `(producer_pipe, consumer, data_notify, space_notify)`.
-/// The `data_notify` is fired by producers on push; the consumer
-/// awaits it. `space_notify` is fired by the consumer on release;
-/// blocked producers await it.
-pub(crate) fn recv_pipe(
-    capacity: usize,
-    blocking_waker: Arc<BlockingRecvWaker>,
-) -> (
-    Arc<SharedRecvPipe>,
-    yring::Consumer<Message>,
-    Arc<DataSignal>,
-    Arc<StateSignal>,
-) {
-    let (prod, cons) = yring::spsc(capacity);
-    let notify = Arc::new(DataSignal::new());
-    let space = Arc::new(StateSignal::new());
-    let pipe = Arc::new(SharedRecvPipe {
-        producer: Mutex::new(prod),
-        notify: notify.clone(),
-        space: space.clone(),
-        closed: AtomicBool::new(false),
-        blocking_waker,
-    });
-    (pipe, cons, notify, space)
 }
 
 // ---------------------------------------------------------------------------
@@ -308,11 +97,19 @@ pub(crate) struct SpscHandles {
     pub receive_handles: Weak<()>,
     pub fanin: Option<Arc<super::fanin::Fanin>>,
     pub peer_recv: Option<Arc<ReceiveCell<super::peer_recv::PeerReceiver>>>,
+    /// Generation counter. Bumped by the actor on any consumer add/remove
+    /// (inproc or TCP).
     pub consumer_generation: SpscConsumerGeneration,
+    /// Shared recv data signal. All drivers/senders mark this.
     pub recv_signal: SpscRecvSignal,
+    /// Notified when consumers Vec changes (new peer added).
     pub activated: SpscActivated,
+    /// Per-peer yring consumers: byte-stream peers and inproc
+    /// connections. Actor appends.
     pub tcp_consumers: TcpConsumers,
+    /// Waker for blocking `recv()` callers.
     pub blocking_recv_waker: Arc<BlockingRecvWaker>,
+    /// Optional receive-side conflate slot.
     pub conflate_slot: Option<Arc<ConflateRecvSlot>>,
 }
 
@@ -382,35 +179,19 @@ impl SpscHandles {
 /// pipe, returning messages one at a time.
 #[derive(Debug)]
 pub(crate) struct SpscAwareRecv {
-    fanin: Option<Arc<super::fanin::Fanin>>,
-    peer_recv: Option<Arc<ReceiveCell<super::peer_recv::PeerReceiver>>>,
-    /// Per-peer yring consumers: byte-stream peers and inproc
-    /// connections. Actor appends.
-    tcp_consumers: TcpConsumers,
-    /// Generation counter. Bumped by the actor on any consumer add/remove
-    /// (inproc or TCP).
-    consumer_generation: SpscConsumerGeneration,
-    /// Shared recv data signal. All drivers/senders mark this.
-    recv_signal: SpscRecvSignal,
-    /// Notified when consumers Vec changes (new peer added).
-    activated: SpscActivated,
+    /// Receive sources and signals shared with the actor.
+    handles: SpscHandles,
+    /// Batching and spin settings fixed when the socket is built.
+    tuning: RecvTuning,
     /// Data arrival signal from the shared recv pipe.
     recv_pipe_notify: Arc<DataSignal>,
     /// Space-available signal for the shared recv pipe.
     recv_pipe_space: Arc<StateSignal>,
-    /// Optional receive-side conflate slot.
-    conflate_slot: Option<Arc<ConflateRecvSlot>>,
     /// Drain state: cached consumer snapshots, message batch buffer,
     /// and the shared recv pipe consumer.
     drain_state: ReceiveCell<DrainState>,
-    /// Opt-in receive scheduling for bulk calls only.
-    recv_batching: bool,
-    /// Opt-in busy-wait budget before each blocking receive park.
-    recv_spin: Duration,
     /// Single-source receives can probe without preparing a signal drain.
     spin_single: bool,
-    /// Waker for blocking `recv()` callers.
-    blocking_recv_waker: Arc<BlockingRecvWaker>,
     /// Fan-in sockets with per-peer rings alternate which source a
     /// receive tries first.
     rings_first: AtomicBool,
@@ -421,10 +202,15 @@ impl SpscAwareRecv {
         &self,
         source: Option<&super::peer_recv::ReceiveLane>,
     ) -> Result<(super::peer_recv::ReceiveReceipt, Message)> {
-        if let Some(fanin) = self.fanin.as_ref().filter(|fanin| fanin.source_aware()) {
+        if let Some(fanin) = self
+            .handles
+            .fanin
+            .as_ref()
+            .filter(|fanin| fanin.source_aware())
+        {
             return fanin.recv_with_receipt(source).await;
         }
-        let peer = self.peer_recv.as_ref().ok_or_else(|| {
+        let peer = self.handles.peer_recv.as_ref().ok_or_else(|| {
             Error::Protocol(
                 "receipt receive requires native PEER, PULL, or GATHER without conflate".into(),
             )
@@ -436,10 +222,15 @@ impl SpscAwareRecv {
         &self,
         source: Option<&super::peer_recv::ReceiveLane>,
     ) -> Result<(super::peer_recv::ReceiveReceipt, Message)> {
-        if let Some(fanin) = self.fanin.as_ref().filter(|fanin| fanin.source_aware()) {
+        if let Some(fanin) = self
+            .handles
+            .fanin
+            .as_ref()
+            .filter(|fanin| fanin.source_aware())
+        {
             return fanin.try_recv_with_receipt(source);
         }
-        let peer = self.peer_recv.as_ref().ok_or_else(|| {
+        let peer = self.handles.peer_recv.as_ref().ok_or_else(|| {
             Error::Protocol(
                 "receipt receive requires native PEER, PULL, or GATHER without conflate".into(),
             )
@@ -452,10 +243,15 @@ impl SpscAwareRecv {
         receipt: super::peer_recv::ReceiveReceipt,
         message: Message,
     ) -> std::result::Result<(), super::peer_recv::UnshiftError> {
-        if let Some(fanin) = self.fanin.as_ref().filter(|fanin| fanin.source_aware()) {
+        if let Some(fanin) = self
+            .handles
+            .fanin
+            .as_ref()
+            .filter(|fanin| fanin.source_aware())
+        {
             return fanin.unshift(receipt, message);
         }
-        let Some(peer) = &self.peer_recv else {
+        let Some(peer) = &self.handles.peer_recv else {
             return Err(super::peer_recv::UnshiftError {
                 error: Error::Protocol(
                     "unshift requires native PEER, PULL, or GATHER without conflate".into(),
@@ -467,45 +263,39 @@ impl SpscAwareRecv {
     }
 
     pub(crate) fn new(pipe: RecvPipeEnds, handles: SpscHandles, tuning: RecvTuning) -> Self {
+        // Only per-peer rings and the shared pipe allow the single-source probe.
+        let spin_single = handles.fanin.is_none()
+            && handles.peer_recv.is_none()
+            && handles.conflate_slot.is_none();
+        let drain_state = ReceiveCell::new(
+            DrainState {
+                generation: u64::MAX,
+                recv_cursor: 0,
+                tcp: Vec::new(),
+                batch: VecDeque::new(),
+                recv_consumer: pipe.consumer,
+                recv_batch: RingDrain::default(),
+                latency: tuning.latency_profile,
+            },
+            handles.receive_handles.clone(),
+        );
         Self {
-            recv_batching: tuning.batching,
-            recv_spin: tuning.spin,
-            // Only per-peer rings and the shared pipe allow the single-source probe.
-            spin_single: handles.fanin.is_none()
-                && handles.peer_recv.is_none()
-                && handles.conflate_slot.is_none(),
-            fanin: handles.fanin,
-            peer_recv: handles.peer_recv,
-            tcp_consumers: handles.tcp_consumers,
-            consumer_generation: handles.consumer_generation,
-            recv_signal: handles.recv_signal,
-            activated: handles.activated,
-            conflate_slot: handles.conflate_slot,
+            handles,
+            tuning,
             recv_pipe_notify: pipe.notify,
             recv_pipe_space: pipe.space,
-            blocking_recv_waker: handles.blocking_recv_waker,
+            drain_state,
+            spin_single,
             rings_first: AtomicBool::new(false),
-            drain_state: ReceiveCell::new(
-                DrainState {
-                    generation: u64::MAX,
-                    recv_cursor: 0,
-                    tcp: Vec::new(),
-                    batch: VecDeque::new(),
-                    recv_consumer: pipe.consumer,
-                    recv_batch: RingDrain::default(),
-                    latency: tuning.latency_profile,
-                },
-                handles.receive_handles,
-            ),
         }
     }
 
     fn buffered_sources_empty(&self) -> bool {
         // Fanring returns directly, without application-side staging.
-        if self.fanin.is_some() && !self.has_ring_sources() {
+        if self.handles.fanin.is_some() && !self.has_ring_sources() {
             return true;
         }
-        if self.peer_recv.is_some() {
+        if self.handles.peer_recv.is_some() {
             // The PEER drain clears or rearms its signal before reporting
             // empty. Its message permits also count held receipts and paused
             // lanes, which no drain returns, so they must not prevent parking.
@@ -518,31 +308,41 @@ impl SpscAwareRecv {
     /// Per-peer rings were registered at some point. Fan-in sockets then
     /// drain those next to the fan-in queue.
     fn has_ring_sources(&self) -> bool {
-        self.consumer_generation.load(Ordering::Acquire) > 0
+        self.handles.consumer_generation.load(Ordering::Acquire) > 0
     }
 
     /// The fan-in queue, once a wire peer registered a producer. A socket
     /// whose peers all deliver through rings never probes it.
     fn active_fanin(&self) -> Option<&Arc<super::fanin::Fanin>> {
-        self.fanin.as_ref().filter(|fanin| fanin.has_registered())
+        self.handles
+            .fanin
+            .as_ref()
+            .filter(|fanin| fanin.has_registered())
     }
 
     fn take_conflate_message(&self) -> Option<Message> {
-        self.conflate_slot.as_ref().and_then(|slot| slot.take())
+        self.handles
+            .conflate_slot
+            .as_ref()
+            .and_then(|slot| slot.take())
     }
 
     fn conflate_slot_empty(&self) -> bool {
-        self.conflate_slot
+        self.handles
+            .conflate_slot
             .as_ref()
             .is_none_or(|slot| slot.is_empty())
     }
 
     fn cleanup_disconnected(&self) {
-        self.tcp_consumers
+        self.handles
+            .tcp_consumers
             .write()
             .unwrap()
             .retain(|tc| tc.consumer.try_lock().is_none_or(|c| !c.is_disconnected()));
-        self.consumer_generation.fetch_add(1, Ordering::Release);
+        self.handles
+            .consumer_generation
+            .fetch_add(1, Ordering::Release);
         self.drain_state.lock().generation = u64::MAX;
     }
 
@@ -562,10 +362,10 @@ impl SpscAwareRecv {
 
             // Arm the wake futures before the second drain, so a push between
             // that drain and the select still wakes this receiver.
-            let recv_ready = self.recv_signal.ready();
+            let recv_ready = self.handles.recv_signal.ready();
             let pipe_ready = self.recv_pipe_notify.ready();
-            let activated_seen = self.activated.generation();
-            let activated = self.activated.changed_after(activated_seen);
+            let activated_seen = self.handles.activated.generation();
+            let activated = self.handles.activated.changed_after(activated_seen);
             tokio::pin!(recv_ready);
             tokio::pin!(pipe_ready);
             tokio::pin!(activated);
@@ -581,10 +381,12 @@ impl SpscAwareRecv {
                 }
 
                 let _peer_waiter = self
+                    .handles
                     .peer_recv
                     .as_deref()
                     .map(super::peer_recv::PeerReceiver::wait);
                 let _fanin_waiter = self
+                    .handles
                     .fanin
                     .as_deref()
                     .filter(|fanin| fanin.source_aware())
@@ -626,23 +428,24 @@ impl SpscAwareRecv {
     /// `recv_signal`. Without them only the shared pipe can wake a receive.
     #[inline]
     fn has_signaled_sources(&self) -> bool {
-        self.fanin.is_some()
-            || self.peer_recv.is_some()
-            || self.consumer_generation.load(Ordering::Acquire) > 0
-            || self.conflate_slot.is_some()
+        self.handles.fanin.is_some()
+            || self.handles.peer_recv.is_some()
+            || self.handles.consumer_generation.load(Ordering::Acquire) > 0
+            || self.handles.conflate_slot.is_some()
     }
 
     #[inline]
     fn delivered(&self, msg: Message, woken: bool) -> Message {
         if woken {
-            self.recv_signal.hand_off();
+            self.handles.recv_signal.hand_off();
             self.recv_pipe_notify.hand_off();
         }
         msg
     }
 
     fn take_peer_yield_pending(&self) -> bool {
-        self.peer_recv
+        self.handles
+            .peer_recv
             .as_ref()
             .is_some_and(|peer| peer.lock().take_yield_pending())
     }
@@ -671,7 +474,7 @@ impl SpscAwareRecv {
         max: usize,
         out: &mut Vec<Message>,
     ) -> Result<usize> {
-        if let Some(peer) = &self.peer_recv {
+        if let Some(peer) = &self.handles.peer_recv {
             return peer.lock().try_recv_many_after_first(max, out);
         }
         let mut budget = DrainBudget::new(max.min(RECV_BATCH_MESSAGES), RECV_BATCH_BYTES);
@@ -694,7 +497,7 @@ impl SpscAwareRecv {
                 return Ok(0);
             }
             if !self.has_ring_sources() {
-                return fanin.recv_into(out, budget, self.recv_batching);
+                return fanin.recv_into(out, budget, self.tuning.batching);
             }
             // Split the call's budget between the fan-in queue and the
             // per-peer rings, alternating which one goes first.
@@ -710,7 +513,7 @@ impl SpscAwareRecv {
             let taken = out.len() - start_len;
             if taken < limit {
                 let rest = DrainBudget::new(limit - taken, RECV_BATCH_BYTES);
-                match fanin.recv_into(out, rest, self.recv_batching) {
+                match fanin.recv_into(out, rest, self.tuning.batching) {
                     Ok(_) | Err(Error::WouldBlock) => {}
                     Err(error) => return Err(error),
                 }
@@ -737,7 +540,7 @@ impl SpscAwareRecv {
         out: &mut Vec<Message>,
         mut budget: DrainBudget,
     ) -> Result<usize> {
-        if let Some(peer) = &self.peer_recv {
+        if let Some(peer) = &self.handles.peer_recv {
             return peer.lock().try_recv_many_into(max, out);
         }
         let start_len = out.len();
@@ -765,7 +568,7 @@ impl SpscAwareRecv {
             return Ok(out.len() - start_len);
         }
 
-        self.recv_signal.begin_drain();
+        self.handles.recv_signal.begin_drain();
         self.recv_pipe_notify.begin_drain();
         self.refresh_snapshot(&mut guard);
 
@@ -783,12 +586,12 @@ impl SpscAwareRecv {
         let all_empty = Self::state_is_empty(state) && self.conflate_slot_empty();
         if out.len() == start_len
             && all_empty
-            && (self.recv_signal.clear_after(all_empty)
+            && (self.handles.recv_signal.clear_after(all_empty)
                 || self
                     .recv_pipe_notify
                     .clear_after(state.recv_consumer.is_empty()))
         {
-            self.blocking_recv_waker.wake();
+            self.handles.blocking_recv_waker.wake();
         }
         drop(guard);
 
@@ -807,10 +610,10 @@ impl SpscAwareRecv {
     }
 
     pub(crate) fn shutdown(&self) {
-        if let Some(fanin) = &self.fanin {
+        if let Some(fanin) = &self.handles.fanin {
             fanin.close();
         }
-        if let Some(peer) = &self.peer_recv {
+        if let Some(peer) = &self.handles.peer_recv {
             peer.lock().shutdown();
         }
         {
@@ -823,8 +626,8 @@ impl SpscAwareRecv {
             state.tcp.clear();
             state.generation = u64::MAX;
         }
-        self.tcp_consumers.write().unwrap().clear();
-        if let Some(slot) = &self.conflate_slot {
+        self.handles.tcp_consumers.write().unwrap().clear();
+        if let Some(slot) = &self.handles.conflate_slot {
             slot.close();
         }
         self.recv_pipe_space.notify_changed();

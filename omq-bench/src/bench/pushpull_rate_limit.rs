@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -16,14 +15,7 @@ pub(crate) const BURST: u64 = 1_000_000;
 pub(crate) const CACHE: &str = "pushpull-rate-limit.jsonl";
 
 pub(crate) fn link() -> CompressionLink {
-    CompressionLink {
-        rate_mbps: 1000,
-        delay_us: 1000,
-        mtu: 1500,
-        shared_rate: true,
-        segmentation_offloads: false,
-        placement: "tcp-ingress-ifb".into(),
-    }
+    CompressionLink::ifb(1000, 1000)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -72,18 +64,10 @@ pub(crate) fn run(args: &PushpullRateLimitArgs) {
     }
 
     let binary_sha256 = peer_sha256(&binary);
-    let run_id = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos()
-        .to_string();
+    let run_id = super::unix_nanos().to_string();
     let sizes = args.sizes.as_deref().unwrap_or(SIZES);
     assert!(!sizes.is_empty() && sizes.iter().all(|size| *size > 0));
-    let affinity = if std::env::var_os("OMQ_BENCH_TASKSET").is_some() {
-        "sender=1-2,receiver=3-4"
-    } else {
-        "unbound"
-    };
+    let affinity = process::affinity_label();
     let campaign = Campaign {
         binary: &binary,
         binary_sha256: &binary_sha256,

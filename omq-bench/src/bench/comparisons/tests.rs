@@ -1,5 +1,5 @@
 use super::impls::TransportKind::Tcp;
-use super::impls::{impl_io_threads, latency_rep_subcmd, latency_req_subcmd};
+use super::impls::{IMPLS, impl_io_threads, latency_rep_subcmd, latency_req_subcmd};
 use super::*;
 
 fn io_threads_from_env<'a>(env: &'a [(&'a str, &'a str)]) -> &'a str {

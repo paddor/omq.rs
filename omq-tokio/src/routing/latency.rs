@@ -424,7 +424,7 @@ mod tests {
         tokio::sync::mpsc::Receiver<crate::engine::PeerDriverData>,
     ) {
         let (tcp, _peer) = tcp_pair();
-        let direct = crate::socket::dispatch::DirectTcpWriter::new(tcp);
+        let direct = crate::socket::direct_writer::DirectTcpWriter::new(tcp);
         let (inbox, _rx) = tokio::sync::mpsc::channel::<PeerDriverCommand>(1);
         let (data_inbox, data_rx) = tokio::sync::mpsc::channel(1);
         (

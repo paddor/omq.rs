@@ -417,8 +417,6 @@ pub(super) fn peer_ident_socket_addr(ident: &PeerIdent) -> Option<std::net::Sock
 
 pub(super) use omq_proto::message::generated_identity;
 
-pub(crate) use super::direct_writer::DirectTcpWriter;
-
 mod stream;
 
 pub(crate) use stream::{AnyReadHalf, AnyStream, AnyWriteHalf, Migratable};

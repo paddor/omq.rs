@@ -11,7 +11,7 @@ pub(crate) enum PeerOutbound {
     Wire {
         slot: Arc<PeerTransmitSlot>,
         inbox: crate::engine::data_inbox::Sender,
-        direct: Option<Arc<crate::socket::dispatch::DirectTcpWriter>>,
+        direct: Option<Arc<crate::socket::direct_writer::DirectTcpWriter>>,
     },
     Inbox(crate::engine::data_inbox::Sender),
     /// Direct delivery into an inproc peer's receive queue.
@@ -224,7 +224,7 @@ mod tests {
     #[test]
     fn handshake_does_not_let_direct_send_overtake_inbox() {
         use crate::engine::transmit_slot::{PeerTransmitSlot, SlotConfig, TryFrameResult};
-        use crate::socket::dispatch::DirectTcpWriter;
+        use crate::socket::direct_writer::DirectTcpWriter;
         use std::io::Read;
         use std::net::{TcpListener, TcpStream};
         use std::sync::Arc;

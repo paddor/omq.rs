@@ -394,6 +394,14 @@ impl AsMut<[u8]> for crate::pool::SlotStorage {
     }
 }
 
+pub(crate) fn read_u32(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes(
+        bytes[offset..offset + 4]
+            .try_into()
+            .expect("validated record"),
+    )
+}
+
 pub(crate) fn read_u64(bytes: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(
         bytes[offset..offset + 8]

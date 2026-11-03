@@ -3,7 +3,7 @@
 
 use std::io;
 
-use crate::mapping::{invalid, read_u64};
+use crate::mapping::{invalid, read_u32, read_u64};
 
 pub(crate) const PREFACE_MAGIC: &[u8; 8] = b"OMQSHM08";
 pub(crate) const COPIED: u8 = 0;
@@ -45,20 +45,12 @@ impl Preface {
     }
 
     pub(crate) fn decode(bytes: &[u8; crate::PREFACE_SIZE]) -> io::Result<Self> {
-        let count = u32::from_le_bytes(
-            bytes[PREFACE_COUNT..PREFACE_TOKEN]
-                .try_into()
-                .expect("preface count"),
-        ) as usize;
+        let count = read_u32(bytes, PREFACE_COUNT) as usize;
         if &bytes[..PREFACE_ID] != PREFACE_MAGIC || !(1..=crate::MAX_LEASES).contains(&count) {
             return Err(invalid("invalid SHM preface"));
         }
         Ok(Self {
-            id: u32::from_le_bytes(
-                bytes[PREFACE_ID..PREFACE_COUNT]
-                    .try_into()
-                    .expect("preface id"),
-            ),
+            id: read_u32(bytes, PREFACE_ID),
             count,
             token: read_u64(bytes, PREFACE_TOKEN),
         })
@@ -104,13 +96,13 @@ impl Reference {
         }
         Ok(Self {
             kind,
-            id: u32::from_le_bytes(bytes[ID..TOKEN].try_into().expect("reference id")),
+            id: read_u32(bytes, ID),
             token: read_u64(bytes, TOKEN),
             offset: usize::try_from(read_u64(bytes, OFFSET))
                 .map_err(|_| invalid("SHM offset overflow"))?,
             length: usize::try_from(read_u64(bytes, LENGTH))
                 .map_err(|_| invalid("SHM length overflow"))?,
-            lease: u32::from_le_bytes(bytes[LEASE..GENERATION].try_into().expect("lease")) as usize,
+            lease: read_u32(bytes, LEASE) as usize,
             generation: read_u64(bytes, GENERATION),
         })
     }

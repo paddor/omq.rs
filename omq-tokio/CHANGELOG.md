@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   closed receive queue, like wire peers, instead of filling an unread one.
 - A blocking SERVER send no longer waits on a stale queue signal when the
   peer's send queue changes while it is full.
+- A hostname that resolves to no addresses fails `bind`, and UDP or DART
+  `connect`, with `Error::Io` like other DNS failures, instead of
+  `Error::InvalidEndpoint`. Only `bind` and `connect` report it; reconnects
+  keep retrying.
 
 ## [0.33.0] - 2026-10-29
 

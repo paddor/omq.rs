@@ -188,8 +188,22 @@ pub(crate) mod test_lookup {
     use std::collections::HashMap;
     use std::net::IpAddr;
 
+    #[derive(Clone, Copy)]
+    enum Reply {
+        Address(IpAddr),
+        /// The lookup succeeds with no addresses.
+        Empty,
+        Fail,
+    }
+
+    impl From<Option<IpAddr>> for Reply {
+        fn from(address: Option<IpAddr>) -> Self {
+            address.map_or(Self::Fail, Self::Address)
+        }
+    }
+
     struct Answer {
-        address: Option<IpAddr>,
+        reply: Reply,
         calls: usize,
     }
 
@@ -202,17 +216,28 @@ pub(crate) mod test_lookup {
     }
 
     impl ScopedLookup {
+        /// Answer lookups on `port` with `address`, or fail them for `None`.
         pub(crate) fn new(port: u16, address: Option<IpAddr>) -> Self {
-            let previous = ANSWERS
-                .lock()
-                .unwrap()
-                .insert(port, Answer { address, calls: 0 });
+            let answer = Answer {
+                reply: address.into(),
+                calls: 0,
+            };
+            let previous = ANSWERS.lock().unwrap().insert(port, answer);
             assert!(previous.is_none(), "test DNS port already in use");
             Self { port }
         }
 
         pub(crate) fn set_address(&self, address: Option<IpAddr>) {
-            ANSWERS.lock().unwrap().get_mut(&self.port).unwrap().address = address;
+            self.set(address.into());
+        }
+
+        /// Answer later lookups with an empty address list.
+        pub(crate) fn set_empty(&self) {
+            self.set(Reply::Empty);
+        }
+
+        fn set(&self, reply: Reply) {
+            ANSWERS.lock().unwrap().get_mut(&self.port).unwrap().reply = reply;
         }
 
         pub(crate) fn calls(&self) -> usize {
@@ -230,9 +255,10 @@ pub(crate) mod test_lookup {
         let mut answers = ANSWERS.lock().unwrap();
         let answer = answers.get_mut(&port).expect("test DNS answer missing");
         answer.calls += 1;
-        match answer.address {
-            Some(address) => Ok(vec![SocketAddr::new(address, port)]),
-            None => Err(Error::Io(io::Error::new(
+        match answer.reply {
+            Reply::Address(address) => Ok(vec![SocketAddr::new(address, port)]),
+            Reply::Empty => Ok(Vec::new()),
+            Reply::Fail => Err(Error::Io(io::Error::new(
                 io::ErrorKind::AddrNotAvailable,
                 "test DNS failure",
             ))),

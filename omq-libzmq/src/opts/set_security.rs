@@ -5,8 +5,8 @@
     reason = "option code table; the lint skips test builds"
 )]
 use super::codes::*;
-use super::raw::{none_if_empty, read_bytes, read_i32, read_key, read_string};
-use super::{MechanismOverlay, SecretBytes};
+use super::raw::{OptIn, none_if_empty, parse_origins};
+use super::{MechanismOverlay, SecretBytes, overlay};
 use crate::error::{c_try, fail};
 use crate::socket::OmqSocket;
 use std::ffi::c_int;
@@ -16,15 +16,12 @@ use std::sync::Arc;
 pub(super) fn set_plain_server_option(
     sock_arc: &Arc<OmqSocket>,
     option: c_int,
-    optval: *const libc::c_void,
-    optvallen: usize,
-) -> Option<c_int> {
+    optval: OptIn,
+) -> Result<bool, c_int> {
     match option {
         ZMQ_PLAIN_SERVER => {
-            let Some(v) = read_i32(optval, optvallen) else {
-                return Some(fail(libc::EINVAL));
-            };
-            let mut ov = lock_overlay!(sock_arc);
+            let v = optval.i32()?;
+            let mut ov = overlay(sock_arc)?;
             if v != 0 {
                 ov.mechanism = MechanismOverlay::PlainServer;
             } else if matches!(
@@ -35,42 +32,35 @@ pub(super) fn set_plain_server_option(
             }
         }
         ZMQ_ZAP_DOMAIN => {
-            let Some(domain) = read_string(optval, optvallen) else {
-                return Some(fail(libc::EINVAL));
-            };
+            let domain = optval.string()?;
             if domain.len() > 255 || !domain.is_ascii() {
-                return Some(fail(libc::EINVAL));
+                return Err(libc::EINVAL);
             }
-            lock_overlay!(sock_arc).zap_domain = domain;
+            overlay(sock_arc)?.zap_domain = domain;
         }
         ZMQ_ZAP_ENFORCE_DOMAIN => {
-            let Some(value) = read_i32(optval, optvallen) else {
-                return Some(fail(libc::EINVAL));
-            };
-            lock_overlay!(sock_arc).zap_enforce_domain = value != 0;
+            let value = optval.i32()?;
+            overlay(sock_arc)?.zap_enforce_domain = value != 0;
         }
-        _ => return None,
+        _ => return Ok(false),
     }
 
-    Some(0)
+    Ok(true)
 }
 
 /// PLAIN client credentials.
 pub(super) fn set_plain_client_option(
     sock_arc: &Arc<OmqSocket>,
     option: c_int,
-    optval: *const libc::c_void,
-    optvallen: usize,
-) -> Option<c_int> {
+    optval: OptIn,
+) -> Result<bool, c_int> {
     match option {
         ZMQ_PLAIN_USERNAME => {
-            let Some(s) = read_string(optval, optvallen) else {
-                return Some(fail(libc::EINVAL));
-            };
+            let s = optval.string()?;
             if s.len() > 255 || !s.bytes().all(|byte| byte.is_ascii_graphic()) {
-                return Some(fail(libc::EINVAL));
+                return Err(libc::EINVAL);
             }
-            let mut ov = lock_overlay!(sock_arc);
+            let mut ov = overlay(sock_arc)?;
             match &mut ov.mechanism {
                 MechanismOverlay::PlainClient { username, .. } => *username = s,
                 _ => {
@@ -82,13 +72,11 @@ pub(super) fn set_plain_client_option(
             }
         }
         ZMQ_PLAIN_PASSWORD => {
-            let Some(s) = read_string(optval, optvallen) else {
-                return Some(fail(libc::EINVAL));
-            };
+            let s = optval.string()?;
             if s.len() > 255 || !s.bytes().all(|byte| byte.is_ascii_graphic()) {
-                return Some(fail(libc::EINVAL));
+                return Err(libc::EINVAL);
             }
-            let mut ov = lock_overlay!(sock_arc);
+            let mut ov = overlay(sock_arc)?;
             match &mut ov.mechanism {
                 MechanismOverlay::PlainClient { password, .. } => *password = s,
                 _ => {
@@ -99,25 +87,22 @@ pub(super) fn set_plain_client_option(
                 }
             }
         }
-        _ => return None,
+        _ => return Ok(false),
     }
 
-    Some(0)
+    Ok(true)
 }
 
 /// CURVE server role and secret key.
 pub(super) fn set_curve_option(
     sock_arc: &Arc<OmqSocket>,
     option: c_int,
-    optval: *const libc::c_void,
-    optvallen: usize,
-) -> Option<c_int> {
+    optval: OptIn,
+) -> Result<bool, c_int> {
     match option {
         ZMQ_CURVE_SERVER => {
-            let Some(v) = read_i32(optval, optvallen) else {
-                return Some(fail(libc::EINVAL));
-            };
-            let mut ov = lock_overlay!(sock_arc);
+            let v = optval.i32()?;
+            let mut ov = overlay(sock_arc)?;
             if v != 0 {
                 if !matches!(ov.mechanism, MechanismOverlay::CurveServer { .. }) {
                     ov.mechanism = MechanismOverlay::CurveServer {
@@ -129,10 +114,8 @@ pub(super) fn set_curve_option(
             }
         }
         ZMQ_CURVE_SECRETKEY => {
-            let Some(key) = read_key(optval, optvallen) else {
-                return Some(fail(libc::EINVAL));
-            };
-            let mut ov = lock_overlay!(sock_arc);
+            let key = optval.key()?;
+            let mut ov = overlay(sock_arc)?;
             match &mut ov.mechanism {
                 MechanismOverlay::CurveServer { secret_key, .. }
                 | MechanismOverlay::CurveClient { secret_key, .. } => *secret_key = key,
@@ -145,25 +128,22 @@ pub(super) fn set_curve_option(
                 }
             }
         }
-        _ => return None,
+        _ => return Ok(false),
     }
 
-    Some(0)
+    Ok(true)
 }
 
 /// CURVE client public and server keys.
 pub(super) fn set_curve_client_option(
     sock_arc: &Arc<OmqSocket>,
     option: c_int,
-    optval: *const libc::c_void,
-    optvallen: usize,
-) -> Option<c_int> {
+    optval: OptIn,
+) -> Result<bool, c_int> {
     match option {
         ZMQ_CURVE_PUBLICKEY => {
-            let Some(key) = read_key(optval, optvallen) else {
-                return Some(fail(libc::EINVAL));
-            };
-            let mut ov = lock_overlay!(sock_arc);
+            let key = optval.key()?;
+            let mut ov = overlay(sock_arc)?;
             match &mut ov.mechanism {
                 MechanismOverlay::CurveClient { public_key, .. } => *public_key = key,
                 _ => {
@@ -176,10 +156,8 @@ pub(super) fn set_curve_client_option(
             }
         }
         ZMQ_CURVE_SERVERKEY => {
-            let Some(key) = read_key(optval, optvallen) else {
-                return Some(fail(libc::EINVAL));
-            };
-            let mut ov = lock_overlay!(sock_arc);
+            let key = optval.key()?;
+            let mut ov = overlay(sock_arc)?;
             match &mut ov.mechanism {
                 MechanismOverlay::CurveClient { server_key, .. } => *server_key = key,
                 _ => {
@@ -191,102 +169,75 @@ pub(super) fn set_curve_client_option(
                 }
             }
         }
-        _ => return None,
+        _ => return Ok(false),
     }
 
-    Some(0)
+    Ok(true)
 }
 
 /// WebSocket peer limit and origin policy.
 pub(super) fn set_ws_option(
     sock_arc: &Arc<OmqSocket>,
     option: c_int,
-    optval: *const libc::c_void,
-    optvallen: usize,
-) -> Option<c_int> {
+    optval: OptIn,
+) -> Result<bool, c_int> {
     match option {
         OMQ_WS_MAX_READY_PEERS => {
             if sock_arc.inner.get().is_some() {
-                return Some(fail(libc::EBUSY));
+                return Err(libc::EBUSY);
             }
-            let Some(value) = read_i32(optval, optvallen) else {
-                return Some(fail(libc::EINVAL));
-            };
+            let value = optval.i32()?;
             if value <= 0 {
-                return Some(fail(libc::EINVAL));
+                return Err(libc::EINVAL);
             }
-            lock_overlay!(sock_arc).ws_max_ready_peers = value;
+            overlay(sock_arc)?.ws_max_ready_peers = value;
         }
         OMQ_WS_ALLOWED_ORIGINS => {
             // Security policy must take effect, never silently mutate an
             // overlay after its immutable backend options were consumed.
             if sock_arc.inner.get().is_some() {
-                return Some(fail(libc::EBUSY));
+                return Err(libc::EBUSY);
             }
-            let Some(value) = read_string(optval, optvallen) else {
-                return Some(fail(libc::EINVAL));
-            };
-            let origins: Vec<String> = if value.is_empty() {
-                Vec::new()
-            } else {
-                value.split('\n').map(str::to_owned).collect()
-            };
-            if origins
-                .iter()
-                .any(|origin| omq_tokio::proto::ws_handshake::normalize_ws_origin(origin).is_err())
-            {
-                return Some(fail(libc::EINVAL));
-            }
-            lock_overlay!(sock_arc).ws_allowed_origins = origins;
+            let origins = parse_origins(&optval.string()?)?;
+            overlay(sock_arc)?.ws_allowed_origins = origins;
         }
-        _ => return None,
+        _ => return Ok(false),
     }
 
-    Some(0)
+    Ok(true)
 }
 
 /// WebSocket TLS material.
 pub(super) fn set_wss_option(
     sock_arc: &Arc<OmqSocket>,
     option: c_int,
-    optval: *const libc::c_void,
-    optvallen: usize,
-) -> Option<c_int> {
+    optval: OptIn,
+) -> Result<bool, c_int> {
     match option {
         ZMQ_WSS_KEY_PEM => {
-            let Some(v) = read_bytes(optval, optvallen) else {
-                return Some(fail(libc::EINVAL));
-            };
-            lock_overlay!(sock_arc).wss_key_pem = none_if_empty(v).map(SecretBytes);
+            let v = optval.bytes()?;
+            overlay(sock_arc)?.wss_key_pem = none_if_empty(v).map(SecretBytes);
         }
         ZMQ_WSS_CERT_PEM => {
-            let Some(v) = read_bytes(optval, optvallen) else {
-                return Some(fail(libc::EINVAL));
-            };
-            lock_overlay!(sock_arc).wss_cert_pem = none_if_empty(v);
+            let v = optval.bytes()?;
+            overlay(sock_arc)?.wss_cert_pem = none_if_empty(v);
         }
         ZMQ_WSS_TRUST_PEM => {
-            let Some(v) = read_bytes(optval, optvallen) else {
-                return Some(fail(libc::EINVAL));
-            };
-            lock_overlay!(sock_arc).wss_trust_pem = none_if_empty(v);
+            let v = optval.bytes()?;
+            overlay(sock_arc)?.wss_trust_pem = none_if_empty(v);
         }
         ZMQ_WSS_HOSTNAME => {
-            let Some(v) = read_string(optval, optvallen) else {
-                return Some(fail(libc::EINVAL));
-            };
-            lock_overlay!(sock_arc).wss_hostname = if v.is_empty() { None } else { Some(v) };
+            let v = optval.string()?;
+            overlay(sock_arc)?.wss_hostname = if v.is_empty() { None } else { Some(v) };
         }
         ZMQ_WSS_TRUST_SYSTEM => {
-            let Some(v) = read_i32(optval, optvallen) else {
-                return Some(fail(libc::EINVAL));
-            };
-            lock_overlay!(sock_arc).wss_trust_system = v != 0;
+            let v = optval.i32()?;
+            overlay(sock_arc)?.wss_trust_system = v != 0;
         }
-        _ => return None,
+        _ => return Ok(false),
     }
 
-    Some(0)
+    Ok(true)
 }
 
 /// One exact username/password pair in an OMQ fixed PLAIN server allowlist.
@@ -382,7 +333,7 @@ pub extern "C" fn omq_socket_set_plain_server_credentials(
         ));
         copied.push((username, password));
     }
-    lock_overlay!(socket).mechanism = MechanismOverlay::PlainServerCredentials {
+    c_try!(overlay(socket)).mechanism = MechanismOverlay::PlainServerCredentials {
         credentials: copied,
     };
     0

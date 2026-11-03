@@ -3,9 +3,10 @@
 
 use std::ffi::c_int;
 
-use super::raw::{OptOut, none_if_empty, read_bytes, read_i32, read_string};
-use super::{QuicOverlay, overlay};
-use crate::error::fail;
+use super::overlay;
+#[cfg(feature = "webtransport")]
+use super::raw::parse_origins;
+use super::raw::{OptIn, OptOut, none_if_empty};
 
 #[cfg(feature = "webtransport")]
 use super::codes::{OMQ_QUIC_ALLOWED_ORIGINS, OMQ_QUIC_WEBTRANSPORT_PATH};
@@ -34,80 +35,62 @@ fn is_quic_option(option: c_int) -> bool {
     )
 }
 
-/// `None` when `option` is not a QUIC option.
+/// `Ok(false)` when `option` is not a QUIC option.
 pub(super) fn set(
     sock: &crate::socket::OmqSocket,
     option: c_int,
-    optval: *const libc::c_void,
-    optvallen: usize,
-) -> Option<c_int> {
+    optval: OptIn,
+) -> Result<bool, c_int> {
     if !is_quic_option(option) {
-        return None;
+        return Ok(false);
     }
     if sock.inner.get().is_some() {
-        return Some(fail(libc::EBUSY));
+        return Err(libc::EBUSY);
     }
-    let Ok(mut overlay) = sock.overlay.lock() else {
-        return Some(fail(crate::error::ETERM));
-    };
+    let mut overlay = overlay(sock)?;
     let quic = &mut overlay.quic;
-    let ok = match option {
-        OMQ_QUIC_CERT_PEM => set_pem(&mut quic.cert_pem, optval, optvallen),
-        OMQ_QUIC_KEY_PEM => set_pem(&mut quic.key_pem, optval, optvallen),
-        OMQ_QUIC_TRUST_PEM => set_pem(&mut quic.trust_pem, optval, optvallen),
-        OMQ_QUIC_SERVER_NAME => read_string(optval, optvallen).map(|name| {
+    match option {
+        OMQ_QUIC_CERT_PEM => quic.cert_pem = none_if_empty(optval.bytes()?),
+        OMQ_QUIC_KEY_PEM => quic.key_pem = none_if_empty(optval.bytes()?),
+        OMQ_QUIC_TRUST_PEM => quic.trust_pem = none_if_empty(optval.bytes()?),
+        OMQ_QUIC_SERVER_NAME => {
+            let name = optval.string()?;
             quic.server_name = (!name.is_empty()).then_some(name);
-        }),
-        OMQ_QUIC_TRUST_SYSTEM => {
-            read_i32(optval, optvallen).map(|value| quic.trust_system = value != 0)
         }
-        OMQ_QUIC_STREAM_WINDOW => set_window(quic, optval, optvallen),
-        OMQ_QUIC_MAX_READY_PEERS => read_i32(optval, optvallen)
-            .filter(|&value| value > 0)
-            .map(|value| quic.max_ready_peers = value),
+        OMQ_QUIC_TRUST_SYSTEM => quic.trust_system = optval.i32()? != 0,
+        OMQ_QUIC_STREAM_WINDOW => quic.stream_window = stream_window(optval)?,
+        OMQ_QUIC_MAX_READY_PEERS => {
+            let value = optval.i32()?;
+            if value <= 0 {
+                return Err(libc::EINVAL);
+            }
+            quic.max_ready_peers = value;
+        }
         #[cfg(feature = "webtransport")]
-        OMQ_QUIC_ALLOWED_ORIGINS => set_origins(quic, optval, optvallen),
+        OMQ_QUIC_ALLOWED_ORIGINS => quic.allowed_origins = parse_origins(&optval.string()?)?,
         #[cfg(feature = "webtransport")]
-        OMQ_QUIC_WEBTRANSPORT_PATH => set_path(quic, optval, optvallen),
+        OMQ_QUIC_WEBTRANSPORT_PATH => quic.webtransport_path = webtransport_path(optval)?,
         _ => unreachable!("checked QUIC option"),
-    };
-    Some(if ok.is_some() { 0 } else { fail(libc::EINVAL) })
+    }
+    Ok(true)
 }
 
-fn set_pem(slot: &mut Option<Vec<u8>>, optval: *const libc::c_void, len: usize) -> Option<()> {
-    read_bytes(optval, len).map(|pem| *slot = none_if_empty(pem))
-}
-
-fn set_window(quic: &mut QuicOverlay, optval: *const libc::c_void, len: usize) -> Option<()> {
+fn stream_window(optval: OptIn) -> Result<i32, c_int> {
     use omq_tokio::options::QuicOptions;
-    let value = read_i32(optval, len)?;
-    let window = u32::try_from(value).ok()?;
-    (QuicOptions::MIN_STREAM_WINDOW..=QuicOptions::MAX_STREAM_WINDOW)
-        .contains(&window)
-        .then(|| quic.stream_window = value)
+    let value = optval.i32()?;
+    let window = u32::try_from(value).map_err(|_| libc::EINVAL)?;
+    if !(QuicOptions::MIN_STREAM_WINDOW..=QuicOptions::MAX_STREAM_WINDOW).contains(&window) {
+        return Err(libc::EINVAL);
+    }
+    Ok(value)
 }
 
 #[cfg(feature = "webtransport")]
-fn set_origins(quic: &mut QuicOverlay, optval: *const libc::c_void, len: usize) -> Option<()> {
-    let value = read_string(optval, len)?;
-    let origins: Vec<String> = if value.is_empty() {
-        Vec::new()
-    } else {
-        value.split('\n').map(str::to_owned).collect()
-    };
-    origins
-        .iter()
-        .all(|origin| omq_tokio::proto::web_address::normalize_ws_origin(origin).is_ok())
-        .then(|| quic.allowed_origins = origins)
-}
-
-#[cfg(feature = "webtransport")]
-fn set_path(quic: &mut QuicOverlay, optval: *const libc::c_void, len: usize) -> Option<()> {
-    let path = read_string(optval, len)?;
+fn webtransport_path(optval: OptIn) -> Result<String, c_int> {
+    let path = optval.string()?;
     let host = omq_tokio::endpoint::Host::Name("localhost".into());
-    omq_tokio::proto::web_address::validate_ws_address(&host, &path)
-        .ok()
-        .map(|()| quic.webtransport_path = path)
+    omq_tokio::proto::web_address::validate_ws_address(&host, &path).map_err(|_| libc::EINVAL)?;
+    Ok(path)
 }
 
 /// `Ok(false)` when `option` is not a QUIC option.

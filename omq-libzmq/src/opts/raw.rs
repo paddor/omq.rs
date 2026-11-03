@@ -2,74 +2,98 @@
 
 use std::ffi::c_int;
 
-pub(super) fn read_i32(optval: *const libc::c_void, optvallen: usize) -> Option<i32> {
-    if optval.is_null() || optvallen < 4 {
-        return None;
-    }
-    // SAFETY: optval is non-null (checked above) and points to at least 4 readable bytes.
-    Some(unsafe { std::ptr::read_unaligned(optval.cast::<i32>()) })
+/// Caller storage holding a `zmq_setsockopt`-style value. Readers fail with
+/// `EINVAL` for a null pointer or a value of the wrong size.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct OptIn {
+    pub(super) ptr: *const libc::c_void,
+    pub(super) len: usize,
 }
 
-pub(super) fn read_i64(optval: *const libc::c_void, optvallen: usize) -> Option<i64> {
-    if optval.is_null() || optvallen < 8 {
-        return None;
+impl OptIn {
+    pub(super) fn new(ptr: *const libc::c_void, len: usize) -> Self {
+        Self { ptr, len }
     }
-    // SAFETY: optval is non-null (checked above) and points to at least 8 readable bytes.
-    Some(unsafe { std::ptr::read_unaligned(optval.cast::<i64>()) })
-}
 
-pub(super) fn read_string(optval: *const libc::c_void, optvallen: usize) -> Option<String> {
-    if optval.is_null() {
-        return None;
+    /// The value bytes; `None` when the pointer is null.
+    pub(super) fn slice<'a>(self) -> Option<&'a [u8]> {
+        if self.ptr.is_null() {
+            return None;
+        }
+        // SAFETY: ptr is non-null (checked above); the caller passes `len`
+        // readable bytes that stay valid for the call.
+        Some(unsafe { std::slice::from_raw_parts(self.ptr.cast::<u8>(), self.len) })
     }
-    if optvallen == 0 {
-        return Some(String::new());
-    }
-    // SAFETY: optval is non-null with optvallen > 0 (checked above).
-    let slice = unsafe { std::slice::from_raw_parts(optval.cast::<u8>(), optvallen) };
-    Some(String::from_utf8_lossy(slice).into_owned())
-}
 
-pub(super) fn read_bytes(optval: *const libc::c_void, optvallen: usize) -> Option<Vec<u8>> {
-    if optvallen == 0 {
-        return Some(Vec::new());
+    pub(super) fn i32(self) -> Result<i32, c_int> {
+        if self.ptr.is_null() || self.len < 4 {
+            return Err(libc::EINVAL);
+        }
+        // SAFETY: ptr is non-null (checked above) and points to at least 4 readable bytes.
+        Ok(unsafe { std::ptr::read_unaligned(self.ptr.cast::<i32>()) })
     }
-    if optval.is_null() {
-        return None;
+
+    pub(super) fn i64(self) -> Result<i64, c_int> {
+        if self.ptr.is_null() || self.len < 8 {
+            return Err(libc::EINVAL);
+        }
+        // SAFETY: ptr is non-null (checked above) and points to at least 8 readable bytes.
+        Ok(unsafe { std::ptr::read_unaligned(self.ptr.cast::<i64>()) })
     }
-    // SAFETY: optval is non-null with optvallen > 0 (checked above).
-    Some(unsafe { std::slice::from_raw_parts(optval.cast::<u8>(), optvallen) }.to_vec())
+
+    /// The value as lossy UTF-8; empty for a zero length.
+    pub(super) fn string(self) -> Result<String, c_int> {
+        let bytes = self.slice().ok_or(libc::EINVAL)?;
+        Ok(String::from_utf8_lossy(bytes).into_owned())
+    }
+
+    /// The value bytes; empty for a zero length, even with a null pointer.
+    pub(super) fn bytes(self) -> Result<Vec<u8>, c_int> {
+        if self.len == 0 {
+            return Ok(Vec::new());
+        }
+        self.slice().map(<[u8]>::to_vec).ok_or(libc::EINVAL)
+    }
+
+    /// A CURVE key as 32 raw bytes or 40 Z85 characters.
+    pub(super) fn key(self) -> Result<[u8; 32], c_int> {
+        let bytes = self.slice().ok_or(libc::EINVAL)?;
+        let mut key = [0u8; 32];
+        if bytes.len() == 32 {
+            key.copy_from_slice(bytes);
+            return Ok(key);
+        }
+        if bytes.len() >= 40
+            && let Ok(s) = std::str::from_utf8(&bytes[..40])
+            && let Ok(decoded) = omq_tokio::proto::z85::decode(s)
+            && decoded.len() == 32
+        {
+            key.copy_from_slice(&decoded);
+            return Ok(key);
+        }
+        Err(libc::EINVAL)
+    }
 }
 
 pub(super) fn none_if_empty(bytes: Vec<u8>) -> Option<Vec<u8>> {
     if bytes.is_empty() { None } else { Some(bytes) }
 }
 
-pub(super) fn read_key(optval: *const libc::c_void, optvallen: usize) -> Option<[u8; 32]> {
-    if optval.is_null() {
-        return None;
+/// Parse a newline-separated WebSocket origin list; an empty value allows
+/// none. `EINVAL` when any origin is invalid.
+pub(super) fn parse_origins(value: &str) -> Result<Vec<String>, c_int> {
+    let origins: Vec<String> = if value.is_empty() {
+        Vec::new()
+    } else {
+        value.split('\n').map(str::to_owned).collect()
+    };
+    if origins
+        .iter()
+        .any(|origin| omq_tokio::proto::ws_handshake::normalize_ws_origin(origin).is_err())
+    {
+        return Err(libc::EINVAL);
     }
-    let mut key = [0u8; 32];
-    if optvallen == 32 {
-        // SAFETY: optval is non-null (checked above) and optvallen == 32.
-        let slice = unsafe { std::slice::from_raw_parts(optval.cast::<u8>(), 32) };
-        key.copy_from_slice(slice);
-        return Some(key);
-    }
-    if optvallen >= 40 {
-        // SAFETY: optval is non-null (checked above) and optvallen >= 40.
-        let slice = unsafe { std::slice::from_raw_parts(optval.cast::<u8>(), 40) };
-        let Ok(s) = std::str::from_utf8(slice) else {
-            return None;
-        };
-        if let Ok(decoded) = omq_tokio::proto::z85::decode(s)
-            && decoded.len() == 32
-        {
-            key.copy_from_slice(&decoded);
-            return Some(key);
-        }
-    }
-    None
+    Ok(origins)
 }
 
 /// Caller storage for a `zmq_getsockopt`-style value: a buffer and its

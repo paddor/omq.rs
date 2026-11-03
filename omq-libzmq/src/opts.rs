@@ -17,18 +17,6 @@ use crate::socket::DEFAULT_HWM;
 #[cfg(feature = "quic")]
 mod quic;
 
-/// Lock the overlay or return `ETERM` from the enclosing function. `.into()`
-/// lets the same macro serve `c_int` and `Option<c_int>` returns.
-macro_rules! lock_overlay {
-    ($sock:expr) => {
-        match $sock.overlay.lock() {
-            Ok(g) => g,
-            Err(_) => return crate::error::fail(crate::error::ETERM).into(),
-        }
-    };
-}
-
-// Declared after `lock_overlay!`, which these modules use.
 mod codes;
 mod get;
 mod raw;

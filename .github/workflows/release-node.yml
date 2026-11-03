@@ -85,6 +85,8 @@ jobs:
           workspaces: bindings/node
       - uses: mlugg/setup-zig@v2
         if: matrix.cross
+        with:
+          version: 0.17.0
       - name: Install npm deps
         working-directory: bindings/node
         run: npm ci

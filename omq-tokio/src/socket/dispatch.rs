@@ -280,14 +280,9 @@ pub(super) async fn preflight_connect_endpoint_resolution(endpoint: &Endpoint) -
 }
 
 async fn preflight_connect_host(host: &Host, port: u16) -> Result<()> {
-    match host {
-        Host::Wildcard => Err(Error::InvalidEndpoint(
-            "cannot connect to wildcard host".into(),
-        )),
-        Host::Ip(_) => Ok(()),
-        Host::Name(name) => crate::transport::dns::resolve(name, port).await.map(|_| ()),
-        _ => unreachable!(),
-    }
+    crate::transport::dns::connect_addrs(host, port)
+        .await
+        .map(|_| ())
 }
 
 /// Connect dispatch (single attempt). Used under `dial_with_backoff`.

@@ -3,8 +3,6 @@
 //! These sockets deliberately require `&mut self`: the caller polls TCP and
 //! ZMTP directly, without a connection-driver task or data relay ring.
 
-use std::io;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -494,7 +492,7 @@ async fn bind_tcp_listener(endpoint: &Endpoint) -> Result<(TcpListener, Endpoint
             "exclusive sockets currently support only tcp:// endpoints".into(),
         ));
     };
-    let addr = resolve_bind_addr(host, *port).await?;
+    let addr = crate::transport::dns::bind_addr(host, *port).await?;
     let listener = crate::transport::tcp::reuse_addr_bind(addr)?;
     let local = listener.local_addr()?;
     let bound = Endpoint::Tcp {
@@ -502,21 +500,6 @@ async fn bind_tcp_listener(endpoint: &Endpoint) -> Result<(TcpListener, Endpoint
         port: local.port(),
     };
     Ok((listener, bound))
-}
-
-async fn resolve_bind_addr(host: &Host, port: u16) -> Result<SocketAddr> {
-    match host {
-        Host::Wildcard => Ok(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port)),
-        Host::Ip(ip) => Ok(SocketAddr::new(*ip, port)),
-        Host::Name(name) => crate::transport::dns::resolve(name, port)
-            .await?
-            .into_iter()
-            .next()
-            .ok_or_else(|| Error::Io(io::Error::other(format!("no addresses for {name}:{port}")))),
-        _ => Err(Error::Config(
-            "exclusive sockets do not support this TCP host type".into(),
-        )),
-    }
 }
 
 fn is_identity_routed(socket_type: SocketType) -> bool {

@@ -6,8 +6,7 @@ use super::peer_materialize::PeerChannels;
 use super::{
     ConnectionStatus, DialerEntry, DisconnectReason, Endpoint, EndpointTask, Error, MonitorEvent,
     PeerIdent, PeerInfo, Result, SocketDriver, SocketType, UdpDialerEntry, bind_any,
-    reject_encrypted_inproc, spawn_dish_listener, spawn_radio_sender, supports_groups,
-    supports_subscribe,
+    reject_encrypted_inproc, spawn_dish_listener, spawn_radio_sender,
 };
 use crate::socket::actor::lifecycle::PeerLifecycle;
 
@@ -338,86 +337,6 @@ impl SocketDriver {
     pub(super) fn server_peer_info(&self, routing_id: u32) -> Option<PeerInfo> {
         let connection_id = u64::from(routing_id.checked_sub(1)?);
         self.peers.get(&connection_id)?.info.clone()
-    }
-
-    /// Returns the peers whose protocol lane backlogged. The caller's ack
-    /// waits for them; the actor never does.
-    pub(super) fn apply_join(
-        &mut self,
-        group: bytes::Bytes,
-        joining: bool,
-    ) -> Result<Vec<crate::engine::control_inbox::Sender>> {
-        if !supports_groups(self.socket_type) {
-            return Err(Error::Protocol(
-                "socket type does not support join / leave".into(),
-            ));
-        }
-        {
-            let mut groups = (**self.routing.joined_groups.load()).clone();
-            if joining {
-                groups.insert(group.clone());
-            } else {
-                groups.remove(&group);
-            }
-            self.routing.joined_groups.store(Arc::new(groups));
-        }
-        // Replay to data-plane-ready peers. Pending peers pick up the join
-        // via `handle_peer_event(HandshakeSucceeded)`'s replay loop. UDP DISH
-        // listener tasks see the change through the shared set, no command
-        // needed.
-        let cmd = if joining {
-            omq_proto::proto::Command::Join(group)
-        } else {
-            omq_proto::proto::Command::Leave(group)
-        };
-        Ok(self.send_protocol_to_ready_peers(&cmd))
-    }
-
-    /// Returns the peers whose protocol lane backlogged. The caller's ack
-    /// waits for them; the actor never does.
-    pub(super) fn apply_subscription(
-        &mut self,
-        prefix: bytes::Bytes,
-        subscribe: bool,
-    ) -> Result<Vec<crate::engine::control_inbox::Sender>> {
-        if !supports_subscribe(self.socket_type) {
-            return Err(Error::Protocol(
-                "socket type does not support subscribe".into(),
-            ));
-        }
-        if subscribe {
-            self.routing.subscriptions.push(prefix.clone());
-        } else if let Some(pos) = self.routing.subscriptions.iter().position(|p| p == &prefix) {
-            self.routing.subscriptions.remove(pos);
-        }
-        // Broadcast to every data-plane-ready peer. Pending peers are skipped;
-        // `handle_peer_event(HandshakeSucceeded)` replays `self.subscriptions`
-        // for each peer as it transitions to ready.
-        let cmd = if subscribe {
-            omq_proto::proto::Command::Subscribe(prefix)
-        } else {
-            omq_proto::proto::Command::Cancel(prefix)
-        };
-        Ok(self.send_protocol_to_ready_peers(&cmd))
-    }
-
-    /// Queue `cmd` for every data-plane-ready peer without waiting.
-    fn send_protocol_to_ready_peers(
-        &self,
-        cmd: &omq_proto::proto::Command,
-    ) -> Vec<crate::engine::control_inbox::Sender> {
-        let mut backlogged = Vec::new();
-        for p in self.peers.values() {
-            if !p.ready {
-                continue;
-            }
-            let inbox = &p.handle.inbox;
-            let _ = inbox.try_send(crate::engine::PeerDriverCommand::SendCommand(cmd.clone()));
-            if inbox.protocol_backlogged() {
-                backlogged.push(inbox.clone());
-            }
-        }
-        backlogged
     }
 
     pub(super) fn capture_endpoint_options(

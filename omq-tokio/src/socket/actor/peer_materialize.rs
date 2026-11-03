@@ -13,6 +13,7 @@ use omq_proto::{Options, WorkloadProfile};
 
 mod inproc;
 mod recv_bypass;
+mod stream;
 
 pub(super) use inproc::spawn_inproc_peer;
 pub(super) use recv_bypass::server_routing_id;

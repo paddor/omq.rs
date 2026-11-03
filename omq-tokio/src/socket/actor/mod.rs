@@ -7,12 +7,14 @@ mod dart;
 mod dialer;
 mod endpoint_resolution;
 mod endpoints;
+mod handshake;
 mod inproc_driver;
 mod lifecycle;
 mod link;
 mod listener;
 mod peer;
 mod peer_materialize;
+mod subscriptions;
 
 use close::{CloseState, PEER_TASK_JOIN_TIMEOUT, stop_peer_task};
 pub(crate) use link::{CloseLinger, DriverEnv, HandleLink, HandleShared, SocketCommand};

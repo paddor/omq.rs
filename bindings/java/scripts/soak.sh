@@ -46,7 +46,10 @@ case "$(uname -m)" in
 esac
 
 platform="${os}-${arch}"
-native_dir="${repo_root}/bindings/java/native/target/release"
+target_dir="$("${cargo_cmd}" metadata --format-version 1 --no-deps \
+  --manifest-path "${repo_root}/bindings/java/native/Cargo.toml" \
+  | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
+native_dir="${target_dir}/release"
 resource_dir="${repo_root}/bindings/java/target/test-classes/io/omq/native/${platform}"
 
 if [[ "${SOAK_SKIP_BUILD:-0}" != "1" ]]; then

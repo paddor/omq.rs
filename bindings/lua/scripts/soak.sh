@@ -21,8 +21,12 @@ case "$(uname -s)" in
         ;;
 esac
 
+target_dir="$("${cargo_cmd}" metadata --format-version 1 --no-deps \
+    --manifest-path "${repo_root}/bindings/lua/native/Cargo.toml" \
+    | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
+
 export LUA_PATH="${repo_root}/bindings/lua/lua/?.lua;;"
-export LUA_CPATH="${repo_root}/bindings/lua/native/target/release/${lib_pattern};;"
+export LUA_CPATH="${target_dir}/release/${lib_pattern};;"
 
 for duration in ${durations}; do
     echo "== OMQ.lua soak: ${duration}s, workers=${workers} =="

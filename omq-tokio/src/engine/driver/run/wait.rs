@@ -45,13 +45,13 @@ impl Session<'_> {
             () = self.shm_driver.credit_returned(self.transmit_slot.as_deref()),
                 if self.shm_driver.waiting_for_credit() => Ok(Flow::Next),
 
-            permit = &mut waits.control.pending, if self.peer_events.control_ready(&mut self.peer_out, self.pending_receive.is_none()) => {
+            permit = &mut waits.control.pending, if self.peer_events.control_ready(&mut self.outlet.output, self.pending_receive.is_none()) => {
                 Ok(rearm_after(&mut waits.control, self.send_control(permit)))
             }
 
-            result = self.peer_out.ready(),
+            result = self.outlet.output.ready(),
                 if (self.pending_receive.is_some() && self.recv_direct.is_none())
-                    || (self.pending_receive.is_none() && self.peer_events.notification_pending() && !self.peer_out.has_capacity()) => {
+                    || (self.pending_receive.is_none() && self.peer_events.notification_pending() && !self.outlet.output.has_capacity()) => {
                 Ok(self.on_output_ready(result.is_ok()))
             }
 
@@ -162,12 +162,7 @@ impl Session<'_> {
             return Flow::Exit;
         };
 
-        Flow::exit_unless(self.peer_events.send_reserved(
-            permit,
-            self.peer_id,
-            self.completion,
-            &mut self.peer_out,
-        ))
+        Flow::exit_unless(self.peer_events.send_reserved(permit, self.outlet.view()))
     }
 
     /// Actor output has room: refresh the control prefix, then retry a
@@ -176,14 +171,15 @@ impl Session<'_> {
         if !ready {
             return Flow::Exit;
         }
-        self.peer_out
+        self.outlet
+            .output
             .set_control_prefix(self.peer_events.control_prefix());
 
         if self.recv_direct.is_none()
             && let Some(message) = self.pending_receive.take()
         {
-            match self.peer_out.try_send(self.peer_id, message, false) {
-                Ok(()) => self.completion.note_event(),
+            match self.outlet.view().try_send(message, false) {
+                Ok(()) => {}
                 Err(SendPipeError::Full(message)) => self.pending_receive = Some(message),
                 Err(SendPipeError::Closed(_)) => return Flow::Exit,
                 #[cfg(feature = "dart")]

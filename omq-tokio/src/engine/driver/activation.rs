@@ -9,9 +9,8 @@ use super::{
     write::{mark_peer_dead, write_handshake_progress},
 };
 use crate::engine::{
-    actor_output::PeerOutput,
+    actor_output::OutletRef,
     control_inbox,
-    peer_completion::CompletionProgress,
     peer_events::{EventRoute, PeerEventDispatch},
     transmit_slot::PeerTransmitSlot,
 };
@@ -65,10 +64,8 @@ pub(super) struct Activation<'a, 'events> {
     pub(super) inbox: &'a mut control_inbox::Receiver,
     pub(super) peer_events: &'a mut PeerEventDispatch,
     pub(super) event_out: &'events mpsc::Sender<(u64, PeerEvent)>,
-    pub(super) peer_out: &'a mut PeerOutput,
-    pub(super) peer_id: u64,
+    pub(super) outlet: OutletRef<'a>,
     pub(super) recv_direct: &'a mut Option<RecvSink>,
-    pub(super) completion: &'a mut CompletionProgress,
     pub(super) transmit_slot: Option<&'a PeerTransmitSlot>,
     pub(super) cancel: &'a CancellationToken,
     pub(super) setup_cancel: Option<&'a CancellationToken>,
@@ -122,13 +119,13 @@ impl<'events> Activation<'_, 'events> {
 
                 cmd = self.inbox.recv() => self.on_command(cmd, &mut activation_budget).await,
 
-                permit = &mut credit.pending, if self.peer_events.control_ready(self.peer_out, true) => {
+                permit = &mut credit.pending, if self.peer_events.control_ready(self.outlet.output, true) => {
                     let step = self.send_control(permit);
                     credit.rearm_if(step == PreActivationStep::Continue);
                     Ok(step)
                 }
 
-                result = self.peer_out.ready(), if self.peer_events.notification_pending() && !self.peer_out.has_capacity() => {
+                result = self.outlet.output.ready(), if self.peer_events.notification_pending() && !self.outlet.output.has_capacity() => {
                     Ok(if result.is_err() { PreActivationStep::Close } else { PreActivationStep::Continue })
                 }
 
@@ -224,7 +221,7 @@ impl<'events> Activation<'_, 'events> {
 
         if self
             .peer_events
-            .send_reserved(permit, self.peer_id, self.completion, self.peer_out)
+            .send_reserved(permit, self.outlet.reborrow())
         {
             PreActivationStep::Continue
         } else {
@@ -287,9 +284,7 @@ impl<'events> Activation<'_, 'events> {
 
         let route = EventRoute {
             mailbox: self.event_out,
-            output: self.peer_out,
-            peer_id: self.peer_id,
-            completion: self.completion,
+            outlet: self.outlet.reborrow(),
         };
         if !self
             .peer_events

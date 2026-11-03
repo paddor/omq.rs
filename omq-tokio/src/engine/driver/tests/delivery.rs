@@ -1,4 +1,5 @@
 use super::*;
+use crate::engine::actor_output::OutletRef;
 
 #[test]
 fn yring_sink_signals_every_flush_even_when_nonempty() {
@@ -152,9 +153,7 @@ fn receive_frame_validation_drops_bad_envelopes_without_using_queue_credit() {
     let mut sink = None;
     let mut delivery = MessageDelivery {
         sink: &mut sink,
-        peer_out: &mut events,
-        peer_id: 0,
-        completion: &mut completion,
+        outlet: OutletRef::new(&mut events, 0, &mut completion),
         pending: &mut pending,
         reserved_admission: false,
         expected_parts: Some(2),
@@ -209,9 +208,7 @@ async fn full_peer_queue_bounds_pending_delivery_and_leaves_decoder_remainder_in
                 ReceiveProfile::Throughput,
                 MessageDelivery {
                     sink: &mut sink,
-                    peer_out: &mut events,
-                    peer_id: 0,
-                    completion: &mut CompletionProgress::default(),
+                    outlet: OutletRef::new(&mut events, 0, &mut CompletionProgress::default()),
                     pending: &mut pending,
                     reserved_admission: false,
                     expected_parts: None,

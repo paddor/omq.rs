@@ -2,8 +2,7 @@
 
 use super::{BATCH_TIME_CHECK_MSGS, DriverStep, RecvSink};
 use crate::engine::{
-    actor_output::PeerOutput,
-    peer_completion::CompletionProgress,
+    actor_output::OutletRef,
     rate_limit::{SharedIpRateLimiter, TokenBucket},
 };
 use omq_proto::{
@@ -80,9 +79,7 @@ pub(super) struct ReceiveRateLimiters<'a> {
 
 pub(super) struct MessageDelivery<'a> {
     pub(super) sink: &'a mut Option<RecvSink>,
-    pub(super) peer_out: &'a mut PeerOutput,
-    pub(super) peer_id: u64,
-    pub(super) completion: &'a mut CompletionProgress,
+    pub(super) outlet: OutletRef<'a>,
     pub(super) pending: &'a mut Option<Message>,
     pub(super) reserved_admission: bool,
     pub(super) expected_parts: Option<usize>,
@@ -129,11 +126,8 @@ impl MessageDelivery<'_> {
         let result = if let Some(sink) = self.sink {
             sink.try_send_with_flush_mode(message, defer, pending_flush)
         } else {
-            match self.peer_out.try_send(self.peer_id, message, false) {
-                Ok(()) => {
-                    self.completion.note_event();
-                    Ok(())
-                }
+            match self.outlet.try_send(message, false) {
+                Ok(()) => Ok(()),
                 Err(crate::engine::SendPipeError::Full(message)) => {
                     Err(TrySendError::Full(message))
                 }

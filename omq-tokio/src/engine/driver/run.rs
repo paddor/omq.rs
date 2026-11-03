@@ -17,7 +17,7 @@ use super::{
 };
 use crate::engine::{
     AuthenticatedRecvItem,
-    actor_output::PeerOutput,
+    actor_output::PeerOutlet,
     compression_pool::EncoderLoan,
     control_inbox,
     peer_completion::CompletionProgress,
@@ -156,11 +156,9 @@ struct Session<'c> {
     recv_direct: Option<RecvSink>,
     config: PeerDriverConfig,
     cancel: CancellationToken,
-    peer_id: u64,
-    peer_out: PeerOutput,
+    outlet: PeerOutlet<'c>,
     inbox: control_inbox::Receiver,
     connection: Connection,
-    completion: &'c mut CompletionProgress,
 }
 
 impl<T> ConnectionDriver<T>
@@ -221,7 +219,7 @@ where
 
         // Socket-owned drivers publish codec events on a separate control
         // mailbox. Standalone drivers share the caller's combined channel.
-        let legacy_events = session.peer_out.legacy_sender();
+        let legacy_events = session.outlet.output.legacy_sender();
         let event_out = peer_control
             .as_ref()
             .or(legacy_events.as_ref())
@@ -340,11 +338,9 @@ where
             recv_direct: self.recv_direct,
             config: self.config,
             cancel: self.cancel,
-            peer_id: self.peer_id,
-            peer_out: self.peer_out,
+            outlet: PeerOutlet::new(self.peer_out, self.peer_id, completion),
             inbox: self.inbox,
             connection: self.connection,
-            completion,
         };
 
         let wiring = Wiring {
@@ -369,10 +365,8 @@ impl Session<'_> {
             inbox: &mut self.inbox,
             peer_events: &mut self.peer_events,
             event_out,
-            peer_out: &mut self.peer_out,
-            peer_id: self.peer_id,
+            outlet: self.outlet.view(),
             recv_direct: &mut self.recv_direct,
-            completion: self.completion,
             transmit_slot: self.transmit_slot.as_deref(),
             cancel: &self.cancel,
             setup_cancel,
@@ -500,9 +494,7 @@ impl Session<'_> {
             let data_clear = self.pending_receive.is_none();
             let route = EventRoute {
                 mailbox: event_out,
-                output: &mut self.peer_out,
-                peer_id: self.peer_id,
-                completion: self.completion,
+                outlet: self.outlet.view(),
             };
             if !self.peer_events.drive(
                 &mut self.connection,
@@ -519,7 +511,8 @@ impl Session<'_> {
             return Err(self.pending_input_error.take().unwrap());
         }
 
-        self.peer_out
+        self.outlet
+            .output
             .set_control_prefix(self.peer_events.control_prefix());
         Ok(true)
     }
@@ -577,9 +570,7 @@ impl Session<'_> {
 
         let delivery = MessageDelivery {
             sink: &mut self.recv_direct,
-            peer_out: &mut self.peer_out,
-            peer_id: self.peer_id,
-            completion: self.completion,
+            outlet: self.outlet.view(),
             pending: &mut self.pending_receive,
             reserved_admission,
             expected_parts: receive.parts,

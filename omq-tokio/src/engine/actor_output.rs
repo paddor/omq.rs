@@ -12,6 +12,7 @@ use omq_proto::Message;
 use omq_proto::proto::Event;
 use tokio::sync::mpsc;
 
+use super::peer_completion::CompletionProgress;
 use super::{PeerEvent, SendPipeError};
 
 #[derive(Debug)]
@@ -168,6 +169,100 @@ impl PeerOutput {
         if let Self::Actor { control_prefix, .. } = self {
             *control_prefix = prefix;
         }
+    }
+}
+
+/// One peer driver's actor-bound output, with the peer id it stamps and the
+/// completion that counts every admitted event.
+pub(super) struct PeerOutlet<'c> {
+    pub(super) output: PeerOutput,
+    peer_id: u64,
+    completion: &'c mut CompletionProgress,
+}
+
+impl<'c> PeerOutlet<'c> {
+    pub(super) fn new(
+        output: PeerOutput,
+        peer_id: u64,
+        completion: &'c mut CompletionProgress,
+    ) -> Self {
+        Self {
+            output,
+            peer_id,
+            completion,
+        }
+    }
+
+    /// Borrow by value, so receive paths keep one pointer hop per field.
+    #[inline]
+    pub(super) fn view(&mut self) -> OutletRef<'_> {
+        OutletRef {
+            output: &mut self.output,
+            peer_id: self.peer_id,
+            completion: self.completion,
+        }
+    }
+}
+
+/// A borrowed [`PeerOutlet`].
+pub(super) struct OutletRef<'a> {
+    pub(super) output: &'a mut PeerOutput,
+    peer_id: u64,
+    completion: &'a mut CompletionProgress,
+}
+
+#[cfg(test)]
+impl<'a> OutletRef<'a> {
+    pub(super) fn new(
+        output: &'a mut PeerOutput,
+        peer_id: u64,
+        completion: &'a mut CompletionProgress,
+    ) -> Self {
+        Self {
+            output,
+            peer_id,
+            completion,
+        }
+    }
+}
+
+impl OutletRef<'_> {
+    #[inline]
+    pub(super) fn reborrow(&mut self) -> OutletRef<'_> {
+        OutletRef {
+            output: self.output,
+            peer_id: self.peer_id,
+            completion: self.completion,
+        }
+    }
+
+    /// Admit a message or XPUB notification; counts it once admitted.
+    #[inline]
+    pub(super) fn try_send(
+        &mut self,
+        message: Message,
+        notification: bool,
+    ) -> Result<(), SendPipeError> {
+        self.output.try_send(self.peer_id, message, notification)?;
+        self.completion.note_event();
+        Ok(())
+    }
+
+    /// Admit a codec event into its reserved mailbox slot.
+    pub(super) fn send_event(&mut self, permit: mpsc::Permit<'_, (u64, PeerEvent)>, event: Event) {
+        permit.send((self.peer_id, PeerEvent::Event(event)));
+        self.completion.note_event();
+    }
+
+    /// Admit a codec event if the mailbox has room; counts it once admitted.
+    pub(super) fn try_send_event(
+        &mut self,
+        mailbox: &mpsc::Sender<(u64, PeerEvent)>,
+        event: Event,
+    ) -> Result<(), mpsc::error::TrySendError<(u64, PeerEvent)>> {
+        mailbox.try_send((self.peer_id, PeerEvent::Event(event)))?;
+        self.completion.note_event();
+        Ok(())
     }
 }
 

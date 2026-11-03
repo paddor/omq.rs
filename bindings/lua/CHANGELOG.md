@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.2.13] - 2026-11-03
+
+### Changed
+
+- Bundle `omq-libzmq` built on `omq-tokio` 0.34.2. Single-peer receives no
+  longer allocate when a message arrives mid-receive.
+
 ## [0.2.12] - 2026-11-03
 
 ### Changed

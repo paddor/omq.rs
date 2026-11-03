@@ -34,11 +34,6 @@ impl WireFraming {
             Self::Zmtp => WsRole::Server,
         }
     }
-
-    #[cfg(all(test, feature = "ws"))]
-    pub(crate) fn is_masked(self) -> bool {
-        matches!(self, Self::Zws(WsRole::Client))
-    }
 }
 
 #[cfg(test)]

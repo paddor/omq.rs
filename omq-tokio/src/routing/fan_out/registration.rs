@@ -255,7 +255,10 @@ mod tests {
             .collect();
         match framing {
             WireFraming::Zmtp => assert_eq!(wire, b"\x01\x05topic\x00\x07payload"),
-            WireFraming::Zws(_) => assert_zws_wire(&wire, framing.is_masked()),
+            WireFraming::Zws(_) => assert_zws_wire(
+                &wire,
+                framing.ws_send_role() == omq_proto::proto::connection::WsRole::Client,
+            ),
         }
     }
 

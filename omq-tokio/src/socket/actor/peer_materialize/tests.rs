@@ -1,4 +1,5 @@
 use super::recv_bypass::{can_use_yring_recv_bypass, fanin_recv_sink};
+use super::wire::supports_direct_tcp_writer;
 use super::*;
 
 #[cfg(target_os = "linux")]

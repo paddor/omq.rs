@@ -106,7 +106,7 @@ fn get_state_option(sock_arc: &Arc<OmqSocket>, option: c_int, out: OptOut) -> Re
     match option {
         ZMQ_RCVMORE => out.i32(i32::from(rcvmore(sock_arc))),
         ZMQ_TYPE => {
-            let Some(v) = zmq_type_code(sock_arc.socket_type) else {
+            let Some(v) = crate::socket::socket_type_code(sock_arc.socket_type) else {
                 return Err(libc::EINVAL);
             };
             out.i32(v)
@@ -137,10 +137,7 @@ fn get_state_option(sock_arc: &Arc<OmqSocket>, option: c_int, out: OptOut) -> Re
 /// `ZMQ_RCVMORE` for whichever receive path this socket uses: ZAP handler,
 /// authenticated receive, or the plain receive drain.
 fn rcvmore(sock_arc: &OmqSocket) -> bool {
-    if sock_arc
-        .zap_handler
-        .load(std::sync::atomic::Ordering::Acquire)
-    {
+    if sock_arc.is_zap_handler() {
         sock_arc.ctx.zap.has_more(sock_arc.id)
     } else if crate::send_recv::authenticated_recv_configured(sock_arc) {
         crate::send_recv::authenticated_recv_has_more(sock_arc)
@@ -152,35 +149,6 @@ fn rcvmore(sock_arc: &OmqSocket) -> bool {
     }
 }
 
-/// libzmq's `ZMQ_TYPE` numbering; `None` for omq-only socket types.
-fn zmq_type_code(socket_type: SocketType) -> Option<i32> {
-    let code = match socket_type {
-        SocketType::Pair => 0,
-        SocketType::Pub => 1,
-        SocketType::Sub => 2,
-        SocketType::Req => 3,
-        SocketType::Rep => 4,
-        SocketType::Dealer => 5,
-        SocketType::Router => 6,
-        SocketType::Pull => 7,
-        SocketType::Push => 8,
-        SocketType::XPub => 9,
-        SocketType::XSub => 10,
-        SocketType::Server => 12,
-        SocketType::Client => 13,
-        SocketType::Radio => 14,
-        SocketType::Dish => 15,
-        SocketType::Gather => 16,
-        SocketType::Scatter => 17,
-        SocketType::Peer => 19,
-        SocketType::Channel => 20,
-        SocketType::Stream => 11,
-        _ => return None,
-    };
-
-    Some(code)
-}
-
 /// `ZMQ_EVENTS` bits: POLLOUT when a send would not block, POLLIN when any
 /// receive source has data.
 fn poll_events(sock_arc: &OmqSocket) -> i32 {
@@ -190,10 +158,7 @@ fn poll_events(sock_arc: &OmqSocket) -> i32 {
         0
     };
 
-    let drain_nonempty = if sock_arc
-        .zap_handler
-        .load(std::sync::atomic::Ordering::Acquire)
-    {
+    let drain_nonempty = if sock_arc.is_zap_handler() {
         sock_arc.ctx.zap.has_input(sock_arc.id)
     } else {
         sock_arc

@@ -172,7 +172,7 @@ fn with_authenticator(
 /// so that options set between `zmq_socket` and first bind/connect take
 /// effect.
 pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) -> Result<(), c_int> {
-    if sock.zap_handler.load(Ordering::Acquire) {
+    if sock.is_zap_handler() {
         return Err(libc::EINVAL);
     }
     let Some(ctx) = sock.ctx.io_context().cloned() else {

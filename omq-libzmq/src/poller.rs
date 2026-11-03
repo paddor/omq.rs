@@ -3,7 +3,7 @@
 use std::ffi::{c_int, c_short, c_void};
 
 use crate::error::{c_try, fail};
-use crate::poll::{ZmqFd, ZmqPollItem};
+use crate::poll::{ZmqFd, ZmqPollItem, invalid_fd};
 
 #[derive(Clone, Copy, Debug)]
 enum PollerTarget {
@@ -30,17 +30,6 @@ pub struct ZmqPollerEvent {
     pub fd: ZmqFd,
     pub user_data: *mut c_void,
     pub events: c_short,
-}
-
-fn invalid_fd() -> ZmqFd {
-    #[cfg(unix)]
-    {
-        -1
-    }
-    #[cfg(windows)]
-    {
-        ZmqFd::MAX
-    }
 }
 
 fn fd_is_invalid(fd: ZmqFd) -> bool {

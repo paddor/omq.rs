@@ -48,7 +48,7 @@ pub(crate) enum SendMessageAttempt {
 pub(crate) fn try_recv_message(sock: &OmqSocket) -> Result<Option<omq_tokio::Message>, c_int> {
     use std::sync::atomic::Ordering;
 
-    if sock.zap_handler.load(Ordering::Acquire) {
+    if sock.is_zap_handler() {
         return sock
             .ctx
             .zap
@@ -88,7 +88,7 @@ pub(crate) fn try_send_message(
     sock: &Arc<OmqSocket>,
     msg: omq_tokio::Message,
 ) -> Result<SendMessageAttempt, c_int> {
-    if sock.zap_handler.load(std::sync::atomic::Ordering::Acquire) {
+    if sock.is_zap_handler() {
         let response: Vec<Bytes> = (0..msg.len())
             .filter_map(|index| msg.part_bytes(index))
             .collect();
@@ -114,7 +114,7 @@ pub(crate) fn try_send_message(
 
 /// libzmq `ZMQ_POLLOUT`: whether a `ZMQ_DONTWAIT` send would be accepted.
 pub(crate) fn send_ready(sock: &OmqSocket) -> bool {
-    if sock.zap_handler.load(std::sync::atomic::Ordering::Acquire) {
+    if sock.is_zap_handler() {
         return sock.ctx.zap.can_send(sock.id);
     }
     let Some(inner) = sock.inner.get() else {
@@ -441,7 +441,7 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
         return fail(libc::EMSGSIZE);
     }
 
-    if sock.zap_handler.load(std::sync::atomic::Ordering::Acquire) {
+    if sock.is_zap_handler() {
         return send_zap_bytes(sock, data, flags, ret_len);
     }
 
@@ -621,7 +621,7 @@ pub(crate) fn send_message(
     if max > 0 && msg.byte_len() > max as usize {
         return fail(libc::EMSGSIZE);
     }
-    if sock.zap_handler.load(std::sync::atomic::Ordering::Acquire) {
+    if sock.is_zap_handler() {
         let response: Vec<Bytes> = (0..msg.len())
             .filter_map(|index| msg.part_bytes(index))
             .collect();

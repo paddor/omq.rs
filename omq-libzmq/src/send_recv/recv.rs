@@ -53,7 +53,7 @@ pub extern "C" fn zmq_recviov(
 fn zmq_recv_impl(sock: &OmqSocket, buf: *mut libc::c_void, buf_len: usize, flags: c_int) -> c_int {
     use std::sync::atomic::Ordering;
 
-    if sock.zap_handler.load(Ordering::Acquire) {
+    if sock.is_zap_handler() {
         return zmq_recv_via_frame(sock, buf, buf_len, flags);
     }
 
@@ -232,7 +232,7 @@ pub(crate) fn pop_recv_frame_with_properties(
 pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, bool), c_int> {
     use std::sync::atomic::Ordering;
 
-    if sock.zap_handler.load(Ordering::Acquire) {
+    if sock.is_zap_handler() {
         return pop_zap_frame(sock, RecvWait::new(sock, flags));
     }
 

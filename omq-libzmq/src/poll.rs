@@ -24,6 +24,18 @@ pub(crate) type ZmqFd = libc::c_int;
 #[cfg(windows)]
 pub(crate) type ZmqFd = usize;
 
+/// The fd reported for socket items and unset fd slots.
+pub(crate) fn invalid_fd() -> ZmqFd {
+    #[cfg(unix)]
+    {
+        -1
+    }
+    #[cfg(windows)]
+    {
+        ZmqFd::MAX
+    }
+}
+
 pub(crate) const ZMQ_POLLIN: libc::c_short = consts::ZMQ_POLLIN as libc::c_short;
 pub(crate) const ZMQ_POLLOUT: libc::c_short = consts::ZMQ_POLLOUT as libc::c_short;
 #[allow(dead_code)]

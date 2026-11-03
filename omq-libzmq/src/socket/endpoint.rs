@@ -124,7 +124,7 @@ pub extern "C" fn zmq_bind(sock_ptr: *mut c_void, addr: *const libc::c_char) -> 
         }
         return 0;
     }
-    if sock.zap_handler.load(Ordering::Acquire) {
+    if sock.is_zap_handler() {
         return fail(libc::EINVAL);
     }
 
@@ -162,7 +162,7 @@ pub extern "C" fn zmq_connect(sock_ptr: *mut c_void, addr: *const libc::c_char) 
     if addr_str == crate::zap::ENDPOINT {
         return fail(libc::EINVAL);
     }
-    if sock.zap_handler.load(Ordering::Acquire) {
+    if sock.is_zap_handler() {
         return fail(libc::EINVAL);
     }
 

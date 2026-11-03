@@ -66,33 +66,52 @@ impl OmqSocket {
         self.send.allow_thread_migration();
         self.recv.allow_thread_migration();
     }
+
+    /// True for the REP socket bound to the reserved ZAP endpoint.
+    #[inline]
+    pub(crate) fn is_zap_handler(&self) -> bool {
+        self.zap_handler.load(Ordering::Acquire)
+    }
 }
 
-/// Map ZMQ socket-type integer to `SocketType`.
-fn map_socket_type(t: c_int) -> Option<SocketType> {
-    match t {
-        0 => Some(SocketType::Pair),
-        1 => Some(SocketType::Pub),
-        2 => Some(SocketType::Sub),
-        3 => Some(SocketType::Req),
-        4 => Some(SocketType::Rep),
-        5 => Some(SocketType::Dealer),
-        6 => Some(SocketType::Router),
-        7 => Some(SocketType::Pull),
-        8 => Some(SocketType::Push),
-        9 => Some(SocketType::XPub),
-        10 => Some(SocketType::XSub),
-        11 => Some(SocketType::Stream),
-        12 => Some(SocketType::Server),
-        13 => Some(SocketType::Client),
-        14 => Some(SocketType::Radio),
-        15 => Some(SocketType::Dish),
-        16 => Some(SocketType::Gather),
-        17 => Some(SocketType::Scatter),
-        19 => Some(SocketType::Peer),
-        20 => Some(SocketType::Channel),
-        _ => None,
-    }
+/// libzmq socket type codes (`ZMQ_PAIR` .. `ZMQ_CHANNEL`; 18 is unused).
+const SOCKET_TYPES: [(c_int, SocketType); 20] = [
+    (0, SocketType::Pair),
+    (1, SocketType::Pub),
+    (2, SocketType::Sub),
+    (3, SocketType::Req),
+    (4, SocketType::Rep),
+    (5, SocketType::Dealer),
+    (6, SocketType::Router),
+    (7, SocketType::Pull),
+    (8, SocketType::Push),
+    (9, SocketType::XPub),
+    (10, SocketType::XSub),
+    (11, SocketType::Stream),
+    (12, SocketType::Server),
+    (13, SocketType::Client),
+    (14, SocketType::Radio),
+    (15, SocketType::Dish),
+    (16, SocketType::Gather),
+    (17, SocketType::Scatter),
+    (19, SocketType::Peer),
+    (20, SocketType::Channel),
+];
+
+/// Map a libzmq socket type code to `SocketType`.
+fn map_socket_type(code: c_int) -> Option<SocketType> {
+    SOCKET_TYPES
+        .iter()
+        .find(|&&(candidate, _)| candidate == code)
+        .map(|&(_, socket_type)| socket_type)
+}
+
+/// libzmq's `ZMQ_TYPE` code; `None` for omq-only socket types.
+pub(crate) fn socket_type_code(socket_type: SocketType) -> Option<c_int> {
+    SOCKET_TYPES
+        .iter()
+        .find(|&&(_, candidate)| candidate == socket_type)
+        .map(|&(code, _)| code)
 }
 
 /// Run an async op against the socket's inner Arc on the context runtime and

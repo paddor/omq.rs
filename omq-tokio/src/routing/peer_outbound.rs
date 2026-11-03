@@ -228,7 +228,6 @@ mod tests {
         use std::io::Read;
         use std::net::{TcpListener, TcpStream};
         use std::sync::Arc;
-        use std::sync::atomic::Ordering;
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let tcp = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
@@ -255,7 +254,7 @@ mod tests {
             target.try_encode(&Message::from_slice(b"older")),
             TryFrameResult::Ok
         );
-        slot.handshake_done.store(true, Ordering::Release);
+        slot.mark_handshake_done();
         assert_eq!(
             target.try_encode(&Message::from_slice(b"newer")),
             TryFrameResult::Ok

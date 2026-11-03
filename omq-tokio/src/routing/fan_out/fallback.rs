@@ -227,7 +227,6 @@ fn push_wire(
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::sync::atomic::Ordering;
 
     use omq_proto::fan_out_frame::{build_fan_out_frame, clear_fan_out_frame};
 
@@ -526,7 +525,7 @@ mod tests {
                 ..SlotConfig::default()
             },
         );
-        slot.handshake_done.store(true, Ordering::Release);
+        slot.mark_handshake_done();
         slot
     }
 
@@ -539,7 +538,7 @@ mod tests {
                 ..SlotConfig::default()
             },
         );
-        slot.handshake_done.store(true, Ordering::Release);
+        slot.mark_handshake_done();
         slot
     }
 

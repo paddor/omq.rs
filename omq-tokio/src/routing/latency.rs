@@ -397,7 +397,6 @@ impl State {
 mod tests {
     use std::net::{TcpListener, TcpStream};
     use std::sync::Arc;
-    use std::sync::atomic::Ordering;
     use std::time::Duration;
 
     use bytes::Bytes;
@@ -455,7 +454,7 @@ mod tests {
                 ..SlotConfig::default()
             },
         );
-        slot.handshake_done.store(true, Ordering::Release);
+        slot.mark_handshake_done();
         let (handle, mut receiver) = direct_peer_handle(slot.clone());
         send.connection_added(7, &handle);
 

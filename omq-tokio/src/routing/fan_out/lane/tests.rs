@@ -551,8 +551,7 @@ async fn shm_dispatch_keeps_ready_peers_progressing_under_both_mute_policies() {
             for (slot, stream) in [(&slow, &first), (&fast, &second)] {
                 let state = omq_shm::Connection::new(stream, 8, None).unwrap();
                 slot.set_shm(Arc::new(Mutex::new(state)));
-                slot.handshake_done
-                    .store(true, std::sync::atomic::Ordering::Release);
+                slot.mark_handshake_done();
             }
             let (mut worker, _control) = batch_worker(policy, &[slow.clone(), fast.clone()]);
             let msg = omq_proto::Message::with_group("group", vec![7; size]);

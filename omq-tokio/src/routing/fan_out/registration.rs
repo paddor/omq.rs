@@ -153,7 +153,7 @@ mod tests {
                 ..SlotConfig::default()
             },
         );
-        slot.handshake_done.store(true, Ordering::Release);
+        slot.mark_handshake_done();
         let (inbox, _commands) = mpsc::channel(1);
         let (data_inbox, data) = mpsc::channel(1);
         let handle = ActorPeerDriverHandle {

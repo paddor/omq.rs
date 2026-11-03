@@ -464,17 +464,13 @@ impl IdentitySend {
     }
 
     pub(crate) fn new(socket_type: SocketType, options: &Options) -> Self {
-        let latency_profile = options
-                .workload_profile
-                .unwrap_or(if socket_type == SocketType::Rep {
-                    omq_proto::WorkloadProfile::Latency
-                } else {
-                    omq_proto::WorkloadProfile::Throughput
-                })
+        // REP matches the socket's latency gate; CURVE peers use send pipes.
+        let latency_profile = if socket_type == SocketType::Rep {
+            crate::socket::latency_profile(socket_type, options)
+        } else {
+            crate::socket::effective_workload(socket_type, options)
                 == omq_proto::WorkloadProfile::Latency
-                // REP matches the socket's latency gate; CURVE peers use
-                // send pipes.
-                && !(socket_type == SocketType::Rep && options.mechanism.has_frame_transform());
+        };
         Self {
             inner: Arc::new(Mutex::new(IdentityInner {
                 peers: FxHashMap::default(),

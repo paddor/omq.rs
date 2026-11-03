@@ -260,6 +260,24 @@ fn message_part_slice_inline() {
 }
 
 #[test]
+fn push_inline_appends_filled_message() {
+    let mut queue = std::collections::VecDeque::new();
+    queue.push_back(Message::from_inline(b"old"));
+    Message::push_inline(&mut queue, 5).copy_from_slice(b"hello");
+    let full = [0x5A; MAX_INLINE_MESSAGE];
+    Message::push_inline(&mut queue, MAX_INLINE_MESSAGE).copy_from_slice(&full);
+    Message::push_inline(&mut queue, 0);
+    assert_eq!(queue.len(), 4);
+    assert_eq!(queue[1].part_slice(0), Some(b"hello".as_slice()));
+    assert!(matches!(
+        queue[1].inner,
+        MessageInner::Inline { len: 5, .. }
+    ));
+    assert_eq!(queue[2].part_slice(0), Some(full.as_slice()));
+    assert_eq!(queue[3].part_slice(0), Some(b"".as_slice()));
+}
+
+#[test]
 fn message_part_slice_heap_borrows_payload() {
     let body = Bytes::copy_from_slice(&[0xAA; MAX_INLINE_MESSAGE + 1]);
     let body_ptr = body.as_ptr();

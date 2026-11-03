@@ -29,6 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `proto::frame::encode_message_flat_ws_masked`. Call `encode_message_flat_ws`
   with `WsRole::Client`.
 
+### Performance
+
+- Small single-part messages are decoded straight into the receive queue
+  slot. TCP 16 B PUSH/PULL is about 6% faster, PUB/SUB about 12%.
+
 ## [0.37.0] - 2026-10-29
 
 ### Breaking

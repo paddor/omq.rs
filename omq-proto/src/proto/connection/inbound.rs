@@ -264,21 +264,8 @@ impl Connection {
         {
             self.in_buf.advance(hdr.header_len);
             if hdr.payload_len <= crate::message::MAX_INLINE_MESSAGE {
-                self.messages.push_back(Message {
-                    inner: crate::message::MessageInner::Inline {
-                        len: hdr.payload_len as u8,
-                        data: [0; crate::message::MAX_INLINE_MESSAGE],
-                    },
-                });
-                let crate::message::MessageInner::Inline { data, .. } = &mut self
-                    .messages
-                    .back_mut()
-                    .expect("inserted inline message")
-                    .inner
-                else {
-                    unreachable!("inserted inline message");
-                };
-                self.in_buf.read_into(hdr.payload_len, data);
+                let body = Message::push_inline(&mut self.messages, hdr.payload_len);
+                self.in_buf.read_into(hdr.payload_len, body);
             } else {
                 let payload = self
                     .in_buf
@@ -437,12 +424,11 @@ impl Connection {
         } else if self.assembly.parts.is_empty() {
             self.assembly.size = 0;
             let s = payload.as_slice();
-            let msg = if s.len() <= crate::message::MAX_INLINE_MESSAGE {
-                Message::from_inline(s)
+            if s.len() <= crate::message::MAX_INLINE_MESSAGE {
+                Message::push_inline(&mut self.messages, s.len()).copy_from_slice(s);
             } else {
-                Message::from_payload(payload)
-            };
-            self.messages.push_back(msg);
+                self.messages.push_back(Message::from_payload(payload));
+            }
         } else {
             self.assembly.parts.push(payload);
             let parts = self.assembly.parts.take();

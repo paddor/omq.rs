@@ -29,12 +29,14 @@ use smallvec::SmallVec;
 use tokio::sync::Notify;
 
 mod blocking;
+mod woken;
 
 pub use blocking::BlockingRecvCancel;
 pub(crate) use blocking::{
     BlockingRecvCancelGuard, BlockingSignal, WakerRegistration, block_on, enter_receive_guard,
     leave_receive_guard,
 };
+pub(crate) use woken::{WakeGate, WokenGate};
 
 fn new_notify() -> Notify {
     let notify = Notify::new();

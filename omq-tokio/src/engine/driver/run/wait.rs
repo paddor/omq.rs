@@ -1,14 +1,14 @@
 //! One select over the driver's waits, and the handler for each ready branch.
 
 use super::activation::{ControlCredit, ControlPermit};
-use super::{AuthenticatedPermit, Flow, OffloadResult, PacedIo, Session, Turn, Waits};
+use super::{AuthenticatedPermit, Flow, OffloadResult, PacedIo, Session, SlotWait, Turn, Waits};
 use crate::engine::driver::{
     DriverStep, DriverWrite, PeerDriverCommand, PeerDriverData, RecvSink,
     control::sleep_until_opt,
     write::{claim_direct_writer, write_driver_progress},
 };
 use crate::engine::{
-    SendPipeError, data_inbox, send_pipe::SendPipeConsumer, transmit_slot::PeerTransmitSlot,
+    SendPipeError, control_inbox, data_inbox, send_pipe::SendPipeConsumer, signal::WakeGate,
 };
 use omq_proto::error::{Error, Result};
 use std::{future::Future, io, time::Instant};
@@ -18,10 +18,10 @@ impl Session<'_> {
     /// Park until one wait is ready and service it. Arm order is priority:
     /// teardown and control first, then credits, writes, slot wakeups, reads,
     /// and timers.
-    pub(super) async fn wait<'e, 'x, R, W, D, F, G, A, H>(
+    pub(super) async fn wait<'e, 'x, R, W, D, F, G, A, H, S>(
         &mut self,
         io: &mut PacedIo<R, W>,
-        waits: &mut Waits<'_, D, F, G, A, H>,
+        waits: &mut Waits<'_, D, F, G, A, H, S>,
         turn: &Turn,
     ) -> Result<Flow>
     where
@@ -32,15 +32,17 @@ impl Session<'_> {
         G: Fn() -> F,
         A: Future<Output = AuthenticatedPermit<'x>>,
         H: Fn() -> A,
+        S: Future<Output = ()>,
     {
+        let (slot_early, slot_late) = slot_arms(&mut waits.slot.ready, self.latency.profile);
         tokio::select! {
             biased;
-            exited = &mut waits.shm_peer_death => exited.map(|()| Flow::Exit),
-            () = self.cancel.cancelled() => Ok(self.on_cancel()),
+            exited = &mut waits.shm_peer_death, if waits.watch_shm_peer => exited.map(|()| Flow::Exit),
+            () = &mut waits.cancelled => Ok(self.on_cancel()),
 
             () = sleep_until_opt(self.control.deadline()), if self.control.deadline().is_some() => Ok(Flow::Exit),
 
-            cmd = self.inbox.recv(), if !turn.control_exhausted => self.on_command(cmd),
+            cmd = gated_command(&mut waits.inbox_gate, &mut self.inbox), if !turn.control_exhausted => self.on_command(cmd),
 
             () = self.shm_driver.credit_returned(self.transmit_slot.as_deref()),
                 if self.shm_driver.waiting_for_credit() => Ok(Flow::Next),
@@ -77,8 +79,8 @@ impl Session<'_> {
             // the slot. Poll this wakeup before the reader: otherwise a
             // reply can cause an unnecessary zero-time reactor poll
             // before the next request is written.
-            () = slot_signal(self.transmit_slot.as_deref()),
-                if self.latency.profile && self.slot_handshake_done() && turn.can_accept_data => Ok(self.on_slot_ready()),
+            () = ready_or_pending(slot_early),
+                if self.latency.profile && self.slot_handshake_done() && turn.can_accept_data => Ok(self.on_slot_wake(&mut waits.slot)),
 
             () = receive_space(self.delivery.sink.as_mut()),
                 if turn.message_blocked && self.delivery.sink.is_some() && !waits.reserved_admission => Ok(Flow::Next),
@@ -94,17 +96,22 @@ impl Session<'_> {
             Some(first) = self.output.encoding.next_offload(),
                 if turn.data_plane_open && self.output.encoding.has_pending_offload() => self.on_offload(first),
 
+            // OPTIMIZE: gate this arm like the control inbox (`WakeGate`) to skip
+            // the empty fanring scan on idle turns. `poll_recv` also retires
+            // empty lanes for registration waiters, so check that they wake it.
             data = next_data(self.output.data.as_mut()),
                 if turn.can_accept_data && self.output.inbox_ready() => Ok(self.on_data(data)),
 
             // Wire-slot arm: the socket handle encoded ZMTP frames
             // into the per-peer PeerTransmitSlot. Stage one bounded batch;
             // the main write arm performs the I/O.
-            () = slot_signal(self.transmit_slot.as_deref()),
-                if !self.latency.profile && self.slot_handshake_done() && turn.can_accept_data => Ok(self.on_slot_ready()),
+            () = ready_or_pending(slot_late),
+                if !self.latency.profile && self.slot_handshake_done() && turn.can_accept_data => Ok(self.on_slot_wake(&mut waits.slot)),
 
             // Per-peer send pipe: active round-robin pushes raw
             // messages to this driver, which encodes and writes locally.
+            // OPTIMIZE: keep this wait registered across turns like the slot
+            // (`SlotWait`). It needs an owned consumer handle for the future.
             () = pipe_ready(self.output.pipe.as_ref()),
                 if self.output.pipe_ready() && turn.can_accept_data => Ok(self.claim_writer()),
 
@@ -208,6 +215,12 @@ impl Session<'_> {
         Ok(Flow::exit_unless(!shutdown))
     }
 
+    /// The persistent slot wait fired: re-arm it, then stage the slot.
+    fn on_slot_wake<S>(&mut self, slot: &mut SlotWait<'_, S>) -> Flow {
+        slot.rearm();
+        self.on_slot_ready()
+    }
+
     fn on_slot_ready(&mut self) -> Flow {
         if self.claim_writer() == Flow::Exit {
             return Flow::Exit;
@@ -300,9 +313,31 @@ where
     flow
 }
 
-/// Transmit-slot wakeup. Its select arm is gated on the slot existing.
-async fn slot_signal(slot: Option<&PeerTransmitSlot>) {
-    slot.unwrap().data_signal.ready().await;
+/// Control command. The inbox is polled only after a command or close woke
+/// its gate.
+fn gated_command<'a>(
+    gate: &'a mut WakeGate,
+    inbox: &'a mut control_inbox::Receiver,
+) -> impl Future<Output = Option<PeerDriverCommand>> + 'a {
+    std::future::poll_fn(move |cx| gate.poll(cx, |cx| inbox.poll_recv(cx)))
+}
+
+/// Hand the slot wakeup to the arm for this profile. Latency drivers poll it
+/// before the reader, others after the data inbox.
+fn slot_arms<T>(ready: &mut T, latency: bool) -> (Option<&mut T>, Option<&mut T>) {
+    if latency {
+        (Some(ready), None)
+    } else {
+        (None, Some(ready))
+    }
+}
+
+/// Ready when `wait` is; pending without one.
+async fn ready_or_pending<T: Future<Output = ()> + Unpin>(wait: Option<&mut T>) {
+    match wait {
+        Some(wait) => wait.await,
+        None => std::future::pending().await,
+    }
 }
 
 /// Receive-queue space wakeup. Its select arm is gated on a sink existing.

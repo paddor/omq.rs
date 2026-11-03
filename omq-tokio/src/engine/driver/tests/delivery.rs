@@ -236,3 +236,54 @@ async fn full_peer_queue_bounds_pending_delivery_and_leaves_decoder_remainder_in
     }
     assert_eq!(remaining, 83);
 }
+
+#[tokio::test]
+async fn latency_batch_yields_only_while_more_input_is_ready() {
+    let (mut sender, mut connection) = ready_push_pull_connections();
+    for body in ["first", "second"] {
+        sender.send_message(&Message::from(body)).unwrap();
+    }
+    connection
+        .handle_input(Bytes::from(drain_transmit(&mut sender)))
+        .unwrap();
+    let handles =
+        crate::socket::recv::SpscHandles::new(crate::socket::recv::BlockingRecvWaker::new(), false);
+    let (mut routes, mut receiver) =
+        crate::socket::peer_recv::PeerRecvRoutes::new(16, &handles, &omq_proto::Options::default());
+    let sink = routes
+        .register(Bytes::from_static(b"peer"), CancellationToken::new())
+        .unwrap();
+    let mut sink = Some(RecvSink::Peer(sink));
+    let (events, _rx) = mpsc::channel(1);
+    let mut events = PeerOutput::from(events);
+    let mut pending = None;
+    // The second message is already decoded, so the first batch yields to
+    // it. The last batch leaves nothing ready and must not yield.
+    for expected in [DriverStep::Yield, DriverStep::Continue] {
+        let step = drain_decoded_messages(
+            DecodeInput {
+                connection: &mut connection,
+                decoder: &mut None,
+                payload_pool: None,
+                #[cfg(target_os = "linux")]
+                shm: None,
+            },
+            ReceiveProfile::Latency,
+            MessageDelivery {
+                sink: &mut sink,
+                outlet: OutletRef::new(&mut events, 0, &mut CompletionProgress::default()),
+                pending: &mut pending,
+                reserved_admission: false,
+                expected_parts: None,
+            },
+            ReceiveRateLimiters {
+                connection: &mut None,
+                ip: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(step, expected);
+    }
+    let mut queued = Vec::new();
+    assert_eq!(receiver.try_recv_many_into(16, &mut queued).unwrap(), 2);
+}

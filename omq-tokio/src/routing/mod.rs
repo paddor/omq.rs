@@ -69,14 +69,24 @@ pub(crate) fn split_rep_request(msg: &Message) -> Option<(RepEnvelope, Message)>
     None
 }
 
-pub(crate) fn rep_reply_with_envelope(envelope: &RepEnvelope, body: &Message) -> Message {
-    Message::multipart(
-        envelope
-            .iter()
-            .cloned()
-            .chain(std::iter::once(Bytes::new()))
-            .chain(body.iter()),
-    )
+/// Wrap a REP reply in its envelope and delimiter. A single-frame body under
+/// an empty envelope keeps the compact delimited form, without a parts table.
+pub(crate) fn rep_reply_with_envelope(envelope: &RepEnvelope, body: Message) -> Message {
+    envelope
+        .iter()
+        .rev()
+        .fold(Message::with_prefix(Bytes::new(), body), |reply, frame| {
+            Message::with_prefix(frame.clone(), reply)
+        })
+}
+
+/// The body of a reply built by [`rep_reply_with_envelope`], for a send
+/// that hands the reply back.
+pub(crate) fn rep_reply_body(envelope: &RepEnvelope, mut reply: Message) -> Message {
+    for _ in 0..=envelope.len() {
+        let _ = reply.pop_front_payload();
+    }
+    reply
 }
 
 /// A peer that just became routable, as handed to the send strategy.
@@ -760,6 +770,33 @@ mod tests {
             SendStrategy::for_socket_type(SocketType::Pair, &Options::default(), &io_pool),
             SendStrategy::Exclusive(_)
         ));
+    }
+
+    #[test]
+    fn rep_reply_wraps_and_returns_body() {
+        let envelopes = [
+            RepEnvelope::new(),
+            RepEnvelope::from_iter([Bytes::from_static(b"id")]),
+            RepEnvelope::from_iter([Bytes::from_static(b"hop"), Bytes::from_static(b"id")]),
+        ];
+        let bodies = [
+            Message::single(vec![7u8; 256]),
+            Message::single("small"),
+            Message::multipart(["a", "b"]),
+        ];
+        for envelope in &envelopes {
+            for body in &bodies {
+                let reply = rep_reply_with_envelope(envelope, body.clone());
+                let expected: Vec<Bytes> = envelope
+                    .iter()
+                    .cloned()
+                    .chain([Bytes::new()])
+                    .chain(body.iter())
+                    .collect();
+                assert_eq!(reply.iter().collect::<Vec<_>>(), expected);
+                assert_eq!(&rep_reply_body(envelope, reply), body);
+            }
+        }
     }
 
     #[test]

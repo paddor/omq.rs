@@ -111,9 +111,12 @@ fn roundtrip_single_frame_message() {
     while push.poll_event().is_some() {}
     while pull.poll_event().is_some() {}
 
+    assert!(!pull.has_messages());
     push.send_message(&Message::single("hello")).unwrap();
     pump(&mut push, &mut pull);
+    assert!(pull.has_messages());
     let m = pull.poll_message().expect("message");
+    assert!(!pull.has_messages());
     assert_eq!(m.len(), 1);
     assert_eq!(m.part_bytes(0).unwrap(), &b"hello"[..]);
 }

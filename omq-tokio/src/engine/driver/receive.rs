@@ -193,7 +193,9 @@ impl DecodeInput<'_> {
 
 /// Budget and deferred-flush state of one `drain_decoded_messages` call.
 struct ReceiveBatch {
-    start: Instant,
+    /// Read from the clock on first use. Batches without a time limit or
+    /// rate limiter never read it.
+    start: Option<Instant>,
     profile: ReceiveProfile,
     /// Sized by the first message of the batch.
     budget: Option<DrainBudget>,
@@ -225,7 +227,7 @@ impl ReceiveBatch {
             && delivery.sink.as_ref().is_some_and(RecvSink::is_yring);
 
         Self {
-            start: Instant::now(),
+            start: None,
             profile,
             budget: None,
             time_limit: None,
@@ -244,6 +246,10 @@ impl ReceiveBatch {
         }
     }
 
+    fn started(&mut self) -> Instant {
+        *self.start.get_or_insert_with(Instant::now)
+    }
+
     /// Deliver one message and charge it. `Some` ends the batch.
     #[inline]
     fn deliver(
@@ -253,10 +259,13 @@ impl ReceiveBatch {
         delivery: &mut MessageDelivery<'_>,
     ) -> Option<DriverStep> {
         let profile = self.profile;
-        let budget = self.budget.get_or_insert_with(|| {
+        if self.budget.is_none() {
             self.time_limit = profile.time(msg_bytes);
-            profile.budget(msg_bytes)
-        });
+            if self.time_limit.is_some() {
+                self.started();
+            }
+        }
+        let budget = self.budget.get_or_insert_with(|| profile.budget(msg_bytes));
         if !delivery.send(message, self.defer_flush, &mut self.pending_flush) {
             return Some(DriverStep::Close);
         }
@@ -268,11 +277,9 @@ impl ReceiveBatch {
 
         // Read the clock only every BATCH_TIME_CHECK_MSGS messages.
         let time_check = budget.msgs().is_multiple_of(BATCH_TIME_CHECK_MSGS);
+        let time_limit = self.time_limit;
         if !budget_remains
-            || (time_check
-                && self
-                    .time_limit
-                    .is_some_and(|limit| self.start.elapsed() >= limit))
+            || (time_check && time_limit.is_some_and(|limit| self.started().elapsed() >= limit))
         {
             return Some(DriverStep::Yield);
         }
@@ -329,7 +336,7 @@ pub(super) fn drain_decoded_messages(
             }
         };
 
-        if rate_limiters.exceeded(batch.start) {
+        if !rate_limiters.is_unlimited() && rate_limiters.exceeded(batch.started()) {
             delivery.flush(&mut batch.pending_flush);
             return Err(Error::ReceiveRateLimitExceeded);
         }
@@ -337,12 +344,29 @@ pub(super) fn drain_decoded_messages(
         let msg_bytes = batch.cost(&m);
         if let Some(step) = batch.deliver(m, msg_bytes, &mut delivery) {
             delivery.flush(&mut batch.pending_flush);
+            // A latency batch is one message. Its spent budget yields only to
+            // other ready input: yielding with nothing ready costs a reactor
+            // poll per message.
+            if step == DriverStep::Yield
+                && receive_profile != ReceiveProfile::Throughput
+                && shm_guard.is_none()
+                && !decoded_input_ready(connection, decoder.as_ref())
+            {
+                return Ok(DriverStep::Continue);
+            }
             return Ok(step);
         }
     }
 
     delivery.flush(&mut batch.pending_flush);
     Ok(DriverStep::Continue)
+}
+
+/// Whether another message can be decoded without reading the transport.
+fn decoded_input_ready(connection: &Connection, decoder: Option<&MessageDecoder>) -> bool {
+    connection.has_messages()
+        || connection.has_pending_input()
+        || decoder.is_some_and(MessageDecoder::has_pending_messages)
 }
 
 enum DecodedReceive {

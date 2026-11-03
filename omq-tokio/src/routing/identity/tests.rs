@@ -251,7 +251,7 @@ async fn routed_progress_wait_registers_without_an_application_identity_frame() 
                 .unwrap();
             assert!(matches!(
                 submitter.try_send_rep(7, &RepEnvelope::new(), message),
-                Err(TrySendError::Full(_))
+                Err(TrySendError::Full(returned)) if returned == Message::single("body")
             ));
             let wait = submitter.wait_peer_send_progress(7);
             tokio::pin!(wait);

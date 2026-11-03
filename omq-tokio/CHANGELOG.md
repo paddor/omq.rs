@@ -26,6 +26,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Error::InvalidEndpoint`. Only `bind` and `connect` report it; reconnects
   keep retrying.
 
+### Performance
+
+- Connections with the latency workload profile (REQ and REP by default)
+  yield after a received message only when more input is ready, instead of
+  after every message. The idle control inbox check no longer locks, and
+  cancellation is registered once per connection. TCP REQ/REP user CPU per
+  round trip is about 10% lower.
+- Connection drivers poll the control inbox and cancellation only after a
+  wake, and keep the transmit-slot wait registered across turns. REP replies
+  keep the compact delimited form instead of building a parts list. TCP
+  REQ/REP round trips use about 12% fewer user instructions, and median
+  latency is about 1.5 us lower.
+
 ## [0.33.0] - 2026-10-29
 
 ### Added

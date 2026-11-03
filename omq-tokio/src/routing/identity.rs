@@ -23,7 +23,7 @@ use crate::engine::send_pipe::SendPreparation;
 use crate::engine::signal::StateSignal;
 use crate::engine::{ActorPeerDriverHandle, SendPipeError};
 use crate::routing::peer_outbound::PeerOutbound;
-use crate::routing::{RepEnvelope, rep_reply_with_envelope};
+use crate::routing::{RepEnvelope, rep_reply_body, rep_reply_with_envelope};
 use omq_proto::error::{Error, Result, TrySendError};
 use omq_proto::message::Message;
 use omq_proto::options::Options;
@@ -198,7 +198,7 @@ impl Submitter {
         envelope: &RepEnvelope,
         mut msg: Message,
     ) -> Result<()> {
-        msg = rep_reply_with_envelope(envelope, &msg);
+        msg = rep_reply_with_envelope(envelope, msg);
         loop {
             match self.try_send_rep_wire(peer_id, msg) {
                 Ok(()) => return Ok(()),
@@ -216,10 +216,12 @@ impl Submitter {
         envelope: &RepEnvelope,
         msg: Message,
     ) -> core::result::Result<(), TrySendError> {
-        let wire = rep_reply_with_envelope(envelope, &msg);
+        let wire = rep_reply_with_envelope(envelope, msg);
         match self.try_send_rep_wire(peer_id, wire) {
             Ok(()) => Ok(()),
-            Err(TrySendError::Full(_)) => Err(TrySendError::Full(msg)),
+            Err(TrySendError::Full(wire)) => {
+                Err(TrySendError::Full(rep_reply_body(envelope, wire)))
+            }
             Err(error) => Err(error),
         }
     }

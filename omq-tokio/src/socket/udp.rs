@@ -110,13 +110,32 @@ async fn recv_datagram(
     };
 
     let (length, _) = sock.peek_from(buf).await?;
+    gated_io(
+        gate,
+        length,
+        || sock.try_recv_from(buf),
+        |cx| sock.poll_recv_ready(cx),
+        |(n, _)| *n,
+    )
+    .await
+}
+
+/// Run one datagram operation under a network gate. Takes `len` bytes of
+/// credit, tries the operation, and returns what it did not use. On
+/// `WouldBlock` all credit goes back while waiting for readiness.
+async fn gated_io<T>(
+    gate: &mut crate::network_limit::Gate,
+    len: usize,
+    mut try_op: impl FnMut() -> std::io::Result<T>,
+    mut poll_ready: impl FnMut(&mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>>,
+    used: impl Fn(&T) -> usize,
+) -> std::io::Result<T> {
     std::future::poll_fn(|cx| {
-        let n = std::task::ready!(gate.poll(cx, length, length));
-        match sock.try_recv_from(buf) {
+        let n = std::task::ready!(gate.poll(cx, len, len));
+        match try_op() {
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // Return the unused credit, then wait for readiness again.
                 gate.finish(n, 0);
-                match sock.poll_recv_ready(cx) {
+                match poll_ready(cx) {
                     std::task::Poll::Ready(Ok(())) => cx.waker().wake_by_ref(),
                     std::task::Poll::Ready(Err(e)) => return std::task::Poll::Ready(Err(e)),
                     std::task::Poll::Pending => {}
@@ -124,7 +143,7 @@ async fn recv_datagram(
                 std::task::Poll::Pending
             }
             result => {
-                gate.finish(n, result.as_ref().map_or(0, |(n, _)| *n));
+                gate.finish(n, result.as_ref().map_or(0, &used));
                 std::task::Poll::Ready(result)
             }
         }
@@ -260,25 +279,13 @@ async fn send_datagram(
         return sock.send(bytes).await;
     };
 
-    std::future::poll_fn(|cx| {
-        let n = std::task::ready!(gate.poll(cx, bytes.len(), bytes.len()));
-        match sock.try_send(bytes) {
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // Return the unused credit, then wait for readiness again.
-                gate.finish(n, 0);
-                match sock.poll_send_ready(cx) {
-                    std::task::Poll::Ready(Ok(())) => cx.waker().wake_by_ref(),
-                    std::task::Poll::Ready(Err(e)) => return std::task::Poll::Ready(Err(e)),
-                    std::task::Poll::Pending => {}
-                }
-                std::task::Poll::Pending
-            }
-            result => {
-                gate.finish(n, result.as_ref().map_or(0, |n| *n));
-                std::task::Poll::Ready(result)
-            }
-        }
-    })
+    gated_io(
+        gate,
+        bytes.len(),
+        || sock.try_send(bytes),
+        |cx| sock.poll_send_ready(cx),
+        |n| *n,
+    )
     .await
 }
 

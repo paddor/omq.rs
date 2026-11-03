@@ -58,8 +58,8 @@ fn zmq_recv_impl(sock: &OmqSocket, buf: *mut libc::c_void, buf_len: usize, flags
     }
 
     if authenticated_recv_configured(sock) {
-        let (frame, _, _) = c_try!(pop_recv_frame_with_properties(sock, flags));
-        return c_try!(copy_out(buf, buf_len, &frame));
+        let part = c_try!(pop_recv_frame_with_properties(sock, flags));
+        return c_try!(copy_out(buf, buf_len, &part.frame));
     }
 
     // Multipart drain: leftover frames use the Bytes-returning path.
@@ -196,15 +196,20 @@ fn pop_authenticated_message(
 pub(crate) fn pop_recv_frame_with_properties(
     sock: &OmqSocket,
     flags: c_int,
-) -> Result<(Bytes, bool, Option<Arc<omq_tokio::proto::PeerProperties>>), c_int> {
+) -> Result<ReceivedPart, c_int> {
     if !authenticated_recv_configured(sock) {
-        return pop_recv_frame(sock, flags).map(|(frame, more)| (frame, more, None));
+        return pop_recv_frame(sock, flags)
+            .map(|(frame, more)| ReceivedPart::new(frame, more, None));
     }
 
     // SAFETY: libzmq sockets are accessed by at most one application thread.
     let drain = unsafe { sock.recv.authenticated_drain.get() };
     if let Some((frame, properties)) = drain.pop_front() {
-        return Ok((frame, !drain.is_empty(), Some(properties)));
+        return Ok(ReceivedPart::new(
+            frame,
+            !drain.is_empty(),
+            Some(properties),
+        ));
     }
 
     let item = pop_authenticated_message(sock, flags)?;
@@ -216,7 +221,11 @@ pub(crate) fn pop_recv_frame_with_properties(
             drain.push_back((part, properties.clone()));
         }
     }
-    Ok((frame, !drain.is_empty(), Some(properties)))
+    Ok(ReceivedPart::new(
+        frame,
+        !drain.is_empty(),
+        Some(properties),
+    ))
 }
 
 /// Pop one frame from the socket, honoring flags/timeout.
@@ -254,22 +263,45 @@ pub(crate) fn pop_recv_server_message(
     pop_message(sock, flags, Ok)
 }
 
+/// Pop one SERVER message with its routing ID and any ZAP properties.
 pub(crate) fn pop_recv_server_message_with_properties(
     sock: &OmqSocket,
     flags: c_int,
-) -> Result<
-    (
-        omq_tokio::Message,
-        Option<Arc<omq_tokio::proto::PeerProperties>>,
-    ),
-    c_int,
-> {
-    if authenticated_recv_configured(sock) {
-        let item = pop_authenticated_message(sock, flags)?;
-        let (message, properties) = item;
-        return Ok((message, Some(properties)));
+) -> Result<ReceivedPart, c_int> {
+    let (message, properties) = if authenticated_recv_configured(sock) {
+        let (message, properties) = pop_authenticated_message(sock, flags)?;
+        (message, Some(properties))
+    } else {
+        (pop_recv_server_message(sock, flags)?, None)
+    };
+    let mut part = ReceivedPart::new(message.part_bytes(0).unwrap_or_default(), false, properties);
+    part.routing_id = message.routing_id().unwrap_or(0);
+    Ok(part)
+}
+
+/// One received frame with the metadata `zmq_msg_recv` stores.
+pub(crate) struct ReceivedPart {
+    pub(crate) frame: Bytes,
+    pub(crate) more: bool,
+    /// SERVER routing ID; zero for other socket types.
+    pub(crate) routing_id: u32,
+    /// ZAP peer properties of an authenticated connection.
+    pub(crate) properties: Option<Arc<omq_tokio::proto::PeerProperties>>,
+}
+
+impl ReceivedPart {
+    fn new(
+        frame: Bytes,
+        more: bool,
+        properties: Option<Arc<omq_tokio::proto::PeerProperties>>,
+    ) -> Self {
+        Self {
+            frame,
+            more,
+            routing_id: 0,
+            properties,
+        }
     }
-    pop_recv_server_message(sock, flags).map(|message| (message, None))
 }
 
 #[inline]

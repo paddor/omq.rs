@@ -16,8 +16,9 @@ use crate::socket::{OmqSocket, materialized, run_on_socket};
 mod recv;
 
 pub(crate) use recv::{
-    authenticated_recv_configured, authenticated_recv_has_data, authenticated_recv_has_more,
-    pop_recv_frame_with_properties, pop_recv_server_message_with_properties,
+    ReceivedPart, authenticated_recv_configured, authenticated_recv_has_data,
+    authenticated_recv_has_more, pop_recv_frame_with_properties,
+    pop_recv_server_message_with_properties,
 };
 use recv::{try_pop_dual, try_recv_authenticated_message};
 pub use recv::{zmq_recv, zmq_recviov};
@@ -29,7 +30,7 @@ pub struct ZmqIovec {
     pub iov_len: usize,
 }
 
-fn checked_c_int_len(n: usize) -> Result<c_int, c_int> {
+pub(crate) fn checked_c_int_len(n: usize) -> Result<c_int, c_int> {
     c_int::try_from(n).map_err(|_| libc::EMSGSIZE)
 }
 

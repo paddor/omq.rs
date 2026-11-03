@@ -171,7 +171,8 @@ pub(crate) async fn connect_addrs(host: &Host, port: u16) -> Result<Vec<SocketAd
     }
 }
 
-async fn resolve_name(name: &str, port: u16) -> Result<Vec<SocketAddr>> {
+/// Addresses for a hostname, in resolver order. Never empty.
+pub(crate) async fn resolve_name(name: &str, port: u16) -> Result<Vec<SocketAddr>> {
     let addrs = resolve(name, port).await?;
     if addrs.is_empty() {
         return Err(Error::Io(io::Error::other(format!(

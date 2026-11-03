@@ -216,11 +216,7 @@ async fn ws_bind_address(endpoint: Endpoint) -> Result<Endpoint> {
 }
 
 async fn first(host: &str, port: u16) -> Result<SocketAddr> {
-    crate::transport::dns::resolve(host, port)
-        .await?
-        .into_iter()
-        .next()
-        .ok_or_else(|| Error::InvalidEndpoint(format!("DNS lookup failed for {host}")))
+    Ok(crate::transport::dns::resolve_name(host, port).await?[0])
 }
 
 struct EndpointTask {

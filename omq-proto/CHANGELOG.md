@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `FrameBuffer::frame_ws` takes a `WsRole` instead of a masking flag, and
   `proto::frame::encode_message_flat_ws` takes a `WsRole`. A client role
   masks. Both use the codec's WebSocket header encoder.
+- `fan_out_frame::FanOutEncoder` replaces `build_fan_out_frame`,
+  `encode_fan_out_message`, `finish_fan_out_frame` and `clear_fan_out_frame`.
+  It owns the frame buffer and chunk list, and takes target count and copy
+  budget as one `FanOutCost`.
 
 ### Removed
 

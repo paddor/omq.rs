@@ -42,6 +42,19 @@ pub const fn header_len_for(payload_len: usize) -> usize {
     }
 }
 
+/// Wire size of `msg` as plain ZMTP data frames: every part's header plus
+/// its payload.
+#[inline]
+pub(crate) fn message_wire_len(msg: &Message) -> usize {
+    let mut total = 0usize;
+    msg.iter_slices(|part| {
+        total = total
+            .saturating_add(header_len_for(part.len()))
+            .saturating_add(part.len());
+    });
+    total
+}
+
 /// Serialise a frame into `out`. Multi-chunk payloads are concatenated
 /// chunk by chunk into the contiguous buffer. Used by tests and any
 /// consumer that needs a single byte slice; the engine layer's gather

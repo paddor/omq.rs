@@ -2,10 +2,9 @@
 
 use super::LaneWorker;
 use crate::engine::transmit_slot::{PeerTransmitSlot, TryFrameResult};
-use crate::routing::fan_out::FAN_OUT_TOTAL_COPY_BUDGET;
+use crate::routing::fan_out::fan_out_cost;
 use bytes::Bytes;
-use omq_proto::fan_out_frame::{FanOutFrame, encode_fan_out_message, finish_fan_out_frame};
-use omq_proto::frame_buffer::FrameBuffer;
+use omq_proto::fan_out_frame::{FanOutEncoder, FanOutFrame};
 use omq_proto::message::Message;
 use omq_proto::proto::transform::TransformedOut;
 use smallvec::SmallVec;
@@ -113,15 +112,15 @@ pub(super) struct GroupPeers<'a> {
 
 /// Frame a group's encoded publication once for `recipients` peers.
 pub(super) fn frame_publication<'f>(
-    eq: &'f mut FrameBuffer,
-    chunks: &'f mut Vec<Bytes>,
+    encoder: &'f mut FanOutEncoder,
     wire: &TransformedOut,
     recipients: usize,
 ) -> FanOutFrame<'f> {
+    let cost = fan_out_cost(recipients);
     for message in wire {
-        encode_fan_out_message(eq, message, recipients, FAN_OUT_TOTAL_COPY_BUDGET);
+        encoder.encode(message, cost);
     }
-    finish_fan_out_frame(eq, chunks, recipients, FAN_OUT_TOTAL_COPY_BUDGET)
+    encoder.finish(cost)
 }
 
 impl LaneWorker {

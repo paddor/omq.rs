@@ -28,6 +28,7 @@ use smallvec::SmallVec;
 use tokio::sync::oneshot;
 
 use omq_proto::error::Result;
+use omq_proto::fan_out_frame::FanOutCost;
 use omq_proto::message::Message;
 use omq_proto::options::{OnMute, Options};
 use omq_proto::proto::SocketType;
@@ -40,6 +41,14 @@ use lane::{FanOutLanes, LaneAdmission};
 /// shared `Bytes` chunks. This is fan-out specific. Do not change
 /// `FrameBuffer::ARENA_THRESHOLD` for this: PUSH/SCATTER use it too.
 const FAN_OUT_TOTAL_COPY_BUDGET: usize = 16 * 1024;
+
+/// Copy cost of one publication framed once for `targets` peers.
+const fn fan_out_cost(targets: usize) -> FanOutCost {
+    FanOutCost {
+        targets,
+        copy_budget: FAN_OUT_TOTAL_COPY_BUDGET,
+    }
+}
 
 /// Yield every N sends to keep latency bounded. Scales down with peer
 /// count and message size: fewer sends per yield when one send queues

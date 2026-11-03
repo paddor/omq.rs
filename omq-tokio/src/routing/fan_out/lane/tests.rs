@@ -2,7 +2,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use omq_proto::fan_out_frame::{build_fan_out_frame, clear_fan_out_frame};
+use omq_proto::fan_out_frame::{FanOutCost, FanOutEncoder};
 use omq_proto::frame_buffer::FrameBuffer;
 use omq_proto::message::Message;
 #[cfg(feature = "lz4")]
@@ -20,6 +20,11 @@ use super::{
 use crate::engine::control_queue::ControlQueue;
 use crate::engine::transmit_slot::SlotConfig;
 use crate::test_util::poll_once;
+
+const ONE_PEER: FanOutCost = FanOutCost {
+    targets: 1,
+    copy_budget: 8 * 1024,
+};
 
 fn paused_lanes(count: usize) -> (FanOutLanes, Vec<yring::Consumer<Message>>) {
     let lanes = test_lanes(count);
@@ -815,9 +820,8 @@ fn test_dispatch(body: &str) -> Message {
 
 fn encoded_dispatch(body: &str) -> Bytes {
     let msg = omq_proto::message::Message::from_slice(body.as_bytes());
-    let mut eq = FrameBuffer::one_shot();
-    let mut chunks = Vec::new();
-    let frame = build_fan_out_frame(&mut eq, &msg, &mut chunks, 1, 8 * 1024);
+    let mut encoder = FanOutEncoder::new();
+    let frame = encoder.build(&msg, ONE_PEER);
     let bytes = match frame {
         omq_proto::fan_out_frame::FanOutFrame::Arena(raw) => Bytes::copy_from_slice(raw),
         omq_proto::fan_out_frame::FanOutFrame::Chunks(chunks) if chunks.len() == 1 => {
@@ -832,7 +836,7 @@ fn encoded_dispatch(body: &str) -> Bytes {
             buf.freeze()
         }
     };
-    clear_fan_out_frame(&mut eq, &mut chunks);
+    encoder.clear();
     bytes
 }
 

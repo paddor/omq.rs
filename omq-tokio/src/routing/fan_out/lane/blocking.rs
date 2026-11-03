@@ -2,9 +2,8 @@
 
 use super::{GroupPeers, LaneWorker, Parked, PendingPeer, PreparedFrame, frame_publication};
 use crate::engine::transmit_slot::TryFrameResult;
-use crate::routing::fan_out::FAN_OUT_TOTAL_COPY_BUDGET;
+use crate::routing::fan_out::fan_out_cost;
 use futures::{StreamExt, stream::FuturesUnordered};
-use omq_proto::fan_out_frame::{build_fan_out_frame, clear_fan_out_frame};
 use omq_proto::message::Message;
 use smallvec::SmallVec;
 use std::sync::Arc;
@@ -38,12 +37,7 @@ impl LaneWorker {
             .as_ref()
             .and_then(|dict| self.ship_dictionary_ready(dict, target.peers, touched));
 
-        let frame = frame_publication(
-            &mut self.eq,
-            &mut self.chunks,
-            &wire_messages,
-            target.peers.len(),
-        );
+        let frame = frame_publication(&mut self.encoder, &wire_messages, target.peers.len());
         let mut parked = Parked::new(pending);
         for &peer_id in target.peers {
             let Some(peer) = self.peers.get_mut(&peer_id) else {
@@ -67,7 +61,7 @@ impl LaneWorker {
                 TryFrameResult::Dead | TryFrameResult::Ineligible => {}
             }
         }
-        clear_fan_out_frame(&mut self.eq, &mut self.chunks);
+        self.encoder.clear();
     }
 
     /// Ship the group dictionary to peers that lack it. Returns an owned copy
@@ -78,13 +72,7 @@ impl LaneWorker {
         peer_ids: &[u64],
         touched: &mut SmallVec<[u64; 32]>,
     ) -> Option<Arc<PreparedFrame>> {
-        let frame = build_fan_out_frame(
-            &mut self.eq,
-            dict,
-            &mut self.chunks,
-            peer_ids.len(),
-            FAN_OUT_TOTAL_COPY_BUDGET,
-        );
+        let frame = self.encoder.build(dict, fan_out_cost(peer_ids.len()));
 
         let mut owned_dict = None;
         for &peer_id in peer_ids {
@@ -102,7 +90,7 @@ impl LaneWorker {
                 owned_dict.get_or_insert_with(|| Arc::new(PreparedFrame::from_frame(&frame)));
             }
         }
-        clear_fan_out_frame(&mut self.eq, &mut self.chunks);
+        self.encoder.clear();
 
         owned_dict
     }

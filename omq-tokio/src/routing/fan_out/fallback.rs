@@ -1,20 +1,15 @@
 use std::cell::RefCell;
 use std::sync::Mutex;
 
-use bytes::Bytes;
-
 use crate::engine::send_pipe::SendPreparation;
 use crate::engine::transmit_slot::{PeerTransmitSlot, TryFrameResult};
 use crate::engine::{PeerDriverData, SendPipeError};
 use crate::routing::peer_outbound::PeerOutbound;
 use crate::transport::inproc::{Admission, InprocSender};
-use omq_proto::fan_out_frame::{
-    FanOutFrame, clear_fan_out_frame, encode_fan_out_message, finish_fan_out_frame,
-};
-use omq_proto::frame_buffer::FrameBuffer;
+use omq_proto::fan_out_frame::{FanOutEncoder, FanOutFrame};
 use omq_proto::message::Message;
 
-use super::{FAN_OUT_TOTAL_COPY_BUDGET, FanOutMutePolicy};
+use super::{FanOutMutePolicy, fan_out_cost};
 
 fn data_inbox(target: &PeerOutbound) -> Option<&crate::engine::data_inbox::Sender> {
     match target {
@@ -134,21 +129,13 @@ impl FallbackPublication<'_> {
             return;
         }
         thread_local! {
-            static ARENA: RefCell<FrameBuffer> = RefCell::new(
-                FrameBuffer::one_shot(),
-            );
-            static CHUNKS: RefCell<Vec<Bytes>> = const { RefCell::new(Vec::new()) };
+            static ENCODER: RefCell<FanOutEncoder> = RefCell::new(FanOutEncoder::new());
         }
-        let recipients = self.targets.len();
-        ARENA.with(|cell| {
-            let eq = &mut *cell.borrow_mut();
-            encode_fan_out_message(eq, self.msg, recipients, FAN_OUT_TOTAL_COPY_BUDGET);
-            CHUNKS.with(|drain| {
-                let chunks = &mut *drain.borrow_mut();
-                let frame = finish_fan_out_frame(eq, chunks, recipients, FAN_OUT_TOTAL_COPY_BUDGET);
-                self.push_frame(&frame, deactivate);
-                clear_fan_out_frame(eq, chunks);
-            });
+        ENCODER.with(|cell| {
+            let encoder = &mut *cell.borrow_mut();
+            let frame = encoder.build(self.msg, fan_out_cost(self.targets.len()));
+            self.push_frame(&frame, deactivate);
+            encoder.clear();
         });
     }
 
@@ -228,7 +215,7 @@ fn push_wire(
 mod tests {
     use std::sync::Arc;
 
-    use omq_proto::fan_out_frame::{build_fan_out_frame, clear_fan_out_frame};
+    use bytes::Bytes;
 
     use super::*;
     use crate::engine::transmit_slot::SlotConfig;
@@ -552,9 +539,12 @@ mod tests {
 
     fn encoded_message_for_targets(body: &str, target_count: usize) -> Bytes {
         let msg = Message::single(body.to_owned());
-        let mut eq = FrameBuffer::one_shot();
-        let mut chunks = Vec::new();
-        let frame = build_fan_out_frame(&mut eq, &msg, &mut chunks, target_count, 8 * 1024);
+        let mut encoder = FanOutEncoder::new();
+        let cost = omq_proto::fan_out_frame::FanOutCost {
+            targets: target_count,
+            copy_budget: 8 * 1024,
+        };
+        let frame = encoder.build(&msg, cost);
         let bytes = match &frame {
             FanOutFrame::Arena(raw) => Bytes::copy_from_slice(raw),
             FanOutFrame::Chunks(chunks) if chunks.len() == 1 => chunks[0].clone(),
@@ -567,7 +557,7 @@ mod tests {
                 buf.freeze()
             }
         };
-        clear_fan_out_frame(&mut eq, &mut chunks);
+        encoder.clear();
         bytes
     }
 

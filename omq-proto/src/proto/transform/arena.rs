@@ -2,7 +2,7 @@
 
 use bytes::Bytes;
 
-use crate::proto::frame::{FLAG_LONG, FLAG_MORE};
+use crate::proto::frame::{FLAG_LONG, FLAG_MORE, message_wire_len};
 use crate::{Error, Message, Payload, Result};
 
 pub(crate) const HEADER: usize = 16;
@@ -22,12 +22,7 @@ pub fn arena_message_size(message: &Message) -> Option<usize> {
     if message.is_empty() || message.len() > MAX_ARENA_PARTS {
         return None;
     }
-    let mut size = 0usize;
-    message.iter_slices(|part| {
-        size = size
-            .saturating_add(part.len())
-            .saturating_add(if part.len() > 255 { 9 } else { 2 });
-    });
+    let size = message_wire_len(message);
     (size <= MAX_ARENA_MESSAGE_BYTES).then_some(size)
 }
 

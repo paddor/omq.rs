@@ -2,8 +2,8 @@
 
 use super::{GroupPeers, LanePeer, LaneWorker, frame_publication};
 use crate::engine::transmit_slot::TryFrameResult;
-use crate::routing::fan_out::{FAN_OUT_TOTAL_COPY_BUDGET, FanOutMutePolicy};
-use omq_proto::fan_out_frame::{FanOutFrame, build_fan_out_frame, clear_fan_out_frame};
+use crate::routing::fan_out::{FanOutMutePolicy, fan_out_cost};
+use omq_proto::fan_out_frame::FanOutFrame;
 use omq_proto::message::Message;
 use smallvec::SmallVec;
 
@@ -48,12 +48,7 @@ impl LaneWorker {
             return;
         }
 
-        let encoded = frame_publication(
-            &mut self.eq,
-            &mut self.chunks,
-            &wire_messages,
-            payload_peer_ids.len(),
-        );
+        let encoded = frame_publication(&mut self.encoder, &wire_messages, payload_peer_ids.len());
         let lossy = LossyPush {
             policy: self.mute_policy,
             protected: false,
@@ -63,7 +58,7 @@ impl LaneWorker {
                 lossy.push(peer_id, peer, &encoded, touched);
             }
         }
-        clear_fan_out_frame(&mut self.eq, &mut self.chunks);
+        self.encoder.clear();
     }
 
     /// Queue the group dictionary where it is not queued or shipped yet.
@@ -75,13 +70,7 @@ impl LaneWorker {
         touched: &mut SmallVec<[u64; 32]>,
     ) -> SmallVec<[u64; 32]> {
         let mut payload_peer_ids = SmallVec::new();
-        let encoded = build_fan_out_frame(
-            &mut self.eq,
-            dict,
-            &mut self.chunks,
-            peer_ids.len(),
-            FAN_OUT_TOTAL_COPY_BUDGET,
-        );
+        let encoded = self.encoder.build(dict, fan_out_cost(peer_ids.len()));
 
         let lossy = LossyPush {
             policy: self.mute_policy,
@@ -97,7 +86,7 @@ impl LaneWorker {
                 payload_peer_ids.push(peer_id);
             }
         }
-        clear_fan_out_frame(&mut self.eq, &mut self.chunks);
+        self.encoder.clear();
 
         payload_peer_ids
     }

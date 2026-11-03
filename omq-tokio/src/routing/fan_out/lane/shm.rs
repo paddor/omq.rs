@@ -102,7 +102,7 @@ impl LaneWorker {
         if copied {
             // Copied records are identical for every recipient. Reference
             // records below instead reserve a distinct lease per connection.
-            omq_shm::frame_copied(msg, &mut self.eq);
+            omq_shm::frame_copied(msg, self.encoder.frames_mut());
         }
         let mut parked = pending.map(Parked::new);
         for &peer_id in peer_ids {
@@ -111,7 +111,7 @@ impl LaneWorker {
             };
             let result = if copied {
                 peer.slot
-                    .try_push_pre_framed_no_signal(self.eq.arena_bytes())
+                    .try_push_pre_framed_no_signal(self.encoder.frames().arena_bytes())
             } else if let Some(record) = &multipart {
                 Self::try_encode_shm_multipart(&peer.slot, record)
             } else {
@@ -126,7 +126,9 @@ impl LaneWorker {
                     };
                     parked.park(peer_id, &peer.slot, None, || {
                         if copied {
-                            PreparedFrame::from_frame(&FanOutFrame::Arena(self.eq.arena_bytes()))
+                            PreparedFrame::from_frame(&FanOutFrame::Arena(
+                                self.encoder.frames().arena_bytes(),
+                            ))
                         } else if let Some(record) = &multipart {
                             PreparedFrame::ShmMultipart(record.clone())
                         } else {
@@ -137,7 +139,7 @@ impl LaneWorker {
                 TryFrameResult::Dead | TryFrameResult::Ineligible => {}
             }
         }
-        self.eq.clear_arena();
+        self.encoder.frames_mut().clear_arena();
     }
 
     fn shm_copied_body(message: &Message) -> bool {

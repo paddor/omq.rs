@@ -3,8 +3,7 @@
 use super::{GroupPeers, LaneWorker};
 use crate::engine::transmit_slot::TryFrameResult;
 use crate::routing::fan_out::codec_group::{CodecGroup, MAX_CODEC_GROUPS};
-use crate::routing::fan_out::{FAN_OUT_TOTAL_COPY_BUDGET, FanOutMutePolicy};
-use omq_proto::fan_out_frame::{build_fan_out_frame, clear_fan_out_frame};
+use crate::routing::fan_out::{FanOutMutePolicy, fan_out_cost};
 use omq_proto::message::Message;
 use smallvec::SmallVec;
 
@@ -116,13 +115,7 @@ impl LaneWorker {
                 continue;
             };
 
-            let frame = build_fan_out_frame(
-                &mut self.eq,
-                &wire,
-                &mut self.chunks,
-                peers.len(),
-                FAN_OUT_TOTAL_COPY_BUDGET,
-            );
+            let frame = self.encoder.build(&wire, fan_out_cost(peers.len()));
             for id in peers {
                 let peer = self.peers.get_mut(id).unwrap();
                 match peer.slot.try_push_arena_no_signal(&frame, messages.len()) {
@@ -131,7 +124,7 @@ impl LaneWorker {
                     TryFrameResult::Dead | TryFrameResult::Ineligible => {}
                 }
             }
-            clear_fan_out_frame(&mut self.eq, &mut self.chunks);
+            self.encoder.clear();
         }
 
         fallback

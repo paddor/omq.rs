@@ -10,6 +10,7 @@ use tokio::sync::oneshot;
 use crate::engine::control_queue::ControlQueue;
 use crate::engine::signal::{DataSignal, StateSignal};
 use crate::engine::transmit_slot::PeerTransmitSlot;
+use omq_proto::fan_out_frame::FanOutEncoder;
 use omq_proto::flow::DrainBudget;
 use omq_proto::frame_buffer::FrameBuffer;
 use omq_proto::message::Message;
@@ -122,8 +123,7 @@ struct LaneWorker {
     mute_policy: FanOutMutePolicy,
     peers: FxHashMap<u64, LanePeer>,
     subscribe_all_count: usize,
-    eq: FrameBuffer,
-    chunks: Vec<Bytes>,
+    encoder: FanOutEncoder,
     codec_groups: [Option<CodecGroup>; MAX_CODEC_GROUPS],
     /// Set when `run` returns.
     exited: Arc<AtomicBool>,
@@ -192,8 +192,7 @@ impl LaneWorker {
             mute_policy,
             peers: FxHashMap::default(),
             subscribe_all_count: 0,
-            eq: FrameBuffer::one_shot(),
-            chunks: Vec::new(),
+            encoder: FanOutEncoder::new(),
             codec_groups: std::array::from_fn(|_| None),
             exited: Arc::new(AtomicBool::new(false)),
         }

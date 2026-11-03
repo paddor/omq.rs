@@ -1,26 +1,19 @@
 //! ZMTP setup while control admission, writes, and cancellation stay active.
 
-use super::{
-    DriverWrite, PeerDriverConfig, PeerEvent, PreActivationStep, RecvSink,
+use super::Session;
+use crate::engine::driver::{
+    DriverWrite, PeerDriverCommand, PeerEvent, PreActivationStep,
     control::{
         COMMAND_DRAIN_BUDGET, cancelled_opt, handle_pre_activation_inbox_command, sleep_until_opt,
     },
-    read::StreamRead,
-    write::{mark_peer_dead, write_handshake_progress},
-};
-use crate::engine::{
-    actor_output::OutletRef,
-    control_inbox,
-    peer_events::{EventRoute, PeerEventDispatch},
-    transmit_slot::PeerTransmitSlot,
+    write::write_handshake_progress,
 };
 use omq_proto::{
     AuthenticationResult, AuthenticationStatus,
     error::{Error, Result},
     flow::DrainBudget,
-    proto::Connection,
 };
-use std::{future::Future, io, pin::Pin, time::Instant};
+use std::{future::Future, io, pin::Pin};
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
     sync::mpsc,
@@ -59,25 +52,15 @@ where
     }
 }
 
-pub(super) struct Activation<'a, 'events> {
-    pub(super) connection: &'a mut Connection,
-    pub(super) inbox: &'a mut control_inbox::Receiver,
-    pub(super) peer_events: &'a mut PeerEventDispatch,
+/// The session during ZMTP setup, with the codec event mailbox and the
+/// transport setup token that only setup uses.
+pub(super) struct Activation<'a, 'c, 'events> {
+    pub(super) session: &'a mut Session<'c>,
     pub(super) event_out: &'events mpsc::Sender<(u64, PeerEvent)>,
-    pub(super) outlet: OutletRef<'a>,
-    pub(super) recv_direct: &'a mut Option<RecvSink>,
-    pub(super) transmit_slot: Option<&'a PeerTransmitSlot>,
-    pub(super) cancel: &'a CancellationToken,
     pub(super) setup_cancel: Option<&'a CancellationToken>,
-    pub(super) handshake_deadline: &'a mut Option<Instant>,
-    pub(super) read: &'a mut StreamRead,
-    pub(super) config: &'a PeerDriverConfig,
-    pub(super) last_input: &'a mut Instant,
-    pub(super) pending_input_error: &'a mut Option<Error>,
-    pub(super) unflushed: &'a mut bool,
 }
 
-impl<'events> Activation<'_, 'events> {
+impl<'events> Activation<'_, '_, 'events> {
     /// Drive the handshake until the actor activates the data plane or the
     /// connection closes. Every arm yields `Continue` to loop again.
     pub(super) async fn run<R, W, D, F, G>(
@@ -103,29 +86,30 @@ impl<'events> Activation<'_, 'events> {
             }
             self.start_authentication(&mut authentication);
 
-            let want_write = self.connection.has_pending_transmit() || *self.unflushed;
-            let resume_input = self.pending_input_error.is_none()
-                && !self.connection.input_blocked_on_output()
-                && self.connection.has_pending_input();
-            let want_read = self.pending_input_error.is_none()
-                && !self.peer_events.blocked()
-                && !self.connection.is_ready()
-                && self.connection.accepts_input();
+            let want_write = self.session.connection.has_pending_transmit()
+                || self.session.output.pending.unflushed;
+            let resume_input = self.session.pending_input_error.is_none()
+                && !self.session.connection.input_blocked_on_output()
+                && self.session.connection.has_pending_input();
+            let want_read = self.session.pending_input_error.is_none()
+                && !self.session.peer_events.blocked()
+                && !self.session.connection.is_ready()
+                && self.session.connection.accepts_input();
 
             let step = tokio::select! {
                 biased;
                 exited = &mut *shm_peer_death => exited.map(|()| PreActivationStep::Close),
-                () = self.cancel.cancelled() => Ok(self.on_cancel()),
+                () = self.session.cancel.cancelled() => Ok(self.on_cancel()),
 
-                cmd = self.inbox.recv() => self.on_command(cmd, &mut activation_budget).await,
+                cmd = self.session.inbox.recv() => self.on_command(cmd, &mut activation_budget).await,
 
-                permit = &mut credit.pending, if self.peer_events.control_ready(self.outlet.output, true) => {
+                permit = &mut credit.pending, if self.session.peer_events.control_ready(&mut self.session.outlet.output, true) => {
                     let step = self.send_control(permit);
                     credit.rearm_if(step == PreActivationStep::Continue);
                     Ok(step)
                 }
 
-                result = self.outlet.output.ready(), if self.peer_events.notification_pending() && !self.outlet.output.has_capacity() => {
+                result = self.session.outlet.output.ready(), if self.session.peer_events.notification_pending() && !self.session.outlet.output.has_capacity() => {
                     Ok(if result.is_err() { PreActivationStep::Close } else { PreActivationStep::Continue })
                 }
 
@@ -137,19 +121,19 @@ impl<'events> Activation<'_, 'events> {
                     Ok(PreActivationStep::Continue)
                 }
 
-                () = sleep_until_opt(*self.handshake_deadline), if self.handshake_deadline.is_some() => {
-                    Err(self.pending_input_error.take().unwrap_or_else(||
+                () = sleep_until_opt(self.session.handshake_deadline), if self.session.handshake_deadline.is_some() => {
+                    Err(self.session.pending_input_error.take().unwrap_or_else(||
                         Error::HandshakeFailed("handshake timeout".into())))
                 }
 
-                res = reader.read_buf(&mut self.read.buffer), if want_read => self.on_read(res),
+                res = reader.read_buf(&mut self.session.read.buffer), if want_read => self.on_read(res),
 
-                res = write_handshake_progress(writer, self.connection, self.unflushed),
+                res = write_handshake_progress(writer, &mut self.session.connection, &mut self.session.output.pending.unflushed),
                     if want_write => self.on_flushed(res),
 
-                () = tokio::task::yield_now(), if !self.peer_events.has_pending() && (self.peer_events.needs_drain() || resume_input) => {
-                    if !self.peer_events.needs_drain() {
-                        *self.pending_input_error = self.connection.resume_input().err();
+                () = tokio::task::yield_now(), if !self.session.peer_events.has_pending() && (self.session.peer_events.needs_drain() || resume_input) => {
+                    if !self.session.peer_events.needs_drain() {
+                        self.session.pending_input_error = self.session.connection.resume_input().err();
                     }
                     Ok(PreActivationStep::Continue)
                 }
@@ -169,31 +153,28 @@ impl<'events> Activation<'_, 'events> {
         authentication: &mut Option<tokio::task::JoinHandle<AuthenticationResult>>,
     ) {
         if authentication.is_none()
-            && let Some(request) = self.connection.take_authentication_request()
+            && let Some(request) = self.session.connection.take_authentication_request()
         {
             *authentication = Some(tokio::task::spawn_blocking(move || request.run()));
         }
     }
 
     fn on_cancel(&self) -> PreActivationStep {
-        if let Some(slot) = self.transmit_slot {
-            slot.mark_dead();
-        }
-
+        self.session.mark_slot_dead();
         PreActivationStep::Close
     }
 
     async fn on_command(
         &mut self,
-        cmd: Option<super::PeerDriverCommand>,
+        cmd: Option<PeerDriverCommand>,
         budget: &mut DrainBudget,
     ) -> Result<PreActivationStep> {
-        let before = self.connection.pending_transmit_size();
+        let before = self.session.connection.pending_transmit_size();
         let step = handle_pre_activation_inbox_command(
             cmd,
-            self.connection,
-            self.recv_direct,
-            self.pending_input_error.is_some(),
+            &mut self.session.connection,
+            &mut self.session.delivery.sink,
+            self.session.pending_input_error.is_some(),
         )?;
         if step != PreActivationStep::Continue {
             return Ok(step);
@@ -202,11 +183,12 @@ impl<'events> Activation<'_, 'events> {
         // Commands can queue output during setup. Bound the bytes they add
         // per turn and yield so writes and other tasks make progress.
         let added = self
+            .session
             .connection
             .pending_transmit_size()
             .saturating_sub(before);
         if !budget.account(added) {
-            self.inbox.release_consumed();
+            self.session.inbox.release_consumed();
             tokio::task::yield_now().await;
             budget.reset();
         }
@@ -215,14 +197,7 @@ impl<'events> Activation<'_, 'events> {
     }
 
     fn send_control(&mut self, permit: ControlPermit<'events>) -> PreActivationStep {
-        let Ok(permit) = permit else {
-            return PreActivationStep::Close;
-        };
-
-        if self
-            .peer_events
-            .send_reserved(permit, self.outlet.reborrow())
-        {
+        if self.session.send_control(permit) {
             PreActivationStep::Continue
         } else {
             PreActivationStep::Close
@@ -238,7 +213,11 @@ impl<'events> Activation<'_, 'events> {
             status: AuthenticationStatus::InternalError,
             ..AuthenticationResult::deny()
         });
-        *self.pending_input_error = self.connection.complete_authentication(result).err();
+        self.session.pending_input_error = self
+            .session
+            .connection
+            .complete_authentication(result)
+            .err();
     }
 
     fn on_read(&mut self, res: io::Result<usize>) -> Result<PreActivationStep> {
@@ -246,16 +225,18 @@ impl<'events> Activation<'_, 'events> {
 
         // EOF during setup: no later write can reach the peer.
         if n == 0 {
-            mark_peer_dead(self.transmit_slot);
-            self.cancel.cancel();
-            self.inbox.close();
+            self.session.close_on_eof();
             return Ok(PreActivationStep::Close);
         }
 
-        let input = self
-            .read
-            .handle_input(n, self.connection, self.config, self.last_input);
-        *self.pending_input_error = input.err();
+        let session = &mut *self.session;
+        let input = session.read.handle_input(
+            n,
+            &mut session.connection,
+            &session.config,
+            &mut session.heartbeat.last_input,
+        );
+        session.pending_input_error = input.err();
 
         Ok(PreActivationStep::Continue)
     }
@@ -264,7 +245,7 @@ impl<'events> Activation<'_, 'events> {
     /// the root cause of the peer dropping the connection.
     fn on_flushed(&mut self, res: io::Result<usize>) -> Result<PreActivationStep> {
         if res.is_err()
-            && let Some(error) = self.pending_input_error.take()
+            && let Some(error) = self.session.pending_input_error.take()
         {
             return Err(error);
         }
@@ -275,6 +256,7 @@ impl<'events> Activation<'_, 'events> {
 
     fn drive_events(&mut self) -> Result<PreActivationStep> {
         if self
+            .session
             .transmit_slot
             .as_ref()
             .is_some_and(|slot| slot.is_dead())
@@ -282,33 +264,26 @@ impl<'events> Activation<'_, 'events> {
             return Ok(PreActivationStep::Close);
         }
 
-        let route = EventRoute {
-            mailbox: self.event_out,
-            outlet: self.outlet.reborrow(),
-        };
-        if !self
-            .peer_events
-            .drive(self.connection, route, self.recv_direct.as_mut(), true)
-        {
+        if !self.session.drive_peer_events(self.event_out, true) {
             return Ok(PreActivationStep::Close);
         }
 
-        if self.handshake_deadline.is_some()
-            && self.connection.is_ready()
-            && self.peer_events.handshake_admitted()
-            && self.pending_input_error.is_none()
+        if self.session.handshake_deadline.is_some()
+            && self.session.connection.is_ready()
+            && self.session.peer_events.handshake_admitted()
+            && self.session.pending_input_error.is_none()
         {
-            *self.handshake_deadline = None;
+            self.session.handshake_deadline = None;
         }
 
         // Authentication failures may have queued a mechanism ERROR.
         // Admit older events and flush that prefix through the select,
         // retaining setup cancellation and the original deadline.
-        if self.pending_input_error.is_some()
-            && !self.peer_events.blocked()
-            && !self.connection.has_pending_transmit()
+        if self.session.pending_input_error.is_some()
+            && !self.session.peer_events.blocked()
+            && !self.session.connection.has_pending_transmit()
         {
-            return Err(self.pending_input_error.take().unwrap());
+            return Err(self.session.pending_input_error.take().unwrap());
         }
 
         Ok(PreActivationStep::Continue)

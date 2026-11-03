@@ -227,15 +227,6 @@ impl<'a> OutletRef<'a> {
 }
 
 impl OutletRef<'_> {
-    #[inline]
-    pub(super) fn reborrow(&mut self) -> OutletRef<'_> {
-        OutletRef {
-            output: self.output,
-            peer_id: self.peer_id,
-            completion: self.completion,
-        }
-    }
-
     /// Admit a message or XPUB notification; counts it once admitted.
     #[inline]
     pub(super) fn try_send(

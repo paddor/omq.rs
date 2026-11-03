@@ -3,7 +3,6 @@
 use super::{
     ConnectionDriver, DriverStep, DriverStream, DriverWrite, IPC_LATENCY_POLL_WINDOW,
     PeerDriverConfig, PeerEvent, PreActivationStep, ReceiveProfile, RecvSink,
-    activation::{Activation, ControlCredit, ControlPermit},
     control::{ControlState, Heartbeat, close_error_reason},
     outbound::OutboundState,
     output::QueuedOutput,
@@ -13,7 +12,7 @@ use super::{
         drain_decoded_messages,
     },
     shm,
-    write::{TransmitSlotLifetime, enable_transmit_slot_after_handshake},
+    write::{TransmitSlotLifetime, enable_transmit_slot_after_handshake, mark_peer_dead},
 };
 use crate::engine::{
     AuthenticatedRecvItem,
@@ -40,7 +39,10 @@ use std::{future::Future, net::IpAddr, pin::Pin, sync::Arc, time::Instant};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+mod activation;
 mod wait;
+
+use activation::{Activation, ControlCredit, ControlPermit};
 
 /// Outcome of reserving one slot on the authenticated receive queue.
 type AuthenticatedPermit<'a> =
@@ -407,29 +409,56 @@ where
     }
 }
 
-impl Session<'_> {
+impl<'c> Session<'c> {
     fn activation<'a, 'events>(
         &'a mut self,
         event_out: &'events mpsc::Sender<(u64, PeerEvent)>,
         setup_cancel: Option<&'a CancellationToken>,
-    ) -> Activation<'a, 'events> {
+    ) -> Activation<'a, 'c, 'events> {
         Activation {
-            connection: &mut self.connection,
-            inbox: &mut self.inbox,
-            peer_events: &mut self.peer_events,
+            session: self,
             event_out,
-            outlet: self.outlet.view(),
-            recv_direct: &mut self.delivery.sink,
-            transmit_slot: self.transmit_slot.as_deref(),
-            cancel: &self.cancel,
             setup_cancel,
-            handshake_deadline: &mut self.handshake_deadline,
-            read: &mut self.read,
-            config: &self.config,
-            last_input: &mut self.heartbeat.last_input,
-            pending_input_error: &mut self.pending_input_error,
-            unflushed: &mut self.output.pending.unflushed,
         }
+    }
+
+    /// Close the transmit slot so senders stop queueing to this peer.
+    fn mark_slot_dead(&self) {
+        mark_peer_dead(self.transmit_slot.as_deref());
+    }
+
+    /// Peer EOF: no later write can reach the peer.
+    fn close_on_eof(&mut self) {
+        self.mark_slot_dead();
+        self.cancel.cancel();
+        self.inbox.close();
+    }
+
+    /// Admit the retained codec event into its reserved mailbox slot.
+    /// Returns `false` once the actor is gone.
+    fn send_control(&mut self, permit: ControlPermit<'_>) -> bool {
+        let Ok(permit) = permit else {
+            return false;
+        };
+        self.peer_events.send_reserved(permit, self.outlet.view())
+    }
+
+    /// Admit pending codec events. Returns `false` once the actor is gone.
+    fn drive_peer_events(
+        &mut self,
+        event_out: &mpsc::Sender<(u64, PeerEvent)>,
+        data_clear: bool,
+    ) -> bool {
+        let route = EventRoute {
+            mailbox: event_out,
+            outlet: self.outlet.view(),
+        };
+        self.peer_events.drive(
+            &mut self.connection,
+            route,
+            self.delivery.sink.as_mut(),
+            data_clear,
+        )
     }
 
     fn start_data_plane(&mut self) {
@@ -545,16 +574,7 @@ impl Session<'_> {
         // data waits. Standalone combined mailboxes retain their prefix.
         if separate_control || self.delivery.pending.is_none() {
             let data_clear = self.delivery.pending.is_none();
-            let route = EventRoute {
-                mailbox: event_out,
-                outlet: self.outlet.view(),
-            };
-            if !self.peer_events.drive(
-                &mut self.connection,
-                route,
-                self.delivery.sink.as_mut(),
-                data_clear,
-            ) {
+            if !self.drive_peer_events(event_out, data_clear) {
                 return Ok(false);
             }
         }

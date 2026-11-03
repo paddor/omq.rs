@@ -32,7 +32,6 @@ use super::rate_limit::SharedIpRateLimiter;
 use super::send_pipe::{SendPipeConsumer, SendPipeProducerHandle};
 use super::transmit_slot::PeerTransmitSlot;
 
-mod activation;
 mod builder;
 mod control;
 mod outbound;

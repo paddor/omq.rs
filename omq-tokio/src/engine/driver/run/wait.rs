@@ -1,11 +1,11 @@
 //! One select over the driver's waits, and the handler for each ready branch.
 
+use super::activation::{ControlCredit, ControlPermit};
 use super::{AuthenticatedPermit, Flow, OffloadResult, PacedIo, Session, Turn, Waits};
 use crate::engine::driver::{
     DriverStep, DriverWrite, PeerDriverCommand, PeerDriverData, RecvSink,
-    activation::{ControlCredit, ControlPermit},
     control::sleep_until_opt,
-    write::{claim_direct_writer, mark_peer_dead, write_driver_progress},
+    write::{claim_direct_writer, write_driver_progress},
 };
 use crate::engine::{
     SendPipeError, data_inbox, send_pipe::SendPipeConsumer, transmit_slot::PeerTransmitSlot,
@@ -46,7 +46,7 @@ impl Session<'_> {
                 if self.shm_driver.waiting_for_credit() => Ok(Flow::Next),
 
             permit = &mut waits.control.pending, if self.peer_events.control_ready(&mut self.outlet.output, self.delivery.pending.is_none()) => {
-                Ok(rearm_after(&mut waits.control, self.send_control(permit)))
+                Ok(rearm_after(&mut waits.control, Flow::exit_unless(self.send_control(permit))))
             }
 
             result = self.outlet.output.ready(),
@@ -132,10 +132,7 @@ impl Session<'_> {
     }
 
     fn on_cancel(&self) -> Flow {
-        if let Some(ref slot) = self.transmit_slot {
-            slot.mark_dead();
-        }
-
+        self.mark_slot_dead();
         Flow::Exit
     }
 
@@ -155,14 +152,6 @@ impl Session<'_> {
             .control
             .handle_command(cmd, &mut self.connection, input_failed)?;
         Ok(Flow::exit_unless(step != DriverStep::Close))
-    }
-
-    fn send_control(&mut self, permit: ControlPermit<'_>) -> Flow {
-        let Ok(permit) = permit else {
-            return Flow::Exit;
-        };
-
-        Flow::exit_unless(self.peer_events.send_reserved(permit, self.outlet.view()))
     }
 
     /// Actor output has room: refresh the control prefix, then retry a
@@ -246,9 +235,7 @@ impl Session<'_> {
 
         // EOF: no later write can reach the peer.
         if n == 0 {
-            mark_peer_dead(self.transmit_slot.as_deref());
-            self.cancel.cancel();
-            self.inbox.close();
+            self.close_on_eof();
             return Ok(Flow::Exit);
         }
 

@@ -65,7 +65,7 @@ impl TransmitProfile {
 pub(super) struct WireCarrier {
     #[cfg(target_os = "linux")]
     pub(super) shm: Option<crate::transport::shm::ShmState>,
-    pub(super) direct_tcp_writer: Option<Arc<crate::socket::dispatch::DirectTcpWriter>>,
+    pub(super) direct_tcp_writer: Option<Arc<crate::socket::direct_writer::DirectTcpWriter>>,
 }
 
 /// Wrap SHM carriers and split off a direct TCP writer where allowed.
@@ -182,7 +182,7 @@ fn codec_passthrough_info(setup: Option<&CodecSetup>) -> Option<(bytes::Bytes, u
 pub(super) fn attach_direct_writer(
     socket_type: SocketType,
     slot: Option<&Arc<crate::engine::transmit_slot::PeerTransmitSlot>>,
-    writer: Option<&Arc<crate::socket::dispatch::DirectTcpWriter>>,
+    writer: Option<&Arc<crate::socket::direct_writer::DirectTcpWriter>>,
     send_pipe: Option<&SendPipeProducerHandle>,
 ) {
     let (Some(slot), Some(writer)) = (slot, writer) else {
@@ -216,7 +216,7 @@ fn split_direct_tcp_writer(
 ) -> Result<
     (
         AnyStream,
-        Option<Arc<crate::socket::dispatch::DirectTcpWriter>>,
+        Option<Arc<crate::socket::direct_writer::DirectTcpWriter>>,
     ),
     (),
 > {
@@ -235,7 +235,9 @@ fn split_direct_tcp_writer(
             let std_tcp = tcp.into_std().map_err(|_| ())?;
             let direct_tcp = std_tcp.try_clone().map_err(|_| ())?;
             let driver_tcp = tokio::net::TcpStream::from_std(std_tcp).map_err(|_| ())?;
-            let direct = Arc::new(crate::socket::dispatch::DirectTcpWriter::new(direct_tcp));
+            let direct = Arc::new(crate::socket::direct_writer::DirectTcpWriter::new(
+                direct_tcp,
+            ));
             Ok((AnyStream::Tcp(driver_tcp), Some(direct)))
         }
         AnyStream::Ipc(ipc) => Ok((AnyStream::Ipc(ipc), None)),

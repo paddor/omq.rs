@@ -3,6 +3,7 @@ use crate::engine::transmit_slot::{PeerTransmitSlot, SlotConfig, TryFrameResult}
 use crate::engine::write_ownership::WriteOwnership;
 use omq_proto::Message;
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 #[derive(Debug)]
 struct ScriptedWrite {

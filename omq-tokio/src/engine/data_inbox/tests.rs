@@ -493,7 +493,7 @@ fn coordinated_teardown_releases_queued_buffers_with_idle_clones_alive() {
 fn immediate_tcp_write_unlocks_reserved_producer_before_buffer_release() {
     use crate::engine::transmit_slot::{PeerTransmitSlot, SlotConfig};
     use crate::routing::peer_outbound::PeerOutbound;
-    use crate::socket::dispatch::DirectTcpWriter;
+    use crate::socket::direct_writer::DirectTcpWriter;
     use std::net::{TcpListener, TcpStream};
 
     #[derive(Debug)]

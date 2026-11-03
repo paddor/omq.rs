@@ -7,6 +7,7 @@
 //! mutexes on the hot path.
 
 pub(crate) mod actor;
+pub(crate) mod direct_writer;
 pub(crate) mod dispatch;
 pub(crate) mod fanin;
 pub mod handle;

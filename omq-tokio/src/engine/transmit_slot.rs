@@ -41,7 +41,7 @@ pub(crate) enum TryFrameResult {
 
 pub(crate) struct PeerTransmitSlot {
     eq: Mutex<FrameBuffer>,
-    direct_writer: OnceLock<Arc<crate::socket::dispatch::DirectTcpWriter>>,
+    direct_writer: OnceLock<Arc<crate::socket::direct_writer::DirectTcpWriter>>,
     cap: usize,
     msg_cap: usize,
     pub(crate) data_signal: DataSignal,
@@ -179,11 +179,16 @@ impl PeerTransmitSlot {
         self.handshake_done.store(true, Ordering::Release);
     }
 
-    pub(crate) fn set_direct_writer(&self, writer: Arc<crate::socket::dispatch::DirectTcpWriter>) {
+    pub(crate) fn set_direct_writer(
+        &self,
+        writer: Arc<crate::socket::direct_writer::DirectTcpWriter>,
+    ) {
         self.direct_writer.get_or_init(|| writer);
     }
 
-    pub(crate) fn direct_writer(&self) -> Option<&Arc<crate::socket::dispatch::DirectTcpWriter>> {
+    pub(crate) fn direct_writer(
+        &self,
+    ) -> Option<&Arc<crate::socket::direct_writer::DirectTcpWriter>> {
         self.direct_writer.get()
     }
 

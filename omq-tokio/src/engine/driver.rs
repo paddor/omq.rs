@@ -122,7 +122,7 @@ pub struct PeerDriverHandle {
     /// Request immediate driver teardown.
     pub cancel: CancellationToken,
     pub(crate) transmit_slot: Option<Arc<PeerTransmitSlot>>,
-    pub(crate) direct_tcp_writer: Option<Arc<crate::socket::dispatch::DirectTcpWriter>>,
+    pub(crate) direct_tcp_writer: Option<Arc<crate::socket::direct_writer::DirectTcpWriter>>,
     pub(crate) send_pipe: Option<SendPipeProducerHandle>,
     /// Direct route into an inproc peer's receive queue.
     pub(crate) inproc: Option<crate::transport::inproc::InprocSender>,
@@ -136,7 +136,7 @@ pub(crate) struct ActorPeerDriverHandle {
     pub data_inbox: super::data_inbox::Sender,
     pub cancel: CancellationToken,
     pub(crate) transmit_slot: Option<Arc<PeerTransmitSlot>>,
-    pub(crate) direct_tcp_writer: Option<Arc<crate::socket::dispatch::DirectTcpWriter>>,
+    pub(crate) direct_tcp_writer: Option<Arc<crate::socket::direct_writer::DirectTcpWriter>>,
     pub(crate) send_pipe: Option<SendPipeProducerHandle>,
     /// Direct route into an inproc peer's receive queue.
     pub(crate) inproc: Option<crate::transport::inproc::InprocSender>,

@@ -525,32 +525,24 @@ impl SendStrategy {
 
     /// Allocate a connect-side pre-ready pipe. The producer is immediately
     /// eligible for routing; the dialer keeps the consumer until a connection
-    /// completes the handshake.
-    pub(crate) fn make_connect_pipe(&mut self, route_id: u64) -> Option<SendPipeConsumer> {
+    /// completes the handshake. DART sockets pass their type so the pipe
+    /// validates messages.
+    pub(crate) fn make_connect_pipe(
+        &mut self,
+        route_id: u64,
+        #[cfg(feature = "dart")] dart: Option<SocketType>,
+    ) -> Option<SendPipeConsumer> {
         match self {
             Self::RoundRobin(s) => Some(s.make_connect_pipe(
                 route_id,
                 #[cfg(feature = "dart")]
-                None,
+                dart,
             )),
             Self::Latency(s) => Some(s.make_connect_pipe(
                 route_id,
                 #[cfg(feature = "dart")]
-                None,
+                dart,
             )),
-            _ => None,
-        }
-    }
-
-    #[cfg(feature = "dart")]
-    pub(crate) fn make_dart_connect_pipe(
-        &mut self,
-        route_id: u64,
-        socket_type: SocketType,
-    ) -> Option<SendPipeConsumer> {
-        match self {
-            Self::RoundRobin(s) => Some(s.make_connect_pipe(route_id, Some(socket_type))),
-            Self::Latency(s) => Some(s.make_connect_pipe(route_id, Some(socket_type))),
             _ => None,
         }
     }

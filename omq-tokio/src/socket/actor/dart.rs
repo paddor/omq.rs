@@ -110,7 +110,7 @@ impl SocketDriver {
         let pipe = if side.is_connect() {
             self.routing
                 .send_strategy
-                .make_dart_connect_pipe(route_id, self.socket_type)
+                .make_connect_pipe(route_id, Some(self.socket_type))
         } else {
             None
         };
@@ -364,7 +364,7 @@ impl SocketDriver {
         entry.pipe = self
             .routing
             .send_strategy
-            .make_dart_connect_pipe(route_id, self.socket_type);
+            .make_connect_pipe(route_id, Some(self.socket_type));
     }
 
     pub(super) async fn stop_dart_endpoints(&mut self, target: Option<(&Endpoint, Side)>) -> bool {

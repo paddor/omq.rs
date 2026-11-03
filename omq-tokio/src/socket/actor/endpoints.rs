@@ -329,7 +329,11 @@ impl SocketDriver {
                 self.options.send_queue_capacity(),
             ))
         } else {
-            self.routing.send_strategy.make_connect_pipe(route_id)
+            self.routing.send_strategy.make_connect_pipe(
+                route_id,
+                #[cfg(feature = "dart")]
+                None,
+            )
         };
 
         let cancel = self.link.cancel.child_token();

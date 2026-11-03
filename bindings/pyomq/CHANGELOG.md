@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.4] - 2026-11-03
+
+### Changed
+
+- Bundle `omq-tokio` 0.34.0. TCP REQ/REP round trips are faster.
+
 ## [0.27.3] - 2026-10-24
 
 ### Changed

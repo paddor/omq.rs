@@ -2,10 +2,11 @@ use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
 use super::*;
+use crate::batch;
 use crate::mapping::{HEADER, read_u64};
 use crate::pool::LOOKUP;
 use crate::test_support::grouped;
-use crate::wire::REFERENCE_SIZE;
+use crate::wire::{MULTIPART, REFERENCE_SIZE};
 use crate::{
     BATCH_MAX_MESSAGES, COPIED_BATCH_MAX_BODY, MULTIPART_ENVELOPE_THRESHOLD, is_pooled,
     payload_pool, pooled_prefix, prepare_batch, prepare_reference_batch,
@@ -42,7 +43,7 @@ fn decode_all(receiver: &mut Connection, wire: Message) -> Vec<Message> {
 
 /// Assert `view` sits at `offset` in the receiver's import of a region.
 fn assert_mapped_at(receiver: &Connection, id: u32, token: u64, view: &[u8], offset: usize) {
-    let region = receiver.find_region(id, token).unwrap();
+    let region = receiver.inbound.find(id, token).unwrap();
     assert_eq!(view.as_ptr() as usize, region.address() + offset);
 }
 
@@ -61,7 +62,7 @@ fn data_descriptor_before_lease_table_is_rejected() {
         io::ErrorKind::InvalidData
     );
     assert!(receiver.incoming.is_none());
-    assert!(receiver.regions.is_empty());
+    assert!(receiver.inbound.regions.is_empty());
 }
 
 #[test]
@@ -546,7 +547,7 @@ fn completed_leases_return_before_credit_runs_out() {
     for _ in 0..1024 {
         drop(delivered(&mut sender, &mut receiver, &body));
         // Only the lease published by this encode may still be active.
-        assert!(sender.active.len() <= 1);
+        assert!(sender.leases.active.len() <= 1);
     }
 }
 
@@ -557,8 +558,8 @@ fn copied_body_framing_preserves_envelopes_and_uses_no_lease() {
     let message = Message::with_group("group", "abc").with_routing_id(7);
     assert!(sender.encode_and_frame(&message, &mut frames).unwrap());
     assert_eq!(frames.arena_bytes(), b"\x01\x05group\x00\x04\x00abc");
-    assert_eq!(sender.free.len(), 1);
-    assert!(sender.active.is_empty());
+    assert_eq!(sender.leases.free.len(), 1);
+    assert!(sender.leases.active.is_empty());
     assert_eq!(message.routing_id(), Some(7));
     frames.clear_arena();
     assert!(
@@ -629,7 +630,7 @@ fn inline_grouped_messages_never_check_out_heap_or_mapped_pool_slots() {
         let wire = encoded(&mut sender, &mut receiver, &message);
         assert_eq!(body(&wire).unwrap()[0], COPIED);
         assert_eq!(receiver.decode(wire).unwrap(), message);
-        assert!(sender.active.is_empty());
+        assert!(sender.leases.active.is_empty());
         assert_eq!(sender.send_pool.memory_used(), 0);
     }
 }
@@ -667,8 +668,8 @@ fn single_frame_batches_preserve_bodies_routes_and_logical_credit() {
                 .encode_record(&packed, count, kind.record())
                 .unwrap()
                 .unwrap();
-            assert_eq!(sender.active.len(), 1);
-            assert_eq!(sender.leased_messages, count);
+            assert_eq!(sender.leases.active.len(), 1);
+            assert_eq!(sender.leases.leased_messages, count);
             transfer(&mut sender, &mut receiver);
             let mut decoded = vec![receiver.decode_received(wire).unwrap()];
             while let Some(message) = receiver.poll_received() {
@@ -730,7 +731,7 @@ fn small_body_batches_preserve_order_and_charge_each_message_against_hwm() {
         let batch = prepare_batch(&pool, &references).unwrap().unwrap();
         let wire = sender.encode_record(&batch, count, 2).unwrap().unwrap();
         let stale = wire.clone();
-        assert_eq!(sender.leased_messages, count);
+        assert_eq!(sender.leases.leased_messages, count);
         assert!(
             sender
                 .encode(&Message::from_slice(&[8; 128]))
@@ -755,7 +756,7 @@ fn small_body_batches_preserve_order_and_charge_each_message_against_hwm() {
                 .unwrap()
                 .is_some()
         );
-        assert_eq!(sender.free.len(), count - 1);
+        assert_eq!(sender.leases.free.len(), count - 1);
         drop(sender);
         drop(receiver);
         assert_eq!(decoded, messages);
@@ -816,8 +817,8 @@ fn copied_batches_share_storage_and_keep_every_recipient_view_alive() {
         .encode_record(&batch, messages.len(), 2)
         .unwrap()
         .unwrap();
-    assert_eq!(sender1.active.len(), 1);
-    assert_eq!(sender1.leased_messages, messages.len());
+    assert_eq!(sender1.leases.active.len(), 1);
+    assert_eq!(sender1.leases.leased_messages, messages.len());
     transfer(&mut sender1, &mut receiver1);
     transfer(&mut sender2, &mut receiver2);
     let first = decode_all(&mut receiver1, wire1);
@@ -1153,7 +1154,7 @@ fn reference_batches_preserve_unread_regions_across_registration_eviction() {
         wires.push(sender.encode_record(&batch, 4, 3).unwrap().unwrap());
         transfer(&mut sender, &mut receiver);
     }
-    assert!(!receiver.retired_regions.is_empty());
+    assert!(!receiver.inbound.retired.is_empty());
     let mut messages = Vec::new();
     for wire in wires {
         messages.push(receiver.decode_received(wire).unwrap());
@@ -1416,7 +1417,7 @@ fn batch_credit_finds_completed_cells_while_unused_positions_remain() {
         .map(|_| delivered(&mut sender, &mut receiver, &body))
         .collect();
     held.truncate(2 * BATCH_MAX_MESSAGES);
-    assert_eq!(sender.free.len(), 1);
+    assert_eq!(sender.leases.free.len(), 1);
     let pool = payload_pool([(BATCH_MAX_BYTES.next_power_of_two(), 1)]).unwrap();
     let message = Message::with_group("group", vec![8; 16]);
     let batch = prepare_batch(&pool, &[&message; BATCH_MAX_MESSAGES])
@@ -1481,8 +1482,8 @@ fn queued_references_survive_registration_eviction_and_reregistration() {
         references.push(sender.encode(message).unwrap().unwrap());
     }
     transfer(&mut sender, &mut receiver);
-    assert_eq!(receiver.regions.len(), 64);
-    assert_eq!(receiver.retired_regions.len(), 64);
+    assert_eq!(receiver.inbound.regions.len(), 64);
+    assert_eq!(receiver.inbound.retired.len(), 64);
     let held: Vec<_> = references
         .into_iter()
         .map(|wire| receiver.decode(wire).unwrap())
@@ -1513,7 +1514,7 @@ fn partial_writes_transfer_fds_once_and_blocked_writes_retain_them() {
     let bytes = vec![0; 1024 * 1024];
     let written = sender.try_write(&first, &[IoSlice::new(&bytes)]).unwrap();
     assert!(written > 0 && written < bytes.len());
-    assert!(sender.descriptors.is_empty());
+    assert!(sender.registrations.descriptors.is_empty());
     // Saturate the byte stream before queuing another region descriptor.
     for attempt in 0..256 {
         match sender.try_write(&first, &[IoSlice::new(&bytes[..4096])]) {
@@ -1534,7 +1535,7 @@ fn partial_writes_transfer_fds_once_and_blocked_writes_retain_them() {
             .kind(),
         io::ErrorKind::WouldBlock
     );
-    assert_eq!(sender.descriptors.len(), 1);
+    assert_eq!(sender.registrations.descriptors.len(), 1);
     let mut bytes = [0; 4096];
     for attempt in 0..256 {
         match receiver.try_read(&second, &mut bytes) {
@@ -1545,11 +1546,11 @@ fn partial_writes_transfer_fds_once_and_blocked_writes_retain_them() {
             }
         }
     }
-    assert_eq!(receiver.regions.len(), 1);
+    assert_eq!(receiver.inbound.regions.len(), 1);
     assert_eq!(sender.try_write(&first, &[IoSlice::new(b"x")]).unwrap(), 1);
     assert_eq!(receiver.try_read(&second, &mut bytes).unwrap(), 1);
-    assert!(sender.descriptors.is_empty());
-    assert_eq!(receiver.regions.len(), 2);
+    assert!(sender.registrations.descriptors.is_empty());
+    assert_eq!(receiver.inbound.regions.len(), 2);
     assert_eq!(receiver.decode(first_wire).unwrap(), first_message);
     assert_eq!(receiver.decode(second_wire).unwrap(), second_message);
 }
@@ -2079,7 +2080,7 @@ fn multipart_records_preserve_unread_regions_across_registration_eviction() {
         wires.push(sender.encode(&message).unwrap().unwrap());
         transfer(&mut sender, &mut receiver);
     }
-    assert!(!receiver.retired_regions.is_empty());
+    assert!(!receiver.inbound.retired.is_empty());
     let messages: Vec<_> = wires
         .into_iter()
         .map(|wire| receiver.decode_received(wire).unwrap())

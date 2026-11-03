@@ -1,6 +1,6 @@
 //! Raw STREAM peers: no handshake, ready at once.
 
-use super::{AnyStream, PeerSetup, SocketDriver, new_peer_entry};
+use super::{AnyStream, PeerSetup, Side, SocketDriver, new_peer_entry};
 use crate::routing::AddedPeer;
 use crate::socket::actor::generated_identity;
 
@@ -16,8 +16,11 @@ impl SocketDriver {
         // Bind side names peers by peer id. Connect side keeps the route id
         // that connect() already reported.
         let route_id = peer.route_id;
-        let identity = generated_identity(if peer.is_server { peer_id } else { route_id });
-        if peer.is_server {
+        let identity = generated_identity(match peer.side {
+            Side::Bind => peer_id,
+            Side::Connect => route_id,
+        });
+        if peer.side == Side::Bind {
             self.last_stream_routing_id = Some(identity.clone());
         }
 

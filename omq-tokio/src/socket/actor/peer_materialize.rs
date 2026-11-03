@@ -2,7 +2,8 @@ use std::sync::{Arc, Mutex};
 
 use super::{
     AnyStream, ConnectionConfig, ConnectionDriver, Endpoint, PeerDriverConfig, PeerDriverHandle,
-    PeerEntry, PeerIdent, Role, SocketDriver, SocketType, ZmtpConnection, peer_ident_socket_addr,
+    PeerEntry, PeerIdent, Role, Side, SocketDriver, SocketType, ZmtpConnection,
+    peer_ident_socket_addr,
 };
 use crate::engine::codec::CodecSetup;
 use crate::engine::driver::{ActorLink, ReceiveProfile};
@@ -57,7 +58,7 @@ impl PeerChannels {
 pub(super) struct PeerSetup {
     pub(super) endpoint: Endpoint,
     pub(super) ident: PeerIdent,
-    pub(super) is_server: bool,
+    pub(super) side: Side,
     pub(super) route_id: u64,
     pub(super) send_pipe_rx: Option<SendPipeConsumer>,
     pub(super) options: Arc<Options>,
@@ -110,7 +111,7 @@ fn prepare_wire_codec(
         setup,
     }: ByteStreamConnection,
 ) -> Option<WireCodecSetup> {
-    let framing = wire_framing(&stream, peer.is_server);
+    let framing = wire_framing(&stream, peer.side);
     let Ok(transforms) = build_message_transforms(socket, &peer) else {
         return None;
     };
@@ -319,7 +320,7 @@ pub(super) fn new_peer_entry(
         identity: bytes::Bytes::new(),
         info: None,
         endpoint: peer.endpoint,
-        is_client: !peer.is_server,
+        side: peer.side,
         route_id: peer.route_id,
         inproc_inbound: None,
         task: None,
@@ -356,7 +357,7 @@ fn build_message_transforms(
                 .publish(peer.handshake_failed(e.to_string()));
             // A bad codec config fails every retry the same way, so stop
             // dialing instead of reconnecting forever.
-            if !peer.is_server {
+            if peer.side.is_connect() {
                 socket.drop_dial_route(peer.route_id);
             }
             Err(())
@@ -422,17 +423,16 @@ impl SocketDriver {
     }
 }
 
-fn wire_framing(stream: &AnyStream, is_server: bool) -> WireFraming {
+fn wire_framing(stream: &AnyStream, side: Side) -> WireFraming {
     #[cfg(feature = "ws")]
     if matches!(stream, AnyStream::Ws(_)) {
-        return WireFraming::Zws(if is_server {
-            omq_proto::proto::connection::WsRole::Server
-        } else {
-            omq_proto::proto::connection::WsRole::Client
+        return WireFraming::Zws(match side {
+            Side::Bind => omq_proto::proto::connection::WsRole::Server,
+            Side::Connect => omq_proto::proto::connection::WsRole::Client,
         });
     }
     #[cfg(not(feature = "ws"))]
-    let _ = (stream, is_server);
+    let _ = (stream, side);
     WireFraming::Zmtp
 }
 
@@ -443,10 +443,9 @@ fn build_codec(
     receive_wire_limit: Option<usize>,
 ) -> ZmtpConnection {
     let options = &peer.options;
-    let role = if peer.is_server {
-        Role::Server
-    } else {
-        Role::Client
+    let role = match peer.side {
+        Side::Bind => Role::Server,
+        Side::Connect => Role::Client,
     };
 
     // The driver runs authenticators on the blocking pool; a ZAP handler

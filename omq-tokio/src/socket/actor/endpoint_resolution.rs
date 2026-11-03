@@ -15,17 +15,11 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use super::dialer::FirstAttempt;
-use super::{Endpoint, Error, InternalEvent, Result, SocketDriver};
+use super::{Endpoint, Error, InternalEvent, Result, Side, SocketDriver};
 use crate::transport::setup::PendingHandshake;
 use omq_proto::endpoint::Host;
 
 const MAX_PENDING_ENDPOINTS: usize = 128;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Kind {
-    Bind,
-    Connect,
-}
 
 pub(super) enum Ack {
     Bind(oneshot::Sender<Result<Endpoint>>),
@@ -33,10 +27,10 @@ pub(super) enum Ack {
 }
 
 impl Ack {
-    fn kind(&self) -> Kind {
+    fn side(&self) -> Side {
         match self {
-            Self::Bind(_) => Kind::Bind,
-            Self::Connect(_) => Kind::Connect,
+            Self::Bind(_) => Side::Bind,
+            Self::Connect(_) => Side::Connect,
         }
     }
 
@@ -74,7 +68,7 @@ pub(super) struct ResolvedEndpoint {
 pub(super) struct PendingEndpoint {
     options: Arc<Options>,
     pub(super) original: Endpoint,
-    pub(super) kind: Kind,
+    pub(super) side: Side,
     pub(super) cancel: CancellationToken,
     task: JoinHandle<()>,
 }
@@ -231,7 +225,7 @@ async fn first(host: &str, port: u16) -> Result<SocketAddr> {
 
 struct EndpointTask {
     id: u64,
-    kind: Kind,
+    side: Side,
     endpoint: Endpoint,
     cancel: CancellationToken,
     admission: Option<crate::transport::setup::Admission>,
@@ -289,9 +283,9 @@ impl EndpointTask {
 
     async fn resolve(&self) -> Result<Endpoint> {
         loop {
-            let result = match self.kind {
-                Kind::Bind => bind_address(self.endpoint.clone()).await,
-                Kind::Connect => {
+            let result = match self.side {
+                Side::Bind => bind_address(self.endpoint.clone()).await,
+                Side::Connect => {
                     #[cfg(feature = "dart")]
                     if matches!(self.endpoint, Endpoint::Dart { .. }) {
                         return bind_address(self.endpoint.clone()).await;
@@ -328,9 +322,9 @@ impl SocketDriver {
             )));
             return;
         }
-        let kind = ack.kind();
+        let side = ack.side();
         // Datagram targets have no handshake to admit.
-        let admission = (kind == Kind::Connect
+        let admission = (side.is_connect()
             && self.socket_type != super::SocketType::Stream
             && !matches!(endpoint, Endpoint::Udp { .. }))
         .then(|| self.endpoints.dial_admission.clone());
@@ -346,7 +340,7 @@ impl SocketDriver {
         let task = tokio::spawn(
             EndpointTask {
                 id,
-                kind,
+                side,
                 endpoint: task_endpoint,
                 cancel: task_cancel,
                 admission,
@@ -360,7 +354,7 @@ impl SocketDriver {
             PendingEndpoint {
                 options,
                 original: endpoint,
-                kind,
+                side,
                 cancel,
                 task,
             },
@@ -388,7 +382,7 @@ impl SocketDriver {
                             resolved.endpoint,
                             pending.original.clone(),
                             pending.options.clone(),
-                            false,
+                            Side::Bind,
                         )
                         .await,
                     );
@@ -408,7 +402,7 @@ impl SocketDriver {
                             resolved.endpoint,
                             pending.original.clone(),
                             pending.options.clone(),
-                            true,
+                            Side::Connect,
                         )
                         .await
                         .map(|_| ()),
@@ -429,11 +423,11 @@ impl SocketDriver {
         }
     }
 
-    pub(super) fn cancel_pending_endpoints(&self, endpoint: Option<(&Endpoint, Kind)>) -> bool {
+    pub(super) fn cancel_pending_endpoints(&self, endpoint: Option<(&Endpoint, Side)>) -> bool {
         let mut canceled = false;
         for pending in self.endpoints.pending_endpoints.values() {
             if endpoint
-                .is_none_or(|(target, kind)| target == &pending.original && kind == pending.kind)
+                .is_none_or(|(target, side)| target == &pending.original && side == pending.side)
             {
                 pending.cancel.cancel();
                 canceled = true;

@@ -273,7 +273,7 @@ impl SocketDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::socket::actor::{PeerDriverHandle, PeerEntry, PeerIdent, SocketType};
+    use crate::socket::actor::{PeerDriverHandle, PeerEntry, PeerIdent, Side, SocketType};
     use crate::socket::monitor::{MonitorEvent, MonitorTryRecvError};
     use omq_proto::proto::{Command, Event, PeerProperties};
     use omq_proto::{Endpoint, Message, Options, ReconnectPolicy};
@@ -362,7 +362,7 @@ mod tests {
                 identity: bytes::Bytes::new(),
                 info: None,
                 endpoint: "tcp://127.0.0.1:12345".parse::<Endpoint>().unwrap(),
-                is_client: false,
+                side: Side::Bind,
                 route_id: peer_id,
                 inproc_inbound: None,
                 task: None,

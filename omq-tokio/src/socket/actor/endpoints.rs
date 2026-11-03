@@ -4,7 +4,7 @@ use std::sync::Arc;
 use super::dialer::FirstAttempt;
 use super::{
     ConnectionStatus, DialerEntry, DisconnectReason, Endpoint, EndpointTask, Error, MonitorEvent,
-    PeerInfo, Result, SocketDriver, SocketType, bind_any, reject_encrypted_inproc,
+    PeerInfo, Result, Side, SocketDriver, SocketType, bind_any, reject_encrypted_inproc,
 };
 use crate::socket::actor::lifecycle::PeerLifecycle;
 
@@ -44,7 +44,7 @@ impl SocketDriver {
         } else if Self::is_dart_endpoint(&endpoint) {
             #[cfg(feature = "dart")]
             let _ = ack.send(
-                self.start_dart(endpoint.clone(), endpoint, options, true)
+                self.start_dart(endpoint.clone(), endpoint, options, Side::Connect)
                     .await
                     .map(|_| ()),
             );
@@ -88,7 +88,7 @@ impl SocketDriver {
             || self
                 .peers
                 .values()
-                .any(|peer| peer.is_client && &peer.endpoint == endpoint)
+                .any(|peer| peer.side.is_connect() && &peer.endpoint == endpoint)
     }
 
     #[cfg_attr(
@@ -97,11 +97,10 @@ impl SocketDriver {
     )]
     pub(super) async fn unbind(&mut self, endpoint: &Endpoint) -> Result<()> {
         #[cfg(feature = "dart")]
-        if self.stop_dart_endpoints(Some((endpoint, false))).await {
+        if self.stop_dart_endpoints(Some((endpoint, Side::Bind))).await {
             return Ok(());
         }
-        let pending =
-            self.cancel_pending_endpoints(Some((endpoint, super::endpoint_resolution::Kind::Bind)));
+        let pending = self.cancel_pending_endpoints(Some((endpoint, Side::Bind)));
         // Wait for each task so the address is free when unbind returns.
         let removed = super::stop_matching(&mut self.endpoints.listeners, endpoint).await
             + super::stop_matching(&mut self.endpoints.udp_listeners, endpoint).await;
@@ -119,12 +118,14 @@ impl SocketDriver {
     /// `Error::Unroutable` if no dialer or live client peer matches.
     pub(super) async fn disconnect(&mut self, endpoint: &Endpoint) -> Result<()> {
         #[cfg(feature = "dart")]
-        if self.stop_dart_endpoints(Some((endpoint, true))).await {
+        if self
+            .stop_dart_endpoints(Some((endpoint, Side::Connect)))
+            .await
+        {
             return Ok(());
         }
 
-        let pending = self
-            .cancel_pending_endpoints(Some((endpoint, super::endpoint_resolution::Kind::Connect)));
+        let pending = self.cancel_pending_endpoints(Some((endpoint, Side::Connect)));
         let before = self.endpoints.dialers.len() + self.endpoints.udp_dialers.len();
 
         self.remove_dialers_to(endpoint);
@@ -164,7 +165,7 @@ impl SocketDriver {
             .peers
             .iter()
             .filter_map(|(id, peer)| {
-                if peer.is_client && &peer.endpoint == endpoint {
+                if peer.side.is_connect() && &peer.endpoint == endpoint {
                     Some(*id)
                 } else {
                     None
@@ -216,7 +217,7 @@ impl SocketDriver {
         #[cfg(feature = "dart")]
         if matches!(endpoint, Endpoint::Dart { .. }) {
             return self
-                .start_dart(endpoint.clone(), endpoint, options, false)
+                .start_dart(endpoint.clone(), endpoint, options, Side::Bind)
                 .await;
         }
         if self.socket_type == SocketType::Stream && !endpoint.is_tcp_family() {

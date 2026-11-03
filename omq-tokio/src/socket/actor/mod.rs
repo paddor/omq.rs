@@ -98,6 +98,21 @@ enum InternalEvent {
     },
 }
 
+/// The endpoint operation a peer or endpoint came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Side {
+    /// Accepted on, or bound to, a local endpoint.
+    Bind,
+    /// Dialed through `connect()`.
+    Connect,
+}
+
+impl Side {
+    const fn is_connect(self) -> bool {
+        matches!(self, Self::Connect)
+    }
+}
+
 struct PeerEntry {
     /// Immutable endpoint-generation configuration, including reconnects.
     options: Arc<Options>,
@@ -127,9 +142,8 @@ struct PeerEntry {
     /// Endpoint this peer arrived at (bind side) or dialed to (connect
     /// side). Surfaced in monitor events.
     endpoint: Endpoint,
-    /// True for dialer-initiated connections; false for listener-accepted.
-    /// Used to decide whether to restart the dial after a mid-session drop.
-    is_client: bool,
+    /// Dialed or accepted. Dialed peers redial after a mid-session drop.
+    side: Side,
     /// Send-strategy route id. For connect-side round-robin pipes this is
     /// allocated at `connect()` time and can differ from the peer id.
     route_id: u64,

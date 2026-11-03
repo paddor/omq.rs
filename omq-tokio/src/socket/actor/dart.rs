@@ -11,8 +11,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::peer_materialize::{FaninProducer, PeerChannels, fanin_recv_sink, wrap_routed_sink};
 use super::{
-    Endpoint, Error, MonitorEvent, PeerDriverHandle, PeerEntry, PeerIdent, Result, SocketDriver,
-    SocketType,
+    Endpoint, Error, MonitorEvent, PeerDriverHandle, PeerEntry, PeerIdent, Result, Side,
+    SocketDriver, SocketType,
 };
 use crate::engine::{RecvSink, SendPipeConsumer};
 use crate::transport::dart::{
@@ -24,7 +24,7 @@ pub(super) struct Entry {
     id: u64,
     endpoint: Endpoint,
     original: Endpoint,
-    connect: bool,
+    side: Side,
     options: Arc<Options>,
     pub(super) cancel: CancellationToken,
     task: JoinHandle<()>,
@@ -83,16 +83,16 @@ impl SocketDriver {
         endpoint: Endpoint,
         original: Endpoint,
         options: Arc<Options>,
-        connect: bool,
+        side: Side,
     ) -> Result<Endpoint> {
         self.validate_dart_options(&options)?;
         if self.endpoints.dart_endpoints.len() >= 128 {
             return Err(Error::Config("DART endpoint limit reached".into()));
         }
 
-        let carrier = self.open_dart_carrier(&endpoint, &options, connect).await?;
+        let carrier = self.open_dart_carrier(&endpoint, &options, side).await?;
         let io_thread = carrier.lease.index();
-        let resolved = if connect {
+        let resolved = if side.is_connect() {
             endpoint
         } else {
             // Report the bound port, which differs from the request for port 0.
@@ -107,7 +107,7 @@ impl SocketDriver {
             .alloc_id()
             .ok_or_else(|| Error::Config("peer ID exhausted".into()))?;
         let route_id = id;
-        let pipe = if connect {
+        let pipe = if side.is_connect() {
             self.routing
                 .send_strategy
                 .make_dart_connect_pipe(route_id, self.socket_type)
@@ -117,7 +117,7 @@ impl SocketDriver {
 
         let cancel = self.link.cancel.child_token();
         let (task, commands) = self.spawn_dart_worker(id, carrier, &options, cancel.clone());
-        if !connect {
+        if side == Side::Bind {
             self.link.monitor.publish(MonitorEvent::Listening {
                 endpoint: resolved.clone(),
             });
@@ -127,7 +127,7 @@ impl SocketDriver {
             id,
             endpoint: resolved.clone(),
             original,
-            connect,
+            side,
             options,
             cancel,
             task,
@@ -145,9 +145,9 @@ impl SocketDriver {
         &self,
         endpoint: &Endpoint,
         options: &Options,
-        connect: bool,
+        side: Side,
     ) -> Result<Carrier> {
-        let (socket, target) = prepare_socket(endpoint, options, connect)?;
+        let (socket, target) = prepare_socket(endpoint, options, side)?;
         let lease = self.resources.io_pool.reserve_thread();
         let io_thread = lease.index();
         let network = self.resources.io_pool.network_on(io_thread);
@@ -274,10 +274,14 @@ impl SocketDriver {
         let cancel = handle.cancel.clone();
         let options = entry.options.clone();
         let endpoint = entry.endpoint.clone();
-        let connect = entry.connect;
+        let side = entry.side;
         let commands = entry.commands.clone();
         // Connect endpoints keep the route allocated at connect() time.
-        let route_id = if connect { entry.route_id } else { peer_id };
+        let route_id = if side.is_connect() {
+            entry.route_id
+        } else {
+            peer_id
+        };
         let (send_pipe, pipe) = entry.make_send_pipe(
             self.socket_type,
             self.routing.send_strategy.needs_peer_send_pipe(),
@@ -294,7 +298,7 @@ impl SocketDriver {
 
         let ident = PeerIdent::Socket(source);
         self.link.monitor.publish(super::peer::connection_event(
-            connect,
+            side,
             endpoint,
             ident.clone(),
             peer_id,
@@ -330,7 +334,7 @@ impl SocketDriver {
 
     async fn retire_dart_connect_generation(&mut self, index: usize) {
         let entry = &self.endpoints.dart_endpoints[index];
-        let Some(peer_id) = entry.active_peer.filter(|_| entry.connect) else {
+        let Some(peer_id) = entry.active_peer.filter(|_| entry.side.is_connect()) else {
             return;
         };
         self.stop_removed_peer(peer_id, super::DisconnectReason::PeerClosed)
@@ -343,7 +347,7 @@ impl SocketDriver {
             .endpoints
             .dart_endpoints
             .iter()
-            .position(|entry| entry.connect && entry.active_peer == Some(peer_id))
+            .position(|entry| entry.side.is_connect() && entry.active_peer == Some(peer_id))
         else {
             return;
         };
@@ -363,14 +367,13 @@ impl SocketDriver {
             .make_dart_connect_pipe(route_id, self.socket_type);
     }
 
-    pub(super) async fn stop_dart_endpoints(&mut self, target: Option<(&Endpoint, bool)>) -> bool {
+    pub(super) async fn stop_dart_endpoints(&mut self, target: Option<(&Endpoint, Side)>) -> bool {
         let mut removed = Vec::new();
         let mut index = 0;
         while index < self.endpoints.dart_endpoints.len() {
             let entry = &self.endpoints.dart_endpoints[index];
-            if target.is_none_or(|(endpoint, connect)| {
-                entry.connect == connect
-                    && (endpoint == &entry.endpoint || endpoint == &entry.original)
+            if target.is_none_or(|(endpoint, side)| {
+                entry.side == side && (endpoint == &entry.endpoint || endpoint == &entry.original)
             }) {
                 let entry = self.endpoints.dart_endpoints.swap_remove(index);
                 entry.cancel.cancel();
@@ -389,7 +392,7 @@ impl SocketDriver {
             .filter(|(_, peer)| {
                 removed
                     .iter()
-                    .any(|entry| peer.endpoint == entry.endpoint && peer.is_client == entry.connect)
+                    .any(|entry| peer.endpoint == entry.endpoint && peer.side == entry.side)
             })
             .map(|(&id, _)| id)
             .collect();
@@ -407,8 +410,9 @@ impl SocketDriver {
 fn prepare_socket(
     endpoint: &Endpoint,
     options: &Options,
-    connect: bool,
+    side: Side,
 ) -> Result<(std::net::UdpSocket, Option<SocketAddr>)> {
+    let connect = side.is_connect();
     let Endpoint::Dart { host, port } = endpoint else {
         unreachable!()
     };
@@ -451,7 +455,7 @@ impl Entry {
         Option<crate::engine::send_pipe::SendPipeProducerHandle>,
         Option<SendPipeConsumer>,
     ) {
-        if self.connect
+        if self.side.is_connect()
             && let Some(pipe) = self.pipe.take()
         {
             return (None, Some(pipe));
@@ -483,7 +487,7 @@ impl Entry {
             identity: Bytes::new(),
             info: None,
             endpoint: self.endpoint.clone(),
-            is_client: self.connect,
+            side: self.side,
             route_id,
             inproc_inbound: None,
             task: None,

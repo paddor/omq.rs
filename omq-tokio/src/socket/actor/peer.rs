@@ -1,6 +1,6 @@
 use super::{
     AnyConn, DisconnectReason, Duration, InprocPeerSnapshot, InternalEvent, Message, MonitorEvent,
-    PeerEntry, PeerIdent, ReconnectPolicy, SocketDriver, SocketType, ZmtpEvent,
+    PeerEntry, PeerIdent, ReconnectPolicy, Side, SocketDriver, SocketType, ZmtpEvent,
     peer_ident_socket_addr,
 };
 use crate::socket::actor::lifecycle::PeerLifecycle;
@@ -25,7 +25,7 @@ impl SocketDriver {
                     endpoint,
                     ident: conn.peer_ident().clone(),
                     options,
-                    is_server: true,
+                    side: Side::Bind,
                     route_id: self.next_peer_id,
                     send_pipe_rx: None,
                 };
@@ -49,7 +49,7 @@ impl SocketDriver {
                     endpoint,
                     ident: conn.peer_ident().clone(),
                     options,
-                    is_server: false,
+                    side: Side::Connect,
                     route_id,
                     send_pipe_rx: self.take_dialer_send_pipe(route_id),
                 };
@@ -102,12 +102,12 @@ impl SocketDriver {
         }
         // A refused handshake would be refused again; stop dialing.
         if refused {
-            if peer.is_client {
+            if peer.side.is_connect() {
                 self.drop_dial_route(peer.route_id);
             }
             return;
         }
-        if peer.is_client
+        if peer.side.is_connect()
             && !self.close.started
             && !matches!(peer.options.reconnect, ReconnectPolicy::Disabled)
         {
@@ -134,7 +134,7 @@ impl SocketDriver {
             }
         }
 
-        if refused && peer.is_client {
+        if refused && peer.side.is_connect() {
             self.link.monitor.publish(MonitorEvent::ConnectStopped {
                 endpoint: peer.endpoint.clone(),
                 reason: reason.clone(),
@@ -260,7 +260,7 @@ impl SocketDriver {
             }
         }
         self.link.monitor.publish(connection_event(
-            !peer.is_server,
+            peer.side,
             peer.endpoint.clone(),
             peer.ident.clone(),
             self.next_peer_id,
@@ -434,12 +434,12 @@ impl PeerSetup {
 
 /// Connect endpoints report `Connected`, bind endpoints `Accepted`.
 pub(super) fn connection_event(
-    connect: bool,
+    side: Side,
     endpoint: omq_proto::Endpoint,
     peer_ident: PeerIdent,
     connection_id: u64,
 ) -> MonitorEvent {
-    if connect {
+    if side.is_connect() {
         MonitorEvent::Connected {
             endpoint,
             peer_ident,

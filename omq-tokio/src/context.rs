@@ -13,6 +13,7 @@ use omq_proto::options::Options;
 use omq_proto::proto::SocketType;
 
 use crate::Socket;
+use crate::socket::handle::{Build, Placement};
 
 mod io_pool;
 
@@ -442,9 +443,8 @@ impl Context {
 
     /// Create an async socket on this context's runtime.
     pub fn socket(&self, socket_type: SocketType, options: Options) -> Socket {
-        self.new_socket("Context::socket()", |io_pool, registry| {
-            Socket::new_with_io_pool(socket_type, options, io_pool, registry)
-        })
+        let build = Build::native(None);
+        self.new_socket("Context::socket()", socket_type, options, build)
     }
 
     #[doc(hidden)]
@@ -454,18 +454,9 @@ impl Context {
         options: Options,
         config: Arc<crate::engine::RecvSinkConfig>,
     ) -> Socket {
-        self.new_socket(
-            "Context::socket_with_recv_sink_config()",
-            |io_pool, registry| {
-                Socket::new_with_recv_sink_config_and_io_pool(
-                    socket_type,
-                    options,
-                    config,
-                    io_pool,
-                    registry,
-                )
-            },
-        )
+        let build = Build::native(Some(config));
+        let caller = "Context::socket_with_recv_sink_config()";
+        self.new_socket(caller, socket_type, options, build)
     }
 
     /// Construct a binding socket with libzmq send and polling semantics.
@@ -476,9 +467,11 @@ impl Context {
         options: Options,
         recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
     ) -> Socket {
-        self.new_socket("Context::socket_for_libzmq()", |io_pool, registry| {
-            Socket::new_for_libzmq(socket_type, options, recv_sink_config, io_pool, registry)
-        })
+        let build = Build {
+            recv_sink_config,
+            compatibility: crate::routing::SendCompatibility::Libzmq,
+        };
+        self.new_socket("Context::socket_for_libzmq()", socket_type, options, build)
     }
 
     /// Construct a blocking binding socket with libzmq send semantics.
@@ -515,15 +508,18 @@ impl Context {
     fn new_socket(
         &self,
         caller: &str,
-        build: impl FnOnce(&IoPoolHandle, Arc<crate::transport::inproc::InprocRegistry>) -> Socket,
+        socket_type: SocketType,
+        options: Options,
+        build: Build,
     ) -> Socket {
         self.assert_usable(caller);
         self.inner.freeze_network();
         let _guard = self.inner.primary_handle().enter();
-        build(
-            &self.inner.io_pool_handle(),
-            self.inner.inproc_registry.clone(),
-        )
+        let placement = Placement {
+            io_pool: &self.inner.io_pool_handle(),
+            inproc_registry: self.inner.inproc_registry.clone(),
+        };
+        Socket::new_in(socket_type, options, build, placement)
     }
 
     /// Run a future on this context's runtime, blocking the calling

@@ -86,7 +86,7 @@ impl Socket {
         timeout: std::time::Duration,
     ) -> Result<usize> {
         let deadline = crate::socket::deadline_after(timeout).map(tokio::time::Instant::from_std);
-        let changed = &self.inner.ready_peer_count.changed;
+        let changed = &self.inner.shared.ready_peers.changed;
         loop {
             // Snapshot first: the actor answers after any readiness change
             // it already published, and notifies for later ones.
@@ -129,7 +129,7 @@ impl Socket {
     ) -> Result<u64> {
         let deadline = crate::socket::deadline_after(timeout).map(tokio::time::Instant::from_std);
         loop {
-            let count = self.inner.subscribe_count.load(Ordering::Acquire);
+            let count = self.inner.shared.subscribe_count.load(Ordering::Acquire);
             if count >= min_subscriptions {
                 return Ok(count);
             }
@@ -160,7 +160,7 @@ impl Socket {
     /// becomes ready or a ready peer goes away, so every change to
     /// [`Self::connections`] moves it. Unlike monitor events, it never lags.
     pub fn connections_generation(&self) -> u64 {
-        self.inner.ready_peer_count.changed.generation()
+        self.inner.shared.ready_peers.changed.generation()
     }
 
     /// Wait until the connection generation differs from `seen` and return
@@ -169,7 +169,7 @@ impl Socket {
     /// Returns `Err(Error::Closed)` once the socket is closing and `seen`
     /// is current.
     pub async fn connections_changed(&self, seen: u64) -> Result<u64> {
-        let changed = &self.inner.ready_peer_count.changed;
+        let changed = &self.inner.shared.ready_peers.changed;
         tokio::select! {
             biased;
             () = changed.changed_after(seen) => Ok(changed.generation()),

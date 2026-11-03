@@ -116,11 +116,11 @@ impl Socket {
         crate::socket::send_budget::cooperate().await;
         match self.inner.socket_type {
             SocketType::Req => {
-                if !self.inner.req_awaiting_reply.claim() {
+                if !self.inner.shared.req_awaiting_reply.claim() {
                     // Yield so the actor can process a potential peer
                     // disconnect that resets the flag, then retry once.
                     tokio::task::yield_now().await;
-                    if !self.inner.req_awaiting_reply.claim() {
+                    if !self.inner.shared.req_awaiting_reply.claim() {
                         return Err(Error::Protocol(
                             "REQ socket must receive a reply before sending again".into(),
                         ));
@@ -128,13 +128,13 @@ impl Socket {
                 }
                 // Canceling the send must allow the next send.
                 let mut claim = ReqSendClaim {
-                    awaiting_reply: &self.inner.req_awaiting_reply,
+                    awaiting_reply: &self.inner.shared.req_awaiting_reply,
                     sent: false,
                 };
                 let msg = Message::with_prefix(Bytes::new(), msg);
                 let result = self
                     .send_submitter
-                    .send_request(msg, &self.inner.req_awaiting_reply)
+                    .send_request(msg, &self.inner.shared.req_awaiting_reply)
                     .await;
                 claim.sent = result.is_ok();
                 result
@@ -221,7 +221,7 @@ impl Socket {
     pub fn try_send(&self, msg: Message) -> core::result::Result<(), TrySendError> {
         match self.inner.socket_type {
             SocketType::Req => {
-                if !self.inner.req_awaiting_reply.claim() {
+                if !self.inner.shared.req_awaiting_reply.claim() {
                     return Err(TrySendError::Error(Error::Protocol(
                         "REQ socket must receive a reply before sending again".into(),
                     )));
@@ -229,9 +229,9 @@ impl Socket {
                 let msg = Message::with_prefix(Bytes::new(), msg);
                 let result = self
                     .send_submitter
-                    .try_send_request(msg, &self.inner.req_awaiting_reply);
+                    .try_send_request(msg, &self.inner.shared.req_awaiting_reply);
                 if result.is_err() {
-                    self.inner.req_awaiting_reply.clear();
+                    self.inner.shared.req_awaiting_reply.clear();
                 }
                 match result {
                     Err(TrySendError::Full(mut returned)) => {
@@ -355,7 +355,7 @@ impl Socket {
     pub fn send_ready(&self) -> bool {
         match self.inner.socket_type {
             SocketType::Req => {
-                !self.inner.req_awaiting_reply.is_set() && self.send_submitter.send_ready()
+                !self.inner.shared.req_awaiting_reply.is_set() && self.send_submitter.send_ready()
             }
             SocketType::Rep => {
                 let peer = self
@@ -380,7 +380,7 @@ impl Socket {
     pub async fn wait_send_ready(&self) {
         match self.inner.socket_type {
             SocketType::Req => loop {
-                self.inner.req_awaiting_reply.wait_cleared().await;
+                self.inner.shared.req_awaiting_reply.wait_cleared().await;
                 self.send_submitter.wait_send_ready().await;
                 // A send from another handle may have claimed the reply.
                 if self.send_ready() {

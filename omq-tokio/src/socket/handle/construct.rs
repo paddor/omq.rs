@@ -17,9 +17,9 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 /// Where a new socket runs: its IO pool and inproc namespace.
-struct Placement<'a> {
-    io_pool: &'a crate::context::IoPoolHandle,
-    inproc_registry: Arc<InprocRegistry>,
+pub(crate) struct Placement<'a> {
+    pub(crate) io_pool: &'a crate::context::IoPoolHandle,
+    pub(crate) inproc_registry: Arc<InprocRegistry>,
 }
 
 impl Placement<'_> {
@@ -28,6 +28,23 @@ impl Placement<'_> {
         Placement {
             io_pool,
             inproc_registry: crate::transport::inproc::standalone_registry(),
+        }
+    }
+}
+
+/// How a new socket behaves: an optional caller-provided receive sink and
+/// its send semantics.
+pub(crate) struct Build {
+    pub(crate) recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
+    pub(crate) compatibility: SendCompatibility,
+}
+
+impl Build {
+    /// Native send semantics.
+    pub(crate) fn native(recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>) -> Self {
+        Self {
+            recv_sink_config,
+            compatibility: SendCompatibility::Native,
         }
     }
 }
@@ -48,33 +65,12 @@ impl Socket {
     /// # Errors
     /// Returns an error if the options are invalid for the protocol or socket type.
     pub fn try_new(socket_type: SocketType, options: Options) -> Result<Self> {
-        Self::new_inner(
+        Self::try_new_in(
             socket_type,
             options,
-            None,
+            Build::native(None),
             Placement::standalone(&crate::context::IoPoolHandle::none()),
-            SendCompatibility::Native,
         )
-    }
-
-    pub(crate) fn new_with_io_pool(
-        socket_type: SocketType,
-        options: Options,
-        io_pool: &crate::context::IoPoolHandle,
-        inproc_registry: Arc<InprocRegistry>,
-    ) -> Self {
-        let placement = Placement {
-            io_pool,
-            inproc_registry,
-        };
-        Self::new_inner(
-            socket_type,
-            options,
-            None,
-            placement,
-            SendCompatibility::Native,
-        )
-        .expect("invalid socket options")
     }
 
     /// Like [`Socket::new`], but installs a `RecvSinkConfig` that the
@@ -101,63 +97,33 @@ impl Socket {
         options: Options,
         config: Arc<crate::engine::RecvSinkConfig>,
     ) -> Result<Self> {
-        Self::new_inner(
+        Self::try_new_in(
             socket_type,
             options,
-            Some(config),
+            Build::native(Some(config)),
             Placement::standalone(&crate::context::IoPoolHandle::none()),
-            SendCompatibility::Native,
         )
     }
 
-    pub(crate) fn new_with_recv_sink_config_and_io_pool(
+    /// Create a socket in a context's placement.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the options are invalid for the protocol or socket type.
+    pub(crate) fn new_in(
         socket_type: SocketType,
         options: Options,
-        config: Arc<crate::engine::RecvSinkConfig>,
-        io_pool: &crate::context::IoPoolHandle,
-        inproc_registry: Arc<InprocRegistry>,
+        build: Build,
+        placement: Placement<'_>,
     ) -> Self {
-        let placement = Placement {
-            io_pool,
-            inproc_registry,
-        };
-        Self::new_inner(
-            socket_type,
-            options,
-            Some(config),
-            placement,
-            SendCompatibility::Native,
-        )
-        .expect("invalid socket options")
+        Self::try_new_in(socket_type, options, build, placement).expect("invalid socket options")
     }
 
-    pub(crate) fn new_for_libzmq(
-        socket_type: SocketType,
-        options: Options,
-        recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
-        io_pool: &crate::context::IoPoolHandle,
-        inproc_registry: Arc<InprocRegistry>,
-    ) -> Self {
-        let placement = Placement {
-            io_pool,
-            inproc_registry,
-        };
-        Self::new_inner(
-            socket_type,
-            options,
-            recv_sink_config,
-            placement,
-            SendCompatibility::Libzmq,
-        )
-        .expect("invalid socket options")
-    }
-
-    fn new_inner(
+    fn try_new_in(
         socket_type: SocketType,
         mut options: Options,
-        recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
+        build: Build,
         placement: Placement<'_>,
-        compatibility: SendCompatibility,
     ) -> Result<Self> {
         prepare_options(socket_type, &mut options)?;
         let tuning = recv_tuning(socket_type, &options);
@@ -167,10 +133,10 @@ impl Socket {
         let driver_linger = options.linger;
         let monitor = MonitorPublisher::new(options.monitor_capacity);
         let send_strategy = SendStrategy::for_socket_type(socket_type, &options, placement.io_pool)
-            .with_compatibility(compatibility);
+            .with_compatibility(build.compatibility);
         let send_submitter = send_strategy.submitter();
         // A caller-provided sink replaces the native receive fast paths.
-        let recv = ReceiveParts::new(socket_type, &options, recv_sink_config.is_none());
+        let recv = ReceiveParts::new(socket_type, &options, build.recv_sink_config.is_none());
         let shared = HandleShared::new();
 
         let link = HandleLink {
@@ -185,7 +151,7 @@ impl Socket {
         let env = DriverEnv {
             io_pool: placement.io_pool.clone(),
             inproc_registry: placement.inproc_registry,
-            recv_sink_config,
+            recv_sink_config: build.recv_sink_config,
         };
         let driver = SocketDriver::new(socket_type, options, send_strategy, link, env);
         #[cfg(feature = "dart")]
@@ -208,9 +174,7 @@ impl Socket {
                 monitor,
                 send_submitter,
                 rep_current: Arc::new(Mutex::new(None)),
-                req_awaiting_reply: shared.req_awaiting_reply,
-                subscribe_count: shared.subscribe_count,
-                ready_peer_count: shared.ready_peers,
+                shared,
                 last_bound_endpoint: RwLock::new(None),
                 actor_task: Mutex::new(Some(actor_task)),
             }),

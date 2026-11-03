@@ -315,7 +315,7 @@ pub(crate) struct HandleLink {
 }
 
 /// State the socket handle reads or updates without an actor hop.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct HandleShared {
     /// REQ alternation flag for lock-free send/recv on REQ. The actor resets
     /// it on peer disconnect.

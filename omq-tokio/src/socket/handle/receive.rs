@@ -93,7 +93,7 @@ impl Socket {
                 if message.len() < 2 || !message.pop_front()?.is_empty() {
                     return None;
                 }
-                if !self.inner.req_awaiting_reply.accept_reply(peer_id) {
+                if !self.inner.shared.req_awaiting_reply.accept_reply(peer_id) {
                     return None;
                 }
                 Some(message)

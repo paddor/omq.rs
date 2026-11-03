@@ -261,8 +261,7 @@ async fn finish_connect(driver: &mut SocketDriver, id: u64, resolved: Endpoint) 
             endpoint_resolution::Ack::Connect(ack),
             Ok(endpoint_resolution::ResolvedEndpoint {
                 endpoint: resolved,
-                first_deadline: None,
-                admission: None,
+                first: crate::socket::actor::dialer::FirstAttempt::default(),
             }),
         )
         .await;

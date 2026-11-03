@@ -14,6 +14,7 @@ use futures::channel::oneshot;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use super::dialer::FirstAttempt;
 use super::{Endpoint, Error, InternalEvent, Result, SocketDriver};
 use crate::transport::setup::PendingHandshake;
 use omq_proto::endpoint::Host;
@@ -67,8 +68,7 @@ impl Ack {
 
 pub(super) struct ResolvedEndpoint {
     pub(super) endpoint: Endpoint,
-    pub(super) first_deadline: Option<Instant>,
-    pub(super) admission: Option<PendingHandshake>,
+    pub(super) first: FirstAttempt,
 }
 
 pub(super) struct PendingEndpoint {
@@ -280,8 +280,10 @@ impl EndpointTask {
             .map_err(|_| Error::HandshakeFailed("DNS resolution timeout".into()))??;
         Ok(ResolvedEndpoint {
             endpoint,
-            first_deadline,
-            admission,
+            first: FirstAttempt {
+                deadline: first_deadline,
+                admission,
+            },
         })
     }
 
@@ -414,11 +416,11 @@ impl SocketDriver {
                     return;
                 }
                 if !self.should_ignore_duplicate_connect(&resolved.endpoint) {
-                    self.start_dial_with_deadline(
+                    self.start_dial_task(
                         resolved.endpoint,
                         pending.options.clone(),
-                        resolved.first_deadline,
-                        resolved.admission,
+                        resolved.first,
+                        0,
                     );
                 }
                 let _ = ack.send(Ok(()));

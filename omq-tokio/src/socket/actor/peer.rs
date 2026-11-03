@@ -8,6 +8,7 @@ use crate::engine::peer_events::SubscriptionGate;
 use crate::routing::AddedPeer;
 use crate::socket::actor::lifecycle::PeerLifecycle;
 use crate::socket::actor::peer_materialize::{ByteStreamConnection, PeerSetup, new_peer_entry};
+use crate::socket::dispatch::InprocSetup;
 #[cfg(any(feature = "ws", feature = "quic"))]
 use omq_proto::endpoint::Endpoint;
 use std::sync::atomic::Ordering;
@@ -214,20 +215,18 @@ impl SocketDriver {
             )
     }
 
-    pub(super) fn inproc_config(
-        &self,
-        options: &omq_proto::Options,
-    ) -> crate::transport::inproc::RecvConfig {
-        crate::transport::inproc::RecvConfig {
-            direct: self.inproc_direct_inbound(),
-            send_hwm: options.send_queue_capacity(),
-        }
-    }
-
-    pub(super) fn inproc_snapshot(&self) -> InprocPeerSnapshot {
-        InprocPeerSnapshot {
-            socket_type: self.socket_type,
-            identity: self.options.identity.clone(),
+    /// Inproc bind or connect setup. `options` are the endpoint's own.
+    pub(super) fn inproc_setup(&self, options: &omq_proto::Options) -> InprocSetup {
+        InprocSetup {
+            registry: self.resources.inproc_registry.clone(),
+            snapshot: InprocPeerSnapshot {
+                socket_type: self.socket_type,
+                identity: self.options.identity.clone(),
+            },
+            recv: crate::transport::inproc::RecvConfig {
+                direct: self.inproc_direct_inbound(),
+                send_hwm: options.send_queue_capacity(),
+            },
         }
     }
 

@@ -15,15 +15,17 @@ fn snapshot() -> InprocPeerSnapshot {
 async fn bind_result_for_test(endpoint: &Endpoint) -> Result<BoundListener> {
     #[cfg(any(feature = "ws", feature = "quic"))]
     let carrier_options = omq_proto::Options::default();
-    let inproc_registry = Arc::new(inproc_transport::InprocRegistry::new());
-    bind_any(
-        &inproc_registry,
-        endpoint,
-        &snapshot(),
-        &inproc_transport::RecvConfig {
+    let inproc = InprocSetup {
+        registry: Arc::new(inproc_transport::InprocRegistry::new()),
+        snapshot: snapshot(),
+        recv: inproc_transport::RecvConfig {
             direct: false,
             send_hwm: 1000,
         },
+    };
+    bind_any(
+        endpoint,
+        &inproc,
         #[cfg(any(feature = "ws", feature = "quic"))]
         CarrierAccept {
             options: &carrier_options,

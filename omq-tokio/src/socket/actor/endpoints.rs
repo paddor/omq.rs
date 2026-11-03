@@ -1,6 +1,7 @@
 use omq_proto::Options;
 use std::sync::Arc;
 
+use super::dialer::FirstAttempt;
 use super::peer_materialize::PeerChannels;
 use super::{
     ConnectionStatus, DialerEntry, DisconnectReason, Endpoint, EndpointTask, Error, MonitorEvent,
@@ -464,13 +465,10 @@ impl SocketDriver {
         }
         reject_encrypted_inproc(&endpoint, &options.mechanism)?;
 
-        let snapshot = self.inproc_snapshot();
         let cancel = self.link.cancel.child_token();
         let bound = bind_any(
-            &self.resources.inproc_registry,
             &endpoint,
-            &snapshot,
-            &self.inproc_config(&options),
+            &self.inproc_setup(&options),
             #[cfg(any(feature = "ws", feature = "quic"))]
             self.carrier_accept(&endpoint, &options, &cancel),
         )
@@ -532,7 +530,7 @@ impl SocketDriver {
     }
 
     pub(super) fn start_dial(&mut self, endpoint: Endpoint, options: Arc<Options>) {
-        self.start_dial_with_deadline(endpoint, options, None, None);
+        self.start_dial_task(endpoint, options, FirstAttempt::default(), 0);
     }
 
     pub(super) fn start_redial(
@@ -544,21 +542,7 @@ impl SocketDriver {
         self.start_dial_task(endpoint, options, FirstAttempt::default(), failed_attempts);
     }
 
-    pub(super) fn start_dial_with_deadline(
-        &mut self,
-        endpoint: Endpoint,
-        options: Arc<Options>,
-        first_deadline: Option<std::time::Instant>,
-        first_admission: Option<crate::transport::setup::PendingHandshake>,
-    ) {
-        let first = FirstAttempt {
-            deadline: first_deadline,
-            admission: first_admission,
-        };
-        self.start_dial_task(endpoint, options, first, 0);
-    }
-
-    fn start_dial_task(
+    pub(super) fn start_dial_task(
         &mut self,
         endpoint: Endpoint,
         options: Arc<Options>,
@@ -602,12 +586,9 @@ impl SocketDriver {
                 cancel: cancel.clone(),
                 tx: self.mail.internal_tx.clone(),
                 monitor: self.link.monitor.clone(),
-                snapshot: self.inproc_snapshot(),
-                recv: self.inproc_config(&options),
-                registry: self.resources.inproc_registry.clone(),
+                inproc: self.inproc_setup(&options),
                 setup,
-                first_deadline: first.deadline,
-                first_admission: first.admission,
+                first,
                 failed_attempts: failed_attempts.clone(),
                 io_pool: self.resources.io_pool.clone(),
             }
@@ -692,13 +673,6 @@ impl SocketDriver {
         let _ = endpoint;
         Ok(())
     }
-}
-
-/// Setup budget carried from DNS resolution into a dialer's first attempt.
-#[derive(Default)]
-struct FirstAttempt {
-    deadline: Option<std::time::Instant>,
-    admission: Option<crate::transport::setup::PendingHandshake>,
 }
 
 /// Listener setup deadline. QUIC always has a finite deadline.

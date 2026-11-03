@@ -10,9 +10,7 @@ use std::io;
 use std::io::IoSlice;
 use std::io::Write;
 use std::pin::Pin;
-#[cfg(test)]
-use std::sync::Arc;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll};
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -656,15 +654,20 @@ pub(super) struct CarrierAccept<'a> {
     pub(super) setup: crate::transport::setup::AcceptSetup,
 }
 
+/// What a socket brings to inproc binds and connects.
+pub(super) struct InprocSetup {
+    pub(super) registry: Arc<inproc_transport::InprocRegistry>,
+    pub(super) snapshot: InprocPeerSnapshot,
+    pub(super) recv: inproc_transport::RecvConfig,
+}
+
 /// Bind dispatch: route an endpoint to its transport's listener and wrap it.
 ///
 /// `lz4+tcp://` reuses the TCP listener; the per-connection
 /// transform is installed by the actor based on the endpoint scheme.
 pub(super) async fn bind_any(
-    inproc_registry: &std::sync::Arc<inproc_transport::InprocRegistry>,
     endpoint: &Endpoint,
-    snapshot: &InprocPeerSnapshot,
-    recv: &inproc_transport::RecvConfig,
+    inproc: &InprocSetup,
     #[cfg(any(feature = "ws", feature = "quic"))] carrier: CarrierAccept<'_>,
 ) -> Result<BoundListener> {
     if endpoint.is_tcp_family() {
@@ -704,10 +707,10 @@ pub(super) async fn bind_any(
 
     let listener = match endpoint {
         Endpoint::Inproc { name } => AnyListener::Inproc(inproc_transport::bind(
-            inproc_registry.clone(),
+            inproc.registry.clone(),
             name,
-            snapshot.clone(),
-            *recv,
+            inproc.snapshot.clone(),
+            inproc.recv,
         )?),
         Endpoint::Ipc(_) => AnyListener::Ipc(IpcTransport::bind(endpoint).await?),
         other => return Err(Error::UnsupportedScheme(other.scheme().to_string())),
@@ -791,10 +794,8 @@ async fn preflight_connect_host(host: &Host, port: u16) -> Result<()> {
 
 /// Connect dispatch (single attempt). Used under `dial_with_backoff`.
 pub(super) async fn connect_any(
-    inproc_registry: &inproc_transport::InprocRegistry,
     endpoint: &Endpoint,
-    snapshot: &InprocPeerSnapshot,
-    recv: &inproc_transport::RecvConfig,
+    inproc: &InprocSetup,
     #[cfg(any(feature = "ws", feature = "quic"))] carrier: CarrierConnect<'_>,
 ) -> Result<AnyConn> {
     if endpoint.is_tcp_family() {
@@ -835,8 +836,13 @@ pub(super) async fn connect_any(
 
     match endpoint {
         Endpoint::Inproc { name } => {
-            let conn =
-                inproc_transport::connect(inproc_registry, name, snapshot.clone(), *recv).await?;
+            let conn = inproc_transport::connect(
+                &inproc.registry,
+                name,
+                inproc.snapshot.clone(),
+                inproc.recv,
+            )
+            .await?;
             Ok(AnyConn::Inproc {
                 conn,
                 peer_ident: PeerIdent::Inproc(name.clone()),

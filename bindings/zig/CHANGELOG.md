@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.1.10] - 2026-11-03
+
+### Changed
+
+- Bundle `omq-libzmq` 0.9.0. TCP REQ/REP round trips are faster.
+
 ## [0.1.9] - 2026-10-24
 
 ### Changed

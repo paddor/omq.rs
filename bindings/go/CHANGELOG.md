@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.1.12] - 2026-11-03
+
+### Changed
+
+- Bundle `omq-tokio` 0.34.0. TCP REQ/REP round trips are faster.
+
 ## [0.1.11] - 2026-10-24
 
 ### Changed

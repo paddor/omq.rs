@@ -296,6 +296,7 @@ pub struct Connection {
     messages: VecDeque<Message>,
     assembly: Assembly,
     peer_heartbeat_ttl: u16,
+    peer_announced_ttl: u16,
     input: InputState,
     #[cfg(feature = "ws")]
     ws: ws::WsState,
@@ -337,6 +338,7 @@ impl Connection {
                 payload_pool: None,
             },
             peer_heartbeat_ttl: 0,
+            peer_announced_ttl: 0,
             input: InputState::default(),
             #[cfg(feature = "ws")]
             ws: ws::WsState::new(ws_role),
@@ -498,8 +500,22 @@ impl Connection {
     /// input clears it. The I/O backend owns the timer and must suspend it
     /// while local receive backpressure prevents reading.
     pub fn peer_heartbeat_ttl(&self) -> Option<std::time::Duration> {
-        (self.peer_heartbeat_ttl != 0)
-            .then(|| std::time::Duration::from_millis(u64::from(self.peer_heartbeat_ttl) * 100))
+        ttl(self.peer_heartbeat_ttl)
+    }
+
+    /// TTL of the latest received PING, kept through later input: how long
+    /// the peer says it may go silent. A zero TTL withdraws it.
+    pub fn peer_announced_ttl(&self) -> Option<std::time::Duration> {
+        ttl(self.peer_announced_ttl)
+    }
+}
+
+/// A PING TTL in deciseconds as a duration; `None` for zero.
+const fn ttl(deciseconds: u16) -> Option<std::time::Duration> {
+    if deciseconds == 0 {
+        None
+    } else {
+        Some(std::time::Duration::from_millis(deciseconds as u64 * 100))
     }
 }
 

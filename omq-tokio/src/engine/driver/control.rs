@@ -248,6 +248,8 @@ pub(super) struct Heartbeat {
     interval: Option<Duration>,
     timeout: Duration,
     ttl_deciseconds: u16,
+    /// Ticks the queued probe has waited behind unsent output.
+    stuck_ticks: u16,
 }
 
 impl Heartbeat {
@@ -261,6 +263,7 @@ impl Heartbeat {
             timeout: heartbeat_timeout(config.heartbeat_interval, config.heartbeat_timeout)
                 .unwrap_or(Duration::MAX),
             ttl_deciseconds: ttl_deciseconds(config.heartbeat_ttl),
+            stuck_ticks: 0,
         }
     }
 
@@ -293,7 +296,15 @@ impl Heartbeat {
     }
 
     pub(super) fn tick(&mut self, connection: &mut Connection, recv_blocked: bool) -> Result<()> {
-        if !recv_blocked && self.probe.timed_out(self.last_input, self.timeout) {
+        self.stuck_ticks = if self.probe.can_queue() {
+            0
+        } else {
+            self.stuck_ticks.saturating_add(1)
+        };
+        if !recv_blocked
+            && (self.probe.timed_out(self.last_input, self.timeout)
+                || self.stuck_past_ttl(connection))
+        {
             return Err(Error::Timeout);
         }
         if self.probe.can_queue() {
@@ -305,6 +316,18 @@ impl Heartbeat {
         }
         self.deadline = self.interval.and_then(|d| Instant::now().checked_add(d));
         Ok(())
+    }
+
+    /// Whether the probe has waited behind unsent output for the TTL the
+    /// peer announced, and the peer was silent that long: a probe stuck
+    /// there cannot find a dead peer. Ticks come no earlier than their
+    /// interval, so the probe waited at least that long.
+    fn stuck_past_ttl(&self, connection: &Connection) -> bool {
+        let (Some(interval), Some(ttl)) = (self.interval, connection.peer_announced_ttl()) else {
+            return false;
+        };
+        interval.saturating_mul(u32::from(self.stuck_ticks)) >= ttl
+            && self.last_input.elapsed() >= ttl
     }
 }
 

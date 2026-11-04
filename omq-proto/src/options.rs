@@ -244,6 +244,8 @@ pub struct Options {
     pub heartbeat_interval: Option<Duration>,
 
     /// TTL announced in PING (peer's how-long-to-wait hint). `None` = omit.
+    /// A received TTL closes a silent connection: after its PING, and while
+    /// a local PING waits behind unsent output.
     pub heartbeat_ttl: Option<Duration>,
 
     /// Close the connection if no traffic received within this window.

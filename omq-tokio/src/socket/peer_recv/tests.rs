@@ -277,7 +277,7 @@ fn unshift_transfers_charge_without_readmitting_or_overtaking() {
 }
 
 #[test]
-fn receipt_drain_preserves_batched_producer_space_wakes() {
+fn ordinary_drain_preserves_batched_producer_space_wakes() {
     use std::future::Future;
 
     for (capacity, release_at) in [(16, 16), (256, 128)] {
@@ -293,9 +293,8 @@ fn receipt_drain_preserves_batched_producer_space_wakes() {
         let mut ready = Box::pin(sink.ready());
         assert!(ready.as_mut().poll(&mut cx).is_pending());
         for consumed in 1..=release_at {
-            let (receipt, body) = receiver.try_recv_with_receipt(None).unwrap();
-            assert_eq!(body.part_slice(0), Some(b"queued".as_slice()));
-            drop((receipt, body));
+            let message = receiver.try_recv().unwrap();
+            assert_eq!(message.part_slice(1), Some(b"queued".as_slice()));
             if consumed < release_at {
                 assert_eq!(count.0.load(Ordering::Relaxed), 0);
                 assert!(ready.as_mut().poll(&mut cx).is_pending());
@@ -306,6 +305,34 @@ fn receipt_drain_preserves_batched_producer_space_wakes() {
         drop(ready);
         assert!(sink.retry_pending());
         assert!(!sink.blocked());
+    }
+}
+
+#[test]
+fn receipt_claim_publishes_consumed_slot_to_blocked_producer() {
+    use std::future::Future;
+
+    for capacity in [16, 256] {
+        let (mut routes, mut receiver) = receive_pair(RecvLimits::default(), capacity);
+        let mut sink = register(&mut routes, "a");
+        for _ in 0..=capacity {
+            put(&mut sink, "queued");
+        }
+        assert!(sink.blocked());
+        let count = Arc::new(WakeCount(0.into()));
+        let waker = std::task::Waker::from(count.clone());
+        let mut cx = std::task::Context::from_waker(&waker);
+        let mut ready = Box::pin(sink.ready());
+        assert!(ready.as_mut().poll(&mut cx).is_pending());
+        // The claim pauses the source lane, which publishes its consumed slot.
+        let (receipt, body) = receiver.try_recv_with_receipt(None).unwrap();
+        assert_eq!(body.part_slice(0), Some(b"queued".as_slice()));
+        assert_eq!(count.0.load(Ordering::Relaxed), 1);
+        assert!(ready.as_mut().poll(&mut cx).is_ready());
+        drop(ready);
+        assert!(sink.retry_pending());
+        assert!(!sink.blocked());
+        drop((receipt, body));
     }
 }
 

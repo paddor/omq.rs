@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Require `yring` 0.3.21 and `fanring` 0.3.10.
+
 ## [0.27.5] - 2026-11-03
 
 ### Changed

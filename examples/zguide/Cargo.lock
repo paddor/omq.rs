@@ -55,6 +55,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
+name = "cfg_aliases"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
+
+[[package]]
 name = "chacha20"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -102,9 +108,9 @@ dependencies = [
 
 [[package]]
 name = "fanring"
-version = "0.3.9"
+version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9a0a001924e64ade2c902a95dae33873344f5406798209408f19ae2504b6671a"
+checksum = "c740e2831320005b9b4bedc779120273261ca7885f6da2fa8e1aa5ab82615573"
 dependencies = [
  "arc-swap",
  "atomic-waker",
@@ -295,6 +301,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nix"
+version = "0.31.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
+dependencies = [
+ "bitflags",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
+]
+
+[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -305,7 +323,7 @@ dependencies = [
 
 [[package]]
 name = "omq-proto"
-version = "0.32.0"
+version = "0.38.0"
 dependencies = [
  "bytes",
  "concurrent-queue",
@@ -319,7 +337,7 @@ dependencies = [
 
 [[package]]
 name = "omq-shm"
-version = "0.2.0"
+version = "0.6.0"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -331,7 +349,7 @@ dependencies = [
 
 [[package]]
 name = "omq-tokio"
-version = "0.28.0"
+version = "0.34.2"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -340,6 +358,7 @@ dependencies = [
  "fanring",
  "futures",
  "libc",
+ "nix",
  "omq-proto",
  "omq-shm",
  "parking_lot",
@@ -709,9 +728,9 @@ dependencies = [
 
 [[package]]
 name = "yring"
-version = "0.3.20"
+version = "0.3.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4591d9911df5ce299e6a33e65efe20d35d81c7c40f5be2d20092256187973763"
+checksum = "dbf3b929ee32afe8b4f4c47e3647071775e59bcf67e0cbbbd360d30180bf1e91"
 dependencies = [
  "loom",
 ]

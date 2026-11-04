@@ -7,8 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-11-04
+
 ### Changed
 
+- Require `omq-tokio` 0.34.3, which drops a silent peer once its announced
+  PING TTL passes while our PING waits behind unsent output.
 - Require `yring` 0.3.21.
 
 ## [0.9.1] - 2026-11-03

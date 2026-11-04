@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.38.1] - 2026-11-04
+
 ### Added
 
 - `Connection::peer_announced_ttl` keeps the TTL of the latest received

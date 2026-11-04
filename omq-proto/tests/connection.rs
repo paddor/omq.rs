@@ -1267,6 +1267,31 @@ fn received_ping_ttl_is_cleared_by_subsequent_input() {
 }
 
 #[test]
+fn an_announced_ttl_outlives_later_input() {
+    use std::time::Duration;
+    let mut receiver = raw_ready_connection(SocketType::Pair, SocketType::Pair, (3, 1));
+    assert_eq!(receiver.peer_announced_ttl(), None);
+    receiver
+        .handle_input(Bytes::from_static(b"\x04\x07\x04PING\x00\x02"))
+        .unwrap();
+    receiver.resume_input().unwrap();
+    receiver
+        .handle_input(Bytes::from_static(b"\x00\x01x"))
+        .unwrap();
+    assert!(receiver.poll_message().is_some());
+    assert_eq!(receiver.peer_heartbeat_ttl(), None);
+    assert_eq!(
+        receiver.peer_announced_ttl(),
+        Some(Duration::from_millis(200)),
+        "later input keeps the announcement"
+    );
+    receiver
+        .handle_input(Bytes::from_static(b"\x04\x07\x04PING\x00\x00"))
+        .unwrap();
+    assert_eq!(receiver.peer_announced_ttl(), None, "zero TTL withdraws it");
+}
+
+#[test]
 fn invalid_greeting_roles_are_rejected() {
     for flag in [2, 255] {
         let mut receiver = Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pair));

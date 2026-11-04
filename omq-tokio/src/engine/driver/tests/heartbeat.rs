@@ -181,3 +181,111 @@ async fn queued_heartbeat_with_stalled_output(
     ends.server_cancel.cancel();
     join_ok(server_task).await;
 }
+
+#[tokio::test]
+async fn a_silent_peer_that_announced_a_ttl_is_dropped_behind_stalled_output() {
+    let (mut peer, connection) = ready_connections(
+        ConnectionConfig::new(Role::Server, SocketType::Pull),
+        ConnectionConfig::new(Role::Client, SocketType::Push),
+    );
+    // A PING that promises traffic within 300 ms, then a PONG: the last
+    // input is no PING, so that PING's own TTL has lapsed.
+    peer.send_command(&Command::Ping {
+        ttl_deciseconds: 3,
+        context: Bytes::new(),
+    })
+    .unwrap();
+    peer.send_command(&Command::Pong {
+        context: Bytes::new(),
+    })
+    .unwrap();
+    let wire = drain_transmit(&mut peer);
+
+    let (stream, remote) = tokio::io::duplex(1024);
+    let (commands, inbox) = mpsc::channel(8);
+    let (events, _events) = mpsc::channel(8);
+    let (data, data_inbox) = mpsc::channel(64);
+    commands
+        .send(PeerDriverCommand::ActivateDataPlane)
+        .await
+        .unwrap();
+    let task = tokio::spawn(
+        ConnectionDriver::new(
+            stream,
+            connection,
+            inbox,
+            events,
+            1,
+            CancellationToken::new(),
+        )
+        .with_driver_config(PeerDriverConfig {
+            heartbeat_interval: Some(Duration::from_millis(50)),
+            heartbeat_timeout: Some(Duration::from_millis(150)),
+            ..PeerDriverConfig::default()
+        })
+        .with_data_inbox(data_inbox)
+        .run(),
+    );
+
+    // Then it goes silent and reads nothing: the driver's output, its
+    // PINGs included, queues behind data.
+    let (_replies, mut requests) = tokio::io::split(remote);
+    requests.write_all(&wire).await.unwrap();
+    for _ in 0..32 {
+        data.send(PeerDriverData::SendMessage(Message::single(Bytes::from(
+            vec![7; 1024],
+        ))))
+        .await
+        .unwrap();
+    }
+    let ended = tokio::time::timeout(Duration::from_secs(2), task).await;
+    assert!(
+        matches!(ended, Ok(Ok(Err(Error::Timeout)))),
+        "a peer silent past its TTL stayed connected: {ended:?}"
+    );
+}
+
+#[test]
+fn a_probe_stuck_for_the_announced_ttl_times_out_a_silent_peer() {
+    use super::super::control::Heartbeat;
+    use std::time::Instant;
+    let (mut peer, mut connection) = ready_connections(
+        ConnectionConfig::new(Role::Server, SocketType::Pull),
+        ConnectionConfig::new(Role::Client, SocketType::Push),
+    );
+    peer.send_command(&Command::Ping {
+        ttl_deciseconds: 3,
+        context: Bytes::new(),
+    })
+    .unwrap();
+    peer.send_command(&Command::Pong {
+        context: Bytes::new(),
+    })
+    .unwrap();
+    connection
+        .handle_input(Bytes::from(drain_transmit(&mut peer)))
+        .unwrap();
+    let mut heartbeat = Heartbeat::new(&PeerDriverConfig {
+        heartbeat_interval: Some(Duration::from_millis(100)),
+        ..PeerDriverConfig::default()
+    });
+    let silent = || Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+    heartbeat.last_input = silent();
+    // The first tick queues a probe, and nothing writes it. Silent as the
+    // peer is, the probe has not waited its 300 ms yet.
+    for _ in 0..3 {
+        heartbeat.tick(&mut connection, false).unwrap();
+    }
+    heartbeat.last_input = Instant::now();
+    heartbeat
+        .tick(&mut connection, false)
+        .expect("fresh input shows life");
+    heartbeat.last_input = silent();
+    heartbeat
+        .tick(&mut connection, true)
+        .expect("local backpressure is no silence");
+    assert!(matches!(
+        heartbeat.tick(&mut connection, false),
+        Err(Error::Timeout)
+    ));
+}

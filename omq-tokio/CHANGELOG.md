@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A peer that stops reading and sending is dropped once its announced PING
+  TTL passes while our own PING waits behind unsent output. Before, a
+  stalled writer kept such a connection open until TCP gave up. Peers
+  that announced no TTL are still treated as slow, not dead.
+
 ## [0.34.2] - 2026-11-03
 
 ### Fixed

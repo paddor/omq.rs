@@ -451,6 +451,7 @@ impl Connection {
                 ttl_deciseconds,
             } => {
                 self.peer_heartbeat_ttl = ttl_deciseconds;
+                self.peer_announced_ttl = ttl_deciseconds;
                 let pong = Command::Pong { context };
                 let before = self.pending_transmit_size();
                 self.write_outbound_commands(&[pong])?;

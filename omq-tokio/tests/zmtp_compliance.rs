@@ -428,6 +428,35 @@ async fn exclusive_receive_honors_received_ttl_without_local_heartbeats() {
 }
 
 #[tokio::test]
+async fn announced_ttl_drops_a_silent_peer_behind_stalled_output() {
+    let local = Socket::new(
+        SocketType::Pair,
+        Options::default()
+            .linger(Duration::ZERO)
+            .heartbeat_interval(Duration::from_millis(200)),
+    );
+    let mut monitor = local.monitor();
+    let mut raw = raw_peer(&local, b"PAIR", (3, 1)).await;
+    // It announces a TTL, then data lapses that PING's own TTL.
+    ping(&mut raw, 3).await;
+    raw.write_all(&frame(0, b"activity")).await.unwrap();
+    let _ = tokio::time::timeout(DEADLINE, local.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    // It reads nothing more: output, the next PING included, backs up.
+    let sender = local.clone();
+    let traffic = tokio::spawn(async move {
+        let block = vec![7; 64 << 10];
+        while sender.send(Message::single(block.clone())).await.is_ok() {}
+    });
+    wait_disconnected(&mut monitor).await;
+    traffic.abort();
+    let _ = traffic.await;
+    drop(raw);
+}
+
+#[tokio::test]
 async fn peer_ttl_expires_during_continuous_outbound_traffic() {
     let local = Socket::new(SocketType::Pair, Options::default().linger(Duration::ZERO));
     let mut raw = raw_peer(&local, b"PAIR", (3, 1)).await;

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Require `fanring` 0.3.10 and `yring` 0.3.21. A receive receipt claim
+  publishes its source's consumed slots, so a connection blocked on a full
+  receive ring resumes reading without waiting for the release batch.
+
 ### Fixed
 
 - A peer that stops reading and sending is dropped once its announced PING

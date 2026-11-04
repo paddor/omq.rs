@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Require `yring` 0.3.21 and `fanring` 0.3.10.
+
 ## [0.2.12] - 2026-11-03
 
 ### Changed

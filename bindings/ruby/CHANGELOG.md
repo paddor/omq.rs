@@ -2,8 +2,12 @@
 
 ## [Unreleased]
 
+## [0.2.13] - 2026-11-04
+
 ### Changed
 
+- Bundle `omq-tokio` 0.34.3. A silent peer is dropped once its announced
+  PING TTL passes while a PING waits behind unsent output.
 - Require `yring` 0.3.21 and `fanring` 0.3.10.
 
 ## [0.2.12] - 2026-11-03

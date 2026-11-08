@@ -14,5 +14,6 @@ fn send_ring_layout_matches_go_memory_access() {
     assert_eq!(size_of::<SendRingDesc>(), 64);
     assert_eq!(align_of::<SendRingDesc>(), 64);
     assert_eq!(offset_of!(SendRingDesc, payload), 0);
+    assert_eq!(offset_of!(SendRingDesc, payload_len), 8);
     assert_eq!(offset_of!(SendRingDesc, payload_end), 16);
 }

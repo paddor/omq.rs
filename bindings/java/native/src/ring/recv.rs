@@ -19,6 +19,9 @@ use std::ffi::CString;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// Most messages one fill receives.
+const RECV_BATCH_MESSAGES: usize = 256;
+
 #[repr(C, align(128))]
 struct RecvRingControl {
     head: AtomicUsize,
@@ -47,7 +50,7 @@ struct RecvRingDesc {
     part_count: u64,
     flags: u64,
     payload_end: u64,
-    _reserved0: u64,
+    routing_id: u64,
     _reserved1: u64,
 }
 
@@ -69,7 +72,6 @@ struct JavaRecvRing {
     reclaimed_head: usize,
     payload_cursor: usize,
     payload_head: usize,
-    pending: VecDeque<Message>,
     scratch: Vec<Message>,
     external: VecDeque<ExternalBlock>,
     last_error_code: Cell<i32>,
@@ -97,8 +99,7 @@ impl JavaRecvRing {
             reclaimed_head: 0,
             payload_cursor: 0,
             payload_head: 0,
-            pending: VecDeque::new(),
-            scratch: Vec::with_capacity(desc_capacity.min(256)),
+            scratch: Vec::with_capacity(desc_capacity.min(RECV_BATCH_MESSAGES)),
             external: VecDeque::new(),
             last_error_code: Cell::new(RECV_RING_STATUS_OK),
             last_error_message: RefCell::new(empty_cstring()),
@@ -221,7 +222,7 @@ impl JavaRecvRing {
                 part_count: part_count as u64,
                 flags,
                 payload_end: payload_end as u64,
-                _reserved0: message.routing_id().unwrap_or(0) as u64,
+                routing_id: message.routing_id().unwrap_or(0) as u64,
                 _reserved1: 0,
             };
         } else {
@@ -238,7 +239,7 @@ impl JavaRecvRing {
                 part_count: part_count as u64,
                 flags: flags | RECV_RING_FLAG_EXTERNAL,
                 payload_end: self.payload_cursor as u64,
-                _reserved0: message.routing_id().unwrap_or(0) as u64,
+                routing_id: message.routing_id().unwrap_or(0) as u64,
                 _reserved1: 0,
             };
         }
@@ -263,57 +264,40 @@ impl JavaRecvRing {
             ));
         }
 
+        self.fill_with(max_messages as usize, |socket, max, out| {
+            recv_many_into(socket, max as i32, timeout_millis, out)
+        })
+    }
+
+    fn fill_with<F>(&mut self, max_messages: usize, receive: F) -> Result<usize, Error>
+    where
+        F: FnOnce(&BlockingSocket, usize, &mut Vec<Message>) -> Result<usize, Error>,
+    {
         self.reclaim_consumed();
-        let start_cursor = self.cursor;
-        let max_messages = max_messages as usize;
-
-        while self.cursor.wrapping_sub(start_cursor) < max_messages {
-            if let Some(message) = self.pending.pop_front() {
-                if self.publish(&message) {
-                    continue;
-                }
-                self.pending.push_front(message);
-                break;
-            }
-
-            if self.desc_is_full() {
-                break;
-            }
-
-            let remaining = max_messages - self.cursor.wrapping_sub(start_cursor);
-            let desc_space = self.desc.len() - self.cursor.wrapping_sub(self.cached_head);
-            let batch_max = remaining.min(desc_space).min(256);
-            self.scratch.clear();
-            recv_many_into(
-                &self.socket,
-                batch_max as i32,
-                timeout_millis,
-                &mut self.scratch,
-            )?;
-
-            let mut blocked = false;
-            let mut batch = Vec::new();
-            std::mem::swap(&mut batch, &mut self.scratch);
-            let mut drained = batch.drain(..);
-            while let Some(message) = drained.next() {
-                if self.publish(&message) {
-                    continue;
-                }
-                self.pending.push_back(message);
-                self.pending.extend(&mut drained);
-                blocked = true;
-                break;
-            }
-            drop(drained);
-            batch.clear();
-            std::mem::swap(&mut batch, &mut self.scratch);
-            if blocked {
-                break;
-            }
-            break;
+        if self.desc_is_full() {
+            return Ok(0);
         }
 
+        let desc_space = self.desc.len() - self.cursor.wrapping_sub(self.cached_head);
+        let batch_max = max_messages.min(desc_space).min(RECV_BATCH_MESSAGES);
+        self.scratch.clear();
+        receive(&self.socket, batch_max, &mut self.scratch)?;
+
+        let start_cursor = self.cursor;
+        self.publish_scratch();
         Ok(self.flush(start_cursor))
+    }
+
+    /// Publishes the received batch. Receives never return more than the
+    /// free descriptor count, so every publish succeeds.
+    fn publish_scratch(&mut self) {
+        let mut batch = std::mem::take(&mut self.scratch);
+        for message in &batch {
+            let published = self.publish(message);
+            debug_assert!(published, "receive batch exceeded descriptor space");
+        }
+        batch.clear();
+        self.scratch = batch;
     }
 }
 

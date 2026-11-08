@@ -64,7 +64,6 @@ pub struct OmqGoRecvRing {
     reclaimed_head: usize,
     payload_cursor: usize,
     payload_head: usize,
-    pending: VecDeque<Message>,
     scratch: Vec<Message>,
     external: VecDeque<RecvExternalBlock>,
 }
@@ -89,7 +88,6 @@ impl OmqGoRecvRing {
             reclaimed_head: 0,
             payload_cursor: 0,
             payload_head: 0,
-            pending: VecDeque::new(),
             scratch: Vec::with_capacity(desc_capacity.min(RING_BATCH)),
             external: VecDeque::new(),
         }
@@ -219,29 +217,30 @@ impl OmqGoRecvRing {
         self.cursor.wrapping_sub(old_cursor)
     }
 
-    fn fill_with(
-        &mut self,
-        max_messages: usize,
-        receive: impl FnOnce(&BlockingSocket, usize, &mut Vec<Message>) -> Result<Option<usize>, Error>,
-    ) -> Result<Option<usize>, Error> {
+    fn fill_with<F>(&mut self, max_messages: usize, receive: F) -> Result<Option<usize>, Error>
+    where
+        F: FnOnce(&BlockingSocket, usize, &mut Vec<Message>) -> Result<Option<usize>, Error>,
+    {
         if max_messages == 0 {
             return Err(Error::Config(
                 "max messages must be greater than zero".to_string(),
             ));
         }
+
         self.reclaim_consumed();
-        let start_cursor = self.cursor;
-        self.publish_pending(start_cursor, max_messages);
-        let filled = self.cursor.wrapping_sub(start_cursor);
-        if filled < max_messages && !self.desc_is_full() {
-            let desc_space = self.desc.len() - self.cursor.wrapping_sub(self.cached_head);
-            let batch_max = (max_messages - filled).min(desc_space).min(RING_BATCH);
-            self.scratch.clear();
-            if receive(&self.socket, batch_max, &mut self.scratch)?.is_none() {
-                return Ok(None);
-            }
-            self.publish_scratch();
+        if self.desc_is_full() {
+            return Err(Error::WouldBlock);
         }
+
+        let desc_space = self.desc.len() - self.cursor.wrapping_sub(self.cached_head);
+        let batch_max = max_messages.min(desc_space).min(RING_BATCH);
+        self.scratch.clear();
+        if receive(&self.socket, batch_max, &mut self.scratch)?.is_none() {
+            return Ok(None);
+        }
+
+        let start_cursor = self.cursor;
+        self.publish_scratch();
         let filled = self.flush(start_cursor);
         if filled == 0 {
             return Err(Error::WouldBlock);
@@ -249,29 +248,15 @@ impl OmqGoRecvRing {
         Ok(Some(filled))
     }
 
-    fn publish_pending(&mut self, start_cursor: usize, max_messages: usize) {
-        while self.cursor.wrapping_sub(start_cursor) < max_messages {
-            let Some(message) = self.pending.pop_front() else {
-                break;
-            };
-            if !self.publish(&message) {
-                self.pending.push_front(message);
-                break;
-            }
-        }
-    }
-
+    /// Publishes the received batch. Receives never return more than the
+    /// free descriptor count, so every publish succeeds.
     fn publish_scratch(&mut self) {
         let mut batch = std::mem::take(&mut self.scratch);
-        let mut drained = batch.drain(..);
-        while let Some(message) = drained.next() {
-            if !self.publish(&message) {
-                self.pending.push_back(message);
-                self.pending.extend(&mut drained);
-                break;
-            }
+        for message in &batch {
+            let published = self.publish(message);
+            debug_assert!(published, "receive batch exceeded descriptor space");
         }
-        drop(drained);
+        batch.clear();
         self.scratch = batch;
     }
 }

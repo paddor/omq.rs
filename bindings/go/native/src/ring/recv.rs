@@ -8,7 +8,7 @@ use crate::ring::codec::{encode_message, encoded_message_len, write_message_enco
 use crate::socket::OmqGoSocket;
 use crate::socket::recv::recv_many_into;
 use crate::stats::{RECV_RINGS_CREATED, RECV_RINGS_FREED, bump};
-use omq_tokio::blocking::{BlockingRecvCancel, Socket as BlockingSocket};
+use omq_tokio::blocking::Socket as BlockingSocket;
 use omq_tokio::{Error, Message};
 use std::collections::VecDeque;
 use std::ffi::c_void;
@@ -219,68 +219,10 @@ impl OmqGoRecvRing {
         self.cursor.wrapping_sub(old_cursor)
     }
 
-    fn fill(&mut self, timeout_millis: i64, max_messages: usize) -> Result<usize, Error> {
-        if max_messages == 0 {
-            return Err(Error::Config(
-                "max messages must be greater than zero".to_string(),
-            ));
-        }
-
-        self.reclaim_consumed();
-        let start_cursor = self.cursor;
-
-        while self.cursor.wrapping_sub(start_cursor) < max_messages {
-            if let Some(message) = self.pending.pop_front() {
-                if self.publish(&message) {
-                    continue;
-                }
-                self.pending.push_front(message);
-                break;
-            }
-
-            if self.desc_is_full() {
-                break;
-            }
-
-            let remaining = max_messages - self.cursor.wrapping_sub(start_cursor);
-            let desc_space = self.desc.len() - self.cursor.wrapping_sub(self.cached_head);
-            let batch_max = remaining.min(desc_space).min(RING_BATCH);
-            self.scratch.clear();
-            recv_many_into(&self.socket, batch_max, timeout_millis, &mut self.scratch)?;
-
-            let mut blocked = false;
-            let mut batch = Vec::new();
-            std::mem::swap(&mut batch, &mut self.scratch);
-            let mut drained = batch.drain(..);
-            while let Some(message) = drained.next() {
-                if self.publish(&message) {
-                    continue;
-                }
-                self.pending.push_back(message);
-                self.pending.extend(&mut drained);
-                blocked = true;
-                break;
-            }
-            drop(drained);
-            batch.clear();
-            std::mem::swap(&mut batch, &mut self.scratch);
-            if blocked {
-                break;
-            }
-            break;
-        }
-
-        let filled = self.flush(start_cursor);
-        if filled == 0 {
-            return Err(Error::WouldBlock);
-        }
-        Ok(filled)
-    }
-
-    fn fill_cancelable(
+    fn fill_with(
         &mut self,
-        cancel: &BlockingRecvCancel,
         max_messages: usize,
+        receive: impl FnOnce(&BlockingSocket, usize, &mut Vec<Message>) -> Result<Option<usize>, Error>,
     ) -> Result<Option<usize>, Error> {
         if max_messages == 0 {
             return Err(Error::Config(
@@ -289,60 +231,48 @@ impl OmqGoRecvRing {
         }
         self.reclaim_consumed();
         let start_cursor = self.cursor;
-
-        while self.cursor.wrapping_sub(start_cursor) < max_messages {
-            if let Some(message) = self.pending.pop_front() {
-                if self.publish(&message) {
-                    continue;
-                }
-                self.pending.push_front(message);
-                break;
-            }
-
-            if self.desc_is_full() {
-                break;
-            }
-
-            let remaining = max_messages - self.cursor.wrapping_sub(start_cursor);
+        self.publish_pending(start_cursor, max_messages);
+        let filled = self.cursor.wrapping_sub(start_cursor);
+        if filled < max_messages && !self.desc_is_full() {
             let desc_space = self.desc.len() - self.cursor.wrapping_sub(self.cached_head);
-            let batch_max = remaining.min(desc_space).min(RING_BATCH);
+            let batch_max = (max_messages - filled).min(desc_space).min(RING_BATCH);
             self.scratch.clear();
-            let Some(_) = self.socket.recv_many_registered_cancelable_into(
-                batch_max,
-                cancel,
-                &mut self.scratch,
-            )?
-            else {
+            if receive(&self.socket, batch_max, &mut self.scratch)?.is_none() {
                 return Ok(None);
-            };
-
-            let mut blocked = false;
-            let mut batch = Vec::new();
-            std::mem::swap(&mut batch, &mut self.scratch);
-            let mut drained = batch.drain(..);
-            while let Some(message) = drained.next() {
-                if self.publish(&message) {
-                    continue;
-                }
-                self.pending.push_back(message);
-                self.pending.extend(&mut drained);
-                blocked = true;
-                break;
             }
-            drop(drained);
-            batch.clear();
-            std::mem::swap(&mut batch, &mut self.scratch);
-            if blocked {
-                break;
-            }
-            break;
+            self.publish_scratch();
         }
-
         let filled = self.flush(start_cursor);
         if filled == 0 {
             return Err(Error::WouldBlock);
         }
         Ok(Some(filled))
+    }
+
+    fn publish_pending(&mut self, start_cursor: usize, max_messages: usize) {
+        while self.cursor.wrapping_sub(start_cursor) < max_messages {
+            let Some(message) = self.pending.pop_front() else {
+                break;
+            };
+            if !self.publish(&message) {
+                self.pending.push_front(message);
+                break;
+            }
+        }
+    }
+
+    fn publish_scratch(&mut self) {
+        let mut batch = std::mem::take(&mut self.scratch);
+        let mut drained = batch.drain(..);
+        while let Some(message) = drained.next() {
+            if !self.publish(&message) {
+                self.pending.push_back(message);
+                self.pending.extend(&mut drained);
+                break;
+            }
+        }
+        drop(drained);
+        self.scratch = batch;
     }
 }
 
@@ -410,7 +340,9 @@ pub extern "C" fn omq_go_recv_ring_fill(
         return OmqGoStatus::err(CLOSED, "receive ring closed");
     }
     let ring = unsafe { &mut *ring };
-    match ring.fill(timeout_millis, max_messages) {
+    match ring.fill_with(max_messages, |socket, max, out| {
+        recv_many_into(socket, max, timeout_millis, out).map(Some)
+    }) {
         Ok(_) => OmqGoStatus::ok(),
         Err(error) => OmqGoStatus::from_error(error),
     }
@@ -430,7 +362,9 @@ pub extern "C" fn omq_go_recv_ring_fill_cancelable(
     }
     let ring = unsafe { &mut *ring };
     let cancel = unsafe { &*cancel };
-    match ring.fill_cancelable(cancel.token(), max_messages) {
+    match ring.fill_with(max_messages, |socket, max, out| {
+        socket.recv_many_registered_cancelable_into(max, cancel.token(), out)
+    }) {
         Ok(Some(_)) => OmqGoStatus::ok(),
         Ok(None) => OmqGoStatus::err(CANCELED, "operation canceled"),
         Err(error) => OmqGoStatus::from_error(error),

@@ -229,8 +229,8 @@ where
         self.receive.shm.is_some()
     }
 
-    pub(crate) fn with_recv_parts(mut self, count: usize) -> Self {
-        self.receive.parts = Some(count);
+    pub(crate) fn with_recv_parts(mut self, parts: Option<usize>) -> Self {
+        self.receive.parts = parts;
         self
     }
 

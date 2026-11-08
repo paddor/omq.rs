@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `SocketType::recv_parts` reports the frame count each received message
+  must have, if the socket type fixes one.
+
 ## [0.38.1] - 2026-11-04
 
 ### Added

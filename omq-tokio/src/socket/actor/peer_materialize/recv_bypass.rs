@@ -13,7 +13,8 @@ pub(super) fn attach_recv_bypass(
     if socket.socket_type == SocketType::Dish && peer_driver.uses_shm() {
         // DISH's only receive transform is validating group + body. SHM
         // drivers can do that before the existing per-peer receive queue.
-        return attach_yring_recv_bypass(socket, peer_driver, peer_id, false).with_recv_parts(2);
+        return attach_yring_recv_bypass(socket, peer_driver, peer_id, false)
+            .with_recv_parts(SocketType::Dish.recv_parts());
     }
     let rep_latency = socket.socket_type == SocketType::Rep && socket.uses_latency_profile();
     if !can_bypass_actor_recv(socket.socket_type) && !rep_latency {

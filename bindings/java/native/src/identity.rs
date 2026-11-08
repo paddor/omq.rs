@@ -1,11 +1,11 @@
 //! Java identity handles and peer metadata.
 
-use crate::convert::{optional_java_bytes, optional_java_string};
+use crate::convert::{curve_key_z85, optional_java_bytes, optional_java_string};
 use crate::error::{guard, jni_error, throw_omq};
 use jni::JNIEnv;
 use jni::objects::{JClass, JObject, JValue};
 use jni::sys::{jboolean, jint, jlong, jobject};
-use omq_tokio::{CurvePublicKey, Error, PeerInfo as NativePeerInfo};
+use omq_tokio::{Error, PeerInfo as NativePeerInfo};
 
 pub(crate) fn peer_info_object<'local>(
     env: &mut JNIEnv<'local>,
@@ -38,7 +38,7 @@ pub(crate) fn peer_info_object<'local>(
     )?;
     let public_key = match &peer.authentication.public_key {
         Some(omq_proto::PeerPublicKey::Curve(key)) => {
-            optional_java_string(env, Some(&CurvePublicKey::from_bytes(*key).to_z85()))?
+            optional_java_string(env, curve_key_z85(key).as_deref())?
         }
         _ => JObject::null(),
     };

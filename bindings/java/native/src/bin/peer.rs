@@ -2,9 +2,9 @@ use std::env;
 use std::str::FromStr;
 use std::time::Duration;
 
-use omq_tokio::{
-    Context, CurveKeypair, CurvePublicKey, CurveSecretKey, Endpoint, Message, Options, SocketType,
-};
+use omq_tokio::{Context, Endpoint, Message, Options, SocketType};
+#[cfg(feature = "curve")]
+use omq_tokio::{CurveKeypair, CurvePublicKey, CurveSecretKey};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
@@ -32,6 +32,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("{}", String::from_utf8_lossy(&part));
             socket.close()?;
         }
+        #[cfg(feature = "curve")]
         "curve-push" => {
             let options = Options::default().curve_client(
                 curve_keypair_from_env("OMQ_CURVE_CLIENT_PUBLIC", "OMQ_CURVE_CLIENT_SECRET")?,
@@ -44,6 +45,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::thread::sleep(Duration::from_millis(100));
             socket.close()?;
         }
+        #[cfg(feature = "curve")]
         "curve-pull" => {
             let options = Options::default().curve_server(curve_keypair_from_env(
                 "OMQ_CURVE_SERVER_PUBLIC",
@@ -64,6 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[cfg(feature = "curve")]
 fn curve_keypair_from_env(
     public_name: &str,
     secret_name: &str,
@@ -76,6 +79,7 @@ fn curve_keypair_from_env(
     Ok(CurveKeypair { public, secret })
 }
 
+#[cfg(feature = "curve")]
 fn curve_public_from_env(name: &str) -> Result<CurvePublicKey, Box<dyn std::error::Error>> {
     Ok(CurvePublicKey::from_z85(&env::var(name)?)?)
 }

@@ -690,12 +690,10 @@ impl RecvStrategy {
         }
     }
 
-    /// Prepare a recv message for a per-socket-type post-recv transform.
-    /// For `Identity`, prepends the sender's identity so the REP handler
-    /// sees the full envelope; for `FairQueue`, returns the message
-    /// unchanged. Used when the `type_state` needs to post-process (REQ,
-    /// REP) rather than hitting the recv channel directly.
-    pub(crate) fn wrap_for_transform(&self, peer_id: u64, msg: Message) -> Option<Message> {
+    /// Prepare an actor-routed receive: prepend the sender identity for
+    /// identity routing, pass fair-queued messages through, or discard on
+    /// send-only sockets. REQ/REP admission belongs to the socket handle.
+    pub(crate) fn prepare_message(&self, peer_id: u64, msg: Message) -> Option<Message> {
         match self {
             Self::None => None,
             Self::FairQueue => Some(msg),

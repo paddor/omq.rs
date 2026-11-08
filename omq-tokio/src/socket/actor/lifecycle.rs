@@ -42,7 +42,6 @@ impl<'a> PeerLifecycle<'a> {
         self.driver.link.spsc.remove_empty_tcp_consumer(peer_id);
         self.invalidate_transmit_slot(peer.as_ref());
         self.refill_recv_sink(peer_id);
-        self.reset_type_state_if_last_peer();
         peer
     }
 
@@ -129,15 +128,6 @@ impl<'a> PeerLifecycle<'a> {
         // yring path instead of falling back to the recv pump.
         if let Some(ref config) = self.driver.resources.recv_sink_config {
             config.peer_disconnected(peer_id);
-        }
-    }
-
-    fn reset_type_state_if_last_peer(&mut self) {
-        match self.driver.socket_type {
-            SocketType::Req | SocketType::Rep if self.driver.ready_peer_count() == 0 => {
-                self.driver.routing.type_state.on_peer_disconnected();
-            }
-            _ => {}
         }
     }
 

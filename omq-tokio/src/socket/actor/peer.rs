@@ -323,18 +323,10 @@ impl SocketDriver {
                 if self.handle_legacy_subscribe(peer_id, &msg) {
                     return;
                 }
-                let message = self.routing.recv_strategy.wrap_for_transform(peer_id, msg);
-                let message = if self.type_state_needs_transform() {
-                    message.and_then(|wrapped| {
-                        self.routing
-                            .type_state
-                            .post_recv(self.socket_type, wrapped)
-                            .ok()
-                            .flatten()
-                    })
-                } else {
-                    message
-                };
+                if self.socket_type == SocketType::Dish && msg.len() != 2 {
+                    return;
+                }
+                let message = self.routing.recv_strategy.prepare_message(peer_id, msg);
                 if let Some(message) = message {
                     self.stage_receive(peer_id, message);
                 }

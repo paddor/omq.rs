@@ -44,7 +44,6 @@ use super::monitor::{
     ConnectionStatus, DisconnectReason, MonitorEvent, MonitorPublisher, MonitorStream,
     PeerCommandKind, PeerInfo, PeerSubscriptions,
 };
-use super::type_state::TypeState;
 use super::udp::{JoinedGroups, new_joined_groups, spawn_dish_listener, spawn_radio_sender};
 use crate::routing::{
     RecvStrategy, SendStrategy, max_peer_count, supports_groups, supports_subscribe,
@@ -286,8 +285,6 @@ struct Routing {
     /// UDP listener tasks via `Arc<Mutex<HashSet<Bytes>>>` so JOIN /
     /// LEAVE is visible without a control channel.
     joined_groups: JoinedGroups,
-    /// REQ / REP / DISH receive transform and envelope state.
-    type_state: TypeState,
 }
 
 /// Runtime resources and receive sinks the actor hands to its peers.
@@ -343,7 +340,6 @@ impl SocketDriver {
                 recv_strategy: RecvStrategy::for_socket_type(socket_type),
                 subscriptions: Vec::new(),
                 joined_groups: new_joined_groups(),
-                type_state: TypeState::new(),
             },
             resources,
             #[cfg(feature = "dart")]
@@ -619,13 +615,6 @@ impl SocketDriver {
 
     pub(super) fn can_accept_ready_peer(&self) -> bool {
         max_peer_count(self.socket_type).is_none_or(|max| self.ready_peer_count() < max)
-    }
-
-    fn type_state_needs_transform(&self) -> bool {
-        matches!(
-            self.socket_type,
-            SocketType::Req | SocketType::Rep | SocketType::Dish
-        )
     }
 }
 

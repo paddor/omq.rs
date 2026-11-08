@@ -32,7 +32,7 @@ Java caller thread
 - `src/main/java/io/omq/Native.java`: JNI declarations
 - `src/main/java/io/omq/NativeFfm.java`: FFM downcalls
 - `src/main/java/io/omq/RecvRing.java`, `SendRing.java`: Java ring views
-- `native/src/lib.rs`: JNI/FFM bridge to `omq-tokio`
+- `native/src/`: JNI/FFM bridge to `omq-tokio`, split by concern (`socket/`, `ring/`, `auth.rs`)
 - `src/main/java/module-info.java`: JPMS module descriptor
 
 ## Native Boundary

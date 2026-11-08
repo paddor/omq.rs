@@ -14,7 +14,7 @@ default-members = ["omq-proto", "omq-tokio"]
 # pull foreign-language toolchains into `cargo build --workspace`. `pure/`
 # holds non-Rust OMQ implementations; their Rust test fixtures stand alone.
 exclude = ["bindings", "pure"]
-resolver = "2"
+resolver = "3"
 
 [workspace.package]
 edition = "2024"

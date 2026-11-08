@@ -1,0 +1,583 @@
+use super::*;
+use crate::socket::actor::{
+    PeerDriverHandle, PeerEntry, PeerHandshake, PeerIdent, PeerOrigin, Side, SocketType,
+};
+use crate::socket::monitor::{MonitorEvent, MonitorTryRecvError};
+use omq_proto::proto::{Command, Event, PeerProperties};
+use omq_proto::{Endpoint, Message, Options, ReconnectPolicy};
+use std::sync::Arc;
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+
+#[derive(Debug, Default)]
+struct WakeCounter(std::sync::atomic::AtomicUsize);
+
+impl futures::task::ArcWake for WakeCounter {
+    fn wake_by_ref(counter: &Arc<Self>) {
+        counter.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+fn fixture() -> (SocketDriver, yring::Consumer<Message>) {
+    fixture_for(SocketType::Router)
+}
+
+fn fixture_for(socket_type: SocketType) -> (SocketDriver, yring::Consumer<Message>) {
+    fixture_with_pool(socket_type, crate::context::IoPoolHandle::none())
+}
+
+fn fixture_with_pool(
+    socket_type: SocketType,
+    pool: crate::context::IoPoolHandle,
+) -> (SocketDriver, yring::Consumer<Message>) {
+    let options = Options::default().reconnect(ReconnectPolicy::Disabled);
+    let blocking = crate::socket::recv::BlockingRecvWaker::new();
+    let (recv, consumer, _, _) = crate::socket::recv::recv_pipe(16, blocking.clone());
+    let (_, commands) = mpsc::channel(16);
+    let send_strategy = crate::routing::SendStrategy::for_socket_type(socket_type, &options, &pool);
+    let link = super::super::HandleLink {
+        cmd_rx: commands,
+        recv_tx: recv,
+        cancel: CancellationToken::new(),
+        monitor: crate::socket::monitor::MonitorPublisher::new(
+            omq_proto::options::DEFAULT_MONITOR_CAPACITY,
+        ),
+        spsc: crate::socket::recv::SpscHandles::new(blocking, false),
+        peer_recv_routes: None,
+        shared: super::super::HandleShared::new(),
+    };
+    let env = super::super::DriverEnv {
+        io_pool: pool,
+        inproc_registry: Arc::new(crate::transport::inproc::InprocRegistry::new()),
+        recv_sink_config: None,
+    };
+    let driver = SocketDriver::new(socket_type, options, send_strategy, link, env);
+    (driver, consumer)
+}
+
+fn insert_peer(driver: &mut SocketDriver, peer_id: u64, handshake: PeerHandshake) {
+    let (inbox, commands) = mpsc::channel(1);
+    let (data_inbox, data) = mpsc::channel(1);
+    // READY may be queued after the driver has already exited.
+    drop(commands);
+    drop(data);
+    let origin = PeerOrigin {
+        options: Arc::new(driver.options.clone()),
+        endpoint: "tcp://127.0.0.1:12345".parse::<Endpoint>().unwrap(),
+        side: Side::Bind,
+        route_id: peer_id,
+        ident: PeerIdent::Socket("127.0.0.1:12345".parse().unwrap()),
+        local_address: None,
+        remote_address: None,
+        io_thread: 0,
+    };
+    let handle = PeerDriverHandle::new(inbox.into(), data_inbox.into(), CancellationToken::new());
+    let entry = PeerEntry {
+        handshake,
+        ..PeerEntry::new(origin, handle)
+    };
+    driver.peers.insert(peer_id, entry);
+}
+
+fn insert_pending_peer(driver: &mut SocketDriver, peer_id: u64) {
+    let admission = crate::transport::setup::PendingHandshake::acquire(
+        &driver.endpoints.setup_admission,
+        None,
+        None,
+    )
+    .unwrap();
+    let handshake = PeerHandshake {
+        admission: Some(admission),
+        ..PeerHandshake::default()
+    };
+    insert_peer(driver, peer_id, handshake);
+}
+
+#[tokio::test]
+async fn dish_discards_malformed_messages_then_delivers_group_and_body() {
+    let (mut driver, mut receive) = fixture_for(SocketType::Dish);
+    insert_peer(
+        &mut driver,
+        7,
+        PeerHandshake {
+            ready: true,
+            ..PeerHandshake::default()
+        },
+    );
+    for message in [
+        Message::new(),
+        Message::single("group"),
+        Message::multipart(["group", "a", "b"]),
+    ] {
+        driver
+            .handle_peer_output(7, PeerEvent::Event(Event::Message(message)))
+            .await;
+        assert_eq!(receive.prefetch(), 0);
+    }
+    let message = Message::multipart(["group", "body"]);
+    driver
+        .handle_peer_output(7, PeerEvent::Event(Event::Message(message.clone())))
+        .await;
+    assert_eq!(receive.prefetch_and_pop(), Some(message));
+}
+
+/// A raw STREAM peer: ready at once, without a handshake slot.
+fn insert_stream_peer(driver: &mut SocketDriver, peer_id: u64, identity: bytes::Bytes) {
+    let handshake = PeerHandshake {
+        ready: true,
+        identity,
+        ..PeerHandshake::default()
+    };
+    insert_peer(driver, peer_id, handshake);
+}
+
+#[tokio::test]
+async fn data_waits_for_its_control_prefix_and_completion_keeps_notifications() {
+    let (mut driver, mut receive) = fixture_for(SocketType::XPub);
+    insert_pending_peer(&mut driver, 7);
+    let peer = driver.peers.get_mut(&7).unwrap();
+    peer.handshake.ready = true;
+    peer.progress.handled_control = 1;
+    peer.progress.handled_events = 1;
+    driver.mail.pending_peer_data = Some(crate::engine::actor_output::ActorData {
+        peer_id: 7,
+        message: Message::single("\x01topic"),
+        notification: true,
+        control_prefix: 2,
+    });
+    driver.retry_peer_data().await;
+    assert!(driver.mail.pending_peer_data.is_some());
+    assert_eq!(receive.prefetch(), 0);
+    driver
+        .handle_peer_control(
+            7,
+            PeerEvent::Event(Event::Command(Command::Subscribe(
+                bytes::Bytes::from_static(b"topic"),
+            ))),
+        )
+        .await;
+    driver
+        .handle_peer_completion(PeerCompletion {
+            peer_id: 7,
+            admitted_events: 3,
+            reason: DisconnectReason::PeerClosed,
+            stream_disconnect: StreamDisconnect::None,
+        })
+        .await;
+    assert!(driver.peers.contains_key(&7));
+    for _ in 0..16 {
+        driver
+            .link
+            .recv_tx
+            .try_send(Message::single("filler"))
+            .unwrap();
+    }
+    driver.retry_peer_data().await;
+    assert!(driver.mail.pending_peer_data.is_none());
+    assert!(driver.pending_receive.is_some());
+    assert!(driver.peers.contains_key(&7));
+    receive.prefetch();
+    receive.pop().unwrap();
+    receive.release();
+    driver.retry_pending_receive();
+    driver.retire_completed_peer(7).await;
+    assert!(!driver.peers.contains_key(&7));
+    receive.prefetch();
+    for _ in 0..15 {
+        receive.pop().unwrap();
+    }
+    receive.prefetch();
+    assert_eq!(
+        receive.pop().unwrap().part_slice(0),
+        Some(b"\x01topic".as_slice())
+    );
+}
+
+#[tokio::test]
+async fn actor_data_batches_bound_count_and_bytes_and_return_partial_credits() {
+    for (size, expected) in [(1, 64), (40 * 1024, 2)] {
+        let (mut driver, _old_receive) = fixture();
+        let (pipe, _receive, _, _) =
+            crate::socket::recv::recv_pipe(256, driver.link.spsc.blocking_recv_waker.clone());
+        driver.link.recv_tx = pipe;
+        insert_pending_peer(&mut driver, 7);
+        driver.peers.get_mut(&7).unwrap().handshake.ready = true;
+        driver
+            .routing
+            .recv_strategy
+            .connection_added(7, bytes::Bytes::from_static(b"peer"));
+        let mut output = crate::engine::actor_output::PeerOutput::actor(
+            driver.mail.peer_out_tx.try_register().unwrap(),
+        );
+        let body = bytes::Bytes::from(vec![0; size]);
+        for _ in 0..256 {
+            output
+                .try_send(7, Message::single(body.clone()), false)
+                .unwrap();
+        }
+        assert!(matches!(
+            output.try_send(7, Message::single(body.clone()), false),
+            Err(crate::engine::SendPipeError::Full(_))
+        ));
+        let first = driver
+            .mail
+            .peer_out_rx
+            .as_mut()
+            .unwrap()
+            .recv_async()
+            .await
+            .unwrap();
+        driver.drain_peer_data(first).await;
+        let actual = driver.peers.get(&7).unwrap().progress.handled_events;
+        assert!(actual > 0 && actual <= expected);
+        assert!(driver.pending_receive.is_none());
+        for _ in 0..actual {
+            output
+                .try_send(7, Message::single(body.clone()), false)
+                .unwrap();
+        }
+        assert!(matches!(
+            output.try_send(7, Message::single(body), false),
+            Err(crate::engine::SendPipeError::Full(_))
+        ));
+    }
+}
+
+fn peer_completion(
+    admitted_events: u64,
+    reason: DisconnectReason,
+    stream_disconnect: StreamDisconnect,
+) -> PeerCompletion {
+    PeerCompletion {
+        peer_id: 7,
+        admitted_events,
+        reason,
+        stream_disconnect,
+    }
+}
+
+/// Fill the 16-slot receive pipe so the next receive blocks.
+fn fill_receive_pipe(driver: &SocketDriver) {
+    for _ in 0..16 {
+        driver
+            .link
+            .recv_tx
+            .try_send(Message::single("filler"))
+            .unwrap();
+    }
+}
+
+/// Take one message so the blocked receive fits, then retire peer 7.
+async fn free_slot_and_retire(driver: &mut SocketDriver, receive: &mut yring::Consumer<Message>) {
+    receive.pop().unwrap();
+    receive.release();
+    driver.retry_pending_receive();
+    driver.retire_completed_peer(7).await;
+}
+
+fn assert_fillers(receive: &mut yring::Consumer<Message>, count: usize) {
+    for _ in 0..count {
+        assert_eq!(
+            receive.pop().unwrap().part_slice(0),
+            Some(b"filler".as_slice())
+        );
+    }
+}
+
+fn assert_routed(message: &Message, identity: &[u8], body: &[u8]) {
+    assert_eq!(message.len(), 2);
+    assert_eq!(message.part_slice(0), Some(identity));
+    assert_eq!(message.part_slice(1), Some(body));
+}
+
+/// Complete the handshake of pending peer 7 as a DEALER named "peer".
+async fn ready_dealer(driver: &mut SocketDriver) {
+    driver
+        .handle_peer_output(
+            7,
+            PeerEvent::Event(Event::HandshakeSucceeded {
+                peer_minor: 1,
+                peer_properties: PeerProperties::default()
+                    .with_socket_type(SocketType::Dealer)
+                    .with_identity(bytes::Bytes::from_static(b"peer"))
+                    .into(),
+            }),
+        )
+        .await;
+}
+
+#[tokio::test]
+async fn completion_preserves_ready_identity_commands_and_pending_receive() {
+    let (mut driver, mut receive) = fixture();
+    driver.endpoints.setup_admission = crate::transport::setup::Admission::new(1);
+    let mut monitor = driver.link.monitor.subscribe();
+    insert_pending_peer(&mut driver, 7);
+
+    // Completion arrives first; the admitted events still run in order.
+    let reason = DisconnectReason::Error("original wire failure".into());
+    driver
+        .handle_peer_completion(peer_completion(3, reason, StreamDisconnect::None))
+        .await;
+    assert!(driver.endpoints.setup_admission.try_acquire().is_none());
+    ready_dealer(&mut driver).await;
+    assert!(driver.peers.get(&7).unwrap().handshake.ready);
+    assert!(matches!(
+        monitor.try_recv().unwrap(),
+        MonitorEvent::HandshakeSucceeded { .. }
+    ));
+    driver
+        .handle_peer_output(
+            7,
+            PeerEvent::Event(Event::Command(Command::Unknown {
+                name: "OLDER".into(),
+                body: bytes::Bytes::from_static(b"command"),
+            })),
+        )
+        .await;
+    assert!(driver.peers.contains_key(&7));
+    assert!(matches!(
+        monitor.try_recv().unwrap(),
+        MonitorEvent::PeerCommand { .. }
+    ));
+
+    // The last event blocks on a full pipe and holds the peer back.
+    fill_receive_pipe(&driver);
+    driver
+        .handle_peer_output(7, PeerEvent::Event(Event::Message(Message::single("last"))))
+        .await;
+    assert_eq!(driver.peers.get(&7).unwrap().progress.handled_events, 3);
+    assert_eq!(driver.pending_receive.as_ref().unwrap().peer_id, 7);
+    driver.retire_completed_peer(7).await;
+    assert!(driver.peers.contains_key(&7));
+    assert!(matches!(
+        monitor.try_recv(),
+        Err(MonitorTryRecvError::Empty)
+    ));
+
+    assert_eq!(receive.prefetch(), 16);
+    free_slot_and_retire(&mut driver, &mut receive).await;
+    assert!(!driver.peers.contains_key(&7));
+    assert!(driver.pending_receive.is_none());
+    assert!(
+        matches!(monitor.try_recv().unwrap(), MonitorEvent::Disconnected { peer, reason, .. }
+        if peer.peer_identity.as_deref() == Some(b"peer".as_slice())
+            && matches!(&reason, DisconnectReason::Error(reason) if reason == "original wire failure"))
+    );
+    assert_fillers(&mut receive, 15);
+    receive.prefetch();
+    assert_routed(&receive.pop().unwrap(), b"peer", b"last");
+}
+
+#[tokio::test]
+async fn stream_disconnect_receive_follows_data_and_retains_identity_until_admission() {
+    let (mut driver, mut receive) = fixture_for(SocketType::Stream);
+    let identity = bytes::Bytes::from_static(b"stream");
+    insert_stream_peer(&mut driver, 7, identity.clone());
+    driver.link.shared.ready_peers.set(1);
+    driver
+        .routing
+        .recv_strategy
+        .connection_added(7, identity.clone());
+
+    fill_receive_pipe(&driver);
+    driver
+        .handle_peer_output(
+            7,
+            PeerEvent::Event(Event::Message(Message::single("older data"))),
+        )
+        .await;
+    driver
+        .handle_peer_completion(peer_completion(
+            1,
+            DisconnectReason::PeerClosed,
+            StreamDisconnect::Pending,
+        ))
+        .await;
+    assert!(driver.peers.contains_key(&7));
+
+    // Admitting the data queues the terminal receive, which blocks too.
+    receive.prefetch();
+    free_slot_and_retire(&mut driver, &mut receive).await;
+    driver.drain_stream_disconnects().await;
+    assert!(driver.peers.contains_key(&7));
+    let completion = driver
+        .peers
+        .get(&7)
+        .unwrap()
+        .progress
+        .completion
+        .as_ref()
+        .unwrap();
+    assert_eq!(completion.stream_disconnect, StreamDisconnect::None);
+    assert_routed(
+        &driver.pending_receive.as_ref().unwrap().message,
+        &identity,
+        b"",
+    );
+
+    free_slot_and_retire(&mut driver, &mut receive).await;
+    assert!(!driver.peers.contains_key(&7));
+    assert_eq!(driver.link.shared.ready_peers.get(), 0);
+    assert_fillers(&mut receive, 14);
+    receive.prefetch();
+    assert_routed(&receive.pop().unwrap(), &identity, b"older data");
+    assert_routed(&receive.pop().unwrap(), &identity, b"");
+}
+
+#[tokio::test]
+async fn completion_drain_budgets_ready_results_and_preserves_pending_receive() {
+    let (mut driver, _receive) = fixture();
+    driver.pending_receive = Some(super::super::PendingReceive {
+        peer_id: 200,
+        message: Message::single("blocked"),
+        properties: None,
+    });
+    for peer_id in 0..100 {
+        let (publisher, receiver) =
+            crate::engine::peer_completion::CompletionProgress::reserve(peer_id);
+        driver.mail.peer_completions.push(receiver);
+        drop(publisher);
+    }
+    driver.drain_peer_completions().await;
+    assert!((84..100).contains(&driver.mail.peer_completions.len()));
+    assert_eq!(driver.pending_receive.as_ref().unwrap().peer_id, 200);
+    for _ in 0..100 {
+        if driver.mail.peer_completions.is_empty() {
+            break;
+        }
+        driver.drain_peer_completions().await;
+    }
+    assert!(driver.mail.peer_completions.is_empty());
+}
+
+#[tokio::test]
+async fn pending_completion_drain_keeps_the_actual_actor_waker() {
+    use std::future::Future;
+    let (mut driver, _receive) = fixture();
+    insert_pending_peer(&mut driver, 7);
+    let (mut publisher, receiver) = crate::engine::peer_completion::CompletionProgress::reserve(7);
+    driver.mail.peer_completions.push(receiver);
+    let counter = Arc::new(WakeCounter::default());
+    let waker = futures::task::waker(counter.clone());
+    let mut context = std::task::Context::from_waker(&waker);
+    {
+        let drain = driver.drain_peer_completions();
+        tokio::pin!(drain);
+        assert!(drain.as_mut().poll(&mut context).is_ready());
+    }
+    counter.0.store(0, std::sync::atomic::Ordering::Relaxed);
+    publisher.complete(DisconnectReason::PeerClosed).unwrap();
+    assert!(
+        counter.0.load(std::sync::atomic::Ordering::Relaxed) > 0,
+        "completion drain replaced the actual actor waker"
+    );
+    driver.drain_peer_completions().await;
+    assert!(!driver.peers.contains_key(&7));
+}
+
+#[tokio::test]
+async fn stream_disconnect_preserves_another_peers_blocked_receive() {
+    let (mut driver, mut receive) = fixture_for(SocketType::Stream);
+    let identity = bytes::Bytes::from_static(b"closed stream");
+    insert_stream_peer(&mut driver, 7, identity.clone());
+    driver.routing.recv_strategy.connection_added(7, identity);
+    driver.link.shared.ready_peers.set(1);
+    driver.pending_receive = Some(super::super::PendingReceive {
+        peer_id: 8,
+        message: Message::single("other peer"),
+        properties: None,
+    });
+    driver
+        .handle_peer_completion(PeerCompletion {
+            peer_id: 7,
+            admitted_events: 0,
+            reason: DisconnectReason::PeerClosed,
+            stream_disconnect: StreamDisconnect::Pending,
+        })
+        .await;
+    driver.drain_stream_disconnects().await;
+    assert_eq!(driver.pending_receive.as_ref().unwrap().peer_id, 8);
+    assert_eq!(
+        driver
+            .pending_receive
+            .as_ref()
+            .unwrap()
+            .message
+            .part_slice(0),
+        Some(b"other peer".as_slice())
+    );
+    assert!(driver.peers.contains_key(&7));
+    driver.retire_completed_peer(7).await;
+    assert_eq!(driver.mail.stream_disconnects.len(), 1);
+    driver.retry_pending_receive();
+    driver.drain_stream_disconnects().await;
+    assert!(!driver.peers.contains_key(&7));
+    assert!(driver.mail.stream_disconnects.is_empty());
+    receive.prefetch();
+    assert_eq!(
+        receive.pop().unwrap().part_slice(0),
+        Some(b"other peer".as_slice())
+    );
+    let terminal = receive.pop().unwrap();
+    assert_eq!(terminal.part_slice(0), Some(b"closed stream".as_slice()));
+    assert_eq!(terminal.part_slice(1), Some(b"".as_slice()));
+    assert!(receive.pop().is_none());
+}
+
+#[tokio::test]
+async fn pending_handshake_completion_releases_admission_with_another_receive_blocked() {
+    let (mut driver, _receive) = fixture();
+    driver.endpoints.setup_admission = crate::transport::setup::Admission::new(1);
+    let mut monitor = driver.link.monitor.subscribe();
+    insert_pending_peer(&mut driver, 7);
+    driver.pending_receive = Some(super::super::PendingReceive {
+        peer_id: 8,
+        message: Message::single("other peer"),
+        properties: None,
+    });
+    driver
+        .handle_peer_completion(PeerCompletion {
+            peer_id: 7,
+            admitted_events: 0,
+            reason: DisconnectReason::Error("setup failed".into()),
+            stream_disconnect: StreamDisconnect::None,
+        })
+        .await;
+    assert!(!driver.peers.contains_key(&7));
+    assert!(driver.endpoints.setup_admission.try_acquire().is_some());
+    assert_eq!(driver.pending_receive.as_ref().unwrap().peer_id, 8);
+    assert!(
+        matches!(monitor.try_recv().unwrap(), MonitorEvent::HandshakeFailed { reason, .. }
+        if reason == "setup failed")
+    );
+}
+
+#[tokio::test]
+async fn unassigned_stream_peer_cannot_release_another_peers_io_load() {
+    let context = crate::Context::with_config(crate::ContextConfig { io_threads: 2 });
+    let pool = context.core().io_pool_handle();
+    let unrelated_assignment = pool.reserve_thread();
+    assert_eq!(unrelated_assignment.index(), 0);
+    let (mut driver, _receive) = fixture_with_pool(SocketType::Stream, pool.clone());
+    insert_pending_peer(&mut driver, 7);
+    driver
+        .handle_peer_completion(PeerCompletion {
+            peer_id: 7,
+            admitted_events: 0,
+            reason: DisconnectReason::PeerClosed,
+            stream_disconnect: StreamDisconnect::None,
+        })
+        .await;
+    assert!(!driver.peers.contains_key(&7));
+    let next_assignment = pool.reserve_thread();
+    assert_eq!(
+        next_assignment.index(),
+        1,
+        "STREAM released an unreserved IO load"
+    );
+}
+
+mod codec_tests;
+
+#[cfg(any(feature = "lz4", feature = "zstd"))]
+mod receive_limits;

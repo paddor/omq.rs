@@ -95,22 +95,6 @@ impl TypeState {
         }
     }
 
-    /// Strip the REQ reply envelope without checking `req_awaiting_reply`.
-    ///
-    /// Used by the tokio `recv_direct` path where the driver pushes
-    /// messages straight to the user channel. The flag may already be
-    /// cleared by a concurrent `on_peer_disconnected` in the actor, but
-    /// the message is a valid wire reply and must not be dropped.
-    pub fn post_recv_req_direct(&mut self, msg: Message) -> Option<Message> {
-        let mut parts = msg.into_parts_payload();
-        if parts.len() < 2 || !parts[0].is_empty() {
-            return None;
-        }
-        parts.remove(0);
-        self.req_awaiting_reply = false;
-        Some(Message::from_parts(parts))
-    }
-
     /// Transform the incoming message per the socket type. Returns:
     /// - `Ok(Some(msg))` with the user-visible body.
     /// - `Ok(None)` to silently drop (malformed or out-of-order).
@@ -339,7 +323,6 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert!(state.post_recv_req_direct(Message::single("")).is_none());
         assert!(
             state
                 .pre_send(SocketType::Req, Message::single("another"))

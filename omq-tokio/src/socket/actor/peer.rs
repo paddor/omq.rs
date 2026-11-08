@@ -323,7 +323,11 @@ impl SocketDriver {
                 if self.handle_legacy_subscribe(peer_id, &msg) {
                     return;
                 }
-                if self.socket_type == SocketType::Dish && msg.len() != 2 {
+                if self
+                    .socket_type
+                    .recv_parts()
+                    .is_some_and(|parts| msg.len() != parts)
+                {
                     return;
                 }
                 let message = self.routing.recv_strategy.prepare_message(peer_id, msg);

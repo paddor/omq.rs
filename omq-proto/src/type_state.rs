@@ -115,7 +115,7 @@ impl TypeState {
     /// - `Ok(Some(msg))` with the user-visible body.
     /// - `Ok(None)` to silently drop (malformed or out-of-order).
     pub fn post_recv(&mut self, t: SocketType, msg: Message) -> Result<Option<Message>> {
-        if t.requires_single_frame() && msg.len() != 1 {
+        if t.recv_parts().is_some_and(|parts| msg.len() != parts) {
             return Ok(None);
         }
         match t {
@@ -130,12 +130,6 @@ impl TypeState {
                 parts.remove(0);
                 self.req_awaiting_reply = false;
                 Ok(Some(Message::from_parts(parts)))
-            }
-            SocketType::Dish => {
-                if msg.len() != 2 {
-                    return Ok(None);
-                }
-                Ok(Some(msg))
             }
             SocketType::Rep => {
                 let parts = msg.into_parts_payload();
@@ -162,6 +156,28 @@ impl TypeState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dish_recv_keeps_only_group_and_body_messages() {
+        let mut state = TypeState::new();
+        for malformed in [
+            Message::new(),
+            Message::single("group"),
+            Message::multipart(["group", "a", "b"]),
+        ] {
+            assert!(
+                state
+                    .post_recv(SocketType::Dish, malformed)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        let message = Message::multipart(["group", "body"]);
+        assert_eq!(
+            state.post_recv(SocketType::Dish, message.clone()).unwrap(),
+            Some(message)
+        );
+    }
 
     #[test]
     fn server_requires_single_body_with_routing_metadata() {

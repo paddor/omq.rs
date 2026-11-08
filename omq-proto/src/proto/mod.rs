@@ -94,6 +94,17 @@ impl SocketType {
         )
     }
 
+    /// Frame count every received message must have, if the type fixes
+    /// one. DISH messages carry a group frame and a body frame.
+    #[must_use]
+    pub const fn recv_parts(self) -> Option<usize> {
+        match self {
+            Self::Dish => Some(2),
+            _ if self.requires_single_frame() => Some(1),
+            _ => None,
+        }
+    }
+
     /// Wire-level name used in the READY command's `Socket-Type` property.
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -188,6 +199,15 @@ pub const fn is_compatible(ours: SocketType, theirs: SocketType) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recv_parts_fix_dish_and_single_frame_types_only() {
+        assert_eq!(SocketType::Dish.recv_parts(), Some(2));
+        assert_eq!(SocketType::Server.recv_parts(), Some(1));
+        assert_eq!(SocketType::Gather.recv_parts(), Some(1));
+        assert_eq!(SocketType::Pull.recv_parts(), None);
+        assert_eq!(SocketType::Radio.recv_parts(), None);
+    }
 
     #[test]
     fn wire_names_roundtrip() {

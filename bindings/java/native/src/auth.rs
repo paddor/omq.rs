@@ -1,16 +1,26 @@
 //! Authentication callbacks, credentials, and key conversion.
 
-use crate::convert::{java_string, java_strings};
-use crate::error::{guard, jni_error, throw_omq};
+#[cfg(feature = "plain")]
+use crate::convert::java_strings;
+#[cfg(any(feature = "plain", feature = "curve"))]
+use crate::convert::{curve_key_z85, java_string, optional_java_string};
+#[cfg(any(feature = "plain", feature = "curve"))]
+use crate::error::jni_error;
+use crate::error::{guard, throw_omq};
+#[cfg(any(feature = "plain", feature = "curve"))]
 use crate::socket::socket_from_handle;
 use jni::JNIEnv;
-use jni::objects::{JClass, JObject, JObjectArray, JString, JValue};
+#[cfg(any(feature = "plain", feature = "curve"))]
+use jni::objects::JValue;
+use jni::objects::{JClass, JObject, JObjectArray, JString};
 use jni::sys::{jlong, jobjectArray, jstring};
-use omq_tokio::{
-    Authenticator, CurveKeypair, CurvePublicKey, CurveSecretKey, CurveServerOptions, Error,
-    MechanismPeerInfo, MechanismSetup,
-};
+use omq_tokio::Error;
+#[cfg(any(feature = "plain", feature = "curve"))]
+use omq_tokio::{Authenticator, MechanismPeerInfo, MechanismSetup};
+#[cfg(feature = "curve")]
+use omq_tokio::{CurveKeypair, CurvePublicKey, CurveSecretKey, CurveServerOptions};
 
+#[cfg(any(feature = "plain", feature = "curve"))]
 fn mechanism_peer_info_object<'local>(
     env: &mut JNIEnv<'local>,
     peer: &MechanismPeerInfo,
@@ -19,10 +29,7 @@ fn mechanism_peer_info_object<'local>(
         .new_string(peer.mechanism.as_str()?.to_string())
         .map_err(jni_error)?;
     let public_key = if peer.mechanism == omq_proto::proto::MechanismName::CURVE {
-        JObject::from(
-            env.new_string(CurvePublicKey::from_bytes(peer.public_key).to_z85())
-                .map_err(jni_error)?,
-        )
+        optional_java_string(env, curve_key_z85(&peer.public_key).as_deref())?
     } else {
         JObject::null()
     };
@@ -58,6 +65,7 @@ fn mechanism_peer_info_object<'local>(
     .map_err(jni_error)
 }
 
+#[cfg(any(feature = "plain", feature = "curve"))]
 fn java_authenticator(
     env: &mut JNIEnv<'_>,
     authenticator: JObject<'_>,
@@ -89,6 +97,7 @@ fn java_authenticator(
     }))
 }
 
+#[cfg(feature = "curve")]
 fn curve_keypair_from_z85(public_key: String, secret_key: String) -> Result<CurveKeypair, Error> {
     let public = CurvePublicKey::from_z85(&public_key)?;
     let secret = CurveSecretKey::from_z85(&secret_key)?;
@@ -96,6 +105,7 @@ fn curve_keypair_from_z85(public_key: String, secret_key: String) -> Result<Curv
 }
 
 #[unsafe(no_mangle)]
+#[cfg(feature = "curve")]
 pub extern "system" fn Java_io_omq_Native_curveKeypair(
     mut env: JNIEnv<'_>,
     _class: JClass<'_>,
@@ -127,6 +137,7 @@ pub extern "system" fn Java_io_omq_Native_curveKeypair(
 }
 
 #[unsafe(no_mangle)]
+#[cfg(feature = "curve")]
 pub extern "system" fn Java_io_omq_Native_curvePublic(
     mut env: JNIEnv<'_>,
     _class: JClass<'_>,
@@ -151,6 +162,7 @@ pub extern "system" fn Java_io_omq_Native_curvePublic(
 }
 
 #[unsafe(no_mangle)]
+#[cfg(feature = "plain")]
 pub extern "system" fn Java_io_omq_Native_socketSetPlainServer(
     mut env: JNIEnv<'_>,
     _class: JClass<'_>,
@@ -183,6 +195,7 @@ pub extern "system" fn Java_io_omq_Native_socketSetPlainServer(
 }
 
 #[unsafe(no_mangle)]
+#[cfg(feature = "plain")]
 pub extern "system" fn Java_io_omq_Native_socketSetPlainServerCallback(
     mut env: JNIEnv<'_>,
     _class: JClass<'_>,
@@ -205,6 +218,7 @@ pub extern "system" fn Java_io_omq_Native_socketSetPlainServerCallback(
 }
 
 #[unsafe(no_mangle)]
+#[cfg(feature = "plain")]
 pub extern "system" fn Java_io_omq_Native_socketSetPlainClient(
     mut env: JNIEnv<'_>,
     _class: JClass<'_>,
@@ -229,6 +243,7 @@ pub extern "system" fn Java_io_omq_Native_socketSetPlainClient(
 }
 
 #[unsafe(no_mangle)]
+#[cfg(feature = "curve")]
 pub extern "system" fn Java_io_omq_Native_socketSetCurveServer(
     mut env: JNIEnv<'_>,
     _class: JClass<'_>,
@@ -258,6 +273,7 @@ pub extern "system" fn Java_io_omq_Native_socketSetCurveServer(
 }
 
 #[unsafe(no_mangle)]
+#[cfg(feature = "curve")]
 pub extern "system" fn Java_io_omq_Native_socketSetCurveServerCallback(
     mut env: JNIEnv<'_>,
     _class: JClass<'_>,
@@ -291,6 +307,7 @@ pub extern "system" fn Java_io_omq_Native_socketSetCurveServerCallback(
 }
 
 #[unsafe(no_mangle)]
+#[cfg(feature = "curve")]
 pub extern "system" fn Java_io_omq_Native_socketSetCurveClient(
     mut env: JNIEnv<'_>,
     _class: JClass<'_>,
@@ -319,4 +336,110 @@ pub extern "system" fn Java_io_omq_Native_socketSetCurveClient(
             throw_omq(env, error);
         }
     });
+}
+
+#[cfg(not(all(feature = "plain", feature = "curve")))]
+fn throw_disabled(env: &mut JNIEnv<'_>, mechanism: &str) {
+    throw_omq(
+        env,
+        Error::Config(format!("{mechanism} support not enabled")),
+    );
+}
+
+#[unsafe(no_mangle)]
+#[cfg(not(feature = "curve"))]
+pub extern "system" fn Java_io_omq_Native_curveKeypair(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+) -> jobjectArray {
+    guard(&mut env, std::ptr::null_mut(), |env| {
+        throw_disabled(env, "CURVE");
+        std::ptr::null_mut()
+    })
+}
+
+#[unsafe(no_mangle)]
+#[cfg(not(feature = "curve"))]
+pub extern "system" fn Java_io_omq_Native_curvePublic(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    _secret_key: JString<'_>,
+) -> jstring {
+    guard(&mut env, std::ptr::null_mut(), |env| {
+        throw_disabled(env, "CURVE");
+        std::ptr::null_mut()
+    })
+}
+
+#[unsafe(no_mangle)]
+#[cfg(not(feature = "plain"))]
+pub extern "system" fn Java_io_omq_Native_socketSetPlainServer(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    _handle: jlong,
+    _usernames: JObjectArray<'_>,
+    _passwords: JObjectArray<'_>,
+) {
+    guard(&mut env, (), |env| throw_disabled(env, "PLAIN"));
+}
+
+#[unsafe(no_mangle)]
+#[cfg(not(feature = "plain"))]
+pub extern "system" fn Java_io_omq_Native_socketSetPlainServerCallback(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    _handle: jlong,
+    _authenticator: JObject<'_>,
+) {
+    guard(&mut env, (), |env| throw_disabled(env, "PLAIN"));
+}
+
+#[unsafe(no_mangle)]
+#[cfg(not(feature = "plain"))]
+pub extern "system" fn Java_io_omq_Native_socketSetPlainClient(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    _handle: jlong,
+    _username: JString<'_>,
+    _password: JString<'_>,
+) {
+    guard(&mut env, (), |env| throw_disabled(env, "PLAIN"));
+}
+
+#[unsafe(no_mangle)]
+#[cfg(not(feature = "curve"))]
+pub extern "system" fn Java_io_omq_Native_socketSetCurveServer(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    _handle: jlong,
+    _public_key: JString<'_>,
+    _secret_key: JString<'_>,
+) {
+    guard(&mut env, (), |env| throw_disabled(env, "CURVE"));
+}
+
+#[unsafe(no_mangle)]
+#[cfg(not(feature = "curve"))]
+pub extern "system" fn Java_io_omq_Native_socketSetCurveServerCallback(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    _handle: jlong,
+    _public_key: JString<'_>,
+    _secret_key: JString<'_>,
+    _authenticator: JObject<'_>,
+) {
+    guard(&mut env, (), |env| throw_disabled(env, "CURVE"));
+}
+
+#[unsafe(no_mangle)]
+#[cfg(not(feature = "curve"))]
+pub extern "system" fn Java_io_omq_Native_socketSetCurveClient(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    _handle: jlong,
+    _public_key: JString<'_>,
+    _secret_key: JString<'_>,
+    _server_public_key: JString<'_>,
+) {
+    guard(&mut env, (), |env| throw_disabled(env, "CURVE"));
 }

@@ -2,7 +2,9 @@
 
 use crate::error::jni_error;
 use jni::JNIEnv;
-use jni::objects::{JByteArray, JObject, JObjectArray, JString};
+#[cfg(feature = "plain")]
+use jni::objects::JObjectArray;
+use jni::objects::{JByteArray, JObject, JString};
 use jni::sys::{jint, jlong};
 use omq_tokio::{Error, SocketType};
 use std::time::Duration;
@@ -56,6 +58,7 @@ pub(crate) fn java_string(env: &mut JNIEnv<'_>, value: JString<'_>) -> Result<St
     env.get_string(&value).map(|s| s.into()).map_err(jni_error)
 }
 
+#[cfg(feature = "plain")]
 pub(crate) fn java_strings(
     env: &mut JNIEnv<'_>,
     values: &JObjectArray<'_>,
@@ -72,6 +75,11 @@ pub(crate) fn java_strings(
         out.push(java_string(env, JString::from(value))?);
     }
     Ok(out)
+}
+
+/// Z85 text for a CURVE public key.
+pub(crate) fn curve_key_z85(key: &[u8; 32]) -> Option<String> {
+    omq_proto::proto::z85::encode(key).ok()
 }
 
 pub(crate) fn byte_array(env: &mut JNIEnv<'_>, value: JByteArray<'_>) -> Result<Vec<u8>, Error> {
@@ -127,3 +135,6 @@ pub(crate) fn socket_type_from_code(code: jint) -> Result<SocketType, Error> {
         _ => return Err(Error::Config(format!("unknown socket type code {code}"))),
     })
 }
+
+#[cfg(test)]
+mod tests;

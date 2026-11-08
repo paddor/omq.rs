@@ -371,6 +371,34 @@ mod tests {
         insert_peer(driver, peer_id, handshake);
     }
 
+    #[tokio::test]
+    async fn dish_discards_malformed_messages_then_delivers_group_and_body() {
+        let (mut driver, mut receive) = fixture_for(SocketType::Dish);
+        insert_peer(
+            &mut driver,
+            7,
+            PeerHandshake {
+                ready: true,
+                ..PeerHandshake::default()
+            },
+        );
+        for message in [
+            Message::new(),
+            Message::single("group"),
+            Message::multipart(["group", "a", "b"]),
+        ] {
+            driver
+                .handle_peer_output(7, PeerEvent::Event(Event::Message(message)))
+                .await;
+            assert_eq!(receive.prefetch(), 0);
+        }
+        let message = Message::multipart(["group", "body"]);
+        driver
+            .handle_peer_output(7, PeerEvent::Event(Event::Message(message.clone())))
+            .await;
+        assert_eq!(receive.prefetch_and_pop(), Some(message));
+    }
+
     /// A raw STREAM peer: ready at once, without a handshake slot.
     fn insert_stream_peer(driver: &mut SocketDriver, peer_id: u64, identity: bytes::Bytes) {
         let handshake = PeerHandshake {

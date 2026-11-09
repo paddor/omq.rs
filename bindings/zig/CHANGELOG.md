@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.1.13] - 2026-11-09
+
+### Changed
+
+- Bundle `omq-libzmq` 0.10.0 on `omq-tokio` 0.35.0.
+
 ## [0.1.12] - 2026-11-04
 
 ### Changed

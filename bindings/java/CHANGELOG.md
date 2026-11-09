@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.5.8] - 2026-11-09
+
+### Changed
+
+- Bundle `omq-tokio` 0.35.0.
+
+### Fixed
+
+- The native library builds with the `plain` or `curve` feature off.
+  Disabled PLAIN and CURVE entry points throw a "support not enabled"
+  error.
+
 ## [0.5.7] - 2026-11-04
 
 ### Changed

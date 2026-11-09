@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.2.13] - 2026-11-09
+
+### Changed
+
+- Bundle `omq-libzmq` 0.10.0 on `omq-tokio` 0.35.0. On Windows,
+  socket creation fails when its wakeup events cannot be created,
+  instead of returning a socket whose receives spin.
+
 ## [0.2.12] - 2026-11-04
 
 ### Changed

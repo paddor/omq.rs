@@ -85,14 +85,18 @@ test("PLAIN PUSH/PULL accepts credential allowlist", async () => {
 test("PLAIN rejects wrong credentials", async () => {
   const pull = new Pull({ plain: { username: "alice", password: "secret", server: true } });
   const push = new Push({ plain: { username: "alice", password: "wrong" } });
+  let sent = Promise.resolve();
   try {
     const endpoint = await pull.bind("tcp://127.0.0.1:0");
     await push.connect(endpoint);
-    await push.send("blocked");
+    // A refused handshake drops the dial route and its pre-ready pipe, so
+    // this send stays pending until close if the refusal arrives first.
+    sent = push.send("blocked").catch(() => {});
     assert.equal(await pull.recv({ signal: AbortSignal.timeout(300) }).catch(() => null), null);
   } finally {
     push.close();
     pull.close();
+    await sent;
   }
 });
 

@@ -115,7 +115,8 @@ final class CurveTest {
                      .curveClient(clientKeypair, serverKeypair.publicKey())) {
             String endpoint = pull.bind("tcp://127.0.0.1:0");
             push.connect(endpoint);
-            push.send("blocked");
+            // A refused handshake drops the route; a blocking send could hang.
+            push.trySend("blocked");
 
             assertTrue(pull.receive(Duration.ofMillis(500)).isEmpty());
             assertEquals(clientKeypair.publicKey(), seen.get().publicKey().orElseThrow());

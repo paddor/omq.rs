@@ -1,5 +1,6 @@
 """PLAIN mechanism socket tests."""
 
+import contextlib
 import time
 
 import pyomq as zmq
@@ -90,7 +91,9 @@ def test_plain_fixed_policy_rejects_wrong_password(tcp_endpoint):
         pull.bind(tcp_endpoint)
         ep = pull.last_endpoint
         push.connect(ep)
-        push.send(b"blocked")
+        # A refused handshake drops the route; a blocking send could hang.
+        with contextlib.suppress(zmq.Again):
+            push.send(b"blocked", zmq.NOBLOCK)
         pull.rcvtimeo = 300
         with pytest.raises(zmq.Again):
             pull.recv()

@@ -33,7 +33,7 @@ test = [
     "tornado>=6",
 ]
 lint = ["ruff==0.16.6"]
-type-check = ["ty>=0.0.63", "mypy>=1.19", "pyright>=1.1.400"]
+type-check = ["ty>=0.0.100", "mypy>=1.19", "pyright>=1.1.400"]
 dev = [
   { include-group = "test" },
   { include-group = "lint" },

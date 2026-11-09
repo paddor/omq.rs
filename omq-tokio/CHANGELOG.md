@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.35.0] - 2026-11-09
+
+### Changed
+
+- Depend on `omq-proto` 0.39.0 and `omq-shm` 0.7.0.
+
 ## [0.34.3] - 2026-11-04
 
 ### Changed

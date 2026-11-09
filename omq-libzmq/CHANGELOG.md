@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-09
+
+### Changed
+
+- Require `omq-tokio` 0.35.0.
+
 ### Fixed
 
 - On Windows, `zmq_socket` fails with `EMFILE` when it cannot create its

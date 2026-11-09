@@ -90,7 +90,8 @@ class FeaturesTest < Minitest::Test
     server.set_curve_auth([other_public])
     endpoint = tcp_endpoint(server)
     client.connect(endpoint)
-    client << "rejected"
+    # A refused handshake drops the route; a blocking send could hang.
+    client.try_send("rejected")
 
     assert_raises(IO::TimeoutError) { server.recv }
   end
@@ -116,7 +117,8 @@ class FeaturesTest < Minitest::Test
     server.set_curve_auth { false }
     endpoint = tcp_endpoint(server)
     client.connect(endpoint)
-    client << "rejected"
+    # A refused handshake drops the route; a blocking send could hang.
+    client.try_send("rejected")
 
     assert_raises(IO::TimeoutError) { server.recv }
   end

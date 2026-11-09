@@ -1,5 +1,6 @@
 """CURVE client authentication tests."""
 
+import contextlib
 import time
 
 import pyomq as zmq
@@ -56,7 +57,9 @@ def test_curve_auth_allowed_keys_reject(tcp_endpoint):
         pull.bind(tcp_endpoint)
         ep = pull.last_endpoint
         push.connect(ep)
-        push.send(b"should not arrive")
+        # A refused handshake drops the route; a blocking send could hang.
+        with contextlib.suppress(zmq.Again):
+            push.send(b"should not arrive", zmq.NOBLOCK)
         pull.setsockopt(zmq.RCVTIMEO, 1000)
         with pytest.raises(zmq.Again):
             pull.recv()
@@ -95,7 +98,9 @@ def test_curve_auth_callback_reject(tcp_endpoint):
         pull.bind(tcp_endpoint)
         ep = pull.last_endpoint
         push.connect(ep)
-        push.send(b"rejected")
+        # A refused handshake drops the route; a blocking send could hang.
+        with contextlib.suppress(zmq.Again):
+            push.send(b"rejected", zmq.NOBLOCK)
         pull.setsockopt(zmq.RCVTIMEO, 1000)
         with pytest.raises(zmq.Again):
             pull.recv()

@@ -33,7 +33,7 @@
     "build:ts": "tsc -p tsconfig.json",
     "artifacts": "napi artifacts --output-dir artifacts",
     "release:prepare": "node scripts/prepare-release.js",
-    "test": "node --test test/*.test.js",
+    "test": "node --test --test-timeout=30000 --test-force-exit test/*.test.js",
     "bench": "node scripts/omq-node-bench.js",
     "chart": "python3 scripts/update_perf.py --chart-only",
     "soak": "node --expose-gc --test --test-concurrency=1 test/soak/*.test.js"

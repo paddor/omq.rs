@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- On Windows, `zmq_socket` fails with `EMFILE` when it cannot create its
+  wakeup events. Before, it returned a socket whose blocking receives spun
+  and whose `zmq_poll` entries never fired.
+
 ## [0.9.2] - 2026-11-04
 
 ### Changed

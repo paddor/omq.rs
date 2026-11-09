@@ -16,8 +16,7 @@ impl RecvNotify {
     #[inline]
     pub(crate) fn signal(self) {
         // SAFETY: SetEvent takes the handle by value and touches no Rust
-        // memory. The owning WindowsNotifyHandle outlives this copy; a
-        // null handle (failed CreateEventW) only makes the call fail.
+        // memory. The owning WindowsNotifyHandle outlives this copy.
         unsafe {
             let _ = SetEvent(self.event);
         }
@@ -39,16 +38,39 @@ impl RecvNotify {
         } else {
             timeout_ms as u32
         };
-        // SAFETY: as in `signal`; the wait reads no Rust memory, and a
-        // null handle returns WAIT_FAILED.
+        // SAFETY: as in `signal`; the wait reads no Rust memory.
         let rc = unsafe { WaitForSingleObject(self.event, wait_ms) };
         rc == WAIT_OBJECT_0
     }
 }
 
+/// A manual-reset event, closed on drop.
+struct Event(HANDLE);
+
+impl Event {
+    fn new() -> Option<Self> {
+        // SAFETY: no security attributes and no name, so no pointers are
+        // passed. Each call returns a new manual-reset event or an error.
+        unsafe { CreateEventW(None, true, false, None) }
+            .ok()
+            .map(Self)
+    }
+}
+
+impl Drop for Event {
+    fn drop(&mut self) {
+        // SAFETY: the handle came from CreateEventW and drop is its only
+        // close. No RecvNotify copy outlives the owning
+        // WindowsNotifyHandle.
+        unsafe {
+            let _ = CloseHandle(self.0);
+        }
+    }
+}
+
 pub(crate) struct WindowsNotifyHandle {
-    recv_event: Option<HANDLE>,
-    send_event: Option<HANDLE>,
+    recv_event: Event,
+    send_event: Event,
 }
 
 // SAFETY: HANDLE is an opaque kernel object reference; Win32 event
@@ -63,54 +85,29 @@ impl std::fmt::Debug for WindowsNotifyHandle {
 }
 
 impl WindowsNotifyHandle {
-    pub(crate) fn new() -> Self {
-        // SAFETY: no security attributes and no name, so no pointers are
-        // passed. Each call returns a new manual-reset event or an error.
-        let recv_event = unsafe { CreateEventW(None, true, false, None) };
-        // SAFETY: as above.
-        let send_event = unsafe { CreateEventW(None, true, false, None) };
-        Self {
-            recv_event: recv_event.ok(),
-            send_event: send_event.ok(),
-        }
-    }
-}
-
-impl Drop for WindowsNotifyHandle {
-    fn drop(&mut self) {
-        if let Some(handle) = self.recv_event.take() {
-            // SAFETY: `handle` came from CreateEventW and `take()` makes
-            // this its only close. No RecvNotify copy outlives `self`.
-            unsafe {
-                let _ = CloseHandle(handle);
-            }
-        }
-        if let Some(handle) = self.send_event.take() {
-            // SAFETY: as above.
-            unsafe {
-                let _ = CloseHandle(handle);
-            }
-        }
+    /// Both events, or `None` when either cannot be created. A partly
+    /// created pair closes on drop.
+    pub(crate) fn new() -> Option<Self> {
+        Some(Self {
+            recv_event: Event::new()?,
+            send_event: Event::new()?,
+        })
     }
 }
 
 impl NotifyHandle for WindowsNotifyHandle {
     fn signal_recv(&self) {
-        if let Some(handle) = self.recv_event {
-            // SAFETY: `handle` is an open event owned by `self`; SetEvent
-            // touches no Rust memory.
-            unsafe {
-                let _ = SetEvent(handle);
-            }
+        // SAFETY: the event is open while `self` lives; SetEvent touches
+        // no Rust memory.
+        unsafe {
+            let _ = SetEvent(self.recv_event.0);
         }
     }
 
     fn signal_send(&self) {
-        if let Some(handle) = self.send_event {
-            // SAFETY: as in `signal_recv`.
-            unsafe {
-                let _ = SetEvent(handle);
-            }
+        // SAFETY: as in `signal_recv`.
+        unsafe {
+            let _ = SetEvent(self.send_event.0);
         }
     }
 
@@ -126,7 +123,7 @@ impl NotifyHandle for WindowsNotifyHandle {
 
     fn recv_notifier(&self) -> RecvNotify {
         RecvNotify {
-            event: self.recv_event.unwrap_or_default(),
+            event: self.recv_event.0,
         }
     }
 }
@@ -156,25 +153,19 @@ impl PollWaiter {
                 continue;
             };
 
-            if (item.events & crate::poll::ZMQ_POLLIN as libc::c_short) != 0
-                && let Some(handle) = sock.notify.recv_event
-                && !handle.is_invalid()
-            {
+            if (item.events & crate::poll::ZMQ_POLLIN as libc::c_short) != 0 {
                 if batches.last().unwrap().len() >= Self::BATCH_SIZE {
                     batches.push(Vec::new());
                 }
-                batches.last_mut().unwrap().push(handle);
+                batches.last_mut().unwrap().push(sock.notify.recv_event.0);
                 handle_map.push((idx, crate::poll::ZMQ_POLLIN as libc::c_short));
             }
 
-            if (item.events & crate::poll::ZMQ_POLLOUT as libc::c_short) != 0
-                && let Some(handle) = sock.notify.send_event
-                && !handle.is_invalid()
-            {
+            if (item.events & crate::poll::ZMQ_POLLOUT as libc::c_short) != 0 {
                 if batches.last().unwrap().len() >= Self::BATCH_SIZE {
                     batches.push(Vec::new());
                 }
-                batches.last_mut().unwrap().push(handle);
+                batches.last_mut().unwrap().push(sock.notify.send_event.0);
                 handle_map.push((idx, crate::poll::ZMQ_POLLOUT as libc::c_short));
             }
         }
@@ -259,3 +250,6 @@ impl PollWaiter {
         ready_count
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -24,16 +24,10 @@ mod unix;
 #[cfg(windows)]
 pub(crate) mod windows;
 
-#[allow(clippy::unnecessary_wraps)]
+/// Wakeup handles for a new socket, or `None` when the OS cannot create
+/// them.
 pub(crate) fn create_notify() -> Option<std::sync::Arc<PlatformNotifyHandle>> {
-    #[cfg(unix)]
-    {
-        unix::UnixNotifyHandle::new().map(std::sync::Arc::new)
-    }
-    #[cfg(windows)]
-    {
-        Some(std::sync::Arc::new(windows::WindowsNotifyHandle::new()))
-    }
+    PlatformNotifyHandle::new().map(std::sync::Arc::new)
 }
 
 #[cfg(unix)]

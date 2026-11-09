@@ -1,4 +1,7 @@
 //! Native ring message encoding.
+//!
+//! NOTE: `bindings/java/native/src/ring/codec.rs` duplicates this
+//! ring logic. Apply every change or fix to both.
 
 use omq_tokio::Message;
 

@@ -1,4 +1,7 @@
 //! Native recv ring storage and entry points.
+//!
+//! NOTE: `bindings/go/native/src/ring/recv.rs` duplicates this
+//! ring logic. Apply every change or fix to both.
 
 use crate::error::{
     RECV_RING_STATUS_CLOSED, RECV_RING_STATUS_ERROR, RECV_RING_STATUS_OK, clear_ffm_last_error,

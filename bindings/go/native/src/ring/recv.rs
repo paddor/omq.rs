@@ -1,4 +1,7 @@
 //! Native recv ring storage and entry points.
+//!
+//! NOTE: `bindings/java/native/src/ring/recv.rs` duplicates this
+//! ring logic. Apply every change or fix to both.
 
 use super::RING_BATCH;
 use crate::cancel::OmqGoCancel;

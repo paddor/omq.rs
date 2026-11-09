@@ -1,4 +1,7 @@
 //! Native send ring storage and entry points.
+//!
+//! NOTE: `bindings/java/native/src/ring/send.rs` duplicates this
+//! ring logic. Apply every change or fix to both.
 
 use super::RING_BATCH;
 use crate::error::{CLOSED, CONFIG, OK, cstring_lossy, empty_cstring, status_code_from_error};

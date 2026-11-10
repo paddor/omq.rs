@@ -14,15 +14,6 @@ mod codec_tests;
 #[cfg(any(feature = "lz4", feature = "zstd"))]
 mod receive_limits;
 
-#[derive(Debug, Default)]
-struct WakeCounter(std::sync::atomic::AtomicUsize);
-
-impl futures::task::ArcWake for WakeCounter {
-    fn wake_by_ref(counter: &Arc<Self>) {
-        counter.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-
 fn fixture() -> (SocketDriver, yring::Consumer<Message>) {
     fixture_for(SocketType::Router)
 }
@@ -496,8 +487,7 @@ async fn pending_completion_drain_keeps_the_actual_actor_waker() {
     insert_pending_peer(&mut driver, 7);
     let (mut publisher, receiver) = crate::engine::peer_completion::CompletionProgress::reserve(7);
     driver.mail.peer_completions.push(receiver);
-    let counter = Arc::new(WakeCounter::default());
-    let waker = futures::task::waker(counter.clone());
+    let (counter, waker) = crate::test_util::counting_waker();
     let mut context = std::task::Context::from_waker(&waker);
 
     {
@@ -506,10 +496,10 @@ async fn pending_completion_drain_keeps_the_actual_actor_waker() {
         assert!(drain.as_mut().poll(&mut context).is_ready());
     }
 
-    counter.0.store(0, std::sync::atomic::Ordering::Relaxed);
+    let seen = counter.count();
     publisher.complete(DisconnectReason::PeerClosed).unwrap();
     assert!(
-        counter.0.load(std::sync::atomic::Ordering::Relaxed) > 0,
+        counter.count() > seen,
         "completion drain replaced the actual actor waker"
     );
     driver.drain_peer_completions().await;

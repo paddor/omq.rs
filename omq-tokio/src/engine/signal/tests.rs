@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tokio::time::{Duration, timeout};
 
 use super::*;
+use crate::test_util::counting_waker;
 
 #[test]
 fn any_changed_observes_changes_before_first_poll_and_after_cancellation() {
@@ -29,22 +30,14 @@ fn any_changed_observes_changes_before_first_poll_and_after_cancellation() {
 
 #[test]
 fn any_changed_registers_every_signal_and_wakes_the_task() {
-    struct Count(AtomicUsize);
-    impl std::task::Wake for Count {
-        fn wake(self: Arc<Self>) {
-            self.0.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
     for count in [1, 4, 8] {
         let signals: Vec<_> = (0..count).map(|_| Arc::new(StateSignal::new())).collect();
         let mut wait = std::pin::pin!(any_changed(signals.iter().cloned()).wait());
-        let counter = Arc::new(Count(AtomicUsize::new(0)));
-        let waker = std::task::Waker::from(counter.clone());
+        let (counter, waker) = counting_waker();
         let mut cx = std::task::Context::from_waker(&waker);
         assert!(wait.as_mut().poll(&mut cx).is_pending());
         signals.last().unwrap().notify_changed();
-        assert!(counter.0.load(Ordering::Relaxed) != 0);
+        assert!(counter.count() != 0);
         assert!(wait.as_mut().poll(&mut cx).is_ready());
     }
 }

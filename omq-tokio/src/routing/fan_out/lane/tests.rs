@@ -19,7 +19,7 @@ use super::{
 };
 use crate::engine::control_queue::ControlQueue;
 use crate::engine::transmit_slot::SlotConfig;
-use crate::test_util::poll_once;
+use crate::test_util::{counting_waker, poll_once};
 
 const ONE_PEER: FanOutCost = FanOutCost {
     targets: 1,
@@ -103,20 +103,10 @@ fn strict_admission_is_atomic_across_lanes_but_lossy_dispatch_skips_full_lanes()
 async fn native_readiness_observes_inactive_lanes_worker_exit_and_close() {
     use std::future::Future;
 
-    #[derive(Default)]
-    struct CountWake(std::sync::atomic::AtomicUsize);
-
-    impl std::task::Wake for CountWake {
-        fn wake(self: Arc<Self>) {
-            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        }
-    }
-
     for event in ["remove", "exit", "close"] {
         let (sender, _receivers) = full_radio_sender();
         let submitter = sender.submitter();
-        let wake = Arc::new(CountWake::default());
-        let waker = std::task::Waker::from(wake.clone());
+        let (wake, waker) = counting_waker();
         let mut cx = std::task::Context::from_waker(&waker);
         let mut wait = Box::pin(submitter.wait_send_ready());
         assert!(wait.as_mut().poll(&mut cx).is_pending());
@@ -124,10 +114,7 @@ async fn native_readiness_observes_inactive_lanes_worker_exit_and_close() {
         for lane in 0..2 {
             release_lane(&sender, event, lane);
             if lane == 0 || event != "close" {
-                assert!(
-                    wake.0.swap(0, std::sync::atomic::Ordering::SeqCst) > 0,
-                    "{event}: no wake"
-                );
+                assert!(wake.take() > 0, "{event}: no wake");
             }
 
             if lane == 0 && event != "close" {

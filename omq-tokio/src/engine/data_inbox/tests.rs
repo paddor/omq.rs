@@ -297,15 +297,6 @@ async fn abandoning_reservation_completes_graceful_close() {
 #[cfg(feature = "dart")]
 #[tokio::test]
 async fn final_ack_batch_wakes_a_closed_receiver_and_close_progress() {
-    #[derive(Debug, Default)]
-    struct CountWake(AtomicUsize);
-
-    impl Wake for CountWake {
-        fn wake(self: Arc<Self>) {
-            self.0.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
     let (root, mut receiver) = dart_channel(3, omq_proto::SocketType::Radio);
     let sender = SenderLanes::default().bind(&root);
     let progress = Arc::new(StateSignal::new());
@@ -321,8 +312,7 @@ async fn final_ack_batch_wakes_a_closed_receiver_and_close_progress() {
     receiver.release_consumed();
     receiver.close();
 
-    let wake = Arc::new(CountWake::default());
-    let waker = Waker::from(wake.clone());
+    let (wake, waker) = crate::test_util::counting_waker();
     let mut done = Box::pin(receiver.recv());
     assert!(
         done.as_mut()
@@ -333,7 +323,7 @@ async fn final_ack_batch_wakes_a_closed_receiver_and_close_progress() {
     let seen = progress.generation();
     Admission::release_batch(claims.into_iter());
     assert_ne!(progress.generation(), seen);
-    assert_eq!(wake.0.load(Ordering::Relaxed), 1);
+    assert_eq!(wake.count(), 1);
     assert!(done.await.is_none());
 }
 

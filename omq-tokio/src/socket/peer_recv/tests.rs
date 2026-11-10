@@ -2,7 +2,7 @@ use super::*;
 use crate::socket::recv::{
     BlockingRecvWaker, RecvPipeEnds, RecvTuning, SpscAwareRecv, SpscHandles, recv_pipe,
 };
-use crate::test_util::poll_once;
+use crate::test_util::{counting_waker, poll_once};
 
 impl Default for RecvLimits {
     fn default() -> Self {
@@ -313,8 +313,7 @@ fn ordinary_drain_preserves_batched_producer_space_wakes() {
         }
 
         assert!(sink.blocked());
-        let count = Arc::new(WakeCount(0.into()));
-        let waker = std::task::Waker::from(count.clone());
+        let (counter, waker) = counting_waker();
         let mut cx = std::task::Context::from_waker(&waker);
         let mut ready = Box::pin(sink.ready());
         assert!(ready.as_mut().poll(&mut cx).is_pending());
@@ -324,12 +323,12 @@ fn ordinary_drain_preserves_batched_producer_space_wakes() {
             assert_eq!(message.part_slice(1), Some(b"queued".as_slice()));
 
             if consumed < release_at {
-                assert_eq!(count.0.load(Ordering::Relaxed), 0);
+                assert_eq!(counter.count(), 0);
                 assert!(ready.as_mut().poll(&mut cx).is_pending());
             }
         }
 
-        assert_eq!(count.0.load(Ordering::Relaxed), 1);
+        assert_eq!(counter.count(), 1);
         assert!(ready.as_mut().poll(&mut cx).is_ready());
         drop(ready);
         assert!(sink.retry_pending());
@@ -350,8 +349,7 @@ fn receipt_claim_publishes_consumed_slot_to_blocked_producer() {
         }
 
         assert!(sink.blocked());
-        let count = Arc::new(WakeCount(0.into()));
-        let waker = std::task::Waker::from(count.clone());
+        let (counter, waker) = counting_waker();
         let mut cx = std::task::Context::from_waker(&waker);
         let mut ready = Box::pin(sink.ready());
         assert!(ready.as_mut().poll(&mut cx).is_pending());
@@ -359,7 +357,7 @@ fn receipt_claim_publishes_consumed_slot_to_blocked_producer() {
         // The claim pauses the source lane, which publishes its consumed slot.
         let (receipt, body) = receiver.try_recv_with_receipt(None).unwrap();
         assert_eq!(body.part_slice(0), Some(b"queued".as_slice()));
-        assert_eq!(count.0.load(Ordering::Relaxed), 1);
+        assert_eq!(counter.count(), 1);
         assert!(ready.as_mut().poll(&mut cx).is_ready());
 
         drop(ready);
@@ -404,8 +402,7 @@ fn paused_source_retains_one_large_frame_without_blocking_other_sources() {
     assert!(a.push(message.clone()));
     assert!(a.blocked());
 
-    let count = Arc::new(WakeCount(0.into()));
-    let waker = std::task::Waker::from(count.clone());
+    let (counter, waker) = counting_waker();
     let mut ready = Box::pin(a.ready());
     let mut cx = std::task::Context::from_waker(&waker);
     assert!(ready.as_mut().poll(&mut cx).is_pending());
@@ -422,12 +419,12 @@ fn paused_source_retains_one_large_frame_without_blocking_other_sources() {
         assert_eq!(receipt.identity(), Some(b"b".as_slice()));
         assert_eq!(body.part_slice(0).unwrap().len(), 8 * 1024 * 1024);
         drop((receipt, body));
-        assert_eq!(count.0.load(Ordering::Relaxed), 0);
+        assert_eq!(counter.count(), 0);
     }
 
     let (receipt, held) = receiver.try_recv_with_receipt(Some(&source)).unwrap();
     drop((receipt, held));
-    assert!(count.0.load(Ordering::Relaxed) > 0);
+    assert!(counter.count() > 0);
     assert!(ready.as_mut().poll(&mut cx).is_ready());
 
     drop(ready);
@@ -519,7 +516,7 @@ fn foreign_and_oversized_returns_preserve_ownership_and_release_claim() {
 #[test]
 fn targeted_wait_ignores_other_sources_and_wakes_on_its_source() {
     use std::future::Future;
-    use std::task::{Context, Poll, Waker};
+    use std::task::{Context, Poll};
 
     let (mut routes, receiver) = receive_pair(RecvLimits::default(), 16);
     let receiver = ReceiveCell::new(receiver, Weak::new());
@@ -531,8 +528,7 @@ fn targeted_wait_ignores_other_sources_and_wakes_on_its_source() {
     let source = receipt.lane().unwrap().clone();
     drop(receipt);
 
-    let count = Arc::new(WakeCount(0.into()));
-    let waker = Waker::from(count.clone());
+    let (counter, waker) = counting_waker();
     let mut waiting = Box::pin(PeerReceiver::recv_with_receipt(&receiver, Some(&source)));
     assert!(
         waiting
@@ -545,9 +541,9 @@ fn targeted_wait_ignores_other_sources_and_wakes_on_its_source() {
         put(&mut b, "unrelated");
     }
 
-    assert_eq!(count.0.load(Ordering::Relaxed), 0);
+    assert_eq!(counter.count(), 0);
     put(&mut a, "second");
-    assert!(count.0.load(Ordering::Relaxed) > 0);
+    assert!(counter.count() > 0);
 
     let Poll::Ready(Ok((receipt, body))) = waiting.as_mut().poll(&mut Context::from_waker(&waker))
     else {
@@ -561,7 +557,7 @@ fn targeted_wait_ignores_other_sources_and_wakes_on_its_source() {
 #[test]
 fn targeted_wait_ends_on_disconnect_or_socket_close() {
     use std::future::Future;
-    use std::task::{Context, Poll, Waker};
+    use std::task::{Context, Poll};
 
     for close_socket in [false, true] {
         let (mut routes, receiver) = receive_pair(RecvLimits::default(), 16);
@@ -573,8 +569,7 @@ fn targeted_wait_ends_on_disconnect_or_socket_close() {
         let source = receipt.lane().unwrap().clone();
         drop(receipt);
 
-        let count = Arc::new(WakeCount(0.into()));
-        let waker = Waker::from(count.clone());
+        let (counter, waker) = counting_waker();
         let mut waiting = Box::pin(PeerReceiver::recv_with_receipt(&receiver, Some(&source)));
         assert!(
             waiting
@@ -589,7 +584,7 @@ fn targeted_wait_ends_on_disconnect_or_socket_close() {
             drop(a);
         }
 
-        assert!(count.0.load(Ordering::Relaxed) > 0);
+        assert!(counter.count() > 0);
         assert!(matches!(
             waiting.as_mut().poll(&mut Context::from_waker(&waker)),
             Poll::Ready(Err(Error::Closed))
@@ -600,7 +595,7 @@ fn targeted_wait_ends_on_disconnect_or_socket_close() {
 #[test]
 fn held_only_queue_does_not_reschedule_fair_waiters_in_a_loop() {
     use std::future::Future;
-    use std::task::{Context, Waker};
+    use std::task::Context;
 
     let (mut routes, receiver, _pipe) = ordinary_receive(16);
     let mut a = register(&mut routes, "a");
@@ -610,8 +605,7 @@ fn held_only_queue_does_not_reschedule_fair_waiters_in_a_loop() {
     let source = receipt.lane().unwrap().clone();
     receiver.unshift(receipt, message).unwrap();
 
-    let count = Arc::new(WakeCount(0.into()));
-    let waker = Waker::from(count.clone());
+    let (counter, waker) = counting_waker();
     let mut waiting = Box::pin(receiver.recv());
     assert!(
         waiting
@@ -620,19 +614,19 @@ fn held_only_queue_does_not_reschedule_fair_waiters_in_a_loop() {
             .is_pending()
     );
 
-    let seen = count.0.load(Ordering::Relaxed);
+    let seen = counter.count();
     assert!(
         waiting
             .as_mut()
             .poll(&mut Context::from_waker(&waker))
             .is_pending()
     );
-    assert_eq!(count.0.load(Ordering::Relaxed), seen);
+    assert_eq!(counter.count(), seen);
 
     let (receipt, _) = receiver.try_recv_with_receipt(Some(&source)).unwrap();
     drop(receipt);
     put(&mut a, "resumed");
-    assert!(count.0.load(Ordering::Relaxed) > seen);
+    assert!(counter.count() > seen);
     assert!(
         waiting
             .as_mut()
@@ -641,26 +635,15 @@ fn held_only_queue_does_not_reschedule_fair_waiters_in_a_loop() {
     );
 }
 
-struct WakeCount(std::sync::atomic::AtomicUsize);
-
-impl std::task::Wake for WakeCount {
-    fn wake(self: Arc<Self>) {
-        self.0.fetch_add(1, Ordering::Relaxed);
-    }
-}
-
 #[test]
 fn canceled_waiter_hands_off_batch_without_consuming() {
     use std::future::Future;
-    use std::task::{Context, Poll, Waker};
+    use std::task::{Context, Poll};
 
     for cancel_first in [true, false] {
         let (mut routes, receiver, _pipe) = ordinary_receive(16);
         let mut sink = register(&mut routes, "a");
-        let counts: [_; 3] = std::array::from_fn(|_| Arc::new(WakeCount(0.into())));
-        let wakers = counts
-            .each_ref()
-            .map(|counter| Waker::from(counter.clone()));
+        let (counts, wakers): (Vec<_>, Vec<_>) = (0..3).map(|_| counting_waker()).unzip();
         let mut waiting = std::array::from_fn::<_, 3, _>(|_| Some(Box::pin(receiver.recv())));
 
         for (future, waker) in waiting.iter_mut().zip(&wakers) {
@@ -699,7 +682,7 @@ fn canceled_waiter_hands_off_batch_without_consuming() {
 
         for index in if cancel_first { 1..3 } else { 2..3 } {
             assert!(
-                counts[index].0.load(Ordering::Relaxed) > 0,
+                counts[index].count() > 0,
                 "receiver {index} stranded after cancellation"
             );
 
@@ -727,12 +710,11 @@ fn canceled_waiter_hands_off_batch_without_consuming() {
 #[test]
 fn repeated_receives_coalesce_handoffs_to_a_parked_waiter() {
     use std::future::Future;
-    use std::task::{Context, Waker};
+    use std::task::Context;
 
     let (mut routes, receiver, _pipe) = ordinary_receive(16);
     let mut sink = register(&mut routes, "a");
-    let counter = Arc::new(WakeCount(0.into()));
-    let waker = Waker::from(counter.clone());
+    let (counter, waker) = counting_waker();
     let mut waiting = Box::pin(receiver.recv());
     assert!(
         waiting
@@ -747,13 +729,13 @@ fn repeated_receives_coalesce_handoffs_to_a_parked_waiter() {
 
     sink.flush();
     receiver.try_recv().unwrap();
-    let counts = counter.0.load(Ordering::Relaxed);
+    let counts = counter.count();
 
     for _ in 0..14 {
         receiver.try_recv().unwrap();
     }
 
-    assert_eq!(counter.0.load(Ordering::Relaxed), counts);
+    assert_eq!(counter.count(), counts);
     assert!(
         waiting
             .as_mut()
@@ -765,25 +747,11 @@ fn repeated_receives_coalesce_handoffs_to_a_parked_waiter() {
 #[test]
 fn one_batch_wakes_two_parked_socket_receivers() {
     use std::future::Future;
-    use std::sync::atomic::AtomicUsize;
-    use std::task::{Context, Wake, Waker};
-
-    struct Wakes(AtomicUsize);
-    impl Wake for Wakes {
-        fn wake(self: Arc<Self>) {
-            self.0.fetch_add(1, Ordering::Relaxed);
-        }
-    }
+    use std::task::Context;
 
     let (mut routes, receiver, _pipe) = ordinary_receive(16);
     let mut sink = register(&mut routes, "a");
-    let counts = [
-        Arc::new(Wakes(AtomicUsize::new(0))),
-        Arc::new(Wakes(AtomicUsize::new(0))),
-    ];
-    let wakers = counts
-        .each_ref()
-        .map(|counter| Waker::from(counter.clone()));
+    let (counts, wakers): (Vec<_>, Vec<_>) = (0..2).map(|_| counting_waker()).unzip();
 
     let mut first = std::pin::pin!(receiver.recv());
     let mut second = std::pin::pin!(receiver.recv());
@@ -804,7 +772,7 @@ fn one_batch_wakes_two_parked_socket_receivers() {
     assert!(sink.push(Message::single("second")));
     sink.flush();
 
-    assert!(counts[0].0.load(Ordering::Relaxed) > 0);
+    assert!(counts[0].count() > 0);
     assert!(
         first
             .as_mut()
@@ -812,10 +780,7 @@ fn one_batch_wakes_two_parked_socket_receivers() {
             .is_ready()
     );
 
-    assert!(
-        counts[1].0.load(Ordering::Relaxed) > 0,
-        "second parked receiver needs a wake"
-    );
+    assert!(counts[1].count() > 0, "second parked receiver needs a wake");
     assert!(
         second
             .as_mut()
@@ -1178,15 +1143,7 @@ fn reconnect_discards_respect_message_and_byte_drain_limits() {
 #[test]
 fn credit_boundary_and_partial_bulk_return_wake_the_registered_producer() {
     use std::future::Future;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::task::{Context, Wake, Waker};
-
-    struct Wakes(AtomicUsize);
-    impl Wake for Wakes {
-        fn wake(self: Arc<Self>) {
-            self.0.fetch_add(1, Ordering::Relaxed);
-        }
-    }
+    use std::task::Context;
 
     for bulk in [false, true] {
         let (mut routes, mut receiver) = receive_pair(RecvLimits::default(), 256);
@@ -1196,8 +1153,7 @@ fn credit_boundary_and_partial_bulk_return_wake_the_registered_producer() {
             put(&mut sink, "value");
         }
 
-        let counter = Arc::new(Wakes(AtomicUsize::new(0)));
-        let waker = Waker::from(counter.clone());
+        let (counter, waker) = counting_waker();
         let mut cx = Context::from_waker(&waker);
 
         {
@@ -1209,12 +1165,12 @@ fn credit_boundary_and_partial_bulk_return_wake_the_registered_producer() {
                 assert_eq!(receiver.try_recv_many_into(1, &mut out).unwrap(), 1);
             } else {
                 for _ in 0..128 {
-                    assert_eq!(counter.0.load(Ordering::Relaxed), 0);
+                    assert_eq!(counter.count(), 0);
                     receiver.try_recv().unwrap();
                 }
             }
 
-            assert!(counter.0.load(Ordering::Relaxed) > 0);
+            assert!(counter.count() > 0);
             assert!(ready.as_mut().poll(&mut cx).is_ready());
         }
 

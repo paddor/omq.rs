@@ -1,5 +1,6 @@
 use super::*;
-use std::task::{Context, Poll, Wake, Waker};
+use crate::test_util::counting_waker;
+use std::task::{Context, Poll};
 
 fn queue() -> Arc<Fanin> {
     Fanin::new_source_aware(
@@ -7,19 +8,6 @@ fn queue() -> Arc<Fanin> {
         Arc::new(super::super::DataSignal::new()),
         super::super::BlockingRecvWaker::new(),
     )
-}
-
-#[derive(Default)]
-struct WakeCount(AtomicUsize);
-
-impl Wake for WakeCount {
-    fn wake(self: Arc<Self>) {
-        self.0.fetch_add(1, Ordering::SeqCst);
-    }
-
-    fn wake_by_ref(self: &Arc<Self>) {
-        self.0.fetch_add(1, Ordering::SeqCst);
-    }
 }
 
 #[tokio::test]
@@ -33,17 +21,16 @@ async fn targeted_waits_ignore_other_lanes_and_cancellation_preserves_messages()
     let source = receipt.lane().unwrap().clone();
     drop(receipt);
 
-    let counter = Arc::new(WakeCount::default());
-    let waker = Waker::from(counter.clone());
+    let (counter, waker) = counting_waker();
     let mut cx = Context::from_waker(&waker);
     let mut waiting = Box::pin(queue.recv_with_receipt(Some(&source)));
     assert!(waiting.as_mut().poll(&mut cx).is_pending());
 
     b.try_send(Message::single("unrelated")).unwrap();
-    assert_eq!(counter.0.load(Ordering::SeqCst), 0);
+    assert_eq!(counter.count(), 0);
     assert!(waiting.as_mut().poll(&mut cx).is_pending());
     a.try_send(Message::single("selected")).unwrap();
-    assert_ne!(counter.0.load(Ordering::SeqCst), 0);
+    assert_ne!(counter.count(), 0);
 
     drop(waiting);
     assert_eq!(
@@ -128,10 +115,8 @@ async fn canceled_any_source_wait_hands_off_coalesced_readiness() {
     let mut a = queue.register().unwrap();
     let mut b = queue.register().unwrap();
 
-    let first_counter = Arc::new(WakeCount::default());
-    let second_counter = Arc::new(WakeCount::default());
-    let first_waker = Waker::from(first_counter.clone());
-    let second_waker = Waker::from(second_counter.clone());
+    let (first_counter, first_waker) = counting_waker();
+    let (second_counter, second_waker) = counting_waker();
     let mut first_cx = Context::from_waker(&first_waker);
     let mut second_cx = Context::from_waker(&second_waker);
 
@@ -142,11 +127,11 @@ async fn canceled_any_source_wait_hands_off_coalesced_readiness() {
 
     a.try_send(Message::single("a")).unwrap();
     b.try_send(Message::single("b")).unwrap();
-    assert_ne!(first_counter.0.load(Ordering::SeqCst), 0);
+    assert_ne!(first_counter.count(), 0);
 
     drop(first);
     assert_ne!(
-        second_counter.0.load(Ordering::SeqCst),
+        second_counter.count(),
         0,
         "cancellation must wake the other waiter"
     );
@@ -277,10 +262,8 @@ async fn targeted_batch_wakes_coalesce_and_second_claim_waits_for_acceptance() {
     let source = receipt.lane().unwrap().clone();
     drop(receipt);
 
-    let first_counter = Arc::new(WakeCount::default());
-    let second_counter = Arc::new(WakeCount::default());
-    let first_waker = Waker::from(first_counter.clone());
-    let second_waker = Waker::from(second_counter.clone());
+    let (first_counter, first_waker) = counting_waker();
+    let (second_counter, second_waker) = counting_waker();
     let mut first_cx = Context::from_waker(&first_waker);
     let mut second_cx = Context::from_waker(&second_waker);
 
@@ -291,10 +274,7 @@ async fn targeted_batch_wakes_coalesce_and_second_claim_waits_for_acceptance() {
 
     producer.try_send(Message::single("first")).unwrap();
     producer.try_send(Message::single("second")).unwrap();
-    assert_eq!(
-        first_counter.0.load(Ordering::SeqCst) + second_counter.0.load(Ordering::SeqCst),
-        1
-    );
+    assert_eq!(first_counter.count() + second_counter.count(), 1);
 
     let Poll::Ready(Ok((receipt, message))) = first.as_mut().poll(&mut first_cx) else {
         panic!("targeted publication was not observed")
@@ -302,9 +282,9 @@ async fn targeted_batch_wakes_coalesce_and_second_claim_waits_for_acceptance() {
 
     assert_eq!(message, Message::single("first"));
     assert!(second.as_mut().poll(&mut second_cx).is_pending());
-    let before = second_counter.0.load(Ordering::SeqCst);
+    let before = second_counter.count();
     drop(receipt);
-    assert!(second_counter.0.load(Ordering::SeqCst) > before);
+    assert!(second_counter.count() > before);
 
     let Poll::Ready(Ok((receipt, message))) = second.as_mut().poll(&mut second_cx) else {
         panic!("receipt acceptance did not resume targeted wait")

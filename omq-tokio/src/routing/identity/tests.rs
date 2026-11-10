@@ -7,67 +7,34 @@ use crate::engine::driver::DirectRoutes;
 use crate::engine::send_pipe;
 use crate::engine::{PeerDriverData, SendPipeProducer};
 
-#[tokio::test]
-async fn stream_full_lane_preserves_backpressure_and_other_peers() {
+/// A STREAM socket with peers "slow" and "fast". The "slow" lane is full.
+struct FullStreamLane {
+    _send: IdentitySend,
+    submitter: Submitter,
+    slow: crate::engine::data_inbox::Receiver,
+    fast: crate::engine::data_inbox::Receiver,
+}
+
+fn stream_with_full_lane() -> FullStreamLane {
     let mut send = IdentitySend::new(SocketType::Stream, &Options::default());
-    let (data_inbox, mut receiver) = crate::engine::data_inbox::channel(1);
-    let (other_inbox, mut other_receiver) = crate::engine::data_inbox::channel(1);
-    let slow = Bytes::from_static(b"slow");
-    send.connection_added(7, inbox_handle(data_inbox), slow, false);
-    send.connection_added(
-        8,
-        inbox_handle(other_inbox),
-        Bytes::from_static(b"fast"),
-        false,
-    );
+    let (slow_inbox, slow) = crate::engine::data_inbox::channel(1);
+    let (fast_inbox, fast) = crate::engine::data_inbox::channel(1);
+    let slow_id = Bytes::from_static(b"slow");
+    let fast_id = Bytes::from_static(b"fast");
+    send.connection_added(7, inbox_handle(slow_inbox), slow_id, false);
+    send.connection_added(8, inbox_handle(fast_inbox), fast_id, false);
 
     let submitter = send.submitter();
     submitter
         .try_send(Message::multipart(["slow", "first"]))
         .unwrap();
 
-    assert!(submitter.send_ready());
-    assert!(matches!(
-        submitter.check_route(b"slow"),
-        Err(Error::WouldBlock)
-    ));
-    assert!(matches!(
-        submitter.check_route(b"missing"),
-        Err(Error::Unroutable)
-    ));
-    assert!(submitter.check_route(b"fast").is_ok());
-
-    let next = Message::multipart(["slow", "next"]);
-    assert!(matches!(
-        submitter.try_send(next.clone()),
-        Err(TrySendError::Full(returned)) if returned == next
-    ));
-    let waiting = submitter.send(next);
-    tokio::pin!(waiting);
-    assert!(waiting.as_mut().now_or_never().is_none());
-
-    submitter
-        .try_send(Message::multipart(["fast", "available"]))
-        .unwrap();
-    assert!(matches!(
-        other_receiver.recv().await.unwrap(),
-        PeerDriverData::SendMessage(message) if message == Message::single("available")
-    ));
-
-    assert!(matches!(
-        receiver.recv().await.unwrap(),
-        PeerDriverData::SendMessage(message) if message == Message::single("first")
-    ));
-
-    receiver.release_consumed();
-    tokio::time::timeout(Duration::from_secs(1), waiting)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(matches!(
-        receiver.recv().await.unwrap(),
-        PeerDriverData::SendMessage(message) if message == Message::single("next")
-    ));
+    FullStreamLane {
+        _send: send,
+        submitter,
+        slow,
+        fast,
+    }
 }
 
 /// A peer handle whose only data route is `data_inbox`.
@@ -78,6 +45,73 @@ fn inbox_handle(data_inbox: crate::engine::data_inbox::Sender) -> ActorPeerDrive
         cancel: tokio_util::sync::CancellationToken::new(),
         routes: DirectRoutes::default(),
     }
+}
+
+#[tokio::test]
+async fn stream_full_lane_keeps_the_socket_ready_and_routes_by_peer() {
+    let stream = stream_with_full_lane();
+
+    assert!(stream.submitter.send_ready());
+    assert!(matches!(
+        stream.submitter.check_route(b"slow"),
+        Err(Error::WouldBlock)
+    ));
+    assert!(matches!(
+        stream.submitter.check_route(b"missing"),
+        Err(Error::Unroutable)
+    ));
+    assert!(stream.submitter.check_route(b"fast").is_ok());
+}
+
+#[tokio::test]
+async fn stream_try_send_to_a_full_lane_returns_the_message() {
+    let stream = stream_with_full_lane();
+    let next = Message::multipart(["slow", "next"]);
+
+    assert!(matches!(
+        stream.submitter.try_send(next.clone()),
+        Err(TrySendError::Full(returned)) if returned == next
+    ));
+}
+
+#[tokio::test]
+async fn stream_send_blocked_on_a_full_lane_leaves_other_peers_writable() {
+    let mut stream = stream_with_full_lane();
+    let waiting = stream.submitter.send(Message::multipart(["slow", "next"]));
+    tokio::pin!(waiting);
+    assert!(waiting.as_mut().now_or_never().is_none());
+
+    stream
+        .submitter
+        .try_send(Message::multipart(["fast", "available"]))
+        .unwrap();
+    assert!(matches!(
+        stream.fast.recv().await.unwrap(),
+        PeerDriverData::SendMessage(message) if message == Message::single("available")
+    ));
+}
+
+#[tokio::test]
+async fn stream_blocked_send_completes_in_order_once_its_lane_drains() {
+    let mut stream = stream_with_full_lane();
+    let waiting = stream.submitter.send(Message::multipart(["slow", "next"]));
+    tokio::pin!(waiting);
+    assert!(waiting.as_mut().now_or_never().is_none());
+
+    assert!(matches!(
+        stream.slow.recv().await.unwrap(),
+        PeerDriverData::SendMessage(message) if message == Message::single("first")
+    ));
+
+    stream.slow.release_consumed();
+    tokio::time::timeout(Duration::from_secs(1), waiting)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        stream.slow.recv().await.unwrap(),
+        PeerDriverData::SendMessage(message) if message == Message::single("next")
+    ));
 }
 
 #[test]

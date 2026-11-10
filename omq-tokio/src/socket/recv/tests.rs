@@ -5,6 +5,7 @@ use super::{
     BlockingRecvWaker, RECV_BATCH_BYTES, RECV_BATCH_MESSAGES, SpscAwareRecv, SpscHandles,
     TcpYringConsumer, recv_pipe,
 };
+use crate::engine::signal::DataSignal;
 use omq_proto::Message;
 use omq_proto::flow::DrainBudget;
 use std::sync::Arc;
@@ -78,6 +79,18 @@ fn bulk_receiver(
     };
 
     (SpscAwareRecv::new(ends, handles, tuning), producers, pipe)
+}
+
+/// Wait until a receiver drain pass leaves `signal` idle.
+fn wait_until_drained(signal: &DataSignal) {
+    let until = Instant::now() + Duration::from_secs(1);
+    while !signal.is_idle() {
+        assert!(
+            Instant::now() < until,
+            "receiver never finished a drain pass"
+        );
+        std::thread::yield_now();
+    }
 }
 
 type WaiterResult = omq_proto::Result<Option<Message>>;
@@ -264,6 +277,7 @@ fn blocking_recv_spin_observes_delivery_and_close_before_and_after_parking() {
             let (mut recv, _, pipe) = bulk_receiver(0, 16, false);
             recv.tuning.spin = spin;
             let waker = recv.handles.blocking_recv_waker.clone();
+            let signal = recv.handles.recv_signal.clone();
             let (done_tx, done_rx) = std::sync::mpsc::channel();
             let (started_tx, started_rx) = std::sync::mpsc::channel();
             let worker = std::thread::spawn(move || {
@@ -279,7 +293,13 @@ fn blocking_recv_spin_observes_delivery_and_close_before_and_after_parking() {
                     std::thread::yield_now();
                 }
             } else {
-                std::thread::sleep(Duration::from_millis(5));
+                // Each mark needs a later drain pass to clear it. Two passes
+                // put the receiver past its first probe, inside its spin.
+                for _ in 0..2 {
+                    signal.mark();
+                    wait_until_drained(&signal);
+                }
+
                 assert!(!waker.has_waiter(worker.thread().id()));
             }
 
@@ -319,6 +339,9 @@ fn single_ring_spinning_observes_delivery_new_sources_and_close_in_both_profiles
         let generation = recv.handles.consumer_generation.clone();
         let signal = recv.handles.recv_signal.clone();
 
+        // The first full drain pass clears this mark. Once idle, the
+        // receiver is past that pass and spins on its single-ring probe.
+        signal.mark();
         let (done, received) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
             for _ in 0..3 {
@@ -327,13 +350,15 @@ fn single_ring_spinning_observes_delivery_new_sources_and_close_in_both_profiles
             }
         });
 
-        std::thread::sleep(Duration::from_millis(5));
+        wait_until_drained(&signal);
         producers[0].push(Message::single("first")).unwrap();
         producers[0].flush();
         signal.mark();
         assert_eq!(received.recv().unwrap().unwrap(), Message::single("first"));
 
-        std::thread::sleep(Duration::from_millis(5));
+        // The spin probe took "first" and left its mark pending. The next
+        // receive clears it in its full drain pass, then spins again.
+        wait_until_drained(&signal);
         let (mut producer, peer) = tcp_consumer(99);
         producer.push(Message::single("new peer")).unwrap();
         producer.flush();

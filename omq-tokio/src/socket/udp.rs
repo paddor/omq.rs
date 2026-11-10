@@ -57,6 +57,7 @@ pub(crate) fn spawn_dish_listener(
         let Ok(sock) = sock.into_std().and_then(UdpSocket::from_std) else {
             return;
         };
+
         run_dish_listener(&sock, &delivery, &cancel, network.ingress()).await;
     })
 }
@@ -140,6 +141,7 @@ async fn gated_io<T>(
                     std::task::Poll::Ready(Err(e)) => return std::task::Poll::Ready(Err(e)),
                     std::task::Poll::Pending => {}
                 }
+
                 std::task::Poll::Pending
             }
             result => {
@@ -161,9 +163,11 @@ fn dish_message(datagram: &[u8], delivery: &DishDelivery) -> Option<Message> {
     if let Some(pool) = &delivery.pool {
         let group = pool.payload(group.len(), |bytes| bytes.copy_from_slice(group));
         let body = pool.payload(body.len(), |bytes| bytes.copy_from_slice(body));
+
         let (Ok(group), Ok(body)) = (group, body) else {
             return None;
         };
+
         Some(Message::multipart_payloads([group, body]))
     } else {
         Some(Message::multipart([
@@ -196,6 +200,7 @@ pub(crate) fn spawn_radio_sender(
         let Ok(sock) = sock.into_std().and_then(UdpSocket::from_std) else {
             return;
         };
+
         run_radio_sender(&sock, inboxes, &cancel, network.egress()).await;
     })
 }
@@ -222,12 +227,14 @@ async fn run_radio_sender(
             budget.reset();
             tokio::task::yield_now().await;
         }
+
         let _ = budget.account(0);
         if pending.is_none()
             && let Some(gate) = &mut egress
         {
             gate.cancel_wait();
         }
+
         if closing && pending.is_none() && inbox_rx.is_empty() && data_inbox_rx.is_empty() {
             break;
         }
@@ -295,6 +302,7 @@ fn radio_datagram(message: &Message) -> Option<Bytes> {
     if message.len() != 2 {
         return None;
     }
+
     let group = message.part_bytes(0).unwrap_or_default();
     let body = message.part_bytes(1).unwrap_or_default();
     udp::encode_datagram(&group, &body).ok()

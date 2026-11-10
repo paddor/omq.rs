@@ -32,6 +32,7 @@ impl Socket {
                 message,
             ));
         }
+
         self.inner.recv_rx.recv_with_receipt(lane).await
     }
 
@@ -47,6 +48,7 @@ impl Socket {
                 message,
             ));
         }
+
         self.inner.recv_rx.try_recv_with_receipt(lane)
     }
 
@@ -66,6 +68,7 @@ impl Socket {
                 message,
             });
         }
+
         self.inner.recv_rx.unshift(receipt, message)
     }
 
@@ -93,15 +96,18 @@ impl Socket {
                 if message.len() < 2 || !message.pop_front()?.is_empty() {
                     return None;
                 }
+
                 if !self.inner.shared.req_awaiting_reply.accept_reply(peer_id) {
                     return None;
                 }
+
                 Some(message)
             }
             SocketType::Rep => {
                 let peer_id = u64::from(message.routing_id()?.checked_sub(1)?);
                 let (envelope, body) = crate::routing::split_rep_request(&message)?;
                 *self.inner.rep_current.lock().expect("rep current") = Some((peer_id, envelope));
+
                 Some(body)
             }
             _ => Some(message),
@@ -121,13 +127,16 @@ impl Socket {
         if !matches!(self.inner.socket_type, SocketType::Req | SocketType::Rep) {
             return self.inner.recv_rx.recv().await;
         }
+
         let mut budget = DrainBudget::WORKER;
         loop {
             let message = self.inner.recv_rx.recv().await?;
             let byte_len = message.byte_len();
+
             if let Some(message) = self.prepare_external_recv(message) {
                 return Ok(message);
             }
+
             if !budget.account(byte_len) {
                 tokio::task::yield_now().await;
                 budget.reset();
@@ -179,10 +188,12 @@ impl Socket {
         if max == 0 {
             return Ok(0);
         }
+
         match self.try_recv_many_into(max, out) {
             Err(Error::WouldBlock) => {}
             result => return result,
         }
+
         let start_len = out.len();
         out.push(self.recv().await?);
         self.try_recv_many_after_first(max, start_len, out)
@@ -198,6 +209,7 @@ impl Socket {
         if matches!(self.inner.socket_type, SocketType::Req | SocketType::Rep) {
             return Ok(appended);
         }
+
         match self.inner.recv_rx.try_recv_many_after_first(max, out) {
             Ok(n) => Ok(appended + n),
             Err(Error::WouldBlock | Error::Closed) => Ok(appended),
@@ -217,9 +229,11 @@ impl Socket {
             if max == 0 {
                 return Ok(0);
             }
+
             out.push(self.try_recv()?);
             return Ok(1);
         }
+
         self.inner.recv_rx.try_recv_many_into(max, out)
     }
 
@@ -231,13 +245,16 @@ impl Socket {
         if !matches!(self.inner.socket_type, SocketType::Req | SocketType::Rep) {
             return self.inner.recv_rx.try_recv();
         }
+
         let mut budget = DrainBudget::WORKER;
         loop {
             let message = self.inner.recv_rx.try_recv()?;
             let byte_len = message.byte_len();
+
             if let Some(message) = self.prepare_external_recv(message) {
                 return Ok(message);
             }
+
             if !budget.account(byte_len) {
                 return Err(Error::WouldBlock);
             }

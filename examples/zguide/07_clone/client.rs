@@ -40,6 +40,7 @@ async fn main() {
     // Buffer live updates in a background task.
     let buffer: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let buffer_tx = Arc::clone(&buffer);
+
     let buffer_task = tokio::spawn(async move {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
         loop {
@@ -77,12 +78,15 @@ async fn main() {
         {
             let s: u64 = seq_str.parse().unwrap_or(0);
             store.insert(key.to_owned(), val.to_owned());
+
             if s > snapshot_seq {
                 snapshot_seq = s;
             }
+
             println!("client (snapshot): {key}={val} seq={s}");
         }
     }
+
     println!(
         "client: snapshot has {} entries (up to seq={snapshot_seq})",
         store.len()
@@ -110,6 +114,7 @@ async fn main() {
     println!("client: final store ({} entries):", store.len());
     let mut keys: Vec<_> = store.keys().collect();
     keys.sort();
+
     for k in keys {
         println!("  {k} = {}", store[k]);
     }

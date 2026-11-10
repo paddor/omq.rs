@@ -74,6 +74,7 @@ fn ordered(core: &mut Session) {
             sequence.to_le_bytes()
         );
     }
+
     assert!(core.take_received().is_none());
     assert_eq!(core.next_receive(), 2);
 }
@@ -200,6 +201,7 @@ fn direct_reordered_arrivals_retain_only_the_undelivered_suffix() {
                 assert_eq!(message.part_slice(0).unwrap(), 1u64.to_le_bytes());
                 s.release_receive(1);
             }
+
             assert!(s.take_received().is_none());
             assert_eq!(s.receive_right_edge(), 4);
         },
@@ -236,11 +238,13 @@ fn rejected_direct_delivery_prevents_successor_bypass() {
 fn receive_packed(core: &mut Session) {
     let mut sender = session(1, 2);
     sender.handle_control(status(1, 0, 2), Duration::ZERO);
+
     for sequence in 0u64..2 {
         sender
             .submit(Message::from_slice(&sequence.to_le_bytes()))
             .unwrap();
     }
+
     let mut bytes = [0; omq_proto::dart::MAX_DATAGRAM];
     let length = sender
         .prepare_packed_data(
@@ -250,6 +254,7 @@ fn receive_packed(core: &mut Session) {
             &mut Vec::with_capacity(2),
         )
         .unwrap();
+
     let Packet::Packed {
         session,
         first,
@@ -258,6 +263,7 @@ fn receive_packed(core: &mut Session) {
     else {
         panic!()
     };
+
     for (offset, payload) in messages.iter().enumerate() {
         let sequence = first + offset as u64;
         if core.classify(session, sequence) == Admission::Accept {
@@ -660,9 +666,11 @@ fn credit_observation_acquires_prior_storage_publication() {
             storage.store(true, Ordering::Relaxed);
             returned.publish(1);
         });
+
         if credit.take() == 1 {
             assert!(ready.load(Ordering::Relaxed));
         }
+
         task.join().unwrap();
     });
 }

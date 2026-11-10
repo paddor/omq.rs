@@ -45,6 +45,7 @@ pub(super) fn cases() -> Vec<Case> {
         #[cfg(feature = "dart")]
         Transport::Dart,
     ];
+
     for transport in transports {
         for io_threads in [1, 2] {
             add_pipeline_cases(&mut cases, transport, io_threads);
@@ -53,6 +54,7 @@ pub(super) fn cases() -> Vec<Case> {
             if matches!(transport, Transport::Dart) {
                 continue;
             }
+
             add_pubsub_cases(&mut cases, transport, io_threads);
         }
     }
@@ -61,6 +63,7 @@ pub(super) fn cases() -> Vec<Case> {
         name: "pubsub_2io.256b_32p_msgs_s".to_owned(),
         workload: Workload::PubsubProcesses,
     });
+
     cases.push(Case {
         name: "inproc_pushpull_1io.16b_msgs_s".to_owned(),
         workload: Workload::Pipeline {
@@ -69,6 +72,7 @@ pub(super) fn cases() -> Vec<Case> {
             transport: Transport::Inproc,
         },
     });
+
     contract_cases(&mut cases);
     draft::cases(&mut cases);
     cases
@@ -82,10 +86,12 @@ fn add_pipeline_cases(cases: &mut Vec<Case>, transport: Transport, io_threads: u
         Transport::Dart => "scattergather",
         _ => "pushpull",
     };
+
     for (size, suffix) in [(16, "16b"), (256, "256b"), (1024, "1k"), (16 * 1024, "16k")] {
         if size > 1024 && !matches!(transport, Transport::Tcp) {
             continue;
         }
+
         cases.push(Case {
             name: format!(
                 "{}{pipeline}_{io_threads}io.{suffix}_msgs_s",
@@ -107,6 +113,7 @@ fn add_pubsub_cases(cases: &mut Vec<Case>, transport: Transport, io_threads: usi
         if size > 1024 && !matches!(transport, Transport::Tcp) {
             continue;
         }
+
         cases.push(Case {
             name: format!(
                 "{}pubsub_{io_threads}io.{suffix}_msgs_s",
@@ -137,6 +144,7 @@ fn contract_cases(cases: &mut Vec<Case>) {
         (Pattern::Peer, 8),
         (Pattern::Pair, 1),
     ];
+
     for (pattern, peers) in round_trips {
         for (size, suffix) in sizes {
             cases.push(Case {
@@ -149,6 +157,7 @@ fn contract_cases(cases: &mut Vec<Case>) {
             });
         }
     }
+
     for pattern in [Pattern::PushPull, Pattern::DealerRouter, Pattern::Pair] {
         for (size, suffix) in [(64, "64b"), (16 * 1024, "16k")] {
             cases.push(Case {

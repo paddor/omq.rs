@@ -32,44 +32,6 @@ pub use monitor::{
 // Default channel capacity (matches default HWM).
 pub(crate) const DEFAULT_HWM: usize = 1000;
 
-#[derive(Debug)]
-pub(crate) struct OmqSocket {
-    pub id: u64,
-    pub ctx: Arc<OmqContext>,
-    pub socket_type: SocketType,
-    pub overlay: Mutex<SocketOverlay>,
-    pub send: SendState,
-    pub recv: RecvState,
-    /// The inner omq-tokio socket. Send+Sync, stored directly.
-    pub inner: std::sync::OnceLock<Arc<omq_tokio::Socket>>,
-    pub endpoints: EndpointState,
-    pub notify: Arc<PlatformNotifyHandle>,
-    /// True for the REP socket bound to the reserved ZAP endpoint.
-    pub(crate) zap_handler: AtomicBool,
-}
-
-impl OmqSocket {
-    pub(crate) fn recv_has_data(&self) -> bool {
-        // SAFETY: libzmq sockets are accessed by at most one application thread.
-        let Some(consumers) = unsafe { self.recv.consumers.get() }.as_mut() else {
-            return false;
-        };
-        consumers.refresh(self.recv.sink_config.get());
-        !consumers.fast.is_empty() || !consumers.pump.is_empty()
-    }
-
-    fn allow_thread_migration(&self) {
-        self.send.allow_thread_migration();
-        self.recv.allow_thread_migration();
-    }
-
-    /// True for the REP socket bound to the reserved ZAP endpoint.
-    #[inline]
-    pub(crate) fn is_zap_handler(&self) -> bool {
-        self.zap_handler.load(Ordering::Acquire)
-    }
-}
-
 /// libzmq socket type codes (`ZMQ_PAIR` .. `ZMQ_CHANNEL`; 18 is unused).
 const SOCKET_TYPES: [(c_int, SocketType); 20] = [
     (0, SocketType::Pair),
@@ -93,6 +55,45 @@ const SOCKET_TYPES: [(c_int, SocketType); 20] = [
     (19, SocketType::Peer),
     (20, SocketType::Channel),
 ];
+
+#[derive(Debug)]
+pub(crate) struct OmqSocket {
+    pub id: u64,
+    pub ctx: Arc<OmqContext>,
+    pub socket_type: SocketType,
+    pub overlay: Mutex<SocketOverlay>,
+    pub send: SendState,
+    pub recv: RecvState,
+    /// The inner omq-tokio socket. Send+Sync, stored directly.
+    pub inner: std::sync::OnceLock<Arc<omq_tokio::Socket>>,
+    pub endpoints: EndpointState,
+    pub notify: Arc<PlatformNotifyHandle>,
+    /// True for the REP socket bound to the reserved ZAP endpoint.
+    pub(crate) zap_handler: AtomicBool,
+}
+
+impl OmqSocket {
+    pub(crate) fn recv_has_data(&self) -> bool {
+        // SAFETY: libzmq sockets are accessed by at most one application thread.
+        let Some(consumers) = unsafe { self.recv.consumers.get() }.as_mut() else {
+            return false;
+        };
+
+        consumers.refresh(self.recv.sink_config.get());
+        !consumers.fast.is_empty() || !consumers.pump.is_empty()
+    }
+
+    fn allow_thread_migration(&self) {
+        self.send.allow_thread_migration();
+        self.recv.allow_thread_migration();
+    }
+
+    /// True for the REP socket bound to the reserved ZAP endpoint.
+    #[inline]
+    pub(crate) fn is_zap_handler(&self) -> bool {
+        self.zap_handler.load(Ordering::Acquire)
+    }
+}
 
 /// Map a libzmq socket type code to `SocketType`.
 fn map_socket_type(code: c_int) -> Option<SocketType> {
@@ -149,6 +150,7 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
         set_errno(libc::EMFILE);
         return std::ptr::null_mut();
     };
+
     let id = next_socket_id();
 
     // Context-level ZMQ_IPV6 and ZMQ_BLOCKY seed the per-socket defaults;
@@ -162,6 +164,7 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
         },
         ..SocketOverlay::default()
     };
+
     let queue_without_ready_peer = !overlay.immediate;
 
     let sock = Arc::new(OmqSocket {
@@ -176,6 +179,7 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
         notify,
         zap_handler: AtomicBool::new(false),
     });
+
     sock.ctx.socket_opened();
     sock.ctx.register_socket(&sock);
 
@@ -191,19 +195,24 @@ fn socket_preconditions<'a>(
     if ctx_ptr.is_null() {
         return Err(libc::EFAULT);
     }
+
     // SAFETY: C callers pass null or a pointer from this API.
     let Ok(ctx) = (unsafe { crate::handle::context(ctx_ptr) }) else {
         return Err(libc::EFAULT);
     };
+
     if ctx.is_effectively_terminated() {
         return Err(ETERM);
     }
+
     let Some(socket_type) = map_socket_type(type_int) else {
         return Err(libc::EINVAL);
     };
+
     if ctx.socket_count.load(Ordering::Relaxed) >= ctx.options.max_sockets.load(Ordering::Relaxed) {
         return Err(libc::EMFILE);
     }
+
     Ok((ctx, socket_type))
 }
 
@@ -213,9 +222,11 @@ pub extern "C" fn omq_socket_allow_thread_migration(sock_ptr: *mut c_void) -> c_
     if sock_ptr.is_null() {
         return fail(libc::EFAULT);
     }
+
     // SAFETY: C callers pass null or a pointer from this API.
     let socket = c_try!(unsafe { crate::handle::socket(sock_ptr) });
     socket.allow_thread_migration();
+
     0
 }
 
@@ -232,6 +243,7 @@ pub extern "C" fn zmq_close(sock_ptr: *mut c_void) -> c_int {
     // on a different thread before ownership returned to this caller.
     let consumers = unsafe { arc.recv.consumers.get_unchecked() }.take();
     drop(consumers);
+
     if let Some(space) = arc.recv.space.get() {
         space.notify_changed();
     }
@@ -243,6 +255,7 @@ pub extern "C" fn zmq_close(sock_ptr: *mut c_void) -> c_int {
     if let Some(h) = arc.recv.pump.get() {
         h.abort();
     }
+
     let linger = arc
         .overlay
         .lock()
@@ -258,22 +271,27 @@ pub extern "C" fn zmq_close(sock_ptr: *mut c_void) -> c_int {
         arc.notify.close();
         arc.ctx.socket_closed();
         drop(arc);
+
         return 0;
     };
+
     if let Some(socket) = close_socket {
         // A lingering close keeps context termination waiting until it ends.
         let work =
             (!matches!(linger, Some(std::time::Duration::ZERO))).then(|| arc.ctx.begin_work());
+
         drop(handle.spawn(async move {
             let _ = socket.close_with_linger(linger).await;
             drop(work);
         }));
     }
+
     let _guard = handle.enter();
 
     arc.notify.close();
     arc.ctx.socket_closed();
     drop(arc);
+
     0
 }
 

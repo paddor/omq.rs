@@ -17,6 +17,7 @@ fn lz4_ws_loopback(port: u16) -> Endpoint {
 async fn bind_lz4_ws(sock: &Socket) -> u16 {
     let mut mon = sock.monitor();
     sock.bind(lz4_ws_loopback(0)).await.unwrap();
+
     loop {
         match mon.recv().await {
             Ok(MonitorEvent::Listening {
@@ -149,6 +150,7 @@ async fn lz4_ws_many_messages_in_a_row() {
     for i in 0..N {
         push.send(Message::single(format!("m-{i}"))).await.unwrap();
     }
+
     for i in 0..N {
         let m = tokio::time::timeout(Duration::from_secs(5), pull.recv())
             .await
@@ -283,6 +285,7 @@ async fn lz4_ws_pub_sub_fan_out() {
         s.subscribe(Bytes::new()).await.unwrap();
         subs.push(s);
     }
+
     publisher
         .wait_subscribed(N_SUBS as u64, Duration::from_secs(1))
         .await
@@ -347,6 +350,7 @@ async fn lz4_ws_auto_train_dict() {
         let s = format!(r#"{{"seq":{i},"msg":"hello world","tag":"bench"}}"#);
         trainer.add_sample(s.as_bytes());
     }
+
     let dict = Bytes::from(trainer.train());
     let opts = Options::default().compression_dict(dict);
 
@@ -392,13 +396,16 @@ async fn lz4_ws_reconnect_after_server_restart() {
 
     let pull2 = Socket::new(SocketType::Pull, Options::default());
     let mut bound = false;
+
     for _ in 0..20 {
         if pull2.bind(lz4_ws_loopback(port)).await.is_ok() {
             bound = true;
             break;
         }
+
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+
     assert!(bound, "pull2 failed to bind after pull1 closed");
     tokio::time::sleep(Duration::from_millis(300)).await;
 

@@ -20,6 +20,7 @@ impl OptIn {
         if self.ptr.is_null() {
             return None;
         }
+
         // SAFETY: ptr is non-null (checked above); the caller passes `len`
         // readable bytes that stay valid for the call.
         Some(unsafe { std::slice::from_raw_parts(self.ptr.cast::<u8>(), self.len) })
@@ -29,6 +30,7 @@ impl OptIn {
         if self.ptr.is_null() || self.len < 4 {
             return Err(libc::EINVAL);
         }
+
         // SAFETY: ptr is non-null (checked above) and points to at least 4 readable bytes.
         Ok(unsafe { std::ptr::read_unaligned(self.ptr.cast::<i32>()) })
     }
@@ -37,6 +39,7 @@ impl OptIn {
         if self.ptr.is_null() || self.len < 8 {
             return Err(libc::EINVAL);
         }
+
         // SAFETY: ptr is non-null (checked above) and points to at least 8 readable bytes.
         Ok(unsafe { std::ptr::read_unaligned(self.ptr.cast::<i64>()) })
     }
@@ -52,6 +55,7 @@ impl OptIn {
         if self.len == 0 {
             return Ok(Vec::new());
         }
+
         self.slice().map(<[u8]>::to_vec).ok_or(libc::EINVAL)
     }
 
@@ -59,10 +63,12 @@ impl OptIn {
     pub(super) fn key(self) -> Result<[u8; 32], c_int> {
         let bytes = self.slice().ok_or(libc::EINVAL)?;
         let mut key = [0u8; 32];
+
         if bytes.len() == 32 {
             key.copy_from_slice(bytes);
             return Ok(key);
         }
+
         if bytes.len() >= 40
             && let Ok(s) = std::str::from_utf8(&bytes[..40])
             && let Ok(decoded) = omq_tokio::proto::z85::decode(s)
@@ -71,6 +77,7 @@ impl OptIn {
             key.copy_from_slice(&decoded);
             return Ok(key);
         }
+
         Err(libc::EINVAL)
     }
 }
@@ -87,12 +94,14 @@ pub(super) fn parse_origins(value: &str) -> Result<Vec<String>, c_int> {
     } else {
         value.split('\n').map(str::to_owned).collect()
     };
+
     if origins
         .iter()
         .any(|origin| omq_tokio::proto::ws_handshake::normalize_ws_origin(origin).is_err())
     {
         return Err(libc::EINVAL);
     }
+
     Ok(origins)
 }
 
@@ -116,6 +125,7 @@ impl OptOut {
         if self.ptr.is_null() || self.len.is_null() {
             return Err(libc::EFAULT);
         }
+
         // SAFETY: len is non-null (checked above); reading the available size.
         Ok(unsafe { *self.len })
     }
@@ -126,6 +136,7 @@ impl OptOut {
         if avail < N {
             return Err(libc::EINVAL);
         }
+
         // SAFETY: ptr is non-null with at least N of `avail` bytes writable
         // (checked above); len is non-null.
         unsafe {
@@ -133,6 +144,7 @@ impl OptOut {
             std::ptr::copy_nonoverlapping(value.as_ptr(), self.ptr.cast::<u8>(), N);
             *self.len = N;
         }
+
         Ok(())
     }
 
@@ -149,11 +161,13 @@ impl OptOut {
         if avail < data.len() {
             return Err(libc::EINVAL);
         }
+
         // SAFETY: ptr is non-null with at least data.len() bytes available.
         unsafe {
             std::ptr::copy_nonoverlapping(data.as_ptr(), self.ptr.cast::<u8>(), data.len());
             *self.len = data.len();
         }
+
         Ok(())
     }
 
@@ -161,15 +175,18 @@ impl OptOut {
     pub(crate) fn string(self, data: &[u8]) -> Result<(), c_int> {
         let avail = self.avail()?;
         let needed = data.len() + 1;
+
         if avail < needed {
             return Err(libc::EINVAL);
         }
+
         // SAFETY: ptr is non-null with at least `needed` bytes available.
         unsafe {
             std::ptr::copy_nonoverlapping(data.as_ptr(), self.ptr.cast::<u8>(), data.len());
             *self.ptr.cast::<u8>().add(data.len()) = 0;
             *self.len = needed;
         }
+
         Ok(())
     }
 
@@ -181,6 +198,7 @@ impl OptOut {
         // SAFETY: the string fit, so ptr is non-null with `avail >= needed`
         // writable bytes.
         unsafe { std::ptr::write_bytes(self.ptr.cast::<u8>().add(needed), 0, avail - needed) };
+
         Ok(())
     }
 
@@ -197,16 +215,20 @@ impl OptOut {
                 *(self.ptr.cast::<u8>()).add(40) = 0;
                 *self.len = 41;
             }
+
             return Ok(());
         }
+
         if avail >= 32 {
             // SAFETY: ptr has at least 32 bytes available (checked above).
             unsafe {
                 std::ptr::copy_nonoverlapping(key.as_ptr(), self.ptr.cast::<u8>(), 32);
                 *self.len = 32;
             }
+
             return Ok(());
         }
+
         Err(libc::EINVAL)
     }
 }

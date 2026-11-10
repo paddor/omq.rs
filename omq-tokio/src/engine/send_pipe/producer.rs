@@ -18,10 +18,12 @@ impl SendPipeProducer {
         if let Some(slot) = &self.direct_slot {
             slot.data_signal.watch_idle(progress);
         }
+
         if let SendPipeProducerInner::Inproc(sender) = &self.inner {
             sender.watch_close(progress);
         }
     }
+
     #[cfg(feature = "dart")]
     pub(crate) fn set_dart(&mut self, socket_type: omq_proto::SocketType) {
         self.dart = Some(socket_type);
@@ -30,6 +32,7 @@ impl SendPipeProducer {
             SendPipeProducerInner::Peer(peer) => Some(peer.max_messages()),
             _ => None,
         };
+
         if let Some(capacity) = capacity {
             self.data_signal
                 .dart_admission
@@ -46,6 +49,7 @@ impl SendPipeProducer {
         let SendPipeProducerInner::Peer(peer) = &self.inner else {
             return None;
         };
+
         peer.register().map(|producer| Self {
             inner: SendPipeProducerInner::Peer(producer),
             #[cfg(feature = "dart")]
@@ -94,12 +98,14 @@ impl SendPipeProducer {
         if self.dart.is_some() {
             return self.try_send(msg);
         }
+
         let result = match &self.inner {
             SendPipeProducerInner::Inproc(sender) => {
                 let result = sender.try_send_deferred(msg, &mut self.pending);
                 if matches!(result, Err(SendPipeError::Full(_))) {
                     self.above_lwm.store(true, Ordering::Release);
                 }
+
                 result
             }
             SendPipeProducerInner::Queue(_) => {
@@ -107,11 +113,13 @@ impl SendPipeProducer {
             }
             _ => return self.try_send(msg),
         };
+
         if result.is_err() {
             // A muted pipe must publish accepted messages before leaving the
             // active set, so its consumer can drain and return LWM credit.
             self.flush_deferred();
         }
+
         result
     }
 
@@ -143,20 +151,24 @@ impl SendPipeProducer {
             )
             .map_err(SendPipeError::Invalid)?;
         }
+
         #[cfg(feature = "dart")]
         let admitted = if let Some(counter) = self.dart_admission() {
             if counter.acquire(1) == 0 {
                 return Err(dart_refusal(counter, msg));
             }
+
             true
         } else {
             false
         };
+
         let result = self.try_send_prepared_inner(msg, preparation);
         #[cfg(feature = "dart")]
         if admitted && result.is_err() {
             self.dart_release(1);
         }
+
         result
     }
 
@@ -170,10 +182,12 @@ impl SendPipeProducer {
             let Some(slot) = &self.direct_slot else {
                 return peer.try_send_prepared(msg, preparation, |_| false);
             };
+
             let mut state = slot.direct_writer().expect("direct slot writer").lock();
             if state.is_closed() {
                 return Err(SendPipeError::Closed(msg));
             }
+
             // Registration, ring capacity and the shared budget all precede
             // the direct attempt. Hold admission through fallback publication.
             let mut sent_direct = false;
@@ -181,21 +195,27 @@ impl SendPipeProducer {
                 sent_direct = state.try_send(slot, message) == TryFrameResult::Ok;
                 sent_direct
             });
+
             if result.is_ok() && !sent_direct {
                 state.queued();
             }
+
             return result;
         }
+
         if let SendPipeProducerInner::Inproc(sender) = &self.inner {
             let result = sender.try_send_prepared(msg, preparation);
             if matches!(result, Err(SendPipeError::Full(_))) {
                 self.above_lwm.store(true, Ordering::Release);
             }
+
             return result;
         }
+
         if matches!(self.inner, SendPipeProducerInner::Queue(_)) {
             return self.try_send_queue::<false>(msg, preparation);
         }
+
         self.try_send_conflate(msg, preparation)
     }
 
@@ -208,13 +228,16 @@ impl SendPipeProducer {
         let SendPipeProducerInner::Queue(producer) = &mut self.inner else {
             unreachable!("queue send requires a queue pipe");
         };
+
         if producer.is_consumer_dropped() {
             return Err(SendPipeError::Closed(msg));
         }
+
         if producer.is_full() {
             self.above_lwm.store(true, Ordering::Release);
             return Err(SendPipeError::Full(msg));
         }
+
         // Exclusive producer access guarantees capacity until this push.
         match producer.push(preparation.prepare(msg)) {
             Ok(()) => {
@@ -225,6 +248,7 @@ impl SendPipeProducer {
                     self.pending = false;
                     self.data_signal.mark();
                 }
+
                 Ok(())
             }
             Err(_) if producer.is_consumer_dropped() => Ok(()),
@@ -245,6 +269,7 @@ impl SendPipeProducer {
                     .map_err(SendPipeError::Invalid)?;
             }
         }
+
         #[cfg(feature = "dart")]
         if matches!(self.inner, SendPipeProducerInner::Queue(_))
             && let Some(counter) = self.dart_admission()
@@ -253,18 +278,23 @@ impl SendPipeProducer {
             if requested == 0 {
                 return Ok(0);
             }
+
             let count = counter.acquire(requested);
             if count == 0 {
                 let message = messages.pop_front().expect("requested message");
                 return Err(dart_refusal(counter, message));
             }
+
             let result = self.try_send_many_inner(messages, count);
             let unused = count - result.as_ref().copied().unwrap_or(0);
+
             if unused != 0 {
                 self.dart_release(unused);
             }
+
             return result;
         }
+
         self.try_send_many_inner(messages, max)
     }
 
@@ -278,16 +308,20 @@ impl SendPipeProducer {
             self.flush_deferred();
             return result;
         }
+
         let SendPipeProducerInner::Queue(producer) = &mut self.inner else {
             let Some(msg) = messages.pop_front() else {
                 return Ok(0);
             };
+
             return self.try_send(msg).map(|()| 1);
         };
+
         if producer.is_consumer_dropped() {
             let Some(msg) = messages.pop_front() else {
                 return Ok(0);
             };
+
             return Err(SendPipeError::Closed(msg));
         }
 
@@ -296,19 +330,23 @@ impl SendPipeProducer {
             let Some(msg) = messages.pop_front() else {
                 break;
             };
+
             match producer.push(msg) {
                 Ok(()) => count += 1,
                 Err(returned) => {
                     let closed = producer.is_consumer_dropped();
                     messages.push_front(returned);
+
                     if !closed {
                         self.above_lwm.store(true, Ordering::Release);
                     }
+
                     if count > 0 {
                         producer.flush();
                         self.data_signal.mark();
                         return Ok(count);
                     }
+
                     let msg = messages.pop_front().expect("returned message present");
                     return Err(if closed {
                         SendPipeError::Closed(msg)
@@ -323,6 +361,7 @@ impl SendPipeProducer {
             producer.flush();
             self.data_signal.mark();
         }
+
         Ok(count)
     }
 
@@ -336,6 +375,7 @@ impl SendPipeProducer {
             let Some(msg) = messages.pop_front() else {
                 break;
             };
+
             match self.try_send_deferred(msg) {
                 Ok(()) => count += 1,
                 Err(SendPipeError::Full(msg) | SendPipeError::Closed(msg)) if count > 0 => {
@@ -345,6 +385,7 @@ impl SendPipeProducer {
                 Err(error) => return Err(error),
             }
         }
+
         Ok(count)
     }
 
@@ -357,9 +398,11 @@ impl SendPipeProducer {
         let SendPipeProducerInner::Conflate(state) = &self.inner else {
             unreachable!("queue send handled by try_send")
         };
+
         if state.consumer_dropped.load(Ordering::Acquire) {
             return Err(SendPipeError::Closed(msg));
         }
+
         *state.slot.lock().expect("conflate send pipe") = Some(preparation.prepare(msg));
         self.data_signal.mark();
         Ok(())
@@ -393,6 +436,7 @@ impl SendPipeProducer {
         if self.dart_exhausted() {
             return false;
         }
+
         match &self.inner {
             SendPipeProducerInner::Peer(peer) => peer.ready(),
             SendPipeProducerInner::Queue(producer) => {
@@ -411,16 +455,19 @@ impl SendPipeProducer {
         if self.dart_exhausted() {
             return false;
         }
+
         match &mut self.inner {
             SendPipeProducerInner::Peer(peer) => peer.alive() && peer.has_space(),
             SendPipeProducerInner::Queue(producer) => {
                 if producer.is_consumer_dropped() {
                     return false;
                 }
+
                 if producer.is_full() {
                     self.above_lwm.store(true, Ordering::Release);
                     return false;
                 }
+
                 true
             }
             SendPipeProducerInner::Conflate(state) => {
@@ -457,6 +504,7 @@ impl SendPipeProducer {
         if self.dart.is_some() {
             return self.space_available.clone();
         }
+
         match &self.inner {
             SendPipeProducerInner::Peer(peer) => peer.space(),
             SendPipeProducerInner::Inproc(sender) => sender.space(),
@@ -509,8 +557,10 @@ impl Drop for SendPipeProducer {
                 state.producer_dropped.store(true, Ordering::Release);
             }
         }
+
         self.data_signal.wake_all();
         self.space_available.notify_changed();
+
         if !Arc::ptr_eq(&space, &self.space_available) {
             space.notify_changed();
         }

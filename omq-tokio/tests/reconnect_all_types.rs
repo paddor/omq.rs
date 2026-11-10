@@ -34,8 +34,10 @@ async fn rebind<F: Fn() -> Socket>(ep: &Endpoint, make: F) -> Socket {
         if s.bind(ep.clone()).await.is_ok() {
             return s;
         }
+
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+
     panic!("could not rebind {ep:?} after 40 attempts");
 }
 
@@ -56,11 +58,13 @@ async fn send_single_until_received(
             Ok(Ok(())) | Err(_) => {}
             Ok(Err(e)) => panic!("{timeout_message}: send failed: {e:?}"),
         }
+
         match tokio::time::timeout(Duration::from_millis(200), receiver.recv()).await {
             Ok(Ok(msg)) => return msg,
             Ok(Err(e)) => panic!("{timeout_message}: {e:?}"),
             Err(_) => {}
         }
+
         assert!(Instant::now() < deadline, "{timeout_message}");
     }
 }
@@ -361,10 +365,12 @@ async fn radio_dish_reconnect_replays_joins() {
             .send(Message::multipart(["w", "probe"]))
             .await
             .unwrap();
+
         if let Ok(Ok(m)) = tokio::time::timeout(Duration::from_millis(200), dish.recv()).await {
             assert_eq!(m.part_bytes(1).unwrap().as_ref(), b"probe");
             break;
         }
+
         assert!(
             std::time::Instant::now() < deadline,
             "join never propagated"
@@ -380,10 +386,12 @@ async fn radio_dish_reconnect_replays_joins() {
             .send(Message::multipart(["w", "after"]))
             .await
             .unwrap();
+
         if let Ok(Ok(m)) = tokio::time::timeout(Duration::from_millis(200), dish.recv()).await {
             assert_eq!(m, Message::multipart(["w", "after"]));
             break;
         }
+
         assert!(
             std::time::Instant::now() < deadline,
             "join not replayed after restart"
@@ -430,10 +438,12 @@ async fn peer_reconnect_after_bind_side_restart() {
             .send(Message::multipart(["pa", "hello"]))
             .await
             .unwrap();
+
         if let Ok(Ok(m)) = tokio::time::timeout(Duration::from_millis(200), peer_a1.recv()).await {
             assert_eq!(m, Message::multipart(["pb", "hello"]));
             break;
         }
+
         assert!(
             std::time::Instant::now() < deadline,
             "identity never discovered"
@@ -455,10 +465,12 @@ async fn peer_reconnect_after_bind_side_restart() {
             .send(Message::multipart(["pa", "after"]))
             .await
             .unwrap();
+
         if let Ok(Ok(m)) = tokio::time::timeout(Duration::from_millis(200), peer_a2.recv()).await {
             assert_eq!(m, Message::multipart(["pb", "after"]));
             break;
         }
+
         assert!(
             std::time::Instant::now() < deadline,
             "identity not rediscovered after restart"

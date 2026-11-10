@@ -11,6 +11,7 @@ pub mod curve;
 mod curve_cookie;
 #[cfg(feature = "curve")]
 pub mod curve_keys;
+
 #[cfg(feature = "curve")]
 pub(crate) use curve::{CurveClient, CurveServer, CurveTransform};
 #[cfg(feature = "curve")]
@@ -21,11 +22,13 @@ use curve_cookie::DEFAULT_COOKIE_LIFETIME;
 
 #[cfg(feature = "plain")]
 pub mod plain;
+
 #[cfg(feature = "plain")]
 pub(crate) use plain::{PlainClient, PlainServer};
 
 mod auth;
 mod null;
+
 pub(crate) use auth::ServerAuth;
 pub use auth::{
     AuthenticationRequest, AuthenticationResult, AuthenticationStatus, Authenticator,
@@ -33,6 +36,10 @@ pub use auth::{
 };
 use auth::{check_authentication, no_pending_authentication};
 pub(crate) use null::NullMechanism;
+
+use super::command::{Command, NAME_ERROR, PeerProperties};
+use super::greeting::MechanismName;
+use crate::error::{Error, Result};
 
 /// Security-mechanism configuration passed to [`crate::proto::Connection::new`] and
 /// stored in [`Options`](crate::options::Options). NULL is the default;
@@ -215,10 +222,6 @@ impl MechanismSetup {
     }
 }
 
-use super::command::{Command, NAME_ERROR, PeerProperties};
-use super::greeting::MechanismName;
-use crate::error::{Error, Result};
-
 /// Server-side CURVE configuration.
 #[cfg(feature = "curve")]
 #[derive(Clone, Debug)]
@@ -275,9 +278,11 @@ fn try_error_command(cmd: &Command, mechanism: MechanismName) -> Option<Error> {
     let Command::Unknown { ref name, ref body } = *cmd else {
         return None;
     };
+
     if name.as_ref() != NAME_ERROR {
         return None;
     }
+
     let reason = if body.is_empty() {
         String::new()
     } else {
@@ -285,6 +290,7 @@ fn try_error_command(cmd: &Command, mechanism: MechanismName) -> Option<Error> {
         let end = (1 + reason_len).min(body.len());
         String::from_utf8_lossy(&body[1..end]).into_owned()
     };
+
     Some(Error::HandshakeRefused(std::sync::Arc::new(
         crate::error::HandshakeRefusal { mechanism, reason },
     )))
@@ -456,6 +462,7 @@ impl SecurityMechanism {
             #[cfg(feature = "plain")]
             Self::PlainClient(_) | Self::PlainServer(_) => return Ok(None),
         };
+
         Ok(Some(FrameTransform::Curve(transform)))
     }
 }
@@ -490,11 +497,13 @@ impl FrameTransform {
         let parts = msg.parts_payload();
         let n = parts.len();
         let mut out = smallvec::SmallVec::with_capacity(n);
+
         for (i, part) in parts.iter().enumerate() {
             let more = i + 1 < n;
             let (flags, payload) = self.encrypt_part(more, part)?;
             out.push((flags, payload));
         }
+
         Ok(out)
     }
 
@@ -512,6 +521,7 @@ impl FrameTransform {
                 } else {
                     FrameFlags::LAST
                 };
+
                 let wire = tx.encrypt_message_frame(flags, part.as_slice())?;
                 Ok((flags, wire))
             }

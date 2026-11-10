@@ -30,6 +30,7 @@ use table::{fmt_compact, fmt_full, print_latency_header, print_throughput_header
 // ---- Address generation ---------------------------------------------------
 
 use std::sync::atomic::{AtomicU64, Ordering};
+
 static ADDR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn next_addr_id() -> u64 {
@@ -133,6 +134,7 @@ impl ComparisonRun<'_> {
         row.msgs_s = Some(result.msgs_s);
         row.mbps = Some(result.mbps);
         row.elapsed = Some(result.elapsed);
+
         row.cpu_time = match kind {
             CellKind::Throughput | CellKind::PubSub => match (result.push_cpu, result.pull_cpu) {
                 (Some(push), Some(pull)) => Some(push + pull),
@@ -145,6 +147,7 @@ impl ComparisonRun<'_> {
                 _ => result.pull_cpu,
             },
         };
+
         match kind {
             CellKind::Throughput | CellKind::FanOut | CellKind::FanIn => {
                 row.push_cpu_time = result.push_cpu;
@@ -159,6 +162,7 @@ impl ComparisonRun<'_> {
                     .clone_from(&self.args.pubsub.pubsub_receiver_cpus);
             }
         }
+
         row.set_spread(result.spread);
         row.zero_transport = (result.msgs_s == 0.0).then_some(true);
         jsonl::append_jsonl(self.jsonl_path, &row);
@@ -172,16 +176,20 @@ impl ComparisonRun<'_> {
     ) {
         let name = cell.def.name;
         let mut row = self.row(name, "latency", cell.transport, cell.size);
+
         row.elapsed = result.elapsed;
         row.cpu_time = result.cpu_time;
         row.req_cpu_time = result.req_cpu;
+
         row.p50_us = Some(result.p50_us);
         row.p99_us = Some(result.p99_us);
         row.p999_us = Some(result.p999_us);
         row.max_us = Some(result.max_us);
         row.iterations = Some(result.iterations);
+
         row.latency_pair = Some(workload.pair.to_owned());
         row.workload_profile = Some(workload.profile.to_owned());
+
         if name.starts_with("omq-") {
             row.recv_spin_us = Some(
                 latency_env(cell.def, workload.pair, workload.profile)
@@ -193,6 +201,7 @@ impl ComparisonRun<'_> {
                     .unwrap(),
             );
         }
+
         jsonl::append_jsonl(self.jsonl_path, &row);
     }
 
@@ -216,15 +225,19 @@ impl ComparisonRun<'_> {
             .copied()
             .filter(|name| find_impl(name).unwrap().transports.contains(&transport))
             .collect();
+
         if active.is_empty() {
             return;
         }
+
         if !self.args.no_throughput {
             self.run_throughput(transport, &active);
         }
+
         if !self.args.no_latency {
             self.run_latency(transport, &active);
         }
+
         if !self.args.pubsub.no_pubsub && transport != TransportKind::Inproc {
             let pubsub_impls: Vec<&str> = active
                 .iter()
@@ -238,10 +251,12 @@ impl ComparisonRun<'_> {
                 false,
             );
         }
+
         if matches!(transport, TransportKind::Tcp | TransportKind::Quic) {
             if self.args.fanio.fanout {
                 self.run_fanio(transport, &active, CellKind::FanOut);
             }
+
             if self.args.fanio.fanin {
                 self.run_fanio(transport, &active, CellKind::FanIn);
             }
@@ -254,15 +269,19 @@ impl ComparisonRun<'_> {
             .copied()
             .filter(|name| supports_pushpull(find_impl(name).unwrap()))
             .collect();
+
         if impls.is_empty() {
             return;
         }
+
         eprintln!("\n=== Throughput / {} ===", transport.as_str());
         print_throughput_header(&impls);
+
         run_table(self.sizes, &impls, 14, |name, size| {
             let cell = self.cell(name, transport, size);
             let result = run_throughput_cell(&cell, self.duration, self.rounds);
             self.record_cell(&cell, CellKind::Throughput, None, &result);
+
             fmt_full(&result, size)
         });
     }
@@ -281,6 +300,7 @@ impl ComparisonRun<'_> {
                                 || !def.inproc_lat_subcmd.is_empty())
                     })
                     .collect();
+
                 if impls.is_empty() {
                     continue;
                 }
@@ -296,6 +316,7 @@ impl ComparisonRun<'_> {
                     let cell = self.cell(name, transport, size);
                     let result = self.measure_latency(&cell, &workload);
                     self.record_latency(&cell, &workload, &result);
+
                     format!("{:.1}", result.p99_us)
                 });
             }
@@ -353,11 +374,13 @@ impl ComparisonRun<'_> {
             let label = if curve { "CURVE PubSub" } else { "PubSub" };
             eprintln!("\n=== {label} {peers}p / {} ===", transport.as_str());
             print_throughput_header(impls);
+
             run_table(&sizes, impls, if curve { 14 } else { 8 }, |name, size| {
                 let cell = self.cell(name, transport, size);
                 let result =
                     run_pubsub_cell(&cell, peers, self.duration, self.rounds, &self.args.pubsub);
                 self.record_cell(&cell, CellKind::PubSub, Some(peers), &result);
+
                 if curve {
                     fmt_full(&result, size)
                 } else {
@@ -377,6 +400,7 @@ impl ComparisonRun<'_> {
                 def.class == Some(ImplClass::Curve) && def.transports.contains(&TransportKind::Tcp)
             })
             .collect();
+
         if !impls.is_empty() {
             self.run_pubsub(
                 TransportKind::Tcp,
@@ -394,14 +418,17 @@ impl ComparisonRun<'_> {
             .filter(|name| supports_fanio(find_impl(name).unwrap()) && self.multi_peer(name))
             .collect();
         let sizes = self.chart_sizes();
+
         let (label, peer_counts) = match kind {
             CellKind::FanOut => ("FanOut", &self.args.fanio.fanout_peers),
             CellKind::FanIn => ("FanIn", &self.args.fanio.fanin_peers),
             _ => unreachable!(),
         };
+
         for &peers in peer_counts {
             eprintln!("\n=== {label} {peers}p / {} ===", transport.as_str());
             print_throughput_header(&impls);
+
             run_table(&sizes, &impls, 8, |name, size| {
                 let cell = self.cell(name, transport, size);
                 let result = match kind {
@@ -409,6 +436,7 @@ impl ComparisonRun<'_> {
                     CellKind::FanIn => run_fanin_cell(&cell, peers, self.duration, self.rounds),
                     _ => unreachable!(),
                 };
+
                 self.record_cell(&cell, kind, Some(peers), &result);
                 fmt_compact(&result, size)
             });
@@ -422,8 +450,10 @@ pub(crate) fn run(args: &ComparisonsArgs) {
             || std::env::var_os("OMQ_BENCH_TASKSET").is_some(),
         "--pubsub-receiver-cpus requires OMQ_BENCH_TASKSET"
     );
+
     process::install_reaper();
     process::cleanup_ipc_sockets();
+
     let (duration, rounds) = duration_and_rounds(args);
     let sizes = selected_sizes(args);
     let impl_names = selected_impl_names(args);
@@ -433,6 +463,7 @@ pub(crate) fn run(args: &ComparisonsArgs) {
     if transports.contains(&TransportKind::Quic) {
         crate::tls::install_bench_credentials();
     }
+
     eprintln!("Building peers...");
     let features = peer_features(args, &impl_names, &transports);
     let binaries = build_peers(&impl_names, &features);
@@ -440,6 +471,7 @@ pub(crate) fn run(args: &ComparisonsArgs) {
     let base_port = args.base_port.unwrap_or_else(random_base_port);
     let run_id = make_run_id(args.id.as_deref());
     let jsonl_path = jsonl::cache_dir().join("comparisons.jsonl");
+
     let run = ComparisonRun {
         args,
         sizes: &sizes,
@@ -455,9 +487,11 @@ pub(crate) fn run(args: &ComparisonsArgs) {
     for &transport in &transports {
         run.run_transport(transport);
     }
+
     if args.curve.enabled {
         run.run_curve_pubsub();
     }
+
     eprintln!("\nResults appended to {}", jsonl_path.display());
 }
 

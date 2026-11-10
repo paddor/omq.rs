@@ -58,6 +58,7 @@ fn usage() -> (Duration, i64) {
     let switches = i64::from(usage.ru_nvcsw);
     #[cfg(target_pointer_width = "64")]
     let switches = usage.ru_nvcsw;
+
     (
         Duration::from_micros(micros(usage.ru_utime) + micros(usage.ru_stime)),
         switches,
@@ -70,6 +71,7 @@ fn usage_while_sleeping(idle: Duration) -> (Duration, i64) {
     let (cpu_before, switches_before) = usage();
     std::thread::sleep(idle);
     let (cpu_after, switches_after) = usage();
+
     (
         cpu_after.saturating_sub(cpu_before),
         switches_after - switches_before,
@@ -80,6 +82,7 @@ fn usage_while_sleeping(idle: Duration) -> (Duration, i64) {
 fn fill_until_backpressured(src: *mut c_void, body: &[u8]) {
     let deadline = Instant::now() + Duration::from_secs(20);
     let mut full_since: Option<Instant> = None;
+
     loop {
         assert!(Instant::now() < deadline, "proxy never backpressured");
         if zmq_send(src, body.as_ptr().cast(), body.len(), ZMQ_DONTWAIT) >= 0 {
@@ -89,6 +92,7 @@ fn fill_until_backpressured(src: *mut c_void, body: &[u8]) {
             if since.elapsed() > Duration::from_millis(200) {
                 break;
             }
+
             std::thread::sleep(Duration::from_millis(5));
         }
     }
@@ -103,13 +107,16 @@ fn proxy_into_muted_nodrop_publisher_does_not_spin() {
     let sub = zmq_socket(ctx, ZMQ_SUB);
     let ctrl_a = zmq_socket(ctx, ZMQ_PAIR);
     let ctrl_b = zmq_socket(ctx, ZMQ_PAIR);
+
     for sock in [fe, be, src, sub, ctrl_a, ctrl_b] {
         set_i32(sock, ZMQ_LINGER, 0);
     }
+
     for sock in [fe, be, src] {
         set_i32(sock, ZMQ_SNDHWM, 16);
         set_i32(sock, ZMQ_RCVHWM, 16);
     }
+
     set_i32(sub, ZMQ_RCVHWM, 16);
     set_i32(be, ZMQ_XPUB_NODROP, 1);
     assert_eq!(zmq_setsockopt(sub, ZMQ_SUBSCRIBE, std::ptr::null(), 0), 0);
@@ -162,5 +169,6 @@ fn proxy_into_muted_nodrop_publisher_does_not_spin() {
     for sock in [fe, be, src, sub, ctrl_a, ctrl_b] {
         zmq_close(sock);
     }
+
     zmq_ctx_term(ctx);
 }

@@ -13,6 +13,9 @@ use omq_proto::inproc::InprocPeerSnapshot;
 use super::relay::{RelayReceiver, RelaySender, relay_channel};
 use super::{InprocPort, RecvConfig};
 
+/// Capacity of each command and relay-data lane of one connection.
+pub const DEFAULT_INPROC_HWM: usize = 1024;
+
 /// What `connect` / `accept` hand back to the `SocketDriver` instead
 /// of a byte stream. `out` and `in_rx` carry commands and, for peers
 /// without a direct route, relayed messages.
@@ -31,9 +34,6 @@ pub struct InprocConn {
     /// Port the peer opens for this socket's direct sends.
     pub(crate) outbound: Option<Arc<InprocPort>>,
 }
-
-/// Capacity of each command and relay-data lane of one connection.
-pub const DEFAULT_INPROC_HWM: usize = 1024;
 
 /// Sent from `connect` to `accept` through the registry. Carries
 /// the connector's snapshot, channel halves the listener will
@@ -80,6 +80,7 @@ impl InprocRegistry {
 pub(crate) fn standalone_registry() -> Arc<InprocRegistry> {
     static REGISTRY: std::sync::LazyLock<Arc<InprocRegistry>> =
         std::sync::LazyLock::new(|| Arc::new(InprocRegistry::new()));
+
     REGISTRY.clone()
 }
 
@@ -95,6 +96,7 @@ pub(crate) fn bind(
 ) -> Result<InprocListener> {
     let (tx, rx) = mpsc::channel(32);
     let binding_id = registry.next_binding_id();
+
     {
         let mut reg = registry.binds.lock().expect("inproc registry poisoned");
         if let Some(existing) = reg.get(name)
@@ -104,8 +106,10 @@ pub(crate) fn bind(
                 "inproc name already bound: {name}"
             )));
         }
+
         reg.insert(name.to_string(), InprocBinding { id: binding_id, tx });
     }
+
     Ok(InprocListener {
         registry,
         binding_id,
@@ -202,10 +206,12 @@ impl InprocListener {
             listener_to_connector_port,
             accept_ack,
         } = req;
+
         let _ = accept_ack.send(InprocAck {
             listener: self.snapshot.clone(),
             listener_config: self.config,
         });
+
         Ok(InprocConn {
             out: listener_to_connector_tx,
             in_rx: connector_to_listener_rx,

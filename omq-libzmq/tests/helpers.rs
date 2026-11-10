@@ -26,12 +26,14 @@ fn bind_random(sock: *mut c_void, endpoint: &str) -> CString {
         "bind {endpoint} failed, errno={}",
         omq_zmq::zmq_errno(),
     );
+
     last_endpoint(sock)
 }
 
 pub(crate) fn last_endpoint(sock: *mut c_void) -> CString {
     let mut buf = [0u8; 256];
     let mut len = buf.len();
+
     assert_eq!(
         zmq_getsockopt(
             sock,
@@ -43,5 +45,6 @@ pub(crate) fn last_endpoint(sock: *mut c_void) -> CString {
         "ZMQ_LAST_ENDPOINT failed, errno={}",
         omq_zmq::zmq_errno(),
     );
+
     CStr::from_bytes_until_nul(&buf[..len]).unwrap().to_owned()
 }

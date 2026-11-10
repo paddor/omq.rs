@@ -34,6 +34,7 @@ impl PeerTarget {
             Self::Inbox(inbox) => inbox.watch_close(progress),
         }
     }
+
     pub(super) fn outbound(
         &self,
         lanes: &crate::engine::data_inbox::SenderLanes,
@@ -65,6 +66,7 @@ impl PeerTarget {
                 .validate_dart(&msg, matches!(preparation, SendPreparation::StripIdentity))
                 .map_err(SendPipeError::Invalid)?;
         }
+
         match self {
             Self::Pipe(p) | Self::RepInproc(p) => p.try_send_prepared(msg, preparation),
             Self::Direct(target) => target.try_send_in(lanes, msg, preparation),

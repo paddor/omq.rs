@@ -70,6 +70,7 @@ async fn ws_plain_rejected() {
         client.try_send(Message::single("should not arrive")),
         Ok(()) | Err(TrySendError::Full(_))
     ));
+
     let refusal = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if let MonitorEvent::ConnectStopped {
@@ -83,6 +84,7 @@ async fn ws_plain_rejected() {
     })
     .await
     .expect("rejected credentials must stop WebSocket reconnect");
+
     assert_eq!(
         refusal.mechanism,
         omq_proto::proto::greeting::MechanismName::PLAIN

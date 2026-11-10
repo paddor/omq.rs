@@ -20,6 +20,7 @@ fn free_tcp_port() -> u16 {
     let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
+
     port
 }
 
@@ -37,6 +38,7 @@ async fn wait_for_unsubscribe(mon: &mut MonitorStream, prefix: &[u8]) {
             }
         }
     };
+
     tokio::time::timeout(Duration::from_secs(2), fut)
         .await
         .expect("unsubscribe did not arrive");
@@ -275,6 +277,7 @@ async fn pub_sub_subscribe_all_with_empty_prefix() {
             .await
             .unwrap();
     }
+
     for expected in ["a", "bb", "ccc", "quux"] {
         let m = tokio::time::timeout(Duration::from_millis(500), subscriber.recv())
             .await
@@ -416,6 +419,7 @@ async fn pub_tcp_multi_sub_all_receive() {
         s.connect(test_support::tcp_loopback(port)).await.unwrap();
         subs.push(s);
     }
+
     pub_.wait_subscribed(4, Duration::from_secs(1))
         .await
         .expect("subscriptions did not arrive");
@@ -529,6 +533,7 @@ async fn pub_io_lane_fanout_all_receive() {
         s.connect(test_support::tcp_loopback(port)).await.unwrap();
         subs.push(s);
     }
+
     pub_.wait_subscribed(8, Duration::from_secs(1))
         .await
         .expect("subscriptions did not arrive");
@@ -548,6 +553,7 @@ async fn pub_io_lane_fanout_all_receive() {
                 break;
             }
         }
+
         assert_eq!(
             count, msg_count,
             "subscriber {si} received {count}/{msg_count}"
@@ -563,12 +569,14 @@ async fn pub_io_lane_fanout_subscription_filter() {
 
     let mut subs = Vec::new();
     let prefixes = ["a.", "b.", "c.", "d.", "e.", "f."];
+
     for &pfx in &prefixes {
         let s = Socket::new(SocketType::Sub, Options::default());
         s.subscribe(pfx).await.unwrap();
         s.connect(test_support::tcp_loopback(port)).await.unwrap();
         subs.push(s);
     }
+
     pub_.wait_subscribed(prefixes.len() as u64, Duration::from_secs(1))
         .await
         .expect("subscriptions did not arrive");
@@ -578,6 +586,7 @@ async fn pub_io_lane_fanout_subscription_filter() {
             .await
             .unwrap();
     }
+
     pub_.send(Message::single("z.nobody")).await.unwrap();
 
     for (si, sub) in subs.iter().enumerate() {
@@ -639,6 +648,7 @@ async fn pub_io_lane_fanout_block_on_mute_does_not_block_slow_sub() {
         sub.connect(test_support::tcp_loopback(port)).await.unwrap();
         subs.push(sub);
     }
+
     pub_.wait_subscribed(SUBS as u64, Duration::from_secs(1))
         .await
         .expect("subscriptions did not arrive");
@@ -671,6 +681,7 @@ async fn pub_io_lane_fanout_two_worker_runtime_all_receive() {
         sub.connect(test_support::tcp_loopback(port)).await.unwrap();
         subs.push(sub);
     }
+
     pub_.wait_subscribed(SUBS as u64, Duration::from_secs(1))
         .await
         .expect("subscriptions did not arrive");
@@ -800,9 +811,11 @@ async fn pub_clones_send_concurrently_and_sub_preserves_per_clone_fifo() {
         assert_eq!(seq, next[tag], "clone {tag} delivered out of order");
         next[tag] += 1;
     }
+
     for sender in senders {
         sender.await.unwrap();
     }
+
     assert_eq!(next, [PER_CLONE; CLONES]);
 }
 
@@ -815,17 +828,21 @@ async fn single_io_thread_pub_survives_subscription_replay_bursts() {
     let publisher = pub_ctx.socket(SocketType::Pub, Options::default().linger(Duration::ZERO));
     let endpoint = publisher.bind("tcp://127.0.0.1:0").await.unwrap();
     let mut subscribers = Vec::new();
+
     for _ in 0..2 {
         let sub = sub_ctx.socket(SocketType::Sub, Options::default().linger(Duration::ZERO));
         for topic in 0..100 {
             sub.subscribe(format!("t{topic:05}")).await.unwrap();
         }
+
         sub.subscribe("hello").await.unwrap();
         subscribers.push(sub);
     }
+
     for sub in &subscribers {
         sub.connect(endpoint.clone()).await.unwrap();
     }
+
     publisher
         .wait_subscribed(2 * 101, Duration::from_secs(5))
         .await
@@ -834,6 +851,7 @@ async fn single_io_thread_pub_survives_subscription_replay_bursts() {
         .send(Message::single("hello world"))
         .await
         .unwrap();
+
     for sub in &subscribers {
         let message = tokio::time::timeout(Duration::from_secs(5), sub.recv())
             .await
@@ -849,6 +867,7 @@ async fn closing_many_pub_clones_never_waits_for_an_exited_lane() {
     publisher.bind("tcp://127.0.0.1:0").await.unwrap();
     let clones: Vec<Socket> = (0..80).map(|_| publisher.clone()).collect();
     publisher.close().await.unwrap();
+
     for clone in clones {
         tokio::time::timeout(Duration::from_secs(2), clone.close())
             .await

@@ -47,6 +47,7 @@ fn rng() -> StdRng {
             rand::rng().fill_bytes(&mut s);
             u64::from_le_bytes(s)
         });
+
     eprintln!("OMQ_FUZZ_SEED={seed}");
     StdRng::seed_from_u64(seed)
 }
@@ -55,6 +56,7 @@ fn random_bytes(rng: &mut StdRng, max_len: usize) -> Vec<u8> {
     let len = rng.random_range(0..=max_len);
     let mut v = vec![0u8; len];
     rng.fill_bytes(&mut v);
+
     v
 }
 
@@ -80,6 +82,7 @@ fn null_client_greeting() -> Vec<u8> {
     let g = Greeting::current(MechanismName::NULL, false);
     let mut buf = BytesMut::new();
     g.encode(&mut buf);
+
     buf.to_vec()
 }
 
@@ -90,6 +93,7 @@ fn command_frame(body: &[u8]) -> Vec<u8> {
         out.push(0x04); // COMMAND flag, short form
         out.push(body.len() as u8);
         out.extend_from_slice(body);
+
         out
     } else {
         long_command_frame(body)
@@ -102,6 +106,7 @@ fn long_command_frame(body: &[u8]) -> Vec<u8> {
     out.push(0x06); // COMMAND | LONG
     out.extend_from_slice(&(body.len() as u64).to_be_bytes());
     out.extend_from_slice(body);
+
     out
 }
 
@@ -115,6 +120,7 @@ fn ready_body(socket_type: &str, identity: Option<&[u8]>, extra: &[(&[u8], &[u8]
     buf.put_slice(b"Socket-Type");
     buf.put_u32(socket_type.len() as u32);
     buf.put_slice(socket_type.as_bytes());
+
     // Identity
     if let Some(id) = identity {
         buf.put_u8(8);
@@ -122,12 +128,14 @@ fn ready_body(socket_type: &str, identity: Option<&[u8]>, extra: &[(&[u8], &[u8]
         buf.put_u32(id.len() as u32);
         buf.put_slice(id);
     }
+
     for &(name, value) in extra {
         buf.put_u8(name.len() as u8);
         buf.put_slice(name);
         buf.put_u32(value.len() as u32);
         buf.put_slice(value);
     }
+
     buf.to_vec()
 }
 
@@ -136,6 +144,7 @@ fn valid_handshake(socket_type: &str) -> Vec<u8> {
     let mut wire = null_client_greeting();
     let body = ready_body(socket_type, None, &[]);
     wire.extend_from_slice(&command_frame(&body));
+
     wire
 }
 
@@ -153,12 +162,15 @@ fn client_conn(st: SocketType) -> Connection {
 fn drain(conn: &mut Connection) -> (usize, usize) {
     let mut events = 0;
     let mut msgs = 0;
+
     while conn.poll_event().is_some() {
         events += 1;
     }
+
     while conn.poll_message().is_some() {
         msgs += 1;
     }
+
     (events, msgs)
 }
 
@@ -176,6 +188,7 @@ fn feed_chunked(
         drain(conn);
         pos += chunk;
     }
+
     Ok(())
 }
 
@@ -184,30 +197,38 @@ fn feed_chunked(
 fn capture_handshake(a: &mut Connection, b: &mut Connection) -> (Vec<u8>, Vec<u8>) {
     let mut a_to_b = Vec::new();
     let mut b_to_a = Vec::new();
+
     for _ in 0..20 {
         let a_out = a.poll_transmit();
         let b_out = b.poll_transmit();
+
         if a_out.is_empty() && b_out.is_empty() {
             break;
         }
+
         a_to_b.extend_from_slice(&a_out);
         b_to_a.extend_from_slice(&b_out);
         a.advance_transmit(a_out.len());
         b.advance_transmit(b_out.len());
+
         if !a_to_b.is_empty() {
             let _ = b.handle_input(Bytes::copy_from_slice(&a_to_b));
             a_to_b.clear();
         }
+
         if !b_to_a.is_empty() {
             let _ = a.handle_input(Bytes::copy_from_slice(&b_to_a));
             b_to_a.clear();
         }
+
         drain(a);
         drain(b);
     }
+
     // Capture any final bytes
     let a_final = a.poll_transmit().to_vec();
     let b_final = b.poll_transmit().to_vec();
+
     (a_final, b_final)
 }
 
@@ -221,6 +242,7 @@ fn fuzz_command_decode() {
     for i in 0..iters() {
         let raw = random_bytes(&mut rng, 512);
         let _ = command::decode(Bytes::from(raw));
+
         if i % 50_000 == 0 {
             eprintln!("command iter {i}");
         }
@@ -237,6 +259,7 @@ fn fuzz_handle_input_full_stream() {
         let raw = random_bytes(&mut rng, 4096);
         let _ = conn.handle_input(Bytes::copy_from_slice(&raw));
         drain(&mut conn);
+
         if i % 10_000 == 0 {
             eprintln!("full_stream iter {i}");
         }
@@ -250,6 +273,7 @@ fn fuzz_handle_input_chunked() {
         let mut conn = server_conn(SocketType::Pull);
         let raw = random_bytes(&mut rng, 4096);
         let _ = feed_chunked(&mut conn, &raw, &mut rng, 64);
+
         if i % 10_000 == 0 {
             eprintln!("chunked iter {i}");
         }
@@ -265,12 +289,14 @@ fn fuzz_handle_input_both_roles() {
         } else {
             Role::Client
         };
+
         let st = ALL_SOCKET_TYPES[rng.random_range(0..ALL_SOCKET_TYPES.len())];
         let cfg = ConnectionConfig::new(role, st).mechanism(MechanismSetup::Null);
         let mut conn = Connection::new(cfg);
         let raw = random_bytes(&mut rng, 2048);
         let _ = conn.handle_input(Bytes::copy_from_slice(&raw));
         drain(&mut conn);
+
         if i % 10_000 == 0 {
             eprintln!("both_roles iter {i}");
         }
@@ -282,6 +308,7 @@ fn fuzz_frame_roundtrip() {
     use omq_tokio::message::{Frame, FrameFlags, Payload};
     use omq_tokio::proto::frame::{decode_frame_from_bytes, encode_frame};
     let mut rng = rng();
+
     for i in 0..iters() / 2 {
         let size = match rng.random_range(0..6) {
             0 => 0,
@@ -291,14 +318,17 @@ fn fuzz_frame_roundtrip() {
             4 => rng.random_range(256..=65_536),
             _ => rng.random_range(0..=65_536),
         };
+
         let mut payload = vec![0u8; size];
         rng.fill_bytes(&mut payload);
         let bytes = Bytes::from(payload);
+
         let (more, command) = match rng.random_range(0..3) {
             0 => (false, false),
             1 => (true, false),
             _ => (false, true),
         };
+
         let frame = Frame {
             flags: FrameFlags { more, command },
             payload: Payload::from_bytes(bytes.clone()),
@@ -312,6 +342,7 @@ fn fuzz_frame_roundtrip() {
         assert_eq!(decoded.flags.command, command, "command bit");
         assert_eq!(decoded.payload.as_bytes(), bytes, "payload mismatch");
         assert_eq!(remaining, 0, "decoder left {remaining} bytes pending");
+
         if i % 50_000 == 0 {
             eprintln!("frame_roundtrip iter {i}");
         }
@@ -322,6 +353,7 @@ fn fuzz_frame_roundtrip() {
 fn fuzz_handle_input_perturbed_greeting() {
     let mut rng = rng();
     let base = null_client_greeting();
+
     for i in 0..iters() / 4 {
         let mut buf = base.clone();
         let tail_len = rng.random_range(0..=512);
@@ -329,13 +361,16 @@ fn fuzz_handle_input_perturbed_greeting() {
         rng.fill_bytes(&mut tail);
         buf.extend_from_slice(&tail);
         let flips = rng.random_range(0..=3);
+
         for _ in 0..flips {
             let pos = rng.random_range(0..64);
             buf[pos] = rng.random();
         }
+
         let mut conn = server_conn(SocketType::Pull);
         let _ = conn.handle_input(Bytes::copy_from_slice(&buf));
         drain(&mut conn);
+
         if i % 10_000 == 0 {
             eprintln!("perturbed iter {i}");
         }
@@ -347,9 +382,11 @@ fn fuzz_z85_decode() {
     let mut rng = rng();
     let alphabet: &[u8] =
         b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-:+=^!/*?&<>()[]{}@%$#";
+
     for i in 0..iters() / 4 {
         let len = rng.random_range(0..=256);
         let mut s = String::with_capacity(len);
+
         for _ in 0..len {
             if rng.random_bool(0.9) {
                 s.push(alphabet[rng.random_range(0..alphabet.len())] as char);
@@ -360,6 +397,7 @@ fn fuzz_z85_decode() {
                 }
             }
         }
+
         let _ = z85::decode(&s);
         if i % 50_000 == 0 {
             eprintln!("z85 iter {i}");
@@ -372,16 +410,20 @@ fn fuzz_z85_decode() {
 fn fuzz_lz4_decode() {
     use omq_tokio::proto::transform::lz4::Lz4Decoder;
     let mut rng = rng();
+
     for i in 0..iters() / 4 {
         let mut tx = Lz4Decoder::new();
         let n_parts = rng.random_range(1..=4);
         let mut parts_vec: Vec<Bytes> = Vec::new();
+
         for _ in 0..n_parts {
             let part = random_bytes(&mut rng, 256);
             parts_vec.push(Bytes::from(part));
         }
+
         let msg = Message::multipart(parts_vec);
         let _ = tx.decode(msg);
+
         if i % 10_000 == 0 {
             eprintln!("lz4 iter {i}");
         }
@@ -397,6 +439,7 @@ fn fuzz_endpoint_parse() {
     let schemes = [
         "tcp", "ipc", "inproc", "udp", "ws", "wss", "lz4+tcp", "lz4+ws", "bogus", "",
     ];
+
     for i in 0..iters() / 2 {
         let input = if rng.random_range(0..4) == 0 {
             let scheme = schemes[rng.random_range(0..schemes.len())];
@@ -404,6 +447,7 @@ fn fuzz_endpoint_parse() {
             let tail: String = (0..tail_len)
                 .map(|_| rng.random_range(0x20..0x7f_u8) as char)
                 .collect();
+
             format!("{scheme}://{tail}")
         } else {
             let len = rng.random_range(0..256);
@@ -411,6 +455,7 @@ fn fuzz_endpoint_parse() {
                 .map(|_| rng.random_range(0x20..0x7f_u8) as char)
                 .collect()
         };
+
         let _ = Endpoint::from_str(&input);
         if i % 100_000 == 0 {
             eprintln!("endpoint_parse iter {i}");
@@ -507,6 +552,7 @@ fn fuzz_compress_ws_roundtrip() {
         path: "/".into(),
     }];
     let opts = Options::default();
+
     for i in 0..iters() / 4 {
         let ep = &endpoints[rng.random_range(0..endpoints.len())];
         let (mut enc, mut dec) = MessageEncoder::for_endpoint(ep, &opts)
@@ -514,14 +560,17 @@ fn fuzz_compress_ws_roundtrip() {
             .expect("transform for compressed-ws");
         let n_parts = rng.random_range(1..=4);
         let mut parts: Vec<Bytes> = Vec::new();
+
         for _ in 0..n_parts {
             let len = rng.random_range(0..2048);
             let part: Vec<u8> = (0..len).map(|_| rng.random()).collect();
             parts.push(Bytes::from(part));
         }
+
         let msg = Message::multipart(parts.clone());
         let wires = enc.encode(&msg).expect("encode failed");
         let mut decoded_parts: Vec<Bytes> = Vec::new();
+
         for wire in wires {
             if let Some(decoded) = dec.decode(wire).expect("decode failed") {
                 for j in 0..decoded.len() {
@@ -529,14 +578,17 @@ fn fuzz_compress_ws_roundtrip() {
                 }
             }
         }
+
         assert_eq!(
             parts.len(),
             decoded_parts.len(),
             "part count mismatch at iter {i}"
         );
+
         for (j, (orig, got)) in parts.iter().zip(&decoded_parts).enumerate() {
             assert_eq!(orig, got, "part {j} mismatch at iter {i}");
         }
+
         if i % 50_000 == 0 {
             eprintln!("compress_ws_roundtrip iter {i}");
         }
@@ -578,6 +630,7 @@ fn fuzz_greeting_compliance() {
                 "major {major} + as_server=0 must be accepted"
             );
         }
+
         if i % 10_000 == 0 {
             eprintln!("greeting_compliance iter {i}");
         }
@@ -608,16 +661,20 @@ fn fuzz_null_greeting_output() {
 fn fuzz_handshake_byte_surgery() {
     let mut rng = rng();
     let base = valid_handshake("PULL");
+
     for i in 0..iters() / 4 {
         let mut wire = base.clone();
         let n_flips = rng.random_range(1..=8);
+
         for _ in 0..n_flips {
             let pos = rng.random_range(0..wire.len());
             wire[pos] = rng.random();
         }
+
         let mut conn = server_conn(SocketType::Pull);
         // Deliver one byte at a time — maximizes partial-parse coverage.
         let _ = feed_chunked(&mut conn, &wire, &mut rng, 1);
+
         if i % 10_000 == 0 {
             eprintln!("byte_surgery iter {i}");
         }
@@ -631,15 +688,18 @@ fn fuzz_handshake_byte_surgery() {
 fn fuzz_handshake_truncation() {
     let mut rng = rng();
     let base = valid_handshake("PULL");
+
     for i in 0..iters() / 4 {
         let cut = rng.random_range(0..=base.len());
         let mut conn = server_conn(SocketType::Pull);
+
         // Sometimes deliver as one chunk, sometimes byte-by-byte.
         if rng.random_bool(0.5) {
             let _ = conn.handle_input(Bytes::copy_from_slice(&base[..cut]));
         } else {
             let _ = feed_chunked(&mut conn, &base[..cut], &mut rng, 3);
         }
+
         drain(&mut conn);
         if i % 10_000 == 0 {
             eprintln!("truncation iter {i}");
@@ -672,6 +732,7 @@ fn fuzz_post_handshake_chaos() {
                     let mut f = vec![0x00u8]; // data, short
                     f.push(payload.len() as u8);
                     f.extend_from_slice(&payload);
+
                     f
                 }
                 // Long data frame with huge declared size, tiny actual
@@ -681,6 +742,7 @@ fn fuzz_post_handshake_chaos() {
                     f.extend_from_slice(&declared.to_be_bytes());
                     let actual = random_bytes(&mut rng, 64);
                     f.extend_from_slice(&actual);
+
                     f
                 }
                 // Illegal flag combo: COMMAND | MORE (0x05)
@@ -689,6 +751,7 @@ fn fuzz_post_handshake_chaos() {
                     let mut f = vec![0x05u8]; // COMMAND|MORE — illegal
                     f.push(payload.len() as u8);
                     f.extend_from_slice(&payload);
+
                     f
                 }
                 // Command frame with random body
@@ -710,11 +773,14 @@ fn fuzz_post_handshake_chaos() {
                     command_frame(&body)
                 }
             };
+
             if pull.handle_input(Bytes::from(frame)).is_err() {
                 break;
             }
+
             drain(&mut pull);
         }
+
         if i % 5_000 == 0 {
             eprintln!("post_handshake iter {i}");
         }
@@ -748,16 +814,20 @@ fn fuzz_bidirectional_corruption() {
                 if b.handle_input(Bytes::from(wire)).is_err() {
                     b_err = true;
                 }
+
                 drain(&mut b);
             }
+
             // Corrupt b→a
             if !b_out.is_empty() && !a_err {
                 let wire = corrupt_wire(&b_out, &mut rng);
                 if a.handle_input(Bytes::from(wire)).is_err() {
                     a_err = true;
                 }
+
                 drain(&mut a);
             }
+
             if a_err && b_err {
                 break;
             }
@@ -770,6 +840,7 @@ fn fuzz_bidirectional_corruption() {
                 if a.send_message(&msg).is_err() {
                     break;
                 }
+
                 let wire = a.poll_transmit().to_vec();
                 a.advance_transmit(wire.len());
                 let wire = corrupt_wire(&wire, &mut rng);
@@ -777,6 +848,7 @@ fn fuzz_bidirectional_corruption() {
                 drain(&mut b);
             }
         }
+
         if i % 5_000 == 0 {
             eprintln!("bidirectional iter {i}");
         }
@@ -832,6 +904,7 @@ fn corrupt_wire(data: &[u8], rng: &mut StdRng) -> Vec<u8> {
             }
         }
     }
+
     wire
 }
 
@@ -841,6 +914,7 @@ fn push_ready_prefix() -> BytesMut {
     body.put_u8(5);
     body.put_slice(b"READY");
     put_prop(&mut body, b"Socket-Type", b"PUSH");
+
     body
 }
 
@@ -856,6 +930,7 @@ fn put_prop(body: &mut BytesMut, name: &[u8], value: &[u8]) {
 fn random_name_ready(rng: &mut StdRng) -> Result<command::Command, Error> {
     let name_len: u8 = rng.random_range(0..=20);
     let mut name = Vec::with_capacity(name_len as usize);
+
     for _ in 0..name_len {
         if rng.random_bool(0.5) {
             name.push(VALID_PROP_CHARS[rng.random_range(0..VALID_PROP_CHARS.len())]);
@@ -881,6 +956,7 @@ fn one_byte_name_ready(rng: &mut StdRng) -> Result<command::Command, Error> {
         || byte == b'_'
         || byte == b'.'
         || byte == b'+';
+
     match &r {
         Ok(_) => assert!(valid, "accepted invalid prop name byte 0x{byte:02x}"),
         Err(e) => assert!(!valid, "rejected valid prop name byte 0x{byte:02x}: {e}"),
@@ -902,6 +978,7 @@ fn adversarial_ready(scenario: i32, rng: &mut StdRng) -> Result<command::Command
                 .collect();
             let mut body = push_ready_prefix();
             put_prop(&mut body, &name, b"yes");
+
             command::decode(body.freeze())
         }
         // Duplicate Socket-Type
@@ -915,15 +992,18 @@ fn adversarial_ready(scenario: i32, rng: &mut StdRng) -> Result<command::Command
             let mut body = push_ready_prefix();
             put_prop(&mut body, b"Identity", b"aaa");
             put_prop(&mut body, b"Identity", b"bbb");
+
             command::decode(body.freeze())
         }
         // Many properties (50-200), all valid
         4 => {
             let n_props = rng.random_range(50..=200);
             let mut body = push_ready_prefix();
+
             for j in 0..n_props {
                 put_prop(&mut body, format!("X-Prop-{j}").as_bytes(), b"v");
             }
+
             command::decode(body.freeze())
         }
         // Truncation: build valid properties, cut at random offset
@@ -932,6 +1012,7 @@ fn adversarial_ready(scenario: i32, rng: &mut StdRng) -> Result<command::Command
             put_prop(&mut body, b"X-Foo", b"0123456789");
             let full = body.freeze();
             let cut = rng.random_range(0..=full.len());
+
             command::decode(full.slice(..cut))
         }
         // Declared value length >> actual remaining bytes
@@ -943,6 +1024,7 @@ fn adversarial_ready(scenario: i32, rng: &mut StdRng) -> Result<command::Command
             body.put_u32(rng.random_range(1000..=u16::MAX as u32));
             let actual = random_bytes(rng, 10);
             body.put_slice(&actual);
+
             command::decode(body.freeze())
         }
         // Every possible byte value in a 1-char property name
@@ -965,9 +1047,11 @@ fn fuzz_property_adversarial() {
         if scenario == 2 {
             assert!(result.is_err(), "duplicate Socket-Type must be rejected");
         }
+
         if scenario == 3 {
             assert!(result.is_err(), "duplicate Identity must be rejected");
         }
+
         // scenario 6 (huge declared value) must be rejected (truncated)
         if scenario == 6 {
             assert!(result.is_err(), "declared len >> actual must be rejected");
@@ -1014,9 +1098,11 @@ fn fuzz_greeting_mechanism_mismatch() {
                 raw[12..32].fill(0);
             }
         }
+
         let mut conn = server_conn(SocketType::Pull);
         let _ = conn.handle_input(Bytes::from(raw));
         drain(&mut conn);
+
         if i % 10_000 == 0 {
             eprintln!("mech_mismatch iter {i}");
         }
@@ -1030,6 +1116,7 @@ fn fuzz_greeting_mechanism_mismatch() {
 fn fuzz_greeting_then_hostile_ready() {
     let mut rng = rng();
     let greeting = null_client_greeting();
+
     for i in 0..iters() / 4 {
         let mut wire = greeting.clone();
         // Build a command frame with random body that might or might not
@@ -1037,26 +1124,31 @@ fn fuzz_greeting_then_hostile_ready() {
         let body_len = rng.random_range(0..=512);
         let mut body = vec![0u8; body_len];
         rng.fill_bytes(&mut body);
+
         // 50%: make it look READY-shaped (name_len=5, "READY", then garbage)
         if rng.random_bool(0.5) && body_len >= 6 {
             body[0] = 5;
             body[1..6].copy_from_slice(b"READY");
         }
+
         // 20%: make it ERROR-shaped
         if rng.random_bool(0.2) && body_len >= 6 {
             body[0] = 5;
             body[1..6].copy_from_slice(b"ERROR");
         }
+
         if body_len <= 255 {
             wire.extend_from_slice(&command_frame(&body));
         } else {
             wire.extend_from_slice(&long_command_frame(&body));
         }
+
         // Sometimes append more garbage after the command frame.
         if rng.random_bool(0.3) {
             let tail = random_bytes(&mut rng, 256);
             wire.extend_from_slice(&tail);
         }
+
         let mut conn = server_conn(SocketType::Pull);
         // Sometimes deliver chunked, sometimes all at once.
         if rng.random_bool(0.5) {
@@ -1065,6 +1157,7 @@ fn fuzz_greeting_then_hostile_ready() {
             let _ = conn.handle_input(Bytes::from(wire));
             drain(&mut conn);
         }
+
         if i % 10_000 == 0 {
             eprintln!("hostile_ready iter {i}");
         }
@@ -1078,9 +1171,11 @@ fn fuzz_greeting_then_hostile_ready() {
 fn fuzz_greeting_byte_drip() {
     let mut rng = rng();
     let full = valid_handshake("PULL");
+
     for i in 0..iters() / 4 {
         let mut conn = server_conn(SocketType::Pull);
         let mut ok = true;
+
         for (j, &byte) in full.iter().enumerate() {
             // Occasionally corrupt this byte
             let b = if rng.random_bool(0.05) {
@@ -1088,6 +1183,7 @@ fn fuzz_greeting_byte_drip() {
             } else {
                 byte
             };
+
             // Occasionally send a zero-length input (must be a no-op)
             if rng.random_bool(0.1) {
                 if conn.handle_input(Bytes::new()).is_err() {
@@ -1095,16 +1191,19 @@ fn fuzz_greeting_byte_drip() {
                     break;
                 }
             }
+
             if conn.handle_input(Bytes::copy_from_slice(&[b])).is_err() {
                 ok = false;
                 break;
             }
+
             drain(&mut conn);
             // If we're past greeting (byte 63) and handshake completed, stop
             if j >= GREETING_LEN && conn.is_ready() {
                 break;
             }
         }
+
         let _ = ok;
         if i % 10_000 == 0 {
             eprintln!("byte_drip iter {i}");
@@ -1122,6 +1221,7 @@ fn fuzz_frame_adversarial() {
         let mut push = client_conn(SocketType::Push);
         let mut pull = server_conn(SocketType::Pull);
         capture_handshake(&mut push, &mut pull);
+
         if !pull.is_ready() {
             continue;
         }
@@ -1129,9 +1229,11 @@ fn fuzz_frame_adversarial() {
         // Build adversarial frames and feed them
         let n_frames = rng.random_range(1..=10);
         let mut wire = Vec::new();
+
         for _ in 0..n_frames {
             let flags: u8 = rng.random();
             let is_long = flags & 0x02 != 0;
+
             if is_long {
                 wire.push(flags);
                 let size: u64 = match rng.random_range(0..4) {
@@ -1140,6 +1242,7 @@ fn fuzz_frame_adversarial() {
                     2 => rng.random_range(256..=65536),
                     _ => rng.random_range(0..=u32::MAX as u64),
                 };
+
                 wire.extend_from_slice(&size.to_be_bytes());
                 // Only provide a small amount of actual payload
                 let actual = rng.random_range(0..=64).min(size as usize);
@@ -1162,6 +1265,7 @@ fn fuzz_frame_adversarial() {
         } else {
             let _ = feed_chunked(&mut pull, &wire, &mut rng, 8);
         }
+
         drain(&mut pull);
         if i % 5_000 == 0 {
             eprintln!("frame_adversarial iter {i}");
@@ -1180,6 +1284,7 @@ fn fuzz_message_roundtrip_corrupt() {
         let mut push = client_conn(SocketType::Push);
         let mut pull = server_conn(SocketType::Pull);
         capture_handshake(&mut push, &mut pull);
+
         if !push.is_ready() {
             continue;
         }
@@ -1187,15 +1292,18 @@ fn fuzz_message_roundtrip_corrupt() {
         // Send 1-5 messages, collect all wire bytes
         let n_msgs = rng.random_range(1..=5);
         let mut original_payloads: Vec<Vec<u8>> = Vec::new();
+
         for _ in 0..n_msgs {
             let n_parts = rng.random_range(1..=4);
             let parts: Vec<Vec<u8>> = (0..n_parts).map(|_| random_bytes(&mut rng, 256)).collect();
             let msg = Message::multipart(parts.iter().map(|p| Bytes::from(p.clone())));
             original_payloads.push(parts.into_iter().flatten().collect());
+
             if push.send_message(&msg).is_err() {
                 break;
             }
         }
+
         let wire = push.poll_transmit().to_vec();
         push.advance_transmit(wire.len());
 
@@ -1208,6 +1316,7 @@ fn fuzz_message_roundtrip_corrupt() {
         } else {
             let _ = feed_chunked(&mut pull, &corrupted, &mut rng, 32);
         }
+
         drain(&mut pull);
         if i % 5_000 == 0 {
             eprintln!("msg_corrupt iter {i}");
@@ -1231,6 +1340,7 @@ fn fuzz_interleaved_streams() {
         // Interleave bytes from all streams into one Franken-stream
         let mut franken = Vec::new();
         let mut positions: Vec<usize> = vec![0; n_streams];
+
         while positions.iter().zip(&streams).any(|(p, s)| *p < s.len()) {
             let stream_idx = rng.random_range(0..n_streams);
             if positions[stream_idx] < streams[stream_idx].len() {
@@ -1246,6 +1356,7 @@ fn fuzz_interleaved_streams() {
 
         let mut conn = server_conn(SocketType::Pull);
         let _ = feed_chunked(&mut conn, &franken, &mut rng, 32);
+
         if i % 5_000 == 0 {
             eprintln!("interleaved iter {i}");
         }
@@ -1258,11 +1369,13 @@ fn fuzz_interleaved_streams() {
 fn fuzz_replay_attack() {
     let mut rng = rng();
     let handshake = valid_handshake("PULL");
+
     for i in 0..iters() / 8 {
         let mut conn = server_conn(SocketType::Pull);
         if conn.handle_input(Bytes::from(handshake.clone())).is_err() {
             continue;
         }
+
         drain(&mut conn);
 
         // Replay: send the handshake bytes again
@@ -1278,6 +1391,7 @@ fn fuzz_replay_attack() {
         let garbage = random_bytes(&mut rng, 512);
         let _ = conn.handle_input(Bytes::from(garbage));
         drain(&mut conn);
+
         if i % 5_000 == 0 {
             eprintln!("replay iter {i}");
         }
@@ -1297,6 +1411,7 @@ fn fuzz_message_size_boundary() {
         let mut pull = Connection::new(cfg);
         let mut push = client_conn(SocketType::Push);
         capture_handshake(&mut push, &mut pull);
+
         if !push.is_ready() {
             continue;
         }
@@ -1306,9 +1421,11 @@ fn fuzz_message_size_boundary() {
             let size = (max_size as i64 + delta).max(0) as usize;
             let payload = vec![0xAA; size];
             let msg = Message::single(Bytes::from(payload));
+
             if push.send_message(&msg).is_err() {
                 continue;
             }
+
             let wire = push.poll_transmit().to_vec();
             push.advance_transmit(wire.len());
 
@@ -1322,12 +1439,15 @@ fn fuzz_message_size_boundary() {
                 );
                 push = client_conn(SocketType::Push);
                 capture_handshake(&mut push, &mut pull);
+
                 if !push.is_ready() {
                     break;
                 }
             }
+
             drain(&mut pull);
         }
+
         if i % 5_000 == 0 {
             eprintln!("size_boundary iter {i}");
         }
@@ -1349,6 +1469,7 @@ mod mech_fuzz {
         g[10] = 0x03;
         g[11] = 0x01;
         g[12..12 + mech_name.len()].copy_from_slice(mech_name);
+
         // as-server at offset 32 is implicitly 0 from zero-init.
         g
     }
@@ -1358,6 +1479,7 @@ mod mech_fuzz {
     fn fuzz_curve_server_input() {
         use omq_tokio::{CurveKeypair, CurveServerOptions};
         let mut rng = rng();
+
         for i in 0..iters() / 8 {
             let kp = CurveKeypair::generate();
             let cfg = ConnectionConfig::new(Role::Server, SocketType::Pull).mechanism(
@@ -1370,6 +1492,7 @@ mod mech_fuzz {
             let raw = random_bytes(&mut rng, 1024);
             let _ = conn.handle_input(Bytes::copy_from_slice(&raw));
             drain(&mut conn);
+
             if i % 5_000 == 0 {
                 eprintln!("curve iter {i}");
             }
@@ -1382,6 +1505,7 @@ mod mech_fuzz {
         use omq_tokio::{CurveKeypair, CurveServerOptions};
         let greeting = greeting_bytes(b"CURVE");
         let mut rng = rng();
+
         for i in 0..iters() / 8 {
             let kp = CurveKeypair::generate();
             let cfg = ConnectionConfig::new(Role::Server, SocketType::Pull).mechanism(
@@ -1392,6 +1516,7 @@ mod mech_fuzz {
             );
             let mut conn = Connection::new(cfg);
             let _ = conn.handle_input(Bytes::copy_from_slice(&greeting));
+
             let body_len = rng.random_range(0..=256);
             let mut body = Vec::with_capacity(1 + 5 + body_len);
             body.push(5);
@@ -1399,9 +1524,11 @@ mod mech_fuzz {
             let mut tail = vec![0u8; body_len];
             rng.fill_bytes(&mut tail);
             body.extend_from_slice(&tail);
+
             let frame = long_command_frame(&body);
             let _ = conn.handle_input(Bytes::copy_from_slice(&frame));
             drain(&mut conn);
+
             if i % 5_000 == 0 {
                 eprintln!("curve hello iter {i}");
             }

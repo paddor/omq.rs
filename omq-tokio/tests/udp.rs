@@ -16,11 +16,13 @@ async fn dish_on_loopback() -> (Socket, Endpoint) {
     })
     .await
     .unwrap();
+
     let port = loop {
         let ev = tokio::time::timeout(Duration::from_millis(500), mon.recv())
             .await
             .unwrap()
             .unwrap();
+
         if let MonitorEvent::Listening {
             endpoint: Endpoint::Udp { port, .. },
         } = ev
@@ -28,11 +30,13 @@ async fn dish_on_loopback() -> (Socket, Endpoint) {
             break port;
         }
     };
+
     let connect_ep = Endpoint::Udp {
         group: None,
         host: Host::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST)),
         port,
     };
+
     (dish, connect_ep)
 }
 
@@ -40,6 +44,7 @@ fn udp_port(endpoint: &Endpoint) -> u16 {
     let Endpoint::Udp { port, .. } = endpoint else {
         panic!("not a UDP endpoint: {endpoint}");
     };
+
     *port
 }
 

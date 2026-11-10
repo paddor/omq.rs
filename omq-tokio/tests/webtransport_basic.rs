@@ -35,6 +35,7 @@ fn server_options(tls: &Tls) -> Options {
     options.quic.server_cert_pem = Some(tls.cert.clone());
     options.quic.server_key_pem = Some(tls.key.clone());
     options.quic.allowed_origins = vec!["https://app.example.com".into()];
+
     options
 }
 
@@ -66,6 +67,7 @@ impl WebTransportPeer {
             .with_no_client_auth();
         tls.alpn_protocols = vec![b"h3".to_vec()];
         let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls).unwrap();
+
         let mut config = quinn::ClientConfig::new(Arc::new(crypto));
         let mut transport = quinn::TransportConfig::default();
         transport
@@ -74,6 +76,7 @@ impl WebTransportPeer {
             .datagram_receive_buffer_size(Some(64 * 1024))
             .datagram_send_buffer_size(64 * 1024);
         config.transport_config(Arc::new(transport));
+
         let endpoint =
             quinn::Endpoint::client(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).unwrap();
         let remote = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
@@ -82,6 +85,7 @@ impl WebTransportPeer {
             .unwrap()
             .await
             .unwrap();
+
         let url: url::Url = format!("https://127.0.0.1:{port}/omq").parse().unwrap();
         let session = omq_webtrans_quinn::Session::connect_with_origin(
             connection,
@@ -90,10 +94,12 @@ impl WebTransportPeer {
         )
         .await
         .unwrap();
+
         let (mut data_send, data_recv) = session.open_bi().await.unwrap();
         let (mut liveness_send, liveness_recv) = session.open_bi().await.unwrap();
         data_send.write_all(DATA_PREFACE).await.unwrap();
         liveness_send.write_all(LIVENESS_PREFACE).await.unwrap();
+
         let mut peer = Self {
             _endpoint: endpoint,
             _session: session,
@@ -103,9 +109,11 @@ impl WebTransportPeer {
             _liveness_recv: liveness_recv,
             codec: Connection::new(ConnectionConfig::new(Role::Client, socket_type)),
         };
+
         tokio::time::timeout(Duration::from_secs(5), peer.handshake())
             .await
             .expect("WebTransport ZMTP handshake timed out");
+
         peer
     }
 
@@ -115,6 +123,7 @@ impl WebTransportPeer {
             if bytes.is_empty() {
                 break;
             }
+
             self.data_send.write_all(&bytes).await.unwrap();
             self.codec.advance_transmit(bytes.len());
         }
@@ -138,6 +147,7 @@ impl WebTransportPeer {
             self.flush().await;
             self.read().await;
         }
+
         self.flush().await;
     }
 
@@ -152,6 +162,7 @@ impl WebTransportPeer {
                 if let Some(message) = self.codec.poll_message() {
                     return message;
                 }
+
                 self.read().await;
                 self.flush().await;
             }

@@ -20,6 +20,9 @@ mod pipe;
 use drain::{DrainLimit, DrainResult, DrainState, RingDrain, drain_peer_source};
 pub(crate) use pipe::{ConflateRecvSlot, RecvPipeEnds, SharedRecvPipe, recv_pipe};
 
+pub use crate::engine::signal::BlockingRecvCancel;
+pub(crate) use crate::engine::signal::BlockingSignal as BlockingRecvWaker;
+
 /// Shared recv data signal. All inproc producers mark this.
 pub(crate) type SpscRecvSignal = Arc<DataSignal>;
 
@@ -39,9 +42,6 @@ pub(crate) fn recv_budget_bytes(message: &Message) -> usize {
         _ => RECV_BATCH_BYTES + 1,
     }
 }
-
-pub use crate::engine::signal::BlockingRecvCancel;
-pub(crate) use crate::engine::signal::BlockingSignal as BlockingRecvWaker;
 
 /// Bumped by the actor whenever the consumers Vec changes. Lets
 /// `SpscAwareRecv` skip re-cloning the Vec when nothing changed.
@@ -133,6 +133,7 @@ impl SpscHandles {
             receive,
             self.receive_handles.clone(),
         )));
+
         routes
     }
 
@@ -140,6 +141,7 @@ impl SpscHandles {
         let recv_signal = Arc::new(DataSignal::new());
         let conflate_slot = conflate_recv
             .then(|| ConflateRecvSlot::new(recv_signal.clone(), blocking_recv_waker.clone()));
+
         Self {
             receive_handles: Weak::new(),
             fanin: None,
@@ -159,11 +161,13 @@ impl SpscHandles {
             if tc.peer_id != peer_id {
                 return true;
             }
+
             let keep = tc
                 .consumer
                 .try_lock()
                 .is_none_or(|consumer| !consumer.is_empty());
             removed |= !keep;
+
             keep
         });
 
@@ -210,11 +214,13 @@ impl SpscAwareRecv {
         {
             return fanin.recv_with_receipt(source).await;
         }
+
         let peer = self.handles.peer_recv.as_ref().ok_or_else(|| {
             Error::Protocol(
                 "receipt receive requires native PEER, PULL, or GATHER without conflate".into(),
             )
         })?;
+
         super::peer_recv::PeerReceiver::recv_with_receipt(peer, source).await
     }
 
@@ -230,11 +236,13 @@ impl SpscAwareRecv {
         {
             return fanin.try_recv_with_receipt(source);
         }
+
         let peer = self.handles.peer_recv.as_ref().ok_or_else(|| {
             Error::Protocol(
                 "receipt receive requires native PEER, PULL, or GATHER without conflate".into(),
             )
         })?;
+
         peer.lock().try_recv_with_receipt(source)
     }
 
@@ -251,6 +259,7 @@ impl SpscAwareRecv {
         {
             return fanin.unshift(receipt, message);
         }
+
         let Some(peer) = &self.handles.peer_recv else {
             return Err(super::peer_recv::UnshiftError {
                 error: Error::Protocol(
@@ -259,6 +268,7 @@ impl SpscAwareRecv {
                 message,
             });
         };
+
         peer.lock().unshift(receipt, message)
     }
 
@@ -267,6 +277,7 @@ impl SpscAwareRecv {
         let spin_single = handles.fanin.is_none()
             && handles.peer_recv.is_none()
             && handles.conflate_slot.is_none();
+
         let drain_state = ReceiveCell::new(
             DrainState {
                 generation: u64::MAX,
@@ -279,6 +290,7 @@ impl SpscAwareRecv {
             },
             handles.receive_handles.clone(),
         );
+
         Self {
             handles,
             tuning,
@@ -295,12 +307,14 @@ impl SpscAwareRecv {
         if self.handles.fanin.is_some() && !self.has_ring_sources() {
             return true;
         }
+
         if self.handles.peer_recv.is_some() {
             // The PEER drain clears or rearms its signal before reporting
             // empty. Its message permits also count held receipts and paused
             // lanes, which no drain returns, so they must not prevent parking.
             return true;
         }
+
         let guard = self.drain_state.lock();
         Self::state_is_empty(&guard) && self.conflate_slot_empty()
     }
@@ -350,6 +364,7 @@ impl SpscAwareRecv {
         // Set once a signal wake led here. A woken receiver that takes a
         // message passes the wake on to other parked receivers.
         let mut woken = false;
+
         loop {
             if let Some(result) = self.try_deliver(woken) {
                 return result;
@@ -391,12 +406,14 @@ impl SpscAwareRecv {
                     .as_deref()
                     .filter(|fanin| fanin.source_aware())
                     .map(super::fanin::Fanin::wait);
+
                 tokio::select! {
                     biased;
                     () = &mut recv_ready => {}
                     () = &mut pipe_ready => {}
                     () = &mut activated => {}
                 }
+
                 woken = true;
                 continue;
             }
@@ -410,6 +427,7 @@ impl SpscAwareRecv {
                 () = &mut pipe_ready => {}
                 () = &mut activated => {}
             }
+
             woken = true;
         }
     }
@@ -440,6 +458,7 @@ impl SpscAwareRecv {
             self.handles.recv_signal.hand_off();
             self.recv_pipe_notify.hand_off();
         }
+
         msg
     }
 
@@ -457,6 +476,7 @@ impl SpscAwareRecv {
         {
             return fanin.try_recv();
         }
+
         match self.try_drain() {
             DrainResult::Message(msg) => Ok(msg),
             DrainResult::Closed => Err(Error::Closed),
@@ -477,12 +497,15 @@ impl SpscAwareRecv {
         if let Some(peer) = &self.handles.peer_recv {
             return peer.lock().try_recv_many_after_first(max, out);
         }
+
         let mut budget = DrainBudget::new(max.min(RECV_BATCH_MESSAGES), RECV_BATCH_BYTES);
         let first = out.last().expect("first message already received");
+
         if !budget.account(recv_budget_bytes(first)) {
             self.release_partial_batches(&mut self.drain_state.lock());
             return Ok(0);
         }
+
         self.try_recv_many_into_budget(max - 1, out, budget)
     }
 
@@ -496,20 +519,24 @@ impl SpscAwareRecv {
             if max == 0 {
                 return Ok(0);
             }
+
             if !self.has_ring_sources() {
                 return fanin.recv_into(out, budget, self.tuning.batching);
             }
+
             // Split the call's budget between the fan-in queue and the
             // per-peer rings, alternating which one goes first.
             let limit = budget.remaining_msgs();
             let start_len = out.len();
             let rings_first = self.rings_first.fetch_xor(true, Ordering::Relaxed);
+
             if rings_first {
                 match self.try_recv_many_queues(limit, out, budget) {
                     Ok(_) | Err(Error::WouldBlock | Error::Closed) => {}
                     Err(error) => return Err(error),
                 }
             }
+
             let taken = out.len() - start_len;
             if taken < limit {
                 let rest = DrainBudget::new(limit - taken, RECV_BATCH_BYTES);
@@ -518,6 +545,7 @@ impl SpscAwareRecv {
                     Err(error) => return Err(error),
                 }
             }
+
             let taken = out.len() - start_len;
             if !rings_first && taken < limit {
                 let rest = DrainBudget::new(limit - taken, RECV_BATCH_BYTES);
@@ -526,11 +554,13 @@ impl SpscAwareRecv {
                     Err(error) => return Err(error),
                 }
             }
+
             return match out.len() - start_len {
                 0 => Err(Error::WouldBlock),
                 count => Ok(count),
             };
         }
+
         self.try_recv_many_queues(max, out, budget)
     }
 
@@ -543,13 +573,16 @@ impl SpscAwareRecv {
         if let Some(peer) = &self.handles.peer_recv {
             return peer.lock().try_recv_many_into(max, out);
         }
+
         let start_len = out.len();
         if max == 0 {
             return Ok(0);
         }
+
         if let Some(msg) = self.take_conflate_message() {
             let _ = budget.account(recv_budget_bytes(&msg));
             out.push(msg);
+
             if budget.exhausted() {
                 return Ok(out.len() - start_len);
             }
@@ -560,9 +593,11 @@ impl SpscAwareRecv {
             let Some(msg) = guard.batch.pop_front() else {
                 break;
             };
+
             let _ = budget.account(recv_budget_bytes(&msg));
             out.push(msg);
         }
+
         if budget.exhausted() {
             self.release_partial_batches(&mut guard);
             return Ok(out.len() - start_len);
@@ -584,6 +619,7 @@ impl SpscAwareRecv {
         let pipe_disconnected = state.recv_consumer.is_disconnected();
         let has_peers = !state.tcp.is_empty();
         let all_empty = Self::state_is_empty(state) && self.conflate_slot_empty();
+
         if out.len() == start_len
             && all_empty
             && (self.handles.recv_signal.clear_after(all_empty)
@@ -593,6 +629,7 @@ impl SpscAwareRecv {
         {
             self.handles.blocking_recv_waker.wake();
         }
+
         drop(guard);
 
         if has_disconnected {
@@ -613,23 +650,28 @@ impl SpscAwareRecv {
         if let Some(fanin) = &self.handles.fanin {
             fanin.close();
         }
+
         if let Some(peer) = &self.handles.peer_recv {
             peer.lock().shutdown();
         }
+
         {
             let mut state = self.drain_state.lock();
             while state.recv_consumer.prefetch() > 0 {
                 while state.recv_consumer.pop().is_some() {}
                 state.recv_consumer.release();
             }
+
             state.batch.clear();
             state.tcp.clear();
             state.generation = u64::MAX;
         }
+
         self.handles.tcp_consumers.write().unwrap().clear();
         if let Some(slot) = &self.handles.conflate_slot {
             slot.close();
         }
+
         self.recv_pipe_space.notify_changed();
     }
 }

@@ -30,6 +30,7 @@ impl Options {
             our_keypair,
             options,
         };
+
         self
     }
 
@@ -45,6 +46,7 @@ impl Options {
             our_keypair,
             server_public,
         };
+
         self
     }
 
@@ -61,6 +63,7 @@ impl Options {
         self.mechanism = MechanismSetup::PlainServer {
             authenticator: Authenticator::new(f),
         };
+
         self
     }
 
@@ -81,6 +84,7 @@ impl Options {
         self.mechanism = MechanismSetup::PlainServer {
             authenticator: Authenticator::plain_credentials(credentials),
         };
+
         self
     }
 
@@ -97,6 +101,7 @@ impl Options {
             username: username.into(),
             password: password.into(),
         };
+
         self
     }
 }

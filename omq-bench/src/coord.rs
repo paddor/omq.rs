@@ -29,6 +29,7 @@ impl CoordSocket {
         let endpoint = coord_ipc_endpoint();
         let ep: omq_tokio::Endpoint = endpoint.parse().unwrap();
         sock.bind(ep).expect("coord bind");
+
         Self { sock, endpoint }
     }
 
@@ -39,11 +40,13 @@ impl CoordSocket {
     pub(crate) fn recv_ready_port(&self, timeout: Duration) -> Option<u16> {
         let sock = self.sock.clone();
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
+
         std::thread::spawn(move || {
             if let Ok(msg) = sock.recv() {
                 tx.send(msg).ok();
             }
         });
+
         let msg = rx.recv_timeout(timeout).ok()?;
         parse_ready_port(&msg)
     }

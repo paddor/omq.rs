@@ -10,6 +10,11 @@ use std::time::Duration;
 
 use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
 
+const STRESS_CHANNEL_CAPACITY: usize = 32;
+const STRESS_BATCH: u32 = 2048;
+const STRESS_PAYLOAD_BYTES: usize = 28;
+const STRESS_SOCKET_HWM: u32 = 32;
+
 fn inproc_ep(name: &str) -> Endpoint {
     Endpoint::Inproc { name: name.into() }
 }
@@ -19,15 +24,11 @@ fn free_tcp_port() -> u16 {
     listener.local_addr().unwrap().port()
 }
 
-const STRESS_CHANNEL_CAPACITY: usize = 32;
-const STRESS_BATCH: u32 = 2048;
-const STRESS_PAYLOAD_BYTES: usize = 28;
-const STRESS_SOCKET_HWM: u32 = 32;
-
 fn encode_stress_message(id: u32, payload: &[u8]) -> Message {
     let mut buf = Vec::with_capacity(4 + payload.len());
     buf.extend_from_slice(&id.to_be_bytes());
     buf.extend_from_slice(payload);
+
     Message::from_slice(&buf)
 }
 
@@ -41,6 +42,7 @@ async fn recv_body_string(sock: &Socket) -> String {
         .await
         .expect("recv timed out")
         .unwrap();
+
     String::from_utf8(msg.part_bytes(0).unwrap().to_vec()).unwrap()
 }
 
@@ -177,21 +179,26 @@ fn blocking_credit_case(tcp: bool, io_threads: usize, hwm: u32) {
 
     const BURSTS: [u32; 5] = [1, 3, 33, 257, 1025];
     let receiver_ctx = Context::with_config(ContextConfig { io_threads });
+
     let sender_ctx = if tcp {
         Context::with_config(ContextConfig { io_threads })
     } else {
         receiver_ctx.clone()
     };
+
     let pull = receiver_ctx.blocking_socket(SocketType::Pull, Options::default().recv_hwm(hwm));
     let push = sender_ctx.blocking_socket(SocketType::Push, Options::default().send_hwm(hwm));
+
     let endpoint = if tcp {
         "tcp://127.0.0.1:0".parse().unwrap()
     } else {
         inproc_ep("single-recv-credits")
     };
+
     push.connect(pull.bind(endpoint).unwrap()).unwrap();
     pull.wait_connected(1, Duration::from_secs(2)).unwrap();
     let (ack_tx, ack_rx) = std::sync::mpsc::channel();
+
     std::thread::scope(|scope| {
         let sender = scope.spawn(move || {
             let mut seq = 0u32;
@@ -205,14 +212,18 @@ fn blocking_credit_case(tcp: bool, io_threads: usize, hwm: u32) {
                             Err(TrySendError::Full(returned)) => message = returned,
                             Err(error) => panic!("send failed: {error}"),
                         }
+
                         assert!(std::time::Instant::now() < deadline, "send stayed muted");
                         std::thread::yield_now();
                     }
+
                     seq += 1;
                 }
+
                 ack_rx.recv_timeout(Duration::from_secs(5)).unwrap();
             }
         });
+
         let mut seq = 0u32;
         for count in BURSTS {
             for _ in 0..count {
@@ -220,6 +231,7 @@ fn blocking_credit_case(tcp: bool, io_threads: usize, hwm: u32) {
                 assert_eq!(message.part_slice(0).unwrap(), &seq.to_be_bytes());
                 seq += 1;
             }
+
             // Force a park after a partial batch before allowing more sends.
             assert!(matches!(
                 pull.recv_timeout(Duration::from_millis(1)),
@@ -227,8 +239,10 @@ fn blocking_credit_case(tcp: bool, io_threads: usize, hwm: u32) {
             ));
             ack_tx.send(()).unwrap();
         }
+
         sender.join().unwrap();
     });
+
     sender_ctx.term();
     receiver_ctx.term();
 }
@@ -247,6 +261,7 @@ async fn push_round_robin_delivers_two_rounds_to_each_pull() {
         pull.connect(ep.clone()).await.unwrap();
         pulls.push(pull);
     }
+
     push.wait_connected(PULLS, Duration::from_secs(1))
         .await
         .expect("PUSH did not see all PULLs");
@@ -254,6 +269,7 @@ async fn push_round_robin_delivers_two_rounds_to_each_pull() {
     for _ in 0..PULLS {
         push.send(Message::single("ABC")).await.unwrap();
     }
+
     for _ in 0..PULLS {
         push.send(Message::single("DEF")).await.unwrap();
     }
@@ -278,6 +294,7 @@ async fn pull_fair_queues_first_batch_before_second_batch() {
         push.connect(ep.clone()).await.unwrap();
         pushes.push(push);
     }
+
     pull.wait_connected(PUSHES, Duration::from_secs(1))
         .await
         .expect("PULL did not see all PUSHes");
@@ -295,6 +312,7 @@ async fn pull_fair_queues_first_batch_before_second_batch() {
     for _ in 0..PUSHES {
         first_batch.insert(recv_body_string(&pull).await);
     }
+
     assert_eq!(
         first_batch,
         (0..PUSHES)
@@ -306,6 +324,7 @@ async fn pull_fair_queues_first_batch_before_second_batch() {
     for _ in 0..PUSHES {
         second_batch.insert(recv_body_string(&pull).await);
     }
+
     assert_eq!(
         second_batch,
         (0..PUSHES)
@@ -334,6 +353,7 @@ async fn push_tcp_single_pull_preserves_startup_order() {
                     .await
                     .unwrap();
             }
+
             push
         });
 
@@ -404,6 +424,7 @@ async fn push_pull_persistent_actor_loop_does_not_stall() {
                 let got = pull_rx_owned.recv().await.expect("pull channel");
                 assert_eq!(got, expected, "iteration {iteration}: message reordered");
             }
+
             pull_rx_owned
         });
 
@@ -426,6 +447,7 @@ fn spawn_stress_reader(pull: Socket) -> tokio::sync::mpsc::Receiver<u32> {
             }
         }
     });
+
     pull_rx
 }
 
@@ -447,6 +469,7 @@ fn spawn_stress_writer(push: Socket) -> tokio::sync::mpsc::Sender<(u32, Vec<u8>)
             }
         }
     });
+
     tokio::spawn(async move {
         while let Some(msg) = writer_rx.recv().await {
             push.send(msg).await.expect("send");
@@ -469,6 +492,7 @@ async fn push_pull_multi_peer_distributes() {
     let pulls: Vec<Socket> = (0..3)
         .map(|_| Socket::new(SocketType::Pull, Options::default()))
         .collect();
+
     for p in &pulls {
         p.connect(ep.clone()).await.unwrap();
     }
@@ -484,6 +508,7 @@ async fn push_pull_multi_peer_distributes() {
         .map(|_| Arc::new(AtomicUsize::new(0)))
         .collect();
     let mut handles = Vec::new();
+
     for (p, c) in pulls.into_iter().zip(counts.iter().cloned()) {
         let c = c.clone();
         handles.push(tokio::spawn(async move {
@@ -497,6 +522,7 @@ async fn push_pull_multi_peer_distributes() {
             }
         }));
     }
+
     for h in handles {
         let _ = h.await;
     }
@@ -551,6 +577,7 @@ async fn push_pull_slow_peer_does_not_block_fast() {
             }
         }
     });
+
     let sc = slow_count.clone();
     let slow_task = tokio::spawn(async move {
         loop {
@@ -617,6 +644,7 @@ async fn push_pull_under_backpressure_delivers_everything() {
             }
         }
     });
+
     let sc = slow_count.clone();
     let slow_task = tokio::spawn(async move {
         loop {
@@ -679,9 +707,11 @@ async fn push_tcp_send_before_peer_connects_waits_for_pipe() {
             for i in 0..5 {
                 push.send(Message::single(format!("early-{i}"))).await?;
             }
+
             omq_tokio::Result::<()>::Ok(())
         }
     });
+
     assert!(
         tokio::time::timeout(Duration::from_millis(100), &mut send_task)
             .await
@@ -702,6 +732,7 @@ async fn push_tcp_send_before_peer_connects_waits_for_pipe() {
         let expected = format!("early-{i}");
         assert_eq!(m.part_bytes(0).unwrap(), expected.as_bytes());
     }
+
     tokio::time::timeout(Duration::from_secs(1), send_task)
         .await
         .expect("send task did not finish after TCP peer connected")
@@ -747,16 +778,19 @@ async fn push_tcp_multi_pull_distributes() {
 
     let counts: Vec<Arc<AtomicUsize>> = (0..3).map(|_| Arc::new(AtomicUsize::new(0))).collect();
     let mut handles = Vec::new();
+
     for c in &counts {
         let p = Socket::new(SocketType::Pull, Options::default());
         p.connect(test_support::tcp_loopback(port)).await.unwrap();
         let c = c.clone();
+
         handles.push(tokio::spawn(async move {
             while let Ok(Ok(_)) = tokio::time::timeout(Duration::from_millis(500), p.recv()).await {
                 c.fetch_add(1, Ordering::SeqCst);
             }
         }));
     }
+
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     for i in 0..N {
@@ -780,6 +814,7 @@ async fn push_keeps_sending_to_a_fast_peer_while_another_stalls() {
     let push = Socket::new(SocketType::Push, options.clone());
     let slow = Socket::new(SocketType::Pull, options.clone());
     let fast = Socket::new(SocketType::Pull, options);
+
     let slow_ep = slow.bind("tcp://127.0.0.1:0").await.unwrap();
     let fast_ep = fast.bind("tcp://127.0.0.1:0").await.unwrap();
     push.connect(slow_ep).await.unwrap();
@@ -787,13 +822,16 @@ async fn push_keeps_sending_to_a_fast_peer_while_another_stalls() {
     push.wait_connected(2, Duration::from_secs(2))
         .await
         .unwrap();
+
     let reader = tokio::spawn(async move { while fast.recv().await.is_ok() {} });
+
     // Large bodies fill the stalled peer's TCP buffers quickly. Once both
     // pipes have been full, a sender parked on the stalled pipe alone would
     // never see the fast pipe drain.
     let body = bytes::Bytes::from(vec![7u8; 256 * 1024]);
     let started = std::time::Instant::now();
     let mut sent = 0;
+
     while started.elapsed() < Duration::from_secs(1) {
         tokio::time::timeout(
             Duration::from_secs(2),
@@ -804,6 +842,7 @@ async fn push_keeps_sending_to_a_fast_peer_while_another_stalls() {
         .unwrap();
         sent += 1;
     }
+
     reader.abort();
     drop(slow);
 }
@@ -815,6 +854,7 @@ async fn push_resumes_once_an_inproc_connect_backlog_moves_into_the_ring() {
     let push = Socket::new(SocketType::Push, options);
     pull.bind(inproc_ep("backlog-batches")).await.unwrap();
     push.connect(inproc_ep("backlog-batches")).await.unwrap();
+
     for round in 0u32..128 {
         for index in 0u32..16 {
             tokio::time::timeout(
@@ -830,6 +870,7 @@ async fn push_resumes_once_an_inproc_connect_backlog_moves_into_the_ring() {
             })
             .unwrap();
         }
+
         for _ in 0..16 {
             pull.recv().await.unwrap();
         }

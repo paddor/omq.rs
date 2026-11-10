@@ -99,6 +99,7 @@ impl Pong {
         debug_assert!(payload.len() <= 125);
         let mut data = [0; 125];
         data[..payload.len()].copy_from_slice(payload);
+
         Self {
             data,
             len: payload.len() as u8,

@@ -31,6 +31,7 @@ async fn wait_for_handshakes(monitor: &mut omq_tokio::MonitorStream, count: usiz
             .await
             .expect("handshake timeout")
             .unwrap();
+
         if matches!(event, MonitorEvent::HandshakeSucceeded { .. }) {
             seen += 1;
         }
@@ -43,6 +44,7 @@ async fn wait_for_rate_limit_disconnect(monitor: &mut omq_tokio::MonitorStream) 
             .await
             .expect("disconnect timeout")
             .unwrap();
+
         if let MonitorEvent::Disconnected {
             reason: DisconnectReason::Error(reason),
             ..

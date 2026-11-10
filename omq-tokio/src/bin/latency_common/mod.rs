@@ -68,11 +68,13 @@ impl SocketPair {
             "throughput" => options.workload_profile(WorkloadProfile::Throughput),
             other => panic!("unknown OMQ_BENCH_WORKLOAD_PROFILE: {other}"),
         };
+
         let kind = if requester {
             self.requester()
         } else {
             self.responder()
         };
+
         options
             .identity(Bytes::from_static(if requester {
                 REQUESTER
@@ -99,24 +101,28 @@ impl SocketPair {
         } else {
             self.responder()
         };
+
         let routed = matches!(kind, SocketType::Router | SocketType::Peer);
         assert_eq!(
             message.len(),
             if routed { 2 } else { 1 },
             "wrong frame count for {self:?}"
         );
+
         if routed {
             assert_eq!(
                 message.get(0).unwrap(),
                 if reply { RESPONDER } else { REQUESTER }
             );
         }
+
         if kind == SocketType::Server {
             assert!(
                 message.routing_id().is_some(),
                 "SERVER request has no routing id"
             );
         }
+
         let body = message.get(usize::from(routed)).unwrap();
         assert_eq!(body.len(), size, "wrong body length for {self:?}");
         assert!(
@@ -144,49 +150,10 @@ fn percentile(sorted: &[u64], p: f64) -> f64 {
     if sorted.is_empty() {
         return 0.0;
     }
+
     let idx = ((sorted.len() as f64 * p / 100.0) as usize).min(sorted.len() - 1);
     sorted[idx] as f64 / 1_000.0
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn every_pair_preserves_its_reply_route() {
-        let ctx = omq_tokio::Context::new();
-        for pair in [
-            SocketPair::ReqRep,
-            SocketPair::RouterDealer,
-            SocketPair::RouterRouter,
-            SocketPair::Pair,
-            SocketPair::ClientServer,
-            SocketPair::Peer,
-            SocketPair::Channel,
-        ] {
-            let responder =
-                ctx.blocking_socket(pair.responder(), pair.options(Options::default(), false));
-            let endpoint = responder
-                .bind(format!("inproc://latency-pair-{pair:?}"))
-                .unwrap();
-            let requester =
-                ctx.blocking_socket(pair.requester(), pair.options(Options::default(), true));
-            requester.connect(endpoint).unwrap();
-            requester
-                .wait_connected(1, std::time::Duration::from_secs(2))
-                .unwrap();
-            for size in [16, 64, 4096] {
-                requester.send(pair.request(size)).unwrap();
-                let request = responder
-                    .recv_timeout(std::time::Duration::from_secs(2))
-                    .unwrap();
-                pair.validate(&request, size, false);
-                responder.send(request).unwrap();
-                let reply = requester
-                    .recv_timeout(std::time::Duration::from_secs(2))
-                    .unwrap();
-                pair.validate(&reply, size, true);
-            }
-        }
-    }
-}
+mod tests;

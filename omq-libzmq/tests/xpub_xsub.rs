@@ -22,10 +22,13 @@ const ZMQ_SNDTIMEO: i32 = 28;
 const ZMQ_SUBSCRIBE: i32 = 6;
 const ZMQ_LINGER: i32 = 17;
 const ZMQ_DONTWAIT: i32 = 1;
+
 #[allow(dead_code)]
 const ZMQ_RCVMORE: i32 = 13;
+
 #[allow(dead_code)]
 const ZMQ_SNDMORE: i32 = 2;
+
 const ZMQ_TYPE: i32 = 16;
 
 fn set_timeo(sock: *mut c_void, ms: i32) {
@@ -57,6 +60,7 @@ fn get_type(sock: *mut c_void) -> i32 {
     let mut v: i32 = 0;
     let mut sz = size_of::<i32>();
     zmq_getsockopt(sock, ZMQ_TYPE, (&mut v as *mut i32).cast(), &mut sz);
+
     v
 }
 
@@ -158,6 +162,7 @@ fn xpub_xsub_proxy_pattern() {
     let xsub = zmq_socket(ctx, ZMQ_XSUB);
     let xpub = zmq_socket(ctx, ZMQ_XPUB);
     let sub = zmq_socket(ctx, ZMQ_SUB);
+
     set_linger_zero(pub_);
     set_linger_zero(xsub);
     set_linger_zero(xpub);
@@ -180,9 +185,11 @@ fn xpub_xsub_proxy_pattern() {
     // Forward subscription from XPUB to XSUB.
     let mut buf = [0u8; 256];
     let rc = zmq_recv(xpub, buf.as_mut_ptr().cast(), buf.len(), 0);
+
     if rc > 0 {
         zmq_send(xsub, buf[..rc as usize].as_ptr().cast(), rc as usize, 0);
     }
+
     std::thread::sleep(Duration::from_millis(50));
 
     // PUB sends.

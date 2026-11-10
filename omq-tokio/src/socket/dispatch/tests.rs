@@ -16,6 +16,7 @@ fn snapshot() -> InprocPeerSnapshot {
 async fn bind_result_for_test(endpoint: &Endpoint) -> Result<BoundListener> {
     #[cfg(any(feature = "ws", feature = "quic"))]
     let carrier_options = omq_proto::Options::default();
+
     let inproc = InprocSetup {
         registry: Arc::new(inproc_transport::InprocRegistry::new()),
         snapshot: snapshot(),
@@ -24,6 +25,7 @@ async fn bind_result_for_test(endpoint: &Endpoint) -> Result<BoundListener> {
             send_hwm: 1000,
         },
     };
+
     bind_any(
         endpoint,
         &inproc,
@@ -54,6 +56,7 @@ fn any_stream_tcp_reports_write_vectored() {
         .enable_io()
         .build()
         .unwrap();
+
     rt.block_on(async {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -71,16 +74,20 @@ fn any_stream_ipc_reports_write_vectored() {
         .enable_io()
         .build()
         .unwrap();
+
     rt.block_on(async {
         let dir = std::env::temp_dir();
         let path = dir.join(format!("omq-test-writev-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&path);
+
         let listener = tokio::net::UnixListener::bind(&path).unwrap();
         let client = UnixStream::connect(&path).await.unwrap();
         let _ = listener.accept().await.unwrap();
+
         assert!(client.is_write_vectored());
         let any = AnyStream::Ipc(client);
         assert!(any.is_write_vectored());
+
         let _ = std::fs::remove_file(&path);
     });
 }
@@ -137,6 +144,7 @@ async fn bind_any_returns_resolved_ws_endpoint() {
         }
         other => panic!("expected resolved WS listener endpoint, got {other:?}"),
     }
+
     match bound.endpoint {
         Endpoint::Ws {
             host: Host::Ip(ip),

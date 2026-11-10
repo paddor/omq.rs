@@ -6,15 +6,15 @@
 //! Each phase gates send throughput and in-phase sequence gaps after new
 //! subscribers have propagated their subscriptions to the PUB socket.
 
-#[global_allocator]
-static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
-
 mod soak_common;
 
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use omq_tokio::{Message, MonitorEvent, OnMute, Options, ReconnectPolicy, Socket, SocketType};
+
+#[global_allocator]
+static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
 
 const PHASE_TARGETS: &[usize] = &[0, 1, 12, 3, 0];
 const TOPICS: &[&[u8]] = &[b"a.", b"b.", b"c.", b"d."];
@@ -54,6 +54,7 @@ fn account_external_pause(
         "[pub_sub_realworld_churn_tcp] ignored external pause during {label}: {:.1}s",
         idle.as_secs_f64()
     );
+
     true
 }
 
@@ -92,6 +93,7 @@ fn encode(seq: u64) -> Vec<u8> {
     buf.extend_from_slice(topic);
     buf.extend_from_slice(&seq.to_le_bytes());
     buf.resize(topic.len() + 8 + PAYLOAD_LEN, b'x');
+
     buf
 }
 
@@ -103,15 +105,18 @@ fn decode(part: &[u8]) -> Option<(usize, u64)> {
             return Some((idx, u64::from_le_bytes(bytes)));
         }
     }
+
     None
 }
 
 async fn wait_for_subscribes(mon: &mut omq_tokio::MonitorStream, n: usize) {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut subscribed = 0;
+
     while subscribed < n {
         let now = Instant::now();
         assert!(now < deadline, "timed out waiting for {n} subscriptions");
+
         match tokio::time::timeout(deadline - now, mon.recv()).await {
             Ok(Ok(MonitorEvent::SubscribeReceived { .. })) => subscribed += 1,
             Ok(Ok(_)) => {}
@@ -131,9 +136,11 @@ async fn wait_for_live_peers(publisher: &Socket, n: usize) {
             .into_iter()
             .filter(|c| c.peer_info.is_some())
             .count();
+
         if live == n {
             return;
         }
+
         let now = Instant::now();
         assert!(
             now < deadline,
@@ -160,6 +167,7 @@ impl SubscriberProbe {
         } else {
             Bytes::copy_from_slice(TOPICS[id % TOPICS.len()])
         };
+
         socket.connect(ep).await.unwrap();
         socket.subscribe(prefix.clone()).await.unwrap();
         Self {
@@ -176,21 +184,25 @@ impl SubscriberProbe {
             let Some(part) = msg.part_bytes(0) else {
                 continue;
             };
+
             let Some((topic_idx, seq)) = decode(&part) else {
                 panic!("subscriber received malformed payload");
             };
+
             if !self.prefix.is_empty() {
                 assert!(
                     part.starts_with(&self.prefix),
                     "subscriber received non-matching topic"
                 );
             }
+
             if let Some(prev) = self.last_seq_by_topic[topic_idx] {
                 let delta = seq.saturating_sub(prev);
                 if delta > TOPICS.len() as u64 {
                     self.gaps += delta / TOPICS.len() as u64 - 1;
                 }
             }
+
             self.last_seq_by_topic[topic_idx] = Some(seq);
             self.received += 1;
         }
@@ -219,9 +231,11 @@ impl Measurement {
             received: subs.iter().map(|s| s.received).sum(),
             gaps: subs.iter().map(|s| s.gaps).sum(),
         };
+
         for sub in subs {
             sub.reset_gap_window();
         }
+
         measurement
     }
 
@@ -253,6 +267,7 @@ impl Measurement {
             send_rate >= MIN_SEND_MSGS_PER_SEC,
             "phase target {target} send rate too low: {send_rate:.0} msg/s"
         );
+
         // Small samples make the ratio too noisy to gate on.
         if expected >= MIN_EXPECTED_FOR_GAP_CHECK {
             assert!(
@@ -348,6 +363,7 @@ impl Soak {
                 self.next_sub_id += 1;
                 self.subs.push(sub);
             }
+
             wait_for_subscribes(&mut self.mon, add).await;
         }
 
@@ -431,6 +447,7 @@ impl Soak {
         for sub in self.subs {
             sub.socket.close().await.unwrap();
         }
+
         wait_for_live_peers(&self.publisher, 0).await;
         self.publisher.close().await.unwrap();
     }

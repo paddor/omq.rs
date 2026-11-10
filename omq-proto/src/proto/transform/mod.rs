@@ -149,6 +149,7 @@ impl CompressionKind {
                 "OMQ compression is not supported with encrypted mechanisms".into(),
             ));
         }
+
         Ok(kind)
     }
 
@@ -255,6 +256,7 @@ impl MessageEncoder {
         else {
             return Ok(None);
         };
+
         Self::for_compression_kind(kind, options)
     }
 
@@ -290,6 +292,7 @@ impl MessageEncoder {
                 "LZ4 dictionary auto-training requires capacity of at least 32 bytes".into(),
             ));
         }
+
         let mut enc = if let Some(d) = options.compression_dict.clone() {
             Lz4Encoder::with_send_dict(d)?
         } else {
@@ -297,19 +300,24 @@ impl MessageEncoder {
             if options.compression_auto_train {
                 e = e.with_auto_train();
             }
+
             if let Some(c) = options.compression_dict_capacity {
                 e = e.with_dict_capacity(c);
             }
+
             e
         }
         .with_max_message_size(options.max_message_size);
+
         if let Some(t) = options.compression_threshold {
             enc = enc.with_threshold(t);
         }
+
         let mut dec = Lz4Decoder::new().with_max_message_size(options.max_message_size);
         if let Some(m) = options.max_recv_dict_size {
             dec = dec.with_max_recv_dict_size(m);
         }
+
         Ok((MessageEncoder::Lz4(Box::new(enc)), MessageDecoder::Lz4(dec)))
     }
 
@@ -323,27 +331,34 @@ impl MessageEncoder {
             if options.compression_auto_train {
                 e = e.with_auto_train();
             }
+
             if let Some(c) = options.compression_dict_capacity {
                 e = e.with_dict_capacity(c);
             }
+
             e
         }
         .with_max_message_size(options.max_message_size);
+
         if let Some(t) = options.compression_threshold {
             enc = enc.with_threshold(t);
         }
+
         enc = if let Some(level) = options.compression_level {
             enc.with_level(level)
         } else {
             let (min, max) = options
                 .compression_level_range
                 .unwrap_or(zstd::DEFAULT_LEVEL_RANGE);
+
             enc.with_level_range(min, max)
         };
+
         let mut dec = ZstdDecoder::new().with_max_message_size(options.max_message_size);
         if let Some(m) = options.max_recv_dict_size {
             dec = dec.with_max_recv_dict_size(m);
         }
+
         Ok((
             MessageEncoder::Zstd(Box::new(enc)),
             MessageDecoder::Zstd(dec),
@@ -366,10 +381,12 @@ impl MessageEncoder {
         if out.first().is_some_and(lz4::is_dict_shipment) {
             return Some(out.remove(0));
         }
+
         #[cfg(feature = "zstd")]
         if out.first().is_some_and(zstd::is_dict_shipment) {
             return Some(out.remove(0));
         }
+
         #[cfg(not(any(feature = "lz4", feature = "zstd")))]
         let _ = out;
         None
@@ -546,6 +563,7 @@ impl MessageDecoder {
     ) -> Result<Option<Message>> {
         #[cfg(not(feature = "lz4"))]
         let _ = pool;
+
         match self {
             #[cfg(feature = "lz4")]
             Self::Lz4(t) => t.decode_with_payload_slots(msg, pool),

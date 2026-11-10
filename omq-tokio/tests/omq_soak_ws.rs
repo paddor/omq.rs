@@ -10,9 +10,6 @@
 //! 3. Fragmented input: masked binary messages split into continuation
 //!    frames and arbitrary byte-stream chunks, with interleaved PINGs.
 
-#[global_allocator]
-static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
-
 mod soak_common;
 
 use std::time::{Duration, Instant};
@@ -24,6 +21,9 @@ use omq_tokio::proto::{Command, PeerProperties, command, zws};
 use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
 use rand::RngExt;
 use rand::rngs::StdRng;
+
+#[global_allocator]
+static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
 
 const OP_CONTINUATION: u8 = 0x00;
 const OP_BINARY: u8 = 0x02;
@@ -53,14 +53,17 @@ async fn rebind_ws(port: u16) -> Option<Socket> {
         if s.bind(ws_ep(port)).await.is_ok() {
             return Some(s);
         }
+
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+
     None
 }
 
 fn masked_ws_frame(fin: bool, opcode: u8, payload: &[u8], mask: [u8; 4]) -> Bytes {
     let mut wire = BytesMut::new();
     wire.put_u8((if fin { 0x80 } else { 0 }) | opcode);
+
     if payload.len() <= 125 {
         wire.put_u8(0x80 | u8::try_from(payload.len()).unwrap());
     } else if payload.len() <= 65_535 {
@@ -70,12 +73,15 @@ fn masked_ws_frame(fin: bool, opcode: u8, payload: &[u8], mask: [u8; 4]) -> Byte
         wire.put_u8(0x80 | 0x7f);
         wire.put_u64(u64::try_from(payload.len()).unwrap());
     }
+
     wire.put_slice(&mask);
     let payload_start = wire.len();
     wire.put_slice(payload);
+
     for (index, byte) in wire[payload_start..].iter_mut().enumerate() {
         *byte ^= mask[index & 3];
     }
+
     wire.freeze()
 }
 
@@ -92,20 +98,24 @@ fn fragmented_ws_message(rng: &mut StdRng, payload: &[u8], sequence: u64) -> Byt
     let ping_after = rng.random_range(0..fragment_count - 1);
     let mut offset = 0;
     let mut wire = BytesMut::new();
+
     for fragment in 0..fragment_count {
         let remaining = zws_message.len() - offset;
         let fragments_left = fragment_count - fragment;
+
         let len = if fragments_left == 1 {
             remaining
         } else {
             rng.random_range(1..=remaining - (fragments_left - 1))
         };
+
         let fin = fragments_left == 1;
         let opcode = if fragment == 0 {
             OP_BINARY
         } else {
             OP_CONTINUATION
         };
+
         wire.put_slice(&masked_ws_frame(
             fin,
             opcode,
@@ -123,6 +133,7 @@ fn fragmented_ws_message(rng: &mut StdRng, payload: &[u8], sequence: u64) -> Byt
             ));
         }
     }
+
     wire.freeze()
 }
 
@@ -135,6 +146,7 @@ fn feed_random_chunks(connection: &mut Connection, wire: &Bytes, rng: &mut StdRn
         } else {
             rng.random_range(1..=max)
         };
+
         connection
             .handle_input(wire.slice(offset..offset + len))
             .unwrap();
@@ -159,6 +171,7 @@ fn ready_fragmented_ws_connection(rng: &mut StdRng) -> Connection {
     let mut zws_ready = Vec::with_capacity(ready.len() + 1);
     zws_ready.push(zws::FLAG_COMMAND);
     zws_ready.extend_from_slice(&ready);
+
     let split = zws_ready.len() / 2;
     let mut wire = BytesMut::new();
     wire.put_slice(&masked_ws_frame(
@@ -173,9 +186,11 @@ fn ready_fragmented_ws_connection(rng: &mut StdRng) -> Connection {
         &zws_ready[split..],
         random_mask(rng),
     ));
+
     feed_random_chunks(&mut connection, &wire.freeze(), rng);
     assert!(connection.is_ready());
     discard_transmit(&mut connection);
+
     connection
 }
 
@@ -302,6 +317,7 @@ fn soak_ws_reconnect_storm() {
         } else {
             100.0
         };
+
         eprintln!(
             "[ws_reconnect_storm] done: {delivered}/{cycles} ({pct:.1}%) in {:.1}s",
             start.elapsed().as_secs_f64(),
@@ -317,6 +333,7 @@ fn soak_ws_reconnect_storm() {
 fn soak_ws_fragmented_binary_input() {
     let duration = soak_common::soak_duration();
     let monitor = soak_common::ResourceMonitor::start();
+
     {
         let mut rng = soak_common::seeded_rng("ws_fragmented_input");
         let mut connection = ready_fragmented_ws_connection(&mut rng);
@@ -332,9 +349,11 @@ fn soak_ws_fragmented_binary_input() {
                 2 => 65_536,
                 _ => rng.random_range(64..=128 * 1024),
             };
+
             let mut payload = vec![0; payload_len];
             payload[..8].copy_from_slice(&messages.to_le_bytes());
             let pattern = messages.to_le_bytes();
+
             for (index, byte) in payload[8..].iter_mut().enumerate() {
                 *byte = pattern[index & 7];
             }
@@ -354,6 +373,7 @@ fn soak_ws_fragmented_binary_input() {
 
             messages += 1;
             bytes += u64::try_from(payload_len).unwrap();
+
             if last_log.elapsed() >= Duration::from_secs(30) {
                 eprintln!(
                     "[ws_fragmented_input] {:.0}s, messages {messages}, bytes {bytes}",

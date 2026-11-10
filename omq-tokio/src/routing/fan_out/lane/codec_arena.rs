@@ -20,8 +20,10 @@ impl LaneWorker {
         if batch.len() < 2 || self.mute_policy == FanOutMutePolicy::DropOldest {
             return (0, false);
         }
+
         let first = &batch[0];
         let targets = self.matching_peer_groups(first);
+
         if !self.codec_arena_targets_ready(&targets) {
             return (0, false);
         }
@@ -30,6 +32,7 @@ impl LaneWorker {
         if messages.len() < 2 {
             return (0, false);
         }
+
         let count = messages.len();
         let fallback = self.push_codec_arena(&targets, &messages, touched);
 
@@ -38,9 +41,11 @@ impl LaneWorker {
         if fallback.is_empty() {
             return (count, false);
         }
+
         let shutdown = self
             .dispatch_arena_fallback(&batch[..count], &fallback, touched)
             .await;
+
         (count, shutdown)
     }
 
@@ -73,10 +78,12 @@ impl LaneWorker {
         let mut messages = SmallVec::new();
         let mut bytes = 0;
         let mut parts = 0;
+
         for msg in batch.iter().take(max_messages) {
             let Some(size) = arena_message_size(msg) else {
                 break;
             };
+
             if bytes + size > capacity
                 || parts + msg.len() > MAX_ARENA_PARTS
                 || self.matching_peer_groups(msg) != *targets
@@ -84,6 +91,7 @@ impl LaneWorker {
             {
                 break;
             }
+
             bytes += size;
             parts += msg.len();
             messages.push(msg);
@@ -124,6 +132,7 @@ impl LaneWorker {
                     TryFrameResult::Dead | TryFrameResult::Ineligible => {}
                 }
             }
+
             self.encoder.clear();
         }
 
@@ -145,12 +154,14 @@ impl LaneWorker {
                     group,
                     peers: &[id],
                 };
+
                 if self.mute_policy.is_lossy() {
                     self.dispatch_group_lossy(target, msg, touched);
                 } else {
                     self.dispatch_group_ready(target, msg, touched, &mut pending);
                 }
             }
+
             if self.finish_pending(&mut pending, touched).await {
                 return true;
             }
@@ -172,6 +183,7 @@ impl LaneWorker {
                             if peer.slot.is_ws() {
                                 return false;
                             }
+
                             self.codec_groups[group]
                                 .as_ref()
                                 .unwrap()

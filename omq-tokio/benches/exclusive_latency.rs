@@ -51,6 +51,7 @@ async fn run_server(endpoint: Endpoint) {
     let router = Socket::new(SocketType::Router, Options::default());
     let bound = router.bind(endpoint).await.expect("bind ROUTER");
     eprintln!("READY {bound}");
+
     loop {
         let message = router.recv().await.expect("receive request");
         router.send(message).await.expect("echo response");
@@ -65,6 +66,7 @@ async fn run_client(mode: &str, address: &str, size: usize, iterations: usize, w
 
     let mut regular = None;
     let mut exclusive = None;
+
     match mode {
         "standard" => {
             let endpoint: Endpoint = address.parse().expect("valid connect URI");
@@ -107,6 +109,7 @@ async fn run_client(mode: &str, address: &str, size: usize, iterations: usize, w
         round_trip(regular.as_ref(), exclusive.as_mut(), &message).await;
         samples.push(started.elapsed().as_nanos() as u64);
     }
+
     samples.sort_unstable();
 
     println!("mode,size,iterations,warmup,p50_us,p95_us,p99_us,max_us");

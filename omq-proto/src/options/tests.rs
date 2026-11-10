@@ -1,3 +1,9 @@
+use super::*;
+#[cfg(feature = "plain")]
+use crate::proto::mechanism::MechanismPeerInfo;
+#[cfg(feature = "curve")]
+use crate::proto::mechanism::{CurveKeypair, CurvePublicKey};
+
 #[test]
 fn identity_limits_and_reserved_prefix() {
     use bytes::Bytes;
@@ -8,6 +14,7 @@ fn identity_limits_and_reserved_prefix() {
     ] {
         assert!(super::Options::default().identity(valid).validate().is_ok());
     }
+
     for invalid in [
         Bytes::from_static(b"\x00reserved"),
         Bytes::from(vec![b'x'; 256]),
@@ -20,11 +27,6 @@ fn identity_limits_and_reserved_prefix() {
         );
     }
 }
-use super::*;
-#[cfg(feature = "plain")]
-use crate::proto::mechanism::MechanismPeerInfo;
-#[cfg(feature = "curve")]
-use crate::proto::mechanism::{CurveKeypair, CurvePublicKey};
 
 #[cfg(feature = "dart")]
 #[test]
@@ -36,18 +38,22 @@ fn dart_defaults_are_bounded_and_spinning_is_explicit() {
     assert_eq!(options.dart.congestion, DartCongestion::Adaptive);
     assert_eq!(options.dart.window_messages, 256);
     assert_eq!(options.dart.max_send_rate, None);
+
     options.dart.io_spin = Duration::from_micros(50);
     assert!(options.validate().is_ok());
     options.dart.io_spin += Duration::from_nanos(1);
     assert!(options.validate().is_err());
+
     options.dart.io_spin = Duration::ZERO;
     options.dart.max_ready_peers = 0;
     assert!(options.validate().is_err());
     options.dart.max_ready_peers = 1;
+
     for window in [0, 3, 65_537] {
         options.dart.window_messages = window;
         assert!(options.validate().is_err());
     }
+
     options.dart.window_messages = 65_536;
     assert!(options.validate().is_ok());
     options.dart.max_send_rate = Some(0);
@@ -91,6 +97,7 @@ fn webtransport_path_requires_an_absolute_safe_resource() {
         options.quic.webtransport_path = path.into();
         assert!(options.validate().is_err(), "accepted {path:?}");
     }
+
     let mut options = Options::default();
     options.quic.webtransport_path = "/custom?topic=x".into();
     assert!(options.validate().is_ok());
@@ -111,9 +118,11 @@ fn webtransport_origins_must_be_explicit_web_origins() {
 fn fixed_plain_credentials_match_exactly() {
     let options =
         Options::default().plain_server_credentials([("alice", "secret"), ("bob", "hunter2")]);
+
     let MechanismSetup::PlainServer { authenticator } = options.mechanism else {
         panic!("expected PLAIN server");
     };
+
     let peer = |username: &str, password: &str| MechanismPeerInfo {
         mechanism: crate::proto::MechanismName::PLAIN,
         public_key: [0; 32],
@@ -149,6 +158,7 @@ fn plain_client_credentials_require_rfc_24_vchar() {
             .validate()
             .is_ok()
     );
+
     for (username, password) in [
         ("has space", "secret"),
         ("alice", "line\nbreak"),
@@ -177,6 +187,7 @@ fn peer_count_limits_reject_zero_and_overflow() {
     ] {
         assert!(matches!(options.validate(), Err(crate::Error::Config(_))));
     }
+
     for count in [1, 16384] {
         let options = Options::default()
             .peer_send_queue_capacity(count)
@@ -224,9 +235,11 @@ fn defaults_are_per_socket_hwm_block() {
     assert_eq!(o.peer_recv_max_messages, 8192);
     assert_eq!(o.peer_send_max_bytes, None);
     assert_eq!(o.peer_recv_max_bytes, None);
+
     assert!(!o.recv_batching);
     assert_eq!(o.recv_rate_limit, None);
     assert_eq!(o.recv_ip_rate_limit, None);
+
     assert_eq!(o.linger, Some(Duration::ZERO));
     assert_eq!(o.handshake_timeout, Some(Duration::from_secs(10)));
     assert_eq!(o.max_pending_handshakes, DEFAULT_MAX_PENDING_HANDSHAKES);
@@ -234,11 +247,13 @@ fn defaults_are_per_socket_hwm_block() {
     assert_eq!(o.max_message_size, None);
     assert_eq!(o.tcp_keepalive, KeepAlive::Default);
     assert_eq!(o.tcp_user_timeout, None);
+
     assert!(!o.conflate);
     assert!(!o.router_mandatory);
     assert_eq!(o.compression_level, None);
     assert_eq!(o.on_mute, OnMute::Block);
     assert_eq!(o.large_message_threshold, Some(128 * 1024));
+
     #[cfg(feature = "quic")]
     {
         assert_eq!(o.quic.idle_timeout, Duration::from_secs(10));
@@ -279,10 +294,12 @@ fn validates_monitor_capacity() {
         Options::default().monitor_capacity,
         DEFAULT_MONITOR_CAPACITY
     );
+
     for capacity in [0, MAX_QUEUE_CAPACITY + 1] {
         let options = Options::default().monitor_capacity(capacity);
         assert!(matches!(options.validate(), Err(crate::Error::Config(_))));
     }
+
     for capacity in [1, MAX_QUEUE_CAPACITY] {
         assert!(
             Options::default()
@@ -328,6 +345,7 @@ fn rejects_zero_reconnect_intervals() {
             "{policy:?}"
         );
     }
+
     for policy in [
         ReconnectPolicy::Disabled,
         ReconnectPolicy::Fixed(ms(1)),
@@ -347,6 +365,7 @@ fn validates_zstd_compression_level() {
     assert!(Options::new().compression_level(4).validate().is_ok());
     assert!(Options::new().compression_level(5).validate().is_err());
     assert!(Options::new().compression_level(-8).validate().is_err());
+
     for (min, max, valid) in [
         (-7, 4, true),
         (2, 2, true),
@@ -449,6 +468,7 @@ fn tcp_keepalive_builder() {
         intvl: Duration::from_secs(5),
         cnt: 3,
     });
+
     match o.tcp_keepalive {
         KeepAlive::Enabled { idle, intvl, cnt } => {
             assert_eq!(idle, Duration::from_secs(30));
@@ -483,6 +503,7 @@ fn builder_chaining() {
         .compression_level(1)
         .router_mandatory(true)
         .on_mute(OnMute::DropNewest);
+
     assert_eq!(o.send_hwm, 42);
     assert_eq!(o.workload_profile, Some(WorkloadProfile::Latency));
     assert_eq!(o.recv_hwm, 99);

@@ -95,15 +95,18 @@ impl OutputQueue {
     pub(super) fn io_slices(&self, max: usize) -> SmallVec<[IoSlice<'_>; 8]> {
         let cap = max.min(self.chunks.len());
         let mut out = SmallVec::with_capacity(cap);
+
         for (i, chunk) in self.chunks.iter().enumerate() {
             if out.len() >= max {
                 break;
             }
+
             let start = if i == 0 { self.front_consumed } else { 0 };
             if start < chunk.len() {
                 out.push(IoSlice::new(&chunk[start..]));
             }
         }
+
         out
     }
 
@@ -115,6 +118,7 @@ impl OutputQueue {
                 out.push(chunk.slice(start..));
             }
         }
+
         out
     }
 
@@ -128,6 +132,7 @@ impl OutputQueue {
                     let start = if i == 0 { self.front_consumed } else { 0 };
                     out.extend_from_slice(&chunk[start..]);
                 }
+
                 out.freeze()
             }
         }
@@ -140,17 +145,21 @@ impl OutputQueue {
                 debug_assert!(false, "advance_transmit beyond pending bytes");
                 return;
             };
+
             let front_len = front.len();
             let remaining = front_len - self.front_consumed;
+
             if n < remaining {
                 self.front_consumed += n;
                 break;
             }
+
             n -= remaining;
             self.chunks.pop_front();
             self.total = self.total.saturating_sub(front_len);
             self.front_consumed = 0;
         }
+
         if self.pending_pong_bytes != 0 {
             self.pong_queued_through = self.pong_queued_through.saturating_sub(written);
             if self.pong_queued_through == 0 {

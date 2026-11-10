@@ -17,10 +17,12 @@ fn identity(validity: Option<(i32, i32)>) -> Identity {
     let issuer = rcgen::Issuer::new(root, root_key);
     let mut leaf = rcgen::CertificateParams::new(vec!["service.example".into()]).unwrap();
     leaf.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
+
     if let Some((before, after)) = validity {
         leaf.not_before = rcgen::date_time_ymd(before, 1, 1);
         leaf.not_after = rcgen::date_time_ymd(after, 1, 1);
     }
+
     let leaf_key = rcgen::KeyPair::generate().unwrap();
     let cert = leaf.signed_by(&leaf_key, &issuer).unwrap();
     Identity {
@@ -36,6 +38,7 @@ async fn exchange(identity: &Identity, trust: Option<&[u8]>, name: &str) -> std:
     ));
     let connector =
         tokio_rustls::TlsConnector::from(Arc::new(verified_client_config(false, trust).unwrap()));
+
     let (server, client) = tokio::io::duplex(16384);
     let (server, client) = tokio::join!(
         acceptor.accept(server),
@@ -43,11 +46,13 @@ async fn exchange(identity: &Identity, trust: Option<&[u8]>, name: &str) -> std:
     );
     let mut client = client?;
     let mut server = server?;
+
     client.write_all(b"verified").await?;
     client.flush().await?;
     let mut received = [0; 8];
     server.read_exact(&mut received).await?;
     assert_eq!(&received, b"verified");
+
     Ok(())
 }
 
@@ -94,6 +99,7 @@ fn malformed_trust_identity_and_key_mismatch_fail_locally() {
     ] {
         assert!(verified_client_config(false, Some(trust)).is_err());
     }
+
     assert!(server_config(b"not PEM", identity.key.as_bytes()).is_err());
     assert!(server_config(identity.certificate.as_bytes(), b"not a key").is_err());
     let other_key = rcgen::KeyPair::generate().unwrap().serialize_pem();

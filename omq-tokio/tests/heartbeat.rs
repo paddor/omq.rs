@@ -54,6 +54,7 @@ fn null_greeting_as_client() -> [u8; 64] {
     g[10] = 3; // major
     g[11] = 1; // minor
     g[12..16].copy_from_slice(b"NULL"); // mechanism (rest stays 0)
+
     // g[32] = 0: as-server = false (connect side)
     g
 }
@@ -74,6 +75,7 @@ async fn heartbeat_keeps_idle_connection_alive() {
     let endpoints = endpoints
         .into_iter()
         .chain(["ws://127.0.0.1:0".parse::<Endpoint>().unwrap()]);
+
     for ep in endpoints {
         let opts = Options::default()
             .heartbeat_interval(Duration::from_millis(50))
@@ -136,6 +138,7 @@ async fn heartbeat_detects_silent_peer() {
     );
     let mut mon = push.monitor();
     let ep = push.bind(tcp_ep(0)).await.unwrap();
+
     let port = match &ep {
         Endpoint::Tcp { port, .. } => *port,
         _ => unreachable!(),
@@ -159,6 +162,7 @@ async fn heartbeat_detects_silent_peer() {
         // Drain everything PUSH sends (greeting + READY + PINGs) forever.
         // Never respond with PONG.
         let mut buf = [0u8; 512];
+
         loop {
             match s.read(&mut buf).await {
                 Ok(0) | Err(_) => break, // PUSH closed the connection (heartbeat timeout)
@@ -179,6 +183,7 @@ async fn heartbeat_detects_silent_peer() {
             None => break false,
         }
     };
+
     assert!(handshook, "handshake never completed with the silent peer");
 
     // PUSH must emit Disconnected within heartbeat_interval + heartbeat_timeout + margin.

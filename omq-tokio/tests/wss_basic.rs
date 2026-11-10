@@ -12,6 +12,7 @@ fn self_signed_tls() -> (Vec<u8>, Vec<u8>) {
     let certified = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
     let cert_pem = certified.cert.pem().into_bytes();
     let key_pem = certified.signing_key.serialize_pem().into_bytes();
+
     (cert_pem, key_pem)
 }
 

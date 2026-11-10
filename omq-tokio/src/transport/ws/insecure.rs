@@ -10,6 +10,7 @@ pub(super) fn client_config() -> rustls::ClientConfig {
     config
         .dangerous()
         .set_certificate_verifier(Arc::new(NoVerify));
+
     config
 }
 

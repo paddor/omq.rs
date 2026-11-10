@@ -88,12 +88,14 @@ async fn stress_push_pull(transport: &Transport, bind_side: &str) {
             let bound = push.bind(ep).await.unwrap();
             let pull = Socket::new(SocketType::Pull, opts());
             pull.connect(bound).await.unwrap();
+
             (push, pull)
         } else {
             let pull = Socket::new(SocketType::Pull, Options::default());
             let bound = pull.bind(ep).await.unwrap();
             let push = Socket::new(SocketType::Push, opts());
             push.connect(bound).await.unwrap();
+
             (push, pull)
         };
 
@@ -116,12 +118,14 @@ async fn stress_req_rep(transport: &Transport, bind_side: &str) {
             let bound = rep.bind(ep).await.unwrap();
             let req = Socket::new(SocketType::Req, opts());
             req.connect(bound).await.unwrap();
+
             (req, rep)
         } else {
             let req = Socket::new(SocketType::Req, Options::default());
             let bound = req.bind(ep).await.unwrap();
             let rep = Socket::new(SocketType::Rep, opts());
             rep.connect(bound).await.unwrap();
+
             (req, rep)
         };
 
@@ -152,6 +156,7 @@ async fn stress_pub_sub(transport: &Transport, bind_side: &str) {
             let sub = Socket::new(SocketType::Sub, opts());
             sub.subscribe("").await.unwrap();
             sub.connect(bound).await.unwrap();
+
             (pub_, sub)
         } else {
             let sub = Socket::new(SocketType::Sub, Options::default());
@@ -159,6 +164,7 @@ async fn stress_pub_sub(transport: &Transport, bind_side: &str) {
             let bound = sub.bind(ep).await.unwrap();
             let pub_ = Socket::new(SocketType::Pub, opts());
             pub_.connect(bound).await.unwrap();
+
             (pub_, sub)
         };
 
@@ -169,6 +175,7 @@ async fn stress_pub_sub(transport: &Transport, bind_side: &str) {
                 assert_eq!(m.part_bytes(0).unwrap(), &b"m"[..]);
                 break;
             }
+
             assert!(
                 std::time::Instant::now() < deadline,
                 "pub/sub {bind_side}-binds round {i} sub never received"
@@ -215,6 +222,7 @@ async fn stress_dealer_router(transport: &Transport, bind_side: &str) {
                 opts().identity(Bytes::from_static(b"d1")),
             );
             dealer.connect(bound).await.unwrap();
+
             (dealer, router)
         } else {
             let dealer = Socket::new(
@@ -224,6 +232,7 @@ async fn stress_dealer_router(transport: &Transport, bind_side: &str) {
             let bound = dealer.bind(ep).await.unwrap();
             let router = Socket::new(SocketType::Router, opts());
             router.connect(bound).await.unwrap();
+
             (dealer, router)
         };
 
@@ -255,27 +264,35 @@ async fn stress_dealer_router(transport: &Transport, bind_side: &str) {
 stress_test!(push_pull_tcp_push_binds, {
     stress_push_pull(&Transport::Tcp, "push").await;
 });
+
 stress_test!(push_pull_tcp_pull_binds, {
     stress_push_pull(&Transport::Tcp, "pull").await;
 });
+
 stress_test!(req_rep_tcp_rep_binds, {
     stress_req_rep(&Transport::Tcp, "rep").await;
 });
+
 stress_test!(req_rep_tcp_req_binds, {
     stress_req_rep(&Transport::Tcp, "req").await;
 });
+
 stress_test!(pub_sub_tcp_pub_binds, {
     stress_pub_sub(&Transport::Tcp, "pub").await;
 });
+
 stress_test!(pub_sub_tcp_sub_binds, {
     stress_pub_sub(&Transport::Tcp, "sub").await;
 });
+
 stress_test!(pair_tcp, {
     stress_pair(&Transport::Tcp).await;
 });
+
 stress_test!(dealer_router_tcp_router_binds, {
     stress_dealer_router(&Transport::Tcp, "router").await;
 });
+
 stress_test!(dealer_router_tcp_dealer_binds, {
     stress_dealer_router(&Transport::Tcp, "dealer").await;
 });
@@ -289,6 +306,7 @@ stress_test!(
         stress_push_pull(&Transport::Ipc, "push").await;
     }
 );
+
 stress_test!(
     #[cfg(unix)]
     push_pull_ipc_pull_binds,
@@ -296,6 +314,7 @@ stress_test!(
         stress_push_pull(&Transport::Ipc, "pull").await;
     }
 );
+
 stress_test!(
     #[cfg(unix)]
     req_rep_ipc_rep_binds,
@@ -303,6 +322,7 @@ stress_test!(
         stress_req_rep(&Transport::Ipc, "rep").await;
     }
 );
+
 stress_test!(
     #[cfg(unix)]
     req_rep_ipc_req_binds,
@@ -310,6 +330,7 @@ stress_test!(
         stress_req_rep(&Transport::Ipc, "req").await;
     }
 );
+
 stress_test!(
     #[cfg(unix)]
     pub_sub_ipc_pub_binds,
@@ -317,6 +338,7 @@ stress_test!(
         stress_pub_sub(&Transport::Ipc, "pub").await;
     }
 );
+
 stress_test!(
     #[cfg(unix)]
     pub_sub_ipc_sub_binds,
@@ -324,6 +346,7 @@ stress_test!(
         stress_pub_sub(&Transport::Ipc, "sub").await;
     }
 );
+
 stress_test!(
     #[cfg(unix)]
     pair_ipc,
@@ -331,6 +354,7 @@ stress_test!(
         stress_pair(&Transport::Ipc).await;
     }
 );
+
 stress_test!(
     #[cfg(unix)]
     dealer_router_ipc_router_binds,
@@ -338,6 +362,7 @@ stress_test!(
         stress_dealer_router(&Transport::Ipc, "router").await;
     }
 );
+
 stress_test!(
     #[cfg(unix)]
     dealer_router_ipc_dealer_binds,
@@ -351,27 +376,35 @@ stress_test!(
 stress_test!(push_pull_inproc_push_binds, {
     stress_push_pull(&Transport::Inproc, "push").await;
 });
+
 stress_test!(push_pull_inproc_pull_binds, {
     stress_push_pull(&Transport::Inproc, "pull").await;
 });
+
 stress_test!(req_rep_inproc_rep_binds, {
     stress_req_rep(&Transport::Inproc, "rep").await;
 });
+
 stress_test!(req_rep_inproc_req_binds, {
     stress_req_rep(&Transport::Inproc, "req").await;
 });
+
 stress_test!(pub_sub_inproc_pub_binds, {
     stress_pub_sub(&Transport::Inproc, "pub").await;
 });
+
 stress_test!(pub_sub_inproc_sub_binds, {
     stress_pub_sub(&Transport::Inproc, "sub").await;
 });
+
 stress_test!(pair_inproc, {
     stress_pair(&Transport::Inproc).await;
 });
+
 stress_test!(dealer_router_inproc_router_binds, {
     stress_dealer_router(&Transport::Inproc, "router").await;
 });
+
 stress_test!(dealer_router_inproc_dealer_binds, {
     stress_dealer_router(&Transport::Inproc, "dealer").await;
 });

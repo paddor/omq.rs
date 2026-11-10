@@ -35,10 +35,12 @@ impl IoThreadPool {
         let context_name = context_name
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| format!("OMQ{id}"));
+
         // Multi-IO contexts reserve runtime 0 for socket actors and blocking
         // control calls. The configured count applies to data runtimes.
         let runtime_count = if n > 1 { n + 1 } else { 1 };
         let context_name = fit_context_name(&context_name, n);
+
         let mut threads = Vec::with_capacity(runtime_count);
         let mut joins = Vec::with_capacity(runtime_count);
         let mut primary_job_tx = None;
@@ -100,9 +102,11 @@ impl IoThreadPool {
             .enumerate()
             .min_by_key(|(index, t)| (t.load.load(Ordering::Relaxed), *index != preferred))
             .map_or(0, |(i, _)| i);
+
         self.threads[best + offset]
             .load
             .fetch_add(1, Ordering::Relaxed);
+
         best
     }
 
@@ -116,6 +120,7 @@ impl IoThreadPool {
         self.cancel.cancel();
         *self.primary_job_tx.lock().expect("job_tx poisoned") = None;
         let mut joins = self.joins.lock().expect("joins poisoned");
+
         for j in joins.iter_mut() {
             if let Some(handle) = j.take() {
                 let _ = handle.join();
@@ -142,11 +147,13 @@ fn spawn_primary_thread(
             block_sigpipe();
             let rt = build_current_thread_runtime();
             let _ = handle_tx.send(rt.handle().clone());
+
             rt.block_on(async move {
                 // Jobs from different callers run concurrently, so
                 // one long wait cannot delay another caller's bind.
                 // Cancellation drops every unfinished job.
                 let mut jobs = FuturesUnordered::new();
+
                 loop {
                     tokio::select! {
                         biased;
@@ -199,6 +206,7 @@ pub(super) fn fit_context_name(name: &str, io_threads: usize) -> &str {
     } else {
         max_io_suffix
     };
+
     truncate_utf8(name, 15usize.saturating_sub(max_suffix))
 }
 
@@ -206,12 +214,14 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> &str {
     if value.len() <= max_bytes {
         return value;
     }
+
     let end = value
         .char_indices()
         .map(|(index, _)| index)
         .take_while(|index| *index <= max_bytes)
         .last()
         .unwrap_or(0);
+
     &value[..end]
 }
 
@@ -267,6 +277,7 @@ impl IoPoolHandle {
             .pool
             .as_ref()
             .map_or(0, |pool| pool.data_thread_offset());
+
         self.network
             .as_ref()
             .map_or_else(Default::default, |lanes| lanes[index + offset].clone())
@@ -344,6 +355,7 @@ impl IoPoolHandle {
             None => 0,
             Some(pool) => pool.assign_thread(),
         };
+
         self.lease(index)
     }
 
@@ -354,6 +366,7 @@ impl IoPoolHandle {
             .pool
             .as_ref()
             .map_or(0, |pool| pool.assign_thread_preferred(preferred));
+
         self.lease(index)
     }
 
@@ -365,6 +378,7 @@ impl IoPoolHandle {
                 .load
                 .fetch_add(1, Ordering::Relaxed);
         }
+
         self.lease(index)
     }
 

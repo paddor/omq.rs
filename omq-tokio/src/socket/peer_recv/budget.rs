@@ -98,6 +98,7 @@ impl Budget {
         if !self.room(bytes) {
             return Err(message);
         }
+
         if self
             .messages
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
@@ -108,6 +109,7 @@ impl Budget {
         {
             return Err(message);
         }
+
         if self
             .bytes
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
@@ -120,6 +122,7 @@ impl Budget {
             self.space.notify_changed();
             return Err(message);
         }
+
         self.socket_messages.fetch_add(1, Ordering::AcqRel);
         Ok(QueuedMessage {
             message,

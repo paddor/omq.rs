@@ -15,6 +15,7 @@ fn greeting(version: (u8, u8)) -> [u8; 64] {
     wire[10] = version.0;
     wire[11] = version.1;
     wire[12..16].copy_from_slice(b"NULL");
+
     wire
 }
 
@@ -28,6 +29,7 @@ fn command(name: &[u8], body: &[u8]) -> Vec<u8> {
     let mut payload = vec![u8::try_from(name.len()).unwrap()];
     payload.extend_from_slice(name);
     payload.extend_from_slice(body);
+
     frame(4, &payload)
 }
 
@@ -39,9 +41,11 @@ async fn read_frame(stream: &mut TcpStream) -> (u8, Vec<u8>) {
         } else {
             usize::try_from(stream.read_u64().await.unwrap()).unwrap()
         };
+
         assert!(len < 4096, "unexpected frame size");
         let mut body = vec![0; len];
         stream.read_exact(&mut body).await.unwrap();
+
         (flags, body)
     })
     .await
@@ -52,9 +56,11 @@ async fn handshake(stream: &mut TcpStream, peer_type: &[u8], version: (u8, u8)) 
     let mut props = b"\x0bSocket-Type".to_vec();
     props.extend_from_slice(&u32::try_from(peer_type.len()).unwrap().to_be_bytes());
     props.extend_from_slice(peer_type);
+
     let mut wire = greeting(version).to_vec();
     wire.extend_from_slice(&command(b"READY", &props));
     stream.write_all(&wire).await.unwrap();
+
     let mut response = [0; 64];
     tokio::time::timeout(DEADLINE, stream.read_exact(&mut response))
         .await
@@ -69,9 +75,11 @@ async fn raw_peer(local: &Socket, peer_type: &[u8], version: (u8, u8)) -> TcpStr
     let Endpoint::Tcp { port, .. } = endpoint else {
         unreachable!()
     };
+
     let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
     handshake(&mut stream, peer_type, version).await;
     local.wait_connected(1, DEADLINE).await.unwrap();
+
     stream
 }
 
@@ -107,10 +115,12 @@ async fn single_frame_sockets_discard_multipart_without_losing_connection() {
     ] {
         let local = Socket::new(kind, Options::default().linger(Duration::ZERO));
         let mut raw = raw_peer(&local, peer, (3, 1)).await;
+
         let mut wire = frame(1, b"first");
         wire.extend_from_slice(&frame(0, b"last"));
         wire.extend_from_slice(&frame(0, b"valid"));
         raw.write_all(&wire).await.unwrap();
+
         let message = tokio::time::timeout(DEADLINE, local.recv())
             .await
             .unwrap()
@@ -118,7 +128,9 @@ async fn single_frame_sockets_discard_multipart_without_losing_connection() {
         assert_eq!(message.len(), 1);
         assert_eq!(message.part_bytes(0).unwrap().as_ref(), b"valid");
         assert!(local.try_recv().is_err());
+
         raw.write_all(&frame(0, b"still connected")).await.unwrap();
+
         assert_eq!(
             tokio::time::timeout(DEADLINE, local.recv())
                 .await
@@ -142,6 +154,7 @@ async fn subscription_commands_follow_peer_version() {
             let sub = read_frame(&mut raw).await;
             local.unsubscribe("topic").await.unwrap();
             let cancel = read_frame(&mut raw).await;
+
             if version == (3, 0) {
                 assert_eq!(sub, (0, b"\x01topic".to_vec()));
                 assert_eq!(cancel, (0, b"\x00topic".to_vec()));
@@ -189,6 +202,7 @@ async fn check_duplicate_subscription(transport: &str, kind: SocketType, prefix:
     } else {
         format!("inproc://duplicate-{kind:?}-{}", prefix.len())
     };
+
     let endpoint = publisher.bind(endpoint).await.unwrap();
 
     for attempt in 0..2 {
@@ -201,6 +215,7 @@ async fn check_duplicate_subscription(transport: &str, kind: SocketType, prefix:
         subscriber.unsubscribe(prefix).await.unwrap();
         expect_notification(&publisher, 0, prefix).await;
         publisher.send(Message::single("topic/body")).await.unwrap();
+
         assert_eq!(
             tokio::time::timeout(DEADLINE, subscriber.recv())
                 .await
@@ -245,19 +260,23 @@ async fn received_ttl_expires_without_local_heartbeats_and_reconnects() {
     let local = Socket::new(SocketType::Pair, Options::default().linger(Duration::ZERO));
     let mut monitor = local.monitor();
     local.connect(endpoint).await.unwrap();
+
     let (mut raw, _) = tokio::time::timeout(DEADLINE, listener.accept())
         .await
         .unwrap()
         .unwrap();
     handshake(&mut raw, b"PAIR", (3, 1)).await;
+
     ping(&mut raw, 1).await;
     wait_disconnected(&mut monitor).await;
+
     let (mut next, _) = tokio::time::timeout(DEADLINE, listener.accept())
         .await
         .unwrap()
         .unwrap();
     handshake(&mut next, b"PAIR", (3, 1)).await;
     next.write_all(&frame(0, b"reconnected")).await.unwrap();
+
     assert_eq!(
         tokio::time::timeout(DEADLINE, local.recv())
             .await
@@ -274,6 +293,7 @@ async fn received_ttl_expires_without_local_heartbeats_and_reconnects() {
 async fn incoming_traffic_and_zero_ttl_cancel_peer_timeout() {
     let local = Socket::new(SocketType::Pair, Options::default().linger(Duration::ZERO));
     let mut raw = raw_peer(&local, b"PAIR", (3, 1)).await;
+
     for cancel_with_data in [true, false] {
         ping(&mut raw, 3).await;
         if cancel_with_data {
@@ -285,6 +305,7 @@ async fn incoming_traffic_and_zero_ttl_cancel_peer_timeout() {
         } else {
             ping(&mut raw, 0).await;
         }
+
         // Twice the advertised TTL; any surviving timer would close the stream.
         assert!(
             tokio::time::timeout(Duration::from_millis(600), raw.read_u8())
@@ -292,6 +313,7 @@ async fn incoming_traffic_and_zero_ttl_cancel_peer_timeout() {
                 .is_err()
         );
         raw.write_all(&frame(0, b"still alive")).await.unwrap();
+
         assert_eq!(
             tokio::time::timeout(DEADLINE, local.recv())
                 .await
@@ -313,9 +335,11 @@ async fn peer_ttl_suspends_during_receive_backpressure_then_expires() {
     );
     let mut raw = raw_peer(&local, b"PUSH", (3, 1)).await;
     let mut wire = Vec::new();
+
     for _ in 0..17 {
         wire.extend_from_slice(&frame(0, b"queued"));
     }
+
     wire.extend_from_slice(&command(b"PING", b"\x00\x03ctx"));
     raw.write_all(&wire).await.unwrap();
     assert_eq!(read_frame(&mut raw).await.1, b"\x04PONGctx");
@@ -325,6 +349,7 @@ async fn peer_ttl_suspends_during_receive_backpressure_then_expires() {
             .is_err(),
         "local backpressure must suspend TTL"
     );
+
     for _ in 0..17 {
         assert_eq!(
             tokio::time::timeout(DEADLINE, local.recv())
@@ -337,6 +362,7 @@ async fn peer_ttl_suspends_during_receive_backpressure_then_expires() {
             b"queued"
         );
     }
+
     // The timer gets a fresh TTL after the application resumes draining.
     assert_eq!(
         tokio::time::timeout(DEADLINE, raw.read_u8())
@@ -363,6 +389,7 @@ async fn heartbeat_interval_does_not_send_ping_to_zmtp_30_peer() {
             .is_err()
     );
     raw.write_all(&frame(0, b"legacy alive")).await.unwrap();
+
     assert_eq!(
         tokio::time::timeout(DEADLINE, local.recv())
             .await
@@ -379,9 +406,11 @@ async fn heartbeat_interval_does_not_send_ping_to_zmtp_30_peer() {
 async fn incompatible_socket_types_send_error_before_closing() {
     let local = Socket::new(SocketType::Pull, Options::default().linger(Duration::ZERO));
     let endpoint = local.bind("tcp://127.0.0.1:0").await.unwrap();
+
     let Endpoint::Tcp { port, .. } = endpoint else {
         unreachable!()
     };
+
     let mut raw = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
     handshake(&mut raw, b"PUB", (3, 1)).await;
     assert_eq!(
@@ -402,6 +431,7 @@ async fn exclusive_receive_honors_received_ttl_without_local_heartbeats() {
     let endpoint: Endpoint = format!("tcp://{}", listener.local_addr().unwrap())
         .parse()
         .unwrap();
+
     let peer = tokio::spawn(async move {
         let (mut raw, _) = listener.accept().await.unwrap();
         handshake(&mut raw, b"PAIR", (3, 1)).await;
@@ -413,6 +443,7 @@ async fn exclusive_receive_honors_received_ttl_without_local_heartbeats() {
                 .is_err()
         );
     });
+
     let mut local = omq_tokio::exclusive::Socket::connect(
         SocketType::Pair,
         endpoint,
@@ -437,6 +468,7 @@ async fn announced_ttl_drops_a_silent_peer_behind_stalled_output() {
     );
     let mut monitor = local.monitor();
     let mut raw = raw_peer(&local, b"PAIR", (3, 1)).await;
+
     // It announces a TTL, then data lapses that PING's own TTL.
     ping(&mut raw, 3).await;
     raw.write_all(&frame(0, b"activity")).await.unwrap();
@@ -444,12 +476,14 @@ async fn announced_ttl_drops_a_silent_peer_behind_stalled_output() {
         .await
         .unwrap()
         .unwrap();
+
     // It reads nothing more: output, the next PING included, backs up.
     let sender = local.clone();
     let traffic = tokio::spawn(async move {
         let block = vec![7; 64 << 10];
         while sender.send(Message::single(block.clone())).await.is_ok() {}
     });
+
     wait_disconnected(&mut monitor).await;
     traffic.abort();
     let _ = traffic.await;
@@ -462,6 +496,7 @@ async fn peer_ttl_expires_during_continuous_outbound_traffic() {
     let mut raw = raw_peer(&local, b"PAIR", (3, 1)).await;
     ping(&mut raw, 3).await;
     let sender = local.clone();
+
     let traffic = tokio::spawn(async move {
         loop {
             sender
@@ -470,18 +505,22 @@ async fn peer_ttl_expires_during_continuous_outbound_traffic() {
                 .unwrap();
         }
     });
+
     let result = tokio::time::timeout(Duration::from_secs(2), async {
         let mut total = 0;
         let mut buf = [0; 8192];
+
         loop {
             let n = raw.read(&mut buf).await.unwrap();
             if n == 0 {
                 return total;
             }
+
             total += n;
         }
     })
     .await;
+
     traffic.abort();
     let _ = traffic.await;
     assert!(result.unwrap() > 0, "outbound traffic did not run");

@@ -39,6 +39,7 @@ fn run_fanout_once(cell: &Cell<'_>, peers: u64, duration: f64) -> CellResult {
         role: "push",
         settle: Duration::from_millis(100),
     };
+
     let mut pusher = spawn_binder(cell.transport, &addr, &binder);
 
     let (mut pull_procs, peers_per_process) =
@@ -46,6 +47,7 @@ fn run_fanout_once(cell: &Cell<'_>, peers: u64, duration: f64) -> CellResult {
 
     let timeout = process::peer_timeout(duration);
     let mut pull_results = Vec::new();
+
     for pull_proc in &mut pull_procs {
         if let Some(output) = pull_proc.wait_with_output(timeout)
             && let Some(result) =
@@ -68,6 +70,7 @@ fn run_fanout_once(cell: &Cell<'_>, peers: u64, duration: f64) -> CellResult {
         peers_per_process,
         peers,
     };
+
     receivers.combine(cell.size, push_cpu)
 }
 
@@ -91,6 +94,7 @@ fn spawn_fanout_receivers(
     let dur_str = format!("{duration:.1}");
     let local_peers_str = peers_per_process.to_string();
     let mut pull_procs = Vec::new();
+
     for _ in 0..receiver_processes {
         pull_procs.push(process::spawn(
             &[
@@ -181,6 +185,7 @@ fn run_fanin_once(cell: &Cell<'_>, peers: u64, duration: f64) -> CellResult {
         role: "pull-bind",
         settle: Duration::from_millis(100),
     };
+
     let mut puller = spawn_binder(cell.transport, &addr, &binder);
     // Fan-in closes the coord socket as soon as the binder is ready.
     drop(puller.coord.take());
@@ -208,12 +213,14 @@ fn run_fanin_once(cell: &Cell<'_>, peers: u64, duration: f64) -> CellResult {
     let Some(r) = pull_output.and_then(|output| parse::parse_throughput(&output, cell.size)) else {
         return zero_result(duration);
     };
+
     // Push peers that were killed report no per-peer rates.
     let spread = push_output
         .as_deref()
         .and_then(|output| parse::parse_multi_throughput(output, cell.size, peers))
         .map(|multi| multi.spread)
         .unwrap_or_default();
+
     CellResult {
         msgs_s: r.msgs_s,
         mbps: r.mbps,

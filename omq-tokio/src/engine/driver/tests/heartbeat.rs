@@ -1,6 +1,8 @@
 use super::*;
 use tokio::io::AsyncWriteExt;
 
+const PINGS: usize = 16 * 1024;
+
 #[tokio::test(start_paused = true)]
 async fn stalled_pong_output_backpressures_input_and_keeps_close_reachable() {
     stalled_pong_output(
@@ -39,6 +41,7 @@ async fn stalled_pong_output(
             .send(PeerDriverCommand::ActivateDataPlane)
             .await
             .unwrap();
+
         let task = tokio::spawn(
             ConnectionDriver::new(
                 stream,
@@ -67,6 +70,7 @@ async fn stalled_pong_output(
             assert_pong_replies(&mut replies, reply_prefix).await;
             sending.await.unwrap().unwrap();
         }
+
         commands.send(PeerDriverCommand::Close).await.unwrap();
         tokio::time::timeout(Duration::from_secs(1), task)
             .await
@@ -75,8 +79,6 @@ async fn stalled_pong_output(
             .unwrap();
     }
 }
-
-const PINGS: usize = 16 * 1024;
 
 /// Wire bytes of `PINGS` sequenced PINGs, and the ready receiving codec.
 fn ping_flood(sender: ConnectionConfig, receiver: ConnectionConfig) -> (Vec<u8>, Connection) {
@@ -148,6 +150,7 @@ async fn queued_heartbeat_with_stalled_output(
             ..PeerDriverConfig::default()
         },
     };
+
     let (server, client, mut ends) = pair_drivers(spec);
     // Nothing drains this one-slot ring, so the server stops reading and the
     // client's output, PINGs included, queues behind data.
@@ -167,6 +170,7 @@ async fn queued_heartbeat_with_stalled_output(
             .await
             .unwrap();
     }
+
     tokio::time::sleep(Duration::from_millis(350)).await;
     assert!(
         !ends.client_control.is_closed(),
@@ -209,6 +213,7 @@ async fn a_silent_peer_that_announced_a_ttl_is_dropped_behind_stalled_output() {
         .send(PeerDriverCommand::ActivateDataPlane)
         .await
         .unwrap();
+
     let task = tokio::spawn(
         ConnectionDriver::new(
             stream,
@@ -231,6 +236,7 @@ async fn a_silent_peer_that_announced_a_ttl_is_dropped_behind_stalled_output() {
     // PINGs included, queues behind data.
     let (_replies, mut requests) = tokio::io::split(remote);
     requests.write_all(&wire).await.unwrap();
+
     for _ in 0..32 {
         data.send(PeerDriverData::SendMessage(Message::single(Bytes::from(
             vec![7; 1024],
@@ -238,6 +244,7 @@ async fn a_silent_peer_that_announced_a_ttl_is_dropped_behind_stalled_output() {
         .await
         .unwrap();
     }
+
     let ended = tokio::time::timeout(Duration::from_secs(2), task).await;
     assert!(
         matches!(ended, Ok(Ok(Err(Error::Timeout)))),
@@ -249,10 +256,12 @@ async fn a_silent_peer_that_announced_a_ttl_is_dropped_behind_stalled_output() {
 fn a_probe_stuck_for_the_announced_ttl_times_out_a_silent_peer() {
     use super::super::control::Heartbeat;
     use std::time::Instant;
+
     let (mut peer, mut connection) = ready_connections(
         ConnectionConfig::new(Role::Server, SocketType::Pull),
         ConnectionConfig::new(Role::Client, SocketType::Push),
     );
+
     peer.send_command(&Command::Ping {
         ttl_deciseconds: 3,
         context: Bytes::new(),
@@ -265,17 +274,20 @@ fn a_probe_stuck_for_the_announced_ttl_times_out_a_silent_peer() {
     connection
         .handle_input(Bytes::from(drain_transmit(&mut peer)))
         .unwrap();
+
     let mut heartbeat = Heartbeat::new(&PeerDriverConfig {
         heartbeat_interval: Some(Duration::from_millis(100)),
         ..PeerDriverConfig::default()
     });
     let silent = || Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
     heartbeat.last_input = silent();
+
     // The first tick queues a probe, and nothing writes it. Silent as the
     // peer is, the probe has not waited its 300 ms yet.
     for _ in 0..3 {
         heartbeat.tick(&mut connection, false).unwrap();
     }
+
     heartbeat.last_input = Instant::now();
     heartbeat
         .tick(&mut connection, false)

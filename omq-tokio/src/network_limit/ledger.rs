@@ -18,11 +18,13 @@ impl Reports {
     pub(super) fn publish(&self, snapshot: [u64; 5]) {
         self.spent.store(snapshot[0], Ordering::Release);
         self.returned.store(snapshot[1], Ordering::Release);
+
         #[cfg(feature = "dart")]
         {
             self.refunded.store(snapshot[3], Ordering::Release);
             self.debt.store(snapshot[4], Ordering::Release);
         }
+
         self.demand.store(snapshot[2], Ordering::Release);
     }
 }
@@ -53,6 +55,7 @@ fn delta(counter: &AtomicU64, previous: &mut u64) -> u64 {
     let total = counter.load(Ordering::Acquire);
     let change = total.wrapping_sub(*previous);
     *previous = total;
+
     change
 }
 
@@ -66,6 +69,7 @@ impl Ledger {
             #[cfg(feature = "dart")]
             debt: delta(&reports.debt, &mut self.debt),
         };
+
         self.held -= updates.spent + updates.returned;
         updates
     }

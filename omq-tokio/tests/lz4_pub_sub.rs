@@ -31,6 +31,7 @@ fn tcp_from_lz4(ep: &Endpoint) -> Endpoint {
 async fn bind_lz4_loopback(sock: &Socket) -> Endpoint {
     let mut mon = sock.monitor();
     sock.bind(lz4_loopback()).await.unwrap();
+
     let port = loop {
         if let MonitorEvent::Listening {
             endpoint: Endpoint::Lz4Tcp { port, .. },
@@ -39,6 +40,7 @@ async fn bind_lz4_loopback(sock: &Socket) -> Endpoint {
             break port;
         }
     };
+
     Endpoint::Lz4Tcp {
         host: Host::Ip(std::net::Ipv4Addr::LOCALHOST.into()),
         port,
@@ -65,6 +67,7 @@ async fn connect_decoded_subs(
         .wait_subscribed(count as u64, FAN_OUT_READY_TIMEOUT)
         .await
         .expect("subscriptions did not arrive");
+
     decoded_subs
 }
 
@@ -79,6 +82,7 @@ async fn connect_raw_sub(publisher: &Socket, ep: &Endpoint, total_subscribers: u
         .wait_subscribed(total_subscribers as u64, FAN_OUT_READY_TIMEOUT)
         .await
         .expect("raw subscriber subscription did not arrive");
+
     raw_sub
 }
 
@@ -148,9 +152,11 @@ async fn pub_sub_lz4_io_lane_fan_out_ships_dict_to_late_subscriber() {
 
     let sample = r#"{"kind":"quote","venue":"XNAS","symbol":"OMQ","bid":101.25,"ask":101.27,"depth":[10125,10126,10127],"flags":"regular"}"#;
     let mut trainer = DictTrainer::new(2048);
+
     for _ in 0..100 {
         trainer.add_sample(sample.as_bytes());
     }
+
     let dict = bytes::Bytes::from(trainer.train());
     let opts = Options::default().compression_dict(dict);
 
@@ -289,9 +295,11 @@ async fn pub_sub_lz4_io_lane_fan_out_deferred_large_message_preserves_order() {
 
     let sample = r#"{"kind":"quote","venue":"XNAS","symbol":"OMQ","bid":101.25,"ask":101.27,"depth":[10125,10126,10127],"flags":"regular"}"#;
     let mut trainer = DictTrainer::new(2048);
+
     for _ in 0..100 {
         trainer.add_sample(sample.as_bytes());
     }
+
     let opts = Options::default().compression_dict(bytes::Bytes::from(trainer.train()));
 
     let publisher = Socket::new(SocketType::Pub, opts.clone());
@@ -304,6 +312,7 @@ async fn pub_sub_lz4_io_lane_fan_out_deferred_large_message_preserves_order() {
         sub.subscribe(bytes::Bytes::new()).await.unwrap();
         subs.push(sub);
     }
+
     publisher
         .wait_subscribed(N_SUBS as u64, FAN_OUT_READY_TIMEOUT)
         .await
@@ -399,12 +408,14 @@ async fn pub_sub_mixed_tcp_then_lz4_fallback_delivers_to_all() {
 
     let lz4_ep = bind_lz4_loopback(&publisher).await;
     let mut lz4_subs = Vec::new();
+
     for _ in 0..2 {
         let sub = Socket::new(SocketType::Sub, Options::default());
         sub.subscribe(bytes::Bytes::new()).await.unwrap();
         sub.connect(lz4_ep.clone()).await.unwrap();
         lz4_subs.push(sub);
     }
+
     publisher
         .wait_subscribed(3, FAN_OUT_READY_TIMEOUT)
         .await
@@ -449,6 +460,7 @@ async fn pub_sub_lz4_fan_out() {
         s.subscribe(bytes::Bytes::new()).await.unwrap();
         subs.push(s);
     }
+
     publisher
         .wait_subscribed(N_SUBS as u64, FAN_OUT_READY_TIMEOUT)
         .await
@@ -493,6 +505,7 @@ async fn pub_sub_lz4_fan_out_with_dict() {
         let s = format!(r#"{{"seq":{i},"msg":"hello world","tag":"bench"}}"#);
         trainer.add_sample(s.as_bytes());
     }
+
     let dict = bytes::Bytes::from(trainer.train());
     let opts = Options::default().compression_dict(dict);
 
@@ -506,6 +519,7 @@ async fn pub_sub_lz4_fan_out_with_dict() {
         s.subscribe(bytes::Bytes::new()).await.unwrap();
         subs.push(s);
     }
+
     publisher
         .wait_subscribed(N_SUBS as u64, FAN_OUT_READY_TIMEOUT)
         .await

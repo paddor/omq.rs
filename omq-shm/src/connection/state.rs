@@ -58,18 +58,23 @@ impl OutboundLeases {
             self.free.push_back(lease.index);
             self.leased_messages -= lease.messages;
         }
+
         if self.has_credit(needed) {
             return;
         }
+
         // Scan the complete bounded window before parking. A batch can need
         // more credit even while a few unused positions remain in the table.
         let mut budget = crate::LEASE_RECLAIM_BUDGET;
+
         for _ in 0..self.active.len() {
             if budget.exhausted() {
                 break;
             }
+
             let lease = self.active.pop_front().expect("active lease");
             let _ = budget.account(std::mem::size_of::<ActiveLease>());
+
             if lease_completed(outgoing, peer, lease.index, lease.generation) {
                 self.free.push_back(lease.index);
                 self.leased_messages -= lease.messages;
@@ -89,6 +94,7 @@ impl OutboundLeases {
         let index = self.free.pop_front().expect("reserved lease credit");
         self.generation = generation;
         self.leased_messages += messages;
+
         Ok((index, generation))
     }
 
@@ -129,13 +135,16 @@ impl Registrations {
         if self.registered.contains(&identity) {
             return Ok(true);
         }
+
         if self.descriptors.len() == socket::SEND_LIMIT {
             return Ok(false);
         }
+
         self.descriptors.push_back(mapping.descriptor()?);
         if self.registered.len() == socket::SEND_LIMIT {
             self.registered.pop_front();
         }
+
         self.registered.push_back(identity);
         Ok(true)
     }
@@ -145,6 +154,7 @@ impl Registrations {
         if self.descriptors.is_empty() {
             return false;
         }
+
         self.sent = self.sent.wrapping_add(self.descriptors.len() as u64);
         self.descriptors.clear();
         true
@@ -179,6 +189,7 @@ impl InboundRegions {
             .retain(|(id, token, _)| (*id, *token) != identity);
         self.regions
             .push_back((mapping.id, mapping.token, Arc::new(mapping)));
+
         if self.regions.len() > socket::SEND_LIMIT {
             // Both sides retain the last 64 registrations in wire order.
             // Older regions remain discoverable while queued references need
@@ -187,13 +198,16 @@ impl InboundRegions {
             self.retired
                 .retain(|(id, token, _)| pending.contains(&(*id, *token)));
             let region = self.regions.pop_front().expect("registered region");
+
             if pending.contains(&(region.0, region.1)) {
                 self.retired.push_back(region);
             }
+
             if self.retired.len() > MAX_LEASES {
                 return Err(invalid("too many retained SHM regions"));
             }
         }
+
         Ok(())
     }
 
@@ -204,6 +218,7 @@ impl InboundRegions {
             if table.cell(index).load(Ordering::Acquire) & STATE_BITS != PENDING {
                 continue;
             }
+
             let id = table
                 .coordinates(index, wire::REGION_ID)
                 .load(Ordering::Relaxed) as u32;
@@ -214,12 +229,14 @@ impl InboundRegions {
             let kind = table
                 .coordinates(index, wire::RECORD_KIND)
                 .load(Ordering::Relaxed);
+
             if (kind == u64::from(REFERENCE_BATCH) || kind == u64::from(MULTIPART))
                 && let Some(mapping) = self.find(id, token)
             {
                 pending_batch_regions(table, index, mapping, &mut regions);
             }
         }
+
         regions
     }
 }
@@ -238,6 +255,7 @@ fn pending_batch_regions(
     let length = table
         .coordinates(index, wire::BODY_LENGTH)
         .load(Ordering::Relaxed);
+
     if let (Ok(offset), Ok(length)) = (usize::try_from(offset), usize::try_from(length))
         && mapping.contains(offset, length)
         && let Ok(references) = batch::references(mapping.bytes(offset, length))

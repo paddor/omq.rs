@@ -63,6 +63,7 @@ fn shape(seed: usize, sizes: &[usize], pool: &PayloadPool, pooled: Pooled) -> Me
             Pooled::Last => part == last,
             Pooled::All => true,
         };
+
         frame(pattern(seed, part, *size), pooled.then_some(pool))
     }))
 }
@@ -91,6 +92,7 @@ async fn connected(
     connector.connect(address).await.unwrap();
     connector.wait_connected(1, DEADLINE).await.unwrap();
     listener.wait_connected(1, DEADLINE).await.unwrap();
+
     (listener, connector)
 }
 
@@ -105,15 +107,18 @@ async fn pipeline_pair_and_dealer_keep_every_multipart_shape() {
         let context = Context::new();
         let (receiver, sender) =
             connected(&context, (bind_type, options()), (connect_type, options())).await;
+
         for message in messages(&pool) {
             sender.send(message.clone()).await.unwrap();
             let got = receive(&receiver).await;
             assert_eq!(got, message);
+
             if bind_type != SocketType::Pull {
                 receiver.send(got).await.unwrap();
                 assert_eq!(receive(&sender).await, message);
             }
         }
+
         sender.close().await.unwrap();
         receiver.close().await.unwrap();
     }
@@ -129,12 +134,14 @@ async fn pooled_envelope_frames_stay_shared_until_the_receiver_drops_them() {
         (SocketType::Push, options()),
     )
     .await;
+
     let envelope = pattern(1, 0, 8192);
     let message = Message::multipart_payloads([
         frame(envelope.clone(), Some(&pool)),
         Payload::from_static(b"body"),
     ]);
     sender.send(message).await.unwrap();
+
     let delivered = receive(&receiver).await;
     assert_eq!(delivered.part_slice(0), Some(envelope.as_ref()));
     assert_eq!(
@@ -143,6 +150,7 @@ async fn pooled_envelope_frames_stay_shared_until_the_receiver_drops_them() {
         "the envelope frame is shared, not copied"
     );
     drop(delivered);
+
     tokio::time::timeout(DEADLINE, async {
         while pool.available() == 0 {
             tokio::time::sleep(std::time::Duration::from_millis(1)).await;
@@ -150,6 +158,7 @@ async fn pooled_envelope_frames_stay_shared_until_the_receiver_drops_them() {
     })
     .await
     .unwrap();
+
     sender.close().await.unwrap();
     receiver.close().await.unwrap();
 }
@@ -158,6 +167,7 @@ async fn pooled_envelope_frames_stay_shared_until_the_receiver_drops_them() {
 async fn router_prepends_identities_and_routes_multipart_replies() {
     let pool = pool();
     let context = Context::new();
+
     let (router, dealer) = connected(
         &context,
         (SocketType::Router, options()),
@@ -167,6 +177,7 @@ async fn router_prepends_identities_and_routes_multipart_replies() {
         ),
     )
     .await;
+
     for message in messages(&pool) {
         dealer.send(message.clone()).await.unwrap();
         let mut request = receive(&router).await;
@@ -175,6 +186,7 @@ async fn router_prepends_identities_and_routes_multipart_replies() {
         router.send_to(b"dealer", request).await.unwrap();
         assert_eq!(receive(&dealer).await, message);
     }
+
     dealer.close().await.unwrap();
     router.close().await.unwrap();
 }
@@ -183,6 +195,7 @@ async fn router_prepends_identities_and_routes_multipart_replies() {
 async fn request_reply_envelopes_survive_shm() {
     let pool = pool();
     let context = Context::new();
+
     // Latency profiles use different REQ and REP receive sinks.
     for profile in [WorkloadProfile::Throughput, WorkloadProfile::Latency] {
         let options = options().workload_profile(profile);
@@ -192,6 +205,7 @@ async fn request_reply_envelopes_survive_shm() {
             (SocketType::Req, options.clone()),
         )
         .await;
+
         for message in messages(&pool) {
             req.send(message.clone()).await.unwrap();
             let request = receive(&rep).await;
@@ -199,6 +213,7 @@ async fn request_reply_envelopes_survive_shm() {
             rep.send(request).await.unwrap();
             assert_eq!(receive(&req).await, message);
         }
+
         req.close().await.unwrap();
         rep.close().await.unwrap();
 
@@ -212,6 +227,7 @@ async fn request_reply_envelopes_survive_shm() {
             ),
         )
         .await;
+
         for message in messages(&pool) {
             req.send(message.clone()).await.unwrap();
             let mut request = receive(&router).await;
@@ -224,6 +240,7 @@ async fn request_reply_envelopes_survive_shm() {
                 .unwrap();
             assert_eq!(receive(&req).await, message);
         }
+
         req.close().await.unwrap();
         router.close().await.unwrap();
     }
@@ -237,9 +254,11 @@ async fn publish_filtered(publisher: &Socket, subscribers: &[&Socket], pool: &Pa
     let probe = topic(b"keep", &Message::from_slice(b"probe"));
     let fence = topic(b"keep", &Message::from_slice(b"fence"));
     wait_fanout_ready(publisher, subscribers, probe, fence).await;
+
     for message in messages(pool) {
         publisher.send(topic(b"drop", &message)).await.unwrap();
         publisher.send(topic(b"keep", &message)).await.unwrap();
+
         for subscriber in subscribers {
             let mut got = receive(subscriber).await;
             assert_eq!(got.pop_front().unwrap(), b"keep".as_slice());
@@ -266,6 +285,7 @@ async fn publishers_filter_multipart_topics_for_shm_and_ipc_subscribers() {
     .unwrap();
     let ipc = publisher.bind(ipc).await.unwrap();
     let mut subscribers = Vec::new();
+
     for address in [&shm, &shm, &ipc] {
         let subscriber = context.socket(SocketType::Sub, options());
         subscriber
@@ -276,11 +296,14 @@ async fn publishers_filter_multipart_topics_for_shm_and_ipc_subscribers() {
         subscriber.wait_connected(1, DEADLINE).await.unwrap();
         subscribers.push(subscriber);
     }
+
     let borrowed: Vec<_> = subscribers.iter().collect();
     publish_filtered(&publisher, &borrowed, &pool).await;
+
     for subscriber in subscribers {
         subscriber.close().await.unwrap();
     }
+
     publisher.close().await.unwrap();
 
     let raw_publisher = context.socket(SocketType::XPub, nodrop);
@@ -288,6 +311,7 @@ async fn publishers_filter_multipart_topics_for_shm_and_ipc_subscribers() {
     let raw_subscriber = context.socket(SocketType::XSub, options());
     raw_subscriber.connect(address).await.unwrap();
     raw_subscriber.wait_connected(1, DEADLINE).await.unwrap();
+
     raw_subscriber
         .send(Message::from_slice(b"\x01keep"))
         .await
@@ -296,7 +320,9 @@ async fn publishers_filter_multipart_topics_for_shm_and_ipc_subscribers() {
         receive(&raw_publisher).await,
         Message::from_slice(b"\x01keep")
     );
+
     publish_filtered(&raw_publisher, &[&raw_subscriber], &pool).await;
+
     raw_subscriber.close().await.unwrap();
     raw_publisher.close().await.unwrap();
 }
@@ -312,9 +338,11 @@ fn queued(sequence: usize, pool: Option<&PayloadPool>) -> Message {
         "envelope-{}",
         sequence / 16
     )))];
+
     if sequence.is_multiple_of(7) {
         parts.push(Payload::from_static(b"extra"));
     }
+
     parts.push(frame(Bytes::from(body), pool));
     Message::multipart_payloads(parts)
 }
@@ -332,6 +360,7 @@ async fn queued_multipart_messages_keep_order_envelopes_and_identities() {
             .send_hwm(256)
             .recv_hwm(256)
             .router_mandatory(true);
+
         let (receiver, sender) = connected(
             &context,
             (
@@ -344,6 +373,7 @@ async fn queued_multipart_messages_keep_order_envelopes_and_identities() {
             ),
         )
         .await;
+
         let pool = shm_payload_pool([(32 * 1024, 512)]).unwrap();
         let task = tokio::spawn(async move {
             for sequence in 0..COUNT {
@@ -351,22 +381,27 @@ async fn queued_multipart_messages_keep_order_envelopes_and_identities() {
                 if bind_type == SocketType::Router {
                     assert_eq!(message.pop_front().unwrap(), b"sender".as_slice());
                 }
+
                 assert_eq!(message, queued(sequence, None), "message {sequence}");
                 if sequence.is_multiple_of(64) {
                     tokio::task::yield_now().await;
                 }
             }
+
             receiver.close().await.unwrap();
         });
+
         for sequence in 0..COUNT {
             let pooled = (sequence / 32).is_multiple_of(2).then_some(&pool);
             let message = queued(sequence, pooled);
+
             if connect_type == SocketType::Router {
                 sender.send_to(b"receiver", message).await.unwrap();
             } else {
                 sender.send(message).await.unwrap();
             }
         }
+
         tokio::time::timeout(DEADLINE, task).await.unwrap().unwrap();
         sender.close().await.unwrap();
     }

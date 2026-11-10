@@ -33,6 +33,10 @@ pub(super) const MIN_COMPRESS_WITH_DICT: usize = 64;
 /// Default auto-train dictionary capacity in bytes.
 pub(super) const DEFAULT_DICT_CAPACITY: usize = 2048;
 
+/// Decoded bytes per message when no message limit is configured. Whatever
+/// its parts declare, a small compressed frame cannot expand past this.
+pub(super) const DEFAULT_DECODED_MESSAGE_LIMIT: usize = 0x4000_0000 - 1;
+
 /// Send-side dictionary and threshold state shared by compression encoders.
 #[derive(Clone, Debug)]
 pub(super) struct SendDict {
@@ -101,6 +105,7 @@ impl SendDict {
         if self.shipped {
             return None;
         }
+
         let dict = self.dict.as_ref()?;
         self.shipped = true;
         Some(dict)
@@ -139,14 +144,12 @@ pub(super) fn take_budget(budget: &mut Option<usize>, take: usize) -> Result<()>
                 max: *left,
             });
         }
+
         *left -= take;
     }
+
     Ok(())
 }
-
-/// Decoded bytes per message when no message limit is configured. Whatever
-/// its parts declare, a small compressed frame cannot expand past this.
-pub(super) const DEFAULT_DECODED_MESSAGE_LIMIT: usize = 0x4000_0000 - 1;
 
 /// Reserve the per-part storage charged by the socket's decoded-message limit
 /// before allocating any decompressed bodies. Raw codec APIs keep body-only
@@ -172,6 +175,7 @@ pub(super) fn check_expansion(
             "{label} declared size implausibly large for compressed input"
         )));
     }
+
     Ok(())
 }
 
@@ -184,9 +188,11 @@ pub(super) fn plaintext_payload(plain: &Bytes) -> Payload {
     if plain.is_empty() {
         return Payload::from_bytes(Bytes::from_static(&SENTINEL_PLAIN));
     }
+
     let mut buf = BytesMut::with_capacity(ENVELOPE_PLAIN + plain.len());
     buf.extend_from_slice(&SENTINEL_PLAIN);
     buf.extend_from_slice(plain);
+
     Payload::from_bytes(buf.freeze())
 }
 
@@ -199,12 +205,14 @@ pub(super) fn validate_dict(dict: &Bytes, label: &str, max_bytes: usize) -> Resu
             "{label} dictionary must not be empty"
         )));
     }
+
     if dict.len() > max_bytes {
         return Err(Error::Protocol(format!(
             "{label} dictionary {} bytes exceeds max {max_bytes}",
             dict.len()
         )));
     }
+
     Ok(())
 }
 
@@ -230,11 +238,13 @@ pub(super) fn check_dict_shipment(
             "{label} dict shipment must be a single-part message"
         )));
     }
+
     if installed {
         return Err(Error::Protocol(format!(
             "{label} dict shipped twice on the same connection"
         )));
     }
+
     validate_dict(dict, label, max_bytes)
 }
 
@@ -253,22 +263,9 @@ pub(super) fn build_dict_shipment(sentinel: [u8; 4], dict: &Bytes) -> Message {
     let mut frame = BytesMut::with_capacity(4 + dict.len());
     frame.extend_from_slice(&sentinel);
     frame.extend_from_slice(dict);
+
     Message::single(frame.freeze())
 }
 
 #[cfg(test)]
-mod budget_tests {
-    use super::*;
-
-    #[test]
-    fn decoded_budget_is_finite_without_a_message_limit() {
-        let slot = size_of::<Payload>();
-        assert_eq!(
-            body_budget(2, None).unwrap(),
-            Some(DEFAULT_DECODED_MESSAGE_LIMIT - 2 * slot)
-        );
-        assert_eq!(body_budget(1, Some(1000)).unwrap(), Some(1000 - slot));
-        assert!(check_expansion(255, 1, 255, "test").is_ok());
-        assert!(check_expansion(256, 1, 255, "test").is_err());
-    }
-}
+mod budget_tests;

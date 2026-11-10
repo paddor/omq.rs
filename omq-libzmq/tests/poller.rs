@@ -25,6 +25,7 @@ const ZMQ_ETERM: i32 = 156_384_765;
 
 #[cfg(unix)]
 type ZmqFd = i32;
+
 #[cfg(windows)]
 type ZmqFd = usize;
 
@@ -42,6 +43,7 @@ fn invalid_fd() -> ZmqFd {
     {
         -1
     }
+
     #[cfg(windows)]
     {
         ZmqFd::MAX
@@ -58,6 +60,7 @@ fn set_timeo(sock: *mut c_void, ms: i32) {
         ),
         0
     );
+
     assert_eq!(
         zmq_setsockopt(
             sock,
@@ -212,6 +215,7 @@ fn poller_validation_errors_match_errno_contract() {
         ),
         -1
     );
+
     assert_eq!(omq_zmq::zmq_errno(), ZMQ_ENOTSOCK);
 
     assert_eq!(zmq_poller_remove(poller, std::ptr::null_mut()), -1);
@@ -226,6 +230,7 @@ fn poller_validation_errors_match_errno_contract() {
         ),
         -1
     );
+
     assert_eq!(omq_zmq::zmq_errno(), libc::EFAULT);
 
     assert_eq!(zmq_poller_wait(poller, std::ptr::null_mut(), 0), -1);
@@ -340,6 +345,7 @@ fn poller_fd_lifecycle_reports_pipe_readability() {
 
     let mut poller_slot = poller;
     assert_eq!(zmq_poller_destroy(&mut poller_slot), 0);
+
     unsafe {
         libc::close(fds[0]);
         libc::close(fds[1]);

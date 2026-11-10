@@ -48,13 +48,16 @@ unsafe fn parse_endpoint_args<'a>(
     if addr.is_null() {
         return Err(libc::EFAULT);
     }
+
     if sock.ctx.is_effectively_terminated() {
         return Err(ETERM);
     }
+
     // SAFETY: addr is non-null (checked above); caller guarantees a valid C string.
     let Ok(addr_str) = unsafe { CStr::from_ptr(addr) }.to_str() else {
         return Err(libc::EINVAL);
     };
+
     let addr_str = addr_str.to_owned();
 
     // DART's buffer ownership API is currently native Rust only. Cargo
@@ -66,6 +69,7 @@ unsafe fn parse_endpoint_args<'a>(
     let Ok(endpoint) = omq_tokio::Endpoint::from_str(&addr_str) else {
         return Err(libc::EINVAL);
     };
+
     Ok((sock, addr_str, endpoint))
 }
 
@@ -86,10 +90,12 @@ unsafe fn parse_group_args<'a>(
     if cstr.is_null() {
         return Err(libc::EFAULT);
     }
+
     // SAFETY: cstr is non-null (checked above); caller guarantees a valid C string.
     let Ok(g) = unsafe { CStr::from_ptr(cstr) }.to_str() else {
         return Err(libc::EINVAL);
     };
+
     Ok((sock, Bytes::copy_from_slice(g.as_bytes())))
 }
 
@@ -103,10 +109,12 @@ fn compression_options_for_endpoint(
     if omq_tokio::CompressionKind::for_endpoint(endpoint).is_none() {
         return Ok(None);
     }
+
     let options = overlay.to_options();
     omq_tokio::CompressionKind::for_endpoint_with_mechanism(endpoint, &options.mechanism)
         .map_err(|_| libc::EINVAL)?;
     options.validate().map_err(|_| libc::EINVAL)?;
+
     Ok(Some(omq_tokio::CompressionOptions::from(&options)))
 }
 
@@ -121,11 +129,14 @@ pub extern "C" fn zmq_bind(sock_ptr: *mut c_void, addr: *const libc::c_char) -> 
         sock.endpoints
             .bound_or_connected
             .store(true, Ordering::Release);
+
         if let Ok(mut ep) = sock.endpoints.last.lock() {
             *ep = Some(addr_str);
         }
+
         return 0;
     }
+
     if sock.is_zap_handler() {
         return fail(libc::EINVAL);
     }
@@ -134,9 +145,11 @@ pub extern "C" fn zmq_bind(sock_ptr: *mut c_void, addr: *const libc::c_char) -> 
     let Ok(ov) = sock.overlay.lock() else {
         return fail(ETERM);
     };
+
     if ov.ipv6 {
         endpoint = ipv6_rewrite_wildcard(endpoint);
     }
+
     let compression = c_try!(compression_options_for_endpoint(&ov, &endpoint));
     drop(ov);
 
@@ -150,9 +163,11 @@ pub extern "C" fn zmq_bind(sock_ptr: *mut c_void, addr: *const libc::c_char) -> 
         }
         Ok(s.last_bound_endpoint().map(|ep| ep.to_string()))
     }));
+
     if let Ok(mut ep) = sock.endpoints.last.lock() {
         *ep = resolved.or(Some(addr_str));
     }
+
     0
 }
 
@@ -164,6 +179,7 @@ pub extern "C" fn zmq_connect(sock_ptr: *mut c_void, addr: *const libc::c_char) 
     if addr_str == crate::zap::ENDPOINT {
         return fail(libc::EINVAL);
     }
+
     if sock.is_zap_handler() {
         return fail(libc::EINVAL);
     }
@@ -172,6 +188,7 @@ pub extern "C" fn zmq_connect(sock_ptr: *mut c_void, addr: *const libc::c_char) 
         let Ok(overlay) = sock.overlay.lock() else {
             return fail(ETERM);
         };
+
         c_try!(compression_options_for_endpoint(&overlay, &endpoint))
     };
 
@@ -184,10 +201,12 @@ pub extern "C" fn zmq_connect(sock_ptr: *mut c_void, addr: *const libc::c_char) 
             s.connect(endpoint).await
         }
     }));
+
     sock.endpoints.connect_count.fetch_add(1, Ordering::AcqRel);
     if let Ok(mut ep) = sock.endpoints.last.lock() {
         *ep = Some(addr_str);
     }
+
     0
 }
 
@@ -201,18 +220,22 @@ pub extern "C" fn zmq_unbind(sock_ptr: *mut c_void, addr: *const libc::c_char) -
         sock.endpoints
             .bound_or_connected
             .store(false, Ordering::Release);
+
         if let Ok(mut endpoint) = sock.endpoints.last.lock() {
             *endpoint = None;
         }
+
         return 0;
     }
 
     let Some(inner) = sock.inner.get() else {
         return fail(ETERM);
     };
+
     c_try!(run_on_socket(sock, inner, move |s| async move {
         s.unbind(endpoint).await
     }));
+
     0
 }
 
@@ -224,6 +247,7 @@ pub extern "C" fn zmq_disconnect(sock_ptr: *mut c_void, addr: *const libc::c_cha
     let Some(inner) = sock.inner.get() else {
         return fail(ETERM);
     };
+
     c_try!(run_on_socket(sock, inner, move |s| async move {
         s.disconnect(endpoint).await
     }));
@@ -235,6 +259,7 @@ pub extern "C" fn zmq_disconnect(sock_ptr: *mut c_void, addr: *const libc::c_cha
         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
             Some(n.saturating_sub(1))
         });
+
     0
 }
 
@@ -245,6 +270,7 @@ pub extern "C" fn zmq_connect_peer(sock_ptr: *mut c_void, _addr: *const libc::c_
         set_errno(crate::error::ENOTSOCK);
         return 0;
     }
+
     set_errno(crate::error::ENOTSUP);
     0
 }
@@ -259,9 +285,11 @@ pub extern "C" fn zmq_disconnect_peer(sock_ptr: *mut c_void, routing_id: u32) ->
     if sock.ctx.is_effectively_terminated() {
         return fail(ETERM);
     }
+
     if sock.socket_type != SocketType::Server {
         return fail(crate::error::ENOTSUP);
     }
+
     // An unmaterialized socket has no peers.
     let Some(inner) = sock.inner.get() else {
         return fail(libc::EHOSTUNREACH);
@@ -273,6 +301,7 @@ pub extern "C" fn zmq_disconnect_peer(sock_ptr: *mut c_void, routing_id: u32) ->
         };
         s.disconnect_peer(peer.connection_id).await
     }));
+
     0
 }
 
@@ -284,6 +313,7 @@ pub extern "C" fn zmq_join(sock_ptr: *mut c_void, group: *const libc::c_char) ->
     c_try!(run_on_socket(sock, inner, move |s| async move {
         s.join(g).await
     }));
+
     0
 }
 
@@ -295,5 +325,6 @@ pub extern "C" fn zmq_leave(sock_ptr: *mut c_void, group: *const libc::c_char) -
     c_try!(run_on_socket(sock, inner, move |s| async move {
         s.leave(g).await
     }));
+
     0
 }

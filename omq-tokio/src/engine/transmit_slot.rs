@@ -25,9 +25,12 @@ mod fan_out;
 mod shm;
 
 pub(crate) const TRANSMIT_SLOT_CAP_DEFAULT: usize = 512 * 1024;
+
 #[cfg(test)]
 pub(crate) const TRANSMIT_SLOT_MSG_CAP_DEFAULT: usize = 1000;
+
 const TRANSMIT_SLOT_LWM_DIVISOR: usize = 2;
+
 /// Slices per direct write. The latency path queues few messages.
 const DIRECT_WRITE_SLICES: usize = 64;
 
@@ -161,6 +164,7 @@ impl PeerTransmitSlot {
         if result == TryFrameResult::Ok {
             self.signal_encoded();
         }
+
         result
     }
 
@@ -196,6 +200,7 @@ impl PeerTransmitSlot {
         if self.is_dead() {
             return TryFrameResult::Dead;
         }
+
         if !self.is_handshake_done() {
             return TryFrameResult::Ineligible;
         }
@@ -203,6 +208,7 @@ impl PeerTransmitSlot {
         let Some(mut eq) = self.lock_live() else {
             return TryFrameResult::Dead;
         };
+
         let decision = decide_handle_frame(
             HandleFrameState {
                 uses_crypto: false,
@@ -219,6 +225,7 @@ impl PeerTransmitSlot {
             },
             msg,
         );
+
         match decision {
             HandleFrameDecision::Plain => eq.frame(msg),
             #[cfg(feature = "ws")]
@@ -233,9 +240,11 @@ impl PeerTransmitSlot {
             }
             HandleFrameDecision::Ineligible => return TryFrameResult::Ineligible,
         }
+
         self.queued_msgs.fetch_add(1, Ordering::Relaxed);
         self.mark_above_lwm_if_needed(eq.total_bytes(), self.queued_msgs.load(Ordering::Relaxed));
         drop(eq);
+
         TryFrameResult::Ok
     }
 
@@ -258,17 +267,21 @@ impl PeerTransmitSlot {
         if !eq.has_arena_only() {
             return None;
         }
+
         copy_stats::record(Site::ArenaDrain, eq.arena_bytes().len());
         out.extend_from_slice(eq.arena_bytes());
         eq.clear_arena();
+
         self.data_signal.begin_drain();
         self.queued_msgs.store(0, Ordering::Relaxed);
         let settled = self.settle_after_drain(0, 0);
         drop(eq);
         self.clear_data_signal_and_rearm();
+
         if settled.reactivate {
             self.notify_reactivation();
         }
+
         Some(DrainOutcome {
             space_available: settled.space_available,
         })
@@ -289,22 +302,28 @@ impl PeerTransmitSlot {
             let count = eq.io_slices(&mut slices);
             write(&slices[..count])?
         };
+
         if n > 0 {
             eq.advance(n);
         }
+
         let eq_empty = eq.is_empty();
         let eq_bytes = eq.total_bytes();
         self.data_signal.begin_drain();
+
         if eq_empty {
             self.queued_msgs.store(0, Ordering::Relaxed);
         }
+
         let queued_msgs = self.queued_msgs.load(Ordering::Relaxed);
         let settled = self.settle_after_drain(eq_bytes, queued_msgs);
         drop(eq);
         self.clear_data_signal_and_rearm();
+
         if settled.space_available {
             self.space_available.notify_changed();
         }
+
         if settled.reactivate {
             self.notify_reactivation();
         }
@@ -329,6 +348,7 @@ impl PeerTransmitSlot {
         } else {
             eq.drain(buf, max_chunks)
         };
+
         let eq_empty = eq.is_empty();
         let eq_bytes = eq.total_bytes();
         self.data_signal.begin_drain();
@@ -349,15 +369,19 @@ impl PeerTransmitSlot {
         if eq_empty {
             self.queued_msgs.store(0, Ordering::Relaxed);
         }
+
         let queued_msgs = self.queued_msgs.load(Ordering::Relaxed);
         let settled = self.settle_after_drain(eq_bytes, queued_msgs);
         drop(eq);
+
         if eq_empty {
             self.clear_data_signal_and_rearm();
         }
+
         if settled.reactivate {
             self.notify_reactivation();
         }
+
         DrainOutcome {
             space_available: settled.space_available,
         }
@@ -377,12 +401,14 @@ impl PeerTransmitSlot {
         if let Some(state) = ownership.as_mut() {
             state.close();
         }
+
         self.dead.store(true, Ordering::Release);
         let retired = {
             let mut eq = self.eq.lock().expect("transmit_slot eq poisoned");
             self.queued_msgs.store(0, Ordering::Relaxed);
             std::mem::replace(&mut *eq, FrameBuffer::one_shot())
         };
+
         self.fan_out.retire();
         self.above_lwm.store(false, Ordering::Relaxed);
         drop(ownership);

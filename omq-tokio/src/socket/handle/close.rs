@@ -34,11 +34,13 @@ impl Socket {
             linger,
         };
         let zero_linger = matches!(effective_linger, Some(std::time::Duration::ZERO));
+
         let ack = if zero_linger {
             match self.inner.cmd_tx.try_send(close) {
                 Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
                 Err(mpsc::error::TrySendError::Full(_)) => self.inner.cancel.cancel(),
             }
+
             tokio::select! {
                 biased;
                 res = rx => Some(res),
@@ -52,6 +54,7 @@ impl Socket {
                 let _ = self.inner.cmd_tx.send(close).await;
                 rx.await
             };
+
             // Include admission: a full protocol inbox can block the actor's
             // current command before it can start its own linger timer.
             if let Some(duration) = effective_linger {
@@ -65,18 +68,22 @@ impl Socket {
                 Some(complete.await)
             }
         };
+
         let res = match ack {
             Some(Ok(res)) => res,
             Some(Err(_)) | None => Ok(()),
         };
+
         self.send_submitter.shutdown();
         self.inner.recv_rx.shutdown();
         let actor_task = self.inner.actor_task.lock().unwrap().take();
+
         if let Some(task) = actor_task
             && !zero_linger
         {
             let _ = task.await;
         }
+
         res
     }
 }

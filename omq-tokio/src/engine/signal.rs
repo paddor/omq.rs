@@ -38,6 +38,11 @@ pub(crate) use blocking::{
 };
 pub(crate) use woken::{WakeGate, WokenGate};
 
+const IDLE: u8 = 0;
+const PENDING: u8 = 1;
+const DRAINING: u8 = 2;
+const DIRTY: u8 = 3;
+
 fn new_notify() -> Notify {
     let notify = Notify::new();
     // Tokio's waiter mutex allocates on first use on some platforms.
@@ -46,13 +51,9 @@ fn new_notify() -> Notify {
         let mut waiter = std::pin::pin!(notify.notified());
         waiter.as_mut().enable();
     }
+
     notify
 }
-
-const IDLE: u8 = 0;
-const PENDING: u8 = 1;
-const DRAINING: u8 = 2;
-const DIRTY: u8 = 3;
 
 /// Coalesced data-available notification.
 #[derive(Debug)]
@@ -119,10 +120,12 @@ impl DataSignal {
         if let Some(endpoint) = self.endpoint.get() {
             endpoint.mark();
         }
+
         // Order the caller's publication before the state read. See the
         // module docs.
         fence(Ordering::SeqCst);
         let state = self.state.load(Ordering::Acquire);
+
         if !matches!(state, PENDING | DIRTY) {
             self.mark_pending(state);
         }
@@ -166,6 +169,7 @@ impl DataSignal {
                 self.state
                     .compare_exchange(PENDING, DRAINING, Ordering::AcqRel, Ordering::Acquire);
         }
+
         // Order the state write before the drain's reads. See the module
         // docs.
         fence(Ordering::SeqCst);
@@ -195,6 +199,7 @@ impl DataSignal {
                         if let Some(progress) = self.close_progress.get() {
                             progress.notify_changed();
                         }
+
                         return false;
                     }
                     Err(next) => state = next,
@@ -244,6 +249,7 @@ impl DataSignal {
     pub(crate) fn wake_all(&self) {
         self.state.store(PENDING, Ordering::Release);
         self.notify.notify_waiters();
+
         if let Some(progress) = self.close_progress.get() {
             progress.notify_changed();
         }
@@ -257,16 +263,20 @@ impl DataSignal {
         let notified = self.notify.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
+
         if !self.is_idle() {
             return;
         }
+
         // Count this waiter before the final check. A consumer that later
         // sees pending data in `hand_off` then also sees this waiter.
         self.waiters.fetch_add(1, Ordering::SeqCst);
         let _parked = ParkedWaiter(&self.waiters);
+
         if self.state.load(Ordering::SeqCst) != IDLE {
             return;
         }
+
         notified.await;
     }
 
@@ -376,6 +386,7 @@ impl StateSignal {
             .expect("DART space subscribers");
         let endpoints = Arc::make_mut(&mut subscribers);
         endpoints.retain(|endpoint| endpoint.strong_count() != 0);
+
         if !endpoints
             .iter()
             .any(|endpoint| endpoint.as_ptr() == Arc::as_ptr(signal))
@@ -405,11 +416,13 @@ impl StateSignal {
     pub fn notify_changed(&self) {
         self.generation.fetch_add(1, Ordering::SeqCst);
         self.notify.notify_waiters();
+
         #[cfg(feature = "dart")]
         if let Some(endpoints) = self.endpoints.get() {
             // Snapshot once per publication; registration copies only while
             // a wake holds the old list. Notify can invoke user callbacks.
             let endpoints = Arc::clone(&endpoints.lock().expect("DART space subscribers"));
+
             for endpoint in endpoints.iter() {
                 if let Some(signal) = endpoint.upgrade() {
                     signal.mark();
@@ -423,12 +436,15 @@ impl StateSignal {
         if self.generation() != seen {
             return;
         }
+
         let notified = self.notify.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
+
         if self.generation() != seen {
             return;
         }
+
         notified.await;
     }
 
@@ -443,13 +459,16 @@ impl StateSignal {
             if ready() {
                 return;
             }
+
             let seen = self.generation();
             let notified = self.notify.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
+
             if ready() || self.generation() != seen {
                 return;
             }
+
             notified.await;
         }
     }

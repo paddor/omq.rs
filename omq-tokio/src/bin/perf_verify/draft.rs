@@ -82,6 +82,7 @@ pub(super) fn cases(cases: &mut Vec<Case>) {
     ] {
         add_size_cases(cases, transport);
         add_fan_cases(cases, transport);
+
         #[cfg(target_os = "linux")]
         if matches!(transport, Transport::Shm) {
             add_shm_cases(cases, transport);
@@ -101,6 +102,7 @@ fn add_size_cases(cases: &mut Vec<Case>, transport: Transport) {
             {
                 continue;
             }
+
             add(cases, suffix, Workload::new(transport, pattern, size));
         }
     }
@@ -118,6 +120,7 @@ fn add_fan_cases(cases: &mut Vec<Case>, transport: Transport) {
             ..scatter
         },
     );
+
     add(
         cases,
         "64b_8src",
@@ -126,6 +129,7 @@ fn add_fan_cases(cases: &mut Vec<Case>, transport: Transport) {
             ..scatter
         },
     );
+
     add(
         cases,
         "64b_4p",
@@ -150,10 +154,12 @@ fn add_shm_cases(cases: &mut Vec<Case>, transport: Transport) {
             ..scatter
         },
     );
+
     for pattern in [Pattern::ScatterGather, Pattern::RadioDish] {
         for (size, suffix) in [(4096, "4k"), (16 * 1024, "16k"), (1024 * 1024, "1m")] {
             let workload = Workload::new(transport, pattern, size);
             add(cases, suffix, workload);
+
             add(
                 cases,
                 suffix,
@@ -186,6 +192,7 @@ pub(super) fn smoke_thresholds(thresholds: &mut HashMap<String, f64>) {
     ] {
         thresholds.insert(name.into(), 100_000.0);
     }
+
     #[cfg(target_os = "linux")]
     for name in [
         "shm_scattergather_1io.64b_msgs_s",
@@ -196,6 +203,7 @@ pub(super) fn smoke_thresholds(thresholds: &mut HashMap<String, f64>) {
     ] {
         thresholds.insert(name.into(), 100_000.0);
     }
+
     #[cfg(target_os = "linux")]
     thresholds.insert("shm_scattergather_pool_1io.1m_msgs_s".into(), 100.0);
     #[cfg(feature = "dart")]
@@ -209,21 +217,25 @@ pub(super) fn measure(workload: Workload) -> f64 {
     } else {
         context(1, Side::Sender)
     };
+
     let mut options = workload.transport.options().send_hwm(HWM).recv_hwm(HWM);
     options.xpub_nodrop = true;
     let (sender_type, receiver_type) = workload.pattern.types();
     let mut receivers = Vec::with_capacity(workload.destinations);
     let mut endpoints = Vec::with_capacity(workload.destinations);
+
     for _ in 0..workload.destinations {
         let receiver = receiver_ctx.blocking_socket(receiver_type, options.clone());
         if matches!(workload.pattern, Pattern::RadioDish) {
             receiver.join(Bytes::from_static(GROUP)).expect("DISH join");
         }
+
         endpoints.push(
             receiver
                 .bind(workload.transport.endpoint())
                 .expect("draft bind"),
         );
+
         if workload.mixed {
             endpoints.push(
                 receiver
@@ -231,8 +243,10 @@ pub(super) fn measure(workload: Workload) -> f64 {
                     .expect("mixed TCP bind"),
             );
         }
+
         receivers.push(receiver);
     }
+
     let senders: Vec<_> = (0..workload.sources)
         .map(|index| {
             let sender = sender_ctx.blocking_socket(sender_type, options.clone());
@@ -240,25 +254,32 @@ pub(super) fn measure(workload: Workload) -> f64 {
                 if workload.mixed && index % endpoints.len() != endpoint_index {
                     continue;
                 }
+
                 sender.connect(endpoint.clone()).expect("draft connect");
             }
+
             sender
                 .wait_connected(workload.destinations, Duration::from_secs(5))
                 .expect("draft sender ready");
+
             sender
         })
         .collect();
+
     for receiver in &receivers {
         receiver
             .wait_connected(workload.sources, Duration::from_secs(5))
             .expect("draft receiver ready");
     }
+
     if matches!(workload.pattern, Pattern::RadioDish) {
         wait_radio_ready(&senders[0], &receivers);
     }
+
     let rate = transfer(&senders, receivers, workload);
     sender_ctx.term();
     receiver_ctx.term();
+
     rate
 }
 
@@ -266,12 +287,14 @@ fn wait_radio_ready(sender: &Socket, receivers: &[Socket]) {
     let probe = Message::with_group(Bytes::from_static(GROUP), Bytes::from_static(b"\0"));
     let mut ready = vec![false; receivers.len()];
     let deadline = Instant::now() + Duration::from_secs(5);
+
     while ready.iter().any(|ready| !ready) {
         assert!(Instant::now() < deadline, "DISH probe timeout");
         match sender.try_send(probe.clone()) {
             Ok(()) | Err(TrySendError::Full(_)) => {}
             Err(error) => panic!("DISH probe send: {error}"),
         }
+
         for (receiver, ready) in receivers.iter().zip(&mut ready) {
             match receiver.try_recv() {
                 Ok(message) => {
@@ -282,6 +305,7 @@ fn wait_radio_ready(sender: &Socket, receivers: &[Socket]) {
                 Err(error) => panic!("DISH probe receive: {error}"),
             }
         }
+
         thread::yield_now();
     }
 }
@@ -290,6 +314,7 @@ fn transfer(senders: &[Socket], receivers: Vec<Socket>, workload: Workload) -> f
     let (window_tx, window_rx) = mpsc::channel();
     let ready = Arc::new(Barrier::new(2));
     let receiver_ready = ready.clone();
+
     let reader = thread::spawn(move || {
         SETTINGS.affinity.pin(5);
         receiver_ready.wait();
@@ -298,11 +323,13 @@ fn transfer(senders: &[Socket], receivers: Vec<Socket>, workload: Workload) -> f
             window_rx.recv().expect("draft measurement window"),
         )
     });
+
     let pool = storage(workload);
     ready.wait();
     let window = Window::new(Instant::now(), SETTINGS.warmup, SETTINGS.measure);
     window_tx.send(window).expect("draft measurement start");
     let mut queued = VecDeque::with_capacity(BATCH);
+
     for (tag, deadline) in [(0, window.start), (MEASURED_TAG, window.end)] {
         let template = message(workload, None, tag);
         while Instant::now() < deadline {
@@ -310,6 +337,7 @@ fn transfer(senders: &[Socket], receivers: Vec<Socket>, workload: Workload) -> f
                 if Instant::now() >= deadline {
                     break;
                 }
+
                 if workload.bulk {
                     queued.extend((0..BATCH).map(|_| template.clone()));
                     while !queued.is_empty() && Instant::now() < deadline {
@@ -323,6 +351,7 @@ fn transfer(senders: &[Socket], receivers: Vec<Socket>, workload: Workload) -> f
                             Err(error) => panic!("draft bulk send: {error}"),
                         }
                     }
+
                     queued.clear();
                 } else {
                     send_blocking_batch_until_with(
@@ -340,6 +369,7 @@ fn transfer(senders: &[Socket], receivers: Vec<Socket>, workload: Workload) -> f
             }
         }
     }
+
     reader.join().expect("draft receiver").rate()
 }
 
@@ -347,6 +377,7 @@ fn storage(workload: Workload) -> Option<PayloadPool> {
     if !workload.pooled {
         return None;
     }
+
     #[cfg(target_os = "linux")]
     if workload.pooled {
         let capacity = if workload.size >= 1024 * 1024 {
@@ -354,11 +385,13 @@ fn storage(workload: Workload) -> Option<PayloadPool> {
         } else {
             64 * 1024 * 1024
         };
+
         return Some(
             omq_tokio::shm_payload_pool([(workload.size, capacity / workload.size)])
                 .expect("SHM payload pool"),
         );
     }
+
     None
 }
 
@@ -370,6 +403,7 @@ fn message(workload: Workload, pool: Option<&PayloadPool>, tag: u8) -> Message {
                 .expect("pooled draft body")
         },
     );
+
     match workload.pattern {
         Pattern::ScatterGather => body,
         Pattern::RadioDish => Message::with_prefix(Bytes::from_static(GROUP), body),

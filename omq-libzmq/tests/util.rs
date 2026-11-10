@@ -33,6 +33,7 @@ fn has_capabilities() {
     assert_eq!(zmq_has(c"curve".as_ptr()), 1);
     assert_eq!(zmq_has(c"plain".as_ptr()), 1);
     assert_eq!(zmq_has(c"zmtp3".as_ptr()), 1);
+
     assert_eq!(zmq_has(c"norm".as_ptr()), 0);
     assert_eq!(zmq_has(c"tipc".as_ptr()), 0);
     assert_eq!(zmq_has(c"vmci".as_ptr()), 0);

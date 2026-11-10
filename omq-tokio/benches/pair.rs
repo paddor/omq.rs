@@ -26,6 +26,7 @@ fn main() {
                     common::print_cell(size, cell);
                     common::append_jsonl(PATTERN, &transport, peers, size, cell);
                 }
+
                 println!();
             }
         }
@@ -39,6 +40,7 @@ async fn run_cell(transport: &str, size: usize, seq: usize) -> common::Cell {
 
     let sender = Socket::new(SocketType::Pair, Options::default());
     sender.connect(ep.clone()).await.expect("connect PAIR");
+
     if transport != "inproc" {
         common::wait_connected(&[&sender]).await;
     }
@@ -51,19 +53,23 @@ async fn run_cell(transport: &str, size: usize, seq: usize) -> common::Cell {
         let receiver = receiver.clone();
         let sender = sender.clone();
         let payload = payload.clone();
+
         async move {
             let send = {
                 let sender = sender.clone();
                 let payload = payload.clone();
+
                 tokio::spawn(async move {
                     for _ in 0..k {
                         sender.send(Message::single(payload.clone())).await.unwrap();
                     }
                 })
             };
+
             for _ in 0..k {
                 receiver.recv().await.unwrap();
             }
+
             let _ = send.await;
         }
     };
@@ -72,8 +78,10 @@ async fn run_cell(transport: &str, size: usize, seq: usize) -> common::Cell {
     if let Ok(sender) = std::sync::Arc::try_unwrap(sender) {
         let _ = sender.close().await;
     }
+
     if let Ok(receiver) = std::sync::Arc::try_unwrap(receiver) {
         let _ = receiver.close().await;
     }
+
     cell
 }

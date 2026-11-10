@@ -75,6 +75,7 @@ impl RingDrain {
         if self.popped == 0 {
             return false;
         }
+
         self.popped = 0;
         consumer.release_with_full()
     }
@@ -90,21 +91,25 @@ pub(super) fn drain_peer_source(
     let Some(mut consumer) = peer.consumer.try_lock() else {
         return SourceDrain::default();
     };
+
     let mut progress = RingDrain {
         remaining: peer.batch_remaining.load(Ordering::Relaxed),
         popped: peer.batch_popped.load(Ordering::Relaxed),
     };
+
     let message = if latency {
         let (item, wake) = drain_yring_one(&mut consumer, &mut progress);
         if wake {
             peer.space.notify_changed();
         }
+
         item
     } else {
         match limit {
             DrainLimit::One => {
                 let (_, wake) =
                     drain_yring_one_into_batch(&mut consumer, batch, &mut progress, budget);
+
                 if wake {
                     peer.space.notify_changed();
                 }
@@ -115,11 +120,14 @@ pub(super) fn drain_peer_source(
                 });
             }
         }
+
         None
     };
+
     peer.batch_remaining
         .store(progress.remaining, Ordering::Relaxed);
     peer.batch_popped.store(progress.popped, Ordering::Relaxed);
+
     SourceDrain {
         message,
         disconnected: consumer.is_disconnected(),
@@ -135,10 +143,12 @@ pub(super) fn drain_yring_one_into_batch(
     if budget.exhausted() {
         return (0, false);
     }
+
     let (item, released) = drain_yring_one(consumer, progress);
     let Some(item) = item else {
         return (0, released);
     };
+
     let _ = budget.account(recv_budget_bytes(&item));
     batch.push(item);
     (1, released)
@@ -153,6 +163,7 @@ pub(super) fn drain_yring(
 ) -> usize {
     let mut drained = 0;
     let lwm = RingDrain::lwm(consumer.capacity());
+
     while !budget.exhausted() {
         if progress.remaining == 0 {
             progress.remaining = consumer.prefetch();
@@ -160,6 +171,7 @@ pub(super) fn drain_yring(
                 break;
             }
         }
+
         let count = consumer.pop_into_while(
             batch,
             budget.remaining_msgs().min(lwm - progress.popped),
@@ -167,27 +179,33 @@ pub(super) fn drain_yring(
                 if budget.exhausted() {
                     return false;
                 }
+
                 // Admit the item exhausting the byte budget, even if oversized.
                 let _ = budget.account(recv_budget_bytes(message));
                 true
             },
         );
+
         progress.remaining -= count;
         progress.popped += count;
         drained += count;
+
         if (progress.remaining == 0 || progress.popped >= lwm) && progress.release(consumer) {
             // Publish and wake at LWM while this drain continues on its other
             // half. Deferring the wake until return prevents overlap.
             on_release();
         }
+
         if count == 0 {
             break;
         }
     }
+
     // A budget boundary hands control elsewhere. Publish partial credits.
     if progress.release(consumer) {
         on_release();
     }
+
     drained
 }
 
@@ -203,16 +221,20 @@ pub(super) fn drain_yring_one(
                 return (None, progress.release(consumer));
             }
         }
+
         if let Some(item) = consumer.pop() {
             progress.remaining -= 1;
             progress.popped += 1;
             let wake = (progress.remaining == 0
                 || progress.popped >= RingDrain::lwm(consumer.capacity()))
                 && progress.release(consumer);
+
             return (Some(item), wake);
         }
+
         let wake = progress.release(consumer);
         progress.remaining = 0;
+
         if wake {
             return (None, true);
         }
@@ -229,22 +251,27 @@ impl SpscAwareRecv {
                     Err(_) => DrainResult::Empty,
                 };
             }
+
             // Alternate the first source so neither starves the other.
             // Both are checked before reporting an empty socket.
             let rings_first = self.rings_first.fetch_xor(true, Ordering::Relaxed);
             if rings_first && let DrainResult::Message(message) = self.try_drain_queues() {
                 return DrainResult::Message(message);
             }
+
             match fanin.try_recv() {
                 Ok(message) => return DrainResult::Message(message),
                 Err(Error::Closed) => return DrainResult::Closed,
                 Err(_) => {}
             }
+
             if !rings_first && let DrainResult::Message(message) = self.try_drain_queues() {
                 return DrainResult::Message(message);
             }
+
             return DrainResult::Empty;
         }
+
         self.try_drain_queues()
     }
 
@@ -256,6 +283,7 @@ impl SpscAwareRecv {
                 Err(_) => DrainResult::Empty,
             };
         }
+
         if let Some(msg) = self.take_conflate_message() {
             return DrainResult::Message(msg);
         }
@@ -268,6 +296,7 @@ impl SpscAwareRecv {
 
         self.refresh_snapshot(&mut guard);
         let state = &mut *guard;
+
         if let Some(msg) = Self::try_single_peer(state).and_then(|drained| drained.message) {
             return DrainResult::Message(msg);
         }
@@ -277,16 +306,20 @@ impl SpscAwareRecv {
         // fences, before clearing signals or allowing the caller to park.
         self.handles.recv_signal.begin_drain();
         self.recv_pipe_notify.begin_drain();
+
         if let Some(msg) = self.take_conflate_message() {
             return DrainResult::Message(msg);
         }
+
         let (result, has_disconnected) = self.drain_fenced(state);
         let pipe_disconnected = state.recv_consumer.is_disconnected();
         let has_peers = !state.tcp.is_empty();
         let all_empty = Self::state_is_empty(state) && self.conflate_slot_empty();
+
         if result.is_none() {
             self.release_partial_batches(state);
         }
+
         if result.is_none()
             && all_empty
             && (self.handles.recv_signal.clear_after(all_empty)
@@ -296,6 +329,7 @@ impl SpscAwareRecv {
         {
             self.handles.blocking_recv_waker.wake();
         }
+
         drop(guard);
 
         if has_disconnected {
@@ -314,6 +348,7 @@ impl SpscAwareRecv {
         if state.generation == current_gen {
             return;
         }
+
         state
             .tcp
             .clone_from(&self.handles.tcp_consumers.read().unwrap());
@@ -330,6 +365,7 @@ impl SpscAwareRecv {
         {
             return None;
         }
+
         let mut budget = DrainBudget::new(1, RECV_BATCH_BYTES);
         Some(drain_peer_source(
             &state.tcp[0],
@@ -347,6 +383,7 @@ impl SpscAwareRecv {
         if let Some(drained) = Self::try_single_peer(state) {
             return (drained.message, drained.disconnected);
         }
+
         let mut budget = DrainBudget::new(RECV_BATCH_MESSAGES, RECV_BATCH_BYTES);
         // The staging deque is empty here. Reuse its allocation for the
         // queues' contiguous bulk output, then restore FIFO single receives.
@@ -354,6 +391,7 @@ impl SpscAwareRecv {
         let (latency_result, has_disconnected) =
             self.drain_sources(state, &mut budget, false, &mut batch);
         state.batch = batch.into();
+
         (
             latency_result.or_else(|| state.batch.pop_front()),
             has_disconnected,
@@ -376,14 +414,17 @@ impl SpscAwareRecv {
         // Batching bulk calls take one peer's whole window before moving
         // on. Everything else rotates peers after each message.
         let batching = bulk && self.tuning.batching;
+
         let limit = if !latency && peer_source_count > 1 && !batching {
             DrainLimit::One
         } else {
             DrainLimit::Budget
         };
+
         loop {
             let start = state.recv_cursor % source_count;
             let before = budget.msgs();
+
             // One logical round-robin space covers all sources. Bulk calls
             // repeat fair rounds with one aggregate budget, never waiting for
             // arrivals. Advance the cursor even when a limit cuts a round short.
@@ -391,8 +432,10 @@ impl SpscAwareRecv {
                 if result.is_some() || budget.exhausted() {
                     break;
                 }
+
                 let source = (start + offset) % source_count;
                 state.recv_cursor = (source + 1) % source_count;
+
                 let outcome = match recv_source_at(source, tcp_len) {
                     RecvSource::Stream(index) => {
                         drain_peer_source(&state.tcp[index], latency, batch, budget, limit)
@@ -400,13 +443,16 @@ impl SpscAwareRecv {
                     RecvSource::Shared if latency => self.drain_shared_one(state),
                     RecvSource::Shared => self.drain_shared_batch(state, budget, limit, batch),
                 };
+
                 result = outcome.message;
                 has_disconnected |= outcome.disconnected;
             }
+
             if !bulk || budget.exhausted() || budget.msgs() == before {
                 break;
             }
         }
+
         (result, has_disconnected)
     }
 
@@ -417,6 +463,7 @@ impl SpscAwareRecv {
         if wake {
             self.recv_pipe_space.notify_changed();
         }
+
         SourceDrain {
             message: item,
             disconnected: false,
@@ -440,6 +487,7 @@ impl SpscAwareRecv {
                     &mut state.recv_batch,
                     budget,
                 );
+
                 if wake {
                     self.recv_pipe_space.notify_changed();
                 }
@@ -454,6 +502,7 @@ impl SpscAwareRecv {
                 );
             }
         }
+
         SourceDrain::default()
     }
 
@@ -479,6 +528,7 @@ impl SpscAwareRecv {
                 }
             }
         }
+
         if state.recv_batch.release(&mut state.recv_consumer) {
             self.recv_pipe_space.notify_changed();
         }

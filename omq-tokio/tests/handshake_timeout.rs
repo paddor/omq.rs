@@ -69,6 +69,7 @@ async fn null_refusal_stops_only_its_endpoint() {
     })
     .await
     .unwrap();
+
     assert_eq!(endpoint, refused_endpoint);
     assert_eq!(refusal.mechanism, MechanismName::NULL);
     assert_eq!(refusal.reason, "auth");
@@ -126,6 +127,7 @@ async fn connect_to_silent_peer_queues_until_pre_ready_pipe_full() {
             _ => break,
         }
     }
+
     assert_eq!(
         accepted as u32, hwm,
         "pre-ready pipe should buffer up to send_hwm before blocking"
@@ -153,6 +155,7 @@ async fn failed_driver_handshake_waits_before_reconnecting() {
     let endpoint: omq_tokio::Endpoint = format!("tcp://{}", listener.local_addr().unwrap())
         .parse()
         .unwrap();
+
     let push = Socket::new(
         SocketType::Push,
         Options {
@@ -164,9 +167,11 @@ async fn failed_driver_handshake_waits_before_reconnecting() {
             ..Options::default()
         },
     );
+
     let mut monitor = push.monitor();
     push.connect(endpoint).await.unwrap();
     let (mut silent_peer, _) = listener.accept().await.unwrap();
+
     for (attempt, interval_ms) in [(1, 200), (2, 400)] {
         tokio::time::timeout(Duration::from_secs(1), async {
             while !matches!(
@@ -176,6 +181,7 @@ async fn failed_driver_handshake_waits_before_reconnecting() {
         })
         .await
         .unwrap();
+
         let failed_at = tokio::time::Instant::now();
         let (retry, _) = tokio::time::timeout(Duration::from_secs(1), listener.accept())
             .await
@@ -192,6 +198,7 @@ async fn failed_driver_handshake_waits_before_reconnecting() {
         ));
         silent_peer = retry;
     }
+
     drop(silent_peer);
     push.close().await.unwrap();
 }
@@ -207,9 +214,11 @@ async fn silent_inbound_peers_cannot_starve_outbound_connects() {
             .handshake_timeout(Duration::from_secs(10)),
     );
     let endpoint = socket.bind("tcp://127.0.0.1:0").await.unwrap();
+
     let Endpoint::Tcp { port, .. } = endpoint else {
         unreachable!()
     };
+
     // Unauthenticated, silent transports fill every inbound slot.
     let mut silent = Vec::new();
     for _ in 0..2 {
@@ -219,6 +228,7 @@ async fn silent_inbound_peers_cannot_starve_outbound_connects() {
                 .unwrap(),
         );
     }
+
     tokio::time::sleep(Duration::from_millis(100)).await;
     socket.connect(peer_ep).await.unwrap();
     socket
@@ -237,6 +247,7 @@ async fn blocked_authenticator_leaves_the_io_thread_to_other_connections() {
     let release = Arc::new((Mutex::new(false), Condvar::new()));
     let gate = release.clone();
     let (entered_tx, mut entered) = tokio::sync::mpsc::unbounded_channel();
+
     let options = Options {
         mechanism: omq_tokio::MechanismSetup::NullServer {
             authenticator: omq_tokio::Authenticator::new(move |_| {
@@ -249,11 +260,13 @@ async fn blocked_authenticator_leaves_the_io_thread_to_other_connections() {
                     })
                     .unwrap()
                     .0;
+
                 *released
             }),
         },
         ..Options::default()
     };
+
     let guarded = context.socket(SocketType::Pull, options);
     let guarded_endpoint = guarded.bind("tcp://127.0.0.1:0").await.unwrap();
     let client = context.socket(SocketType::Push, Options::default());
@@ -269,14 +282,17 @@ async fn blocked_authenticator_leaves_the_io_thread_to_other_connections() {
         let push = context.socket(SocketType::Push, Options::default());
         push.connect(endpoint).await.unwrap();
         push.send(Message::single("through")).await.unwrap();
+
         pull.recv().await.unwrap()
     })
     .await;
+
     {
         let (lock, cvar) = &*release;
         *lock.lock().unwrap() = true;
         cvar.notify_all();
     }
+
     assert_eq!(
         unrelated.expect("the IO thread waited for the authenticator"),
         Message::single("through")

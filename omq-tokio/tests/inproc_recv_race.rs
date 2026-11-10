@@ -23,6 +23,7 @@ fn tcp_ep() -> Endpoint {
     let l = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
     let port = l.local_addr().unwrap().port();
     drop(l);
+
     Endpoint::Tcp {
         host: omq_tokio::endpoint::Host::Ip(Ipv4Addr::LOCALHOST.into()),
         port,

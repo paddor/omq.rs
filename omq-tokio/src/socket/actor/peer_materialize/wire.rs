@@ -83,6 +83,7 @@ pub(super) fn prepare_wire_carrier(
     )?;
     #[cfg(not(target_os = "linux"))]
     let shm = None;
+
     let Ok((stream, direct_tcp_writer)) =
         split_direct_tcp_writer(socket, stream, &peer.endpoint, profile)
     else {
@@ -93,6 +94,7 @@ pub(super) fn prepare_wire_carrier(
         shm,
         direct_tcp_writer,
     };
+
     Some((stream, carrier))
 }
 
@@ -104,6 +106,7 @@ pub(super) fn attach_transmit_slot(
     let peer_driver = peer_driver
         .with_arena_threshold(arena.threshold)
         .with_arena_cap(arena.cap);
+
     match slot {
         Some(slot) => peer_driver.with_transmit_slot(slot.clone()),
         None => peer_driver,
@@ -148,9 +151,11 @@ fn prepare_shm_stream(
     if !matches!(endpoint, Endpoint::Shm(_)) {
         return Some((stream, None));
     }
+
     let AnyStream::Ipc(ipc) = stream else {
         return None;
     };
+
     let carrier = crate::transport::shm::ShmStream::new(ipc, options, pool.clone()).ok()?;
     let state = carrier.state.clone();
     Some((AnyStream::Shm(carrier), Some(state)))
@@ -166,8 +171,10 @@ pub(super) fn reserve_peer_io(
         // Stable endpoint assignment keeps every subscriber and its publisher
         // fan-out worker on one IO lane, including after reconnection.
         let thread = rustc_hash::FxBuildHasher.hash_one(endpoint) as usize % pool.thread_count();
+
         return pool.reserve_thread_at(thread);
     }
+
     #[cfg(not(target_os = "linux"))]
     let _ = endpoint;
     pool.reserve_thread()
@@ -188,6 +195,7 @@ pub(super) fn attach_direct_writer(
     let (Some(slot), Some(writer)) = (slot, writer) else {
         return;
     };
+
     slot.set_direct_writer(writer.clone());
     if socket_type == SocketType::Peer
         && let Some(handle) = send_pipe
@@ -238,6 +246,7 @@ fn split_direct_tcp_writer(
             let direct = Arc::new(crate::socket::direct_writer::DirectTcpWriter::new(
                 direct_tcp,
             ));
+
             Ok((AnyStream::Tcp(driver_tcp), Some(direct)))
         }
         AnyStream::Ipc(ipc) => Ok((AnyStream::Ipc(ipc), None)),
@@ -278,6 +287,7 @@ fn arena_config(endpoint: &Endpoint, latency_profile: bool, socket: &SocketDrive
         .options
         .arena_threshold
         .unwrap_or(omq_proto::frame_buffer::ARENA_THRESHOLD);
+
     let cap = if matches!(endpoint, Endpoint::Ipc(_) | Endpoint::Shm(_)) {
         omq_proto::frame_buffer::ARENA_INITIAL_CAP_IPC
     } else if latency_profile {
@@ -285,6 +295,7 @@ fn arena_config(endpoint: &Endpoint, latency_profile: bool, socket: &SocketDrive
     } else {
         omq_proto::frame_buffer::ARENA_INITIAL_CAP
     };
+
     ArenaConfig { threshold, cap }
 }
 
@@ -306,6 +317,7 @@ pub(super) fn build_transmit_slot(
         .transmit_slot_cap
         .unwrap_or(crate::engine::transmit_slot::TRANSMIT_SLOT_CAP_DEFAULT);
     let transmit_slot_msg_cap = socket.options.send_queue_capacity();
+
     let config = crate::engine::transmit_slot::SlotConfig {
         has_transform: profile.has_transforms,
         codec_profile: profile.codec,

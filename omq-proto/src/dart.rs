@@ -2,19 +2,11 @@
 
 use crate::proto::SocketType;
 
-/// Largest ordinary DATA body. Larger messages are fragmented.
-pub const MAX_BODY: usize = 1024;
-/// Largest DATA, fragment, or control UDP payload.
-pub const MAX_DATAGRAM: usize = 1200;
-/// Largest PACKED payload on a 1500-byte IPv6 path, without IP fragmentation.
-pub const MAX_PACKED_DATAGRAM: usize = 1452;
-/// READY protocol version.
-pub const VERSION: u8 = 1;
-
 mod credit;
 mod handshake;
 mod ready;
 mod session;
+
 pub use credit::{AdmissionCounter, CreditCounter};
 pub use handshake::Handshake;
 pub use ready::{Ready, decode_ready, encode_ready};
@@ -23,12 +15,27 @@ pub use session::{
     Transmit,
 };
 
+/// Largest ordinary DATA body. Larger messages are fragmented.
+pub const MAX_BODY: usize = 1024;
+
+/// Largest DATA, fragment, or control UDP payload.
+pub const MAX_DATAGRAM: usize = 1200;
+
+/// Largest PACKED payload on a 1500-byte IPv6 path, without IP fragmentation.
+pub const MAX_PACKED_DATAGRAM: usize = 1452;
+
+/// READY protocol version.
+pub const VERSION: u8 = 1;
+
 /// Bytes in the tag, session ID, and sequence header.
 pub const DATA_HEADER: usize = 17;
+
 /// Bytes in a first-fragment header, including the full message length.
 pub const FIRST_HEADER: usize = DATA_HEADER + 8;
+
 /// Largest CONT body; FIRST's length and group occupy part of this space.
 pub const MAX_FRAGMENT_BODY: usize = MAX_DATAGRAM - DATA_HEADER;
+
 /// Maximum messages coalesced into one UDP datagram.
 pub const MAX_PACKED_MESSAGES: usize = 128;
 
@@ -68,6 +75,7 @@ impl<'a> Iterator for Payloads<'a> {
         let (payload, rest) = self.bytes.split_at(usize::from(length));
         self.lengths = lengths;
         self.bytes = rest;
+
         Some(payload)
     }
 
@@ -90,6 +98,7 @@ fn decode_packed<'a>(lengths: &'a [u8], bytes: &'a [u8], first: u64) -> Option<P
     {
         return None;
     }
+
     Some(PackedMessages { lengths, bytes })
 }
 
@@ -251,6 +260,7 @@ fn decode_packed_packet(bytes: &[u8], count: usize) -> Option<Packet<'_>> {
     let lengths = bytes.get(1..1 + count)?;
     let session = word(bytes, 1 + count)?;
     let first = word(bytes, 9 + count)?;
+
     if session == 0 {
         return None;
     }
@@ -289,12 +299,15 @@ pub fn encode_packet(packet: Packet<'_>, output: &mut [u8]) -> Option<usize> {
         | Packet::First { .. }
         | Packet::Continuation { .. } => return None,
     };
+
     let output = output.get_mut(..length)?;
     if session == 0 {
         return None;
     }
+
     output[0] = tag;
     output[1..9].copy_from_slice(&session.to_le_bytes());
+
     match packet {
         Packet::Status(status) => {
             for (chunk, value) in output[9..].as_chunks_mut::<8>().0.iter_mut().zip(
@@ -315,6 +328,7 @@ pub fn encode_packet(packet: Packet<'_>, output: &mut [u8]) -> Option<usize> {
         | Packet::First { .. }
         | Packet::Continuation { .. } => unreachable!(),
     }
+
     Some(length)
 }
 
@@ -329,21 +343,25 @@ pub fn validate_message(
     let start = usize::from(identity_prefix);
     let grouped = socket_type == SocketType::Radio;
     let expected = start + if grouped { 2 } else { 1 };
+
     if !supports(socket_type) || message.len() != expected {
         return Err(crate::Error::Protocol(
             "DART requires exactly one body plus routing metadata".into(),
         ));
     }
+
     if grouped {
         let group = message.part_slice(start).ok_or_else(|| {
             crate::Error::Protocol("DART requires contiguous group metadata".into())
         })?;
+
         if group.is_empty() || group.len() > 255 {
             return Err(crate::Error::Protocol(
                 "DART group length must be 1..=255 bytes".into(),
             ));
         }
     }
+
     // Every Message part has contiguous Payload storage. Checking its count
     // already establishes that the body exists; no body borrow is needed.
     Ok(())
@@ -374,6 +392,7 @@ pub fn encode_fragment(
         length,
         group,
     } = header;
+
     let prefix = if length.is_some() {
         FIRST_HEADER
     } else {
@@ -393,15 +412,18 @@ pub fn encode_fragment(
     let header_len = prefix + group.map_or(0, |g| g.len() + 1);
     let size = header_len + body.len();
     let output = output.get_mut(..size.min(MAX_DATAGRAM))?;
+
     if size > MAX_DATAGRAM {
         return None;
     }
 
     let tag = if length.is_some() { 0x81 } else { 0x82 };
     write_sequenced_header(output, tag, session, sequence);
+
     if let Some(length) = length {
         output[DATA_HEADER..FIRST_HEADER].copy_from_slice(&length.to_le_bytes());
     }
+
     if let Some(group) = group {
         write_group(&mut output[prefix..header_len], group);
     }
@@ -461,15 +483,18 @@ pub fn decode(bytes: &[u8]) -> Option<Datagram<'_>> {
     if bytes.len() > MAX_DATAGRAM {
         return None;
     }
+
     let (&tag, payload) = bytes.split_first()?;
     match tag {
         1 if payload.len() >= 16 => Some(Datagram::Data(&payload[16..])),
         0xC0 => {
             let (&length, payload) = payload.split_first()?;
             let (name, body) = payload.split_at_checked(usize::from(length))?;
+
             if name.is_empty() || !name.is_ascii() {
                 return None;
             }
+
             Some(Datagram::Command { name, body })
         }
         _ => None,
@@ -489,11 +514,13 @@ pub fn fragment_body(payload: &[u8], grouped: bool) -> Option<(Option<&[u8]>, &[
         if length == 0 {
             return None;
         }
+
         let (group, body) = rest.split_at_checked(usize::from(length))?;
         (Some(group), body)
     } else {
         (None, payload)
     };
+
     (payload.len() <= MAX_FRAGMENT_BODY).then_some((group, body))
 }
 
@@ -515,222 +542,26 @@ pub fn encode_sequenced_data(
     if body.len() > MAX_BODY {
         return None;
     }
+
     let header = match group {
         Some(group) if group.is_empty() || group.len() > 255 => return None,
         Some(group) => DATA_HEADER + 1 + group.len(),
         None => DATA_HEADER,
     };
+
     let length = header + body.len();
     if length > MAX_DATAGRAM || output.len() < length {
         return None;
     }
+
     write_sequenced_header(output, 1, session, sequence);
     if let Some(group) = group {
         write_group(&mut output[DATA_HEADER..header], group);
     }
+
     output[header..length].copy_from_slice(body);
     Some(length)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn data_roundtrips_exact_boundaries() {
-        let mut output = [0; MAX_DATAGRAM];
-        for length in [0, 1, 16, 64, MAX_BODY] {
-            let body = vec![7; length];
-            for group in [None, Some(b"news".as_slice())] {
-                let n = encode_data(&body, group, &mut output).unwrap();
-                let Some(Datagram::Data(payload)) = decode(&output[..n]) else {
-                    panic!()
-                };
-                assert_eq!(
-                    data_body(payload, group.is_some()),
-                    Some((group, body.as_slice()))
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn rejects_invalid_tags_and_truncated_commands() {
-        assert_eq!(decode(&[]), None);
-        for tag in 0..=255 {
-            assert_eq!(decode(&[tag]), None);
-        }
-        assert_eq!(decode(b"\x01\x02\0\x03abc\0\x03def"), None);
-        assert_eq!(decode(b"\xc0\x00"), None);
-        assert_eq!(decode(b"\xc0\x05READ"), None);
-        assert_eq!(decode(b"\xc0\x01\xff"), None);
-        assert_eq!(decode(&[0; MAX_DATAGRAM + 1]), None);
-        assert!(data_body(&[0; MAX_BODY + 1], false).is_none());
-    }
-
-    #[test]
-    fn group_budget_and_empty_body_are_enforced() {
-        let mut output = [0; MAX_DATAGRAM];
-        let group = [b'g'; 255];
-        assert_eq!(
-            encode_data(&[0; 927], Some(&group), &mut output),
-            Some(MAX_DATAGRAM)
-        );
-        assert_eq!(encode_data(&[0; 928], Some(&group), &mut output), None);
-        assert_eq!(encode_data(&[0; MAX_BODY + 1], None, &mut output), None);
-        assert_eq!(encode_data(b"", Some(b""), &mut output), None);
-        assert_eq!(encode_data(b"", Some(&[0; 256]), &mut output), None);
-        assert_eq!(encode_data(b"abc", None, &mut [0; 3]), None);
-        assert!(data_body(&[0], true).is_none());
-        assert!(data_body(&[4, 1, 2], true).is_none());
-    }
-
-    #[test]
-    fn ready_roundtrips_all_supported_types_and_request_values() {
-        for socket_type in [
-            SocketType::Client,
-            SocketType::Server,
-            SocketType::Scatter,
-            SocketType::Gather,
-            SocketType::Peer,
-            SocketType::Radio,
-            SocketType::Dish,
-            SocketType::Channel,
-        ] {
-            for reply_requested in [false, true] {
-                let ready = Ready {
-                    socket_type,
-                    identity: Some(b"identity"),
-                    reply_requested,
-                    session: 1,
-                    echo: 0,
-                    phase: Phase::Hello,
-                };
-                let mut output = [0; MAX_DATAGRAM];
-                let n = encode_ready(ready, &mut output).unwrap();
-                assert_eq!(decode_ready(&output[..n]), Some(ready));
-                for prefix in 0..n {
-                    assert!(decode_ready(&output[..prefix]).is_none(), "prefix {prefix}");
-                }
-            }
-        }
-    }
-
-    fn append_property(bytes: &mut Vec<u8>, name: &[u8], value: &[u8]) {
-        bytes.push(name.len() as u8);
-        bytes.extend_from_slice(name);
-        bytes.extend_from_slice(&(value.len() as u32).to_be_bytes());
-        bytes.extend_from_slice(value);
-    }
-
-    #[test]
-    fn required_metadata_and_duplicates_are_checked() {
-        let mut output = [0; MAX_DATAGRAM];
-        let ready = Ready {
-            socket_type: SocketType::Peer,
-            identity: Some(b"peer"),
-            reply_requested: true,
-            session: 1,
-            echo: 0,
-            phase: Phase::Hello,
-        };
-        let n = encode_ready(ready, &mut output).unwrap();
-        for name in [
-            b"Socket-Type".as_slice(),
-            b"Identity",
-            b"DART-Version",
-            b"Reply-Requested",
-        ] {
-            let mut duplicate = output[..n].to_vec();
-            append_property(&mut duplicate, name, b"ignored");
-            assert_eq!(decode_ready(&duplicate), None);
-        }
-        let mut extra = output[..n].to_vec();
-        append_property(&mut extra, b"Extension", b"value");
-        assert_eq!(decode_ready(&extra), Some(ready));
-        append_property(&mut extra, b"Extension", b"again");
-        assert_eq!(decode_ready(&extra), None);
-        // Unknown properties are bounded, so the duplicate scan stays small.
-        let mut crowded = output[..n].to_vec();
-        for index in 0..16_u8 {
-            append_property(&mut crowded, &[b'X', index + b'a'], b"");
-        }
-        assert_eq!(decode_ready(&crowded), None);
-        // Identities starting with 0x00 belong to generated identities.
-        let reserved = encode_ready(
-            Ready {
-                identity: Some(b"\0peer"),
-                ..ready
-            },
-            &mut output,
-        )
-        .unwrap();
-        assert_eq!(decode_ready(&output[..reserved]), None);
-        assert_eq!(decode_ready(b"\xc0\x05READY"), None);
-        for (name, value) in [
-            (b"DART-Version".as_slice(), b"\x00".as_slice()),
-            (b"DART-Version", b"\x02"),
-            (b"DART-Version", b"\x04"),
-            (b"DART-Version", b"\x05"),
-            (b"Reply-Requested", b"\x02"),
-            (b"Reply-Requested", b""),
-            (b"Socket-Type", b"PUSH"),
-            (b"Socket-Type", b"unknown"),
-        ] {
-            let mut bytes = b"\xc0\x05READY".to_vec();
-            for (key, valid) in [
-                (b"Socket-Type".as_slice(), b"CHANNEL".as_slice()),
-                (b"DART-Version", &[VERSION]),
-                (b"Reply-Requested", b"\x01"),
-            ] {
-                append_property(&mut bytes, key, if key == name { value } else { valid });
-            }
-            assert!(decode_ready(&bytes).is_none());
-        }
-    }
-
-    #[test]
-    fn identity_and_control_buffer_limits_are_checked() {
-        let mut output = [0; MAX_DATAGRAM];
-        for identity in [None, Some(b"".as_slice()), Some([0; 256].as_slice())] {
-            assert_eq!(
-                encode_ready(
-                    Ready {
-                        socket_type: SocketType::Peer,
-                        identity,
-                        reply_requested: false,
-                        session: 1,
-                        echo: 0,
-                        phase: Phase::Hello,
-                    },
-                    &mut output
-                ),
-                None
-            );
-        }
-        let ready = Ready {
-            socket_type: SocketType::Peer,
-            identity: Some(&[0; 255]),
-            reply_requested: false,
-            session: 1,
-            echo: 0,
-            phase: Phase::Hello,
-        };
-        assert!(encode_ready(ready, &mut output).is_some());
-        assert_eq!(encode_ready(ready, &mut [0; 7]), None);
-        assert_eq!(
-            encode_ready(
-                Ready {
-                    socket_type: SocketType::Push,
-                    ..ready
-                },
-                &mut output
-            ),
-            None
-        );
-        let mut bytes = b"\xc0\x05READY".to_vec();
-        bytes.extend_from_slice(b"\x01X\xff\xff\xff\xff");
-        assert_eq!(decode_ready(&bytes), None);
-        assert!(decode_ready(b"\xc0\x05READY\x00\x00\x00\x00\x00").is_none());
-    }
-}
+mod tests;

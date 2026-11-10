@@ -62,6 +62,7 @@ impl Configuration {
         let mut state = self.state.lock().expect("payload pool configuration");
         ensure_mutable(&state)?;
         state.recv = Some(pool);
+
         Ok(())
     }
 
@@ -76,6 +77,7 @@ impl Configuration {
             self.socket_type,
             SocketType::Push | SocketType::Scatter | SocketType::Pub | SocketType::Radio
         );
+
         let send = if sends && state.send.is_none() {
             Some(default_pool(self.send_hwm)?)
         } else if sends {
@@ -83,6 +85,7 @@ impl Configuration {
         } else {
             None
         };
+
         let recv = if receives && state.recv.is_none() {
             Some(default_pool(self.recv_hwm)?)
         } else if receives {
@@ -90,10 +93,12 @@ impl Configuration {
         } else {
             None
         };
+
         state.send.clone_from(&send);
         if receives {
             state.recv.clone_from(&recv);
         }
+
         Ok(SocketPools { send, recv })
     }
 }
@@ -104,6 +109,7 @@ fn ensure_mutable(state: &State) -> Result<()> {
             "receive payload pools must be configured before bind/connect".into(),
         ));
     }
+
     Ok(())
 }
 

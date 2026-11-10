@@ -31,6 +31,7 @@ pub(crate) fn run(mut args: AeronArgs) {
             assert!(THROUGHPUT_SIZES.contains(&size));
             let directory = TempDir::new("dart-aeron");
             let mut row = measure(&args, &directory.0, kind, size);
+
             row.as_object_mut().unwrap().extend(
                 json!({"timestamp_ns":unix_nanos(),
             "kind":kind, "transport":"aeron", "msg_size":size, "cpus":args.common.cpu_csv(),
@@ -46,6 +47,7 @@ pub(crate) fn run(mut args: AeronArgs) {
                 .unwrap()
                 .clone(),
             );
+
             record(&args.common, "dart-aeron.jsonl", &row);
             row
         },
@@ -80,9 +82,11 @@ fn peer_files(args: &AeronArgs) -> Vec<PathBuf> {
                     .is_some_and(|extension| extension == "class")
         })
         .collect();
+
     assert!(!classes.is_empty(), "compile AeronUdpPeer.java first");
     classes.sort();
     classes.insert(0, args.jar.clone());
+
     classes
 }
 
@@ -92,15 +96,18 @@ fn command(args: &AeronArgs, directory: &Path, kind: &str, peer_side: Side, size
     } else {
         ("server", args.common.cpus[5])
     };
+
     let mut command = Command::new("taskset");
     command
         .args(["-c", &cpu.to_string()])
         .arg(java_peer(directory));
+
     let profile_side = if args.common.profile_side.as_deref().unwrap_or("receive") == "receive" {
         Side::Receive
     } else {
         Side::Send
     };
+
     if let Some(path) = args
         .common
         .profile
@@ -117,6 +124,7 @@ fn command(args: &AeronArgs, directory: &Path, kind: &str, peer_side: Side, size
             recording.display()
         ));
     }
+
     let classpath = std::env::join_paths([&args.classes, &args.jar]).unwrap();
     command
         .args([
@@ -127,6 +135,7 @@ fn command(args: &AeronArgs, directory: &Path, kind: &str, peer_side: Side, size
         .arg(classpath)
         .args(["AeronUdpPeer", kind, role, &size.to_string(), "43100"])
         .arg(directory);
+
     command
 }
 
@@ -144,8 +153,10 @@ fn java_peer(directory: &Path) -> PathBuf {
                 .expect("resolve Java executable");
             std::os::unix::fs::symlink(java, &peer).expect("name Aeron benchmark executable");
         }
+
         peer
     }
+
     #[cfg(not(unix))]
     {
         let _ = directory;
@@ -160,23 +171,28 @@ fn measure(args: &AeronArgs, directory: &Path, kind: &str, size: u64) -> Value {
         &mut command(args, directory, kind, Side::Receive, size),
     );
     std::thread::sleep(Duration::from_millis(500));
+
     peers.spawn(
         Side::Send,
         &mut command(args, directory, kind, Side::Send, size),
     );
+
     let deadline = Instant::now() + Duration::from_mins(5);
     let mut closed = 0;
     let mut ready = [false; 2];
     let mut result = None;
+
     while closed < 4 {
         let event = peers.next(deadline.saturating_duration_since(Instant::now()));
         let Some(line) = event.line else {
             closed += 1;
             continue;
         };
+
         if !event.stderr {
             println!("aeron {kind} {size} {:?}: {line}", event.side);
         }
+
         if line.trim() == "ready" {
             pin_driver(
                 peers.pid(event.side),
@@ -186,21 +202,25 @@ fn measure(args: &AeronArgs, directory: &Path, kind: &str, size: u64) -> Value {
                     args.common.cpus[3]
                 },
             );
+
             ready[usize::from(event.side == Side::Send)] = true;
             if ready.iter().all(|ready| *ready) {
                 std::fs::write(directory.join("go"), "go").unwrap();
             }
         }
+
         if event.side == Side::Send && !event.stderr && line.starts_with("impl=") {
             assert!(result.is_none(), "unexpected extra Aeron result");
             result = Some(parse(&line, kind, size));
         }
     }
+
     peers.finish();
     assert!(
         ready.iter().all(|ready| *ready),
         "Aeron handshake incomplete"
     );
+
     result.expect("missing Aeron result")
 }
 
@@ -213,6 +233,7 @@ fn pin_driver(pid: u32, cpu: usize) {
                 .is_ok_and(|name| name.trim() == "dartaeron-io")
         })
         .collect();
+
     assert_eq!(threads.len(), 1, "expected one Aeron shared driver");
     let tid = threads[0]
         .file_name()
@@ -231,11 +252,13 @@ fn parse(line: &str, kind: &str, size: u64) -> Value {
     assert_eq!(fields.next(), Some(format!("size={size}").as_str()));
     assert_eq!(fields.next(), Some("round=1"));
     let mut result = json!({});
+
     for field in fields {
         let (key, value) = field.split_once('=').expect("Aeron result field");
         let value: f64 = value.parse().expect("numeric Aeron result");
         assert!(value.is_finite() && value >= 0.0);
         result[key] = json!(value);
     }
+
     result
 }

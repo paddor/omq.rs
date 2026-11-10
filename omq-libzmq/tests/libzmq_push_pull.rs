@@ -87,6 +87,7 @@ fn push_pull_multiple_pushers() {
 
     let mut buf = [0u8; 8];
     let total = N_PUSHERS * MSG_PER_PUSHER;
+
     for _ in 0..total {
         let rc = zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0);
         assert_eq!(rc, 1);
@@ -95,6 +96,7 @@ fn push_pull_multiple_pushers() {
     for p in pushers {
         zmq_close(p);
     }
+
     zmq_close(pull);
     zmq_ctx_term(ctx);
 }
@@ -118,6 +120,7 @@ fn push_pull_multiple_pullers() {
 
     std::thread::sleep(Duration::from_millis(100));
     set_timeo(push, ZMQ_SNDTIMEO, TIMEOUT_MS);
+
     for p in &pullers {
         set_timeo(*p, ZMQ_RCVTIMEO, 200); // short; not all pullers get messages
     }
@@ -130,6 +133,7 @@ fn push_pull_multiple_pullers() {
     let mut received = 0usize;
     let mut buf = [0u8; 8];
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
+
     loop {
         for p in &pullers {
             while let rc = zmq_recv(*p, buf.as_mut_ptr().cast(), buf.len(), ZMQ_DONTWAIT)
@@ -138,20 +142,24 @@ fn push_pull_multiple_pullers() {
                 received += 1;
             }
         }
+
         if received >= TOTAL {
             break;
         }
+
         assert!(
             std::time::Instant::now() < deadline,
             "timeout waiting for all messages: got {received}/{TOTAL}"
         );
         std::thread::sleep(Duration::from_millis(10));
     }
+
     assert_eq!(received, TOTAL);
 
     for p in pullers {
         zmq_close(p);
     }
+
     zmq_close(push);
     zmq_ctx_term(ctx);
 }

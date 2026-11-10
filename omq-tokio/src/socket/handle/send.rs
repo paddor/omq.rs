@@ -20,9 +20,11 @@ impl Socket {
         if self.socket_type() != SocketType::Stream {
             return Err(Error::Protocol("expected a STREAM socket".into()));
         }
+
         let crate::routing::SendSubmitter::Identity(submitter) = &self.send_submitter else {
             unreachable!("STREAM identity routing")
         };
+
         submitter.check_route(identity)
     }
 
@@ -44,6 +46,7 @@ impl Socket {
         if body.is_empty() {
             return Err(Error::Protocol("send_to requires a message body".into()));
         }
+
         crate::socket::send_budget::cooperate().await;
         self.send_submitter.send_to(identity.as_ref(), body).await
     }
@@ -60,6 +63,7 @@ impl Socket {
                 "try_send_to requires a message body".into(),
             )));
         }
+
         self.send_submitter.try_send_to(identity.as_ref(), body)
     }
 
@@ -93,11 +97,13 @@ impl Socket {
                 "send_group is only valid on RADIO sockets".into(),
             ));
         }
+
         if body.len() != 1 {
             return Err(Error::Protocol(
                 "send_group requires a single-frame body".into(),
             ));
         }
+
         Ok(Message::with_prefix(group, body))
     }
 
@@ -120,12 +126,14 @@ impl Socket {
                     // Yield so the actor can process a potential peer
                     // disconnect that resets the flag, then retry once.
                     tokio::task::yield_now().await;
+
                     if !self.inner.shared.req_awaiting_reply.claim() {
                         return Err(Error::Protocol(
                             "REQ socket must receive a reply before sending again".into(),
                         ));
                     }
                 }
+
                 // Canceling the send must allow the next send.
                 let mut claim = ReqSendClaim {
                     awaiting_reply: &self.inner.shared.req_awaiting_reply,
@@ -137,6 +145,7 @@ impl Socket {
                     .send_request(msg, &self.inner.shared.req_awaiting_reply)
                     .await;
                 claim.sent = result.is_ok();
+
                 result
             }
             SocketType::Rep => {
@@ -144,6 +153,7 @@ impl Socket {
                 let Some(request) = request else {
                     return Err(rep_send_without_request());
                 };
+
                 // Canceling the send must keep the request answerable.
                 let mut claim = RepSendClaim {
                     current: &self.inner.rep_current,
@@ -156,6 +166,7 @@ impl Socket {
                     .send_rep_to_peer(*peer_id, envelope, msg)
                     .await;
                 claim.request = None;
+
                 result
             }
             SocketType::Server => self.send_submitter.send_server(msg).await,
@@ -226,18 +237,22 @@ impl Socket {
                         "REQ socket must receive a reply before sending again".into(),
                     )));
                 }
+
                 let msg = Message::with_prefix(Bytes::new(), msg);
                 let result = self
                     .send_submitter
                     .try_send_request(msg, &self.inner.shared.req_awaiting_reply);
+
                 if result.is_err() {
                     self.inner.shared.req_awaiting_reply.clear();
                 }
+
                 match result {
                     Err(TrySendError::Full(mut returned)) => {
                         // Full returns the original application message so
                         // retrying never prepends a second REQ delimiter.
                         let _ = returned.pop_front();
+
                         Err(TrySendError::Full(returned))
                     }
                     other => other,
@@ -248,13 +263,16 @@ impl Socket {
                 let Some((peer_id, envelope)) = current.take() else {
                     return Err(TrySendError::Error(rep_send_without_request()));
                 };
+
                 let result = self
                     .inner
                     .send_submitter
                     .send_rep_try_to_peer(peer_id, &envelope, msg);
+
                 if matches!(&result, Err(TrySendError::Full(_))) {
                     *current = Some((peer_id, envelope));
                 }
+
                 result
             }
             SocketType::Server => self.send_submitter.try_send_server(msg),
@@ -293,6 +311,7 @@ impl Socket {
         if max == 0 {
             return Ok(0);
         }
+
         match self.inner.socket_type {
             SocketType::Push | SocketType::Scatter => {
                 let max = max.min(omq_proto::flow::DrainBudget::WORKER.remaining_msgs());
@@ -305,6 +324,7 @@ impl Socket {
                 } else {
                     max
                 };
+
                 if max == 0 {
                     // Report an invalid front message through the scalar check.
                     // A valid prefix is submitted first, subject to normal HWM.
@@ -312,6 +332,7 @@ impl Socket {
                         .pop_front()
                         .map_or(Ok(0), |message| self.try_send(message).map(|()| 1));
                 }
+
                 self.inner.send_submitter.try_send_many(messages, max)
             }
             _ => {
@@ -320,6 +341,7 @@ impl Socket {
                     let Some(msg) = messages.pop_front() else {
                         break;
                     };
+
                     match self.try_send(msg) {
                         Ok(()) => sent += 1,
                         Err(TrySendError::Full(returned)) => {
@@ -327,12 +349,14 @@ impl Socket {
                             if sent > 0 {
                                 return Ok(sent);
                             }
+
                             let msg = messages.pop_front().expect("returned message present");
                             return Err(TrySendError::Full(msg));
                         }
                         Err(error) => return Err(error),
                     }
                 }
+
                 Ok(sent)
             }
         }
@@ -365,6 +389,7 @@ impl Socket {
                     .expect("rep identity")
                     .as_ref()
                     .map(|(peer_id, _)| *peer_id);
+
                 peer.is_some_and(|peer_id| self.send_submitter.rep_send_ready(peer_id))
             }
             SocketType::XSub => self.inner.cmd_tx.capacity() > 0 || self.inner.cmd_tx.is_closed(),
@@ -382,6 +407,7 @@ impl Socket {
             SocketType::Req => loop {
                 self.inner.shared.req_awaiting_reply.wait_cleared().await;
                 self.send_submitter.wait_send_ready().await;
+
                 // A send from another handle may have claimed the reply.
                 if self.send_ready() {
                     return;
@@ -395,6 +421,7 @@ impl Socket {
                     .expect("rep identity")
                     .as_ref()
                     .map(|(peer_id, _)| *peer_id);
+
                 match peer {
                     Some(peer_id) => self.send_submitter.wait_rep_send_ready(peer_id).await,
                     None => std::future::pending().await,
@@ -411,6 +438,7 @@ impl Socket {
             let _ = self.inner.cmd_tx.reserve().await;
             return;
         }
+
         let routed_peer = match self.inner.socket_type {
             SocketType::Rep => self
                 .inner
@@ -425,10 +453,12 @@ impl Socket {
                 .map(u64::from),
             _ => None,
         };
+
         if let Some(peer_id) = routed_peer {
             self.send_submitter.wait_peer_send_progress(peer_id).await;
             return;
         }
+
         self.send_submitter.wait_send_progress(msg).await;
     }
 
@@ -443,10 +473,12 @@ impl Socket {
     fn try_send_xsub_raw_command(&self, msg: Message) -> core::result::Result<(), TrySendError> {
         let (command, prefix) = xsub_raw_command(&msg).map_err(TrySendError::Error)?;
         let (ack, _rx) = oneshot::channel();
+
         let command = match command {
             XSubRawCommand::Subscribe => SocketCommand::Subscribe { prefix, ack },
             XSubRawCommand::Unsubscribe => SocketCommand::Unsubscribe { prefix, ack },
         };
+
         match self.inner.cmd_tx.try_send(command) {
             Ok(()) => Ok(()),
             Err(mpsc::error::TrySendError::Full(_)) => Err(TrySendError::Full(msg)),
@@ -467,10 +499,12 @@ fn xsub_raw_command(msg: &Message) -> Result<(XSubRawCommand, Bytes)> {
             "XSUB raw command must be a single frame".into(),
         ));
     }
+
     let part = msg.part_bytes(0).unwrap_or_default();
     let Some((&tag, prefix)) = part.split_first() else {
         return Err(Error::Protocol("XSUB raw command cannot be empty".into()));
     };
+
     let command = match tag {
         0x01 => XSubRawCommand::Subscribe,
         0x00 => XSubRawCommand::Unsubscribe,
@@ -480,6 +514,7 @@ fn xsub_raw_command(msg: &Message) -> Result<(XSubRawCommand, Bytes)> {
             ));
         }
     };
+
     Ok((command, Bytes::copy_from_slice(prefix)))
 }
 
@@ -517,9 +552,11 @@ impl ReqAwaitingReply {
             .awaiting
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok();
+
         if claimed {
             routes.selected = None;
         }
+
         claimed
     }
 
@@ -531,6 +568,7 @@ impl ReqAwaitingReply {
         // inproc peer replies on another application thread immediately.
         let mut routes = self.routes.lock().expect("REQ routes");
         let route_id = send()?;
+
         routes.selected = Some(
             routes
                 .connected
@@ -539,12 +577,14 @@ impl ReqAwaitingReply {
                     ReqReplySource::Connected(*peer_id)
                 }),
         );
+
         Ok(())
     }
 
     pub(crate) fn peer_connected(&self, route_id: u64, peer_id: u64) {
         let mut routes = self.routes.lock().expect("REQ routes");
         routes.connected.insert(route_id, peer_id);
+
         if routes.selected == Some(ReqReplySource::Pending(route_id)) {
             routes.selected = Some(ReqReplySource::Connected(peer_id));
         }
@@ -555,6 +595,7 @@ impl ReqAwaitingReply {
         if routes.connected.get(&route_id) == Some(&peer_id) {
             routes.connected.remove(&route_id);
         }
+
         if matches!(routes.selected, Some(ReqReplySource::Connected(id)) if id == peer_id)
             || routes.selected == Some(ReqReplySource::Pending(route_id))
         {
@@ -577,6 +618,7 @@ impl ReqAwaitingReply {
         if routes.selected != Some(ReqReplySource::Connected(peer_id)) {
             return false;
         }
+
         routes.selected = None;
         self.clear_awaiting();
         true
@@ -592,6 +634,7 @@ impl ReqAwaitingReply {
         // Pairs with `wait_cleared`: either it sees the flag clear or this
         // sees its waiter count.
         self.awaiting.store(false, Ordering::SeqCst);
+
         if self.waiters.load(Ordering::SeqCst) > 0 {
             self.cleared.notify_changed();
         }
@@ -604,13 +647,16 @@ impl ReqAwaitingReply {
                 self.0.fetch_sub(1, Ordering::SeqCst);
             }
         }
+
         self.waiters.fetch_add(1, Ordering::SeqCst);
         let _waiting = Waiting(&self.waiters);
+
         loop {
             let seen = self.cleared.generation();
             if !self.awaiting.load(Ordering::SeqCst) {
                 return;
             }
+
             self.cleared.changed_after(seen).await;
         }
     }

@@ -30,8 +30,10 @@ fn skip_if_no_pyzmq() -> bool {
             "OMQ_INTEROP_REQUIRED=1 but python3 + pyzmq is not available",
         );
         eprintln!("skip: python3 + pyzmq not available");
+
         return true;
     }
+
     false
 }
 
@@ -52,6 +54,7 @@ async fn wait_success(child: Child, context: &str) -> Output {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+
     output
 }
 
@@ -111,8 +114,10 @@ async fn read_endpoint_then_lines(
             if r.read_line(&mut buf).unwrap_or(0) == 0 {
                 break;
             }
+
             collected.push(buf.trim().to_string());
         }
+
         collected
     });
 
@@ -120,6 +125,7 @@ async fn read_endpoint_then_lines(
         .await
         .expect("pyzmq PULL did not become ready")
         .unwrap();
+
     (endpoint, reader)
 }
 
@@ -170,6 +176,7 @@ ctx.term()
         let _ = stderr.read_to_string(&mut err);
         panic!("pyzmq PULL timed out\nstderr={err}");
     };
+
     assert_eq!(
         lines,
         (0..3).map(|i| format!("rust-null-{i}")).collect::<Vec<_>>()
@@ -186,6 +193,7 @@ async fn null_tcp_pyzmq_push_to_rust_pull() {
     if skip_if_no_pyzmq() {
         return;
     }
+
     rust_pull_from_pyzmq_push(test_support::tcp_loopback(0)).await;
 }
 
@@ -194,6 +202,7 @@ async fn null_tcp_rust_push_to_pyzmq_pull() {
     if skip_if_no_pyzmq() {
         return;
     }
+
     rust_push_to_pyzmq_pull(test_support::tcp_loopback(0)).await;
 }
 
@@ -203,6 +212,7 @@ async fn null_ipc_pyzmq_push_to_rust_pull() {
     if skip_if_no_pyzmq() {
         return;
     }
+
     rust_pull_from_pyzmq_push(test_support::ipc_endpoint("interop-null-py-push")).await;
 }
 
@@ -212,6 +222,7 @@ async fn null_ipc_rust_push_to_pyzmq_pull() {
     if skip_if_no_pyzmq() {
         return;
     }
+
     rust_push_to_pyzmq_pull(test_support::ipc_endpoint("interop-null-py-pull")).await;
 }
 

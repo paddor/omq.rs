@@ -32,6 +32,7 @@ impl SendPipeConsumer {
             if self.needs_drain() {
                 return;
             }
+
             self.data_signal.ready().await;
         }
     }
@@ -65,20 +66,25 @@ impl SendPipeConsumer {
         let SendPipeConsumerInner::Queue(consumer) = &mut self.inner else {
             return None;
         };
+
         self.data_signal.begin_drain();
         consumer.prefetch();
         let mut count = 0;
         let mut bytes = 0;
+
         while count < max_msgs && bytes < max_bytes {
             let Some(message) = consumer.pop() else {
                 break;
             };
+
             bytes += message.byte_len();
             count += 1;
+
             if !accept(message) {
                 break;
             }
         }
+
         if count != 0 {
             return_queue_credit(
                 consumer,
@@ -87,6 +93,7 @@ impl SendPipeConsumer {
                 &mut self.freed_full,
             );
         }
+
         self.data_signal.clear_after(consumer.is_empty());
         Some((count, bytes))
     }
@@ -118,33 +125,42 @@ impl SendPipeConsumer {
             freed_full,
         } = self;
         data_signal.begin_drain();
+
         if let SendPipeConsumerInner::Peer(peer) = inner {
             let count = peer.drain_into_with_cost(batch, max_msgs, max_bytes, |message, bytes| {
                 cost(message, Some(bytes))
             });
             data_signal.clear_after(peer.is_empty());
+
             return count;
         }
+
         let SendPipeConsumerInner::Queue(consumer) = inner else {
             let SendPipeConsumerInner::Conflate(state) = inner else {
                 unreachable!("send pipe consumer inner must be queue or conflate")
             };
+
             return Self::drain_conflate(data_signal, state, batch, max_msgs, max_bytes);
         };
+
         consumer.prefetch();
         let mut count = 0usize;
         let mut bytes = 0usize;
+
         while count < max_msgs && bytes < max_bytes {
             let Some(msg) = consumer.pop() else {
                 break;
             };
+
             bytes += cost(&msg, None);
             batch.push(msg);
             count += 1;
         }
+
         if count > 0 {
             return_queue_credit(consumer, above_lwm, space_available, freed_full);
         }
+
         data_signal.clear_after(consumer.is_empty());
         count
     }
@@ -165,6 +181,7 @@ impl SendPipeConsumer {
         } else {
             0
         };
+
         let is_empty = state.slot.lock().expect("conflate send pipe").is_none();
         data_signal.clear_after(is_empty);
         count
@@ -206,6 +223,7 @@ impl Drop for SendPipeConsumer {
         if let Some(counter) = self.data_signal.dart_admission.get() {
             counter.close();
         }
+
         match &mut self.inner {
             SendPipeConsumerInner::Peer(peer) => peer.close(),
             SendPipeConsumerInner::Queue(consumer) => consumer.close(),
@@ -213,6 +231,7 @@ impl Drop for SendPipeConsumer {
                 state.consumer_dropped.store(true, Ordering::Release);
             }
         }
+
         self.space_available.notify_changed();
     }
 }

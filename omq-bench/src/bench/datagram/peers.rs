@@ -76,6 +76,7 @@ impl Peers {
                         break;
                     }
                 };
+
                 if sender
                     .send(Event {
                         side,
@@ -87,6 +88,7 @@ impl Peers {
                     return;
                 }
             }
+
             let _ = sender.send(Event {
                 side,
                 stderr,
@@ -101,6 +103,7 @@ impl Peers {
             .recv_timeout(timeout)
             .expect("benchmark output timeout");
         check_output(&event);
+
         event
     }
 
@@ -114,6 +117,7 @@ impl Peers {
             {
                 return self.pending.remove(index).1;
             }
+
             let event = self.next(deadline.saturating_duration_since(Instant::now()));
             if let Some(line) = event.line {
                 if !event.stderr {
@@ -147,6 +151,7 @@ impl Peers {
         for process in self.processes.iter_mut().flatten() {
             process.wait_success(Duration::from_secs(5));
         }
+
         // Drain while joining: bounded output queues cannot strand readers.
         let deadline = Instant::now() + Duration::from_secs(5);
         while self.readers.iter().any(|reader| !reader.is_finished()) {
@@ -154,9 +159,11 @@ impl Peers {
             self.drain_output();
             std::thread::sleep(Duration::from_millis(1));
         }
+
         for reader in self.readers.drain(..) {
             reader.join().expect("peer output reader failed");
         }
+
         while self.drain_output() {}
     }
 
@@ -166,12 +173,15 @@ impl Peers {
             let Ok(event) = self.receiver.try_recv() else {
                 return false;
             };
+
             bytes += event.line.as_ref().map_or(0, String::len);
             check_output(&event);
+
             if bytes >= 64 * 1024 {
                 return true;
             }
         }
+
         true
     }
 }
@@ -181,6 +191,7 @@ fn check_output(event: &Event) {
         if event.stderr {
             eprintln!("{:?}: {line}", event.side);
         }
+
         if event.stderr || !line.starts_with('{') {
             assert!(
                 !diagnostic(line),
@@ -208,6 +219,7 @@ pub(super) fn profiled(
     let frequency = std::env::var("OMQ_PERF_FREQUENCY").unwrap_or_else(|_| "997".into());
     assert!(frequency.parse::<u32>().expect("perf sample frequency") > 0);
     let mut perf = Command::new("perf");
+
     perf.args([
         "record",
         "-F",
@@ -221,6 +233,7 @@ pub(super) fn profiled(
     .arg("--")
     .arg(command.get_program())
     .args(command.get_args());
+
     for (key, value) in command.get_envs() {
         if let Some(value) = value {
             perf.env(key, value);
@@ -228,9 +241,11 @@ pub(super) fn profiled(
             perf.env_remove(key);
         }
     }
+
     if let Some(directory) = command.get_current_dir() {
         perf.current_dir(directory);
     }
+
     perf
 }
 
@@ -244,6 +259,7 @@ pub(super) fn affinity(pid: u32) -> Vec<usize> {
             &raw mut mask,
         )
     };
+
     assert_eq!(result, 0, "read CPU affinity");
     (0..usize::try_from(libc::CPU_SETSIZE).unwrap())
         .filter(|cpu| unsafe { libc::CPU_ISSET(*cpu, &mask) })
@@ -256,6 +272,7 @@ pub(super) fn pin(pid: u32, cpu: usize) {
     unsafe {
         libc::CPU_SET(cpu, &mut mask);
     }
+
     let result = unsafe {
         libc::sched_setaffinity(
             pid.try_into().unwrap(),
@@ -263,6 +280,7 @@ pub(super) fn pin(pid: u32, cpu: usize) {
             &raw const mask,
         )
     };
+
     assert_eq!(result, 0, "set CPU affinity");
     assert_eq!(affinity(pid), vec![cpu]);
 }
@@ -271,6 +289,7 @@ pub(super) fn pin(pid: u32, cpu: usize) {
 pub(super) fn affinity(_pid: u32) -> Vec<usize> {
     panic!("pinned datagram benchmarks require Linux")
 }
+
 #[cfg(not(target_os = "linux"))]
 pub(super) fn pin(_pid: u32, _cpu: usize) {
     panic!("pinned datagram benchmarks require Linux")

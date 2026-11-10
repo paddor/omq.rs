@@ -17,10 +17,12 @@ fn inproc(name: &str) -> Endpoint {
 fn stall_io_thread(ctx: &Context) -> mpsc::Sender<()> {
     let (release, wait) = mpsc::channel::<()>();
     let (stalled_tx, stalled_rx) = mpsc::channel();
+
     std::mem::drop(ctx.handle().spawn(async move {
         stalled_tx.send(()).unwrap();
         let _ = wait.recv();
     }));
+
     stalled_rx.recv_timeout(TIMEOUT).unwrap();
     release
 }
@@ -37,6 +39,7 @@ fn connected_pair(
     b.connect(inproc(name)).unwrap();
     a.wait_connected(1, TIMEOUT).unwrap();
     b.wait_connected(1, TIMEOUT).unwrap();
+
     (a, b)
 }
 
@@ -49,6 +52,7 @@ fn req_rep_round_trips_without_the_io_thread() {
     let ctx = Context::new();
     let (rep, req) = connected_pair(&ctx, "direct-req-rep", SocketType::Rep, SocketType::Req);
     let release = stall_io_thread(&ctx);
+
     for round in 0u8..50 {
         req.send(Message::single(vec![round])).unwrap();
         let request = rep.recv_timeout(TIMEOUT).unwrap();
@@ -57,6 +61,7 @@ fn req_rep_round_trips_without_the_io_thread() {
         let reply = req.recv_timeout(TIMEOUT).unwrap();
         assert_eq!(body(&reply, 0), [round, round]);
     }
+
     drop(release);
 }
 
@@ -70,6 +75,7 @@ fn dealer_router_round_trips_without_the_io_thread() {
         SocketType::Dealer,
     );
     let release = stall_io_thread(&ctx);
+
     for round in 0u8..50 {
         dealer.send(Message::single(vec![round])).unwrap();
         let request = router.recv_timeout(TIMEOUT).unwrap();
@@ -83,6 +89,7 @@ fn dealer_router_round_trips_without_the_io_thread() {
         assert_eq!(reply.len(), 1);
         assert_eq!(body(&reply, 0), [round, 1]);
     }
+
     drop(release);
 }
 
@@ -145,12 +152,14 @@ fn symmetric_pairs_exchange_both_ways_without_the_io_thread() {
         let name = format!("direct-symmetric-{index}");
         let (a, b) = connected_pair(&ctx, &name, socket_type, socket_type);
         let release = stall_io_thread(&ctx);
+
         for round in 0u8..20 {
             b.send(Message::single(vec![round])).unwrap();
             assert_eq!(body(&a.recv_timeout(TIMEOUT).unwrap(), 0), [round]);
             a.send(Message::single(vec![round, 2])).unwrap();
             assert_eq!(body(&b.recv_timeout(TIMEOUT).unwrap(), 0), [round, 2]);
         }
+
         drop(release);
     }
 }
@@ -165,6 +174,7 @@ fn client_server_route_replies_without_the_io_thread() {
         SocketType::Client,
     );
     let release = stall_io_thread(&ctx);
+
     for round in 0u8..20 {
         client.send(Message::single(vec![round])).unwrap();
         let request = server.recv_timeout(TIMEOUT).unwrap();
@@ -175,6 +185,7 @@ fn client_server_route_replies_without_the_io_thread() {
             .unwrap();
         assert_eq!(body(&client.recv_timeout(TIMEOUT).unwrap(), 0), [round, 3]);
     }
+
     drop(release);
 }
 
@@ -191,21 +202,26 @@ fn pipelines_fan_in_from_several_peers_without_the_io_thread() {
         let ep = inproc(&format!("direct-pipeline-{index}"));
         let sink = ctx.blocking_socket(receiver, Options::default());
         sink.bind(ep.clone()).unwrap();
+
         let sources: Vec<_> = (0..3)
             .map(|_| {
                 let source = ctx.blocking_socket(sender, Options::default());
                 source.connect(ep.clone()).unwrap();
                 source.wait_connected(1, TIMEOUT).unwrap();
+
                 source
             })
             .collect();
+
         sink.wait_connected(3, TIMEOUT).unwrap();
         let release = stall_io_thread(&ctx);
+
         for (peer, source) in sources.iter().enumerate() {
             for seq in 0u8..40 {
                 source.send(Message::single(vec![peer as u8, seq])).unwrap();
             }
         }
+
         // Each connection keeps its own order.
         let mut next = [0u8; 3];
         for _ in 0..120 {
@@ -215,6 +231,7 @@ fn pipelines_fan_in_from_several_peers_without_the_io_thread() {
             assert_eq!(payload[1], next[peer]);
             next[peer] += 1;
         }
+
         assert_eq!(next, [40; 3]);
         drop(release);
     }
@@ -233,34 +250,42 @@ fn bulk_pipeline_rotates_peers_and_resumes_after_hwm_without_io() {
         let ep = inproc(&format!("direct-bulk-{index}"));
         let source = ctx.blocking_socket(sender, Options::default().send_hwm(2));
         source.bind(ep.clone()).unwrap();
+
         let receivers: Vec<_> = (0..2)
             .map(|_| {
                 let sink = ctx.blocking_socket(receiver, Options::default().recv_hwm(2));
                 sink.connect(ep.clone()).unwrap();
                 sink.wait_connected(1, TIMEOUT).unwrap();
+
                 sink
             })
             .collect();
+
         source.wait_connected(2, TIMEOUT).unwrap();
         let release = stall_io_thread(&ctx);
         let mut messages = (0..10_u8).map(|seq| Message::from_slice(&[seq])).collect();
         assert_eq!(source.try_send_many(&mut messages, 10).unwrap(), 8);
         let mut received = Vec::new();
+
         for receiver in &receivers {
             let mut lane = Vec::new();
             for _ in 0..4 {
                 let message = receiver.recv_timeout(TIMEOUT).unwrap();
                 lane.push(message.part_slice(0).unwrap()[0]);
             }
+
             assert!(lane.windows(2).all(|pair| pair[1] == pair[0] + 2));
             received.extend(lane);
         }
+
         assert_eq!(source.try_send_many(&mut messages, 10).unwrap(), 2);
         assert!(messages.is_empty());
+
         for receiver in &receivers {
             let message = receiver.recv_timeout(TIMEOUT).unwrap();
             received.push(message.part_slice(0).unwrap()[0]);
         }
+
         received.sort_unstable();
         assert_eq!(received, (0..10).collect::<Vec<_>>());
         drop(release);
@@ -286,10 +311,12 @@ fn ring_holds_send_hwm_plus_recv_hwm() {
             Err(error) => panic!("unexpected send error: {error:?}"),
         }
     }
+
     assert_eq!(accepted, 64);
     for seq in 0..accepted {
         assert_eq!(body(&pull.recv_timeout(TIMEOUT).unwrap(), 0), [seq]);
     }
+
     push.try_send(Message::single("after-drain")).unwrap();
     assert_eq!(
         body(&pull.recv_timeout(TIMEOUT).unwrap(), 0),
@@ -303,15 +330,19 @@ fn sends_before_the_peer_binds_arrive_first_and_in_order() {
     let ctx = Context::new();
     let dealer = ctx.blocking_socket(SocketType::Dealer, Options::default());
     dealer.connect(inproc("direct-backlog")).unwrap();
+
     for seq in 0u8..50 {
         dealer.send(Message::single(vec![seq])).unwrap();
     }
+
     let router = ctx.blocking_socket(SocketType::Router, Options::default());
     router.bind(inproc("direct-backlog")).unwrap();
     dealer.wait_connected(1, TIMEOUT).unwrap();
+
     for seq in 50u8..100 {
         dealer.send(Message::single(vec![seq])).unwrap();
     }
+
     for seq in 0u8..100 {
         let message = router.recv_timeout(TIMEOUT).unwrap();
         assert_eq!(body(&message, 1), [seq]);
@@ -328,12 +359,14 @@ fn settle_subscriptions(publish: impl Fn(), subscribers: &[&blocking::Socket]) {
             if subscriber.recv_timeout(Duration::from_millis(10)).is_ok() {
                 break;
             }
+
             assert!(
                 std::time::Instant::now() < deadline,
                 "subscription not seen"
             );
         }
     }
+
     std::thread::sleep(Duration::from_millis(50));
     for subscriber in subscribers {
         while subscriber.try_recv().is_ok() {}
@@ -354,15 +387,18 @@ fn publishers_filter_and_fan_out_without_the_io_thread() {
         let publisher = ctx.blocking_socket(publisher, Options::default());
         publisher.bind(ep.clone()).unwrap();
         let topics = ["a", "b", ""];
+
         let subscribers: Vec<_> = topics
             .iter()
             .map(|topic| {
                 let socket = ctx.blocking_socket(subscriber, Options::default());
                 socket.connect(ep.clone()).unwrap();
                 socket.subscribe(*topic).unwrap();
+
                 socket
             })
             .collect();
+
         publisher.wait_connected(3, TIMEOUT).unwrap();
         settle_subscriptions(
             || {
@@ -371,12 +407,14 @@ fn publishers_filter_and_fan_out_without_the_io_thread() {
             },
             &subscribers.iter().collect::<Vec<_>>(),
         );
+
         let release = stall_io_thread(&ctx);
 
         for seq in 0u8..40 {
             let topic = if seq % 2 == 0 { b'a' } else { b'b' };
             publisher.send(Message::single(vec![topic, seq])).unwrap();
         }
+
         for (topic, socket) in topics.iter().zip(&subscribers) {
             let expected: Vec<u8> = (0u8..40)
                 .filter(|seq| match *topic {
@@ -385,11 +423,14 @@ fn publishers_filter_and_fan_out_without_the_io_thread() {
                     _ => true,
                 })
                 .collect();
+
             for seq in expected {
                 assert_eq!(body(&socket.recv_timeout(TIMEOUT).unwrap(), 0)[1], seq);
             }
+
             assert!(socket.try_recv().is_err());
         }
+
         drop(release);
     }
 }
@@ -401,15 +442,18 @@ fn radio_reaches_joined_dishes_without_the_io_thread() {
     let radio = ctx.blocking_socket(SocketType::Radio, Options::default());
     radio.bind(ep.clone()).unwrap();
     let groups = ["red", "blue"];
+
     let dishes: Vec<_> = groups
         .iter()
         .map(|group| {
             let dish = ctx.blocking_socket(SocketType::Dish, Options::default());
             dish.connect(ep.clone()).unwrap();
             dish.join(*group).unwrap();
+
             dish
         })
         .collect();
+
     radio.wait_connected(2, TIMEOUT).unwrap();
     settle_subscriptions(
         || {
@@ -419,6 +463,7 @@ fn radio_reaches_joined_dishes_without_the_io_thread() {
         },
         &dishes.iter().collect::<Vec<_>>(),
     );
+
     let release = stall_io_thread(&ctx);
 
     for seq in 0u8..40 {
@@ -427,6 +472,7 @@ fn radio_reaches_joined_dishes_without_the_io_thread() {
             .send_group(group, Message::from_slice(&[seq]))
             .unwrap();
     }
+
     for (index, dish) in dishes.iter().enumerate() {
         for seq in (0u8..40).filter(|seq| usize::from(seq % 2) == index) {
             let message = dish.recv_timeout(TIMEOUT).unwrap();
@@ -434,8 +480,10 @@ fn radio_reaches_joined_dishes_without_the_io_thread() {
             assert_eq!(body(&message, 0), groups[index].as_bytes());
             assert_eq!(body(&message, 1), [seq]);
         }
+
         assert!(dish.try_recv().is_err());
     }
+
     drop(release);
 }
 
@@ -446,6 +494,7 @@ fn muted_senders_wait_and_resume_without_the_io_thread() {
     let small = || Options::default().send_hwm(8).recv_hwm(8);
     let pull = ctx.blocking_socket(SocketType::Pull, small());
     let push = ctx.blocking_socket(SocketType::Push, small());
+
     pull.bind(inproc("direct-muted-push")).unwrap();
     push.connect(inproc("direct-muted-push")).unwrap();
     push.wait_connected(1, TIMEOUT).unwrap();
@@ -461,11 +510,13 @@ fn muted_senders_wait_and_resume_without_the_io_thread() {
     let subscriber = ctx.blocking_socket(SocketType::Sub, small());
     subscriber.connect(inproc("direct-muted-pub")).unwrap();
     subscriber.subscribe("").unwrap();
+
     publisher.wait_connected(1, TIMEOUT).unwrap();
     settle_subscriptions(
         || publisher.send(Message::single("probe")).unwrap(),
         &[&subscriber],
     );
+
     let release = stall_io_thread(&ctx);
 
     std::thread::scope(|scope| {
@@ -478,6 +529,7 @@ fn muted_senders_wait_and_resume_without_the_io_thread() {
                 }
             });
         }
+
         for receiver in [&pull, &subscriber] {
             for seq in 0..COUNT {
                 let message = receiver.recv_timeout(TIMEOUT).unwrap();
@@ -485,6 +537,7 @@ fn muted_senders_wait_and_resume_without_the_io_thread() {
             }
         }
     });
+
     drop(release);
 }
 
@@ -498,6 +551,7 @@ fn scatter_bulk_rejects_invalid_frames_after_delivering_the_valid_prefix() {
         SocketType::Scatter,
     );
     let release = stall_io_thread(&ctx);
+
     for invalid in [Message::new(), Message::multipart(["one", "two"])] {
         let mut messages = [
             Message::single("before"),
@@ -505,19 +559,23 @@ fn scatter_bulk_rejects_invalid_frames_after_delivering_the_valid_prefix() {
             Message::single("after"),
         ]
         .into();
+
         assert_eq!(scatter.try_send_many(&mut messages, 0).unwrap(), 0);
         assert_eq!(messages.len(), 3);
+
         assert_eq!(scatter.try_send_many(&mut messages, 3).unwrap(), 1);
         assert_eq!(
             gather.recv_timeout(TIMEOUT).unwrap(),
             Message::single("before")
         );
         assert_eq!(messages.front(), Some(&invalid));
+
         assert!(matches!(
             scatter.try_send_many(&mut messages, 2),
             Err(TrySendError::Error(omq_tokio::Error::Protocol(_)))
         ));
         assert_eq!(messages, [Message::single("after")]);
+
         assert_eq!(scatter.try_send_many(&mut messages, 1).unwrap(), 1);
         assert_eq!(
             gather.recv_timeout(TIMEOUT).unwrap(),
@@ -525,6 +583,7 @@ fn scatter_bulk_rejects_invalid_frames_after_delivering_the_valid_prefix() {
         );
         assert!(gather.try_recv().is_err());
     }
+
     drop(release);
 }
 
@@ -534,10 +593,12 @@ fn scatter_bulk_frame_check_respects_hwm_and_the_requested_limit() {
     let options = Options::default().send_hwm(2).recv_hwm(2);
     let gather = ctx.blocking_socket(SocketType::Gather, options.clone());
     let scatter = ctx.blocking_socket(SocketType::Scatter, options);
+
     gather.bind(inproc("direct-bulk-frame-hwm")).unwrap();
     scatter.connect(inproc("direct-bulk-frame-hwm")).unwrap();
     gather.wait_connected(1, TIMEOUT).unwrap();
     scatter.wait_connected(1, TIMEOUT).unwrap();
+
     let release = stall_io_thread(&ctx);
     let mut messages: std::collections::VecDeque<_> = (0..5u8)
         .map(|value| Message::from_slice(&[value]))
@@ -546,17 +607,21 @@ fn scatter_bulk_frame_check_respects_hwm_and_the_requested_limit() {
 
     assert_eq!(scatter.try_send_many(&mut messages, 1).unwrap(), 1);
     assert_eq!(scatter.try_send_many(&mut messages, 6).unwrap(), 3);
+
     let Err(TrySendError::Full(returned)) = scatter.try_send_many(&mut messages, 3) else {
         panic!("the remaining valid message must retain normal backpressure");
     };
+
     assert_eq!(returned, Message::from_slice(&[4]));
     messages.push_front(returned);
+
     for value in 0..4u8 {
         assert_eq!(
             gather.recv_timeout(TIMEOUT).unwrap(),
             Message::from_slice(&[value])
         );
     }
+
     assert_eq!(scatter.try_send_many(&mut messages, 3).unwrap(), 1);
     assert_eq!(
         gather.recv_timeout(TIMEOUT).unwrap(),

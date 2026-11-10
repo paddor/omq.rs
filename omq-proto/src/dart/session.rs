@@ -6,7 +6,9 @@ use std::time::Duration;
 use crate::{DartCongestion, Message};
 
 use super::{DATA_HEADER, MAX_BODY, MAX_DATAGRAM, Packet, Status};
+
 mod fragment;
+
 pub use fragment::FragmentBuffer;
 use fragment::{Assembly, FragmentPiece, FragmentReceive, FragmentSend};
 
@@ -141,6 +143,7 @@ impl Prepared<'_> {
                     length: part.length,
                     group: self.group,
                 };
+
                 super::encode_fragment(header, self.body, output)
             }
             None => super::encode_sequenced_data(remote, sequence, self.body, self.group, output),
@@ -311,6 +314,7 @@ impl<B: FragmentBuffer> Session<B> {
         assert!(config.window.is_power_of_two() && config.window <= 65_536);
         assert_ne!(config.max_send_rate, Some(0));
         let window = config.window;
+
         let mut session = Self {
             local,
             remote,
@@ -364,6 +368,7 @@ impl<B: FragmentBuffer> Session<B> {
             pacing: Pacing::default(),
             stats: SessionStats::default(),
         };
+
         session.update_pacing_rate();
         session
     }
@@ -372,38 +377,47 @@ impl<B: FragmentBuffer> Session<B> {
     pub const fn local_session(&self) -> u64 {
         self.local
     }
+
     /// Return the remote receiver session ID.
     pub const fn remote_session(&self) -> u64 {
         self.remote
     }
+
     /// Return cumulative protocol counters.
     pub const fn stats(&self) -> SessionStats {
         self.stats
     }
+
     /// Return retained sequence capacity per direction.
     pub const fn window_capacity(&self) -> usize {
         self.config.window
     }
+
     /// Return available submission slots; zero while fragment submission is pending.
     pub fn send_capacity(&self) -> usize {
         if self.is_exhausted() || self.send.sending.is_some() {
             return 0;
         }
+
         ((self.config.window - self.outstanding()) as u64)
             .min(u64::MAX - self.config.window as u64 - self.send.next) as usize
     }
+
     /// Return retained outbound sequence units awaiting retirement.
     pub const fn outstanding(&self) -> usize {
         (self.send.next - self.send.base) as usize
     }
+
     /// Whether outgoing data currently uses ECN marking.
     pub const fn ecn_enabled(&self) -> bool {
         self.ecn.enabled
     }
+
     /// Return the first sequence position not cumulatively received.
     pub const fn next_receive(&self) -> u64 {
         self.receive.next
     }
+
     /// Return the exclusive end of local receive credit.
     pub const fn receive_right_edge(&self) -> u64 {
         self.receive.credit
@@ -439,22 +453,27 @@ impl<B: FragmentBuffer> Session<B> {
     pub const fn received_units(&self) -> u64 {
         self.receive.received
     }
+
     /// Return the next sequence position awaiting initial transmission.
     pub const fn next_send(&self) -> u64 {
         self.send.cursor
     }
+
     /// Return the exclusive end of submitted outbound sequence units.
     pub const fn submitted(&self) -> u64 {
         self.send.next
     }
+
     /// Return the first outbound sequence position not yet retired.
     pub const fn acknowledged_position(&self) -> u64 {
         self.send.base
     }
+
     /// Return the congestion window in wire bytes.
     pub const fn congestion_window(&self) -> usize {
         self.congestion.cwnd
     }
+
     /// Return transmitted wire bytes awaiting acknowledgment or repair.
     pub const fn bytes_in_flight(&self) -> usize {
         self.congestion.flight
@@ -483,6 +502,7 @@ impl<B: FragmentBuffer> Session<B> {
         } else {
             crate::SocketType::Channel
         };
+
         if super::validate_message(valid, &message, false).is_err()
             || self.send.sending.is_some()
             || self.outstanding() == self.config.window
@@ -490,20 +510,25 @@ impl<B: FragmentBuffer> Session<B> {
         {
             return Err(message);
         }
+
         let body = message
             .part_slice(usize::from(grouped))
             .expect("validated body");
+
         let metadata = if grouped {
             1 + message.part_slice(0).expect("group").len()
         } else {
             0
         };
+
         let bytes = DATA_HEADER + metadata + body.len();
         if body.len() > MAX_BODY || bytes > MAX_DATAGRAM {
             return self.submit_fragmented(message);
         }
+
         let sequence = self.send.next;
         let index = self.index(sequence);
+
         self.send.tx[index] = Some(Sent {
             fragment: None,
             bytes,
@@ -514,6 +539,7 @@ impl<B: FragmentBuffer> Session<B> {
             repair: false,
             in_flight: false,
         });
+
         self.send.next += 1;
         Ok(sequence)
     }
@@ -529,6 +555,7 @@ impl<B: FragmentBuffer> Session<B> {
         self.control.status_pending |= received;
         let retired = self.retire_acknowledged();
         let filled = self.fill_fragments();
+
         received || retired || filled
     }
 
@@ -554,21 +581,26 @@ impl<B: FragmentBuffer> Session<B> {
                 let Some(end) = first.checked_add(u64::from(count)) else {
                     return false;
                 };
+
                 if count == 0 || end > self.send.cursor {
                     return false;
                 }
+
                 let mut lost = false;
                 let mut budget = crate::flow::DrainBudget::new(64, 64_000);
+
                 for sequence in first.max(self.peer.ack)..end {
                     if budget.exhausted() {
                         break;
                     }
+
                     let bytes = self.send.tx[self.index(sequence)]
                         .as_ref()
                         .expect("retained NAK")
                         .bytes;
                     let _ = budget.account(bytes);
                     let index = self.index(sequence);
+
                     if let Some(sent) = &mut self.send.tx[index]
                         && (sent.attempts == 1
                             || now.saturating_sub(sent.last) >= self.congestion.rtt)
@@ -576,26 +608,32 @@ impl<B: FragmentBuffer> Session<B> {
                         if !sent.repair {
                             self.send.repairs += 1;
                         }
+
                         sent.repair = true;
                         if sent.in_flight {
                             self.congestion.flight -= sent.bytes;
                             sent.in_flight = false;
                         }
+
                         lost = true;
                     }
                 }
+
                 if lost {
                     self.congest();
                 }
+
                 true
             }
             Packet::Probe { session, next } if session == self.local => {
                 if next > self.receive.credit {
                     return false;
                 }
+
                 self.control.gap_high = self.control.gap_high.max(next);
                 self.control.status_pending = true;
                 self.control.nak_at = self.control.nak_at.min(now);
+
                 true
             }
             _ => false,
@@ -606,6 +644,7 @@ impl<B: FragmentBuffer> Session<B> {
         if status.serial <= self.peer.serial {
             return true;
         }
+
         if status.ack < self.peer.ack
             || status.ack > self.send.cursor
             || status.credit < self.peer.credit
@@ -620,6 +659,7 @@ impl<B: FragmentBuffer> Session<B> {
         {
             return false;
         }
+
         if self.ecn.enabled {
             let marked = status.counts[0].saturating_add(status.counts[2]);
             if status.counts[1] != 0
@@ -645,9 +685,11 @@ impl<B: FragmentBuffer> Session<B> {
         self.peer.serial = status.serial;
         self.peer.ecn = status.counts;
         self.peer.credit = status.credit;
+
         if status.ack > self.peer.ack {
             self.peer.ack_at = now;
         }
+
         self.peer.ack = status.ack;
         self.retire_acknowledged();
         true
@@ -657,32 +699,40 @@ impl<B: FragmentBuffer> Session<B> {
         let mut acknowledged_bytes = 0;
         let mut sample_at = None;
         let mut budget = crate::flow::DrainBudget::new(128, 64_000);
+
         while self.send.base < self.peer.ack && !budget.exhausted() {
             let index = self.index(self.send.base);
             let sent = self.send.tx[index]
                 .as_ref()
                 .expect("retained acknowledged message");
+
             if sent.in_flight {
                 self.congestion.flight -= sent.bytes;
             }
+
             if sent.repair {
                 self.send.repairs -= 1;
             }
+
             acknowledged_bytes += sent.bytes;
             let _ = budget.account(sent.bytes);
+
             if sent.attempts == 1 {
                 sample_at = Some(sent.first.expect("submitted transmit"));
             }
+
             self.send.base += 1;
             self.stats.acknowledged += u64::from(sent.fragment.is_none_or(|part| part.last));
             self.send.tx[index] = None;
         }
+
         // One feedback timestamp represents the entire acknowledged prefix.
         // Sample its newest unretransmitted message once per bounded turn.
         if let Some(first) = sample_at {
             let sample = self.peer.ack_at.saturating_sub(first);
             self.congestion.sample_rtt(sample);
         }
+
         if self.config.congestion == DartCongestion::Adaptive
             && acknowledged_bytes != 0
             && self.send.base >= self.congestion.recovery_end
@@ -690,9 +740,11 @@ impl<B: FragmentBuffer> Session<B> {
             self.congestion
                 .grow(acknowledged_bytes, self.config.window * MAX_DATAGRAM);
         }
+
         if acknowledged_bytes != 0 {
             self.update_pacing_rate();
         }
+
         budget.msgs() != 0
     }
 
@@ -716,6 +768,7 @@ impl<B: FragmentBuffer> Session<B> {
         let attempts = self.send.tx[self.index(self.peer.ack)]
             .as_ref()
             .map_or(1, |sent| sent.attempts);
+
         (self.congestion.rtt + self.congestion.rttvar * 4)
             .max(MIN_RTO)
             .saturating_mul(1 << attempts.saturating_sub(1).min(10))
@@ -727,17 +780,20 @@ impl<B: FragmentBuffer> Session<B> {
         if self.peer.ack < self.send.cursor {
             let index = self.index(self.peer.ack);
             let rto = self.rto();
+
             if let Some(sent) = &mut self.send.tx[index]
                 && now.saturating_sub(sent.last.max(self.peer.ack_at)) >= rto
             {
                 if !sent.repair {
                     self.send.repairs += 1;
                 }
+
                 sent.repair = true;
                 if sent.in_flight {
                     self.congestion.flight -= sent.bytes;
                     sent.in_flight = false;
                 }
+
                 self.congest();
             }
         }
@@ -749,9 +805,11 @@ impl<B: FragmentBuffer> Session<B> {
         if self.control.status_pending || self.has_progress() {
             return Duration::ZERO;
         }
+
         if self.receive.next < self.control.gap_high {
             deadline = deadline.min(self.control.nak_at);
         }
+
         if self.peer.ack < self.send.cursor {
             let sent = self.send.tx[self.index(self.peer.ack)]
                 .as_ref()
@@ -760,11 +818,13 @@ impl<B: FragmentBuffer> Session<B> {
             // Unchanged ACKs and credit-only feedback cannot postpone repair.
             deadline = deadline.min(sent.last.max(self.peer.ack_at) + self.rto());
         }
+
         if self.pacing.next_at > now
             && (self.send.cursor < self.send.next || self.next_repair().is_some())
         {
             deadline = deadline.min(self.pacing.next_at);
         }
+
         deadline
     }
 }

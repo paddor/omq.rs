@@ -57,20 +57,24 @@ fn latency_variants_preserve_runtime_and_spin_configuration() {
         assert!(env.contains(&("OMQ_IO_THREADS", io)));
         assert!(supports_latency_pair(def, "router-router", "latency"));
     }
+
     for name in ["libzmq", "omq-tokio-exclusive", "zmq.rs"] {
         let def = find_impl(name).unwrap();
         assert!(supports_latency_pair(def, "req-rep", "default"));
         assert!(!supports_latency_pair(def, "router-router", "latency"));
     }
+
     for name in ["libzmq", "libzmq-2t"] {
         let def = find_impl(name).unwrap();
         for pair in ["router-dealer", "router-router", "pair"] {
             assert!(supports_latency_pair(def, pair, "default"));
         }
+
         for pair in ["client-server", "peer", "channel"] {
             assert!(!supports_latency_pair(def, pair, "default"));
         }
     }
+
     assert!(!supports_pushpull(
         find_impl("omq-tokio-1t-spin50").unwrap()
     ));

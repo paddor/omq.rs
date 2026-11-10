@@ -15,6 +15,7 @@ impl Message {
         if message.routing_id().is_some() {
             let _ = message.take_routing_id();
         }
+
         let inner = match message.inner {
             MessageInner::Empty => MessageInner::RoutedEmpty { routing_id },
             MessageInner::Inline { len, data }
@@ -51,6 +52,7 @@ impl Message {
                 parts: Message { inner: other }.into_parts_payload(),
             },
         };
+
         Self { inner }
     }
 
@@ -91,6 +93,7 @@ impl Message {
                 return None;
             }
         };
+
         self.inner = inner;
         Some(routing_id)
     }

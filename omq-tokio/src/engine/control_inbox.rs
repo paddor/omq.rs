@@ -108,6 +108,7 @@ pub(crate) fn channel(capacity: usize) -> (Sender, Receiver) {
         #[cfg(feature = "dart")]
         endpoint: std::sync::OnceLock::new(),
     });
+
     (
         Sender::Owned {
             commands: tx,
@@ -137,12 +138,15 @@ impl Sender {
             let Self::Legacy(sender) = self else {
                 unreachable!()
             };
+
             return sender.try_send(command);
         };
+
         let mut pending = lifecycle.lock();
         if pending.closed {
             return Err(mpsc::error::TrySendError::Closed(command));
         }
+
         let old = match command {
             PeerDriverCommand::SendCommand(_) => {
                 // Serialize with lifecycle admission; one native producer.
@@ -157,12 +161,15 @@ impl Sender {
                 } else {
                     pending.overflow.push_back(command);
                 }
+
                 drop(pending);
                 lifecycle.receive.wake();
+
                 #[cfg(feature = "dart")]
                 if let Some(signal) = lifecycle.endpoint.get() {
                     signal.mark();
                 }
+
                 return Ok(());
             }
             PeerDriverCommand::ActivateDataPlane | PeerDriverCommand::ActivateWithRecvSink(_) => {
@@ -173,14 +180,17 @@ impl Sender {
                 pending.close.replace(command)
             }
         };
+
         drop(pending);
         drop(old);
         lifecycle.changed.notify_changed();
         lifecycle.receive.wake();
+
         #[cfg(feature = "dart")]
         if let Some(signal) = lifecycle.endpoint.get() {
             signal.mark();
         }
+
         Ok(())
     }
 
@@ -200,8 +210,10 @@ impl Sender {
             let Self::Legacy(sender) = self else {
                 unreachable!()
             };
+
             return sender.send(command).await;
         };
+
         loop {
             let seen = lifecycle.changed.generation();
             match self.try_send(command) {
@@ -211,20 +223,20 @@ impl Sender {
                 }
                 Err(mpsc::error::TrySendError::Full(returned)) => command = returned,
             }
+
             tokio::select! {
                 _ = commands.ready() => {},
                 () = lifecycle.changed.changed_after(seen) => {},
             }
         }
     }
-}
 
-impl Sender {
     /// Whether protocol commands wait behind a full ring.
     pub(crate) fn protocol_backlogged(&self) -> bool {
         let Self::Owned { lifecycle, .. } = self else {
             return false;
         };
+
         !lifecycle.lock().overflow.is_empty()
     }
 
@@ -234,6 +246,7 @@ impl Sender {
         let Self::Owned { lifecycle, .. } = self else {
             return;
         };
+
         lifecycle
             .changed
             .wait_until(|| {
@@ -256,6 +269,7 @@ impl Receiver {
         let Self::Owned { lifecycle, .. } = self else {
             return futures::future::pending().await;
         };
+
         futures::future::poll_fn(|cx| {
             lifecycle.receive.register(cx.waker());
             Self::take_lifecycle(lifecycle).map_or(std::task::Poll::Pending, |command| {
@@ -269,10 +283,12 @@ impl Receiver {
         if !lifecycle.may_be_occupied() {
             return None;
         }
+
         let mut pending = lifecycle.lock();
         if matches!(pending.close, Some(PeerDriverCommand::Close)) {
             return pending.close.take();
         }
+
         pending.activation.take().or_else(|| pending.close.take())
     }
 
@@ -282,11 +298,13 @@ impl Receiver {
         if !lifecycle.may_be_occupied() {
             return None;
         }
+
         let command = lifecycle.lock().overflow.pop_front();
         if command.is_some() {
             // Wakes callers waiting in `Sender::protocol_drained`.
             lifecycle.changed.notify_changed();
         }
+
         command
     }
 
@@ -300,6 +318,7 @@ impl Receiver {
                 if let Some(command) = Self::take_lifecycle(lifecycle) {
                     return Ok(command);
                 }
+
                 commands
                     .try_recv()
                     .or_else(|error| Self::take_overflow(lifecycle).ok_or(error))
@@ -326,6 +345,7 @@ impl Receiver {
                 if let Some(command) = Self::take_lifecycle(lifecycle) {
                     return std::task::Poll::Ready(Some(command));
                 }
+
                 match commands.poll_recv(cx) {
                     std::task::Poll::Ready(Some(command)) => std::task::Poll::Ready(Some(command)),
                     closed_or_pending => Self::take_overflow(lifecycle)
@@ -378,6 +398,7 @@ impl Drop for Receiver {
             let close = pending.close.take();
             let overflow = std::mem::take(&mut pending.overflow);
             drop(pending);
+
             drop(activation);
             drop(close);
             drop(overflow);
@@ -398,90 +419,4 @@ impl From<mpsc::Receiver<PeerDriverCommand>> for Receiver {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use omq_proto::proto::Command;
-    use std::time::{Duration, Instant};
-
-    fn command(value: u8) -> PeerDriverCommand {
-        PeerDriverCommand::SendCommand(Command::Subscribe(bytes::Bytes::from(vec![value])))
-    }
-
-    #[tokio::test]
-    async fn activation_and_close_bypass_full_protocol_lane() {
-        let (sender, mut receiver) = channel(1);
-        sender.try_send(command(1)).unwrap();
-        sender.try_send(command(2)).unwrap();
-        sender
-            .try_send(PeerDriverCommand::ActivateDataPlane)
-            .unwrap();
-        assert!(matches!(
-            receiver.recv_lifecycle().await,
-            Some(PeerDriverCommand::ActivateDataPlane)
-        ));
-        sender.try_send(PeerDriverCommand::Close).unwrap();
-        assert!(matches!(
-            sender.try_send(command(3)),
-            Err(mpsc::error::TrySendError::Closed(_))
-        ));
-        assert!(matches!(
-            receiver.recv_lifecycle().await,
-            Some(PeerDriverCommand::Close)
-        ));
-    }
-
-    #[tokio::test]
-    async fn graceful_close_retains_accepted_protocol_fifo() {
-        let (sender, mut receiver) = channel(1);
-        sender.try_send(command(1)).unwrap();
-        sender.try_send(command(2)).unwrap();
-        sender
-            .try_send(PeerDriverCommand::DrainAndClose {
-                deadline: Some(Instant::now() + Duration::from_secs(1)),
-            })
-            .unwrap();
-        assert!(matches!(
-            receiver.recv().await,
-            Some(PeerDriverCommand::DrainAndClose { .. })
-        ));
-        assert!(!receiver.is_empty());
-        for expected in [1, 2] {
-            let Some(PeerDriverCommand::SendCommand(Command::Subscribe(prefix))) =
-                receiver.recv().await
-            else {
-                panic!("protocol command");
-            };
-            assert_eq!(prefix.as_ref(), &[expected]);
-        }
-        assert!(receiver.is_empty());
-    }
-
-    #[tokio::test]
-    async fn protocol_commands_never_wait_and_keep_fifo_across_the_ring() {
-        let (sender, mut receiver) = channel(2);
-        for value in 0..5 {
-            tokio::time::timeout(Duration::from_secs(1), sender.send(command(value)))
-                .await
-                .unwrap()
-                .unwrap();
-        }
-        // A command sent after a partial drain still follows the overflow.
-        let first = receiver.try_recv().unwrap();
-        sender.try_send(command(5)).unwrap();
-        let mut drained = vec![first];
-        while let Ok(command) = receiver.try_recv() {
-            drained.push(command);
-        }
-        let prefixes: Vec<u8> = drained
-            .into_iter()
-            .map(|command| {
-                let PeerDriverCommand::SendCommand(Command::Subscribe(prefix)) = command else {
-                    panic!("protocol command");
-                };
-                prefix[0]
-            })
-            .collect();
-        assert_eq!(prefixes, [0, 1, 2, 3, 4, 5]);
-        assert!(receiver.is_empty());
-    }
-}
+mod tests;

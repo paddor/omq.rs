@@ -21,6 +21,7 @@ pub(super) fn run_inproc(ctx: &omq_tokio::Context, name: String, size: usize, du
                 send_fast(&push, Message::from_slice(&payload));
             }
         }
+
         let msg = Message::single(payload.clone());
         loop {
             send_fast(&push, msg.clone());
@@ -32,10 +33,12 @@ pub(super) fn run_inproc(ctx: &omq_tokio::Context, name: String, size: usize, du
     let t0 = Instant::now();
     let deadline = t0 + duration;
     let mut count: u64 = 0;
+
     loop {
         if Instant::now() >= deadline {
             break;
         }
+
         if pull.try_recv().is_ok() {
             count += 1;
             while Instant::now() < deadline && pull.try_recv().is_ok() {
@@ -45,6 +48,7 @@ pub(super) fn run_inproc(ctx: &omq_tokio::Context, name: String, size: usize, du
             std::thread::yield_now();
         }
     }
+
     let elapsed = t0.elapsed().as_secs_f64();
     println!("{count} {elapsed:.6} {size}");
 }
@@ -90,11 +94,13 @@ fn spawn_2ut_sender(
             stop: sender_stop,
         } = signals;
         sender_barrier.wait();
+
         if payload.len() <= omq_tokio::message::MAX_INLINE_MESSAGE {
             loop {
                 if sender_stop.load(Ordering::Acquire) {
                     break;
                 }
+
                 match sender_push.try_send(Message::from_slice(&payload)) {
                     Ok(()) => {}
                     Err(TrySendError::Full(_)) => std::hint::spin_loop(),
@@ -107,6 +113,7 @@ fn spawn_2ut_sender(
                 if sender_stop.load(Ordering::Acquire) {
                     break;
                 }
+
                 match sender_push.try_send(msg.clone()) {
                     Ok(()) => {}
                     Err(TrySendError::Full(_)) => std::hint::spin_loop(),
@@ -135,19 +142,23 @@ fn spawn_2ut_receiver(
         let mut count = 0u64;
         // Read the clock only every 10k polls.
         let mut until_timer_check = 10_000usize;
+
         loop {
             match receiver_pull.try_recv() {
                 Ok(_) => count += 1,
                 Err(_) => std::hint::spin_loop(),
             }
+
             until_timer_check -= 1;
             if until_timer_check == 0 {
                 if Instant::now() >= deadline {
                     break;
                 }
+
                 until_timer_check = 10_000;
             }
         }
+
         receiver_stop.store(true, Ordering::Release);
         (count, start.elapsed())
     })
@@ -172,6 +183,7 @@ pub(super) fn run_inproc_latency(
         let first = rep.recv().unwrap();
         pair.validate(&first, size, false);
         rep.send(first).unwrap();
+
         loop {
             let msg = rep.recv().unwrap();
             rep.send(msg).unwrap();
@@ -198,12 +210,14 @@ pub(super) fn run_inproc_latency(
 
     let t_wall = Instant::now();
     let mut rtts = Vec::with_capacity(iterations);
+
     for _ in 0..iterations {
         let t0 = Instant::now();
         req.send(msg.clone()).unwrap();
         req.recv().unwrap();
         rtts.push(t0.elapsed().as_nanos() as u64);
     }
+
     let elapsed = t_wall.elapsed().as_secs_f64();
 
     latency_common::print_rtts(rtts, iterations, None, elapsed);

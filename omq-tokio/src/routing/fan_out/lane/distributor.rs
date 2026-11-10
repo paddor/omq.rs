@@ -121,11 +121,13 @@ impl LaneTemplate {
             #[cfg(target_os = "linux")]
             self.shm_pool.clone(),
         );
+
         let input = LaneInput {
             tx: data_tx,
             signal: worker.data_signal.clone(),
             exited: worker.exited.clone(),
         };
+
         let endpoint = LaneEndpoint {
             ctrl: worker.ctrl.clone(),
             data_signal: worker.data_signal.clone(),
@@ -134,6 +136,7 @@ impl LaneTemplate {
             codec_groups: std::array::from_fn(|_| None),
             peer_groups: FxHashMap::default(),
         };
+
         io_pool.spawn_on(index, worker.run());
         (input, endpoint)
     }
@@ -155,6 +158,7 @@ impl FanOutLanes {
             mode,
             mute_policy,
         };
+
         let lane_count = io_pool.thread_count().max(1);
         let active_flags = Arc::new(
             (0..lane_count)
@@ -209,6 +213,7 @@ impl FanOutLanes {
             .codec_profile()
             .map(crate::engine::codec::CodecProfile::sharing_key);
         let shm = add.slot.is_shm();
+
         let codec_group = endpoint
             .codec_groups
             .iter()
@@ -218,6 +223,7 @@ impl FanOutLanes {
                     .is_some_and(|group| group.key == key && group.shm == shm)
             })
             .or_else(|| endpoint.codec_groups.iter().position(Option::is_none))?;
+
         let group = endpoint.codec_groups[codec_group].get_or_insert_with(|| GroupAdmission {
             key,
             shm,
@@ -228,12 +234,14 @@ impl FanOutLanes {
         endpoint.peer_count += 1;
         Self::push_control(endpoint, LaneControl::AddPeer { add, codec_group });
         self.active_flags[lane].store(true, Ordering::Release);
+
         Some(lane)
     }
 
     fn send_to_lane(&self, lane: usize, cmd: LaneControl) {
         let lane = self.normalize_lane(lane);
         let mut state = self.state.lock().expect("fanout lanes poisoned");
+
         if let Some(endpoint) = state.endpoints.get_mut(lane) {
             Self::push_control(endpoint, cmd);
         }
@@ -248,6 +256,7 @@ impl FanOutLanes {
         let (ack, rx) = oneshot::channel();
         let lane = self.normalize_lane(lane);
         let mut state = self.state.lock().expect("fanout lanes poisoned");
+
         if let Some(endpoint) = state.endpoints.get_mut(lane) {
             Self::push_control(
                 endpoint,
@@ -257,6 +266,7 @@ impl FanOutLanes {
                     ack: Some(ack),
                 },
             );
+
             Some(rx)
         } else {
             None
@@ -283,22 +293,28 @@ impl FanOutLanes {
     pub(in crate::routing::fan_out) fn remove_peer(&self, lane: usize, peer_id: u64) {
         let lane = self.normalize_lane(lane);
         let mut state = self.state.lock().expect("fanout lanes poisoned");
+
         if let Some(endpoint) = state.endpoints.get_mut(lane) {
             if let Some(group_id) = endpoint.peer_groups.remove(&peer_id) {
                 let group = endpoint.codec_groups[group_id]
                     .as_mut()
                     .expect("registered codec group");
                 group.peers -= 1;
+
                 if group.peers == 0 {
                     endpoint.codec_groups[group_id] = None;
                 }
+
                 endpoint.peer_count -= 1;
             }
+
             if endpoint.peer_count == 0 {
                 self.active_flags[lane].store(false, Ordering::Release);
             }
+
             Self::push_control(endpoint, LaneControl::RemovePeer { peer_id });
         }
+
         drop(state);
         // Readiness may have probed before the lane became inactive. Publish
         // a capacity change after the flag update, even if no worker drains.
@@ -321,6 +337,7 @@ impl FanOutLanes {
         if self.admission_closed.load(Ordering::Acquire) {
             return Err(omq_proto::TrySendError::Closed);
         }
+
         self.publish(&mut dist, msg, admission)
             .map_err(omq_proto::TrySendError::Full)
     }
@@ -339,9 +356,11 @@ impl FanOutLanes {
             {
                 continue;
             }
+
             if input.tx.is_full() {
                 input.tx.flush();
                 input.signal.mark();
+
                 if admission == LaneAdmission::Backpressure {
                     return Err(msg);
                 }
@@ -349,6 +368,7 @@ impl FanOutLanes {
                 selected.push(index);
             }
         }
+
         // This lock owns every producer. Capacity cannot be stolen between
         // admission and publication; a disconnected consumer may drop data.
         if let Some(last) = selected.pop() {
@@ -358,11 +378,13 @@ impl FanOutLanes {
                 input.tx.flush();
                 input.signal.mark();
             }
+
             let input = &mut dist.lanes[last];
             let _ = input.tx.push(msg);
             input.tx.flush();
             input.signal.mark();
         }
+
         Ok(())
     }
 
@@ -374,9 +396,11 @@ impl FanOutLanes {
                 if self.admission_closed.load(Ordering::Acquire) {
                     return;
                 }
+
                 // Snapshot before admission: any worker's release or exit
                 // must remain observable when a full queue makes us wait.
                 let seen = dist.space.generation();
+
                 match self.publish(&mut dist, msg, admission) {
                     Ok(()) => return,
                     Err(returned) => {
@@ -385,6 +409,7 @@ impl FanOutLanes {
                     }
                 }
             };
+
             wait.0.changed_after(wait.1).await;
         }
     }
@@ -399,6 +424,7 @@ impl FanOutLanes {
                     || input.tx.is_consumer_dropped()
                     || !input.tx.is_full()
             });
+
         (ready, dist.space.clone())
     }
 
@@ -419,11 +445,13 @@ impl FanOutLanes {
             .expect("distributor poisoned")
             .space
             .clone();
+
         loop {
             let seen = space.generation();
             if self.admission_closed() {
                 return;
             }
+
             space.changed_after(seen).await;
         }
     }
@@ -431,12 +459,14 @@ impl FanOutLanes {
     pub(in crate::routing::fan_out) fn shutdown(&self) {
         self.stop_admission();
         let mut state = self.state.lock().expect("fanout lanes poisoned");
+
         for endpoint in &mut state.endpoints {
             Self::push_control(endpoint, LaneControl::Shutdown);
             endpoint.peer_count = 0;
             endpoint.peer_groups.clear();
             endpoint.codec_groups = std::array::from_fn(|_| None);
         }
+
         for flag in self.active_flags.iter() {
             flag.store(false, Ordering::Release);
         }
@@ -449,6 +479,7 @@ impl FanOutLanes {
             (input.tx.is_empty() && input.signal.is_idle()) || input.exited.load(Ordering::Acquire)
         });
         drop(dist);
+
         empty
             && self
                 .state

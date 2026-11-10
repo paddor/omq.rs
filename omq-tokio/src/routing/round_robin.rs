@@ -43,6 +43,7 @@ impl Default for ActivePipes {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(1, |d| d.as_secs() ^ u64::from(d.subsec_nanos()))
             .max(1);
+
         Self {
             active: Vec::new(),
             inactive: Vec::new(),
@@ -66,21 +67,26 @@ impl ActivePipes {
                 .map(|()| self.active[0].peer_id)
                 .map_err(|error| self.reject(0, error));
         }
+
         if !self.has_any_pipe() {
             return Err(omq_proto::TrySendError::Full(message));
         }
+
         if self.active.is_empty() {
             self.try_reactivate_when_empty();
         } else if !self.inactive.is_empty() {
             self.try_reactivate_one();
         }
+
         let mut scanned = 0;
         while scanned < self.active.len() {
             let index = self.cursor;
             self.cursor += 1;
+
             if self.cursor == self.active.len() {
                 self.cursor = 0;
             }
+
             scanned += 1;
             match self.send_to_pipe::<DEFERRED>(index, message) {
                 Ok(()) => return Ok(self.active[index].peer_id),
@@ -89,14 +95,17 @@ impl ActivePipes {
                         omq_proto::TrySendError::Full(returned) => returned,
                         error => return Err(error),
                     };
+
                     if self.active.is_empty() {
                         break;
                     }
+
                     // Removal leaves the next stable-order pipe at index.
                     scanned = scanned.saturating_sub(1);
                 }
             }
         }
+
         Err(omq_proto::TrySendError::Full(message))
     }
 
@@ -140,9 +149,11 @@ impl ActivePipes {
             if closed.load(Ordering::Acquire) {
                 return Err(omq_proto::TrySendError::Closed);
             }
+
             let Some(message) = messages.pop_front() else {
                 break;
             };
+
             match self.try_send::<true>(message) {
                 Ok(_) => {
                     let _ = budget.account(std::mem::size_of::<Message>());
@@ -154,6 +165,7 @@ impl ActivePipes {
                 Err(error) => return Err(error),
             }
         }
+
         Ok(budget.msgs())
     }
 
@@ -161,9 +173,11 @@ impl ActivePipes {
         for pipe in &self.active {
             pipe.tx.space_available().notify_changed();
         }
+
         for pipe in &self.inactive {
             pipe.tx.space_available().notify_changed();
         }
+
         self.active.clear();
         self.inactive.clear();
         self.pipe_peers.clear();
@@ -175,15 +189,18 @@ impl ActivePipes {
         let was_empty = self.inactive.is_empty();
         let pipe = self.active.remove(pos);
         self.inactive.push(pipe);
+
         if was_empty {
             self.inactive_cursor = self.random_index(self.inactive.len());
         }
+
         if self.active.is_empty() {
             self.cursor = 0;
         } else {
             if pos < self.cursor {
                 self.cursor -= 1;
             }
+
             if self.cursor >= self.active.len() {
                 self.cursor = 0;
             }
@@ -194,19 +211,23 @@ impl ActivePipes {
         let Some(len) = (!self.inactive.is_empty()).then_some(self.inactive.len()) else {
             return;
         };
+
         let i = self.inactive_cursor % len;
         self.inactive_cursor = (i + 1) % len;
+
         if self.inactive[i].tx.above_lwm.load(Ordering::Acquire)
             && !self.inactive[i].tx.is_below_lwm()
         {
             return;
         }
+
         self.inactive[i]
             .tx
             .above_lwm
             .store(false, Ordering::Release);
         let pipe = self.inactive.remove(i);
         self.active.push(pipe);
+
         if self.inactive.is_empty() {
             self.inactive_cursor = 0;
         } else if i < self.inactive_cursor {
@@ -234,6 +255,7 @@ impl ActivePipes {
                 if pos < self.cursor {
                     self.cursor -= 1;
                 }
+
                 if self.cursor >= self.active.len() {
                     self.cursor = 0;
                 }
@@ -255,10 +277,12 @@ impl ActivePipes {
     fn insert_pipe(&mut self, peer_id: u64, tx: SendPipeProducer) {
         self.remove_peer(peer_id);
         self.pipe_peers.insert(peer_id);
+
         let pos = {
             let len = self.active.len() + 1;
             self.random_index(len)
         };
+
         self.active.insert(pos, ActivePipe { peer_id, tx });
     }
 
@@ -272,6 +296,7 @@ impl ActivePipes {
         x ^= x >> 7;
         x ^= x << 17;
         self.random_state = x.max(1);
+
         (x as usize) % len
     }
 }
@@ -302,6 +327,7 @@ impl Submitter {
                     return Err(omq_proto::error::Error::Closed);
                 }
             }
+
             self.wait_send_ready().await;
         }
     }
@@ -312,6 +338,7 @@ impl Submitter {
         if self.closed.load(Ordering::Acquire) {
             return true;
         }
+
         let mut guard = self.active.lock();
         let pipes = &mut *guard;
         pipes.active.iter_mut().any(|pipe| pipe.tx.can_accept())
@@ -331,9 +358,11 @@ impl Submitter {
                         .chain(pipes.flat_map(|pipe| pipe.tx.readiness_signals())),
                 )
             };
+
             if self.send_ready() {
                 return;
             }
+
             changed.wait().await;
         }
     }
@@ -359,6 +388,7 @@ impl Submitter {
         if self.closed.load(Ordering::Acquire) {
             return Err(omq_proto::TrySendError::Closed);
         }
+
         self.active.lock().try_send::<false>(message)
     }
 
@@ -370,30 +400,37 @@ impl Submitter {
         if messages.is_empty() || max == 0 {
             return Ok(0);
         }
+
         if self.closed.load(Ordering::Acquire) {
             return Err(omq_proto::TrySendError::Closed);
         }
+
         let mut active = self.active.lock();
         if !active.has_any_pipe() {
             return Err(omq_proto::TrySendError::Full(
                 messages.pop_front().expect("message present"),
             ));
         }
+
         if active.active.is_empty() {
             active.try_reactivate_when_empty();
         } else if !active.inactive.is_empty() {
             active.try_reactivate_one();
         }
+
         if active.active.len() != 1 || !active.inactive.is_empty() {
             let result = active.try_send_batch(messages, max, &self.closed);
             for pipe in &mut active.active {
                 pipe.tx.flush_deferred();
             }
+
             return result;
         }
+
         let result = active.active[0]
             .tx
             .try_send_many(messages, max.min(DrainBudget::WORKER.remaining_msgs()));
+
         result.map_err(|error| active.reject(0, error))
     }
 }
@@ -440,6 +477,7 @@ impl RoundRobinSend {
         let mut active = self.active.lock();
         active.insert_pipe(route_id, tx);
         self.active_changed.notify_changed();
+
         rx
     }
 
@@ -489,9 +527,11 @@ impl RoundRobinSend {
     pub(crate) fn stop_admission(&self) {
         self.closed.store(true, Ordering::Release);
         let active = self.active.lock();
+
         for pipe in active.active.iter().chain(&active.inactive) {
             pipe.tx.space_available().notify_changed();
         }
+
         self.active_changed.notify_changed();
     }
 
@@ -506,6 +546,7 @@ impl RoundRobinSend {
         let guard = self.active.lock();
         let active_empty = guard.active.iter().all(|pipe| pipe.tx.is_empty());
         let inactive_empty = guard.inactive.iter().all(|pipe| pipe.tx.is_empty());
+
         active_empty && inactive_empty
     }
 
@@ -518,224 +559,4 @@ impl RoundRobinSend {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{ActivePipe, ActivePipes, RoundRobinSend};
-    use crate::engine::ActorPeerDriverHandle;
-    use crate::engine::send_pipe::send_pipe;
-    use omq_proto::message::Message;
-    use omq_proto::options::Options;
-    use std::collections::VecDeque;
-    use tokio_util::sync::CancellationToken;
-
-    fn connect_pipe(send: &mut RoundRobinSend, route_id: u64) -> crate::engine::SendPipeConsumer {
-        send.make_connect_pipe(
-            route_id,
-            #[cfg(feature = "dart")]
-            None,
-        )
-    }
-
-    #[test]
-    fn batches_preserve_round_robin_order_and_scalar_cursor() {
-        let mut send = RoundRobinSend::new(&Options::default().send_hwm(16));
-        let mut receivers: Vec<_> = (0..3).map(|id| connect_pipe(&mut send, id)).collect();
-        let order: Vec<_> = send
-            .active
-            .lock()
-            .active
-            .iter()
-            .map(|pipe| pipe.peer_id as usize)
-            .collect();
-        let submitter = send.submitter();
-        let mut messages = (0..7_u8).map(|seq| Message::from_slice(&[seq])).collect();
-        assert_eq!(submitter.try_send_many(&mut messages, 7).unwrap(), 7);
-        submitter.try_send(Message::from_slice(&[7])).unwrap();
-        for (position, &peer) in order.iter().enumerate() {
-            let mut received = Vec::new();
-            receivers[peer].drain_into(&mut received, 16, usize::MAX);
-            let expected: Vec<_> = (position..8)
-                .step_by(3)
-                .map(|seq| Message::from_slice(&[u8::try_from(seq).unwrap()]))
-                .collect();
-            assert_eq!(received, expected);
-        }
-    }
-
-    #[test]
-    fn partial_full_batches_publish_and_reactivate_without_losing_messages() {
-        let mut send = RoundRobinSend::new(&Options::default().send_hwm(2));
-        let mut receivers: Vec<_> = (0..2).map(|id| connect_pipe(&mut send, id)).collect();
-        let submitter = send.submitter();
-        let mut messages: VecDeque<_> = (0..7_u8).map(|seq| Message::from_slice(&[seq])).collect();
-        assert_eq!(submitter.try_send_many(&mut messages, 7).unwrap(), 4);
-        assert_eq!(messages.front().unwrap(), &Message::from_slice(&[4]));
-        let mut received = Vec::new();
-        for receiver in &mut receivers {
-            assert_eq!(receiver.drain_into(&mut received, 2, usize::MAX), 2);
-        }
-        assert_eq!(submitter.try_send_many(&mut messages, 7).unwrap(), 3);
-        assert!(messages.is_empty());
-        for receiver in &mut receivers {
-            receiver.drain_into(&mut received, 2, usize::MAX);
-        }
-        let mut sequences: Vec<_> = received
-            .iter()
-            .map(|message| message.part_slice(0).unwrap()[0])
-            .collect();
-        sequences.sort_unstable();
-        assert_eq!(sequences, (0..7).collect::<Vec<_>>());
-    }
-
-    #[test]
-    fn batch_skips_closed_peer_and_delivers_to_the_remaining_peer() {
-        let mut send = RoundRobinSend::new(&Options::default().send_hwm(16));
-        let closed = connect_pipe(&mut send, 0);
-        let mut receiver = connect_pipe(&mut send, 1);
-        drop(closed);
-        let submitter = send.submitter();
-        let expected: Vec<_> = (0..7_u8).map(|seq| Message::from_slice(&[seq])).collect();
-        let mut messages = expected.clone().into();
-        assert_eq!(submitter.try_send_many(&mut messages, 7).unwrap(), 7);
-        let mut batch = Vec::new();
-        receiver.drain_into(&mut batch, 16, usize::MAX);
-        assert_eq!(batch, expected);
-    }
-
-    #[test]
-    fn deactivation_preserves_active_peer_order() {
-        let mut pipes = ActivePipes::default();
-        for peer_id in 0..4 {
-            pipes.active.push(ActivePipe {
-                peer_id,
-                tx: send_pipe(4).0,
-            });
-        }
-        pipes.cursor = 2;
-
-        pipes.deactivate(1);
-
-        assert_eq!(
-            pipes
-                .active
-                .iter()
-                .map(|pipe| pipe.peer_id)
-                .collect::<Vec<_>>(),
-            vec![0, 2, 3]
-        );
-        assert_eq!(pipes.cursor, 1);
-    }
-
-    #[test]
-    fn inactive_pipe_reactivates_without_timer() {
-        let (tx0, mut rx0) = send_pipe(2);
-        let (tx1, _rx1) = send_pipe(2);
-        let mut pipes = ActivePipes::default();
-        pipes.active.push(ActivePipe {
-            peer_id: 0,
-            tx: tx0,
-        });
-        pipes.active.push(ActivePipe {
-            peer_id: 1,
-            tx: tx1,
-        });
-
-        pipes.active[0].tx.try_send(Message::single("a")).unwrap();
-        pipes.active[0].tx.try_send(Message::single("b")).unwrap();
-        assert!(matches!(
-            pipes.active[0].tx.try_send(Message::single("c")),
-            Err(crate::engine::SendPipeError::Full(_))
-        ));
-        pipes.deactivate(0);
-        assert_eq!(pipes.inactive.len(), 1);
-
-        let mut batch = Vec::new();
-        assert_eq!(rx0.drain_into(&mut batch, 1, usize::MAX), 1);
-        pipes.try_reactivate_one();
-
-        assert_eq!(pipes.inactive.len(), 0);
-        assert!(pipes.active.iter().any(|pipe| pipe.peer_id == 0));
-    }
-
-    #[test]
-    fn inactive_pipe_rechecks_occupancy_when_lwm_flag_is_stale() {
-        let (mut tx, mut rx) = send_pipe(2);
-        tx.try_send(Message::single("a")).unwrap();
-        tx.try_send(Message::single("b")).unwrap();
-
-        let mut batch = Vec::new();
-        assert_eq!(rx.drain_into(&mut batch, 2, usize::MAX), 2);
-
-        // Models producer observing Full and setting above_lwm after the
-        // consumer already drained below LWM, so no space wake fires.
-        tx.above_lwm
-            .store(true, std::sync::atomic::Ordering::Release);
-
-        let mut pipes = ActivePipes::default();
-        pipes.inactive.push(ActivePipe { peer_id: 0, tx });
-        pipes.try_reactivate_when_empty();
-
-        assert_eq!(pipes.inactive.len(), 0);
-        assert_eq!(pipes.active.len(), 1);
-        assert_eq!(pipes.active[0].peer_id, 0);
-    }
-
-    #[test]
-    fn no_pipe_try_send_is_full() {
-        let send = RoundRobinSend::new(&Options::default().send_hwm(1));
-        let submitter = send.submitter();
-
-        let err = submitter.try_send(Message::single("mute")).unwrap_err();
-        match err {
-            omq_proto::error::TrySendError::Full(msg) => {
-                assert_eq!(msg.part_bytes(0).unwrap(), &b"mute"[..]);
-            }
-            other => panic!("expected Full, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn connect_pipe_buffers_before_peer_ready() {
-        let mut send = RoundRobinSend::new(&Options::default().send_hwm(1));
-        let submitter = send.submitter();
-        let mut rx = connect_pipe(&mut send, 7);
-
-        submitter.try_send(Message::single("pre")).unwrap();
-        let err = submitter.try_send(Message::single("full")).unwrap_err();
-        assert!(matches!(err, omq_proto::error::TrySendError::Full(_)));
-
-        let mut batch = Vec::new();
-        assert_eq!(rx.drain_into(&mut batch, 1, usize::MAX), 1);
-        assert_eq!(batch[0].part_bytes(0).unwrap(), &b"pre"[..]);
-    }
-
-    #[test]
-    fn connection_added_reuses_connect_pipe() {
-        let mut send = RoundRobinSend::new(&Options::default().send_hwm(2));
-        let submitter = send.submitter();
-        let mut rx = connect_pipe(&mut send, 7);
-
-        submitter.try_send(Message::single("pre")).unwrap();
-
-        let (send_pipe, mut send_pipe_rx) = send_pipe(1);
-        let (inbox, _inbox_rx) = tokio::sync::mpsc::channel(1);
-        let (data_inbox, _data_inbox_rx) = tokio::sync::mpsc::channel(1);
-        let handle = ActorPeerDriverHandle {
-            inbox: inbox.into(),
-            data_inbox: data_inbox.into(),
-            cancel: CancellationToken::new(),
-            routes: crate::engine::driver::DirectRoutes {
-                send_pipe: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(send_pipe)))),
-                ..Default::default()
-            },
-        };
-        send.connection_added(7, &handle, false);
-
-        submitter.try_send(Message::single("post")).unwrap();
-
-        let mut batch = Vec::new();
-        assert_eq!(rx.drain_into(&mut batch, 2, usize::MAX), 2);
-        assert_eq!(batch[0].part_bytes(0).unwrap(), &b"pre"[..]);
-        assert_eq!(batch[1].part_bytes(0).unwrap(), &b"post"[..]);
-        assert_eq!(send_pipe_rx.drain_into(&mut batch, 1, usize::MAX), 0);
-    }
-}
+mod tests;

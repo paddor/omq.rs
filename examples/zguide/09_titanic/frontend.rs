@@ -47,6 +47,7 @@ async fn main() {
         let Ok(Ok(msg)) = tokio::time::timeout(Duration::from_secs(3), rep.recv()).await else {
             break;
         };
+
         let body = msg_str(&msg, 0);
         let parts: Vec<&str> = body.splitn(3, '|').collect();
 

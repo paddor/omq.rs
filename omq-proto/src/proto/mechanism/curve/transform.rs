@@ -68,6 +68,7 @@ impl CurveTransform {
         out.put_bytes(0, 16); // placeholder for tag
         out.put_u8(u8::from(flags.more) | (u8::from(flags.command) << 1));
         out.extend_from_slice(plaintext);
+
         let nonce = nonce_short(&self.out_prefix, counter);
         let tag = self
             .salsa
@@ -85,6 +86,7 @@ impl CurveTransform {
         let counter = self.next_out_counter()?;
         let mut out = BytesMut::with_capacity(Self::message_frame_len(plaintext.len()));
         self.seal_message_into(counter, flags, plaintext, &mut out);
+
         Ok(out.freeze())
     }
 
@@ -100,17 +102,20 @@ impl CurveTransform {
         if body.len() < 8 + 16 + 1 {
             return Err(Error::Protocol("MESSAGE command too short".into()));
         }
+
         let counter = u64::from_be_bytes(body[..8].try_into().unwrap());
         if counter <= self.in_counter {
             return Err(Error::Protocol(
                 "CURVE MESSAGE nonce counter not monotonically increasing".into(),
             ));
         }
+
         // NaCl wire layout: nonce(8) || tag(16) || ciphertext.
         let nonce = nonce_short(&self.in_prefix, counter);
         let tag: [u8; 16] = body[8..8 + 16].try_into().unwrap();
         let ct = &body[8 + 16..];
         let decrypt_failed = |_| Error::Protocol("CURVE decrypt failed".into());
+
         let (flags, plaintext) = if ct.len() <= INLINE_BOX {
             let mut stack = [0u8; INLINE_BOX];
             let buf = &mut stack[..ct.len()];
@@ -118,6 +123,7 @@ impl CurveTransform {
             self.salsa
                 .decrypt_detached(&nonce, buf, &tag)
                 .map_err(decrypt_failed)?;
+
             (buf[0], Payload::from_slice(&buf[1..]))
         } else {
             let mut buf = BytesMut::from(ct);
@@ -126,8 +132,10 @@ impl CurveTransform {
                 .map_err(decrypt_failed)?;
             let flags = buf[0];
             buf.advance(1);
+
             (flags, Payload::from_bytes(buf.freeze()))
         };
+
         self.in_counter = counter;
         Ok((flags & 0x01 != 0, flags & 0x02 != 0, plaintext))
     }
@@ -145,6 +153,7 @@ pub(super) fn build_transform(
     } else {
         (*NONCE_MESSAGE_C, *NONCE_MESSAGE_S)
     };
+
     Ok(CurveTransform {
         salsa,
         out_counter,

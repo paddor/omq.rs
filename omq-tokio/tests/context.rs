@@ -65,6 +65,7 @@ async fn check_async_bulk_first_wait(
     let ctx = Context::current();
     let pull = ctx.socket(receiver, options.clone());
     let push = ctx.socket(sender, options);
+
     let ep = if tcp {
         tcp_loopback(0)
     } else {
@@ -88,6 +89,7 @@ async fn check_async_bulk_first_wait(
         let mut task = std::task::Context::from_waker(std::task::Waker::noop());
         assert!(std::future::Future::poll(waiting.as_mut(), &mut task).is_pending());
     }
+
     assert_eq!(out.len(), 1);
 
     // One queued message completes a bulk receive of up to 256.
@@ -123,6 +125,7 @@ async fn async_bulk_req_rep_preserves_alternation() {
     let rep = ctx.socket(SocketType::Rep, Options::default());
     let ep = rep.bind(inproc_ep("bulk-req-rep")).await.unwrap();
     req.connect(ep).await.unwrap();
+
     tokio::time::timeout(Duration::from_secs(2), async {
         for _ in 0..2 {
             req.send(Message::from_slice(b"question")).await.unwrap();
@@ -148,14 +151,17 @@ async fn pull_recv_batching_is_opt_in_and_leaves_recv_order_unchanged() {
         let pull = ctx.socket(SocketType::Pull, Options::default().recv_batching(enabled));
         let ep = pull.bind(inproc_ep("recv-batching")).await.unwrap();
         let mut pushes = Vec::new();
+
         for _ in 0..4 {
             let push = ctx.socket(SocketType::Push, Options::default());
             push.connect(ep.clone()).await.unwrap();
             pushes.push(push);
         }
+
         pull.wait_connected(4, Duration::from_secs(2))
             .await
             .unwrap();
+
         for (peer, push) in pushes.iter().enumerate() {
             for seq in 0..32 {
                 push.send(Message::from_slice(&[peer as u8, seq]))
@@ -163,6 +169,7 @@ async fn pull_recv_batching_is_opt_in_and_leaves_recv_order_unchanged() {
                     .unwrap();
             }
         }
+
         let mut order = Vec::new();
         for _ in 0..4 {
             let message = pull.recv().await.unwrap();
@@ -171,8 +178,10 @@ async fn pull_recv_batching_is_opt_in_and_leaves_recv_order_unchanged() {
             assert!(!order.contains(&payload[0]));
             order.push(payload[0]);
         }
+
         let mut out = Vec::new();
         assert_eq!(pull.try_recv_many_into(8, &mut out).unwrap(), 8);
+
         for (index, message) in out.iter().enumerate() {
             let payload = message.part_slice(0).unwrap();
             assert_eq!(payload[0], order[if enabled { 0 } else { index % 4 }]);
@@ -209,6 +218,7 @@ async fn check_batching_fifo(receiver: SocketType, sender: SocketType, tcp: bool
     let ctx = Context::current();
     let pull = ctx.socket(receiver, Options::default().recv_batching(true));
     let subscription = sender == SocketType::XPub;
+
     if subscription {
         pull.subscribe("A").await.unwrap();
     }
@@ -274,6 +284,7 @@ async fn connect_batching_senders(
             // installed before the first round is published.
             assert_eq!(push.recv().await.unwrap().part_slice(0).unwrap(), b"\x01A");
         }
+
         senders.push(push);
     }
 
@@ -288,6 +299,7 @@ async fn send_batching_round(senders: &[Socket], round: u8, subscription: bool) 
             if subscription {
                 push.send(Message::from_slice(b"filtered")).await.unwrap();
             }
+
             push.send(Message::from_slice(&[b'A', peer as u8, seq]))
                 .await
                 .unwrap();
@@ -333,10 +345,12 @@ fn context_from_env() {
     unsafe {
         std::env::set_var("OMQ_IO_THREADS", "3");
     }
+
     let cfg = ContextConfig::from_env();
     unsafe {
         std::env::remove_var("OMQ_IO_THREADS");
     }
+
     assert_eq!(cfg.io_threads, 3);
 }
 
@@ -402,6 +416,7 @@ fn pub_sub_via_context() {
         // Retry loop: subscription propagation is asynchronous.
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         let mut received = false;
+
         while !received && std::time::Instant::now() < deadline {
             let _ = pub_.send(Message::single("msg")).await;
             if let Ok(Ok(m)) = tokio::time::timeout(Duration::from_millis(20), sub.recv()).await {
@@ -409,6 +424,7 @@ fn pub_sub_via_context() {
                 received = true;
             }
         }
+
         assert!(received, "SUB never received a message from PUB");
     });
 }
@@ -500,15 +516,18 @@ fn contexts_have_isolated_inproc_namespaces() {
         let endpoint = endpoint.clone();
         let pull = pull1.clone();
         let push = push1.clone();
+
         async move {
             pull.bind(endpoint.clone()).await.unwrap();
             push.connect(endpoint).await.unwrap();
         }
     });
+
     ctx2.block_on({
         let endpoint = endpoint.clone();
         let pull = pull2.clone();
         let push = push2.clone();
+
         async move {
             pull.bind(endpoint.clone()).await.unwrap();
             push.connect(endpoint).await.unwrap();
@@ -523,6 +542,7 @@ fn contexts_have_isolated_inproc_namespaces() {
             .unwrap();
         assert_eq!(msg, Message::single("ctx1"));
     });
+
     ctx2.block_on(async move {
         push2.send(Message::single("ctx2")).await.unwrap();
         let msg = tokio::time::timeout(Duration::from_secs(2), pull2.recv())
@@ -560,6 +580,7 @@ fn context_share_key_does_not_keep_core_alive() {
         let ctx = Context::new();
         ctx.share_key()
     };
+
     assert!(Context::from_share_key(key).is_none());
 }
 
@@ -620,6 +641,7 @@ fn context_drop_cleanup() {
     {
         let ctx = Context::new();
         let push = ctx.socket(SocketType::Push, Options::default());
+
         ctx.block_on(async move {
             let ep = inproc_ep("drop-cleanup");
             push.bind(ep).await.unwrap();
@@ -634,6 +656,7 @@ fn context_term_cancels_inflight_block_on() {
     let ctx = Context::new();
     let worker_ctx = ctx.clone();
     let (started_tx, started_rx) = std::sync::mpsc::channel();
+
     let worker = std::thread::spawn(move || {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             worker_ctx.block_on(async move {
@@ -642,6 +665,7 @@ fn context_term_cancels_inflight_block_on() {
             });
         }))
     });
+
     started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
 
     let started = std::time::Instant::now();
@@ -746,6 +770,7 @@ fn cross_context_communication() {
                 Endpoint::Tcp { port, .. } => port,
                 other => panic!("expected TCP endpoint, got {other:?}"),
             };
+
             let _ = port_tx.send(port);
             tokio::time::timeout(Duration::from_secs(5), pull.recv())
                 .await
@@ -780,6 +805,7 @@ fn multi_io_thread_push_pull_tcp() {
         for i in 0..20 {
             push.send(Message::single(format!("mt-{i}"))).await.unwrap();
         }
+
         for i in 0..20 {
             let m = tokio::time::timeout(Duration::from_secs(3), pull.recv())
                 .await
@@ -819,6 +845,7 @@ fn multi_io_thread_push_pull_many_peers() {
                 .unwrap();
             received.push(m.try_as_parts::<1>().unwrap()[0].clone());
         }
+
         received.sort();
         for (i, payload) in received.iter().enumerate() {
             assert_eq!(payload.as_ref(), format!("peer-{i}").as_bytes());
@@ -964,6 +991,7 @@ fn blocking_send_cancelable_parks_until_canceled() {
             cancel.cancel();
         })
     };
+
     assert!(
         !push
             .send_cancelable(Message::single("lost"), &cancel)
@@ -989,6 +1017,7 @@ fn blocking_recv_waker_wakes_on_message() {
         fn wake(self: Arc<Self>) {
             self.wake_by_ref();
         }
+
         fn wake_by_ref(self: &Arc<Self>) {
             self.0.store(true, std::sync::atomic::Ordering::Release);
             self.1.unpark();
@@ -1016,6 +1045,7 @@ fn blocking_recv_waker_wakes_on_message() {
         assert!(now < deadline, "receive waker was not woken");
         std::thread::park_timeout(deadline - now);
     }
+
     drop(registration);
     assert_eq!(pull.try_recv().unwrap(), Message::single("wake"));
 }
@@ -1118,6 +1148,7 @@ fn async_socket_try_recv_many_into_appends_to_existing_vec() {
         out.push(Message::single("seed"));
         let capacity = out.capacity();
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
+
         while out.len() < 4 && std::time::Instant::now() < deadline {
             match pull.try_recv_many_into(4, &mut out) {
                 Ok(_) => {}
@@ -1151,6 +1182,7 @@ fn blocking_socket_push_pull_tcp() {
     for i in 0..10 {
         push.send(Message::single(format!("tcp-{i}"))).unwrap();
     }
+
     for i in 0..10 {
         let m = pull.recv().unwrap();
         assert_eq!(m, Message::single(format!("tcp-{i}")));
@@ -1193,10 +1225,12 @@ fn blocking_socket_pub_sub() {
     while std::time::Instant::now() < deadline {
         let _ = pub_.send(Message::single("msg"));
         std::thread::sleep(Duration::from_millis(5));
+
         if recv_thread.is_finished() {
             break;
         }
     }
+
     let m = recv_thread.join().unwrap();
     assert_eq!(m, Message::single("msg"));
 }
@@ -1321,6 +1355,7 @@ fn blocking_socket_multi_io_threads() {
     for i in 0..10 {
         push.send(Message::single(format!("mt-bl-{i}"))).unwrap();
     }
+
     for i in 0..10 {
         let m = pull.recv().unwrap();
         assert_eq!(m, Message::single(format!("mt-bl-{i}")));
@@ -1336,6 +1371,7 @@ fn block_on_callers_do_not_wait_for_each_other() {
             ctx.block_on(async { tokio::time::sleep(Duration::from_secs(3)).await });
         })
     };
+
     std::thread::sleep(Duration::from_millis(50));
     let started = std::time::Instant::now();
     assert_eq!(ctx.block_on(async { 7 }), 7);

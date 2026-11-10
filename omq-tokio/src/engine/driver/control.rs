@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 
 pub(super) const COMMAND_DRAIN_BUDGET: DrainBudget = DrainBudget::new(64, 64 * 1024);
 const PEER_CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[cfg(feature = "ws")]
 const WS_NORMAL_CLOSURE: u16 = 1000;
 
@@ -41,6 +42,7 @@ impl ControlState {
         if inbox.is_empty() {
             return Ok(DriverStep::Continue);
         }
+
         let mut budget = COMMAND_DRAIN_BUDGET;
         let step = loop {
             match inbox.try_recv() {
@@ -51,6 +53,7 @@ impl ControlState {
                     {
                         return Ok(DriverStep::Close);
                     }
+
                     if !budget.account(connection.pending_transmit_size().saturating_sub(before)) {
                         break DriverStep::Yield;
                     }
@@ -59,6 +62,7 @@ impl ControlState {
                 Err(mpsc::error::TryRecvError::Disconnected) => return Ok(DriverStep::Close),
             }
         };
+
         inbox.release_consumed();
         Ok(step)
     }
@@ -81,6 +85,7 @@ impl ControlState {
                 if self.data_plane_open(input_failed) {
                     connection.send_command(&c)?;
                 }
+
                 Ok(DriverStep::Continue)
             }
             Some(PeerDriverCommand::DrainAndClose { deadline }) => {
@@ -100,6 +105,7 @@ impl ControlState {
                         });
                     }
                 }
+
                 Ok(DriverStep::Continue)
             }
             Some(PeerDriverCommand::Close) | None => Ok(DriverStep::Close),
@@ -120,6 +126,7 @@ impl ControlState {
                 discard_receive: false,
             });
         }
+
         if let Some(close) = self.close {
             self.discard_receive |= close.discard_receive;
             if let Some(data) = data_inbox {
@@ -149,18 +156,22 @@ impl ControlState {
         if !drained {
             return false;
         }
+
         let Some(close) = self.close.as_mut() else {
             return false;
         };
+
         #[cfg(feature = "ws")]
         if connection.is_ws() {
             if close.ws_close_started {
                 return connection.is_closed();
             }
+
             connection.send_ws_close(WS_NORMAL_CLOSURE);
             close.ws_close_started = true;
             return false;
         }
+
         #[cfg(not(feature = "ws"))]
         let _ = (connection, close);
         true
@@ -190,6 +201,7 @@ pub(super) fn handle_pre_activation_inbox_command(
             if !input_failed {
                 connection.send_command(&c)?;
             }
+
             Ok(PreActivationStep::Continue)
         }
         Some(PeerDriverCommand::Close | PeerDriverCommand::DrainAndClose { .. }) | None => {
@@ -288,6 +300,7 @@ impl Heartbeat {
         if recv_blocked || self.was_recv_blocked {
             self.last_input = Instant::now();
         }
+
         self.was_recv_blocked = recv_blocked;
         connection
             .peer_heartbeat_ttl()
@@ -301,12 +314,14 @@ impl Heartbeat {
         } else {
             self.stuck_ticks.saturating_add(1)
         };
+
         if !recv_blocked
             && (self.probe.timed_out(self.last_input, self.timeout)
                 || self.stuck_past_ttl(connection))
         {
             return Err(Error::Timeout);
         }
+
         if self.probe.can_queue() {
             connection.send_command(&Command::Ping {
                 ttl_deciseconds: self.ttl_deciseconds,
@@ -314,6 +329,7 @@ impl Heartbeat {
             })?;
             self.probe.queued_through = Some(connection.pending_transmit_size());
         }
+
         self.deadline = self.interval.and_then(|d| Instant::now().checked_add(d));
         Ok(())
     }
@@ -326,6 +342,7 @@ impl Heartbeat {
         let (Some(interval), Some(ttl)) = (self.interval, connection.peer_announced_ttl()) else {
             return false;
         };
+
         interval.saturating_mul(u32::from(self.stuck_ticks)) >= ttl
             && self.last_input.elapsed() >= ttl
     }
@@ -343,6 +360,7 @@ impl HeartbeatProbe {
         let Some(remaining) = self.queued_through else {
             return;
         };
+
         if written < remaining {
             self.queued_through = Some(remaining - written);
         } else {

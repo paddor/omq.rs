@@ -16,6 +16,7 @@ pub(super) fn run_pub(ctx: &omq_tokio::Context, ep: Endpoint, size: usize, peers
     let pub_ = ctx.blocking_socket(SocketType::Pub, opts);
     let bound = pub_.bind(ep).expect("pub bind");
     report_bound_port(ctx, &bound);
+
     if peers > 0 {
         let timeout = if peers > 64 { 20 } else { 10 };
         pub_.wait_connected(peers, Duration::from_secs(timeout))
@@ -26,16 +27,19 @@ pub(super) fn run_pub(ctx: &omq_tokio::Context, ep: Endpoint, size: usize, peers
     let payload = bench_payload(size);
     wait_for_warmup_barrier();
     let warmup_deadline = Instant::now() + warmup_duration();
+
     while Instant::now() < warmup_deadline {
         send_fast(&pub_, Message::from_slice(&payload));
         std::thread::sleep(Duration::from_millis(1));
     }
+
     wait_for_start_barrier();
     if payload.len() <= omq_tokio::message::MAX_INLINE_MESSAGE {
         loop {
             send_fast(&pub_, Message::from_slice(&payload));
         }
     }
+
     let msg = Message::single(payload.clone());
     loop {
         send_fast(&pub_, msg.clone());
@@ -90,6 +94,7 @@ fn drain_subscriber_workers(
     if workers == 1 {
         return drain_subscribers(sockets, size, deadline);
     }
+
     std::thread::scope(|scope| {
         let handles: Vec<_> = (0..workers)
             .map(|worker| {
@@ -101,6 +106,7 @@ fn drain_subscriber_workers(
                     .expect("spawn subscriber worker")
             })
             .collect();
+
         handles
             .into_iter()
             .flat_map(|handle| handle.join().expect("subscriber worker"))
@@ -125,6 +131,7 @@ fn drain_subscribers(sockets: &[blocking::Socket], size: usize, deadline: Instan
     let drain_batch = multi_pull_drain_batch(size);
     let mut counts = vec![0; sockets.len()];
     let waker = std::task::Waker::from(Arc::new(SubscriberWake(std::thread::current())));
+
     while Instant::now() < deadline {
         let mut received = false;
         for (socket, count) in sockets.iter().zip(&mut counts) {
@@ -139,6 +146,7 @@ fn drain_subscribers(sockets: &[blocking::Socket], size: usize, deadline: Instan
                 }
             }
         }
+
         if received {
             continue;
         }
@@ -149,6 +157,7 @@ fn drain_subscribers(sockets: &[blocking::Socket], size: usize, deadline: Instan
             .iter()
             .map(|socket| socket.register_recv_waker(waker.clone()))
             .collect();
+
         for (socket, count) in sockets.iter().zip(&mut counts) {
             match socket.try_recv() {
                 Ok(_) => {
@@ -159,10 +168,13 @@ fn drain_subscribers(sockets: &[blocking::Socket], size: usize, deadline: Instan
                 Err(error) => panic!("pub/sub receive failed: {error}"),
             }
         }
+
         if !received {
             std::thread::park_timeout(deadline.saturating_duration_since(Instant::now()));
         }
+
         drop(registrations);
     }
+
     counts
 }

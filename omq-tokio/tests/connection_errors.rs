@@ -26,6 +26,7 @@ async fn server_survives_pre_handshake_drop() {
 
     let pull = Socket::new(SocketType::Pull, Options::default());
     let ep = pull.bind(tcp_ep(0)).await.unwrap();
+
     let port = match &ep {
         Endpoint::Tcp { port, .. } => *port,
         _ => unreachable!(),
@@ -66,10 +67,12 @@ async fn pending_handshake_does_not_block_pair_slot() {
     );
     let mut mon = server.monitor();
     let ep = server.bind(tcp_ep(0)).await.unwrap();
+
     let port = match &ep {
         Endpoint::Tcp { port, .. } => *port,
         _ => unreachable!(),
     };
+
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
 
     let _idle = TcpStream::connect(addr).await.unwrap();
@@ -105,6 +108,7 @@ async fn pending_handshake_does_not_block_pair_slot() {
     })
     .await
     .is_ok();
+
     assert!(handshook, "pending peer blocked legitimate PAIR handshake");
 
     client.send(Message::single("alive")).await.unwrap();
@@ -127,12 +131,15 @@ async fn max_pending_handshakes_rejects_excess_idle_connections() {
             ..Options::default()
         },
     );
+
     let mut mon = server.monitor();
     let ep = server.bind(tcp_ep(0)).await.unwrap();
+
     let port = match &ep {
         Endpoint::Tcp { port, .. } => *port,
         _ => unreachable!(),
     };
+
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
 
     let idle = TcpStream::connect(addr).await.unwrap();
@@ -193,12 +200,15 @@ async fn pending_handshake_timeout_emits_failure_and_releases_slot() {
             ..Options::default()
         },
     );
+
     let mut mon = server.monitor();
     let ep = server.bind(tcp_ep(0)).await.unwrap();
+
     let port = match &ep {
         Endpoint::Tcp { port, .. } => *port,
         _ => unreachable!(),
     };
+
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
 
     let _idle = TcpStream::connect(addr).await.unwrap();
@@ -252,6 +262,7 @@ async fn server_survives_mid_session_abrupt_drop() {
         assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"first");
         // push1 drops here — abrupt half-close.
     }
+
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Second client: server must still be healthy.
@@ -301,10 +312,12 @@ async fn reconnect_after_ipc_peer_restarts() {
 
     let pull2 = Socket::new(SocketType::Pull, Options::default());
     let deadline = Instant::now() + Duration::from_secs(2);
+
     loop {
         if pull2.bind(ep.clone()).await.is_ok() {
             break;
         }
+
         assert!(Instant::now() <= deadline, "could not rebind IPC endpoint");
         tokio::time::sleep(Duration::from_millis(25)).await;
     }

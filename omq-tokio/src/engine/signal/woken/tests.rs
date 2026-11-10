@@ -36,6 +36,7 @@ impl Future for Probe {
         if self.ready {
             return Poll::Ready(());
         }
+
         self.waker = Some(cx.waker().clone());
         Poll::Pending
     }
@@ -80,10 +81,12 @@ fn gated_cancellation_completes_after_cancel() {
         let (count, waker) = counter();
         let mut cx = Context::from_waker(&waker);
         let mut gate = WokenGate::new(Box::pin(token.clone().cancelled_owned()));
+
         if !cancel_first {
             assert!(Pin::new(&mut gate).poll(&mut cx).is_pending());
             assert!(Pin::new(&mut gate).poll(&mut cx).is_pending());
         }
+
         token.cancel();
         assert_eq!(count.0.load(Ordering::Relaxed), usize::from(!cancel_first));
         assert!(Pin::new(&mut gate).poll(&mut cx).is_ready());
@@ -112,6 +115,7 @@ impl Queue {
             self.waker = Some(cx.waker().clone());
             return Poll::Pending;
         }
+
         Poll::Ready(self.items.remove(0))
     }
 }
@@ -122,13 +126,16 @@ fn gate_stays_open_after_ready_until_sources_park() {
     let mut cx = Context::from_waker(&waker);
     let mut gate = super::WakeGate::new();
     let mut queue = Queue::default();
+
     assert!(gate.poll(&mut cx, |cx| queue.poll_pop(cx)).is_pending());
     queue.push(1);
     queue.push(2);
     assert_eq!(count.0.load(Ordering::Relaxed), 1);
+
     assert_eq!(gate.poll(&mut cx, |cx| queue.poll_pop(cx)), Poll::Ready(1));
     assert_eq!(gate.poll(&mut cx, |cx| queue.poll_pop(cx)), Poll::Ready(2));
     assert!(gate.poll(&mut cx, |cx| queue.poll_pop(cx)).is_pending());
+
     let polls = queue.polls;
     assert!(gate.poll(&mut cx, |cx| queue.poll_pop(cx)).is_pending());
     assert_eq!(queue.polls, polls);

@@ -21,6 +21,7 @@ fn pair_ctx(
 ) {
     let blocking = crate::socket::recv::BlockingRecvWaker::new();
     let (recv, consumer, _, _) = crate::socket::recv::recv_pipe(16, blocking.clone());
+
     let ctx = InprocDriverCtx {
         peer_out,
         subscriptions: SubscriptionGate::default(),
@@ -42,6 +43,7 @@ fn pair_ctx(
             blocking_recv_waker: blocking,
         },
     };
+
     (ctx, recv, consumer)
 }
 
@@ -59,6 +61,7 @@ fn spawn_relay(
         data_inbox,
         inbox,
     };
+
     tokio::spawn(inproc_peer_driver(channels, ctx))
 }
 
@@ -87,9 +90,11 @@ async fn inproc_completion_joins_with_its_handshake_mailbox_full() {
 
     let mut task = spawn_relay(inbox, data_inbox, in_rx, out, ctx);
     let result = tokio::time::timeout(Duration::from_millis(100), &mut task).await;
+
     if result.is_err() {
         task.abort();
     }
+
     result
         .expect("inproc closure waited for data-mailbox credit")
         .unwrap();
@@ -113,6 +118,7 @@ async fn inproc_completion_counts_only_admitted_commands_and_messages() {
         let (incoming, in_rx) = crate::transport::inproc::relay_channel(2);
         let (out, _outgoing) = crate::transport::inproc::relay_channel(1);
         let (peer_out, mut events) = mpsc::channel(2);
+
         let (completion, finished) = crate::engine::peer_completion::CompletionProgress::reserve(7);
         let cancel = CancellationToken::new();
         let (ctx, _recv, _consumer) = pair_ctx(
@@ -121,6 +127,7 @@ async fn inproc_completion_counts_only_admitted_commands_and_messages() {
             completion,
             cancel.clone(),
         );
+
         let mut task = spawn_relay(inbox, data_inbox, in_rx, out, ctx);
         assert!(matches!(
             events.recv().await.unwrap().1,
@@ -135,6 +142,7 @@ async fn inproc_completion_counts_only_admitted_commands_and_messages() {
         incoming
             .try_send(InboundFrame::Message(Message::single("last")))
             .unwrap();
+
         tokio::time::timeout(Duration::from_millis(500), async {
             while events.len() != 2 {
                 tokio::task::yield_now().await;
@@ -142,6 +150,7 @@ async fn inproc_completion_counts_only_admitted_commands_and_messages() {
         })
         .await
         .unwrap();
+
         match mode {
             "cancel" => cancel.cancel(),
             "abort" => task.abort(),
@@ -151,11 +160,13 @@ async fn inproc_completion_counts_only_admitted_commands_and_messages() {
         let result = tokio::time::timeout(Duration::from_millis(500), &mut task)
             .await
             .expect("inproc completion waited for its admitted prefix to drain");
+
         if mode == "abort" {
             assert!(result.unwrap_err().is_cancelled());
         } else {
             result.unwrap();
         }
+
         let completion = finished.await.unwrap();
         assert_eq!(completion.admitted_events, 3);
         assert_eq!(
@@ -179,11 +190,13 @@ async fn inproc_control_progresses_while_actor_data_is_full() {
         let (incoming, in_rx) = crate::transport::inproc::relay_channel(2);
         let (out, _outgoing) = crate::transport::inproc::relay_channel(1);
         let (control, mut events) = mpsc::channel(4);
+
         let (sender, _actor_data) = fanring::mpsc::channel_with_policy(1);
         let mut peer_out = crate::engine::actor_output::PeerOutput::actor(sender);
         peer_out
             .try_send(7, Message::single("occupied"), false)
             .unwrap();
+
         let (completion, finished) = crate::engine::peer_completion::CompletionProgress::reserve(7);
         let cancel = CancellationToken::new();
         let (mut ctx, recv, _consumer) = pair_ctx(control, peer_out, completion, cancel.clone());
@@ -192,6 +205,7 @@ async fn inproc_control_progresses_while_actor_data_is_full() {
         for _ in 0..16 {
             recv.try_send(Message::single("occupied")).unwrap();
         }
+
         ctx.receive.inbound = (mode == "port").then(crate::transport::inproc::InprocPort::new);
         if let Some(port) = &ctx.receive.inbound {
             port.open(crate::transport::inproc::OpenPort {
@@ -201,6 +215,7 @@ async fn inproc_control_progresses_while_actor_data_is_full() {
                 cancel,
             });
         }
+
         ctx.receive.recv_sink =
             (mode == "sink").then(|| crate::engine::RecvSink::Channel(recv.clone()));
         let task = spawn_relay(inbox, data_inbox, in_rx, out, ctx);

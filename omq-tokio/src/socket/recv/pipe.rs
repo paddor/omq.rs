@@ -43,9 +43,11 @@ impl ConflateRecvSlot {
         if self.closed.load(Ordering::Acquire) {
             return false;
         }
+
         *self.slot.lock().unwrap() = Some(msg);
         self.notify.mark();
         self.blocking_waker.wake();
+
         true
     }
 
@@ -100,11 +102,13 @@ impl SharedRecvPipe {
         if self.is_closed() || producer.is_consumer_dropped() {
             return Err(TrySendError::Closed);
         }
+
         producer.push(msg).map_err(TrySendError::Full)?;
         producer.flush();
         drop(producer);
         self.notify.mark();
         self.blocking_waker.wake();
+
         Ok(())
     }
 
@@ -142,12 +146,14 @@ impl SharedRecvPipe {
                 if self.closed.load(Ordering::Acquire) || prod.is_consumer_dropped() {
                     return Err(Error::Closed);
                 }
+
                 match prod.push(item) {
                     Ok(()) => {
                         prod.flush();
                         drop(prod);
                         self.notify.mark();
                         self.blocking_waker.wake();
+
                         return Ok(());
                     }
                     Err(returned) => {
@@ -155,6 +161,7 @@ impl SharedRecvPipe {
                     }
                 }
             }
+
             space_changed.await;
         }
     }
@@ -166,6 +173,7 @@ impl SharedRecvPipe {
         if let Ok(mut prod) = self.producer.lock() {
             prod.close();
         }
+
         self.notify.wake_all();
         self.space.notify_changed();
         self.blocking_waker.wake();
@@ -177,6 +185,7 @@ impl Drop for SharedRecvPipe {
         if !*self.closed.get_mut() {
             self.producer.get_mut().unwrap().close();
         }
+
         self.notify.wake_all();
         self.space.notify_changed();
         self.blocking_waker.wake();
@@ -215,5 +224,6 @@ pub(crate) fn recv_pipe(
         closed: AtomicBool::new(false),
         blocking_waker,
     });
+
     (pipe, cons, notify, space)
 }

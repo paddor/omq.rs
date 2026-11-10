@@ -37,6 +37,7 @@ async fn bind_connect_accept_exchange() {
     )
     .unwrap();
     let connector_registry = registry.clone();
+
     let connector = tokio::spawn(async move {
         connect(
             &connector_registry,
@@ -46,6 +47,7 @@ async fn bind_connect_accept_exchange() {
         )
         .await
     });
+
     let server_side = l.accept().await.unwrap();
     let client_side = connector.await.unwrap().unwrap();
 
@@ -64,6 +66,7 @@ async fn bind_connect_accept_exchange() {
     .await
     .unwrap()
     .unwrap();
+
     match f {
         InboundFrame::Message(m) => {
             assert_eq!(m.part_bytes(0).unwrap(), &b"hi"[..]);
@@ -114,5 +117,6 @@ async fn listener_drop_releases_name() {
         )
         .unwrap();
     }
+
     let _l2 = bind(registry, "test-drop", snap(SocketType::Pair), config()).unwrap();
 }

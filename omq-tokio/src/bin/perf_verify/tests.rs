@@ -34,6 +34,7 @@ fn transport_cases_cover_key_sizes_without_duplicate_names() {
     let cases = cases();
     let names: std::collections::HashSet<_> = cases.iter().map(|case| &case.name).collect();
     assert_eq!(names.len(), cases.len());
+
     for prefix in [
         "",
         #[cfg(feature = "quic")]
@@ -47,6 +48,7 @@ fn transport_cases_cover_key_sizes_without_duplicate_names() {
             }
         }
     }
+
     #[cfg(feature = "dart")]
     for io in [1, 2] {
         for size in ["16b", "256b", "1k"] {

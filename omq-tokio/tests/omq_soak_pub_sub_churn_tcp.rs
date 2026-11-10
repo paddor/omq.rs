@@ -7,9 +7,6 @@
 //! join and leave with different prefix subscriptions while PUB sends
 //! continuously.
 
-#[global_allocator]
-static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
-
 mod soak_common;
 
 use std::time::{Duration, Instant};
@@ -21,6 +18,9 @@ use rand::rngs::StdRng;
 use omq_tokio::{
     Endpoint, Message, MonitorEvent, OnMute, Options, ReconnectPolicy, Socket, SocketType,
 };
+
+#[global_allocator]
+static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
 
 const TOPICS: &[&str] = &["fast.", "slow.", "all.", "rare."];
 
@@ -38,9 +38,11 @@ fn pub_options() -> Options {
 async fn wait_for_subscribes(mon: &mut omq_tokio::MonitorStream, n: usize) {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut subscribed = 0;
+
     while subscribed < n {
         let now = Instant::now();
         assert!(now < deadline, "timed out waiting for {n} subscriptions");
+
         match tokio::time::timeout(deadline - now, mon.recv()).await {
             Ok(Ok(MonitorEvent::SubscribeReceived { .. })) => subscribed += 1,
             Ok(Ok(_)) => {}
@@ -56,6 +58,7 @@ async fn publish_batch(publisher: &Socket, pub_count: &mut u64) {
     for _ in 0..1_000 {
         let topic = TOPICS[*pub_count as usize % TOPICS.len()];
         let msg = format!("{topic}{pub_count}");
+
         if let Ok(Ok(())) = tokio::time::timeout(
             Duration::from_millis(1),
             publisher.send(Message::single(msg)),
@@ -143,6 +146,7 @@ fn soak_pub_sub_churn_tcp() {
         for sub in subs {
             sub.close().await.unwrap();
         }
+
         slow_sub.close().await.unwrap();
         publisher.close().await.unwrap();
 

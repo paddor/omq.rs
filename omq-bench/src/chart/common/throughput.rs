@@ -68,6 +68,7 @@ fn split_sizes(sizes: &[u64]) -> (Vec<u64>, Vec<u64>) {
         .copied()
         .filter(|&s| s >= LARGE_START)
         .collect();
+
     (small, large)
 }
 
@@ -130,6 +131,7 @@ pub(crate) fn draw_throughput_dual_panel(
             sizes: &large,
             present: &present,
         };
+
         match style.gbs_scale {
             GbsScale::Linear => {
                 let axis = nice_axis(peak_gbs(&large, tput), N_TICKS);
@@ -199,6 +201,7 @@ fn draw_msgs_panel(
                 .map(|&(x, y)| Circle::new((x, y), 2, imp.color.filled())),
         )?;
     }
+
     Ok(())
 }
 
@@ -240,6 +243,7 @@ fn draw_gbs_panel(
 
         draw_line_with_dots(&mut chart, &pts, imp.color)?;
     }
+
     Ok(())
 }
 
@@ -253,6 +257,7 @@ fn gbs_values(sizes: &[u64], tput: &ValMap) -> ValMap {
                 .iter()
                 .map(|(key, value)| (key.clone(), value / 1000.0))
                 .collect();
+
             Some((*size, values))
         })
         .collect()
@@ -264,6 +269,7 @@ fn log_gbs_range(gbs_tput: &ValMap, fairness: Option<&FairnessMap>) -> Option<(f
         .flat_map(|values| values.values().copied())
         .filter(|v| v.is_finite() && *v > 0.0)
         .collect();
+
     if let Some(fairness) = fairness {
         for (size, values) in gbs_tput {
             for (key, value) in values {
@@ -280,9 +286,11 @@ fn log_gbs_range(gbs_tput: &ValMap, fairness: Option<&FairnessMap>) -> Option<(f
             }
         }
     }
+
     if gbs_vals.is_empty() {
         return None;
     }
+
     let lo = gbs_vals
         .iter()
         .copied()
@@ -296,6 +304,7 @@ fn log_gbs_range(gbs_tput: &ValMap, fairness: Option<&FairnessMap>) -> Option<(f
         .log10()
         .ceil()
         .max(lo + 1.0);
+
     Some((lo, hi))
 }
 
@@ -308,6 +317,7 @@ fn draw_gbs_panel_log(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let sizes = panel.sizes;
     let gbs_tput = gbs_values(sizes, tput);
+
     let Some((lo, hi)) = log_gbs_range(&gbs_tput, fairness) else {
         return Ok(());
     };
@@ -338,12 +348,14 @@ fn draw_gbs_panel_log(
             let gbs = v / 1000.0;
             (gbs > 0.0).then(|| gbs.log10())
         });
+
         if pts.is_empty() {
             continue;
         }
 
         draw_line_with_dots(&mut chart, &pts, imp.color)?;
     }
+
     Ok(())
 }
 
@@ -364,6 +376,7 @@ pub(crate) fn draw_multirow_throughput(
                 .any(|row| has_point(row.tput, spec.sizes, imp.key))
         })
         .collect();
+
     let (small, large) = split_sizes(spec.sizes);
 
     let row_count = rows.len() as u32;
@@ -430,5 +443,6 @@ fn draw_throughput_row(
     if !large.sizes.is_empty() && gbs_axis.0 > 0.0 {
         draw_gbs_panel(right_area, large, row.tput, gbs_axis, row.fairness)?;
     }
+
     Ok(())
 }

@@ -47,8 +47,10 @@ pub struct MechanismName([u8; MECHANISM_BYTES]);
 impl MechanismName {
     /// NULL mechanism (no encryption, no authentication).
     pub const NULL: Self = Self::from_ascii_panic(b"NULL");
+
     /// CURVE mechanism (`CurveZMQ`, RFC 26).
     pub const CURVE: Self = Self::from_ascii_panic(b"CURVE");
+
     /// PLAIN mechanism (RFC 24, username + password, no encryption).
     pub const PLAIN: Self = Self::from_ascii_panic(b"PLAIN");
 
@@ -59,12 +61,14 @@ impl MechanismName {
         assert!(name.len() <= MECHANISM_BYTES, "mechanism name too long");
         let mut bytes = [0u8; MECHANISM_BYTES];
         let mut i = 0;
+
         while i < name.len() {
             let b = name[i];
             assert!(b != 0 && b < 0x80, "mechanism name must be non-null ASCII");
             bytes[i] = b;
             i += 1;
         }
+
         Self(bytes)
     }
 
@@ -85,6 +89,7 @@ impl MechanismName {
             .iter()
             .position(|&b| b == 0)
             .unwrap_or(MECHANISM_BYTES);
+
         &self.0[..n]
     }
 
@@ -154,6 +159,7 @@ pub fn peek_major(buf: &[u8]) -> Result<Option<u8>> {
     if buf.len() < VERSION_SNIFF_LEN {
         return Ok(None);
     }
+
     // Per RFC 23: only signature[0] = 0xff and signature[9] = 0x7f are
     // significant; bytes 1..9 are padding and "Not significant". libzmq
     // sets byte 8 = 0x01 for backward-compat detection - rejecting that
@@ -161,10 +167,12 @@ pub fn peek_major(buf: &[u8]) -> Result<Option<u8>> {
     if buf[0] != SIGNATURE[0] || buf[9] != SIGNATURE[9] {
         return Err(Error::Protocol("bad ZMTP greeting signature".into()));
     }
+
     let major = buf[10];
     if major < 3 {
         return Err(Error::UnsupportedZmtpVersion { major, minor: 0 });
     }
+
     Ok(Some(major))
 }
 
@@ -174,23 +182,29 @@ pub(crate) fn try_decode(buf: &mut ChunkedInputBuf) -> Result<Option<Greeting>> 
     let Some(sniff) = buf.peek_array::<VERSION_SNIFF_LEN>() else {
         return Ok(None);
     };
+
     if peek_major(&sniff)?.is_none() {
         return Ok(None);
     }
+
     if buf.len() < GREETING_LEN {
         return Ok(None);
     }
+
     let raw: [u8; GREETING_LEN] = buf.peek_array::<GREETING_LEN>().expect("len checked");
     buf.advance(GREETING_LEN);
     let major = raw[10];
     let minor = raw[11];
+
     if major < ZMTP_MAJOR {
         return Err(Error::UnsupportedZmtpVersion { major, minor });
     }
+
     let mut mech_raw = [0u8; MECHANISM_BYTES];
     mech_raw.copy_from_slice(&raw[12..12 + MECHANISM_BYTES]);
     // Reject names with stray non-zero bytes after a NUL -- RFC compliance.
     let mut saw_zero = false;
+
     for &b in &mech_raw {
         if b == 0 {
             saw_zero = true;
@@ -198,12 +212,14 @@ pub(crate) fn try_decode(buf: &mut ChunkedInputBuf) -> Result<Option<Greeting>> 
             return Err(Error::Protocol("mechanism name has bytes after NUL".into()));
         }
     }
+
     let mechanism = MechanismName::from_padded(&mech_raw);
     let as_server = match raw[32] {
         0 => false,
         1 => true,
         _ => return Err(Error::Protocol("invalid as-server flag".into())),
     };
+
     Ok(Some(Greeting {
         major,
         minor,
@@ -218,133 +234,4 @@ pub fn effective_minor(peer_minor: u8) -> u8 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use bytes::Bytes;
-
-    fn make_buf(data: &[u8]) -> ChunkedInputBuf {
-        let mut buf = ChunkedInputBuf::new();
-        buf.push(Bytes::copy_from_slice(data));
-        buf
-    }
-
-    fn encode_to_buf(g: &Greeting) -> ChunkedInputBuf {
-        let mut wire = BytesMut::new();
-        g.encode(&mut wire);
-        make_buf(&wire)
-    }
-
-    #[test]
-    fn encode_decode_roundtrip() {
-        let g = Greeting::current(MechanismName::NULL, true);
-        let mut buf = encode_to_buf(&g);
-        let decoded = try_decode(&mut buf).unwrap().unwrap();
-        assert_eq!(decoded, g);
-        assert!(buf.is_empty());
-    }
-
-    #[test]
-    fn partial_read_returns_none() {
-        let mut buf = make_buf(&SIGNATURE);
-        assert!(try_decode(&mut buf).unwrap().is_none());
-        assert_eq!(buf.len(), 10);
-    }
-
-    #[test]
-    fn peek_rejects_bad_signature() {
-        let bad = [0u8; VERSION_SNIFF_LEN];
-        assert!(matches!(peek_major(&bad), Err(Error::Protocol(_))));
-    }
-
-    #[test]
-    fn peek_rejects_pre_3_0() {
-        let mut wire = [0u8; VERSION_SNIFF_LEN];
-        wire[..10].copy_from_slice(&SIGNATURE);
-        wire[10] = 1; // ZMTP 2.x
-        assert!(matches!(
-            peek_major(&wire),
-            Err(Error::UnsupportedZmtpVersion { major: 1, .. })
-        ));
-    }
-
-    #[test]
-    fn peek_accepts_3_0() {
-        let mut wire = [0u8; VERSION_SNIFF_LEN];
-        wire[..10].copy_from_slice(&SIGNATURE);
-        wire[10] = 3;
-        assert_eq!(peek_major(&wire).unwrap(), Some(3));
-    }
-
-    #[test]
-    fn peek_returns_none_on_short() {
-        let wire = &SIGNATURE[..5];
-        assert!(peek_major(wire).unwrap().is_none());
-    }
-
-    #[test]
-    fn decode_captures_3_0_minor() {
-        let g = Greeting {
-            major: 3,
-            minor: 0,
-            mechanism: MechanismName::NULL,
-            as_server: false,
-        };
-        let mut buf = encode_to_buf(&g);
-        let decoded = try_decode(&mut buf).unwrap().unwrap();
-        assert_eq!(decoded.minor, 0);
-    }
-
-    #[test]
-    fn effective_minor_picks_min() {
-        assert_eq!(effective_minor(0), 0);
-        assert_eq!(effective_minor(1), 1);
-        assert_eq!(effective_minor(5), 1);
-    }
-
-    #[test]
-    fn mechanism_name_trimmed() {
-        let n = MechanismName::NULL;
-        assert_eq!(n.as_bytes(), b"NULL");
-        assert_eq!(n.as_str().unwrap(), "NULL");
-        assert_eq!(n.as_padded()[4], 0);
-    }
-
-    #[test]
-    fn reject_mechanism_bytes_after_nul() {
-        let g = Greeting::current(MechanismName::NULL, false);
-        let mut wire = BytesMut::new();
-        g.encode(&mut wire);
-        // Sabotage: set byte 17 (within mechanism region after NUL padding)
-        wire[17] = b'X';
-        let mut buf = make_buf(&wire);
-        assert!(matches!(try_decode(&mut buf), Err(Error::Protocol(_))));
-    }
-
-    #[test]
-    fn server_flag() {
-        let s = Greeting::current(MechanismName::NULL, true);
-        let mut buf = encode_to_buf(&s);
-        let d = try_decode(&mut buf).unwrap().unwrap();
-        assert!(d.as_server);
-    }
-
-    #[test]
-    fn accepts_higher_major_version() {
-        let mut g = Greeting::current(MechanismName::NULL, false);
-        g.major = 4;
-        let mut buf = encode_to_buf(&g);
-        let decoded = try_decode(&mut buf).unwrap().unwrap();
-        assert_eq!(decoded.major, 4);
-    }
-
-    #[test]
-    fn rejects_lower_major_version() {
-        let mut g = Greeting::current(MechanismName::NULL, false);
-        g.major = 2;
-        let mut buf = encode_to_buf(&g);
-        assert!(matches!(
-            try_decode(&mut buf),
-            Err(Error::UnsupportedZmtpVersion { major: 2, .. })
-        ));
-    }
-}
+mod tests;

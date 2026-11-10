@@ -38,6 +38,7 @@ async fn main() {
         let Ok(Ok(msg)) = tokio::time::timeout(Duration::from_secs(3), pull.recv()).await else {
             break;
         };
+
         let ticket = msg_str(&msg, 0);
         let req_path = Path::new(store_dir).join(format!("{ticket}.req"));
 

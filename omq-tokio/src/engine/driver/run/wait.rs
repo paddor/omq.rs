@@ -158,6 +158,7 @@ impl Session<'_> {
         let step = self
             .control
             .handle_command(cmd, &mut self.connection, input_failed)?;
+
         Ok(Flow::exit_unless(step != DriverStep::Close))
     }
 
@@ -167,6 +168,7 @@ impl Session<'_> {
         if !ready {
             return Flow::Exit;
         }
+
         self.outlet
             .output
             .set_control_prefix(self.peer_events.control_prefix());
@@ -242,6 +244,7 @@ impl Session<'_> {
         if self.claim_writer() == Flow::Exit {
             return Ok(Flow::Exit);
         }
+
         let n = res?;
 
         self.latency.note_progress();
@@ -281,6 +284,7 @@ impl Session<'_> {
             &self.connection,
             &mut self.output.frames,
         )?;
+
         Ok(Flow::Next)
     }
 

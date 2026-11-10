@@ -19,8 +19,10 @@ const ZMQ_ROUTER: i32 = 6;
 const ZMQ_REQ: i32 = 3;
 const ZMQ_REP: i32 = 4;
 const ZMQ_SNDMORE: i32 = 2;
+
 #[allow(dead_code)]
 const ZMQ_DONTWAIT: i32 = 1;
+
 const ZMQ_RCVTIMEO: i32 = 27;
 const ZMQ_SNDTIMEO: i32 = 28;
 const ZMQ_RCVMORE: i32 = 13;
@@ -43,6 +45,7 @@ fn rcvmore(sock: *mut c_void) -> bool {
     let mut v: i32 = 0;
     let mut sz = size_of::<i32>();
     zmq_getsockopt(sock, ZMQ_RCVMORE, (&mut v as *mut i32).cast(), &mut sz);
+
     v != 0
 }
 
@@ -58,6 +61,7 @@ fn connect_slow_dealer(ctx: *mut c_void, mandatory: i32) -> (*mut c_void, *mut c
     let router = zmq_socket(ctx, ZMQ_ROUTER);
     let dealer = zmq_socket(ctx, ZMQ_DEALER);
     let addr = CString::new(format!("inproc://router-full-{mandatory}")).unwrap();
+
     set_timeo(router, ZMQ_LINGER, 0);
     set_timeo(dealer, ZMQ_LINGER, 0);
     set_timeo(router, ZMQ_SNDHWM, 1);
@@ -67,6 +71,7 @@ fn connect_slow_dealer(ctx: *mut c_void, mandatory: i32) -> (*mut c_void, *mut c
     set_timeo(router, ZMQ_SNDTIMEO, 50);
     set_timeo(dealer, ZMQ_RCVTIMEO, TIMEOUT_MS);
     set_identity(dealer, b"slow");
+
     assert_eq!(zmq_bind(router, addr.as_ptr()), 0);
     assert_eq!(zmq_connect(dealer, addr.as_ptr()), 0);
 
@@ -74,6 +79,7 @@ fn connect_slow_dealer(ctx: *mut c_void, mandatory: i32) -> (*mut c_void, *mut c
     let mut buf = [0u8; 64];
     assert_eq!(recv_frame(router, &mut buf), b"slow");
     assert_eq!(recv_frame(router, &mut buf), b"ready");
+
     (router, dealer)
 }
 
@@ -85,6 +91,7 @@ fn drain_header_body(dealer: *mut c_void, buf: &mut [u8]) -> usize {
         if rc < 0 {
             return received;
         }
+
         assert_eq!(rc, 6);
         assert_eq!(&buf[..6], b"header");
         assert!(rcvmore(dealer));
@@ -110,6 +117,7 @@ fn router_full_destination_drop_and_mandatory_backpressure() {
                 zmq_send(router, b"header".as_ptr().cast(), 6, ZMQ_SNDMORE | flags),
                 6
             );
+
             zmq_send(router, b"body".as_ptr().cast(), 4, flags)
         };
 
@@ -121,8 +129,10 @@ fn router_full_destination_drop_and_mandatory_backpressure() {
                 assert_eq!(omq_zmq::zmq_errno(), libc::EAGAIN);
                 break;
             }
+
             accepted += 1;
         }
+
         if mandatory == 1 {
             assert!(accepted > 0 && accepted < 64);
             assert_eq!(send(0), -1, "SNDTIMEO must bound mandatory send waits");
@@ -134,6 +144,7 @@ fn router_full_destination_drop_and_mandatory_backpressure() {
 
         let received = drain_header_body(dealer, &mut buf);
         assert!(received > 0 && received < 64);
+
         if mandatory == 1 {
             assert_eq!(received, accepted);
         }
@@ -178,19 +189,23 @@ fn dealer_router_identity_routing() {
     // Drain until we reach the payload.
     let mut buf = [0u8; 64];
     let mut payload_len = 0;
+
     loop {
         let more = rcvmore(router);
         if !more {
             // This was the last frame we already read (id), wait for payload below.
             break;
         }
+
         let rc = zmq_recv(router, buf.as_mut_ptr().cast(), buf.len(), 0);
         assert!(rc >= 0);
+
         if !rcvmore(router) {
             payload_len = rc as usize;
             break;
         }
     }
+
     if payload_len == 0 {
         // id was the only prior frame; check if there are more
         if rcvmore(router) {
@@ -199,6 +214,7 @@ fn dealer_router_identity_routing() {
             payload_len = rc as usize;
         }
     }
+
     assert_eq!(&buf[..payload_len], b"hello");
 
     // Router replies: send id + payload back.
@@ -240,29 +256,35 @@ fn dealer_router_tcp() {
     // Router receives all, replies.
     let mut id_buf = [0u8; 64];
     let mut buf = [0u8; 64];
+
     for i in 0..3u8 {
         // Drain the identity frame(s) and get payload.
         let id_len = {
             let id = recv_frame(router, &mut id_buf);
             id.len()
         };
+
         assert!(id_len > 0);
 
         // Drain frames until payload (last frame).
         let mut payload = [0u8; 64];
         let mut plen = 0;
+
         loop {
             let more = rcvmore(router);
             if !more {
                 break;
             }
+
             let rc = zmq_recv(router, payload.as_mut_ptr().cast(), payload.len(), 0);
             assert!(rc >= 0);
             plen = rc as usize;
+
             if !rcvmore(router) {
                 break;
             }
         }
+
         if plen == 0 {
             // Payload was the immediately next frame after id (no delimiter).
             plen = {
@@ -270,6 +292,7 @@ fn dealer_router_tcp() {
                 r as usize
             };
         }
+
         assert_eq!(plen, 4);
         assert!(payload[..4].iter().all(|&b| b == i));
 
@@ -302,9 +325,11 @@ fn recv_payload_after_identity(router: *mut c_void, payload: &mut [u8]) -> usize
         if !more {
             break;
         }
+
         let rc = zmq_recv(router, payload.as_mut_ptr().cast(), payload.len(), 0);
         assert!(rc >= 0);
         plen = rc as usize;
+
         if !rcvmore(router) {
             break;
         }
@@ -313,6 +338,7 @@ fn recv_payload_after_identity(router: *mut c_void, payload: &mut [u8]) -> usize
     if plen == 0 {
         plen = zmq_recv(router, payload.as_mut_ptr().cast(), payload.len(), 0) as usize;
     }
+
     plen
 }
 
@@ -329,6 +355,7 @@ fn multiple_dealers_one_router() {
     set_timeo(router, ZMQ_RCVTIMEO, TIMEOUT_MS);
     set_timeo(router, ZMQ_SNDTIMEO, TIMEOUT_MS);
     let mut dealers = Vec::new();
+
     for i in 0..N {
         let d = zmq_socket(ctx, ZMQ_DEALER);
         set_identity(d, format!("d{i}").as_bytes());
@@ -336,6 +363,7 @@ fn multiple_dealers_one_router() {
         set_timeo(d, ZMQ_RCVTIMEO, TIMEOUT_MS);
         dealers.push(d);
     }
+
     std::thread::sleep(Duration::from_millis(150));
 
     // Each dealer sends one message.
@@ -347,6 +375,7 @@ fn multiple_dealers_one_router() {
     // Router receives N messages and echoes each back.
     let mut id_buf = [0u8; 64];
     let mut buf = [0u8; 64];
+
     for _ in 0..N {
         let id_len = {
             let id = recv_frame(router, &mut id_buf);
@@ -376,6 +405,7 @@ fn multiple_dealers_one_router() {
     for d in dealers {
         zmq_close(d);
     }
+
     zmq_close(router);
     zmq_ctx_term(ctx);
 }
@@ -393,6 +423,7 @@ fn forward_message(from: *mut c_void, to: *mut c_void, buf: &mut [u8]) {
             rc as usize,
             send_flags,
         );
+
         if !more {
             break;
         }

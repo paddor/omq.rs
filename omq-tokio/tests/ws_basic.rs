@@ -114,6 +114,7 @@ async fn bounded_parser_drains_large_tiny_message_batches_in_both_profiles() {
         push.wait_connected(1, Duration::from_secs(2))
             .await
             .unwrap();
+
         let sender = tokio::spawn(async move {
             for sequence in 0u32..5000 {
                 push.send(Message::single(Bytes::copy_from_slice(
@@ -122,8 +123,10 @@ async fn bounded_parser_drains_large_tiny_message_batches_in_both_profiles() {
                 .await
                 .unwrap();
             }
+
             push
         });
+
         for sequence in 0u32..5000 {
             let message = tokio::time::timeout(Duration::from_secs(2), pull.recv())
                 .await
@@ -131,6 +134,7 @@ async fn bounded_parser_drains_large_tiny_message_batches_in_both_profiles() {
                 .unwrap();
             assert_eq!(message.part_bytes(0).unwrap(), sequence.to_be_bytes()[..]);
         }
+
         sender.await.unwrap().close().await.unwrap();
         pull.close().await.unwrap();
     }

@@ -26,9 +26,11 @@ async fn bind_ipv6_get_port(socket: &Socket) -> Option<u16> {
     if !ipv6_available() {
         return None;
     }
+
     let ep = tcp6(0);
     let mut mon = socket.monitor();
     socket.bind(ep).await.ok()?;
+
     match tokio::time::timeout(Duration::from_secs(1), mon.recv()).await {
         Ok(Ok(MonitorEvent::Listening {
             endpoint: Endpoint::Tcp { port, .. },
@@ -100,6 +102,7 @@ async fn ipv6_pub_sub() {
             assert_eq!(m.part_bytes(0).unwrap(), &b"v6msg"[..]);
             return;
         }
+
         assert!(
             std::time::Instant::now() < deadline,
             "ipv6 pub/sub timed out"

@@ -16,10 +16,13 @@ use omq_zmq::{
 
 const ZMQ_REQ: i32 = 3;
 const ZMQ_REP: i32 = 4;
+
 #[allow(dead_code)]
 const ZMQ_DEALER: i32 = 5;
+
 #[allow(dead_code)]
 const ZMQ_SNDMORE: i32 = 2;
+
 const ZMQ_RCVTIMEO: i32 = 27;
 const ZMQ_SNDTIMEO: i32 = 28;
 const ZMQ_RCVMORE: i32 = 13;
@@ -33,6 +36,7 @@ fn rcvmore(sock: *mut std::ffi::c_void) -> bool {
     let mut v: i32 = 0;
     let mut sz = size_of::<i32>();
     zmq_getsockopt(sock, ZMQ_RCVMORE, (&mut v as *mut i32).cast(), &mut sz);
+
     v != 0
 }
 
@@ -162,6 +166,7 @@ fn req_rep_multiple_clients() {
     set_timeo(rep, ZMQ_RCVTIMEO, TIMEOUT_MS);
     set_timeo(rep, ZMQ_SNDTIMEO, TIMEOUT_MS);
     let mut reqs = Vec::new();
+
     for _ in 0..N {
         let r = zmq_socket(ctx, ZMQ_REQ);
         zmq_connect(r, addr.as_ptr());
@@ -169,6 +174,7 @@ fn req_rep_multiple_clients() {
         set_timeo(r, ZMQ_SNDTIMEO, TIMEOUT_MS);
         reqs.push(r);
     }
+
     std::thread::sleep(Duration::from_millis(100));
 
     let mut buf = [0u8; 64];
@@ -190,6 +196,7 @@ fn req_rep_multiple_clients() {
     for r in reqs {
         zmq_close(r);
     }
+
     zmq_close(rep);
     zmq_ctx_term(ctx);
 }

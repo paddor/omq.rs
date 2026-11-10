@@ -46,6 +46,7 @@ fn lossy_pub_stays_writable_when_internal_lane_is_full() {
     let socket = unsafe { crate::handle::socket(publisher) }.unwrap();
     let backend = socket.inner.get().unwrap();
     let io = socket.ctx.io_context().unwrap();
+
     let subscriber = io.blocking_socket(omq_tokio::SocketType::Sub, omq_tokio::Options::default());
     subscriber.subscribe("").unwrap();
     subscriber
@@ -71,6 +72,7 @@ fn lossy_pub_stays_writable_when_internal_lane_is_full() {
             4
         );
     }
+
     assert!(matches!(
         try_send_message(socket, omq_tokio::Message::from("proxy")),
         Ok(SendMessageAttempt::Sent)
@@ -94,6 +96,7 @@ fn direct_inproc_req_rep_progresses_while_io_runtime_is_paused() {
     assert_eq!(crate::zmq_ctx_set(ctx, 1, 0), 0);
     let req = crate::zmq_socket(ctx, 3);
     let rep = crate::zmq_socket(ctx, 4);
+
     for socket in [req, rep] {
         for (option, value) in [(17, 0_i32), (27, 250), (28, 250)] {
             assert_eq!(
@@ -102,6 +105,7 @@ fn direct_inproc_req_rep_progresses_while_io_runtime_is_paused() {
             );
         }
     }
+
     assert_eq!(
         crate::zmq_bind(rep, c"inproc://req-rep-with-paused-io".as_ptr()),
         0
@@ -111,6 +115,7 @@ fn direct_inproc_req_rep_progresses_while_io_runtime_is_paused() {
         0
     );
     let mut received = [0_u8; 4];
+
     // Finish both endpoints' READY transition before pausing setup/control.
     for (sender, receiver) in [(req, rep), (rep, req)] {
         assert_eq!(crate::zmq_send(sender, b"warm".as_ptr().cast(), 4, 0), 4);
@@ -119,9 +124,11 @@ fn direct_inproc_req_rep_progresses_while_io_runtime_is_paused() {
             4
         );
     }
+
     // SAFETY: ctx is a live context returned by zmq_ctx_new.
     let context = unsafe { crate::handle::context(ctx) }.unwrap();
     let handle = context.handle().unwrap();
+
     let (paused_tx, paused_rx) = std::sync::mpsc::channel();
     let (resume_tx, resume_rx) = std::sync::mpsc::channel();
     let paused = handle.spawn(async move {
@@ -130,6 +137,7 @@ fn direct_inproc_req_rep_progresses_while_io_runtime_is_paused() {
         let _ = resume_rx.recv_timeout(Duration::from_secs(3));
     });
     paused_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
     for (sender, receiver, body) in [(req, rep, b"ping"), (rep, req, b"pong")] {
         assert_eq!(
             crate::zmq_send(sender, body.as_ptr().cast(), body.len(), 0),
@@ -141,6 +149,7 @@ fn direct_inproc_req_rep_progresses_while_io_runtime_is_paused() {
         );
         assert_eq!(&received, body);
     }
+
     resume_tx.send(()).unwrap();
     handle.block_on(paused).unwrap();
     assert_eq!(crate::zmq_close(req), 0);

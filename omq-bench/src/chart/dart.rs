@@ -10,8 +10,10 @@ use crate::jsonl;
 mod radiodish;
 
 use crate::bench::datagram::{LATENCY_SIZES, THROUGHPUT_SIZES};
+
 // The chart binary builds without the transport feature. Match the codec version.
 const DART_WIRE_VERSION: u64 = 1;
+
 const IMPLS: &[Impl] = &[
     Impl {
         key: "dart-lan",
@@ -49,6 +51,7 @@ fn eligible_runs() -> Runs {
         let Some((size, key, kind)) = run_slot(&row) else {
             continue;
         };
+
         let kind = kind.to_owned();
         add_run(&mut groups, size, key, kind, row);
     }
@@ -63,9 +66,11 @@ fn run_slot(row: &serde_json::Value) -> Option<(u64, &'static str, &str)> {
     if settings_rejected(row) {
         return None;
     }
+
     let Some(transport @ ("dart" | "tcp")) = row["transport"].as_str() else {
         return None;
     };
+
     if transport == "dart"
         && (row["dart_wire_version"] != DART_WIRE_VERSION
             || row["dart_window_messages"].as_u64().unwrap_or(256) != 256)
@@ -76,6 +81,7 @@ fn run_slot(row: &serde_json::Value) -> Option<(u64, &'static str, &str)> {
     let size = row["msg_size"]
         .as_u64()
         .filter(|size| THROUGHPUT_SIZES.contains(size))?;
+
     if transport == "dart"
         && size > 1024
         && row["experimental_wire_version"]
@@ -88,6 +94,7 @@ fn run_slot(row: &serde_json::Value) -> Option<(u64, &'static str, &str)> {
     let Some(kind @ ("throughput" | "latency")) = row["kind"].as_str() else {
         return None;
     };
+
     // Runs are grouped by binary, so rows without a digest cannot be used.
     row["binary_sha256"].as_str()?;
 
@@ -99,11 +106,13 @@ fn run_slot(row: &serde_json::Value) -> Option<(u64, &'static str, &str)> {
         },
         _ => "tcp",
     };
+
     let rejected = if kind == "throughput" {
         throughput_rejected(row)
     } else {
         latency_rejected(row)
     };
+
     (!rejected).then_some((size, key, kind))
 }
 
@@ -155,6 +164,7 @@ fn add_run(groups: &mut Runs, size: u64, key: &str, kind: String, row: serde_jso
     }) {
         group.clear();
     }
+
     group.push(row);
     if group.len() > 3 {
         group.remove(0);
@@ -173,15 +183,18 @@ fn aeron_runs(groups: &mut Runs) {
         {
             continue;
         }
+
         let Some(size) = row["msg_size"]
             .as_u64()
             .filter(|size| THROUGHPUT_SIZES.contains(size))
         else {
             continue;
         };
+
         let Some(kind @ ("throughput" | "latency")) = row["kind"].as_str() else {
             continue;
         };
+
         if kind == "throughput" {
             if row["elapsed"].as_f64() != Some(3.0)
                 || row["warmup_seconds"] != 3
@@ -192,6 +205,7 @@ fn aeron_runs(groups: &mut Runs) {
         } else if row["iterations"] != 100_000 || row["warmup_iterations"] != 200_000 {
             continue;
         }
+
         add_run(groups, size, "aeron", kind.to_owned(), row);
     }
 }
@@ -206,11 +220,13 @@ fn median_runs() -> (ValMap, ValMap, LatencyMap) {
         if group.len() != 3 {
             continue;
         }
+
         let metric = if kind == "throughput" {
             "msgs_s"
         } else {
             "p99_us"
         };
+
         if group
             .iter()
             .any(|row| row[metric].as_f64().is_none_or(|value| value <= 0.0))
@@ -225,6 +241,7 @@ fn median_runs() -> (ValMap, ValMap, LatencyMap) {
                 .unwrap()
                 .total_cmp(&b[metric].as_f64().unwrap())
         });
+
         let row = &group[1];
 
         if kind == "throughput" {
@@ -259,6 +276,7 @@ pub(crate) fn generate() {
     if !messages.is_empty() {
         draw_throughput(&directory, &bandwidth, &messages);
     }
+
     if !latency.is_empty() {
         draw_latency(&directory, &latency);
     }
@@ -272,6 +290,7 @@ fn draw_throughput(directory: &Path, bandwidth: &ValMap, messages: &ValMap) {
         sizes: THROUGHPUT_SIZES,
         impls: IMPLS,
     };
+
     common::draw_throughput_dual_panel(
         &spec,
         bandwidth,
@@ -280,6 +299,7 @@ fn draw_throughput(directory: &Path, bandwidth: &ValMap, messages: &ValMap) {
         common::DualPanelStyle::PLAIN,
     )
     .expect("draw DART throughput chart");
+
     eprintln!("Written: {}", path.display());
 }
 

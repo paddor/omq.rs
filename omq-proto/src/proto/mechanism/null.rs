@@ -51,12 +51,14 @@ impl NullMechanism {
         let Some(auth) = &mut self.auth else {
             return self.send_ready(None, out, our_props);
         };
+
         let peer = auth.peer_info(MechanismName::NULL);
         let Some(result) = auth.decide(peer) else {
             self.pending_props = Some(our_props);
             self.state = NullState::AwaitingAuthentication;
             return Ok(());
         };
+
         self.send_ready(Some(result), out, our_props)
     }
 
@@ -68,9 +70,11 @@ impl NullMechanism {
         let Some(auth) = &mut self.auth else {
             return Err(no_pending_authentication());
         };
+
         auth.finish()?;
         let our_props = self.pending_props.take().unwrap_or_default();
         self.send_ready(Some(result), out, our_props)?;
+
         Ok(MechanismStep::Continue)
     }
 
@@ -83,9 +87,11 @@ impl NullMechanism {
         if let Some(result) = &authentication {
             check_authentication(result, "NULL", out)?;
         }
+
         self.authentication = authentication;
         out.push(Command::Ready(our_props));
         self.state = NullState::AwaitingReady;
+
         Ok(())
     }
 
@@ -97,12 +103,14 @@ impl NullMechanism {
         if let Some(err) = try_error_command(&cmd, MechanismName::NULL) {
             return Err(err);
         }
+
         if self.state != NullState::AwaitingReady {
             return Err(Error::HandshakeFailed(format!(
                 "NULL mechanism in state {:?} received command",
                 self.state
             )));
         }
+
         // Connection's mechanism handshake stage hands us raw commands
         // as `Unknown` (so CURVE can see opaque bodies). Parse the
         // property list ourselves for NULL.
@@ -118,9 +126,11 @@ impl NullMechanism {
                 )));
             }
         };
+
         if let Some(authentication) = self.authentication.take() {
             authentication.apply_to(&mut props, MechanismName::NULL);
         }
+
         self.state = NullState::Done;
         Ok(MechanismStep::Complete {
             peer_properties: props,

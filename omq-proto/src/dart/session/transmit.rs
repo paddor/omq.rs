@@ -30,6 +30,7 @@ impl<B: FragmentBuffer> Session<B> {
             {
                 end += 1;
             }
+
             (
                 Transmit::Nak {
                     first: self.receive.next,
@@ -51,6 +52,7 @@ impl<B: FragmentBuffer> Session<B> {
         } else {
             return None;
         };
+
         Some((transmit, encode_packet(packet, output)?))
     }
 
@@ -79,6 +81,7 @@ impl<B: FragmentBuffer> Session<B> {
         let remote = self.remote;
         let prepared = self.prepare_parts(sequence, &batch)?;
         let length = prepared.encode(remote, sequence, output)?;
+
         Some((prepared.token, length))
     }
 
@@ -130,21 +133,25 @@ impl<B: FragmentBuffer> Session<B> {
 
         let remote = self.remote;
         let count = self.plan_packed(first, limit, output)?;
+
         // PACKED needs two messages; a single one keeps DATA framing.
         if count < 2 {
             let prepared = self.prepare_parts(first, batch)?;
             let length = prepared.encode(remote, first, output)?;
             batch.reserved_bytes += prepared.bytes;
+
             return Some((prepared.token, length, 1));
         }
 
         // The length table sits between the tag and the session ID.
         output[1 + count..9 + count].copy_from_slice(&remote.to_le_bytes());
         output[9 + count..DATA_HEADER + count].copy_from_slice(&first.to_le_bytes());
+
         // Only initial transmissions at the send cursor may be packed.
         if first < self.peer.ack || first < self.send.cursor {
             return None;
         }
+
         if batch.now < self.pacing.next_at {
             self.stats.congestion_stalls += 1;
             return None;
@@ -154,6 +161,7 @@ impl<B: FragmentBuffer> Session<B> {
         if actual == 0 {
             return None;
         }
+
         if actual < count {
             // Congestion can shorten the planned prefix. Collapse the table,
             // preserving ordinary DATA framing when only one message fits.
@@ -188,6 +196,7 @@ impl<B: FragmentBuffer> Session<B> {
             if sequence >= self.send.next || sequence >= self.peer.credit {
                 break;
             }
+
             let Some(sent) = self.send.tx[self.index(sequence)].as_ref() else {
                 break;
             };
@@ -229,6 +238,7 @@ impl<B: FragmentBuffer> Session<B> {
             let sent = self.send.tx[self.index(sequence)]
                 .as_ref()
                 .expect("planned retained message");
+
             if self.config.congestion == DartCongestion::Adaptive
                 && !sent.in_flight
                 && self
@@ -238,6 +248,7 @@ impl<B: FragmentBuffer> Session<B> {
                 self.stats.congestion_stalls += 1;
                 break;
             }
+
             if sent.message.len() != 1 + usize::from(grouped) {
                 break;
             }
@@ -250,6 +261,7 @@ impl<B: FragmentBuffer> Session<B> {
                 .part_slice(usize::from(grouped))
                 .expect("retained body");
             let destination = &mut output[length..length + payload];
+
             if grouped {
                 let group = sent.message.part_slice(0).expect("retained group");
                 destination[0] = group.len() as u8;
@@ -274,18 +286,23 @@ impl<B: FragmentBuffer> Session<B> {
             grouped,
             reserved_bytes,
         } = *batch;
+
         if sequence < self.peer.ack || sequence >= self.send.next {
             return None;
         }
+
         let index = self.index(sequence);
         let sent = self.send.tx[index].as_ref()?;
         let repair = sent.repair;
+
         if !repair && (sequence < self.send.cursor || sequence >= self.peer.credit) {
             if sequence >= self.peer.credit {
                 self.stats.credit_stalls += 1;
             }
+
             return None;
         }
+
         // A paced scalar repair must pass even when later retained packets
         // exceed the reduced congestion window; ACKs cannot cross its gap.
         if now < self.pacing.next_at
@@ -297,13 +314,16 @@ impl<B: FragmentBuffer> Session<B> {
             self.stats.congestion_stalls += 1;
             return None;
         }
+
         if sent.message.len() != 1 + usize::from(grouped) {
             return None;
         }
+
         let whole_body = sent.message.part_slice(usize::from(grouped))?;
         let body = sent
             .fragment
             .map_or(whole_body, |part| &whole_body[part.start..part.end]);
+
         if body.len()
             > sent
                 .fragment
@@ -311,14 +331,17 @@ impl<B: FragmentBuffer> Session<B> {
         {
             return None;
         }
+
         let group = if grouped && sent.fragment.is_none_or(|part| part.length.is_some()) {
             Some(sent.message.part_slice(0)?)
         } else {
             None
         };
+
         if group.is_some_and(|group| group.is_empty() || group.len() > 255) {
             return None;
         }
+
         let prepared = Prepared {
             token: Transmit::Data { sequence, repair },
             body,
@@ -326,6 +349,7 @@ impl<B: FragmentBuffer> Session<B> {
             bytes: sent.bytes,
             fragment: sent.fragment,
         };
+
         (sent.bytes <= MAX_DATAGRAM).then_some(prepared)
     }
 
@@ -335,6 +359,7 @@ impl<B: FragmentBuffer> Session<B> {
         if self.send.repairs == 0 {
             return None;
         }
+
         (self.peer.ack..self.send.cursor).find(|sequence| {
             self.send.tx[self.index(*sequence)]
                 .as_ref()
@@ -351,26 +376,32 @@ impl<B: FragmentBuffer> Session<B> {
                 let sent = self.send.tx[index]
                     .as_mut()
                     .expect("prepared retained message");
+
                 if repair {
                     self.stats.retransmitted += 1;
                 } else {
                     assert_eq!(sequence, self.send.cursor);
                     self.send.cursor += 1;
                 }
+
                 sent.first.get_or_insert(now);
                 sent.last = now;
                 sent.attempts = sent.attempts.saturating_add(1);
+
                 if sent.repair {
                     self.send.repairs -= 1;
                 }
+
                 sent.repair = false;
                 if !sent.in_flight {
                     self.congestion.flight += sent.bytes;
                     sent.in_flight = true;
                 }
+
                 if self.ecn.enabled && !repair {
                     self.ecn.marked_sent += 1;
                 }
+
                 self.pacing.schedule(now, sent.bytes);
             }
             Transmit::Status => {

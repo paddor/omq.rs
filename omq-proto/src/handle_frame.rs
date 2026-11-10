@@ -60,23 +60,29 @@ pub fn decide_handle_frame<'a>(
     if state.uses_crypto || !state.handshake_done {
         return HandleFrameDecision::Ineligible;
     }
+
     if state.queued_bytes >= caps.byte_cap || state.queued_messages >= caps.message_cap {
         return HandleFrameDecision::Full;
     }
+
     if state.is_ws {
         if state.has_transform {
             return HandleFrameDecision::Ineligible;
         }
+
         return HandleFrameDecision::WebSocket;
     }
+
     if !state.has_transform {
         return HandleFrameDecision::Plain;
     }
+
     if let Some((sentinel, threshold)) = state.transform_passthrough
         && msg.iter().all(|part| part.len() < *threshold)
     {
         return HandleFrameDecision::TransformPassthrough { sentinel };
     }
+
     HandleFrameDecision::Ineligible
 }
 

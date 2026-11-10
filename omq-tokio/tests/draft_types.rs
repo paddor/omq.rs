@@ -91,6 +91,7 @@ async fn scatter_gather_single_frame_roundtrip() {
             .await
             .unwrap();
     }
+
     for i in 0..3 {
         let m = tokio::time::timeout(Duration::from_millis(500), gather.recv())
             .await
@@ -274,6 +275,7 @@ async fn client_server_multiple_clients() {
             .unwrap();
         let routing_id = m.routing_id().expect("SERVER routing id");
         let body = m.part_bytes(0).unwrap();
+
         server
             .send(
                 Message::single(Bytes::from(format!(
@@ -284,6 +286,7 @@ async fn client_server_multiple_clients() {
             )
             .await
             .unwrap();
+
         routing_ids.push(routing_id);
     }
 
@@ -294,6 +297,7 @@ async fn client_server_multiple_clients() {
             .unwrap();
         assert!(reply.part_bytes(0).unwrap().starts_with(b"re:from-"));
     }
+
     routing_ids.sort_unstable();
     routing_ids.dedup();
     assert_eq!(routing_ids.len(), 3);
@@ -326,6 +330,7 @@ async fn scatter_gather_multiple_scatterers() {
             .unwrap();
         received.insert(String::from_utf8_lossy(&m.part_bytes(0).unwrap()).into_owned());
     }
+
     assert_eq!(received.len(), 15);
 }
 
@@ -338,6 +343,7 @@ async fn scatter_gather_multiple_gatherers() {
     let gatherers: Vec<Socket> = (0..3)
         .map(|_| Socket::new(SocketType::Gather, Options::default()))
         .collect();
+
     for g in &gatherers {
         g.connect(ep.clone()).await.unwrap();
     }
@@ -355,6 +361,7 @@ async fn scatter_gather_multiple_gatherers() {
             total += 1;
         }
     }
+
     assert_eq!(total, 30);
 }
 
@@ -369,6 +376,7 @@ async fn channel_multiple_messages() {
     for i in 0..20 {
         a.send(Message::single(format!("a-{i}"))).await.unwrap();
     }
+
     for i in 0..20 {
         let m = tokio::time::timeout(Duration::from_millis(500), b.recv())
             .await

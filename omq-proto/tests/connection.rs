@@ -17,6 +17,7 @@ fn push_pull_pair() -> (Connection, Connection) {
         ConnectionConfig::new(Role::Client, SocketType::Push).identity(Bytes::from_static(b"p")),
     );
     let pull = Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pull));
+
     (push, pull)
 }
 
@@ -25,13 +26,16 @@ fn pump(a: &mut Connection, b: &mut Connection) {
     loop {
         let a_out = a.poll_transmit();
         let b_out = b.poll_transmit();
+
         if a_out.is_empty() && b_out.is_empty() {
             break;
         }
+
         if !a_out.is_empty() {
             a.advance_transmit(a_out.len());
             b.handle_input(a_out).expect("b accepts");
         }
+
         if !b_out.is_empty() {
             b.advance_transmit(b_out.len());
             a.handle_input(b_out).expect("a accepts");
@@ -48,6 +52,7 @@ fn handshake_completes_on_compat_pair() {
     assert!(pull.is_ready());
     let pev = push.poll_event().unwrap();
     let lev = pull.poll_event().unwrap();
+
     match (pev, lev) {
         (
             Event::HandshakeSucceeded {
@@ -71,12 +76,15 @@ fn handshake_rejects_incompatible() {
     let mut push = Connection::new(ConnectionConfig::new(Role::Client, SocketType::Push));
     let mut pub_ = Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pub));
     let mut err = None;
+
     for _ in 0..10 {
         let a_out = push.poll_transmit();
         let b_out = pub_.poll_transmit();
+
         if a_out.is_empty() && b_out.is_empty() {
             break;
         }
+
         if !a_out.is_empty() {
             push.advance_transmit(a_out.len());
             if let Err(e) = pub_.handle_input(a_out) {
@@ -84,6 +92,7 @@ fn handshake_rejects_incompatible() {
                 break;
             }
         }
+
         if !b_out.is_empty() {
             pub_.advance_transmit(b_out.len());
             if let Err(e) = push.handle_input(b_out) {
@@ -92,6 +101,7 @@ fn handshake_rejects_incompatible() {
             }
         }
     }
+
     assert!(matches!(err, Some(Error::HandshakeFailed(_))));
 }
 
@@ -159,6 +169,7 @@ fn ping_is_auto_answered_with_pong() {
     b.send_command(&Command::Subscribe(Bytes::from_static(b"news")))
         .unwrap();
     pump(&mut a, &mut b);
+
     match a.poll_event().unwrap() {
         Event::Command(Command::Subscribe(p)) => assert_eq!(&p[..], b"news"),
         e => panic!("unexpected event: {e:?}"),
@@ -209,11 +220,13 @@ fn pair_configurations() -> Vec<(ConnectionConfig, ConnectionConfig)> {
         client.ws_role(omq_proto::proto::connection::WsRole::Client),
         server.ws_role(omq_proto::proto::connection::WsRole::Server),
     ));
+
     #[cfg(feature = "curve")]
     for (client, server) in configurations.clone() {
         use omq_proto::{CurveKeypair, Options};
         let keypair = CurveKeypair::generate();
         let public = keypair.public;
+
         configurations.push((
             client.mechanism(
                 Options::default()
@@ -223,6 +236,7 @@ fn pair_configurations() -> Vec<(ConnectionConfig, ConnectionConfig)> {
             server.mechanism(Options::default().curve_server(keypair).mechanism),
         ));
     }
+
     configurations
         .into_iter()
         .flat_map(|(client, server)| [(client.clone(), server.clone()), (server, client)])
@@ -244,28 +258,36 @@ fn core_stops_automatic_replies_until_output_drains() {
         transfer(&mut sender, &mut receiver).unwrap();
         let reply_size = receiver.pending_transmit_size();
         transfer(&mut receiver, &mut sender).unwrap();
+
         for _ in 0..PINGS {
             sender.send_command(&ping).unwrap();
         }
+
         transfer(&mut sender, &mut receiver).unwrap();
         assert!(receiver.input_blocked_on_output());
         assert!(receiver.has_pending_input());
+
         let queued = receiver.pending_transmit_size();
         assert!(queued < 64 * 1024 + reply_size);
         receiver.resume_input().unwrap();
         assert_eq!(receiver.pending_transmit_size(), queued);
         assert!(receiver.handle_input(Bytes::from_static(b"extra")).is_err());
         assert!(receiver.peek_next_frame_payload_size().unwrap().is_none());
+
         let mut replies = 0;
+
         loop {
             replies += receiver.pending_transmit_size() / reply_size;
             transfer(&mut receiver, &mut sender).unwrap();
             assert!(!receiver.input_blocked_on_output());
+
             if !receiver.has_pending_input() {
                 break;
             }
+
             receiver.resume_input().unwrap();
         }
+
         assert_eq!(replies, PINGS);
         sender
             .send_message(&Message::single("after replies"))
@@ -284,14 +306,17 @@ fn core_parser_turns_stop_on_frame_and_byte_budgets() {
         let (mut sender, mut receiver) = push_pull_pair();
         pump(&mut sender, &mut receiver);
         receiver.set_input_budget(true);
+
         for sequence in 0u32..frames {
             let mut body = vec![0; body_len];
             body[..4].copy_from_slice(&sequence.to_be_bytes());
             sender.send_message(&Message::single(body)).unwrap();
         }
+
         transfer(&mut sender, &mut receiver).unwrap();
         assert!(receiver.has_pending_input());
         let mut observed = 0u32;
+
         loop {
             let mut turn = 0;
             while let Some(message) = receiver.poll_message() {
@@ -302,15 +327,19 @@ fn core_parser_turns_stop_on_frame_and_byte_budgets() {
                 observed += 1;
                 turn += 1;
             }
+
             assert!(turn <= 4096);
             if body_len == 8192 {
                 assert!(turn <= 32);
             }
+
             if !receiver.has_pending_input() {
                 break;
             }
+
             receiver.resume_input().unwrap();
         }
+
         assert_eq!(observed, frames);
         receiver.handle_input(Bytes::from_static(&[0])).unwrap();
         assert!(!receiver.has_pending_input());
@@ -325,6 +354,7 @@ fn automatic_pong_accounting_survives_partial_writes_and_interleaved_data() {
         let mut receiver = Connection::new(receiver);
         let mut sender = Connection::new(sender);
         pump(&mut sender, &mut receiver);
+
         let message = Message::single(Bytes::from(vec![42; 128 * 1024]));
         receiver.send_message(&message).unwrap();
         receiver
@@ -333,12 +363,14 @@ fn automatic_pong_accounting_survives_partial_writes_and_interleaved_data() {
             })
             .unwrap();
         assert_eq!(receiver.pending_pong_size(), 0);
+
         let prefix = receiver.pending_transmit_size();
         let ping = Command::Ping {
             ttl_deciseconds: 0,
             context: Bytes::from_static(b"echo"),
         };
         sender.send_command(&ping).unwrap();
+
         transfer(&mut sender, &mut receiver).unwrap();
         let reply_size = receiver.pending_transmit_size() - prefix;
         assert!(reply_size > 1);
@@ -402,6 +434,7 @@ fn message_limit_counts_decoded_parts() {
                 pump(&mut sender, &mut receiver);
                 sender.send_message(&message).unwrap();
                 let result = transfer(&mut sender, &mut receiver);
+
                 if over {
                     assert!(result.is_err(), "oversized message accepted");
                     assert!(receiver.poll_message().is_none());
@@ -420,6 +453,7 @@ fn transfer(sender: &mut Connection, receiver: &mut Connection) -> Result<(), Er
         if wire.is_empty() {
             return Ok(());
         }
+
         sender.advance_transmit(wire.len());
         receiver.handle_input(wire)?;
     }
@@ -463,6 +497,7 @@ fn oversized_handshake_command_rejected() {
     let declared: u64 = 256 * 1024 * 1024;
     let mut hdr = vec![0x06u8]; // FLAG_COMMAND | FLAG_LONG
     hdr.extend_from_slice(&declared.to_be_bytes());
+
     let err = a.handle_input(Bytes::from(hdr)).unwrap_err();
     assert!(matches!(err, Error::HandshakeFailed(_)), "got {err:?}");
 }
@@ -487,14 +522,17 @@ fn streaming_one_byte_at_a_time_handshake() {
             let byte = push_to_pull.remove(0);
             pull.handle_input(Bytes::copy_from_slice(&[byte])).unwrap();
         }
+
         if !pull_to_push.is_empty() {
             let byte = pull_to_push.remove(0);
             push.handle_input(Bytes::copy_from_slice(&[byte])).unwrap();
         }
+
         if push.is_ready() && pull.is_ready() {
             break;
         }
     }
+
     assert!(push.is_ready() && pull.is_ready());
 }
 
@@ -514,6 +552,7 @@ fn curve_handshake_and_message_roundtrip() {
             },
         ),
     );
+
     let mut client = Connection::new(
         ConnectionConfig::new(Role::Client, SocketType::Push).mechanism(
             MechanismSetup::CurveClient {
@@ -526,22 +565,27 @@ fn curve_handshake_and_message_roundtrip() {
     for i in 0..10 {
         let s_out = server.poll_transmit();
         let c_out = client.poll_transmit();
+
         if s_out.is_empty() && c_out.is_empty() && (server.is_ready() || i > 0) {
             break;
         }
+
         server.advance_transmit(s_out.len());
         client.advance_transmit(c_out.len());
+
         if !s_out.is_empty() {
             client
                 .handle_input(s_out)
                 .expect("client accepts server bytes");
         }
+
         if !c_out.is_empty() {
             server
                 .handle_input(c_out)
                 .expect("server accepts client bytes");
         }
     }
+
     assert!(server.is_ready(), "server must reach Ready");
     assert!(client.is_ready(), "client must reach Ready");
 
@@ -585,6 +629,7 @@ fn curve_command_demux() {
             },
         ),
     );
+
     let mut sub_conn = Connection::new(
         ConnectionConfig::new(Role::Client, SocketType::Sub).mechanism(
             MechanismSetup::CurveClient {
@@ -654,6 +699,7 @@ fn ready_pair() -> (Connection, Connection) {
     pump(&mut push, &mut pull);
     while push.poll_event().is_some() {}
     while pull.poll_event().is_some() {}
+
     (push, pull)
 }
 
@@ -663,6 +709,7 @@ fn peek_next_frame_payload_size_short_frame() {
     push.send_message(&Message::single("hi")).unwrap();
     let wire = push.poll_transmit();
     push.advance_transmit(wire.len());
+
     pull.handle_input(wire.slice(..2)).unwrap();
     let info = pull.peek_next_frame_payload_size().unwrap().unwrap();
     assert_eq!(info.header_len, 2);
@@ -680,6 +727,7 @@ fn peek_next_frame_payload_size_long_frame() {
         .unwrap();
     let wire = push.poll_transmit();
     push.advance_transmit(wire.len());
+
     pull.handle_input(wire.slice(..9)).unwrap();
     let info = pull.peek_next_frame_payload_size().unwrap().unwrap();
     assert_eq!(info.header_len, 9);
@@ -751,9 +799,11 @@ fn supply_payload_emits_message() {
         .unwrap();
     let wire = push.poll_transmit();
     push.advance_transmit(wire.len());
+
     pull.handle_input(wire.slice(..9)).unwrap();
     let payload_len = pull.begin_supplied_payload().expect("can switch");
     assert_eq!(payload_len, 4096);
+
     let payload = wire.slice(9..9 + payload_len);
     pull.supply_payload(payload).unwrap();
     let m = pull.poll_message().expect("message");
@@ -782,16 +832,19 @@ fn supplied_payload_keeps_reverse_messages_and_commands_ready() {
     pump(&mut client, &mut server);
     while client.poll_event().is_some() {}
     while server.poll_event().is_some() {}
+
     let payload = Bytes::from(vec![7; 4096]);
     client
         .send_message(&Message::single(payload.clone()))
         .unwrap();
     let wire = client.poll_transmit();
     client.advance_transmit(wire.len());
+
     server.handle_input(wire.slice(..9)).unwrap();
     assert_eq!(server.begin_supplied_payload(), Some(payload.len()));
     assert!(server.is_ready(), "the handshake is still complete");
     assert!(server.poll_message().is_none(), "no partial delivery");
+
     server.send_message(&Message::single("reverse")).unwrap();
     server
         .send_command(&Command::Unknown {
@@ -799,6 +852,7 @@ fn supplied_payload_keeps_reverse_messages_and_commands_ready() {
             body: Bytes::from_static(b"live"),
         })
         .unwrap();
+
     let response = server.poll_transmit();
     server.advance_transmit(response.len());
     client.handle_input(response).unwrap();
@@ -810,6 +864,7 @@ fn supplied_payload_keeps_reverse_messages_and_commands_ready() {
         matches!(client.poll_event(), Some(Event::Command(Command::Unknown { name, body }))
         if name == "CONTROL" && body == b"live"[..])
     );
+
     server.supply_payload(wire.slice(9..)).unwrap();
     assert_eq!(
         server.poll_message().unwrap().part_slice(0),
@@ -851,12 +906,14 @@ fn ready_resumes_after_supply_payload() {
     push.send_message(&Message::single("after")).unwrap();
     let wire = push.poll_transmit();
     push.advance_transmit(wire.len());
+
     // Frame 1: 9-byte header + 1024 = 1033 wire bytes.
     let frame1_total = 9 + 1024;
     pull.handle_input(wire.slice(..9)).unwrap();
     pull.begin_supplied_payload().unwrap();
     pull.supply_payload(wire.slice(9..frame1_total)).unwrap();
     pull.handle_input(wire.slice(frame1_total..)).unwrap();
+
     let m1 = pull.poll_message().expect("first message");
     let m2 = pull.poll_message().expect("second message");
     assert_eq!(m1.part_bytes(0).unwrap(), big.as_slice());
@@ -870,6 +927,7 @@ fn supply_payload_through_curve() {
     let server_kp = CurveKeypair::generate();
     let client_kp = CurveKeypair::generate();
     let server_pub = server_kp.public;
+
     let mut server = Connection::new(
         ConnectionConfig::new(Role::Server, SocketType::Pull)
             .max_message_size(4096 + size_of::<Payload>())
@@ -878,6 +936,7 @@ fn supply_payload_through_curve() {
                 options: CurveServerOptions::default(),
             }),
     );
+
     let mut client = Connection::new(
         ConnectionConfig::new(Role::Client, SocketType::Push).mechanism(
             MechanismSetup::CurveClient {
@@ -886,6 +945,7 @@ fn supply_payload_through_curve() {
             },
         ),
     );
+
     pump(&mut server, &mut client);
     while server.poll_event().is_some() {}
     while client.poll_event().is_some() {}
@@ -903,16 +963,19 @@ fn supply_payload_through_curve() {
         server.handle_input(wire.slice(..9)).unwrap();
         server.peek_next_frame_payload_size().unwrap().unwrap()
     };
+
     assert_eq!(info.header_len, 9);
     let payload_len = server.begin_supplied_payload().expect("can switch");
     assert_eq!(payload_len, info.payload_len);
     assert!(server.is_ready(), "CURVE handshake remains complete");
+
     server
         .send_command(&Command::Unknown {
             name: "CONTROL".into(),
             body: Bytes::from_static(b"encrypted reverse control"),
         })
         .unwrap();
+
     let response = server.poll_transmit();
     server.advance_transmit(response.len());
     client.handle_input(response).unwrap();
@@ -920,6 +983,7 @@ fn supply_payload_through_curve() {
         matches!(client.poll_event(), Some(Event::Command(Command::Unknown { name, body }))
         if name == "CONTROL" && body == b"encrypted reverse control"[..])
     );
+
     server
         .supply_payload(wire.slice(9..9 + payload_len))
         .unwrap();
@@ -953,6 +1017,7 @@ mod ws {
         let pull = Connection::new(
             ConnectionConfig::new(Role::Server, SocketType::Pull).ws_role(WsRole::Server),
         );
+
         (push, pull)
     }
 
@@ -960,17 +1025,20 @@ mod ws {
         loop {
             let mut progress = false;
             let wire_a = a.poll_transmit();
+
             if !wire_a.is_empty() {
                 b.handle_input(wire_a).expect("b accepts");
                 a.advance_transmit(a.pending_transmit_size());
                 progress = true;
             }
+
             let wire_b = b.poll_transmit();
             if !wire_b.is_empty() {
                 a.handle_input(wire_b).expect("a accepts");
                 b.advance_transmit(b.pending_transmit_size());
                 progress = true;
             }
+
             if !progress {
                 break;
             }
@@ -986,6 +1054,7 @@ mod ws {
         assert!(pull.is_ready());
         let pev = push.poll_event().unwrap();
         let lev = pull.poll_event().unwrap();
+
         match (pev, lev) {
             (
                 Event::HandshakeSucceeded {
@@ -1067,19 +1136,23 @@ mod ws {
             ConnectionConfig::new(Role::Server, SocketType::Push).ws_role(WsRole::Server),
         );
         let wire_a = a.poll_transmit();
+
         if !wire_a.is_empty() {
             let _ = b.handle_input(wire_a);
             a.advance_transmit(a.pending_transmit_size());
         }
+
         let wire_b = b.poll_transmit();
         if !wire_b.is_empty() {
             let result = a.handle_input(wire_b);
             b.advance_transmit(b.pending_transmit_size());
+
             if let Err(Error::HandshakeFailed(msg)) = result {
                 assert!(msg.contains("incompatible"));
                 return;
             }
         }
+
         panic!("expected incompatible socket type rejection");
     }
 }
@@ -1112,6 +1185,7 @@ fn raw_ready_connection(
 ) -> Connection {
     use bytes::BytesMut;
     use omq_proto::proto::{command, frame, greeting};
+
     let mut connection = Connection::new(ConnectionConfig::new(Role::Server, socket_type));
     let mut wire = BytesMut::new();
     greeting::Greeting {
@@ -1121,6 +1195,7 @@ fn raw_ready_connection(
         as_server: false,
     }
     .encode(&mut wire);
+
     let mut body = BytesMut::new();
     command::encode(
         &Command::Ready(command::PeerProperties::default().with_socket_type(peer_type)),
@@ -1133,11 +1208,14 @@ fn raw_ready_connection(
         },
         &mut wire,
     );
+
     connection.handle_input(wire.freeze()).unwrap();
     assert!(connection.is_ready());
+
     let pending = connection.pending_transmit_size();
     connection.advance_transmit(pending);
     while connection.poll_event().is_some() {}
+
     connection
 }
 
@@ -1167,6 +1245,7 @@ fn subscriptions_use_negotiated_wire_format() {
                 connection.advance_transmit(wire.len());
                 let long = wire[0] & 2 != 0;
                 let header_len = if long { 9 } else { 2 };
+
                 if version == (3, 0) {
                     assert_eq!(wire[0] & 5, 0, "legacy subscriptions are final data frames");
                     assert_eq!(wire[header_len], tag);
@@ -1175,6 +1254,7 @@ fn subscriptions_use_negotiated_wire_format() {
                     assert_eq!(wire[0] & 5, 4);
                     let decoded =
                         omq_proto::proto::command::decode(wire.slice(header_len..)).unwrap();
+
                     match (decoded, tag) {
                         (Command::Subscribe(got), 1) | (Command::Cancel(got), 0) => {
                             assert_eq!(got, prefix);
@@ -1201,11 +1281,13 @@ fn single_frame_sockets_discard_whole_multipart_and_accept_next_message() {
             let mut wire = vec![1, 1, b'a', 1, 1, b'b'];
             wire.extend_from_slice(&[4, 8, 4, b'P', b'I', b'N', b'G', 0, 0, b'x']);
             wire.extend_from_slice(&[0, 1, b'c', 0, 2, b'o', b'k']);
+
             for chunk in wire.chunks(chunk_size) {
                 receiver
                     .handle_input(Bytes::copy_from_slice(chunk))
                     .unwrap();
             }
+
             let message = receiver.poll_message().unwrap();
             assert_eq!(message.part_bytes(0).unwrap(), b"ok".as_slice());
             assert!(
@@ -1226,6 +1308,7 @@ fn single_frame_sockets_discard_whole_multipart_and_accept_next_message() {
 #[test]
 fn received_ping_ttl_is_cleared_by_subsequent_input() {
     use std::time::Duration;
+
     let mut receiver = raw_ready_connection(SocketType::Pair, SocketType::Pair, (3, 1));
     let ping = Bytes::from_static(b"\x04\x07\x04PING\x00\x02");
     receiver.handle_input(ping.clone()).unwrap();
@@ -1233,12 +1316,14 @@ fn received_ping_ttl_is_cleared_by_subsequent_input() {
         receiver.peer_heartbeat_ttl(),
         Some(Duration::from_millis(200))
     );
+
     receiver.resume_input().unwrap();
     receiver.handle_input(Bytes::new()).unwrap();
     assert!(
         receiver.peer_heartbeat_ttl().is_some(),
         "empty input is not peer activity"
     );
+
     receiver.handle_input(Bytes::from_static(b"\x00")).unwrap();
     assert_eq!(
         receiver.peer_heartbeat_ttl(),
@@ -1247,6 +1332,7 @@ fn received_ping_ttl_is_cleared_by_subsequent_input() {
     );
     receiver.handle_input(Bytes::from_static(b"\x01x")).unwrap();
     assert!(receiver.poll_message().is_some());
+
     let mut combined = ping.to_vec();
     combined.extend_from_slice(b"\x00\x01y");
     receiver.handle_input(Bytes::from(combined)).unwrap();
@@ -1255,6 +1341,7 @@ fn received_ping_ttl_is_cleared_by_subsequent_input() {
         None,
         "coalesced traffic clears TTL"
     );
+
     receiver.handle_input(ping).unwrap();
     receiver
         .handle_input(Bytes::from_static(b"\x04\x07\x04PING\x00\x00"))
@@ -1269,12 +1356,15 @@ fn received_ping_ttl_is_cleared_by_subsequent_input() {
 #[test]
 fn an_announced_ttl_outlives_later_input() {
     use std::time::Duration;
+
     let mut receiver = raw_ready_connection(SocketType::Pair, SocketType::Pair, (3, 1));
     assert_eq!(receiver.peer_announced_ttl(), None);
+
     receiver
         .handle_input(Bytes::from_static(b"\x04\x07\x04PING\x00\x02"))
         .unwrap();
     receiver.resume_input().unwrap();
+
     receiver
         .handle_input(Bytes::from_static(b"\x00\x01x"))
         .unwrap();
@@ -1285,6 +1375,7 @@ fn an_announced_ttl_outlives_later_input() {
         Some(Duration::from_millis(200)),
         "later input keeps the announcement"
     );
+
     receiver
         .handle_input(Bytes::from_static(b"\x04\x07\x04PING\x00\x00"))
         .unwrap();
@@ -1309,17 +1400,20 @@ fn invalid_greeting_roles_are_rejected() {
 fn incompatible_peer_gets_error_before_close() {
     let mut receiver = Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pull));
     let mut peer = Connection::new(ConnectionConfig::new(Role::Client, SocketType::Pub));
+
     let greeting = peer.poll_transmit();
     peer.advance_transmit(greeting.len());
     receiver.handle_input(greeting).unwrap();
     let response = receiver.poll_transmit();
     receiver.advance_transmit(response.len());
     let _ = peer.handle_input(response);
+
     let wire = peer.poll_transmit();
     assert!(matches!(
         receiver.handle_input(wire),
         Err(Error::HandshakeFailed(_))
     ));
+
     let error = receiver.poll_transmit();
     assert!(matches!(
         omq_proto::proto::command::decode(error.slice(2..)).unwrap(),
@@ -1341,6 +1435,7 @@ fn plain_security_roles_are_independent_of_transport_roles() {
                 .mechanism,
         ),
     );
+
     let mut client = Connection::new(
         ConnectionConfig::new(Role::Server, SocketType::Push)
             .mechanism(Options::default().plain_client("alice", "secret").mechanism),
@@ -1362,6 +1457,7 @@ fn plain_security_roles_are_independent_of_transport_roles() {
 #[test]
 fn curve_security_roles_and_discard_preserve_encrypted_stream() {
     use omq_proto::{CurveKeypair, Options};
+
     let keypair = CurveKeypair::generate();
     let public = keypair.public;
     let mut server = Connection::new(
@@ -1375,9 +1471,11 @@ fn curve_security_roles_and_discard_preserve_encrypted_stream() {
                 .mechanism,
         ),
     );
+
     assert_eq!(server.poll_transmit()[32], 1);
     assert_eq!(client.poll_transmit()[32], 0);
     pump(&mut server, &mut client);
+
     client
         .send_message(&Message::multipart(["discard", "both"]))
         .unwrap();
@@ -1388,12 +1486,14 @@ fn curve_security_roles_and_discard_preserve_encrypted_stream() {
         })
         .unwrap();
     client.send_message(&Message::single("encrypted")).unwrap();
+
     pump(&mut server, &mut client);
     assert_eq!(
         server.poll_message().unwrap().part_bytes(0).unwrap(),
         b"encrypted".as_slice()
     );
     assert!(server.poll_message().is_none());
+
     client.send_message(&Message::single("next nonce")).unwrap();
     pump(&mut server, &mut client);
     assert_eq!(
@@ -1418,6 +1518,7 @@ mod deferred_authentication {
     fn counted(result: AuthenticationResult) -> Counted {
         let calls = Arc::new(AtomicUsize::new(0));
         let seen = calls.clone();
+
         Counted {
             calls,
             authenticator: Authenticator::new_with_result(move |_| {
@@ -1442,19 +1543,24 @@ mod deferred_authentication {
             } else {
                 Bytes::new()
             };
+
             let s_out = server.poll_transmit();
             let request = server.take_authentication_request();
+
             if c_out.is_empty() && s_out.is_empty() && request.is_none() {
                 return Ok(());
             }
+
             if !c_out.is_empty() {
                 client.advance_transmit(c_out.len());
                 server.handle_input(c_out)?;
             }
+
             if !s_out.is_empty() {
                 server.advance_transmit(s_out.len());
                 client.handle_input(s_out)?;
             }
+
             if let Some(request) = request {
                 assert_eq!(calls.load(Ordering::SeqCst), 0, "called inline");
                 assert!(server.awaiting_authentication());
@@ -1475,6 +1581,7 @@ mod deferred_authentication {
         let client = Connection::new(
             ConnectionConfig::new(Role::Client, SocketType::Push).mechanism(client),
         );
+
         (client, server)
     }
 
@@ -1483,12 +1590,14 @@ mod deferred_authentication {
         pump(&mut client, &mut server, calls).unwrap();
         assert!(client.is_ready() && server.is_ready());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+
         let Some(Event::HandshakeSucceeded {
             peer_properties, ..
         }) = server.poll_event()
         else {
             panic!("server handshake event");
         };
+
         assert_eq!(
             peer_properties.authentication.user_id.as_deref(),
             Some(&b"alice"[..])
@@ -1556,6 +1665,7 @@ mod deferred_authentication {
         let server_public = server_kp.public;
         let mut options = CurveServerOptions::default();
         options.authenticator = Some(auth.authenticator);
+
         assert_admitted(
             MechanismSetup::CurveServer {
                 our_keypair: server_kp,

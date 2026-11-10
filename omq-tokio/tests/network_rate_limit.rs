@@ -17,6 +17,7 @@ async fn configuration_is_shared_frozen_and_owned_only() {
             .is_err()
     );
     let context = Context::new();
+
     for invalid in [ByteRateLimit::new(0, 1), ByteRateLimit::new(1, 0)] {
         assert!(
             context
@@ -27,6 +28,7 @@ async fn configuration_is_shared_frozen_and_owned_only() {
                 .is_err()
         );
     }
+
     context.set_network_rate_limits(limits).unwrap();
     let imported = Context::from_share_key(context.share_key()).unwrap();
     assert_eq!(imported.network_rate_limits(), limits);
@@ -50,6 +52,7 @@ fn limited_context(io_threads: usize, ingress: bool) -> Context {
             egress: (!ingress).then_some(limit).flatten(),
         })
         .unwrap();
+
     context
 }
 
@@ -69,6 +72,7 @@ async fn connect_pair(
         )
         .await
         .unwrap();
+
     push.connect(endpoint).await.unwrap();
 
     pull.wait_connected(1, timeout).await.unwrap();
@@ -84,6 +88,7 @@ async fn aggregate(threads: usize, ingress: bool, scheme: &str) {
     // Its ingress envelope starts there, rather than at the first data send.
     let admission_started = Instant::now();
     let mut pairs = Vec::new();
+
     for _ in 0..4 {
         let pull =
             if ingress { &context } else { &other }.socket(SocketType::Gather, Options::default());
@@ -100,6 +105,7 @@ async fn aggregate(threads: usize, ingress: bool, scheme: &str) {
             .await
             .unwrap();
     }
+
     tokio::time::timeout(Duration::from_secs(5), async {
         for (_, pull) in &pairs {
             assert_eq!(pull.recv().await.unwrap().byte_len(), 8192);
@@ -107,15 +113,18 @@ async fn aggregate(threads: usize, ingress: bool, scheme: &str) {
     })
     .await
     .unwrap();
+
     let elapsed = if scheme == "dart" && ingress {
         admission_started.elapsed()
     } else {
         started.elapsed()
     };
+
     assert!(
         elapsed >= Duration::from_millis(450),
         "{scheme} ingress={ingress} escaped the budget: {elapsed:?}"
     );
+
     for (push, pull) in pairs {
         push.close().await.unwrap();
         pull.close().await.unwrap();
@@ -151,6 +160,7 @@ async fn raw_stream_runs_and_is_paced_on_owned_io_lanes() {
         .unwrap();
     let stream = context.socket(SocketType::Stream, Options::default());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+
     stream
         .connect(
             format!("tcp://{}", listener.local_addr().unwrap())
@@ -159,6 +169,7 @@ async fn raw_stream_runs_and_is_paced_on_owned_io_lanes() {
         )
         .await
         .unwrap();
+
     let (mut remote, _) = listener.accept().await.unwrap();
     let identity = stream.recv().await.unwrap().part_bytes(0).unwrap();
     let start = Instant::now();
@@ -206,6 +217,7 @@ fn heartbeat_options(scheme: &str) -> (Options, Options) {
         client.quic.trust_system = false;
         client.quic.trust_pem = Some(tls.cert.pem().into_bytes());
     }
+
     #[cfg(not(feature = "quic"))]
     let _ = scheme;
 
@@ -232,6 +244,7 @@ async fn transfer(scheme: &str, ingress: bool, workload: Workload) {
         for _ in 0..count {
             push.send(Message::from_slice(&body)).await.unwrap();
         }
+
         for _ in 0..count {
             assert_eq!(
                 pull.recv().await.unwrap().part_bytes(0).unwrap().as_ref(),
@@ -241,6 +254,7 @@ async fn transfer(scheme: &str, ingress: bool, workload: Workload) {
     })
     .await
     .unwrap_or_else(|_| panic!("{scheme} ingress={ingress} stalled"));
+
     assert!(
         start.elapsed() >= minimum,
         "{scheme} escaped limit in {:?}",
@@ -274,6 +288,7 @@ async fn compression_is_charged_after_encoding() {
         #[cfg(feature = "zstd")]
         "zstd+tcp",
     ];
+
     for scheme in schemes {
         for ingress in [false, true] {
             transfer(
@@ -301,6 +316,7 @@ async fn phase_two_transports_use_the_context_budget() {
         #[cfg(feature = "dart")]
         "dart",
     ];
+
     for scheme in schemes {
         for ingress in [false, true] {
             transfer(
@@ -329,19 +345,23 @@ async fn udp_paces_complete_datagrams_in_both_directions() {
                 egress: if ingress { None } else { limit },
             })
             .unwrap();
+
         let unlimited = Context::current();
         let dish = if ingress { &limited } else { &unlimited }
             .socket(SocketType::Dish, Options::default());
         let radio = if ingress { &unlimited } else { &limited }
             .socket(SocketType::Radio, Options::default());
+
         dish.join("g").await.unwrap();
         let endpoint = dish
             .bind("udp://127.0.0.1:0".parse::<omq_tokio::Endpoint>().unwrap())
             .await
             .unwrap();
         radio.connect(endpoint).await.unwrap();
+
         let body = bytes::Bytes::from(vec![7; 16 * 1024]);
         let start = Instant::now();
+
         tokio::time::timeout(Duration::from_secs(5), async {
             for _ in 0..8 {
                 radio
@@ -352,12 +372,14 @@ async fn udp_paces_complete_datagrams_in_both_directions() {
                     .await
                     .unwrap();
             }
+
             for _ in 0..8 {
                 assert_eq!(dish.recv().await.unwrap().part_bytes(1).unwrap(), body);
             }
         })
         .await
         .unwrap();
+
         assert!(start.elapsed() >= Duration::from_millis(450));
         radio.close().await.unwrap();
         dish.close().await.unwrap();
@@ -404,12 +426,14 @@ async fn fanout_charges_each_wire_copy() {
         .unwrap();
     let unlimited = Context::current();
     let mut subscribers = Vec::new();
+
     for _ in 0..4 {
         let subscriber = unlimited.socket(SocketType::Sub, Options::default());
         subscriber.subscribe("").await.unwrap();
         subscriber.connect(endpoint.clone()).await.unwrap();
         subscribers.push(subscriber);
     }
+
     publisher
         .wait_subscribed(4, Duration::from_secs(3))
         .await
@@ -419,6 +443,7 @@ async fn fanout_charges_each_wire_copy() {
         .send(Message::from_slice(&vec![7; 8192]))
         .await
         .unwrap();
+
     tokio::time::timeout(Duration::from_secs(5), async {
         for subscriber in &subscribers {
             assert_eq!(subscriber.recv().await.unwrap().byte_len(), 8192);
@@ -426,8 +451,10 @@ async fn fanout_charges_each_wire_copy() {
     })
     .await
     .unwrap();
+
     assert!(start.elapsed() >= Duration::from_millis(450));
     publisher.close().await.unwrap();
+
     for subscriber in subscribers {
         subscriber.close().await.unwrap();
     }
@@ -442,6 +469,7 @@ async fn latency_direct_writer_cannot_bypass_egress() {
             egress: Some(ByteRateLimit::new(64 * 1024, 1024)),
         })
         .unwrap();
+
     let sender = limited.socket(
         SocketType::Channel,
         Options {
@@ -450,6 +478,7 @@ async fn latency_direct_writer_cannot_bypass_egress() {
         },
     );
     let receiver = Context::current().socket(SocketType::Channel, Options::default());
+
     let endpoint = receiver
         .bind("tcp://127.0.0.1:0".parse::<omq_tokio::Endpoint>().unwrap())
         .await
@@ -459,6 +488,7 @@ async fn latency_direct_writer_cannot_bypass_egress() {
         .wait_connected(1, Duration::from_secs(3))
         .await
         .unwrap();
+
     let start = Instant::now();
     sender
         .send(Message::from_slice(&vec![7; 16 * 1024]))
@@ -469,6 +499,7 @@ async fn latency_direct_writer_cannot_bypass_egress() {
         .unwrap()
         .unwrap();
     assert!(start.elapsed() >= Duration::from_millis(220));
+
     sender.close().await.unwrap();
     receiver.close().await.unwrap();
 }
@@ -494,6 +525,7 @@ async fn inproc_bypasses_the_network_budget() {
         .send(Message::from_slice(&vec![7; 8192]))
         .await
         .unwrap();
+
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(1), receiver.recv())
             .await
@@ -502,6 +534,7 @@ async fn inproc_bypasses_the_network_budget() {
             .byte_len(),
         8192
     );
+
     sender.close().await.unwrap();
     receiver.close().await.unwrap();
 }

@@ -53,17 +53,21 @@ impl Policy {
             Some(query) => format!("{}?{query}", url.path()),
             None => url.path().to_owned(),
         };
+
         if resource != self.resource {
             return Err(StatusCode::NOT_FOUND);
         }
+
         // Native clients may omit Origin; a present Origin must be allowed.
         if let Some(origin) = request.origin() {
             let allowed = normalize_ws_origin(origin)
                 .is_ok_and(|origin| self.allowed_origins.contains(&origin));
+
             if !allowed {
                 return Err(StatusCode::FORBIDDEN);
             }
         }
+
         Ok(())
     }
 }
@@ -73,23 +77,28 @@ pub(super) async fn accept_roles(connection: quinn::Connection, policy: &Policy)
     let request = omq_webtrans_quinn::Request::accept(connection)
         .await
         .map_err(|e| failed(format!("WebTransport CONNECT: {e:?}")))?;
+
     if let Err(status) = policy.check(&request) {
         let _ = request.close(status).await;
         return Err(failed(format!("WebTransport request rejected: {status}")));
     }
+
     let session = request
         .ok()
         .await
         .map_err(|e| failed(format!("WebTransport response: {e}")))?;
+
     let roles = match classify_streams(&session).await {
         Ok((data, mut liveness)) => liveness::write_preface(&mut liveness.0)
             .await
             .map(|()| (data, liveness)),
         Err(e) => Err(e),
     };
+
     if roles.is_err() {
         session.close(super::code::SETUP_ERROR, b"");
     }
+
     let (data, liveness) = roles?;
     Ok(Roles {
         carrier: Carrier::Web(Box::new(session)),
@@ -103,6 +112,7 @@ type Pair = (SendHalf, RecvHalf);
 async fn classify_streams(session: &omq_webtrans_quinn::Session) -> Result<(Pair, Pair)> {
     let mut data = None;
     let mut control = None;
+
     while data.is_none() || control.is_none() {
         let (send, recv) = session
             .accept_bi()
@@ -111,14 +121,17 @@ async fn classify_streams(session: &omq_webtrans_quinn::Session) -> Result<(Pair
         let mut recv = RecvHalf::Web(recv);
         let mut preface = [0; 8];
         recv.read_exact(&mut preface).await?;
+
         let slot = match preface {
             DATA_PREFACE => &mut data,
             liveness::PREFACE => &mut control,
             _ => return Err(failed("invalid WebTransport role preface")),
         };
+
         if slot.replace((SendHalf::Web(send), recv)).is_some() {
             return Err(failed("duplicate WebTransport stream role"));
         }
     }
+
     Ok((data.expect("data role"), control.expect("liveness role")))
 }

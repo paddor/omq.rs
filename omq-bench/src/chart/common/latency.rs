@@ -73,6 +73,7 @@ impl LatencyLayout<LatencyAxis> {
         let ticks = std::iter::once(1.0)
             .chain((10..=100).step_by(10).map(f64::from))
             .collect();
+
         Self {
             axis: LatencyAxis((1.0..100.0).into(), ticks),
             chart_h: 600,
@@ -119,6 +120,7 @@ pub(crate) fn draw_latency_single_panel<Y: Ranged<ValueType = f64> + ValueFormat
     } else {
         ("req CPU%", "rep CPU%")
     };
+
     let columns = CpuColumns {
         cpu,
         snd_label,
@@ -196,6 +198,7 @@ fn draw_latency_panel<DB: DrawingBackend, Y: Ranged<ValueType = f64> + ValueForm
                 })
             })
             .collect();
+
         if pts.is_empty() {
             continue;
         }
@@ -236,6 +239,7 @@ pub(crate) fn draw_multirow_latency(
         sizes,
         present: &present,
     };
+
     for (index, (caption, lat)) in rows.iter().enumerate() {
         let y = top_margin + index as u32 * (panel_height + gap);
         let area = root.clone().shrink((0, y), (width, panel_height));
@@ -279,6 +283,7 @@ fn draw_latency_ranges<DB: DrawingBackend, Y: Ranged<ValueType = f64>>(
             let Some(entry) = lat.get(size).and_then(|values| values.get(imp.key)) else {
                 continue;
             };
+
             let x = index as f64;
             let (low, high) = if annotate_clipped {
                 (
@@ -340,9 +345,11 @@ impl ClipLabels {
                     .all(|old| old.end <= span.start || span.end <= old.start)
             })
             .unwrap_or(self.rows.len());
+
         if row == self.rows.len() {
             self.rows.push(Vec::new());
         }
+
         self.rows[row].push(span);
         row
     }
@@ -379,11 +386,13 @@ impl ClipLabels {
         let pixel_x = chart.plotting_area().map_coordinate(&(x, top)).0;
         let label_width = i32::try_from(label.len()).unwrap() * 6;
         let boundary = pixel_x + label_width + 8 > chart.plotting_area().get_pixel_range().0.end;
+
         let span = if boundary {
             pixel_x - label_width - 8..pixel_x
         } else {
             pixel_x..pixel_x + label_width + 8
         };
+
         let row = self.place(span);
 
         let style = ("sans-serif", 10)
@@ -393,6 +402,7 @@ impl ClipLabels {
                 if boundary { HPos::Right } else { HPos::Left },
                 VPos::Top,
             ));
+
         chart.draw_series(std::iter::once(Text::new(
             label,
             (
@@ -401,6 +411,7 @@ impl ClipLabels {
             ),
             style,
         )))?;
+
         Ok(())
     }
 }
@@ -412,5 +423,6 @@ pub(crate) fn auto_lat_range(lat: &LatencyMap) -> (f64, f64) {
         .map(|entry| entry.p999)
         .fold(0.0_f64, f64::max);
     let (top, _) = nice_axis(max_val * 1.05, 6);
+
     (0.0, top)
 }

@@ -67,6 +67,7 @@ fn init_external<'a>(
         ),
         0
     );
+
     ptr
 }
 
@@ -196,15 +197,18 @@ fn shm_received_message_data_is_writable() {
     let ctx = zmq_ctx_new();
     let sender = zmq_socket(ctx, ZMQ_CHANNEL);
     let receiver = zmq_socket(ctx, ZMQ_CHANNEL);
+
     for socket in [sender, receiver] {
         set_i32(socket, ZMQ_LINGER, 0);
         set_i32(socket, ZMQ_RCVTIMEO, 5000);
         set_i32(socket, ZMQ_SNDTIMEO, 5000);
     }
+
     let endpoint =
         std::ffi::CString::new(format!("shm://@omq-msg-data-{}", std::process::id())).unwrap();
     assert_eq!(omq_zmq::zmq_bind(receiver, endpoint.as_ptr()), 0);
     assert_eq!(zmq_connect(sender, endpoint.as_ptr()), 0);
+
     let payload = [b'a'; 512];
     assert_eq!(
         zmq_send(sender, payload.as_ptr().cast(), payload.len(), 0),
@@ -215,6 +219,7 @@ fn shm_received_message_data_is_writable() {
         zmq_msg_recv(message.0.as_mut_ptr().cast(), receiver, 0),
         512
     );
+
     let data = zmq_msg_data(message.0.as_mut_ptr().cast()).cast::<u8>();
     // SAFETY: the received message exposes 512 writable bytes until close.
     unsafe { std::slice::from_raw_parts_mut(data, payload.len()) }.fill(b'b');
@@ -222,6 +227,7 @@ fn shm_received_message_data_is_writable() {
         zmq_msg_data(message.0.as_mut_ptr().cast()).cast::<u8>(),
         data,
     );
+
     assert_eq!(
         zmq_msg_send(message.0.as_mut_ptr().cast(), receiver, 0),
         512
@@ -232,6 +238,7 @@ fn shm_received_message_data_is_writable() {
         512
     );
     assert_eq!(reply, [b'b'; 512]);
+
     assert_eq!(zmq_msg_close(message.0.as_mut_ptr().cast()), 0);
     assert_eq!(zmq_close(sender), 0);
     assert_eq!(zmq_close(receiver), 0);

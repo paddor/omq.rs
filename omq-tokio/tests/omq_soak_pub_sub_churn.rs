@@ -1,8 +1,5 @@
 #![cfg(feature = "soak")]
 
-#[global_allocator]
-static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
-
 mod soak_common;
 
 use std::time::{Duration, Instant};
@@ -13,6 +10,9 @@ use rand::rngs::StdRng;
 
 use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
 
+#[global_allocator]
+static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
+
 const TOPICS: &[&str] = &["fast.", "slow.", "all.", "rare."];
 
 /// Publishes up to 10k messages, cycling through topics. A send blocked for
@@ -21,6 +21,7 @@ async fn publish_batch(publisher: &Socket, pub_count: &mut u64) {
     for _ in 0..10_000 {
         let topic = TOPICS[*pub_count as usize % TOPICS.len()];
         let msg = format!("{topic}{pub_count}");
+
         if let Ok(Ok(())) = tokio::time::timeout(
             Duration::from_millis(1),
             publisher.send(Message::single(msg)),
@@ -95,6 +96,7 @@ fn soak_pub_sub_churn() {
         for sub in subs {
             sub.close().await.unwrap();
         }
+
         publisher.close().await.unwrap();
 
         eprintln!(

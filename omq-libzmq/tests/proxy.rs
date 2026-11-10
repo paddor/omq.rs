@@ -30,6 +30,8 @@ const ZMQ_RCVHWM: i32 = 24;
 const ZMQ_RCVTIMEO: i32 = 27;
 const ZMQ_SNDTIMEO: i32 = 28;
 
+const ZMQ_MSG_WORDS: usize = 64 / size_of::<usize>();
+
 fn set_i32(sock: *mut c_void, opt: i32, value: i32) {
     zmq_setsockopt(sock, opt, (&value as *const i32).cast(), size_of::<i32>());
 }
@@ -46,10 +48,9 @@ fn rcvmore(sock: *mut c_void) -> bool {
     let mut v: i32 = 0;
     let mut sz = size_of::<i32>();
     zmq_getsockopt(sock, ZMQ_RCVMORE, (&mut v as *mut i32).cast(), &mut sz);
+
     v != 0
 }
-
-const ZMQ_MSG_WORDS: usize = 64 / size_of::<usize>();
 
 #[repr(C)]
 struct ZmqMsg([usize; ZMQ_MSG_WORDS]);
@@ -108,15 +109,18 @@ fn spawn_counter_sender(src: *mut c_void, n: usize) -> std::thread::JoinHandle<S
     std::thread::spawn(move || {
         let src = src_arg.into_ptr();
         let mut sent = 0usize;
+
         while sent < n {
             let data = (sent as u32).to_le_bytes();
             let rc = zmq_send(src, data.as_ptr().cast(), data.len(), ZMQ_DONTWAIT);
+
             if rc == i32::try_from(data.len()).expect("test payload len fits i32") {
                 sent += 1;
             } else {
                 std::thread::sleep(Duration::from_millis(1));
             }
         }
+
         SocketArg(src)
     })
 }
@@ -141,10 +145,12 @@ fn send_burst(sock: *mut c_void, count: u32) -> usize {
     for i in 0..count {
         let data = i.to_le_bytes();
         let rc = zmq_send(sock, data.as_ptr().cast(), data.len(), ZMQ_DONTWAIT);
+
         if rc == i32::try_from(data.len()).expect("test payload len fits i32") {
             sent += 1;
         }
     }
+
     sent
 }
 
@@ -243,11 +249,13 @@ fn proxy_retries_pending_after_inproc_backpressure() {
 
     let mut got = Vec::with_capacity(N);
     let mut buf = [0u8; 4];
+
     for _ in 0..N {
         let rc = zmq_recv(dst, buf.as_mut_ptr().cast(), buf.len(), 0);
         assert_eq!(rc, 4, "dst recv failed (errno={})", omq_zmq::zmq_errno());
         got.push(u32::from_le_bytes(buf));
     }
+
     assert_eq!(got, (0..N as u32).collect::<Vec<_>>());
 
     let src = sender.join().unwrap().0;
@@ -579,12 +587,14 @@ fn proxy_large_message() {
     let rc = zmq_msg_recv(recv_msg.0.as_mut_ptr().cast(), dst, 0);
     assert_eq!(rc as usize, size);
     assert_eq!(zmq_msg_size(recv_msg.0.as_ptr().cast()), size);
+
     let got = unsafe {
         std::slice::from_raw_parts(
             zmq_msg_data(recv_msg.0.as_mut_ptr().cast()).cast::<u8>(),
             size,
         )
     };
+
     assert_eq!(got, &payload[..]);
 
     zmq_msg_close(recv_msg.0.as_mut_ptr().cast());

@@ -21,6 +21,7 @@ fn msg_str(msg: &Message, idx: usize) -> String {
 async fn main() {
     let ctx = Context::new();
     let args: Vec<String> = std::env::args().collect();
+
     let endpoints: Vec<Endpoint> = if args.len() > 1 {
         args[1..]
             .iter()
@@ -46,6 +47,7 @@ async fn main() {
                     order.push(idx);
                 }
             }
+
             order
         } else {
             (0..endpoints.len()).collect()

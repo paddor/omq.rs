@@ -10,9 +10,6 @@
 //! - Identity table doesn't grow unbounded (heap check).
 //! - New peer reusing a departed identity works correctly.
 
-#[global_allocator]
-static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
-
 mod soak_common;
 
 use std::time::{Duration, Instant};
@@ -22,6 +19,9 @@ use rand::RngExt;
 use rand::rngs::StdRng;
 
 use omq_tokio::{Message, Options, ReconnectPolicy, Socket, SocketType};
+
+#[global_allocator]
+static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
 
 struct Dealer {
     identity: Bytes,
@@ -171,6 +171,7 @@ fn soak_router_dealer_churn() {
                     stats.unroutable,
                     dealers.len(),
                 );
+
                 last_log = Instant::now();
             }
         }
@@ -178,6 +179,7 @@ fn soak_router_dealer_churn() {
         for dealer in dealers {
             dealer.socket.close().await.unwrap();
         }
+
         router.close().await.unwrap();
 
         eprintln!(
@@ -188,6 +190,7 @@ fn soak_router_dealer_churn() {
             stats.unroutable,
             start.elapsed().as_secs_f64(),
         );
+
         assert!(stats.sent > 0, "no messages sent");
     });
 

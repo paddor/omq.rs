@@ -41,10 +41,12 @@ impl Table {
         {
             return Err(invalid("invalid SHM lease").into());
         }
+
         let cell = self.lease_cell(reference.lease);
         if !cell.borrow(reference.generation) {
             return Err(invalid("stale or duplicate SHM reference").into());
         }
+
         if !LeaseCell::matches(
             self.coordinate_cells(reference.lease),
             reference.coordinates(),
@@ -52,6 +54,7 @@ impl Table {
             self.complete(reference.lease, reference.generation, BORROWED);
             return Err(invalid("SHM coordinates do not match their lease").into());
         }
+
         Ok(())
     }
 
@@ -84,6 +87,7 @@ impl Table {
             stopped: &self.stopped,
         }
     }
+
     pub(super) fn cell(&self, index: usize) -> &std::sync::atomic::AtomicU64 {
         assert!(index < self.count);
         self.mapping.atomic64(HEADER + index * CELL_BYTES)
@@ -130,6 +134,7 @@ impl Table {
                 self.notify();
             }
         }
+
         self.notify();
         let _ = self.carrier.notify_writer(&self.mapping);
     }

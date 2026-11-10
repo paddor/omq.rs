@@ -91,10 +91,12 @@ where
         if cancel.is_cancelled() {
             return Err(Canceled::Token);
         }
+
         if attempt > 0 {
             let Some(delay) = next_delay(&policy, attempt) else {
                 return Err(Canceled::PolicyDisabled);
             };
+
             on_delay(delay, attempt);
             tokio::select! {
                 biased;
@@ -102,17 +104,20 @@ where
                 () = sleep(delay) => {}
             }
         }
+
         let result = tokio::select! {
             biased;
             () = cancel.cancelled() => return Err(Canceled::Token),
             result = dial() => result,
         };
+
         match result {
             Ok(stream) => return Ok(stream),
             Err(err) => {
                 if stop_conn_refused && err.is_connection_refused() {
                     return Err(Canceled::StoppedConnRefused);
                 }
+
                 attempt = attempt.saturating_add(1);
             }
         }

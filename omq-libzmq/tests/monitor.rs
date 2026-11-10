@@ -21,8 +21,10 @@ const ZMQ_SNDTIMEO: i32 = 28;
 
 const ZMQ_EVENT_LISTENING: u16 = 0x0008;
 const ZMQ_EVENT_ACCEPTED: u16 = 0x0020;
+
 #[allow(dead_code)]
 const ZMQ_EVENT_CONNECTED: u16 = 0x0001;
+
 const ZMQ_EVENT_HANDSHAKE_SUCCEEDED: u16 = 0x1000;
 const ZMQ_EVENT_ALL: i32 = 0xFFFF;
 const ZMQ_CURRENT_EVENT_VERSION: i32 = 1;
@@ -47,13 +49,16 @@ fn set_timeo(sock: *mut c_void, ms: i32) {
 fn recv_monitor_event(mon: *mut c_void) -> Option<(u16, String)> {
     let mut header = [0u8; 64];
     let rc = zmq_recv(mon, header.as_mut_ptr().cast(), header.len(), 0);
+
     if rc < 6 {
         return None;
     }
+
     let event_id = u16::from_le_bytes([header[0], header[1]]);
 
     let mut ep_buf = [0u8; 256];
     let rc2 = zmq_recv(mon, ep_buf.as_mut_ptr().cast(), ep_buf.len(), 0);
+
     let endpoint = if rc2 > 0 {
         String::from_utf8_lossy(&ep_buf[..rc2 as usize]).to_string()
     } else {
@@ -82,6 +87,7 @@ fn monitor_versioned_v1_delegates_and_v2_stubs_return_enotsup() {
 
     let pull2 = zmq_socket(ctx, ZMQ_PULL);
     let mon_addr2 = CString::new("inproc://test-monitor-versioned-v2").unwrap();
+
     assert_eq!(
         zmq_socket_monitor_versioned(
             pull2,
@@ -92,6 +98,7 @@ fn monitor_versioned_v1_delegates_and_v2_stubs_return_enotsup() {
         ),
         -1
     );
+
     assert_eq!(omq_zmq::zmq_errno(), ZMQ_ENOTSUP);
     assert_eq!(zmq_socket_monitor_pipes_stats(pull2), -1);
     assert_eq!(omq_zmq::zmq_errno(), ZMQ_ENOTSUP);
@@ -138,11 +145,13 @@ fn monitor_receives_listening_and_accepted() {
     // Should receive ACCEPTED and/or HANDSHAKE_SUCCEEDED.
     let mut got_accepted = false;
     let mut got_handshake = false;
+
     for _ in 0..5 {
         if let Some((id, _)) = recv_monitor_event(mon) {
             if id == ZMQ_EVENT_ACCEPTED {
                 got_accepted = true;
             }
+
             if id == ZMQ_EVENT_HANDSHAKE_SUCCEEDED {
                 got_handshake = true;
             }
@@ -150,6 +159,7 @@ fn monitor_receives_listening_and_accepted() {
             break;
         }
     }
+
     assert!(got_accepted, "expected ACCEPTED event");
     assert!(got_handshake, "expected HANDSHAKE_SUCCEEDED event");
 

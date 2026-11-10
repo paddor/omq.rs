@@ -15,6 +15,7 @@ fn blocking_waker_can_reenter_registration() {
             drop(self.0.register());
         }
     }
+
     let signal = BlockingSignal::new();
     let registration = signal.register_waker(Arc::new(Reenter(signal.clone())).into());
     signal.wake();
@@ -30,6 +31,7 @@ fn panicking_waker_does_not_poison_waiter_registration() {
             panic!("user waker");
         }
     }
+
     let signal = BlockingSignal::new();
     let registration = signal.register_waker(Arc::new(Panics).into());
     assert!(std::panic::catch_unwind(|| signal.wake()).is_err());
@@ -48,19 +50,23 @@ fn blocking_task_waker_releases_at_thread_exit_and_allows_late_tls_calls() {
             self.0.send(()).unwrap();
         }
     }
+
     thread_local! {
         static LATE: RefCell<Option<LateCall>> = const { RefCell::new(None) };
     }
+
     let (completed, completion) = std::sync::mpsc::channel();
     let cached = std::thread::spawn(move || {
         // TLS drops in reverse order. This destructor runs after the
         // cached wake handle has been destroyed.
         LATE.with(|late| *late.borrow_mut() = Some(LateCall(completed)));
         block_on(std::future::ready(()));
+
         BLOCKING_UNPARK.with(Arc::downgrade)
     })
     .join()
     .unwrap();
+
     completion.recv().unwrap();
     assert!(cached.upgrade().is_none());
 }
@@ -72,13 +78,16 @@ fn cached_blocking_waiters_keep_nested_registrations_independent() {
     let pointer = Arc::as_ptr(&first.state);
     let second = signal.register();
     assert!(!Arc::ptr_eq(&first.state, &second.state));
+
     drop(first);
     let reused = signal.register();
     assert_eq!(Arc::as_ptr(&reused.state), pointer);
     assert_eq!(signal.active.load(Ordering::Acquire), 2);
+
     signal.wake();
     assert!(!second.state.armed.load(Ordering::Acquire));
     assert!(!reused.state.armed.load(Ordering::Acquire));
+
     drop(second);
     drop(reused);
     assert_eq!(signal.active.load(Ordering::Acquire), 0);

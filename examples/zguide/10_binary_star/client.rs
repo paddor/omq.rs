@@ -51,6 +51,7 @@ async fn main() {
                 println!("client: primary timeout for {body}, trying backup");
             }
         }
+
         drop(req);
 
         // Fallback to backup.

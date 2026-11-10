@@ -78,6 +78,7 @@ async fn random_multipart_sizes() {
             .unwrap_or_else(|_| panic!("recv timed out on round {round}"))
             .unwrap();
         assert_eq!(m.len(), n_parts, "part count mismatch on round {round}");
+
         for (j, expected) in hashes.iter().enumerate() {
             let got = m.part_bytes(j).unwrap();
             assert_eq!(

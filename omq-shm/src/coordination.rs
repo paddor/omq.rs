@@ -49,8 +49,10 @@ impl ReceiveCredits {
             used.checked_sub(count)
                 .expect("returned unreserved receive credits")
         });
+
         count != 0 && previous == self.capacity
     }
+
     fn update(&self, change: impl Fn(usize) -> usize) -> usize {
         let mut used = self.used.load(Ordering::Acquire);
         loop {
@@ -58,6 +60,7 @@ impl ReceiveCredits {
             if updated == used {
                 return used;
             }
+
             match self.used.compare_exchange_weak(
                 used,
                 updated,
@@ -87,9 +90,11 @@ impl LeaseCell<'_> {
         for (cell, value) in cells.iter().zip(coordinates) {
             cell.store(value, Ordering::Relaxed);
         }
+
         self.state.store(generation | PENDING, Ordering::Release);
         // Pair with close_reader: publication and close cannot both miss.
         fence(Ordering::SeqCst);
+
         self.closed.load(Ordering::Acquire) != 0 && self.complete(generation, PENDING)
     }
 
@@ -188,6 +193,7 @@ impl CarrierState<'_> {
         let read = self.read.load(Ordering::Relaxed);
         let write = self.write.load(Ordering::Acquire);
         let length = write.wrapping_sub(read);
+
         (length <= self.capacity as u64).then_some(Window {
             cursor: read,
             length: length as usize,
@@ -199,6 +205,7 @@ impl CarrierState<'_> {
         let write = self.write.load(Ordering::Relaxed);
         let read = self.read.load(Ordering::Acquire);
         let length = write.wrapping_sub(read);
+
         (length <= self.capacity as u64).then(|| Window {
             cursor: write,
             length: self.capacity - length as usize,
@@ -223,6 +230,7 @@ impl CarrierState<'_> {
         // RMW acquires a concurrent publisher that has already disarmed us.
         self.reader_parked
             .swap(u32::from(!polling), Ordering::SeqCst);
+
         self.read_window().map(|window| window.length != 0)
     }
 
@@ -289,9 +297,11 @@ impl<L: Recipient> LeaseGroup<L> {
         if self.complete.load(Ordering::Acquire) {
             return true;
         }
+
         if !self.sealed.load(Ordering::Acquire) {
             return false;
         }
+
         let leases = self.leases.lock().expect("SHM group leases");
         if leases.iter().all(Recipient::finished) {
             self.complete.store(true, Ordering::Release);
@@ -310,5 +320,6 @@ pub(crate) fn unique_release<T>(owner: Arc<T>, gate: &Mutex<()>) -> Option<Arc<T
             return None;
         }
     }
+
     Some(owner)
 }

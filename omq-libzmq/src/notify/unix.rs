@@ -17,6 +17,7 @@ fn signal_fd(fd: c_int) {
             libc::write(fd, (&raw const val).cast::<libc::c_void>(), 8);
         }
     }
+
     #[cfg(not(target_os = "linux"))]
     {
         let b: u8 = 1;
@@ -37,6 +38,7 @@ fn drain_fd(fd: c_int) {
             libc::read(fd, (&raw mut buf).cast::<libc::c_void>(), 8);
         }
     }
+
     #[cfg(not(target_os = "linux"))]
     {
         let mut buf = [0u8; 64];
@@ -66,6 +68,7 @@ impl RecvNotify {
         if self.signal_fd < 0 {
             return;
         }
+
         signal_fd(self.signal_fd);
     }
 
@@ -73,6 +76,7 @@ impl RecvNotify {
         if self.poll_fd < 0 {
             return;
         }
+
         drain_fd(self.poll_fd);
     }
 
@@ -80,6 +84,7 @@ impl RecvNotify {
         if self.poll_fd < 0 {
             return false;
         }
+
         let mut pfd = libc::pollfd {
             fd: self.poll_fd,
             events: libc::POLLIN,
@@ -87,6 +92,7 @@ impl RecvNotify {
         };
         // SAFETY: pfd is a valid single-element pollfd array.
         let rc = unsafe { libc::poll(&raw mut pfd, 1, timeout_ms) };
+
         rc > 0
     }
 }
@@ -110,6 +116,7 @@ impl NotifyFds {
         if recv_fd < 0 {
             return None;
         }
+
         // SAFETY: same as above.
         let send_fd = unsafe { libc::eventfd(DEFAULT_HWM as u32, libc::EFD_NONBLOCK) };
         if send_fd < 0 {
@@ -117,6 +124,7 @@ impl NotifyFds {
             unsafe { libc::close(recv_fd) };
             return None;
         }
+
         Some(Self {
             recv_poll: recv_fd,
             recv_signal: recv_fd,
@@ -130,30 +138,37 @@ impl NotifyFds {
         let mut fds = [-1i32; 2];
         // SAFETY: fds is a valid 2-element array; pipe() writes two fds into it on success.
         let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
+
         if rc != 0 {
             return None;
         }
+
         // SAFETY: fds[0] and fds[1] are valid fds from the successful pipe() call.
         unsafe {
             libc::fcntl(fds[0], libc::F_SETFL, libc::O_NONBLOCK);
             libc::fcntl(fds[1], libc::F_SETFL, libc::O_NONBLOCK);
         }
+
         let (recv_read, recv_write) = (fds[0], fds[1]);
         // SAFETY: same as above.
         let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
+
         if rc != 0 {
             // SAFETY: recv_read and recv_write are valid open fds.
             unsafe {
                 libc::close(recv_read);
                 libc::close(recv_write);
             }
+
             return None;
         }
+
         // SAFETY: fds[0] and fds[1] are valid fds from the successful pipe() call.
         unsafe {
             libc::fcntl(fds[0], libc::F_SETFL, libc::O_NONBLOCK);
             libc::fcntl(fds[1], libc::F_SETFL, libc::O_NONBLOCK);
         }
+
         Some(Self {
             recv_poll: recv_read,
             recv_signal: recv_write,
@@ -169,6 +184,7 @@ impl Drop for NotifyFds {
             (self.recv_poll, self.recv_signal),
             (self.send_poll, self.send_signal),
         ];
+
         for (poll, signal) in directions {
             // SAFETY: the fds were opened by `open` and are closed only here.
             unsafe { libc::close(poll) };
@@ -252,6 +268,7 @@ impl PollWaiter {
                         map.push((i, crate::poll::ZMQ_POLLIN as libc::c_short));
                     }
                 }
+
                 if (item.events & crate::poll::ZMQ_POLLOUT as libc::c_short) != 0 {
                     let fd = sock.notify.send_fd();
                     if fd >= 0 {
@@ -268,12 +285,15 @@ impl PollWaiter {
                 if (item.events & crate::poll::ZMQ_POLLIN as libc::c_short) != 0 {
                     events |= libc::POLLIN as libc::c_short;
                 }
+
                 if (item.events & crate::poll::ZMQ_POLLOUT as libc::c_short) != 0 {
                     events |= libc::POLLOUT as libc::c_short;
                 }
+
                 if (item.events & crate::poll::ZMQ_POLLERR as libc::c_short) != 0 {
                     events |= libc::POLLERR as libc::c_short;
                 }
+
                 pfds.push(libc::pollfd {
                     fd: item.fd,
                     events,
@@ -295,9 +315,11 @@ impl PollWaiter {
             if pfd.fd < 0 {
                 continue;
             }
+
             if self.map[pfd_idx].1 == 0 {
                 continue;
             }
+
             drain_fd(pfd.fd);
         }
     }
@@ -325,6 +347,7 @@ impl PollWaiter {
                 poll_timeout,
             )
         };
+
         if rc < 0 {
             return crate::error::fail(
                 std::io::Error::last_os_error()
@@ -332,6 +355,7 @@ impl PollWaiter {
                     .unwrap_or(libc::EINTR) as std::os::raw::c_int,
             );
         }
+
         if rc == 0 {
             return 0;
         }
@@ -343,10 +367,12 @@ impl PollWaiter {
 
         let mut ready_count = 0i32;
         let mut counted = vec![false; items.len()];
+
         for (pfd_idx, pfd) in self.pfds.iter().enumerate() {
             if pfd.revents == 0 {
                 continue;
             }
+
             let (item_idx, zmq_event) = self.map[pfd_idx];
 
             if zmq_event == 0 {
@@ -354,9 +380,11 @@ impl PollWaiter {
                 if (pfd.revents & libc::POLLIN as libc::c_short) != 0 {
                     items[item_idx].revents |= crate::poll::ZMQ_POLLIN as libc::c_short;
                 }
+
                 if (pfd.revents & libc::POLLOUT as libc::c_short) != 0 {
                     items[item_idx].revents |= crate::poll::ZMQ_POLLOUT as libc::c_short;
                 }
+
                 if (pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) as libc::c_short)
                     != 0
                 {

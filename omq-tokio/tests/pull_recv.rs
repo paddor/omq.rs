@@ -30,6 +30,7 @@ async fn backpressure(kind: SocketType, endpoint: Endpoint) {
     let context = Context::with_config(ContextConfig { io_threads: 2 });
     let receiver = context.socket(kind, options());
     let endpoint = receiver.bind(endpoint).await.unwrap();
+
     let sender_kind = if kind == SocketType::Gather {
         SocketType::Scatter
     } else {
@@ -116,6 +117,7 @@ async fn send_until_blocked(a: &Socket) -> bool {
             return true;
         }
     }
+
     false
 }
 
@@ -131,6 +133,7 @@ async fn assert_upstream_resumes(receiver: &Socket, a: &Socket) {
             }
         }
     };
+
     tokio::time::timeout(DEADLINE, draining).await.unwrap();
 
     tokio::time::timeout(DEADLINE, resumed)
@@ -198,39 +201,46 @@ async fn pull_mixed_transports_preserve_multipart_and_source_fifo() {
         })
         .await
         .unwrap();
+
     let a = context.socket(SocketType::Push, options());
     let b = context.socket(SocketType::Push, options());
     a.connect(inproc).await.unwrap();
     b.connect(tcp).await.unwrap();
     connected(&a).await;
     connected(&b).await;
+
     a.send(Message::multipart(["held", "second frame"]))
         .await
         .unwrap();
     let (receipt, message) = receiver.recv_with_receipt(None).await.unwrap();
     let source = receipt.lane().unwrap().clone();
     receiver.unshift(receipt, message).unwrap();
+
     for sequence in 0_u8..10 {
         a.send(Message::single(vec![sequence])).await.unwrap();
         b.send(Message::single(vec![100 + sequence])).await.unwrap();
     }
+
     for sequence in 0_u8..10 {
         assert_eq!(
             receive(&receiver).await.part_slice(0),
             Some([100 + sequence].as_slice())
         );
     }
+
     assert!(matches!(receiver.try_recv(), Err(Error::WouldBlock)));
     let (receipt, message) = receiver.try_recv_with_receipt(Some(&source)).unwrap();
     assert_eq!(message.len(), 2);
     assert_eq!(message.part_slice(1), Some(b"second frame".as_slice()));
     drop(receipt);
+
     for sequence in 0_u8..10 {
         assert_eq!(
             receive(&receiver).await.part_slice(0),
             Some([sequence].as_slice())
         );
     }
+
     receiver.close().await.unwrap();
     a.close().await.unwrap();
     b.close().await.unwrap();
@@ -264,6 +274,7 @@ async fn pull_targeted_waits_cancel_and_end_on_disconnect_or_close() {
         .await
         .is_err()
     );
+
     sender
         .send(Message::single("after cancellation"))
         .await
@@ -350,22 +361,27 @@ async fn pipeline_source_cannot_target_or_return_to_a_peer_socket() {
         })
         .await
         .unwrap();
+
     let sender = context.socket(SocketType::Push, options());
     sender.connect(endpoint).await.unwrap();
     connected(&sender).await;
+
     sender.send(Message::single("first")).await.unwrap();
     sender.send(Message::single("next")).await.unwrap();
     let (receipt, message) = receiver.recv_with_receipt(None).await.unwrap();
     let source = receipt.lane().unwrap().clone();
+
     let peer = context.socket(SocketType::Peer, options());
     assert!(matches!(
         peer.try_recv_with_receipt(Some(&source)),
         Err(Error::Protocol(_))
     ));
+
     let error = peer.unshift(receipt, message).unwrap_err();
     assert!(matches!(error.error, Error::Protocol(_)));
     assert_eq!(error.message, Message::single("first"));
     assert_eq!(receive(&receiver).await, Message::single("next"));
+
     peer.close().await.unwrap();
     receiver.close().await.unwrap();
     sender.close().await.unwrap();
@@ -381,17 +397,21 @@ async fn gather_rejects_multipart_returns_even_when_the_original_charge_fits() {
         })
         .await
         .unwrap();
+
     let sender = context.socket(SocketType::Scatter, options());
     sender.connect(endpoint).await.unwrap();
     connected(&sender).await;
+
     sender.send(Message::single(vec![5; 4096])).await.unwrap();
     sender.send(Message::single("next")).await.unwrap();
+
     let (receipt, _) = receiver.recv_with_receipt(None).await.unwrap();
     let returned = Message::multipart(["one", "two"]);
     let error = receiver.unshift(receipt, returned.clone()).unwrap_err();
     assert!(matches!(error.error, Error::Protocol(_)));
     assert_eq!(error.message, returned);
     assert_eq!(receive(&receiver).await, Message::single("next"));
+
     receiver.close().await.unwrap();
     sender.close().await.unwrap();
 }

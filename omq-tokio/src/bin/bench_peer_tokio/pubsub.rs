@@ -18,18 +18,22 @@ pub(super) async fn run_pub(ctx: &omq_tokio::Context, ep: Endpoint, size: usize,
     let monitor = pub_.monitor();
     let bound = pub_.bind(ep).await.expect("pub bind");
     report_bound_port(ctx, &bound).await;
+
     if peers > 0 {
         wait_for_subscribes(&pub_, monitor, peers).await;
     }
+
     let payload = bench_payload(size);
     wait_for_warmup_barrier().await;
     run_push_warmup(&pub_, &payload).await;
     wait_for_start_barrier().await;
+
     if payload.len() <= omq_tokio::message::MAX_INLINE_MESSAGE {
         loop {
             pub_.send(Message::from_slice(&payload)).await.unwrap();
         }
     }
+
     let msg = Message::single(payload.clone());
     loop {
         pub_.send(msg.clone()).await.unwrap();
@@ -40,12 +44,14 @@ async fn wait_for_subscribes(sock: &Socket, mut monitor: omq_tokio::MonitorStrea
     let timeout_secs = if peers > 64 { 20 } else { 10 };
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     let mut subscribed = 0;
+
     while subscribed < peers {
         let now = Instant::now();
         assert!(
             now < deadline,
             "timed out waiting for {peers} subscribers ({subscribed} so far)"
         );
+
         match tokio::time::timeout(deadline - now, monitor.recv()).await {
             Ok(Ok(MonitorEvent::SubscribeReceived { .. })) => subscribed += 1,
             Ok(Ok(_)) => {}
@@ -66,6 +72,7 @@ async fn wait_for_subscribes(sock: &Socket, mut monitor: omq_tokio::MonitorStrea
             Err(e) => panic!("timed out waiting for {peers} subscribers: {e:?}"),
         }
     }
+
     // Let any remaining subscribe commands finish processing.
     tokio::time::sleep(Duration::from_millis(100)).await;
 }
@@ -87,18 +94,22 @@ pub(super) async fn run_sub(
     let t0 = Instant::now();
     let deadline = t0 + duration;
     let mut count: u64 = 0;
+
     loop {
         if !recv_before_deadline(&sub, deadline).await {
             break;
         }
+
         count += 1;
         while sub.try_recv().is_ok() {
             count += 1;
         }
+
         if Instant::now() >= deadline {
             break;
         }
     }
+
     let elapsed = t0.elapsed().as_secs_f64();
     let cpu = cpu_time_secs() - cpu_before;
     println!("{count} {elapsed:.6} {size} {cpu:.6}");
@@ -119,6 +130,7 @@ pub(super) async fn run_inproc_pubsub(name: String, size: usize, duration: Durat
         s.subscribe(Bytes::new()).await.expect("subscribe");
         subs.push(s);
     }
+
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let payload = Bytes::from(vec![b'x'; size]);
@@ -135,6 +147,7 @@ pub(super) async fn run_inproc_pubsub(name: String, size: usize, duration: Durat
     // Drain all non-measured subscribers so PUB doesn't block on HWM.
     let mut drain_handles = Vec::new();
     let stop_c = stop.clone();
+
     for s in subs.drain(1..) {
         let stop_c = stop_c.clone();
         drain_handles.push(tokio::spawn(async move {
@@ -152,22 +165,28 @@ pub(super) async fn run_inproc_pubsub(name: String, size: usize, duration: Durat
     let t0 = Instant::now();
     let deadline = t0 + duration;
     let mut count: u64 = 0;
+
     loop {
         measured.recv().await.unwrap();
         count += 1;
+
         while measured.try_recv().is_ok() {
             count += 1;
         }
+
         if Instant::now() >= deadline {
             break;
         }
     }
+
     let elapsed = t0.elapsed().as_secs_f64();
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     pub_handle.abort();
+
     for h in drain_handles {
         h.abort();
     }
+
     println!("{count} {elapsed:.6} {size}");
 }
 

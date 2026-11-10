@@ -18,6 +18,7 @@ pub(crate) const THROUGHPUT_SIZES: &[u64] = &[
     16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 262_144, 1_048_576,
     4_194_304, 8_388_608,
 ];
+
 pub(crate) const LATENCY_SIZES: &[u64] =
     &[16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384];
 
@@ -40,16 +41,19 @@ fn rounds(
             latency_defaults
         });
         let mut groups: BTreeMap<u64, Vec<Value>> = BTreeMap::new();
+
         for repeat in 0..args.repeats {
             let offset = if args.order == "rotate" {
                 repeat % sizes.len()
             } else {
                 0
             };
+
             for (position, size) in sizes[offset..].iter().chain(&sizes[..offset]).enumerate() {
                 let row = measure(kind, *size, repeat + 1, position);
                 let group = groups.entry(*size).or_default();
                 group.push(row);
+
                 if group.len() == args.repeats {
                     summarize(kind, *size, group);
                 }
@@ -64,14 +68,17 @@ fn summarize(kind: &str, size: u64, rows: &[Value]) {
     } else {
         "p99_us"
     };
+
     let mut values: Vec<_> = rows.iter().map(|row| number(row, metric)).collect();
     values.sort_by(f64::total_cmp);
     let middle = values.len() / 2;
+
     let median = if values.len().is_multiple_of(2) {
         values[middle - 1].midpoint(values[middle])
     } else {
         values[middle]
     };
+
     println!(
         "{}",
         json!({"event":"summary", "transport":rows[0]["transport"],
@@ -85,6 +92,7 @@ fn number(value: &Value, field: &str) -> f64 {
         .as_f64()
         .unwrap_or_else(|| panic!("missing numeric {field}"));
     assert!(number.is_finite(), "nonfinite {field}");
+
     number
 }
 
@@ -105,6 +113,7 @@ fn provenance(binary: &Path) -> Value {
     revision.args(["rev-parse", "HEAD"]);
     let mut dirty = Command::new("git");
     dirty.args(["status", "--porcelain"]);
+
     json!({"binary":binary, "binary_sha256":digest(&[binary.to_path_buf()]),
         "revision":capture(&mut revision).trim(), "dirty":!capture(&mut dirty).is_empty()})
 }
@@ -112,14 +121,17 @@ fn provenance(binary: &Path) -> Value {
 fn capture(command: &mut Command) -> String {
     let output = command.output().expect("run benchmark helper");
     let stderr = String::from_utf8(output.stderr).unwrap();
+
     if !stderr.is_empty() {
         eprint!("{stderr}");
     }
+
     assert!(
         output.status.success(),
         "benchmark helper failed: {command:?}"
     );
     assert!(!peers::diagnostic(&stderr), "benchmark helper diagnostics");
+
     String::from_utf8(output.stdout).unwrap()
 }
 
@@ -130,13 +142,16 @@ fn digest(paths: &[PathBuf]) -> String {
         .spawn()
         .expect("sha256sum is required for benchmark provenance");
     let mut input = child.stdin.take().unwrap();
+
     for path in paths {
         let mut file = std::fs::File::open(path).expect("read measured binary");
         std::io::copy(&mut file, &mut input).unwrap();
     }
+
     drop(input);
     let output = child.wait_with_output().unwrap();
     assert!(output.status.success());
+
     String::from_utf8(output.stdout)
         .unwrap()
         .split_whitespace()
@@ -152,6 +167,7 @@ impl TempDir {
         let path =
             std::env::temp_dir().join(format!("{prefix}-{}-{}", std::process::id(), unix_nanos()));
         std::fs::create_dir(&path).expect("create benchmark directory");
+
         Self(path)
     }
 }
@@ -165,6 +181,7 @@ impl Drop for TempDir {
 fn validate_cpus(cpus: &[usize]) {
     assert_eq!(cpus.len(), 6, "six distinct physical cores are required");
     let mut topology = std::collections::BTreeSet::new();
+
     for (index, cpu) in cpus.iter().enumerate() {
         assert!(!cpus[..index].contains(cpu));
         assert!(peers::affinity(0).contains(cpu), "CPU {cpu} is unavailable");

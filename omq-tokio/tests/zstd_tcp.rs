@@ -88,13 +88,16 @@ fn payload_seq(payload: &[u8]) -> Option<u64> {
         + marker.len();
     let mut seq = 0u64;
     let mut saw_digit = false;
+
     for &byte in &payload[start..] {
         if !byte.is_ascii_digit() {
             break;
         }
+
         saw_digit = true;
         seq = seq.checked_mul(10)?.checked_add(u64::from(byte - b'0'))?;
     }
+
     saw_digit.then_some(seq)
 }
 
@@ -105,6 +108,7 @@ async fn expect_payload_seq_at_least(sock: &Socket, min_seq: u64, label: &str) {
             let part = got.part_bytes(0).unwrap();
             let seq = payload_seq(&part)
                 .unwrap_or_else(|| panic!("{label} received unparseable payload"));
+
             if seq >= min_seq {
                 return;
             }
@@ -135,12 +139,14 @@ async fn pull_on_loopback() -> (Socket, Endpoint) {
         .await
         .unwrap()
         .unwrap();
+
     let port = match ev {
         MonitorEvent::Listening {
             endpoint: Endpoint::ZstdTcp { port, .. },
         } => port,
         other => panic!("expected ZstdTcp Listening, got {other:?}"),
     };
+
     (pull, zstd_loopback(port))
 }
 
@@ -159,6 +165,7 @@ async fn arenas_resume_through_receive_hwm_and_preserve_multipart_limits() {
                 .compression_auto_train(true),
         );
         push.connect(endpoint).await.unwrap();
+
         let expected: Vec<_> = (0..1024u32)
             .map(|index| {
                 Message::multipart([
@@ -168,9 +175,11 @@ async fn arenas_resume_through_receive_hwm_and_preserve_multipart_limits() {
                 ])
             })
             .collect();
+
         for message in &expected {
             push.send(message.clone()).await.unwrap();
         }
+
         tokio::time::sleep(Duration::from_millis(20)).await;
         for message in expected {
             assert_eq!(pull.recv().await.unwrap(), message);
@@ -189,6 +198,7 @@ async fn arenas_keep_order_across_large_compression_offloads() {
             Options::default().compression_offload_threshold(Some(4096)),
         );
         push.connect(endpoint).await.unwrap();
+
         let expected: Vec<_> = (0..300u32)
             .map(|index| {
                 // Runs of large messages hold and offload in turn around arenas.
@@ -197,14 +207,17 @@ async fn arenas_keep_order_across_large_compression_offloads() {
                     3 => 128 * 1024,
                     _ => 128,
                 };
+
                 let mut bytes = vec![b'x'; size];
                 bytes[..4].copy_from_slice(&index.to_le_bytes());
                 Message::single(bytes)
             })
             .collect();
+
         for message in &expected {
             push.send(message.clone()).await.unwrap();
         }
+
         for message in expected {
             assert_eq!(pull.recv().await.unwrap(), message);
         }
@@ -287,6 +300,7 @@ async fn dict_roundtrip_small_payload() {
     let pull = Socket::new(SocketType::Pull, opts());
     let mut mon = pull.monitor();
     pull.bind(zstd_loopback(0)).await.unwrap();
+
     let port = match tokio::time::timeout(Duration::from_millis(500), mon.recv())
         .await
         .unwrap()
@@ -301,6 +315,7 @@ async fn dict_roundtrip_small_payload() {
     let push = Socket::new(SocketType::Push, opts());
     push.connect(zstd_loopback(port)).await.unwrap();
     let plain = b"omq-".repeat(20);
+
     for _ in 0..3 {
         push.send(Message::single(plain.clone())).await.unwrap();
         let m = tokio::time::timeout(Duration::from_secs(2), pull.recv())
@@ -332,6 +347,7 @@ async fn req_rep_over_zstd() {
     let rep = Socket::new(SocketType::Rep, Options::default());
     let mut mon = rep.monitor();
     rep.bind(zstd_loopback(0)).await.unwrap();
+
     let port = match tokio::time::timeout(Duration::from_millis(500), mon.recv())
         .await
         .unwrap()
@@ -375,6 +391,7 @@ async fn auto_train_survives_reconnect() {
                 .cycle()
                 .take(1000 - v.len()),
         );
+
         v
     };
 
@@ -387,9 +404,11 @@ async fn auto_train_survives_reconnect() {
         );
         push.connect(ep.clone()).await.unwrap();
         wait_for_handshake(&pull).await;
+
         for i in 0..FIRST {
             push.send(Message::single(make_payload(i))).await.unwrap();
         }
+
         push.close().await.unwrap();
     }
 
@@ -402,9 +421,11 @@ async fn auto_train_survives_reconnect() {
         );
         push.connect(ep.clone()).await.unwrap();
         wait_for_handshake(&pull).await;
+
         for i in 0..SECOND {
             push.send(Message::single(make_payload(i))).await.unwrap();
         }
+
         push.close().await.unwrap();
     }
 
@@ -415,6 +436,7 @@ async fn auto_train_survives_reconnect() {
             break;
         }
     }
+
     assert_eq!(got, FIRST + SECOND);
 }
 
@@ -433,6 +455,7 @@ async fn pub_sub_zstd_io_lane_try_send_auto_train_dict_for_late_subscriber() {
 async fn bind_zstd_publisher(publisher: &Socket) -> Endpoint {
     let mut mon = publisher.monitor();
     publisher.bind(zstd_loopback(0)).await.unwrap();
+
     loop {
         if let MonitorEvent::Listening {
             endpoint: Endpoint::ZstdTcp { port, .. },
@@ -500,6 +523,7 @@ async fn run_pub_sub_zstd_io_lane_auto_train_dict_for_late_subscriber(mode: Fano
     for seq in 0..128 {
         send_fanout(&publisher, Message::single(quote_payload(seq)), mode).await;
     }
+
     for (idx, sub) in decoded_subs.iter().enumerate() {
         expect_payload_seq_at_least(sub, 127, &format!("decoded sub {idx} training tail")).await;
     }
@@ -519,6 +543,7 @@ async fn run_pub_sub_zstd_io_lane_auto_train_dict_for_late_subscriber(mode: Fano
     for seq in 128..132 {
         send_fanout(&publisher, Message::single(quote_payload(seq)), mode).await;
     }
+
     expect_raw_dict_then_frame(&raw).await;
 
     for seq in 128..132 {
@@ -532,6 +557,7 @@ async fn run_pub_sub_zstd_io_lane_auto_train_dict_for_late_subscriber(mode: Fano
     for sub in decoded_subs {
         sub.close_with_linger(Some(Duration::ZERO)).await.unwrap();
     }
+
     load.close_with_linger(Some(Duration::ZERO)).await.unwrap();
     load_peer
         .close_with_linger(Some(Duration::ZERO))

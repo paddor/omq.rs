@@ -21,6 +21,7 @@ fn nonce_long(prefix: &[u8; 8], suffix: &[u8; 16]) -> [u8; 24] {
     let mut n = [0u8; 24];
     n[..8].copy_from_slice(prefix);
     n[8..].copy_from_slice(suffix);
+
     n
 }
 
@@ -52,12 +53,15 @@ impl CurveCookieKey {
         let mut suffix = [0u8; 16];
         rand::rng().fill_bytes(&mut suffix);
         let nonce = nonce_long(NONCE_COOKIE_PREFIX, &suffix);
+
         let mut out = vec![0u8; 96];
         out[..16].copy_from_slice(&suffix);
         out[32..64].copy_from_slice(cp);
         out[64..].copy_from_slice(sn_secret);
+
         let tag = self.key.encrypt_detached(&nonce, &mut out[32..]);
         out[16..32].copy_from_slice(&tag);
+
         out
     }
 
@@ -66,9 +70,11 @@ impl CurveCookieKey {
         if cookie.len() != 96 {
             return Err(Error::HandshakeFailed("CURVE cookie wrong length".into()));
         }
+
         if self.created_at.elapsed() >= self.lifetime {
             return Err(Error::HandshakeFailed("CURVE cookie expired".into()));
         }
+
         let suffix: [u8; 16] = cookie[..16].try_into().unwrap();
         let tag: [u8; 16] = cookie[16..32].try_into().unwrap();
         let nonce = nonce_long(NONCE_COOKIE_PREFIX, &suffix);
@@ -97,42 +103,4 @@ impl Default for CurveCookieKey {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn encrypt_decrypt_roundtrip() {
-        let kr = CurveCookieKey::new();
-        let cp = [0xAAu8; 32];
-        let sn = [0xBBu8; 32];
-        let cookie = kr.encrypt_cookie(&cp, &sn);
-        assert_eq!(cookie.len(), 96);
-        let (cp2, sn2) = kr.decrypt_cookie(&cookie).unwrap();
-        assert_eq!(cp, cp2);
-        assert_eq!(sn, sn2);
-    }
-
-    #[test]
-    fn wrong_length_rejected() {
-        let kr = CurveCookieKey::new();
-        assert!(kr.decrypt_cookie(&[0u8; 95]).is_err());
-        assert!(kr.decrypt_cookie(&[0u8; 97]).is_err());
-    }
-
-    #[test]
-    fn expired_cookie_rejected() {
-        let mut kr = CurveCookieKey::new();
-        let cookie = kr.encrypt_cookie(&[1u8; 32], &[2u8; 32]);
-        kr.expire_now();
-        assert!(kr.decrypt_cookie(&cookie).is_err());
-    }
-
-    #[test]
-    fn corrupted_cookie_rejected() {
-        let kr = CurveCookieKey::new();
-        let cookie = kr.encrypt_cookie(&[1u8; 32], &[2u8; 32]);
-        let mut corrupted = cookie.clone();
-        corrupted[20] ^= 0x01;
-        assert!(kr.decrypt_cookie(&corrupted).is_err());
-    }
-}
+mod tests;

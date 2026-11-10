@@ -17,6 +17,7 @@ fn cpu_time() -> Duration {
     // SAFETY: getrusage succeeded.
     let usage = unsafe { usage.assume_init() };
     let micros = |t: libc::timeval| t.tv_sec as u64 * 1_000_000 + t.tv_usec as u64;
+
     Duration::from_micros(micros(usage.ru_utime) + micros(usage.ru_stime))
 }
 
@@ -24,8 +25,10 @@ fn cpu_time() -> Duration {
 async fn proxy_into_muted_nodrop_publisher_does_not_spin() {
     let ctx = Context::current();
     let options = Options::default().send_hwm(16).recv_hwm(16);
+
     let frontend = ctx.socket(SocketType::Pull, options.clone());
     let frontend_endpoint = frontend.bind("inproc://proxy-idle-frontend").await.unwrap();
+
     let backend = ctx.socket(
         SocketType::Pub,
         Options {
@@ -34,6 +37,7 @@ async fn proxy_into_muted_nodrop_publisher_does_not_spin() {
         },
     );
     let backend_endpoint = backend.bind(test_support::tcp_loopback(0)).await.unwrap();
+
     // A wire subscriber that never reads mutes the publisher.
     let subscriber = ctx.socket(SocketType::Sub, options.clone());
     subscriber.subscribe(Bytes::new()).await.unwrap();
@@ -42,6 +46,7 @@ async fn proxy_into_muted_nodrop_publisher_does_not_spin() {
         .wait_subscribed(1, Duration::from_secs(5))
         .await
         .unwrap();
+
     let producer = ctx.socket(SocketType::Push, options);
     producer.connect(frontend_endpoint).await.unwrap();
 
@@ -50,6 +55,7 @@ async fn proxy_into_muted_nodrop_publisher_does_not_spin() {
     // Fill until the proxy stops taking input: it then holds a pending send.
     let deadline = Instant::now() + Duration::from_secs(20);
     let mut full_since = None;
+
     loop {
         assert!(Instant::now() < deadline, "proxy never backpressured");
         match producer.try_send(Message::single(body.clone())) {
@@ -59,6 +65,7 @@ async fn proxy_into_muted_nodrop_publisher_does_not_spin() {
                 if since.elapsed() > Duration::from_millis(200) {
                     break;
                 }
+
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
             Err(error) => panic!("producer send failed: {error}"),

@@ -40,6 +40,7 @@ async fn main() {
         let body = msg_str(&msg, 0);
         let worker_id = body.split(':').next().unwrap_or("unknown").to_string();
         *counts.entry(worker_id).or_default() += 1;
+
         if (i + 1) % 25 == 0 || i + 1 == expected {
             println!("sink: received {}/{expected}", i + 1);
         }
@@ -51,6 +52,7 @@ async fn main() {
     );
     let mut sorted: Vec<_> = counts.into_iter().collect();
     sorted.sort();
+
     for (worker, count) in &sorted {
         println!("  {worker}: {count} items");
     }

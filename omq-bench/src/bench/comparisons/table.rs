@@ -8,6 +8,7 @@ pub(super) fn print_throughput_header(impls: &[&str]) {
     for &name in impls {
         eprint!("  {name:>14}");
     }
+
     eprintln!();
 }
 
@@ -16,6 +17,7 @@ pub(super) fn print_latency_header(impls: &[&str]) {
     for &name in impls {
         eprint!("  {name:>14}");
     }
+
     eprintln!("  (p99 us)");
 }
 
@@ -41,6 +43,7 @@ fn print_table_row(label: &str, cells: &[String], width: usize) {
     for cell in cells {
         write!(&mut line, "  {cell:>width$}").expect("write to string");
     }
+
     eprintln!("{line}");
 }
 

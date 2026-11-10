@@ -80,6 +80,7 @@ impl std::fmt::Debug for InprocPort {
             PortState::Open(_) => "open",
             PortState::Closed => "closed",
         };
+
         f.debug_struct("InprocPort")
             .field("state", &state)
             .finish_non_exhaustive()
@@ -100,6 +101,7 @@ impl InprocPort {
         if matches!(*state, PortState::Pending) {
             *state = PortState::Open(Box::new(open));
         }
+
         drop(state);
         self.changed.notify_changed();
     }
@@ -115,6 +117,7 @@ impl InprocPort {
                 space.notify_changed();
             }
         }
+
         changed.notify_changed();
     }
 
@@ -138,6 +141,7 @@ impl InprocPort {
             PortState::Closed => return Err(SendPipeError::Closed(msg)),
             PortState::Open(open) => open,
         };
+
         if open
             .max_message_size
             .is_some_and(|max| msg.max_message_size_len() > max)
@@ -145,30 +149,36 @@ impl InprocPort {
             // The receiver drops the connection and the message with it.
             open.cancel.cancel();
             Self::close_locked(&mut state, &self.changed);
+
             return Ok(());
         }
+
         let prefixed = open.identity.is_some();
         let msg = match &open.identity {
             Some(identity) => Message::with_identity(identity.clone(), msg),
             None => msg,
         };
+
         let delivered = if DEFERRED {
             open.sink.try_deliver_deferred(msg, pending)
         } else {
             open.sink.try_deliver(msg)
         };
+
         match delivered {
             Ok(()) => Ok(()),
             Err(omq_proto::error::TrySendError::Full(mut msg)) => {
                 if prefixed {
                     msg.pop_front_payload();
                 }
+
                 Err(SendPipeError::Full(msg))
             }
             Err(_) => {
                 // The receiving socket closed its queue. The message is
                 // lost like any other message queued behind the closure.
                 Self::close_locked(&mut state, &self.changed);
+
                 Ok(())
             }
         }
@@ -178,9 +188,11 @@ impl InprocPort {
         if !*pending {
             return;
         }
+
         if let PortState::Open(open) = &mut *self.state.lock() {
             open.sink.flush_delivery(pending);
         }
+
         *pending = false;
     }
 
@@ -296,9 +308,11 @@ impl InprocSender {
         if !matches!(preparation, SendPreparation::StripIdentity) {
             return self.inner.port.try_send(msg);
         }
+
         let Some(identity) = msg.pop_front_payload() else {
             return self.inner.port.try_send(msg);
         };
+
         // The caller gets the routed message back when it was not admitted.
         let restore = |msg| Message::with_prefix(identity.as_bytes(), msg);
         self.inner.port.try_send(msg).map_err(|error| match error {
@@ -331,6 +345,7 @@ impl InprocSender {
                 Flush::Closed => return Err(SendPipeError::Closed(msg)),
             }
         }
+
         Ok(msg)
     }
 
@@ -357,16 +372,19 @@ impl InprocSender {
                         backlog.pre_ready = None;
                         self.inner.backlog_pending.store(false, Ordering::Release);
                         self.notify_close_progress();
+
                         return Flush::Closed;
                     }
                 }
             }
+
             let Backlog {
                 pre_ready, batch, ..
             } = &mut *backlog;
             let drained = pre_ready
                 .as_mut()
                 .map_or(0, |consumer| consumer.drain_into(batch, 1, usize::MAX));
+
             if drained == 0 {
                 backlog.pre_ready = None;
                 self.inner.backlog_pending.store(false, Ordering::Release);
@@ -374,8 +392,10 @@ impl InprocSender {
                 // Admission counted the backlog as full. Senders waiting on
                 // this route's space must see that it cleared.
                 self.inner.port.space().notify_changed();
+
                 return Flush::Done;
             }
+
             backlog.stalled = backlog.batch.pop();
         }
     }
@@ -385,9 +405,11 @@ impl InprocSender {
         while self.has_backlog() {
             let space = self.inner.port.space();
             let seen = space.generation();
+
             if self.flush_backlog() != Flush::Stalled {
                 return;
             }
+
             space.changed_after(seen).await;
         }
     }
@@ -412,6 +434,7 @@ impl InprocSender {
         if self.has_backlog() {
             return Admission::Full;
         }
+
         self.inner.port.admission()
     }
 
@@ -424,9 +447,11 @@ impl InprocSender {
         loop {
             let space = self.space();
             let seen = space.generation();
+
             if self.has_space() {
                 return;
             }
+
             space.changed_after(seen).await;
         }
     }

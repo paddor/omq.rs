@@ -26,6 +26,7 @@ macro_rules! c_try {
         }
     };
 }
+
 pub(crate) use c_try;
 
 // ZMQ-specific error codes (HAUSNUMERO = 156384712).
@@ -75,6 +76,7 @@ pub(crate) fn map_io_err(e: &std::io::Error) -> c_int {
     if let Some(raw) = e.raw_os_error() {
         return raw;
     }
+
     match e.kind() {
         std::io::ErrorKind::AddrInUse => EADDRINUSE,
         std::io::ErrorKind::ConnectionRefused => ECONNREFUSED,

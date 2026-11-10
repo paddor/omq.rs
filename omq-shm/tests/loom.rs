@@ -35,22 +35,27 @@ impl Lease {
             closed: AtomicU64::new(0),
         }
     }
+
     fn cell(&self) -> LeaseCell<'_> {
         LeaseCell {
             state: &self.state,
             closed: &self.closed,
         }
     }
+
     fn publish(&self, generation: u64, coordinates: [u64; COORDINATES]) -> bool {
         self.cell()
             .publish(generation, self.coordinate_cells(), coordinates)
     }
+
     fn matches(&self, coordinates: [u64; COORDINATES]) -> bool {
         LeaseCell::matches(self.coordinate_cells(), coordinates)
     }
+
     fn coordinate_cells(&self) -> [&AtomicU64; COORDINATES] {
         std::array::from_fn(|index| &self.coordinates[index])
     }
+
     fn close(&self) {
         coordination::close_reader(&self.closed);
         self.cell().cancel_pending();
@@ -67,6 +72,7 @@ fn publication_and_close_never_leave_an_unread_lease_pinned() {
                 lease.publish(GENERATION_STEP, [1, 2, 3, 4, 5]);
             })
         };
+
         lease.close();
         publisher.join().unwrap();
         assert!(lease.cell().completed(GENERATION_STEP));
@@ -79,6 +85,7 @@ fn borrow_racing_close_either_cancels_or_pins_until_completion() {
     model(|| {
         let lease = Arc::new(Lease::new());
         lease.publish(GENERATION_STEP, [1, 2, 3, 4, 5]);
+
         let borrower = {
             let lease = lease.clone();
             thread::spawn(move || {
@@ -90,6 +97,7 @@ fn borrow_racing_close_either_cancels_or_pins_until_completion() {
                 }
             })
         };
+
         lease.close();
         borrower.join().unwrap();
         assert!(lease.cell().completed(GENERATION_STEP));
@@ -101,21 +109,25 @@ fn acquire_borrow_observes_every_coordinate_and_payload_write() {
     model(|| {
         let lease = Arc::new(Lease::new());
         let data = Arc::new(loom::cell::UnsafeCell::new(0));
+
         let publisher = {
             let lease = lease.clone();
             let data = data.clone();
+
             thread::spawn(move || {
                 // SAFETY: the producer owns this cell before publication.
                 data.with_mut(|ptr| unsafe { *ptr = 7 });
                 lease.publish(GENERATION_STEP, [1, 2, 3, 4, 5]);
             })
         };
+
         if lease.cell().borrow(GENERATION_STEP) {
             assert!(lease.matches([1, 2, 3, 4, 5]));
             // SAFETY: successful borrow acquired the producer's publication.
             data.with(|ptr| assert_eq!(unsafe { *ptr }, 7));
             lease.cell().complete(GENERATION_STEP, BORROWED);
         }
+
         publisher.join().unwrap();
     });
 }
@@ -127,20 +139,24 @@ fn release_completion_prevents_reuse_until_readers_finish() {
         let data = Arc::new(loom::cell::UnsafeCell::new(7));
         lease.publish(GENERATION_STEP, [1; COORDINATES]);
         assert!(lease.cell().borrow(GENERATION_STEP));
+
         let reader = {
             let lease = lease.clone();
             let data = data.clone();
+
             thread::spawn(move || {
                 // SAFETY: this reader holds the borrowed lease.
                 data.with(|ptr| assert_eq!(unsafe { *ptr }, 7));
                 lease.cell().complete(GENERATION_STEP, BORROWED);
             })
         };
+
         if lease.cell().completed(GENERATION_STEP) {
             // SAFETY: completion acquired the final reader release.
             data.with_mut(|ptr| unsafe { *ptr = 9 });
             lease.publish(2 * GENERATION_STEP, [2; COORDINATES]);
         }
+
         reader.join().unwrap();
     });
 }
@@ -151,6 +167,7 @@ fn only_one_receiver_can_borrow_or_complete_a_generation() {
         let lease = Arc::new(Lease::new());
         let winners = Arc::new(AtomicUsize::new(0));
         lease.publish(GENERATION_STEP, [1; COORDINATES]);
+
         let borrower = |lease: Arc<Lease>, winners: Arc<AtomicUsize>| {
             if lease.cell().borrow(GENERATION_STEP) {
                 winners.fetch_add(1, Ordering::Relaxed);
@@ -158,11 +175,13 @@ fn only_one_receiver_can_borrow_or_complete_a_generation() {
                 assert!(!lease.cell().complete(GENERATION_STEP, BORROWED));
             }
         };
+
         let other = {
             let lease = lease.clone();
             let winners = winners.clone();
             thread::spawn(move || borrower(lease, winners))
         };
+
         borrower(lease.clone(), winners.clone());
         other.join().unwrap();
         assert_eq!(winners.load(Ordering::Relaxed), 1);
@@ -174,6 +193,7 @@ fn stale_completion_cannot_release_a_reused_cell() {
     model(|| {
         let lease = Arc::new(Lease::new());
         lease.publish(2 * GENERATION_STEP, [2; COORDINATES]);
+
         let stale = {
             let lease = lease.clone();
             thread::spawn(move || {
@@ -182,6 +202,7 @@ fn stale_completion_cannot_release_a_reused_cell() {
                 assert!(!lease.cell().complete(GENERATION_STEP, BORROWED));
             })
         };
+
         assert!(lease.cell().borrow(2 * GENERATION_STEP));
         stale.join().unwrap();
         assert!(!lease.cell().completed(2 * GENERATION_STEP));
@@ -197,6 +218,7 @@ struct Ring {
     writer_parked: AtomicU32,
     capacity: usize,
 }
+
 impl Ring {
     fn new(capacity: usize, cursor: u64) -> Self {
         Self {
@@ -208,6 +230,7 @@ impl Ring {
             capacity,
         }
     }
+
     fn state(&self) -> CarrierState<'_> {
         CarrierState {
             write: &self.write,
@@ -228,6 +251,7 @@ fn reader_arm_racing_publication_has_data_or_a_wake() {
             let ring = ring.clone();
             thread::spawn(move || ring.state().publish(1))
         };
+
         let ready = ring.state().arm_reader(false).unwrap();
         let notified = writer.join().unwrap();
         assert!(
@@ -242,10 +266,12 @@ fn writer_arm_racing_returned_space_has_space_or_a_wake() {
     model(|| {
         let ring = Arc::new(Ring::new(1, 0));
         ring.write.store(1, Ordering::Relaxed);
+
         let reader = {
             let ring = ring.clone();
             thread::spawn(move || ring.state().return_bytes(1))
         };
+
         ring.state().park_writer();
         let ready = ring.state().write_window().unwrap().length != 0;
         let notified = reader.join().unwrap();
@@ -264,6 +290,7 @@ fn writer_arm_racing_descriptor_ack_has_acknowledgment_or_a_wake() {
             let ring = ring.clone();
             thread::spawn(move || ring.state().acknowledge_imports(1))
         };
+
         ring.state().park_writer();
         let ready = ring.state().imported() == 1;
         let notified = receiver.join().unwrap();
@@ -277,9 +304,11 @@ fn carrier_acquire_publication_and_return_protect_wrapping_payload_bytes() {
         model(move || {
             let ring = Arc::new(Ring::new(1, cursor));
             let data = Arc::new(loom::cell::UnsafeCell::new(0));
+
             let writer = {
                 let ring = ring.clone();
                 let data = data.clone();
+
                 thread::spawn(move || {
                     for value in 1..=2 {
                         let window = ring.state().write_window().unwrap();
@@ -291,6 +320,7 @@ fn carrier_acquire_publication_and_return_protect_wrapping_payload_bytes() {
                     }
                 })
             };
+
             let mut last = 0;
             for _ in 0..2 {
                 let window = ring.state().read_window().unwrap();
@@ -301,9 +331,11 @@ fn carrier_acquire_publication_and_return_protect_wrapping_payload_bytes() {
                         assert!(value > last);
                         last = value;
                     });
+
                     ring.state().return_bytes(window.cursor.wrapping_add(1));
                 }
             }
+
             writer.join().unwrap();
         });
     }
@@ -342,6 +374,7 @@ struct Credit {
     parked: AtomicU32,
     stopped: AtomicBool,
 }
+
 impl Credit {
     fn new(sequence: u32) -> Self {
         Self {
@@ -350,6 +383,7 @@ impl Credit {
             stopped: AtomicBool::new(false),
         }
     }
+
     fn signal(&self) -> CreditSignal<'_> {
         CreditSignal {
             sequence: &self.sequence,
@@ -381,11 +415,13 @@ fn completion_before_or_after_arming_cannot_leave_credit_asleep() {
         model(move || {
             let credit = Arc::new(Credit::new(sequence));
             let sleeping = Arc::new(Mutex::new(false));
+
             let completer = {
                 let credit = credit.clone();
                 let sleeping = sleeping.clone();
                 thread::spawn(move || credit.notify(&sleeping))
             };
+
             credit.wait(sequence, &sleeping);
             completer.join().unwrap();
             assert!(
@@ -401,14 +437,17 @@ fn shutdown_racing_credit_arm_cannot_park_without_progress() {
     model(|| {
         let credit = Arc::new(Credit::new(0));
         let sleeping = Arc::new(Mutex::new(false));
+
         let stopper = {
             let credit = credit.clone();
             let sleeping = sleeping.clone();
+
             thread::spawn(move || {
                 credit.stopped.store(true, Ordering::Release);
                 credit.notify(&sleeping);
             })
         };
+
         credit.wait(0, &sleeping);
         stopper.join().unwrap();
         assert!(!*sleeping.lock().unwrap(), "shutdown missed a parked futex");
@@ -423,9 +462,11 @@ fn concurrent_final_view_releases_recycle_exactly_once() {
         let second = owner.clone();
         let gate = Arc::new(Mutex::new(()));
         let recycled = Arc::new(AtomicUsize::new(0));
+
         let other = {
             let gate = gate.clone();
             let recycled = recycled.clone();
+
             thread::spawn(move || {
                 if let Some(owner) = coordination::unique_release(second, &gate) {
                     assert_eq!(Arc::strong_count(&owner), 1);
@@ -433,10 +474,12 @@ fn concurrent_final_view_releases_recycle_exactly_once() {
                 }
             })
         };
+
         if let Some(owner) = coordination::unique_release(owner, &gate) {
             assert_eq!(Arc::strong_count(&owner), 1);
             recycled.fetch_add(1, Ordering::Relaxed);
         }
+
         other.join().unwrap();
         assert_eq!(recycled.load(Ordering::Relaxed), 1);
     });
@@ -454,6 +497,7 @@ fn simultaneous_memory_reservations_share_and_return_one_limit() {
                 drop(reservation);
             })
         };
+
         let reservation = memory::Budget::reserve(&budget, 1);
         assert!(budget.used() <= 1);
         drop(reservation);
@@ -481,14 +525,17 @@ fn every_fanout_recipient_must_finish_before_payload_reuse() {
     model(|| {
         let leases = Arc::new([Lease::new(), Lease::new()]);
         let data = Arc::new(loom::cell::UnsafeCell::new(7));
+
         for lease in leases.iter() {
             lease.publish(GENERATION_STEP, [1; COORDINATES]);
             assert!(lease.cell().borrow(GENERATION_STEP));
         }
+
         let readers: Vec<_> = (0..2)
             .map(|index| {
                 let leases = leases.clone();
                 let data = data.clone();
+
                 thread::spawn(move || {
                     // SAFETY: each reader owns its own outstanding recipient lease.
                     data.with(|ptr| assert_eq!(unsafe { *ptr }, 7));
@@ -496,6 +543,7 @@ fn every_fanout_recipient_must_finish_before_payload_reuse() {
                 })
             })
             .collect();
+
         if leases
             .iter()
             .all(|lease| lease.cell().completed(GENERATION_STEP))
@@ -503,6 +551,7 @@ fn every_fanout_recipient_must_finish_before_payload_reuse() {
             // SAFETY: every reader completed with a release acquired above.
             data.with_mut(|ptr| unsafe { *ptr = 9 });
         }
+
         for reader in readers {
             reader.join().unwrap();
         }
@@ -517,6 +566,7 @@ fn three_final_view_owners_recycle_once_outside_the_release_gate() {
         let first = Arc::new(0);
         let second = first.clone();
         let third = first.clone();
+
         let release = |owner, gate: Arc<Mutex<()>>, recycled: Arc<AtomicUsize>| {
             if coordination::unique_release(owner, &gate).is_some() {
                 assert!(
@@ -526,6 +576,7 @@ fn three_final_view_owners_recycle_once_outside_the_release_gate() {
                 recycled.fetch_add(1, Ordering::Relaxed);
             }
         };
+
         let threads: Vec<_> = [second, third]
             .into_iter()
             .map(|owner| {
@@ -534,10 +585,12 @@ fn three_final_view_owners_recycle_once_outside_the_release_gate() {
                 thread::spawn(move || release(owner, gate, recycled))
             })
             .collect();
+
         release(first, gate, recycled.clone());
         for other in threads {
             other.join().unwrap();
         }
+
         assert_eq!(recycled.load(Ordering::Relaxed), 1);
     });
 }
@@ -547,18 +600,22 @@ fn simultaneous_publication_borrow_and_close_never_pin_unread_storage() {
     model(|| {
         let lease = Arc::new(Lease::new());
         let data = Arc::new(loom::cell::UnsafeCell::new(0));
+
         let publisher = {
             let lease = lease.clone();
             let data = data.clone();
+
             thread::spawn(move || {
                 // SAFETY: exclusive producer access before publication.
                 data.with_mut(|ptr| unsafe { *ptr = 7 });
                 lease.publish(GENERATION_STEP, [1; COORDINATES]);
             })
         };
+
         let borrower = {
             let lease = lease.clone();
             let data = data.clone();
+
             thread::spawn(move || {
                 if lease.cell().borrow(GENERATION_STEP) {
                     assert!(lease.matches([1; COORDINATES]));
@@ -568,6 +625,7 @@ fn simultaneous_publication_borrow_and_close_never_pin_unread_storage() {
                 }
             })
         };
+
         lease.close();
         publisher.join().unwrap();
         borrower.join().unwrap();
@@ -594,6 +652,7 @@ fn borrowed_leases() -> Arc<[Lease; 2]> {
         lease.publish(GENERATION_STEP, [1; COORDINATES]);
         assert!(lease.cell().borrow(GENERATION_STEP));
     }
+
     leases
 }
 
@@ -607,10 +666,12 @@ fn shared_record_storage_waits_for_the_seal_and_every_recipient() {
             index: 0,
         });
         let data = Arc::new(loom::cell::UnsafeCell::new(7));
+
         let readers: Vec<_> = (0..2)
             .map(|index| {
                 let leases = leases.clone();
                 let data = data.clone();
+
                 thread::spawn(move || {
                     // SAFETY: each reader owns its own outstanding recipient lease.
                     data.with(|ptr| assert_eq!(unsafe { *ptr }, 7));
@@ -618,23 +679,28 @@ fn shared_record_storage_waits_for_the_seal_and_every_recipient() {
                 })
             })
             .collect();
+
         // The local owner tracks a late recipient, then drops on another thread.
         let owner = {
             let group = group.clone();
             let leases = leases.clone();
+
             thread::spawn(move || {
                 group.track(Tracked { leases, index: 1 });
                 group.seal();
             })
         };
+
         if group.completed() {
             // SAFETY: the seal and every tracked completion were acquired.
             data.with_mut(|ptr| unsafe { *ptr = 9 });
         }
+
         owner.join().unwrap();
         for reader in readers {
             reader.join().unwrap();
         }
+
         assert!(group.completed());
     });
 }
@@ -644,12 +710,14 @@ fn unsealed_groups_stay_pinned_after_tracked_recipients_finish() {
     model(|| {
         let leases = borrowed_leases();
         let group = coordination::LeaseGroup::default();
+
         for index in 0..2 {
             group.track(Tracked {
                 leases: leases.clone(),
                 index,
             });
         }
+
         let reader = {
             let leases = leases.clone();
             thread::spawn(move || {
@@ -658,6 +726,7 @@ fn unsealed_groups_stay_pinned_after_tracked_recipients_finish() {
                 }
             })
         };
+
         reader.join().unwrap();
         assert!(!group.completed(), "a live local owner can add recipients");
         group.seal();
@@ -673,6 +742,7 @@ fn receive_credit_reservations_cannot_exceed_logical_hwm() {
             let credits = credits.clone();
             thread::spawn(move || credits.reserve(3))
         };
+
         let second = credits.reserve(3);
         assert_eq!(first.join().unwrap() + second, 4);
         assert!(credits.full());
@@ -686,10 +756,12 @@ fn receive_credit_release_racing_reservation_preserves_capacity_and_wake() {
     model(|| {
         let credits = Arc::new(coordination::ReceiveCredits::new(4));
         assert_eq!(credits.reserve(usize::MAX), 4);
+
         let release = {
             let credits = credits.clone();
             thread::spawn(move || credits.release(2))
         };
+
         let reserved = credits.reserve(3);
         assert!(reserved == 0 || reserved == 2);
         assert!(release.join().unwrap());
@@ -704,10 +776,12 @@ fn receive_credit_partial_returns_wake_only_on_full_to_writable() {
     model(|| {
         let credits = Arc::new(coordination::ReceiveCredits::new(2));
         assert_eq!(credits.reserve(256), 2);
+
         let first = {
             let credits = credits.clone();
             thread::spawn(move || credits.release(1))
         };
+
         let second = credits.release(1);
         assert_ne!(first.join().unwrap(), second);
         assert_eq!(credits.reserve(usize::MAX), 2);
@@ -720,10 +794,12 @@ fn receive_credit_zero_and_maximum_capacities_do_not_overflow_or_invent_credit()
         model(move || {
             let credits = Arc::new(ReceiveCredits::new(capacity));
             assert_eq!(credits.reserve(0), 0);
+
             let first = {
                 let credits = credits.clone();
                 thread::spawn(move || credits.reserve(usize::MAX))
             };
+
             let second = credits.reserve(usize::MAX);
             assert_eq!(first.join().unwrap() + second, capacity);
             assert!(credits.full());

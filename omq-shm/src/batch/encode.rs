@@ -51,6 +51,7 @@ pub fn prepare_batch(pool: &PayloadPool, messages: &[&Message]) -> Result<Option
     let Some(length) = storage_length(messages, BatchKind::Copied)? else {
         return Ok(None);
     };
+
     prepare_copied_validated(pool, messages, length)
 }
 
@@ -63,6 +64,7 @@ pub(crate) fn prepare_copied_validated(
     let Some(body) = pool.try_message(length, |bytes| {
         write_count(bytes, messages.len());
         let mut offset = bodies_start(messages.len());
+
         for (index, message) in messages.iter().enumerate() {
             let body = crate::body(message).expect("batch body");
             let size = size_slot(index);
@@ -70,11 +72,13 @@ pub(crate) fn prepare_copied_validated(
             bytes[offset..offset + body.len()].copy_from_slice(body);
             offset += body.len();
         }
+
         bytes[offset..].fill(0);
     })?
     else {
         return Ok(None);
     };
+
     Ok(Some(with_envelope(first, body)))
 }
 
@@ -82,10 +86,12 @@ pub(crate) fn storage_length(messages: &[&Message], kind: BatchKind) -> Result<O
     if !(2..=BATCH_MAX_MESSAGES).contains(&messages.len()) {
         return Err(invalid("invalid SHM batch count").into());
     }
+
     let first = messages[0];
     if !(1..=2).contains(&first.len()) {
         return Err(invalid("invalid SHM batch envelope").into());
     }
+
     let mut bodies = 0_usize;
     for message in messages {
         if message.len() != first.len()
@@ -94,16 +100,20 @@ pub(crate) fn storage_length(messages: &[&Message], kind: BatchKind) -> Result<O
         {
             return Err(invalid("SHM batch envelopes differ").into());
         }
+
         let length = crate::body(message)?.len();
         if matches!(kind, BatchKind::Copied) && length > COPIED_BATCH_MAX_BODY {
             return Err(invalid("SHM batch body is too large").into());
         }
+
         bodies = bodies.saturating_add(length);
     }
+
     let length = match kind {
         BatchKind::Copied => bodies_start(messages.len()) + bodies,
         BatchKind::Referenced => reference_table_end(messages.len()),
     };
+
     // Metadata must exceed both inline capacities to use mapped pool storage.
     Ok((length <= BATCH_MAX_BYTES).then_some(length.max(MIN_STORAGE_BYTES)))
 }
@@ -122,6 +132,7 @@ pub fn prepare_reference_batch(
     let Some(length) = storage_length(messages, BatchKind::Referenced)? else {
         return Ok(None);
     };
+
     prepare_references_validated(pool, messages, length)
 }
 
@@ -133,12 +144,15 @@ pub(crate) fn prepare_references_validated(
     let Some(sources) = Sources::gather(messages) else {
         return Ok(None);
     };
+
     let Some(body) = pool.try_message(length, |bytes| sources.write(bytes))? else {
         return Ok(None);
     };
+
     let Some(slot) = find_slot(body.part_slice(0).expect("batch metadata")) else {
         return Ok(None);
     };
+
     let record = sources.into_record(&slot, body.last_payload().expect("batch metadata"));
     Ok(Some(with_envelope(messages[0], record)))
 }
@@ -190,9 +204,11 @@ impl MultipartFrames {
     pub(crate) fn new(message: &Message) -> Self {
         let mut source = message.clone();
         let mut payloads = Vec::with_capacity(message.len());
+
         while let Some(payload) = source.pop_front_payload() {
             payloads.push(payload);
         }
+
         let referenced: Vec<_> = payloads
             .iter()
             .map(|payload| referenced_frame(payload.as_slice()))
@@ -203,6 +219,7 @@ impl MultipartFrames {
             .filter(|(_, referenced)| !**referenced)
             .map(|(payload, _)| payload.len())
             .sum();
+
         Self {
             length: multipart_table_length(payloads.len()) + copied,
             payloads,
@@ -219,6 +236,7 @@ impl MultipartFrames {
         write_count(bytes, count);
         let mut pooled = sources.references.iter();
         let mut data = multipart_table_length(count);
+
         for (index, (payload, referenced)) in self.payloads.iter().zip(&self.referenced).enumerate()
         {
             let reference = if *referenced {
@@ -228,10 +246,13 @@ impl MultipartFrames {
                 bytes[data..data + frame.len()].copy_from_slice(frame);
                 let reference = Reference::at(slot, base + data, frame.len());
                 data += frame.len();
+
                 reference
             };
+
             write_reference(bytes, count, index, reference);
         }
+
         bytes[reference_table_end(count)..multipart_table_length(count)].fill(0);
     }
 }
@@ -252,14 +273,17 @@ pub(crate) fn prepare_multipart_validated(
         .collect();
     let pooled: Vec<_> = pooled.iter().collect();
     let sources = Sources::gather(&pooled)?;
+
     let mut buffer = pool.try_buffer(frames.length)?;
     let slot = find_slot(&buffer.writable()[..frames.length])?;
     let base = buffer.writable().as_ptr() as usize - slot.mapping.address();
     frames.write(buffer.writable(), &sources, &slot, base);
+
     buffer
         .set_len(multipart_table_length(frames.payloads.len()))
         .expect("multipart table fits its slot");
     let record = sources.into_record(&slot, buffer.into_payload());
+
     Some(envelop(None, message.routing_id(), record))
 }
 
@@ -278,12 +302,14 @@ impl Sources {
             regions: Vec::new(),
             slots: Vec::with_capacity(messages.len()),
         };
+
         for messages in messages.chunks(crate::pool::LOOKUP_BATCH) {
             let bodies = std::array::from_fn(|index| {
                 messages
                     .get(index)
                     .and_then(|message| crate::body(message).ok())
             });
+
             if let Some(slot) = sources.slots.last()
                 && bodies
                     .iter()
@@ -298,10 +324,12 @@ impl Sources {
                 );
                 continue;
             }
+
             let slots = crate::pool::find_slots(bodies);
             for ((message, body), slot) in messages.iter().zip(bodies).zip(slots) {
                 let body = body?;
                 let slot = slot?;
+
                 if !sources
                     .regions
                     .iter()
@@ -311,8 +339,10 @@ impl Sources {
                     if sources.regions.len() == crate::socket::SEND_LIMIT - 1 {
                         return None;
                     }
+
                     sources.regions.push(slot.mapping.clone());
                 }
+
                 sources.references.push(Reference::in_slot(&slot, body));
                 if sources
                     .slots
@@ -328,15 +358,18 @@ impl Sources {
                 }
             }
         }
+
         Some(sources)
     }
 
     fn write(&self, bytes: &mut [u8]) {
         let count = self.references.len();
         write_count(bytes, count);
+
         for (index, reference) in self.references.iter().enumerate() {
             write_reference(bytes, count, index, *reference);
         }
+
         bytes[reference_table_end(count)..].fill(0);
     }
 
@@ -344,10 +377,12 @@ impl Sources {
         for source in &self.slots {
             let mut state = source.state.lock().expect("SHM source batch leases");
             state.batches.retain(|batch| !batch.completed());
+
             if !state.batches.iter().any(|batch| Arc::ptr_eq(batch, group)) {
                 state.batches.push(group.clone());
             }
         }
+
         let mut state = metadata.state.lock().expect("SHM batch sources");
         state.published_batch = Some(group.clone());
         state.regions.clone_from(&self.regions);
@@ -363,6 +398,7 @@ impl Sources {
             group,
             _sources: self.retained,
         });
+
         Message::from(Payload::from_shared_owner(owner))
     }
 }

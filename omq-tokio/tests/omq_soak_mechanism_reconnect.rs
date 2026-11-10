@@ -9,9 +9,6 @@
 //!
 //! CURVE (RFC 26) re-handshake test.
 
-#[global_allocator]
-static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
-
 mod soak_common;
 
 use std::time::{Duration, Instant};
@@ -19,6 +16,9 @@ use std::time::{Duration, Instant};
 use omq_tokio::options::ReconnectPolicy;
 #[allow(unused_imports)]
 use omq_tokio::{Message, Options, Socket, SocketType};
+
+#[global_allocator]
+static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
 
 fn fast_reconnect() -> Options {
     Options {
@@ -33,8 +33,10 @@ async fn rebind(ep: &omq_tokio::Endpoint, make: impl Fn() -> Socket) -> Option<S
         if s.bind(ep.clone()).await.is_ok() {
             return Some(s);
         }
+
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+
     None
 }
 
@@ -100,6 +102,7 @@ fn run_mechanism_storm(
         } else {
             100.0
         };
+
         eprintln!(
             "[{name}] done: {delivered}/{cycles} delivered ({pct:.1}%) in {:.1}s",
             start.elapsed().as_secs_f64(),

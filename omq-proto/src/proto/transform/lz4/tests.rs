@@ -1,31 +1,39 @@
 use super::super::common::{MIN_COMPRESS_NO_DICT, MIN_COMPRESS_WITH_DICT};
 use super::*;
 
+const TEST_BLOCK: usize = 4096;
+
 #[test]
 fn decode_storage_rejects_length_mismatches_and_recovers() {
     let plain = Message::single(vec![b'x'; 2048]);
     let pool = crate::PayloadPool::new([(8192, 1)]).unwrap();
+
     for dict in [None, Some(Bytes::from(vec![b'x'; 2048]))] {
         for format in [SENTINEL_LZ4B, SENTINEL_LZ4M, arena::SENTINEL] {
             let mut encoder = dict.clone().map_or_else(Lz4Encoder::new, |dict| {
                 Lz4Encoder::with_send_dict(dict).unwrap()
             });
             let mut decoder = Lz4Decoder::new();
+
             if format == SENTINEL_LZ4M {
                 encoder = encoder.with_block_size(1024);
                 decoder = decoder.with_block_size(1024);
             }
+
             let mut wire = if format == arena::SENTINEL {
                 encoder.encode_arena(&[&plain; 2]).unwrap()
             } else {
                 encoder.encode(&plain).unwrap()
             };
+
             if dict.is_some() {
                 assert!(decoder.decode(wire.remove(0)).unwrap().is_none());
             }
+
             let wire = wire.pop().unwrap();
             let bytes = wire.part_slice(0).unwrap();
             assert_eq!(&bytes[..4], &format);
+
             for use_pool in [None, Some(&pool)] {
                 for extra in [-1_i64, 1] {
                     let bad = with_declared_length_off_by(bytes, format, extra);
@@ -39,6 +47,7 @@ fn decode_storage_rejects_length_mismatches_and_recovers() {
                         "failed decode returns slot"
                     );
                 }
+
                 for exhausted in [false, true] {
                     let held = exhausted.then(|| pool.try_buffer(8192).unwrap());
                     let recovered = decoder
@@ -46,9 +55,11 @@ fn decode_storage_rejects_length_mismatches_and_recovers() {
                         .unwrap()
                         .unwrap();
                     assert_eq!(recovered, plain);
+
                     if format == arena::SENTINEL {
                         assert_eq!(decoder.poll_message(), Some(plain.clone()));
                     }
+
                     assert!(decoder.poll_message().is_none());
                     drop(recovered);
                     drop(held);
@@ -71,6 +82,7 @@ fn with_declared_length_off_by(bytes: &[u8], format: [u8; 4], extra: i64) -> Vec
         let size = size.checked_add_signed(extra).unwrap();
         bad[4..12].copy_from_slice(&size.to_le_bytes());
     }
+
     bad
 }
 
@@ -84,15 +96,19 @@ fn pooled_decode_preserves_table_and_invalidates_wire_byte_count() {
     ]);
     let wire = Lz4Encoder::new().encode(&plain).unwrap().remove(0);
     let wire = pool.multipart(wire.iter());
+
     let crate::message::MessageInner::Multi(parts) = &wire.inner else {
         panic!("multipart")
     };
+
     let pointer = parts.as_ptr();
     assert_ne!(wire.byte_len(), plain.byte_len());
     let decoded = Lz4Decoder::new().decode(wire).unwrap().unwrap();
+
     let crate::message::MessageInner::Multi(parts) = &decoded.inner else {
         panic!("multipart")
     };
+
     assert_eq!(parts.as_ptr(), pointer);
     assert_eq!(
         decoded.iter().collect::<Vec<_>>(),
@@ -101,9 +117,11 @@ fn pooled_decode_preserves_table_and_invalidates_wire_byte_count() {
     assert_eq!(decoded.byte_len(), plain.byte_len());
     drop(decoded);
     let reused = pool.multipart(["a", "", "b"]);
+
     let crate::message::MessageInner::Multi(parts) = &reused.inner else {
         panic!("multipart")
     };
+
     assert_eq!(parts.as_ptr(), pointer);
 }
 
@@ -114,6 +132,7 @@ fn rt(msg: Message) -> Message {
     let wire = enc.encode(&msg).unwrap();
     assert_eq!(wire.len(), 1, "no-dict slice always emits 1 wire message");
     let plain = dec.decode(wire.into_iter().next().unwrap()).unwrap();
+
     plain.expect("plaintext message")
 }
 
@@ -167,6 +186,7 @@ fn incompressible_falls_back_to_plaintext() {
     for i in 0..MIN_COMPRESS_NO_DICT {
         plain.push(((i as u32).wrapping_mul(2_654_435_761) >> 24) as u8);
     }
+
     let msg = Message::single(plain.clone());
     let mut enc = Lz4Encoder::new();
     let wire = enc.encode(&msg).unwrap();
@@ -188,14 +208,17 @@ fn multipart_roundtrip() {
         Bytes::from(big.clone()),
         Bytes::from_static(b"trailer"),
     ]);
+
     let mut enc = Lz4Encoder::new();
     let wire = enc.encode(&msg).unwrap();
     assert_eq!(wire[0].len(), 3);
+
     let mut dec = Lz4Decoder::new();
     let out = dec
         .decode(wire.into_iter().next().unwrap())
         .unwrap()
         .unwrap();
+
     assert_eq!(out.len(), 3);
     assert_eq!(out.part_bytes(0).unwrap(), &b"meta"[..]);
     assert_eq!(out.part_bytes(1).unwrap().to_vec(), big);
@@ -298,6 +321,7 @@ fn rejects_oversized_dict() {
 fn receive_dictionary_limit_cannot_raise_the_protocol_ceiling() {
     let oversized = Bytes::from(vec![0x5a; MAX_DICT_BYTES + 1]);
     let largest = Bytes::from(vec![0x5a; MAX_DICT_BYTES]);
+
     for limit in [MAX_DICT_BYTES, MAX_DICT_BYTES + 1, usize::MAX] {
         let mut decoder = Lz4Decoder::new()
             .with_max_recv_dict_size(limit)
@@ -314,6 +338,7 @@ fn receive_dictionary_limit_cannot_raise_the_protocol_ceiling() {
             "valid dictionaries do not consume the logical message budget"
         );
     }
+
     let mut decoder = Lz4Decoder::new().with_max_recv_dict_size(31);
     assert!(
         decoder
@@ -378,8 +403,6 @@ fn budget_dict_shipment_does_not_count() {
     let m = dec.decode(wire[1].clone()).unwrap().unwrap();
     assert_eq!(m.part_bytes(0).unwrap(), &b"ok"[..]);
 }
-
-const TEST_BLOCK: usize = 4096;
 
 fn test_enc() -> Lz4Encoder {
     Lz4Encoder::new().with_block_size(TEST_BLOCK)
@@ -542,6 +565,7 @@ fn compressible_payload(size: usize) -> Bytes {
     while buf.len() < size {
         buf.extend_from_slice(b"{\"ts\":\"2026-06-11\",\"level\":\"INFO\",\"msg\":\"ok\"}");
     }
+
     buf.truncate(size);
     Bytes::from(buf)
 }
@@ -558,18 +582,21 @@ fn auto_train_produces_dict_and_roundtrips() {
     for _ in 0..200 {
         let msg = Message::single(compressible_payload(256));
         let wire = enc.encode(&msg).unwrap();
+
         for w in &wire {
             if let Some(first_part) = w.part_bytes(0)
                 && first_part.starts_with(b"LZ4D")
             {
                 dict_shipped = true;
             }
+
             let decoded = dec.decode(w.clone()).unwrap();
             if let Some(out) = decoded {
                 assert_eq!(out.part_bytes(0).unwrap().len(), 256);
             }
         }
     }
+
     assert!(enc.trainer.is_none(), "trainer consumed after saturation");
     assert!(enc.send.dict.is_some(), "trained dict installed");
     assert!(dict_shipped, "trained dict shipped to decoder");
@@ -581,6 +608,7 @@ fn auto_train_produces_dict_and_roundtrips() {
     assert_eq!(wire.len(), 1);
     let body = wire[0].part_bytes(0).unwrap();
     assert_eq!(&body[..4], b"LZ4B", "128B msg compressed with dict");
+
     let out = dec.decode(wire[0].clone()).unwrap().unwrap();
     assert_eq!(out.part_bytes(0).unwrap().len(), 128);
 }
@@ -597,6 +625,7 @@ fn auto_train_threshold_drops_after_dict() {
     for _ in 0..200 {
         let _ = enc.encode(&Message::single(compressible_payload(256)));
     }
+
     assert!(enc.trainer.is_none());
     assert_eq!(enc.send.effective_threshold(), MIN_COMPRESS_WITH_DICT);
 }
@@ -611,6 +640,7 @@ fn sync_dict_propagates_trained_dict() {
     for _ in 0..200 {
         let _ = primary.encode(&Message::single(compressible_payload(256)));
     }
+
     assert!(primary.send.dict.is_some());
 
     // Offload picks up the trained dict via sync.
@@ -634,11 +664,13 @@ fn auto_train_with_custom_capacity() {
 fn multiblock_2gib_roundtrip() {
     let size = LZ4M_BLOCK_SIZE + 1;
     let mut plain = vec![0u8; size];
+
     for (i, chunk) in plain.chunks_mut(43).enumerate() {
         let tag = (i as u64).to_le_bytes();
         let n = tag.len().min(chunk.len());
         chunk[..n].copy_from_slice(&tag[..n]);
     }
+
     let msg = Message::single(plain.clone());
     let mut enc = Lz4Encoder::new();
     let wire = enc.encode(&msg).unwrap();
@@ -666,11 +698,13 @@ fn multiblock_2gib_with_dict() {
     let dict = Bytes::from(vec![0x42u8; 256]);
     let size = LZ4M_BLOCK_SIZE + 1;
     let mut plain = vec![0u8; size];
+
     for (i, chunk) in plain.chunks_mut(43).enumerate() {
         let tag = (i as u64).to_le_bytes();
         let n = tag.len().min(chunk.len());
         chunk[..n].copy_from_slice(&tag[..n]);
     }
+
     let msg = Message::single(plain.clone());
     let mut enc = Lz4Encoder::with_send_dict(dict).unwrap();
     let mut dec = Lz4Decoder::new();
@@ -699,6 +733,7 @@ fn auto_train_soak_pattern() {
         let mut v = vec![seed; size];
         let tag = idx.to_le_bytes();
         v[..tag.len().min(size)].copy_from_slice(&tag[..tag.len().min(size)]);
+
         v
     }
 
@@ -711,6 +746,7 @@ fn auto_train_soak_pattern() {
         if size < 512 {
             continue;
         }
+
         let input = soak_payload(idx, size);
         let bound = block::get_maximum_output_size(input.len());
         let mut out = vec![0u8; bound];
@@ -720,11 +756,13 @@ fn auto_train_soak_pattern() {
     // Full encoder/decoder roundtrip with auto-train.
     let mut enc = Lz4Encoder::new().with_auto_train();
     let mut dec = Lz4Decoder::new();
+
     for idx in 0..300u64 {
         let size = SIZES[idx as usize % SIZES.len()];
         let payload = soak_payload(idx, size);
         let msg = Message::single(payload.clone());
         let wire = enc.encode(&msg).unwrap();
+
         for w in wire {
             if let Some(out) = dec.decode(w).unwrap() {
                 assert_eq!(out.part_bytes(0).unwrap().to_vec(), payload);
@@ -743,6 +781,7 @@ fn reusable_compressor_survives_epoch_rollover() {
         compressor.compress_into(&input, &mut output).unwrap();
     }
 }
+
 #[test]
 fn lz4b_rejects_a_tiny_frame_declaring_a_huge_body() {
     // 13 bytes declaring one GiB would otherwise reserve that much.

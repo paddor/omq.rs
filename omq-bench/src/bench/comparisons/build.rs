@@ -51,6 +51,7 @@ fn build_source(source: &str, peer_features: &[&str], needs_mt_runtime: bool) ->
             if needs_mt_runtime {
                 features.push("bench-mt-runtime");
             }
+
             process::build_omq_peer("omq_bench_peer_tokio", &features)
         }
         "omq-tokio-1t" => process::build_omq_peer("omq_bench_peer_blocking", peer_features),
@@ -58,6 +59,7 @@ fn build_source(source: &str, peer_features: &[&str], needs_mt_runtime: bool) ->
             let src = "scripts/libzmq_bench_peer.c";
             let out = "scripts/omq_libzmq_baseline_peer";
             run_build(&["gcc", "-O2", "-o", out, src, "-lzmq", "-lpthread"]);
+
             PathBuf::from(out)
         }
         "zmq.rs" => {
@@ -65,6 +67,7 @@ fn build_source(source: &str, peer_features: &[&str], needs_mt_runtime: bool) ->
                 &["cargo", "build", "--release", "-q"],
                 "scripts/zmqrs_bench_peer",
             );
+
             PathBuf::from("scripts/zmqrs_bench_peer/target/release/omq_zmqrs_bench_peer")
         }
         "r0z-async" | "tmq" | "monocoque-tokio-ct" => build_external_comparison_peer(source),
@@ -73,6 +76,7 @@ fn build_source(source: &str, peer_features: &[&str], needs_mt_runtime: bool) ->
                 &["cargo", "build", "--release", "-q"],
                 "scripts/rzmq_bench_peer",
             );
+
             PathBuf::from("scripts/rzmq_bench_peer/target/release/omq_rzmq_bench_peer")
         }
         _ => panic!("unknown impl source: {source}"),

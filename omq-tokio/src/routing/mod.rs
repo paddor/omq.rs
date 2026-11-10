@@ -21,6 +21,7 @@ pub(crate) mod identity;
 pub(crate) mod latency;
 pub(crate) mod peer_outbound;
 pub(crate) mod round_robin;
+
 // subscription matcher lives in omq-proto now.
 pub(crate) use omq_proto::subscription;
 
@@ -37,14 +38,16 @@ use omq_proto::proto::SocketType;
 use omq_proto::routing::{FanOutKind, RecvCategory, SendCategory, recv_category, send_category};
 use tokio::sync::oneshot;
 
-/// Max messages one outbound drain batch encodes before flushing.
-pub(crate) const OUTBOUND_BATCH_MAX_MSGS: usize = 512;
-
 pub(crate) use exclusive::{ExclusiveSend, Submitter as ExclusiveSubmitter};
 pub(crate) use fan_out::{FanOutMode, FanOutSend, Submitter as FanOutSubmitter};
 pub(crate) use identity::{IdentityRecv, IdentitySend, Submitter as IdentitySubmitter};
 pub(crate) use latency::{LatencySend, Submitter as LatencySubmitter};
 pub(crate) use round_robin::{RoundRobinSend, Submitter as RoundRobinSubmitter};
+
+pub(crate) use omq_proto::routing::supports_conflate;
+
+/// Max messages one outbound drain batch encodes before flushing.
+pub(crate) const OUTBOUND_BATCH_MAX_MSGS: usize = 512;
 
 pub(crate) type RepEnvelope = SmallVec<[Bytes; 2]>;
 
@@ -59,13 +62,16 @@ pub(crate) enum SendCompatibility {
 pub(crate) fn split_rep_request(msg: &Message) -> Option<(RepEnvelope, Message)> {
     let mut envelope = RepEnvelope::new();
     let mut parts = msg.iter();
+
     while let Some(part) = parts.next() {
         if part.is_empty() {
             let body = Message::multipart(parts);
             return (!body.is_empty()).then_some((envelope, body));
         }
+
         envelope.push(part);
     }
+
     None
 }
 
@@ -86,6 +92,7 @@ pub(crate) fn rep_reply_body(envelope: &RepEnvelope, mut reply: Message) -> Mess
     for _ in 0..=envelope.len() {
         let _ = reply.pop_front_payload();
     }
+
     reply
 }
 
@@ -145,6 +152,7 @@ impl SendSubmitter {
                 Err(omq_proto::TrySendError::Error(error)) => return Err(error),
                 Err(omq_proto::TrySendError::Closed) => return Err(Error::Closed),
             }
+
             self.wait_send_ready().await;
         }
     }
@@ -275,6 +283,7 @@ impl SendSubmitter {
                 let Some(msg) = messages.pop_front() else {
                     break;
                 };
+
                 match self.try_send(msg) {
                     Ok(()) => sent += 1,
                     Err(omq_proto::error::TrySendError::Full(returned)) => {
@@ -282,12 +291,14 @@ impl SendSubmitter {
                         if sent > 0 {
                             return Ok(sent);
                         }
+
                         let msg = messages.pop_front().expect("returned message present");
                         return Err(omq_proto::error::TrySendError::Full(msg));
                     }
                     Err(error) => return Err(error),
                 }
             }
+
             Ok(sent)
         }
     }
@@ -352,6 +363,7 @@ impl SendStrategy {
         if let Self::FanOut(send) = &mut self {
             send.set_compatibility(compatibility);
         }
+
         self
     }
 
@@ -368,6 +380,7 @@ impl SendStrategy {
             Self::Identity(send) => send.watch_close(progress),
         }
     }
+
     pub(crate) fn for_socket_type(
         t: SocketType,
         options: &Options,
@@ -482,6 +495,7 @@ impl SendStrategy {
         let Self::Identity(strategy) = self else {
             unreachable!("STREAM identity routing")
         };
+
         strategy.make_stream_connect_pipe(route_id, identity, capacity)
     }
 
@@ -501,6 +515,7 @@ impl SendStrategy {
         if let Self::FanOut(s) = self {
             return s.peer_subscribe(peer_id, prefix);
         }
+
         None
     }
 
@@ -623,6 +638,7 @@ fn uses_latency_round_robin(t: SocketType, options: &Options) -> bool {
     if options.mechanism.has_frame_transform() {
         return false;
     }
+
     match t {
         // REQ keeps its historical latency default. Other round-robin
         // socket types opt in explicitly so existing throughput-oriented
@@ -650,6 +666,7 @@ fn with_dart(
     if let Some(kind) = dart {
         tx.set_dart(kind);
     }
+
     tx
 }
 
@@ -721,96 +738,5 @@ pub(crate) fn supports_groups(t: SocketType) -> bool {
     matches!(t, SocketType::Dish)
 }
 
-pub(crate) use omq_proto::routing::supports_conflate;
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use omq_proto::WorkloadProfile;
-
-    #[test]
-    fn dealer_uses_latency_route_only_when_explicitly_requested() {
-        let io_pool = crate::context::IoPoolHandle::none();
-        let latency = Options::default().workload_profile(WorkloadProfile::Latency);
-        assert!(matches!(
-            SendStrategy::for_socket_type(SocketType::Dealer, &latency, &io_pool),
-            SendStrategy::Latency(_)
-        ));
-
-        assert!(matches!(
-            SendStrategy::for_socket_type(SocketType::Dealer, &Options::default(), &io_pool),
-            SendStrategy::RoundRobin(_)
-        ));
-    }
-
-    #[test]
-    fn latency_profile_extends_client_pair_and_channel() {
-        let io_pool = crate::context::IoPoolHandle::none();
-        let latency = Options::default().workload_profile(WorkloadProfile::Latency);
-
-        assert!(matches!(
-            SendStrategy::for_socket_type(SocketType::Client, &latency, &io_pool),
-            SendStrategy::Latency(_)
-        ));
-        assert!(matches!(
-            SendStrategy::for_socket_type(SocketType::Client, &Options::default(), &io_pool),
-            SendStrategy::RoundRobin(_)
-        ));
-        assert!(matches!(
-            SendStrategy::for_socket_type(SocketType::Pair, &latency, &io_pool),
-            SendStrategy::Latency(_)
-        ));
-        assert!(matches!(
-            SendStrategy::for_socket_type(SocketType::Channel, &latency, &io_pool),
-            SendStrategy::Latency(_)
-        ));
-        assert!(matches!(
-            SendStrategy::for_socket_type(SocketType::Pair, &Options::default(), &io_pool),
-            SendStrategy::Exclusive(_)
-        ));
-    }
-
-    #[test]
-    fn rep_reply_wraps_and_returns_body() {
-        let envelopes = [
-            RepEnvelope::new(),
-            RepEnvelope::from_iter([Bytes::from_static(b"id")]),
-            RepEnvelope::from_iter([Bytes::from_static(b"hop"), Bytes::from_static(b"id")]),
-        ];
-        let bodies = [
-            Message::single(vec![7u8; 256]),
-            Message::single("small"),
-            Message::multipart(["a", "b"]),
-        ];
-        for envelope in &envelopes {
-            for body in &bodies {
-                let reply = rep_reply_with_envelope(envelope, body.clone());
-                let expected: Vec<Bytes> = envelope
-                    .iter()
-                    .cloned()
-                    .chain([Bytes::new()])
-                    .chain(body.iter())
-                    .collect();
-                assert_eq!(reply.iter().collect::<Vec<_>>(), expected);
-                assert_eq!(&rep_reply_body(envelope, reply), body);
-            }
-        }
-    }
-
-    #[test]
-    fn identity_types_use_transmit_slots_for_latency_profile() {
-        let io_pool = crate::context::IoPoolHandle::none();
-        let latency = Options::default().workload_profile(WorkloadProfile::Latency);
-
-        for socket_type in [SocketType::Router, SocketType::Server] {
-            let latency_strategy = SendStrategy::for_socket_type(socket_type, &latency, &io_pool);
-            assert!(matches!(latency_strategy, SendStrategy::Identity(_)));
-            assert!(latency_strategy.needs_transmit_slot());
-
-            let throughput_strategy =
-                SendStrategy::for_socket_type(socket_type, &Options::default(), &io_pool);
-            assert!(matches!(throughput_strategy, SendStrategy::Identity(_)));
-            assert!(!throughput_strategy.needs_transmit_slot());
-        }
-    }
-}
+mod tests;

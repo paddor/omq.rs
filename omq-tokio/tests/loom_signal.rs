@@ -8,10 +8,15 @@ use loom::thread;
 #[path = "../src/network_limit/ledger.rs"]
 mod byte_ledger;
 
+// Compile the production transitions against Loom's admission mutex.
+#[path = "../src/engine/write_ownership.rs"]
+mod write_ownership;
+
 #[test]
 fn byte_ledger_conserves_credit_across_two_concurrent_lanes() {
     let mut model = loom::model::Builder::new();
     model.preemption_bound = Some(2);
+
     model.check(|| {
         let reports = Arc::new([
             byte_ledger::Reports::default(),
@@ -22,13 +27,16 @@ fn byte_ledger_conserves_credit_across_two_concurrent_lanes() {
             byte_ledger::Ledger::default(),
             byte_ledger::Ledger::default(),
         ];
+
         for index in 0..2 {
             accounts[index].grant(4, &grants[index]);
         }
+
         let lanes: Vec<_> = (0..2)
             .map(|index| {
                 let reports = reports.clone();
                 let grants = grants.clone();
+
                 thread::spawn(move || {
                     let credit = grants[index].load(Ordering::Acquire);
                     let spent = index as u64 + 1;
@@ -36,8 +44,10 @@ fn byte_ledger_conserves_credit_across_two_concurrent_lanes() {
                 })
             })
             .collect();
+
         let mut available = 0;
         let mut spent = 0;
+
         for _ in 0..2 {
             for index in 0..2 {
                 let updates = accounts[index].collect(&reports[index]);
@@ -49,20 +59,24 @@ fn byte_ledger_conserves_credit_across_two_concurrent_lanes() {
                     available + spent + accounts.iter().map(|a| a.held).sum::<u64>(),
                     8
                 );
+
                 if available != 0 {
                     available -= 1;
                     accounts[index].grant(1, &grants[index]);
                 }
             }
         }
+
         for lane in lanes {
             lane.join().unwrap();
         }
+
         for index in 0..2 {
             let updates = accounts[index].collect(&reports[index]);
             available += updates.returned;
             spent += updates.spent;
         }
+
         assert_eq!(spent, 3);
         assert_eq!(available + accounts.iter().map(|a| a.held).sum::<u64>(), 5);
     });
@@ -75,19 +89,23 @@ fn byte_grant_racing_cancellation_is_returned_or_wakes_the_idle_lane() {
         reports.demand.store(1, Ordering::Release);
         let granted = Arc::new(AtomicU64::new(0));
         let signal = Arc::new(AtomicDataSignal::new(AtomicDataSignal::IDLE, true));
+
         let allocator = {
             let reports = reports.clone();
             let granted = granted.clone();
             let signal = signal.clone();
+
             thread::spawn(move || {
                 let mut account = byte_ledger::Ledger::default();
                 if reports.demand.load(Ordering::Acquire) != 0 {
                     account.grant(8, &granted);
                     signal.mark();
                 }
+
                 account
             })
         };
+
         reports.publish([0; 5]); // Cancel before collecting a concurrent grant.
         signal.begin_drain();
         let returned = granted.load(Ordering::Acquire);
@@ -96,9 +114,11 @@ fn byte_grant_racing_cancellation_is_returned_or_wakes_the_idle_lane() {
         let mut account = allocator.join().unwrap();
         let first = account.collect(&reports);
         assert_eq!(first.returned, returned);
+
         if account.held != 0 {
             assert!(!signal.is_idle());
         }
+
         reports.publish([0, granted.load(Ordering::Acquire), 0, 0, 0]);
         let last = account.collect(&reports);
         assert_eq!(first.returned + last.returned, account.granted);
@@ -116,6 +136,7 @@ fn byte_ledger_handles_cumulative_counter_wrap_without_duplicate_credit() {
         account.grant(initial, &granted);
         reports.publish([initial, 0, 1, 0, 0]);
         assert_eq!(account.collect(&reports).spent, initial);
+
         let allocator = {
             let granted = granted.clone();
             thread::spawn(move || {
@@ -123,12 +144,15 @@ fn byte_ledger_handles_cumulative_counter_wrap_without_duplicate_credit() {
                 account
             })
         };
+
         let observed = granted.load(Ordering::Acquire);
         let credit = observed.wrapping_sub(initial);
         assert!(credit == 0 || credit == 8);
+
         reports.publish([observed, 0, 1, 0, 0]);
         let mut account = allocator.join().unwrap();
         let first = account.collect(&reports).spent;
+
         reports.publish([granted.load(Ordering::Acquire), 0, 0, 0, 0]);
         let last = account.collect(&reports).spent;
         assert_eq!(first + last, 8);
@@ -141,14 +165,17 @@ fn byte_grant_publication_cannot_be_lost_during_lane_drain() {
     loom::model(|| {
         let granted = Arc::new(AtomicUsize::new(0));
         let signal = Arc::new(AtomicDataSignal::new(AtomicDataSignal::IDLE, true));
+
         let allocator = {
             let granted = granted.clone();
             let signal = signal.clone();
+
             thread::spawn(move || {
                 granted.store(8, Ordering::Release);
                 signal.mark();
             })
         };
+
         signal.begin_drain();
         let collected = granted.load(Ordering::Acquire);
         signal.clear_after(true);
@@ -165,17 +192,21 @@ fn independently_published_spend_and_return_reports_preserve_burst_capacity() {
     loom::model(|| {
         let spent = Arc::new(AtomicUsize::new(0));
         let returned = Arc::new(AtomicUsize::new(0));
+
         let lane = {
             let spent = spent.clone();
             let returned = returned.clone();
+
             thread::spawn(move || {
                 spent.store(3, Ordering::Release);
                 returned.store(5, Ordering::Release);
             })
         };
+
         let mut held = 8;
         let mut available = 0;
         let mut last = (0, 0);
+
         for _ in 0..2 {
             // Refill before observing reports; unseen spend remains held.
             available = 8 - held;
@@ -188,6 +219,7 @@ fn independently_published_spend_and_return_reports_preserve_burst_capacity() {
             assert!(held + available <= 8);
             last = current;
         }
+
         lane.join().unwrap();
         held -= 3 - last.0 + 5 - last.1;
         available += 5 - last.1;
@@ -201,14 +233,17 @@ fn observing_lane_generation_before_empty_probe_cannot_hide_publication() {
     loom::model(|| {
         let data = Arc::new(AtomicBool::new(false));
         let ready = Arc::new(AtomicUsize::new(0));
+
         let producer = {
             let data = data.clone();
             let ready = ready.clone();
+
             thread::spawn(move || {
                 data.store(true, Ordering::Release);
                 ready.store(1, Ordering::Release);
             })
         };
+
         let seen = ready.load(Ordering::Acquire);
         let observed = data.load(Ordering::Acquire);
         producer.join().unwrap();
@@ -223,29 +258,35 @@ fn publication_fence_covers_async_and_blocking_waiter_registration() {
         let active = Arc::new(AtomicUsize::new(0));
         let woke = Arc::new(AtomicBool::new(false));
         let signal = Arc::new(AtomicDataSignal::new(AtomicDataSignal::IDLE, true));
+
         let producer = {
             let published = published.clone();
             let active = active.clone();
             let woke = woke.clone();
             let signal = signal.clone();
+
             thread::spawn(move || {
                 published.store(true, Ordering::Release);
                 signal.mark();
+
                 // Reuse mark's fence before checking blocking registration.
                 if active.load(Ordering::Acquire) != 0 {
                     woke.store(true, Ordering::Release);
                 }
             })
         };
+
         let blocking = {
             let published = published.clone();
             let active = active.clone();
+
             thread::spawn(move || {
                 active.fetch_add(1, Ordering::SeqCst);
                 fence(Ordering::SeqCst);
                 published.load(Ordering::Acquire)
             })
         };
+
         signal.begin_drain();
         let ready = published.load(Ordering::Acquire);
         signal.clear_after(!ready);
@@ -261,19 +302,23 @@ fn targeted_source_waiter_registration_cannot_miss_publication() {
         let published = Arc::new(AtomicBool::new(false));
         let waiters = Arc::new(AtomicUsize::new(0));
         let signal = Arc::new(AtomicDataSignal::new(AtomicDataSignal::IDLE, true));
+
         let producer = {
             let published = published.clone();
             let waiters = waiters.clone();
             let signal = signal.clone();
+
             thread::spawn(move || {
                 published.store(true, Ordering::Release);
                 // DataSignal::mark orders queue publication before this load.
                 fence(Ordering::SeqCst);
+
                 if waiters.load(Ordering::Acquire) != 0 {
                     signal.mark();
                 }
             })
         };
+
         waiters.fetch_add(1, Ordering::SeqCst);
         fence(Ordering::SeqCst);
         signal.begin_drain();
@@ -292,18 +337,22 @@ fn source_claim_racing_close_cannot_hide_control_work() {
         const CLAIMED: u8 = 2;
         let status = Arc::new(AtomicU8::new(LIVE));
         let pending = Arc::new(AtomicBool::new(false));
+
         let closer = {
             let status = status.clone();
             let pending = pending.clone();
+
             thread::spawn(move || {
                 if status.fetch_and(!LIVE, Ordering::AcqRel) & CLAIMED != 0 {
                     pending.swap(true, Ordering::Release);
                 }
             })
         };
+
         if status.fetch_or(CLAIMED, Ordering::AcqRel) & LIVE == 0 {
             pending.swap(true, Ordering::Release);
         }
+
         closer.join().unwrap();
         assert!(pending.load(Ordering::Acquire));
     });
@@ -315,14 +364,17 @@ fn source_receipt_release_racing_control_scan_is_resumed_or_pending() {
         const CLAIMED: u8 = 4;
         let status = Arc::new(AtomicU8::new(CLAIMED));
         let pending = Arc::new(AtomicBool::new(false));
+
         let releaser = {
             let status = status.clone();
             let pending = pending.clone();
+
             thread::spawn(move || {
                 status.fetch_and(!CLAIMED, Ordering::AcqRel);
                 pending.swap(true, Ordering::Release);
             })
         };
+
         let resumed =
             pending.swap(false, Ordering::AcqRel) && status.load(Ordering::Acquire) & CLAIMED == 0;
         releaser.join().unwrap();
@@ -356,6 +408,7 @@ impl ModelStateSignal {
     fn notify_changed(&self) {
         let mut state = self.state.lock().unwrap();
         state.generation = state.generation.wrapping_add(1);
+
         if state.waiters != 0 {
             state.woken = true;
         }
@@ -366,6 +419,7 @@ impl ModelStateSignal {
         if state.generation != seen {
             return true;
         }
+
         state.waiters += 1;
         state.generation != seen || state.woken
     }
@@ -455,6 +509,7 @@ impl AtomicDataSignal {
         if self.fenced {
             fence(Ordering::SeqCst);
         }
+
         let mut state = self.state.load(Ordering::Acquire);
         loop {
             match state {
@@ -491,6 +546,7 @@ impl AtomicDataSignal {
                 Ordering::Acquire,
             );
         }
+
         if self.fenced {
             fence(Ordering::SeqCst);
         }
@@ -501,6 +557,7 @@ impl AtomicDataSignal {
             self.rearm();
             return;
         }
+
         let mut state = self.state.load(Ordering::Acquire);
         loop {
             match state {
@@ -588,9 +645,11 @@ impl ModelLaneDistributor {
         if !self.try_push_pending_compression(&mut state) {
             return false;
         }
+
         if state.entries.len() >= self.cap {
             return false;
         }
+
         state.entries.push(ModelLaneEntry::Dispatch(id));
         true
     }
@@ -603,9 +662,11 @@ impl ModelLaneDistributor {
         if !state.pending_compression {
             return true;
         }
+
         if state.entries.len() >= self.cap {
             return false;
         }
+
         state.entries.push(ModelLaneEntry::CompressionUpdate);
         state.pending_compression = false;
         true
@@ -639,6 +700,7 @@ impl ModelFanoutSlot {
         if !Self::make_room(&mut entries, self.msg_cap) {
             return false;
         }
+
         entries.push(ModelFanoutEntry::Dict);
         self.dict_queued.store(true, Ordering::Release);
         true
@@ -648,12 +710,14 @@ impl ModelFanoutSlot {
         if !self.dict_ready() {
             return false;
         }
+
         self.push_unprotected(ModelFanoutEntry::Compressed(id))
     }
 
     fn drain(&self) -> Vec<ModelFanoutEntry> {
         let mut entries = self.entries.lock().unwrap();
         let drained = std::mem::take(&mut *entries);
+
         if drained
             .iter()
             .any(|entry| matches!(entry, ModelFanoutEntry::Dict))
@@ -661,6 +725,7 @@ impl ModelFanoutSlot {
             self.dict_queued.store(false, Ordering::Release);
             self.dict_shipped.store(true, Ordering::Release);
         }
+
         drained
     }
 
@@ -677,6 +742,7 @@ impl ModelFanoutSlot {
         if !Self::make_room(&mut entries, self.msg_cap) {
             return false;
         }
+
         entries.push(entry);
         true
     }
@@ -689,8 +755,10 @@ impl ModelFanoutSlot {
             else {
                 return false;
             };
+
             entries.remove(pos);
         }
+
         true
     }
 }
@@ -750,6 +818,7 @@ impl ModelBlockingRecvWaker {
         if self.active.load(Ordering::Acquire) == 0 {
             return;
         }
+
         if *self.thread.lock().unwrap() && self.armed.swap(false, Ordering::AcqRel) {
             self.unparked.store(true, Ordering::Release);
         }
@@ -786,6 +855,7 @@ impl ModelBlockingRecvCancel {
         {
             return;
         }
+
         *self.thread_present.lock().unwrap() = true;
         if self.canceled.load(Ordering::Acquire) {
             self.unparked.store(true, Ordering::Release);
@@ -814,6 +884,7 @@ fn state_signal_catches_change_between_check_and_wait_registration() {
         let waiter_signal = signal.clone();
         let waiter_full = full.clone();
         let waiter_observed = observed.clone();
+
         let waiter = thread::spawn(move || {
             let seen = waiter_signal.generation();
             if !waiter_full.load(Ordering::SeqCst) {
@@ -848,21 +919,26 @@ fn state_signal_catches_change_between_check_and_wait_registration() {
 fn fanout_scan_generation_model(refresh_between_targets: bool) {
     let signal = Arc::new(ModelStateSignal::new());
     let full = Arc::new(AtomicBool::new(true));
+
     let writer = {
         let signal = signal.clone();
         let full = full.clone();
+
         thread::spawn(move || {
             full.store(false, Ordering::SeqCst);
             signal.notify_changed();
         })
     };
+
     let mut seen = signal.generation();
     let pending = full.load(Ordering::SeqCst);
     // Continue scanning other peers after yielding to their consumers.
     thread::yield_now();
+
     if refresh_between_targets {
         seen = signal.generation();
     }
+
     let changed = signal.register_and_check(seen);
     writer.join().unwrap();
     assert!(
@@ -889,15 +965,18 @@ fn native_slot_release_wakes_after_the_earlier_admission_capacity_edge() {
         // Admission may be decremented before fanring publishes its head.
         signal.notify_changed();
         let slot_full = Arc::new(AtomicBool::new(true));
+
         let releaser = {
             let signal = signal.clone();
             let slot_full = slot_full.clone();
+
             thread::spawn(move || {
                 slot_full.store(false, Ordering::SeqCst);
                 // Forward the ring's space wake as well as Admission::drop.
                 signal.notify_changed();
             })
         };
+
         let seen = signal.generation();
         let pending = slot_full.load(Ordering::SeqCst);
         let changed = signal.register_and_check(seen);
@@ -915,18 +994,22 @@ fn peer_shared_sender_capacity_handoff_model(relay_ready: bool, parked: bool, fa
     let registered = Arc::new(Mutex::new(true));
     let signal = Arc::new(ModelStateSignal::new());
     let seen = signal.generation();
+
     if parked {
         assert!(!signal.register_and_check(seen));
     }
+
     let consumer = {
         let full = full.clone();
         let waiting = waiting.clone();
         let registered = registered.clone();
         let signal = signal.clone();
+
         thread::spawn(move || {
             // fanring publishes credits before notifying its single waiter.
             full.store(false, Ordering::Release);
             let wake = std::mem::replace(&mut *registered.lock().unwrap(), false);
+
             if wake {
                 // The inbox bridge waker forwards the ring's capacity edge.
                 waiting.store(false, Ordering::Release);
@@ -934,16 +1017,19 @@ fn peer_shared_sender_capacity_handoff_model(relay_ready: bool, parked: bool, fa
             }
         })
     };
+
     let sender = {
         let waiting = waiting.clone();
         let registered = registered.clone();
         let signal = signal.clone();
+
         thread::spawn(move || {
             // engine::producer_ready, serialized with the first caller by
             // the lane mutex. Both calls use the same bridge waker.
             if fast_ready && !waiting.load(Ordering::Acquire) && !full.load(Ordering::Acquire) {
                 return;
             }
+
             let was_waiting = waiting.swap(true, Ordering::AcqRel);
             if full.load(Ordering::Acquire) {
                 *registered.lock().unwrap() = true;
@@ -951,9 +1037,11 @@ fn peer_shared_sender_capacity_handoff_model(relay_ready: bool, parked: bool, fa
                     return;
                 }
             }
+
             // fanring::Sender::poll_ready cancels its registration on Ready.
             *registered.lock().unwrap() = false;
             waiting.store(false, Ordering::Release);
+
             if relay_ready && was_waiting {
                 signal.notify_changed();
             }
@@ -1024,20 +1112,24 @@ fn blocking_recv_lazy_registration_and_rearm_cannot_lose_publication() {
                 waker.register();
                 waker.cancel_sleep();
             }
+
             let message = Arc::new(AtomicBool::new(false));
             let receiver = {
                 let waker = waker.clone();
                 let message = message.clone();
+
                 thread::spawn(move || {
                     if !rearm {
                         waker.register();
                     }
+
                     waker.prepare_sleep();
                     // Exactly one queue recheck before parking, with no final
                     // load that could hide a missing publication wake.
                     message.load(Ordering::Acquire)
                 })
             };
+
             let sender = {
                 let waker = waker.clone();
                 thread::spawn(move || {
@@ -1045,6 +1137,7 @@ fn blocking_recv_lazy_registration_and_rearm_cannot_lose_publication() {
                     waker.wake();
                 })
             };
+
             let observed = receiver.join().unwrap();
             sender.join().unwrap();
             assert!(
@@ -1069,6 +1162,7 @@ fn blocking_recv_waker_does_not_lose_wake_around_sleep_prepare() {
         let recv_observed = observed.clone();
         let recv_parked = parked.clone();
         let recv_lost = lost.clone();
+
         let receiver = thread::spawn(move || {
             recv_waker.register();
             if recv_has_message.load(Ordering::Acquire) {
@@ -1095,6 +1189,7 @@ fn blocking_recv_waker_does_not_lose_wake_around_sleep_prepare() {
 
             recv_parked.store(true, Ordering::Release);
             thread::yield_now();
+
             if recv_has_message.load(Ordering::Acquire) && !recv_waker.was_unparked() {
                 recv_lost.store(true, Ordering::Release);
             }
@@ -1174,6 +1269,7 @@ fn fanout_dict_entry_stays_before_compressed_payloads_under_hwm() {
 
         let drain_slot = slot.clone();
         let drain_wire = wire.clone();
+
         let drainer = thread::spawn(move || {
             for _ in 0..3 {
                 thread::yield_now();
@@ -1205,10 +1301,12 @@ fn fanout_pending_compression_update_precedes_accepted_try_send_dispatches() {
             if sender_dist.try_dispatch(1) {
                 accepted.push(1);
             }
+
             thread::yield_now();
             if sender_dist.try_dispatch(2) {
                 accepted.push(2);
             }
+
             accepted
         });
 
@@ -1219,6 +1317,7 @@ fn fanout_pending_compression_update_precedes_accepted_try_send_dispatches() {
             observed.extend(drain_dist.drain());
             thread::yield_now();
             observed.extend(drain_dist.drain());
+
             observed
         });
 
@@ -1255,13 +1354,16 @@ fn space_signal_catches_release_or_drop_after_full_retry() {
         let sender_full = full.clone();
         let sender_alive = alive.clone();
         let sender_observed = observed.clone();
+
         let sender = thread::spawn(move || {
             if !sender_full.load(Ordering::SeqCst) || !sender_alive.load(Ordering::SeqCst) {
                 sender_observed.store(true, Ordering::SeqCst);
                 return;
             }
+
             let seen = sender_signal.generation();
             thread::yield_now();
+
             if sender_signal.register_and_check(seen)
                 || !sender_full.load(Ordering::SeqCst)
                 || !sender_alive.load(Ordering::SeqCst)
@@ -1305,10 +1407,12 @@ fn pipe_wait_tracks_space_and_route_activation() {
         let sender_pipe_full = pipe_full.clone();
         let sender_route_available = route_available.clone();
         let sender_observed = observed.clone();
+
         let sender = thread::spawn(move || {
             let pipe_seen = sender_pipe_space.generation();
             let route_seen = sender_route_changed.generation();
             thread::yield_now();
+
             if sender_pipe_space.register_and_check(pipe_seen)
                 || sender_route_changed.register_and_check(route_seen)
                 || !sender_pipe_full.load(Ordering::SeqCst)
@@ -1367,6 +1471,7 @@ fn data_signal_skipped_mark_model(fenced: bool) {
         let producer = {
             let tail = tail.clone();
             let signal = signal.clone();
+
             thread::spawn(move || {
                 // yring flush, then DataSignal::mark.
                 tail.store(2, Ordering::Release);
@@ -1381,10 +1486,12 @@ fn data_signal_skipped_mark_model(fenced: bool) {
             consumed = tail.load(Ordering::Acquire);
             let is_empty = tail.load(Ordering::Acquire) == consumed;
             signal.clear_after(is_empty);
+
             if signal.is_idle() {
                 break;
             }
         }
+
         let parked = signal.is_idle();
 
         producer.join().unwrap();
@@ -1396,19 +1503,17 @@ fn data_signal_skipped_mark_model(fenced: bool) {
     }
 }
 
-// Compile the production transitions against Loom's admission mutex.
-#[path = "../src/engine/write_ownership.rs"]
-mod write_ownership;
-
 #[test]
 fn direct_idle_publication_cannot_miss_queue_admission() {
     loom::model(|| {
         use write_ownership::WriteOwnership;
         let owner = Arc::new(Mutex::new(WriteOwnership::new()));
         let queued = Arc::new(AtomicBool::new(false));
+
         let producer = {
             let owner = owner.clone();
             let queued = queued.clone();
+
             thread::spawn(move || {
                 let mut owner = owner.lock().unwrap();
                 if !owner.is_idle() {
@@ -1417,6 +1522,7 @@ fn direct_idle_publication_cannot_miss_queue_admission() {
                 }
             })
         };
+
         owner
             .lock()
             .unwrap()
@@ -1432,9 +1538,11 @@ fn pending_write_excludes_direct_send_until_completion_or_close() {
         use write_ownership::WriteOwnership;
         let owner = Arc::new(Mutex::new(WriteOwnership::new()));
         let pending = Arc::new(AtomicBool::new(true));
+
         let sender = {
             let owner = owner.clone();
             let pending = pending.clone();
+
             thread::spawn(move || {
                 let mut owner = owner.lock().unwrap();
                 if owner.is_idle() {
@@ -1444,10 +1552,12 @@ fn pending_write_excludes_direct_send_until_completion_or_close() {
                 }
             })
         };
+
         let closer = {
             let owner = owner.clone();
             thread::spawn(move || owner.lock().unwrap().close())
         };
+
         // No mutex held while the driver's write future is pending/canceled.
         thread::yield_now();
         pending.store(false, Ordering::Release);

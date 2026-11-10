@@ -54,10 +54,12 @@ fn plain_zap_authenticates_over_quic() {
     let zap = start_plain_zap_handler(ctx);
     let pull = zmq_socket(ctx, ZMQ_PULL);
     let push = zmq_socket(ctx, ZMQ_PUSH);
+
     for sock in [pull, push] {
         set_i32(sock, ZMQ_LINGER, 0);
         set_timeo(sock, 5000);
     }
+
     set_i32(pull, ZMQ_PLAIN_SERVER, 1);
     set_bytes(pull, ZMQ_ZAP_DOMAIN, b"global");
     set_bytes(pull, OMQ_QUIC_CERT_PEM, cert.as_bytes());
@@ -70,14 +72,17 @@ fn plain_zap_authenticates_over_quic() {
     set_i32(push, OMQ_QUIC_TRUST_SYSTEM, 0);
     set_bytes(push, OMQ_QUIC_TRUST_PEM, cert.as_bytes());
     assert_eq!(zmq_connect(push, endpoint.as_ptr()), 0);
+
     assert_eq!(zmq_send(push, b"hello".as_ptr().cast(), 5, 0), 5);
     let mut buf = [0u8; 8];
     assert_eq!(zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0), 5);
     assert_eq!(&buf[..5], b"hello");
+
     let request = zap.join().unwrap();
     assert_eq!(request[5], b"PLAIN");
     assert_eq!(request[6], b"alice");
     assert_eq!(request[7], b"secret");
+
     zmq_close(push);
     zmq_close(pull);
     zmq_ctx_term(ctx);
@@ -106,9 +111,11 @@ fn msg_property(message: &ZmqMsg, property: &std::ffi::CStr) -> Option<Vec<u8>> 
 fn msg_bytes(message: &mut ZmqMsg) -> Vec<u8> {
     let size = zmq_msg_size(message.0.as_ptr().cast());
     let data = zmq_msg_data(message.0.as_mut_ptr().cast()).cast::<u8>();
+
     if size == 0 {
         return Vec::new();
     }
+
     assert!(!data.is_null());
     // SAFETY: zmq_msg_data exposes `size` readable bytes until message close.
     unsafe { std::slice::from_raw_parts(data, size) }.to_vec()
@@ -143,6 +150,7 @@ fn get_i32(sock: *mut c_void, option: i32) -> i32 {
         zmq_getsockopt(sock, option, (&raw mut value).cast(), &raw mut len),
         0
     );
+
     value
 }
 
@@ -153,6 +161,7 @@ fn recv_multipart(sock: *mut c_void) -> Vec<Vec<u8>> {
         let size = zmq_recv(sock, buf.as_mut_ptr().cast(), buf.len(), 0);
         assert!(size >= 0, "ZAP recv failed, errno={}", omq_zmq::zmq_errno());
         parts.push(buf[..size as usize].to_vec());
+
         if get_i32(sock, ZMQ_RCVMORE) == 0 {
             return parts;
         }
@@ -166,6 +175,7 @@ fn send_multipart(sock: *mut c_void, parts: &[&[u8]]) {
         } else {
             ZMQ_SNDMORE
         };
+
         assert_eq!(
             zmq_send(sock, part.as_ptr().cast(), part.len(), flags),
             i32::try_from(part.len()).unwrap()
@@ -183,6 +193,7 @@ where
 {
     let ctx = ctx as usize;
     let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+
     let thread = std::thread::spawn(move || {
         let ctx = ctx as *mut c_void;
         let zap = zmq_socket(ctx, socket_type);
@@ -195,8 +206,10 @@ where
         let response: Vec<&[u8]> = response.iter().map(Vec::as_slice).collect();
         send_multipart(zap, &response);
         zmq_close(zap);
+
         request
     });
+
     ready_rx.recv().unwrap();
     thread
 }
@@ -211,6 +224,7 @@ fn start_plain_zap_handler_with_status(
 ) -> std::thread::JoinHandle<Vec<Vec<u8>>> {
     let ctx = ctx as usize;
     let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+
     let thread = std::thread::spawn(move || {
         let ctx = ctx as *mut c_void;
         let zap = zmq_socket(ctx, ZMQ_REP);
@@ -221,6 +235,7 @@ fn start_plain_zap_handler_with_status(
         let request = recv_multipart(zap);
         assert_eq!(request.len(), 8);
         let user_id: &[u8] = if status == b"200" { b"alice" } else { b"" };
+
         let reply = [
             b"1.0".as_slice(),
             request[1].as_slice(),
@@ -229,10 +244,12 @@ fn start_plain_zap_handler_with_status(
             user_id,
             b"".as_slice(),
         ];
+
         send_multipart(zap, &reply);
         zmq_close(zap);
         request
     });
+
     ready_rx.recv().unwrap();
     thread
 }
@@ -559,6 +576,7 @@ fn plain_zap_router_exposes_and_requires_routing_envelope() {
         assert_eq!(request.len(), 10);
         assert_eq!(request[0].len(), size_of::<u64>());
         assert_eq!(request[1], [] as [u8; 0]);
+
         vec![
             request[0].clone(),
             Vec::new(),
@@ -570,6 +588,7 @@ fn plain_zap_router_exposes_and_requires_routing_envelope() {
             Vec::new(),
         ]
     });
+
     let pull = zmq_socket(ctx, ZMQ_PULL);
     set_i32(pull, ZMQ_PLAIN_SERVER, 1);
     set_bytes(pull, ZMQ_ZAP_DOMAIN, b"global");
@@ -616,6 +635,7 @@ fn malformed_zap_router_reply_fails_authentication_closed() {
             Vec::new(),
         ]
     });
+
     let pull = zmq_socket(ctx, ZMQ_PULL);
     set_i32(pull, ZMQ_PLAIN_SERVER, 1);
     set_bytes(pull, ZMQ_ZAP_DOMAIN, b"global");
@@ -647,6 +667,7 @@ fn zap_user_id_and_metadata_are_attached_to_every_received_frame() {
         metadata.extend_from_slice(b"Role");
         metadata.extend_from_slice(&5u32.to_be_bytes());
         metadata.extend_from_slice(b"admin");
+
         vec![
             b"1.0".to_vec(),
             request[1].clone(),
@@ -656,6 +677,7 @@ fn zap_user_id_and_metadata_are_attached_to_every_received_frame() {
             metadata,
         ]
     });
+
     let pull = zmq_socket(ctx, ZMQ_PULL);
     set_i32(pull, ZMQ_PLAIN_SERVER, 1);
     set_bytes(pull, ZMQ_ZAP_DOMAIN, b"global");
@@ -716,6 +738,7 @@ fn send_null_ready_with_spoofed_properties(peer: &mut std::net::TcpStream) {
     for name in ["User-Id", "user-id", "USER-ID", "Role", "role", "ROLE"] {
         properties.add(name, Bytes::from_static(b"admin"));
     }
+
     properties.add("X-Application", Bytes::from_static(b"client"));
 
     let mut ready = BytesMut::new();
@@ -747,6 +770,7 @@ fn zap_metadata_cannot_be_shadowed_by_peer_properties() {
             b"\x04Role\x00\x00\x00\x06reader".to_vec(),
         ]
     });
+
     let pull = zmq_socket(ctx, ZMQ_PULL);
     set_bytes(pull, ZMQ_ZAP_DOMAIN, b"global");
     set_timeo(pull, 5000);
@@ -766,9 +790,11 @@ fn zap_metadata_cannot_be_shadowed_by_peer_properties() {
     assert_eq!(zmq_msg_recv(message.0.as_mut_ptr().cast(), pull, 0), 5);
     assert_eq!(msg_property(&message, c"User-Id"), Some(b"alice".to_vec()));
     assert_eq!(msg_property(&message, c"Role"), Some(b"reader".to_vec()));
+
     for name in [c"user-id", c"USER-ID", c"role", c"ROLE"] {
         assert_eq!(msg_property(&message, name), None);
     }
+
     assert_eq!(
         msg_property(&message, c"X-Application"),
         Some(b"client".to_vec())
@@ -788,6 +814,7 @@ fn zap_metadata_cannot_be_shadowed_by_peer_properties() {
 fn spawn_pipelined_zap_router(ctx: *mut c_void) -> std::thread::JoinHandle<[Vec<Vec<u8>>; 2]> {
     let handler_ctx = ctx as usize;
     let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+
     let zap = std::thread::spawn(move || {
         let ctx = handler_ctx as *mut c_void;
         let router = zmq_socket(ctx, ZMQ_ROUTER);
@@ -797,6 +824,7 @@ fn spawn_pipelined_zap_router(ctx: *mut c_void) -> std::thread::JoinHandle<[Vec<
 
         let requests = [recv_multipart(router), recv_multipart(router)];
         assert_ne!(requests[0][0], requests[1][0]);
+
         for request in &requests {
             // [route, delimiter, version, request id, status, text, user id, metadata]
             let response = [
@@ -809,11 +837,14 @@ fn spawn_pipelined_zap_router(ctx: *mut c_void) -> std::thread::JoinHandle<[Vec<
                 request[8].as_slice(),
                 b"",
             ];
+
             send_multipart(router, &response);
         }
+
         zmq_close(router);
         requests
     });
+
     ready_rx.recv().unwrap();
     zap
 }
@@ -836,6 +867,7 @@ fn connect_plain_clients(
             zmq_send(push, username.as_ptr().cast(), username.len(), 0),
             i32::try_from(username.len()).unwrap()
         );
+
         push
     })
 }
@@ -863,6 +895,7 @@ fn zap_router_can_pipeline_requests_from_multiple_servers() {
     assert_eq!(requests[0][7], b"PLAIN");
     assert_eq!(requests[1][7], b"PLAIN");
     let mut received = std::collections::HashSet::new();
+
     for _ in 0..2 {
         let mut message = ZmqMsg::new();
         assert!(zmq_msg_recv(message.0.as_mut_ptr().cast(), pull, 0) > 0);
@@ -872,6 +905,7 @@ fn zap_router_can_pipeline_requests_from_multiple_servers() {
         received.insert(body);
         zmq_msg_close(message.0.as_mut_ptr().cast());
     }
+
     assert_eq!(
         received,
         [b"alice".to_vec(), b"bob".to_vec()].into_iter().collect()
@@ -881,6 +915,7 @@ fn zap_router_can_pipeline_requests_from_multiple_servers() {
         zmq_close(push);
         zmq_ctx_term(ctx);
     }
+
     zmq_close(pull);
     zmq_ctx_term(server_ctx);
 }
@@ -899,6 +934,7 @@ fn null_zap_request_has_no_credentials() {
             Vec::new(),
         ]
     });
+
     let pull = zmq_socket(ctx, ZMQ_PULL);
     set_bytes(pull, ZMQ_ZAP_DOMAIN, b"public");
     set_timeo(pull, 5000);
@@ -957,6 +993,7 @@ fn curve_zap_request_carries_raw_client_public_key() {
             Vec::new(),
         ]
     });
+
     let pull = zmq_socket(ctx, ZMQ_PULL);
     set_i32(pull, ZMQ_CURVE_SERVER, 1);
     set_bytes(pull, ZMQ_CURVE_SECRETKEY, &server_secret[..40]);
@@ -1003,6 +1040,7 @@ fn plain_server_without_zap_fails_closed() {
     // Authentication can reject the peer before the message enters its pipe.
     // A muted PUSH then waits for a usable peer until its send timeout.
     let sent = zmq_send(push, b"denied".as_ptr().cast(), 6, 0);
+
     if sent == -1 {
         assert_eq!(omq_zmq::zmq_errno(), libc::EAGAIN);
     } else {
@@ -1065,6 +1103,7 @@ fn zap_and_plain_string_options_enforce_rfc_limits() {
         ),
         -1
     );
+
     assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
     assert_eq!(
         zmq_setsockopt(
@@ -1075,12 +1114,14 @@ fn zap_and_plain_string_options_enforce_rfc_limits() {
         ),
         -1
     );
+
     assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
     assert_eq!(
         zmq_setsockopt(socket, ZMQ_PLAIN_USERNAME, b"has space".as_ptr().cast(), 9,),
         -1
     );
     assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+
     assert_eq!(
         zmq_setsockopt(
             socket,
@@ -1090,6 +1131,7 @@ fn zap_and_plain_string_options_enforce_rfc_limits() {
         ),
         -1
     );
+
     assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
 
     let enforced = zmq_socket(ctx, ZMQ_PULL);
@@ -1264,11 +1306,13 @@ fn plain_zap_rep_keeps_queued_request_routes_and_properties_together() {
     let ctx = zmq_ctx_new();
     let context_address = ctx as usize;
     let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+
     let zap = std::thread::spawn(move || {
         let handler = zmq_socket(context_address as *mut c_void, ZMQ_REP);
         set_timeo(handler, 5000);
         assert_eq!(zmq_bind(handler, c"inproc://zeromq.zap.01".as_ptr()), 0);
         ready_tx.send(()).unwrap();
+
         for _ in 0..2 {
             let request = recv_multipart(handler);
             assert_eq!(request.len(), 8);
@@ -1277,8 +1321,10 @@ fn plain_zap_rep_keeps_queued_request_routes_and_properties_together() {
                 &[b"1.0", &request[1], b"200", b"OK", &request[6], b""],
             );
         }
+
         assert_eq!(zmq_close(handler), 0);
     });
+
     ready_rx.recv().unwrap();
     let rep = zmq_socket(ctx, ZMQ_REP);
     set_i32(rep, ZMQ_LINGER, 0);
@@ -1287,6 +1333,7 @@ fn plain_zap_rep_keeps_queued_request_routes_and_properties_together() {
     set_timeo(rep, 5000);
     let endpoint = helpers::bind_random_tcp(rep);
     let clients = [zmq_socket(ctx, ZMQ_REQ), zmq_socket(ctx, ZMQ_REQ)];
+
     for (client, user) in clients.iter().zip([b"alice".as_slice(), b"bob".as_slice()]) {
         set_i32(*client, ZMQ_LINGER, 0);
         set_bytes(*client, ZMQ_PLAIN_USERNAME, user);
@@ -1298,6 +1345,7 @@ fn plain_zap_rep_keeps_queued_request_routes_and_properties_together() {
             i32::try_from(user.len()).unwrap()
         );
     }
+
     zap.join().unwrap();
     // Both connections have queued requests; each body keeps its own ZAP ID.
     for _ in 0..2 {
@@ -1311,6 +1359,7 @@ fn plain_zap_rep_keeps_queued_request_routes_and_properties_together() {
         );
         assert_eq!(zmq_msg_close(request.0.as_mut_ptr().cast()), 0);
     }
+
     for (client, expected) in clients.iter().zip([b"alice".as_slice(), b"bob".as_slice()]) {
         let mut reply = [0_u8; 8];
         assert_eq!(
@@ -1320,6 +1369,7 @@ fn plain_zap_rep_keeps_queued_request_routes_and_properties_together() {
         assert_eq!(&reply[..expected.len()], expected);
         assert_eq!(zmq_close(*client), 0);
     }
+
     assert_eq!(zmq_close(rep), 0);
     assert_eq!(zmq_ctx_term(ctx), 0);
 }

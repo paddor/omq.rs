@@ -21,6 +21,7 @@ impl Write for ScriptedWrite {
             .unwrap_or(Ok(usize::MAX))?
             .min(bytes.len());
         self.bytes.extend_from_slice(&bytes[..count]);
+
         Ok(count)
     }
 
@@ -38,6 +39,7 @@ fn fixture(step: io::Result<usize>) -> (DirectWriteState<ScriptedWrite>, Arc<Pee
         },
         ownership: WriteOwnership::new(),
     };
+
     let config = SlotConfig {
         arena_threshold: 4096,
         arena_cap: 4096,
@@ -47,6 +49,7 @@ fn fixture(step: io::Result<usize>) -> (DirectWriteState<ScriptedWrite>, Arc<Pee
     };
     let slot = PeerTransmitSlot::with_config(1, config);
     slot.mark_handshake_done();
+
     (state, slot)
 }
 
@@ -56,18 +59,22 @@ fn short_write_and_eagain_keep_tail_ahead_of_later_send() {
         let (mut state, slot) = fixture(step);
         let first = Message::single("first");
         let second = Message::single("second");
+
         assert_eq!(state.try_send(&slot, &first), TryFrameResult::Ineligible);
         state.ownership.publish_idle(|| true);
         assert_eq!(state.try_send(&slot, &first), TryFrameResult::Ok);
         assert_eq!(state.stream.calls, 1, "one nonblocking write per admission");
         assert!(!slot.is_empty());
         assert_eq!(state.try_send(&slot, &second), TryFrameResult::Ineligible);
+
         let mut pending = Vec::new();
         slot.try_drain_arena_only(&mut pending).unwrap();
         assert!(slot.is_empty());
+
         // Slot empty does not mean TCP idle: driver still owns the staged tail.
         state.ownership.publish_idle(|| pending.is_empty());
         assert_eq!(state.try_send(&slot, &second), TryFrameResult::Ineligible);
+
         state.stream.bytes.extend_from_slice(&pending);
         pending.clear();
         state.ownership.publish_idle(|| pending.is_empty());

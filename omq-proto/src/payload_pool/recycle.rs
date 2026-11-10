@@ -20,10 +20,12 @@ impl Recycling {
         let Some(pool) = &self.pool else {
             return;
         };
+
         pool.free.push_batch(&mut self.owners[..self.count]);
         if let Some(returns) = self.returns.take() {
             returns.publish(self.count);
         }
+
         self.count = 0;
     }
 
@@ -31,14 +33,18 @@ impl Recycling {
         let returns = (credit == Credit::Publish)
             .then_some(owner.returns.as_ref())
             .flatten();
+
         if self.count != 0 && !same_returns(self.returns.as_ref(), returns) {
             self.flush();
         }
+
         if self.count == 0 {
             self.returns = returns.cloned();
         }
+
         self.owners[self.count] = Some(owner);
         self.count += 1;
+
         if self.count == TRANSFER {
             self.flush();
         }
@@ -58,6 +64,7 @@ impl Drop for RecycleGuard {
         let _ = RECYCLE.try_with(|recycle| {
             let mut recycle = recycle.borrow_mut();
             recycle.flush();
+
             if self.0 {
                 recycle.active = false;
                 recycle.pool = None;
@@ -79,6 +86,7 @@ pub(super) fn recycling<R>(operation: impl FnOnce() -> R) -> R {
             }
         })
         .unwrap_or(false);
+
     let _guard = RecycleGuard(installed);
     operation()
 }

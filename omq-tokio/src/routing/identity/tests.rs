@@ -25,6 +25,7 @@ async fn stream_full_lane_preserves_backpressure_and_other_peers() {
     submitter
         .try_send(Message::multipart(["slow", "first"]))
         .unwrap();
+
     assert!(submitter.send_ready());
     assert!(matches!(
         submitter.check_route(b"slow"),
@@ -35,6 +36,7 @@ async fn stream_full_lane_preserves_backpressure_and_other_peers() {
         Err(Error::Unroutable)
     ));
     assert!(submitter.check_route(b"fast").is_ok());
+
     let next = Message::multipart(["slow", "next"]);
     assert!(matches!(
         submitter.try_send(next.clone()),
@@ -43,6 +45,7 @@ async fn stream_full_lane_preserves_backpressure_and_other_peers() {
     let waiting = submitter.send(next);
     tokio::pin!(waiting);
     assert!(waiting.as_mut().now_or_never().is_none());
+
     submitter
         .try_send(Message::multipart(["fast", "available"]))
         .unwrap();
@@ -50,10 +53,12 @@ async fn stream_full_lane_preserves_backpressure_and_other_peers() {
         other_receiver.recv().await.unwrap(),
         PeerDriverData::SendMessage(message) if message == Message::single("available")
     ));
+
     assert!(matches!(
         receiver.recv().await.unwrap(),
         PeerDriverData::SendMessage(message) if message == Message::single("first")
     ));
+
     receiver.release_consumed();
     tokio::time::timeout(Duration::from_secs(1), waiting)
         .await
@@ -81,11 +86,13 @@ fn default_router_releases_full_messages_outside_routing_lock() {
         bytes: [u8; 128],
         routes: Arc<Mutex<IdentityInner>>,
     }
+
     impl AsRef<[u8]> for Export {
         fn as_ref(&self) -> &[u8] {
             &self.bytes
         }
     }
+
     impl Drop for Export {
         fn drop(&mut self) {
             assert!(
@@ -94,6 +101,7 @@ fn default_router_releases_full_messages_outside_routing_lock() {
             );
         }
     }
+
     let mut send = IdentitySend::new(SocketType::Router, &Options::default());
     let (producer, _consumer) = send_pipe(1);
     send.connection_added(7, peer_handle(producer), Bytes::from_static(b"id"), false);
@@ -101,11 +109,13 @@ fn default_router_releases_full_messages_outside_routing_lock() {
     submitter
         .try_send_to_message(b"id", Message::single("full"))
         .unwrap();
+
     for tagged in [true, false] {
         let message = Message::single(Bytes::from_owner(Export {
             bytes: [0; 128],
             routes: send.inner.clone(),
         }));
+
         if tagged {
             submitter
                 .try_send(Message::with_prefix(Bytes::from_static(b"id"), message))
@@ -139,10 +149,12 @@ async fn default_router_drops_full_lane_and_can_send_to_another_peer() {
         Bytes::from_static(b"fast"),
         false,
     );
+
     let submitter = send.submitter();
     submitter
         .try_send(Message::multipart(["slow", "first"]))
         .unwrap();
+
     submitter
         .try_send(Message::multipart(["slow", "drop"]))
         .unwrap();
@@ -161,9 +173,11 @@ async fn default_router_drops_full_lane_and_can_send_to_another_peer() {
             .now_or_never(),
         Some(Ok(()))
     ));
+
     submitter
         .try_send(Message::multipart(["fast", "available"]))
         .unwrap();
+
     assert!(matches!(
         receiver.recv().await.unwrap(),
         PeerDriverData::SendMessage(message) if message == Message::single("first")
@@ -189,6 +203,7 @@ async fn fallback_clones_have_separate_lanes_and_binding_copies_share_fifo() {
         routes: DirectRoutes::default(),
     };
     send.connection_added(7, handle, Bytes::from_static(b"id"), false);
+
     let first = send.submitter();
     first.try_send(Message::multipart(["id", "first"])).unwrap();
     let shared = first.clone_shared();
@@ -196,20 +211,25 @@ async fn fallback_clones_have_separate_lanes_and_binding_copies_share_fifo() {
         shared.try_send(Message::multipart(["id", "next"])),
         Err(TrySendError::Full(_))
     ));
+
     let independent = first.clone();
     independent
         .try_send(Message::multipart(["id", "independent"]))
         .unwrap();
+
     let waiting = shared.wait_peer_send_progress(7);
     tokio::pin!(waiting);
     assert!(waiting.as_mut().now_or_never().is_none());
     let mut accepted = Vec::new();
+
     for _ in 0..2 {
         let PeerDriverData::SendMessage(message) = receiver.recv().await.unwrap() else {
             panic!("raw message")
         };
+
         accepted.push(message.part_bytes(0).unwrap());
     }
+
     accepted.sort();
     assert_eq!(
         accepted,
@@ -229,9 +249,11 @@ async fn fallback_clones_have_separate_lanes_and_binding_copies_share_fifo() {
     tokio::time::timeout(Duration::from_secs(1), closing)
         .await
         .unwrap();
+
     let PeerDriverData::SendMessage(message) = receiver.recv().await.unwrap() else {
         panic!("raw message")
     };
+
     assert_eq!(message, Message::single("next"));
 }
 
@@ -244,11 +266,13 @@ async fn routed_progress_wait_registers_without_an_application_identity_frame() 
             let mut send = IdentitySend::new(socket_type, &options);
             let (producer, mut consumer) = send_pipe(1);
             send.connection_added(7, peer_handle(producer), Bytes::from_static(b"peer"), false);
+
             let submitter = send.submitter();
             let message = Message::single("body");
             submitter
                 .try_send_rep(7, &RepEnvelope::new(), message.clone())
                 .unwrap();
+
             assert!(matches!(
                 submitter.try_send_rep(7, &RepEnvelope::new(), message),
                 Err(TrySendError::Full(returned)) if returned == Message::single("body")
@@ -256,6 +280,7 @@ async fn routed_progress_wait_registers_without_an_application_identity_frame() 
             let wait = submitter.wait_peer_send_progress(7);
             tokio::pin!(wait);
             assert!(wait.as_mut().now_or_never().is_none());
+
             let _replacement = match action {
                 0 => {
                     assert_eq!(consumer.drain_into(&mut Vec::new(), 1, usize::MAX), 1);
@@ -274,9 +299,11 @@ async fn routed_progress_wait_registers_without_an_application_identity_frame() 
                         Bytes::from_static(b"replacement"),
                         false,
                     );
+
                     Some(consumer)
                 }
             };
+
             tokio::time::timeout(Duration::from_secs(1), wait)
                 .await
                 .unwrap();
@@ -314,8 +341,10 @@ fn latency_peer_keeps_fanring_admission() {
     let mut send = IdentitySend::new(SocketType::Peer, &options);
     assert!(send.needs_peer_send_pipe());
     assert!(send.needs_transmit_slot());
+
     let (producer, mut receiver) = crate::engine::peer_send_pipe(1, &omq_proto::Options::default());
     send.connection_added(1, peer_handle(producer), Bytes::from_static(b"id"), false);
+
     let first = send.submitter();
     let second = first.clone();
     first.try_send(Message::multipart(["id", "first"])).unwrap();
@@ -323,9 +352,11 @@ fn latency_peer_keeps_fanring_admission() {
         second.try_send(Message::multipart(["id", "second"])),
         Err(TrySendError::Full(_))
     ));
+
     let mut batch = Vec::new();
     assert_eq!(receiver.drain_into(&mut batch, 1, 1024), 1);
     assert_eq!(batch[0], Message::single("first"));
+
     second
         .try_send(Message::multipart(["id", "second"]))
         .unwrap();
@@ -347,6 +378,7 @@ fn try_send_reports_full_and_preserves_routing_frame() {
             ..Default::default()
         },
     };
+
     send.connection_added(1, handle, Bytes::from_static(b"id"), false);
 
     submitter
@@ -397,8 +429,10 @@ fn full_peer_retry_preserves_all_frames_and_metadata() {
                 send_pipe(capacity)
             }
         };
+
         let large = Bytes::from(vec![0x5a; 4096]);
         let pool = omq_proto::MessagePool::new(4, 4);
+
         for identity in [Bytes::new(), Bytes::from_static(b"id")] {
             let options =
                 Options::default().workload_profile(omq_proto::WorkloadProfile::Throughput);
@@ -417,12 +451,14 @@ fn full_peer_retry_preserves_all_frames_and_metadata() {
                 Message::multipart([Bytes::new(), large.clone(), Bytes::new()]),
                 pool.multipart([Bytes::new(), large.clone(), Bytes::new()]),
             ];
+
             for body in bodies {
                 for routing_id in [None, Some(42)] {
                     let mut message = Message::with_prefix(identity.clone(), body.clone());
                     if let Some(id) = routing_id {
                         message = message.with_routing_id(id);
                     }
+
                     submitter
                         .try_send(Message::with_prefix(
                             identity.clone(),
@@ -457,10 +493,12 @@ fn assert_full_retries(submitter: &Submitter, mut message: Message, large: &Byte
         };
         assert_eq!(message, expected);
         assert_eq!(message.routing_id(), expected.routing_id());
+
         if let Some(index) = large_part {
             assert_eq!(message.part_slice(index).unwrap().as_ptr(), large.as_ptr());
         }
     }
+
     message
 }
 
@@ -481,9 +519,11 @@ async fn progress_wait_observes_capacity_released_before_registration() {
         let (pipe_tx, mut pipe_rx) = send_pipe(4);
         send.connection_added(1, peer_handle(pipe_tx), Bytes::from_static(b"id"), false);
         let message = Message::multipart(["id", "body"]);
+
         for _ in 0..4 {
             submitter.try_send(message.clone()).unwrap();
         }
+
         assert!(matches!(
             submitter.try_send(message.clone()),
             Err(TrySendError::Full(_))
@@ -517,15 +557,18 @@ async fn registered_progress_wait_wakes_for_drain_close_and_identity_handover() 
             let submitter = send.submitter();
             let (pipe_tx, mut pipe_rx) = send_pipe(1);
             send.connection_added(1, peer_handle(pipe_tx), Bytes::from_static(b"id"), false);
+
             let message = Message::multipart(["id", "body"]);
             submitter.try_send(message.clone()).unwrap();
             assert!(matches!(
                 submitter.try_send(message.clone()),
                 Err(TrySendError::Full(_))
             ));
+
             let wait = submitter.wait_send_progress(&message);
             tokio::pin!(wait);
             assert!(wait.as_mut().now_or_never().is_none());
+
             let _replacement = match action {
                 0 => {
                     assert_eq!(pipe_rx.drain_into(&mut Vec::new(), 1, usize::MAX), 1);
@@ -543,9 +586,11 @@ async fn registered_progress_wait_wakes_for_drain_close_and_identity_handover() 
                         Bytes::from_static(b"id"),
                         false,
                     );
+
                     Some(replacement_rx)
                 }
             };
+
             assert!(
                 wait.as_mut().now_or_never().is_some(),
                 "action {action} must release the stale wait"
@@ -574,6 +619,7 @@ async fn send_retry_changes_wait_queue_after_handover_before_registration() {
             .try_send(Message::multipart(["id", "old queued"]))
             .unwrap();
         let body = Message::single("pending body");
+
         let Err(SendRetry::Full(returned, old_space)) =
             submitter.try_send_to(b"id", body.clone()).unwrap()
         else {
@@ -598,9 +644,11 @@ async fn send_retry_changes_wait_queue_after_handover_before_registration() {
         .await
         .expect("replacement retry must not wait on the retired queue")
         .unwrap();
+
         let Err(SendRetry::Full(returned, new_space)) = retried else {
             panic!("replacement peer must still be full");
         };
+
         assert_eq!(returned, body);
         assert!(!Arc::ptr_eq(
             &old_space,
@@ -634,6 +682,7 @@ async fn server_send_retry_changes_wait_queue_after_replacement() {
         Ok(Ok(()))
     ));
     let body = Message::single("pending body");
+
     let Err(SendRetry::Full(returned, old_space)) =
         submitter.try_send_server_to(7, body.clone()).unwrap()
     else {
@@ -657,9 +706,11 @@ async fn server_send_retry_changes_wait_queue_after_replacement() {
     .await
     .expect("replacement retry must not wait on the retired queue")
     .unwrap();
+
     let Err(SendRetry::Full(returned, new_space)) = retried else {
         panic!("replacement peer must still be full");
     };
+
     assert_eq!(returned, body);
 
     let wait = submitter.retry_server_full(7, returned, new_space);
@@ -728,9 +779,11 @@ fn stale_disconnects_do_not_remove_replacement_peer_routes() {
                 send_pipe(capacity)
             }
         };
+
         let options = Options::default().workload_profile(omq_proto::WorkloadProfile::Throughput);
         let mut send = IdentitySend::new(SocketType::Peer, &options);
         let submitter = send.submitter();
+
         for id in 1..=64u64 {
             let (tx, mut rx) = send_pipe(1);
             send.connection_added(id, peer_handle(tx), Bytes::from_static(b"id"), false);

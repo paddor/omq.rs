@@ -37,8 +37,10 @@ const USER_DICT_ID_MAX: u32 = 0x7FFF_FFFF;
 
 /// Default Zstd compression level, and the adaptive starting level.
 pub const DEFAULT_LEVEL: i32 = -1;
+
 /// Default adaptive level range when no fixed level is configured.
 pub const DEFAULT_LEVEL_RANGE: (i32, i32) = (-7, 4);
+
 /// Default trained dictionary capacity in bytes.
 pub const DEFAULT_DICT_CAPACITY: usize = super::common::DEFAULT_DICT_CAPACITY;
 
@@ -66,11 +68,13 @@ pub fn train_zdict(samples: &[&[u8]], capacity: usize) -> Option<Bytes> {
     if samples.is_empty() || capacity == 0 {
         return None;
     }
+
     let capacity = capacity.min(MAX_DICT_BYTES);
     let content = select_segments(samples, capacity, &FastCoverParams::default());
     let mut dict = finalize_dictionary(&content, samples, capacity);
     patch_user_dict_id(&mut dict).ok()?;
     Dictionary::from_bytes(&dict).ok()?;
+
     Some(Bytes::from(dict))
 }
 
@@ -148,6 +152,7 @@ impl ZstdEncoder {
                 total_bytes: 0,
             });
         }
+
         self
     }
 
@@ -176,6 +181,7 @@ impl ZstdEncoder {
                 "Zstd dictionary must start with ZDICT magic".into(),
             ));
         }
+
         Dictionary::from_bytes(&dict)
             .map_err(|e| Error::Protocol(format!("invalid zstd dictionary: {e}")))?;
         Ok(Self {
@@ -204,6 +210,7 @@ impl ZstdEncoder {
         self.set_level(controller.level());
         self.adaptive = Some(controller);
         self.stats = Some(CompressStats::default());
+
         self
     }
 
@@ -239,6 +246,7 @@ impl ZstdEncoder {
         let Some(controller) = self.adaptive.as_mut() else {
             return;
         };
+
         let stats = self
             .stats
             .replace(CompressStats::default())
@@ -332,9 +340,11 @@ impl ZstdEncoder {
 
         let mut out = self.ship_dictionary();
         let mut wire = Message::new();
+
         for part in &msg.parts_payload() {
             wire.push_part_payload(self.encode_part(part)?);
         }
+
         out.push(wire);
         Ok(out)
     }
@@ -344,6 +354,7 @@ impl ZstdEncoder {
         if let Some(dict) = self.send.take_shipment() {
             out.push(Message::single(dict.clone()));
         }
+
         out
     }
 
@@ -355,12 +366,15 @@ impl ZstdEncoder {
         let size = arena::check_batch(messages, "Zstd")?;
         self.arena_buf.clear();
         self.arena_buf.reserve(size);
+
         for message in messages {
             for part in &message.parts_payload() {
                 self.maybe_train(&part.as_bytes());
             }
+
             crate::proto::frame::encode_message_flat(message, &mut self.arena_buf);
         }
+
         let mut out = self.ship_dictionary();
         let compressed = if size >= self.send.effective_threshold() {
             self.ensure_cctx()?;
@@ -371,13 +385,16 @@ impl ZstdEncoder {
                 .unwrap()
                 .compress(&self.arena_buf)
                 .map_err(|e| compress_err(&e))?;
+
             if let (Some(started), Some(stats)) = (started, self.stats.as_mut()) {
                 stats.record(size, compressed.len(), started.elapsed());
             }
+
             Some(compressed).filter(|compressed| compressed.len() < size)
         } else {
             None
         };
+
         let body = compressed.as_deref().unwrap_or(&self.arena_buf);
         let mut wire = BytesMut::with_capacity(arena::HEADER + body.len());
         wire.extend_from_slice(&arena::encode_header(
@@ -388,6 +405,7 @@ impl ZstdEncoder {
         ));
         wire.extend_from_slice(body);
         out.push(Message::single(wire.freeze()));
+
         Ok(out)
     }
 
@@ -395,19 +413,25 @@ impl ZstdEncoder {
         let Some(state) = self.train.as_mut() else {
             return;
         };
+
         if plain.len() >= TRAIN_MAX_SAMPLE_LEN {
             return;
         }
+
         state.samples.push(plain.to_vec());
         state.total_bytes += plain.len();
+
         if state.samples.len() < TRAIN_MAX_SAMPLES && state.total_bytes < TRAIN_MAX_BYTES {
             return;
         }
+
         let state = self.train.take().unwrap();
         let samples: Vec<&[u8]> = state.samples.iter().map(Vec::as_slice).collect();
+
         let Some(dict) = train_zdict(&samples, self.send.dict_capacity) else {
             return;
         };
+
         self.send.install(dict);
         self.cctx = None;
     }
@@ -420,8 +444,10 @@ impl ZstdEncoder {
             } else {
                 CompressContext::new(self.level).map_err(|e| compress_err(&e))?
             };
+
             self.cctx = Some(ctx);
         }
+
         Ok(self.cctx.as_mut().unwrap())
     }
 
@@ -430,6 +456,7 @@ impl ZstdEncoder {
         if plain.len() < self.send.effective_threshold() {
             return Ok(plaintext_payload(&plain));
         }
+
         self.ensure_cctx()?;
         let started = self.stats.is_some().then(Instant::now);
         let compressed = self
@@ -438,12 +465,15 @@ impl ZstdEncoder {
             .unwrap()
             .compress(&plain)
             .map_err(|e| compress_err(&e))?;
+
         if let (Some(started), Some(stats)) = (started, self.stats.as_mut()) {
             stats.record(plain.len(), compressed.len(), started.elapsed());
         }
+
         if compressed.len() >= plain.len().saturating_sub(ENVELOPE_PLAIN) {
             return Ok(plaintext_payload(&plain));
         }
+
         Ok(Payload::from_bytes(Bytes::copy_from_slice(&compressed)))
     }
 }
@@ -508,6 +538,7 @@ impl ZstdDecoder {
         if Self::is_arena(&msg) {
             return self.decode_arena(&msg, false);
         }
+
         self.decode_with_budget(msg, self.max_message_size)
     }
 
@@ -536,15 +567,18 @@ impl ZstdDecoder {
             count,
         } = arena::parse_header(msg.len(), &bytes, "Zstd")?;
         let body = bytes.slice(arena::HEADER..);
+
         let payload = if compressed {
             let payload = self.decode_zstd(&body, &mut Some(size))?;
             if payload.len() != size {
                 return Err(invalid());
             }
+
             payload
         } else {
             Payload::from_bytes(Bytes::copy_from_slice(&body))
         };
+
         Ok(self.arena.start(DecodedArena::new(
             payload.as_bytes(),
             payload.retained_size().unwrap_or(size),
@@ -559,9 +593,11 @@ impl ZstdDecoder {
         if Self::is_arena(&msg) {
             return self.decode_arena(&msg, true);
         }
+
         if is_dict_shipment(&msg) {
             return self.decode(msg);
         }
+
         let budget = body_budget(msg.len(), self.max_message_size)?;
         self.decode_with_budget(msg, budget)
     }
@@ -573,6 +609,7 @@ impl ZstdDecoder {
             // largest per-part overhead is the four-byte passthrough prefix.
             let data = limit.saturating_add(parts.saturating_mul(ENVELOPE_PLAIN));
             let setup = self.max_recv_dict_size + size_of::<Payload>();
+
             wire_limit(data, setup)
         })
     }
@@ -584,6 +621,7 @@ impl ZstdDecoder {
     ) -> Result<Option<Message>> {
         let mut parts = msg.into_parts_payload();
         let multipart = parts.len() > 1;
+
         for part in parts.iter_mut() {
             let bytes = part.as_bytes();
             if bytes.len() < 4 {
@@ -591,6 +629,7 @@ impl ZstdDecoder {
                     "zstd part shorter than 4-byte sentinel".into(),
                 ));
             }
+
             let sentinel: [u8; 4] = bytes[..4].try_into().unwrap();
             match sentinel {
                 SENTINEL_PLAIN => *part = decode_plain(&bytes, &mut budget_left)?,
@@ -606,11 +645,13 @@ impl ZstdDecoder {
                     let dict = Dictionary::from_bytes(&bytes).map_err(|e| decompress_err(&e))?;
                     self.dctx = DecompressContext::with_dict(dict);
                     self.recv_dict = Some(bytes);
+
                     return Ok(None);
                 }
                 _ => return Err(Error::Protocol("unknown zstd sentinel".into())),
             }
         }
+
         Ok(Some(Message::from_parts(parts)))
     }
 
@@ -622,11 +663,13 @@ impl ZstdDecoder {
         })?;
         let decompressed_size = usize::try_from(declared)
             .map_err(|_| Error::Protocol("zstd declared size exceeds usize".into()))?;
+
         if decompressed_size > MAX_DECOMPRESSED_SIZE {
             return Err(Error::Protocol(
                 "zstd declared size exceeds absolute limit".into(),
             ));
         }
+
         take_budget(budget, decompressed_size)?;
         // Decode into the final owner instead of copying the context's scratch
         // output. zrip's destination API requires Vec rather than fixed slices.
@@ -634,11 +677,13 @@ impl ZstdDecoder {
         self.dctx
             .decompress_into_with_limit(bytes, &mut result, decompressed_size)
             .map_err(|e| decompress_err(&e))?;
+
         if result.len() != decompressed_size {
             return Err(Error::Protocol(
                 "zstd decompressed length disagrees with declared".into(),
             ));
         }
+
         Ok(Payload::from_bytes(Bytes::from(result)))
     }
 }
@@ -647,9 +692,11 @@ fn patch_user_dict_id(dict: &mut [u8]) -> core::result::Result<(), ()> {
     if dict.len() < 8 || dict[..4] != ZDICT_MAGIC {
         return Err(());
     }
+
     let span = USER_DICT_ID_MAX - USER_DICT_ID_MIN + 1;
     let id = USER_DICT_ID_MIN + (rand::random::<u32>() % span);
     dict[4..8].copy_from_slice(&id.to_le_bytes());
+
     Ok(())
 }
 

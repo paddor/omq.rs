@@ -18,6 +18,7 @@ pub(super) fn ready<T>(
     if !waiting.load(Ordering::Acquire) && !sender.is_disconnected() && !sender.is_full() {
         return Ok(true);
     }
+
     wait_ready(sender, waiting, waker, notify_ready)
 }
 
@@ -34,9 +35,11 @@ fn wait_ready<T>(
         Poll::Ready(Err(_)) => return Err(()),
         Poll::Ready(Ok(())) => {}
     }
+
     waiting.store(false, Ordering::Release);
     if was_waiting {
         notify_ready();
     }
+
     Ok(true)
 }

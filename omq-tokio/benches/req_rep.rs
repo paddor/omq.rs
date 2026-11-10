@@ -28,6 +28,7 @@ fn main() {
                     common::print_cell(size, cell);
                     common::append_jsonl(PATTERN, &transport, peers, size, cell);
                 }
+
                 println!();
             }
         }
@@ -41,6 +42,7 @@ async fn run_cell(transport: &str, size: usize, seq: usize) -> common::Cell {
 
     let req = Socket::new(SocketType::Req, Options::default());
     req.connect(ep.clone()).await.expect("connect REQ");
+
     if transport != "inproc" {
         common::wait_connected(&[&req]).await;
     }
@@ -66,6 +68,7 @@ async fn run_cell(transport: &str, size: usize, seq: usize) -> common::Cell {
     let burst = |k: usize| {
         let req = req.clone();
         let payload = payload.clone();
+
         async move {
             for _ in 0..k {
                 req.send(Message::single(payload.clone())).await.unwrap();
@@ -77,11 +80,14 @@ async fn run_cell(transport: &str, size: usize, seq: usize) -> common::Cell {
     let cell = common::measure_min_of(size, 1, burst).await;
     responder.abort();
     let _ = responder.await;
+
     if let Ok(req) = Arc::try_unwrap(req) {
         let _ = req.close().await;
     }
+
     if let Ok(rep) = Arc::try_unwrap(rep) {
         let _ = rep.close().await;
     }
+
     cell
 }

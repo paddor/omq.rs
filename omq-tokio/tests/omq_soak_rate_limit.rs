@@ -5,9 +5,6 @@
 //! reconnects fresh peers, and verifies rate-limited disconnects continue.
 //! The per-IP case pauses between bursts so it also exercises token refill.
 
-#[global_allocator]
-static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
-
 mod soak_common;
 
 use std::sync::Arc;
@@ -17,6 +14,9 @@ use std::time::{Duration, Instant};
 use omq_tokio::{
     DisconnectReason, Endpoint, Message, MonitorEvent, Options, ReconnectPolicy, Socket, SocketType,
 };
+
+#[global_allocator]
+static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
 
 const SERVER_ATTACK_BURST: usize = 16;
 
@@ -31,6 +31,7 @@ async fn wait_for_handshakes(monitor: &mut omq_tokio::MonitorStream, expected: u
             .await
             .expect("handshake timeout")
             .expect("monitor closed before handshake");
+
         if matches!(event, MonitorEvent::HandshakeSucceeded { .. }) {
             seen += 1;
         }
@@ -43,6 +44,7 @@ async fn wait_for_rate_limit_disconnect(monitor: &mut omq_tokio::MonitorStream) 
             .await
             .expect("rate-limit disconnect timeout")
             .expect("monitor closed before rate-limit disconnect");
+
         if let MonitorEvent::Disconnected {
             reason: DisconnectReason::Error(reason),
             ..
@@ -61,6 +63,7 @@ async fn send_burst(socket: &Socket, count: usize) {
             socket.send(Message::single(i.to_le_bytes().to_vec())),
         )
         .await;
+
         if !matches!(result, Ok(Ok(()))) {
             break;
         }
@@ -72,6 +75,7 @@ async fn drain(socket: &Socket) -> u64 {
     while let Ok(Ok(_)) = tokio::time::timeout(Duration::from_millis(2), socket.recv()).await {
         received += 1;
     }
+
     received
 }
 
@@ -96,6 +100,7 @@ async fn serve_claims(server: Socket, stop: Arc<AtomicBool>, claims: Arc<AtomicU
             Ok(Err(error)) => panic!("SERVER receive failed: {error}"),
             Err(_) => continue,
         };
+
         let body = message.part_slice(0).expect("single-part CLIENT message");
         if body.first() != Some(&1) {
             continue;
@@ -151,6 +156,7 @@ async fn run_server_attack(endpoint: &Endpoint, events: &mut omq_tokio::MonitorS
             attacker.send(Message::single(body)),
         )
         .await;
+
         if !matches!(result, Ok(Ok(()))) {
             break;
         }
@@ -166,6 +172,7 @@ fn soak_per_connection_rate_limit() {
     let duration = soak_common::soak_duration();
     let monitor = soak_common::ResourceMonitor::start();
     let ctx = soak_common::build_context();
+
     ctx.block_on(async move {
         let pull = Socket::new(
             SocketType::Pull,
@@ -215,6 +222,7 @@ fn soak_per_ip_rate_limit() {
     let duration = soak_common::soak_duration();
     let monitor = soak_common::ResourceMonitor::start();
     let ctx = soak_common::build_context();
+
     ctx.block_on(async move {
         let pull = Socket::new(
             SocketType::Pull,
@@ -271,6 +279,7 @@ fn soak_server_peer_info_with_rate_limited_attackers() {
     let duration = soak_common::soak_duration();
     let monitor = soak_common::ResourceMonitor::start();
     let ctx = soak_common::build_context();
+
     ctx.block_on(async move {
         let server = Socket::new(
             SocketType::Server,
@@ -297,6 +306,7 @@ fn soak_server_peer_info_with_rate_limited_attackers() {
         let start = Instant::now();
         let mut attack_cycles = 0u64;
         let mut last_log = start;
+
         while start.elapsed() < duration {
             run_server_attack(&endpoint, &mut events, attack_cycles).await;
             attack_cycles += 1;

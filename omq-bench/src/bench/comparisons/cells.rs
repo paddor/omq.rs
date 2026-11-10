@@ -49,6 +49,7 @@ impl Cell<'_> {
     fn addr(&self) -> String {
         let prefix = self.def.prefix;
         let uid = next_addr_id();
+
         match self.transport {
             TransportKind::Tcp | TransportKind::Quic => "0".to_string(),
             TransportKind::Ws => {
@@ -63,6 +64,7 @@ impl Cell<'_> {
                     "R" => 700,
                     _ => 800,
                 };
+
                 let port = self.base_port + offset;
                 format!("ws://127.0.0.1:{port}/")
             }
@@ -116,6 +118,7 @@ fn spawn_binder(transport: TransportKind, fixed_addr: &str, binder: &BinderCmd<'
 
     let coord = scheme.is_some().then(CoordSocket::bind_new);
     let mut env = binder.env.to_vec();
+
     if let Some(coord) = &coord {
         env.push(("OMQ_BENCH_COORD", coord.endpoint()));
     }
@@ -126,6 +129,7 @@ fn spawn_binder(transport: TransportKind, fixed_addr: &str, binder: &BinderCmd<'
         let port = coord
             .recv_ready_port(Duration::from_secs(10))
             .unwrap_or_else(|| panic!("coord: no READY from {} peer", binder.role));
+
         format!("{scheme}://127.0.0.1:{port}")
     } else {
         std::thread::sleep(binder.settle);
@@ -147,6 +151,7 @@ fn start_at() -> String {
         .expect("system clock before Unix epoch")
         .as_secs_f64()
         + 2.0;
+
     format!("{start_at:.6}")
 }
 
@@ -162,6 +167,7 @@ fn size_and_peers<'a>(size: &'a str, peers: &'a str, with_peers: bool) -> Vec<&'
     if with_peers {
         tail.push(peers);
     }
+
     tail
 }
 
@@ -186,6 +192,7 @@ fn run_throughput_once(cell: &Cell<'_>, duration: f64) -> CellResult {
     } else {
         Duration::from_millis(100)
     };
+
     let binder = BinderCmd {
         head: [cell.binary.to_str().unwrap(), "push"],
         tail: &[&size_str],
@@ -194,6 +201,7 @@ fn run_throughput_once(cell: &Cell<'_>, duration: f64) -> CellResult {
         role: "push",
         settle,
     };
+
     let mut pusher = spawn_binder(cell.transport, &addr, &binder);
 
     let pull_output = process::capture(
@@ -216,6 +224,7 @@ fn run_throughput_once(cell: &Cell<'_>, duration: f64) -> CellResult {
     let Some(output) = pull_output else {
         return zero_result(duration);
     };
+
     match parse::parse_throughput(&output, cell.size) {
         Some(r) => CellResult {
             msgs_s: r.msgs_s,
@@ -259,6 +268,7 @@ fn run_inproc_cell(cell: &Cell<'_>, subcmd: &str, extra: &[&str], duration: f64)
             .as_ref()
             .and_then(|stats| stats.cpu_seconds)
             .unwrap_or(cpu);
+
         return CellResult {
             blocking_inproc,
             msgs_s: r.msgs_s,
@@ -311,12 +321,14 @@ fn run_pubsub_once(cell: &Cell<'_>, peers: u64, duration: f64, pubsub: &PubsubAr
         role: "pub",
         settle: Duration::from_millis(100),
     };
+
     let mut publisher = spawn_binder(cell.transport, &addr, &binder);
 
     // --pubsub-receiver-cpus only replaces a pinned default.
     let sub_cpus = def
         .affinity(process::OTHER_CPU)
         .map(|default| pubsub.pubsub_receiver_cpus.as_deref().unwrap_or(default));
+
     let sub_output = process::capture(
         &[
             cell.peer_binary.to_str().unwrap(),
@@ -340,6 +352,7 @@ fn run_pubsub_once(cell: &Cell<'_>, peers: u64, duration: f64, pubsub: &PubsubAr
     else {
         return zero_result(duration);
     };
+
     CellResult {
         msgs_s: r.rate.msgs_s,
         mbps: r.rate.mbps,
@@ -375,6 +388,7 @@ fn representative_of(rounds: u32, mut f: impl FnMut(u32) -> CellResult) -> CellR
     for i in 0..rounds {
         results.push(f(i));
     }
+
     results.sort_by(|a, b| a.msgs_s.total_cmp(&b.msgs_s));
     results
         .into_iter()

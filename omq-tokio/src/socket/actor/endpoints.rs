@@ -63,6 +63,7 @@ impl SocketDriver {
         {
             matches!(endpoint, Endpoint::Dart { .. })
         }
+
         #[cfg(not(feature = "dart"))]
         {
             let _ = endpoint;
@@ -81,6 +82,7 @@ impl SocketDriver {
         if !self.socket_type_ignores_duplicate_connect() {
             return false;
         }
+
         self.endpoints
             .dialers
             .iter()
@@ -100,10 +102,12 @@ impl SocketDriver {
         if self.stop_dart_endpoints(Some((endpoint, Side::Bind))).await {
             return Ok(());
         }
+
         let pending = self.cancel_pending_endpoints(Some((endpoint, Side::Bind)));
         // Wait for each task so the address is free when unbind returns.
         let removed = super::stop_matching(&mut self.endpoints.listeners, endpoint).await
             + super::stop_matching(&mut self.endpoints.udp_listeners, endpoint).await;
+
         if pending || removed > 0 {
             Ok(())
         } else {
@@ -172,6 +176,7 @@ impl SocketDriver {
                 }
             })
             .collect();
+
         let removed = peer_ids.len();
 
         // Cancel every peer first, then join, so the tasks wind down in parallel.
@@ -187,6 +192,7 @@ impl SocketDriver {
         for task in peer_tasks {
             super::stop_peer_task(task).await;
         }
+
         removed
     }
 
@@ -220,14 +226,17 @@ impl SocketDriver {
                 .start_dart(endpoint.clone(), endpoint, options, Side::Bind)
                 .await;
         }
+
         if self.socket_type == SocketType::Stream && !endpoint.is_tcp_family() {
             return Err(Error::Protocol(
                 "STREAM sockets only support tcp:// endpoints".into(),
             ));
         }
+
         if matches!(endpoint, Endpoint::Udp { .. }) {
             return self.bind_udp(endpoint).await;
         }
+
         reject_encrypted_inproc(&endpoint, &options.mechanism)?;
 
         let cancel = self.link.cancel.child_token();
@@ -238,6 +247,7 @@ impl SocketDriver {
             self.carrier_accept(&endpoint, &options, &cancel),
         )
         .await?;
+
         Ok(self.start_listener(bound, options, cancel))
     }
 
@@ -286,11 +296,13 @@ impl SocketDriver {
             }
             .run(bound.listener),
         );
+
         self.endpoints.listeners.push(EndpointTask {
             endpoint: resolved.clone(),
             cancel,
             task,
         });
+
         resolved
     }
 
@@ -387,6 +399,7 @@ fn carrier_setup_timeout(endpoint: &Endpoint, options: &Options) -> std::time::D
             .handshake_timeout
             .unwrap_or(omq_proto::options::DEFAULT_HANDSHAKE_TIMEOUT);
     }
+
     let _ = endpoint;
     options.handshake_timeout.unwrap_or_default()
 }
@@ -404,6 +417,7 @@ pub(super) fn dial_setup_timeout(
                 .unwrap_or(omq_proto::options::DEFAULT_HANDSHAKE_TIMEOUT),
         );
     }
+
     if matches!(endpoint, Endpoint::Inproc { .. }) {
         None
     } else {

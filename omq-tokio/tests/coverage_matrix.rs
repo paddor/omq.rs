@@ -14,9 +14,11 @@ async fn endpoint_arguments_work_with_owned_async_sockets() {
     let context = Context::new();
     let uri = "tcp://127.0.0.1:0".to_owned();
     let typed: Endpoint = uri.parse().unwrap();
+
     for argument in 0..5 {
         let pull = context.socket(SocketType::Pull, Options::default());
         let push = context.socket(SocketType::Push, Options::default());
+
         let bound = match argument {
             0 => omq_proto::socket_api::SocketApi::bind(&pull, uri.as_str()).await,
             1 => pull.bind(uri.clone()).await,
@@ -25,6 +27,7 @@ async fn endpoint_arguments_work_with_owned_async_sockets() {
             _ => pull.bind(&typed).await,
         }
         .unwrap();
+
         let address = bound.to_string();
         match argument {
             0 => push.connect(address.as_str()).await,
@@ -34,6 +37,7 @@ async fn endpoint_arguments_work_with_owned_async_sockets() {
             _ => omq_proto::socket_api::SocketApi::connect(&push, &bound).await,
         }
         .unwrap();
+
         push.send(Message::single("endpoint arguments"))
             .await
             .unwrap();
@@ -58,9 +62,11 @@ fn endpoint_arguments_work_with_blocking_sockets() {
     let context = Context::new();
     let uri = "tcp://127.0.0.1:0".to_owned();
     let typed: Endpoint = uri.parse().unwrap();
+
     for argument in 0..5 {
         let pull = context.blocking_socket(SocketType::Pull, Options::default());
         let push = context.blocking_socket(SocketType::Push, Options::default());
+
         let bound = match argument {
             0 => pull.bind(uri.as_str()),
             1 => pull.bind(uri.clone()),
@@ -69,6 +75,7 @@ fn endpoint_arguments_work_with_blocking_sockets() {
             _ => pull.bind(&typed),
         }
         .unwrap();
+
         let address = bound.to_string();
         match argument {
             0 => push.connect(address.as_str()),
@@ -78,6 +85,7 @@ fn endpoint_arguments_work_with_blocking_sockets() {
             _ => push.connect(&bound),
         }
         .unwrap();
+
         push.send(Message::single("endpoint arguments")).unwrap();
         assert_eq!(
             pull.recv_timeout(Duration::from_secs(5)).unwrap(),
@@ -96,14 +104,17 @@ fn endpoint_arguments_work_with_blocking_deadlines() {
     let pull = context.blocking_socket(SocketType::Pull, Options::default());
     let push = context.blocking_socket(SocketType::Push, Options::default());
     let uri = "tcp://127.0.0.1:0".to_owned();
+
     let bound = pull.bind_timeout(&uri, Duration::from_secs(5)).unwrap();
     push.connect_timeout(&bound, Duration::from_secs(5))
         .unwrap();
+
     push.send(Message::single("deadline arguments")).unwrap();
     assert_eq!(
         pull.recv_timeout(Duration::from_secs(5)).unwrap(),
         Message::single("deadline arguments")
     );
+
     push.close().unwrap();
     pull.close().unwrap();
 }
@@ -112,6 +123,7 @@ fn endpoint_arguments_work_with_blocking_deadlines() {
 async fn invalid_endpoint_arguments_do_not_freeze_async_configuration() {
     let context = Context::new();
     let socket = context.socket(SocketType::Pull, Options::default());
+
     for uri in ["invalid", "unknown://host"] {
         for error in [
             socket.bind(uri).await.unwrap_err(),
@@ -133,6 +145,7 @@ async fn invalid_endpoint_arguments_do_not_freeze_async_configuration() {
             ));
         }
     }
+
     assert!(socket.last_bound_endpoint().is_none());
     socket
         .set_recv_payload_pool(PayloadPool::new([(128, 1)]).unwrap())
@@ -145,6 +158,7 @@ async fn invalid_endpoint_arguments_do_not_freeze_async_configuration() {
 fn invalid_endpoint_arguments_do_not_freeze_blocking_configuration() {
     let context = Context::new();
     let socket = context.blocking_socket(SocketType::Pull, Options::default());
+
     for uri in ["invalid", "unknown://host"] {
         for error in [
             socket.bind(uri).unwrap_err(),
@@ -164,6 +178,7 @@ fn invalid_endpoint_arguments_do_not_freeze_blocking_configuration() {
             ));
         }
     }
+
     assert!(socket.last_bound_endpoint().is_none());
     socket
         .set_recv_payload_pool(PayloadPool::new([(128, 1)]).unwrap())
@@ -218,6 +233,7 @@ async fn explicit_buffers_work_over_inproc_and_tcp() {
         push.connect(bound).await.unwrap();
         let pool = PayloadPool::new([(128, 1)]).unwrap();
         let clone = pool.clone();
+
         for size in [0, 16, 55, 56, 128, 129, 4096] {
             let message = pool.message(size, |body| body.fill(7)).unwrap();
             let held = message.clone();
@@ -228,6 +244,7 @@ async fn explicit_buffers_work_over_inproc_and_tcp() {
                 .unwrap()
                 .unwrap();
             assert_eq!(received.part_slice(0), Some(vec![7; size].as_slice()));
+
             if pooled {
                 assert!(
                     clone
@@ -238,9 +255,11 @@ async fn explicit_buffers_work_over_inproc_and_tcp() {
             } else {
                 assert_eq!(clone.available(), 1);
             }
+
             drop(held);
             drop(received);
         }
+
         push.close().await.unwrap();
         pull.close().await.unwrap();
     }
@@ -251,41 +270,50 @@ fn explicit_buffers_work_with_blocking_sockets_and_outlive_them() {
     let context = omq_tokio::Context::new();
     let pull = context.blocking_socket(SocketType::Pull, Options::default().recv_hwm(4));
     let push = context.blocking_socket(SocketType::Push, Options::default().send_hwm(8192));
+
     let pools = pull.init_payload_pools().unwrap();
     assert!(pools.send.is_none());
     assert_eq!(
         pools.recv.unwrap().classes().collect::<Vec<_>>(),
         vec![(4096, 4)]
     );
+
     let pools = push.init_payload_pools().unwrap();
     assert!(pools.recv.is_none());
     assert_eq!(
         pools.send.unwrap().classes().collect::<Vec<_>>(),
         vec![(2048, 8192)]
     );
+
     let bound = pull.bind(test_support::tcp_loopback(0)).unwrap();
     assert!(matches!(
         pull.init_payload_pools(),
         Err(omq_tokio::Error::Config(_))
     ));
     push.connect(bound).unwrap();
+
     let pool = PayloadPool::new([(128, 1)]).unwrap();
+
     for size in [16, 128, 129] {
         let message = pool.message(size, |body| body.fill(9)).unwrap();
         push.send(message).unwrap();
         let received = pull.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(received.part_slice(0), Some(vec![9; size].as_slice()));
     }
+
     // Explicit pools and checked-out buffers have no socket lifecycle dependency.
     let mut buffer = pool.try_buffer(1).unwrap();
     buffer.writable()[..64].fill(3);
     buffer.set_len(64).unwrap();
+
     push.close().unwrap();
     pull.close().unwrap();
     context.term();
+
     let message = buffer.into_message();
     assert_eq!(message.part_slice(0), Some([3; 64].as_slice()));
     assert!(pool.try_buffer(1).is_none());
+
     drop(message);
     assert_eq!(pool.available(), 1);
 }
@@ -346,6 +374,7 @@ async fn pub_sub_roundtrip(server: &Socket, client_ep: Endpoint) {
     let s = Socket::new(SocketType::Sub, Options::default());
     s.subscribe("").await.unwrap();
     s.connect(client_ep).await.unwrap();
+
     for _ in 0..30 {
         let _ = server.send(Message::single("hello")).await;
         if let Ok(Ok(m)) = tokio::time::timeout(Duration::from_millis(50), s.recv()).await {
@@ -353,6 +382,7 @@ async fn pub_sub_roundtrip(server: &Socket, client_ep: Endpoint) {
             return;
         }
     }
+
     panic!("SUB never received");
 }
 
@@ -363,17 +393,20 @@ async fn client_server_roundtrip(server: &Socket, client_ep: Endpoint) {
     );
     client.connect(client_ep).await.unwrap();
     wait().await;
+
     client.send(Message::single("ping")).await.unwrap();
     let m = tokio::time::timeout(Duration::from_secs(2), server.recv())
         .await
         .unwrap()
         .unwrap();
     assert_eq!(m, Message::single("ping"));
+
     let routing_id = m.routing_id().expect("SERVER routing id");
     server
         .send(Message::single("pong").with_routing_id(routing_id))
         .await
         .unwrap();
+
     let r = tokio::time::timeout(Duration::from_secs(2), client.recv())
         .await
         .unwrap()
@@ -430,6 +463,7 @@ async fn push_pull_inproc() {
     pull.bind(ep.clone()).await.unwrap();
     push_pull_roundtrip(&pull, ep).await;
 }
+
 #[tokio::test]
 async fn req_rep_inproc() {
     let ep = inproc_ep("rr");
@@ -437,6 +471,7 @@ async fn req_rep_inproc() {
     rep.bind(ep.clone()).await.unwrap();
     req_rep_roundtrip(&rep, ep).await;
 }
+
 #[tokio::test]
 async fn dealer_router_inproc() {
     let ep = inproc_ep("dr");
@@ -444,6 +479,7 @@ async fn dealer_router_inproc() {
     router.bind(ep.clone()).await.unwrap();
     dealer_router_roundtrip(&router, ep).await;
 }
+
 #[tokio::test]
 async fn pair_inproc() {
     let ep = inproc_ep("pair");
@@ -451,6 +487,7 @@ async fn pair_inproc() {
     a.bind(ep.clone()).await.unwrap();
     pair_roundtrip(&a, ep).await;
 }
+
 #[tokio::test]
 async fn pub_sub_inproc() {
     let ep = inproc_ep("ps");
@@ -458,6 +495,7 @@ async fn pub_sub_inproc() {
     p.bind(ep.clone()).await.unwrap();
     pub_sub_roundtrip(&p, ep).await;
 }
+
 #[tokio::test]
 async fn client_server_inproc() {
     let ep = inproc_ep("cs");
@@ -465,6 +503,7 @@ async fn client_server_inproc() {
     server.bind(ep.clone()).await.unwrap();
     client_server_roundtrip(&server, ep).await;
 }
+
 #[tokio::test]
 async fn scatter_gather_inproc() {
     let ep = inproc_ep("sg");
@@ -472,6 +511,7 @@ async fn scatter_gather_inproc() {
     gather.bind(ep.clone()).await.unwrap();
     scatter_gather_roundtrip(&gather, ep).await;
 }
+
 #[tokio::test]
 async fn channel_inproc() {
     let ep = inproc_ep("ch");
@@ -479,6 +519,7 @@ async fn channel_inproc() {
     a.bind(ep.clone()).await.unwrap();
     channel_roundtrip(&a, ep).await;
 }
+
 #[tokio::test]
 async fn peer_inproc() {
     let ep = inproc_ep("pp");
@@ -523,6 +564,7 @@ async fn push_pull_ipc() {
     pull.bind(ep.clone()).await.unwrap();
     push_pull_roundtrip(&pull, ep).await;
 }
+
 #[tokio::test]
 async fn req_rep_ipc() {
     let ep = ipc_ep("rr");
@@ -530,6 +572,7 @@ async fn req_rep_ipc() {
     rep.bind(ep.clone()).await.unwrap();
     req_rep_roundtrip(&rep, ep).await;
 }
+
 #[tokio::test]
 async fn dealer_router_ipc() {
     let ep = ipc_ep("dr");
@@ -537,6 +580,7 @@ async fn dealer_router_ipc() {
     router.bind(ep.clone()).await.unwrap();
     dealer_router_roundtrip(&router, ep).await;
 }
+
 #[tokio::test]
 async fn pair_ipc() {
     let ep = ipc_ep("pair");
@@ -544,6 +588,7 @@ async fn pair_ipc() {
     a.bind(ep.clone()).await.unwrap();
     pair_roundtrip(&a, ep).await;
 }
+
 #[tokio::test]
 async fn pub_sub_ipc() {
     let ep = ipc_ep("ps");
@@ -551,6 +596,7 @@ async fn pub_sub_ipc() {
     p.bind(ep.clone()).await.unwrap();
     pub_sub_roundtrip(&p, ep).await;
 }
+
 #[tokio::test]
 async fn client_server_ipc() {
     let ep = ipc_ep("cs");
@@ -558,6 +604,7 @@ async fn client_server_ipc() {
     server.bind(ep.clone()).await.unwrap();
     client_server_roundtrip(&server, ep).await;
 }
+
 #[tokio::test]
 async fn scatter_gather_ipc() {
     let ep = ipc_ep("sg");
@@ -565,6 +612,7 @@ async fn scatter_gather_ipc() {
     gather.bind(ep.clone()).await.unwrap();
     scatter_gather_roundtrip(&gather, ep).await;
 }
+
 #[tokio::test]
 async fn channel_ipc() {
     let ep = ipc_ep("ch");
@@ -572,6 +620,7 @@ async fn channel_ipc() {
     a.bind(ep.clone()).await.unwrap();
     channel_roundtrip(&a, ep).await;
 }
+
 #[tokio::test]
 async fn peer_ipc() {
     let ep = ipc_ep("pp");
@@ -589,48 +638,56 @@ async fn push_pull_tcp() {
     let port = test_support::bind_loopback(&pull).await;
     push_pull_roundtrip(&pull, test_support::tcp_loopback(port)).await;
 }
+
 #[tokio::test]
 async fn req_rep_tcp() {
     let rep = Socket::new(SocketType::Rep, Options::default());
     let port = test_support::bind_loopback(&rep).await;
     req_rep_roundtrip(&rep, test_support::tcp_loopback(port)).await;
 }
+
 #[tokio::test]
 async fn dealer_router_tcp() {
     let router = Socket::new(SocketType::Router, Options::default());
     let port = test_support::bind_loopback(&router).await;
     dealer_router_roundtrip(&router, test_support::tcp_loopback(port)).await;
 }
+
 #[tokio::test]
 async fn pair_tcp() {
     let a = Socket::new(SocketType::Pair, Options::default());
     let port = test_support::bind_loopback(&a).await;
     pair_roundtrip(&a, test_support::tcp_loopback(port)).await;
 }
+
 #[tokio::test]
 async fn pub_sub_tcp() {
     let p = Socket::new(SocketType::Pub, Options::default());
     let port = test_support::bind_loopback(&p).await;
     pub_sub_roundtrip(&p, test_support::tcp_loopback(port)).await;
 }
+
 #[tokio::test]
 async fn client_server_tcp() {
     let server = Socket::new(SocketType::Server, Options::default());
     let port = test_support::bind_loopback(&server).await;
     client_server_roundtrip(&server, test_support::tcp_loopback(port)).await;
 }
+
 #[tokio::test]
 async fn scatter_gather_tcp() {
     let gather = Socket::new(SocketType::Gather, Options::default());
     let port = test_support::bind_loopback(&gather).await;
     scatter_gather_roundtrip(&gather, test_support::tcp_loopback(port)).await;
 }
+
 #[tokio::test]
 async fn channel_tcp() {
     let a = Socket::new(SocketType::Channel, Options::default());
     let port = test_support::bind_loopback(&a).await;
     channel_roundtrip(&a, test_support::tcp_loopback(port)).await;
 }
+
 #[tokio::test]
 async fn peer_tcp() {
     let a = Socket::new(

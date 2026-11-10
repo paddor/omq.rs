@@ -14,5 +14,6 @@ pub(crate) fn grouped(
         .try_message(size, |bytes| bytes.fill(value))
         .unwrap()
         .expect("free pool slot");
+
     Message::with_prefix(prefix.into(), body).with_routing_id(7)
 }

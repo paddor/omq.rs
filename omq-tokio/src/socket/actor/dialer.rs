@@ -62,6 +62,7 @@ impl DialTask {
             },
         )
         .await;
+
         match result {
             Ok(()) | Err(Canceled::Token) => {}
             Err(Canceled::PolicyDisabled | Canceled::StoppedConnRefused) => {
@@ -105,9 +106,11 @@ impl DialTask {
                 return Err(error);
             }
         };
+
         if let AnyConn::ByteStream { setup, .. } = &mut conn {
             *setup = state;
         }
+
         self.deliver(conn).await
     }
 
@@ -129,11 +132,13 @@ impl DialTask {
             AnyConn::ByteStream { setup, .. } => setup.as_ref().and_then(|s| s.deadline),
             AnyConn::Inproc { .. } => None,
         };
+
         let delivery = self.tx.send(InternalEvent::Connected {
             conn,
             endpoint: self.endpoint.clone(),
             route_id: self.route_id,
         });
+
         let delivered = if let Some(deadline) = deadline {
             tokio::time::timeout_at(deadline.into(), delivery)
                 .await
@@ -141,6 +146,7 @@ impl DialTask {
         } else {
             delivery.await
         };
+
         delivered.map_err(|_| Error::Closed)
     }
 }

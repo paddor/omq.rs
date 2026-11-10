@@ -32,6 +32,7 @@ fn blocking_pair() -> (omq_tokio::blocking::Socket, omq_tokio::blocking::Socket)
     pull.bind("inproc://message-dispatch").unwrap();
     push.connect("inproc://message-dispatch").unwrap();
     push.wait_connected(1, WAIT).unwrap();
+
     (push, pull)
 }
 
@@ -42,6 +43,7 @@ async fn async_pair(endpoint: &str) -> (Context, Socket, Socket) {
     let bound = pull.bind(endpoint).await.unwrap();
     push.connect(bound).await.unwrap();
     push.wait_connected(1, WAIT).await.unwrap();
+
     (context, push, pull)
 }
 
@@ -53,6 +55,7 @@ async fn full_inproc_pair(endpoint: &str) -> (Context, Socket, Socket, usize) {
     pull.bind(endpoint).await.unwrap();
     push.connect(endpoint).await.unwrap();
     push.wait_connected(1, WAIT).await.unwrap();
+
     for queued in 0..128 {
         match push.try_send(Message::single("queued")) {
             Ok(()) => {}
@@ -60,6 +63,7 @@ async fn full_inproc_pair(endpoint: &str) -> (Context, Socket, Socket, usize) {
             Err(error) => panic!("queue fill failed: {error}"),
         }
     }
+
     panic!("inproc queue never filled");
 }
 
@@ -78,6 +82,7 @@ async fn sink_sends_streams_and_flushes_on_close_without_closing_socket() {
             .await
             .unwrap()
             .unwrap();
+
         for message in expected {
             assert_eq!(
                 tokio::time::timeout(WAIT, pull.recv())
@@ -87,6 +92,7 @@ async fn sink_sends_streams_and_flushes_on_close_without_closing_socket() {
                 message
             );
         }
+
         sink.feed(Message::single("flush on close")).await.unwrap();
         tokio::time::timeout(WAIT, sink.close())
             .await
@@ -121,27 +127,33 @@ async fn sink_rejects_unready_sends_without_losing_the_pending_message() {
         let (_context, push, pull, queued) = full_inproc_pair("inproc://sink-unready").await;
         let mut sink = Box::pin(push.sink());
         sink.feed(Message::single("pending")).await.unwrap();
+
         if poll {
             let mut flush = Box::pin(sink.flush());
             let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
             assert!(std::future::Future::poll(flush.as_mut(), &mut cx).is_pending());
         }
+
         assert!(matches!(
             sink.as_mut().start_send(Message::single("rejected")),
             Err(Error::Protocol(_))
         ));
+
         let drain = async {
             for _ in 0..queued {
                 assert_eq!(pull.recv().await.unwrap(), Message::single("queued"));
             }
+
             assert_eq!(pull.recv().await.unwrap(), Message::single("pending"));
         };
+
         tokio::time::timeout(WAIT, async {
             let (result, ()) = tokio::join!(sink.flush(), drain);
             result.unwrap();
         })
         .await
         .unwrap();
+
         assert!(matches!(pull.try_recv(), Err(Error::WouldBlock)));
         drop(sink);
         push.close().await.unwrap();
@@ -157,18 +169,22 @@ async fn sink_waits_for_capacity_and_wakes_when_drained() {
     let mut flush = Box::pin(sink.flush());
     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
     assert!(std::future::Future::poll(flush.as_mut(), &mut cx).is_pending());
+
     let drain = async {
         for _ in 0..queued {
             assert_eq!(pull.recv().await.unwrap(), Message::single("queued"));
         }
+
         assert_eq!(pull.recv().await.unwrap(), Message::single("pending"));
     };
+
     tokio::time::timeout(WAIT, async {
         let (result, ()) = tokio::join!(flush, drain);
         result.unwrap();
     })
     .await
     .unwrap();
+
     assert!(matches!(pull.try_recv(), Err(Error::WouldBlock)));
     drop(sink);
     push.close().await.unwrap();
@@ -181,15 +197,18 @@ async fn dropping_unflushed_sink_discards_pending_and_preserves_socket() {
         let (_context, push, pull, queued) = full_inproc_pair("inproc://sink-drop").await;
         let mut sink = Box::pin(push.sink());
         sink.feed(Message::single("abandoned")).await.unwrap();
+
         if poll {
             let mut flush = Box::pin(sink.flush());
             let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
             assert!(std::future::Future::poll(flush.as_mut(), &mut cx).is_pending());
         }
+
         drop(sink);
         for _ in 0..queued {
             assert_eq!(pull.recv().await.unwrap(), Message::single("queued"));
         }
+
         assert!(matches!(pull.try_recv(), Err(Error::WouldBlock)));
         push.send(Message::single("after drop")).await.unwrap();
         assert_eq!(pull.recv().await.unwrap(), Message::single("after drop"));
@@ -203,6 +222,7 @@ async fn sink_cooperates_with_other_application_tasks_under_ready_load() {
     for (size, total) in [(5, 600), (128 * 1024, 40)] {
         let (_context, push, pull) = async_pair("inproc://sink-cooperation").await;
         let body = Message::from_slice(&vec![0xa5; size]);
+
         let produced = Arc::new(AtomicUsize::new(0));
         let observed = produced.clone();
         let mut source = stream::iter((0..total).map(|_| {
@@ -210,13 +230,17 @@ async fn sink_cooperates_with_other_application_tasks_under_ready_load() {
             Ok(body.clone())
         }));
         let other_task = tokio::spawn(async move { observed.load(Ordering::Relaxed) });
+
         let mut sink = Box::pin(push.sink());
         sink.send_all(&mut source).await.unwrap();
+
         let count = other_task.await.unwrap();
         assert!(count > 0 && count < total, "other task only ran at {count}");
+
         for _ in 0..total {
             assert_eq!(pull.recv().await.unwrap(), body);
         }
+
         drop(sink);
         push.close().await.unwrap();
         pull.close().await.unwrap();
@@ -237,15 +261,18 @@ async fn ready_async_sends_cooperate_across_clones_and_sockets() {
             context.socket(SocketType::Router, Options::default()),
         ];
         let body = Message::single("ready");
+
         let message = if identity {
             body
         } else {
             Message::with_prefix(bytes::Bytes::from_static(b"absent"), body)
         };
+
         let produced = Arc::new(AtomicUsize::new(0));
         let observed = produced.clone();
         let other_task = tokio::spawn(async move { observed.load(Ordering::Relaxed) });
         let total = 16_384;
+
         for index in 0..total {
             let socket = &sockets[index % sockets.len()];
             if identity {
@@ -253,10 +280,13 @@ async fn ready_async_sends_cooperate_across_clones_and_sockets() {
             } else {
                 socket.send(message.clone()).await.unwrap();
             }
+
             produced.fetch_add(1, Ordering::Relaxed);
         }
+
         let count = other_task.await.unwrap();
         assert!(count > 0 && count < total, "other task only ran at {count}");
+
         for socket in sockets {
             socket.close().await.unwrap();
         }
@@ -312,6 +342,7 @@ fn poll_ready_sends_until_yield(
             }
         }
     }
+
     false
 }
 
@@ -338,6 +369,7 @@ fn ready_sends_yield_outside_tokio_and_cancel_cleanly() {
     let mut cx = TaskContext::from_waker(&waker);
     let mut yielded_send = Box::pin(sender.send(ready_routed_message()));
     let mut pending = false;
+
     for _ in 0..4096 {
         match yielded_send.as_mut().poll(&mut cx) {
             Poll::Ready(result) => {
@@ -350,6 +382,7 @@ fn ready_sends_yield_outside_tokio_and_cancel_cleanly() {
             }
         }
     }
+
     assert!(pending, "ready send never yielded before migration");
 
     std::thread::scope(|scope| {
@@ -380,6 +413,7 @@ async fn sinks_preserve_req_rep_alternation_and_reply_routes() {
         req.connect(bound).await.unwrap();
         let mut requests = Box::pin(req.sink());
         let mut replies = Box::pin(rep.sink());
+
         for _ in 0..2 {
             tokio::time::timeout(WAIT, requests.send(Message::single("request")))
                 .await
@@ -404,6 +438,7 @@ async fn sinks_preserve_req_rep_alternation_and_reply_routes() {
                 Message::single("reply")
             );
         }
+
         drop(requests);
         drop(replies);
         req.close().await.unwrap();
@@ -443,6 +478,7 @@ async fn stream_delivers_owned_messages_and_ends_on_close() {
         let (_context, push, pull) = async_pair(endpoint).await;
         let mut messages = Box::pin(pull.message());
         assert!(!messages.is_terminated());
+
         for size in [16, 128, 8192] {
             let body = vec![0xa5; size];
             push.send(Message::from_slice(&body)).await.unwrap();
@@ -453,6 +489,7 @@ async fn stream_delivers_owned_messages_and_ends_on_close() {
                 .unwrap();
             assert_eq!(message, Message::from_slice(&body));
         }
+
         pull.clone().close().await.unwrap();
         assert!(
             tokio::time::timeout(WAIT, messages.next())
@@ -506,12 +543,15 @@ async fn stream_cooperates_with_other_application_tasks_under_ready_load() {
     for (size, total) in [(5, 600), (128 * 1024, 40)] {
         let (_context, push, pull) = async_pair("inproc://stream-cooperation").await;
         let body = Message::from_slice(&vec![0xa5; size]);
+
         for _ in 0..total {
             push.send(body.clone()).await.unwrap();
         }
+
         let processed = Arc::new(AtomicUsize::new(0));
         let observed = processed.clone();
         let other_task = tokio::spawn(async move { observed.load(Ordering::Relaxed) });
+
         pull.message()
             .take(total)
             .for_each(|message| {
@@ -520,6 +560,7 @@ async fn stream_cooperates_with_other_application_tasks_under_ready_load() {
                 std::future::ready(())
             })
             .await;
+
         let count = other_task.await.unwrap();
         assert!(count > 0 && count < total, "other task only ran at {count}");
         push.close().await.unwrap();
@@ -535,6 +576,7 @@ async fn stream_admits_req_replies_before_the_next_send() {
     rep.bind("inproc://stream-req").await.unwrap();
     req.connect("inproc://stream-req").await.unwrap();
     let mut messages = Box::pin(req.message());
+
     for _ in 0..2 {
         req.send(Message::single("request")).await.unwrap();
         assert_eq!(
@@ -545,6 +587,7 @@ async fn stream_admits_req_replies_before_the_next_send() {
             Message::single("request")
         );
         rep.send(Message::single("reply")).await.unwrap();
+
         assert_eq!(
             tokio::time::timeout(WAIT, messages.next())
                 .await
@@ -554,6 +597,7 @@ async fn stream_admits_req_replies_before_the_next_send() {
             Message::single("reply")
         );
     }
+
     drop(messages);
     req.close().await.unwrap();
     rep.close().await.unwrap();
@@ -565,8 +609,10 @@ fn dispatch_runs_non_send_handler_on_caller_and_leaves_unread_messages() {
     for body in ["one", "two", "three"] {
         push.send(Message::single(body)).unwrap();
     }
+
     let calls = Rc::new(Cell::new(0));
     let thread = std::thread::current().id();
+
     let report = pull
         .dispatch(DispatchOptions::default(), |message| {
             assert_eq!(std::thread::current().id(), thread);
@@ -574,9 +620,11 @@ fn dispatch_runs_non_send_handler_on_caller_and_leaves_unread_messages() {
             assert_eq!(message, Message::single("one"));
             // Re-enter the receive path to prove handler execution holds no lock.
             assert_eq!(pull.try_recv().unwrap(), Message::single("two"));
+
             ControlFlow::Break(())
         })
         .unwrap();
+
     assert_eq!(calls.get(), 1);
     assert_eq!(report.messages, 1);
     assert_eq!(report.bytes, 3);
@@ -590,9 +638,11 @@ fn dispatch_runs_non_send_handler_on_caller_and_leaves_unread_messages() {
 fn dispatch_limits_count_complete_multipart_messages_and_soft_bytes() {
     let (push, pull) = blocking_pair();
     let message = Message::multipart(["abc", "defg"]);
+
     for _ in 0..4 {
         push.send(message.clone()).unwrap();
     }
+
     let report = pull
         .dispatch(
             DispatchOptions {
@@ -605,10 +655,12 @@ fn dispatch_limits_count_complete_multipart_messages_and_soft_bytes() {
             },
         )
         .unwrap();
+
     assert_eq!(
         (report.messages, report.bytes, report.exit),
         (2, 14, DispatchExit::ByteLimit)
     );
+
     let report = pull
         .dispatch(
             DispatchOptions {
@@ -618,6 +670,7 @@ fn dispatch_limits_count_complete_multipart_messages_and_soft_bytes() {
             |_| ControlFlow::Continue(()),
         )
         .unwrap();
+
     assert_eq!(
         (report.messages, report.bytes, report.exit),
         (1, 7, DispatchExit::MessageLimit)
@@ -633,6 +686,7 @@ fn dispatch_zero_limits_and_precancellation_consume_nothing() {
     push.send(Message::single("unread")).unwrap();
     let cancel = Arc::new(BlockingRecvCancel::new());
     cancel.cancel();
+
     for (options, exit) in [
         (
             DispatchOptions {
@@ -668,6 +722,7 @@ fn dispatch_zero_limits_and_precancellation_consume_nothing() {
             .unwrap();
         assert_eq!((report.messages, report.bytes, report.exit), (0, 0, exit));
     }
+
     assert_eq!(pull.recv_timeout(WAIT).unwrap(), Message::single("unread"));
     push.close().unwrap();
     pull.close().unwrap();
@@ -681,6 +736,7 @@ fn dispatch_deadline_bounds_spinning_and_idle_wait_with_cancellation_installed()
             let pull =
                 context.blocking_socket(SocketType::Pull, Options::default().recv_spin(spin));
             let started = Instant::now();
+
             let report = pull
                 .dispatch(
                     DispatchOptions {
@@ -691,6 +747,7 @@ fn dispatch_deadline_bounds_spinning_and_idle_wait_with_cancellation_installed()
                     |_| panic!("no publisher"),
                 )
                 .unwrap();
+
             assert_eq!(report.exit, DispatchExit::TimeLimit);
             assert_eq!(report.messages, 0);
             assert!(started.elapsed() < WAIT);
@@ -704,6 +761,7 @@ fn dispatch_deadline_includes_handler_time_without_interrupting_message() {
     let (push, pull) = blocking_pair();
     push.send(Message::single("first")).unwrap();
     push.send(Message::single("second")).unwrap();
+
     let report = pull
         .dispatch(
             DispatchOptions {
@@ -717,6 +775,7 @@ fn dispatch_deadline_includes_handler_time_without_interrupting_message() {
             },
         )
         .unwrap();
+
     assert_eq!((report.messages, report.exit), (1, DispatchExit::TimeLimit));
     assert_eq!(pull.recv_timeout(WAIT).unwrap(), Message::single("second"));
     push.close().unwrap();
@@ -731,6 +790,7 @@ fn cancellation_wakes_an_idle_dispatch() {
     let stop = cancel.clone();
     let (ready_tx, ready_rx) = mpsc::channel();
     let (report_tx, report_rx) = mpsc::channel();
+
     let worker = std::thread::spawn(move || {
         ready_tx.send(()).unwrap();
         report_tx
@@ -745,8 +805,10 @@ fn cancellation_wakes_an_idle_dispatch() {
                 .unwrap(),
             )
             .unwrap();
+
         pull.close().unwrap();
     });
+
     ready_rx.recv_timeout(WAIT).unwrap();
     assert!(matches!(
         report_rx.recv_timeout(Duration::from_millis(20)),
@@ -766,6 +828,7 @@ fn cancellation_stops_between_ready_messages() {
     for body in ["first", "second"] {
         push.send(Message::single(body)).unwrap();
     }
+
     let cancel = Arc::new(BlockingRecvCancel::new());
     let report = pull
         .dispatch(
@@ -780,6 +843,7 @@ fn cancellation_stops_between_ready_messages() {
             },
         )
         .unwrap();
+
     assert_eq!((report.messages, report.exit), (1, DispatchExit::Canceled));
     assert_eq!(pull.recv_timeout(WAIT).unwrap(), Message::single("second"));
     push.close().unwrap();
@@ -792,6 +856,7 @@ fn default_dispatch_waits_for_messages_and_stops_when_socket_closes() {
     let close = pull.clone();
     let (handled_tx, handled_rx) = mpsc::channel();
     let (report_tx, report_rx) = mpsc::channel();
+
     let worker = std::thread::spawn(move || {
         report_tx
             .send(
@@ -804,6 +869,7 @@ fn default_dispatch_waits_for_messages_and_stops_when_socket_closes() {
             )
             .unwrap();
     });
+
     push.send(Message::single("later")).unwrap();
     handled_rx.recv_timeout(WAIT).unwrap();
     close.close().unwrap();
@@ -820,6 +886,7 @@ fn dispatch_handlers_can_send_rep_replies_over_tcp() {
     let rep = context.blocking_socket(SocketType::Rep, Options::default());
     let endpoint = rep.bind("tcp://127.0.0.1:0").unwrap();
     req.connect(endpoint).unwrap();
+
     let worker = std::thread::spawn(move || {
         let report = rep
             .dispatch(
@@ -835,6 +902,7 @@ fn dispatch_handlers_can_send_rep_replies_over_tcp() {
                 },
             )
             .unwrap();
+
         assert_eq!(
             (report.messages, report.bytes, report.exit),
             (2, 14, DispatchExit::MessageLimit)
@@ -843,10 +911,12 @@ fn dispatch_handlers_can_send_rep_replies_over_tcp() {
         assert_eq!(rep.recv_timeout(WAIT).unwrap(), Message::single("done"));
         rep.close().unwrap();
     });
+
     for _ in 0..2 {
         req.send(Message::single("request")).unwrap();
         assert_eq!(req.recv_timeout(WAIT).unwrap(), Message::single("reply"));
     }
+
     req.send(Message::single("done")).unwrap();
     worker.join().unwrap();
     req.close().unwrap();

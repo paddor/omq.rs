@@ -21,6 +21,7 @@ const C_QUIC_2T: RGBColor = RGBColor(3, 105, 161);
 const TPUT_SIZES: &[u64] = &[
     16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 262_144, 4_194_304, 8_388_608,
 ];
+
 const LAT_SIZES: &[u64] = &[16, 64, 256, 1024, 4096];
 const PEER_COUNTS: &[u64] = &[4, 8];
 
@@ -30,18 +31,21 @@ const CURVE_1T: Impl = Impl {
     threads: "1 IO",
     color: C_OMQ_1T,
 };
+
 const CURVE_2T: Impl = Impl {
     key: "tcp:omq-curve-2t",
     label: "omq CURVE",
     threads: "2 IO",
     color: C_OMQ_2T,
 };
+
 const QUIC_1T: Impl = Impl {
     key: "quic:omq-tokio-1t",
     label: "omq QUIC",
     threads: "1 IO",
     color: C_QUIC_1T,
 };
+
 const QUIC_2T: Impl = Impl {
     key: "quic:omq-tokio-2t",
     label: "omq QUIC",
@@ -51,6 +55,36 @@ const QUIC_2T: Impl = Impl {
 
 const SINGLE_PEER_IMPLS: &[Impl] = &[CURVE_1T, QUIC_1T, QUIC_2T];
 const MULTI_PEER_IMPLS: &[Impl] = &[CURVE_1T, CURVE_2T, QUIC_1T, QUIC_2T];
+
+const MULTI_PEER_CHARTS: &[MultiPeerChart] = &[
+    MultiPeerChart {
+        kind: "pub_sub",
+        file: "pubsub.svg",
+        title: "PUB/SUB throughput, CURVE/TCP vs QUIC loopback, 2-process",
+        row_title: |peers| format!("{peers} subscribers"),
+        snd_label: "snd CPU%",
+        rcv_label: "",
+        with_fairness: false,
+    },
+    MultiPeerChart {
+        kind: "fan_out",
+        file: "fanout.svg",
+        title: "PUSH fan-out, CURVE/TCP vs QUIC loopback, 2-process",
+        row_title: |peers| format!("{peers} peers"),
+        snd_label: "push CPU%",
+        rcv_label: "pull CPU%",
+        with_fairness: true,
+    },
+    MultiPeerChart {
+        kind: "fan_in",
+        file: "fanin.svg",
+        title: "PUSH fan-in, CURVE/TCP vs QUIC loopback, 2-process",
+        row_title: |peers| format!("{peers} peers"),
+        snd_label: "push CPU%",
+        rcv_label: "pull CPU%",
+        with_fairness: true,
+    },
+];
 
 /// Impl keys of one transport with the prefix stripped, for the loaders.
 fn transport_impls(impls: &[Impl], transport: &str) -> Vec<Impl> {
@@ -74,6 +108,7 @@ fn transports(impls: &[Impl]) -> Vec<&'static str> {
         .filter_map(|imp| imp.key.split_once(':').map(|(t, _)| t))
         .collect();
     out.dedup();
+
     out
 }
 
@@ -116,6 +151,7 @@ fn load_tput_all(
         merge_sized(&mut msgs, m, transport);
         merge_cpu(&mut cpu, c, transport);
     }
+
     (tput, msgs, cpu)
 }
 
@@ -125,6 +161,7 @@ fn load_fairness_all(kind: &str, peers: Option<u64>, impls: &[Impl]) -> Fairness
         let f = load_fairness(kind, transport, peers, &transport_impls(impls, transport));
         merge_sized(&mut fair, f, transport);
     }
+
     fair
 }
 
@@ -135,6 +172,7 @@ fn load_latency_all(impls: &[Impl]) -> (LatencyMap, BTreeMap<String, CpuData>) {
         merge_sized(&mut lat, l, transport);
         merge_cpu(&mut cpu, c, transport);
     }
+
     (lat, cpu)
 }
 
@@ -150,40 +188,11 @@ struct MultiPeerChart {
     with_fairness: bool,
 }
 
-const MULTI_PEER_CHARTS: &[MultiPeerChart] = &[
-    MultiPeerChart {
-        kind: "pub_sub",
-        file: "pubsub.svg",
-        title: "PUB/SUB throughput, CURVE/TCP vs QUIC loopback, 2-process",
-        row_title: |peers| format!("{peers} subscribers"),
-        snd_label: "snd CPU%",
-        rcv_label: "",
-        with_fairness: false,
-    },
-    MultiPeerChart {
-        kind: "fan_out",
-        file: "fanout.svg",
-        title: "PUSH fan-out, CURVE/TCP vs QUIC loopback, 2-process",
-        row_title: |peers| format!("{peers} peers"),
-        snd_label: "push CPU%",
-        rcv_label: "pull CPU%",
-        with_fairness: true,
-    },
-    MultiPeerChart {
-        kind: "fan_in",
-        file: "fanin.svg",
-        title: "PUSH fan-in, CURVE/TCP vs QUIC loopback, 2-process",
-        row_title: |peers| format!("{peers} peers"),
-        snd_label: "push CPU%",
-        rcv_label: "pull CPU%",
-        with_fairness: true,
-    },
-];
-
 fn generate_multi_peer(chart: &MultiPeerChart) {
     #[expect(clippy::type_complexity)]
     let mut panel_data: Vec<(u64, ValMap, ValMap, BTreeMap<String, CpuData>, FairnessMap)> =
         Vec::new();
+
     for &peers in PEER_COUNTS {
         let (tput, msgs, cpu) = load_tput_all(chart.kind, Some(peers), MULTI_PEER_IMPLS);
         let fair = if chart.with_fairness {
@@ -191,10 +200,12 @@ fn generate_multi_peer(chart: &MultiPeerChart) {
         } else {
             FairnessMap::new()
         };
+
         if !tput.is_empty() {
             panel_data.push((peers, tput, msgs, cpu, fair));
         }
     }
+
     if panel_data.is_empty() {
         return;
     }
@@ -209,6 +220,7 @@ fn generate_multi_peer(chart: &MultiPeerChart) {
             fairness: chart.with_fairness.then_some(fair),
         })
         .collect();
+
     let out = out_dir().join("quic").join(chart.file);
     let spec = ChartSpec {
         out_path: &out,
@@ -230,6 +242,7 @@ fn generate_multi_peer(chart: &MultiPeerChart) {
         super::common::detect_hardware().as_deref(),
     )
     .expect("draw QUIC multi-peer chart");
+
     eprintln!("Written: {}", out.display());
 }
 

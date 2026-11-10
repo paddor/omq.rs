@@ -9,6 +9,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 pub trait DriverStream: Sized {
     /// Owned read half used by the connection driver.
     type Reader: AsyncRead + Send + Unpin + 'static;
+
     /// Write half used by the connection driver.
     type Writer: DriverWrite;
 

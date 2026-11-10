@@ -15,11 +15,13 @@ async fn reserved_completion_keeps_driver_join_independent_of_full_mailbox() {
             ))
             .unwrap();
         let cancellation = CancellationToken::new();
+
         if cancel {
             cancellation.cancel();
         } else {
             commands.try_send(PeerDriverCommand::Close).unwrap();
         }
+
         let driver = ConnectionDriver::new(stream, connection, inbox, events, 1, cancellation);
         let (completion, finished) = CompletionProgress::reserve(1);
         let driver = driver.with_completion(completion);
@@ -29,9 +31,11 @@ async fn reserved_completion_keeps_driver_join_independent_of_full_mailbox() {
             .expect("driver did not tear down its command inbox");
         assert_eq!(remote.read(&mut [0; 1]).await.unwrap(), 0);
         let joined = tokio::time::timeout(Duration::from_millis(100), &mut task).await;
+
         if joined.is_err() {
             task.abort();
         }
+
         joined
             .expect("final closure publication trapped the driver task")
             .unwrap()
@@ -52,6 +56,7 @@ async fn aborted_driver_publishes_reserved_completion_after_transport_drop() {
     let (_commands, inbox) = mpsc::channel(1);
     let (events, mut event_inbox) = mpsc::channel(1);
     let (completion, finished) = CompletionProgress::reserve(7);
+
     let driver = ConnectionDriver::new(
         stream,
         connection,
@@ -61,22 +66,26 @@ async fn aborted_driver_publishes_reserved_completion_after_transport_drop() {
         CancellationToken::new(),
     )
     .with_completion(completion);
+
     let task = tokio::spawn(driver.run());
     assert!(matches!(
         event_inbox.recv().await.unwrap().1,
         PeerEvent::Event(Event::HandshakeSucceeded { .. })
     ));
+
     task.abort();
     let finished = tokio::time::timeout(Duration::from_millis(500), finished)
         .await
         .unwrap()
         .unwrap();
+
     assert_eq!(finished.peer_id, 7);
     assert_eq!(finished.admitted_events, 1);
     assert_eq!(
         finished.reason,
         DisconnectReason::Error("connection driver stopped before completion".into())
     );
+
     assert_eq!(remote.read(&mut [0; 1]).await.unwrap(), 0);
     assert!(task.await.unwrap_err().is_cancelled());
     assert!(event_inbox.recv().await.is_none());
@@ -105,6 +114,7 @@ async fn full_handshake_event_mailbox_preserves_writes_and_original_deadline() {
     let (_client_control, client_inbox) = mpsc::channel(8);
     let (server_events, mut server_event_inbox) = mpsc::channel(1);
     let (client_events, mut client_event_inbox) = mpsc::channel(8);
+
     server_events
         .send((
             9,
@@ -115,6 +125,7 @@ async fn full_handshake_event_mailbox_preserves_writes_and_original_deadline() {
         ))
         .await
         .unwrap();
+
     let client_cancel = CancellationToken::new();
     let server = ConnectionDriver::new(
         server_stream,
@@ -125,6 +136,7 @@ async fn full_handshake_event_mailbox_preserves_writes_and_original_deadline() {
         CancellationToken::new(),
     )
     .with_setup_deadline(Some(Instant::now() + Duration::from_millis(150)), None);
+
     let client = ConnectionDriver::new(
         client_stream,
         Connection::new(ConnectionConfig::new(Role::Client, SocketType::Pair)),
@@ -133,6 +145,7 @@ async fn full_handshake_event_mailbox_preserves_writes_and_original_deadline() {
         2,
         client_cancel.clone(),
     );
+
     let server_task = tokio::spawn(server.run());
     let client_task = tokio::spawn(client.run());
 
@@ -251,12 +264,14 @@ async fn full_peer_event_mailbox_controls(mode: &str, reserved: bool) {
     let (server, client, mut ends) = pair_drivers(PairSpec::pair(1, 1));
     let (completion, finished) = CompletionProgress::reserve(1);
     let mut finished = reserved.then_some(finished);
+
     let server = if reserved {
         server.with_completion(completion)
     } else {
         drop(completion);
         server
     };
+
     let (mut server_task, client_task) = start_pair(server, client, &mut ends).await;
 
     send_blocked_commands(&ends.client_control).await;
@@ -278,6 +293,7 @@ async fn full_peer_event_mailbox_controls(mode: &str, reserved: bool) {
         assert!(matches!(event, PeerEvent::Event(Event::Message(message))
             if message.part_slice(0) == Some(b"after events".as_slice())));
     }
+
     if mode == "cancel" {
         ends.server_cancel.cancel();
     } else {
@@ -286,6 +302,7 @@ async fn full_peer_event_mailbox_controls(mode: &str, reserved: bool) {
             .await
             .unwrap();
     }
+
     tokio::time::timeout(Duration::from_millis(500), ends.server_control.closed())
         .await
         .expect("event admission trapped close/cancellation");
@@ -297,8 +314,10 @@ async fn full_peer_event_mailbox_controls(mode: &str, reserved: bool) {
             .unwrap()
             .unwrap();
     }
+
     let prefix = if mode == "drain" { 5 } else { 1 };
     let admitted = prefix + count_until_closed(&mut ends.server_events, reserved).await;
+
     if let Some(finished) = finished.take() {
         let result = finished.await.unwrap();
         assert_eq!(result.admitted_events, admitted);
@@ -322,11 +341,13 @@ async fn count_until_closed(events: &mut mpsc::Receiver<(u64, PeerEvent)>, reser
                 assert!(!reserved);
                 break;
             }
+
             admitted += 1;
         }
     })
     .await
     .unwrap();
+
     admitted
 }
 
@@ -347,6 +368,7 @@ async fn full_error_event_mailbox_controls(mode: &str) {
     if mode == "drain" {
         expect_blocked_commands(&mut ends.server_events).await;
     }
+
     stop_server(mode, &ends).await;
     tokio::time::timeout(Duration::from_millis(500), ends.server_control.closed())
         .await
@@ -364,10 +386,12 @@ async fn full_error_event_mailbox_controls(mode: &str) {
     })
     .await
     .unwrap();
+
     let result = tokio::time::timeout(Duration::from_millis(500), server_task)
         .await
         .unwrap()
         .unwrap();
+
     if mode == "drain" {
         assert!(matches!(result, Err(Error::Protocol(_))));
     } else {
@@ -428,9 +452,11 @@ async fn full_receive_sink_controls(kind: &str) {
     let (authenticated, _authenticated_receiver) = RecvSink::authenticated(1, Arc::new(|| {}));
     let sink = receive_sink(kind, &pipe, producer, authenticated);
     let (mut server, client, mut ends) = pair_drivers(PairSpec::pair(1, 64));
+
     if let Some(sink) = sink {
         server = server.with_recv_sink(sink);
     }
+
     let (server_task, client_task) = start_pair(server, client, &mut ends).await;
 
     for sequence in 0u8..32 {
@@ -440,11 +466,13 @@ async fn full_receive_sink_controls(kind: &str) {
         } else {
             Message::single(body)
         };
+
         ends.client_data
             .send(PeerDriverData::SendMessage(message))
             .await
             .unwrap();
     }
+
     tokio::time::sleep(Duration::from_millis(30)).await;
     assert_reverse_control(
         &mut ends,
@@ -462,6 +490,7 @@ async fn full_receive_sink_controls(kind: &str) {
         assert_eq!(request.get(1), Some([0_u8; 128].as_slice()));
         assert!(pipe_receiver.prefetch_and_pop().is_none());
     }
+
     ends.server_control
         .send(PeerDriverCommand::Close)
         .await
@@ -509,6 +538,7 @@ async fn partial_large_read_controls(cancel_only: bool) {
         assert_reverse_control(&mut ends, b"partial", "partial large read").await;
         stop_server("linger", &ends).await;
     }
+
     tokio::time::timeout(Duration::from_millis(500), server_task)
         .await
         .expect("partial large read trapped cancellation/linger")

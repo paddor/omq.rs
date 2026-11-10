@@ -21,6 +21,7 @@ impl LaneWorker {
         if target.peers.is_empty() {
             return;
         }
+
         if self.is_shm_group(target.group) {
             self.dispatch_shm_group(target.peers, msg, touched, Some(pending));
             return;
@@ -29,9 +30,11 @@ impl LaneWorker {
         let group = self.codec_groups[target.group]
             .as_mut()
             .expect("matched codec group");
+
         let Ok(wire_messages) = group.encode(msg) else {
             return;
         };
+
         let dictionary = group.dictionary().cloned();
         let owned_dict = dictionary
             .as_ref()
@@ -39,10 +42,12 @@ impl LaneWorker {
 
         let frame = frame_publication(&mut self.encoder, &wire_messages, target.peers.len());
         let mut parked = Parked::new(pending);
+
         for &peer_id in target.peers {
             let Some(peer) = self.peers.get_mut(&peer_id) else {
                 continue;
             };
+
             // A payload must not overtake its peer's unshipped dictionary.
             let needs_dict = dictionary.is_some() && !peer.dict_shipped;
             let result = if needs_dict {
@@ -50,6 +55,7 @@ impl LaneWorker {
             } else {
                 Self::try_push_frame(&peer.slot, &frame)
             };
+
             match result {
                 TryFrameResult::Ok => Self::touch_peer(peer_id, peer, touched),
                 TryFrameResult::Full => {
@@ -61,6 +67,7 @@ impl LaneWorker {
                 TryFrameResult::Dead | TryFrameResult::Ineligible => {}
             }
         }
+
         self.encoder.clear();
     }
 
@@ -79,6 +86,7 @@ impl LaneWorker {
             let Some(peer) = self.peers.get_mut(&peer_id) else {
                 continue;
             };
+
             if peer.dict_shipped {
                 continue;
             }
@@ -90,6 +98,7 @@ impl LaneWorker {
                 owned_dict.get_or_insert_with(|| Arc::new(PreparedFrame::from_frame(&frame)));
             }
         }
+
         self.encoder.clear();
 
         owned_dict
@@ -110,6 +119,7 @@ impl LaneWorker {
                 else {
                     return false;
                 };
+
                 // Snapshot before admission so a concurrent drain cannot lose
                 // the only space wake between the failed push and parking.
                 let seen = target.slot.space_available.generation();
@@ -124,6 +134,7 @@ impl LaneWorker {
                         TryFrameResult::Dead | TryFrameResult::Ineligible => return false,
                     }
                 }
+
                 if target.dictionary.is_none() {
                     match target.payload.try_push(&target.slot) {
                         TryFrameResult::Ok => {
@@ -134,16 +145,21 @@ impl LaneWorker {
                         TryFrameResult::Dead | TryFrameResult::Ineligible => return false,
                     }
                 }
+
                 target.slot.signal_encoded();
                 let space = target.slot.space_available.clone();
                 waits.push(async move { space.changed_after(seen).await });
+
                 true
             });
+
             self.flush_touched(touched);
             touched.clear();
+
             if pending.is_empty() {
                 break;
             }
+
             tokio::select! {
                 biased;
                 () = self.ctrl.ready() => {
@@ -152,6 +168,7 @@ impl LaneWorker {
                 _ = waits.next() => {}
             }
         }
+
         false
     }
 }

@@ -28,6 +28,7 @@ fn main() {
                     common::print_cell(size, cell);
                     common::append_jsonl(PATTERN, &transport, peers, size, cell);
                 }
+
                 println!();
             }
         }
@@ -46,6 +47,7 @@ async fn run_cell(transport: &str, peers: usize, size: usize, seq: usize) -> com
         d.connect(ep.clone()).await.expect("connect DEALER");
         dealers.push(d);
     }
+
     if transport != "inproc" {
         let refs: Vec<&Socket> = dealers.iter().collect();
         common::wait_connected(&refs).await;
@@ -59,21 +61,26 @@ async fn run_cell(transport: &str, peers: usize, size: usize, seq: usize) -> com
         let router = router.clone();
         let dealers = dealers.clone();
         let payload = payload.clone();
+
         async move {
             let per = (k / dealers.len()).max(1);
             let mut handles = Vec::with_capacity(dealers.len());
+
             for i in 0..dealers.len() {
                 let d = dealers.clone();
                 let payload = payload.clone();
+
                 handles.push(tokio::spawn(async move {
                     for _ in 0..per {
                         d[i].send(Message::single(payload.clone())).await.unwrap();
                     }
                 }));
             }
+
             for _ in 0..(per * dealers.len()) {
                 router.recv().await.unwrap();
             }
+
             for h in handles {
                 let _ = h.await;
             }
@@ -86,8 +93,10 @@ async fn run_cell(transport: &str, peers: usize, size: usize, seq: usize) -> com
             let _ = d.close().await;
         }
     }
+
     if let Ok(router) = std::sync::Arc::try_unwrap(router) {
         let _ = router.close().await;
     }
+
     cell
 }

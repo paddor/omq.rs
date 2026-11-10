@@ -100,21 +100,26 @@ impl Config {
             (10..=11).contains(&args.len()),
             "role endpoint size seconds iterations warmup spin_us io_spin_us lan|adaptive [current|current-poll]"
         );
+
         let runtime = match args.get(10).map(String::as_str) {
             None => RuntimeMode::Owned,
             Some("current") => RuntimeMode::Current,
             Some("current-poll") => RuntimeMode::CurrentPoll,
             Some(_) => panic!("unknown runtime mode"),
         };
+
         let size = args[3].parse().expect("body size");
         let spin = spin_budget(&args[7]);
         let io_spin = spin_budget(&args[8]);
         assert!((8..=8_388_608).contains(&size));
+
         #[cfg(feature = "quic")]
         ws_bench_config::set_endpoint(Some(&args[2]));
+
         assert!(spin <= Duration::from_micros(50) || spin == Duration::MAX);
         assert!(io_spin <= Duration::from_micros(50) || io_spin == Duration::MAX);
         assert!(runtime == RuntimeMode::Owned || (spin.is_zero() && io_spin.is_zero()));
+
         Self {
             role: Role::parse(&args[1]),
             endpoint: args[2].parse().expect("endpoint"),
@@ -163,6 +168,7 @@ impl Config {
             } else {
                 (1024, 1024)
             };
+
             PayloadPool::new([(slot_bytes, slots)]).unwrap()
         })
     }
@@ -170,19 +176,23 @@ impl Config {
     fn options(&self) -> Options {
         let tuning = &self.tuning;
         let mut options = Options::default().recv_spin(tuning.spin);
+
         options.workload_profile = Some(if self.role.latency() {
             WorkloadProfile::Latency
         } else {
             WorkloadProfile::Throughput
         });
+
         options.recv_batching = !self.role.latency();
         options.dart.io_spin = tuning.io_spin;
         options.dart.window_messages = tuning.window_messages;
         options.dart.congestion = tuning.congestion;
+
         if self.recv_pool() {
             options.recv_payload_pool =
                 Some(PayloadPool::new([(POOL_SLOT_BYTES, POOL_SLOTS)]).unwrap());
         }
+
         #[cfg(feature = "quic")]
         ws_bench_config::configure(&mut options);
         options
@@ -195,11 +205,13 @@ impl Config {
         } else {
             "null".into()
         };
+
         let (capacity, slot_bytes) = if self.recv_pool() {
             (POOL_SLOTS, POOL_SLOT_BYTES)
         } else {
             (0, 0)
         };
+
         format!(
             "{{\"event\":\"ready\",\"affinity\":\"{}\",\"offloads\":{offloads},\"dart_wire_version\":{wire_version},\"dart_window_messages\":{},\"recv_pool_capacity\":{capacity},\"recv_pool_slot_bytes\":{slot_bytes}}}",
             affinity.description(),
@@ -235,11 +247,13 @@ fn format_offloads(capabilities: Option<omq_tokio::DartCapabilities>) -> String 
     let Some(capabilities) = capabilities else {
         return "null".into();
     };
+
     let ecn = |available: Option<bool>| match available {
         Some(true) => "true",
         Some(false) => "false",
         None => "null",
     };
+
     format!(
         "{{\"gso_segments\":{},\"gro_segments\":{},\"ecn_ipv4\":{},\"ecn_ipv6\":{},\"may_fragment\":{}}}",
         capabilities.max_gso_segments,
@@ -257,6 +271,7 @@ fn start() -> Instant {
     let delay = epoch.duration_since(SystemTime::now()).expect("late start");
     let at = Instant::now() + delay;
     std::thread::sleep(delay);
+
     at
 }
 
@@ -264,10 +279,12 @@ fn timed_cancel(at: Instant) -> Arc<BlockingRecvCancel> {
     let cancel = Arc::new(BlockingRecvCancel::new());
     cancel.register_current_thread_once();
     let timer = cancel.clone();
+
     std::thread::spawn(move || {
         std::thread::sleep(at.saturating_duration_since(Instant::now()));
         timer.cancel();
     });
+
     cancel
 }
 
@@ -277,6 +294,7 @@ fn make_body(pool: &PayloadPool, size: usize, tag: u64) -> Option<Message> {
         body[..8].copy_from_slice(&tag.to_le_bytes());
         return Some(Message::single(body));
     }
+
     pool.try_message(size, |body| {
         body.fill(7);
         body[..8].copy_from_slice(&tag.to_le_bytes());
@@ -297,6 +315,7 @@ impl CapacityWait {
             std::hint::spin_loop();
             return;
         }
+
         let deadline = *self.deadline.get_or_insert_with(|| now + self.spin);
         if now >= deadline {
             std::thread::yield_now();
@@ -365,6 +384,7 @@ fn scatter(socket: &Socket, config: &Config, pool: &PayloadPool, at: Instant) {
     let mut bodies = BodySource::new(pool, config.size);
     let measure_at = at + config.throughput_warmup;
     let until = measure_at + config.duration;
+
     let mut pending = None;
     let mut counts = ScatterCounts::default();
     let mut sequence = 0u64;
@@ -382,6 +402,7 @@ fn scatter(socket: &Socket, config: &Config, pool: &PayloadPool, at: Instant) {
             now = Instant::now();
             until_clock = CLOCK_MESSAGES;
         }
+
         if now >= until {
             break;
         }
@@ -389,6 +410,7 @@ fn scatter(socket: &Socket, config: &Config, pool: &PayloadPool, at: Instant) {
         if pending.is_none() {
             let measured = now >= measure_at;
             let tag = sequence | (u64::from(measured) << 63);
+
             if let Some(body) = bodies.next(tag) {
                 sequence += 1;
                 pending = Some((body, measured));
@@ -396,6 +418,7 @@ fn scatter(socket: &Socket, config: &Config, pool: &PayloadPool, at: Instant) {
                 counts.pool_empty += 1;
             }
         }
+
         let Some((body, measured)) = pending.take() else {
             wait.stalled(now);
             until_clock = until_clock.min(8) - 1;
@@ -419,10 +442,12 @@ fn scatter(socket: &Socket, config: &Config, pool: &PayloadPool, at: Instant) {
 
     drop(pending);
     std::thread::sleep((config.drain / 2).min(Duration::from_secs(1)));
+
     if config.native() {
         let all_offered = counts.offered + counts.warmup_offered;
         wait_acknowledged(socket, all_offered, until + config.drain, &mut wait);
     }
+
     scatter_result(socket, config, &counts);
 }
 
@@ -434,11 +459,13 @@ fn scatter_result(socket: &Socket, config: &Config, counts: &ScatterCounts) {
         pool_empty,
     } = *counts;
     let stats = dart_stats(socket);
+
     let unacknowledged = if native {
         (offered + warmup_offered).saturating_sub(stats.acknowledged)
     } else {
         0
     };
+
     let sent = if native {
         stats
             .sent_messages
@@ -447,6 +474,7 @@ fn scatter_result(socket: &Socket, config: &Config, counts: &ScatterCounts) {
     } else {
         "null".into()
     };
+
     emit(&format!(
         "{{\"event\":\"result\",\"offered\":{offered},\"warmup_offered\":{warmup_offered},\"unacknowledged\":{unacknowledged},\"seconds\":{},\"sent\":{sent},\"pool_empty\":{pool_empty},\"send_failures\":{},\"retransmitted\":{},\"credit_stalls\":{},\"congestion_stalls\":{},\"ecn_failures\":{},\"offloads\":{}}}",
         config.duration.as_secs_f64(),
@@ -491,10 +519,12 @@ impl BodyCache {
                 return None;
             }
         };
+
         write_tag(&mut body, tag);
         let body = body.freeze();
         let message = Message::single(body.clone());
         self.bodies.push_back(body);
+
         Some(message)
     }
 }
@@ -505,6 +535,7 @@ fn wait_acknowledged(socket: &Socket, count: u64, deadline: Instant, wait: &mut 
         if now >= deadline {
             break;
         }
+
         wait.stalled(now);
     }
 }
@@ -532,6 +563,7 @@ impl GatherTally {
                 self.corrupt += 1;
                 continue;
             }
+
             let tag = u64::from_le_bytes(body[..8].try_into().unwrap());
             let valid = if body.len() >= 16 {
                 let check = u64::from_le_bytes(body[8..16].try_into().unwrap());
@@ -539,9 +571,11 @@ impl GatherTally {
             } else {
                 valid_padding(&body[8..])
             };
+
             if !valid {
                 self.corrupt += 1;
             }
+
             let sequence = tag & !(1 << 63);
             if sequence < self.expected {
                 self.duplicates += 1;
@@ -549,8 +583,10 @@ impl GatherTally {
                 self.gaps += sequence - self.expected;
                 self.expected = sequence + 1;
             }
+
             measured += tag >> 63;
         }
+
         measured
     }
 }
@@ -569,10 +605,12 @@ fn gather(socket: &Socket, config: &Config, at: Instant) {
     {
         let measured = tally.check_batch(&batch, config.size);
         tally.total += measured;
+
         // Bodies drained after the window still count toward the total only.
         if Instant::now() <= until {
             tally.received += measured;
         }
+
         if recycle_pooled {
             while !batch.is_empty() {
                 PayloadPool::recycle_many(&mut batch, 64);
@@ -594,6 +632,7 @@ fn gather_result(socket: &Socket, config: &Config, tally: &GatherTally) {
         corrupt,
         ..
     } = *tally;
+
     let stats = dart_stats(socket);
     emit(&format!(
         "{{\"event\":\"result\",\"received\":{received},\"received_total\":{total},\"duplicates\":{duplicates},\"gaps\":{gaps},\"corrupt\":{corrupt},\"seconds\":{},\"received_datagrams\":{},\"pool_exhausted\":{},\"receive_overflow\":{},\"invalid_datagrams\":{},\"receive_failures\":{},\"ect0\":{},\"ect1\":{},\"ce\":{},\"ecn_unavailable\":{},\"offloads\":{}}}",
@@ -618,6 +657,7 @@ fn valid_padding(bytes: &[u8]) -> bool {
     let difference = words.iter().fold(0, |difference, word| {
         difference | (u64::from_ne_bytes(*word) ^ 0x0707_0707_0707_0707)
     });
+
     difference == 0 && tail.iter().all(|byte| *byte == 7)
 }
 
@@ -625,11 +665,13 @@ fn server(socket: &Socket) {
     let cancel = Arc::new(BlockingRecvCancel::new());
     cancel.register_current_thread_once();
     let stop = cancel.clone();
+
     std::thread::spawn(move || {
         let mut line = String::new();
         std::io::stdin().lock().read_line(&mut line).unwrap();
         stop.cancel();
     });
+
     let mut replies = Vec::with_capacity(1);
     while socket
         .recv_many_registered_cancelable_into(1, &cancel, &mut replies)
@@ -640,6 +682,7 @@ fn server(socket: &Socket) {
             socket.send(reply).unwrap();
         }
     }
+
     emit(&format!(
         "{{\"event\":\"result\",\"offloads\":{},{} }}",
         offloads(socket),
@@ -659,10 +702,12 @@ fn client(socket: &Socket, config: &Config, pool: &PayloadPool) {
             .expect("RTT timeout");
         let elapsed = at.elapsed().as_secs_f64() * 1e6;
         validate_reply(&reply, config.size, tag);
+
         if index >= config.warmup {
             samples.push(elapsed);
         }
     }
+
     latency_result(&mut samples, config, &offloads(socket), dart_stats(socket));
 }
 
@@ -680,12 +725,15 @@ fn save_latency_samples(samples: &[f64]) {
     let Some(path) = std::env::var_os("OMQ_DART_RTT_SAMPLES") else {
         return;
     };
+
     // Preserve chronological order. File I/O happens after every timed RTT.
     let mut output = std::io::BufWriter::new(std::fs::File::create(path).unwrap());
     writeln!(output, "sample,rtt_us").unwrap();
+
     for (index, sample) in samples.iter().enumerate() {
         writeln!(output, "{index},{sample:.6}").unwrap();
     }
+
     output.flush().unwrap();
 }
 
@@ -705,9 +753,11 @@ fn latency_counters(stats: DartStats) -> String {
 fn latency_result(samples: &mut [f64], config: &Config, offloads: &str, stats: DartStats) {
     save_latency_samples(samples);
     samples.sort_by(f64::total_cmp);
+
     let quantile = |numerator: usize, denominator: usize| {
         samples[((samples.len() - 1) * numerator).div_ceil(denominator)]
     };
+
     emit(&format!(
         "{{\"event\":\"result\",\"iterations\":{},\"p50_us\":{},\"p99_us\":{},\"p999_us\":{},\"max_us\":{},\"timeouts\":0,\"offloads\":{},{} }}",
         config.iterations,
@@ -723,6 +773,7 @@ fn latency_result(samples: &mut [f64], config: &Config, offloads: &str, stats: D
 fn main() {
     let config = Config::parse();
     let affinity = affinity::Affinity::from_env();
+
     if config.runtime != RuntimeMode::Owned {
         run_current_runtime(&config, &affinity);
         return;
@@ -733,6 +784,7 @@ fn main() {
     } else {
         affinity::Side::Sender
     };
+
     let context = Context::with_name("dartbench");
     affinity.pin_context("dartbench", 1, placement);
     affinity.pin(if config.role.receiving() { 5 } else { 0 });
@@ -744,6 +796,7 @@ fn main() {
     } else {
         socket.connect(config.endpoint.clone()).unwrap();
     }
+
     socket.wait_connected(1, SETUP_TIMEOUT).unwrap();
     emit(&config.ready_event(&affinity, &offloads(&socket)));
 
@@ -754,6 +807,7 @@ fn main() {
         Role::Client => client(&socket, &config, pool.as_ref().unwrap()),
         Role::Server => server(&socket),
     }
+
     socket.close().unwrap();
     context.term();
 }
@@ -763,6 +817,7 @@ fn main() {
 fn run_current_runtime(config: &Config, affinity: &affinity::Affinity) {
     assert!(config.role.latency());
     affinity.pin(if config.role.receiving() { 5 } else { 0 });
+
     // A poll interval of 1 checks IO on every scheduler tick.
     tokio::runtime::Builder::new_current_thread()
         .enable_all()

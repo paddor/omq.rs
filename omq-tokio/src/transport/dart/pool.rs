@@ -73,19 +73,23 @@ impl ReceivePool {
         let mut body = Vec::new();
         body.try_reserve_exact(bytes.len()).ok()?;
         body.extend_from_slice(bytes);
+
         Some(self.owned_payload(body))
     }
 
     pub(super) fn take(&self, size: usize, cache: &mut ReceiveBuffers) -> Option<PayloadBuffer> {
         let pool = self.storage.as_ref()?;
         let target = pool.class_size(size)?;
+
         if cache.class != Some(target) {
             pool.with_recycling_batch(|| cache.buffers.clear());
             cache.class = Some(target);
         }
+
         if cache.buffers.is_empty() {
             pool.try_buffers_into(size, 64, &mut cache.buffers);
         }
+
         cache.buffers.pop()
     }
 }
@@ -143,6 +147,7 @@ impl ReceiveBody {
         {
             return Some(Self::Pooled(buffer));
         }
+
         let mut body = Vec::new();
         body.try_reserve_exact(length).ok()?;
         Some(Self::Owned(body))

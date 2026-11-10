@@ -33,9 +33,11 @@ impl Options {
         if let Some(n) = self.recv_buffer_size {
             sref.set_recv_buffer_size(n)?;
         }
+
         if let Some(n) = self.send_buffer_size {
             sref.set_send_buffer_size(n)?;
         }
+
         Ok(())
     }
 
@@ -46,6 +48,7 @@ impl Options {
         if let Some(timeout) = self.tcp_user_timeout {
             sock.as_socket_ref().set_tcp_user_timeout(Some(timeout))?;
         }
+
         #[cfg(not(any(target_os = "linux", target_os = "android")))]
         let _ = sock;
         Ok(())
@@ -66,6 +69,7 @@ impl KeepAlive {
                     .with_time(*idle)
                     .with_interval(*intvl)
                     .with_retries(*cnt);
+
                 sref.set_tcp_keepalive(&ka)
             }
         }

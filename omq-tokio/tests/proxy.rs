@@ -25,6 +25,7 @@ async fn control_pair(id: &str) -> (Socket, Socket) {
         .wait_connected(1, Duration::from_secs(2))
         .await
         .unwrap();
+
     (control, controller)
 }
 
@@ -122,6 +123,7 @@ async fn proxy_capture_gets_forwarded_copy() {
     backend.bind(endpoint("capture-be")).await.unwrap();
     capture.bind(endpoint("capture-copy")).await.unwrap();
     control.bind(endpoint("capture-ctrl")).await.unwrap();
+
     sender.connect(endpoint("capture-fe")).await.unwrap();
     receiver.connect(endpoint("capture-be")).await.unwrap();
     capture_recv
@@ -129,6 +131,7 @@ async fn proxy_capture_gets_forwarded_copy() {
         .await
         .unwrap();
     controller.connect(endpoint("capture-ctrl")).await.unwrap();
+
     controller
         .wait_connected(1, Duration::from_secs(2))
         .await
@@ -190,6 +193,7 @@ async fn proxy_flushes_pending_after_backend_backpressure() {
             .unwrap();
         got.push(String::from_utf8(msg.part_bytes(0).unwrap().to_vec()).unwrap());
     }
+
     send_task.await.unwrap();
     assert_eq!(got.len(), 96);
 
@@ -210,12 +214,14 @@ async fn proxy_does_not_starve_backend_when_frontend_is_hot() {
     backend.bind(endpoint("fair-be")).await.unwrap();
     client.connect(endpoint("fair-fe")).await.unwrap();
     server.connect(endpoint("fair-be")).await.unwrap();
+
     let task = tokio::spawn(
         Proxy::new(frontend, backend)
             .control(control.clone())
             .burst_size(4)
             .run(),
     );
+
     client
         .wait_connected(1, Duration::from_secs(2))
         .await
@@ -325,12 +331,14 @@ async fn proxy_forwards_xpub_subscriptions_to_xsub() {
             .send(Message::single("sports.beta"))
             .await
             .unwrap();
+
         if let Ok(Ok(msg)) =
             tokio::time::timeout(Duration::from_millis(20), subscriber.recv()).await
         {
             assert_eq!(&msg.part_bytes(0).unwrap()[..], b"news.alpha");
             break;
         }
+
         assert!(std::time::Instant::now() < deadline);
     }
 
@@ -349,6 +357,7 @@ async fn rep_control_is_serviced_while_input_stays_ready() {
             .send_hwm(2 * QUEUED)
             .recv_hwm(2 * QUEUED)
     };
+
     let frontend = Socket::new(SocketType::Pull, options());
     let feeder = Socket::new(SocketType::Push, options());
     frontend.bind(endpoint("ready-fe")).await.unwrap();
@@ -361,9 +370,11 @@ async fn rep_control_is_serviced_while_input_stays_ready() {
         .wait_connected(1, Duration::from_secs(2))
         .await
         .unwrap();
+
     for _ in 0..QUEUED {
         feeder.send(Message::single("x")).await.unwrap();
     }
+
     let (control, controller) = control_pair("ready-ctl").await;
     controller.send(Message::single("TERMINATE")).await.unwrap();
 
@@ -376,9 +387,11 @@ async fn rep_control_is_serviced_while_input_stays_ready() {
     .unwrap();
     assert_eq!(exit, ProxyExit::Terminated);
     let mut forwarded = 0;
+
     while sink.try_recv().is_ok() {
         forwarded += 1;
     }
+
     assert!(
         forwarded < QUEUED / 4,
         "control waited for {forwarded} forwarded messages"

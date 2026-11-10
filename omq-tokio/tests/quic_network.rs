@@ -66,6 +66,7 @@ impl XorShift {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 7;
         self.0 ^= self.0 << 17;
+
         self.0 % 1000
     }
 }
@@ -99,6 +100,7 @@ async fn proxy(server: SocketAddr, impairment: Impairment, seed: u64) -> Proxy {
         forwarded: Arc::new(AtomicU64::new(0)),
     };
     let task = tokio::spawn(run_proxy(front, server, impairment, seed, signals.clone()));
+
     Proxy {
         addr,
         rebind: signals.rebind,
@@ -145,11 +147,13 @@ async fn run_proxy(
         if rng.per_mille() < impairment.drop {
             continue;
         }
+
         let copies = if rng.per_mille() < impairment.duplicate {
             2
         } else {
             1
         };
+
         let delay = if rng.per_mille() < impairment.reorder {
             Duration::from_millis(1 + rng.per_mille() % 8)
         } else {
@@ -161,6 +165,7 @@ async fn run_proxy(
         } else {
             front.clone()
         };
+
         forwarded.fetch_add(1, Ordering::Relaxed);
 
         // A delayed datagram goes out from its own task, so later
@@ -199,6 +204,7 @@ async fn fifo_and_atomic_multipart_survive_loss_duplication_and_reordering() {
     let tls = tls();
     let pull = Socket::new(SocketType::Pull, server_options(&tls));
     let port = port_of(&pull.bind("quic://127.0.0.1:0").await.unwrap());
+
     let proxy = proxy(
         format!("127.0.0.1:{port}").parse().unwrap(),
         Impairment {
@@ -209,6 +215,7 @@ async fn fifo_and_atomic_multipart_survive_loss_duplication_and_reordering() {
         0x5eed,
     )
     .await;
+
     let push = Socket::new(SocketType::Push, client_options(&tls));
     push.connect(format!("quic://{}", proxy.addr))
         .await
@@ -225,14 +232,18 @@ async fn fifo_and_atomic_multipart_survive_loss_duplication_and_reordering() {
                 } else {
                     Message::single(head)
                 };
+
                 push.send(msg).await.unwrap();
             }
+
             push
         }
     });
+
     for i in 0u32..2_000 {
         let msg = recv(&pull).await;
         assert_eq!(msg.part_bytes(0).unwrap(), &i.to_be_bytes()[..], "FIFO");
+
         if i % 100 == 0 {
             assert_eq!(msg.len(), 3, "multipart atomicity");
             assert!(msg.part_bytes(1).unwrap().is_empty());
@@ -241,6 +252,7 @@ async fn fifo_and_atomic_multipart_survive_loss_duplication_and_reordering() {
             assert_eq!(msg.len(), 1);
         }
     }
+
     drop(sender.await.unwrap());
     assert!(proxy.forwarded.load(Ordering::Relaxed) > 100);
 }
@@ -256,6 +268,7 @@ async fn liveness_holds_under_loss_and_bidirectional_saturation() {
     server.send_hwm = 8;
     let a = Socket::new(SocketType::Pair, server);
     let port = port_of(&a.bind("quic://127.0.0.1:0").await.unwrap());
+
     let proxy = proxy(
         format!("127.0.0.1:{port}").parse().unwrap(),
         Impairment {
@@ -266,12 +279,14 @@ async fn liveness_holds_under_loss_and_bidirectional_saturation() {
         0xbeef,
     )
     .await;
+
     let mut client = client_options(&tls);
     client.heartbeat_interval = Some(Duration::from_millis(100));
     client.heartbeat_timeout = Some(Duration::from_secs(2));
     client.quic.stream_window = QuicOptions::MIN_STREAM_WINDOW;
     client.recv_hwm = 8;
     client.send_hwm = 8;
+
     let b = Socket::new(SocketType::Pair, client);
     let mut monitor = b.monitor();
     b.connect(format!("quic://{}", proxy.addr)).await.unwrap();
@@ -285,12 +300,15 @@ async fn liveness_holds_under_loss_and_bidirectional_saturation() {
                 data[..4].copy_from_slice(&i.to_be_bytes());
                 socket.send(Message::single(data)).await.unwrap();
             }
+
             socket
         })
     };
+
     let a_sender = send_all(a.clone(), body.clone());
     let b_sender = send_all(b.clone(), body.clone());
     tokio::time::sleep(Duration::from_secs(4)).await;
+
     for (socket, name) in [(&a, "a"), (&b, "b")] {
         for i in 0u32..300 {
             let msg = recv(socket).await;
@@ -301,8 +319,10 @@ async fn liveness_holds_under_loss_and_bidirectional_saturation() {
             );
         }
     }
+
     a_sender.await.unwrap();
     b_sender.await.unwrap();
+
     while let Ok(event) = monitor.try_recv() {
         assert!(
             !matches!(event, omq_proto::MonitorEvent::Disconnected { .. }),
@@ -319,6 +339,7 @@ async fn address_rebinding_recovers_through_reconnect() {
     server.quic.keep_alive_interval = Duration::from_millis(500);
     let pull = Socket::new(SocketType::Pull, server);
     let port = port_of(&pull.bind("quic://127.0.0.1:0").await.unwrap());
+
     let proxy = proxy(
         format!("127.0.0.1:{port}").parse().unwrap(),
         Impairment {
@@ -329,6 +350,7 @@ async fn address_rebinding_recovers_through_reconnect() {
         1,
     )
     .await;
+
     let mut client = client_options(&tls);
     client.quic.idle_timeout = Duration::from_secs(2);
     client.quic.keep_alive_interval = Duration::from_millis(500);
@@ -336,6 +358,7 @@ async fn address_rebinding_recovers_through_reconnect() {
     push.connect(format!("quic://{}", proxy.addr))
         .await
         .unwrap();
+
     push.send(Message::single("before")).await.unwrap();
     assert_eq!(recv(&pull).await.part_bytes(0).unwrap(), &b"before"[..]);
 
@@ -344,14 +367,17 @@ async fn address_rebinding_recovers_through_reconnect() {
     proxy.rebind.store(true, Ordering::Release);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     let mut n = 0u32;
+
     loop {
         let _ = push.try_send(Message::single(format!("after-{n}")));
         n += 1;
+
         if let Ok(Ok(msg)) = tokio::time::timeout(Duration::from_millis(100), pull.recv()).await
             && msg.part_bytes(0).unwrap().starts_with(b"after-")
         {
             break;
         }
+
         assert!(
             tokio::time::Instant::now() < deadline,
             "no recovery after rebinding"
@@ -366,6 +392,7 @@ async fn finite_linger_completes_through_a_lossy_path() {
     server.recv_hwm = 10_000;
     let pull = Socket::new(SocketType::Pull, server);
     let port = port_of(&pull.bind("quic://127.0.0.1:0").await.unwrap());
+
     let proxy = proxy(
         format!("127.0.0.1:{port}").parse().unwrap(),
         Impairment {
@@ -376,6 +403,7 @@ async fn finite_linger_completes_through_a_lossy_path() {
         0x11_4e,
     )
     .await;
+
     let mut client = client_options(&tls);
     client.linger = Some(Duration::from_secs(20));
     client.send_hwm = 10_000;
@@ -384,12 +412,15 @@ async fn finite_linger_completes_through_a_lossy_path() {
         .await
         .unwrap();
     let body = Bytes::from(vec![0x42; 4096]);
+
     for _ in 0..1_000 {
         push.send(Message::single(body.clone())).await.unwrap();
     }
+
     // Close while most data is unacknowledged; lost FIN/ACK packets are
     // retransmitted within the linger deadline.
     push.close().await.unwrap();
+
     for _ in 0..1_000 {
         assert_eq!(recv(&pull).await.part_bytes(0).unwrap(), &body[..]);
     }

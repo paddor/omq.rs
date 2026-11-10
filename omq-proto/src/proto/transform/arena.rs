@@ -1,5 +1,8 @@
 //! Bounded compression carriers containing complete, ordinary ZMTP data frames.
 
+#[cfg(test)]
+pub(super) mod codec_tests;
+
 use bytes::Bytes;
 
 use crate::proto::frame::{FLAG_LONG, FLAG_MORE, message_wire_len};
@@ -289,18 +292,6 @@ impl DecodedArena {
     pub(crate) fn is_empty(&self) -> bool {
         self.remaining == 0
     }
-}
-
-/// Uncompressed arena wire message around `body`, for codec tests.
-#[cfg(test)]
-pub(crate) fn raw_arena(sentinel: [u8; 4], body: &[u8], count: u32) -> Message {
-    let mut bytes = Vec::from(sentinel);
-    bytes.extend_from_slice(&[0; 4]);
-    bytes.extend_from_slice(&u32::try_from(body.len()).unwrap().to_le_bytes());
-    bytes.extend_from_slice(&count.to_le_bytes());
-    bytes.extend_from_slice(body);
-
-    Message::single(bytes)
 }
 
 #[cfg(test)]

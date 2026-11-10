@@ -8,14 +8,11 @@
 //! Setup defaults to 10 seconds in Rust and all bindings, compared with libzmq's
 //! 30-second `ZMQ_HANDSHAKE_IVL`.
 
-use std::time::Duration;
-
-use bytes::Bytes;
-
-use crate::proto::mechanism::MechanismSetup;
-use crate::subscription::{SubscriptionAdmission, SubscriptionRequest};
-
+mod buffers;
 mod compression;
+mod connection;
+mod queue;
+mod receive;
 #[cfg(any(feature = "plain", feature = "curve"))]
 mod security;
 mod tcp;
@@ -23,7 +20,17 @@ mod tcp;
 mod transport;
 mod validate;
 
+use std::time::Duration;
+
+use bytes::Bytes;
+
+use crate::proto::mechanism::MechanismSetup;
+use crate::subscription::{SubscriptionAdmission, SubscriptionRequest};
+
 pub use compression::CompressionOptions;
+pub use connection::ReconnectPolicy;
+pub use queue::{OnMute, queue_capacity};
+pub use receive::MessageRateLimit;
 pub use tcp::KeepAlive;
 #[cfg(feature = "quic")]
 pub use transport::QuicOptions;
@@ -54,37 +61,6 @@ pub const DEFAULT_MONITOR_CAPACITY: usize = 256;
 /// Largest message queue allocated for one HWM. Queues preallocate their
 /// capacity, so larger HWM values behave as this limit.
 pub const MAX_QUEUE_CAPACITY: usize = 1 << 20;
-
-/// Queue capacity in messages for `hwm`, clamped to `1..=MAX_QUEUE_CAPACITY`.
-#[must_use]
-pub fn queue_capacity(hwm: u32) -> usize {
-    usize::try_from(hwm)
-        .unwrap_or(MAX_QUEUE_CAPACITY)
-        .clamp(1, MAX_QUEUE_CAPACITY)
-}
-
-/// Token-bucket message rate limit.
-///
-/// `messages_per_second` controls refill speed. `burst` is the maximum token
-/// capacity. Exceeding either receive limit closes the offending connection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct MessageRateLimit {
-    /// Sustained complete messages allowed per second.
-    pub messages_per_second: u32,
-    /// Maximum immediate message burst.
-    pub burst: u32,
-}
-
-impl MessageRateLimit {
-    /// Create a message rate limit.
-    #[must_use]
-    pub const fn new(messages_per_second: u32, burst: u32) -> Self {
-        Self {
-            messages_per_second,
-            burst,
-        }
-    }
-}
 
 /// Per-socket configuration.
 ///
@@ -564,326 +540,10 @@ impl Options {
         self
     }
 
-    /// Send queue capacity in messages, from `send_hwm` via [`queue_capacity`].
-    #[must_use]
-    pub fn send_queue_capacity(&self) -> usize {
-        queue_capacity(self.send_hwm)
-    }
-
-    /// Receive queue capacity in messages, from `recv_hwm` via [`queue_capacity`].
-    #[must_use]
-    pub fn recv_queue_capacity(&self) -> usize {
-        queue_capacity(self.recv_hwm)
-    }
-
-    /// Set send-side HWM as a message count.
-    ///
-    /// This is not a byte limit. Large messages count the same as small
-    /// messages. Native OMQ may hold more than this value across multiple
-    /// connect-side pre-ready pipes, per-peer pipes, fan-out lane rings, and
-    /// transmit slots.
-    #[must_use]
-    pub fn send_hwm(mut self, hwm: u32) -> Self {
-        self.send_hwm = hwm;
-        self
-    }
-
-    #[must_use]
-    /// Set receive-side HWM as a message count.
-    ///
-    /// This bounds complete messages queued for application receive. It is
-    /// not a byte limit.
-    pub fn recv_hwm(mut self, hwm: u32) -> Self {
-        self.recv_hwm = hwm;
-        self
-    }
-
-    /// Set the native PEER queue capacity per sending handle and destination.
-    /// See [`Self::peer_send_queue_capacity`] for rounding and shared limits.
-    #[must_use]
-    pub fn peer_send_queue_capacity(mut self, messages: usize) -> Self {
-        self.peer_send_queue_capacity = messages;
-        self
-    }
-
-    /// Set the native PEER sending-handle limit per destination.
-    /// See [`Self::peer_max_senders`] for retired queue accounting.
-    #[must_use]
-    pub fn peer_max_senders(mut self, senders: usize) -> Self {
-        self.peer_max_senders = senders;
-        self
-    }
-
-    /// Set the native PEER receive-peer limit per socket.
-    /// See [`Self::peer_max_peers`] for connection admission behavior.
-    #[must_use]
-    pub fn peer_max_peers(mut self, peers: usize) -> Self {
-        self.peer_max_peers = peers;
-        self
-    }
-
-    /// Set the native PEER retained-message budget per receiving connection.
-    /// See [`Self::peer_recv_max_messages`] for claim and HWM accounting.
-    #[must_use]
-    pub fn peer_recv_max_messages(mut self, messages: usize) -> Self {
-        self.peer_recv_max_messages = messages;
-        self
-    }
-
-    /// Set the native PEER outbound byte budget for each connection.
-    /// See [`Self::peer_send_max_bytes`] for accounting and defaults.
-    #[must_use]
-    pub fn peer_send_max_bytes(mut self, bytes: usize) -> Self {
-        self.peer_send_max_bytes = Some(bytes);
-        self
-    }
-
-    /// Set the native PEER receive byte budget for each connection.
-    /// See [`Self::peer_recv_max_bytes`] for accounting and defaults.
-    #[must_use]
-    pub fn peer_recv_max_bytes(mut self, bytes: usize) -> Self {
-        self.peer_recv_max_bytes = Some(bytes);
-        self
-    }
-
-    /// Set the busy-wait budget before parking in native blocking receives.
-    /// Zero disables spinning. See [`Self::recv_spin`] for scope and tradeoffs.
-    #[must_use]
-    pub fn recv_spin(mut self, budget: Duration) -> Self {
-        self.recv_spin = budget;
-        self
-    }
-
-    /// Allow bounded per-connection bursts when receiving batches.
-    /// See [`Self::recv_batching`] for supported socket types and semantics.
-    #[must_use]
-    pub fn recv_batching(mut self, enabled: bool) -> Self {
-        self.recv_batching = enabled;
-        self
-    }
-
-    /// Recycle native byte-stream receive frame tables through this bounded pool.
-    #[must_use]
-    pub fn recv_message_pool(mut self, pool: crate::message::MessagePool) -> Self {
-        self.recv_message_pool = Some(pool);
-        self
-    }
-
-    /// Set explicit receive payload size classes, shared across connections.
-    /// Pools supply destinations for incomplete bodies, fragmentation, and
-    /// decoders that support fixed storage. Contiguous buffered bodies keep their
-    /// byte views. Inline bodies skip checkout; exhaustion and oversized bodies
-    /// use owned allocations. Inproc transfers payload owners unchanged.
-    #[must_use]
-    pub fn recv_payload_pool(mut self, pool: crate::PayloadPool) -> Self {
-        self.recv_payload_pool = Some(pool);
-        self
-    }
-
-    /// Set the per-connection receive message rate and burst.
-    #[must_use]
-    pub fn recv_rate_limit(mut self, messages_per_second: u32, burst: u32) -> Self {
-        self.recv_rate_limit = Some(MessageRateLimit::new(messages_per_second, burst));
-        self
-    }
-
-    /// Set the aggregate receive message rate and burst per remote IP.
-    #[must_use]
-    pub fn recv_ip_rate_limit(mut self, messages_per_second: u32, burst: u32) -> Self {
-        self.recv_ip_rate_limit = Some(MessageRateLimit::new(messages_per_second, burst));
-        self
-    }
-
-    /// Set close linger to a finite duration.
-    ///
-    /// `Duration::ZERO` means drop queued outbound messages immediately.
-    /// Non-zero values keep endpoints alive so queued sends can drain to
-    /// existing or late peers before the deadline.
-    #[must_use]
-    pub fn linger(mut self, d: Duration) -> Self {
-        self.linger = Some(d);
-        self
-    }
-
-    /// Wait forever for queued outbound messages to drain on close/drop.
-    ///
-    /// This can wait forever if queued messages have no peer and no peer ever
-    /// arrives. Use finite linger for services that need bounded shutdown.
-    #[must_use]
-    pub fn linger_forever(mut self) -> Self {
-        self.linger = None;
-        self
-    }
-
-    #[must_use]
-    /// Set the ZMTP identity advertised during handshake.
-    pub fn identity(mut self, id: impl Into<Bytes>) -> Self {
-        self.identity = id.into();
-        self
-    }
-
-    #[must_use]
-    /// Set reconnect behavior for connect-side peers.
-    pub fn reconnect(mut self, policy: ReconnectPolicy) -> Self {
-        self.reconnect = policy;
-        self
-    }
-
-    #[must_use]
-    /// Stop reconnecting when the remote side refuses the connection.
-    pub fn reconnect_stop_conn_refused(mut self, stop: bool) -> Self {
-        self.reconnect_stop_conn_refused = stop;
-        self
-    }
-
-    #[must_use]
-    /// Set interval between heartbeat PING commands.
-    pub fn heartbeat_interval(mut self, d: Duration) -> Self {
-        self.heartbeat_interval = Some(d);
-        self
-    }
-
-    #[must_use]
-    /// Set heartbeat TTL advertised to peers.
-    pub fn heartbeat_ttl(mut self, d: Duration) -> Self {
-        self.heartbeat_ttl = Some(d);
-        self
-    }
-
-    #[must_use]
-    /// Set max time to wait for peer heartbeat traffic before disconnecting.
-    pub fn heartbeat_timeout(mut self, d: Duration) -> Self {
-        self.heartbeat_timeout = Some(d);
-        self
-    }
-
-    /// Set max time allowed to complete the ZMTP handshake.
-    ///
-    /// For encrypted mechanisms this also controls how long a stalled peer can
-    /// occupy one `max_pending_handshakes` slot.
-    #[must_use]
-    pub fn handshake_timeout(mut self, d: Duration) -> Self {
-        self.handshake_timeout = Some(d);
-        self
-    }
-
-    /// Set max simultaneous inbound byte-stream handshakes.
-    ///
-    /// This caps pre-auth TCP/IPC resource use. If full, new accepted peers
-    /// are rejected before a peer driver is spawned and monitors receive
-    /// `HandshakeFailed`.
-    #[must_use]
-    pub fn max_pending_handshakes(mut self, n: usize) -> Self {
-        self.max_pending_handshakes = n;
-        self
-    }
-
-    #[must_use]
-    /// Set max allowed size for one complete message.
-    pub fn max_message_size(mut self, n: usize) -> Self {
-        self.max_message_size = Some(n);
-        self
-    }
-
-    /// Cap automatically allocated outbound SHM across all peers of this socket.
-    /// See [`Self::shm_max_memory`] for scope and carrier fallback behavior.
-    #[must_use]
-    pub fn shm_max_memory(mut self, bytes: usize) -> Self {
-        self.shm_max_memory = Some(bytes);
-        self
-    }
-
-    #[must_use]
-    /// Keep only the most recent inbound message.
-    pub fn conflate(mut self, c: bool) -> Self {
-        self.conflate = c;
-        self
-    }
-
     #[must_use]
     /// Require ROUTER sends to target a known peer.
     pub fn router_mandatory(mut self, m: bool) -> Self {
         self.router_mandatory = m;
-        self
-    }
-
-    #[must_use]
-    /// Set behavior when send HWM mutes the socket or peer.
-    pub fn on_mute(mut self, m: OnMute) -> Self {
-        self.on_mute = m;
-        self
-    }
-
-    #[must_use]
-    /// Set TCP keepalive behavior.
-    pub fn tcp_keepalive(mut self, k: KeepAlive) -> Self {
-        self.tcp_keepalive = k;
-        self
-    }
-
-    #[must_use]
-    /// Set `TCP_USER_TIMEOUT` for TCP streams. See the
-    /// [`tcp_user_timeout`](Self::tcp_user_timeout) field for the trade-off.
-    pub fn tcp_user_timeout(mut self, timeout: Duration) -> Self {
-        self.tcp_user_timeout = Some(timeout);
-        self
-    }
-
-    #[must_use]
-    /// Set OS receive buffer size for TCP/IPC streams and QUIC UDP sockets.
-    pub fn recv_buffer_size(mut self, bytes: usize) -> Self {
-        self.recv_buffer_size = Some(bytes);
-        self
-    }
-
-    #[must_use]
-    /// Set OS send buffer size for TCP/IPC streams and QUIC UDP sockets.
-    pub fn send_buffer_size(mut self, bytes: usize) -> Self {
-        self.send_buffer_size = Some(bytes);
-        self
-    }
-
-    /// Set the wire-payload size at which the recv path switches to a
-    /// sized one-shot read. See the field-level docs on
-    /// [`large_message_threshold`](Self::large_message_threshold) for
-    /// the trade-offs. Pass `0` to fall back to the multi-shot path
-    /// for every frame; the threshold is treated as `usize::MAX` in
-    /// that case.
-    #[must_use]
-    pub fn large_message_threshold(mut self, n: usize) -> Self {
-        self.large_message_threshold = if n == 0 { None } else { Some(n) };
-        self
-    }
-
-    /// Disable the one-shot recv switch entirely; the multi-shot path
-    /// is used for every inbound frame regardless of size.
-    #[must_use]
-    pub fn disable_large_message_path(mut self) -> Self {
-        self.large_message_threshold = None;
-        self
-    }
-
-    /// Set the per-`FrameBuffer` arena threshold. Messages smaller than
-    /// this are copied into a contiguous arena buffer; larger ones use
-    /// zero-copy gather-write. `0` forces gather-write for every
-    /// non-empty message. Default: 4 KiB.
-    #[must_use]
-    pub fn arena_threshold(mut self, bytes: usize) -> Self {
-        self.arena_threshold = Some(bytes);
-        self
-    }
-
-    /// Restore the default per-`FrameBuffer` arena threshold.
-    #[must_use]
-    pub fn default_arena_threshold(mut self) -> Self {
-        self.arena_threshold = None;
-        self
-    }
-
-    /// Set the per-peer transmit-slot capacity in bytes. Default: 2 MiB.
-    #[must_use]
-    pub fn transmit_slot_cap(mut self, bytes: usize) -> Self {
-        self.transmit_slot_cap = Some(bytes);
         self
     }
 
@@ -920,58 +580,6 @@ impl From<Bytes> for Options {
     fn from(identity: Bytes) -> Self {
         Self::default().identity(identity)
     }
-}
-
-/// Reconnection policy applied after a lost connection on `connect()` sockets.
-/// Receiving a fatal handshake ERROR stops automatic retries under every policy.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum ReconnectPolicy {
-    /// No reconnect; the connection is dropped permanently on failure.
-    Disabled,
-    /// Retry at a constant interval.
-    Fixed(Duration),
-    /// Exponential backoff, doubling on each retry.
-    Exponential {
-        /// Initial retry interval.
-        min: Duration,
-        /// Maximum retry interval.
-        max: Duration,
-    },
-}
-
-impl Default for ReconnectPolicy {
-    fn default() -> Self {
-        // Constant 100ms matches libzmq's `ZMQ_RECONNECT_IVL` default.
-        // Users who want exponential backoff opt in via
-        // `Options::reconnect(ReconnectPolicy::Exponential { .. })`.
-        Self::Fixed(Duration::from_millis(100))
-    }
-}
-
-/// What to do when native send HWM is reached and a new message arrives.
-///
-/// Native bound no-peer round-robin sockets mute immediately. Connected
-/// no-peer round-robin sockets queue into a pre-ready pipe until `send_hwm`
-/// is reached, then apply this policy. Native OMQ has no `ZMQ_IMMEDIATE`
-/// option; `omq-libzmq` implements `ZMQ_IMMEDIATE` at the C layer.
-///
-/// `PUB`, `XPUB`, and `RADIO` honor `DropOldest` for per-peer fan-out
-/// queues. Other fan-out sockets keep the native drop-newest behavior unless
-/// `xpub_nodrop` asks them to wait.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum OnMute {
-    /// Block the sender until room is available.
-    ///
-    /// Ignored by fan-out sockets (`PUB`, `XPUB`, `RADIO`), which drop on
-    /// mute unless `xpub_nodrop` is set.
-    #[default]
-    Block,
-    /// Drop the incoming message silently.
-    DropNewest,
-    /// Drop the oldest queued message, then enqueue the new one.
-    DropOldest,
 }
 
 #[cfg(test)]

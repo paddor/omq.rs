@@ -413,6 +413,26 @@ fn read_zmtp_frame(stream: &mut std::net::TcpStream) -> Vec<u8> {
     body
 }
 
+/// Connects a raw ZMTP 3.0 SUB peer to `addr` and exchanges greetings and
+/// READY commands. Reads time out after 3 s.
+fn zmtp30_sub_handshake(addr: std::net::SocketAddr) -> std::net::TcpStream {
+    use std::io::{Read, Write};
+
+    let mut stream = std::net::TcpStream::connect(addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+
+    stream.write_all(&zmtp30_sub_greeting()).unwrap();
+    let mut peer_greeting = [0u8; 64];
+    stream.read_exact(&mut peer_greeting).unwrap();
+
+    stream.write_all(SUB_READY).unwrap();
+    let _ = read_zmtp_frame(&mut stream);
+
+    stream
+}
+
 #[tokio::test]
 async fn pub_accepts_zmtp30_message_form_subscribe() {
     // A raw ZMTP 3.0 SUB peer connects to PUB. Instead of sending a SUBSCRIBE
@@ -439,25 +459,7 @@ async fn pub_accepts_zmtp30_message_form_subscribe() {
 
     let addr = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
     std::thread::spawn(move || {
-        use std::io::Read;
-
-        let mut stream = std::net::TcpStream::connect(addr).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(3)))
-            .unwrap();
-
-        // Send ZMTP 3.0 greeting (minor = 0).
-        stream.write_all(&zmtp30_sub_greeting()).unwrap();
-
-        // Read peer greeting (64 bytes).
-        let mut peer_greeting = [0u8; 64];
-        stream.read_exact(&mut peer_greeting).unwrap();
-
-        // Send READY as SUB.
-        stream.write_all(SUB_READY).unwrap();
-
-        // Read peer's READY.
-        let _ = read_zmtp_frame(&mut stream);
+        let mut stream = zmtp30_sub_handshake(addr);
 
         // Send \x01foo as a message-form subscription (ZMTP 3.0 style).
         let sub_frame: &[u8] = &[0x00, 0x04, 0x01, b'f', b'o', b'o']; // DATA \x01foo
@@ -854,7 +856,7 @@ async fn subscription_events(
 
 #[tokio::test]
 async fn pub_subscription_admission_applies_to_zmtp30_subscribe() {
-    use std::io::{Read, Write};
+    use std::io::Write;
 
     let pub_ = Socket::new(
         SocketType::Pub,
@@ -871,17 +873,7 @@ async fn pub_subscription_admission_applies_to_zmtp30_subscribe() {
     let (cancel_tx, cancel_rx) = std::sync::mpsc::channel::<()>();
 
     std::thread::spawn(move || {
-        let mut stream = std::net::TcpStream::connect(addr).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(3)))
-            .unwrap();
-
-        stream.write_all(&zmtp30_sub_greeting()).unwrap();
-        let mut peer_greeting = [0u8; 64];
-        stream.read_exact(&mut peer_greeting).unwrap();
-
-        stream.write_all(SUB_READY).unwrap();
-        let _ = read_zmtp_frame(&mut stream);
+        let mut stream = zmtp30_sub_handshake(addr);
 
         // DATA \x01foo (rejected), then DATA \x01bar (admitted).
         stream

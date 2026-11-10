@@ -1056,9 +1056,9 @@ async fn recover_faults(congestion: DartCongestion, profile: WorkloadProfile, si
     gather.close().await.unwrap();
 }
 
-#[tokio::test]
-async fn peer_limit_is_socket_wide_and_malformed_ready_cannot_allocate_routes() {
-    let gather = Socket::new(
+/// GATHER that admits one ready DART peer across all its endpoints.
+fn single_peer_gather() -> Socket {
+    Socket::new(
         SocketType::Gather,
         Options {
             dart: DartOptions {
@@ -1067,17 +1067,35 @@ async fn peer_limit_is_socket_wide_and_malformed_ready_cannot_allocate_routes() 
             },
             ..Options::default()
         },
-    );
+    )
+}
 
+#[tokio::test]
+async fn malformed_or_mistyped_ready_cannot_allocate_routes_or_peer_slots() {
+    let gather = single_peer_gather();
+    let target = address(&gather.bind(endpoint(0)).await.unwrap());
+    let raw = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+    raw.send_to(b"\xc0\x05READYbroken", target).await.unwrap();
+    send_ready(&raw, target, SocketType::Client, None, true).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(gather.connections().await.unwrap().is_empty());
+
+    // The only peer slot is still free for a valid READY.
+    send_ready(&raw, target, SocketType::Scatter, None, true).await;
+    response(&raw).await;
+    ready(&gather, 1).await;
+
+    gather.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn peer_limit_is_socket_wide_across_endpoints() {
+    let gather = single_peer_gather();
     let first = address(&gather.bind(endpoint(0)).await.unwrap());
     let second = address(&gather.bind(endpoint(0)).await.unwrap());
     let raw = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let other = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-
-    raw.send_to(b"\xc0\x05READYbroken", first).await.unwrap();
-    send_ready(&raw, first, SocketType::Client, None, true).await;
-    tokio::time::sleep(Duration::from_millis(20)).await;
-    assert!(gather.connections().await.unwrap().is_empty());
 
     send_ready(&raw, first, SocketType::Scatter, None, true).await;
     response(&raw).await;

@@ -1,17 +1,19 @@
 //! SHM transport and pool lifetimes, including real process failures.
 #![cfg(target_os = "linux")]
 
+#[path = "shm/endpoints.rs"]
+mod endpoints;
+#[path = "shm/multipart.rs"]
+mod multipart;
+
 use std::io::Read;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use omq_tokio::{Context, Endpoint, Message, Options, Socket, SocketType, shm_payload_pool};
-
-#[path = "shm/endpoints.rs"]
-mod endpoints;
-#[path = "shm/multipart.rs"]
-mod multipart;
+use omq_tokio::{
+    Context, Endpoint, Message, Options, PayloadPool, Socket, SocketType, shm_payload_pool,
+};
 
 const DEADLINE: Duration = Duration::from_secs(10);
 
@@ -90,6 +92,35 @@ async fn receive(socket: &Socket) -> Message {
         .unwrap()
 }
 
+/// A pooled `size`-byte body filled with `value`.
+fn filled(pool: &PayloadPool, size: usize, value: u8) -> Message {
+    pool.message(size, |bytes| bytes.fill(value)).unwrap()
+}
+
+/// Sends `message` and checks that `receiver` gets the same body (last part).
+/// Returns the received message.
+async fn assert_delivered(sender: &Socket, receiver: &Socket, message: Message) -> Message {
+    sender.send(message.clone()).await.unwrap();
+    let got = receive(receiver).await;
+
+    assert_eq!(
+        got.part_slice(got.len() - 1),
+        message.part_slice(message.len() - 1)
+    );
+
+    got
+}
+
+/// A body view keeps its single lease after its message, sockets, and
+/// context are gone. Dropping the view returns the credit.
+fn assert_view_holds_the_lease(pool: &PayloadPool, view: Bytes, expected: &[u8]) {
+    assert_eq!(pool.available(), 0);
+    assert_eq!(view.as_ref(), expected);
+
+    drop(view);
+    assert_eq!(pool.available(), 1);
+}
+
 async fn wait_radio_ready(publisher: &Socket, subscribers: &[&Socket], group: &'static str) {
     let probe = Message::with_group(group, vec![0xff]);
     let fence = Message::with_group(group, vec![0xfe]);
@@ -165,7 +196,7 @@ async fn latency_polling_returns_to_signaled_reads_after_idle() {
 
         for sequence in 0..64_u8 {
             tokio::time::sleep(Duration::from_millis(2)).await;
-            let message = pool.message(256, |bytes| bytes.fill(sequence)).unwrap();
+            let message = filled(&pool, 256, sequence);
             publisher.send_group("idle", message).await.unwrap();
             let received = receive(&subscriber).await;
             assert_eq!(received.part_slice(1).unwrap(), &[sequence; 256]);
@@ -211,7 +242,7 @@ async fn connect_two_radios(
 
 /// Sends 16 pooled messages per sender. Byte 0 names the source, byte 1
 /// is the sequence, and the rest is 0xa5 filler.
-async fn send_tagged_sources(senders: &[Socket], pool: &omq_tokio::PayloadPool, size: usize) {
+async fn send_tagged_sources(senders: &[Socket], pool: &PayloadPool, size: usize) {
     for (source, sender) in senders.iter().enumerate() {
         for sequence in 0..16_u8 {
             let message = pool
@@ -390,9 +421,7 @@ async fn endpoint_swap_preserves_all_supported_families_and_sizes() {
 
         for size in [0, 16, 54, 55, 56, 62, 63, 128, 1024, 16384, 256 * 1024] {
             let message = Message::from_slice(&vec![0xa5; size]);
-            send.send(message.clone()).await.unwrap();
-            let got = receive(&recv).await;
-            assert_eq!(got.part_slice(0), message.part_slice(0));
+            let got = assert_delivered(&send, &recv, message.clone()).await;
 
             if recv_type == SocketType::Server {
                 recv.send(got).await.unwrap();
@@ -422,16 +451,11 @@ async fn abstract_namespace_preserves_endpoint_and_pooled_body_ownership() {
     sender.wait_connected(1, DEADLINE).await.unwrap();
     let pool = shm_payload_pool([(1024, 1)]).unwrap();
 
-    sender
-        .send(
-            pool.try_message(1024, |bytes| bytes.fill(7))
-                .unwrap()
-                .unwrap(),
-        )
-        .await
+    let message = pool
+        .try_message(1024, |bytes| bytes.fill(7))
+        .unwrap()
         .unwrap();
-
-    let held = receive(&receiver).await;
+    let held = assert_delivered(&sender, &receiver, message).await;
     let view = held.part_bytes(0).unwrap();
     drop(held);
 
@@ -439,15 +463,11 @@ async fn abstract_namespace_preserves_endpoint_and_pooled_body_ownership() {
     receiver.close().await.unwrap();
     drop(context);
 
-    assert_eq!(pool.available(), 0);
-    assert_eq!(view.as_ref(), &[7; 1024]);
-
-    drop(view);
-    assert_eq!(pool.available(), 1);
+    assert_view_holds_the_lease(&pool, view, &[7; 1024]);
 }
 
 #[tokio::test]
-async fn peer_identity_and_radio_group_envelopes_survive_shm() {
+async fn peer_identity_envelopes_survive_shm() {
     let context = Context::new();
     let server = context.socket(
         SocketType::Peer,
@@ -461,24 +481,20 @@ async fn peer_identity_and_radio_group_envelopes_survive_shm() {
     client.connect(address).await.unwrap();
     client.wait_connected(1, DEADLINE).await.unwrap();
 
-    let body = Bytes::from(vec![7; 1024]);
-    client
-        .send(Message::multipart([
-            Bytes::from_static(b"server"),
-            body.clone(),
-        ]))
-        .await
-        .unwrap();
-    let got = receive(&server).await;
+    let request = Message::multipart([Bytes::from_static(b"server"), Bytes::from(vec![7; 1024])]);
+    let got = assert_delivered(&client, &server, request).await;
     assert_eq!(got.part_slice(0), Some(b"client".as_slice()));
-    assert_eq!(got.part_slice(1), Some(body.as_ref()));
 
-    server.send(got).await.unwrap();
-    assert_eq!(receive(&client).await.part_slice(1), Some(body.as_ref()));
+    let reply = assert_delivered(&server, &client, got).await;
+    assert_eq!(reply.part_slice(0), Some(b"server".as_slice()));
 
     client.close().await.unwrap();
     server.close().await.unwrap();
+}
 
+#[tokio::test]
+async fn radio_group_envelopes_survive_shm() {
+    let context = Context::new();
     let radio = context.socket(
         SocketType::Radio,
         Options {
@@ -491,6 +507,7 @@ async fn peer_identity_and_radio_group_envelopes_survive_shm() {
     dish.join("group").await.unwrap();
     dish.connect(address).await.unwrap();
     dish.wait_connected(1, DEADLINE).await.unwrap();
+    let body = Bytes::from(vec![7; 1024]);
     let deadline = Instant::now() + DEADLINE;
 
     let got = loop {
@@ -607,11 +624,11 @@ async fn prime_dish(radio: &Socket, dish: &Socket) {
 
 /// Sends 128 bodies, alternating pooled (leased over SHM) and plain
 /// (copied) storage.
-async fn send_mixed_bodies(radio: &Socket, pool: &omq_tokio::PayloadPool) {
+async fn send_mixed_bodies(radio: &Socket, pool: &PayloadPool) {
     for sequence in 0..128_u8 {
         let size = mixed_size(sequence);
         let body = if sequence % 2 == 0 {
-            pool.message(size, |bytes| bytes.fill(sequence)).unwrap()
+            filled(pool, size, sequence)
         } else {
             Message::from_slice(&vec![sequence; size])
         };
@@ -656,25 +673,13 @@ async fn radio_close_remains_reachable_while_lane_waits_for_a_borrowed_lease() {
     dish.join("group").await.unwrap();
     dish.connect(address).await.unwrap();
     dish.wait_connected(1, DEADLINE).await.unwrap();
-    let deadline = Instant::now() + DEADLINE;
-
-    loop {
-        radio.send_group("group", "ready").await.unwrap();
-        if tokio::time::timeout(Duration::from_millis(20), dish.recv())
-            .await
-            .is_ok()
-        {
-            break;
-        }
-
-        assert!(Instant::now() < deadline);
-    }
+    prime_dish(&radio, &dish).await;
 
     let pool = shm_payload_pool([(128, 1)]).unwrap();
     radio
         .send(Message::with_prefix(
             Bytes::from_static(b"group"),
-            pool.message(128, |bytes| bytes.fill(7)).unwrap(),
+            filled(&pool, 128, 7),
         ))
         .await
         .unwrap();
@@ -712,12 +717,7 @@ async fn held_views_outlive_contexts_and_credit_wait_keeps_close_reachable() {
     sender.connect(address).await.unwrap();
 
     let pool = shm_payload_pool([(128, 1)]).unwrap();
-    sender
-        .send(pool.message(128, |bytes| bytes.fill(7)).unwrap())
-        .await
-        .unwrap();
-
-    let held = receive(&receiver).await;
+    let held = assert_delivered(&sender, &receiver, filled(&pool, 128, 7)).await;
     let view = held.part_bytes(0).unwrap();
     drop(held);
     assert_eq!(pool.available(), 0);
@@ -733,11 +733,7 @@ async fn held_views_outlive_contexts_and_credit_wait_keeps_close_reachable() {
     receiver.close().await.unwrap();
     drop(context);
 
-    assert_eq!(view.as_ref(), &[7; 128]);
-    assert_eq!(pool.available(), 0);
-
-    drop(view);
-    assert_eq!(pool.available(), 1);
+    assert_view_holds_the_lease(&pool, view, &[7; 128]);
 }
 
 /// RADIO messages need a group prefix. CHANNEL messages are sent as is.
@@ -795,10 +791,7 @@ async fn released_leases_resume_staged_messages_without_new_io() {
         wait_until_delivering(&sender, &receiver, sender_type).await;
 
         let pool = shm_payload_pool([(128, 4)]).unwrap();
-        sender
-            .send(envelope(pool.message(128, |bytes| bytes.fill(0)).unwrap()))
-            .await
-            .unwrap();
+        sender.send(envelope(filled(&pool, 128, 0))).await.unwrap();
 
         let mut held = loop {
             let message = receive(&receiver).await;
@@ -811,9 +804,7 @@ async fn released_leases_resume_staged_messages_without_new_io() {
         // with no further send to kick the IO path.
         for value in 1..=16_u8 {
             sender
-                .send(envelope(
-                    pool.message(128, |bytes| bytes.fill(value)).unwrap(),
-                ))
+                .send(envelope(filled(&pool, 128, value)))
                 .await
                 .unwrap();
             // The sole lease is borrowed, so staging cannot produce bytes.
@@ -844,7 +835,7 @@ async fn many_pool_regions_preserve_order_and_retained_views() {
     let messages: Vec<_> = pools
         .iter()
         .enumerate()
-        .map(|(index, pool)| pool.message(SIZE, |bytes| bytes.fill(index as u8)).unwrap())
+        .map(|(index, pool)| filled(pool, SIZE, index as u8))
         .collect();
 
     for message in &messages {
@@ -858,9 +849,7 @@ async fn many_pool_regions_preserve_order_and_retained_views() {
         held.push(message);
     }
 
-    sender.send(messages[0].clone()).await.unwrap();
-    let again = receive(&receiver).await;
-    assert_eq!(again.part_slice(0).unwrap(), &[0; SIZE]);
+    let again = assert_delivered(&sender, &receiver, messages[0].clone()).await;
 
     let view = held[0].part_bytes(0).unwrap();
     drop(messages);
@@ -879,27 +868,48 @@ async fn many_pool_regions_preserve_order_and_retained_views() {
     assert!(pools.iter().all(|pool| pool.available() == 1));
 }
 
-#[tokio::test]
-async fn connect_before_bind_rebind_and_mixed_transport() {
-    let context = Context::new();
-    let sender = context.socket(
+/// SCATTER that retries its connection every 10 ms.
+fn reconnecting_scatter(context: &Context) -> Socket {
+    context.socket(
         SocketType::Scatter,
         options().reconnect(omq_tokio::ReconnectPolicy::Fixed(Duration::from_millis(10))),
-    );
+    )
+}
+
+#[tokio::test]
+async fn connect_before_bind_delivers_the_queued_message() {
+    let context = Context::new();
+    let sender = reconnecting_scatter(&context);
     let address = endpoint();
     sender.connect(address.clone()).await.unwrap();
     sender.send(Message::from_slice(&[7; 1024])).await.unwrap();
 
-    let first = context.socket(SocketType::Gather, options());
-    first.bind(address.clone()).await.unwrap();
+    let gather = context.socket(SocketType::Gather, options());
+    gather.bind(address).await.unwrap();
+
     assert_eq!(
-        receive(&first).await.part_slice(0),
+        receive(&gather).await.part_slice(0),
         Some([7; 1024].as_slice())
     );
+
+    sender.close().await.unwrap();
+    gather.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn sender_reconnects_after_rebind_beside_a_tcp_binding() {
+    let context = Context::new();
+    let sender = reconnecting_scatter(&context);
+    let address = endpoint();
+    let first = context.socket(SocketType::Gather, options());
+    first.bind(address.clone()).await.unwrap();
+    sender.connect(address.clone()).await.unwrap();
+
+    assert_delivered(&sender, &first, Message::from_slice(&[7; 1024])).await;
     first.close().await.unwrap();
 
     let next = context.socket(SocketType::Gather, options());
-    next.bind(address.clone()).await.unwrap();
+    next.bind(address).await.unwrap();
     let tcp = next.bind("tcp://127.0.0.1:0").await.unwrap();
     sender.wait_connected(1, DEADLINE).await.unwrap();
 
@@ -910,11 +920,7 @@ async fn connect_before_bind_rebind_and_mixed_transport() {
     ordinary.send(Message::from("tcp")).await.unwrap();
     assert_eq!(receive(&next).await, Message::from("tcp"));
 
-    sender.send(Message::from_slice(&[8; 1024])).await.unwrap();
-    assert_eq!(
-        receive(&next).await.part_slice(0),
-        Some([8; 1024].as_slice())
-    );
+    assert_delivered(&sender, &next, Message::from_slice(&[8; 1024])).await;
 
     ordinary.close().await.unwrap();
     sender.close().await.unwrap();
@@ -943,11 +949,7 @@ async fn bind_replaces_only_a_stale_socket_file() {
 
     let scatter = context.socket(SocketType::Scatter, options());
     scatter.connect(address).await.unwrap();
-    scatter.send(Message::from_slice(&[9; 1024])).await.unwrap();
-    assert_eq!(
-        receive(&gather).await.part_slice(0),
-        Some([9; 1024].as_slice())
-    );
+    assert_delivered(&scatter, &gather, Message::from_slice(&[9; 1024])).await;
 
     scatter.close().await.unwrap();
     gather.close().await.unwrap();
@@ -1008,9 +1010,7 @@ fn shm_process_child() {
         socket.recv_timeout(DEADLINE).unwrap()
     } else {
         let pool = shm_payload_pool([(128, 1)]).unwrap();
-        socket
-            .send(pool.message(128, |bytes| bytes.fill(0xa5)).unwrap())
-            .unwrap();
+        socket.send(filled(&pool, 128, 0xa5)).unwrap();
 
         socket.recv_timeout(DEADLINE).unwrap()
     };
@@ -1032,9 +1032,7 @@ fn reader_process_death_reclaims_shared_pool_and_accepts_reconnection() {
 
     for value in [7, 8] {
         let mut child = ChildProcess::spawn("reader", &address);
-        sender
-            .send(pool.message(128, |bytes| bytes.fill(value)).unwrap())
-            .unwrap();
+        sender.send(filled(&pool, 128, value)).unwrap();
         assert_eq!(
             sender.recv_timeout(DEADLINE).unwrap(),
             Message::from("held")

@@ -266,7 +266,7 @@ async fn explicit_buffers_work_over_inproc_and_tcp() {
 }
 
 #[test]
-fn explicit_buffers_work_with_blocking_sockets_and_outlive_them() {
+fn blocking_payload_pools_follow_hwm_and_freeze_at_bind() {
     let context = omq_tokio::Context::new();
     let pull = context.blocking_socket(SocketType::Pull, Options::default().recv_hwm(4));
     let push = context.blocking_socket(SocketType::Push, Options::default().send_hwm(8192));
@@ -285,11 +285,26 @@ fn explicit_buffers_work_with_blocking_sockets_and_outlive_them() {
         vec![(2048, 8192)]
     );
 
-    let bound = pull.bind(test_support::tcp_loopback(0)).unwrap();
+    pull.bind(test_support::tcp_loopback(0)).unwrap();
     assert!(matches!(
         pull.init_payload_pools(),
         Err(omq_tokio::Error::Config(_))
     ));
+
+    push.close().unwrap();
+    pull.close().unwrap();
+}
+
+#[test]
+fn explicit_buffers_work_with_blocking_sockets_and_outlive_them() {
+    let context = omq_tokio::Context::new();
+    let pull = context.blocking_socket(SocketType::Pull, Options::default().recv_hwm(4));
+    let push = context.blocking_socket(SocketType::Push, Options::default().send_hwm(8192));
+
+    // Explicit buffers travel beside initialized socket pools.
+    pull.init_payload_pools().unwrap();
+    push.init_payload_pools().unwrap();
+    let bound = pull.bind(test_support::tcp_loopback(0)).unwrap();
     push.connect(bound).unwrap();
 
     let pool = PayloadPool::new([(128, 1)]).unwrap();

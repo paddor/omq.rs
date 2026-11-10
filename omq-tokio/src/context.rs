@@ -63,6 +63,7 @@ impl ContextConfig {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(1);
+
         Self { io_threads }
     }
 
@@ -156,12 +157,15 @@ impl std::fmt::Debug for ContextCore {
 }
 
 static NEXT_CONTEXT_KEY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 static CONTEXT_KEY_PREFIX: LazyLock<u64> = LazyLock::new(|| {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos() as u64);
+
     nanos ^ (u64::from(std::process::id()) << 32)
 });
+
 static CONTEXT_REGISTRY: LazyLock<Mutex<FxHashMap<u128, Weak<ContextCore>>>> =
     LazyLock::new(|| Mutex::new(FxHashMap::default()));
 
@@ -194,6 +198,7 @@ impl ContextCore {
             network: OnceLock::new(),
             inproc_registry: Arc::new(crate::transport::inproc::InprocRegistry::new()),
         });
+
         register_context_core(&core);
         core
     }
@@ -203,21 +208,27 @@ impl ContextCore {
             .network_config
             .lock()
             .expect("context network settings");
+
         if config.1 {
             return;
         }
+
         config.1 = true;
         if !config.0.enabled() {
             return;
         }
+
         let RuntimeOwnership::Owned { pool } = &self.ownership else {
             unreachable!()
         };
+
         let allocator = crate::network_limit::Allocator::new(config.0, pool.threads.len());
         let lanes = Arc::new(allocator.lanes());
+
         for (thread, lane) in pool.threads.iter().zip(lanes.iter()) {
             thread.handle.spawn(lane.clone().run(pool.cancel.clone()));
         }
+
         pool.primary_handle()
             .spawn(allocator.run(pool.cancel.clone()));
         self.network
@@ -272,21 +283,25 @@ impl Context {
                 "network limits require a live context owned by this process".into(),
             ));
         }
+
         let mut config = self
             .inner
             .network_config
             .lock()
             .expect("context network settings");
+
         if config.1 {
             return Err(crate::Error::Config(
                 "network limits must be configured before creating sockets".into(),
             ));
         }
+
         if limits.enabled() && self.io_threads() == 0 {
             return Err(crate::Error::Config(
                 "network limits require an OMQ-owned runtime".into(),
             ));
         }
+
         config.0 = limits;
         Ok(())
     }
@@ -297,12 +312,14 @@ impl Context {
             self.inner.is_owner_process(),
             "network_rate_limits() called on a context inherited across fork"
         );
+
         self.inner
             .network_config
             .lock()
             .expect("context network settings")
             .0
     }
+
     #[cfg(all(test, feature = "quic"))]
     pub(crate) fn io_pool_handle_for_test(&self) -> IoPoolHandle {
         self.inner.io_pool_handle()
@@ -352,6 +369,7 @@ impl Context {
             !name.is_empty() && !name.contains('\0'),
             "context name must be non-empty and contain no NUL byte"
         );
+
         Self::with_config_inner(config, Some(name))
     }
 
@@ -359,6 +377,7 @@ impl Context {
         if config.io_threads == 0 {
             return Self::current();
         }
+
         let io_threads = config.io_threads;
         let pool = IoThreadPool::new_with_context_name(io_threads, context_name);
         Self {
@@ -396,14 +415,18 @@ impl Context {
         let core = {
             let mut registry = CONTEXT_REGISTRY.lock().ok()?;
             let core = registry.get(&share_key).and_then(Weak::upgrade);
+
             if core.is_none() {
                 registry.remove(&share_key);
             }
+
             core?
         };
+
         if !core.is_owner_process() || core.terminated.load(Ordering::Acquire) {
             return None;
         }
+
         Some(Self { inner: core })
     }
 
@@ -417,6 +440,7 @@ impl Context {
         if !core.is_owner_process() || core.terminated.load(Ordering::Acquire) {
             return None;
         }
+
         Some(Self { inner: core })
     }
 
@@ -438,6 +462,7 @@ impl Context {
             self.io_threads() > 0,
             "blocking_socket() requires at least one owned IO thread"
         );
+
         crate::blocking::Socket::new(self.socket(socket_type, options), self.clone())
     }
 
@@ -471,6 +496,7 @@ impl Context {
             recv_sink_config,
             compatibility: crate::routing::SendCompatibility::Libzmq,
         };
+
         self.new_socket("Context::socket_for_libzmq()", socket_type, options, build)
     }
 
@@ -485,6 +511,7 @@ impl Context {
             self.io_threads() > 0,
             "blocking_socket_for_libzmq() requires at least one owned IO thread"
         );
+
         crate::blocking::Socket::new(
             self.socket_for_libzmq(socket_type, options, None),
             self.clone(),
@@ -519,6 +546,7 @@ impl Context {
             io_pool: &self.inner.io_pool_handle(),
             inproc_registry: self.inner.inproc_registry.clone(),
         };
+
         Socket::new_in(socket_type, options, build, placement)
     }
 
@@ -543,6 +571,7 @@ impl Context {
                  (created with Context::current())"
             );
         };
+
         self.assert_usable("Context::block_on()");
         let guard = pool.primary_job_tx.lock().expect("job_tx poisoned");
         let job_tx = guard
@@ -555,6 +584,7 @@ impl Context {
         });
         job_tx.send(fut).expect("omq: context runtime exited");
         drop(guard);
+
         result_rx
             .recv()
             .expect("omq: context runtime exited unexpectedly")
@@ -591,10 +621,12 @@ impl Context {
         if self.inner.terminated.swap(true, Ordering::AcqRel) {
             return;
         }
+
         unregister_context_core(self.inner.share_key);
         if !self.inner.is_owner_process() {
             return;
         }
+
         if let RuntimeOwnership::Owned { ref pool } = self.inner.ownership {
             pool.shutdown();
         }
@@ -613,6 +645,7 @@ impl Drop for ContextCore {
         if !self.is_owner_process() {
             return;
         }
+
         if let RuntimeOwnership::Owned { ref pool } = self.ownership {
             pool.shutdown();
         }

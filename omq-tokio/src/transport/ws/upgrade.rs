@@ -38,13 +38,16 @@ impl ServerPolicy {
         if request.path != self.path {
             return Err(failed("WebSocket resource mismatch"));
         }
+
         if let Some(origin) = &request.origin {
             let origin = ws_handshake::normalize_ws_origin(origin)
                 .map_err(|_| failed("invalid WebSocket Origin"))?;
+
             if !self.allowed_origins.contains(&origin) {
                 return Err(failed("WebSocket Origin not allowed"));
             }
         }
+
         if request
             .subprotocols
             .iter()
@@ -52,6 +55,7 @@ impl ServerPolicy {
         {
             return Ok(self.protocol);
         }
+
         // OMQ's existing browser profile still runs configured NULL/PLAIN
         // authentication. It is not RFC 45's identity-first bare profile.
         if matches!(self.protocol, "ZWS2.0/NULL" | "ZWS2.0/PLAIN")
@@ -59,6 +63,7 @@ impl ServerPolicy {
         {
             return Ok("ZWS2.0");
         }
+
         Err(failed(
             "no offered WebSocket profile matches configured mechanism",
         ))
@@ -82,12 +87,15 @@ pub(super) fn mechanism_subprotocol(mechanism: &MechanismSetup) -> &'static str 
 async fn read_head(stream: &mut (impl AsyncRead + Unpin)) -> Result<(Bytes, Bytes)> {
     let mut buffer = vec![0; MAX_HTTP_BYTES];
     let mut total: usize = 0;
+
     loop {
         let start = total.saturating_sub(3);
         let read = stream.read(&mut buffer[total..]).await.map_err(Error::Io)?;
+
         if read == 0 {
             return Err(failed("connection closed during HTTP upgrade"));
         }
+
         total += read;
         if let Some(end) = buffer[start..total]
             .windows(4)
@@ -97,8 +105,10 @@ async fn read_head(stream: &mut (impl AsyncRead + Unpin)) -> Result<(Bytes, Byte
             buffer.truncate(total);
             let mut head = Bytes::from(buffer);
             let leftover = head.split_off(end);
+
             return Ok((head, leftover));
         }
+
         if total == MAX_HTTP_BYTES {
             return Err(failed("HTTP upgrade head too large"));
         }
@@ -118,6 +128,7 @@ pub(super) async fn accept(
     );
     stream.write_all(&response).await.map_err(Error::Io)?;
     stream.flush().await.map_err(Error::Io)?;
+
     Ok(leftover)
 }
 
@@ -129,15 +140,19 @@ pub(super) async fn connect(
 ) -> Result<Bytes> {
     let key = ws_handshake::generate_ws_key();
     let request = ws_handshake::format_client_upgrade(host, path, &key, protocol);
+
     if request.len() > MAX_HTTP_BYTES {
         return Err(failed("HTTP upgrade head too large"));
     }
+
     stream.write_all(&request).await.map_err(Error::Io)?;
     stream.flush().await.map_err(Error::Io)?;
     let (head, leftover) = read_head(stream).await?;
+
     if ws_handshake::parse_server_upgrade(&head, &key)? != protocol {
         return Err(failed("server selected an unoffered WebSocket profile"));
     }
+
     Ok(leftover)
 }
 

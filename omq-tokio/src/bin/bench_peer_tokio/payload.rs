@@ -16,6 +16,7 @@ fn json_dict_samples() -> Vec<Bytes> {
             .flat_map(|size| (0..32).map(move |index| payload_corpus::generate(size, 1, index)))
             .collect();
     }
+
     // Bias toward common message sizes (512B, 1 KiB) with a few at other sizes.
     let sample_sizes: &[(usize, usize)] = &[
         (64, 2),
@@ -26,12 +27,14 @@ fn json_dict_samples() -> Vec<Bytes> {
         (2048, 4),
         (4096, 4),
     ];
+
     let mut samples = Vec::new();
     for &(size, count) in sample_sizes {
         for i in 1..=count {
             samples.push(json_payload_seeded(size, i as u32));
         }
     }
+
     samples
 }
 
@@ -43,6 +46,7 @@ pub(super) fn train_lz4_json_dict(capacity: usize) -> Vec<u8> {
     for payload in json_dict_samples() {
         trainer.add_sample(&payload);
     }
+
     trainer.train()
 }
 
@@ -58,15 +62,19 @@ pub(super) fn train_zstd_json_dict(capacity: usize) -> Vec<u8> {
 pub(super) fn wire_size(ep: &Endpoint, size: usize) -> usize {
     use omq_proto::proto::transform::MessageEncoder;
     let options = bench_options(size);
+
     if let Some(corpus) = payload_corpus::from_env(size) {
         return corpus_wire_size(ep, &options, &corpus);
     }
+
     let Ok(Some((mut enc, _dec))) = MessageEncoder::for_endpoint(ep, &options) else {
         return size;
     };
+
     let payload = json_payload_random(size);
     let msg = Message::single(payload.clone());
     let frames = enc.encode(&msg).unwrap();
+
     frames.last().map_or(size, Message::byte_len)
 }
 
@@ -77,17 +85,21 @@ fn corpus_wire_size(ep: &Endpoint, options: &Options, corpus: &[Message]) -> usi
         .map(|(encoder, _)| encoder);
     let mut bytes = 0usize;
     let mut offset = 0;
+
     while offset < corpus.len() {
         let (count, mut wire) = encode_corpus_prefix(&mut encoder, &corpus[offset..]);
         MessageEncoder::take_leading_dict_shipment(&mut wire);
+
         for message in wire {
             for index in 0..message.len() {
                 let part = message.part_slice(index).unwrap();
                 bytes += part.len() + if part.len() > 255 { 9 } else { 2 };
             }
         }
+
         offset += count;
     }
+
     bytes.div_ceil(corpus.len())
 }
 
@@ -102,6 +114,7 @@ fn encode_corpus_prefix(
         let count = (encoder.arena_capacity() / size)
             .min(omq_proto::proto::transform::arena::MAX_ARENA_MESSAGES)
             .min(corpus.len());
+
         if count > 1 {
             let references: Vec<_> = corpus[..count].iter().collect();
             return (
@@ -110,9 +123,11 @@ fn encode_corpus_prefix(
             );
         }
     }
+
     let wire = encoder.as_mut().map_or_else(
         || smallvec::smallvec![corpus[0].clone()],
         |encoder| encoder.encode(&corpus[0]).expect("encode corpus"),
     );
+
     (1, wire)
 }

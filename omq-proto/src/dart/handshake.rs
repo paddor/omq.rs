@@ -51,14 +51,17 @@ impl Handshake {
     pub const fn local(&self) -> u64 {
         self.local
     }
+
     /// Return the remote receiver session ID, or zero before WELCOME.
     pub const fn remote(&self) -> u64 {
         self.remote
     }
+
     /// Whether the remote receiver session has been confirmed.
     pub const fn confirmed(&self) -> bool {
         self.confirmed
     }
+
     /// Return the next handshake phase awaiting transmission.
     pub const fn pending(&self) -> Option<Phase> {
         self.pending
@@ -88,6 +91,7 @@ impl Handshake {
             }
             _ => return false,
         }
+
         true
     }
 

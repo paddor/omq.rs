@@ -10,8 +10,10 @@ use crate::{Error, Result};
 
 /// Maximum HTTP upgrade head size including its terminator.
 pub const MAX_HTTP_BYTES: usize = 4096;
+
 /// Maximum header fields in one HTTP upgrade head.
 pub const MAX_HTTP_FIELDS: usize = 64;
+
 const MAX_SUBPROTOCOLS: usize = 64;
 
 fn invalid(reason: &str) -> Error {
@@ -63,24 +65,29 @@ impl<'a> Head<'a> {
         if bytes.len() > MAX_HTTP_BYTES || !bytes.ends_with(b"\r\n\r\n") {
             return Err(invalid("oversized or incomplete HTTP upgrade head"));
         }
+
         let text = std::str::from_utf8(&bytes[..bytes.len() - 4])
             .map_err(|_| invalid("invalid UTF-8 in HTTP upgrade"))?;
         let mut lines = text.split("\r\n");
         let line = lines.next().ok_or_else(|| invalid("empty HTTP upgrade"))?;
+
         if line
             .bytes()
             .any(|byte| byte.is_ascii_control() && byte != b'\t')
         {
             return Err(invalid("invalid HTTP start line"));
         }
+
         let mut fields = Vec::new();
         for line in lines {
             if fields.len() == MAX_HTTP_FIELDS {
                 return Err(invalid("too many HTTP fields"));
             }
+
             let (name, value) = line
                 .split_once(':')
                 .ok_or_else(|| invalid("HTTP field without colon"))?;
+
             if !token(name)
                 || value
                     .bytes()
@@ -88,8 +95,10 @@ impl<'a> Head<'a> {
             {
                 return Err(invalid("invalid HTTP field syntax"));
             }
+
             fields.push((name, ows(value)));
         }
+
         let head = Self { line, fields };
         if head.single("Transfer-Encoding")?.is_some()
             || head
@@ -98,6 +107,7 @@ impl<'a> Head<'a> {
         {
             return Err(invalid("HTTP upgrade must not have a body"));
         }
+
         Ok(head)
     }
 
@@ -108,11 +118,13 @@ impl<'a> Head<'a> {
             .filter(|(field, _)| field.eq_ignore_ascii_case(name))
             .map(|(_, value)| *value);
         let value = values.next();
+
         if values.next().is_some() {
             return Err(Error::HandshakeFailed(format!(
                 "duplicate HTTP field: {name}"
             )));
         }
+
         Ok(value)
     }
 
@@ -135,12 +147,15 @@ impl<'a> Head<'a> {
                         && value
                             .split_once('/')
                             .is_some_and(|(name, version)| token(name) && token(version)));
+
                 if !valid {
                     return Err(invalid("invalid HTTP list field"));
                 }
+
                 found |= value.eq_ignore_ascii_case(expected);
             }
         }
+
         Ok(found)
     }
 
@@ -158,12 +173,15 @@ impl<'a> Head<'a> {
                 {
                     return Err(invalid("invalid, duplicate, or excessive WS subprotocols"));
                 }
+
                 values.push(value.to_string());
             }
         }
+
         if values.is_empty() {
             return Err(invalid("missing ZWS subprotocol"));
         }
+
         Ok(values)
     }
 }
@@ -188,9 +206,11 @@ pub fn parse_client_upgrade(request: &[u8]) -> Result<UpgradeRequest> {
     let head = Head::parse(request)?;
     let mut parts = head.line.split(' ');
     let (method, path, version) = (parts.next(), parts.next(), parts.next());
+
     if method != Some("GET") || version != Some("HTTP/1.1") || parts.next().is_some() {
         return Err(invalid("expected GET request with HTTP/1.1"));
     }
+
     let path = path.unwrap_or_default();
     if !path.starts_with('/')
         || path
@@ -199,20 +219,25 @@ pub fn parse_client_upgrade(request: &[u8]) -> Result<UpgradeRequest> {
     {
         return Err(invalid("invalid WS resource target"));
     }
+
     let host = head.required("Host")?;
     crate::proto::web_address::authority(host).map_err(|_| invalid("invalid HTTP Host"))?;
+
     if !head.contains_token("Upgrade", "websocket")?
         || !head.contains_token("Connection", "Upgrade")?
     {
         return Err(invalid("missing WebSocket upgrade headers"));
     }
+
     if head.required("Sec-WebSocket-Version")? != "13" {
         return Err(invalid("unsupported WebSocket version"));
     }
+
     let key = head.required("Sec-WebSocket-Key")?;
     if !valid_ws_key(key) {
         return Err(invalid("invalid Sec-WebSocket-Key"));
     }
+
     Ok(UpgradeRequest {
         key: key.to_string(),
         subprotocols: head.protocols()?,
@@ -229,20 +254,25 @@ pub fn parse_server_upgrade(response: &[u8], expected_key: &str) -> Result<Strin
     if !head.line.starts_with("HTTP/1.1 101 ") {
         return Err(invalid("expected HTTP/1.1 101 response"));
     }
+
     if !head.required("Upgrade")?.eq_ignore_ascii_case("websocket")
         || !head.contains_token("Connection", "Upgrade")?
     {
         return Err(invalid("missing WebSocket upgrade headers"));
     }
+
     if !validate_ws_accept(expected_key, head.required("Sec-WebSocket-Accept")?) {
         return Err(invalid("Sec-WebSocket-Accept mismatch"));
     }
+
     if head.single("Sec-WebSocket-Extensions")?.is_some() {
         return Err(invalid("unsolicited WebSocket extension"));
     }
+
     let protocol = head.required("Sec-WebSocket-Protocol")?;
     if !subprotocol(protocol) {
         return Err(invalid("invalid WebSocket subprotocol selection"));
     }
+
     Ok(protocol.to_string())
 }

@@ -6,9 +6,6 @@
 //! `close()`. Verifies the cancellation/cleanup path never panics,
 //! leaks FDs, or leaks memory.
 
-#[global_allocator]
-static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
-
 mod soak_common;
 
 use std::time::{Duration, Instant};
@@ -17,6 +14,9 @@ use omq_tokio::options::ReconnectPolicy;
 use omq_tokio::{Message, Options, Socket, SocketType};
 use rand::RngExt;
 use rand::rngs::StdRng;
+
+#[global_allocator]
+static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
 
 const PAIRS: &[(SocketType, SocketType)] = &[
     (SocketType::Push, SocketType::Pull),
@@ -129,6 +129,7 @@ async fn drop_after_connect_inproc(rng: &mut StdRng, id: u64) {
     if send_type == SocketType::Sub {
         client.subscribe("").await.unwrap();
     }
+
     client.connect(ep).await.unwrap();
 }
 
@@ -142,6 +143,7 @@ async fn drop_after_connect_tcp(rng: &mut StdRng) {
     if send_type == SocketType::Sub {
         client.subscribe("").await.unwrap();
     }
+
     client.connect(ep).await.unwrap();
     // Drop both while TCP handshake may still be in progress.
 }
@@ -157,6 +159,7 @@ async fn drop_server_while_connected(rng: &mut StdRng) {
     if send_type == SocketType::Sub {
         client.subscribe("").await.unwrap();
     }
+
     client.connect(ep).await.unwrap();
     tokio::time::sleep(Duration::from_millis(30)).await;
 
@@ -211,6 +214,7 @@ async fn drop_both_simultaneously(rng: &mut StdRng, id: u64) {
     if send_type == SocketType::Sub {
         client.subscribe("").await.unwrap();
     }
+
     client.connect(ep).await.unwrap();
     tokio::time::sleep(Duration::from_millis(10)).await;
 
@@ -237,6 +241,7 @@ async fn rapid_create_drop_burst(rng: &mut StdRng, id: &mut u64) {
         if send_type == SocketType::Sub {
             client.subscribe("").await.unwrap();
         }
+
         client.connect(ep).await.unwrap();
 
         sockets.push(server);

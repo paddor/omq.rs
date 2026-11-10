@@ -81,6 +81,7 @@ impl SocketState {
         if !configured.is_empty() {
             return configured.clone();
         }
+
         self.identity
             .get_or_init(|| {
                 let mut value = [0; 17];
@@ -117,6 +118,7 @@ impl DartCapabilities {
                 _ => None,
             }
         }
+
         Self {
             max_gso_segments: self.max_gso_segments.min(other.max_gso_segments),
             max_gro_segments: self.max_gro_segments.min(other.max_gro_segments),

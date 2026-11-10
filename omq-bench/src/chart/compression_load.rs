@@ -28,6 +28,7 @@ struct Point {
 
 /// Size index against wire ratio (primary) or sender CPU% (secondary).
 type Coord = Cartesian2d<RangedCoordf64, RangedCoordf64>;
+
 type DualChart<'a, 'b> = DualCoordChartContext<'a, SVGBackend<'b>, Coord, Coord>;
 
 /// Send rate of a paced loopback run.
@@ -44,6 +45,7 @@ pub(crate) fn generate(chart: &CompressionChart) {
     if cells.is_empty() {
         return;
     }
+
     assert_complete(chart, &cells);
 
     let dir = out_dir().join("pushpull");
@@ -142,6 +144,7 @@ fn draw_rate_row(
         .iter()
         .map(|series| (series, points(chart, rate, series, cells)))
         .collect();
+
     let (cpu_max, cpu_ticks) = nice_axis(
         lines
             .iter()
@@ -169,6 +172,7 @@ fn draw_rate_row(
         ratio_ticks,
         (cpu_max, cpu_ticks),
     );
+
     for (series, points) in &lines {
         draw_lines(&mut chart_area, series.color, points);
     }
@@ -187,6 +191,7 @@ fn configure_axes(
             format!("{v:.1}x")
         }
     };
+
     draw_size_mesh(chart_area, sizes, Some(ratio_ticks + 1), &ratio_label).unwrap();
 
     // Low rates use a few percent of a core, so small axes get a decimal.
@@ -210,6 +215,7 @@ fn draw_lines(chart_area: &mut DualChart<'_, '_>, color: RGBColor, points: &[Poi
             color.stroke_width(2),
         ))
         .unwrap();
+
     chart_area
         .draw_series(points.iter().map(|p| {
             let style = if p.reached {
@@ -217,9 +223,11 @@ fn draw_lines(chart_area: &mut DualChart<'_, '_>, color: RGBColor, points: &[Poi
             } else {
                 color.stroke_width(1)
             };
+
             Circle::new((p.x, p.ratio), 3, style)
         }))
         .unwrap();
+
     chart_area
         .draw_secondary_series(DashedLineSeries::new(
             points.iter().map(|p| (p.x, p.cpu_pct)),
@@ -231,23 +239,4 @@ fn draw_lines(chart_area: &mut DualChart<'_, '_>, color: RGBColor, points: &[Poi
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fixed_load_panels_take_paced_loopback_rows() {
-        let chart = &super::super::compression::FIXED_LOAD;
-        let mut row: PushpullLz4Row = serde_json::from_value(serde_json::json!({
-            "run_id": "test", "pattern": "pushpull_lz4", "transport": "lz4+tcp",
-            "peers": 1, "msg_size": 64, "wire_bytes": 70,
-            "send_rate": 10000, "received_wire_bytes": 1000
-        }))
-        .unwrap();
-        assert_eq!(send_rate(chart, &row), Some(10_000));
-        row.send_rate = Some(500);
-        assert_eq!(send_rate(chart, &row), None);
-        row.send_rate = Some(10_000);
-        row.received_wire_bytes = None;
-        assert_eq!(send_rate(chart, &row), None);
-    }
-}
+mod tests;

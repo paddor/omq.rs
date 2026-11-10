@@ -12,6 +12,9 @@ use tokio::io::unix::AsyncFd;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::UnixStream;
 
+const SIGNAL_POLL_LIMIT: usize = 4;
+const CONTROL_READ_BYTES: usize = 64;
+
 pub(crate) type ShmState = Arc<Mutex<omq_shm::Connection>>;
 
 // AsyncFd retains the File; callers never replace it while registered.
@@ -46,6 +49,7 @@ impl ShmStream {
         )?;
         let send = connection.preface();
         let writer_signal = register_signal(connection.carrier_writer_signal())?;
+
         Ok(Self {
             stream,
             state: Arc::new(Mutex::new(connection)),
@@ -65,6 +69,7 @@ impl ShmStream {
             .reader_signal
             .map(|signal| register_signal(signal.into_inner()))
             .transpose()?;
+
         Ok(self)
     }
 
@@ -78,11 +83,14 @@ impl ShmStream {
             let written = std::task::ready!(
                 self.poll_send(cx, &[io::IoSlice::new(&self.send[self.sent..])])
             )?;
+
             if written == 0 {
                 return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
             }
+
             self.sent += written;
         }
+
         Poll::Ready(Ok(()))
     }
 
@@ -96,18 +104,22 @@ impl ShmStream {
             if self.conn().has_pending_descriptors() {
                 std::task::ready!(self.poll_send(cx, &[io::IoSlice::new(&[0])]))?;
             }
+
             match self.conn().try_write_carrier(bytes) {
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
                 result => return Poll::Ready(result),
             }
+
             self.conn().arm_carrier_write();
             // The arm/recheck pair closes the space and registration wake race.
             match self.conn().try_write_carrier(bytes) {
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
                 result => return Poll::Ready(result),
             }
+
             std::task::ready!(poll_signal(&self.writer_signal, cx))?;
         }
+
         cx.waker().wake_by_ref();
         Poll::Pending
     }
@@ -122,6 +134,7 @@ impl ShmStream {
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
                 result => return Poll::Ready(result),
             }
+
             // The stream carries only FD registration markers after its preface.
             // Keep its readiness registered for both registration and peer EOF.
             match self.poll_registration(cx) {
@@ -131,14 +144,17 @@ impl ShmStream {
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                 Poll::Pending => {}
             }
+
             if self.conn().arm_carrier_read()? {
                 continue;
             }
+
             std::task::ready!(poll_signal(
                 self.reader_signal.as_ref().expect("carrier reader signal"),
                 cx
             ))?;
         }
+
         cx.waker().wake_by_ref();
         Poll::Pending
     }
@@ -149,9 +165,11 @@ impl ShmStream {
         let received = self.stream.try_io(Interest::READABLE, || {
             self.conn().try_read(&self.stream, &mut control)
         })?;
+
         if control[..received].iter().any(|&byte| byte != 0) {
             return Poll::Ready(Err(io::ErrorKind::InvalidData.into()));
         }
+
         Poll::Ready(Ok(received))
     }
 
@@ -189,6 +207,7 @@ impl ShmStream {
         let stream = &self.stream;
         let state = &self.state;
         let unread = &mut self.receive[self.received..];
+
         loop {
             std::task::ready!(stream.poll_read_ready(cx))?;
             match stream.try_io(Interest::READABLE, || {
@@ -204,9 +223,6 @@ impl ShmStream {
     }
 }
 
-const SIGNAL_POLL_LIMIT: usize = 4;
-const CONTROL_READ_BYTES: usize = 64;
-
 fn poll_signal(signal: &AsyncFd<Arc<File>>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
     let mut ready = std::task::ready!(signal.poll_read_ready(cx))?;
     let mut counter = [0; std::mem::size_of::<u64>()];
@@ -214,6 +230,7 @@ fn poll_signal(signal: &AsyncFd<Arc<File>>, cx: &mut Context<'_>) -> Poll<io::Re
         let mut file = signal.get_ref().as_ref();
         file.read_exact(&mut counter)
     });
+
     if let Ok(result) = result {
         ready.clear_ready();
         Poll::Ready(result)
@@ -233,16 +250,19 @@ impl AsyncRead for ShmStream {
         if output.remaining() == 0 {
             return Poll::Ready(Ok(()));
         }
+
         if this.received < this.receive.len() {
             let received = std::task::ready!(this.poll_receive_preface(cx))?;
             if received == 0 {
                 return Poll::Ready(Err(io::ErrorKind::UnexpectedEof.into()));
             }
+
             this.received += received;
             if this.received < this.receive.len() {
                 cx.waker().wake_by_ref();
                 return Poll::Pending;
             }
+
             this.conn().accept_preface(&this.receive)?;
             let signal = this
                 .conn()
@@ -250,9 +270,11 @@ impl AsyncRead for ShmStream {
                 .ok_or(io::ErrorKind::InvalidData)?;
             this.reader_signal = Some(register_signal(signal)?);
         }
+
         let received =
             std::task::ready!(this.poll_carrier_receive(cx, output.initialize_unfilled()))?;
         output.advance(received);
+
         Poll::Ready(Ok(()))
     }
 }
@@ -266,6 +288,7 @@ impl AsyncWrite for ShmStream {
         if bytes.is_empty() {
             return Poll::Ready(Ok(0));
         }
+
         let this = self.get_mut();
         std::task::ready!(this.poll_preface(cx))?;
         this.poll_carrier_send(cx, &[io::IoSlice::new(bytes)])
@@ -279,6 +302,7 @@ impl AsyncWrite for ShmStream {
         if bytes.iter().all(|slice| slice.is_empty()) {
             return Poll::Ready(Ok(0));
         }
+
         let this = self.get_mut();
         std::task::ready!(this.poll_preface(cx))?;
         this.poll_carrier_send(cx, bytes)

@@ -52,6 +52,7 @@ async fn accept_remote(
     let (data, data_inbox) = mpsc::channel(16);
     let (events, mut remote_events) = mpsc::channel(16);
     let cancel = CancellationToken::new();
+
     let remote_driver = ConnectionDriver::new(
         remote,
         Connection::new(ConnectionConfig::new(Role::Client, SocketType::Dealer)),
@@ -61,6 +62,7 @@ async fn accept_remote(
         cancel.clone(),
     )
     .with_data_inbox(data_inbox);
+
     let task = tokio::spawn(remote_driver.run());
 
     actor
@@ -75,6 +77,7 @@ async fn accept_remote(
             options,
         })
         .await;
+
     let (id, event) = actor.mail.peer_control_rx.recv().await.unwrap();
     assert!(matches!(
         event,
@@ -129,12 +132,14 @@ async fn receive_boundary(
         .unwrap()
         .unwrap();
     let wire = encoder.encode(&message).unwrap();
+
     if send_options.compression_dict.is_some() {
         assert_eq!(wire.len(), 2);
         assert!(wire[0].max_message_size_len() > limit);
     } else if threshold == usize::MAX {
         assert!(wire[0].max_message_size_len() > limit);
     }
+
     for wire in wire {
         remote
             .data
@@ -142,6 +147,7 @@ async fn receive_boundary(
             .await
             .unwrap();
     }
+
     let received = actor
         .mail
         .peer_out_rx
@@ -150,6 +156,7 @@ async fn receive_boundary(
         .recv_async()
         .await
         .unwrap();
+
     assert_eq!(received.peer_id, remote.id);
     assert_eq!(received.message, message);
 
@@ -163,6 +170,7 @@ async fn receive_boundary(
         .unwrap()
         .await
         .unwrap();
+
     actor.routing.send_strategy.shutdown();
     remote.cancel.cancel();
     let _ = remote.task.await.unwrap();
@@ -231,6 +239,7 @@ async fn materialized_codec_receive_admits_dictionary_setup_with_a_tiny_limit() 
                 }
                 _ => unreachable!("test enumerates only enabled codecs"),
             };
+
             receive_boundary(kind, Message::single(Bytes::new()), Some(dict), usize::MAX).await;
         }
     })

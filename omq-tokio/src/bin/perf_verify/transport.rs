@@ -8,6 +8,56 @@ use std::sync::atomic::Ordering;
 
 use omq_tokio::{Endpoint, Options};
 
+#[cfg(feature = "quic")]
+static QUIC_CREDENTIALS: LazyLock<(Vec<u8>, Vec<u8>)> = LazyLock::new(|| {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("omq-perf-tls-{}-{nonce}", std::process::id()));
+    std::fs::create_dir(&dir).expect("create benchmark TLS directory");
+    let cert = dir.join("cert.pem");
+    let key = dir.join("key.pem");
+
+    let output = Command::new("openssl")
+        .args([
+            "req",
+            "-x509",
+            "-newkey",
+            "ec",
+            "-pkeyopt",
+            "ec_paramgen_curve:prime256v1",
+            "-nodes",
+            "-days",
+            "1",
+            "-subj",
+            "/CN=127.0.0.1",
+            "-addext",
+            "subjectAltName=IP:127.0.0.1",
+            "-addext",
+            "basicConstraints=critical,CA:FALSE",
+            "-out",
+        ])
+        .arg(&cert)
+        .arg("-keyout")
+        .arg(&key)
+        .output()
+        .expect("openssl is required for QUIC performance gates");
+
+    assert!(
+        output.status.success(),
+        "generate benchmark TLS certificate: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let credentials = (
+        std::fs::read(&cert).expect("read benchmark certificate"),
+        std::fs::read(&key).expect("read benchmark key"),
+    );
+    std::fs::remove_dir_all(dir).expect("remove benchmark TLS directory");
+
+    credentials
+});
+
 pub(super) fn tcp_zero() -> Endpoint {
     "tcp://127.0.0.1:0".parse().expect("valid TCP endpoint")
 }
@@ -27,6 +77,7 @@ fn local_endpoint(scheme: &str) -> Endpoint {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!("omq-perf-{}-{id}.{scheme}", std::process::id()));
+
     format!("{scheme}://{}", path.display())
         .parse()
         .expect("local endpoint")
@@ -99,50 +150,3 @@ impl Transport {
         }
     }
 }
-
-#[cfg(feature = "quic")]
-static QUIC_CREDENTIALS: LazyLock<(Vec<u8>, Vec<u8>)> = LazyLock::new(|| {
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system clock")
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("omq-perf-tls-{}-{nonce}", std::process::id()));
-    std::fs::create_dir(&dir).expect("create benchmark TLS directory");
-    let cert = dir.join("cert.pem");
-    let key = dir.join("key.pem");
-    let output = Command::new("openssl")
-        .args([
-            "req",
-            "-x509",
-            "-newkey",
-            "ec",
-            "-pkeyopt",
-            "ec_paramgen_curve:prime256v1",
-            "-nodes",
-            "-days",
-            "1",
-            "-subj",
-            "/CN=127.0.0.1",
-            "-addext",
-            "subjectAltName=IP:127.0.0.1",
-            "-addext",
-            "basicConstraints=critical,CA:FALSE",
-            "-out",
-        ])
-        .arg(&cert)
-        .arg("-keyout")
-        .arg(&key)
-        .output()
-        .expect("openssl is required for QUIC performance gates");
-    assert!(
-        output.status.success(),
-        "generate benchmark TLS certificate: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let credentials = (
-        std::fs::read(&cert).expect("read benchmark certificate"),
-        std::fs::read(&key).expect("read benchmark key"),
-    );
-    std::fs::remove_dir_all(dir).expect("remove benchmark TLS directory");
-    credentials
-});

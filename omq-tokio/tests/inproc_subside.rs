@@ -33,6 +33,7 @@ fn tcp_ep() -> Endpoint {
     let l = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
     let port = l.local_addr().unwrap().port();
     drop(l);
+
     Endpoint::Tcp {
         host: omq_tokio::endpoint::Host::Ip(Ipv4Addr::LOCALHOST.into()),
         port,
@@ -52,14 +53,18 @@ async fn check_subside_handshake(ep: Endpoint) {
 
     let deadline = Instant::now() + Duration::from_secs(2);
     let mut s1_ready = false;
+
     while Instant::now() < deadline {
         let c1 = s1.connections().await.unwrap();
         s1_ready = c1.iter().any(|c| c.peer_info.is_some());
+
         if s1_ready {
             break;
         }
+
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+
     assert!(
         s1_ready,
         "SUB connector-side never populated peer_info on {ep:?}"
@@ -92,14 +97,18 @@ async fn check_dish_join_handshake(ep: Endpoint) {
 
     let deadline = Instant::now() + Duration::from_secs(2);
     let mut ready = false;
+
     while Instant::now() < deadline {
         let c = dish.connections().await.unwrap();
         ready = c.iter().any(|c| c.peer_info.is_some());
+
         if ready {
             break;
         }
+
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+
     assert!(
         ready,
         "DISH connector-side never populated peer_info on {ep:?}"

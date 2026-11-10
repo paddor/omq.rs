@@ -16,17 +16,21 @@ pub(crate) fn run(mut args: QuinnArgs) {
     assert!(args.layout == "split" || args.app_spin == 0);
     assert!([0, 50].contains(&args.app_spin) && [0, 50].contains(&args.io_spin));
     assert!((1..=4096).contains(&args.batch) && args.event_interval > 0);
+
     args.binary = args.binary.canonicalize().expect("built Quinn peer binary");
     let provenance = provenance(&args.binary);
     let versions = versions();
+
     let directory = TempDir::new("quinn-datagram");
     let mut certificates = Command::new(&args.binary);
     certificates.arg("certs").arg(&directory.0);
     print!("{}", capture(&mut certificates));
+
     let run = QuinnRun {
         args: &args,
         directory: &directory.0,
     };
+
     rounds(
         &args.common,
         &[16, 1024],
@@ -36,12 +40,15 @@ pub(crate) fn run(mut args: QuinnArgs) {
             row.as_object_mut()
                 .unwrap()
                 .extend(provenance.as_object().unwrap().clone());
+
             row["quinn_version"] = versions["quinn"].clone();
             row["dependency_versions"] = versions.clone();
             row["dependency_versions_source"] = json!("workspace Cargo.lock at measurement time");
             row["run"] = json!(repeat);
             row["size_position"] = json!(position);
+
             record(&args.common, "quinn-datagram.jsonl", &row);
+
             row
         },
     );
@@ -89,6 +96,7 @@ impl QuinnRun<'_> {
         } else {
             Side::Send
         };
+
         peers::profiled(
             command,
             args.common
@@ -103,6 +111,7 @@ impl QuinnRun<'_> {
     fn measure(&self, kind: &str, size: u64) -> Value {
         let args = self.args;
         let mut peers = Peers::new(Duration::from_secs_f64(60.0_f64.max(args.duration + 10.0)));
+
         let (receive_role, send_role) = if kind == "throughput" {
             ("receive", "send")
         } else {
@@ -115,6 +124,7 @@ impl QuinnRun<'_> {
             &mut self.command(Side::Receive, receive_role, "127.0.0.1:0", size),
         );
         let bound = peers.wait_json(Side::Receive, "bound");
+
         peers.spawn(
             Side::Send,
             &mut self.command(
@@ -155,6 +165,7 @@ impl QuinnRun<'_> {
             "cipher":"TLS_AES_128_GCM_SHA256", "controller":"default Cubic",
             "ready":ready, "sender":sender, "receiver":receiver, "profiled":args.common.profile.is_some(),
             "measurement_order":args.common.order});
+
         verify(&mut row, args, kind, size);
         row
     }
@@ -166,19 +177,23 @@ fn verify(row: &mut Value, args: &QuinnArgs, kind: &str, size: u64) {
         let received = count(&row["receiver"], "received");
         let total = count(&row["receiver"], "received_total");
         assert!(offered > 0 && received > 0, "empty measurement window");
+
         row["msgs_s"] = json!(received as f64 / args.duration);
         row["payload_gb_s"] = json!(received as f64 * size as f64 / args.duration / 1e9);
         row["offered_msgs_s"] = json!(offered as f64 / args.duration);
         row["missing_count"] = json!(offered.saturating_sub(total));
         row["excess_count"] = json!(total.saturating_sub(offered));
+
         row["warmup_seconds"] = json!(0.2);
         row["tail_seconds"] = json!(0.3);
     } else {
         row["iterations"] = json!(args.iterations);
         row["warmup_iterations"] = json!(args.warmup);
+
         for field in ["p50_us", "p99_us", "p999_us", "max_us", "timeouts"] {
             row[field] = row["sender"][field].clone();
         }
+
         assert_eq!(
             count(&row["receiver"], "echoed"),
             args.iterations + args.warmup,
@@ -195,6 +210,7 @@ fn versions() -> Value {
         .join("Cargo.lock");
     let lock = std::fs::read_to_string(lock).expect("workspace Cargo.lock");
     let mut result = json!({});
+
     for package in lock.split("[[package]]").skip(1) {
         let field = |key: &str| {
             package.lines().find_map(|line| {
@@ -202,12 +218,14 @@ fn versions() -> Value {
                     .and_then(|value| value.strip_suffix('"'))
             })
         };
+
         if let Some(name @ ("quinn" | "quinn-proto" | "quinn-udp" | "rustls" | "tokio" | "ring")) =
             field("name")
         {
             result[name] = json!(field("version").expect("dependency version"));
         }
     }
+
     assert_eq!(result.as_object().unwrap().len(), 6);
     result
 }

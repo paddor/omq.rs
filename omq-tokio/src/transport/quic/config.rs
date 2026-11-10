@@ -12,6 +12,12 @@ use super::ALPN;
 #[cfg(feature = "webtransport")]
 pub(super) const H3_ALPN: &[u8] = b"h3";
 
+/// Largest UDP payload an endpoint accepts. Ordinary Ethernet MTUs carry at
+/// most 1472 bytes of UDP payload; path MTU discovery stops at 1452. Quinn
+/// sizes each endpoint's receive buffer from this value times GRO segments,
+/// so the 64-KiB default costs about 4 MiB per endpoint.
+pub(super) const MAX_UDP_PAYLOAD: u16 = 1500;
+
 /// Which protocols a configuration serves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Profile {
@@ -87,6 +93,7 @@ pub(super) fn transport(
     let stream = options.stream_window;
     let connection = u64::from(stream) + u64::from(options.liveness_reserve());
     let mut config = quinn::TransportConfig::default();
+
     config
         .stream_receive_window(quinn::VarInt::from_u32(stream))
         .receive_window(quinn::VarInt::from_u64(connection).expect("bounded window"))
@@ -104,20 +111,16 @@ pub(super) fn transport(
         ))
         .keep_alive_interval(Some(options.keep_alive_interval))
         .congestion_controller_factory(Arc::new(quinn::congestion::CubicConfig::default()));
+
     config
 }
-
-/// Largest UDP payload an endpoint accepts. Ordinary Ethernet MTUs carry at
-/// most 1472 bytes of UDP payload; path MTU discovery stops at 1452. Quinn
-/// sizes each endpoint's receive buffer from this value times GRO segments,
-/// so the 64-KiB default costs about 4 MiB per endpoint.
-pub(super) const MAX_UDP_PAYLOAD: u16 = 1500;
 
 pub(super) fn endpoint() -> quinn::EndpointConfig {
     let mut config = quinn::EndpointConfig::default();
     config
         .max_udp_payload_size(MAX_UDP_PAYLOAD)
         .expect("valid UDP payload size");
+
     config
 }
 
@@ -134,9 +137,11 @@ pub(super) fn server(
         .server_key_pem
         .as_deref()
         .ok_or_else(|| Error::Config("quic:// bind requires quic.server_key_pem".into()))?;
+
     let mut tls = crate::transport::tls::server_config(cert, key)?;
     tls.alpn_protocols = profile.alpn(true);
     tls.max_early_data_size = 0;
+
     let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(tls)
         .map_err(|e| Error::Config(format!("QUIC TLS config: {e}")))?;
     let mut config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
@@ -147,6 +152,7 @@ pub(super) fn server(
         .max_incoming(handshakes as usize)
         .incoming_buffer_size(64 * 1024)
         .incoming_buffer_size_total(u64::from(handshakes) * 64 * 1024);
+
     Ok(config)
 }
 
@@ -161,6 +167,7 @@ pub(super) fn client(options: &QuicOptions, profile: Profile) -> Result<quinn::C
         .map_err(|e| Error::Config(format!("QUIC TLS config: {e}")))?;
     let mut config = quinn::ClientConfig::new(Arc::new(crypto));
     config.transport_config(Arc::new(transport(options, false, profile)));
+
     Ok(config)
 }
 
@@ -170,6 +177,7 @@ pub(super) fn check_alpn(connection: &quinn::Connection, expected: &[u8]) -> Res
         .handshake_data()
         .and_then(|data| data.downcast::<quinn::crypto::rustls::HandshakeData>().ok())
         .and_then(|data| data.protocol);
+
     if negotiated.as_deref() == Some(expected) {
         Ok(())
     } else {

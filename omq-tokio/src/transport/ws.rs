@@ -18,6 +18,7 @@ use omq_proto::proto::ws_handshake;
 mod insecure;
 mod listener;
 mod upgrade;
+
 pub(crate) use listener::{WsListener, bind};
 
 pub(crate) enum WsTransport {
@@ -114,6 +115,7 @@ pub(crate) async fn connect(
         let connector = build_tls_connector(wss_tls)?;
         let domain = crate::transport::tls::server_name(host, wss_tls.hostname.as_deref())?;
         let tls_stream = connector.connect(domain, stream).await.map_err(Error::Io)?;
+
         WsTransport::Tls(tls_stream)
     } else {
         WsTransport::Plain(stream)
@@ -143,6 +145,7 @@ fn build_tls_connector(wss_tls: &omq_proto::options::WssTls) -> Result<tokio_rus
             wss_tls.trust_pem.as_deref(),
         )?
     };
+
     Ok(tokio_rustls::TlsConnector::from(std::sync::Arc::new(
         config,
     )))

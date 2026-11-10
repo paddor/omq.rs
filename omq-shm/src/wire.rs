@@ -5,13 +5,15 @@ use std::io;
 
 use crate::mapping::{invalid, read_u32, read_u64};
 
+pub(crate) use crate::coordination::{GENERATION_STEP, STATE_BITS};
+
 pub(crate) const PREFACE_MAGIC: &[u8; 8] = b"OMQSHM08";
 pub(crate) const COPIED: u8 = 0;
 pub(crate) const BODY: u8 = 1;
 pub(crate) const COPIED_BATCH: u8 = 2;
 pub(crate) const REFERENCE_BATCH: u8 = 3;
 pub(crate) const MULTIPART: u8 = 4;
-pub(crate) use crate::coordination::{GENERATION_STEP, STATE_BITS};
+
 pub(crate) const CELL_FIELDS: usize = crate::coordination::COORDINATES + 1;
 pub(crate) const CELL_BYTES: usize = CELL_FIELDS * std::mem::size_of::<u64>();
 pub(crate) const READER_CLOSED: usize = 32;
@@ -27,6 +29,15 @@ const PREFACE_ID: usize = PREFACE_MAGIC.len();
 const PREFACE_COUNT: usize = PREFACE_ID + std::mem::size_of::<u32>();
 const PREFACE_TOKEN: usize = PREFACE_COUNT + std::mem::size_of::<u32>();
 
+const KIND: usize = 0;
+const ID: usize = KIND + 1;
+const TOKEN: usize = ID + std::mem::size_of::<u32>();
+const OFFSET: usize = TOKEN + std::mem::size_of::<u64>();
+const LENGTH: usize = OFFSET + std::mem::size_of::<u64>();
+const LEASE: usize = LENGTH + std::mem::size_of::<u64>();
+const GENERATION: usize = LEASE + std::mem::size_of::<u32>();
+pub(crate) const REFERENCE_SIZE: usize = GENERATION + std::mem::size_of::<u64>();
+
 #[derive(Debug)]
 pub(crate) struct Preface {
     pub(crate) id: u32,
@@ -41,6 +52,7 @@ impl Preface {
         bytes[PREFACE_ID..PREFACE_COUNT].copy_from_slice(&self.id.to_le_bytes());
         bytes[PREFACE_COUNT..PREFACE_TOKEN].copy_from_slice(&(self.count as u32).to_le_bytes());
         bytes[PREFACE_TOKEN..].copy_from_slice(&self.token.to_le_bytes());
+
         bytes
     }
 
@@ -49,6 +61,7 @@ impl Preface {
         if &bytes[..PREFACE_ID] != PREFACE_MAGIC || !(1..=crate::MAX_LEASES).contains(&count) {
             return Err(invalid("invalid SHM preface"));
         }
+
         Ok(Self {
             id: read_u32(bytes, PREFACE_ID),
             count,
@@ -56,15 +69,6 @@ impl Preface {
         })
     }
 }
-
-const KIND: usize = 0;
-const ID: usize = KIND + 1;
-const TOKEN: usize = ID + std::mem::size_of::<u32>();
-const OFFSET: usize = TOKEN + std::mem::size_of::<u64>();
-const LENGTH: usize = OFFSET + std::mem::size_of::<u64>();
-const LEASE: usize = LENGTH + std::mem::size_of::<u64>();
-const GENERATION: usize = LEASE + std::mem::size_of::<u32>();
-pub(crate) const REFERENCE_SIZE: usize = GENERATION + std::mem::size_of::<u64>();
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Reference {
@@ -87,6 +91,7 @@ impl Reference {
         bytes[LENGTH..LEASE].copy_from_slice(&(self.length as u64).to_le_bytes());
         bytes[LEASE..GENERATION].copy_from_slice(&(self.lease as u32).to_le_bytes());
         bytes[GENERATION..].copy_from_slice(&self.generation.to_le_bytes());
+
         bytes
     }
 
@@ -94,6 +99,7 @@ impl Reference {
         if bytes.len() != REFERENCE_SIZE || bytes.first() != Some(&kind) {
             return Err(invalid("invalid SHM body record"));
         }
+
         Ok(Self {
             kind,
             id: read_u32(bytes, ID),

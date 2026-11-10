@@ -33,6 +33,7 @@ fn main() {
                     common::print_cell(size, cell);
                     common::append_jsonl(PATTERN, &transport, peers, size, cell);
                 }
+
                 println!();
             }
         }
@@ -61,10 +62,12 @@ async fn connect_pub_subs(
         let refs: Vec<&Socket> = subs.iter().collect();
         common::wait_connected(&refs).await;
     }
+
     {
         let refs: Vec<&Socket> = subs.iter().collect();
         common::wait_subscribed(&pub_, &refs).await;
     }
+
     (pub_, subs)
 }
 
@@ -78,6 +81,7 @@ fn spawn_counting_receivers(
     for s in subs {
         let stop = stop.clone();
         let recv_count = recv_count.clone();
+
         recv_handles.push(tokio::spawn(async move {
             while !stop.load(Ordering::Relaxed) {
                 if let Ok(Ok(_)) = tokio::time::timeout(Duration::from_millis(20), s.recv()).await {
@@ -87,9 +91,11 @@ fn spawn_counting_receivers(
                     }
                 }
             }
+
             drop(s);
         }));
     }
+
     recv_handles
 }
 
@@ -107,6 +113,7 @@ async fn run_cell(transport: &str, peers: usize, size: usize, seq: usize) -> com
     while Instant::now() < warmup_end {
         let _ = pub_.send(Message::single(payload.clone())).await;
     }
+
     tokio::time::sleep(Duration::from_millis(10)).await;
 
     let n_rounds = common::rounds();
@@ -123,13 +130,16 @@ async fn run_cell(transport: &str, peers: usize, size: usize, seq: usize) -> com
         let t0 = Instant::now();
         let end = t0 + round_dur;
         let mut sent = 0usize;
+
         while Instant::now() < end {
             let _ = pub_.send(Message::single(payload.clone())).await;
             sent += 1;
         }
+
         let elapsed = t0.elapsed();
         let cpu = common::process_cpu_time().saturating_sub(cpu0);
         let msgs_s = sent as f64 / elapsed.as_secs_f64();
+
         if msgs_s > best_msgs_s {
             best_msgs_s = msgs_s;
             best_elapsed = elapsed;

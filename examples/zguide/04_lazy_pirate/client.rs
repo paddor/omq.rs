@@ -27,6 +27,7 @@ async fn new_req(ctx: &Context, ep: &Endpoint) -> omq_tokio::Socket {
     req.connect(ep.clone()).await.unwrap();
     // Brief pause so the connection can establish.
     tokio::time::sleep(Duration::from_millis(20)).await;
+
     req
 }
 
@@ -67,6 +68,7 @@ async fn main() {
                     // Destroy and recreate the socket (Lazy Pirate pattern).
                     let _ = req.close().await;
                     req = new_req(&ctx, &ep).await;
+
                     if attempts >= max_retries {
                         println!("client: giving up on {request}");
                         break;

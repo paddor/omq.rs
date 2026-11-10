@@ -65,6 +65,7 @@ fn thread_cpu_time() -> Duration {
     // SAFETY: ts points to writable memory and CLOCK_THREAD_CPUTIME_ID needs no extra invariants.
     let rc = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
     assert_eq!(rc, 0, "clock_gettime(CLOCK_THREAD_CPUTIME_ID)");
+
     Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
 }
 
@@ -100,6 +101,7 @@ fn ctx_shutdown_wakes_blocking_recv() {
     let pull_addr = pull as usize;
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
     let (done_tx, done_rx) = std::sync::mpsc::channel();
+
     let handle = std::thread::spawn(move || {
         let mut buf = [0u8; 8];
         entered_tx.send(()).expect("entered");
@@ -434,26 +436,32 @@ fn send_empty_message() {
 fn shutdown_during_blocked_send(ctx: *mut c_void, sock: *mut c_void) -> (i32, i32) {
     let sock_addr = sock as usize;
     let (done_tx, done_rx) = std::sync::mpsc::channel();
+
     let handle = std::thread::spawn(move || {
         let sock = sock_addr as *mut c_void;
         // A connect-side pipe moves into the peer's queue once the peer is
         // ready, which frees capacity after the queue looked full. Refill
         // whenever a blocking send still succeeds.
         let mut queued = 0;
+
         let result = loop {
             while zmq_send(sock, b"x".as_ptr().cast(), 1, ZMQ_DONTWAIT) == 1 {
                 queued += 1;
                 assert!(queued < 1024, "send never blocked");
             }
+
             let rc = zmq_send(sock, b"x".as_ptr().cast(), 1, 0);
             if rc != 1 {
                 break (rc, omq_zmq::zmq_errno());
             }
+
             queued += 1;
             assert!(queued < 1024, "send never blocked");
         };
+
         done_tx.send(result).expect("done");
     });
+
     assert_eq!(
         done_rx.recv_timeout(Duration::from_millis(200)),
         Err(std::sync::mpsc::RecvTimeoutError::Timeout),
@@ -464,6 +472,7 @@ fn shutdown_during_blocked_send(ctx: *mut c_void, sock: *mut c_void) -> (i32, i3
         .recv_timeout(Duration::from_secs(2))
         .expect("send should wake on context shutdown");
     handle.join().expect("send thread");
+
     result
 }
 
@@ -486,12 +495,14 @@ fn ctx_shutdown_wakes_send_blocked_on_a_full_pipe() {
     let pull = zmq_socket(ctx, ZMQ_PULL);
     let push = zmq_socket(ctx, ZMQ_PUSH);
     let one = 1i32;
+
     for (sock, option) in [(pull, ZMQ_RCVHWM), (push, ZMQ_SNDHWM)] {
         assert_eq!(
             zmq_setsockopt(sock, option, (&one as *const i32).cast(), size_of::<i32>()),
             0
         );
     }
+
     let addr = caddr("inproc://test-basic-shutdown-send-full");
     assert_eq!(zmq_bind(pull, addr.as_ptr()), 0);
     assert_eq!(zmq_connect(push, addr.as_ptr()), 0);

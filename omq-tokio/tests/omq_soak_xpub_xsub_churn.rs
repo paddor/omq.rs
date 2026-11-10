@@ -7,9 +7,6 @@
 //! - No subscription leaks after subscriber departs (heap check).
 //! - Message delivery matches active subscriptions.
 
-#[global_allocator]
-static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
-
 mod soak_common;
 
 use std::time::{Duration, Instant};
@@ -19,6 +16,9 @@ use rand::RngExt;
 use rand::rngs::StdRng;
 
 use omq_tokio::{Message, OnMute, Options, ReconnectPolicy, Socket, SocketType};
+
+#[global_allocator]
+static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
 
 const TOPICS: &[&str] = &["alpha.", "beta.", "gamma.", "delta."];
 
@@ -39,6 +39,7 @@ async fn publish_batch(xpub: &Socket, pub_count: &mut u64) {
     for _ in 0..1_000 {
         let topic = TOPICS[*pub_count as usize % TOPICS.len()];
         let msg = format!("{topic}{pub_count}");
+
         if let Ok(Ok(())) =
             tokio::time::timeout(Duration::from_millis(1), xpub.send(Message::single(msg))).await
         {
@@ -53,6 +54,7 @@ async fn drain_notifications(xpub: &Socket) -> u64 {
     while let Ok(Ok(_notif)) = tokio::time::timeout(Duration::from_millis(1), xpub.recv()).await {
         count += 1;
     }
+
     count
 }
 
@@ -103,6 +105,7 @@ fn soak_xpub_xsub_churn() {
         for sub in subs {
             sub.close().await.unwrap();
         }
+
         xpub.close().await.unwrap();
 
         eprintln!(

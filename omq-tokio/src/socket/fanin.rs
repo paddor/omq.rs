@@ -18,11 +18,13 @@ use crate::engine::signal::{DataSignal, StateSignal};
 
 mod queue;
 mod source;
+
 use queue::{Item, Queue};
 pub(crate) use source::Source;
 use source::{ReceiveState, SourceRegistration};
 
 const STANDARD_PRODUCER: u8 = 1;
+
 #[cfg(feature = "dart")]
 const DART_PRODUCER: u8 = 2;
 
@@ -68,6 +70,7 @@ impl Fanin {
         let (sender, rx) = mpsc::channel(capacity);
         #[cfg(target_os = "linux")]
         let (batch_sender, batch_rx) = mpsc::channel(capacity);
+
         Arc::new(Self {
             registrar: Mutex::new(sender),
             #[cfg(target_os = "linux")]
@@ -129,22 +132,27 @@ impl Fanin {
             Some(capacity) => registrar.try_register_with_capacity(capacity).ok()?,
             None => registrar.try_clone()?,
         };
+
         let mut guard = self.receiver.lock();
         let state = guard.as_mut()?;
         state.receiver.register(sender.lane());
+
         let source = if self.source_aware {
             state.process_changes(self);
             state.reclaim_sources();
             state.scan_lanes |= external_ready;
+
             Some(state.register(self, sender.lane()))
         } else {
             None
         };
+
         drop(guard);
         self.registered.fetch_or(kind, Ordering::Release);
         let space = Arc::new(SpaceWake {
             signal: Arc::new(StateSignal::new()),
         });
+
         Some(Producer {
             #[cfg(target_os = "linux")]
             owner: Arc::downgrade(self),
@@ -173,18 +181,22 @@ impl Fanin {
         state.process_changes(self);
         let start = out.len();
         let mut observed_empty = Self::drain(state, out, &mut budget, batching, false);
+
         if observed_empty && out.len() == start {
             // A successful receive cannot park. Keep its data signal coalesced
             // until a subsequent empty probe prepares the fenced handoff.
             self.signal.begin_drain();
             observed_empty = Self::drain(state, out, &mut budget, batching, true);
+
             if observed_empty && out.len() == start && self.signal.clear_after(true) {
                 self.blocking.wake();
             }
         }
+
         state.observed_empty = observed_empty;
         let count = out.len() - start;
         state.until_poll = state.until_poll.saturating_sub(count);
+
         if count == 0 {
             Err(Error::WouldBlock)
         } else {
@@ -218,9 +230,11 @@ impl Fanin {
                 observed_empty = true;
                 break;
             };
+
             let _ = budget.account(recv_budget_bytes(&item));
             out.push(item);
         }
+
         rx.release_consumed();
         observed_empty
     }
@@ -251,6 +265,7 @@ impl Fanin {
                 Error::WouldBlock
             });
         }
+
         self.try_recv_inner(true)
     }
 
@@ -266,6 +281,7 @@ impl Fanin {
         let spinning = spinning && !state.scan_lanes;
         state.poll_sources(false);
         let mut result = state.receiver.try_recv_fair();
+
         if result.is_err() && !spinning {
             // Ready messages need no signal transition. Before reporting
             // empty, establish the drain fence and recheck all ready sources
@@ -274,6 +290,7 @@ impl Fanin {
             state.poll_sources(true);
             result = state.receiver.try_recv_fair();
         }
+
         if let Ok(item) = result {
             // Keep fanring's bounded slot-release batches. Forcing a release
             // here wakes the producer after every message, even while this
@@ -281,6 +298,7 @@ impl Fanin {
             state.observed_empty = false;
             state.until_poll = state.until_poll.saturating_sub(1);
             state.wake_waiter(self);
+
             Ok(item)
         } else {
             // Publish partial credits before the caller can park. Bulk calls
@@ -289,6 +307,7 @@ impl Fanin {
             if !spinning && self.signal.clear_after(true) {
                 self.blocking.wake();
             }
+
             state.observed_empty = true;
             Err(Error::WouldBlock)
         }
@@ -297,9 +316,11 @@ impl Fanin {
     pub(crate) fn close(&self) {
         self.closed.store(true, Ordering::Release);
         let state = self.receiver.lock().take();
+
         if let Some(state) = &state {
             state.close_sources();
         }
+
         drop(state);
         self.signal.wake_all();
         self.blocking.wake();
@@ -310,10 +331,12 @@ impl Fanin {
 struct SpaceWake {
     signal: Arc<StateSignal>,
 }
+
 impl Wake for SpaceWake {
     fn wake(self: Arc<Self>) {
         self.wake_by_ref();
     }
+
     fn wake_by_ref(self: &Arc<Self>) {
         self.signal.notify_changed();
     }
@@ -352,6 +375,7 @@ pub(crate) struct Producer {
     // Dropped after sender, so disconnect is visible before the external wake.
     source: Option<SourceRegistration>,
 }
+
 impl Producer {
     pub(crate) fn try_send(&mut self, item: Message) -> std::result::Result<(), Message> {
         self.send_message(item, false)?;
@@ -363,14 +387,17 @@ impl Producer {
     fn notify_data(&mut self) {
         self.signal.mark();
         self.blocking.wake_after_fence();
+
         if let Some(source) = &self.source {
             source.published();
         }
     }
+
     #[inline]
     fn try_send_deferred(&mut self, item: Message) -> std::result::Result<(), Message> {
         self.send_message(item, true)
     }
+
     #[inline]
     fn send_message(
         &mut self,
@@ -383,21 +410,26 @@ impl Producer {
         {
             return Err(message);
         }
+
         let result = {
             #[cfg(target_os = "linux")]
             if let Some(batch) = &mut self.batch_sender {
                 let result =
                     Self::send_value(&mut batch.sender, Item::Message(message), deferred, false);
+
                 if result.is_ok() && !deferred {
                     batch.published();
                 }
+
                 return result.map_err(|error| {
                     self.credits.as_ref().expect("batch credits").release(1);
                     queue::into_message(error.into_inner())
                 });
             }
+
             Self::send_value(&mut self.sender, message, deferred, self.external_ready)
         };
+
         result.map_err(mpsc::TrySendError::into_inner)
     }
 
@@ -416,14 +448,17 @@ impl Producer {
             sender.try_send(value)
         }
     }
+
     #[cfg(target_os = "linux")]
     fn enable_batches(&mut self) -> bool {
         if self.credits.is_some() {
             return true;
         }
+
         let Some(owner) = self.owner.upgrade() else {
             return false;
         };
+
         // Connection drivers call this before admitting any SHM delivery.
         let Ok(sender) = owner
             .batch_registrar
@@ -433,10 +468,12 @@ impl Producer {
         else {
             return false;
         };
+
         let mut guard = owner.receiver.lock();
         let Some(state) = guard.as_mut() else {
             return false;
         };
+
         let credits = queue::Credits::new(self.sender.capacity(), self.space.signal.clone());
         let ready = Arc::new(AtomicU64::new(0));
         state.receiver.enable_batches(
@@ -451,8 +488,10 @@ impl Producer {
             generation: 0,
         }));
         self.credits = Some(credits);
+
         true
     }
+
     #[cfg(target_os = "linux")]
     fn try_send_batch(
         &mut self,
@@ -461,13 +500,17 @@ impl Producer {
         if self.is_full() {
             return Err(batch);
         }
+
         let credits = self.credits.as_ref().expect("batch receive enabled");
         let count = credits.reserve(batch.len());
+
         if count == 0 {
             return Err(batch);
         }
+
         let original = batch.clone();
         let prefix = batch.take_prefix(count);
+
         if self
             .batch_sender
             .as_mut()
@@ -479,17 +522,21 @@ impl Producer {
             credits.release(count);
             return Err(original);
         }
+
         Ok((!batch.is_empty()).then_some(batch))
     }
+
     fn flush(&mut self) {
         #[cfg(target_os = "linux")]
         if let Some(batch) = &mut self.batch_sender {
             batch.sender.flush();
             batch.published();
         }
+
         self.sender.flush();
         self.notify_data();
     }
+
     pub(crate) fn is_full(&mut self) -> bool {
         #[cfg(target_os = "linux")]
         if let Some(batch) = &mut self.batch_sender {
@@ -497,21 +544,26 @@ impl Producer {
             if self.credits.as_ref().expect("batch credits").full() && !sender.is_disconnected() {
                 return true;
             }
+
             return sender
                 .poll_ready(&mut Context::from_waker(&self.waker))
                 .is_pending();
         }
+
         self.sender
             .poll_ready(&mut Context::from_waker(&self.waker))
             .is_pending()
     }
+
     pub(crate) fn is_closed(&self) -> bool {
         #[cfg(target_os = "linux")]
         if let Some(batch) = &self.batch_sender {
             return batch.sender.is_disconnected();
         }
+
         self.sender.is_disconnected()
     }
+
     pub(crate) fn space(&self) -> Arc<StateSignal> {
         self.space.signal.clone()
     }
@@ -529,6 +581,7 @@ pub(crate) struct Sink {
     pending: Option<Item>,
     space: Arc<StateSignal>,
 }
+
 impl Sink {
     pub(crate) fn owned(producer: Producer) -> Self {
         let space = producer.space();
@@ -538,19 +591,24 @@ impl Sink {
             space,
         }
     }
+
     #[inline]
     fn with_producer<T>(&mut self, f: impl FnOnce(&mut Producer) -> T) -> T {
         f(&mut self.producer)
     }
+
     pub(crate) fn push(&mut self, message: Message) -> bool {
         self.push_mode::<false>(message)
     }
+
     pub(crate) fn push_deferred(&mut self, message: Message) -> bool {
         self.push_mode::<true>(message)
     }
+
     pub(crate) fn flush(&mut self) {
         self.with_producer(Producer::flush);
     }
+
     #[inline]
     fn push_mode<const DEFERRED: bool>(&mut self, message: Message) -> bool {
         debug_assert!(self.pending.is_none());
@@ -566,15 +624,18 @@ impl Sink {
                 if self.with_producer(|producer| producer.is_closed()) {
                     return false;
                 }
+
                 self.pending = Some(Item::Message(item));
                 true
             }
         }
     }
+
     #[cfg(target_os = "linux")]
     pub(crate) fn enable_batches(&mut self) -> bool {
         self.producer.enable_batches()
     }
+
     #[cfg(target_os = "linux")]
     pub(crate) fn push_batch(&mut self, batch: omq_shm::ReceivedBatch) -> bool {
         debug_assert!(!self.blocked());
@@ -584,15 +645,19 @@ impl Sink {
                 if self.producer.is_closed() {
                     return false;
                 }
+
                 self.pending = Some(Item::Batch(batch));
             }
         }
+
         self.producer.flush();
         true
     }
+
     pub(crate) fn blocked(&self) -> bool {
         self.pending.is_some()
     }
+
     /// Take back a message that `push` retained because the queue was full.
     pub(crate) fn take_pending(&mut self) -> Option<Message> {
         match self.pending.take()? {
@@ -604,13 +669,16 @@ impl Sink {
             }
         }
     }
+
     /// Report fullness and register the space waker when full.
     pub(crate) fn is_full(&mut self) -> bool {
         self.with_producer(Producer::is_full)
     }
+
     pub(crate) fn space(&self) -> Arc<StateSignal> {
         self.space.clone()
     }
+
     pub(crate) fn retry_pending(&mut self) -> bool {
         match self.pending.take() {
             Some(Item::Message(message)) => self.push(message),
@@ -619,6 +687,7 @@ impl Sink {
             None => true,
         }
     }
+
     pub(crate) async fn ready(&mut self) {
         let seen = self.space.generation();
         if self.with_producer(Producer::is_full) {

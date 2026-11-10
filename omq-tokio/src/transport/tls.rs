@@ -19,6 +19,7 @@ pub(crate) fn verified_client_config(
 ) -> Result<rustls::ClientConfig> {
     install_provider();
     let mut roots = rustls::RootCertStore::empty();
+
     if trust_system {
         let cert_result = rustls_native_certs::load_native_certs();
         if cert_result.certs.is_empty() && !cert_result.errors.is_empty() {
@@ -27,10 +28,12 @@ pub(crate) fn verified_client_config(
                 cert_result.errors,
             ))));
         }
+
         for cert in cert_result.certs {
             let _ = roots.add(cert);
         }
     }
+
     if let Some(pem) = trust_pem {
         let mut found = false;
         for cert in CertificateDer::pem_slice_iter(pem) {
@@ -40,10 +43,12 @@ pub(crate) fn verified_client_config(
                 .map_err(|e| Error::Protocol(format!("invalid trust certificate: {e}")))?;
             found = true;
         }
+
         if !found {
             return Err(Error::Protocol("trust PEM contains no certificates".into()));
         }
     }
+
     Ok(rustls::ClientConfig::builder()
         .with_root_certificates(roots)
         .with_no_client_auth())
@@ -56,6 +61,7 @@ pub(crate) fn server_config(cert_pem: &[u8], key_pem: &[u8]) -> Result<rustls::S
         .map_err(|e| Error::Protocol(format!("invalid cert PEM: {e}")))?;
     let key = PrivateKeyDer::from_pem_slice(key_pem)
         .map_err(|e| Error::Protocol(format!("invalid key PEM: {e}")))?;
+
     rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)
@@ -73,6 +79,7 @@ pub(crate) fn server_name(host: &Host, override_name: Option<&str>) -> Result<Se
             ));
         }
     };
+
     ServerName::try_from(name).map_err(|e| Error::Protocol(format!("invalid TLS server name: {e}")))
 }
 

@@ -25,6 +25,7 @@
 //! by configured message limits.
 
 mod arena;
+
 pub use arena::{
     MAX_ARENA_BYTES, MAX_ARENA_MESSAGES, MAX_ARENA_PARTS, arena_capacity, arena_message_size,
 };
@@ -43,6 +44,8 @@ use super::common::{
     check_dict_shipment, check_expansion, decode_plain, plaintext_payload, take_budget,
     validate_dict, wire_limit,
 };
+
+pub use super::MAX_DICT_BYTES;
 
 const SENTINEL_LZ4B: [u8; 4] = *b"LZ4B";
 const SENTINEL_LZ4M: [u8; 4] = *b"LZ4M";
@@ -63,16 +66,16 @@ const LZ4M_BLOCK_SIZE: usize = 0x4000_0000;
 /// allocation even when no `max_message_size` budget is configured.
 const LZ4_MAX_EXPANSION: usize = 255;
 
-pub use super::MAX_DICT_BYTES;
-
 fn decode_len(declared: u64, label: &str) -> Result<usize> {
     let size = usize::try_from(declared)
         .map_err(|_| Error::Protocol(format!("{label} declared size exceeds usize")))?;
+
     if size > isize::MAX as usize {
         return Err(Error::Protocol(format!(
             "{label} declared size exceeds maximum allocation"
         )));
     }
+
     Ok(size)
 }
 
@@ -175,9 +178,11 @@ impl Lz4Encoder {
     pub fn with_dict_capacity(mut self, capacity: usize) -> Self {
         let capacity = capacity.min(MAX_DICT_BYTES);
         self.send.dict_capacity = capacity;
+
         if self.trainer.is_some() {
             self.trainer = Some(DictTrainer::new(capacity));
         }
+
         self
     }
 
@@ -188,6 +193,7 @@ impl Lz4Encoder {
     pub fn with_send_dict(dict: Bytes) -> Result<Self> {
         validate_dict(&dict, "LZ4", MAX_DICT_BYTES)?;
         let compressor = LzCompressor::Dict(DictCompressor::new(&dict));
+
         Ok(Self {
             send: SendDict::new(Some(dict)),
             block_size: LZ4M_BLOCK_SIZE,
@@ -219,6 +225,7 @@ impl Lz4Encoder {
             "LZ4 block size {size} exceeds i32::MAX"
         );
         self.block_size = size;
+
         self
     }
 
@@ -278,6 +285,7 @@ impl Lz4Encoder {
             self.send.dict.clone_from(&primary.send.dict);
             self.compressor = LzCompressor::for_dict(self.send.dict.as_ref());
         }
+
         self.send.sync_settings(&primary.send);
         self.block_size = primary.block_size;
     }
@@ -290,9 +298,11 @@ impl Lz4Encoder {
         self.sample(msg);
         let mut out = self.ship_dictionary();
         let mut wire = Message::new();
+
         for part in &msg.parts_payload() {
             wire.push_part_payload(self.encode_part(part)?);
         }
+
         out.push(wire);
         Ok(out)
     }
@@ -302,10 +312,12 @@ impl Lz4Encoder {
             for part in &msg.parts_payload() {
                 trainer.add_sample(&part.as_bytes());
             }
+
             self.train_msgs_left = self.train_msgs_left.saturating_sub(1);
             if self.train_msgs_left == 0 {
                 let trainer = self.trainer.take().unwrap();
                 let dict_bytes = trainer.train();
+
                 if !dict_bytes.is_empty() {
                     let dict = Bytes::from(dict_bytes);
                     self.compressor = LzCompressor::Dict(DictCompressor::new(&dict));
@@ -320,6 +332,7 @@ impl Lz4Encoder {
         if let Some(dict) = self.send.take_shipment() {
             out.push(build_dict_shipment(SENTINEL_LZ4D, dict));
         }
+
         out
     }
 
@@ -332,13 +345,16 @@ impl Lz4Encoder {
         let size = arena::check_batch(messages, "LZ4")?;
         self.arena_buf.clear();
         self.arena_buf.reserve(size);
+
         for message in messages {
             self.sample(message);
             crate::proto::frame::encode_message_flat(message, &mut self.arena_buf);
         }
+
         let mut out = self.ship_dictionary();
         let bound = block::get_maximum_output_size(size);
         self.out_buf.resize(arena::HEADER + bound, 0);
+
         let compressed = if size >= self.send.effective_threshold() {
             Some(
                 self.compressor
@@ -349,10 +365,12 @@ impl Lz4Encoder {
         } else {
             None
         };
+
         let length = compressed.unwrap_or(size);
         if compressed.is_none() {
             self.out_buf[arena::HEADER..arena::HEADER + size].copy_from_slice(&self.arena_buf);
         }
+
         self.out_buf[..arena::HEADER].copy_from_slice(&arena::encode_header(
             arena::SENTINEL,
             compressed.is_some(),
@@ -362,6 +380,7 @@ impl Lz4Encoder {
         out.push(Message::single(Bytes::copy_from_slice(
             &self.out_buf[..arena::HEADER + length],
         )));
+
         Ok(out)
     }
 
@@ -370,22 +389,27 @@ impl Lz4Encoder {
         if plain.len() < self.send.effective_threshold() {
             return Ok(plaintext_payload(&plain));
         }
+
         if plain.len() > self.block_size {
             return self.encode_part_multiblock(&plain);
         }
+
         let bound = block::get_maximum_output_size(plain.len());
         if self.out_buf.len() < ENVELOPE_LZ4B + bound {
             self.out_buf.resize(ENVELOPE_LZ4B + bound, 0);
         }
+
         let n = self
             .compressor
             .compress_into(&plain, &mut self.out_buf[ENVELOPE_LZ4B..])
             .map_err(|e| Error::Protocol(format!("lz4 compress: {e}")))?;
+
         // RFC §5.4: passthrough if the compressed envelope is no smaller
         // than the plaintext envelope.
         if n + ENVELOPE_LZ4B >= plain.len() + ENVELOPE_PLAIN {
             return Ok(plaintext_payload(&plain));
         }
+
         self.out_buf[..4].copy_from_slice(&SENTINEL_LZ4B);
         self.out_buf[4..ENVELOPE_LZ4B].copy_from_slice(&(plain.len() as u64).to_le_bytes());
         Ok(Payload::from_bytes(Bytes::copy_from_slice(
@@ -399,6 +423,7 @@ impl Lz4Encoder {
         let num_blocks = total.div_ceil(block_size);
         let block_bound = block::get_maximum_output_size(block_size);
         let max_out = ENVELOPE_LZ4B + num_blocks * (4 + block_bound);
+
         if self.out_buf.len() < max_out {
             self.out_buf.resize(max_out, 0);
         }
@@ -482,6 +507,7 @@ impl Lz4Decoder {
             "LZ4 block size {size} exceeds i32::MAX"
         );
         self.block_size = size;
+
         self
     }
 
@@ -496,6 +522,7 @@ impl Lz4Decoder {
         if Self::is_arena(&msg) {
             return self.decode_arena(&msg, false, None);
         }
+
         self.decode_with_budget(msg, self.max_message_size, None)
     }
 
@@ -529,19 +556,23 @@ impl Lz4Decoder {
             count,
         } = arena::parse_header(msg.len(), bytes, "LZ4")?;
         let data = &bytes[arena::HEADER..];
+
         let payload = if compressed {
             decode_payload(size, pool, |mut out| {
                 let length = out
                     .decompress(data, self.decompressor.as_ref(), 0..size)
                     .map_err(|error| Error::Protocol(format!("lz4 arena decompress: {error}")))?;
+
                 if length != size {
                     return Err(invalid());
                 }
+
                 Ok(())
             })?
         } else {
             Payload::from_bytes(Bytes::copy_from_slice(data))
         };
+
         let retained = payload.retained_size().unwrap_or(size);
         Ok(self.arena.start(arena::DecodedArena::new(
             payload.as_bytes(),
@@ -561,9 +592,11 @@ impl Lz4Decoder {
         if Self::is_arena(&msg) {
             return self.decode_arena(&msg, true, pool);
         }
+
         if is_dict_shipment(&msg) {
             return self.decode(msg);
         }
+
         let budget = body_budget(msg.len(), self.max_message_size)?;
         self.decode_with_budget(msg, budget, pool)
     }
@@ -579,6 +612,7 @@ impl Lz4Decoder {
                 .saturating_add(blocks.saturating_mul(4 + 20))
                 .saturating_add(parts.saturating_mul(ENVELOPE_LZ4B));
             let setup = ENVELOPE_PLAIN + self.max_recv_dict_size + size_of::<Payload>();
+
             wire_limit(data, setup)
         })
     }
@@ -591,6 +625,7 @@ impl Lz4Decoder {
     ) -> Result<Option<Message>> {
         let mut parts = msg.into_parts_payload();
         let multipart = parts.len() > 1;
+
         for part in parts.iter_mut() {
             let bytes = part.as_bytes();
             if bytes.len() < 4 {
@@ -598,6 +633,7 @@ impl Lz4Decoder {
                     "lz4 part shorter than 4-byte sentinel".into(),
                 ));
             }
+
             let sentinel: [u8; 4] = bytes[..4].try_into().unwrap();
             match sentinel {
                 SENTINEL_PLAIN => *part = decode_plain(&bytes, &mut budget_left)?,
@@ -629,6 +665,7 @@ impl Lz4Decoder {
                         self.max_recv_dict_size,
                     )?;
                     self.decompressor = Some(Decompressor::with_dict(&dict));
+
                     return Ok(None);
                 }
                 _ => {
@@ -636,6 +673,7 @@ impl Lz4Decoder {
                 }
             }
         }
+
         Ok(Some(Message::from_parts(parts)))
     }
 }
@@ -679,16 +717,20 @@ fn decode_payload(
         decode(DecodeBuffer::Slice(&mut body[..size]))?;
         return Ok(Payload::from_slice(&body[..size]));
     }
+
     if let Some(mut buffer) = pool.and_then(|pool| pool.try_buffer(size)) {
         decode(DecodeBuffer::Slice(&mut buffer.writable()[..size]))?;
         buffer
             .set_len(size)
             .expect("selected slot fits decoded body");
+
         return Ok(buffer.into_payload());
     }
+
     // lz4rip decodes straight into the Vec, so the body is never copied.
     let mut body = Vec::with_capacity(size);
     decode(DecodeBuffer::Append(&mut body))?;
+
     Ok(Payload::from_bytes(Bytes::from(body)))
 }
 
@@ -704,25 +746,31 @@ fn decode_lz4b(
             "LZ4B part shorter than declared-size header".into(),
         ));
     }
+
     let declared = u64::from_le_bytes(body[..8].try_into().unwrap());
     let block = &body[8..];
     let decompressed_size = decode_len(declared, "LZ4B")?;
+
     if decompressed_size > block_size {
         return Err(Error::Protocol(
             "LZ4B declared size exceeds block limit; use LZ4M for large parts".into(),
         ));
     }
+
     check_expansion(decompressed_size, block.len(), LZ4_MAX_EXPANSION, "LZ4B")?;
     take_budget(budget, decompressed_size)?;
+
     decode_payload(decompressed_size, pool, |mut out| {
         let n = out
             .decompress(block, decompressor, 0..decompressed_size)
             .map_err(|e| Error::Protocol(format!("lz4 decompress: {e}")))?;
+
         if n != decompressed_size {
             return Err(Error::Protocol(
                 "LZ4B decompressed length does not match declared".into(),
             ));
         }
+
         Ok(())
     })
 }
@@ -739,6 +787,7 @@ fn decode_lz4m(
             "LZ4M part shorter than declared-size header".into(),
         ));
     }
+
     let declared = u64::from_le_bytes(body[..8].try_into().unwrap());
     let decompressed_size = decode_len(declared, "LZ4M")?;
     // The decompressed output cannot exceed the available compressed bytes
@@ -754,8 +803,10 @@ fn decode_lz4m(
             let Some(length) = body.get(src_pos..).and_then(|rest| rest.first_chunk::<4>()) else {
                 return Err(Error::Protocol("LZ4M truncated block length".into()));
             };
+
             let compressed_len = u32::from_le_bytes(*length) as usize;
             src_pos += 4;
+
             // The peer chooses the length; never let the end offset wrap.
             let Some(block_data) = src_pos
                 .checked_add(compressed_len)
@@ -763,6 +814,7 @@ fn decode_lz4m(
             else {
                 return Err(Error::Protocol("LZ4M truncated block data".into()));
             };
+
             src_pos += compressed_len;
 
             let remaining = decompressed_size - dst_pos;
@@ -775,11 +827,13 @@ fn decode_lz4m(
                     dst_pos..dst_pos + block_decompressed,
                 )
                 .map_err(|e| Error::Protocol(format!("lz4 decompress: {e}")))?;
+
             if n != block_decompressed {
                 return Err(Error::Protocol(
                     "LZ4M block decompressed length mismatch".into(),
                 ));
             }
+
             dst_pos += n;
         }
 

@@ -17,6 +17,7 @@ impl Submitter {
         if self.drop_on_full || self.peer.is_some() || !self.router_mandatory {
             return true;
         }
+
         let mut g = self.inner.lock().expect("identity inner poisoned");
         g.closed
             || g.peers
@@ -34,14 +35,17 @@ impl Submitter {
                     .values()
                     .map(|peer| self.space_changed(&peer.target))
                     .collect();
+
                 (
                     peers,
                     crate::engine::signal::any_changed([self.changed.clone()]),
                 )
             };
+
             if self.send_ready() {
                 return;
             }
+
             tokio::select! {
                 Some(()) = peers.next() => {},
                 () = changed.wait() => {},
@@ -59,8 +63,10 @@ impl Submitter {
             if !outbound.is_alive() {
                 return Box::pin(std::future::pending());
             }
+
             return Box::pin(async move { outbound.wait_capacity().await });
         }
+
         match target {
             PeerTarget::Pipe(pipe) | PeerTarget::RepInproc(pipe) => {
                 Box::pin(crate::engine::signal::any_changed(pipe.readiness_signals()).wait())
@@ -90,9 +96,11 @@ impl Submitter {
                     crate::engine::signal::any_changed([self.changed.clone()]),
                 )
             };
+
             if self.rep_send_ready(peer_id) {
                 return;
             }
+
             let Some(peer) = peer else { return };
             tokio::select! {
                 () = peer => {},
@@ -106,24 +114,29 @@ impl Submitter {
             peer.wait_send_progress(msg, &self.lanes).await;
             return;
         }
+
         let Some(identity) = msg.part_slice(0) else {
             tokio::task::yield_now().await;
             return;
         };
+
         let (peer_id, waiting, outbound) = {
             let state = self.inner.lock().expect("identity inner poisoned");
             let Some(peer_id) = state.route_id(identity) else {
                 return;
             };
+
             let Some(peer) = state.peers.get(&peer_id) else {
                 return;
             };
+
             (
                 peer_id,
                 peer.target.space_available(),
                 peer.target.outbound(&self.data_lanes),
             )
         };
+
         if let Some(target) = outbound {
             self.wait_outbound(peer_id, &target, Some(identity)).await;
         } else if let Some(space) = waiting {
@@ -138,6 +151,7 @@ impl Submitter {
         if g.closed {
             return true;
         }
+
         let peer = g.route_id(identity).and_then(|id| g.peers.get(&id));
         let Some(IdentityPeer {
             target: PeerTarget::Pipe(pipe) | PeerTarget::RepInproc(pipe),
@@ -146,6 +160,7 @@ impl Submitter {
         else {
             return true;
         };
+
         pipe_progressed(pipe, waiting)
     }
 
@@ -155,11 +170,13 @@ impl Submitter {
             let Some(peer) = state.peers.get(&peer_id) else {
                 return;
             };
+
             (
                 peer.target.space_available(),
                 peer.target.outbound(&self.data_lanes),
             )
         };
+
         if let Some(target) = outbound {
             self.wait_outbound(peer_id, &target, None).await;
         } else if let Some(space) = space {
@@ -186,6 +203,7 @@ impl Submitter {
             target.wait_capacity().await;
             return;
         };
+
         space
             .wait_until(|| {
                 let state = self.inner.lock().expect("identity inner poisoned");
@@ -199,6 +217,7 @@ impl Submitter {
                 {
                     return true;
                 }
+
                 drop(state);
                 target.send_ready()
             })

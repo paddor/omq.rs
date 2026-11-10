@@ -1,3 +1,8 @@
+use super::null::NullState;
+use super::*;
+use crate::proto::SocketType;
+use bytes::Bytes;
+
 #[cfg(feature = "plain")]
 #[test]
 fn peer_info_debug_redacts_plain_password() {
@@ -9,15 +14,11 @@ fn peer_info_debug_redacts_plain_password() {
         username: Some("alice".into()),
         password: Some("password-sentinel".into()),
     };
+
     let debug = format!("{info:?}");
     assert!(debug.contains("password: Some(\"<redacted>\")"));
     assert!(!debug.contains("password-sentinel"));
 }
-
-use super::null::NullState;
-use super::*;
-use crate::proto::SocketType;
-use bytes::Bytes;
 
 #[test]
 fn null_authentication_properties_override_peer_claims() {
@@ -34,15 +35,18 @@ fn null_authentication_properties_override_peer_claims() {
         let mut out = Vec::new();
         server.start(&mut out, PeerProperties::default()).unwrap();
         let mut peer = PeerProperties::default().with_socket_type(SocketType::Push);
+
         for name in ["User-Id", "user-id", "USER-ID", "Role", "role", "ROLE"] {
             peer.add(name, Bytes::from_static(b"admin"));
         }
+
         peer.add("X-Application", Bytes::from_static(b"client"));
         let MechanismStep::Complete { peer_properties } =
             server.on_command(Command::Ready(peer), &mut out).unwrap()
         else {
             panic!("expected completed handshake");
         };
+
         assert_eq!(
             peer_properties.authentication.mechanism,
             Some(MechanismName::NULL)
@@ -54,9 +58,11 @@ fn null_authentication_properties_override_peer_claims() {
         );
         assert!(peer_properties.authentication.public_key.is_none());
         let mut expected = vec![("X-Application".into(), Bytes::from_static(b"client"))];
+
         if let Some(user_id) = user_id {
             expected.push(("User-Id".into(), user_id));
         }
+
         expected.push(("Role".into(), Bytes::from_static(b"reader")));
         assert_eq!(peer_properties.other, expected);
         assert_eq!(peer_properties.socket_type, Some(SocketType::Push));
@@ -89,12 +95,14 @@ fn null_accepts_peer_ready() {
             &mut out,
         )
         .unwrap();
+
     match step {
         MechanismStep::Complete { peer_properties } => {
             assert_eq!(peer_properties.socket_type, Some(SocketType::Pull));
         }
         MechanismStep::Continue => panic!("expected Complete"),
     }
+
     assert_eq!(m.state, NullState::Done);
 }
 
@@ -116,6 +124,7 @@ fn null_surfaces_error_reason() {
     let mut out = Vec::new();
     m.start(&mut out, PeerProperties::default()).unwrap();
     out.clear();
+
     let err = m
         .on_command(
             Command::Unknown {
@@ -125,6 +134,7 @@ fn null_surfaces_error_reason() {
             &mut out,
         )
         .unwrap_err();
+
     match err {
         Error::HandshakeRefused(refusal) => {
             assert_eq!(refusal.mechanism, MechanismName::NULL);

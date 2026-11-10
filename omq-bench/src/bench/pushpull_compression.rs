@@ -9,6 +9,26 @@ use crate::process;
 const CHART_SIZES: &[u64] = &[16, 32, 64, 256, 1024, 4096, 16384, 65536, 262_144];
 const QUICK_SIZES: &[u64] = &[64, 1024, 16384];
 
+// Positional shell arguments keep paths and user arguments out of shell code.
+const NETEM_SETUP: &str = r#"
+set -eu
+export PATH="$PATH:/usr/sbin:/sbin"
+rate=$1
+delay=$2
+shift 2
+ip link set lo up
+ip link set lo mtu 1500
+ethtool -K lo gso off gro off tso off tx-udp-segmentation off tx-gso-list off
+ip link add ifb0 type ifb
+ip link set ifb0 up
+tc qdisc add dev lo clsact
+tc filter add dev lo ingress protocol ip pref 1 flower ip_proto tcp action mirred egress redirect dev ifb0
+export OMQ_BENCH_NETEM="limit 10000 delay ${delay}us rate ${rate}mbit"
+tc qdisc add dev ifb0 root netem $OMQ_BENCH_NETEM
+trap 'tc -s qdisc show dev ifb0' EXIT
+"$@"
+"#;
+
 pub(crate) struct Config {
     pub feature: &'static str,
     pub common: PushpullCompressionArgs,
@@ -31,34 +51,16 @@ pub(crate) struct Measurement {
     pub wire_bytes: u64,
 }
 
-// Positional shell arguments keep paths and user arguments out of shell code.
-const NETEM_SETUP: &str = r#"
-set -eu
-export PATH="$PATH:/usr/sbin:/sbin"
-rate=$1
-delay=$2
-shift 2
-ip link set lo up
-ip link set lo mtu 1500
-ethtool -K lo gso off gro off tso off tx-udp-segmentation off tx-gso-list off
-ip link add ifb0 type ifb
-ip link set ifb0 up
-tc qdisc add dev lo clsact
-tc filter add dev lo ingress protocol ip pref 1 flower ip_proto tcp action mirred egress redirect dev ifb0
-export OMQ_BENCH_NETEM="limit 10000 delay ${delay}us rate ${rate}mbit"
-tc qdisc add dev ifb0 root netem $OMQ_BENCH_NETEM
-trap 'tc -s qdisc show dev ifb0' EXIT
-"$@"
-"#;
-
 pub(crate) fn run_in_netem(args: &CompressionLinkArgs) -> bool {
     let Some(rate) = args.link_mbps else {
         return false;
     };
+
     assert_eq!(std::env::consts::OS, "linux", "netem requires Linux");
     if std::env::var_os("OMQ_BENCH_NETEM_READY").is_some() {
         return false;
     }
+
     let executable = std::env::current_exe().expect("benchmark executable");
     let status = Command::new("unshare")
         .args(["--user", "--map-root-user", "--net", "sh", "-c"])
@@ -71,6 +73,7 @@ pub(crate) fn run_in_netem(args: &CompressionLinkArgs) -> bool {
         .env("OMQ_BENCH_NETEM_READY", "1")
         .status()
         .expect("start private netem namespace");
+
     assert!(status.success(), "netem benchmark failed");
     true
 }
@@ -79,6 +82,7 @@ fn utility(peers: &Peers, args: &[&str], env: &[(&str, &str)], timeout: Duration
     let binary = peers.utility.to_str().expect("utility path");
     let mut command = vec![binary];
     command.extend_from_slice(args);
+
     process::capture(&command, env, None, timeout).expect("compression utility failed or timed out")
 }
 
@@ -91,15 +95,19 @@ fn environment<'a>(
         ("OMQ_BENCH_PAYLOAD", "structured-varied-v1"),
         ("OMQ_BENCH_JSON_SEED", "4242"),
     ];
+
     if let Some(path) = dict {
         env.push(("OMQ_BENCH_DICT_FILE", path));
     }
+
     if let Some(level) = level {
         env.push(("OMQ_BENCH_ZSTD_LEVEL", level));
     }
+
     if let Some(range) = level_range {
         env.push(("OMQ_BENCH_ZSTD_LEVEL_RANGE", range));
     }
+
     env
 }
 
@@ -157,6 +165,7 @@ fn reset_netem_queue() {
     let Ok(netem) = std::env::var("OMQ_BENCH_NETEM") else {
         return;
     };
+
     for args in [
         vec!["qdisc", "del", "dev", "ifb0", "root"],
         ["qdisc", "add", "dev", "ifb0", "root", "netem"]
@@ -191,6 +200,7 @@ fn parse_measurement(output: &str, size: u64) -> Measurement {
             .and_then(|field| field.parse().ok())
             .expect("integer measurement field")
     };
+
     assert_eq!(integer(2), size, "incorrect payload size");
 
     Measurement {
@@ -223,9 +233,11 @@ impl Sweep<'_> {
             level.as_deref(),
             level_range.as_deref(),
         );
+
         if let Some(rate) = &send_rate {
             env.push(("OMQ_BENCH_SEND_RATE", rate));
         }
+
         let cache = jsonl::cache_dir().join(format!("results_pushpull_{}.jsonl", config.feature));
 
         for &size in self.sizes {
@@ -248,6 +260,7 @@ impl Sweep<'_> {
                 let sample = run_cell(&cell, &env, &env);
                 let msgs_s = sample.count / sample.elapsed;
                 let mbps = msgs_s * size as f64 / 1_000_000.0;
+
                 let row = PushpullLz4Row {
                     msg_count: Some(sample.count),
                     elapsed: Some(sample.elapsed),
@@ -347,11 +360,13 @@ impl Sweep<'_> {
             "/tmp/omq-bench-{feature}-dict-{capacity}-{}.bin",
             std::process::id()
         );
+
         let action = if feature == "lz4" {
             "train-dict"
         } else {
             "train-zstd-dict"
         };
+
         utility(
             self.peers,
             &[action, &path, &capacity.to_string()],
@@ -384,6 +399,7 @@ pub(crate) fn peer_sha256(binary: &Path) -> String {
         .output()
         .expect("hash benchmark peer");
     assert!(hash.status.success(), "benchmark peer hash failed");
+
     String::from_utf8(hash.stdout)
         .expect("UTF-8 peer hash")
         .split_whitespace()
@@ -398,6 +414,7 @@ pub(crate) fn run(config: &Config) {
     assert!(common.link.warmup_seconds.is_finite() && common.link.warmup_seconds >= 0.0);
     assert!(common.rounds > 0);
     let [blocking, utility_path] = process::build_compression_peers(config.feature);
+
     if run_in_netem(&common.link) {
         return;
     }
@@ -409,13 +426,16 @@ pub(crate) fn run(config: &Config) {
         utility: utility_path,
         sha256,
     };
+
     let sizes = common.sizes.as_deref().unwrap_or(if common.quick {
         QUICK_SIZES
     } else {
         CHART_SIZES
     });
     assert!(sizes.iter().all(|size| *size > 0));
+
     let run_id = super::unix_nanos().to_string();
+
     let transports: Vec<_> = common.transports.split(',').collect();
     let compressed = format!("{}+tcp", config.feature);
     assert!(
@@ -433,9 +453,11 @@ pub(crate) fn run(config: &Config) {
         rounds: if common.quick { 1 } else { common.rounds },
         duration: if common.quick { 1.5 } else { common.duration },
     };
+
     for transport in &transports {
         sweep.measure(transport, None);
     }
+
     for &capacity in &common.dict_sizes {
         sweep.measure_dictionary(
             capacity,

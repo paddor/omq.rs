@@ -47,6 +47,7 @@ async fn plain_refusal_stops_automatic_reconnect() {
     );
     let mut monitor = client.monitor();
     client.connect(endpoint).await.unwrap();
+
     tokio::time::timeout(Duration::from_secs(2), async {
         while !matches!(
             monitor.recv().await.unwrap(),
@@ -55,6 +56,7 @@ async fn plain_refusal_stops_automatic_reconnect() {
     })
     .await
     .unwrap();
+
     let stopped = tokio::time::timeout(Duration::from_secs(1), monitor.recv())
         .await
         .unwrap()
@@ -80,6 +82,7 @@ async fn plain_refusal_stops_automatic_reconnect() {
 async fn plain_temporary_auth_failure_reconnects_and_delivers() {
     let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observed = attempts.clone();
+
     let server = Socket::new(
         SocketType::Pull,
         Options {
@@ -98,6 +101,7 @@ async fn plain_temporary_auth_failure_reconnects_and_delivers() {
             ..Options::default()
         },
     );
+
     let endpoint = server.bind(auth_ep("temporary-reconnect")).await.unwrap();
     let client = Socket::new(
         SocketType::Push,
@@ -311,6 +315,7 @@ async fn router_identity_stays_with_its_plain_user() {
     );
     let mut monitor = router.monitor();
     let ep = router.bind(auth_ep("identity-owner")).await.unwrap();
+
     let dealer = |username| {
         Socket::new(
             SocketType::Dealer,
@@ -320,12 +325,14 @@ async fn router_identity_stays_with_its_plain_user() {
                 .reconnect(omq_tokio::ReconnectPolicy::Disabled),
         )
     };
+
     let alice = dealer("alice");
     alice.connect(ep.clone()).await.unwrap();
     test_support::wait_for_handshake(&alice).await;
 
     let mallory = dealer("mallory");
     mallory.connect(ep.clone()).await.unwrap();
+
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             if let omq_tokio::MonitorEvent::HandshakeFailed { reason, .. } =
@@ -338,6 +345,7 @@ async fn router_identity_stays_with_its_plain_user() {
     })
     .await
     .expect("another user took over the identity");
+
     router
         .send(Message::multipart(["shared", "to-alice"]))
         .await
@@ -390,6 +398,7 @@ async fn plain_pub_sub() {
             return;
         }
     }
+
     panic!("SUB never received over PLAIN");
 }
 
@@ -473,13 +482,16 @@ async fn plain_reconnect_after_server_restart() {
         Options::default().plain_server(accept_alice),
     );
     let mut bound = false;
+
     for _ in 0..20 {
         if server2.bind(ep.clone()).await.is_ok() {
             bound = true;
             break;
         }
+
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+
     assert!(bound);
 
     client.send(Message::single("after")).await.unwrap();

@@ -20,6 +20,7 @@ pub(super) fn run_multi_pull(
 ) {
     let drain_batch = multi_pull_drain_batch(size);
     let mut sockets = Vec::with_capacity(socket_count);
+
     for _ in 0..socket_count {
         let s = ctx.blocking_socket(SocketType::Pull, bench_options_client(size));
         s.connect(ep.clone()).expect("pull connect");
@@ -28,6 +29,7 @@ pub(super) fn run_multi_pull(
 
     std::thread::sleep(Duration::from_millis(500));
     wait_for_start_barrier();
+
     for s in &sockets {
         drain_warmup(s);
     }
@@ -38,11 +40,13 @@ pub(super) fn run_multi_pull(
 
     // Let the drainers reach steady state before the measured window opens.
     std::thread::sleep(Duration::from_millis(500));
+
     let cpu_before = cpu_time_secs();
     let t0 = Instant::now();
     started.store(true, Ordering::Release);
     std::thread::sleep(duration);
     stop.store(true, Ordering::Release);
+
     let elapsed = t0.elapsed().as_secs_f64();
     let per_socket: Vec<u64> = handles.into_iter().map(|h| h.join().unwrap()).collect();
     let cpu = cpu_time_secs() - cpu_before;
@@ -68,28 +72,35 @@ fn spawn_pull_drainers(
         .map(|sock| {
             let started = Arc::clone(started);
             let stop = Arc::clone(stop);
+
             std::thread::spawn(move || {
                 let mut count = 0_u64;
                 loop {
                     if stop.load(Ordering::Acquire) {
                         break;
                     }
+
                     let measuring = started.load(Ordering::Acquire);
                     let mut received = 0;
+
                     for _ in 0..drain_batch {
                         if sock.try_recv().is_err() {
                             break;
                         }
+
                         received += 1;
                     }
+
                     // Count only whole turns inside the measured interval.
                     if measuring && !stop.load(Ordering::Acquire) {
                         count += received;
                     }
+
                     if received == 0 {
                         std::thread::yield_now();
                     }
                 }
+
                 count
             })
         })
@@ -106,6 +117,7 @@ pub(super) fn run_multi_push(
 ) {
     let batch = multi_pull_drain_batch(size);
     let mut sockets = Vec::with_capacity(socket_count);
+
     for _ in 0..socket_count {
         let s = ctx.blocking_socket(SocketType::Push, bench_options_client(size));
         s.connect(ep.clone()).expect("push connect");
@@ -131,15 +143,18 @@ pub(super) fn run_multi_push(
                             send_fast(&sock, Message::from_slice(&p));
                             count += 1;
                         }
+
                         counter.store(count, Ordering::Relaxed);
                     }
                 }
+
                 let msg = Message::single(p);
                 loop {
                     for _ in 0..batch {
                         send_fast(&sock, msg.clone());
                         count += 1;
                     }
+
                     counter.store(count, Ordering::Relaxed);
                 }
             })
@@ -151,6 +166,7 @@ pub(super) fn run_multi_push(
         std::thread::park();
         return;
     };
+
     std::thread::sleep(Duration::from_secs_f64(duration));
     print_multi_push(&counters, duration, size);
 }
@@ -165,6 +181,7 @@ fn print_multi_push(counters: &[Arc<AtomicU64>], elapsed: f64, size: usize) {
     let total: u64 = counters.iter().map(|c| c.load(Ordering::Relaxed)).sum();
     let mut sorted = rates.clone();
     sorted.sort_unstable_by(f64::total_cmp);
+
     println!(
         "{total} {elapsed:.6} {size} {:.6} {socket_count} {:.1} {:.1} {:.1} {:.1} {:.1} {:.1} {:.1}",
         cpu_time_secs(),

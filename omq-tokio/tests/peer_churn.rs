@@ -17,6 +17,7 @@ async fn drain(socket: &Socket, timeout_ms: u64) -> Vec<String> {
     {
         msgs.push(String::from_utf8_lossy(&m.part_bytes(0).unwrap()).into_owned());
     }
+
     msgs
 }
 

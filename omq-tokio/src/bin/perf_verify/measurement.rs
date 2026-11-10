@@ -100,11 +100,13 @@ pub(super) fn drain_ready(
     if started >= window.end {
         return DrainResult::Deadline;
     }
+
     let mut count = 0;
     let result = loop {
         if budget.exhausted() {
             break DrainResult::Budget;
         }
+
         match recv() {
             Ok(message) => {
                 count += u64::from(is_measured(&message));
@@ -116,6 +118,7 @@ pub(super) fn drain_ready(
             Err(error) => panic!("perf recv failed: {error}"),
         }
     };
+
     let finished = now();
     // Timestamp the bounded batch, not every message. Commit only batches
     // entirely within the window: preemption can lower the count, never add
@@ -123,6 +126,7 @@ pub(super) fn drain_ready(
     if started >= window.start && finished < window.end {
         counter.count += count;
     }
+
     if finished >= window.end {
         DrainResult::Deadline
     } else {
@@ -159,10 +163,12 @@ pub(super) fn send_blocking_batch_until_with(
     if Instant::now() >= deadline {
         return false;
     }
+
     let mut budget = DrainBudget::WORKER;
     loop {
         let mut msg = message();
         let bytes = msg.byte_len();
+
         loop {
             match sock.try_send(msg) {
                 Ok(()) => break,
@@ -170,12 +176,14 @@ pub(super) fn send_blocking_batch_until_with(
                     if Instant::now() >= deadline {
                         return false;
                     }
+
                     msg = returned;
                     thread::yield_now();
                 }
                 Err(error) => panic!("perf send failed: {error}"),
             }
         }
+
         if !budget.account(bytes) {
             return true;
         }
@@ -196,8 +204,10 @@ fn count_blocking(sock: &omq_tokio::blocking::Socket, window: Window) -> Receive
         {
             break;
         }
+
         thread::yield_now();
     }
+
     counter.finish(Instant::now())
 }
 
@@ -215,6 +225,7 @@ pub(super) fn count_blocking_many(
 ) -> Received {
     assert!(!sockets.is_empty(), "at least one receiver is required");
     let mut counters: Vec<_> = sockets.iter().map(|_| Counter::new(window)).collect();
+
     'receive: loop {
         for (socket, counter) in sockets.iter().zip(&mut counters) {
             let mut budget = DrainBudget::new(64, 64 * 1024);
@@ -229,8 +240,10 @@ pub(super) fn count_blocking_many(
                 break 'receive;
             }
         }
+
         thread::yield_now();
     }
+
     let now = Instant::now();
     counters
         .into_iter()
@@ -252,19 +265,23 @@ pub(super) fn transfer_blocking_many(
     let (window_tx, window_rx) = mpsc::channel();
     let ready = Arc::new(Barrier::new(2));
     let receiver_ready = ready.clone();
+
     let handle = thread::spawn(move || {
         SETTINGS.affinity.pin(5);
         receiver_ready.wait();
         let window = window_rx.recv().expect("receive benchmark window");
+
         if receivers.len() == 1 {
             count_blocking(&receivers[0], window)
         } else {
             count_blocking_many(&receivers, window)
         }
     });
+
     ready.wait();
     let window = Window::new(Instant::now(), SETTINGS.warmup, SETTINGS.measure);
     window_tx.send(window).expect("send benchmark window");
+
     // Warm the actual data path while the receiver drains. Tags exclude any
     // warmup backlog still in flight when measurement starts.
     for (message, deadline) in [
@@ -273,147 +290,10 @@ pub(super) fn transfer_blocking_many(
     ] {
         while send_blocking_batch_until(sender, &message, deadline) {}
     }
+
     handle.join().expect("receiver thread").rate()
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn excludes_warmup_backlog_and_messages_after_deadline() {
-        let now = Instant::now();
-        let window = Window::new(now, Duration::from_secs(1), Duration::from_secs(2));
-        let mut counter = Counter::new(window);
-        let warmup = Message::from_slice(&[0]);
-        let measured = Message::from_slice(&[MEASURED_TAG]);
-        counter.record(&measured, now);
-        counter.record(&warmup, window.start);
-        counter.record(&measured, window.start);
-        counter.record(&measured, window.end);
-        counter.record(&measured, window.end + Duration::from_secs(1));
-        let received = counter.finish(window.end + Duration::from_secs(1));
-        assert_eq!(received.count, 1);
-        assert_eq!(received.elapsed, Duration::from_secs(3));
-        assert!((received.rate() - 1.0 / 3.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn classifies_router_messages_by_body_instead_of_identity() {
-        use bytes::Bytes;
-
-        let now = Instant::now();
-        let window = Window::new(now, Duration::ZERO, Duration::from_secs(1));
-        let mut counter = Counter::new(window);
-        let warmup = Message::multipart([
-            Bytes::from_static(&[MEASURED_TAG]),
-            Bytes::from_static(&[0]),
-        ]);
-        let measured = Message::multipart([
-            Bytes::from_static(&[0]),
-            Bytes::from_static(&[MEASURED_TAG]),
-        ]);
-        counter.record(&warmup, now);
-        counter.record(&measured, now);
-        assert_eq!(counter.finish(window.end).count, 1);
-    }
-
-    #[test]
-    fn uses_common_window_for_receivers_finishing_at_different_times() {
-        let first = Received {
-            count: 100,
-            elapsed: Duration::from_secs(1),
-        };
-        let second = Received {
-            count: 200,
-            elapsed: Duration::from_secs(2),
-        };
-        assert!((first.combine(second).rate() - 150.0).abs() < f64::EPSILON);
-    }
-    #[test]
-    fn continuously_ready_receiver_yields_at_both_budget_limits() {
-        let now = Instant::now();
-        let window = Window::new(now, Duration::ZERO, Duration::from_secs(1));
-        for (size, expected) in [(16, 256), (1024 * 1024, 2)] {
-            let message = Message::from_slice(&vec![MEASURED_TAG; size]);
-            let mut counter = Counter::new(window);
-            let mut budget = omq_proto::flow::DrainBudget::WORKER;
-            let mut clock_reads = 0;
-            let result = drain_ready(
-                || Ok(message.clone()),
-                &mut counter,
-                window,
-                &mut budget,
-                || {
-                    clock_reads += 1;
-                    now
-                },
-            );
-            assert_eq!(result, DrainResult::Budget);
-            assert_eq!(counter.count, expected);
-            assert_eq!(clock_reads, 2, "clock cost must be per batch");
-        }
-    }
-
-    #[test]
-    fn checks_clock_per_batch_and_excludes_batch_crossing_deadline() {
-        let now = Instant::now();
-        let window = Window::new(now, Duration::ZERO, Duration::from_secs(1));
-        let mut times = [now, window.end].into_iter();
-        let mut counter = Counter::new(window);
-        let mut budget = omq_proto::flow::DrainBudget::new(3, 1024);
-        let mut calls = 0;
-        let result = drain_ready(
-            || {
-                calls += 1;
-                Ok(Message::from_slice(&[MEASURED_TAG]))
-            },
-            &mut counter,
-            window,
-            &mut budget,
-            || times.next().unwrap(),
-        );
-        assert_eq!(result, DrainResult::Deadline);
-        assert_eq!(calls, 3);
-        assert_eq!(counter.count, 0);
-    }
-
-    #[test]
-    fn discards_batch_straddling_warmup_and_keeps_next_complete_batch() {
-        let now = Instant::now();
-        let window = Window::new(now, Duration::from_secs(1), Duration::from_secs(1));
-        let mut counter = Counter::new(window);
-        for (start, expected) in [(now, 0), (window.start, 2)] {
-            let mut times = [start, window.start + Duration::from_millis(1)].into_iter();
-            let mut messages = [0, MEASURED_TAG, MEASURED_TAG].into_iter();
-            assert_eq!(
-                drain_ready(
-                    || Ok(Message::from_slice(&[messages.next().unwrap()])),
-                    &mut counter,
-                    window,
-                    &mut omq_proto::flow::DrainBudget::new(3, 1024),
-                    || times.next().expect("only two clock reads per batch"),
-                ),
-                DrainResult::Budget,
-            );
-            assert_eq!(counter.count, expected);
-        }
-    }
-
-    #[test]
-    fn expired_window_does_not_receive_another_batch() {
-        let now = Instant::now();
-        let window = Window::new(now, Duration::ZERO, Duration::from_secs(1));
-        let mut budget = omq_proto::flow::DrainBudget::WORKER;
-        assert_eq!(
-            drain_ready(
-                || panic!("no receive after observed deadline"),
-                &mut Counter::new(window),
-                window,
-                &mut budget,
-                || window.end,
-            ),
-            DrainResult::Deadline,
-        );
-    }
-}
+#[path = "measurement/tests.rs"]
+mod tests;

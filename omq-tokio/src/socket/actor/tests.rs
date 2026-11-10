@@ -41,6 +41,7 @@ async fn send_queues_until_peer_ready() {
         let c = client.clone();
         tokio::spawn(async move { c.send(Message::single("early")).await })
     };
+
     // Now set up the pair.
     server.bind(ep.clone()).await.unwrap();
     client.connect(ep).await.unwrap();

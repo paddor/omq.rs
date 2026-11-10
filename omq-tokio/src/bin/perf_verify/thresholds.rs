@@ -25,6 +25,7 @@ fn smoke_thresholds() -> HashMap<String, f64> {
         ("inproc_pushpull_1io.16b_msgs_s".to_string(), 1_000_000.0),
     ]);
     draft::smoke_thresholds(&mut thresholds);
+
     thresholds
 }
 
@@ -39,25 +40,31 @@ pub(super) fn read_thresholds() -> ThresholdConfig {
         }
         Err(error) => panic!("cannot read .perf_hw: {error}"),
     };
+
     println!("threshold file: .perf_hw");
     let mut section = String::new();
     let mut thresholds = HashMap::new();
+
     for line in contents.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
+
         if let Some(name) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
             section = name.trim().to_string();
             continue;
         }
+
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
+
         if let Ok(value) = value.trim().parse() {
             thresholds.insert(format!("{section}.{}", key.trim()), value);
         }
     }
+
     ThresholdConfig {
         mode: ThresholdMode::Hardware,
         values: thresholds,
@@ -77,12 +84,14 @@ pub(super) fn verify(sample: &Sample, thresholds: &HashMap<String, f64>) -> bool
     let key = &sample.name;
     println!("{:<24} {:>12.2} {}", sample.name, sample.value, sample.unit);
     let contract = (sample.unit == "ratio").then_some(contract::MIN_RATIO);
+
     match thresholds.get(key).or(contract.as_ref()) {
         Some(limit) if sample.unit == "us" && sample.value > *limit => {
             eprintln!(
                 "FAIL {key}: {:.2} above configured {:.2} {}",
                 sample.value, limit, sample.unit
             );
+
             false
         }
         Some(limit) if sample.unit == "us" => {
@@ -94,6 +103,7 @@ pub(super) fn verify(sample: &Sample, thresholds: &HashMap<String, f64>) -> bool
                 "FAIL {key}: {:.2} below configured {:.2} {}",
                 sample.value, limit, sample.unit
             );
+
             false
         }
         Some(limit) => {

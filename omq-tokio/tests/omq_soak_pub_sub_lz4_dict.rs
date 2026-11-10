@@ -6,9 +6,6 @@
 //! raw TCP late subscribers. Each raw late subscriber must receive one
 //! dictionary shipment before dictionary-compressed payloads.
 
-#[global_allocator]
-static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
-
 mod soak_common;
 
 use std::sync::Arc;
@@ -18,6 +15,9 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use omq_tokio::endpoint::Host;
 use omq_tokio::{Endpoint, Message, MonitorEvent, Options, Socket, SocketType};
+
+#[global_allocator]
+static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
 
 const DECODED_SUBS: usize = 4;
 const TRAINING_MSGS: u64 = 128;
@@ -51,6 +51,7 @@ fn lz4_options() -> Options {
 async fn bind_lz4_pub(publisher: &Socket) -> (Endpoint, omq_tokio::MonitorStream) {
     let mut mon = publisher.monitor();
     publisher.bind(lz4_tcp_ep(0)).await.unwrap();
+
     loop {
         if let MonitorEvent::Listening {
             endpoint: Endpoint::Lz4Tcp { port, .. },
@@ -75,6 +76,7 @@ async fn wait_for_subscribes(mon: &mut omq_tokio::MonitorStream, n: usize) {
             }
         }
     };
+
     tokio::time::timeout(Duration::from_secs(5), fut)
         .await
         .expect("subscribes did not propagate");
@@ -93,12 +95,14 @@ fn verify_message(message: &Message, previous: &mut Option<u64>) {
     let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let seq = value["seq"].as_u64().expect("publication sequence");
     assert_eq!(bytes, payload(seq), "corrupt publication {seq}");
+
     if let Some(last) = previous {
         assert!(
             seq > *last,
             "duplicate or reordered publication {seq} after {last}"
         );
     }
+
     *previous = Some(seq);
 }
 
@@ -112,6 +116,7 @@ async fn assert_raw_dict_then_payloads(raw: &Socket) -> u64 {
     assert!(decoder.decode(dict).unwrap().is_none());
     let mut previous = None;
     let mut arenas = 0;
+
     for idx in 0..RAW_PAYLOAD_CHECKS {
         let msg = tokio::time::timeout(RAW_RECV_TIMEOUT, raw.recv())
             .await
@@ -123,20 +128,26 @@ async fn assert_raw_dict_then_payloads(raw: &Socket) -> u64 {
             arena || part.starts_with(b"LZ4B"),
             "unexpected wire envelope"
         );
+
         if arena {
             assert_eq!(part[4], 1, "expected compressed arena");
             arenas += 1;
         }
+
         let message = decoder.decode(msg).unwrap().expect("duplicate dictionary");
         verify_message(&message, &mut previous);
+
         for _ in 1..omq_proto::proto::transform::arena::MAX_ARENA_MESSAGES {
             let Some(message) = decoder.poll_message() else {
                 break;
             };
+
             verify_message(&message, &mut previous);
         }
+
         assert!(!decoder.has_pending_messages());
     }
+
     arenas
 }
 
@@ -179,6 +190,7 @@ async fn connect_decoded_subs(ep: &Endpoint, mon: &mut omq_tokio::MonitorStream)
         sub.subscribe(Bytes::new()).await.unwrap();
         decoded_subs.push(sub);
     }
+
     wait_for_subscribes(mon, DECODED_SUBS).await;
     decoded_subs
 }
@@ -253,12 +265,14 @@ fn soak_pub_sub_lz4_dict_io_lane_fanout() {
             let task = receive_publications(sub.clone(), progress.clone());
             decode_tasks.push(tokio::spawn(task));
         }
+
         let send_task = spawn_publisher(publisher.clone(), progress.clone());
 
         let start = Instant::now();
         // Backdate the last probe so the first one runs immediately.
         let mut last_probe = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
         let mut last_log = start;
+
         while start.elapsed() < duration {
             tokio::time::sleep(Duration::from_millis(50)).await;
             if last_probe.elapsed() >= Duration::from_millis(500) {
@@ -280,6 +294,7 @@ fn soak_pub_sub_lz4_dict_io_lane_fanout() {
 
         progress.stop.store(true, Ordering::Relaxed);
         send_task.await.expect("publisher task failed");
+
         for task in decode_tasks {
             task.await.expect("subscriber task failed");
         }
@@ -288,6 +303,7 @@ fn soak_pub_sub_lz4_dict_io_lane_fanout() {
         for sub in decoded_subs {
             sub.close().await.unwrap();
         }
+
         publisher.close().await.unwrap();
     });
 

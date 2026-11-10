@@ -45,9 +45,11 @@ fn main() {
                 ),
             )
             .await;
+
             common::print_cell(size, cell);
             common::append_jsonl(PATTERN, "PLAIN", 1, size, cell);
         }
+
         println!();
 
         #[cfg(feature = "curve")]
@@ -70,9 +72,11 @@ fn main() {
                     ),
                 )
                 .await;
+
                 common::print_cell(size, cell);
                 common::append_jsonl(PATTERN, "CURVE", 1, size, cell);
             }
+
             println!();
         }
     });
@@ -92,15 +96,18 @@ async fn run_cell(pull_opts: Options, push_opts: Options, size: usize, seq: usiz
 
     let recv_pull = pull.clone();
     let recv_count = pull_count.clone();
+
     let recv_handle = tokio::spawn(async move {
         loop {
             match tokio::time::timeout(Duration::from_millis(20), recv_pull.recv()).await {
                 Ok(Ok(_)) => {
                     recv_count.fetch_add(1, Ordering::Relaxed);
                     let mut drained = 0u64;
+
                     while recv_pull.try_recv().is_ok() {
                         drained += 1;
                     }
+
                     recv_count.fetch_add(drained as usize, Ordering::Relaxed);
                 }
                 Ok(Err(_)) => break,
@@ -116,11 +123,13 @@ async fn run_cell(pull_opts: Options, push_opts: Options, size: usize, seq: usiz
         let push = push.clone();
         let payload = payload.clone();
         let pull_count = pull_count.clone();
+
         async move {
             let target = pull_count.load(Ordering::Relaxed) + k;
             for _ in 0..k {
                 push.send(Message::single(payload.clone())).await.unwrap();
             }
+
             while pull_count.load(Ordering::Relaxed) < target {
                 tokio::time::sleep(Duration::from_micros(50)).await;
             }

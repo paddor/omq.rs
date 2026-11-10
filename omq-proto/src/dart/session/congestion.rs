@@ -45,6 +45,7 @@ impl Congestion {
         } else {
             (MAX_DATAGRAM * acknowledged_bytes / self.cwnd).max(1)
         };
+
         self.cwnd = self.cwnd.saturating_add(increment).min(max);
     }
 
@@ -82,10 +83,12 @@ impl Pacing {
         let Some(rate) = self.rate else {
             return;
         };
+
         if self.bytes != bytes {
             self.bytes = bytes;
             self.delay = Duration::from_nanos((bytes as u64 * 1_000_000_000 / rate.max(1)).max(1));
         }
+
         self.next_at = self.next_at.max(now) + self.delay;
     }
 }

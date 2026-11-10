@@ -11,6 +11,10 @@ use omq_proto::flow::DrainBudget;
 use omq_proto::message::Message;
 use smallvec::SmallVec;
 
+/// Shorter runs are cheaper as individual SHM records.
+#[cfg(target_os = "linux")]
+const SHM_BATCH_MIN_MESSAGES: usize = 4;
+
 impl LaneWorker {
     /// Pack a run of same-envelope group publications into one SHM batch
     /// record. Returns the record, how many publications it covers, and
@@ -39,6 +43,7 @@ impl LaneWorker {
         if shape.referenced {
             messages.truncate(omq_shm::pooled_prefix(&messages));
         }
+
         if messages.len() < SHM_BATCH_MIN_MESSAGES {
             return None;
         }
@@ -58,11 +63,13 @@ impl LaneWorker {
         let targets = self.matching_peer_groups(&msg);
         let mut pending = SmallVec::<[PendingPeer; 8]>::new();
         let mut parked = Parked::new(&mut pending);
+
         for peers in targets {
             for peer_id in peers {
                 let Some(peer) = self.peers.get_mut(&peer_id) else {
                     continue;
                 };
+
                 match peer
                     .slot
                     .try_encode_shm_batch_no_signal(&msg, count, referenced)
@@ -80,6 +87,7 @@ impl LaneWorker {
                 }
             }
         }
+
         self.finish_pending(&mut pending, touched).await
     }
 
@@ -98,17 +106,20 @@ impl LaneWorker {
             .flatten();
         let msg = prepared.as_ref().unwrap_or(msg);
         let copied = multipart.is_none() && Self::shm_copied_body(msg);
+
         #[cfg(target_os = "linux")]
         if copied {
             // Copied records are identical for every recipient. Reference
             // records below instead reserve a distinct lease per connection.
             omq_shm::frame_copied(msg, self.encoder.frames_mut());
         }
+
         let mut parked = pending.map(Parked::new);
         for &peer_id in peer_ids {
             let Some(peer) = self.peers.get_mut(&peer_id) else {
                 continue;
             };
+
             let result = if copied {
                 peer.slot
                     .try_push_pre_framed_no_signal(self.encoder.frames().arena_bytes())
@@ -117,6 +128,7 @@ impl LaneWorker {
             } else {
                 peer.slot.try_encode_shm_no_signal(msg)
             };
+
             match result {
                 TryFrameResult::Ok => Self::touch_peer(peer_id, peer, touched),
                 TryFrameResult::Full => {
@@ -124,6 +136,7 @@ impl LaneWorker {
                         peer.slot.deactivate_fanout();
                         continue;
                     };
+
                     parked.park(peer_id, &peer.slot, None, || {
                         if copied {
                             PreparedFrame::from_frame(&FanOutFrame::Arena(
@@ -139,6 +152,7 @@ impl LaneWorker {
                 TryFrameResult::Dead | TryFrameResult::Ineligible => {}
             }
         }
+
         self.encoder.frames_mut().clear_arena();
     }
 
@@ -151,6 +165,7 @@ impl LaneWorker {
                 .and_then(|index| message.part_slice(index))
                 .is_some_and(|body| body.len() <= omq_shm::COPY_THRESHOLD)
         }
+
         #[cfg(not(target_os = "linux"))]
         {
             let _ = message;
@@ -167,6 +182,7 @@ impl LaneWorker {
                 .then(|| self.shm_pool.prepare_multipart(msg).ok().flatten())
                 .flatten()
         }
+
         #[cfg(not(target_os = "linux"))]
         {
             let _ = msg;
@@ -182,6 +198,7 @@ impl LaneWorker {
         {
             slot.try_encode_shm_multipart_no_signal(record)
         }
+
         #[cfg(not(target_os = "linux"))]
         {
             let _ = (slot, record);
@@ -195,6 +212,7 @@ impl LaneWorker {
         {
             self.shm_pool.prepare(msg).ok().flatten()
         }
+
         #[cfg(not(target_os = "linux"))]
         {
             let _ = msg;
@@ -202,10 +220,6 @@ impl LaneWorker {
         }
     }
 }
-
-/// Shorter runs are cheaper as individual SHM records.
-#[cfg(target_os = "linux")]
-const SHM_BATCH_MIN_MESSAGES: usize = 4;
 
 /// Layout every member of one fan-out SHM batch shares with the first
 /// publication: two parts, the same envelope, and one body storage kind.
@@ -233,6 +247,7 @@ impl<'m> ShmBatchShape<'m> {
             omq_shm::FANOUT_POOLED_BATCH_COPY_THRESHOLD,
             omq_shm::COPIED_BATCH_MAX_BODY,
         );
+
         if !referenced && body > omq_shm::COPIED_BATCH_MAX_BODY {
             return None;
         }
@@ -272,9 +287,11 @@ impl<'m> ShmBatchShape<'m> {
                 if body_length > self.copy_limit {
                     break;
                 }
+
                 // Copied entries carry a u64 length before the body.
                 std::mem::size_of::<u64>() + body_length
             };
+
             packed_bytes += bytes;
             if packed_bytes > omq_shm::BATCH_MAX_BYTES {
                 break;

@@ -172,6 +172,7 @@ fn imported_socket_recv_wakes_after_owner_term() {
         let pull = pull_addr as *mut c_void;
         let mut buf = [0u8; 32];
         let rc = zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0);
+
         (rc, zmq_errno())
     });
 

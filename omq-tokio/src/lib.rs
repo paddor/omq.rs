@@ -20,9 +20,6 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-#[cfg(not(target_has_atomic = "64"))]
-compile_error!("omq-tokio requires target_has_atomic = \"64\"");
-
 pub mod blocking;
 pub mod context;
 #[cfg(feature = "dart")]
@@ -80,12 +77,9 @@ pub use socket::{
     ReceiveLane, ReceiveReceipt, Socket, SocketPools, UnshiftError,
 };
 
+#[cfg(not(target_has_atomic = "64"))]
+compile_error!("omq-tokio requires target_has_atomic = \"64\"");
+
 /// Helpers shared by unit tests.
 #[cfg(test)]
-mod test_util {
-    /// Poll `future` once with a no-op waker.
-    pub(crate) fn poll_once<F: Future>(future: F) -> std::task::Poll<F::Output> {
-        let waker = std::task::Waker::noop();
-        std::pin::pin!(future).poll(&mut std::task::Context::from_waker(waker))
-    }
-}
+mod test_util;

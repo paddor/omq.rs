@@ -18,6 +18,7 @@ pub(crate) fn block_on<T>(ctx: &OmqContext, future: impl Future<Output = T>) -> 
     if omq_tokio::Context::on_io_thread() {
         return Err(libc::EDEADLK);
     }
+
     let handle = ctx.handle().ok_or(ETERM)?;
     handle.block_on(race_shutdown(ctx, future))
 }
@@ -30,12 +31,15 @@ pub(crate) fn run<T: Send + 'static>(
     if omq_tokio::Context::on_io_thread() {
         return Err(libc::EDEADLK);
     }
+
     let handle = ctx.handle().ok_or(ETERM)?;
     let (tx, rx) = flume::bounded(1);
     let ctx = ctx.clone();
+
     handle.spawn(async move {
         let _ = tx.send(race_shutdown(&ctx, future).await);
     });
+
     // A runtime torn down under the task drops the sender.
     rx.recv().unwrap_or(Err(ETERM))
 }

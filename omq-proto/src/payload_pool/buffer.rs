@@ -73,10 +73,12 @@ impl PayloadBuffer {
     fn prepare(&mut self) -> &mut Storage {
         let storage = Arc::get_mut(self.storage.as_mut().expect("live buffer"))
             .expect("writable buffer storage must be unique");
+
         if !self.prepared {
             storage.returns = self.returns.take();
             self.prepared = true;
         }
+
         storage
     }
 
@@ -85,9 +87,11 @@ impl PayloadBuffer {
     pub fn writable_received(&mut self, pool: &PayloadPool) -> &mut [u8] {
         let storage = Arc::get_mut(self.storage.as_mut().expect("live buffer"))
             .expect("writable buffer storage must be unique");
+
         if !same_returns(storage.returns.as_ref(), pool.returns.as_ref()) {
             storage.returns.clone_from(&pool.returns);
         }
+
         self.returns = None;
         self.prepared = true;
         &mut storage.bytes
@@ -106,6 +110,7 @@ impl PayloadBuffer {
                 capacity: self.capacity(),
             });
         }
+
         self.length = length;
         Ok(())
     }
@@ -124,6 +129,7 @@ impl PayloadBuffer {
         if !self.prepared {
             self.prepare();
         }
+
         Payload::from_shared_owner_prefix(self.storage.take().expect("live buffer"), self.length)
     }
 }

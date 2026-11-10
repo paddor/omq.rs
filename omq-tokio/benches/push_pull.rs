@@ -29,6 +29,7 @@ fn main() {
                     common::print_cell(size, cell);
                     common::append_jsonl(PATTERN, &transport, peers, size, cell);
                 }
+
                 println!();
             }
         }
@@ -46,6 +47,7 @@ async fn run_cell(transport: &str, peers: usize, size: usize, seq: usize) -> com
         p.connect(ep.clone()).await.expect("connect PUSH");
         pushes.push(p);
     }
+
     let refs: Vec<&Socket> = pushes.iter().collect();
     common::wait_connected(&refs).await;
 
@@ -57,12 +59,15 @@ async fn run_cell(transport: &str, peers: usize, size: usize, seq: usize) -> com
         let pull = pull.clone();
         let pushes = pushes.clone();
         let payload = payload.clone();
+
         async move {
             let per = (k / pushes.len()).max(1);
             let mut handles = Vec::with_capacity(pushes.len());
+
             for i in 0..pushes.len() {
                 let p = pushes.clone();
                 let payload = payload.clone();
+
                 handles.push(tokio::spawn(async move {
                     let msg = Message::from_slice(&payload);
                     for _ in 0..per {
@@ -70,9 +75,11 @@ async fn run_cell(transport: &str, peers: usize, size: usize, seq: usize) -> com
                     }
                 }));
             }
+
             for _ in 0..(per * pushes.len()) {
                 pull.recv().await.unwrap();
             }
+
             for h in handles {
                 let _ = h.await;
             }
@@ -85,8 +92,10 @@ async fn run_cell(transport: &str, peers: usize, size: usize, seq: usize) -> com
             let _ = p.close().await;
         }
     }
+
     if let Ok(pull) = Arc::try_unwrap(pull) {
         let _ = pull.close().await;
     }
+
     cell
 }

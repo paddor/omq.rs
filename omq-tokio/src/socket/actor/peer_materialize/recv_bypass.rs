@@ -16,6 +16,7 @@ pub(super) fn attach_recv_bypass(
         return attach_yring_recv_bypass(socket, peer_driver, peer_id, false)
             .with_recv_parts(SocketType::Dish.recv_parts());
     }
+
     let rep_latency = socket.socket_type == SocketType::Rep && socket.uses_latency_profile();
     if !can_bypass_actor_recv(socket.socket_type) && !rep_latency {
         return peer_driver;
@@ -28,6 +29,7 @@ pub(super) fn attach_recv_bypass(
         .is_some_and(|config| config.authenticated_sink().is_some());
     let can_use_direct_sink = has_authenticated_sink
         || can_use_yring_recv_bypass(socket.socket_type, socket.uses_latency_profile());
+
     if can_use_direct_sink {
         attach_yring_recv_bypass(socket, peer_driver, peer_id, rep_latency)
     } else if rep_latency || matches!(socket.socket_type, SocketType::Server | SocketType::Req) {
@@ -54,6 +56,7 @@ fn attach_yring_recv_bypass(
         .recv_sink_config
         .as_ref()
         .and_then(|config| config.authenticated_sink());
+
     let sink = if let Some(sink) = authenticated {
         sink
     } else if let Some(conflate) = socket.conflate_sink() {
@@ -68,10 +71,12 @@ fn attach_yring_recv_bypass(
                 if let Some(fanin) = &socket.link.spsc.fanin {
                     return fanin_recv_sink(fanin, &socket.link.recv_tx, FaninProducer::Wire);
                 }
+
                 let cap = socket.options.recv_queue_capacity().max(16);
                 PeerLifecycle::new(socket).yring_sink(peer_id, cap, true)
             })
     };
+
     peer_driver.with_recv_sink(wrap_routed_sink(
         socket.socket_type,
         peer_id,
@@ -135,12 +140,15 @@ pub(in crate::socket::actor) fn fanin_recv_sink(
         #[cfg(feature = "dart")]
         FaninProducer::Dart(capacity) => fanin.register_dart(capacity),
     };
+
     if let Some(producer) = producer {
         return RecvSink::Fanin(crate::socket::fanin::Sink::owned(producer));
     }
+
     // Close/drop can shut down fan-in before the actor handles a connection
     // event. Keep receive closed without preventing outbound linger drain.
     recv_tx.close();
+
     RecvSink::Channel(recv_tx.clone())
 }
 

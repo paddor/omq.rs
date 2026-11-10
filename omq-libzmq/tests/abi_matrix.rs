@@ -5,21 +5,6 @@ use std::path::Path;
 
 const HEADER: &str = include_str!("../include/zmq.h");
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum FunctionStatus {
-    Implemented,
-    Alias,
-    Extension,
-    Partial,
-    Unsupported,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct FunctionEntry {
-    name: &'static str,
-    status: FunctionStatus,
-}
-
 const FUNCTION_MATRIX: &[FunctionEntry] = &[
     FunctionEntry {
         name: "omq_ctx_from_share_key",
@@ -438,28 +423,6 @@ const FUNCTION_MATRIX: &[FunctionEntry] = &[
         status: FunctionStatus::Implemented,
     },
 ];
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SetStatus {
-    RoundTrip,
-    Command,
-    AcceptedNoop,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum GetStatus {
-    RoundTrip,
-    State,
-    CompatDefault,
-    WriteOnly,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct SocketOptionEntry {
-    name: &'static str,
-    set: SetStatus,
-    get: GetStatus,
-}
 
 const SOCKET_OPTION_MATRIX: &[SocketOptionEntry] = &[
     opt(
@@ -913,6 +876,43 @@ const SOCKET_OPTION_MATRIX: &[SocketOptionEntry] = &[
     ),
 ];
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FunctionStatus {
+    Implemented,
+    Alias,
+    Extension,
+    Partial,
+    Unsupported,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FunctionEntry {
+    name: &'static str,
+    status: FunctionStatus,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SetStatus {
+    RoundTrip,
+    Command,
+    AcceptedNoop,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GetStatus {
+    RoundTrip,
+    State,
+    CompatDefault,
+    WriteOnly,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SocketOptionEntry {
+    name: &'static str,
+    set: SetStatus,
+    get: GetStatus,
+}
+
 const fn opt(name: &'static str, set: SetStatus, get: GetStatus) -> SocketOptionEntry {
     SocketOptionEntry { name, set, get }
 }
@@ -959,9 +959,11 @@ fn exported_functions_from_header() -> Vec<String> {
             collecting = true;
             current.clear();
         }
+
         if collecting {
             current.push(' ');
             current.push_str(line);
+
             if line.contains(';') {
                 names.push(function_name_from_decl(&current));
                 collecting = false;
@@ -996,11 +998,13 @@ fn no_mangle_functions_from_source() -> Vec<String> {
 fn collect_no_mangle_functions(path: &Path, names: &mut Vec<String>) {
     let source = std::fs::read_to_string(path).expect("source file");
     let mut armed = false;
+
     for line in source.lines().map(str::trim) {
         if line == "#[unsafe(no_mangle)]" {
             armed = true;
             continue;
         }
+
         if armed
             && line.starts_with("pub extern \"C\" fn ")
             && let Some(name) = line.split_whitespace().nth(4)
@@ -1036,9 +1040,11 @@ fn socket_options_from_header() -> Vec<String> {
         if !line.starts_with("#define ZMQ_") {
             continue;
         }
+
         let Some(name) = line.split_whitespace().nth(1) else {
             continue;
         };
+
         names.push(name.to_owned());
     }
 
@@ -1052,6 +1058,7 @@ fn function_matrix_names() -> Vec<String> {
         .map(|entry| entry.name.to_owned())
         .collect::<Vec<_>>();
     names.sort();
+
     names
 }
 
@@ -1061,17 +1068,20 @@ fn socket_option_matrix_names() -> Vec<String> {
         .map(|entry| entry.name.to_owned())
         .collect::<Vec<_>>();
     names.sort();
+
     names
 }
 
 fn assert_unique(label: &str, names: &[String]) {
     let mut seen = BTreeSet::new();
     let mut duplicates = Vec::new();
+
     for name in names {
         if !seen.insert(name) {
             duplicates.push(name.clone());
         }
     }
+
     assert!(duplicates.is_empty(), "{label} duplicates: {duplicates:?}");
 }
 

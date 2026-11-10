@@ -35,8 +35,10 @@ fn skip_if_no_pyzmq() -> bool {
             "OMQ_INTEROP_REQUIRED=1 but python3 + pyzmq is not available",
         );
         eprintln!("skip: python3 + pyzmq not available");
+
         return true;
     }
+
     false
 }
 
@@ -50,6 +52,7 @@ fn loopback(port: u16) -> Endpoint {
 async fn bind_loopback(sock: &Socket) -> u16 {
     let mut mon = sock.monitor();
     sock.bind(loopback(0)).await.unwrap();
+
     loop {
         match mon.recv().await {
             Ok(MonitorEvent::Listening {
@@ -75,6 +78,7 @@ async fn wait_for_handshake(sock: &Socket) {
             }
         }
     };
+
     match tokio::time::timeout(Duration::from_secs(5), fut).await {
         Ok(Ok(())) => {}
         Ok(Err(e)) => panic!("PLAIN handshake error: {e}"),
@@ -131,6 +135,7 @@ ctx.term()
                 String::from_utf8_lossy(&out.stderr)
             );
         };
+
         assert_eq!(m.part_bytes(0).unwrap(), format!("hello-{i}").as_bytes());
     }
 
@@ -165,8 +170,10 @@ async fn read_port_then_lines(
             if r.read_line(&mut buf).unwrap_or(0) == 0 {
                 break;
             }
+
             collected.push(buf.trim().to_string());
         }
+
         collected
     });
 
@@ -174,6 +181,7 @@ async fn read_port_then_lines(
         .await
         .expect("python bind timed out")
         .unwrap();
+
     (port, reader)
 }
 
@@ -236,6 +244,7 @@ ctx.term()
         let _ = stderr.read_to_string(&mut err);
         panic!("python recv loop timed out\nstderr={err}");
     };
+
     assert_eq!(
         lines,
         (0..5).map(|i| format!("from-rust-{i}")).collect::<Vec<_>>()
@@ -340,6 +349,7 @@ async fn plain_client_binds_and_pyzmq_security_server_connects() {
     if skip_if_no_pyzmq() {
         return;
     }
+
     let client = Socket::new(
         SocketType::Pair,
         Options::default()
@@ -347,6 +357,7 @@ async fn plain_client_binds_and_pyzmq_security_server_connects() {
             .linger(Duration::ZERO),
     );
     let port = bind_loopback(&client).await;
+
     let script = r#"
 import os, zmq, zmq.auth.thread
 ctx = zmq.Context()
@@ -365,6 +376,7 @@ s.close(linger=1000)
 auth.stop()
 ctx.term()
 "#;
+
     let child = python3_command()
         .args(["-c", script])
         .env("PORT", port.to_string())
@@ -377,6 +389,7 @@ ctx.term()
         .await
         .unwrap();
     client.send(Message::single("reversed")).await.unwrap();
+
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(5), client.recv())
             .await
@@ -387,6 +400,7 @@ ctx.term()
             .as_ref(),
         b"authenticated"
     );
+
     let output = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())
         .await
         .unwrap();

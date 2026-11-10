@@ -38,6 +38,7 @@ fn get_fd(sock: *mut c_void) -> i32 {
     let mut sz = size_of::<i32>();
     let rc = zmq_getsockopt(sock, ZMQ_FD, (&mut fd as *mut i32).cast(), &mut sz);
     assert_eq!(rc, 0, "ZMQ_FD getsockopt failed");
+
     fd
 }
 
@@ -49,6 +50,7 @@ fn fd_readable(fd: i32, timeout_ms: i32) -> bool {
         revents: 0,
     };
     let ret = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+
     ret > 0 && (pfd.revents & libc::POLLIN != 0)
 }
 
@@ -224,6 +226,7 @@ fn fd_and_blocking_receives_rearm_between_concurrent_batches() {
     let ctx = zmq_ctx_new();
     let push = zmq_socket(ctx, ZMQ_PUSH);
     let pull = zmq_socket(ctx, ZMQ_PULL);
+
     for socket in [push, pull] {
         for (option, value) in [(17, 0_i32), (23, 8), (24, 8), (27, 1000), (28, 1000)] {
             assert_eq!(
@@ -237,6 +240,7 @@ fn fd_and_blocking_receives_rearm_between_concurrent_batches() {
             );
         }
     }
+
     assert_eq!(
         zmq_bind(pull, c"inproc://fd-concurrent-batches".as_ptr()),
         0
@@ -249,6 +253,7 @@ fn fd_and_blocking_receives_rearm_between_concurrent_batches() {
     let (batch_tx, batch_rx) = std::sync::mpsc::channel();
     let (drained_tx, drained_rx) = std::sync::mpsc::channel();
     let push_address = push as usize;
+
     let sender = std::thread::spawn(move || {
         let push = push_address as *mut c_void;
         for round in 0_u32..128 {
@@ -256,13 +261,16 @@ fn fd_and_blocking_receives_rearm_between_concurrent_batches() {
                 let message = (round * 16 + index).to_le_bytes();
                 assert_eq!(zmq_send(push, message.as_ptr().cast(), message.len(), 0), 4);
             }
+
             batch_tx.send(()).unwrap();
             drained_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         }
     });
+
     for round in 0_u32..128 {
         assert!(fd_readable(fd, 1000), "batch {round} lost its data wake");
         batch_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
         for index in 0_u32..16 {
             assert!(fd_readable(fd, 0), "pending batch must remain readable");
             let mut message = [0_u8; 4];
@@ -272,9 +280,11 @@ fn fd_and_blocking_receives_rearm_between_concurrent_batches() {
             );
             assert_eq!(u32::from_le_bytes(message), round * 16 + index);
         }
+
         assert!(!fd_readable(fd, 0), "drained batch must reset its FD");
         drained_tx.send(()).unwrap();
     }
+
     sender.join().unwrap();
     assert_eq!(zmq_close(push), 0);
     assert_eq!(zmq_close(pull), 0);
@@ -291,15 +301,18 @@ fn fd_and_events_observe_recycled_fast_ring_before_receive() {
         0
     );
     let fd = get_fd(pull);
+
     for sequence in 0_u32..3 {
         let push = zmq_socket(ctx, ZMQ_PUSH);
         assert_eq!(
             zmq_connect(push, c"inproc://fd-recycled-fast-ring".as_ptr()),
             0
         );
+
         let payload = sequence.to_le_bytes();
         assert_eq!(zmq_send(push, payload.as_ptr().cast(), payload.len(), 0), 4);
         assert!(fd_readable(fd, 1000));
+
         let mut events = 0_i32;
         let mut size = size_of::<i32>();
         assert_eq!(
@@ -307,6 +320,7 @@ fn fd_and_events_observe_recycled_fast_ring_before_receive() {
             0
         );
         assert_ne!(events & 1, 0, "replacement data must appear in ZMQ_EVENTS");
+
         let mut received = [0_u8; 4];
         assert_eq!(
             zmq_recv(pull, received.as_mut_ptr().cast(), received.len(), 0),
@@ -314,9 +328,11 @@ fn fd_and_events_observe_recycled_fast_ring_before_receive() {
         );
         assert_eq!(received, payload);
         assert!(!fd_readable(fd, 0));
+
         assert_eq!(zmq_close(push), 0);
         std::thread::sleep(Duration::from_millis(30));
     }
+
     assert_eq!(zmq_close(pull), 0);
     assert_eq!(zmq_ctx_term(ctx), 0);
 }

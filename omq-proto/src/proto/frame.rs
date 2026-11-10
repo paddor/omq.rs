@@ -52,6 +52,7 @@ pub(crate) fn message_wire_len(msg: &Message) -> usize {
             .saturating_add(header_len_for(part.len()))
             .saturating_add(part.len());
     });
+
     total
 }
 
@@ -63,6 +64,7 @@ pub fn encode_frame(frame: &Frame, out: &mut BytesMut) {
     let mut q = VecDeque::new();
     let mut scratch = BytesMut::with_capacity(MAX_FRAME_HEADER_LEN);
     encode_frame_into(frame, &mut q, &mut scratch);
+
     for chunk in q {
         out.extend_from_slice(&chunk);
     }
@@ -84,9 +86,11 @@ pub fn encode_frame_into(frame: &Frame, out: &mut VecDeque<Bytes>, scratch: &mut
     if scratch.capacity() < MAX_FRAME_HEADER_LEN {
         *scratch = BytesMut::with_capacity(64 * 1024);
     }
+
     write_header(scratch, frame.flags, frame.payload.len());
     out.push_back(scratch.split().freeze());
     let b = frame.payload.as_bytes();
+
     if !b.is_empty() {
         out.push_back(b);
     }
@@ -98,9 +102,11 @@ pub(crate) fn write_header(buf: &mut BytesMut, flags: FrameFlags, payload_len: u
     if flags.more {
         bits |= FLAG_MORE;
     }
+
     if flags.command {
         bits |= FLAG_COMMAND;
     }
+
     if payload_len > MAX_SHORT_FRAME_SIZE {
         buf.put_u8(bits | FLAG_LONG);
         buf.put_u64(payload_len as u64);
@@ -131,20 +137,24 @@ pub(crate) fn write_frame_header(buf: &mut BytesMut, more: bool, payload_len: us
 pub fn encode_message_flat_ws(msg: &Message, buf: &mut BytesMut, role: WsRole) {
     let n = msg.len();
     let mut i = 0;
+
     msg.iter_slices(|slice| {
         let flag = if i + 1 < n {
             super::zws::FLAG_MORE
         } else {
             super::zws::FLAG_FINAL
         };
+
         // ZWS flag + ZMTP payload
         let mask = super::ws_codec::encode_ws_binary_header(buf, 1 + slice.len(), role);
         let start = buf.len();
         buf.put_u8(flag);
         buf.extend_from_slice(slice);
+
         if let Some(mask) = mask {
             super::ws_codec::apply_mask(&mut buf[start..], mask);
         }
+
         i += 1;
     });
 }
@@ -155,6 +165,7 @@ pub fn encode_message_flat_ws(msg: &Message, buf: &mut BytesMut, role: WsRole) {
 pub fn encode_message_flat(msg: &Message, buf: &mut BytesMut) {
     let n = msg.len();
     let mut i = 0;
+
     msg.iter_slices(|slice| {
         write_frame_header(buf, i + 1 < n, slice.len());
         buf.extend_from_slice(slice);
@@ -166,6 +177,7 @@ pub fn encode_message_flat(msg: &Message, buf: &mut BytesMut) {
 pub fn encode_message_prefixed_flat(prefix: &[u8], msg: &Message, buf: &mut BytesMut) {
     let n = msg.len();
     let mut i = 0;
+
     msg.iter_slices(|slice| {
         write_frame_header(buf, i + 1 < n, prefix.len() + slice.len());
         buf.extend_from_slice(prefix);
@@ -205,38 +217,48 @@ pub(crate) fn peek_frame_header(buf: &ChunkedInputBuf) -> Result<Option<PeekedFr
         let Some([flags]) = buf.peek_array::<1>() else {
             return Ok(None);
         };
+
         flags
     };
+
     if flags & FLAG_RESERVED_MASK != 0 {
         return Err(Error::Protocol(format!(
             "reserved ZMTP flag bits set: 0x{flags:02x}"
         )));
     }
+
     let long = flags & FLAG_LONG != 0;
     let more = flags & FLAG_MORE != 0;
     let command = flags & FLAG_COMMAND != 0;
+
     if command && more {
         return Err(Error::Protocol("COMMAND frame must not have MORE".into()));
     }
+
     let (header_len, payload_len) = if long {
         let Some(hdr) = buf.peek_array::<MAX_FRAME_HEADER_LEN>() else {
             return Ok(None);
         };
+
         let size = u64::from_be_bytes(hdr[1..].try_into().expect("8 bytes"));
         let payload_len = usize::try_from(size)
             .map_err(|_| Error::Protocol(format!("frame size {size} exceeds platform usize")))?;
+
         if payload_len > isize::MAX as usize {
             return Err(Error::Protocol(format!(
                 "frame size {payload_len} exceeds maximum allocation"
             )));
         }
+
         (MAX_FRAME_HEADER_LEN, payload_len)
     } else {
         let Some([_, size]) = short_header else {
             return Ok(None);
         };
+
         (2, size as usize)
     };
+
     Ok(Some(PeekedFrameHeader {
         flags: FrameFlags { more, command },
         header_len,
@@ -264,6 +286,7 @@ pub(crate) fn try_decode_frame_with_pool(
     let Some(hdr) = peek_frame_header(buf)? else {
         return Ok(None);
     };
+
     try_decode_frame_with_header(buf, hdr, pool)
 }
 
@@ -278,15 +301,18 @@ pub(crate) fn try_decode_frame_with_header(
         .header_len
         .checked_add(hdr.payload_len)
         .ok_or_else(|| Error::Protocol("frame size overflow".into()))?;
+
     if buf.len() < total {
         return Ok(None);
     }
+
     buf.advance(hdr.header_len);
     let payload = if hdr.flags.command {
         buf.split_to(hdr.payload_len)
     } else {
         buf.split_to_with_pool(hdr.payload_len, pool)
     };
+
     Ok(Some(Frame {
         flags: hdr.flags,
         payload,
@@ -301,200 +327,9 @@ pub fn decode_frame_from_bytes(data: Bytes) -> Result<(Option<Frame>, usize)> {
     let mut buf = ChunkedInputBuf::new();
     buf.push(data);
     let frame = try_decode_frame(&mut buf)?;
+
     Ok((frame, buf.len()))
 }
 
 #[cfg(test)]
-mod tests {
-    use super::super::chunked_buf::ChunkedInputBuf;
-    use super::*;
-    use crate::message::Payload;
-    use bytes::Bytes;
-
-    fn encode(frame: &Frame) -> BytesMut {
-        let mut out = BytesMut::new();
-        encode_frame(frame, &mut out);
-        out
-    }
-
-    fn make_buf(data: &[u8]) -> ChunkedInputBuf {
-        let mut buf = ChunkedInputBuf::new();
-        buf.push(Bytes::copy_from_slice(data));
-        buf
-    }
-
-    #[test]
-    fn encode_empty_short_frame() {
-        let f = Frame::data(Bytes::new(), false);
-        let b = encode(&f);
-        assert_eq!(&b[..], &[0x00, 0x00]);
-    }
-
-    #[test]
-    fn encode_short_frame() {
-        let f = Frame::data(Bytes::from_static(b"hi"), false);
-        let b = encode(&f);
-        assert_eq!(&b[..], &[0x00, 0x02, b'h', b'i']);
-    }
-
-    #[test]
-    fn encode_short_frame_more() {
-        let f = Frame::data(Bytes::from_static(b"x"), true);
-        let b = encode(&f);
-        assert_eq!(b[0], FLAG_MORE);
-        assert_eq!(b[1], 1);
-        assert_eq!(&b[2..], b"x");
-    }
-
-    #[test]
-    fn encode_long_frame() {
-        let data = vec![0x42u8; 300];
-        let f = Frame::data(Bytes::from(data.clone()), false);
-        let b = encode(&f);
-        assert_eq!(b[0], FLAG_LONG);
-        let size = u64::from_be_bytes(b[1..9].try_into().unwrap());
-        assert_eq!(size, 300);
-        assert_eq!(&b[9..], &data[..]);
-    }
-
-    #[test]
-    fn encode_command_frame() {
-        let f = Frame::command(Bytes::from_static(b"READY"));
-        let b = encode(&f);
-        assert_eq!(b[0], FLAG_COMMAND);
-        assert_eq!(b[1], 5);
-        assert_eq!(&b[2..], b"READY");
-    }
-
-    #[test]
-    fn decode_returns_none_on_empty() {
-        let mut buf = ChunkedInputBuf::new();
-        assert!(try_decode_frame(&mut buf).unwrap().is_none());
-    }
-
-    #[test]
-    fn decode_partial_header() {
-        let mut buf = make_buf(&[0x00]);
-        assert!(try_decode_frame(&mut buf).unwrap().is_none());
-        assert_eq!(buf.len(), 1, "buf preserved on short read");
-    }
-
-    #[test]
-    fn decode_partial_long_header() {
-        let mut buf = make_buf(&[FLAG_LONG, 0, 0, 0, 0]);
-        assert!(try_decode_frame(&mut buf).unwrap().is_none());
-        assert_eq!(buf.len(), 5);
-    }
-
-    #[test]
-    fn decode_partial_payload() {
-        let mut buf = make_buf(&[0x00, 0x05, b'h', b'e']);
-        assert!(try_decode_frame(&mut buf).unwrap().is_none());
-        assert_eq!(buf.len(), 4);
-    }
-
-    #[test]
-    fn decode_short_frame() {
-        let mut buf = make_buf(&[0x00, 0x03, b'a', b'b', b'c']);
-        let f = try_decode_frame(&mut buf).unwrap().unwrap();
-        assert_eq!(f.flags, FrameFlags::LAST);
-        assert_eq!(f.payload.as_bytes(), &b"abc"[..]);
-        assert!(buf.is_empty());
-    }
-
-    #[test]
-    fn decode_more_bit() {
-        let mut buf = make_buf(&[FLAG_MORE, 0x01, b'x']);
-        let f = try_decode_frame(&mut buf).unwrap().unwrap();
-        assert_eq!(f.flags, FrameFlags::MORE);
-    }
-
-    #[test]
-    fn decode_command_frame() {
-        let mut buf = make_buf(&[FLAG_COMMAND, 0x01, b'x']);
-        let f = try_decode_frame(&mut buf).unwrap().unwrap();
-        assert_eq!(f.flags, FrameFlags::COMMAND);
-    }
-
-    #[test]
-    fn decode_rejects_reserved_bits() {
-        let mut buf = make_buf(&[0x08, 0x01, b'x']);
-        assert!(matches!(
-            try_decode_frame(&mut buf),
-            Err(Error::Protocol(_))
-        ));
-    }
-
-    #[test]
-    fn decode_rejects_command_with_more() {
-        let mut buf = make_buf(&[FLAG_COMMAND | FLAG_MORE, 0x01, b'x']);
-        assert!(matches!(
-            try_decode_frame(&mut buf),
-            Err(Error::Protocol(_))
-        ));
-    }
-
-    #[test]
-    fn decode_long_frame() {
-        let payload = vec![0x77u8; 1024];
-        let mut wire = BytesMut::new();
-        let f = Frame::data(Bytes::from(payload.clone()), false);
-        encode_frame(&f, &mut wire);
-        let mut buf = make_buf(&wire);
-        let decoded = try_decode_frame(&mut buf).unwrap().unwrap();
-        assert_eq!(decoded.payload.len(), 1024);
-        assert_eq!(decoded.payload.as_bytes(), payload.as_slice());
-        assert!(buf.is_empty());
-    }
-
-    #[test]
-    fn roundtrip_short_then_long() {
-        let frames = [
-            Frame::data(Bytes::from_static(b"a"), true),
-            Frame::data(Bytes::from(vec![0u8; 500]), false),
-        ];
-        let mut wire = BytesMut::new();
-        for f in &frames {
-            encode_frame(f, &mut wire);
-        }
-        let mut buf = make_buf(&wire);
-        let d0 = try_decode_frame(&mut buf).unwrap().unwrap();
-        let d1 = try_decode_frame(&mut buf).unwrap().unwrap();
-        assert!(buf.is_empty());
-        assert_eq!(d0.flags, FrameFlags::MORE);
-        assert_eq!(d1.flags, FrameFlags::LAST);
-        assert_eq!(d0.payload.len(), 1);
-        assert_eq!(d1.payload.len(), 500);
-    }
-
-    #[test]
-    fn streaming_decode_feeds_one_byte_at_a_time() {
-        let f = Frame::data(Bytes::from(vec![0xAAu8; 400]), false);
-        let mut wire = BytesMut::new();
-        encode_frame(&f, &mut wire);
-
-        let mut buf = ChunkedInputBuf::new();
-        let mut decoded = None;
-        for b in wire {
-            buf.push(Bytes::copy_from_slice(&[b]));
-            if let Some(d) = try_decode_frame(&mut buf).unwrap() {
-                decoded = Some(d);
-                break;
-            }
-        }
-        let decoded = decoded.expect("frame must decode after full stream");
-        assert_eq!(decoded.payload.len(), 400);
-    }
-
-    #[test]
-    fn encode_single_payload() {
-        let p = Payload::from_bytes(Bytes::from_static(b"abcd"));
-        let f = Frame {
-            flags: FrameFlags::LAST,
-            payload: p,
-        };
-        let mut buf = BytesMut::new();
-        encode_frame(&f, &mut buf);
-        assert_eq!(&buf[..], &[0x00, 0x04, b'a', b'b', b'c', b'd']);
-    }
-}
+mod tests;

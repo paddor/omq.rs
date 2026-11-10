@@ -28,6 +28,7 @@ pub mod alloc {
             if !ptr.is_null() {
                 LIVE_BYTES.fetch_add(layout.size(), Relaxed);
             }
+
             ptr
         }
 
@@ -39,6 +40,7 @@ pub mod alloc {
         unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
             let old_size = layout.size();
             let new_ptr = unsafe { System.realloc(ptr, layout, new_size) };
+
             if !new_ptr.is_null() {
                 if new_size >= old_size {
                     LIVE_BYTES.fetch_add(new_size - old_size, Relaxed);
@@ -46,6 +48,7 @@ pub mod alloc {
                     LIVE_BYTES.fetch_sub(old_size - new_size, Relaxed);
                 }
             }
+
             new_ptr
         }
     }
@@ -64,6 +67,7 @@ pub fn soak_duration() -> Duration {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(600);
+
     Duration::from_secs(secs.max(5))
 }
 
@@ -80,6 +84,7 @@ pub fn seeded_rng(label: &str) -> StdRng {
             rand::rng().fill_bytes(&mut s);
             u64::from_le_bytes(s)
         });
+
     eprintln!("[{label}] OMQ_SOAK_SEED={seed}");
     StdRng::seed_from_u64(seed)
 }
@@ -126,6 +131,7 @@ const LIVE_HEAP_LIMIT: GrowthLimit = GrowthLimit {
     slope_limit_kib_s: 512.0,
     min_growth_bytes: 64 * 1024 * 1024,
 };
+
 const LIVE_RSS_LIMIT: GrowthLimit = GrowthLimit {
     metric: "RSS",
     slope_limit_kib_s: 1024.0,
@@ -225,6 +231,7 @@ fn assert_live_growth_stable(
     let Some((now, current)) = samples.last().copied() else {
         return;
     };
+
     // Skip startup allocation and require one full window of samples.
     if now.duration_since(started) < LIVE_GROWTH_WARMUP + LIVE_GROWTH_WINDOW {
         return;
@@ -233,11 +240,13 @@ fn assert_live_growth_stable(
     let Some(window_start) = now.checked_sub(LIVE_GROWTH_WINDOW) else {
         return;
     };
+
     let first = samples
         .iter()
         .position(|(t, _)| *t >= window_start)
         .unwrap_or(0);
     let window = &samples[first..];
+
     if window.len() < LIVE_GROWTH_MIN_SAMPLES {
         return;
     }
@@ -250,6 +259,7 @@ fn assert_live_growth_stable(
     let Some(slope_bytes_per_sec) = slope_bytes_per_sec(window) else {
         return;
     };
+
     let slope_kib_s = slope_bytes_per_sec / 1024.0;
     if slope_kib_s <= slope_limit_kib_s {
         return;
@@ -264,12 +274,14 @@ fn assert_live_growth_stable(
         current as f64 / 1_048_576.0,
         min_growth_bytes as f64 / 1_048_576.0,
     );
+
     std::process::exit(101);
 }
 
 fn slope_bytes_per_sec(samples: &[(Instant, usize)]) -> Option<f64> {
     let first_t = samples.first()?.0;
     let elapsed_secs = samples.last()?.0.duration_since(first_t).as_secs_f64();
+
     if elapsed_secs < 1.0 {
         return None;
     }
@@ -324,6 +336,7 @@ impl ResourceReport {
         if n < 10 {
             return;
         }
+
         let peak_rss = self.rss_samples.iter().map(|(_, v)| *v).max().unwrap_or(0);
         eprintln!(
             "[{label}] RSS peak {:.1} MiB (informational, not gated)",
@@ -339,6 +352,7 @@ impl ResourceReport {
 
         let warmup = n / 5;
         let post_warmup = &self.heap_samples[warmup..];
+
         if post_warmup.len() < 2 {
             return;
         }
@@ -346,6 +360,7 @@ impl ResourceReport {
         let Some(slope_bytes_per_sec) = slope_bytes_per_sec(post_warmup) else {
             return;
         };
+
         let sum_y: f64 = post_warmup.iter().map(|(_, v)| *v as f64).sum();
 
         let slope_kib_s = slope_bytes_per_sec / 1024.0;
@@ -383,6 +398,7 @@ impl ResourceReport {
             baseline as f64 / 1_048_576.0,
             current as f64 / 1_048_576.0,
         );
+
         assert!(
             growth < threshold,
             "[{label}] heap leak: {:.1} KiB residual after close \
@@ -415,6 +431,7 @@ impl ResourceReport {
             .0
             .duration_since(first_t)
             .as_secs_f64();
+
         if elapsed_secs < 1.0 {
             return;
         }
@@ -497,6 +514,7 @@ impl ThroughputTracker {
 
         let warmup = rates.len() / 5;
         let post_warmup = &rates[warmup..];
+
         if post_warmup.len() < 2 {
             return;
         }
@@ -527,11 +545,13 @@ impl ThroughputTracker {
                 .0
                 .duration_since(self.samples[i - 1].0)
                 .as_secs_f64();
+
             if dt > 0.0 {
                 let dcount = self.samples[i].1.saturating_sub(self.samples[i - 1].1);
                 rates.push(dcount as f64 / dt);
             }
         }
+
         rates
     }
 }

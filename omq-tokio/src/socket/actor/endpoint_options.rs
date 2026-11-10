@@ -12,6 +12,7 @@ impl SocketDriver {
     ) -> Arc<Options> {
         let mut options = self.options.clone();
         options.recv_payload_pool = self.resources.payload_pools.receive();
+
         if let Some(compression) = compression {
             options.compression_dict = compression.dict;
             options.compression_auto_train = compression.auto_train;
@@ -20,11 +21,13 @@ impl SocketDriver {
             options.compression_level_range = compression.level_range;
             options.compression_dict_capacity = compression.dict_capacity;
         }
+
         if let Some(dict) = &options.compression_dict
             && dict.len() <= 8192
         {
             options.compression_dict = Some(bytes::Bytes::copy_from_slice(dict));
         }
+
         Arc::new(options)
     }
 
@@ -37,6 +40,7 @@ impl SocketDriver {
         if matches!(endpoint, Endpoint::Shm(_)) {
             #[cfg(not(target_os = "linux"))]
             return Err(Error::UnsupportedScheme("shm requires Linux".into()));
+
             #[cfg(target_os = "linux")]
             {
                 if !omq_shm::supports(self.socket_type) {
@@ -44,15 +48,18 @@ impl SocketDriver {
                         "shm:// does not support STREAM sockets".into(),
                     ));
                 }
+
                 if !matches!(options.mechanism, omq_proto::MechanismConfig::Null) {
                     return Err(Error::Config("shm:// requires the NULL mechanism".into()));
                 }
             }
         }
+
         #[cfg(feature = "dart")]
         if matches!(endpoint, Endpoint::Dart { .. }) {
             return self.validate_dart_options(options);
         }
+
         // Validate the effective mechanism before DNS or carrier setup. The
         // codec factory repeats this check for standalone sans-I/O callers.
         let compression =
@@ -60,13 +67,16 @@ impl SocketDriver {
                 endpoint,
                 &options.mechanism,
             )?;
+
         if compression.is_some() && self.socket_type == SocketType::Stream {
             return Err(Error::Config(
                 "OMQ compression is not supported on STREAM sockets".into(),
             ));
         }
+
         let _ = crate::engine::codec::CodecSetup::for_endpoint(endpoint, options)
             .map_err(|error| Error::Config(format!("invalid codec configuration: {error}")))?;
+
         #[cfg(feature = "ws")]
         if endpoint.is_ws_family() {
             if let Endpoint::Ws { host, path, .. } | Endpoint::Wss { host, path, .. } =
@@ -74,6 +84,7 @@ impl SocketDriver {
             {
                 omq_proto::proto::ws_handshake::validate_ws_address(host, path)?;
             }
+
             if options
                 .handshake_timeout
                 .and_then(|timeout| std::time::Instant::now().checked_add(timeout))
@@ -84,6 +95,7 @@ impl SocketDriver {
                 ));
             }
         }
+
         #[cfg(not(feature = "ws"))]
         let _ = endpoint;
         Ok(())

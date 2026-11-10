@@ -9,6 +9,11 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+mod codec_tests;
+
+#[cfg(any(feature = "lz4", feature = "zstd"))]
+mod receive_limits;
+
 #[derive(Debug, Default)]
 struct WakeCounter(std::sync::atomic::AtomicUsize);
 
@@ -35,6 +40,7 @@ fn fixture_with_pool(
     let (recv, consumer, _, _) = crate::socket::recv::recv_pipe(16, blocking.clone());
     let (_, commands) = mpsc::channel(16);
     let send_strategy = crate::routing::SendStrategy::for_socket_type(socket_type, &options, &pool);
+
     let link = super::super::HandleLink {
         cmd_rx: commands,
         recv_tx: recv,
@@ -46,12 +52,14 @@ fn fixture_with_pool(
         peer_recv_routes: None,
         shared: super::super::HandleShared::new(),
     };
+
     let env = super::super::DriverEnv {
         io_pool: pool,
         inproc_registry: Arc::new(crate::transport::inproc::InprocRegistry::new()),
         recv_sink_config: None,
     };
     let driver = SocketDriver::new(socket_type, options, send_strategy, link, env);
+
     (driver, consumer)
 }
 
@@ -61,6 +69,7 @@ fn insert_peer(driver: &mut SocketDriver, peer_id: u64, handshake: PeerHandshake
     // READY may be queued after the driver has already exited.
     drop(commands);
     drop(data);
+
     let origin = PeerOrigin {
         options: Arc::new(driver.options.clone()),
         endpoint: "tcp://127.0.0.1:12345".parse::<Endpoint>().unwrap(),
@@ -71,6 +80,7 @@ fn insert_peer(driver: &mut SocketDriver, peer_id: u64, handshake: PeerHandshake
         remote_address: None,
         io_thread: 0,
     };
+
     let handle = PeerDriverHandle::new(inbox.into(), data_inbox.into(), CancellationToken::new());
     let entry = PeerEntry {
         handshake,
@@ -104,6 +114,7 @@ async fn dish_discards_malformed_messages_then_delivers_group_and_body() {
             ..PeerHandshake::default()
         },
     );
+
     for message in [
         Message::new(),
         Message::single("group"),
@@ -114,6 +125,7 @@ async fn dish_discards_malformed_messages_then_delivers_group_and_body() {
             .await;
         assert_eq!(receive.prefetch(), 0);
     }
+
     let message = Message::multipart(["group", "body"]);
     driver
         .handle_peer_output(7, PeerEvent::Event(Event::Message(message.clone())))
@@ -139,15 +151,18 @@ async fn data_waits_for_its_control_prefix_and_completion_keeps_notifications() 
     peer.handshake.ready = true;
     peer.progress.handled_control = 1;
     peer.progress.handled_events = 1;
+
     driver.mail.pending_peer_data = Some(crate::engine::actor_output::ActorData {
         peer_id: 7,
         message: Message::single("\x01topic"),
         notification: true,
         control_prefix: 2,
     });
+
     driver.retry_peer_data().await;
     assert!(driver.mail.pending_peer_data.is_some());
     assert_eq!(receive.prefetch(), 0);
+
     driver
         .handle_peer_control(
             7,
@@ -156,6 +171,7 @@ async fn data_waits_for_its_control_prefix_and_completion_keeps_notifications() 
             ))),
         )
         .await;
+
     driver
         .handle_peer_completion(PeerCompletion {
             peer_id: 7,
@@ -164,7 +180,9 @@ async fn data_waits_for_its_control_prefix_and_completion_keeps_notifications() 
             stream_disconnect: StreamDisconnect::None,
         })
         .await;
+
     assert!(driver.peers.contains_key(&7));
+
     for _ in 0..16 {
         driver
             .link
@@ -172,20 +190,25 @@ async fn data_waits_for_its_control_prefix_and_completion_keeps_notifications() 
             .try_send(Message::single("filler"))
             .unwrap();
     }
+
     driver.retry_peer_data().await;
     assert!(driver.mail.pending_peer_data.is_none());
     assert!(driver.pending_receive.is_some());
     assert!(driver.peers.contains_key(&7));
+
     receive.prefetch();
     receive.pop().unwrap();
     receive.release();
+
     driver.retry_pending_receive();
     driver.retire_completed_peer(7).await;
     assert!(!driver.peers.contains_key(&7));
     receive.prefetch();
+
     for _ in 0..15 {
         receive.pop().unwrap();
     }
+
     receive.prefetch();
     assert_eq!(
         receive.pop().unwrap().part_slice(0),
@@ -210,15 +233,18 @@ async fn actor_data_batches_bound_count_and_bytes_and_return_partial_credits() {
             driver.mail.peer_out_tx.try_register().unwrap(),
         );
         let body = bytes::Bytes::from(vec![0; size]);
+
         for _ in 0..256 {
             output
                 .try_send(7, Message::single(body.clone()), false)
                 .unwrap();
         }
+
         assert!(matches!(
             output.try_send(7, Message::single(body.clone()), false),
             Err(crate::engine::SendPipeError::Full(_))
         ));
+
         let first = driver
             .mail
             .peer_out_rx
@@ -227,15 +253,18 @@ async fn actor_data_batches_bound_count_and_bytes_and_return_partial_credits() {
             .recv_async()
             .await
             .unwrap();
+
         driver.drain_peer_data(first).await;
         let actual = driver.peers.get(&7).unwrap().progress.handled_events;
         assert!(actual > 0 && actual <= expected);
         assert!(driver.pending_receive.is_none());
+
         for _ in 0..actual {
             output
                 .try_send(7, Message::single(body.clone()), false)
                 .unwrap();
         }
+
         assert!(matches!(
             output.try_send(7, Message::single(body), false),
             Err(crate::engine::SendPipeError::Full(_))
@@ -319,12 +348,14 @@ async fn completion_preserves_ready_identity_commands_and_pending_receive() {
         .handle_peer_completion(peer_completion(3, reason, StreamDisconnect::None))
         .await;
     assert!(driver.endpoints.setup_admission.try_acquire().is_none());
+
     ready_dealer(&mut driver).await;
     assert!(driver.peers.get(&7).unwrap().handshake.ready);
     assert!(matches!(
         monitor.try_recv().unwrap(),
         MonitorEvent::HandshakeSucceeded { .. }
     ));
+
     driver
         .handle_peer_output(
             7,
@@ -334,6 +365,7 @@ async fn completion_preserves_ready_identity_commands_and_pending_receive() {
             })),
         )
         .await;
+
     assert!(driver.peers.contains_key(&7));
     assert!(matches!(
         monitor.try_recv().unwrap(),
@@ -400,6 +432,7 @@ async fn stream_disconnect_receive_follows_data_and_retains_identity_until_admis
     free_slot_and_retire(&mut driver, &mut receive).await;
     driver.drain_stream_disconnects().await;
     assert!(driver.peers.contains_key(&7));
+
     let completion = driver
         .peers
         .get(&7)
@@ -408,6 +441,7 @@ async fn stream_disconnect_receive_follows_data_and_retains_identity_until_admis
         .completion
         .as_ref()
         .unwrap();
+
     assert_eq!(completion.stream_disconnect, StreamDisconnect::None);
     assert_routed(
         &driver.pending_receive.as_ref().unwrap().message,
@@ -432,21 +466,26 @@ async fn completion_drain_budgets_ready_results_and_preserves_pending_receive() 
         message: Message::single("blocked"),
         properties: None,
     });
+
     for peer_id in 0..100 {
         let (publisher, receiver) =
             crate::engine::peer_completion::CompletionProgress::reserve(peer_id);
         driver.mail.peer_completions.push(receiver);
         drop(publisher);
     }
+
     driver.drain_peer_completions().await;
     assert!((84..100).contains(&driver.mail.peer_completions.len()));
     assert_eq!(driver.pending_receive.as_ref().unwrap().peer_id, 200);
+
     for _ in 0..100 {
         if driver.mail.peer_completions.is_empty() {
             break;
         }
+
         driver.drain_peer_completions().await;
     }
+
     assert!(driver.mail.peer_completions.is_empty());
 }
 
@@ -460,11 +499,13 @@ async fn pending_completion_drain_keeps_the_actual_actor_waker() {
     let counter = Arc::new(WakeCounter::default());
     let waker = futures::task::waker(counter.clone());
     let mut context = std::task::Context::from_waker(&waker);
+
     {
         let drain = driver.drain_peer_completions();
         tokio::pin!(drain);
         assert!(drain.as_mut().poll(&mut context).is_ready());
     }
+
     counter.0.store(0, std::sync::atomic::Ordering::Relaxed);
     publisher.complete(DisconnectReason::PeerClosed).unwrap();
     assert!(
@@ -487,6 +528,7 @@ async fn stream_disconnect_preserves_another_peers_blocked_receive() {
         message: Message::single("other peer"),
         properties: None,
     });
+
     driver
         .handle_peer_completion(PeerCompletion {
             peer_id: 7,
@@ -495,8 +537,10 @@ async fn stream_disconnect_preserves_another_peers_blocked_receive() {
             stream_disconnect: StreamDisconnect::Pending,
         })
         .await;
+
     driver.drain_stream_disconnects().await;
     assert_eq!(driver.pending_receive.as_ref().unwrap().peer_id, 8);
+
     assert_eq!(
         driver
             .pending_receive
@@ -506,18 +550,22 @@ async fn stream_disconnect_preserves_another_peers_blocked_receive() {
             .part_slice(0),
         Some(b"other peer".as_slice())
     );
+
     assert!(driver.peers.contains_key(&7));
     driver.retire_completed_peer(7).await;
     assert_eq!(driver.mail.stream_disconnects.len(), 1);
+
     driver.retry_pending_receive();
     driver.drain_stream_disconnects().await;
     assert!(!driver.peers.contains_key(&7));
     assert!(driver.mail.stream_disconnects.is_empty());
+
     receive.prefetch();
     assert_eq!(
         receive.pop().unwrap().part_slice(0),
         Some(b"other peer".as_slice())
     );
+
     let terminal = receive.pop().unwrap();
     assert_eq!(terminal.part_slice(0), Some(b"closed stream".as_slice()));
     assert_eq!(terminal.part_slice(1), Some(b"".as_slice()));
@@ -535,6 +583,7 @@ async fn pending_handshake_completion_releases_admission_with_another_receive_bl
         message: Message::single("other peer"),
         properties: None,
     });
+
     driver
         .handle_peer_completion(PeerCompletion {
             peer_id: 7,
@@ -543,6 +592,7 @@ async fn pending_handshake_completion_releases_admission_with_another_receive_bl
             stream_disconnect: StreamDisconnect::None,
         })
         .await;
+
     assert!(!driver.peers.contains_key(&7));
     assert!(driver.endpoints.setup_admission.try_acquire().is_some());
     assert_eq!(driver.pending_receive.as_ref().unwrap().peer_id, 8);
@@ -560,6 +610,7 @@ async fn unassigned_stream_peer_cannot_release_another_peers_io_load() {
     assert_eq!(unrelated_assignment.index(), 0);
     let (mut driver, _receive) = fixture_with_pool(SocketType::Stream, pool.clone());
     insert_pending_peer(&mut driver, 7);
+
     driver
         .handle_peer_completion(PeerCompletion {
             peer_id: 7,
@@ -568,6 +619,7 @@ async fn unassigned_stream_peer_cannot_release_another_peers_io_load() {
             stream_disconnect: StreamDisconnect::None,
         })
         .await;
+
     assert!(!driver.peers.contains_key(&7));
     let next_assignment = pool.reserve_thread();
     assert_eq!(
@@ -576,8 +628,3 @@ async fn unassigned_stream_peer_cannot_release_another_peers_io_load() {
         "STREAM released an unreserved IO load"
     );
 }
-
-mod codec_tests;
-
-#[cfg(any(feature = "lz4", feature = "zstd"))]
-mod receive_limits;

@@ -13,6 +13,7 @@ fn self_signed_tls() -> (Vec<u8>, Vec<u8>) {
     let certified = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
     let cert_pem = certified.cert.pem().into_bytes();
     let key_pem = certified.signing_key.serialize_pem().into_bytes();
+
     (cert_pem, key_pem)
 }
 
@@ -72,6 +73,7 @@ async fn wss_rejects_invalid_cert() {
 async fn wss_hostname_override_uses_explicit_trust_without_disabling_verification() {
     let certificate = rcgen::generate_simple_self_signed(vec!["service.example".into()]).unwrap();
     let cert_pem = certificate.cert.pem().into_bytes();
+
     let server = Socket::new(
         SocketType::Pull,
         Options {
@@ -83,6 +85,7 @@ async fn wss_hostname_override_uses_explicit_trust_without_disabling_verificatio
             ..Options::default()
         },
     );
+
     let endpoint = server.bind(wss_endpoint(0)).await.unwrap();
     let client = Socket::new(
         SocketType::Push,
@@ -96,6 +99,7 @@ async fn wss_hostname_override_uses_explicit_trust_without_disabling_verificatio
             ..Options::default()
         },
     );
+
     client.connect(endpoint).await.unwrap();
     client
         .wait_connected(1, Duration::from_secs(2))

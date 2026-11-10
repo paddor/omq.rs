@@ -25,15 +25,26 @@ pub(crate) const NAME_PONG: &[u8] = b"PONG";
 pub(crate) const NAME_ERROR: &[u8] = b"ERROR";
 pub(crate) const NAME_JOIN: &[u8] = b"JOIN";
 pub(crate) const NAME_LEAVE: &[u8] = b"LEAVE";
+
 #[cfg(any(feature = "plain", feature = "curve"))]
 pub(crate) const NAME_HELLO: &[u8] = b"HELLO";
+
 #[cfg(any(feature = "plain", feature = "curve"))]
 pub(crate) const NAME_WELCOME: &[u8] = b"WELCOME";
+
 #[cfg(any(feature = "plain", feature = "curve"))]
 pub(crate) const NAME_INITIATE: &[u8] = b"INITIATE";
 
 /// Maximum context length inside PING / PONG bodies (RFC 37).
 pub const PING_CONTEXT_MAX: usize = 16;
+
+/// Most READY properties one peer may declare. Legitimate peers send a few;
+/// each retained property costs an allocation for the connection's lifetime.
+const MAX_READY_PROPERTIES: usize = 256;
+
+/// Names only the local side may set. A peer's claim to them is dropped here,
+/// for every mechanism, so no lookup can see it.
+const LOCAL_ONLY_PROPERTIES: [&str; 2] = ["User-Id", "Peer-Address"];
 
 /// A parsed ZMTP command.
 #[derive(Clone, Debug)]
@@ -152,6 +163,7 @@ impl PeerProperties {
         if !id.is_empty() {
             self.identity = Some(id);
         }
+
         self
     }
 
@@ -228,6 +240,7 @@ pub fn decode(body: Bytes) -> Result<Command> {
             if body.len() > PING_CONTEXT_MAX {
                 return Err(Error::Protocol("PONG context too long".into()));
             }
+
             Command::Pong { context: body }
         }
         NAME_ERROR => decode_error(body)?,
@@ -235,6 +248,7 @@ pub fn decode(body: Bytes) -> Result<Command> {
         NAME_LEAVE => Command::Leave(body),
         _ => Command::Unknown { name, body },
     };
+
     Ok(cmd)
 }
 
@@ -244,10 +258,12 @@ pub(crate) fn split_name(payload: &Bytes) -> Result<(Bytes, Bytes)> {
     if payload.is_empty() {
         return Err(Error::Protocol("empty command frame".into()));
     }
+
     let name_len = payload[0] as usize;
     if payload.len() < 1 + name_len {
         return Err(Error::Protocol("command truncated in name".into()));
     }
+
     Ok((payload.slice(1..=name_len), payload.slice(1 + name_len..)))
 }
 
@@ -264,6 +280,7 @@ pub(crate) fn encode_properties(props: &PeerProperties) -> Result<Vec<u8>> {
     if props.other.iter().any(|(name, _)| name.len() > 255) {
         return Err(Error::Protocol("property name too long".into()));
     }
+
     let mut buf = BytesMut::new();
     encode_properties_inner(props, &mut buf);
     Ok(buf.to_vec())
@@ -278,9 +295,11 @@ pub(crate) fn encode_properties_inner(props: &PeerProperties, out: &mut BytesMut
     if let Some(t) = props.socket_type {
         write_property(out, b"Socket-Type", t.as_str().as_bytes());
     }
+
     if let Some(id) = &props.identity {
         write_property(out, b"Identity", id);
     }
+
     for (k, v) in &props.other {
         write_property(out, k.as_bytes(), v);
     }
@@ -298,28 +317,23 @@ fn write_property(out: &mut BytesMut, name: &[u8], value: &[u8]) {
     out.put_slice(value);
 }
 
-/// Most READY properties one peer may declare. Legitimate peers send a few;
-/// each retained property costs an allocation for the connection's lifetime.
-const MAX_READY_PROPERTIES: usize = 256;
-
-/// Names only the local side may set. A peer's claim to them is dropped here,
-/// for every mechanism, so no lookup can see it.
-const LOCAL_ONLY_PROPERTIES: [&str; 2] = ["User-Id", "Peer-Address"];
-
 pub(crate) fn decode_properties_inner(mut body: Bytes) -> Result<PeerProperties> {
     let mut props = PeerProperties::default();
     let mut count = 0;
+
     while !body.is_empty() {
         count += 1;
         if count > MAX_READY_PROPERTIES {
             return Err(Error::Protocol("too many READY properties".into()));
         }
+
         let (name, value) = split_property(&mut body)?;
 
         // split_property admits only ASCII alphanumerics and [-_.+].
         let name = std::str::from_utf8(&name).expect("validated ASCII");
         record_property(&mut props, name, value)?;
     }
+
     Ok(props)
 }
 
@@ -330,6 +344,7 @@ fn split_property(body: &mut Bytes) -> Result<(Bytes, Bytes)> {
     if name_len == 0 {
         return Err(Error::Protocol("READY property name is empty".into()));
     }
+
     if body.len() < 1 + name_len + 4 {
         return Err(Error::Protocol("READY property truncated".into()));
     }
@@ -348,8 +363,10 @@ fn split_property(body: &mut Bytes) -> Result<(Bytes, Bytes)> {
     if value_len > i32::MAX as u32 {
         return Err(Error::Protocol("READY property value too large".into()));
     }
+
     let value_len = value_len as usize;
     let val_start = 1 + name_len + 4;
+
     if value_len > body.len() - val_start {
         return Err(Error::Protocol("READY property value truncated".into()));
     }
@@ -357,6 +374,7 @@ fn split_property(body: &mut Bytes) -> Result<(Bytes, Bytes)> {
     let val_end = val_start + value_len;
     let value = body.slice(val_start..val_end);
     *body = body.slice(val_end..);
+
     Ok((name, value))
 }
 
@@ -367,6 +385,7 @@ fn record_property(props: &mut PeerProperties, name: &str, value: Bytes) -> Resu
         if props.socket_type.is_some() {
             return Err(Error::Protocol("duplicate Socket-Type property".into()));
         }
+
         let t = SocketType::from_wire(&value).ok_or_else(|| {
             Error::Protocol(format!(
                 "unknown peer socket type: {:?}",
@@ -378,9 +397,11 @@ fn record_property(props: &mut PeerProperties, name: &str, value: Bytes) -> Resu
         if props.identity.is_some() {
             return Err(Error::Protocol("duplicate Identity property".into()));
         }
+
         if !crate::message::is_valid_peer_identity(&value) {
             return Err(Error::Protocol("invalid peer identity".into()));
         }
+
         // An empty identity means "none"; the socket generates one.
         if !value.is_empty() {
             props.identity = Some(value);
@@ -391,6 +412,7 @@ fn record_property(props: &mut PeerProperties, name: &str, value: Bytes) -> Resu
     {
         props.other.push((name.to_string(), value));
     }
+
     Ok(())
 }
 
@@ -399,11 +421,14 @@ fn decode_ping(body: Bytes) -> Result<Command> {
     if body.len() < 2 {
         return Err(Error::Protocol("PING body missing TTL".into()));
     }
+
     let ttl = u16::from_be_bytes([body[0], body[1]]);
     let context = body.slice(2..);
+
     if context.len() > PING_CONTEXT_MAX {
         return Err(Error::Protocol("PING context too long".into()));
     }
+
     Ok(Command::Ping {
         ttl_deciseconds: ttl,
         context,
@@ -415,301 +440,18 @@ fn decode_error(body: Bytes) -> Result<Command> {
     if body.is_empty() {
         return Err(Error::Protocol("ERROR body missing reason length".into()));
     }
+
     let reason_len = body[0] as usize;
     if body.len() < 1 + reason_len {
         return Err(Error::Protocol("ERROR reason truncated".into()));
     }
+
     let reason_bytes = body.slice(1..=reason_len);
     let reason = String::from_utf8(reason_bytes.to_vec())
         .map_err(|_| Error::Protocol("ERROR reason not UTF-8".into()))?;
+
     Ok(Command::Error { reason })
 }
 
 #[cfg(test)]
-mod tests {
-    #[test]
-    fn rejects_empty_and_non_alphabetic_command_names() {
-        for wire in [&b"\x00"[..], &b"\x03A1B"[..], &b"\x01\xff"[..]] {
-            assert!(super::decode(bytes::Bytes::copy_from_slice(wire)).is_err());
-        }
-    }
-    use super::*;
-
-    #[expect(clippy::needless_pass_by_value)]
-    fn roundtrip(cmd: Command) -> Command {
-        let mut buf = BytesMut::new();
-        encode(&cmd, &mut buf);
-        decode(buf.freeze()).unwrap()
-    }
-
-    #[test]
-    fn ready_with_socket_type_and_identity() {
-        let mut props = PeerProperties::default()
-            .with_socket_type(SocketType::Dealer)
-            .with_identity(Bytes::from_static(b"alice"));
-        props.add("X-Metric", Bytes::from_static(b"42"));
-        std::sync::Arc::make_mut(&mut props.authentication).user_id =
-            Some(Bytes::from_static(b"local-only"));
-        let cmd = Command::Ready(props);
-
-        match roundtrip(cmd) {
-            Command::Ready(p) => {
-                assert_eq!(p.socket_type, Some(SocketType::Dealer));
-                assert_eq!(p.identity.as_deref(), Some(&b"alice"[..]));
-                assert!(
-                    p.authentication.user_id.is_none(),
-                    "local facts must not cross the wire"
-                );
-                assert_eq!(p.other.len(), 1);
-                assert_eq!(p.other[0].0, "X-Metric");
-                assert_eq!(p.other[0].1, &b"42"[..]);
-            }
-            _ => panic!("not READY"),
-        }
-    }
-
-    #[test]
-    fn ready_empty_properties() {
-        let cmd = Command::Ready(PeerProperties::default());
-        match roundtrip(cmd) {
-            Command::Ready(p) => {
-                assert!(p.socket_type.is_none());
-                assert!(p.identity.is_none());
-                assert_eq!(p.other, [] as [(String, Bytes); 0]);
-            }
-            _ => panic!(),
-        }
-    }
-
-    #[test]
-    fn subscribe_cancel() {
-        let s = roundtrip(Command::Subscribe(Bytes::from_static(b"news.")));
-        assert!(matches!(s, Command::Subscribe(p) if &p[..] == b"news."));
-
-        let c = roundtrip(Command::Cancel(Bytes::from_static(b"news.")));
-        assert!(matches!(c, Command::Cancel(p) if &p[..] == b"news."));
-    }
-
-    #[test]
-    fn ping_pong() {
-        let p = roundtrip(Command::Ping {
-            ttl_deciseconds: 600,
-            context: Bytes::from_static(b"ctx"),
-        });
-        match p {
-            Command::Ping {
-                ttl_deciseconds,
-                context,
-            } => {
-                assert_eq!(ttl_deciseconds, 600);
-                assert_eq!(&context[..], b"ctx");
-            }
-            _ => panic!(),
-        }
-
-        let pong = roundtrip(Command::Pong {
-            context: Bytes::from_static(b"ctx"),
-        });
-        assert!(matches!(pong, Command::Pong { context } if &context[..] == b"ctx"));
-    }
-
-    #[test]
-    fn ping_rejects_overlong_context() {
-        let mut buf = BytesMut::new();
-        buf.put_u8(NAME_PING.len() as u8);
-        buf.put_slice(NAME_PING);
-        buf.put_u16(0);
-        buf.put_bytes(0xAA, PING_CONTEXT_MAX + 1);
-        assert!(matches!(decode(buf.freeze()), Err(Error::Protocol(_))));
-    }
-
-    #[test]
-    fn error_command() {
-        let cmd = Command::Error {
-            reason: "oops".into(),
-        };
-        match roundtrip(cmd) {
-            Command::Error { reason } => assert_eq!(reason, "oops"),
-            _ => panic!(),
-        }
-    }
-
-    #[test]
-    fn join_leave() {
-        let j = roundtrip(Command::Join(Bytes::from_static(b"weather")));
-        assert!(matches!(j, Command::Join(g) if &g[..] == b"weather"));
-        let l = roundtrip(Command::Leave(Bytes::from_static(b"weather")));
-        assert!(matches!(l, Command::Leave(g) if &g[..] == b"weather"));
-    }
-
-    #[test]
-    fn unknown_command_preserved() {
-        let cmd = Command::Unknown {
-            name: Bytes::from_static(b"FUTURE"),
-            body: Bytes::from_static(b"\x01\x02"),
-        };
-        match roundtrip(cmd) {
-            Command::Unknown { name, body } => {
-                assert_eq!(&name[..], b"FUTURE");
-                assert_eq!(&body[..], b"\x01\x02");
-            }
-            _ => panic!(),
-        }
-    }
-
-    #[test]
-    fn decode_empty_errors() {
-        assert!(matches!(decode(Bytes::new()), Err(Error::Protocol(_))));
-    }
-
-    #[test]
-    fn decode_truncated_name() {
-        let b = Bytes::from_static(&[5, b'x']);
-        assert!(matches!(decode(b), Err(Error::Protocol(_))));
-    }
-
-    #[test]
-    fn rejects_empty_property_name() {
-        let mut body = BytesMut::new();
-        body.put_u8(0); // name_len = 0
-        body.put_u32(1);
-        body.put_u8(b'x');
-        assert!(matches!(
-            decode_properties_inner(body.freeze()),
-            Err(Error::Protocol(msg)) if msg.contains("empty")
-        ));
-    }
-
-    #[test]
-    fn rejects_invalid_property_name_chars() {
-        let mut body = BytesMut::new();
-        body.put_u8(3);
-        body.put_slice(b"a b"); // space is invalid
-        body.put_u32(1);
-        body.put_u8(b'v');
-        assert!(matches!(
-            decode_properties_inner(body.freeze()),
-            Err(Error::Protocol(msg)) if msg.contains("invalid characters")
-        ));
-    }
-
-    #[test]
-    fn rejects_duplicate_socket_type() {
-        let mut body = BytesMut::new();
-        write_property(&mut body, b"Socket-Type", b"PUSH");
-        write_property(&mut body, b"Socket-Type", b"PULL");
-        assert!(matches!(
-            decode_properties_inner(body.freeze()),
-            Err(Error::Protocol(msg)) if msg.contains("duplicate Socket-Type")
-        ));
-    }
-
-    #[test]
-    fn rejects_duplicate_identity() {
-        let mut body = BytesMut::new();
-        write_property(&mut body, b"Socket-Type", b"PUSH");
-        write_property(&mut body, b"Identity", b"alice");
-        write_property(&mut body, b"Identity", b"bob");
-        assert!(matches!(
-            decode_properties_inner(body.freeze()),
-            Err(Error::Protocol(msg)) if msg.contains("duplicate Identity")
-        ));
-    }
-
-    #[test]
-    fn rejects_metadata_values_above_int32_max() {
-        for length in [0x8000_0000u32, u32::MAX] {
-            let mut body = BytesMut::new();
-            body.extend_from_slice(b"\x01X");
-            body.put_u32(length);
-            assert!(matches!(
-                decode_properties_inner(body.freeze()),
-                Err(Error::Protocol(reason)) if reason.contains("value too large")
-            ));
-        }
-    }
-
-    #[test]
-    fn truncated_metadata_at_int32_max_returns_protocol_error() {
-        let mut body = BytesMut::new();
-        body.extend_from_slice(b"\x01X");
-        body.put_u32(i32::MAX as u32);
-        assert!(matches!(
-            decode_properties_inner(body.freeze()),
-            Err(Error::Protocol(reason)) if reason.contains("truncated")
-        ));
-    }
-
-    #[test]
-    fn rejects_oversized_peer_identity() {
-        let mut body = BytesMut::new();
-        write_property(&mut body, b"Identity", &[b'x'; 256]);
-        assert!(matches!(
-            decode_properties_inner(body.freeze()),
-            Err(Error::Protocol(reason)) if reason.contains("identity")
-        ));
-    }
-
-    #[test]
-    fn accepts_maximum_peer_identity() {
-        let mut body = BytesMut::new();
-        write_property(&mut body, b"Identity", &[b'x'; 255]);
-        let properties = decode_properties_inner(body.freeze()).unwrap();
-        assert_eq!(properties.identity.unwrap().len(), 255);
-    }
-
-    #[test]
-    fn rejects_reserved_peer_identity() {
-        let mut body = BytesMut::new();
-        write_property(&mut body, b"Identity", b"\0reserved");
-        assert!(matches!(
-            decode_properties_inner(body.freeze()),
-            Err(Error::Protocol(reason)) if reason.contains("identity")
-        ));
-    }
-
-    #[test]
-    fn kind_discriminates_all_variants() {
-        assert_eq!(
-            Command::Subscribe(Bytes::new()).kind(),
-            CommandKind::Subscribe
-        );
-        assert_eq!(
-            Command::Pong {
-                context: Bytes::new()
-            }
-            .kind(),
-            CommandKind::Pong
-        );
-        assert_eq!(
-            Command::Error {
-                reason: String::new()
-            }
-            .kind(),
-            CommandKind::Error
-        );
-    }
-    #[test]
-    fn ready_drops_local_only_claims_and_bounds_property_count() {
-        use bytes::{BufMut, BytesMut};
-        fn property(out: &mut BytesMut, name: &[u8], value: &[u8]) {
-            out.put_u8(u8::try_from(name.len()).unwrap());
-            out.put_slice(name);
-            out.put_u32(u32::try_from(value.len()).unwrap());
-            out.put_slice(value);
-        }
-        let mut body = BytesMut::new();
-        for name in [&b"User-Id"[..], b"user-id", b"Peer-Address", b"X-Role"] {
-            property(&mut body, name, b"admin");
-        }
-        let props = super::decode_properties_inner(body.freeze()).unwrap();
-        assert_eq!(props.other.len(), 1);
-        assert_eq!(props.other[0].0, "X-Role");
-
-        let mut crowded = BytesMut::new();
-        for index in 0..=super::MAX_READY_PROPERTIES {
-            property(&mut crowded, format!("X-{index}").as_bytes(), b"");
-        }
-        assert!(super::decode_properties_inner(crowded.freeze()).is_err());
-    }
-}
+mod tests;

@@ -1,14 +1,14 @@
 #![cfg(feature = "soak")]
 
-#[global_allocator]
-static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
-
 mod soak_common;
 
 use std::time::{Duration, Instant};
 
 use omq_tokio::options::ReconnectPolicy;
 use omq_tokio::{Endpoint, Message, Socket, SocketType};
+
+#[global_allocator]
+static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
 
 /// Retries the bind for up to ~1 s while the previous listener releases
 /// the port.
@@ -17,8 +17,10 @@ async fn bind_with_retry(pull: &Socket, ep: &Endpoint) -> bool {
         if pull.bind(ep.clone()).await.is_ok() {
             return true;
         }
+
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+
     false
 }
 
@@ -41,6 +43,7 @@ async fn deliver_once(push: &Socket, pull: &Socket, cycle: u64) -> bool {
                  send took {send_us} µs, recv waited {recv_ms} ms, \
                  result={other:?}",
             );
+
             false
         }
     }
@@ -102,6 +105,7 @@ fn soak_reconnect_storm() {
         } else {
             100.0
         };
+
         eprintln!(
             "[reconnect_storm] done: {delivered}/{cycles} delivered ({pct:.1}%) in {:.1}s",
             start.elapsed().as_secs_f64(),

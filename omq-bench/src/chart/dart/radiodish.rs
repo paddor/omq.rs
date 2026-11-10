@@ -23,8 +23,10 @@ fn eligible(row: &Value) -> bool {
     let Some(implementation) = row["impl"].as_str() else {
         return false;
     };
+
     let size = row["msg_size"].as_u64().unwrap_or(0);
     let readers = row["peers"].as_u64().unwrap_or(0);
+
     super::IMPLS[..3]
         .iter()
         .any(|item| item.key == implementation)
@@ -66,10 +68,12 @@ fn cohorts(rows: Vec<(usize, Value)>) -> BTreeMap<(String, String), Cohort> {
         if !eligible(&row) {
             continue;
         }
+
         let (Some(run), Some(digest)) = (row["run_id"].as_str(), row["binary_sha256"].as_str())
         else {
             continue;
         };
+
         cohorts
             .entry((run.into(), digest.into()))
             .or_default()
@@ -95,6 +99,7 @@ fn reader_panel(readers: u64, cohort: &Cohort) -> shm::RateMaps {
             maps.insert_round_rates(row, implementation.key, size);
         }
     }
+
     maps
 }
 
@@ -142,5 +147,6 @@ pub(super) fn generate() -> Result<(), Box<dyn std::error::Error>> {
         common::detect_hardware().as_deref(),
     )?;
     eprintln!("Written: {}", path.display());
+
     Ok(())
 }

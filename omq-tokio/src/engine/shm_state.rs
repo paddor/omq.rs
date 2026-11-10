@@ -2,6 +2,8 @@
 //! these types have no values, so every `Option` of them is `None` and the
 //! code that passes them along needs no platform cfg.
 
+pub(crate) use imp::{ShmConnection, ShmState, lock};
+
 #[cfg(target_os = "linux")]
 mod imp {
     pub(crate) use crate::transport::shm::ShmState;
@@ -47,5 +49,3 @@ mod imp {
         match *state {}
     }
 }
-
-pub(crate) use imp::{ShmConnection, ShmState, lock};

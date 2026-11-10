@@ -87,6 +87,7 @@ impl OutboundState {
             .as_ref()
             .is_some_and(MessageEncoder::is_adaptive)
             .then(|| LevelWindow::new(Instant::now()));
+
         Self {
             encoder,
             passthrough,
@@ -114,6 +115,7 @@ impl OutboundState {
                 .stage(first, try_recv, max_msgs, eq)
                 .map(|count| count >= max_msgs);
         }
+
         #[cfg(any(feature = "lz4", feature = "zstd"))]
         if self
             .encoder
@@ -128,6 +130,7 @@ impl OutboundState {
         // ready results, so they cannot overtake a large offload on the wire.
         let use_pipeline = self.offload_enabled();
         let mut held = None;
+
         let mut encode = |message: &Message, held: &mut Option<Message>| -> Result<()> {
             if use_pipeline {
                 self.pipeline_message(message.clone(), held);
@@ -141,16 +144,19 @@ impl OutboundState {
         let mut count = 1usize;
         let mut bytes = first.byte_len();
         let mut limited = true;
+
         while count < max_msgs && bytes < max_batch_bytes() {
             if count.is_multiple_of(BATCH_TIME_CHECK_MSGS)
                 && started.elapsed() >= OUTBOUND_BATCH_TIME
             {
                 break;
             }
+
             let Some(next) = try_recv() else {
                 limited = false;
                 break;
             };
+
             bytes += next.byte_len();
             encode(&next, &mut held)?;
             count += 1;
@@ -176,6 +182,7 @@ impl OutboundState {
 
         let started = Instant::now();
         let capacity = self.encoder.as_ref().unwrap().arena_capacity();
+
         let mut messages = smallvec::SmallVec::<[Message; 32]>::new();
         let mut arena_bytes = 0;
         let mut parts = 0;
@@ -195,6 +202,7 @@ impl OutboundState {
                 if !messages.is_empty() {
                     self.offload_held(&mut held);
                 }
+
                 self.flush_arena(&messages, connection, eq)?;
                 messages.clear();
                 arena_bytes = 0;
@@ -203,6 +211,7 @@ impl OutboundState {
 
             count += 1;
             bytes += message.byte_len();
+
             if let Some(size) = size {
                 arena_bytes += size;
                 parts += message.len();
@@ -219,12 +228,14 @@ impl OutboundState {
                 limited = true;
                 break;
             }
+
             next = try_recv();
         }
 
         if !messages.is_empty() {
             self.offload_held(&mut held);
         }
+
         self.flush_arena(&messages, connection, eq)?;
         self.encode_held(held, connection, eq)?;
         Ok(limited)
@@ -290,6 +301,7 @@ impl OutboundState {
                 let result = loan.encoder.encode(&msg);
                 (Some(loan), result)
             });
+
             self.offload_pipeline.push_back(Box::pin(async move {
                 match handle.await {
                     Ok(pair) => pair,
@@ -299,8 +311,10 @@ impl OutboundState {
                     ),
                 }
             }));
+
             return;
         }
+
         let result = encoder.encode(msg);
         self.offload_pipeline
             .push_back(Box::pin(futures::future::ready((None, result))));
@@ -332,8 +346,10 @@ impl OutboundState {
             } else {
                 eq.frame_ws(msg, role);
             }
+
             return Ok(());
         }
+
         if connection.has_frame_transform() {
             if let Some(enc) = self.encoder.as_mut() {
                 for wire in enc.encode(msg)? {
@@ -342,8 +358,10 @@ impl OutboundState {
             } else {
                 connection.send_message(msg)?;
             }
+
             return Ok(());
         }
+
         if let Some((sentinel, threshold)) = &self.passthrough
             && msg.iter().all(|b| b.len() < *threshold)
         {
@@ -355,6 +373,7 @@ impl OutboundState {
         } else {
             eq.frame(msg);
         }
+
         Ok(())
     }
 
@@ -369,6 +388,7 @@ impl OutboundState {
         let Some(message) = held else {
             return Ok(());
         };
+
         let wire = self.encoder.as_mut().unwrap().encode(&message)?;
         self.queue_arena_wire(wire, connection, eq)
     }
@@ -383,9 +403,11 @@ impl OutboundState {
         if messages.is_empty() {
             return Ok(());
         }
+
         if messages.len() == 1 && self.offload_pipeline.is_empty() {
             return self.encode(&messages[0], connection, eq);
         }
+
         let encoder = self.encoder.as_mut().unwrap();
         let wire = if messages.len() == 1 {
             encoder.encode(&messages[0])?
@@ -393,6 +415,7 @@ impl OutboundState {
             let references: smallvec::SmallVec<[&Message; 32]> = messages.iter().collect();
             encoder.encode_arena(&references)?
         };
+
         self.queue_arena_wire(wire, connection, eq)
     }
 
@@ -423,6 +446,7 @@ impl OutboundState {
         if let Some(shm) = &mut self.shm {
             shm.drain(eq)?;
         }
+
         Ok(())
     }
 
@@ -438,6 +462,7 @@ impl OutboundState {
         let Some(window) = &mut self.level_window else {
             return;
         };
+
         window.batches += 1;
         window.backlogged += u32::from(backlogged);
         window.overflowed += u32::from(backlogged && limited);
@@ -458,6 +483,7 @@ impl OutboundState {
         let (Some(window), Some(encoder)) = (&mut self.level_window, &mut self.encoder) else {
             return;
         };
+
         encoder.adapt_level(OutputWindow {
             elapsed: now.saturating_duration_since(window.started),
             blocked,
@@ -466,6 +492,7 @@ impl OutboundState {
             overflowed: window.overflowed,
             input_full: window.input_full,
         });
+
         *window = LevelWindow::new(now);
     }
 
@@ -494,20 +521,25 @@ impl OutboundState {
         let started = Instant::now();
         let mut count = 0;
         let mut next = Some(first);
+
         while let Some((mut loan, frames)) = next {
             if let (Some(loan), Some(encoder)) = (loan.as_mut(), self.encoder.as_mut()) {
                 encoder.absorb_offload_stats(&mut loan.encoder);
             }
+
             drain_offload_result(loan, frames, connection, eq)?;
             count += 1;
+
             if count >= OUTBOUND_BATCH_MAX_MSGS
                 || (count.is_multiple_of(BATCH_TIME_CHECK_MSGS)
                     && started.elapsed() >= OUTBOUND_BATCH_TIME)
             {
                 break;
             }
+
             next = self.offload_pipeline.next().now_or_never().flatten();
         }
+
         Ok(count)
     }
 }
@@ -528,16 +560,20 @@ pub(super) fn drain_offload_result(
     if let Some(loan) = loan {
         loan.restore();
     }
+
     #[cfg(feature = "ws")]
     let ws = connection.is_ws().then(|| ws_send_role(connection));
+
     for wire in frames? {
         #[cfg(feature = "ws")]
         if let Some(role) = ws {
             eq.frame_ws(&wire, role);
             continue;
         }
+
         eq.frame(&wire);
     }
+
     Ok(())
 }
 
@@ -550,75 +586,4 @@ fn ws_send_role(connection: &Connection) -> omq_proto::proto::connection::WsRole
 }
 
 #[cfg(all(test, feature = "zstd"))]
-mod tests {
-    use super::*;
-    use omq_proto::proto::SocketType;
-    use omq_proto::proto::connection::{ConnectionConfig, Role};
-    use omq_proto::{CompressionKind, Options};
-    use std::fmt::Write as _;
-
-    fn state(options: &Options) -> OutboundState {
-        let (encoder, _) = MessageEncoder::for_compression_kind(CompressionKind::Zstd, options)
-            .unwrap()
-            .unwrap();
-        OutboundState::new(Some(encoder), None, 0, None)
-    }
-
-    fn level(state: &OutboundState) -> i32 {
-        state
-            .encoder
-            .as_ref()
-            .and_then(MessageEncoder::level)
-            .unwrap()
-    }
-
-    /// Encode one full window of backlogged input and backdate its start.
-    fn fill_window(state: &mut OutboundState, limited: bool, input_full: bool) {
-        let mut connection = Connection::new(ConnectionConfig::new(Role::Client, SocketType::Push));
-        let mut eq = FrameBuffer::new();
-        let mut body = String::new();
-        for index in 0..8192 {
-            write!(body, "{{\"id\":{}}}", index % 89).unwrap();
-        }
-        let message = Message::single(body);
-        while !state.level_window_due() {
-            state
-                .batch_encode(&message, || None, &mut connection, &mut eq)
-                .unwrap();
-            state.note_batch(true, limited, input_full);
-            if let Some(window) = &mut state.level_window {
-                window.started = Instant::now().checked_sub(ADAPT_WINDOW).unwrap();
-            }
-        }
-    }
-
-    #[test]
-    fn stalled_writes_raise_and_overflowing_input_lowers_the_level() {
-        let mut stalled = state(&Options::default());
-        assert_eq!(level(&stalled), -1);
-        fill_window(&mut stalled, true, true);
-        stalled.adapt_level(Instant::now(), ADAPT_WINDOW);
-        assert_eq!(level(&stalled), 1);
-        assert!(!stalled.level_window_due());
-
-        let mut queued = state(&Options::default());
-        fill_window(&mut queued, false, false);
-        queued.adapt_level(Instant::now(), Duration::ZERO);
-        assert_eq!(level(&queued), -1);
-
-        for (limited, input_full) in [(true, false), (false, true)] {
-            let mut behind = state(&Options::default());
-            fill_window(&mut behind, limited, input_full);
-            behind.adapt_level(Instant::now(), Duration::ZERO);
-            assert_eq!(level(&behind), -2);
-        }
-    }
-
-    #[test]
-    fn fixed_levels_do_not_track_windows() {
-        let mut fixed = state(&Options::default().compression_level(3));
-        assert!(!fixed.adapts_level());
-        fixed.note_batch(true, true, true);
-        assert!(!fixed.level_window_due());
-    }
-}
+mod tests;

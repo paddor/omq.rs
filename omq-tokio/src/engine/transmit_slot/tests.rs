@@ -19,6 +19,7 @@ fn fanout_bytes(msg: &Message) -> Bytes {
     let frame = encoder.build(msg, ONE_PEER);
     let wire: Vec<u8> = fanout_frame_chunks(&frame).concat();
     encoder.clear();
+
     Bytes::from(wire)
 }
 
@@ -30,6 +31,7 @@ fn transmit_slot_caps_queued_messages_independent_of_bytes() {
     for _ in 0..TRANSMIT_SLOT_MSG_CAP_DEFAULT {
         assert_eq!(slot.try_encode(&msg), TryFrameResult::Ok);
     }
+
     assert_eq!(slot.try_encode(&msg), TryFrameResult::Full);
 
     let mut chunks = Vec::new();
@@ -42,14 +44,17 @@ fn transmit_slot_caps_queued_messages_independent_of_bytes() {
 fn admit_singles(slot: &PeerTransmitSlot, data: &[u8], ends: &[usize], start: usize) -> usize {
     let mut next = start;
     let mut offset = if start == 0 { 0 } else { ends[start - 1] };
+
     while next < ends.len() {
         let end = ends[next];
         if slot.try_push_pre_framed_no_signal(&data[offset..end]) != TryFrameResult::Ok {
             break;
         }
+
         next += 1;
         offset = end;
     }
+
     next
 }
 
@@ -62,10 +67,12 @@ fn pre_framed_batch_matches_single_admission_and_retries_suffix() {
     ];
     let mut wire = FrameBuffer::new();
     let mut ends = Vec::new();
+
     for message in &messages {
         wire.frame_inline(message);
         ends.push(wire.total_bytes());
     }
+
     let data = wire.uncommitted_arena();
     for byte_cap in [1, 5, 8, 100] {
         for msg_cap in [1, 2, 8] {
@@ -81,30 +88,37 @@ fn pre_framed_batch_matches_single_admission_and_retries_suffix() {
                     },
                 )
             };
+
             let batched = make_slot();
             let singles = make_slot();
             let mut start = 0;
             let mut received = Vec::new();
+
             while start < ends.len() {
                 let expected = admit_singles(&singles, data, &ends, start);
                 let (next, result) =
                     batched.try_push_pre_framed_batch_no_signal(data, &ends, start);
+
                 assert_eq!(next, expected);
                 assert!(next > start, "an empty slot must accept one whole message");
                 assert_eq!(batched.queued_msgs.load(Ordering::Relaxed), next - start);
                 assert_eq!(result == TryFrameResult::Ok, next == ends.len());
                 assert!(batched.data_signal.is_idle(), "caller owns the batch wake");
+
                 batched.signal_encoded();
                 assert!(!batched.data_signal.is_idle());
+
                 let mut actual = Vec::new();
                 let mut reference = Vec::new();
                 batched.drain(&mut actual, 1024);
                 singles.drain(&mut reference, 1024);
                 assert_eq!(actual, reference);
                 assert_eq!(batched.queued_msgs.load(Ordering::Relaxed), 0);
+
                 received.extend(actual.into_iter().flat_map(|chunk| chunk.to_vec()));
                 start = next;
             }
+
             assert_eq!(received, data);
         }
     }
@@ -192,6 +206,7 @@ fn fanout_drop_oldest_shares_large_bodies_and_evicts_whole_messages() {
         assert_eq!(slot.try_push_fanout_drop_oldest(&frame), TryFrameResult::Ok);
         encoder.clear();
     }
+
     let mut actual = Vec::new();
     slot.drain(&mut actual, 1024);
     // The first message was evicted whole: header and body.

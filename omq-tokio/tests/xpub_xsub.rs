@@ -15,6 +15,15 @@ use omq_tokio::{
     Endpoint, Error, Message, MonitorEvent, MonitorStream, Options, Socket, SocketType,
 };
 
+// READY command as a SUB socket (body = 25 bytes).
+const SUB_READY: &[u8] = &[
+    0x04, 0x19, // short COMMAND, body = 25 bytes
+    0x05, b'R', b'E', b'A', b'D', b'Y', // name_len=5, "READY"
+    0x0B, b'S', b'o', b'c', b'k', b'e', b't', b'-', b'T', b'y', b'p', b'e', // "Socket-Type"
+    0x00, 0x00, 0x00, 0x03, // value length = 3
+    b'S', b'U', b'B', // "SUB"
+];
+
 fn tcp_loopback(port: u16) -> Endpoint {
     Endpoint::Tcp {
         host: Host::Ip(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
@@ -48,6 +57,7 @@ fn spawn_subscription_churn(busy: Socket) -> tokio::task::JoinHandle<Socket> {
                 }
             }
         }
+
         busy
     })
 }
@@ -76,6 +86,7 @@ async fn connect_fresh_subscriber(publisher: &Socket, endpoint: Endpoint) -> Soc
     })
     .await
     .expect("fresh subscription blocked by another peer's notifications");
+
     fresh
 }
 
@@ -87,10 +98,12 @@ async fn drain_notifications(
 ) -> (Vec<bytes::Bytes>, usize) {
     let mut busy_notifications = Vec::new();
     let mut fresh_notifications = 0;
+
     tokio::time::timeout(Duration::from_secs(5), async {
         for _ in 0..1025 {
             let notification = publisher.recv().await.unwrap();
             let bytes = notification.part_bytes(0).unwrap();
+
             if bytes.as_ref() == b"\x01fresh" {
                 fresh_notifications += 1;
             } else {
@@ -103,6 +116,7 @@ async fn drain_notifications(
     })
     .await
     .expect("XPUB notifications were lost or their producer remained blocked");
+
     (busy_notifications, fresh_notifications)
 }
 
@@ -112,11 +126,13 @@ async fn check_xpub_full_notifications(transport: &str) {
         SocketType::XPub,
         Options::default().recv_hwm(1).linger(Duration::ZERO),
     );
+
     let endpoint = if transport == "inproc" {
         "inproc://xpub-full-notifications".to_owned()
     } else {
         format!("{transport}://127.0.0.1:0")
     };
+
     let endpoint = publisher.bind(endpoint).await.unwrap();
 
     let busy = Socket::new(SocketType::Sub, Options::default().linger(Duration::ZERO));
@@ -124,6 +140,7 @@ async fn check_xpub_full_notifications(transport: &str) {
     busy.wait_connected(1, Duration::from_secs(1))
         .await
         .unwrap();
+
     let producer = spawn_subscription_churn(busy);
     publisher
         .wait_subscribed(200, Duration::from_secs(2))
@@ -145,6 +162,7 @@ async fn check_xpub_full_notifications(transport: &str) {
     // 512 subscribes, then 512 cancels.
     let (busy_notifications, fresh_notifications) = drain_notifications(&publisher, producer).await;
     assert_eq!(fresh_notifications, 1);
+
     for (index, notification) in busy_notifications.into_iter().enumerate() {
         let tag = u8::from(index < 512);
         let mut expected = vec![tag];
@@ -165,6 +183,7 @@ async fn pub_filters_by_subscriber_prefix() {
     let pub_ = Socket::new(SocketType::Pub, Options::default());
     let mut pub_mon = pub_.monitor();
     pub_.bind(tcp_loopback(0)).await.unwrap();
+
     let port = match tokio::time::timeout(Duration::from_secs(1), pub_mon.recv())
         .await
         .unwrap()
@@ -187,9 +206,11 @@ async fn pub_filters_by_subscriber_prefix() {
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     let mut news_got = false;
     let mut sports_got = false;
+
     while !(news_got && sports_got) && std::time::Instant::now() < deadline {
         let _ = pub_.send(Message::single("news.alpha")).await;
         let _ = pub_.send(Message::single("sports.beta")).await;
+
         if !news_got
             && let Ok(Ok(m)) = tokio::time::timeout(Duration::from_millis(20), news.recv()).await
         {
@@ -197,6 +218,7 @@ async fn pub_filters_by_subscriber_prefix() {
             assert!(bytes.starts_with(b"news."), "news got non-news: {bytes:?}");
             news_got = true;
         }
+
         if !sports_got
             && let Ok(Ok(m)) = tokio::time::timeout(Duration::from_millis(20), sports.recv()).await
         {
@@ -208,6 +230,7 @@ async fn pub_filters_by_subscriber_prefix() {
             sports_got = true;
         }
     }
+
     assert!(news_got, "news SUB never received its subscription");
     assert!(sports_got, "sports SUB never received its subscription");
 }
@@ -217,6 +240,7 @@ async fn xpub_surfaces_subscribe_messages() {
     let xpub = Socket::new(SocketType::XPub, Options::default());
     let mut xmon = xpub.monitor();
     xpub.bind(tcp_loopback(0)).await.unwrap();
+
     let port = match tokio::time::timeout(Duration::from_secs(1), xmon.recv())
         .await
         .unwrap()
@@ -273,6 +297,7 @@ async fn xsub_subscribe_filters_messages_from_xpub() {
         omq_tokio::Socket::new(omq_tokio::SocketType::XPub, omq_tokio::Options::default());
     let mut xmon = pub_socket.monitor();
     pub_socket.bind(tcp_loopback(0)).await.unwrap();
+
     let port = match tokio::time::timeout(Duration::from_secs(1), xmon.recv())
         .await
         .unwrap()
@@ -304,6 +329,7 @@ async fn xsub_subscribe_filters_messages_from_xpub() {
         let _ = pub_socket
             .send(omq_tokio::Message::single("sports.beta"))
             .await;
+
         if let Ok(Ok(m)) = tokio::time::timeout(Duration::from_millis(20), sub_socket.recv()).await
         {
             let bytes = m.part_bytes(0).unwrap();
@@ -311,8 +337,10 @@ async fn xsub_subscribe_filters_messages_from_xpub() {
                 bytes.starts_with(b"news."),
                 "XSUB received non-subscribed message: {bytes:?}"
             );
+
             return;
         }
+
         assert!(
             std::time::Instant::now() < deadline,
             "XSUB never received its subscribed messages"
@@ -361,22 +389,15 @@ fn zmtp30_sub_greeting() -> [u8; 64] {
     g[10] = 3; // major = 3
     g[11] = 0; // minor = 0 → ZMTP 3.0
     g[12..16].copy_from_slice(b"NULL");
+
     g
 }
-
-// READY command as a SUB socket (body = 25 bytes).
-const SUB_READY: &[u8] = &[
-    0x04, 0x19, // short COMMAND, body = 25 bytes
-    0x05, b'R', b'E', b'A', b'D', b'Y', // name_len=5, "READY"
-    0x0B, b'S', b'o', b'c', b'k', b'e', b't', b'-', b'T', b'y', b'p', b'e', // "Socket-Type"
-    0x00, 0x00, 0x00, 0x03, // value length = 3
-    b'S', b'U', b'B', // "SUB"
-];
 
 fn read_zmtp_frame(stream: &mut std::net::TcpStream) -> Vec<u8> {
     use std::io::Read;
     let mut flags = [0u8; 1];
     stream.read_exact(&mut flags).unwrap();
+
     let body_len = if flags[0] & 0x02 != 0 {
         let mut len_buf = [0u8; 8];
         stream.read_exact(&mut len_buf).unwrap();
@@ -386,6 +407,7 @@ fn read_zmtp_frame(stream: &mut std::net::TcpStream) -> Vec<u8> {
         stream.read_exact(&mut len_buf).unwrap();
         len_buf[0] as usize
     };
+
     let mut body = vec![0u8; body_len];
     stream.read_exact(&mut body).unwrap();
     body
@@ -402,6 +424,7 @@ async fn pub_accepts_zmtp30_message_form_subscribe() {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let p = l.local_addr().unwrap().port();
         drop(l);
+
         p
     };
 
@@ -417,6 +440,7 @@ async fn pub_accepts_zmtp30_message_form_subscribe() {
     let addr = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
     std::thread::spawn(move || {
         use std::io::Read;
+
         let mut stream = std::net::TcpStream::connect(addr).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(3)))
@@ -483,6 +507,7 @@ async fn xpub_tcp_subscriber_churn() {
     let xpub = Socket::new(SocketType::XPub, Options::default());
     let mut mon = xpub.monitor();
     xpub.bind(tcp_loopback(0)).await.unwrap();
+
     let port = loop {
         match mon.recv().await {
             Ok(omq_tokio::MonitorEvent::Listening {
@@ -526,6 +551,7 @@ async fn sub_control_stays_responsive_when_an_xpub_never_reads() {
     let sub = Socket::new(SocketType::Sub, Options::default());
     sub.connect("inproc://xpub-never-reads").await.unwrap();
     sub.wait_connected(1, Duration::from_secs(2)).await.unwrap();
+
     // The XPUB never receives its subscription messages, so queues toward it
     // fill and subscribe() feels backpressure. The actor must not.
     let flooding = sub.clone();
@@ -536,11 +562,13 @@ async fn sub_control_stays_responsive_when_an_xpub_never_reads() {
             }
         }
     });
+
     tokio::time::sleep(Duration::from_millis(200)).await;
     tokio::time::timeout(Duration::from_secs(2), sub.connections())
         .await
         .expect("socket commands waited behind a stalled peer")
         .unwrap();
+
     tokio::time::timeout(Duration::from_secs(2), sub.close())
         .await
         .expect("close waited for a stalled peer")
@@ -717,12 +745,15 @@ async fn monitor_with_subscriptions_snapshots_ready_peers() {
     for endpoint in ["tcp://127.0.0.1:0", "inproc://monitor-with-subscriptions"] {
         let pub_ = Socket::new(SocketType::Pub, Options::default());
         let endpoint = pub_.bind(endpoint).await.unwrap();
+
         let quiet = Socket::new(SocketType::Sub, Options::default().identity("quiet"));
         quiet.connect(endpoint.clone()).await.unwrap();
+
         let busy = Socket::new(SocketType::Sub, Options::default().identity("busy"));
         busy.subscribe("b.").await.unwrap();
         busy.subscribe("a.").await.unwrap();
         busy.connect(endpoint.clone()).await.unwrap();
+
         pub_.wait_connected(2, Duration::from_secs(2))
             .await
             .unwrap();
@@ -811,11 +842,13 @@ async fn subscription_events(
                 } => ("unsubscribed", connection_id, prefix),
                 _ => continue,
             };
+
             events.push((kind, connection_id, prefix.to_vec()));
         }
     })
     .await
     .expect("subscription monitor events");
+
     events
 }
 
@@ -828,22 +861,28 @@ async fn pub_subscription_admission_applies_to_zmtp30_subscribe() {
         Options::default().subscription_admission(|request| request.prefix != b"foo"),
     );
     let mut monitor = pub_.monitor();
+
     let Endpoint::Tcp { port, .. } = pub_.bind(tcp_loopback(0)).await.unwrap() else {
         unreachable!("TCP bind");
     };
+
     let addr = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
     let (result_tx, result_rx) = tokio::sync::oneshot::channel::<Vec<u8>>();
     let (cancel_tx, cancel_rx) = std::sync::mpsc::channel::<()>();
+
     std::thread::spawn(move || {
         let mut stream = std::net::TcpStream::connect(addr).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(3)))
             .unwrap();
+
         stream.write_all(&zmtp30_sub_greeting()).unwrap();
         let mut peer_greeting = [0u8; 64];
         stream.read_exact(&mut peer_greeting).unwrap();
+
         stream.write_all(SUB_READY).unwrap();
         let _ = read_zmtp_frame(&mut stream);
+
         // DATA \x01foo (rejected), then DATA \x01bar (admitted).
         stream
             .write_all(&[0x00, 0x04, 0x01, b'f', b'o', b'o'])
@@ -852,12 +891,14 @@ async fn pub_subscription_admission_applies_to_zmtp30_subscribe() {
             .write_all(&[0x00, 0x04, 0x01, b'b', b'a', b'r'])
             .unwrap();
         let _ = result_tx.send(read_zmtp_frame(&mut stream));
+
         // DATA \x00bar cancels. Stay connected until the test ends.
         if cancel_rx.recv().is_ok() {
             stream
                 .write_all(&[0x00, 0x04, 0x00, b'b', b'a', b'r'])
                 .unwrap();
         }
+
         let _ = cancel_rx.recv();
     });
 

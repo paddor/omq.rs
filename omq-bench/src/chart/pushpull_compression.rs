@@ -12,6 +12,10 @@ use super::common::{
 use crate::jsonl::{self, PushpullLz4Row};
 use crate::process;
 
+const PAYLOAD: &str = "structured-varied-v1";
+const CPU_PANEL_MAX: f64 = 200.0;
+pub(crate) const LEGEND_ROW_H: u32 = 16;
+
 /// One codec's bench cache and the workload its rows must match.
 pub(crate) struct Source {
     pub(crate) cache_file: &'static str,
@@ -41,10 +45,6 @@ pub(crate) struct CompressionChart {
 
 /// Median repeat of each (panel, series key, size) cell.
 pub(crate) type Cells = BTreeMap<(u64, &'static str, u64), PushpullLz4Row>;
-
-const PAYLOAD: &str = "structured-varied-v1";
-const CPU_PANEL_MAX: f64 = 200.0;
-pub(crate) const LEGEND_ROW_H: u32 = 16;
 
 struct CompressionData {
     msgs: BTreeMap<String, f64>,
@@ -78,6 +78,7 @@ pub(crate) fn load_cells(
             let Some(key) = series_key(&row) else {
                 continue;
             };
+
             let Some(series) = chart
                 .series
                 .iter()
@@ -85,9 +86,11 @@ pub(crate) fn load_cells(
             else {
                 continue;
             };
+
             if !chart.sizes.contains(&row.msg_size) || !eligible(series.source, &row) {
                 continue;
             }
+
             let Some(panel) = panel(&row) else {
                 continue;
             };
@@ -98,6 +101,7 @@ pub(crate) fn load_cells(
             if group.last().is_some_and(|last| last.run_id != row.run_id) {
                 group.clear();
             }
+
             group.retain(|old| old.repeat != row.repeat);
             group.push(row);
         }
@@ -142,6 +146,7 @@ fn eligible(source: &Source, row: &PushpullLz4Row) -> bool {
 fn link_rate(chart: &CompressionChart, row: &PushpullLz4Row) -> Option<u64> {
     let link = row.netem.as_ref()?;
     let rate = u64::from(link.rate_mbps);
+
     (row.send_rate.is_none()
         && link.delay_us == 1000
         && link.mtu == 1500
@@ -197,6 +202,7 @@ fn measured(data: &BTreeMap<u64, CompressionData>) -> (ValMap, ValMap, ValMap) {
             tput.entry(msg_size)
                 .or_default()
                 .insert(series_key.clone(), mbps);
+
             if let Some(&cpu_pct) = compression.cpu_pct.get(series_key) {
                 cpu.entry(msg_size)
                     .or_default()
@@ -210,6 +216,7 @@ fn measured(data: &BTreeMap<u64, CompressionData>) -> (ValMap, ValMap, ValMap) {
 
 /// Size index against msg/s (primary) or GB/s (secondary).
 type Coord = Cartesian2d<RangedCoordf64, RangedCoordf64>;
+
 type DualChart<'a, 'b> = DualCoordChartContext<'a, SVGBackend<'b>, Coord, Coord>;
 
 /// X-axis sizes and the series drawn in each link row.
@@ -223,6 +230,7 @@ pub(crate) fn generate(chart: &CompressionChart) {
     if cells.is_empty() {
         return;
     }
+
     assert_complete(chart, &cells);
     let data = link_data(&cells);
 
@@ -296,12 +304,14 @@ fn link_data(cells: &Cells) -> LinkData {
                 msgs: BTreeMap::new(),
                 cpu_pct: BTreeMap::new(),
             });
+
         entry.msgs.insert(series.to_owned(), row.msgs_s.unwrap());
         entry.cpu_pct.insert(
             series.to_owned(),
             row.cpu_time.unwrap() / row.elapsed.unwrap() * 100.0,
         );
     }
+
     out
 }
 
@@ -402,6 +412,7 @@ fn draw_msg_lines(chart_area: &mut DualChart<'_, '_>, series: &RowSeries<'_>, ms
             .enumerate()
             .filter_map(|(i, &sz)| msgs.get(&sz)?.get(imp.key).map(|&v| (i as f64, v)))
             .collect();
+
         if pts.is_empty() {
             continue;
         }
@@ -414,6 +425,7 @@ fn draw_msg_lines(chart_area: &mut DualChart<'_, '_>, series: &RowSeries<'_>, ms
                 imp.color.stroke_width(2),
             ))
             .unwrap();
+
         chart_area
             .draw_series(
                 pts.iter()
@@ -446,6 +458,7 @@ fn draw_cpu_lines(
                 ))
             })
             .collect();
+
         if pts.is_empty() {
             continue;
         }
@@ -470,11 +483,13 @@ fn draw_cpu_lines(
                     } else {
                         2
                     };
+
                     let dy = if cpu_pct < 15.0 {
                         [-18, -9, -27][series_index]
                     } else {
                         [0, 9, -7][series_index]
                     };
+
                     EmptyElement::at((x, y))
                         + Text::new(
                             format!("{cpu_pct:.0}%"),
@@ -499,6 +514,7 @@ fn draw_gbs_lines(chart_area: &mut DualChart<'_, '_>, series: &RowSeries<'_>, tp
                     .map(|&v| (i as f64, v / 1000.0))
             })
             .collect();
+
         if pts.is_empty() {
             continue;
         }
@@ -562,80 +578,4 @@ pub(crate) fn draw_legend(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn zstd_row() -> PushpullLz4Row {
-        serde_json::from_value(serde_json::json!({
-            "run_id": "test", "pattern": "pushpull_zstd", "transport": "zstd+tcp",
-            "peers": 1, "msg_size": 64, "wire_bytes": 70,
-            "payload": "structured-varied-v1", "payload_seed": 4242,
-            "payload_corpus_messages": 4096, "arena_bytes": 32768,
-            "rounds": 3, "warmup_seconds": 1.0, "duration_seconds": 2.0,
-            "cpu_affinity": "sender=1-2,receiver=3-4", "binary_sha256": "a".repeat(64),
-            "netem": {
-                "rate_mbps": 1000, "delay_us": 1000, "mtu": 1500,
-                "shared_rate": true, "segmentation_offloads": false,
-                "placement": "tcp-ingress-ifb"
-            }
-        }))
-        .unwrap()
-    }
-
-    #[test]
-    fn zstd_rows_need_the_adaptive_range() {
-        let source = &super::super::compression::ZSTD;
-        let mut row = zstd_row();
-        for (level, range) in [
-            (None, Some([-7, 4])),
-            (None, None),
-            (None, Some([-7, -1])),
-            (Some(-1), None),
-            (Some(1), None),
-        ] {
-            row.compression_level = level;
-            row.compression_level_range = range;
-            row.transport = "zstd+tcp".into();
-            assert_eq!(eligible(source, &row), range == Some([-7, 4]));
-            row.transport = "tcp".into();
-            assert!(eligible(source, &row));
-        }
-    }
-
-    #[test]
-    fn saturation_panels_exclude_paced_rows() {
-        let chart = &super::super::compression::SATURATION;
-        let mut row = zstd_row();
-        assert_eq!(link_rate(chart, &row), Some(1000));
-        row.send_rate = Some(1000);
-        assert_eq!(link_rate(chart, &row), None);
-        row.send_rate = None;
-        row.netem.as_mut().unwrap().rate_mbps = 1;
-        assert_eq!(link_rate(chart, &row), None);
-    }
-
-    #[test]
-    fn varied_chart_rejects_repeated_or_mismatched_workloads() {
-        let mut row: PushpullLz4Row = serde_json::from_value(serde_json::json!({
-            "run_id": "test", "pattern": "pushpull_lz4", "transport": "lz4+tcp",
-            "peers": 1, "msg_size": 64, "wire_bytes": 70, "payload": "json"
-        }))
-        .unwrap();
-        assert!(matches_payload(&row, "json", 16384));
-        assert!(!matches_payload(&row, "structured-varied-v1", 16384));
-        row.payload = Some("structured-varied-v1".into());
-        assert!(!matches_payload(&row, "structured-varied-v1", 16384));
-        row.payload_corpus_messages = Some(4096);
-        row.arena_bytes = Some(16384);
-        assert!(matches_payload(&row, "structured-varied-v1", 16384));
-        assert!(!matches_payload(&row, "structured-varied-v1", 32768));
-        row.arena_bytes = Some(32768);
-        assert!(matches_payload(&row, "structured-varied-v1", 32768));
-        row.arena_bytes = Some(16384);
-        row.payload_corpus_messages = Some(1);
-        assert!(!matches_payload(&row, "structured-varied-v1", 16384));
-        row.payload_corpus_messages = Some(4096);
-        row.arena_bytes = Some(0);
-        assert!(!matches_payload(&row, "structured-varied-v1", 16384));
-    }
-}
+mod tests;

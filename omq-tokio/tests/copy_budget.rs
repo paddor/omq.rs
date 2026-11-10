@@ -27,11 +27,15 @@ use omq_tokio::options::{OnMute, WorkloadProfile};
 use omq_tokio::{Context, Endpoint, Message, Options, SocketType};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Frame headers, routing envelopes, and delimiters per message.
 const HEADER_SLACK: u64 = 64;
+
 const ARENA_THRESHOLD: u64 = omq_proto::frame_buffer::ARENA_THRESHOLD as u64;
+
 /// Default `large_message_threshold`: larger frames are read in place.
 const LARGE_READ: u64 = 128 * 1024;
+
 const SIZES: [usize; 3] = [64, 16 * 1024, 1024 * 1024];
 const HUB_IDENTITY: &[u8] = b"hub";
 
@@ -44,6 +48,9 @@ const EXCEPTIONS: &[(Pattern, Transport, &str)] = &[(
 
 /// Counters are process-wide: cells must not overlap.
 static SERIAL: Mutex<()> = Mutex::new(());
+
+const TRANSPORTS: [Transport; 3] = [Transport::Tcp, Transport::Ipc, Transport::Inproc];
+const PROFILES: [WorkloadProfile; 2] = [WorkloadProfile::Latency, WorkloadProfile::Throughput];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Pattern {
@@ -140,9 +147,6 @@ impl Transport {
     }
 }
 
-const TRANSPORTS: [Transport; 3] = [Transport::Tcp, Transport::Ipc, Transport::Inproc];
-const PROFILES: [WorkloadProfile; 2] = [WorkloadProfile::Latency, WorkloadProfile::Throughput];
-
 fn base_options(profile: WorkloadProfile) -> Options {
     Options::default()
         .workload_profile(profile)
@@ -180,6 +184,7 @@ impl Cell {
         } else {
             0
         };
+
         let size = self.size as u64;
         if self.transport == Transport::Inproc {
             0
@@ -195,6 +200,7 @@ impl Cell {
         let excepted = EXCEPTIONS.iter().any(|(pattern, transport, _)| {
             *pattern == self.pattern && *transport == self.transport
         });
+
         if excepted {
             size + HEADER_SLACK
         } else if self.transport == Transport::Inproc {
@@ -221,26 +227,32 @@ fn connect(cell: &Cell, ctx: &Context) -> (Socket, Vec<Socket>) {
     let hub = ctx.blocking_socket(hub_type, cell.pattern.hub_options(cell.profile));
     let name = format!("{:?}", cell.pattern).to_lowercase();
     let endpoint = hub.bind(cell.transport.endpoint(&name)).expect("hub bind");
+
     let peers: Vec<Socket> = (0..cell.peers)
         .map(|index| {
             let peer =
                 ctx.blocking_socket(peer_type, cell.pattern.peer_options(cell.profile, index));
+
             match peer_type {
                 SocketType::Sub => peer.subscribe(Bytes::new()).expect("subscribe"),
                 SocketType::Dish => peer.join(Bytes::from_static(b"g")).expect("join"),
                 _ => {}
             }
+
             peer.connect(endpoint.clone()).expect("peer connect");
             peer.wait_connected(1, TIMEOUT).expect("peer connected");
             peer
         })
         .collect();
+
     hub.wait_connected(cell.peers, TIMEOUT)
         .expect("hub connected");
+
     if hub_type == SocketType::Pub {
         hub.wait_subscribed(cell.peers as u64, TIMEOUT)
             .expect("subscriptions");
     }
+
     (hub, peers)
 }
 
@@ -257,6 +269,7 @@ fn recv_any(peers: &[Socket]) -> Message {
                 return message;
             }
         }
+
         assert!(Instant::now() < deadline, "no peer received the message");
     }
 }
@@ -279,6 +292,7 @@ fn exchange(cell: &Cell, hub: &Socket, peers: &[Socket], rounds: usize) -> Traff
         sends: 0,
         deliveries: 0,
     };
+
     for round in 0..rounds {
         if cell.pattern.round_trip() {
             for peer in peers {
@@ -293,6 +307,7 @@ fn exchange(cell: &Cell, hub: &Socket, peers: &[Socket], rounds: usize) -> Traff
         } else if cell.pattern.fan_out() {
             hub.send(request(cell, round)).expect("publish");
             traffic.sends += 1;
+
             for peer in peers {
                 assert_eq!(body(&recv(peer)), cell.size, "{cell}: delivery");
                 traffic.deliveries += 1;
@@ -304,6 +319,7 @@ fn exchange(cell: &Cell, hub: &Socket, peers: &[Socket], rounds: usize) -> Traff
             traffic.deliveries += 1;
         }
     }
+
     traffic
 }
 
@@ -314,9 +330,11 @@ fn measure(cell: &Cell, ctx: &Context) -> (Traffic, CopyCounts) {
     copy_stats::reset();
     let traffic = exchange(cell, &hub, &peers, cell.messages());
     let counts = copy_stats::snapshot();
+
     for peer in peers {
         peer.close().expect("close peer");
     }
+
     hub.close().expect("close hub");
     (traffic, counts)
 }
@@ -328,6 +346,7 @@ fn check(patterns: &[Pattern]) {
     let verbose = std::env::var_os("OMQ_COPY_BUDGET_VERBOSE").is_some();
     let ctx = Context::new();
     let mut failures = Vec::new();
+
     for &pattern in patterns {
         for transport in TRANSPORTS {
             for profile in PROFILES {
@@ -341,6 +360,7 @@ fn check(patterns: &[Pattern]) {
                             size,
                         };
                         let (traffic, counts) = measure(&cell, &ctx);
+
                         if verbose {
                             println!(
                                 "{cell}: send {} recv {} B per message ({counts})",
@@ -348,8 +368,10 @@ fn check(patterns: &[Pattern]) {
                                 counts.recv() / traffic.deliveries,
                             );
                         }
+
                         let send_limit = traffic.sends * cell.send_budget();
                         let recv_limit = traffic.deliveries * cell.recv_budget();
+
                         if counts.send() > send_limit || counts.recv() > recv_limit {
                             failures.push(format!(
                                 "{cell}: send {}/{} B per message, recv {}/{} B per \
@@ -365,6 +387,7 @@ fn check(patterns: &[Pattern]) {
             }
         }
     }
+
     ctx.term();
     assert!(
         failures.is_empty(),
@@ -408,6 +431,7 @@ fn every_site_reports_under_its_direction() {
         .into_iter()
         .filter(|site| site.is_recv())
         .collect();
+
     assert_eq!(
         recv,
         [

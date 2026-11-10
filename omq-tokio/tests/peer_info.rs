@@ -56,19 +56,23 @@ async fn snapshot_roundtrip(kind: SocketType, endpoint: Endpoint) {
         .identity_routing()
         .unwrap();
     let endpoint = server.bind(endpoint).await.unwrap();
+
     let client_kind = if kind == SocketType::Peer {
         kind
     } else {
         SocketType::Dealer
     };
+
     let client = context.socket(client_kind, options("client"));
     let mut monitor = client.monitor();
     client.connect(endpoint.clone()).await.unwrap();
     let client_info = ready(&mut monitor).await;
+
     send(&client, "body").await;
     let (identity, body) = receive(&server).await;
     assert_eq!(body, Message::single("body"));
     assert_eq!(identity.as_ref(), b"client");
+
     let info = identity.peer_info();
     assert!(info.authentication.public_key.is_none());
     assert!(info.authentication.user_id.is_none());
@@ -82,6 +86,7 @@ async fn snapshot_roundtrip(kind: SocketType, endpoint: Endpoint) {
         info.diagnostics.remote_address,
         client_info.diagnostics.local_address
     );
+
     if matches!(endpoint, Endpoint::Tcp { .. }) {
         assert!(matches!(
             info.diagnostics.local_address,
@@ -92,6 +97,7 @@ async fn snapshot_roundtrip(kind: SocketType, endpoint: Endpoint) {
             Some(omq_tokio::PeerIdent::Socket(_))
         ));
     }
+
     server
         .send_to(&identity, Message::single("reply"))
         .await
@@ -137,6 +143,7 @@ fn curve_identity_server(
     let server_key = CurveKeypair::generate();
     let server_public = server_key.public;
     let mut server_options = CurveServerOptions::default();
+
     server_options.authenticator = Some(Authenticator::new_with_result(|peer| {
         AuthenticationResult::allow()
             .with_user_id(Bytes::copy_from_slice(&peer.public_key))
@@ -150,6 +157,7 @@ fn curve_identity_server(
         )
         .identity_routing()
         .unwrap();
+
     (server, server_public)
 }
 
@@ -164,6 +172,7 @@ fn same_route_client(
     let key = omq_tokio::CurveKeypair::generate();
     let public = *key.public.as_bytes();
     let socket = context.socket(kind, options("same-route").curve_client(key, server_public));
+
     (socket, public)
 }
 
@@ -218,6 +227,7 @@ async fn curve_handover(kind: SocketType) {
     let context = Context::with_config(ContextConfig { io_threads: 2 });
     let (server, server_public) = curve_identity_server(&context, kind);
     let endpoint = server.bind(test_support::tcp_loopback(0)).await.unwrap();
+
     let client_kind = if kind == SocketType::Peer {
         kind
     } else {
@@ -244,6 +254,7 @@ async fn curve_handover(kind: SocketType) {
     replacement.connect(endpoint).await.unwrap();
     ready(&mut monitor).await;
     replacement.wait_connected(1, DEADLINE).await.unwrap();
+
     send(&replacement, "new").await;
     let (new_identity, body) = receive(&server).await;
     assert_eq!(body, Message::single("new"));
@@ -254,6 +265,7 @@ async fn curve_handover(kind: SocketType) {
     assert_eq!(old_message, Message::single("old"));
     assert_eq!(old_identity.as_ref(), new_identity.as_ref());
     assert_ne!(old_identity, new_identity);
+
     for (identity, key) in [(&old_identity, old_public), (&new_identity, new_public)] {
         assert_curve_authentication(identity, key);
     }

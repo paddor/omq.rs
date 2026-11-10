@@ -13,12 +13,13 @@ use crate::mapping::{DATA, HEADER, Mapping};
 use crate::memory;
 use crate::wire::{MULTIPART, REFERENCE_BATCH};
 
-type Registry = BTreeMap<usize, Weak<PoolRegion>>;
 static REGISTRY: OnceLock<Mutex<Registry>> = OnceLock::new();
 // Keep large power-of-two slots aligned for bulk copies instead of inheriting
 // the mapping header's fixed offset. Small classes keep their compact header.
 const LARGE_CLASS_ALIGNMENT: usize = 4096;
 pub(super) const LOOKUP_BATCH: usize = 8;
+
+type Registry = BTreeMap<usize, Weak<PoolRegion>>;
 
 pub(super) const fn payload_offset(size: usize) -> usize {
     if size >= LARGE_CLASS_ALIGNMENT {
@@ -77,6 +78,7 @@ impl Slot {
     pub(super) fn track_lease(&self, lease: Lease, kind: u8) {
         const MIN_SCAN_INTERVAL: usize = 32;
         let mut state = self.state.lock().expect("SHM slot leases");
+
         if matches!(kind, REFERENCE_BATCH | MULTIPART) {
             state
                 .published_batch
@@ -90,6 +92,7 @@ impl Slot {
                 state.leases.retain(|lease| !lease.completed());
                 state.lease_scan_at = state.leases.len().saturating_mul(2).max(MIN_SCAN_INTERVAL);
             }
+
             state.leases.push(lease);
         }
     }
@@ -110,6 +113,7 @@ impl PoolRegion {
         let slots = self.slots.get()?;
         let slot = slots.get(displacement / self.slot_size)?.upgrade()?;
         let offset = displacement % self.slot_size;
+
         (bytes.len() <= self.slot_size - offset).then_some(slot)
     }
 }
@@ -146,6 +150,7 @@ impl PayloadStorage for SlotStorage {
         let mut state = self.0.state.lock().expect("SHM slot leases");
         state.leases.retain(|lease| !lease.completed());
         state.batches.retain(|batch| !batch.completed());
+
         if state.leases.is_empty()
             && state.batches.is_empty()
             && state
@@ -186,9 +191,11 @@ pub(super) fn pool_storage(
     if capacity == 0 {
         return Ok(Vec::new());
     }
+
     let length = storage_length(size, capacity)?;
     let mut mapping = Mapping::create(length, DATA)?;
     mapping.reservation = reservation;
+
     region_slots(&Arc::new(mapping), size, capacity)
 }
 
@@ -208,6 +215,7 @@ fn region_slots(
     slots
         .try_reserve_exact(capacity)
         .map_err(|_| omq_proto::Error::Config("SHM pool allocation failed".into()))?;
+
     for index in 0..capacity {
         let slot = Arc::new(Slot {
             mapping: mapping.clone(),
@@ -219,6 +227,7 @@ fn region_slots(
         references.push(Arc::downgrade(&slot));
         slots.push(Box::new(SlotStorage(slot)));
     }
+
     region
         .slots
         .set(references.into_boxed_slice())
@@ -227,6 +236,7 @@ fn region_slots(
         mapping.address() + region.payload_offset,
         Arc::downgrade(&region),
     );
+
     Ok(slots)
 }
 
@@ -245,12 +255,14 @@ pub fn is_pooled(message: &Message) -> bool {
 pub fn pooled_prefix(messages: &[&Message]) -> usize {
     let mut count = 0;
     let mut previous: Option<Arc<Slot>> = None;
+
     for messages in messages.chunks(LOOKUP_BATCH) {
         let bodies = std::array::from_fn(|index| {
             messages
                 .get(index)
                 .and_then(|message| crate::body(message).ok())
         });
+
         if let Some(slot) = &previous
             && bodies
                 .iter()
@@ -260,14 +272,17 @@ pub fn pooled_prefix(messages: &[&Message]) -> usize {
             count += messages.len();
             continue;
         }
+
         for slot in find_slots(bodies).into_iter().take(messages.len()) {
             if slot.is_none() {
                 return count;
             }
+
             count += 1;
             previous = slot;
         }
     }
+
     count
 }
 
@@ -279,23 +294,27 @@ pub(super) fn find_slot(bytes: &[u8]) -> Option<Arc<Slot>> {
         {
             return Some(slot);
         }
+
         let region = if contains(cached.region_start, cached.region_size, bytes) {
             cached.region.upgrade()
         } else {
             None
         };
+
         let region = region.or_else(|| {
             let registry = registry().lock().expect("SHM registry");
             let (_, weak) = registry.range(..=bytes.as_ptr() as usize).next_back()?;
             weak.upgrade()
         })?;
         let slot = region.find(bytes)?;
+
         cached.slot_start = slot.mapping.address() + slot.offset;
         cached.slot_size = slot.size;
         cached.slot = Arc::downgrade(&slot);
         cached.region_start = region.mapping.address() + region.payload_offset;
         cached.region_size = region.mapping.len() - region.payload_offset;
         cached.region = Arc::downgrade(&region);
+
         Some(slot)
     })
 }
@@ -307,10 +326,12 @@ pub(super) fn find_slots(
     let first = bodies[0].and_then(find_slot);
     let region = first.as_ref().map(|slot| &slot.region);
     let size = bodies[0].map(<[u8]>::len);
+
     let mut slots = std::array::from_fn(|index| {
         if index == 0 {
             return None;
         }
+
         let body = bodies[index]?;
         if Some(body.len()) == size
             && let Some(slot) = &first
@@ -318,13 +339,16 @@ pub(super) fn find_slots(
         {
             return Some(slot.clone());
         }
+
         if Some(body.len()) == size
             && let Some(slot) = region.and_then(|region| region.find(body))
         {
             return Some(slot);
         }
+
         find_slot(body)
     });
+
     slots[0] = first;
     slots
 }

@@ -44,6 +44,7 @@ impl PeerTransmitSlot {
         if result == TryFrameResult::Ok {
             self.signal_encoded();
         }
+
         result
     }
 
@@ -52,20 +53,24 @@ impl PeerTransmitSlot {
         if self.is_dead() {
             return TryFrameResult::Dead;
         }
+
         let bytes = chunks.iter().map(Bytes::len).sum();
         let Some(mut eq) = self.lock_live() else {
             return TryFrameResult::Dead;
         };
+
         let queued_msgs = self.queued_msgs.load(Ordering::Relaxed);
         if queued_msgs >= self.msg_cap
             || (queued_msgs > 0 && eq.total_bytes().saturating_add(bytes) >= self.cap)
         {
             return self.full();
         }
+
         eq.push_shared_chunks(chunks);
         // Count writers are serialized by eq, including drains and disconnects.
         let queued = queued_msgs + 1;
         self.commit(&eq, queued);
+
         TryFrameResult::Ok
     }
 
@@ -73,16 +78,20 @@ impl PeerTransmitSlot {
         if self.is_dead() {
             return TryFrameResult::Dead;
         }
+
         let Some(mut eq) = self.lock_live() else {
             return TryFrameResult::Dead;
         };
+
         if self.is_full(&eq) {
             return self.full();
         }
+
         eq.push_pre_framed(data);
         // Count writers are serialized by eq, including drains and disconnects.
         let queued = self.queued_msgs.load(Ordering::Relaxed) + 1;
         self.commit(&eq, queued);
+
         TryFrameResult::Ok
     }
 
@@ -94,6 +103,7 @@ impl PeerTransmitSlot {
         let Some(eq) = self.lock_live() else {
             return (0, 0);
         };
+
         (
             self.msg_cap
                 .saturating_sub(self.queued_msgs.load(Ordering::Relaxed)),
@@ -112,19 +122,23 @@ impl PeerTransmitSlot {
             FanOutFrame::Arena(data) => data.len(),
             FanOutFrame::Chunks(chunks) => chunks.iter().map(Bytes::len).sum(),
         };
+
         let Some(mut eq) = self.lock_live() else {
             return TryFrameResult::Dead;
         };
+
         let queued = self.queued_msgs.load(Ordering::Relaxed);
         if queued.saturating_add(messages) > self.msg_cap
             || eq.total_bytes().saturating_add(bytes) >= self.cap
         {
             return self.full();
         }
+
         match frame {
             FanOutFrame::Arena(data) => eq.push_pre_framed(data),
             FanOutFrame::Chunks(chunks) => eq.push_shared_chunks(chunks),
         }
+
         self.commit(&eq, queued + messages);
         TryFrameResult::Ok
     }
@@ -140,33 +154,40 @@ impl PeerTransmitSlot {
         if self.is_dead() {
             return (start, TryFrameResult::Dead);
         }
+
         let Some(mut eq) = self.lock_live() else {
             return (start, TryFrameResult::Dead);
         };
+
         let offset = if start == 0 { 0 } else { ends[start - 1] };
         let queued = self.queued_msgs.load(Ordering::Relaxed);
         let bytes = eq.total_bytes();
         let mut next = start;
         let mut end = offset;
+
         for &message_end in &ends[start..] {
             // Match single-publication admission: the last accepted message
             // may cross the byte cap, but never the message cap.
             if queued + next - start >= self.msg_cap || bytes + end - offset >= self.cap {
                 break;
             }
+
             end = message_end;
             next += 1;
         }
+
         if next != start {
             eq.push_pre_framed(&data[offset..end]);
             let queued = queued + next - start;
             self.commit(&eq, queued);
         }
+
         let result = if next == ends.len() {
             TryFrameResult::Ok
         } else {
             self.full()
         };
+
         (next, result)
     }
 
@@ -189,13 +210,16 @@ impl PeerTransmitSlot {
         if self.is_dead() {
             return TryFrameResult::Dead;
         }
+
         // Queue each encoded fan-out message as one entry or chunk group so
         // full-slot eviction removes the oldest whole message.
         let chunks = fanout_frame_chunks(frame);
         let len = chunks.iter().map(Bytes::len).sum::<usize>();
+
         let Some(mut eq) = self.lock_live() else {
             return TryFrameResult::Dead;
         };
+
         let mut queued_msgs = self.queued_msgs.load(Ordering::Relaxed);
         while queued_msgs > 0
             && (eq.total_bytes().saturating_add(len) >= self.cap || queued_msgs >= self.msg_cap)
@@ -203,16 +227,20 @@ impl PeerTransmitSlot {
             if !eq.pop_oldest_unprotected_entry() {
                 return self.full();
             }
+
             queued_msgs = queued_msgs.saturating_sub(1);
         }
+
         eq.push_raw_message(&chunks, protected);
         if protected {
             self.fan_out.dict_queued.store(true, Ordering::Release);
         }
+
         queued_msgs += 1;
         self.commit(&eq, queued_msgs);
         drop(eq);
         self.signal_encoded();
+
         TryFrameResult::Ok
     }
 

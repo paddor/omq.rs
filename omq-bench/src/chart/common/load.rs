@@ -51,9 +51,11 @@ pub(crate) fn merge_cpu_data<'a>(
         for (name, data) in cpu {
             let accum = cpu_sums.entry(name.clone()).or_default();
             accum.runtime_workers = data.runtime_workers.or(accum.runtime_workers);
+
             if let Some(sender) = data.sender {
                 accum.add_sender_pct(sender);
             }
+
             if let Some(receiver) = data.receiver {
                 accum.add_receiver_pct(receiver);
             }
@@ -81,6 +83,7 @@ fn matching_rows(
 ) -> Vec<ComparisonRow> {
     let path = jsonl::cache_dir().join("comparisons.jsonl");
     let keys: Vec<&str> = impls.iter().map(|i| i.key).collect();
+
     jsonl::load_jsonl::<ComparisonRow>(&path)
         .into_iter()
         .map(|(_, row)| row)
@@ -101,6 +104,7 @@ fn latest_per_point(
     for row in rows {
         latest.insert((row.impl_name.clone(), row.msg_size), row);
     }
+
     latest.into_values()
 }
 
@@ -120,19 +124,23 @@ pub(crate) fn load_tput(
                 .or_default()
                 .insert(row.impl_name.clone(), v);
         }
+
         if let Some(v) = row.msgs_s {
             msgs.entry(row.msg_size)
                 .or_default()
                 .insert(row.impl_name.clone(), v);
         }
+
         if let Some(elapsed) = row.elapsed
             && elapsed > 0.0
         {
             let e = cpu_sums.entry(row.impl_name.clone()).or_default();
             e.runtime_workers = row.runtime_workers.or(e.runtime_workers);
+
             if let Some(push) = row.push_cpu_time.or(row.pub_cpu_time) {
                 e.add_sender(push, elapsed);
             }
+
             if let Some(pull) = row.pull_cpu_time {
                 e.add_receiver(pull, elapsed);
             } else if let (Some(total), Some(push)) =
@@ -210,6 +218,7 @@ pub(crate) fn load_latency(
                 .or_default()
                 .insert(row.impl_name.clone(), LatencyEntry { p50, p99, p999 });
         }
+
         if let Some(elapsed) = row.elapsed
             && elapsed > 0.0
         {
@@ -217,6 +226,7 @@ pub(crate) fn load_latency(
             if let Some(req) = row.req_cpu_time {
                 e.add_sender(req, elapsed);
             }
+
             if let (Some(total), Some(req)) = (row.cpu_time, row.req_cpu_time) {
                 e.add_receiver(total - req, elapsed);
             }

@@ -33,6 +33,7 @@ fn peer() -> Peer {
 fn queues() -> Box<PeerIo> {
     let (_, commands) = crate::engine::control_inbox::channel(8);
     let (_, data) = crate::engine::data_inbox::dart_channel(8, SocketType::Scatter);
+
     Box::new(PeerIo::new(
         PeerQueues {
             commands,
@@ -68,15 +69,18 @@ fn radio_hwm_above_one_batch_counts_queued_and_unacknowledged_messages() {
     let (root, mut data) = dart_channel(97, SocketType::Radio);
     let sender = SenderLanes::default().bind(&root);
     let mut io = queues();
+
     for sequence in 0..97 {
         sender
             .try_send(PeerDriverData::SendMessage(Message::single("body")))
             .unwrap();
+
         if sequence < 64 {
             let (_, admission) = data.dart_try_recv().unwrap();
             io.admissions.push_back((sequence, admission));
         }
     }
+
     data.release_consumed();
     assert!(sender.try_reserve_owned().is_err(), "dequeue retains HWM");
     io.acknowledge(32);
@@ -105,14 +109,17 @@ fn leaving_a_group_returns_retained_inline_credit() {
     io.queues.sink = Some(RecvSink::Fanin(crate::socket::fanin::Sink::owned(
         queue.register().unwrap(),
     )));
+
     let mut peer = peer();
     peer.install_io(2, io, &state(), &Arc::new(DataSignal::new()));
+
     let session = peer.session.as_mut().unwrap();
     session.commit_receive(
         Receipt::new(0, dart::Ecn::NotEct, Duration::ZERO),
         Message::with_group("left", "body"),
     );
     let edge = session.receive_right_edge();
+
     let mut stats = DartStats::default();
     let count = peer.io.as_mut().unwrap().deliver(
         session,
@@ -120,6 +127,7 @@ fn leaving_a_group_returns_retained_inline_credit() {
         peer.pool.as_ref().unwrap(),
         &mut stats,
     );
+
     assert_eq!(count, 1);
     assert_eq!(session.receive_right_edge(), edge + 1);
     assert_eq!(stats.received_messages, 0);
@@ -133,17 +141,21 @@ fn partial_ack_returns_exact_credits_and_keeps_unsent_reservations() {
 
     let (root, mut data) = dart_channel(5, SocketType::Radio);
     let sender = SenderLanes::default().bind(&root);
+
     for n in 0..4 {
         sender
             .try_send(PeerDriverData::SendMessage(Message::from_slice(&[n])))
             .unwrap();
     }
+
     let unsent = sender.try_reserve_owned().unwrap();
     let mut io = queues();
+
     for sequence in 0..4 {
         let (_, admission) = data.dart_try_recv().unwrap();
         io.admissions.push_back((sequence, admission));
     }
+
     data.release_consumed();
     io.queues.data = data;
     io.acknowledge(0);
@@ -151,6 +163,7 @@ fn partial_ack_returns_exact_credits_and_keeps_unsent_reservations() {
         sender.try_reserve_owned(),
         Err(tokio::sync::mpsc::error::TrySendError::Full(()))
     ));
+
     io.acknowledge(2);
     let first = sender.try_reserve_owned().unwrap();
     let second = sender.try_reserve_owned().unwrap();
@@ -158,12 +171,15 @@ fn partial_ack_returns_exact_credits_and_keeps_unsent_reservations() {
         sender.try_reserve_owned(),
         Err(tokio::sync::mpsc::error::TrySendError::Full(()))
     ));
+
     io.acknowledge(2);
     assert_eq!(io.admissions.len(), 2);
+
     io.queues.data.close();
     io.acknowledge(4);
     assert!(io.admissions.is_empty());
     assert!(!io.queues.data.is_empty());
+
     drop((first, second));
     assert!(!io.queues.data.is_empty());
     drop(unsent);
@@ -190,11 +206,13 @@ fn expired_or_cancelled_activation_never_installs_storage() {
     for expired in [true, false] {
         let mut peer = peer();
         let io = queues();
+
         if expired {
             peer.lease.expires = Instant::now();
         } else {
             io.queues.cancel.cancel();
         }
+
         let cancel = io.queues.cancel.clone();
         peer.install_io(2, io, &state(), &Arc::new(DataSignal::new()));
         assert!(cancel.is_cancelled());
@@ -223,10 +241,12 @@ fn repeated_activation_preserves_the_original_queues() {
     let signal = Arc::new(DataSignal::new());
     let mut peer = peer();
     peer.install_io(2, queues(), &state(), &signal);
+
     let live = peer.io.as_ref().unwrap().queues.cancel.clone();
     let repeated = queues();
     let rejected = repeated.queues.cancel.clone();
     peer.install_io(2, repeated, &state(), &signal);
+
     assert!(rejected.is_cancelled());
     assert!(!live.is_cancelled());
     assert_eq!(
@@ -251,11 +271,13 @@ fn a_closed_delivery_window_does_not_block_lifecycle_control() {
     io.queues.commands = receiver;
     let signal = Arc::new(DataSignal::new());
     io.connect_signal(&signal);
+
     sender
         .try_send(PeerDriverCommand::ActivateDataPlane)
         .unwrap();
     assert!(io.controls(&signal, Instant::now()));
     assert!(io.active);
+
     sender.try_send(PeerDriverCommand::Close).unwrap();
     assert!(!io.controls(&signal, Instant::now()));
 }
@@ -265,12 +287,15 @@ fn final_receive_owner_returns_physical_storage_and_credit_once() {
     let mut peer = peer();
     let signal = Arc::new(DataSignal::new());
     peer.install_io(2, queues(), &state(), &signal);
+
     let pool = peer.pool.as_ref().unwrap().storage().unwrap();
     let message = pool.try_buffer(1).unwrap().into_message();
     let view = message.clone();
     assert_eq!(peer.returns.take(), 0);
+
     drop(message);
     assert_eq!(peer.returns.take(), 0);
+
     drop(view);
     assert_eq!(pool.available(), 2);
     assert_eq!(peer.returns.take(), 1);
@@ -299,12 +324,14 @@ fn foreign_pool_batch_publishes_credit_only_after_free_list_return() {
         .try_buffer(1)
         .unwrap()
         .into_message();
+
     caller.with_recycling_batch(|| {
         drop(first);
         drop(second);
         assert_eq!(credit.take(), 0);
         assert_eq!(receive.storage().unwrap().available(), 0);
     });
+
     assert_eq!(receive.storage().unwrap().available(), 2);
     assert_eq!(credit.take(), 2);
 }
@@ -336,10 +363,12 @@ fn teardown_publishes_pending_inline_delivery() {
 fn removing_a_route_preserves_dense_indices_and_returns_admission() {
     let shared = SocketState::new(options(), SocketType::Gather);
     let mut routes = Routes::default();
+
     for port in 1..=3 {
         let source = SocketAddr::from(([127, 0, 0, 1], port));
         let index = routes.order.len();
         routes.order.push(source);
+
         routes.map.insert(
             source,
             Route {
@@ -350,10 +379,12 @@ fn removing_a_route_preserves_dense_indices_and_returns_admission() {
             },
         );
     }
+
     routes.cursor = 2;
     routes.remove(SocketAddr::from(([127, 0, 0, 1], 2)));
     assert_eq!(routes.cursor, 0);
     assert_eq!(shared.peers.available_permits(), 1022);
+
     for (index, source) in routes.order.iter().enumerate() {
         assert_eq!(routes.map[source].index, index);
     }
@@ -373,11 +404,13 @@ async fn fanin_space_return_wakes_the_endpoint_without_network_activity() {
     sink.try_deliver_deferred(Message::single("first"), &mut pending)
         .unwrap();
     sink.flush_delivery(&mut pending);
+
     let Err(TrySendError::Full(held)) =
         sink.try_deliver_deferred(Message::single("second"), &mut pending)
     else {
         panic!("full receive lane");
     };
+
     endpoint.begin_drain();
     endpoint.clear_after(true);
     assert_eq!(queue.try_recv().unwrap().part_slice(0).unwrap(), b"first");
@@ -406,6 +439,7 @@ async fn peer_space_return_wakes_the_endpoint_without_network_activity() {
     let mut pending = false;
     let mut held = None;
     let mut accepted = 0;
+
     for _ in 0..64 {
         match sink.try_deliver_deferred(Message::single("body"), &mut pending) {
             Ok(()) => accepted += 1,
@@ -416,13 +450,16 @@ async fn peer_space_return_wakes_the_endpoint_without_network_activity() {
             Err(error) => panic!("unexpected admission: {error:?}"),
         }
     }
+
     assert!(held.is_some());
     sink.flush_delivery(&mut pending);
     endpoint.begin_drain();
     endpoint.clear_after(true);
+
     for _ in 0..accepted {
         assert_eq!(receive.try_recv().unwrap().part_slice(1).unwrap(), b"body");
     }
+
     assert!(receive.try_recv().is_err());
     tokio::time::timeout(Duration::from_secs(1), endpoint.ready())
         .await

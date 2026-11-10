@@ -127,6 +127,7 @@ fn bench_push_pull_throughput(msg_size: usize, iters: usize) {
             expected
         );
     }
+
     let elapsed = t.elapsed();
     let ns_per = elapsed.as_nanos() as f64 / iters as f64;
     let gbps = (msg_size as f64 * iters as f64) / elapsed.as_secs_f64() / f64::from(1_u32 << 30);
@@ -143,6 +144,7 @@ fn main() {
 
     println!();
     println!("--- push/pull throughput ---");
+
     for &sz in &[64usize, 1024, 16 * 1024, 256 * 1024] {
         bench_push_pull_throughput(sz, if sz <= 1024 { 20_000 } else { 2_000 });
     }

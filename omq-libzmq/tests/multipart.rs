@@ -51,6 +51,7 @@ fn rcvmore(sock: *mut c_void) -> bool {
     let mut v: i32 = 0;
     let mut sz = size_of::<i32>();
     zmq_getsockopt(sock, ZMQ_RCVMORE, (&mut v as *mut i32).cast(), &mut sz);
+
     v != 0
 }
 
@@ -107,6 +108,7 @@ fn msg_init_data_and_buffer_reject_null_nonzero_payload() {
         ),
         -1
     );
+
     assert_eq!(omq_zmq::zmq_errno(), libc::EFAULT);
 
     assert_eq!(
@@ -120,6 +122,7 @@ fn msg_init_data_and_buffer_reject_null_nonzero_payload() {
 fn msg_move_and_copy_self_alias_are_noops() {
     let payload = b"alias";
     let mut m = ZmqMsg::zeroed();
+
     assert_eq!(
         zmq_msg_init_buffer(
             m.0.as_mut_ptr().cast(),
@@ -177,6 +180,7 @@ fn msg_set_handles_supported_and_invalid_properties() {
 fn msg_init_buffer() {
     let payload = b"hello buffer";
     let mut m = ZmqMsg::zeroed();
+
     assert_eq!(
         zmq_msg_init_buffer(
             m.0.as_mut_ptr().cast(),
@@ -185,6 +189,7 @@ fn msg_init_buffer() {
         ),
         0
     );
+
     assert_eq!(zmq_msg_size(m.0.as_ptr().cast()), payload.len());
 
     let data = zmq_msg_data(m.0.as_mut_ptr().cast());
@@ -197,6 +202,7 @@ fn msg_init_buffer() {
 fn msg_get_reports_shared_for_external_data_and_large_copy() {
     let mut external = ZmqMsg::zeroed();
     let mut payload = [0x42u8; 5];
+
     assert_eq!(
         zmq_msg_init_data(
             external.0.as_mut_ptr().cast(),
@@ -207,6 +213,7 @@ fn msg_get_reports_shared_for_external_data_and_large_copy() {
         ),
         0
     );
+
     assert_eq!(zmq_msg_get(external.0.as_ptr().cast(), ZMQ_SHARED), 1);
 
     let mut large = ZmqMsg::zeroed();
@@ -327,6 +334,7 @@ fn msg_init_data_with_free_fn() {
         ),
         0
     );
+
     assert_eq!(zmq_msg_size(m.0.as_ptr().cast()), 8);
 
     zmq_msg_close(m.0.as_mut_ptr().cast());
@@ -354,6 +362,7 @@ fn msg_init_data_free_fn_runs_after_successful_send() {
     let freed = AtomicUsize::new(0);
     let mut payload = *b"external-data";
     let mut m = ZmqMsg::zeroed();
+
     assert_eq!(
         zmq_msg_init_data(
             m.0.as_mut_ptr().cast(),
@@ -639,6 +648,7 @@ fn recv_frames(sock: *mut c_void) -> Vec<Vec<u8>> {
         let n = zmq_recv(sock, buf.as_mut_ptr().cast(), buf.len(), 0);
         assert!(n >= 0, "recv failed");
         frames.push(buf[..n as usize].to_vec());
+
         if !rcvmore(sock) {
             return frames;
         }
@@ -651,33 +661,42 @@ fn eagain_comes_at_the_first_frame_and_never_splits_a_message() {
     const ZMQ_DONTWAIT: i32 = 1;
     const ZMQ_SNDHWM: i32 = 23;
     const ZMQ_RCVHWM: i32 = 24;
+
     let ctx = zmq_ctx_new();
     let pull = zmq_socket(ctx, ZMQ_PULL);
     let push = zmq_socket(ctx, ZMQ_PUSH);
+
     set_timeo(pull, ZMQ_RCVHWM, 1);
     set_timeo(push, ZMQ_SNDHWM, 1);
     set_timeo(pull, ZMQ_RCVTIMEO, 2000);
+
     let addr = CString::new("inproc://multipart-eagain-retry").unwrap();
     assert_eq!(zmq_bind(pull, addr.as_ptr()), 0);
     assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
+
     // Fill the pipe; a connect-side pipe moves into the peer once ready.
     let mut queued = 0;
+
     for _ in 0..50 {
         while zmq_send(push, b"f".as_ptr().cast(), 1, ZMQ_DONTWAIT) == 1 {
             queued += 1;
         }
+
         std::thread::sleep(Duration::from_millis(2));
     }
+
     assert!(queued > 0);
     assert_eq!(
         zmq_send(push, b"a".as_ptr().cast(), 1, ZMQ_SNDMORE | ZMQ_DONTWAIT),
         -1
     );
     assert_eq!(omq_zmq::zmq_errno(), libc::EAGAIN);
+
     // Make room, then retry the message from its first frame.
     for _ in 0..queued {
         assert_eq!(recv_frames(pull), [b"f".to_vec()]);
     }
+
     assert_eq!(
         zmq_send(push, b"a".as_ptr().cast(), 1, ZMQ_SNDMORE | ZMQ_DONTWAIT),
         1
@@ -700,9 +719,11 @@ fn message_group_is_not_staged_for_other_socket_types() {
     assert_eq!(zmq_bind(pull, addr.as_ptr()), 0);
     assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
     let group = CString::new("weather").unwrap();
+
     for body in [b"one", b"two"] {
         let mut msg = ZmqMsg::new();
         assert_eq!(zmq_msg_init_size(msg.0.as_mut_ptr().cast(), body.len()), 0);
+
         // SAFETY: the message owns `body.len()` writable bytes.
         unsafe {
             std::ptr::copy_nonoverlapping(
@@ -711,12 +732,14 @@ fn message_group_is_not_staged_for_other_socket_types() {
                 body.len(),
             );
         }
+
         zmq_msg_set_group(msg.0.as_mut_ptr().cast(), group.as_ptr());
         assert_eq!(
             zmq_msg_send(msg.0.as_mut_ptr().cast(), push, 0),
             i32::try_from(body.len()).unwrap()
         );
     }
+
     assert_eq!(recv_frames(pull), [b"one".to_vec()]);
     assert_eq!(recv_frames(pull), [b"two".to_vec()]);
     zmq_close(push);

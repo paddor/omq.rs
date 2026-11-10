@@ -72,6 +72,7 @@ impl IdentitySocket {
         let identity = receipt
             .take_identity()
             .ok_or_else(|| Error::Protocol("received message has no sender identity".into()))?;
+
         Ok((identity, message))
     }
 
@@ -81,6 +82,7 @@ impl IdentitySocket {
         let identity = receipt
             .take_identity()
             .ok_or_else(|| Error::Protocol("received message has no sender identity".into()))?;
+
         Ok((identity, message))
     }
 

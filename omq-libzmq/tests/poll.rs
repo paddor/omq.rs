@@ -16,14 +16,23 @@ use omq_zmq::{
 
 const ZMQ_PUSH: i32 = 8;
 const ZMQ_PULL: i32 = 7;
+
 #[allow(dead_code)]
 const ZMQ_PAIR: i32 = 0;
+
 const ZMQ_RCVTIMEO: i32 = 27;
 const ZMQ_SNDTIMEO: i32 = 28;
 const ZMQ_POLLIN: i16 = 1;
 const ZMQ_POLLOUT: i16 = 2;
+
 #[cfg(unix)]
 const ZMQ_ENOTSUP: i32 = 156_384_713;
+
+const ZMQ_REQ: i32 = 3;
+const ZMQ_REP: i32 = 4;
+const ZMQ_SNDHWM: i32 = 23;
+const ZMQ_RCVHWM: i32 = 24;
+const ZMQ_DONTWAIT: i32 = 1;
 
 #[repr(C)]
 struct PollItem {
@@ -35,6 +44,7 @@ struct PollItem {
 
 #[cfg(unix)]
 type ZmqFd = i32;
+
 #[cfg(windows)]
 type ZmqFd = usize;
 
@@ -43,6 +53,7 @@ fn invalid_fd() -> ZmqFd {
     {
         -1
     }
+
     #[cfg(windows)]
     {
         ZmqFd::MAX
@@ -285,6 +296,7 @@ fn poll_many_sockets_unix_smoke() {
         let len = i32::try_from(msg.len()).unwrap();
         assert_eq!(zmq_send(push, msg.as_ptr().cast(), msg.len(), 0), len);
     }
+
     std::thread::sleep(Duration::from_millis(20));
 
     let mut items = create_poll_items(&pairs);
@@ -297,6 +309,7 @@ fn poll_many_sockets_unix_smoke() {
         "expected {} ready sockets, got {rc}",
         target_indices.len()
     );
+
     for &idx in &target_indices {
         assert_ne!(
             items[idx].revents & ZMQ_POLLIN,
@@ -309,6 +322,7 @@ fn poll_many_sockets_unix_smoke() {
         zmq_close(push);
         zmq_close(pull);
     }
+
     zmq_ctx_term(ctx);
 }
 
@@ -381,6 +395,7 @@ fn poll_65_sockets_boundary() {
         zmq_close(push);
         zmq_close(pull);
     }
+
     zmq_ctx_term(ctx);
 }
 
@@ -426,6 +441,7 @@ fn poll_128_sockets_boundary() {
         zmq_close(push);
         zmq_close(pull);
     }
+
     zmq_ctx_term(ctx);
 }
 
@@ -478,6 +494,7 @@ fn poll_256_sockets_boundary() {
         zmq_close(push);
         zmq_close(pull);
     }
+
     zmq_ctx_term(ctx);
 }
 
@@ -507,6 +524,7 @@ fn poll_128_sockets_timeout() {
         zmq_close(push);
         zmq_close(pull);
     }
+
     zmq_ctx_term(ctx);
 }
 
@@ -558,6 +576,7 @@ fn poll_128_sockets_fairness() {
         zmq_close(push);
         zmq_close(pull);
     }
+
     zmq_ctx_term(ctx);
 }
 
@@ -584,11 +603,13 @@ fn poll_both_events_counts_as_one_item() {
         0
     );
     assert!(ep_sz > 0, "ZMQ_LAST_ENDPOINT returned empty endpoint");
+
     let ep_end = if ep_sz > 0 && ep_buf[ep_sz - 1] == 0 {
         ep_sz - 1
     } else {
         ep_sz
     };
+
     let ep = CString::new(&ep_buf[..ep_end]).unwrap();
     assert_eq!(zmq_connect(b, ep.as_ptr()), 0);
 
@@ -617,14 +638,9 @@ fn poll_both_events_counts_as_one_item() {
     zmq_ctx_term(ctx);
 }
 
-const ZMQ_REQ: i32 = 3;
-const ZMQ_REP: i32 = 4;
-const ZMQ_SNDHWM: i32 = 23;
-const ZMQ_RCVHWM: i32 = 24;
-const ZMQ_DONTWAIT: i32 = 1;
-
 /// A socket handed to exactly one helper thread.
 struct ThreadSocket(*mut c_void);
+
 // SAFETY: each socket is used by one thread at a time.
 unsafe impl Send for ThreadSocket {}
 
@@ -643,9 +659,11 @@ fn poll_out(sock: *mut c_void, timeout_ms: i64) -> (i32, Duration) {
     }];
     let started = std::time::Instant::now();
     let rc = zmq_poll(items.as_mut_ptr().cast(), 1, timeout_ms as libc::c_long);
+
     if rc > 0 {
         assert_ne!(items[0].revents & ZMQ_POLLOUT, 0);
     }
+
     (rc, started.elapsed())
 }
 
@@ -673,11 +691,13 @@ fn pollout_waits_for_a_bound_peer() {
     let connector = {
         let pull = ThreadSocket(pull);
         let addr = addr.clone();
+
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(50));
             assert_eq!(zmq_connect(pull.get(), addr.as_ptr()), 0);
         })
     };
+
     let (rc, elapsed) = poll_out(push, 5_000);
     connector.join().unwrap();
     assert_eq!(rc, 1);
@@ -701,14 +721,17 @@ fn pollout_waits_for_queue_space() {
     // Internal queues drain asynchronously; refill until the PUSH stays full.
     // Every POLLOUT report must be backed by an accepted send.
     let mut queued = 0;
+
     loop {
         while zmq_send(push, b"x".as_ptr().cast(), 1, ZMQ_DONTWAIT) == 1 {
             queued += 1;
             assert!(queued < 100_000, "queue never filled");
         }
+
         if poll_out(push, 50).0 == 0 {
             break;
         }
+
         assert_eq!(
             zmq_send(push, b"x".as_ptr().cast(), 1, ZMQ_DONTWAIT),
             1,
@@ -722,6 +745,7 @@ fn pollout_waits_for_queue_space() {
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(50));
             let mut buf = [0u8; 8];
+
             for _ in 0..queued {
                 assert_eq!(
                     zmq_recv(pull.get(), buf.as_mut_ptr().cast(), buf.len(), 0),
@@ -730,6 +754,7 @@ fn pollout_waits_for_queue_space() {
             }
         })
     };
+
     let (rc, elapsed) = poll_out(push, 5_000);
     drainer.join().unwrap();
     assert_eq!(rc, 1);

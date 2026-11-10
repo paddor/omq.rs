@@ -197,16 +197,19 @@ fn display_roundtrip() {
         "udp://weather@239.1.1.1:9000",
         "udp://239.1.1.1:9000",
     ];
+
     for c in plain {
         let parsed: Endpoint = c.parse().unwrap();
         assert_eq!(parsed.to_string(), c, "roundtrip failed for {c}");
     }
+
     #[cfg(feature = "lz4")]
     {
         let c = "lz4+tcp://host:9";
         let parsed: Endpoint = c.parse().unwrap();
         assert_eq!(parsed.to_string(), c);
     }
+
     #[cfg(feature = "zstd")]
     {
         let c = "zstd+tcp://host:9";
@@ -354,6 +357,7 @@ fn quic_rejects_codec_prefixes() {
     for uri in ["lz4+quic://host:4433", "zstd+quic://host:4433"] {
         assert!(uri.parse::<Endpoint>().is_err(), "{uri} must be rejected");
     }
+
     #[cfg(feature = "lz4")]
     assert!(
         parse("quic://host:4433")

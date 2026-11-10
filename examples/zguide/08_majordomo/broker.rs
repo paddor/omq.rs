@@ -47,6 +47,7 @@ async fn main() {
         let worker_id = msg.part_bytes(0).unwrap();
         let command = msg_str(&msg, 1);
         let service = msg_str(&msg, 2);
+
         if command == "READY" {
             println!(
                 "broker: worker '{}' registered for '{service}'",

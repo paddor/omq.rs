@@ -23,6 +23,7 @@ fn encrypted_mechanisms_reject_codec_construction() {
     let client = omq_proto::CurveKeypair::generate();
     let server_options = Options::default().curve_server(server.clone());
     let client_options = Options::default().curve_client(client, server.public);
+
     for options in [server_options, client_options] {
         for endpoint in endpoints() {
             assert!(matches!(
@@ -30,6 +31,7 @@ fn encrypted_mechanisms_reject_codec_construction() {
                 Err(omq_proto::Error::Config(_))
             ));
         }
+
         assert!(
             MessageEncoder::for_endpoint(&"tcp://127.0.0.1:1".parse().unwrap(), &options)
                 .unwrap()
@@ -47,6 +49,7 @@ fn eligible_plain_profiles_retain_their_codec_selection() {
                 .unwrap()
                 .is_some()
         );
+
         #[cfg(feature = "plain")]
         assert!(
             MessageEncoder::for_endpoint(
@@ -57,6 +60,7 @@ fn eligible_plain_profiles_retain_their_codec_selection() {
             .is_some()
         );
     }
+
     #[cfg(feature = "ws")]
     assert!(
         MessageEncoder::for_endpoint(
@@ -75,6 +79,7 @@ fn codec_parameters_do_not_implicitly_select_compression() {
         .compression_level(1)
         .compression_auto_train(true)
         .compression_dict_capacity(2048);
+
     for uri in [
         "tcp://host:5555",
         "inproc://messages",
@@ -92,6 +97,7 @@ fn codec_parameters_do_not_implicitly_select_compression() {
                 .is_none()
         );
     }
+
     for endpoint in endpoints() {
         assert!(
             MessageEncoder::for_endpoint(&endpoint, &options)
@@ -118,6 +124,7 @@ fn tiny_active_lz4_training_targets_are_rejected_before_encoder_construction() {
                 .unwrap()
                 .is_some()
         );
+
         assert!(
             MessageEncoder::for_endpoint(
                 &endpoint,
@@ -127,6 +134,7 @@ fn tiny_active_lz4_training_targets_are_rejected_before_encoder_construction() {
             .is_some()
         );
     }
+
     assert!(
         MessageEncoder::for_endpoint(
             &endpoint,

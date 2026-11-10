@@ -26,6 +26,7 @@ async fn connect_retries_until_listener_appears() {
         let pull = Socket::new(SocketType::Pull, Options::default());
         let ep = pull.bind(tcp_ep(0)).await.unwrap();
         ep_tx.send(ep).unwrap();
+
         pull
     });
 
@@ -82,13 +83,16 @@ async fn reconnect_after_peer_restart() {
     // Spin until the OS port is free and the new listener is up.
     let pull2 = Socket::new(SocketType::Pull, Options::default());
     let mut bound = false;
+
     for _ in 0..20 {
         if pull2.bind(ep.clone()).await.is_ok() {
             bound = true;
             break;
         }
+
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+
     assert!(bound, "pull2 failed to bind after pull1 closed");
 
     test_support::wait_for_handshake_on(&mut mon).await;
@@ -143,13 +147,16 @@ async fn peer_drop_mid_send_is_handled_cleanly() {
     // Spin until the actor finishes teardown and the OS port is free again.
     let pull2 = Socket::new(SocketType::Pull, Options::default());
     let mut bound = false;
+
     for _ in 0..20 {
         if pull2.bind(ep.clone()).await.is_ok() {
             bound = true;
             break;
         }
+
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+
     assert!(bound, "pull2 failed to bind after pull1 was dropped");
 
     // Wait for the second handshake on the push side. Without this, a `send`
@@ -161,11 +168,13 @@ async fn peer_drop_mid_send_is_handled_cleanly() {
     // depending on in-flight survival.
     let mut handshakes = 0;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+
     while handshakes < 2 {
         let evt = tokio::time::timeout_at(deadline, mon.recv())
             .await
             .expect("timed out waiting for second HandshakeSucceeded")
             .unwrap();
+
         if matches!(evt, MonitorEvent::HandshakeSucceeded { .. }) {
             handshakes += 1;
         }
@@ -195,6 +204,7 @@ async fn exponential_backoff_retry_in_grows() {
         let l = StdTcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
         let p = l.local_addr().unwrap().port();
         drop(l);
+
         p
     };
 
@@ -208,6 +218,7 @@ async fn exponential_backoff_retry_in_grows() {
             ..Default::default()
         },
     );
+
     let mut mon = push.monitor();
     push.connect(tcp_ep(free_port)).await.unwrap();
 
@@ -215,11 +226,13 @@ async fn exponential_backoff_retry_in_grows() {
     let mut delays: Vec<Duration> = Vec::new();
     // 10 s: Windows CI runners are slower than Linux.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+
     while delays.len() < 4 {
         let evt = tokio::time::timeout_at(deadline, mon.recv())
             .await
             .expect("timed out waiting for ConnectDelayed events")
             .unwrap();
+
         if let MonitorEvent::ConnectDelayed { retry_in, .. } = evt {
             delays.push(retry_in);
         }
@@ -232,6 +245,7 @@ async fn exponential_backoff_retry_in_grows() {
             "delay[{i}] = {d:?} is below min (20 ms)"
         );
     }
+
     // Delays must be non-decreasing (exponential growth or plateau at max).
     for i in 1..delays.len() {
         assert!(
@@ -278,13 +292,16 @@ async fn push_hwm_drains_after_reconnect() {
 
     let pull2 = Socket::new(SocketType::Pull, Options::default());
     let mut bound = false;
+
     for _ in 0..40 {
         if pull2.bind(ep.clone()).await.is_ok() {
             bound = true;
             break;
         }
+
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+
     assert!(bound, "pull2 failed to rebind");
 
     push.send(Message::single("final")).await.unwrap();
@@ -296,5 +313,6 @@ async fn push_hwm_drains_after_reconnect() {
             break;
         }
     }
+
     assert!(count >= 1, "expected at least 1 message, got {count}");
 }

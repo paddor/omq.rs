@@ -42,15 +42,18 @@ fn collect_violations(root: &Path, allowed: &Path, violations: &mut Vec<String>)
     for entry in fs::read_dir(root).expect("read source directory") {
         let entry = entry.expect("read source entry");
         let path = entry.path();
+
         if path.is_dir() {
             collect_violations(&path, allowed, violations);
             continue;
         }
+
         // The signal module and its child modules, such as its tests.
         let in_signal_module = path == allowed || path.starts_with(allowed.with_extension(""));
         if path.extension().and_then(|ext| ext.to_str()) != Some("rs") || in_signal_module {
             continue;
         }
+
         let text = fs::read_to_string(&path).expect("read source file");
         for (index, line) in text.lines().enumerate() {
             let raw_hit = FORBIDDEN_SUBSTRINGS
@@ -59,6 +62,7 @@ fn collect_violations(root: &Path, allowed: &Path, violations: &mut Vec<String>)
                 || FORBIDDEN_TOKENS
                     .iter()
                     .any(|needle| contains_token(line, needle));
+
             if raw_hit {
                 violations.push(format!("{}:{}", path.display(), index + 1));
             }
@@ -71,11 +75,14 @@ fn contains_token(line: &str, needle: &str) -> bool {
     while let Some(pos) = line[offset..].find(needle) {
         let start = offset + pos;
         let previous = line[..start].chars().next_back();
+
         if !previous.is_some_and(is_ident_char) {
             return true;
         }
+
         offset = start + needle.len();
     }
+
     false
 }
 

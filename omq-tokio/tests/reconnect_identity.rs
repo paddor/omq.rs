@@ -33,8 +33,10 @@ async fn rebind<F: Fn() -> Socket>(ep: &Endpoint, make: F) -> Socket {
         if s.bind(ep.clone()).await.is_ok() {
             return s;
         }
+
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+
     panic!("could not rebind {ep:?} after 40 attempts");
 }
 
@@ -137,6 +139,7 @@ async fn echo_three(router: &Socket) -> HashSet<Vec<u8>> {
             .unwrap();
         ids.insert(id);
     }
+
     ids
 }
 
@@ -147,9 +150,11 @@ async fn multi_dealer_reconnect_to_restarted_router() {
 
     let dealers = reconnecting_dealers();
     let mut dealer_mons: Vec<_> = dealers.iter().map(Socket::monitor).collect();
+
     for d in &dealers {
         d.connect(ep.clone()).await.unwrap();
     }
+
     for mon in &mut dealer_mons {
         test_support::wait_for_handshake_on(mon).await;
     }
@@ -157,6 +162,7 @@ async fn multi_dealer_reconnect_to_restarted_router() {
     for (i, d) in dealers.iter().enumerate() {
         d.send(Message::single(format!("msg-{i}"))).await.unwrap();
     }
+
     let mut ids_before = HashSet::new();
     for _ in 0..3 {
         let m = tokio::time::timeout(TIMEOUT, router1.recv())
@@ -165,6 +171,7 @@ async fn multi_dealer_reconnect_to_restarted_router() {
             .unwrap();
         ids_before.insert(m.part_bytes(0).unwrap().to_vec());
     }
+
     assert_eq!(ids_before.len(), 3);
 
     router1.close().await.unwrap();
@@ -175,9 +182,11 @@ async fn multi_dealer_reconnect_to_restarted_router() {
     for mon in &mut dealer_mons {
         test_support::wait_for_handshake_on(mon).await;
     }
+
     for (i, d) in dealers.iter().enumerate() {
         d.send(Message::single(format!("after-{i}"))).await.unwrap();
     }
+
     let ids_after = echo_three(&router2).await;
     assert_eq!(ids_after.len(), 3);
     assert_eq!(ids_before, ids_after);

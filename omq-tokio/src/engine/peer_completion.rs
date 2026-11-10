@@ -64,12 +64,14 @@ impl CompletionProgress {
         let Some(sender) = self.sender.take() else {
             return Err(reason);
         };
+
         let _ = sender.send(PeerCompletion {
             peer_id: self.peer_id,
             admitted_events: self.admitted_events,
             reason,
             stream_disconnect: self.stream_disconnect,
         });
+
         Ok(())
     }
 }
@@ -87,21 +89,4 @@ impl Drop for CompletionProgress {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn abandoned_driver_retains_its_admitted_prefix() {
-        let (mut progress, receiver) = CompletionProgress::reserve(7);
-        progress.note_event();
-        progress.note_event();
-        drop(progress);
-        let result = receiver.await.unwrap();
-        assert_eq!(result.peer_id, 7);
-        assert_eq!(result.admitted_events, 2);
-        assert_eq!(
-            result.reason,
-            DisconnectReason::Error("connection driver stopped before completion".into())
-        );
-    }
-}
+mod tests;

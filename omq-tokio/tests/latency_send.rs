@@ -8,7 +8,13 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::time::Duration;
 
+#[global_allocator]
+static ALLOCATOR: CountingAllocator = CountingAllocator;
+
+const DEADLINE: Duration = Duration::from_secs(5);
+
 struct CountingAllocator;
+
 thread_local! {
     static COUNT: Cell<Option<usize>> = const { Cell::new(None) };
 }
@@ -26,21 +32,18 @@ unsafe impl GlobalAlloc for CountingAllocator {
         allocated();
         unsafe { System.alloc(layout) }
     }
+
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         unsafe {
             System.dealloc(ptr, layout);
         }
     }
+
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
         allocated();
         unsafe { System.realloc(ptr, layout, size) }
     }
 }
-
-#[global_allocator]
-static ALLOCATOR: CountingAllocator = CountingAllocator;
-
-const DEADLINE: Duration = Duration::from_secs(5);
 
 fn options(identity: &'static [u8], profile: WorkloadProfile) -> Options {
     Options::default()
@@ -64,15 +67,18 @@ async fn full_identity_retry_allocates_nothing_and_preserves_original() {
                 kind,
                 options(b"client", profile).router_mandatory(kind == SocketType::Router),
             );
+
             let endpoint = server.bind(test_support::tcp_loopback(0)).await.unwrap();
             client.connect(endpoint).await.unwrap();
             client.wait_connected(1, DEADLINE).await.unwrap();
             server.wait_connected(1, DEADLINE).await.unwrap();
+
             let mut message =
                 Message::multipart([Bytes::from_static(b"server"), Bytes::from(vec![42; 65536])])
                     .with_routing_id(17);
             let expected = message.clone();
             let mut full = None;
+
             for _ in 0..512 {
                 match client.try_send(message) {
                     Ok(()) => message = expected.clone(),
@@ -83,16 +89,19 @@ async fn full_identity_retry_allocates_nothing_and_preserves_original() {
                     other => panic!("unexpected send: {other:?}"),
                 }
             }
+
             let mut message = full.expect("bounded outbound capacity");
             let identity_ptr = message.part_slice(0).unwrap().as_ptr();
             let body_ptr = message.part_slice(1).unwrap().as_ptr();
             COUNT.with(|count| count.set(Some(0)));
+
             for _ in 0..128 {
                 message = match client.try_send(message) {
                     Err(TrySendError::Full(returned)) => returned,
                     other => panic!("retry must remain full: {other:?}"),
                 };
             }
+
             let allocations = COUNT.with(|count| count.replace(None).unwrap());
             assert_eq!(allocations, 0, "{kind:?}/{profile:?}");
             assert_eq!(message, expected);
@@ -120,28 +129,35 @@ async fn partial_writes_preserve_fifo(transport: &str) {
         let context = Context::new();
         let server = context.socket(kind, options(b"server", WorkloadProfile::Latency));
         let client = context.socket(kind, options(b"client", WorkloadProfile::Latency));
+
         let endpoint = if transport == "ipc" {
             test_support::ipc_endpoint("latency-partial")
         } else {
             test_support::tcp_loopback(0)
         };
+
         let endpoint = server.bind(endpoint).await.unwrap();
         client.connect(endpoint).await.unwrap();
         client.wait_connected(1, DEADLINE).await.unwrap();
         server.wait_connected(1, DEADLINE).await.unwrap();
+
         let sending = tokio::spawn(async move {
             for sequence in 0u8..32 {
                 let body =
                     Message::single(vec![sequence; if sequence % 2 == 0 { 65536 } else { 64 }]);
+
                 let message = if kind == SocketType::Peer {
                     Message::with_prefix(Bytes::from_static(b"server"), body)
                 } else {
                     body
                 };
+
                 client.send(message).await.unwrap();
             }
+
             client
         });
+
         // Let small kernel buffers force partial writes and HWM waits.
         tokio::time::sleep(Duration::from_millis(20)).await;
         tokio::time::timeout(Duration::from_secs(15), async {
@@ -156,6 +172,7 @@ async fn partial_writes_preserve_fifo(transport: &str) {
         })
         .await
         .unwrap();
+
         let client = sending.await.unwrap();
         client.close().await.unwrap();
         server.close().await.unwrap();
@@ -173,25 +190,30 @@ async fn warmed_latency_send_adds_no_allocation() {
         client.wait_connected(1, DEADLINE).await.unwrap();
         server.wait_connected(1, DEADLINE).await.unwrap();
         let body = Message::single(Bytes::from_static(&[42; 64]));
+
         let request = if kind == SocketType::Peer {
             Message::with_prefix(Bytes::from_static(b"server"), body)
         } else {
             body
         };
+
         for iteration in 0..32 {
             let message = request.clone();
             COUNT.with(|count| count.set(Some(0)));
             let result = client.try_send(message);
             let allocations = COUNT.with(|count| count.replace(None).unwrap());
             result.unwrap();
+
             if iteration > 0 {
                 assert_eq!(allocations, 0, "{kind:?}");
             }
+
             tokio::time::timeout(DEADLINE, server.recv())
                 .await
                 .unwrap()
                 .unwrap();
         }
+
         client.close().await.unwrap();
         server.close().await.unwrap();
     }
@@ -217,6 +239,7 @@ async fn latency_fallback_honors_small_send_hwm() {
         // spans several bounded stages, so the count stays close to the HWM.
         let message = Message::single(Bytes::from(vec![42; 64 * 1024 * 1024]));
         let mut accepted = 0;
+
         for _ in 0..128 {
             match client.try_send(message.clone()) {
                 Ok(()) => accepted += 1,
@@ -224,6 +247,7 @@ async fn latency_fallback_honors_small_send_hwm() {
                 other => panic!("unexpected send result: {other:?}"),
             }
         }
+
         assert!(
             (1..=4).contains(&accepted),
             "{kind:?}: accepted {accepted} messages with HWM 1"

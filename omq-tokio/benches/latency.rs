@@ -19,16 +19,19 @@ fn main() {
     ctx.block_on(async {
         common::print_header("REQ/REP Latency (serial ping-pong)");
         let mut seq = 0usize;
+
         for transport in common::transports() {
             println!("--- {transport} ---");
             println!(
                 "  {:>6}  {:>10}  {:>10}  {:>10}  {:>10}",
                 "size", "p50 µs", "p99 µs", "p999 µs", "max µs"
             );
+
             for size in common::sizes() {
                 seq += 1;
                 let label = format!("{transport}/{size}B");
                 let cell = common::with_timeout(&label, run_cell(&transport, size, seq)).await;
+
                 println!(
                     "  {:>6}  {:>10.2}  {:>10.2}  {:>10.2}  {:>10.2}",
                     format!("{size}B"),
@@ -37,8 +40,10 @@ fn main() {
                     cell.p999,
                     cell.max,
                 );
+
                 append_jsonl(&transport, size, cell);
             }
+
             println!();
         }
     });
@@ -56,6 +61,7 @@ fn percentile(sorted: &[u64], p: f64) -> f64 {
     if sorted.is_empty() {
         return 0.0;
     }
+
     let idx = ((sorted.len() as f64 * p / 100.0) as usize).min(sorted.len() - 1);
     sorted[idx] as f64 / 1_000.0
 }
@@ -64,10 +70,12 @@ fn append_jsonl(transport: &str, msg_size: usize, c: LatencyCell) {
     if std::env::var_os("OMQ_BENCH_NO_WRITE").is_some() {
         return;
     }
+
     let path = common::results_path();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+
     let row = format!(
         r#"{{"run_id":"{run}","pattern":"{pattern}","transport":"{transport}","peers":1,"msg_size":{msg_size},"p50_us":{p50},"p99_us":{p99},"p999_us":{p999},"max_us":{max}}}"#,
         run = common::run_id(),
@@ -79,6 +87,7 @@ fn append_jsonl(transport: &str, msg_size: usize, c: LatencyCell) {
         p999 = c.p999,
         max = c.max,
     );
+
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -95,6 +104,7 @@ async fn run_cell(transport: &str, size: usize, seq: usize) -> LatencyCell {
 
     let req = Socket::new(SocketType::Req, Options::default());
     req.connect(ep.clone()).await.expect("connect REQ");
+
     if transport != "inproc" {
         common::wait_connected(&[&req]).await;
     }
@@ -129,9 +139,11 @@ async fn run_cell(transport: &str, size: usize, seq: usize) -> LatencyCell {
 
     responder.abort();
     let _ = responder.await;
+
     if let Ok(req) = std::sync::Arc::try_unwrap(req) {
         let _ = req.close().await;
     }
+
     if let Ok(rep) = std::sync::Arc::try_unwrap(rep) {
         let _ = rep.close().await;
     }

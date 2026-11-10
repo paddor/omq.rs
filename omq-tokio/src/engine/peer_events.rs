@@ -74,6 +74,7 @@ impl PeerEventDispatch {
         if self.notification.is_none() {
             return true;
         }
+
         outlet.output.set_control_prefix(self.admitted);
         match outlet.try_send(self.notification.take().unwrap(), true) {
             Ok(()) => true,
@@ -96,6 +97,7 @@ impl PeerEventDispatch {
         let event = self.pending.take().expect("pending event admission guard");
         self.note_admission(is_handshake(&event));
         outlet.send_event(permit, event);
+
         self.send_notification(&mut outlet)
     }
 
@@ -119,11 +121,13 @@ impl PeerEventDispatch {
         if self.pending.is_some() || self.notification.is_some() {
             return true;
         }
+
         self.needs_drain = false;
 
         let Some(mut event) = connection.poll_event() else {
             return true;
         };
+
         let EventRoute {
             mailbox,
             mut outlet,
@@ -140,6 +144,7 @@ impl PeerEventDispatch {
             {
                 sink.set_peer_properties(peer_properties.clone());
             }
+
             self.subscriptions.observe(&event);
 
             let bytes = event_work_bytes(&event);
@@ -164,6 +169,7 @@ impl PeerEventDispatch {
                     Err(TrySendError::Closed(_)) => return false,
                     Err(TrySendError::Full(_)) => unreachable!("codec event admission"),
                 }
+
                 if !self.send_notification(&mut outlet) {
                     return false;
                 }
@@ -173,9 +179,11 @@ impl PeerEventDispatch {
                 self.needs_drain = true;
                 return true;
             }
+
             let Some(next) = connection.poll_event() else {
                 return true;
             };
+
             event = next;
         }
     }
@@ -221,6 +229,7 @@ impl SubscriptionGate {
             monitor: monitor.clone(),
             connection_id,
         });
+
         Self {
             notify_xpub,
             admission,
@@ -247,16 +256,19 @@ impl SubscriptionGate {
         else {
             return true;
         };
+
         let admitted = self
             .peer
             .as_deref()
             .is_some_and(|peer| admission.callback.admits(prefix, peer));
+
         if !admitted {
             admission.monitor.publish(MonitorEvent::SubscribeRejected {
                 connection_id: admission.connection_id,
                 prefix: prefix.clone(),
             });
         }
+
         admitted
     }
 
@@ -276,9 +288,11 @@ fn xpub_notification(event: &Event) -> Option<omq_proto::Message> {
         Event::Command(Command::Cancel(prefix)) => (0x00, prefix),
         _ => return None,
     };
+
     let mut bytes = bytes::BytesMut::with_capacity(1 + prefix.len());
     bytes.extend_from_slice(&[tag]);
     bytes.extend_from_slice(prefix);
+
     Some(omq_proto::Message::single(bytes.freeze()))
 }
 
@@ -302,6 +316,7 @@ pub(crate) fn event_work_bytes(event: &Event) -> usize {
             _ => usize::MAX,
         },
     };
+
     size_of::<Event>().saturating_add(body)
 }
 

@@ -38,6 +38,7 @@ impl RecvNotify {
         } else {
             timeout_ms as u32
         };
+
         // SAFETY: as in `signal`; the wait reads no Rust memory.
         let rc = unsafe { WaitForSingleObject(self.event, wait_ms) };
         rc == WAIT_OBJECT_0
@@ -157,6 +158,7 @@ impl PollWaiter {
                 if batches.last().unwrap().len() >= Self::BATCH_SIZE {
                     batches.push(Vec::new());
                 }
+
                 batches.last_mut().unwrap().push(sock.notify.recv_event.0);
                 handle_map.push((idx, crate::poll::ZMQ_POLLIN as libc::c_short));
             }
@@ -165,6 +167,7 @@ impl PollWaiter {
                 if batches.last().unwrap().len() >= Self::BATCH_SIZE {
                     batches.push(Vec::new());
                 }
+
                 batches.last_mut().unwrap().push(sock.notify.send_event.0);
                 handle_map.push((idx, crate::poll::ZMQ_POLLOUT as libc::c_short));
             }
@@ -219,6 +222,7 @@ impl PollWaiter {
         } else {
             timeout_ms as u32
         };
+
         // SAFETY: the slice is borrowed for the call and holds 1 to 64
         // (MAXIMUM_WAIT_OBJECTS) open events, as in `prepare_for_wait`.
         unsafe {
@@ -229,8 +233,10 @@ impl PollWaiter {
         for item in items.iter_mut() {
             item.revents = 0;
         }
+
         let mut ready_count = 0i32;
         let mut map_idx = 0;
+
         for batch in &self.batches {
             for handle in batch {
                 let (item_idx, event_type) = self.handle_map[map_idx];
@@ -238,10 +244,12 @@ impl PollWaiter {
                 // SAFETY: open event, as in `prepare_for_wait`; a zero
                 // timeout only tests the state.
                 let rc = unsafe { WaitForSingleObject(*handle, 0) };
+
                 if rc == WAIT_OBJECT_0 {
                     if items[item_idx].revents == 0 {
                         ready_count += 1;
                     }
+
                     items[item_idx].revents |= event_type;
                 }
             }

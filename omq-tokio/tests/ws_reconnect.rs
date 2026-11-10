@@ -24,6 +24,7 @@ async fn disconnect_drops_stalled_http_and_tls_attempts() {
             .await
             .unwrap()
             .unwrap();
+
         // Observe setup on the wire before canceling. The server deliberately
         // sends neither an HTTP upgrade response nor a TLS ServerHello.
         let mut first = [0u8; 1];
@@ -31,6 +32,7 @@ async fn disconnect_drops_stalled_http_and_tls_attempts() {
             .await
             .unwrap()
             .unwrap();
+
         socket.disconnect(endpoint).await.unwrap();
         let mut remaining = Vec::new();
         tokio::time::timeout(
@@ -83,13 +85,16 @@ async fn ws_reconnect_after_server_restart() {
 
     let pull2 = Socket::new(SocketType::Pull, Options::default());
     let mut bound = false;
+
     for _ in 0..20 {
         if pull2.bind(ws_endpoint(port)).await.is_ok() {
             bound = true;
             break;
         }
+
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+
     assert!(bound, "pull2 failed to bind after pull1 closed");
 
     tokio::time::sleep(Duration::from_millis(300)).await;

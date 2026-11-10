@@ -18,27 +18,34 @@ pub(crate) fn run(mut args: DartArgs) {
     assert!(args.drain_seconds.is_finite() && args.drain_seconds > 0.0);
     assert!(args.spin <= 50 && args.io_spin <= 50);
     assert!(args.window_messages.is_power_of_two() && args.window_messages <= 65_536);
+
     if args.continuous_io_spin {
         assert!(args.transport.iter().all(|transport| transport == "dart"));
     }
+
     if args.check_gates {
         validate_gates(&args);
     }
+
     if args.runtime != "owned" {
         assert!(args.common.kind == "latency" && args.spin == 0 && args.io_spin == 0);
         assert!(!args.continuous_spin && !args.continuous_io_spin);
     }
+
     if let Some(path) = &args.latency_samples {
         assert_eq!(args.common.kind, "latency");
         std::fs::create_dir_all(path).unwrap();
         args.latency_samples = Some(path.canonicalize().unwrap());
     }
+
     args.binary = args.binary.canonicalize().expect("built DART peer binary");
     if args.transport.iter().any(|transport| transport == "quic") {
         crate::tls::install_bench_credentials();
     }
+
     let provenance = provenance(&args.binary);
     let mut results = Vec::new();
+
     for transport in &args.transport {
         rounds(
             &args.common,
@@ -53,10 +60,12 @@ pub(crate) fn run(mut args: DartArgs) {
                     .extend(provenance.as_object().unwrap().clone());
                 record(&args.common, "dart.jsonl", &row);
                 results.push(row.clone());
+
                 row
             },
         );
     }
+
     if args.check_gates {
         check_gates(&results);
     }
@@ -85,9 +94,11 @@ fn command(
         .env("OMQ_DART_DRAIN_SECS", args.drain_seconds.to_string())
         .env("OMQ_DART_WINDOW_MESSAGES", args.window_messages.to_string())
         .env("OMQ_PERF_CPUS", args.common.cpu_csv());
+
     if args.runtime != "owned" {
         command.arg(&args.runtime);
     }
+
     let samples = args
         .latency_samples
         .as_ref()
@@ -96,18 +107,22 @@ fn command(
             let transport = endpoint.split(':').next().unwrap();
             let path = path.join(format!("{transport}-{size}-{}.csv", unix_nanos()));
             command.env("OMQ_DART_RTT_SAMPLES", &path);
+
             path
         });
+
     let profile_side = if args.common.profile_side.as_deref().unwrap_or("receive") == "receive" {
         Side::Receive
     } else {
         Side::Send
     };
+
     let profile = args
         .common
         .profile
         .as_deref()
         .filter(|_| peer_side == profile_side);
+
     (peers::profiled(command, profile, role, size), samples)
 }
 
@@ -124,6 +139,7 @@ fn measure(args: &DartArgs, transport: &str, kind: &str, size: u64) -> Value {
         40.0_f64.max(args.warmup_seconds + args.duration + args.drain_seconds + 10.0),
     );
     let mut peers = Peers::new(timeout);
+
     let (receive_role, send_role) = if kind == "throughput" {
         ("gather", "scatter")
     } else {
@@ -142,6 +158,7 @@ fn measure(args: &DartArgs, transport: &str, kind: &str, size: u64) -> Value {
         )
         .0,
     );
+
     let bound = peers.wait_json(Side::Receive, "bound");
     let (mut send, samples) = command(
         args,
@@ -151,6 +168,7 @@ fn measure(args: &DartArgs, transport: &str, kind: &str, size: u64) -> Value {
         size,
     );
     peers.spawn(Side::Send, &mut send);
+
     let receive_ready = peers.wait_json(Side::Receive, "ready");
     let send_ready = peers.wait_json(Side::Send, "ready");
     check_ready(args, transport, &receive_ready, &send_ready);
@@ -161,9 +179,11 @@ fn measure(args: &DartArgs, transport: &str, kind: &str, size: u64) -> Value {
     peers.command(Side::Receive, start);
     peers.command(Side::Send, start);
     let sender = peers.wait_json(Side::Send, "result");
+
     if kind == "latency" {
         peers.command(Side::Receive, "STOP");
     }
+
     let receiver = peers.wait_json(Side::Receive, "result");
     peers.finish();
 
@@ -180,6 +200,7 @@ fn measure(args: &DartArgs, transport: &str, kind: &str, size: u64) -> Value {
         "recv_pool_slot_bytes": (transport == "dart").then_some(&receive_ready["recv_pool_slot_bytes"]),
         "congestion": if transport == "dart" { Some(&args.congestion) } else { None },
         "offloads_before":{"receive":receive_ready["offloads"], "send":send_ready["offloads"]}});
+
     verify(&mut row, args, samples);
     row
 }
@@ -213,12 +234,15 @@ fn verify(row: &mut Value, args: &DartArgs, samples: Option<std::path::PathBuf>)
             );
         }
     }
+
     if row["kind"] == "latency" {
         row["iterations"] = json!(args.iterations);
         row["warmup_iterations"] = json!(args.warmup);
+
         for field in ["p50_us", "p99_us", "p999_us", "max_us", "timeouts"] {
             row[field] = row["sender"][field].clone();
         }
+
         assert_eq!(count(row, "timeouts"), 0);
         if let Some(path) = samples {
             row["latency_samples"] = json!(path);
@@ -237,9 +261,11 @@ fn verify(row: &mut Value, args: &DartArgs, samples: Option<std::path::PathBuf>)
             0,
             "unacknowledged messages after bounded drain: {row}"
         );
+
         for field in ["duplicates", "gaps", "corrupt"] {
             assert_eq!(count(&row["receiver"], field), 0);
         }
+
         row["warmup_seconds"] = json!(args.warmup_seconds);
         row["drain_seconds"] = json!(args.drain_seconds);
         row["msgs_s"] = json!(received as f64 / args.duration);
@@ -254,6 +280,7 @@ fn validate_gates(args: &DartArgs) {
     assert!(
         args.common.kind == "both" && args.common.repeats == 3 && args.common.order == "rotate"
     );
+
     assert_eq!(
         Duration::from_secs_f64(args.duration),
         Duration::from_secs(3)
@@ -267,12 +294,15 @@ fn validate_gates(args: &DartArgs) {
         Duration::from_secs_f64(args.drain_seconds),
         Duration::from_secs(2)
     );
+
     assert!(args.spin == 50 && args.io_spin == 50);
     assert!(!args.continuous_spin && !args.continuous_io_spin);
     assert_eq!(args.window_messages, 256);
+
     let mut sizes = args.common.sizes(THROUGHPUT_SIZES);
     sizes.sort_unstable();
     assert_eq!(sizes, THROUGHPUT_SIZES);
+
     assert!(args.transport.iter().any(|transport| transport == "dart"));
     assert!(args.latency_samples.is_none());
 }
@@ -285,6 +315,7 @@ fn check_gates(rows: &[Value]) {
             } else {
                 "msgs_s"
             };
+
             let mut values: Vec<_> = rows
                 .iter()
                 .filter(|row| {
@@ -294,6 +325,7 @@ fn check_gates(rows: &[Value]) {
                 .collect();
             assert_eq!(values.len(), 3);
             values.sort_by(f64::total_cmp);
+
             let passed = if kind == "latency" {
                 values[1] <= 25.0
             } else {
@@ -303,6 +335,7 @@ fn check_gates(rows: &[Value]) {
                     _ => true,
                 }
             };
+
             assert!(
                 passed,
                 "LAN performance gate missed: {kind} {size} B; profile before collecting more results"

@@ -41,6 +41,7 @@ impl Drop for Shared {
         } else {
             code::ABORTED
         };
+
         self.carrier.close(code);
     }
 }
@@ -80,6 +81,7 @@ impl QuicStream {
             liveness,
             completed: AtomicBool::new(false),
         });
+
         Self {
             recv: QuicRecvHalf {
                 stream: recv,
@@ -115,9 +117,11 @@ impl QuicStream {
     pub(crate) fn local_address(&self) -> Option<std::net::SocketAddr> {
         let shared = &self.send.shared;
         let mut address = shared.endpoint.local_addr().ok()?;
+
         if let Some(ip) = shared.carrier.connection().local_ip() {
             address.set_ip(ip);
         }
+
         Some(address)
     }
 
@@ -215,6 +219,7 @@ impl AsyncWrite for QuicSendHalf {
                 Poll::Ready(Err(_)) | Poll::Pending => break,
             }
         }
+
         Poll::Ready(Ok(total))
     }
 

@@ -61,6 +61,7 @@ async fn curve_delivers_messages_at_the_configured_limit() {
         );
         let endpoint = server.bind(tcp_ep(0)).await.unwrap();
         client.connect(endpoint).await.unwrap();
+
         tokio::time::timeout(Duration::from_secs(2), async {
             client.send(message.clone()).await.unwrap();
             assert_eq!(server.recv().await.unwrap(), message);
@@ -69,6 +70,7 @@ async fn curve_delivers_messages_at_the_configured_limit() {
         })
         .await
         .expect("message at the configured limit was not delivered");
+
         client.close().await.unwrap();
         server.close().await.unwrap();
     }
@@ -92,6 +94,7 @@ async fn curve_refusal_stops_automatic_reconnect() {
     let observed = attempts.clone();
     let server_kp = CurveKeypair::generate();
     let server_pub = server_kp.public;
+
     let server = Socket::new(
         SocketType::Router,
         Options::default().curve_server_with_options(
@@ -102,6 +105,7 @@ async fn curve_refusal_stops_automatic_reconnect() {
             }),
         ),
     );
+
     let endpoint = server.bind(auth_ep("refusal-reconnect")).await.unwrap();
     let client = Socket::new(
         SocketType::Dealer,
@@ -111,6 +115,7 @@ async fn curve_refusal_stops_automatic_reconnect() {
     );
     let mut monitor = client.monitor();
     client.connect(endpoint).await.unwrap();
+
     let refusal = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             if let omq_tokio::MonitorEvent::ConnectStopped {
@@ -124,6 +129,7 @@ async fn curve_refusal_stops_automatic_reconnect() {
     })
     .await
     .unwrap();
+
     assert_eq!(
         refusal.mechanism,
         omq_tokio::proto::greeting::MechanismName::CURVE
@@ -145,11 +151,13 @@ fn handshake_prefix(stream: &[u8]) -> Option<Vec<u8>> {
         } else {
             (2usize, *stream.get(off + 1)? as usize)
         };
+
         off = off.checked_add(hdr)?.checked_add(len)?;
         if stream.len() < off {
             return None;
         }
     }
+
     Some(stream[..off].to_vec())
 }
 
@@ -158,30 +166,36 @@ fn recording_proxy(upstream: String) -> (String, Arc<Mutex<Vec<u8>>>) {
     let addr = listener.local_addr().unwrap().to_string();
     let cap = Arc::new(Mutex::new(Vec::new()));
     let cap_thread = cap.clone();
+
     std::thread::spawn(move || {
         let (inbound, _) = listener.accept().unwrap();
         let outbound = TcpStream::connect(&upstream).unwrap();
         let (mut c_in, mut s_out) = (inbound.try_clone().unwrap(), outbound.try_clone().unwrap());
+
         std::thread::spawn(move || {
             let mut buf = [0u8; 8192];
             while let Ok(n) = c_in.read(&mut buf) {
                 if n == 0 {
                     break;
                 }
+
                 cap_thread.lock().unwrap().extend_from_slice(&buf[..n]);
                 if s_out.write_all(&buf[..n]).is_err() {
                     break;
                 }
             }
         });
+
         let (mut s_in, mut c_out) = (outbound, inbound);
         let mut buf = [0u8; 8192];
+
         while let Ok(n) = s_in.read(&mut buf) {
             if n == 0 || c_out.write_all(&buf[..n]).is_err() {
                 break;
             }
         }
     });
+
     (addr, cap)
 }
 
@@ -192,12 +206,14 @@ fn replay(addr: &str, prefix: &[u8]) -> Vec<u8> {
     s.write_all(prefix).unwrap();
     let (mut got, mut buf) = (Vec::new(), [0u8; 8192]);
     let deadline = Instant::now() + Duration::from_secs(3);
+
     while Instant::now() < deadline && got.len() <= 4096 {
         match s.read(&mut buf) {
             Ok(0) | Err(_) => break,
             Ok(n) => got.extend_from_slice(&buf[..n]),
         }
     }
+
     got
 }
 
@@ -432,6 +448,7 @@ async fn curve_emits_handshake_succeeded_with_curve_mechanism() {
             _ => break,
         }
     }
+
     assert!(saw_handshake, "CURVE handshake must complete");
 }
 
@@ -455,6 +472,7 @@ async fn curve_authenticator_admits_known_client() {
             }),
         ),
     );
+
     let ep = server.bind(auth_ep("auth-allow")).await.unwrap();
 
     let client = Socket::new(
@@ -492,10 +510,12 @@ async fn curve_authenticator_identity_matches_router_message() {
                 if let Some(identity) = &peer.identity {
                     auth_identities_cb.lock().unwrap().push(identity.clone());
                 }
+
                 true
             }),
         ),
     );
+
     let ep = router.bind(auth_ep("auth-router-identity")).await.unwrap();
 
     let dealer_one = curve_dealer(b"client-one", server_pub);
@@ -519,6 +539,7 @@ async fn curve_authenticator_identity_matches_router_message() {
             message.part_bytes(0).unwrap().to_vec(),
         ));
     }
+
     identities_by_message.sort_unstable();
     assert_eq!(
         identities_by_message,
@@ -723,6 +744,7 @@ async fn curve_pub_sub() {
             return;
         }
     }
+
     panic!("SUB never received over CURVE");
 }
 
@@ -766,13 +788,16 @@ async fn curve_reconnects_after_server_restart() {
 
     let server2 = Socket::new(SocketType::Pull, Options::default().curve_server(server_kp));
     let mut bound = false;
+
     for _ in 0..20 {
         if server2.bind(ep.clone()).await.is_ok() {
             bound = true;
             break;
         }
+
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+
     assert!(bound, "server2 failed to bind after server1 closed");
 
     test_support::wait_for_handshake_on(&mut client_mon).await;

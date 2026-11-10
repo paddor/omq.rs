@@ -39,9 +39,11 @@ fn recv_buf_pool_caps_total_retained_bytes() {
 
     let pool = RecvBufPool::new();
     let buffer_count = (RECV_POOL_MAX_RETAINED_BYTES / BUFFER_BYTES) + 2;
+
     for _ in 0..buffer_count {
         pool.give(BytesMut::with_capacity(BUFFER_BYTES));
     }
+
     let guard = pool.inner.lock().unwrap();
     assert!(guard.retained_bytes <= RECV_POOL_MAX_RETAINED_BYTES);
     assert_eq!(
@@ -108,11 +110,13 @@ async fn accepted_large_read_keeps_one_allocation_through_completion() {
         ConnectionConfig::new(Role::Server, SocketType::Pull)
             .max_message_size(declared + size_of::<omq_proto::Payload>()),
     );
+
     let prefix = b"buffered prefix";
     let mut wire = vec![0x02];
     wire.extend_from_slice(&(declared as u64).to_be_bytes());
     wire.extend_from_slice(prefix);
     pull.handle_input(Bytes::from(wire)).unwrap();
+
     let config = PeerDriverConfig {
         large_message_threshold: 128 * 1024,
         ..PeerDriverConfig::default()
@@ -121,21 +125,26 @@ async fn accepted_large_read_keeps_one_allocation_through_completion() {
     let mut pending = PendingLargeRead::begin(&mut pull, &config, &pool)
         .unwrap()
         .unwrap();
+
     let ReceiveBody::Stream { buf, pooled } = &pending.buf else {
         panic!("expected an owned receive buffer");
     };
+
     assert!(!pooled);
     assert_eq!(buf.capacity(), declared);
     let allocation = buf.as_ptr();
     let mut reader = tokio::io::repeat(b'!').take((declared - prefix.len()) as u64);
+
     while !pending.complete() {
         pending.read(&mut reader).await.unwrap();
         let ReceiveBody::Stream { buf, .. } = &pending.buf else {
             unreachable!()
         };
+
         assert_eq!(buf.as_ptr(), allocation, "receive body moved during a read");
         assert_eq!(buf.capacity(), declared);
     }
+
     pending.finish(&mut pull, &pool).unwrap();
     let message = pull.poll_message().unwrap();
     let body = message.part_bytes(0).unwrap();
@@ -149,10 +158,12 @@ async fn unpooled_large_read_grows_with_received_bytes() {
     let declared = RECV_POOL_MAX_BUFFER_BYTES * 2;
     let prefix = b"buffered prefix";
     let (_, mut pull) = ready_push_pull_connections();
+
     let mut wire = vec![0x02];
     wire.extend_from_slice(&(declared as u64).to_be_bytes());
     wire.extend_from_slice(prefix);
     pull.handle_input(Bytes::from(wire)).unwrap();
+
     let config = PeerDriverConfig {
         large_message_threshold: 128 * 1024,
         ..PeerDriverConfig::default()
@@ -161,9 +172,11 @@ async fn unpooled_large_read_grows_with_received_bytes() {
     let mut pending = PendingLargeRead::begin(&mut pull, &config, &pool)
         .unwrap()
         .unwrap();
+
     let ReceiveBody::Stream { buf, pooled } = &pending.buf else {
         panic!("expected an unpooled receive buffer");
     };
+
     assert!(!pooled);
     assert_eq!(buf.as_ref(), prefix);
     assert!(
@@ -179,6 +192,7 @@ async fn unpooled_large_read_grows_with_received_bytes() {
         assert!(n > 0 && n <= 64 * 1024);
         assert_eq!(pending.filled(), before + n);
     }
+
     pending.finish(&mut pull, &pool).unwrap();
     let message = pull.poll_message().unwrap();
     let body = message.part_bytes(0).unwrap();
@@ -192,9 +206,11 @@ async fn unpooled_large_read_grows_with_received_bytes() {
 async fn unpooled_large_declaration_keeps_partial_read_bounded() {
     let declared = isize::MAX as usize;
     let (_, mut pull) = ready_push_pull_connections();
+
     let mut wire = vec![0x02];
     wire.extend_from_slice(&(declared as u64).to_be_bytes());
     pull.handle_input(Bytes::from(wire)).unwrap();
+
     let config = PeerDriverConfig {
         large_message_threshold: 128 * 1024,
         ..PeerDriverConfig::default()
@@ -203,13 +219,16 @@ async fn unpooled_large_declaration_keeps_partial_read_bounded() {
     let mut pending = PendingLargeRead::begin(&mut pull, &config, &pool)
         .unwrap()
         .unwrap();
+
     let mut reader = &b"partial body"[..];
     assert_eq!(pending.read(&mut reader).await.unwrap(), 12);
     assert_eq!(pending.target, declared);
     assert!(!pending.complete());
+
     let ReceiveBody::Stream { buf, .. } = &pending.buf else {
         panic!("expected an unpooled receive buffer");
     };
+
     assert_eq!(buf.as_ref(), b"partial body");
     assert!(buf.capacity() <= 64 * 1024);
     assert_eq!(
@@ -258,11 +277,13 @@ async fn read_stream_reuses_prefix_buffer_after_large_frame_consumes_it() {
     push.send_message(&Message::single(Bytes::from(payload.clone())))
         .unwrap();
     let wire = Bytes::from(drain_transmit(&mut push));
+
     let mut read = StreamRead::new(ReceiveProfile::Throughput);
     read.buffer.reserve(READ_BUF_MAX);
     read.buffer.extend_from_slice(&wire[..READ_BUF_MAX]);
     let original = read.buffer.as_ptr();
     let mut reader = ScriptedReader::new(wire.slice(READ_BUF_MAX..), [4093, 65537, 8191]);
+
     let config = PeerDriverConfig {
         large_message_threshold: 128 * 1024,
         ..PeerDriverConfig::default()
@@ -270,6 +291,7 @@ async fn read_stream_reuses_prefix_buffer_after_large_frame_consumes_it() {
     let mut last_input = Instant::now();
     read.handle_input(READ_BUF_MAX, &mut pull, &config, &mut last_input)
         .unwrap();
+
     assert!(read.buffer.is_empty());
     assert!(read.buffer.capacity() >= READ_BUF_MAX);
     assert_eq!(
@@ -278,10 +300,12 @@ async fn read_stream_reuses_prefix_buffer_after_large_frame_consumes_it() {
         "released prefix allocation should be reused"
     );
     assert!(read.has_pending_body());
+
     while read.has_pending_body() {
         assert!(read.read(&mut reader).await.unwrap() > 0);
         read.finish_pending(&mut pull, &config).unwrap();
     }
+
     let message = pull.poll_message().expect("complete large frame");
     assert_eq!(message.part_bytes(0).unwrap().as_ref(), payload);
 }
@@ -580,6 +604,7 @@ async fn large_message_direct_read_matches_mixed_chunked_wire_reference() {
         while let Some(msg) = pull.poll_message() {
             got.push(msg.part_bytes(0).unwrap().to_vec());
         }
+
         assert_eq!(got, expected, "case={case}");
     }
 }
@@ -607,6 +632,7 @@ fn queue_random_payloads(push: &mut Connection, seed: &mut u64, case: u64) -> Ve
             .unwrap();
         expected.push(payload);
     }
+
     expected
 }
 

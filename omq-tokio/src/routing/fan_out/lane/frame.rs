@@ -29,6 +29,7 @@ impl PreparedFrame {
                     omq_proto::copy_stats::Site::FanOutPrepared,
                     raw.len(),
                 );
+
                 Self::Arena(Bytes::copy_from_slice(raw))
             }
             FanOutFrame::Chunks(chunks) => Self::Chunks(chunks.to_vec()),
@@ -120,6 +121,7 @@ pub(super) fn frame_publication<'f>(
     for message in wire {
         encoder.encode(message, cost);
     }
+
     encoder.finish(cost)
 }
 

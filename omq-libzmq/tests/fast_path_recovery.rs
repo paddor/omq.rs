@@ -13,6 +13,7 @@ use omq_zmq::{
 const ZMQ_PUSH: i32 = 8;
 const ZMQ_PULL: i32 = 7;
 const ZMQ_RCVTIMEO: i32 = 27;
+
 fn set_timeo(sock: *mut c_void, ms: i32) {
     zmq_setsockopt(
         sock,

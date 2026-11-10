@@ -47,12 +47,14 @@ async fn full_actor_receive_keeps_controls(scheme: &str) {
             .recv_hwm(1)
             .linger(Duration::from_millis(50)),
     );
+
     let endpoint = if scheme == "inproc" {
         inproc_ep("full-actor-receive-controls")
     } else {
         let suffix = if scheme == "ws" { "/" } else { "" };
         format!("{scheme}://127.0.0.1:0{suffix}").parse().unwrap()
     };
+
     let endpoint = receiver.bind(endpoint).await.unwrap();
     let sender = Socket::new(SocketType::Dealer, Options::default());
     sender.connect(endpoint).await.unwrap();
@@ -60,6 +62,7 @@ async fn full_actor_receive_keeps_controls(scheme: &str) {
         .wait_connected(1, Duration::from_secs(2))
         .await
         .unwrap();
+
     // The shared receive pipe currently rounds HWM up to at least 16 slots.
     for sequence in 0u8..64 {
         sender
@@ -67,12 +70,14 @@ async fn full_actor_receive_keeps_controls(scheme: &str) {
             .await
             .unwrap();
     }
+
     tokio::time::sleep(Duration::from_millis(30)).await;
     let peers = tokio::time::timeout(Duration::from_millis(250), receiver.connections())
         .await
         .expect("full actor receive must not block socket queries")
         .unwrap();
     assert_eq!(peers.len(), 1);
+
     // Drain some messages, then fill the application queue again. Identity
     // wrapping must happen only once when the staged delivery is retried.
     for sequence in 0u8..8 {
@@ -89,6 +94,7 @@ async fn full_actor_receive_keeps_controls(scheme: &str) {
                 .all(|&b| b == sequence)
         );
     }
+
     tokio::time::sleep(Duration::from_millis(30)).await;
     tokio::time::timeout(Duration::from_millis(500), receiver.close())
         .await
@@ -107,12 +113,14 @@ async fn full_xpub_notifications_keep_queries_and_close_responsive() {
     );
     let endpoint = publisher.bind(tcp_ep(0)).await.unwrap();
     let subscriber = Socket::new(SocketType::Sub, Options::default());
+
     for prefix in 0..32 {
         subscriber
             .subscribe(format!("prefix-{prefix}"))
             .await
             .unwrap();
     }
+
     subscriber.connect(endpoint).await.unwrap();
     subscriber
         .wait_connected(1, Duration::from_secs(2))
@@ -136,6 +144,7 @@ async fn linger_stops_new_sends_but_preserves_pre_ready_messages() {
     let sender = Socket::new(SocketType::Push, Options::default().linger_forever());
     sender.connect(endpoint.clone()).await.unwrap();
     sender.send(Message::single("accepted")).await.unwrap();
+
     let handle = sender.clone();
     let close = tokio::spawn(sender.close());
     assert!(matches!(
@@ -148,6 +157,7 @@ async fn linger_stops_new_sends_but_preserves_pre_ready_messages() {
         handle.try_send(Message::single("too late")),
         Err(omq_tokio::TrySendError::Closed)
     ));
+
     let receiver = Socket::new(SocketType::Pull, Options::default());
     receiver.bind(endpoint).await.unwrap();
     let message = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
@@ -155,6 +165,7 @@ async fn linger_stops_new_sends_but_preserves_pre_ready_messages() {
         .unwrap()
         .unwrap();
     assert_eq!(message.part_slice(0).unwrap(), b"accepted");
+
     tokio::time::timeout(Duration::from_secs(2), close)
         .await
         .unwrap()
@@ -196,26 +207,32 @@ async fn linger_drains_fanout_on_two_io_threads() {
                 .linger(Duration::from_secs(4))
         },
     );
+
     let endpoint = publisher.bind("ws://127.0.0.1:0/").await.unwrap();
     let mut subscribers = Vec::new();
+
     for _ in 0..4 {
         let subscriber = Socket::new(SocketType::Sub, Options::default().recv_hwm(1));
         subscriber.subscribe("").await.unwrap();
         subscriber.connect(endpoint.clone()).await.unwrap();
         subscribers.push(subscriber);
     }
+
     publisher
         .wait_subscribed(4, Duration::from_secs(2))
         .await
         .unwrap();
+
     for sequence in 0u8..16 {
         publisher
             .send(Message::single(vec![sequence; 256 * 1024]))
             .await
             .unwrap();
     }
+
     let close = tokio::spawn(publisher.close());
     tokio::time::sleep(Duration::from_millis(30)).await;
+
     for sequence in 0u8..16 {
         for subscriber in &subscribers {
             let message = tokio::time::timeout(Duration::from_secs(2), subscriber.recv())
@@ -227,14 +244,17 @@ async fn linger_drains_fanout_on_two_io_threads() {
             assert!(body.iter().all(|&byte| byte == sequence));
         }
     }
+
     tokio::time::timeout(Duration::from_secs(2), close)
         .await
         .unwrap()
         .unwrap()
         .unwrap();
+
     for subscriber in subscribers {
         subscriber.close().await.unwrap();
     }
+
     context.term();
 }
 
@@ -261,10 +281,12 @@ fn partial_write_options(scheme: &str) -> (Options, Options) {
             Some(certified.signing_key.serialize_pem().into_bytes());
         sender_options.wss_tls.trust_pem = Some(cert);
         sender_options.wss_tls.trust_system = false;
+
         (receiver_options, sender_options)
     } else {
         (receiver_options, sender_options)
     };
+
     #[cfg(not(feature = "ws"))]
     let _ = scheme;
 
@@ -332,6 +354,7 @@ async fn linger_nonzero_drains_queued_messages_inproc() {
     );
     push.connect(ep).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
+
     for i in 0..N {
         push.send(Message::single(i.to_be_bytes().to_vec()))
             .await
@@ -371,6 +394,7 @@ async fn linger_nonzero_drains_queued_messages_tcp() {
     );
     push.connect(ep).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
+
     for i in 0..N {
         push.send(Message::single(i.to_be_bytes().to_vec()))
             .await
@@ -410,6 +434,7 @@ async fn linger_forever_waits_until_drained() {
     let push = Socket::new(SocketType::Push, Options::default().linger_forever());
     push.connect(ep).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
+
     for i in 0..N {
         push.send(Message::single(i.to_be_bytes().to_vec()))
             .await
@@ -427,6 +452,7 @@ async fn linger_forever_waits_until_drained() {
             let bytes: [u8; 4] = m.part_bytes(0).unwrap().as_ref().try_into().unwrap();
             received.push(u32::from_be_bytes(bytes));
         }
+
         received
     });
 
@@ -625,6 +651,7 @@ async fn linger_completes_within_timeout_after_peer_disconnect() {
     for _ in 0..5 {
         let _ = tokio::time::timeout(Duration::from_millis(200), pull.recv()).await;
     }
+
     pull.close().await.unwrap();
 
     // close() must return within linger + generous slack; it must not block
@@ -661,14 +688,17 @@ async fn finite_linger_interrupts_a_saturated_inproc_subscription_handler() {
     let sent = Arc::new(AtomicUsize::new(0));
     let producer = subscriber.clone();
     let progress = sent.clone();
+
     let flood = tokio::spawn(async move {
         for n in 0..4000 {
             if producer.subscribe(format!("flood-{n}")).await.is_err() {
                 return;
             }
+
             progress.fetch_add(1, Ordering::Release);
         }
     });
+
     tokio::time::timeout(Duration::from_secs(2), async {
         while sent.load(Ordering::Acquire) <= 1024 {
             tokio::task::yield_now().await;
@@ -676,6 +706,7 @@ async fn finite_linger_interrupts_a_saturated_inproc_subscription_handler() {
     })
     .await
     .unwrap();
+
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(
         sent.load(Ordering::Acquire) < 4000,

@@ -109,6 +109,7 @@ impl Socket {
         if self.inner.cancel.is_cancelled() {
             return Err(Error::Closed);
         }
+
         self.inner.payload_pools.set_receive(pool)
     }
 
@@ -124,6 +125,7 @@ impl Socket {
         if self.inner.cancel.is_cancelled() {
             return Err(Error::Closed);
         }
+
         self.inner.payload_pools.initialize()
     }
 

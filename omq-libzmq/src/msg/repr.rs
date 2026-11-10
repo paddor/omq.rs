@@ -8,11 +8,25 @@ use bytes::Bytes;
 // kind discriminants
 #[expect(dead_code)]
 const KIND_EMPTY: u8 = 0;
+
 pub(super) const KIND_HEAP: u8 = 1;
 pub(super) const KIND_EXTERNAL: u8 = 2;
 pub(super) const KIND_BYTES: u8 = 3;
 pub(super) const KIND_HEAP_SHARED: u8 = 4;
 pub(super) const KIND_BYTES_METADATA: u8 = 5;
+
+pub(crate) const ZMQ_MSG_T_SIZE: usize = 64;
+const PTR_SIZE: usize = std::mem::size_of::<usize>();
+const MSG_WORDS: usize = ZMQ_MSG_T_SIZE / PTR_SIZE;
+const OFF_KIND: usize = 0;
+const OFF_MORE: usize = 1;
+const OFF_SIZE: usize = 8;
+const OFF_PTR: usize = 16;
+const OFF_FREE_FN: usize = OFF_PTR + PTR_SIZE;
+const OFF_HINT: usize = OFF_FREE_FN + PTR_SIZE;
+const OFF_BOXED: usize = OFF_HINT + PTR_SIZE;
+const OFF_RESERVED: usize = OFF_BOXED + PTR_SIZE;
+pub(super) const RESERVED_LEN: usize = 16;
 
 #[derive(Clone, Debug)]
 pub(super) struct ReceivedFrame {
@@ -26,14 +40,17 @@ impl ReceivedFrame {
         if let Some(socket_type) = peer.socket_type {
             properties.push(c_property("Socket-Type", socket_type.as_str().as_bytes()));
         }
+
         if let Some(identity) = &peer.identity {
             properties.push(c_property("Identity", identity));
         }
+
         properties.extend(
             peer.other
                 .iter()
                 .map(|(name, value)| c_property(name, value)),
         );
+
         Self {
             bytes,
             properties: Arc::new(properties),
@@ -52,6 +69,7 @@ fn c_property(name: impl Into<String>, value: &[u8]) -> (String, Vec<u8>) {
     let mut c_value = Vec::with_capacity(value.len() + 1);
     c_value.extend_from_slice(value);
     c_value.push(0);
+
     (name.into(), c_value)
 }
 
@@ -80,19 +98,6 @@ impl std::fmt::Debug for OmqMsgRepr {
             .finish_non_exhaustive()
     }
 }
-
-pub(crate) const ZMQ_MSG_T_SIZE: usize = 64;
-const PTR_SIZE: usize = std::mem::size_of::<usize>();
-const MSG_WORDS: usize = ZMQ_MSG_T_SIZE / PTR_SIZE;
-const OFF_KIND: usize = 0;
-const OFF_MORE: usize = 1;
-const OFF_SIZE: usize = 8;
-const OFF_PTR: usize = 16;
-const OFF_FREE_FN: usize = OFF_PTR + PTR_SIZE;
-const OFF_HINT: usize = OFF_FREE_FN + PTR_SIZE;
-const OFF_BOXED: usize = OFF_HINT + PTR_SIZE;
-const OFF_RESERVED: usize = OFF_BOXED + PTR_SIZE;
-pub(super) const RESERVED_LEN: usize = 16;
 
 type FreeFn = unsafe extern "C" fn(*mut libc::c_void, *mut libc::c_void);
 
@@ -300,6 +305,7 @@ impl OmqMsgRepr {
         if ptr.is_null() || size == 0 {
             return &[];
         }
+
         // SAFETY: a non-null payload pointer is valid for `size` bytes while
         // the message holds it.
         unsafe { std::slice::from_raw_parts(ptr, size) }
@@ -312,6 +318,7 @@ impl OmqMsgRepr {
         if boxed.is_null() {
             return None;
         }
+
         match self.kind() {
             // SAFETY: the box of a KIND_BYTES message is a `Box<Bytes>` from
             // `Box::into_raw`, owned by this message.
@@ -327,6 +334,7 @@ impl OmqMsgRepr {
         if boxed.is_null() {
             return None;
         }
+
         match self.kind() {
             // SAFETY: as in `boxed_bytes`; `&mut self` makes the access unique.
             KIND_BYTES => Some(unsafe { &mut *boxed.cast::<Bytes>() }),
@@ -342,6 +350,7 @@ impl OmqMsgRepr {
         if self.kind() != KIND_BYTES_METADATA || boxed.is_null() {
             return None;
         }
+
         // SAFETY: the box of a KIND_BYTES_METADATA message is a
         // `Box<ReceivedFrame>` from `Box::into_raw`, owned by this message.
         Some(unsafe { &*boxed.cast::<ReceivedFrame>() })
@@ -355,6 +364,7 @@ impl OmqMsgRepr {
             let ptr = cloned.bytes.as_ptr().cast_mut();
             return Some((ptr, Box::into_raw(cloned).cast()));
         }
+
         let cloned = Box::new(self.boxed_bytes()?.clone());
         let ptr = cloned.as_ptr().cast_mut();
         Some((ptr, Box::into_raw(cloned).cast()))
@@ -366,6 +376,7 @@ impl OmqMsgRepr {
         if boxed.is_null() {
             return;
         }
+
         match self.kind() {
             // SAFETY: as in `boxed_bytes`; the message gives up the box here.
             KIND_BYTES => drop(unsafe { Box::from_raw(boxed.cast::<Bytes>()) }),
@@ -373,13 +384,16 @@ impl OmqMsgRepr {
             KIND_BYTES_METADATA => drop(unsafe { Box::from_raw(boxed.cast::<ReceivedFrame>()) }),
             _ => return,
         }
+
         self.write_usize(OFF_BOXED, 0);
     }
 }
 
 const _SIZE_ASSERT: () = assert!(std::mem::size_of::<OmqMsgRepr>() == ZMQ_MSG_T_SIZE);
+
 const _ALIGN_ASSERT: () =
     assert!(std::mem::align_of::<OmqMsgRepr>() == std::mem::align_of::<usize>());
+
 const _RESERVED_ASSERT: () = assert!(OFF_RESERVED + RESERVED_LEN <= ZMQ_MSG_T_SIZE);
 
 #[inline]

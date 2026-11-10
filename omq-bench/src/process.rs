@@ -9,8 +9,15 @@ use std::time::{Duration, Instant};
 // Optional legacy affinity masks. Disabled unless OMQ_BENCH_TASKSET is set.
 pub(crate) const MEASURED_CPU: &str = "1-2";
 pub(crate) const OTHER_CPU: &str = "3-4";
+
 /// `cpu_affinity` recorded when `OMQ_BENCH_TASKSET` pins sender and receiver.
 pub(crate) const TASKSET_AFFINITY: &str = "sender=1-2,receiver=3-4";
+
+const MAX_PROC_LIFETIME: Duration = Duration::from_mins(1);
+
+static LIVE_PROCS: OnceLock<Mutex<HashMap<u32, Instant>>> = OnceLock::new();
+static REAPER_INSTALLED: AtomicBool = AtomicBool::new(false);
+static PEER_ENV: OnceLock<Vec<(String, String)>> = OnceLock::new();
 
 /// The `cpu_affinity` value for a new row: pinned or `unbound`.
 pub(crate) fn affinity_label() -> &'static str {
@@ -20,12 +27,6 @@ pub(crate) fn affinity_label() -> &'static str {
         "unbound"
     }
 }
-
-const MAX_PROC_LIFETIME: Duration = Duration::from_mins(1);
-
-static LIVE_PROCS: OnceLock<Mutex<HashMap<u32, Instant>>> = OnceLock::new();
-static REAPER_INSTALLED: AtomicBool = AtomicBool::new(false);
-static PEER_ENV: OnceLock<Vec<(String, String)>> = OnceLock::new();
 
 /// Sets environment variables passed to every spawned peer process.
 pub(crate) fn set_peer_env(env: Vec<(String, String)>) {
@@ -38,6 +39,7 @@ pub(crate) fn set_peer_env(env: Vec<(String, String)>) {
 pub(crate) fn build_compression_peers(feature: &str) -> [PathBuf; 2] {
     const NAMES: [&str; 2] = ["omq_bench_peer_blocking", "omq_bench_peer_tokio"];
     eprintln!("  building compression peers ({feature})...");
+
     let output = Command::new("cargo")
         .args([
             "build",
@@ -56,6 +58,7 @@ pub(crate) fn build_compression_peers(feature: &str) -> [PathBuf; 2] {
         .stderr(Stdio::inherit())
         .output()
         .expect("failed to run cargo build");
+
     assert!(output.status.success(), "compression peer build failed");
     let messages: Vec<serde_json::Value> = output
         .stdout
@@ -63,6 +66,7 @@ pub(crate) fn build_compression_peers(feature: &str) -> [PathBuf; 2] {
         .filter(|line| !line.is_empty())
         .map(|line| serde_json::from_slice(line).expect("invalid Cargo build message"))
         .collect();
+
     NAMES.map(|name| {
         messages
             .iter()
@@ -75,6 +79,7 @@ fn executable_artifact(message: &serde_json::Value, name: &str) -> Option<PathBu
     if message["reason"] != "compiler-artifact" || message["target"]["name"] != name {
         return None;
     }
+
     message["executable"].as_str().map(PathBuf::from)
 }
 
@@ -91,14 +96,17 @@ pub(crate) fn build_omq_peer(name: &str, features: &[&str]) -> PathBuf {
         name,
         "--message-format=json-render-diagnostics",
     ]);
+
     if !features.is_empty() {
         command.args(["--features", &features.join(",")]);
     }
+
     let output = command
         .stderr(Stdio::inherit())
         .output()
         .expect("build OMQ peer");
     assert!(output.status.success(), "OMQ peer build failed: {name}");
+
     output
         .stdout
         .split(|&byte| byte == b'\n')
@@ -123,10 +131,12 @@ pub(crate) fn build_external_peer(dir: &str, name: &str, env: &[(&str, &str)]) -
         .stderr(Stdio::inherit())
         .output()
         .expect("build external peer");
+
     assert!(
         output.status.success(),
         "external peer build failed: {name}"
     );
+
     output
         .stdout
         .split(|&byte| byte == b'\n')
@@ -160,6 +170,7 @@ pub(crate) fn install_reaper() {
             loop {
                 std::thread::sleep(Duration::from_secs(1));
                 let now = Instant::now();
+
                 let pids: Vec<u32> = {
                     let map = live_procs().lock().unwrap();
                     map.iter()
@@ -167,6 +178,7 @@ pub(crate) fn install_reaper() {
                         .map(|(pid, _)| *pid)
                         .collect()
                 };
+
                 for pid in pids {
                     eprintln!("[watchdog] killing pid {pid} (exceeded {MAX_PROC_LIFETIME:?})");
                     hard_kill_pid(pid);
@@ -183,6 +195,7 @@ pub(crate) fn reap_all() {
         let map = live_procs().lock().unwrap();
         map.keys().copied().collect()
     };
+
     for pid in pids {
         hard_kill_pid(pid);
         deregister_proc(pid);
@@ -199,8 +212,10 @@ fn hard_kill_pid(pid: u32) {
         } else {
             libc::kill(pid as libc::pid_t, libc::SIGKILL);
         }
+
         libc::waitpid(pid as libc::pid_t, std::ptr::null_mut(), libc::WNOHANG);
     }
+
     #[cfg(not(unix))]
     let _ = pid;
 }
@@ -256,12 +271,14 @@ impl ProcessGuard {
                     }
                 }
             }
+
             if let Ok(Some(_)) = child.wait_timeout(Duration::from_secs(5)) {
             } else {
                 hard_kill_pid(self.pid);
                 child.wait().ok();
             }
         }
+
         deregister_proc(self.pid);
     }
 
@@ -273,6 +290,7 @@ impl ProcessGuard {
             if let Some(ref mut stdout) = child.stdout {
                 stdout.read_to_string(&mut out).ok();
             }
+
             deregister_proc(self.pid);
             status.success().then_some(out)
         } else {
@@ -286,10 +304,12 @@ pub(crate) fn spawn_interactive(command: &mut Command) -> ProcessGuard {
     for (key, value) in PEER_ENV.get().into_iter().flatten() {
         command.env(key, value);
     }
+
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -299,10 +319,12 @@ pub(crate) fn spawn_interactive(command: &mut Command) -> ProcessGuard {
                 if libc::setsid() < 0 {
                     return Err(std::io::Error::last_os_error());
                 }
+
                 Ok(())
             });
         }
     }
+
     ProcessGuard::new(command.spawn().expect("spawn benchmark peer"))
 }
 
@@ -320,15 +342,18 @@ pub(crate) fn spawn(cmd: &[&str], env: &[(&str, &str)], cpu: Option<&str>) -> Pr
     {
         args.extend(["taskset", "-c", cpus]);
     }
+
     args.extend(cmd);
 
     let mut command = Command::new(args[0]);
     command.args(&args[1..]);
     command.stdout(Stdio::piped());
     command.stderr(Stdio::inherit());
+
     for (k, v) in PEER_ENV.get().into_iter().flatten() {
         command.env(k, v);
     }
+
     for &(k, v) in env {
         command.env(k, v);
     }
@@ -347,6 +372,7 @@ pub(crate) fn spawn(cmd: &[&str], env: &[(&str, &str)], cpu: Option<&str>) -> Pr
     let child = command.spawn().unwrap_or_else(|e| {
         panic!("failed to spawn {args:?}: {e}");
     });
+
     ProcessGuard::new(child)
 }
 
@@ -372,6 +398,7 @@ pub(crate) fn capture_with_cpu(
         deregister_proc(pid);
         // Prevent the Drop from killing again.
         std::mem::forget(proc);
+
         status.success().then_some((stdout_content, cpu_secs))
     } else {
         drop(proc);
@@ -401,6 +428,7 @@ pub(crate) fn read_proc_cpu(pid: u32) -> f64 {
     let Ok(contents) = std::fs::read_to_string(&path) else {
         return 0.0;
     };
+
     stat_cpu_ticks(&contents) / clk_tck()
 }
 
@@ -410,11 +438,13 @@ fn stat_cpu_ticks(contents: &str) -> f64 {
     let Some((_, counters)) = contents.rsplit_once(')') else {
         return 0.0;
     };
+
     // Field 3 (state) is index 0; utime and stime are fields 14 and 15.
     let fields: Vec<&str> = counters.split_whitespace().collect();
     if fields.len() < 13 {
         return 0.0;
     }
+
     let utime: f64 = fields[11].parse().unwrap_or(0.0);
     let stime: f64 = fields[12].parse().unwrap_or(0.0);
     utime + stime
@@ -428,6 +458,7 @@ fn clk_tck() -> f64 {
             return tck as f64;
         }
     }
+
     100.0
 }
 
@@ -446,6 +477,7 @@ fn glob_paths(pattern: &str) -> Result<Vec<String>, ()> {
         .args(["-c", &format!("ls -1 {pattern} 2>/dev/null")])
         .output()
         .map_err(|_| ())?;
+
     Ok(String::from_utf8_lossy(&output.stdout)
         .lines()
         .map(String::from)
@@ -465,76 +497,15 @@ impl WaitTimeout for Child {
             if let Some(status) = self.try_wait()? {
                 return Ok(Some(status));
             }
+
             if start.elapsed() >= dur {
                 return Ok(None);
             }
+
             std::thread::sleep(Duration::from_millis(10));
         }
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn stat_cpu_ticks_handles_spaces_and_parens_in_comm() {
-        let rest = "S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16";
-        assert_eq!(stat_cpu_ticks(&format!("42 (peer) {rest}")), 23.0);
-        assert_eq!(stat_cpu_ticks(&format!("42 (my peer) {rest}")), 23.0);
-        assert_eq!(stat_cpu_ticks(&format!("42 (a) (b c)) {rest}")), 23.0);
-        assert_eq!(stat_cpu_ticks("42 (peer) S 1"), 0.0);
-    }
-
-    #[test]
-    fn uses_reported_executable_without_assuming_target_directory() {
-        let message = serde_json::json!({
-            "reason": "compiler-artifact",
-            "target": { "name": "peer" },
-            "executable": "/mnt/bench/tmp/custom/x86_64-unknown-linux-gnu/release/peer"
-        });
-        assert_eq!(
-            executable_artifact(&message, "peer"),
-            Some(PathBuf::from(
-                "/mnt/bench/tmp/custom/x86_64-unknown-linux-gnu/release/peer"
-            ))
-        );
-        assert_eq!(executable_artifact(&message, "other"), None);
-        assert_eq!(
-            executable_artifact(&serde_json::json!({"reason": "build-finished"}), "peer"),
-            None
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn capture_rejects_unsuccessful_exit_even_with_plausible_output() {
-        assert!(
-            capture_with_cpu(
-                &["sh", "-c", "printf 123; exit 7"],
-                &[],
-                None,
-                Duration::from_secs(1)
-            )
-            .is_none()
-        );
-        assert_eq!(
-            capture(
-                &["sh", "-c", "printf 123; exit 7"],
-                &[],
-                None,
-                Duration::from_secs(1)
-            ),
-            None
-        );
-        assert_eq!(
-            capture(
-                &["sh", "-c", "printf 123"],
-                &[],
-                None,
-                Duration::from_secs(1)
-            ),
-            Some("123".into())
-        );
-    }
-}
+mod tests;

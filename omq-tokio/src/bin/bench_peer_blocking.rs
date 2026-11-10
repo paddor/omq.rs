@@ -38,6 +38,7 @@ fn multi_pull_drain_batch(size: usize) -> usize {
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(if size <= 1024 { 64 } else { 256 });
+
     batch.clamp(1, 256).min((64 * 1024 / size.max(1)).max(1))
 }
 
@@ -50,13 +51,16 @@ fn report_bound_port(ctx: &omq_tokio::Context, ep: &Endpoint) {
         Endpoint::Quic { port, .. } => *port,
         _ => return,
     };
+
     let Ok(coord_ep) = std::env::var("OMQ_BENCH_COORD") else {
         return;
     };
+
     let coord = COORD_SOCK.get_or_init(|| {
         let s = ctx.blocking_socket(SocketType::Push, Options::default());
         s.connect(coord_ep).unwrap();
         s.wait_connected(1, Duration::from_secs(5)).unwrap();
+
         s
     });
     let msg = format!("READY {port}");
@@ -78,6 +82,7 @@ fn main() {
     let handled = run_pipeline_mode(&ctx, mode, &args)
         || run_pattern_mode(&ctx, mode, &args)
         || run_inproc_mode(&ctx, mode, &args);
+
     if !handled {
         print_usage();
         std::process::exit(1);
@@ -89,9 +94,11 @@ fn configure_egress_limit(ctx: &omq_tokio::Context) {
     let Ok(value) = std::env::var("OMQ_BENCH_EGRESS_BYTE_LIMIT") else {
         return;
     };
+
     let (rate, burst) = value
         .split_once(',')
         .expect("OMQ_BENCH_EGRESS_BYTE_LIMIT must be BYTES_PER_SECOND,BURST_BYTES");
+
     ctx.set_network_rate_limits(omq_tokio::NetworkRateLimits {
         ingress: None,
         egress: Some(omq_tokio::ByteRateLimit::new(
@@ -122,6 +129,7 @@ fn run_pipeline_mode(ctx: &omq_tokio::Context, mode: Option<&str>, args: &ModeAr
         }
         _ => return false,
     }
+
     true
 }
 
@@ -145,6 +153,7 @@ fn run_pattern_mode(ctx: &omq_tokio::Context, mode: Option<&str>, args: &ModeArg
         }
         _ => return false,
     }
+
     true
 }
 
@@ -170,6 +179,7 @@ fn run_inproc_mode(ctx: &omq_tokio::Context, mode: Option<&str>, args: &ModeArgs
         }
         _ => return false,
     }
+
     true
 }
 
@@ -194,18 +204,22 @@ fn print_usage() {
 fn bench_options(msg_size: usize) -> Options {
     let mut o =
         bench_common::env_options(Options::default().recv_spin(bench_recv_spin()), msg_size);
+
     if let Ok(val) = std::env::var("OMQ_BENCH_OFFLOAD_THRESHOLD") {
         let threshold = (val != "off").then(|| val.parse().expect("OMQ_BENCH_OFFLOAD_THRESHOLD"));
         o = o.compression_offload_threshold(threshold);
     }
+
     if let Ok(val) = std::env::var("OMQ_BENCH_RECV_RATE_LIMIT") {
         let (rate, burst) = parse_rate_limit(&val, "OMQ_BENCH_RECV_RATE_LIMIT");
         o = o.recv_rate_limit(rate, burst);
     }
+
     if let Ok(val) = std::env::var("OMQ_BENCH_RECV_IP_RATE_LIMIT") {
         let (rate, burst) = parse_rate_limit(&val, "OMQ_BENCH_RECV_IP_RATE_LIMIT");
         o = o.recv_ip_rate_limit(rate, burst);
     }
+
     o
 }
 
@@ -220,6 +234,7 @@ fn parse_rate_limit(value: &str, name: &str) -> (u32, u32) {
     let (rate, burst) = value
         .split_once(',')
         .unwrap_or_else(|| panic!("{name} must be RATE,BURST"));
+
     (
         rate.parse()
             .unwrap_or_else(|_| panic!("invalid {name} rate")),
@@ -297,6 +312,7 @@ fn recv_loop(sock: &blocking::Socket, duration: Duration, size: usize) -> (u64, 
     let t0 = Instant::now();
     let deadline = t0 + duration;
     let mut count: u64 = 0;
+
     loop {
         let mut received = 0;
         for _ in 0..batch {
@@ -306,15 +322,18 @@ fn recv_loop(sock: &blocking::Socket, duration: Duration, size: usize) -> (u64, 
                 Err(error) => panic!("throughput receive failed: {error}"),
             }
         }
+
         // Exclude the whole batch that crosses the measurement boundary.
         if Instant::now() >= deadline {
             break;
         }
+
         count += received;
         if received == 0 {
             std::thread::yield_now();
         }
     }
+
     (count, t0.elapsed().as_secs_f64())
 }
 
@@ -334,6 +353,7 @@ fn run_push(ctx: &omq_tokio::Context, ep: Endpoint, size: usize, peers: usize) {
     let push = ctx.blocking_socket(SocketType::Push, bench_options_server(size));
     let bound = push.bind(ep).expect("push bind");
     report_bound_port(ctx, &bound);
+
     if peers > 0 {
         let timeout = if peers > 64 { 20 } else { 10 };
         push.wait_connected(peers, Duration::from_secs(timeout))
@@ -344,28 +364,34 @@ fn run_push(ctx: &omq_tokio::Context, ep: Endpoint, size: usize, peers: usize) {
         wait_for_warmup_barrier();
         wait_for_start_barrier();
         let mut pacer = Pacer::from_env();
+
         loop {
             for message in &corpus {
                 if let Some(pacer) = &mut pacer {
                     pacer.wait();
                 }
+
                 send_fast(&push, message.clone());
             }
         }
     }
+
     let payload = bench_payload(size);
     wait_for_warmup_barrier();
     let warmup_deadline = Instant::now() + warmup_duration();
+
     while Instant::now() < warmup_deadline {
         send_fast(&push, Message::from_slice(&payload));
         std::thread::sleep(Duration::from_millis(1));
     }
+
     wait_for_start_barrier();
     if payload.len() <= omq_tokio::message::MAX_INLINE_MESSAGE {
         loop {
             send_fast(&push, Message::from_slice(&payload));
         }
     }
+
     let msg = Message::single(payload.clone());
     loop {
         send_fast(&push, msg.clone());
@@ -387,11 +413,13 @@ impl Pacer {
             .parse()
             .expect("OMQ_BENCH_SEND_RATE");
         assert!(rate > 0.0, "OMQ_BENCH_SEND_RATE must be positive");
+
         // The default 50 us timer slack would stretch short intervals.
         #[cfg(target_os = "linux")]
         unsafe {
             libc::prctl(libc::PR_SET_TIMERSLACK, 1 as libc::c_ulong);
         }
+
         Some(Self {
             interval: Duration::from_secs_f64(1.0 / rate),
             next: Instant::now(),
@@ -405,6 +433,7 @@ impl Pacer {
         } else if now - self.next > Duration::from_millis(1) {
             self.next = now;
         }
+
         self.next += self.interval;
     }
 }
@@ -438,6 +467,7 @@ fn run_compression_pull(
     let payload = bench_payload(size);
     let mut index = 0;
     let batch = (64 * 1024 / size).clamp(1, 64);
+
     // Reads through the first batch at or after `deadline`, so intervals start
     // and end on message arrivals. Slow links deliver few large messages.
     let mut receive_through = |deadline: Instant| {
@@ -448,6 +478,7 @@ fn run_compression_pull(
                 let Ok(message) = pull.try_recv() else {
                     break;
                 };
+
                 let expected = corpus.map_or(payload.as_ref(), |messages| {
                     messages[index].part_slice(0).unwrap()
                 });
@@ -455,35 +486,44 @@ fn run_compression_pull(
                     message.len() == 1 && message.part_slice(0) == Some(expected),
                     "corrupt compression payload"
                 );
+
                 if let Some(messages) = corpus {
                     index += 1;
                     if index == messages.len() {
                         index = 0;
                     }
                 }
+
                 received += 1;
             }
+
             if received == 0 {
                 std::thread::yield_now();
                 continue;
             }
+
             count += received;
             let now = Instant::now();
+
             if now >= deadline {
                 return (count, now);
             }
         }
     };
+
     let (_, start) = receive_through(Instant::now() + warmup_duration());
+
     let sender_pid = std::env::var("OMQ_BENCH_SENDER_PID").expect("compression sender PID");
     let sender_before = process_cpu_time(&sender_pid);
     let receiver_before = cpu_time_secs();
     let wire_before = tcp_bytes_received();
+
     let (count, end) = receive_through(start + duration);
     let wire_bytes = tcp_bytes_received() - wire_before;
     let elapsed = (end - start).as_secs_f64();
     let receiver_cpu = cpu_time_secs() - receiver_before;
     let sender_cpu = process_cpu_time(&sender_pid) - sender_before;
+
     println!("{count} {elapsed:.9} {size} {receiver_cpu:.9} {sender_cpu:.9} {wire_bytes}");
 }
 
@@ -496,8 +536,10 @@ fn tcp_bytes_received() -> u64 {
         let Ok(fd) = name.to_string_lossy().parse::<libc::c_int>() else {
             continue;
         };
+
         let mut info = std::mem::MaybeUninit::<libc::tcp_info>::zeroed();
         let mut len = std::mem::size_of::<libc::tcp_info>() as libc::socklen_t;
+
         // Other files and non-TCP sockets fail with ENOTSOCK or EOPNOTSUPP.
         let status = unsafe {
             libc::getsockopt(
@@ -508,10 +550,12 @@ fn tcp_bytes_received() -> u64 {
                 &raw mut len,
             )
         };
+
         if status == 0 {
             total += unsafe { info.assume_init() }.tcpi_bytes_received;
         }
     }
+
     total
 }
 
@@ -530,6 +574,7 @@ fn process_cpu_time(pid: &str) -> f64 {
     let system: f64 = fields[12].parse().expect("sender system CPU ticks");
     let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
     assert!(ticks > 0, "process CPU clock resolution");
+
     (user + system) / ticks as f64
 }
 
@@ -560,6 +605,7 @@ fn run_rep(ctx: &omq_tokio::Context, ep: Endpoint, size: usize) {
     let first = rep.recv().unwrap();
     pair.validate(&first, size, false);
     rep.send(first).unwrap();
+
     loop {
         let msg = rep.recv().unwrap();
         rep.send(msg).unwrap();
@@ -590,12 +636,14 @@ fn run_req(ctx: &omq_tokio::Context, ep: Endpoint, size: usize, iterations: usiz
     let t_wall = Instant::now();
     let cpu_before = cpu_time_secs();
     let mut rtts = Vec::with_capacity(iterations);
+
     for _ in 0..iterations {
         let t0 = Instant::now();
         req.send(msg.clone()).unwrap();
         req.recv().unwrap();
         rtts.push(t0.elapsed().as_nanos() as u64);
     }
+
     let cpu = cpu_time_secs() - cpu_before;
     let elapsed = t_wall.elapsed().as_secs_f64();
 

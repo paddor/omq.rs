@@ -34,12 +34,20 @@ use crate::error::Result;
 use crate::message::Payload;
 use crate::message::{FrameFlags, Message, MessagePool, Parts};
 
+use super::SocketType;
 use super::chunked_buf::ChunkedInputBuf;
 #[cfg(test)]
 use super::command;
 use super::command::{Command, PeerProperties};
 #[cfg(test)]
 use super::frame;
+use super::greeting::{self, Greeting, MechanismName};
+#[cfg(feature = "curve")]
+use super::mechanism::FrameTransform;
+use super::mechanism::{MechanismSetup, SecurityMechanism};
+
+#[cfg(feature = "ws")]
+pub use super::ws_codec::WsRole;
 
 /// Parse a command-frame payload as raw `Command::Unknown { name, body }`
 /// without applying name-dispatched body parsing. Used during the mechanism
@@ -50,11 +58,6 @@ fn decode_command_raw(body: bytes::Bytes) -> Result<Command> {
     let (name, body) = super::command::split_name(&body)?;
     Ok(Command::Unknown { name, body })
 }
-use super::SocketType;
-use super::greeting::{self, Greeting, MechanismName};
-#[cfg(feature = "curve")]
-use super::mechanism::FrameTransform;
-use super::mechanism::{MechanismSetup, SecurityMechanism};
 
 /// Which side of the transport pairing we are. Security roles are selected
 /// independently by [`MechanismSetup`].
@@ -65,9 +68,6 @@ pub enum Role {
     /// Connecting side initiating a transport connection.
     Client,
 }
-
-#[cfg(feature = "ws")]
-pub use super::ws_codec::WsRole;
 
 /// Configuration for a new [`Connection`].
 #[derive(Clone, Debug)]
@@ -157,6 +157,7 @@ impl ConnectionConfig {
             // Admit a complete heartbeat before its command name is known.
             // Other commands retain the configured limit after decoding.
             const HEARTBEAT_SIZE: usize = 1 + 4 + 2 + super::command::PING_CONTEXT_MAX;
+
             self.max_message_size
                 .map(|max| max.max(size_of::<crate::message::Payload>() + HEARTBEAT_SIZE))
         } else {
@@ -321,6 +322,7 @@ impl Connection {
         mechanism.set_defer_authentication(config.defer_authentication);
         #[cfg(feature = "ws")]
         let ws_role = config.ws_role;
+
         let mut conn = Self {
             state: State::AwaitingGreeting,
             peer_minor: greeting::ZMTP_MINOR,
@@ -344,11 +346,13 @@ impl Connection {
             ws: ws::WsState::new(ws_role),
             config,
         };
+
         #[cfg(feature = "ws")]
         if ws_role.is_some() {
             conn.init_ws_mode();
             return conn;
         }
+
         conn.queue_greeting();
         conn
     }
@@ -360,6 +364,7 @@ impl Connection {
         let mut parts = pool.take();
         parts.extend(self.assembly.parts.drain(..));
         self.assembly.parts = parts;
+
         self
     }
 
@@ -379,6 +384,7 @@ impl Connection {
         if size <= crate::message::MAX_INLINE_PAYLOAD {
             return None;
         }
+
         self.assembly.payload_pool.as_ref()?.try_buffer(size)
     }
 
@@ -397,12 +403,15 @@ impl Connection {
     fn start_mechanism(&mut self) -> Result<()> {
         self.state = State::MechanismHandshake;
         let mut our_props = PeerProperties::default().with_socket_type(self.config.socket_type);
+
         if !self.config.identity.is_empty() {
             our_props = our_props.with_identity(self.config.identity.clone());
         }
+
         let mut cmds = Vec::new();
         let result = self.mechanism.start(&mut cmds, our_props);
         self.write_outbound_commands(&cmds)?;
+
         result
     }
 
@@ -433,6 +442,7 @@ impl Connection {
         {
             self.transform.is_some()
         }
+
         #[cfg(not(feature = "curve"))]
         {
             false

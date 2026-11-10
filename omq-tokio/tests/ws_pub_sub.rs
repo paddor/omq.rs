@@ -108,6 +108,7 @@ async fn ws_pub_sub_fan_out() {
         s.subscribe(Bytes::new()).await.unwrap();
         subs.push(s);
     }
+
     pub_.wait_subscribed(N_SUBS as u64, Duration::from_secs(1))
         .await
         .expect("subscriptions did not arrive");

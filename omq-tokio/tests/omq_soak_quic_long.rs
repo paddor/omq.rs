@@ -1,15 +1,15 @@
 #![cfg(all(feature = "soak", feature = "quic"))]
 //! Explicit long QUIC soaks. Override `OMQ_SOAK_DURATION_SECS` for a short check.
 
-#[global_allocator]
-static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
-
 mod soak_common;
 
 use std::time::{Duration, Instant};
 
 use omq_tokio::options::{OnMute, QuicOptions, ReconnectPolicy};
 use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
+
+#[global_allocator]
+static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
 
 struct Tls {
     cert: Vec<u8>,
@@ -32,6 +32,7 @@ impl Tls {
             server_key_pem: Some(self.key.clone()),
             ..QuicOptions::default()
         };
+
         options
     }
 
@@ -42,6 +43,7 @@ impl Tls {
             trust_system: false,
             ..QuicOptions::default()
         };
+
         options
     }
 }
@@ -62,9 +64,11 @@ fn endpoint(port: u16) -> Endpoint {
 fn payload(seq: u64, size: usize) -> Vec<u8> {
     let mut data = vec![0; size];
     data[..8].copy_from_slice(&seq.to_be_bytes());
+
     for (index, byte) in data.iter_mut().enumerate().skip(8) {
         *byte = (index as u8).wrapping_mul(31) ^ (seq as u8);
     }
+
     data
 }
 
@@ -72,6 +76,7 @@ fn verify_payload(data: &[u8]) -> u64 {
     assert!(data.len() >= 8, "short QUIC message");
     let seq = u64::from_be_bytes(data[..8].try_into().unwrap());
     assert_eq!(data, payload(seq, data.len()));
+
     seq
 }
 
@@ -101,6 +106,7 @@ async fn close_and_drain(sockets: impl IntoIterator<Item = Socket>) {
     for socket in sockets {
         socket.close().await.unwrap();
     }
+
     tokio::time::sleep(Duration::from_secs(3)).await;
 }
 
@@ -111,6 +117,7 @@ fn soak_quic_integrity_10m() {
     let duration = duration(10);
     let monitor = soak_common::ResourceMonitor::start();
     let ctx = soak_common::build_context();
+
     ctx.block_on(async move {
         let tls = Tls::new();
         let rep = Socket::new(SocketType::Rep, tls.server());
@@ -120,19 +127,23 @@ fn soak_quic_integrity_10m() {
         let started = Instant::now();
         let mut last_report = started;
         let mut seq = 0;
+
         while started.elapsed() < duration {
             let size = [64, 4096, 16 * 1024, 256 * 1024][seq as usize % 4];
             checked_exchange(&req, &rep, seq, payload(seq, size)).await;
             seq += 1;
+
             if last_report.elapsed() >= Duration::from_secs(30) {
                 eprintln!("[quic_integrity] seq={seq} elapsed={:?}", started.elapsed());
                 last_report = Instant::now();
             }
         }
+
         assert!(seq > 0, "no QUIC exchanges");
         eprintln!("[quic_integrity] {seq} exchanges in {duration:?}");
         close_and_drain([req, rep]).await;
     });
+
     monitor.stop().assert_no_leak("quic_integrity");
 }
 
@@ -143,6 +154,7 @@ async fn bind_replacing_listener(ep: &Endpoint, tls: &Tls) -> Socket {
         if pull.bind(ep.clone()).await.is_ok() {
             return pull;
         }
+
         assert!(
             started.elapsed() < Duration::from_secs(10),
             "QUIC rebind stalled"
@@ -154,22 +166,26 @@ async fn bind_replacing_listener(ep: &Endpoint, tls: &Tls) -> Socket {
 async fn await_reconnected_marker(push: &Socket, pull: &Socket, cycle: u64) {
     let marker = cycle.to_be_bytes();
     let started = Instant::now();
+
     loop {
         let _ = tokio::time::timeout(
             Duration::from_secs(1),
             push.send(Message::single(marker.to_vec())),
         )
         .await;
+
         if let Ok(Ok(message)) = tokio::time::timeout(Duration::from_millis(200), pull.recv()).await
         {
             let data = message.part_bytes(0).unwrap();
             assert_eq!(data.len(), marker.len(), "partial QUIC marker");
             let received = u64::from_be_bytes(data.as_ref().try_into().unwrap());
             assert!(received <= cycle, "future QUIC marker");
+
             if received == cycle {
                 return;
             }
         }
+
         assert!(
             started.elapsed() < Duration::from_secs(15),
             "QUIC reconnect stalled"
@@ -184,6 +200,7 @@ fn soak_quic_reconnect_30m() {
     let duration = duration(30);
     let monitor = soak_common::ResourceMonitor::start();
     let ctx = soak_common::build_context();
+
     ctx.block_on(async move {
         let tls = Tls::new();
         let probe = Socket::new(SocketType::Pull, tls.server());
@@ -200,11 +217,13 @@ fn soak_quic_reconnect_30m() {
         let started = Instant::now();
         let mut last_report = started;
         let mut cycles = 0;
+
         while started.elapsed() < duration {
             let pull = bind_replacing_listener(&ep, &tls).await;
             await_reconnected_marker(&push, &pull, cycles).await;
             pull.close().await.unwrap();
             cycles += 1;
+
             if last_report.elapsed() >= Duration::from_secs(30) {
                 eprintln!(
                     "[quic_reconnect] cycles={cycles} elapsed={:?}",
@@ -212,12 +231,15 @@ fn soak_quic_reconnect_30m() {
                 );
                 last_report = Instant::now();
             }
+
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+
         assert!(cycles > 0, "no QUIC reconnect cycles");
         eprintln!("[quic_reconnect] {cycles} cycles in {duration:?}");
         close_and_drain([push]).await;
     });
+
     monitor.stop().assert_no_leak("quic_reconnect");
 }
 
@@ -228,10 +250,12 @@ fn soak_quic_slow_sub_60m() {
     let duration = duration(60);
     let monitor = soak_common::ResourceMonitor::start();
     let ctx = soak_common::build_context();
+
     ctx.block_on(async move {
         let tls = Tls::new();
         let publisher = Socket::new(SocketType::Pub, tls.server().send_hwm(64));
         let ep = publisher.bind(endpoint(0)).await.unwrap();
+
         let fast = Socket::new(SocketType::Sub, tls.client().recv_hwm(1024));
         let slow = Socket::new(SocketType::Sub, tls.client().recv_hwm(1));
         fast.subscribe("").await.unwrap();
@@ -239,17 +263,20 @@ fn soak_quic_slow_sub_60m() {
         fast.connect(ep.clone()).await.unwrap();
         slow.connect(ep).await.unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;
+
         let started = Instant::now();
         let mut last_report = started;
         let mut last_progress = started;
         let mut last_seen = None;
         let mut seq = 0;
+
         while started.elapsed() < duration {
             let size = if seq % 16 == 0 { 16 * 1024 } else { 64 };
             publisher
                 .send(Message::single(payload(seq, size)))
                 .await
                 .unwrap();
+
             if let Ok(Ok(message)) =
                 tokio::time::timeout(Duration::from_millis(500), fast.recv()).await
             {
@@ -257,14 +284,17 @@ fn soak_quic_slow_sub_60m() {
                 if let Some(previous) = last_seen {
                     assert!(received > previous, "QUIC subscriber reordered messages");
                 }
+
                 last_seen = Some(received);
                 last_progress = Instant::now();
             }
+
             assert!(
                 last_progress.elapsed() < Duration::from_secs(10),
                 "fast QUIC peer starved"
             );
             seq += 1;
+
             if last_report.elapsed() >= Duration::from_secs(30) {
                 eprintln!(
                     "[quic_slow_sub] sent={seq} last_received={last_seen:?} elapsed={:?}",
@@ -273,9 +303,11 @@ fn soak_quic_slow_sub_60m() {
                 last_report = Instant::now();
             }
         }
+
         assert!(last_seen.is_some(), "no QUIC publications received");
         eprintln!("[quic_slow_sub] sent {seq}, last received {last_seen:?} in {duration:?}");
         close_and_drain([fast, slow, publisher]).await;
     });
+
     monitor.stop().assert_no_leak("quic_slow_sub");
 }

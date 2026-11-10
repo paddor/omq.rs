@@ -10,11 +10,13 @@ impl<B: FragmentBuffer> Session<B> {
         if session != self.local || sequence >= self.receive.credit {
             return Admission::OutsideWindow;
         }
+
         if sequence < self.receive.next || self.receive.rx[self.index(sequence)].is_some() {
             self.stats.duplicates += 1;
             self.control.status_pending = true;
             return Admission::Duplicate;
         }
+
         Admission::Accept
     }
 
@@ -29,6 +31,7 @@ impl<B: FragmentBuffer> Session<B> {
         if sequence != self.receive.next {
             self.stats.reordered += 1;
         }
+
         self.receive.rx[index] = Some(message);
         self.record_receive(receipt);
 
@@ -68,13 +71,16 @@ impl<B: FragmentBuffer> Session<B> {
 
         assert!(sequence < self.receive.credit);
         assert!(self.receive.rx[self.index(sequence)].is_none());
+
         let Err(message) = deliver(message) else {
             self.record_receive(receipt);
             self.receive.next += 1;
             self.receive.deliver_next += 1;
+
             if self.receive.rx[self.index(self.receive.next)].is_some() {
                 self.advance_receipt();
             }
+
             // Inline delivery retains no storage, so its credit returns now.
             self.release_receive(1);
             return true;
@@ -103,6 +109,7 @@ impl<B: FragmentBuffer> Session<B> {
         if self.control.status_messages >= self.control.status_threshold {
             self.control.status_pending = true;
         }
+
         self.control.status_at = self.control.status_at.min(receipt.now + STATUS_INTERVAL);
     }
 
@@ -114,9 +121,11 @@ impl<B: FragmentBuffer> Session<B> {
             let Some(message) = &self.receive.rx[self.index(self.receive.next)] else {
                 break;
             };
+
             let _ = budget.account(message.byte_len());
             self.receive.next += 1;
         }
+
         budget.msgs() != 0
     }
 
@@ -127,6 +136,7 @@ impl<B: FragmentBuffer> Session<B> {
         {
             return None;
         }
+
         (self.receive.deliver_next < self.receive.next)
             .then(|| self.receive.rx[self.index(self.receive.deliver_next)].as_ref())
             .flatten()
@@ -143,10 +153,12 @@ impl<B: FragmentBuffer> Session<B> {
         {
             return self.take_fragmented(finish);
         }
+
         self.front()?;
         let index = self.index(self.receive.deliver_next);
         let message = self.receive.rx[index].take();
         self.receive.deliver_next += 1;
+
         message
     }
 
@@ -167,14 +179,17 @@ impl<B: FragmentBuffer> Session<B> {
         // immediately, even if earlier returns were coalesced locally.
         let was_closed = self.control.advertised_credit == self.receive.next;
         self.receive.released += count as u64;
+
         if self.receive.paced {
             return;
         }
+
         self.receive.credit = self
             .receive
             .credit
             .checked_add(count as u64)
             .expect("session credit exhausted");
+
         if was_closed
             || self.receive.credit - self.control.advertised_credit
                 >= (self.config.window / 2).max(1) as u64

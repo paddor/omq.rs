@@ -34,10 +34,12 @@ pub(crate) fn block_on<F: Future>(future: F) -> F::Output {
     let waker = std::task::Waker::from(unpark);
     let mut cx = std::task::Context::from_waker(&waker);
     let mut future = std::pin::pin!(future);
+
     loop {
         if let std::task::Poll::Ready(output) = future.as_mut().poll(&mut cx) {
             return output;
         }
+
         std::thread::park();
     }
 }
@@ -84,6 +86,7 @@ fn blocking_thread(signal: &Arc<BlockingSignal>) -> Arc<BlockingThread> {
             armed: AtomicBool::new(true),
         })
     };
+
     BLOCKING_THREADS
         .try_with(|cache| {
             let mut cache = cache.borrow_mut();
@@ -95,12 +98,14 @@ fn blocking_thread(signal: &Arc<BlockingSignal>) -> Arc<BlockingThread> {
             }) {
                 return cached.state.clone();
             }
+
             cache.retain(|cached| cached.signal.strong_count() != 0);
             let state = new();
             cache.push(CachedBlockingThread {
                 signal: Arc::downgrade(signal),
                 state: state.clone(),
             });
+
             state
         })
         .unwrap_or_else(|_| new()) // Thread-local teardown is outside steady state.
@@ -139,6 +144,7 @@ pub(crate) fn leave_receive_guard() {
         (held == 0 && guards.pending.replace(false))
             .then(|| std::mem::take(&mut *guards.deferred.borrow_mut()))
     });
+
     if let Ok(Some(wakers)) = wakers {
         run_wakers(wakers);
     }
@@ -150,6 +156,7 @@ fn defer_wakers(wakers: &mut SmallVec<[Arc<BlockingThread>; 4]>) -> bool {
             if guards.held.get() == 0 {
                 return false;
             }
+
             guards.deferred.borrow_mut().extend(wakers.drain(..));
             guards.pending.set(true);
             true
@@ -184,6 +191,7 @@ impl BlockingSignal {
         let mut waiters = self.waiters.lock().unwrap();
         waiters.push(state.clone());
         self.active.fetch_add(1, Ordering::SeqCst);
+
         BlockingWaiter {
             signal: self,
             state,
@@ -205,6 +213,7 @@ impl BlockingSignal {
         if self.active.load(Ordering::Acquire) == 0 {
             return;
         }
+
         let mut wakers = SmallVec::<[Arc<BlockingThread>; 4]>::new();
         {
             let waiters = self.waiters.lock().unwrap();
@@ -219,6 +228,7 @@ impl BlockingSignal {
                 }
             }
         }
+
         // User wakers can reenter registration or panic. Keep them outside
         // the waiter lock, including their clone/drop callbacks. Under a
         // receive guard they wait until the guard releases, so a waker may
@@ -226,6 +236,7 @@ impl BlockingSignal {
         if wakers.is_empty() || defer_wakers(&mut wakers) {
             return;
         }
+
         run_wakers(wakers);
     }
 
@@ -238,10 +249,17 @@ impl BlockingSignal {
         });
         self.waiters.lock().unwrap().push(state.clone());
         self.active.fetch_add(1, Ordering::SeqCst);
+
         WakerRegistration {
             signal: self.clone(),
             state,
         }
+    }
+
+    fn unregister(&self, state: &Arc<BlockingThread>) {
+        let mut waiters = self.waiters.lock().unwrap();
+        waiters.retain(|waiter| !Arc::ptr_eq(waiter, state));
+        self.active.fetch_sub(1, Ordering::Release);
     }
 
     #[cfg(test)]
@@ -294,14 +312,6 @@ impl Drop for WakerRegistration {
     }
 }
 
-impl BlockingSignal {
-    fn unregister(&self, state: &Arc<BlockingThread>) {
-        let mut waiters = self.waiters.lock().unwrap();
-        waiters.retain(|waiter| !Arc::ptr_eq(waiter, state));
-        self.active.fetch_sub(1, Ordering::Release);
-    }
-}
-
 /// Cancellation handle for blocking receive calls.
 #[derive(Debug)]
 pub struct BlockingRecvCancel {
@@ -342,6 +352,7 @@ impl BlockingRecvCancel {
     pub(crate) fn register(&self, thread: &std::thread::Thread) {
         *self.thread.lock().unwrap() = Some(thread.clone());
         self.registered.store(true, Ordering::Release);
+
         if self.is_canceled() {
             thread.unpark();
         }
@@ -359,8 +370,10 @@ impl BlockingRecvCancel {
         {
             return;
         }
+
         let thread = std::thread::current();
         *self.thread.lock().unwrap() = Some(thread.clone());
+
         if self.is_canceled() {
             thread.unpark();
         }

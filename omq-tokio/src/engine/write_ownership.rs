@@ -26,6 +26,7 @@ impl WriteOwnership {
         if self.is_closed() {
             return false;
         }
+
         *self = Self::Driver;
         true
     }

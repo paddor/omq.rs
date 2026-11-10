@@ -16,8 +16,10 @@ impl SocketDriver {
         let Ok((mut peer_id, mut output)) = self.mail.peer_control_rx.try_recv() else {
             return;
         };
+
         let mut budget = DrainBudget::new(64, 64 * 1024);
         let started = Instant::now();
+
         loop {
             let bytes = match &output {
                 PeerEvent::Event(event) => crate::engine::peer_events::event_work_bytes(event),
@@ -25,13 +27,16 @@ impl SocketDriver {
                     size_of::<PeerEvent>() + error.as_ref().map_or(0, String::len)
                 }
             };
+
             self.handle_peer_control(peer_id, output).await;
             if !budget.account(bytes) || started.elapsed() >= Duration::from_millis(1) {
                 break;
             }
+
             let Ok(next) = self.mail.peer_control_rx.try_recv() else {
                 break;
             };
+
             (peer_id, output) = next;
         }
     }
@@ -42,6 +47,7 @@ impl SocketDriver {
         {
             peer.progress.handled_control = peer.progress.handled_control.wrapping_add(1);
         }
+
         self.handle_peer_output(peer_id, output).await;
     }
 
@@ -51,9 +57,11 @@ impl SocketDriver {
         if self.pending_receive.is_some() {
             return;
         }
+
         let Some(data) = &self.mail.pending_peer_data else {
             return;
         };
+
         if self
             .peers
             .get(&data.peer_id)
@@ -61,6 +69,7 @@ impl SocketDriver {
         {
             return;
         }
+
         let data = self.mail.pending_peer_data.take().unwrap();
         if data.notification {
             if let Some(peer) = self.peers.get_mut(&data.peer_id) {
@@ -69,6 +78,7 @@ impl SocketDriver {
                     self.stage_receive(data.peer_id, data.message);
                 }
             }
+
             self.retire_completed_peer(data.peer_id).await;
         } else {
             self.handle_peer_output(
@@ -89,17 +99,20 @@ impl SocketDriver {
         let mut budget = DrainBudget::new(64, 64 * 1024);
         let started = Instant::now();
         let mut yield_pending = false;
+
         loop {
             let bytes = data.message.byte_len();
             self.mail.pending_peer_data = Some(data);
             self.retry_peer_data().await;
             let remains = budget.account(bytes);
+
             if self.pending_receive.is_some()
                 || self.mail.pending_peer_data.is_some()
                 || self.close.started
             {
                 break;
             }
+
             if !remains
                 || (budget.msgs().is_multiple_of(16)
                     && started.elapsed() >= Duration::from_millis(1))
@@ -107,11 +120,14 @@ impl SocketDriver {
                 yield_pending = true;
                 break;
             }
+
             let Ok(next) = self.mail.peer_out_rx.as_mut().unwrap().try_recv() else {
                 break;
             };
+
             data = next;
         }
+
         self.mail.peer_out_rx.as_mut().unwrap().release_consumed();
         if yield_pending {
             tokio::task::yield_now().await;
@@ -140,11 +156,14 @@ impl SocketDriver {
         if self.mail.peer_completions.is_empty() {
             return;
         }
+
         let Some(mut result) = self.ready_peer_completion().await else {
             return;
         };
+
         let mut budget = DrainBudget::new(16, 64 * 1024);
         let started = Instant::now();
+
         loop {
             let bytes = match result {
                 Ok(completion) => {
@@ -153,18 +172,22 @@ impl SocketDriver {
                         DisconnectReason::HandshakeRefused(refusal) => refusal.reason.len(),
                         _ => 0,
                     };
+
                     let bytes = size_of::<PeerCompletion>().saturating_add(reason_bytes);
                     self.handle_peer_completion(completion).await;
                     bytes
                 }
                 Err(_) => size_of::<PeerCompletion>(),
             };
+
             if !budget.account(bytes) || started.elapsed() >= Duration::from_millis(1) {
                 break;
             }
+
             let Some(next) = self.ready_peer_completion().await else {
                 break;
             };
+
             result = next;
         }
     }
@@ -175,6 +198,7 @@ impl SocketDriver {
                 if let Some(peer) = self.peers.get_mut(&peer_id) {
                     peer.progress.handled_events = peer.progress.handled_events.wrapping_add(1);
                 }
+
                 InternalEvent::PeerEvent { peer_id, event }
             }
             PeerEvent::Closed { error } => InternalEvent::PeerClosed {
@@ -182,6 +206,7 @@ impl SocketDriver {
                 reason: error.map_or(DisconnectReason::PeerClosed, DisconnectReason::Error),
             },
         };
+
         self.handle_internal_event(event).await;
         self.retire_completed_peer(peer_id).await;
     }
@@ -203,9 +228,11 @@ impl SocketDriver {
         {
             return;
         }
+
         let Some(peer) = self.peers.get_mut(&peer_id) else {
             return;
         };
+
         if peer
             .progress
             .completion
@@ -214,19 +241,23 @@ impl SocketDriver {
         {
             return;
         }
+
         match peer.progress.completion.as_mut().unwrap().stream_disconnect {
             StreamDisconnect::Pending => {
                 peer.progress.completion.as_mut().unwrap().stream_disconnect =
                     StreamDisconnect::Queued;
                 self.mail.stream_disconnects.push_back(peer_id);
+
                 return;
             }
             StreamDisconnect::Queued => return,
             StreamDisconnect::None => {}
         }
+
         let Some(peer) = self.peers.get_mut(&peer_id) else {
             return;
         };
+
         let completion = peer.progress.completion.take().unwrap();
         self.handle_internal_event(InternalEvent::PeerClosed {
             peer_id,
@@ -239,12 +270,15 @@ impl SocketDriver {
         if self.pending_receive.is_some() || self.mail.stream_disconnects.is_empty() {
             return;
         }
+
         let mut budget = DrainBudget::new(16, 64 * 1024);
         let started = Instant::now();
+
         while self.pending_receive.is_none() {
             let Some(peer_id) = self.mail.stream_disconnects.pop_front() else {
                 break;
             };
+
             if let Some(completion) = self
                 .peers
                 .get_mut(&peer_id)
@@ -263,6 +297,7 @@ impl SocketDriver {
                 .await;
                 self.retire_completed_peer(peer_id).await;
             }
+
             if !budget.account(size_of::<crate::Message>() + size_of::<u64>())
                 || started.elapsed() >= Duration::from_millis(1)
             {

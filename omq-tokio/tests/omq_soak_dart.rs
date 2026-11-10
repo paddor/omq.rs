@@ -1,8 +1,5 @@
 #![cfg(all(feature = "soak", feature = "dart"))]
 
-#[global_allocator]
-static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
-
 mod soak_common;
 
 use std::net::SocketAddr;
@@ -16,6 +13,9 @@ use omq_tokio::options::WorkloadProfile;
 use omq_tokio::{DartCongestion, DartOptions, Endpoint, Message, Options, Socket, SocketType};
 use tokio::net::UdpSocket;
 use tokio_util::sync::CancellationToken;
+
+#[global_allocator]
+static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
 
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 const GROUP: &[u8] = b"soak";
@@ -73,6 +73,7 @@ impl Flow {
             Self::RadioDish => assert_eq!(message.part_slice(0), Some(GROUP)),
             _ => {}
         }
+
         let body = message.part_slice(self.body_index()).unwrap();
         assert_eq!(
             body,
@@ -116,10 +117,12 @@ fn payload(sequence: u64, size: usize) -> Vec<u8> {
     if size != 0 {
         body[..8].copy_from_slice(&sequence.to_le_bytes());
         body[8..16].copy_from_slice(&(!sequence).to_le_bytes());
+
         for (offset, byte) in body.iter_mut().enumerate().skip(16) {
             *byte = (offset as u8).wrapping_mul(31) ^ sequence as u8;
         }
     }
+
     body
 }
 
@@ -166,6 +169,7 @@ impl Relay {
         let stop = CancellationToken::new();
         let faults = Arc::new(Faults::default());
         let task = tokio::spawn(relay_packets(socket, target, stop.clone(), faults.clone()));
+
         Self {
             endpoint,
             stop,
@@ -180,6 +184,7 @@ impl Relay {
             .await
             .unwrap()
             .unwrap();
+
         for (name, counter) in [
             ("dropped", &self.faults.dropped),
             ("duplicated", &self.faults.duplicated),
@@ -204,11 +209,13 @@ async fn relay_packets(
     let mut count = 0_u64;
     let mut turn_messages = 0;
     let mut turn_bytes = 0;
+
     loop {
         let deadline = pending.as_ref().map_or_else(
             || Instant::now() + Duration::from_mins(1),
             |(_, _, deadline)| *deadline,
         );
+
         tokio::select! {
             biased;
             () = stop.cancelled() => break,
@@ -281,19 +288,23 @@ impl Scenario {
             bound_kind,
             options.clone().identity(Bytes::from_static(b"bound")),
         );
+
         if flow == Flow::RadioDish {
             bound.join(Bytes::from_static(GROUP)).await.unwrap();
         }
+
         let endpoint = bound.bind("dart://127.0.0.1:0").await.unwrap();
         let relay = if workload == Workload::Recovery {
             Some(Relay::new(&endpoint).await)
         } else {
             None
         };
+
         let source = Socket::new(
             source_kind,
             options.clone().identity(Bytes::from_static(b"source")),
         );
+
         source
             .connect(
                 relay
@@ -303,8 +314,10 @@ impl Scenario {
             )
             .await
             .unwrap();
+
         source.wait_connected(1, IO_TIMEOUT).await.unwrap();
         bound.wait_connected(1, IO_TIMEOUT).await.unwrap();
+
         let fast = if workload == Workload::Backpressure && flow != Flow::Channel {
             let fast = Socket::new(
                 source_kind,
@@ -313,10 +326,12 @@ impl Scenario {
             fast.connect(endpoint.clone()).await.unwrap();
             fast.wait_connected(1, IO_TIMEOUT).await.unwrap();
             bound.wait_connected(2, IO_TIMEOUT).await.unwrap();
+
             Some(fast)
         } else {
             None
         };
+
         Self {
             flow,
             options,
@@ -334,6 +349,7 @@ impl Scenario {
         if self.flow == Flow::ClientServer {
             assert!(message.routing_id().is_some_and(|id| id != 0));
         }
+
         if self.flow.replies() {
             send(&self.bound, message).await;
             let response = receive(source).await;
@@ -345,6 +361,7 @@ impl Scenario {
     async fn burst(&mut self) {
         let size = SIZES[self.cycles as usize % SIZES.len()];
         let count = if size <= 255 { 64 } else { 4 };
+
         if self.flow == Flow::RadioDish {
             send(
                 &self.source,
@@ -355,15 +372,18 @@ impl Scenario {
             )
             .await;
         }
+
         for sequence in self.sequence..self.sequence + count {
             send(&self.source, self.flow.message(sequence, size)).await;
         }
+
         for sequence in self.sequence..self.sequence + count {
             let message = receive(&self.bound).await;
             self.flow.verify(&message, sequence, size, b"source");
             self.finish_message(&self.source, message, sequence, size)
                 .await;
         }
+
         self.sequence += count;
         self.cycles += 1;
     }
@@ -376,9 +396,11 @@ impl Scenario {
         let cloned = held.clone();
         let view = held.part_bytes(self.flow.body_index()).unwrap();
         drop(held);
+
         for sequence in self.sequence + 1..=self.sequence + 2 {
             send(&self.source, self.flow.message(sequence, size)).await;
         }
+
         assert!(
             matches!(
                 self.source
@@ -388,6 +410,7 @@ impl Scenario {
             "{:?}: unacknowledged messages did not fill HWM",
             self.flow
         );
+
         assert!(
             tokio::time::timeout(Duration::from_millis(2), self.bound.recv())
                 .await
@@ -395,12 +418,14 @@ impl Scenario {
             "{:?}: clone-held storage returned credit",
             self.flow
         );
+
         if let Some(fast) = &self.fast {
             send(fast, self.flow.message(self.sequence, 64)).await;
             let message = receive(&self.bound).await;
             self.flow.verify(&message, self.sequence, 64, b"fast");
             self.finish_message(fast, message, self.sequence, 64).await;
         }
+
         drop(cloned);
         assert!(
             tokio::time::timeout(Duration::from_millis(2), self.bound.recv())
@@ -410,12 +435,14 @@ impl Scenario {
             self.flow
         );
         drop(view);
+
         for sequence in self.sequence + 1..=self.sequence + 2 {
             let message = receive(&self.bound).await;
             self.flow.verify(&message, sequence, size, b"source");
             self.finish_message(&self.source, message, sequence, size)
                 .await;
         }
+
         self.sequence += 3;
         self.cycles += 1;
     }
@@ -435,6 +462,7 @@ impl Scenario {
                 .close_with_linger(Some(Duration::ZERO))
                 .await
                 .unwrap();
+
             tokio::time::timeout(IO_TIMEOUT, async {
                 while !self.bound.connections().await.unwrap().is_empty() {
                     tokio::time::sleep(Duration::from_millis(10)).await;
@@ -442,6 +470,7 @@ impl Scenario {
             })
             .await
             .expect("Dart did not retire closed source");
+
             self.source = Socket::new(
                 self.flow.kinds().1,
                 self.options.clone().identity(Bytes::from_static(b"source")),
@@ -459,6 +488,7 @@ impl Scenario {
         if let Some(fast) = self.fast {
             fast.close_with_linger(Some(Duration::ZERO)).await.unwrap();
         }
+
         self.source
             .close_with_linger(Some(Duration::ZERO))
             .await
@@ -467,6 +497,7 @@ impl Scenario {
             .close_with_linger(Some(Duration::ZERO))
             .await
             .unwrap();
+
         if let Some(relay) = self.relay {
             relay.close().await;
         }
@@ -480,6 +511,7 @@ fn resource_snapshot() -> (usize, usize) {
         .and_then(|text| text.split_whitespace().nth(1)?.parse::<usize>().ok())
         .unwrap_or(0)
         * 4096;
+
     (fds, rss)
 }
 
@@ -493,6 +525,7 @@ async fn build_scenarios(workload: Workload) -> Vec<Scenario> {
                 .push(Scenario::new(flow, congestion, workload, index.is_multiple_of(2)).await);
         }
     }
+
     scenarios
 }
 
@@ -533,6 +566,7 @@ fn run(workload: Workload) {
                 Workload::Backpressure => scenarios[index].backpressure().await,
                 _ => scenarios[index].burst().await,
             }
+
             index = (index + 1) % scenarios.len();
 
             // Recovery churns one scenario every 3 s, also round-robin.
@@ -544,6 +578,7 @@ fn run(workload: Workload) {
 
             let messages = scenarios.iter().map(|scenario| scenario.sequence).sum();
             tracker.record(messages);
+
             if last_report.elapsed() >= Duration::from_secs(30) {
                 let (fds, rss) = resource_snapshot();
                 eprintln!(

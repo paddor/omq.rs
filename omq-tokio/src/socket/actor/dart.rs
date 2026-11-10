@@ -50,6 +50,7 @@ impl SocketDriver {
                 "socket type does not support dart://".into(),
             ));
         }
+
         if !matches!(
             options.mechanism,
             omq_proto::proto::mechanism::MechanismSetup::Null
@@ -58,11 +59,13 @@ impl SocketDriver {
                 "DART has no authentication or encryption".into(),
             ));
         }
+
         if options.mechanism.has_frame_transform() {
             return Err(Error::Config(
                 "DART has no compression or frame transform".into(),
             ));
         }
+
         if options.recv_spin > std::time::Duration::from_micros(50)
             && options.recv_spin != std::time::Duration::MAX
         {
@@ -70,11 +73,13 @@ impl SocketDriver {
                 "DART receive spinning must be at most 50 microseconds or Duration::MAX".into(),
             ));
         }
+
         if self.socket_type == SocketType::Peer && options.identity.len() > 255 {
             return Err(Error::Config(
                 "DART PEER identity must be 1..=255 bytes".into(),
             ));
         }
+
         Ok(())
     }
 
@@ -92,6 +97,7 @@ impl SocketDriver {
 
         let carrier = self.open_dart_carrier(&endpoint, &options, side).await?;
         let io_thread = carrier.lease.index();
+
         let resolved = if side.is_connect() {
             endpoint
         } else {
@@ -107,6 +113,7 @@ impl SocketDriver {
             .alloc_id()
             .ok_or_else(|| Error::Config("peer ID exhausted".into()))?;
         let route_id = id;
+
         let pipe = if side.is_connect() {
             self.routing
                 .send_strategy
@@ -117,6 +124,7 @@ impl SocketDriver {
 
         let cancel = self.link.cancel.child_token();
         let (task, commands) = self.spawn_dart_worker(id, carrier, &options, cancel.clone());
+
         if side == Side::Bind {
             self.link.monitor.publish(MonitorEvent::Listening {
                 endpoint: resolved.clone(),
@@ -137,6 +145,7 @@ impl SocketDriver {
             pipe,
             active_peer: None,
         });
+
         Ok(resolved)
     }
 
@@ -212,6 +221,7 @@ impl SocketDriver {
             .resources
             .io_pool
             .spawn_leased(carrier.lease, worker.run());
+
         (task, commands)
     }
 
@@ -224,6 +234,7 @@ impl SocketDriver {
         else {
             return;
         };
+
         if self.close.started && self.routing.send_strategy.is_drained() {
             return;
         }
@@ -271,17 +282,20 @@ impl SocketDriver {
             ),
             entry.cancel.child_token(),
         );
+
         let cancel = handle.cancel.clone();
         let options = entry.options.clone();
         let endpoint = entry.endpoint.clone();
         let side = entry.side;
         let commands = entry.commands.clone();
+
         // Connect endpoints keep the route allocated at connect() time.
         let route_id = if side.is_connect() {
             entry.route_id
         } else {
             peer_id
         };
+
         let (send_pipe, pipe) = entry.make_send_pipe(
             self.socket_type,
             self.routing.send_strategy.needs_peer_send_pipe(),
@@ -294,6 +308,7 @@ impl SocketDriver {
         } else {
             Some(self.dart_recv_sink(peer_id))
         };
+
         handle.routes.send_pipe = send_pipe;
 
         let ident = PeerIdent::Socket(source);
@@ -315,6 +330,7 @@ impl SocketDriver {
             cancel,
             completion,
         };
+
         let io = Box::new(PeerIo::new(queues, options.dart.window_messages));
         (commands, io)
     }
@@ -328,6 +344,7 @@ impl SocketDriver {
         } else {
             super::lifecycle::PeerLifecycle::new(self).yring_sink(peer_id, capacity, true)
         };
+
         // DART carries no REQ/REP, so no REP envelope wrap.
         wrap_routed_sink(self.socket_type, peer_id, sink, false)
     }
@@ -337,6 +354,7 @@ impl SocketDriver {
         let Some(peer_id) = entry.active_peer.filter(|_| entry.side.is_connect()) else {
             return;
         };
+
         self.stop_removed_peer(peer_id, super::DisconnectReason::PeerClosed)
             .await;
         self.dart_peer_closed(peer_id);
@@ -351,14 +369,18 @@ impl SocketDriver {
         else {
             return;
         };
+
         let entry = &mut self.endpoints.dart_endpoints[index];
         entry.active_peer = None;
+
         if self.close.started || entry.cancel.is_cancelled() {
             return;
         }
+
         let Some(route_id) = self.alloc_id() else {
             return;
         };
+
         let entry = &mut self.endpoints.dart_endpoints[index];
         entry.route_id = route_id;
         entry.pipe = self
@@ -370,6 +392,7 @@ impl SocketDriver {
     pub(super) async fn stop_dart_endpoints(&mut self, target: Option<(&Endpoint, Side)>) -> bool {
         let mut removed = Vec::new();
         let mut index = 0;
+
         while index < self.endpoints.dart_endpoints.len() {
             let entry = &self.endpoints.dart_endpoints[index];
             if target.is_none_or(|(endpoint, side)| {
@@ -383,9 +406,11 @@ impl SocketDriver {
                 index += 1;
             }
         }
+
         if removed.is_empty() {
             return false;
         }
+
         let peers: Vec<_> = self
             .peers
             .iter()
@@ -396,13 +421,16 @@ impl SocketDriver {
             })
             .map(|(&id, _)| id)
             .collect();
+
         for peer_id in peers {
             self.stop_removed_peer(peer_id, super::DisconnectReason::LocalClose)
                 .await;
         }
+
         for entry in removed {
             super::stop_peer_task(entry.task).await;
         }
+
         true
     }
 }
@@ -416,6 +444,7 @@ fn prepare_socket(
     let Endpoint::Dart { host, port } = endpoint else {
         unreachable!()
     };
+
     let ip = match host {
         Host::Ip(ip) => *ip,
         Host::Wildcard if !connect => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
@@ -425,11 +454,13 @@ fn prepare_socket(
             ));
         }
     };
+
     if ip.is_multicast() || (connect && (ip.is_unspecified() || *port == 0)) {
         return Err(Error::Config(
             "DART requires a unicast destination and nonzero connect port".into(),
         ));
     }
+
     let target = connect.then_some(SocketAddr::new(ip, *port));
     let local = target.map_or(SocketAddr::new(ip, *port), |target| {
         SocketAddr::new(
@@ -441,6 +472,7 @@ fn prepare_socket(
             0,
         )
     });
+
     let socket = std::net::UdpSocket::bind(local)?;
     options.apply_socket_buffers(&socket)?;
     Ok((socket, target))
@@ -460,14 +492,17 @@ impl Entry {
         {
             return (None, Some(pipe));
         }
+
         if !needed {
             return (None, None);
         }
+
         // DART keeps its full capacity even with conflate.
         let cap = self.options.send_queue_capacity();
         let (mut producer, consumer) =
             super::peer_materialize::new_peer_send_pipe(socket_type, &self.options, cap);
         producer.set_dart(socket_type);
+
         (Some(Arc::new(Mutex::new(Some(producer)))), Some(consumer))
     }
 
@@ -482,6 +517,7 @@ impl Entry {
             ident,
             io_thread: self.io_thread,
         };
+
         PeerEntry::new(origin, handle)
     }
 }
@@ -502,49 +538,4 @@ fn ready_properties(ready: ReadyPeer) -> Arc<PeerProperties> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::socket::actor::{DriverEnv, HandleLink, HandleShared};
-    use omq_proto::Message;
-    use omq_proto::error::TrySendError;
-
-    #[tokio::test]
-    async fn late_peer_after_fanin_close_gets_closed_receive() {
-        let options = Options::default();
-        let pool = crate::context::IoPoolHandle::none();
-        let blocking = crate::socket::recv::BlockingRecvWaker::new();
-        let (recv_tx, _consumer, _, _) = crate::socket::recv::recv_pipe(16, blocking.clone());
-        let mut spsc = crate::socket::recv::SpscHandles::new(blocking.clone(), false);
-        let fanin = crate::socket::fanin::Fanin::new(16, spsc.recv_signal.clone(), blocking);
-        spsc.fanin = Some(fanin.clone());
-        let (_, cmd_rx) = mpsc::channel(1);
-        let link = HandleLink {
-            cmd_rx,
-            recv_tx: recv_tx.clone(),
-            cancel: CancellationToken::new(),
-            monitor: crate::socket::monitor::MonitorPublisher::new(16),
-            spsc,
-            peer_recv_routes: None,
-            shared: HandleShared::new(),
-        };
-        let env = DriverEnv {
-            io_pool: pool.clone(),
-            inproc_registry: Arc::new(crate::transport::inproc::InprocRegistry::new()),
-            recv_sink_config: None,
-        };
-        let send_strategy =
-            crate::routing::SendStrategy::for_socket_type(SocketType::Pull, &options, &pool);
-        let mut driver = SocketDriver::new(SocketType::Pull, options, send_strategy, link, env);
-
-        // Last-handle drop closes fan-in before a late DART peer attaches.
-        fanin.close();
-        let RecvSink::Channel(pipe) = driver.dart_recv_sink(0) else {
-            panic!("late attachment must use the shared receive pipe");
-        };
-        assert!(Arc::ptr_eq(&pipe, &recv_tx));
-        assert!(matches!(
-            pipe.try_send(Message::single("late-peer")),
-            Err(TrySendError::Closed)
-        ));
-    }
-}
+mod tests;

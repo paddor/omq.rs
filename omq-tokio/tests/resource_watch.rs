@@ -48,6 +48,7 @@ async fn wait_connections_at_most(sock: &Socket, max: usize, timeout: Duration) 
         if len <= max {
             return;
         }
+
         assert!(
             Instant::now() < deadline,
             "connection count stayed above {max}: {len}"
@@ -187,12 +188,14 @@ async fn stream_close_under_remote_write_returns_fd_count_near_baseline() {
             if client.write_all(&payload).await.is_err() {
                 break;
             }
+
             tokio::task::yield_now().await;
         }
     });
 
     tokio::time::sleep(Duration::from_millis(50)).await;
     stream.close().await.unwrap();
+
     tokio::select! {
         res = &mut writer => {
             let _ = res;

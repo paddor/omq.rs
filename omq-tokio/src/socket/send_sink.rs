@@ -61,6 +61,7 @@ where
                 "send sink must be ready before sending".into(),
             ));
         }
+
         *this.pending = Some(message);
         Ok(())
     }
@@ -72,13 +73,16 @@ where
             if this.pending.is_none() {
                 return Poll::Ready(Ok(()));
             }
+
             if this.budget.exhausted() {
                 this.budget.reset();
                 cx.waker().wake_by_ref();
                 return Poll::Pending;
             }
+
             let message = this.pending.take().expect("pending send");
             *this.pending_bytes = message.byte_len();
+
             // Preserve send's REQ retry and REP envelope cancellation guards.
             let message = if matches!(this.socket.socket_type(), SocketType::Req | SocketType::Rep)
             {
@@ -94,8 +98,10 @@ where
                     Err(TrySendError::Error(error)) => return Poll::Ready(Err(error)),
                 }
             };
+
             this.future.set(Some((this.send)(message)));
         }
+
         let result = ready!(
             this.future
                 .as_mut()
@@ -104,9 +110,11 @@ where
                 .poll(cx)
         );
         this.future.set(None);
+
         if result.is_ok() {
             let _ = this.budget.account(*this.pending_bytes);
         }
+
         Poll::Ready(result)
     }
 

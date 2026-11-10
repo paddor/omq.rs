@@ -18,6 +18,7 @@ async fn wait_no_connections(sock: &Socket) {
         if sock.connections().await.unwrap().is_empty() {
             return;
         }
+
         assert!(
             tokio::time::Instant::now() < deadline,
             "socket still has live connections"
@@ -61,6 +62,7 @@ async fn disconnect_peer_redials_a_dialed_peer() {
 
     let seen = push.connections_generation();
     push.disconnect_peer(first).await.unwrap();
+
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             if let omq_tokio::MonitorEvent::Disconnected { peer, reason, .. } =
@@ -81,6 +83,7 @@ async fn disconnect_peer_redials_a_dialed_peer() {
         loop {
             seen = push.connections_changed(seen).await.unwrap();
             let connections = push.connections().await.unwrap();
+
             if connections.iter().any(|c| c.connection_id != first) {
                 break;
             }
@@ -102,12 +105,14 @@ async fn unbind_then_rebind_succeeds() {
     let pull = Socket::new(SocketType::Pull, Options::default());
     let mut mon = pull.monitor();
     pull.bind(tcp_loopback(0)).await.unwrap();
+
     let port = match mon.recv().await.unwrap() {
         omq_tokio::MonitorEvent::Listening {
             endpoint: Endpoint::Tcp { port, .. },
         } => port,
         other => panic!("{other:?}"),
     };
+
     pull.unbind(tcp_loopback(port)).await.unwrap();
     pull.bind(tcp_loopback(0)).await.unwrap();
 }
@@ -119,6 +124,7 @@ async fn disconnect_after_connect_succeeds() {
     let pull = Socket::new(SocketType::Pull, Options::default());
     let mut mon = pull.monitor();
     pull.bind(tcp_loopback(0)).await.unwrap();
+
     let omq_tokio::MonitorEvent::Listening {
         endpoint: Endpoint::Tcp { port, .. },
     } = mon.recv().await.unwrap()

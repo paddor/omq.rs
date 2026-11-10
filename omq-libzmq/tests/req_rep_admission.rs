@@ -10,6 +10,7 @@ use std::ffi::{CString, c_void};
 
 #[cfg(unix)]
 type PollFd = i32;
+
 #[cfg(windows)]
 type PollFd = usize;
 
@@ -37,12 +38,14 @@ impl Sockets {
     fn socket(&mut self, kind: i32) -> *mut c_void {
         let socket = zmq_socket(self.context, kind);
         assert!(!socket.is_null());
+
         for (option, value) in [(17, 0_i32), (27, 1000), (28, 1000)] {
             assert_eq!(
                 zmq_setsockopt(socket, option, (&raw const value).cast(), size_of::<i32>()),
                 0
             );
         }
+
         self.sockets.push(socket);
         socket
     }
@@ -53,6 +56,7 @@ impl Drop for Sockets {
         for socket in self.sockets.drain(..) {
             zmq_close(socket);
         }
+
         zmq_ctx_term(self.context);
     }
 }
@@ -70,6 +74,7 @@ fn recv(socket: *mut c_void) -> Vec<u8> {
     let mut buffer = [0_u8; 64];
     let length = zmq_recv(socket, buffer.as_mut_ptr().cast(), buffer.len(), 0);
     assert!(length >= 0, "recv errno={}", zmq_errno());
+
     buffer[..usize::try_from(length).unwrap()].to_vec()
 }
 
@@ -88,11 +93,13 @@ fn bind(socket: *mut c_void, transport: &str) -> CString {
     if transport == "tcp" {
         return helpers::bind_random_tcp(socket);
     }
+
     let endpoint = if transport == "ipc" {
         format!("ipc:///tmp/omq-rep-admission-{}.sock", std::process::id())
     } else {
         "inproc://rep-admission".to_owned()
     };
+
     let endpoint = CString::new(endpoint).unwrap();
     assert_eq!(zmq_bind(socket, endpoint.as_ptr()), 0);
     endpoint
@@ -105,17 +112,21 @@ fn rep_route_is_admitted_at_application_receive(transport: &str, second_transpor
     let second = sockets.socket(3);
     let endpoint = bind(rep, transport);
     assert_eq!(zmq_connect(first, endpoint.as_ptr()), 0);
+
     let second_endpoint = if second_transport == transport {
         endpoint
     } else {
         bind(rep, second_transport)
     };
+
     assert_eq!(zmq_connect(second, second_endpoint.as_ptr()), 0);
     send(first, b"first");
     assert_eq!(recv(rep), b"first");
+
     send(second, b"second");
     // The second request has reached the C receive queue before replying.
     readable(rep);
+
     send(rep, b"reply-first");
     assert_eq!(recv(first), b"reply-first");
     assert_eq!(recv(rep), b"second");
@@ -127,10 +138,12 @@ fn rep_route_is_admitted_at_application_receive(transport: &str, second_transpor
 fn rep_admission_inproc() {
     rep_route_is_admitted_at_application_receive("inproc", "inproc");
 }
+
 #[test]
 fn rep_admission_tcp() {
     rep_route_is_admitted_at_application_receive("tcp", "tcp");
 }
+
 #[cfg(unix)]
 #[test]
 fn rep_admission_ipc() {
@@ -144,13 +157,16 @@ fn req_reply_does_not_advance_fsm_before_application_receive() {
     let req = sockets.socket(3);
     let endpoint = bind(rep, "inproc");
     assert_eq!(zmq_connect(req, endpoint.as_ptr()), 0);
+
     send(req, b"request");
     assert_eq!(recv(rep), b"request");
     send(rep, b"reply");
     readable(req);
+
     assert_eq!(zmq_send(req, b"early".as_ptr().cast(), 5, 1), -1);
     assert_eq!(zmq_errno(), 156_384_763); // EFSM
     assert_eq!(recv(req), b"reply");
+
     send(req, b"next");
     assert_eq!(recv(rep), b"next");
 }
@@ -185,6 +201,7 @@ fn recv_parts(socket: *mut c_void) -> Vec<Vec<u8>> {
             omq_zmq::zmq_getsockopt(socket, 13, (&raw mut more).cast(), &raw mut size),
             0
         );
+
         if more == 0 {
             return parts;
         }
@@ -197,13 +214,16 @@ fn rep_multipart_and_malformed(transport: &str) {
     let dealer = sockets.socket(5);
     let endpoint = bind(rep, transport);
     assert_eq!(zmq_connect(dealer, endpoint.as_ptr()), 0);
+
     send(dealer, b"no-delimiter");
     send_parts(dealer, &[b"outer", b"inner", b"", b"", b"body"]);
+
     assert_eq!(recv(rep), b"");
     assert_eq!(zmq_send(rep, b"early".as_ptr().cast(), 5, 1), -1);
     assert_eq!(zmq_errno(), 156_384_763);
     assert_eq!(recv(rep), b"body");
     send_parts(rep, &[b"", b"reply"]);
+
     assert_eq!(
         recv_parts(dealer),
         [
@@ -220,6 +240,7 @@ fn rep_multipart_and_malformed(transport: &str) {
 fn rep_envelope_multipart_and_malformed_inproc() {
     rep_multipart_and_malformed("inproc");
 }
+
 #[test]
 fn rep_envelope_multipart_and_malformed_tcp() {
     rep_multipart_and_malformed("tcp");
@@ -231,9 +252,11 @@ fn req_malformed_reply(transport: &str) {
     let req = sockets.socket(3);
     let endpoint = bind(router, transport);
     assert_eq!(zmq_connect(req, endpoint.as_ptr()), 0);
+
     send(req, b"request");
     let request = recv_parts(router);
     assert_eq!(request.len(), 3);
+
     send_parts(router, &[&request[0], b"missing-delimiter"]);
     readable(req);
     let mut buffer = [0_u8; 64];
@@ -244,11 +267,13 @@ fn req_malformed_reply(transport: &str) {
     assert_eq!(zmq_errno(), libc::EAGAIN);
     assert_eq!(zmq_send(req, b"early".as_ptr().cast(), 5, 1), -1);
     assert_eq!(zmq_errno(), 156_384_763);
+
     send_parts(router, &[&request[0], b"", b"", b"reply"]);
     assert_eq!(recv(req), b"");
     assert_eq!(zmq_send(req, b"early".as_ptr().cast(), 5, 1), -1);
     assert_eq!(zmq_errno(), 156_384_763);
     assert_eq!(recv(req), b"reply");
+
     send(req, b"next");
     assert_eq!(recv_parts(router)[2], b"next");
 }
@@ -257,6 +282,7 @@ fn req_malformed_reply(transport: &str) {
 fn req_delimiter_and_multipart_inproc() {
     req_malformed_reply("inproc");
 }
+
 #[test]
 fn req_delimiter_and_multipart_tcp() {
     req_malformed_reply("tcp");
@@ -269,18 +295,22 @@ fn fallback_disconnect_does_not_replace_a_live_direct_receive_ring() {
     let first = sockets.socket(8);
     let second = sockets.socket(8);
     let endpoint = bind(pull, "inproc");
+
     assert_eq!(zmq_connect(first, endpoint.as_ptr()), 0);
     send(first, b"direct");
     assert_eq!(recv(pull), b"direct");
+
     assert_eq!(zmq_connect(second, endpoint.as_ptr()), 0);
     send(second, b"fallback");
     assert_eq!(recv(pull), b"fallback");
+
     assert_eq!(omq_zmq::zmq_disconnect(second, endpoint.as_ptr()), 0);
     std::thread::sleep(std::time::Duration::from_millis(30));
     let third = sockets.socket(8);
     assert_eq!(zmq_connect(third, endpoint.as_ptr()), 0);
     send(third, b"replacement");
     send(first, b"still-live");
+
     let messages = [recv(pull), recv(pull)];
     assert!(messages.iter().any(|message| message == b"still-live"));
     assert!(messages.iter().any(|message| message == b"replacement"));
@@ -293,15 +323,19 @@ fn direct_receive_does_not_starve_queued_fallback_messages() {
     let first = sockets.socket(8);
     let second = sockets.socket(8);
     let endpoint = bind(pull, "inproc");
+
     assert_eq!(zmq_connect(first, endpoint.as_ptr()), 0);
     send(first, b"warmup-direct");
     assert_eq!(recv(pull), b"warmup-direct");
+
     assert_eq!(zmq_connect(second, endpoint.as_ptr()), 0);
     send(second, b"warmup-fallback");
     assert_eq!(recv(pull), b"warmup-fallback");
+
     for _ in 0..100 {
         send(first, b"busy-direct");
     }
+
     send(second, b"queued-fallback");
     std::thread::sleep(std::time::Duration::from_millis(30));
     let messages = [recv(pull), recv(pull)];

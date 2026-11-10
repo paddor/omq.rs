@@ -21,6 +21,7 @@ fn grab_and_release_port() -> Endpoint {
     let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
+
     tcp_ep(port)
 }
 

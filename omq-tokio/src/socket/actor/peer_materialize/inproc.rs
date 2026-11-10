@@ -20,6 +20,7 @@ fn inproc_sink(socket: &SocketDriver, peer_id: u64) -> Option<RecvSink> {
         // Routed receives need a sink that tags each message.
         recv_sink.get_or_insert_with(|| RecvSink::Channel(socket.link.recv_tx.clone()));
     }
+
     let rep = socket.socket_type == SocketType::Rep;
     recv_sink.map(|sink| wrap_routed_sink(socket.socket_type, peer_id, sink, rep))
 }
@@ -138,6 +139,7 @@ fn spawn_inproc_driver(
             blocking_recv_waker: socket.link.spsc.blocking_recv_waker.clone(),
         },
     };
+
     let channels = InprocChannels {
         out: conn.out,
         in_rx: conn.in_rx,
@@ -159,6 +161,7 @@ fn admit_inproc_peer(socket: &mut SocketDriver, peer_type: SocketType) -> Option
     if !socket.can_accept_ready_peer() {
         return None;
     }
+
     if !omq_proto::proto::is_compatible(socket.socket_type, peer_type) {
         return None;
     }
@@ -183,6 +186,7 @@ fn inproc_send_path(
     let outbound = outbound.filter(|_| {
         !socket.options.conflate && socket.routing.send_strategy.supports_inproc_direct()
     });
+
     if let Some(port) = outbound {
         let sender = crate::transport::inproc::InprocSender::new(port, pre_ready_send_pipe_rx);
         let pipe = crate::engine::inproc_send_pipe(sender.clone());
@@ -222,6 +226,7 @@ fn inproc_receive_path(
         max_message_size: socket.options.max_message_size,
         cancel: cancel.clone(),
     };
+
     (None, Some((port.clone(), open)))
 }
 
@@ -238,13 +243,16 @@ fn inproc_port_sink(socket: &mut SocketDriver, peer_id: u64, peer_send_hwm: usiz
                 .options
                 .recv_queue_capacity()
                 .saturating_add(peer_send_hwm.max(1));
+
             if let Some(fanin) = &socket.link.spsc.fanin
                 && fanin.source_aware()
             {
                 return fanin_recv_sink(fanin, &socket.link.recv_tx, FaninProducer::Inproc(cap));
             }
+
             PeerLifecycle::new(socket).yring_sink(peer_id, cap, false)
         });
+
     let rep = socket.socket_type == SocketType::Rep;
     wrap_routed_sink(socket.socket_type, peer_id, sink, rep)
 }
@@ -253,6 +261,7 @@ fn take_inproc_recv_sink(socket: &SocketDriver, peer_id: u64) -> Option<RecvSink
     if !can_bypass_actor_recv(socket.socket_type) && socket.socket_type != SocketType::Rep {
         return None;
     }
+
     socket
         .resources
         .recv_sink_config

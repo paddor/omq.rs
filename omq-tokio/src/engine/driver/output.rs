@@ -100,6 +100,7 @@ impl QueuedOutput {
         let Some(writer) = slot.direct_writer() else {
             return;
         };
+
         if !self.idle(connection)
             || !self.pipe_batch.is_empty()
             || self.deferred.is_some()
@@ -108,6 +109,7 @@ impl QueuedOutput {
         {
             return;
         }
+
         writer.publish_idle(|| {
             slot.is_empty()
                 && self.pipe.as_ref().is_none_or(SendPipeConsumer::is_empty)
@@ -124,12 +126,14 @@ impl QueuedOutput {
         if !claim_direct_writer(slot) {
             return false;
         }
+
         if self.pending.is_empty()
             && let Some(slot) =
                 slot.filter(|slot| slot.direct_writer().is_some() && !slot.is_empty())
         {
             self.stage_slot(slot);
         }
+
         true
     }
 
@@ -183,9 +187,11 @@ impl QueuedOutput {
                 slot.space_available.notify_changed();
             }
         }
+
         if !self.pipe_batch.is_empty() && self.idle(connection) {
             self.stage_pipe_batch(connection)?;
         }
+
         // Drain an already-ready yring after control service. The select arm
         // still covers the empty-to-nonempty race.
         if self.pipe_batch.is_empty()
@@ -197,6 +203,7 @@ impl QueuedOutput {
         {
             return self.drain_pipe(connection);
         }
+
         Ok(DriverStep::Continue)
     }
 
@@ -204,11 +211,13 @@ impl QueuedOutput {
         let Some(first) = self.deferred.take() else {
             return Ok(());
         };
+
         let mut batch = self
             .data
             .as_mut()
             .expect("deferred data requires inbox")
             .batch();
+
         let limited = match first {
             PeerDriverData::SendMessage(first) => self.encoding.batch_encode(
                 &first,
@@ -228,12 +237,14 @@ impl QueuedOutput {
                 false
             }
         };
+
         let input_full = batch.finish();
         if self.encoding.adapts_level() {
             let backlogged =
                 self.deferred.is_some() || self.data.as_ref().is_some_and(|data| !data.is_empty());
             self.encoding.note_batch(backlogged, limited, input_full);
         }
+
         Ok(())
     }
 
@@ -245,6 +256,7 @@ impl QueuedOutput {
                 connection,
                 &mut self.frames,
             )?;
+
             if self.encoding.adapts_level() {
                 let backlogged = !self.pipe_batch.is_empty()
                     || self.pipe.as_ref().is_some_and(|pipe| !pipe.is_empty());
@@ -255,6 +267,7 @@ impl QueuedOutput {
                 self.encoding.note_batch(backlogged, limited, input_full);
             }
         }
+
         Ok(())
     }
 
@@ -265,6 +278,7 @@ impl QueuedOutput {
             let started = Instant::now();
             let mut count = 0usize;
             let mut encoded = Ok(());
+
             if let Some((drained, _)) =
                 rx.drain_queue_with(OUTBOUND_BATCH_MAX_MSGS, max_batch_bytes(), |message| {
                     encoded = self.encoding.encode(&message, connection, &mut self.frames);
@@ -284,6 +298,7 @@ impl QueuedOutput {
                 });
             }
         }
+
         let drained = if self.encoding.uses_shm() {
             rx.drain_into_with_cost(
                 &mut self.pipe_batch,
@@ -298,6 +313,7 @@ impl QueuedOutput {
                 max_batch_bytes(),
             )
         };
+
         if drained == 0 {
             return Ok(if rx.is_disconnected() {
                 DriverStep::Close
@@ -305,6 +321,7 @@ impl QueuedOutput {
                 DriverStep::Yield
             });
         }
+
         self.pipe_batch.reverse();
         self.stage_pipe_batch(connection)?;
         // Flush the final encoded batch before treating producer EOF as close.

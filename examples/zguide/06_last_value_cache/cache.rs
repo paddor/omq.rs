@@ -51,6 +51,7 @@ async fn main() {
         loop {
             let msg = pull.recv().await.unwrap();
             let body = msg_str(&msg, 0);
+
             if let Some((topic, value)) = body.split_once(' ') {
                 cache_fwd
                     .lock()
@@ -58,6 +59,7 @@ async fn main() {
                     .insert(topic.to_owned(), value.to_owned());
                 println!("cache: cached {topic}={value}");
             }
+
             pub_.send(Message::single(body)).await.unwrap();
         }
     });
@@ -68,6 +70,7 @@ async fn main() {
         loop {
             let msg = rep.recv().await.unwrap();
             let body = msg_str(&msg, 0);
+
             if body == "SNAPSHOT" {
                 let payload = {
                     let locked = cache_snap.lock().unwrap();
@@ -77,8 +80,10 @@ async fn main() {
                         .collect::<Vec<_>>()
                         .join("\n");
                     println!("cache: snapshot served ({} entries)", locked.len());
+
                     p
                 };
+
                 rep.send(Message::single(payload)).await.unwrap();
             }
         }

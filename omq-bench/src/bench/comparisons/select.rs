@@ -5,9 +5,11 @@ use super::impls::{IMPLS, ImplClass, TransportKind, find_impl};
 use crate::cli::ComparisonsArgs;
 
 pub(super) const COMPARISON_CHART_SIZES: &[u64] = &[16, 64, 256, 1024, 4096, 16384];
+
 const MAIN_EXTRA_CHART_SIZES: &[u64] = &[
     32, 128, 512, 2048, 8192, 32768, 262_144, 4_194_304, 8_388_608,
 ];
+
 const QUICK_SIZES: &[u64] = &[64, 1024, 4096];
 
 const LATENCY_MAX_SIZE: u64 = 4096;
@@ -21,6 +23,7 @@ fn all_chart_sizes() -> Vec<u64> {
     sizes.extend(MAIN_EXTRA_CHART_SIZES);
     sizes.sort_unstable();
     sizes.dedup();
+
     sizes
 }
 
@@ -40,6 +43,7 @@ pub(super) fn selected_sizes(args: &ComparisonsArgs) -> Vec<u64> {
     } else {
         all_chart_sizes()
     };
+
     if !args.allow_non_chart_sizes {
         let chart = all_chart_sizes();
         for &size in &sizes {
@@ -50,6 +54,7 @@ pub(super) fn selected_sizes(args: &ComparisonsArgs) -> Vec<u64> {
             }
         }
     }
+
     sizes
 }
 
@@ -61,6 +66,7 @@ pub(super) fn selected_impl_names(args: &ComparisonsArgs) -> Vec<&str> {
                 names.push(name);
             }
         }
+
         names
     } else if !args.impls.is_empty() {
         args.impls.iter().map(String::as_str).collect()
@@ -71,11 +77,13 @@ pub(super) fn selected_impl_names(args: &ComparisonsArgs) -> Vec<&str> {
             .map(|imp| imp.name)
             .collect()
     };
+
     if args.curve.enabled {
         let families: Vec<&str> = names
             .iter()
             .filter_map(|name| name.split('-').next())
             .collect();
+
         for imp in IMPLS {
             if imp.class == Some(ImplClass::Curve)
                 && !names.contains(&imp.name)
@@ -89,6 +97,7 @@ pub(super) fn selected_impl_names(args: &ComparisonsArgs) -> Vec<&str> {
             }
         }
     }
+
     names
 }
 
@@ -100,6 +109,7 @@ pub(super) fn random_base_port() -> u16 {
             file.read_exact(&mut buf)
         })
         .ok();
+
     20_000 + (u16::from_le_bytes(buf) % 20_000)
 }
 
@@ -113,12 +123,15 @@ pub(super) fn peer_features(
     if transports.contains(&TransportKind::Ws) {
         features.push("ws");
     }
+
     if transports.contains(&TransportKind::Quic) {
         features.push("quic");
     }
+
     if args.curve.enabled || impl_names.iter().any(|name| name.contains("curve")) {
         features.push("curve");
     }
+
     features
 }
 
@@ -132,6 +145,7 @@ pub(super) fn duration_and_rounds(args: &ComparisonsArgs) -> (f64, u32) {
             .or_else(|| std::env::var("OMQ_BENCH_DURATION").ok()?.parse().ok())
             .unwrap_or(DEFAULT_DURATION)
     };
+
     let rounds = if args.quick_run {
         1
     } else {
@@ -139,6 +153,7 @@ pub(super) fn duration_and_rounds(args: &ComparisonsArgs) -> (f64, u32) {
             .or_else(|| std::env::var("OMQ_BENCH_ROUNDS").ok()?.parse().ok())
             .unwrap_or(DEFAULT_ROUNDS)
     };
+
     (duration, rounds)
 }
 
@@ -154,6 +169,7 @@ pub(super) fn exit_on_unknown_impls(impl_names: &[&str]) {
                     .collect::<Vec<_>>()
                     .join(", ")
             );
+
             std::process::exit(1);
         }
     }

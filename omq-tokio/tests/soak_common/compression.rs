@@ -31,19 +31,24 @@ fn message(seq: u64) -> Message {
         _ if seq.is_multiple_of(8) => 256 * 1024,
         _ => 64,
     };
+
     let mut data = vec![0; size];
     let mut state = seq.wrapping_add(0x9e37_79b9_7f4a_7c15);
+
     for chunk in data.chunks_mut(8) {
         state ^= state << 13;
         state ^= state >> 7;
         state ^= state << 17;
+
         let value = if seq.is_multiple_of(7) {
             state
         } else {
             state & 0x0000_ffff_0000_ffff
         };
+
         chunk.copy_from_slice(&value.to_le_bytes()[..chunk.len()]);
     }
+
     data[..8].copy_from_slice(&seq.to_le_bytes());
     if seq.is_multiple_of(19) {
         Message::multipart([Bytes::new(), Bytes::from(data), Bytes::new()])
@@ -104,6 +109,7 @@ async fn consume(pull: &Socket, label: &str, progress: &Progress) -> u64 {
             .await
             .unwrap_or_else(|_| panic!("{label} receive stalled at {seq}"))
             .unwrap();
+
         if got == Message::single(END) {
             break;
         }

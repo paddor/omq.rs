@@ -11,6 +11,7 @@ fn value(data: PeerDriverData) -> u8 {
     let PeerDriverData::SendMessage(message) = data else {
         panic!("raw message")
     };
+
     message.part_slice(0).unwrap()[0]
 }
 
@@ -21,22 +22,27 @@ fn clone_lanes_have_exact_capacity_and_fifo() {
     let first = scope.bind(&root);
     let shared = scope.clone_shared().bind(&root);
     let second = scope.clone().bind(&root);
+
     for n in 0..3 {
         first.try_send(message(n)).unwrap();
     }
+
     assert!(matches!(
         shared.try_send(message(3)),
         Err(legacy::error::TrySendError::Full(_))
     ));
+
     for n in 10..13 {
         second.try_send(message(n)).unwrap();
     }
+
     assert!(matches!(
         second.try_send(message(13)),
         Err(legacy::error::TrySendError::Full(_))
     ));
     let mut first_values = Vec::new();
     let mut second_values = Vec::new();
+
     for _ in 0..6 {
         let n = value(receiver.try_recv().unwrap());
         if n < 10 {
@@ -45,6 +51,7 @@ fn clone_lanes_have_exact_capacity_and_fifo() {
             second_values.push(n);
         }
     }
+
     assert_eq!(first_values, [0, 1, 2]);
     assert_eq!(second_values, [10, 11, 12]);
     receiver.release_consumed();
@@ -57,10 +64,12 @@ fn batch_returns_only_consumed_credits_across_lanes() {
     let scope = SenderLanes::default();
     let first = scope.bind(&root);
     let second = scope.clone().bind(&root);
+
     for n in 0..3 {
         first.try_send(message(n)).unwrap();
         second.try_send(message(n + 10)).unwrap();
     }
+
     let mut values = Vec::new();
     {
         let mut batch = receiver.batch();
@@ -68,17 +77,21 @@ fn batch_returns_only_consumed_credits_across_lanes() {
             values.push(value(batch.try_recv().unwrap()));
         }
     }
+
     let first_count = values.iter().filter(|&&n| n < 10).count();
     let second_count = values.len() - first_count;
+
     for (sender, count) in [(&first, first_count), (&second, second_count)] {
         for _ in 0..count {
             sender.try_send(message(99)).unwrap();
         }
+
         assert!(matches!(
             sender.try_send(message(99)),
             Err(legacy::error::TrySendError::Full(_))
         ));
     }
+
     let remaining: Vec<_> = (0..6)
         .map(|_| value(receiver.try_recv().unwrap()))
         .filter(|&n| n != 99)
@@ -102,6 +115,7 @@ fn finished_batch_reports_a_full_lane() {
     for n in 1..4 {
         sender.try_send(message(n)).unwrap();
     }
+
     let mut batch = receiver.batch();
     assert_eq!(value(batch.try_recv().unwrap()), 1);
     assert!(batch.finish());
@@ -111,25 +125,32 @@ fn finished_batch_reports_a_full_lane() {
 async fn batch_drop_wakes_capacity_and_finishes_close() {
     let (root, mut receiver) = channel(3);
     let sender = SenderLanes::default().bind(&root);
+
     for n in 0..3 {
         sender.try_send(message(n)).unwrap();
     }
+
     let wait = sender.wait_capacity();
     tokio::pin!(wait);
     assert!(poll_once(wait.as_mut()).is_pending());
+
     {
         let mut batch = receiver.batch();
         for n in 0..3 {
             assert_eq!(value(batch.try_recv().unwrap()), n);
         }
+
         assert!(poll_once(wait.as_mut()).is_pending());
     }
+
     tokio::time::timeout(Duration::from_secs(1), wait)
         .await
         .unwrap();
+
     for n in 0..3 {
         sender.try_send(message(n)).unwrap();
     }
+
     receiver.close();
     {
         let mut batch = receiver.batch();
@@ -137,6 +158,7 @@ async fn batch_drop_wakes_capacity_and_finishes_close() {
             assert_eq!(value(batch.try_recv().unwrap()), n);
         }
     }
+
     assert!(receiver.is_empty());
     assert!(receiver.recv().await.is_none());
 }
@@ -145,9 +167,11 @@ async fn batch_drop_wakes_capacity_and_finishes_close() {
 fn unwinding_a_batch_returns_credits_without_dropping_queued_data() {
     let (root, mut receiver) = channel(3);
     let sender = SenderLanes::default().bind(&root);
+
     for n in 0..3 {
         sender.try_send(message(n)).unwrap();
     }
+
     assert!(
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut batch = receiver.batch();
@@ -157,12 +181,14 @@ fn unwinding_a_batch_returns_credits_without_dropping_queued_data() {
         }))
         .is_err()
     );
+
     sender.try_send(message(3)).unwrap();
     sender.try_send(message(4)).unwrap();
     assert!(matches!(
         sender.try_send(message(5)),
         Err(legacy::error::TrySendError::Full(_))
     ));
+
     for n in 2..5 {
         assert_eq!(value(receiver.try_recv().unwrap()), n);
     }
@@ -172,11 +198,13 @@ fn unwinding_a_batch_returns_credits_without_dropping_queued_data() {
 async fn registration_wait_reclaims_retired_lanes_even_without_data() {
     let (root, mut receiver) = channel(1);
     let mut scopes = Vec::new();
+
     for _ in 0..MAX_LANES {
         let scope = SenderLanes::default();
         assert!(scope.bind(&root).send_ready());
         scopes.push(scope);
     }
+
     let waiting = SenderLanes::default().bind(&root);
     let future = waiting.wait_capacity();
     tokio::pin!(future);
@@ -199,11 +227,13 @@ async fn canceled_wait_and_ready_probe_preserve_other_waiters() {
     let wait = sender.wait_capacity();
     tokio::pin!(wait);
     assert!(poll_once(wait.as_mut()).is_pending());
+
     {
         let canceled = sender.wait_capacity();
         tokio::pin!(canceled);
         assert!(poll_once(canceled.as_mut()).is_pending());
     }
+
     assert_eq!(value(receiver.recv().await.unwrap()), 1);
     assert!(sender.send_ready());
     tokio::time::timeout(Duration::from_secs(1), wait)
@@ -216,9 +246,11 @@ async fn graceful_close_drains_reservations_and_wakes_muted_senders() {
     let (root, mut receiver) = channel(1);
     let sender = SenderLanes::default().bind(&root);
     let reserved = sender.try_reserve().unwrap();
+
     receiver.close();
     assert!(!receiver.is_empty());
     assert!(poll_once(std::pin::pin!(receiver.recv())).is_pending());
+
     reserved.send(message(7));
     assert_eq!(value(receiver.recv().await.unwrap()), 7);
     assert!(receiver.recv().await.is_none());
@@ -230,13 +262,16 @@ async fn graceful_close_drains_reservations_and_wakes_muted_senders() {
     let (root, mut receiver) = channel(1);
     let sender = SenderLanes::default().bind(&root);
     sender.try_send(message(1)).unwrap();
+
     let wait = sender.wait_capacity();
     tokio::pin!(wait);
     assert!(poll_once(wait.as_mut()).is_pending());
+
     receiver.close();
     tokio::time::timeout(Duration::from_secs(1), wait)
         .await
         .unwrap();
+
     assert_eq!(value(receiver.recv().await.unwrap()), 1);
     assert!(receiver.recv().await.is_none());
 }
@@ -264,6 +299,7 @@ async fn abandoning_reservation_completes_graceful_close() {
 async fn final_ack_batch_wakes_a_closed_receiver_and_close_progress() {
     #[derive(Debug, Default)]
     struct CountWake(AtomicUsize);
+
     impl Wake for CountWake {
         fn wake(self: Arc<Self>) {
             self.0.fetch_add(1, Ordering::Relaxed);
@@ -274,14 +310,17 @@ async fn final_ack_batch_wakes_a_closed_receiver_and_close_progress() {
     let sender = SenderLanes::default().bind(&root);
     let progress = Arc::new(StateSignal::new());
     sender.watch_close(&progress);
+
     for n in 0..3 {
         sender.try_send(message(n)).unwrap();
     }
+
     let claims: Vec<_> = (0..3)
         .map(|_| receiver.dart_try_recv().unwrap().1.unwrap())
         .collect();
     receiver.release_consumed();
     receiver.close();
+
     let wake = Arc::new(CountWake::default());
     let waker = Waker::from(wake.clone());
     let mut done = Box::pin(receiver.recv());
@@ -290,6 +329,7 @@ async fn final_ack_batch_wakes_a_closed_receiver_and_close_progress() {
             .poll(&mut std::task::Context::from_waker(&waker))
             .is_pending()
     );
+
     let seen = progress.generation();
     Admission::release_batch(claims.into_iter());
     assert_ne!(progress.generation(), seen);
@@ -304,24 +344,30 @@ async fn native_progress_observes_ring_release_after_admission_release() {
     let sender = SenderLanes::default().bind(&root);
     let progress = Arc::new(StateSignal::new());
     sender.observe_native_progress(&progress);
+
     for n in 0..16 {
         sender.try_send(message(n)).unwrap();
     }
+
     assert!(matches!(
         sender.try_reserve_owned(),
         Err(ReserveError::Full(()))
     ));
+
     let before_pop = progress.generation();
     assert_eq!(value(receiver.try_recv().unwrap()), 0);
     assert_ne!(progress.generation(), before_pop, "admission capacity edge");
+
     let before_release = progress.generation();
     assert!(
         matches!(sender.try_reserve_owned(), Err(ReserveError::Full(()))),
         "slot release is batched"
     );
+
     let wait = progress.changed_after(before_release);
     tokio::pin!(wait);
     assert!(poll_once(wait.as_mut()).is_pending());
+
     receiver.release_consumed();
     tokio::time::timeout(Duration::from_secs(1), wait)
         .await
@@ -336,11 +382,13 @@ async fn native_progress_observes_registration_reclamation() {
     let progress = Arc::new(StateSignal::new());
     root.observe_native_progress(&progress);
     let mut scopes = Vec::new();
+
     for _ in 0..MAX_LANES {
         let scope = SenderLanes::default();
         assert!(scope.bind(&root).send_ready());
         scopes.push(scope);
     }
+
     let waiting = SenderLanes::default().bind(&root);
     let seen = progress.generation();
     assert!(matches!(
@@ -403,13 +451,16 @@ fn publication_reservations_exclude_concurrent_sends_and_prune_reconnects() {
     let scope = SenderLanes::default();
     let sender = scope.bind(&root);
     let reserved = sender.try_reserve().unwrap();
+
     let Sender::Lane(lane) = &sender else {
         panic!("bound lane")
     };
+
     assert!(lane.producer.try_lock().is_err());
     drop(reserved);
     assert!(lane.producer.try_lock().is_ok());
     drop(receiver);
+
     for _ in 0..100 {
         let (next, receiver) = channel(1);
         scope.bind(&next).try_send(message(1)).unwrap();
@@ -426,22 +477,27 @@ fn disconnected_send_drops_buffer_after_unlocking_producer() {
         lane: std::sync::Weak<Lane>,
         dropped: Arc<AtomicBool>,
     }
+
     impl AsRef<[u8]> for Owner {
         fn as_ref(&self) -> &[u8] {
             &self.bytes
         }
     }
+
     impl Drop for Owner {
         fn drop(&mut self) {
             assert!(self.lane.upgrade().unwrap().producer.try_lock().is_ok());
             self.dropped.store(true, Ordering::Release);
         }
     }
+
     let (root, receiver) = channel(1);
     let sender = SenderLanes::default().bind(&root);
+
     let Sender::Lane(lane) = &sender else {
         panic!("bound lane")
     };
+
     let dropped = Arc::new(AtomicBool::new(false));
     let bytes = bytes::Bytes::from_owner(Owner {
         bytes: [0; 128],
@@ -459,26 +515,31 @@ fn disconnected_send_drops_buffer_after_unlocking_producer() {
 fn coordinated_teardown_releases_queued_buffers_with_idle_clones_alive() {
     #[derive(Debug)]
     struct Owner([u8; 128], Arc<AtomicUsize>);
+
     impl AsRef<[u8]> for Owner {
         fn as_ref(&self) -> &[u8] {
             &self.0
         }
     }
+
     impl Drop for Owner {
         fn drop(&mut self) {
             self.1.fetch_add(1, Ordering::AcqRel);
         }
     }
+
     let (root, receiver) = channel(4);
     let scope = SenderLanes::default();
     let sender = scope.bind(&root);
     let dropped = Arc::new(AtomicUsize::new(0));
+
     for _ in 0..4 {
         let bytes = bytes::Bytes::from_owner(Owner([0; 128], dropped.clone()));
         sender
             .try_send(PeerDriverData::SendMessage(Message::single(bytes)))
             .unwrap();
     }
+
     drop(receiver);
     assert_eq!(dropped.load(Ordering::Acquire), 4);
     assert!(sender.is_empty());
@@ -494,21 +555,25 @@ fn immediate_tcp_write_unlocks_reserved_producer_before_buffer_release() {
 
     #[derive(Debug)]
     struct Owner([u8; 128], std::sync::Weak<Lane>, Arc<AtomicBool>);
+
     impl AsRef<[u8]> for Owner {
         fn as_ref(&self) -> &[u8] {
             &self.0
         }
     }
+
     impl Drop for Owner {
         fn drop(&mut self) {
             assert!(self.1.upgrade().unwrap().producer.try_lock().is_ok());
             self.2.store(true, Ordering::Release);
         }
     }
+
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let tcp = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
     let (_remote, _) = listener.accept().unwrap();
     tcp.set_nonblocking(true).unwrap();
+
     let slot = PeerTransmitSlot::with_config(
         1,
         SlotConfig {
@@ -519,14 +584,17 @@ fn immediate_tcp_write_unlocks_reserved_producer_before_buffer_release() {
             ..SlotConfig::default()
         },
     );
+
     slot.mark_handshake_done();
     let writer = Arc::new(DirectTcpWriter::new(tcp));
     writer.publish_idle(|| true);
     let (root, _receiver) = channel(4);
     let sender = SenderLanes::default().bind(&root);
+
     let Sender::Lane(lane) = &sender else {
         panic!("bound lane")
     };
+
     let dropped = Arc::new(AtomicBool::new(false));
     let bytes = bytes::Bytes::from_owner(Owner([0; 128], Arc::downgrade(lane), dropped.clone()));
     let target = PeerOutbound::Wire {

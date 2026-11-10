@@ -27,6 +27,7 @@ fn overlay_debug_redacts_mechanism_secrets() {
             secret_key: [0xAA; 32],
         },
     ];
+
     for mechanism in cases {
         let debug = format!(
             "{:?}",
@@ -127,6 +128,7 @@ fn compression_fields_map_to_backend_options() {
         },
         ..Default::default()
     };
+
     let opts = overlay.to_options();
 
     assert_eq!(opts.compression_level, Some(1));
@@ -195,10 +197,12 @@ fn fixed_option_lists_are_disjoint() {
         EMPTY_BYTES,
         READ_ONLY,
     ];
+
     let mut seen = std::collections::HashSet::new();
     for code in lists.iter().flat_map(|list| list.iter()) {
         assert!(seen.insert(*code), "option {code} listed twice");
         assert!(is_ignored_on_set(*code));
     }
+
     assert_eq!(seen.len(), 62);
 }

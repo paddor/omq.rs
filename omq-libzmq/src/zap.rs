@@ -88,9 +88,11 @@ impl ZapService {
             omq_tokio::SocketType::Router => HandlerKind::Router,
             _ => return Err(libc::EINVAL),
         };
+
         if handler.endpoints.bound_or_connected.load(Ordering::Acquire) {
             return Err(libc::EINVAL);
         }
+
         let mut state = self.state.lock().map_err(|_| ETERM)?;
         if state
             .handler
@@ -99,6 +101,7 @@ impl ZapService {
         {
             return Err(libc::EADDRINUSE);
         }
+
         state.handler = Some(Handler {
             id: handler.id,
             socket: Arc::downgrade(handler),
@@ -107,6 +110,7 @@ impl ZapService {
             receiving: None,
             rep_reply_route: None,
         });
+
         Ok(())
     }
 
@@ -115,9 +119,11 @@ impl ZapService {
             let Ok(mut state) = self.state.lock() else {
                 return;
             };
+
             if state.handler.as_ref().map(|handler| handler.id) != Some(handler_id) {
                 return;
             }
+
             state.handler = None;
             state
                 .exchanges
@@ -125,6 +131,7 @@ impl ZapService {
                 .map(|(_, exchange)| exchange)
                 .collect::<Vec<_>>()
         };
+
         for exchange in exchanges {
             exchange.complete(internal_error());
         }
@@ -136,6 +143,7 @@ impl ZapService {
             .lock()
             .ok()
             .and_then(|state| state.handler.as_ref().map(|handler| handler.id));
+
         if let Some(handler_id) = handler_id {
             self.unbind(handler_id);
         }
@@ -166,22 +174,28 @@ impl ZapService {
             let Ok(mut state) = self.state.lock() else {
                 return internal_error();
             };
+
             let Some(handler) = state.handler.as_mut() else {
                 return internal_error();
             };
+
             let Some(socket) = handler.socket.upgrade() else {
                 return internal_error();
             };
+
             handler.inbox.push_back(Arc::clone(&exchange));
             socket.recv.drain_nonempty.store(true, Ordering::Release);
             state.exchanges.insert(route_id, Arc::clone(&exchange));
+
             socket
         };
+
         handler.notify.signal_recv();
 
         let Ok(response) = exchange.response.lock() else {
             return internal_error();
         };
+
         let Ok((response, wait)) =
             exchange
                 .response_ready
@@ -189,11 +203,13 @@ impl ZapService {
         else {
             return internal_error();
         };
+
         if wait.timed_out() && response.is_none() {
             drop(response);
             self.cancel(route_id);
             return internal_error();
         }
+
         response.clone().unwrap_or_else(internal_error)
     }
 
@@ -204,26 +220,32 @@ impl ZapService {
             .as_mut()
             .filter(|handler| handler.id == handler_id)
             .ok_or(EFSM)?;
+
         if handler.kind == HandlerKind::Rep && handler.rep_reply_route.is_some() {
             return Err(EFSM);
         }
+
         ensure_delivery(handler);
         let Some(delivery) = handler.receiving.as_mut() else {
             update_readable(handler);
             return Ok(None);
         };
+
         let frame = delivery
             .frames
             .pop_front()
             .expect("ZAP delivery is non-empty");
         let more = !delivery.frames.is_empty();
+
         if !more {
             let route_id = delivery.exchange.route_id;
             handler.receiving = None;
+
             if handler.kind == HandlerKind::Rep {
                 handler.rep_reply_route = Some(route_id);
             }
         }
+
         update_readable(handler);
         Ok(Some((frame, more)))
     }
@@ -235,19 +257,24 @@ impl ZapService {
             .as_mut()
             .filter(|handler| handler.id == handler_id)
             .ok_or(EFSM)?;
+
         if handler.kind == HandlerKind::Rep && handler.rep_reply_route.is_some() {
             return Err(EFSM);
         }
+
         ensure_delivery(handler);
         let Some(delivery) = handler.receiving.take() else {
             update_readable(handler);
             return Ok(None);
         };
+
         let route_id = delivery.exchange.route_id;
         let frames = delivery.frames.into_iter().collect();
+
         if handler.kind == HandlerKind::Rep {
             handler.rep_reply_route = Some(route_id);
         }
+
         update_readable(handler);
         Ok(Some(frames))
     }
@@ -260,6 +287,7 @@ impl ZapService {
                 .as_mut()
                 .filter(|handler| handler.id == handler_id)
                 .ok_or(EFSM)?;
+
             let (route_id, frames) = match handler.kind {
                 HandlerKind::Rep => {
                     let route_id = handler.rep_reply_route.take().ok_or(EFSM)?;
@@ -271,12 +299,15 @@ impl ZapService {
                         .get(1)
                         .is_some_and(Bytes::is_empty)
                         .then(|| &response[2..]);
+
                     (route_id, body)
                 }
             };
+
             let Some(exchange) = state.exchanges.remove(&route_id) else {
                 return Err(libc::EHOSTUNREACH);
             };
+
             let result = frames
                 .and_then(|frames| parse_response(frames, &exchange.request_id).ok())
                 .unwrap_or_else(internal_error);
@@ -284,12 +315,15 @@ impl ZapService {
             let socket = handler.socket.upgrade();
             let wake = handler.kind == HandlerKind::Rep && !handler.inbox.is_empty();
             update_readable(handler);
+
             (exchange, result, socket, wake)
         };
+
         exchange.complete(result);
         if wake_handler && let Some(handler) = handler_socket {
             handler.notify.signal_recv();
         }
+
         Ok(())
     }
 
@@ -333,13 +367,16 @@ impl ZapService {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
+
         state.exchanges.remove(&route_id);
         let Some(handler) = state.handler.as_mut() else {
             return;
         };
+
         handler
             .inbox
             .retain(|exchange| exchange.route_id != route_id);
+
         if handler
             .receiving
             .as_ref()
@@ -347,9 +384,11 @@ impl ZapService {
         {
             handler.receiving = None;
         }
+
         if handler.rep_reply_route == Some(route_id) {
             handler.rep_reply_route = None;
         }
+
         update_readable(handler);
     }
 }
@@ -358,14 +397,17 @@ fn ensure_delivery(handler: &mut Handler) {
     if handler.receiving.is_some() {
         return;
     }
+
     let Some(exchange) = handler.inbox.pop_front() else {
         return;
     };
+
     let mut frames = VecDeque::new();
     if handler.kind == HandlerKind::Router {
         frames.push_back(Bytes::copy_from_slice(&exchange.route_id.to_be_bytes()));
         frames.push_back(Bytes::new());
     }
+
     frames.extend(exchange.request.iter().cloned());
     handler.receiving = Some(Delivery { exchange, frames });
 }
@@ -374,6 +416,7 @@ fn update_readable(handler: &Handler) {
     let readable = handler.receiving.is_some()
         || ((handler.kind == HandlerKind::Router || handler.rep_reply_route.is_none())
             && !handler.inbox.is_empty());
+
     if let Some(socket) = handler.socket.upgrade() {
         socket
             .recv
@@ -389,12 +432,14 @@ fn parse_router_response_route(response: &[Bytes]) -> Result<u64, i32> {
     {
         return Err(libc::EINVAL);
     }
+
     let route_id = u64::from_be_bytes(
         response[0]
             .as_ref()
             .try_into()
             .expect("route length checked"),
     );
+
     Ok(route_id)
 }
 
@@ -408,6 +453,7 @@ fn build_request(
     let address: IpAddr = address.parse().map_err(|_| ())?;
     let address = address.to_string();
     validate_ascii_string(address.as_bytes(), false)?;
+
     if identity.len() > 255 {
         return Err(());
     }
@@ -419,6 +465,7 @@ fn build_request(
             let password = peer.password.as_deref().ok_or(())?;
             validate_vchar(username.as_bytes())?;
             validate_vchar(password.as_bytes())?;
+
             (
                 Bytes::from_static(b"PLAIN"),
                 vec![
@@ -442,6 +489,7 @@ fn build_request(
         Bytes::copy_from_slice(identity),
         mechanism,
     ];
+
     request.extend(credentials);
     Ok(request)
 }
@@ -454,6 +502,7 @@ fn parse_response(
     {
         return Err(());
     }
+
     let status = match response[2].as_ref() {
         b"200" => omq_tokio::AuthenticationStatus::Success,
         b"300" => omq_tokio::AuthenticationStatus::TemporaryFailure,
@@ -461,13 +510,16 @@ fn parse_response(
         b"500" => omq_tokio::AuthenticationStatus::InternalError,
         _ => return Err(()),
     };
+
     validate_ascii_string(&response[3], true)?;
     validate_ascii_string(&response[4], true)?;
+
     if status != omq_tokio::AuthenticationStatus::Success
         && (!response[4].is_empty() || !response[5].is_empty())
     {
         return Err(());
     }
+
     let metadata = parse_metadata(&response[5])?;
     Ok(omq_tokio::AuthenticationResult {
         status,
@@ -483,6 +535,7 @@ fn parse_metadata(mut metadata: &[u8]) -> Result<Vec<(String, Bytes)>, ()> {
         if name_len == 0 || metadata.len() < 1 + name_len + 4 {
             return Err(());
         }
+
         let name = &metadata[1..=name_len];
         if !name
             .iter()
@@ -490,6 +543,7 @@ fn parse_metadata(mut metadata: &[u8]) -> Result<Vec<(String, Bytes)>, ()> {
         {
             return Err(());
         }
+
         let value_len = u32::from_be_bytes(
             metadata[1 + name_len..1 + name_len + 4]
                 .try_into()
@@ -497,9 +551,11 @@ fn parse_metadata(mut metadata: &[u8]) -> Result<Vec<(String, Bytes)>, ()> {
         ) as usize;
         let value_start = 1 + name_len + 4;
         let value_end = value_start.checked_add(value_len).ok_or(())?;
+
         if metadata.len() < value_end {
             return Err(());
         }
+
         let name = String::from_utf8(name.to_vec()).expect("validated ASCII property name");
         properties.push((
             name,
@@ -507,6 +563,7 @@ fn parse_metadata(mut metadata: &[u8]) -> Result<Vec<(String, Bytes)>, ()> {
         ));
         metadata = &metadata[value_end..];
     }
+
     Ok(properties)
 }
 
@@ -514,6 +571,7 @@ fn validate_ascii_string(value: &[u8], allow_empty: bool) -> Result<(), ()> {
     if value.len() > 255 || (!allow_empty && value.is_empty()) || !value.is_ascii() {
         return Err(());
     }
+
     Ok(())
 }
 
@@ -521,6 +579,7 @@ fn validate_vchar(value: &[u8]) -> Result<(), ()> {
     if value.len() > 255 || !value.iter().all(u8::is_ascii_graphic) {
         return Err(());
     }
+
     Ok(())
 }
 
@@ -533,165 +592,4 @@ fn internal_error() -> omq_tokio::AuthenticationResult {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn peer(mechanism: omq_tokio::proto::MechanismName) -> omq_tokio::MechanismPeerInfo {
-        omq_tokio::MechanismPeerInfo {
-            mechanism,
-            public_key: [7; 32],
-            identity: None,
-            peer_address: Some("127.0.0.1".into()),
-            username: None,
-            password: None,
-        }
-    }
-
-    fn metadata(name: &[u8], value: &[u8]) -> Vec<u8> {
-        let mut out = Vec::new();
-        out.push(name.len() as u8);
-        out.extend_from_slice(name);
-        out.extend_from_slice(&(value.len() as u32).to_be_bytes());
-        out.extend_from_slice(value);
-        out
-    }
-
-    #[test]
-    fn response_accepts_all_standard_statuses() {
-        for (wire, expected) in [
-            (b"200".as_slice(), omq_tokio::AuthenticationStatus::Success),
-            (
-                b"300".as_slice(),
-                omq_tokio::AuthenticationStatus::TemporaryFailure,
-            ),
-            (b"400".as_slice(), omq_tokio::AuthenticationStatus::Denied),
-            (
-                b"500".as_slice(),
-                omq_tokio::AuthenticationStatus::InternalError,
-            ),
-        ] {
-            let frames = [b"1.0".as_slice(), b"1", wire, b"", b"", b""].map(Bytes::copy_from_slice);
-            assert_eq!(parse_response(&frames, b"1").unwrap().status, expected);
-        }
-    }
-
-    #[test]
-    fn response_rejects_bad_envelope_and_strings() {
-        for frames in [
-            vec![b"1.0".as_slice(), b"1", b"200", b"", b""],
-            vec![b"1.0".as_slice(), b"1", b"200", b"", b"", b"", b"extra"],
-            vec![b"1.1".as_slice(), b"1", b"200", b"", b"", b""],
-            vec![b"1.0".as_slice(), b"2", b"200", b"", b"", b""],
-            vec![b"1.0".as_slice(), b"1", b"201", b"", b"", b""],
-            vec![b"1.0".as_slice(), b"1", b"200", b"\x80", b"", b""],
-            vec![b"1.0".as_slice(), b"1", b"200", b"", b"\x80", b""],
-            vec![b"1.0".as_slice(), b"1", b"400", b"", b"user", b""],
-            vec![b"1.0".as_slice(), b"1", b"500", b"", b"", b"metadata"],
-        ] {
-            let frames: Vec<Bytes> = frames.into_iter().map(Bytes::copy_from_slice).collect();
-            assert!(parse_response(&frames, b"1").is_err());
-        }
-        let long = Bytes::from(vec![b'x'; 256]);
-        let frames = [
-            Bytes::from_static(b"1.0"),
-            Bytes::from_static(b"1"),
-            Bytes::from_static(b"200"),
-            long,
-            Bytes::new(),
-            Bytes::new(),
-        ];
-        assert!(parse_response(&frames, b"1").is_err());
-        let frames = [
-            Bytes::from_static(b"1.0"),
-            Bytes::from_static(b"1"),
-            Bytes::from_static(b"200"),
-            Bytes::new(),
-            Bytes::from(vec![b'x'; 256]),
-            Bytes::new(),
-        ];
-        assert!(parse_response(&frames, b"1").is_err());
-    }
-
-    #[test]
-    fn response_parses_user_id_and_metadata() {
-        let encoded = metadata(b"Role", b"admin");
-        let frames = [
-            Bytes::from_static(b"1.0"),
-            Bytes::from_static(b"1"),
-            Bytes::from_static(b"200"),
-            Bytes::from_static(b"OK"),
-            Bytes::from_static(b"alice"),
-            Bytes::from(encoded),
-        ];
-        let result = parse_response(&frames, b"1").unwrap();
-        assert_eq!(result.user_id.as_deref(), Some(b"alice".as_slice()));
-        assert_eq!(
-            result.metadata,
-            vec![("Role".into(), Bytes::from_static(b"admin"))]
-        );
-    }
-
-    #[test]
-    fn metadata_rejects_empty_invalid_and_truncated_properties() {
-        assert!(parse_metadata(&[0]).is_err());
-        assert!(parse_metadata(&metadata(b"bad name", b"x")).is_err());
-        assert!(parse_metadata(&[1, b'X', 0, 0, 0, 2, b'x']).is_err());
-    }
-
-    #[test]
-    fn request_shape_matches_each_standard_mechanism() {
-        let null = build_request(
-            "global",
-            "127.0.0.1",
-            b"server",
-            &peer(omq_tokio::proto::MechanismName::NULL),
-        )
-        .unwrap();
-        assert_eq!(null.len(), 6);
-        assert_eq!(null[5], b"NULL".as_slice());
-
-        let mut plain_peer = peer(omq_tokio::proto::MechanismName::PLAIN);
-        plain_peer.username = Some("alice".into());
-        plain_peer.password = Some("secret".into());
-        let plain = build_request("global", "::1", b"", &plain_peer).unwrap();
-        assert_eq!(plain.len(), 8);
-        assert_eq!(plain[3], b"::1".as_slice());
-        assert_eq!(plain[6], b"alice".as_slice());
-        assert_eq!(plain[7], b"secret".as_slice());
-
-        let curve = build_request(
-            "global",
-            "127.0.0.1",
-            b"",
-            &peer(omq_tokio::proto::MechanismName::CURVE),
-        )
-        .unwrap();
-        assert_eq!(curve.len(), 7);
-        assert_eq!(curve[6].as_ref(), &[7; 32]);
-    }
-
-    #[test]
-    fn request_rejects_invalid_rfc_string_fields() {
-        let null = peer(omq_tokio::proto::MechanismName::NULL);
-        assert!(build_request("", "127.0.0.1", b"", &null).is_err());
-        let non_ascii_domain =
-            String::from_utf8(vec![b'g', b'l', 0xc3, 0xb6, b'b', b'a', b'l']).expect("valid UTF-8");
-        assert!(build_request(&non_ascii_domain, "127.0.0.1", b"", &null).is_err());
-        assert!(build_request("global", "localhost", b"", &null).is_err());
-        assert!(build_request("global", "127.0.0.1", &[0; 256], &null).is_err());
-
-        let mut plain = peer(omq_tokio::proto::MechanismName::PLAIN);
-        plain.username = Some("has space".into());
-        plain.password = Some("secret".into());
-        assert!(build_request("global", "127.0.0.1", b"", &plain).is_err());
-    }
-
-    #[test]
-    fn router_response_route_is_independent_of_the_req_delimiter() {
-        let route = 42u64.to_be_bytes();
-        let valid = [Bytes::copy_from_slice(&route), Bytes::new()];
-        assert_eq!(parse_router_response_route(&valid).unwrap(), 42);
-        assert_eq!(parse_router_response_route(&valid[..1]).unwrap(), 42);
-        assert!(parse_router_response_route(&[Bytes::new()]).is_err());
-    }
-}
+mod tests;

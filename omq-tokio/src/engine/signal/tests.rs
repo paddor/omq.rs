@@ -35,6 +35,7 @@ fn any_changed_registers_every_signal_and_wakes_the_task() {
             self.0.fetch_add(1, Ordering::Relaxed);
         }
     }
+
     for count in [1, 4, 8] {
         let signals: Vec<_> = (0..count).map(|_| Arc::new(StateSignal::new())).collect();
         let mut wait = std::pin::pin!(any_changed(signals.iter().cloned()).wait());
@@ -55,12 +56,14 @@ fn dart_forwarded_waker_can_register_another_endpoint() {
         space: Arc<StateSignal>,
         endpoint: Arc<DataSignal>,
     }
+
     impl std::task::Wake for RegisterEndpoint {
         fn wake(self: Arc<Self>) {
             assert!(self.space.endpoints.get().unwrap().try_lock().is_ok());
             self.space.dart_forward_to(&self.endpoint);
         }
     }
+
     let space = Arc::new(StateSignal::new());
     let endpoint = Arc::new(DataSignal::new());
     let extra = Arc::new(DataSignal::new());
@@ -70,10 +73,12 @@ fn dart_forwarded_waker_can_register_another_endpoint() {
         endpoint: extra.clone(),
     }));
     let mut cx = std::task::Context::from_waker(&waker);
+
     let mut wait = std::pin::pin!(endpoint.ready());
     assert!(wait.as_mut().poll(&mut cx).is_pending());
     space.notify_changed();
     assert!(wait.as_mut().poll(&mut cx).is_ready());
+
     space.notify_changed();
     assert!(!extra.is_idle());
 }
@@ -86,10 +91,12 @@ fn dart_space_signal_supports_many_endpoints_and_prunes_dropped_ones() {
     space.dart_forward_to(&dropped);
     drop(dropped);
     let endpoints: Vec<_> = (0..129).map(|_| Arc::new(DataSignal::new())).collect();
+
     for endpoint in &endpoints {
         space.dart_forward_to(endpoint);
         space.dart_forward_to(endpoint);
     }
+
     assert_eq!(
         space.endpoints.get().unwrap().lock().unwrap().len(),
         endpoints.len()
@@ -175,14 +182,17 @@ async fn clear_after_rearms_when_marked_during_drain_even_if_empty_stale() {
 async fn wake_all_wakes_multiple() {
     let sig = Arc::new(DataSignal::new());
     let mut handles = Vec::new();
+
     for _ in 0..3 {
         let s = sig.clone();
         handles.push(tokio::spawn(async move {
             timeout(Duration::from_secs(1), s.notified()).await
         }));
     }
+
     tokio::task::yield_now().await;
     sig.wake_all();
+
     for h in handles {
         assert!(h.await.unwrap().is_ok());
     }

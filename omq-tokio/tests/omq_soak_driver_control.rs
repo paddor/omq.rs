@@ -5,9 +5,6 @@
 //! after a tiny partial write, then sends control commands through the
 //! separate control inbox. Close must preempt the pending write every time.
 
-#[global_allocator]
-static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
-
 mod soak_common;
 
 use std::sync::Arc;
@@ -24,6 +21,9 @@ use tokio::io::DuplexStream;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
+
+#[global_allocator]
+static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
 
 const DATA_BACKLOG: usize = 128;
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
@@ -63,6 +63,7 @@ async fn soak_worker(
         } else {
             1024 * 1024
         };
+
         let control_latency = stalled_write_close_once(worker, local_iterations, payload_len).await;
 
         iterations.fetch_add(1, Ordering::Relaxed);
@@ -81,6 +82,7 @@ fn spawn_reporter(deadline: Instant, iterations: Arc<AtomicU64>) -> tokio::task:
             if Instant::now() >= deadline {
                 break;
             }
+
             eprintln!(
                 "[driver_control] iterations {}",
                 iterations.load(Ordering::Relaxed),
@@ -106,6 +108,7 @@ fn soak_driver_control_separation() {
     runtime.block_on(async {
         let deadline = Instant::now() + duration;
         let mut tasks = JoinSet::new();
+
         for worker in 0..workers {
             tasks.spawn(soak_worker(
                 worker,
@@ -120,9 +123,11 @@ fn soak_driver_control_separation() {
         while let Some(result) = tasks.join_next().await {
             result.expect("driver-control soak worker panicked");
         }
+
         reporter.abort();
         let _ = reporter.await;
     });
+
     drop(runtime);
 
     let total = iterations.load(Ordering::Relaxed);
@@ -225,6 +230,7 @@ async fn fill_data_backlog(data_tx: &mpsc::Sender<PeerDriverData>, payload_len: 
     })
     .await
     .expect("client driver did not start outbound work");
+
     tokio::time::sleep(Duration::from_millis(1)).await;
     assert!(
         data_tx.capacity() < DATA_BACKLOG,

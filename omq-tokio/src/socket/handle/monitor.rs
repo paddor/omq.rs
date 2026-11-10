@@ -32,12 +32,14 @@ impl Socket {
                 "monitor_with_subscriptions is only valid on PUB and XPUB sockets".into(),
             ));
         }
+
         let (ack, rx) = oneshot::channel();
         self.inner
             .cmd_tx
             .send(SocketCommand::MonitorWithSubscriptions { ack })
             .await
             .map_err(|_| Error::Closed)?;
+
         rx.await.map_err(|_| Error::Closed)
     }
 
@@ -52,6 +54,7 @@ impl Socket {
             .send(SocketCommand::QueryConnection { connection_id, ack })
             .await
             .map_err(|_| Error::Closed)?;
+
         rx.await.map_err(|_| Error::Closed)
     }
 
@@ -63,12 +66,14 @@ impl Socket {
                 "peer_info is only valid on SERVER sockets".into(),
             ));
         }
+
         let (ack, rx) = oneshot::channel();
         self.inner
             .cmd_tx
             .send(SocketCommand::QueryPeerInfo { routing_id, ack })
             .await
             .map_err(|_| Error::Closed)?;
+
         rx.await.map_err(|_| Error::Closed)
     }
 
@@ -87,19 +92,23 @@ impl Socket {
     ) -> Result<usize> {
         let deadline = crate::socket::deadline_after(timeout).map(tokio::time::Instant::from_std);
         let changed = &self.inner.shared.ready_peers.changed;
+
         loop {
             // Snapshot first: the actor answers after any readiness change
             // it already published, and notifies for later ones.
             let seen = changed.generation();
             let conns = self.connections().await?;
+
             let ready = if self.inner.socket_type == SocketType::Stream {
                 conns.len()
             } else {
                 conns.iter().filter(|conn| conn.peer_info.is_some()).count()
             };
+
             if ready >= min_peers {
                 return Ok(ready);
             }
+
             match deadline {
                 Some(deadline) => {
                     if tokio::time::timeout_at(deadline, changed.changed_after(seen))
@@ -133,9 +142,11 @@ impl Socket {
             if count >= min_subscriptions {
                 return Ok(count);
             }
+
             if deadline.is_some_and(|d| tokio::time::Instant::now() >= d) {
                 return Err(Error::Timeout);
             }
+
             let now = tokio::time::Instant::now();
             let poll_deadline = now + std::time::Duration::from_millis(5);
             tokio::time::sleep_until(deadline.map_or(poll_deadline, |d| d.min(poll_deadline)))
@@ -153,6 +164,7 @@ impl Socket {
             .send(SocketCommand::QueryConnections { ack })
             .await
             .map_err(|_| Error::Closed)?;
+
         rx.await.map_err(|_| Error::Closed)
     }
 

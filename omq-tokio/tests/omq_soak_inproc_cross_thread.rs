@@ -1,8 +1,5 @@
 #![cfg(feature = "soak")]
 
-#[global_allocator]
-static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
-
 mod soak_common;
 
 use std::sync::Arc;
@@ -10,6 +7,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use omq_tokio::{Message, Options, Socket, SocketType};
+
+#[global_allocator]
+static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
 
 /// Receives on its own task until `stop`, then drains whatever is left.
 fn spawn_receiver(
@@ -102,6 +102,7 @@ fn soak_inproc_cross_thread() {
     } else {
         0.0
     };
+
     assert!(
         loss_pct < 1.0,
         "message loss too high: {loss_pct:.2}% ({s} sent, {r} received)"

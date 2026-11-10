@@ -19,8 +19,10 @@ impl SpscAwareRecv {
                 DrainResult::Closed => return Err(Error::Closed),
                 DrainResult::Empty => {}
             }
+
             let waiter = waiter.get_or_insert_with(|| self.handles.blocking_recv_waker.register());
             waiter.prepare_sleep();
+
             match self.try_drain() {
                 DrainResult::Message(msg) => {
                     return Ok(msg);
@@ -32,6 +34,7 @@ impl SpscAwareRecv {
                     if !self.buffered_sources_empty() {
                         continue;
                     }
+
                     waiter.park();
                 }
             }
@@ -45,9 +48,11 @@ impl SpscAwareRecv {
         let thread = std::thread::current();
         cancel.register(&thread);
         let _guard = BlockingRecvCancelGuard { cancel };
+
         if cancel.is_canceled() {
             return Ok(None);
         }
+
         self.blocking_recv_registered_cancelable(cancel)
     }
 
@@ -67,10 +72,12 @@ impl SpscAwareRecv {
     ) -> Result<Option<Message>> {
         let mut waiter = None;
         let mut woke_without_message = false;
+
         loop {
             if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 return Err(Error::Timeout);
             }
+
             match self.try_drain_with_spin(deadline, || cancel.is_canceled()) {
                 DrainResult::Message(msg) => return Ok(Some(msg)),
                 DrainResult::Closed => return Err(Error::Closed),
@@ -78,11 +85,14 @@ impl SpscAwareRecv {
                     if woke_without_message && cancel.is_canceled() {
                         return Ok(None);
                     }
+
                     woke_without_message = false;
                 }
             }
+
             let waiter = waiter.get_or_insert_with(|| self.handles.blocking_recv_waker.register());
             waiter.prepare_sleep();
+
             match self.try_drain() {
                 DrainResult::Message(msg) => {
                     return Ok(Some(msg));
@@ -95,20 +105,25 @@ impl SpscAwareRecv {
                         if cancel.is_canceled() {
                             return Ok(None);
                         }
+
                         continue;
                     }
+
                     if cancel.is_canceled() {
                         return Ok(None);
                     }
+
                     if let Some(deadline) = deadline {
                         let remaining = deadline.saturating_duration_since(Instant::now());
                         if remaining.is_zero() {
                             return Err(Error::Timeout);
                         }
+
                         waiter.park_timeout(remaining);
                     } else {
                         waiter.park();
                     }
+
                     woke_without_message = true;
                 }
             }
@@ -120,6 +135,7 @@ impl SpscAwareRecv {
         let Some(deadline) = now.checked_add(timeout) else {
             return self.blocking_recv();
         };
+
         self.blocking_recv_until(deadline)
     }
 
@@ -139,8 +155,10 @@ impl SpscAwareRecv {
                 DrainResult::Closed => return Err(Error::Closed),
                 DrainResult::Empty => {}
             }
+
             let waiter = waiter.get_or_insert_with(|| self.handles.blocking_recv_waker.register());
             waiter.prepare_sleep();
+
             match self.try_drain() {
                 DrainResult::Message(msg) => {
                     return Ok(msg);
@@ -153,12 +171,15 @@ impl SpscAwareRecv {
                         if Instant::now() >= deadline {
                             return Err(Error::Timeout);
                         }
+
                         continue;
                     }
+
                     let remaining = deadline.saturating_duration_since(Instant::now());
                     if remaining.is_zero() {
                         return Err(Error::Timeout);
                     }
+
                     waiter.park_timeout(remaining);
                 }
             }
@@ -178,19 +199,23 @@ impl SpscAwareRecv {
         if !matches!(result, DrainResult::Empty) || self.tuning.spin.is_zero() {
             return result;
         }
+
         let spin_deadline = (self.tuning.spin != Duration::MAX)
             .then(|| crate::socket::deadline_after(self.tuning.spin))
             .flatten();
+
         let deadline = match (deadline, spin_deadline) {
             (Some(timeout), Some(spin)) => Some(timeout.min(spin)),
             (timeout, spin) => timeout.or(spin),
         };
+
         let single = if self.spin_single {
             let state = self.drain_state.lock();
             (state.tcp.len() == 1 && state.tcp[0].spin_probe).then_some(state.generation)
         } else {
             None
         };
+
         let fanin_probe = self.active_fanin().filter(|_| !self.has_ring_sources());
         // Cheap idle probes check time once per eight attempts. Other
         // receive sources keep their per-attempt budget check. Cancellation
@@ -200,16 +225,19 @@ impl SpscAwareRecv {
         } else {
             1
         };
+
         while deadline.is_none_or(|deadline| Instant::now() < deadline) {
             if fanin_probe.is_some() && self.has_ring_sources() {
                 // A peer added during continuous spinning must join the
                 // full fair drain; the initial source snapshot is stale.
                 return self.try_drain();
             }
+
             for _ in 0..clock_stride {
                 if interrupted() {
                     return DrainResult::Empty;
                 }
+
                 std::hint::spin_loop();
                 let result = if let Some(fanin) = fanin_probe {
                     match fanin.try_recv_spinning() {
@@ -222,12 +250,14 @@ impl SpscAwareRecv {
                 } else {
                     self.try_drain()
                 };
+
                 match result {
                     DrainResult::Empty => {}
                     result => return result,
                 }
             }
         }
+
         DrainResult::Empty
     }
 
@@ -243,9 +273,11 @@ impl SpscAwareRecv {
         {
             return DrainResult::Empty;
         }
+
         {
             let mut state = self.drain_state.lock();
             self.refresh_snapshot(&mut state);
+
             if state.batch.is_empty()
                 && state.tcp.len() == 1
                 && state.tcp[0].spin_probe
@@ -260,14 +292,17 @@ impl SpscAwareRecv {
                     &mut budget,
                     DrainLimit::One,
                 );
+
                 if let Some(message) = outcome.message {
                     return DrainResult::Message(message);
                 }
+
                 if !outcome.disconnected {
                     return DrainResult::Empty;
                 }
             }
         }
+
         self.try_drain()
     }
 }

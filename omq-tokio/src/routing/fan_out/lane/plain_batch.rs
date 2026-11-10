@@ -23,10 +23,12 @@ impl LaneWorker {
         if batch.len() < 2 || self.mute_policy == FanOutMutePolicy::DropOldest {
             return 0;
         }
+
         let first = &batch[0];
         let first_max_bytes = first
             .byte_len()
             .saturating_add(first.len().saturating_mul(9));
+
         if first_max_bytes.saturating_mul(self.peers.len()) > FAN_OUT_TOTAL_COPY_BUDGET
             || first_max_bytes >= omq_proto::frame_buffer::ARENA_THRESHOLD
             || !filter::all_peers_subscribe_all(
@@ -41,9 +43,11 @@ impl LaneWorker {
         {
             return 0;
         }
+
         wire.clear_arena();
         ends.clear();
         let mut budget = DrainBudget::new(PLAIN_BATCH_MESSAGES, PLAIN_BATCH_BYTES);
+
         for msg in batch.iter().take(PLAIN_BATCH_MESSAGES) {
             let max_bytes = msg.byte_len().saturating_add(msg.len().saturating_mul(9));
             if max_bytes.saturating_mul(self.peers.len()) > FAN_OUT_TOTAL_COPY_BUDGET
@@ -52,13 +56,16 @@ impl LaneWorker {
             {
                 break;
             }
+
             let start = wire.total_bytes();
             wire.frame_inline(msg);
             ends.push(wire.total_bytes());
+
             if !budget.account(wire.total_bytes() - start) {
                 break;
             }
         }
+
         ends.len()
     }
 
@@ -81,11 +88,13 @@ impl LaneWorker {
             if next > 0 {
                 Self::touch_peer(peer_id, peer, touched);
             }
+
             if result == TryFrameResult::Full {
                 if self.mute_policy == FanOutMutePolicy::DropNewest {
                     peer.slot.deactivate_fanout();
                     continue;
                 }
+
                 pending.push(PendingBatchPeer {
                     peer_id,
                     slot: peer.slot.clone(),
@@ -126,10 +135,12 @@ impl LaneWorker {
                     target
                         .slot
                         .try_push_pre_framed_batch_no_signal(wire, ends, target.next);
+
                 if next > target.next {
                     Self::touch_peer(target.peer_id, peer, touched);
                     target.next = next;
                 }
+
                 if result != TryFrameResult::Full {
                     return false;
                 }
@@ -137,8 +148,10 @@ impl LaneWorker {
                 target.slot.signal_encoded();
                 let space = target.slot.space_available.clone();
                 waits.push(async move { space.changed_after(seen).await });
+
                 true
             });
+
             self.flush_touched(touched);
             if pending.is_empty() {
                 break;

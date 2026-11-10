@@ -12,12 +12,14 @@ fn compressed_arena_rejects_trailing_frames_and_content_size_mismatch() {
         .unwrap();
     let bytes = wire.part_bytes(0).unwrap();
     assert_eq!(bytes[4], 1);
+
     for delta in [-1i32, 1] {
         let mut bad = bytes.to_vec();
         let size = u32::from_le_bytes(bad[8..12].try_into().unwrap());
         bad[8..12].copy_from_slice(&size.checked_add_signed(delta).unwrap().to_le_bytes());
         assert!(ZstdDecoder::new().decode(Message::single(bad)).is_err());
     }
+
     let mut bad = bytes.to_vec();
     bad.extend_from_slice(&bytes[arena::HEADER..]);
     assert!(ZstdDecoder::new().decode(Message::single(bad)).is_err());
@@ -33,6 +35,7 @@ fn decode(decoder: &mut ZstdDecoder, wire: Message) -> Vec<Message> {
     while let Some(message) = decoder.poll_message() {
         messages.push(message);
     }
+
     messages
 }
 
@@ -43,9 +46,11 @@ fn arenas_roundtrip_mixed_parts_and_survive_retained_views() {
         Message::single(vec![b'x'; 1024]),
         Message::multipart([Bytes::new(), Bytes::from_static(b"tail"), Bytes::new()]),
     ];
+
     for threshold in [0, usize::MAX] {
         let mut encoder = ZstdEncoder::new().with_threshold(threshold);
         let mut decoder = ZstdDecoder::new();
+
         let wire = encoder
             .encode_arena(&messages.iter().collect::<Vec<_>>())
             .unwrap()
@@ -53,6 +58,7 @@ fn arenas_roundtrip_mixed_parts_and_survive_retained_views() {
             .unwrap();
         assert_eq!(&wire.part_slice(0).unwrap()[..4], &ARENA_SENTINEL);
         assert_eq!(decode(&mut decoder, wire), messages);
+
         let wire = encoder
             .encode_arena(&[&messages[1]; 4])
             .unwrap()
@@ -64,6 +70,7 @@ fn arenas_roundtrip_mixed_parts_and_survive_retained_views() {
             .unwrap()
             .part_bytes(0)
             .unwrap();
+
         while decoder.poll_message().is_some() {}
         drop(decoder);
         assert_eq!(retained.as_ref(), vec![b'x'; 1024]);
@@ -115,14 +122,17 @@ fn arena_rejects_bad_headers_frames_and_trailing_data_before_delivery() {
     ] {
         assert!(ZstdDecoder::new().decode(wire).is_err());
     }
+
     let valid = arena::raw_arena(ARENA_SENTINEL, &[0, 0, 0, 0], 2)
         .part_bytes(0)
         .unwrap();
+
     for (offset, value) in [(4, 2), (5, 1), (6, 1), (7, 1), (10, 2), (15, 1)] {
         let mut bytes = valid.to_vec();
         bytes[offset] = value;
         assert!(ZstdDecoder::new().decode(Message::single(bytes)).is_err());
     }
+
     assert!(
         ZstdDecoder::new()
             .decode(Message::multipart([valid.clone(), Bytes::new()]))
@@ -135,6 +145,7 @@ fn arena_rejects_bad_headers_frames_and_trailing_data_before_delivery() {
             .decode(Message::single(compressed))
             .is_err()
     );
+
     assert!(
         ZstdDecoder::new()
             .decode(arena::raw_arena(
@@ -154,12 +165,14 @@ fn pending_arena_cannot_be_overwritten_and_dictionary_ships_once() {
     let mut wire = encoder.encode_arena(&[&message; 128]).unwrap();
     assert_eq!(wire.len(), 2);
     assert!(is_dict_shipment(&wire[0]));
+
     let mut decoder = ZstdDecoder::new();
     assert!(decoder.decode(wire.remove(0)).unwrap().is_none());
     assert_eq!(
         decoder.decode(wire.pop().unwrap()).unwrap(),
         Some(message.clone())
     );
+
     let later = encoder.encode_arena(&[&message; 128]).unwrap();
     assert_eq!(later.len(), 1);
     assert!(decoder.decode(later[0].clone()).is_err());

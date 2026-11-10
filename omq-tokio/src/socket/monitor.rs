@@ -89,6 +89,7 @@ impl MonitorPublisher {
             let (tx, _) = broadcast::channel(self.capacity);
             tx
         });
+
         MonitorStream::new(tx.subscribe())
     }
 }

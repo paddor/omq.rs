@@ -104,6 +104,7 @@ impl Connection {
             .mapping
             .atomic64(crate::carrier::COUNT_OFFSET)
             .store(count as u64, Ordering::Relaxed);
+
         let descriptors = VecDeque::from([
             outgoing.mapping.descriptor()?,
             outgoing
@@ -117,6 +118,7 @@ impl Connection {
                 .expect("writer signal")
                 .try_clone()?,
         ]);
+
         Ok(Self {
             peer,
             outgoing,
@@ -151,12 +153,14 @@ impl Connection {
     pub fn accept_preface(&mut self, bytes: &[u8; PREFACE_SIZE]) -> io::Result<()> {
         let preface = wire::Preface::decode(bytes)?;
         let table = self.incoming("missing SHM lease descriptor")?;
+
         if table.mapping.id != preface.id
             || table.mapping.token != preface.token
             || table.count != preface.count
         {
             return Err(invalid("invalid SHM lease table size"));
         }
+
         Ok(())
     }
 
@@ -170,11 +174,13 @@ impl Connection {
         if bytes.iter().all(|bytes| bytes.is_empty()) {
             return Ok(0);
         }
+
         let written = socket::send(socket, bytes, &self.registrations.descriptors)?;
         if written != 0 && self.registrations.mark_sent() {
             // Registration capacity also uses the persistent credit wait.
             self.outgoing.notify();
         }
+
         Ok(written)
     }
 
@@ -188,10 +194,12 @@ impl Connection {
         if descriptors.len() > socket::SEND_LIMIT {
             return Err(invalid("too many SHM descriptors in one transfer"));
         }
+
         let count = descriptors.len();
         for file in descriptors {
             self.accept_descriptor(file)?;
         }
+
         if count != 0 {
             self.received_descriptors = self.received_descriptors.wrapping_add(count as u64);
             let incoming = self.incoming("missing SHM lease descriptor")?;
@@ -199,6 +207,7 @@ impl Connection {
                 .carrier
                 .acknowledge_imports(&incoming.mapping, self.received_descriptors)?;
         }
+
         Ok(received)
     }
 
@@ -218,6 +227,7 @@ impl Connection {
         {
             return Err(io::ErrorKind::WouldBlock.into());
         }
+
         if self
             .outgoing
             .mapping
@@ -227,6 +237,7 @@ impl Connection {
         {
             return Err(io::ErrorKind::BrokenPipe.into());
         }
+
         self.outgoing.carrier.write(&self.outgoing.mapping, bytes)
     }
 
@@ -281,6 +292,7 @@ impl Connection {
             table.carrier.accept_signal(file)?;
             return Ok(());
         }
+
         let mapping = Mapping::import(file)?;
         if mapping.kind == LEASES {
             let count = usize::try_from(
@@ -289,22 +301,27 @@ impl Connection {
                     .load(Ordering::Acquire),
             )
             .map_err(|_| invalid("invalid SHM lease count"))?;
+
             if self.incoming.is_some()
                 || !(1..=MAX_LEASES).contains(&count)
                 || mapping.len() != crate::carrier::Carrier::length(count)
             {
                 return Err(invalid("invalid SHM lease descriptor"));
             }
+
             self.incoming = Some(Arc::new(Table::new(
                 mapping,
                 count,
                 crate::carrier::Carrier::new(count, false)?,
             )));
+
             return Ok(());
         }
+
         let Some(incoming) = &self.incoming else {
             return Err(invalid("missing SHM lease descriptor"));
         };
+
         self.inbound.insert(mapping, incoming)
     }
 
@@ -346,6 +363,7 @@ impl Drop for Connection {
         if let Some(table) = &self.incoming {
             table.close_reader();
         }
+
         self.outgoing.stop();
         let _ = self.outgoing.carrier.notify_writer(&self.outgoing.mapping);
         // EOF alone never clears borrowed outgoing leases. Application pools

@@ -10,16 +10,20 @@ use omq_tokio::{DartCongestion, DartOptions, Endpoint, Message, Options, Socket,
 async fn capabilities_follow_live_carriers_without_retaining_closed_endpoints() {
     let socket = Socket::new(SocketType::Channel, Options::default());
     assert_eq!(dart_capabilities(&socket), None);
+
     let first = socket.bind(endpoint(0)).await.unwrap();
     let initial = dart_capabilities(&socket).unwrap();
     assert!((1..=64).contains(&initial.max_gso_segments));
     assert!((1..=64).contains(&initial.max_gro_segments));
+
     let second = socket.bind(endpoint(0)).await.unwrap();
     assert_eq!(dart_capabilities(&socket), Some(initial));
+
     socket.unbind(first).await.unwrap();
     assert_eq!(dart_capabilities(&socket), Some(initial));
     socket.unbind(second).await.unwrap();
     assert_eq!(dart_capabilities(&socket), None);
+
     socket.clone_shared().close().await.unwrap();
     assert_eq!(dart_capabilities(&socket), None);
 }
@@ -54,6 +58,7 @@ async fn send_ready(
         &mut output,
     )
     .unwrap();
+
     socket.send_to(&output[..length], target).await.unwrap();
 }
 
@@ -81,6 +86,7 @@ async fn response(socket: &tokio::net::UdpSocket) -> u64 {
         SocketType::Dish => SocketType::Radio,
         _ => panic!("unexpected raw peer type"),
     };
+
     let mut bytes = [0; dart::MAX_DATAGRAM];
     let length = dart::encode_ready(
         Ready {
@@ -94,6 +100,7 @@ async fn response(socket: &tokio::net::UdpSocket) -> u64 {
         &mut bytes,
     )
     .unwrap();
+
     socket.send_to(&bytes[..length], target).await.unwrap();
     session
 }
@@ -136,11 +143,13 @@ async fn ready(socket: &Socket, count: usize) {
             if socket.connections().await.unwrap().len() == count {
                 break;
             }
+
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
     })
     .await
     .expect("DART readiness");
+
     // Activation follows route publication through the separate control plane.
     tokio::time::sleep(Duration::from_millis(5)).await;
 }
@@ -156,6 +165,7 @@ fn pooled(pool: &omq_tokio::PayloadPool, size: usize, byte: u8) -> Message {
     let mut buffer = pool.try_buffer(1).unwrap();
     buffer.writable()[..size].fill(byte);
     buffer.set_len(size).unwrap();
+
     buffer.into_message()
 }
 
@@ -168,12 +178,14 @@ async fn scatter_gather_preserves_exact_body_lengths_including_empty() {
     scatter.connect(endpoint).await.unwrap();
     ready(&gather, 1).await;
     ready(&scatter, 1).await;
+
     for size in [0, 16, 64, 256, 1024] {
         scatter.send(pooled(&pool, size, 7)).await.unwrap();
         let message = receive(&gather).await;
         assert_eq!(message.len(), 1);
         assert_eq!(message.part_slice(0).unwrap(), vec![7; size]);
     }
+
     scatter.close().await.unwrap();
     gather.close().await.unwrap();
 }
@@ -182,20 +194,24 @@ async fn scatter_gather_preserves_exact_body_lengths_including_empty() {
 async fn malformed_packed_body_cannot_partially_advance_receipt() {
     let gather = Socket::new(SocketType::Gather, Options::default());
     let target = address(&gather.bind(endpoint(0)).await.unwrap());
+
     let raw = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     send_ready(&raw, target, SocketType::Scatter, None, true).await;
     let session = response(&raw).await;
+
     let mut packet = vec![2, 1, 255];
     packet.extend_from_slice(&session.to_le_bytes());
     packet.extend_from_slice(&0u64.to_le_bytes());
     packet.push(7);
     packet.resize(packet.len() + 1025, 8);
+
     raw.send_to(&packet, target).await.unwrap();
     assert!(
         tokio::time::timeout(Duration::from_millis(20), gather.recv())
             .await
             .is_err()
     );
+
     RawSession::new(&raw, target, session)
         .send_data(0, b"valid", None)
         .await;
@@ -203,6 +219,7 @@ async fn malformed_packed_body_cannot_partially_advance_receipt() {
         receive(&gather).await.part_slice(0),
         Some(b"valid".as_slice())
     );
+
     gather.close().await.unwrap();
 }
 
@@ -217,6 +234,7 @@ async fn client_server_roundtrip_uses_local_routing_id() {
         .unwrap();
     ready(&server, 1).await;
     ready(&client, 1).await;
+
     for size in [0, 16, 64, 256, 1024] {
         client.send(pooled(&pool, size, 8)).await.unwrap();
         let request = receive(&server).await;
@@ -227,6 +245,7 @@ async fn client_server_roundtrip_uses_local_routing_id() {
         assert_eq!(response.routing_id(), None);
         assert_eq!(response.part_slice(0).unwrap(), vec![8; size]);
     }
+
     client.close().await.unwrap();
     server.close().await.unwrap();
 }
@@ -236,15 +255,19 @@ async fn channel_roundtrip_and_unbind_release_port_before_ack() {
     let pool = omq_tokio::PayloadPool::new([(2048, 64)]).unwrap();
     let server = Socket::new(SocketType::Channel, Options::default());
     let client = Socket::new(SocketType::Channel, Options::default());
+
     let address = server.bind(endpoint(0)).await.unwrap();
     client.connect(address.clone()).await.unwrap();
     ready(&server, 1).await;
     ready(&client, 1).await;
+
     client.send(pooled(&pool, 64, 3)).await.unwrap();
     server.send(receive(&server).await).await.unwrap();
     assert_eq!(receive(&client).await.part_slice(0).unwrap(), &[3; 64]);
+
     server.unbind(address.clone()).await.unwrap();
     assert_eq!(server.bind(address.clone()).await.unwrap(), address);
+
     client.close().await.unwrap();
     server.close().await.unwrap();
 }
@@ -260,12 +283,14 @@ async fn peer_roundtrip_keeps_identity_outside_datagram_body() {
         SocketType::Peer,
         Options::default().identity(Bytes::from_static(b"client")),
     );
+
     client
         .connect(server.bind(endpoint(0)).await.unwrap())
         .await
         .unwrap();
     ready(&server, 1).await;
     ready(&client, 1).await;
+
     client
         .send(Message::with_prefix(
             Bytes::from_static(b"server"),
@@ -276,10 +301,12 @@ async fn peer_roundtrip_keeps_identity_outside_datagram_body() {
     let request = receive(&server).await;
     assert_eq!(request.part_slice(0).unwrap(), b"client");
     assert_eq!(request.part_slice(1).unwrap(), &[9; 1024]);
+
     server.send(request).await.unwrap();
     let response = receive(&client).await;
     assert_eq!(response.part_slice(0).unwrap(), b"server");
     assert_eq!(response.part_slice(1).unwrap(), &[9; 1024]);
+
     client.close().await.unwrap();
     server.close().await.unwrap();
 }
@@ -296,15 +323,18 @@ async fn dish_inline_group_credit_is_independent_of_application_clones() {
             },
             ..Options::default()
         };
+
         let group = Bytes::from(vec![b'g'; group_size]);
         let radio = Socket::new(SocketType::Radio, options.clone());
         let dish = Socket::new(SocketType::Dish, options);
+
         dish.join(group.clone()).await.unwrap();
         radio
             .connect(dish.bind(endpoint(0)).await.unwrap())
             .await
             .unwrap();
         ready(&radio, 1).await;
+
         radio
             .send_group(group.clone(), Message::single(vec![1; body_size]))
             .await
@@ -312,10 +342,12 @@ async fn dish_inline_group_credit_is_independent_of_application_clones() {
         let first = receive(&dish).await;
         let held = first.clone();
         drop(first);
+
         radio
             .send_group(group.clone(), Message::single(vec![2; body_size]))
             .await
             .unwrap();
+
         if group_size + body_size == 54 {
             assert_eq!(held.retained_size(), Some(std::mem::size_of::<Message>()));
             let next = receive(&dish).await;
@@ -334,6 +366,7 @@ async fn dish_inline_group_credit_is_independent_of_application_clones() {
                 vec![2; body_size]
             );
         }
+
         radio.close().await.unwrap();
         dish.close().await.unwrap();
     }
@@ -353,17 +386,21 @@ async fn radio_fanout_keeps_mixed_fragment_batches_ordered() {
             },
             ..Options::default()
         };
+
         let radio = Socket::new(SocketType::Radio, options.clone());
         let target = radio.bind(endpoint(0)).await.unwrap();
         let mut dishes = Vec::new();
+
         for _ in 0..4 {
             let dish = Socket::new(SocketType::Dish, options.clone());
             dish.join("fanout").await.unwrap();
             dish.connect(target.clone()).await.unwrap();
             dishes.push(dish);
         }
+
         ready(&radio, 4).await;
         let sizes = [16, 4096, 64, 16384, 1024];
+
         let send = async {
             for sequence in 0_u64..257 {
                 let mut body = vec![7; sizes[sequence as usize % sizes.len()]];
@@ -374,6 +411,7 @@ async fn radio_fanout_keeps_mixed_fragment_batches_ordered() {
                     .unwrap();
             }
         };
+
         let receivers = dishes.iter().map(|dish| async {
             for sequence in 0_u64..257 {
                 let message = dish.recv().await.unwrap();
@@ -384,11 +422,13 @@ async fn radio_fanout_keeps_mixed_fragment_batches_ordered() {
                 assert!(body[8..].iter().all(|byte| *byte == 7));
             }
         });
+
         tokio::time::timeout(Duration::from_secs(10), async {
             tokio::join!(send, futures::future::join_all(receivers));
         })
         .await
         .unwrap();
+
         radio.close().await.unwrap();
         for dish in dishes {
             dish.close().await.unwrap();
@@ -401,6 +441,7 @@ async fn radio_dish_filters_locally_and_preserves_group() {
     let pool = omq_tokio::PayloadPool::new([(2048, 64)]).unwrap();
     let radio = Socket::new(SocketType::Radio, Options::default());
     let dish = Socket::new(SocketType::Dish, Options::default());
+
     dish.join(Bytes::from_static(b"quotes")).await.unwrap();
     radio
         .connect(dish.bind(endpoint(0)).await.unwrap())
@@ -408,6 +449,7 @@ async fn radio_dish_filters_locally_and_preserves_group() {
         .unwrap();
     ready(&radio, 1).await;
     ready(&dish, 1).await;
+
     radio
         .send(Message::with_prefix(
             Bytes::from_static(b"other"),
@@ -422,9 +464,11 @@ async fn radio_dish_filters_locally_and_preserves_group() {
         ))
         .await
         .unwrap();
+
     let message = receive(&dish).await;
     assert_eq!(message.part_slice(0).unwrap(), b"quotes");
     assert_eq!(message.part_slice(1).unwrap(), &[2; 256]);
+
     radio.close().await.unwrap();
     dish.close().await.unwrap();
 }
@@ -435,6 +479,7 @@ async fn dish_group_changes_reach_every_endpoint() {
     dish.join("changing").await.unwrap();
     dish.join("stable").await.unwrap();
     let mut radios = Vec::new();
+
     for _ in 0..2 {
         let radio = Socket::new(SocketType::Radio, Options::default());
         radio
@@ -444,6 +489,7 @@ async fn dish_group_changes_reach_every_endpoint() {
         ready(&radio, 1).await;
         radios.push(radio);
     }
+
     ready(&dish, 2).await;
     for radio in &radios {
         radio
@@ -455,6 +501,7 @@ async fn dish_group_changes_reach_every_endpoint() {
             Message::with_group("changing", "before")
         );
     }
+
     dish.leave("changing").await.unwrap();
     for radio in &radios {
         radio
@@ -467,6 +514,7 @@ async fn dish_group_changes_reach_every_endpoint() {
             .unwrap();
         assert_eq!(receive(&dish).await, Message::with_group("stable", "after"));
     }
+
     dish.join("changing").await.unwrap();
     for radio in radios {
         radio
@@ -479,6 +527,7 @@ async fn dish_group_changes_reach_every_endpoint() {
         );
         radio.close().await.unwrap();
     }
+
     dish.close().await.unwrap();
 }
 
@@ -496,6 +545,7 @@ async fn held_receive_storage_backpressures_and_final_clone_drop_returns_credit(
             ..Options::default()
         },
     );
+
     let scatter = Socket::new(SocketType::Scatter, Options::default());
     scatter
         .connect(gather.bind(endpoint(0)).await.unwrap())
@@ -503,10 +553,12 @@ async fn held_receive_storage_backpressures_and_final_clone_drop_returns_credit(
         .unwrap();
     ready(&scatter, 1).await;
     ready(&gather, 1).await;
+
     scatter.send(pooled(&pool, 256, 1)).await.unwrap();
     let held = receive(&gather).await;
     let clone = held.clone();
     drop(held);
+
     scatter.send(pooled(&pool, 256, 2)).await.unwrap();
     assert!(
         tokio::time::timeout(Duration::from_millis(30), gather.recv())
@@ -515,10 +567,13 @@ async fn held_receive_storage_backpressures_and_final_clone_drop_returns_credit(
     );
     assert_eq!(gather.connections().await.unwrap().len(), 1);
     assert_eq!(dart_stats(&gather).pool_exhausted, 0);
+
     // Receive storage is independent of application-created send buffers.
     assert!(pool.try_buffer(1).is_some());
+
     drop(clone);
     assert_eq!(receive(&gather).await.part_slice(0).unwrap(), &[2; 256]);
+
     scatter.close().await.unwrap();
     gather.close().await.unwrap();
 }
@@ -534,6 +589,7 @@ async fn concurrent_receives_preserve_delivery_with_one_or_multiple_handles() {
             },
             ..Options::default()
         };
+
         let gather = Socket::new(SocketType::Gather, options.clone());
         let scatter = Socket::new(SocketType::Scatter, options);
         scatter
@@ -542,6 +598,7 @@ async fn concurrent_receives_preserve_delivery_with_one_or_multiple_handles() {
             .unwrap();
         ready(&scatter, 1).await;
         ready(&gather, 1).await;
+
         let (left, right) = if one_handle {
             let socket = std::sync::Arc::new(gather);
             (socket.clone(), socket)
@@ -551,12 +608,14 @@ async fn concurrent_receives_preserve_delivery_with_one_or_multiple_handles() {
                 std::sync::Arc::new(gather),
             )
         };
+
         for sequence in 0..128_u64 {
             scatter
                 .send(Message::from_slice(&sequence.to_le_bytes()))
                 .await
                 .unwrap();
         }
+
         let first = tokio::spawn(concurrent_receive_batch(left.clone()));
         let second = tokio::spawn(concurrent_receive_batch(right.clone()));
         let (first, second) = tokio::time::timeout(Duration::from_secs(3), async {
@@ -564,10 +623,12 @@ async fn concurrent_receives_preserve_delivery_with_one_or_multiple_handles() {
         })
         .await
         .unwrap();
+
         let mut sequences = first.unwrap();
         sequences.extend(second.unwrap());
         sequences.sort_unstable();
         assert_eq!(sequences, (0..128).collect::<Vec<_>>());
+
         drop(right);
         // Returning to one handle keeps the same consumer position.
         scatter
@@ -578,6 +639,7 @@ async fn concurrent_receives_preserve_delivery_with_one_or_multiple_handles() {
             receive(&left).await.part_slice(0).unwrap(),
             &128_u64.to_le_bytes()
         );
+
         scatter.close().await.unwrap();
         std::sync::Arc::try_unwrap(left)
             .expect("receive workers released their socket")
@@ -595,6 +657,7 @@ async fn concurrent_receive_batch(socket: std::sync::Arc<Socket>) -> Vec<u64> {
             message.part_slice(0).unwrap().try_into().unwrap(),
         ));
     }
+
     sequences
 }
 
@@ -628,6 +691,7 @@ fn spawn_malformed_flood(
     tokio::spawn(async move {
         let oversized = [0u8; dart::MAX_DATAGRAM + 1];
         let started = std::time::Instant::now();
+
         while !stop.is_cancelled() && started.elapsed() < Duration::from_secs(2) {
             for packet in [&[0; 17][..], &oversized[..], b"\xc0\x05READYbroken"] {
                 // Bound kernel backlog by receiver progress. Oversized GRO
@@ -637,6 +701,7 @@ fn spawn_malformed_flood(
                 } else {
                     32
                 };
+
                 let until = dart_stats(&receiver).invalid_datagrams + count;
 
                 for _ in 0..count {
@@ -649,9 +714,11 @@ fn spawn_malformed_flood(
                     if stop.is_cancelled() || started.elapsed() >= Duration::from_secs(2) {
                         return;
                     }
+
                     tokio::task::yield_now().await;
                 }
             }
+
             tokio::task::yield_now().await;
         }
     })
@@ -665,6 +732,7 @@ async fn wait_for_invalid_datagram(socket: &Socket) {
             if stats.invalid_datagrams != 0 {
                 break;
             }
+
             tokio::task::yield_now().await;
         }
     })
@@ -678,6 +746,7 @@ async fn malformed_flood_and_closed_receive_window_preserve_handshake_and_teardo
     let gather = single_slot_gather(&pool);
     let bound = gather.bind(endpoint(0)).await.unwrap();
     let target = address(&bound);
+
     let raw = std::sync::Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
     send_ready(&raw, target, SocketType::Scatter, None, true).await;
     let session = response(&raw).await;
@@ -697,12 +766,14 @@ async fn malformed_flood_and_closed_receive_window_preserve_handshake_and_teardo
     // continues and the sole receive slot is retained by the application.
     let probe = Socket::new(SocketType::Scatter, Options::default());
     probe.connect(bound.clone()).await.unwrap();
+
     tokio::time::timeout(Duration::from_secs(1), async {
         ready(&probe, 1).await;
         ready(&gather, 2).await;
     })
     .await
     .expect("DART handshake must progress with receive credit closed");
+
     assert!(
         pool.try_buffer(1).is_none(),
         "control cannot consume another body slot"
@@ -736,6 +807,7 @@ async fn readiness_requires_challenge_confirmation_and_rejects_stale_data() {
     let (session, _, _) = welcome(&raw).await;
     assert!(gather.connections().await.unwrap().is_empty());
     let mut bytes = [0; dart::MAX_DATAGRAM];
+
     let length = dart::encode_ready(
         Ready {
             socket_type: SocketType::Scatter,
@@ -748,13 +820,16 @@ async fn readiness_requires_challenge_confirmation_and_rejects_stale_data() {
         &mut bytes,
     )
     .unwrap();
+
     raw.send_to(&bytes[..length], target).await.unwrap();
     tokio::time::sleep(Duration::from_millis(10)).await;
     assert!(gather.connections().await.unwrap().is_empty());
+
     send_ready(&raw, target, SocketType::Scatter, None, true).await;
     let confirmed = response(&raw).await;
     assert_eq!(confirmed, session);
     ready(&gather, 1).await;
+
     RawSession::new(&raw, target, session.wrapping_add(1))
         .send_data(0, b"stale", None)
         .await;
@@ -762,6 +837,7 @@ async fn readiness_requires_challenge_confirmation_and_rejects_stale_data() {
         .send_data(0, b"fresh", None)
         .await;
     assert_eq!(receive(&gather).await.part_slice(0).unwrap(), b"fresh");
+
     gather.close().await.unwrap();
 }
 
@@ -832,6 +908,7 @@ impl RelayFaults {
                 drop_packet = true;
             }
         }
+
         if drop_packet {
             return RelayAction::Swallow;
         }
@@ -843,6 +920,7 @@ impl RelayFaults {
 
         let duplicate = sequences.contains(&6) && !self.duplicated;
         self.duplicated |= duplicate;
+
         if duplicate {
             RelayAction::ForwardTwice
         } else {
@@ -888,6 +966,7 @@ async fn faulty_relay(
         if action == RelayAction::ForwardTwice {
             relay.send_to(&bytes[..length], destination).await.unwrap();
         }
+
         // Release the held packet after a later one to reorder it.
         if !server && let Some(delayed) = faults.reordered.take() {
             relay.send_to(&delayed, destination).await.unwrap();
@@ -923,22 +1002,27 @@ async fn recover_faults(congestion: DartCongestion, profile: WorkloadProfile, si
         },
         ..Options::default()
     };
+
     let gather = Socket::new(SocketType::Gather, options.clone());
     let scatter = Socket::new(SocketType::Scatter, options);
     let target = address(&gather.bind(endpoint(0)).await.unwrap());
+
     let relay = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let relay_endpoint = endpoint(relay.local_addr().unwrap().port());
     let stop = tokio_util::sync::CancellationToken::new();
     let cancel = stop.clone();
     let forwarder = tokio::spawn(faulty_relay(relay, target, cancel));
+
     scatter.connect(relay_endpoint).await.unwrap();
     ready(&scatter, 1).await;
     ready(&gather, 1).await;
+
     for sequence in 0..128_u64 {
         let mut body = vec![7; size];
         body[..8].copy_from_slice(&sequence.to_le_bytes());
         scatter.send(Message::single(body)).await.unwrap();
     }
+
     let mut received = 0;
     let delivery = tokio::time::timeout(Duration::from_secs(3), async {
         for sequence in 0..128_u64 {
@@ -951,6 +1035,7 @@ async fn recover_faults(congestion: DartCongestion, profile: WorkloadProfile, si
         }
     })
     .await;
+
     assert!(
         delivery.is_ok(),
         "size={size} congestion={congestion:?} profile={profile:?} received={received} sender={:?} receiver={:?}",
@@ -983,17 +1068,21 @@ async fn peer_limit_is_socket_wide_and_malformed_ready_cannot_allocate_routes() 
             ..Options::default()
         },
     );
+
     let first = address(&gather.bind(endpoint(0)).await.unwrap());
     let second = address(&gather.bind(endpoint(0)).await.unwrap());
     let raw = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let other = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
     raw.send_to(b"\xc0\x05READYbroken", first).await.unwrap();
     send_ready(&raw, first, SocketType::Client, None, true).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
     assert!(gather.connections().await.unwrap().is_empty());
+
     send_ready(&raw, first, SocketType::Scatter, None, true).await;
     response(&raw).await;
     ready(&gather, 1).await;
+
     send_ready(&other, second, SocketType::Scatter, None, true).await;
     let mut bytes = [0; 1200];
     assert!(
@@ -1002,6 +1091,7 @@ async fn peer_limit_is_socket_wide_and_malformed_ready_cannot_allocate_routes() 
             .is_err()
     );
     assert_eq!(gather.connections().await.unwrap().len(), 1);
+
     gather.close().await.unwrap();
 }
 
@@ -1018,23 +1108,28 @@ async fn invalid_traffic_cannot_renew_a_lease_and_reconnection_reassigns_routing
         .await;
     let old_id = receive(&server).await.routing_id().unwrap();
     let until = tokio::time::Instant::now() + Duration::from_millis(3200);
+
     while tokio::time::Instant::now() < until {
         raw.send_to(&[0, 8], target).await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+
     ready(&server, 0).await;
     while server.try_recv().is_ok() {}
     let mut bytes = [0; dart::MAX_DATAGRAM];
     while raw.try_recv_from(&mut bytes).is_ok() {}
+
     send_ready(&raw, target, SocketType::Client, None, true).await;
     let session = response(&raw).await;
     ready(&server, 1).await;
+
     RawSession::new(&raw, target, session)
         .send_data(0, &[9], None)
         .await;
     let fresh = receive(&server).await;
     assert_ne!(fresh.routing_id(), Some(old_id));
     assert_eq!(fresh.part_slice(0).unwrap(), &[9]);
+
     server.close().await.unwrap();
 }
 
@@ -1044,24 +1139,29 @@ async fn full_receive_lane_retains_messages_and_other_sources_progress() {
     let gather = Socket::new(SocketType::Gather, Options::default().recv_hwm(1));
     let slow = Socket::new(SocketType::Scatter, Options::default());
     let fast = Socket::new(SocketType::Scatter, Options::default());
+
     let target = gather.bind(endpoint(0)).await.unwrap();
     slow.connect(target.clone()).await.unwrap();
     fast.connect(target).await.unwrap();
     ready(&gather, 2).await;
     ready(&slow, 1).await;
     ready(&fast, 1).await;
+
     slow.send(pooled(&pool, 16, 1)).await.unwrap();
     let (receipt, message) = gather.recv_with_receipt(None).await.unwrap();
     assert_eq!(message.part_slice(0).unwrap(), &[1; 16]);
     let source = receipt.lane().unwrap().clone();
+
     for _ in 0..8 {
         slow.send(pooled(&pool, 16, 2)).await.unwrap();
     }
+
     tokio::time::sleep(Duration::from_millis(20)).await;
     fast.send(pooled(&pool, 16, 3)).await.unwrap();
     assert_eq!(receive(&gather).await.part_slice(0).unwrap(), &[3; 16]);
     drop(receipt);
     drop(message);
+
     for _ in 0..8 {
         let (_, queued) = tokio::time::timeout(
             Duration::from_secs(1),
@@ -1072,6 +1172,7 @@ async fn full_receive_lane_retains_messages_and_other_sources_progress() {
         .unwrap();
         assert_eq!(queued.part_slice(0).unwrap(), &[2; 16]);
     }
+
     assert_eq!(dart_stats(&gather).receive_overflow, 0);
     slow.close().await.unwrap();
     fast.close().await.unwrap();
@@ -1084,21 +1185,26 @@ async fn connect_before_bind_queues_locally_and_reconnects_after_rebind() {
     let reservation = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     let target = endpoint(reservation.local_addr().unwrap().port());
     drop(reservation);
+
     let scatter = Socket::new(SocketType::Scatter, Options::default());
     let gather = Socket::new(SocketType::Gather, Options::default());
     scatter.connect(target.clone()).await.unwrap();
     scatter.send(pooled(&pool, 16, 1)).await.unwrap();
+
     gather.bind(target.clone()).await.unwrap();
     ready(&gather, 1).await;
     ready(&scatter, 1).await;
     assert_eq!(receive(&gather).await.part_slice(0).unwrap(), &[1; 16]);
+
     gather.unbind(target.clone()).await.unwrap();
     ready(&scatter, 0).await;
     scatter.send(pooled(&pool, 16, 2)).await.unwrap();
+
     gather.bind(target).await.unwrap();
     ready(&gather, 1).await;
     ready(&scatter, 1).await;
     assert_eq!(receive(&gather).await.part_slice(0).unwrap(), &[2; 16]);
+
     scatter.close().await.unwrap();
     gather.close().await.unwrap();
 }
@@ -1121,6 +1227,7 @@ async fn unsupported_types_destinations_and_spin_budgets_fail_during_setup() {
         assert!(socket.connect(endpoint(1234)).await.is_err());
         socket.close().await.unwrap();
     }
+
     let socket = Socket::new(
         SocketType::Scatter,
         Options::default().recv_spin(Duration::from_micros(51)),
@@ -1128,6 +1235,7 @@ async fn unsupported_types_destinations_and_spin_budgets_fail_during_setup() {
     assert!(socket.bind(endpoint(0)).await.is_err());
     socket.close().await.unwrap();
     let socket = Socket::new(SocketType::Scatter, Options::default());
+
     for target in [
         "dart://*:1234",
         "dart://127.0.0.1:0",
@@ -1135,6 +1243,7 @@ async fn unsupported_types_destinations_and_spin_budgets_fail_during_setup() {
     ] {
         assert!(socket.connect(target).await.is_err());
     }
+
     socket.close().await.unwrap();
 }
 
@@ -1157,6 +1266,7 @@ async fn large_messages_stream_atomically_across_a_single_slot_window() {
             },
             ..Options::default()
         };
+
         let gather = Socket::new(SocketType::Gather, options.clone());
         let scatter = Socket::new(SocketType::Scatter, options);
         scatter
@@ -1164,6 +1274,7 @@ async fn large_messages_stream_atomically_across_a_single_slot_window() {
             .await
             .unwrap();
         ready(&scatter, 1).await;
+
         for size in [4096, 16384, 70_001] {
             let body: Vec<_> = (0..size).map(|index| index as u8).collect();
             scatter.send(Message::single(body.clone())).await.unwrap();
@@ -1172,24 +1283,29 @@ async fn large_messages_stream_atomically_across_a_single_slot_window() {
                 .unwrap()
                 .unwrap();
             assert_eq!(message.part_slice(0), Some(body.as_slice()));
+
             let clone = message.clone();
             let view = message.part_bytes(0).unwrap();
             drop(message);
+
             scatter.send(Message::single("after")).await.unwrap();
             assert!(
                 tokio::time::timeout(Duration::from_millis(10), gather.recv())
                     .await
                     .is_err()
             );
+
             drop(clone);
             assert!(
                 tokio::time::timeout(Duration::from_millis(10), gather.recv())
                     .await
                     .is_err()
             );
+
             drop(view);
             assert_eq!(receive(&gather).await.part_slice(0).unwrap(), b"after");
         }
+
         scatter.close().await.unwrap();
         gather.close().await.unwrap();
     }
@@ -1205,6 +1321,7 @@ async fn oversized_first_is_rejected_before_allocation_and_other_senders_continu
         },
     );
     let target = gather.bind(endpoint(0)).await.unwrap();
+
     for advertised in [4097, u64::MAX] {
         let raw = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         send_ready(&raw, address(&target), SocketType::Scatter, None, true).await;
@@ -1221,6 +1338,7 @@ async fn oversized_first_is_rejected_before_allocation_and_other_senders_continu
             .await
             .unwrap();
     }
+
     let scatter = Socket::new(SocketType::Scatter, Options::default());
     scatter.connect(target).await.unwrap();
     ready(&scatter, 1).await;
@@ -1240,6 +1358,7 @@ async fn fragmented_radio_groups_preserve_metadata_and_filter_atomic_bodies() {
         },
         ..Options::default()
     };
+
     let dish = Socket::new(SocketType::Dish, options.clone());
     let radio = Socket::new(SocketType::Radio, options);
     let group = Bytes::from(vec![b'g'; 255]);
@@ -1256,6 +1375,7 @@ async fn fragmented_radio_groups_preserve_metadata_and_filter_atomic_bodies() {
         ))
         .await
         .unwrap();
+
     for size in [1024, 16384] {
         radio
             .send(Message::with_prefix(
@@ -1268,6 +1388,7 @@ async fn fragmented_radio_groups_preserve_metadata_and_filter_atomic_bodies() {
         assert_eq!(message.part_slice(0), Some(group.as_ref()));
         assert_eq!(message.part_slice(1), Some(vec![7; size].as_slice()));
     }
+
     radio.close().await.unwrap();
     dish.close().await.unwrap();
 }
@@ -1312,6 +1433,7 @@ async fn separate_datagrams(profile: WorkloadProfile, io_spin: Duration) {
             ..Options::default()
         },
     );
+
     let target = address(&gather.bind(endpoint(0)).await.unwrap());
     let raw = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     send_ready(&raw, target, SocketType::Scatter, None, true).await;
@@ -1320,9 +1442,11 @@ async fn separate_datagrams(profile: WorkloadProfile, io_spin: Duration) {
     let before = dart_stats(&gather);
     let bodies: Vec<_> = (0..97).map(|index| vec![index; 16]).collect();
     let peer = RawSession::new(&raw, target, session);
+
     for (sequence, body) in bodies.iter().enumerate() {
         peer.send_data(sequence as u64, body, None).await;
     }
+
     let mut received = Vec::new();
     for _ in 0..97 {
         let message = receive(&gather).await;
@@ -1331,6 +1455,7 @@ async fn separate_datagrams(profile: WorkloadProfile, io_spin: Duration) {
         assert!(body.iter().all(|byte| *byte == body[0]));
         received.push(body[0]);
     }
+
     assert_eq!(received, (0..97).collect::<Vec<_>>());
     // Counters are published at the end of the bounded receive turn.
     tokio::task::yield_now().await;
@@ -1356,14 +1481,17 @@ async fn dish_filters_groups_across_separate_datagrams() {
         (b"last", Some(b"alpha")),
     ];
     let peer = RawSession::new(&raw, target, session);
+
     for (sequence, (body, group)) in records.into_iter().enumerate() {
         peer.send_data(sequence as u64, body, group).await;
     }
+
     for expected in [b"first".as_slice(), b"last"] {
         let message = receive(&dish).await;
         assert_eq!(message.part_slice(0), Some(b"alpha".as_slice()));
         assert_eq!(message.part_slice(1), Some(expected));
     }
+
     assert!(
         tokio::time::timeout(Duration::from_millis(20), dish.recv())
             .await
@@ -1384,6 +1512,7 @@ async fn unconfirmed_hellos_get_one_welcome_each_and_never_take_ready_slots() {
             ..Options::default()
         },
     );
+
     let target = address(&gather.bind(endpoint(0)).await.unwrap());
     // A source that never confirms gets one WELCOME per HELLO, not a stream
     // of retransmissions toward a possibly spoofed address.
@@ -1391,12 +1520,14 @@ async fn unconfirmed_hellos_get_one_welcome_each_and_never_take_ready_slots() {
     send_ready(&silent, target, SocketType::Scatter, None, true).await;
     let mut bytes = [0; dart::MAX_DATAGRAM];
     let mut welcomes = 0;
+
     while tokio::time::timeout(Duration::from_millis(400), silent.recv_from(&mut bytes))
         .await
         .is_ok()
     {
         welcomes += 1;
     }
+
     assert_eq!(welcomes, 1);
     // Its pending handshake does not hold the only ready slot.
     let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();

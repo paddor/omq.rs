@@ -142,9 +142,11 @@ fn message_multipart_inlines_small_parts() {
         Bytes::copy_from_slice(&[b'b'; MAX_INLINE_PAYLOAD]),
         Bytes::copy_from_slice(&[b'c'; MAX_INLINE_PAYLOAD + 1]),
     ]);
+
     let MessageInner::Multi(parts) = &m.inner else {
         panic!("expected multipart");
     };
+
     assert!(matches!(parts[0].inner, PayloadInner::Inline { .. }));
     assert!(matches!(parts[1].inner, PayloadInner::Inline { .. }));
     assert!(matches!(parts[2].inner, PayloadInner::Single(_)));
@@ -230,9 +232,11 @@ fn message_pop_front_payload_keeps_inline_and_shared_storage() {
         let first = message.pop_front_payload().unwrap();
         assert_eq!(first.as_slice(), b"id");
         assert!(matches!(first.inner, PayloadInner::Inline { .. }));
+
         if let Some(body) = message.pop_front_payload() {
             assert_eq!(body.as_slice().as_ptr(), large.as_ptr());
         }
+
         assert!(message.is_empty());
         assert!(message.pop_front_payload().is_none());
     }
@@ -267,6 +271,7 @@ fn push_inline_appends_filled_message() {
     let full = [0x5A; MAX_INLINE_MESSAGE];
     Message::push_inline(&mut queue, MAX_INLINE_MESSAGE).copy_from_slice(&full);
     Message::push_inline(&mut queue, 0);
+
     assert_eq!(queue.len(), 4);
     assert_eq!(queue[1].part_slice(0), Some(b"hello".as_slice()));
     assert!(matches!(
@@ -346,15 +351,18 @@ fn message_with_prefix_reuses_multipart_storage() {
             parts.extend([Payload::from_slice(b""), Payload::from_slice(b"data")]);
             let storage = parts.as_ptr();
             let mut body = Message::from_payloads_vec(parts);
+
             if routed {
                 body = body.with_routing_id(42);
             }
+
             let message = Message::with_prefix(prefix.clone(), body);
             let (MessageInner::Multi(parts) | MessageInner::RoutedMulti { parts, .. }) =
                 &message.inner
             else {
                 panic!("expected multipart storage");
             };
+
             assert_eq!(parts.as_ptr(), storage);
             assert_eq!(message.part_slice(0), Some(prefix.as_ref()));
             assert_eq!(message.part_slice(1), Some(b"".as_slice()));
@@ -379,9 +387,11 @@ fn message_repeated_empty_prefix_preserves_every_frame() {
         for count in 1..=4 {
             message = Message::with_prefix(Bytes::new(), message);
             assert_eq!(message.len(), count + 1);
+
             for index in 0..count {
                 assert_eq!(message.part_slice(index), Some(b"".as_slice()));
             }
+
             assert_eq!(message.part_slice(count), Some(payload.as_ref()));
         }
     }

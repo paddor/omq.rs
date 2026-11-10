@@ -66,13 +66,16 @@ impl<W: Write> DirectWriteState<W> {
         if self.is_closed() {
             return TryFrameResult::Dead;
         }
+
         if !self.ownership.is_idle() {
             return TryFrameResult::Ineligible;
         }
+
         let result = slot.try_encode_without_signal(message);
         if result != TryFrameResult::Ok {
             return result;
         }
+
         // Admission succeeded. A subsequent peer failure must not become a
         // socket-closed error, nor cause the caller to retry accepted bytes.
         match slot.try_direct_write(|slices| self.try_write(slices)) {
@@ -86,6 +89,7 @@ impl<W: Write> DirectWriteState<W> {
                 slot.data_signal.mark();
             }
         }
+
         TryFrameResult::Ok
     }
 
@@ -94,6 +98,7 @@ impl<W: Write> DirectWriteState<W> {
             [one] => self.stream.write(one),
             _ => self.stream.write_vectored(slices),
         };
+
         match written {
             Ok(0) => Err(io::Error::new(io::ErrorKind::WriteZero, "tcp write")),
             Ok(n) => Ok(n),

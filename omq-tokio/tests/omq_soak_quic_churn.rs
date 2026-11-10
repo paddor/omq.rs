@@ -1,8 +1,5 @@
 #![cfg(all(feature = "soak", feature = "quic"))]
 
-#[global_allocator]
-static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
-
 mod soak_common;
 
 use std::time::{Duration, Instant};
@@ -10,6 +7,9 @@ use std::time::{Duration, Instant};
 use omq_tokio::options::QuicOptions;
 use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
 use rand::RngExt;
+
+#[global_allocator]
+static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
 
 fn quic_options(cert: &[u8], key: Option<&[u8]>) -> Options {
     let mut options = soak_common::soak_options();
@@ -21,6 +21,7 @@ fn quic_options(cert: &[u8], key: Option<&[u8]>) -> Options {
         stream_window: QuicOptions::MIN_STREAM_WINDOW * 4,
         ..QuicOptions::default()
     };
+
     options
 }
 
@@ -34,6 +35,7 @@ fn soak_quic_peer_churn() {
     let key = certified.signing_key.serialize_pem().into_bytes();
     let monitor = soak_common::ResourceMonitor::start();
     let ctx = soak_common::build_context();
+
     ctx.block_on(async move {
         let push = Socket::new(
             SocketType::Push,
@@ -44,6 +46,7 @@ fn soak_quic_peer_churn() {
         let mut peers: Vec<Socket> = Vec::new();
         let mut sent: u64 = 0;
         let start = Instant::now();
+
         while start.elapsed() < duration {
             let action = rng.random_range(0u8..10);
             if action < 3 && peers.len() < 12 {
@@ -55,12 +58,14 @@ fn soak_quic_peer_churn() {
             } else if action < 5 && !peers.is_empty() {
                 let idx = rng.random_range(0..peers.len());
                 let peer = peers.swap_remove(idx);
+
                 if action == 3 {
                     peer.close().await.unwrap();
                 } else {
                     drop(peer);
                 }
             }
+
             for _ in 0..100 {
                 let len = rng.random_range(1..=8192);
                 if let Ok(Ok(())) = tokio::time::timeout(
@@ -72,13 +77,16 @@ fn soak_quic_peer_churn() {
                     sent += 1;
                 }
             }
+
             for peer in &peers {
                 while peer.try_recv().is_ok() {}
             }
         }
+
         for peer in peers {
             peer.close().await.unwrap();
         }
+
         push.close().await.unwrap();
         // Closed QUIC connections drain for three PTOs before Quinn frees
         // them, and each endpoint driver exits after its last connection.
@@ -88,5 +96,6 @@ fn soak_quic_peer_churn() {
             start.elapsed().as_secs_f64()
         );
     });
+
     monitor.stop().assert_no_leak("quic_churn");
 }

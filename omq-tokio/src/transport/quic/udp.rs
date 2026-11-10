@@ -27,6 +27,7 @@ impl UdpEndpoint {
         let runtime = quinn::default_runtime()
             .ok_or_else(|| Error::Io(std::io::Error::other("no async runtime for QUIC")))?;
         let quinn = quinn::Endpoint::new(config, server, socket, runtime).map_err(Error::Io)?;
+
         Ok(Self {
             quinn,
             socket: handle,
@@ -43,12 +44,14 @@ impl UdpEndpoint {
     pub(super) fn raise_buffers(&self, recv: Option<usize>, send: Option<usize>) {
         let mut buffers = self.buffers.lock().expect("UDP buffer sizes");
         let socket = socket2::SockRef::from(&self.socket);
+
         if let Some(n) = recv
             && n > buffers.0
         {
             buffers.0 = n;
             let _ = socket.set_recv_buffer_size(n);
         }
+
         if let Some(n) = send
             && n > buffers.1
         {

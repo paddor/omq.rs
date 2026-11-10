@@ -26,10 +26,12 @@ pub(super) fn bind(addr: SocketAddr, count: usize) -> io::Result<Option<Vec<UdpS
     let Ok(count) = u8::try_from(count) else {
         return Ok(None);
     };
+
     // Any socket of the same user that sets SO_REUSEPORT may join a group.
     // A plain bind first fails like any bind when the address is taken, and
     // resolves port 0.
     let addr = UdpSocket::bind(addr)?.local_addr()?;
+
     Ok(group(addr, count).ok())
 }
 
@@ -39,12 +41,15 @@ fn group(addr: SocketAddr, count: u8) -> io::Result<Vec<UdpSocket>> {
         let socket = Socket::new(Domain::for_address(addr), Type::DGRAM, Some(Protocol::UDP))?;
         socket.set_reuse_port(true)?;
         socket.bind(&addr.into())?;
+
         if sockets.is_empty() {
             // The program applies to the whole group.
             steer(&socket, count)?;
         }
+
         sockets.push(socket.into());
     }
+
     Ok(sockets)
 }
 
@@ -54,6 +59,7 @@ pub(super) fn endpoint_config(index: usize, count: usize) -> quinn::EndpointConf
     let count = u8::try_from(count).expect("reuseport group size fits u8");
     let mut config = config::endpoint();
     config.cid_generator(move || Box::new(SteeredCids { index, count }));
+
     config
 }
 
@@ -110,6 +116,7 @@ fn steer(socket: &Socket, count: u8) -> io::Result<()> {
     use libc::{
         BPF_A, BPF_ABS, BPF_ALU, BPF_B, BPF_JA, BPF_JMP, BPF_JSET, BPF_K, BPF_LD, BPF_MOD, BPF_RET,
     };
+
     let mut program = [
         insn(BPF_LD | BPF_B | BPF_ABS, 0, 0, 0),
         insn(BPF_JMP | BPF_JSET | BPF_K, 0, 2, 0x80),
@@ -119,10 +126,12 @@ fn steer(socket: &Socket, count: u8) -> io::Result<()> {
         insn(BPF_ALU | BPF_MOD | BPF_K, 0, 0, count.into()),
         insn(BPF_RET | BPF_A, 0, 0, 0),
     ];
+
     let fprog = libc::sock_fprog {
         len: u16::try_from(program.len()).expect("short BPF program"),
         filter: program.as_mut_ptr(),
     };
+
     nix::sys::socket::setsockopt(
         socket,
         nix::sys::socket::sockopt::AttachReusePortCbpf,
@@ -132,73 +141,4 @@ fn steer(socket: &Socket, count: u8) -> io::Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn steered_bytes_select_their_member() {
-        for count in 2..=u8::MAX {
-            for index in 0..count {
-                for random in [0, 1, 127, 128, 254, 255] {
-                    assert_eq!(steered_byte(random, index, count) % count, index);
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn listener_endpoints_issue_steered_cids() {
-        use quinn::ConnectionIdGenerator;
-        let mut cids = SteeredCids { index: 2, count: 3 };
-        for _ in 0..64 {
-            let cid = cids.generate_cid();
-            assert_eq!(cid.len(), CID_LEN);
-            assert_eq!(cid[0] % 3, 2);
-        }
-    }
-
-    #[test]
-    fn group_binds_one_port_and_resolves_port_zero() {
-        let sockets = bind("127.0.0.1:0".parse().unwrap(), 3)
-            .unwrap()
-            .expect("reuseport group");
-        let addr = sockets[0].local_addr().unwrap();
-        assert_ne!(addr.port(), 0);
-        for socket in &sockets {
-            assert_eq!(socket.local_addr().unwrap(), addr);
-        }
-    }
-
-    #[test]
-    fn program_steers_by_destination_cid_not_by_sender() {
-        let sockets = bind("127.0.0.1:0".parse().unwrap(), 2)
-            .unwrap()
-            .expect("reuseport group");
-        let addr = sockets[0].local_addr().unwrap();
-        for socket in &sockets {
-            socket
-                .set_read_timeout(Some(std::time::Duration::from_secs(1)))
-                .unwrap();
-        }
-        // One sender, so the kernel's 4-tuple hash would pick one member.
-        let client = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let short = |cid0| vec![0x40, cid0, 7, 7, 7, 7, 7, 7, 7, 7];
-        let long = |cid0| vec![0xc0, 0, 0, 0, 1, 8, cid0, 7, 7, 7, 7, 7, 7, 7];
-        for (packet, member) in [(short(4), 0), (short(5), 1), (long(9), 1), (long(10), 0)] {
-            client.send_to(&packet, addr).unwrap();
-            let mut buf = [0; 64];
-            let n = sockets[member].recv(&mut buf).unwrap();
-            assert_eq!(&buf[..n], &packet[..]);
-        }
-    }
-
-    #[test]
-    fn group_refuses_a_taken_address() {
-        let sockets = bind("127.0.0.1:0".parse().unwrap(), 2)
-            .unwrap()
-            .expect("reuseport group");
-        let addr = sockets[0].local_addr().unwrap();
-        let err = bind(addr, 2).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::AddrInUse);
-    }
-}
+mod tests;

@@ -19,6 +19,7 @@ fn inproc_push_survives_sender_task_migration() {
         .build()
         .unwrap();
     let endpoint = inproc("spsc-task-migration");
+
     let (pull, push) = runtime.block_on(async {
         let pull = Socket::new(SocketType::Pull, Options::default());
         let push = Socket::new(SocketType::Push, Options::default());
@@ -27,12 +28,14 @@ fn inproc_push_survives_sender_task_migration() {
         push.wait_connected(1, Duration::from_secs(2))
             .await
             .unwrap();
+
         (pull, push)
     });
 
     for payload in ["first", "second"] {
         let handle = runtime.handle().clone();
         let push = push.clone();
+
         thread::spawn(move || {
             handle
                 .block_on(push.send(Message::single(payload)))
@@ -50,6 +53,7 @@ fn inproc_push_survives_sender_task_migration() {
                 .unwrap();
             assert_eq!(message.part_bytes(0).unwrap(), expected.as_bytes());
         }
+
         push.close().await.unwrap();
         pull.close().await.unwrap();
     });
@@ -66,6 +70,7 @@ fn inproc_push_serializes_concurrent_senders() {
         .build()
         .unwrap();
     let endpoint = inproc("spsc-concurrent-senders");
+
     let (pull, push) = runtime.block_on(async {
         let pull = Socket::new(SocketType::Pull, Options::default());
         let push = Socket::new(SocketType::Push, Options::default());
@@ -74,6 +79,7 @@ fn inproc_push_serializes_concurrent_senders() {
         push.wait_connected(1, Duration::from_secs(2))
             .await
             .unwrap();
+
         (pull, push)
     });
 
@@ -83,6 +89,7 @@ fn inproc_push_serializes_concurrent_senders() {
             let barrier = Arc::clone(&barrier);
             let handle = runtime.handle().clone();
             let push = push.clone();
+
             thread::spawn(move || {
                 barrier.wait();
                 handle.block_on(async {
@@ -95,6 +102,7 @@ fn inproc_push_serializes_concurrent_senders() {
             })
         })
         .collect();
+
     for sender in senders {
         sender.join().unwrap();
     }
@@ -109,6 +117,7 @@ fn inproc_push_serializes_concurrent_senders() {
             let body = message.part_bytes(0).unwrap();
             received.insert(std::str::from_utf8(&body).unwrap().to_owned());
         }
+
         assert_eq!(received.len(), SENDERS * MESSAGES);
         push.close().await.unwrap();
         pull.close().await.unwrap();
@@ -167,6 +176,7 @@ async fn send_ring_reenabled_after_second_peer_leaves() {
     for _ in 0..4 {
         push.send(Message::from_slice(b"rr")).await.unwrap();
     }
+
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     while pull1.try_recv().is_ok() {}

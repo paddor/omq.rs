@@ -19,8 +19,15 @@ use crate::consts;
 use crate::error::c_try;
 use crate::socket::OmqSocket;
 
+pub(crate) const ZMQ_POLLIN: libc::c_short = consts::ZMQ_POLLIN as libc::c_short;
+pub(crate) const ZMQ_POLLOUT: libc::c_short = consts::ZMQ_POLLOUT as libc::c_short;
+
+#[allow(dead_code)]
+pub(crate) const ZMQ_POLLERR: libc::c_short = consts::ZMQ_POLLERR as libc::c_short;
+
 #[cfg(unix)]
 pub(crate) type ZmqFd = libc::c_int;
+
 #[cfg(windows)]
 pub(crate) type ZmqFd = usize;
 
@@ -30,16 +37,12 @@ pub(crate) fn invalid_fd() -> ZmqFd {
     {
         -1
     }
+
     #[cfg(windows)]
     {
         ZmqFd::MAX
     }
 }
-
-pub(crate) const ZMQ_POLLIN: libc::c_short = consts::ZMQ_POLLIN as libc::c_short;
-pub(crate) const ZMQ_POLLOUT: libc::c_short = consts::ZMQ_POLLOUT as libc::c_short;
-#[allow(dead_code)]
-pub(crate) const ZMQ_POLLERR: libc::c_short = consts::ZMQ_POLLERR as libc::c_short;
 
 /// `zmq_pollitem_t` layout compatible with libzmq.
 #[repr(C)]
@@ -66,13 +69,16 @@ fn check_immediate(items: &mut [ZmqPollItem]) -> i32 {
         if (item.events & ZMQ_POLLIN) != 0 && recv_ready(sock) {
             item.revents |= ZMQ_POLLIN;
         }
+
         if (item.events & ZMQ_POLLOUT) != 0 && crate::send_recv::send_ready(sock) {
             item.revents |= ZMQ_POLLOUT;
         }
+
         if item.revents != 0 {
             ready += 1;
         }
     }
+
     ready
 }
 
@@ -92,9 +98,11 @@ fn accumulate_buffered(items: &mut [ZmqPollItem]) {
         let Some(sock) = item_socket(item) else {
             continue;
         };
+
         if (item.events & ZMQ_POLLIN) != 0 && recv_ready(sock) {
             item.revents |= ZMQ_POLLIN;
         }
+
         if (item.events & ZMQ_POLLOUT) != 0 {
             if crate::send_recv::send_ready(sock) {
                 item.revents |= ZMQ_POLLOUT;
@@ -145,10 +153,12 @@ pub extern "C" fn zmq_poll(
     let deadline = (timeout_ms > 0)
         .then(|| std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms as u64));
     let mut waiter = crate::notify::PollWaiter::new(items_slice);
+
     if waiter.has_no_handles() {
         if timeout_ms > 0 {
             std::thread::sleep(std::time::Duration::from_millis(timeout_ms as u64));
         }
+
         return 0;
     }
 
@@ -165,6 +175,7 @@ pub extern "C" fn zmq_poll(
         let Some(wait_ms) = wait_budget_ms(deadline) else {
             return 0;
         };
+
         let rc = waiter.wait(wait_ms, items_slice);
         if rc < 0 {
             return rc;
@@ -172,6 +183,7 @@ pub extern "C" fn zmq_poll(
 
         accumulate_buffered(items_slice);
         let ready = items_slice.iter().filter(|item| item.revents != 0).count();
+
         if ready > 0 {
             return c_int::try_from(ready).unwrap_or(c_int::MAX);
         }
@@ -188,6 +200,7 @@ fn poll_items<'a>(items: *mut ZmqPollItem, nitems: c_int) -> Result<&'a mut [Zmq
     if nitems < 0 {
         return Err(libc::EINVAL);
     }
+
     if items.is_null() && nitems > 0 {
         return Err(libc::EFAULT);
     }
@@ -206,9 +219,11 @@ fn poll_items<'a>(items: *mut ZmqPollItem, nitems: c_int) -> Result<&'a mut [Zmq
     {
         return Err(crate::error::ENOTSOCK);
     }
+
     if any_socket_terminated(items_slice) {
         return Err(crate::error::ETERM);
     }
+
     Ok(items_slice)
 }
 
@@ -222,6 +237,7 @@ fn wait_budget_ms(deadline: Option<std::time::Instant>) -> Option<libc::c_long> 
     if left.is_zero() {
         return None;
     }
+
     // Round up so the final wait reaches the deadline.
     Some(libc::c_long::try_from(left.as_micros().div_ceil(1000)).unwrap_or(libc::c_long::MAX))
 }
@@ -237,5 +253,6 @@ pub extern "C" fn zmq_ppoll(
     if !sigmask.is_null() {
         return crate::error::fail(crate::error::ENOTSUP);
     }
+
     zmq_poll(items, nitems, timeout_ms)
 }

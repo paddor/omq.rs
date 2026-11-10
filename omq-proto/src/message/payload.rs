@@ -71,6 +71,7 @@ impl Payload {
         if src.is_empty() {
             return Self::new();
         }
+
         let mut data = [0u8; MAX_INLINE_PAYLOAD];
         data[..src.len()].copy_from_slice(src);
         Self {

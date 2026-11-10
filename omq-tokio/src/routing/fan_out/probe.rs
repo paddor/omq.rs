@@ -33,6 +33,7 @@ impl ProbePeer {
         let (data_inbox, data) = mpsc::channel(64);
         let (remote_inbox, remote_commands) = mpsc::channel(16);
         let cancel = CancellationToken::new();
+
         let slot = PeerTransmitSlot::with_config(
             id,
             SlotConfig {
@@ -45,6 +46,7 @@ impl ProbePeer {
                 ..SlotConfig::default()
             },
         );
+
         let mut sender = ConnectionDriver::new(
             outgoing,
             Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pub)),
@@ -55,6 +57,7 @@ impl ProbePeer {
         )
         .with_data_inbox(data)
         .with_transmit_slot(slot.clone());
+
         let mut receiver = ConnectionDriver::new(
             incoming,
             Connection::new(ConnectionConfig::new(Role::Client, SocketType::Sub)),
@@ -63,6 +66,7 @@ impl ProbePeer {
             id * 2 + 1,
             cancel.clone(),
         );
+
         if let Some(kind) = kind {
             let (encoder, decoder) = MessageEncoder::for_compression_kind(kind, options)
                 .unwrap()
@@ -70,6 +74,7 @@ impl ProbePeer {
             sender = sender.with_encoder(encoder);
             receiver = receiver.with_decoder(decoder);
         }
+
         Self {
             handle: PeerDriverHandle {
                 inbox,
@@ -132,6 +137,7 @@ async fn run_message_probe(
         .enumerate()
         .map(|(id, kind)| ProbePeer::spawn(id as u64, *kind, &options, &events))
         .collect();
+
     // Both drivers of every pair finish their handshake.
     for _ in 0..peers.len() * 2 {
         assert!(matches!(
@@ -139,6 +145,7 @@ async fn run_message_probe(
             PeerEvent::Event(Event::HandshakeSucceeded { .. })
         ));
     }
+
     for (id, peer) in peers.iter().enumerate() {
         peer.attach(id as u64, &mut fanout).await;
     }
@@ -146,9 +153,11 @@ async fn run_message_probe(
     let received = count_deliveries(receive, peers.len(), messages, message.clone());
     let submitter = fanout.submitter();
     let start = Instant::now();
+
     for _ in 0..messages {
         submitter.send(message.clone()).await.unwrap();
     }
+
     received.await.unwrap();
     let elapsed = start.elapsed();
 
@@ -156,11 +165,13 @@ async fn run_message_probe(
     for peer in &peers {
         peer.handle.cancel.cancel();
     }
+
     for peer in peers {
         for task in peer.tasks {
             task.await.unwrap().unwrap();
         }
     }
+
     elapsed
 }
 
@@ -179,10 +190,12 @@ fn count_deliveries(
             let PeerEvent::Event(Event::Message(actual)) = event else {
                 panic!("unexpected data-plane event: {event:?}");
             };
+
             assert_eq!(id % 2, 1);
             assert_eq!(actual, expected);
             counts[id as usize / 2] += 1;
         }
+
         assert!(counts.iter().all(|count| *count == messages));
     })
 }
@@ -194,11 +207,13 @@ async fn mixed_codecs_deliver_original_messages_through_real_drivers() {
         Some(CompressionKind::Lz4),
         Some(CompressionKind::Zstd),
     ];
+
     for reverse in [false, true] {
         let mut kinds = kinds;
         if reverse {
             kinds.reverse();
         }
+
         for size in [16, 4096] {
             tokio::time::timeout(Duration::from_secs(10), run_probe(100, size, &kinds))
                 .await
@@ -217,6 +232,7 @@ async fn multipart_above_1024_parts_survives_bounded_driver_writes_and_reads() {
         Some(CompressionKind::Lz4),
         Some(CompressionKind::Zstd),
     ];
+
     let message = Message::multipart(
         std::iter::once(Bytes::from_static(b"topic"))
             .chain((0..1025).map(|_| Bytes::from_static(&[0x5a; 1024]))),
@@ -241,6 +257,7 @@ async fn profile_mixed_codecs() {
     assert!((1..=1_000_000).contains(&messages));
     assert!((1..=1024 * 1024).contains(&size));
     assert!((1..=16).contains(&copies));
+
     let kinds: Vec<_> = (0..copies)
         .flat_map(|_| {
             [
@@ -250,6 +267,7 @@ async fn profile_mixed_codecs() {
             ]
         })
         .collect();
+
     let elapsed = tokio::time::timeout(Duration::from_mins(1), run_probe(messages, size, &kinds))
         .await
         .unwrap();

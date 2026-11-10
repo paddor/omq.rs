@@ -12,9 +12,11 @@ fn receive_signal_retains_its_descriptor_after_socket_close() {
     let sock = unsafe { crate::handle::socket(socket) }.unwrap();
     let fd = sock.notify.recv_fd();
     let sink = sock.recv.sink_config.get().unwrap().take_sink().unwrap();
+
     let omq_tokio::engine::RecvSink::Yring(sink) = sink else {
         panic!("expected direct receive sink");
     };
+
     let signal = sink.signal;
     drop(sink.producer);
     assert_eq!(zmq_close(socket), 0);

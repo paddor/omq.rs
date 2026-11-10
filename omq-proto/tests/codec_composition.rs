@@ -38,6 +38,7 @@ fn unsupported_disabled_and_nested_prefixes_never_fall_back() {
         #[cfg(not(all(feature = "lz4", feature = "ws")))]
         "lz4+ws",
     ];
+
     for scheme in schemes {
         // Invalid profiles fail before their address is parsed.
         for address in ["host:7", ""] {
@@ -61,9 +62,11 @@ fn typed_and_uri_tcp_codecs_preserve_variants_and_resolved_addresses() {
             assert_eq!(composed.to_string(), uri);
             assert_eq!(composed.without_compression(), plain);
             assert_eq!(composed.clone().with_compression(kind).unwrap(), composed);
+
             let Endpoint::Tcp { host, port } = plain else {
                 panic!("plain TCP expected");
             };
+
             assert_eq!(composed, kind.tcp_endpoint(host, port));
             let resolved: Endpoint = "tcp://127.0.0.1:9876".parse().unwrap();
             let expected: Endpoint = format!("{}+tcp://127.0.0.1:9876", kind.scheme_prefix())
@@ -104,6 +107,7 @@ fn unsupported_typed_carriers_use_the_same_prefix_policy() {
         #[cfg(feature = "ws")]
         "wss://host:443/omq",
     ];
+
     for kind in kinds() {
         for uri in carriers {
             let endpoint: Endpoint = uri.parse().unwrap();
@@ -118,6 +122,7 @@ fn unsupported_typed_carriers_use_the_same_prefix_policy() {
             ));
         }
     }
+
     #[cfg(all(feature = "zstd", feature = "ws"))]
     assert!(matches!(
         "ws://host:80/omq"
@@ -147,6 +152,7 @@ fn composed_ws_preserves_legacy_profile_and_validates_typed_headers() {
             "lz4+ws://127.0.0.1:9876/omq".parse().unwrap()
         );
     }
+
     for (host, path) in [
         ("host\r\nInjected: header", "/omq"),
         ("host", "/omq\r\nInjected: header"),

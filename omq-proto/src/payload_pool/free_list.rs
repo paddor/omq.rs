@@ -40,6 +40,7 @@ impl FreeList {
         if owners.is_empty() {
             return;
         }
+
         let batch = FreeBatch {
             owners: std::array::from_fn(|index| {
                 if index < owners.len() {
@@ -50,6 +51,7 @@ impl FreeList {
             }),
             count: owners.len(),
         };
+
         self.available.fetch_add(batch.count, Ordering::Relaxed);
         self.batches.push(batch).expect("one return per buffer");
     }
@@ -59,9 +61,11 @@ impl FreeList {
             self.available.fetch_sub(1, Ordering::Relaxed);
             return Some(owner);
         }
+
         let mut batch = self.batches.pop().ok()?;
         self.available.fetch_sub(1, Ordering::Relaxed);
         let owner = batch.owners[0].take();
+
         // Expand a returned group once. Scalar acquisitions must not rebuild
         // and copy the shrinking remainder for every subsequent buffer.
         for owner in &mut batch.owners[1..batch.count] {
@@ -69,6 +73,7 @@ impl FreeList {
                 .push(owner.take().expect("returned owner"))
                 .expect("one return per buffer");
         }
+
         owner
     }
 
@@ -77,6 +82,7 @@ impl FreeList {
         if limit == 0 {
             return 0;
         }
+
         // Sparse traffic takes the same scalar path as ordinary acquisition.
         if limit == 1 {
             if let Some(owner) = self.pop() {
@@ -86,15 +92,19 @@ impl FreeList {
                     returns: None,
                     prepared: false,
                 });
+
                 return 1;
             }
+
             return 0;
         }
+
         let mut taken = 0;
         while taken < limit {
             if let Ok(mut batch) = self.batches.pop() {
                 self.available.fetch_sub(batch.count, Ordering::Relaxed);
                 let count = (limit - taken).min(batch.count);
+
                 for owner in &mut batch.owners[..count] {
                     output.push(PayloadBuffer {
                         storage: Some(owner.take().expect("returned owner")),
@@ -103,6 +113,7 @@ impl FreeList {
                         prepared: false,
                     });
                 }
+
                 self.push_batch(&mut batch.owners[count..batch.count]);
                 taken += count;
             } else {
@@ -111,6 +122,7 @@ impl FreeList {
                     let Ok(owner) = self.singles.pop() else {
                         break;
                     };
+
                     output.push(PayloadBuffer {
                         storage: Some(owner),
                         length: 0,
@@ -119,13 +131,16 @@ impl FreeList {
                     });
                     count += 1;
                 }
+
                 if count != 0 {
                     self.available.fetch_sub(count, Ordering::Relaxed);
                 }
+
                 taken += count;
                 break;
             }
         }
+
         taken
     }
 

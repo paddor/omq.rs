@@ -2,61 +2,6 @@
 
 use TransportKind::{Inproc, Ipc, Quic, Tcp, Ws};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ImplClass {
-    Classic,
-    IoUring,
-    Curve,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TransportKind {
-    Tcp,
-    Ipc,
-    Inproc,
-    Ws,
-    Quic,
-}
-
-impl TransportKind {
-    pub(super) fn as_str(self) -> &'static str {
-        match self {
-            Self::Tcp => "tcp",
-            Self::Ipc => "ipc",
-            Self::Inproc => "inproc",
-            Self::Ws => "ws",
-            Self::Quic => "quic",
-        }
-    }
-
-    /// URI scheme for transports whose binder reports an ephemeral port.
-    pub(super) fn port_scheme(self) -> Option<&'static str> {
-        match self {
-            Self::Tcp => Some("tcp"),
-            Self::Quic => Some("quic"),
-            Self::Ipc | Self::Inproc | Self::Ws => None,
-        }
-    }
-}
-
-#[expect(clippy::struct_excessive_bools)]
-pub(crate) struct ImplDef {
-    pub name: &'static str,
-    pub binary_from: Option<&'static str>,
-    pub prefix: &'static str,
-    pub class: Option<ImplClass>,
-    pub main: bool,
-    pub transports: &'static [TransportKind],
-    pub inproc_tput_subcmd: &'static str,
-    pub inproc_lat_subcmd: &'static str,
-    pub inproc_pubsub_subcmd: &'static str,
-    pub pub_needs_peer_count: bool,
-    pub fanout_subcmd: &'static str,
-    pub fanio_needs_peer_count: bool,
-    pub supports_pubsub: bool,
-    pub env: &'static [(&'static str, &'static str)],
-}
-
 pub(super) static IMPLS: &[ImplDef] = &[
     ImplDef {
         name: "omq-tokio-ct",
@@ -412,6 +357,61 @@ pub(super) static IMPLS: &[ImplDef] = &[
     },
 ];
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ImplClass {
+    Classic,
+    IoUring,
+    Curve,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TransportKind {
+    Tcp,
+    Ipc,
+    Inproc,
+    Ws,
+    Quic,
+}
+
+impl TransportKind {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::Tcp => "tcp",
+            Self::Ipc => "ipc",
+            Self::Inproc => "inproc",
+            Self::Ws => "ws",
+            Self::Quic => "quic",
+        }
+    }
+
+    /// URI scheme for transports whose binder reports an ephemeral port.
+    pub(super) fn port_scheme(self) -> Option<&'static str> {
+        match self {
+            Self::Tcp => Some("tcp"),
+            Self::Quic => Some("quic"),
+            Self::Ipc | Self::Inproc | Self::Ws => None,
+        }
+    }
+}
+
+#[expect(clippy::struct_excessive_bools)]
+pub(crate) struct ImplDef {
+    pub name: &'static str,
+    pub binary_from: Option<&'static str>,
+    pub prefix: &'static str,
+    pub class: Option<ImplClass>,
+    pub main: bool,
+    pub transports: &'static [TransportKind],
+    pub inproc_tput_subcmd: &'static str,
+    pub inproc_lat_subcmd: &'static str,
+    pub inproc_pubsub_subcmd: &'static str,
+    pub pub_needs_peer_count: bool,
+    pub fanout_subcmd: &'static str,
+    pub fanio_needs_peer_count: bool,
+    pub supports_pubsub: bool,
+    pub env: &'static [(&'static str, &'static str)],
+}
+
 pub(super) fn find_impl(name: &str) -> Option<&'static ImplDef> {
     IMPLS.iter().find(|i| i.name == name)
 }
@@ -453,10 +453,12 @@ pub(super) fn latency_env<'a>(
     let mut env = def.env.to_vec();
     env.push(("OMQ_BENCH_LATENCY_PAIR", pair));
     env.push(("OMQ_BENCH_WORKLOAD_PROFILE", profile));
+
     // Keep inherited experiment settings from silently changing the baseline.
     if !env.iter().any(|&(key, _)| key == "OMQ_BENCH_RECV_SPIN_US") {
         env.push(("OMQ_BENCH_RECV_SPIN_US", "0"));
     }
+
     if !env.iter().any(|&(key, _)| key == "OMQ_IO_THREADS") {
         match def.binary_from.unwrap_or(def.name) {
             "omq-tokio-1t" => env.push(("OMQ_IO_THREADS", "1")),
@@ -464,6 +466,7 @@ pub(super) fn latency_env<'a>(
             _ => {}
         }
     }
+
     env
 }
 

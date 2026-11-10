@@ -139,6 +139,7 @@ impl AsyncWrite for GreetingOnlyWriter {
             self.stalled.notify_changed();
             return Poll::Pending;
         }
+
         let length = self.remaining.min(buf.len());
         match Pin::new(&mut self.writer).poll_write(cx, &buf[..length]) {
             Poll::Ready(Ok(written)) => {
@@ -202,8 +203,10 @@ impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for ChoppyReader<R> {
         if buf.remaining() == 0 {
             return Poll::Ready(Ok(()));
         }
+
         let mut scratch = vec![0u8; self.cap.min(buf.remaining())];
         let mut limited = ReadBuf::new(&mut scratch);
+
         match Pin::new(&mut self.inner).poll_read(cx, &mut limited) {
             Poll::Ready(Ok(())) => {
                 buf.put_slice(limited.filled());
@@ -230,8 +233,10 @@ impl DriverStream for BufferedDuplex {
 }
 
 impl DriverWrite for StalledShutdownWriter {}
+
 #[cfg(feature = "plain")]
 impl DriverWrite for GreetingOnlyWriter {}
+
 impl<W: AsyncWrite + Send + Unpin + 'static> DriverWrite for ChoppyWriter<W> {}
 impl DriverWrite for tokio::io::BufWriter<tokio::io::WriteHalf<DuplexStream>> {}
 impl DriverWrite for PartialVectoredWriter {}
@@ -260,16 +265,19 @@ impl<W: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for ChoppyWriter<W>
     ) -> Poll<io::Result<usize>> {
         let mut remaining = self.cap;
         let mut limited: SmallVec<[io::IoSlice<'_>; 64]> = SmallVec::new();
+
         for buf in bufs {
             if remaining == 0 {
                 break;
             }
+
             let n = remaining.min(buf.len());
             if n > 0 {
                 limited.push(io::IoSlice::new(&buf[..n]));
                 remaining -= n;
             }
         }
+
         Pin::new(&mut self.inner).poll_write_vectored(cx, &limited)
     }
 
@@ -316,10 +324,12 @@ impl tokio::io::AsyncWrite for PartialVectoredWriter {
         } else {
             self.next_cap
         };
+
         let n = cap.min(buf.len());
         if n > 0 {
             self.out.extend_from_slice(&buf[..n]);
         }
+
         self.writes += 1;
         Poll::Ready(Ok(n))
     }
@@ -335,15 +345,18 @@ impl tokio::io::AsyncWrite for PartialVectoredWriter {
         } else {
             self.next_cap
         };
+
         let mut remaining = cap.min(total);
         for buf in bufs {
             if remaining == 0 {
                 break;
             }
+
             let n = remaining.min(buf.len());
             self.out.extend_from_slice(&buf[..n]);
             remaining -= n;
         }
+
         self.writes += 1;
         Poll::Ready(Ok(cap.min(total)))
     }
@@ -387,6 +400,7 @@ impl tokio::io::AsyncWrite for ScriptedVectoredWriter {
         let cap = self.caps.pop_front().unwrap_or(self.fallback_cap).max(1);
         let n = cap.min(buf.len());
         self.out.extend_from_slice(&buf[..n]);
+
         Poll::Ready(Ok(n))
     }
 
@@ -398,14 +412,17 @@ impl tokio::io::AsyncWrite for ScriptedVectoredWriter {
         let total = bufs.iter().map(|buf| buf.len()).sum::<usize>();
         let cap = self.caps.pop_front().unwrap_or(self.fallback_cap).max(1);
         let mut remaining = cap.min(total);
+
         for buf in bufs {
             if remaining == 0 {
                 break;
             }
+
             let n = remaining.min(buf.len());
             self.out.extend_from_slice(&buf[..n]);
             remaining -= n;
         }
+
         Poll::Ready(Ok(cap.min(total)))
     }
 
@@ -448,6 +465,7 @@ impl tokio::io::AsyncRead for ScriptedReader {
         if self.pos >= self.data.len() {
             return Poll::Ready(Ok(()));
         }
+
         let chunk_cap = self.chunks.pop_front().unwrap_or(usize::MAX);
         let n = chunk_cap
             .min(buf.remaining())
@@ -455,6 +473,7 @@ impl tokio::io::AsyncRead for ScriptedReader {
         let end = self.pos + n;
         buf.put_slice(&self.data[self.pos..end]);
         self.pos = end;
+
         Poll::Ready(Ok(()))
     }
 }
@@ -474,6 +493,7 @@ impl tokio::io::AsyncRead for UninitProbeReader {
             buf.initialized().is_empty(),
             "large recv path must fill uninitialized spare capacity"
         );
+
         Pin::new(&mut self.inner).poll_read(cx, buf)
     }
 }
@@ -547,6 +567,7 @@ fn stream_pair<S: DriverStream + Send + 'static>(
         s_cancel.clone(),
     )
     .with_data_inbox(s_data_rx);
+
     let c_driver = ConnectionDriver::new(
         client_stream,
         client_connection,
@@ -585,8 +606,10 @@ fn drain_transmit(connection: &mut Connection) -> Vec<u8> {
         for chunk in connection.transmit_chunks_capped(128) {
             out.extend_from_slice(&chunk);
         }
+
         connection.advance_transmit(out.len() - len_before);
     }
+
     out
 }
 
@@ -603,19 +626,24 @@ fn ready_connections(
 ) -> (Connection, Connection) {
     let mut push = Connection::new(sender);
     let mut pull = Connection::new(receiver);
+
     for _ in 0..10 {
         let push_out = drain_transmit(&mut push);
         let pull_out = drain_transmit(&mut pull);
+
         if push_out.is_empty() && pull_out.is_empty() {
             break;
         }
+
         if !push_out.is_empty() {
             pull.handle_input(Bytes::from(push_out)).unwrap();
         }
+
         if !pull_out.is_empty() {
             push.handle_input(Bytes::from(pull_out)).unwrap();
         }
     }
+
     assert!(push.is_ready());
     assert!(pull.is_ready());
     (push, pull)
@@ -632,6 +660,7 @@ fn feed_fragmented_input(connection: &mut Connection, wire: &Bytes, end: usize) 
             start = boundary;
         }
     }
+
     if start < end {
         connection.handle_input(wire.slice(start..end)).unwrap();
     }
@@ -649,8 +678,10 @@ async fn handle_large_messages_test<R: AsyncRead + Unpin>(
             large.read(reader).await?;
             *last_input = Instant::now();
         }
+
         large.finish(connection, &recv_pool)?;
     }
+
     Ok(())
 }
 
@@ -663,6 +694,7 @@ fn feed_input_in_chunks(
     let chunks = chunks.into_iter().collect::<Vec<_>>();
     let mut start = 0;
     let mut index = 0;
+
     while start < end {
         let size = chunks[index % chunks.len()];
         index += 1;
@@ -677,12 +709,14 @@ fn patterned_payload(len: usize, seq: u64) -> Vec<u8> {
     payload[..8].copy_from_slice(&0xDEAD_BEEF_CAFE_F00Du64.to_le_bytes());
     payload[8..16].copy_from_slice(&seq.to_le_bytes());
     let mask = (seq as u8).wrapping_mul(7) ^ ((seq >> 8) as u8).wrapping_mul(3);
+
     for (i, byte) in payload.iter_mut().enumerate().skip(16) {
         let mut expected = (i as u8).wrapping_mul(31);
         expected ^= ((i >> 8) as u8).wrapping_mul(17);
         expected ^= ((i >> 16) as u8).wrapping_mul(13);
         *byte = expected ^ mask;
     }
+
     payload
 }
 
@@ -694,6 +728,7 @@ fn push_expected_single_frame(out: &mut Vec<u8>, payload: &[u8]) {
         out.push(0);
         out.push(payload.len() as u8);
     }
+
     out.extend_from_slice(payload);
 }
 
@@ -701,6 +736,7 @@ fn next_random(seed: &mut u64) -> usize {
     *seed ^= *seed << 13;
     *seed ^= *seed >> 7;
     *seed ^= *seed << 17;
+
     *seed as usize
 }
 
@@ -723,6 +759,7 @@ impl LargeReceiver {
                 if !wait || Instant::now() >= deadline {
                     break;
                 }
+
                 tokio::task::yield_now().await;
                 continue;
             }
@@ -737,6 +774,7 @@ impl LargeReceiver {
                 );
                 self.next += 1;
             }
+
             // Popped slots return to the producer only on release.
             if released {
                 self.consumer.release();
@@ -785,23 +823,28 @@ impl ChunkWrite for OwnedChunkWriter {
         if self.caps.front() == Some(&None) {
             return Poll::Pending;
         }
+
         let mut left = self.caps.pop_front().flatten().unwrap_or(self.default_cap);
         let mut written = 0;
+
         for buf in bufs.iter_mut() {
             if left == 0 {
                 break;
             }
+
             let take = buf.len().min(left);
             let chunk = if take == buf.len() {
                 std::mem::take(buf)
             } else {
                 buf.split_to(take)
             };
+
             self.chunk_starts.push(chunk.as_ptr() as usize);
             self.out.extend_from_slice(&chunk);
             written += take;
             left -= take;
         }
+
         Poll::Ready(Ok(written))
     }
 }
@@ -836,17 +879,21 @@ impl AsyncWrite for OwnedChunkWriter {
 fn mixed_frames(eq: &mut FrameBuffer) -> (Vec<u8>, Vec<usize>) {
     let mut expected = Vec::new();
     let mut large_starts = Vec::new();
+
     for (seq, len) in [16, 300, 70_000, 64, 1_000, 200_000, 32]
         .into_iter()
         .enumerate()
     {
         let payload = Bytes::from(patterned_payload(len, seq as u64));
         push_expected_single_frame(&mut expected, &payload);
+
         if len >= omq_proto::frame_buffer::ARENA_THRESHOLD {
             large_starts.push(payload.as_ptr() as usize);
         }
+
         eq.frame(&Message::single(payload));
     }
+
     (expected, large_starts)
 }
 
@@ -937,6 +984,7 @@ fn pair_drivers_over<S: DriverStream, C: DriverStream>(
     let (client_data, client_data_inbox) = mpsc::channel(spec.client_data);
     let (server_event_tx, server_events) = mpsc::channel(spec.server_events);
     let (client_event_tx, client_events) = mpsc::channel(8);
+
     let ends = PairEnds {
         server_control,
         client_control,
@@ -956,6 +1004,7 @@ fn pair_drivers_over<S: DriverStream, C: DriverStream>(
         ends.server_cancel.clone(),
     )
     .with_driver_config(spec.server_driver);
+
     let client = ConnectionDriver::new(
         client_stream,
         Connection::new(spec.client),
@@ -966,6 +1015,7 @@ fn pair_drivers_over<S: DriverStream, C: DriverStream>(
     )
     .with_driver_config(spec.client_driver)
     .with_data_inbox(client_data_inbox);
+
     (server, client, ends)
 }
 
@@ -1001,6 +1051,7 @@ async fn activate_after_handshakes(
             PeerEvent::Event(Event::HandshakeSucceeded { .. })
         ));
     }
+
     for control in controls {
         control
             .send(PeerDriverCommand::ActivateDataPlane)

@@ -22,9 +22,12 @@ const OMQ_QUIC_KEY_PEM: i32 = 1012;
 const OMQ_QUIC_TRUST_PEM: i32 = 1013;
 const OMQ_QUIC_TRUST_SYSTEM: i32 = 1015;
 const OMQ_QUIC_STREAM_WINDOW: i32 = 1016;
+
 #[cfg(feature = "webtransport")]
 const OMQ_QUIC_ALLOWED_ORIGINS: i32 = 1017;
+
 const OMQ_QUIC_MAX_READY_PEERS: i32 = 1018;
+
 #[cfg(feature = "webtransport")]
 const OMQ_QUIC_WEBTRANSPORT_PATH: i32 = 1019;
 
@@ -43,6 +46,7 @@ fn get_i32(sock: *mut c_void, opt: i32) -> i32 {
         zmq_getsockopt(sock, opt, (&mut value as *mut i32).cast(), &mut len),
         0
     );
+
     value
 }
 
@@ -59,11 +63,13 @@ fn round_trip(scheme_addr: &str) {
     let ctx = zmq_ctx_new();
     let pull = zmq_socket(ctx, ZMQ_PULL);
     let push = zmq_socket(ctx, ZMQ_PUSH);
+
     for sock in [pull, push] {
         assert_eq!(set_i32(sock, ZMQ_LINGER, 0), 0);
         assert_eq!(set_i32(sock, ZMQ_RCVTIMEO, 5000), 0);
         assert_eq!(set_i32(sock, ZMQ_SNDTIMEO, 5000), 0);
     }
+
     assert_eq!(set_bytes(pull, OMQ_QUIC_CERT_PEM, &cert), 0);
     assert_eq!(set_bytes(pull, OMQ_QUIC_KEY_PEM, &key), 0);
     let bind = CString::new(scheme_addr).unwrap();
@@ -125,20 +131,24 @@ fn quic_with_webtransport_feature_through_c_options() {
 fn quic_options_validate_and_read_back() {
     let ctx = zmq_ctx_new();
     let sock = zmq_socket(ctx, ZMQ_PULL);
+
     assert_eq!(get_i32(sock, OMQ_QUIC_STREAM_WINDOW), 1024 * 1024);
     assert_eq!(set_i32(sock, OMQ_QUIC_STREAM_WINDOW, 1024), -1);
     assert_eq!(zmq_errno(), libc::EINVAL);
     assert_eq!(set_i32(sock, OMQ_QUIC_STREAM_WINDOW, 64 * 1024), 0);
     assert_eq!(get_i32(sock, OMQ_QUIC_STREAM_WINDOW), 64 * 1024);
+
     assert_eq!(set_i32(sock, OMQ_QUIC_MAX_READY_PEERS, 0), -1);
     assert_eq!(set_i32(sock, OMQ_QUIC_MAX_READY_PEERS, 7), 0);
     assert_eq!(get_i32(sock, OMQ_QUIC_MAX_READY_PEERS), 7);
+
     #[cfg(feature = "webtransport")]
     {
         assert_eq!(set_bytes(sock, OMQ_QUIC_WEBTRANSPORT_PATH, b"relative"), -1);
         assert_eq!(set_bytes(sock, OMQ_QUIC_WEBTRANSPORT_PATH, b"/custom"), 0);
         let mut path = [0u8; 32];
         let mut len = path.len();
+
         assert_eq!(
             zmq_getsockopt(
                 sock,
@@ -148,6 +158,7 @@ fn quic_options_validate_and_read_back() {
             ),
             0
         );
+
         assert_eq!(&path[..len], b"/custom\0");
         assert_eq!(set_bytes(sock, OMQ_QUIC_ALLOWED_ORIGINS, b"null"), -1);
         assert_eq!(
@@ -155,6 +166,7 @@ fn quic_options_validate_and_read_back() {
             0
         );
     }
+
     zmq_close(sock);
     zmq_ctx_term(ctx);
 }

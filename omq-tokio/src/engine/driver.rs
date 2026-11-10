@@ -49,13 +49,14 @@ pub(crate) use receive::ReceiveProfile;
 pub use stream::{ChunkWrite, DriverStream, DriverWrite};
 pub(crate) use write::check_written;
 
-const OUTBOUND_BATCH_TIME: Duration = Duration::from_millis(1);
-const BATCH_TIME_CHECK_MSGS: usize = 32;
-const IPC_LATENCY_POLL_WINDOW: Duration = Duration::from_micros(50);
 pub use super::recv_sink::{
     AuthenticatedRecvItem, AuthenticatedRecvSink, RecvSink, RecvSinkConfig, RepRecvSink,
     ServerRecvSink, YringSink,
 };
+
+const OUTBOUND_BATCH_TIME: Duration = Duration::from_millis(1);
+const BATCH_TIME_CHECK_MSGS: usize = 32;
+const IPC_LATENCY_POLL_WINDOW: Duration = Duration::from_micros(50);
 
 /// Driver-level timing configuration: handshake deadline, heartbeat
 /// cadence, idle-close timeout.

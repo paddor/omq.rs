@@ -16,6 +16,9 @@ pub use buffer::{PayloadBuffer, PayloadLengthError};
 use free_list::FreeList;
 use recycle::{RECYCLE, recycling};
 
+const TRANSFER: usize = 64;
+const TRANSFER_BYTES: usize = 64 * 1024;
+
 /// Backend-provided fixed-size storage. Exclusive access is granted only
 /// after all local views and backend leases have returned.
 #[doc(hidden)]
@@ -42,6 +45,7 @@ impl StorageBytes {
 
 impl std::ops::Deref for StorageBytes {
     type Target = [u8];
+
     fn deref(&self) -> &[u8] {
         match self {
             Self::Heap(bytes) => bytes,
@@ -65,6 +69,7 @@ impl std::ops::DerefMut for StorageBytes {
 pub trait PayloadRelease: fmt::Debug + Send + Sync + std::panic::RefUnwindSafe {
     /// Publish the number of reusable receive positions.
     fn publish(&self, count: usize);
+
     /// Schedule a bounded deferred-reclamation turn.
     fn wake(&self);
 }
@@ -155,9 +160,11 @@ impl Storage {
             let Ok(mut recycle) = recycle.try_borrow_mut() else {
                 return;
             };
+
             if !recycle.active {
                 return;
             }
+
             let owner = storage.as_ref().expect("unreleased storage");
             if recycle
                 .pool
@@ -167,9 +174,11 @@ impl Storage {
                 let Some(pool) = owner.pool.upgrade() else {
                     return;
                 };
+
                 recycle.flush();
                 recycle.pool = Some(pool);
             }
+
             let owner = storage.take().expect("unreleased storage");
             if Arc::strong_count(&owner) == 1 && owner.bytes.reusable() {
                 recycle.push(owner, credit);
@@ -178,9 +187,11 @@ impl Storage {
                 owner.defer(&pool);
             }
         });
+
         let Some(storage) = storage else {
             return;
         };
+
         storage.release_one(credit);
     }
 
@@ -189,6 +200,7 @@ impl Storage {
             .then(|| self.returns.clone())
             .flatten();
         pool.free.push(self);
+
         if let Some(returns) = returns {
             returns.publish(1);
         }
@@ -198,12 +210,14 @@ impl Storage {
         let Some(pool) = self.pool.upgrade() else {
             return;
         };
+
         // Storage is private and has no Weak references. A unique strong
         // owner cannot race a clone, so it can return without locking.
         if Arc::strong_count(&self) == 1 && self.bytes.reusable() {
             self.return_one(&pool, credit);
             return;
         }
+
         self.defer(&pool);
     }
 
@@ -220,6 +234,7 @@ impl Storage {
         } else {
             drop(self);
         }
+
         if let Some(returns) = returns {
             returns.wake();
         }
@@ -231,31 +246,37 @@ impl Pool {
         if requested == 0 {
             return;
         }
+
         let limit = self
             .pending_count
             .load(Ordering::Relaxed)
             .min(self.reclaim_budget.remaining_msgs());
         let mut budget = self.reclaim_budget.clone();
         let mut returned = 0;
+
         // Inspect each queued owner at most once in this turn, even if it
         // remains held and is pushed back onto the pending queue.
         for _ in 0..limit {
             if budget.exhausted() {
                 break;
             }
+
             let Ok(owner) = self.pending.pop() else {
                 break;
             };
+
             let _ = budget.account(if self.backend {
                 std::mem::size_of::<Storage>()
             } else {
                 owner.bytes.len()
             });
+
             if Arc::strong_count(&owner) == 1 && owner.bytes.reusable() {
                 self.queued[owner.slot].store(false, Ordering::Relaxed);
                 self.pending_count.fetch_sub(1, Ordering::Relaxed);
                 owner.return_one(self, Credit::Publish);
                 returned += 1;
+
                 if returned == requested {
                     break;
                 }
@@ -267,9 +288,6 @@ impl Pool {
         }
     }
 }
-
-const TRANSFER: usize = 64;
-const TRANSFER_BYTES: usize = 64 * 1024;
 
 impl PayloadPool {
     /// Preallocate each `(bytes_per_slot, slots)` size class.
@@ -288,9 +306,11 @@ impl PayloadPool {
                 buffers
                     .try_reserve_exact(capacity)
                     .map_err(|_| crate::Error::Config("payload pool allocation failed".into()))?;
+
                 for _ in 0..capacity {
                     buffers.push(StorageBytes::Heap(owned_body(size)?.into_boxed_slice()));
                 }
+
                 Ok(buffers)
             },
         )
@@ -311,6 +331,7 @@ impl PayloadPool {
                 "empty backend reclamation budget".into(),
             ));
         }
+
         Self::build(classes, reclaim_budget, |size, capacity| {
             let buffers = allocate(size, capacity)?;
             if buffers.len() != capacity
@@ -322,6 +343,7 @@ impl PayloadPool {
                     "invalid backend payload storage".into(),
                 ));
             }
+
             Ok(buffers.into_iter().map(StorageBytes::Backend).collect())
         })
     }
@@ -341,11 +363,13 @@ impl PayloadPool {
             {
                 return Err(crate::Error::Config("invalid payload pool size".into()));
             }
+
             let buffers = allocate(buffer_size, capacity)?;
             let backend = buffers
                 .first()
                 .is_some_and(|bytes| matches!(bytes, StorageBytes::Backend(_)));
             let reclaim_budget = reclaim_budget.clone();
+
             pools.push(Arc::new_cyclic(move |pool| {
                 let free = FreeList::new(capacity);
                 for (slot, bytes) in buffers.into_iter().enumerate() {
@@ -356,6 +380,7 @@ impl PayloadPool {
                         returns: None,
                     }));
                 }
+
                 Pool {
                     free,
                     queued: (0..capacity).map(|_| AtomicBool::new(false)).collect(),
@@ -368,6 +393,7 @@ impl PayloadPool {
                 }
             }));
         }
+
         pools.sort_by_key(|pool| pool.buffer_size);
         Ok(Self {
             classes: pools.into(),
@@ -387,6 +413,7 @@ impl PayloadPool {
                 }
             }
         }
+
         classes.sort_by_key(|pool| pool.buffer_size);
         Self {
             classes: classes.into(),
@@ -412,8 +439,10 @@ impl PayloadPool {
                 // Returned free slots are already reusable. Scan deferred
                 // owners only when checkout actually needs their credit.
                 pool.reclaim(1);
+
                 pool.free.pop()
             });
+
             if let Some(storage) = storage {
                 return Some(PayloadBuffer {
                     storage: Some(storage),
@@ -423,6 +452,7 @@ impl PayloadPool {
                 });
             }
         }
+
         None
     }
 
@@ -438,14 +468,17 @@ impl PayloadPool {
             fill(&mut body[..size]);
             return Ok(Message::from_slice(&body[..size]));
         }
+
         if let Some(mut buffer) = self.try_buffer(size) {
             fill(&mut buffer.writable()[..size]);
             buffer.set_len(size).expect("selected slot fits body");
             return Ok(buffer.into_message());
         }
+
         let mut body = owned_body(size)?;
         fill(&mut body);
         let retained = body.capacity();
+
         Ok(Message::from(Payload::from_bytes_with_retained_size(
             bytes::Bytes::from(body),
             retained,
@@ -465,10 +498,12 @@ impl PayloadPool {
         if size <= crate::message::MAX_INLINE_MESSAGE {
             return self.message(size, fill).map(Some);
         }
+
         validate_size(size)?;
         let Some(mut buffer) = self.try_buffer(size) else {
             return Ok(None);
         };
+
         fill(&mut buffer.writable()[..size]);
         buffer.set_len(size).expect("selected slot fits body");
         Ok(Some(buffer.into_message()))
@@ -486,9 +521,11 @@ impl PayloadPool {
         {
             return Ok(payload);
         }
+
         let mut body = owned_body(size)?;
         fill.take().expect("fill once")(&mut body);
         let retained = body.capacity();
+
         Ok(Payload::from_bytes_with_retained_size(
             bytes::Bytes::from(body),
             retained,
@@ -510,10 +547,12 @@ impl PayloadPool {
             fill(&mut body[..size]);
             return Ok(Some(Payload::from_slice(&body[..size])));
         }
+
         validate_size(size)?;
         let Some(mut buffer) = self.try_buffer(size) else {
             return Ok(None);
         };
+
         fill(&mut buffer.writable()[..size]);
         buffer.set_len(size).expect("selected slot fits body");
         Ok(Some(buffer.into_payload()))
@@ -534,27 +573,34 @@ impl PayloadPool {
             limit.min(TRANSFER).min(output.capacity() - start),
             TRANSFER_BYTES,
         );
+
         for pool in self.classes.iter().filter(|pool| pool.buffer_size >= size) {
             if budget.exhausted() {
                 break;
             }
+
             let requested = budget
                 .remaining_msgs()
                 .min((TRANSFER_BYTES.saturating_sub(budget.bytes()) / pool.buffer_size).max(1));
             pool.reclaim(requested.saturating_sub(pool.free.len()));
+
             if pool.free.available.load(Ordering::Relaxed) == 0 {
                 continue;
             }
+
             let count = pool.free.pop_many(requested, output);
             let batch_start = output.len() - count;
+
             for buffer in &mut output[batch_start..] {
                 buffer.returns.clone_from(&self.returns);
                 let _ = budget.account(buffer.capacity());
             }
+
             if count != 0 {
                 break;
             }
         }
+
         output.len() - start
     }
 
@@ -564,13 +610,16 @@ impl PayloadPool {
     pub fn recycle_many(messages: &mut Vec<Message>, limit: usize) -> usize {
         let mut budget = crate::flow::DrainBudget::new(limit.min(TRANSFER), TRANSFER_BYTES);
         let mut count = 0;
+
         for message in messages.iter().take(limit.min(TRANSFER)) {
             if budget.exhausted() {
                 break;
             }
+
             let _ = budget.account(message.byte_len());
             count += 1;
         }
+
         recycling(|| drop(messages.drain(..count)));
         count
     }
@@ -640,6 +689,7 @@ fn validate_size(size: usize) -> crate::Result<()> {
             "payload size exceeds addressable limit".into(),
         ));
     }
+
     Ok(())
 }
 
@@ -649,6 +699,7 @@ fn owned_body(size: usize) -> crate::Result<Vec<u8>> {
     body.try_reserve_exact(size)
         .map_err(|_| crate::Error::Config("payload allocation failed".into()))?;
     body.resize(size, 0);
+
     Ok(body)
 }
 

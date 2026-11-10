@@ -46,9 +46,11 @@ fn radio_send(sock: *mut c_void, group: &std::ffi::CStr, data: &[u8]) -> i32 {
     zmq_msg_init_buffer(m.0.as_mut_ptr().cast(), data.as_ptr().cast(), data.len());
     zmq_msg_set_group(m.0.as_mut_ptr().cast(), group.as_ptr());
     let rc = zmq_msg_send(m.0.as_mut_ptr().cast(), sock, 0);
+
     if rc < 0 {
         zmq_msg_close(m.0.as_mut_ptr().cast());
     }
+
     rc
 }
 
@@ -71,6 +73,7 @@ fn get_type(sock: *mut c_void) -> i32 {
     let mut v: i32 = 0;
     let mut sz = size_of::<i32>();
     zmq_getsockopt(sock, ZMQ_TYPE, (&mut v as *mut i32).cast(), &mut sz);
+
     v
 }
 
@@ -78,6 +81,7 @@ fn rcvmore(sock: *mut c_void) -> bool {
     let mut v: i32 = 0;
     let mut sz = size_of::<i32>();
     zmq_getsockopt(sock, ZMQ_RCVMORE, (&mut v as *mut i32).cast(), &mut sz);
+
     v != 0
 }
 
@@ -162,10 +166,12 @@ fn server_routing_id(server: *mut c_void, client: *mut c_void) -> u32 {
         let rc = zmq_msg_recv(msg.0.as_mut_ptr().cast(), server, 0);
         let routing_id = zmq_msg_routing_id(msg.0.as_ptr().cast());
         zmq_msg_close(msg.0.as_mut_ptr().cast());
+
         if rc == 4 {
             return routing_id;
         }
     }
+
     panic!("SERVER received nothing");
 }
 
@@ -238,6 +244,7 @@ fn scatter_to_tokio_gather_large_tcp() {
         .enable_time()
         .build()
         .unwrap();
+
     rt.block_on(async {
         let gather =
             omq_tokio::Socket::new(omq_tokio::SocketType::Gather, omq_tokio::Options::default());
@@ -252,9 +259,11 @@ fn scatter_to_tokio_gather_large_tcp() {
             set_timeo(scatter, 2_000);
             assert_eq!(zmq_connect(scatter, endpoint.as_ptr()), 0);
             std::thread::sleep(Duration::from_millis(100));
+
             let expected_len = i32::try_from(payload.len()).unwrap();
             let rc = zmq_send(scatter, payload.as_ptr().cast(), payload.len(), 0);
             assert_eq!(rc, expected_len, "scatter send failed");
+
             zmq_close(scatter);
             zmq_ctx_term(ctx);
         });
@@ -437,6 +446,7 @@ fn server_multiple_clients_tcp() {
         set_timeo(c, 2000);
         clients.push(c);
     }
+
     std::thread::sleep(Duration::from_millis(100));
 
     // Each client sends one message.
@@ -466,6 +476,7 @@ fn server_multiple_clients_tcp() {
     for c in clients {
         zmq_close(c);
     }
+
     zmq_close(server);
     zmq_ctx_term(ctx);
 }

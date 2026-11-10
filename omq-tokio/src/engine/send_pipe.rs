@@ -9,6 +9,8 @@ use super::transmit_slot::PeerTransmitSlot;
 mod consumer;
 mod producer;
 
+const SEND_PIPE_LWM_DIVISOR: usize = 2;
+
 /// Routing metadata is consumed only after capacity has been admitted.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum SendPreparation {
@@ -32,13 +34,12 @@ impl SendPreparation {
         if matches!(self, Self::StripIdentity) {
             message.pop_front_payload();
         }
+
         message
     }
 }
 
 pub(crate) type SendPipeProducerHandle = Arc<Mutex<Option<SendPipeProducer>>>;
-
-const SEND_PIPE_LWM_DIVISOR: usize = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SendPipeMode {
@@ -156,6 +157,7 @@ impl PipeSignals {
             above_lwm: self.above_lwm,
             freed_full: false,
         };
+
         (producer, consumer)
     }
 }
@@ -182,6 +184,7 @@ pub(crate) fn send_pipe_with_mode(
             )
         }
     };
+
     PipeSignals::new().pair(producer, consumer)
 }
 
@@ -196,6 +199,7 @@ pub(crate) fn peer_send_pipe(
         signals.data_signal.clone(),
         signals.space_available.clone(),
     );
+
     signals.pair(
         SendPipeProducerInner::Peer(producer),
         SendPipeConsumerInner::Peer(consumer),

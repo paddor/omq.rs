@@ -129,9 +129,11 @@ async fn stop_matching(tasks: &mut Vec<EndpointTask>, endpoint: &Endpoint) -> us
     let mut removed: Vec<_> = tasks
         .extract_if(.., |task| task.endpoint == *endpoint)
         .collect();
+
     for task in &mut removed {
         task.stop().await;
     }
+
     removed.len()
 }
 
@@ -204,6 +206,7 @@ impl Mailboxes {
         let (internal_tx, internal_rx) = mpsc::channel(128);
         let (peer_out_tx, peer_out_rx) = fanring::mpsc::channel_with_policy(256);
         let (peer_control_tx, peer_control_rx) = mpsc::channel(256);
+
         Self {
             internal_tx,
             internal_rx,
@@ -261,12 +264,15 @@ impl EndpointTable {
         for endpoint in &self.dart_endpoints {
             endpoint.cancel.cancel();
         }
+
         for l in &self.listeners {
             l.cancel.cancel();
         }
+
         for l in &self.udp_listeners {
             l.cancel.cancel();
         }
+
         for d in &self.dialers {
             d.task.cancel.cancel();
         }
@@ -314,6 +320,7 @@ impl SocketDriver {
             .recv_sink_config
             .as_ref()
             .and_then(|config| config.authenticated_sink());
+
         let resources = Resources {
             io_pool: env.io_pool,
             inproc_registry: env.inproc_registry,
@@ -369,6 +376,7 @@ impl SocketDriver {
 
             let linger_sleep = self.linger_sleep();
             let close_seen = self.close_drain_wait();
+
             // Drained while waiting on close progress: loop again so the peers
             // get their close request without waiting on a select arm.
             if close_seen.is_some() && self.routing.send_strategy.is_drained() {
@@ -452,6 +460,7 @@ impl SocketDriver {
         if self.request_peer_close_if_drained().await {
             return false;
         }
+
         !self.should_exit()
     }
 
@@ -468,6 +477,7 @@ impl SocketDriver {
             Ok(permit) => {
                 let pending = self.pending_receive.take().unwrap();
                 let peer_id = pending.peer_id;
+
                 // Authenticated receives always carry the peer's properties.
                 self.resources
                     .authenticated_recv_sink
@@ -478,6 +488,7 @@ impl SocketDriver {
                         pending.properties.unwrap(),
                         permit,
                     );
+
                 self.retire_completed_peer(peer_id).await;
             }
             Err(_) => self.begin_close(None, Some(Duration::ZERO)),
@@ -603,12 +614,11 @@ impl SocketDriver {
                 })
             })
             .collect();
+
         peers.sort_unstable_by_key(|peer| peer.peer.connection_id);
         (monitor, peers)
     }
-}
 
-impl SocketDriver {
     pub(super) fn ready_peer_count(&self) -> usize {
         self.peers.values().filter(|p| p.handshake.ready).count()
     }
@@ -639,6 +649,7 @@ fn ack_after_protocol_drain(
                 for inbox in backlogged {
                     inbox.protocol_drained().await;
                 }
+
                 let _ = ack.send(Ok(()));
             });
         }

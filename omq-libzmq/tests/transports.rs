@@ -56,14 +56,17 @@ fn publish_until_received(pub_: *mut c_void, sub: *mut c_void, msg: &[u8]) {
     set_timeo(sub, 100);
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut buf = [0u8; 64];
+
     loop {
         let len = i32::try_from(msg.len()).unwrap();
         assert_eq!(zmq_send(pub_, msg.as_ptr().cast(), msg.len(), 0), len);
         let rc = zmq_recv(sub, buf.as_mut_ptr().cast(), buf.len(), 0);
+
         if rc >= 0 {
             assert_eq!(&buf[..usize::try_from(rc).unwrap()], msg);
             return;
         }
+
         assert!(Instant::now() < deadline, "SUB never received the message");
     }
 }

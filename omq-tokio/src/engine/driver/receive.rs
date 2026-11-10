@@ -56,6 +56,7 @@ impl ReceiveProfile {
                 } else {
                     (256, RECV_LARGE_BYTES)
                 };
+
                 DrainBudget::new(max_msgs, max_bytes)
             }
         }
@@ -99,12 +100,15 @@ impl MessageDelivery<'_> {
         {
             return false;
         }
+
         if self.pending.is_some() && (self.sink.is_none() || self.reserved_admission) {
             return true;
         }
+
         if let Some(message) = self.pending.take() {
             return self.send(message, false, &mut false);
         }
+
         true
     }
 
@@ -116,6 +120,7 @@ impl MessageDelivery<'_> {
         {
             return true;
         }
+
         if let Some(RecvSink::Fanin(sink)) = self.sink {
             return if defer {
                 *pending_flush = true;
@@ -124,6 +129,7 @@ impl MessageDelivery<'_> {
                 sink.push(message)
             };
         }
+
         let result = if let Some(sink) = self.sink {
             sink.try_send_with_flush_mode(message, defer, pending_flush)
         } else {
@@ -139,6 +145,7 @@ impl MessageDelivery<'_> {
                 }
             }
         };
+
         match result {
             Ok(()) => true,
             Err(TrySendError::Full(message)) => {
@@ -264,6 +271,7 @@ impl ReceiveBatch {
                 self.started();
             }
         }
+
         let budget = self.budget.get_or_insert_with(|| profile.budget(msg_bytes));
         if !delivery.send(message, self.defer_flush, &mut self.pending_flush) {
             return Some(DriverStep::Close);
@@ -277,6 +285,7 @@ impl ReceiveBatch {
         // Read the clock only every BATCH_TIME_CHECK_MSGS messages.
         let time_check = budget.msgs().is_multiple_of(BATCH_TIME_CHECK_MSGS);
         let time_limit = self.time_limit;
+
         if !budget_remains
             || (time_check && time_limit.is_some_and(|limit| self.started().elapsed() >= limit))
         {
@@ -296,6 +305,7 @@ pub(super) fn drain_decoded_messages(
     if !delivery.retry_pending() {
         return Ok(DriverStep::Close);
     }
+
     if delivery.blocked() {
         return Ok(DriverStep::Continue);
     }
@@ -310,6 +320,7 @@ pub(super) fn drain_decoded_messages(
         if !sink.enable_batches() {
             return Ok(DriverStep::Close);
         }
+
         return drain_shm_batches(input.connection, shm, receive_profile, delivery);
     }
 
@@ -325,6 +336,7 @@ pub(super) fn drain_decoded_messages(
     loop {
         let polled =
             poll_decoded_message(connection, decoder, payload_pool, shm_guard.as_deref_mut());
+
         let m = match polled {
             Ok(DecodedReceive::Message(message)) => message,
             Ok(DecodedReceive::Setup) => continue,
@@ -353,6 +365,7 @@ pub(super) fn drain_decoded_messages(
             {
                 return Ok(DriverStep::Continue);
             }
+
             return Ok(step);
         }
     }
@@ -383,13 +396,16 @@ fn poll_decoded_message(
     if let Some(message) = decoder.as_mut().and_then(MessageDecoder::poll_message) {
         return Ok(DecodedReceive::Message(message));
     }
+
     let Some(wire) = poll_received_locked(connection, shm)? else {
         return Ok(DecodedReceive::Empty);
     };
+
     let message = match decoder {
         Some(decoder) => decoder.decode_with_payload_pool(wire, pool)?,
         None => Some(wire),
     };
+
     Ok(message.map_or(DecodedReceive::Setup, DecodedReceive::Message))
 }
 
@@ -407,6 +423,7 @@ pub(super) fn drain_shm_batches(
     let mut state = shm.lock().expect("SHM connection");
     let mut pending_flush = false;
     let defer = matches!(profile, ReceiveProfile::Throughput);
+
     loop {
         let received = if let Some(message) = state.poll_received() {
             omq_shm::Received::Message(message)
@@ -416,12 +433,14 @@ pub(super) fn drain_shm_batches(
             delivery.flush(&mut pending_flush);
             return Ok(DriverStep::Continue);
         };
+
         let count = match received {
             omq_shm::Received::Message(message) => {
                 if !delivery.send(message, defer, &mut pending_flush) {
                     delivery.flush(&mut pending_flush);
                     return Ok(DriverStep::Close);
                 }
+
                 1
             }
             omq_shm::Received::Batch(batch) => {
@@ -438,14 +457,17 @@ pub(super) fn drain_shm_batches(
                     delivery.flush(&mut pending_flush);
                     return Ok(DriverStep::Close);
                 }
+
                 count
             }
         };
+
         let remaining = budget.account_many(count, count * header_bytes);
         if delivery.blocked() {
             delivery.flush(&mut pending_flush);
             return Ok(DriverStep::Continue);
         }
+
         if !remaining || deadline.is_some_and(|time| started.elapsed() >= time) {
             delivery.flush(&mut pending_flush);
             return Ok(DriverStep::Yield);
@@ -460,6 +482,7 @@ fn poll_received_locked(
     if let Some(state) = shm {
         return shm::poll_received(connection, state);
     }
+
     Ok(connection.poll_message())
 }
 
@@ -484,5 +507,6 @@ pub(super) fn discard_received_messages(
             return Ok(true);
         }
     }
+
     Ok(false)
 }

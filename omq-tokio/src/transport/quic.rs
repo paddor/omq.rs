@@ -241,23 +241,10 @@ pub(crate) async fn connect(
 }
 
 async fn open_raw_roles(connection: quinn::Connection, deadline: Option<Instant>) -> Result<Roles> {
-    let opened = async {
-        config::check_alpn(&connection, ALPN)?;
+    let closer = connection.clone();
+    let opened = raw_roles(connection, Side::Connect);
 
-        let open = |e: quinn::ConnectionError| Error::HandshakeFailed(format!("QUIC open: {e}"));
-        let data = connection.open_bi().await.map_err(open)?;
-        let control = connection.open_bi().await.map_err(open)?;
-        check_raw_roles(&data.0, &control.0)?;
-
-        let mut control_send = SendHalf::Raw(control.0);
-        let mut control_recv = RecvHalf::Raw(control.1);
-        liveness::write_preface(&mut control_send).await?;
-        liveness::read_preface(&mut control_recv).await?;
-
-        Ok((data, (control_send, control_recv)))
-    };
-
-    let opened = if let Some(deadline) = deadline {
+    let roles = if let Some(deadline) = deadline {
         match tokio::time::timeout_at(deadline.into(), opened).await {
             Ok(result) if Instant::now() < deadline => result,
             _ => Err(Error::HandshakeFailed("transport setup timeout".into())),
@@ -266,16 +253,65 @@ async fn open_raw_roles(connection: quinn::Connection, deadline: Option<Instant>
         opened.await
     };
 
-    match opened {
-        Ok(((data_send, data_recv), (control_send, control_recv))) => Ok(Roles {
-            carrier: Carrier::Raw(connection),
-            data: (SendHalf::Raw(data_send), RecvHalf::Raw(data_recv)),
-            liveness: (control_send, control_recv),
-        }),
-        Err(e) => {
-            connection.close(quinn::VarInt::from_u32(code::SETUP_ERROR), b"");
-            Err(e)
+    if roles.is_err() {
+        closer.close(quinn::VarInt::from_u32(code::SETUP_ERROR), b"");
+    }
+
+    roles
+}
+
+/// Side of a raw-profile connection. The connector opens both streams and
+/// writes its liveness preface first; the listener accepts and answers.
+#[derive(Clone, Copy, Debug)]
+enum Side {
+    Connect,
+    Accept,
+}
+
+/// Raw-profile roles: check the ALPN, take streams 0 and 4, and exchange
+/// liveness prefaces in `side` order.
+async fn raw_roles(connection: quinn::Connection, side: Side) -> Result<Roles> {
+    config::check_alpn(&connection, ALPN)?;
+
+    let (data_send, data_recv) = raw_stream(&connection, side).await?;
+    let (control_send, control_recv) = raw_stream(&connection, side).await?;
+    check_raw_roles(&data_send, &control_send)?;
+
+    let mut control_send = SendHalf::Raw(control_send);
+    let mut control_recv = RecvHalf::Raw(control_recv);
+
+    match side {
+        Side::Connect => {
+            liveness::write_preface(&mut control_send).await?;
+            liveness::read_preface(&mut control_recv).await?;
         }
+        Side::Accept => {
+            liveness::read_preface(&mut control_recv).await?;
+            liveness::write_preface(&mut control_send).await?;
+        }
+    }
+
+    Ok(Roles {
+        carrier: Carrier::Raw(connection),
+        data: (SendHalf::Raw(data_send), RecvHalf::Raw(data_recv)),
+        liveness: (control_send, control_recv),
+    })
+}
+
+/// Open or accept the next bidirectional stream.
+async fn raw_stream(
+    connection: &quinn::Connection,
+    side: Side,
+) -> Result<(quinn::SendStream, quinn::RecvStream)> {
+    match side {
+        Side::Connect => connection
+            .open_bi()
+            .await
+            .map_err(|e| Error::HandshakeFailed(format!("QUIC open: {e}"))),
+        Side::Accept => connection
+            .accept_bi()
+            .await
+            .map_err(|e| Error::HandshakeFailed(format!("QUIC accept: {e}"))),
     }
 }
 
@@ -529,23 +565,7 @@ async fn accept_roles(connection: quinn::Connection, policy: &AcceptPolicy) -> R
     }
 
     let _ = policy;
-    config::check_alpn(&connection, ALPN)?;
-
-    let accept = |e: quinn::ConnectionError| Error::HandshakeFailed(format!("QUIC accept: {e}"));
-    let (data_send, data_recv) = connection.accept_bi().await.map_err(accept)?;
-    let (control_send, control_recv) = connection.accept_bi().await.map_err(accept)?;
-    check_raw_roles(&data_send, &control_send)?;
-
-    let mut control_send = SendHalf::Raw(control_send);
-    let mut control_recv = RecvHalf::Raw(control_recv);
-    liveness::read_preface(&mut control_recv).await?;
-    liveness::write_preface(&mut control_send).await?;
-
-    Ok(Roles {
-        carrier: Carrier::Raw(connection),
-        data: (SendHalf::Raw(data_send), RecvHalf::Raw(data_recv)),
-        liveness: (control_send, control_recv),
-    })
+    raw_roles(connection, Side::Accept).await
 }
 
 /// Bind a QUIC listener. With the `webtransport` feature it also accepts

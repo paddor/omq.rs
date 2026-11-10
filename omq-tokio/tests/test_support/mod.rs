@@ -12,6 +12,10 @@ pub fn tcp_loopback(port: u16) -> Endpoint {
     }
 }
 
+pub fn inproc(name: &str) -> Endpoint {
+    Endpoint::Inproc { name: name.into() }
+}
+
 pub fn ipc_endpoint(name: &str) -> Endpoint {
     static NEXT_IPC_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 

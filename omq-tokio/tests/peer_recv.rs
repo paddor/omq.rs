@@ -73,19 +73,16 @@ async fn configured_send_byte_budget_backpressures_clones_and_rejects_oversize()
     server.close().await.unwrap();
 }
 
-#[tokio::test]
-async fn identity_view_preserves_targeted_claims_and_explicit_body_sends() {
-    let context = Context::new();
+/// "server" and "client" PEER identity views connected over inproc `name`.
+async fn identity_pair(
+    context: &Context,
+    name: &str,
+) -> (omq_tokio::IdentitySocket, omq_tokio::IdentitySocket) {
     let server = context
         .socket(SocketType::Peer, options("server"))
         .identity_routing()
         .unwrap();
-    let endpoint = server
-        .bind(Endpoint::Inproc {
-            name: "identity-source-view".into(),
-        })
-        .await
-        .unwrap();
+    let endpoint = server.bind(test_support::inproc(name)).await.unwrap();
     let client = context
         .socket(SocketType::Peer, options("client"))
         .identity_routing()
@@ -94,6 +91,14 @@ async fn identity_view_preserves_targeted_claims_and_explicit_body_sends() {
     client.connect(endpoint).await.unwrap();
     connected(&client).await;
     connected(&server).await;
+
+    (server, client)
+}
+
+#[tokio::test]
+async fn identity_view_preserves_targeted_claims_while_replies_flow() {
+    let context = Context::new();
+    let (server, client) = identity_pair(&context, "identity-source-claim").await;
 
     client
         .send_to("server", Message::single("held"))
@@ -116,10 +121,29 @@ async fn identity_view_preserves_targeted_claims_and_explicit_body_sends() {
     assert_eq!(message, Message::single("held"));
     drop(receipt);
 
+    // Releasing the claim lets untargeted receives continue.
+    client
+        .send_to("server", Message::single("after release"))
+        .await
+        .unwrap();
+    let (identity, message) = server.recv_from().await.unwrap();
+    assert_eq!(identity.as_ref(), b"client");
+    assert_eq!(message, Message::single("after release"));
+
+    server.into_inner().close().await.unwrap();
+    client.into_inner().close().await.unwrap();
+}
+
+#[tokio::test]
+async fn identity_view_try_send_to_delivers_the_body_with_the_sender_identity() {
+    let context = Context::new();
+    let (server, client) = identity_pair(&context, "identity-explicit-body").await;
+
     client
         .try_send_to("server", Message::single("accepted"))
         .unwrap();
     let (identity, message) = server.recv_from().await.unwrap();
+
     assert_eq!(identity.as_ref(), b"client");
     assert_eq!(message, Message::single("accepted"));
 

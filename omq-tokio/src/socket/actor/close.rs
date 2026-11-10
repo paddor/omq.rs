@@ -186,7 +186,6 @@ impl SocketDriver {
 
         // Detach the handle-side send paths (dead slots, taken pipes) before
         // cancel, so no caller writes into a peer that is shutting down.
-        let mut peer_tasks = Vec::new();
         for p in self.peers.values() {
             if let Some(ref slot) = p.handle.routes.transmit_slot {
                 slot.mark_dead();
@@ -199,11 +198,11 @@ impl SocketDriver {
             p.handle.cancel.cancel();
         }
 
-        for (_, mut peer) in self.peers.drain() {
-            if let Some(task) = peer.task.take() {
-                peer_tasks.push(task);
-            }
-        }
+        let peer_tasks: Vec<_> = self
+            .peers
+            .drain()
+            .filter_map(|(_, mut peer)| peer.task.take())
+            .collect();
 
         for mut listener in self.endpoints.listeners.drain(..) {
             listener.stop().await;

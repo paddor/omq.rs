@@ -237,16 +237,19 @@ impl Socket {
         self.ensure_connected().await?;
         let mut wire_message = self.type_state.pre_send(self.kind, message.clone())?;
 
-        if self.kind == SocketType::Server {
-            if wire_message.take_routing_id() != Some(self.server_routing_id) {
-                return Err(Error::Unroutable);
-            }
-        } else if is_identity_routed(self.kind) {
-            let peer_identity = self.live.as_ref().expect("connected").peer_identity.clone();
-            wire_message = strip_single_peer_identity(self.kind, &peer_identity, wire_message)?;
+        let live = connected(&mut self.live)?;
+
+        if self.kind == SocketType::Server
+            && wire_message.take_routing_id() != Some(self.server_routing_id)
+        {
+            return Err(Error::Unroutable);
         }
 
-        let live = self.live.as_mut().expect("connected");
+        if is_identity_routed(self.kind) {
+            wire_message =
+                strip_single_peer_identity(self.kind, &live.peer_identity, wire_message)?;
+        }
+
         let result = run_timeout(self.options.io_timeout, live.write_message(&wire_message)).await;
         self.disconnect_on_err(result)?;
 
@@ -268,7 +271,7 @@ impl Socket {
             }
 
             self.ensure_connected().await?;
-            let live = self.live.as_mut().expect("connected");
+            let live = connected(&mut self.live)?;
             let result =
                 run_timeout(self.options.io_timeout, recv_live(live, self.heartbeat)).await;
             let message = self.disconnect_on_err(result)?;
@@ -276,7 +279,7 @@ impl Socket {
             let message = if self.kind == SocketType::Server {
                 message.with_routing_id(self.server_routing_id)
             } else if is_identity_routed(self.kind) {
-                let peer_identity = self.live.as_ref().expect("connected").peer_identity.clone();
+                let peer_identity = connected(&mut self.live)?.peer_identity.clone();
                 Message::with_prefix(peer_identity, message)
             } else {
                 message
@@ -299,15 +302,15 @@ impl Socket {
     /// sockets never run a background task.
     pub async fn maintain(&mut self) -> Result<()> {
         self.ensure_connected().await?;
-        let input_result = drain_ready_input(self.live.as_mut().expect("connected"));
+        let input_result = drain_ready_input(connected(&mut self.live)?);
         self.disconnect_on_err(input_result)?;
 
-        let live = self.live.as_mut().expect("connected");
+        let live = connected(&mut self.live)?;
         let flush_result = run_timeout(self.options.io_timeout, flush_and_settle(live)).await;
         self.disconnect_on_err(flush_result)?;
 
         let now = Instant::now();
-        let live = self.live.as_mut().expect("connected");
+        let live = connected(&mut self.live)?;
 
         if live
             .silence_deadline()
@@ -452,6 +455,11 @@ impl Socket {
             attempt: self.reconnect_attempt,
         });
     }
+}
+
+/// Borrow the connection that `ensure_connected` established.
+fn connected(live: &mut Option<LiveConnection>) -> Result<&mut LiveConnection> {
+    live.as_mut().ok_or(Error::Closed)
 }
 
 fn reconnect_delay(policy: ReconnectPolicy, attempt: u32) -> Option<Duration> {

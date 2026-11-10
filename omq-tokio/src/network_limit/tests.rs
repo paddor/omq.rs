@@ -1,6 +1,37 @@
 use super::*;
 
-fn bucket(rate: u64, burst: u64, lanes: usize) -> Bucket {
+/// One egress lane with its allocator and lane tasks running.
+struct RunningLane {
+    lane: Lane,
+    cancel: CancellationToken,
+    allocator_task: tokio::task::JoinHandle<()>,
+    lane_task: tokio::task::JoinHandle<()>,
+}
+
+impl RunningLane {
+    fn start(rate: u64, burst: u64) -> Self {
+        let allocator = egress_allocator(rate, burst, 1);
+        let lane = allocator.lanes()[0].clone();
+        let cancel = CancellationToken::new();
+        let allocator_task = tokio::spawn(allocator.run(cancel.clone()));
+        let lane_task = tokio::spawn(lane.clone().run(cancel.clone()));
+
+        Self {
+            lane,
+            cancel,
+            allocator_task,
+            lane_task,
+        }
+    }
+
+    async fn stop(self) {
+        self.cancel.cancel();
+        self.allocator_task.await.unwrap();
+        self.lane_task.await.unwrap();
+    }
+}
+
+fn egress_allocator(rate: u64, burst: u64, lanes: usize) -> Allocator {
     Allocator::new(
         NetworkRateLimits {
             ingress: None,
@@ -8,8 +39,36 @@ fn bucket(rate: u64, burst: u64, lanes: usize) -> Bucket {
         },
         lanes,
     )
-    .egress
-    .unwrap()
+}
+
+fn bucket(rate: u64, burst: u64, lanes: usize) -> Bucket {
+    egress_allocator(rate, burst, lanes).egress.unwrap()
+}
+
+/// What lane `index` last published to the allocator.
+fn reports(b: &Bucket, index: usize) -> &Reports {
+    &b.accounts[index].mailbox.reports
+}
+
+fn demand_on_every_lane(b: &Bucket, bytes: u64) {
+    for account in &b.accounts {
+        account
+            .mailbox
+            .reports
+            .demand
+            .store(bytes, Ordering::Release);
+    }
+}
+
+/// Every lane reports all credit granted so far as spent.
+fn spend_all_grants(b: &Bucket) {
+    for account in &b.accounts {
+        account
+            .mailbox
+            .reports
+            .spent
+            .store(account.totals.granted, Ordering::Release);
+    }
 }
 
 #[test]
@@ -17,9 +76,7 @@ fn outstanding_grants_still_occupy_burst_capacity() {
     let mut b = bucket(100, 100, 2);
     let start = b.updated;
 
-    for account in &b.accounts {
-        account.mailbox.reports.demand.store(1, Ordering::Release);
-    }
+    demand_on_every_lane(&b, 1);
 
     for _ in 0..8 {
         b.service(start);
@@ -34,11 +91,7 @@ fn outstanding_grants_still_occupy_burst_capacity() {
     // The first lane reports old spending after a minute. No historical
     // refill can be applied to capacity that was still reserved until now.
     let spent = b.accounts[0].totals.held;
-    b.accounts[0]
-        .mailbox
-        .reports
-        .spent
-        .store(spent, Ordering::Release);
+    reports(&b, 0).spent.store(spent, Ordering::Release);
 
     b.service(start + Duration::from_mins(1));
     assert_eq!(b.available, 0);
@@ -53,24 +106,12 @@ fn returned_credit_is_transferred_not_refilled() {
     let mut b = bucket(100, 100, 1);
     let start = b.updated;
 
-    b.accounts[0]
-        .mailbox
-        .reports
-        .demand
-        .store(100, Ordering::Release);
+    reports(&b, 0).demand.store(100, Ordering::Release);
     b.service(start);
     let granted = b.accounts[0].totals.held;
 
-    b.accounts[0]
-        .mailbox
-        .reports
-        .demand
-        .store(0, Ordering::Release);
-    b.accounts[0]
-        .mailbox
-        .reports
-        .returned
-        .store(granted, Ordering::Release);
+    reports(&b, 0).demand.store(0, Ordering::Release);
+    reports(&b, 0).returned.store(granted, Ordering::Release);
 
     b.service(start);
     assert_eq!(b.available, 100);
@@ -99,20 +140,11 @@ fn one_byte_burst_rotates_between_waiting_lanes() {
     let mut b = bucket(1, 1, 4);
     let start = b.updated;
 
-    for account in &b.accounts {
-        account.mailbox.reports.demand.store(1, Ordering::Release);
-    }
+    demand_on_every_lane(&b, 1);
 
     for second in 0..12 {
         b.service(start + Duration::from_secs(second));
-        for account in &b.accounts {
-            account
-                .mailbox
-                .reports
-                .spent
-                .store(account.totals.granted, Ordering::Release);
-        }
-
+        spend_all_grants(&b);
         b.service(start + Duration::from_secs(second));
     }
 
@@ -121,20 +153,9 @@ fn one_byte_burst_rotates_between_waiting_lanes() {
 
 #[tokio::test(start_paused = true)]
 async fn cancelled_waiter_releases_the_next_connection() {
-    let allocator = Allocator::new(
-        NetworkRateLimits {
-            ingress: None,
-            egress: Some(ByteRateLimit::new(100, 10)),
-        },
-        1,
-    );
-    let lane = allocator.lanes()[0].clone();
-    let cancel = CancellationToken::new();
-    let allocator_task = tokio::spawn(allocator.run(cancel.clone()));
-    let lane_task = tokio::spawn(lane.clone().run(cancel.clone()));
-
-    let mut first = lane.egress().unwrap();
-    let mut second = lane.egress().unwrap();
+    let running = RunningLane::start(100, 10);
+    let mut first = running.lane.egress().unwrap();
+    let mut second = running.lane.egress().unwrap();
     let cx = Context::from_waker(Waker::noop());
     assert!(first.poll(&cx, 10, 10).is_pending());
     assert!(second.poll(&cx, 1, 1).is_pending());
@@ -145,9 +166,7 @@ async fn cancelled_waiter_releases_the_next_connection() {
         .unwrap();
     second.finish(n, 1);
 
-    cancel.cancel();
-    allocator_task.await.unwrap();
-    lane_task.await.unwrap();
+    running.stop().await;
 }
 
 #[test]
@@ -155,9 +174,7 @@ fn whole_datagram_grants_do_not_fragment_a_small_burst() {
     let mut b = bucket(1200, 1500, 4);
     let start = b.updated;
 
-    for a in &b.accounts {
-        a.mailbox.reports.demand.store(1200, Ordering::Release);
-    }
+    demand_on_every_lane(&b, 1200);
 
     for second in 0..8 {
         b.service(start + Duration::from_secs(second));
@@ -168,13 +185,7 @@ fn whole_datagram_grants_do_not_fragment_a_small_burst() {
                 .all(|a| a.totals.held == 0 || a.totals.held >= 1200)
         );
 
-        for a in &b.accounts {
-            a.mailbox
-                .reports
-                .spent
-                .store(a.totals.granted, Ordering::Release);
-        }
-
+        spend_all_grants(&b);
         b.service(start + Duration::from_secs(second));
     }
 
@@ -186,29 +197,13 @@ fn a_large_datagram_is_not_starved_by_stream_grants() {
     let mut b = bucket(1000, 100, 2);
     let start = b.updated;
     b.available = 0;
-    b.accounts[0]
-        .mailbox
-        .reports
-        .demand
-        .store(100, Ordering::Release);
-    b.accounts[1]
-        .mailbox
-        .reports
-        .demand
-        .store(1, Ordering::Release);
+    reports(&b, 0).demand.store(100, Ordering::Release);
+    reports(&b, 1).demand.store(1, Ordering::Release);
 
     for tick in 0..=500 {
         let now = start + Duration::from_millis(tick);
         b.service(now);
-
-        for account in &b.accounts {
-            account
-                .mailbox
-                .reports
-                .spent
-                .store(account.totals.granted, Ordering::Release);
-        }
-
+        spend_all_grants(&b);
         b.service(now);
     }
 
@@ -275,16 +270,8 @@ fn datagram_refunds_and_repair_debt_are_applied_once() {
     let start = b.updated;
     b.available = 0;
 
-    b.accounts[0]
-        .mailbox
-        .reports
-        .refunded
-        .store(80, Ordering::Release);
-    b.accounts[0]
-        .mailbox
-        .reports
-        .debt
-        .store(100, Ordering::Release);
+    reports(&b, 0).refunded.store(80, Ordering::Release);
+    reports(&b, 0).debt.store(100, Ordering::Release);
 
     b.service(start);
     assert_eq!((b.available, b.debt), (0, 20));
@@ -343,20 +330,9 @@ async fn tracked_writer_reports_time_refused_by_the_transport() {
 async fn short_and_pending_writes_return_unused_credit() {
     use tokio::io::AsyncWriteExt;
 
-    let allocator = Allocator::new(
-        NetworkRateLimits {
-            ingress: None,
-            egress: Some(ByteRateLimit::new(1, 10)),
-        },
-        1,
-    );
-    let lane = allocator.lanes()[0].clone();
-    let cancel = CancellationToken::new();
-    let allocator_task = tokio::spawn(allocator.run(cancel.clone()));
-    let lane_task = tokio::spawn(lane.clone().run(cancel.clone()));
-
+    let running = RunningLane::start(1, 10);
     let (writer, _reader) = tokio::io::duplex(1);
-    let mut writer = PacedWrite::new(writer, lane.egress());
+    let mut writer = PacedWrite::new(writer, running.lane.egress());
     assert_eq!(writer.write(&[1; 10]).await.unwrap(), 1);
     assert!(
         tokio::time::timeout(Duration::from_millis(10), writer.write(&[2; 10]))
@@ -365,32 +341,20 @@ async fn short_and_pending_writes_return_unused_credit() {
     );
 
     writer.cancel_wait();
-    let mut other = lane.egress().unwrap();
+    let mut other = running.lane.egress().unwrap();
     let grant = tokio::time::timeout(Duration::from_millis(10), other.acquire(9))
         .await
         .unwrap();
     assert_eq!(grant, 9);
     other.finish(grant, 9);
 
-    cancel.cancel();
-    allocator_task.await.unwrap();
-    lane_task.await.unwrap();
+    running.stop().await;
 }
 
 #[tokio::test(start_paused = true)]
 async fn streams_make_bounded_progress_beside_large_datagrams() {
-    let allocator = Allocator::new(
-        NetworkRateLimits {
-            ingress: None,
-            egress: Some(ByteRateLimit::new(1000, 1000)),
-        },
-        1,
-    );
-    let lane = allocator.lanes()[0].clone();
-    let cancel = CancellationToken::new();
-    let allocator_task = tokio::spawn(allocator.run(cancel.clone()));
-    let lane_task = tokio::spawn(lane.clone().run(cancel.clone()));
-    let mut datagram = lane.egress().unwrap();
+    let running = RunningLane::start(1000, 1000);
+    let mut datagram = running.lane.egress().unwrap();
     let stop_datagrams = CancellationToken::new();
     let stopped = stop_datagrams.clone();
 
@@ -408,7 +372,7 @@ async fn streams_make_bounded_progress_beside_large_datagrams() {
         }
     });
 
-    let mut stream = lane.egress().unwrap();
+    let mut stream = running.lane.egress().unwrap();
     tokio::time::timeout(Duration::from_secs(20), async {
         let mut remaining = 8000;
         while remaining != 0 {
@@ -426,9 +390,8 @@ async fn streams_make_bounded_progress_beside_large_datagrams() {
         datagrams.await.unwrap() >= 6000,
         "datagrams must progress too"
     );
-    cancel.cancel();
-    allocator_task.await.unwrap();
-    lane_task.await.unwrap();
+
+    running.stop().await;
 }
 
 #[test]
@@ -464,13 +427,7 @@ fn partial_stream_balances_cannot_pin_a_datagrams_burst() {
 
 #[tokio::test(start_paused = true)]
 async fn lane_shutdown_does_not_reissue_previous_grants() {
-    let allocator = Allocator::new(
-        NetworkRateLimits {
-            ingress: None,
-            egress: Some(ByteRateLimit::new(1, 8)),
-        },
-        1,
-    );
+    let allocator = egress_allocator(1, 8, 1);
     let lane = allocator.lanes()[0].clone();
     let stop_allocator = CancellationToken::new();
     let stop_lane = CancellationToken::new();

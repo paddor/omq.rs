@@ -10,7 +10,7 @@ mod process;
 mod tls;
 
 use clap::Parser;
-use cli::{ChartSub, Command, RunSub};
+use cli::{Command, RunSub};
 
 fn main() {
     let cli = cli::Cli::parse();
@@ -27,32 +27,7 @@ fn main() {
             RunSub::AeronDart(args) => bench::datagram::aeron::run(args),
             RunSub::QuinnDatagram(args) => bench::datagram::quinn::run(args),
         },
-        Command::Chart { sub } => match sub {
-            Some(ChartSub::Shm { cached_baselines }) => {
-                chart::shm::generate(cached_baselines).expect("generate SHM charts");
-            }
-            Some(ChartSub::Main) => chart::main_tcp::generate(),
-            Some(ChartSub::Comparison) => chart::comparison::generate(),
-            Some(ChartSub::Pubsub) => chart::pubsub::generate(),
-            Some(ChartSub::Fanio) => chart::fanio::generate(),
-            Some(ChartSub::Quic) => chart::quic::generate(),
-            Some(ChartSub::Dart) => chart::dart::generate(),
-            Some(ChartSub::Lossy) => chart::lossy::generate(),
-            Some(ChartSub::Compression) => chart::compression::generate(),
-            Some(ChartSub::RateLimit) => chart::rate_limit::generate(),
-            None => {
-                chart::main_tcp::generate();
-                chart::comparison::generate();
-                chart::pubsub::generate();
-                chart::shm::generate(false).expect("generate SHM charts");
-                chart::fanio::generate();
-                chart::quic::generate();
-                chart::dart::generate();
-                chart::lossy::generate();
-                chart::compression::generate();
-                chart::rate_limit::generate();
-            }
-        },
+        Command::Chart { sub } => chart::generate(sub),
     });
 
     process::reap_all();

@@ -14,7 +14,7 @@ use crate::process;
 
 const PAYLOAD: &str = "structured-varied-v1";
 const CPU_PANEL_MAX: f64 = 200.0;
-pub(crate) const LEGEND_ROW_H: u32 = 16;
+const LEGEND_ROW_H: u32 = 16;
 
 /// One codec's bench cache and the workload its rows must match.
 pub(crate) struct Source {
@@ -52,6 +52,17 @@ struct CompressionData {
 }
 
 type LinkData = BTreeMap<u64, BTreeMap<u64, CompressionData>>;
+
+/// X-axis sizes and the series drawn in each link row.
+struct RowSeries<'a> {
+    sizes: &'a [u64],
+    present: &'a [Series],
+}
+
+/// Size index against a row's left (primary) or right (secondary) value.
+type Coord = Cartesian2d<RangedCoordf64, RangedCoordf64>;
+
+pub(crate) type DualChart<'a, 'b> = DualCoordChartContext<'a, SVGBackend<'b>, Coord, Coord>;
 
 fn matches_payload(row: &PushpullLz4Row, payload: &str, arena_bytes: u64) -> bool {
     row.payload.as_deref() == Some(payload)
@@ -214,17 +225,6 @@ fn measured(data: &BTreeMap<u64, CompressionData>) -> (ValMap, ValMap, ValMap) {
     (tput, msgs, cpu)
 }
 
-/// Size index against msg/s (primary) or GB/s (secondary).
-type Coord = Cartesian2d<RangedCoordf64, RangedCoordf64>;
-
-type DualChart<'a, 'b> = DualCoordChartContext<'a, SVGBackend<'b>, Coord, Coord>;
-
-/// X-axis sizes and the series drawn in each link row.
-struct RowSeries<'a> {
-    sizes: &'a [u64],
-    present: &'a [&'a Series],
-}
-
 pub(crate) fn generate(chart: &CompressionChart) {
     let cells = load_cells(chart, |row| link_rate(chart, row));
     if cells.is_empty() {
@@ -233,7 +233,35 @@ pub(crate) fn generate(chart: &CompressionChart) {
 
     assert_complete(chart, &cells);
     let data = link_data(&cells);
+    let series = RowSeries {
+        sizes: chart.sizes,
+        present: chart.series,
+    };
 
+    draw_chart(
+        chart,
+        &[
+            "--- dashed = msg/s (left axis)",
+            "\u{2500}\u{2500}\u{2500} solid = payload/s (right axis)",
+            "... dotted = sender CPU% (0-200%)",
+        ],
+        &[
+            "Measured netem: shared rate, 1 ms/direction, MTU 1500; segmentation offloads off.",
+            "Median of 3; 0.5 s warmup (1 s Zstd), >=2 s measurement; varied binary/JSON.",
+        ],
+        |row_area, rate| draw_link_row(row_area, &series, &data[&rate]),
+    );
+}
+
+/// Draws `chart` to its SVG file: one titled row per panel above the
+/// series legend, `key_lines`, and `notes`. `draw_row` draws the row of one
+/// panel value.
+pub(crate) fn draw_chart(
+    chart: &CompressionChart,
+    key_lines: &[&str],
+    notes: &[&str; 2],
+    draw_row: impl Fn(&DrawingArea<SVGBackend<'_>, Shift>, u64),
+) {
     let dir = out_dir().join("pushpull");
     std::fs::create_dir_all(&dir).ok();
     let out = dir.join(chart.output_file);
@@ -253,35 +281,17 @@ pub(crate) fn generate(chart: &CompressionChart) {
     let root = SVGBackend::new(&out, (width, total_h)).into_drawing_area();
     root.fill(&BACKGROUND_COLOR).unwrap();
 
-    let series = RowSeries {
-        sizes: chart.sizes,
-        present: &present,
-    };
     let mut row_titles: Vec<(u32, String)> = Vec::new();
-
-    for (idx, &(rate, label)) in chart.panels.iter().enumerate() {
+    for (idx, &(panel, label)) in chart.panels.iter().enumerate() {
         let y_top = top_margin + idx as u32 * (panel_h + row_gap);
         let row_area = root.clone().shrink((0, y_top), (width, panel_h));
 
         row_titles.push((y_top - 6, label.to_string()));
-        draw_link_row(&row_area, &series, &data[&rate]);
+        draw_row(&row_area, panel);
     }
 
     let table_area = root.clone().shrink((0, chart_total), (width, table_h));
-    draw_legend(
-        &table_area,
-        &present,
-        &[
-            "--- dashed = msg/s (left axis)",
-            "\u{2500}\u{2500}\u{2500} solid = payload/s (right axis)",
-            "... dotted = sender CPU% (0-200%)",
-        ],
-        &[
-            "Measured netem: shared rate, 1 ms/direction, MTU 1500; segmentation offloads off.",
-            "Median of 3; 0.5 s warmup (1 s Zstd), >=2 s measurement; varied binary/JSON.",
-        ],
-        table_h,
-    );
+    draw_legend(&table_area, &present, key_lines, notes, table_h);
 
     root.present().unwrap();
     drop(root);
@@ -290,6 +300,28 @@ pub(crate) fn generate(chart: &CompressionChart) {
     append_row_titles(&out, width, &row_titles).unwrap();
 
     eprintln!("Written: {}", out.display());
+}
+
+/// Builds the dual-axis chart of one row: size index against `0..left_max`
+/// on the left axis and `0..right_max` on the right.
+pub(crate) fn dual_chart<'a, 'b>(
+    row_area: &'a DrawingArea<SVGBackend<'b>, Shift>,
+    sizes: &[u64],
+    left_max: f64,
+    right_max: f64,
+) -> DualChart<'a, 'b> {
+    let last = (sizes.len() - 1) as f64;
+
+    ChartBuilder::on(row_area)
+        .set_label_area_size(LabelAreaPosition::Bottom, 28)
+        .set_label_area_size(LabelAreaPosition::Left, 70)
+        .set_label_area_size(LabelAreaPosition::Right, 62)
+        .margin_top(6)
+        .margin_left(10)
+        .margin_right(10)
+        .build_cartesian_2d(0.0..last, 0.0..left_max)
+        .unwrap()
+        .set_secondary_coord(0.0..last, 0.0..right_max)
 }
 
 /// msg/s and sender CPU% per link rate, size, and series.
@@ -361,16 +393,7 @@ fn draw_link_row(
         return;
     }
 
-    let mut chart_area = ChartBuilder::on(row_area)
-        .set_label_area_size(LabelAreaPosition::Bottom, 28)
-        .set_label_area_size(LabelAreaPosition::Left, 70)
-        .set_label_area_size(LabelAreaPosition::Right, 62)
-        .margin_top(6)
-        .margin_left(10)
-        .margin_right(10)
-        .build_cartesian_2d(0.0..(sizes.len() - 1) as f64, 0.0..msgs_max)
-        .unwrap()
-        .set_secondary_coord(0.0..(sizes.len() - 1) as f64, 0.0..gbs_max);
+    let mut chart_area = dual_chart(row_area, sizes, msgs_max, gbs_max);
 
     configure_axes(&mut chart_area, sizes, msgs_ticks, gbs_ticks);
     draw_msg_lines(&mut chart_area, series, &msgs);
@@ -532,7 +555,7 @@ fn draw_gbs_lines(chart_area: &mut DualChart<'_, '_>, series: &RowSeries<'_>, tp
 }
 
 /// Line style key, series swatches, and method notes below the rows.
-pub(crate) fn draw_legend(
+fn draw_legend(
     table_area: &DrawingArea<SVGBackend<'_>, Shift>,
     present: &[&Series],
     key_lines: &[&str],

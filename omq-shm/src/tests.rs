@@ -280,6 +280,35 @@ fn delivered(sender: &mut Connection, receiver: &mut Connection, message: &Messa
     receiver.decode(wire).unwrap()
 }
 
+/// Encode one batch record and carry its descriptors to the receiver.
+/// The message count comes from the record's own table.
+fn encoded_record(
+    sender: &mut Connection,
+    receiver: &mut Connection,
+    record: &Message,
+    kind: BatchKind,
+) -> Message {
+    let count = batch::count(body(record).unwrap()).unwrap();
+    let wire = sender
+        .encode_record(record, count, kind.record())
+        .unwrap()
+        .unwrap();
+    transfer(sender, receiver);
+
+    wire
+}
+
+/// Encode, transfer, and decode every message of one batch record.
+fn delivered_record(
+    sender: &mut Connection,
+    receiver: &mut Connection,
+    record: &Message,
+    kind: BatchKind,
+) -> Vec<Message> {
+    let wire = encoded_record(sender, receiver, record, kind);
+    decode_all(receiver, wire)
+}
+
 #[test]
 fn native_carrier_waits_for_region_import_and_reader_close() {
     let (mut sender, mut receiver) = pair(2);
@@ -653,14 +682,7 @@ fn queued_copy_policy_releases_small_sources_but_retains_large_references() {
             .prepare_batch(&messages.iter().collect::<Vec<_>>(), kind)
             .unwrap()
             .unwrap();
-        let wire = sender
-            .encode_record(&packed, messages.len(), kind.record())
-            .unwrap()
-            .unwrap();
-
-        transfer(&mut sender, &mut receiver);
-        let mut decoded = vec![receiver.decode_received(wire).unwrap()];
-        decoded.extend(std::iter::from_fn(|| receiver.poll_received()));
+        let decoded = delivered_record(&mut sender, &mut receiver, &packed, kind);
         assert_eq!(decoded, messages);
 
         let held = decoded[0].part_bytes(1).unwrap().slice(1..17);
@@ -730,19 +752,11 @@ fn single_frame_batches_preserve_bodies_routes_and_logical_credit() {
                 .unwrap();
             assert_eq!(packed.len(), 1);
             assert_eq!(packed.routing_id(), Some(7));
-            let wire = sender
-                .encode_record(&packed, count, kind.record())
-                .unwrap()
-                .unwrap();
+            let wire = encoded_record(&mut sender, &mut receiver, &packed, kind);
             assert_eq!(sender.leases.active.len(), 1);
             assert_eq!(sender.leases.leased_messages, count);
-            transfer(&mut sender, &mut receiver);
-            let mut decoded = vec![receiver.decode_received(wire).unwrap()];
 
-            while let Some(message) = receiver.poll_received() {
-                decoded.push(message);
-            }
-
+            let decoded = decode_all(&mut receiver, wire);
             assert_eq!(decoded, messages);
             assert!(
                 decoded
@@ -789,43 +803,69 @@ fn batches_reject_mixed_envelopes_routes_and_excess_hwm() {
     assert_eq!(sender.batch_capacity(), 2);
 }
 
+/// `count` grouped 0, 16, and 55-byte bodies packed into one copied batch.
+fn small_body_batch(count: usize) -> (omq_proto::PayloadPool, Vec<Message>, Message) {
+    let pool = payload_pool([(BATCH_MAX_BYTES.next_power_of_two(), 1)]).unwrap();
+    let messages: Vec<_> = (0..count)
+        .map(|index| Message::with_group("group", vec![index as u8; [0, 16, 55][index % 3]]))
+        .collect();
+    let batch = prepare_batch(&pool, &messages.iter().collect::<Vec<_>>())
+        .unwrap()
+        .unwrap();
+
+    (pool, messages, batch)
+}
+
 #[test]
-fn small_body_batches_preserve_order_and_charge_each_message_against_hwm() {
+fn small_body_batches_preserve_order_after_connections_close() {
     for count in [2, 8, BATCH_MAX_MESSAGES] {
         let (mut sender, mut receiver) = pair(count);
-        let pool = payload_pool([(BATCH_MAX_BYTES.next_power_of_two(), 1)]).unwrap();
-        let messages: Vec<_> = (0..count)
-            .map(|index| Message::with_group("group", vec![index as u8; [0, 16, 55][index % 3]]))
-            .collect();
-        let references: Vec<_> = messages.iter().collect();
+        let (_pool, messages, batch) = small_body_batch(count);
 
-        let batch = prepare_batch(&pool, &references).unwrap().unwrap();
-        let wire = sender.encode_record(&batch, count, 2).unwrap().unwrap();
-        let stale = wire.clone();
+        let decoded = delivered_record(&mut sender, &mut receiver, &batch, BatchKind::Copied);
+        assert_eq!(decoded, messages);
+
+        drop(sender);
+        drop(receiver);
+        assert_eq!(decoded, messages);
+    }
+}
+
+#[test]
+fn small_body_batches_charge_each_message_against_hwm_until_received() {
+    for count in [2, 8, BATCH_MAX_MESSAGES] {
+        let (mut sender, mut receiver) = pair(count);
+        let (_pool, _messages, batch) = small_body_batch(count);
+        let extra = Message::from_slice(&[8; 128]);
+
+        let wire = encoded_record(&mut sender, &mut receiver, &batch, BatchKind::Copied);
         assert_eq!(sender.leases.leased_messages, count);
-
-        assert!(
-            sender
-                .encode(&Message::from_slice(&[8; 128]))
-                .unwrap()
-                .is_none()
-        );
+        assert!(sender.encode(&extra).unwrap().is_none());
 
         drop(batch);
-        assert_eq!(pool.available(), 0);
+        let decoded = decode_all(&mut receiver, wire);
 
-        transfer(&mut sender, &mut receiver);
+        assert_eq!(decoded.len(), count);
+        assert!(sender.encode(&extra).unwrap().is_some());
+        assert_eq!(sender.leases.free.len(), count - 1);
+    }
+}
+
+#[test]
+fn replayed_small_body_batch_records_are_rejected_without_extra_credit() {
+    for count in [2, 8, BATCH_MAX_MESSAGES] {
+        let (mut sender, mut receiver) = pair(count);
+        let (_pool, messages, batch) = small_body_batch(count);
+        let wire = encoded_record(&mut sender, &mut receiver, &batch, BatchKind::Copied);
+        let stale = wire.clone();
+
+        // A replay while the batch is partly read leaves its cursor intact.
         let mut decoded = vec![receiver.decode_received(wire).unwrap()];
         assert!(receiver.decode_received(stale.clone()).is_err());
-
-        while let Some(message) = receiver.poll_received() {
-            decoded.push(message);
-        }
-
+        decoded.extend(std::iter::from_fn(|| receiver.poll_received()));
         assert_eq!(decoded, messages);
-        // Small application bodies keep their independent inline ownership.
-        assert_eq!(pool.available(), 1);
         assert!(receiver.decode_received(stale).is_err());
+
         assert!(
             sender
                 .encode(&Message::from_slice(&[8; 128]))
@@ -833,9 +873,23 @@ fn small_body_batches_preserve_order_and_charge_each_message_against_hwm() {
                 .is_some()
         );
         assert_eq!(sender.leases.free.len(), count - 1);
-        drop(sender);
-        drop(receiver);
-        assert_eq!(decoded, messages);
+    }
+}
+
+#[test]
+fn small_body_batches_release_their_metadata_slot_once_decoded() {
+    for count in [2, 8, BATCH_MAX_MESSAGES] {
+        let (mut sender, mut receiver) = pair(count);
+        let (pool, _messages, batch) = small_body_batch(count);
+        let wire = encoded_record(&mut sender, &mut receiver, &batch, BatchKind::Copied);
+
+        drop(batch);
+        assert_eq!(pool.available(), 0);
+
+        // Small application bodies keep their independent inline ownership.
+        let decoded = decode_all(&mut receiver, wire);
+        assert_eq!(decoded.len(), count);
+        assert_eq!(pool.available(), 1);
     }
 }
 
@@ -848,11 +902,7 @@ fn received_batches_ignore_size_table_changes_after_validation() {
         .collect();
     let references: Vec<_> = messages.iter().collect();
     let batch = prepare_batch(&pool, &references).unwrap().unwrap();
-    let wire = sender
-        .encode_record(&batch, messages.len(), crate::wire::COPIED_BATCH)
-        .unwrap()
-        .unwrap();
-    transfer(&mut sender, &mut receiver);
+    let wire = encoded_record(&mut sender, &mut receiver, &batch, BatchKind::Copied);
 
     let Received::Batch(mut batch_view) = receiver.decode_delivery(wire).unwrap() else {
         panic!("expected a batch");
@@ -890,19 +940,11 @@ fn copied_batches_share_storage_and_keep_every_recipient_view_alive() {
 
     let (mut sender1, mut receiver1) = pair(messages.len());
     let (mut sender2, mut receiver2) = pair(messages.len());
-    let wire1 = sender1
-        .encode_record(&batch, messages.len(), 2)
-        .unwrap()
-        .unwrap();
-    let wire2 = sender2
-        .encode_record(&batch, messages.len(), 2)
-        .unwrap()
-        .unwrap();
+    let wire1 = encoded_record(&mut sender1, &mut receiver1, &batch, BatchKind::Copied);
+    let wire2 = encoded_record(&mut sender2, &mut receiver2, &batch, BatchKind::Copied);
     assert_eq!(sender1.leases.active.len(), 1);
     assert_eq!(sender1.leases.leased_messages, messages.len());
 
-    transfer(&mut sender1, &mut receiver1);
-    transfer(&mut sender2, &mut receiver2);
     let first = decode_all(&mut receiver1, wire1);
     let second = decode_all(&mut receiver2, wire2);
     assert_eq!(first, messages);
@@ -970,14 +1012,7 @@ fn copied_batch_boundaries_use_inline_bodies_or_shared_byte_slices() {
         .unwrap();
 
     let (mut sender, mut receiver) = pair(messages.len());
-    let wire = sender
-        .encode_record(&batch, messages.len(), 2)
-        .unwrap()
-        .unwrap();
-
-    transfer(&mut sender, &mut receiver);
-    let mut decoded = vec![receiver.decode_received(wire).unwrap()];
-    decoded.extend(std::iter::from_fn(|| receiver.poll_received()));
+    let decoded = delivered_record(&mut sender, &mut receiver, &batch, BatchKind::Copied);
     assert_eq!(decoded, messages);
 
     for (message, size) in decoded.iter().zip(sizes) {
@@ -1028,14 +1063,7 @@ fn reference_batch_runs_preserve_order_and_leave_gaps_unborrowed() {
             .unwrap();
 
         let (mut sender, mut receiver) = pair(selected.len());
-        let wire = sender
-            .encode_record(&batch, selected.len(), 3)
-            .unwrap()
-            .unwrap();
-
-        transfer(&mut sender, &mut receiver);
-        let mut decoded = vec![receiver.decode_received(wire).unwrap()];
-        decoded.extend(std::iter::from_fn(|| receiver.poll_received()));
+        let decoded = delivered_record(&mut sender, &mut receiver, &batch, BatchKind::Referenced);
         assert_eq!(decoded.iter().collect::<Vec<_>>(), selected);
 
         for (message, shared) in decoded.iter().zip(expected) {
@@ -1107,11 +1135,9 @@ fn reference_batches_keep_source_slots_until_the_final_recipient_view() {
 
         let (mut sender1, mut receiver1) = pair(4);
         let (mut sender2, mut receiver2) = pair(4);
-        let wire1 = sender1.encode_record(&batch, 4, 3).unwrap().unwrap();
-        let wire2 = sender2.encode_record(&batch, 4, 3).unwrap().unwrap();
+        let wire1 = encoded_record(&mut sender1, &mut receiver1, &batch, BatchKind::Referenced);
+        let wire2 = encoded_record(&mut sender2, &mut receiver2, &batch, BatchKind::Referenced);
 
-        transfer(&mut sender1, &mut receiver1);
-        transfer(&mut sender2, &mut receiver2);
         let first = decode_all(&mut receiver1, wire1);
         let second = decode_all(&mut receiver2, wire2);
 
@@ -1273,10 +1299,7 @@ fn reference_batches_preserve_unread_regions_across_registration_eviction() {
     let mut messages = Vec::new();
 
     for wire in wires {
-        messages.push(receiver.decode_received(wire).unwrap());
-        while let Some(message) = receiver.poll_received() {
-            messages.push(message);
-        }
+        messages.extend(decode_all(&mut receiver, wire));
     }
 
     for (index, message) in messages.iter().enumerate() {
@@ -1355,8 +1378,7 @@ fn rejected_copied_batch_publishes_neither_views_nor_receive_cursor() {
     assert_eq!(metadata.available(), 2);
 
     let batch = prepare_batch(&metadata, &references).unwrap().unwrap();
-    let wire = sender.encode_record(&batch, 2, 2).unwrap().unwrap();
-    transfer(&mut sender, &mut receiver);
+    let wire = encoded_record(&mut sender, &mut receiver, &batch, BatchKind::Copied);
     assert_eq!(receiver.decode_received(wire).unwrap(), messages[0]);
     assert_eq!(receiver.poll_received().unwrap(), messages[1]);
     assert!(receiver.poll_received().is_none());
@@ -1870,17 +1892,10 @@ fn slab_slices_keep_the_whole_slot_until_every_recipient_releases() {
 
             let (mut first_sender, mut first_reader) = pair(messages.len());
             let (mut second_sender, mut second_reader) = pair(messages.len());
-            let first_wire = first_sender
-                .encode_record(&batch, messages.len(), 3)
-                .unwrap()
-                .unwrap();
-            let second_wire = second_sender
-                .encode_record(&batch, messages.len(), 3)
-                .unwrap()
-                .unwrap();
+            let kind = BatchKind::Referenced;
+            let first_wire = encoded_record(&mut first_sender, &mut first_reader, &batch, kind);
+            let second_wire = encoded_record(&mut second_sender, &mut second_reader, &batch, kind);
 
-            transfer(&mut first_sender, &mut first_reader);
-            transfer(&mut second_sender, &mut second_reader);
             let first = decode_all(&mut first_reader, first_wire);
             let second = decode_all(&mut second_reader, second_wire);
             assert_eq!(first, messages);
@@ -1999,11 +2014,7 @@ fn lazy_batches_split_without_views_and_retain_storage_after_connection_close() 
                 .prepare_batch(&messages.iter().collect::<Vec<_>>(), kind)
                 .unwrap()
                 .unwrap();
-            let wire = sender
-                .encode_record(&prepared, 8, kind.record())
-                .unwrap()
-                .unwrap();
-            transfer(&mut sender, &mut receiver);
+            let wire = encoded_record(&mut sender, &mut receiver, &prepared, kind);
 
             let Received::Batch(mut batch) = receiver.decode_delivery(wire).unwrap() else {
                 panic!("expected batch")

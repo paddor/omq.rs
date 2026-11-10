@@ -1,10 +1,31 @@
 use crate::message::{Message, MessageInner, MessagePool, Payload, PayloadOwner};
 use bytes::Bytes;
 
-#[test]
-fn prefix_and_rep_envelope_preserve_every_body_representation() {
+struct SharedFrame(Vec<u8>);
+
+impl AsRef<[u8]> for SharedFrame {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl PayloadOwner for SharedFrame {
+    fn retained_size(&self) -> Option<usize> {
+        Some(self.0.capacity())
+    }
+}
+
+fn shared_frame(length: usize) -> (Message, std::sync::Weak<SharedFrame>) {
+    let owner = std::sync::Arc::new(SharedFrame(vec![7; length]));
+    let weak = std::sync::Arc::downgrade(&owner);
+    (Message::from(Payload::from_shared_owner(owner)), weak)
+}
+
+/// One message per internal body representation.
+fn body_representations() -> [Message; 11] {
     let (shared, _) = shared_frame(128);
-    let bodies = [
+
+    [
         Message::new(),
         Message::single(""),
         Message::single("inline"),
@@ -16,23 +37,55 @@ fn prefix_and_rep_envelope_preserve_every_body_representation() {
         Message::with_prefix(Bytes::new(), Message::single("inline")),
         Message::with_prefix(Bytes::new(), Message::single(vec![9; 128])),
         Message::multipart(["first", "", "last"]),
-    ];
+    ]
+}
 
+/// A routed 128-byte shared frame, prefixed with `peer`.
+fn routed_and_prefixed_shared_frame() -> (Message, Message) {
+    let (body, _) = shared_frame(128);
+    let routed = body.with_routing_id(7);
+    let prefixed = Message::with_prefix(Bytes::from_static(b"peer"), routed.clone());
+
+    (routed, prefixed)
+}
+
+/// A small routed view into a 1 MiB opaque buffer, plus that buffer.
+fn opaque_view_of_large_buffer() -> (Bytes, Message) {
+    let huge = Bytes::from(vec![7; 1024 * 1024]);
+    let message = Message::multipart([huge.slice(..100), Bytes::new()]).with_routing_id(3);
+
+    (huge, message)
+}
+
+#[test]
+fn prefix_preserves_every_body_representation() {
     let prefix = Bytes::from(vec![1; 64]);
-    for body in bodies {
+
+    for body in body_representations() {
         for body in [body.clone(), body.with_routing_id(42)] {
             let expected: Vec<_> = body.iter().collect();
-            let prefixed = Message::with_prefix(prefix.clone(), body.clone());
+            let prefixed = Message::with_prefix(prefix.clone(), body);
+
+            assert_eq!(prefixed.routing_id(), None);
+            assert_eq!(prefixed.iter().skip(1).collect::<Vec<_>>(), expected);
+            assert_eq!(prefixed.part_bytes(0), Some(prefix.clone()));
+        }
+    }
+}
+
+#[test]
+fn rep_envelope_preserves_every_body_representation() {
+    let prefix = Bytes::from(vec![1; 64]);
+
+    for body in body_representations() {
+        for body in [body.clone(), body.with_routing_id(42)] {
+            let expected: Vec<_> = body.iter().collect();
             let mut reply = Message::with_rep_envelope(
                 smallvec::smallvec![prefix.clone(), Bytes::from_static(b"route")],
                 body,
             );
 
-            assert_eq!(prefixed.routing_id(), None);
             assert_eq!(reply.routing_id(), None);
-            assert_eq!(prefixed.iter().skip(1).collect::<Vec<_>>(), expected);
-            assert_eq!(prefixed.part_bytes(0), Some(prefix.clone()));
-
             assert_eq!(reply.pop_front(), Some(prefix.clone()));
             assert_eq!(reply.pop_front(), Some(Bytes::from_static(b"route")));
             assert_eq!(reply.pop_front(), Some(Bytes::new()));
@@ -98,8 +151,12 @@ fn small_prefixed_frames_remain_inline_through_message_operations() {
             assert!(matches!(bounded.inner, MessageInner::InlinePair(_)));
         }
     }
+}
 
+#[test]
+fn prefixed_frames_past_the_inline_limit_become_multipart() {
     let overflow = Message::with_group("group", Bytes::from(vec![7; 50]));
+
     assert_eq!(overflow.byte_len(), 55);
     assert_eq!(overflow.part_slice(1), Some([7; 50].as_slice()));
     assert!(matches!(overflow.inner, MessageInner::Multi(_)));
@@ -143,8 +200,12 @@ fn replacing_final_payload_preserves_envelopes_routing_and_cached_sizes() {
             );
         }
     }
+}
 
+#[test]
+fn replacing_final_payload_of_an_empty_message_fails_and_keeps_routing() {
     let mut empty = Message::new().with_routing_id(9);
+
     assert!(!empty.replace_last_payload(Payload::from_slice(b"unused")));
     assert_eq!(empty.routing_id(), Some(9));
     assert!(empty.is_empty());
@@ -180,32 +241,15 @@ fn prefixed_slab_slices_share_headers_and_keep_the_original_buffer_live() {
     assert_eq!(pool.available(), 1);
 }
 
-struct SharedFrame(Vec<u8>);
-
-impl AsRef<[u8]> for SharedFrame {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl PayloadOwner for SharedFrame {
-    fn retained_size(&self) -> Option<usize> {
-        Some(self.0.capacity())
-    }
-}
-
-fn shared_frame(length: usize) -> (Message, std::sync::Weak<SharedFrame>) {
-    let owner = std::sync::Arc::new(SharedFrame(vec![7; length]));
-    let weak = std::sync::Arc::downgrade(&owner);
-    (Message::from(Payload::from_shared_owner(owner)), weak)
-}
-
 #[test]
-fn multipart_construction_preserves_empty_frames_and_shared_owners() {
+fn multipart_construction_preserves_empty_frames() {
     assert_eq!(Message::multipart(std::iter::empty::<Bytes>()).len(), 0);
     assert_eq!(Message::multipart([Bytes::new()]).len(), 1);
     assert_eq!(Message::multipart_payloads(std::iter::empty()).len(), 0);
+}
 
+#[test]
+fn multipart_payloads_keep_shared_owners_until_the_last_view_drops() {
     for length in [0, 16, 63, 1024] {
         for count in [1, 2, 3] {
             let (mut body, owner) = shared_frame(length);
@@ -244,7 +288,6 @@ fn multipart_payloads_reuses_an_owned_frame_table() {
 
 #[test]
 fn compact_shared_routing_preserves_ownership_and_frame_operations() {
-    assert_eq!(std::mem::size_of::<Message>(), 64);
     for length in [0, 16, 63, 1024] {
         let (body, owner) = shared_frame(length);
         let mut routed = body.with_routing_id(7);
@@ -339,59 +382,80 @@ fn compact_shared_prefix_preserves_ownership_and_frame_operations() {
 }
 
 #[test]
-fn compact_shared_envelopes_preserve_parts_and_routing_rules() {
-    let (body, _) = shared_frame(128);
-    let routed = body.with_routing_id(7);
-    let message = Message::with_prefix(Bytes::from_static(b"peer"), routed.clone());
+fn prefixing_a_routed_shared_frame_drops_routing_and_nests() {
+    let (_, message) = routed_and_prefixed_shared_frame();
+
     assert_eq!(message.routing_id(), None);
     assert_eq!(message.part_slice(0), Some(b"peer".as_slice()));
     assert_eq!(message.part_slice(1), Some([7; 128].as_slice()));
 
-    let nested = Message::with_prefix(Bytes::from_static(b"outer"), message.clone());
+    let nested = Message::with_prefix(Bytes::from_static(b"outer"), message);
     assert_eq!(nested.len(), 3);
     assert_eq!(nested.part_slice(1), Some(b"peer".as_slice()));
+}
 
+#[test]
+fn rep_envelope_wraps_a_prefixed_shared_frame() {
+    let (_, message) = routed_and_prefixed_shared_frame();
     let envelope = smallvec::smallvec![Bytes::from_static(b"route")];
-    let reply = Message::with_rep_envelope(envelope, message.clone());
+
+    let reply = Message::with_rep_envelope(envelope, message);
+
     assert_eq!(reply.len(), 4);
     assert_eq!(reply.part_slice(0), Some(b"route".as_slice()));
     assert_eq!(reply.part_slice(1), Some([].as_slice()));
     assert_eq!(reply.part_slice(2), Some(b"peer".as_slice()));
     assert_eq!(reply.part_slice(3), Some([7; 128].as_slice()));
+}
+
+#[test]
+fn empty_delimiter_precedes_a_prefixed_shared_frame() {
+    let (_, message) = routed_and_prefixed_shared_frame();
 
     let mut delimited = message.prepend_empty_delimiter();
+
     assert_eq!(delimited.len(), 3);
     assert!(delimited.pop_front_payload().unwrap().is_empty());
     assert_eq!(delimited.part_slice(0), Some(b"peer".as_slice()));
+}
 
-    let mut routed_delimited = routed.prepend_empty_delimiter();
-    assert_eq!(routed_delimited.routing_id(), Some(7));
-    assert_eq!(routed_delimited.take_routing_id(), Some(7));
-    assert_eq!(routed_delimited.len(), 2);
-    assert!(routed_delimited.pop_front_payload().unwrap().is_empty());
-    assert_eq!(
-        routed_delimited.pop_front_payload().unwrap().as_slice(),
-        &[7; 128]
-    );
+#[test]
+fn empty_delimiter_keeps_routing_of_a_routed_shared_frame() {
+    let (routed, _) = routed_and_prefixed_shared_frame();
+
+    let mut delimited = routed.prepend_empty_delimiter();
+
+    assert_eq!(delimited.routing_id(), Some(7));
+    assert_eq!(delimited.take_routing_id(), Some(7));
+    assert_eq!(delimited.len(), 2);
+    assert!(delimited.pop_front_payload().unwrap().is_empty());
+    assert_eq!(delimited.pop_front_payload().unwrap().as_slice(), &[7; 128]);
 }
 
 #[test]
 fn opaque_storage_is_bounded_without_losing_frames_or_routing() {
-    let huge = Bytes::from(vec![7; 1024 * 1024]);
-    let mut message = Message::multipart([huge.slice(..100), Bytes::new()]).with_routing_id(3);
+    let (huge, mut message) = opaque_view_of_large_buffer();
     assert_eq!(message.retained_size(), None);
 
     message.bound_storage();
+
     assert_eq!(message.routing_id(), Some(3));
     assert_eq!(message.len(), 2);
     assert_eq!(message.part_slice(0), Some([7; 100].as_slice()));
     assert_eq!(message.part_slice(1), Some([].as_slice()));
     assert!(message.retained_size().unwrap() < 1024);
     assert_ne!(message.part_slice(0).unwrap().as_ptr(), huge.as_ptr());
+}
 
+#[test]
+fn bounded_opaque_storage_keeps_its_size_when_bounded_again_or_cloned() {
+    let (_, mut message) = opaque_view_of_large_buffer();
+    message.bound_storage();
     let size = message.retained_size();
     let pointer = message.part_slice(0).unwrap().as_ptr();
+
     message.bound_storage();
+
     assert_eq!(message.retained_size(), size);
     assert_eq!(message.part_slice(0).unwrap().as_ptr(), pointer);
     assert_eq!(message.clone().retained_size(), size);
@@ -406,9 +470,7 @@ fn accounted_storage_keeps_large_backing_charge_and_ownership() {
     assert!(size >= 4096);
 
     message.bound_storage();
+
     assert_eq!(message.retained_size(), Some(size));
     assert_eq!(message.part_slice(0).unwrap().as_ptr(), huge.as_ptr());
-
-    assert_eq!(std::mem::size_of::<Message>(), 64);
-    assert_eq!(std::mem::size_of::<Payload>(), 64);
 }

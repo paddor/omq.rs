@@ -22,8 +22,6 @@ const ZMQ_GATHER: i32 = 16;
 const ZMQ_SCATTER: i32 = 17;
 const ZMQ_PEER: i32 = 19;
 const ZMQ_CHANNEL: i32 = 20;
-const ZMQ_RCVTIMEO: i32 = 27;
-const ZMQ_SNDTIMEO: i32 = 28;
 const ZMQ_RCVMORE: i32 = 13;
 const ZMQ_SNDMORE: i32 = 2;
 const ZMQ_TYPE: i32 = 16;
@@ -52,21 +50,6 @@ fn radio_send(sock: *mut c_void, group: &std::ffi::CStr, data: &[u8]) -> i32 {
     }
 
     rc
-}
-
-fn set_timeo(sock: *mut c_void, ms: i32) {
-    zmq_setsockopt(
-        sock,
-        ZMQ_RCVTIMEO,
-        (&ms as *const i32).cast(),
-        size_of::<i32>(),
-    );
-    zmq_setsockopt(
-        sock,
-        ZMQ_SNDTIMEO,
-        (&ms as *const i32).cast(),
-        size_of::<i32>(),
-    );
 }
 
 fn get_type(sock: *mut c_void) -> i32 {
@@ -114,8 +97,8 @@ fn server_client_roundtrip() {
     zmq_bind(server, addr.as_ptr());
     zmq_connect(client, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(20));
-    set_timeo(server, 2000);
-    set_timeo(client, 2000);
+    helpers::set_timeouts(server, 2000);
+    helpers::set_timeouts(client, 2000);
 
     let rc = zmq_send(client, b"request".as_ptr().cast(), 7, 0);
     assert_eq!(rc, 7);
@@ -183,8 +166,8 @@ fn server_disconnect_peer_by_routing_id() {
     let client = zmq_socket(ctx, ZMQ_CLIENT);
     let addr = helpers::bind_random_tcp(server);
     zmq_connect(client, addr.as_ptr());
-    set_timeo(server, 100);
-    set_timeo(client, 2000);
+    helpers::set_timeouts(server, 100);
+    helpers::set_timeouts(client, 2000);
 
     let first = server_routing_id(server, client);
     assert_eq!(zmq_disconnect_peer(server, first), 0);
@@ -215,8 +198,8 @@ fn scatter_gather_tcp() {
     let addr = helpers::bind_random_tcp(gather);
     zmq_connect(scatter, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(100));
-    set_timeo(scatter, 2000);
-    set_timeo(gather, 2000);
+    helpers::set_timeouts(scatter, 2000);
+    helpers::set_timeouts(gather, 2000);
 
     for i in 0u8..5 {
         let msg = [i; 4];
@@ -256,7 +239,7 @@ fn scatter_to_tokio_gather_large_tcp() {
         let sender = std::thread::spawn(move || {
             let ctx = zmq_ctx_new();
             let scatter = zmq_socket(ctx, ZMQ_SCATTER);
-            set_timeo(scatter, 2_000);
+            helpers::set_timeouts(scatter, 2_000);
             assert_eq!(zmq_connect(scatter, endpoint.as_ptr()), 0);
             std::thread::sleep(Duration::from_millis(100));
 
@@ -293,7 +276,7 @@ fn radio_dish_inproc() {
     zmq_join(dish, group.as_ptr());
     zmq_connect(dish, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(50));
-    set_timeo(dish, 2000);
+    helpers::set_timeouts(dish, 2000);
 
     radio_send(radio, c"weather", b"weather sunny");
 
@@ -321,7 +304,7 @@ fn radio_dish_filtered() {
     zmq_join(dish, sports.as_ptr());
     zmq_connect(dish, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(50));
-    set_timeo(dish, 500);
+    helpers::set_timeouts(dish, 500);
 
     radio_send(radio, c"news", b"news headline");
     radio_send(radio, c"sports", b"sports goal");
@@ -348,8 +331,8 @@ fn channel_inproc() {
     zmq_bind(a, addr.as_ptr());
     zmq_connect(b, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(20));
-    set_timeo(a, 1000);
-    set_timeo(b, 1000);
+    helpers::set_timeouts(a, 1000);
+    helpers::set_timeouts(b, 1000);
 
     zmq_send(a, b"chan-a".as_ptr().cast(), 6, 0);
     zmq_send(b, b"chan-b".as_ptr().cast(), 6, 0);
@@ -384,8 +367,8 @@ fn peer_inproc() {
     zmq_bind(a, addr.as_ptr());
     zmq_connect(b, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(50));
-    set_timeo(a, 2000);
-    set_timeo(b, 2000);
+    helpers::set_timeouts(a, 2000);
+    helpers::set_timeouts(b, 2000);
 
     // B sends to A: [target_identity="peer-a", body].
     zmq_send(b, b"peer-a".as_ptr().cast(), 6, ZMQ_SNDMORE);
@@ -437,13 +420,13 @@ fn server_multiple_clients_tcp() {
     let ctx = zmq_ctx_new();
     let server = zmq_socket(ctx, ZMQ_SERVER);
     let addr = helpers::bind_random_tcp(server);
-    set_timeo(server, 2000);
+    helpers::set_timeouts(server, 2000);
 
     let mut clients = Vec::new();
     for _ in 0..3 {
         let c = zmq_socket(ctx, ZMQ_CLIENT);
         zmq_connect(c, addr.as_ptr());
-        set_timeo(c, 2000);
+        helpers::set_timeouts(c, 2000);
         clients.push(c);
     }
 

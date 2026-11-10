@@ -24,33 +24,9 @@ const ZMQ_REP: i32 = 4;
 const ZMQ_PAIR: i32 = 0;
 const ZMQ_DONTWAIT: i32 = 1;
 const ZMQ_SNDMORE: i32 = 2;
-const ZMQ_RCVTIMEO: i32 = 27;
-const ZMQ_SNDTIMEO: i32 = 28;
 const ZMQ_SUBSCRIBE: i32 = 6;
 const ZMQ_RCVMORE: i32 = 13;
 const ZMQ_ETERM: i32 = 156_384_765;
-
-fn set_rcvtimeo(sock: *mut c_void, ms: i32) {
-    let v = ms;
-    let rc = zmq_setsockopt(
-        sock,
-        ZMQ_RCVTIMEO,
-        (&v as *const i32).cast(),
-        size_of::<i32>(),
-    );
-    assert_eq!(rc, 0, "setsockopt RCVTIMEO failed");
-}
-
-fn set_sndtimeo(sock: *mut c_void, ms: i32) {
-    let v = ms;
-    let rc = zmq_setsockopt(
-        sock,
-        ZMQ_SNDTIMEO,
-        (&v as *const i32).cast(),
-        size_of::<i32>(),
-    );
-    assert_eq!(rc, 0, "setsockopt SNDTIMEO failed");
-}
 
 fn caddr(s: &str) -> CString {
     CString::new(s).unwrap()
@@ -145,8 +121,8 @@ fn push_pull_inproc() {
     // Give the connection a moment.
     std::thread::sleep(Duration::from_millis(20));
 
-    set_rcvtimeo(pull, 1000);
-    set_sndtimeo(push, 1000);
+    helpers::set_rcvtimeo(pull, 1000);
+    helpers::set_sndtimeo(push, 1000);
 
     let msg = b"hello";
     let rc = zmq_send(push, msg.as_ptr().cast(), msg.len(), 0);
@@ -175,8 +151,8 @@ fn recv_timeout_after_stale_signal_does_not_spin() {
     assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
     std::thread::sleep(Duration::from_millis(20));
 
-    set_rcvtimeo(pull, 100);
-    set_sndtimeo(push, 1000);
+    helpers::set_rcvtimeo(pull, 100);
+    helpers::set_sndtimeo(push, 1000);
 
     let payload = b"x";
     assert_eq!(zmq_send(push, payload.as_ptr().cast(), payload.len(), 0), 1);
@@ -216,8 +192,8 @@ fn push_pull_tcp() {
 
     std::thread::sleep(Duration::from_millis(50));
 
-    set_rcvtimeo(pull, 2000);
-    set_sndtimeo(push, 2000);
+    helpers::set_rcvtimeo(pull, 2000);
+    helpers::set_sndtimeo(push, 2000);
 
     for i in 0u8..5 {
         let payload = [i; 32];
@@ -265,8 +241,8 @@ fn multipart_sndmore_rcvmore() {
     zmq_connect(push, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(20));
 
-    set_rcvtimeo(pull, 1000);
-    set_sndtimeo(push, 1000);
+    helpers::set_rcvtimeo(pull, 1000);
+    helpers::set_sndtimeo(push, 1000);
 
     // Send a 3-part message.
     zmq_send(push, b"part1".as_ptr().cast(), 5, ZMQ_SNDMORE);
@@ -323,8 +299,8 @@ fn pair_inproc_roundtrip() {
     zmq_connect(b, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(20));
 
-    set_rcvtimeo(a, 1000);
-    set_rcvtimeo(b, 1000);
+    helpers::set_rcvtimeo(a, 1000);
+    helpers::set_rcvtimeo(b, 1000);
 
     let rc = zmq_send(a, b"ping".as_ptr().cast(), 4, 0);
     assert_eq!(rc, 4);
@@ -353,7 +329,7 @@ fn pub_sub_inproc() {
     zmq_connect(sub_sock, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(50));
 
-    set_rcvtimeo(sub_sock, 1000);
+    helpers::set_rcvtimeo(sub_sock, 1000);
 
     // Matching message
     zmq_send(pub_sock, b"hello world".as_ptr().cast(), 11, 0);
@@ -386,8 +362,8 @@ fn req_rep_inproc() {
     zmq_connect(req, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(20));
 
-    set_rcvtimeo(rep, 1000);
-    set_rcvtimeo(req, 1000);
+    helpers::set_rcvtimeo(rep, 1000);
+    helpers::set_rcvtimeo(req, 1000);
 
     zmq_send(req, b"request".as_ptr().cast(), 7, 0);
 
@@ -416,7 +392,7 @@ fn send_empty_message() {
     zmq_connect(push, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(20));
 
-    set_rcvtimeo(pull, 1000);
+    helpers::set_rcvtimeo(pull, 1000);
 
     // Send zero-length message.
     let rc = zmq_send(push, std::ptr::null(), 0, 0);

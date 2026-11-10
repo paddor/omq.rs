@@ -1,23 +1,22 @@
 //! `zmq_poller_*` C ABI compatibility tests.
 #![allow(clippy::borrow_as_ptr, clippy::ref_as_ptr)]
 
+mod helpers;
+
 use std::ffi::{CString, c_void};
-use std::mem::size_of;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use omq_zmq::{
     zmq_bind, zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_shutdown, zmq_ctx_term, zmq_poller_add,
     zmq_poller_destroy, zmq_poller_modify, zmq_poller_new, zmq_poller_remove, zmq_poller_size,
-    zmq_poller_wait, zmq_poller_wait_all, zmq_send, zmq_setsockopt, zmq_socket,
+    zmq_poller_wait, zmq_poller_wait_all, zmq_send, zmq_socket,
 };
 #[cfg(unix)]
 use omq_zmq::{zmq_poller_add_fd, zmq_poller_fd, zmq_poller_modify_fd, zmq_poller_remove_fd};
 
 const ZMQ_PUSH: i32 = 8;
 const ZMQ_PULL: i32 = 7;
-const ZMQ_RCVTIMEO: i32 = 27;
-const ZMQ_SNDTIMEO: i32 = 28;
 const ZMQ_POLLIN: i16 = 1;
 
 const ZMQ_ENOTSOCK: i32 = 156_384_721;
@@ -50,28 +49,6 @@ fn invalid_fd() -> ZmqFd {
     }
 }
 
-fn set_timeo(sock: *mut c_void, ms: i32) {
-    assert_eq!(
-        zmq_setsockopt(
-            sock,
-            ZMQ_RCVTIMEO,
-            (&ms as *const i32).cast(),
-            size_of::<i32>(),
-        ),
-        0
-    );
-
-    assert_eq!(
-        zmq_setsockopt(
-            sock,
-            ZMQ_SNDTIMEO,
-            (&ms as *const i32).cast(),
-            size_of::<i32>(),
-        ),
-        0
-    );
-}
-
 fn unique_addr(label: &str) -> CString {
     static NEXT: AtomicUsize = AtomicUsize::new(1);
     CString::new(format!(
@@ -91,8 +68,8 @@ fn push_pull_pair(label: &str) -> (*mut c_void, *mut c_void, *mut c_void) {
     let addr = unique_addr(label);
     assert_eq!(zmq_bind(pull, addr.as_ptr()), 0);
     assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
-    set_timeo(push, 1000);
-    set_timeo(pull, 1000);
+    helpers::set_timeouts(push, 1000);
+    helpers::set_timeouts(pull, 1000);
     std::thread::sleep(Duration::from_millis(20));
 
     (ctx, push, pull)
@@ -115,8 +92,8 @@ fn poller_wait_all_reports_socket_user_data() {
     let addr2 = unique_addr("wait-all-2");
     assert_eq!(zmq_bind(pull2, addr2.as_ptr()), 0);
     assert_eq!(zmq_connect(push2, addr2.as_ptr()), 0);
-    set_timeo(push2, 1000);
-    set_timeo(pull2, 1000);
+    helpers::set_timeouts(push2, 1000);
+    helpers::set_timeouts(pull2, 1000);
     std::thread::sleep(Duration::from_millis(20));
 
     let poller = zmq_poller_new();

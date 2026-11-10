@@ -20,18 +20,6 @@ use omq_zmq::{
 const ZMQ_PUSH: i32 = 8;
 const ZMQ_PULL: i32 = 7;
 const ZMQ_FD: i32 = 14;
-const ZMQ_RCVTIMEO: i32 = 27;
-
-fn set_rcvtimeo(sock: *mut c_void, ms: i32) {
-    use omq_zmq::zmq_setsockopt;
-    let v = ms;
-    zmq_setsockopt(
-        sock,
-        ZMQ_RCVTIMEO,
-        (&v as *const i32).cast(),
-        size_of::<i32>(),
-    );
-}
 
 fn get_fd(sock: *mut c_void) -> i32 {
     let mut fd: i32 = -1;
@@ -98,7 +86,7 @@ fn fd_not_signaled_by_empty_inproc_connect() {
         "an inproc connect without messages must not signal ZMQ_FD"
     );
 
-    set_rcvtimeo(push, 1000);
+    helpers::set_rcvtimeo(push, 1000);
     zmq_send(push, b"x".as_ptr().cast(), 1, 0);
     assert!(fd_readable(fd, 1000), "fd should be readable after data");
 
@@ -121,7 +109,7 @@ fn fd_becomes_readable_after_send() {
     let fd = get_fd(pull);
     assert!(!fd_readable(fd, 0), "should not be readable before send");
 
-    set_rcvtimeo(push, 1000);
+    helpers::set_rcvtimeo(push, 1000);
     zmq_send(push, b"hello".as_ptr().cast(), 5, 0);
 
     // Wait up to 1s for the message to arrive.
@@ -146,7 +134,7 @@ fn fd_level_triggered_stays_readable() {
     std::thread::sleep(Duration::from_millis(20));
 
     let fd = get_fd(pull);
-    set_rcvtimeo(pull, 1000);
+    helpers::set_rcvtimeo(pull, 1000);
 
     zmq_send(push, b"msg1".as_ptr().cast(), 4, 0);
     zmq_send(push, b"msg2".as_ptr().cast(), 4, 0);
@@ -203,7 +191,7 @@ fn fd_not_readable_after_recv() {
     std::thread::sleep(Duration::from_millis(20));
 
     let fd = get_fd(pull);
-    set_rcvtimeo(pull, 1000);
+    helpers::set_rcvtimeo(pull, 1000);
 
     zmq_send(push, b"one".as_ptr().cast(), 3, 0);
     assert!(fd_readable(fd, 2000));
@@ -295,7 +283,7 @@ fn fd_and_blocking_receives_rearm_between_concurrent_batches() {
 fn fd_and_events_observe_recycled_fast_ring_before_receive() {
     let ctx = zmq_ctx_new();
     let pull = zmq_socket(ctx, ZMQ_PULL);
-    set_rcvtimeo(pull, 1000);
+    helpers::set_rcvtimeo(pull, 1000);
     assert_eq!(
         zmq_bind(pull, c"inproc://fd-recycled-fast-ring".as_ptr()),
         0

@@ -4,11 +4,10 @@
 mod helpers;
 
 use std::ffi::{CString, c_void};
-use std::mem::size_of;
 use std::time::Duration;
 
 use omq_zmq::{
-    zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_term, zmq_recv, zmq_setsockopt, zmq_socket,
+    zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_term, zmq_recv, zmq_socket,
     zmq_socket_get_peer_state, zmq_socket_monitor, zmq_socket_monitor_pipes_stats,
     zmq_socket_monitor_versioned,
 };
@@ -16,8 +15,6 @@ use omq_zmq::{
 const ZMQ_PUSH: i32 = 8;
 const ZMQ_PULL: i32 = 7;
 const ZMQ_PAIR: i32 = 0;
-const ZMQ_RCVTIMEO: i32 = 27;
-const ZMQ_SNDTIMEO: i32 = 28;
 
 const ZMQ_EVENT_LISTENING: u16 = 0x0008;
 const ZMQ_EVENT_ACCEPTED: u16 = 0x0020;
@@ -30,21 +27,6 @@ const ZMQ_EVENT_ALL: i32 = 0xFFFF;
 const ZMQ_CURRENT_EVENT_VERSION: i32 = 1;
 const ZMQ_CURRENT_EVENT_VERSION_DRAFT: i32 = 2;
 const ZMQ_ENOTSUP: i32 = 156_384_713;
-
-fn set_timeo(sock: *mut c_void, ms: i32) {
-    zmq_setsockopt(
-        sock,
-        ZMQ_RCVTIMEO,
-        (&ms as *const i32).cast(),
-        size_of::<i32>(),
-    );
-    zmq_setsockopt(
-        sock,
-        ZMQ_SNDTIMEO,
-        (&ms as *const i32).cast(),
-        size_of::<i32>(),
-    );
-}
 
 fn recv_monitor_event(mon: *mut c_void) -> Option<(u16, String)> {
     let mut header = [0u8; 64];
@@ -126,7 +108,7 @@ fn monitor_receives_listening_and_accepted() {
 
     let mon = zmq_socket(ctx, ZMQ_PAIR);
     zmq_connect(mon, mon_addr.as_ptr());
-    set_timeo(mon, 2000);
+    helpers::set_timeouts(mon, 2000);
 
     let addr = helpers::bind_random_tcp(pull);
 
@@ -181,7 +163,7 @@ fn monitor_event_filter() {
 
     let mon = zmq_socket(ctx, ZMQ_PAIR);
     zmq_connect(mon, mon_addr.as_ptr());
-    set_timeo(mon, 1000);
+    helpers::set_timeouts(mon, 1000);
 
     let addr = helpers::bind_random_tcp(pull);
 
@@ -196,7 +178,7 @@ fn monitor_event_filter() {
     assert_eq!(ev.unwrap().0, ZMQ_EVENT_LISTENING);
 
     // Next recv should timeout (ACCEPTED is filtered out).
-    set_timeo(mon, 200);
+    helpers::set_timeouts(mon, 200);
     let mut buf = [0u8; 64];
     let rc = zmq_recv(mon, buf.as_mut_ptr().cast(), buf.len(), 0);
     assert!(rc < 0, "should timeout: only LISTENING subscribed");

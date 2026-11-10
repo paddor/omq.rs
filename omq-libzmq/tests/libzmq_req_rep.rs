@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use omq_zmq::{
     zmq_bind, zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_term, zmq_getsockopt, zmq_recv,
-    zmq_send, zmq_setsockopt, zmq_socket,
+    zmq_send, zmq_socket,
 };
 
 const ZMQ_REQ: i32 = 3;
@@ -27,10 +27,6 @@ const ZMQ_RCVTIMEO: i32 = 27;
 const ZMQ_SNDTIMEO: i32 = 28;
 const ZMQ_RCVMORE: i32 = 13;
 const TIMEOUT_MS: i32 = 2000;
-
-fn set_timeo(sock: *mut std::ffi::c_void, opt: i32, ms: i32) {
-    zmq_setsockopt(sock, opt, (&ms as *const i32).cast(), size_of::<i32>());
-}
 
 fn rcvmore(sock: *mut std::ffi::c_void) -> bool {
     let mut v: i32 = 0;
@@ -52,10 +48,10 @@ fn req_rep_basic_inproc() {
     zmq_connect(req, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(20));
 
-    set_timeo(rep, ZMQ_RCVTIMEO, TIMEOUT_MS);
-    set_timeo(rep, ZMQ_SNDTIMEO, TIMEOUT_MS);
-    set_timeo(req, ZMQ_RCVTIMEO, TIMEOUT_MS);
-    set_timeo(req, ZMQ_SNDTIMEO, TIMEOUT_MS);
+    helpers::set_int_opt(rep, ZMQ_RCVTIMEO, TIMEOUT_MS);
+    helpers::set_int_opt(rep, ZMQ_SNDTIMEO, TIMEOUT_MS);
+    helpers::set_int_opt(req, ZMQ_RCVTIMEO, TIMEOUT_MS);
+    helpers::set_int_opt(req, ZMQ_SNDTIMEO, TIMEOUT_MS);
 
     let rc = zmq_send(req, b"request".as_ptr().cast(), 7, 0);
     assert_eq!(rc, 7);
@@ -87,10 +83,10 @@ fn req_rep_basic_tcp() {
     zmq_connect(req, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(100));
 
-    set_timeo(rep, ZMQ_RCVTIMEO, TIMEOUT_MS);
-    set_timeo(rep, ZMQ_SNDTIMEO, TIMEOUT_MS);
-    set_timeo(req, ZMQ_RCVTIMEO, TIMEOUT_MS);
-    set_timeo(req, ZMQ_SNDTIMEO, TIMEOUT_MS);
+    helpers::set_int_opt(rep, ZMQ_RCVTIMEO, TIMEOUT_MS);
+    helpers::set_int_opt(rep, ZMQ_SNDTIMEO, TIMEOUT_MS);
+    helpers::set_int_opt(req, ZMQ_RCVTIMEO, TIMEOUT_MS);
+    helpers::set_int_opt(req, ZMQ_SNDTIMEO, TIMEOUT_MS);
 
     let mut buf = [0u8; 64];
     for i in 0u8..5 {
@@ -129,8 +125,8 @@ fn req_rep_multipart_payload() {
     zmq_connect(req, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(20));
 
-    set_timeo(rep, ZMQ_RCVTIMEO, TIMEOUT_MS);
-    set_timeo(req, ZMQ_RCVTIMEO, TIMEOUT_MS);
+    helpers::set_int_opt(rep, ZMQ_RCVTIMEO, TIMEOUT_MS);
+    helpers::set_int_opt(req, ZMQ_RCVTIMEO, TIMEOUT_MS);
 
     // REQ sends a single-part request.
     zmq_send(req, b"hello".as_ptr().cast(), 5, 0);
@@ -163,15 +159,15 @@ fn req_rep_multiple_clients() {
 
     let addr = helpers::bind_random_tcp(rep);
 
-    set_timeo(rep, ZMQ_RCVTIMEO, TIMEOUT_MS);
-    set_timeo(rep, ZMQ_SNDTIMEO, TIMEOUT_MS);
+    helpers::set_int_opt(rep, ZMQ_RCVTIMEO, TIMEOUT_MS);
+    helpers::set_int_opt(rep, ZMQ_SNDTIMEO, TIMEOUT_MS);
     let mut reqs = Vec::new();
 
     for _ in 0..N {
         let r = zmq_socket(ctx, ZMQ_REQ);
         zmq_connect(r, addr.as_ptr());
-        set_timeo(r, ZMQ_RCVTIMEO, TIMEOUT_MS);
-        set_timeo(r, ZMQ_SNDTIMEO, TIMEOUT_MS);
+        helpers::set_int_opt(r, ZMQ_RCVTIMEO, TIMEOUT_MS);
+        helpers::set_int_opt(r, ZMQ_SNDTIMEO, TIMEOUT_MS);
         reqs.push(r);
     }
 

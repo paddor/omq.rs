@@ -5,12 +5,10 @@
 mod helpers;
 
 use std::ffi::CString;
-use std::mem::size_of;
 use std::time::Duration;
 
 use omq_zmq::{
-    zmq_bind, zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_term, zmq_recv, zmq_send,
-    zmq_setsockopt, zmq_socket,
+    zmq_bind, zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_term, zmq_recv, zmq_send, zmq_socket,
 };
 
 const ZMQ_PUSH: i32 = 8;
@@ -19,10 +17,6 @@ const ZMQ_RCVTIMEO: i32 = 27;
 const ZMQ_SNDTIMEO: i32 = 28;
 const ZMQ_DONTWAIT: i32 = 1;
 const TIMEOUT_MS: i32 = 2000;
-
-fn set_timeo(sock: *mut std::ffi::c_void, opt: i32, ms: i32) {
-    zmq_setsockopt(sock, opt, (&ms as *const i32).cast(), size_of::<i32>());
-}
 
 /// From `libzmq/tests/test_push_pull.cpp`: basic push/pull
 #[test]
@@ -37,8 +31,8 @@ fn push_pull_basic_tcp() {
     assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
     std::thread::sleep(Duration::from_millis(100));
 
-    set_timeo(pull, ZMQ_RCVTIMEO, TIMEOUT_MS);
-    set_timeo(push, ZMQ_SNDTIMEO, TIMEOUT_MS);
+    helpers::set_int_opt(pull, ZMQ_RCVTIMEO, TIMEOUT_MS);
+    helpers::set_int_opt(push, ZMQ_SNDTIMEO, TIMEOUT_MS);
 
     let payload = b"message";
 
@@ -77,7 +71,7 @@ fn push_pull_multiple_pushers() {
     }
 
     std::thread::sleep(Duration::from_millis(100));
-    set_timeo(pull, ZMQ_RCVTIMEO, TIMEOUT_MS);
+    helpers::set_int_opt(pull, ZMQ_RCVTIMEO, TIMEOUT_MS);
 
     for push in &pushers {
         for _ in 0..MSG_PER_PUSHER {
@@ -119,10 +113,10 @@ fn push_pull_multiple_pullers() {
     }
 
     std::thread::sleep(Duration::from_millis(100));
-    set_timeo(push, ZMQ_SNDTIMEO, TIMEOUT_MS);
+    helpers::set_int_opt(push, ZMQ_SNDTIMEO, TIMEOUT_MS);
 
     for p in &pullers {
-        set_timeo(*p, ZMQ_RCVTIMEO, 200); // short; not all pullers get messages
+        helpers::set_int_opt(*p, ZMQ_RCVTIMEO, 200); // short; not all pullers get messages
     }
 
     for _ in 0..TOTAL {
@@ -176,7 +170,7 @@ fn push_pull_inproc() {
     zmq_connect(push, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(20));
 
-    set_timeo(pull, ZMQ_RCVTIMEO, TIMEOUT_MS);
+    helpers::set_int_opt(pull, ZMQ_RCVTIMEO, TIMEOUT_MS);
 
     let payload = b"inproc-payload";
     let rc = zmq_send(push, payload.as_ptr().cast(), payload.len(), 0);

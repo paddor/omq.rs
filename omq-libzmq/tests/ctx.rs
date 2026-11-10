@@ -1,5 +1,7 @@
 //! Context lifecycle tests.
 
+mod helpers;
+
 use omq_zmq::{
     zmq_bind, zmq_close, zmq_connect, zmq_ctx_get, zmq_ctx_get_ext, zmq_ctx_new, zmq_ctx_set,
     zmq_ctx_set_ext, zmq_ctx_shutdown, zmq_ctx_term, zmq_getsockopt, zmq_init, zmq_recv, zmq_send,
@@ -31,18 +33,6 @@ const ZMQ_LINGER: i32 = 17;
 
 // Hang guard, not a performance target. Keep above debug runtime on busy hosts.
 const INPROC_CHURN_CHILD_TIMEOUT: Duration = Duration::from_secs(30);
-
-fn set_i32(sock: *mut c_void, opt: i32, value: i32) {
-    assert_eq!(
-        zmq_setsockopt(
-            sock,
-            opt,
-            std::ptr::from_ref(&value).cast(),
-            size_of::<i32>(),
-        ),
-        0
-    );
-}
 
 #[test]
 fn ctx_new_term() {
@@ -625,10 +615,10 @@ fn run_zero_linger_inproc_churn() {
         let push = zmq_socket(ctx, ZMQ_PUSH);
         assert!(!pull.is_null());
         assert!(!push.is_null());
-        set_i32(pull, ZMQ_LINGER, 0);
-        set_i32(push, ZMQ_LINGER, 0);
-        set_i32(pull, ZMQ_RCVHWM, 4);
-        set_i32(push, ZMQ_SNDHWM, 4);
+        helpers::set_int_opt(pull, ZMQ_LINGER, 0);
+        helpers::set_int_opt(push, ZMQ_LINGER, 0);
+        helpers::set_int_opt(pull, ZMQ_RCVHWM, 4);
+        helpers::set_int_opt(push, ZMQ_SNDHWM, 4);
 
         let addr = CString::new(format!("inproc://ctx-churn-{i}")).unwrap();
         assert_eq!(zmq_bind(pull, addr.as_ptr()), 0);

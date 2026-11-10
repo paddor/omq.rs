@@ -33,10 +33,6 @@ const ZMQ_RCVHWM: i32 = 24;
 const ZMQ_ROUTER_MANDATORY: i32 = 33;
 const TIMEOUT_MS: i32 = 2000;
 
-fn set_timeo(sock: *mut c_void, opt: i32, ms: i32) {
-    zmq_setsockopt(sock, opt, (&ms as *const i32).cast(), size_of::<i32>());
-}
-
 fn set_identity(sock: *mut c_void, id: &[u8]) {
     zmq_setsockopt(sock, ZMQ_ROUTING_ID, id.as_ptr().cast(), id.len());
 }
@@ -62,14 +58,14 @@ fn connect_slow_dealer(ctx: *mut c_void, mandatory: i32) -> (*mut c_void, *mut c
     let dealer = zmq_socket(ctx, ZMQ_DEALER);
     let addr = CString::new(format!("inproc://router-full-{mandatory}")).unwrap();
 
-    set_timeo(router, ZMQ_LINGER, 0);
-    set_timeo(dealer, ZMQ_LINGER, 0);
-    set_timeo(router, ZMQ_SNDHWM, 1);
-    set_timeo(dealer, ZMQ_RCVHWM, 1);
-    set_timeo(router, ZMQ_ROUTER_MANDATORY, mandatory);
-    set_timeo(router, ZMQ_RCVTIMEO, TIMEOUT_MS);
-    set_timeo(router, ZMQ_SNDTIMEO, 50);
-    set_timeo(dealer, ZMQ_RCVTIMEO, TIMEOUT_MS);
+    helpers::set_int_opt(router, ZMQ_LINGER, 0);
+    helpers::set_int_opt(dealer, ZMQ_LINGER, 0);
+    helpers::set_int_opt(router, ZMQ_SNDHWM, 1);
+    helpers::set_int_opt(dealer, ZMQ_RCVHWM, 1);
+    helpers::set_int_opt(router, ZMQ_ROUTER_MANDATORY, mandatory);
+    helpers::set_int_opt(router, ZMQ_RCVTIMEO, TIMEOUT_MS);
+    helpers::set_int_opt(router, ZMQ_SNDTIMEO, 50);
+    helpers::set_int_opt(dealer, ZMQ_RCVTIMEO, TIMEOUT_MS);
     set_identity(dealer, b"slow");
 
     assert_eq!(zmq_bind(router, addr.as_ptr()), 0);
@@ -172,9 +168,9 @@ fn dealer_router_identity_routing() {
     zmq_connect(dealer, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(50));
 
-    set_timeo(router, ZMQ_RCVTIMEO, TIMEOUT_MS);
-    set_timeo(router, ZMQ_SNDTIMEO, TIMEOUT_MS);
-    set_timeo(dealer, ZMQ_RCVTIMEO, TIMEOUT_MS);
+    helpers::set_int_opt(router, ZMQ_RCVTIMEO, TIMEOUT_MS);
+    helpers::set_int_opt(router, ZMQ_SNDTIMEO, TIMEOUT_MS);
+    helpers::set_int_opt(dealer, ZMQ_RCVTIMEO, TIMEOUT_MS);
 
     // Dealer sends payload.
     zmq_send(dealer, b"hello".as_ptr().cast(), 5, 0);
@@ -242,10 +238,10 @@ fn dealer_router_tcp() {
     zmq_connect(dealer, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(100));
 
-    set_timeo(router, ZMQ_RCVTIMEO, TIMEOUT_MS);
-    set_timeo(router, ZMQ_SNDTIMEO, TIMEOUT_MS);
-    set_timeo(dealer, ZMQ_RCVTIMEO, TIMEOUT_MS);
-    set_timeo(dealer, ZMQ_SNDTIMEO, TIMEOUT_MS);
+    helpers::set_int_opt(router, ZMQ_RCVTIMEO, TIMEOUT_MS);
+    helpers::set_int_opt(router, ZMQ_SNDTIMEO, TIMEOUT_MS);
+    helpers::set_int_opt(dealer, ZMQ_RCVTIMEO, TIMEOUT_MS);
+    helpers::set_int_opt(dealer, ZMQ_SNDTIMEO, TIMEOUT_MS);
 
     // Dealer sends 3 messages.
     for i in 0..3u8 {
@@ -352,15 +348,15 @@ fn multiple_dealers_one_router() {
 
     let addr = helpers::bind_random_tcp(router);
 
-    set_timeo(router, ZMQ_RCVTIMEO, TIMEOUT_MS);
-    set_timeo(router, ZMQ_SNDTIMEO, TIMEOUT_MS);
+    helpers::set_int_opt(router, ZMQ_RCVTIMEO, TIMEOUT_MS);
+    helpers::set_int_opt(router, ZMQ_SNDTIMEO, TIMEOUT_MS);
     let mut dealers = Vec::new();
 
     for i in 0..N {
         let d = zmq_socket(ctx, ZMQ_DEALER);
         set_identity(d, format!("d{i}").as_bytes());
         zmq_connect(d, addr.as_ptr());
-        set_timeo(d, ZMQ_RCVTIMEO, TIMEOUT_MS);
+        helpers::set_int_opt(d, ZMQ_RCVTIMEO, TIMEOUT_MS);
         dealers.push(d);
     }
 
@@ -448,14 +444,14 @@ fn req_through_dealer_router() {
     zmq_connect(rep, addr_be.as_ptr());
     std::thread::sleep(Duration::from_millis(150));
 
-    set_timeo(req, ZMQ_RCVTIMEO, TIMEOUT_MS);
-    set_timeo(req, ZMQ_SNDTIMEO, TIMEOUT_MS);
-    set_timeo(router_fe, ZMQ_RCVTIMEO, TIMEOUT_MS);
-    set_timeo(router_fe, ZMQ_SNDTIMEO, TIMEOUT_MS);
-    set_timeo(dealer_be, ZMQ_RCVTIMEO, TIMEOUT_MS);
-    set_timeo(dealer_be, ZMQ_SNDTIMEO, TIMEOUT_MS);
-    set_timeo(rep, ZMQ_RCVTIMEO, TIMEOUT_MS);
-    set_timeo(rep, ZMQ_SNDTIMEO, TIMEOUT_MS);
+    helpers::set_int_opt(req, ZMQ_RCVTIMEO, TIMEOUT_MS);
+    helpers::set_int_opt(req, ZMQ_SNDTIMEO, TIMEOUT_MS);
+    helpers::set_int_opt(router_fe, ZMQ_RCVTIMEO, TIMEOUT_MS);
+    helpers::set_int_opt(router_fe, ZMQ_SNDTIMEO, TIMEOUT_MS);
+    helpers::set_int_opt(dealer_be, ZMQ_RCVTIMEO, TIMEOUT_MS);
+    helpers::set_int_opt(dealer_be, ZMQ_SNDTIMEO, TIMEOUT_MS);
+    helpers::set_int_opt(rep, ZMQ_RCVTIMEO, TIMEOUT_MS);
+    helpers::set_int_opt(rep, ZMQ_SNDTIMEO, TIMEOUT_MS);
 
     // REQ sends.
     zmq_send(req, b"query".as_ptr().cast(), 5, 0);

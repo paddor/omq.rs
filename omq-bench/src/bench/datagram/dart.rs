@@ -13,27 +13,13 @@ use super::{
 
 pub(crate) fn run(mut args: DartArgs) {
     validate_cpus(&args.common.cpus);
-    assert!(args.duration.is_finite() && args.duration > 0.0 && args.iterations > 0);
-    assert!(args.warmup_seconds.is_finite() && args.warmup_seconds >= 0.0);
-    assert!(args.drain_seconds.is_finite() && args.drain_seconds > 0.0);
-    assert!(args.spin <= 50 && args.io_spin <= 50);
-    assert!(args.window_messages.is_power_of_two() && args.window_messages <= 65_536);
-
-    if args.continuous_io_spin {
-        assert!(args.transport.iter().all(|transport| transport == "dart"));
-    }
+    validate_args(&args);
 
     if args.check_gates {
         validate_gates(&args);
     }
 
-    if args.runtime != "owned" {
-        assert!(args.common.kind == "latency" && args.spin == 0 && args.io_spin == 0);
-        assert!(!args.continuous_spin && !args.continuous_io_spin);
-    }
-
     if let Some(path) = &args.latency_samples {
-        assert_eq!(args.common.kind, "latency");
         std::fs::create_dir_all(path).unwrap();
         args.latency_samples = Some(path.canonicalize().unwrap());
     }
@@ -275,36 +261,118 @@ fn verify(row: &mut Value, args: &DartArgs, samples: Option<std::path::PathBuf>)
     }
 }
 
-fn validate_gates(args: &DartArgs) {
-    assert!(args.runtime == "owned" && args.congestion == "lan" && args.common.profile.is_none());
+/// Panics with the offending flag when `args` hold an invalid combination.
+fn validate_args(args: &DartArgs) {
     assert!(
-        args.common.kind == "both" && args.common.repeats == 3 && args.common.order == "rotate"
+        args.duration.is_finite() && args.duration > 0.0,
+        "--duration must be a positive number of seconds"
+    );
+    assert!(args.iterations > 0, "--iterations must be positive");
+    assert!(
+        args.warmup_seconds.is_finite() && args.warmup_seconds >= 0.0,
+        "--warmup-seconds must be zero or more"
+    );
+    assert!(
+        args.drain_seconds.is_finite() && args.drain_seconds > 0.0,
+        "--drain-seconds must be positive"
+    );
+    assert!(
+        args.spin <= 50 && args.io_spin <= 50,
+        "--spin and --io-spin must be at most 50"
+    );
+    assert!(
+        args.window_messages.is_power_of_two() && args.window_messages <= 65_536,
+        "--window-messages must be a power of two up to 65536"
+    );
+
+    if args.continuous_io_spin {
+        assert!(
+            args.transport.iter().all(|transport| transport == "dart"),
+            "--continuous-io-spin needs --transport dart"
+        );
+    }
+
+    if args.runtime != "owned" {
+        assert!(
+            args.common.kind == "latency" && args.spin == 0 && args.io_spin == 0,
+            "--runtime {} needs --kind latency, --spin 0, and --io-spin 0",
+            args.runtime
+        );
+        assert!(
+            !args.continuous_spin && !args.continuous_io_spin,
+            "--runtime {} excludes --continuous-spin and --continuous-io-spin",
+            args.runtime
+        );
+    }
+
+    if args.latency_samples.is_some() {
+        assert_eq!(
+            args.common.kind, "latency",
+            "--latency-samples needs --kind latency"
+        );
+    }
+}
+
+/// Panics unless `args` match the gated LAN workload: the default DART
+/// settings, all default sizes, and no profiling or sample output.
+fn validate_gates(args: &DartArgs) {
+    assert!(
+        args.runtime == "owned" && args.congestion == "lan" && args.common.profile.is_none(),
+        "--check-gates needs --runtime owned, --congestion lan, and no --profile"
+    );
+    assert!(
+        args.common.kind == "both" && args.common.repeats == 3 && args.common.order == "rotate",
+        "--check-gates needs --kind both, --repeats 3, and --order rotate"
     );
 
     assert_eq!(
         Duration::from_secs_f64(args.duration),
-        Duration::from_secs(3)
+        Duration::from_secs(3),
+        "--check-gates needs --duration 3"
     );
-    assert!(args.iterations == 100_000 && args.warmup == 200_000);
+    assert!(
+        args.iterations == 100_000 && args.warmup == 200_000,
+        "--check-gates needs --iterations 100000 and --warmup 200000"
+    );
     assert_eq!(
         Duration::from_secs_f64(args.warmup_seconds),
-        Duration::from_millis(200)
+        Duration::from_millis(200),
+        "--check-gates needs --warmup-seconds 0.2"
     );
     assert_eq!(
         Duration::from_secs_f64(args.drain_seconds),
-        Duration::from_secs(2)
+        Duration::from_secs(2),
+        "--check-gates needs --drain-seconds 2"
     );
 
-    assert!(args.spin == 50 && args.io_spin == 50);
-    assert!(!args.continuous_spin && !args.continuous_io_spin);
-    assert_eq!(args.window_messages, 256);
+    assert!(
+        args.spin == 50 && args.io_spin == 50,
+        "--check-gates needs --spin 50 and --io-spin 50"
+    );
+    assert!(
+        !args.continuous_spin && !args.continuous_io_spin,
+        "--check-gates excludes --continuous-spin and --continuous-io-spin"
+    );
+    assert_eq!(
+        args.window_messages, 256,
+        "--check-gates needs --window-messages 256"
+    );
 
     let mut sizes = args.common.sizes(THROUGHPUT_SIZES);
     sizes.sort_unstable();
-    assert_eq!(sizes, THROUGHPUT_SIZES);
+    assert_eq!(
+        sizes, THROUGHPUT_SIZES,
+        "--check-gates needs the default --sizes"
+    );
 
-    assert!(args.transport.iter().any(|transport| transport == "dart"));
-    assert!(args.latency_samples.is_none());
+    assert!(
+        args.transport.iter().any(|transport| transport == "dart"),
+        "--check-gates needs the dart transport"
+    );
+    assert!(
+        args.latency_samples.is_none(),
+        "--check-gates excludes --latency-samples"
+    );
 }
 
 fn check_gates(rows: &[Value]) {
@@ -343,3 +411,6 @@ fn check_gates(rows: &[Value]) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

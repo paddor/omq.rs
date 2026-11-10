@@ -5,7 +5,6 @@
 mod helpers;
 
 use std::ffi::{CString, c_void};
-use std::mem::size_of;
 use std::time::Duration;
 
 use omq_zmq::{
@@ -18,19 +17,9 @@ const ZMQ_PULL: i32 = 7;
 const ZMQ_PAIR: i32 = 0;
 const ZMQ_PUB: i32 = 1;
 const ZMQ_SUB: i32 = 2;
-const ZMQ_RCVTIMEO: i32 = 27;
 const ZMQ_SUBSCRIBE: i32 = 6;
 const ZMQ_SNDMORE: i32 = 2;
 const ZMQ_ETERM: i32 = 156_384_765;
-
-fn set_timeo(sock: *mut c_void, ms: i32) {
-    zmq_setsockopt(
-        sock,
-        ZMQ_RCVTIMEO,
-        (&ms as *const i32).cast(),
-        size_of::<i32>(),
-    );
-}
 
 #[test]
 fn inproc_push_pull() {
@@ -42,7 +31,7 @@ fn inproc_push_pull() {
     zmq_bind(pull, addr.as_ptr());
     zmq_connect(push, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(20));
-    set_timeo(pull, 1000);
+    helpers::set_rcvtimeo(pull, 1000);
 
     for i in 0u8..10 {
         let msg = [i; 8];
@@ -76,8 +65,8 @@ fn inproc_same_name_is_context_local() {
     assert_eq!(zmq_connect(push1, addr.as_ptr()), 0);
     assert_eq!(zmq_connect(push2, addr.as_ptr()), 0);
     std::thread::sleep(Duration::from_millis(20));
-    set_timeo(pull1, 1000);
-    set_timeo(pull2, 1000);
+    helpers::set_rcvtimeo(pull1, 1000);
+    helpers::set_rcvtimeo(pull2, 1000);
 
     assert_eq!(zmq_send(push1, b"ctx1".as_ptr().cast(), 4, 0), 4);
     assert_eq!(zmq_send(push2, b"ctx2".as_ptr().cast(), 4, 0), 4);
@@ -111,7 +100,7 @@ fn inproc_shared_context_key_crosses_c_contexts() {
     assert_eq!(zmq_bind(pull, addr.as_ptr()), 0);
     assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
     std::thread::sleep(Duration::from_millis(20));
-    set_timeo(pull, 1000);
+    helpers::set_rcvtimeo(pull, 1000);
 
     assert_eq!(zmq_send(push, b"shared".as_ptr().cast(), 6, 0), 6);
     let mut buf = [0u8; 32];
@@ -127,7 +116,7 @@ fn inproc_shared_context_key_crosses_c_contexts() {
     let addr = CString::new("inproc://test-owner-after-import-term").unwrap();
     assert_eq!(zmq_bind(pull, addr.as_ptr()), 0);
     assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
-    set_timeo(pull, 1000);
+    helpers::set_rcvtimeo(pull, 1000);
     assert_eq!(zmq_send(push, b"owner".as_ptr().cast(), 5, 0), 5);
     assert_eq!(zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0), 5);
     assert_eq!(&buf[..5], b"owner");
@@ -196,8 +185,8 @@ fn inproc_pair_bidirectional() {
     zmq_bind(a, addr.as_ptr());
     zmq_connect(b, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(20));
-    set_timeo(a, 1000);
-    set_timeo(b, 1000);
+    helpers::set_rcvtimeo(a, 1000);
+    helpers::set_rcvtimeo(b, 1000);
 
     zmq_send(a, b"from-a".as_ptr().cast(), 6, 0);
     zmq_send(b, b"from-b".as_ptr().cast(), 6, 0);
@@ -226,7 +215,7 @@ fn inproc_multipart() {
     zmq_bind(pull, addr.as_ptr());
     zmq_connect(push, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(20));
-    set_timeo(pull, 1000);
+    helpers::set_rcvtimeo(pull, 1000);
 
     zmq_send(push, b"part1".as_ptr().cast(), 5, ZMQ_SNDMORE);
     zmq_send(push, b"part2".as_ptr().cast(), 5, ZMQ_SNDMORE);
@@ -262,7 +251,7 @@ fn inproc_pub_sub() {
     zmq_setsockopt(sub, ZMQ_SUBSCRIBE, b"".as_ptr().cast(), 0);
     zmq_connect(sub, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(50));
-    set_timeo(sub, 1000);
+    helpers::set_rcvtimeo(sub, 1000);
 
     zmq_send(pub_, b"inproc msg".as_ptr().cast(), 10, 0);
 

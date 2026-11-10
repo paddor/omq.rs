@@ -4,14 +4,13 @@
 mod helpers;
 
 use std::ffi::{CString, c_void};
-use std::mem::size_of;
 use std::time::Duration;
 
 use serial_test::serial;
 
 use omq_zmq::{
     zmq_bind, zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_term, zmq_poll, zmq_ppoll, zmq_recv,
-    zmq_send, zmq_setsockopt, zmq_socket,
+    zmq_send, zmq_socket,
 };
 
 const ZMQ_PUSH: i32 = 8;
@@ -20,8 +19,6 @@ const ZMQ_PULL: i32 = 7;
 #[allow(dead_code)]
 const ZMQ_PAIR: i32 = 0;
 
-const ZMQ_RCVTIMEO: i32 = 27;
-const ZMQ_SNDTIMEO: i32 = 28;
 const ZMQ_POLLIN: i16 = 1;
 const ZMQ_POLLOUT: i16 = 2;
 
@@ -58,21 +55,6 @@ fn invalid_fd() -> ZmqFd {
     {
         ZmqFd::MAX
     }
-}
-
-fn set_timeo(sock: *mut c_void, ms: i32) {
-    zmq_setsockopt(
-        sock,
-        ZMQ_RCVTIMEO,
-        (&ms as *const i32).cast(),
-        size_of::<i32>(),
-    );
-    zmq_setsockopt(
-        sock,
-        ZMQ_SNDTIMEO,
-        (&ms as *const i32).cast(),
-        size_of::<i32>(),
-    );
 }
 
 #[test]
@@ -129,8 +111,8 @@ fn poll_detects_readable() {
     zmq_bind(pull, addr.as_ptr());
     zmq_connect(push, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(20));
-    set_timeo(push, 1000);
-    set_timeo(pull, 1000);
+    helpers::set_timeouts(push, 1000);
+    helpers::set_timeouts(pull, 1000);
 
     zmq_send(push, b"msg".as_ptr().cast(), 3, 0);
     std::thread::sleep(Duration::from_millis(20));
@@ -170,8 +152,8 @@ fn poll_multiple_sockets() {
     zmq_bind(pull2, addr2.as_ptr());
     zmq_connect(push2, addr2.as_ptr());
     std::thread::sleep(Duration::from_millis(20));
-    set_timeo(push1, 1000);
-    set_timeo(push2, 1000);
+    helpers::set_timeouts(push1, 1000);
+    helpers::set_timeouts(push2, 1000);
 
     zmq_send(push2, b"two".as_ptr().cast(), 3, 0);
     std::thread::sleep(Duration::from_millis(20));
@@ -257,8 +239,8 @@ fn create_n_socket_pairs(n: usize) -> (*mut c_void, Vec<(*mut c_void, *mut c_voi
             "connect failed for {i}"
         );
 
-        set_timeo(push, 100);
-        set_timeo(pull, 100);
+        helpers::set_timeouts(push, 100);
+        helpers::set_timeouts(pull, 100);
 
         pairs.push((push, pull));
         addrs.push(addr);
@@ -590,8 +572,8 @@ fn poll_both_events_counts_as_one_item() {
     let b = zmq_socket(ctx, ZMQ_PAIR);
     assert!(!a.is_null(), "failed to create pair socket a");
     assert!(!b.is_null(), "failed to create pair socket b");
-    set_timeo(a, 1000);
-    set_timeo(b, 1000);
+    helpers::set_timeouts(a, 1000);
+    helpers::set_timeouts(b, 1000);
 
     let addr = CString::new("tcp://127.0.0.1:*").unwrap();
     assert_eq!(zmq_bind(a, addr.as_ptr()), 0);
@@ -667,18 +649,6 @@ fn poll_out(sock: *mut c_void, timeout_ms: i64) -> (i32, Duration) {
     (rc, started.elapsed())
 }
 
-fn set_i32(sock: *mut c_void, option: i32, value: i32) {
-    assert_eq!(
-        zmq_setsockopt(
-            sock,
-            option,
-            (&value as *const i32).cast(),
-            size_of::<i32>()
-        ),
-        0
-    );
-}
-
 #[test]
 fn pollout_waits_for_a_bound_peer() {
     let ctx = zmq_ctx_new();
@@ -713,8 +683,8 @@ fn pollout_waits_for_queue_space() {
     let ctx = zmq_ctx_new();
     let push = zmq_socket(ctx, ZMQ_PUSH);
     let pull = zmq_socket(ctx, ZMQ_PULL);
-    set_i32(push, ZMQ_SNDHWM, 4);
-    set_i32(pull, ZMQ_RCVHWM, 4);
+    helpers::set_int_opt(push, ZMQ_SNDHWM, 4);
+    helpers::set_int_opt(pull, ZMQ_RCVHWM, 4);
     let addr = CString::new("inproc://pollout-queue-space").unwrap();
     assert_eq!(zmq_bind(pull, addr.as_ptr()), 0);
     assert_eq!(zmq_connect(push, addr.as_ptr()), 0);

@@ -56,11 +56,11 @@ fn plain_zap_authenticates_over_quic() {
     let push = zmq_socket(ctx, ZMQ_PUSH);
 
     for sock in [pull, push] {
-        set_i32(sock, ZMQ_LINGER, 0);
-        set_timeo(sock, 5000);
+        helpers::set_int_opt(sock, ZMQ_LINGER, 0);
+        helpers::set_timeouts(sock, 5000);
     }
 
-    set_i32(pull, ZMQ_PLAIN_SERVER, 1);
+    helpers::set_int_opt(pull, ZMQ_PLAIN_SERVER, 1);
     set_bytes(pull, ZMQ_ZAP_DOMAIN, b"global");
     set_bytes(pull, OMQ_QUIC_CERT_PEM, cert.as_bytes());
     set_bytes(pull, OMQ_QUIC_KEY_PEM, key.as_bytes());
@@ -69,7 +69,7 @@ fn plain_zap_authenticates_over_quic() {
 
     set_bytes(push, ZMQ_PLAIN_USERNAME, b"alice");
     set_bytes(push, ZMQ_PLAIN_PASSWORD, b"secret");
-    set_i32(push, OMQ_QUIC_TRUST_SYSTEM, 0);
+    helpers::set_int_opt(push, OMQ_QUIC_TRUST_SYSTEM, 0);
     set_bytes(push, OMQ_QUIC_TRUST_PEM, cert.as_bytes());
     assert_eq!(zmq_connect(push, endpoint.as_ptr()), 0);
 
@@ -121,10 +121,6 @@ fn msg_bytes(message: &mut ZmqMsg) -> Vec<u8> {
     unsafe { std::slice::from_raw_parts(data, size) }.to_vec()
 }
 
-fn set_i32(sock: *mut c_void, opt: i32, val: i32) {
-    zmq_setsockopt(sock, opt, (&val as *const i32).cast(), size_of::<i32>());
-}
-
 fn set_bytes(sock: *mut c_void, opt: i32, data: &[u8]) {
     zmq_setsockopt(sock, opt, data.as_ptr().cast(), data.len());
 }
@@ -136,11 +132,6 @@ fn plain_credential(username: &[u8], password: &[u8]) -> OmqPlainCredential {
         password: password.as_ptr(),
         password_size: password.len(),
     }
-}
-
-fn set_timeo(sock: *mut c_void, ms: i32) {
-    set_i32(sock, ZMQ_RCVTIMEO, ms);
-    set_i32(sock, ZMQ_SNDTIMEO, ms);
 }
 
 fn get_i32(sock: *mut c_void, option: i32) -> i32 {
@@ -197,7 +188,7 @@ where
     let thread = std::thread::spawn(move || {
         let ctx = ctx as *mut c_void;
         let zap = zmq_socket(ctx, socket_type);
-        set_timeo(zap, 5000);
+        helpers::set_timeouts(zap, 5000);
         assert_eq!(zmq_bind(zap, c"inproc://zeromq.zap.01".as_ptr()), 0);
         ready_tx.send(()).unwrap();
 
@@ -228,7 +219,7 @@ fn start_plain_zap_handler_with_status(
     let thread = std::thread::spawn(move || {
         let ctx = ctx as *mut c_void;
         let zap = zmq_socket(ctx, ZMQ_REP);
-        set_timeo(zap, 5000);
+        helpers::set_timeouts(zap, 5000);
         assert_eq!(zmq_bind(zap, c"inproc://zeromq.zap.01".as_ptr()), 0);
         ready_tx.send(()).unwrap();
 
@@ -405,17 +396,17 @@ fn curve_req_rep_tcp() {
 
     let ctx = zmq_ctx_new();
     let rep = zmq_socket(ctx, ZMQ_REP);
-    set_i32(rep, ZMQ_CURVE_SERVER, 1);
+    helpers::set_int_opt(rep, ZMQ_CURVE_SERVER, 1);
     set_bytes(rep, ZMQ_CURVE_SECRETKEY, &srv_sec[..40]);
     let addr = helpers::bind_random_tcp(rep);
-    set_timeo(rep, 5000);
+    helpers::set_timeouts(rep, 5000);
 
     let req = zmq_socket(ctx, ZMQ_REQ);
     set_bytes(req, ZMQ_CURVE_PUBLICKEY, &cli_pub[..40]);
     set_bytes(req, ZMQ_CURVE_SECRETKEY, &cli_sec[..40]);
     set_bytes(req, ZMQ_CURVE_SERVERKEY, &srv_pub[..40]);
     zmq_connect(req, addr.as_ptr());
-    set_timeo(req, 5000);
+    helpers::set_timeouts(req, 5000);
 
     std::thread::sleep(Duration::from_millis(200));
 
@@ -454,16 +445,16 @@ fn plain_push_pull_tcp() {
     let ctx = zmq_ctx_new();
     let zap = start_plain_zap_handler(ctx);
     let pull = zmq_socket(ctx, ZMQ_PULL);
-    set_i32(pull, ZMQ_PLAIN_SERVER, 1);
+    helpers::set_int_opt(pull, ZMQ_PLAIN_SERVER, 1);
     set_bytes(pull, ZMQ_ZAP_DOMAIN, b"global");
     let addr = helpers::bind_random_tcp(pull);
-    set_timeo(pull, 5000);
+    helpers::set_timeouts(pull, 5000);
 
     let push = zmq_socket(ctx, ZMQ_PUSH);
     set_bytes(push, ZMQ_PLAIN_USERNAME, b"user");
     set_bytes(push, ZMQ_PLAIN_PASSWORD, b"pass");
     zmq_connect(push, addr.as_ptr());
-    set_timeo(push, 5000);
+    helpers::set_timeouts(push, 5000);
 
     std::thread::sleep(Duration::from_millis(200));
 
@@ -495,15 +486,15 @@ fn plain_zap_rep_receives_user_id_and_can_reply() {
     let ctx = zmq_ctx_new();
     let zap = start_plain_zap_handler(ctx);
     let rep = zmq_socket(ctx, ZMQ_REP);
-    set_i32(rep, ZMQ_PLAIN_SERVER, 1);
+    helpers::set_int_opt(rep, ZMQ_PLAIN_SERVER, 1);
     set_bytes(rep, ZMQ_ZAP_DOMAIN, b"global");
-    set_timeo(rep, 5000);
+    helpers::set_timeouts(rep, 5000);
     let addr = helpers::bind_random_tcp(rep);
 
     let req = zmq_socket(ctx, ZMQ_REQ);
     set_bytes(req, ZMQ_PLAIN_USERNAME, b"alice");
     set_bytes(req, ZMQ_PLAIN_PASSWORD, b"secret");
-    set_timeo(req, 5000);
+    helpers::set_timeouts(req, 5000);
     assert_eq!(zmq_connect(req, addr.as_ptr()), 0);
     assert_eq!(zmq_send(req, b"ping".as_ptr().cast(), 4, 0), 4);
 
@@ -529,16 +520,16 @@ fn plain_zap_router_receives_user_id_and_can_route_reply() {
     let ctx = zmq_ctx_new();
     let zap = start_plain_zap_handler(ctx);
     let router = zmq_socket(ctx, ZMQ_ROUTER);
-    set_i32(router, ZMQ_PLAIN_SERVER, 1);
+    helpers::set_int_opt(router, ZMQ_PLAIN_SERVER, 1);
     set_bytes(router, ZMQ_ZAP_DOMAIN, b"global");
-    set_timeo(router, 5000);
+    helpers::set_timeouts(router, 5000);
     let addr = helpers::bind_random_tcp(router);
 
     let dealer = zmq_socket(ctx, ZMQ_DEALER);
     set_bytes(dealer, ZMQ_IDENTITY, b"client");
     set_bytes(dealer, ZMQ_PLAIN_USERNAME, b"alice");
     set_bytes(dealer, ZMQ_PLAIN_PASSWORD, b"secret");
-    set_timeo(dealer, 5000);
+    helpers::set_timeouts(dealer, 5000);
     assert_eq!(zmq_connect(dealer, addr.as_ptr()), 0);
     assert_eq!(zmq_send(dealer, b"ping".as_ptr().cast(), 4, 0), 4);
 
@@ -590,16 +581,16 @@ fn plain_zap_router_exposes_and_requires_routing_envelope() {
     });
 
     let pull = zmq_socket(ctx, ZMQ_PULL);
-    set_i32(pull, ZMQ_PLAIN_SERVER, 1);
+    helpers::set_int_opt(pull, ZMQ_PLAIN_SERVER, 1);
     set_bytes(pull, ZMQ_ZAP_DOMAIN, b"global");
     set_bytes(pull, ZMQ_IDENTITY, b"server-id");
-    set_timeo(pull, 5000);
+    helpers::set_timeouts(pull, 5000);
     let addr = helpers::bind_random_tcp(pull);
 
     let push = zmq_socket(ctx, ZMQ_PUSH);
     set_bytes(push, ZMQ_PLAIN_USERNAME, b"alice");
     set_bytes(push, ZMQ_PLAIN_PASSWORD, b"secret");
-    set_timeo(push, 5000);
+    helpers::set_timeouts(push, 5000);
     assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
     assert_eq!(zmq_send(push, b"routed".as_ptr().cast(), 6, 0), 6);
 
@@ -637,15 +628,15 @@ fn malformed_zap_router_reply_fails_authentication_closed() {
     });
 
     let pull = zmq_socket(ctx, ZMQ_PULL);
-    set_i32(pull, ZMQ_PLAIN_SERVER, 1);
+    helpers::set_int_opt(pull, ZMQ_PLAIN_SERVER, 1);
     set_bytes(pull, ZMQ_ZAP_DOMAIN, b"global");
-    set_timeo(pull, 300);
+    helpers::set_timeouts(pull, 300);
     let addr = helpers::bind_random_tcp(pull);
 
     let push = zmq_socket(ctx, ZMQ_PUSH);
     set_bytes(push, ZMQ_PLAIN_USERNAME, b"alice");
     set_bytes(push, ZMQ_PLAIN_PASSWORD, b"secret");
-    set_timeo(push, 300);
+    helpers::set_timeouts(push, 300);
     assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
     assert_eq!(zmq_send(push, b"blocked".as_ptr().cast(), 7, 0), 7);
 
@@ -679,15 +670,15 @@ fn zap_user_id_and_metadata_are_attached_to_every_received_frame() {
     });
 
     let pull = zmq_socket(ctx, ZMQ_PULL);
-    set_i32(pull, ZMQ_PLAIN_SERVER, 1);
+    helpers::set_int_opt(pull, ZMQ_PLAIN_SERVER, 1);
     set_bytes(pull, ZMQ_ZAP_DOMAIN, b"global");
-    set_timeo(pull, 5000);
+    helpers::set_timeouts(pull, 5000);
     let addr = helpers::bind_random_tcp(pull);
 
     let push = zmq_socket(ctx, ZMQ_PUSH);
     set_bytes(push, ZMQ_PLAIN_USERNAME, b"alice");
     set_bytes(push, ZMQ_PLAIN_PASSWORD, b"secret");
-    set_timeo(push, 5000);
+    helpers::set_timeouts(push, 5000);
     assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
     send_multipart(push, &[b"one", b"two"]);
     zap.join().unwrap();
@@ -773,7 +764,7 @@ fn zap_metadata_cannot_be_shadowed_by_peer_properties() {
 
     let pull = zmq_socket(ctx, ZMQ_PULL);
     set_bytes(pull, ZMQ_ZAP_DOMAIN, b"global");
-    set_timeo(pull, 5000);
+    helpers::set_timeouts(pull, 5000);
     let endpoint = helpers::bind_random_tcp(pull);
     let address = endpoint.to_str().unwrap().strip_prefix("tcp://").unwrap();
     let mut peer = TcpStream::connect(address).unwrap();
@@ -818,7 +809,7 @@ fn spawn_pipelined_zap_router(ctx: *mut c_void) -> std::thread::JoinHandle<[Vec<
     let zap = std::thread::spawn(move || {
         let ctx = handler_ctx as *mut c_void;
         let router = zmq_socket(ctx, ZMQ_ROUTER);
-        set_timeo(router, 5000);
+        helpers::set_timeouts(router, 5000);
         assert_eq!(zmq_bind(router, c"inproc://zeromq.zap.01".as_ptr()), 0);
         ready_tx.send(()).unwrap();
 
@@ -861,7 +852,7 @@ fn connect_plain_clients(
         let push = zmq_socket(ctx, ZMQ_PUSH);
         set_bytes(push, ZMQ_PLAIN_USERNAME, username);
         set_bytes(push, ZMQ_PLAIN_PASSWORD, password);
-        set_timeo(push, 5000);
+        helpers::set_timeouts(push, 5000);
         assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
         assert_eq!(
             zmq_send(push, username.as_ptr().cast(), username.len(), 0),
@@ -879,9 +870,9 @@ fn zap_router_can_pipeline_requests_from_multiple_servers() {
     let zap = spawn_pipelined_zap_router(server_ctx);
 
     let pull = zmq_socket(server_ctx, ZMQ_PULL);
-    set_i32(pull, ZMQ_PLAIN_SERVER, 1);
+    helpers::set_int_opt(pull, ZMQ_PLAIN_SERVER, 1);
     set_bytes(pull, ZMQ_ZAP_DOMAIN, b"global");
-    set_timeo(pull, 5000);
+    helpers::set_timeouts(pull, 5000);
     let addr = helpers::bind_random_tcp(pull);
 
     let client_contexts = [zmq_ctx_new(), zmq_ctx_new()];
@@ -937,11 +928,11 @@ fn null_zap_request_has_no_credentials() {
 
     let pull = zmq_socket(ctx, ZMQ_PULL);
     set_bytes(pull, ZMQ_ZAP_DOMAIN, b"public");
-    set_timeo(pull, 5000);
+    helpers::set_timeouts(pull, 5000);
     let addr = helpers::bind_random_tcp(pull);
 
     let push = zmq_socket(ctx, ZMQ_PUSH);
-    set_timeo(push, 5000);
+    helpers::set_timeouts(push, 5000);
     assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
     assert_eq!(zmq_send(push, b"null".as_ptr().cast(), 4, 0), 4);
 
@@ -995,17 +986,17 @@ fn curve_zap_request_carries_raw_client_public_key() {
     });
 
     let pull = zmq_socket(ctx, ZMQ_PULL);
-    set_i32(pull, ZMQ_CURVE_SERVER, 1);
+    helpers::set_int_opt(pull, ZMQ_CURVE_SERVER, 1);
     set_bytes(pull, ZMQ_CURVE_SECRETKEY, &server_secret[..40]);
     set_bytes(pull, ZMQ_ZAP_DOMAIN, b"secure");
-    set_timeo(pull, 5000);
+    helpers::set_timeouts(pull, 5000);
     let addr = helpers::bind_random_tcp(pull);
 
     let push = zmq_socket(ctx, ZMQ_PUSH);
     set_bytes(push, ZMQ_CURVE_PUBLICKEY, &client_public[..40]);
     set_bytes(push, ZMQ_CURVE_SECRETKEY, &client_secret[..40]);
     set_bytes(push, ZMQ_CURVE_SERVERKEY, &server_public[..40]);
-    set_timeo(push, 5000);
+    helpers::set_timeouts(push, 5000);
     assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
     assert_eq!(zmq_send(push, b"curve".as_ptr().cast(), 5, 0), 5);
 
@@ -1025,17 +1016,17 @@ fn curve_zap_request_carries_raw_client_public_key() {
 fn plain_server_without_zap_fails_closed() {
     let ctx = zmq_ctx_new();
     let pull = zmq_socket(ctx, ZMQ_PULL);
-    set_i32(pull, ZMQ_PLAIN_SERVER, 1);
+    helpers::set_int_opt(pull, ZMQ_PLAIN_SERVER, 1);
     set_bytes(pull, ZMQ_ZAP_DOMAIN, b"global");
-    set_i32(pull, ZMQ_RCVTIMEO, 300);
-    set_i32(pull, ZMQ_LINGER, 0);
+    helpers::set_int_opt(pull, ZMQ_RCVTIMEO, 300);
+    helpers::set_int_opt(pull, ZMQ_LINGER, 0);
     let addr = helpers::bind_random_tcp(pull);
 
     let push = zmq_socket(ctx, ZMQ_PUSH);
     set_bytes(push, ZMQ_PLAIN_USERNAME, b"user");
     set_bytes(push, ZMQ_PLAIN_PASSWORD, b"pass");
-    set_i32(push, ZMQ_SNDTIMEO, 300);
-    set_i32(push, ZMQ_LINGER, 0);
+    helpers::set_int_opt(push, ZMQ_SNDTIMEO, 300);
+    helpers::set_int_opt(push, ZMQ_LINGER, 0);
     assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
     // Authentication can reject the peer before the message enters its pipe.
     // A muted PUSH then waits for a usable peer until its send timeout.
@@ -1135,7 +1126,7 @@ fn zap_and_plain_string_options_enforce_rfc_limits() {
     assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
 
     let enforced = zmq_socket(ctx, ZMQ_PULL);
-    set_i32(enforced, ZMQ_ZAP_ENFORCE_DOMAIN, 1);
+    helpers::set_int_opt(enforced, ZMQ_ZAP_ENFORCE_DOMAIN, 1);
     assert_eq!(get_i32(enforced, ZMQ_ZAP_ENFORCE_DOMAIN), 1);
     assert_eq!(zmq_bind(enforced, c"tcp://127.0.0.1:0".as_ptr()), -1);
     assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
@@ -1149,7 +1140,7 @@ fn zap_and_plain_string_options_enforce_rfc_limits() {
 fn plain_zap_rejects_an_empty_domain_before_bind() {
     let ctx = zmq_ctx_new();
     let pull = zmq_socket(ctx, ZMQ_PULL);
-    set_i32(pull, ZMQ_PLAIN_SERVER, 1);
+    helpers::set_int_opt(pull, ZMQ_PLAIN_SERVER, 1);
     assert_eq!(zmq_bind(pull, c"tcp://127.0.0.1:0".as_ptr()), -1);
     assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
     zmq_close(pull);
@@ -1161,16 +1152,16 @@ fn plain_server_honors_zap_rejection() {
     let ctx = zmq_ctx_new();
     let zap = start_plain_zap_handler_with_status(ctx, b"400");
     let pull = zmq_socket(ctx, ZMQ_PULL);
-    set_i32(pull, ZMQ_PLAIN_SERVER, 1);
+    helpers::set_int_opt(pull, ZMQ_PLAIN_SERVER, 1);
     set_bytes(pull, ZMQ_ZAP_DOMAIN, b"global");
-    set_i32(pull, ZMQ_RCVTIMEO, 300);
-    set_i32(pull, ZMQ_LINGER, 0);
+    helpers::set_int_opt(pull, ZMQ_RCVTIMEO, 300);
+    helpers::set_int_opt(pull, ZMQ_LINGER, 0);
     let addr = helpers::bind_random_tcp(pull);
 
     let push = zmq_socket(ctx, ZMQ_PUSH);
     set_bytes(push, ZMQ_PLAIN_USERNAME, b"mallory");
     set_bytes(push, ZMQ_PLAIN_PASSWORD, b"wrong");
-    set_i32(push, ZMQ_LINGER, 0);
+    helpers::set_int_opt(push, ZMQ_LINGER, 0);
     assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
     assert_eq!(zmq_send(push, b"denied".as_ptr().cast(), 6, 0), 6);
 
@@ -1198,7 +1189,7 @@ fn omq_fixed_plain_credential_allowlist_is_enforced_without_zap() {
         omq_socket_set_plain_server_credentials(pull, credentials.as_ptr(), credentials.len()),
         0
     );
-    set_i32(pull, ZMQ_RCVTIMEO, 5000);
+    helpers::set_int_opt(pull, ZMQ_RCVTIMEO, 5000);
     let addr = helpers::bind_random_tcp(pull);
 
     let alice = zmq_socket(ctx, ZMQ_PUSH);
@@ -1309,7 +1300,7 @@ fn plain_zap_rep_keeps_queued_request_routes_and_properties_together() {
 
     let zap = std::thread::spawn(move || {
         let handler = zmq_socket(context_address as *mut c_void, ZMQ_REP);
-        set_timeo(handler, 5000);
+        helpers::set_timeouts(handler, 5000);
         assert_eq!(zmq_bind(handler, c"inproc://zeromq.zap.01".as_ptr()), 0);
         ready_tx.send(()).unwrap();
 
@@ -1327,18 +1318,18 @@ fn plain_zap_rep_keeps_queued_request_routes_and_properties_together() {
 
     ready_rx.recv().unwrap();
     let rep = zmq_socket(ctx, ZMQ_REP);
-    set_i32(rep, ZMQ_LINGER, 0);
-    set_i32(rep, ZMQ_PLAIN_SERVER, 1);
+    helpers::set_int_opt(rep, ZMQ_LINGER, 0);
+    helpers::set_int_opt(rep, ZMQ_PLAIN_SERVER, 1);
     set_bytes(rep, ZMQ_ZAP_DOMAIN, b"global");
-    set_timeo(rep, 5000);
+    helpers::set_timeouts(rep, 5000);
     let endpoint = helpers::bind_random_tcp(rep);
     let clients = [zmq_socket(ctx, ZMQ_REQ), zmq_socket(ctx, ZMQ_REQ)];
 
     for (client, user) in clients.iter().zip([b"alice".as_slice(), b"bob".as_slice()]) {
-        set_i32(*client, ZMQ_LINGER, 0);
+        helpers::set_int_opt(*client, ZMQ_LINGER, 0);
         set_bytes(*client, ZMQ_PLAIN_USERNAME, user);
         set_bytes(*client, ZMQ_PLAIN_PASSWORD, b"secret");
-        set_timeo(*client, 5000);
+        helpers::set_timeouts(*client, 5000);
         assert_eq!(zmq_connect(*client, endpoint.as_ptr()), 0);
         assert_eq!(
             zmq_send(*client, user.as_ptr().cast(), user.len(), 0),

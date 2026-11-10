@@ -8,6 +8,8 @@ use omq_zmq::{
 };
 use std::ffi::{CString, c_void};
 
+const ZMQ_EFSM: i32 = 156_384_763;
+
 #[cfg(unix)]
 type PollFd = i32;
 
@@ -164,7 +166,7 @@ fn req_reply_does_not_advance_fsm_before_application_receive() {
     readable(req);
 
     assert_eq!(zmq_send(req, b"early".as_ptr().cast(), 5, 1), -1);
-    assert_eq!(zmq_errno(), 156_384_763); // EFSM
+    assert_eq!(zmq_errno(), ZMQ_EFSM);
     assert_eq!(recv(req), b"reply");
 
     send(req, b"next");
@@ -220,7 +222,7 @@ fn rep_multipart_and_malformed(transport: &str) {
 
     assert_eq!(recv(rep), b"");
     assert_eq!(zmq_send(rep, b"early".as_ptr().cast(), 5, 1), -1);
-    assert_eq!(zmq_errno(), 156_384_763);
+    assert_eq!(zmq_errno(), ZMQ_EFSM);
     assert_eq!(recv(rep), b"body");
     send_parts(rep, &[b"", b"reply"]);
 
@@ -266,12 +268,12 @@ fn req_malformed_reply(transport: &str) {
     );
     assert_eq!(zmq_errno(), libc::EAGAIN);
     assert_eq!(zmq_send(req, b"early".as_ptr().cast(), 5, 1), -1);
-    assert_eq!(zmq_errno(), 156_384_763);
+    assert_eq!(zmq_errno(), ZMQ_EFSM);
 
     send_parts(router, &[&request[0], b"", b"", b"reply"]);
     assert_eq!(recv(req), b"");
     assert_eq!(zmq_send(req, b"early".as_ptr().cast(), 5, 1), -1);
-    assert_eq!(zmq_errno(), 156_384_763);
+    assert_eq!(zmq_errno(), ZMQ_EFSM);
     assert_eq!(recv(req), b"reply");
 
     send(req, b"next");

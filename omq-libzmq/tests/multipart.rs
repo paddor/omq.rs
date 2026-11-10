@@ -13,7 +13,7 @@ use omq_zmq::{
     zmq_msg_copy, zmq_msg_data, zmq_msg_get, zmq_msg_gets, zmq_msg_group, zmq_msg_init,
     zmq_msg_init_buffer, zmq_msg_init_data, zmq_msg_init_size, zmq_msg_more, zmq_msg_move,
     zmq_msg_recv, zmq_msg_send, zmq_msg_set, zmq_msg_set_group, zmq_msg_size, zmq_recv, zmq_send,
-    zmq_setsockopt, zmq_socket,
+    zmq_socket,
 };
 
 const ZMQ_PUSH: i32 = 8;
@@ -41,10 +41,6 @@ impl ZmqMsg {
         zmq_msg_init(m.0.as_mut_ptr().cast());
         m
     }
-}
-
-fn set_timeo(sock: *mut c_void, opt: i32, ms: i32) {
-    zmq_setsockopt(sock, opt, (&ms as *const i32).cast(), size_of::<i32>());
 }
 
 fn rcvmore(sock: *mut c_void) -> bool {
@@ -357,7 +353,7 @@ fn msg_init_data_free_fn_runs_after_successful_send() {
     assert_eq!(zmq_bind(pull, addr.as_ptr()), 0);
     assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
     std::thread::sleep(Duration::from_millis(20));
-    set_timeo(pull, ZMQ_RCVTIMEO, 1000);
+    helpers::set_int_opt(pull, ZMQ_RCVTIMEO, 1000);
 
     let freed = AtomicUsize::new(0);
     let mut payload = *b"external-data";
@@ -441,7 +437,7 @@ fn msg_send_recv_roundtrip() {
     zmq_bind(pull, addr.as_ptr());
     zmq_connect(push, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(20));
-    set_timeo(pull, ZMQ_RCVTIMEO, 1000);
+    helpers::set_int_opt(pull, ZMQ_RCVTIMEO, 1000);
 
     let payload = b"msg api roundtrip";
     let mut out_m = ZmqMsg::zeroed();
@@ -479,7 +475,7 @@ fn msg_more_flag_in_recv() {
     zmq_bind(pull, addr.as_ptr());
     zmq_connect(push, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(20));
-    set_timeo(pull, ZMQ_RCVTIMEO, 1000);
+    helpers::set_int_opt(pull, ZMQ_RCVTIMEO, 1000);
 
     // Send 3-part message.
     zmq_send(push, b"A".as_ptr().cast(), 1, ZMQ_SNDMORE);
@@ -534,7 +530,7 @@ fn msg_send_then_raw_recv() {
     zmq_bind(pull, addr.as_ptr());
     zmq_connect(push, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(20));
-    set_timeo(pull, ZMQ_RCVTIMEO, 1000);
+    helpers::set_int_opt(pull, ZMQ_RCVTIMEO, 1000);
 
     let mut m = ZmqMsg::zeroed();
     zmq_msg_init_buffer(m.0.as_mut_ptr().cast(), b"raw recv".as_ptr().cast(), 8);
@@ -570,8 +566,8 @@ fn kind_bytes_arc_stolen_on_zmq_msg_send() {
     zmq_bind(fwd_pull, addr2.as_ptr());
     zmq_connect(fwd_push, addr2.as_ptr());
     std::thread::sleep(Duration::from_millis(20));
-    set_timeo(pull, ZMQ_RCVTIMEO, 1000);
-    set_timeo(fwd_pull, ZMQ_RCVTIMEO, 1000);
+    helpers::set_int_opt(pull, ZMQ_RCVTIMEO, 1000);
+    helpers::set_int_opt(fwd_pull, ZMQ_RCVTIMEO, 1000);
 
     let payload = b"zero-copy-kind-bytes";
 
@@ -623,7 +619,7 @@ fn raw_send_then_msg_recv() {
     zmq_bind(pull, addr.as_ptr());
     zmq_connect(push, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(20));
-    set_timeo(pull, ZMQ_RCVTIMEO, 1000);
+    helpers::set_int_opt(pull, ZMQ_RCVTIMEO, 1000);
 
     zmq_send(push, b"msg recv".as_ptr().cast(), 8, 0);
 
@@ -666,9 +662,9 @@ fn eagain_comes_at_the_first_frame_and_never_splits_a_message() {
     let pull = zmq_socket(ctx, ZMQ_PULL);
     let push = zmq_socket(ctx, ZMQ_PUSH);
 
-    set_timeo(pull, ZMQ_RCVHWM, 1);
-    set_timeo(push, ZMQ_SNDHWM, 1);
-    set_timeo(pull, ZMQ_RCVTIMEO, 2000);
+    helpers::set_int_opt(pull, ZMQ_RCVHWM, 1);
+    helpers::set_int_opt(push, ZMQ_SNDHWM, 1);
+    helpers::set_int_opt(pull, ZMQ_RCVTIMEO, 2000);
 
     let addr = CString::new("inproc://multipart-eagain-retry").unwrap();
     assert_eq!(zmq_bind(pull, addr.as_ptr()), 0);
@@ -714,7 +710,7 @@ fn message_group_is_not_staged_for_other_socket_types() {
     let ctx = zmq_ctx_new();
     let pull = zmq_socket(ctx, ZMQ_PULL);
     let push = zmq_socket(ctx, ZMQ_PUSH);
-    set_timeo(pull, ZMQ_RCVTIMEO, 2000);
+    helpers::set_int_opt(pull, ZMQ_RCVTIMEO, 2000);
     let addr = CString::new("inproc://multipart-group-staging").unwrap();
     assert_eq!(zmq_bind(pull, addr.as_ptr()), 0);
     assert_eq!(zmq_connect(push, addr.as_ptr()), 0);

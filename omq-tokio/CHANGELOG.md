@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A connection driver with steady output no longer holds its IO thread
+  until the transport blocks. It pauses output every 16 KiB, so peer
+  timers and QUIC tasks on the same thread run on time, and small-message
+  QUIC throughput stays steady.
+
 ## [0.35.0] - 2026-11-09
 
 ### Changed

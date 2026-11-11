@@ -132,9 +132,10 @@ impl Session<'_> {
 
             () = tokio::task::yield_now(), if turn.control_exhausted => Ok(Flow::Next),
 
-            // Keep the reactor polling for a follow-up send or reply.
-            // Yield every turn; idle and backpressured peers still park.
-            () = tokio::task::yield_now(), if turn.poll_transport => Ok(Flow::Next),
+            // Keep the reactor polling for a follow-up send or reply, or end
+            // an output pause. Yield every turn; idle and backpressured
+            // peers still park.
+            () = tokio::task::yield_now(), if turn.poll_transport || turn.output_paused => Ok(Flow::Next),
         }
     }
 

@@ -3,6 +3,7 @@
 use super::{
     ConnectionDriver, DriverStep, DriverStream, DriverWrite, IPC_LATENCY_POLL_WINDOW, OutputSetup,
     PeerDriverConfig, PeerEvent, PreActivationStep, ReceiveProfile, ReceiveSetup, RecvSink,
+    WRITE_PAUSE_BYTES,
     control::{ControlState, Heartbeat, close_error_reason},
     outbound::OutboundState,
     output::QueuedOutput,
@@ -275,7 +276,19 @@ struct Turn {
     recv_blocked: bool,
     resume_input: bool,
     poll_transport: bool,
+    output_paused: bool,
     peer_ttl_deadline: Option<Instant>,
+}
+
+impl Turn {
+    /// Skip output for this turn and end it with a yield. Input, control,
+    /// and timers get polled, and tasks sharing the IO thread run.
+    fn pause_output(&mut self) {
+        self.want_write = false;
+        self.shutdown_ready = false;
+        self.can_accept_data = false;
+        self.output_paused = true;
+    }
 }
 
 /// State of one driver run. Struct fields drop first to last, so this order
@@ -578,7 +591,16 @@ impl<'c> Session<'c> {
 
             self.adapt_compression_level(io);
 
-            let turn = self.plan_turn(io, control_exhausted, data_plane_open);
+            let mut turn = self.plan_turn(io, control_exhausted, data_plane_open);
+
+            // Queued output never runs out under load. Without a pause, the
+            // write arm would starve later arms and other tasks until the
+            // transport blocks.
+            if self.output.pending.written_since_pause >= WRITE_PAUSE_BYTES {
+                self.output.pending.written_since_pause = 0;
+                turn.pause_output();
+            }
+
             if self.wait(io, waits, &turn).await? == Flow::Exit {
                 return Ok(());
             }
@@ -836,6 +858,7 @@ impl<'c> Session<'c> {
             recv_blocked,
             resume_input,
             poll_transport,
+            output_paused: false,
             peer_ttl_deadline,
         }
     }

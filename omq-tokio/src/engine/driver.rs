@@ -58,6 +58,11 @@ const OUTBOUND_BATCH_TIME: Duration = Duration::from_millis(1);
 const BATCH_TIME_CHECK_MSGS: usize = 32;
 const IPC_LATENCY_POLL_WINDOW: Duration = Duration::from_micros(50);
 
+/// Output a driver writes before it pauses output for one turn. Timers and
+/// input get polled then, and tasks sharing its IO thread, such as Quinn's
+/// connection drivers, run.
+const WRITE_PAUSE_BYTES: usize = 16 * 1024;
+
 /// Driver-level timing configuration: handshake deadline, heartbeat
 /// cadence, idle-close timeout.
 #[derive(Debug, Clone, Copy, Default)]

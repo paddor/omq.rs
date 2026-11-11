@@ -34,6 +34,8 @@ pub(super) struct PendingWrite {
     /// ciphertext after a partial socket write and sends it only on a later
     /// write or flush.
     pub(super) unflushed: bool,
+    /// Bytes the transport accepted since the last output pause.
+    pub(super) written_since_pause: usize,
 }
 
 /// Merges runs of small owned chunks into one buffer each, in order.
@@ -287,6 +289,7 @@ pub(super) async fn write_driver_progress<W: DriverWrite>(
         };
 
         pending.unflushed = true;
+        pending.written_since_pause += written;
 
         if !budget.account(written) || started.elapsed() >= OUTBOUND_BATCH_TIME {
             return Ok(());

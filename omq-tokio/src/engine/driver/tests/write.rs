@@ -398,3 +398,56 @@ async fn owned_chunk_write_cancellation_keeps_staged_chunks() {
     write_until_idle(&mut writer, &mut eq, &mut pending, &mut connection).await;
     assert_eq!(writer.out, expected);
 }
+
+#[tokio::test]
+async fn busy_sender_yields_to_tasks_on_its_thread() {
+    use futures::FutureExt;
+
+    const MESSAGES: usize = 40_000;
+    const WIRE_BYTES: usize = MESSAGES * (2 + 100);
+
+    let (push, _pull) = ready_push_pull_connections();
+    // Room for all output, so a full transport never parks the driver.
+    let (stream, mut remote) = tokio::io::duplex(2 * WIRE_BYTES);
+    let (commands, inbox) = mpsc::channel(4);
+    let (events, _event_inbox) = mpsc::channel(4);
+    let (mut producer, consumer) = crate::engine::send_pipe(MESSAGES);
+
+    for _ in 0..MESSAGES {
+        producer.try_send(Message::single(vec![7; 100])).unwrap();
+    }
+
+    let driver = ConnectionDriver::new(stream, push, inbox, events, 1, CancellationToken::new())
+        .with_send_pipe(consumer);
+    commands
+        .send(PeerDriverCommand::ActivateDataPlane)
+        .await
+        .unwrap();
+
+    let task = tokio::spawn(driver.run());
+    let mut buffer = vec![0; 2 * WIRE_BYTES];
+    let mut received = 0;
+    let mut largest_burst = 0;
+
+    // This task shares the driver's thread. It runs only between driver
+    // polls, so each read sees what one driver poll wrote.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while received < WIRE_BYTES {
+            if let Some(read) = remote.read(&mut buffer).now_or_never() {
+                let read = read.unwrap();
+                received += read;
+                largest_burst = largest_burst.max(read);
+            }
+
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("driver output stalled");
+
+    assert!(
+        largest_burst < WIRE_BYTES / 4,
+        "one driver poll wrote {largest_burst} of {WIRE_BYTES} bytes"
+    );
+    task.abort();
+}

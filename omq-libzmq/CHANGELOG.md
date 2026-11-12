@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-11-12
+
+### Changed
+
+- Require `omq-tokio` 0.35.1. A connection driver with steady output pauses
+  every 16 KiB, so timers and QUIC tasks on its IO thread run on time.
+
 ## [0.10.0] - 2026-11-09
 
 ### Changed

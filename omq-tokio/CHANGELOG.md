@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.35.1] - 2026-11-12
+
+### Changed
+
+- Depend on `omq-proto` 0.39.1 and `omq-shm` 0.7.1.
+
 ### Fixed
 
 - A connection driver with steady output no longer holds its IO thread

@@ -1,6 +1,6 @@
 [package]
 name = "omq-proto"
-version = "0.39.0"
+version = "0.39.1"
 edition.workspace = true
 rust-version.workspace = true
 autotests = false

@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.2.16] - 2026-11-12
+
+### Changed
+
+- Bundle `omq-libzmq` 0.10.1 on `omq-tokio` 0.35.1. A connection driver
+  with steady output pauses every 16 KiB, so other tasks and timers on its
+  IO thread run on time.
+
 ## [0.2.15] - 2026-11-09
 
 ### Changed

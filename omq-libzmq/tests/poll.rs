@@ -227,6 +227,59 @@ fn poll_pollout_on_empty_socket() {
     zmq_ctx_term(ctx);
 }
 
+/// A descriptor item is checked like a socket item: with a zero timeout,
+/// and in the same call that reports a ready socket.
+#[cfg(unix)]
+#[test]
+fn poll_reports_a_ready_descriptor_without_waiting() {
+    let mut pipe = [0; 2];
+    // SAFETY: `pipe` has room for the two descriptors.
+    assert_eq!(unsafe { libc::pipe(pipe.as_mut_ptr()) }, 0);
+    // SAFETY: the write end is open and the buffer holds one byte.
+    assert_eq!(unsafe { libc::write(pipe[1], b"x".as_ptr().cast(), 1) }, 1);
+
+    let ctx = zmq_ctx_new();
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    let addr = CString::new("inproc://test-poll-descriptor").unwrap();
+    zmq_connect(push, addr.as_ptr());
+
+    let mut items = [PollItem {
+        socket: std::ptr::null_mut(),
+        fd: pipe[0],
+        events: ZMQ_POLLIN,
+        revents: 0,
+    }];
+    assert_eq!(zmq_poll(items.as_mut_ptr().cast(), 1, 0), 1);
+    assert_eq!(items[0].revents, ZMQ_POLLIN);
+
+    // A connecting PUSH is writable at once.
+    let mut items = [
+        PollItem {
+            socket: push,
+            fd: invalid_fd(),
+            events: ZMQ_POLLOUT,
+            revents: 0,
+        },
+        PollItem {
+            socket: std::ptr::null_mut(),
+            fd: pipe[0],
+            events: ZMQ_POLLIN,
+            revents: 0,
+        },
+    ];
+    assert_eq!(zmq_poll(items.as_mut_ptr().cast(), 2, 1000), 2);
+    assert_eq!(items[0].revents, ZMQ_POLLOUT);
+    assert_eq!(items[1].revents, ZMQ_POLLIN);
+
+    zmq_close(push);
+    zmq_ctx_term(ctx);
+    // SAFETY: both descriptors are open and owned by this test.
+    unsafe {
+        libc::close(pipe[0]);
+        libc::close(pipe[1]);
+    }
+}
+
 /// Helper to create N push-pull socket pairs over inproc.
 /// Returns (ctx, vec of (push, pull) pairs, addresses for cleanup).
 fn create_n_socket_pairs(n: usize) -> (*mut c_void, Vec<(*mut c_void, *mut c_void)>, Vec<CString>) {

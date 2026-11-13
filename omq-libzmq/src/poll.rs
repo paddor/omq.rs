@@ -3,7 +3,7 @@
 //! Three-phase algorithm, repeated until an item is ready or the timeout
 //! passes:
 //! 1. `check_immediate`: scan yring consumers and send readiness (zero
-//!    syscalls).
+//!    syscalls), then descriptor items with one zero-timeout `poll()`.
 //! 2. `PollWaiter::wait`: block on OS events (`poll()` on Unix, WFMO on
 //!    Windows). A one-shot send wake signals a `POLLOUT` socket's send
 //!    eventfd once it may have become writable.
@@ -73,7 +73,7 @@ fn check_immediate(items: &mut [ZmqPollItem]) -> i32 {
             ready += 1;
         }
     }
-    ready
+    ready + crate::notify::check_descriptors(items)
 }
 
 /// Whether a socket has a buffered message or frame to receive.

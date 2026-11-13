@@ -40,6 +40,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A multipart send whose final frame returns `EAGAIN` because the peer
   left can be restarted from its first frame. Before, the frames staged
   by the failed attempt stayed in front, and the peer got them twice.
+- `zmq_poll` and `zmq_poller_wait` report a ready descriptor item with a
+  zero timeout, and in the same call that reports a ready socket. Before,
+  a descriptor was only checked once no socket was ready, so an always
+  writable socket hid it for good. Unix only.
 
 ## [0.9.2] - 2026-11-04
 

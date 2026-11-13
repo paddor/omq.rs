@@ -225,6 +225,70 @@ impl std::fmt::Debug for UnixNotifyHandle {
     }
 }
 
+/// The `pollfd` for a descriptor item.
+fn descriptor_pollfd(item: &crate::poll::ZmqPollItem) -> libc::pollfd {
+    let mut events: libc::c_short = 0;
+    if (item.events & crate::poll::ZMQ_POLLIN) != 0 {
+        events |= libc::POLLIN;
+    }
+    if (item.events & crate::poll::ZMQ_POLLOUT) != 0 {
+        events |= libc::POLLOUT;
+    }
+    if (item.events & crate::poll::ZMQ_POLLERR) != 0 {
+        events |= libc::POLLERR;
+    }
+    libc::pollfd {
+        fd: item.fd,
+        events,
+        revents: 0,
+    }
+}
+
+/// The `zmq_poll` events for a descriptor's `poll` result.
+fn descriptor_revents(revents: libc::c_short) -> libc::c_short {
+    let mut events = 0;
+    if (revents & libc::POLLIN) != 0 {
+        events |= crate::poll::ZMQ_POLLIN;
+    }
+    if (revents & libc::POLLOUT) != 0 {
+        events |= crate::poll::ZMQ_POLLOUT;
+    }
+    if (revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL)) != 0 {
+        events |= crate::poll::ZMQ_POLLERR;
+    }
+    events
+}
+
+/// Check the descriptor items without waiting and add their events to
+/// `revents`. Returns how many of them became ready through this check.
+pub(crate) fn check_descriptors(items: &mut [crate::poll::ZmqPollItem]) -> i32 {
+    let mut pfds: Vec<libc::pollfd> = items
+        .iter()
+        .filter(|item| item.socket.is_null() && item.fd >= 0)
+        .map(descriptor_pollfd)
+        .collect();
+    if pfds.is_empty() {
+        return 0;
+    }
+    // SAFETY: `pfds` is a valid pollfd array, and a zero timeout never blocks.
+    let rc = unsafe { libc::poll(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, 0) };
+    if rc <= 0 {
+        return 0;
+    }
+    let mut ready = 0;
+    let descriptors = items
+        .iter_mut()
+        .filter(|item| item.socket.is_null() && item.fd >= 0);
+    for (item, pfd) in descriptors.zip(&pfds) {
+        let events = descriptor_revents(pfd.revents);
+        if events != 0 && item.revents == 0 {
+            ready += 1;
+        }
+        item.revents |= events;
+    }
+    ready
+}
+
 pub(crate) struct PollWaiter {
     pfds: Vec<libc::pollfd>,
     map: Vec<(usize, libc::c_short)>, // (item_idx, zmq_event_type)
@@ -264,21 +328,7 @@ impl PollWaiter {
                     }
                 }
             } else if item.fd >= 0 {
-                let mut events: libc::c_short = 0;
-                if (item.events & crate::poll::ZMQ_POLLIN as libc::c_short) != 0 {
-                    events |= libc::POLLIN as libc::c_short;
-                }
-                if (item.events & crate::poll::ZMQ_POLLOUT as libc::c_short) != 0 {
-                    events |= libc::POLLOUT as libc::c_short;
-                }
-                if (item.events & crate::poll::ZMQ_POLLERR as libc::c_short) != 0 {
-                    events |= libc::POLLERR as libc::c_short;
-                }
-                pfds.push(libc::pollfd {
-                    fd: item.fd,
-                    events,
-                    revents: 0,
-                });
+                pfds.push(descriptor_pollfd(item));
                 map.push((i, 0));
             }
         }
@@ -351,17 +401,7 @@ impl PollWaiter {
 
             if zmq_event == 0 {
                 // Raw fd item
-                if (pfd.revents & libc::POLLIN as libc::c_short) != 0 {
-                    items[item_idx].revents |= crate::poll::ZMQ_POLLIN as libc::c_short;
-                }
-                if (pfd.revents & libc::POLLOUT as libc::c_short) != 0 {
-                    items[item_idx].revents |= crate::poll::ZMQ_POLLOUT as libc::c_short;
-                }
-                if (pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) as libc::c_short)
-                    != 0
-                {
-                    items[item_idx].revents |= crate::poll::ZMQ_POLLERR as libc::c_short;
-                }
+                items[item_idx].revents |= descriptor_revents(pfd.revents);
             } else {
                 // ZMQ socket item
                 items[item_idx].revents |= zmq_event;

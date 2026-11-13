@@ -156,7 +156,9 @@ impl SocketFile {
         use std::os::unix::fs::MetadataExt;
         let metadata = std::fs::symlink_metadata(path)?;
         Ok(Self {
-            path: path.to_path_buf(),
+            // Absolute, so that a later change of the working directory
+            // does not make drop look for the file elsewhere.
+            path: std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()),
             dev: metadata.dev(),
             ino: metadata.ino(),
         })
@@ -434,6 +436,32 @@ mod tests {
             std::process::id()
         ));
         Endpoint::Ipc(IpcPath::Filesystem(path))
+    }
+
+    /// The listener removes its socket file on drop. A relative path must
+    /// still name that file after the process changes its directory.
+    #[cfg(unix)]
+    #[test]
+    fn socket_file_keeps_an_absolute_path() {
+        // One `..` per level of the working directory reaches the root.
+        let depth = std::env::current_dir().unwrap().components().count();
+        let relative = std::path::PathBuf::from(format!(
+            "{}tmp/omq-ipc-relative-{}.sock",
+            "../".repeat(depth),
+            std::process::id()
+        ));
+        if relative.as_os_str().len() >= 100 {
+            // Too long for a socket address from this directory.
+            return;
+        }
+        let listener = std::os::unix::net::UnixListener::bind(&relative).unwrap();
+
+        let file = SocketFile::new(&relative).unwrap();
+
+        assert!(file.path.is_absolute());
+        drop(listener);
+        file.remove_if_unchanged();
+        assert!(!relative.exists());
     }
 
     #[cfg(target_os = "linux")]

@@ -119,6 +119,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answers. The next address is dialed alongside after 250 ms, as for
   TCP. Before, `quic://localhost` never connected to an IPv4-only listener
   when `::1` resolved first.
+- The listener of a relative `ipc://` path removes its socket file on
+  close after the process changed its working directory.
 
 ## [0.34.3] - 2026-11-04
 

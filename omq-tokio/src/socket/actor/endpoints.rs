@@ -33,7 +33,10 @@ impl SocketDriver {
             let _ = ack.send(res);
         } else if let Err(e) = reject_encrypted_inproc(&endpoint, &options.mechanism) {
             let _ = ack.send(Err(e));
-        } else if let Err(e) = self.validate_setup_options(&endpoint, &options) {
+        } else if let Err(e) = self
+            .validate_setup_options(&endpoint, &options)
+            .and_then(|()| Self::validate_dial_settings(&endpoint, &options))
+        {
             let _ = ack.send(Err(e));
         } else if super::endpoint_resolution::needs_dns(&endpoint) {
             self.start_endpoint_resolution(
@@ -56,6 +59,16 @@ impl SocketDriver {
             self.start_dial(endpoint, options);
             let _ = ack.send(Ok(()));
         }
+    }
+
+    /// Settings that only a dial uses and that no dial can succeed without.
+    #[cfg_attr(not(feature = "quic"), expect(clippy::unnecessary_wraps))]
+    fn validate_dial_settings(endpoint: &Endpoint, options: &Options) -> Result<()> {
+        #[cfg(feature = "quic")]
+        crate::transport::quic::validate_connect(endpoint, options)?;
+        #[cfg(not(feature = "quic"))]
+        let _ = (endpoint, options);
+        Ok(())
     }
 
     pub(super) fn is_dart_endpoint(endpoint: &Endpoint) -> bool {

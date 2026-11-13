@@ -424,6 +424,20 @@ async fn malformed_record_and_finished_liveness_stream_close_the_peer() {
     assert_eq!(closed_code(&client).await, Some(code::CONTROL_ERROR));
 }
 
+/// A peer that stops our liveness stream leaves us without PING and PONG.
+/// That closes the connection, as an ended stream does.
+#[tokio::test]
+async fn stopped_liveness_stream_closes_the_peer() {
+    let options = Options {
+        heartbeat_interval: Some(Duration::from_millis(30)),
+        heartbeat_timeout: Some(Duration::from_secs(30)),
+        ..Options::default()
+    };
+    let (client, _send, mut recv, _stream) = established(options).await;
+    recv.stop(quinn::VarInt::from_u32(0)).unwrap();
+    assert_eq!(closed_code(&client).await, Some(code::CONTROL_ERROR));
+}
+
 #[tokio::test]
 async fn invalid_preface_is_rejected_during_setup() {
     let mut fixture = listener(Options::default(), Duration::from_secs(5)).await;
@@ -860,6 +874,23 @@ async fn connect_does_not_wait_out_a_silent_address() {
         .unwrap();
     assert!(fixture.next().await.is_some());
     drop(client);
+}
+
+/// Invalid local TLS settings fail `connect()`. No dial can ever succeed
+/// with them, so retrying would only hide the mistake.
+#[tokio::test]
+async fn connect_rejects_invalid_client_tls_settings() {
+    let mut bad_trust = Options::default();
+    bad_trust.quic.trust_pem = Some(b"not a certificate".to_vec());
+    bad_trust.quic.trust_system = false;
+    let mut bad_name = Options::default();
+    bad_name.quic.server_name = Some("not a host name".into());
+
+    for options in [bad_trust, bad_name] {
+        let push = crate::Socket::new(omq_proto::SocketType::Push, options);
+        assert!(push.connect("quic://127.0.0.1:9").await.is_err());
+        push.close().await.unwrap();
+    }
 }
 
 #[tokio::test]

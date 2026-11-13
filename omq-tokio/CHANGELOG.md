@@ -133,6 +133,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A `quic://` peer that stops our liveness stream is closed with
   `CONTROL_ERROR`. Before, liveness ended without a word and the
   connection lived on with no dead-peer detection.
+- `connect()` to a `quic://` endpoint fails for invalid client TLS
+  settings, such as a malformed `quic.trust_pem` or `quic.server_name`.
+  Before, it returned `Ok` and every dial attempt failed.
 
 ## [0.34.3] - 2026-11-04
 

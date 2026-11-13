@@ -178,6 +178,17 @@ async fn handshake(
         .map_err(|e| Error::HandshakeFailed(format!("QUIC handshake: {e}")))
 }
 
+/// Check the connect-side TLS settings of a `quic://` endpoint without
+/// touching the network. Every dial would fail on invalid ones, so
+/// `connect()` reports them instead of retrying.
+pub(crate) fn validate_connect(endpoint: &Endpoint, options: &Options) -> Result<()> {
+    let Endpoint::Quic { host, .. } = endpoint else {
+        return Ok(());
+    };
+    crate::transport::tls::server_name(host, options.quic.server_name.as_deref())?;
+    config::client(&options.quic, config::Profile::Raw).map(drop)
+}
+
 /// Dial one peer. The caller bounds the full attempt with the setup deadline;
 /// stream setup validates both prefaces under that same deadline.
 /// The connection lives on a reserved data IO runtime; the returned stream

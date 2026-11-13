@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - On Windows, `zmq_socket` fails with `EMFILE` when it cannot create its
   wakeup events. Before, it returned a socket whose blocking receives spun
   and whose `zmq_poll` entries never fired.
+- A CURVE server keeps a `ZMQ_CURVE_SECRETKEY` set before
+  `ZMQ_CURVE_SERVER`, the order czmq uses. Before, the role change reset
+  the key to zeros and no client could connect. Setting
+  `ZMQ_CURVE_PUBLICKEY` on a server no longer turns it into a client.
 
 ## [0.9.2] - 2026-11-04
 

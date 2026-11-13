@@ -12,6 +12,15 @@ use crate::socket::OmqSocket;
 use std::ffi::c_int;
 use std::sync::Arc;
 
+/// The CURVE secret key already set, whatever the role. Zero when unset.
+fn curve_secret_key(mechanism: &MechanismOverlay) -> [u8; 32] {
+    match mechanism {
+        MechanismOverlay::CurveServer { secret_key }
+        | MechanismOverlay::CurveClient { secret_key, .. } => *secret_key,
+        _ => [0; 32],
+    }
+}
+
 /// PLAIN server role and ZAP domain.
 pub(super) fn set_plain_server_option(
     sock_arc: &Arc<OmqSocket>,
@@ -104,11 +113,9 @@ pub(super) fn set_curve_option(
             let v = optval.i32()?;
             let mut ov = overlay(sock_arc)?;
             if v != 0 {
-                if !matches!(ov.mechanism, MechanismOverlay::CurveServer { .. }) {
-                    ov.mechanism = MechanismOverlay::CurveServer {
-                        secret_key: [0; 32],
-                    };
-                }
+                // Keep a secret key set before the role.
+                let secret_key = curve_secret_key(&ov.mechanism);
+                ov.mechanism = MechanismOverlay::CurveServer { secret_key };
             } else if matches!(ov.mechanism, MechanismOverlay::CurveServer { .. }) {
                 ov.mechanism = MechanismOverlay::Null;
             }
@@ -146,6 +153,8 @@ pub(super) fn set_curve_client_option(
             let mut ov = overlay(sock_arc)?;
             match &mut ov.mechanism {
                 MechanismOverlay::CurveClient { public_key, .. } => *public_key = key,
+                // A server derives its public key and keeps its role.
+                MechanismOverlay::CurveServer { .. } => {}
                 _ => {
                     ov.mechanism = MechanismOverlay::CurveClient {
                         public_key: key,
@@ -160,10 +169,12 @@ pub(super) fn set_curve_client_option(
             let mut ov = overlay(sock_arc)?;
             match &mut ov.mechanism {
                 MechanismOverlay::CurveClient { server_key, .. } => *server_key = key,
-                _ => {
-                    ov.mechanism = MechanismOverlay::CurveClient {
+                // A server key makes the socket a client, as in libzmq.
+                // Its secret key stays.
+                other => {
+                    *other = MechanismOverlay::CurveClient {
                         public_key: [0; 32],
-                        secret_key: [0; 32],
+                        secret_key: curve_secret_key(other),
                         server_key: key,
                     };
                 }

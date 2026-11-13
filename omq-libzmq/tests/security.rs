@@ -378,6 +378,35 @@ fn mismatched_curve_keypair_returns_einval_and_can_be_corrected() {
 
 #[test]
 fn curve_req_rep_tcp() {
+    curve_req_rep_round_trip(|rep, secret| {
+        set_i32(rep, ZMQ_CURVE_SERVER, 1);
+        set_bytes(rep, ZMQ_CURVE_SECRETKEY, secret);
+    });
+}
+
+/// czmq applies the certificate first and the server role second.
+#[test]
+fn curve_server_keeps_a_secret_key_set_before_the_server_role() {
+    curve_req_rep_round_trip(|rep, secret| {
+        set_bytes(rep, ZMQ_CURVE_SECRETKEY, secret);
+        set_i32(rep, ZMQ_CURVE_SERVER, 1);
+    });
+}
+
+/// A server's public key is derived. Setting it keeps the server role.
+#[test]
+fn curve_server_stays_a_server_when_its_public_key_is_set() {
+    let mut public = [0u8; 41];
+    let mut secret = [0u8; 41];
+    zmq_curve_keypair(public.as_mut_ptr().cast(), secret.as_mut_ptr().cast());
+    curve_req_rep_round_trip(|rep, server_secret| {
+        set_i32(rep, ZMQ_CURVE_SERVER, 1);
+        set_bytes(rep, ZMQ_CURVE_SECRETKEY, server_secret);
+        set_bytes(rep, ZMQ_CURVE_PUBLICKEY, &public[..40]);
+    });
+}
+
+fn curve_req_rep_round_trip(configure_server: impl FnOnce(*mut c_void, &[u8])) {
     let mut srv_pub = [0u8; 41];
     let mut srv_sec = [0u8; 41];
     zmq_curve_keypair(srv_pub.as_mut_ptr().cast(), srv_sec.as_mut_ptr().cast());
@@ -388,8 +417,7 @@ fn curve_req_rep_tcp() {
 
     let ctx = zmq_ctx_new();
     let rep = zmq_socket(ctx, ZMQ_REP);
-    set_i32(rep, ZMQ_CURVE_SERVER, 1);
-    set_bytes(rep, ZMQ_CURVE_SECRETKEY, &srv_sec[..40]);
+    configure_server(rep, &srv_sec[..40]);
     let addr = helpers::bind_random_tcp(rep);
     set_timeo(rep, 5000);
 

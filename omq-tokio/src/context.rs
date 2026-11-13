@@ -532,7 +532,10 @@ impl Context {
     /// # Panics
     ///
     /// Panics if the context was created with [`Context::current()`]
-    /// (the caller is already async; just `.await` directly).
+    /// (the caller is already async; just `.await` directly). Panics if
+    /// called on this context's own primary IO thread, for example from
+    /// inside another `block_on` future: the call would wait for a future
+    /// that only the waiting thread can run.
     pub fn block_on<F, T>(&self, f: F) -> T
     where
         F: Future<Output = T> + Send + 'static,
@@ -545,6 +548,11 @@ impl Context {
             );
         };
         self.assert_usable("Context::block_on()");
+        assert!(
+            !pool.on_primary_thread(),
+            "Context::block_on() called on the context's own primary IO thread; \
+             await the future instead"
+        );
         let guard = pool.primary_job_tx.lock().expect("job_tx poisoned");
         let job_tx = guard
             .as_ref()

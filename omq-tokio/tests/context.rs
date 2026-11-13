@@ -613,6 +613,15 @@ fn context_term_block_on_panics() {
     ctx.block_on(async {});
 }
 
+/// The nested call would wait on the thread that has to run its job.
+#[test]
+#[should_panic(expected = "own primary IO thread")]
+fn nested_block_on_panics_instead_of_deadlocking() {
+    let ctx = Context::new();
+    let nested = ctx.clone();
+    ctx.block_on(async move { nested.block_on(async {}) });
+}
+
 #[test]
 fn context_drop_cleanup() {
     // Verify that dropping a context does not hang. The background thread

@@ -23,6 +23,8 @@ pub(super) struct IoThread {
 pub(super) struct IoThreadPool {
     pub(super) threads: Vec<IoThread>,
     pub(super) primary_job_tx: Mutex<Option<tokio::sync::mpsc::UnboundedSender<BoxFuture>>>,
+    /// The thread that runs `primary_job_tx` jobs.
+    primary_thread: thread::ThreadId,
     pub(super) cancel: CancellationToken,
     joins: Mutex<Vec<Option<thread::JoinHandle<()>>>>,
 }
@@ -64,12 +66,20 @@ impl IoThreadPool {
             joins.push(Some(join));
         }
 
+        let primary_thread = joins[0].as_ref().expect("primary IO thread").thread().id();
         Arc::new(Self {
             threads,
             primary_job_tx: Mutex::new(primary_job_tx),
+            primary_thread,
             cancel,
             joins: Mutex::new(joins),
         })
+    }
+
+    /// Whether the caller is the thread that runs submitted jobs. A job
+    /// that waits for another job there waits for itself.
+    pub(super) fn on_primary_thread(&self) -> bool {
+        thread::current().id() == self.primary_thread
     }
 
     pub(super) fn primary_handle(&self) -> &Handle {

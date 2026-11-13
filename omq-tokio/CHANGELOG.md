@@ -97,6 +97,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A zero-linger `close()` ends a close that another clone started with a
   longer linger. Before, it returned at once and the other close kept
   lingering on a peer that had stopped reading.
+- `Context::block_on` panics when called on the context's own primary IO
+  thread, for example from inside another `block_on` future. Before, the
+  whole context hung without a message.
 
 ## [0.34.3] - 2026-11-04
 

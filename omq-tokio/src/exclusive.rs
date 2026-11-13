@@ -411,7 +411,7 @@ impl Socket {
         let now = Instant::now();
         self.retry_at = Some(
             now.checked_add(delay)
-                .unwrap_or_else(|| now + Duration::from_secs(365 * 24 * 60 * 60)),
+                .unwrap_or_else(|| now + Duration::from_hours(365 * 24)),
         );
         let _ = self.monitor.send(Event::ReconnectDelayed {
             retry_in: delay,

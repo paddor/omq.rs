@@ -32,15 +32,33 @@ fn out_of_order_firsts_share_a_bounded_reservation() {
     let chunk = Message::single(vec![1; 16]);
     assert_eq!(s.classify(1, 1), Admission::Accept);
     // The first waiting body is admitted at any size.
-    assert!(s.may_reserve_ahead(48 * mib));
+    assert!(s.may_reserve_ahead(1, 48 * mib));
     assert!(s.commit_fragment(
         Receipt::new(1, Ecn::Unavailable, Duration::ZERO),
         Some(48 * mib),
         chunk
     ));
     // Further bodies must fit the shared budget.
-    assert!(s.may_reserve_ahead(16 * mib));
-    assert!(!s.may_reserve_ahead(17 * mib));
+    assert!(s.may_reserve_ahead(2, 16 * mib));
+    assert!(!s.may_reserve_ahead(2, 17 * mib));
+}
+
+#[test]
+fn the_next_in_order_first_passes_a_full_reservation() {
+    let mut s = session(32);
+    let mib: u64 = 1024 * 1024;
+    assert_eq!(s.classify(1, 2), Admission::Accept);
+    assert!(s.may_reserve_ahead(2, 80 * mib));
+    assert!(s.commit_fragment(
+        Receipt::new(2, Ecn::Unavailable, Duration::ZERO),
+        Some(80 * mib),
+        Message::single(vec![1; 16])
+    ));
+    // Sequence 0 was lost. Only its delivery frees the budget, so its
+    // retransmit must pass or the session stalls for good.
+    assert!(s.may_reserve_ahead(0, 2000));
+    // A FIRST further ahead still waits.
+    assert!(!s.may_reserve_ahead(3, 2000));
 }
 
 fn session(window: usize) -> Session {

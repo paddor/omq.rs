@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `SocketType::recv_parts` reports the frame count each received message
   must have, if the socket type fixes one.
 
+### Changed
+
+- `dart::Session::may_reserve_ahead` takes the fragment's sequence.
+
 ### Removed
 
 - `TypeState::post_recv_req_direct`. Use `TypeState::post_recv` with
@@ -30,6 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A capped drain could take the head of a message, and a later
   `pop_oldest_unprotected_entry` then removed its tail, which tore the
   message on the wire.
+- A DART session no longer stalls when a FIRST fragment is lost and later
+  FIRSTs have used up the reserve-ahead budget. The retransmitted FIRST
+  was refused forever, because only its own delivery frees that budget.
 
 ## [0.38.1] - 2026-11-04
 

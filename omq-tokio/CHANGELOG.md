@@ -34,6 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   buffer sizes unset.
 - A failed `TCP_NODELAY` on an accepted connection no longer makes the
   listener back off for 50 ms.
+- A `dart://` session no longer stalls for good when a FIRST fragment is
+  lost while later large messages are already buffered.
 
 ## [0.34.3] - 2026-11-04
 

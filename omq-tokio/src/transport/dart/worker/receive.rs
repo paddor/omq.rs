@@ -392,7 +392,7 @@ impl EndpointWorker {
             peer.lease.expires = now;
             return;
         }
-        if length.is_some_and(|length| !session.may_reserve_ahead(length)) {
+        if length.is_some_and(|length| !session.may_reserve_ahead(unit.sequence, length)) {
             // Enough bodies already wait in the window. Leave this FIRST
             // unacknowledged; the sender retransmits it later.
             return;

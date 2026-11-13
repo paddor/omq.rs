@@ -138,6 +138,10 @@ impl ActivePipes {
         let mut budget = DrainBudget::WORKER;
         while budget.msgs() < max && !budget.exhausted() {
             if closed.load(Ordering::Acquire) {
+                // Report what this batch queued before the close.
+                if budget.msgs() > 0 {
+                    break;
+                }
                 return Err(omq_proto::TrySendError::Closed);
             }
             let Some(message) = messages.pop_front() else {
@@ -599,6 +603,44 @@ mod tests {
         let mut batch = Vec::new();
         receiver.drain_into(&mut batch, 16, usize::MAX);
         assert_eq!(batch, expected);
+    }
+
+    /// A close that lands inside a batch must not hide the messages the
+    /// batch queued before it.
+    #[test]
+    fn batch_cut_short_by_close_reports_what_it_accepted() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        for _ in 0..300 {
+            let mut send = RoundRobinSend::new(&Options::default().send_hwm(4096));
+            let _receivers: Vec<_> = (0..2).map(|id| connect_pipe(&mut send, id)).collect();
+            let submitter = send.submitter();
+            let closed = send.closed.clone();
+            let start = Arc::new(AtomicBool::new(false));
+            let closing = std::thread::spawn({
+                let start = start.clone();
+                move || {
+                    while !start.load(Ordering::Acquire) {
+                        std::hint::spin_loop();
+                    }
+                    closed.store(true, Ordering::Release);
+                }
+            });
+            let mut messages: VecDeque<_> = (0..256).map(|_| Message::from("x")).collect();
+            let before = messages.len();
+            start.store(true, Ordering::Release);
+            match submitter.try_send_many(&mut messages, before) {
+                Ok(queued) => assert_eq!(before - messages.len(), queued),
+                Err(omq_proto::TrySendError::Closed) => assert_eq!(
+                    messages.len(),
+                    before,
+                    "Closed after the batch queued messages"
+                ),
+                Err(error) => panic!("unexpected {error:?}"),
+            }
+            closing.join().unwrap();
+        }
     }
 
     #[test]

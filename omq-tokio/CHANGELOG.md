@@ -91,6 +91,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   drains while the publisher is muting it for a full queue. This needed a
   publisher and a connection on different threads, as with
   `Context::current()` on a multi-thread runtime.
+- `try_send_many` on a round-robin socket reports the messages it queued
+  when the socket closes in the middle of the batch. Before, it returned
+  `Closed` and the caller lost that count.
 
 ## [0.34.3] - 2026-11-04
 

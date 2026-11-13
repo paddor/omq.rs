@@ -121,6 +121,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when `::1` resolved first.
 - The listener of a relative `ipc://` path removes its socket file on
   close after the process changed its working directory.
+- `disconnect()` of a `udp://` endpoint connected by host name works.
+  Before, it returned `Unroutable` and RADIO kept sending there, because
+  the endpoint was stored under its resolved address.
 
 ## [0.34.3] - 2026-11-04
 

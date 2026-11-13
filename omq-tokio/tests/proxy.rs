@@ -384,3 +384,18 @@ async fn rep_control_is_serviced_while_input_stays_ready() {
         "control waited for {forwarded} forwarded messages"
     );
 }
+
+/// Two receive-only sockets leave nothing to forward. That is an error,
+/// not a panic in the proxy loop.
+#[tokio::test]
+async fn proxy_without_a_forwarding_direction_fails() {
+    let frontend = Socket::new(SocketType::Pull, Options::default());
+    let backend = Socket::new(SocketType::Pull, Options::default());
+    let result = tokio::time::timeout(Duration::from_secs(2), Proxy::new(frontend, backend).run())
+        .await
+        .expect("proxy kept running with nothing to forward");
+    assert!(
+        matches!(result, Err(omq_tokio::Error::Protocol(_))),
+        "{result:?}"
+    );
+}

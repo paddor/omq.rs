@@ -188,6 +188,13 @@ impl Proxy {
             be_to_fe_enabled: self.can_forward_direction(Direction::BackendToFrontend, same_socket),
             preferred: Direction::FrontendToBackend,
         };
+        // With nothing to forward and no control socket, no select arm
+        // would ever be enabled.
+        if !flows.fe_to_be_enabled && !flows.be_to_fe_enabled && self.control.is_none() {
+            return Err(Error::Protocol(
+                "proxy sockets cannot forward in either direction".into(),
+            ));
+        }
         let mut state = ProxyState::Active;
         let mut turn = DrainBudget::new(TURN_BURSTS, usize::MAX);
 

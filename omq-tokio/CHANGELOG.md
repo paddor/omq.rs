@@ -59,6 +59,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `usize::MAX` panicked.
 - `exclusive::Socket` no longer panics on a `heartbeat_interval` or a
   fixed reconnect delay beyond the clock range, such as `Duration::MAX`.
+- `Proxy::run` returns a protocol error when neither direction can
+  forward and there is no control socket, such as PULL to PULL. Before,
+  it panicked.
 
 ## [0.34.3] - 2026-11-04
 

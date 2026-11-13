@@ -112,6 +112,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - STREAM sockets publish `Disconnected` monitor events for raw peers, and
   `connections()` reports their peer info. Before, monitors saw raw peers
   arrive and never leave.
+- `tcp_keepalive`, `tcp_user_timeout`, `recv_buffer_size` and
+  `send_buffer_size` apply to `ws://` and `wss://` connections. Before,
+  they were ignored there without an error.
 
 ## [0.34.3] - 2026-11-04
 

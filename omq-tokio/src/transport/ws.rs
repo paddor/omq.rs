@@ -27,6 +27,15 @@ pub(crate) enum WsTransport {
 }
 
 impl WsTransport {
+    /// The TCP stream that carries the WebSocket, for socket options.
+    pub(crate) fn tcp(&self) -> &TcpStream {
+        match self {
+            Self::Plain(tcp) => tcp,
+            Self::Tls(tls) => tls.get_ref().0,
+            Self::TlsServer(tls) => tls.get_ref().0,
+        }
+    }
+
     pub(crate) fn migrate(self) -> std::io::Result<Self> {
         match self {
             Self::Plain(tcp) => {

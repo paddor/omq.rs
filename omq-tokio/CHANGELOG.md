@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- XPUB surfaces a `\x00<prefix>` message for each subscription that a
+  subscriber still held when it disconnected, as libzmq does. Before, a
+  forwarder kept the subscriptions of every past subscriber upstream.
+
 ### Fixed
 
 - Codec output such as a PING no longer lands inside another frame. A

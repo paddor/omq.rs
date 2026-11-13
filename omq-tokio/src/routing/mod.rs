@@ -512,6 +512,14 @@ impl SendStrategy {
         }
     }
 
+    /// One of the subscriptions a peer holds. `None` except for `FanOut`.
+    pub(crate) fn peer_subscription(&self, peer_id: u64) -> Option<Bytes> {
+        match self {
+            Self::FanOut(s) => s.peer_subscription(peer_id),
+            _ => None,
+        }
+    }
+
     /// Record a CANCEL from a peer. No-op except for `FanOut`.
     pub(crate) fn peer_cancel(&self, peer_id: u64, prefix: &[u8]) {
         if let Self::FanOut(s) = self {

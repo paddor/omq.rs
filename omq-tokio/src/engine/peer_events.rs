@@ -276,10 +276,20 @@ fn xpub_notification(event: &Event) -> Option<omq_proto::Message> {
         Event::Command(Command::Cancel(prefix)) => (0x00, prefix),
         _ => return None,
     };
+    Some(xpub_message(tag, prefix))
+}
+
+/// The message XPUB surfaces for a peer that stopped subscribing to
+/// `prefix`.
+pub(crate) fn xpub_unsubscribe(prefix: &[u8]) -> omq_proto::Message {
+    xpub_message(0x00, prefix)
+}
+
+fn xpub_message(tag: u8, prefix: &[u8]) -> omq_proto::Message {
     let mut bytes = bytes::BytesMut::with_capacity(1 + prefix.len());
     bytes.extend_from_slice(&[tag]);
     bytes.extend_from_slice(prefix);
-    Some(omq_proto::Message::single(bytes.freeze()))
+    omq_proto::Message::single(bytes.freeze())
 }
 
 // Logical service costs, not backing-allocation accounting. A single event's

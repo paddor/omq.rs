@@ -730,6 +730,14 @@ impl FanOutSend {
         prefixes
     }
 
+    /// One of the subscriptions `peer_id` holds, if any.
+    pub(crate) fn peer_subscription(&self, peer_id: u64) -> Option<Bytes> {
+        let g = self.shared.inner.lock().expect("fanout inner poisoned");
+        let peer = g.peers.get(&peer_id)?;
+        let (prefix, _) = peer.filter.subscriptions().iter().next()?;
+        Some(Bytes::from(prefix))
+    }
+
     pub(crate) fn peer_cancel(&self, peer_id: u64, prefix: &[u8]) {
         let mut g = self.shared.inner.lock().expect("fanout inner poisoned");
         if let Some(p) = g.peers.get_mut(&peer_id) {

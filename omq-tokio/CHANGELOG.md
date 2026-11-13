@@ -94,6 +94,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `try_send_many` on a round-robin socket reports the messages it queued
   when the socket closes in the middle of the batch. Before, it returned
   `Closed` and the caller lost that count.
+- A zero-linger `close()` ends a close that another clone started with a
+  longer linger. Before, it returned at once and the other close kept
+  lingering on a peer that had stopped reading.
 
 ## [0.34.3] - 2026-11-04
 

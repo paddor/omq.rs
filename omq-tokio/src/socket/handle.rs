@@ -28,7 +28,9 @@ pub(crate) use send::ReqAwaitingReply;
 
 /// A ZMQ-style socket. Clone-able; all clones talk to the same underlying
 /// driver task. [`Socket::close`] waits for configured linger and joins the
-/// driver. Dropping the last handle starts the same configured linger in the
+/// driver. With zero linger it cancels the driver and returns without
+/// joining it, so endpoints can stay bound for a moment after it returns.
+/// Dropping the last handle starts the same configured linger in the
 /// background, but no caller waits for the result.
 ///
 /// # Native send semantics

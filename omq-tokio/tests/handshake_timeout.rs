@@ -181,14 +181,16 @@ async fn failed_driver_handshake_waits_before_reconnecting() {
             .await
             .unwrap()
             .unwrap();
+        // Jitter may shorten a delay by up to 10%.
+        let shortest = Duration::from_millis(interval_ms * 9 / 10);
         assert!(
-            failed_at.elapsed() >= Duration::from_millis(interval_ms - 50),
+            failed_at.elapsed() >= shortest.saturating_sub(Duration::from_millis(50)),
             "driver failure bypassed the configured reconnect delay"
         );
         assert!(matches!(
             monitor.recv().await.unwrap(),
             MonitorEvent::ConnectDelayed { retry_in, attempt: observed, .. }
-                if retry_in >= Duration::from_millis(interval_ms) && observed == attempt
+                if retry_in >= shortest && observed == attempt
         ));
         silent_peer = retry;
     }

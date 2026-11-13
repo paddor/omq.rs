@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use rand::RngExt;
+use rand::{Rng, RngExt};
 
 use crate::options::ReconnectPolicy;
 
@@ -14,7 +14,8 @@ use crate::options::ReconnectPolicy;
 /// `None` when the policy has exhausted retries (currently only
 /// [`ReconnectPolicy::Disabled`]).
 ///
-/// Adds up to 10% jitter to stagger thundering herds across many peers.
+/// Adds +/-10% jitter to stagger thundering herds across many peers, so a
+/// delay can be up to 10% shorter than the policy's value.
 pub fn next_delay(policy: &ReconnectPolicy, attempt: u32) -> Option<Duration> {
     match policy {
         ReconnectPolicy::Disabled => None,
@@ -29,18 +30,22 @@ pub fn next_delay(policy: &ReconnectPolicy, attempt: u32) -> Option<Duration> {
     }
 }
 
-/// Add up to 10% jitter to a duration, rounded to whole milliseconds. The
-/// result never falls below `d`. Zero stays zero; any non-zero
-/// sub-millisecond delay is treated as 1 ms.
+/// Apply +/-10% jitter to a duration, rounded to whole milliseconds. Zero
+/// stays zero; any non-zero sub-millisecond delay is treated as 1 ms.
 pub fn jitter(d: Duration) -> Duration {
+    jitter_with(d, &mut rand::rng())
+}
+
+/// [`jitter`] with the caller's random source.
+fn jitter_with(d: Duration, rng: &mut impl Rng) -> Duration {
     if d.is_zero() {
         return d;
     }
-    let mut rng = rand::rng();
     let ms = d.as_millis().max(1);
     let delta = ms / 10;
-    let offset = rng.random_range(0..=delta);
-    duration_from_millis(ms.saturating_add(offset))
+    // Draw evenly from [ms - delta, ms + delta]; `delta <= ms`.
+    let offset = rng.random_range(0..=2 * delta);
+    duration_from_millis((ms - delta).saturating_add(offset))
 }
 
 fn duration_from_millis(ms: u128) -> Duration {
@@ -98,15 +103,28 @@ mod tests {
     }
 
     #[test]
-    fn jitter_spreads_evenly_from_the_base_up() {
+    fn jitter_spreads_evenly_on_both_sides_of_the_base() {
+        use rand::SeedableRng;
+
+        // A fixed seed makes the draws, and so this test, repeatable.
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
         let base = Duration::from_secs(1);
-        let samples: Vec<Duration> = (0..1000).map(|_| jitter(base)).collect();
-        assert!(samples.iter().all(|d| *d >= base && *d <= base * 11 / 10));
-        // 101 values are equally likely, so few samples land on the base.
-        let unjittered = samples.iter().filter(|d| **d == base).count();
+        let samples: Vec<Duration> = (0..1000).map(|_| jitter_with(base, &mut rng)).collect();
         assert!(
-            unjittered < 100,
-            "{unjittered} of 1000 delays got no jitter"
+            samples
+                .iter()
+                .all(|d| *d >= base * 9 / 10 && *d <= base * 11 / 10)
+        );
+        let below = samples.iter().filter(|d| **d < base).count();
+        let above = samples.iter().filter(|d| **d > base).count();
+        // 100 of the 201 equally likely values lie on each side.
+        assert!(
+            (400..600).contains(&below),
+            "{below} of 1000 below the base"
+        );
+        assert!(
+            (400..600).contains(&above),
+            "{above} of 1000 above the base"
         );
     }
 

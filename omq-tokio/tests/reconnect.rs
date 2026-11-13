@@ -183,9 +183,9 @@ async fn peer_drop_mid_send_is_handled_cleanly() {
 
 #[tokio::test]
 async fn exponential_backoff_retry_in_grows() {
-    // ConnectDelayed monitor events carry the configured retry_in duration.
-    // With ExponentialPolicy{min, max}, successive retry_in values must be
-    // non-decreasing and at least as large as `min`.
+    // ConnectDelayed monitor events carry the jittered retry_in duration.
+    // With ExponentialPolicy{min, max}, each retry_in stays within 10% of
+    // its doubled base, so successive values never decrease.
     use omq_tokio::MonitorEvent;
 
     // Nothing is listening; every dial attempt will fail immediately.
@@ -225,11 +225,13 @@ async fn exponential_backoff_retry_in_grows() {
         }
     }
 
-    // Each retry_in must be >= min.
-    for (i, &d) in delays.iter().enumerate() {
+    // Each retry_in must be within the 10% jitter of its base. These
+    // bounds hold for every draw.
+    for (i, (&d, base_ms)) in delays.iter().zip([20, 40, 80, 160]).enumerate() {
+        let base = Duration::from_millis(base_ms);
         assert!(
-            d >= Duration::from_millis(20),
-            "delay[{i}] = {d:?} is below min (20 ms)"
+            d >= base * 9 / 10 && d <= base * 11 / 10,
+            "delay[{i}] = {d:?} is not within 10% of {base:?}"
         );
     }
     // Delays must be non-decreasing (exponential growth or plateau at max).

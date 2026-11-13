@@ -62,6 +62,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Before, they failed with `ETERM`, which callers read as a terminated
   context. The first such call now fixes the options that bind and
   connect fix.
+- `ZMQ_FD` of a ZAP-authenticated socket is no longer readable once its
+  queue is empty. Before, it stayed readable after the first message, so
+  an event loop on the descriptor spun at full CPU.
 
 ## [0.9.2] - 2026-11-04
 

@@ -496,6 +496,58 @@ fn curve_req_rep_round_trip(configure_server: impl FnOnce(*mut c_void, &[u8])) {
     zmq_ctx_term(ctx);
 }
 
+/// `ZMQ_FD` is level-triggered. Once a ZAP-authenticated socket has no
+/// message left, the descriptor is not readable; otherwise an event loop
+/// that watches it spins.
+#[cfg(unix)]
+#[test]
+fn zap_socket_fd_is_not_readable_once_drained() {
+    const ZMQ_FD: i32 = 14;
+    const ZMQ_DONTWAIT: i32 = 1;
+    let readable = |fd: i32, timeout_ms: i32| {
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: `pfd` is one valid pollfd.
+        unsafe { libc::poll(&raw mut pfd, 1, timeout_ms) > 0 }
+    };
+
+    let ctx = zmq_ctx_new();
+    let zap = start_plain_zap_handler(ctx);
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    set_i32(pull, ZMQ_PLAIN_SERVER, 1);
+    set_bytes(pull, ZMQ_ZAP_DOMAIN, b"global");
+    assert_eq!(zmq_bind(pull, c"tcp://127.0.0.1:0".as_ptr()), 0);
+    let endpoint = helpers::last_endpoint(pull);
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    set_bytes(push, ZMQ_PLAIN_USERNAME, b"user");
+    set_bytes(push, ZMQ_PLAIN_PASSWORD, b"pass");
+    assert_eq!(zmq_connect(push, endpoint.as_ptr()), 0);
+    set_timeo(push, 5000);
+    assert_eq!(zmq_send(push, b"hello".as_ptr().cast(), 5, 0), 5);
+
+    let fd = get_i32(pull, ZMQ_FD);
+    assert!(readable(fd, 5000), "no message arrived");
+    let mut buf = [0u8; 8];
+    assert_eq!(
+        zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), ZMQ_DONTWAIT),
+        5
+    );
+    assert_eq!(
+        zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), ZMQ_DONTWAIT),
+        -1
+    );
+    assert_eq!(omq_zmq::zmq_errno(), libc::EAGAIN);
+    assert!(!readable(fd, 0), "the descriptor stayed readable");
+
+    zap.join().unwrap();
+    zmq_close(push);
+    zmq_close(pull);
+    zmq_ctx_term(ctx);
+}
+
 /// An IPC peer has no IP address. ZAP carries an empty address frame for
 /// it, as in libzmq, and the handler decides.
 #[cfg(unix)]

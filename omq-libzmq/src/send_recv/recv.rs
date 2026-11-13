@@ -171,15 +171,34 @@ pub(super) fn try_recv_authenticated_message(
             Ok(item) => {
                 let (message, properties) = item.into_parts();
                 let _ = budget.account(message.byte_len());
+                settle_authenticated_fd(sock, receiver);
                 if let Some(message) = prepare_external_recv(sock, message) {
                     return Ok(Some((message, properties)));
                 }
             }
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => return Ok(None),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                settle_authenticated_fd(sock, receiver);
+                return Ok(None);
+            }
             Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => return Err(ETERM),
         }
     }
     Ok(None)
+}
+
+/// Keep `ZMQ_FD` level-triggered for the authenticated queue: once it is
+/// empty, reset the readiness counter. The sink signals every message, so
+/// the counter otherwise stays set and an event loop on the descriptor
+/// spins. A message that lands in between is signaled again.
+fn settle_authenticated_fd<T>(sock: &OmqSocket, receiver: &tokio::sync::mpsc::Receiver<T>) {
+    if !receiver.is_empty() {
+        return;
+    }
+    let notify = sock.notify.recv_notifier();
+    notify.drain();
+    if !receiver.is_empty() {
+        notify.signal();
+    }
 }
 
 fn pop_authenticated_message(

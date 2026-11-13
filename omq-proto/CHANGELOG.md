@@ -26,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Options::validate` rejects a `handshake_timeout` that overflows the
   clock, such as `Duration::MAX`. Before, TCP and IPC sockets accepted it
   and then failed every dial attempt before any I/O, with no error.
+- `FrameBuffer::drain` never splits a chunk group from `push_raw_message`.
+  A capped drain could take the head of a message, and a later
+  `pop_oldest_unprotected_entry` then removed its tail, which tore the
+  message on the wire.
 
 ## [0.38.1] - 2026-11-04
 

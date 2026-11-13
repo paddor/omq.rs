@@ -213,8 +213,10 @@ async fn check_duplicate_subscription(transport: &str, kind: SocketType, prefix:
         );
 
         if attempt == 0 {
-            // Restore two copies, then reconnect so both are replayed.
+            // The lost peer still held one copy, which XPUB reports.
             subscriber.disconnect(endpoint.clone()).await.unwrap();
+            expect_notification(&publisher, 0, prefix).await;
+            // Restore two copies, then reconnect so both are replayed.
             subscriber.subscribe(prefix).await.unwrap();
         } else {
             // Canceling the last copy stops delivery.

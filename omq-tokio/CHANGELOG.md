@@ -23,6 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A zero `heartbeat_interval` disables heartbeats, as in libzmq. Before,
   it closed every connection right after the handshake or sent PINGs in
   a busy loop.
+- RADIO drops a message whose `udp://` datagram would exceed 65507 bytes.
+  Before, under a `Context` egress limit such a datagram waited for a
+  grant larger than the burst and blocked every sender on its IO thread.
 
 ## [0.34.3] - 2026-11-04
 

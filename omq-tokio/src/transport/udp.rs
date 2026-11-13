@@ -25,12 +25,20 @@ pub const MAX_DATAGRAM_SIZE: usize = 65_507;
 pub const FLAG_DATA: u8 = 0x01;
 
 /// Encode `[group, body]` as a single UDP datagram. Errors when
-/// `group` exceeds 255 bytes (it doesn't fit the 1-byte length field).
+/// `group` exceeds 255 bytes (it doesn't fit the 1-byte length field)
+/// or the datagram exceeds [`MAX_DATAGRAM_SIZE`].
 pub fn encode_datagram(group: &[u8], body: &[u8]) -> Result<Bytes> {
     if group.len() > u8::MAX as usize {
         return Err(Error::Protocol(format!(
             "RADIO group name too long ({} bytes; max 255)",
             group.len()
+        )));
+    }
+    // No socket can send it, and an egress limit could never grant it.
+    let total = 2 + group.len() + body.len();
+    if total > MAX_DATAGRAM_SIZE {
+        return Err(Error::Protocol(format!(
+            "RADIO datagram too large ({total} bytes; max {MAX_DATAGRAM_SIZE})"
         )));
     }
     let mut out = Vec::with_capacity(2 + group.len() + body.len());
@@ -142,6 +150,21 @@ mod tests {
         let big = vec![b'g'; 256];
         assert!(matches!(
             encode_datagram(&big, b"x"),
+            Err(Error::Protocol(_))
+        ));
+    }
+
+    #[test]
+    fn datagram_rejects_a_total_over_the_udp_limit() {
+        // 2 header bytes + 1 group byte + body.
+        let fits = vec![0u8; MAX_DATAGRAM_SIZE - 3];
+        assert_eq!(
+            encode_datagram(b"g", &fits).unwrap().len(),
+            MAX_DATAGRAM_SIZE
+        );
+        let over = vec![0u8; MAX_DATAGRAM_SIZE - 2];
+        assert!(matches!(
+            encode_datagram(b"g", &over),
             Err(Error::Protocol(_))
         ));
     }

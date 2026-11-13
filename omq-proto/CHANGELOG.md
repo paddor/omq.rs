@@ -23,8 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Reconnect jitter spreads on both sides of the base delay. Before, it only
-  added up to 10% and left about half of all delays without jitter.
+- Reconnect jitter spreads evenly from the base delay to 10% above it.
+  Before, about half of all delays got no jitter.
 - `tcp://[::1]:*` parses. A bracketed IPv6 host rejected the wildcard port
   that other hosts accept.
 - `Options::validate` rejects a `handshake_timeout` that overflows the

@@ -14,7 +14,7 @@ use crate::options::ReconnectPolicy;
 /// `None` when the policy has exhausted retries (currently only
 /// [`ReconnectPolicy::Disabled`]).
 ///
-/// Adds ±10% jitter to stagger thundering herds across many peers.
+/// Adds up to 10% jitter to stagger thundering herds across many peers.
 pub fn next_delay(policy: &ReconnectPolicy, attempt: u32) -> Option<Duration> {
     match policy {
         ReconnectPolicy::Disabled => None,
@@ -29,8 +29,9 @@ pub fn next_delay(policy: &ReconnectPolicy, attempt: u32) -> Option<Duration> {
     }
 }
 
-/// Apply ±10% jitter to a duration, rounded to whole milliseconds. Zero stays
-/// zero; any non-zero sub-millisecond delay is treated as 1 ms.
+/// Add up to 10% jitter to a duration, rounded to whole milliseconds. The
+/// result never falls below `d`. Zero stays zero; any non-zero
+/// sub-millisecond delay is treated as 1 ms.
 pub fn jitter(d: Duration) -> Duration {
     if d.is_zero() {
         return d;
@@ -38,9 +39,8 @@ pub fn jitter(d: Duration) -> Duration {
     let mut rng = rand::rng();
     let ms = d.as_millis().max(1);
     let delta = ms / 10;
-    // Draw from [ms - delta, ms + delta]; `delta <= ms`, so no underflow.
-    let offset = rng.random_range(0..=2 * delta);
-    duration_from_millis((ms - delta).saturating_add(offset))
+    let offset = rng.random_range(0..=delta);
+    duration_from_millis(ms.saturating_add(offset))
 }
 
 fn duration_from_millis(ms: u128) -> Duration {
@@ -93,20 +93,20 @@ mod tests {
             max: Duration::from_millis(500),
         };
         let d = next_delay(&policy, 20).unwrap();
-        // With +/-10% jitter the cap can be slightly exceeded on the high end.
+        // Jitter can exceed the cap by up to 10%.
         assert!(d <= Duration::from_millis(550));
     }
 
     #[test]
-    fn jitter_spreads_on_both_sides_of_the_base() {
+    fn jitter_spreads_evenly_from_the_base_up() {
         let base = Duration::from_secs(1);
         let samples: Vec<Duration> = (0..1000).map(|_| jitter(base)).collect();
-        assert!(samples.iter().any(|d| *d < base), "no delay below base");
-        assert!(samples.iter().any(|d| *d > base), "no delay above base");
+        assert!(samples.iter().all(|d| *d >= base && *d <= base * 11 / 10));
+        // 101 values are equally likely, so few samples land on the base.
+        let unjittered = samples.iter().filter(|d| **d == base).count();
         assert!(
-            samples
-                .iter()
-                .all(|d| *d >= base * 9 / 10 && *d <= base * 11 / 10)
+            unjittered < 100,
+            "{unjittered} of 1000 delays got no jitter"
         );
     }
 

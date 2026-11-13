@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   message that starts with `LZ4D` or the Zstandard dictionary magic is
   delivered. Before, the lane took it for a dictionary shipment: later
   such messages were lost, and new subscribers got a stale one.
+- A fan-out subscriber fed through its inbox, such as a `ws://`
+  subscriber, keeps receiving after a burst fills that inbox. Before, one
+  overflow under `OnMute::DropNewest` muted it until it reconnected.
 
 ## [0.34.3] - 2026-11-04
 

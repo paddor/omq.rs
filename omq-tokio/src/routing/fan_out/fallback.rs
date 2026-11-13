@@ -125,7 +125,7 @@ impl FallbackPublication<'_> {
     /// unless a peer needs its own encoding.
     pub(super) fn dispatch(&self, deactivate: &mut impl FnMut(&PeerOutbound)) {
         if self.encodes_per_peer() {
-            self.encode_each(deactivate);
+            self.encode_each();
             return;
         }
         thread_local! {
@@ -157,13 +157,12 @@ impl FallbackPublication<'_> {
         false
     }
 
-    fn encode_each(&self, deactivate: &mut impl FnMut(&PeerOutbound)) {
+    /// A full inbox drops this publication for that peer. The peer stays
+    /// active: only a slot drain reactivates one, and this path never
+    /// fills the slot.
+    fn encode_each(&self) {
         for target in self.targets {
-            if target.try_encode(self.msg) == TryFrameResult::Full
-                && self.policy == FanOutMutePolicy::DropNewest
-            {
-                deactivate(target);
-            }
+            let _ = target.try_encode(self.msg);
         }
     }
 

@@ -20,6 +20,10 @@ const ZMQ_RCVTIMEO: i32 = 27;
 const ZMQ_SNDTIMEO: i32 = 28;
 const ZMQ_POLLIN: i16 = 1;
 
+// POSIX defines this code, so `zmq.h` keeps the system value there.
+#[cfg(unix)]
+const ZMQ_ENOTSOCK: i32 = libc::ENOTSOCK;
+#[cfg(not(unix))]
 const ZMQ_ENOTSOCK: i32 = 156_384_721;
 const ZMQ_ETERM: i32 = 156_384_765;
 

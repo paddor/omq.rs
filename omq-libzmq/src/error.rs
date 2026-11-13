@@ -9,7 +9,41 @@ thread_local! {
 
 pub(crate) fn set_errno(e: c_int) {
     ERRNO.with(|c| c.set(e));
+    set_c_errno(e);
 }
+
+/// Store `e` in the C `errno` too. C callers test `errno` itself after a
+/// failed call, as libzmq documents. `zmq_errno` keeps its own copy, which
+/// later library calls on this thread cannot overwrite.
+#[cfg(target_os = "linux")]
+fn set_c_errno(e: c_int) {
+    // SAFETY: `__errno_location` returns this thread's errno slot, which is
+    // valid for the thread's lifetime.
+    unsafe { *libc::__errno_location() = e };
+}
+
+#[cfg(target_os = "android")]
+fn set_c_errno(e: c_int) {
+    // SAFETY: `__errno` returns this thread's errno slot, which is valid
+    // for the thread's lifetime.
+    unsafe { *libc::__errno() = e };
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))]
+fn set_c_errno(e: c_int) {
+    // SAFETY: `__error` returns this thread's errno slot, which is valid
+    // for the thread's lifetime.
+    unsafe { *libc::__error() = e };
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd"
+)))]
+const fn set_c_errno(_: c_int) {}
 
 pub(crate) fn fail(e: c_int) -> c_int {
     set_errno(e);
@@ -28,17 +62,47 @@ macro_rules! c_try {
 }
 pub(crate) use c_try;
 
+/// Codes that POSIX defines keep their system value, as in libzmq:
+/// `zmq.h` defines a HAUSNUMERO fallback only where `<errno.h>` lacks one.
+#[cfg(unix)]
+mod posix {
+    use std::ffi::c_int;
+
+    pub(crate) const ENOTSUP: c_int = libc::ENOTSUP;
+    pub(crate) const EPROTONOSUPPORT: c_int = libc::EPROTONOSUPPORT;
+    pub(crate) const ENOBUFS: c_int = libc::ENOBUFS;
+    pub(crate) const ENETDOWN: c_int = libc::ENETDOWN;
+    pub(crate) const EADDRINUSE: c_int = libc::EADDRINUSE;
+    pub(crate) const EADDRNOTAVAIL: c_int = libc::EADDRNOTAVAIL;
+    pub(crate) const ECONNREFUSED: c_int = libc::ECONNREFUSED;
+    pub(crate) const EINPROGRESS: c_int = libc::EINPROGRESS;
+    pub(crate) const ENOTSOCK: c_int = libc::ENOTSOCK;
+    pub(crate) const EMSGSIZE: c_int = libc::EMSGSIZE;
+}
+
+/// HAUSNUMERO fallbacks (base 156384712).
+#[cfg(not(unix))]
+mod posix {
+    use std::ffi::c_int;
+
+    pub(crate) const ENOTSUP: c_int = 156_384_713;
+    pub(crate) const EPROTONOSUPPORT: c_int = 156_384_714;
+    pub(crate) const ENOBUFS: c_int = 156_384_715;
+    pub(crate) const ENETDOWN: c_int = 156_384_716;
+    pub(crate) const EADDRINUSE: c_int = 156_384_717;
+    pub(crate) const EADDRNOTAVAIL: c_int = 156_384_718;
+    pub(crate) const ECONNREFUSED: c_int = 156_384_719;
+    pub(crate) const EINPROGRESS: c_int = 156_384_720;
+    pub(crate) const ENOTSOCK: c_int = 156_384_721;
+    pub(crate) const EMSGSIZE: c_int = 156_384_722;
+}
+
+pub(crate) use posix::{
+    EADDRINUSE, EADDRNOTAVAIL, ECONNREFUSED, EINPROGRESS, EMSGSIZE, ENETDOWN, ENOBUFS, ENOTSOCK,
+    ENOTSUP, EPROTONOSUPPORT,
+};
+
 // ZMQ-specific error codes (HAUSNUMERO = 156384712).
-pub(crate) const ENOTSUP: c_int = 156_384_713;
-pub(crate) const EPROTONOSUPPORT: c_int = 156_384_714;
-pub(crate) const ENOBUFS: c_int = 156_384_715;
-pub(crate) const ENETDOWN: c_int = 156_384_716;
-pub(crate) const EADDRINUSE: c_int = 156_384_717;
-pub(crate) const EADDRNOTAVAIL: c_int = 156_384_718;
-pub(crate) const ECONNREFUSED: c_int = 156_384_719;
-pub(crate) const EINPROGRESS: c_int = 156_384_720;
-pub(crate) const ENOTSOCK: c_int = 156_384_721;
-pub(crate) const EMSGSIZE: c_int = 156_384_722;
 pub(crate) const ETERM: c_int = 156_384_765;
 pub(crate) const EFSM: c_int = 156_384_763;
 pub(crate) const ENOCOMPATPROTO: c_int = 156_384_764;

@@ -500,3 +500,18 @@ fn ctx_shutdown_wakes_send_blocked_on_a_full_pipe() {
     assert_eq!(zmq_close(pull), 0);
     assert_eq!(zmq_ctx_term(ctx), 0);
 }
+
+/// C callers test `errno` itself after a failed call, as libzmq documents.
+#[cfg(unix)]
+#[test]
+fn a_failed_call_sets_the_c_errno() {
+    let ctx = zmq_ctx_new();
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    let mut buf = [0u8; 8];
+    let rc = zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), ZMQ_DONTWAIT);
+    let c_errno = std::io::Error::last_os_error().raw_os_error();
+    assert_eq!(rc, -1);
+    assert_eq!(c_errno, Some(omq_zmq::zmq_errno()));
+    zmq_close(pull);
+    zmq_ctx_term(ctx);
+}

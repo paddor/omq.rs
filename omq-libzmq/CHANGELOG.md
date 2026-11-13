@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `zmq_join` or `zmq_socket_monitor`. Before, they returned 0 and did not
   apply, so a SUB that subscribed before setting its CURVE keys ran
   without encryption.
+- On Unix, `ENOTSUP`, `EPROTONOSUPPORT`, `ENOBUFS`, `ENETDOWN`,
+  `EADDRINUSE`, `EADDRNOTAVAIL`, `ECONNREFUSED`, `EINPROGRESS`,
+  `ENOTSOCK` and `EMSGSIZE` are reported with their system values, which
+  is what `zmq.h` resolves these names to there. Before, the library
+  returned the HAUSNUMERO fallbacks, so `zmq_errno() == ENOTSOCK` never
+  matched in C.
 
 ### Fixed
 
@@ -24,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ZMQ_CURVE_SERVER`, the order czmq uses. Before, the role change reset
   the key to zeros and no client could connect. Setting
   `ZMQ_CURVE_PUBLICKEY` on a server no longer turns it into a client.
+- A failed call sets the C `errno` on Linux, Android, macOS, iOS and
+  FreeBSD, as libzmq does. Before, only `zmq_errno()` reported the
+  error, so C code testing `errno == EAGAIN` or `errno == ETERM` saw a
+  stale value.
 
 ## [0.9.2] - 2026-11-04
 

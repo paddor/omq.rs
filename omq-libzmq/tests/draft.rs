@@ -28,6 +28,10 @@ const ZMQ_RCVMORE: i32 = 13;
 const ZMQ_SNDMORE: i32 = 2;
 const ZMQ_TYPE: i32 = 16;
 const ZMQ_IDENTITY: i32 = 5;
+// POSIX defines this code, so `zmq.h` keeps the system value there.
+#[cfg(unix)]
+const ZMQ_ENOTSUP: i32 = libc::ENOTSUP;
+#[cfg(not(unix))]
 const ZMQ_ENOTSUP: i32 = 156_384_713;
 
 const ZMQ_MSG_WORDS: usize = 64 / size_of::<usize>();

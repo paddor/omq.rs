@@ -27,6 +27,10 @@ const ZMQ_EVENT_HANDSHAKE_SUCCEEDED: u16 = 0x1000;
 const ZMQ_EVENT_ALL: i32 = 0xFFFF;
 const ZMQ_CURRENT_EVENT_VERSION: i32 = 1;
 const ZMQ_CURRENT_EVENT_VERSION_DRAFT: i32 = 2;
+// POSIX defines this code, so `zmq.h` keeps the system value there.
+#[cfg(unix)]
+const ZMQ_ENOTSUP: i32 = libc::ENOTSUP;
+#[cfg(not(unix))]
 const ZMQ_ENOTSUP: i32 = 156_384_713;
 
 fn set_timeo(sock: *mut c_void, ms: i32) {

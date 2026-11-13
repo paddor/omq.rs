@@ -54,6 +54,7 @@ impl SocketDriver {
                     send_pipe_rx: self.take_dialer_send_pipe(route_id),
                 };
                 self.spawn_on_handshake(conn, peer);
+                self.redial_unmaterialized_route(route_id);
             }
             InternalEvent::ConnectGaveUp { route_id } => self.drop_dial_route(route_id),
             InternalEvent::PeerEvent { peer_id, event } => {
@@ -107,11 +108,39 @@ impl SocketDriver {
             }
             return;
         }
-        if peer.origin.side.is_connect()
-            && !self.close.started
-            && !matches!(peer.origin.options.reconnect, ReconnectPolicy::Disabled)
+        if peer.origin.side.is_connect() && !self.close.started {
+            if matches!(peer.origin.options.reconnect, ReconnectPolicy::Disabled) {
+                // No redial: end the route, so a later connect() dials again.
+                self.drop_dial_route(peer.origin.route_id);
+            } else {
+                self.redial_closed_peer(&peer);
+            }
+        }
+    }
+
+    /// Redial a route whose connected transport produced no peer. Its dial
+    /// task has ended, so nothing else would retry it.
+    fn redial_unmaterialized_route(&mut self, route_id: u64) {
+        if self.close.started
+            || self
+                .peers
+                .values()
+                .any(|peer| peer.origin.route_id == route_id)
         {
-            self.redial_closed_peer(&peer);
+            return;
+        }
+        let Some(dialer) = self.endpoints.dialer(route_id) else {
+            return;
+        };
+        let endpoint = dialer.task.endpoint.clone();
+        let options = dialer.options.clone();
+        let failed_attempts = dialer
+            .failed_attempts
+            .load(Ordering::Relaxed)
+            .saturating_add(1);
+        self.drop_dial_route(route_id);
+        if !matches!(options.reconnect, ReconnectPolicy::Disabled) {
+            self.start_redial(endpoint, options, failed_attempts);
         }
     }
 
@@ -156,7 +185,10 @@ impl SocketDriver {
                 .map_or(0, |dialer| dialer.failed_attempts.load(Ordering::Relaxed))
                 .saturating_add(1)
         };
-        self.endpoints.dialers.retain(|d| d.task.endpoint != ep);
+        // Only this route: the endpoint may carry other connects.
+        self.endpoints
+            .dialers
+            .retain(|d| d.route_id != peer.origin.route_id);
         self.start_redial(ep, peer.origin.options.clone(), failed_attempts);
     }
 

@@ -298,3 +298,87 @@ async fn push_hwm_drains_after_reconnect() {
     }
     assert!(count >= 1, "expected at least 1 message, got {count}");
 }
+
+/// Bind `socket` to `ep`, retrying while a closed socket still holds it.
+async fn rebind(socket: &Socket, ep: &Endpoint) {
+    for _ in 0..80 {
+        if socket.bind(ep.clone()).await.is_ok() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("failed to rebind {ep}");
+}
+
+fn fast_reconnect() -> Options {
+    Options::default().reconnect(ReconnectPolicy::Fixed(Duration::from_millis(20)))
+}
+
+/// Two connects to one endpoint are two routes. Losing the listener
+/// redials both.
+#[tokio::test]
+async fn duplicate_connects_to_one_endpoint_both_redial() {
+    let pull = Socket::new(SocketType::Pull, Options::default());
+    let ep = pull.bind(tcp_ep(0)).await.unwrap();
+    let push = Socket::new(SocketType::Push, fast_reconnect());
+    push.connect(ep.clone()).await.unwrap();
+    push.connect(ep.clone()).await.unwrap();
+    test_support::wait_for_connection_count(&pull, 2, Duration::from_secs(5), "first listener")
+        .await;
+
+    pull.close().await.unwrap();
+    let pull = Socket::new(SocketType::Pull, Options::default());
+    rebind(&pull, &ep).await;
+    test_support::wait_for_connection_count(&pull, 2, Duration::from_secs(5), "second listener")
+        .await;
+}
+
+/// With reconnect disabled, a lost peer ends its route. A new `connect()`
+/// to that endpoint dials again.
+#[tokio::test]
+async fn connect_after_peer_loss_dials_again_with_reconnect_disabled() {
+    let router = Socket::new(SocketType::Router, Options::default());
+    let ep = router.bind(tcp_ep(0)).await.unwrap();
+    let dealer = Socket::new(
+        SocketType::Dealer,
+        Options::default().reconnect(ReconnectPolicy::Disabled),
+    );
+    dealer.connect(ep.clone()).await.unwrap();
+    test_support::wait_for_connection_count(&router, 1, Duration::from_secs(5), "first connect")
+        .await;
+
+    router.close().await.unwrap();
+    test_support::wait_for_connection_count(&dealer, 0, Duration::from_secs(5), "peer loss").await;
+    let router = Socket::new(SocketType::Router, Options::default());
+    rebind(&router, &ep).await;
+
+    dealer.connect(ep).await.unwrap();
+    test_support::wait_for_connection_count(&router, 1, Duration::from_secs(5), "second connect")
+        .await;
+}
+
+/// A connected transport that yields no peer must not strand its route.
+/// Here a PAIR that has its one peer connects a second endpoint.
+#[tokio::test]
+async fn connect_route_redials_after_its_transport_yields_no_peer() {
+    let inproc = |name: &str| Endpoint::Inproc { name: name.into() };
+    let first = Socket::new(SocketType::Pair, Options::default());
+    first.bind(inproc("redial-no-peer-first")).await.unwrap();
+    let second = Socket::new(SocketType::Pair, Options::default());
+    second.bind(inproc("redial-no-peer-second")).await.unwrap();
+
+    let pair = Socket::new(SocketType::Pair, fast_reconnect());
+    pair.connect(inproc("redial-no-peer-first")).await.unwrap();
+    test_support::wait_for_connection_count(&first, 1, Duration::from_secs(5), "first peer").await;
+    pair.connect(inproc("redial-no-peer-second")).await.unwrap();
+
+    first.close().await.unwrap();
+    test_support::wait_for_connection_count(&pair, 0, Duration::from_secs(5), "peer loss").await;
+    let message = tokio::time::timeout(Duration::from_secs(5), async {
+        pair.send(Message::single("hello")).await.unwrap();
+        second.recv().await.unwrap()
+    })
+    .await
+    .expect("the second endpoint was never redialed");
+    assert_eq!(message.part_bytes(0).unwrap().as_ref(), b"hello");
+}

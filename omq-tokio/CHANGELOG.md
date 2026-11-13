@@ -36,6 +36,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   listener back off for 50 ms.
 - A `dart://` session no longer stalls for good when a FIRST fragment is
   lost while later large messages are already buffered.
+- Losing a peer redials only its own route. A socket connected twice to
+  one endpoint lost the other route's dialer and its queued messages, so
+  one of the two connections never came back.
+- A connect route whose transport connected but produced no peer is
+  redialed with backoff. Before, the route stayed dead: for example a
+  `ws://` peer that sent bad bytes with its upgrade response, or a PAIR
+  that connected a second endpoint while it had its one peer.
+- With `ReconnectPolicy::Disabled`, a lost peer ends its connect route.
+  Before, DEALER, SUB, PUB and REQ ignored a new `connect()` to that
+  endpoint as a duplicate.
 
 ## [0.34.3] - 2026-11-04
 

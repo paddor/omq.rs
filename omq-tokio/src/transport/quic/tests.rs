@@ -838,6 +838,30 @@ mod web_wire {
     }
 }
 
+/// QUIC gets no error for an address where nothing answers. Such an
+/// address must not use up the attempt: the next one is dialed alongside.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn connect_does_not_wait_out_a_silent_address() {
+    let mut fixture = listener(Options::default(), Duration::from_secs(5)).await;
+    // The same port on another loopback address. Nothing there speaks QUIC.
+    let silent = SocketAddr::new("127.0.0.2".parse().unwrap(), fixture.addr.port());
+    let _socket = std::net::UdpSocket::bind(silent).unwrap();
+    let mut options = Options::default();
+    options.quic.trust_pem = Some(fixture.cert.clone());
+    options.quic.trust_system = false;
+    let pool = crate::context::IoPoolHandle::none();
+    let host = Host::Ip(fixture.addr.ip());
+
+    let dial = connect_addrs(vec![silent, fixture.addr], &host, &options, None, &pool);
+    let client = tokio::time::timeout(Duration::from_secs(3), dial)
+        .await
+        .expect("the silent address used up the whole attempt")
+        .unwrap();
+    assert!(fixture.next().await.is_some());
+    drop(client);
+}
+
 #[tokio::test]
 async fn outbound_peers_on_one_thread_share_a_connector_endpoint() {
     let mut fixture = listener(Options::default(), Duration::from_secs(5)).await;

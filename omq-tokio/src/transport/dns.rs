@@ -14,6 +14,52 @@ use futures::channel::oneshot;
 use omq_proto::endpoint::Host;
 use omq_proto::{Error, Result};
 
+/// How long one address may stay unanswered before the next one is dialed
+/// alongside it (RFC 8305, Connection Attempt Delay).
+const NEXT_ADDRESS_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Run `attempt` on `addrs` in order and return the first success.
+///
+/// A failed address moves on to the next at once. An address that does not
+/// answer keeps its attempt, and the next one starts after
+/// [`NEXT_ADDRESS_DELAY`]: a silent host would otherwise use up the
+/// caller's whole deadline, on this attempt and on every retry. Attempts
+/// still pending at the first success are dropped. The error is the last
+/// failure, or `None` without addresses.
+pub(crate) async fn first_connected<T, E, F>(
+    addrs: Vec<SocketAddr>,
+    mut attempt: impl FnMut(SocketAddr) -> F,
+) -> std::result::Result<T, Option<E>>
+where
+    F: Future<Output = std::result::Result<T, E>>,
+{
+    use futures::StreamExt;
+
+    let mut remaining = addrs.into_iter();
+    let mut attempts = futures::stream::FuturesUnordered::new();
+    let mut last_err = None;
+    loop {
+        if attempts.is_empty() {
+            let Some(addr) = remaining.next() else {
+                break;
+            };
+            attempts.push(attempt(addr));
+        }
+        tokio::select! {
+            Some(result) = attempts.next() => match result {
+                Ok(connected) => return Ok(connected),
+                Err(e) => last_err = Some(e),
+            },
+            () = tokio::time::sleep(NEXT_ADDRESS_DELAY), if remaining.len() != 0 => {
+                if let Some(addr) = remaining.next() {
+                    attempts.push(attempt(addr));
+                }
+            }
+        }
+    }
+    Err(last_err)
+}
+
 const WORKERS: usize = 4;
 const QUEUED: usize = 8;
 const MAX_ADDRESSES: usize = 256;

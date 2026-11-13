@@ -115,6 +115,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `tcp_keepalive`, `tcp_user_timeout`, `recv_buffer_size` and
   `send_buffer_size` apply to `ws://` and `wss://` connections. Before,
   they were ignored there without an error.
+- A `quic://` connect no longer waits out a resolved address where nothing
+  answers. The next address is dialed alongside after 250 ms, as for
+  TCP. Before, `quic://localhost` never connected to an IPv4-only listener
+  when `::1` resolved first.
 
 ## [0.34.3] - 2026-11-04
 

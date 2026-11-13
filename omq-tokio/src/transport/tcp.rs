@@ -7,10 +7,7 @@
 
 use std::io;
 use std::net::SocketAddr;
-use std::time::Duration;
 
-use futures::StreamExt;
-use futures::stream::FuturesUnordered;
 use tokio::net::{TcpListener as TokioTcpListener, TcpStream};
 
 use omq_proto::endpoint::{Endpoint, Host};
@@ -103,48 +100,23 @@ pub(crate) fn reuse_addr_bind(addr: SocketAddr) -> Result<TokioTcpListener> {
     ))?)
 }
 
-/// How long one address may stay unanswered before the next one is dialed
-/// alongside it (RFC 8305, Connection Attempt Delay).
-const NEXT_ADDRESS_DELAY: Duration = Duration::from_millis(250);
-
-/// Dial `addrs` in order and return the first stream that connects.
-///
-/// A failed address moves on to the next at once. An address that does not
-/// answer keeps its attempt, and the next one starts after
-/// [`NEXT_ADDRESS_DELAY`]: a host that drops SYNs would otherwise use up
-/// the caller's whole deadline, on this attempt and on every retry.
+/// Dial `addrs` in order and return the first stream that connects. See
+/// [`super::dns::first_connected`]: an address that drops SYNs does not
+/// hold up the ones after it.
 pub(crate) async fn connect_any(addrs: Vec<SocketAddr>) -> Result<TcpStream> {
-    let mut remaining = addrs.into_iter();
-    let mut attempts = FuturesUnordered::new();
-    let mut last_err = None;
-    loop {
-        if attempts.is_empty() {
-            let Some(addr) = remaining.next() else {
-                break;
-            };
-            attempts.push(TcpStream::connect(addr));
-        }
-        tokio::select! {
-            Some(result) = attempts.next() => match result {
-                Ok(stream) => return Ok(stream),
-                Err(e) => last_err = Some(e),
-            },
-            () = tokio::time::sleep(NEXT_ADDRESS_DELAY), if remaining.len() != 0 => {
-                if let Some(addr) = remaining.next() {
-                    attempts.push(TcpStream::connect(addr));
-                }
-            }
-        }
-    }
-    Err(Error::Io(last_err.unwrap_or_else(|| {
-        io::Error::other("no addresses to connect")
-    })))
+    super::dns::first_connected(addrs, TcpStream::connect)
+        .await
+        .map_err(|error| {
+            Error::Io(error.unwrap_or_else(|| io::Error::other("no addresses to connect")))
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
+    #[cfg(target_os = "linux")]
+    use std::time::Duration;
 
     fn loopback_port_zero() -> Endpoint {
         Endpoint::Tcp {

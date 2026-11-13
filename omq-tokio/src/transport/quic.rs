@@ -197,6 +197,17 @@ pub(crate) async fn connect(
         }
     };
     let addrs = resolve_connect(host, port).await?;
+    connect_addrs(addrs, host, options, deadline, pool).await
+}
+
+/// Dial the resolved addresses of `host` and return the first stream.
+async fn connect_addrs(
+    addrs: Vec<SocketAddr>,
+    host: &Host,
+    options: &Options,
+    deadline: Option<Instant>,
+    pool: &IoPoolHandle,
+) -> Result<QuicStream> {
     let server_name =
         crate::transport::tls::server_name(host, options.quic.server_name.as_deref())?;
     let server_name = server_name.to_str().into_owned();
@@ -204,22 +215,24 @@ pub(crate) async fn connect(
     let liveness = LivenessConfig::from_options(options);
     let buffers = (options.recv_buffer_size, options.send_buffer_size);
     let lease = pool.reserve_thread();
-    let mut last_err = None;
-    for addr in addrs {
+    // QUIC gets no error for an address where nothing answers, so the
+    // next address is dialed alongside one that stays silent.
+    let attempt = |addr| {
         let server_name = server_name.clone();
         let client = client.clone();
-        let attempt = on_io_thread(pool, &lease, async move {
+        on_io_thread(pool, &lease, async move {
             let endpoint = client_endpoint(addr, buffers)?;
             let connection = handshake(&endpoint, client, addr, &server_name).await?;
             let roles = open_raw_roles(connection, deadline).await?;
             Ok(roles.establish(endpoint, None, liveness))
-        });
-        match attempt.await {
-            Ok(stream) => return Ok(stream.with_io_lease(lease)),
-            Err(e) => last_err = Some(e),
-        }
-    }
-    Err(last_err.unwrap_or_else(|| Error::Io(std::io::Error::other("no addresses to connect"))))
+        })
+    };
+    let stream = crate::transport::dns::first_connected(addrs, attempt)
+        .await
+        .map_err(|error| {
+            error.unwrap_or_else(|| Error::Io(std::io::Error::other("no addresses to connect")))
+        })?;
+    Ok(stream.with_io_lease(lease))
 }
 
 async fn open_raw_roles(connection: quinn::Connection, deadline: Option<Instant>) -> Result<Roles> {

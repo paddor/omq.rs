@@ -68,6 +68,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A panic in a `Context::block_on` job unwinds the caller of `block_on`.
   Before, it killed the context's primary IO thread, and with it every
   socket on the context and every later `block_on`.
+- `Context::term()` and dropping the last `Context` wake callers blocked
+  on its sockets with `Error::Closed`. Before, a blocked receive on PULL,
+  GATHER, SUB, XSUB or DISH hung forever.
 
 ## [0.34.3] - 2026-11-04
 

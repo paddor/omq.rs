@@ -1359,3 +1359,33 @@ fn a_panicking_block_on_job_leaves_the_context_usable() {
     assert_eq!(payload.downcast_ref::<&str>(), Some(&"job panic"));
     assert_eq!(ctx.block_on(async { 7 }), 7);
 }
+
+/// `term()` ends every socket of the context. A thread blocked in a
+/// receive wakes with `Closed`.
+#[test]
+fn context_term_wakes_a_blocked_receive() {
+    let ctx = Context::new();
+    let pull = ctx.blocking_socket(SocketType::Pull, Options::default());
+    let push = ctx.blocking_socket(SocketType::Push, Options::default());
+    let endpoint = pull.bind(tcp_loopback(0)).unwrap();
+    push.connect(endpoint).unwrap();
+    push.send(Message::single("warmup")).unwrap();
+    assert_eq!(
+        pull.recv_timeout(Duration::from_secs(5)).unwrap(),
+        Message::single("warmup")
+    );
+
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let receiver = std::thread::spawn(move || {
+        let _ = done_tx.send(pull.recv());
+    });
+    // Let the receive park before the context goes away.
+    std::thread::sleep(Duration::from_millis(100));
+    ctx.term();
+
+    let result = done_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("the blocked receive survived term()");
+    assert!(matches!(result, Err(Error::Closed)), "{result:?}");
+    receiver.join().unwrap();
+}

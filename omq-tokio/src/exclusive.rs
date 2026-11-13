@@ -407,7 +407,12 @@ impl Socket {
             return;
         };
         self.reconnect_attempt = self.reconnect_attempt.saturating_add(1);
-        self.retry_at = Some(Instant::now() + delay);
+        // A delay past the clock range stands for "never": wait a year.
+        let now = Instant::now();
+        self.retry_at = Some(
+            now.checked_add(delay)
+                .unwrap_or_else(|| now + Duration::from_secs(365 * 24 * 60 * 60)),
+        );
         let _ = self.monitor.send(Event::ReconnectDelayed {
             retry_in: delay,
             attempt: self.reconnect_attempt,

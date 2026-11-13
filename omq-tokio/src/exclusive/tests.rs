@@ -528,6 +528,31 @@ async fn heartbeat_timeout_defaults_to_interval() {
     server.abort();
 }
 
+/// Durations past the clock range mean "never". They must not panic.
+#[tokio::test]
+async fn out_of_range_durations_do_not_panic() {
+    let (endpoint, server) = unresponsive_router().await;
+    let mut socket = Socket::connect(
+        SocketType::Dealer,
+        endpoint,
+        Options {
+            heartbeat_interval: Some(Duration::MAX),
+            reconnect: ReconnectPolicy::Fixed(Duration::MAX),
+            ..Options::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), socket.recv())
+            .await
+            .is_err()
+    );
+    // The lost connection schedules a retry with the out-of-range delay.
+    server.abort();
+    let _ = tokio::time::timeout(Duration::from_millis(200), socket.recv()).await;
+}
+
 #[tokio::test]
 async fn inbound_pong_clears_heartbeat_deadline() {
     let (endpoint, server) = router_replies_to_one_ping().await;

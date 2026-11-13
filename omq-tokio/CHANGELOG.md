@@ -57,6 +57,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `recv_many` and the other batch receives no longer allocate `max`
   message slots up front. A large `max` aborted on allocation, and
   `usize::MAX` panicked.
+- `exclusive::Socket` no longer panics on a `heartbeat_interval` or a
+  fixed reconnect delay beyond the clock range, such as `Duration::MAX`.
 
 ## [0.34.3] - 2026-11-04
 

@@ -68,6 +68,42 @@ fn thread_cpu_time() -> Duration {
     Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
 }
 
+/// A socket without endpoints is a socket without peers, as in libzmq.
+/// The context is not terminated, so `ETERM` would mislead callers.
+#[test]
+fn io_before_bind_or_connect_sees_a_socket_without_peers() {
+    let ctx = zmq_ctx_new();
+    let mut buf = [0u8; 8];
+
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    assert_eq!(
+        zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), ZMQ_DONTWAIT),
+        -1
+    );
+    assert_eq!(omq_zmq::zmq_errno(), libc::EAGAIN);
+    let mut msg = [0u8; 64];
+    assert_eq!(omq_zmq::zmq_msg_init(msg.as_mut_ptr().cast()), 0);
+    assert_eq!(
+        omq_zmq::zmq_msg_recv(msg.as_mut_ptr().cast(), pull, ZMQ_DONTWAIT),
+        -1
+    );
+    assert_eq!(omq_zmq::zmq_errno(), libc::EAGAIN);
+
+    // A bound-side PUSH without a peer mutes.
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    assert_eq!(zmq_send(push, b"x".as_ptr().cast(), 1, ZMQ_DONTWAIT), -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EAGAIN);
+
+    // PUB drops for lack of subscribers.
+    let publisher = zmq_socket(ctx, ZMQ_PUB);
+    assert_eq!(zmq_send(publisher, b"x".as_ptr().cast(), 1, 0), 1);
+
+    for socket in [pull, push, publisher] {
+        assert_eq!(zmq_close(socket), 0);
+    }
+    zmq_ctx_term(ctx);
+}
+
 #[test]
 fn send_recv_null_nonzero_buffer_returns_efault() {
     let ctx = zmq_ctx_new();

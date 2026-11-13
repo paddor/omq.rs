@@ -21,7 +21,7 @@ pub use endpoint::{
     zmq_bind, zmq_connect, zmq_connect_peer, zmq_disconnect, zmq_disconnect_peer, zmq_join,
     zmq_leave, zmq_unbind,
 };
-pub(crate) use materialize::{RecvConsumers, ensure_materialized};
+pub(crate) use materialize::{RecvConsumers, ensure_materialized, materialize_for_io};
 pub(crate) use state::{EndpointState, RecvState, SendState};
 
 pub use monitor::{

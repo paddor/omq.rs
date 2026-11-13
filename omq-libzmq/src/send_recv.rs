@@ -746,6 +746,7 @@ pub extern "C" fn zmq_send(
     if buf.is_null() && len > 0 {
         return fail(libc::EFAULT);
     }
+    c_try!(crate::socket::materialize_for_io(sock));
 
     let data = if buf.is_null() || len == 0 {
         &[]

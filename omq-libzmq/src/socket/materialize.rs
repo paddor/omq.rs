@@ -167,10 +167,23 @@ fn with_authenticator(
     }
 }
 
+/// Send and receive calls on a socket without endpoints. libzmq treats it
+/// as a socket without peers, so the backend socket is created for it.
+/// That fixes the options that bind and connect would fix. ZAP handler
+/// sockets have no backend socket.
+#[inline]
+pub(crate) fn materialize_for_io(sock: &Arc<OmqSocket>) -> Result<(), c_int> {
+    // Relaxed: only this socket's application thread materializes it.
+    if sock.endpoints.bound_or_connected.load(Ordering::Relaxed) || sock.is_zap_handler() {
+        return Ok(());
+    }
+    ensure_materialized(sock)
+}
+
 /// Materialize the omq-tokio socket on the io thread with current overlay
-/// options, then start the recv pump. Called once on first bind/connect
-/// so that options set between `zmq_socket` and first bind/connect take
-/// effect.
+/// options, then start the recv pump. Called on the first bind, connect,
+/// send or receive, so that options set after `zmq_socket` and before
+/// that call take effect.
 pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) -> Result<(), c_int> {
     if sock.is_zap_handler() {
         return Err(libc::EINVAL);

@@ -56,6 +56,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Socket notification descriptors, `ZMQ_FD` among them, are close-on-exec.
 - A `zmq_poll` timeout beyond the range of `poll()` no longer wraps to a
   short wait that spins until the deadline.
+- `zmq_send`, `zmq_recv`, `zmq_msg_send` and `zmq_msg_recv` on a socket
+  that has not bound or connected yet behave as on a socket without peers:
+  `EAGAIN` or a wait for round-robin and receive calls, a drop for PUB.
+  Before, they failed with `ETERM`, which callers read as a terminated
+  context. The first such call now fixes the options that bind and
+  connect fix.
 
 ## [0.9.2] - 2026-11-04
 

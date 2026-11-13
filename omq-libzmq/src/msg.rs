@@ -417,6 +417,7 @@ pub extern "C" fn zmq_msg_send(
 
     // SAFETY: C callers pass null or a pointer from this API.
     let sock_arc = c_try!(unsafe { crate::handle::socket(sock) });
+    c_try!(crate::socket::materialize_for_io(sock_arc));
 
     let group = msg_group_bytes(msg);
     let routing_id = zmq_msg_routing_id(msg);
@@ -518,6 +519,7 @@ pub extern "C" fn zmq_msg_recv(
     {
         return crate::error::fail(crate::error::ETERM);
     }
+    c_try!(crate::socket::materialize_for_io(sock));
 
     let received = if sock.socket_type == omq_tokio::SocketType::Server {
         crate::send_recv::pop_recv_server_message_with_properties(sock, flags)

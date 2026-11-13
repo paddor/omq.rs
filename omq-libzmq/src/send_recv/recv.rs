@@ -29,6 +29,7 @@ pub extern "C" fn zmq_recv(
     if buf.is_null() && buf_len > 0 {
         return fail(libc::EFAULT);
     }
+    c_try!(crate::socket::materialize_for_io(sock));
 
     zmq_recv_impl(sock, buf, buf_len, flags)
 }

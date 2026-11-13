@@ -62,6 +62,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Proxy::run` returns a protocol error when neither direction can
   forward and there is no control socket, such as PULL to PULL. Before,
   it panicked.
+- An `shm://` reference batch or multipart record no longer fails with
+  "SHM batch region was not registered" when it names an old region
+  together with new ones. The connection dropped and the batch was lost.
 
 ## [0.34.3] - 2026-11-04
 

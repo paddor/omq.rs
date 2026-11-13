@@ -81,6 +81,13 @@ impl Connection {
     }
 
     fn register_sources(&mut self, slot: &Slot, kind: u8) -> Result<bool> {
+        // The slot's region first. For a batch it holds the table that
+        // names the sources. A new region can push an older source out of
+        // the peer's registration window, and the peer keeps that source
+        // only if it can read the table by then.
+        if !self.registrations.register(&slot.mapping)? {
+            return Ok(false);
+        }
         if matches!(kind, REFERENCE_BATCH | MULTIPART) {
             let state = slot.state.lock().expect("SHM batch sources");
             if state.published_batch.is_none() {
@@ -92,7 +99,7 @@ impl Connection {
                 }
             }
         }
-        Ok(self.registrations.register(&slot.mapping)?)
+        Ok(true)
     }
 
     /// Lease `source`, a body inside `slot`'s mapping, to the peer.

@@ -1170,6 +1170,48 @@ fn reference_batches_preserve_unread_regions_across_registration_eviction() {
     assert!(sources.iter().all(|pool| pool.available() == 1));
 }
 
+/// A batch can name a region that its own new regions push out of the
+/// registration window. The peer must still find it.
+#[test]
+fn reference_batch_keeps_an_old_source_evicted_by_its_new_regions() {
+    // 64 regions fill the window. The first pool is its oldest entry, and
+    // no lease is pending.
+    let pools: Vec<_> = (0..64).map(|_| payload_pool([(128, 1)]).unwrap()).collect();
+    let (mut sender, mut receiver) = pair(128);
+    for (index, pool) in pools.iter().enumerate() {
+        let message = pool
+            .try_message(128, |bytes| bytes.fill(index as u8))
+            .unwrap()
+            .unwrap();
+        drop(delivered(&mut sender, &mut receiver, &message));
+    }
+    assert!(pools.iter().all(|pool| pool.available() == 1));
+
+    let fresh = payload_pool([(128, 1)]).unwrap();
+    let metadata = payload_pool([(BATCH_MAX_BYTES.next_power_of_two(), 1)]).unwrap();
+    let messages: Vec<_> = [(&pools[0], 200), (&fresh, 201)]
+        .into_iter()
+        .map(|(pool, fill)| {
+            Message::with_prefix(
+                b"group".as_slice().into(),
+                pool.try_message(128, |bytes| bytes.fill(fill))
+                    .unwrap()
+                    .unwrap(),
+            )
+        })
+        .collect();
+    let batch = prepare_reference_batch(&metadata, &messages.iter().collect::<Vec<_>>())
+        .unwrap()
+        .unwrap();
+    let wire = sender.encode_record(&batch, 2, 3).unwrap().unwrap();
+    transfer(&mut sender, &mut receiver);
+
+    let received = decode_all(&mut receiver, wire);
+    assert_eq!(received.len(), 2);
+    assert_eq!(received[0].part_slice(1).unwrap(), vec![200; 128]);
+    assert_eq!(received[1].part_slice(1).unwrap(), vec![201; 128]);
+}
+
 #[test]
 fn reference_batch_rejections_complete_the_shared_lease() {
     let sources = payload_pool([(1024, 2)]).unwrap();

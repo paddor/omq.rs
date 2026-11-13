@@ -106,12 +106,14 @@ impl NotifyFds {
         // Non-semaphore: a single read returns the accumulated count
         // and resets to 0. This allows O(1) drain instead of O(N).
         // SAFETY: eventfd returns a valid fd on success, -1 on failure.
-        let recv_fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK) };
+        // Close-on-exec keeps both out of child programs.
+        let recv_fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
         if recv_fd < 0 {
             return None;
         }
         // SAFETY: same as above.
-        let send_fd = unsafe { libc::eventfd(DEFAULT_HWM as u32, libc::EFD_NONBLOCK) };
+        let send_fd =
+            unsafe { libc::eventfd(DEFAULT_HWM as u32, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
         if send_fd < 0 {
             // SAFETY: recv_fd is a valid open fd from the successful eventfd call above.
             unsafe { libc::close(recv_fd) };
@@ -134,9 +136,12 @@ impl NotifyFds {
             return None;
         }
         // SAFETY: fds[0] and fds[1] are valid fds from the successful pipe() call.
+        // Close-on-exec keeps them out of child programs.
         unsafe {
             libc::fcntl(fds[0], libc::F_SETFL, libc::O_NONBLOCK);
             libc::fcntl(fds[1], libc::F_SETFL, libc::O_NONBLOCK);
+            libc::fcntl(fds[0], libc::F_SETFD, libc::FD_CLOEXEC);
+            libc::fcntl(fds[1], libc::F_SETFD, libc::FD_CLOEXEC);
         }
         let (recv_read, recv_write) = (fds[0], fds[1]);
         // SAFETY: same as above.
@@ -150,9 +155,12 @@ impl NotifyFds {
             return None;
         }
         // SAFETY: fds[0] and fds[1] are valid fds from the successful pipe() call.
+        // Close-on-exec keeps them out of child programs.
         unsafe {
             libc::fcntl(fds[0], libc::F_SETFL, libc::O_NONBLOCK);
             libc::fcntl(fds[1], libc::F_SETFL, libc::O_NONBLOCK);
+            libc::fcntl(fds[0], libc::F_SETFD, libc::FD_CLOEXEC);
+            libc::fcntl(fds[1], libc::F_SETFD, libc::FD_CLOEXEC);
         }
         Some(Self {
             recv_poll: recv_read,
@@ -364,7 +372,9 @@ impl PollWaiter {
         let poll_timeout = if timeout_ms < 0 {
             -1
         } else {
-            timeout_ms as std::os::raw::c_int
+            // A wait longer than `poll` can express ends early; the caller
+            // loops until its own deadline.
+            std::os::raw::c_int::try_from(timeout_ms).unwrap_or(std::os::raw::c_int::MAX)
         };
 
         // SAFETY: pfds is a valid pollfd array; poll blocks until events or timeout.

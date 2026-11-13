@@ -47,6 +47,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `zmq_poller_*` and `zmq_timers_*` return `EFAULT` for a handle of
   another type or a destroyed handle, as libzmq does. Before, they read
   the memory as a poller or timer set.
+- `zmq_msg_close` calls the free function of a `zmq_msg_init_data` message
+  with a null buffer, so its hint is released.
+- `zmq_z85_decode` returns `EINVAL` for text that is not UTF-8. Before, it
+  returned success without writing anything.
+- `ZMQ_SNDHWM` and `ZMQ_RCVHWM` read 1000 on a socket that never set
+  them, the value that applies. Before, they read 0.
+- Socket notification descriptors, `ZMQ_FD` among them, are close-on-exec.
+- A `zmq_poll` timeout beyond the range of `poll()` no longer wraps to a
+  short wait that spins until the deadline.
 
 ## [0.9.2] - 2026-11-04
 

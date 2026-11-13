@@ -13,7 +13,7 @@ use super::raw::OptOut;
 use crate::error::c_try;
 #[cfg(unix)]
 use crate::notify::NotifyHandle;
-use crate::socket::OmqSocket;
+use crate::socket::{DEFAULT_HWM, OmqSocket};
 use omq_tokio::SocketType;
 use omq_tokio::options::{OnMute, WorkloadProfile};
 use std::ffi::c_int;
@@ -85,12 +85,17 @@ fn get_queue_option(sock_arc: &Arc<OmqSocket>, option: c_int, out: OptOut) -> Re
                 .timeout_ms
                 .load(std::sync::atomic::Ordering::Relaxed) as i32,
         ),
+        // An unset HWM reads as the default that applies.
         ZMQ_SNDHWM => {
-            let v = overlay(sock_arc)?.send_hwm.map_or(0, |n| n as i32);
+            let v = overlay(sock_arc)?
+                .send_hwm
+                .map_or(DEFAULT_HWM as i32, |n| n as i32);
             out.i32(v)
         }
         ZMQ_RCVHWM => {
-            let v = overlay(sock_arc)?.recv_hwm.map_or(0, |n| n as i32);
+            let v = overlay(sock_arc)?
+                .recv_hwm
+                .map_or(DEFAULT_HWM as i32, |n| n as i32);
             out.i32(v)
         }
         ZMQ_LINGER => {

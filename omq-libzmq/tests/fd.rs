@@ -52,6 +52,21 @@ fn fd_readable(fd: i32, timeout_ms: i32) -> bool {
     ret > 0 && (pfd.revents & libc::POLLIN != 0)
 }
 
+/// The descriptor must not leak into programs the process executes.
+#[test]
+fn fd_is_close_on_exec() {
+    let ctx = zmq_ctx_new();
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+
+    let fd = get_fd(pull);
+    // SAFETY: `fd` is the socket's open descriptor.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    assert_ne!(flags & libc::FD_CLOEXEC, 0);
+
+    zmq_close(pull);
+    zmq_ctx_term(ctx);
+}
+
 #[test]
 fn fd_not_readable_when_empty() {
     let ctx = zmq_ctx_new();

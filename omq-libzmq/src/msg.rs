@@ -163,11 +163,12 @@ pub extern "C" fn zmq_msg_close(msg: *mut OmqMsgRepr) -> c_int {
             }
         }
         KIND_EXTERNAL => {
-            let ptr = r.ptr();
-            if let Some(ffn) = r.free_fn()
-                && !ptr.is_null()
-            {
-                unsafe { ffn(ptr.cast(), r.hint()) };
+            // Also for a null buffer, as libzmq does: the hint can own
+            // resources of its own.
+            if let Some(ffn) = r.free_fn() {
+                // SAFETY: the caller of zmq_msg_init_data promised that
+                // `ffn` accepts this buffer and hint.
+                unsafe { ffn(r.ptr().cast(), r.hint()) };
             }
         }
         KIND_BYTES | KIND_BYTES_METADATA => r.drop_boxed(),

@@ -89,7 +89,10 @@ pub extern "C" fn zmq_z85_decode(dest: *mut u8, string: *const libc::c_char) -> 
         return std::ptr::null_mut();
     }
     // SAFETY: string is non-null (checked above); caller guarantees valid C string.
-    let s = unsafe { std::ffi::CStr::from_ptr(string).to_str().unwrap_or("") };
+    let Ok(s) = unsafe { std::ffi::CStr::from_ptr(string) }.to_str() else {
+        crate::error::set_errno(libc::EINVAL);
+        return std::ptr::null_mut();
+    };
     if s.len() % 5 != 0 {
         crate::error::set_errno(libc::EINVAL);
         return std::ptr::null_mut();

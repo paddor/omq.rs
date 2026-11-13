@@ -127,6 +127,29 @@ fn getsockopt_i32_clears_larger_output_buffer() {
     zmq_ctx_term(ctx);
 }
 
+/// A fresh socket reports the HWM that applies, not zero.
+#[test]
+fn hwm_defaults_read_as_1000() {
+    let ctx = zmq_ctx_new();
+    let s = zmq_socket(ctx, ZMQ_PUSH);
+
+    assert_eq!(get_i32(s, ZMQ_SNDHWM), 1000);
+    assert_eq!(get_i32(s, ZMQ_RCVHWM), 1000);
+
+    zmq_close(s);
+    zmq_ctx_term(ctx);
+}
+
+#[test]
+fn z85_decode_rejects_text_that_is_not_utf8() {
+    let mut dest = [0xaa_u8; 4];
+    // Five bytes, so the length check passes.
+    let text = [0xff_u8, 0xfe, 0xfd, 0xfc, 0xfb, 0];
+    assert!(omq_zmq::zmq_z85_decode(dest.as_mut_ptr(), text.as_ptr().cast()).is_null());
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+    assert_eq!(dest, [0xaa; 4]);
+}
+
 #[test]
 fn hwm_roundtrip() {
     let ctx = zmq_ctx_new();

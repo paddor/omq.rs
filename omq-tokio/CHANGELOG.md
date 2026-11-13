@@ -130,6 +130,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A `dart://` connector ignores HELLO datagrams. Before, one HELLO from
   its target address replaced the connector's own handshake, and repeated
   ones kept it from connecting.
+- A `quic://` peer that stops our liveness stream is closed with
+  `CONTROL_ERROR`. Before, liveness ended without a word and the
+  connection lived on with no dead-peer detection.
 
 ## [0.34.3] - 2026-11-04
 

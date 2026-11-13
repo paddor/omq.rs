@@ -254,7 +254,11 @@ async fn serve(
             }
             ok = writer.write(), if writer.has_output() => {
                 if !ok {
-                    return None;
+                    // On a live connection the peer stopped this stream.
+                    // Without it there is no liveness; that ends the peer
+                    // like an ended liveness stream.
+                    let live = carrier.connection().close_reason().is_none();
+                    return live.then_some(code::CONTROL_ERROR);
                 }
                 if writer.out[0] == 1 && writer.written == writer.len {
                     unanswered_since.get_or_insert_with(Instant::now);

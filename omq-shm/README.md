@@ -85,6 +85,8 @@ are excluded. Message-count HWM and `max_message_size` are separate limits.
 
 Requires Linux 5.3+, same-UID peers, visible peer PIDs, and `OMQSHM08` on both
 peers. Receivers trust the sender and read payloads in place. Receivers cannot
-write payloads, but can retain slots until they release them or exit. `omq-shm`
+write payloads, but can retain slots until they release them or exit. All
+peers of a socket map the same regions, so a peer can read payloads sent to
+other peers, such as publications outside its subscriptions. `omq-shm`
 contains the Linux/unsafe boundary. Do not inherit live contexts or borrowed
 payloads across `fork`.

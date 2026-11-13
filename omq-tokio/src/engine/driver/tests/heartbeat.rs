@@ -289,3 +289,21 @@ fn a_probe_stuck_for_the_announced_ttl_times_out_a_silent_peer() {
         Err(Error::Timeout)
     ));
 }
+
+#[test]
+fn a_zero_heartbeat_interval_disables_heartbeats() {
+    use super::super::control::Heartbeat;
+    let (_peer, connection) = ready_connections(
+        ConnectionConfig::new(Role::Server, SocketType::Pull),
+        ConnectionConfig::new(Role::Client, SocketType::Push),
+    );
+    let mut heartbeat = Heartbeat::new(&PeerDriverConfig {
+        heartbeat_interval: Some(Duration::ZERO),
+        ..PeerDriverConfig::default()
+    });
+    heartbeat.activate(&connection);
+    assert!(
+        heartbeat.deadline.is_none(),
+        "a zero interval armed a timer that fires on every poll"
+    );
+}

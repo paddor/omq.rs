@@ -20,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A fan-out subscriber fed through its inbox, such as a `ws://`
   subscriber, keeps receiving after a burst fills that inbox. Before, one
   overflow under `OnMute::DropNewest` muted it until it reconnected.
+- A zero `heartbeat_interval` disables heartbeats, as in libzmq. Before,
+  it closed every connection right after the handshake or sent PINGs in
+  a busy loop.
 
 ## [0.34.3] - 2026-11-04
 

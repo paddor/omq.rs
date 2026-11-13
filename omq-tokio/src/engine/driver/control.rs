@@ -254,14 +254,18 @@ pub(super) struct Heartbeat {
 
 impl Heartbeat {
     pub(super) fn new(config: &PeerDriverConfig) -> Self {
+        // Zero means disabled, as in libzmq. A zero interval would fire on
+        // every poll and time out each probe at once.
+        let interval = config
+            .heartbeat_interval
+            .filter(|interval| !interval.is_zero());
         Self {
             probe: HeartbeatProbe::default(),
             last_input: Instant::now(),
             deadline: None,
             was_recv_blocked: false,
-            interval: config.heartbeat_interval,
-            timeout: heartbeat_timeout(config.heartbeat_interval, config.heartbeat_timeout)
-                .unwrap_or(Duration::MAX),
+            interval,
+            timeout: heartbeat_timeout(interval, config.heartbeat_timeout).unwrap_or(Duration::MAX),
             ttl_deciseconds: ttl_deciseconds(config.heartbeat_ttl),
             stuck_ticks: 0,
         }

@@ -458,9 +458,9 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
     }
 
     let call = SendCall::new(sock, ret_len, flags);
-    c_try!(ensure_libzmq_send_route(sock, call));
 
     if sock.socket_type == omq_tokio::SocketType::Stream {
+        c_try!(ensure_libzmq_send_route(sock, call));
         return send_stream_frame(sock, data, call);
     }
 
@@ -468,6 +468,13 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
     let accum = unsafe { sock.send.accum.get() };
     // SAFETY: libzmq sockets are accessed by at most one application thread.
     let retry = unsafe { sock.send.retry.get() };
+
+    // The route is checked where a message starts. A later frame joins the
+    // staged ones, and the final submit reports a missing peer: it keeps
+    // the staged frames and marks the message for a retry or a restart.
+    if accum.is_empty() {
+        c_try!(ensure_libzmq_send_route(sock, call));
+    }
 
     // If SNDMORE: buffer and return immediately.
     if call.more() {

@@ -37,6 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ZAP authentication works over `ipc://`. The handler gets an empty
   address frame for a peer without an IP address, as in libzmq. Before,
   no request was sent and every IPC peer was denied.
+- A multipart send whose final frame returns `EAGAIN` because the peer
+  left can be restarted from its first frame. Before, the frames staged
+  by the failed attempt stayed in front, and the peer got them twice.
 
 ## [0.9.2] - 2026-11-04
 

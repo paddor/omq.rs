@@ -723,3 +723,77 @@ fn message_group_is_not_staged_for_other_socket_types() {
     zmq_close(pull);
     zmq_ctx_term(ctx);
 }
+
+/// Send `frame` without blocking, retrying while the socket has no peer.
+fn send_when_ready(sock: *mut c_void, frame: &[u8], flags: i32) {
+    const ZMQ_DONTWAIT: i32 = 1;
+    for _ in 0..500 {
+        if zmq_send(
+            sock,
+            frame.as_ptr().cast(),
+            frame.len(),
+            flags | ZMQ_DONTWAIT,
+        ) >= 0
+        {
+            return;
+        }
+        assert_eq!(omq_zmq::zmq_errno(), libc::EAGAIN);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("the socket never became ready to send");
+}
+
+/// A final frame that would block leaves the staged frames for a retry of
+/// that frame. A caller that restarts the message instead must not get
+/// the staged frames in front of it.
+#[test]
+fn restarting_a_multipart_after_eagain_sends_it_once() {
+    const ZMQ_DONTWAIT: i32 = 1;
+    const ZMQ_LINGER: i32 = 17;
+    let ctx = zmq_ctx_new();
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    let addr = helpers::bind_random_tcp(push);
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    set_timeo(pull, ZMQ_LINGER, 0);
+    zmq_connect(pull, addr.as_ptr());
+
+    // The first frame is staged while the peer is there.
+    send_when_ready(push, b"first", ZMQ_SNDMORE);
+    // The peer goes away before the final frame.
+    zmq_close(pull);
+    let mut blocked = false;
+    for _ in 0..500 {
+        if zmq_send(push, b"last".as_ptr().cast(), 4, ZMQ_DONTWAIT) == -1 {
+            assert_eq!(omq_zmq::zmq_errno(), libc::EAGAIN);
+            blocked = true;
+            break;
+        }
+        // The peer was still there: stage the first frame again.
+        send_when_ready(push, b"first", ZMQ_SNDMORE);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(blocked, "the final frame never hit a missing peer");
+
+    // A new peer arrives and the caller restarts the whole message.
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    set_timeo(pull, ZMQ_RCVTIMEO, 5000);
+    zmq_connect(pull, addr.as_ptr());
+    send_when_ready(push, b"first", ZMQ_SNDMORE);
+    send_when_ready(push, b"last", 0);
+
+    let mut frames = Vec::new();
+    let mut buf = [0u8; 16];
+    loop {
+        let len = zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0);
+        assert!(len >= 0, "recv failed (errno={})", omq_zmq::zmq_errno());
+        frames.push(buf[..len as usize].to_vec());
+        if !rcvmore(pull) {
+            break;
+        }
+    }
+    assert_eq!(frames, [b"first".to_vec(), b"last".to_vec()]);
+
+    zmq_close(push);
+    zmq_close(pull);
+    zmq_ctx_term(ctx);
+}

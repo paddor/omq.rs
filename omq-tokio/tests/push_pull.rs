@@ -835,3 +835,22 @@ async fn push_resumes_once_an_inproc_connect_backlog_moves_into_the_ring() {
         }
     }
 }
+
+/// `max` bounds the batch. It is no allocation size.
+#[tokio::test]
+async fn recv_many_accepts_any_maximum() {
+    let endpoint = Endpoint::Inproc {
+        name: "recv-many-any-maximum".into(),
+    };
+    let pull = Socket::new(SocketType::Pull, Options::default());
+    pull.bind(endpoint.clone()).await.unwrap();
+    let push = Socket::new(SocketType::Push, Options::default());
+    push.connect(endpoint).await.unwrap();
+    push.send(Message::single("one")).await.unwrap();
+
+    let messages = tokio::time::timeout(Duration::from_secs(5), pull.recv_many(usize::MAX))
+        .await
+        .expect("recv_many timed out")
+        .unwrap();
+    assert_eq!(messages.len(), 1);
+}

@@ -54,6 +54,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - PEER sockets without a configured identity connect over `dart://`. The
   generated identity started with 0x00, which peers reject, so the
   handshake never completed.
+- `recv_many` and the other batch receives no longer allocate `max`
+  message slots up front. A large `max` aborted on allocation, and
+  `usize::MAX` panicked.
 
 ## [0.34.3] - 2026-11-04
 

@@ -23,6 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   added up to 10% and left about half of all delays without jitter.
 - `tcp://[::1]:*` parses. A bracketed IPv6 host rejected the wildcard port
   that other hosts accept.
+- `Options::validate` rejects a `handshake_timeout` that overflows the
+  clock, such as `Duration::MAX`. Before, TCP and IPC sockets accepted it
+  and then failed every dial attempt before any I/O, with no error.
 
 ## [0.38.1] - 2026-11-04
 

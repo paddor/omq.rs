@@ -49,6 +49,16 @@ impl Options {
         }
         self.validate_recv_rate_limits()?;
 
+        // Every dial computes `now + handshake_timeout`; one that overflows
+        // the clock would fail each attempt before any I/O.
+        if self
+            .handshake_timeout
+            .is_some_and(|timeout| std::time::Instant::now().checked_add(timeout).is_none())
+        {
+            return Err(crate::error::Error::Config(
+                "handshake_timeout exceeds the clock range".into(),
+            ));
+        }
         if self.handshake_timeout.is_none() && self.mechanism.has_frame_transform() {
             return Err(crate::error::Error::Config(
                 "encrypted mechanisms require handshake_timeout".into(),

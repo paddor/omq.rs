@@ -528,3 +528,18 @@ fn from_bytes_sets_identity() {
     assert_eq!(o.identity, &b"id"[..]);
     assert_eq!(o.send_hwm, 1000);
 }
+
+#[test]
+fn rejects_handshake_timeout_beyond_the_clock_range() {
+    let error = Options::default()
+        .handshake_timeout(Duration::MAX)
+        .validate()
+        .unwrap_err();
+    assert!(matches!(error, crate::error::Error::Config(_)), "{error}");
+    assert!(
+        Options::default()
+            .handshake_timeout(Duration::from_secs(3600))
+            .validate()
+            .is_ok()
+    );
+}

@@ -390,7 +390,8 @@ impl Proxy {
         match control.try_recv() {
             Ok(msg) => self.handle_control(msg, state).await.map(Some),
             Err(Error::WouldBlock) => Ok(None),
-            Err(Error::Closed) => Ok(Some(ControlAction::Terminate)),
+            // Includes `Closed`, which `run` reports as `ProxyExit::Closed`,
+            // the same as the control arm of `wait_ready`.
             Err(error) => Err(error),
         }
     }

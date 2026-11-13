@@ -100,6 +100,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Context::block_on` panics when called on the context's own primary IO
   thread, for example from inside another `block_on` future. Before, the
   whole context hung without a message.
+- `Proxy::run` returns `ProxyExit::Closed` for a closed control socket in
+  every case. Before, a PAIR control socket that closed between forwarding
+  turns gave `ProxyExit::Terminated`.
 
 ## [0.34.3] - 2026-11-04
 

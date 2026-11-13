@@ -109,6 +109,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Proxy::run` returns `ProxyExit::Closed` for a closed control socket in
   every case. Before, a PAIR control socket that closed between forwarding
   turns gave `ProxyExit::Terminated`.
+- STREAM sockets publish `Disconnected` monitor events for raw peers, and
+  `connections()` reports their peer info. Before, monitors saw raw peers
+  arrive and never leave.
 
 ## [0.34.3] - 2026-11-04
 

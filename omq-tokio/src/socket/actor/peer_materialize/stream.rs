@@ -40,15 +40,20 @@ impl SocketDriver {
             return;
         };
 
-        // Raw STREAM has no handshake, so the peer is ready at once.
+        // Raw STREAM has no handshake, so the peer is ready at once. It
+        // has no properties and no ZMTP version either. Its info lets
+        // monitors see it leave.
+        let origin = peer.into_origin(io_thread);
+        let info = origin.peer_info(peer_id, &std::sync::Arc::default(), (0, 0));
         let entry = PeerEntry {
             handshake: PeerHandshake {
                 ready: true,
                 identity: identity.clone(),
+                info: Some(info),
                 ..PeerHandshake::default()
             },
             task: Some(task),
-            ..PeerEntry::new(peer.into_origin(io_thread), handle.clone())
+            ..PeerEntry::new(origin, handle.clone())
         };
         self.peers.insert(peer_id, entry);
         self.link.shared.ready_peers.add();

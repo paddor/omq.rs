@@ -359,6 +359,33 @@ async fn stream_peer_disconnect() {
     );
 }
 
+/// Monitors see a raw peer go away, as they see it arrive.
+#[tokio::test]
+async fn stream_peer_disconnect_reaches_monitors() {
+    let stream = Socket::new(SocketType::Stream, Options::default());
+    let mut monitor = stream.monitor();
+    let ep = stream.bind(tcp_ep(0)).await.unwrap();
+    let raw = TcpStream::connect(resolved_addr(&ep)).await.unwrap();
+    // The connect notification: [identity, empty].
+    let connected = tokio::time::timeout(Duration::from_secs(2), stream.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(connected.len(), 2);
+
+    drop(raw);
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !matches!(
+            monitor.recv().await.unwrap(),
+            omq_tokio::MonitorEvent::Disconnected { .. }
+        ) {}
+    })
+    .await
+    .expect("no Disconnected event for a raw peer");
+    assert!(stream.connections().await.unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn stream_non_tcp_rejected() {
     let stream = Socket::new(SocketType::Stream, Options::default());

@@ -3,7 +3,6 @@
 
 use super::{
     MonitorEvent, PeerHandshake, PeerIdent, PeerInfo, SocketDriver, SocketType, generated_identity,
-    peer_ident_socket_addr,
 };
 use crate::routing::AddedPeer;
 #[cfg(any(feature = "ws", feature = "quic"))]
@@ -191,19 +190,11 @@ impl SocketDriver {
         peer_properties: &std::sync::Arc<omq_proto::proto::command::PeerProperties>,
     ) -> Option<PeerInfo> {
         let peer = self.peers.get(&peer_id)?;
-        Some(PeerInfo {
-            authentication: peer_properties.authentication.clone(),
-            diagnostics: omq_proto::PeerDiagnostics {
-                endpoint: peer.origin.endpoint.to_string(),
-                local_address: peer.origin.local_address.clone(),
-                remote_address: peer.origin.remote_address.clone(),
-            },
-            connection_id: peer_id,
-            peer_address: peer_ident_socket_addr(&peer.origin.ident),
-            peer_identity: peer_properties.identity.clone(),
-            peer_properties: peer_properties.clone(),
-            zmtp_version: Self::peer_protocol_version(&peer.origin.endpoint, peer_minor),
-        })
+        Some(peer.origin.peer_info(
+            peer_id,
+            peer_properties,
+            Self::peer_protocol_version(&peer.origin.endpoint, peer_minor),
+        ))
     }
 
     /// Flip the peer entry to ready. Returns what activation still needs.

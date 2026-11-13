@@ -93,7 +93,13 @@ impl Admission {
         if *held >= (self.limit / SOURCE_SHARE).max(1) {
             return None;
         }
-        let mut permit = self.try_acquire()?;
+        let Some(mut permit) = self.try_acquire() else {
+            // Only a permit's drop removes an entry: leave no empty one.
+            if *held == 0 {
+                sources.remove(&key);
+            }
+            return None;
+        };
         *held += 1;
         permit.source = Some(Box::new((key, self.sources.clone())));
         Some(permit)
@@ -277,6 +283,18 @@ mod tests {
         drop((second, third));
         assert_eq!(socket.used.load(Ordering::Relaxed), 0);
         assert_eq!(listener.used.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn refused_sources_leave_no_entry_behind() {
+        let admission = Admission::new(1);
+        let held = admission.try_acquire().unwrap();
+        for host in 1..=3 {
+            let source = std::net::IpAddr::from([192, 0, 2, host]);
+            assert!(admission.try_acquire_from(Some(source)).is_none());
+        }
+        assert!(admission.sources.lock().unwrap().is_empty());
+        drop(held);
     }
 
     #[tokio::test]

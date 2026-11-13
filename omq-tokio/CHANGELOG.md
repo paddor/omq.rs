@@ -46,6 +46,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - With `ReconnectPolicy::Disabled`, a lost peer ends its connect route.
   Before, DEALER, SUB, PUB and REQ ignored a new `connect()` to that
   endpoint as a duplicate.
+- Refusing a handshake at the socket's pending limit no longer leaves an
+  entry per refused source address behind.
 
 ## [0.34.3] - 2026-11-04
 

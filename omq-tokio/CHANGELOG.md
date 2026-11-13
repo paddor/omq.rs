@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transmit slot batch could end between a frame header and its payload,
   and a compression offload result could be written ahead of the tail of
   a half-sent codec frame. Both corrupted the stream for the peer.
+- With the `lz4` or `zstd` feature, an uncompressed PUB, XPUB or RADIO
+  message that starts with `LZ4D` or the Zstandard dictionary magic is
+  delivered. Before, the lane took it for a dictionary shipment: later
+  such messages were lost, and new subscribers got a stale one.
 
 ## [0.34.3] - 2026-11-04
 

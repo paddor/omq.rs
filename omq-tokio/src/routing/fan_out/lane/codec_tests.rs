@@ -445,3 +445,19 @@ async fn grouped_large_multipart_remains_atomic_with_all_mute_policies() {
         }
     }
 }
+
+/// A plain group has no encoder, so nothing it carries is a dictionary:
+/// user payloads that start with a codec's dictionary sentinel pass through.
+#[test]
+fn plain_group_passes_dictionary_sentinel_payloads_through() {
+    let mut group = CodecGroup::new(None).unwrap();
+    for payload in [&b"LZ4D-user-data"[..], &[0x37, 0xA4, 0x30, 0xEC, 1, 2][..]] {
+        for _ in 0..2 {
+            let wire = group
+                .encode(&Message::single(bytes::Bytes::copy_from_slice(payload)))
+                .unwrap();
+            assert_eq!(wire.len(), 1, "payload was taken as a dictionary");
+            assert_eq!(wire[0].part_bytes(0).unwrap().as_ref(), payload);
+        }
+    }
+}

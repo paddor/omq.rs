@@ -59,16 +59,19 @@ impl CodecGroup {
         {
             self.encode_count += 1;
         }
-        let mut wire = if let Some(encoder) = &mut self.encoder {
-            encoder.encode(msg)?
+        // Only an encoder emits dictionary shipments. A plain group's wire
+        // is the user message, which may start with any bytes.
+        let wire = if let Some(encoder) = &mut self.encoder {
+            let mut wire = encoder.encode(msg)?;
+            if let Some(dictionary) = MessageEncoder::take_leading_dict_shipment(&mut wire) {
+                // Retain the single immutable shipment for later subscribers.
+                debug_assert!(self.dictionary.is_none());
+                self.dictionary = Some(dictionary);
+            }
+            wire
         } else {
             smallvec::smallvec![msg.clone()]
         };
-        if let Some(dictionary) = MessageEncoder::take_leading_dict_shipment(&mut wire) {
-            // Retain the single immutable shipment for later subscribers.
-            debug_assert!(self.dictionary.is_none());
-            self.dictionary = Some(dictionary);
-        }
         self.sample(msg)?;
         Ok(wire)
     }

@@ -26,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - RADIO drops a message whose `udp://` datagram would exceed 65507 bytes.
   Before, under a `Context` egress limit such a datagram waited for a
   grant larger than the burst and blocked every sender on its IO thread.
+- Connecting to an abstract `ipc://@name` listener whose accept backlog is
+  full fails and retries with backoff. Before, the connect blocked the
+  runtime thread without limit and stalled every socket on it.
 
 ## [0.34.3] - 2026-11-04
 

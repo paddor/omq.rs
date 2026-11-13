@@ -20,7 +20,7 @@ pub(super) fn bottleneck(output: OutputWindow) -> Option<Bottleneck> {
     }
     // The input queue filled up, or more than 1/8 of the batches stopped at
     // their limit with input left. A shorter backlog only grows the batches.
-    if output.input_full > 0 || output.overflowed * 8 > output.batches {
+    if output.input_full > 0 || u64::from(output.overflowed) * 8 > u64::from(output.batches) {
         return (blocked * 64 < elapsed).then_some(Bottleneck::Cpu);
     }
     (output.backlogged == 0).then_some(Bottleneck::Input)
@@ -50,6 +50,16 @@ mod tests {
         assert_eq!(bottleneck(window(0, 64, 0, 1)), Some(Bottleneck::Cpu));
         assert_eq!(bottleneck(window(0, 64, 9, 0)), Some(Bottleneck::Cpu));
         assert_eq!(bottleneck(window(0, 0, 0, 0)), Some(Bottleneck::Input));
+    }
+
+    /// The 1/8 share is computed without overflowing the batch counter.
+    #[test]
+    fn a_huge_overflow_count_still_names_the_cpu() {
+        let busy = OutputWindow {
+            batches: u32::MAX,
+            ..window(0, 64, u32::MAX, 0)
+        };
+        assert_eq!(bottleneck(busy), Some(Bottleneck::Cpu));
     }
 
     #[test]

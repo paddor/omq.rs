@@ -41,6 +41,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Lz4Encoder::with_auto_train` does nothing after `with_send_dict`, as
   documented. It trained and shipped a second dictionary, which closes
   the connection on the peer.
+- The adaptive batching check no longer overflows its batch counter. A
+  debug build panicked and a release build wrapped after about 536
+  million limited batches in one window.
 
 ## [0.38.1] - 2026-11-04
 

@@ -569,7 +569,9 @@ impl EndpointWorker {
         {
             return;
         }
-        if ready.phase == Phase::Hello {
+        // Only a listener admits HELLO. A connector that did would let one
+        // datagram from its target address replace its own handshake.
+        if ready.phase == Phase::Hello && self.target.is_none() {
             self.admit_hello(source, ready, now, routes);
         }
 

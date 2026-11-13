@@ -127,6 +127,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `unbind()` accepts the endpoint as it was passed to `bind()`, such as
   `tcp://*:5555` or a host name, as libzmq does. Before, only the
   resolved endpoint that `bind()` returned matched.
+- A `dart://` connector ignores HELLO datagrams. Before, one HELLO from
+  its target address replaced the connector's own handshake, and repeated
+  ones kept it from connecting.
 
 ## [0.34.3] - 2026-11-04
 

@@ -178,6 +178,63 @@ async fn scatter_gather_preserves_exact_body_lengths_including_empty() {
     gather.close().await.unwrap();
 }
 
+/// The next READY of `phase` that `socket` receives, with its source.
+async fn next_ready(
+    socket: &tokio::net::UdpSocket,
+    phase: dart::Phase,
+) -> Option<(u64, u64, std::net::SocketAddr)> {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        let mut bytes = [0; dart::MAX_DATAGRAM];
+        loop {
+            let (len, source) = socket.recv_from(&mut bytes).await.unwrap();
+            if let Some(ready) = dart::decode_ready(&bytes[..len])
+                && ready.phase == phase
+            {
+                return (ready.session, ready.echo, source);
+            }
+        }
+    })
+    .await
+    .ok()
+}
+
+/// Only listeners admit HELLO. One that arrives from the target address
+/// must not replace the connector's own handshake.
+#[tokio::test]
+async fn connector_ignores_a_hello_and_completes_its_own_handshake() {
+    let raw = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let scatter = Socket::new(SocketType::Scatter, Options::default());
+    scatter
+        .connect(format!("dart://{}", raw.local_addr().unwrap()))
+        .await
+        .unwrap();
+    let (session, _, connector) = next_ready(&raw, dart::Phase::Hello).await.unwrap();
+
+    send_ready(&raw, connector, SocketType::Gather, None, true).await;
+    let mut output = [0; dart::MAX_DATAGRAM];
+    let length = dart::encode_ready(
+        Ready {
+            socket_type: SocketType::Gather,
+            identity: None,
+            reply_requested: false,
+            session: 5,
+            echo: session,
+            phase: dart::Phase::Welcome,
+        },
+        &mut output,
+    )
+    .unwrap();
+    raw.send_to(&output[..length], connector).await.unwrap();
+
+    let confirm = next_ready(&raw, dart::Phase::Confirm).await;
+    assert_eq!(
+        confirm.map(|(_, echo, _)| echo),
+        Some(5),
+        "the HELLO replaced the connector's handshake"
+    );
+    scatter.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn malformed_packed_body_cannot_partially_advance_receipt() {
     let gather = Socket::new(SocketType::Gather, Options::default());

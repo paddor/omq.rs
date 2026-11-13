@@ -45,6 +45,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   debug build panicked and a release build wrapped after about 536
   million limited batches in one window.
 
+### Security
+
+- `Authenticator::plain_credentials` compares user names and passwords in
+  constant time and checks every allowlist entry. Before, the time taken
+  depended on the matching prefix and on the entry that matched. The
+  `plain` feature now depends on `subtle`.
+
 ## [0.38.1] - 2026-11-04
 
 ### Added

@@ -29,6 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Connecting to an abstract `ipc://@name` listener whose accept backlog is
   full fails and retries with backoff. Before, the connect blocked the
   runtime thread without limit and stalled every socket on it.
+- A TCP option that the OS rejects no longer skips the options after it.
+  An invalid keepalive setting left `tcp_user_timeout` and the socket
+  buffer sizes unset.
+- A failed `TCP_NODELAY` on an accepted connection no longer makes the
+  listener back off for 50 ms.
 
 ## [0.34.3] - 2026-11-04
 

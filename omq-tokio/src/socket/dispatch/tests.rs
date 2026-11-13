@@ -282,3 +282,34 @@ async fn connect_preflight_accepts_named_lz4_ws_without_socket_connect() {
         .await
         .unwrap();
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_rejected_tcp_option_does_not_skip_the_later_ones() {
+    use omq_proto::options::KeepAlive;
+    use std::time::Duration;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let tcp = TcpStream::connect(listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    let default_size = socket2::SockRef::from(&tcp).recv_buffer_size().unwrap();
+    let any = AnyStream::Tcp(tcp);
+    let options = omq_proto::Options {
+        // Linux rejects a zero keepalive idle time.
+        tcp_keepalive: KeepAlive::Enabled {
+            idle: Duration::ZERO,
+            intvl: Duration::from_secs(1),
+            cnt: 1,
+        },
+        recv_buffer_size: Some(4096),
+        ..omq_proto::Options::default()
+    };
+
+    assert!(any.apply_tcp_options(&options).is_err());
+    let AnyStream::Tcp(tcp) = &any else {
+        unreachable!()
+    };
+    let size = socket2::SockRef::from(tcp).recv_buffer_size().unwrap();
+    assert!(size < default_size, "recv buffer stayed at {default_size}");
+}

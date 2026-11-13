@@ -157,10 +157,11 @@ impl AnyStream {
             #[cfg(test)]
             Self::Memory(_) => Ok(()),
             Self::Tcp(s) => {
-                options.tcp_keepalive.apply(s)?;
-                options.apply_tcp_user_timeout(s)?;
-                options.apply_socket_buffers(s)?;
-                Ok(())
+                // One rejected option must not skip the others.
+                let keepalive = options.tcp_keepalive.apply(s);
+                let user_timeout = options.apply_tcp_user_timeout(s);
+                let buffers = options.apply_socket_buffers(s);
+                keepalive.and(user_timeout).and(buffers)
             }
             #[cfg(unix)]
             Self::Ipc(s) => options.apply_socket_buffers(s),

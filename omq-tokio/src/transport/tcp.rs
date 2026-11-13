@@ -74,7 +74,9 @@ impl Listener for TcpListener {
 
     async fn accept(&mut self) -> Result<(Self::Stream, PeerIdent)> {
         let (stream, peer) = self.inner.accept().await?;
-        stream.set_nodelay(true)?;
+        // A peer that already reset can fail this. That is no accept
+        // error: the listener must not back off for it.
+        let _ = stream.set_nodelay(true);
         Ok((stream, PeerIdent::Socket(peer)))
     }
 }

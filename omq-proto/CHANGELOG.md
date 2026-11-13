@@ -37,6 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A DART session no longer stalls when a FIRST fragment is lost and later
   FIRSTs have used up the reserve-ahead budget. The retransmitted FIRST
   was refused forever, because only its own delivery frees that budget.
+- `Lz4Encoder::with_auto_train` does nothing after `with_send_dict`, as
+  documented. It trained and shipped a second dictionary, which closes
+  the connection on the peer.
 
 ## [0.38.1] - 2026-11-04
 

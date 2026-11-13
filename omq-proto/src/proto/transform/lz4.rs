@@ -164,8 +164,12 @@ impl Lz4Encoder {
     /// `compression_dict` is set.
     #[must_use]
     pub fn with_auto_train(mut self) -> Self {
-        self.trainer = Some(DictTrainer::new(self.send.dict_capacity));
-        self.train_msgs_left = 100;
+        // A connection takes one dictionary per direction. A trained one
+        // after a static one would be a second shipment.
+        if self.send.dict.is_none() {
+            self.trainer = Some(DictTrainer::new(self.send.dict_capacity));
+            self.train_msgs_left = 100;
+        }
         self
     }
 

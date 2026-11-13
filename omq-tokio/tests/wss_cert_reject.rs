@@ -110,3 +110,39 @@ async fn wss_hostname_override_uses_explicit_trust_without_disabling_verificatio
     client.close().await.unwrap();
     server.close().await.unwrap();
 }
+
+/// A TLS failure on connect is retried, and the monitor shows why.
+#[tokio::test]
+async fn wss_connect_reports_a_rejected_certificate_to_the_monitor() {
+    let (cert_pem, key_pem) = self_signed_tls();
+    let pull = Socket::new(
+        SocketType::Pull,
+        Options {
+            wss_tls: WssTls {
+                server_cert_pem: Some(cert_pem),
+                server_key_pem: Some(key_pem),
+                ..WssTls::default()
+            },
+            ..Options::default()
+        },
+    );
+    let port = get_port(&pull.bind(wss_endpoint(0)).await.unwrap());
+
+    // The client does not trust the server's self-signed certificate.
+    let push = Socket::new(SocketType::Push, Options::default());
+    let mut monitor = push.monitor();
+    push.connect(wss_endpoint(port)).await.unwrap();
+
+    let reason = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let omq_tokio::MonitorEvent::HandshakeFailed { reason, .. } =
+                monitor.recv().await.unwrap()
+            {
+                break reason;
+            }
+        }
+    })
+    .await
+    .expect("the TLS failure never reached the monitor");
+    assert!(reason.starts_with("TLS"), "{reason}");
+}

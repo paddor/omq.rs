@@ -83,6 +83,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   addresses tries the next address after 250 ms without an answer.
   Before, a first address that dropped SYNs used up every attempt's
   deadline, and the socket never reached a working later address.
+- A `wss://` connect that fails in TLS, for an untrusted certificate, a
+  name mismatch or unusable trust settings, publishes
+  `MonitorEvent::HandshakeFailed` with the reason. Before, the monitor
+  showed only `ConnectDelayed`.
 
 ## [0.34.3] - 2026-11-04
 

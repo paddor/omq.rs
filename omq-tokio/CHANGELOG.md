@@ -87,6 +87,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   name mismatch or unusable trust settings, publishes
   `MonitorEvent::HandshakeFailed` with the reason. Before, the monitor
   showed only `ConnectDelayed`.
+- A fan-out subscriber is no longer muted for good when its connection
+  drains while the publisher is muting it for a full queue. This needed a
+  publisher and a connection on different threads, as with
+  `Context::current()` on a multi-thread runtime.
 
 ## [0.34.3] - 2026-11-04
 

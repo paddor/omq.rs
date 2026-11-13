@@ -37,6 +37,43 @@ fn transmit_slot_caps_queued_messages_independent_of_bytes() {
     assert_eq!(slot.try_encode(&msg), TryFrameResult::Ok);
 }
 
+/// Fill the slot until it refuses a message.
+fn fill(slot: &PeerTransmitSlot) {
+    let msg = Message::from("x");
+    while slot.try_encode(&msg) == TryFrameResult::Ok {}
+}
+
+fn drain_all(slot: &PeerTransmitSlot) {
+    let mut chunks = Vec::new();
+    while !slot.is_empty() {
+        slot.drain(&mut chunks, 1024);
+    }
+}
+
+#[test]
+fn fanout_deactivation_after_its_drain_keeps_the_peer_active() {
+    let slot = test_slot();
+    fill(&slot);
+    // The driver drains between the refused push and the deactivation. It
+    // finds the peer active, so it reactivates nothing.
+    drain_all(&slot);
+    slot.deactivate_fanout();
+    assert!(
+        slot.fanout_active(),
+        "an idle queue never drains again, so the peer stays muted"
+    );
+}
+
+#[test]
+fn fanout_deactivation_holds_until_the_queue_drains() {
+    let slot = test_slot();
+    fill(&slot);
+    assert!(slot.deactivate_fanout());
+    assert!(!slot.fanout_active());
+    drain_all(&slot);
+    assert!(slot.fanout_active());
+}
+
 /// Push messages `start..` one at a time until the slot refuses one.
 /// Returns the index of the first message not admitted.
 fn admit_singles(slot: &PeerTransmitSlot, data: &[u8], ends: &[usize], start: usize) -> usize {

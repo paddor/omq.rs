@@ -232,6 +232,29 @@ mod tests {
         }
     }
 
+    /// A drain can run between a refused push and the deactivation. It
+    /// reactivates nothing then, so the deactivation must not stick.
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn deactivating_a_drained_fallback_peer_keeps_it_targetable() {
+        use omq_proto::proto::connection::WsRole;
+        let mut sender = sender();
+        let (slot, handle, _data) = peer(7, WireFraming::Zws(WsRole::Server), None);
+        register_subscribed(&mut sender, 7, &handle).await;
+        let target = {
+            let inner = sender.shared.inner.lock().unwrap();
+            inner.peers[&7].target.clone()
+        };
+        assert!(slot.is_empty());
+
+        sender.shared.deactivate_target(&target);
+
+        assert!(slot.fanout_active());
+        assert!(sender.shared.inner.lock().unwrap().peers[&7].fanout_active);
+        sender.connection_removed(7);
+        sender.shutdown();
+    }
+
     /// Add peer `id` and subscribe it to everything, waiting for its lane.
     #[cfg(feature = "ws")]
     async fn register_subscribed(sender: &mut FanOutSend, id: u64, handle: &ActorPeerDriverHandle) {

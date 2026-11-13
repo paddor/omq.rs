@@ -34,6 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   FreeBSD, as libzmq does. Before, only `zmq_errno()` reported the
   error, so C code testing `errno == EAGAIN` or `errno == ETERM` saw a
   stale value.
+- ZAP authentication works over `ipc://`. The handler gets an empty
+  address frame for a peer without an IP address, as in libzmq. Before,
+  no request was sent and every IPC peer was denied.
 
 ## [0.9.2] - 2026-11-04
 

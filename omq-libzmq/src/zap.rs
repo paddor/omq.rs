@@ -405,9 +405,12 @@ fn build_request(
     peer: &omq_tokio::MechanismPeerInfo,
 ) -> Result<Vec<Bytes>, ()> {
     validate_ascii_string(domain.as_bytes(), false)?;
-    let address: IpAddr = address.parse().map_err(|_| ())?;
-    let address = address.to_string();
-    validate_ascii_string(address.as_bytes(), false)?;
+    // The address frame carries an IP address. A peer without one, such as
+    // an IPC peer, gets an empty frame, as in libzmq.
+    let address = address
+        .parse::<IpAddr>()
+        .map(|address| address.to_string())
+        .unwrap_or_default();
     if identity.len() > 255 {
         return Err(());
     }
@@ -677,7 +680,10 @@ mod tests {
         let non_ascii_domain =
             String::from_utf8(vec![b'g', b'l', 0xc3, 0xb6, b'b', b'a', b'l']).expect("valid UTF-8");
         assert!(build_request(&non_ascii_domain, "127.0.0.1", b"", &null).is_err());
-        assert!(build_request("global", "localhost", b"", &null).is_err());
+        // A peer without an IP address, such as an IPC peer, has an empty
+        // address frame.
+        let ipc = build_request("global", "/tmp/omq.sock", b"", &null).expect("IPC request");
+        assert!(ipc[3].is_empty());
         assert!(build_request("global", "127.0.0.1", &[0; 256], &null).is_err());
 
         let mut plain = peer(omq_tokio::proto::MechanismName::PLAIN);

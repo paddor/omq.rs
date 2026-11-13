@@ -496,6 +496,48 @@ fn curve_req_rep_round_trip(configure_server: impl FnOnce(*mut c_void, &[u8])) {
     zmq_ctx_term(ctx);
 }
 
+/// An IPC peer has no IP address. ZAP carries an empty address frame for
+/// it, as in libzmq, and the handler decides.
+#[cfg(unix)]
+#[test]
+fn plain_zap_authenticates_over_ipc() {
+    let path = format!("/tmp/omq-zap-ipc-{}.sock", std::process::id());
+    let endpoint = std::ffi::CString::new(format!("ipc://{path}")).unwrap();
+    let ctx = zmq_ctx_new();
+    let zap = start_plain_zap_handler(ctx);
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    set_i32(pull, ZMQ_PLAIN_SERVER, 1);
+    set_bytes(pull, ZMQ_ZAP_DOMAIN, b"global");
+    assert_eq!(omq_zmq::zmq_bind(pull, endpoint.as_ptr()), 0);
+    set_timeo(pull, 5000);
+
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    set_bytes(push, ZMQ_PLAIN_USERNAME, b"user");
+    set_bytes(push, ZMQ_PLAIN_PASSWORD, b"pass");
+    zmq_connect(push, endpoint.as_ptr());
+    set_timeo(push, 5000);
+
+    assert_eq!(zmq_send(push, b"hello".as_ptr().cast(), 5, 0), 5);
+    let mut buf = [0u8; 64];
+    let rc = zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0);
+    assert_eq!(
+        rc,
+        5,
+        "PLAIN over ipc failed (errno={})",
+        omq_zmq::zmq_errno()
+    );
+
+    let request = zap.join().unwrap();
+    assert_eq!(request[2], b"global");
+    assert_eq!(request[3], [] as [u8; 0]);
+    assert_eq!(request[5], b"PLAIN");
+
+    zmq_close(push);
+    zmq_close(pull);
+    zmq_ctx_term(ctx);
+    let _ = std::fs::remove_file(path);
+}
+
 #[test]
 fn plain_push_pull_tcp() {
     let ctx = zmq_ctx_new();

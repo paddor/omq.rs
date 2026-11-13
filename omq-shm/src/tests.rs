@@ -1206,10 +1206,10 @@ fn reference_batch_keeps_an_old_source_evicted_by_its_new_regions() {
     let wire = sender.encode_record(&batch, 2, 3).unwrap().unwrap();
     transfer(&mut sender, &mut receiver);
 
-    let received = decode_all(&mut receiver, wire);
-    assert_eq!(received.len(), 2);
-    assert_eq!(received[0].part_slice(1).unwrap(), vec![200; 128]);
-    assert_eq!(received[1].part_slice(1).unwrap(), vec![201; 128]);
+    let decoded = decode_all(&mut receiver, wire);
+    assert_eq!(decoded.len(), 2);
+    assert_eq!(decoded[0].part_slice(1).unwrap(), vec![200; 128]);
+    assert_eq!(decoded[1].part_slice(1).unwrap(), vec![201; 128]);
 }
 
 #[test]

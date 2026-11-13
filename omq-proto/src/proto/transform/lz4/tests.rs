@@ -760,7 +760,7 @@ fn lz4b_rejects_a_tiny_frame_declaring_a_huge_body() {
 /// is that one, so auto-training must not ship a second.
 #[test]
 fn auto_train_does_not_replace_a_static_dictionary() {
-    let dict = Bytes::from(compressible_payload(1024));
+    let dict = compressible_payload(1024);
     let mut enc = Lz4Encoder::with_send_dict(dict).unwrap().with_auto_train();
     let mut shipments = 0;
     for i in 0..300u32 {

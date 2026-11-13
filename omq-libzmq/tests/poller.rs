@@ -108,6 +108,28 @@ fn blank_events<const N: usize>() -> [PollerEvent; N] {
     }; N]
 }
 
+/// A handle of another type is refused, not read as a poller.
+#[test]
+fn poller_calls_refuse_a_socket_handle() {
+    let ctx = zmq_ctx_new();
+    let socket = zmq_socket(ctx, ZMQ_PULL);
+
+    assert_eq!(zmq_poller_size(socket), -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EFAULT);
+    assert_eq!(
+        zmq_poller_add(socket, socket, std::ptr::null_mut(), ZMQ_POLLIN),
+        -1
+    );
+    assert_eq!(omq_zmq::zmq_errno(), libc::EFAULT);
+    let mut handle = socket;
+    assert_eq!(zmq_poller_destroy(&mut handle), -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EFAULT);
+    assert_eq!(handle, socket, "a refused destroy leaves the pointer alone");
+
+    assert_eq!(zmq_close(socket), 0);
+    zmq_ctx_term(ctx);
+}
+
 #[test]
 fn poller_wait_all_reports_socket_user_data() {
     let (ctx, push1, pull1) = push_pull_pair("wait-all-1");

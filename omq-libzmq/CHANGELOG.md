@@ -44,6 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   zero timeout, and in the same call that reports a ready socket. Before,
   a descriptor was only checked once no socket was ready, so an always
   writable socket hid it for good. Unix only.
+- `zmq_poller_*` and `zmq_timers_*` return `EFAULT` for a handle of
+  another type or a destroyed handle, as libzmq does. Before, they read
+  the memory as a poller or timer set.
 
 ## [0.9.2] - 2026-11-04
 

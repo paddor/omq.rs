@@ -12,7 +12,7 @@ use crate::socket::OmqSocket;
 // libzmq's ctx_t and socket_base_t tags.
 const CONTEXT_TAG: u32 = 0xabad_cafe;
 const SOCKET_TAG: u32 = 0xbadd_ecaf;
-const DEAD_TAG: u32 = 0xdead_beef;
+pub(crate) const DEAD_TAG: u32 = 0xdead_beef;
 
 #[repr(C)]
 struct Handle<T> {

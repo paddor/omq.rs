@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Codec output such as a PING no longer lands inside another frame. A
+  transmit slot batch could end between a frame header and its payload,
+  and a compression offload result could be written ahead of the tail of
+  a half-sent codec frame. Both corrupted the stream for the peer.
+
 ## [0.34.3] - 2026-11-04
 
 ### Changed

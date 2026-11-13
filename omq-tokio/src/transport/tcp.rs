@@ -7,7 +7,10 @@
 
 use std::io;
 use std::net::SocketAddr;
+use std::time::Duration;
 
+use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use tokio::net::{TcpListener as TokioTcpListener, TcpStream};
 
 use omq_proto::endpoint::{Endpoint, Host};
@@ -100,13 +103,37 @@ pub(crate) fn reuse_addr_bind(addr: SocketAddr) -> Result<TokioTcpListener> {
     ))?)
 }
 
+/// How long one address may stay unanswered before the next one is dialed
+/// alongside it (RFC 8305, Connection Attempt Delay).
+const NEXT_ADDRESS_DELAY: Duration = Duration::from_millis(250);
+
 /// Dial `addrs` in order and return the first stream that connects.
+///
+/// A failed address moves on to the next at once. An address that does not
+/// answer keeps its attempt, and the next one starts after
+/// [`NEXT_ADDRESS_DELAY`]: a host that drops SYNs would otherwise use up
+/// the caller's whole deadline, on this attempt and on every retry.
 pub(crate) async fn connect_any(addrs: Vec<SocketAddr>) -> Result<TcpStream> {
+    let mut remaining = addrs.into_iter();
+    let mut attempts = FuturesUnordered::new();
     let mut last_err = None;
-    for addr in addrs {
-        match TcpStream::connect(addr).await {
-            Ok(stream) => return Ok(stream),
-            Err(e) => last_err = Some(e),
+    loop {
+        if attempts.is_empty() {
+            let Some(addr) = remaining.next() else {
+                break;
+            };
+            attempts.push(TcpStream::connect(addr));
+        }
+        tokio::select! {
+            Some(result) = attempts.next() => match result {
+                Ok(stream) => return Ok(stream),
+                Err(e) => last_err = Some(e),
+            },
+            () = tokio::time::sleep(NEXT_ADDRESS_DELAY), if remaining.len() != 0 => {
+                if let Some(addr) = remaining.next() {
+                    attempts.push(TcpStream::connect(addr));
+                }
+            }
         }
     }
     Err(Error::Io(last_err.unwrap_or_else(|| {
@@ -183,6 +210,46 @@ mod tests {
         let (_accepted, _) = listener.accept().await.unwrap();
         let stream = connect.await.unwrap().unwrap();
 
+        assert_eq!(stream.peer_addr().unwrap(), good_addr);
+    }
+
+    /// A listener whose accept queue is full drops further SYNs, so a
+    /// connect to it neither succeeds nor fails. Returns the listener, the
+    /// streams that fill its queue, and its address.
+    #[cfg(target_os = "linux")]
+    async fn unanswering_address() -> (socket2::Socket, Vec<TcpStream>, SocketAddr) {
+        let listener =
+            socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+        listener
+            .bind(&SocketAddr::from((Ipv4Addr::LOCALHOST, 0)).into())
+            .unwrap();
+        listener.listen(0).unwrap();
+        let addr = listener.local_addr().unwrap().as_socket().unwrap();
+        let mut queued = Vec::new();
+        for _ in 0..8 {
+            let attempt = TcpStream::connect(addr);
+            match tokio::time::timeout(Duration::from_millis(200), attempt).await {
+                Ok(stream) => queued.push(stream.unwrap()),
+                Err(_) => return (listener, queued, addr),
+            }
+        }
+        panic!("the listener kept accepting connections");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn connect_does_not_wait_out_an_unanswering_address() {
+        let (_silent, _queued, silent_addr) = unanswering_address().await;
+        let listener = TokioTcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let good_addr = listener.local_addr().unwrap();
+
+        let connect = connect_any(vec![silent_addr, good_addr]);
+        let stream = tokio::time::timeout(Duration::from_secs(3), connect)
+            .await
+            .expect("the first address used up the whole attempt")
+            .unwrap();
         assert_eq!(stream.peer_addr().unwrap(), good_addr);
     }
 }

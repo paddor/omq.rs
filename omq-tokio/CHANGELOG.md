@@ -79,6 +79,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   send order even when they overflow its command ring. A driver that was
   preempted right after it saw the ring empty could take an overflowed
   command ahead of older ones in the ring.
+- A `tcp://`, `ws://` or `wss://` connect to a name with several
+  addresses tries the next address after 250 ms without an answer.
+  Before, a first address that dropped SYNs used up every attempt's
+  deadline, and the socket never reached a working later address.
 
 ## [0.34.3] - 2026-11-04
 

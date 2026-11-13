@@ -406,6 +406,42 @@ fn curve_server_stays_a_server_when_its_public_key_is_set() {
     });
 }
 
+/// Security options are consumed when the socket starts. A later change
+/// fails instead of leaving the socket on its old mechanism.
+#[test]
+fn security_options_after_subscribe_fail_with_ebusy() {
+    const ZMQ_SUB: i32 = 2;
+    const ZMQ_SUBSCRIBE: i32 = 6;
+    let mut public = [0u8; 41];
+    let mut secret = [0u8; 41];
+    zmq_curve_keypair(public.as_mut_ptr().cast(), secret.as_mut_ptr().cast());
+
+    let ctx = zmq_ctx_new();
+    let sub = zmq_socket(ctx, ZMQ_SUB);
+    assert_eq!(
+        zmq_setsockopt(sub, ZMQ_SUBSCRIBE, c"".as_ptr().cast(), 0),
+        0
+    );
+    let one = 1i32;
+    for (option, value, len) in [
+        (ZMQ_CURVE_SERVER, (&raw const one).cast::<c_void>(), 4),
+        (ZMQ_PLAIN_SERVER, (&raw const one).cast(), 4),
+        (ZMQ_CURVE_SECRETKEY, secret.as_ptr().cast(), 40),
+        (ZMQ_CURVE_SERVERKEY, public.as_ptr().cast(), 40),
+        (ZMQ_PLAIN_USERNAME, c"user".as_ptr().cast(), 4),
+        (ZMQ_ZAP_DOMAIN, c"domain".as_ptr().cast(), 6),
+    ] {
+        assert_eq!(
+            zmq_setsockopt(sub, option, value, len),
+            -1,
+            "option {option}"
+        );
+        assert_eq!(omq_zmq::zmq_errno(), libc::EBUSY, "option {option}");
+    }
+    zmq_close(sub);
+    zmq_ctx_term(ctx);
+}
+
 fn curve_req_rep_round_trip(configure_server: impl FnOnce(*mut c_void, &[u8])) {
     let mut srv_pub = [0u8; 41];
     let mut srv_sec = [0u8; 41];

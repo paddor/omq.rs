@@ -12,6 +12,18 @@ use crate::socket::OmqSocket;
 use std::ffi::c_int;
 use std::sync::Arc;
 
+/// The overlay, for a security option. The socket consumes these when it
+/// starts (first bind, connect, subscribe, join, or monitor). A later
+/// change fails with `EBUSY` instead of silently not applying.
+fn security_overlay(
+    sock: &OmqSocket,
+) -> Result<std::sync::MutexGuard<'_, super::SocketOverlay>, c_int> {
+    if sock.inner.get().is_some() {
+        return Err(libc::EBUSY);
+    }
+    overlay(sock)
+}
+
 /// The CURVE secret key already set, whatever the role. Zero when unset.
 fn curve_secret_key(mechanism: &MechanismOverlay) -> [u8; 32] {
     match mechanism {
@@ -30,7 +42,7 @@ pub(super) fn set_plain_server_option(
     match option {
         ZMQ_PLAIN_SERVER => {
             let v = optval.i32()?;
-            let mut ov = overlay(sock_arc)?;
+            let mut ov = security_overlay(sock_arc)?;
             if v != 0 {
                 ov.mechanism = MechanismOverlay::PlainServer;
             } else if matches!(
@@ -45,11 +57,11 @@ pub(super) fn set_plain_server_option(
             if domain.len() > 255 || !domain.is_ascii() {
                 return Err(libc::EINVAL);
             }
-            overlay(sock_arc)?.zap.domain = domain;
+            security_overlay(sock_arc)?.zap.domain = domain;
         }
         ZMQ_ZAP_ENFORCE_DOMAIN => {
             let value = optval.i32()?;
-            overlay(sock_arc)?.zap.enforce = value != 0;
+            security_overlay(sock_arc)?.zap.enforce = value != 0;
         }
         _ => return Ok(false),
     }
@@ -69,7 +81,7 @@ pub(super) fn set_plain_client_option(
             if s.len() > 255 || !s.bytes().all(|byte| byte.is_ascii_graphic()) {
                 return Err(libc::EINVAL);
             }
-            let mut ov = overlay(sock_arc)?;
+            let mut ov = security_overlay(sock_arc)?;
             match &mut ov.mechanism {
                 MechanismOverlay::PlainClient { username, .. } => *username = s,
                 _ => {
@@ -85,7 +97,7 @@ pub(super) fn set_plain_client_option(
             if s.len() > 255 || !s.bytes().all(|byte| byte.is_ascii_graphic()) {
                 return Err(libc::EINVAL);
             }
-            let mut ov = overlay(sock_arc)?;
+            let mut ov = security_overlay(sock_arc)?;
             match &mut ov.mechanism {
                 MechanismOverlay::PlainClient { password, .. } => *password = s,
                 _ => {
@@ -111,7 +123,7 @@ pub(super) fn set_curve_option(
     match option {
         ZMQ_CURVE_SERVER => {
             let v = optval.i32()?;
-            let mut ov = overlay(sock_arc)?;
+            let mut ov = security_overlay(sock_arc)?;
             if v != 0 {
                 // Keep a secret key set before the role.
                 let secret_key = curve_secret_key(&ov.mechanism);
@@ -122,7 +134,7 @@ pub(super) fn set_curve_option(
         }
         ZMQ_CURVE_SECRETKEY => {
             let key = optval.key()?;
-            let mut ov = overlay(sock_arc)?;
+            let mut ov = security_overlay(sock_arc)?;
             match &mut ov.mechanism {
                 MechanismOverlay::CurveServer { secret_key, .. }
                 | MechanismOverlay::CurveClient { secret_key, .. } => *secret_key = key,
@@ -150,7 +162,7 @@ pub(super) fn set_curve_client_option(
     match option {
         ZMQ_CURVE_PUBLICKEY => {
             let key = optval.key()?;
-            let mut ov = overlay(sock_arc)?;
+            let mut ov = security_overlay(sock_arc)?;
             match &mut ov.mechanism {
                 MechanismOverlay::CurveClient { public_key, .. } => *public_key = key,
                 // A server derives its public key and keeps its role.
@@ -166,7 +178,7 @@ pub(super) fn set_curve_client_option(
         }
         ZMQ_CURVE_SERVERKEY => {
             let key = optval.key()?;
-            let mut ov = overlay(sock_arc)?;
+            let mut ov = security_overlay(sock_arc)?;
             match &mut ov.mechanism {
                 MechanismOverlay::CurveClient { server_key, .. } => *server_key = key,
                 // A server key makes the socket a client, as in libzmq.
@@ -227,23 +239,23 @@ pub(super) fn set_wss_option(
     match option {
         ZMQ_WSS_KEY_PEM => {
             let v = optval.bytes()?;
-            overlay(sock_arc)?.wss.key_pem = none_if_empty(v).map(SecretBytes);
+            security_overlay(sock_arc)?.wss.key_pem = none_if_empty(v).map(SecretBytes);
         }
         ZMQ_WSS_CERT_PEM => {
             let v = optval.bytes()?;
-            overlay(sock_arc)?.wss.cert_pem = none_if_empty(v);
+            security_overlay(sock_arc)?.wss.cert_pem = none_if_empty(v);
         }
         ZMQ_WSS_TRUST_PEM => {
             let v = optval.bytes()?;
-            overlay(sock_arc)?.wss.trust_pem = none_if_empty(v);
+            security_overlay(sock_arc)?.wss.trust_pem = none_if_empty(v);
         }
         ZMQ_WSS_HOSTNAME => {
             let v = optval.string()?;
-            overlay(sock_arc)?.wss.hostname = if v.is_empty() { None } else { Some(v) };
+            security_overlay(sock_arc)?.wss.hostname = if v.is_empty() { None } else { Some(v) };
         }
         ZMQ_WSS_TRUST_SYSTEM => {
             let v = optval.i32()?;
-            overlay(sock_arc)?.wss.trust_system = v != 0;
+            security_overlay(sock_arc)?.wss.trust_system = v != 0;
         }
         _ => return Ok(false),
     }

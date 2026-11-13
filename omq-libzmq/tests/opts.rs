@@ -656,23 +656,16 @@ fn updated_compression_after_materialization_is_validated_before_dns() {
 }
 
 #[test]
-fn changed_curve_overlay_cannot_enable_compression_on_a_materialized_socket() {
+fn curve_overlay_cannot_change_on_a_materialized_socket() {
     let ctx = zmq_ctx_new();
     let socket = zmq_socket(ctx, ZMQ_PUSH);
     assert_eq!(
         zmq_bind(socket, c"inproc://codec-snapshot-curve".as_ptr()),
         0
     );
-    assert_eq!(set_i32(socket, ZMQ_CURVE_SERVER, 1), 0);
-    for endpoint in [
-        c"lz4+tcp://codec-snapshot.invalid:1",
-        c"zstd+tcp://codec-snapshot.invalid:2",
-    ] {
-        assert_eq!(zmq_connect(socket, endpoint.as_ptr()), -1);
-        assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
-        assert_eq!(zmq_bind(socket, endpoint.as_ptr()), -1);
-        assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
-    }
+    // The running socket keeps its mechanism, so the change is refused.
+    assert_eq!(set_i32(socket, ZMQ_CURVE_SERVER, 1), -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EBUSY);
     assert_eq!(zmq_close(socket), 0);
     assert_eq!(zmq_ctx_term(ctx), 0);
 }

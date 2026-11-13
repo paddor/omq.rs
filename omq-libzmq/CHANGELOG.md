@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- PLAIN, CURVE, ZAP and WSS trust options fail with `EBUSY` once the
+  socket has started: after its first bind, connect, `ZMQ_SUBSCRIBE`,
+  `zmq_join` or `zmq_socket_monitor`. Before, they returned 0 and did not
+  apply, so a SUB that subscribed before setting its CURVE keys ran
+  without encryption.
+
 ### Fixed
 
 - On Windows, `zmq_socket` fails with `EMFILE` when it cannot create its

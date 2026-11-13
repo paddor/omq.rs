@@ -48,6 +48,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   endpoint as a duplicate.
 - Refusing a handshake at the socket's pending limit no longer leaves an
   entry per refused source address behind.
+- `close()` on a clone while another clone's `close()` still lingers waits
+  for that close. Before, it shut the send side down at once and
+  discarded the messages the first close was still draining.
 
 ## [0.34.3] - 2026-11-04
 

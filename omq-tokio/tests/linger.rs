@@ -474,6 +474,45 @@ async fn linger_forever_close_keeps_dialer_until_late_peer_drains() {
     pull.close().await.unwrap();
 }
 
+/// A second `close()` on a clone joins the close in progress. It must not
+/// discard the queue that close still drains.
+#[tokio::test]
+async fn second_close_on_a_clone_keeps_the_first_close_linger_queue() {
+    let ep = free_tcp_ep();
+    let push = Socket::new(SocketType::Push, Options::default().linger_forever());
+    let clone = push.clone();
+    push.connect(ep.clone()).await.unwrap();
+    push.send(Message::single("queued-before-peer"))
+        .await
+        .unwrap();
+
+    let first = tokio::spawn(async move { push.close().await });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let second = tokio::spawn(async move { clone.close().await });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !first.is_finished(),
+        "close returned before the queue drained"
+    );
+
+    let pull = Socket::new(SocketType::Pull, Options::default());
+    pull.bind(ep).await.unwrap();
+    let msg = tokio::time::timeout(Duration::from_secs(2), pull.recv())
+        .await
+        .expect("the second close discarded the queued message")
+        .unwrap();
+    assert_eq!(msg.part_bytes(0).unwrap().as_ref(), b"queued-before-peer");
+
+    for close in [first, second] {
+        tokio::time::timeout(Duration::from_secs(2), close)
+            .await
+            .expect("close did not finish after the late peer drained")
+            .unwrap()
+            .unwrap();
+    }
+    pull.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn drop_with_linger_forever_keeps_dialer_until_late_peer_drains() {
     let ep = free_tcp_ep();

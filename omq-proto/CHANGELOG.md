@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `TypeState::post_recv_req_direct`. Use `TypeState::post_recv` with
   `SocketType::Req`.
 
+### Fixed
+
+- Reconnect jitter spreads on both sides of the base delay. Before, it only
+  added up to 10% and left about half of all delays without jitter.
+
 ## [0.38.1] - 2026-11-04
 
 ### Added

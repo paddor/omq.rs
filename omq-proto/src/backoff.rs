@@ -38,8 +38,9 @@ pub fn jitter(d: Duration) -> Duration {
     let mut rng = rand::rng();
     let ms = d.as_millis().max(1);
     let delta = ms / 10;
-    let offset = rng.random_range(0..=2 * delta).saturating_sub(delta);
-    duration_from_millis(ms.saturating_add(offset))
+    // Draw from [ms - delta, ms + delta]; `delta <= ms`, so no underflow.
+    let offset = rng.random_range(0..=2 * delta);
+    duration_from_millis((ms - delta).saturating_add(offset))
 }
 
 fn duration_from_millis(ms: u128) -> Duration {
@@ -94,6 +95,19 @@ mod tests {
         let d = next_delay(&policy, 20).unwrap();
         // With +/-10% jitter the cap can be slightly exceeded on the high end.
         assert!(d <= Duration::from_millis(550));
+    }
+
+    #[test]
+    fn jitter_spreads_on_both_sides_of_the_base() {
+        let base = Duration::from_secs(1);
+        let samples: Vec<Duration> = (0..1000).map(|_| jitter(base)).collect();
+        assert!(samples.iter().any(|d| *d < base), "no delay below base");
+        assert!(samples.iter().any(|d| *d > base), "no delay above base");
+        assert!(
+            samples
+                .iter()
+                .all(|d| *d >= base * 9 / 10 && *d <= base * 11 / 10)
+        );
     }
 
     #[test]

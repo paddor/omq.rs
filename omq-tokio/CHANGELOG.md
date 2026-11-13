@@ -51,6 +51,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `close()` on a clone while another clone's `close()` still lingers waits
   for that close. Before, it shut the send side down at once and
   discarded the messages the first close was still draining.
+- PEER sockets without a configured identity connect over `dart://`. The
+  generated identity started with 0x00, which peers reject, so the
+  handshake never completed.
 
 ## [0.34.3] - 2026-11-04
 

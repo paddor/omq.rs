@@ -83,7 +83,8 @@ impl SocketState {
         }
         self.identity
             .get_or_init(|| {
-                let mut value = [0; 17];
+                // Peers reject an identity that starts with 0x00.
+                let mut value = [1; 17];
                 value[1..].copy_from_slice(&rand::random::<[u8; 16]>());
                 bytes::Bytes::copy_from_slice(&value)
             })

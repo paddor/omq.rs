@@ -284,6 +284,22 @@ async fn peer_roundtrip_keeps_identity_outside_datagram_body() {
     server.close().await.unwrap();
 }
 
+/// Without a configured identity a PEER announces a generated one. Peers
+/// reject an identity that starts with 0x00, so it must not.
+#[tokio::test]
+async fn peers_without_a_configured_identity_connect() {
+    let server = Socket::new(SocketType::Peer, Options::default());
+    let client = Socket::new(SocketType::Peer, Options::default());
+    client
+        .connect(server.bind(endpoint(0)).await.unwrap())
+        .await
+        .unwrap();
+    ready(&server, 1).await;
+    ready(&client, 1).await;
+    client.close().await.unwrap();
+    server.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn dish_inline_group_credit_is_independent_of_application_clones() {
     for (group_size, body_size) in [(1, 53), (38, 16), (1, 54)] {

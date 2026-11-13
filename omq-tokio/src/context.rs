@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock, Weak, mpsc};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use futures::FutureExt;
 use rustc_hash::FxHashMap;
 use tokio::runtime::Handle;
 
@@ -550,14 +551,20 @@ impl Context {
             .expect("Context::block_on() called on a terminated context");
         let (result_tx, result_rx) = mpsc::channel();
         let fut: BoxFuture = Box::pin(async move {
-            let result = f.await;
+            // The primary IO thread polls this job inline and also runs
+            // the context's sockets. A panic unwinds the caller instead.
+            let result = std::panic::AssertUnwindSafe(f).catch_unwind().await;
             let _ = result_tx.send(result);
         });
         job_tx.send(fut).expect("omq: context runtime exited");
         drop(guard);
-        result_rx
+        match result_rx
             .recv()
             .expect("omq: context runtime exited unexpectedly")
+        {
+            Ok(output) => output,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
     }
 
     /// Return the tokio runtime handle for the primary IO thread.

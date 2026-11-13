@@ -1346,3 +1346,16 @@ fn block_on_callers_do_not_wait_for_each_other() {
     );
     long.join().unwrap();
 }
+
+/// A panic in a `block_on` job belongs to its caller. The IO thread that
+/// polled the job runs every socket of the context and must survive.
+#[test]
+fn a_panicking_block_on_job_leaves_the_context_usable() {
+    let ctx = Context::new();
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.block_on(async { panic!("job panic") })
+    }));
+    let payload = panicked.expect_err("the job panic did not reach its caller");
+    assert_eq!(payload.downcast_ref::<&str>(), Some(&"job panic"));
+    assert_eq!(ctx.block_on(async { 7 }), 7);
+}

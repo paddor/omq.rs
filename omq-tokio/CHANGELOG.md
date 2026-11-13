@@ -65,6 +65,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An `shm://` reference batch or multipart record no longer fails with
   "SHM batch region was not registered" when it names an old region
   together with new ones. The connection dropped and the batch was lost.
+- A panic in a `Context::block_on` job unwinds the caller of `block_on`.
+  Before, it killed the context's primary IO thread, and with it every
+  socket on the context and every later `block_on`.
 
 ## [0.34.3] - 2026-11-04
 

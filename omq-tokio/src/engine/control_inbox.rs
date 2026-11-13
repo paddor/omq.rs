@@ -278,11 +278,22 @@ impl Receiver {
 
     /// Overflow holds only commands newer than every ring entry, so it is
     /// read after the ring is empty.
-    fn take_overflow(lifecycle: &Lifecycle) -> Option<PeerDriverCommand> {
+    fn take_overflow(
+        commands: &mut single_inbox::Receiver<PeerDriverCommand>,
+        lifecycle: &Lifecycle,
+    ) -> Option<PeerDriverCommand> {
         if !lifecycle.may_be_occupied() {
             return None;
         }
-        let command = lifecycle.lock().overflow.pop_front();
+        let mut pending = lifecycle.lock();
+        // The sender fills the ring and the overflow under this lock. It
+        // may have done both since the caller saw the ring empty, so look
+        // at the ring once more: its commands are the older ones.
+        if let Ok(command) = commands.try_recv() {
+            return Some(command);
+        }
+        let command = pending.overflow.pop_front();
+        drop(pending);
         if command.is_some() {
             // Wakes callers waiting in `Sender::protocol_drained`.
             lifecycle.changed.notify_changed();
@@ -302,7 +313,7 @@ impl Receiver {
                 }
                 commands
                     .try_recv()
-                    .or_else(|error| Self::take_overflow(lifecycle).ok_or(error))
+                    .or_else(|error| Self::take_overflow(commands, lifecycle).ok_or(error))
             }
         }
     }
@@ -328,7 +339,7 @@ impl Receiver {
                 }
                 match commands.poll_recv(cx) {
                     std::task::Poll::Ready(Some(command)) => std::task::Poll::Ready(Some(command)),
-                    closed_or_pending => Self::take_overflow(lifecycle)
+                    closed_or_pending => Self::take_overflow(commands, lifecycle)
                         .map_or(closed_or_pending, |command| {
                             std::task::Poll::Ready(Some(command))
                         }),
@@ -483,5 +494,37 @@ mod tests {
             .collect();
         assert_eq!(prefixes, [0, 1, 2, 3, 4, 5]);
         assert!(receiver.is_empty());
+    }
+
+    /// The ring holds older commands than the overflow. A receive that saw
+    /// the ring empty must not then take from the overflow past commands
+    /// the sender put in the ring meanwhile.
+    #[test]
+    fn overflowed_commands_never_overtake_the_ring() {
+        const COMMANDS: u32 = 300_000;
+        let (sender, mut receiver) = channel(1);
+        let producer = std::thread::spawn(move || {
+            for value in 0..COMMANDS {
+                let prefix = bytes::Bytes::copy_from_slice(&value.to_be_bytes());
+                sender
+                    .try_send(PeerDriverCommand::SendCommand(Command::Subscribe(prefix)))
+                    .unwrap();
+            }
+            sender
+        });
+        let mut next = 0;
+        while next < COMMANDS {
+            let Ok(command) = receiver.try_recv() else {
+                std::hint::spin_loop();
+                continue;
+            };
+            let PeerDriverCommand::SendCommand(Command::Subscribe(prefix)) = command else {
+                panic!("unexpected command");
+            };
+            let value = u32::from_be_bytes(prefix[..].try_into().unwrap());
+            assert_eq!(value, next, "a command overtook an older one");
+            next += 1;
+        }
+        drop(producer.join().unwrap());
     }
 }

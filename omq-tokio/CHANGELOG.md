@@ -75,6 +75,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an exactly full send pipe. The caller slept until another event woke
   it, with space available. ROUTER with `router_mandatory` shared the
   race.
+- A peer driver takes protocol commands such as SUBSCRIBE and CANCEL in
+  send order even when they overflow its command ring. A driver that was
+  preempted right after it saw the ring empty could take an overflowed
+  command ahead of older ones in the ring.
 
 ## [0.34.3] - 2026-11-04
 

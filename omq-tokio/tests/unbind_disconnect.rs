@@ -112,6 +112,27 @@ async fn unbind_then_rebind_succeeds() {
     pull.bind(tcp_loopback(0)).await.unwrap();
 }
 
+/// `bind()` stores the address it resolved the wildcard to. `unbind()`
+/// accepts the wildcard form too, as libzmq does.
+#[tokio::test]
+async fn unbind_accepts_the_wildcard_endpoint_that_was_bound() {
+    let free_port = {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        probe.local_addr().unwrap().port()
+    };
+    let wildcard = format!("tcp://*:{free_port}");
+    let pull = Socket::new(SocketType::Pull, Options::default());
+    pull.bind(wildcard.as_str()).await.unwrap();
+
+    pull.unbind(wildcard.as_str()).await.unwrap();
+
+    assert!(matches!(
+        pull.unbind(wildcard.as_str()).await,
+        Err(Error::Unroutable)
+    ));
+    pull.bind(wildcard.as_str()).await.unwrap();
+}
+
 #[tokio::test]
 async fn disconnect_after_connect_succeeds() {
     let opts = Options::default().reconnect(omq_proto::options::ReconnectPolicy::Disabled);

@@ -221,6 +221,10 @@ impl Mailboxes {
 /// Bound, dialed, and resolving endpoints, plus setup admission.
 struct EndpointTable {
     listeners: Vec<EndpointTask>,
+    /// Bound endpoints whose resolved form differs from the one passed to
+    /// `bind()`, such as a wildcard host: `(requested, resolved)`. Lets
+    /// `unbind()` take the requested form too.
+    bind_aliases: Vec<(Endpoint, Endpoint)>,
     dialers: Vec<DialerEntry>,
     pending_endpoints: FxHashMap<u64, endpoint_resolution::PendingEndpoint>,
     /// UDP DISH listeners.
@@ -239,6 +243,7 @@ impl EndpointTable {
     fn new(max_pending_handshakes: usize) -> Self {
         Self {
             listeners: Vec::new(),
+            bind_aliases: Vec::new(),
             dialers: Vec::new(),
             pending_endpoints: FxHashMap::default(),
             udp_listeners: Vec::new(),
@@ -248,6 +253,22 @@ impl EndpointTable {
             setup_admission: Admission::new(max_pending_handshakes),
             dial_admission: Admission::new(max_pending_handshakes),
         }
+    }
+
+    /// Remember that `requested` was bound as `resolved`.
+    fn note_bound(&mut self, requested: Endpoint, resolved: &Endpoint) {
+        if requested != *resolved {
+            self.bind_aliases.push((requested, resolved.clone()));
+        }
+    }
+
+    /// The resolved endpoint of one bind of `requested`, forgetting it.
+    fn take_bound_as(&mut self, requested: &Endpoint) -> Option<Endpoint> {
+        let index = self
+            .bind_aliases
+            .iter()
+            .position(|(alias, _)| alias == requested)?;
+        Some(self.bind_aliases.swap_remove(index).1)
     }
 
     fn dialer(&self, route_id: u64) -> Option<&DialerEntry> {

@@ -357,6 +357,18 @@ impl SocketDriver {
         );
     }
 
+    /// Bind the resolved address of a named host. `unbind()` can then name
+    /// the host the caller bound.
+    async fn bind_resolved(
+        &mut self,
+        resolved: Endpoint,
+        pending: &PendingEndpoint,
+    ) -> Result<Endpoint> {
+        let bound = self.bind(resolved, pending.options.clone()).await?;
+        self.endpoints.note_bound(pending.original.clone(), &bound);
+        Ok(bound)
+    }
+
     pub(super) async fn finish_endpoint_resolution(
         &mut self,
         id: u64,
@@ -384,11 +396,14 @@ impl SocketDriver {
                     );
                     return;
                 }
-                let _ = ack.send(self.bind(resolved.endpoint, pending.options.clone()).await);
+                let _ = ack.send(self.bind_resolved(resolved.endpoint, &pending).await);
             }
             (Ack::Connect(ack), Ok(resolved)) => {
                 if matches!(resolved.endpoint, Endpoint::Udp { .. }) {
-                    let _ = ack.send(self.start_dial_udp(resolved.endpoint).await);
+                    let _ = ack.send(
+                        self.start_dial_udp(resolved.endpoint, pending.original.clone())
+                            .await,
+                    );
                     return;
                 }
                 #[cfg(feature = "dart")]

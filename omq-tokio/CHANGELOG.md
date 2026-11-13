@@ -124,6 +124,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `disconnect()` of a `udp://` endpoint connected by host name works.
   Before, it returned `Unroutable` and RADIO kept sending there, because
   the endpoint was stored under its resolved address.
+- `unbind()` accepts the endpoint as it was passed to `bind()`, such as
+  `tcp://*:5555` or a host name, as libzmq does. Before, only the
+  resolved endpoint that `bind()` returned matched.
 
 ## [0.34.3] - 2026-11-04
 

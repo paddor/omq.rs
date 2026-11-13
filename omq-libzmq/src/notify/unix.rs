@@ -76,9 +76,11 @@ impl RecvNotify {
         drain_fd(self.poll_fd);
     }
 
-    pub(crate) fn wait_for_readable(self, timeout_ms: c_int) -> bool {
+    /// Wait until the descriptor is readable or the timeout passes.
+    /// `Err(EINTR)` when a signal handler interrupted the wait.
+    pub(crate) fn wait_for_readable_or_signal(self, timeout_ms: c_int) -> Result<bool, c_int> {
         if self.poll_fd < 0 {
-            return false;
+            return Ok(false);
         }
         let mut pfd = libc::pollfd {
             fd: self.poll_fd,
@@ -87,7 +89,10 @@ impl RecvNotify {
         };
         // SAFETY: pfd is a valid single-element pollfd array.
         let rc = unsafe { libc::poll(&raw mut pfd, 1, timeout_ms) };
-        rc > 0
+        if rc < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+            return Err(libc::EINTR);
+        }
+        Ok(rc > 0)
     }
 }
 

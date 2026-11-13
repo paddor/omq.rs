@@ -68,6 +68,58 @@ fn thread_cpu_time() -> Duration {
     Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
 }
 
+/// A signal handler that returns ends a blocking receive with `EINTR`,
+/// as in libzmq. A program can then act on the signal, such as Ctrl-C.
+#[cfg(unix)]
+#[test]
+fn blocking_recv_returns_eintr_when_a_signal_interrupts_it() {
+    extern "C" fn on_signal(_signal: libc::c_int) {}
+    // SAFETY: the handler does nothing, which is async-signal-safe.
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = on_signal as extern "C" fn(libc::c_int) as usize;
+        libc::sigemptyset(&raw mut action.sa_mask);
+        assert_eq!(
+            libc::sigaction(libc::SIGUSR1, &raw const action, std::ptr::null_mut()),
+            0
+        );
+    }
+
+    let ctx = zmq_ctx_new();
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    let addr = CString::new("inproc://test-recv-eintr").unwrap();
+    assert_eq!(zmq_bind(pull, addr.as_ptr()), 0);
+    let (started, thread_id) = std::sync::mpsc::channel();
+    let socket = pull as usize;
+    let receiver = std::thread::spawn(move || {
+        // SAFETY: pthread_self has no preconditions.
+        started
+            .send(unsafe { libc::pthread_self() } as usize)
+            .unwrap();
+        let mut buf = [0u8; 8];
+        let rc = zmq_recv(socket as *mut c_void, buf.as_mut_ptr().cast(), buf.len(), 0);
+        (rc, omq_zmq::zmq_errno())
+    });
+    let thread = thread_id.recv().unwrap() as libc::pthread_t;
+
+    // Early signals can land before the receive blocks, so keep sending.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !receiver.is_finished() && Instant::now() < deadline {
+        // SAFETY: the thread is alive until it is joined below.
+        unsafe { libc::pthread_kill(thread, libc::SIGUSR1) };
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let interrupted = receiver.is_finished();
+    // Ends the receive in any case, so the test cannot hang.
+    zmq_ctx_shutdown(ctx);
+    let result = receiver.join().unwrap();
+    assert!(interrupted, "the signal did not end the receive");
+    assert_eq!(result, (-1, libc::EINTR));
+
+    zmq_close(pull);
+    zmq_ctx_term(ctx);
+}
+
 /// A socket without endpoints is a socket without peers, as in libzmq.
 /// The context is not terminated, so `ETERM` would mislead callers.
 #[test]

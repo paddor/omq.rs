@@ -42,6 +42,14 @@ impl RecvNotify {
         let rc = unsafe { WaitForSingleObject(self.event, wait_ms) };
         rc == WAIT_OBJECT_0
     }
+
+    /// As on Unix. Windows has no signals that interrupt the wait.
+    pub(crate) fn wait_for_readable_or_signal(
+        self,
+        timeout_ms: std::os::raw::c_int,
+    ) -> Result<bool, std::os::raw::c_int> {
+        Ok(self.wait_for_readable(timeout_ms))
+    }
 }
 
 /// A manual-reset event, closed on drop.

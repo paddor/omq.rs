@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is what `zmq.h` resolves these names to there. Before, the library
   returned the HAUSNUMERO fallbacks, so `zmq_errno() == ENOTSOCK` never
   matched in C.
+- A blocking `zmq_recv` or `zmq_msg_recv` returns `EINTR` when a signal
+  handler interrupts it and no message arrived, as libzmq does. Before, it
+  kept waiting, so a handler for Ctrl-C could not end the receive. Unix
+  only; blocking sends are unchanged.
 
 ### Fixed
 

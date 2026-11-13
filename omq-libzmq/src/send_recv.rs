@@ -400,7 +400,8 @@ fn block_recv_result<T>(
         }
         let ms = next_wait_ms(wait, deadline)?;
         let recv_notify = sock.notify.recv_notifier();
-        if recv_notify.wait_for_readable(ms) {
+        let waited = recv_notify.wait_for_readable_or_signal(ms);
+        if waited == Ok(true) {
             recv_notify.drain();
         }
         if sock.ctx.is_effectively_terminated() {
@@ -409,6 +410,9 @@ fn block_recv_result<T>(
         if let Some(val) = try_pop()? {
             return Ok(val);
         }
+        // A signal handler ran and nothing arrived: `EINTR`, as in libzmq,
+        // so the caller can act on the signal.
+        waited?;
     }
 }
 

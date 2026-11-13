@@ -419,7 +419,9 @@ impl SendPipeProducer {
                 }
                 if producer.is_full() {
                     self.above_lwm.store(true, Ordering::Release);
-                    return false;
+                    // A drain between the check and the arming found no
+                    // wake to send. Look again now that it is armed.
+                    return !producer.is_full();
                 }
                 true
             }
@@ -430,7 +432,11 @@ impl SendPipeProducer {
                 crate::transport::inproc::Admission::Ready => true,
                 crate::transport::inproc::Admission::Full => {
                     self.above_lwm.store(true, Ordering::Release);
-                    false
+                    // As for a queue: look again once the wake is armed.
+                    matches!(
+                        sender.admission(),
+                        crate::transport::inproc::Admission::Ready
+                    )
                 }
                 crate::transport::inproc::Admission::Closed => false,
             },

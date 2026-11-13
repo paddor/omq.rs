@@ -393,3 +393,51 @@ fn conflate_pipe_keeps_latest_message() {
     assert_eq!(batch[0].part_bytes(0).unwrap().as_ref(), b"c");
     assert_eq!(rx.drain_into(&mut batch, 8, usize::MAX), 0);
 }
+
+/// A readiness check on a full pipe arms the space wake. A drain that lands
+/// between its fullness check and the arming must not go unnoticed.
+#[test]
+fn readiness_check_on_a_full_pipe_never_misses_a_concurrent_drain() {
+    use std::sync::atomic::AtomicUsize;
+
+    const ROUNDS: usize = 200_000;
+    let (mut tx, mut rx) = send_pipe(2);
+    // Both threads spin on these, so they meet within nanoseconds.
+    let started = Arc::new(AtomicUsize::new(0));
+    let finished = Arc::new(AtomicUsize::new(0));
+    let drainer = std::thread::spawn({
+        let (started, finished) = (started.clone(), finished.clone());
+        move || {
+            let mut messages = Vec::new();
+            for round in 1..=ROUNDS {
+                while started.load(Ordering::Acquire) != round {
+                    std::hint::spin_loop();
+                }
+                rx.drain_into(&mut messages, 2, usize::MAX);
+                messages.clear();
+                finished.store(round, Ordering::Release);
+            }
+        }
+    });
+    let space = tx.space_available();
+    for round in 1..=ROUNDS {
+        // Exactly full, by sends that all succeed: nothing armed the wake.
+        tx.try_send(Message::single("a")).unwrap();
+        tx.try_send(Message::single("b")).unwrap();
+        let seen = space.generation();
+        started.store(round, Ordering::Release);
+        // Sweep the check across the drain.
+        for _ in 0..round % 64 {
+            std::hint::spin_loop();
+        }
+        let accepts = tx.can_accept();
+        while finished.load(Ordering::Acquire) != round {
+            std::hint::spin_loop();
+        }
+        assert!(
+            accepts || space.generation() != seen,
+            "round {round}: the pipe drained, and the waiter got neither space nor a wake"
+        );
+    }
+    drainer.join().unwrap();
+}

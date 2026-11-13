@@ -71,6 +71,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Context::term()` and dropping the last `Context` wake callers blocked
   on its sockets with `Error::Closed`. Before, a blocked receive on PULL,
   GATHER, SUB, XSUB or DISH hung forever.
+- `wait_send_ready()` no longer misses a drain that lands while it checks
+  an exactly full send pipe. The caller slept until another event woke
+  it, with space available. ROUTER with `router_mandatory` shared the
+  race.
 
 ## [0.34.3] - 2026-11-04
 

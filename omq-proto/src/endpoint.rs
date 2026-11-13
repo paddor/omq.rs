@@ -518,7 +518,7 @@ fn parse_host_port(rest: &str) -> Result<(Host, u16)> {
         let after = &stripped[close + 1..];
         let port = after
             .strip_prefix(':')
-            .and_then(|p| p.parse::<u16>().ok())
+            .and_then(|p| if p == "*" { Some(0) } else { p.parse().ok() })
             .ok_or_else(|| Error::InvalidEndpoint(format!("missing port in {rest}")))?;
         let ip: IpAddr = ip_str
             .parse()
@@ -682,6 +682,18 @@ mod tests {
             let moved = endpoint_argument(endpoint.clone()).unwrap();
             assert_eq!(moved, endpoint);
         }
+    }
+
+    #[test]
+    fn bracketed_ipv6_accepts_wildcard_port() {
+        let endpoint: Endpoint = "tcp://[::1]:*".parse().unwrap();
+        assert_eq!(
+            endpoint,
+            Endpoint::Tcp {
+                host: Host::Ip("::1".parse().unwrap()),
+                port: 0,
+            }
+        );
     }
 
     #[test]

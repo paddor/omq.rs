@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Reconnect jitter spreads on both sides of the base delay. Before, it only
   added up to 10% and left about half of all delays without jitter.
+- `tcp://[::1]:*` parses. A bracketed IPv6 host rejected the wildcard port
+  that other hosts accept.
 
 ## [0.38.1] - 2026-11-04
 

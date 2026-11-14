@@ -9,9 +9,10 @@ use std::time::Duration;
 
 use omq_zmq::{
     zmq_bind, zmq_close, zmq_connect, zmq_connect_peer, zmq_ctx_new, zmq_ctx_term,
-    zmq_disconnect_peer, zmq_getsockopt, zmq_join, zmq_msg_close, zmq_msg_data, zmq_msg_init,
-    zmq_msg_init_buffer, zmq_msg_recv, zmq_msg_routing_id, zmq_msg_send, zmq_msg_set_group,
-    zmq_msg_set_routing_id, zmq_msg_size, zmq_recv, zmq_send, zmq_setsockopt, zmq_socket,
+    zmq_disconnect_peer, zmq_getsockopt, zmq_join, zmq_msg_close, zmq_msg_data, zmq_msg_group,
+    zmq_msg_init, zmq_msg_init_buffer, zmq_msg_recv, zmq_msg_routing_id, zmq_msg_send,
+    zmq_msg_set_group, zmq_msg_set_routing_id, zmq_msg_size, zmq_recv, zmq_send, zmq_setsockopt,
+    zmq_socket,
 };
 
 const ZMQ_SERVER: i32 = 12;
@@ -329,6 +330,89 @@ fn radio_dish_filtered() {
     zmq_close(dish);
     zmq_close(radio);
     zmq_ctx_term(ctx);
+}
+
+/// Send `body` to `group` until the DISH receives a message of that group;
+/// return the body it got. A RADIO drops messages until the join arrived.
+fn recv_in_group(radio: *mut c_void, dish: *mut c_void, group: &std::ffi::CStr) -> Vec<u8> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        assert!(radio_send(radio, group, b"body") >= 0);
+        let mut m = ZmqMsg::zeroed();
+        let msg = m.0.as_mut_ptr().cast();
+        zmq_msg_init(msg);
+        if zmq_msg_recv(msg, dish, 0) >= 0 {
+            // SAFETY: the live message owns its group string and payload.
+            let (got, body) = unsafe {
+                (
+                    std::ffi::CStr::from_ptr(zmq_msg_group(msg)).to_owned(),
+                    std::slice::from_raw_parts(zmq_msg_data(msg).cast::<u8>(), zmq_msg_size(msg))
+                        .to_vec(),
+                )
+            };
+            zmq_msg_close(msg);
+            if got.as_c_str() == group {
+                return body;
+            }
+            assert!(!got.is_empty(), "DISH receive dropped the group");
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no message in {group:?}"
+        );
+    }
+}
+
+/// `zmq_msg_group` reports the group of a received DISH message, also one
+/// longer than the 11 bytes that fit inline in `zmq_msg_t`.
+#[test]
+fn dish_recv_reports_the_group() {
+    let ctx = zmq_ctx_new();
+    let radio = zmq_socket(ctx, ZMQ_RADIO);
+    let dish = zmq_socket(ctx, ZMQ_DISH);
+    let addr = CString::new("inproc://test-dish-group").unwrap();
+    assert_eq!(zmq_bind(radio, addr.as_ptr()), 0);
+
+    let long = CString::new("g".repeat(255)).unwrap();
+    let groups = [c"weather", c"twelve-bytes", long.as_c_str()];
+    for group in groups {
+        assert_eq!(zmq_join(dish, group.as_ptr()), 0);
+    }
+    assert_eq!(zmq_connect(dish, addr.as_ptr()), 0);
+    set_timeo(dish, 100);
+
+    for group in groups {
+        assert_eq!(recv_in_group(radio, dish, group), b"body");
+    }
+
+    zmq_close(dish);
+    zmq_close(radio);
+    zmq_ctx_term(ctx);
+}
+
+/// `zmq_msg_set_group` takes up to `ZMQ_GROUP_MAX_LENGTH` bytes.
+#[test]
+fn msg_set_group_accepts_255_bytes_and_rejects_more() {
+    let mut m = ZmqMsg::zeroed();
+    let msg = m.0.as_mut_ptr().cast();
+    zmq_msg_init(msg);
+    for length in [0, 11, 12, 255] {
+        let group = CString::new("g".repeat(length)).unwrap();
+        assert_eq!(zmq_msg_set_group(msg, group.as_ptr()), 0, "{length} bytes");
+        // SAFETY: the live message owns its group string.
+        let got = unsafe { std::ffi::CStr::from_ptr(zmq_msg_group(msg)) };
+        assert_eq!(got, group.as_c_str());
+    }
+    let too_long = CString::new("g".repeat(256)).unwrap();
+    assert_eq!(zmq_msg_set_group(msg, too_long.as_ptr()), -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+    // The rejected call left the 255-byte group in place.
+    // SAFETY: as above.
+    assert_eq!(
+        unsafe { std::ffi::CStr::from_ptr(zmq_msg_group(msg)) }.count_bytes(),
+        255
+    );
+    assert_eq!(zmq_msg_close(msg), 0);
 }
 
 /// CHANNEL: bidirectional, like PAIR.

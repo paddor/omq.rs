@@ -89,6 +89,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `zmq_close` after `zmq_ctx_shutdown`, or while `zmq_ctx_term` waits,
   honors `ZMQ_LINGER`: queued messages are still sent and term waits for
   them, as in libzmq. Before, such a close dropped the queue.
+- `zmq_msg_group` returns the group of a message received on a DISH
+  socket. Before, `zmq_msg_recv` dropped it and the group was always
+  empty.
+- `zmq_msg_set_group` accepts a group of up to `ZMQ_GROUP_MAX_LENGTH`
+  (255) bytes. Before, it failed with `EINVAL` above 11 bytes.
 
 ## [0.9.2] - 2026-11-04
 

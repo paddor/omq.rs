@@ -48,3 +48,61 @@ fn writable_received_data_reuses_unique_heap_storage() {
     assert_eq!(zmq_msg_data(&raw mut message).cast::<u8>(), pointer);
     assert_eq!(zmq_msg_close(&raw mut message), 0);
 }
+
+fn group_of(message: &OmqMsgRepr) -> &CStr {
+    // SAFETY: the live message owns its group string.
+    unsafe { CStr::from_ptr(zmq_msg_group(message)) }
+}
+
+#[test]
+fn long_group_is_owned_per_message_across_copy_move_and_close() {
+    let long = std::ffi::CString::new("g".repeat(200)).unwrap();
+    let mut first = OmqMsgRepr::zeroed();
+    assert_eq!(zmq_msg_init_size(&raw mut first, 4), 0);
+    assert_eq!(zmq_msg_set_routing_id(&raw mut first, 7), 0);
+    assert_eq!(zmq_msg_set_group(&raw mut first, long.as_ptr()), 0);
+
+    // A copy gets its own string and keeps the routing ID.
+    let mut copy = OmqMsgRepr::zeroed();
+    assert_eq!(zmq_msg_copy(&raw mut copy, &raw const first), 0);
+    assert_ne!(
+        zmq_msg_group(&raw const copy),
+        zmq_msg_group(&raw const first)
+    );
+    assert_eq!(group_of(&copy), long.as_c_str());
+    assert_eq!(zmq_msg_routing_id(&raw const copy), 7);
+
+    // Replacing one group frees its string and leaves the copy alone.
+    assert_eq!(zmq_msg_set_group(&raw mut first, c"short".as_ptr()), 0);
+    assert_eq!(group_of(&first), c"short");
+    assert_eq!(zmq_msg_routing_id(&raw const first), 7);
+    assert_eq!(group_of(&copy), long.as_c_str());
+
+    // A move hands the string over and empties the source.
+    let string = zmq_msg_group(&raw const copy);
+    let mut moved = OmqMsgRepr::zeroed();
+    assert_eq!(zmq_msg_move(&raw mut moved, &raw mut copy), 0);
+    assert_eq!(zmq_msg_group(&raw const moved), string);
+    assert_eq!(group_of(&copy), c"");
+
+    for message in [&raw mut first, &raw mut copy, &raw mut moved] {
+        assert_eq!(zmq_msg_close(message), 0);
+        // SAFETY: a closed message is zeroed storage.
+        assert_eq!(group_of(unsafe { &*message }), c"");
+    }
+}
+
+#[test]
+fn received_group_is_cut_at_a_nul_byte() {
+    let mut message = OmqMsgRepr::zeroed();
+    let part = ReceivedPart {
+        frame: Bytes::from_static(b"body"),
+        more: false,
+        routing_id: 0,
+        group: Bytes::from_static(b"wire\0tail-longer-than-inline"),
+        properties: None,
+    };
+    store_received_frame(&mut message, part).unwrap();
+    assert_eq!(group_of(&message), c"wire");
+    assert_eq!(zmq_msg_close(&raw mut message), 0);
+}

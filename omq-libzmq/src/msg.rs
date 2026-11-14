@@ -19,8 +19,8 @@ pub(crate) use repr::ZMQ_MSG_T_SIZE;
 const LARGE_MSG_SHARED_THRESHOLD: usize = 64;
 
 use repr::{
-    KIND_BYTES, KIND_BYTES_METADATA, KIND_EXTERNAL, KIND_HEAP, KIND_HEAP_SHARED, MsgFields,
-    RESERVED_LEN, ReceivedFrame, repr, repr_ref,
+    GROUP_MAX, KIND_BYTES, KIND_BYTES_METADATA, KIND_EXTERNAL, KIND_HEAP, KIND_HEAP_SHARED,
+    MsgFields, ReceivedFrame, repr, repr_ref,
 };
 
 /// Initialize caller-owned message storage as an empty message; return zero or -1 with errno.
@@ -174,6 +174,7 @@ pub extern "C" fn zmq_msg_close(msg: *mut OmqMsgRepr) -> c_int {
         KIND_BYTES | KIND_BYTES_METADATA => r.drop_boxed(),
         _ => {}
     }
+    r.drop_group();
     r.clear();
     0
 }
@@ -224,6 +225,8 @@ pub extern "C" fn zmq_msg_copy(dst: *mut OmqMsgRepr, src: *const OmqMsgRepr) -> 
         }
     };
     c_try!(copied);
+    // The copy owns its group: a long one is a heap string per message.
+    d.set_group(s.group());
     0
 }
 
@@ -235,7 +238,7 @@ fn copy_boxed(s: &OmqMsgRepr, d: &mut OmqMsgRepr) -> Result<(), c_int> {
     };
     let fields = MsgFields::new(s.kind(), s.more(), s.size(), data_ptr)
         .boxed(boxed)
-        .reserved(s.reserved_array());
+        .routing_id(s.routing_id());
     d.init_fields(fields);
     Ok(())
 }
@@ -271,7 +274,7 @@ fn copy_heap_payload(s: &OmqMsgRepr, d: &mut OmqMsgRepr) -> Result<(), c_int> {
         KIND_HEAP
     };
 
-    d.init_fields(MsgFields::new(kind, s.more(), size, new_ptr).reserved(s.reserved_array()));
+    d.init_fields(MsgFields::new(kind, s.more(), size, new_ptr).routing_id(s.routing_id()));
     Ok(())
 }
 
@@ -313,7 +316,7 @@ pub extern "C" fn zmq_msg_set(msg: *mut OmqMsgRepr, property: c_int, val: c_int)
             0
         }
         5 => {
-            r.reserved_mut()[0..4].copy_from_slice(&(val as u32).to_le_bytes());
+            r.set_routing_id(val as u32);
             0
         }
         _ => crate::error::fail(libc::EINVAL),
@@ -355,8 +358,7 @@ pub extern "C" fn zmq_msg_set_routing_id(msg: *mut OmqMsgRepr, routing_id: u32) 
         return crate::error::fail(libc::EFAULT);
     }
     // SAFETY: msg is non-null (checked above).
-    let r = unsafe { repr(msg) };
-    r.reserved_mut()[0..4].copy_from_slice(&routing_id.to_le_bytes());
+    unsafe { repr(msg) }.set_routing_id(routing_id);
     0
 }
 
@@ -367,11 +369,11 @@ pub extern "C" fn zmq_msg_routing_id(msg: *const OmqMsgRepr) -> u32 {
         return 0;
     }
     // SAFETY: msg is non-null (checked above).
-    let bytes = unsafe { &repr_ref(msg).reserved()[0..4] };
-    u32::from_le_bytes(bytes.try_into().unwrap_or([0; 4]))
+    unsafe { repr_ref(msg) }.routing_id()
 }
 
-/// Group stored as null-terminated string in reserved bytes 4..16 (max 11 + null).
+/// Set the RADIO/DISH group from a null-terminated string of at most
+/// `ZMQ_GROUP_MAX_LENGTH` bytes; return zero or -1 with errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_msg_set_group(msg: *mut OmqMsgRepr, group: *const libc::c_char) -> c_int {
     if msg.is_null() || group.is_null() {
@@ -379,14 +381,11 @@ pub extern "C" fn zmq_msg_set_group(msg: *mut OmqMsgRepr, group: *const libc::c_
     }
     // SAFETY: group is non-null (checked above); caller guarantees valid C string.
     let s = unsafe { CStr::from_ptr(group) }.to_bytes();
-    if s.len() > 11 {
+    if s.len() > GROUP_MAX {
         return crate::error::fail(libc::EINVAL);
     }
     // SAFETY: msg is non-null (checked above).
-    let r = unsafe { repr(msg) };
-    let reserved = r.reserved_mut();
-    reserved[4..4 + s.len()].copy_from_slice(s);
-    reserved[4 + s.len()] = 0;
+    unsafe { repr(msg) }.set_group(s);
     0
 }
 
@@ -396,8 +395,8 @@ pub extern "C" fn zmq_msg_group(msg: *const OmqMsgRepr) -> *const libc::c_char {
     if msg.is_null() {
         return c"".as_ptr();
     }
-    // SAFETY: msg is non-null (checked above); reserved area is always valid.
-    unsafe { repr_ref(msg).reserved()[4..].as_ptr().cast() }
+    // SAFETY: msg is non-null (checked above).
+    unsafe { repr_ref(msg) }.group_ptr()
 }
 
 /// Send the data held in `msg` on `sock`. The msg is zeroed on success.
@@ -483,16 +482,7 @@ pub extern "C" fn zmq_recvmsg(
 
 fn msg_group_bytes(msg: *mut OmqMsgRepr) -> bytes::Bytes {
     // SAFETY: caller guarantees msg is non-null.
-    let r = unsafe { repr_ref(msg) };
-    let group_area = &r.reserved()[4..];
-    let nul = group_area
-        .iter()
-        .position(|&b| b == 0)
-        .unwrap_or(group_area.len());
-    if nul == 0 {
-        return bytes::Bytes::new();
-    }
-    bytes::Bytes::copy_from_slice(&group_area[..nul])
+    bytes::Bytes::copy_from_slice(unsafe { repr_ref(msg) }.group())
 }
 
 /// Receive into `msg` as a zero-copy `KIND_BYTES` frame.
@@ -521,10 +511,11 @@ pub extern "C" fn zmq_msg_recv(
     }
     c_try!(crate::socket::materialize_for_io(sock));
 
-    let received = if sock.socket_type == omq_tokio::SocketType::Server {
-        crate::send_recv::pop_recv_server_message_with_properties(sock, flags)
-    } else {
-        crate::send_recv::pop_recv_frame_with_properties(sock, flags)
+    let received = match sock.socket_type {
+        omq_tokio::SocketType::Server | omq_tokio::SocketType::Dish => {
+            crate::send_recv::pop_recv_message_with_metadata(sock, flags)
+        }
+        _ => crate::send_recv::pop_recv_frame_with_properties(sock, flags),
     };
     let part = c_try!(received);
 
@@ -543,13 +534,11 @@ fn store_received_frame(r: &mut OmqMsgRepr, part: ReceivedPart) -> Result<(), c_
         frame,
         more,
         routing_id,
+        group,
         properties,
     } = part;
     let sz = frame.len();
     let more = u8::from(more);
-    // The routing ID rides in reserved bytes 0..4, read by zmq_msg_routing_id.
-    let mut reserved = [0; RESERVED_LEN];
-    reserved[..4].copy_from_slice(&routing_id.to_le_bytes());
 
     let fields = if let Some(properties) = properties {
         // Authenticated peers: keep the properties for zmq_msg_gets.
@@ -568,7 +557,8 @@ fn store_received_frame(r: &mut OmqMsgRepr, part: ReceivedPart) -> Result<(), c_
             .boxed(Box::into_raw(boxed).cast::<libc::c_void>())
     };
 
-    r.init_fields(fields.reserved(reserved));
+    r.init_fields(fields.routing_id(routing_id));
+    r.set_group(&group);
     Ok(())
 }
 

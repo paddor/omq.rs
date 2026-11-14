@@ -274,17 +274,10 @@ pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, b
     pop_message(sock, flags, |message| decompose_message(sock, &message))
 }
 
-/// Pop one complete SERVER message so `zmq_msg_recv` can preserve routing ID
-/// metadata. SERVER messages are always single-part.
-pub(crate) fn pop_recv_server_message(
-    sock: &OmqSocket,
-    flags: c_int,
-) -> Result<omq_tokio::Message, c_int> {
-    pop_message(sock, flags, Ok)
-}
-
-/// Pop one SERVER message with its routing ID and any ZAP properties.
-pub(crate) fn pop_recv_server_message_with_properties(
+/// Pop one whole SERVER or DISH message with its metadata and any ZAP
+/// properties: the routing ID of a SERVER message, the group of a DISH
+/// message. Both types receive a single body frame.
+pub(crate) fn pop_recv_message_with_metadata(
     sock: &OmqSocket,
     flags: c_int,
 ) -> Result<ReceivedPart, c_int> {
@@ -292,10 +285,19 @@ pub(crate) fn pop_recv_server_message_with_properties(
         let (message, properties) = pop_authenticated_message(sock, flags)?;
         (message, Some(properties))
     } else {
-        (pop_recv_server_message(sock, flags)?, None)
+        (pop_message(sock, flags, Ok)?, None)
     };
-    let mut part = ReceivedPart::new(message.part_bytes(0).unwrap_or_default(), false, properties);
+    // A DISH message is `[group, body]`.
+    let body = msg_start_index(sock, &message);
+    let mut part = ReceivedPart::new(
+        message.part_bytes(body).unwrap_or_default(),
+        false,
+        properties,
+    );
     part.routing_id = message.routing_id().unwrap_or(0);
+    if body == 1 {
+        part.group = message.part_bytes(0).unwrap_or_default();
+    }
     Ok(part)
 }
 
@@ -305,6 +307,8 @@ pub(crate) struct ReceivedPart {
     pub(crate) more: bool,
     /// SERVER routing ID; zero for other socket types.
     pub(crate) routing_id: u32,
+    /// DISH group; empty for other socket types.
+    pub(crate) group: Bytes,
     /// ZAP peer properties of an authenticated connection.
     pub(crate) properties: Option<Arc<omq_tokio::proto::PeerProperties>>,
 }
@@ -319,6 +323,7 @@ impl ReceivedPart {
             frame,
             more,
             routing_id: 0,
+            group: Bytes::new(),
             properties,
         }
     }

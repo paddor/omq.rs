@@ -18,8 +18,7 @@ mod recv;
 
 pub(crate) use recv::{
     ReceivedPart, authenticated_recv_configured, authenticated_recv_has_data,
-    authenticated_recv_has_more, pop_recv_frame_with_properties,
-    pop_recv_server_message_with_properties,
+    authenticated_recv_has_more, pop_recv_frame_with_properties, pop_recv_message_with_metadata,
 };
 use recv::{try_pop_dual, try_recv_authenticated_message};
 pub use recv::{zmq_recv, zmq_recviov};

@@ -501,10 +501,15 @@ fn get_curve_option(sock_arc: &Arc<OmqSocket>, option: c_int, out: OptOut) -> Re
         }
         ZMQ_CURVE_PUBLICKEY => {
             let ov = overlay(sock_arc)?;
-            if let MechanismOverlay::CurveClient { ref public_key, .. } = ov.mechanism {
-                out.key(public_key)
-            } else {
-                out.key(&[0; 32])
+            match ov.mechanism {
+                MechanismOverlay::CurveClient { ref public_key, .. } => out.key(public_key),
+                // A server stores only its secret key. The public key it
+                // presents is derived from that.
+                MechanismOverlay::CurveServer { ref secret_key } if *secret_key != [0; 32] => {
+                    let secret = omq_tokio::CurveSecretKey::from_bytes(*secret_key);
+                    out.key(secret.derive_public().as_bytes())
+                }
+                _ => out.key(&[0; 32]),
             }
         }
         ZMQ_CURVE_SECRETKEY => {

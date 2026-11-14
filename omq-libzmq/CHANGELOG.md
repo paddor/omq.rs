@@ -110,6 +110,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   empty.
 - `zmq_msg_set_group` accepts a group of up to `ZMQ_GROUP_MAX_LENGTH`
   (255) bytes. Before, it failed with `EINVAL` above 11 bytes.
+- `ZMQ_CURVE_PUBLICKEY` read on a CURVE server returns the public key
+  that the server presents, derived from its secret key. Before, it
+  returned zeros.
 
 ## [0.9.2] - 2026-11-04
 

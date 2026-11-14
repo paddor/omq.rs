@@ -406,6 +406,43 @@ fn curve_server_stays_a_server_when_its_public_key_is_set() {
     });
 }
 
+/// A server reports the public key it presents, the one derived from its
+/// secret key. Bindings read it back after setting a keypair.
+#[test]
+fn curve_server_reports_its_derived_public_key() {
+    const ZMQ_PUSH: i32 = 8;
+    let mut public = [0u8; 41];
+    let mut secret = [0u8; 41];
+    zmq_curve_keypair(public.as_mut_ptr().cast(), secret.as_mut_ptr().cast());
+
+    let ctx = zmq_ctx_new();
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    let read_public = || {
+        let mut key = [0u8; 41];
+        let mut len = key.len();
+        let rc = zmq_getsockopt(
+            push,
+            ZMQ_CURVE_PUBLICKEY,
+            key.as_mut_ptr().cast(),
+            &raw mut len,
+        );
+        assert_eq!(rc, 0);
+        key
+    };
+    set_i32(push, ZMQ_CURVE_SERVER, 1);
+    // No secret key yet: nothing to derive.
+    let unset = read_public();
+    set_bytes(push, ZMQ_CURVE_SECRETKEY, &secret[..40]);
+    set_bytes(push, ZMQ_CURVE_PUBLICKEY, &public[..40]);
+    assert_eq!(get_i32(push, ZMQ_CURVE_SERVER), 1);
+    let derived = read_public();
+    assert_eq!(&derived[..40], &public[..40]);
+    assert_ne!(&unset[..40], &public[..40]);
+
+    zmq_close(push);
+    zmq_ctx_term(ctx);
+}
+
 /// Security options are consumed when the socket starts. A later change
 /// fails instead of leaving the socket on its old mechanism.
 #[test]

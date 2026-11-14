@@ -747,6 +747,9 @@ test "curve bad server key rejects" {
 
     try pull.setCurveServer(allocator, server.publicSlice(), server.secretSlice());
     try push.setCurveClient(allocator, client.publicSlice(), client.secretSlice(), wrong.publicSlice());
+    // The message stays queued for a redial that never succeeds; infinite
+    // linger would block close.
+    try push.setLinger(0);
     try pull.setReceiveTimeout(1000);
 
     const bound = try pull.bind(allocator, "tcp://127.0.0.1:*");

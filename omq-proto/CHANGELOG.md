@@ -54,6 +54,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The adaptive batching check no longer overflows its batch counter. A
   debug build panicked and a release build wrapped after about 536
   million limited batches in one window.
+- `ZstdEncoder` sends a part above the decoder's 1 GiB limit as
+  plaintext. Before, it compressed the part, and the peer's decoder
+  refused the frame and closed the connection.
 
 ### Security
 

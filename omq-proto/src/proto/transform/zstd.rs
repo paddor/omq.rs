@@ -98,6 +98,9 @@ pub struct ZstdEncoder {
     stats: Option<CompressStats>,
     train: Option<TrainState>,
     arena_buf: BytesMut,
+    /// Largest part sent compressed. The decoder refuses a frame that
+    /// declares more, so a larger part goes out as plaintext.
+    compress_limit: usize,
 }
 
 impl std::fmt::Debug for ZstdEncoder {
@@ -129,6 +132,7 @@ impl Default for ZstdEncoder {
             stats: None,
             train: None,
             arena_buf: BytesMut::new(),
+            compress_limit: MAX_DECOMPRESSED_SIZE,
         }
     }
 }
@@ -299,6 +303,7 @@ impl ZstdEncoder {
             stats: self.stats.map(|_| CompressStats::default()),
             train: None,
             arena_buf: BytesMut::new(),
+            compress_limit: self.compress_limit,
         }
     }
 
@@ -427,7 +432,7 @@ impl ZstdEncoder {
 
     fn encode_part(&mut self, part: &Payload) -> Result<Payload> {
         let plain = part.as_bytes();
-        if plain.len() < self.send.effective_threshold() {
+        if plain.len() < self.send.effective_threshold() || plain.len() > self.compress_limit {
             return Ok(plaintext_payload(&plain));
         }
         self.ensure_cctx()?;

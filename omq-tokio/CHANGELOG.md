@@ -37,6 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no socket is left alone. Before, the bind unlinked whatever was there,
   as libzmq does: a regular file was deleted, and a live listener stayed
   up but unreachable.
+- Require `fanring` 0.3.11. Pausing or closing a fan-in peer lane right as
+  a readiness poll is due no longer stops the poll for newly ready peers
+  while another peer stays busy.
 
 ### Fixed
 

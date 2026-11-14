@@ -41,7 +41,7 @@ copy-stats = ["omq-proto/copy-stats"]
 bench-mt-runtime = ["tokio/rt-multi-thread"]
 
 [dependencies]
-fanring = { version = "0.3.10", features = ["async"] }
+fanring = { version = "0.3.11", features = ["async"] }
 omq-proto = { path = "../omq-proto", version = "0.39.1", default-features = false }
 yring = "0.3.21"
 arc-swap = "1.9.2"

@@ -254,7 +254,7 @@ pub extern "C" fn zmq_close(sock_ptr: *mut c_void) -> c_int {
     // Enter the tokio runtime context so that dropping OmqSocket (and
     // the Arc<omq_tokio::Socket> it holds) doesn't panic from missing
     // reactor.
-    let Some(handle) = arc.ctx.handle().cloned() else {
+    let Some(handle) = arc.ctx.close_handle().cloned() else {
         arc.notify.close();
         arc.ctx.socket_closed();
         drop(arc);

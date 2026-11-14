@@ -86,6 +86,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   group on the default interface. Before, the socket received nothing.
   The libzmq form with an interface, `udp://interface;group:port`, is not
   supported.
+- `zmq_close` after `zmq_ctx_shutdown`, or while `zmq_ctx_term` waits,
+  honors `ZMQ_LINGER`: queued messages are still sent and term waits for
+  them, as in libzmq. Before, such a close dropped the queue.
 
 ## [0.9.2] - 2026-11-04
 

@@ -550,6 +550,46 @@ fn ctx_term_waits_for_socket_close() {
 }
 
 #[test]
+fn close_after_ctx_shutdown_lingers_until_the_queue_is_delivered() {
+    // A port that nothing listens on yet, so the message stays queued.
+    let port = {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let endpoint = CString::new(format!("tcp://127.0.0.1:{port}")).unwrap();
+
+    let ctx = zmq_ctx_new();
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    assert_eq!(zmq_connect(push, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_send(push, b"x".as_ptr().cast(), 1, 0), 1);
+
+    assert_eq!(zmq_ctx_shutdown(ctx), 0);
+    assert_eq!(zmq_close(push), 0);
+    let ctx_addr = ctx as usize;
+    let (done_tx, done_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = done_tx.send(zmq_ctx_term(ctx_addr as *mut c_void));
+    });
+
+    let peer_ctx = zmq_ctx_new();
+    let pull = zmq_socket(peer_ctx, ZMQ_PULL);
+    set_i32(pull, ZMQ_RCVTIMEO, 5000);
+    assert_eq!(zmq_bind(pull, endpoint.as_ptr()), 0);
+    let mut buf = [0u8; 8];
+    assert_eq!(
+        zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0),
+        1,
+        "the queued message was dropped, errno={}",
+        omq_zmq::zmq_errno(),
+    );
+    assert_eq!(buf[0], b'x');
+    assert_eq!(done_rx.recv_timeout(Duration::from_secs(5)), Ok(0));
+
+    assert_eq!(zmq_close(pull), 0);
+    assert_eq!(zmq_ctx_term(peer_ctx), 0);
+}
+
+#[test]
 fn ctx_multiple_sockets_closed_before_term() {
     let ctx = zmq_ctx_new();
     let s1 = zmq_socket(ctx, ZMQ_PUSH);

@@ -313,6 +313,9 @@ pub struct Connection {
     /// commands.
     #[cfg(feature = "curve")]
     transform: Option<FrameTransform>,
+    /// The caller holds the transform; see [`Self::take_transform`].
+    #[cfg(feature = "curve")]
+    transform_lent: bool,
     peer_minor: u8,
     in_buf: ChunkedInputBuf,
     out: output::OutputQueue,
@@ -353,6 +356,8 @@ impl Connection {
             mechanism,
             #[cfg(feature = "curve")]
             transform: None,
+            #[cfg(feature = "curve")]
+            transform_lent: false,
             in_buf: ChunkedInputBuf::new(),
             out: output::OutputQueue::new(),
             events: VecDeque::new(),
@@ -467,17 +472,33 @@ impl Connection {
     }
 
     /// Temporarily remove the frame transform so the caller can run
-    /// encryption on a blocking thread. Must be restored via
-    /// [`Self::restore_transform`] before the next `send_message` call.
+    /// encryption on a blocking thread. Until
+    /// [`Self::restore_transform`] puts it back, `handle_input` and
+    /// `send_message` fail: without the transform they would treat the
+    /// encrypted connection as plaintext.
     #[cfg(feature = "curve")]
     pub fn take_transform(&mut self) -> Option<FrameTransform> {
-        self.transform.take()
+        let transform = self.transform.take();
+        self.transform_lent = transform.is_some();
+        transform
     }
 
     /// Put back a transform previously removed by [`Self::take_transform`].
     #[cfg(feature = "curve")]
     pub fn restore_transform(&mut self, tx: FrameTransform) {
         self.transform = Some(tx);
+        self.transform_lent = false;
+    }
+
+    /// Fail while the caller holds the frame transform.
+    #[cfg(feature = "curve")]
+    pub(super) fn check_transform_present(&self) -> crate::error::Result<()> {
+        if self.transform_lent {
+            return Err(crate::error::Error::Protocol(
+                "frame transform is taken; restore it first".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Emit pre-encrypted frames produced by

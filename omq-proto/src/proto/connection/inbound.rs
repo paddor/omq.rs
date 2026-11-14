@@ -46,6 +46,8 @@ impl Connection {
             }
             _ => {}
         }
+        #[cfg(feature = "curve")]
+        self.check_transform_present()?;
         if src.is_empty() {
             return Ok(());
         }

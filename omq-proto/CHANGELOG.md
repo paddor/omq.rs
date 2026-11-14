@@ -63,6 +63,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The inbound buffer merges runs of small read chunks of an incomplete
   frame. Before, a peer that paced a large frame in tiny reads made the
   buffer hold one handle per read, many times the size of the frame.
+- `Connection::handle_input` and `send_message` fail while the CURVE
+  transform is out through `take_transform`. Before, the connection
+  treated frames as plaintext until `restore_transform`, so a peer could
+  inject unauthenticated frames in that window.
 
 ### Security
 

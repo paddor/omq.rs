@@ -280,11 +280,16 @@ fn msg_routing_id_and_group_roundtrip() {
     let group = unsafe { std::ffi::CStr::from_ptr(zmq_msg_group(m.0.as_ptr().cast())) };
     assert_eq!(group.to_bytes(), b"group-a");
 
+    // A group above ZMQ_GROUP_MAX_LENGTH (255) is refused and leaves the
+    // group in place.
+    let too_long = std::ffi::CString::new("g".repeat(256)).unwrap();
     assert_eq!(
-        zmq_msg_set_group(m.0.as_mut_ptr().cast(), c"too-long-group".as_ptr()),
+        zmq_msg_set_group(m.0.as_mut_ptr().cast(), too_long.as_ptr()),
         -1
     );
     assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+    let group = unsafe { std::ffi::CStr::from_ptr(zmq_msg_group(m.0.as_ptr().cast())) };
+    assert_eq!(group.to_bytes(), b"group-a");
     assert_eq!(omq_zmq::zmq_msg_set_routing_id(std::ptr::null_mut(), 1), -1);
     assert_eq!(omq_zmq::zmq_errno(), libc::EFAULT);
     assert_eq!(

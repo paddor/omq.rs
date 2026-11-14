@@ -832,19 +832,13 @@ mod web_wire {
         assert_closed(&connection).await;
     }
 
-    /// Counts wakes and lets the test wait for the next one.
-    #[derive(Default)]
-    struct WakeProbe {
-        wakes: std::sync::atomic::AtomicUsize,
-        woken: tokio::sync::Notify,
-    }
+    /// A waker that reports each wake on a channel, so the test can wait
+    /// for the next one.
+    struct WakeProbe(tokio::sync::mpsc::UnboundedSender<()>);
 
     impl std::task::Wake for WakeProbe {
         fn wake(self: Arc<Self>) {
-            // Relaxed: a counter read after the notification it pairs with.
-            self.wakes
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            self.woken.notify_one();
+            let _ = self.0.send(());
         }
     }
 
@@ -871,11 +865,11 @@ mod web_wire {
         let stream = fixture.next().await.expect("peer delivered");
         let (_recv, mut send) = stream.into_split();
 
-        let probe = Arc::new(WakeProbe::default());
-        let waker = Waker::from(probe.clone());
+        let (probe, mut woken) = tokio::sync::mpsc::unbounded_channel();
+        let waker = Waker::from(Arc::new(WakeProbe(probe)));
         let mut cx = Context::from_waker(&waker);
         assert!(Pin::new(&mut send).poll_shutdown(&mut cx).is_pending());
-        tokio::time::timeout(Duration::from_secs(5), probe.woken.notified())
+        tokio::time::timeout(Duration::from_secs(5), woken.recv())
             .await
             .expect("the FIN acknowledgment did not wake the shutdown");
 
@@ -883,7 +877,7 @@ mod web_wire {
         let second = Pin::new(&mut send).poll_shutdown(&mut cx);
         assert!(second.is_pending(), "{second:?}");
         connection.close(0_u32.into(), b"");
-        tokio::time::timeout(Duration::from_secs(5), probe.woken.notified())
+        tokio::time::timeout(Duration::from_secs(5), woken.recv())
             .await
             .expect("the peer's close did not wake the shutdown");
         assert!(matches!(

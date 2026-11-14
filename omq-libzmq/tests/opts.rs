@@ -61,6 +61,8 @@ const OMQ_COMPRESSION_LEVEL: i32 = 1005;
 const OMQ_COMPRESSION_DICT: i32 = 1006;
 const OMQ_COMPRESSION_AUTO_TRAIN: i32 = 1007;
 const OMQ_WORKLOAD_PROFILE: i32 = 1008;
+const OMQ_MAX_MESSAGE_PARTS: i32 = 1020;
+const OMQ_MAX_PEER_SUBSCRIPTIONS: i32 = 1021;
 const OMQ_ON_MUTE_BLOCK: i32 = 0;
 const OMQ_ON_MUTE_DROP_NEWEST: i32 = 1;
 const OMQ_ON_MUTE_DROP_OLDEST: i32 = 2;
@@ -1323,6 +1325,124 @@ fn ws_ready_peer_limit_roundtrip_validation_and_materialization() {
     assert_eq!(omq_zmq::zmq_errno(), libc::EBUSY);
     assert_eq!(get_i32(socket, OMQ_WS_MAX_READY_PEERS), 7);
     assert_eq!(zmq_close(socket), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn peer_limit_options_default_to_the_c_abi_limits() {
+    let ctx = zmq_ctx_new();
+    let socket = zmq_socket(ctx, ZMQ_PULL);
+    assert_eq!(get_i32(socket, OMQ_MAX_MESSAGE_PARTS), 65_536);
+    assert_eq!(get_i32(socket, OMQ_MAX_PEER_SUBSCRIPTIONS), 1_048_576);
+    assert_eq!(zmq_close(socket), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn peer_limit_options_roundtrip_validation_and_materialization() {
+    for option in [OMQ_MAX_MESSAGE_PARTS, OMQ_MAX_PEER_SUBSCRIPTIONS] {
+        let ctx = zmq_ctx_new();
+        let socket = zmq_socket(ctx, ZMQ_PULL);
+        assert_eq!(set_i32(socket, option, 7), 0);
+        assert_eq!(get_i32(socket, option), 7);
+        // -1 is no limit.
+        assert_eq!(set_i32(socket, option, -1), 0);
+        assert_eq!(get_i32(socket, option), -1);
+        assert_eq!(set_i32(socket, option, i32::MAX), 0);
+        assert_eq!(get_i32(socket, option), i32::MAX);
+        for invalid in [0, -2, i32::MIN] {
+            assert_eq!(set_i32(socket, option, invalid), -1);
+            assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+        }
+        assert_eq!(set_bytes(socket, option, &[1, 2]), -1);
+        assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+        assert_eq!(get_i32(socket, option), i32::MAX);
+        helpers::bind_random_tcp(socket);
+        assert_eq!(set_i32(socket, option, 9), -1);
+        assert_eq!(omq_zmq::zmq_errno(), libc::EBUSY);
+        assert_eq!(get_i32(socket, option), i32::MAX);
+        assert_eq!(zmq_close(socket), 0);
+        assert_eq!(zmq_ctx_term(ctx), 0);
+    }
+}
+
+fn send_parts(socket: *mut c_void, parts: &[&[u8]]) {
+    const ZMQ_SNDMORE: i32 = 2;
+    for (index, part) in parts.iter().enumerate() {
+        let flags = if index + 1 < parts.len() {
+            ZMQ_SNDMORE
+        } else {
+            0
+        };
+        let sent = zmq_send(socket, part.as_ptr().cast(), part.len(), flags);
+        assert_eq!(usize::try_from(sent), Ok(part.len()));
+    }
+}
+
+/// A peer that sends more parts than `OMQ_MAX_MESSAGE_PARTS` is disconnected
+/// and its message is dropped whole. A message at the limit arrives.
+#[test]
+fn max_message_parts_drops_an_oversize_multipart_over_tcp() {
+    const ZMQ_PAIR: i32 = 0;
+    const ZMQ_EVENT_DISCONNECTED: u16 = 0x0200;
+    let ctx = zmq_ctx_new();
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    // The monitor materializes the backend, so the limit is set first.
+    assert_eq!(set_i32(pull, OMQ_MAX_MESSAGE_PARTS, 2), 0);
+    let monitor_addr = std::ffi::CString::new("inproc://opts-max-parts-monitor").unwrap();
+    assert_eq!(
+        omq_zmq::zmq_socket_monitor(
+            pull,
+            monitor_addr.as_ptr(),
+            i32::from(ZMQ_EVENT_DISCONNECTED)
+        ),
+        0
+    );
+    let monitor = zmq_socket(ctx, ZMQ_PAIR);
+    assert_eq!(zmq_connect(monitor, monitor_addr.as_ptr()), 0);
+    assert_eq!(set_i32(monitor, ZMQ_RCVTIMEO, 5000), 0);
+    assert_eq!(set_i32(pull, ZMQ_RCVTIMEO, 5000), 0);
+    let addr = helpers::bind_random_tcp(pull);
+
+    let over = zmq_socket(ctx, ZMQ_PUSH);
+    assert_eq!(set_i32(over, ZMQ_LINGER, 0), 0);
+    assert_eq!(set_i32(over, ZMQ_SNDTIMEO, 5000), 0);
+    assert_eq!(zmq_connect(over, addr.as_ptr()), 0);
+    send_parts(over, &[b"over-1", b"over-2", b"over-3"]);
+
+    // The third part ends the connection: event frame, then endpoint frame.
+    let mut event = [0u8; 64];
+    let len = zmq_recv(monitor, event.as_mut_ptr().cast(), event.len(), 0);
+    assert!(len >= 2, "no monitor event, errno={}", omq_zmq::zmq_errno());
+    assert_eq!(
+        u16::from_le_bytes([event[0], event[1]]),
+        ZMQ_EVENT_DISCONNECTED
+    );
+    assert!(zmq_recv(monitor, event.as_mut_ptr().cast(), event.len(), 0) > 0);
+    assert_eq!(zmq_close(over), 0);
+
+    let within = zmq_socket(ctx, ZMQ_PUSH);
+    assert_eq!(set_i32(within, ZMQ_SNDTIMEO, 5000), 0);
+    assert_eq!(zmq_connect(within, addr.as_ptr()), 0);
+    send_parts(within, &[b"ok-1", b"ok-2"]);
+
+    // The oversize message would have been queued first.
+    let mut buf = [0u8; 16];
+    for (expected, more) in [(b"ok-1", 1), (b"ok-2", 0)] {
+        let len = zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0);
+        assert_eq!(usize::try_from(len), Ok(expected.len()));
+        assert_eq!(&buf[..expected.len()], expected);
+        assert_eq!(get_i32(pull, ZMQ_RCVMORE), more);
+    }
+    assert_eq!(
+        zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), ZMQ_DONTWAIT),
+        -1
+    );
+    assert_eq!(omq_zmq::zmq_errno(), libc::EAGAIN);
+
+    assert_eq!(zmq_close(within), 0);
+    assert_eq!(zmq_close(monitor), 0);
+    assert_eq!(zmq_close(pull), 0);
     assert_eq!(zmq_ctx_term(ctx), 0);
 }
 

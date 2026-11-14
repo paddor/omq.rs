@@ -54,6 +54,11 @@ Socket options fall into three groups:
 `OMQ_ARENA_THRESHOLD` is an OMQ extension. It sets the outbound frame arena
 threshold before first bind/connect; `-1` restores the 4 KiB native default.
 
+`OMQ_MAX_MESSAGE_PARTS` (default 65,536) and `OMQ_MAX_PEER_SUBSCRIPTIONS`
+(default 1,048,576) are OMQ extensions. They bound the parts of one received
+message and the prefixes or groups one peer may hold; `-1` removes the limit.
+Set them before first bind/connect; later changes fail with `EBUSY`.
+
 `ZMQ_RECONNECT_STOP` is stored and returned. Only the connection-refused bit is
 currently wired into backend behavior.
 

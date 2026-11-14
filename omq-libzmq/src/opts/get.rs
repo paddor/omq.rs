@@ -22,10 +22,11 @@ use std::sync::Arc;
 /// One category of `zmq_getsockopt` options; `Ok(false)` when `option` is not in it.
 type GetOption = fn(&Arc<OmqSocket>, c_int, OptOut) -> Result<bool, c_int>;
 
-const GET_OPTIONS: [GetOption; 15] = [
+const GET_OPTIONS: [GetOption; 16] = [
     get_queue_option,
     get_state_option,
     get_message_option,
+    get_peer_limit_option,
     get_tuning_option,
     get_reconnect_option,
     get_heartbeat_option,
@@ -205,6 +206,21 @@ fn get_message_option(
             };
             out.i32(v)
         }
+        _ => return Ok(false),
+    }?;
+
+    Ok(true)
+}
+
+/// Limits on what one peer may send or subscribe to; -1 is no limit.
+fn get_peer_limit_option(
+    sock_arc: &Arc<OmqSocket>,
+    option: c_int,
+    out: OptOut,
+) -> Result<bool, c_int> {
+    match option {
+        OMQ_MAX_MESSAGE_PARTS => out.i32(overlay(sock_arc)?.limits.max_message_parts),
+        OMQ_MAX_PEER_SUBSCRIPTIONS => out.i32(overlay(sock_arc)?.limits.max_peer_subscriptions),
         _ => return Ok(false),
     }?;
 

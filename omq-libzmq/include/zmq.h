@@ -286,6 +286,8 @@ extern "C" {
 #define OMQ_QUIC_ALLOWED_ORIGINS    1017
 #define OMQ_QUIC_MAX_READY_PEERS    1018
 #define OMQ_QUIC_WEBTRANSPORT_PATH  1019
+#define OMQ_MAX_MESSAGE_PARTS       1020
+#define OMQ_MAX_PEER_SUBSCRIPTIONS  1021
 #define OMQ_ARENA_THRESHOLD         10001
 
 #define OMQ_ON_MUTE_BLOCK           0
@@ -374,6 +376,18 @@ extern "C" {
     MAX_READY_PEERS caps ready QUIC connections (default 1024). All must be
     set before backend materialization; later changes fail with EBUSY.
     Unknown to builds without the features (EINVAL).
+
+    OMQ_MAX_MESSAGE_PARTS is an int32_t cap on the parts of one received
+    message. Default 65536; -1 removes the cap. A peer that sends more is
+    disconnected. Inproc peers are not limited; WS/WSS peers never exceed
+    65536 parts.
+
+    OMQ_MAX_PEER_SUBSCRIPTIONS is an int32_t cap on the distinct prefixes
+    (PUB/XPUB) or groups (RADIO) one peer may hold. Default 1048576; -1
+    removes the cap. A subscription or join over the cap is ignored.
+
+    Both reject 0 and values below -1 with EINVAL. Set them before backend
+    materialization; later changes fail with EBUSY.
 
     OMQ_WORKLOAD_PROFILE is an int32_t scheduling hint. The default (-1) uses
     OMQ's socket-type default: REQ/REP latency profile, other sockets

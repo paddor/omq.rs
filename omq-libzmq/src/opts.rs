@@ -29,13 +29,13 @@ pub(crate) use raw::OptOut;
 pub use set::zmq_setsockopt;
 pub use set_security::{OmqPlainCredential, omq_socket_set_plain_server_credentials};
 
-/// Most parts one received message may have. libzmq has no such limit and
-/// no option for one, so this is fixed and far above the omq-tokio default.
-const MAX_MESSAGE_PARTS: usize = 65_536;
-
-/// Most prefixes or groups one peer may hold. Fixed for the same reason, and
+/// Default `OMQ_MAX_MESSAGE_PARTS`. libzmq has no part limit, so this is far
 /// above the omq-tokio default.
-const MAX_PEER_SUBSCRIPTIONS: usize = 1 << 20;
+const DEFAULT_MAX_MESSAGE_PARTS: i32 = 65_536;
+
+/// Default `OMQ_MAX_PEER_SUBSCRIPTIONS`, above the omq-tokio default for the
+/// same reason.
+const DEFAULT_MAX_PEER_SUBSCRIPTIONS: i32 = 1 << 20;
 
 /// Lock the socket's overlay, or `ETERM` when the lock is poisoned.
 fn overlay(
@@ -73,6 +73,7 @@ pub(crate) struct SocketOverlay {
     pub req_correlate: bool,
     pub req_relaxed: bool,
     pub xpub_nodrop: bool,
+    pub limits: PeerLimitsOverlay,
     pub ws: WsOverlay,
     pub wss: WssOverlay,
     #[cfg(feature = "quic")]
@@ -177,6 +178,31 @@ pub(crate) struct CompressionOverlay {
 pub(crate) struct ZapOverlay {
     pub domain: String,
     pub enforce: bool,
+}
+
+/// `OMQ_MAX_MESSAGE_PARTS` and `OMQ_MAX_PEER_SUBSCRIPTIONS` as set: a
+/// positive limit, or -1 for no limit.
+#[derive(Clone, Debug)]
+pub(crate) struct PeerLimitsOverlay {
+    pub max_message_parts: i32,
+    pub max_peer_subscriptions: i32,
+}
+
+impl Default for PeerLimitsOverlay {
+    fn default() -> Self {
+        Self {
+            max_message_parts: DEFAULT_MAX_MESSAGE_PARTS,
+            max_peer_subscriptions: DEFAULT_MAX_PEER_SUBSCRIPTIONS,
+        }
+    }
+}
+
+impl PeerLimitsOverlay {
+    /// The backend limit for a stored value. -1 does not convert, so it is
+    /// `None`: no limit.
+    fn limit(value: i32) -> Option<usize> {
+        usize::try_from(value).ok()
+    }
 }
 
 /// WebSocket origin policy and peer limit.
@@ -355,6 +381,7 @@ impl Default for SocketOverlay {
             req_correlate: false,
             req_relaxed: false,
             xpub_nodrop: false,
+            limits: PeerLimitsOverlay::default(),
             ws: WsOverlay::default(),
             wss: WssOverlay::default(),
             #[cfg(feature = "quic")]
@@ -447,8 +474,8 @@ impl SocketOverlay {
             linger: self.effective_linger(),
             identity: self.identity.clone(),
             max_message_size: self.max_message_size,
-            max_message_parts: Some(MAX_MESSAGE_PARTS),
-            max_peer_subscriptions: Some(MAX_PEER_SUBSCRIPTIONS),
+            max_message_parts: PeerLimitsOverlay::limit(self.limits.max_message_parts),
+            max_peer_subscriptions: PeerLimitsOverlay::limit(self.limits.max_peer_subscriptions),
             arena_threshold: self.arena_threshold,
             router_mandatory: self.router_mandatory,
             heartbeat_interval: self.heartbeat.ivl,

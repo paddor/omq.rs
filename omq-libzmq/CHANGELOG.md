@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `OMQ_MAX_MESSAGE_PARTS` (1020) and `OMQ_MAX_PEER_SUBSCRIPTIONS` (1021):
+  `int` socket options for the two limits that were fixed before. The
+  defaults stay 65,536 parts and 1,048,576 prefixes or groups; -1 removes
+  a limit. Set them before the first bind or connect; later they fail
+  with `EBUSY`.
+
 ### Changed
 
 - PLAIN, CURVE, ZAP and WSS trust options fail with `EBUSY` once the

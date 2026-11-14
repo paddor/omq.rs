@@ -9,8 +9,8 @@ use std::time::Duration;
 use serial_test::serial;
 
 use omq_zmq::{
-    zmq_bind, zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_term, zmq_poll, zmq_ppoll, zmq_recv,
-    zmq_send, zmq_socket,
+    zmq_bind, zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_shutdown, zmq_ctx_term, zmq_poll,
+    zmq_ppoll, zmq_recv, zmq_send, zmq_socket,
 };
 
 const ZMQ_PUSH: i32 = 8;
@@ -34,6 +34,7 @@ const ZMQ_REP: i32 = 4;
 const ZMQ_SNDHWM: i32 = 23;
 const ZMQ_RCVHWM: i32 = 24;
 const ZMQ_DONTWAIT: i32 = 1;
+const ZMQ_ETERM: i32 = 156_384_765;
 
 #[repr(C)]
 struct PollItem {
@@ -852,4 +853,55 @@ fn pollout_follows_req_rep_alternation() {
     zmq_close(req);
     zmq_close(rep);
     zmq_ctx_term(ctx);
+}
+
+/// A poll blocked on a socket whose context shuts down fails with ETERM,
+/// as in libzmq, instead of reporting the shutdown wake as input.
+#[test]
+fn poll_blocked_when_the_context_shuts_down_fails_with_eterm() {
+    for bound in [false, true] {
+        let ctx = zmq_ctx_new();
+        let pull = zmq_socket(ctx, ZMQ_PULL);
+        if bound {
+            let addr = CString::new("inproc://poll-ctx-shutdown").unwrap();
+            assert_eq!(zmq_bind(pull, addr.as_ptr()), 0);
+        }
+
+        let pull_addr = pull as usize;
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let poller = std::thread::spawn(move || {
+            let mut items = [PollItem {
+                socket: pull_addr as *mut c_void,
+                fd: invalid_fd(),
+                events: ZMQ_POLLIN,
+                revents: 0,
+            }];
+            entered_tx.send(()).unwrap();
+            let rc = zmq_poll(items.as_mut_ptr().cast(), 1, 10_000);
+            done_tx
+                .send((rc, omq_zmq::zmq_errno(), items[0].revents))
+                .unwrap();
+        });
+
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("poll thread entered");
+        // Let the poll block. Either order must give ETERM.
+        std::thread::sleep(Duration::from_millis(50));
+
+        assert_eq!(zmq_ctx_shutdown(ctx), 0);
+        let (rc, errno, revents) = done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("poll should wake on context shutdown");
+        assert_eq!(
+            (rc, errno),
+            (-1, ZMQ_ETERM),
+            "bound={bound} revents={revents}"
+        );
+        poller.join().unwrap();
+
+        assert_eq!(zmq_close(pull), 0);
+        assert_eq!(zmq_ctx_term(ctx), 0);
+    }
 }

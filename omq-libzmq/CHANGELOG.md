@@ -92,6 +92,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ZMQ_EVENTS` reports no `ZMQ_POLLOUT`, and reading `ZMQ_EVENTS` consumes
   it. Before, the descriptor followed incoming messages only, so an event
   loop that waited on it to send, for example on a PUSH socket, never woke.
+- `zmq_poll` blocked when its context shuts down fails with `ETERM`, as in
+  libzmq. Before, it reported `ZMQ_POLLIN` for a socket with nothing to
+  receive.
 - `zmq_poll` with a zero timeout reports `ZMQ_POLLIN` for a ZAP handler
   socket with a pending request. Before, it saw the request only after a
   wait.

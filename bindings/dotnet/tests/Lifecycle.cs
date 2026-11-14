@@ -34,7 +34,12 @@ static async Task ShutdownAndCancellationBoundPoll()
     Task<IReadOnlyList<PollResult>> pending = poller.WaitAsync(TimeSpan.FromSeconds(10), cancellation.Token);
     await Task.Delay(50);
     context.Shutdown();
-    await pending.WaitAsync(TimeSpan.FromSeconds(2));
+    try
+    {
+        await pending.WaitAsync(TimeSpan.FromSeconds(2));
+        throw new Exception("shutdown did not fail the pending poll");
+    }
+    catch (OmqException error) when (error.Errno == 156384765) { } // ETERM
 }
 
 static async Task ShutdownCompletesPendingSend()

@@ -999,7 +999,9 @@ impl Default for ReconnectPolicy {
 ///
 /// `PUB`, `XPUB`, and `RADIO` honor `DropOldest` for per-peer fan-out
 /// queues. Other fan-out sockets keep the native drop-newest behavior unless
-/// `xpub_nodrop` asks them to wait.
+/// `xpub_nodrop` asks them to wait. A subscriber that is not served from a
+/// shared frame queue, such as a WebSocket or CURVE peer, has an inbox of
+/// at most 64 messages and drops the newest message when it is full.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum OnMute {

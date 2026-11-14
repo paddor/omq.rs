@@ -26,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only; blocking sends are unchanged.
 - A received message may have at most 65,536 parts. A peer that sends more
   is disconnected. libzmq has no such limit and no option for one.
+- One peer holds at most 1,048,576 distinct subscription prefixes or
+  groups. A subscription or join over that is ignored. libzmq has no such
+  limit and no option for one.
 
 ### Fixed
 

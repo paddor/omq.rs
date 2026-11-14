@@ -101,6 +101,9 @@ pub(super) struct PeerEntry {
     pub(super) handle: PeerDriverHandle,
     pub(super) handshake: PeerHandshake,
     pub(super) progress: PeerProgress,
+    /// What the peer subscribed to or joined, shared with its driver, when
+    /// the socket limits it.
+    pub(super) subscriptions: Option<Arc<crate::engine::subscription_ledger::SubscriptionLedger>>,
     /// Inproc receive port and its sink, opened once this peer is ready.
     pub(super) inproc_inbound: Option<(
         Arc<crate::transport::inproc::InprocPort>,
@@ -117,6 +120,7 @@ impl PeerEntry {
             handle,
             handshake: PeerHandshake::default(),
             progress: PeerProgress::default(),
+            subscriptions: None,
             inproc_inbound: None,
             task: None,
         }

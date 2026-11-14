@@ -33,6 +33,10 @@ pub use set_security::{OmqPlainCredential, omq_socket_set_plain_server_credentia
 /// no option for one, so this is fixed and far above the omq-tokio default.
 const MAX_MESSAGE_PARTS: usize = 65_536;
 
+/// Most prefixes or groups one peer may hold. Fixed for the same reason, and
+/// above the omq-tokio default.
+const MAX_PEER_SUBSCRIPTIONS: usize = 1 << 20;
+
 /// Lock the socket's overlay, or `ETERM` when the lock is poisoned.
 fn overlay(
     sock: &crate::socket::OmqSocket,
@@ -444,6 +448,7 @@ impl SocketOverlay {
             identity: self.identity.clone(),
             max_message_size: self.max_message_size,
             max_message_parts: Some(MAX_MESSAGE_PARTS),
+            max_peer_subscriptions: Some(MAX_PEER_SUBSCRIPTIONS),
             arena_threshold: self.arena_threshold,
             router_mandatory: self.router_mandatory,
             heartbeat_interval: self.heartbeat.ivl,

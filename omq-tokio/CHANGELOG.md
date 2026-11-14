@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Options::max_message_parts` changes the limit or removes it. Before, a
   peer could hold 64 bytes for every two bytes it sent as empty parts
   unless `max_message_size` was set. Inproc peers are not limited.
+- One peer holds at most 65,536 distinct prefixes on a PUB or XPUB socket,
+  or groups on a RADIO socket, and 64 bytes per permitted entry on average.
+  A SUBSCRIBE or JOIN over the limit is not registered; monitors see
+  `SubscribeRejected` or `JoinRejected`. `Options::max_peer_subscriptions`
+  changes the limit or removes it. Before, a peer could add prefixes
+  without end, and each stayed in memory until it disconnected.
 
 ### Fixed
 

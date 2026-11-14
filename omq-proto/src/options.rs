@@ -51,6 +51,9 @@ pub const DEFAULT_PEER_MAX_BYTES: usize = 16 * 1024 * 1024;
 /// Default limit on the parts of one received message.
 pub const DEFAULT_MAX_MESSAGE_PARTS: usize = 1024;
 
+/// Default limit on the prefixes or groups one peer may hold.
+pub const DEFAULT_MAX_PEER_SUBSCRIPTIONS: usize = 65_536;
+
 /// Default per-socket monitor event queue capacity.
 pub const DEFAULT_MONITOR_CAPACITY: usize = 256;
 
@@ -478,6 +481,14 @@ pub struct Options {
     /// See [`SubscriptionAdmission`] for what a rejection skips.
     pub subscription_admission: Option<SubscriptionAdmission>,
 
+    /// PUB/XPUB/RADIO: most distinct prefixes or groups one peer may hold.
+    /// Defaults to 65,536. `None` = no limit. Their bytes are bounded too,
+    /// at 64 per permitted entry on average. A SUBSCRIBE or JOIN over the
+    /// limit is not registered and the peer is not told; monitors see
+    /// `SubscribeRejected` or `JoinRejected`. A prefix or group the peer
+    /// already holds is always accepted.
+    pub max_peer_subscriptions: Option<usize>,
+
     /// TLS configuration for `wss://` endpoints. Ignored for non-WSS
     /// transports. Requires the `ws` feature.
     #[cfg(feature = "ws")]
@@ -552,6 +563,7 @@ impl Default for Options {
             reconnect_stop_conn_refused: false,
             monitor_capacity: DEFAULT_MONITOR_CAPACITY,
             subscription_admission: None,
+            max_peer_subscriptions: Some(DEFAULT_MAX_PEER_SUBSCRIPTIONS),
             #[cfg(feature = "quic")]
             quic: QuicOptions::default(),
             #[cfg(feature = "dart")]
@@ -912,6 +924,14 @@ impl Options {
     #[must_use]
     pub fn monitor_capacity(mut self, events: usize) -> Self {
         self.monitor_capacity = events;
+        self
+    }
+
+    /// Set the most prefixes or groups one peer may hold. `None` removes
+    /// the limit. See [`Self::max_peer_subscriptions`].
+    #[must_use]
+    pub fn max_peer_subscriptions(mut self, entries: Option<usize>) -> Self {
+        self.max_peer_subscriptions = entries;
         self
     }
 

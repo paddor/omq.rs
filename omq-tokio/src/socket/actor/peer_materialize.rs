@@ -231,6 +231,7 @@ fn prepare_wire_driver(
     let (stream, carrier) = prepare_wire_carrier(socket, stream, &peer, profile)?;
 
     let link = actor_link(socket, peer_id, channels.control, handle.cancel.clone())?;
+    let subscriptions = socket.subscription_ledger();
     let peer_driver = ConnectionDriver::with_actor_config(
         stream,
         codec,
@@ -240,7 +241,7 @@ fn prepare_wire_driver(
     .with_actor_data_inbox(channels.data)
     .with_actor_control(
         socket.mail.peer_control_tx.clone(),
-        socket.subscription_gate(peer_id),
+        socket.subscription_gate(peer_id, subscriptions.clone()),
     );
     let peer_driver = configure_actor_driver(socket, peer_driver, &peer, setup.as_ref(), profile);
     let peer_driver = attach_transforms(socket, peer_driver, transforms);
@@ -269,6 +270,7 @@ fn prepare_wire_driver(
             admission: setup.map(|state| state.admission),
             ..PeerHandshake::default()
         },
+        subscriptions,
         ..PeerEntry::new(origin, handle)
     };
     Some((peer_driver, entry, io_assignment))

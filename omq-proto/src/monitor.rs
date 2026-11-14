@@ -119,8 +119,9 @@ pub enum MonitorEvent {
         /// Subscribed prefix.
         prefix: Bytes,
     },
-    /// `Options::subscription_admission` rejected a SUBSCRIBE on a PUB/XPUB
-    /// socket. The prefix was not registered. The peer is not told.
+    /// A SUBSCRIBE on a PUB/XPUB socket was not registered:
+    /// `Options::subscription_admission` rejected it, or the peer holds
+    /// `Options::max_peer_subscriptions` prefixes. The peer is not told.
     SubscribeRejected {
         /// Stable per-socket id of the subscribing connection.
         connection_id: u64,
@@ -137,6 +138,14 @@ pub enum MonitorEvent {
     /// A remote peer sent a JOIN command (RADIO/DISH group membership).
     JoinReceived {
         /// Joined group name.
+        group: Bytes,
+    },
+    /// A JOIN on a RADIO socket was not registered: the peer holds
+    /// `Options::max_peer_subscriptions` groups. The peer is not told.
+    JoinRejected {
+        /// Stable per-socket id of the joining connection.
+        connection_id: u64,
+        /// Rejected group name.
         group: Bytes,
     },
     /// A remote peer sent a LEAVE command.

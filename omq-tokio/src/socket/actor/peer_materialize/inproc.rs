@@ -82,6 +82,7 @@ fn register_inproc_peer(
     // Inproc's synthetic handshake never holds a pending-handshake slot.
     let entry = PeerEntry {
         inproc_inbound,
+        subscriptions: socket.subscription_ledger(),
         ..PeerEntry::new(peer.into_origin(io_assignment.index()), handle)
     };
     socket.peers.insert(peer_id, entry);
@@ -113,6 +114,10 @@ fn spawn_inproc_driver(
         && conn.inbound.is_none())
     .then(|| socket.link.recv_tx.clone());
 
+    let subscriptions = socket
+        .peers
+        .get(&peer_id)
+        .and_then(|peer| peer.subscriptions.clone());
     let completion = socket.reserve_completion(peer_id);
     let Ok(peer_output) = socket.mail.peer_out_tx.try_register() else {
         return;
@@ -120,7 +125,7 @@ fn spawn_inproc_driver(
 
     let ctx = InprocDriverCtx {
         peer_out: crate::engine::actor_output::PeerOutput::actor(peer_output),
-        subscriptions: socket.subscription_gate(peer_id),
+        subscriptions: socket.subscription_gate(peer_id, subscriptions),
         completion,
         peer_id,
         cancel: ends.cancel,

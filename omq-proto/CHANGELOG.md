@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   limit the parts of one received message. The default is 1024; `None`
   removes the limit. `Lz4Decoder` and `ZstdDecoder` take the same limit for
   arena messages through `with_max_message_parts`.
+- `Options::max_peer_subscriptions` limits the prefixes or groups one peer
+  may hold on a PUB, XPUB or RADIO socket. The default is 65,536; `None`
+  removes the limit. `MonitorEvent::JoinRejected` reports a JOIN over it.
 
 ### Changed
 

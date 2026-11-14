@@ -181,6 +181,17 @@ fn max_message_parts_defaults_to_1024_and_rejects_zero() {
 }
 
 #[test]
+fn max_peer_subscriptions_defaults_to_65536() {
+    let options = Options::default();
+    assert_eq!(options.max_peer_subscriptions, Some(65_536));
+    for entries in [None, Some(0), Some(1)] {
+        let options = Options::default().max_peer_subscriptions(entries);
+        assert_eq!(options.max_peer_subscriptions, entries);
+        assert!(options.validate().is_ok());
+    }
+}
+
+#[test]
 fn peer_count_limits_reject_zero_and_overflow() {
     for options in [
         Options::default().peer_send_queue_capacity(0),

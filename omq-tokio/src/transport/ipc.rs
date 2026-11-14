@@ -253,10 +253,9 @@ impl Drop for IpcListener {
 #[cfg(unix)]
 #[expect(clippy::unused_async)]
 async fn bind_filesystem_unix(endpoint: &Endpoint, path: &Path) -> Result<IpcListener> {
-    // Best-effort cleanup of any stale socket at this path. Ignore
-    // failure: the real bind below surfaces a precise error if the
-    // path is unusable.
-    let _ = std::fs::remove_file(path);
+    // libzmq unlinks whatever is at the path. That deletes regular files
+    // and leaves a live listener running but unreachable.
+    remove_stale_socket(path)?;
     listen_filesystem_unix(endpoint, path)
 }
 
@@ -271,9 +270,8 @@ fn listen_filesystem_unix(endpoint: &Endpoint, path: &Path) -> Result<IpcListene
     })
 }
 
-/// Bind an `shm://` rendezvous socket. Unlike IPC, a filesystem path is
-/// replaced only when it holds a stale socket: SHM peers are always OMQ, so
-/// the libzmq unlink-on-bind behavior does not apply.
+/// Bind an `shm://` rendezvous socket. As for IPC, a filesystem path is
+/// replaced only when it holds a stale socket.
 #[cfg(target_os = "linux")]
 pub(crate) fn bind_shm(endpoint: &Endpoint) -> Result<IpcListener> {
     match endpoint {
@@ -290,7 +288,7 @@ pub(crate) fn bind_shm(endpoint: &Endpoint) -> Result<IpcListener> {
 
 /// Remove `path` if it is a socket nobody accepts on; fail if anything else
 /// occupies it. A nonblocking connect never waits on a full backlog.
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn remove_stale_socket(path: &Path) -> Result<()> {
     use std::os::unix::fs::FileTypeExt;
     let metadata = match std::fs::symlink_metadata(path) {
@@ -311,7 +309,7 @@ fn remove_stale_socket(path: &Path) -> Result<()> {
     }
     Err(std::io::Error::new(
         std::io::ErrorKind::AddrInUse,
-        format!("shm path {} is in use", path.display()),
+        format!("socket path {} is in use", path.display()),
     )
     .into())
 }

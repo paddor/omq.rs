@@ -29,6 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - One peer holds at most 1,048,576 distinct subscription prefixes or
   groups. A subscription or join over that is ignored. libzmq has no such
   limit and no option for one.
+- `zmq_bind` on an `ipc://` path with a live listener fails with
+  `EADDRINUSE`, and it does not delete a file that is no socket. libzmq
+  unlinks the path in both cases.
 
 ### Fixed
 

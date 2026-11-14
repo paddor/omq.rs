@@ -177,7 +177,9 @@ async fn ipc_close_keeps_a_newer_bind_of_the_same_path() {
     let ep = Endpoint::Ipc(IpcPath::Filesystem(path.clone()));
     let old = Socket::new(SocketType::Pull, Options::default());
     old.bind(ep.clone()).await.unwrap();
-    // A later bind replaces the socket file, as after a crashed owner.
+    // Something else unlinks the file, as a libzmq bind would, and a later
+    // bind creates a new one at the same path.
+    std::fs::remove_file(&path).unwrap();
     let new = Socket::new(SocketType::Pull, Options::default());
     new.bind(ep.clone()).await.unwrap();
     old.close().await.unwrap();
@@ -193,4 +195,50 @@ async fn ipc_close_keeps_a_newer_bind_of_the_same_path() {
     assert_eq!(m, Message::single("to new"));
     new.close().await.unwrap();
     assert!(!path.exists(), "close should remove its own socket file");
+}
+
+/// A bind takes over a path only from a socket file that nobody listens
+/// on. It must not steal the path of a live listener, which would stay
+/// alive and unreachable, and it must not delete a file that is no socket.
+#[cfg(unix)]
+#[tokio::test]
+async fn ipc_bind_replaces_only_a_stale_socket_file() {
+    let base = format!("/tmp/omq-ipc-bind-{}", std::process::id());
+    let path = |name: &str| std::path::PathBuf::from(format!("{base}-{name}"));
+    let endpoint = |name: &str| Endpoint::Ipc(IpcPath::Filesystem(path(name)));
+    for name in ["live.sock", "data", "stale.sock"] {
+        let _ = std::fs::remove_file(path(name));
+    }
+
+    // A live listener keeps its path and stays reachable.
+    let first = Socket::new(SocketType::Pull, Options::default());
+    first.bind(endpoint("live.sock")).await.unwrap();
+    let second = Socket::new(SocketType::Pull, Options::default());
+    let error = second.bind(endpoint("live.sock")).await.unwrap_err();
+    assert!(
+        matches!(&error, omq_tokio::Error::Io(io) if io.kind() == std::io::ErrorKind::AddrInUse),
+        "{error:?}"
+    );
+    let push = Socket::new(SocketType::Push, Options::default());
+    push.connect(endpoint("live.sock")).await.unwrap();
+    push.send(Message::single("to first")).await.unwrap();
+    let message = tokio::time::timeout(Duration::from_secs(2), first.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(message, Message::single("to first"));
+
+    // A regular file is not deleted.
+    std::fs::write(path("data"), b"keep").unwrap();
+    assert!(second.bind(endpoint("data")).await.is_err());
+    assert_eq!(std::fs::read(path("data")).unwrap(), b"keep");
+    std::fs::remove_file(path("data")).unwrap();
+
+    // A socket file left by a dead owner is replaced.
+    drop(std::os::unix::net::UnixListener::bind(path("stale.sock")).unwrap());
+    assert!(path("stale.sock").exists());
+    second.bind(endpoint("stale.sock")).await.unwrap();
+
+    first.close().await.unwrap();
+    second.close().await.unwrap();
 }

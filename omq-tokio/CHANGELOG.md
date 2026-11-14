@@ -26,6 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SERVER keep every peer, also peers that announce the same identity.
   Before, two such clients evicted each other on every reconnect, though
   neither socket type routes by identity.
+- An `ipc://` bind replaces a socket file only when nobody listens on it.
+  A path with a live listener fails with `AddrInUse`, and a file that is
+  no socket is left alone. Before, the bind unlinked whatever was there,
+  as libzmq does: a regular file was deleted, and a live listener stayed
+  up but unreachable.
 
 ### Fixed
 

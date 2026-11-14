@@ -185,7 +185,9 @@ Backpressure is per connection: a full lane stops reading from that
 connection only, then its transport buffers and the sender's queues fill while
 other peers keep flowing. PULL and GATHER bound each lane by `recv_hwm`
 messages; PEER also bounds each connection by bytes. No socket-wide budget
-couples peers, and transport buffers are outside these budgets.
+couples peers, and transport buffers are outside these budgets. A departed
+peer's lane stays until the application drains it; with 1024 such lanes, a
+socket refuses new TCP, IPC, and other stream peers until it reads.
 
 Round-robin and exclusive sends wait when mute; nonblocking sends report
 `Full`. Fan-out applies its drop or block policy. Peer loss and slow consumers

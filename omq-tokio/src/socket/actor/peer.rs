@@ -8,6 +8,10 @@ use crate::socket::actor::peer_materialize::{ByteStreamConnection, PeerSetup};
 use crate::socket::dispatch::InprocSetup;
 use std::sync::atomic::Ordering;
 
+/// Most receive queues that departed peers may leave unread before new
+/// peers are refused: at the default HWM about 64 MiB of messages.
+const MAX_DEPARTED_RINGS: usize = 1024;
+
 impl SocketDriver {
     pub(super) async fn handle_internal_event(&mut self, evt: InternalEvent) {
         match evt {
@@ -310,32 +314,9 @@ impl SocketDriver {
 
         if self.socket_type != SocketType::Stream
             && let AnyConn::ByteStream { setup, .. } = &mut conn
+            && !self.admit_byte_stream(setup, &peer)
         {
-            if setup
-                .as_ref()
-                .is_some_and(|state| state.cancel.is_cancelled())
-            {
-                return;
-            }
-
-            if setup.is_none() {
-                let source = peer_ident_socket_addr(&peer.ident).map(|address| address.ip());
-                let Some(admission) = crate::transport::setup::PendingHandshake::acquire(
-                    &self.endpoints.setup_admission,
-                    None,
-                    source,
-                ) else {
-                    let reason = "socket pending-handshake limit reached";
-                    self.link.monitor.publish(peer.handshake_failed(reason));
-                    return;
-                };
-
-                *setup = Some(crate::transport::setup::SetupState {
-                    deadline: None,
-                    cancel: self.link.cancel.clone(),
-                    admission,
-                });
-            }
+            return;
         }
 
         self.link.monitor.publish(connection_event(
@@ -345,6 +326,71 @@ impl SocketDriver {
             self.next_peer_id,
         ));
         self.spawn_any_conn(conn, peer);
+    }
+
+    /// Admit a ZMTP byte stream to its handshake. A refused stream is closed:
+    /// a dialer redials it with backoff, a remote dialer reconnects.
+    fn admit_byte_stream(
+        &mut self,
+        setup: &mut Option<crate::transport::setup::SetupState>,
+        peer: &PeerSetup,
+    ) -> bool {
+        if setup
+            .as_ref()
+            .is_some_and(|state| state.cancel.is_cancelled())
+        {
+            return false;
+        }
+
+        if self.departed_rings() >= MAX_DEPARTED_RINGS {
+            let reason =
+                format!("socket holds {MAX_DEPARTED_RINGS} unread queues of departed peers");
+            self.link.monitor.publish(peer.handshake_failed(reason));
+            return false;
+        }
+
+        if setup.is_none() {
+            let source = peer_ident_socket_addr(&peer.ident).map(|address| address.ip());
+            let Some(admission) = crate::transport::setup::PendingHandshake::acquire(
+                &self.endpoints.setup_admission,
+                None,
+                source,
+            ) else {
+                let reason = "socket pending-handshake limit reached";
+                self.link.monitor.publish(peer.handshake_failed(reason));
+                return false;
+            };
+
+            *setup = Some(crate::transport::setup::SetupState {
+                deadline: None,
+                cancel: self.link.cancel.clone(),
+                admission,
+            });
+        }
+
+        true
+    }
+
+    /// Receive queues of departed peers that the application has not
+    /// drained. Each holds up to `recv_hwm` messages.
+    fn departed_rings(&self) -> usize {
+        let lanes = self
+            .link
+            .spsc
+            .fanin
+            .as_ref()
+            .map_or(0, |fanin| fanin.departed_lanes());
+        let rings = self
+            .link
+            .spsc
+            .tcp_consumers
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|ring| !self.peers.contains_key(&ring.peer_id))
+            .count();
+
+        lanes + rings
     }
 
     /// Dispatch on transport type: byte-stream conns get the full

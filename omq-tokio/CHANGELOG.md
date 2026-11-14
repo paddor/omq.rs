@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A socket whose application stops reading refuses new stream connections
+  once 1024 departed peers left receive queues it has not drained, about
+  64 MiB at the default HWM. Monitors see `HandshakeFailed`, the peer
+  redials with backoff, and it gets in once the application reads. Before,
+  peers that connected, sent and left could fill memory without limit.
+  Inproc and DART connections are not refused.
 - XPUB surfaces a `\x00<prefix>` message for each subscription that a
   subscriber still held when it disconnected, as libzmq does. Before, a
   forwarder kept the subscriptions of every past subscriber upstream.

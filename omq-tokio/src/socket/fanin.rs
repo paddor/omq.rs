@@ -106,6 +106,16 @@ impl Fanin {
         self.source_aware
     }
 
+    /// Lanes whose producer dropped and that a receive has not retired yet:
+    /// they hold unread messages, or a receive has not seen them empty.
+    pub(crate) fn departed_lanes(&self) -> usize {
+        let registrar = self.registrar.lock().unwrap();
+        // Both counts include the registrar's own lane.
+        registrar
+            .registered_lanes()
+            .saturating_sub(registrar.sender_count())
+    }
+
     pub(crate) fn register(self: &Arc<Self>) -> Option<Producer> {
         self.register_capacity(None, false, STANDARD_PRODUCER)
     }

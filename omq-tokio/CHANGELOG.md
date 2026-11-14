@@ -198,6 +198,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   memory that a sender had reclaimed stayed resident in each receiver,
   up to many times `shm_max_memory`. No format change: older peers
   ignore the new header flag and keep the old behavior.
+- A `dart://` listener keeps no state for a HELLO. It derives the WELCOME
+  session from the HELLO's source and session with a secret and admits a
+  CONFIRM that echoes it. Before, each HELLO took one of a fixed number
+  of pending places for three seconds, so sources that never confirmed
+  could keep real peers out. The wire format is unchanged.
 
 ## [0.34.3] - 2026-11-04
 

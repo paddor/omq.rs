@@ -105,6 +105,11 @@ accepts only an echo of C and replies CONFIRM with `Session=C, Echo=L`.
 The listener MUST withhold admission and data credit until this confirmation.
 The connector MAY admit its local route upon accepting WELCOME.
 
+A listener SHOULD NOT keep state for a HELLO. It MAY derive L from the
+connector's address and C with a secret, and admit a CONFIRM whose Echo it can
+derive again. Such a listener MAY issue a different L for a repeated HELLO
+after it changed its secret; the connector keeps the first L it accepted.
+
 Participants MUST retry lost establishment messages. A repeated WELCOME
 MUST elicit CONFIRM. Identifiers remain unchanged during retries; a new
 attempt MUST use fresh identifiers. A changed HELLO MAY challenge a new
@@ -303,7 +308,9 @@ protection must provide it separately.
 
 Implementations MUST bound peer admission, pending setup, retention, and
 reordering, and enforce message size limits before reservation. An advertised
-u64 length does not authorize unbounded allocation. Repeated setup traffic,
+u64 length does not authorize unbounded allocation. A listener that keeps
+state for each HELLO lets sources that never confirm exhaust pending setup;
+deriving L avoids that. Repeated setup traffic,
 forged feedback, and fragment reservations can consume resources. ECN
 feedback is unauthenticated, and LAN mode does not protect shared paths
 against excessive aggregate load.

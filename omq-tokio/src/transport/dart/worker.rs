@@ -2,6 +2,7 @@
 //! mailboxes and reusable body capacity remain independent of data backlogs.
 
 use std::collections::VecDeque;
+use std::hash::{BuildHasher, RandomState};
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -138,15 +139,67 @@ impl Lease {
     }
 }
 
+/// A handshake that is not a peer yet: a connector's attempt, or for one
+/// call the listener side of a CONFIRM that proved its WELCOME.
 struct Pending {
     /// Expiry is fixed at the first HELLO; repeats never extend it.
     lease: Lease,
-    /// Inbound handshakes hold a pending slot; our own connector does not.
-    _slot: Option<OwnedSemaphorePermit>,
+}
+
+/// Secrets for the session IDs that a listener puts in WELCOME. An ID is a
+/// keyed hash of the HELLO's source and session, so the listener stores
+/// nothing for a HELLO: a CONFIRM proves itself by echoing an ID that the
+/// same hash yields again. Sources that never confirm hold no state.
+#[derive(Default)]
+struct Challenges {
+    current: RandomState,
+    /// Still accepted, so a rotation does not fail a handshake under way.
+    previous: RandomState,
+    rotated: Option<Instant>,
+    /// HELLOs to answer with WELCOME in the next service pass.
+    queue: VecDeque<(SocketAddr, u64)>,
+}
+
+impl Challenges {
+    /// The listener session ID for a HELLO with `session` from `source`.
+    fn issue(&self, source: SocketAddr, session: u64) -> u64 {
+        Self::derive(&self.current, source, session)
+    }
+
+    /// Whether `echo` is an ID issued for `session` from `source`.
+    fn verify(&self, source: SocketAddr, session: u64, echo: u64) -> bool {
+        echo == Self::derive(&self.current, source, session)
+            || echo == Self::derive(&self.previous, source, session)
+    }
+
+    fn derive(secret: &RandomState, source: SocketAddr, session: u64) -> u64 {
+        // Session IDs are nonzero.
+        secret.hash_one((source, session)).max(1)
+    }
+
+    /// Replace the secret once per lease, so an echoed ID is valid for one
+    /// to two leases.
+    fn rotate(&mut self, now: Instant) {
+        if self
+            .rotated
+            .is_none_or(|rotated| now.duration_since(rotated) >= LEASE)
+        {
+            self.previous = std::mem::take(&mut self.current);
+            self.rotated = Some(now);
+        }
+    }
+
+    /// Queue one WELCOME. A full queue drops it: the connector repeats
+    /// its HELLO.
+    fn queue(&mut self, source: SocketAddr, session: u64) {
+        if self.queue.len() < MESSAGES {
+            self.queue.push_back((source, session));
+        }
+    }
 }
 
 impl Pending {
-    /// Start a handshake lease without a pending slot.
+    /// Start a handshake lease.
     fn new(
         handshake: Handshake,
         socket_type: SocketType,
@@ -161,7 +214,6 @@ impl Pending {
                 expires: now + LEASE,
                 retry: now,
             },
-            _slot: None,
         }
     }
 }
@@ -300,6 +352,8 @@ struct Routes {
     remaining: usize,
     /// Generation of the most recently admitted peer.
     generation: u64,
+    /// Listener only: the stateless side of the handshake.
+    challenges: Challenges,
 }
 
 impl Routes {
@@ -463,6 +517,7 @@ impl EndpointWorker {
         if !self.drain_commands(&mut task.routes, &task.signal) {
             return None;
         }
+        task.routes.challenges.rotate(now);
         self.ensure_connector(&mut task.routes, now);
 
         let mut stats = DartStats::default();
@@ -501,7 +556,7 @@ impl EndpointWorker {
         {
             let handshake = Handshake::connector(fresh_session());
             let pending = Pending::new(handshake, self.socket_type, None, now);
-            self.insert_pending(target, pending, routes);
+            Self::insert_pending(target, pending, routes);
         }
     }
 
@@ -530,21 +585,7 @@ impl EndpointWorker {
         }
     }
 
-    fn insert_pending(&self, source: SocketAddr, mut pending: Pending, routes: &mut Routes) {
-        if !pending.lease.handshake.is_connector() {
-            // Never answer a new source that could not take a ready slot.
-            if !routes.map.contains_key(&source) && self.shared.peers.available_permits() == 0 {
-                return;
-            }
-            let Ok(slot) = self.shared.pending.clone().try_acquire_owned() else {
-                return;
-            };
-            pending = Pending {
-                _slot: Some(slot),
-                ..pending
-            };
-        }
-
+    fn insert_pending(source: SocketAddr, pending: Pending, routes: &mut Routes) {
         if let Some(route) = routes.map.get_mut(&source) {
             route.pending = Some(pending);
             return;
@@ -585,10 +626,14 @@ impl EndpointWorker {
         {
             return;
         }
-        // Only a listener admits HELLO. A connector that did would let one
+        // Only a listener answers HELLO. A connector that did would let one
         // datagram from its target address replace its own handshake.
-        if ready.phase == Phase::Hello && self.target.is_none() {
-            self.admit_hello(source, ready, now, routes);
+        if self.target.is_none() {
+            match ready.phase {
+                Phase::Hello => self.challenge_hello(source, ready, routes),
+                Phase::Confirm => self.admit_confirm(source, ready, now, routes),
+                Phase::Welcome => {}
+            }
         }
 
         let Some(route) = routes.map.get_mut(&source) else {
@@ -617,38 +662,61 @@ impl EndpointWorker {
         }
     }
 
-    /// Start a listener handshake unless this HELLO repeats a known session.
-    fn admit_hello(&self, source: SocketAddr, ready: Ready<'_>, now: Instant, routes: &mut Routes) {
-        let existing = routes.map.get(&source);
-        let same = existing.is_some_and(|route| {
+    /// Whether `source` already has a peer for the connector session
+    /// `session`. That peer answers repeats of its own handshake.
+    fn has_session(routes: &Routes, source: SocketAddr, session: u64) -> bool {
+        routes.map.get(&source).is_some_and(|route| {
             route
-                .pending
+                .peer
                 .as_ref()
-                .is_some_and(|pending| pending.lease.handshake.remote() == ready.session)
-                || route
-                    .peer
-                    .as_ref()
-                    .is_some_and(|peer| peer.lease.handshake.remote() == ready.session)
-        });
-        if same {
+                .is_some_and(|peer| peer.lease.handshake.remote() == session)
+        })
+    }
+
+    /// Whether a handshake from `source` could become a peer: not while an
+    /// exclusive CHANNEL has another one, and not when a new source would
+    /// find no ready slot.
+    fn admits_source(&self, routes: &Routes, source: SocketAddr) -> bool {
+        if routes.map.contains_key(&source) {
+            return true;
+        }
+        let exclusive = self.socket_type == SocketType::Channel
+            && routes.map.values().any(|route| route.peer.is_some());
+        !exclusive && self.shared.peers.available_permits() != 0
+    }
+
+    /// Answer a HELLO with a WELCOME whose session ID is derived from it.
+    /// Nothing is stored for the source.
+    fn challenge_hello(&self, source: SocketAddr, ready: Ready<'_>, routes: &mut Routes) {
+        if Self::has_session(routes, source, ready.session) || !self.admits_source(routes, source) {
             return;
         }
+        routes.challenges.queue(source, ready.session);
+    }
 
-        // Exclusive CHANNEL cannot admit a second source while live.
-        if self.socket_type == SocketType::Channel
-            && existing.is_none()
-            && routes.map.values().any(|route| route.peer.is_some())
+    /// Start the listener side for a CONFIRM that echoes a session ID this
+    /// endpoint derived for its source and session. The caller then
+    /// confirms and promotes it at once.
+    fn admit_confirm(
+        &self,
+        source: SocketAddr,
+        ready: Ready<'_>,
+        now: Instant,
+        routes: &mut Routes,
+    ) {
+        if Self::has_session(routes, source, ready.session)
+            || !routes.challenges.verify(source, ready.session, ready.echo)
+            || !self.admits_source(routes, source)
         {
             return;
         }
-
         let pending = Pending::new(
-            Handshake::listener(fresh_session(), ready.session),
+            Handshake::listener(ready.echo, ready.session),
             ready.socket_type,
             ready.identity.map(Bytes::copy_from_slice),
             now,
         );
-        self.insert_pending(source, pending, routes);
+        Self::insert_pending(source, pending, routes);
     }
 
     /// Drop a confirmed handshake that found no ready slot. A connector

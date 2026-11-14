@@ -42,6 +42,8 @@ const ZMQ_RCVHWM: i32 = 24;
 const ZMQ_RCVTIMEO: i32 = 27;
 const ZMQ_SNDTIMEO: i32 = 28;
 const ZMQ_LAST_ENDPOINT: i32 = 32;
+const OMQ_MAX_MESSAGE_PARTS: i32 = 1020;
+const OMQ_MAX_PEER_SUBSCRIPTIONS: i32 = 1021;
 const OMQ_ARENA_THRESHOLD: i32 = 10_001;
 const LAST_ENDPOINT_CAPACITY: usize = 512;
 const RAW_SOCKET_MT: &[u8] = b"omq.RawSocket\0";
@@ -503,6 +505,20 @@ impl UserData for NativeSocket {
         methods.add_method("get_arena_threshold", |_, this, ()| {
             this.get_i64(OMQ_ARENA_THRESHOLD)
         });
+        methods.add_method("set_max_message_parts", |_, this, value: i32| {
+            this.set_i32(OMQ_MAX_MESSAGE_PARTS, value)?;
+            Ok(true)
+        });
+        methods.add_method("get_max_message_parts", |_, this, ()| {
+            this.get_i32(OMQ_MAX_MESSAGE_PARTS)
+        });
+        methods.add_method("set_max_peer_subscriptions", |_, this, value: i32| {
+            this.set_i32(OMQ_MAX_PEER_SUBSCRIPTIONS, value)?;
+            Ok(true)
+        });
+        methods.add_method("get_max_peer_subscriptions", |_, this, ()| {
+            this.get_i32(OMQ_MAX_PEER_SUBSCRIPTIONS)
+        });
         methods.add_method("subscribe", |_, this, prefix: LuaString| {
             this.set_bytes(ZMQ_SUBSCRIBE, prefix.as_bytes().as_ref())?;
             Ok(true)
@@ -738,6 +754,19 @@ impl NativeSocket {
             std::mem::size_of::<i32>(),
         );
         check_rc(rc)
+    }
+
+    fn get_i32(&self, option: i32) -> LuaResult<i32> {
+        let mut value = 0_i32;
+        let mut len = std::mem::size_of::<i32>();
+        let rc = omq_zmq::zmq_getsockopt(
+            self.inner.ptr()?,
+            option,
+            (&mut value as *mut i32).cast(),
+            &mut len,
+        );
+        check_rc(rc)?;
+        Ok(value)
     }
 
     fn set_i64(&self, option: i32, value: i64) -> LuaResult<()> {
@@ -1656,6 +1685,38 @@ unsafe extern "C-unwind" fn raw_socket_get_arena_threshold(state: *mut ffi::lua_
     )
 }
 
+fn raw_socket_get_i32(state: *mut ffi::lua_State, option: i32) -> Result<c_int, String> {
+    let socket = raw_socket_mut(state)?;
+    let value = socket
+        .socket()?
+        .get_i32(option)
+        .map_err(|err| err.to_string())?;
+    unsafe {
+        ffi::lua_pushinteger(state, i64::from(value));
+    }
+    Ok(1)
+}
+
+unsafe extern "C-unwind" fn raw_socket_set_max_message_parts(state: *mut ffi::lua_State) -> c_int {
+    raw_finish(state, raw_socket_set_i32(state, OMQ_MAX_MESSAGE_PARTS))
+}
+
+unsafe extern "C-unwind" fn raw_socket_get_max_message_parts(state: *mut ffi::lua_State) -> c_int {
+    raw_finish(state, raw_socket_get_i32(state, OMQ_MAX_MESSAGE_PARTS))
+}
+
+unsafe extern "C-unwind" fn raw_socket_set_max_peer_subscriptions(
+    state: *mut ffi::lua_State,
+) -> c_int {
+    raw_finish(state, raw_socket_set_i32(state, OMQ_MAX_PEER_SUBSCRIPTIONS))
+}
+
+unsafe extern "C-unwind" fn raw_socket_get_max_peer_subscriptions(
+    state: *mut ffi::lua_State,
+) -> c_int {
+    raw_finish(state, raw_socket_get_i32(state, OMQ_MAX_PEER_SUBSCRIPTIONS))
+}
+
 fn raw_socket_set_bytes(state: *mut ffi::lua_State, option: i32) -> Result<c_int, String> {
     let socket = raw_socket_mut(state)?;
     let value = lua_string_bytes(state, 2)?;
@@ -1769,6 +1830,26 @@ fn ensure_raw_socket_metatable(state: *mut ffi::lua_State) {
                 b"get_arena_threshold\0",
                 raw_socket_get_arena_threshold,
             );
+            raw_set_cfunc(
+                state,
+                b"set_max_message_parts\0",
+                raw_socket_set_max_message_parts,
+            );
+            raw_set_cfunc(
+                state,
+                b"get_max_message_parts\0",
+                raw_socket_get_max_message_parts,
+            );
+            raw_set_cfunc(
+                state,
+                b"set_max_peer_subscriptions\0",
+                raw_socket_set_max_peer_subscriptions,
+            );
+            raw_set_cfunc(
+                state,
+                b"get_max_peer_subscriptions\0",
+                raw_socket_get_max_peer_subscriptions,
+            );
             raw_set_cfunc(state, b"subscribe\0", raw_socket_subscribe);
             raw_set_cfunc(state, b"unsubscribe\0", raw_socket_unsubscribe);
             raw_set_cfunc(state, b"join\0", raw_socket_join);
@@ -1873,6 +1954,8 @@ fn set_constants(table: &Table) -> LuaResult<()> {
     table.set("DONTWAIT", ZMQ_DONTWAIT)?;
     table.set("SNDMORE", ZMQ_SNDMORE)?;
     table.set("OMQ_ARENA_THRESHOLD", OMQ_ARENA_THRESHOLD)?;
+    table.set("OMQ_MAX_MESSAGE_PARTS", OMQ_MAX_MESSAGE_PARTS)?;
+    table.set("OMQ_MAX_PEER_SUBSCRIPTIONS", OMQ_MAX_PEER_SUBSCRIPTIONS)?;
     Ok(())
 }
 

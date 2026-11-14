@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- `SocketOption.MaxMessageParts` and `SocketOption.MaxPeerSubscriptions`
+  limit the parts of one received message and the prefixes or groups one
+  peer may hold; `-1` removes the limit.
+
 ## [0.2.12] - 2026-11-04
 
 ### Changed

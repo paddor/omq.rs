@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `OMQ_MAX_MESSAGE_PARTS` (`max_message_parts`, default 1024) limits the
+  parts of one received message. `OMQ_MAX_PEER_SUBSCRIPTIONS`
+  (`max_peer_subscriptions`, default 65536) limits the prefixes or groups
+  one peer may hold on a PUB, XPUB or RADIO socket. -1 removes a limit.
+
 ## [0.27.6] - 2026-11-04
 
 ### Changed

@@ -33,6 +33,10 @@ func TestOptionsAcceptBeforeMaterialization(t *testing.T) {
 		HandshakeTimeout(time.Second),
 		MaxPendingHandshakes(8),
 		NoMaxMessageSize(),
+		MaxMessageParts(8),
+		NoMaxMessageParts(),
+		MaxPeerSubscriptions(16),
+		NoMaxPeerSubscriptions(),
 		Conflate(false),
 		RouterMandatory(false),
 		OnMutePolicy(OnMuteBlock),
@@ -238,6 +242,37 @@ func TestOptionsSnapshotReportsConfiguredValues(t *testing.T) {
 	}
 }
 
+func TestOptionsSnapshotReportsPartAndSubscriptionLimits(t *testing.T) {
+	ctx := openTestContext(t)
+	defer closeContext(t, ctx)
+
+	socket, err := ctx.Socket(Pub, MaxMessageParts(16), MaxPeerSubscriptions(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeSocket(t, socket)
+
+	options := socket.Options()
+	if !options.MaxMessageParts.Set || options.MaxMessageParts.Value != 16 || options.NoMaxMessageParts {
+		t.Fatalf("MaxMessageParts = %#v/%v", options.MaxMessageParts, options.NoMaxMessageParts)
+	}
+	if !options.MaxPeerSubscriptions.Set || options.MaxPeerSubscriptions.Value != 0 ||
+		options.NoMaxPeerSubscriptions {
+		t.Fatalf("MaxPeerSubscriptions = %#v/%v", options.MaxPeerSubscriptions, options.NoMaxPeerSubscriptions)
+	}
+
+	for _, option := range []SocketOption{NoMaxMessageParts(), NoMaxPeerSubscriptions()} {
+		if err := option(socket); err != nil {
+			t.Fatal(err)
+		}
+	}
+	options = socket.Options()
+	if options.MaxMessageParts.Set || !options.NoMaxMessageParts ||
+		options.MaxPeerSubscriptions.Set || !options.NoMaxPeerSubscriptions {
+		t.Fatalf("limit sentinel options = %#v", options)
+	}
+}
+
 func TestOptionsCannotChangeAfterMaterialization(t *testing.T) {
 	ctx := openTestContext(t)
 	defer closeContext(t, ctx)
@@ -268,6 +303,9 @@ func TestOptionsRejectInvalidValues(t *testing.T) {
 		HeartbeatTTL(time.Duration(maxHeartbeatTTLMillis+1) * time.Millisecond),
 		HandshakeTimeout(-time.Millisecond),
 		MaxMessageSize(-1),
+		MaxMessageParts(0),
+		MaxMessageParts(-1),
+		MaxPeerSubscriptions(-1),
 		ReconnectExponential(time.Second, time.Millisecond),
 		MaxPendingHandshakes(0),
 		TCPKeepalive(time.Second, time.Second, 0),

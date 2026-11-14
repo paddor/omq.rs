@@ -42,6 +42,9 @@ public static class SocketOption
     public const int Priority = 112, BusyPoll = 113, HiccupMessage = 114, XSubVerboseUnsubscribe = 115, TopicsCount = 116;
     public const int NormMode = 117, NormUnicastNack = 118, NormBufferSize = 119, NormSegmentSize = 120;
     public const int NormBlockSize = 121, NormNumParity = 122, NormNumAutoParity = 123, NormPush = 124, ArenaThreshold = 10001;
+    /// OMQ limits: parts of one received message, and prefixes or groups one peer may hold.
+    /// -1 removes a limit. Set before bind or connect.
+    public const int MaxMessageParts = 1020, MaxPeerSubscriptions = 1021;
 }
 
 /// Common socket settings applied immediately after socket creation.

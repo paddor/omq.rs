@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- `maxMessageParts` and `maxPeerSubscriptions` socket options. Negative
+  means no limit.
+
 ## [0.2.13] - 2026-11-04
 
 ### Changed

@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- `maxMessageParts` / `noMaxMessageParts` and `maxPeerSubscriptions` /
+  `noMaxPeerSubscriptions` on `Socket` and `SocketOptions.Builder`.
+
 ## [0.5.7] - 2026-11-04
 
 ### Changed

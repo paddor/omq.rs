@@ -53,6 +53,10 @@ final class OptionsTest {
                     .handshakeTimeout(Duration.ofSeconds(1))
                     .maxPendingHandshakes(8)
                     .noMaxMessageSize()
+                    .maxMessageParts(16)
+                    .noMaxMessageParts()
+                    .maxPeerSubscriptions(0)
+                    .noMaxPeerSubscriptions()
                     .conflate(false)
                     .routerMandatory(false)
                     .onMute(OnMute.BLOCK)
@@ -109,6 +113,10 @@ final class OptionsTest {
                 .handshakeTimeout(Duration.ofSeconds(1))
                 .maxPendingHandshakes(8)
                 .noMaxMessageSize()
+                .maxMessageParts(16)
+                .noMaxMessageParts()
+                .maxPeerSubscriptions(0)
+                .noMaxPeerSubscriptions()
                 .conflate(false)
                 .routerMandatory(false)
                 .onMute(OnMute.BLOCK)
@@ -223,6 +231,10 @@ final class OptionsTest {
                 () -> SocketOptions.builder().compressionLevel(5));
         assertThrows(IllegalArgumentException.class,
                 () -> SocketOptions.builder().heartbeatTtl(Duration.ofMillis(6_553_501)));
+        assertThrows(IllegalArgumentException.class,
+                () -> SocketOptions.builder().maxMessageParts(0));
+        assertThrows(IllegalArgumentException.class,
+                () -> SocketOptions.builder().maxPeerSubscriptions(-1));
     }
 
     @Test
@@ -240,6 +252,23 @@ final class OptionsTest {
         try (Context context = OMQ.context();
              Socket pull = context.socket(SocketType.PULL)) {
             assertThrows(IllegalArgumentException.class, () -> pull.maxMessageSize(-1));
+        }
+    }
+
+    @Test
+    void rejectsInvalidMaxMessageParts() {
+        try (Context context = OMQ.context();
+             Socket pull = context.socket(SocketType.PULL)) {
+            assertThrows(IllegalArgumentException.class, () -> pull.maxMessageParts(0));
+            assertThrows(IllegalArgumentException.class, () -> pull.maxMessageParts(-1));
+        }
+    }
+
+    @Test
+    void rejectsNegativeMaxPeerSubscriptions() {
+        try (Context context = OMQ.context();
+             Socket pub = context.socket(SocketType.PUB)) {
+            assertThrows(IllegalArgumentException.class, () -> pub.maxPeerSubscriptions(-1));
         }
     }
 

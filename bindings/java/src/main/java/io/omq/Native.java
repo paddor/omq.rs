@@ -108,6 +108,10 @@ final class Native {
 
     static native void socketSetMaxMessageSize(long handle, long size);
 
+    static native void socketSetMaxMessageParts(long handle, long parts);
+
+    static native void socketSetMaxPeerSubscriptions(long handle, long max);
+
     static native void socketSetCompressionAutoTrain(long handle, int enabled);
 
     static native void socketSetCompressionThreshold(long handle, long threshold);

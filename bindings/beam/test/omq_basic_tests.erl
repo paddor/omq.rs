@@ -1315,7 +1315,66 @@ option_parity_rejections_test() ->
     ?assertEqual({ok, 1}, omq:getsockopt(Sock, omq_compression_auto_train)),
     ok = omq:setsockopt(Sock, omq_compression_auto_train, 0),
     ?assertEqual({ok, 0}, omq:getsockopt(Sock, omq_compression_auto_train)),
+    ?assertEqual({ok, 1024}, omq:getsockopt(Sock, omq_max_message_parts)),
+    ok = omq:setsockopt(Sock, omq_max_message_parts, 16),
+    ?assertEqual({ok, 16}, omq:getsockopt(Sock, omq:omq_max_message_parts())),
+    ok = omq:setsockopt(Sock, omq_max_message_parts, -1),
+    ?assertEqual({ok, -1}, omq:getsockopt(Sock, omq_max_message_parts)),
+    ?assertMatch({error, badarg, _}, omq:setsockopt(Sock, omq_max_message_parts, 0)),
+    ?assertEqual({ok, 65536}, omq:getsockopt(Sock, omq_max_peer_subscriptions)),
+    ok = omq:setsockopt(Sock, omq_max_peer_subscriptions, 0),
+    ?assertEqual({ok, 0}, omq:getsockopt(Sock, omq:omq_max_peer_subscriptions())),
+    ok = omq:setsockopt(Sock, omq_max_peer_subscriptions, -1),
+    ?assertEqual({ok, -1}, omq:getsockopt(Sock, omq_max_peer_subscriptions)),
     ok = omq:close(Sock),
+    ok = omq:term(Ctx).
+
+max_message_parts_drops_message_over_limit_test() ->
+    {ok, Ctx} = omq:context(),
+    {ok, Pull} = omq:socket(Ctx, pull),
+    {ok, Push} = omq:socket(Ctx, push),
+    ok = omq:setsockopt(Pull, omq_max_message_parts, 2),
+    {ok, Endpoint} = omq:bind(Pull, <<"tcp://127.0.0.1:0">>),
+    ok = omq:connect(Push, Endpoint),
+    ok = omq:send_multipart(Push, [<<"a">>, <<"b">>]),
+    ?assertEqual({ok, [<<"a">>, <<"b">>]}, omq:recv_multipart(Pull, 1000)),
+    ok = omq:send_multipart(Push, [<<"a">>, <<"b">>, <<"c">>]),
+    ?assertMatch({error, timeout, _}, omq:recv_multipart(Pull, 300)),
+    ok = omq:close(Push),
+    ok = omq:close(Pull),
+    ok = omq:term(Ctx).
+
+max_message_parts_no_limit_test() ->
+    {ok, Ctx} = omq:context(),
+    {ok, Pull} = omq:socket(Ctx, pull),
+    {ok, Push} = omq:socket(Ctx, push),
+    ok = omq:setsockopt(Pull, omq_max_message_parts, -1),
+    {ok, Endpoint} = omq:bind(Pull, <<"tcp://127.0.0.1:0">>),
+    ok = omq:connect(Push, Endpoint),
+    Parts = lists:duplicate(1025, <<"x">>),
+    ok = omq:send_multipart(Push, Parts),
+    ?assertEqual({ok, Parts}, omq:recv_multipart(Pull, 1000)),
+    ok = omq:close(Push),
+    ok = omq:close(Pull),
+    ok = omq:term(Ctx).
+
+max_peer_subscriptions_ignores_prefix_over_limit_test() ->
+    {ok, Ctx} = omq:context(),
+    {ok, XPub} = omq:socket(Ctx, xpub),
+    {ok, Sub} = omq:socket(Ctx, sub),
+    ok = omq:setsockopt(XPub, omq_max_peer_subscriptions, 1),
+    {ok, Endpoint} = omq:bind(XPub, <<"tcp://127.0.0.1:0">>),
+    ok = omq:subscribe(Sub, <<"a">>),
+    ok = omq:connect(Sub, Endpoint),
+    ?assertEqual({ok, <<1, "a">>}, omq:recv(XPub, 1000)),
+    %% "b" is over the limit, so XPUB never reports it.
+    ok = omq:subscribe(Sub, <<"b">>),
+    ok = omq:unsubscribe(Sub, <<"a">>),
+    ok = omq:subscribe(Sub, <<"c">>),
+    ?assertEqual({ok, <<0, "a">>}, omq:recv(XPub, 1000)),
+    ?assertEqual({ok, <<1, "c">>}, omq:recv(XPub, 1000)),
+    ok = omq:close(Sub),
+    ok = omq:close(XPub),
     ok = omq:term(Ctx).
 
 unbound_tcp_endpoint() ->

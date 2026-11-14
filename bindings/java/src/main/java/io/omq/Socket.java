@@ -931,6 +931,59 @@ public final class Socket implements AutoCloseable {
         }
     }
 
+    /** Sets maximum parts per received message (default 1024). Must be set before first I/O. */
+    public Socket maxMessageParts(long parts) {
+        operationLock.lock();
+        try {
+            if (parts <= 0) {
+                throw new IllegalArgumentException("parts must be greater than zero");
+            }
+            withHandleVoid(handle -> Native.socketSetMaxMessageParts(handle, parts));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
+    }
+
+    /** Removes the maximum message parts limit. Must be set before first I/O. */
+    public Socket noMaxMessageParts() {
+        operationLock.lock();
+        try {
+            withHandleVoid(handle -> Native.socketSetMaxMessageParts(handle, NONE));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
+    }
+
+    /**
+     * Sets maximum prefixes (PUB/XPUB) or groups (RADIO) held per peer (default 65536).
+     * Must be set before first I/O.
+     */
+    public Socket maxPeerSubscriptions(long max) {
+        operationLock.lock();
+        try {
+            if (max < 0) {
+                throw new IllegalArgumentException("max must be non-negative");
+            }
+            withHandleVoid(handle -> Native.socketSetMaxPeerSubscriptions(handle, max));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
+    }
+
+    /** Removes the per-peer subscription limit. Must be set before first I/O. */
+    public Socket noMaxPeerSubscriptions() {
+        operationLock.lock();
+        try {
+            withHandleVoid(handle -> Native.socketSetMaxPeerSubscriptions(handle, NONE));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
+    }
+
     /** Enables or disables compression dictionary auto-training before first I/O. */
     public Socket compressionAutoTrain(boolean enabled) {
         operationLock.lock();

@@ -108,6 +108,30 @@ public final class SocketOptions {
             return add(Socket::noMaxMessageSize);
         }
 
+        /** Sets maximum parts per received message (default 1024). */
+        public Builder maxMessageParts(long parts) {
+            if (parts <= 0) {
+                throw new IllegalArgumentException("parts must be greater than zero");
+            }
+            return add(socket -> socket.maxMessageParts(parts));
+        }
+
+        /** Removes the maximum message parts limit. */
+        public Builder noMaxMessageParts() {
+            return add(Socket::noMaxMessageParts);
+        }
+
+        /** Sets maximum prefixes (PUB/XPUB) or groups (RADIO) held per peer (default 65536). */
+        public Builder maxPeerSubscriptions(long max) {
+            requireNonNegative("max", max);
+            return add(socket -> socket.maxPeerSubscriptions(max));
+        }
+
+        /** Removes the per-peer subscription limit. */
+        public Builder noMaxPeerSubscriptions() {
+            return add(Socket::noMaxPeerSubscriptions);
+        }
+
         /** Enables or disables compression dictionary auto-training. */
         public Builder compressionAutoTrain(boolean enabled) {
             return add(socket -> socket.compressionAutoTrain(enabled));

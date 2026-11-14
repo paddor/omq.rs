@@ -80,6 +80,12 @@ M.OMQ_ARENA_THRESHOLD = native.OMQ_ARENA_THRESHOLD
 ---Default outbound frame arena threshold used by OMQ.lua sockets.
 ---@type integer
 M.DEFAULT_ARENA_THRESHOLD = 4 * 1024
+---Native socket option id for the received message part limit.
+---@type integer
+M.OMQ_MAX_MESSAGE_PARTS = native.OMQ_MAX_MESSAGE_PARTS
+---Native socket option id for the per-peer subscription limit.
+---@type integer
+M.OMQ_MAX_PEER_SUBSCRIPTIONS = native.OMQ_MAX_PEER_SUBSCRIPTIONS
 
 local context_option_keys = {
   io_threads = true,
@@ -92,6 +98,8 @@ local socket_option_keys = {
   send_hwm = true,
   recv_hwm = true,
   arena_threshold = true,
+  max_message_parts = true,
+  max_peer_subscriptions = true,
   subscribe = true,
 }
 
@@ -154,6 +162,10 @@ Context.__index = Context
 ---@field set_recv_hwm fun(self: omq.Socket, value: integer): boolean Set inbound high-water mark.
 ---@field set_arena_threshold fun(self: omq.Socket, bytes: integer): boolean Set outbound frame arena threshold. `-1` restores native default.
 ---@field get_arena_threshold fun(self: omq.Socket): integer Return outbound frame arena threshold.
+---@field set_max_message_parts fun(self: omq.Socket, parts: integer): boolean Set the most parts of one received message. `-1` removes the limit.
+---@field get_max_message_parts fun(self: omq.Socket): integer Return the received message part limit; `-1` is no limit.
+---@field set_max_peer_subscriptions fun(self: omq.Socket, entries: integer): boolean Set the most prefixes or groups one peer may hold. `-1` removes the limit.
+---@field get_max_peer_subscriptions fun(self: omq.Socket): integer Return the per-peer subscription limit; `-1` is no limit.
 
 local function socket_type_id(socket_type)
   if type(socket_type) == "number" then
@@ -191,6 +203,12 @@ local function apply_socket_options(socket, options)
   if options.arena_threshold ~= nil then
     socket:set_arena_threshold(options.arena_threshold)
   end
+  if options.max_message_parts ~= nil then
+    socket:set_max_message_parts(options.max_message_parts)
+  end
+  if options.max_peer_subscriptions ~= nil then
+    socket:set_max_peer_subscriptions(options.max_peer_subscriptions)
+  end
   if options.subscribe ~= nil then
     socket:subscribe(options.subscribe)
   end
@@ -227,9 +245,13 @@ end
 ---`"req"`, etc.) or numeric ZMQ constant. All 20 ZMTP socket types are
 ---supported.
 ---@param options? {linger?: integer, send_timeout?: integer, recv_timeout?: integer,
----send_hwm?: integer, recv_hwm?: integer, arena_threshold?: integer, subscribe?: string}
+---send_hwm?: integer, recv_hwm?: integer, arena_threshold?: integer,
+---max_message_parts?: integer, max_peer_subscriptions?: integer, subscribe?: string}
 ---socket options applied before bind/connect. `arena_threshold` overrides
 ---OMQ.lua's native 4 KiB default; `-1` restores the native default.
+---`max_message_parts` (default 65536) and `max_peer_subscriptions`
+---(default 1048576) limit what one peer may send or subscribe to; `-1`
+---removes the limit.
 ---@return omq.Socket socket new socket object.
 function Context:socket(socket_type, options)
   validate_options(options, socket_option_keys, "socket")

@@ -1480,6 +1480,13 @@ fn setsockopt<'a>(
                 _ => return err_term(env, atoms::badarg(), "invalid workload profile"),
             };
         }
+        1101 => {
+            if int_value == 0 {
+                return err_term(env, atoms::badarg(), "max message parts must not be 0");
+            }
+            options.max_message_parts = usize::try_from(int_value).ok();
+        }
+        1102 => options.max_peer_subscriptions = usize::try_from(int_value).ok(),
         109 => options.reconnect_stop_conn_refused = int_value != 0,
         39 | 42 | 31 | 8 | 79 | 40 | 51 | 52 | 53 | 56 | 38 | 80 | 25 | 9 | 55 => {}
         6 | 7 => return err_term(env, atoms::badarg(), "use subscribe/unsubscribe"),
@@ -1629,6 +1636,8 @@ fn getsockopt<'a>(env: Env<'a>, socket: ResourceArc<NativeSocket>, option: i64) 
             };
             ok(env, value)
         }
+        1101 => ok(env, options.max_message_parts.map_or(-1, |v| v as i64)),
+        1102 => ok(env, options.max_peer_subscriptions.map_or(-1, |v| v as i64)),
         109 => ok(env, i64::from(options.reconnect_stop_conn_refused)),
         43 | 39 | 42 | 31 | 8 | 79 | 40 | 51 | 52 | 53 | 56 | 80 | 25 | 9 => ok(env, 0i64),
         32 => ok_binary(env, &socket.last_endpoint.lock().unwrap()),

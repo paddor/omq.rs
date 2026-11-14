@@ -24,7 +24,8 @@ Benchmark and build details live in
 - Lua strings are message payloads. Lua tables are multipart messages.
 - Nonblocking calls use libzmq-style flags and `try_*` helpers.
 - Socket options are supplied at creation or through setter methods for HWM,
-  linger, timeouts, subscription, and arena threshold tuning.
+  linger, timeouts, subscription, arena threshold tuning, and the message
+  part and per-peer subscription limits.
 - Treat each socket as owned by one Lua coroutine/thread at a time. Create
   more sockets for more concurrent flows.
 - `omq.testing.*` helpers are test-only Rust backend peers, not application

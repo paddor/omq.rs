@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- `max_message_parts` and `max_peer_subscriptions` socket options, with
+  `set_*`/`get_*` methods. They limit the parts of one received message and
+  the prefixes or groups one peer may hold; `-1` removes the limit.
+
 ## [0.2.14] - 2026-11-04
 
 ### Changed

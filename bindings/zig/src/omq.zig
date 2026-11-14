@@ -99,6 +99,8 @@ pub const OMQ_COMPRESSION_LEVEL = c.OMQ_COMPRESSION_LEVEL;
 pub const OMQ_COMPRESSION_DICT = c.OMQ_COMPRESSION_DICT;
 pub const OMQ_COMPRESSION_AUTO_TRAIN = c.OMQ_COMPRESSION_AUTO_TRAIN;
 pub const OMQ_WORKLOAD_PROFILE = c.OMQ_WORKLOAD_PROFILE;
+pub const OMQ_MAX_MESSAGE_PARTS = c.OMQ_MAX_MESSAGE_PARTS;
+pub const OMQ_MAX_PEER_SUBSCRIPTIONS = c.OMQ_MAX_PEER_SUBSCRIPTIONS;
 pub const OMQ_ARENA_THRESHOLD = c.OMQ_ARENA_THRESHOLD;
 pub const OMQ_ON_MUTE_BLOCK = c.OMQ_ON_MUTE_BLOCK;
 pub const OMQ_ON_MUTE_DROP_NEWEST = c.OMQ_ON_MUTE_DROP_NEWEST;
@@ -1223,6 +1225,27 @@ pub const Socket = struct {
 
     pub fn maxMessageSize(self: *Socket) Error!i64 {
         return self.getI64(MAXMSGSIZE);
+    }
+
+    /// Most parts of one received message; a peer that sends more is
+    /// disconnected. `-1` removes the limit. Set before bind or connect.
+    pub fn setMaxMessageParts(self: *Socket, parts: i32) Error!void {
+        try self.setInt(OMQ_MAX_MESSAGE_PARTS, parts);
+    }
+
+    pub fn maxMessageParts(self: *Socket) Error!i32 {
+        return self.getInt(OMQ_MAX_MESSAGE_PARTS);
+    }
+
+    /// Most distinct prefixes (PUB/XPUB) or groups (RADIO) one peer may
+    /// hold; more are ignored. `-1` removes the limit. Set before bind or
+    /// connect.
+    pub fn setMaxPeerSubscriptions(self: *Socket, entries: i32) Error!void {
+        try self.setInt(OMQ_MAX_PEER_SUBSCRIPTIONS, entries);
+    }
+
+    pub fn maxPeerSubscriptions(self: *Socket) Error!i32 {
+        return self.getInt(OMQ_MAX_PEER_SUBSCRIPTIONS);
     }
 
     pub fn setRate(self: *Socket, rate: i32) Error!void {

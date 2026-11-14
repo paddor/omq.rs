@@ -15,6 +15,8 @@ type NativeSocketOptions = {
   routerMandatory?: boolean;
   conflate?: boolean;
   xpubNodrop?: boolean;
+  maxMessageParts?: number;
+  maxPeerSubscriptions?: number;
   onMute?: "block" | "dropNewest" | "dropOldest";
   workloadProfile?: "throughput" | "latency";
   compressionDictionary?: Uint8Array;
@@ -157,6 +159,13 @@ export interface SocketOptions {
   conflate?: boolean;
   /** XPUB send fails instead of dropping when subscribers are muted. */
   xpubNodrop?: boolean;
+  /** Most parts one received message may have. Defaults to 1024; negative means no limit. */
+  maxMessageParts?: number;
+  /**
+   * Most prefixes (PUB/XPUB) or groups (RADIO) one peer may hold. Defaults
+   * to 65536; negative means no limit.
+   */
+  maxPeerSubscriptions?: number;
   /** Behavior when a socket cannot currently send. */
   onMute?: "block" | "dropNewest" | "dropOldest";
   /** Workload hint used by the native transport. */
@@ -863,6 +872,8 @@ function normalizeOptions(options: SocketOptions): NativeSocketOptions {
     routerMandatory: options.routerMandatory,
     conflate: options.conflate,
     xpubNodrop: options.xpubNodrop,
+    maxMessageParts: options.maxMessageParts,
+    maxPeerSubscriptions: options.maxPeerSubscriptions,
     onMute: options.onMute,
     workloadProfile: options.workloadProfile,
     compressionDictionary: lz4Dictionary(options.lz4),

@@ -618,6 +618,12 @@ defmodule OMQ do
   @doc "OMQ_WORKLOAD_PROFILE option ID."
   def omq_workload_profile, do: call(:omq_workload_profile, [])
 
+  @doc "OMQ_MAX_MESSAGE_PARTS option ID. Default 1024; -1 means no limit."
+  def omq_max_message_parts, do: call(:omq_max_message_parts, [])
+
+  @doc "OMQ_MAX_PEER_SUBSCRIPTIONS option ID. Default 65536; -1 means no limit."
+  def omq_max_peer_subscriptions, do: call(:omq_max_peer_subscriptions, [])
+
   @doc "OMQ_ON_MUTE block mode value."
   def omq_on_mute_block, do: call(:omq_on_mute_block, [])
 

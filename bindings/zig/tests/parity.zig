@@ -166,6 +166,10 @@ test "named option helpers reject invalid values" {
     try testing.expectError(error.Invalid, sock.setOnMute(99));
     try testing.expectError(error.Invalid, sock.setCompressionLevel(-8));
     try testing.expectError(error.Invalid, sock.setCompressionLevel(5));
+    try testing.expectError(error.Invalid, sock.setMaxMessageParts(0));
+    try testing.expectError(error.Invalid, sock.setMaxMessageParts(-2));
+    try testing.expectError(error.Invalid, sock.setMaxPeerSubscriptions(0));
+    try testing.expectError(error.Invalid, sock.setMaxPeerSubscriptions(-2));
 
     const oversize = try allocator.alloc(u8, 8 * 1024 + 1);
     defer allocator.free(oversize);

@@ -48,6 +48,22 @@ Check(options.GetInt32(SocketOption.ReconnectInterval) == 100, "default reconnec
 Check(options.GetInt32(SocketOption.SendHwm) == 64, "SNDHWM option mismatch");
 Check(options.GetInt32(SocketOption.ReceiveHwm) == 32, "RCVHWM option mismatch");
 Check(options.GetInt32(SocketOption.HeartbeatInterval) == 1000, "heartbeat option mismatch");
+Check(options.GetInt32(SocketOption.MaxMessageParts) == 65_536, "default part limit mismatch");
+Check(options.GetInt32(SocketOption.MaxPeerSubscriptions) == 1_048_576, "default peer subscription limit mismatch");
+options.SetOption(SocketOption.MaxMessageParts, 16);
+options.SetOption(SocketOption.MaxPeerSubscriptions, -1);
+Check(options.GetInt32(SocketOption.MaxMessageParts) == 16, "part limit mismatch");
+Check(options.GetInt32(SocketOption.MaxPeerSubscriptions) == -1, "peer subscription limit mismatch");
+foreach (int limitOption in new[] { SocketOption.MaxMessageParts, SocketOption.MaxPeerSubscriptions })
+{
+    foreach (int invalid in new[] { 0, -2 })
+    {
+        bool rejected = false;
+        try { options.SetOption(limitOption, invalid); }
+        catch (OmqException) { rejected = true; }
+        Check(rejected, "invalid peer limit should raise");
+    }
+}
 using (var dnsSocket = context.CreateSocket(SocketType.Push, new SocketOptions { Linger = 0 }))
 {
     foreach (Action operation in new Action[] {

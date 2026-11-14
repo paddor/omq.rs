@@ -609,6 +609,8 @@ function normalizeOptions(options) {
         routerMandatory: options.routerMandatory,
         conflate: options.conflate,
         xpubNodrop: options.xpubNodrop,
+        maxMessageParts: options.maxMessageParts,
+        maxPeerSubscriptions: options.maxPeerSubscriptions,
         onMute: options.onMute,
         workloadProfile: options.workloadProfile,
         compressionDictionary: lz4Dictionary(options.lz4),

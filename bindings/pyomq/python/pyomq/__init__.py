@@ -66,6 +66,8 @@ from ._native import (
     OMQ_COMPRESSION_AUTO_TRAIN,
     OMQ_COMPRESSION_DICT,
     OMQ_COMPRESSION_LEVEL,
+    OMQ_MAX_MESSAGE_PARTS,
+    OMQ_MAX_PEER_SUBSCRIPTIONS,
     OMQ_ON_MUTE,
     OMQ_ON_MUTE_BLOCK,
     OMQ_ON_MUTE_DROP_NEWEST,
@@ -438,6 +440,8 @@ class _SocketOptionsBase[
     reconnect_ivl_max = _SocketOptionDescriptor[int](RECONNECT_IVL_MAX)
     backlog = _SocketOptionDescriptor[int](BACKLOG)
     maxmsgsize = _SocketOptionDescriptor[int](MAXMSGSIZE)
+    max_message_parts = _SocketOptionDescriptor[int](OMQ_MAX_MESSAGE_PARTS)
+    max_peer_subscriptions = _SocketOptionDescriptor[int](OMQ_MAX_PEER_SUBSCRIPTIONS)
     rcvtimeo = _SocketOptionDescriptor[int](RCVTIMEO)
     sndtimeo = _SocketOptionDescriptor[int](SNDTIMEO)
     ipv6 = _SocketOptionDescriptor[int](IPV6)
@@ -1854,6 +1858,8 @@ __all__ = [  # noqa: RUF022
     "OMQ_QUIC_TRUST_SYSTEM",
     "OMQ_QUIC_STREAM_WINDOW",
     "OMQ_QUIC_MAX_READY_PEERS",
+    "OMQ_MAX_MESSAGE_PARTS",
+    "OMQ_MAX_PEER_SUBSCRIPTIONS",
     "OMQ_ON_MUTE",
     "OMQ_COMPRESSION_LEVEL",
     "OMQ_COMPRESSION_DICT",

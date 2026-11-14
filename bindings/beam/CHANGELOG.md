@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- `omq_max_message_parts` (1101) and `omq_max_peer_subscriptions` (1102)
+  socket options, with Elixir and Gleam constants. -1 means no limit.
+
 ## [0.2.12] - 2026-11-04
 
 ### Changed

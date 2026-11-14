@@ -54,6 +54,8 @@ type _IntOption = Literal[
     1004,
     1005,
     1007,
+    1020,
+    1021,
 ]
 type Multipart = list[bytes] | list[Frame]
 type AuthCallback = Callable[[PeerInfo], bool]

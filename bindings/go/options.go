@@ -46,6 +46,14 @@ type SocketOptions struct {
 	MaxMessageSize OptionValue[int64]
 	// NoMaxMessageSize reports disabled receive size limit.
 	NoMaxMessageSize bool
+	// MaxMessageParts is the configured receive part limit.
+	MaxMessageParts OptionValue[int64]
+	// NoMaxMessageParts reports disabled receive part limit.
+	NoMaxMessageParts bool
+	// MaxPeerSubscriptions is the configured per-peer subscription limit.
+	MaxPeerSubscriptions OptionValue[int64]
+	// NoMaxPeerSubscriptions reports disabled per-peer subscription limit.
+	NoMaxPeerSubscriptions bool
 
 	// PlainServer is the fixed PLAIN server credential allowlist.
 	PlainServer OptionValue[[]PlainCredential]
@@ -342,6 +350,44 @@ func NoMaxMessageSize() SocketOption {
 	}, func(options *SocketOptions) {
 		options.MaxMessageSize = OptionValue[int64]{}
 		options.NoMaxMessageSize = true
+	})
+}
+
+// MaxMessageParts sets max parts of one received message. It must be
+// positive. The native default is 1024.
+func MaxMessageParts(parts int64) SocketOption {
+	return trackedNonNegativeInt64Option("max message parts", parts, setMaxMessagePartsNative, func(options *SocketOptions, value int64) {
+		options.MaxMessageParts = OptionValue[int64]{Value: value, Set: true}
+		options.NoMaxMessageParts = false
+	})
+}
+
+// NoMaxMessageParts removes max parts of one received message.
+func NoMaxMessageParts() SocketOption {
+	return trackedOption(func(handle *nativeSocket) error {
+		return setMaxMessagePartsNative(handle, -1)
+	}, func(options *SocketOptions) {
+		options.MaxMessageParts = OptionValue[int64]{}
+		options.NoMaxMessageParts = true
+	})
+}
+
+// MaxPeerSubscriptions sets max subscription prefixes (PUB, XPUB) or groups
+// (RADIO) one peer may hold. The native default is 65536.
+func MaxPeerSubscriptions(entries int64) SocketOption {
+	return trackedNonNegativeInt64Option("max peer subscriptions", entries, setMaxPeerSubscriptionsNative, func(options *SocketOptions, value int64) {
+		options.MaxPeerSubscriptions = OptionValue[int64]{Value: value, Set: true}
+		options.NoMaxPeerSubscriptions = false
+	})
+}
+
+// NoMaxPeerSubscriptions removes the per-peer subscription limit.
+func NoMaxPeerSubscriptions() SocketOption {
+	return trackedOption(func(handle *nativeSocket) error {
+		return setMaxPeerSubscriptionsNative(handle, -1)
+	}, func(options *SocketOptions) {
+		options.MaxPeerSubscriptions = OptionValue[int64]{}
+		options.NoMaxPeerSubscriptions = true
 	})
 }
 

@@ -431,6 +431,45 @@ def test_compression_auto_train_round_trip():
         ctx.term()
 
 
+def test_max_message_parts_round_trip():
+    ctx, s = _push()
+    try:
+        assert s.getsockopt(zmq.OMQ_MAX_MESSAGE_PARTS) == 1024
+        s.setsockopt(zmq.OMQ_MAX_MESSAGE_PARTS, 8)
+        assert s.getsockopt(zmq.OMQ_MAX_MESSAGE_PARTS) == 8
+        s.max_message_parts = -1  # no limit
+        assert s.max_message_parts == -1
+    finally:
+        s.close()
+        ctx.term()
+
+
+def test_max_message_parts_rejects_zero():
+    ctx, s = _push()
+    try:
+        with pytest.raises(ValueError):
+            s.setsockopt(zmq.OMQ_MAX_MESSAGE_PARTS, 0)
+        assert s.getsockopt(zmq.OMQ_MAX_MESSAGE_PARTS) == 1024
+    finally:
+        s.close()
+        ctx.term()
+
+
+def test_max_peer_subscriptions_round_trip():
+    ctx, s = _push()
+    try:
+        assert s.getsockopt(zmq.OMQ_MAX_PEER_SUBSCRIPTIONS) == 65536
+        s.setsockopt(zmq.OMQ_MAX_PEER_SUBSCRIPTIONS, 0)
+        assert s.getsockopt(zmq.OMQ_MAX_PEER_SUBSCRIPTIONS) == 0
+        s.max_peer_subscriptions = 16
+        assert s.max_peer_subscriptions == 16
+        s.max_peer_subscriptions = -1  # no limit
+        assert s.max_peer_subscriptions == -1
+    finally:
+        s.close()
+        ctx.term()
+
+
 @pytest.mark.parametrize("identity", [b"\x00reserved", b"x" * 256])
 def test_identity_rejects_invalid_value_without_overwriting(identity):
     ctx, sock = _push()

@@ -188,6 +188,8 @@ pub struct NativeSocketOptions {
     pub router_mandatory: Option<bool>,
     pub conflate: Option<bool>,
     pub xpub_nodrop: Option<bool>,
+    pub max_message_parts: Option<i64>,
+    pub max_peer_subscriptions: Option<i64>,
     pub on_mute: Option<String>,
     pub workload_profile: Option<String>,
     pub compression_dictionary: Option<Uint8Array>,
@@ -880,6 +882,12 @@ fn build_options(input: Option<NativeSocketOptions>) -> Result<Options> {
     if let Some(xpub_nodrop) = input.xpub_nodrop {
         options.xpub_nodrop = xpub_nodrop;
     }
+    if let Some(parts) = input.max_message_parts {
+        options = options.max_message_parts(optional_limit(parts));
+    }
+    if let Some(max) = input.max_peer_subscriptions {
+        options = options.max_peer_subscriptions(optional_limit(max));
+    }
     if let Some(on_mute) = input.on_mute {
         options = options.on_mute(parse_on_mute(&on_mute)?);
     }
@@ -956,6 +964,11 @@ fn curve_keypair_from_z85(public_key: String, secret_key: String) -> Result<Curv
     let public = CurvePublicKey::from_z85(&public_key).map_err(map_omq_error)?;
     let secret = CurveSecretKey::from_z85(&secret_key).map_err(map_omq_error)?;
     Ok(CurveKeypair { public, secret })
+}
+
+/// Negative means no limit.
+fn optional_limit(value: i64) -> Option<usize> {
+    usize::try_from(value).ok()
 }
 
 fn parse_on_mute(value: &str) -> Result<OnMute> {

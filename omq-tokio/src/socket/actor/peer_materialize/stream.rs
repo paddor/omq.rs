@@ -96,7 +96,10 @@ impl SocketDriver {
             completion,
             capacity: self.options.send_queue_capacity(),
             pool: peer.options.recv_payload_pool.clone(),
-            send_pipe: peer.send_pipe_rx.take(),
+            send_pipe: peer
+                .send_pipe_rx
+                .take()
+                .and_then(crate::engine::SendPipeLease::detach),
         };
 
         let (handle, task) = crate::transport::stream_raw::spawn_on(

@@ -9,7 +9,7 @@ use crate::engine::codec::CodecSetup;
 use crate::engine::driver::{ActorLink, ReceiveProfile};
 use crate::engine::framing::WireFraming;
 use crate::engine::send_pipe::SendPipeProducerHandle;
-use crate::engine::{SendPipeConsumer, SendPipeMode, SendPipeProducer};
+use crate::engine::{SendPipeConsumer, SendPipeLease, SendPipeMode, SendPipeProducer};
 use omq_proto::Options;
 
 mod inproc;
@@ -60,7 +60,8 @@ pub(super) struct PeerSetup {
     pub(super) ident: PeerIdent,
     pub(super) side: Side,
     pub(super) route_id: u64,
-    pub(super) send_pipe_rx: Option<SendPipeConsumer>,
+    /// The connect route's queue, lent to this connection.
+    pub(super) send_pipe_rx: Option<SendPipeLease>,
     pub(super) options: Arc<Options>,
 }
 
@@ -186,7 +187,7 @@ struct WireSend {
     transmit: TransmitProfile,
     carrier: WireCarrier,
     /// The connect-side pipe that already took messages, if any.
-    send_pipe_rx: Option<SendPipeConsumer>,
+    send_pipe_rx: Option<SendPipeLease>,
 }
 
 /// Pair the peer mailbox with a fresh actor output registration.
@@ -567,9 +568,13 @@ fn attach_transforms(
 fn attach_send_pipe(
     socket: &SocketDriver,
     peer_driver: ConnectionDriver<AnyStream>,
-    pre_ready_send_pipe_rx: Option<SendPipeConsumer>,
+    route_queue: Option<SendPipeLease>,
 ) -> (Option<SendPipeProducerHandle>, ConnectionDriver<AnyStream>) {
-    let (send_pipe, Some(send_pipe_rx)) = make_send_pipe(socket, pre_ready_send_pipe_rx) else {
+    if let Some(lease) = route_queue {
+        return (None, peer_driver.with_send_pipe_lease(lease));
+    }
+
+    let (send_pipe, Some(send_pipe_rx)) = make_send_pipe(socket, None) else {
         return (None, peer_driver);
     };
 

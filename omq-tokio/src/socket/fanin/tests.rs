@@ -468,3 +468,20 @@ async fn pending_sink_wakes_on_partial_release_and_close() {
     assert!(matches!(queue.try_recv(), Err(Error::Closed)));
     assert!(queue.register().is_none());
 }
+
+#[test]
+fn departed_lanes_count_dropped_producers_until_a_receive_retires_them() {
+    let queue = queue(4);
+    let mut live = queue.register().unwrap();
+    let mut departed = queue.register().unwrap();
+    live.try_send(Message::from_slice(b"live")).unwrap();
+    departed.try_send(Message::from_slice(b"left")).unwrap();
+    assert_eq!(queue.departed_lanes(), 0);
+
+    drop(departed);
+    assert_eq!(queue.departed_lanes(), 1);
+
+    while queue.try_recv().is_ok() {}
+    assert_eq!(queue.departed_lanes(), 0);
+    drop(live);
+}

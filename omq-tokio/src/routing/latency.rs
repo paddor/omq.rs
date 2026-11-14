@@ -78,12 +78,28 @@ impl LatencySend {
         let (tx, rx) = crate::engine::send_pipe(self.pipe_cap);
         #[cfg(feature = "dart")]
         let tx = super::with_dart(tx, dart);
-        let mut state = self.state.lock().expect("latency send state");
-        state.remove_route(route_id);
-        state.pending.push(PendingPipe { route_id, tx });
-        self.changed.notify_changed();
+        self.insert_connect_pipe(route_id, tx);
 
         rx
+    }
+
+    /// Queue sends in a connect route's pipe until it has a ready peer.
+    pub(crate) fn insert_connect_pipe(&mut self, route_id: u64, tx: SendPipeProducer) {
+        let mut state = self.state.lock().expect("latency send state");
+        drop(state.remove_route(route_id));
+        state.pending.push(PendingPipe { route_id, tx });
+        self.changed.notify_changed();
+    }
+
+    /// Remove a route and hand back the producer of its pipe.
+    pub(crate) fn take_connect_pipe(&mut self, route_id: u64) -> Option<SendPipeProducer> {
+        let tx = self
+            .state
+            .lock()
+            .expect("latency send state")
+            .remove_route(route_id);
+        self.changed.notify_changed();
+        tx
     }
 
     pub(crate) fn connection_added(&mut self, route_id: u64, handle: &ActorPeerDriverHandle) {
@@ -98,9 +114,7 @@ impl LatencySend {
     }
 
     pub(crate) fn connection_removed(&mut self, route_id: u64) {
-        let mut state = self.state.lock().expect("latency send state");
-        state.remove_route(route_id);
-        self.changed.notify_changed();
+        drop(self.take_connect_pipe(route_id));
     }
 
     pub(crate) fn shutdown(&self) {
@@ -374,15 +388,21 @@ impl State {
         }
     }
 
-    fn remove_route(&mut self, route_id: u64) {
+    fn remove_route(&mut self, route_id: u64) -> Option<SendPipeProducer> {
         self.remove_peer(route_id);
-        self.pending.retain(|pipe| pipe.route_id != route_id);
+        let index = self
+            .pending
+            .iter()
+            .position(|pipe| pipe.route_id == route_id)?;
+        let pipe = self.pending.remove(index);
 
         if self.pending.is_empty() {
             self.pending_cursor = 0;
         } else {
             self.pending_cursor %= self.pending.len();
         }
+
+        Some(pipe.tx)
     }
 
     fn try_send_pending(&mut self, mut msg: Message) -> core::result::Result<u64, TrySendError> {

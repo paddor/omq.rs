@@ -3,7 +3,7 @@
 use super::recv_bypass::{FaninProducer, fanin_recv_sink, wrap_routed_sink};
 use super::{PeerChannels, PeerEntry, PeerSetup, can_bypass_actor_recv, make_send_pipe};
 use crate::engine::send_pipe::SendPipeProducerHandle;
-use crate::engine::{RecvSink, SendPipeConsumer};
+use crate::engine::{RecvSink, SendPipeConsumer, SendPipeLease};
 use crate::socket::actor::inproc_driver::{
     InprocChannels, InprocDriverCtx, ReceiveRoutes, RelayOutside, SendRoutes, inproc_peer_driver,
 };
@@ -78,8 +78,12 @@ fn register_inproc_peer(
     } = socket.peer_channels();
     let cancel = handle.cancel.clone();
 
-    let (send_pipe, send_pipe_rx, outbound) =
-        inproc_send_path(socket, conn.outbound.take(), peer.send_pipe_rx.take());
+    let (send_pipe, send_pipe_rx, outbound) = inproc_send_path(
+        socket,
+        conn.outbound.take(),
+        // The bound socket drains this queue; nothing comes back.
+        peer.send_pipe_rx.take().and_then(SendPipeLease::detach),
+    );
     let (recv_sink, inproc_inbound) = inproc_receive_path(
         socket,
         peer_id,

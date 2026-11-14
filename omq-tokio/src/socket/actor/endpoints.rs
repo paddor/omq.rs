@@ -2,11 +2,30 @@ use omq_proto::Options;
 use std::sync::Arc;
 
 use super::dialer::FirstAttempt;
+use super::route_queue::{CarriedQueue, RouteQueue};
 use super::{
     ConnectionStatus, DialerEntry, DisconnectReason, Endpoint, EndpointTask, Error, MonitorEvent,
     PeerInfo, Result, Side, SocketDriver, SocketType, bind_any, reject_encrypted_inproc,
 };
 use crate::socket::actor::lifecycle::PeerLifecycle;
+
+/// How a dial loop starts.
+#[derive(Default)]
+pub(super) struct DialStart {
+    pub(super) first: FirstAttempt,
+    pub(super) failed_attempts: u32,
+    /// The queue of the route this dial loop replaces.
+    pub(super) queue: Option<CarriedQueue>,
+}
+
+impl From<FirstAttempt> for DialStart {
+    fn from(first: FirstAttempt) -> Self {
+        Self {
+            first,
+            ..Self::default()
+        }
+    }
+}
 
 impl SocketDriver {
     pub(super) async fn handle_connect_command(
@@ -342,46 +361,40 @@ impl SocketDriver {
     }
 
     pub(super) fn start_dial(&mut self, endpoint: Endpoint, options: Arc<Options>) {
-        self.start_dial_task(endpoint, options, FirstAttempt::default(), 0);
+        self.start_dial_task(endpoint, options, DialStart::default());
     }
 
+    /// Dial a lost route again under a new route ID, with its queue if kept.
     pub(super) fn start_redial(
         &mut self,
         endpoint: Endpoint,
         options: Arc<Options>,
         failed_attempts: u32,
+        queue: Option<CarriedQueue>,
     ) {
-        self.start_dial_task(endpoint, options, FirstAttempt::default(), failed_attempts);
+        let start = DialStart {
+            failed_attempts,
+            queue,
+            ..DialStart::default()
+        };
+        self.start_dial_task(endpoint, options, start);
     }
 
     pub(super) fn start_dial_task(
         &mut self,
         endpoint: Endpoint,
         options: Arc<Options>,
-        first: FirstAttempt,
-        failed_attempts: u32,
+        start: DialStart,
     ) {
+        let DialStart {
+            first,
+            failed_attempts,
+            queue,
+        } = start;
         let Some(route_id) = self.alloc_id() else {
             return;
         };
-
-        // STREAM assigns the routing id at connect() so callers can query and
-        // address the peer before it connects.
-        let send_pipe_rx = if self.socket_type == SocketType::Stream {
-            let identity = super::generated_identity(route_id);
-            self.last_stream_routing_id = Some(identity.clone());
-            Some(self.routing.send_strategy.make_stream_connect_pipe(
-                route_id,
-                identity,
-                self.options.send_queue_capacity(),
-            ))
-        } else {
-            self.routing.send_strategy.make_connect_pipe(
-                route_id,
-                #[cfg(feature = "dart")]
-                None,
-            )
-        };
+        let send_pipe_rx = self.route_send_pipe(route_id, queue);
 
         let cancel = self.link.cancel.child_token();
         let failed_attempts = Arc::new(std::sync::atomic::AtomicU32::new(failed_attempts));
@@ -419,9 +432,40 @@ impl SocketDriver {
             },
             options,
             route_id,
-            send_pipe_rx,
+            queue: RouteQueue::new(send_pipe_rx),
             failed_attempts,
         });
+    }
+}
+
+impl SocketDriver {
+    /// The send pipe of a new connect route: a carried queue, or a new one.
+    fn route_send_pipe(
+        &mut self,
+        route_id: u64,
+        queue: Option<CarriedQueue>,
+    ) -> Option<crate::engine::SendPipeConsumer> {
+        // STREAM assigns the routing id at connect() so callers can query and
+        // address the peer before it connects.
+        if self.socket_type == SocketType::Stream {
+            let identity = super::generated_identity(route_id);
+            self.last_stream_routing_id = Some(identity.clone());
+            return Some(self.routing.send_strategy.make_stream_connect_pipe(
+                route_id,
+                identity,
+                self.options.send_queue_capacity(),
+            ));
+        }
+
+        if let Some(queue) = queue {
+            return Some(self.register_carried_queue(route_id, queue));
+        }
+
+        self.routing.send_strategy.make_connect_pipe(
+            route_id,
+            #[cfg(feature = "dart")]
+            None,
+        )
     }
 }
 

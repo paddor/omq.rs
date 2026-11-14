@@ -41,8 +41,8 @@ pub use driver::{
     PeerDriverHandle, PeerEvent, RecvSink, RecvSinkConfig, YringSink,
 };
 pub(crate) use send_pipe::{
-    SendPipeConsumer, SendPipeError, SendPipeMode, SendPipeProducer, inproc_send_pipe,
-    peer_send_pipe, send_pipe, send_pipe_with_mode,
+    SendPipeConsumer, SendPipeError, SendPipeHome, SendPipeLease, SendPipeMode, SendPipeProducer,
+    inproc_send_pipe, peer_send_pipe, send_pipe, send_pipe_with_mode,
 };
 pub use signal::StateSignal;
 

@@ -112,7 +112,7 @@ impl Session<'_> {
             // messages to this driver, which encodes and writes locally.
             // OPTIMIZE: keep this wait registered across turns like the slot
             // (`SlotWait`). It needs an owned consumer handle for the future.
-            () = pipe_ready(self.output.pipe.as_ref()),
+            () = pipe_ready(self.output.pipe.get()),
                 if self.output.pipe_ready() && turn.can_accept_data => Ok(self.claim_writer()),
 
             () = sleep_until_opt(turn.peer_ttl_deadline),

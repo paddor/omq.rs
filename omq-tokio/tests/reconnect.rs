@@ -463,3 +463,126 @@ async fn lost_peer_is_redialed_while_the_application_does_not_receive() {
     }
     assert!(expected > 1, "no message of the lost connection survived");
 }
+
+/// Accept one connection on a raw listener and close it before the ZMTP
+/// greeting, as a proxy with its backend down does. Frees the port after.
+async fn refuse_one_handshake(listener: tokio::net::TcpListener) {
+    let (stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+        .await
+        .expect("the dialer never connected")
+        .unwrap();
+    drop(stream);
+}
+
+/// A connection that fails before READY took nothing from the route's send
+/// queue, so the redial must find every queued message still there.
+#[tokio::test]
+async fn failed_handshake_keeps_the_queued_messages() {
+    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let ep = tcp_ep(listener.local_addr().unwrap().port());
+    let push = Socket::new(SocketType::Push, fast_reconnect());
+    push.connect(ep.clone()).await.unwrap();
+    for sequence in 0..8_u32 {
+        push.send(Message::single(sequence.to_le_bytes().to_vec()))
+            .await
+            .unwrap();
+    }
+
+    refuse_one_handshake(listener).await;
+    let pull = Socket::new(SocketType::Pull, Options::default());
+    rebind(&pull, &ep).await;
+    for sequence in 0..8_u32 {
+        let message = tokio::time::timeout(Duration::from_secs(5), pull.recv())
+            .await
+            .expect("a queued message was lost with the failed connection")
+            .unwrap();
+        assert_eq!(
+            message.part_bytes(0).unwrap().as_ref(),
+            sequence.to_le_bytes()
+        );
+    }
+}
+
+/// A REQ request queued behind a failed handshake is still sent after the
+/// redial, and the socket waits for its reply instead of taking a new one.
+#[tokio::test]
+async fn failed_handshake_keeps_the_queued_request() {
+    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let ep = tcp_ep(listener.local_addr().unwrap().port());
+    let req = Socket::new(SocketType::Req, fast_reconnect());
+    req.connect(ep.clone()).await.unwrap();
+    req.send(Message::single("request")).await.unwrap();
+
+    refuse_one_handshake(listener).await;
+    let rep = Socket::new(SocketType::Rep, Options::default());
+    rebind(&rep, &ep).await;
+    let request = tokio::time::timeout(Duration::from_secs(5), rep.recv())
+        .await
+        .expect("the queued request was lost with the failed connection")
+        .unwrap();
+    assert_eq!(request.part_bytes(0).unwrap().as_ref(), b"request");
+    assert!(
+        req.try_send(Message::single("second")).is_err(),
+        "REQ took a new request while the first one waits for its reply"
+    );
+
+    rep.send(Message::single("reply")).await.unwrap();
+    let reply = tokio::time::timeout(Duration::from_secs(5), req.recv())
+        .await
+        .expect("the reply never arrived")
+        .unwrap();
+    assert_eq!(reply.part_bytes(0).unwrap().as_ref(), b"reply");
+}
+
+/// Messages still in the route's queue when a ready connection drops wait
+/// for the redial. Only what the connection already took out is lost.
+#[tokio::test]
+async fn lost_connection_keeps_the_messages_it_did_not_take() {
+    let pull = Socket::new(SocketType::Pull, Options::default().recv_hwm(1));
+    let ep = pull.bind(tcp_ep(0)).await.unwrap();
+    let push = Socket::new(SocketType::Push, fast_reconnect().send_hwm(8));
+    push.connect(ep.clone()).await.unwrap();
+    push.wait_connected(1, Duration::from_secs(5))
+        .await
+        .unwrap();
+
+    // Nobody receives: fill the kernel buffers, then the send queue.
+    let body = |sequence: u32| {
+        let mut body = vec![0_u8; 64 * 1024];
+        body[..4].copy_from_slice(&sequence.to_le_bytes());
+        Message::single(body)
+    };
+    let mut sent = 0_u32;
+    let mut stalls = 0;
+    while stalls < 3 {
+        if push.try_send(body(sent)).is_ok() {
+            sent += 1;
+            stalls = 0;
+        } else {
+            stalls += 1;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    pull.close().await.unwrap();
+    let pull = Socket::new(SocketType::Pull, Options::default());
+    rebind(&pull, &ep).await;
+    let mut previous = None;
+    loop {
+        let message = tokio::time::timeout(Duration::from_secs(5), pull.recv())
+            .await
+            .expect("the messages queued at the loss were dropped")
+            .unwrap();
+        let bytes = message.part_bytes(0).unwrap();
+        let sequence = u32::from_le_bytes(bytes[..4].try_into().unwrap());
+        assert!(previous < Some(sequence), "message {sequence} out of order");
+        previous = Some(sequence);
+        if sequence == sent - 1 {
+            break;
+        }
+    }
+}

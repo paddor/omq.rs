@@ -10,7 +10,7 @@ use crate::engine::{
     peer_completion::CompletionProgress,
     peer_events::SubscriptionGate,
     rate_limit::SharedIpRateLimiter,
-    send_pipe::SendPipeConsumer,
+    send_pipe::{SendPipeConsumer, SendPipeLease},
     transmit_slot::PeerTransmitSlot,
 };
 use omq_proto::proto::{
@@ -237,8 +237,15 @@ where
     /// Install a per-peer send pipe. The public socket handle pushes raw
     /// messages into the sender; this driver drains and encodes locally.
     #[must_use]
-    pub(crate) fn with_send_pipe(mut self, rx: SendPipeConsumer) -> Self {
-        self.output.send_pipe_rx = Some(rx);
+    pub(crate) fn with_send_pipe(self, rx: SendPipeConsumer) -> Self {
+        self.with_send_pipe_lease(SendPipeLease::owned(rx))
+    }
+
+    /// Install a connect route's send pipe. The driver gives it back to the
+    /// route when it ends.
+    #[must_use]
+    pub(crate) fn with_send_pipe_lease(mut self, lease: SendPipeLease) -> Self {
+        self.output.send_pipe_rx = lease;
         self
     }
 

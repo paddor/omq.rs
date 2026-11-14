@@ -596,12 +596,20 @@ impl ReqAwaitingReply {
             routes.connected.remove(&route_id);
         }
 
-        if matches!(routes.selected, Some(ReqReplySource::Connected(id)) if id == peer_id)
-            || routes.selected == Some(ReqReplySource::Pending(route_id))
-        {
+        // A request still queued on the route waits for the redial. When the
+        // route drops its queue instead, `route_removed` ends the wait.
+        if matches!(routes.selected, Some(ReqReplySource::Connected(id)) if id == peer_id) {
             // A queued reply remains receivable after disconnect. A new
             // request replaces this source and rejects the old queued reply.
             self.clear_awaiting();
+        }
+    }
+
+    /// A connect route's queue moved to the route that redials it.
+    pub(crate) fn route_moved(&self, from: u64, to: u64) {
+        let mut routes = self.routes.lock().expect("REQ routes");
+        if routes.selected == Some(ReqReplySource::Pending(from)) {
+            routes.selected = Some(ReqReplySource::Pending(to));
         }
     }
 
@@ -718,3 +726,6 @@ fn check_pre_send_frame_count(t: SocketType, msg: &Message) -> Result<()> {
         _ => Ok(()),
     }
 }
+
+#[cfg(test)]
+mod tests;

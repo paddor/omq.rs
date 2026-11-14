@@ -8,6 +8,10 @@ use crate::socket::actor::peer_materialize::{ByteStreamConnection, PeerSetup};
 use crate::socket::dispatch::InprocSetup;
 use std::sync::atomic::Ordering;
 
+/// Most receive queues that departed peers may leave unread before new
+/// peers are refused: at the default HWM about 64 MiB of messages.
+const MAX_DEPARTED_RINGS: usize = 1024;
+
 impl SocketDriver {
     pub(super) async fn handle_internal_event(&mut self, evt: InternalEvent) {
         match evt {
@@ -53,7 +57,7 @@ impl SocketDriver {
                     options,
                     side: Side::Connect,
                     route_id,
-                    send_pipe_rx: self.take_dialer_send_pipe(route_id),
+                    send_pipe_rx: self.lend_route_queue(route_id),
                 };
 
                 self.spawn_on_handshake(conn, peer);
@@ -121,13 +125,8 @@ impl SocketDriver {
                 // No redial: end the route, so a later connect() dials again.
                 self.drop_dial_route(peer.origin.route_id);
             } else {
-                let origin = &peer.origin;
-                self.redial_closed_peer(
-                    origin.route_id,
-                    origin.endpoint.clone(),
-                    origin.options.clone(),
-                    peer.handshake.ready,
-                );
+                // Removing the peer parked its queue if the route keeps it.
+                self.redial_closed_peer(LostRoute::of(&peer, self.socket_type));
             }
         }
     }
@@ -158,14 +157,9 @@ impl SocketDriver {
             return;
         }
         peer.progress.redialed = true;
-        let origin = &peer.origin;
-        let (route_id, endpoint, options) = (
-            origin.route_id,
-            origin.endpoint.clone(),
-            origin.options.clone(),
-        );
-        let was_ready = peer.handshake.ready;
-        self.redial_closed_peer(route_id, endpoint, options, was_ready);
+        // Its route still holds the queue: the peer is removed later.
+        let lost = LostRoute::of(peer, self.socket_type);
+        self.redial_closed_peer(lost);
     }
 
     /// Redial a route whose connected transport produced no peer. Its dial
@@ -188,9 +182,12 @@ impl SocketDriver {
             .failed_attempts
             .load(Ordering::Relaxed)
             .saturating_add(1);
-        self.drop_dial_route(route_id);
-        if !matches!(options.reconnect, ReconnectPolicy::Disabled) {
-            self.start_redial(endpoint, options, failed_attempts);
+        let redial = !matches!(options.reconnect, ReconnectPolicy::Disabled);
+        // Nothing took from the queue: the connection never became a peer.
+        let queue = self.take_route_queue(route_id, redial);
+        self.endpoints.dialers.retain(|d| d.route_id != route_id);
+        if redial {
+            self.start_redial(endpoint, options, failed_attempts, queue);
         }
     }
 
@@ -222,14 +219,16 @@ impl SocketDriver {
         }
     }
 
-    /// Restart the dial loop for a lost client peer, carrying its backoff.
-    fn redial_closed_peer(
-        &mut self,
-        route_id: u64,
-        endpoint: omq_proto::Endpoint,
-        options: std::sync::Arc<omq_proto::Options>,
-        was_ready: bool,
-    ) {
+    /// Restart the dial loop for a lost client peer, carrying its backoff
+    /// and the queue of its route.
+    fn redial_closed_peer(&mut self, lost: LostRoute) {
+        let LostRoute {
+            route_id,
+            endpoint,
+            options,
+            was_ready,
+            keep_queue,
+        } = lost;
         // Transport success does not reset backoff: READY does.
         let failed_attempts = if was_ready {
             1
@@ -242,9 +241,10 @@ impl SocketDriver {
                 .saturating_add(1)
         };
 
+        let queue = self.take_route_queue(route_id, keep_queue);
         // Only this route: the endpoint may carry other connects.
         self.endpoints.dialers.retain(|d| d.route_id != route_id);
-        self.start_redial(endpoint, options, failed_attempts);
+        self.start_redial(endpoint, options, failed_attempts, queue);
     }
 
     pub(super) fn evict_peer_for_handover(&mut self, peer_id: u64) {
@@ -304,14 +304,6 @@ impl SocketDriver {
         self.remove_connect_route(route_id);
     }
 
-    fn take_dialer_send_pipe(&mut self, route_id: u64) -> Option<crate::engine::SendPipeConsumer> {
-        self.endpoints
-            .dialers
-            .iter_mut()
-            .find(|d| d.route_id == route_id)
-            .and_then(|d| d.send_pipe_rx.take())
-    }
-
     fn spawn_on_handshake(&mut self, mut conn: AnyConn, peer: PeerSetup) {
         // During linger, the handshake may complete after begin_close().
         // Spawn anyway so queued messages can drain; teardown cancels once
@@ -322,32 +314,9 @@ impl SocketDriver {
 
         if self.socket_type != SocketType::Stream
             && let AnyConn::ByteStream { setup, .. } = &mut conn
+            && !self.admit_byte_stream(setup, &peer)
         {
-            if setup
-                .as_ref()
-                .is_some_and(|state| state.cancel.is_cancelled())
-            {
-                return;
-            }
-
-            if setup.is_none() {
-                let source = peer_ident_socket_addr(&peer.ident).map(|address| address.ip());
-                let Some(admission) = crate::transport::setup::PendingHandshake::acquire(
-                    &self.endpoints.setup_admission,
-                    None,
-                    source,
-                ) else {
-                    let reason = "socket pending-handshake limit reached";
-                    self.link.monitor.publish(peer.handshake_failed(reason));
-                    return;
-                };
-
-                *setup = Some(crate::transport::setup::SetupState {
-                    deadline: None,
-                    cancel: self.link.cancel.clone(),
-                    admission,
-                });
-            }
+            return;
         }
 
         self.link.monitor.publish(connection_event(
@@ -357,6 +326,71 @@ impl SocketDriver {
             self.next_peer_id,
         ));
         self.spawn_any_conn(conn, peer);
+    }
+
+    /// Admit a ZMTP byte stream to its handshake. A refused stream is closed:
+    /// a dialer redials it with backoff, a remote dialer reconnects.
+    fn admit_byte_stream(
+        &mut self,
+        setup: &mut Option<crate::transport::setup::SetupState>,
+        peer: &PeerSetup,
+    ) -> bool {
+        if setup
+            .as_ref()
+            .is_some_and(|state| state.cancel.is_cancelled())
+        {
+            return false;
+        }
+
+        if self.departed_rings() >= MAX_DEPARTED_RINGS {
+            let reason =
+                format!("socket holds {MAX_DEPARTED_RINGS} unread queues of departed peers");
+            self.link.monitor.publish(peer.handshake_failed(reason));
+            return false;
+        }
+
+        if setup.is_none() {
+            let source = peer_ident_socket_addr(&peer.ident).map(|address| address.ip());
+            let Some(admission) = crate::transport::setup::PendingHandshake::acquire(
+                &self.endpoints.setup_admission,
+                None,
+                source,
+            ) else {
+                let reason = "socket pending-handshake limit reached";
+                self.link.monitor.publish(peer.handshake_failed(reason));
+                return false;
+            };
+
+            *setup = Some(crate::transport::setup::SetupState {
+                deadline: None,
+                cancel: self.link.cancel.clone(),
+                admission,
+            });
+        }
+
+        true
+    }
+
+    /// Receive queues of departed peers that the application has not
+    /// drained. Each holds up to `recv_hwm` messages.
+    fn departed_rings(&self) -> usize {
+        let lanes = self
+            .link
+            .spsc
+            .fanin
+            .as_ref()
+            .map_or(0, |fanin| fanin.departed_lanes());
+        let rings = self
+            .link
+            .spsc
+            .tcp_consumers
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|ring| !self.peers.contains_key(&ring.peer_id))
+            .count();
+
+        lanes + rings
     }
 
     /// Dispatch on transport type: byte-stream conns get the full
@@ -505,6 +539,27 @@ pub(crate) fn spawn_driver(
     io_pool: &crate::context::IoPoolHandle,
 ) -> tokio::task::JoinHandle<()> {
     io_pool.spawn_primary(async move { driver.run().await })
+}
+
+/// A lost client peer's route, as its redial needs it.
+struct LostRoute {
+    route_id: u64,
+    endpoint: omq_proto::Endpoint,
+    options: std::sync::Arc<omq_proto::Options>,
+    was_ready: bool,
+    keep_queue: bool,
+}
+
+impl LostRoute {
+    fn of(peer: &PeerEntry, socket_type: SocketType) -> Self {
+        Self {
+            route_id: peer.origin.route_id,
+            endpoint: peer.origin.endpoint.clone(),
+            options: peer.origin.options.clone(),
+            was_ready: peer.handshake.ready,
+            keep_queue: SocketDriver::keeps_route_queue(peer, socket_type),
+        }
+    }
 }
 
 impl PeerSetup {

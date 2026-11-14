@@ -7,7 +7,9 @@ use super::{
 };
 use crate::{
     engine::{
-        control_inbox, data_inbox, send_pipe::SendPipeConsumer, transmit_slot::PeerTransmitSlot,
+        control_inbox, data_inbox,
+        send_pipe::{SendPipeConsumer, SendPipeLease},
+        transmit_slot::PeerTransmitSlot,
     },
     routing::OUTBOUND_BATCH_MAX_MSGS,
 };
@@ -22,7 +24,7 @@ pub(super) struct QueuedOutput {
     pipe_batch: Vec<Message>,
     pub(super) pending: PendingWrite,
     pub(super) frames: FrameBuffer,
-    pub(super) pipe: Option<SendPipeConsumer>,
+    pub(super) pipe: SendPipeLease,
     pub(super) data: Option<data_inbox::Receiver>,
     pub(super) encoding: OutboundState,
     owned_chunks: bool,
@@ -32,7 +34,7 @@ impl QueuedOutput {
     pub(super) fn new(
         encoding: OutboundState,
         frames: FrameBuffer,
-        pipe: Option<SendPipeConsumer>,
+        pipe: SendPipeLease,
         data: Option<data_inbox::Receiver>,
         owned_chunks: bool,
     ) -> Self {
@@ -62,7 +64,7 @@ impl QueuedOutput {
     }
 
     pub(super) fn pipe_ready(&self) -> bool {
-        self.pipe.is_some() && self.pipe_batch.is_empty()
+        self.pipe.get().is_some() && self.pipe_batch.is_empty()
     }
 
     pub(super) fn inbox_ready(&self) -> bool {
@@ -81,7 +83,7 @@ impl QueuedOutput {
                     && !self.encoding.has_pending_shm()
                     && self.pipe_batch.is_empty()
                     && self.deferred.is_none()
-                    && self.pipe.as_ref().is_none_or(SendPipeConsumer::is_empty)
+                    && self.pipe.get().is_none_or(SendPipeConsumer::is_empty)
                     && self
                         .data
                         .as_ref()
@@ -112,7 +114,7 @@ impl QueuedOutput {
 
         writer.publish_idle(|| {
             slot.is_empty()
-                && self.pipe.as_ref().is_none_or(SendPipeConsumer::is_empty)
+                && self.pipe.get().is_none_or(SendPipeConsumer::is_empty)
                 && self
                     .data
                     .as_ref()
@@ -179,7 +181,7 @@ impl QueuedOutput {
     ) -> Result<DriverStep> {
         if self.deferred.is_some()
             && self.pipe_batch.is_empty()
-            && self.pipe.as_ref().is_none_or(SendPipeConsumer::is_empty)
+            && self.pipe.get().is_none_or(SendPipeConsumer::is_empty)
             && self.idle(connection)
         {
             self.stage_inbox(connection)?;
@@ -196,10 +198,7 @@ impl QueuedOutput {
         // still covers the empty-to-nonempty race.
         if self.pipe_batch.is_empty()
             && self.idle(connection)
-            && self
-                .pipe
-                .as_ref()
-                .is_some_and(SendPipeConsumer::needs_drain)
+            && self.pipe.get().is_some_and(SendPipeConsumer::needs_drain)
         {
             return self.drain_pipe(connection);
         }
@@ -259,10 +258,10 @@ impl QueuedOutput {
 
             if self.encoding.adapts_level() {
                 let backlogged = !self.pipe_batch.is_empty()
-                    || self.pipe.as_ref().is_some_and(|pipe| !pipe.is_empty());
+                    || self.pipe.get().is_some_and(|pipe| !pipe.is_empty());
                 let input_full = self
                     .pipe
-                    .as_mut()
+                    .get_mut()
                     .is_some_and(SendPipeConsumer::take_freed_full);
                 self.encoding.note_batch(backlogged, limited, input_full);
             }
@@ -272,7 +271,7 @@ impl QueuedOutput {
     }
 
     fn drain_pipe(&mut self, connection: &mut Connection) -> Result<DriverStep> {
-        let rx = self.pipe.as_mut().expect("ready send pipe");
+        let rx = self.pipe.get_mut().expect("ready send pipe");
         if self.encoding.encoder.is_none() && !self.encoding.uses_shm() {
             // Untransformed messages need no staging vector or reverse pass.
             let started = Instant::now();

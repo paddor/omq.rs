@@ -12,7 +12,8 @@ Both use 1 and 2 IO threads and one application thread per side.
 The verifier also measures CT REQ/REP at 256B, 32-subscriber PUB/SUB
 at 256B with 2 IO threads, and 16B inproc PUSH/PULL.
 Four-subscriber rates count aggregate deliveries; the 32-subscriber
-gate reports the average per subscriber. Inproc shares one context;
+gate reports the average per subscriber, read with batch receives of up
+to 64 messages. Inproc shares one context;
 wire cases use separate contexts. Measurement excludes tagged warmup.
 Draft cases measure SCATTER/GATHER and RADIO/DISH over TCP, inproc, IPC,
 SHM, and DART, with fan-in/fan-out and SHM pool variants.

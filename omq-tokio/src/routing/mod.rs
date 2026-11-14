@@ -30,7 +30,7 @@ use std::collections::VecDeque;
 use bytes::Bytes;
 use smallvec::SmallVec;
 
-use crate::engine::{ActorPeerDriverHandle, SendPipeConsumer};
+use crate::engine::{ActorPeerDriverHandle, SendPipeConsumer, SendPipeProducer};
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 use omq_proto::options::Options;
@@ -466,14 +466,40 @@ impl SendStrategy {
         }
     }
 
-    pub(crate) fn connection_removed(&mut self, peer_id: u64, route_id: u64) {
+    /// Stop routing to a peer. Round-robin routes hand back the producer of
+    /// their connect pipe, so a redial can keep what it still queues.
+    pub(crate) fn connection_removed(
+        &mut self,
+        peer_id: u64,
+        route_id: u64,
+    ) -> Option<SendPipeProducer> {
         match self {
             Self::None => {}
-            Self::RoundRobin(s) => s.connection_removed(route_id),
-            Self::Latency(s) => s.connection_removed(route_id),
+            Self::RoundRobin(s) => return s.take_connect_pipe(route_id),
+            Self::Latency(s) => return s.take_connect_pipe(route_id),
             Self::Exclusive(s) => s.connection_removed(peer_id),
             Self::FanOut(s) => s.connection_removed(peer_id),
             Self::Identity(s) => s.connection_removed(peer_id),
+        }
+
+        None
+    }
+
+    /// Stop routing into a connect route's pipe and hand back its producer.
+    pub(crate) fn take_connect_pipe(&mut self, route_id: u64) -> Option<SendPipeProducer> {
+        match self {
+            Self::RoundRobin(s) => s.take_connect_pipe(route_id),
+            Self::Latency(s) => s.take_connect_pipe(route_id),
+            Self::None | Self::Exclusive(_) | Self::FanOut(_) | Self::Identity(_) => None,
+        }
+    }
+
+    /// Route sends into a connect pipe taken by [`Self::take_connect_pipe`].
+    pub(crate) fn insert_connect_pipe(&mut self, route_id: u64, tx: SendPipeProducer) {
+        match self {
+            Self::RoundRobin(s) => s.insert_connect_pipe(route_id, tx),
+            Self::Latency(s) => s.insert_connect_pipe(route_id, tx),
+            Self::None | Self::Exclusive(_) | Self::FanOut(_) | Self::Identity(_) => {}
         }
     }
 

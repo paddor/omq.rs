@@ -113,9 +113,13 @@ a nonblocking vectored write; the driver owns any unfinished output.
 | Identity or reply route | ROUTER, REP, SERVER, PEER | Selected peer or saved request route |
 | Exclusive | PAIR, CHANNEL | One peer |
 
-Round-robin peers have bounded send pipes. Connect-side pipes exist before the
-peer binds, so early sends keep their order; a bind-side socket without a ready
-pipe is mute. HWM bounds each pipe, not total socket memory.
+Round-robin peers have bounded send pipes. A connect-side pipe belongs to its
+`connect()` route and exists before the peer binds, so early sends keep their
+order. Each connection borrows the pipe and gives it back when it ends, so the
+redial sends what is still queued; a lost connection loses only what it took
+out. REQ drops a request that a ready connection may have sent. A bind-side
+socket without a ready pipe is mute. HWM bounds each pipe, not total socket
+memory.
 
 A PUSH socket on one I/O thread picks one ready peer per message:
 
@@ -181,7 +185,9 @@ Backpressure is per connection: a full lane stops reading from that
 connection only, then its transport buffers and the sender's queues fill while
 other peers keep flowing. PULL and GATHER bound each lane by `recv_hwm`
 messages; PEER also bounds each connection by bytes. No socket-wide budget
-couples peers, and transport buffers are outside these budgets.
+couples peers, and transport buffers are outside these budgets. A departed
+peer's lane stays until the application drains it; with 1024 such lanes, a
+socket refuses new TCP, IPC, and other stream peers until it reads.
 
 Round-robin and exclusive sends wait when mute; nonblocking sends report
 `Full`. Fan-out applies its drop or block policy. Peer loss and slow consumers

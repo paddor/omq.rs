@@ -450,8 +450,7 @@ impl SocketDriver {
                     self.start_dial_task(
                         resolved.endpoint,
                         pending.options.clone(),
-                        resolved.first,
-                        0,
+                        resolved.first.into(),
                     );
                 }
 

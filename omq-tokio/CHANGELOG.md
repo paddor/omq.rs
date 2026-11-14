@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SubscribeRejected` or `JoinRejected`. `Options::max_peer_subscriptions`
   changes the limit or removes it. Before, a peer could add prefixes
   without end, and each stayed in memory until it disconnected.
+- Only ROUTER and PEER hand an identity over to a new connection. REP and
+  SERVER keep every peer, also peers that announce the same identity.
+  Before, two such clients evicted each other on every reconnect, though
+  neither socket type routes by identity.
 
 ### Fixed
 

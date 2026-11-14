@@ -21,6 +21,20 @@ struct ReadiedPeer {
 }
 
 impl SocketDriver {
+    /// The live peer that a new connection with `identity` takes over from.
+    /// Only ROUTER and PEER route by the peer's identity, so only they hand
+    /// one over. Other types keep every peer: two REP or SERVER clients
+    /// with one identity would evict each other on every reconnect.
+    fn identity_holder(&self, peer_id: u64, identity: &bytes::Bytes) -> Option<u64> {
+        if !matches!(self.socket_type, SocketType::Router | SocketType::Peer) {
+            return None;
+        }
+        self.routing
+            .send_strategy
+            .peer_for_identity(identity)
+            .filter(|&old_id| old_id != peer_id)
+    }
+
     /// A routing identity in use stays with its principal. Handover needs the
     /// same mechanism, CURVE key, PLAIN username, and authenticator user ID.
     fn identity_held_by_other_principal(
@@ -30,10 +44,7 @@ impl SocketDriver {
         authentication: &omq_proto::PeerAuthentication,
     ) -> bool {
         let Some(held) = self
-            .routing
-            .send_strategy
-            .peer_for_identity(identity)
-            .filter(|&old_id| old_id != peer_id)
+            .identity_holder(peer_id, identity)
             .and_then(|old_id| self.peers.get(&old_id)?.handshake.info.as_ref())
         else {
             return false;
@@ -92,10 +103,7 @@ impl SocketDriver {
             .filter(|peer| peer.handshake.ready && family(&peer.origin.endpoint))
             .count();
         let replaced = self
-            .routing
-            .send_strategy
-            .peer_for_identity(identity)
-            .filter(|&old_id| old_id != peer_id)
+            .identity_holder(peer_id, identity)
             .and_then(|old_id| self.peers.get(&old_id))
             .is_some_and(|peer| peer.handshake.ready && family(&peer.origin.endpoint));
         Some(ready.saturating_sub(usize::from(replaced)) < limit)
@@ -127,11 +135,7 @@ impl SocketDriver {
         let Some(activation) = self.receive_activation(peer_id, &sender) else {
             return;
         };
-        let replaced = self
-            .routing
-            .send_strategy
-            .peer_for_identity(&identity)
-            .filter(|old_id| *old_id != peer_id);
+        let replaced = self.identity_holder(peer_id, &identity);
 
         let Some(ready) = self.mark_peer_ready(peer_id, &identity, info) else {
             return;

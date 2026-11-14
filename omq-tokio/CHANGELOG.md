@@ -159,6 +159,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   valid messages and then a frame over `max_message_size` dropped all
   ten. Messages that arrive before the data plane is active are still
   dropped with such a frame.
+- An `inproc://` peer that the socket refuses, for its peer limit or an
+  incompatible socket type, is reported as `HandshakeFailed`. Before, the
+  refusal left no monitor event.
 
 ## [0.34.3] - 2026-11-04
 

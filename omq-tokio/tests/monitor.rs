@@ -24,6 +24,39 @@ async fn wait_connected_accepts_huge_timeout() {
     assert_eq!(ready, 0);
 }
 
+/// A refused inproc peer is reported like a refused wire peer.
+#[tokio::test]
+async fn refused_inproc_peer_reports_handshake_failed() {
+    let first = Socket::new(SocketType::Pair, Options::default());
+    first.bind(inproc_ep("mon-refused-first")).await.unwrap();
+    let second = Socket::new(SocketType::Pair, Options::default());
+    second.bind(inproc_ep("mon-refused-second")).await.unwrap();
+
+    let pair = Socket::new(SocketType::Pair, Options::default());
+    let mut monitor = pair.monitor();
+    pair.connect(inproc_ep("mon-refused-first")).await.unwrap();
+    pair.wait_connected(1, Duration::from_secs(5))
+        .await
+        .unwrap();
+    // PAIR takes one peer, so the second endpoint is refused.
+    pair.connect(inproc_ep("mon-refused-second")).await.unwrap();
+
+    let reason = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let MonitorEvent::HandshakeFailed {
+                endpoint, reason, ..
+            } = monitor.recv().await.unwrap()
+            {
+                assert_eq!(endpoint, inproc_ep("mon-refused-second"));
+                break reason;
+            }
+        }
+    })
+    .await
+    .expect("no HandshakeFailed for the refused inproc peer");
+    assert_eq!(reason, "socket peer limit reached");
+}
+
 #[tokio::test]
 async fn monitor_listening_event_on_bind() {
     let ep = inproc_ep("mon-listen");

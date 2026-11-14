@@ -32,12 +32,23 @@ pub(in crate::socket::actor) fn spawn_inproc_peer(
     mut conn: InprocConn,
     peer: PeerSetup,
 ) {
-    let Some(peer_id) = admit_inproc_peer(socket, conn.peer.socket_type) else {
+    let peer_id = match admit_inproc_peer(socket, conn.peer.socket_type) {
+        Ok(peer_id) => peer_id,
+        Err(reason) => {
+            // No peer entry exists, so no driver reports this. A connect
+            // route is redialed by the caller.
+            socket.link.monitor.publish(peer.handshake_failed(reason));
+            return;
+        }
+    };
+    // Before the peer entry exists: a closed actor output then leaves no
+    // entry without a task behind.
+    let Ok(peer_output) = socket.mail.peer_out_tx.try_register() else {
         return;
     };
 
     let ends = register_inproc_peer(socket, peer_id, &mut conn, peer);
-    spawn_inproc_driver(socket, peer_id, conn, ends);
+    spawn_inproc_driver(socket, peer_id, conn, ends, peer_output);
 }
 
 /// Driver-side ends of an inproc peer that is already in the peer table.
@@ -104,6 +115,7 @@ fn spawn_inproc_driver(
     peer_id: u64,
     conn: InprocConn,
     ends: InprocDriverEnds,
+    peer_output: crate::engine::actor_output::DataSender,
 ) {
     let peer_props = omq_proto::proto::command::PeerProperties::default()
         .with_socket_type(conn.peer.socket_type)
@@ -119,9 +131,6 @@ fn spawn_inproc_driver(
         .get(&peer_id)
         .and_then(|peer| peer.subscriptions.clone());
     let completion = socket.reserve_completion(peer_id);
-    let Ok(peer_output) = socket.mail.peer_out_tx.try_register() else {
-        return;
-    };
 
     let ctx = InprocDriverCtx {
         peer_out: crate::engine::actor_output::PeerOutput::actor(peer_output),
@@ -159,16 +168,21 @@ fn spawn_inproc_driver(
 }
 
 /// Allocate a peer id if this socket can take another ready peer of
-/// `peer_type`.
-fn admit_inproc_peer(socket: &mut SocketDriver, peer_type: SocketType) -> Option<u64> {
+/// `peer_type`; else the reason it cannot.
+fn admit_inproc_peer(
+    socket: &mut SocketDriver,
+    peer_type: SocketType,
+) -> Result<u64, &'static str> {
     if !socket.can_accept_ready_peer() {
-        return None;
+        return Err("socket peer limit reached");
     }
     if !omq_proto::proto::is_compatible(socket.socket_type, peer_type) {
-        return None;
+        return Err("incompatible socket types");
     }
 
-    socket.alloc_routable_peer_id()
+    socket
+        .alloc_routable_peer_id()
+        .ok_or("no routable peer id left")
 }
 
 /// Pick the inproc send route: the handle-side pipe and, when sends go

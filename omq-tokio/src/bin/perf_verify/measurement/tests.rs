@@ -150,3 +150,77 @@ fn expired_window_does_not_receive_another_batch() {
         DrainResult::Deadline,
     );
 }
+
+#[test]
+fn batch_drain_counts_measured_messages_of_one_receive() {
+    let now = Instant::now();
+    let window = Window::new(now, Duration::ZERO, Duration::from_secs(1));
+    let mut counter = Counter::new(window);
+    let mut batch = Vec::new();
+    let mut calls = 0;
+
+    let result = drain_batch(
+        |out| {
+            calls += 1;
+            for tag in [MEASURED_TAG, 0, MEASURED_TAG] {
+                out.push(Message::from_slice(&[tag]));
+            }
+            Ok(3)
+        },
+        &mut batch,
+        &mut counter,
+        window,
+        || now,
+    );
+
+    assert_eq!(result, DrainResult::Budget);
+    assert_eq!(calls, 1);
+    assert_eq!(counter.count, 2);
+    assert!(batch.is_empty(), "the batch must not hold messages");
+}
+
+#[test]
+fn batch_drain_reports_empty_and_excludes_batch_crossing_deadline() {
+    let now = Instant::now();
+    let window = Window::new(now, Duration::ZERO, Duration::from_secs(1));
+    let mut counter = Counter::new(window);
+    let mut batch = Vec::new();
+
+    assert_eq!(
+        drain_batch(
+            |_| Err(omq_tokio::Error::WouldBlock),
+            &mut batch,
+            &mut counter,
+            window,
+            || now,
+        ),
+        DrainResult::Empty,
+    );
+
+    let mut times = [now, window.end].into_iter();
+    assert_eq!(
+        drain_batch(
+            |out| {
+                out.push(Message::from_slice(&[MEASURED_TAG]));
+                Ok(1)
+            },
+            &mut batch,
+            &mut counter,
+            window,
+            || times.next().unwrap(),
+        ),
+        DrainResult::Deadline,
+    );
+    assert_eq!(counter.count, 0);
+
+    assert_eq!(
+        drain_batch(
+            |_| panic!("no receive after observed deadline"),
+            &mut batch,
+            &mut counter,
+            window,
+            || window.end,
+        ),
+        DrainResult::Deadline,
+    );
+}

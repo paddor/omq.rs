@@ -2,7 +2,7 @@
 
 use super::affinity::Side;
 use super::measurement::{
-    Window, count_blocking_many, payload, send_blocking_batch_until, tagged_payload,
+    Window, count_batches_many, payload, send_blocking_batch_until, tagged_payload,
 };
 use super::transport::tcp_zero;
 use super::{PUBSUB_32P_MEASURE, PUBSUB_32P_WARMUP, SETTINGS, context, duration_env};
@@ -94,7 +94,10 @@ pub(super) fn run_pubsub_sub_child(
             .expect("flush measurement command");
     });
 
-    let received = count_blocking_many(&receivers, window);
+    // Batch receives keep the rate independent of code layout: one payload
+    // cache miss per scalar receive hides behind the hardware prefetcher
+    // only in some builds.
+    let received = count_batches_many(&receivers, window);
     coordinator.join().expect("measurement coordinator");
     ctx.term();
     println!(

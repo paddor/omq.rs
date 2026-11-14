@@ -119,18 +119,56 @@ pub(super) fn drain_ready(
         }
     };
 
-    let finished = now();
-    // Timestamp the bounded batch, not every message. Commit only batches
-    // entirely within the window: preemption can lower the count, never add
-    // warmup or late traffic. At most one boundary batch per edge is discarded.
-    if started >= window.start && finished < window.end {
-        counter.count += count;
+    counter.commit(started, now(), count, result)
+}
+
+/// Drain one batch with a single batch receive. Counting a popped batch
+/// loads its payloads back to back, so their cache misses overlap.
+pub(super) fn drain_batch(
+    recv: impl FnOnce(&mut Vec<Message>) -> omq_tokio::Result<usize>,
+    batch: &mut Vec<Message>,
+    counter: &mut Counter,
+    window: Window,
+    mut now: impl FnMut() -> Instant,
+) -> DrainResult {
+    let started = now();
+    if started >= window.end {
+        return DrainResult::Deadline;
     }
 
-    if finished >= window.end {
-        DrainResult::Deadline
-    } else {
-        result
+    batch.clear();
+    let result = match recv(batch) {
+        Ok(_) => DrainResult::Budget,
+        Err(omq_tokio::Error::WouldBlock) => DrainResult::Empty,
+        Err(error) => panic!("perf recv failed: {error}"),
+    };
+    let count = batch.iter().map(|m| u64::from(is_measured(m))).sum();
+    batch.clear();
+
+    counter.commit(started, now(), count, result)
+}
+
+impl Counter {
+    fn commit(
+        &mut self,
+        started: Instant,
+        finished: Instant,
+        count: u64,
+        result: DrainResult,
+    ) -> DrainResult {
+        // Timestamp the bounded batch, not every message. Commit only batches
+        // entirely within the window: preemption can lower the count, never
+        // add warmup or late traffic. At most one boundary batch per edge is
+        // discarded.
+        if started >= self.window.start && finished < self.window.end {
+            self.count += count;
+        }
+
+        if finished >= self.window.end {
+            DrainResult::Deadline
+        } else {
+            result
+        }
     }
 }
 
@@ -223,20 +261,49 @@ pub(super) fn count_blocking_many(
     sockets: &[omq_tokio::blocking::Socket],
     window: Window,
 ) -> Received {
+    count_many(sockets, window, |socket, counter| {
+        let mut budget = DrainBudget::new(VISIT_MESSAGES, 64 * 1024);
+        drain_ready(
+            || socket.try_recv(),
+            counter,
+            window,
+            &mut budget,
+            Instant::now,
+        )
+    })
+}
+
+/// Like [`count_blocking_many`], with one batch receive per visit.
+pub(super) fn count_batches_many(
+    sockets: &[omq_tokio::blocking::Socket],
+    window: Window,
+) -> Received {
+    let mut batch = Vec::with_capacity(VISIT_MESSAGES);
+    count_many(sockets, window, |socket, counter| {
+        drain_batch(
+            |out| socket.try_recv_many_into(VISIT_MESSAGES, out),
+            &mut batch,
+            counter,
+            window,
+            Instant::now,
+        )
+    })
+}
+
+/// Messages taken from one receiver before visiting the next.
+const VISIT_MESSAGES: usize = 64;
+
+fn count_many(
+    sockets: &[omq_tokio::blocking::Socket],
+    window: Window,
+    mut visit: impl FnMut(&omq_tokio::blocking::Socket, &mut Counter) -> DrainResult,
+) -> Received {
     assert!(!sockets.is_empty(), "at least one receiver is required");
     let mut counters: Vec<_> = sockets.iter().map(|_| Counter::new(window)).collect();
 
     'receive: loop {
         for (socket, counter) in sockets.iter().zip(&mut counters) {
-            let mut budget = DrainBudget::new(64, 64 * 1024);
-            if drain_ready(
-                || socket.try_recv(),
-                counter,
-                window,
-                &mut budget,
-                Instant::now,
-            ) == DrainResult::Deadline
-            {
+            if visit(socket, counter) == DrainResult::Deadline {
                 break 'receive;
             }
         }

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-14
+
 ### Added
 
 - `OMQ_MAX_MESSAGE_PARTS` (1020) and `OMQ_MAX_PEER_SUBSCRIPTIONS` (1021):

@@ -55,6 +55,7 @@ fn fill(socket: &omq_tokio::blocking::Socket) -> usize {
             Err(TrySendError::Full(_)) => return sent,
             Err(error) => panic!("fill failed: {error}"),
         }
+
         assert!(sent < 1_000_000, "queue never filled");
     }
 }
@@ -71,6 +72,7 @@ fn receive_only_types_are_never_writable() {
         let socket = ctx.blocking_socket(kind, Options::default());
         assert!(!socket.send_ready(), "{kind:?}");
     }
+
     ctx.term();
 }
 
@@ -88,6 +90,7 @@ fn sockets_without_peers_follow_writability_policy() {
         let socket = ctx.blocking_socket(kind, Options::default());
         assert!(socket.send_ready(), "{kind:?}");
     }
+
     let mandatory = ctx.blocking_socket(
         SocketType::Router,
         Options::default().router_mandatory(true),
@@ -130,18 +133,21 @@ fn full_queues_wake_when_drained() {
                     .workload_profile(profile)
                     .send_hwm(4)
                     .recv_hwm(4);
+
                 let receiver = ctx.blocking_socket(receiver_type, options.clone());
                 let endpoint = receiver.bind(endpoint).unwrap();
                 let sender = ctx.blocking_socket(sender_type, options);
                 sender.connect(endpoint).unwrap();
                 sender.wait_connected(1, TIMEOUT).unwrap();
                 receiver.wait_connected(1, TIMEOUT).unwrap();
+
                 let case = format!("{sender_type:?} {profile:?}");
                 assert!(sender.send_ready(), "{case}: connected");
 
                 // Fill the bounded queue before registering for space.
                 let mut queued = fill(&sender);
                 let deadline = Instant::now() + TIMEOUT;
+
                 while sender.send_ready() {
                     assert!(Instant::now() < deadline, "{case}: never stayed full");
                     std::thread::sleep(Duration::from_millis(20));
@@ -153,12 +159,14 @@ fn full_queues_wake_when_drained() {
                 let _registration = sender.register_send_waker(Waker::from(wake.clone()));
                 assert!(!sender.send_ready(), "{case}: full");
                 assert_eq!(wake.count.load(Ordering::SeqCst), 0, "{case}: early wake");
+
                 for _ in 0..queued {
                     receiver.recv_timeout(TIMEOUT).unwrap();
                     if wake.count.load(Ordering::SeqCst) > 0 {
                         break;
                     }
                 }
+
                 wait_for(|| wake.count.load(Ordering::SeqCst) > 0, &case);
                 assert!(sender.send_ready(), "{case}: ready after wake");
                 sender
@@ -203,14 +211,17 @@ fn req_and_rep_follow_alternation() {
 async fn async_wait_send_ready_tracks_peer_queues() {
     let ctx = Context::current();
     let options = Options::default().send_hwm(2).recv_hwm(2);
+
     let pull = ctx.socket(SocketType::Pull, options.clone());
     let endpoint = pull.bind("inproc://async-send-ready").await.unwrap();
     let push = ctx.socket(SocketType::Push, options);
     push.connect(endpoint).await.unwrap();
     push.wait_connected(1, TIMEOUT).await.unwrap();
+
     // The receiver must open its inproc port before filling the final queue.
     // Otherwise opening it later legitimately makes the sender writable.
     pull.wait_connected(1, TIMEOUT).await.unwrap();
+
     while push.try_send(Message::from("x")).is_ok() {}
     assert!(!push.send_ready());
 
@@ -218,12 +229,15 @@ async fn async_wait_send_ready_tracks_peer_queues() {
         let push = push.clone();
         tokio::spawn(async move { push.wait_send_ready().await })
     };
+
     tokio::time::sleep(Duration::from_millis(20)).await;
     assert!(!waiter.is_finished(), "wait completed while full");
+
     while tokio::time::timeout(Duration::from_millis(50), pull.recv())
         .await
         .is_ok()
     {}
+
     tokio::time::timeout(TIMEOUT, waiter)
         .await
         .expect("wait_send_ready after drain")
@@ -241,6 +255,7 @@ async fn nodrop_pub_readiness_waits_for_inproc_capacity() {
         xpub_nodrop: true,
         ..Options::default()
     };
+
     let publisher = ctx.socket(SocketType::Pub, options);
     let subscriber = ctx.socket(SocketType::Sub, Options::default().recv_hwm(1));
     let second_subscriber = ctx.socket(SocketType::Sub, Options::default().recv_hwm(1));
@@ -248,38 +263,47 @@ async fn nodrop_pub_readiness_waits_for_inproc_capacity() {
         .bind("inproc://nodrop-pub-readiness")
         .await
         .unwrap();
+
     subscriber.subscribe("").await.unwrap();
     subscriber.connect(endpoint.clone()).await.unwrap();
     second_subscriber.subscribe("").await.unwrap();
     second_subscriber.connect(endpoint).await.unwrap();
+
     publisher.wait_subscribed(2, TIMEOUT).await.unwrap();
     subscriber.wait_connected(1, TIMEOUT).await.unwrap();
     second_subscriber.wait_connected(1, TIMEOUT).await.unwrap();
 
     let message = Message::single("queued");
     let mut accepted = 0;
+
     let returned = loop {
         match publisher.try_send(message.clone()) {
             Ok(()) => accepted += 1,
             Err(TrySendError::Full(message)) => break message,
             Err(error) => panic!("unexpected send error: {error}"),
         }
+
         assert!(accepted <= 8, "inproc queue should be bounded");
     };
+
     assert!(!publisher.send_ready(), "full PUB must not report writable");
     let mut wait = Box::pin(publisher.wait_send_ready());
     assert!(
         wait.as_mut().now_or_never().is_none(),
         "wait completed while full"
     );
+
     for _ in 0..accepted {
         assert_eq!(subscriber.recv().await.unwrap(), message);
     }
+
     assert!(!publisher.send_ready(), "another subscriber is still full");
     assert!(wait.as_mut().now_or_never().is_none());
+
     for _ in 0..accepted {
         assert_eq!(second_subscriber.recv().await.unwrap(), message);
     }
+
     tokio::time::timeout(TIMEOUT, wait)
         .await
         .expect("capacity release did not wake PUB");
@@ -303,21 +327,26 @@ fn nodrop_pub_registered_waker_tracks_inproc_capacity() {
             ..Options::default()
         },
     );
+
     let subscriber = ctx.blocking_socket(SocketType::Sub, Options::default().recv_hwm(1));
     let endpoint = publisher.bind("inproc://nodrop-pub-waker").unwrap();
     subscriber.subscribe("").unwrap();
     subscriber.connect(endpoint).unwrap();
     publisher.wait_subscribed(1, TIMEOUT).unwrap();
     subscriber.wait_connected(1, TIMEOUT).unwrap();
+
     let accepted = fill(&publisher);
     assert!(!publisher.send_ready());
+
     let wake = Arc::new(CountWake::default());
     wake.thread.set(std::thread::current()).unwrap();
     let _registration = publisher.register_send_waker(Waker::from(wake.clone()));
     assert!(!publisher.send_ready());
+
     for _ in 0..accepted {
         subscriber.recv_timeout(TIMEOUT).unwrap();
     }
+
     wait_for(
         || wake.count.load(Ordering::SeqCst) > 0,
         "PUB capacity wake",
@@ -347,6 +376,7 @@ async fn libzmq_fanout_preserves_lossy_internal_admission_on_clones() {
                 },
                 None,
             );
+
             let subscriber = ctx.socket(SocketType::Sub, Options::default());
             let endpoint = publisher.bind(test_support::tcp_loopback(0)).await.unwrap();
             subscriber.subscribe("").await.unwrap();
@@ -360,12 +390,14 @@ async fn libzmq_fanout_preserves_lossy_internal_admission_on_clones() {
                 assert_eq!(sender.send_ready(), !nodrop);
                 assert_eq!(sender.wait_send_ready().now_or_never().is_some(), !nodrop);
                 let result = sender.try_send(Message::from("overflow"));
+
                 if nodrop {
                     assert!(matches!(result, Err(TrySendError::Full(_))));
                 } else {
                     result.unwrap();
                 }
             }
+
             assert_eq!(subscriber.recv().await.unwrap(), Message::from("first"));
             publisher.close().await.unwrap();
             subscriber.close().await.unwrap();
@@ -418,9 +450,11 @@ async fn check_lossy_fanout_readiness(ctx: &Context, kind: SocketType, policy: o
     // the message for retry. Every handle reports not ready.
     publisher.try_send(Message::from("first")).unwrap();
     let message = Message::multipart(["topic", "retry"]);
+
     let Err(TrySendError::Full(returned)) = publisher.try_send(message.clone()) else {
         panic!("full internal lane must return the unsent message");
     };
+
     assert_eq!(returned, message);
     assert!(!publisher.send_ready());
     assert!(!publisher.clone().send_ready());
@@ -430,6 +464,7 @@ async fn check_lossy_fanout_readiness(ctx: &Context, kind: SocketType, policy: o
     let mut canceled = Box::pin(publisher.wait_send_ready());
     assert!(canceled.as_mut().now_or_never().is_none());
     drop(canceled);
+
     let wake = Arc::new(CountWake::default());
     let waker = Waker::from(wake.clone());
     let mut task = TaskContext::from_waker(&waker);
@@ -451,9 +486,11 @@ async fn check_lossy_fanout_readiness(ctx: &Context, kind: SocketType, policy: o
         .clone()
         .try_send(Message::from("competing"))
         .unwrap();
+
     let Err(TrySendError::Full(returned)) = publisher.try_send(returned) else {
         panic!("retry must observe capacity consumed by another clone");
     };
+
     assert_eq!(returned, message);
     assert_eq!(subscriber.recv().await.unwrap(), Message::from("competing"));
 
@@ -479,11 +516,13 @@ async fn lossy_fanout_fallback_capacity_does_not_backpressure_native_admission()
     subscriber.connect(endpoint).await.unwrap();
     publisher.wait_subscribed(1, TIMEOUT).await.unwrap();
     subscriber.wait_connected(1, TIMEOUT).await.unwrap();
+
     for _ in 0..16 {
         publisher.try_send(Message::from("overflow")).unwrap();
         assert!(publisher.send_ready());
         assert!(publisher.wait_send_ready().now_or_never().is_some());
     }
+
     publisher.close().await.unwrap();
     subscriber.close().await.unwrap();
 }
@@ -499,9 +538,11 @@ async fn lossy_fanout_full_does_not_publish_to_inproc_before_retry() {
         .bind("inproc://pub-admission-atomicity")
         .await
         .unwrap();
+
     for subscriber in [&wire, &local] {
         subscriber.subscribe("").await.unwrap();
     }
+
     wire.connect(endpoint).await.unwrap();
     local.connect(inproc).await.unwrap();
     publisher.wait_subscribed(2, TIMEOUT).await.unwrap();
@@ -518,9 +559,11 @@ async fn lossy_fanout_full_does_not_publish_to_inproc_before_retry() {
         local.try_recv(),
         Err(omq_tokio::Error::WouldBlock)
     ));
+
     let Err(TrySendError::Full(returned)) = publisher.try_send_many(&mut batch, 2) else {
         panic!("batch must return the first unsent message");
     };
+
     assert_eq!(returned, retry);
     assert_eq!(batch, [last]);
     assert!(matches!(
@@ -593,11 +636,13 @@ fn lossy_pub_blocking_readiness_distinguishes_native_and_binding_sockets() {
     for compatibility in [false, true] {
         let ctx = Context::new();
         let options = Options::default().send_hwm(1);
+
         let publisher = if compatibility {
             ctx.blocking_socket_for_libzmq(SocketType::Pub, options)
         } else {
             ctx.blocking_socket(SocketType::Pub, options)
         };
+
         let subscriber = ctx.blocking_socket(SocketType::Sub, Options::default());
         let endpoint = publisher.bind(test_support::tcp_loopback(0)).unwrap();
         subscriber.subscribe("").unwrap();
@@ -610,11 +655,13 @@ fn lossy_pub_blocking_readiness_distinguishes_native_and_binding_sockets() {
         publisher.try_send(Message::from("first")).unwrap();
         let result = publisher.clone().try_send(Message::from("retry"));
         assert_eq!(publisher.send_ready(), compatibility);
+
         if compatibility {
             result.unwrap();
         } else {
             assert!(matches!(result, Err(TrySendError::Full(_))));
         }
+
         assert_blocking_sends_drop(&publisher);
 
         let wake = Arc::new(CountWake::default());

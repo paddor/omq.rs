@@ -1,5 +1,6 @@
 use super::*;
 use std::cell::RefCell;
+
 const BUFFER_CAPACITY: usize = 2048;
 
 #[test]
@@ -8,10 +9,12 @@ fn variable_slab_slices_keep_the_buffer_until_every_view_is_released() {
     let sizes = [64, 256, 1024, 128, 512];
     let mut buffer = pool.try_buffer(2048).unwrap();
     let mut offset = 0;
+
     for (index, size) in sizes.into_iter().enumerate() {
         buffer.writable()[offset..offset + size].fill(index as u8);
         offset += size;
     }
+
     buffer.set_len(offset).unwrap();
     let mut bytes: bytes::Bytes = buffer.into_payload().into();
     let messages: Vec<_> = sizes
@@ -19,12 +22,14 @@ fn variable_slab_slices_keep_the_buffer_until_every_view_is_released() {
         .map(|size| Message::from(bytes.split_to(size)))
         .collect();
     drop(bytes);
+
     for (index, message) in messages.iter().enumerate() {
         assert_eq!(
             message.part_slice(0).unwrap(),
             vec![index as u8; sizes[index]]
         );
     }
+
     let held = messages[2].part_bytes(0).unwrap().slice(1..17);
     std::thread::spawn(move || drop(messages)).join().unwrap();
     assert_eq!(pool.available(), 0);
@@ -63,6 +68,7 @@ impl PayloadStorage for PendingStorage {
 fn checkout_reclaims_only_the_requested_slots() {
     let ready = Arc::new(AtomicBool::new(false));
     let checks = Arc::new(AtomicUsize::new(0));
+
     let pool = PayloadPool::with_storage(
         [(128, TRANSFER)],
         &DrainBudget::new(TRANSFER, usize::MAX),
@@ -79,14 +85,17 @@ fn checkout_reclaims_only_the_requested_slots() {
         },
     )
     .unwrap();
+
     let buffers: Vec<_> = (0..TRANSFER)
         .map(|_| pool.try_buffer(128).unwrap())
         .collect();
     drop(buffers);
+
     ready.store(true, Ordering::Release);
     checks.store(0, Ordering::Relaxed);
     let held = pool.try_buffer(128).unwrap();
     assert_eq!(checks.load(Ordering::Relaxed), 1);
+
     let mut batch = Vec::with_capacity(4);
     assert_eq!(pool.try_buffers_into(128, 4, &mut batch), 4);
     assert_eq!(checks.load(Ordering::Relaxed), 5);
@@ -94,6 +103,7 @@ fn checkout_reclaims_only_the_requested_slots() {
         pool.classes[0].pending_count.load(Ordering::Relaxed),
         TRANSFER - 5
     );
+
     drop(held);
     drop(batch);
     assert_eq!(pool.available(), TRANSFER);
@@ -105,6 +115,7 @@ fn checkout_finds_ready_storage_behind_unreleased_backend_slots() {
         .map(|_| Arc::new(AtomicBool::new(false)))
         .collect();
     let checks = Arc::new(AtomicUsize::new(0));
+
     let pool = PayloadPool::with_storage(
         [(128, TRANSFER)],
         &DrainBudget::new(TRANSFER, usize::MAX),
@@ -121,6 +132,7 @@ fn checkout_finds_ready_storage_behind_unreleased_backend_slots() {
         },
     )
     .unwrap();
+
     let buffers: Vec<_> = (0..TRANSFER)
         .map(|_| pool.try_buffer(128).unwrap())
         .collect();
@@ -131,9 +143,11 @@ fn checkout_finds_ready_storage_behind_unreleased_backend_slots() {
     assert_eq!(checks.load(Ordering::Relaxed), TRANSFER);
     assert_eq!(buffer.writable(), &[(TRANSFER - 1) as u8; 128]);
     assert!(pool.try_buffer(128).is_none());
+
     for slot in &ready {
         slot.store(true, Ordering::Release);
     }
+
     drop(buffer);
     assert_eq!(pool.available(), TRANSFER);
 }
@@ -146,6 +160,7 @@ fn backend_reclamation_honors_count_and_metadata_byte_budgets() {
     ] {
         let ready = Arc::new(AtomicBool::new(true));
         let checks = Arc::new(AtomicUsize::new(0));
+
         let pool = PayloadPool::with_storage([(128, 4)], &budget, |size, capacity| {
             Ok((0..capacity)
                 .map(|_| {
@@ -158,6 +173,7 @@ fn backend_reclamation_honors_count_and_metadata_byte_budgets() {
                 .collect())
         })
         .unwrap();
+
         let buffers: Vec<_> = (0..4).map(|_| pool.try_buffer(128).unwrap()).collect();
         ready.store(false, Ordering::Release);
         drop(buffers);
@@ -165,10 +181,12 @@ fn backend_reclamation_honors_count_and_metadata_byte_budgets() {
         pool.reclaim();
         assert_eq!(checks.load(Ordering::Relaxed), per_turn);
         ready.store(true, Ordering::Release);
+
         for turn in 1..=4 / per_turn {
             pool.reclaim();
             assert_eq!(checks.load(Ordering::Relaxed), per_turn * (turn + 1));
         }
+
         assert_eq!(pool.available(), 4);
     }
 }
@@ -189,12 +207,14 @@ fn message_builder_selects_inline_pooled_and_owned_storage() {
         assert_eq!(message.part_slice(0), Some(vec![7; size].as_slice()));
         let pooled = (56..=256).contains(&size);
         assert_eq!(pool.available(), 2 - usize::from(pooled));
+
         if size <= 55 {
             assert_eq!(
                 message.retained_size(),
                 Some(std::mem::size_of::<Message>())
             );
         }
+
         let clone = message.clone();
         let view = message.part_bytes(0).unwrap();
         drop(message);
@@ -216,11 +236,13 @@ fn exhausted_pool_skips_fill_without_blocking_other_storage_forms() {
                 .unwrap()
                 .is_none()
         );
+
         for size in [16, 129] {
             let message = pool.message(size, |body| body.fill(3)).unwrap();
             assert_eq!(message.part_slice(0), Some(vec![3; size].as_slice()));
             assert_eq!(pool.available(), 0);
         }
+
         drop(held);
         assert_eq!(pool.available(), capacity);
     }
@@ -256,6 +278,7 @@ fn body(pool: &PayloadPool, length: usize, value: u8) -> Message {
     let mut buffer = pool.try_buffer(1).unwrap();
     buffer.writable()[..length].fill(value);
     buffer.set_len(length).unwrap();
+
     buffer.into_message()
 }
 
@@ -266,10 +289,12 @@ fn capacity_is_fixed_and_returns_after_drop() {
     let second = pool.try_buffer(1).unwrap();
     assert!(pool.try_buffer(1).is_none());
     assert_eq!(pool.available(), 0);
+
     drop(first);
     assert_eq!(pool.available(), 1);
     drop(second);
     assert_eq!(pool.available(), 2);
+
     assert!(
         PayloadPool::new([(2048, 0)])
             .unwrap()
@@ -303,23 +328,27 @@ fn mixed_scalar_and_bulk_acquisition_preserve_capacity_with_unused_slots() {
         let pool = PayloadPool::new([(2048, 8)]).unwrap();
         let mut buffers = Vec::with_capacity(8);
         assert_eq!(pool.try_buffers_into(1, 3, &mut buffers), 3);
+
         if grouped {
             pool.with_recycling_batch(|| buffers.clear());
         } else {
             buffers.clear();
         }
+
         assert_eq!(pool.available(), 8);
         assert_eq!(pool.try_buffers_into(1, 2, &mut buffers), 2);
         buffers.push(pool.try_buffer(1).unwrap());
         assert_eq!(pool.available(), 5);
         assert_eq!(pool.try_buffers_into(1, 8, &mut buffers), 5);
         assert!(pool.try_buffer(1).is_none());
+
         let mut slots: Vec<_> = buffers
             .iter()
             .map(|buffer| buffer.storage.as_ref().unwrap().slot)
             .collect();
         slots.sort_unstable();
         assert_eq!(slots, (0..8).collect::<Vec<_>>());
+
         drop(buffers);
         assert_eq!(pool.available(), 8);
     }
@@ -332,10 +361,12 @@ fn clones_and_bytes_views_prevent_early_reuse() {
         let message = body(&pool, length, 7);
         let clone = message.clone();
         let bytes = message.part_bytes(0).unwrap();
+
         drop(message);
         drop(clone);
         assert_eq!(pool.available(), 0);
         assert_eq!(bytes.as_ref(), vec![7; length]);
+
         drop(bytes);
         assert_eq!(pool.available(), 1);
     }
@@ -347,15 +378,18 @@ fn concurrent_final_releases_return_exactly_one_buffer() {
     for _ in 0..64 {
         let first = body(&pool, BUFFER_CAPACITY, 7);
         let second = first.clone();
+
         let barrier = Arc::new(std::sync::Barrier::new(2));
         let other = barrier.clone();
         let thread = std::thread::spawn(move || {
             other.wait();
             drop(second);
         });
+
         barrier.wait();
         drop(first);
         thread.join().unwrap();
+
         assert_eq!(pool.available(), 1);
         assert_eq!(pool.try_buffer(1).unwrap().len(), 0);
     }
@@ -386,8 +420,10 @@ fn concurrent_acquisition_and_return_preserve_every_slot() {
                         if let Some(buffer) = pool.try_buffer(1) {
                             break buffer;
                         }
+
                         std::thread::yield_now();
                     };
+
                     buffer.writable().fill(value);
                     buffer.set_len(BUFFER_CAPACITY).unwrap();
                     let original = buffer.into_message();
@@ -405,14 +441,17 @@ fn concurrent_acquisition_and_return_preserve_every_slot() {
             });
         }
     });
+
     assert_eq!(pool.available(), pool.capacity());
 }
+
 #[test]
 fn bulk_acquisition_and_return_respect_capacity_and_live_views() {
     let pool = PayloadPool::new([(2048, 70)]).unwrap();
     let mut buffers = Vec::with_capacity(100);
     assert_eq!(pool.try_buffers_into(1, 100, &mut buffers), 32);
     assert_eq!(pool.available(), 38);
+
     let mut messages: Vec<_> = buffers.drain(..).map(PayloadBuffer::into_message).collect();
     let view = messages[0].part_bytes(0).unwrap();
     assert_eq!(PayloadPool::recycle_many(&mut messages, 0), 0);
@@ -420,6 +459,7 @@ fn bulk_acquisition_and_return_respect_capacity_and_live_views() {
     assert_eq!(pool.available(), 69);
     drop(view);
     assert_eq!(pool.available(), 70);
+
     let mut small = Vec::with_capacity(2);
     assert_eq!(pool.try_buffers_into(1, 64, &mut small), 2);
     assert_eq!(pool.try_buffers_into(1, 64, &mut small), 0);
@@ -432,6 +472,7 @@ fn bulk_acquisition_and_return_respect_capacity_and_live_views() {
 fn nested_foreign_and_unwinding_returns_leave_no_hidden_buffers() {
     let first = PayloadPool::new([(2048, 4)]).unwrap();
     let second = PayloadPool::new([(2048, 4)]).unwrap();
+
     let outcome = std::panic::catch_unwind(|| {
         first.with_recycling_batch(|| {
             drop(body(&first, 16, 1));
@@ -439,12 +480,14 @@ fn nested_foreign_and_unwinding_returns_leave_no_hidden_buffers() {
                 drop(body(&first, 16, 1));
                 drop(body(&second, 16, 2));
             });
+
             assert_eq!(first.available(), 4);
             assert_eq!(second.available(), 4);
             drop(body(&first, 16, 1));
             panic!("unwind recycling scope");
         });
     });
+
     assert!(outcome.is_err());
     assert_eq!(first.available(), 4);
     assert_eq!(second.available(), 4);
@@ -461,10 +504,12 @@ fn concurrent_bulk_and_scalar_returns_preserve_unique_slots() {
             scope.spawn(move || {
                 let mut buffers = Vec::with_capacity(2);
                 let mut messages = Vec::with_capacity(2);
+
                 for _ in 0..256 {
                     while pool.try_buffers_into(1, 2, &mut buffers) == 0 {
                         std::thread::yield_now();
                     }
+
                     for mut buffer in buffers.drain(..) {
                         buffer.writable().fill(value);
                         buffer.set_len(BUFFER_CAPACITY).unwrap();
@@ -480,11 +525,13 @@ fn concurrent_bulk_and_scalar_returns_preserve_unique_slots() {
                         );
                         drop(clone);
                     }
+
                     PayloadPool::recycle_many(&mut messages, 2);
                 }
             });
         }
     });
+
     assert_eq!(pool.available(), 8);
     let mut buffers = Vec::with_capacity(8);
     assert_eq!(pool.try_buffers_into(1, 8, &mut buffers), 8);
@@ -495,11 +542,13 @@ fn concurrent_bulk_and_scalar_returns_preserve_unique_slots() {
     slots.sort_unstable();
     assert_eq!(slots, (0..8).collect::<Vec<_>>());
 }
+
 #[test]
 fn full_and_partial_groups_never_hide_capacity() {
     for capacity in [0, 1, 2, 63, 64, 65, 127, 128, 129] {
         let pool = PayloadPool::new([(2048, capacity)]).unwrap();
         let mut buffers = Vec::with_capacity(capacity);
+
         for limit in [1, 2, 17, 63, 64] {
             while pool.try_buffers_into(1, limit, &mut buffers) != 0 {}
             assert_eq!(buffers.len(), capacity);
@@ -507,15 +556,18 @@ fn full_and_partial_groups_never_hide_capacity() {
             // Partial final transfers are all published by scope exit.
             pool.with_recycling_batch(|| buffers.clear());
             assert_eq!(pool.available(), capacity);
+
             while let Some(buffer) = pool.try_buffer(1) {
                 buffers.push(buffer);
             }
+
             assert_eq!(buffers.len(), capacity);
             drop(buffers.drain(..));
             assert_eq!(pool.available(), capacity);
         }
     }
 }
+
 #[test]
 fn recycling_during_late_tls_destruction_falls_back_to_global_return() {
     struct LateDrop(RefCell<Option<(PayloadPool, Message)>>);
@@ -527,11 +579,14 @@ fn recycling_during_late_tls_destruction_falls_back_to_global_return() {
             }
         }
     }
+
     thread_local! {
         static LATE: LateDrop = const { LateDrop(RefCell::new(None)) };
     }
+
     let pool = PayloadPool::new([(2048, 1)]).unwrap();
     let other = pool.clone();
+
     std::thread::spawn(move || {
         // The recycler is initialized later, so it is destroyed first.
         LATE.with(|late| *late.0.borrow_mut() = Some((other.clone(), body(&other, 16, 7))));
@@ -539,5 +594,6 @@ fn recycling_during_late_tls_destruction_falls_back_to_global_return() {
     })
     .join()
     .unwrap();
+
     assert_eq!(pool.available(), 1);
 }

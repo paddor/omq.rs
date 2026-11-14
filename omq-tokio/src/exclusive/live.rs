@@ -52,6 +52,7 @@ impl LiveConnection {
             .connection
             .peer_heartbeat_ttl()
             .and_then(|ttl| self.last_input.checked_add(ttl));
+
         match (self.heartbeat_deadline, peer) {
             (Some(local), Some(peer)) => Some(local.min(peer)),
             (local, peer) => local.or(peer),
@@ -70,6 +71,7 @@ impl LiveConnection {
             .await
             .map_err(Error::Io)?;
         self.write_pending = false;
+
         Ok(())
     }
 }
@@ -103,11 +105,13 @@ pub(super) async fn connect_live(
             "exclusive sockets currently support only tcp:// endpoints".into(),
         ));
     };
+
     let host = host.to_string();
     let connect = TcpStream::connect((host.as_str(), *port));
     let stream = tokio::time::timeout(options.connect_timeout, connect)
         .await
         .map_err(|_| timed_out("exclusive socket connect timeout"))??;
+
     handshake_live(stream, Role::Client, socket_type, options).await
 }
 
@@ -119,6 +123,7 @@ pub(super) async fn accept_live(
     let (stream, _) = tokio::time::timeout(options.connect_timeout, listener.accept())
         .await
         .map_err(|_| timed_out("exclusive socket accept timeout"))??;
+
     handshake_live(stream, Role::Server, socket_type, options).await
 }
 
@@ -135,6 +140,7 @@ async fn handshake_live(
         tokio::time::timeout(options.handshake_timeout, finish_handshake(&mut live))
             .await
             .map_err(|_| timed_out("exclusive socket handshake timeout"))??;
+
     Ok(live)
 }
 
@@ -145,6 +151,7 @@ pub(super) async fn finish_handshake(live: &mut LiveConnection) -> Result<Bytes>
         if live.connection.is_ready() {
             break;
         }
+
         read_live_once(live).await?;
         while let Some(event) = live.connection.poll_event() {
             if let ProtoEvent::HandshakeSucceeded {
@@ -161,6 +168,7 @@ pub(super) async fn finish_handshake(live: &mut LiveConnection) -> Result<Bytes>
             }
         }
     }
+
     flush_and_settle(live).await?;
     Ok(peer_identity.unwrap_or_else(|| generated_identity(0)))
 }
@@ -173,6 +181,7 @@ pub(super) async fn recv_live(
         if let Some(message) = live.connection.poll_message() {
             return Ok(message);
         }
+
         if !live.connection.accepts_input() {
             flush_and_settle(live).await?;
             continue;
@@ -184,6 +193,7 @@ pub(super) async fn recv_live(
             // An interval past the clock range never comes due.
             .and_then(|interval| live.last_ping.checked_add(interval));
         let heartbeat_deadline = live.silence_deadline();
+
         tokio::select! {
             biased;
             result = read_live_once(live) => {
@@ -216,9 +226,11 @@ pub(super) fn queue_ping(
         context,
     })?;
     live.last_ping = now;
+
     if live.heartbeat_deadline.is_none() {
         live.heartbeat_deadline = now.checked_add(timeout);
     }
+
     Ok(())
 }
 
@@ -232,6 +244,7 @@ pub(super) async fn read_live_once(live: &mut LiveConnection) -> Result<()> {
     if n == 0 {
         return Err(Error::Closed);
     }
+
     note_inbound_traffic(live);
     live.connection.handle_input(live.read_buf.split().freeze())
 }
@@ -250,6 +263,7 @@ pub(super) fn drain_ready_input(live: &mut LiveConnection) -> Result<()> {
             Err(error) => return Err(Error::Io(error)),
         }
     }
+
     Ok(())
 }
 
@@ -261,6 +275,7 @@ pub(super) async fn flush_live(live: &mut LiveConnection) -> Result<()> {
         drop(chunks);
         live.connection.advance_transmit(n);
     }
+
     Ok(())
 }
 
@@ -272,6 +287,7 @@ pub(super) async fn flush_and_settle(live: &mut LiveConnection) -> Result<()> {
         if live.connection.accepts_input() {
             return Ok(());
         }
+
         live.connection.resume_input()?;
     }
 }

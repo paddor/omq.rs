@@ -18,6 +18,7 @@ use omq_proto::proto::ws_handshake;
 mod insecure;
 mod listener;
 mod upgrade;
+
 pub(crate) use listener::{WsListener, bind};
 
 pub(crate) enum WsTransport {
@@ -169,6 +170,7 @@ fn build_tls_connector(wss_tls: &omq_proto::options::WssTls) -> Result<tokio_rus
             wss_tls.trust_pem.as_deref(),
         )?
     };
+
     Ok(tokio_rustls::TlsConnector::from(std::sync::Arc::new(
         config,
     )))

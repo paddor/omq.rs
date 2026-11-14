@@ -56,6 +56,7 @@ impl SocketDriver {
         else {
             return false;
         };
+
         let held = &held.authentication;
         held.mechanism != authentication.mechanism
             || held.public_key != authentication.public_key
@@ -77,6 +78,7 @@ impl SocketDriver {
         ) {
             return allowed;
         }
+
         #[cfg(feature = "quic")]
         if let Some(allowed) = self.carrier_ready_capacity(
             peer_id,
@@ -86,6 +88,7 @@ impl SocketDriver {
         ) {
             return allowed;
         }
+
         #[cfg(not(any(feature = "ws", feature = "quic")))]
         let _ = (peer_id, identity);
         true
@@ -104,6 +107,7 @@ impl SocketDriver {
         if !family(&candidate.origin.endpoint) || candidate.handshake.ready {
             return None;
         }
+
         let ready = self
             .peers
             .values()
@@ -115,6 +119,7 @@ impl SocketDriver {
             .identity_holder(peer_id, identity)
             .and_then(|old_id| self.peers.get(&old_id))
             .is_some_and(|peer| peer.handshake.ready && family(&peer.origin.endpoint));
+
         Some(ready.saturating_sub(usize::from(replaced)) < limit)
     }
 
@@ -128,6 +133,7 @@ impl SocketDriver {
             .identity
             .clone()
             .unwrap_or_else(|| generated_identity(peer_id));
+
         if let Some(reason) = self.handshake_rejection(peer_id, &identity, &peer_properties) {
             self.reject_handshake(peer_id, reason);
             return;
@@ -136,19 +142,23 @@ impl SocketDriver {
         let Some(info) = self.ready_peer_info(peer_id, peer_minor, &peer_properties) else {
             return;
         };
+
         let sender = omq_proto::Identity::new(&identity, info);
         // The compact snapshot is published before any data plane can run.
         let info = sender.peer_info().clone();
+
         // Admission can reject a replacement at the receive queue limit.
         // Keep the current route alive until the replacement owns its queue.
         let Some(activation) = self.receive_activation(peer_id, &sender) else {
             return;
         };
+
         let replaced = self.identity_holder(peer_id, &identity);
 
         let Some(ready) = self.mark_peer_ready(peer_id, &identity, info) else {
             return;
         };
+
         self.add_ready_routes(peer_id, &ready, identity, sender);
         // The new route owns the identity now. Evicting the old connection
         // first would leave a moment without a route, and a send from
@@ -166,6 +176,7 @@ impl SocketDriver {
             // peer after that prefix; removing it here loses routing state.
             return;
         }
+
         self.replay_state_to_peer(&ready.handle, ready.subs_replay)
             .await;
     }
@@ -194,6 +205,7 @@ impl SocketDriver {
         let Some(peer) = self.peers.get(&peer_id) else {
             return;
         };
+
         self.link.monitor.publish(peer.handshake_failed(reason));
 
         // Let the driver report closure through the ordinary lifecycle.
@@ -270,6 +282,7 @@ impl SocketDriver {
                 .req_awaiting_reply
                 .peer_connected(ready.route_id, peer_id);
         }
+
         if any_groups {
             self.routing.send_strategy.connection_added_any_groups(
                 peer_id,
@@ -286,6 +299,7 @@ impl SocketDriver {
                 io_thread: ready.io_thread,
             });
         }
+
         self.routing.recv_strategy.admitted(peer_id, sender.clone());
 
         // Replies are routable now, so the peer may deliver into this
@@ -298,8 +312,10 @@ impl SocketDriver {
             if self.socket_type == SocketType::Router {
                 open.identity = Some(sender);
             }
+
             port.open(open);
         }
+
         if ready.became_ready {
             self.link.shared.ready_peers.add();
         }
@@ -313,6 +329,7 @@ impl SocketDriver {
         let Some(routes) = &mut self.link.peer_recv_routes else {
             return Some(crate::engine::PeerDriverCommand::ActivateDataPlane);
         };
+
         let peer = self.peers.get(&peer_id)?;
         match routes.register_peer(identity.clone(), peer.handle.cancel.clone()) {
             Ok(sink) => Some(crate::engine::PeerDriverCommand::ActivateWithRecvSink(
@@ -325,6 +342,7 @@ impl SocketDriver {
                         .publish(peer.handshake_failed(error.to_string()));
                     peer.handle.cancel.cancel();
                 }
+
                 None
             }
         }

@@ -19,9 +19,6 @@ use omq_tokio::options::{OnMute, WorkloadProfile};
 use std::ffi::c_int;
 use std::sync::Arc;
 
-/// One category of `zmq_getsockopt` options; `Ok(false)` when `option` is not in it.
-type GetOption = fn(&Arc<OmqSocket>, c_int, OptOut) -> Result<bool, c_int>;
-
 const GET_OPTIONS: [GetOption; 16] = [
     get_queue_option,
     get_state_option,
@@ -41,6 +38,9 @@ const GET_OPTIONS: [GetOption; 16] = [
     get_fixed_option,
 ];
 
+/// One category of `zmq_getsockopt` options; `Ok(false)` when `option` is not in it.
+type GetOption = fn(&Arc<OmqSocket>, c_int, OptOut) -> Result<bool, c_int>;
+
 /// Write a socket option into caller storage and update its length; return zero or -1 with
 /// errno.
 #[unsafe(no_mangle)]
@@ -53,6 +53,7 @@ pub extern "C" fn zmq_getsockopt(
     // SAFETY: C callers pass null or a pointer from this API.
     let sock_arc = c_try!(unsafe { crate::handle::socket(sock) });
     c_try!(get_option(sock_arc, option, OptOut::new(optval, optvallen)));
+
     0
 }
 
@@ -117,11 +118,13 @@ fn get_state_option(sock_arc: &Arc<OmqSocket>, option: c_int, out: OptOut) -> Re
             let Some(v) = crate::socket::socket_type_code(sock_arc.socket_type) else {
                 return Err(libc::EINVAL);
             };
+
             out.i32(v)
         }
         ZMQ_FD => {
             #[cfg(windows)]
             return Err(libc::ENOPROTOOPT);
+
             #[cfg(unix)]
             {
                 crate::send_recv::fd_edge::watch(sock_arc);
@@ -134,6 +137,7 @@ fn get_state_option(sock_arc: &Arc<OmqSocket>, option: c_int, out: OptOut) -> Re
             let Ok(ep) = sock_arc.endpoints.last.lock() else {
                 return Err(crate::error::ETERM);
             };
+
             let s = ep.as_deref().unwrap_or("");
             out.string(s.as_bytes())
         }
@@ -168,6 +172,7 @@ fn poll_events(sock_arc: &OmqSocket) -> i32 {
     if crate::poll::recv_ready(sock_arc) {
         events |= ZMQ_POLLIN;
     }
+
     events
 }
 
@@ -182,6 +187,7 @@ fn get_message_option(
             let v = overlay(sock_arc)?
                 .max_message_size
                 .map_or(-1i64, |n| n as i64);
+
             out.i64(v)
         }
         OMQ_ARENA_THRESHOLD => {
@@ -190,6 +196,7 @@ fn get_message_option(
                 .map_or(omq_tokio::options::DEFAULT_ARENA_THRESHOLD as i64, |n| {
                     n as i64
                 });
+
             out.i64(v)
         }
         ZMQ_CONFLATE => {
@@ -204,6 +211,7 @@ fn get_message_option(
                 OnMute::DropOldest => OMQ_ON_MUTE_DROP_OLDEST,
                 _ => OMQ_ON_MUTE_BLOCK,
             };
+
             out.i32(v)
         }
         _ => return Ok(false),
@@ -248,6 +256,7 @@ fn get_tuning_option(sock_arc: &Arc<OmqSocket>, option: c_int, out: OptOut) -> R
                 Some(WorkloadProfile::Throughput) => OMQ_WORKLOAD_THROUGHPUT,
                 Some(WorkloadProfile::Latency) => OMQ_WORKLOAD_LATENCY,
             };
+
             out.i32(v)
         }
         _ => return Ok(false),
@@ -268,6 +277,7 @@ fn get_reconnect_option(
                 .reconnect
                 .ivl
                 .map_or(-1, |d| d.as_millis() as i32);
+
             out.i32(v)
         }
         ZMQ_RECONNECT_IVL_MAX => {
@@ -275,6 +285,7 @@ fn get_reconnect_option(
                 .reconnect
                 .ivl_max
                 .map_or(0, |d| d.as_millis() as i32);
+
             out.i32(v)
         }
         ZMQ_RECONNECT_STOP => out.i32(overlay(sock_arc)?.reconnect.stop),
@@ -283,6 +294,7 @@ fn get_reconnect_option(
                 .reconnect
                 .handshake_ivl
                 .map_or(DEFAULT_HANDSHAKE_IVL_MS, |d| d.as_millis() as i32);
+
             out.i32(v)
         }
         ZMQ_CONNECT_TIMEOUT => out.i32(overlay(sock_arc)?.reconnect.connect_timeout),
@@ -304,6 +316,7 @@ fn get_heartbeat_option(
                 .heartbeat
                 .ivl
                 .map_or(0, |d| d.as_millis() as i32);
+
             out.i32(v)
         }
         ZMQ_HEARTBEAT_TTL => {
@@ -311,6 +324,7 @@ fn get_heartbeat_option(
                 .heartbeat
                 .ttl
                 .map_or(0, |d| d.as_millis() as i32);
+
             out.i32(v)
         }
         ZMQ_HEARTBEAT_TIMEOUT => {
@@ -318,6 +332,7 @@ fn get_heartbeat_option(
                 .heartbeat
                 .timeout
                 .map_or(0, |d| d.as_millis() as i32);
+
             out.i32(v)
         }
         _ => return Ok(false),
@@ -342,6 +357,7 @@ fn get_tcp_option(sock_arc: &Arc<OmqSocket>, option: c_int, out: OptOut) -> Resu
                 .tcp
                 .idle
                 .map_or(-1, |d| d.as_secs() as i32);
+
             out.i32(v)
         }
         ZMQ_TCP_KEEPALIVE_INTVL => {
@@ -349,6 +365,7 @@ fn get_tcp_option(sock_arc: &Arc<OmqSocket>, option: c_int, out: OptOut) -> Resu
                 .tcp
                 .intvl
                 .map_or(-1, |d| d.as_secs() as i32);
+
             out.i32(v)
         }
         ZMQ_TCP_MAXRT => {
@@ -410,6 +427,7 @@ fn get_routing_option(
                     Err(errno) => return Err(errno),
                 }
             }
+
             let ov = overlay(sock_arc)?;
             out.bytes(&ov.identity)
         }
@@ -453,6 +471,7 @@ fn get_plain_option(sock_arc: &Arc<OmqSocket>, option: c_int, out: OptOut) -> Re
                     ZMQ_CURVE
                 }
             };
+
             out.i32(v)
         }
         ZMQ_PLAIN_SERVER => {
@@ -460,6 +479,7 @@ fn get_plain_option(sock_arc: &Arc<OmqSocket>, option: c_int, out: OptOut) -> Re
                 overlay(sock_arc)?.mechanism,
                 MechanismOverlay::PlainServer | MechanismOverlay::PlainServerCredentials { .. }
             );
+
             out.i32(i32::from(v))
         }
         ZMQ_PLAIN_USERNAME => {
@@ -497,6 +517,7 @@ fn get_curve_option(sock_arc: &Arc<OmqSocket>, option: c_int, out: OptOut) -> Re
                 overlay(sock_arc)?.mechanism,
                 MechanismOverlay::CurveServer { .. }
             );
+
             out.i32(i32::from(v))
         }
         ZMQ_CURVE_PUBLICKEY => {
@@ -519,6 +540,7 @@ fn get_curve_option(sock_arc: &Arc<OmqSocket>, option: c_int, out: OptOut) -> Re
                 | MechanismOverlay::CurveClient { ref secret_key, .. } => secret_key,
                 _ => &[0; 32],
             };
+
             out.key(key)
         }
         ZMQ_CURVE_SERVERKEY => {

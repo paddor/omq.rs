@@ -63,6 +63,7 @@ impl CurveServer {
     ) -> Self {
         let our_lt_secret = StaticSecret::from(*our_keypair.secret.as_bytes());
         let our_lt_public = PublicKey::from(*our_keypair.public.as_bytes());
+
         Self {
             our_lt_secret,
             our_lt_public,
@@ -91,12 +92,14 @@ impl CurveServer {
         if let Some(err) = try_error_command(&cmd, MechanismName::CURVE) {
             return Err(err);
         }
+
         let Command::Unknown { name, body } = cmd else {
             return Err(Error::HandshakeFailed(format!(
                 "CURVE server got unexpected command: {:?}",
                 cmd.kind()
             )));
         };
+
         match (name.as_ref(), &self.state) {
             (command::NAME_HELLO, CurveServerState::Init) => {
                 let (our_eph_secret, peer_eph_public) = self.parse_hello(&body)?;
@@ -106,24 +109,29 @@ impl CurveServer {
                     body: welcome,
                 });
                 self.state = CurveServerState::AwaitingInitiate;
+
                 Ok(MechanismStep::Continue)
             }
             (command::NAME_INITIATE, CurveServerState::AwaitingInitiate) => {
                 let (mut peer_props, peer_public_key) = self.parse_initiate(&body)?;
                 stamp_peer_key(&mut peer_props, peer_public_key);
+
                 // parse_initiate transitions state to Done.
                 let Some(auth) = &mut self.auth else {
                     return self.send_ready(out, peer_props);
                 };
+
                 let peer = MechanismPeerInfo {
                     public_key: peer_public_key,
                     identity: peer_props.identity.clone(),
                     ..auth.peer_info(MechanismName::CURVE)
                 };
+
                 let Some(result) = auth.decide(peer) else {
                     self.pending_props = Some(peer_props);
                     return Ok(MechanismStep::Continue);
                 };
+
                 self.admit(result, out, peer_props)
             }
             (n, st) => Err(Error::HandshakeFailed(format!(
@@ -142,6 +150,7 @@ impl CurveServer {
         let Some(auth) = &mut self.auth else {
             return Err(no_pending_authentication());
         };
+
         auth.finish()?;
         let peer_props = self.pending_props.take().unwrap_or_default();
         self.admit(result, out, peer_props)
@@ -168,6 +177,7 @@ impl CurveServer {
             name: Bytes::from_static(command::NAME_READY),
             body: ready,
         });
+
         Ok(MechanismStep::Complete {
             peer_properties: peer_props,
         })
@@ -180,13 +190,16 @@ impl CurveServer {
                 body.len()
             )));
         }
+
         let version_major = body[0];
         let version_minor = body[1];
+
         if version_major != 0x01 || version_minor != 0x00 {
             return Err(Error::HandshakeFailed(format!(
                 "CURVE version mismatch {version_major}.{version_minor}"
             )));
         }
+
         let cp_bytes: [u8; 32] = body[74..106].try_into().unwrap();
         let counter = u64::from_be_bytes(body[106..114].try_into().unwrap());
         let signature_box = &body[114..194];
@@ -196,6 +209,7 @@ impl CurveServer {
         let pt = CurveBox::new(&cp, &self.our_lt_secret)?
             .decrypt(&nonce, signature_box)
             .map_err(|_| Error::HandshakeFailed("CURVE HELLO signature invalid".into()))?;
+
         if pt.len() != 64 || pt.iter().any(|&b| b != 0) {
             return Err(Error::HandshakeFailed(
                 "CURVE HELLO signature plaintext not 64 zeros".into(),
@@ -239,6 +253,7 @@ impl CurveServer {
         if body.len() < 96 + 8 + 16 {
             return Err(Error::HandshakeFailed("CURVE INITIATE too short".into()));
         }
+
         let cookie_bytes = &body[..96];
         let counter = u64::from_be_bytes(body[96..104].try_into().unwrap());
         let init_box = &body[104..];
@@ -258,11 +273,13 @@ impl CurveServer {
             .curve_box()?
             .decrypt(&nonce, init_box)
             .map_err(|_| Error::HandshakeFailed("CURVE INITIATE decrypt failed".into()))?;
+
         if init_pt.len() < 32 + 16 + 80 {
             return Err(Error::HandshakeFailed(
                 "CURVE INITIATE plaintext too short".into(),
             ));
         }
+
         // INITIATE plaintext: client long-term key, vouch (nonce suffix and
         // box), then metadata.
         let client_lt_bytes: [u8; 32] = init_pt[..32].try_into().unwrap();
@@ -293,6 +310,7 @@ impl CurveServer {
         let vouch_pt = CurveBox::new(cl, &keys.our_eph_secret)?
             .decrypt(&vouch_nonce, vouch_box)
             .map_err(|_| Error::HandshakeFailed("CURVE VOUCH invalid".into()))?;
+
         if vouch_pt.len() != 64
             || &vouch_pt[..32] != keys.peer_eph_public.as_bytes()
             || &vouch_pt[32..] != our_lt_public.as_bytes()
@@ -301,6 +319,7 @@ impl CurveServer {
                 "CURVE VOUCH content mismatch".into(),
             ));
         }
+
         Ok(())
     }
 
@@ -311,12 +330,14 @@ impl CurveServer {
                 "CURVE READY requested before INITIATE".into(),
             ));
         };
+
         let nonce = nonce_short(NONCE_READY, counter);
         let metadata = command::encode_properties(&self.our_props)?;
         let ready_box = keys.curve_box()?.encrypt(&nonce, metadata.as_slice());
         let mut body = BytesMut::with_capacity(8 + ready_box.len());
         body.put_slice(&counter.to_be_bytes());
         body.put_slice(&ready_box);
+
         Ok(body.freeze())
     }
 
@@ -326,6 +347,7 @@ impl CurveServer {
                 "CURVE transform requested before handshake complete".into(),
             ));
         };
+
         keys.transform(self.out_counter, true)
     }
 }

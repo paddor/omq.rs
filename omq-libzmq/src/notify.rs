@@ -9,26 +9,10 @@
 //!   `WaitForMultipleObjects` with 64-handle batching).
 //! - `NotifyHandle` trait: dynamic dispatch for setup/teardown.
 
-#[allow(dead_code)]
-pub(crate) trait NotifyHandle: Send + Sync {
-    fn signal_recv(&self);
-    fn signal_send(&self);
-    fn close(&self);
-    fn recv_fd(&self) -> std::os::raw::c_int;
-    fn send_fd(&self) -> std::os::raw::c_int;
-    fn recv_notifier(&self) -> RecvNotify;
-}
-
 #[cfg(unix)]
 mod unix;
 #[cfg(windows)]
 pub(crate) mod windows;
-
-/// Wakeup handles for a new socket, or `None` when the OS cannot create
-/// them.
-pub(crate) fn create_notify() -> Option<std::sync::Arc<PlatformNotifyHandle>> {
-    PlatformNotifyHandle::new().map(std::sync::Arc::new)
-}
 
 #[cfg(unix)]
 pub(crate) use unix::RecvNotify;
@@ -54,3 +38,19 @@ pub(crate) use unix::UnixNotifyHandle as PlatformNotifyHandle;
 
 #[cfg(windows)]
 pub(crate) use windows::WindowsNotifyHandle as PlatformNotifyHandle;
+
+#[allow(dead_code)]
+pub(crate) trait NotifyHandle: Send + Sync {
+    fn signal_recv(&self);
+    fn signal_send(&self);
+    fn close(&self);
+    fn recv_fd(&self) -> std::os::raw::c_int;
+    fn send_fd(&self) -> std::os::raw::c_int;
+    fn recv_notifier(&self) -> RecvNotify;
+}
+
+/// Wakeup handles for a new socket, or `None` when the OS cannot create
+/// them.
+pub(crate) fn create_notify() -> Option<std::sync::Arc<PlatformNotifyHandle>> {
+    PlatformNotifyHandle::new().map(std::sync::Arc::new)
+}

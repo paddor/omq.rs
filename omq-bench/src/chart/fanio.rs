@@ -43,13 +43,16 @@ fn generate_fanio(kind: &str, dir_name: &str, title_fn: &dyn Fn(u64) -> String) 
     #[expect(clippy::type_complexity)]
     let mut panel_data: Vec<(u64, ValMap, ValMap, BTreeMap<String, CpuData>, FairnessMap)> =
         Vec::new();
+
     for &peers in PEER_COUNTS {
         let (tput, msgs, cpu) = load_tput(kind, "tcp", Some(peers), FANIO_IMPLS);
         let fair = load_fairness(kind, "tcp", Some(peers), FANIO_IMPLS);
+
         if !tput.is_empty() {
             panel_data.push((peers, tput, msgs, cpu, fair));
         }
     }
+
     if panel_data.is_empty() {
         return;
     }
@@ -64,6 +67,7 @@ fn generate_fanio(kind: &str, dir_name: &str, title_fn: &dyn Fn(u64) -> String) 
             fairness: Some(fair),
         })
         .collect();
+
     let out = sub.join("tcp.svg");
     let chart_title = title_fn(0);
     let _ = kind;
@@ -87,6 +91,7 @@ fn generate_fanio(kind: &str, dir_name: &str, title_fn: &dyn Fn(u64) -> String) 
         super::common::detect_hardware().as_deref(),
     )
     .expect("draw fanio chart");
+
     eprintln!("Written: {}", out.display());
 }
 
@@ -94,6 +99,7 @@ pub(crate) fn generate() {
     generate_fanio("fan_out", "fanout", &|_| {
         "PUSH fan-out, TCP loopback, 2-process".to_string()
     });
+
     generate_fanio("fan_in", "fanin", &|_| {
         "PUSH fan-in, TCP loopback, 2-process".to_string()
     });

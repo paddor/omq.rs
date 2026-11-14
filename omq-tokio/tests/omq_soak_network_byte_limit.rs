@@ -1,9 +1,6 @@
 #![cfg(feature = "soak")]
 //! Shared ingress/egress budgets under mixed transports, churn and shutdown.
 
-#[global_allocator]
-static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
-
 #[path = "soak_network_byte_limit/raw.rs"]
 mod raw;
 mod soak_common;
@@ -20,11 +17,15 @@ use omq_tokio::{
 use rand::Rng;
 use tokio::task::JoinSet;
 
+#[global_allocator]
+static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
+
 const INGRESS: u64 = 384 * 1024;
 const EGRESS: u64 = 256 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(15);
 const PHASE: Duration = Duration::from_secs(15);
 const SIZES: [usize; 8] = [16, 55, 256, 1024, 1452, 4096, 16384, 65536];
+
 const SCHEMES: &[&str] = &[
     "tcp",
     #[cfg(feature = "lz4")]
@@ -129,16 +130,19 @@ fn payload(seed: u64, sequence: u64, size: usize) -> Bytes {
     body[..8].copy_from_slice(&seed.to_le_bytes());
     body[8..16].copy_from_slice(&sequence.to_le_bytes());
     let mut random = seed ^ sequence.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+
     for byte in &mut body[16..] {
         random ^= random << 13;
         random ^= random >> 7;
         random ^= random << 17;
+
         *byte = if sequence.is_multiple_of(2) {
             sequence as u8
         } else {
             random as u8
         };
     }
+
     body.into()
 }
 
@@ -152,6 +156,7 @@ async fn close(socket: Socket) {
 async fn pair(limited: &Context, remote: &Context, scheme: &str) -> (Socket, Socket) {
     let mut server = options();
     let mut client = options();
+
     #[cfg(feature = "quic")]
     if scheme == "quic" {
         let tls = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
@@ -160,6 +165,7 @@ async fn pair(limited: &Context, remote: &Context, scheme: &str) -> (Socket, Soc
         client.quic.trust_pem = server.quic.server_cert_pem.clone();
         client.quic.trust_system = false;
     }
+
     // These options are mutated only when the QUIC feature is enabled.
     let _ = (&mut server, &mut client);
     let bound = limited.socket(SocketType::Channel, server);
@@ -169,6 +175,7 @@ async fn pair(limited: &Context, remote: &Context, scheme: &str) -> (Socket, Soc
     connected.connect(endpoint).await.unwrap();
     bound.wait_connected(1, IO_TIMEOUT).await.unwrap();
     connected.wait_connected(1, IO_TIMEOUT).await.unwrap();
+
     (bound, connected)
 }
 
@@ -198,14 +205,17 @@ impl Envelope {
 fn recent_events(monitor: &mut omq_tokio::MonitorStream) -> Vec<String> {
     let mut events = Vec::new();
     let mut budget = omq_tokio::flow::DrainBudget::new(64, 64 * 1024);
+
     while !budget.exhausted() {
         let event = match monitor.try_recv() {
             Err(omq_tokio::MonitorTryRecvError::Empty) => break,
             event => format!("{event:?}"),
         };
+
         let _ = budget.account(event.len());
         events.push(event);
     }
+
     events
 }
 
@@ -243,6 +253,7 @@ async fn exchange(bound: &Socket, remote: &Socket, body: Bytes, report: Exchange
             "corrupt/reordered payload"
         );
         counts.received(body.len());
+
         if let Some(envelope) = envelope {
             envelope.observe(direction, body.len());
         }
@@ -290,12 +301,14 @@ async fn check_envelope(epoch: &Epoch, counts: &Arc<Counts>) {
         let counts = counts.clone();
         let envelope = envelope.clone();
         let seed = seed ^ index as u64;
+
         tasks.spawn(async move {
             let report = ExchangeReport {
                 counts: &counts,
                 envelope: Some(&envelope),
                 label: "TCP envelope",
             };
+
             for sequence in 0..2 {
                 exchange(&bound, &remote, payload(seed, sequence, 32768), report).await;
             }
@@ -331,6 +344,7 @@ async fn fill_and_cancel(socket: &Socket, seed: u64, counts: &Counts) {
             return;
         }
     }
+
     panic!("failed to create a pending send for cancellation");
 }
 
@@ -358,6 +372,7 @@ async fn message_worker(worker: Worker, scheme: &'static str) {
             };
             exchange(&bound, &connected, payload(seed, sequence, size), report).await;
             sequence += 1;
+
             if Instant::now() >= deadline {
                 break;
             }
@@ -413,6 +428,7 @@ fn soak_context_network_byte_limits() {
     let first_epoch = std::env::var("OMQ_SOAK_START_EPOCH")
         .map_or(1, |value| value.parse::<usize>().expect("positive epoch"));
     assert!(first_epoch != 0);
+
     for _ in 1..first_epoch {
         let _ = rng.next_u64();
     }

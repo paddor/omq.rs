@@ -25,8 +25,10 @@ fn skip_if_no_helper() -> bool {
             "OMQ_INTEROP_REQUIRED=1 but zmq_ws_peer helper not found at {HELPER}",
         );
         eprintln!("SKIP: zmq_ws_peer helper not found at {HELPER}");
+
         return true;
     }
+
     false
 }
 
@@ -47,12 +49,14 @@ async fn libzmq_push_to_omq_pull() {
     if skip_if_no_helper() {
         return;
     }
+
     let pull = Socket::new(SocketType::Pull, Options::default());
     let bound = pull.bind(ws_ep(0)).await.unwrap();
     let port = get_port(&bound);
 
     let count = 10;
     let size = 64;
+
     let mut child = Command::new(HELPER)
         .args([
             "push",
@@ -76,6 +80,7 @@ async fn libzmq_push_to_omq_pull() {
             String::from_utf8_lossy(&data[..expected.len().min(data.len())])
         );
     }
+
     let status = child.wait().unwrap();
     assert!(status.success(), "zmq_ws_peer exited with {status}");
 }
@@ -86,6 +91,7 @@ async fn omq_push_to_libzmq_pull() {
     if skip_if_no_helper() {
         return;
     }
+
     let port = {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         l.local_addr().unwrap().port()
@@ -93,6 +99,7 @@ async fn omq_push_to_libzmq_pull() {
 
     let count = 10;
     let size = 64;
+
     let child = Command::new(HELPER)
         .args([
             "pull",

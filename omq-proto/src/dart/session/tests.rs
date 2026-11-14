@@ -7,8 +7,10 @@ fn paced_credit_separates_initial_and_released_storage_from_admission() {
     assert_eq!(s.receive_right_edge(), 0);
     assert_eq!(s.pending_receive_credit(), 2);
     assert_eq!(s.classify(1, 0), super::super::Admission::OutsideWindow);
+
     s.grant_receive_credit(1);
     assert_eq!(s.receive_right_edge(), 1);
+
     assert!(s.commit_receive_with_delivery(
         Receipt::new(0, Ecn::NotEct, Duration::ZERO),
         Message::single("small"),
@@ -21,6 +23,7 @@ fn paced_credit_separates_initial_and_released_storage_from_admission() {
         "inline storage release cannot grant unpaced credit"
     );
     assert_eq!(s.pending_receive_credit(), 2);
+
     s.grant_receive_credit(2);
     assert_eq!(s.receive_right_edge(), 3);
 }
@@ -87,14 +90,17 @@ fn pacing_cache_preserves_delays_across_sizes_and_rates() {
         }),
         Duration::ZERO,
     ));
+
     let sizes = [16, 16, 32, 512, 16];
     let mut output = [0; MAX_DATAGRAM];
+
     for rate in [10_000_000, 3_000_000, u64::MAX, 1] {
         session.config.max_send_rate = Some(rate);
         session.update_pacing_rate();
         assert_eq!(session.pacing.bytes, 0);
         let now = session.pacing.next_at + Duration::from_secs(1);
         let mut tokens = Vec::new();
+
         for size in sizes {
             let sequence = session.submit(Message::from_slice(&vec![7; size])).unwrap();
             let (token, _) = session
@@ -102,6 +108,7 @@ fn pacing_cache_preserves_delays_across_sizes_and_rates() {
                 .unwrap();
             tokens.push(token);
         }
+
         let mut expected = now;
         for (token, size) in tokens.into_iter().zip(sizes) {
             expected +=
@@ -121,8 +128,10 @@ fn send_capacity_stops_a_batch_before_sequence_exhaustion() {
     session.peer.ack = near_limit;
     session.send.cursor = near_limit;
     session.send.next = near_limit;
+
     assert_eq!(session.send_capacity(), 1);
     assert_eq!(session.submit(Message::single("last")).unwrap(), near_limit);
+
     assert_eq!(session.send_capacity(), 0);
     assert!(session.is_exhausted());
     assert!(session.submit(Message::single("overflow")).is_err());
@@ -137,6 +146,7 @@ fn reordered_receipt_prefix_resumes_under_a_drain_budget() {
             Message::single("data"),
         );
     }
+
     session.commit_receive(
         Receipt::new(0, Ecn::NotEct, Duration::ZERO),
         Message::single("data"),
@@ -159,6 +169,7 @@ fn ack_retirement_and_nak_marking_have_message_and_byte_budgets() {
         };
         assert!(session.handle_control(Packet::Status(initial), Duration::ZERO));
         let mut bytes = [0; MAX_DATAGRAM];
+
         for sequence in 0..256 {
             session.submit(Message::from_slice(&vec![7; size])).unwrap();
             let (token, _) = session
@@ -166,6 +177,7 @@ fn ack_retirement_and_nak_marking_have_message_and_byte_budgets() {
                 .unwrap();
             session.commit_transmit(token, Duration::ZERO);
         }
+
         session.handle_control(
             Packet::Nak {
                 session: 2,
@@ -174,6 +186,7 @@ fn ack_retirement_and_nak_marking_have_message_and_byte_budgets() {
             },
             Duration::ZERO,
         );
+
         assert!(session.send.repairs <= 64);
         let ack = Status {
             serial: 2,
@@ -183,9 +196,11 @@ fn ack_retirement_and_nak_marking_have_message_and_byte_budgets() {
         };
         session.handle_control(Packet::Status(ack), Duration::from_micros(100));
         assert!(session.outstanding() >= 128);
+
         if size == 1024 {
             assert!(session.outstanding() > 128);
         }
+
         while session.poll_progress() {}
         assert_eq!(session.outstanding(), 0);
         assert_eq!(session.send.repairs, 0);

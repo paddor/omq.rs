@@ -41,9 +41,11 @@ impl InlinePair {
         if len > CAPACITY {
             return None;
         }
+
         let mut data = [0; CAPACITY];
         data[..first.len()].copy_from_slice(first);
         data[first.len()..len].copy_from_slice(second);
+
         Some(Self {
             first_len: first.len() as u8,
             len: len as u8,

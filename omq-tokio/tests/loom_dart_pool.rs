@@ -39,6 +39,7 @@ impl Model {
             let Some((slot, owner)) = self.pending.lock().unwrap().pop() else {
                 break;
             };
+
             if Arc::strong_count(&owner) == 1 {
                 self.queued[slot].store(false, Ordering::Relaxed);
                 self.free.lock().unwrap().push(owner);
@@ -54,6 +55,7 @@ fn release(owner: Arc<usize>, model: &Model, slot: usize) {
         model.free.lock().unwrap().push(owner);
         return;
     }
+
     model.defer(owner, slot);
 }
 
@@ -64,6 +66,7 @@ fn cloning_a_live_reader_cannot_race_unique_return() {
         let first = Arc::new(7);
         let reader = first.clone();
         let other_model = model.clone();
+
         let other = thread::spawn(move || {
             let clone = reader.clone();
             assert_eq!(*clone, 7);
@@ -72,6 +75,7 @@ fn cloning_a_live_reader_cannot_race_unique_return() {
             assert!(other_model.free.lock().unwrap().is_empty());
             release(clone, &other_model, 0);
         });
+
         release(first, &model, 0);
         other.join().unwrap();
         model.reclaim();
@@ -90,9 +94,11 @@ fn simultaneous_final_releases_cannot_lose_or_duplicate_storage() {
         let first = Arc::new(7);
         let second = first.clone();
         let other_free = free.clone();
+
         let other = thread::spawn(move || release(second, &other_free, 0));
         release(first, &free, 0);
         other.join().unwrap();
+
         free.reclaim();
         let mut free = free.free.lock().unwrap();
         assert_eq!(free.len(), 1);
@@ -108,11 +114,14 @@ fn a_live_reader_prevents_reuse_during_other_releases() {
         let first = reader.clone();
         let second = first.clone();
         let other_free = free.clone();
+
         let other = thread::spawn(move || release(second, &other_free, 0));
         release(first, &free, 0);
         free.reclaim();
+
         assert_eq!(*reader, 7);
         assert!(free.free.lock().unwrap().is_empty());
+
         other.join().unwrap();
         release(reader, &free, 0);
         free.reclaim();
@@ -129,10 +138,12 @@ fn acquisition_racing_final_release_sees_exhaustion_or_unique_storage() {
         let releaser = thread::spawn(move || release(owner, &other_free, 0));
         free.reclaim();
         let acquired = free.free.lock().unwrap().pop();
+
         if let Some(mut acquired) = acquired {
             *Arc::get_mut(&mut acquired).expect("exclusive writable storage") = 9;
             release(acquired, &free, 0);
         }
+
         releaser.join().unwrap();
         free.reclaim();
         assert_eq!(free.free.lock().unwrap().len(), 1);
@@ -150,11 +161,13 @@ fn independent_slots_return_once_with_concurrent_acquisition() {
         release(second, &model, 1);
         model.reclaim();
         let acquired = model.free.lock().unwrap().pop();
+
         if let Some(mut acquired) = acquired {
             let slot = usize::from(*acquired == 9);
             assert!(Arc::get_mut(&mut acquired).is_some());
             release(acquired, &model, slot);
         }
+
         other.join().unwrap();
         model.reclaim();
         let mut free = model.free.lock().unwrap();
@@ -176,9 +189,11 @@ fn dropping_nonfinal_refs_without_a_queued_owner_can_lose_storage() {
                 return;
             }
         }
+
         thread::yield_now();
         drop(owner);
     }
+
     loom::model(|| {
         let free = Arc::new(Mutex::new(Vec::new()));
         let first = Arc::new(7);
@@ -218,6 +233,7 @@ mod publication {
             if self.count == 0 {
                 return;
             }
+
             assert!(self.channel.queued.fetch_sub(self.count, Ordering::AcqRel) >= self.count);
             assert!(
                 self.channel
@@ -253,11 +269,13 @@ mod publication {
             if channel.queued.load(Ordering::Acquire) >= channel.capacity {
                 return None;
             }
+
             let mut accepted = channel.admitted.load(Ordering::Acquire);
             loop {
                 if accepted & CLOSED != 0 {
                     return None;
                 }
+
                 match channel.admitted.compare_exchange(
                     accepted,
                     accepted + 1,
@@ -268,6 +286,7 @@ mod publication {
                     Err(current) => accepted = current,
                 }
             }
+
             channel.queued.fetch_add(1, Ordering::AcqRel);
             Some(Claim {
                 channel: channel.clone(),
@@ -278,6 +297,7 @@ mod publication {
         fn drain(&self) -> Vec<usize> {
             let items = std::mem::take(&mut *self.data.lock().unwrap());
             let mut batch: Option<Claim> = None;
+
             items
                 .into_iter()
                 .map(|(value, mut claim)| {
@@ -288,6 +308,7 @@ mod publication {
                     } else {
                         batch = Some(claim);
                     }
+
                     value
                 })
                 .collect()
@@ -305,9 +326,11 @@ mod publication {
                 }
             });
             channel.admitted.fetch_or(CLOSED, Ordering::AcqRel);
+
             if channel.admitted.load(Ordering::Acquire) == CLOSED {
                 assert!(channel.data.lock().unwrap().is_empty());
             }
+
             writing.join().unwrap();
             let values = channel.drain();
             assert!(values.is_empty() || values == [7]);
@@ -327,9 +350,11 @@ mod publication {
                     claim.send(9);
                 }
             });
+
             if let Some(claim) = Channel::reserve(&channel) {
                 claim.send(11);
             }
+
             other.join().unwrap();
             reserved.send(7);
             let values = channel.drain();
@@ -347,10 +372,12 @@ mod publication {
             let unsent = Channel::reserve(&channel).unwrap();
             Channel::reserve(&channel).unwrap().send(7);
             Channel::reserve(&channel).unwrap().send(9);
+
             let draining = {
                 let channel = channel.clone();
                 thread::spawn(move || assert_eq!(channel.drain(), [7, 9]))
             };
+
             channel.admitted.fetch_or(CLOSED, Ordering::AcqRel);
             assert!(channel.admitted.load(Ordering::Acquire) & !CLOSED >= 1);
             assert!(Channel::reserve(&channel).is_none());
@@ -369,10 +396,12 @@ mod publication {
             let channel = Channel::new(3);
             Channel::reserve(&channel).unwrap().send(7);
             Channel::reserve(&channel).unwrap().send(9);
+
             let writer = {
                 let channel = channel.clone();
                 thread::spawn(move || Channel::reserve(&channel))
             };
+
             assert_eq!(channel.drain(), [7, 9]);
             let reserved = writer.join().unwrap().unwrap();
             assert_eq!(channel.admitted.load(Ordering::Acquire), 1);
@@ -389,6 +418,7 @@ fn stage_release(owner: Arc<usize>, model: &Model, slot: usize, pending: &mut Ve
         pending.push(owner);
         return;
     }
+
     model.defer(owner, slot);
 }
 
@@ -399,11 +429,13 @@ fn batched_and_scalar_final_drops_publish_one_unique_owner() {
         let first = Arc::new(7);
         let second = first.clone();
         let other_model = model.clone();
+
         let other = thread::spawn(move || release(second, &other_model, 0));
         let mut pending = Vec::new();
         stage_release(first, &model, 0, &mut pending);
         model.free.lock().unwrap().extend(pending);
         other.join().unwrap();
+
         model.reclaim();
         let mut free = model.free.lock().unwrap();
         assert_eq!(free.len(), 1);
@@ -424,9 +456,11 @@ fn bulk_acquisition_never_observes_a_staged_owner_before_publication() {
             other_model.free.lock().unwrap().extend(pending);
         });
         let mut acquired: Vec<_> = model.free.lock().unwrap().drain(..).collect();
+
         for owner in &mut acquired {
             *Arc::get_mut(owner).unwrap() = 9;
         }
+
         model.free.lock().unwrap().extend(acquired);
         other.join().unwrap();
         assert_eq!(model.free.lock().unwrap().len(), 1);
@@ -446,14 +480,17 @@ fn immediate_group_acquisition_cannot_underflow_the_available_count() {
             returned.lock().unwrap().push([0, 1]);
         });
         let early = queue.lock().unwrap().pop();
+
         if early.is_some() {
             assert_eq!(available.fetch_sub(2, Ordering::Relaxed), 2);
         }
+
         producer.join().unwrap();
         if early.is_none() {
             assert_eq!(queue.lock().unwrap().pop(), Some([0, 1]));
             assert_eq!(available.fetch_sub(2, Ordering::Relaxed), 2);
         }
+
         assert_eq!(available.load(Ordering::Relaxed), 0);
     });
 }
@@ -467,23 +504,29 @@ fn scalar_expansion_of_a_returned_group_preserves_count_and_unique_slots() {
         let available = Arc::new(AtomicUsize::new(2));
         let expanded = singles.clone();
         let count = available.clone();
+
         let consumer = thread::spawn(move || {
             // Taking the group's first slot does not reacquire or recount
             // its remainder when publishing that remainder as single slots.
             assert_eq!(count.fetch_sub(1, Ordering::Relaxed), 2);
             expanded.lock().unwrap().push(1);
+
             0
         });
+
         let mut acquired = Vec::new();
+
         if let Some(slot) = singles.lock().unwrap().pop() {
             assert_eq!(available.fetch_sub(1, Ordering::Relaxed), 1);
             acquired.push(slot);
         }
+
         acquired.push(consumer.join().unwrap());
         for slot in singles.lock().unwrap().drain(..) {
             assert_eq!(available.fetch_sub(1, Ordering::Relaxed), 1);
             acquired.push(slot);
         }
+
         acquired.sort_unstable();
         assert_eq!(acquired, [0, 1]);
         assert_eq!(available.load(Ordering::Relaxed), 0);

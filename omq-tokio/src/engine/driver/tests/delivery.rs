@@ -33,11 +33,14 @@ fn full_rep_sink_returns_original_message_without_internal_route() {
         }),
         7,
     );
+
     sink.try_deliver(Message::multipart(["", "first"])).unwrap();
     let original = Message::multipart(["", "second"]).with_routing_id(99);
+
     let Err(omq_proto::TrySendError::Full(returned)) = sink.try_deliver(original.clone()) else {
         panic!("full sink must return the request");
     };
+
     assert_eq!(returned, original);
     assert_eq!(returned.routing_id(), Some(99));
     let received = consumer.prefetch_and_pop().unwrap();
@@ -58,26 +61,31 @@ fn receive_config_recycles_only_its_owner_and_retains_pending_queues() {
         Arc::new(StateSignal::new()),
         4,
     );
+
     let mut first = config.take_sink_for_peer(0).unwrap();
     config.peer_disconnected(1);
     assert!(config.take_sink_for_peer(2).is_none());
+
     first.try_deliver(Message::single("first")).unwrap();
     assert_eq!(
         initial_consumer.prefetch_and_pop(),
         Some(Message::single("first"))
     );
+
     drop(first);
     config.peer_disconnected(0);
     let mut second = config.take_sink_for_peer(2).unwrap();
     second.try_deliver(Message::single("second")).unwrap();
     drop(second);
     config.peer_disconnected(2);
+
     assert!(
         config.take_sink_for_peer(3).is_none(),
         "pending ring must survive churn"
     );
     let mut pending = config.try_take_pending_consumer().unwrap();
     assert_eq!(pending.prefetch_and_pop(), Some(Message::single("second")));
+
     let mut third = config.take_sink_for_peer(3).unwrap();
     third.try_deliver(Message::single("third")).unwrap();
     let mut newest = config.try_take_pending_consumer().unwrap();
@@ -97,6 +105,7 @@ fn yring_sink_deferred_send_signals_once_per_flush() {
         space: Arc::new(StateSignal::new()),
     };
     let mut pending = false;
+
     // Wake hints stay conservative until the consumer acknowledges their
     // activation with an empty check. Prime that registration first.
     sink.try_send_deferred(Message::single("warmup"), &mut pending)
@@ -124,9 +133,11 @@ fn yring_sink_deferred_send_signals_once_per_flush() {
         1,
         "nonempty queue needs no extra wake"
     );
+
     for expected in ["a", "b", "c"] {
         assert_eq!(consumer.prefetch_and_pop(), Some(Message::single(expected)));
     }
+
     assert_eq!(consumer.prefetch_and_pop(), None);
     sink.try_send_deferred(Message::single("d"), &mut pending)
         .unwrap();
@@ -158,17 +169,21 @@ fn receive_frame_validation_drops_bad_envelopes_without_using_queue_credit() {
         reserved_admission: false,
         expected_parts: Some(2),
     };
+
     for message in [
         Message::from("body"),
         Message::multipart(["group", "body", "extra"]),
     ] {
         assert!(delivery.send(message, false, &mut false));
     }
+
     assert!(receiver.try_recv().is_err());
     assert!(delivery.send(Message::with_group("group", "body"), false, &mut false));
+
     let (_, PeerEvent::Event(Event::Message(message))) = receiver.try_recv().unwrap() else {
         panic!("expected valid grouped message");
     };
+
     assert_eq!(message, Message::with_group("group", "body"));
     assert!(pending.is_none());
 }
@@ -181,9 +196,11 @@ async fn full_peer_queue_bounds_pending_delivery_and_leaves_decoder_remainder_in
             .send_message(&Message::single(Bytes::from(vec![0; 512])))
             .unwrap();
     }
+
     let wire = drain_transmit(&mut sender);
     assert!(wire.len() < READ_BUF_MAX);
     connection.handle_input(Bytes::from(wire)).unwrap();
+
     let handles =
         crate::socket::recv::SpscHandles::new(crate::socket::recv::BlockingRecvWaker::new(), false);
     let (mut routes, mut receiver) =
@@ -192,9 +209,11 @@ async fn full_peer_queue_bounds_pending_delivery_and_leaves_decoder_remainder_in
         .register(Bytes::from_static(b"peer"), CancellationToken::new())
         .unwrap();
     let mut sink = Some(RecvSink::Peer(sink));
+
     let (events, _rx) = mpsc::channel(1);
     let mut events = PeerOutput::from(events);
     let mut pending = None;
+
     for _ in 0..8 {
         assert_eq!(
             drain_decoded_messages(
@@ -220,19 +239,23 @@ async fn full_peer_queue_bounds_pending_delivery_and_leaves_decoder_remainder_in
             .unwrap(),
             DriverStep::Continue
         );
+
         assert!(sink.as_ref().unwrap().peer_blocked());
     }
+
     let mut queued = Vec::new();
     assert_eq!(receiver.try_recv_many_into(100, &mut queued).unwrap(), 16);
     // Only one additional message left the decoder for pending admission.
     // Repeated driver turns under backpressure consume no further input.
     let mut remaining = 0;
     let mut bytes = 0;
+
     while let Some(message) = connection.poll_message() {
         remaining += 1;
         bytes += message.max_message_size_len();
         assert!(remaining <= 100 && bytes < READ_BUF_MAX);
     }
+
     assert_eq!(remaining, 83);
 }
 
@@ -242,6 +265,7 @@ async fn latency_batch_yields_only_while_more_input_is_ready() {
     for body in ["first", "second"] {
         sender.send_message(&Message::from(body)).unwrap();
     }
+
     connection
         .handle_input(Bytes::from(drain_transmit(&mut sender)))
         .unwrap();
@@ -256,6 +280,7 @@ async fn latency_batch_yields_only_while_more_input_is_ready() {
     let (events, _rx) = mpsc::channel(1);
     let mut events = PeerOutput::from(events);
     let mut pending = None;
+
     // The second message is already decoded, so the first batch yields to
     // it. The last batch leaves nothing ready and must not yield.
     for expected in [DriverStep::Yield, DriverStep::Continue] {
@@ -280,8 +305,10 @@ async fn latency_batch_yields_only_while_more_input_is_ready() {
             },
         )
         .unwrap();
+
         assert_eq!(step, expected);
     }
+
     let mut queued = Vec::new();
     assert_eq!(receiver.try_recv_many_into(16, &mut queued).unwrap(), 2);
 }

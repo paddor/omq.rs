@@ -9,8 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `SocketType::recv_parts` reports the frame count each received message
-  must have, if the socket type fixes one.
 - `Options::max_message_parts` and `ConnectionConfig::max_message_parts`
   limit the parts of one received message. The default is 1024; `None`
   removes the limit. `Lz4Decoder` and `ZstdDecoder` take the same limit for
@@ -25,11 +23,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A received message with more than 1024 parts is a protocol error by
   default. Before, only WebSocket connections had a part limit, so a peer
   could hold 64 bytes here for every two bytes it sent as empty parts.
-
-### Removed
-
-- `TypeState::post_recv_req_direct`. Use `TypeState::post_recv` with
-  `SocketType::Req`.
 
 ### Fixed
 
@@ -74,6 +67,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   constant time and checks every allowlist entry. Before, the time taken
   depended on the matching prefix and on the entry that matched. The
   `plain` feature now depends on `subtle`.
+
+## [0.39.1] - 2026-11-12
+
+### Changed
+
+- Option setters live in per-concern submodules. Public paths are unchanged.
+
+## [0.39.0] - 2026-11-09
+
+### Added
+
+- `SocketType::recv_parts` reports the frame count each received message
+  must have, if the socket type fixes one.
+
+### Removed
+
+- `TypeState::post_recv_req_direct`. Use `TypeState::post_recv` with
+  `SocketType::Req`.
 
 ## [0.38.1] - 2026-11-04
 

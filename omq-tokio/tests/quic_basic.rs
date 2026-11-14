@@ -19,6 +19,7 @@ fn tls_for(names: &[&str]) -> Tls {
         names.iter().map(|n| (*n).to_string()).collect::<Vec<_>>(),
     )
     .unwrap();
+
     Tls {
         cert: certified.cert.pem().into_bytes(),
         key: certified.signing_key.serialize_pem().into_bytes(),
@@ -79,6 +80,7 @@ async fn pair(server: SocketType, client: SocketType) -> (Socket, Socket, Tls) {
     let bound = bound_socket.bind(quic(0)).await.unwrap();
     let connected = Socket::new(client, client_options(&tls));
     connected.connect(quic(port_of(&bound))).await.unwrap();
+
     (bound_socket, connected, tls)
 }
 
@@ -189,6 +191,7 @@ async fn connect_paused_and_healthy(
         send_type,
         client_options(&tls).identity(Bytes::from_static(b"healthy")),
     );
+
     for sender in [&paused, &healthy] {
         sender.connect(bound.clone()).await.unwrap();
         sender
@@ -201,6 +204,7 @@ async fn connect_paused_and_healthy(
         .wait_connected(2, Duration::from_secs(10))
         .await
         .unwrap();
+
     (receiver, paused, healthy)
 }
 
@@ -236,6 +240,7 @@ async fn check_paused_quic_source(receive_type: SocketType, send_type: SocketTyp
     for i in 0..8 {
         send_to_receiver(&paused, send_type, Message::single(format!("queued-{i}"))).await;
     }
+
     assert!(matches!(
         receiver.try_recv_with_receipt(Some(&source)),
         Err(omq_tokio::Error::WouldBlock)
@@ -253,6 +258,7 @@ async fn check_paused_quic_source(receive_type: SocketType, send_type: SocketTyp
     let (receipt, body) = recv_receipt_within(&receiver, Some(&source)).await;
     assert_eq!(body, Message::single("held"));
     drop(receipt);
+
     for i in 0..8 {
         let (receipt, body) = recv_receipt_within(&receiver, Some(&source)).await;
         assert_eq!(body, Message::single(format!("queued-{i}")));
@@ -281,6 +287,7 @@ async fn fifo_and_large_messages_cross_small_windows() {
             .map(|i| (i % 251) as u8)
             .collect::<Vec<_>>(),
     );
+
     let sender = tokio::spawn({
         let large = large.clone();
         async move {
@@ -288,13 +295,16 @@ async fn fifo_and_large_messages_cross_small_windows() {
                 push.send(Message::single(i.to_be_bytes().to_vec()))
                     .await
                     .unwrap();
+
                 if i % 1_000 == 999 {
                     push.send(Message::single(large.clone())).await.unwrap();
                 }
             }
+
             push
         }
     });
+
     for i in 0u32..5_000 {
         let msg = recv(&pull).await;
         assert_eq!(
@@ -302,10 +312,12 @@ async fn fifo_and_large_messages_cross_small_windows() {
             &i.to_be_bytes()[..],
             "FIFO order"
         );
+
         if i % 1_000 == 999 {
             assert_eq!(recv(&pull).await.part_bytes(0).unwrap(), &large[..]);
         }
     }
+
     drop(sender.await.unwrap());
 }
 
@@ -331,9 +343,11 @@ async fn pub_sub_filters_on_subscription() {
     sub.subscribe("keep").await.unwrap();
     // Subscriptions travel on the data stream after the handshake.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+
     loop {
         publisher.send(Message::single("drop me")).await.unwrap();
         publisher.send(Message::single("keep me")).await.unwrap();
+
         match tokio::time::timeout(Duration::from_millis(50), sub.recv()).await {
             Ok(Ok(msg)) => {
                 assert_eq!(msg.part_bytes(0).unwrap(), &b"keep me"[..]);
@@ -375,6 +389,7 @@ async fn connect_before_bind_and_reconnect_after_rebind() {
     let pull = Socket::new(SocketType::Pull, server_options(&tls));
     // The old UDP port frees once its closed connection has drained.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+
     while let Err(error) = pull.bind(quic(port)).await {
         assert!(
             matches!(&error, omq_tokio::Error::Io(e) if e.kind() == std::io::ErrorKind::AddrInUse)
@@ -383,6 +398,7 @@ async fn connect_before_bind_and_reconnect_after_rebind() {
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+
     push.send(Message::single("second")).await.unwrap();
     assert_eq!(recv(&pull).await.part_bytes(0).unwrap(), &b"second"[..]);
 }
@@ -400,9 +416,11 @@ async fn untrusted_and_wrong_name_certificates_are_rejected() {
     let other = tls_for(&["127.0.0.1"]);
     let untrusted = Socket::new(SocketType::Push, client_options(&other));
     untrusted.connect(quic(port)).await.unwrap();
+
     for socket in [&wrong_name, &untrusted] {
         let _ = socket.try_send(Message::single("must not arrive"));
     }
+
     assert!(
         tokio::time::timeout(Duration::from_millis(700), pull.recv())
             .await
@@ -448,15 +466,18 @@ async fn finite_linger_delivers_queued_messages_after_close() {
     server.recv_hwm = 100_000;
     let pull = Socket::new(SocketType::Pull, server);
     let port = port_of(&pull.bind(quic(0)).await.unwrap());
+
     let mut client = client_options(&tls);
     client.linger = Some(Duration::from_secs(10));
     client.send_hwm = 100_000;
     let push = Socket::new(SocketType::Push, client);
     push.connect(quic(port)).await.unwrap();
     let body = Bytes::from(vec![7u8; 16 * 1024]);
+
     for _ in 0..2_000 {
         push.send(Message::single(body.clone())).await.unwrap();
     }
+
     push.close().await.unwrap();
     for _ in 0..2_000 {
         assert_eq!(recv(&pull).await.part_bytes(0).unwrap().len(), body.len());
@@ -473,6 +494,7 @@ async fn liveness_survives_local_receive_backpressure() {
     server.quic.stream_window = QuicOptions::MIN_STREAM_WINDOW;
     let pull = Socket::new(SocketType::Pull, server);
     let port = port_of(&pull.bind(quic(0)).await.unwrap());
+
     let mut client = client_options(&tls);
     client.heartbeat_interval = Some(Duration::from_millis(50));
     client.heartbeat_timeout = Some(Duration::from_millis(250));
@@ -488,8 +510,10 @@ async fn liveness_survives_local_receive_backpressure() {
             data[..4].copy_from_slice(&i.to_be_bytes());
             push.send(Message::single(data)).await.unwrap();
         }
+
         push
     });
+
     // Receive nothing for many heartbeat timeouts: data credit stalls, but
     // liveness records keep flowing on their reserved credit.
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -497,6 +521,7 @@ async fn liveness_survives_local_receive_backpressure() {
         let msg = recv(&pull).await;
         assert_eq!(&msg.part_bytes(0).unwrap()[..4], &i.to_be_bytes()[..]);
     }
+
     let _push = sender.await.unwrap();
     while let Ok(event) = monitor.try_recv() {
         assert!(
@@ -513,11 +538,13 @@ async fn multi_io_context_carries_many_peers() {
     let pull = context.socket(SocketType::Pull, server_options(&tls));
     let port = port_of(&pull.bind(quic(0)).await.unwrap());
     let mut pushes = Vec::new();
+
     for _ in 0..6 {
         let push = context.socket(SocketType::Push, client_options(&tls));
         push.connect(quic(port)).await.unwrap();
         pushes.push(push);
     }
+
     for (index, push) in pushes.iter().enumerate() {
         for seq in 0u32..200 {
             let mut body = vec![u8::try_from(index).unwrap()];
@@ -525,6 +552,7 @@ async fn multi_io_context_carries_many_peers() {
             push.send(Message::single(body)).await.unwrap();
         }
     }
+
     let mut next = [0u32; 6];
     for _ in 0..6 * 200 {
         let msg = recv(&pull).await;
@@ -534,6 +562,7 @@ async fn multi_io_context_carries_many_peers() {
         assert_eq!(seq, next[peer], "per-peer FIFO");
         next[peer] += 1;
     }
+
     assert_eq!(next, [200; 6]);
 }
 
@@ -552,23 +581,28 @@ async fn bound_sender_blocked_before_peer_resumes_on_connect() {
     let tls = tls_for(&["127.0.0.1"]);
     let push = Socket::new(SocketType::Push, server_options(&tls));
     let port = port_of(&push.bind(quic(0)).await.unwrap());
+
     let sender = tokio::spawn(async move {
         for i in 0u32..1000 {
             push.send(Message::single(i.to_be_bytes().to_vec()))
                 .await
                 .unwrap();
         }
+
         push
     });
+
     tokio::time::sleep(Duration::from_millis(100)).await;
     let pull = Socket::new(SocketType::Pull, client_options(&tls));
     pull.connect(quic(port)).await.unwrap();
+
     for i in 0u32..1000 {
         assert_eq!(
             recv(&pull).await.part_bytes(0).unwrap(),
             &i.to_be_bytes()[..]
         );
     }
+
     drop(sender.await.unwrap());
 }
 
@@ -581,6 +615,7 @@ async fn connector_monitor_reports_certificate_failure() {
     let push = Socket::new(SocketType::Push, client_options(&other));
     let mut monitor = push.monitor();
     push.connect(quic(port)).await.unwrap();
+
     let reason = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if let Ok(omq_proto::MonitorEvent::HandshakeFailed { reason, .. }) =
@@ -592,6 +627,7 @@ async fn connector_monitor_reports_certificate_failure() {
     })
     .await
     .expect("connector saw no HandshakeFailed");
+
     assert!(reason.contains("certificate"), "{reason}");
 }
 
@@ -611,6 +647,7 @@ async fn plain_credentials_authenticate_over_quic() {
     );
     let mut monitor = denied.monitor();
     denied.connect(quic(port)).await.unwrap();
+
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if let Ok(omq_proto::MonitorEvent::HandshakeFailed { .. }) = monitor.recv().await {
@@ -652,6 +689,7 @@ async fn plain_predicate_receives_peer_info_during_quic_handshake() {
             && peer.password.as_deref() == Some("secret")
             && peer.peer_address.as_deref() == Some("127.0.0.1")
     });
+
     let pull = Socket::new(SocketType::Pull, options);
     let port = port_of(&pull.bind(quic(0)).await.unwrap());
     let push = Socket::new(
@@ -659,6 +697,7 @@ async fn plain_predicate_receives_peer_info_during_quic_handshake() {
         client_options(&tls).plain_client("alice", "secret"),
     );
     push.connect(quic(port)).await.unwrap();
+
     push.send(Message::single("accepted")).await.unwrap();
     let received = tokio::time::timeout(Duration::from_secs(5), pull.recv())
         .await
@@ -678,18 +717,22 @@ async fn connection_bursts_past_half_the_setup_slots_complete_through_retry() {
     let clients: Vec<Socket> = (0..24)
         .map(|_| Socket::new(SocketType::Push, client_options(&tls)))
         .collect();
+
     for client in &clients {
         client.connect(endpoint.clone()).await.unwrap();
     }
+
     for client in &clients {
         client
             .wait_connected(1, Duration::from_secs(10))
             .await
             .expect("validated client did not connect");
     }
+
     for client in &clients {
         client.send(Message::single("hello")).await.unwrap();
     }
+
     for _ in 0..clients.len() {
         assert_eq!(recv(&server).await, Message::single("hello"));
     }

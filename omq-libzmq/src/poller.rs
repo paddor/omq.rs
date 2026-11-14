@@ -53,6 +53,7 @@ fn fd_is_invalid(fd: ZmqFd) -> bool {
     {
         fd < 0
     }
+
     #[cfg(windows)]
     {
         fd == ZmqFd::MAX
@@ -66,6 +67,7 @@ unsafe fn poller<'a>(ptr: *mut c_void) -> Result<&'a mut ZmqPoller, c_int> {
     if ptr.is_null() {
         return Err(libc::EFAULT);
     }
+
     let poller = ptr.cast::<ZmqPoller>();
     // SAFETY: the caller guarantees the tag is readable; it sits at offset 0.
     if unsafe { (*poller).tag } != POLLER_TAG {
@@ -99,6 +101,7 @@ pub extern "C" fn zmq_poller_destroy(poller_p: *mut *mut c_void) -> c_int {
     if poller_p.is_null() {
         return fail(libc::EFAULT);
     }
+
     // SAFETY: poller_p is non-null (checked above).
     let ptr = unsafe { *poller_p };
     // SAFETY: C callers pass null or a pointer from this API.
@@ -110,6 +113,7 @@ pub extern "C" fn zmq_poller_destroy(poller_p: *mut *mut c_void) -> c_int {
         drop(Box::from_raw(ptr.cast::<ZmqPoller>()));
         *poller_p = std::ptr::null_mut();
     }
+
     0
 }
 
@@ -133,15 +137,18 @@ pub extern "C" fn zmq_poller_add(
     if socket.is_null() {
         return fail(crate::error::ENOTSOCK);
     }
+
     let p = c_try!(unsafe { poller(poller_ptr) });
     if socket_entry(&p.entries, socket).is_some() {
         return fail(libc::EINVAL);
     }
+
     p.entries.push(PollerEntry {
         target: PollerTarget::Socket(socket),
         user_data,
         events,
     });
+
     0
 }
 
@@ -155,10 +162,12 @@ pub extern "C" fn zmq_poller_modify(
     if socket.is_null() {
         return fail(crate::error::ENOTSOCK);
     }
+
     let p = c_try!(unsafe { poller(poller_ptr) });
     let Some(idx) = socket_entry(&p.entries, socket) else {
         return fail(libc::EINVAL);
     };
+
     p.entries[idx].events = events;
     0
 }
@@ -169,10 +178,12 @@ pub extern "C" fn zmq_poller_remove(poller_ptr: *mut c_void, socket: *mut c_void
     if socket.is_null() {
         return fail(crate::error::ENOTSOCK);
     }
+
     let p = c_try!(unsafe { poller(poller_ptr) });
     let Some(idx) = socket_entry(&p.entries, socket) else {
         return fail(libc::EINVAL);
     };
+
     p.entries.swap_remove(idx);
     0
 }
@@ -189,15 +200,18 @@ pub extern "C" fn zmq_poller_add_fd(
     if fd_is_invalid(fd) {
         return fail(libc::EBADF);
     }
+
     let p = c_try!(unsafe { poller(poller_ptr) });
     if fd_entry(&p.entries, fd).is_some() {
         return fail(libc::EINVAL);
     }
+
     p.entries.push(PollerEntry {
         target: PollerTarget::Fd(fd),
         user_data,
         events,
     });
+
     0
 }
 
@@ -212,6 +226,7 @@ pub extern "C" fn zmq_poller_modify_fd(
     let Some(idx) = fd_entry(&p.entries, fd) else {
         return fail(libc::EINVAL);
     };
+
     p.entries[idx].events = events;
     0
 }
@@ -223,6 +238,7 @@ pub extern "C" fn zmq_poller_remove_fd(poller_ptr: *mut c_void, fd: ZmqFd) -> c_
     let Some(idx) = fd_entry(&p.entries, fd) else {
         return fail(libc::EINVAL);
     };
+
     p.entries.swap_remove(idx);
     0
 }
@@ -256,10 +272,12 @@ pub extern "C" fn zmq_poller_wait_all(
     // interests are skipped.
     let mut poll_items = Vec::new();
     let mut map = Vec::new();
+
     for (idx, entry) in p.entries.iter().enumerate() {
         if entry.events == 0 {
             continue;
         }
+
         poll_items.push(entry.poll_item());
         map.push(idx);
     }
@@ -273,9 +291,11 @@ pub extern "C" fn zmq_poller_wait_all(
         c_int::try_from(poll_items.len()).unwrap_or(c_int::MAX),
         timeout,
     );
+
     if rc < 0 {
         return -1;
     }
+
     if rc == 0 {
         return fail(libc::EAGAIN);
     }
@@ -285,9 +305,11 @@ pub extern "C" fn zmq_poller_wait_all(
         if item.revents == 0 {
             continue;
         }
+
         if written >= n_events as usize {
             break;
         }
+
         let out = p.entries[map[poll_idx]].event(item.revents);
         // SAFETY: events_out points to at least n_events entries (caller contract).
         unsafe { events_out.add(written).write(out) };
@@ -339,162 +361,13 @@ pub extern "C" fn zmq_poller_fd(poller_ptr: *mut c_void, fd: *mut ZmqFd) -> c_in
     if fd.is_null() {
         return fail(libc::EFAULT);
     }
+
     if unsafe { poller(poller_ptr) }.is_err() {
         return fail(libc::EFAULT);
     }
+
     fail(libc::EINVAL)
 }
 
 #[cfg(test)]
-mod tests {
-    use std::ffi::CString;
-    use std::mem::size_of;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Duration;
-
-    use super::*;
-    use crate::poll::ZMQ_POLLIN;
-
-    const ZMQ_PUSH: c_int = 8;
-    const ZMQ_PULL: c_int = 7;
-    const ZMQ_SNDTIMEO: c_int = 28;
-
-    static NEXT_ADDR: AtomicUsize = AtomicUsize::new(1);
-
-    fn unique_inproc(name: &str) -> CString {
-        CString::new(format!(
-            "inproc://poller-{name}-{}",
-            NEXT_ADDR.fetch_add(1, Ordering::Relaxed)
-        ))
-        .unwrap()
-    }
-
-    fn set_sndtimeo(sock: *mut c_void, timeout_ms: c_int) {
-        assert_eq!(
-            crate::zmq_setsockopt(
-                sock,
-                ZMQ_SNDTIMEO,
-                std::ptr::from_ref(&timeout_ms).cast(),
-                size_of::<c_int>(),
-            ),
-            0
-        );
-    }
-
-    #[test]
-    fn poller_socket_reports_user_data() {
-        let ctx = crate::zmq_ctx_new();
-        let push = crate::zmq_socket(ctx, ZMQ_PUSH);
-        let pull = crate::zmq_socket(ctx, ZMQ_PULL);
-        assert!(!push.is_null());
-        assert!(!pull.is_null());
-
-        let addr = unique_inproc("socket");
-        assert_eq!(crate::zmq_bind(pull, addr.as_ptr()), 0);
-        assert_eq!(crate::zmq_connect(push, addr.as_ptr()), 0);
-        set_sndtimeo(push, 1000);
-        std::thread::sleep(Duration::from_millis(20));
-
-        let poller = zmq_poller_new();
-        assert!(!poller.is_null());
-        let tag = 0xA11CEusize;
-        let user_data = std::ptr::from_ref(&tag).cast::<c_void>().cast_mut();
-        assert_eq!(zmq_poller_add(poller, pull, user_data, ZMQ_POLLIN), 0);
-        assert_eq!(zmq_poller_size(poller), 1);
-
-        assert_eq!(crate::zmq_send(push, b"x".as_ptr().cast(), 1, 0), 1);
-        let mut event = ZmqPollerEvent {
-            socket: std::ptr::null_mut(),
-            fd: invalid_fd(),
-            user_data: std::ptr::null_mut(),
-            events: 0,
-        };
-        assert_eq!(zmq_poller_wait(poller, &raw mut event, 1000), 1);
-        assert_eq!(event.socket, pull);
-        assert_eq!(event.user_data, user_data);
-        assert_ne!(event.events & ZMQ_POLLIN, 0);
-
-        assert_eq!(zmq_poller_remove(poller, pull), 0);
-        assert_eq!(zmq_poller_size(poller), 0);
-        let mut poller_slot = poller;
-        assert_eq!(zmq_poller_destroy(&raw mut poller_slot), 0);
-        assert!(poller_slot.is_null());
-
-        crate::zmq_close(push);
-        crate::zmq_close(pull);
-        crate::zmq_ctx_term(ctx);
-    }
-
-    #[test]
-    fn poller_timeout_maps_to_eagain() {
-        let ctx = crate::zmq_ctx_new();
-        let pull = crate::zmq_socket(ctx, ZMQ_PULL);
-        assert!(!pull.is_null());
-
-        let addr = unique_inproc("timeout");
-        assert_eq!(crate::zmq_bind(pull, addr.as_ptr()), 0);
-        let poller = zmq_poller_new();
-        assert_eq!(
-            zmq_poller_add(poller, pull, std::ptr::null_mut(), ZMQ_POLLIN),
-            0
-        );
-
-        let mut event = ZmqPollerEvent {
-            socket: std::ptr::null_mut(),
-            fd: invalid_fd(),
-            user_data: std::ptr::null_mut(),
-            events: 0,
-        };
-        assert_eq!(zmq_poller_wait(poller, &raw mut event, 1), -1);
-        assert_eq!(crate::zmq_errno(), libc::EAGAIN);
-        assert_eq!(zmq_poller_modify(poller, pull, 0), 0);
-        assert_eq!(zmq_poller_wait(poller, &raw mut event, 0), -1);
-        assert_eq!(crate::zmq_errno(), libc::EAGAIN);
-
-        let mut poller_slot = poller;
-        assert_eq!(zmq_poller_destroy(&raw mut poller_slot), 0);
-        crate::zmq_close(pull);
-        crate::zmq_ctx_term(ctx);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn poller_fd_reports_readable_pipe() {
-        let mut fds = [-1; 2];
-        // SAFETY: fds points to two valid ints for pipe output.
-        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
-
-        let poller = zmq_poller_new();
-        let tag = 0xFDFDusize;
-        let user_data = std::ptr::from_ref(&tag).cast::<c_void>().cast_mut();
-        assert_eq!(zmq_poller_add_fd(poller, fds[0], user_data, ZMQ_POLLIN), 0);
-        assert_eq!(zmq_poller_size(poller), 1);
-
-        let mut poller_fd = -1;
-        assert_eq!(zmq_poller_fd(poller, &raw mut poller_fd), -1);
-        assert_eq!(crate::zmq_errno(), libc::EINVAL);
-
-        // SAFETY: fds[1] is a valid pipe write fd and buffer has one byte.
-        assert_eq!(unsafe { libc::write(fds[1], b"x".as_ptr().cast(), 1) }, 1);
-        let mut event = ZmqPollerEvent {
-            socket: std::ptr::null_mut(),
-            fd: invalid_fd(),
-            user_data: std::ptr::null_mut(),
-            events: 0,
-        };
-        assert_eq!(zmq_poller_wait(poller, &raw mut event, 1000), 1);
-        assert!(event.socket.is_null());
-        assert_eq!(event.fd, fds[0]);
-        assert_eq!(event.user_data, user_data);
-        assert_ne!(event.events & ZMQ_POLLIN, 0);
-
-        assert_eq!(zmq_poller_remove_fd(poller, fds[0]), 0);
-        let mut poller_slot = poller;
-        assert_eq!(zmq_poller_destroy(&raw mut poller_slot), 0);
-        // SAFETY: fds were opened by pipe above and are closed once here.
-        unsafe {
-            libc::close(fds[0]);
-            libc::close(fds[1]);
-        }
-    }
-}
+mod tests;

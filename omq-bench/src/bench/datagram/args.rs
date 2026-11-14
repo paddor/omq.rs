@@ -35,9 +35,11 @@ impl CommonArgs {
     pub(super) fn sizes(&self, defaults: &[u64]) -> Vec<u64> {
         let sizes = self.sizes.clone().unwrap_or_else(|| defaults.to_vec());
         assert!(self.repeats > 0 && !sizes.is_empty());
+
         for (i, size) in sizes.iter().enumerate() {
             assert!((8..=8_388_608).contains(size) && !sizes[..i].contains(size));
         }
+
         sizes
     }
 

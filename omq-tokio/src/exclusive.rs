@@ -66,31 +66,37 @@ impl Options {
                 self.identity.len()
             )));
         }
+
         if self.identity.first() == Some(&0) {
             return Err(Error::Config(
                 "exclusive socket identity must not start with a zero byte".into(),
             ));
         }
+
         if self.connect_timeout.is_zero() {
             return Err(Error::Config(
                 "exclusive socket connect_timeout must be non-zero".into(),
             ));
         }
+
         if self.handshake_timeout.is_zero() {
             return Err(Error::Config(
                 "exclusive socket handshake_timeout must be non-zero".into(),
             ));
         }
+
         if self.heartbeat_interval.is_some_and(|value| value.is_zero()) {
             return Err(Error::Config(
                 "exclusive socket heartbeat_interval must be non-zero".into(),
             ));
         }
+
         if self.heartbeat_timeout.is_some_and(|value| value.is_zero()) {
             return Err(Error::Config(
                 "exclusive socket heartbeat_timeout must be non-zero".into(),
             ));
         }
+
         if let Some(ttl) = self.heartbeat_ttl
             && ttl > Duration::from_millis(6_553_500)
         {
@@ -98,6 +104,7 @@ impl Options {
                 "exclusive socket heartbeat_ttl {ttl:?} exceeds ZMTP maximum of 6553.5s"
             )));
         }
+
         Ok(())
     }
 }
@@ -191,6 +198,7 @@ impl Socket {
         validate_connect_mode(socket_type, &endpoint, &options)?;
         let mut socket = Self::new(socket_type, endpoint, options, Mode::Connect);
         socket.establish().await?;
+
         Ok(socket)
     }
 
@@ -210,6 +218,7 @@ impl Socket {
         validate_bind_mode(socket_type, &endpoint, &options)?;
         let (listener, bound) = bind_tcp_listener(&endpoint).await?;
         let socket = Self::new(socket_type, bound.clone(), options, Mode::Bind { listener });
+
         Ok((socket, bound))
     }
 
@@ -227,20 +236,27 @@ impl Socket {
     pub async fn send(&mut self, message: &Message) -> Result<()> {
         self.ensure_connected().await?;
         let mut wire_message = self.type_state.pre_send(self.kind, message.clone())?;
-        if self.kind == SocketType::Server {
-            if wire_message.take_routing_id() != Some(self.server_routing_id) {
-                return Err(Error::Unroutable);
-            }
-        } else if is_identity_routed(self.kind) {
-            let peer_identity = self.live.as_ref().expect("connected").peer_identity.clone();
-            wire_message = strip_single_peer_identity(self.kind, &peer_identity, wire_message)?;
+
+        let live = connected(&mut self.live)?;
+
+        if self.kind == SocketType::Server
+            && wire_message.take_routing_id() != Some(self.server_routing_id)
+        {
+            return Err(Error::Unroutable);
         }
-        let live = self.live.as_mut().expect("connected");
+
+        if is_identity_routed(self.kind) {
+            wire_message =
+                strip_single_peer_identity(self.kind, &live.peer_identity, wire_message)?;
+        }
+
         let result = run_timeout(self.options.io_timeout, live.write_message(&wire_message)).await;
         self.disconnect_on_err(result)?;
+
         if self.kind == SocketType::Rep {
             self.rep_request_pending = false;
         }
+
         Ok(())
     }
 
@@ -253,23 +269,27 @@ impl Socket {
                     "REP socket must send a reply before receiving again".into(),
                 ));
             }
+
             self.ensure_connected().await?;
-            let live = self.live.as_mut().expect("connected");
+            let live = connected(&mut self.live)?;
             let result =
                 run_timeout(self.options.io_timeout, recv_live(live, self.heartbeat)).await;
             let message = self.disconnect_on_err(result)?;
+
             let message = if self.kind == SocketType::Server {
                 message.with_routing_id(self.server_routing_id)
             } else if is_identity_routed(self.kind) {
-                let peer_identity = self.live.as_ref().expect("connected").peer_identity.clone();
+                let peer_identity = connected(&mut self.live)?.peer_identity.clone();
                 Message::with_prefix(peer_identity, message)
             } else {
                 message
             };
+
             if let Some(message) = self.type_state.post_recv(self.kind, message)? {
                 if self.kind == SocketType::Rep {
                     self.rep_request_pending = true;
                 }
+
                 return Ok(message);
             }
         }
@@ -282,19 +302,23 @@ impl Socket {
     /// sockets never run a background task.
     pub async fn maintain(&mut self) -> Result<()> {
         self.ensure_connected().await?;
-        let input_result = drain_ready_input(self.live.as_mut().expect("connected"));
+        let input_result = drain_ready_input(connected(&mut self.live)?);
         self.disconnect_on_err(input_result)?;
-        let live = self.live.as_mut().expect("connected");
+
+        let live = connected(&mut self.live)?;
         let flush_result = run_timeout(self.options.io_timeout, flush_and_settle(live)).await;
         self.disconnect_on_err(flush_result)?;
+
         let now = Instant::now();
-        let live = self.live.as_mut().expect("connected");
+        let live = connected(&mut self.live)?;
+
         if live
             .silence_deadline()
             .is_some_and(|deadline| now >= deadline)
         {
             return self.disconnect_on_err(Err(Error::Timeout));
         }
+
         if live.connection.peer_minor() >= 1
             && let Some(interval) = self.heartbeat.interval
             && now.duration_since(live.last_ping) >= interval
@@ -303,6 +327,7 @@ impl Socket {
             let result = run_timeout(self.options.io_timeout, flush_live(live)).await;
             self.disconnect_on_err(result)?;
         }
+
         Ok(())
     }
 
@@ -311,10 +336,12 @@ impl Socket {
         if self.closed {
             return Err(Error::Closed);
         }
+
         self.live = None;
         self.retry_at = None;
         self.type_state.on_peer_disconnected();
         self.rep_request_pending = false;
+
         self.establish().await
     }
 
@@ -322,9 +349,11 @@ impl Socket {
     pub async fn close(&mut self) -> Result<()> {
         self.closed = true;
         self.retry_at = None;
+
         if let Some(mut live) = self.live.take() {
             live.stream.shutdown().await?;
         }
+
         let _ = self.monitor.send(Event::Closed);
         Ok(())
     }
@@ -333,20 +362,25 @@ impl Socket {
         if self.closed {
             return Err(Error::Closed);
         }
+
         if self.live.as_ref().is_some_and(|live| live.write_pending) {
             self.mark_disconnected(&Error::Protocol(
                 "exclusive socket write was cancelled".into(),
             ));
         }
+
         if self.live.is_some() {
             return Ok(());
         }
+
         if matches!(self.options.reconnect, ReconnectPolicy::Disabled) {
             return Err(Error::Closed);
         }
+
         if let Some(retry_at) = self.retry_at {
             tokio::time::sleep_until(retry_at.into()).await;
         }
+
         self.establish().await
     }
 
@@ -355,19 +389,23 @@ impl Socket {
             Mode::Connect => connect_live(self.kind, &self.endpoint, &self.options).await,
             Mode::Bind { listener } => accept_live(self.kind, listener, &self.options).await,
         };
+
         match result {
             Ok(live) => {
                 if self.kind == SocketType::Server {
                     let Some(routing_id) = self.server_routing_id.checked_add(1) else {
                         return Err(Error::Config("SERVER routing IDs exhausted".into()));
                     };
+
                     self.server_routing_id = routing_id;
                 }
+
                 self.live = Some(live);
                 self.reconnect_attempt = 0;
                 self.retry_at = None;
                 let _ = self.monitor.send(Event::Connected);
                 let _ = self.monitor.send(Event::HandshakeSucceeded);
+
                 Ok(())
             }
             Err(error) => {
@@ -382,6 +420,7 @@ impl Socket {
         if let Err(error) = &result {
             self.mark_disconnected(error);
         }
+
         result
     }
 
@@ -393,6 +432,7 @@ impl Socket {
                 reason: error.to_string(),
             });
         }
+
         self.schedule_reconnect();
     }
 
@@ -402,10 +442,12 @@ impl Socket {
             self.retry_at = None;
             return;
         }
+
         let Some(delay) = reconnect_delay(self.options.reconnect, self.reconnect_attempt) else {
             self.retry_at = None;
             return;
         };
+
         self.reconnect_attempt = self.reconnect_attempt.saturating_add(1);
         // A delay past the clock range stands for "never": wait a year.
         let now = Instant::now();
@@ -418,6 +460,11 @@ impl Socket {
             attempt: self.reconnect_attempt,
         });
     }
+}
+
+/// Borrow the connection that `ensure_connected` established.
+fn connected(live: &mut Option<LiveConnection>) -> Result<&mut LiveConnection> {
+    live.as_mut().ok_or(Error::Closed)
 }
 
 fn reconnect_delay(policy: ReconnectPolicy, attempt: u32) -> Option<Duration> {
@@ -446,6 +493,7 @@ fn validate_socket_type(socket_type: SocketType) -> Result<()> {
             "exclusive sockets currently support only PAIR, DEALER, ROUTER, REQ, REP, CLIENT, and SERVER, not {socket_type:?}"
         )));
     }
+
     Ok(())
 }
 
@@ -471,6 +519,7 @@ fn validate_connect_mode(
             )));
         }
     }
+
     options.validate()
 }
 
@@ -488,6 +537,7 @@ fn validate_bind_mode(
             )));
         }
     }
+
     options.validate()
 }
 
@@ -497,6 +547,7 @@ async fn bind_tcp_listener(endpoint: &Endpoint) -> Result<(TcpListener, Endpoint
             "exclusive sockets currently support only tcp:// endpoints".into(),
         ));
     };
+
     let addr = crate::transport::dns::bind_addr(host, *port).await?;
     let listener = crate::transport::tcp::reuse_addr_bind(addr)?;
     let local = listener.local_addr()?;
@@ -504,6 +555,7 @@ async fn bind_tcp_listener(endpoint: &Endpoint) -> Result<(TcpListener, Endpoint
         host: Host::Ip(local.ip()),
         port: local.port(),
     };
+
     Ok((listener, bound))
 }
 
@@ -521,9 +573,11 @@ fn strip_single_peer_identity(
             "{socket_type:?} socket requires a routing identity frame"
         )));
     };
+
     if identity != *peer_identity {
         return Err(Error::Unroutable);
     }
+
     Ok(message)
 }
 

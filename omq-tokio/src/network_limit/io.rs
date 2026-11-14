@@ -19,6 +19,7 @@ impl<R> PacedRead<R> {
     pub(crate) fn new(inner: R, gate: Option<Gate>) -> Self {
         Self { inner, gate }
     }
+
     pub(crate) fn blocked(&self) -> bool {
         self.gate.as_ref().is_some_and(Gate::blocked)
     }
@@ -40,15 +41,18 @@ impl<R: AsyncRead + Unpin> AsyncRead for PacedRead<R> {
         let Some(gate) = &mut this.gate else {
             return Pin::new(&mut this.inner).poll_read(cx, buf);
         };
+
         let n = std::task::ready!(gate.poll(cx, buf.remaining(), 1));
         if n == 0 {
             return Poll::Ready(Ok(()));
         }
+
         let mut limited = ReadBuf::new(buf.initialize_unfilled_to(n));
         let result = Pin::new(&mut this.inner).poll_read(cx, &mut limited);
         let read = limited.filled().len();
         buf.advance(read);
         gate.finish(n, read);
+
         result
     }
 }
@@ -92,10 +96,12 @@ impl<W> PacedWrite<W> {
         let Some(clock) = &mut self.stalls else {
             return Duration::ZERO;
         };
+
         if let Some(since) = &mut clock.since {
             clock.total += now.saturating_duration_since(*since);
             *since = now;
         }
+
         std::mem::take(&mut clock.total)
     }
 
@@ -103,6 +109,7 @@ impl<W> PacedWrite<W> {
         let Some(clock) = &mut self.stalls else {
             return;
         };
+
         match result {
             Poll::Pending => {
                 clock.since.get_or_insert_with(Instant::now);
@@ -122,6 +129,7 @@ impl<W: AsyncWrite + Unpin> PacedWrite<W> {
         let Some(gate) = &mut self.gate else {
             return Pin::new(&mut self.inner).poll_write(cx, buf);
         };
+
         let n = std::task::ready!(gate.poll(cx, buf.len(), 1));
         let result = Pin::new(&mut self.inner).poll_write(cx, &buf[..n]);
         gate.finish(
@@ -131,6 +139,7 @@ impl<W: AsyncWrite + Unpin> PacedWrite<W> {
                 _ => 0,
             },
         );
+
         result
     }
 
@@ -142,20 +151,24 @@ impl<W: AsyncWrite + Unpin> PacedWrite<W> {
         let Some(gate) = &mut self.gate else {
             return Pin::new(&mut self.inner).poll_write_vectored(cx, bufs);
         };
+
         let wanted = bufs
             .iter()
             .fold(0usize, |sum, b| sum.saturating_add(b.len()));
         let n = std::task::ready!(gate.poll(cx, wanted, 1));
         let mut left = n;
         let mut limited = SmallVec::<[IoSlice<'_>; 64]>::new();
+
         for buf in bufs {
             if left == 0 {
                 break;
             }
+
             let len = left.min(buf.len());
             left -= len;
             limited.push(IoSlice::new(&buf[..len]));
         }
+
         let result = Pin::new(&mut self.inner).poll_write_vectored(cx, &limited);
         gate.finish(
             n,
@@ -164,6 +177,7 @@ impl<W: AsyncWrite + Unpin> PacedWrite<W> {
                 _ => 0,
             },
         );
+
         result
     }
 }
@@ -177,6 +191,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for PacedWrite<W> {
         let this = self.get_mut();
         let result = this.poll_paced_write(cx, buf);
         this.note_progress(&result);
+
         result
     }
 
@@ -188,15 +203,18 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for PacedWrite<W> {
         let this = self.get_mut();
         let result = this.poll_paced_write_vectored(cx, bufs);
         this.note_progress(&result);
+
         result
     }
 
     fn is_write_vectored(&self) -> bool {
         self.inner.is_write_vectored()
     }
+
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.get_mut().inner).poll_flush(cx)
     }
+
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
     }
@@ -207,6 +225,7 @@ impl<W: DriverWrite> DriverWrite for PacedWrite<W> {
         if self.gate.is_none() {
             return self.inner.chunk_writer();
         }
+
         if self.inner.chunk_writer().is_some() {
             Some(self)
         } else {
@@ -225,35 +244,43 @@ impl<W: DriverWrite> ChunkWrite for PacedWrite<W> {
         let Some(gate) = &mut self.gate else {
             return writer.poll_write_chunks(cx, bufs);
         };
+
         let wanted = bufs
             .iter()
             .fold(0usize, |sum, b| sum.saturating_add(b.len()));
         let n = std::task::ready!(gate.poll(cx, wanted, 1));
         let mut limited = SmallVec::<[Bytes; 64]>::new();
         let mut left = n;
+
         for buf in bufs.iter() {
             if left == 0 {
                 break;
             }
+
             let len = left.min(buf.len());
             limited.push(buf.slice(..len));
             left -= len;
         }
+
         let result = writer.poll_write_chunks(cx, &mut limited);
         let written = match &result {
             Poll::Ready(Ok(n)) => *n,
             _ => 0,
         };
+
         gate.finish(n, written);
         let mut left = written;
+
         for buf in bufs {
             let len = left.min(buf.len());
             buf.advance(len);
             left -= len;
+
             if left == 0 {
                 break;
             }
         }
+
         result
     }
 }

@@ -57,6 +57,7 @@ async fn recv_dealer_body_string(dealer: &Socket) -> String {
         .expect("DEALER did not receive")
         .unwrap();
     assert_eq!(msg.len(), 1);
+
     String::from_utf8(msg.part_bytes(0).unwrap().to_vec()).unwrap()
 }
 
@@ -96,6 +97,7 @@ async fn default_router_drops_full_inproc_messages_without_blocking_other_peers(
             .try_send(Message::multipart(["slow", "header", "body"]))
             .expect("default ROUTER must drop messages when a destination is full");
     }
+
     tokio::time::timeout(
         Duration::from_millis(100),
         router.send(Message::multipart(["slow", "drop"])),
@@ -114,6 +116,7 @@ async fn default_router_drops_full_inproc_messages_without_blocking_other_peers(
         assert_eq!(message, Message::multipart(["header", "body"]));
         received += 1;
     }
+
     assert!(
         received > 0 && received < 64,
         "full queue must drop messages"
@@ -146,6 +149,7 @@ async fn mandatory_router_preserves_full_message_and_resumes_after_drain() {
         .unwrap();
     let message = Message::multipart(["slow", "header", "body"]);
     let mut accepted = 0;
+
     loop {
         match router.try_send(message.clone()) {
             Ok(()) => {
@@ -159,21 +163,25 @@ async fn mandatory_router_preserves_full_message_and_resumes_after_drain() {
             other => panic!("unexpected send result: {other:?}"),
         }
     }
+
     {
         let waiting = router.send(message);
         tokio::pin!(waiting);
         assert!(waiting.as_mut().now_or_never().is_none());
+
         for _ in 0..accepted {
             assert_eq!(
                 dealer.recv().await.unwrap(),
                 Message::multipart(["header", "body"])
             );
         }
+
         tokio::time::timeout(Duration::from_secs(1), waiting)
             .await
             .expect("mandatory ROUTER must resume after its destination drains")
             .unwrap();
     }
+
     assert_eq!(
         dealer.recv().await.unwrap(),
         Message::multipart(["header", "body"])
@@ -277,8 +285,10 @@ async fn latency_dealer_round_robins_tcp_peers() {
             .await
             .unwrap();
     }
+
     let mut counts = [0_u32; 2];
     let deadline = Instant::now() + Duration::from_secs(2);
+
     while counts.iter().sum::<u32>() < 20 {
         counts[0] += drain_count(&router_a);
         counts[1] += drain_count(&router_b);
@@ -288,6 +298,7 @@ async fn latency_dealer_round_robins_tcp_peers() {
         );
         tokio::task::yield_now().await;
     }
+
     assert_eq!(counts, [10, 10]);
 }
 
@@ -423,6 +434,7 @@ fn fixed_identity(identity: &'static [u8]) -> Options {
 async fn assert_routed_from_a_and_b(router: &Socket) {
     let mut saw_a = false;
     let mut saw_b = false;
+
     for _ in 0..2 {
         let msg = tokio::time::timeout(Duration::from_secs(1), router.recv())
             .await
@@ -544,6 +556,7 @@ async fn tcp_req_to_router_uses_empty_delimiter_and_ignores_bad_reply() {
         ]))
         .await
         .unwrap();
+
     let reply = tokio::time::timeout(Duration::from_secs(1), req.recv())
         .await
         .expect("req did not receive good reply")
@@ -601,6 +614,7 @@ async fn dealer_round_robin_preserves_multipart_messages() {
     let mut count_a = 0;
     let mut count_b = 0;
     let deadline = Instant::now() + Duration::from_secs(2);
+
     while seen.len() < MSGS as usize {
         count_a += drain_dealer_round_robin_msgs(&router_a, &mut seen);
         count_b += drain_dealer_round_robin_msgs(&router_b, &mut seen);
@@ -630,6 +644,7 @@ async fn dealer_fair_queues_first_batch_before_second_batch() {
         sender.connect(ep.clone()).await.unwrap();
         senders.push(sender);
     }
+
     receiver
         .wait_connected(PEERS, Duration::from_secs(1))
         .await
@@ -646,6 +661,7 @@ async fn dealer_fair_queues_first_batch_before_second_batch() {
             .await
             .unwrap();
     }
+
     for (idx, sender) in senders.iter().enumerate() {
         sender
             .send(Message::single(format!("second-{idx}")))
@@ -657,6 +673,7 @@ async fn dealer_fair_queues_first_batch_before_second_batch() {
     for _ in 0..PEERS {
         first_batch.insert(recv_dealer_body_string(&receiver).await);
     }
+
     let expected_first = (0..PEERS).map(|idx| format!("first-{idx}")).collect();
     assert_eq!(first_batch, expected_first);
 
@@ -664,6 +681,7 @@ async fn dealer_fair_queues_first_batch_before_second_batch() {
     for _ in 0..PEERS {
         second_batch.insert(recv_dealer_body_string(&receiver).await);
     }
+
     let expected_second = (0..PEERS).map(|idx| format!("second-{idx}")).collect();
     assert_eq!(second_batch, expected_second);
 }
@@ -1023,6 +1041,7 @@ async fn router_handover_monitor_event() {
             _ => break,
         }
     }
+
     assert!(found, "must see Disconnected(Handover) for old peer");
 }
 
@@ -1131,6 +1150,7 @@ async fn handshake_progresses_while_router_receive_is_full() {
     if cfg!(feature = "ws") {
         transports.push("ws");
     }
+
     for transport in transports {
         let router = Socket::new(
             SocketType::Router,
@@ -1149,9 +1169,11 @@ async fn handshake_progresses_while_router_receive_is_full() {
         busy.wait_connected(1, Duration::from_secs(2))
             .await
             .unwrap();
+
         for _ in 0..1024 {
             busy.send(Message::single("backlog")).await.unwrap();
         }
+
         // Allow the actor to fill its receive pipe and retain a pending item.
         // No application receive frees capacity before the second handshake.
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1163,19 +1185,23 @@ async fn handshake_progresses_while_router_receive_is_full() {
             } else {
                 "ws://127.0.0.1:0".to_owned()
             };
+
             router.bind(name).await.unwrap()
         };
+
         let newcomer = Socket::new(
             SocketType::Dealer,
             Options::default().linger(Duration::ZERO),
         );
         newcomer.connect(endpoint).await.unwrap();
+
         router
             .wait_connected(2, Duration::from_secs(1))
             .await
             .unwrap_or_else(|error| {
                 panic!("{transport} handshake stranded by receive backlog: {error}")
             });
+
         newcomer.close().await.unwrap();
         busy.close().await.unwrap();
         router.close().await.unwrap();

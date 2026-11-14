@@ -53,12 +53,14 @@ fn patterned_payload(len: usize, seq: u64) -> Vec<u8> {
     payload[..8].copy_from_slice(&0xDEAD_BEEF_CAFE_F00Du64.to_le_bytes());
     payload[8..16].copy_from_slice(&seq.to_le_bytes());
     let mask = (seq as u8).wrapping_mul(7) ^ ((seq >> 8) as u8).wrapping_mul(3);
+
     for (i, byte) in payload.iter_mut().enumerate().skip(16) {
         let mut expected = (i as u8).wrapping_mul(31);
         expected ^= ((i >> 8) as u8).wrapping_mul(17);
         expected ^= ((i >> 16) as u8).wrapping_mul(13);
         *byte = expected ^ mask;
     }
+
     payload
 }
 
@@ -214,6 +216,7 @@ async fn many_large_messages_preserve_pattern_under_hwm_backpressure() {
                 .await
                 .unwrap();
         }
+
         push
     });
 
@@ -256,6 +259,7 @@ async fn held_large_messages_survive_recv_bypass_ring_pressure() {
                 .await
                 .unwrap();
         }
+
         push
     });
 
@@ -272,6 +276,7 @@ async fn held_large_messages_survive_recv_bypass_ring_pressure() {
         if seq < HOLD_COUNT {
             held.push((seq, m));
         }
+
         for (held_seq, held_msg) in &held {
             let held_payload = held_msg.part_bytes(0).unwrap();
             assert_patterned_payload(&held_payload, *held_seq);
@@ -306,6 +311,7 @@ async fn large_message_preserves_pattern_with_tiny_tcp_buffers() {
                 .await
                 .unwrap();
         }
+
         push
     });
 

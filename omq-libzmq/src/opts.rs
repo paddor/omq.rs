@@ -308,6 +308,7 @@ impl std::fmt::Debug for QuicOverlay {
         #[cfg(feature = "webtransport")]
         debug.field("webtransport_path", &self.webtransport_path);
         debug.field("max_ready_peers", &self.max_ready_peers);
+
         debug.finish()
     }
 }

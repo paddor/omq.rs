@@ -84,6 +84,7 @@ impl<'events> Activation<'_, '_, 'events> {
             if self.drive_events()? == PreActivationStep::Close {
                 return Ok(PreActivationStep::Close);
             }
+
             self.start_authentication(&mut authentication);
 
             let want_write = self.session.connection.has_pending_transmit()
@@ -176,6 +177,7 @@ impl<'events> Activation<'_, '_, 'events> {
             &mut self.session.delivery.sink,
             self.session.pending_input_error.is_some(),
         )?;
+
         if step != PreActivationStep::Continue {
             return Ok(step);
         }
@@ -187,6 +189,7 @@ impl<'events> Activation<'_, '_, 'events> {
             .connection
             .pending_transmit_size()
             .saturating_sub(before);
+
         if !budget.account(added) {
             self.session.inbox.release_consumed();
             tokio::task::yield_now().await;
@@ -249,6 +252,7 @@ impl<'events> Activation<'_, '_, 'events> {
         {
             return Err(error);
         }
+
         res?;
 
         Ok(PreActivationStep::Continue)

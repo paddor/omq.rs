@@ -48,6 +48,7 @@ async fn selected_write_cancellation_preserves_external_chunks() {
         ) => panic!("stalled write unexpectedly completed: {result:?}"),
         () = tokio::time::sleep(Duration::from_millis(10)) => {}
     }
+
     assert!(
         !pending.is_empty(),
         "cancelled write dropped pending chunks"
@@ -58,6 +59,7 @@ async fn selected_write_cancellation_preserves_external_chunks() {
         peer.read_to_end(&mut actual).await.unwrap();
         actual
     });
+
     while !pending.is_empty() || !eq.is_empty() {
         write_driver_progress(
             &mut writer,
@@ -69,6 +71,7 @@ async fn selected_write_cancellation_preserves_external_chunks() {
         .await
         .unwrap();
     }
+
     drop(writer);
     assert_eq!(reader.await.unwrap(), expected);
 }
@@ -91,6 +94,7 @@ async fn driver_write_preserves_large_payloads_after_partial_write_matrix() {
         .map(|seq| patterned_payload(MSG_SIZE, seq))
         .collect::<Vec<_>>();
     let mut expected = Vec::new();
+
     for payload in &payloads {
         expected.push(0x02);
         expected.extend_from_slice(&(MSG_SIZE as u64).to_be_bytes());
@@ -102,6 +106,7 @@ async fn driver_write_preserves_large_payloads_after_partial_write_matrix() {
         for payload in &payloads {
             eq.frame(&Message::single(Bytes::copy_from_slice(payload)));
         }
+
         let mut writer = PartialVectoredWriter::new(first_cap, next_cap);
         write_frames(&mut writer, &mut eq).await;
 
@@ -120,6 +125,7 @@ async fn driver_write_preserves_large_payloads_after_scripted_partial_writes() {
         .map(|seq| patterned_payload(MSG_SIZE, seq))
         .collect::<Vec<_>>();
     let mut expected = Vec::new();
+
     for payload in &payloads {
         expected.push(0x02);
         expected.extend_from_slice(&(MSG_SIZE as u64).to_be_bytes());
@@ -146,6 +152,7 @@ async fn driver_write_preserves_large_payloads_after_scripted_partial_writes() {
         131_071,
         262_147,
     ];
+
     let mut writer = ScriptedVectoredWriter::new(caps, 17_003);
     write_frames(&mut writer, &mut eq).await;
 
@@ -176,6 +183,7 @@ async fn driver_write_matches_reference_under_random_partial_writes() {
         let mut seed = 0xA5A5_5A5A_D3C1_BEEF ^ case;
         let mut eq = FrameBuffer::one_shot();
         let mut expected = Vec::new();
+
         for seq in 0..12u64 {
             let len = LENGTHS[next_random(&mut seed) % LENGTHS.len()];
             let payload = patterned_payload(len, (case << 8) | seq);
@@ -199,6 +207,7 @@ async fn driver_write_matches_reference_under_random_partial_writes() {
                 _ => (next_random(&mut seed) % 262_147) + 1,
             })
             .collect::<Vec<_>>();
+
         let mut writer = ScriptedVectoredWriter::new(caps, 37_111);
         write_frames(&mut writer, &mut eq).await;
 
@@ -282,11 +291,13 @@ fn coalesce_small_chunks_merges_runs_and_keeps_large_chunks() {
 async fn owned_chunk_writer_receives_few_chunks_for_mid_size_frames() {
     let mut eq = FrameBuffer::new();
     let mut expected = Vec::new();
+
     for seq in 0..64 {
         let payload = Bytes::from(patterned_payload(4_096, seq));
         push_expected_single_frame(&mut expected, &payload);
         eq.frame(&Message::single(payload));
     }
+
     let mut connection = Connection::new(ConnectionConfig::new(Role::Client, SocketType::Push));
     let _ = drain_transmit(&mut connection);
     let mut pending = PendingWrite::default();
@@ -310,6 +321,7 @@ fn owned_slot_staging_merges_shared_fan_out_chunks() {
     // Shared fan-out payloads stay separate chunks in the slot.
     let payload = Bytes::from(patterned_payload(256, 7));
     let mut expected = Vec::new();
+
     for _ in 0..200 {
         let header = Bytes::from_static(&[0, 0x80]);
         expected.extend_from_slice(&header);
@@ -377,6 +389,7 @@ async fn owned_chunk_write_cancellation_keeps_staged_chunks() {
             () = tokio::time::sleep(Duration::from_millis(10)) => break,
         }
     }
+
     assert!(!pending.is_empty(), "cancelled write dropped staged chunks");
     assert_eq!(writer.out.len(), 1_234);
 
@@ -471,4 +484,57 @@ async fn output_framed_during_a_short_codec_write_stays_behind_its_tail() {
     }
     drop(writer);
     assert_eq!(reader.await.unwrap(), expected);
+}
+
+#[tokio::test]
+async fn busy_sender_yields_to_tasks_on_its_thread() {
+    use futures::FutureExt;
+
+    const MESSAGES: usize = 40_000;
+    const WIRE_BYTES: usize = MESSAGES * (2 + 100);
+
+    let (push, _pull) = ready_push_pull_connections();
+    // Room for all output, so a full transport never parks the driver.
+    let (stream, mut remote) = tokio::io::duplex(2 * WIRE_BYTES);
+    let (commands, inbox) = mpsc::channel(4);
+    let (events, _event_inbox) = mpsc::channel(4);
+    let (mut producer, consumer) = crate::engine::send_pipe(MESSAGES);
+
+    for _ in 0..MESSAGES {
+        producer.try_send(Message::single(vec![7; 100])).unwrap();
+    }
+
+    let driver = ConnectionDriver::new(stream, push, inbox, events, 1, CancellationToken::new())
+        .with_send_pipe(consumer);
+    commands
+        .send(PeerDriverCommand::ActivateDataPlane)
+        .await
+        .unwrap();
+
+    let task = tokio::spawn(driver.run());
+    let mut buffer = vec![0; 2 * WIRE_BYTES];
+    let mut received = 0;
+    let mut largest_burst = 0;
+
+    // This task shares the driver's thread. It runs only between driver
+    // polls, so each read sees what one driver poll wrote.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while received < WIRE_BYTES {
+            if let Some(read) = remote.read(&mut buffer).now_or_never() {
+                let read = read.unwrap();
+                received += read;
+                largest_burst = largest_burst.max(read);
+            }
+
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("driver output stalled");
+
+    assert!(
+        largest_burst < WIRE_BYTES / 4,
+        "one driver poll wrote {largest_burst} of {WIRE_BYTES} bytes"
+    );
+    task.abort();
 }

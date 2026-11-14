@@ -35,6 +35,7 @@ fn main() {
     let push = zmq_socket(ctx, 8);
     let pull = zmq_socket(ctx, 7);
     assert!(!ctx.is_null() && !push.is_null() && !pull.is_null());
+
     for socket in [push, pull] {
         set_i32(socket, 23, hwm); // SNDHWM
         set_i32(socket, 24, hwm); // RCVHWM
@@ -42,6 +43,7 @@ fn main() {
         set_i32(socket, 28, 5000); // SNDTIMEO
         set_i32(socket, 17, 0); // LINGER
     }
+
     let endpoint = CString::new("inproc://c-streaming-bench").unwrap();
     assert_eq!(zmq_bind(pull, endpoint.as_ptr()), 0);
     assert_eq!(zmq_connect(push, endpoint.as_ptr()), 0);
@@ -50,23 +52,28 @@ fn main() {
     let barrier = Arc::new(Barrier::new(2));
     let sender_barrier = barrier.clone();
     let push_address = push as usize;
+
     let sender = std::thread::spawn(move || {
         let push = push_address as *mut c_void;
         let payload = vec![b'x'; size];
         sender_barrier.wait();
+
         for _ in 0..messages {
             assert_eq!(zmq_send(push, payload.as_ptr().cast(), size, 0), expected);
         }
     });
+
     let mut received = vec![0_u8; size];
     barrier.wait();
     let started = Instant::now();
+
     for _ in 0..messages {
         assert_eq!(
             zmq_recv(pull, received.as_mut_ptr().cast(), size, 0),
             expected
         );
     }
+
     let elapsed = started.elapsed().as_secs_f64();
     sender.join().expect("sender thread");
     assert_eq!(zmq_close(push), 0);

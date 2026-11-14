@@ -40,6 +40,7 @@ async fn recv_from_any_rep(reps: &[Socket]) -> (usize, Message) {
                 Err(e) => panic!("rep {idx} recv failed: {e:?}"),
             }
         }
+
         assert!(
             tokio::time::Instant::now() < deadline,
             "no REP received request"
@@ -150,6 +151,7 @@ async fn connect_two_routers(req: &Socket, endpoint: &Endpoint) -> [Socket; 2] {
         Socket::new(SocketType::Router, Options::default()),
         Socket::new(SocketType::Router, Options::default()),
     ];
+
     for router in &routers {
         router.connect(endpoint.clone()).await.unwrap();
         router
@@ -198,11 +200,13 @@ async fn check_unselected_replies_rejected(profile: WorkloadProfile, transport: 
             .identity(bytes::Bytes::from_static(b"requester"))
             .workload_profile(profile),
     );
+
     let endpoint = if transport == "tcp" {
         tcp_ep(0)
     } else {
         inproc_ep(&format!("req-peer-{profile:?}"))
     };
+
     let endpoint = req.bind(endpoint).await.unwrap();
     let routers = connect_two_routers(&req, &endpoint).await;
 
@@ -248,6 +252,7 @@ async fn check_unselected_replies_rejected(profile: WorkloadProfile, transport: 
     for router in routers {
         router.close().await.unwrap();
     }
+
     req.close().await.unwrap();
 }
 
@@ -259,14 +264,17 @@ async fn rep_rejects_delimiter_without_body() {
                 SocketType::Rep,
                 Options::default().workload_profile(profile),
             );
+
             let endpoint = if transport == "tcp" {
                 tcp_ep(0)
             } else {
                 inproc_ep(&format!("rep-no-body-{profile:?}"))
             };
+
             let endpoint = rep.bind(endpoint).await.unwrap();
             let dealer = Socket::new(SocketType::Dealer, Options::default());
             dealer.connect(endpoint).await.unwrap();
+
             for malformed in [Message::single(""), Message::multipart(["route", ""])] {
                 dealer.send(malformed).await.unwrap();
                 dealer
@@ -285,6 +293,7 @@ async fn rep_rejects_delimiter_without_body() {
                     .unwrap();
                 assert_eq!(reply, Message::multipart(["route", "", "reply"]));
             }
+
             dealer.close().await.unwrap();
             rep.close().await.unwrap();
         }
@@ -297,16 +306,20 @@ async fn req_accepts_a_queued_reply_after_its_peer_disconnects() {
     let endpoint = rep.bind(tcp_ep(0)).await.unwrap();
     let req = Socket::new(SocketType::Req, Options::default());
     req.connect(endpoint).await.unwrap();
+
     req.send(Message::single("request")).await.unwrap();
     assert_eq!(rep.recv().await.unwrap(), Message::single("request"));
+
     rep.send(Message::single("reply")).await.unwrap();
     let reply = tokio::time::timeout(Duration::from_secs(2), req.recv_for_external_recv())
         .await
         .unwrap()
         .unwrap();
+
     let mut monitor = req.monitor();
     rep.close().await.unwrap();
     wait_for_disconnect(&mut monitor).await;
+
     assert_eq!(
         req.prepare_external_recv(reply),
         Some(Message::single("reply"))
@@ -323,6 +336,7 @@ async fn req_replaces_a_disconnected_reply_source_without_accepting_its_queued_r
     req.send(Message::single("first")).await.unwrap();
     let (selected, mut request) = recv_from_any_rep(&routers).await;
     let identity = request.pop_front().unwrap();
+
     routers[selected]
         .send(Message::multipart([
             identity,
@@ -331,6 +345,7 @@ async fn req_replaces_a_disconnected_reply_source_without_accepting_its_queued_r
         ]))
         .await
         .unwrap();
+
     let old_reply = recv_external(&req).await;
 
     // Disconnect the selected peer while its reply is still unaccepted.
@@ -341,6 +356,7 @@ async fn req_replaces_a_disconnected_reply_source_without_accepting_its_queued_r
     // A new request replaces the old one, so the stale reply is rejected.
     req.try_send(Message::single("second")).unwrap();
     assert!(req.prepare_external_recv(old_reply).is_none());
+
     let remaining = &routers[1 - selected];
     let mut request = tokio::time::timeout(Duration::from_secs(2), remaining.recv())
         .await
@@ -348,6 +364,7 @@ async fn req_replaces_a_disconnected_reply_source_without_accepting_its_queued_r
         .unwrap();
     let identity = request.pop_front().unwrap();
     assert_eq!(request, Message::multipart(["", "second"]));
+
     remaining
         .send(Message::multipart([
             identity,
@@ -356,6 +373,7 @@ async fn req_replaces_a_disconnected_reply_source_without_accepting_its_queued_r
         ]))
         .await
         .unwrap();
+
     let reply = tokio::time::timeout(Duration::from_secs(2), req.recv())
         .await
         .unwrap()
@@ -396,6 +414,7 @@ async fn req_round_robins_across_connected_reps() {
         rep.connect(ep.clone()).await.unwrap();
         reps.push(rep);
     }
+
     req.wait_connected(REPS, Duration::from_secs(1))
         .await
         .expect("REQ did not see all REPs");
@@ -438,6 +457,7 @@ async fn dealer_round_robins_requests_across_reps() {
         rep.connect(ep.clone()).await.unwrap();
         reps.push(rep);
     }
+
     dealer
         .wait_connected(REPS, Duration::from_secs(1))
         .await
@@ -455,6 +475,7 @@ async fn dealer_round_robins_requests_across_reps() {
 
     let mut counts = [0usize; REPS];
     let mut bodies = HashSet::new();
+
     for _ in 0..REPS {
         let (idx, request) = recv_from_any_rep(&reps).await;
         counts[idx] += 1;
@@ -627,9 +648,11 @@ async fn multi_io_rep_finishes_reply_while_client_closes() {
                 .await
                 .expect("REP recv timed out")
                 .unwrap();
+
             if sequence == 20 {
                 server_reply_race.wait().await;
             }
+
             tokio::time::timeout(Duration::from_secs(1), rep.send(request))
                 .await
                 .expect("REP send timed out")
@@ -640,11 +663,13 @@ async fn multi_io_rep_finishes_reply_while_client_closes() {
     let req = context.socket(SocketType::Req, Options::default().linger(Duration::ZERO));
     req.connect(endpoint).await.unwrap();
     test_support::wait_for_handshake(&req).await;
+
     for sequence in 0..20 {
         let request = Message::single(format!("request-{sequence}"));
         req.send(request.clone()).await.unwrap();
         assert_eq!(req.recv().await.unwrap(), request);
     }
+
     req.send(Message::single("last")).await.unwrap();
     // Zero linger may discard the last send. Admit it before racing the
     // client's close against the server's reply.
@@ -709,6 +734,7 @@ async fn three_req_to_one_rep_direct_io_routing() {
         req.connect(ep.clone()).await.unwrap();
         reqs.push(req);
     }
+
     test_support::wait_for_handshake(&rep).await;
 
     for (i, req) in reqs.iter().enumerate() {
@@ -857,12 +883,14 @@ async fn assert_empty_body_parts_roundtrip(
         &["a", ""],
         &["a", "", "", "b", ""],
     ];
+
     for body in bodies {
         let request = if client_type == SocketType::Dealer {
             Message::multipart(std::iter::once("").chain(body.iter().copied()))
         } else {
             Message::multipart(body.iter().copied())
         };
+
         client.send(request).await.unwrap();
         let got = tokio::time::timeout(Duration::from_secs(1), rep.recv())
             .await
@@ -881,11 +909,13 @@ async fn assert_empty_body_parts_roundtrip(
             .await
             .expect("client did not receive reply")
             .unwrap();
+
         let expected = if client_type == SocketType::Dealer {
             Message::multipart(std::iter::once("").chain(body.iter().copied()))
         } else {
             Message::multipart(body.iter().copied())
         };
+
         assert_eq!(reply, expected, "reply body");
     }
 }
@@ -945,9 +975,11 @@ async fn req_full_returns_unmodified_application_message() {
     let req = Socket::new(SocketType::Req, Options::default());
     let endpoint = req.bind(inproc_ep("req-full-original-body")).await.unwrap();
     let original = Message::multipart(["", "body", "tail"]);
+
     let Err(omq_tokio::TrySendError::Full(returned)) = req.try_send(original.clone()) else {
         panic!("bound REQ without peers must mute");
     };
+
     assert_eq!(returned, original);
     let rep = Socket::new(SocketType::Rep, Options::default());
     rep.connect(endpoint).await.unwrap();

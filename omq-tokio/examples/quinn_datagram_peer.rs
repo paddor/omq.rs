@@ -21,10 +21,11 @@ use quinn::{AsyncUdpSocket, Connection, Runtime, UdpPoller, udp};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use tokio::sync::{mpsc, oneshot};
 
-type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 const WARMUP_TIME: Duration = Duration::from_millis(200);
 const TAIL: Duration = Duration::from_millis(200);
 const QUEUE_BYTES: usize = 8 * 1024 * 1024;
+
+type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
 #[derive(Debug)]
 struct Config {
@@ -49,6 +50,7 @@ impl Config {
         if args.len() != 15 {
             return Err("role address size seconds iterations warmup layout app_spin_us io_spin_us cert_dir app_cpu io_cpu batch event_interval".into());
         }
+
         let config = Self {
             role: args[1].clone(),
             address: args[2].parse()?,
@@ -65,6 +67,7 @@ impl Config {
             batch: args[13].parse()?,
             event_interval: args[14].parse()?,
         };
+
         if !(16..=1024).contains(&config.size)
             || config.seconds <= 0.0
             || !config.seconds.is_finite()
@@ -84,6 +87,7 @@ impl Config {
                 "invalid benchmark configuration (only split can spin the application)".into(),
             );
         }
+
         Ok(config)
     }
 
@@ -103,17 +107,21 @@ fn pin(cpu: usize) -> io::Result<()> {
         if cpu >= libc::CPU_SETSIZE as usize {
             return Err(io::Error::other("CPU ID exceeds CPU_SETSIZE"));
         }
+
         // SAFETY: set is initialized, cpu is in range, and the supplied size is correct.
         unsafe {
             let mut set = std::mem::zeroed::<libc::cpu_set_t>();
             libc::CPU_ZERO(&mut set);
             libc::CPU_SET(cpu, &mut set);
+
             if libc::sched_setaffinity(0, std::mem::size_of_val(&set), &raw const set) != 0 {
                 return Err(io::Error::last_os_error());
             }
         }
+
         Ok(())
     }
+
     #[cfg(not(target_os = "linux"))]
     {
         let _ = cpu;
@@ -191,9 +199,11 @@ impl AsyncUdpSocket for ActiveSocket {
             }
             Err(error) => Poll::Ready(Err(error)),
         };
+
         if matches!(result, Poll::Ready(Ok(count)) if count > 0) {
             self.activity.mark();
         }
+
         result
     }
 
@@ -222,20 +232,24 @@ fn transport() -> Arc<quinn::TransportConfig> {
         .datagram_receive_buffer_size(Some(QUEUE_BYTES))
         .datagram_send_buffer_size(QUEUE_BYTES)
         .max_idle_timeout(Some(Duration::from_secs(10).try_into().unwrap()));
+
     Arc::new(config)
 }
 
 fn tls_configs(config: &Config) -> Result<(quinn::ServerConfig, quinn::ClientConfig)> {
     let cert = CertificateDer::from(std::fs::read(config.directory.join("cert.der"))?);
     let key = PrivatePkcs8KeyDer::from(std::fs::read(config.directory.join("key.der"))?);
+
     let mut provider = rustls::crypto::ring::default_provider();
     provider.cipher_suites = vec![rustls::crypto::ring::cipher_suite::TLS13_AES_128_GCM_SHA256];
     let provider = Arc::new(provider);
+
     let mut server = rustls::ServerConfig::builder_with_provider(provider.clone())
         .with_protocol_versions(&[&rustls::version::TLS13])?
         .with_no_client_auth()
         .with_single_cert(vec![cert.clone()], key.into())?;
     server.alpn_protocols = vec![b"quinn-datagram-bench".to_vec()];
+
     let mut roots = rustls::RootCertStore::empty();
     roots.add(cert)?;
     let mut client = rustls::ClientConfig::builder_with_provider(provider)
@@ -243,14 +257,17 @@ fn tls_configs(config: &Config) -> Result<(quinn::ServerConfig, quinn::ClientCon
         .with_root_certificates(roots)
         .with_no_client_auth();
     client.alpn_protocols.clone_from(&server.alpn_protocols);
+
     let mut server = quinn::ServerConfig::with_crypto(Arc::new(
         quinn::crypto::rustls::QuicServerConfig::try_from(server)?,
     ));
     server.transport = transport();
+
     let mut client = quinn::ClientConfig::new(Arc::new(
         quinn::crypto::rustls::QuicClientConfig::try_from(client)?,
     ));
     client.transport_config(transport());
+
     Ok((server, client))
 }
 
@@ -262,6 +279,7 @@ fn bind_udp(config: &Config) -> Result<(UdpSocket, usize, usize)> {
     } else {
         "127.0.0.1:0".parse()?
     };
+
     let udp = UdpSocket::bind(address)?;
     udp.set_nonblocking(true)?;
 
@@ -270,6 +288,7 @@ fn bind_udp(config: &Config) -> Result<(UdpSocket, usize, usize)> {
     sock.set_send_buffer_size(QUEUE_BYTES)?;
     let recv_buffer = sock.recv_buffer_size()?;
     let send_buffer = sock.send_buffer_size()?;
+
     Ok((udp, recv_buffer, send_buffer))
 }
 
@@ -293,6 +312,7 @@ fn quinn_socket(
             epoch: Instant::now(),
             last_ns: AtomicU64::new(0),
         });
+
         socket = Arc::new(ActiveSocket {
             inner: socket,
             activity,
@@ -302,6 +322,7 @@ fn quinn_socket(
             latency: matches!(config.role.as_str(), "client" | "server"),
         });
     }
+
     Ok((socket, gso, gro))
 }
 
@@ -318,12 +339,14 @@ async fn connect(config: &Config) -> Result<(quinn::Endpoint, Connection)> {
         runtime,
     )?;
     endpoint.set_default_client_config(client);
+
     if config.receiving() {
         emit(&format!(
             "{{\"event\":\"bound\",\"endpoint\":\"{}\"}}",
             endpoint.local_addr()?
         ))?;
     }
+
     let connection = tokio::time::timeout(Duration::from_secs(5), async {
         if config.receiving() {
             Ok::<_, Box<dyn Error + Send + Sync>>(
@@ -334,16 +357,19 @@ async fn connect(config: &Config) -> Result<(quinn::Endpoint, Connection)> {
         }
     })
     .await??;
+
     if connection
         .max_datagram_size()
         .is_none_or(|size| size < config.size)
     {
         return Err("negotiated DATAGRAM size is too small".into());
     }
+
     emit(&format!(
         "{{\"event\":\"ready\",\"gso_segments\":{gso},\"gro_segments\":{gro},\"send_buffer\":{send_buffer},\"recv_buffer\":{recv_buffer},\"max_datagram_size\":{}}}",
         connection.max_datagram_size().unwrap()
     ))?;
+
     Ok((endpoint, connection))
 }
 
@@ -354,8 +380,10 @@ async fn receive(
     if spin.is_zero() {
         return connection.read_datagram().await;
     }
+
     let future = connection.read_datagram();
     tokio::pin!(future);
+
     poll_fn(|cx| {
         let until = Instant::now() + spin;
         loop {
@@ -401,6 +429,7 @@ async fn start(commands: &mut mpsc::Receiver<String>) -> Result<Instant> {
     let delay = (UNIX_EPOCH + Duration::from_nanos(epoch_ns)).duration_since(SystemTime::now())?;
     let at = Instant::now() + delay;
     tokio::time::sleep_until(at.into()).await;
+
     Ok(at)
 }
 
@@ -414,10 +443,12 @@ async fn send_throughput(config: &Config, connection: &Connection, at: Instant) 
     let batch = config.batch.min(65536 / config.size);
     let mut offered = 0_u64;
     let mut warmup = 0_u64;
+
     let sending = async {
         while Instant::now() < end {
             let measurement = Instant::now() >= begin;
             let payload = if measurement { &measured } else { &warm };
+
             for _ in 0..batch {
                 // Unlike send_datagram(), this does not evict older queued data.
                 connection.send_datagram_wait(payload.clone()).await?;
@@ -427,20 +458,25 @@ async fn send_throughput(config: &Config, connection: &Connection, at: Instant) 
                     warmup += 1;
                 }
             }
+
             tokio::task::yield_now().await;
         }
+
         Ok::<(), quinn::SendDatagramError>(())
     };
+
     tokio::select! {
         result = sending => result?,
         () = tokio::time::sleep_until(end.into()) => {},
     }
+
     // Let both the protocol driver and receiver drain the final queued data.
     tokio::time::sleep(TAIL).await;
     emit(&format!(
         "{{\"event\":\"result\",\"offered\":{offered},\"warmup\":{warmup},\"stats\":{}}}",
         stats(connection)
     ))?;
+
     Ok(())
 }
 
@@ -451,6 +487,7 @@ async fn receive_throughput(config: &Config, connection: &Connection, at: Instan
     let batch = config.batch.min(65536 / config.size);
     let mut received = 0_u64;
     let mut received_total = 0_u64;
+
     let receiving = async {
         loop {
             for _ in 0..batch {
@@ -460,6 +497,7 @@ async fn receive_throughput(config: &Config, connection: &Connection, at: Instan
                         "invalid throughput body".into(),
                     );
                 }
+
                 if body[0] == 1 {
                     received_total += 1;
                     if Instant::now() < end {
@@ -467,19 +505,23 @@ async fn receive_throughput(config: &Config, connection: &Connection, at: Instan
                     }
                 }
             }
+
             tokio::task::yield_now().await;
         }
     };
+
     // One timer for the whole measurement, avoiding timer registration and
     // cancellation on every immediately available application datagram.
     tokio::select! {
         result = receiving => result?,
         () = tokio::time::sleep_until(tail.into()) => {},
     }
+
     emit(&format!(
         "{{\"event\":\"result\",\"received\":{received},\"received_total\":{received_total},\"stats\":{}}}",
         stats(connection)
     ))?;
+
     Ok(())
 }
 
@@ -495,17 +537,21 @@ async fn latency_client(config: &Config, connection: &Connection) -> Result<()> 
             tokio::time::timeout(Duration::from_secs(1), receive(connection, config.app_spin))
                 .await??;
         let elapsed = started.elapsed().as_nanos() as u64;
+
         if reply != body {
             return Err("reply changed payload or sequence".into());
         }
+
         if index >= config.warmup {
             samples.push(elapsed);
         }
     }
+
     samples.sort_unstable();
     let percentile = |n: usize| {
         samples[((samples.len() * n).div_ceil(1000) - 1).min(samples.len() - 1)] as f64 / 1000.0
     };
+
     emit(&format!(
         "{{\"event\":\"result\",\"p50_us\":{},\"p99_us\":{},\"p999_us\":{},\"max_us\":{},\"timeouts\":0,\"stats\":{}}}",
         percentile(500),
@@ -514,6 +560,7 @@ async fn latency_client(config: &Config, connection: &Connection) -> Result<()> 
         samples[samples.len() - 1] as f64 / 1000.0,
         stats(connection),
     ))?;
+
     Ok(())
 }
 
@@ -532,11 +579,14 @@ async fn latency_server(
             }
             body = receive(connection, config.app_spin) => body?,
         };
+
         if body.len() != config.size {
             return Err("invalid request size".into());
         }
+
         connection.send_datagram(body)?;
         echoed += 1;
+
         if echoed.is_multiple_of(64) {
             tokio::task::yield_now().await;
         }
@@ -553,8 +603,10 @@ async fn run(config: Config) -> Result<()> {
             }
         }
     });
+
     let (_endpoint, connection) = connect(&config).await?;
     let at = start(&mut commands).await?;
+
     match config.role.as_str() {
         "send" => {
             send_throughput(&config, &connection, at).await?;
@@ -566,6 +618,7 @@ async fn run(config: Config) -> Result<()> {
             latency_client(&config, &connection).await?;
             // Keep the connection alive until the server reports its result.
             commands.recv().await.ok_or("stdin closed before STOP")?;
+
             Ok(())
         }
         "server" => latency_server(&config, &connection, &mut commands).await,
@@ -584,44 +637,56 @@ fn main() -> Result<()> {
             PathBuf::from(directory).join("key.der"),
             tls.signing_key.serialize_der(),
         )?;
+
         return Ok(());
     }
+
     let config = Config::parse(&args)?;
     let mut builder = if config.layout == "multi" {
         let mut builder = tokio::runtime::Builder::new_multi_thread();
         let cpus = [config.io_cpu, config.app_cpu];
         let index = AtomicUsize::new(0);
+
         builder.worker_threads(2).on_thread_start(move || {
             pin(cpus[index.fetch_add(1, Ordering::Relaxed) % 2]).expect("IO affinity");
         });
+
         builder
     } else {
         tokio::runtime::Builder::new_current_thread()
     };
+
     builder.enable_all().event_interval(config.event_interval);
     let runtime = builder.build()?;
+
     if config.layout == "split" {
         let handle = runtime.handle().clone();
         let (stop, stopped) = oneshot::channel::<()>();
         let cpu = config.io_cpu;
+
         let thread = std::thread::spawn(move || -> Result<()> {
             pin(cpu)?;
             runtime.block_on(async {
                 let _ = stopped.await;
             });
+
             Ok(())
         });
+
         pin(config.app_cpu)?;
         let result = handle.block_on(run(config));
         let _ = stop.send(());
         thread.join().map_err(|_| "IO thread panicked")??;
+
         return result;
     }
+
     pin(if config.layout == "multi" {
         config.app_cpu
     } else {
         config.io_cpu
     })?;
+
     // Give the application the same scheduler queue as Quinn's drivers.
     // A block_on root future can be revisited less often under IO load.
     runtime.block_on(async {

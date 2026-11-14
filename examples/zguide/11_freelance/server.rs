@@ -34,9 +34,11 @@ async fn main() {
     loop {
         let msg = rep.recv().await.unwrap();
         let body = msg_str(&msg, 0);
+
         if delay_secs > 0.0 {
             tokio::time::sleep(Duration::from_secs_f64(delay_secs)).await;
         }
+
         println!("{name}: served {body}");
         rep.send(Message::single(format!("{name}:{body}")))
             .await

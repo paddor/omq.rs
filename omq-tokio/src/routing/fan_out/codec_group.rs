@@ -38,6 +38,7 @@ impl CodecGroup {
         } else {
             None
         };
+
         Ok(Self {
             #[cfg(any(feature = "lz4", feature = "zstd"))]
             training: profile.as_ref().and_then(|profile| {
@@ -59,6 +60,7 @@ impl CodecGroup {
         {
             self.encode_count += 1;
         }
+
         // Only an encoder emits dictionary shipments. A plain group's wire
         // is the user message, which may start with any bytes.
         let wire = if let Some(encoder) = &mut self.encoder {
@@ -72,6 +74,7 @@ impl CodecGroup {
         } else {
             smallvec::smallvec![msg.clone()]
         };
+
         self.sample(msg)?;
         Ok(wire)
     }
@@ -83,6 +86,7 @@ impl CodecGroup {
     fn sample(&mut self, msg: &Message) -> Result<()> {
         #[cfg(not(any(feature = "lz4", feature = "zstd")))]
         let _ = msg;
+
         #[cfg(any(feature = "lz4", feature = "zstd"))]
         if self
             .training
@@ -102,6 +106,7 @@ impl CodecGroup {
                 )?);
             }
         }
+
         Ok(())
     }
 
@@ -117,13 +122,16 @@ impl CodecGroup {
         let encoder = self.encoder.as_mut().unwrap();
         let mut wire = encoder.encode_arena(messages)?;
         debug_assert_eq!(wire.len(), 1, "dictionary must already be shipped");
+
         #[cfg(test)]
         {
             self.encode_count += 1;
         }
+
         for message in messages {
             self.sample(message)?;
         }
+
         Ok(wire.pop().unwrap())
     }
 

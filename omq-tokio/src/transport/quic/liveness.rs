@@ -27,6 +27,7 @@ pub(super) const PREFACE: [u8; 8] = [b'O', b'M', b'Q', b'L', 1, 0, 0, 0];
 const RECORD_LEN: usize = 9;
 const PING: u8 = 0x01;
 const PONG: u8 = 0x02;
+
 /// Records handled before yielding to other tasks on this runtime.
 const RECORD_BUDGET: usize = 64;
 
@@ -42,9 +43,11 @@ impl Record {
             Self::Ping(value) => (PING, value),
             Self::Pong(value) => (PONG, value),
         };
+
         let mut out = [0; RECORD_LEN];
         out[0] = kind;
         out[1..].copy_from_slice(&value.to_be_bytes());
+
         out
     }
 
@@ -118,6 +121,7 @@ impl RecordReader {
                 }
             }
         }
+
         self.filled = 0;
         match Record::decode(&self.buf) {
             Some(record) => ReadOutcome::Record(record),
@@ -130,6 +134,7 @@ impl RecordReader {
 pub(super) async fn read_preface(stream: &mut RecvHalf) -> omq_proto::Result<()> {
     let mut buf = [0; PREFACE.len()];
     stream.read_exact(&mut buf).await?;
+
     if buf == PREFACE {
         Ok(())
     } else {
@@ -143,6 +148,7 @@ pub(super) async fn read_preface(stream: &mut RecvHalf) -> omq_proto::Result<()>
 pub(super) async fn write_preface(stream: &mut SendHalf) -> omq_proto::Result<()> {
     stream.raise_priority();
     let mut written = 0;
+
     while written < PREFACE.len() {
         match stream.write(&PREFACE[written..]).await {
             Some(n) if n > 0 => written += n,
@@ -153,6 +159,7 @@ pub(super) async fn write_preface(stream: &mut SendHalf) -> omq_proto::Result<()
             }
         }
     }
+
     Ok(())
 }
 
@@ -183,6 +190,7 @@ impl RecordWriter {
         if self.written < self.len {
             return;
         }
+
         let record = if let Some(nonce) = self.pong.take() {
             Record::Pong(nonce)
         } else if let Some(nonce) = self.ping.take() {
@@ -190,6 +198,7 @@ impl RecordWriter {
         } else {
             return;
         };
+
         self.out = record.encode();
         self.len = RECORD_LEN;
         self.written = 0;
@@ -228,15 +237,18 @@ async fn serve(
     let mut reader = RecordReader::new(recv);
     let mut writer = RecordWriter::new(send);
     writer.stream.raise_priority();
+
     let start = Instant::now();
     let mut unanswered_since = None;
     let mut next_ping = config.interval.and_then(|ivl| start.checked_add(ivl));
     let mut nonce = 0u64;
     let mut budget = RECORD_BUDGET;
+
     loop {
         writer.refill();
         let death =
             unanswered_since.and_then(|sent_at: Instant| sent_at.checked_add(config.timeout));
+
         tokio::select! {
             outcome = reader.next() => {
                 match outcome {
@@ -282,38 +294,4 @@ async fn serve(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn records_round_trip_and_reject_unknown_types() {
-        for record in [Record::Ping(0), Record::Ping(u64::MAX), Record::Pong(7)] {
-            assert_eq!(Record::decode(&record.encode()), Some(record));
-        }
-        assert_eq!(
-            Record::Ping(0x0102_0304_0506_0708).encode(),
-            [1, 1, 2, 3, 4, 5, 6, 7, 8]
-        );
-        let mut unknown = Record::Pong(1).encode();
-        unknown[0] = 3;
-        assert_eq!(Record::decode(&unknown), None);
-        unknown[0] = 0;
-        assert_eq!(Record::decode(&unknown), None);
-    }
-
-    #[test]
-    fn heartbeat_options_map_to_liveness() {
-        let mut options = Options::default();
-        let off = LivenessConfig::from_options(&options);
-        assert!(off.interval.is_none());
-        options.heartbeat_interval = Some(Duration::from_millis(100));
-        let on = LivenessConfig::from_options(&options);
-        assert_eq!(on.interval, Some(Duration::from_millis(100)));
-        assert_eq!(on.timeout, Duration::from_millis(100));
-        options.heartbeat_timeout = Some(Duration::from_millis(300));
-        assert_eq!(
-            LivenessConfig::from_options(&options).timeout,
-            Duration::from_millis(300)
-        );
-    }
-}
+mod tests;

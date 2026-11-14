@@ -186,6 +186,7 @@ impl FromStr for Endpoint {
         if let Some(endpoint) = parse_carrier(scheme, rest, s) {
             return endpoint;
         }
+
         #[cfg(any(feature = "lz4", feature = "zstd"))]
         if let Some((prefix, carrier)) = scheme.split_once('+')
             && let Some(kind) = CompressionKind::for_scheme_prefix(prefix)
@@ -195,6 +196,7 @@ impl FromStr for Endpoint {
                 .expect("eligible codec carrier is enabled")?
                 .with_compression(kind);
         }
+
         Err(Error::UnsupportedScheme(scheme.to_string()))
     }
 }
@@ -303,6 +305,7 @@ impl Endpoint {
                 if let Self::Lz4Ws { host, path, .. } = &self {
                     crate::proto::ws_handshake::validate_ws_address(host, path)?;
                 }
+
                 Ok(self)
             } else {
                 Err(Error::Config(format!(
@@ -312,6 +315,7 @@ impl Endpoint {
                 )))
             };
         }
+
         if !kind.supports_carrier(self.scheme()) {
             return Err(Error::UnsupportedScheme(format!(
                 "{}+{}",
@@ -319,10 +323,12 @@ impl Endpoint {
                 self.scheme()
             )));
         }
+
         #[cfg(feature = "ws")]
         if let Self::Ws { host, path, .. } = &self {
             crate::proto::ws_handshake::validate_ws_address(host, path)?;
         }
+
         Ok(self.attach_codec(kind))
     }
 
@@ -381,6 +387,7 @@ impl Endpoint {
         {
             return resolved.attach_codec(kind);
         }
+
         resolved
     }
 
@@ -455,6 +462,7 @@ pub fn reject_encrypted_inproc(
                 .into(),
         ));
     }
+
     Ok(())
 }
 
@@ -491,6 +499,7 @@ impl FromStr for EndpointSpec {
             Some(b'>') => (EndpointRole::Connect, &s[1..]),
             _ => (EndpointRole::Default, s),
         };
+
         Ok(Self {
             role,
             endpoint: rest.parse()?,
@@ -523,12 +532,14 @@ fn parse_host_port(rest: &str) -> Result<(Host, u16)> {
         let ip: IpAddr = ip_str
             .parse()
             .map_err(|_| Error::InvalidEndpoint(format!("invalid IPv6 {ip_str}")))?;
+
         return Ok((Host::Ip(ip), port));
     }
 
     let (host_str, port_str) = rest
         .rsplit_once(':')
         .ok_or_else(|| Error::InvalidEndpoint(format!("missing port in {rest}")))?;
+
     let port: u16 = if port_str == "*" {
         0
     } else {
@@ -536,6 +547,7 @@ fn parse_host_port(rest: &str) -> Result<(Host, u16)> {
             .parse()
             .map_err(|_| Error::InvalidEndpoint(format!("invalid port {port_str}")))?
     };
+
     let host = parse_host(host_str)?;
     Ok((host, port))
 }
@@ -544,21 +556,25 @@ fn parse_host(s: &str) -> Result<Host> {
     if s == "*" || s.is_empty() {
         return Ok(Host::Wildcard);
     }
+
     // Bare IPv6 is ambiguous with host:port -- require bracketed form.
     if s.contains(':') {
         return Err(Error::InvalidEndpoint(format!(
             "IPv6 must be bracketed: [{s}]"
         )));
     }
+
     if let Ok(ip) = s.parse::<IpAddr>() {
         return Ok(Host::Ip(ip));
     }
+
     if !s
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
     {
         return Err(Error::InvalidEndpoint(format!("invalid host {s}")));
     }
+
     Ok(Host::Name(s.to_string()))
 }
 
@@ -575,8 +591,10 @@ fn parse_ipc(rest: &str) -> Result<IpcPath> {
                     "empty abstract ipc name".to_string(),
                 ));
             }
+
             return Ok(IpcPath::Abstract(name.to_string()));
         }
+
         Ok(IpcPath::Filesystem(PathBuf::from(rest)))
     }
 
@@ -638,9 +656,11 @@ fn parse_ws(rest: &str, tls: bool) -> Result<Endpoint> {
         Some(i) => (&rest[..i], &rest[i..]),
         None => (rest, "/"),
     };
+
     let (host, port) = parse_host_port(hp)?;
     crate::proto::ws_handshake::validate_ws_address(&host, path)?;
     let path = path.to_string();
+
     if tls {
         Ok(Endpoint::Wss { host, port, path })
     } else {
@@ -653,207 +673,10 @@ fn parse_udp(rest: &str) -> Result<Endpoint> {
         Some((g, hp)) if !g.is_empty() => (Some(g.to_string()), hp),
         _ => (None, rest),
     };
+
     let (host, port) = parse_host_port(hp)?;
     Ok(Endpoint::Udp { group, host, port })
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn endpoint_argument(value: impl TryInto<Endpoint, Error: Into<Error>>) -> Result<Endpoint> {
-        value.try_into().map_err(Into::into)
-    }
-
-    #[test]
-    fn endpoint_argument_conversions_accept_strings_and_typed_values() {
-        for uri in [
-            "tcp://127.0.0.1:5555",
-            "inproc://service",
-            "udp://localhost:5555",
-        ] {
-            let owned_uri = uri.to_owned();
-            let endpoint: Endpoint = uri.parse().unwrap();
-            assert_eq!(Endpoint::try_from(uri).unwrap(), endpoint);
-            assert_eq!(Endpoint::try_from(owned_uri.clone()).unwrap(), endpoint);
-            assert_eq!(Endpoint::try_from(&owned_uri).unwrap(), endpoint);
-            assert_eq!(Endpoint::from(&endpoint), endpoint);
-
-            let moved = endpoint_argument(endpoint.clone()).unwrap();
-            assert_eq!(moved, endpoint);
-        }
-    }
-
-    #[test]
-    fn bracketed_ipv6_accepts_wildcard_port() {
-        let endpoint: Endpoint = "tcp://[::1]:*".parse().unwrap();
-        assert_eq!(
-            endpoint,
-            Endpoint::Tcp {
-                host: Host::Ip("::1".parse().unwrap()),
-                port: 0,
-            }
-        );
-    }
-
-    #[test]
-    fn endpoint_argument_conversions_preserve_validation_errors() {
-        for uri in [
-            "",
-            "not-an-endpoint",
-            "tcp://127.0.0.1",
-            "tcp://127.0.0.1:65536",
-            "unknown://host",
-        ] {
-            let owned_uri = uri.to_owned();
-            let expected = uri.parse::<Endpoint>().unwrap_err().to_string();
-            assert_eq!(Endpoint::try_from(uri).unwrap_err().to_string(), expected);
-            assert_eq!(
-                Endpoint::try_from(owned_uri.clone())
-                    .unwrap_err()
-                    .to_string(),
-                expected
-            );
-            assert_eq!(
-                Endpoint::try_from(&owned_uri).unwrap_err().to_string(),
-                expected
-            );
-        }
-    }
-
-    #[test]
-    fn owned_endpoint_argument_preserves_its_storage() {
-        let endpoint = Endpoint::Inproc {
-            name: "service".to_owned(),
-        };
-        let Endpoint::Inproc { name } = &endpoint else {
-            unreachable!()
-        };
-        let storage = name.as_ptr();
-        let moved = endpoint_argument(endpoint).unwrap();
-        let Endpoint::Inproc { name } = moved else {
-            unreachable!()
-        };
-        assert_eq!(name.as_ptr(), storage);
-    }
-
-    #[test]
-    fn tcp_endpoint_parses() {
-        let ep: Endpoint = "tcp://localhost:5555".parse().unwrap();
-        assert_eq!(ep.scheme(), "tcp");
-        assert!(ep.is_tcp_family());
-    }
-
-    #[test]
-    fn inproc_endpoint_parses() {
-        let ep: Endpoint = "inproc://service".parse().unwrap();
-        assert_eq!(ep.scheme(), "inproc");
-        assert!(matches!(ep, Endpoint::Inproc { name } if name == "service"));
-    }
-
-    #[test]
-    fn endpoint_display_roundtrip() {
-        let endpoints = vec![
-            "tcp://localhost:5555",
-            "inproc://test",
-            "udp://localhost:5555",
-        ];
-
-        for ep_str in endpoints {
-            let ep: Endpoint = ep_str.parse().unwrap();
-            assert_eq!(ep.to_string(), ep_str);
-        }
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn unix_ipc_filesystem() {
-        let ep: Endpoint = "ipc:///tmp/socket".parse().unwrap();
-        assert_eq!(ep.scheme(), "ipc");
-        let ep_str = ep.to_string();
-        assert!(ep_str.starts_with("ipc://"));
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn unix_ipc_abstract_namespace() {
-        let ep: Endpoint = "ipc://@myservice".parse().unwrap();
-        assert_eq!(ep.scheme(), "ipc");
-        assert_eq!(ep.to_string(), "ipc://@myservice");
-    }
-
-    #[test]
-    #[cfg(target_os = "windows")]
-    fn windows_ipc_named_pipe() {
-        let ep: Endpoint = "ipc://myservice".parse().unwrap();
-        assert_eq!(ep.scheme(), "ipc");
-        assert_eq!(ep.to_string(), "ipc://myservice");
-    }
-
-    #[test]
-    #[cfg(target_os = "windows")]
-    fn windows_ipc_validates_reserved_names() {
-        // Reserved names should be rejected
-        let reserved = ["CON", "PRN", "AUX", "NUL", "COM1", "LPT1"];
-        for name in &reserved {
-            let result: Result<Endpoint> = format!("ipc://{name}").parse();
-            assert!(result.is_err(), "Reserved name '{name}' should be rejected");
-        }
-    }
-
-    #[test]
-    #[cfg(target_os = "windows")]
-    fn windows_ipc_validates_invalid_chars() {
-        let invalid_names = vec!["my<pipe", "my|pipe", "my:pipe", "my?pipe", "my*pipe"];
-        for name in invalid_names {
-            let result: Result<Endpoint> = format!("ipc://{name}").parse();
-            assert!(
-                result.is_err(),
-                "Name '{name}' with invalid chars should be rejected"
-            );
-        }
-    }
-
-    #[test]
-    #[cfg(target_os = "windows")]
-    fn windows_ipc_valid_names() {
-        let valid_names = vec!["myservice", "Service123", "my_service", "my-service"];
-        for name in valid_names {
-            let ep: Endpoint = format!("ipc://{name}").parse().unwrap();
-            assert_eq!(ep.scheme(), "ipc");
-        }
-    }
-
-    #[test]
-    fn endpoint_spec_with_bind_role() {
-        let spec: EndpointSpec = "@tcp://localhost:5555".parse().unwrap();
-        assert_eq!(spec.role, EndpointRole::Bind);
-        assert_eq!(spec.to_string(), "@tcp://localhost:5555");
-    }
-
-    #[test]
-    fn endpoint_spec_with_connect_role() {
-        let spec: EndpointSpec = ">tcp://localhost:5555".parse().unwrap();
-        assert_eq!(spec.role, EndpointRole::Connect);
-        assert_eq!(spec.to_string(), ">tcp://localhost:5555");
-    }
-
-    #[test]
-    fn endpoint_spec_with_default_role() {
-        let spec: EndpointSpec = "tcp://localhost:5555".parse().unwrap();
-        assert_eq!(spec.role, EndpointRole::Default);
-        assert_eq!(spec.to_string(), "tcp://localhost:5555");
-    }
-
-    #[test]
-    fn invalid_endpoint_missing_scheme() {
-        let result: Result<Endpoint> = "localhost:5555".parse();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn invalid_endpoint_unknown_scheme() {
-        let result: Result<Endpoint> = "unknown://localhost:5555".parse();
-        assert!(result.is_err());
-    }
-}
+mod tests;

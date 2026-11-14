@@ -48,9 +48,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- On Windows, `zmq_socket` fails with `EMFILE` when it cannot create its
-  wakeup events. Before, it returned a socket whose blocking receives spun
-  and whose `zmq_poll` entries never fired.
 - A CURVE server keeps a `ZMQ_CURVE_SECRETKEY` set before
   `ZMQ_CURVE_SERVER`, the order czmq uses. Before, the role change reset
   the key to zeros and no client could connect. Setting
@@ -113,6 +110,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ZMQ_CURVE_PUBLICKEY` read on a CURVE server returns the public key
   that the server presents, derived from its secret key. Before, it
   returned zeros.
+
+## [0.10.1] - 2026-11-12
+
+### Changed
+
+- Require `omq-tokio` 0.35.1. A connection driver with steady output pauses
+  every 16 KiB, so timers and QUIC tasks on its IO thread run on time.
+
+## [0.10.0] - 2026-11-09
+
+### Changed
+
+- Require `omq-tokio` 0.35.0.
+
+### Fixed
+
+- On Windows, `zmq_socket` fails with `EMFILE` when it cannot create its
+  wakeup events. Before, it returned a socket whose blocking receives spun
+  and whose `zmq_poll` entries never fired.
 
 ## [0.9.2] - 2026-11-04
 

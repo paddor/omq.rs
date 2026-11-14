@@ -33,25 +33,31 @@ async fn configured_send_byte_budget_backpressures_clones_and_rejects_oversize()
     client.connect(endpoint).await.unwrap();
     connected(&client).await;
     connected(&server).await;
+
     let clone = client.clone();
     let message = Message::multipart([Bytes::from_static(b"server"), Bytes::from(vec![7; 128])]);
     client.try_send(message.clone()).unwrap();
+
     let Err(TrySendError::Full(returned)) = clone.try_send(message.clone()) else {
         panic!("clones must share the connection byte budget");
     };
+
     assert_eq!(returned, message);
     let mut sending = Box::pin(clone.send(returned));
     assert!(sending.as_mut().now_or_never().is_none());
+
     let oversized = Message::multipart([Bytes::from_static(b"server"), Bytes::from(vec![0; 256])]);
     assert!(matches!(
         client.try_send(oversized),
         Err(TrySendError::Error(Error::Protocol(_)))
     ));
+
     let received = tokio::time::timeout(DEADLINE, server.recv())
         .await
         .unwrap()
         .unwrap();
     assert_eq!(received.part_slice(1), message.part_slice(1));
+
     tokio::time::timeout(DEADLINE, sending)
         .await
         .unwrap()
@@ -61,31 +67,39 @@ async fn configured_send_byte_budget_backpressures_clones_and_rejects_oversize()
         .unwrap()
         .unwrap();
     assert_eq!(received.part_slice(1), message.part_slice(1));
+
     drop(clone);
     client.close().await.unwrap();
     server.close().await.unwrap();
 }
 
-#[tokio::test]
-async fn identity_view_preserves_targeted_claims_and_explicit_body_sends() {
-    let context = Context::new();
+/// "server" and "client" PEER identity views connected over inproc `name`.
+async fn identity_pair(
+    context: &Context,
+    name: &str,
+) -> (omq_tokio::IdentitySocket, omq_tokio::IdentitySocket) {
     let server = context
         .socket(SocketType::Peer, options("server"))
         .identity_routing()
         .unwrap();
-    let endpoint = server
-        .bind(Endpoint::Inproc {
-            name: "identity-source-view".into(),
-        })
-        .await
-        .unwrap();
+    let endpoint = server.bind(test_support::inproc(name)).await.unwrap();
     let client = context
         .socket(SocketType::Peer, options("client"))
         .identity_routing()
         .unwrap();
+
     client.connect(endpoint).await.unwrap();
     connected(&client).await;
     connected(&server).await;
+
+    (server, client)
+}
+
+#[tokio::test]
+async fn identity_view_preserves_targeted_claims_while_replies_flow() {
+    let context = Context::new();
+    let (server, client) = identity_pair(&context, "identity-source-claim").await;
+
     client
         .send_to("server", Message::single("held"))
         .await
@@ -94,6 +108,7 @@ async fn identity_view_preserves_targeted_claims_and_explicit_body_sends() {
     let source = receipt.lane().unwrap().clone();
     assert_eq!(receipt.identity(), Some(b"client".as_slice()));
     server.unshift(receipt, message).unwrap();
+
     server
         .send_to("client", Message::single("reply while paused"))
         .await
@@ -101,15 +116,37 @@ async fn identity_view_preserves_targeted_claims_and_explicit_body_sends() {
     let (identity, message) = client.recv_from().await.unwrap();
     assert_eq!(identity.as_ref(), b"server");
     assert_eq!(message, Message::single("reply while paused"));
+
     let (receipt, message) = server.try_recv_with_receipt(Some(&source)).unwrap();
     assert_eq!(message, Message::single("held"));
     drop(receipt);
+
+    // Releasing the claim lets untargeted receives continue.
+    client
+        .send_to("server", Message::single("after release"))
+        .await
+        .unwrap();
+    let (identity, message) = server.recv_from().await.unwrap();
+    assert_eq!(identity.as_ref(), b"client");
+    assert_eq!(message, Message::single("after release"));
+
+    server.into_inner().close().await.unwrap();
+    client.into_inner().close().await.unwrap();
+}
+
+#[tokio::test]
+async fn identity_view_try_send_to_delivers_the_body_with_the_sender_identity() {
+    let context = Context::new();
+    let (server, client) = identity_pair(&context, "identity-explicit-body").await;
+
     client
         .try_send_to("server", Message::single("accepted"))
         .unwrap();
     let (identity, message) = server.recv_from().await.unwrap();
+
     assert_eq!(identity.as_ref(), b"client");
     assert_eq!(message, Message::single("accepted"));
+
     server.into_inner().close().await.unwrap();
     client.into_inner().close().await.unwrap();
 }
@@ -140,6 +177,7 @@ async fn server_with_clients(
     connected(&a).await;
     connected(&b).await;
     server.wait_connected(2, DEADLINE).await.unwrap();
+
     (server, a, b)
 }
 
@@ -256,6 +294,7 @@ async fn fill_until_backpressure(a: &Socket, payload: &Bytes) {
                 Ok(result) => result.unwrap(),
             }
         }
+
         panic!("paused large-message source did not backpressure");
     })
     .await
@@ -294,6 +333,7 @@ async fn assert_large_b_progresses(
 async fn large_source_backpressure(endpoint: Endpoint) {
     const SIZE: usize = 8 * 1024 * 1024;
     let context = Context::with_config(ContextConfig { io_threads: 2 });
+
     let (server, a, b) = server_with_clients(
         &context,
         endpoint,
@@ -382,6 +422,7 @@ fn spawn_echo_worker(receiving: Socket) -> std::thread::JoinHandle<()> {
         runtime.block_on(async {
             let mut next = [0u32; 2];
             let mut batch = Vec::new();
+
             while next != [128, 128] {
                 batch.clear();
                 tokio::time::timeout(DEADLINE, receiving.recv_many_into(16, &mut batch))
@@ -395,6 +436,7 @@ fn spawn_echo_worker(receiving: Socket) -> std::thread::JoinHandle<()> {
                         b"b" => 1,
                         identity => panic!("unexpected identity: {identity:?}"),
                     };
+
                     assert_eq!(
                         message.part_slice(1),
                         Some(next[index].to_le_bytes().as_slice())
@@ -525,6 +567,7 @@ async fn count_a_and_b(server: &Socket) -> [usize; 2] {
     })
     .await
     .unwrap();
+
     counts
 }
 
@@ -603,6 +646,7 @@ async fn receive_closes_before_blocked_send_linger_finishes() {
     client.connect(endpoint).await.unwrap();
     connected(&client).await;
     connected(&server).await;
+
     // Client intentionally never drains. Fill the bounded inproc/send queues.
     assert!(
         tokio::time::timeout(Duration::from_millis(100), async {
@@ -619,6 +663,7 @@ async fn receive_closes_before_blocked_send_linger_finishes() {
         .await
         .is_err()
     );
+
     let closing = tokio::spawn(
         server
             .clone()
@@ -648,6 +693,7 @@ async fn handshake_notification_already_has_a_usable_reply_route() {
     let server = context.socket(SocketType::Peer, options("server"));
     let endpoint = server.bind(test_support::tcp_loopback(0)).await.unwrap();
     let mut monitor = server.monitor();
+
     for _ in 0..32 {
         let client = context.socket(SocketType::Peer, options("client"));
         client.connect(endpoint.clone()).await.unwrap();
@@ -665,6 +711,7 @@ async fn handshake_notification_already_has_a_usable_reply_route() {
         assert_eq!(message.part_slice(1), Some(b"welcome".as_slice()));
         client.close().await.unwrap();
     }
+
     server.close().await.unwrap();
 }
 
@@ -673,20 +720,24 @@ async fn rejected_replacement_does_not_evict_live_identity() {
     let context = Context::with_config(ContextConfig { io_threads: 2 });
     let server = context.socket(SocketType::Peer, options("server").peer_max_peers(2));
     let endpoint = server.bind(test_support::tcp_loopback(0)).await.unwrap();
+
     let client_options = options("client").reconnect(omq_tokio::ReconnectPolicy::Disabled);
     let original = context.socket(SocketType::Peer, client_options.clone());
     original.connect(endpoint.clone()).await.unwrap();
     connected(&original).await;
     connected(&server).await;
+
     // Fill the configured receive peer slots. Admission must
     // reject the replacement without invalidating the original identity.
     let filler = context.socket(SocketType::Peer, options("filler"));
     filler.connect(endpoint.clone()).await.unwrap();
     connected(&filler).await;
     server.wait_connected(2, DEADLINE).await.unwrap();
+
     let mut monitor = server.monitor();
     let replacement = context.socket(SocketType::Peer, client_options);
     replacement.connect(endpoint).await.unwrap();
+
     tokio::time::timeout(DEADLINE, async {
         loop {
             match monitor.recv().await.unwrap() {
@@ -706,6 +757,7 @@ async fn rejected_replacement_does_not_evict_live_identity() {
     })
     .await
     .unwrap();
+
     server
         .send(Message::multipart(["client", "still current"]))
         .await
@@ -715,6 +767,7 @@ async fn rejected_replacement_does_not_evict_live_identity() {
         .unwrap()
         .unwrap();
     assert_eq!(reply.part_slice(1), Some(b"still current".as_slice()));
+
     original
         .send(Message::multipart(["server", "still readable"]))
         .await
@@ -724,6 +777,7 @@ async fn rejected_replacement_does_not_evict_live_identity() {
         .unwrap()
         .unwrap();
     assert_eq!(message.part_slice(1), Some(b"still readable".as_slice()));
+
     original.close().await.unwrap();
     replacement.close().await.unwrap();
     filler.close().await.unwrap();
@@ -739,6 +793,7 @@ async fn send_and_snapshot(client: &Socket, server: &Socket) -> omq_tokio::Ident
         .unwrap();
     let message = recv_within(server).await;
     assert_eq!(message.part_slice(1), Some(b"before handover".as_slice()));
+
     message.sender_identity().unwrap().clone()
 }
 
@@ -805,6 +860,7 @@ async fn reconnect_churn_discards_stale_backlogs_and_reclaims_retired_rings() {
             assert!(matches!(server.try_recv(), Err(Error::WouldBlock)));
             current = replacement;
         }
+
         current.close().await.unwrap();
         server.close().await.unwrap();
         assert_eq!(snapshots.len(), 160);
@@ -830,6 +886,7 @@ async fn assert_quiet_peers_progress(
             .await
             .unwrap();
     }
+
     b.send(Message::multipart(["server", "independent"]))
         .await
         .unwrap();
@@ -854,6 +911,7 @@ async fn assert_quiet_peers_progress(
                 identity => panic!("unexpected identity: {identity:?}"),
             }
         }
+
         assert_eq!(counts, [32, 1, 1]);
     })
     .await
@@ -914,10 +972,12 @@ async fn overload_matrix_case(endpoint: Endpoint, io_threads: usize) {
     let a = context.socket(SocketType::Peer, options("a"));
     let b = context.socket(SocketType::Peer, options("b"));
     let c = context.socket(SocketType::Peer, options("c"));
+
     for client in [&a, &b, &c] {
         client.connect(endpoint.clone()).await.unwrap();
         connected(client).await;
     }
+
     server.wait_connected(3, DEADLINE).await.unwrap();
 
     // A exceeds its ring. Quiet peers must still make progress.
@@ -936,6 +996,7 @@ async fn overload_matrix_case(endpoint: Endpoint, io_threads: usize) {
         .await
         .unwrap()
         .unwrap();
+
     for client in [a, b, c] {
         client.close().await.unwrap();
     }
@@ -967,6 +1028,7 @@ async fn saturate(socket: &Socket, identity: &'static str) {
         for _ in 0..20_000 {
             let message =
                 Message::multipart([Bytes::from_static(identity.as_bytes()), payload.clone()]);
+
             match socket.try_send(message) {
                 Ok(()) => {}
                 Err(omq_tokio::TrySendError::Full(message)) => {
@@ -980,6 +1042,7 @@ async fn saturate(socket: &Socket, identity: &'static str) {
                 Err(error) => panic!("unexpected saturation error: {error:?}"),
             }
         }
+
         panic!("connection did not backpressure within 10 MiB");
     })
     .await
@@ -1022,6 +1085,7 @@ fn spawn_fifo_senders(client: &Socket) -> Vec<tokio::task::JoinHandle<()>> {
             } else {
                 std::sync::Arc::new(client.clone())
             };
+
             tokio::spawn(async move {
                 for sequence in 0u8..128 {
                     sender
@@ -1070,6 +1134,7 @@ async fn shared_sender_fifo(hwm: u32, profile: omq_tokio::options::WorkloadProfi
         for sender in senders {
             sender.await.unwrap();
         }
+
         assert_eq!(next, [128; 4]);
 
         server.close().await.unwrap();
@@ -1092,10 +1157,12 @@ async fn socket_receiver_clones_deliver_once_and_all_wake_on_close() {
     connected(&client).await;
     connected(&server).await;
     let (tx, mut rx) = tokio::sync::mpsc::channel(256);
+
     let receivers: Vec<_> = (0..4)
         .map(|_| {
             let socket = server.clone();
             let tx = tx.clone();
+
             tokio::spawn(async move {
                 loop {
                     match socket.recv().await {
@@ -1107,6 +1174,7 @@ async fn socket_receiver_clones_deliver_once_and_all_wake_on_close() {
             })
         })
         .collect();
+
     drop(tx);
     tokio::time::timeout(DEADLINE, async {
         for sequence in 0u8..=255 {
@@ -1118,6 +1186,7 @@ async fn socket_receiver_clones_deliver_once_and_all_wake_on_close() {
                 .await
                 .unwrap();
         }
+
         let mut seen = [false; 256];
         for _ in 0..256 {
             let message = rx.recv().await.unwrap();
@@ -1128,15 +1197,19 @@ async fn socket_receiver_clones_deliver_once_and_all_wake_on_close() {
                 "duplicate {index}"
             );
         }
+
         assert!(seen.into_iter().all(|received| received));
         server.close().await.unwrap();
+
         for receiver in receivers {
             receiver.await.unwrap();
         }
+
         assert!(rx.recv().await.is_none());
     })
     .await
     .unwrap();
+
     client.close().await.unwrap();
 }
 
@@ -1149,6 +1222,7 @@ async fn full_peer_queue_saturation_transport_and_io_thread_matrix() {
             io_threads,
         )
         .await;
+
         if io_threads != 2 {
             full_queue_with_threads(test_support::tcp_loopback(0), true, io_threads).await;
             full_queue_with_threads(
@@ -1170,6 +1244,7 @@ fn blocking_receive_parks_while_a_receipt_holds_the_only_source() {
         let stat = std::fs::read_to_string("/proc/thread-self/schedstat").unwrap();
         Duration::from_nanos(stat.split_whitespace().next().unwrap().parse().unwrap())
     }
+
     let ctx = Context::new();
     let server = ctx.blocking_socket(SocketType::Peer, options("server"));
     let client = ctx.blocking_socket(SocketType::Peer, options("client"));
@@ -1178,9 +1253,11 @@ fn blocking_receive_parks_while_a_receipt_holds_the_only_source() {
     };
     server.bind(endpoint.clone()).unwrap();
     client.connect(endpoint).unwrap();
+
     for body in [b"0", b"1"] {
         let message = Message::multipart([Bytes::from_static(b"server"), Bytes::from_static(body)]);
         let deadline = std::time::Instant::now() + DEADLINE;
+
         while client.send(message.clone()).is_err() {
             assert!(
                 std::time::Instant::now() < deadline,
@@ -1189,17 +1266,20 @@ fn blocking_receive_parks_while_a_receipt_holds_the_only_source() {
             std::thread::yield_now();
         }
     }
+
     let deadline = std::time::Instant::now() + DEADLINE;
     let (_receipt, _first) = loop {
         if let Ok(claimed) = server.as_ref().try_recv_with_receipt(None) {
             break claimed;
         }
+
         assert!(
             std::time::Instant::now() < deadline,
             "first message never arrived"
         );
         std::thread::yield_now();
     };
+
     // The held receipt keeps the queued second message unavailable. Its
     // permit must not make the receive loop spin instead of parking.
     let receiving = server.clone();

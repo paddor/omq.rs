@@ -99,7 +99,7 @@ def test_unknown_attr_raises():
     sock = ctx.socket(zmq.PUSH)
     try:
         with pytest.raises(AttributeError):
-            _ = sock.nonexistent_attribute  # type: ignore[ty:unresolved-attribute]
+            _ = sock.nonexistent_attribute  # type: ignore[ty:missing-attribute]
     finally:
         sock.close()
         ctx.term()

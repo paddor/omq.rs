@@ -132,9 +132,11 @@ impl Socket {
         let (cmd_tx, cmd_rx) = mpsc::channel(options.send_queue_capacity().max(16));
         let driver_linger = options.linger;
         let monitor = MonitorPublisher::new(options.monitor_capacity);
+
         let send_strategy = SendStrategy::for_socket_type(socket_type, &options, placement.io_pool)
             .with_compatibility(build.compatibility);
         let send_submitter = send_strategy.submitter();
+
         // A caller-provided sink replaces the native receive fast paths.
         let recv = ReceiveParts::new(socket_type, &options, build.recv_sink_config.is_none());
         let shared = HandleShared::new();
@@ -148,6 +150,7 @@ impl Socket {
             peer_recv_routes: recv.peer_recv_routes,
             shared: shared.clone(),
         };
+
         let env = DriverEnv {
             io_pool: placement.io_pool.clone(),
             inproc_registry: placement.inproc_registry,
@@ -226,6 +229,7 @@ fn prepare_options(socket_type: SocketType, options: &mut Options) -> Result<()>
     if socket_type == SocketType::Peer && options.max_message_size.is_none() {
         options.max_message_size = Some(omq_proto::options::DEFAULT_PEER_MAX_BYTES);
     }
+
     options.validate()?;
 
     if options.conflate && !crate::routing::supports_conflate(socket_type) {
@@ -233,6 +237,7 @@ fn prepare_options(socket_type: SocketType, options: &mut Options) -> Result<()>
             "Options::conflate(true) is not supported for socket type {socket_type:?}"
         )));
     }
+
     Ok(())
 }
 
@@ -264,6 +269,7 @@ fn recv_handles(
                 | SocketType::Dealer
                 | SocketType::Gather
         );
+
     let mut spsc = SpscHandles::new(blocking_recv_waker, conflate_recv);
     if supports_recv_batching(socket_type) && !conflate_recv && native {
         let source_aware = matches!(socket_type, SocketType::Pull | SocketType::Gather);
@@ -272,12 +278,14 @@ fn recv_handles(
         } else {
             crate::socket::fanin::Fanin::new
         };
+
         spsc.fanin = Some(constructor(
             options.recv_queue_capacity().max(16),
             spsc.recv_signal.clone(),
             spsc.blocking_recv_waker.clone(),
         ));
     }
+
     spsc
 }
 
@@ -293,18 +301,4 @@ fn supports_recv_batching(t: SocketType) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn try_new_returns_invalid_options() {
-        assert!(matches!(
-            Socket::try_new(SocketType::Pair, Options::default().identity(vec![0])),
-            Err(Error::Config(_))
-        ));
-        assert!(matches!(
-            Socket::try_new(SocketType::Pair, Options::default().conflate(true)),
-            Err(Error::Config(_))
-        ));
-    }
-}
+mod tests;

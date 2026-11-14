@@ -19,6 +19,7 @@ use super::{SETTINGS, context};
 
 /// The favored profile may be at most 15% slower than the other one.
 pub(super) const MIN_RATIO: f64 = 0.85;
+
 const RESPONDER: &[u8] = b"perf-responder";
 const TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -96,6 +97,7 @@ fn other(profile: WorkloadProfile) -> WorkloadProfile {
 pub(super) fn ratio(pattern: Pattern, shape: Shape, size: usize) -> f64 {
     let favored = favored(shape);
     let mut best = (0.0f64, 0.0f64);
+
     for attempt in 0..2 {
         best.0 = best.0.max(rate(pattern, shape, size, favored));
         best.1 = best.1.max(rate(pattern, shape, size, other(favored)));
@@ -107,10 +109,12 @@ pub(super) fn ratio(pattern: Pattern, shape: Shape, size: usize) -> f64 {
             best.1,
             if attempt > 0 { " (best of 2)" } else { "" }
         );
+
         if ratio >= MIN_RATIO {
             return ratio;
         }
     }
+
     best.0 / best.1
 }
 
@@ -133,14 +137,18 @@ fn stream(pattern: Pattern, size: usize, profile: WorkloadProfile) -> f64 {
         sender_type,
         Pattern::options(sender_type, profile, Bytes::from_static(b"perf-sender")),
     );
+
     let endpoint = receiver.bind(tcp_zero()).expect("receiver bind");
     sender.connect(endpoint).expect("sender connect");
     receiver
         .wait_connected(1, TIMEOUT)
         .expect("receiver connect timeout");
+
     let rate = transfer_blocking(&sender, receiver, size);
+
     sender_ctx.term();
     receiver_ctx.term();
+
     rate
 }
 
@@ -153,6 +161,7 @@ fn round_trips(pattern: Pattern, size: usize, peers: usize, profile: WorkloadPro
         Pattern::options(responder_type, profile, Bytes::from_static(RESPONDER)),
     );
     let endpoint = responder.bind(tcp_zero()).expect("responder bind");
+
     let requesters: Vec<_> = (0..peers)
         .map(|index| {
             let identity = Bytes::from(format!("perf-requester-{index}"));
@@ -164,9 +173,11 @@ fn round_trips(pattern: Pattern, size: usize, peers: usize, profile: WorkloadPro
             requester
                 .wait_connected(1, TIMEOUT)
                 .expect("requester connect timeout");
+
             requester
         })
         .collect();
+
     responder
         .wait_connected(peers, TIMEOUT)
         .expect("responder connect timeout");
@@ -183,16 +194,19 @@ fn round_trips(pattern: Pattern, size: usize, peers: usize, profile: WorkloadPro
 
     let mut total = 0;
     let mut sockets = Vec::with_capacity(clients.len() + 1);
+
     for client in clients {
         let (count, requester) = client.join().expect("requester thread");
         total += count;
         sockets.push(requester);
     }
+
     stop.store(true, Ordering::Release);
     sockets.push(serving.join().expect("responder thread"));
     drop(sockets);
     requester_ctx.term();
     responder_ctx.term();
+
     total as f64 / SETTINGS.measure.as_secs_f64()
 }
 
@@ -211,6 +225,7 @@ fn spawn_echo(
                 Err(error) => panic!("responder recv failed: {error}"),
             }
         }
+
         responder
     })
 }
@@ -226,17 +241,21 @@ fn spawn_round_trips(
     thread::spawn(move || {
         SETTINGS.affinity.pin(index);
         let mut count = 0u64;
+
         loop {
             let started = Instant::now();
             if started >= window.end {
                 break;
             }
+
             requester.send(request.clone()).expect("requester send");
             requester.recv_timeout(TIMEOUT).expect("requester recv");
+
             if started >= window.start && Instant::now() < window.end {
                 count += 1;
             }
         }
+
         (count, requester)
     })
 }

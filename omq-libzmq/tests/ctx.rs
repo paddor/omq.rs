@@ -1,5 +1,7 @@
 //! Context lifecycle tests.
 
+mod helpers;
+
 use omq_zmq::{
     zmq_bind, zmq_close, zmq_connect, zmq_ctx_get, zmq_ctx_get_ext, zmq_ctx_new, zmq_ctx_set,
     zmq_ctx_set_ext, zmq_ctx_shutdown, zmq_ctx_term, zmq_getsockopt, zmq_init, zmq_recv, zmq_send,
@@ -31,18 +33,6 @@ const ZMQ_LINGER: i32 = 17;
 
 // Hang guard, not a performance target. Keep above debug runtime on busy hosts.
 const INPROC_CHURN_CHILD_TIMEOUT: Duration = Duration::from_secs(30);
-
-fn set_i32(sock: *mut c_void, opt: i32, value: i32) {
-    assert_eq!(
-        zmq_setsockopt(
-            sock,
-            opt,
-            std::ptr::from_ref(&value).cast(),
-            size_of::<i32>(),
-        ),
-        0
-    );
-}
 
 #[test]
 fn ctx_new_term() {
@@ -115,6 +105,7 @@ fn ctx_set_io_threads_before_socket_creation() {
 fn ctx_ext_int_options_roundtrip() {
     let ctx = zmq_ctx_new();
     let value = 3i32;
+
     assert_eq!(
         zmq_ctx_set_ext(
             ctx,
@@ -127,6 +118,7 @@ fn ctx_ext_int_options_roundtrip() {
 
     let mut got = 0i32;
     let mut got_size = size_of::<i32>();
+
     assert_eq!(
         zmq_ctx_get_ext(
             ctx,
@@ -136,6 +128,7 @@ fn ctx_ext_int_options_roundtrip() {
         ),
         0
     );
+
     assert_eq!(got, value);
     assert_eq!(got_size, size_of::<i32>());
 
@@ -149,6 +142,7 @@ fn ctx_ext_int_options_roundtrip() {
         ),
         -1
     );
+
     assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
 
     zmq_ctx_term(ctx);
@@ -158,6 +152,7 @@ fn ctx_ext_int_options_roundtrip() {
 fn ctx_ext_thread_name_prefix_roundtrips() {
     let ctx = zmq_ctx_new();
     let prefix = CString::new("omq").unwrap();
+
     assert_eq!(
         zmq_ctx_set_ext(
             ctx,
@@ -170,6 +165,7 @@ fn ctx_ext_thread_name_prefix_roundtrips() {
 
     let mut buf = [0xFF_u8; 4];
     let mut len = buf.len();
+
     assert_eq!(
         zmq_ctx_get_ext(
             ctx,
@@ -179,6 +175,7 @@ fn ctx_ext_thread_name_prefix_roundtrips() {
         ),
         0
     );
+
     assert_eq!(len, 4);
     assert_eq!(&buf, b"omq\0");
 
@@ -200,6 +197,7 @@ fn ctx_thread_name_prefix_names_background_threads() {
     let ctx = zmq_ctx_new();
     let name = CString::new("threads").unwrap();
     assert_eq!(zmq_ctx_set(ctx, ZMQ_IO_THREADS, 2), 0);
+
     assert_eq!(
         zmq_ctx_set_ext(
             ctx,
@@ -209,6 +207,7 @@ fn ctx_thread_name_prefix_names_background_threads() {
         ),
         0
     );
+
     let sock = zmq_socket(ctx, ZMQ_PUSH);
     assert!(!sock.is_null());
     let endpoint = CString::new("inproc://thread-name-test").unwrap();
@@ -248,6 +247,7 @@ fn ctx_set_io_threads_rejects_negative_and_late_changes() {
 fn ctx_ext_thread_name_prefix_validates_input() {
     let ctx = zmq_ctx_new();
     let too_long = [b'x'; 17];
+
     assert_eq!(
         zmq_ctx_set_ext(
             ctx,
@@ -257,6 +257,7 @@ fn ctx_ext_thread_name_prefix_validates_input() {
         ),
         -1
     );
+
     assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
 
     let embedded_nul = b"bad\0name";
@@ -269,6 +270,7 @@ fn ctx_ext_thread_name_prefix_validates_input() {
         ),
         -1
     );
+
     assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
 
     assert_eq!(
@@ -312,6 +314,7 @@ fn zero_io_threads_support_cross_thread_inproc_push_pull() {
         assert!(!pull.is_null());
         let addr = CString::new(endpoint).unwrap();
         let timeout = 1000_i32;
+
         assert_eq!(
             zmq_setsockopt(
                 pull,
@@ -321,6 +324,7 @@ fn zero_io_threads_support_cross_thread_inproc_push_pull() {
             ),
             0
         );
+
         assert_eq!(zmq_bind(pull, addr.as_ptr()), 0);
         ready_tx.send(()).unwrap();
 
@@ -475,6 +479,7 @@ fn explicit_linger_overrides_ctx_blocky_default() {
     let socket = zmq_socket(ctx, ZMQ_PUSH);
     assert!(!socket.is_null());
     let linger = 25i32;
+
     assert_eq!(
         zmq_setsockopt(
             socket,
@@ -573,7 +578,7 @@ fn close_after_ctx_shutdown_lingers_until_the_queue_is_delivered() {
 
     let peer_ctx = zmq_ctx_new();
     let pull = zmq_socket(peer_ctx, ZMQ_PULL);
-    set_i32(pull, ZMQ_RCVTIMEO, 5000);
+    helpers::set_rcvtimeo(pull, 5000);
     assert_eq!(zmq_bind(pull, endpoint.as_ptr()), 0);
     let mut buf = [0u8; 8];
     assert_eq!(
@@ -623,11 +628,13 @@ fn zero_linger_inproc_churn_term_does_not_hang() {
             assert!(status.success(), "child failed: {status}");
             return;
         }
+
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
             panic!("zero-linger inproc churn child hung");
         }
+
         std::thread::sleep(Duration::from_millis(10));
     }
 }
@@ -648,10 +655,10 @@ fn run_zero_linger_inproc_churn() {
         let push = zmq_socket(ctx, ZMQ_PUSH);
         assert!(!pull.is_null());
         assert!(!push.is_null());
-        set_i32(pull, ZMQ_LINGER, 0);
-        set_i32(push, ZMQ_LINGER, 0);
-        set_i32(pull, ZMQ_RCVHWM, 4);
-        set_i32(push, ZMQ_SNDHWM, 4);
+        helpers::set_int_opt(pull, ZMQ_LINGER, 0);
+        helpers::set_int_opt(push, ZMQ_LINGER, 0);
+        helpers::set_int_opt(pull, ZMQ_RCVHWM, 4);
+        helpers::set_int_opt(push, ZMQ_SNDHWM, 4);
 
         let addr = CString::new(format!("inproc://ctx-churn-{i}")).unwrap();
         assert_eq!(zmq_bind(pull, addr.as_ptr()), 0);
@@ -705,8 +712,10 @@ fn ctx_max_msgsz_enforced() {
         let mut buf = [0u8; 256];
         let mut sz = buf.len();
         omq_zmq::zmq_getsockopt(pull, 32, buf.as_mut_ptr().cast(), &raw mut sz);
+
         String::from_utf8_lossy(&buf[..sz - 1]).to_string()
     };
+
     let addr = std::ffi::CString::new(port).unwrap();
     omq_zmq::zmq_connect(push, addr.as_ptr());
     std::thread::sleep(std::time::Duration::from_millis(50));
@@ -729,14 +738,17 @@ fn ctx_max_msgsz_enforced() {
 fn context_calls_during_a_blocked_term_report_eterm() {
     const ZMQ_PUSH: i32 = 8;
     const ZMQ_ETERM: i32 = 156_384_765;
+
     let ctx = omq_zmq::zmq_ctx_new();
     let open = omq_zmq::zmq_socket(ctx, ZMQ_PUSH);
     let ctx_addr = ctx as usize;
     let terminating = std::thread::spawn(move || omq_zmq::zmq_ctx_term(ctx_addr as *mut c_void));
+
     // Term blocks until the open socket closes. The handle stays valid.
     std::thread::sleep(std::time::Duration::from_millis(100));
     assert!(omq_zmq::zmq_socket(ctx, ZMQ_PUSH).is_null());
     assert_eq!(omq_zmq::zmq_errno(), ZMQ_ETERM);
+
     assert_eq!(omq_zmq::zmq_close(open), 0);
     assert_eq!(terminating.join().unwrap(), 0);
 }

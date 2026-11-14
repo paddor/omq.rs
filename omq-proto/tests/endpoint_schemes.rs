@@ -89,6 +89,7 @@ fn every_scheme_round_trips_through_display() {
         let endpoint = parse(uri);
         assert_eq!(endpoint.to_string(), uri);
         assert_eq!(parse(&endpoint.to_string()), endpoint, "{uri}");
+
         for prefix in ["@", ">", ""] {
             let spec: EndpointSpec = format!("{prefix}{uri}").parse().unwrap();
             assert_eq!(spec.endpoint, endpoint, "{prefix}{uri}");
@@ -132,6 +133,7 @@ fn codec_follows_the_scheme_prefix() {
         let prefix = scheme_of(uri).split_once('+').map(|(prefix, _)| prefix);
         let kind = CompressionKind::for_endpoint(&endpoint);
         assert_eq!(kind.map(CompressionKind::scheme_prefix), prefix, "{uri}");
+
         if let Some(kind) = kind {
             assert_eq!(parse(carrier).with_compression(kind).unwrap(), endpoint);
         }
@@ -147,6 +149,7 @@ fn codec_strips_and_rewraps_over_its_carrier() {
         assert_eq!(carrier.without_compression(), carrier, "{uri}");
         assert_eq!(endpoint.rewrap(carrier.clone()), endpoint, "{uri}");
         assert_eq!(endpoint.rewrap(endpoint.clone()), endpoint, "{uri}");
+
         for &(_, other_uri) in CASES {
             if scheme_of(other_uri) != scheme_of(carrier_uri) {
                 let other = parse(other_uri);

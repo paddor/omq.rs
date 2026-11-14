@@ -36,6 +36,7 @@ async fn listener_at(endpoint: &str, options: Options, timeout: Duration) -> Fix
     options.quic.server_cert_pem = Some(cert.clone());
     options.quic.server_key_pem = Some(certified.signing_key.serialize_pem().into_bytes());
     let admission = Admission::new(4);
+
     let mut listener = bind(
         &endpoint.parse().unwrap(),
         AcceptSetup {
@@ -49,6 +50,7 @@ async fn listener_at(endpoint: &str, options: Options, timeout: Duration) -> Fix
     )
     .await
     .unwrap();
+
     let (ip, port) = match listener.local_endpoint() {
         Endpoint::Quic {
             host: Host::Ip(ip),
@@ -56,6 +58,7 @@ async fn listener_at(endpoint: &str, options: Options, timeout: Duration) -> Fix
         } => (*ip, *port),
         _ => unreachable!(),
     };
+
     let addr = SocketAddr::new(ip, port);
     let (tx, accepted) = tokio::sync::mpsc::channel(4);
     let task = tokio::spawn(async move {
@@ -65,6 +68,7 @@ async fn listener_at(endpoint: &str, options: Options, timeout: Duration) -> Fix
             }
         }
     });
+
     Fixture {
         addr,
         accepted,
@@ -93,16 +97,19 @@ impl Fixture {
         tls.alpn_protocols = vec![alpn.to_vec()];
         let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls).unwrap();
         let mut client = quinn::ClientConfig::new(Arc::new(crypto));
+
         #[cfg(feature = "webtransport")]
         let profile = if alpn == config::H3_ALPN {
             config::Profile::Web
         } else {
             config::Profile::Raw
         };
+
         #[cfg(not(feature = "webtransport"))]
         let profile = config::Profile::Raw;
         client.transport_config(Arc::new(config::transport(&options, false, profile)));
         let endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+
         endpoint
             .connect_with(client, self.addr, "127.0.0.1")
             .unwrap()
@@ -154,18 +161,22 @@ impl ConnectorFixture {
         options.quic.server_key_pem = Some(tls.signing_key.serialize_pem().into_bytes());
         options.quic.trust_pem = options.quic.server_cert_pem.clone();
         options.quic.trust_system = false;
+
         let endpoint = quinn::Endpoint::server(
             config::server(&options.quic, 4, config::Profile::Raw).unwrap(),
             "127.0.0.1:0".parse().unwrap(),
         )
         .unwrap();
+
         let push = crate::Socket::new(omq_proto::SocketType::Push, options);
         push.connect(format!("quic://{}", endpoint.local_addr().unwrap()))
             .await
             .unwrap();
+
         let connection = endpoint.accept().await.unwrap().await.unwrap();
         let (data_send, data_recv) = connection.accept_bi().await.unwrap();
         let (control_send, mut control_recv) = connection.accept_bi().await.unwrap();
+
         let mut preface = [0; 8];
         control_recv.read_exact(&mut preface).await.unwrap();
         assert_eq!(preface, liveness::PREFACE);
@@ -185,20 +196,24 @@ impl ConnectorFixture {
 #[tokio::test]
 async fn connector_cannot_reach_ready_before_the_liveness_preface() {
     let mut fixture = ConnectorFixture::new(Duration::from_secs(5)).await;
+
     // A TLS-authenticated server sends a valid NULL greeting and PULL READY,
     // but deliberately withholds its liveness preface.
     let mut greeting = vec![0xff, 0, 0, 0, 0, 0, 0, 0, 1, 0x7f, 3, 1];
     greeting.extend_from_slice(b"NULL");
     greeting.resize(64, 0);
+
     let mut ready = vec![5];
     ready.extend_from_slice(b"READY");
     ready.push(11);
     ready.extend_from_slice(b"Socket-Type");
     ready.extend_from_slice(&4u32.to_be_bytes());
     ready.extend_from_slice(b"PULL");
+
     greeting.extend_from_slice(&[4, u8::try_from(ready.len()).unwrap()]);
     greeting.extend_from_slice(&ready);
     fixture.data_send.write_all(&greeting).await.unwrap();
+
     assert!(
         fixture
             .push
@@ -207,6 +222,7 @@ async fn connector_cannot_reach_ready_before_the_liveness_preface() {
             .is_err(),
         "ZMTP READY bypassed an unvalidated QUIC liveness preface"
     );
+
     fixture
         .control_send
         .write_all(&liveness::PREFACE)
@@ -225,6 +241,7 @@ async fn connector_rejects_invalid_missing_and_partial_prefaces_before_ready() {
     for mode in ["invalid", "missing", "partial"] {
         let mut fixture = ConnectorFixture::new(Duration::from_secs(1)).await;
         let mut monitor = fixture.push.monitor();
+
         match mode {
             "invalid" => fixture
                 .control_send
@@ -234,6 +251,7 @@ async fn connector_rejects_invalid_missing_and_partial_prefaces_before_ready() {
             "partial" => fixture.control_send.write_all(b"OMQ").await.unwrap(),
             _ => {}
         }
+
         let reason = tokio::time::timeout(Duration::from_secs(3), async {
             loop {
                 if let Ok(omq_proto::MonitorEvent::HandshakeFailed { reason, .. }) =
@@ -245,11 +263,13 @@ async fn connector_rejects_invalid_missing_and_partial_prefaces_before_ready() {
         })
         .await
         .expect("connector setup did not fail");
+
         if mode == "invalid" {
             assert!(reason.contains("invalid QUIC liveness preface"), "{reason}");
         } else {
             assert!(reason.contains("setup timeout"), "{reason}");
         }
+
         assert_eq!(fixture.push.ready_peer_count(), 0);
         fixture.push.close().await.unwrap();
     }
@@ -271,10 +291,12 @@ async fn roles_follow_stream_ids_when_liveness_arrives_first() {
     let mut buf = [0; 10];
     stream.read_exact(&mut buf).await.unwrap();
     assert_eq!(&buf, b"zmtp bytes");
+
     stream.write_all(b"reply").await.unwrap();
     let mut reply = [0; 5];
     data_recv.read_exact(&mut reply).await.unwrap();
     assert_eq!(&reply, b"reply");
+
     let mut preface = [0; 8];
     control_recv.read_exact(&mut preface).await.unwrap();
     assert_eq!(preface, liveness::PREFACE);
@@ -286,9 +308,11 @@ async fn liveness_answers_the_newest_ping() {
     let client = fixture.raw_client(ALPN).await.unwrap();
     let (mut data_send, _data_recv) = client.open_bi().await.unwrap();
     let (mut control_send, mut control_recv) = client.open_bi().await.unwrap();
+
     data_send.write_all(b"x").await.unwrap();
     control_send.write_all(&liveness::PREFACE).await.unwrap();
     let _stream = fixture.next().await.expect("peer delivered");
+
     control_send
         .write_all(&[1, 0, 0, 0, 0, 0, 0, 0, 42])
         .await
@@ -315,6 +339,7 @@ async fn established(
     control_send.write_all(&liveness::PREFACE).await.unwrap();
     // The stream retains the endpoint after the listener task stops.
     let stream = fixture.next().await.expect("peer delivered");
+
     (client, control_send, control_recv, stream)
 }
 
@@ -363,9 +388,11 @@ async fn ping_flood_cannot_starve_replies() {
     let mut preface = [0; 8];
     recv.read_exact(&mut preface).await.unwrap();
     assert_eq!(preface, liveness::PREFACE);
+
     let flood = tokio::spawn(async move {
         let mut nonce = 0u64;
         let mut records = Vec::with_capacity(256 * 9);
+
         loop {
             records.clear();
             for _ in 0..256 {
@@ -373,12 +400,15 @@ async fn ping_flood_cannot_starve_replies() {
                 records.push(1);
                 records.extend_from_slice(&nonce.to_be_bytes());
             }
+
             if send.write_all(&records).await.is_err() {
                 return;
             }
+
             tokio::task::yield_now().await;
         }
     });
+
     let mut last_nonce = 0;
     for _ in 0..100 {
         let mut record = [0; 9];
@@ -391,6 +421,7 @@ async fn ping_flood_cannot_starve_replies() {
         assert!(nonce > last_nonce);
         last_nonce = nonce;
     }
+
     assert!(client.close_reason().is_none());
     flood.abort();
     let _ = flood.await;
@@ -444,13 +475,16 @@ async fn invalid_preface_is_rejected_during_setup() {
     let client = fixture.raw_client(ALPN).await.unwrap();
     let (mut data_send, _) = client.open_bi().await.unwrap();
     let (mut control_send, _) = client.open_bi().await.unwrap();
+
     data_send.write_all(b"x").await.unwrap();
     control_send.write_all(b"OMQL\x02\0\0\0").await.unwrap();
     assert_eq!(closed_code(&client).await, Some(code::SETUP_ERROR));
+
     assert!(
         fixture.next().await.is_none(),
         "invalid peer must not be delivered"
     );
+
     let all: Vec<_> = (0..4)
         .map(|_| fixture.admission.try_acquire().unwrap())
         .collect();
@@ -480,6 +514,7 @@ fn setup_runs_quinn_tasks_on_data_io_runtimes_only() {
         .enable_all()
         .build()
         .unwrap();
+
     test_runtime.block_on(async {
         let before = pool.alive_tasks();
         let options = self_signed_options();
@@ -490,9 +525,11 @@ fn setup_runs_quinn_tasks_on_data_io_runtimes_only() {
         )
         .await
         .unwrap();
+
         let Endpoint::Quic { host, port } = listener.local_endpoint().clone() else {
             unreachable!()
         };
+
         let client_thread = least_loaded_thread(&listener, &pool);
         let accept = tokio::spawn(async move {
             let accepted = listener.accept().await.map(|(stream, _, _)| stream);
@@ -500,11 +537,13 @@ fn setup_runs_quinn_tasks_on_data_io_runtimes_only() {
         });
         let target = Endpoint::Quic { host, port };
         let mut client = connect(&target, &options, None, &pool).await.unwrap();
+
         // The connector writes its preface; the listener then delivers.
         let (listener, accepted) = accept.await.unwrap();
         let mut accepted = accepted.unwrap();
         let client_lease = client.take_io_lease().unwrap();
         let server_lease = accepted.take_io_lease().unwrap();
+
         let after = pool.alive_tasks();
         assert_eq!(after[0], before[0], "control runtime gained QUIC tasks");
         let data_before: usize = before[1..].iter().sum();
@@ -515,6 +554,7 @@ fn setup_runs_quinn_tasks_on_data_io_runtimes_only() {
             data_after >= data_before + 6,
             "QUIC tasks missing from data runtimes: {before:?} -> {after:?}"
         );
+
         assert_eq!(
             client_lease.index(),
             client_thread,
@@ -534,6 +574,7 @@ fn self_signed_options() -> Options {
     options.quic.server_key_pem = Some(certified.signing_key.serialize_pem().into_bytes());
     options.quic.trust_pem = options.quic.server_cert_pem.clone();
     options.quic.trust_system = false;
+
     options
 }
 
@@ -554,6 +595,7 @@ fn least_loaded_thread(listener: &QuicListener, pool: &crate::context::IoPoolHan
     for endpoint in listener.endpoints.iter() {
         loads[endpoint.lease.index()] += 1;
     }
+
     loads
         .iter()
         .enumerate()
@@ -615,6 +657,7 @@ fn listener_binds_one_endpoint_per_io_thread_on_linux() {
         .enable_all()
         .build()
         .unwrap();
+
     test_runtime.block_on(async {
         let options = self_signed_options();
         let mut listener = bind(
@@ -629,9 +672,11 @@ fn listener_binds_one_endpoint_per_io_thread_on_linux() {
         let threads: Vec<usize> = listener.endpoints.iter().map(|e| e.lease.index()).collect();
         let expected: Vec<usize> = (0..expected).collect();
         assert_eq!(threads, expected, "one endpoint driver per IO thread");
+
         let Endpoint::Quic { host, port } = listener.local_endpoint().clone() else {
             unreachable!()
         };
+
         let target = Endpoint::Quic { host, port };
         let taken = bind(&target, accept_setup(&pool), &options)
             .await
@@ -646,21 +691,25 @@ fn listener_binds_one_endpoint_per_io_thread_on_linux() {
         // thread. 24 connections all on one of two is a 2^-23 chance.
         let mut per_endpoint = [0; 2];
         let mut peers = Vec::new();
+
         for _ in 0..24 {
             let (client, accepted, lease) =
                 connect_and_accept(&mut listener, &target, &options, &pool).await;
             per_endpoint[listener_endpoint_of(&listener, &accepted).unwrap()] += 1;
             peers.push((client, accepted, lease));
         }
+
         if cfg!(target_os = "linux") {
             assert!(
                 per_endpoint.iter().all(|&n| n > 0),
                 "Initials not spread: {per_endpoint:?}"
             );
         }
+
         for (client, accepted, _) in &mut peers {
             assert_ping_pong(client, accepted).await;
         }
+
         let group = Arc::downgrade(&listener.endpoints);
         drop(listener);
         assert!(group.upgrade().is_some(), "accepted peers lost UDP group");
@@ -681,6 +730,7 @@ fn skewed_initials_still_balance_connection_work_and_transfer_data() {
         .enable_all()
         .build()
         .unwrap();
+
     runtime.block_on(async {
         let options = self_signed_options();
         let mut listener = bind(
@@ -694,13 +744,16 @@ fn skewed_initials_still_balance_connection_work_and_transfer_data() {
         let address = listener.endpoints[0].udp.local_addr().unwrap();
         let endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
         let mut client_config = config::client(&options.quic, config::Profile::Raw).unwrap();
+
         client_config.initial_dst_cid_provider(Arc::new(|| {
             let mut bytes: [u8; 20] = rand::random();
             bytes[0] = 0; // Every Initial enters listener endpoint zero.
             quinn::ConnectionId::new(&bytes)
         }));
+
         let mut peers = Vec::new();
         let mut assigned = [0; 2];
+
         for _ in 0..4 {
             let client = async {
                 let connection = endpoint
@@ -708,8 +761,10 @@ fn skewed_initials_still_balance_connection_work_and_transfer_data() {
                     .unwrap()
                     .await
                     .unwrap();
+
                 open_raw_roles(connection, None).await.unwrap()
             };
+
             let (client, accepted) = tokio::join!(client, listener.accept());
             let (mut accepted, _, _) = accepted.unwrap();
             assert_eq!(listener_endpoint_of(&listener, &accepted), Some(0));
@@ -717,12 +772,14 @@ fn skewed_initials_still_balance_connection_work_and_transfer_data() {
             assigned[lease.index()] += 1;
             peers.push((client, accepted, lease));
         }
+
         assert_eq!(assigned, [2, 2]);
         for (client, accepted, _) in &mut peers {
             #[allow(irrefutable_let_patterns)]
             let SendHalf::Raw(send) = &mut client.data.0 else {
                 unreachable!("native roles")
             };
+
             send.write_all(b"ping").await.unwrap();
             let mut buf = [0; 4];
             accepted.read_exact(&mut buf).await.unwrap();
@@ -760,6 +817,7 @@ mod web_wire {
         let url: url::Url = format!("https://127.0.0.1:{}{path}", fixture.addr.port())
             .parse()
             .unwrap();
+
         omq_webtrans_quinn::Session::connect_with_origin(connection, url, origin.map(str::to_owned))
             .await
             .map_err(|e| e.to_string())
@@ -809,6 +867,7 @@ mod web_wire {
         b.write_all(&second).await.unwrap();
         // Dropped receive halves would stop the listener liveness preface.
         std::mem::forget((session, a_recv, b_recv));
+
         (fixture, connection)
     }
 
@@ -932,11 +991,13 @@ mod web_wire {
             roles_with_prefaces(super::super::web::DATA_PREFACE, liveness::PREFACE).await;
         let _stream = fixture.next().await.expect("peer delivered");
         let extra = connection.open_bi().await;
+
         if let Ok((mut send, _)) = extra {
             // A raw bidi stream without the WebTransport signal is invalid
             // HTTP/3; either layer may close the connection.
             let _ = send.write_all(b"extra").await;
         }
+
         assert!(
             tokio::time::timeout(Duration::from_secs(5), connection.closed())
                 .await
@@ -997,10 +1058,12 @@ async fn outbound_peers_on_one_thread_share_a_connector_endpoint() {
         host: Host::Ip(fixture.addr.ip()),
         port: fixture.addr.port(),
     };
+
     let pool = crate::context::IoPoolHandle::none();
     let first = connect(&target, &options, None, &pool).await.unwrap();
     let second = connect(&target, &options, None, &pool).await.unwrap();
     assert!(Arc::ptr_eq(first.endpoint(), second.endpoint()));
+
     let weak = Arc::downgrade(first.endpoint());
     let accepted = (fixture.next().await, fixture.next().await);
     drop((first, second, accepted));
@@ -1017,6 +1080,7 @@ fn udp_buffers_for(recv: usize, send: usize) -> (usize, usize) {
     let socket = socket2::SockRef::from(&socket);
     socket.set_recv_buffer_size(recv).unwrap();
     socket.set_send_buffer_size(send).unwrap();
+
     (
         socket.recv_buffer_size().unwrap(),
         socket.send_buffer_size().unwrap(),
@@ -1027,22 +1091,27 @@ fn udp_buffers_for(recv: usize, send: usize) -> (usize, usize) {
 async fn buffer_sizes_apply_to_listener_and_grow_on_shared_connector() {
     const SMALL: (usize, usize) = (48 * 1024, 40 * 1024);
     const LARGE: (usize, usize) = (96 * 1024, 80 * 1024);
+
     let with_buffers = |(recv, send): (usize, usize)| {
         Options::default()
             .recv_buffer_size(recv)
             .send_buffer_size(send)
     };
+
     let mut fixture = listener(with_buffers(LARGE), Duration::from_secs(5)).await;
     let target = Endpoint::Quic {
         host: Host::Ip(fixture.addr.ip()),
         port: fixture.addr.port(),
     };
+
     let client = |sizes| {
         let mut options = with_buffers(sizes);
         options.quic.trust_pem = Some(fixture.cert.clone());
         options.quic.trust_system = false;
+
         options
     };
+
     let pool = crate::context::IoPoolHandle::none();
 
     let first = connect(&target, &client(SMALL), None, &pool).await.unwrap();

@@ -12,8 +12,10 @@ use crate::message::{Frame, FrameFlags, Message, Payload};
 
 /// Final application frame of a ZWS message.
 pub const FLAG_FINAL: u8 = 0x00;
+
 /// Application frame followed by another part.
 pub const FLAG_MORE: u8 = 0x01;
+
 /// ZMTP command frame carried by ZWS.
 pub const FLAG_COMMAND: u8 = 0x02;
 
@@ -49,10 +51,12 @@ pub fn encode_frame(frame: &Frame) -> Bytes {
     } else {
         FLAG_FINAL
     };
+
     let payload = frame.payload.as_bytes();
     let mut buf = BytesMut::with_capacity(1 + payload.len());
     buf.put_u8(flag);
     buf.extend_from_slice(&payload);
+
     buf.freeze()
 }
 
@@ -61,6 +65,7 @@ pub fn decode_frame(mut msg: Bytes) -> Result<Frame> {
     if msg.is_empty() {
         return Err(Error::Protocol("empty ZWS frame".into()));
     }
+
     let flag = msg[0];
     let flags = match flag {
         FLAG_FINAL => FrameFlags::LAST,
@@ -72,6 +77,7 @@ pub fn decode_frame(mut msg: Bytes) -> Result<Frame> {
             )));
         }
     };
+
     let _ = msg.split_to(1);
     Ok(Frame {
         flags,
@@ -86,6 +92,7 @@ pub fn encode_message(msg: &Message) -> SmallVec<[Bytes; 4]> {
     let parts = msg.parts_payload();
     let n = parts.len();
     let mut out = SmallVec::with_capacity(n);
+
     for (i, part) in parts.iter().enumerate() {
         let flag = if i + 1 < n { FLAG_MORE } else { FLAG_FINAL };
         let payload = part.as_bytes();
@@ -94,6 +101,7 @@ pub fn encode_message(msg: &Message) -> SmallVec<[Bytes; 4]> {
         buf.extend_from_slice(&payload);
         out.push(buf.freeze());
     }
+
     out
 }
 
@@ -102,87 +110,9 @@ pub fn encode_command(body: &Bytes) -> Bytes {
     let mut buf = BytesMut::with_capacity(1 + body.len());
     buf.put_u8(FLAG_COMMAND);
     buf.extend_from_slice(body);
+
     buf.freeze()
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn encode_decode_final() {
-        let frame = Frame::data(Bytes::from_static(b"hello"), false);
-        let wire = encode_frame(&frame);
-        assert_eq!(wire[0], FLAG_FINAL);
-        assert_eq!(&wire[1..], b"hello");
-        let decoded = decode_frame(wire).unwrap();
-        assert_eq!(decoded.flags, FrameFlags::LAST);
-        assert_eq!(decoded.payload.as_bytes(), &b"hello"[..]);
-    }
-
-    #[test]
-    fn encode_decode_more() {
-        let frame = Frame::data(Bytes::from_static(b"part1"), true);
-        let wire = encode_frame(&frame);
-        assert_eq!(wire[0], FLAG_MORE);
-        let decoded = decode_frame(wire).unwrap();
-        assert_eq!(decoded.flags, FrameFlags::MORE);
-    }
-
-    #[test]
-    fn encode_decode_command() {
-        let frame = Frame::command(Bytes::from_static(b"\x05READYstuff"));
-        let wire = encode_frame(&frame);
-        assert_eq!(wire[0], FLAG_COMMAND);
-        let decoded = decode_frame(wire).unwrap();
-        assert_eq!(decoded.flags, FrameFlags::COMMAND);
-        assert_eq!(decoded.payload.as_bytes(), &b"\x05READYstuff"[..]);
-    }
-
-    #[test]
-    fn decode_empty_fails() {
-        assert!(decode_frame(Bytes::new()).is_err());
-    }
-
-    #[test]
-    fn decode_invalid_flag_fails() {
-        assert!(decode_frame(Bytes::from_static(&[0x03, b'x'])).is_err());
-        assert!(decode_frame(Bytes::from_static(&[0xFF])).is_err());
-    }
-
-    #[test]
-    fn encode_message_single_part() {
-        let msg = Message::from(Bytes::from_static(b"payload"));
-        let frames = encode_message(&msg);
-        assert_eq!(frames.len(), 1);
-        assert_eq!(frames[0][0], FLAG_FINAL);
-        assert_eq!(&frames[0][1..], b"payload");
-    }
-
-    #[test]
-    fn encode_message_multi_part() {
-        let msg = Message::multipart([
-            Bytes::from_static(b"a"),
-            Bytes::from_static(b"b"),
-            Bytes::from_static(b"c"),
-        ]);
-        let frames = encode_message(&msg);
-        assert_eq!(frames.len(), 3);
-        assert_eq!(frames[0][0], FLAG_MORE);
-        assert_eq!(frames[1][0], FLAG_MORE);
-        assert_eq!(frames[2][0], FLAG_FINAL);
-        assert_eq!(&frames[0][1..], b"a");
-        assert_eq!(&frames[1][1..], b"b");
-        assert_eq!(&frames[2][1..], b"c");
-    }
-
-    #[test]
-    fn encode_empty_payload() {
-        let frame = Frame::data(Bytes::new(), false);
-        let wire = encode_frame(&frame);
-        assert_eq!(wire.len(), 1);
-        assert_eq!(wire[0], FLAG_FINAL);
-        let decoded = decode_frame(wire).unwrap();
-        assert!(decoded.payload.as_bytes().is_empty());
-    }
-}
+mod tests;

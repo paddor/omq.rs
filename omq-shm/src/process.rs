@@ -27,6 +27,7 @@ impl Process {
                 "SHM requires peers with the same UID and visible PID namespace",
             ));
         }
+
         // PID reuse can only delay reclamation: the original process must
         // have exited before its PID can name a replacement.
         let (pidfd, dead) = match rustix::process::pidfd_open(credentials.pid, PidfdFlags::empty())
@@ -35,6 +36,7 @@ impl Process {
             Err(rustix::io::Errno::SRCH) => (None, true),
             Err(error) => return Err(error.into()),
         };
+
         Ok(Self {
             pidfd,
             dead: AtomicBool::new(dead),
@@ -60,9 +62,11 @@ impl Process {
         if self.dead.load(Ordering::Acquire) {
             return true;
         }
+
         let Some(file) = &self.pidfd else {
             return false;
         };
+
         let mut descriptors = [PollFd::new(file, PollFlags::IN)];
         if rustix::event::poll(
             &mut descriptors,
@@ -76,6 +80,7 @@ impl Process {
             self.dead.store(true, Ordering::Relaxed);
             return true;
         }
+
         false
     }
 
@@ -95,6 +100,7 @@ pub(crate) fn futex_wait(word: &AtomicU32, expected: u32) {
         tv_sec: 0,
         tv_nsec: 100_000_000,
     };
+
     let _ = futex::wait(word, futex::Flags::empty(), expected, Some(&SLICE));
 }
 

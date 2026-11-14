@@ -180,7 +180,8 @@ using (var rejectedReq = context.CreateSocket(SocketType.Req, new SocketOptions 
 {
     rejectedReq.ConfigurePlainClient("user", "wrong");
     rejectedReq.Connect(plainEndpoint);
-    rejectedReq.SendText("rejected");
+    // A refused handshake drops the route; a blocking send could hang.
+    _ = rejectedReq.TrySend("rejected"u8);
     bool rejected = false;
     try { plainRep.Receive(); }
     catch (OmqAgainException) { rejected = true; }

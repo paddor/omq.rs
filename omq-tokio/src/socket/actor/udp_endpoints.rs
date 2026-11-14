@@ -23,6 +23,7 @@ impl SocketDriver {
             // UDP dialers use their peer id as route id.
             self.routing.send_strategy.connection_removed(pid, pid);
         }
+
         removed
     }
 
@@ -41,6 +42,7 @@ impl SocketDriver {
         network.validate_datagrams(crate::transport::udp::MAX_DATAGRAM_SIZE)?;
         let sock = crate::transport::udp::bind(&endpoint).await?;
         let local = sock.local_addr()?;
+
         let resolved = match &endpoint {
             Endpoint::Udp { group, host, .. } => Endpoint::Udp {
                 group: group.clone(),
@@ -54,6 +56,7 @@ impl SocketDriver {
             },
             _ => unreachable!("checked above"),
         };
+
         self.link.monitor.publish(MonitorEvent::Listening {
             endpoint: resolved.clone(),
         });
@@ -78,6 +81,7 @@ impl SocketDriver {
             cancel,
             task,
         });
+
         Ok(ret)
     }
 
@@ -110,6 +114,7 @@ impl SocketDriver {
             data,
         } = self.peer_channels();
         let cancel = handle.cancel.clone();
+
         let assignment = self.resources.io_pool.reserve_thread();
         let index = assignment.index();
         let inboxes = crate::socket::udp::RadioInboxes { control, data };
@@ -146,6 +151,7 @@ impl SocketDriver {
             },
             peer_id,
         });
+
         Ok(())
     }
 }

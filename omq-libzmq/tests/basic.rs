@@ -24,33 +24,9 @@ const ZMQ_REP: i32 = 4;
 const ZMQ_PAIR: i32 = 0;
 const ZMQ_DONTWAIT: i32 = 1;
 const ZMQ_SNDMORE: i32 = 2;
-const ZMQ_RCVTIMEO: i32 = 27;
-const ZMQ_SNDTIMEO: i32 = 28;
 const ZMQ_SUBSCRIBE: i32 = 6;
 const ZMQ_RCVMORE: i32 = 13;
 const ZMQ_ETERM: i32 = 156_384_765;
-
-fn set_rcvtimeo(sock: *mut c_void, ms: i32) {
-    let v = ms;
-    let rc = zmq_setsockopt(
-        sock,
-        ZMQ_RCVTIMEO,
-        (&v as *const i32).cast(),
-        size_of::<i32>(),
-    );
-    assert_eq!(rc, 0, "setsockopt RCVTIMEO failed");
-}
-
-fn set_sndtimeo(sock: *mut c_void, ms: i32) {
-    let v = ms;
-    let rc = zmq_setsockopt(
-        sock,
-        ZMQ_SNDTIMEO,
-        (&v as *const i32).cast(),
-        size_of::<i32>(),
-    );
-    assert_eq!(rc, 0, "setsockopt SNDTIMEO failed");
-}
 
 fn caddr(s: &str) -> CString {
     CString::new(s).unwrap()
@@ -65,6 +41,7 @@ fn thread_cpu_time() -> Duration {
     // SAFETY: ts points to writable memory and CLOCK_THREAD_CPUTIME_ID needs no extra invariants.
     let rc = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
     assert_eq!(rc, 0, "clock_gettime(CLOCK_THREAD_CPUTIME_ID)");
+
     Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
 }
 
@@ -173,12 +150,12 @@ fn interrupted_send(
         // without waiting can still find room a moment later.
         let mut filled = 0;
         if fill {
-            set_sndtimeo(sock, 100);
+            helpers::set_sndtimeo(sock, 100);
             while send(b"fill", 0) == 4 {
                 filled += 1;
                 assert!(filled < 10_000, "the queue never filled");
             }
-            set_sndtimeo(sock, -1);
+            helpers::set_sndtimeo(sock, -1);
         }
         let (last, staged) = frames.split_last().unwrap();
         for frame in staged {
@@ -233,14 +210,14 @@ fn blocking_send_without_a_peer_returns_eintr_when_a_signal_interrupts_it() {
 
     // The interrupted message was not queued: a peer gets only the retry.
     let pull = zmq_socket(ctx, ZMQ_PULL);
-    set_rcvtimeo(pull, 2000);
+    helpers::set_rcvtimeo(pull, 2000);
     assert_eq!(zmq_connect(pull, addr.as_ptr()), 0);
     send.retry.send(()).unwrap();
     assert_eq!(send.thread.join().unwrap(), 4);
     let mut buf = [0u8; 8];
     assert_eq!(zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0), 4);
     assert_eq!(&buf[..4], b"once");
-    set_rcvtimeo(pull, 50);
+    helpers::set_rcvtimeo(pull, 50);
     assert_eq!(zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0), -1);
 
     zmq_close(pull);
@@ -276,7 +253,7 @@ fn blocking_send_on_a_full_queue_returns_eintr_and_keeps_staged_frames() {
     assert_eq!(send.result, (-1, libc::EINTR));
 
     // Drain the fill messages; the retry of the final frame then goes out.
-    set_rcvtimeo(pull, 2000);
+    helpers::set_rcvtimeo(pull, 2000);
     let mut buf = [0u8; 8];
     for _ in 0..send.filled {
         assert_eq!(zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0), 4);
@@ -288,7 +265,7 @@ fn blocking_send_on_a_full_queue_returns_eintr_and_keeps_staged_frames() {
         assert_eq!(zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0), 4);
         assert_eq!(&buf[..4], expected);
     }
-    set_rcvtimeo(pull, 50);
+    helpers::set_rcvtimeo(pull, 50);
     assert_eq!(zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0), -1);
 
     zmq_close(push);
@@ -364,6 +341,7 @@ fn ctx_shutdown_wakes_blocking_recv() {
     let pull_addr = pull as usize;
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
     let (done_tx, done_rx) = std::sync::mpsc::channel();
+
     let handle = std::thread::spawn(move || {
         let mut buf = [0u8; 8];
         entered_tx.send(()).expect("entered");
@@ -407,8 +385,8 @@ fn push_pull_inproc() {
     // Give the connection a moment.
     std::thread::sleep(Duration::from_millis(20));
 
-    set_rcvtimeo(pull, 1000);
-    set_sndtimeo(push, 1000);
+    helpers::set_rcvtimeo(pull, 1000);
+    helpers::set_sndtimeo(push, 1000);
 
     let msg = b"hello";
     let rc = zmq_send(push, msg.as_ptr().cast(), msg.len(), 0);
@@ -437,8 +415,8 @@ fn recv_timeout_after_stale_signal_does_not_spin() {
     assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
     std::thread::sleep(Duration::from_millis(20));
 
-    set_rcvtimeo(pull, 100);
-    set_sndtimeo(push, 1000);
+    helpers::set_rcvtimeo(pull, 100);
+    helpers::set_sndtimeo(push, 1000);
 
     let payload = b"x";
     assert_eq!(zmq_send(push, payload.as_ptr().cast(), payload.len(), 0), 1);
@@ -478,8 +456,8 @@ fn push_pull_tcp() {
 
     std::thread::sleep(Duration::from_millis(50));
 
-    set_rcvtimeo(pull, 2000);
-    set_sndtimeo(push, 2000);
+    helpers::set_rcvtimeo(pull, 2000);
+    helpers::set_sndtimeo(push, 2000);
 
     for i in 0u8..5 {
         let payload = [i; 32];
@@ -509,8 +487,8 @@ fn multipart_above_the_default_part_limit_arrives_over_tcp() {
     let push = zmq_socket(ctx, ZMQ_PUSH);
     let addr = helpers::bind_random_tcp(pull);
     assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
-    set_rcvtimeo(pull, 5000);
-    set_sndtimeo(push, 5000);
+    helpers::set_rcvtimeo(pull, 5000);
+    helpers::set_sndtimeo(push, 5000);
 
     for index in 0..PARTS {
         let flags = if index + 1 < PARTS { ZMQ_SNDMORE } else { 0 };
@@ -563,8 +541,8 @@ fn multipart_sndmore_rcvmore() {
     zmq_connect(push, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(20));
 
-    set_rcvtimeo(pull, 1000);
-    set_sndtimeo(push, 1000);
+    helpers::set_rcvtimeo(pull, 1000);
+    helpers::set_sndtimeo(push, 1000);
 
     // Send a 3-part message.
     zmq_send(push, b"part1".as_ptr().cast(), 5, ZMQ_SNDMORE);
@@ -621,8 +599,8 @@ fn pair_inproc_roundtrip() {
     zmq_connect(b, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(20));
 
-    set_rcvtimeo(a, 1000);
-    set_rcvtimeo(b, 1000);
+    helpers::set_rcvtimeo(a, 1000);
+    helpers::set_rcvtimeo(b, 1000);
 
     let rc = zmq_send(a, b"ping".as_ptr().cast(), 4, 0);
     assert_eq!(rc, 4);
@@ -651,7 +629,7 @@ fn pub_sub_inproc() {
     zmq_connect(sub_sock, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(50));
 
-    set_rcvtimeo(sub_sock, 1000);
+    helpers::set_rcvtimeo(sub_sock, 1000);
 
     // Matching message
     zmq_send(pub_sock, b"hello world".as_ptr().cast(), 11, 0);
@@ -684,8 +662,8 @@ fn req_rep_inproc() {
     zmq_connect(req, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(20));
 
-    set_rcvtimeo(rep, 1000);
-    set_rcvtimeo(req, 1000);
+    helpers::set_rcvtimeo(rep, 1000);
+    helpers::set_rcvtimeo(req, 1000);
 
     zmq_send(req, b"request".as_ptr().cast(), 7, 0);
 
@@ -714,7 +692,7 @@ fn send_empty_message() {
     zmq_connect(push, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(20));
 
-    set_rcvtimeo(pull, 1000);
+    helpers::set_rcvtimeo(pull, 1000);
 
     // Send zero-length message.
     let rc = zmq_send(push, std::ptr::null(), 0, 0);
@@ -734,26 +712,32 @@ fn send_empty_message() {
 fn shutdown_during_blocked_send(ctx: *mut c_void, sock: *mut c_void) -> (i32, i32) {
     let sock_addr = sock as usize;
     let (done_tx, done_rx) = std::sync::mpsc::channel();
+
     let handle = std::thread::spawn(move || {
         let sock = sock_addr as *mut c_void;
         // A connect-side pipe moves into the peer's queue once the peer is
         // ready, which frees capacity after the queue looked full. Refill
         // whenever a blocking send still succeeds.
         let mut queued = 0;
+
         let result = loop {
             while zmq_send(sock, b"x".as_ptr().cast(), 1, ZMQ_DONTWAIT) == 1 {
                 queued += 1;
                 assert!(queued < 1024, "send never blocked");
             }
+
             let rc = zmq_send(sock, b"x".as_ptr().cast(), 1, 0);
             if rc != 1 {
                 break (rc, omq_zmq::zmq_errno());
             }
+
             queued += 1;
             assert!(queued < 1024, "send never blocked");
         };
+
         done_tx.send(result).expect("done");
     });
+
     assert_eq!(
         done_rx.recv_timeout(Duration::from_millis(200)),
         Err(std::sync::mpsc::RecvTimeoutError::Timeout),
@@ -764,6 +748,7 @@ fn shutdown_during_blocked_send(ctx: *mut c_void, sock: *mut c_void) -> (i32, i3
         .recv_timeout(Duration::from_secs(2))
         .expect("send should wake on context shutdown");
     handle.join().expect("send thread");
+
     result
 }
 
@@ -786,12 +771,14 @@ fn ctx_shutdown_wakes_send_blocked_on_a_full_pipe() {
     let pull = zmq_socket(ctx, ZMQ_PULL);
     let push = zmq_socket(ctx, ZMQ_PUSH);
     let one = 1i32;
+
     for (sock, option) in [(pull, ZMQ_RCVHWM), (push, ZMQ_SNDHWM)] {
         assert_eq!(
             zmq_setsockopt(sock, option, (&one as *const i32).cast(), size_of::<i32>()),
             0
         );
     }
+
     let addr = caddr("inproc://test-basic-shutdown-send-full");
     assert_eq!(zmq_bind(pull, addr.as_ptr()), 0);
     assert_eq!(zmq_connect(push, addr.as_ptr()), 0);

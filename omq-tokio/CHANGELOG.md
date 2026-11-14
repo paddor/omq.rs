@@ -204,6 +204,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of pending places for three seconds, so sources that never confirmed
   could keep real peers out. The wire format is unchanged.
 
+## [0.35.1] - 2026-11-12
+
+### Changed
+
+- Depend on `omq-proto` 0.39.1 and `omq-shm` 0.7.1.
+
+### Fixed
+
+- A connection driver with steady output no longer holds its IO thread
+  until the transport blocks. It pauses output every 16 KiB, so peer
+  timers and QUIC tasks on the same thread run on time, and small-message
+  QUIC throughput stays steady.
+
+## [0.35.0] - 2026-11-09
+
+### Changed
+
+- Depend on `omq-proto` 0.39.0 and `omq-shm` 0.7.0.
+
 ## [0.34.3] - 2026-11-04
 
 ### Changed

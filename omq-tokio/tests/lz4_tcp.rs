@@ -28,6 +28,7 @@ async fn arenas_resume_through_receive_hwm_and_preserve_multipart_limits() {
                 .compression_auto_train(true),
         );
         push.connect(endpoint).await.unwrap();
+
         let expected: Vec<_> = (0..1024u32)
             .map(|index| {
                 Message::multipart([
@@ -37,9 +38,11 @@ async fn arenas_resume_through_receive_hwm_and_preserve_multipart_limits() {
                 ])
             })
             .collect();
+
         for message in &expected {
             push.send(message.clone()).await.unwrap();
         }
+
         tokio::time::sleep(Duration::from_millis(20)).await;
         for message in expected {
             assert_eq!(pull.recv().await.unwrap(), message);
@@ -58,6 +61,7 @@ async fn arenas_keep_order_across_large_compression_offloads() {
             Options::default().compression_offload_threshold(Some(4096)),
         );
         push.connect(endpoint).await.unwrap();
+
         let expected: Vec<_> = (0..300u32)
             .map(|index| {
                 // Runs of large messages hold and offload in turn around arenas.
@@ -66,14 +70,17 @@ async fn arenas_keep_order_across_large_compression_offloads() {
                     3 => 128 * 1024,
                     _ => 128,
                 };
+
                 let mut bytes = vec![b'x'; size];
                 bytes[..4].copy_from_slice(&index.to_le_bytes());
                 Message::single(bytes)
             })
             .collect();
+
         for message in &expected {
             push.send(message.clone()).await.unwrap();
         }
+
         for message in expected {
             assert_eq!(pull.recv().await.unwrap(), message);
         }
@@ -112,16 +119,19 @@ async fn pull_on_loopback() -> (Socket, Endpoint) {
         .await
         .unwrap()
         .unwrap();
+
     let port = match ev {
         MonitorEvent::Listening {
             endpoint: Endpoint::Lz4Tcp { port, .. },
         } => port,
         other => panic!("expected Lz4Tcp Listening, got {other:?}"),
     };
+
     let connect_ep = Endpoint::Lz4Tcp {
         host: Host::Ip(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
         port,
     };
+
     (pull, connect_ep)
 }
 
@@ -199,6 +209,7 @@ async fn dict_roundtrip_small_payload() {
         .await
         .unwrap()
         .unwrap();
+
     let port = match ev {
         MonitorEvent::Listening {
             endpoint: Endpoint::Lz4Tcp { port, .. },
@@ -286,6 +297,7 @@ async fn req_rep_over_lz4() {
     })
     .await
     .unwrap();
+
     let port = match tokio::time::timeout(Duration::from_millis(500), mon.recv())
         .await
         .unwrap()
@@ -296,6 +308,7 @@ async fn req_rep_over_lz4() {
         } => port,
         other => panic!("unexpected {other:?}"),
     };
+
     let ep = Endpoint::Lz4Tcp {
         host: Host::Ip(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
         port,
@@ -330,6 +343,7 @@ async fn many_messages_in_a_row() {
     for i in 0..N {
         push.send(Message::single(format!("m-{i}"))).await.unwrap();
     }
+
     for i in 0..N {
         let m = tokio::time::timeout(Duration::from_secs(2), pull.recv())
             .await

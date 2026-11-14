@@ -41,6 +41,7 @@ impl Socket {
     ) -> Result<Endpoint> {
         self.inner.payload_pools.freeze();
         let (ack, rx) = oneshot::channel();
+
         self.inner
             .cmd_tx
             .send(SocketCommand::Bind {
@@ -50,6 +51,7 @@ impl Socket {
             })
             .await
             .map_err(|_| Error::Closed)?;
+
         let resolved = rx.await.map_err(|_| Error::Closed)??;
         *self.inner.last_bound_endpoint.write().unwrap() = Some(resolved.clone());
         Ok(resolved)
@@ -68,12 +70,14 @@ impl Socket {
         if self.socket_type() != omq_proto::SocketType::Stream {
             return Err(Error::Protocol("expected a STREAM socket".into()));
         }
+
         let (ack, rx) = oneshot::channel();
         self.inner
             .cmd_tx
             .send(SocketCommand::QueryStreamRoutingId { ack })
             .await
             .map_err(|_| Error::Closed)?;
+
         rx.await.map_err(|_| Error::Closed)
     }
 
@@ -113,6 +117,7 @@ impl Socket {
     ) -> Result<()> {
         self.inner.payload_pools.freeze();
         let (ack, rx) = oneshot::channel();
+
         self.inner
             .cmd_tx
             .send(SocketCommand::Connect {
@@ -122,6 +127,7 @@ impl Socket {
             })
             .await
             .map_err(|_| Error::Closed)?;
+
         rx.await.map_err(|_| Error::Closed)?
     }
 
@@ -139,6 +145,7 @@ impl Socket {
             })
             .await
             .map_err(|_| Error::Closed)?;
+
         rx.await.map_err(|_| Error::Closed)?
     }
 
@@ -154,6 +161,7 @@ impl Socket {
             })
             .await
             .map_err(|_| Error::Closed)?;
+
         rx.await.map_err(|_| Error::Closed)?
     }
 
@@ -169,6 +177,7 @@ impl Socket {
             })
             .await
             .map_err(|_| Error::Closed)?;
+
         rx.await.map_err(|_| Error::Closed)?
     }
 
@@ -183,6 +192,7 @@ impl Socket {
             })
             .await
             .map_err(|_| Error::Closed)?;
+
         rx.await.map_err(|_| Error::Closed)?
     }
 
@@ -199,6 +209,7 @@ impl Socket {
             .send(SocketCommand::Unbind { endpoint, ack })
             .await
             .map_err(|_| Error::Closed)?;
+
         rx.await.map_err(|_| Error::Closed)?
     }
 
@@ -217,6 +228,7 @@ impl Socket {
             .send(SocketCommand::Disconnect { endpoint, ack })
             .await
             .map_err(|_| Error::Closed)?;
+
         rx.await.map_err(|_| Error::Closed)?
     }
 
@@ -233,6 +245,7 @@ impl Socket {
             .send(SocketCommand::DisconnectPeer { connection_id, ack })
             .await
             .map_err(|_| Error::Closed)?;
+
         rx.await.map_err(|_| Error::Closed)?
     }
 }

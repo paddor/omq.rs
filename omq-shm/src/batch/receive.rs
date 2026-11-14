@@ -35,6 +35,7 @@ impl<R> DecodeContext<'_, R> {
         if !mapping.contains(reference.offset, reference.length) {
             return Err(invalid("SHM batch body exceeds region or message size limit").into());
         }
+
         crate::check_body_size(message, reference.length, self.maximum)
     }
 
@@ -49,6 +50,7 @@ impl<R> DecodeContext<'_, R> {
     ) -> Result<(usize, usize)> {
         let mut count = 1;
         let mut length = first.length;
+
         while first.length != 0
             && let Some(next) = references.peek().copied()
         {
@@ -59,11 +61,13 @@ impl<R> DecodeContext<'_, R> {
             {
                 break;
             }
+
             self.check_reference(message, mapping, next)?;
             references.next();
             count += 1;
             length += next.length;
         }
+
         Ok((count, length))
     }
 }
@@ -81,6 +85,7 @@ pub(crate) fn decode(
         region: (),
     };
     drain_all(ReceivedBatch::copied(message, &cx)?, messages);
+
     Ok(())
 }
 
@@ -97,9 +102,11 @@ fn drain_all(mut batch: ReceivedBatch, messages: &mut VecDeque<Message>) {
 pub(crate) fn references(bytes: &[u8]) -> Result<Vec<Reference>> {
     let count = count(bytes)?;
     let end = reference_table_end(count);
+
     if bytes.len() != end.max(MIN_STORAGE_BYTES) || bytes[end..].iter().any(|&byte| byte != 0) {
         return Err(invalid("invalid SHM reference table length or padding").into());
     }
+
     (0..count)
         .map(|index| {
             let size = size_slot(index);
@@ -108,9 +115,11 @@ pub(crate) fn references(bytes: &[u8]) -> Result<Vec<Reference>> {
             let length = usize::try_from(read_u64(bytes, size))
                 .ok()
                 .filter(|&length| isize::try_from(length).is_ok());
+
             let (Ok(offset), Some(length)) = (offset, length) else {
                 return Err(invalid("SHM reference batch exceeds payload limits").into());
             };
+
             Ok(Reference {
                 id: read_u32(bytes, coordinate),
                 token: read_u64(bytes, coordinate + REGION_TOKEN),
@@ -135,6 +144,7 @@ pub(crate) fn decode_references(
         region,
     };
     drain_all(ReceivedBatch::referenced(message, &mut cx)?, messages);
+
     Ok(())
 }
 
@@ -147,21 +157,26 @@ pub(crate) fn multipart(
     if message.len() != 1 {
         return Err(invalid("invalid SHM multipart envelope").into());
     }
+
     let mut frames = ReceivedBatch::referenced(message, cx)?;
     let ReceivedBacking::Referenced { bodies, .. } = &frames.storage.backing else {
         unreachable!("multipart records are referenced")
     };
+
     let size = bodies.iter().fold(
         bodies.len() * std::mem::size_of::<Payload>(),
         |size, body| size.saturating_add(body.length),
     );
+
     if cx.maximum.is_some_and(|maximum| size > maximum) {
         return Err(invalid("SHM multipart message exceeds max_message_size").into());
     }
+
     let mut parts = Vec::with_capacity(frames.len());
     while let Some(mut frame) = frames.pop_front() {
         parts.push(frame.pop_front_payload().expect("multipart frame"));
     }
+
     Ok(Message::multipart_payloads(parts))
 }
 
@@ -236,12 +251,15 @@ impl ReceivedBatch {
         let mut offset = bodies_start(count);
         let mut inline = message.len() == 1;
         let mut lengths = Vec::with_capacity(count);
+
         for index in 0..count {
             let length = copied_length(bytes, index)?;
             inline &= length <= COPY_THRESHOLD;
+
             if length > COPIED_BATCH_MAX_BODY {
                 return Err(invalid("SHM batch body exceeds message size limit").into());
             }
+
             crate::check_body_size(message, length, cx.maximum)?;
             offset = offset
                 .checked_add(length)
@@ -249,20 +267,24 @@ impl ReceivedBatch {
                 .ok_or_else(|| invalid("truncated SHM batch body"))?;
             lengths.push(length);
         }
+
         if bytes[offset..].iter().any(|&byte| byte != 0)
             || bytes.len() != offset.max(MIN_STORAGE_BYTES)
         {
             return Err(invalid("invalid SHM batch padding").into());
         }
+
         let (bytes, backing) = if inline {
             // Inline bodies own their bytes. Construct them on the IO thread,
             // then transfer one batch without retaining its SHM metadata lease.
             let mut messages = Vec::with_capacity(count);
             let mut offset = bodies_start(count);
+
             for length in lengths {
                 messages.push(Message::from_slice(&bytes[offset..offset + length]));
                 offset += length;
             }
+
             (
                 Bytes::new(),
                 ReceivedBacking::Inline(messages.into_boxed_slice()),
@@ -273,6 +295,7 @@ impl ReceivedBatch {
                 ReceivedBacking::Copied(lengths.into_boxed_slice()),
             )
         };
+
         Ok(Self::new(message, bytes, cx.views, backing))
     }
 
@@ -286,12 +309,14 @@ impl ReceivedBatch {
         let mut references = bodies.iter().copied().peekable();
         let mut runs = Vec::new();
         let mut end = 0;
+
         while let Some(reference) = references.next() {
             let mapping = (cx.region)(reference.id, reference.token)
                 .ok_or_else(|| invalid("SHM batch region was not registered"))?;
             cx.check_reference(message, &mapping, reference)?;
             let (run_count, length) =
                 cx.adjacent_references(message, &mapping, reference, &mut references)?;
+
             let shared = (message.len() == 1 && run_count > 1).then(|| {
                 Bytes::from_owner(ReferencedRun {
                     mapping: mapping.clone(),
@@ -300,6 +325,7 @@ impl ReceivedBatch {
                     _batch: Payload::from_bytes(owner.clone()),
                 })
             });
+
             end += run_count;
             runs.push(ReceivedRun {
                 end,
@@ -308,6 +334,7 @@ impl ReceivedBatch {
                 shared,
             });
         }
+
         Ok(Self::new(
             message,
             owner,
@@ -336,6 +363,7 @@ impl ReceivedBatch {
             ReceivedBacking::Copied(lengths) => lengths.len(),
             ReceivedBacking::Referenced { bodies, .. } => bodies.len(),
         };
+
         Self {
             storage: Arc::new(ReceivedStorage {
                 bytes,
@@ -388,11 +416,13 @@ impl ReceivedBatch {
             run: self.run,
             routing_id: self.routing_id,
         };
+
         if count < self.len()
             && let ReceivedBacking::Copied(lengths) = &self.storage.backing
         {
             self.offset += lengths[self.next..self.next + count].iter().sum::<usize>();
         }
+
         self.next += count;
         prefix
     }
@@ -404,14 +434,17 @@ impl ReceivedBatch {
         if self.is_empty() {
             return None;
         }
+
         if let ReceivedBacking::Inline(messages) = &self.storage.backing {
             let message = messages[self.next].clone();
             self.next += 1;
             return Some(self.wrap(message));
         }
+
         if matches!(self.storage.backing, ReceivedBacking::Copied(_)) {
             return Some(self.pop_copied());
         }
+
         Some(self.pop_referenced())
     }
 
@@ -424,10 +457,12 @@ impl ReceivedBatch {
         let ReceivedBacking::Referenced { runs, bodies } = &self.storage.backing else {
             unreachable!("copied cursor handled above")
         };
+
         let Body { offset, length } = bodies[self.next];
         while self.next >= runs[self.run].end {
             self.run += 1;
         }
+
         let run = &runs[self.run];
         let body = if let Some(shared) = &run.shared {
             let start = offset - run.offset;
@@ -440,6 +475,7 @@ impl ReceivedBatch {
                 Payload::from_bytes(self.storage.bytes.clone()),
             )
         };
+
         self.next += 1;
         self.wrap(Message::from(body))
     }
@@ -453,11 +489,13 @@ impl ReceivedBatch {
         let ReceivedBacking::Copied(lengths) = &self.storage.backing else {
             unreachable!("referenced cursor handled separately")
         };
+
         let length = lengths[self.next];
         let bytes = self.storage.bytes.as_ref();
         let offset = self.offset;
         self.offset += length;
         self.next += 1;
+
         let message = if length <= COPY_THRESHOLD {
             Message::from_slice(&bytes[offset..offset + length])
         } else if self.storage.envelope.is_some() {
@@ -469,6 +507,7 @@ impl ReceivedBatch {
         } else {
             Message::from(self.storage.bytes.slice(offset..offset + length))
         };
+
         self.wrap(message)
     }
 
@@ -488,10 +527,12 @@ impl ReceivedBatch {
                 let message = self.wrap(message.clone());
                 let more = continue_after(&message);
                 out.push(message);
+
                 if !more {
                     break;
                 }
             }
+
             let count = out.len() - start;
             self.next += count;
             count
@@ -514,10 +555,12 @@ impl ReceivedBatch {
             let message = next();
             let more = continue_after(&message);
             out.push(message);
+
             if !more {
                 break;
             }
         }
+
         out.len() - start
     }
 
@@ -531,6 +574,7 @@ fn check_envelope(message: &Message) -> Result<()> {
     if !(1..=2).contains(&message.len()) {
         return Err(invalid("invalid SHM batch envelope").into());
     }
+
     Ok(())
 }
 
@@ -539,6 +583,7 @@ fn copied_length(bytes: &[u8], index: usize) -> Result<usize> {
     let length = bytes
         .get(offset..offset + SIZE_BYTES)
         .ok_or_else(|| invalid("truncated SHM batch size table"))?;
+
     usize::try_from(u64::from_le_bytes(length.try_into().unwrap()))
         .map_err(|_| invalid("SHM batch body length overflow").into())
 }

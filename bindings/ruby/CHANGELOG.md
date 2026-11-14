@@ -9,6 +9,20 @@
   hold on a PUB, XPUB or RADIO socket (default 65536). A negative value
   removes a limit.
 
+## [0.2.15] - 2026-11-12
+
+### Changed
+
+- Bundle `omq-tokio` 0.35.1. A connection driver with steady output
+  pauses every 16 KiB, so other tasks and timers on its IO thread run on
+  time.
+
+## [0.2.14] - 2026-11-09
+
+### Changed
+
+- Bundle `omq-tokio` 0.35.0.
+
 ## [0.2.13] - 2026-11-04
 
 ### Changed

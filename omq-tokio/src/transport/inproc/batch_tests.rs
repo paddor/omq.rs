@@ -19,6 +19,7 @@ impl Receiver {
         let signal = wakes.clone();
         let cancel = tokio_util::sync::CancellationToken::new();
         let port = InprocPort::new();
+
         port.open(OpenPort {
             sink: RecvSink::Yring(YringSink {
                 producer,
@@ -31,6 +32,7 @@ impl Receiver {
             max_message_size,
             cancel: cancel.clone(),
         });
+
         Self {
             port,
             messages,
@@ -46,9 +48,11 @@ impl Receiver {
     fn drain(&mut self) -> Vec<Message> {
         let mut received = Vec::new();
         self.messages.prefetch();
+
         while let Some(message) = self.messages.pop() {
             received.push(message);
         }
+
         self.messages.release();
         received
     }
@@ -82,11 +86,14 @@ fn full_batch_preserves_unsent_messages_and_resumes_after_release() {
     let mut sender = receiver.sender();
     let mut batch = messages(5);
     let expected: Vec<_> = batch.iter().cloned().collect();
+
     assert_eq!(sender.try_send_many(&mut batch, 5).unwrap(), 2);
     assert_eq!(batch.front(), Some(&expected[2]));
     assert_eq!(receiver.drain(), expected[..2]);
+
     assert_eq!(sender.try_send_many(&mut batch, 5).unwrap(), 2);
     assert_eq!(receiver.drain(), expected[2..4]);
+
     assert_eq!(sender.try_send_many(&mut batch, 5).unwrap(), 1);
     assert_eq!(receiver.drain(), expected[4..]);
     assert!(batch.is_empty());

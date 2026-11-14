@@ -2,7 +2,7 @@ use super::*;
 use crate::socket::recv::{
     BlockingRecvWaker, RecvPipeEnds, RecvTuning, SpscAwareRecv, SpscHandles, recv_pipe,
 };
-use crate::test_util::poll_once;
+use crate::test_util::{counting_waker, poll_once};
 
 impl Default for RecvLimits {
     fn default() -> Self {
@@ -34,6 +34,7 @@ impl PeerRecvRoutes {
                 zmtp_version: (0, 0),
             },
         );
+
         self.register_peer(identity, cancel)
     }
 }
@@ -80,24 +81,29 @@ fn receive_budget_survives_claims(options: &omq_proto::Options) {
     let (mut routes, mut receiver) = PeerRecvRoutes::new(16, &handles, options);
     let mut a = register(&mut routes, "a");
     let mut b = register(&mut routes, "b");
+
     put(&mut a, "first");
     put(&mut a, "second");
     put(&mut a, "pending");
     assert!(a.blocked());
+
     let (receipt, message) = receiver.try_recv_with_receipt(None).unwrap();
     let lane = receipt.lane().unwrap().clone();
     receiver.unshift(receipt, message).unwrap();
     assert!(a.retry_pending());
     assert!(a.blocked(), "a held message keeps its budget charge");
+
     let (receipt, _) = receiver.try_recv_with_receipt(Some(&lane)).unwrap();
     assert!(a.retry_pending());
     assert!(a.blocked(), "a claimed message keeps its budget charge");
+
     put(&mut b, "independent");
     assert!(!b.blocked());
     assert_eq!(
         receiver.try_recv().unwrap().part_slice(0),
         Some(b"b".as_slice())
     );
+
     let state = routes
         .previous
         .get(b"a".as_slice())
@@ -110,12 +116,14 @@ fn receive_budget_survives_claims(options: &omq_proto::Options) {
     assert_ne!(signal.generation(), seen);
     assert!(a.retry_pending());
     assert!(!a.blocked());
+
     for expected in ["second", "pending"] {
         assert_eq!(
             receiver.try_recv().unwrap().part_slice(1),
             Some(expected.as_bytes())
         );
     }
+
     if options.peer_recv_max_bytes == Some(128) {
         assert!(!a.push(Message::single(vec![0; 256])));
     }
@@ -127,10 +135,12 @@ fn receive_message_budget_can_exceed_old_limit() {
     let handles = SpscHandles::new(BlockingRecvWaker::new(), false);
     let (mut routes, mut receiver) = PeerRecvRoutes::new(16384, &handles, &options);
     let mut sink = register(&mut routes, "a");
+
     for _ in 0..8200 {
         put(&mut sink, "queued");
         assert!(!sink.blocked());
     }
+
     put(&mut sink, "pending");
     assert!(sink.blocked());
     assert!(poll_once(sink.ready()).is_pending());
@@ -158,18 +168,22 @@ fn configured_receive_peer_limit_counts_retired_queues() {
                 .register(Bytes::from_static(b"new"), CancellationToken::new())
                 .is_err()
         );
+
         for peer in &mut peers {
             put(peer, "retained");
         }
+
         drop(peers);
         assert!(
             routes
                 .register(Bytes::from_static(b"new"), CancellationToken::new())
                 .is_err()
         );
+
         for _ in 0..limit {
             receiver.try_recv().unwrap();
         }
+
         assert!(matches!(receiver.try_recv(), Err(Error::WouldBlock)));
         let _replacement = register(&mut routes, "new");
     }
@@ -192,6 +206,7 @@ fn ordinary_receive(
         space,
     };
     let receiver = SpscAwareRecv::new(ends, handles, RecvTuning::default());
+
     (routes, receiver, pipe)
 }
 
@@ -216,16 +231,19 @@ fn held_message_and_live_receipt_exclude_source_from_ordinary_receives() {
     let mut b = register(&mut routes, "b");
     put(&mut a, "first");
     put(&mut a, "second");
+
     let (receipt, message) = receiver.try_recv_with_receipt(None).unwrap();
     assert_eq!(receipt.identity(), Some(b"a".as_slice()));
     let source = receipt.lane().unwrap().clone();
     receiver.unshift(receipt, message).unwrap();
+
     put(&mut b, "healthy");
     assert_eq!(
         receiver.try_recv().unwrap().part_slice(1),
         Some(b"healthy".as_slice())
     );
     assert!(matches!(receiver.try_recv(), Err(Error::WouldBlock)));
+
     for _ in 0..3 {
         let (receipt, message) = receiver.try_recv_with_receipt(Some(&source)).unwrap();
         assert_eq!(message.part_slice(0), Some(b"first".as_slice()));
@@ -236,6 +254,7 @@ fn held_message_and_live_receipt_exclude_source_from_ordinary_receives() {
         assert!(matches!(receiver.try_recv(), Err(Error::WouldBlock)));
         receiver.unshift(receipt, message).unwrap();
     }
+
     let (receipt, _) = receiver.try_recv_with_receipt(Some(&source)).unwrap();
     drop(receipt);
     assert_eq!(
@@ -254,19 +273,24 @@ fn unshift_transfers_charge_without_readmitting_or_overtaking() {
         },
         16,
     );
+
     let mut sink = register(&mut routes, "a");
     put(&mut sink, "one");
+
     let (receipt, message) = receiver.try_recv_with_receipt(None).unwrap();
     let source = receipt.lane().unwrap().clone();
     assert!(sink.push(Message::single("two")));
     assert!(sink.blocked());
+
     receiver.unshift(receipt, message).unwrap();
     assert!(sink.retry_pending());
     assert!(sink.blocked());
+
     let (receipt, message) = receiver.try_recv_with_receipt(Some(&source)).unwrap();
     assert_eq!(message.part_slice(0), Some(b"one".as_slice()));
     assert!(sink.retry_pending());
     assert!(sink.blocked());
+
     drop(receipt);
     assert!(sink.retry_pending());
     assert!(!sink.blocked());
@@ -283,24 +307,28 @@ fn ordinary_drain_preserves_batched_producer_space_wakes() {
     for (capacity, release_at) in [(16, 16), (256, 128)] {
         let (mut routes, mut receiver) = receive_pair(RecvLimits::default(), capacity);
         let mut sink = register(&mut routes, "a");
+
         for _ in 0..=capacity {
             put(&mut sink, "queued");
         }
+
         assert!(sink.blocked());
-        let count = Arc::new(WakeCount(0.into()));
-        let waker = std::task::Waker::from(count.clone());
+        let (counter, waker) = counting_waker();
         let mut cx = std::task::Context::from_waker(&waker);
         let mut ready = Box::pin(sink.ready());
         assert!(ready.as_mut().poll(&mut cx).is_pending());
+
         for consumed in 1..=release_at {
             let message = receiver.try_recv().unwrap();
             assert_eq!(message.part_slice(1), Some(b"queued".as_slice()));
+
             if consumed < release_at {
-                assert_eq!(count.0.load(Ordering::Relaxed), 0);
+                assert_eq!(counter.count(), 0);
                 assert!(ready.as_mut().poll(&mut cx).is_pending());
             }
         }
-        assert_eq!(count.0.load(Ordering::Relaxed), 1);
+
+        assert_eq!(counter.count(), 1);
         assert!(ready.as_mut().poll(&mut cx).is_ready());
         drop(ready);
         assert!(sink.retry_pending());
@@ -315,20 +343,23 @@ fn receipt_claim_publishes_consumed_slot_to_blocked_producer() {
     for capacity in [16, 256] {
         let (mut routes, mut receiver) = receive_pair(RecvLimits::default(), capacity);
         let mut sink = register(&mut routes, "a");
+
         for _ in 0..=capacity {
             put(&mut sink, "queued");
         }
+
         assert!(sink.blocked());
-        let count = Arc::new(WakeCount(0.into()));
-        let waker = std::task::Waker::from(count.clone());
+        let (counter, waker) = counting_waker();
         let mut cx = std::task::Context::from_waker(&waker);
         let mut ready = Box::pin(sink.ready());
         assert!(ready.as_mut().poll(&mut cx).is_pending());
+
         // The claim pauses the source lane, which publishes its consumed slot.
         let (receipt, body) = receiver.try_recv_with_receipt(None).unwrap();
         assert_eq!(body.part_slice(0), Some(b"queued".as_slice()));
-        assert_eq!(count.0.load(Ordering::Relaxed), 1);
+        assert_eq!(counter.count(), 1);
         assert!(ready.as_mut().poll(&mut cx).is_ready());
+
         drop(ready);
         assert!(sink.retry_pending());
         assert!(!sink.blocked());
@@ -343,6 +374,7 @@ fn paused_source_retains_one_large_frame_without_blocking_other_sources() {
     let mut message = Message::from_slice(&vec![7; 8 * 1024 * 1024]);
     message.bound_storage();
     let charge = message.retained_size().unwrap();
+
     let (mut routes, mut receiver) = receive_pair(
         RecvLimits {
             bytes: 2 * charge,
@@ -357,18 +389,20 @@ fn paused_source_retains_one_large_frame_without_blocking_other_sources() {
         .unwrap()
         .budget
         .clone();
+
     assert!(a.push(message.clone()));
     a.flush();
     let (receipt, held) = receiver.try_recv_with_receipt(None).unwrap();
     let source = receipt.lane().unwrap().clone();
     receiver.unshift(receipt, held).unwrap();
+
     assert!(a.push(message.clone()));
     a.flush();
     assert!(!a.blocked());
     assert!(a.push(message.clone()));
     assert!(a.blocked());
-    let count = Arc::new(WakeCount(0.into()));
-    let waker = std::task::Waker::from(count.clone());
+
+    let (counter, waker) = counting_waker();
     let mut ready = Box::pin(a.ready());
     let mut cx = std::task::Context::from_waker(&waker);
     assert!(ready.as_mut().poll(&mut cx).is_pending());
@@ -376,22 +410,27 @@ fn paused_source_retains_one_large_frame_without_blocking_other_sources() {
     for _ in 0..3 {
         let (receipt, held) = receiver.try_recv_with_receipt(Some(&source)).unwrap();
         receiver.unshift(receipt, held).unwrap();
+
         assert!(b.push(message.clone()));
         b.flush();
         assert!(!b.blocked());
+
         let (receipt, body) = receiver.try_recv_with_receipt(None).unwrap();
         assert_eq!(receipt.identity(), Some(b"b".as_slice()));
         assert_eq!(body.part_slice(0).unwrap().len(), 8 * 1024 * 1024);
         drop((receipt, body));
-        assert_eq!(count.0.load(Ordering::Relaxed), 0);
+        assert_eq!(counter.count(), 0);
     }
+
     let (receipt, held) = receiver.try_recv_with_receipt(Some(&source)).unwrap();
     drop((receipt, held));
-    assert!(count.0.load(Ordering::Relaxed) > 0);
+    assert!(counter.count() > 0);
     assert!(ready.as_mut().poll(&mut cx).is_ready());
+
     drop(ready);
     assert!(a.retry_pending());
     assert!(!a.blocked());
+
     while receiver.try_recv().is_ok() {}
     assert!(receiver.is_empty());
     assert!(budget.room(2 * charge));
@@ -402,9 +441,11 @@ fn stale_unshift_returns_body_and_does_not_pause_replacement() {
     let (mut routes, mut receiver) = receive_pair(RecvLimits::default(), 16);
     let mut old = register(&mut routes, "a");
     put(&mut old, "old");
+
     let (receipt, message) = receiver.try_recv_with_receipt(None).unwrap();
     let source = receipt.lane().unwrap().clone();
     let mut new = register(&mut routes, "a");
+
     let error = receiver.unshift(receipt, message).unwrap_err();
     assert!(matches!(error.error, Error::Closed));
     assert_eq!(error.message.part_slice(0), Some(b"old".as_slice()));
@@ -412,6 +453,7 @@ fn stale_unshift_returns_body_and_does_not_pause_replacement() {
         receiver.try_recv_with_receipt(Some(&source)),
         Err(Error::Closed)
     ));
+
     put(&mut new, "new");
     assert_eq!(
         receiver.try_recv().unwrap().part_slice(1),
@@ -425,10 +467,12 @@ fn disconnected_held_source_releases_held_and_unread_charges() {
     let mut sink = register(&mut routes, "a");
     put(&mut sink, "one");
     put(&mut sink, "two");
+
     let (receipt, message) = receiver.try_recv_with_receipt(None).unwrap();
     let source = receipt.lane().unwrap().clone();
     receiver.unshift(receipt, message).unwrap();
     drop(sink);
+
     assert!(matches!(receiver.try_recv(), Err(Error::WouldBlock)));
     assert!(receiver.is_empty());
     assert!(receiver.paused.is_empty());
@@ -445,19 +489,23 @@ fn foreign_and_oversized_returns_preserve_ownership_and_release_claim() {
     let mut sink = register(&mut routes, "a");
     put(&mut sink, "one");
     put(&mut sink, "two");
+
     let (receipt, message) = receiver.try_recv_with_receipt(None).unwrap();
     let source = receipt.lane().unwrap().clone();
     assert!(matches!(
         foreign.try_recv_with_receipt(Some(&source)),
         Err(Error::Protocol(_))
     ));
+
     let error = foreign.unshift(receipt, message).unwrap_err();
     assert_eq!(error.message.part_slice(0), Some(b"one".as_slice()));
+
     let (receipt, _) = receiver.try_recv_with_receipt(None).unwrap();
     let large = Message::from_slice(&[7; 1024]);
     let error = receiver.unshift(receipt, large).unwrap_err();
     assert!(matches!(error.error, Error::Protocol(_)));
     assert_eq!(error.message.part_slice(0), Some([7; 1024].as_slice()));
+
     put(&mut sink, "three");
     assert_eq!(
         receiver.try_recv().unwrap().part_slice(1),
@@ -468,17 +516,19 @@ fn foreign_and_oversized_returns_preserve_ownership_and_release_claim() {
 #[test]
 fn targeted_wait_ignores_other_sources_and_wakes_on_its_source() {
     use std::future::Future;
-    use std::task::{Context, Poll, Waker};
+    use std::task::{Context, Poll};
+
     let (mut routes, receiver) = receive_pair(RecvLimits::default(), 16);
     let receiver = ReceiveCell::new(receiver, Weak::new());
     let mut a = register(&mut routes, "a");
     let mut b = register(&mut routes, "b");
+
     put(&mut a, "first");
     let (receipt, _) = receiver.lock().try_recv_with_receipt(None).unwrap();
     let source = receipt.lane().unwrap().clone();
     drop(receipt);
-    let count = Arc::new(WakeCount(0.into()));
-    let waker = Waker::from(count.clone());
+
+    let (counter, waker) = counting_waker();
     let mut waiting = Box::pin(PeerReceiver::recv_with_receipt(&receiver, Some(&source)));
     assert!(
         waiting
@@ -486,16 +536,20 @@ fn targeted_wait_ignores_other_sources_and_wakes_on_its_source() {
             .poll(&mut Context::from_waker(&waker))
             .is_pending()
     );
+
     for _ in 0..4 {
         put(&mut b, "unrelated");
     }
-    assert_eq!(count.0.load(Ordering::Relaxed), 0);
+
+    assert_eq!(counter.count(), 0);
     put(&mut a, "second");
-    assert!(count.0.load(Ordering::Relaxed) > 0);
+    assert!(counter.count() > 0);
+
     let Poll::Ready(Ok((receipt, body))) = waiting.as_mut().poll(&mut Context::from_waker(&waker))
     else {
         panic!("target not ready")
     };
+
     assert_eq!(body.part_slice(0), Some(b"second".as_slice()));
     drop(receipt);
 }
@@ -503,17 +557,19 @@ fn targeted_wait_ignores_other_sources_and_wakes_on_its_source() {
 #[test]
 fn targeted_wait_ends_on_disconnect_or_socket_close() {
     use std::future::Future;
-    use std::task::{Context, Poll, Waker};
+    use std::task::{Context, Poll};
+
     for close_socket in [false, true] {
         let (mut routes, receiver) = receive_pair(RecvLimits::default(), 16);
         let receiver = ReceiveCell::new(receiver, Weak::new());
         let mut a = register(&mut routes, "a");
+
         put(&mut a, "first");
         let (receipt, _) = receiver.lock().try_recv_with_receipt(None).unwrap();
         let source = receipt.lane().unwrap().clone();
         drop(receipt);
-        let count = Arc::new(WakeCount(0.into()));
-        let waker = Waker::from(count.clone());
+
+        let (counter, waker) = counting_waker();
         let mut waiting = Box::pin(PeerReceiver::recv_with_receipt(&receiver, Some(&source)));
         assert!(
             waiting
@@ -521,12 +577,14 @@ fn targeted_wait_ends_on_disconnect_or_socket_close() {
                 .poll(&mut Context::from_waker(&waker))
                 .is_pending()
         );
+
         if close_socket {
             routes.close_receive();
         } else {
             drop(a);
         }
-        assert!(count.0.load(Ordering::Relaxed) > 0);
+
+        assert!(counter.count() > 0);
         assert!(matches!(
             waiting.as_mut().poll(&mut Context::from_waker(&waker)),
             Poll::Ready(Err(Error::Closed))
@@ -537,15 +595,17 @@ fn targeted_wait_ends_on_disconnect_or_socket_close() {
 #[test]
 fn held_only_queue_does_not_reschedule_fair_waiters_in_a_loop() {
     use std::future::Future;
-    use std::task::{Context, Waker};
+    use std::task::Context;
+
     let (mut routes, receiver, _pipe) = ordinary_receive(16);
     let mut a = register(&mut routes, "a");
+
     put(&mut a, "held");
     let (receipt, message) = receiver.try_recv_with_receipt(None).unwrap();
     let source = receipt.lane().unwrap().clone();
     receiver.unshift(receipt, message).unwrap();
-    let count = Arc::new(WakeCount(0.into()));
-    let waker = Waker::from(count.clone());
+
+    let (counter, waker) = counting_waker();
     let mut waiting = Box::pin(receiver.recv());
     assert!(
         waiting
@@ -553,18 +613,20 @@ fn held_only_queue_does_not_reschedule_fair_waiters_in_a_loop() {
             .poll(&mut Context::from_waker(&waker))
             .is_pending()
     );
-    let seen = count.0.load(Ordering::Relaxed);
+
+    let seen = counter.count();
     assert!(
         waiting
             .as_mut()
             .poll(&mut Context::from_waker(&waker))
             .is_pending()
     );
-    assert_eq!(count.0.load(Ordering::Relaxed), seen);
+    assert_eq!(counter.count(), seen);
+
     let (receipt, _) = receiver.try_recv_with_receipt(Some(&source)).unwrap();
     drop(receipt);
     put(&mut a, "resumed");
-    assert!(count.0.load(Ordering::Relaxed) > seen);
+    assert!(counter.count() > seen);
     assert!(
         waiting
             .as_mut()
@@ -573,27 +635,17 @@ fn held_only_queue_does_not_reschedule_fair_waiters_in_a_loop() {
     );
 }
 
-struct WakeCount(std::sync::atomic::AtomicUsize);
-
-impl std::task::Wake for WakeCount {
-    fn wake(self: Arc<Self>) {
-        self.0.fetch_add(1, Ordering::Relaxed);
-    }
-}
-
 #[test]
 fn canceled_waiter_hands_off_batch_without_consuming() {
     use std::future::Future;
-    use std::task::{Context, Poll, Waker};
+    use std::task::{Context, Poll};
 
     for cancel_first in [true, false] {
         let (mut routes, receiver, _pipe) = ordinary_receive(16);
         let mut sink = register(&mut routes, "a");
-        let counts: [_; 3] = std::array::from_fn(|_| Arc::new(WakeCount(0.into())));
-        let wakers = counts
-            .each_ref()
-            .map(|counter| Waker::from(counter.clone()));
+        let (counts, wakers): (Vec<_>, Vec<_>) = (0..3).map(|_| counting_waker()).unzip();
         let mut waiting = std::array::from_fn::<_, 3, _>(|_| Some(Box::pin(receiver.recv())));
+
         for (future, waker) in waiting.iter_mut().zip(&wakers) {
             assert!(
                 future
@@ -604,11 +656,14 @@ fn canceled_waiter_hands_off_batch_without_consuming() {
                     .is_pending()
             );
         }
+
         for value in ["first", "second", "third"] {
             assert!(sink.push(Message::single(value)));
         }
+
         sink.flush();
         let mut messages = Vec::new();
+
         if cancel_first {
             drop(waiting[0].take());
         } else {
@@ -620,14 +675,17 @@ fn canceled_waiter_hands_off_batch_without_consuming() {
             else {
                 panic!("first receive not ready");
             };
+
             messages.push(message);
             drop(waiting[1].take());
         }
+
         for index in if cancel_first { 1..3 } else { 2..3 } {
             assert!(
-                counts[index].0.load(Ordering::Relaxed) > 0,
+                counts[index].count() > 0,
                 "receiver {index} stranded after cancellation"
             );
+
             let Poll::Ready(Ok(message)) = waiting[index]
                 .as_mut()
                 .unwrap()
@@ -636,12 +694,15 @@ fn canceled_waiter_hands_off_batch_without_consuming() {
             else {
                 panic!("receive not ready");
             };
+
             messages.push(message);
         }
+
         messages.push(receiver.try_recv().unwrap());
         for (message, expected) in messages.iter().zip(["first", "second", "third"]) {
             assert_eq!(message.part_slice(1), Some(expected.as_bytes()));
         }
+
         assert!(matches!(receiver.try_recv(), Err(Error::WouldBlock)));
     }
 }
@@ -649,12 +710,11 @@ fn canceled_waiter_hands_off_batch_without_consuming() {
 #[test]
 fn repeated_receives_coalesce_handoffs_to_a_parked_waiter() {
     use std::future::Future;
-    use std::task::{Context, Waker};
+    use std::task::Context;
 
     let (mut routes, receiver, _pipe) = ordinary_receive(16);
     let mut sink = register(&mut routes, "a");
-    let counter = Arc::new(WakeCount(0.into()));
-    let waker = Waker::from(counter.clone());
+    let (counter, waker) = counting_waker();
     let mut waiting = Box::pin(receiver.recv());
     assert!(
         waiting
@@ -662,16 +722,20 @@ fn repeated_receives_coalesce_handoffs_to_a_parked_waiter() {
             .poll(&mut Context::from_waker(&waker))
             .is_pending()
     );
+
     for _ in 0..16 {
         assert!(sink.push(Message::single("value")));
     }
+
     sink.flush();
     receiver.try_recv().unwrap();
-    let counts = counter.0.load(Ordering::Relaxed);
+    let counts = counter.count();
+
     for _ in 0..14 {
         receiver.try_recv().unwrap();
     }
-    assert_eq!(counter.0.load(Ordering::Relaxed), counts);
+
+    assert_eq!(counter.count(), counts);
     assert!(
         waiting
             .as_mut()
@@ -683,25 +747,12 @@ fn repeated_receives_coalesce_handoffs_to_a_parked_waiter() {
 #[test]
 fn one_batch_wakes_two_parked_socket_receivers() {
     use std::future::Future;
-    use std::sync::atomic::AtomicUsize;
-    use std::task::{Context, Wake, Waker};
-
-    struct Wakes(AtomicUsize);
-    impl Wake for Wakes {
-        fn wake(self: Arc<Self>) {
-            self.0.fetch_add(1, Ordering::Relaxed);
-        }
-    }
+    use std::task::Context;
 
     let (mut routes, receiver, _pipe) = ordinary_receive(16);
     let mut sink = register(&mut routes, "a");
-    let counts = [
-        Arc::new(Wakes(AtomicUsize::new(0))),
-        Arc::new(Wakes(AtomicUsize::new(0))),
-    ];
-    let wakers = counts
-        .each_ref()
-        .map(|counter| Waker::from(counter.clone()));
+    let (counts, wakers): (Vec<_>, Vec<_>) = (0..2).map(|_| counting_waker()).unzip();
+
     let mut first = std::pin::pin!(receiver.recv());
     let mut second = std::pin::pin!(receiver.recv());
     assert!(
@@ -716,20 +767,20 @@ fn one_batch_wakes_two_parked_socket_receivers() {
             .poll(&mut Context::from_waker(&wakers[1]))
             .is_pending()
     );
+
     assert!(sink.push(Message::single("first")));
     assert!(sink.push(Message::single("second")));
     sink.flush();
-    assert!(counts[0].0.load(Ordering::Relaxed) > 0);
+
+    assert!(counts[0].count() > 0);
     assert!(
         first
             .as_mut()
             .poll(&mut Context::from_waker(&wakers[0]))
             .is_ready()
     );
-    assert!(
-        counts[1].0.load(Ordering::Relaxed) > 0,
-        "second parked receiver needs a wake"
-    );
+
+    assert!(counts[1].count() > 0, "second parked receiver needs a wake");
     assert!(
         second
             .as_mut()
@@ -759,12 +810,14 @@ fn profile_sparse_peer_receive() {
         .collect();
     let mut active = register(&mut routes, "active");
     let start = std::time::Instant::now();
+
     for _ in 0..messages {
         put(&mut active, "payload");
         let message = receiver.try_recv().unwrap();
         assert_eq!(message.part_slice(1), Some(b"payload".as_slice()));
         std::hint::black_box(message);
     }
+
     println!(
         "idle={idle} messages={messages} msg_s={:.0}",
         messages as f64 / start.elapsed().as_secs_f64()
@@ -798,10 +851,12 @@ fn handover_discards_old_queue_and_waits_for_both_halves_to_release_allocation()
         ..RecvLimits::default()
     };
     let (mut routes, mut receiver) = receive_pair(config, 16);
+
     let mut old = register(&mut routes, "a");
     put(&mut old, "old");
     let mut next = register(&mut routes, "a");
     put(&mut next, "next");
+
     assert_eq!(
         receiver.try_recv().unwrap().part_slice(1),
         Some(b"next".as_slice())
@@ -811,12 +866,14 @@ fn handover_discards_old_queue_and_waits_for_both_halves_to_release_allocation()
             .register(Bytes::from_static(b"a"), CancellationToken::new())
             .is_err()
     );
+
     drop(old);
     assert!(
         routes
             .register(Bytes::from_static(b"a"), CancellationToken::new())
             .is_err()
     );
+
     assert!(matches!(receiver.try_recv(), Err(Error::WouldBlock)));
     let _replacement = register(&mut routes, "a");
 }
@@ -825,15 +882,19 @@ fn handover_discards_old_queue_and_waits_for_both_halves_to_release_allocation()
 async fn drains_full_queue_and_wakes_without_a_timer() {
     let (mut routes, mut receiver) = receive_pair(RecvLimits::default(), 16);
     let mut sink = register(&mut routes, "a");
+
     for _ in 0..17 {
         put(&mut sink, "value");
     }
+
     assert!(sink.blocked());
     assert!(poll_once(sink.ready()).is_pending());
+
     for _ in 0..16 {
         assert!(poll_once(sink.ready()).is_pending());
         receiver.try_recv().unwrap();
     }
+
     assert!(poll_once(sink.ready()).is_ready());
     assert!(sink.retry_pending());
     let mut out = Vec::with_capacity(16);
@@ -847,14 +908,17 @@ async fn drains_full_queue_and_wakes_without_a_timer() {
 fn full_producer_waits_for_half_ring_credits() {
     let (mut routes, mut receiver) = receive_pair(RecvLimits::default(), 256);
     let mut sink = register(&mut routes, "a");
+
     for _ in 0..257 {
         put(&mut sink, "value");
     }
+
     assert!(sink.blocked());
     for _ in 0..128 {
         assert!(poll_once(sink.ready()).is_pending());
         receiver.try_recv().unwrap();
     }
+
     assert!(poll_once(sink.ready()).is_ready());
     assert!(sink.retry_pending());
     assert!(!sink.blocked());
@@ -876,11 +940,13 @@ fn idle_peers_do_not_interfere_with_hot_quiet_fairness_or_fifo() {
         .collect();
     let mut hot = register(&mut routes, "hot");
     let mut quiet = register(&mut routes, "quiet");
+
     for sequence in 0u32..256 {
         assert!(hot.push(Message::single(Bytes::copy_from_slice(
             &sequence.to_le_bytes()
         ))));
     }
+
     hot.flush();
     for sequence in 0u32..256 {
         put(&mut quiet, "quiet");
@@ -900,6 +966,7 @@ fn idle_peers_do_not_interfere_with_hot_quiet_fairness_or_fifo() {
             Some(sequence.to_le_bytes().as_slice())
         );
     }
+
     assert!(receiver.is_empty());
 }
 
@@ -935,9 +1002,11 @@ fn idle_disconnect_wakes_receiver_and_releases_registration_slot() {
     let (mut routes, mut receiver) = receive_pair(config, 16);
     let idle = register(&mut routes, "a");
     assert!(matches!(receiver.try_recv(), Err(Error::WouldBlock)));
+
     let data = receiver.shared.data.clone();
     let mut notified = std::pin::pin!(data.ready());
     assert!(poll_once(notified.as_mut()).is_pending());
+
     drop(idle);
     assert!(poll_once(notified.as_mut()).is_ready());
     assert!(matches!(receiver.try_recv(), Err(Error::WouldBlock)));
@@ -961,6 +1030,7 @@ fn registration_racing_receiver_drop_always_cancels_admitted_connections() {
         barrier.wait();
         drop(receiver);
         let (_routes, sink) = register.join().unwrap();
+
         if let Ok(mut sink) = sink {
             assert!(observer.is_cancelled());
             assert!(!sink.push(Message::single("closed")));
@@ -986,16 +1056,20 @@ fn ordinary_async_receive_yields_during_stale_generation_cleanup() {
     };
     let receiver = SpscAwareRecv::new(ends, handles, RecvTuning::default());
     let mut old = register(&mut routes, "a");
+
     for _ in 0..512 {
         put(&mut old, "stale");
     }
+
     let mut next = register(&mut routes, "a");
     assert!(poll_once(receiver.recv()).is_pending());
     assert!(!lane.lock().is_empty());
     put(&mut next, "current");
+
     let std::task::Poll::Ready(Ok(message)) = poll_once(receiver.recv()) else {
         panic!("current peer must not wait for the stale backlog");
     };
+
     assert_eq!(message.part_slice(1), Some(b"current".as_slice()));
     assert!(!lane.lock().is_empty());
 }
@@ -1021,9 +1095,11 @@ fn ordinary_bulk_after_first_preserves_budget_and_releases_partial_credits() {
         let receiver = SpscAwareRecv::new(ends, handles, RecvTuning::default());
         let mut sink = register(&mut routes, "a");
         let payload = Bytes::from(vec![0x55; size]);
+
         for _ in 0..513 {
             assert!(sink.push(Message::single(payload.clone())));
         }
+
         sink.flush();
         assert!(poll_once(sink.ready()).is_pending());
         let mut out = vec![receiver.try_recv().unwrap()];
@@ -1041,9 +1117,11 @@ fn reconnect_discards_respect_message_and_byte_drain_limits() {
         let (mut routes, mut receiver) = receive_pair(RecvLimits::default(), 512);
         let mut old = register(&mut routes, "a");
         let payload = Bytes::from(vec![0x55; size]);
+
         for _ in 0..count {
             assert!(old.push(Message::single(payload.clone())));
         }
+
         old.flush();
         let mut next = register(&mut routes, "a");
         assert!(matches!(receiver.try_recv(), Err(Error::WouldBlock)));
@@ -1052,9 +1130,11 @@ fn reconnect_discards_respect_message_and_byte_drain_limits() {
         assert!(!receiver.is_empty());
         put(&mut next, "current");
         let result = receiver.try_recv();
+
         let Ok(message) = result else {
             panic!("current peer must not wait for the stale backlog: {result:?}");
         };
+
         assert_eq!(message.part_slice(1), Some(b"current".as_slice()));
         assert!(!receiver.is_empty());
     }
@@ -1063,40 +1143,37 @@ fn reconnect_discards_respect_message_and_byte_drain_limits() {
 #[test]
 fn credit_boundary_and_partial_bulk_return_wake_the_registered_producer() {
     use std::future::Future;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::task::{Context, Wake, Waker};
-
-    struct Wakes(AtomicUsize);
-    impl Wake for Wakes {
-        fn wake(self: Arc<Self>) {
-            self.0.fetch_add(1, Ordering::Relaxed);
-        }
-    }
+    use std::task::Context;
 
     for bulk in [false, true] {
         let (mut routes, mut receiver) = receive_pair(RecvLimits::default(), 256);
         let mut sink = register(&mut routes, "a");
+
         for _ in 0..257 {
             put(&mut sink, "value");
         }
-        let counter = Arc::new(Wakes(AtomicUsize::new(0)));
-        let waker = Waker::from(counter.clone());
+
+        let (counter, waker) = counting_waker();
         let mut cx = Context::from_waker(&waker);
+
         {
             let mut ready = std::pin::pin!(sink.ready());
             assert!(ready.as_mut().poll(&mut cx).is_pending());
+
             if bulk {
                 let mut out = Vec::new();
                 assert_eq!(receiver.try_recv_many_into(1, &mut out).unwrap(), 1);
             } else {
                 for _ in 0..128 {
-                    assert_eq!(counter.0.load(Ordering::Relaxed), 0);
+                    assert_eq!(counter.count(), 0);
                     receiver.try_recv().unwrap();
                 }
             }
-            assert!(counter.0.load(Ordering::Relaxed) > 0);
+
+            assert!(counter.count() > 0);
             assert!(ready.as_mut().poll(&mut cx).is_ready());
         }
+
         assert!(sink.retry_pending());
         assert!(!sink.blocked());
     }
@@ -1119,19 +1196,24 @@ fn per_source_count_and_byte_bounds_leave_other_sources_usable() {
         let (mut routes, mut receiver) = receive_pair(config, 16);
         let mut a = register(&mut routes, "a");
         let mut b = register(&mut routes, "b");
+
         put(&mut a, "1234");
         put(&mut a, "5678");
         put(&mut a, "next");
         assert!(a.blocked());
+
         let (held, _) = receiver.try_recv_with_receipt(None).unwrap();
         put(&mut b, "healthy");
         assert!(!b.blocked());
+
         let (receipt, body) = receiver.try_recv_with_receipt(None).unwrap();
         assert_eq!(receipt.identity(), Some(b"b".as_slice()));
         assert_eq!(body.part_slice(0), Some(b"healthy".as_slice()));
         drop(receipt);
+
         assert!(a.retry_pending());
         assert!(a.blocked());
+
         drop(held);
         assert!(a.retry_pending());
         assert!(!a.blocked());
@@ -1146,13 +1228,16 @@ fn empty_frames_cannot_bypass_receive_byte_budget() {
     };
     let (mut routes, mut receiver) = receive_pair(config, 16);
     let mut sink = register(&mut routes, "a");
+
     assert!(sink.push(Message::multipart(["", "", ""])));
     sink.flush();
     assert!(sink.push(Message::multipart(["", ""])));
     assert!(sink.blocked());
+
     receiver.try_recv().unwrap();
     assert!(sink.retry_pending());
     assert!(!sink.blocked());
+
     assert!(!sink.push(Message::multipart(["", "", "", "", ""])));
 }
 
@@ -1163,9 +1248,11 @@ fn dropping_receiver_cancels_idle_and_full_peers_and_releases_budgets() {
     let idle = register(&mut routes, "idle");
     let busy_state = routes.previous[b"busy".as_slice()].upgrade().unwrap();
     let idle_state = routes.previous[b"idle".as_slice()].upgrade().unwrap();
+
     for _ in 0..17 {
         put(&mut busy, "busy");
     }
+
     let budget = busy_state.budget.clone();
     drop(receiver);
     assert!(budget.room(omq_proto::options::DEFAULT_PEER_MAX_BYTES));
@@ -1196,9 +1283,11 @@ async fn closing_receive_wakes_receiver_without_canceling_outbound_linger() {
     let (mut routes, receiver, _pipe) = ordinary_receive(16);
     let mut sink = register(&mut routes, "a");
     let state = routes.previous[b"a".as_slice()].upgrade().unwrap();
+
     assert!(poll_once(receiver.recv()).is_pending());
     routes.close_receive();
     assert!(matches!(receiver.recv().await, Err(Error::Closed)));
+
     assert!(!state.cancel.is_cancelled());
     assert!(sink.retry_pending());
     put(&mut sink, "closed admission");

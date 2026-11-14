@@ -6,7 +6,6 @@
 mod helpers;
 
 use std::ffi::{CString, c_void};
-use std::mem::size_of;
 use std::time::{Duration, Instant};
 
 use omq_zmq::{
@@ -36,13 +35,6 @@ struct ProxyArgs {
 // SAFETY: the proxy thread is the only user of these sockets while it runs.
 unsafe impl Send for ProxyArgs {}
 
-fn set_i32(sock: *mut c_void, opt: i32, value: i32) {
-    assert_eq!(
-        zmq_setsockopt(sock, opt, (&value as *const i32).cast(), size_of::<i32>()),
-        0
-    );
-}
-
 /// CPU time and voluntary context switches of this process.
 fn usage() -> (Duration, i64) {
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
@@ -58,6 +50,7 @@ fn usage() -> (Duration, i64) {
     let switches = i64::from(usage.ru_nvcsw);
     #[cfg(target_pointer_width = "64")]
     let switches = usage.ru_nvcsw;
+
     (
         Duration::from_micros(micros(usage.ru_utime) + micros(usage.ru_stime)),
         switches,
@@ -70,6 +63,7 @@ fn usage_while_sleeping(idle: Duration) -> (Duration, i64) {
     let (cpu_before, switches_before) = usage();
     std::thread::sleep(idle);
     let (cpu_after, switches_after) = usage();
+
     (
         cpu_after.saturating_sub(cpu_before),
         switches_after - switches_before,
@@ -80,6 +74,7 @@ fn usage_while_sleeping(idle: Duration) -> (Duration, i64) {
 fn fill_until_backpressured(src: *mut c_void, body: &[u8]) {
     let deadline = Instant::now() + Duration::from_secs(20);
     let mut full_since: Option<Instant> = None;
+
     loop {
         assert!(Instant::now() < deadline, "proxy never backpressured");
         if zmq_send(src, body.as_ptr().cast(), body.len(), ZMQ_DONTWAIT) >= 0 {
@@ -89,6 +84,7 @@ fn fill_until_backpressured(src: *mut c_void, body: &[u8]) {
             if since.elapsed() > Duration::from_millis(200) {
                 break;
             }
+
             std::thread::sleep(Duration::from_millis(5));
         }
     }
@@ -103,15 +99,18 @@ fn proxy_into_muted_nodrop_publisher_does_not_spin() {
     let sub = zmq_socket(ctx, ZMQ_SUB);
     let ctrl_a = zmq_socket(ctx, ZMQ_PAIR);
     let ctrl_b = zmq_socket(ctx, ZMQ_PAIR);
+
     for sock in [fe, be, src, sub, ctrl_a, ctrl_b] {
-        set_i32(sock, ZMQ_LINGER, 0);
+        helpers::set_int_opt(sock, ZMQ_LINGER, 0);
     }
+
     for sock in [fe, be, src] {
-        set_i32(sock, ZMQ_SNDHWM, 16);
-        set_i32(sock, ZMQ_RCVHWM, 16);
+        helpers::set_int_opt(sock, ZMQ_SNDHWM, 16);
+        helpers::set_int_opt(sock, ZMQ_RCVHWM, 16);
     }
-    set_i32(sub, ZMQ_RCVHWM, 16);
-    set_i32(be, ZMQ_XPUB_NODROP, 1);
+
+    helpers::set_int_opt(sub, ZMQ_RCVHWM, 16);
+    helpers::set_int_opt(be, ZMQ_XPUB_NODROP, 1);
     assert_eq!(zmq_setsockopt(sub, ZMQ_SUBSCRIBE, std::ptr::null(), 0), 0);
 
     let addr_fe = CString::new("inproc://proxy-idle-fe").unwrap();
@@ -153,7 +152,7 @@ fn proxy_into_muted_nodrop_publisher_does_not_spin() {
     );
 
     // Reading resumes forwarding; control still reaches the proxy.
-    set_i32(sub, ZMQ_RCVTIMEO, 5_000);
+    helpers::set_int_opt(sub, ZMQ_RCVTIMEO, 5_000);
     let mut buf = vec![0u8; body.len()];
     assert!(zmq_recv(sub, buf.as_mut_ptr().cast(), buf.len(), 0) > 0);
     assert_eq!(zmq_send(ctrl_b, b"TERMINATE".as_ptr().cast(), 9, 0), 9);
@@ -162,5 +161,6 @@ fn proxy_into_muted_nodrop_publisher_does_not_spin() {
     for sock in [fe, be, src, sub, ctrl_a, ctrl_b] {
         zmq_close(sock);
     }
+
     zmq_ctx_term(ctx);
 }

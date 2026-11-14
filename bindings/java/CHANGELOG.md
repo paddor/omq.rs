@@ -7,6 +7,26 @@
 - `maxMessageParts` / `noMaxMessageParts` and `maxPeerSubscriptions` /
   `noMaxPeerSubscriptions` on `Socket` and `SocketOptions.Builder`.
 
+## [0.5.9] - 2026-11-12
+
+### Changed
+
+- Bundle `omq-tokio` 0.35.1. A connection driver with steady output
+  pauses every 16 KiB, so other tasks and timers on its IO thread run on
+  time.
+
+## [0.5.8] - 2026-11-09
+
+### Changed
+
+- Bundle `omq-tokio` 0.35.0.
+
+### Fixed
+
+- The native library builds with the `plain` or `curve` feature off.
+  Disabled PLAIN and CURVE entry points throw a "support not enabled"
+  error.
+
 ## [0.5.7] - 2026-11-04
 
 ### Changed

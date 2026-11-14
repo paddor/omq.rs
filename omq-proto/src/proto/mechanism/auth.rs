@@ -135,6 +135,7 @@ impl AuthenticationResult {
         authentication.mechanism = Some(mechanism);
         authentication.user_id.clone_from(&self.user_id);
         authentication.metadata.clone_from(&self.metadata);
+
         // User-Id belongs to the authenticator even when it supplies no ID.
         // Remove collisions rather than relying on a consumer's lookup order.
         properties.other.retain(|(name, _)| {
@@ -144,9 +145,11 @@ impl AuthenticationResult {
                     .iter()
                     .any(|(authenticated, _)| name.eq_ignore_ascii_case(authenticated))
         });
+
         if let Some(user_id) = self.user_id {
             properties.add("User-Id", user_id);
         }
+
         properties.other.extend(self.metadata);
     }
 }
@@ -195,6 +198,7 @@ impl Authenticator {
             .into_iter()
             .map(|(username, password)| (username.into(), password.into()))
             .collect();
+
         Self::new(move |peer| {
             use subtle::ConstantTimeEq;
 
@@ -282,11 +286,13 @@ impl ServerAuth {
         if !self.defer {
             return Some(self.authenticator.authenticate(&peer));
         }
+
         self.waiting = true;
         self.request = Some(Box::new(AuthenticationRequest {
             authenticator: self.authenticator.clone(),
             peer,
         }));
+
         None
     }
 
@@ -294,6 +300,7 @@ impl ServerAuth {
         if !self.waiting {
             return Err(no_pending_authentication());
         }
+
         self.waiting = false;
         self.request = None;
         Ok(())
@@ -314,11 +321,13 @@ pub(super) fn check_authentication(
     if result.status == AuthenticationStatus::Success {
         return Ok(());
     }
+
     if result.status != AuthenticationStatus::TemporaryFailure {
         out.push(Command::Error {
             reason: result.status.code().into(),
         });
     }
+
     Err(Error::HandshakeFailed(format!(
         "{mechanism} authentication failed with status {}",
         result.status.code()

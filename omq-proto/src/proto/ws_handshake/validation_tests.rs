@@ -181,6 +181,7 @@ fn rejects_ambiguous_or_malformed_responses() {
             valid.trim_end_matches("\r\n").to_string(),
         ),
     ];
+
     let accepted: Vec<_> = cases
         .into_iter()
         .filter_map(|(name, wire)| {
@@ -189,6 +190,7 @@ fn rejects_ambiguous_or_malformed_responses() {
                 .then_some(name)
         })
         .collect();
+
     assert!(
         accepted.is_empty(),
         "accepted malformed responses: {accepted:?}"

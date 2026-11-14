@@ -132,9 +132,10 @@ impl Session<'_> {
 
             () = tokio::task::yield_now(), if turn.control_exhausted => Ok(Flow::Next),
 
-            // Keep the reactor polling for a follow-up send or reply.
-            // Yield every turn; idle and backpressured peers still park.
-            () = tokio::task::yield_now(), if turn.poll_transport => Ok(Flow::Next),
+            // Keep the reactor polling for a follow-up send or reply, or end
+            // an output pause. Yield every turn; idle and backpressured
+            // peers still park.
+            () = tokio::task::yield_now(), if turn.poll_transport || turn.output_paused => Ok(Flow::Next),
         }
     }
 
@@ -158,6 +159,7 @@ impl Session<'_> {
         let step = self
             .control
             .handle_command(cmd, &mut self.connection, input_failed)?;
+
         Ok(Flow::exit_unless(step != DriverStep::Close))
     }
 
@@ -167,6 +169,7 @@ impl Session<'_> {
         if !ready {
             return Flow::Exit;
         }
+
         self.outlet
             .output
             .set_control_prefix(self.peer_events.control_prefix());
@@ -242,6 +245,7 @@ impl Session<'_> {
         if self.claim_writer() == Flow::Exit {
             return Ok(Flow::Exit);
         }
+
         let n = res?;
 
         self.latency.note_progress();
@@ -281,6 +285,7 @@ impl Session<'_> {
             &self.connection,
             &mut self.output.frames,
         )?;
+
         Ok(Flow::Next)
     }
 

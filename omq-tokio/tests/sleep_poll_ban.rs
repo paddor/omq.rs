@@ -50,9 +50,11 @@ fn binding_and_libzmq_waits_do_not_sleep_poll() {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let repo = manifest.parent().expect("omq-tokio lives under repo root");
     let mut violations = Vec::new();
+
     for root in ["omq-tokio/src", "omq-libzmq/src", "bindings"] {
         collect(repo, &repo.join(root), &mut violations);
     }
+
     assert!(
         violations.is_empty(),
         "timer polling outside the allowlist; park on a wakeup instead:\n{}",
@@ -64,9 +66,11 @@ fn collect(repo: &Path, dir: &Path, violations: &mut Vec<String>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
+
     for entry in entries {
         let path = entry.expect("read source entry").path();
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
         if path.is_dir() {
             // Tests, benches, peers, and build output may sleep.
             if !matches!(
@@ -75,31 +79,38 @@ fn collect(repo: &Path, dir: &Path, violations: &mut Vec<String>) {
             ) {
                 collect(repo, &path, violations);
             }
+
             continue;
         }
+
         if path.extension().and_then(|e| e.to_str()) != Some("rs")
             || name == "tests.rs"
             || name.ends_with("_tests.rs")
         {
             continue;
         }
+
         let rel = path
             .strip_prefix(repo)
             .expect("source under repo")
             .to_string_lossy()
             .replace('\\', "/");
         let text = fs::read_to_string(&path).expect("read source file");
+
         for (index, line) in text.lines().enumerate() {
             // Inline unit test modules sit at the end of the file.
             if line.starts_with("#[cfg(test)]") {
                 break;
             }
+
             if !FORBIDDEN.iter().any(|needle| line.contains(needle)) {
                 continue;
             }
+
             let allowed = ALLOWED
                 .iter()
                 .any(|(file, needle, _)| *file == rel && line.contains(needle));
+
             if !allowed {
                 violations.push(format!("{rel}:{}: {}", index + 1, line.trim()));
             }
@@ -114,6 +125,7 @@ fn generated_build_sources_are_skipped_but_native_sources_are_checked() {
         .unwrap()
         .as_nanos();
     let repo = std::env::temp_dir().join(format!("omq-sleep-poll-{}-{nonce}", std::process::id()));
+
     for relative in ["build/packages/omq/native/src", "native/src"] {
         let dir = repo.join(relative);
         fs::create_dir_all(&dir).unwrap();
@@ -123,6 +135,7 @@ fn generated_build_sources_are_skipped_but_native_sources_are_checked() {
         )
         .unwrap();
     }
+
     let mut violations = Vec::new();
     collect(&repo, &repo, &mut violations);
     fs::remove_dir_all(repo).unwrap();

@@ -116,6 +116,7 @@ fn generate_multi_peer(sub: &Path, transport: &str, title: &str) {
 
     let title = format!("{title}{}", receiver_label(transport));
     let merged_cpu = merge_cpu_data(panel_data.iter().map(|(_, _, _, cpu)| cpu));
+
     let rows: Vec<ThroughputRow<'_>> = panel_data
         .iter()
         .map(|(peers, tput, msgs, _)| ThroughputRow {
@@ -125,6 +126,7 @@ fn generate_multi_peer(sub: &Path, transport: &str, title: &str) {
             fairness: None,
         })
         .collect();
+
     let out = sub.join(format!("{transport}.svg"));
     let spec = ChartSpec {
         out_path: &out,
@@ -137,6 +139,7 @@ fn generate_multi_peer(sub: &Path, transport: &str, title: &str) {
         snd_label: "snd CPU%",
         rcv_label: "",
     };
+
     let row_title = |peers: u64| {
         if peers == 1 {
             "1 subscriber".to_string()
@@ -153,6 +156,7 @@ fn generate_multi_peer(sub: &Path, transport: &str, title: &str) {
         super::common::detect_hardware().as_deref(),
     )
     .expect("draw pubsub chart");
+
     eprintln!("Written: {}", out.display());
 }
 
@@ -160,6 +164,7 @@ fn receiver_label(transport: &str) -> String {
     let path = crate::jsonl::cache_dir().join("comparisons.jsonl");
     let rows: Vec<(_, crate::jsonl::ComparisonRow)> = crate::jsonl::load_jsonl(&path);
     let mut latest = BTreeMap::new();
+
     for (_, row) in rows {
         if row.kind == "pub_sub"
             && row.transport == transport
@@ -173,17 +178,21 @@ fn receiver_label(transport: &str) -> String {
             );
         }
     }
+
     let io_counts: BTreeSet<_> = latest.values().map(|(io, _)| *io).collect();
     let Some(Some(io)) = io_counts.first() else {
         return String::new();
     };
+
     if io_counts.len() != 1 {
         return String::new();
     }
+
     let workers: BTreeSet<_> = latest
         .into_values()
         .map(|(_, workers)| workers.unwrap_or(1))
         .collect();
+
     match (workers.first(), workers.last()) {
         (Some(min), Some(max)) if min != max => {
             format!(", receiver {io} IO / {min}-{max} workers")

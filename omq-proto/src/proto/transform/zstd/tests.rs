@@ -10,15 +10,19 @@ fn pooled_decode_preserves_table_and_invalidates_wire_byte_count() {
     ]);
     let wire = ZstdEncoder::new().encode(&plain).unwrap().remove(0);
     let wire = pool.multipart(wire.iter());
+
     let crate::message::MessageInner::Multi(parts) = &wire.inner else {
         panic!("multipart")
     };
+
     let pointer = parts.as_ptr();
     assert_ne!(wire.byte_len(), plain.byte_len());
     let decoded = ZstdDecoder::new().decode(wire).unwrap().unwrap();
+
     let crate::message::MessageInner::Multi(parts) = &decoded.inner else {
         panic!("multipart")
     };
+
     assert_eq!(parts.as_ptr(), pointer);
     assert_eq!(
         decoded.iter().collect::<Vec<_>>(),
@@ -27,9 +31,11 @@ fn pooled_decode_preserves_table_and_invalidates_wire_byte_count() {
     assert_eq!(decoded.byte_len(), plain.byte_len());
     drop(decoded);
     let reused = pool.multipart(["a", "", "b"]);
+
     let crate::message::MessageInner::Multi(parts) = &reused.inner else {
         panic!("multipart")
     };
+
     assert_eq!(parts.as_ptr(), pointer);
 }
 
@@ -37,6 +43,7 @@ pub(super) fn trained_dict() -> Bytes {
     let samples: Vec<&[u8]> = (0..200)
         .map(|_| &b"the-quick-brown-fox-jumps-over-the-lazy-dog\n"[..])
         .collect();
+
     train_zdict(&samples, MAX_DICT_BYTES).expect("training must succeed")
 }
 
@@ -99,6 +106,7 @@ fn options_custom_level_reaches_encoder() {
     let (enc, _) = MessageEncoder::for_compression_kind(CompressionKind::Zstd, &options)
         .unwrap()
         .unwrap();
+
     match enc {
         MessageEncoder::Zstd(enc) => assert_eq!(enc.level, 1),
         #[cfg(feature = "lz4")]
@@ -123,6 +131,7 @@ fn unset_level_adapts_and_fixed_level_pins() {
         #[cfg(feature = "lz4")]
         MessageEncoder::Lz4(_) => panic!("expected zstd encoder"),
     };
+
     let adaptive = encoder(&Options::new());
     assert!(adaptive.is_adaptive());
     assert_eq!(adaptive.level(), DEFAULT_LEVEL);
@@ -142,17 +151,21 @@ fn unset_level_adapts_and_fixed_level_pins() {
 fn adapted_level_changes_frames_and_offload_work_counts_only_at_that_level() {
     use std::fmt::Write as _;
     let mut body = String::new();
+
     for index in 0..8192 {
         write!(body, "{{\"id\":{},\"v\":{}}}", index % 97, index % 13).unwrap();
     }
+
     let message = Message::single(body.into_bytes()[..64 * 1024].to_vec());
     let mut encoder = ZstdEncoder::new().with_level_range(-7, 4);
     let mut decoder = ZstdDecoder::new();
     let before = encoder.encode(&message).unwrap().remove(0);
     assert!(!encoder.adaptation_ready());
+
     for _ in 0..3 {
         encoder.encode(&message).unwrap();
     }
+
     assert!(encoder.adaptation_ready());
     let window = OutputWindow {
         elapsed: std::time::Duration::from_millis(100),
@@ -162,11 +175,13 @@ fn adapted_level_changes_frames_and_offload_work_counts_only_at_that_level() {
         overflowed: 0,
         input_full: 0,
     };
+
     encoder.adapt_level(window);
     assert_eq!(encoder.level(), 1);
     assert!(!encoder.adaptation_ready());
     let after = encoder.encode(&message).unwrap().remove(0);
     assert_ne!(before, after);
+
     for wire in [before, after] {
         assert_eq!(decoder.decode(wire).unwrap(), Some(message.clone()));
     }
@@ -176,6 +191,7 @@ fn adapted_level_changes_frames_and_offload_work_counts_only_at_that_level() {
     encoder.stats = Some(CompressStats::default());
     encoder.absorb_offload_stats(&mut offload);
     assert!(encoder.stats.unwrap().plain > 0);
+
     let mut stale = encoder.new_offload();
     stale.encode(&message).unwrap();
     encoder.set_level(-1);
@@ -204,11 +220,14 @@ fn dict_roundtrip() {
     let plain = b"the-quick-brown-fox-jumps-over-the-lazy-dog\n".repeat(2);
     let mut enc = ZstdEncoder::with_send_dict(dict.clone()).unwrap();
     let mut dec = ZstdDecoder::new();
+
     let wire = enc.encode(&Message::single(plain.clone())).unwrap();
     assert_eq!(wire.len(), 2);
     assert_eq!(wire[0].part_bytes(0).unwrap().as_ref(), &dict[..]);
+
     assert!(dec.decode(wire[0].clone()).unwrap().is_none());
     assert_eq!(dec.recv_dict.as_ref().unwrap().as_ref(), &dict[..]);
+
     let recovered = dec.decode(wire[1].clone()).unwrap().unwrap();
     assert_eq!(recovered.part_bytes(0).unwrap().to_vec(), plain);
 }
@@ -228,6 +247,7 @@ fn dict_cap_applies_to_zdict_blob() {
     let err = dec
         .decode(Message::single(Bytes::from(shipment)))
         .unwrap_err();
+
     match err {
         Error::Protocol(msg) => assert!(msg.contains("exceeds max")),
         other => panic!("expected protocol error, got {other:?}"),
@@ -252,15 +272,18 @@ fn auto_train_ships_dict_and_blocks_offload() {
     assert!(!enc.can_offload());
     let mut dec = ZstdDecoder::new();
     let sample = br#"{"event":"login","user":"alice","ip":"10.0.0.1","ok":true}"#;
+
     for _ in 0..2000 {
         let wire = enc.encode(&Message::single(sample.as_slice())).unwrap();
         for part in wire {
             let _ = dec.decode(part).unwrap();
         }
+
         if enc.send.dict.is_some() {
             break;
         }
     }
+
     assert!(enc.send.dict.is_some(), "auto-train never produced dict");
     let dict = enc.send.dict.clone().unwrap();
     assert_eq!(&dict[..4], &ZDICT_MAGIC);

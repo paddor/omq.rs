@@ -17,6 +17,7 @@ pub(super) async fn cooperate() {
         remaining.set(if next == 0 { SEND_YIELD_INTERVAL } else { next });
         next == 0
     });
+
     if exhausted {
         // Also wakes and returns Pending when polled outside a Tokio runtime.
         tokio::task::yield_now().await;

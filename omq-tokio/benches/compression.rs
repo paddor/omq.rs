@@ -7,14 +7,14 @@
 //! mimic typical eventing / log shipping traffic. Reports **virtual**
 //! throughput (uncompressed bytes/sec).
 
+#[cfg(feature = "lz4")]
+#[path = "common/mod.rs"]
+mod common;
+
 #[cfg(not(feature = "lz4"))]
 fn main() {
     eprintln!("compression bench requires `--features lz4`");
 }
-
-#[cfg(feature = "lz4")]
-#[path = "common/mod.rs"]
-mod common;
 
 #[cfg(feature = "lz4")]
 fn main() {
@@ -48,6 +48,7 @@ mod inner {
         if let Ok(s) = std::env::var("OMQ_BENCH_TRANSPORTS") {
             return s.split(',').map(|t| t.trim().to_string()).collect();
         }
+
         SUPPORTED_TRANSPORTS
             .iter()
             .map(|s| (*s).to_string())
@@ -58,6 +59,7 @@ mod inner {
         if let Ok(s) = std::env::var("OMQ_BENCH_DICT_SIZES") {
             return s.split(',').filter_map(|t| t.trim().parse().ok()).collect();
         }
+
         DEFAULT_DICT_SIZES.to_vec()
     }
 
@@ -65,6 +67,7 @@ mod inner {
         if let Ok(s) = std::env::var("OMQ_BENCH_SIZES") {
             return s.split(',').filter_map(|t| t.trim().parse().ok()).collect();
         }
+
         common::DENSE_SIZES.to_vec()
     }
 
@@ -101,11 +104,13 @@ mod inner {
                                     .await;
                             let wire_mbps =
                                 (cell.msgs_s * wire_bytes_per_msg as f64) / 1_000_000.0;
+
                             let cpu_pct = if cell.elapsed.as_nanos() > 0 {
                                 cell.cpu_time.as_secs_f64() / cell.elapsed.as_secs_f64() * 100.0
                             } else {
                                 0.0
                             };
+
                             println!(
                                 "  ~{:>6}  {:>9.0} msg/s  {:>9.1} wireMB/s  {:>9.1} virtMB/s  ({:.2}s, cpu {:.0}%, n={})",
                                 format!("{approx_size}B"),
@@ -116,6 +121,7 @@ mod inner {
                                 cpu_pct,
                                 cell.n,
                             );
+
                             let row = CompressionRow {
                                 pattern: PATTERN,
                                 transport,
@@ -124,8 +130,10 @@ mod inner {
                                 wire_bytes: wire_bytes_per_msg,
                                 dict_size: None,
                             };
+
                             append_compression_jsonl(&row, cell);
                         }
+
                         println!();
                     }
                 }
@@ -138,6 +146,7 @@ mod inner {
     async fn run_dict_benches(peer_counts: &[usize], sizes: &[usize], seq: &mut usize) {
         let dict_sizes = dict_sizes();
         let transports = active_transports();
+
         for &dict_cap in &dict_sizes {
             let dict_label = if dict_cap >= 1024 {
                 format!("{}K", dict_cap / 1024)
@@ -149,9 +158,11 @@ mod inner {
                 if !transports.iter().any(|t| t == transport) {
                     continue;
                 }
+
                 let dict = train_lz4_dict_sized(dict_cap);
                 let actual_len = dict.len();
                 println!("--- {transport} with {dict_label} dict (actual {actual_len}B) ---");
+
                 for &peers in peer_counts {
                     common::print_subheader(transport, peers);
                     for &approx_size in sizes {
@@ -163,11 +174,13 @@ mod inner {
                             run_cell(transport, peers, payload.clone(), *seq, Some(dict.clone()))
                                 .await;
                         let wire_mbps = (cell.msgs_s * wire_bytes_per_msg as f64) / 1_000_000.0;
+
                         let cpu_pct = if cell.elapsed.as_nanos() > 0 {
                             cell.cpu_time.as_secs_f64() / cell.elapsed.as_secs_f64() * 100.0
                         } else {
                             0.0
                         };
+
                         println!(
                             "  ~{:>6}  {:>9.0} msg/s  {:>9.1} wireMB/s  {:>9.1} virtMB/s  ({:.2}s, cpu {:.0}%, n={})",
                             format!("{approx_size}B"),
@@ -178,6 +191,7 @@ mod inner {
                             cpu_pct,
                             cell.n,
                         );
+
                         let row = CompressionRow {
                             pattern: "compression_json_dict",
                             transport,
@@ -186,8 +200,10 @@ mod inner {
                             wire_bytes: wire_bytes_per_msg,
                             dict_size: Some(dict_cap),
                         };
+
                         append_compression_jsonl(&row, cell);
                     }
+
                     println!();
                 }
             }
@@ -217,6 +233,7 @@ mod inner {
         if std::env::var_os("OMQ_BENCH_NO_WRITE").is_some() {
             return;
         }
+
         let path = common::compression_results_path();
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -226,6 +243,7 @@ mod inner {
             Some(ds) => format!(r#","dict_size":{ds}"#),
             None => String::new(),
         };
+
         let line = format!(
             r#"{{"run_id":"{run}","pattern":"{pattern}","transport":"{transport}","peers":{peers},"msg_size":{msg_size},"wire_bytes":{wire_bytes},"msg_count":{n},"elapsed":{el},"cpu_time":{cpu},"mbps":{mbps},"msgs_s":{msgs_s}{dict_field}}}"#,
             run = common::run_id(),
@@ -235,6 +253,7 @@ mod inner {
             mbps = c.mbps,
             msgs_s = c.msgs_s,
         );
+
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -248,18 +267,22 @@ mod inner {
     fn wire_size(transport: &str, plain: &Bytes, dict: Option<&Bytes>) -> usize {
         use omq_proto::proto::transform::lz4::Lz4Encoder;
         let m = omq_tokio::Message::single(plain.clone());
+
         let encoded_len = |out: omq_proto::proto::transform::TransformedOut| {
             out.last().map_or(plain.len(), omq_tokio::Message::byte_len)
         };
+
         match transport {
             "lz4+tcp" => {
                 let mut t = match dict {
                     Some(d) => Lz4Encoder::with_send_dict(d.clone()).unwrap(),
                     None => Lz4Encoder::new(),
                 };
+
                 if let Some(th) = compression_threshold() {
                     t = t.with_threshold(th);
                 }
+
                 encoded_len(t.encode(&m).unwrap())
             }
             _ => plain.len(),
@@ -269,10 +292,12 @@ mod inner {
     fn train_lz4_dict_sized(max_bytes: usize) -> Bytes {
         use omq_proto::proto::transform::lz4::DictTrainer;
         let mut trainer = DictTrainer::new(max_bytes);
+
         for i in 0..200 {
             let sample = json_payload(64 + (i * 10) % (4096 - 64));
             trainer.add_sample(&sample);
         }
+
         let dict = trainer.train();
         Bytes::from(dict)
     }
@@ -282,9 +307,11 @@ mod inner {
             Some(d) => Options::default().compression_dict(d.clone()),
             None => Options::default().compression_auto_train(false),
         };
+
         if let Some(t) = compression_threshold() {
             opts = opts.compression_threshold(t);
         }
+
         opts
     }
 
@@ -293,6 +320,7 @@ mod inner {
         if let Some(hwm) = send_hwm() {
             opts = opts.send_hwm(hwm);
         }
+
         opts
     }
 
@@ -323,13 +351,16 @@ mod inner {
             let pushes = pushes.clone();
             let payload = payload.clone();
             let pull_count = pull_count.clone();
+
             async move {
                 let per = (k / pushes.len()).max(1);
                 let target = pull_count.load(Ordering::Relaxed) + per * pushes.len();
                 let mut handles = Vec::with_capacity(pushes.len());
+
                 for i in 0..pushes.len() {
                     let p = pushes.clone();
                     let payload = payload.clone();
+
                     handles.push(tokio::spawn(async move {
                         if inline {
                             for _ in 0..per {
@@ -343,9 +374,11 @@ mod inner {
                         }
                     }));
                 }
+
                 for h in handles {
                     let _ = h.await;
                 }
+
                 while pull_count.load(Ordering::Relaxed) < target {
                     tokio::time::sleep(std::time::Duration::from_micros(50)).await;
                 }
@@ -374,6 +407,7 @@ mod inner {
                 let _ = p.close().await;
             }
         }
+
         if let Ok(pull) = std::sync::Arc::try_unwrap(pull) {
             let _ = pull.close().await;
         }
@@ -395,6 +429,7 @@ mod inner {
             p.connect(ep.clone()).await.expect("connect PUSH");
             pushes.push(p);
         }
+
         let refs: Vec<&Socket> = pushes.iter().collect();
         common::wait_connected(&refs).await;
 
@@ -414,9 +449,11 @@ mod inner {
                 {
                     pull_count.fetch_add(1, Ordering::Relaxed);
                     let mut drained = 0u64;
+
                     while pull.try_recv().is_ok() {
                         drained += 1;
                     }
+
                     pull_count.fetch_add(drained as usize, Ordering::Relaxed);
                 }
             }
@@ -424,6 +461,7 @@ mod inner {
     }
 
     const LEVELS: &[&str] = &["DEBUG", "INFO", "WARN", "ERROR"];
+
     const SERVICES: &[&str] = &[
         "api-gateway",
         "auth-svc",
@@ -431,7 +469,9 @@ mod inner {
         "payment-svc",
         "notify-svc",
     ];
+
     const METHODS: &[&str] = &["GET", "POST", "PUT", "DELETE", "PATCH"];
+
     const PATHS: &[&str] = &[
         "/v1/widgets",
         "/v1/users",
@@ -439,6 +479,7 @@ mod inner {
         "/v2/events",
         "/v1/health",
     ];
+
     const REGIONS: &[&str] = &[
         "us-east-1",
         "us-west-2",
@@ -446,9 +487,11 @@ mod inner {
         "ap-south-1",
         "eu-central-1",
     ];
+
     const STATUSES: &[u16] = &[200, 201, 204, 400, 404, 500, 502, 503];
     const ACTIONS: &[&str] = &["login", "logout", "purchase", "refund", "update_profile"];
     const CURRENCIES: &[&str] = &["USD", "EUR", "GBP", "JPY", "CHF"];
+
     const ERROR_CODES: &[&str] = &[
         "TIMEOUT",
         "RATE_LIMITED",
@@ -462,6 +505,7 @@ mod inner {
     fn json_payload(target_bytes: usize) -> Bytes {
         let mut out = String::with_capacity(target_bytes + 512);
         let mut counter: u32 = 0;
+
         while out.len() < target_bytes {
             // Multiplicative hash spreads consecutive counters over all fields.
             let h = counter.wrapping_mul(0x9E37_79B1) as usize;
@@ -469,6 +513,7 @@ mod inner {
             out.push('\n');
             counter = counter.wrapping_add(1);
         }
+
         out.truncate(target_bytes);
         Bytes::from(out)
     }
@@ -478,6 +523,7 @@ mod inner {
     fn write_json_record(out: &mut String, h: usize) {
         use std::fmt::Write as _;
         let id = format!("{h:08x}");
+
         match h % 5 {
             0 => {
                 let level = LEVELS[h % LEVELS.len()];
@@ -515,6 +561,7 @@ mod inner {
             3 => {
                 let service = SERVICES[(h >> 4) % SERVICES.len()];
                 let region = REGIONS[(h >> 16) % REGIONS.len()];
+
                 let _ = write!(
                     out,
                     r#"{{"type":"metric","service":"{service}","host":"{service}-{id}.svc.cluster.local","region":"{region}","ts":"2026-04-27T12:34:56.{id}Z","cpu":{cpu:.1},"mem_mb":{mem},"gc_ms":{gc},"conns":{conns}}}"#,

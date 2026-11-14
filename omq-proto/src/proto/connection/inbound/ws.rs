@@ -19,6 +19,7 @@ impl Connection {
                         "peer sent data frame during handshake".into(),
                     ));
                 }
+
                 self.process_mechanism_command(payload.as_bytes())
             }
             State::Ready => {
@@ -44,6 +45,7 @@ impl Connection {
             ws_codec::WsRole::Client => ws_codec::WsRole::Server,
             ws_codec::WsRole::Server => ws_codec::WsRole::Client,
         };
+
         let mut service = (self.input.budget || self.config.ws_input_budget)
             .then(crate::proto::connection::ws::Service::new);
 
@@ -51,6 +53,7 @@ impl Connection {
             if self.ws_input_paused() {
                 return Ok(());
             }
+
             let before = self.in_buf.len();
             self.clear_peer_ttl_if_input_buffered();
 
@@ -59,6 +62,7 @@ impl Connection {
             } else {
                 self.step_ws_frame(peer_role)?
             };
+
             // Charge consumed bytes to the service budget; stop once spent.
             if !progressed || !self.account_ws_service(&mut service, before - self.in_buf.len()) {
                 return Ok(());
@@ -76,6 +80,7 @@ impl Connection {
             .skip_payload
             .min(self.in_buf.len())
             .min(crate::proto::connection::ws::SERVICE_BYTES);
+
         if take == 0 {
             return false;
         }
@@ -105,6 +110,7 @@ impl Connection {
         let Some(ws_hdr) = ws_codec::peek_ws_header(&self.in_buf, peer_role)? else {
             return Ok(false);
         };
+
         let payload_len = self.ws_frame_payload_len(&ws_hdr)?;
         let total_frame = ws_hdr
             .header_len
@@ -122,6 +128,7 @@ impl Connection {
             self.ws.control.skip_payload = payload_len;
             return Ok(true);
         }
+
         if self.in_buf.len() < total_frame {
             return Ok(false);
         }
@@ -163,6 +170,7 @@ impl Connection {
             }
             _ => unreachable!("peek_ws_header rejects unknown opcodes"),
         }
+
         Ok(true)
     }
 
@@ -176,11 +184,13 @@ impl Connection {
                 "WS payload length {declared} exceeds platform usize"
             ))
         })?;
+
         if payload_len > isize::MAX as usize {
             return Err(Error::Protocol(format!(
                 "WS payload length {payload_len} exceeds maximum allocation"
             )));
         }
+
         // Reject oversized declarations before buffering the body. The
         // pre-auth ceiling applies even without an application message limit.
         if header.opcode < crate::proto::ws_codec::OP_CLOSE_CODE
@@ -191,9 +201,11 @@ impl Connection {
                 "WS frame too large: {payload_len} bytes (max {cap})"
             )));
         }
+
         if !self.ws.close_sent {
             self.validate_ws_receive_header(header, payload_len)?;
         }
+
         Ok(payload_len)
     }
 
@@ -210,10 +222,12 @@ impl Connection {
                         "new WS binary frame before fragmented message completed".into(),
                     ));
                 }
+
                 let flag = (payload_len > 0)
                     .then(|| self.in_buf.peek_array_at::<1>(header.header_len))
                     .flatten()
                     .map(|value| value[0] ^ if header.masked { header.mask_key[0] } else { 0 });
+
                 (payload_len, flag)
             }
             ws_codec::OP_CONTINUATION_CODE => {
@@ -222,18 +236,22 @@ impl Connection {
                         "WS continuation frame without initial binary frame".into(),
                     ));
                 };
+
                 if fragment.count == crate::proto::connection::ws::MAX_FRAGMENTS {
                     return Err(Error::Protocol("WS fragment limit exceeded".into()));
                 }
+
                 let total = fragment
                     .bytes
                     .len()
                     .checked_add(payload_len)
                     .ok_or_else(|| Error::Protocol("WS fragmented message size overflow".into()))?;
+
                 (total, fragment.bytes.first().copied())
             }
             _ => return Ok(()),
         };
+
         if let Some(max) = self.ws_payload_cap()
             && total > max
         {
@@ -241,11 +259,13 @@ impl Connection {
                 "WS fragmented message too large: {total} bytes (max {max})"
             )));
         }
+
         if matches!(self.state, State::Ready)
             && let Some(flag) = flag
         {
             self.validate_receive_frame(zws::zws_to_flags(flag)?, total.saturating_sub(1))?;
         }
+
         Ok(())
     }
 
@@ -261,6 +281,7 @@ impl Connection {
             self.input.pending = !self.in_buf.is_empty();
             return false;
         }
+
         true
     }
 
@@ -286,10 +307,12 @@ impl Connection {
         if payload_len == 0 {
             return Err(Error::Protocol("empty WS binary frame".into()));
         }
+
         let flag = self.in_buf.peek_array::<1>().expect("complete WS payload")[0];
         let flags = crate::proto::zws::zws_to_flags(flag)?;
         self.in_buf.advance(1);
         let payload = self.in_buf.split_to(payload_len - 1);
+
         self.dispatch_ws_binary(flags, payload)
     }
 
@@ -318,6 +341,7 @@ impl Connection {
         // Clients must mask and servers must not (RFC 6455 5.1).
         let masked = peer_role == WsRole::Client;
         let b1 = first_two[1];
+
         if masked != (b1 & 0x80 != 0) {
             return Ok(None);
         }
@@ -327,6 +351,7 @@ impl Connection {
         if ws_payload_len >= 126 {
             return Ok(None);
         }
+
         // ws_payload = ZWS flag (1) + ZMTP payload
         if ws_payload_len == 0 || ws_payload_len - 1 > crate::message::MAX_INLINE_MESSAGE {
             return Ok(None);
@@ -334,6 +359,7 @@ impl Connection {
 
         let header_len = if masked { 6 } else { 2 };
         let total_frame = header_len + ws_payload_len;
+
         if self.in_buf.len() < total_frame {
             return Ok(Some(false));
         }
@@ -342,6 +368,7 @@ impl Connection {
             let Some(hdr) = self.in_buf.peek_array::<6>() else {
                 return Ok(Some(false));
             };
+
             Some([hdr[2], hdr[3], hdr[4], hdr[5]])
         } else {
             None
@@ -391,6 +418,7 @@ impl Connection {
             self.in_buf.copy_into(payload_len, &mut raw);
             // Offset 1: the flag byte already used the first key byte.
             ws_codec::apply_mask_offset(&mut raw, mask_key, 1);
+
             return self.dispatch_ws_binary(flags, Payload::from_bytes(raw.freeze()));
         }
 
@@ -428,6 +456,7 @@ impl Connection {
     ) -> Result<()> {
         use crate::proto::ws_codec;
         let raw = self.take_ws_payload(payload_len, ws_hdr);
+
         match ws_hdr.opcode {
             ws_codec::OP_BINARY_CODE => {
                 if self.ws.fragment.is_some() {
@@ -435,6 +464,7 @@ impl Connection {
                         "new WS binary frame before fragmented message completed".into(),
                     ));
                 }
+
                 if ws_hdr.fin {
                     self.dispatch_ws_payload(raw)
                 } else {
@@ -442,6 +472,7 @@ impl Connection {
                         bytes: raw,
                         count: 1,
                     });
+
                     Ok(())
                 }
             }
@@ -451,14 +482,17 @@ impl Connection {
                         "WS continuation frame without initial binary frame".into(),
                     ));
                 };
+
                 if fragment.count == crate::proto::connection::ws::MAX_FRAGMENTS {
                     return Err(Error::Protocol("WS fragment limit exceeded".into()));
                 }
+
                 fragment.count += 1;
                 let total =
                     fragment.bytes.len().checked_add(raw.len()).ok_or_else(|| {
                         Error::Protocol("WS fragmented message size overflow".into())
                     })?;
+
                 if let Some(cap) = self.ws_payload_cap()
                     && total > cap
                 {
@@ -466,6 +500,7 @@ impl Connection {
                         "WS fragmented message too large: {total} bytes (max {cap})"
                     )));
                 }
+
                 fragment.bytes.extend_from_slice(&raw);
                 if ws_hdr.fin {
                     self.dispatch_ws_payload(fragment.bytes)
@@ -486,9 +521,11 @@ impl Connection {
         use crate::proto::ws_codec;
         let mut raw = BytesMut::with_capacity(payload_len);
         self.in_buf.copy_into(payload_len, &mut raw);
+
         if ws_hdr.masked {
             ws_codec::apply_mask(&mut raw, ws_hdr.mask_key);
         }
+
         raw
     }
 
@@ -497,12 +534,14 @@ impl Connection {
         if raw.is_empty() {
             return Err(Error::Protocol("empty WS binary frame".into()));
         }
+
         let flags = zws::zws_to_flags(raw[0])?;
         let zmtp_payload = if raw.len() > 1 {
             Payload::from_bytes(raw.split_off(1).freeze())
         } else {
             Payload::new()
         };
+
         self.dispatch_ws_binary(flags, zmtp_payload)
     }
 
@@ -513,6 +552,7 @@ impl Connection {
     ) -> Result<()> {
         let payload = self.take_ws_payload(payload_len, ws_hdr);
         let code = crate::proto::ws_codec::validate_close_payload(&payload)?;
+
         if !self.ws.close_sent {
             if let Some(code) = code {
                 self.send_ws_close(code);
@@ -520,6 +560,7 @@ impl Connection {
                 self.send_empty_ws_close();
             }
         }
+
         self.state = State::Closed;
         Ok(())
     }
@@ -532,9 +573,11 @@ impl Connection {
         let mut ping = [0; 125];
         self.in_buf.read_into(payload_len, &mut ping);
         let ping = &mut ping[..payload_len];
+
         if ws_hdr.masked {
             crate::proto::ws_codec::apply_mask(ping, ws_hdr.mask_key);
         }
+
         self.queue_ws_pong(ping);
     }
 }

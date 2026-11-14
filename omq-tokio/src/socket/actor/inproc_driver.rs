@@ -261,6 +261,7 @@ impl InprocRelay {
             peer_out,
             channels,
         };
+
         (relay, outside)
     }
 
@@ -279,6 +280,7 @@ impl InprocRelay {
             peer_properties: std::sync::Arc::new(peer_props),
         };
         self.subscriptions.observe(&handshake);
+
         tokio::select! {
             biased;
             () = self.cancel.cancelled() => return false,
@@ -311,6 +313,7 @@ impl InprocRelay {
             let recv_blocked = self.recv_blocked();
             let actor_space = self.waits_for_actor_space();
             let close_deadline = self.closing.deadline;
+
             tokio::select! {
                 biased;
                 () = self.cancel.cancelled() => return,
@@ -387,6 +390,7 @@ impl InprocRelay {
                 return false;
             }
         }
+
         if self.closing.requested || self.closing.discard_receive {
             self.pending.inbound = None;
         }
@@ -394,6 +398,7 @@ impl InprocRelay {
         let Some(message) = self.pending.inbound.take() else {
             return true;
         };
+
         match self.try_deliver(message, completion) {
             Ok(()) => {}
             Err(TrySendError::Full(message)) => self.pending.inbound = Some(message),
@@ -402,6 +407,7 @@ impl InprocRelay {
             }
             Err(_) => return false,
         }
+
         true
     }
 
@@ -449,10 +455,12 @@ impl InprocRelay {
                 .outbound
                 .as_ref()
                 .is_none_or(crate::transport::inproc::InprocSender::is_empty);
+
         let partner_gone = !self.open.control
             && !self.open.receive
             && self.pending.inbound.is_none()
             && self.pending.control.is_none();
+
         drained || partner_gone
     }
 
@@ -486,6 +494,7 @@ impl InprocRelay {
                     self.closing.requested = true;
                     self.closing.deadline = deadline;
                     self.channels.data_inbox.close();
+
                     if let Some(port) = &self.receive.inbound {
                         port.close();
                     }
@@ -493,6 +502,7 @@ impl InprocRelay {
             }
             Some(PeerDriverCommand::Close) | None => return false,
         }
+
         true
     }
 
@@ -500,11 +510,13 @@ impl InprocRelay {
     fn flush_command(&mut self) -> bool {
         let command = self.pending.command.take().unwrap();
         let _ = self.budget.account(inproc_command_size(&command));
+
         match self.channels.out.control.try_send(command) {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(command)) => self.pending.command = Some(command),
             Err(mpsc::error::TrySendError::Closed(_)) => return false,
         }
+
         true
     }
 
@@ -514,9 +526,11 @@ impl InprocRelay {
             Some(command) => {
                 let _ = self.budget.account(inproc_command_size(&command));
                 let event = ZmtpEvent::Command(command);
+
                 if !self.subscriptions.admits(&event) {
                     return;
                 }
+
                 self.pending.notification = self.subscriptions.notification(&event);
                 self.pending.control = Some(event);
             }
@@ -542,6 +556,7 @@ impl InprocRelay {
         let Some(notification) = self.pending.notification.take() else {
             return true;
         };
+
         // The arm's precondition checked capacity for this notification.
         match self.peer_out.try_send(self.peer_id, notification, true) {
             Ok(()) => completion.note_event(),
@@ -554,6 +569,7 @@ impl InprocRelay {
                 unreachable!("receive output has no transport send validator")
             }
         }
+
         true
     }
 
@@ -561,6 +577,7 @@ impl InprocRelay {
     fn flush_data(&mut self) -> bool {
         let message = self.pending.outbound.pop_front().unwrap();
         let _ = self.budget.account(message.byte_len());
+
         match self.channels.out.data.try_send(message) {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(message)) => {
@@ -568,6 +585,7 @@ impl InprocRelay {
             }
             Err(mpsc::error::TrySendError::Closed(_)) => return false,
         }
+
         true
     }
 
@@ -594,6 +612,7 @@ impl InprocRelay {
             crate::routing::OUTBOUND_BATCH_MAX_MSGS,
             omq_proto::flow::max_batch_bytes(),
         );
+
         if drained == 0 {
             return !send_pipe_rx.is_disconnected();
         }
@@ -602,6 +621,7 @@ impl InprocRelay {
             let _ = self.budget.account(message.byte_len());
             self.pending.outbound.push_back(message);
         }
+
         true
     }
 
@@ -618,10 +638,12 @@ impl InprocRelay {
                 {
                     return false;
                 }
+
                 self.pending.inbound = Some(message);
             }
             None => self.open.receive = false,
         }
+
         true
     }
 }

@@ -65,11 +65,13 @@ pub(crate) fn try_recv_message(sock: &OmqSocket) -> Result<Option<omq_tokio::Mes
         let Ok(mut drain) = sock.recv.drain.lock() else {
             return Err(ETERM);
         };
+
         if !drain.is_empty() {
             let parts: Vec<Bytes> = drain.drain(..).collect();
             sock.recv.drain_nonempty.store(false, Ordering::Relaxed);
             return Ok(Some(omq_tokio::Message::multipart(parts)));
         }
+
         sock.recv.drain_nonempty.store(false, Ordering::Relaxed);
     }
 
@@ -77,6 +79,7 @@ pub(crate) fn try_recv_message(sock: &OmqSocket) -> Result<Option<omq_tokio::Mes
     let Some(cons) = (unsafe { sock.recv.consumers.get() }) else {
         return Err(ETERM);
     };
+
     Ok(try_pop_dual(cons, sock))
 }
 
@@ -93,17 +96,21 @@ pub(crate) fn try_send_message(
             .filter_map(|index| msg.part_bytes(index))
             .collect();
         sock.ctx.zap.respond(sock.id, &response)?;
+
         return Ok(SendMessageAttempt::Sent);
     }
+
     let Some(inner) = sock.inner.get() else {
         return Err(ETERM);
     };
+
     if round_robin_send_mutes_without_ready_peer(sock)
         && !can_queue_without_ready_peer(sock)
         && inner.ready_peer_count() == 0
     {
         return Ok(SendMessageAttempt::Full(msg));
     }
+
     match inner.try_send(msg) {
         Ok(()) => Ok(SendMessageAttempt::Sent),
         Err(omq_tokio::TrySendError::Full(msg)) => Ok(SendMessageAttempt::Full(msg)),
@@ -117,12 +124,15 @@ pub(crate) fn send_ready(sock: &OmqSocket) -> bool {
     if sock.is_zap_handler() {
         return sock.ctx.zap.can_send(sock.id);
     }
+
     let Some(inner) = sock.inner.get() else {
         return false;
     };
+
     if waits_for_ready_peer(sock) && inner.ready_peer_count() == 0 {
         return false;
     }
+
     inner.send_ready()
 }
 
@@ -148,16 +158,19 @@ pub(crate) fn arm_send_wake(sock: &OmqSocket) -> Option<SendWake> {
 fn spawn_send_wake(sock: &OmqSocket, ready: impl FnOnce() + Send + 'static) -> Option<SendWake> {
     let inner = sock.inner.get()?.clone();
     let gated = waits_for_ready_peer(sock);
+
     let task = sock.ctx.handle()?.spawn(async move {
         loop {
             if gated && inner.wait_connected(1, Duration::MAX).await.is_err() {
                 break;
             }
+
             inner.wait_send_ready().await;
             if !gated || inner.ready_peer_count() > 0 {
                 break;
             }
         }
+
         ready();
     });
     Some(SendWake(task.abort_handle()))
@@ -174,6 +187,7 @@ fn arm_progress_wake(sock: &OmqSocket, msg: &omq_tokio::Message) -> Option<SendW
         inner.wait_send_progress_for(&probe).await;
         notify.signal_send();
     });
+
     Some(SendWake(task.abort_handle()))
 }
 
@@ -267,6 +281,7 @@ pub(crate) fn spawn_send_message(
     let notify = sock.notify.clone();
     let result = Arc::new(std::sync::Mutex::new(None));
     let stored = result.clone();
+
     let task = handle.spawn(async move {
         let sent = if gated {
             match inner.wait_connected(1, Duration::MAX).await {
@@ -276,9 +291,11 @@ pub(crate) fn spawn_send_message(
         } else {
             inner.send(msg).await
         };
+
         *stored.lock().expect("spawned send result") = Some(sent);
         notify.signal_send();
     });
+
     Ok(SpawnedSend {
         result,
         task: task.abort_handle(),
@@ -294,14 +311,17 @@ fn send_zap_bytes(sock: &OmqSocket, data: &[u8], flags: c_int, ret_len: c_int) -
     if !sock.ctx.zap.can_send(sock.id) {
         return fail(crate::error::EFSM);
     }
+
     // SAFETY: libzmq sockets are accessed by at most one application thread.
     let accum = unsafe { sock.send.accum.get() };
     if flags & ZMQ_SNDMORE != 0 {
         accum.push(Bytes::copy_from_slice(data));
         return ret_len;
     }
+
     let mut response = std::mem::take(accum);
     response.push(Bytes::copy_from_slice(data));
+
     match sock.ctx.zap.respond(sock.id, &response) {
         Ok(()) => ret_len,
         Err(error) => fail(error),
@@ -328,6 +348,7 @@ fn can_queue_without_ready_peer(sock: &OmqSocket) -> bool {
     {
         return false;
     }
+
     // SAFETY: libzmq sockets are accessed by at most one application thread.
     *unsafe { sock.send.queue_without_ready_peer.get() }
 }
@@ -391,6 +412,7 @@ fn wait_for_ready_peer(sock: &OmqSocket, timeout: Option<Duration>) -> Result<()
     let Some(inner) = sock.inner.get() else {
         return Err(ETERM);
     };
+
     if inner.ready_peer_count() != 0 {
         return Ok(());
     }
@@ -425,21 +447,27 @@ fn ensure_libzmq_send_route(sock: &OmqSocket, call: SendCall) -> Result<(), c_in
     {
         return Err(crate::error::EFSM);
     }
+
     if !round_robin_send_mutes_without_ready_peer(sock) {
         return Ok(());
     }
+
     if can_queue_without_ready_peer(sock) {
         return Ok(());
     }
+
     let Some(inner) = sock.inner.get() else {
         return Err(ETERM);
     };
+
     if inner.ready_peer_count() != 0 {
         return Ok(());
     }
+
     if call.dontwait() {
         return Err(libc::EAGAIN);
     }
+
     wait_for_ready_peer(sock, call.timeout())
 }
 
@@ -458,6 +486,7 @@ impl RecvWait {
             .recv
             .timeout_ms
             .load(std::sync::atomic::Ordering::Relaxed);
+
         Self {
             nonblocking: (flags & ZMQ_DONTWAIT) != 0 || rcvtimeo == 0,
             rcvtimeo,
@@ -475,24 +504,30 @@ fn block_recv_result<T>(
     if wait.nonblocking {
         return Err(libc::EAGAIN);
     }
+
     let deadline = if wait.rcvtimeo > 0 {
         Instant::now().checked_add(Duration::from_millis(wait.rcvtimeo as u64))
     } else {
         None
     };
+
     loop {
         if sock.ctx.is_effectively_terminated() {
             return Err(ETERM);
         }
+
         let ms = next_wait_ms(wait, deadline)?;
         let recv_notify = sock.notify.recv_notifier();
+
         let waited = recv_notify.wait_for_readable_or_signal(ms);
         if waited == Ok(true) {
             recv_notify.drain();
         }
+
         if sock.ctx.is_effectively_terminated() {
             return Err(ETERM);
         }
+
         if let Some(val) = try_pop()? {
             return Ok(val);
         }
@@ -509,13 +544,16 @@ fn next_wait_ms(wait: RecvWait, deadline: Option<Instant>) -> Result<c_int, c_in
     if wait.rcvtimeo <= 0 {
         return Ok(100);
     }
+
     let Some(deadline) = deadline else {
         return Ok(i32::MAX);
     };
+
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
         return Err(libc::EAGAIN);
     }
+
     Ok(remaining.as_millis().min(i32::MAX as u128) as c_int)
 }
 
@@ -534,6 +572,7 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
         .options
         .max_msg_size
         .load(std::sync::atomic::Ordering::Relaxed);
+
     if max > 0 && len > max as usize {
         return fail(libc::EMSGSIZE);
     }
@@ -573,11 +612,13 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
             // than retrying its final frame.
             accum.clear();
         }
+
         if accum.is_empty()
             && let Err(errno) = admit_first_frame(sock, call)
         {
             return fail(errno);
         }
+
         accum.push(Bytes::copy_from_slice(data));
         return ret_len;
     }
@@ -602,6 +643,7 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
                 .filter_map(|index| unsent.part_bytes(index))
                 .collect();
             *retry = !accum.is_empty();
+
             fail(errno)
         }
     }
@@ -626,6 +668,7 @@ fn send_xsub_subscription(sock: &Arc<OmqSocket>, data: &[u8], ret_len: c_int) ->
             s.unsubscribe(prefix).await
         }
     }));
+
     ret_len
 }
 
@@ -639,6 +682,7 @@ fn send_stream_frame(sock: &Arc<OmqSocket>, data: &[u8], call: SendCall) -> c_in
         if !call.more() {
             return fail(libc::EINVAL);
         }
+
         c_try!(prepare_stream_route(sock, data, call));
         accum.push(Bytes::copy_from_slice(data));
         return call.ret_len;
@@ -648,9 +692,11 @@ fn send_stream_frame(sock: &Arc<OmqSocket>, data: &[u8], call: SendCall) -> c_in
     // STREAM data always ends the pair. Keep the identity on EAGAIN and
     // EINTR so the caller can retry the same data frame.
     let result = submit_message(sock, message, call);
+
     if result >= 0 || !matches!(crate::error::zmq_errno(), libc::EAGAIN | libc::EINTR) {
         accum.clear();
     }
+
     result
 }
 
@@ -665,18 +711,23 @@ fn admit_first_frame(sock: &Arc<OmqSocket>, call: SendCall) -> Result<(), c_int>
     ) {
         return Ok(());
     }
+
     let dontwait = call.dontwait();
     let timeout = call.timeout();
+
     let Some(inner) = sock.inner.get() else {
         return Ok(());
     };
+
     // A blocking send without a timeout waits at its final frame instead.
     if (!dontwait && timeout.is_none()) || inner.send_ready() {
         return Ok(());
     }
+
     let Some(timeout) = timeout.filter(|_| !dontwait) else {
         return Err(libc::EAGAIN);
     };
+
     wait_send_ready_for(sock, inner, timeout)
 }
 
@@ -721,8 +772,10 @@ fn prepare_stream_route(
         Err(omq_tokio::Error::WouldBlock) if !call.dontwait() => {}
         Err(error) => return Err(map_omq_err(&error)),
     }
+
     let identity = Bytes::copy_from_slice(identity);
     let timeout = call.timeout();
+
     run_on_socket(sock, inner, move |socket| async move {
         let ready = socket.wait_stream_route(identity);
         if let Some(timeout) = timeout {
@@ -746,22 +799,27 @@ pub(crate) fn send_message(
         .options
         .max_msg_size
         .load(std::sync::atomic::Ordering::Relaxed);
+
     if max > 0 && msg.byte_len() > max as usize {
         return fail(libc::EMSGSIZE);
     }
+
     if sock.is_zap_handler() {
         let response: Vec<Bytes> = (0..msg.len())
             .filter_map(|index| msg.part_bytes(index))
             .collect();
+
         return match sock.ctx.zap.respond(sock.id, &response) {
             Ok(()) => ret_len,
             Err(error) => fail(error),
         };
     }
+
     let call = SendCall::new(sock, ret_len, flags);
     if call.more() {
         return fail(libc::EINVAL);
     }
+
     c_try!(ensure_libzmq_send_route(sock, call));
     submit_message(sock, msg, call)
 }
@@ -795,6 +853,7 @@ fn submit_message_or_return(
     let Some(inner) = sock.inner.get() else {
         return Ok(fail(ETERM));
     };
+
     let ret_len = call.ret_len;
     let dontwait = call.dontwait();
 
@@ -810,6 +869,7 @@ fn submit_message_or_return(
                 } else {
                     std::thread::yield_now();
                 }
+
                 match inner.try_send(msg) {
                     Ok(()) => return Ok(ret_len),
                     Err(omq_tokio::TrySendError::Closed) => return Ok(fail(ETERM)),
@@ -819,6 +879,7 @@ fn submit_message_or_return(
                     Err(omq_tokio::TrySendError::Full(returned)) => msg = returned,
                 }
             }
+
             send_blocked(sock, inner, msg, call)
         }
     }
@@ -900,11 +961,13 @@ pub extern "C" fn zmq_send(
     if sock_ptr.is_null() {
         return fail(libc::EFAULT);
     }
+
     // SAFETY: C callers pass null or a pointer from this API.
     let sock = c_try!(unsafe { crate::handle::socket(sock_ptr) });
     if sock.ctx.is_effectively_terminated() {
         return fail(ETERM);
     }
+
     if buf.is_null() && len > 0 {
         return fail(libc::EFAULT);
     }
@@ -942,9 +1005,11 @@ pub extern "C" fn zmq_sendiov(
     if sock_ptr.is_null() {
         return fail(libc::EFAULT);
     }
+
     if iov.is_null() && count > 0 {
         return fail(libc::EFAULT);
     }
+
     fail(crate::error::ENOTSUP)
 }
 

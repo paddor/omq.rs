@@ -179,6 +179,7 @@ async fn try_send_returns_would_block_when_hwm_full() {
     // from max(1,16)=16... actually the cap is max(hwm,16)=16 in tokio.
     // Use a large burst to hit the limit reliably.
     let mut blocked = false;
+
     for _ in 0..2048 {
         if matches!(
             push.try_send(Message::single("x")),
@@ -188,6 +189,7 @@ async fn try_send_returns_would_block_when_hwm_full() {
             break;
         }
     }
+
     assert!(
         blocked,
         "try_send should return WouldBlock when cmd_tx is full"
@@ -218,6 +220,7 @@ async fn identity_propagates_on_handshake() {
             _ => break,
         }
     }
+
     assert_eq!(got_identity.as_deref(), Some(&b"my-client"[..]));
 }
 

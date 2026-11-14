@@ -250,6 +250,7 @@ impl std::task::Wake for BudgetWake {
     fn wake(self: Arc<Self>) {
         self.0.mark();
     }
+
     fn wake_by_ref(self: &Arc<Self>) {
         self.0.mark();
     }
@@ -283,10 +284,12 @@ impl Peer {
         {
             return;
         }
+
         if io.queues.cancel.is_cancelled() {
             // Keep cancellation visible to drive(), which retires this
             // handshake. Discarding only the queues leaves READY retries live.
             self.io = Some(io);
+
             return;
         }
 
@@ -304,6 +307,7 @@ impl Peer {
                 .receive_pool()
                 .map_or(0, |_| MESSAGES.min(options.window_messages)),
         );
+
         self.session = Some(Session::with_receive_buffers(
             self.lease.handshake.local(),
             self.lease.handshake.remote(),
@@ -314,10 +318,12 @@ impl Peer {
                 max_send_rate: options.max_send_rate,
             },
         ));
+
         // Byte-limited ingress grants receive credit as its budget admits it.
         if self.pacing.ingress.is_some() {
             self.session.as_mut().unwrap().pace_receive_credit();
         }
+
         // Budget gates wake the endpoint through its data signal.
         if self.pacing.ingress.is_some() || self.pacing.egress.is_some() {
             self.pacing.waker = std::task::Waker::from(Arc::new(BudgetWake(signal.clone())));
@@ -361,10 +367,12 @@ impl Routes {
         let Some(route) = self.map.remove(&source) else {
             return;
         };
+
         self.order.swap_remove(route.index);
         if let Some(moved) = self.order.get(route.index) {
             self.map.get_mut(moved).expect("indexed route").index = route.index;
         }
+
         if self.cursor >= self.order.len() {
             self.cursor = 0;
         }
@@ -448,6 +456,7 @@ impl EndpointWorker {
         let mut timer = super::io::Deadline::new();
         let continuous = self.spin == Duration::MAX;
         let coalesce_polls = !self.spin.is_zero();
+
         loop {
             if self.cancel.is_cancelled() {
                 break;
@@ -460,6 +469,7 @@ impl EndpointWorker {
                 tokio::task::yield_now().await;
                 now = Instant::now();
                 task.turn_started = now;
+
                 if self.cancel.is_cancelled() {
                     break;
                 }
@@ -468,13 +478,16 @@ impl EndpointWorker {
             let Some(pass) = self.run_pass(&mut task, now) else {
                 break;
             };
+
             if pass.active {
                 if !continuous {
                     task.spin_until = now + self.spin;
                 }
+
                 if !coalesce_polls {
                     tokio::task::yield_now().await;
                 }
+
                 continue;
             }
 
@@ -486,9 +499,11 @@ impl EndpointWorker {
                 } else {
                     self.probe_spin(&mut task.batch, &mut task.receive_retry);
                 }
+
                 if !coalesce_polls {
                     tokio::task::yield_now().await;
                 }
+
                 continue;
             }
 
@@ -514,9 +529,11 @@ impl EndpointWorker {
         if let Some(pool) = self.shared.receive_pool() {
             pool.reclaim();
         }
+
         if !self.drain_commands(&mut task.routes, &task.signal) {
             return None;
         }
+
         task.routes.challenges.rotate(now);
         self.ensure_connector(&mut task.routes, now);
 
@@ -526,6 +543,7 @@ impl EndpointWorker {
         } else {
             0
         };
+
         if stats.receive_failures != 0 {
             task.receive_retry = now + Duration::from_millis(1);
         }
@@ -534,6 +552,7 @@ impl EndpointWorker {
         if task.receive_retry > now {
             deadline = deadline.min(task.receive_retry);
         }
+
         self.shared.counters.add(stats);
 
         let more = task.batch.has_pending_datagrams();
@@ -568,6 +587,7 @@ impl EndpointWorker {
                 Err(mpsc::error::TryRecvError::Disconnected) => return false,
             }
         }
+
         true
     }
 
@@ -593,6 +613,7 @@ impl EndpointWorker {
 
         let index = routes.order.len();
         routes.order.push(source);
+
         routes.map.insert(
             source,
             Route {
@@ -610,12 +631,15 @@ impl EndpointWorker {
             generation,
             peer: io,
         } = command;
+
         let Some(route) = routes.map.get_mut(&source) else {
             return;
         };
+
         let Some(peer) = &mut route.peer else {
             return;
         };
+
         peer.install_io(generation, io, &self.shared, signal);
     }
 
@@ -626,6 +650,7 @@ impl EndpointWorker {
         {
             return;
         }
+
         // Only a listener answers HELLO. A connector that did would let one
         // datagram from its target address replace its own handshake.
         if self.target.is_none() {
@@ -639,13 +664,16 @@ impl EndpointWorker {
         let Some(route) = routes.map.get_mut(&source) else {
             return;
         };
+
         if let Some(pending) = &mut route.pending {
             let lease = &mut pending.lease;
             if !lease.handshake.receive(ready) {
                 return;
             }
+
             lease.socket_type = ready.socket_type;
             lease.identity = ready.identity.map(Bytes::copy_from_slice);
+
             if lease.handshake.confirmed() {
                 self.promote(source, route, now, &mut routes.generation);
             }
@@ -656,6 +684,7 @@ impl EndpointWorker {
             {
                 return;
             }
+
             if lease.handshake.receive(ready) {
                 lease.expires = now + LEASE;
             }
@@ -745,11 +774,14 @@ impl EndpointWorker {
                 Self::refuse_promotion(route);
                 return;
             };
+
             route.permit = Some(permit);
         }
+
         let Some(next) = generation.checked_add(1) else {
             return;
         };
+
         *generation = next;
 
         let pending = route.pending.take().expect("confirmed handshake");

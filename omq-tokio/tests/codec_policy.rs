@@ -35,6 +35,7 @@ fn endpoints() -> Vec<Endpoint> {
             path: "/omq".into(),
         },
     ];
+
     for kind in [
         #[cfg(feature = "lz4")]
         CompressionKind::Lz4,
@@ -49,6 +50,7 @@ fn endpoints() -> Vec<Endpoint> {
                 .unwrap(),
         );
     }
+
     #[cfg(all(feature = "lz4", feature = "ws"))]
     endpoints.push(
         "ws://omq-codec-policy.invalid:1/omq"
@@ -57,6 +59,7 @@ fn endpoints() -> Vec<Endpoint> {
             .with_compression(CompressionKind::Lz4)
             .unwrap(),
     );
+
     endpoints
 }
 
@@ -80,6 +83,7 @@ async fn encrypted_codecs_fail_before_dns_connect_or_bind() {
     let client = CurveKeypair::generate();
     let server_options = Options::default().curve_server(server.clone());
     let client_options = Options::default().curve_client(client, server.public);
+
     for options in [server_options, client_options] {
         let socket = Socket::new(SocketType::Dealer, options);
         for endpoint in endpoints() {
@@ -92,6 +96,7 @@ async fn encrypted_codecs_fail_before_dns_connect_or_bind() {
                     .await,
                 Err(Error::Config(_))
             ));
+
             assert!(matches!(
                 socket
                     .bind_with_compression_options(endpoint.clone(), CompressionOptions::default())
@@ -108,6 +113,7 @@ async fn encrypted_codecs_fail_before_dns_connect_or_bind() {
                 .unwrap();
             assert!(matches!(bind, Err(Error::Config(_))));
         }
+
         assert!(socket.connections().await.unwrap().is_empty());
         socket.close().await.unwrap();
     }
@@ -134,6 +140,7 @@ async fn invalid_codec_snapshots_fail_before_dns_or_carrier_io() {
             Err(Error::Config(_))
         ));
     }
+
     #[cfg(feature = "zstd")]
     {
         let endpoint: Endpoint = "zstd+tcp://codec-snapshot.invalid:1".parse().unwrap();
@@ -154,6 +161,7 @@ async fn invalid_codec_snapshots_fail_before_dns_or_carrier_io() {
             Err(Error::Config(_))
         ));
     }
+
     assert!(socket.connections().await.unwrap().is_empty());
     socket.close().await.unwrap();
 }

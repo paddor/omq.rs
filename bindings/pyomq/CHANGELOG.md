@@ -14,6 +14,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`max_peer_subscriptions`, default 65536) limits the prefixes or groups
   one peer may hold on a PUB, XPUB or RADIO socket. -1 removes a limit.
 
+## [0.27.8] - 2026-11-12
+
+### Changed
+
+- Bundle `omq-tokio` 0.35.1. A connection driver with steady output
+  pauses every 16 KiB, so other tasks and timers on its IO thread run on
+  time.
+
+## [0.27.7] - 2026-11-09
+
+### Changed
+
+- Bundle `omq-tokio` 0.35.0.
+
 ## [0.27.6] - 2026-11-04
 
 ### Changed

@@ -58,6 +58,7 @@ impl Outbound {
         let mut budget = DrainBudget::new(max_msgs, max_batch_bytes());
         self.pending.push_back(first.clone());
         let _ = budget.account(std::mem::size_of::<Message>());
+
         while !budget.exhausted()
             && (!budget.msgs().is_multiple_of(BATCH_TIME_CHECK_MSGS)
                 || started.elapsed() < OUTBOUND_BATCH_TIME)
@@ -65,9 +66,11 @@ impl Outbound {
             let Some(message) = try_recv() else {
                 break;
             };
+
             let _ = budget.account(std::mem::size_of::<Message>());
             self.pending.push_back(message);
         }
+
         let count = budget.msgs();
         self.drain(frames)?;
         Ok(count)
@@ -76,28 +79,35 @@ impl Outbound {
     pub(in crate::engine::driver) fn drain(&mut self, frames: &mut FrameBuffer) -> Result<()> {
         let mut state = self.state.lock().expect("SHM connection");
         let mut budget = DrainBudget::new(OUTBOUND_BATCH_MAX_MSGS, max_batch_bytes());
+
         while !budget.exhausted() {
             if self.batch.is_none() {
                 self.batch = prepare_batch(&state, &self.pending, &budget)?;
             }
+
             if let Some(batch) = &self.batch {
                 if !state.encode_batch_and_frame(&batch.message, batch.kind, frames)? {
                     break;
                 }
+
                 let _ = budget.account_many(batch.count, batch.work_bytes);
                 self.pending.drain(..batch.count);
                 self.batch = None;
                 continue;
             }
+
             let Some(message) = self.pending.front() else {
                 break;
             };
+
             if !state.encode_and_frame(message, frames)? {
                 break;
             }
+
             let _ = budget.account(omq_shm::send_work_bytes(message));
             self.pending.pop_front();
         }
+
         Ok(())
     }
 }
@@ -110,23 +120,28 @@ fn prepare_batch(
     if pending.len() < 2 || state.batch_capacity() < 2 || drain.remaining_msgs() < 2 {
         return Ok(None);
     }
+
     let Some(shape) = pending.front().and_then(BatchShape::new) else {
         return Ok(None);
     };
+
     let kind = shape.kind;
 
     // Members must also fit what is left of the caller's drain budget.
     let limit = state.batch_capacity().min(drain.remaining_msgs());
     let mut budget = DrainBudget::new(limit, max_batch_bytes().saturating_sub(drain.bytes()));
     let mut messages = smallvec::SmallVec::<[&Message; omq_shm::BATCH_MAX_MESSAGES]>::new();
+
     for message in pending.iter().take(limit) {
         if budget.exhausted() || !shape.admits(message) {
             break;
         }
+
         let bytes = batch_work_bytes(message, kind);
         if bytes > max_batch_bytes().saturating_sub(drain.bytes() + budget.bytes()) {
             break;
         }
+
         messages.push(message);
         let _ = budget.account(bytes);
     }
@@ -135,6 +150,7 @@ fn prepare_batch(
     if matches!(kind, omq_shm::BatchKind::Referenced) {
         messages.truncate(omq_shm::pooled_prefix(&messages));
     }
+
     if messages.len() < 2 {
         return Ok(None);
     }
@@ -147,6 +163,7 @@ fn prepare_batch(
             .map(|message| batch_work_bytes(message, kind))
             .sum()
     };
+
     Ok(state
         .prepare_batch(&messages, kind)?
         .map(|message| PreparedBatch {
@@ -174,6 +191,7 @@ impl<'m> BatchShape<'m> {
         let envelope_fits = (1..=2).contains(&first.len())
             && (first.len() == 1
                 || first.part_slice(0).expect("SHM envelope").len() <= COPIED_BATCH_MAX_BODY);
+
         if !envelope_fits {
             return None;
         }
@@ -184,6 +202,7 @@ impl<'m> BatchShape<'m> {
             .expect("SHM body")
             .len()
             .clamp(POOLED_BATCH_COPY_THRESHOLD, COPIED_BATCH_MAX_BODY);
+
         Some(Self {
             first,
             body_index,
@@ -215,6 +234,7 @@ fn batch_work_bytes(message: &Message, kind: omq_shm::BatchKind) -> usize {
                 .part_slice(message.len() - 1)
                 .expect("SHM body")
                 .len();
+
             message.byte_len() - length + omq_shm::REFERENCE_ENTRY_BYTES
         }
     }
@@ -230,6 +250,7 @@ pub(in crate::engine::driver) fn poll_received(
     if let Some(message) = state.poll_received() {
         return Ok(Some(message));
     }
+
     connection
         .poll_message()
         .map(|message| state.decode_received(message))
@@ -245,6 +266,7 @@ pub(super) async fn peer_exited(state: ShmState) -> Result<()> {
         let registered = tokio::io::unix::AsyncFd::new(descriptor)?;
         let _ = registered.readable().await?;
     }
+
     state.lock().expect("SHM connection").peer_exited();
     Ok(())
 }

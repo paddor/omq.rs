@@ -67,6 +67,7 @@ impl RepRecvSink {
             false,
             pending_flush,
         );
+
         match result {
             Err(TrySendError::Full(returned)) => Err(TrySendError::Full(restore_routing_id(
                 returned,
@@ -186,12 +187,14 @@ impl RecvSinkConfig {
         if slot.sink.is_some() {
             return;
         }
+
         let mut pending = self.pending_consumer.lock().unwrap();
         if pending.is_some() {
             // Never discard a replacement ring before application adoption.
             // New peers can use the bounded fallback receive path meanwhile.
             return;
         }
+
         let (prod, cons) = yring::spsc(self.cap);
         let signal = self.signal.clone();
         slot.sink = Some(RecvSink::Yring(YringSink {
@@ -216,9 +219,11 @@ impl RecvSinkConfig {
         if let Some(RecvSink::Authenticated(sink)) = slot.sink.as_ref() {
             return Some(RecvSink::Authenticated(sink.clone()));
         }
+
         if slot.owner_peer.is_none() {
             self.refill_unowned(&mut slot);
         }
+
         let sink = slot.sink.take()?;
         slot.owner_peer = peer_id;
         Some(sink)
@@ -229,6 +234,7 @@ impl RecvSinkConfig {
         if slot.owner_peer != Some(peer_id) {
             return;
         }
+
         slot.owner_peer = None;
         self.refill_unowned(&mut slot);
     }
@@ -238,6 +244,7 @@ impl RecvSinkConfig {
         let RecvSink::Authenticated(sink) = slot.sink.as_ref()? else {
             return None;
         };
+
         Some(RecvSink::Authenticated(sink.clone()))
     }
 
@@ -344,6 +351,7 @@ impl RecvSink {
             _ => unreachable!("batch receive sink"),
         }
     }
+
     /// Create a shared authenticated receive sink. Every connection gets a
     /// clone of the sender, so messages from all peers retain their own
     /// handshake properties in one application-facing queue.
@@ -386,6 +394,7 @@ impl RecvSink {
         let Self::Authenticated(sink) = self else {
             unreachable!("actor authentication sink is unwrapped");
         };
+
         match sink.sender.try_send(AuthenticatedRecvItem {
             message,
             peer_properties,
@@ -412,6 +421,7 @@ impl RecvSink {
         let Self::Authenticated(sink) = self else {
             unreachable!("actor authentication sink is unwrapped");
         };
+
         permit.send(AuthenticatedRecvItem {
             message,
             peer_properties,
@@ -446,6 +456,7 @@ impl RecvSink {
                     .clone()
                     .expect("authenticated sink activated after handshake");
                 self.send_authenticated_reserved(message, properties, permit);
+
                 true
             }
             _ => unreachable!("authenticated receive reservation"),
@@ -483,12 +494,14 @@ impl RecvSink {
                 Err(TrySendError::Full(returned)) => message = returned,
                 Err(_) => return false,
             }
+
             if let Some(sender) = self.authenticated_sender() {
                 return match sender.reserve().await {
                     Ok(permit) => self.send_reserved(message, permit),
                     Err(_) => false,
                 };
             }
+
             self.receive_space_ready().await;
         }
     }
@@ -503,6 +516,7 @@ impl RecvSink {
         if let Self::Rep(rep) = self {
             return rep.try_send(m, pending_yring_flush);
         }
+
         if let Self::Server(server) = self {
             return server.sink.try_send_unwrapped(
                 m.with_routing_id(server.routing_id),
@@ -510,6 +524,7 @@ impl RecvSink {
                 pending_yring_flush,
             );
         }
+
         self.try_send_unwrapped(m, defer_yring_flush, pending_yring_flush)
     }
 
@@ -534,6 +549,7 @@ impl RecvSink {
                 if !defer {
                     sink.flush();
                 }
+
                 alive
             }
             Self::Channel(pipe) => return pipe.try_send(message),
@@ -542,6 +558,7 @@ impl RecvSink {
                 if !defer {
                     sink.flush_pending(pending);
                 }
+
                 return Ok(());
             }
             Self::Authenticated(sink) => {
@@ -549,11 +566,13 @@ impl RecvSink {
                     .peer_properties
                     .clone()
                     .expect("authenticated sink activated after handshake");
+
                 return self.try_send_authenticated(message, properties);
             }
             Self::Conflate(slot) => slot.send_latest(message),
             Self::Rep(_) | Self::Server(_) => unreachable!("unwrapped receive sink"),
         };
+
         if alive {
             Ok(())
         } else {
@@ -599,6 +618,7 @@ impl RecvSink {
     ) -> core::result::Result<(), TrySendError> {
         let routing_id = message.routing_id();
         let wrapped = matches!(self, Self::Server(_));
+
         match self.try_send_with_flush_mode(message, defer, pending) {
             Ok(()) => {}
             Err(TrySendError::Full(message)) => {
@@ -610,6 +630,7 @@ impl RecvSink {
             }
             Err(error) => return Err(error),
         }
+
         let unwrapped = self.direct_inner();
         let returned = if let Self::Fanin(sink) = unwrapped {
             let message = sink.take_pending();
@@ -619,9 +640,11 @@ impl RecvSink {
             } else {
                 false
             };
+
             if message.is_some() && !full {
                 sink.space().notify_changed();
             }
+
             message
         } else {
             #[cfg(feature = "dart")]
@@ -630,9 +653,11 @@ impl RecvSink {
             } else {
                 None
             }
+
             #[cfg(not(feature = "dart"))]
             None
         };
+
         if let Some(message) = returned {
             return Err(TrySendError::Full(if wrapped {
                 restore_routing_id(message, routing_id)
@@ -640,6 +665,7 @@ impl RecvSink {
                 message
             }));
         }
+
         Ok(())
     }
 
@@ -751,55 +777,4 @@ fn restore_routing_id(mut message: Message, original: Option<u32>) -> Message {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::Duration;
-
-    #[tokio::test]
-    async fn concurrent_authenticated_waiters_keep_their_reserved_slots() {
-        let (mut first, mut receive) = RecvSink::authenticated(1, Arc::new(|| {}));
-        let properties = Arc::new(omq_proto::proto::command::PeerProperties::default());
-        first.set_peer_properties(properties);
-        let RecvSink::Authenticated(authenticated) = &first else {
-            unreachable!()
-        };
-        let mut second = RecvSink::Authenticated(authenticated.clone());
-        assert!(first.send(Message::single("initial")).await);
-        let first = tokio::spawn(async move { first.send(Message::single("first")).await });
-        tokio::task::yield_now().await;
-        let second = tokio::spawn(async move { second.send(Message::single("second")).await });
-        tokio::task::yield_now().await;
-        let _ = receive.recv().await.unwrap();
-        for expected in ["first", "second"] {
-            let item = tokio::time::timeout(Duration::from_millis(100), receive.recv())
-                .await
-                .expect("reserved receive slots must deliver instead of passing to another waiter")
-                .unwrap();
-            assert_eq!(item.message.part_slice(0).unwrap(), expected.as_bytes());
-        }
-        assert!(first.await.unwrap());
-        assert!(second.await.unwrap());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn raw_yring_consumer_drop_signal_releases_a_parked_sender() {
-        let (producer, consumer) = yring::spsc(1);
-        let space = Arc::new(StateSignal::new());
-        let mut sink = RecvSink::Yring(YringSink {
-            producer,
-            signal: Box::new(|| {}),
-            space: space.clone(),
-        });
-        assert!(sink.send(Message::single("accepted")).await);
-        let blocked = tokio::spawn(async move { sink.send(Message::single("blocked")).await });
-        tokio::task::yield_now().await;
-        drop(consumer);
-        space.notify_changed();
-        assert!(
-            !tokio::time::timeout(Duration::from_millis(50), blocked)
-                .await
-                .unwrap()
-                .unwrap()
-        );
-    }
-}
+mod tests;

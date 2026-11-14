@@ -33,17 +33,22 @@ use pubsub_process::{pubsub_process_published_rate, run_pubsub_pub_child, run_pu
 use thresholds::{ThresholdConfig, ThresholdMode, read_thresholds, should_measure, verify};
 use transport::{Transport, tcp_zero};
 
-struct Settings {
-    affinity: Affinity,
-    warmup: Duration,
-    measure: Duration,
-}
-
 static SETTINGS: LazyLock<Settings> = LazyLock::new(|| Settings {
     affinity: Affinity::from_env(),
     warmup: duration_env("OMQ_PERF_WARMUP_MS", WARMUP),
     measure: duration_env("OMQ_PERF_MEASURE_MS", MEASURE),
 });
+
+const WARMUP: Duration = Duration::from_millis(100);
+const MEASURE: Duration = Duration::from_millis(750);
+const PUBSUB_32P_WARMUP: Duration = Duration::from_millis(500);
+const PUBSUB_32P_MEASURE: Duration = Duration::from_secs(3);
+
+struct Settings {
+    affinity: Affinity,
+    warmup: Duration,
+    measure: Duration,
+}
 
 fn duration_env(name: &str, default: Duration) -> Duration {
     std::env::var(name).map_or(default, |value| {
@@ -51,6 +56,7 @@ fn duration_env(name: &str, default: Duration) -> Duration {
             .parse()
             .expect("benchmark duration must be milliseconds");
         assert!(millis > 0, "benchmark duration must be positive");
+
         Duration::from_millis(millis)
     })
 }
@@ -60,15 +66,11 @@ fn context(io_threads: usize, side: Side) -> Context {
         Side::Sender => "perf-tx",
         Side::Receiver => "perf-rx",
     };
+
     let ctx = Context::with_config_and_name(ContextConfig { io_threads }, name);
     SETTINGS.affinity.pin_context(name, io_threads, side);
     ctx
 }
-
-const WARMUP: Duration = Duration::from_millis(100);
-const MEASURE: Duration = Duration::from_millis(750);
-const PUBSUB_32P_WARMUP: Duration = Duration::from_millis(500);
-const PUBSUB_32P_MEASURE: Duration = Duration::from_secs(3);
 
 #[derive(Clone)]
 struct Sample {
@@ -96,6 +98,7 @@ async fn reqrep_latency() -> f64 {
     });
     let msg = payload(256);
     let warmup_end = Instant::now() + SETTINGS.warmup;
+
     while Instant::now() < warmup_end {
         tokio::time::timeout(Duration::from_secs(1), async {
             req.send(msg.clone()).await.expect("REQ warmup send");
@@ -104,6 +107,7 @@ async fn reqrep_latency() -> f64 {
         .await
         .expect("REQ warmup timeout");
     }
+
     let mut samples = Vec::with_capacity(500);
     for _ in 0..500 {
         let start = Instant::now();
@@ -113,11 +117,14 @@ async fn reqrep_latency() -> f64 {
         })
         .await
         .expect("REQ measurement timeout");
+
         samples.push(start.elapsed().as_secs_f64() * 1_000_000.0);
     }
+
     echo.abort();
     let _ = echo.await;
     samples.sort_by(f64::total_cmp);
+
     samples[samples.len() / 2]
 }
 
@@ -137,15 +144,18 @@ async fn measure_transfer(
     tokio::task::spawn_blocking(move || {
         SETTINGS.affinity.pin(0);
         let receiver_ctx = context(io_threads, Side::Receiver);
+
         let sender_ctx = if shared {
             receiver_ctx.clone()
         } else {
             context(io_threads, Side::Sender)
         };
+
         let (sender, receivers) = connect(&sender_ctx, &receiver_ctx);
         let rate = transfer_blocking_many(&sender, receivers, size);
         sender_ctx.term();
         receiver_ctx.term();
+
         rate
     })
     .await
@@ -165,6 +175,7 @@ async fn pipeline(size: usize, io_threads: usize, transport: Transport) -> f64 {
                 Transport::Dart => (SocketType::Scatter, SocketType::Gather),
                 _ => (SocketType::Push, SocketType::Pull),
             };
+
             let receiver = receiver_ctx.blocking_socket(receiver_type, transport.options());
             let sender = sender_ctx.blocking_socket(sender_type, transport.options());
             let endpoint = receiver.bind(transport.endpoint()).expect("pipeline bind");
@@ -172,6 +183,7 @@ async fn pipeline(size: usize, io_threads: usize, transport: Transport) -> f64 {
             receiver
                 .wait_connected(1, Duration::from_secs(1))
                 .expect("pipeline connect timeout");
+
             (sender, vec![receiver])
         },
     )
@@ -200,6 +212,7 @@ async fn fanin(
             receiver
                 .wait_connected(1, Duration::from_secs(1))
                 .expect("receiver connect timeout");
+
             (sender, vec![receiver])
         },
     )
@@ -261,15 +274,18 @@ async fn pubsub(size: usize, io_threads: usize, peers: usize, transport: Transpo
             let publisher = pub_ctx.blocking_socket(SocketType::Pub, transport.options());
             let endpoint = publisher.bind(transport.endpoint()).expect("PUB bind");
             let mut receivers = Vec::with_capacity(peers);
+
             for _ in 0..peers {
                 let subscriber = sub_ctx.blocking_socket(SocketType::Sub, transport.options());
                 subscriber.connect(endpoint.clone()).expect("SUB connect");
                 subscriber.subscribe(Bytes::new()).expect("SUB subscribe");
                 receivers.push(subscriber);
             }
+
             publisher
                 .wait_subscribed(peers as u64, Duration::from_secs(5))
                 .expect("SUB subscribe timeout");
+
             (publisher, receivers)
         },
     )
@@ -302,6 +318,7 @@ async fn run_mode(args: &[String]) -> bool {
             let io_threads = args[3].parse().expect("io_threads");
             let peers = args[4].parse().expect("peers");
             run_pubsub_pub_child(size, io_threads, peers);
+
             true
         }
         Some("--pubsub-sub-child") => {
@@ -310,6 +327,7 @@ async fn run_mode(args: &[String]) -> bool {
             let peers = args[5].parse().expect("peers");
             let io_threads = args[6].parse().expect("io_threads");
             run_pubsub_sub_child(&endpoint, duration, peers, io_threads);
+
             true
         }
         _ => false,
@@ -354,6 +372,7 @@ async fn measure(case: &Case) -> Sample {
             "ratio",
         ),
     };
+
     Sample {
         name: case.name.clone(),
         value,
@@ -376,6 +395,7 @@ impl RunOptions {
             ..Self::default()
         };
         let mut args = args.iter().skip(1);
+
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--case" => {
@@ -393,6 +413,7 @@ impl RunOptions {
                 _ => panic!("unknown option: {arg}"),
             }
         }
+
         assert!(options.repeat > 0, "repeat count must be positive");
         options
     }
@@ -404,6 +425,7 @@ fn print_run_header(options: &RunOptions, thresholds: &ThresholdConfig) {
         "warmup: {:?}, measurement: {:?}, repetitions: {}",
         SETTINGS.warmup, SETTINGS.measure, options.repeat
     );
+
     if options.measure_only {
         println!("measurement only: thresholds are not checked");
     } else if thresholds.mode == ThresholdMode::Smoke {
@@ -418,6 +440,7 @@ async fn measure_median(case: &Case, repeat: usize) -> Sample {
     for round in 0..repeat {
         let sample = measure(case).await;
         assert!(sample.value.is_finite(), "invalid benchmark measurement");
+
         if repeat > 1 {
             println!(
                 "  sample {}: {:.2} {}",
@@ -426,14 +449,17 @@ async fn measure_median(case: &Case, repeat: usize) -> Sample {
                 sample.unit
             );
         }
+
         samples.push(sample);
     }
 
     samples.sort_by(|a, b| a.value.total_cmp(&b.value));
     let mut sample = samples[samples.len() / 2].clone();
+
     if samples.len() % 2 == 0 {
         sample.value = sample.value.midpoint(samples[samples.len() / 2 - 1].value);
     }
+
     if repeat > 1 {
         println!(
             "  range: {:.2}..{:.2} {} (result is median)",
@@ -442,6 +468,7 @@ async fn measure_median(case: &Case, repeat: usize) -> Sample {
             sample.unit
         );
     }
+
     sample
 }
 
@@ -452,23 +479,29 @@ async fn main() {
     // restore the explicit CPU list passed by their parent.
     let _ = &*SETTINGS;
     SETTINGS.affinity.pin(0);
+
     if run_mode(&args).await {
         return;
     }
+
     let options = RunOptions::parse(&args);
     let cases = cases();
+
     if options.list {
         for case in cases {
             println!("{}", case.name);
         }
+
         return;
     }
+
     if let Some(name) = &options.case {
         assert!(
             cases.iter().any(|case| &case.name == name),
             "unknown benchmark case: {name}"
         );
     }
+
     let thresholds = read_thresholds();
     print_run_header(&options, &thresholds);
 

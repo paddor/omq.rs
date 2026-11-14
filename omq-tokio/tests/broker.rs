@@ -118,6 +118,7 @@ async fn router_dealer_rep_single_cycle_with(frontend: Endpoint, backend: Endpoi
     // Broker: transparently forward one request and one reply.
     let router_c = router.clone();
     let dealer_c = dealer.clone();
+
     let broker = tokio::spawn(async move {
         let request = tokio::time::timeout(Duration::from_secs(2), router_c.recv())
             .await
@@ -173,6 +174,7 @@ async fn router_dealer_rep_multi_hop_envelope_with(frontend: Endpoint, backend: 
 
     let router_c = router.clone();
     let dealer_c = dealer.clone();
+
     let broker = tokio::spawn(async move {
         let request = tokio::time::timeout(Duration::from_secs(2), router_c.recv())
             .await

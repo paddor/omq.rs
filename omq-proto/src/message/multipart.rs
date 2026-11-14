@@ -13,30 +13,38 @@ impl Message {
             let identity = self.pop_identity().expect("identity frame");
             let replaced = self.replace_last_payload(payload);
             *self = Self::with_identity(identity, std::mem::take(self));
+
             return replaced;
         }
+
         match &mut self.inner {
             MessageInner::Multi(parts) | MessageInner::RoutedMulti { parts, .. } => {
                 let Some(last) = parts.last_mut() else {
                     return false;
                 };
+
                 *last = payload;
             }
             _ => {
                 if self.is_empty() {
                     return false;
                 }
+
                 let routing_id = self.routing_id();
                 let mut body = Self::from(payload);
+
                 if self.len() == 2 {
                     body = Self::with_prefix(self.part_bytes(0).expect("envelope frame"), body);
                 }
+
                 if let Some(id) = routing_id {
                     body = body.with_routing_id(id);
                 }
+
                 *self = body;
             }
         }
+
         true
     }
 
@@ -56,6 +64,7 @@ impl Message {
         if self.len() != 1 {
             return Err(self);
         }
+
         Ok(self.pop_front().expect("one part"))
     }
 
@@ -82,6 +91,7 @@ impl Message {
                         len: len & !INLINE_DELIMITED_FLAG,
                         data,
                     };
+
                     Some(Payload::new())
                 } else {
                     Some(Payload::from_slice(&data[..len as usize]))
@@ -101,6 +111,7 @@ impl Message {
                 if v.is_empty() {
                     return None;
                 }
+
                 let first = v.remove(0);
                 self.inner = Self::from_parts(v).inner;
                 Some(first)
@@ -113,6 +124,7 @@ impl Message {
                 if parts.is_empty() {
                     return None;
                 }
+
                 let first = parts.remove(0);
                 self.inner = Self::from_parts(parts).inner;
                 Some(first)
@@ -127,11 +139,13 @@ impl Message {
         if prefix.is_empty() {
             return body.prepend_empty_delimiter();
         }
+
         if let Some(pair) = InlinePair::for_message(&prefix, &body) {
             return Self {
                 inner: MessageInner::InlinePair(pair),
             };
         }
+
         body.inner = match body.inner {
             MessageInner::Single(Payload {
                 inner: PayloadInner::Single(bytes),
@@ -156,6 +170,7 @@ impl Message {
             }
             other => other,
         };
+
         if let MessageInner::Multi(parts) | MessageInner::RoutedMulti { parts, .. } =
             &mut body.inner
         {
@@ -163,9 +178,11 @@ impl Message {
             let _ = body.take_routing_id();
             return body;
         }
+
         let mut parts = Vec::with_capacity(1 + body.len());
         parts.push(Payload::from_bytes(prefix));
         body.append_payloads_to(&mut parts);
+
         Self {
             inner: MessageInner::Multi(parts.into()),
         }
@@ -179,6 +196,7 @@ impl Message {
         parts.extend(envelope.into_iter().map(Payload::from_bytes));
         parts.push(Payload::from_bytes(Bytes::new()));
         body.append_payloads_to(&mut parts);
+
         Self::from_payloads_vec(parts)
     }
 
@@ -199,6 +217,7 @@ impl Message {
             MessageInner::Inline { len, data } => {
                 let existing =
                     Payload::from_slice(&data[..(len & !INLINE_DELIMITED_FLAG) as usize]);
+
                 if len & INLINE_DELIMITED_FLAG != 0 {
                     multi([Payload::from_bytes(Bytes::new()), existing, part])
                 } else {
@@ -295,6 +314,7 @@ impl Message {
                 MessageInner::RoutedMulti { routing_id, parts }
             }
         };
+
         Self { inner }
     }
 
@@ -313,6 +333,7 @@ impl Message {
             } => return Self::from_payloads_vec(vec![empty, p]),
             p => MessageInner::EmptyDelimitedBytes(p.into_bytes()),
         };
+
         Self { inner }
     }
 
@@ -325,6 +346,7 @@ impl Message {
                 if len & INLINE_DELIMITED_FLAG != 0 {
                     parts.push(Payload::from_bytes(Bytes::new()));
                 }
+
                 parts.push(Payload::from_slice(
                     &data[..(len & !INLINE_DELIMITED_FLAG) as usize],
                 ));

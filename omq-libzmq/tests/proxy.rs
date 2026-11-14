@@ -30,26 +30,19 @@ const ZMQ_RCVHWM: i32 = 24;
 const ZMQ_RCVTIMEO: i32 = 27;
 const ZMQ_SNDTIMEO: i32 = 28;
 
-fn set_i32(sock: *mut c_void, opt: i32, value: i32) {
-    zmq_setsockopt(sock, opt, (&value as *const i32).cast(), size_of::<i32>());
-}
-
-fn set_timeo(sock: *mut c_void, opt: i32, ms: i32) {
-    set_i32(sock, opt, ms);
-}
+const ZMQ_MSG_WORDS: usize = 64 / size_of::<usize>();
 
 fn set_linger(sock: *mut c_void, ms: i32) {
-    set_i32(sock, ZMQ_LINGER, ms);
+    helpers::set_int_opt(sock, ZMQ_LINGER, ms);
 }
 
 fn rcvmore(sock: *mut c_void) -> bool {
     let mut v: i32 = 0;
     let mut sz = size_of::<i32>();
     zmq_getsockopt(sock, ZMQ_RCVMORE, (&mut v as *mut i32).cast(), &mut sz);
+
     v != 0
 }
-
-const ZMQ_MSG_WORDS: usize = 64 / size_of::<usize>();
 
 #[repr(C)]
 struct ZmqMsg([usize; ZMQ_MSG_WORDS]);
@@ -108,15 +101,18 @@ fn spawn_counter_sender(src: *mut c_void, n: usize) -> std::thread::JoinHandle<S
     std::thread::spawn(move || {
         let src = src_arg.into_ptr();
         let mut sent = 0usize;
+
         while sent < n {
             let data = (sent as u32).to_le_bytes();
             let rc = zmq_send(src, data.as_ptr().cast(), data.len(), ZMQ_DONTWAIT);
+
             if rc == i32::try_from(data.len()).expect("test payload len fits i32") {
                 sent += 1;
             } else {
                 std::thread::sleep(Duration::from_millis(1));
             }
         }
+
         SocketArg(src)
     })
 }
@@ -141,10 +137,12 @@ fn send_burst(sock: *mut c_void, count: u32) -> usize {
     for i in 0..count {
         let data = i.to_le_bytes();
         let rc = zmq_send(sock, data.as_ptr().cast(), data.len(), ZMQ_DONTWAIT);
+
         if rc == i32::try_from(data.len()).expect("test payload len fits i32") {
             sent += 1;
         }
     }
+
     sent
 }
 
@@ -171,8 +169,8 @@ fn proxy_small_message() {
     zmq_connect(ctrl_b, addr_ctrl.as_ptr());
     std::thread::sleep(Duration::from_millis(50));
 
-    set_timeo(dst, ZMQ_RCVTIMEO, 5000);
-    set_timeo(src, ZMQ_SNDTIMEO, 5000);
+    helpers::set_int_opt(dst, ZMQ_RCVTIMEO, 5000);
+    helpers::set_int_opt(src, ZMQ_SNDTIMEO, 5000);
 
     let args = ProxyArgs {
         fe,
@@ -219,8 +217,8 @@ fn proxy_retries_pending_after_inproc_backpressure() {
 
     // Small HWMs on the proxy's backend path force EAGAIN inside the proxy.
     let hwm = 16i32;
-    set_i32(be, ZMQ_SNDHWM, hwm);
-    set_i32(dst, ZMQ_RCVHWM, hwm);
+    helpers::set_int_opt(be, ZMQ_SNDHWM, hwm);
+    helpers::set_int_opt(dst, ZMQ_RCVHWM, hwm);
 
     let addr_fe = CString::new("inproc://proxy-fe-backpressure").unwrap();
     let addr_be = CString::new("inproc://proxy-be-backpressure").unwrap();
@@ -234,7 +232,7 @@ fn proxy_retries_pending_after_inproc_backpressure() {
     zmq_connect(ctrl_b, addr_ctrl.as_ptr());
     std::thread::sleep(Duration::from_millis(50));
 
-    set_timeo(dst, ZMQ_RCVTIMEO, 5000);
+    helpers::set_int_opt(dst, ZMQ_RCVTIMEO, 5000);
 
     let proxy = spawn_proxy(fe, be, std::ptr::null_mut(), ctrl_a);
     let sender = spawn_counter_sender(src, N);
@@ -243,11 +241,13 @@ fn proxy_retries_pending_after_inproc_backpressure() {
 
     let mut got = Vec::with_capacity(N);
     let mut buf = [0u8; 4];
+
     for _ in 0..N {
         let rc = zmq_recv(dst, buf.as_mut_ptr().cast(), buf.len(), 0);
         assert_eq!(rc, 4, "dst recv failed (errno={})", omq_zmq::zmq_errno());
         got.push(u32::from_le_bytes(buf));
     }
+
     assert_eq!(got, (0..N as u32).collect::<Vec<_>>());
 
     let src = sender.join().unwrap().0;
@@ -282,8 +282,8 @@ fn proxy_does_not_starve_reverse_direction_when_frontend_is_hot() {
     }
 
     let hwm = 16i32;
-    set_i32(be, ZMQ_SNDHWM, hwm);
-    set_i32(right, ZMQ_RCVHWM, hwm);
+    helpers::set_int_opt(be, ZMQ_SNDHWM, hwm);
+    helpers::set_int_opt(right, ZMQ_RCVHWM, hwm);
 
     let addr_fe = CString::new("inproc://proxy-fe-starve").unwrap();
     let addr_be = CString::new("inproc://proxy-be-starve").unwrap();
@@ -297,8 +297,8 @@ fn proxy_does_not_starve_reverse_direction_when_frontend_is_hot() {
     zmq_connect(ctrl_b, addr_ctrl.as_ptr());
     std::thread::sleep(Duration::from_millis(50));
 
-    set_timeo(left, ZMQ_RCVTIMEO, 5000);
-    set_timeo(right, ZMQ_SNDTIMEO, 5000);
+    helpers::set_int_opt(left, ZMQ_RCVTIMEO, 5000);
+    helpers::set_int_opt(right, ZMQ_SNDTIMEO, 5000);
 
     let proxy = spawn_proxy(fe, be, std::ptr::null_mut(), ctrl_a);
 
@@ -322,7 +322,7 @@ fn proxy_does_not_starve_reverse_direction_when_frontend_is_hot() {
     );
     assert_eq!(&buf[..payload.len()], payload);
 
-    set_timeo(right, ZMQ_RCVTIMEO, 5000);
+    helpers::set_int_opt(right, ZMQ_RCVTIMEO, 5000);
     recv_u32_frames(right, hot_sent);
 
     zmq_send(ctrl_b, b"TERMINATE".as_ptr().cast(), 9, 0);
@@ -359,8 +359,8 @@ fn proxy_multipart_message() {
     zmq_connect(ctrl_b, addr_ctrl.as_ptr());
     std::thread::sleep(Duration::from_millis(50));
 
-    set_timeo(dst, ZMQ_RCVTIMEO, 5000);
-    set_timeo(src, ZMQ_SNDTIMEO, 5000);
+    helpers::set_int_opt(dst, ZMQ_RCVTIMEO, 5000);
+    helpers::set_int_opt(src, ZMQ_SNDTIMEO, 5000);
 
     let args = ProxyArgs {
         fe,
@@ -425,8 +425,8 @@ fn proxy_capture_gets_copy() {
     zmq_connect(ctrl_b, addr_ctrl.as_ptr());
     std::thread::sleep(Duration::from_millis(50));
 
-    set_timeo(dst, ZMQ_RCVTIMEO, 5000);
-    set_timeo(cap_dst, ZMQ_RCVTIMEO, 5000);
+    helpers::set_int_opt(dst, ZMQ_RCVTIMEO, 5000);
+    helpers::set_int_opt(cap_dst, ZMQ_RCVTIMEO, 5000);
 
     let args = ProxyArgs {
         fe,
@@ -486,7 +486,7 @@ fn proxy_pause_resume() {
     zmq_connect(ctrl_b, addr_ctrl.as_ptr());
     std::thread::sleep(Duration::from_millis(50));
 
-    set_timeo(dst, ZMQ_RCVTIMEO, 100);
+    helpers::set_int_opt(dst, ZMQ_RCVTIMEO, 100);
 
     let args = ProxyArgs {
         fe,
@@ -507,7 +507,7 @@ fn proxy_pause_resume() {
     let mut buf = [0u8; 64];
     assert!(zmq_recv(dst, buf.as_mut_ptr().cast(), buf.len(), 0) < 0);
 
-    set_timeo(dst, ZMQ_RCVTIMEO, 5000);
+    helpers::set_int_opt(dst, ZMQ_RCVTIMEO, 5000);
     zmq_send(ctrl_b, b"RESUME".as_ptr().cast(), 6, 0);
     let rc = zmq_recv(dst, buf.as_mut_ptr().cast(), buf.len(), 0);
     assert_eq!(rc as usize, payload.len());
@@ -550,8 +550,8 @@ fn proxy_large_message() {
     zmq_connect(ctrl_b, addr_ctrl.as_ptr());
     std::thread::sleep(Duration::from_millis(200));
 
-    set_timeo(dst, ZMQ_RCVTIMEO, 10000);
-    set_timeo(src, ZMQ_SNDTIMEO, 10000);
+    helpers::set_int_opt(dst, ZMQ_RCVTIMEO, 10000);
+    helpers::set_int_opt(src, ZMQ_SNDTIMEO, 10000);
 
     let args = ProxyArgs {
         fe,
@@ -579,12 +579,14 @@ fn proxy_large_message() {
     let rc = zmq_msg_recv(recv_msg.0.as_mut_ptr().cast(), dst, 0);
     assert_eq!(rc as usize, size);
     assert_eq!(zmq_msg_size(recv_msg.0.as_ptr().cast()), size);
+
     let got = unsafe {
         std::slice::from_raw_parts(
             zmq_msg_data(recv_msg.0.as_mut_ptr().cast()).cast::<u8>(),
             size,
         )
     };
+
     assert_eq!(got, &payload[..]);
 
     zmq_msg_close(recv_msg.0.as_mut_ptr().cast());
@@ -620,7 +622,7 @@ fn proxy_forwards_xpub_subscriptions_to_xsub() {
     zmq_connect(publisher, addr_xsub.as_ptr());
     zmq_connect(subscriber, addr_xpub.as_ptr());
     zmq_connect(ctrl_b, addr_ctrl.as_ptr());
-    set_timeo(subscriber, ZMQ_RCVTIMEO, 5000);
+    helpers::set_int_opt(subscriber, ZMQ_RCVTIMEO, 5000);
 
     let args = ProxyArgs {
         fe: xsub,

@@ -230,6 +230,7 @@ impl LaneWorker {
                 tokio::task::yield_now().await;
                 continue;
             }
+
             tokio::select! {
                 () = self.ctrl.ready() => {}
                 () = self.data_signal.ready() => {}
@@ -250,22 +251,26 @@ impl LaneWorker {
         while let Some(msg) = self.data_rx.pop() {
             drained = true;
             let msg_bytes = msg.byte_len();
+
             #[cfg(target_os = "linux")]
             let msg_bytes = if shm_only {
                 omq_shm::send_work_bytes(&msg)
             } else {
                 msg_bytes
             };
+
             batch.push(msg);
             if !budget.account(msg_bytes) {
                 break;
             }
         }
+
         self.data_rx.release();
 
         if drained {
             self.notify_data_space();
         }
+
         drained
     }
 
@@ -280,9 +285,11 @@ impl LaneWorker {
                 let (count, shutdown) = self
                     .dispatch_codec_arena(&scratch.batch[next..], &mut scratch.touched)
                     .await;
+
                 if shutdown {
                     return true;
                 }
+
                 if count > 1 {
                     next += count;
                     continue;
@@ -299,6 +306,7 @@ impl LaneWorker {
                 {
                     return true;
                 }
+
                 next += count;
                 continue;
             }
@@ -308,6 +316,7 @@ impl LaneWorker {
                 &mut scratch.wire,
                 &mut scratch.ends,
             );
+
             let shutdown = if count > 1 {
                 let wire = scratch.wire.uncommitted_arena();
                 self.dispatch_plain_batch(wire, &scratch.ends, &mut scratch.touched)
@@ -316,9 +325,11 @@ impl LaneWorker {
                 self.dispatch(&scratch.batch[next], &mut scratch.touched)
                     .await
             };
+
             if shutdown {
                 return true;
             }
+
             next += count.max(1);
         }
 
@@ -351,11 +362,13 @@ impl LaneWorker {
         let mut shutdown = false;
         let mut batch = std::mem::take(&mut self.ctrl_batch);
         self.ctrl.take_batch(&mut batch);
+
         for cmd in batch.drain(..) {
             if self.handle_control(cmd) {
                 shutdown = true;
             }
         }
+
         self.ctrl_batch = batch;
         self.ctrl.finish_drain();
         shutdown
@@ -375,6 +388,7 @@ impl LaneWorker {
                 {
                     self.subscribe_all_count += 1;
                 }
+
                 if let Some(ack) = ack {
                     let _ = ack.send(());
                 }
@@ -398,6 +412,7 @@ impl LaneWorker {
             }
             LaneControl::Shutdown => return true,
         }
+
         false
     }
 
@@ -408,6 +423,7 @@ impl LaneWorker {
             let mut group = CodecGroup::new(add.slot.codec_profile().cloned())
                 .expect("validated codec profile");
             group.shm = add.slot.is_shm();
+
             group
         });
         group.peers += 1;
@@ -422,6 +438,7 @@ impl LaneWorker {
         let Some(peer) = self.peers.remove(&peer_id) else {
             return;
         };
+
         if peer.filter.is_subscribe_all() {
             self.subscribe_all_count = self.subscribe_all_count.saturating_sub(1);
         }
@@ -430,6 +447,7 @@ impl LaneWorker {
             .as_mut()
             .expect("peer codec group");
         group.peers -= 1;
+
         if group.peers == 0 {
             self.codec_groups[peer.codec_group] = None;
         }
@@ -441,6 +459,7 @@ impl LaneWorker {
             for (group, peers) in targets.iter().enumerate() {
                 self.dispatch_group_lossy(GroupPeers { group, peers }, msg, touched);
             }
+
             return false;
         }
 
@@ -451,6 +470,7 @@ impl LaneWorker {
             let target = GroupPeers { group, peers };
             self.dispatch_group_ready(target, msg, touched, &mut pending);
         }
+
         self.finish_pending(&mut pending, touched).await
     }
 
@@ -466,6 +486,7 @@ impl LaneWorker {
             std::array::from_fn(|_| SmallVec::new());
         let all_subscribe_all =
             filter::all_peers_subscribe_all(self.mode, self.subscribe_all_count, self.peers.len());
+
         for (&peer_id, peer) in &self.peers {
             if peer.slot.fanout_active()
                 && (all_subscribe_all
@@ -480,6 +501,7 @@ impl LaneWorker {
                 groups[peer.codec_group].push(peer_id);
             }
         }
+
         groups
     }
 

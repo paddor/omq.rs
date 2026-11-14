@@ -39,6 +39,7 @@ impl Wake for GateWake {
         // Set the flag before reading the task waker. `poll` stores the task
         // waker before reading the flag, so one of them sees the other.
         self.fired.store(true, Ordering::Release);
+
         if let Some(task) = self.task.lock().expect("gate task poisoned").as_ref() {
             task.wake_by_ref();
         }
@@ -71,16 +72,19 @@ impl WakeGate {
             *self.wake.task.lock().expect("gate task poisoned") = Some(task.clone());
             self.task = Some(task);
         }
+
         // Acquire pairs with the wake's release.
         if self.parked && !self.wake.fired.load(Ordering::Acquire) {
             return Poll::Pending;
         }
+
         // A wake racing with this poll either sets the flag again or made its
         // source ready before it fired.
         self.wake.fired.store(false, Ordering::Relaxed);
         let result = poll(&mut Context::from_waker(&self.waker));
         // A ready source may hold more: it registers again only when empty.
         self.parked = result.is_pending();
+
         result
     }
 

@@ -10,10 +10,12 @@ use super::StartStop;
 pub(super) fn run(ctx: &Context, name: String, size: usize, duration: Duration, hwm: u32) {
     assert!(hwm > 0, "benchmark HWM must be positive");
     assert!(!duration.is_zero(), "benchmark duration must be positive");
+
     let options = Options::default().send_hwm(hwm).recv_hwm(hwm);
     let pull = ctx.blocking_socket(SocketType::Pull, options.clone());
     let push = ctx.blocking_socket(SocketType::Push, options);
     let endpoint = Endpoint::Inproc { name };
+
     pull.bind(endpoint.clone()).expect("pull bind");
     push.connect(endpoint).expect("push connect");
     push.wait_connected(1, Duration::from_secs(5))
@@ -26,18 +28,22 @@ pub(super) fn run(ctx: &Context, name: String, size: usize, duration: Duration, 
 
     let receiver_pull = pull.clone();
     let receiver_push = push;
+
     let receiver = std::thread::spawn(move || {
         barrier.wait();
         let before = Usage::read();
         let started = Instant::now();
         let mut count = 0_u64;
+
         loop {
             receiver_pull.recv().expect("blocking receive");
             count += 1;
+
             if count.is_multiple_of(256) && started.elapsed() >= duration {
                 break;
             }
         }
+
         let elapsed = started.elapsed();
         let usage = Usage::read().zip(before).map(|(after, before)| Usage {
             cpu_seconds: after.cpu_seconds - before.cpu_seconds,
@@ -48,8 +54,10 @@ pub(super) fn run(ctx: &Context, name: String, size: usize, duration: Duration, 
         receiver_push
             .close_with_linger(Some(Duration::ZERO))
             .expect("close push");
+
         (count, elapsed, usage)
     });
+
     let (count, elapsed, usage) = receiver.join().expect("receiver thread");
     sender.join().expect("sender thread");
     pull.close_with_linger(Some(Duration::ZERO))
@@ -72,6 +80,7 @@ fn spawn_sender(
             stop: sender_stop,
         } = signals;
         sender_barrier.wait();
+
         if payload.len() <= omq_tokio::message::MAX_INLINE_MESSAGE {
             while !sender_stop.load(Ordering::Acquire) {
                 if let Err(error) = sender_push.send(Message::from_slice(&payload)) {
@@ -96,12 +105,14 @@ fn print_stats(hwm: u32, usage: Option<&Usage>) {
     // Each direction's ring holds send_hwm + recv_hwm, rounded up to a power of two.
     let ring_capacity = (hwm as usize).saturating_mul(2).next_power_of_two();
     print!("blocking-stats hwm={hwm} ring_capacity={ring_capacity}");
+
     if let Some(usage) = usage {
         print!(
             " cpu_seconds={:.9} context_switches={}",
             usage.cpu_seconds, usage.context_switches
         );
     }
+
     println!();
 }
 
@@ -125,6 +136,7 @@ impl Usage {
         );
         // SAFETY: getrusage succeeded and initialized every field read below.
         let usage = unsafe { usage.assume_init() };
+
         Some(Self {
             cpu_seconds: crate::bench_common::timeval_secs(&usage.ru_utime)
                 + crate::bench_common::timeval_secs(&usage.ru_stime),

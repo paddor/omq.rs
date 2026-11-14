@@ -20,6 +20,7 @@ impl SocketDriver {
         let Some(peer_id) = self.alloc_id() else {
             return;
         };
+
         // Bind side names peers by peer id. Connect side keeps the route id
         // that connect() already reported.
         let route_id = peer.route_id;
@@ -27,6 +28,7 @@ impl SocketDriver {
             Side::Bind => peer_id,
             Side::Connect => route_id,
         });
+
         if peer.side == Side::Bind {
             self.last_stream_routing_id = Some(identity.clone());
         }
@@ -55,6 +57,7 @@ impl SocketDriver {
             task: Some(task),
             ..PeerEntry::new(origin, handle.clone())
         };
+
         self.peers.insert(peer_id, entry);
         self.link.shared.ready_peers.add();
 
@@ -66,6 +69,7 @@ impl SocketDriver {
             is_inproc: false,
             io_thread,
         });
+
         self.routing
             .recv_strategy
             .connection_added(peer_id, identity);
@@ -84,6 +88,7 @@ impl SocketDriver {
         let assignment = self.resources.io_pool.reserve_thread();
         let io_thread = assignment.index();
         let migrate = self.resources.io_pool.has_dedicated_io_threads();
+
         let raw_peer = crate::transport::stream_raw::RawPeer {
             peer_id,
             peer_out: crate::engine::actor_output::PeerOutput::actor(peer_output),
@@ -108,6 +113,7 @@ impl SocketDriver {
                 }
             },
         );
+
         Some(RawStreamTask {
             handle,
             task,

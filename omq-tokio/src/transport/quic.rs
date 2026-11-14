@@ -39,24 +39,29 @@ use udp::UdpEndpoint;
 /// Private ALPN for the two-stream raw profile. Not a ZMTP version.
 pub(crate) const ALPN: &[u8] = b"omq-zmtp/1";
 
+/// Concurrent TLS/stream setups per QUIC listener, beside the socket limit.
+const LISTENER_SETUPS: u32 = 32;
+
 /// QUIC application close codes.
 pub(crate) mod code {
     /// Normal close after completed linger or peer EOF.
     pub(crate) const NO_ERROR: u32 = 0x00;
+
     /// Invalid stream roles, preface, or setup deadline.
     pub(crate) const SETUP_ERROR: u32 = 0x01;
+
     /// Malformed liveness record or ended liveness stream.
     pub(crate) const CONTROL_ERROR: u32 = 0x02;
+
     /// No liveness record within the heartbeat timeout.
     pub(crate) const LIVENESS_TIMEOUT: u32 = 0x03;
+
     /// A stream beyond the two permitted ones.
     pub(crate) const UNEXPECTED_STREAM: u32 = 0x04;
+
     /// Local abort, including linger expiry with unacknowledged data.
     pub(crate) const ABORTED: u32 = 0x05;
 }
-
-/// Concurrent TLS/stream setups per QUIC listener, beside the socket limit.
-const LISTENER_SETUPS: u32 = 32;
 
 /// Data role, liveness role, and the connection that owns them.
 struct Roles {
@@ -81,6 +86,7 @@ impl Roles {
             config,
         ))
         .abort_handle();
+
         QuicStream::new(self.carrier, endpoint, group, self.data, liveness)
     }
 }
@@ -112,6 +118,7 @@ async fn on_io_thread<T: Send + 'static>(
             self.0.abort();
         }
     }
+
     let mut task = AbortOnDrop(pool.spawn_on(lease.index(), future));
     (&mut task.0)
         .await
@@ -124,6 +131,7 @@ async fn resolve_connect(host: &Host, port: u16) -> Result<Vec<SocketAddr>> {
             "QUIC connect requires a port".into(),
         ));
     }
+
     crate::transport::dns::connect_addrs(host, port).await
 }
 
@@ -145,6 +153,7 @@ fn client_endpoint(
 ) -> Result<Arc<UdpEndpoint>> {
     let family = usize::from(addr.is_ipv6());
     let cached = CLIENT_ENDPOINTS.with(|slots| slots.borrow()[family].upgrade());
+
     let endpoint = if let Some(endpoint) = cached {
         endpoint
     } else {
@@ -152,6 +161,7 @@ fn client_endpoint(
         CLIENT_ENDPOINTS.with(|slots| slots.borrow_mut()[family] = Arc::downgrade(&endpoint));
         endpoint
     };
+
     endpoint.raise_buffers(buffers.0, buffers.1);
     Ok(endpoint)
 }
@@ -161,6 +171,7 @@ fn new_client_endpoint(addr: SocketAddr) -> Result<UdpEndpoint> {
         IpAddr::V4(_) => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
         IpAddr::V6(_) => SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
     };
+
     let socket = std::net::UdpSocket::bind(local).map_err(Error::Io)?;
     UdpEndpoint::new(socket, config::endpoint(), None)
 }
@@ -207,6 +218,7 @@ pub(crate) async fn connect(
             )));
         }
     };
+
     let addrs = resolve_connect(host, port).await?;
     connect_addrs(addrs, host, options, deadline, pool).await
 }
@@ -222,9 +234,11 @@ async fn connect_addrs(
     let server_name =
         crate::transport::tls::server_name(host, options.quic.server_name.as_deref())?;
     let server_name = server_name.to_str().into_owned();
+
     let client = config::client(&options.quic, config::Profile::Raw)?;
     let liveness = LivenessConfig::from_options(options);
     let buffers = (options.recv_buffer_size, options.send_buffer_size);
+
     let lease = pool.reserve_thread();
     // QUIC gets no error for an address where nothing answers, so the
     // next address is dialed alongside one that stays silent.
@@ -235,6 +249,7 @@ async fn connect_addrs(
             let endpoint = client_endpoint(addr, buffers)?;
             let connection = handshake(&endpoint, client, addr, &server_name).await?;
             let roles = open_raw_roles(connection, deadline).await?;
+
             Ok(roles.establish(endpoint, None, liveness))
         })
     };
@@ -247,19 +262,10 @@ async fn connect_addrs(
 }
 
 async fn open_raw_roles(connection: quinn::Connection, deadline: Option<Instant>) -> Result<Roles> {
-    let opened = async {
-        config::check_alpn(&connection, ALPN)?;
-        let open = |e: quinn::ConnectionError| Error::HandshakeFailed(format!("QUIC open: {e}"));
-        let data = connection.open_bi().await.map_err(open)?;
-        let control = connection.open_bi().await.map_err(open)?;
-        check_raw_roles(&data.0, &control.0)?;
-        let mut control_send = SendHalf::Raw(control.0);
-        let mut control_recv = RecvHalf::Raw(control.1);
-        liveness::write_preface(&mut control_send).await?;
-        liveness::read_preface(&mut control_recv).await?;
-        Ok((data, (control_send, control_recv)))
-    };
-    let opened = if let Some(deadline) = deadline {
+    let closer = connection.clone();
+    let opened = raw_roles(connection, Side::Connect);
+
+    let roles = if let Some(deadline) = deadline {
         match tokio::time::timeout_at(deadline.into(), opened).await {
             Ok(result) if Instant::now() < deadline => result,
             _ => Err(Error::HandshakeFailed("transport setup timeout".into())),
@@ -267,16 +273,66 @@ async fn open_raw_roles(connection: quinn::Connection, deadline: Option<Instant>
     } else {
         opened.await
     };
-    match opened {
-        Ok(((data_send, data_recv), (control_send, control_recv))) => Ok(Roles {
-            carrier: Carrier::Raw(connection),
-            data: (SendHalf::Raw(data_send), RecvHalf::Raw(data_recv)),
-            liveness: (control_send, control_recv),
-        }),
-        Err(e) => {
-            connection.close(quinn::VarInt::from_u32(code::SETUP_ERROR), b"");
-            Err(e)
+
+    if roles.is_err() {
+        closer.close(quinn::VarInt::from_u32(code::SETUP_ERROR), b"");
+    }
+
+    roles
+}
+
+/// Side of a raw-profile connection. The connector opens both streams and
+/// writes its liveness preface first; the listener accepts and answers.
+#[derive(Clone, Copy, Debug)]
+enum Side {
+    Connect,
+    Accept,
+}
+
+/// Raw-profile roles: check the ALPN, take streams 0 and 4, and exchange
+/// liveness prefaces in `side` order.
+async fn raw_roles(connection: quinn::Connection, side: Side) -> Result<Roles> {
+    config::check_alpn(&connection, ALPN)?;
+
+    let (data_send, data_recv) = raw_stream(&connection, side).await?;
+    let (control_send, control_recv) = raw_stream(&connection, side).await?;
+    check_raw_roles(&data_send, &control_send)?;
+
+    let mut control_send = SendHalf::Raw(control_send);
+    let mut control_recv = RecvHalf::Raw(control_recv);
+
+    match side {
+        Side::Connect => {
+            liveness::write_preface(&mut control_send).await?;
+            liveness::read_preface(&mut control_recv).await?;
         }
+        Side::Accept => {
+            liveness::read_preface(&mut control_recv).await?;
+            liveness::write_preface(&mut control_send).await?;
+        }
+    }
+
+    Ok(Roles {
+        carrier: Carrier::Raw(connection),
+        data: (SendHalf::Raw(data_send), RecvHalf::Raw(data_recv)),
+        liveness: (control_send, control_recv),
+    })
+}
+
+/// Open or accept the next bidirectional stream.
+async fn raw_stream(
+    connection: &quinn::Connection,
+    side: Side,
+) -> Result<(quinn::SendStream, quinn::RecvStream)> {
+    match side {
+        Side::Connect => connection
+            .open_bi()
+            .await
+            .map_err(|e| Error::HandshakeFailed(format!("QUIC open: {e}"))),
+        Side::Accept => connection
+            .accept_bi()
+            .await
+            .map_err(|e| Error::HandshakeFailed(format!("QUIC accept: {e}"))),
     }
 }
 
@@ -344,6 +400,7 @@ impl QuicListener {
             host: Host::Ip(local.ip()),
             port: local.port(),
         };
+
         Ok(Self {
             endpoints,
             generation,
@@ -390,8 +447,10 @@ impl QuicListener {
             if let Err(error) = incoming.retry() {
                 error.into_incoming().ignore();
             }
+
             return;
         }
+
         let (setup, deadline) = match self.queue.admit(addr) {
             Ok(admitted) => admitted,
             // Clients retransmit Initials once capacity returns.
@@ -404,10 +463,12 @@ impl QuicListener {
                 return;
             }
         };
+
         let endpoint = self.endpoints[index].udp.clone();
         let group = self.endpoints.clone();
         let policy = self.policy.clone();
         let pool = self.queue.io_pool().clone();
+
         // Keep connection crypto, timers, liveness and OMQ IO together.
         // Prefer the receiving endpoint's reactor, but do not let random
         // Initial connection IDs pile all connection work onto one lane.
@@ -416,6 +477,7 @@ impl QuicListener {
         } else {
             pool.reserve_thread()
         };
+
         self.queue.push(async move {
             let accepted = on_io_thread(&pool, &lease, async move {
                 accept_setup(incoming, endpoint, group, policy, deadline).await
@@ -423,6 +485,7 @@ impl QuicListener {
             let result = accepted
                 .await
                 .map(|stream| (stream.with_io_lease(lease), setup));
+
             (addr, result)
         });
     }
@@ -442,10 +505,12 @@ async fn next_incoming(endpoints: &[ListenerEndpoint]) -> Option<(usize, quinn::
     if let [only] = endpoints {
         return only.udp.accept().await.map(|incoming| (0, incoming));
     }
+
     let accepts = endpoints
         .iter()
         .map(|endpoint| Box::pin(endpoint.udp.accept()));
     let (incoming, index, _) = futures::future::select_all(accepts).await;
+
     incoming.map(|incoming| (index, incoming))
 }
 
@@ -459,6 +524,7 @@ fn listener_sockets(addr: SocketAddr, io_threads: usize) -> Result<Vec<std::net:
     {
         return Ok(sockets);
     }
+
     let _ = io_threads;
     Ok(vec![std::net::UdpSocket::bind(addr).map_err(Error::Io)?])
 }
@@ -468,6 +534,7 @@ fn listener_endpoint_config(index: usize, count: usize) -> quinn::EndpointConfig
     if count > 1 {
         return reuseport::endpoint_config(index, count);
     }
+
     let _ = (index, count);
     config::endpoint()
 }
@@ -489,6 +556,7 @@ async fn accept_setup(
         .map_err(|e| Error::HandshakeFailed(format!("QUIC handshake: {e}")))?;
     let closer = connection.clone();
     let roles = tokio::time::timeout_at(deadline.into(), accept_roles(connection, &policy)).await;
+
     // An immediately ready result must not bypass an expired deadline.
     let roles = match roles {
         Ok(Ok(roles)) if Instant::now() < deadline => Ok(roles),
@@ -499,6 +567,7 @@ async fn accept_setup(
         Err(_) => Err(timeout()),
         Ok(Err(e)) => Err(e),
     };
+
     match roles {
         Ok(roles) => Ok(roles.establish(endpoint, Some(group), policy.liveness)),
         Err(e) => {
@@ -515,21 +584,9 @@ async fn accept_roles(connection: quinn::Connection, policy: &AcceptPolicy) -> R
     if config::check_alpn(&connection, config::H3_ALPN).is_ok() {
         return web::accept_roles(connection, &policy.web).await;
     }
+
     let _ = policy;
-    config::check_alpn(&connection, ALPN)?;
-    let accept = |e: quinn::ConnectionError| Error::HandshakeFailed(format!("QUIC accept: {e}"));
-    let (data_send, data_recv) = connection.accept_bi().await.map_err(accept)?;
-    let (control_send, control_recv) = connection.accept_bi().await.map_err(accept)?;
-    check_raw_roles(&data_send, &control_send)?;
-    let mut control_send = SendHalf::Raw(control_send);
-    let mut control_recv = RecvHalf::Raw(control_recv);
-    liveness::read_preface(&mut control_recv).await?;
-    liveness::write_preface(&mut control_send).await?;
-    Ok(Roles {
-        carrier: Carrier::Raw(connection),
-        data: (SendHalf::Raw(data_send), RecvHalf::Raw(data_recv)),
-        liveness: (control_send, control_recv),
-    })
+    raw_roles(connection, Side::Accept).await
 }
 
 /// Bind a QUIC listener. With the `webtransport` feature it also accepts
@@ -548,6 +605,7 @@ pub(crate) async fn bind(
             )));
         }
     };
+
     let policy = AcceptPolicy::new(options)?;
     let handshakes = u32::try_from(options.max_pending_handshakes)
         .unwrap_or(u32::MAX)
@@ -555,13 +613,16 @@ pub(crate) async fn bind(
     let server = config::server(&options.quic, handshakes, config::Profile::listener())?;
     let addr = crate::transport::dns::bind_addr(host, port).await?;
     let _bind_guard = ListenerGroup::bind_guard().await;
+
     if let Some(group) = ListenerGroup::cached(addr) {
         let generation = group.claim(&server, setup.cancel.clone(), options)?;
         return QuicListener::new(group, generation, setup, policy);
     }
+
     let sockets = listener_sockets(addr, setup.io_pool.thread_count())?;
     let count = sockets.len();
     let mut endpoints = Vec::with_capacity(count);
+
     for (index, socket) in sockets.into_iter().enumerate() {
         // Endpoint receive/demultiplexing tasks belong on data IO runtimes,
         // never on a dedicated control runtime.
@@ -570,6 +631,7 @@ pub(crate) async fn bind(
         } else {
             setup.io_pool.reserve_thread()
         };
+
         let config = listener_endpoint_config(index, count);
         let server = server.clone();
         let udp = on_io_thread(&setup.io_pool, &lease, async move {
@@ -582,6 +644,7 @@ pub(crate) async fn bind(
             lease,
         });
     }
+
     let local = endpoints[0].udp.local_addr().map_err(Error::Io)?;
     let group = ListenerGroup::new(local, endpoints, setup.cancel.clone());
     QuicListener::new(group, 1, setup, policy)

@@ -45,6 +45,7 @@ pub(super) async fn warm_up_receivers(sockets: &[omq_tokio::Socket]) {
             }
         }));
     }
+
     for h in warmup_handles {
         let _ = h.await;
     }
@@ -73,6 +74,7 @@ pub(super) async fn measure_fair_recv(
             counter.store(recv_fair_loop(&sock, deadline, size).await, AO::Relaxed);
         }));
     }
+
     for h in handles {
         let _ = h.await;
     }
@@ -101,12 +103,14 @@ pub(super) async fn run_multi_push(
 
     let payload = bench_payload(size);
     let mut handles = Vec::with_capacity(socket_count);
+
     for sock in sockets {
         let p = payload.clone();
         handles.push(tokio::spawn(async move {
             run_push_loop(&sock, &p).await;
         }));
     }
+
     for h in handles {
         let _ = h.await;
     }
@@ -119,18 +123,22 @@ async fn recv_fair_loop(sock: &Socket, deadline: Instant, size: usize) -> u64 {
         let mut budget =
             omq_proto::flow::DrainBudget::new(MULTI_PULL_DRAIN_BATCH, RECV_BATCH_BYTES);
         let mut more = budget.account(size);
+
         while more && sock.try_recv().is_ok() {
             count += 1;
             more = budget.account(size);
         }
+
         tokio::task::yield_now().await;
     }
+
     count
 }
 
 pub(super) fn drain_pending(sock: &Socket) {
     let deadline = Instant::now() + Duration::from_millis(2);
     let mut budget = omq_proto::flow::DrainBudget::new(256, RECV_BATCH_BYTES);
+
     while Instant::now() < deadline {
         let Ok(message) = sock.try_recv() else { break };
         if !budget.account(message.byte_len()) {

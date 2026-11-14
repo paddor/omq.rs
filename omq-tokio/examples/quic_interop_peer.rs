@@ -10,6 +10,7 @@ fn cases() -> Vec<Message> {
             .map(|i| u8::try_from(i % 251).unwrap())
             .collect::<Vec<_>>()
     };
+
     vec![
         Message::single(Vec::new()),
         Message::single(vec![0, 255, 128]),
@@ -34,6 +35,7 @@ fn write_certs(directory: &Path) -> Result<(), Box<dyn Error>> {
             tls.signing_key.serialize_pem(),
         )?;
     }
+
     Ok(())
 }
 
@@ -61,6 +63,7 @@ fn serve(
     let mut stop = String::new();
     std::io::stdin().read_line(&mut stop)?;
     rep.close()?;
+
     Ok(())
 }
 
@@ -73,6 +76,7 @@ fn request(context: &Context, options: Options, endpoint: &str) -> Result<(), Bo
     for expected in cases() {
         req.send(expected.clone())?;
         let actual = req.recv_timeout(Duration::from_secs(10))?;
+
         if actual != expected {
             return Err("reply changed message bytes or multipart boundaries".into());
         }
@@ -90,6 +94,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     {
         return write_certs(Path::new(directory));
     }
+
     let [command, endpoint, directory] = args.as_slice() else {
         return Err(
             "usage: quic_interop_peer certs DIR | bind-rep/connect-req ENDPOINT DIR".into(),

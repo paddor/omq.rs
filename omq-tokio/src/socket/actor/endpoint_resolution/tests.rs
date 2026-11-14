@@ -81,6 +81,7 @@ async fn assert_initial_dns_outage_is_returned(lookup: &ScopedLookup, port: u16)
         );
         sockets.extend([connecting, binding]);
     }
+
     let calls = lookup.calls();
     tokio::time::sleep(Duration::from_millis(150)).await;
     assert_eq!(
@@ -88,6 +89,7 @@ async fn assert_initial_dns_outage_is_returned(lookup: &ScopedLookup, port: u16)
         calls,
         "initial DNS failure must not create a retry loop"
     );
+
     for socket in sockets {
         socket.close().await.unwrap();
     }
@@ -112,15 +114,18 @@ async fn assert_reconnect_dns_outage_recovers(outage: impl FnOnce(&ScopedLookup)
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let lookup = ScopedLookup::new(address.port(), Some(address.ip()));
+
     let push = Socket::new(SocketType::Push, Options::default());
     let endpoint: Endpoint = format!("tcp://omq-test-lookup.invalid:{}", address.port())
         .parse()
         .unwrap();
     push.connect(endpoint).await.unwrap();
     let (peer, _) = listener.accept().await.unwrap();
+
     let before = lookup.calls();
     outage(&lookup);
     drop(peer);
+
     tokio::time::timeout(Duration::from_secs(1), async {
         while lookup.calls() < before + 2 {
             tokio::task::yield_now().await;
@@ -128,6 +133,7 @@ async fn assert_reconnect_dns_outage_recovers(outage: impl FnOnce(&ScopedLookup)
     })
     .await
     .unwrap();
+
     tokio::time::timeout(
         Duration::from_secs(1),
         push.send(crate::Message::single("queued")),
@@ -135,16 +141,19 @@ async fn assert_reconnect_dns_outage_recovers(outage: impl FnOnce(&ScopedLookup)
     .await
     .expect("send blocked during a DNS outage")
     .unwrap();
+
     drop(listener);
     let pull = Socket::new(SocketType::Pull, Options::default());
     pull.bind(format!("tcp://{address}")).await.unwrap();
     lookup.set_address(Some(address.ip()));
+
     push.wait_connected(1, Duration::from_secs(1))
         .await
         .unwrap();
     push.send(crate::Message::single("recovered"))
         .await
         .unwrap();
+
     for expected in ["queued", "recovered"] {
         let message = tokio::time::timeout(Duration::from_secs(1), pull.recv())
             .await
@@ -152,6 +161,7 @@ async fn assert_reconnect_dns_outage_recovers(outage: impl FnOnce(&ScopedLookup)
             .unwrap();
         assert_eq!(message.part_bytes(0).unwrap(), expected.as_bytes());
     }
+
     push.close().await.unwrap();
     pull.close().await.unwrap();
 }
@@ -171,12 +181,14 @@ async fn reconnect_empty_dns_result_retries_and_recovers_without_api_errors() {
 async fn stalled_quic_dns_leaves_controls_responsive() {
     let _serial = TEST_STALL_LOCK.lock().await;
     let socket = Socket::new(SocketType::Sub, Options::default());
+
     let before = crate::transport::dns::stalled_test_lookups();
     let connecting = tokio::spawn({
         let socket = socket.clone();
         async move { socket.connect("quic://omq-test-stall.invalid:12003").await }
     });
     wait_stalled(before + 1).await;
+
     let responsive =
         tokio::time::timeout(Duration::from_millis(100), socket.subscribe("news")).await;
     connecting.abort();
@@ -185,6 +197,7 @@ async fn stalled_quic_dns_leaves_controls_responsive() {
         "initial QUIC DNS blocked the socket actor"
     );
     responsive.unwrap().unwrap();
+
     socket.close().await.unwrap();
 }
 
@@ -217,6 +230,7 @@ async fn stalled_named_bind_and_connect_leave_controls_responsive() {
     let socket = Socket::new(SocketType::Sub, Options::default());
     let connect_endpoint: Endpoint = "ws://omq-test-stall.invalid:12001/".parse().unwrap();
     let bind_endpoint: Endpoint = "ws://omq-test-stall.invalid:12002/".parse().unwrap();
+
     let first_count = crate::transport::dns::stalled_test_lookups();
     let connecting = tokio::spawn({
         let socket = socket.clone();
@@ -224,22 +238,26 @@ async fn stalled_named_bind_and_connect_leave_controls_responsive() {
         async move { socket.connect(endpoint).await }
     });
     wait_stalled(first_count + 1).await;
+
     tokio::time::timeout(Duration::from_secs(1), socket.subscribe("news"))
         .await
         .unwrap()
         .unwrap();
+
     let binding = tokio::spawn({
         let socket = socket.clone();
         let endpoint = bind_endpoint.clone();
         async move { socket.bind(endpoint).await }
     });
     wait_stalled(first_count + 2).await;
+
     let healthy: Endpoint = "ws://127.0.0.1:0/".parse().unwrap();
     let bound = tokio::time::timeout(Duration::from_secs(1), socket.bind(healthy))
         .await
         .unwrap()
         .unwrap();
     assert!(matches!(bound, Endpoint::Ws { .. }));
+
     tokio::time::timeout(Duration::from_secs(1), socket.disconnect(connect_endpoint))
         .await
         .unwrap()
@@ -248,6 +266,7 @@ async fn stalled_named_bind_and_connect_leave_controls_responsive() {
         .await
         .unwrap()
         .unwrap();
+
     assert!(matches!(connecting.await.unwrap(), Err(Error::Closed)));
     assert!(matches!(binding.await.unwrap(), Err(Error::Closed)));
     socket.close().await.unwrap();
@@ -265,9 +284,11 @@ async fn named_connect_waits_for_dial_setup_credit_before_dns() {
         },
     );
     let listener = socket.bind("ws://127.0.0.1:0/").await.unwrap();
+
     let Endpoint::Ws { host, port, .. } = listener else {
         unreachable!()
     };
+
     let mut pending = tokio::net::TcpStream::connect(format!("{host}:{port}"))
         .await
         .unwrap();
@@ -279,22 +300,26 @@ async fn named_connect_waits_for_dial_setup_credit_before_dns() {
     );
     pending.write_all(&request).await.unwrap();
     let mut head = Vec::new();
+
     while !head.ends_with(b"\r\n\r\n") {
         assert!(head.len() < 4096);
         head.push(pending.read_u8().await.unwrap());
     }
+
     // An inbound peer holding the sole inbound slot does not delay dials.
     let before = crate::transport::dns::stalled_test_lookups();
     let connect = |endpoint: Endpoint| {
         let socket = socket.clone();
         tokio::spawn(async move { socket.connect(endpoint).await })
     };
+
     let first: Endpoint = "ws://omq-test-stall.invalid:12001/".parse().unwrap();
     let first_connect = connect(first.clone());
     wait_stalled(before + 1).await;
     // A second named dial waits for the sole outbound slot before DNS.
     let second: Endpoint = "ws://omq-test-stall.invalid:12002/".parse().unwrap();
     let second_connect = connect(second.clone());
+
     assert!(
         tokio::time::timeout(Duration::from_millis(40), async {
             while crate::transport::dns::stalled_test_lookups() == before + 1 {
@@ -304,6 +329,7 @@ async fn named_connect_waits_for_dial_setup_credit_before_dns() {
         .await
         .is_err()
     );
+
     tokio::time::timeout(Duration::from_secs(1), socket.subscribe("still responsive"))
         .await
         .unwrap()
@@ -324,6 +350,7 @@ async fn pending_endpoint_jobs_have_a_finite_socket_cap() {
     let socket = Socket::new(SocketType::Sub, Options::default());
     let before = crate::transport::dns::stalled_test_lookups();
     let mut pending = Vec::new();
+
     for port in 12000..12000 + u16::try_from(MAX_PENDING_ENDPOINTS).unwrap() {
         let socket = socket.clone();
         let endpoint: Endpoint = format!("ws://omq-test-stall.invalid:{port}/")
@@ -331,16 +358,19 @@ async fn pending_endpoint_jobs_have_a_finite_socket_cap() {
             .unwrap();
         pending.push(tokio::spawn(async move { socket.connect(endpoint).await }));
     }
+
     wait_stalled(before + MAX_PENDING_ENDPOINTS).await;
     let excess = socket.connect("ws://omq-test-stall.invalid:13000/").await;
     assert!(
         matches!(excess, Err(Error::Io(ref error)) if error.kind() == std::io::ErrorKind::WouldBlock)
     );
     socket.close().await.unwrap();
+
     for operation in pending {
         assert!(matches!(operation.await.unwrap(), Err(Error::Closed)));
     }
 }
+
 #[tokio::test]
 #[cfg(feature = "ws")]
 async fn canceled_connect_caller_releases_dns_setup_admission() {
@@ -352,18 +382,22 @@ async fn canceled_connect_caller_releases_dns_setup_admission() {
             ..Options::default()
         },
     );
+
     let before = crate::transport::dns::stalled_test_lookups();
     let first = tokio::spawn({
         let socket = socket.clone();
         async move { socket.connect("ws://omq-test-stall.invalid:12001/").await }
     });
     wait_stalled(before + 1).await;
+
     first.abort();
     assert!(first.await.unwrap_err().is_cancelled());
+
     let second = tokio::spawn({
         let socket = socket.clone();
         async move { socket.connect("ws://omq-test-stall.invalid:12002/").await }
     });
+
     // Reaching DNS proves the canceled caller released the only credit.
     wait_stalled(before + 2).await;
     socket.close().await.unwrap();
@@ -377,6 +411,7 @@ async fn named_udp_connect_resolves_without_holding_the_actor() {
     let _lookup =
         crate::transport::dns::test_lookup::ScopedLookup::new(address.port(), Some(address.ip()));
     let radio = Socket::new(SocketType::Radio, Options::default());
+
     let endpoint: Endpoint = format!("udp://omq-test-lookup.invalid:{}", address.port())
         .parse()
         .unwrap();
@@ -385,6 +420,7 @@ async fn named_udp_connect_resolves_without_holding_the_actor() {
         .send(crate::Message::with_group("weather", "hot"))
         .await
         .unwrap();
+
     let mut datagram = [0; 64];
     let len = tokio::time::timeout(Duration::from_secs(1), dish.recv(&mut datagram))
         .await
@@ -400,10 +436,12 @@ async fn named_udp_connect_resolves_without_holding_the_actor() {
     // A lookup that never answers leaves the actor serving other commands.
     let _guard = TEST_STALL_LOCK.lock().await;
     let stalled: Endpoint = "udp://omq-test-stall.invalid:13006".parse().unwrap();
+
     let pending = {
         let radio = radio.clone();
         tokio::spawn(async move { radio.connect(stalled).await })
     };
+
     tokio::time::timeout(Duration::from_secs(1), radio.join("ignored"))
         .await
         .expect("actor waited for a UDP lookup")

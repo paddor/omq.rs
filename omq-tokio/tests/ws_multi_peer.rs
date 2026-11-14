@@ -32,6 +32,7 @@ async fn ws_push_to_multiple_pulls() {
     let pulls: Vec<Socket> = (0..3)
         .map(|_| Socket::new(SocketType::Pull, Options::default()))
         .collect();
+
     for p in &pulls {
         p.connect(ws_endpoint(port)).await.unwrap();
     }
@@ -44,6 +45,7 @@ async fn ws_push_to_multiple_pulls() {
 
     let counts: Vec<Arc<AtomicUsize>> = (0..3).map(|_| Arc::new(AtomicUsize::new(0))).collect();
     let mut handles = Vec::new();
+
     for (p, c) in pulls.into_iter().zip(counts.iter().cloned()) {
         handles.push(tokio::spawn(async move {
             loop {
@@ -56,6 +58,7 @@ async fn ws_push_to_multiple_pulls() {
             }
         }));
     }
+
     for h in handles {
         let _ = h.await;
     }

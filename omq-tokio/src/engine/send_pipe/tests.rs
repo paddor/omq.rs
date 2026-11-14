@@ -65,6 +65,7 @@ async fn metadata_drain_preserves_limits_order_and_capacity_wakes() {
         for sequence in 0..4 {
             tx.try_send(Message::from(vec![sequence; 4096])).unwrap();
         }
+
         let mut batch = Vec::new();
         for (count, bytes) in [(0, 128), (4, 0)] {
             assert_eq!(
@@ -72,13 +73,16 @@ async fn metadata_drain_preserves_limits_order_and_capacity_wakes() {
                 0
             );
         }
+
         assert_eq!(rx.drain_into_with_cost(&mut batch, 4, 128, |_, _| 64), 2);
         timeout(Duration::from_millis(10), rx.ready())
             .await
             .expect("bounded drain must rearm the remaining messages");
+
         for sequence in 4..6 {
             tx.try_send(Message::from(vec![sequence; 4096])).unwrap();
         }
+
         assert!(matches!(
             tx.try_send(Message::from(vec![6; 4096])),
             Err(SendPipeError::Full(_))
@@ -87,6 +91,7 @@ async fn metadata_drain_preserves_limits_order_and_capacity_wakes() {
         assert_eq!(rx.drain_into(&mut batch, 4, 128), 1);
         assert_eq!(rx.drain_into_with_cost(&mut batch, 4, 128, |_, _| 64), 2);
         assert_eq!(batch.len(), 6);
+
         for (sequence, message) in (0..6).zip(&batch) {
             assert!(
                 message
@@ -96,6 +101,7 @@ async fn metadata_drain_preserves_limits_order_and_capacity_wakes() {
                     .all(|&b| b == sequence)
             );
         }
+
         assert!(rx.is_empty());
         assert!(
             timeout(Duration::from_millis(10), rx.ready())
@@ -112,6 +118,7 @@ fn dart_direct_drain_obeys_budgets_and_preserves_the_suffix() {
     for body in ["a", "bb", "ccc", "dddd"] {
         tx.try_send(Message::single(body)).unwrap();
     }
+
     let mut received = Vec::new();
     assert_eq!(
         rx.drain_queue_with(0, 4, |_| panic!("zero count")),
@@ -121,6 +128,7 @@ fn dart_direct_drain_obeys_budgets_and_preserves_the_suffix() {
         rx.drain_queue_with(4, 0, |_| panic!("zero bytes")),
         Some((0, 0))
     );
+
     assert_eq!(
         rx.drain_queue_with(1, 10, |message| {
             received.push(message);
@@ -135,6 +143,7 @@ fn dart_direct_drain_obeys_budgets_and_preserves_the_suffix() {
         }),
         Some((1, 2))
     );
+
     assert_eq!(
         rx.drain_queue_with(4, 10, |message| {
             received.push(message);
@@ -143,6 +152,7 @@ fn dart_direct_drain_obeys_budgets_and_preserves_the_suffix() {
         Some((1, 3))
     );
     assert!(!rx.is_empty());
+
     assert_eq!(
         rx.drain_queue_with(4, 10, |message| {
             received.push(message);
@@ -167,13 +177,16 @@ fn dart_direct_drain_keeps_admission_until_ack_and_observes_close() {
     tx.set_dart(omq_proto::SocketType::Scatter);
     tx.try_send(Message::single("first")).unwrap();
     tx.try_send(Message::single("second")).unwrap();
+
     assert_eq!(rx.drain_queue_with(2, 2048, |_| true), Some((2, 11)));
     assert!(matches!(
         tx.try_send(Message::single("third")),
         Err(SendPipeError::Full(_))
     ));
+
     rx.dart_acknowledge(1);
     tx.try_send(Message::single("third")).unwrap();
+
     drop(tx);
     assert!(!rx.is_disconnected());
     assert_eq!(rx.drain_queue_with(2, 2048, |_| true), Some((1, 5)));
@@ -197,6 +210,7 @@ async fn dart_direct_drain_rearms_and_reactivates_at_low_water() {
     for _ in 0..4 {
         tx.try_send(Message::single("x")).unwrap();
     }
+
     assert!(matches!(
         tx.try_send(Message::single("full")),
         Err(SendPipeError::Full(_))
@@ -242,14 +256,17 @@ fn dart_drain_keeps_send_admission_until_ack() {
     tx.set_dart(omq_proto::SocketType::Scatter);
     tx.try_send(Message::single("first")).unwrap();
     tx.try_send(Message::single("second")).unwrap();
+
     let mut staged = Vec::with_capacity(2);
     assert_eq!(rx.drain_into(&mut staged, 2, 2048), 2);
     assert!(matches!(
         tx.try_send(Message::single("third")),
         Err(SendPipeError::Full(_))
     ));
+
     rx.dart_acknowledge(1);
     tx.try_send(Message::single("third")).unwrap();
+
     drop(rx);
     assert!(matches!(
         tx.try_send(Message::single("fourth")),
@@ -285,6 +302,7 @@ fn dart_bulk_admits_only_the_available_retention_prefix() {
     assert_eq!(tx.try_send_many(&mut messages, 3).unwrap(), 3);
     let mut staged = Vec::with_capacity(4);
     assert_eq!(rx.drain_into(&mut staged, 4, 4096), 3);
+
     messages.extend([
         Message::single("d"),
         Message::single("e"),
@@ -292,6 +310,7 @@ fn dart_bulk_admits_only_the_available_retention_prefix() {
     ]);
     assert_eq!(tx.try_send_many(&mut messages, 3).unwrap(), 1);
     assert_eq!(messages.len(), 2);
+
     rx.dart_acknowledge(2);
     assert_eq!(tx.try_send_many(&mut messages, 3).unwrap(), 2);
     assert!(messages.is_empty());
@@ -364,6 +383,7 @@ fn space_reactivates_at_half_capacity_after_full() {
     for _ in 0..4 {
         tx.try_send(Message::single("x")).unwrap();
     }
+
     assert!(matches!(
         tx.try_send(Message::single("x")),
         Err(SendPipeError::Full(_))

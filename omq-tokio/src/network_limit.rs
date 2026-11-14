@@ -5,6 +5,7 @@ mod io;
 mod ledger;
 #[cfg(test)]
 mod tests;
+
 pub(crate) use io::{PacedRead, PacedWrite};
 
 use std::cell::RefCell;
@@ -20,6 +21,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::engine::signal::DataSignal;
 use ledger::{Ledger, Reports};
+
+static NEXT_GATE: AtomicU64 = AtomicU64::new(1);
 
 /// A byte token bucket. Both fields must be nonzero.
 ///
@@ -84,6 +87,7 @@ impl NetworkRateLimits {
                 ));
             }
         }
+
         Ok(())
     }
 }
@@ -131,6 +135,7 @@ impl Lane {
                 "network burst must accommodate a {maximum}-byte datagram"
             )));
         }
+
         Ok(())
     }
 
@@ -143,12 +148,14 @@ impl Lane {
         else {
             return;
         };
+
         loop {
             tokio::select! {
                 biased;
                 () = cancel.cancelled() => break,
                 () = signal.ready() => {}
             }
+
             signal.begin_drain();
             for mailbox in [&self.ingress, &self.egress].into_iter().flatten() {
                 LOCAL.with(|locals| {
@@ -163,6 +170,7 @@ impl Lane {
                     }
                 });
             }
+
             signal.clear_after(true);
         }
         // Owned runtime threads destroy LOCAL on exit, after dropping their
@@ -195,12 +203,14 @@ impl Allocator {
                         burst: limit.burst_bytes,
                     })
                 };
+
                 Lane {
                     ingress: config.ingress.map(mailbox),
                     egress: config.egress.map(mailbox),
                 }
             })
             .collect::<Vec<_>>();
+
         let now = Instant::now();
         Self {
             ingress: config.ingress.map(|limit| {
@@ -236,6 +246,7 @@ impl Allocator {
                 .filter_map(|bucket| bucket.service(now))
                 .min();
             self.signal.clear_after(true);
+
             tokio::select! {
                 biased;
                 () = cancel.cancelled() => return,
@@ -292,16 +303,20 @@ impl Bucket {
             .saturating_mul(u128::from(self.limit.bytes_per_second))
             .saturating_add(self.fraction);
         let whole = generated / 1_000_000_000;
+
         let repaid = whole.min(self.debt);
         self.debt -= repaid;
         let whole = whole - repaid;
+
         let added = whole.min(u128::from(room)) as u64;
         self.available += added;
+
         self.fraction = if self.debt == 0 && whole >= u128::from(room) {
             0
         } else {
             generated % 1_000_000_000
         };
+
         self.updated = now;
     }
 
@@ -323,6 +338,7 @@ impl Bucket {
             let updates = account.totals.collect(&account.mailbox.reports);
             self.held -= updates.spent + updates.returned;
             self.available += updates.returned;
+
             #[cfg(feature = "dart")]
             {
                 self.debt += u128::from(updates.debt);
@@ -359,6 +375,7 @@ impl Bucket {
                 .demand
                 .load(Ordering::Acquire)
                 .min(self.limit.burst_bytes);
+
             let demand = if requested == 0 {
                 0
             } else {
@@ -366,6 +383,7 @@ impl Bucket {
                     .max(2 * account.mailbox.quantum)
                     .min(self.limit.burst_bytes)
             };
+
             let needed = demand.saturating_sub(account.totals.held);
             if needed == 0 {
                 continue;
@@ -387,6 +405,7 @@ impl Bucket {
             let grant = needed
                 .min(account.mailbox.quantum.max(minimum))
                 .min(self.available);
+
             if grant != 0 {
                 self.available -= grant;
                 self.held += grant;
@@ -411,6 +430,7 @@ impl Bucket {
         if self.available >= next_bytes {
             return Some(now);
         }
+
         if next_bytes > self.limit.burst_bytes - self.held {
             return None;
         }
@@ -422,6 +442,7 @@ impl Bucket {
             .saturating_sub(self.fraction)
             .div_ceil(u128::from(self.limit.bytes_per_second))
             .max(1);
+
         Some(now + Duration::from_nanos(nanos.min(u128::from(u64::MAX)) as u64))
     }
 }
@@ -429,7 +450,6 @@ impl Bucket {
 thread_local! {
     static LOCAL: RefCell<HashMap<usize, Local>> = RefCell::new(HashMap::new());
 }
-static NEXT_GATE: AtomicU64 = AtomicU64::new(1);
 
 fn key(mailbox: &Arc<Mailbox>) -> usize {
     Arc::as_ptr(mailbox) as usize
@@ -491,6 +511,7 @@ impl Local {
         {
             self.return_credit();
         }
+
         // A fully used IO allowance predicts another operation. Refill at
         // half a quantum; canceled/idle operations withdraw this demand.
         let prefetch = u64::from(self.active != 0 && self.credit <= self.mailbox.quantum / 2);
@@ -506,9 +527,11 @@ impl Local {
             adjustment[0],
             adjustment[1],
         ];
+
         if snapshot == self.published {
             return;
         }
+
         self.published = snapshot;
         self.mailbox.reports.publish(snapshot);
         self.mailbox.allocator.mark();
@@ -561,6 +584,7 @@ impl Gate {
         if !self.blocked && !self.active {
             return;
         }
+
         self.blocked = false;
         LOCAL.with(|locals| {
             if let Some(local) = locals.borrow_mut().get_mut(&key(&self.mailbox)) {
@@ -570,6 +594,7 @@ impl Gate {
                 self.mailbox.lane.mark();
             }
         });
+
         self.active = false;
     }
 
@@ -578,6 +603,7 @@ impl Gate {
             self.cancel_wait();
             return Poll::Ready(0);
         }
+
         // Queue a useful batch, not just the transport's smallest operation.
         // Otherwise a stream can receive only a few bytes per turn while a
         // competing datagram consumes its entire packet on every turn.
@@ -587,6 +613,7 @@ impl Gate {
             let local = locals
                 .entry(key(&self.mailbox))
                 .or_insert_with(|| Local::new(self.mailbox.clone()));
+
             if let Some(waiter) = local.waiters.iter_mut().find(|w| w.id == self.id) {
                 waiter.minimum = minimum as u64;
                 waiter.waker.clone_from(cx.waker());
@@ -597,9 +624,11 @@ impl Gate {
                     waker: cx.waker().clone(),
                 });
             }
+
             if local.credit < minimum as u64 {
                 local.collect();
             }
+
             if local.waiters.front().is_some_and(|w| w.id == self.id)
                 && local.credit >= minimum as u64
             {
@@ -608,6 +637,7 @@ impl Gate {
                     .min(self.mailbox.quantum.max(minimum as u64));
                 local.credit -= count;
                 local.waiters.pop_front();
+
                 Some(count as usize)
             } else {
                 local.publish();
@@ -615,6 +645,7 @@ impl Gate {
                 None
             }
         });
+
         self.blocked = granted.is_none();
         granted.map_or(Poll::Pending, Poll::Ready)
     }
@@ -624,17 +655,20 @@ impl Gate {
         if reserved == 0 {
             return;
         }
+
         LOCAL.with(|locals| {
             let mut locals = locals.borrow_mut();
             let local = locals
                 .get_mut(&key(&self.mailbox))
                 .expect("reserved lane credit");
+
             local.credit += (reserved - spent) as u64;
             local.spent = local.spent.wrapping_add(spent as u64);
             let active = spent == reserved;
             local.active = local.active + usize::from(active) - usize::from(self.active);
             self.active = active;
             local.wake_front();
+
             // One lane service wake per IO turn, including a final short
             // batch. It returns idle credit and publishes batched reports.
             self.mailbox.lane.mark();

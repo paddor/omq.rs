@@ -73,6 +73,7 @@ async fn message_roundtrip_flushes_buffering_writers() {
             .await
             .unwrap();
     }
+
     client
         .data_inbox
         .send(PeerDriverData::SendMessage(Message::single("hello")))
@@ -117,6 +118,7 @@ async fn graceful_close_deadline_interrupts_stalled_transport_shutdown() {
     let shutdown_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (commands, inbox) = mpsc::channel(4);
     let (events, _event_inbox) = mpsc::channel(4);
+
     let driver = ConnectionDriver::new(
         StalledShutdownStream {
             stream,
@@ -128,6 +130,7 @@ async fn graceful_close_deadline_interrupts_stalled_transport_shutdown() {
         1,
         CancellationToken::new(),
     );
+
     commands
         .send(PeerDriverCommand::ActivateDataPlane)
         .await
@@ -155,27 +158,34 @@ async fn producer_eof_preserves_the_final_send_pipe_batch() {
     let (commands, inbox) = mpsc::channel(4);
     let (events, _event_inbox) = mpsc::channel(4);
     let (mut producer, consumer) = crate::engine::send_pipe(4);
+
     producer.try_send(Message::single(vec![5; 4096])).unwrap();
     drop(producer);
+
     let driver = ConnectionDriver::new(stream, push, inbox, events, 1, CancellationToken::new())
         .with_send_pipe(consumer);
     commands
         .send(PeerDriverCommand::ActivateDataPlane)
         .await
         .unwrap();
+
     let task = tokio::spawn(driver.run());
     let mut buffer = [0; 1024];
+
     loop {
         let count = tokio::time::timeout(Duration::from_secs(1), remote.read(&mut buffer))
             .await
             .unwrap()
             .unwrap();
+
         if count == 0 {
             break;
         }
+
         pull.handle_input(Bytes::copy_from_slice(&buffer[..count]))
             .unwrap();
     }
+
     assert_eq!(
         pull.poll_message().unwrap().part_slice(0).unwrap(),
         &[5; 4096]
@@ -210,6 +220,7 @@ async fn close_interrupts_stalled_outbound_write() {
     if stopped.is_err() {
         ends.client_cancel.cancel();
     }
+
     ends.server_cancel.cancel();
     assert!(stopped.is_ok(), "Close was trapped behind a stalled write");
 
@@ -240,9 +251,11 @@ async fn peer_ws_close_preserves_coalesced_messages_through_backpressure() {
             Message::single("before close"),
             Message::single("last message"),
         ];
+
         for message in &messages {
             push.send_message(message).unwrap();
         }
+
         push.send_ws_close(1000);
         let wire = drain_transmit(&mut push);
         let (stream, mut remote) = tokio::io::duplex(4096);
@@ -254,6 +267,7 @@ async fn peer_ws_close_preserves_coalesced_messages_through_backpressure() {
         let space = Arc::new(StateSignal::new());
         let mut driver =
             ConnectionDriver::new(stream, pull, inbox, events, 1, CancellationToken::new());
+
         if direct {
             driver = driver.with_recv_sink(RecvSink::Yring(YringSink {
                 producer,
@@ -261,12 +275,14 @@ async fn peer_ws_close_preserves_coalesced_messages_through_backpressure() {
                 space: space.clone(),
             }));
         }
+
         commands
             .send(PeerDriverCommand::ActivateDataPlane)
             .await
             .unwrap();
         let task = tokio::spawn(driver.run());
         tokio::task::yield_now().await;
+
         for expected in messages {
             let received = tokio::time::timeout(
                 Duration::from_secs(1),
@@ -276,6 +292,7 @@ async fn peer_ws_close_preserves_coalesced_messages_through_backpressure() {
             .expect("peer CLOSE discarded a preceding message");
             assert_eq!(received, expected);
         }
+
         tokio::time::timeout(Duration::from_secs(1), task)
             .await
             .expect("peer CLOSE did not finish after receive admission")
@@ -297,6 +314,7 @@ async fn graceful_ws_close_drains_data_waits_for_reply_and_keeps_original_deadli
         let driver =
             ConnectionDriver::new(stream, push, inbox, events, 1, CancellationToken::new())
                 .with_data_inbox(data_inbox);
+
         data.send(PeerDriverData::SendMessage(Message::single(vec![9; 4096])))
             .await
             .unwrap();
@@ -304,6 +322,7 @@ async fn graceful_ws_close_drains_data_waits_for_reply_and_keeps_original_deadli
             .send(PeerDriverCommand::ActivateDataPlane)
             .await
             .unwrap();
+
         let deadline = Instant::now() + Duration::from_millis(250);
         commands
             .send(PeerDriverCommand::DrainAndClose {
@@ -311,9 +330,11 @@ async fn graceful_ws_close_drains_data_waits_for_reply_and_keeps_original_deadli
             })
             .await
             .unwrap();
+
         let task = tokio::spawn(driver.run());
         tokio::time::sleep(Duration::from_millis(75)).await;
         assert!(!task.is_finished(), "staged data was dropped during drain");
+
         read_until_ws_close(&mut remote, &mut pull, deadline).await;
         assert_eq!(
             pull.poll_message().unwrap().part_slice(0).unwrap(),
@@ -323,9 +344,11 @@ async fn graceful_ws_close_drains_data_waits_for_reply_and_keeps_original_deadli
             !task.is_finished(),
             "driver did not wait for the peer CLOSE"
         );
+
         if reply {
             remote.write_all(&drain_transmit(&mut pull)).await.unwrap();
         }
+
         tokio::time::timeout_at((deadline + Duration::from_millis(75)).into(), task)
             .await
             .expect("close restarted its deadline after draining data")
@@ -359,6 +382,7 @@ async fn next_delivery(
         let PeerEvent::Event(Event::Message(message)) = event else {
             panic!("peer closed before delivering {expected:?}: {event:?}");
         };
+
         return message;
     }
 
@@ -368,6 +392,7 @@ async fn next_delivery(
             space.notify_changed();
             return message;
         }
+
         tokio::task::yield_now().await;
     }
 }
@@ -399,6 +424,7 @@ async fn handshake_completes_over_tcp() {
     };
     let mut listener = TcpTransport::bind(&bind_ep).await.unwrap();
     let local = listener.local_endpoint().clone();
+
     let Endpoint::Tcp { port, .. } = local else {
         panic!()
     };
@@ -430,6 +456,7 @@ async fn handshake_completes_over_tcp() {
         0,
         CancellationToken::new(),
     );
+
     let c = ConnectionDriver::new(
         client_stream,
         client_connection,
@@ -438,6 +465,7 @@ async fn handshake_completes_over_tcp() {
         0,
         CancellationToken::new(),
     );
+
     tokio::spawn(Box::pin(s.run()));
     tokio::spawn(Box::pin(c.run()));
 
@@ -448,6 +476,7 @@ async fn handshake_completes_over_tcp() {
         Event::HandshakeSucceeded { .. } => {}
         other => panic!("unexpected {other:?}"),
     }
+
     match s_evt_rx.recv().await.unwrap() {
         Event::HandshakeSucceeded { .. } => {}
         other => panic!("unexpected {other:?}"),
@@ -467,6 +496,7 @@ async fn stalled_authentication_error_keeps_cancel_and_original_deadline_reachab
         let (client_events, _client_events_rx) = mpsc::channel(16);
         let server_cancel = CancellationToken::new();
         let client_cancel = CancellationToken::new();
+
         let mut server = ConnectionDriver::new(
             GreetingOnlyStream {
                 stream: server_stream,
@@ -478,11 +508,13 @@ async fn stalled_authentication_error_keeps_cancel_and_original_deadline_reachab
             0,
             server_cancel.clone(),
         );
+
         server.config.handshake_timeout = Some(if cancel {
             Duration::from_secs(5)
         } else {
             Duration::from_millis(300)
         });
+
         let client = ConnectionDriver::new(
             client_stream,
             client_connection,
@@ -491,25 +523,30 @@ async fn stalled_authentication_error_keeps_cancel_and_original_deadline_reachab
             1,
             client_cancel.clone(),
         );
+
         let server_task = tokio::spawn(server.run());
         let client_task = tokio::spawn(client.run());
 
         tokio::time::timeout(Duration::from_secs(1), stalled.changed_after(0))
             .await
             .expect("authentication ERROR write never stalled");
+
         if cancel {
             server_cancel.cancel();
         }
+
         tokio::time::timeout(Duration::from_secs(1), server_inbox.closed())
             .await
             .expect("authentication ERROR write trapped teardown");
         let result = server_task.await.unwrap();
+
         if cancel {
             assert!(result.is_ok());
         } else {
             assert!(matches!(result, Err(Error::HandshakeFailed(reason))
                 if reason == "PLAIN authentication failed with status 400"));
         }
+
         let (_, event) = server_events_rx.recv().await.unwrap();
         assert!(matches!(event, PeerEvent::Closed { .. }));
 
@@ -528,6 +565,7 @@ fn rejected_plain_connections() -> (Connection, Connection) {
             },
         ),
     );
+
     let client = Connection::new(
         ConnectionConfig::new(Role::Client, SocketType::Push).mechanism(
             omq_proto::MechanismSetup::PlainClient {
@@ -536,6 +574,7 @@ fn rejected_plain_connections() -> (Connection, Connection) {
             },
         ),
     );
+
     (server, client)
 }
 
@@ -550,6 +589,7 @@ async fn authentication_failure_flushes_mechanism_error_before_close() {
             },
         ),
     );
+
     let client_connection = Connection::new(
         ConnectionConfig::new(Role::Client, SocketType::Push).mechanism(
             omq_proto::MechanismSetup::PlainClient {
@@ -558,6 +598,7 @@ async fn authentication_failure_flushes_mechanism_error_before_close() {
             },
         ),
     );
+
     let (server_inbox_tx, server_inbox_rx) = mpsc::channel(16);
     let (client_inbox_tx, client_inbox_rx) = mpsc::channel(16);
     let (server_events_tx, _server_events_rx) = mpsc::channel(16);
@@ -571,6 +612,7 @@ async fn authentication_failure_flushes_mechanism_error_before_close() {
         0,
         CancellationToken::new(),
     );
+
     let client = ConnectionDriver::new(
         client_stream,
         client_connection,
@@ -579,6 +621,7 @@ async fn authentication_failure_flushes_mechanism_error_before_close() {
         1,
         CancellationToken::new(),
     );
+
     let server_task = tokio::spawn(Box::pin(server.run()));
     let client_task = tokio::spawn(Box::pin(client.run()));
     let _inboxes = (server_inbox_tx, client_inbox_tx);
@@ -594,6 +637,7 @@ async fn authentication_failure_flushes_mechanism_error_before_close() {
     })
     .await
     .expect("client did not receive the authentication failure");
+
     assert_eq!(reason, "PLAIN peer sent ERROR: 400");
 
     assert!(server_task.await.unwrap().is_err());
@@ -614,6 +658,7 @@ async fn coalesced_ready_and_error_still_emits_handshake_succeeded() {
     let server_connection = Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pull));
     let (_s_inbox_tx, s_inbox_rx) = mpsc::channel(16);
     let (s_evt_tx, mut s_evt_rx) = mpsc::channel::<(u64, PeerEvent)>(16);
+
     let s_driver = ConnectionDriver::new(
         server_stream,
         server_connection,
@@ -622,6 +667,7 @@ async fn coalesced_ready_and_error_still_emits_handshake_succeeded() {
         0,
         CancellationToken::new(),
     );
+
     tokio::spawn(Box::pin(s_driver.run()));
 
     // Manual client: use a connection to generate correct wire bytes.
@@ -665,6 +711,7 @@ async fn coalesced_ready_and_error_still_emits_handshake_succeeded() {
     while let Some((_, out)) = s_evt_rx.recv().await {
         let is_closed = matches!(out, PeerEvent::Closed { .. });
         events.push(out);
+
         if is_closed {
             break;
         }
@@ -729,6 +776,7 @@ async fn send_pipe_to_yring_large_payload_harness<S, C>(
             }
         }
     }
+
     receiver.drain_until(msgs, true).await;
 
     ends.client_cancel.cancel();
@@ -763,6 +811,7 @@ fn large_payload_drivers<S: DriverStream, C: DriverStream>(
         },
         ..PairSpec::pair(16, 16)
     };
+
     let (server, client, ends) = pair_drivers_over(server_stream, client_stream, spec);
     (
         server.with_recv_sink(sink),
@@ -780,6 +829,7 @@ async fn protocol_failure_retires_a_queued_transmit_slot() {
     let slot = PeerTransmitSlot::with_config(1, SlotConfig::default());
     let (_inbox_tx, inbox_rx) = mpsc::channel(16);
     let (events_tx, _events_rx) = mpsc::channel(16);
+
     let driver = ConnectionDriver::new(
         stream,
         Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pull)),
@@ -789,6 +839,7 @@ async fn protocol_failure_retires_a_queued_transmit_slot() {
         CancellationToken::new(),
     )
     .with_transmit_slot(slot.clone());
+
     // Not a ZMTP greeting: the driver exits with a protocol error.
     peer.write_all(&[0xff; 64]).await.unwrap();
     assert!(

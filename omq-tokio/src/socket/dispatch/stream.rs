@@ -59,6 +59,7 @@ impl AnyStream {
                     WsTransport::Tls(tls) => tls.get_ref().0,
                     WsTransport::TlsServer(tls) => tls.get_ref().0,
                 };
+
                 (
                     tcp.local_addr().ok().map(PeerIdent::Socket),
                     tcp.peer_addr().ok().map(PeerIdent::Socket),
@@ -86,6 +87,7 @@ fn ipc_address(address: io::Result<tokio::net::unix::SocketAddr>) -> Option<Peer
     if let Some(path) = address.as_pathname() {
         return Some(PeerIdent::Path(path.to_string_lossy().into_owned()));
     }
+
     #[cfg(target_os = "linux")]
     if let Some(name) = address.as_abstract_name() {
         return Some(PeerIdent::Path(format!(
@@ -93,6 +95,7 @@ fn ipc_address(address: io::Result<tokio::net::unix::SocketAddr>) -> Option<Peer
             String::from_utf8_lossy(name)
         )));
     }
+
     None
 }
 
@@ -225,6 +228,7 @@ impl AsyncWrite for AnyWriteHalf {
                         Err(e) => return Poll::Ready(Err(e)),
                     }
                 }
+
                 Pin::new(writer).poll_write(cx, buf)
             }
             Self::Other(writer) => Pin::new(writer).poll_write(cx, buf),
@@ -247,6 +251,7 @@ impl AsyncWrite for AnyWriteHalf {
                         Err(e) => return Poll::Ready(Err(e)),
                     }
                 }
+
                 Pin::new(writer).poll_write_vectored(cx, bufs)
             }
             Self::Other(writer) => Pin::new(writer).poll_write_vectored(cx, bufs),

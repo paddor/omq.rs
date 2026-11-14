@@ -8,6 +8,22 @@
   `set_*`/`get_*` methods. They limit the parts of one received message and
   the prefixes or groups one peer may hold; `-1` removes the limit.
 
+## [0.2.16] - 2026-11-12
+
+### Changed
+
+- Bundle `omq-libzmq` 0.10.1 on `omq-tokio` 0.35.1. A connection driver
+  with steady output pauses every 16 KiB, so other tasks and timers on its
+  IO thread run on time.
+
+## [0.2.15] - 2026-11-09
+
+### Changed
+
+- Bundle `omq-libzmq` 0.10.0 on `omq-tokio` 0.35.0. On Windows,
+  socket creation fails when its wakeup events cannot be created,
+  instead of returning a socket whose receives spin.
+
 ## [0.2.14] - 2026-11-04
 
 ### Changed

@@ -48,6 +48,7 @@ pub use pool::{is_pooled, payload_pool, pooled_prefix};
 pub use send_pool::SendPool;
 
 const MAX_LEASES: usize = 4096;
+
 const LEASE_RECLAIM_BUDGET: omq_proto::flow::DrainBudget =
     omq_proto::flow::DrainBudget::new(MAX_LEASES, 256 * 1024);
 
@@ -55,8 +56,10 @@ const LEASE_RECLAIM_BUDGET: omq_proto::flow::DrainBudget =
 mod miri_tests;
 #[cfg(test)]
 mod test_support;
+
 /// Maximum body size normally carried as copied bytes without a region lease.
 pub const COPY_THRESHOLD: usize = 55;
+
 /// Fixed transport preface length, before the ordinary ZMTP greeting.
 pub const PREFACE_SIZE: usize = 24;
 
@@ -67,9 +70,11 @@ pub fn send_work_bytes(message: &Message) -> usize {
     if uses_multipart_record(message) {
         return batch::multipart_work_bytes(message);
     }
+
     let Some(index) = message.len().checked_sub(1) else {
         return 0;
     };
+
     let length = message.part_slice(index).expect("message body").len();
     if length > COPY_THRESHOLD && is_pooled(message) {
         message.byte_len() - length + REFERENCE_ENTRY_BYTES
@@ -109,9 +114,11 @@ fn copied_record(message: &Message) -> Result<Message> {
             Message::from_slice(&bytes[..=body.len()]),
         ));
     }
+
     let mut bytes = Vec::with_capacity(body.len() + 1);
     bytes.push(COPIED);
     bytes.extend_from_slice(body);
+
     Ok(replace_body(message, Message::from(bytes)))
 }
 
@@ -119,14 +126,17 @@ fn check_body_size(message: &Message, length: usize, maximum: Option<usize>) -> 
     let Some(maximum) = maximum else {
         return Ok(());
     };
+
     let wire_body = body(message)?;
     let size = message
         .byte_len()
         .saturating_sub(wire_body.len())
         .saturating_add(length)
         .saturating_add(message.len().saturating_mul(std::mem::size_of::<Payload>()));
+
     if size > maximum {
         return Err(invalid("SHM body exceeds max_message_size").into());
     }
+
     Ok(())
 }

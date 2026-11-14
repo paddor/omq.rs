@@ -18,6 +18,11 @@ pub(super) const RECV_POOL_MAX_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 pub(super) const RECV_POOL_MAX_RETAINED_BYTES: usize = 64 * 1024 * 1024;
 const LARGE_READ_CHUNK: usize = 64 * 1024;
 
+pub(super) const READ_BUF_INITIAL_LATENCY: usize = 4 * 1024;
+pub(super) const READ_BUF_INITIAL_THROUGHPUT: usize = 4 * 1024;
+pub(super) const READ_BUF_MAX: usize = 128 * 1024;
+pub(super) const READ_BUF_GROW_FULL_READS: usize = 2;
+
 #[derive(Debug)]
 pub(super) struct RecvBufPool {
     pub(super) inner: std::sync::Mutex<RecvBufPoolInner>,
@@ -41,11 +46,14 @@ impl RecvBufPool {
         if let Some(mut buf) = pool.buffers.pop() {
             pool.retained_bytes = pool.retained_bytes.saturating_sub(buf.capacity());
             buf.clear();
+
             if buf.capacity() < capacity {
                 buf.reserve(capacity);
             }
+
             return buf;
         }
+
         BytesMut::with_capacity(capacity)
     }
 
@@ -54,8 +62,10 @@ impl RecvBufPool {
         if capacity > RECV_POOL_MAX_BUFFER_BYTES {
             return;
         }
+
         buf.clear();
         let mut pool = self.inner.lock().expect("recv buf pool");
+
         if pool.retained_bytes.saturating_add(capacity) <= RECV_POOL_MAX_RETAINED_BYTES {
             pool.retained_bytes += capacity;
             pool.buffers.push(buf);
@@ -113,37 +123,45 @@ impl PendingLargeRead {
         let skip_large = connection.is_ws();
         #[cfg(not(feature = "ws"))]
         let skip_large = false;
+
         if matches!(config.large_message_threshold, 0 | usize::MAX)
             || connection.has_frame_transform()
             || skip_large
         {
             return Ok(None);
         }
+
         let Some(info) = connection.peek_next_frame_payload_size()? else {
             return Ok(None);
         };
+
         // Complete frames retain their byte views, including frames left by
         // a bounded codec turn. No pool checkout should make a second copy.
         if info.buffered_payload_prefix == info.payload_len {
             return Ok(None);
         }
+
         let bounded = connection
             .receive_frame_size_limit(info.flags.command)
             .is_some();
+
         let payload_buffer = if info.flags.command {
             None
         } else {
             connection.try_recv_payload_buffer(info.payload_len)
         };
+
         if payload_buffer.is_none() && info.payload_len < config.large_message_threshold {
             return Ok(None);
         }
+
         if let Some(mut buffer) = payload_buffer {
             let Some((target, filled)) =
                 connection.begin_supplied_payload_into(buffer.writable())?
             else {
                 return Ok(None);
             };
+
             copy_stats::record(Site::RecvLargePrefix, filled);
             buffer.set_len(filled).expect("selected slot fits body");
             return Ok(Some(Self {
@@ -151,12 +169,15 @@ impl PendingLargeRead {
                 target,
             }));
         }
+
         let Some((target, prefix)) = connection.begin_supplied_payload_with_prefix() else {
             return Ok(None);
         };
+
         // Release the shared input prefix before the caller refills read_buf.
         copy_stats::record(Site::RecvLargePrefix, prefix.len());
         let pooled = target <= RECV_POOL_MAX_BUFFER_BYTES;
+
         let mut buf = if pooled {
             pool.take(target)
         } else if bounded {
@@ -167,6 +188,7 @@ impl PendingLargeRead {
             // A declaration alone must not reserve an arbitrarily large body.
             BytesMut::with_capacity(prefix.len().saturating_add(LARGE_READ_CHUNK).min(target))
         };
+
         buf.extend_from_slice(prefix.as_slice());
         Ok(Some(Self {
             buf: ReceiveBody::Stream { buf, pooled },
@@ -188,6 +210,7 @@ impl PendingLargeRead {
     pub(super) async fn read<R: AsyncRead + Unpin>(&mut self, reader: &mut R) -> io::Result<usize> {
         let filled = self.filled();
         let remaining = (self.target - filled).min(LARGE_READ_CHUNK);
+
         let n = match &mut self.buf {
             ReceiveBody::Stream { buf, .. } => {
                 buf.reserve(remaining);
@@ -199,12 +222,15 @@ impl PendingLargeRead {
                     .read(&mut buf.writable()[filled..filled + remaining])
                     .await?;
                 buf.set_len(filled + n).expect("read stays within body");
+
                 n
             }
         };
+
         if n == 0 {
             return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
         }
+
         Ok(n)
     }
 
@@ -218,14 +244,10 @@ impl PendingLargeRead {
                 omq_proto::Payload::from_bytes_with_retained_size(bytes, capacity)
             }
         };
+
         connection.supply_payload_frame(payload)
     }
 }
-
-pub(super) const READ_BUF_INITIAL_LATENCY: usize = 4 * 1024;
-pub(super) const READ_BUF_INITIAL_THROUGHPUT: usize = 4 * 1024;
-pub(super) const READ_BUF_MAX: usize = 128 * 1024;
-pub(super) const READ_BUF_GROW_FULL_READS: usize = 2;
 
 /// Retain stream buffers and a partially read body across selected operations.
 pub(super) struct StreamRead {
@@ -242,6 +264,7 @@ impl StreamRead {
             ReceiveProfile::Throughput => READ_BUF_INITIAL_THROUGHPUT,
             ReceiveProfile::Latency | ReceiveProfile::LatencyReq => READ_BUF_INITIAL_LATENCY,
         };
+
         Self {
             buffer: BytesMut::with_capacity(target),
             target,
@@ -271,6 +294,7 @@ impl StreamRead {
                 .finish(connection, &self.pool)?;
             self.pending = PendingLargeRead::begin(connection, config, &self.pool)?;
         }
+
         Ok(())
     }
 
@@ -306,6 +330,7 @@ impl StreamRead {
         // The target is a growth hint, not a minimum spare-capacity promise.
         self.buffer
             .reserve(self.target.saturating_sub(self.buffer.capacity()));
+
         Ok(())
     }
 }

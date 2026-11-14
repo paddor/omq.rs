@@ -18,9 +18,12 @@ use crate::engine::signal::{DataSignal, StateSignal};
 mod budget;
 mod sink;
 mod source;
+
 pub use source::{ReceiveLane, ReceiveReceipt, UnshiftError};
+
 #[cfg(test)]
 mod tests;
+
 use budget::{Budget, QueuedMessage};
 pub(crate) use sink::PeerRecvSink;
 
@@ -70,6 +73,7 @@ impl Drop for ReceiveWaiter<'_> {
         let mut receiver = self.0.lock();
         receiver.async_waiters -= 1;
         receiver.handoff_pending = false;
+
         if !receiver.is_empty() && (!receiver.observed_empty || !receiver.shared.data.is_idle()) {
             receiver.wake_waiter();
         }
@@ -222,6 +226,7 @@ impl PeerRecvRoutes {
             messages: Arc::new(AtomicUsize::new(0)),
             control_pending: AtomicBool::new(false),
         });
+
         let receiver = PeerReceiver {
             shared: shared.clone(),
             receiver: Some(receiver),
@@ -231,6 +236,7 @@ impl PeerRecvRoutes {
             paused: Vec::new(),
             observed_empty: true,
         };
+
         (
             Self {
                 shared,
@@ -251,9 +257,11 @@ impl PeerRecvRoutes {
             .registration
             .lock()
             .expect("PEER registration poisoned");
+
         if self.shared.closed.load(Ordering::Acquire) {
             return Err(Error::Closed);
         }
+
         // The idle registrar owns one internal lane. Retired connection rings
         // still count until fanring observes them disconnected and empty.
         let Ok(producer) = registration
@@ -264,12 +272,14 @@ impl PeerRecvRoutes {
                 "PEER receive closed or peer queue limit reached".into(),
             ));
         };
+
         // Reclaim weak keys on churn, not on the data path. This also bounds
         // identities of disconnected peers, not merely their message rings.
         self.previous.retain(|_, state| state.strong_count() != 0);
         registration
             .states
             .retain(|state| state.strong_count() != 0);
+
         let state = Arc::new(QueueState {
             identity,
             status: AtomicU8::new(QueueState::LIVE),
@@ -283,6 +293,7 @@ impl PeerRecvRoutes {
                 self.shared.messages.clone(),
             )),
         });
+
         registration.states.push(Arc::downgrade(&state));
         if let Some(previous) = self
             .previous
@@ -294,10 +305,12 @@ impl PeerRecvRoutes {
             previous.space.notify_changed();
             previous.data.notify_changed();
             previous.budget.space.notify_changed();
+
             if claimed {
                 self.shared.source_changed();
             }
         }
+
         drop(registration);
         Ok(PeerRecvSink::new(producer, state, self.shared.clone()))
     }
@@ -305,6 +318,7 @@ impl PeerRecvRoutes {
     pub(crate) fn close_receive(&self) {
         self.shared.closed.store(true, Ordering::Release);
         self.shared.wake_all();
+
         for state in self.previous.values().filter_map(Weak::upgrade) {
             state.space.notify_changed();
             state.data.notify_changed();
@@ -348,14 +362,17 @@ impl PeerReceiver {
                 .lock()
                 .expect("PEER registration poisoned");
             self.shared.closed.store(true, Ordering::Release);
+
             std::mem::take(&mut registration.states)
         };
+
         for state in states.into_iter().filter_map(|state| state.upgrade()) {
             state.cancel.cancel();
             state.space.notify_changed();
             state.data.notify_changed();
             state.budget.space.notify_changed();
         }
+
         // Coordinated teardown reclaims unread payloads even while senders
         // remain alive. Never run payload drops under the registration lock.
         self.receiver.take();
@@ -372,12 +389,14 @@ impl PeerReceiver {
         self.process_source_changes();
         self.shared.data.begin_drain();
         let mut budget = DrainBudget::WORKER;
+
         self.drain_one(&mut budget)
     }
 
     fn drain_one(&mut self, budget: &mut DrainBudget) -> Result<Message> {
         self.yield_pending = false;
         let receiver = self.receiver.as_mut().ok_or(Error::Closed)?;
+
         while !budget.exhausted() {
             if let Ok(item) = receiver.try_recv_fair() {
                 let _ = budget.account(item.budget_bytes());
@@ -390,15 +409,18 @@ impl PeerReceiver {
                     // Another caller may already be parked on this batch's
                     // coalesced signal. No handoff work for a sole receiver.
                     self.wake_waiter();
+
                     return Ok(message);
                 }
                 // Dropping a stale generation releases its source's storage.
             } else {
                 self.observed_empty = true;
                 receiver.release_consumed();
+
                 if self.shared.data.clear_after(true) {
                     self.shared.blocking.wake();
                 }
+
                 return if self.shared.closed.load(Ordering::Acquire) {
                     Err(Error::Closed)
                 } else {
@@ -406,12 +428,14 @@ impl PeerReceiver {
                 };
             }
         }
+
         // Reconnect churn cannot bury runtime/control work behind stale data.
         receiver.release_consumed();
         self.yield_pending = true;
         self.shared.data.clear_after(false);
         self.shared.data.reschedule();
         self.shared.blocking.wake();
+
         Err(Error::WouldBlock)
     }
 
@@ -433,6 +457,7 @@ impl PeerReceiver {
         let mut budget = Self::bulk_budget(max);
         let first = out.last().expect("first message already received");
         let _ = budget.account(first.max_message_size_len());
+
         // Even an exhausted budget must release the first message's credits.
         self.drain_many(budget, out)
     }
@@ -449,6 +474,7 @@ impl PeerReceiver {
         let start = out.len();
         self.shared.data.begin_drain();
         let mut error = None;
+
         while !budget.exhausted() {
             match self.drain_one(&mut budget) {
                 Ok(message) => {
@@ -460,9 +486,11 @@ impl PeerReceiver {
                 }
             }
         }
+
         if let Some(receiver) = &mut self.receiver {
             receiver.release_consumed();
         }
+
         if out.len() == start
             && let Some(error) = error
         {

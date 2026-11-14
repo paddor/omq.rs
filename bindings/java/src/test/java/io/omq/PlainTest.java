@@ -73,7 +73,8 @@ final class PlainTest {
              Socket push = context.socket(SocketType.PUSH).plainClient("alice", "wrong")) {
             String endpoint = pull.bind("tcp://127.0.0.1:0");
             push.connect(endpoint);
-            push.send("blocked");
+            // A refused handshake drops the route; a blocking send could hang.
+            push.trySend("blocked");
 
             assertTrue(pull.receive(Duration.ofMillis(500)).isEmpty());
         }
@@ -116,7 +117,8 @@ final class PlainTest {
              Socket push = context.socket(SocketType.PUSH).plainClient("alice", "secret")) {
             String endpoint = pull.bind("tcp://127.0.0.1:0");
             push.connect(endpoint);
-            push.send("blocked");
+            // A refused handshake drops the route; a blocking send could hang.
+            push.trySend("blocked");
 
             assertTrue(pull.receive(Duration.ofMillis(500)).isEmpty());
             assertEquals("alice", seen.get().username().orElseThrow());

@@ -80,24 +80,30 @@ impl EndpointWorker {
                 if !self.fill_batch(batch, count, polling, stats) {
                     break;
                 }
+
                 timestamp.at = Instant::now();
             }
+
             let Some(packet) = batch.peek_datagram() else {
                 break;
             };
+
             bytes += packet.bytes.len();
 
             let arrival = Arrival { packet, timestamp };
             let received = self.receive(arrival, routes, RECEIVE_MESSAGES - count, stats);
+
             if received == 0 {
                 break;
             }
+
             batch.advance_datagram();
             count += received;
 
             if received >= until_clock {
                 until_clock = 8;
                 timestamp.at = Instant::now();
+
                 if timestamp.at.duration_since(started) >= TURN {
                     break;
                 }
@@ -105,6 +111,7 @@ impl EndpointWorker {
                 until_clock -= received;
             }
         }
+
         count
     }
 
@@ -159,6 +166,7 @@ impl EndpointWorker {
             self.handshake(packet.source, ready, arrival.timestamp.at, routes);
             return 1;
         }
+
         let Some(decoded) = dart::decode_packet(packet.bytes) else {
             stats.received_datagrams += 1;
             stats.invalid_datagrams += 1;
@@ -169,9 +177,11 @@ impl EndpointWorker {
             Packet::Packed { messages, .. } => messages.message_count(),
             _ => 1,
         };
+
         if count > remaining {
             return 0;
         }
+
         stats.received_datagrams += 1;
         self.receive_established(decoded, arrival, routes, stats);
         count
@@ -192,6 +202,7 @@ impl EndpointWorker {
         else {
             return;
         };
+
         if peer.lease.expires <= now
             || peer
                 .io
@@ -200,9 +211,11 @@ impl EndpointWorker {
         {
             return;
         }
+
         let Some(session) = &peer.session else {
             return;
         };
+
         let before = session.received_units();
 
         // Ingress charged one MAX_DATAGRAM per admitted unit up front;
@@ -237,6 +250,7 @@ impl EndpointWorker {
                 let unit = Unit::new(session, sequence, payload);
                 let length = Some(length);
                 self.receive_fragment(peer, Fragment { unit, length }, arrival, stats);
+
                 true
             }
             Packet::Continuation {
@@ -247,6 +261,7 @@ impl EndpointWorker {
                 let unit = Unit::new(session, sequence, payload);
                 let length = None;
                 self.receive_fragment(peer, Fragment { unit, length }, arrival, stats);
+
                 true
             }
             Packet::Data {
@@ -268,6 +283,7 @@ impl EndpointWorker {
                     first,
                     messages,
                 };
+
                 self.receive_packed(peer, packed, arrival, stats)
             }
             _ => {
@@ -302,6 +318,7 @@ impl EndpointWorker {
             let unit = Unit::new(packed.session, sequence, payload);
             self.receive_data(peer, unit, arrival, stats);
         }
+
         true
     }
 
@@ -328,8 +345,10 @@ impl EndpointWorker {
         let Ok(length) = usize::try_from(length) else {
             return false;
         };
+
         let slot = std::mem::size_of::<omq_proto::message::Payload>();
         let overhead = group.map_or(slot, |g| g.len() + 2 * slot);
+
         length.checked_add(overhead).is_some_and(|size| {
             isize::try_from(size).is_ok() && self.max_message_size.is_none_or(|limit| size <= limit)
         })
@@ -372,6 +391,7 @@ impl EndpointWorker {
         let Fragment { unit, length } = fragment;
         let now = arrival.timestamp.at;
         let session = peer.session.as_mut().expect("admitted receive session");
+
         match session.classify(unit.session, unit.sequence) {
             Admission::Duplicate => {
                 peer.renew(now);
@@ -386,11 +406,13 @@ impl EndpointWorker {
             stats.invalid_datagrams += 1;
             return;
         };
+
         if length.is_some_and(|length| !self.message_size_allowed(length, group)) {
             // Reject before reserving or acknowledging any fragment.
             peer.lease.expires = now;
             return;
         }
+
         if length.is_some_and(|length| !session.may_reserve_ahead(unit.sequence, length)) {
             // Enough bodies already wait in the window. Leave this FIRST
             // unacknowledged; the sender retransmits it later.
@@ -399,12 +421,14 @@ impl EndpointWorker {
 
         let ecn = self.classify_ecn(arrival.packet, stats);
         let mut message = peer.copy_fragment(body, stats);
+
         if let Some(group) = group {
             message = Message::with_prefix(bytes::Bytes::copy_from_slice(group), message);
         }
 
         let receipt = Receipt::new(unit.sequence, ecn, arrival.timestamp.elapsed());
         let session = peer.session.as_mut().expect("admitted receive session");
+
         if session.commit_fragment_with(receipt, length, message, |length| {
             ReceiveBody::reserve(peer.pool.as_ref().expect("receiver pool"), length)
         }) {
@@ -427,6 +451,7 @@ impl EndpointWorker {
             stats.invalid_datagrams += 1;
             return false;
         };
+
         if !self.message_size_allowed(body.len() as u64, group) {
             peer.lease.expires = Instant::now();
             return false;
@@ -434,6 +459,7 @@ impl EndpointWorker {
 
         let ecn = self.classify_ecn(arrival.packet, stats);
         let receipt = Receipt::new(unit.sequence, ecn, arrival.timestamp.elapsed());
+
         let group = if let Some(group) = group {
             let joined = self.joined.load();
             let Some(group) = joined.get(group).cloned() else {
@@ -441,8 +467,10 @@ impl EndpointWorker {
                 // delivery drops it and returns the credit at once.
                 let session = peer.session.as_mut().expect("admitted receive session");
                 session.commit_receive(receipt, Message::with_group(Bytes::new(), Bytes::new()));
+
                 return true;
             };
+
             Some(group)
         } else {
             None
@@ -464,9 +492,11 @@ impl EndpointWorker {
         let Some(mut message) = peer.copy_received(body, stats) else {
             return false;
         };
+
         if let Some(group) = group {
             message = Message::with_prefix(group, message);
         }
+
         let session = peer.session.as_mut().expect("admitted receive session");
         session.commit_receive(receipt, message);
         true
@@ -485,6 +515,7 @@ impl Peer {
         let valid = omq_proto::payload_pool::with_recycling_batch(|| {
             session.handle_control(decoded, elapsed)
         });
+
         if !valid {
             stats.invalid_datagrams += 1;
             return;
@@ -513,6 +544,7 @@ impl Peer {
             Some(group) => Message::with_prefix(group.clone(), Message::from_slice(body)),
             None => Message::from_slice(body),
         };
+
         let message = inline();
 
         if let Some(io) = &mut self.io
@@ -530,6 +562,7 @@ impl Peer {
                     }
                 }
             });
+
             if delivered {
                 stats.received_messages += 1;
             }
@@ -546,6 +579,7 @@ impl Peer {
             buffer.writable_received(pool.storage().expect("explicit receive pool"))[..body.len()]
                 .copy_from_slice(body);
             buffer.set_len(body.len()).expect("validated body");
+
             return Some(buffer.into_message());
         }
 
@@ -553,6 +587,7 @@ impl Peer {
         if pool.storage().is_some() {
             stats.pool_exhausted += 1;
         }
+
         let payload = pool.copy_received(body)?;
         Some(Message::from(payload))
     }
@@ -572,6 +607,7 @@ impl Peer {
         if pool.storage().is_some() {
             stats.pool_exhausted += 1;
         }
+
         Message::from_slice(body)
     }
 }

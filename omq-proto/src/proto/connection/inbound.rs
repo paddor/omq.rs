@@ -24,6 +24,7 @@ mod ws;
 /// hundred bytes at most; this only exists to stop a pre-auth peer from
 /// making us buffer unbounded data during the handshake.
 const MAX_HANDSHAKE_COMMAND: usize = 256 * 1024;
+
 // Parsing precedes the driver's smaller delivery batches. Keep normal wire
 // chunks together without making empty-frame streams an unbounded turn.
 const INPUT_SERVICE_FRAMES: usize = 4096;
@@ -46,16 +47,19 @@ impl Connection {
             }
             _ => {}
         }
+
         #[cfg(feature = "curve")]
         self.check_transform_present()?;
         if src.is_empty() {
             return Ok(());
         }
+
         if !self.accepts_input() {
             return Err(Error::Protocol(
                 "drain pending codec work before supplying more input".into(),
             ));
         }
+
         self.peer_heartbeat_ttl = 0;
         self.in_buf.push(src);
         self.drive()
@@ -68,6 +72,7 @@ impl Connection {
         if self.ws.role.is_some() {
             return self.drive_ws();
         }
+
         self.drive_zmtp()
     }
 
@@ -104,6 +109,7 @@ impl Connection {
         let step = self.mechanism.complete_authentication(result, &mut cmds);
         self.write_outbound_commands(&cmds)?;
         self.finish_mechanism_step(step?)?;
+
         self.drive()
     }
 
@@ -128,6 +134,7 @@ impl Connection {
             if self.pause_input_for_output() {
                 return Ok(());
             }
+
             let before = self.in_buf.len();
             let progress = match self.state {
                 State::AwaitingGreeting => self.try_advance_greeting()?,
@@ -135,9 +142,11 @@ impl Connection {
                 State::Ready => self.try_advance_ready()?,
                 State::AwaitingSuppliedPayload { .. } | State::Closed => return Ok(()),
             };
+
             if !progress {
                 return Ok(());
             }
+
             if self.input.budget && !budget.account(before - self.in_buf.len()) {
                 self.input.pending = !self.in_buf.is_empty();
                 return Ok(());
@@ -151,6 +160,7 @@ impl Connection {
             self.input.pending = !self.in_buf.is_empty();
             return true;
         }
+
         false
     }
 
@@ -158,6 +168,7 @@ impl Connection {
         let Some(g) = greeting::try_decode(&mut self.in_buf)? else {
             return Ok(false);
         };
+
         let our_mech = self.config.mechanism_name();
         if g.mechanism != our_mech {
             return Err(Error::HandshakeFailed(format!(
@@ -166,6 +177,7 @@ impl Connection {
                 g.mechanism.as_str().unwrap_or("<invalid>"),
             )));
         }
+
         // RFC 23: "When a peer uses the NULL security mechanism, the as-server
         // field MUST be zero."
         if our_mech == MechanismName::NULL && g.as_server {
@@ -173,11 +185,13 @@ impl Connection {
                 "peer sent as-server=1 with NULL mechanism".into(),
             ));
         }
+
         self.peer_minor = if g.major > greeting::ZMTP_MAJOR {
             greeting::ZMTP_MINOR
         } else {
             effective_minor(g.minor)
         };
+
         self.start_mechanism()?;
         Ok(true)
     }
@@ -186,6 +200,7 @@ impl Connection {
         if self.mechanism.awaiting_authentication() {
             return Ok(false);
         }
+
         // Bound the frame before buffering its whole body. This runs
         // pre-authentication, so a peer must not be able to make us buffer an
         // arbitrary amount by declaring a huge command frame and dribbling
@@ -202,14 +217,17 @@ impl Connection {
                 hdr.payload_len
             )));
         }
+
         let Some(frame) = frame::try_decode_frame(&mut self.in_buf)? else {
             return Ok(false);
         };
+
         if !frame.flags.command {
             return Err(Error::HandshakeFailed(
                 "peer sent data frame during handshake".into(),
             ));
         }
+
         self.process_mechanism_command(frame.payload.as_bytes())?;
         Ok(true)
     }
@@ -219,6 +237,7 @@ impl Connection {
         let mut cmds = Vec::new();
         let result = self.mechanism.on_command(cmd, &mut cmds);
         self.write_outbound_commands(&cmds)?;
+
         self.finish_mechanism_step(result?)
     }
 
@@ -227,25 +246,30 @@ impl Connection {
             let peer_type = peer_properties
                 .socket_type
                 .ok_or_else(|| Error::HandshakeFailed("peer did not declare socket type".into()))?;
+
             if !is_compatible(self.config.socket_type, peer_type) {
                 self.write_outbound_commands(&[Command::Error {
                     reason: "Incompatible socket types".into(),
                 }])?;
+
                 return Err(Error::HandshakeFailed(format!(
                     "incompatible socket types: ours={:?} peer={:?}",
                     self.config.socket_type, peer_type
                 )));
             }
+
             #[cfg(feature = "curve")]
             {
                 self.transform = self.mechanism.build_transform()?;
             }
+
             self.state = State::Ready;
             self.events.push_back(Event::HandshakeSucceeded {
                 peer_minor: self.peer_minor,
                 peer_properties: Arc::new(peer_properties),
             });
         }
+
         Ok(())
     }
 
@@ -255,6 +279,7 @@ impl Connection {
         let Some(hdr) = frame::peek_frame_header(&self.in_buf)? else {
             return Ok(false);
         };
+
         self.validate_receive_frame(hdr.flags, hdr.payload_len)?;
         // Complete single-part data messages need no frame or multipart assembly.
         if !self.has_frame_transform()
@@ -274,16 +299,20 @@ impl Connection {
                     .split_to_with_pool(hdr.payload_len, self.assembly.payload_pool.as_ref());
                 self.messages.push_back(Message::from_payload(payload));
             }
+
             return Ok(true);
         }
+
         let pool = if self.has_frame_transform() {
             None
         } else {
             self.assembly.payload_pool.as_ref()
         };
+
         let Some(frame) = frame::try_decode_frame_with_header(&mut self.in_buf, hdr, pool)? else {
             return Ok(false);
         };
+
         self.decode_assembled_frame(frame.flags, frame.payload)?;
         Ok(true)
     }
@@ -297,11 +326,13 @@ impl Connection {
             // MESSAGE prefix, nonce, tag, and inner flags are wire overhead.
             // The outer command bit cannot identify the inner payload kind.
             const MESSAGE_OVERHEAD: usize = 8 + 8 + 16 + 1;
+
             return self
                 .config
                 .max_frame_size_limit()
                 .map(|max| max.saturating_add(MESSAGE_OVERHEAD));
         }
+
         self.config.frame_size_limit(command)
     }
 
@@ -315,6 +346,7 @@ impl Connection {
                     max,
                 });
             }
+
             // For unwrapped data the header also determines the multipart
             // total. Reject it before allocating or collecting another body.
             if self.assembly.size != 0 && !flags.command && !self.has_frame_transform() {
@@ -324,6 +356,7 @@ impl Connection {
                 }
             }
         }
+
         Ok(())
     }
 
@@ -355,6 +388,7 @@ impl Connection {
                     tx.decrypt_message(&body[CURVE_MESSAGE_PREFIX.len()..])?;
                 return self.dispatch_decrypted(command, more, plaintext);
             }
+
             return Err(Error::Protocol(
                 "expected CURVE-wrapped MESSAGE on data-phase connection".into(),
             ));
@@ -375,18 +409,21 @@ impl Connection {
         } else {
             self.absorb_data_frame(more, plaintext)?;
         }
+
         Ok(())
     }
 
     fn decode_post_handshake_command(&mut self, payload: Bytes) -> Result<()> {
         let size = payload.len().saturating_add(size_of::<Payload>());
         let command = command::decode(payload)?;
+
         if !matches!(command, Command::Ping { .. } | Command::Pong { .. })
             && let Some(max) = self.config.max_message_size
             && size > max
         {
             return Err(Error::MessageTooLarge { size, max });
         }
+
         self.handle_post_handshake_command(command)
     }
 
@@ -403,17 +440,21 @@ impl Connection {
             self.assembly.discarding = more;
             return Ok(true);
         }
+
         if more && self.config.socket_type.requires_single_frame() {
             self.assembly.discarding = true;
             return Ok(true);
         }
+
         // An empty part costs the peer two wire bytes and holds a payload
         // slot here, so the count is bounded apart from the byte limit.
         if self.assembly.parts.len() >= self.assembly.max_parts {
             return Err(Error::Protocol("multipart part limit exceeded".into()));
         }
+
         let size = payload.len() + size_of::<Payload>();
         self.assembly.size = self.assembly.size.saturating_add(size);
+
         if let Some(max) = self.config.data_size_limit()
             && self.assembly.size > max
         {
@@ -422,11 +463,13 @@ impl Connection {
                 max,
             });
         }
+
         if more {
             self.assembly.parts.push(payload);
         } else if self.assembly.parts.is_empty() {
             self.assembly.size = 0;
             let s = payload.as_slice();
+
             if s.len() <= crate::message::MAX_INLINE_MESSAGE {
                 Message::push_inline(&mut self.messages, s.len()).copy_from_slice(s);
             } else {
@@ -439,6 +482,7 @@ impl Connection {
             let msg = Message::from_parts(parts);
             self.messages.push_back(msg);
         }
+
         Ok(true)
     }
 
@@ -466,8 +510,10 @@ impl Connection {
             }
             other => self.events.push_back(Event::Command(other)),
         }
+
         Ok(())
     }
+
     /// Drain the next parsed control-plane event (commands, handshake).
     /// Application messages are on a separate queue — use
     /// [`poll_message`](Self::poll_message).
@@ -497,6 +543,7 @@ impl Connection {
     pub fn swap_messages(&mut self, dest: &mut VecDeque<Message>) {
         std::mem::swap(&mut self.messages, dest);
     }
+
     /// Inspect the next inbound frame without consuming any bytes.
     ///
     /// Returns `Some(NextFrameInfo)` when the connection is in the data
@@ -517,17 +564,21 @@ impl Connection {
         if !matches!(self.state, State::Ready) || !self.accepts_input() {
             return Ok(None);
         }
+
         #[cfg(feature = "ws")]
         if self.ws.role.is_some() {
             return Ok(None);
         }
+
         let Some(hdr) = frame::peek_frame_header(&self.in_buf)? else {
             return Ok(None);
         };
+
         self.validate_receive_frame(hdr.flags, hdr.payload_len)?;
         let buffered_total = self.in_buf.len();
         let prefix_after_header = buffered_total.saturating_sub(hdr.header_len);
         let buffered_payload_prefix = prefix_after_header.min(hdr.payload_len);
+
         Ok(Some(NextFrameInfo {
             flags: hdr.flags,
             header_len: hdr.header_len,
@@ -555,11 +606,13 @@ impl Connection {
         if self.in_buf.len() != info.header_len {
             return None;
         }
+
         self.in_buf.advance(info.header_len);
         self.state = State::AwaitingSuppliedPayload {
             flags: info.flags,
             payload_len: info.payload_len,
         };
+
         Some(info.payload_len)
     }
 
@@ -576,15 +629,18 @@ impl Connection {
         let info = self.peek_next_frame_payload_size().ok().flatten()?;
         self.in_buf.advance(info.header_len);
         let prefix_len = info.buffered_payload_prefix;
+
         let prefix = if prefix_len > 0 {
             self.in_buf.split_to(prefix_len)
         } else {
             Payload::new()
         };
+
         self.state = State::AwaitingSuppliedPayload {
             flags: info.flags,
             payload_len: info.payload_len,
         };
+
         Some((info.payload_len, prefix))
     }
 
@@ -603,9 +659,11 @@ impl Connection {
         let Some(info) = self.peek_next_frame_payload_size()? else {
             return Ok(None);
         };
+
         if destination.len() < info.payload_len {
             return Err(Error::Config("receive destination is too small".into()));
         }
+
         self.in_buf.advance(info.header_len);
         self.in_buf
             .read_into(info.buffered_payload_prefix, destination);
@@ -613,6 +671,7 @@ impl Connection {
             flags: info.flags,
             payload_len: info.payload_len,
         };
+
         Ok(Some((info.payload_len, info.buffered_payload_prefix)))
     }
 
@@ -642,6 +701,7 @@ impl Connection {
                 ));
             }
         };
+
         if payload.len() != expected_len {
             return Err(Error::Protocol(format!(
                 "supplied payload length {} != expected {}",
@@ -649,6 +709,7 @@ impl Connection {
                 expected_len,
             )));
         }
+
         self.state = State::Ready;
         self.decode_assembled_frame(flags, payload)?;
         // Drive in case in_buf still holds further frames the caller

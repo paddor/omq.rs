@@ -43,6 +43,7 @@ pub(super) fn set_plain_server_option(
         ZMQ_PLAIN_SERVER => {
             let v = optval.i32()?;
             let mut ov = security_overlay(sock_arc)?;
+
             if v != 0 {
                 ov.mechanism = MechanismOverlay::PlainServer;
             } else if matches!(
@@ -57,6 +58,7 @@ pub(super) fn set_plain_server_option(
             if domain.len() > 255 || !domain.is_ascii() {
                 return Err(libc::EINVAL);
             }
+
             security_overlay(sock_arc)?.zap.domain = domain;
         }
         ZMQ_ZAP_ENFORCE_DOMAIN => {
@@ -81,6 +83,7 @@ pub(super) fn set_plain_client_option(
             if s.len() > 255 || !s.bytes().all(|byte| byte.is_ascii_graphic()) {
                 return Err(libc::EINVAL);
             }
+
             let mut ov = security_overlay(sock_arc)?;
             match &mut ov.mechanism {
                 MechanismOverlay::PlainClient { username, .. } => *username = s,
@@ -97,6 +100,7 @@ pub(super) fn set_plain_client_option(
             if s.len() > 255 || !s.bytes().all(|byte| byte.is_ascii_graphic()) {
                 return Err(libc::EINVAL);
             }
+
             let mut ov = security_overlay(sock_arc)?;
             match &mut ov.mechanism {
                 MechanismOverlay::PlainClient { password, .. } => *password = s,
@@ -124,6 +128,7 @@ pub(super) fn set_curve_option(
         ZMQ_CURVE_SERVER => {
             let v = optval.i32()?;
             let mut ov = security_overlay(sock_arc)?;
+
             if v != 0 {
                 // Keep a secret key set before the role.
                 let secret_key = curve_secret_key(&ov.mechanism);
@@ -135,6 +140,7 @@ pub(super) fn set_curve_option(
         ZMQ_CURVE_SECRETKEY => {
             let key = optval.key()?;
             let mut ov = security_overlay(sock_arc)?;
+
             match &mut ov.mechanism {
                 MechanismOverlay::CurveServer { secret_key, .. }
                 | MechanismOverlay::CurveClient { secret_key, .. } => *secret_key = key,
@@ -163,6 +169,7 @@ pub(super) fn set_curve_client_option(
         ZMQ_CURVE_PUBLICKEY => {
             let key = optval.key()?;
             let mut ov = security_overlay(sock_arc)?;
+
             match &mut ov.mechanism {
                 MechanismOverlay::CurveClient { public_key, .. } => *public_key = key,
                 // A server derives its public key and keeps its role.
@@ -179,6 +186,7 @@ pub(super) fn set_curve_client_option(
         ZMQ_CURVE_SERVERKEY => {
             let key = optval.key()?;
             let mut ov = security_overlay(sock_arc)?;
+
             match &mut ov.mechanism {
                 MechanismOverlay::CurveClient { server_key, .. } => *server_key = key,
                 // A server key makes the socket a client, as in libzmq.
@@ -209,10 +217,12 @@ pub(super) fn set_ws_option(
             if sock_arc.inner.get().is_some() {
                 return Err(libc::EBUSY);
             }
+
             let value = optval.i32()?;
             if value <= 0 {
                 return Err(libc::EINVAL);
             }
+
             overlay(sock_arc)?.ws.max_ready_peers = value;
         }
         OMQ_WS_ALLOWED_ORIGINS => {
@@ -221,6 +231,7 @@ pub(super) fn set_ws_option(
             if sock_arc.inner.get().is_some() {
                 return Err(libc::EBUSY);
             }
+
             let origins = parse_origins(&optval.string()?)?;
             overlay(sock_arc)?.ws.allowed_origins = origins;
         }
@@ -285,21 +296,26 @@ fn copy_plain_credential_field(ptr: *const u8, len: usize) -> Result<String, c_i
     if ptr.is_null() && len != 0 {
         return Err(libc::EFAULT);
     }
+
     if len > 255 {
         return Err(libc::EINVAL);
     }
+
     if len == 0 {
         return Ok(String::new());
     }
+
     // SAFETY: the non-null pointer is a caller-provided readable buffer of
     // `len` bytes. The C ABI requires it to remain valid for this call.
     let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
     let Ok(text) = std::str::from_utf8(bytes) else {
         return Err(libc::EINVAL);
     };
+
     if !text.bytes().all(|byte| byte.is_ascii_graphic()) {
         return Err(libc::EINVAL);
     }
+
     Ok(text.to_owned())
 }
 
@@ -323,9 +339,11 @@ pub extern "C" fn omq_socket_set_plain_server_credentials(
     if sock.is_null() || (credentials.is_null() && credential_count != 0) {
         return fail(libc::EFAULT);
     }
+
     if credential_count > isize::MAX as usize / std::mem::size_of::<OmqPlainCredential>() {
         return fail(libc::EINVAL);
     }
+
     // SAFETY: C callers pass null or a pointer from this API.
     let socket = c_try!(unsafe { crate::handle::socket(sock) });
     if socket
@@ -335,6 +353,7 @@ pub extern "C" fn omq_socket_set_plain_server_credentials(
     {
         return fail(libc::EINVAL);
     }
+
     let entries = if credential_count == 0 {
         &[]
     } else {
@@ -342,10 +361,12 @@ pub extern "C" fn omq_socket_set_plain_server_credentials(
         // `credential_count` entries. The size check prevents slice overflow.
         unsafe { std::slice::from_raw_parts(credentials, credential_count) }
     };
+
     let mut copied = Vec::new();
     if copied.try_reserve_exact(entries.len()).is_err() {
         return fail(libc::ENOMEM);
     }
+
     for entry in entries {
         let username = c_try!(copy_plain_credential_field(
             entry.username,
@@ -357,8 +378,10 @@ pub extern "C" fn omq_socket_set_plain_server_credentials(
         ));
         copied.push((username, password));
     }
+
     c_try!(overlay(socket)).mechanism = MechanismOverlay::PlainServerCredentials {
         credentials: copied,
     };
+
     0
 }

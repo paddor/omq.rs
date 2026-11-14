@@ -9,9 +9,10 @@ use tokio_util::sync::CancellationToken;
 
 use super::ListenerEndpoint;
 
-type Registry = HashMap<(tokio::runtime::Id, SocketAddr), Weak<ListenerGroup>>;
 static GROUPS: OnceLock<Mutex<Registry>> = OnceLock::new();
 static BINDS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+type Registry = HashMap<(tokio::runtime::Id, SocketAddr), Weak<ListenerGroup>>;
 
 /// All reuseport members must outlive every accepted connection: removing
 /// even an idle member changes the kernel's socket indices. An unbound group
@@ -41,6 +42,7 @@ impl ListenerGroup {
             .lock()
             .expect("QUIC groups");
         groups.retain(|_, group| group.strong_count() > 0);
+
         groups
             .get(&(tokio::runtime::Handle::current().id(), addr))?
             .upgrade()
@@ -58,6 +60,7 @@ impl ListenerGroup {
                 cancel: Some(cancel),
             }),
         });
+
         GROUPS
             .get_or_init(Mutex::default)
             .lock()
@@ -66,6 +69,7 @@ impl ListenerGroup {
                 (tokio::runtime::Handle::current().id(), addr),
                 Arc::downgrade(&group),
             );
+
         group
     }
 
@@ -83,16 +87,19 @@ impl ListenerGroup {
         {
             return Err(Error::Io(std::io::ErrorKind::AddrInUse.into()));
         }
+
         state.generation = state
             .generation
             .checked_add(1)
             .ok_or_else(|| Error::Config("QUIC listener generation exhausted".into()))?;
+
         for endpoint in &self.endpoints {
             endpoint.udp.set_server_config(Some(server.clone()));
             endpoint
                 .udp
                 .raise_buffers(options.recv_buffer_size, options.send_buffer_size);
         }
+
         state.cancel = Some(cancel);
         Ok(state.generation)
     }
@@ -105,6 +112,7 @@ impl ListenerGroup {
             for endpoint in &self.endpoints {
                 endpoint.udp.set_server_config(None);
             }
+
             state.cancel = None;
         }
     }

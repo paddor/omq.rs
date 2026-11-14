@@ -8,9 +8,6 @@
 //! stays alive and reconnects. Verifies no hangs, no leaks, and that
 //! message delivery resumes after every restart.
 
-#[global_allocator]
-static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
-
 mod soak_common;
 
 use std::time::{Duration, Instant};
@@ -19,6 +16,21 @@ use bytes::Bytes;
 use omq_tokio::options::ReconnectPolicy;
 use omq_tokio::{Message, Options, Socket, SocketType};
 use rand::RngExt;
+
+#[global_allocator]
+static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
+
+/// Pair name and the bind-side type that each cycle recreates.
+const PAIRS: [(&str, SocketType); 8] = [
+    ("push/pull", SocketType::Pull),
+    ("req/rep", SocketType::Rep),
+    ("pub/sub", SocketType::Pub),
+    ("dealer/router", SocketType::Router),
+    ("pair", SocketType::Pair),
+    ("client/server", SocketType::Server),
+    ("scatter/gather", SocketType::Gather),
+    ("channel", SocketType::Channel),
+];
 
 fn fast_reconnect() -> Options {
     Options {
@@ -33,8 +45,10 @@ async fn rebind(ep: &omq_tokio::Endpoint, make: impl Fn() -> Socket) -> Option<S
         if s.bind(ep.clone()).await.is_ok() {
             return Some(s);
         }
+
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+
     None
 }
 
@@ -51,6 +65,7 @@ async fn make_pair(name: &'static str, bind_type: SocketType, connector: Socket)
     let ep = probe.bind(soak_common::tcp_ep(0)).await.unwrap();
     probe.close().await.unwrap();
     connector.connect(ep.clone()).await.unwrap();
+
     PairState {
         name,
         ep,
@@ -59,18 +74,6 @@ async fn make_pair(name: &'static str, bind_type: SocketType, connector: Socket)
         delivered: 0,
     }
 }
-
-/// Pair name and the bind-side type that each cycle recreates.
-const PAIRS: [(&str, SocketType); 8] = [
-    ("push/pull", SocketType::Pull),
-    ("req/rep", SocketType::Rep),
-    ("pub/sub", SocketType::Pub),
-    ("dealer/router", SocketType::Router),
-    ("pair", SocketType::Pair),
-    ("client/server", SocketType::Server),
-    ("scatter/gather", SocketType::Gather),
-    ("channel", SocketType::Channel),
-];
 
 /// The long-lived connect side of a pair, which must reconnect on its own.
 async fn connector(name: &str) -> Socket {
@@ -102,6 +105,7 @@ async fn create_all_pairs() -> Vec<PairState> {
     for (name, bind_type) in PAIRS {
         pairs.push(make_pair(name, bind_type, connector(name).await).await);
     }
+
     pairs
 }
 
@@ -163,6 +167,7 @@ fn soak_reconnect_all_types() {
 
             let ok = cycle(pair).await;
             pair.cycles += 1;
+
             if ok {
                 pair.delivered += 1;
             }
@@ -172,10 +177,12 @@ fn soak_reconnect_all_types() {
                     "[reconnect_all_types] {:.0}s:",
                     start.elapsed().as_secs_f64()
                 );
+
                 for p in &pairs {
                     let pct = delivery_pct(p);
                     eprintln!("  {}: {}/{} ({pct:.0}%)", p.name, p.delivered, p.cycles);
                 }
+
                 last_log = Instant::now();
             }
         }
@@ -216,11 +223,13 @@ async fn cycle_push_pull(pair: &mut PairState) -> bool {
         pull.close().await.unwrap();
         return false;
     }
+
     let ok = matches!(
         tokio::time::timeout(Duration::from_secs(5), pull.recv()).await,
         Ok(Ok(_))
     );
     pull.close().await.unwrap();
+
     ok
 }
 
@@ -278,12 +287,14 @@ async fn cycle_pub_sub(pair: &mut PairState) -> bool {
             pub_.close().await.unwrap();
             return false;
         }
+
         if let Ok(Ok(_)) =
             tokio::time::timeout(Duration::from_millis(200), pair.connector.recv()).await
         {
             pub_.close().await.unwrap();
             return true;
         }
+
         if Instant::now() >= deadline {
             pub_.close().await.unwrap();
             return false;
@@ -309,10 +320,12 @@ async fn cycle_dealer_router(pair: &mut PairState) -> bool {
         router.close().await.unwrap();
         return false;
     }
+
     let ok = match tokio::time::timeout(Duration::from_secs(5), router.recv()).await {
         Ok(Ok(m)) => m.part_bytes(0).is_some_and(|id| id.as_ref() == b"d1"),
         _ => false,
     };
+
     router.close().await.unwrap();
     ok
 }
@@ -323,6 +336,7 @@ async fn cycle_bidirectional(pair: &mut PairState) -> bool {
     } else {
         SocketType::Channel
     };
+
     let Some(bind_side) = rebind(&pair.ep, || {
         Socket::new(bind_type, soak_common::soak_options())
     })
@@ -340,11 +354,13 @@ async fn cycle_bidirectional(pair: &mut PairState) -> bool {
         bind_side.close().await.unwrap();
         return false;
     }
+
     let ok = matches!(
         tokio::time::timeout(Duration::from_secs(5), bind_side.recv()).await,
         Ok(Ok(_))
     );
     bind_side.close().await.unwrap();
+
     ok
 }
 
@@ -366,10 +382,12 @@ async fn cycle_client_server(pair: &mut PairState) -> bool {
         server.close().await.unwrap();
         return false;
     }
+
     let ok = match tokio::time::timeout(Duration::from_secs(5), server.recv()).await {
         Ok(Ok(m)) => m.routing_id().is_some() && m.len() == 1,
         _ => false,
     };
+
     server.close().await.unwrap();
     ok
 }
@@ -392,10 +410,12 @@ async fn cycle_scatter_gather(pair: &mut PairState) -> bool {
         gather.close().await.unwrap();
         return false;
     }
+
     let ok = matches!(
         tokio::time::timeout(Duration::from_secs(5), gather.recv()).await,
         Ok(Ok(_))
     );
     gather.close().await.unwrap();
+
     ok
 }

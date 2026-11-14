@@ -6,6 +6,8 @@
 //! on the bind side. `bind_any` / `connect_any` are the dispatch
 //! entry points the socket actor calls from its bind / dial paths.
 
+mod stream;
+
 use std::sync::Arc;
 
 use omq_proto::endpoint::{Endpoint, Host};
@@ -15,6 +17,9 @@ use crate::transport::{
     InprocConn, InprocPeerSnapshot, IpcTransport, Listener as _, PeerIdent, TcpTransport,
     Transport as _, inproc as inproc_transport,
 };
+
+pub(super) use omq_proto::message::generated_identity;
+pub(crate) use stream::{AnyReadHalf, AnyStream, AnyWriteHalf, Migratable};
 
 /// Per-attempt settings for carriers with TLS/HTTP setup.
 #[cfg(any(feature = "ws", feature = "quic"))]
@@ -188,6 +193,7 @@ pub(super) async fn bind_any(
             crate::transport::quic::bind(endpoint, carrier.setup, carrier.options).await?;
         let resolved = quic_listener.local_endpoint().clone();
         quic_listener.set_monitor_endpoint(resolved.clone());
+
         return Ok(BoundListener {
             listener: AnyListener::Quic(Box::new(quic_listener)),
             endpoint: resolved,
@@ -213,6 +219,7 @@ pub(super) async fn bind_any(
         Endpoint::Ipc(_) => AnyListener::Ipc(IpcTransport::bind(endpoint).await?),
         other => return Err(Error::UnsupportedScheme(other.scheme().to_string())),
     };
+
     let resolved = listener.local_endpoint().clone();
     Ok(BoundListener {
         listener,
@@ -225,6 +232,7 @@ pub(super) async fn bind_any(
 async fn bind_ws(endpoint: &Endpoint, carrier: CarrierAccept<'_>) -> Result<BoundListener> {
     let plain = endpoint.without_compression();
     let wss_tls = &carrier.options.wss_tls;
+
     let tls_acc = if matches!(plain, Endpoint::Wss { .. }) {
         let cert = wss_tls.server_cert_pem.as_deref().ok_or_else(|| {
             Error::Protocol("wss:// bind requires server_cert_pem in WssTls options".into())
@@ -232,6 +240,7 @@ async fn bind_ws(endpoint: &Endpoint, carrier: CarrierAccept<'_>) -> Result<Boun
         let key = wss_tls.server_key_pem.as_deref().ok_or_else(|| {
             Error::Protocol("wss:// bind requires server_key_pem in WssTls options".into())
         })?;
+
         Some(tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(
             crate::transport::tls::server_config(cert, key)?,
         )))
@@ -244,6 +253,7 @@ async fn bind_ws(endpoint: &Endpoint, carrier: CarrierAccept<'_>) -> Result<Boun
     // Report the bound port and keep any wrapper (e.g. lz4+ws://).
     let resolved = endpoint.rewrap(ws_listener.local_endpoint().clone());
     ws_listener.set_monitor_endpoint(resolved.clone());
+
     Ok(BoundListener {
         listener: AnyListener::Ws(ws_listener),
         endpoint: resolved,
@@ -258,8 +268,10 @@ pub(super) async fn preflight_connect_endpoint_resolution(endpoint: &Endpoint) -
         let Endpoint::Tcp { host, port } = &plain else {
             unreachable!();
         };
+
         return preflight_connect_host(host, *port).await;
     }
+
     #[cfg(feature = "ws")]
     if endpoint.is_ws_family() {
         let plain = endpoint.without_compression();
@@ -267,12 +279,15 @@ pub(super) async fn preflight_connect_endpoint_resolution(endpoint: &Endpoint) -
             Endpoint::Ws { host, port, .. } | Endpoint::Wss { host, port, .. } => (host, *port),
             _ => unreachable!(),
         };
+
         return preflight_connect_host(host, port).await;
     }
+
     #[cfg(feature = "quic")]
     if let Endpoint::Quic { host, port } = endpoint {
         return preflight_connect_host(host, *port).await;
     }
+
     match endpoint {
         Endpoint::Inproc { .. } | Endpoint::Ipc(_) | Endpoint::Shm(_) => Ok(()),
         other => Err(Error::UnsupportedScheme(other.scheme().to_string())),
@@ -314,6 +329,7 @@ pub(super) async fn connect_any(
         )
         .await?;
         let peer_ident = PeerIdent::Socket(stream.remote_address());
+
         return Ok(byte_stream(AnyStream::Quic(Box::new(stream)), peer_ident));
     }
 
@@ -336,6 +352,7 @@ pub(super) async fn connect_any(
                 inproc.recv,
             )
             .await?;
+
             Ok(AnyConn::Inproc {
                 conn,
                 peer_ident: PeerIdent::Inproc(name.clone()),
@@ -377,6 +394,7 @@ async fn connect_ws(endpoint: &Endpoint, carrier: CarrierConnect<'_>) -> Result<
     let connected =
         crate::transport::ws::connect(target, &carrier.options.wss_tls, &carrier.options.mechanism)
             .await?;
+
     Ok(AnyConn::ByteStream {
         stream: AnyStream::Ws(Box::new(connected.transport)),
         peer_ident: peer_ident_for_endpoint(endpoint),
@@ -409,12 +427,6 @@ pub(super) fn peer_ident_socket_addr(ident: &PeerIdent) -> Option<std::net::Sock
         _ => None,
     }
 }
-
-pub(super) use omq_proto::message::generated_identity;
-
-mod stream;
-
-pub(crate) use stream::{AnyReadHalf, AnyStream, AnyWriteHalf, Migratable};
 
 #[cfg(test)]
 mod tests;

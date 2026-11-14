@@ -7,9 +7,6 @@
 //! `maintain()` to drive heartbeats, then drops the peer and verifies the
 //! bound side observes the disappearance.
 
-#[global_allocator]
-static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
-
 mod soak_common;
 
 use std::time::{Duration, Instant};
@@ -21,11 +18,60 @@ use omq_tokio::exclusive::{
 use omq_tokio::{Endpoint, Error, Message, ReconnectPolicy, SocketType};
 use tokio::sync::broadcast::error::TryRecvError;
 
+#[global_allocator]
+static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
+
 const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(20);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_millis(120);
 const IO_TIMEOUT: Duration = Duration::from_secs(1);
 const IDLE_MAINTAIN: Duration = Duration::from_millis(70);
 const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Every exclusive pairing, each bound from both sides.
+const SPECS: [Scenario; 7] = [
+    Scenario {
+        name: "pair",
+        bind_kind: SocketType::Pair,
+        connect_kind: SocketType::Pair,
+        flow: Flow::Pair,
+    },
+    Scenario {
+        name: "dealer-router",
+        bind_kind: SocketType::Router,
+        connect_kind: SocketType::Dealer,
+        flow: Flow::DealerRouter,
+    },
+    Scenario {
+        name: "router-dealer",
+        bind_kind: SocketType::Dealer,
+        connect_kind: SocketType::Router,
+        flow: Flow::DealerRouter,
+    },
+    Scenario {
+        name: "req-rep",
+        bind_kind: SocketType::Rep,
+        connect_kind: SocketType::Req,
+        flow: Flow::ReqRep,
+    },
+    Scenario {
+        name: "rep-req",
+        bind_kind: SocketType::Req,
+        connect_kind: SocketType::Rep,
+        flow: Flow::ReqRep,
+    },
+    Scenario {
+        name: "client-server",
+        bind_kind: SocketType::Server,
+        connect_kind: SocketType::Client,
+        flow: Flow::ClientServer,
+    },
+    Scenario {
+        name: "server-client",
+        bind_kind: SocketType::Client,
+        connect_kind: SocketType::Server,
+        flow: Flow::ClientServer,
+    },
+];
 
 #[derive(Clone, Copy, Debug)]
 enum Flow {
@@ -63,6 +109,7 @@ fn exclusive_options(kind: SocketType, side: &str) -> ExclusiveOptions {
         SocketType::Pair => Bytes::from(format!("pair-{side}")),
         _ => Bytes::new(),
     };
+
     ExclusiveOptions {
         identity,
         connect_timeout: Duration::from_secs(1),
@@ -84,6 +131,7 @@ async fn make_state(spec: Scenario) -> ScenarioState {
     .await
     .unwrap();
     let monitor = bound.monitor();
+
     ScenarioState {
         spec,
         bound,
@@ -103,6 +151,7 @@ async fn connect_peer(state: &mut ScenarioState) -> ExclusiveSocket {
     let accept = state.bound.maintain();
     let (connected, accepted) = tokio::join!(connect, accept);
     accepted.unwrap();
+
     connected.unwrap()
 }
 
@@ -246,6 +295,7 @@ async fn wait_for_peer_disappearance(bound: &mut ExclusiveSocket) {
             Err(Error::Closed | Error::Timeout | Error::Io(_)) => return,
             Err(error) => panic!("unexpected exclusive peer disappearance error: {error}"),
         }
+
         assert!(
             start.elapsed() < DISCONNECT_TIMEOUT,
             "exclusive bound socket did not observe peer disappearance"
@@ -268,52 +318,6 @@ fn drain_disconnect_events(monitor: &mut tokio::sync::broadcast::Receiver<Exclus
     }
 }
 
-/// Every exclusive pairing, each bound from both sides.
-const SPECS: [Scenario; 7] = [
-    Scenario {
-        name: "pair",
-        bind_kind: SocketType::Pair,
-        connect_kind: SocketType::Pair,
-        flow: Flow::Pair,
-    },
-    Scenario {
-        name: "dealer-router",
-        bind_kind: SocketType::Router,
-        connect_kind: SocketType::Dealer,
-        flow: Flow::DealerRouter,
-    },
-    Scenario {
-        name: "router-dealer",
-        bind_kind: SocketType::Dealer,
-        connect_kind: SocketType::Router,
-        flow: Flow::DealerRouter,
-    },
-    Scenario {
-        name: "req-rep",
-        bind_kind: SocketType::Rep,
-        connect_kind: SocketType::Req,
-        flow: Flow::ReqRep,
-    },
-    Scenario {
-        name: "rep-req",
-        bind_kind: SocketType::Req,
-        connect_kind: SocketType::Rep,
-        flow: Flow::ReqRep,
-    },
-    Scenario {
-        name: "client-server",
-        bind_kind: SocketType::Server,
-        connect_kind: SocketType::Client,
-        flow: Flow::ClientServer,
-    },
-    Scenario {
-        name: "server-client",
-        bind_kind: SocketType::Client,
-        connect_kind: SocketType::Server,
-        flow: Flow::ClientServer,
-    },
-];
-
 #[test]
 fn soak_exclusive_all_supported_types() {
     let duration = soak_common::soak_duration();
@@ -328,6 +332,7 @@ fn soak_exclusive_all_supported_types() {
 
         let start = Instant::now();
         let mut last_log = start;
+
         while start.elapsed() < duration {
             for state in &mut states {
                 cycle(state).await;
@@ -341,6 +346,7 @@ fn soak_exclusive_all_supported_types() {
                         state.spec.name, state.cycles, state.disconnects
                     );
                 }
+
                 last_log = Instant::now();
             }
         }

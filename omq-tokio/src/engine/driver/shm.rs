@@ -10,6 +10,7 @@ use crate::engine::shm_state::ShmState;
 
 #[cfg(target_os = "linux")]
 mod linux;
+
 #[cfg(target_os = "linux")]
 use linux as platform;
 #[cfg(not(target_os = "linux"))]
@@ -27,6 +28,7 @@ pub(super) async fn peer_death(state: Option<ShmState>) -> Result<()> {
     if let Some(state) = state {
         return platform::peer_exited(state).await;
     }
+
     std::future::pending::<Result<()>>().await
 }
 
@@ -57,6 +59,7 @@ impl Driver {
         } else {
             std::future::pending::<()>().await;
         }
+
         self.credit = None;
         if let Some(slot) = slot {
             slot.shm_credit_returned();

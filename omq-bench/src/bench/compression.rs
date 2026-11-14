@@ -22,9 +22,11 @@ fn get_wire_size(binary: &str, transport: &str, size: u64, dict_file: Option<&st
     let ep = format!("{transport}://127.0.0.1:{port}");
     let size_str = size.to_string();
     let mut env = vec![("OMQ_BENCH_PAYLOAD", "json")];
+
     if let Some(df) = dict_file {
         env.push(("OMQ_BENCH_DICT_FILE", df));
     }
+
     let output = process::capture(
         &[binary, "wire-size", &ep, &size_str],
         &env,
@@ -32,6 +34,7 @@ fn get_wire_size(binary: &str, transport: &str, size: u64, dict_file: Option<&st
         Duration::from_secs(10),
     )
     .unwrap_or_default();
+
     output.trim().parse().unwrap_or(size)
 }
 
@@ -174,6 +177,7 @@ impl Sweep<'_> {
                             msgs_s: Some(msgs_s),
                             dict_size,
                         };
+
                         jsonl::append_jsonl(self.jsonl_path, &row);
                         eprint!("  {msgs_s:>10.0} msg/s  {mbps:>8.1} MB/s");
                     }

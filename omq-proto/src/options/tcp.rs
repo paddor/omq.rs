@@ -1,4 +1,4 @@
-//! TCP socket settings applied after connect or accept.
+//! TCP and OS socket settings applied after connect or accept.
 
 use super::Options;
 use crate::socket_ref::SocketRef;
@@ -27,15 +27,46 @@ pub enum KeepAlive {
 }
 
 impl Options {
+    #[must_use]
+    /// Set TCP keepalive behavior.
+    pub fn tcp_keepalive(mut self, k: KeepAlive) -> Self {
+        self.tcp_keepalive = k;
+        self
+    }
+
+    #[must_use]
+    /// Set `TCP_USER_TIMEOUT` for TCP streams. See the
+    /// [`tcp_user_timeout`](Self::tcp_user_timeout) field for the trade-off.
+    pub fn tcp_user_timeout(mut self, timeout: Duration) -> Self {
+        self.tcp_user_timeout = Some(timeout);
+        self
+    }
+
+    #[must_use]
+    /// Set OS receive buffer size for TCP/IPC streams and QUIC UDP sockets.
+    pub fn recv_buffer_size(mut self, bytes: usize) -> Self {
+        self.recv_buffer_size = Some(bytes);
+        self
+    }
+
+    #[must_use]
+    /// Set OS send buffer size for TCP/IPC streams and QUIC UDP sockets.
+    pub fn send_buffer_size(mut self, bytes: usize) -> Self {
+        self.send_buffer_size = Some(bytes);
+        self
+    }
+
     /// Apply `SO_RCVBUF` and `SO_SNDBUF` to a connected socket.
     pub fn apply_socket_buffers<S: SocketRef>(&self, sock: &S) -> std::io::Result<()> {
         let sref = sock.as_socket_ref();
         if let Some(n) = self.recv_buffer_size {
             sref.set_recv_buffer_size(n)?;
         }
+
         if let Some(n) = self.send_buffer_size {
             sref.set_send_buffer_size(n)?;
         }
+
         Ok(())
     }
 
@@ -46,6 +77,7 @@ impl Options {
         if let Some(timeout) = self.tcp_user_timeout {
             sock.as_socket_ref().set_tcp_user_timeout(Some(timeout))?;
         }
+
         #[cfg(not(any(target_os = "linux", target_os = "android")))]
         let _ = sock;
         Ok(())
@@ -66,6 +98,7 @@ impl KeepAlive {
                     .with_time(*idle)
                     .with_interval(*intvl)
                     .with_retries(*cnt);
+
                 sref.set_tcp_keepalive(&ka)
             }
         }

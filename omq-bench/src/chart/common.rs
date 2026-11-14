@@ -177,14 +177,17 @@ pub(crate) fn nice_step(max_val: f64, target_lines: usize) -> f64 {
     if max_val <= 0.0 {
         return 1.0;
     }
+
     let raw = max_val / target_lines as f64;
     let mag = 10.0_f64.powf(raw.log10().floor());
+
     for s in [1.0, 2.0, 2.5, 5.0, 10.0] {
         let step = s * mag;
         if max_val / step <= target_lines as f64 + 1.0 {
             return step;
         }
     }
+
     mag * 10.0
 }
 
@@ -221,6 +224,7 @@ pub(crate) fn msg_axis_2m(max_val: f64) -> (f64, usize) {
     } else {
         (max_val / MSG_AXIS_STEP).ceil().max(1.0) as usize
     };
+
     (MSG_AXIS_STEP * ticks as f64, ticks)
 }
 
@@ -252,18 +256,22 @@ fn read_chart_hw() -> BTreeMap<String, String> {
             || std::path::PathBuf::from(".chart_hw"),
             |repo| repo.join(".chart_hw"),
         );
+
     let Ok(content) = std::fs::read_to_string(chart_hw) else {
         return map;
     };
+
     for line in content.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
+
         if let Some((k, v)) = line.split_once('=') {
             map.insert(k.trim().to_string(), v.trim().to_string());
         }
     }
+
     map
 }
 
@@ -295,6 +303,7 @@ pub(crate) fn postprocess_svg(
          font-family=\"sans-serif\" font-size=\"14\" font-weight=\"bold\" \
          fill=\"{TITLE_FILL}\">{title}</text>",
     );
+
     if let Some(hw) = hw_label {
         write!(
             header,
@@ -341,9 +350,11 @@ fn draw_whiskers<DB: DrawingBackend>(
             let Some(&agg) = chart_vals.get(&sz).and_then(|m| m.get(imp.key)) else {
                 continue;
             };
+
             let Some(f) = fairness.get(&sz).and_then(|m| m.get(imp.key)) else {
                 continue;
             };
+
             if f.median <= 0.0 {
                 continue;
             }
@@ -402,6 +413,7 @@ where
             .get(v.round() as usize)
             .map_or(String::new(), |&s| fmt_size(s))
     };
+
     let mut mesh = chart.configure_mesh();
     mesh.x_labels(sizes.len())
         .x_label_formatter(&x_label)
@@ -411,9 +423,11 @@ where
         .light_line_style(TRANSPARENT)
         .bold_line_style(GRID_COLOR)
         .axis_style(AXIS_COLOR);
+
     if let Some(count) = y_labels {
         mesh.y_labels(count);
     }
+
     mesh.draw()
 }
 
@@ -452,6 +466,7 @@ fn draw_line_with_dots<DB: DrawingBackend, Y: Ranged<ValueType = f64>>(
         pts.iter()
             .map(|&(x, y)| Circle::new((x, y), 2, color.filled())),
     )?;
+
     Ok(())
 }
 
@@ -464,6 +479,7 @@ pub(crate) fn append_row_titles(
     let mut svg = std::fs::read_to_string(path)?;
     let mid = width / 2;
     let mut extra = String::new();
+
     for (y, label) in row_titles {
         write!(
             extra,
@@ -477,6 +493,7 @@ pub(crate) fn append_row_titles(
     if let Some(pos) = svg.rfind("</svg>") {
         svg.insert_str(pos, &extra);
     }
+
     std::fs::write(path, svg)?;
     Ok(())
 }
@@ -485,5 +502,6 @@ pub(crate) fn out_dir() -> std::path::PathBuf {
     let repo = std::env::current_dir().expect("cwd");
     let dir = repo.join("doc/charts");
     std::fs::create_dir_all(&dir).expect("create charts dir");
+
     dir
 }

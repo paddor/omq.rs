@@ -14,6 +14,7 @@ pub(super) async fn stop_peer_task(task: JoinHandle<()>) {
     if !task.is_finished() {
         task.abort();
     }
+
     let _ = tokio::time::timeout(PEER_TASK_JOIN_TIMEOUT, task).await;
 }
 
@@ -53,6 +54,7 @@ impl SocketDriver {
         if !self.close.started || self.close.peers_requested {
             return None;
         }
+
         self.routing.send_strategy.watch_close(&self.close.progress);
         Some(self.close.progress.generation())
     }
@@ -61,6 +63,7 @@ impl SocketDriver {
         if !self.close.started {
             return false;
         }
+
         self.close.peers_requested && self.peers.is_empty()
     }
 
@@ -73,24 +76,31 @@ impl SocketDriver {
             if let Some(a) = ack {
                 let _ = a.send(Ok(()));
             }
+
             return;
         }
 
         self.close.started = true;
         self.close.deadline = linger.and_then(|d| Instant::now().checked_add(d));
+
         self.link.cmd_rx.close();
         self.routing.send_strategy.stop_admission();
         self.cancel_pending_endpoints(None);
+
         self.close.peers_requested = false;
         self.close.ack = ack;
+
         // Close the recv channel so any awaiting recv() returns Closed.
         self.link.recv_tx.close();
+
         if let Some(fanin) = &self.link.spsc.fanin {
             fanin.close();
         }
+
         if let Some(routes) = &self.link.peer_recv_routes {
             routes.close_receive();
         }
+
         // close() sets the closed flag; existing ring data can still be drained.
         // Non-zero linger keeps endpoints alive so late peers can take queued
         // sends before the deadline.
@@ -115,6 +125,7 @@ impl SocketDriver {
             .iter()
             .map(|(&peer_id, peer)| (peer_id, peer.handle.inbox.clone()))
             .collect();
+
         if targets.is_empty() {
             self.close.peers_requested = true;
             return false;
@@ -122,10 +133,12 @@ impl SocketDriver {
 
         let cancel = self.link.cancel.clone();
         let mut disconnected = Vec::new();
+
         for (peer_id, inbox) in targets {
             let send = inbox.send(PeerDriverCommand::DrainAndClose {
                 deadline: self.close.deadline,
             });
+
             let result = match self.close.deadline {
                 Some(deadline) => {
                     let deadline = tokio::time::Instant::from_std(deadline);
@@ -166,37 +179,43 @@ impl SocketDriver {
         self.mail.peer_out_rx.take();
         self.mail.pending_peer_data.take();
         self.mail.peer_control_rx.close();
+
         self.endpoints.pending_endpoints.clear();
         self.routing.send_strategy.shutdown();
         self.link.shared.ready_peers.set(0);
 
         // Detach the handle-side send paths (dead slots, taken pipes) before
         // cancel, so no caller writes into a peer that is shutting down.
-        let mut peer_tasks = Vec::new();
         for p in self.peers.values() {
             if let Some(ref slot) = p.handle.routes.transmit_slot {
                 slot.mark_dead();
             }
+
             if let Some(ref pipe) = p.handle.routes.send_pipe {
                 let _ = pipe.lock().expect("send pipe poisoned").take();
             }
+
             p.handle.cancel.cancel();
         }
-        for (_, mut peer) in self.peers.drain() {
-            if let Some(task) = peer.task.take() {
-                peer_tasks.push(task);
-            }
-        }
+
+        let peer_tasks: Vec<_> = self
+            .peers
+            .drain()
+            .filter_map(|(_, mut peer)| peer.task.take())
+            .collect();
 
         for mut listener in self.endpoints.listeners.drain(..) {
             listener.stop().await;
         }
+
         for mut listener in self.endpoints.udp_listeners.drain(..) {
             listener.stop().await;
         }
+
         // Dropping an entry cancels and aborts its task.
         self.endpoints.dialers.clear();
         self.endpoints.udp_dialers.clear();
+
         if let Some(pool) = self.resources.compression_pool.take() {
             pool.clear();
         }
@@ -204,6 +223,7 @@ impl SocketDriver {
         for task in peer_tasks {
             stop_peer_task(task).await;
         }
+
         #[cfg(feature = "dart")]
         self.stop_dart_endpoints(None).await;
 
@@ -219,6 +239,7 @@ impl SocketDriver {
         else {
             return;
         };
+
         if let Some(task) = peer.cancel_task() {
             stop_peer_task(task).await;
         }

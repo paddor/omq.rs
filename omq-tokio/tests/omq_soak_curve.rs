@@ -1,8 +1,5 @@
 #![cfg(all(feature = "soak", feature = "curve"))]
 
-#[global_allocator]
-static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
-
 mod soak_common;
 
 use std::sync::Arc;
@@ -10,6 +7,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use omq_tokio::{CurveKeypair, Message, Socket, SocketType};
+
+#[global_allocator]
+static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
 
 /// Sends numbered messages until `stop`. A send that times out is not
 /// counted, but its index is still consumed.
@@ -29,6 +29,7 @@ fn spawn_sender(
             {
                 sent.fetch_add(1, Ordering::Relaxed);
             }
+
             idx += 1;
         }
     })

@@ -74,6 +74,7 @@ fn spawn_sender(
                         if sender_stop.load(Ordering::Acquire) {
                             return;
                         }
+
                         std::hint::spin_loop();
                     }
                     Err(_) => return,
@@ -98,20 +99,24 @@ fn spawn_receiver(
         let mut count = 0usize;
         // Read the clock only every TIMER_CHECK_INTERVAL polls.
         let mut until_timer_check = TIMER_CHECK_INTERVAL;
+
         loop {
             match receiver_pull.try_recv() {
                 Ok(_) => count += 1,
                 Err(omq_proto::error::Error::WouldBlock) => std::hint::spin_loop(),
                 Err(_) => break,
             }
+
             until_timer_check -= 1;
             if until_timer_check == 0 {
                 if Instant::now() >= deadline {
                     break;
                 }
+
                 until_timer_check = TIMER_CHECK_INTERVAL;
             }
         }
+
         receiver_stop.store(true, Ordering::Release);
         (count, start.elapsed())
     })
@@ -125,15 +130,18 @@ fn main() {
     let rounds = common::rounds();
     let duration = common::round_duration();
     let mut seq = 0usize;
+
     for size in common::sizes() {
         let mut best = None;
         for _ in 0..rounds {
             seq += 1;
             let cell = round(&ctx, size, seq, duration);
+
             if best.is_none_or(|current: common::Cell| cell.elapsed < current.elapsed) {
                 best = Some(cell);
             }
         }
+
         let cell = best.expect("at least one benchmark round");
         common::print_cell(size, cell);
         common::append_jsonl(PATTERN, "inproc-threads", 1, size, cell);

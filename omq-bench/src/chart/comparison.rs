@@ -136,14 +136,6 @@ const INPROC_LAT_IMPLS: &[Impl] = &[
     },
 ];
 
-struct TransportConfig {
-    transport: &'static str,
-    label: &'static str,
-    tput_impls: &'static [Impl],
-    lat_impls: &'static [Impl],
-    log_gbs: bool,
-}
-
 const TRANSPORTS: &[TransportConfig] = &[
     TransportConfig {
         transport: "tcp",
@@ -167,6 +159,14 @@ const TRANSPORTS: &[TransportConfig] = &[
         log_gbs: true,
     },
 ];
+
+struct TransportConfig {
+    transport: &'static str,
+    label: &'static str,
+    tput_impls: &'static [Impl],
+    lat_impls: &'static [Impl],
+    log_gbs: bool,
+}
 
 pub(crate) fn generate() {
     let dir = out_dir();
@@ -196,6 +196,7 @@ pub(crate) fn generate() {
             } else {
                 DualPanelStyle::PLAIN
             };
+
             draw_throughput_dual_panel(&spec, &tput, &msgs, &columns, style)
                 .expect("draw pushpull chart");
             eprintln!("Written: {}", out.display());
@@ -206,6 +207,7 @@ pub(crate) fn generate() {
         if !lat.is_empty() {
             let sub = dir.join("reqrep");
             std::fs::create_dir_all(&sub).ok();
+
             let out = sub.join(format!("{}.svg", tc.transport));
             let range = common::auto_lat_range(&lat);
             let title = format!("REQ/REP latency: {}", tc.label);
@@ -215,6 +217,7 @@ pub(crate) fn generate() {
                 sizes: COMPARISON_LATENCY_SIZES,
                 impls: tc.lat_impls,
             };
+
             draw_latency_single_panel(&spec, &lat, &cpu, LatencyLayout::auto(range))
                 .expect("draw reqrep chart");
             eprintln!("Written: {}", out.display());

@@ -60,6 +60,7 @@ async fn ipc_req_rep_roundtrip() {
 fn ipc_owned_req_rep_after_idle_with_and_without_recv_spin() {
     const EXCHANGES: usize = 64;
     const DEADLINE: Duration = Duration::from_secs(5);
+
     for spin in [Duration::ZERO, Duration::from_micros(50)] {
         let context = omq_tokio::Context::new();
         let options = Options::default().recv_spin(spin).linger(DEADLINE);
@@ -68,13 +69,16 @@ fn ipc_owned_req_rep_after_idle_with_and_without_recv_spin() {
         let endpoint = rep.bind(temp_ipc("owned-req-rep")).unwrap();
         req.connect(endpoint).unwrap();
         req.wait_connected(1, DEADLINE).unwrap();
+
         let responder = std::thread::spawn(move || {
             for _ in 0..2 * 3 * EXCHANGES {
                 let message = rep.recv_timeout(DEADLINE).unwrap();
                 rep.send_timeout(message, DEADLINE).unwrap();
             }
+
             rep.close().unwrap();
         });
+
         for _ in 0..2 {
             // Let the IO polling window expire before restarting traffic.
             std::thread::sleep(Duration::from_millis(10));
@@ -89,6 +93,7 @@ fn ipc_owned_req_rep_after_idle_with_and_without_recv_spin() {
                 }
             }
         }
+
         responder.join().unwrap();
         req.close().unwrap();
     }
@@ -158,13 +163,16 @@ async fn ipc_socket_file_cleaned_on_close() {
     s.bind(ep).await.unwrap();
     assert!(path.exists(), "bind must create the socket file");
     s.close().await.unwrap();
+
     // The driver task may take a moment to drop the listener; give it a tick.
     for _ in 0..20 {
         if !path.exists() {
             return;
         }
+
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+
     panic!("close should remove the socket file");
 }
 

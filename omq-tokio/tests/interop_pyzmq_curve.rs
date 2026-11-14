@@ -41,8 +41,10 @@ fn skip_if_no_pyzmq_curve() -> bool {
             "OMQ_INTEROP_REQUIRED=1 but python3 + pyzmq with CURVE is not available",
         );
         eprintln!("skip: python3 + pyzmq with CURVE not available");
+
         return true;
     }
+
     false
 }
 
@@ -58,6 +60,7 @@ fn loopback(port: u16) -> Endpoint {
 async fn bind_loopback(sock: &Socket) -> u16 {
     let mut mon = sock.monitor();
     sock.bind(loopback(0)).await.unwrap();
+
     loop {
         match mon.recv().await {
             Ok(MonitorEvent::Listening {
@@ -88,6 +91,7 @@ async fn wait_for_curve_handshake(sock: &Socket) {
             }
         }
     };
+
     match tokio::time::timeout(Duration::from_secs(5), fut).await {
         Ok(Ok(())) => {}
         Ok(Err(e)) => panic!("CURVE handshake error: {e}"),
@@ -133,8 +137,10 @@ async fn read_port_then_lines(
             if r.read_line(&mut buf).unwrap_or(0) == 0 {
                 break;
             }
+
             collected.push(buf.trim().to_string());
         }
+
         collected
     });
 
@@ -144,6 +150,7 @@ async fn read_port_then_lines(
         .unwrap()
         .parse()
         .expect("python did not print a valid port");
+
     (port, reader)
 }
 
@@ -205,6 +212,7 @@ ctx.term()
                 String::from_utf8_lossy(&out.stderr)
             );
         };
+
         assert_eq!(m.part_bytes(0).unwrap(), format!("hello-{i}").as_bytes());
     }
 
@@ -236,6 +244,7 @@ async fn rust_curve_rep_from_pyzmq_req() {
 
     let rep = Socket::new(SocketType::Rep, Options::default().curve_server(server_kp));
     let port = bind_loopback(&rep).await;
+
     let script = r#"
 import os, zmq
 ctx = zmq.Context.instance()
@@ -249,6 +258,7 @@ assert s.recv() == b"curve-rep"
 s.close(linger=2000)
 ctx.term()
 "#;
+
     let child = python3_command()
         .args(["-c", script])
         .env("PORT", port.to_string())
@@ -335,6 +345,7 @@ ctx.term()
         let _ = stderr.read_to_string(&mut err);
         panic!("python recv loop timed out\nstderr={err}");
     };
+
     assert_eq!(
         lines,
         (0..5).map(|i| format!("from-rust-{i}")).collect::<Vec<_>>()
@@ -524,6 +535,7 @@ ctx.term()
             panic!("SUB never received from pyzmq PUB over CURVE\nstderr={err}");
         }
     };
+
     assert!(
         std::str::from_utf8(&m.part_bytes(0).unwrap())
             .unwrap()
@@ -542,6 +554,7 @@ async fn curve_client_binds_and_pyzmq_security_server_connects() {
     if skip_if_no_pyzmq_curve() {
         return;
     }
+
     let server = CurveKeypair::generate();
     let public = server.public.to_z85();
     let secret = server.secret.to_z85();
@@ -552,6 +565,7 @@ async fn curve_client_binds_and_pyzmq_security_server_connects() {
             .linger(Duration::ZERO),
     );
     let port = bind_loopback(&client).await;
+
     let script = r#"
 import os, zmq
 ctx = zmq.Context()
@@ -566,6 +580,7 @@ s.send(b"encrypted")
 s.close(linger=1000)
 ctx.term()
 "#;
+
     let child = python3_command()
         .args(["-c", script])
         .env("PORT", port.to_string())
@@ -575,11 +590,13 @@ ctx.term()
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
+
     client
         .wait_connected(1, Duration::from_secs(5))
         .await
         .unwrap();
     client.send(Message::single("reversed")).await.unwrap();
+
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(5), client.recv())
             .await
@@ -590,6 +607,7 @@ ctx.term()
             .as_ref(),
         b"encrypted"
     );
+
     let output = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())
         .await
         .unwrap();

@@ -11,7 +11,7 @@ use std::time::Duration;
 use omq_zmq::{
     zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_term, zmq_msg_close, zmq_msg_copy, zmq_msg_data,
     zmq_msg_init, zmq_msg_init_data, zmq_msg_move, zmq_msg_recv, zmq_msg_send, zmq_msg_size,
-    zmq_recv, zmq_send, zmq_setsockopt, zmq_socket,
+    zmq_recv, zmq_send, zmq_socket,
 };
 
 const ZMQ_PUSH: i32 = 8;
@@ -44,13 +44,6 @@ unsafe extern "C" fn count_free(_data: *mut c_void, hint: *mut c_void) {
     counter.fetch_add(1, Ordering::SeqCst);
 }
 
-fn set_i32(sock: *mut c_void, opt: i32, val: i32) {
-    assert_eq!(
-        zmq_setsockopt(sock, opt, (&val as *const i32).cast(), size_of::<i32>()),
-        0
-    );
-}
-
 fn init_external<'a>(
     msg: &mut ZmqMsg,
     payload: &'a mut [u8],
@@ -67,6 +60,7 @@ fn init_external<'a>(
         ),
         0
     );
+
     ptr
 }
 
@@ -155,8 +149,8 @@ fn moving_external_message_closes_destination_and_transfers_ownership() {
 fn failed_msg_send_preserves_external_message_until_close() {
     let ctx = zmq_ctx_new();
     let push = zmq_socket(ctx, ZMQ_PUSH);
-    set_i32(push, ZMQ_LINGER, 0);
-    set_i32(push, ZMQ_SNDTIMEO, 0);
+    helpers::set_int_opt(push, ZMQ_LINGER, 0);
+    helpers::set_int_opt(push, ZMQ_SNDTIMEO, 0);
     let _endpoint = helpers::bind_random_tcp(push);
 
     let counter = AtomicUsize::new(0);
@@ -189,7 +183,7 @@ fn msg_recv_closes_existing_destination_once_before_replacement() {
     assert_eq!(omq_zmq::zmq_bind(pull, addr.as_ptr()), 0);
     assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
     std::thread::sleep(Duration::from_millis(20));
-    set_i32(pull, ZMQ_RCVTIMEO, 1000);
+    helpers::set_int_opt(pull, ZMQ_RCVTIMEO, 1000);
 
     let counter = AtomicUsize::new(0);
     let mut old_payload = *b"old";
@@ -216,15 +210,18 @@ fn shm_received_message_data_is_writable() {
     let ctx = zmq_ctx_new();
     let sender = zmq_socket(ctx, ZMQ_CHANNEL);
     let receiver = zmq_socket(ctx, ZMQ_CHANNEL);
+
     for socket in [sender, receiver] {
-        set_i32(socket, ZMQ_LINGER, 0);
-        set_i32(socket, ZMQ_RCVTIMEO, 5000);
-        set_i32(socket, ZMQ_SNDTIMEO, 5000);
+        helpers::set_int_opt(socket, ZMQ_LINGER, 0);
+        helpers::set_int_opt(socket, ZMQ_RCVTIMEO, 5000);
+        helpers::set_int_opt(socket, ZMQ_SNDTIMEO, 5000);
     }
+
     let endpoint =
         std::ffi::CString::new(format!("shm://@omq-msg-data-{}", std::process::id())).unwrap();
     assert_eq!(omq_zmq::zmq_bind(receiver, endpoint.as_ptr()), 0);
     assert_eq!(zmq_connect(sender, endpoint.as_ptr()), 0);
+
     let payload = [b'a'; 512];
     assert_eq!(
         zmq_send(sender, payload.as_ptr().cast(), payload.len(), 0),
@@ -235,6 +232,7 @@ fn shm_received_message_data_is_writable() {
         zmq_msg_recv(message.0.as_mut_ptr().cast(), receiver, 0),
         512
     );
+
     let data = zmq_msg_data(message.0.as_mut_ptr().cast()).cast::<u8>();
     // SAFETY: the received message exposes 512 writable bytes until close.
     unsafe { std::slice::from_raw_parts_mut(data, payload.len()) }.fill(b'b');
@@ -242,6 +240,7 @@ fn shm_received_message_data_is_writable() {
         zmq_msg_data(message.0.as_mut_ptr().cast()).cast::<u8>(),
         data,
     );
+
     assert_eq!(
         zmq_msg_send(message.0.as_mut_ptr().cast(), receiver, 0),
         512
@@ -252,6 +251,7 @@ fn shm_received_message_data_is_writable() {
         512
     );
     assert_eq!(reply, [b'b'; 512]);
+
     assert_eq!(zmq_msg_close(message.0.as_mut_ptr().cast()), 0);
     assert_eq!(zmq_close(sender), 0);
     assert_eq!(zmq_close(receiver), 0);
@@ -267,7 +267,7 @@ fn copied_large_received_message_survives_original_close() {
     assert_eq!(omq_zmq::zmq_bind(pull, addr.as_ptr()), 0);
     assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
     std::thread::sleep(Duration::from_millis(20));
-    set_i32(pull, ZMQ_RCVTIMEO, 1000);
+    helpers::set_int_opt(pull, ZMQ_RCVTIMEO, 1000);
 
     let payload = vec![0xA5u8; 512];
     assert_eq!(

@@ -29,6 +29,7 @@ impl Message {
                 )?
             }
         };
+
         Some(std::mem::size_of::<Self>().saturating_add(extra))
     }
 
@@ -41,10 +42,13 @@ impl Message {
                 for part in parts.iter_mut() {
                     part.bound_storage();
                 }
+
                 self.inner = MessageInner::Multi(parts);
             }
+
             return;
         }
+
         match &mut self.inner {
             MessageInner::Single(payload) => payload.bound_storage(),
             MessageInner::PrefixedShared { prefix, body } => {

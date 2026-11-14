@@ -1,26 +1,18 @@
 //! Verify fast paths recover after peer churn.
 #![allow(clippy::borrow_as_ptr, clippy::ref_as_ptr)]
 
-use std::ffi::{CString, c_void};
-use std::mem::size_of;
+mod helpers;
+
+use std::ffi::CString;
 use std::time::Duration;
 
 use omq_zmq::{
     zmq_bind, zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_term, zmq_disconnect, zmq_recv,
-    zmq_send, zmq_setsockopt, zmq_socket,
+    zmq_send, zmq_socket,
 };
 
 const ZMQ_PUSH: i32 = 8;
 const ZMQ_PULL: i32 = 7;
-const ZMQ_RCVTIMEO: i32 = 27;
-fn set_timeo(sock: *mut c_void, ms: i32) {
-    zmq_setsockopt(
-        sock,
-        ZMQ_RCVTIMEO,
-        (&ms as *const i32).cast(),
-        size_of::<i32>(),
-    );
-}
 
 #[test]
 fn inproc_recovers_after_disconnect_reconnect() {
@@ -32,7 +24,7 @@ fn inproc_recovers_after_disconnect_reconnect() {
     zmq_bind(pull, addr.as_ptr());
     zmq_connect(push, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(30));
-    set_timeo(pull, 2000);
+    helpers::set_rcvtimeo(pull, 2000);
 
     let msg = b"hello";
     zmq_send(push, msg.as_ptr().cast(), msg.len(), 0);
@@ -66,7 +58,7 @@ fn inproc_multi_churn() {
     let addr = CString::new("inproc://multi-churn").unwrap();
 
     zmq_bind(pull, addr.as_ptr());
-    set_timeo(pull, 2000);
+    helpers::set_rcvtimeo(pull, 2000);
 
     for i in 0u8..5 {
         zmq_connect(push, addr.as_ptr());

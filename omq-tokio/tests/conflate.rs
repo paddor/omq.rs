@@ -32,6 +32,7 @@ async fn pub_conflate_keeps_only_latest_per_subscriber() {
         if let Ok(Ok(_)) = tokio::time::timeout(Duration::from_millis(20), sub.recv()).await {
             break;
         }
+
         assert!(
             std::time::Instant::now() <= deadline,
             "subscription never propagated"
@@ -53,10 +54,12 @@ async fn pub_conflate_keeps_only_latest_per_subscriber() {
             .await
             .unwrap();
     }
+
     let mut received = Vec::new();
     while let Ok(Ok(msg)) = tokio::time::timeout(Duration::from_millis(50), sub.recv()).await {
         let body = msg.part_bytes(0).unwrap();
         received.push(String::from_utf8_lossy(&body).into_owned());
+
         if received.len() >= N as usize {
             break;
         }
@@ -140,10 +143,12 @@ async fn pull_conflate_keeps_only_latest() {
 
     let latest = format!("m-{:05}", N - 1);
     let mut received = Vec::new();
+
     while received.len() < N as usize {
         let Ok(Ok(msg)) = tokio::time::timeout(Duration::from_secs(1), pull.recv()).await else {
             break;
         };
+
         received.push(String::from_utf8_lossy(&msg.part_bytes(0).unwrap()).into_owned());
         if received.last() == Some(&latest) {
             break;
@@ -184,10 +189,12 @@ async fn radio_conflate_keeps_only_latest_per_group() {
             .await
             .unwrap();
     }
+
     let mut received = Vec::new();
     while let Ok(Ok(msg)) = tokio::time::timeout(Duration::from_millis(50), dish.recv()).await {
         let body = msg.part_bytes(1).unwrap();
         received.push(String::from_utf8_lossy(&body).into_owned());
+
         if received.len() >= N as usize {
             break;
         }

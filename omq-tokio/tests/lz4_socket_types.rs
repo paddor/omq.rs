@@ -18,6 +18,7 @@ fn lz4_loopback(port: u16) -> Endpoint {
 async fn bind_lz4(sock: &Socket) -> u16 {
     let mut mon = sock.monitor();
     sock.bind(lz4_loopback(0)).await.unwrap();
+
     loop {
         match mon.recv().await {
             Ok(MonitorEvent::Listening {
@@ -161,6 +162,7 @@ async fn xpub_xsub_over_lz4() {
     loop {
         xpub.send(Message::single("news.alpha")).await.unwrap();
         xpub.send(Message::single("sports.beta")).await.unwrap();
+
         if let Ok(Ok(m)) = tokio::time::timeout(Duration::from_millis(50), sub.recv()).await {
             assert!(
                 m.part_bytes(0).unwrap().starts_with(b"news."),
@@ -169,6 +171,7 @@ async fn xpub_xsub_over_lz4() {
             );
             break;
         }
+
         assert!(
             std::time::Instant::now() < deadline,
             "sub never received matching message"
@@ -195,14 +198,17 @@ async fn xsub_subscribe_over_lz4() {
     loop {
         xpub.send(Message::single("data.123")).await.unwrap();
         xpub.send(Message::single("other.456")).await.unwrap();
+
         if let Ok(Ok(m)) = tokio::time::timeout(Duration::from_millis(50), sub.recv()).await {
             assert!(
                 m.part_bytes(0).unwrap().starts_with(b"data."),
                 "XSUB got non-data: {:?}",
                 m.part_bytes(0).unwrap()
             );
+
             return;
         }
+
         assert!(
             std::time::Instant::now() < deadline,
             "XSUB never received matching message"
@@ -260,6 +266,7 @@ async fn client_server_multi_client() {
         c.connect(lz4_loopback(port)).await.unwrap();
         clients.push(c);
     }
+
     for c in &clients {
         wait_handshake(c).await;
     }
@@ -275,6 +282,7 @@ async fn client_server_multi_client() {
             .unwrap();
         let routing_id = m.routing_id().expect("SERVER routing id");
         let body = m.part_bytes(0).unwrap();
+
         server
             .send(
                 Message::single(Bytes::from(format!(
@@ -334,9 +342,11 @@ async fn scatter_gather_multi_scatter() {
         s.connect(lz4_loopback(port)).await.unwrap();
         scatterers.push(s);
     }
+
     for s in &scatterers {
         wait_handshake(s).await;
     }
+
     for s in &scatterers {
         s.send(Message::single("ping")).await.unwrap();
     }
@@ -530,6 +540,7 @@ async fn req_rep_multi_peer() {
         r.connect(lz4_loopback(port)).await.unwrap();
         reqs.push(r);
     }
+
     for r in &reqs {
         wait_handshake(r).await;
     }

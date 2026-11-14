@@ -30,6 +30,7 @@ fn factory_decoder_enforces_body_and_payload_slots_at_exact_boundaries() {
             let message =
                 Message::multipart(bodies.into_iter().map(|size| Bytes::from(vec![0x5a; size])));
             let size = message.max_message_size_len();
+
             for (limit, allowed) in [(size, true), (size - 1, false)] {
                 let options = Options {
                     max_message_size: Some(limit),
@@ -42,6 +43,7 @@ fn factory_decoder_enforces_body_and_payload_slots_at_exact_boundaries() {
                 let wire = encoder.encode(&message).unwrap();
                 assert_eq!(wire.len(), 1);
                 let result = decoder.decode(wire[0].clone());
+
                 if allowed {
                     assert_eq!(result.unwrap(), Some(message.clone()), "{kind:?}, {limit}");
                 } else {
@@ -91,11 +93,13 @@ fn factory_decoder_applies_the_part_limit_to_arena_messages() {
 fn raw_decoder_preserves_body_only_budget_for_empty_parts() {
     assert_eq!(size_of::<Payload>(), 64);
     let empty = Message::single(Bytes::new());
+
     for kind in kinds() {
         let (mut encoder, _) = MessageEncoder::for_compression_kind(kind, &Options::default())
             .unwrap()
             .unwrap();
         let wire = encoder.encode(&empty).unwrap().remove(0);
+
         let decoded = match kind {
             #[cfg(feature = "lz4")]
             CompressionKind::Lz4 => Lz4Decoder::new()
@@ -106,6 +110,7 @@ fn raw_decoder_preserves_body_only_budget_for_empty_parts() {
                 .with_max_message_size(Some(0))
                 .decode(wire),
         };
+
         assert_eq!(decoded.unwrap(), Some(empty.clone()));
     }
 }
@@ -135,6 +140,7 @@ fn ready_pair(logical: usize, wire: usize, ws: bool) -> (Connection, Connection)
         .max_message_size(logical)
         .max_wire_message_size(wire);
     let send = ConnectionConfig::new(Role::Client, SocketType::Pair);
+
     #[cfg(feature = "ws")]
     let (receive, send) = if ws {
         use crate::proto::connection::WsRole;
@@ -145,23 +151,29 @@ fn ready_pair(logical: usize, wire: usize, ws: bool) -> (Connection, Connection)
     } else {
         (receive, send)
     };
+
     #[cfg(not(feature = "ws"))]
     let _ = ws;
     let (mut receive, mut send) = (Connection::new(receive), Connection::new(send));
+
     for _ in 0..16 {
         let inbound = send.poll_transmit();
         let outbound = receive.poll_transmit();
+
         if inbound.is_empty() && outbound.is_empty() {
             break;
         }
+
         send.advance_transmit(inbound.len());
         receive.advance_transmit(outbound.len());
         receive.handle_input(inbound).unwrap();
         send.handle_input(outbound).unwrap();
     }
+
     assert!(receive.is_ready() && send.is_ready());
     assert!(receive.poll_event().is_some());
     assert!(send.poll_event().is_some());
+
     (receive, send)
 }
 
@@ -170,6 +182,7 @@ fn through_framer(receive: &mut Connection, send: &mut Connection, message: &Mes
     let bytes = send.poll_transmit();
     send.advance_transmit(bytes.len());
     receive.handle_input(bytes).unwrap();
+
     receive.poll_message().unwrap()
 }
 
@@ -187,14 +200,17 @@ fn dictionary_setup_is_independent_of_a_tiny_logical_limit_and_ships_once() {
             let (mut encoder, mut decoder) = MessageEncoder::for_compression_kind(kind, &options)
                 .unwrap()
                 .unwrap();
+
             let wire = encoder.encode(&empty).unwrap();
             assert_eq!(wire.len(), 2);
             assert!(wire[0].max_message_size_len() > empty.max_message_size_len());
+
             let (mut receive, mut send) = ready_pair(
                 empty.max_message_size_len(),
                 decoder.max_wire_message_size().unwrap(),
                 ws,
             );
+
             let shipment = through_framer(&mut receive, &mut send, &wire[0]);
             assert!(decoder.decode(shipment.clone()).unwrap().is_none());
             let payload = through_framer(&mut receive, &mut send, &wire[1]);
@@ -208,6 +224,7 @@ fn dictionary_setup_is_independent_of_a_tiny_logical_limit_and_ships_once() {
 fn passthrough_allowance_does_not_raise_command_limits() {
     let message = Message::multipart([Bytes::new(), Bytes::from_static(b"x")]);
     let logical = message.max_message_size_len();
+
     for kind in kinds() {
         for ws in carriers() {
             let options = Options {
@@ -217,12 +234,15 @@ fn passthrough_allowance_does_not_raise_command_limits() {
             let (mut encoder, mut decoder) = MessageEncoder::for_compression_kind(kind, &options)
                 .unwrap()
                 .unwrap();
+
             let wire = encoder.encode(&message).unwrap().remove(0);
             assert!(wire.max_message_size_len() > logical);
+
             let (mut receive, mut send) =
                 ready_pair(logical, decoder.max_wire_message_size().unwrap(), ws);
             let payload = through_framer(&mut receive, &mut send, &wire);
             assert_eq!(decoder.decode(payload).unwrap(), Some(message.clone()));
+
             send.send_command(&Command::Subscribe(Bytes::from(vec![0; logical])))
                 .unwrap();
             let bytes = send.poll_transmit();
@@ -269,6 +289,7 @@ fn finite_wire_limits_saturate_without_overflow_and_unlimited_stays_explicit() {
             assert!(wire <= isize::MAX.unsigned_abs());
             assert!(wire >= limit.min(isize::MAX.unsigned_abs()));
         }
+
         let (_, decoder) = MessageEncoder::for_compression_kind(kind, &Options::default())
             .unwrap()
             .unwrap();
@@ -285,24 +306,29 @@ fn expanding_lz4_multiblock_output_fits_the_finite_wire_allowance() {
             state ^= state << 13;
             state ^= state >> 7;
             state ^= state << 17;
+
             state.to_le_bytes()[0]
         })
         .collect();
+
     let message = Message::multipart([
         Bytes::new(),
         Bytes::from(random),
         Bytes::from(vec![0x5a; 65]),
     ]);
     let limit = message.max_message_size_len();
+
     let mut encoder = Lz4Encoder::new().with_block_size(64).with_threshold(0);
     let mut decoder = MessageDecoder::Lz4(
         Lz4Decoder::new()
             .with_block_size(64)
             .with_max_message_size(Some(limit)),
     );
+
     let wire = encoder.encode(&message).unwrap().remove(0);
     assert!(wire.max_message_size_len() > limit);
     assert!(wire.max_message_size_len() <= decoder.max_wire_message_size().unwrap());
+
     let (mut receive, mut send) =
         ready_pair(limit, decoder.max_wire_message_size().unwrap(), false);
     let payload = through_framer(&mut receive, &mut send, &wire);

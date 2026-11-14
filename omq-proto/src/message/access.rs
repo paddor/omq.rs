@@ -216,6 +216,7 @@ impl Message {
                 actual,
             });
         }
+
         Ok(std::array::from_fn(|i| {
             self.part_bytes(i).expect("index < len checked above")
         }))
@@ -244,6 +245,7 @@ impl Message {
                 if *len & INLINE_DELIMITED_FLAG != 0 {
                     f(&[]);
                 }
+
                 f(&data[..(*len & !INLINE_DELIMITED_FLAG) as usize]);
             }
             MessageInner::Single(p) => f(p.as_slice()),
@@ -294,6 +296,7 @@ impl Iterator for MessageIter<'_> {
         let i = self.pos;
         let result = self.msg.part_bytes(i)?;
         self.pos += 1;
+
         Some(result)
     }
 

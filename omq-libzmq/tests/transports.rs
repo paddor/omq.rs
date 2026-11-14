@@ -4,7 +4,6 @@
 mod helpers;
 
 use std::ffi::{CString, c_void};
-use std::mem::size_of;
 use std::time::{Duration, Instant};
 
 use omq_zmq::{
@@ -17,8 +16,6 @@ const ZMQ_PULL: i32 = 7;
 const ZMQ_PUB: i32 = 1;
 const ZMQ_SUB: i32 = 2;
 const ZMQ_LINGER: i32 = 17;
-const ZMQ_RCVTIMEO: i32 = 27;
-const ZMQ_SNDTIMEO: i32 = 28;
 const ZMQ_SUBSCRIBE: i32 = 6;
 const ZMQ_WSS_KEY_PEM: i32 = 103;
 const ZMQ_WSS_CERT_PEM: i32 = 104;
@@ -26,44 +23,23 @@ const ZMQ_WSS_TRUST_PEM: i32 = 105;
 const ZMQ_WSS_HOSTNAME: i32 = 106;
 const ZMQ_WSS_TRUST_SYSTEM: i32 = 107;
 
-fn set_timeo(sock: *mut c_void, ms: i32) {
-    zmq_setsockopt(
-        sock,
-        ZMQ_RCVTIMEO,
-        (&ms as *const i32).cast(),
-        size_of::<i32>(),
-    );
-    zmq_setsockopt(
-        sock,
-        ZMQ_SNDTIMEO,
-        (&ms as *const i32).cast(),
-        size_of::<i32>(),
-    );
-}
-
-fn set_i32(sock: *mut c_void, opt: i32, value: i32) {
-    assert_eq!(
-        zmq_setsockopt(sock, opt, (&value as *const i32).cast(), size_of::<i32>(),),
-        0,
-        "setsockopt {opt} failed, errno={}",
-        omq_zmq::zmq_errno()
-    );
-}
-
 /// Publish `msg` until `sub` receives it. PUB drops messages sent before
 /// the subscription arrives, so a single send races the connection.
 fn publish_until_received(pub_: *mut c_void, sub: *mut c_void, msg: &[u8]) {
-    set_timeo(sub, 100);
+    helpers::set_timeouts(sub, 100);
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut buf = [0u8; 64];
+
     loop {
         let len = i32::try_from(msg.len()).unwrap();
         assert_eq!(zmq_send(pub_, msg.as_ptr().cast(), msg.len(), 0), len);
         let rc = zmq_recv(sub, buf.as_mut_ptr().cast(), buf.len(), 0);
+
         if rc >= 0 {
             assert_eq!(&buf[..usize::try_from(rc).unwrap()], msg);
             return;
         }
+
         assert!(Instant::now() < deadline, "SUB never received the message");
     }
 }
@@ -136,8 +112,8 @@ fn ipc_push_pull() {
     zmq_bind(pull, addr.as_ptr());
     zmq_connect(push, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(50));
-    set_timeo(push, 2000);
-    set_timeo(pull, 2000);
+    helpers::set_timeouts(push, 2000);
+    helpers::set_timeouts(pull, 2000);
 
     let rc = zmq_send(push, b"ipc-msg".as_ptr().cast(), 7, 0);
     assert_eq!(rc, 7);
@@ -184,8 +160,8 @@ fn ipc_abstract_namespace() {
     zmq_bind(pull, addr.as_ptr());
     zmq_connect(push, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(50));
-    set_timeo(push, 2000);
-    set_timeo(pull, 2000);
+    helpers::set_timeouts(push, 2000);
+    helpers::set_timeouts(pull, 2000);
 
     let rc = zmq_send(push, b"abstract".as_ptr().cast(), 8, 0);
     assert_eq!(rc, 8);
@@ -271,10 +247,10 @@ fn wss_push_pull_with_tls_options() {
     let push = zmq_socket(ctx, ZMQ_PUSH);
     let pull = zmq_socket(ctx, ZMQ_PULL);
 
-    set_i32(push, ZMQ_LINGER, 0);
-    set_i32(pull, ZMQ_LINGER, 0);
-    set_timeo(push, 2000);
-    set_timeo(pull, 2000);
+    helpers::set_int_opt(push, ZMQ_LINGER, 0);
+    helpers::set_int_opt(pull, ZMQ_LINGER, 0);
+    helpers::set_timeouts(push, 2000);
+    helpers::set_timeouts(pull, 2000);
 
     set_bytes(pull, ZMQ_WSS_CERT_PEM, &cert_pem);
     set_bytes(pull, ZMQ_WSS_KEY_PEM, &key_pem);
@@ -288,7 +264,7 @@ fn wss_push_pull_with_tls_options() {
     );
     let addr = helpers::last_endpoint(pull);
 
-    set_i32(push, ZMQ_WSS_TRUST_SYSTEM, 0);
+    helpers::set_int_opt(push, ZMQ_WSS_TRUST_SYSTEM, 0);
     set_bytes(push, ZMQ_WSS_TRUST_PEM, &ca_pem);
     set_bytes(push, ZMQ_WSS_HOSTNAME, b"127.0.0.1");
 
@@ -334,8 +310,8 @@ fn lz4_tcp_push_pull() {
     let addr = helpers::bind_random_lz4_tcp(pull);
     zmq_connect(push, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(100));
-    set_timeo(push, 2000);
-    set_timeo(pull, 2000);
+    helpers::set_timeouts(push, 2000);
+    helpers::set_timeouts(pull, 2000);
 
     let payload = vec![0x42u8; 4096];
     let rc = zmq_send(push, payload.as_ptr().cast(), payload.len(), 0);
@@ -360,8 +336,8 @@ fn lz4_tcp_multiple_messages() {
     let addr = helpers::bind_random_lz4_tcp(pull);
     zmq_connect(push, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(100));
-    set_timeo(push, 2000);
-    set_timeo(pull, 2000);
+    helpers::set_timeouts(push, 2000);
+    helpers::set_timeouts(pull, 2000);
 
     for i in 0u8..10 {
         let msg = vec![i; 256];
@@ -391,8 +367,8 @@ fn zstd_tcp_push_pull() {
     let addr = helpers::bind_random_zstd_tcp(pull);
     zmq_connect(push, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(100));
-    set_timeo(push, 2000);
-    set_timeo(pull, 2000);
+    helpers::set_timeouts(push, 2000);
+    helpers::set_timeouts(pull, 2000);
 
     let payload = vec![0x37u8; 4096];
     let rc = zmq_send(push, payload.as_ptr().cast(), payload.len(), 0);

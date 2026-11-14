@@ -1,17 +1,12 @@
 //! Compression at fixed send rates: measured wire ratio and sender CPU per
 //! message size, one panel per rate.
 
-use plotters::chart::DualCoordChartContext;
 use plotters::coord::Shift;
-use plotters::coord::types::RangedCoordf64;
 use plotters::prelude::*;
 
-use super::common::{
-    AXIS_COLOR, BACKGROUND_COLOR, TEXT_COLOR, append_row_titles, detect_hardware, draw_size_mesh,
-    nice_axis, out_dir, postprocess_svg,
-};
+use super::common::{AXIS_COLOR, TEXT_COLOR, draw_size_mesh, nice_axis};
 use super::pushpull_compression::{
-    Cells, CompressionChart, LEGEND_ROW_H, Series, assert_complete, draw_legend, load_cells,
+    Cells, CompressionChart, DualChart, Series, assert_complete, draw_chart, dual_chart, load_cells,
 };
 use crate::jsonl::PushpullLz4Row;
 
@@ -25,10 +20,6 @@ struct Point {
     cpu_pct: f64,
     reached: bool,
 }
-
-/// Size index against wire ratio (primary) or sender CPU% (secondary).
-type Coord = Cartesian2d<RangedCoordf64, RangedCoordf64>;
-type DualChart<'a, 'b> = DualCoordChartContext<'a, SVGBackend<'b>, Coord, Coord>;
 
 /// Send rate of a paced loopback run.
 fn send_rate(chart: &CompressionChart, row: &PushpullLz4Row) -> Option<u64> {
@@ -44,26 +35,8 @@ pub(crate) fn generate(chart: &CompressionChart) {
     if cells.is_empty() {
         return;
     }
+
     assert_complete(chart, &cells);
-
-    let dir = out_dir().join("pushpull");
-    std::fs::create_dir_all(&dir).ok();
-    let out = dir.join(chart.output_file);
-    let present: Vec<&Series> = chart.series.iter().collect();
-
-    let row_count = chart.panels.len() as u32;
-    let panel_h = 280u32;
-    let row_gap = 60u32;
-    // Series rows plus room for the two method notes at the bottom.
-    let table_h = 20 + present.len() as u32 * LEGEND_ROW_H + 34;
-    let top_margin = 56u32;
-    let chart_total = row_count * panel_h + (row_count - 1) * row_gap + top_margin;
-    let total_h = chart_total + table_h;
-    let width = 800u32;
-    let hw_label = detect_hardware();
-
-    let root = SVGBackend::new(&out, (width, total_h)).into_drawing_area();
-    root.fill(&BACKGROUND_COLOR).unwrap();
 
     // One ratio axis for all rows, so rates compare by height.
     let ratio_max = chart
@@ -75,19 +48,8 @@ pub(crate) fn generate(chart: &CompressionChart) {
         .fold(0.0, f64::max);
     let ratio_axis = nice_axis(ratio_max, 6);
 
-    let mut row_titles: Vec<(u32, String)> = Vec::new();
-    for (idx, &(rate, label)) in chart.panels.iter().enumerate() {
-        let y_top = top_margin + idx as u32 * (panel_h + row_gap);
-        let row_area = root.clone().shrink((0, y_top), (width, panel_h));
-
-        row_titles.push((y_top - 6, label.to_string()));
-        draw_rate_row(&row_area, chart, rate, &cells, ratio_axis);
-    }
-
-    let table_area = root.clone().shrink((0, chart_total), (width, table_h));
-    draw_legend(
-        &table_area,
-        &present,
+    draw_chart(
+        chart,
         &[
             "\u{2500}\u{2500}\u{2500} solid = wire ratio (left axis)",
             "... dotted = sender CPU% (right axis)",
@@ -97,16 +59,8 @@ pub(crate) fn generate(chart: &CompressionChart) {
             "Loopback TCP; sender paced per message. Ratio = payload / TCP payload bytes.",
             "Median of 3; 0.5 s warmup (1 s Zstd), 2 s measurement; varied binary/JSON.",
         ],
-        table_h,
+        |row_area, rate| draw_rate_row(row_area, chart, rate, &cells, ratio_axis),
     );
-
-    root.present().unwrap();
-    drop(root);
-
-    postprocess_svg(&out, width, total_h, chart.title, hw_label.as_deref()).unwrap();
-    append_row_titles(&out, width, &row_titles).unwrap();
-
-    eprintln!("Written: {}", out.display());
 }
 
 /// Points of one series in one rate row, in size order.
@@ -142,6 +96,7 @@ fn draw_rate_row(
         .iter()
         .map(|series| (series, points(chart, rate, series, cells)))
         .collect();
+
     let (cpu_max, cpu_ticks) = nice_axis(
         lines
             .iter()
@@ -151,17 +106,7 @@ fn draw_rate_row(
         6,
     );
 
-    let last = (chart.sizes.len() - 1) as f64;
-    let mut chart_area = ChartBuilder::on(row_area)
-        .set_label_area_size(LabelAreaPosition::Bottom, 28)
-        .set_label_area_size(LabelAreaPosition::Left, 70)
-        .set_label_area_size(LabelAreaPosition::Right, 62)
-        .margin_top(6)
-        .margin_left(10)
-        .margin_right(10)
-        .build_cartesian_2d(0.0..last, 0.0..ratio_max)
-        .unwrap()
-        .set_secondary_coord(0.0..last, 0.0..cpu_max);
+    let mut chart_area = dual_chart(row_area, chart.sizes, ratio_max, cpu_max);
 
     configure_axes(
         &mut chart_area,
@@ -169,6 +114,7 @@ fn draw_rate_row(
         ratio_ticks,
         (cpu_max, cpu_ticks),
     );
+
     for (series, points) in &lines {
         draw_lines(&mut chart_area, series.color, points);
     }
@@ -187,6 +133,7 @@ fn configure_axes(
             format!("{v:.1}x")
         }
     };
+
     draw_size_mesh(chart_area, sizes, Some(ratio_ticks + 1), &ratio_label).unwrap();
 
     // Low rates use a few percent of a core, so small axes get a decimal.
@@ -210,6 +157,7 @@ fn draw_lines(chart_area: &mut DualChart<'_, '_>, color: RGBColor, points: &[Poi
             color.stroke_width(2),
         ))
         .unwrap();
+
     chart_area
         .draw_series(points.iter().map(|p| {
             let style = if p.reached {
@@ -217,9 +165,11 @@ fn draw_lines(chart_area: &mut DualChart<'_, '_>, color: RGBColor, points: &[Poi
             } else {
                 color.stroke_width(1)
             };
+
             Circle::new((p.x, p.ratio), 3, style)
         }))
         .unwrap();
+
     chart_area
         .draw_secondary_series(DashedLineSeries::new(
             points.iter().map(|p| (p.x, p.cpu_pct)),
@@ -231,23 +181,4 @@ fn draw_lines(chart_area: &mut DualChart<'_, '_>, color: RGBColor, points: &[Poi
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fixed_load_panels_take_paced_loopback_rows() {
-        let chart = &super::super::compression::FIXED_LOAD;
-        let mut row: PushpullLz4Row = serde_json::from_value(serde_json::json!({
-            "run_id": "test", "pattern": "pushpull_lz4", "transport": "lz4+tcp",
-            "peers": 1, "msg_size": 64, "wire_bytes": 70,
-            "send_rate": 10000, "received_wire_bytes": 1000
-        }))
-        .unwrap();
-        assert_eq!(send_rate(chart, &row), Some(10_000));
-        row.send_rate = Some(500);
-        assert_eq!(send_rate(chart, &row), None);
-        row.send_rate = Some(10_000);
-        row.received_wire_bytes = None;
-        assert_eq!(send_rate(chart, &row), None);
-    }
-}
+mod tests;

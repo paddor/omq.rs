@@ -12,6 +12,10 @@ use super::common::{
 use crate::jsonl::{self, PushpullLz4Row};
 use crate::process;
 
+const PAYLOAD: &str = "structured-varied-v1";
+const CPU_PANEL_MAX: f64 = 200.0;
+const LEGEND_ROW_H: u32 = 16;
+
 /// One codec's bench cache and the workload its rows must match.
 pub(crate) struct Source {
     pub(crate) cache_file: &'static str,
@@ -42,16 +46,23 @@ pub(crate) struct CompressionChart {
 /// Median repeat of each (panel, series key, size) cell.
 pub(crate) type Cells = BTreeMap<(u64, &'static str, u64), PushpullLz4Row>;
 
-const PAYLOAD: &str = "structured-varied-v1";
-const CPU_PANEL_MAX: f64 = 200.0;
-pub(crate) const LEGEND_ROW_H: u32 = 16;
-
 struct CompressionData {
     msgs: BTreeMap<String, f64>,
     cpu_pct: BTreeMap<String, f64>,
 }
 
 type LinkData = BTreeMap<u64, BTreeMap<u64, CompressionData>>;
+
+/// X-axis sizes and the series drawn in each link row.
+struct RowSeries<'a> {
+    sizes: &'a [u64],
+    present: &'a [Series],
+}
+
+/// Size index against a row's left (primary) or right (secondary) value.
+type Coord = Cartesian2d<RangedCoordf64, RangedCoordf64>;
+
+pub(crate) type DualChart<'a, 'b> = DualCoordChartContext<'a, SVGBackend<'b>, Coord, Coord>;
 
 fn matches_payload(row: &PushpullLz4Row, payload: &str, arena_bytes: u64) -> bool {
     row.payload.as_deref() == Some(payload)
@@ -78,6 +89,7 @@ pub(crate) fn load_cells(
             let Some(key) = series_key(&row) else {
                 continue;
             };
+
             let Some(series) = chart
                 .series
                 .iter()
@@ -85,9 +97,11 @@ pub(crate) fn load_cells(
             else {
                 continue;
             };
+
             if !chart.sizes.contains(&row.msg_size) || !eligible(series.source, &row) {
                 continue;
             }
+
             let Some(panel) = panel(&row) else {
                 continue;
             };
@@ -98,6 +112,7 @@ pub(crate) fn load_cells(
             if group.last().is_some_and(|last| last.run_id != row.run_id) {
                 group.clear();
             }
+
             group.retain(|old| old.repeat != row.repeat);
             group.push(row);
         }
@@ -142,6 +157,7 @@ fn eligible(source: &Source, row: &PushpullLz4Row) -> bool {
 fn link_rate(chart: &CompressionChart, row: &PushpullLz4Row) -> Option<u64> {
     let link = row.netem.as_ref()?;
     let rate = u64::from(link.rate_mbps);
+
     (row.send_rate.is_none()
         && link.delay_us == 1000
         && link.mtu == 1500
@@ -197,6 +213,7 @@ fn measured(data: &BTreeMap<u64, CompressionData>) -> (ValMap, ValMap, ValMap) {
             tput.entry(msg_size)
                 .or_default()
                 .insert(series_key.clone(), mbps);
+
             if let Some(&cpu_pct) = compression.cpu_pct.get(series_key) {
                 cpu.entry(msg_size)
                     .or_default()
@@ -208,24 +225,43 @@ fn measured(data: &BTreeMap<u64, CompressionData>) -> (ValMap, ValMap, ValMap) {
     (tput, msgs, cpu)
 }
 
-/// Size index against msg/s (primary) or GB/s (secondary).
-type Coord = Cartesian2d<RangedCoordf64, RangedCoordf64>;
-type DualChart<'a, 'b> = DualCoordChartContext<'a, SVGBackend<'b>, Coord, Coord>;
-
-/// X-axis sizes and the series drawn in each link row.
-struct RowSeries<'a> {
-    sizes: &'a [u64],
-    present: &'a [&'a Series],
-}
-
 pub(crate) fn generate(chart: &CompressionChart) {
     let cells = load_cells(chart, |row| link_rate(chart, row));
     if cells.is_empty() {
         return;
     }
+
     assert_complete(chart, &cells);
     let data = link_data(&cells);
+    let series = RowSeries {
+        sizes: chart.sizes,
+        present: chart.series,
+    };
 
+    draw_chart(
+        chart,
+        &[
+            "--- dashed = msg/s (left axis)",
+            "\u{2500}\u{2500}\u{2500} solid = payload/s (right axis)",
+            "... dotted = sender CPU% (0-200%)",
+        ],
+        &[
+            "Measured netem: shared rate, 1 ms/direction, MTU 1500; segmentation offloads off.",
+            "Median of 3; 0.5 s warmup (1 s Zstd), >=2 s measurement; varied binary/JSON.",
+        ],
+        |row_area, rate| draw_link_row(row_area, &series, &data[&rate]),
+    );
+}
+
+/// Draws `chart` to its SVG file: one titled row per panel above the
+/// series legend, `key_lines`, and `notes`. `draw_row` draws the row of one
+/// panel value.
+pub(crate) fn draw_chart(
+    chart: &CompressionChart,
+    key_lines: &[&str],
+    notes: &[&str; 2],
+    draw_row: impl Fn(&DrawingArea<SVGBackend<'_>, Shift>, u64),
+) {
     let dir = out_dir().join("pushpull");
     std::fs::create_dir_all(&dir).ok();
     let out = dir.join(chart.output_file);
@@ -245,35 +281,17 @@ pub(crate) fn generate(chart: &CompressionChart) {
     let root = SVGBackend::new(&out, (width, total_h)).into_drawing_area();
     root.fill(&BACKGROUND_COLOR).unwrap();
 
-    let series = RowSeries {
-        sizes: chart.sizes,
-        present: &present,
-    };
     let mut row_titles: Vec<(u32, String)> = Vec::new();
-
-    for (idx, &(rate, label)) in chart.panels.iter().enumerate() {
+    for (idx, &(panel, label)) in chart.panels.iter().enumerate() {
         let y_top = top_margin + idx as u32 * (panel_h + row_gap);
         let row_area = root.clone().shrink((0, y_top), (width, panel_h));
 
         row_titles.push((y_top - 6, label.to_string()));
-        draw_link_row(&row_area, &series, &data[&rate]);
+        draw_row(&row_area, panel);
     }
 
     let table_area = root.clone().shrink((0, chart_total), (width, table_h));
-    draw_legend(
-        &table_area,
-        &present,
-        &[
-            "--- dashed = msg/s (left axis)",
-            "\u{2500}\u{2500}\u{2500} solid = payload/s (right axis)",
-            "... dotted = sender CPU% (0-200%)",
-        ],
-        &[
-            "Measured netem: shared rate, 1 ms/direction, MTU 1500; segmentation offloads off.",
-            "Median of 3; 0.5 s warmup (1 s Zstd), >=2 s measurement; varied binary/JSON.",
-        ],
-        table_h,
-    );
+    draw_legend(&table_area, &present, key_lines, notes, table_h);
 
     root.present().unwrap();
     drop(root);
@@ -282,6 +300,28 @@ pub(crate) fn generate(chart: &CompressionChart) {
     append_row_titles(&out, width, &row_titles).unwrap();
 
     eprintln!("Written: {}", out.display());
+}
+
+/// Builds the dual-axis chart of one row: size index against `0..left_max`
+/// on the left axis and `0..right_max` on the right.
+pub(crate) fn dual_chart<'a, 'b>(
+    row_area: &'a DrawingArea<SVGBackend<'b>, Shift>,
+    sizes: &[u64],
+    left_max: f64,
+    right_max: f64,
+) -> DualChart<'a, 'b> {
+    let last = (sizes.len() - 1) as f64;
+
+    ChartBuilder::on(row_area)
+        .set_label_area_size(LabelAreaPosition::Bottom, 28)
+        .set_label_area_size(LabelAreaPosition::Left, 70)
+        .set_label_area_size(LabelAreaPosition::Right, 62)
+        .margin_top(6)
+        .margin_left(10)
+        .margin_right(10)
+        .build_cartesian_2d(0.0..last, 0.0..left_max)
+        .unwrap()
+        .set_secondary_coord(0.0..last, 0.0..right_max)
 }
 
 /// msg/s and sender CPU% per link rate, size, and series.
@@ -296,12 +336,14 @@ fn link_data(cells: &Cells) -> LinkData {
                 msgs: BTreeMap::new(),
                 cpu_pct: BTreeMap::new(),
             });
+
         entry.msgs.insert(series.to_owned(), row.msgs_s.unwrap());
         entry.cpu_pct.insert(
             series.to_owned(),
             row.cpu_time.unwrap() / row.elapsed.unwrap() * 100.0,
         );
     }
+
     out
 }
 
@@ -351,16 +393,7 @@ fn draw_link_row(
         return;
     }
 
-    let mut chart_area = ChartBuilder::on(row_area)
-        .set_label_area_size(LabelAreaPosition::Bottom, 28)
-        .set_label_area_size(LabelAreaPosition::Left, 70)
-        .set_label_area_size(LabelAreaPosition::Right, 62)
-        .margin_top(6)
-        .margin_left(10)
-        .margin_right(10)
-        .build_cartesian_2d(0.0..(sizes.len() - 1) as f64, 0.0..msgs_max)
-        .unwrap()
-        .set_secondary_coord(0.0..(sizes.len() - 1) as f64, 0.0..gbs_max);
+    let mut chart_area = dual_chart(row_area, sizes, msgs_max, gbs_max);
 
     configure_axes(&mut chart_area, sizes, msgs_ticks, gbs_ticks);
     draw_msg_lines(&mut chart_area, series, &msgs);
@@ -402,6 +435,7 @@ fn draw_msg_lines(chart_area: &mut DualChart<'_, '_>, series: &RowSeries<'_>, ms
             .enumerate()
             .filter_map(|(i, &sz)| msgs.get(&sz)?.get(imp.key).map(|&v| (i as f64, v)))
             .collect();
+
         if pts.is_empty() {
             continue;
         }
@@ -414,6 +448,7 @@ fn draw_msg_lines(chart_area: &mut DualChart<'_, '_>, series: &RowSeries<'_>, ms
                 imp.color.stroke_width(2),
             ))
             .unwrap();
+
         chart_area
             .draw_series(
                 pts.iter()
@@ -446,6 +481,7 @@ fn draw_cpu_lines(
                 ))
             })
             .collect();
+
         if pts.is_empty() {
             continue;
         }
@@ -470,11 +506,13 @@ fn draw_cpu_lines(
                     } else {
                         2
                     };
+
                     let dy = if cpu_pct < 15.0 {
                         [-18, -9, -27][series_index]
                     } else {
                         [0, 9, -7][series_index]
                     };
+
                     EmptyElement::at((x, y))
                         + Text::new(
                             format!("{cpu_pct:.0}%"),
@@ -499,6 +537,7 @@ fn draw_gbs_lines(chart_area: &mut DualChart<'_, '_>, series: &RowSeries<'_>, tp
                     .map(|&v| (i as f64, v / 1000.0))
             })
             .collect();
+
         if pts.is_empty() {
             continue;
         }
@@ -516,7 +555,7 @@ fn draw_gbs_lines(chart_area: &mut DualChart<'_, '_>, series: &RowSeries<'_>, tp
 }
 
 /// Line style key, series swatches, and method notes below the rows.
-pub(crate) fn draw_legend(
+fn draw_legend(
     table_area: &DrawingArea<SVGBackend<'_>, Shift>,
     present: &[&Series],
     key_lines: &[&str],
@@ -562,80 +601,4 @@ pub(crate) fn draw_legend(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn zstd_row() -> PushpullLz4Row {
-        serde_json::from_value(serde_json::json!({
-            "run_id": "test", "pattern": "pushpull_zstd", "transport": "zstd+tcp",
-            "peers": 1, "msg_size": 64, "wire_bytes": 70,
-            "payload": "structured-varied-v1", "payload_seed": 4242,
-            "payload_corpus_messages": 4096, "arena_bytes": 32768,
-            "rounds": 3, "warmup_seconds": 1.0, "duration_seconds": 2.0,
-            "cpu_affinity": "sender=1-2,receiver=3-4", "binary_sha256": "a".repeat(64),
-            "netem": {
-                "rate_mbps": 1000, "delay_us": 1000, "mtu": 1500,
-                "shared_rate": true, "segmentation_offloads": false,
-                "placement": "tcp-ingress-ifb"
-            }
-        }))
-        .unwrap()
-    }
-
-    #[test]
-    fn zstd_rows_need_the_adaptive_range() {
-        let source = &super::super::compression::ZSTD;
-        let mut row = zstd_row();
-        for (level, range) in [
-            (None, Some([-7, 4])),
-            (None, None),
-            (None, Some([-7, -1])),
-            (Some(-1), None),
-            (Some(1), None),
-        ] {
-            row.compression_level = level;
-            row.compression_level_range = range;
-            row.transport = "zstd+tcp".into();
-            assert_eq!(eligible(source, &row), range == Some([-7, 4]));
-            row.transport = "tcp".into();
-            assert!(eligible(source, &row));
-        }
-    }
-
-    #[test]
-    fn saturation_panels_exclude_paced_rows() {
-        let chart = &super::super::compression::SATURATION;
-        let mut row = zstd_row();
-        assert_eq!(link_rate(chart, &row), Some(1000));
-        row.send_rate = Some(1000);
-        assert_eq!(link_rate(chart, &row), None);
-        row.send_rate = None;
-        row.netem.as_mut().unwrap().rate_mbps = 1;
-        assert_eq!(link_rate(chart, &row), None);
-    }
-
-    #[test]
-    fn varied_chart_rejects_repeated_or_mismatched_workloads() {
-        let mut row: PushpullLz4Row = serde_json::from_value(serde_json::json!({
-            "run_id": "test", "pattern": "pushpull_lz4", "transport": "lz4+tcp",
-            "peers": 1, "msg_size": 64, "wire_bytes": 70, "payload": "json"
-        }))
-        .unwrap();
-        assert!(matches_payload(&row, "json", 16384));
-        assert!(!matches_payload(&row, "structured-varied-v1", 16384));
-        row.payload = Some("structured-varied-v1".into());
-        assert!(!matches_payload(&row, "structured-varied-v1", 16384));
-        row.payload_corpus_messages = Some(4096);
-        row.arena_bytes = Some(16384);
-        assert!(matches_payload(&row, "structured-varied-v1", 16384));
-        assert!(!matches_payload(&row, "structured-varied-v1", 32768));
-        row.arena_bytes = Some(32768);
-        assert!(matches_payload(&row, "structured-varied-v1", 32768));
-        row.arena_bytes = Some(16384);
-        row.payload_corpus_messages = Some(1);
-        assert!(!matches_payload(&row, "structured-varied-v1", 16384));
-        row.payload_corpus_messages = Some(4096);
-        row.arena_bytes = Some(0);
-        assert!(!matches_payload(&row, "structured-varied-v1", 16384));
-    }
-}
+mod tests;

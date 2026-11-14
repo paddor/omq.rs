@@ -19,8 +19,10 @@ fn skip_if_no_helper() -> bool {
             "OMQ_INTEROP_REQUIRED=1 but zmq_draft_peer helper not found at {HELPER}",
         );
         eprintln!("skip: zmq_draft_peer helper not found at {HELPER}");
+
         return true;
     }
+
     false
 }
 
@@ -43,6 +45,7 @@ async fn wait_success(child: Child, context: &str) -> Output {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+
     output
 }
 
@@ -63,6 +66,7 @@ async fn wait_for_join(mon: &mut omq_tokio::MonitorStream) {
             }
         }
     };
+
     tokio::time::timeout(Duration::from_secs(5), fut)
         .await
         .expect("JOIN did not arrive");

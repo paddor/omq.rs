@@ -23,6 +23,7 @@ fn is_quic_option(option: c_int) -> bool {
     ) {
         return true;
     }
+
     matches!(
         option,
         OMQ_QUIC_CERT_PEM
@@ -44,11 +45,14 @@ pub(super) fn set(
     if !is_quic_option(option) {
         return Ok(false);
     }
+
     if sock.inner.get().is_some() {
         return Err(libc::EBUSY);
     }
+
     let mut overlay = overlay(sock)?;
     let quic = &mut overlay.quic;
+
     match option {
         OMQ_QUIC_CERT_PEM => quic.cert_pem = none_if_empty(optval.bytes()?),
         OMQ_QUIC_KEY_PEM => quic.key_pem = none_if_empty(optval.bytes()?),
@@ -64,6 +68,7 @@ pub(super) fn set(
             if value <= 0 {
                 return Err(libc::EINVAL);
             }
+
             quic.max_ready_peers = value;
         }
         #[cfg(feature = "webtransport")]
@@ -72,6 +77,7 @@ pub(super) fn set(
         OMQ_QUIC_WEBTRANSPORT_PATH => quic.webtransport_path = webtransport_path(optval)?,
         _ => unreachable!("checked QUIC option"),
     }
+
     Ok(true)
 }
 
@@ -79,9 +85,11 @@ fn stream_window(optval: OptIn) -> Result<i32, c_int> {
     use omq_tokio::options::QuicOptions;
     let value = optval.i32()?;
     let window = u32::try_from(value).map_err(|_| libc::EINVAL)?;
+
     if !(QuicOptions::MIN_STREAM_WINDOW..=QuicOptions::MAX_STREAM_WINDOW).contains(&window) {
         return Err(libc::EINVAL);
     }
+
     Ok(value)
 }
 
@@ -90,6 +98,7 @@ fn webtransport_path(optval: OptIn) -> Result<String, c_int> {
     let path = optval.string()?;
     let host = omq_tokio::endpoint::Host::Name("localhost".into());
     omq_tokio::proto::web_address::validate_ws_address(&host, &path).map_err(|_| libc::EINVAL)?;
+
     Ok(path)
 }
 
@@ -102,9 +111,11 @@ pub(super) fn get(
     if !is_quic_option(option) {
         return Ok(false);
     }
+
     let overlay = overlay(sock)?;
     let quic = &overlay.quic;
     let bytes = |value: &Option<Vec<u8>>| out.bytes(value.as_deref().unwrap_or(b""));
+
     match option {
         OMQ_QUIC_CERT_PEM => bytes(&quic.cert_pem),
         OMQ_QUIC_KEY_PEM => bytes(&quic.key_pem),
@@ -119,5 +130,6 @@ pub(super) fn get(
         OMQ_QUIC_WEBTRANSPORT_PATH => out.string(quic.webtransport_path.as_bytes()),
         _ => unreachable!("checked QUIC option"),
     }?;
+
     Ok(true)
 }

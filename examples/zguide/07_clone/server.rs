@@ -54,6 +54,7 @@ async fn main() {
         loop {
             let msg = rep.recv().await.unwrap();
             let body = msg_str(&msg, 0);
+
             if body == "SNAPSHOT" {
                 let payload = {
                     let locked = store_snap.lock().unwrap();
@@ -63,8 +64,10 @@ async fn main() {
                         .collect::<Vec<_>>()
                         .join("\n");
                     println!("server: snapshot served ({} entries)", locked.len());
+
                     p
                 };
+
                 rep.send(Message::single(payload)).await.unwrap();
             }
         }

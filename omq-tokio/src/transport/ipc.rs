@@ -91,6 +91,7 @@ impl Transport for IpcTransport {
                 )));
             }
         };
+
         tune_unix_buffers(&stream);
         Ok(stream)
     }
@@ -223,6 +224,7 @@ impl Listener for IpcListener {
         // Prepare the next instance before handing this one to the connection driver.
         // If creation fails, keep the accepted connection and retry on the next accept.
         self.inner = ServerOptions::new().create(&self.pipe_path).ok();
+
         Ok((
             IpcStream::Server(server),
             PeerIdent::Path(self.name.clone()),
@@ -256,6 +258,7 @@ async fn bind_filesystem_unix(endpoint: &Endpoint, path: &Path) -> Result<IpcLis
     // libzmq unlinks whatever is at the path. That deletes regular files
     // and leaves a live listener running but unreachable.
     remove_stale_socket(path)?;
+
     listen_filesystem_unix(endpoint, path)
 }
 
@@ -296,6 +299,7 @@ fn remove_stale_socket(path: &Path) -> Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error.into()),
     };
+
     let refused = || -> std::io::Result<bool> {
         let socket = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)?;
         socket.set_nonblocking(true)?;
@@ -303,10 +307,12 @@ fn remove_stale_socket(path: &Path) -> Result<()> {
             .connect(&socket2::SockAddr::unix(path)?)
             .is_err_and(|error| error.kind() == std::io::ErrorKind::ConnectionRefused))
     };
+
     if metadata.file_type().is_socket() && refused()? {
         std::fs::remove_file(path)?;
         return Ok(());
     }
+
     Err(std::io::Error::new(
         std::io::ErrorKind::AddrInUse,
         format!("socket path {} is in use", path.display()),
@@ -324,6 +330,7 @@ fn bind_abstract_unix(endpoint: &Endpoint, name: &str) -> Result<IpcListener> {
     let std_listener = StdListener::bind_addr(&addr)?;
     std_listener.set_nonblocking(true)?;
     let inner = TokioUnixListener::from_std(std_listener)?;
+
     Ok(IpcListener {
         inner,
         endpoint: endpoint.clone(),
@@ -421,220 +428,4 @@ async fn connect_named_pipe_windows(name: &str) -> Result<IpcStream> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::transport::Transport;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    #[cfg(unix)]
-    fn temp_ipc(name: &str) -> Endpoint {
-        let short_name: String = name.chars().take(8).collect();
-        let path = std::path::PathBuf::from(format!(
-            "/tmp/omq-ipc-{short_name}-{}.sock",
-            std::process::id()
-        ));
-        Endpoint::Ipc(IpcPath::Filesystem(path))
-    }
-
-    /// The listener removes its socket file on drop. A relative path must
-    /// still name that file after the process changes its directory.
-    #[cfg(unix)]
-    #[test]
-    fn socket_file_keeps_an_absolute_path() {
-        // One `..` per level of the working directory reaches the root.
-        let depth = std::env::current_dir().unwrap().components().count();
-        let relative = std::path::PathBuf::from(format!(
-            "{}tmp/omq-ipc-relative-{}.sock",
-            "../".repeat(depth),
-            std::process::id()
-        ));
-        if relative.as_os_str().len() >= 100 {
-            // Too long for a socket address from this directory.
-            return;
-        }
-        let listener = std::os::unix::net::UnixListener::bind(&relative).unwrap();
-
-        let file = SocketFile::new(&relative).unwrap();
-
-        assert!(file.path.is_absolute());
-        drop(listener);
-        file.remove_if_unchanged();
-        assert!(!relative.exists());
-    }
-
-    #[cfg(target_os = "linux")]
-    #[tokio::test]
-    async fn abstract_connect_to_a_full_backlog_fails_without_blocking() {
-        use std::os::unix::ffi::OsStrExt;
-
-        let name = format!("omq-ipc-backlog-{}", std::process::id());
-        let mut raw = vec![0];
-        raw.extend_from_slice(name.as_bytes());
-        let addr = socket2::SockAddr::unix(std::ffi::OsStr::from_bytes(&raw)).unwrap();
-        // Backlog 0 holds one pending connection, and nothing accepts.
-        let listener =
-            socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None).unwrap();
-        listener.bind(&addr).unwrap();
-        listener.listen(0).unwrap();
-        let queued = connect_abstract_unix(&name).unwrap();
-
-        let attempt = tokio::task::spawn_blocking(move || connect_abstract_unix(&name).map(drop));
-        let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), attempt).await;
-        // Closing the listener releases a connect still blocked on the backlog.
-        drop(listener);
-        drop(queued);
-        let result = outcome
-            .expect("connect blocked on the full backlog")
-            .unwrap();
-        assert!(result.is_err(), "the backlog had no room");
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn bind_connect_accept_roundtrip() {
-        let ep = temp_ipc("basic");
-        let mut listener = IpcTransport::bind(&ep).await.unwrap();
-        let ep2 = ep.clone();
-        let connect = tokio::spawn(async move { IpcTransport::connect(&ep2).await });
-
-        let (mut server_side, peer) = listener.accept().await.unwrap();
-        let mut client_side = connect.await.unwrap().unwrap();
-        assert!(matches!(peer, PeerIdent::Path(_)));
-
-        client_side.write_all(b"hello").await.unwrap();
-        let mut buf = [0u8; 5];
-        server_side.read_exact(&mut buf).await.unwrap();
-        assert_eq!(&buf, b"hello");
-    }
-
-    #[cfg(target_os = "linux")]
-    #[tokio::test]
-    async fn abstract_bind_connect_roundtrip() {
-        // Random suffix avoids cross-test collisions in the abstract namespace.
-        let name = format!(
-            "omq-ipc-abs-{}-{}",
-            std::process::id(),
-            rand::random::<u32>()
-        );
-        let ep = Endpoint::Ipc(IpcPath::Abstract(name));
-        let mut listener = IpcTransport::bind(&ep).await.unwrap();
-        let ep2 = ep.clone();
-        let connect = tokio::spawn(async move { IpcTransport::connect(&ep2).await });
-
-        let (mut server_side, peer) = listener.accept().await.unwrap();
-        let mut client_side = connect.await.unwrap().unwrap();
-        match peer {
-            PeerIdent::Path(p) => assert!(p.starts_with('@')),
-            other => panic!("expected abstract peer ident, got {other:?}"),
-        }
-
-        client_side.write_all(b"abstract").await.unwrap();
-        let mut buf = [0u8; 8];
-        server_side.read_exact(&mut buf).await.unwrap();
-        assert_eq!(&buf, b"abstract");
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    #[tokio::test]
-    async fn abstract_rejected_off_linux() {
-        #[cfg(unix)]
-        {
-            let ep = Endpoint::Ipc(IpcPath::Abstract("foo".into()));
-            assert!(matches!(
-                IpcTransport::bind(&ep).await,
-                Err(Error::UnsupportedScheme(_))
-            ));
-        }
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn bind_cleans_up_stale_socket() {
-        let ep = temp_ipc("stale");
-        // First bind creates the socket file.
-        {
-            let _l = IpcTransport::bind(&ep).await.unwrap();
-        }
-        // Drop removed the file. Re-bind should still succeed.
-        let _l = IpcTransport::bind(&ep).await.unwrap();
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn listener_drop_removes_socket_file() {
-        let ep = temp_ipc("drop");
-        let path = match &ep {
-            Endpoint::Ipc(IpcPath::Filesystem(p)) => p.clone(),
-            _ => unreachable!(),
-        };
-        {
-            let _l = IpcTransport::bind(&ep).await.unwrap();
-            assert!(path.exists());
-        }
-        assert!(!path.exists(), "drop should have removed the socket file");
-    }
-
-    #[cfg(target_os = "windows")]
-    #[tokio::test]
-    async fn windows_named_pipe_bind_connect_roundtrip() {
-        let name = format!("omq-pipe-{}-{}", std::process::id(), rand::random::<u32>());
-        let ep = Endpoint::Ipc(IpcPath::NamedPipe(name));
-
-        // Bind server
-        let mut listener = IpcTransport::bind(&ep).await.unwrap();
-
-        // Connect client in background
-        let ep2 = ep.clone();
-        let connect = tokio::spawn(async move { IpcTransport::connect(&ep2).await });
-
-        // Accept connection
-        let (mut server_side, peer) = listener.accept().await.unwrap();
-        let mut client_side = connect.await.unwrap().unwrap();
-
-        // Verify peer identity contains the pipe name
-        assert!(matches!(peer, PeerIdent::Path(_)));
-
-        // Roundtrip data
-        client_side.write_all(b"windows").await.unwrap();
-        let mut buf = [0u8; 7];
-        server_side.read_exact(&mut buf).await.unwrap();
-        assert_eq!(&buf, b"windows");
-    }
-
-    #[cfg(target_os = "windows")]
-    #[tokio::test]
-    async fn windows_named_pipe_accepts_concurrent_clients() {
-        let name = format!("omq-pipe-{}-{}", std::process::id(), rand::random::<u32>());
-        let ep = Endpoint::Ipc(IpcPath::NamedPipe(name));
-        let mut listener = IpcTransport::bind(&ep).await.unwrap();
-
-        let ep1 = ep.clone();
-        let ep2 = ep.clone();
-        let connect1 = tokio::spawn(async move { IpcTransport::connect(&ep1).await });
-        let connect2 = tokio::spawn(async move { IpcTransport::connect(&ep2).await });
-
-        let (mut server1, _) = listener.accept().await.unwrap();
-        let (mut server2, _) = listener.accept().await.unwrap();
-        let mut client1 = connect1.await.unwrap().unwrap();
-        let mut client2 = connect2.await.unwrap().unwrap();
-
-        client1.write_all(b"hello").await.unwrap();
-        client2.write_all(b"hello").await.unwrap();
-
-        let mut buf1 = [0u8; 5];
-        let mut buf2 = [0u8; 5];
-        server1.read_exact(&mut buf1).await.unwrap();
-        server2.read_exact(&mut buf2).await.unwrap();
-
-        assert_eq!(&buf1, b"hello");
-        assert_eq!(&buf2, b"hello");
-    }
-
-    #[cfg(target_os = "windows")]
-    #[tokio::test]
-    async fn windows_pipe_name_in_error() {
-        // Invalid pipe name should be rejected at parse time
-        let result: Result<Endpoint> = "ipc://CON".parse();
-        assert!(result.is_err());
-    }
-}
+mod tests;

@@ -23,14 +23,18 @@ pub(super) fn run_pubsub_pub_child(size: usize, io_threads: usize, peers: usize)
         ..Options::default()
     };
     let publisher = ctx.blocking_socket(SocketType::Pub, options);
+
     let endpoint = publisher.bind(tcp_zero()).expect("PUB bind");
     println!("{endpoint}");
     std::io::stdout().flush().expect("flush PUB endpoint");
+
     publisher
         .wait_subscribed(peers as u64, Duration::from_secs(10))
         .expect("SUB subscribe timeout");
+
     let measured = Arc::new(AtomicBool::new(false));
     let measured_reader = measured.clone();
+
     thread::spawn(move || {
         let mut command = String::new();
         std::io::stdin()
@@ -39,19 +43,23 @@ pub(super) fn run_pubsub_pub_child(size: usize, io_threads: usize, peers: usize)
         assert_eq!(command.trim(), "MEASURE");
         measured_reader.store(true, Ordering::Release);
     });
+
     let warmup = tagged_payload(size, 0);
     let message = payload(size);
     let deadline = Instant::now() + SETTINGS.warmup + SETTINGS.measure + Duration::from_secs(30);
+
     while Instant::now() < deadline {
         let value = if measured.load(Ordering::Acquire) {
             &message
         } else {
             &warmup
         };
+
         if !send_blocking_batch_until(&publisher, value, deadline) {
             break;
         }
     }
+
     panic!("PUB child exceeded measurement deadline");
 }
 
@@ -64,14 +72,17 @@ pub(super) fn run_pubsub_sub_child(
     SETTINGS.affinity.pin(5);
     let ctx = context(io_threads, Side::Receiver);
     let mut receivers = Vec::with_capacity(peers);
+
     for _ in 0..peers {
         let subscriber = ctx.blocking_socket(SocketType::Sub, Options::default());
         subscriber.connect(endpoint.clone()).expect("SUB connect");
         subscriber.subscribe(Bytes::new()).expect("SUB subscribe");
         receivers.push(subscriber);
     }
+
     let warmup = duration_env("OMQ_PERF_WARMUP_MS", PUBSUB_32P_WARMUP);
     let window = Window::new(Instant::now(), warmup, duration);
+
     // The publisher tags all traffic as warmup until this command reaches it.
     // Any warmup still in flight is discarded by the receiving counters.
     let coordinator = thread::spawn(move || {
@@ -82,6 +93,7 @@ pub(super) fn run_pubsub_sub_child(
             .flush()
             .expect("flush measurement command");
     });
+
     let received = count_blocking_many(&receivers, window);
     coordinator.join().expect("measurement coordinator");
     ctx.term();
@@ -105,10 +117,12 @@ impl Drop for ChildGuard {
 fn child_command() -> Command {
     let mut command = Command::new(std::env::current_exe().expect("current executable"));
     let cpus = SETTINGS.affinity.csv();
+
     if !cpus.is_empty() {
         // Children otherwise inherit the caller's one-CPU mask.
         command.env("OMQ_PERF_CPUS", cpus);
     }
+
     command
 }
 
@@ -124,6 +138,7 @@ pub(super) fn pubsub_process_published_rate(size: usize, io_threads: usize, peer
             .spawn()
             .expect("spawn PUB child"),
     );
+
     let mut reader = std::io::BufReader::new(publisher.0.stdout.take().expect("PUB stdout"));
     let mut endpoint = String::new();
     reader.read_line(&mut endpoint).expect("read PUB endpoint");
@@ -132,6 +147,7 @@ pub(super) fn pubsub_process_published_rate(size: usize, io_threads: usize, peer
         "PUB child did not report endpoint"
     );
     let duration = duration_env("OMQ_PERF_MEASURE_MS", PUBSUB_32P_MEASURE);
+
     let mut subscriber = ChildGuard(
         child_command()
             .arg("--pubsub-sub-child")
@@ -144,21 +160,25 @@ pub(super) fn pubsub_process_published_rate(size: usize, io_threads: usize, peer
             .spawn()
             .expect("spawn SUB child"),
     );
+
     let mut reader = std::io::BufReader::new(subscriber.0.stdout.take().expect("SUB stdout"));
     let mut line = String::new();
     reader
         .read_line(&mut line)
         .expect("read SUB measurement command");
     assert_eq!(line.trim(), "MEASURE");
+
     let stdin = publisher.0.stdin.as_mut().expect("PUB stdin");
     writeln!(stdin, "MEASURE").expect("send measurement command");
     stdin.flush().expect("flush measurement command");
+
     line.clear();
     reader.read_line(&mut line).expect("read SUB result");
     assert!(
         subscriber.0.wait().expect("wait SUB child").success(),
         "SUB child failed"
     );
+
     let mut fields = line.split_whitespace();
     assert_eq!(fields.next(), Some("RESULT"));
     let total: f64 = fields
@@ -170,5 +190,6 @@ pub(super) fn pubsub_process_published_rate(size: usize, io_threads: usize, peer
         .and_then(|s| s.parse().ok())
         .expect("SUB elapsed");
     assert!(elapsed.is_finite() && elapsed > 0.0);
+
     total / elapsed / peers as f64
 }

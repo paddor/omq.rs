@@ -11,6 +11,7 @@ use crate::jsonl;
 
 const LOSSES: &[u64] = &[0, 1000, 10_000, 50_000];
 const LOSS_LABELS: &[&str] = &["0%", "0.1%", "1%", "5%"];
+
 const IMPLS: &[Impl] = &[
     Impl {
         key: "dart-lan",
@@ -32,13 +33,6 @@ const IMPLS: &[Impl] = &[
     },
 ];
 
-struct Panel {
-    kind: &'static str,
-    size: u64,
-    title: &'static str,
-    axis: &'static str,
-}
-
 const PANELS: &[Panel] = &[
     Panel {
         kind: "throughput",
@@ -59,6 +53,13 @@ const PANELS: &[Panel] = &[
         axis: "p99 RTT (ms, log scale)",
     },
 ];
+
+struct Panel {
+    kind: &'static str,
+    size: u64,
+    title: &'static str,
+    axis: &'static str,
+}
 
 struct Summary {
     median: f64,
@@ -111,6 +112,7 @@ fn verified(row: &Value) -> bool {
         } else {
             2
         };
+
         row["socket_pair"] == "scatter-gather"
             && row["recv_batching"] == true
             && row["sender"]["seconds"] == 3
@@ -148,11 +150,14 @@ fn load() -> Data {
         if !eligible(&row) || !verified(&row) {
             continue;
         }
+
         let Some(key) = series_key(&row) else {
             continue;
         };
+
         let size = row["msg_size"].as_u64().unwrap_or(0);
         let kind = row["kind"].as_str().unwrap().to_owned();
+
         if !PANELS
             .iter()
             .any(|panel| panel.size == size && panel.kind == kind)
@@ -168,6 +173,7 @@ fn load() -> Data {
                 key.into(),
             ))
             .or_default();
+
         push_run(group, row);
     }
 
@@ -232,6 +238,7 @@ fn summarize(key: Key, group: &[Value]) -> Option<(Key, Summary)> {
             }
         })
         .collect();
+
     if values
         .iter()
         .any(|value| !value.is_finite() || *value <= 0.0)
@@ -275,6 +282,7 @@ fn draw_series<Y: Ranged<ValueType = f64> + ValueFormatter<f64>>(
         .bold_line_style(common::GRID_COLOR)
         .axis_style(common::AXIS_COLOR)
         .draw()?;
+
     for imp in IMPLS.iter().rev() {
         let mut points = Vec::new();
         for (index, &loss) in LOSSES.iter().enumerate() {
@@ -288,6 +296,7 @@ fn draw_series<Y: Ranged<ValueType = f64> + ValueFormatter<f64>>(
                 PathElement::new(vec![(x - 0.04, value.max), (x + 0.04, value.max)], stroke),
             ])?;
         }
+
         chart.draw_series(LineSeries::new(
             points.iter().copied(),
             imp.color.stroke_width(2),
@@ -298,6 +307,7 @@ fn draw_series<Y: Ranged<ValueType = f64> + ValueFormatter<f64>>(
                 .map(|&point| Circle::new(point, 2, imp.color.filled())),
         )?;
     }
+
     Ok(())
 }
 
@@ -399,6 +409,7 @@ pub(crate) fn generate() {
     if data.is_empty() {
         return;
     }
+
     for panel in PANELS {
         for &loss in LOSSES {
             for imp in IMPLS {
@@ -412,6 +423,7 @@ pub(crate) fn generate() {
             }
         }
     }
+
     let directory = common::out_dir().join("dart");
     std::fs::create_dir_all(&directory).expect("create DART chart directory");
     let path = directory.join("lossy.svg");

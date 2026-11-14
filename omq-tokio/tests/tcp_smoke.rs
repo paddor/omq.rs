@@ -157,9 +157,11 @@ async fn tcp_user_timeout_drops_a_peer_that_stops_reading() {
         let pull = Socket::new(SocketType::Pull, buffers.clone().recv_hwm(1));
         let port = test_support::bind_loopback(&pull).await;
         let mut options = buffers.send_hwm(1);
+
         if let Some(timeout) = user_timeout {
             options = options.tcp_user_timeout(timeout);
         }
+
         let push = Socket::new(SocketType::Push, options);
         let mut monitor = push.monitor();
         push.connect(test_support::tcp_loopback(port))
@@ -176,6 +178,7 @@ async fn tcp_user_timeout_drops_a_peer_that_stops_reading() {
         .await
         .is_ok()
         {}
+
         let disconnected = tokio::time::timeout(Duration::from_secs(3), async {
             while !matches!(
                 monitor.recv().await.unwrap(),
@@ -184,6 +187,7 @@ async fn tcp_user_timeout_drops_a_peer_that_stops_reading() {
         })
         .await
         .is_ok();
+
         assert_eq!(
             disconnected,
             user_timeout.is_some(),

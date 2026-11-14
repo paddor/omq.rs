@@ -67,9 +67,11 @@ impl Submitter {
         let mut state = self.lock_open()?;
         let peer_id = state.route_id(identity).ok_or(Error::Unroutable)?;
         let peer = state.peers.get_mut(&peer_id).ok_or(Error::Unroutable)?;
+
         if !peer.target.is_alive() {
             return Err(Error::Unroutable);
         }
+
         if peer.target.can_accept(&self.data_lanes) {
             Ok(())
         } else {
@@ -95,6 +97,7 @@ impl Submitter {
             peer.shutdown();
             return;
         }
+
         let mut g = self.inner.lock().expect("identity inner poisoned");
         g.closed = true;
         g.peers.clear();
@@ -108,16 +111,20 @@ impl Submitter {
         if let Some(peer) = &self.peer {
             return peer.try_send(msg, self.router_mandatory, &self.lanes);
         }
+
         let Some(identity) = msg.part_slice(0) else {
             return Err(TrySendError::Error(Error::Unroutable));
         };
+
         let Ok(g) = self.lock_open() else {
             return Err(TrySendError::Closed);
         };
+
         let routed = match g.route_id(identity) {
             Some(id) => self.deliver(g, id, msg, RoutedSend::Envelope),
             None => self.unroutable(),
         };
+
         into_try_send(routed)
     }
 
@@ -125,6 +132,7 @@ impl Submitter {
         if msg.is_empty() {
             return Err(Error::Unroutable);
         }
+
         let identity = msg.pop_front_payload().expect("nonempty message");
         self.send_to(identity.as_slice(), msg).await
     }
@@ -171,9 +179,11 @@ impl Submitter {
         let routing_id = take_server_routing_id(&mut msg)?;
         let peer_id = u64::from(routing_id - 1);
         let mut retry = self.try_send_server_to(peer_id, msg)?;
+
         while let Err(SendRetry::Full(returned, space)) = retry {
             retry = self.retry_server_full(peer_id, returned, space).await?;
         }
+
         Ok(())
     }
 
@@ -184,6 +194,7 @@ impl Submitter {
         let retry = msg.clone();
         let routing_id = take_server_routing_id(&mut msg).map_err(TrySendError::Error)?;
         let peer_id = u64::from(routing_id - 1);
+
         match self
             .try_send_server_to(peer_id, msg)
             .map_err(TrySendError::Error)?
@@ -192,6 +203,7 @@ impl Submitter {
             Err(SendRetry::Full(_, _)) => Err(TrySendError::Full(retry)),
         }
     }
+
     pub(crate) async fn send_rep(
         &self,
         peer_id: u64,
@@ -206,6 +218,7 @@ impl Submitter {
                 Err(TrySendError::Error(error)) => return Err(error),
                 Err(TrySendError::Closed) => return Err(Error::Closed),
             }
+
             self.wait_peer_send_progress(peer_id).await;
         }
     }
@@ -233,12 +246,15 @@ impl Submitter {
     ) -> core::result::Result<(), TrySendError> {
         let mut g = self.inner.lock().expect("identity inner poisoned");
         let closed = g.closed;
+
         let Some(peer) = g.peers.get_mut(&peer_id) else {
             if closed {
                 return Err(TrySendError::Closed);
             }
+
             return Ok(());
         };
+
         match peer.target.try_send(msg, &self.data_lanes) {
             #[cfg(feature = "dart")]
             Err(SendPipeError::Invalid(error)) => Err(TrySendError::Error(error)),
@@ -256,6 +272,7 @@ impl Submitter {
         if let Some(peer) = &self.peer {
             return peer.try_send_to(identity, msg, self.router_mandatory, &self.lanes);
         }
+
         let g = self.lock_open()?;
         match g.route_id(identity) {
             Some(id) => self.deliver(g, id, msg, RoutedSend::Body),
@@ -276,10 +293,12 @@ impl Submitter {
         let Some(peer) = g.peers.get_mut(&id) else {
             return self.unroutable();
         };
+
         let preparation = match form {
             RoutedSend::Envelope => SendPreparation::StripIdentity,
             RoutedSend::Body => SendPreparation::Plain,
         };
+
         match peer
             .target
             .try_send_prepared(msg, preparation, &self.data_lanes)
@@ -289,6 +308,7 @@ impl Submitter {
                 // Payload owners may reenter routing when dropped.
                 drop(g);
                 drop(returned);
+
                 Ok(Ok(()))
             }
             Err(SendPipeError::Closed(_)) => {
@@ -302,6 +322,7 @@ impl Submitter {
                     RoutedSend::Envelope => None,
                     RoutedSend::Body => peer.target.space_available(),
                 };
+
                 Ok(Err(SendRetry::Full(returned, space)))
             }
         }
@@ -324,6 +345,7 @@ impl Submitter {
         if g.closed {
             return Err(Error::Closed);
         }
+
         Ok(g)
     }
 
@@ -336,6 +358,7 @@ impl Submitter {
         let Some(peer) = g.peers.get_mut(&peer_id) else {
             return Err(Error::Unroutable);
         };
+
         match peer.target.try_send(msg, &self.data_lanes) {
             Ok(()) => Ok(Ok(())),
             Err(SendPipeError::Closed(_)) => Err(Error::Unroutable),
@@ -372,12 +395,15 @@ async fn retry_full(
         tokio::task::yield_now().await;
         return try_send(msg);
     };
+
     let seen = space.generation();
     let changed = space.changed_after(seen);
     tokio::pin!(changed);
+
     let Err(SendRetry::Full(returned, next_space)) = try_send(msg)? else {
         return Ok(Ok(()));
     };
+
     if !next_space
         .as_ref()
         .is_some_and(|next| Arc::ptr_eq(&space, next))
@@ -385,8 +411,10 @@ async fn retry_full(
         // Handover may have notified the old queue before we captured its
         // generation. Never wait there after retrying a replacement queue.
         tokio::task::yield_now().await;
+
         return Ok(Err(SendRetry::Full(returned, next_space)));
     }
+
     changed.await;
     try_send(returned)
 }
@@ -398,6 +426,7 @@ fn take_server_routing_id(msg: &mut Message) -> Result<u32> {
             msg.len()
         )));
     }
+
     msg.take_routing_id()
         .filter(|routing_id| *routing_id != 0)
         .ok_or_else(|| Error::Protocol("SERVER socket requires a routing ID".into()))
@@ -462,6 +491,7 @@ impl IdentitySend {
         );
         drop(state);
         self.changed.notify_changed();
+
         consumer
     }
 
@@ -473,6 +503,7 @@ impl IdentitySend {
             crate::socket::effective_workload(socket_type, options)
                 == omq_proto::WorkloadProfile::Latency
         };
+
         Self {
             inner: Arc::new(Mutex::new(IdentityInner {
                 peers: FxHashMap::default(),
@@ -541,6 +572,7 @@ impl IdentitySend {
             peer.insert(peer_id, identity, target);
             return;
         }
+
         let mut g = self.inner.lock().expect("identity inner poisoned");
         // A connecting STREAM route already owns its producer. Its queued
         // prefix and capacity must survive attachment to the raw driver.
@@ -550,6 +582,7 @@ impl IdentitySend {
         {
             target = pending.target;
         }
+
         g.peers.insert(
             peer_id,
             IdentityPeer {
@@ -557,6 +590,7 @@ impl IdentitySend {
                 target,
             },
         );
+
         if let Some(previous) = g.identity_to_peer.insert(identity, peer_id)
             && previous != peer_id
             && let Some(signal) = g
@@ -566,6 +600,7 @@ impl IdentitySend {
         {
             signal.notify_changed();
         }
+
         drop(g);
         self.changed.notify_changed();
     }
@@ -575,6 +610,7 @@ impl IdentitySend {
             peer.remove(peer_id);
             return;
         }
+
         let mut g = self.inner.lock().expect("identity inner poisoned");
         g.remove_peer(peer_id);
         drop(g);
@@ -585,6 +621,7 @@ impl IdentitySend {
         if let Some(peer) = &self.peer {
             return peer.peer_for_identity(identity);
         }
+
         let g = self.inner.lock().expect("identity inner poisoned");
         g.route_id(identity)
     }
@@ -594,6 +631,7 @@ impl IdentitySend {
             peer.shutdown();
             return;
         }
+
         let mut g = self.inner.lock().expect("identity inner poisoned");
         g.closed = true;
         g.peers.clear();
@@ -607,13 +645,16 @@ impl IdentitySend {
             peer.stop_admission();
             return;
         }
+
         let mut state = self.inner.lock().expect("identity inner poisoned");
         state.closed = true;
+
         for peer in state.peers.values() {
             if let Some(space) = peer.target.space_available() {
                 space.notify_changed();
             }
         }
+
         drop(state);
         self.changed.notify_changed();
     }
@@ -622,6 +663,7 @@ impl IdentitySend {
         if let Some(peer) = &self.peer {
             return peer.is_drained();
         }
+
         let g = self.inner.lock().expect("identity inner poisoned");
         g.peers.values().all(|p| p.target.is_empty())
     }
@@ -631,6 +673,7 @@ impl IdentitySend {
             peer.watch_close(progress);
             return;
         }
+
         let guard = self.inner.lock().expect("identity inner poisoned");
         for peer in guard.peers.values() {
             peer.target.watch_close(progress);

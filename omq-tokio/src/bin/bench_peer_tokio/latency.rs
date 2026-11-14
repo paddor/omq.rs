@@ -22,6 +22,7 @@ pub(super) async fn run_inproc_latency(
         let first = rep.recv().await.unwrap();
         pair.validate(&first, size, false);
         rep.send(first).await.unwrap();
+
         loop {
             let msg = rep.recv().await.unwrap();
             rep.send(msg).await.unwrap();
@@ -46,12 +47,14 @@ pub(super) async fn run_inproc_latency(
 
     let mut rtts = Vec::with_capacity(iterations);
     let wall_start = Instant::now();
+
     for _ in 0..iterations {
         let t0 = Instant::now();
         req.send(msg.clone()).await.unwrap();
         req.recv().await.unwrap();
         rtts.push(t0.elapsed().as_nanos() as u64);
     }
+
     let elapsed = wall_start.elapsed().as_secs_f64();
 
     latency_common::print_rtts(rtts, iterations, None, elapsed);
@@ -65,6 +68,7 @@ pub(super) async fn run_rep(ctx: &omq_tokio::Context, ep: Endpoint, size: usize)
     let first = rep.recv().await.unwrap();
     pair.validate(&first, size, false);
     rep.send(first).await.unwrap();
+
     loop {
         let msg = rep.recv().await.unwrap();
         rep.send(msg).await.unwrap();
@@ -76,12 +80,14 @@ pub(super) async fn run_rep_exclusive(ctx: &omq_tokio::Context, ep: Endpoint, _s
         .await
         .expect("exclusive rep bind");
     report_bound_port(ctx, &bound).await;
+
     loop {
         let msg = match rep.recv().await {
             Ok(msg) => msg,
             Err(Error::Closed | Error::Io(_)) => continue,
             Err(error) => panic!("{error}"),
         };
+
         match rep.send(&msg).await {
             Ok(()) | Err(Error::Closed | Error::Io(_)) => {}
             Err(error) => panic!("{error}"),
@@ -117,12 +123,14 @@ pub(super) async fn run_req(
     let t_wall = Instant::now();
     let cpu_before = cpu_time_secs();
     let mut rtts = Vec::with_capacity(iterations);
+
     for _ in 0..iterations {
         let t0 = Instant::now();
         req.send(msg.clone()).await.unwrap();
         req.recv().await.unwrap();
         rtts.push(t0.elapsed().as_nanos() as u64);
     }
+
     let cpu = cpu_time_secs() - cpu_before;
     let elapsed = t_wall.elapsed().as_secs_f64();
 
@@ -145,12 +153,14 @@ pub(super) async fn run_req_exclusive(ep: Endpoint, size: usize, iterations: usi
     let t_wall = Instant::now();
     let cpu_before = cpu_time_secs();
     let mut rtts = Vec::with_capacity(iterations);
+
     for _ in 0..iterations {
         let t0 = Instant::now();
         req.send(&message).await.unwrap();
         req.recv().await.unwrap();
         rtts.push(t0.elapsed().as_nanos() as u64);
     }
+
     let cpu = cpu_time_secs() - cpu_before;
     let elapsed = t_wall.elapsed().as_secs_f64();
 

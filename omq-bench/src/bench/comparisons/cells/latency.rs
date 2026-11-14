@@ -68,6 +68,7 @@ pub(crate) fn run_latency_cell(
         role: "rep",
         settle: Duration::from_millis(100),
     };
+
     let mut replier = spawn_binder(cell.transport, &addr, &binder);
     // Latency closes the coord socket as soon as the binder is ready.
     drop(replier.coord.take());
@@ -127,6 +128,7 @@ fn run_inproc_latency(cell: &Cell<'_>, workload: &LatencyWorkload<'_>) -> Option
         def.affinity(process::MEASURED_CPU),
         Duration::from_secs(workload.timeout + 30),
     )?;
+
     let r = parse::parse_latency(&out)?;
     validate_latency_result(&r, workload.iterations);
 

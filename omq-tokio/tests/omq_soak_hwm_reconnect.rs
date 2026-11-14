@@ -12,15 +12,15 @@
 //! Verifies no hangs, no leaks, and that delivery resumes cleanly
 //! after each reconnect cycle.
 
-#[global_allocator]
-static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
-
 mod soak_common;
 
 use std::time::{Duration, Instant};
 
 use omq_tokio::options::{OnMute, ReconnectPolicy};
 use omq_tokio::{Message, Options, Socket, SocketType};
+
+#[global_allocator]
+static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
 
 fn fast_reconnect() -> Options {
     Options {
@@ -35,8 +35,10 @@ async fn rebind(ep: &omq_tokio::Endpoint) -> Option<Socket> {
         if s.bind(ep.clone()).await.is_ok() {
             return Some(s);
         }
+
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+
     None
 }
 
@@ -53,6 +55,7 @@ async fn send_burst(push: &Socket, name: &str, cycle: u64) -> bool {
             return false;
         }
     }
+
     true
 }
 
@@ -62,6 +65,7 @@ async fn drain(pull: &Socket) -> u64 {
     while let Ok(Ok(_)) = tokio::time::timeout(Duration::from_millis(500), pull.recv()).await {
         received += 1;
     }
+
     received
 }
 
@@ -116,6 +120,7 @@ fn run_hwm_storm(name: &str, mute: OnMute) {
         } else {
             100.0
         };
+
         eprintln!(
             "[{name}] done: {delivered}/{} delivered ({pct:.1}%) in {:.1}s",
             cycles * 8,

@@ -41,14 +41,17 @@ async fn async_main(ctx: omq_tokio::Context) {
 
     let stop2 = stop.clone();
     let push_ctx = ctx.clone();
+
     tokio::spawn(async move {
         let push = push_ctx.socket(SocketType::Push, Options::default());
         push.connect(tcp_ep(fe_port)).await.expect("push connect");
+
         let payload = if size <= omq_proto::message::MAX_INLINE_MESSAGE {
             Message::from_slice(&vec![b'x'; size])
         } else {
             Message::single(vec![b'x'; size])
         };
+
         while !stop2.load(Ordering::Relaxed) {
             if push.send(payload.clone()).await.is_err() {
                 break;
@@ -64,16 +67,20 @@ async fn async_main(ctx: omq_tokio::Context) {
     let t0 = Instant::now();
     let deadline = t0 + duration;
     let mut count: u64 = 0;
+
     loop {
         pull.recv().await.unwrap();
         count += 1;
+
         while pull.try_recv().is_ok() {
             count += 1;
         }
+
         if Instant::now() >= deadline {
             break;
         }
     }
+
     let elapsed = t0.elapsed().as_secs_f64();
     println!("{count} {elapsed:.6} {size}");
 

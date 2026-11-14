@@ -5,9 +5,6 @@
 //! exchanges a round trip, idles long enough for heartbeats to run, closes the
 //! peer, and verifies the bound side observes the disappearance.
 
-#[global_allocator]
-static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
-
 mod soak_common;
 
 use std::time::{Duration, Instant};
@@ -18,10 +15,71 @@ use omq_tokio::{
     Endpoint, Message, MonitorEvent, MonitorTryRecvError, Options, Socket, SocketType,
 };
 
+#[global_allocator]
+static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
+
 const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(20);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_millis(120);
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
 const IDLE_HEARTBEATS: Duration = Duration::from_millis(80);
+
+/// Every supported pairing; asymmetric pairings are bound from both sides.
+const SPECS: [Scenario; 9] = [
+    Scenario {
+        name: "channel",
+        bind_kind: SocketType::Channel,
+        connect_kind: SocketType::Channel,
+        flow: Flow::Pair,
+    },
+    Scenario {
+        name: "peer",
+        bind_kind: SocketType::Peer,
+        connect_kind: SocketType::Peer,
+        flow: Flow::Peer,
+    },
+    Scenario {
+        name: "pair",
+        bind_kind: SocketType::Pair,
+        connect_kind: SocketType::Pair,
+        flow: Flow::Pair,
+    },
+    Scenario {
+        name: "dealer-router",
+        bind_kind: SocketType::Router,
+        connect_kind: SocketType::Dealer,
+        flow: Flow::DealerRouter,
+    },
+    Scenario {
+        name: "router-dealer",
+        bind_kind: SocketType::Dealer,
+        connect_kind: SocketType::Router,
+        flow: Flow::DealerRouter,
+    },
+    Scenario {
+        name: "req-rep",
+        bind_kind: SocketType::Rep,
+        connect_kind: SocketType::Req,
+        flow: Flow::ReqRep,
+    },
+    Scenario {
+        name: "rep-req",
+        bind_kind: SocketType::Req,
+        connect_kind: SocketType::Rep,
+        flow: Flow::ReqRep,
+    },
+    Scenario {
+        name: "client-server",
+        bind_kind: SocketType::Server,
+        connect_kind: SocketType::Client,
+        flow: Flow::ClientServer,
+    },
+    Scenario {
+        name: "server-client",
+        bind_kind: SocketType::Client,
+        connect_kind: SocketType::Server,
+        flow: Flow::ClientServer,
+    },
+];
 
 #[derive(Clone, Copy, Debug)]
 enum Flow {
@@ -61,6 +119,7 @@ fn latency_options(kind: SocketType, side: &str) -> Options {
         SocketType::Pair => Bytes::from(format!("pair-{side}")),
         _ => Bytes::new(),
     };
+
     Options::default()
         .identity(identity)
         .workload_profile(WorkloadProfile::Latency)
@@ -79,6 +138,7 @@ async fn make_state(spec: Scenario) -> ScenarioState {
     let mut monitor = bound.monitor();
     let endpoint = bound.bind(soak_common::tcp_ep(0)).await.unwrap();
     wait_for_listening(&mut monitor).await;
+
     ScenarioState {
         spec,
         bound,
@@ -98,6 +158,7 @@ async fn wait_for_listening(monitor: &mut omq_tokio::MonitorStream) {
             Ok(Err(error)) => panic!("monitor failed before listening: {error:?}"),
             Err(error) => panic!("socket did not report Listening before timeout: {error:?}"),
         }
+
         assert!(Instant::now() < deadline, "listening monitor timed out");
     }
 }
@@ -112,6 +173,7 @@ async fn connect_peer(state: &mut ScenarioState) -> (Socket, omq_tokio::MonitorS
     peer.wait_connected(1, IO_TIMEOUT).await.unwrap();
     state.bound.wait_connected(1, IO_TIMEOUT).await.unwrap();
     wait_for_handshake(&mut peer_monitor).await;
+
     (peer, peer_monitor)
 }
 
@@ -127,6 +189,7 @@ async fn wait_for_handshake(monitor: &mut omq_tokio::MonitorStream) {
             Ok(Err(error)) => panic!("monitor failed before handshake: {error:?}"),
             Err(error) => panic!("peer did not report handshake before timeout: {error:?}"),
         }
+
         assert!(Instant::now() < deadline, "handshake monitor timed out");
     }
 }
@@ -277,6 +340,7 @@ fn assert_no_disconnect(monitor: &mut omq_tokio::MonitorStream, scenario: &str) 
                     eprintln!("{scenario} monitor lagged during soak: skipped {skipped}");
                     return;
                 }
+
                 panic!("{scenario} monitor lagged during soak: skipped {skipped}");
             }
             Err(error) => panic!("{scenario} unexpected monitor error during soak: {error:?}"),
@@ -293,67 +357,10 @@ async fn wait_for_disconnect(monitor: &mut omq_tokio::MonitorStream, scenario: &
             Ok(Err(error)) => panic!("{scenario} monitor failed before disconnect: {error:?}"),
             Err(error) => panic!("{scenario} did not report disconnect before timeout: {error:?}"),
         }
+
         assert!(Instant::now() < deadline, "{scenario} disconnect timed out");
     }
 }
-
-/// Every supported pairing; asymmetric pairings are bound from both sides.
-const SPECS: [Scenario; 9] = [
-    Scenario {
-        name: "channel",
-        bind_kind: SocketType::Channel,
-        connect_kind: SocketType::Channel,
-        flow: Flow::Pair,
-    },
-    Scenario {
-        name: "peer",
-        bind_kind: SocketType::Peer,
-        connect_kind: SocketType::Peer,
-        flow: Flow::Peer,
-    },
-    Scenario {
-        name: "pair",
-        bind_kind: SocketType::Pair,
-        connect_kind: SocketType::Pair,
-        flow: Flow::Pair,
-    },
-    Scenario {
-        name: "dealer-router",
-        bind_kind: SocketType::Router,
-        connect_kind: SocketType::Dealer,
-        flow: Flow::DealerRouter,
-    },
-    Scenario {
-        name: "router-dealer",
-        bind_kind: SocketType::Dealer,
-        connect_kind: SocketType::Router,
-        flow: Flow::DealerRouter,
-    },
-    Scenario {
-        name: "req-rep",
-        bind_kind: SocketType::Rep,
-        connect_kind: SocketType::Req,
-        flow: Flow::ReqRep,
-    },
-    Scenario {
-        name: "rep-req",
-        bind_kind: SocketType::Req,
-        connect_kind: SocketType::Rep,
-        flow: Flow::ReqRep,
-    },
-    Scenario {
-        name: "client-server",
-        bind_kind: SocketType::Server,
-        connect_kind: SocketType::Client,
-        flow: Flow::ClientServer,
-    },
-    Scenario {
-        name: "server-client",
-        bind_kind: SocketType::Client,
-        connect_kind: SocketType::Server,
-        flow: Flow::ClientServer,
-    },
-];
 
 #[test]
 fn soak_latency_profile_all_supported_socket_types() {
@@ -369,6 +376,7 @@ fn soak_latency_profile_all_supported_socket_types() {
 
         let start = Instant::now();
         let mut last_log = start;
+
         while start.elapsed() < duration {
             for state in &mut states {
                 cycle(state).await;
@@ -382,6 +390,7 @@ fn soak_latency_profile_all_supported_socket_types() {
                         state.spec.name, state.cycles, state.disconnects
                     );
                 }
+
                 last_log = Instant::now();
             }
         }

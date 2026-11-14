@@ -55,6 +55,7 @@ fn parse_ep(s: &str) -> Endpoint {
             port,
         };
     }
+
     if let Some((ip, port_str)) = s.split_once(':')
         && let Ok(addr) = ip.parse::<Ipv4Addr>()
         && let Ok(port) = port_str.parse::<u16>()
@@ -64,6 +65,7 @@ fn parse_ep(s: &str) -> Endpoint {
             port,
         };
     }
+
     s.parse()
         .expect("valid endpoint (port, ip:port, or full URI)")
 }
@@ -100,17 +102,21 @@ pub(crate) fn install_signals() {
 pub(crate) fn env_options(mut o: Options, msg_size: usize) -> Options {
     #[cfg(any(feature = "ws", feature = "quic"))]
     crate::ws_bench_config::configure(&mut o);
+
     if msg_size >= 2 * 1024 * 1024 {
         let buf = msg_size * 2;
         o = o.recv_buffer_size(buf).send_buffer_size(buf);
     }
+
     if let Ok(path) = std::env::var("OMQ_BENCH_DICT_FILE") {
         let dict = Bytes::from(std::fs::read(&path).expect("read dict file"));
         o = o.compression_dict(dict);
     }
+
     if let Ok(val) = std::env::var("OMQ_BENCH_ZSTD_LEVEL") {
         o = o.compression_level(val.parse().expect("OMQ_BENCH_ZSTD_LEVEL"));
     }
+
     if let Ok(val) = std::env::var("OMQ_BENCH_ZSTD_LEVEL_RANGE") {
         let (min, max) = val
             .split_once(',')
@@ -118,9 +124,11 @@ pub(crate) fn env_options(mut o: Options, msg_size: usize) -> Options {
             .expect("OMQ_BENCH_ZSTD_LEVEL_RANGE");
         o = o.compression_level_range(min, max);
     }
+
     if let Ok(val) = std::env::var("OMQ_BENCH_ARENA_THRESHOLD") {
         o = o.arena_threshold(val.parse().expect("OMQ_BENCH_ARENA_THRESHOLD"));
     }
+
     o
 }
 
@@ -175,6 +183,7 @@ impl RecvWindow {
             .map(|&count| count as f64 / elapsed)
             .collect();
         rates.sort_unstable_by(f64::total_cmp);
+
         println!(
             "{total} {elapsed:.6} {size} {cpu:.6} {socket_count} {per_min_rate:.1} \
              {per_max_rate:.1} {:.1} {:.1} {:.1} {:.1} {:.1}",
@@ -184,10 +193,12 @@ impl RecvWindow {
             quantile(&rates, 0.75),
             quantile(&rates, 0.90),
         );
+
         print!(" ");
         for rate in &rates {
             print!("{rate:.1} ");
         }
+
         println!();
         self.eprint_summary("multi-pull");
     }
@@ -208,6 +219,7 @@ impl RecvWindow {
         let total: u64 = self.per_socket.iter().sum();
         let per_min = self.per_socket.iter().copied().min().unwrap_or(0);
         let per_max = self.per_socket.iter().copied().max().unwrap_or(0);
+
         (
             total,
             per_min as f64 / self.elapsed,
@@ -254,6 +266,7 @@ fn delay_until_start(lead: Duration) -> Option<Duration> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0.0, |d| d.as_secs_f64());
+
     (at > now).then(|| Duration::from_secs_f64(at - now))
 }
 
@@ -274,6 +287,7 @@ pub(crate) fn cpu_time_secs() -> f64 {
         let usage = usage.assume_init();
         let user = timeval_secs(&usage.ru_utime);
         let sys = timeval_secs(&usage.ru_stime);
+
         user + sys
     }
 }

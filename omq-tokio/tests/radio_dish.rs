@@ -64,6 +64,7 @@ async fn send_group_accepts_inline_and_pooled_messages_without_replacing_storage
     dish.connect(ep).await.unwrap();
     dish.join("group").await.unwrap();
     let pool = omq_tokio::PayloadPool::new([(64, 1)]).unwrap();
+
     for size in [16, 64] {
         let message = pool
             .try_message(size, |body| body.fill(7))
@@ -77,13 +78,16 @@ async fn send_group_accepts_inline_and_pooled_messages_without_replacing_storage
             .unwrap();
         assert_eq!(received.part_slice(0), Some(b"group".as_slice()));
         assert_eq!(received.part_slice(1), Some(vec![7; size].as_slice()));
+
         if size == 64 {
             assert_eq!(received.part_slice(1).unwrap().as_ptr(), storage);
             assert!(pool.try_message(size, |_| {}).unwrap().is_none());
         }
+
         drop(received);
         assert!(pool.try_message(size, |_| {}).unwrap().is_some());
     }
+
     for body in [Message::new(), Message::multipart(["a", "b"])] {
         assert!(matches!(
             radio.send_group("group", body).await,

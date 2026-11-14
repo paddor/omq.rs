@@ -15,24 +15,30 @@ fn impl_versions() -> &'static BTreeMap<&'static str, String> {
         if let Some(version) = libzmq_version() {
             versions.insert("libzmq", version);
         }
+
         if let Some(version) = cargo_lock_version("scripts/zmqrs_bench_peer/Cargo.lock", "zeromq") {
             versions.insert("zmq.rs", version);
         }
+
         if let Some(version) = cargo_lock_version("scripts/r0z_bench_peer/Cargo.lock", "r0z-async")
         {
             versions.insert("r0z-async", version);
         }
+
         if let Some(version) = cargo_lock_version("scripts/tmq_bench_peer/Cargo.lock", "tmq") {
             versions.insert("tmq", version);
         }
+
         if let Some(version) =
             cargo_lock_version("scripts/monocoque_bench_peer/Cargo.lock", "monocoque-rs")
         {
             versions.insert("monocoque-tokio-ct", version);
         }
+
         if let Some(version) = cargo_lock_version("scripts/rzmq_bench_peer/Cargo.lock", "rzmq") {
             versions.insert("rzmq", version);
         }
+
         versions
     })
 }
@@ -42,9 +48,11 @@ fn libzmq_version() -> Option<String> {
         .args(["--modversion", "libzmq"])
         .output()
         .ok()?;
+
     if !output.status.success() {
         return None;
     }
+
     let version = String::from_utf8(output.stdout).ok()?.trim().to_string();
     (!version.is_empty()).then_some(version)
 }
@@ -55,15 +63,18 @@ fn cargo_lock_version(rel_lock_path: &str, package: &str) -> Option<String> {
 
     let mut name_matches = false;
     let mut version = None;
+
     for line in content.lines().map(str::trim) {
         if line == "[[package]]" {
             if name_matches {
                 return version;
             }
+
             name_matches = false;
             version = None;
             continue;
         }
+
         if let Some(name) = quoted_toml_value(line, "name") {
             name_matches = name == package;
         } else if let Some(v) = quoted_toml_value(line, "version") {
@@ -92,6 +103,7 @@ fn other_impl_version(key: &str) -> Option<&'static str> {
     } else {
         return None;
     };
+
     impl_versions().get(version_key).map(String::as_str)
 }
 
@@ -146,6 +158,7 @@ pub(super) fn draw_legend_table_with_versions(
     if !snd_label.is_empty() {
         table_area.draw_text(snd_label, &style_hdr, (col_snd, 4))?;
     }
+
     if !rcv_label.is_empty() {
         table_area.draw_text(rcv_label, &style_hdr, (col_rcv, 4))?;
     }
@@ -170,10 +183,12 @@ pub(super) fn draw_legend_table_with_versions(
                 .get(imp.key)
                 .and_then(|data| data.runtime_workers)
                 .unwrap_or(cores);
+
             format!("{workers} MT")
         } else {
             imp.threads.to_string()
         };
+
         table_area.draw_text(&threads, &style_dim, (col_threads, y))?;
 
         if let Some(cd) = cpu.get(imp.key) {
@@ -182,6 +197,7 @@ pub(super) fn draw_legend_table_with_versions(
             {
                 table_area.draw_text(&format!("{v:.0}%"), &style_dim, (col_snd, y))?;
             }
+
             if !rcv_label.is_empty()
                 && let Some(v) = cd.receiver
             {
@@ -189,5 +205,6 @@ pub(super) fn draw_legend_table_with_versions(
             }
         }
     }
+
     Ok(())
 }

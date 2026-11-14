@@ -9,16 +9,20 @@ use crate::proto::frame;
 
 /// Default payload size below which framing copies into the arena.
 pub const ARENA_THRESHOLD: usize = 4 * 1024;
+
 /// Initial arena capacity for TCP and WebSocket framing.
 pub const ARENA_INITIAL_CAP: usize = 16 * 1024;
+
 /// Initial arena capacity for IPC framing.
 pub const ARENA_INITIAL_CAP_IPC: usize = 64 * 1024;
+
 /// Arenas moved out by [`FrameBuffer::drain_owned`] stay available for
 /// reuse once the writer drops every chunk taken from them. Bounded by
 /// count and by capacity. The capacity bound is twice the default QUIC
 /// stream window, so arenas still in flight rarely force an allocation.
 /// It is also the most a `FrameBuffer` retains for reuse while idle.
 const RETIRED_ARENAS: usize = 16;
+
 const RETIRED_ARENA_BYTES: usize = 2 * 1024 * 1024;
 
 /// An entry in the encoded output sequence: either a range within the
@@ -175,10 +179,12 @@ impl FrameBuffer {
         let pending = self.uncommitted_arena();
         let tail = (!pending.is_empty()).then_some(pending);
         let chunks = self.entries.iter().map(|entry| entry.as_slice(&self.arena));
+
         for (slot, chunk) in out.iter_mut().zip(chunks.chain(tail)) {
             *slot = IoSlice::new(chunk);
             count += 1;
         }
+
         count
     }
 
@@ -186,18 +192,22 @@ impl FrameBuffer {
     pub fn advance(&mut self, mut n: usize) {
         debug_assert!(n <= self.total_bytes);
         self.total_bytes -= n;
+
         while let Some(front) = self.entries.front_mut() {
             let len = front.len();
             if n < len {
                 front.advance(n);
                 return;
             }
+
             n -= len;
             self.entries.pop_front();
         }
+
         // No entry references the arena any more: drop its written prefix.
         let written = self.arena_mark as usize + n;
         self.arena_mark = 0;
+
         if written >= self.arena.len() {
             self.arena.clear();
         } else {
@@ -210,6 +220,7 @@ impl FrameBuffer {
     pub fn advance_arena(&mut self, n: usize) {
         debug_assert!(self.entries.is_empty());
         debug_assert!(n <= self.arena.len());
+
         if n >= self.arena.len() {
             self.clear_arena();
         } else {
@@ -246,6 +257,7 @@ impl FrameBuffer {
         for _ in 0..self.retired.len() {
             let (retired, capacity) = self.retired.pop_front()?;
             self.retired_bytes -= capacity;
+
             match retired.try_into_mut() {
                 Ok(mut arena) if arena.capacity() >= wanted => {
                     arena.clear();
@@ -256,12 +268,14 @@ impl FrameBuffer {
                 Err(retired) => self.retire_arena(retired, capacity),
             }
         }
+
         None
     }
 
     fn retire_arena(&mut self, arena: Bytes, capacity: usize) {
         self.retired.push_back((arena, capacity));
         self.retired_bytes += capacity;
+
         while self.retired.len() > RETIRED_ARENAS || self.retired_bytes > RETIRED_ARENA_BYTES {
             // Drops only our reference; chunks still in flight keep it.
             let (_, capacity) = self.retired.pop_front().expect("retired arena");
@@ -275,6 +289,7 @@ impl FrameBuffer {
     fn commit_arena_range(&mut self) {
         debug_assert!(u32::try_from(self.arena.len()).is_ok());
         let end = self.arena.len() as u32;
+
         if end > self.arena_mark {
             self.entries.push_back(Entry::Arena {
                 offset: self.arena_mark,
@@ -333,14 +348,17 @@ impl FrameBuffer {
         self.encode_arena(reserve, Site::FrameInline, |arena| {
             let mut index = 0;
             let count = msg.len();
+
             msg.iter_slices(|part| {
                 index += 1;
                 let last = index == count;
                 let length = part.len() + if last { prefix.len() } else { 0 };
                 frame::write_frame_header(arena, !last, length);
+
                 if last {
                     arena.extend_from_slice(prefix);
                 }
+
                 arena.extend_from_slice(part);
             });
         });
@@ -351,9 +369,11 @@ impl FrameBuffer {
         let parts = msg.parts_payload();
         let n = parts.len();
         self.reserve_arena(n * 9);
+
         for (i, part) in parts.iter().enumerate() {
             self.push_frame_header(i + 1 < n, part.len());
             let b = part.as_bytes();
+
             if !b.is_empty() {
                 self.push_external(b);
             }
@@ -400,10 +420,12 @@ impl FrameBuffer {
         let parts = msg.parts_payload();
         let n = parts.len();
         self.reserve_arena(n * 9);
+
         for (i, part) in parts.iter().enumerate() {
             self.push_frame_header(i + 1 < n, prefix.len() + part.len());
             self.push_external(prefix.clone());
             let b = part.as_bytes();
+
             if !b.is_empty() {
                 self.push_external(b);
             }
@@ -452,9 +474,11 @@ impl FrameBuffer {
         let Some(entry) = self.entries.pop_front() else {
             return false;
         };
+
         let len = entry.len();
         self.total_bytes = self.total_bytes.saturating_sub(len);
         self.clear_empty_arena();
+
         true
     }
 
@@ -465,16 +489,19 @@ impl FrameBuffer {
         let Some(pos) = self.entries.iter().position(|entry| !entry.is_protected()) else {
             return false;
         };
+
         loop {
             let entry = self
                 .entries
                 .remove(pos)
                 .expect("position came from entries");
             self.total_bytes = self.total_bytes.saturating_sub(entry.len());
+
             if !entry.continues() {
                 break;
             }
         }
+
         self.clear_empty_arena();
         true
     }
@@ -510,6 +537,7 @@ impl FrameBuffer {
     fn drain_arena(&mut self, buf: &mut Vec<Bytes>, max_chunks: usize, owned: bool) -> Drained {
         self.commit_arena_range();
         let mut drained = Drained::default();
+
         if self.entries.is_empty() {
             return drained;
         }
@@ -526,9 +554,11 @@ impl FrameBuffer {
             if entry.is_protected() {
                 drained.protected += 1;
             }
+
             if !entry.continues() {
                 drained.entries += 1;
             }
+
             let b = match entry {
                 Entry::Arena { offset, len, .. } => frozen
                     .as_ref()
@@ -536,6 +566,7 @@ impl FrameBuffer {
                     .slice(offset as usize..(offset + len) as usize),
                 Entry::External { bytes, .. } => bytes,
             };
+
             self.total_bytes = self.total_bytes.saturating_sub(b.len());
             buf.push(b);
         }
@@ -548,6 +579,7 @@ impl FrameBuffer {
         if owned && let Some(frozen) = frozen {
             self.retire_arena(frozen, retired_capacity);
         }
+
         drained
     }
 
@@ -563,6 +595,7 @@ impl FrameBuffer {
         if cap > self.arena_peak_cap {
             self.arena_peak_cap = cap;
         }
+
         if owned {
             return (Some(std::mem::take(&mut self.arena).freeze()), cap);
         }
@@ -575,6 +608,7 @@ impl FrameBuffer {
         copy_stats::record(Site::ArenaDrain, self.arena.len());
         let frozen = Bytes::copy_from_slice(&self.arena);
         self.arena.clear();
+
         (Some(frozen), 0)
     }
 

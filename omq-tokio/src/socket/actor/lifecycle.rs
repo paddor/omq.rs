@@ -22,11 +22,13 @@ impl<'a> PeerLifecycle<'a> {
             .recv_strategy
             .connection_removed(peer_id);
         let peer = self.driver.peers.remove(&peer_id);
+
         if let Some(ref p) = peer {
             self.driver
                 .routing
                 .send_strategy
                 .connection_removed(peer_id, p.origin.route_id);
+
             if self.driver.socket_type == SocketType::Req {
                 self.driver
                     .link
@@ -34,14 +36,17 @@ impl<'a> PeerLifecycle<'a> {
                     .req_awaiting_reply
                     .peer_disconnected(p.origin.route_id, peer_id);
             }
+
             if p.handshake.ready {
                 self.driver.link.shared.ready_peers.remove();
             }
         }
+
         self.publish_disconnect(peer.as_ref(), reason);
         self.driver.link.spsc.remove_empty_tcp_consumer(peer_id);
         self.invalidate_transmit_slot(peer.as_ref());
         self.refill_recv_sink(peer_id);
+
         peer
     }
 
@@ -58,6 +63,7 @@ impl<'a> PeerLifecycle<'a> {
         self.register_tcp_consumer(consumer, space.clone(), peer_id, spin_probe);
         let recv_signal = self.driver.link.spsc.recv_signal.clone();
         let blocking_waker = self.driver.link.spsc.blocking_recv_waker.clone();
+
         crate::engine::RecvSink::Yring(crate::engine::YringSink {
             producer,
             signal: Box::new(move || {
@@ -88,6 +94,7 @@ impl<'a> PeerLifecycle<'a> {
             space,
             peer_id,
         });
+
         self.driver
             .link
             .spsc

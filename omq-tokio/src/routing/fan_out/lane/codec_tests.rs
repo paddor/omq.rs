@@ -27,6 +27,7 @@ fn worker(
         #[cfg(target_os = "linux")]
         omq_shm::SendPool::new(16, None),
     );
+
     let ctrl = worker.ctrl.clone();
     (worker, ctrl)
 }
@@ -55,6 +56,7 @@ fn add_peer(
             ..SlotConfig::default()
         },
     );
+
     worker.handle_control(LaneControl::AddPeer {
         add: LanePeerAdd {
             peer_id: id,
@@ -63,6 +65,7 @@ fn add_peer(
         },
         codec_group: group,
     });
+
     worker.handle_control(LaneControl::Subscribe {
         peer_id: id,
         prefix: Bytes::from_static(b"topic"),
@@ -72,6 +75,7 @@ fn add_peer(
         peer_id: id,
         group: Bytes::from_static(b"topic"),
     });
+
     slot
 }
 
@@ -101,6 +105,7 @@ fn receive(slot: &PeerTransmitSlot, decoder: &mut Option<MessageDecoder>) -> (Ve
     let mut messages = Vec::new();
     let mut parts = Vec::new();
     let mut dictionaries = 0;
+
     while !input.is_empty() {
         let (frame, remaining) =
             omq_proto::proto::frame::decode_frame_from_bytes(input.clone()).unwrap();
@@ -108,20 +113,25 @@ fn receive(slot: &PeerTransmitSlot, decoder: &mut Option<MessageDecoder>) -> (Ve
         assert!(!frame.flags.command);
         input = input.slice(input.len() - remaining..);
         parts.push(frame.payload.as_bytes());
+
         if !frame.flags.more {
             let wire = Message::multipart(parts.drain(..));
             let mut transformed = smallvec::smallvec![wire.clone()];
+
             if MessageEncoder::take_leading_dict_shipment(&mut transformed).is_some() {
                 dictionaries += 1;
             }
+
             let plain = if let Some(decoder) = decoder {
                 decoder.decode(wire).unwrap()
             } else {
                 Some(wire)
             };
+
             if let Some(plain) = plain {
                 messages.push(plain);
             }
+
             if let Some(decoder) = decoder {
                 while let Some(message) = decoder.poll_message() {
                     messages.push(message);
@@ -129,6 +139,7 @@ fn receive(slot: &PeerTransmitSlot, decoder: &mut Option<MessageDecoder>) -> (Ve
             }
         }
     }
+
     assert!(parts.is_empty(), "multipart publication was truncated");
     (messages, dictionaries)
 }
@@ -143,6 +154,7 @@ async fn arena_shares_encoding_counts_messages_and_stops_at_filter_changes() {
         let batch: Vec<_> = (0..12)
             .map(|index| dispatch(format!("body-{index}").as_bytes()))
             .collect();
+
         let mut touched = SmallVec::new();
         let (count, shutdown) = worker.dispatch_codec_arena(&batch, &mut touched).await;
         assert_eq!(count, 8, "logical HWM must cap an arena");
@@ -150,11 +162,13 @@ async fn arena_shares_encoding_counts_messages_and_stops_at_filter_changes() {
         assert_eq!(worker.codec_groups[0].as_ref().unwrap().encode_count, 1);
         assert_eq!(first.arena_credit().0, 0);
         assert_eq!(second.arena_credit().0, 0);
+
         let mut first_decoder = decoder(Some(kind), &options);
         let mut second_decoder = decoder(Some(kind), &options);
         let expected: Vec<_> = batch[..8].to_vec();
         assert_eq!(receive(&first, &mut first_decoder).0, expected);
         assert_eq!(receive(&second, &mut second_decoder).0, expected);
+
         let mut changed = batch[..3].to_vec();
         changed[2] = Message::single("other-topic");
         assert_eq!(
@@ -180,6 +194,7 @@ async fn arena_keeps_dictionary_shipment_per_peer_and_oldest_eviction_scalar() {
             .unwrap(),
             _ => unreachable!(),
         };
+
         let options = Options::default().compression_dict(dict);
 
         for mute in [FanOutMutePolicy::DropNewest, FanOutMutePolicy::DropOldest] {
@@ -192,6 +207,7 @@ async fn arena_keeps_dictionary_shipment_per_peer_and_oldest_eviction_scalar() {
             worker.dispatch(&batch[0], &mut touched).await;
             assert_eq!(receive(&slot, &mut decoder).1, 1);
             let count = worker.dispatch_codec_arena(&batch, &mut touched).await.0;
+
             assert_eq!(
                 count,
                 if mute == FanOutMutePolicy::DropOldest {
@@ -200,6 +216,7 @@ async fn arena_keeps_dictionary_shipment_per_peer_and_oldest_eviction_scalar() {
                     4
                 }
             );
+
             if count > 0 {
                 let (messages, dictionaries) = receive(&slot, &mut decoder);
                 assert_eq!(messages.len(), count);
@@ -216,12 +233,14 @@ async fn raw_arenas_share_gathered_storage_without_losing_message_credit() {
         let (mut worker, _) = worker(FanOutMode::SubscriptionPrefix, FanOutMutePolicy::Block);
         let slot = add_peer(&mut worker, 1, 0, profile(Some(kind), &options), 64);
         let batch: Vec<_> = (0..64).map(|index| dispatch(&vec![index; 512])).collect();
+
         let (count, shutdown) = worker
             .dispatch_codec_arena(&batch, &mut SmallVec::new())
             .await;
         assert!(count > 8);
         assert!(!shutdown);
         assert_eq!(slot.arena_credit().0, 64 - count);
+
         let expected: Vec<_> = batch[..count].to_vec();
         let (messages, dictionaries) = receive(&slot, &mut decoder(Some(kind), &options));
         assert_eq!(messages, expected);
@@ -242,12 +261,15 @@ async fn encodes_once_per_matched_group_per_lane_in_both_registration_orders() {
                 for lane_count in [1, 2] {
                     let options = Options::default();
                     let kinds = kinds();
+
                     for _ in 0..lane_count {
                         let (mut worker, _ctrl) = worker(mode, policy);
                         let mut order: Vec<_> = (0..kinds.len() * 9).collect();
+
                         if reverse {
                             order.reverse();
                         }
+
                         let mut peers = Vec::new();
                         for index in order {
                             let group = index % kinds.len();
@@ -260,19 +282,24 @@ async fn encodes_once_per_matched_group_per_lane_in_both_registration_orders() {
                             );
                             peers.push((slot, decoder(kinds[group], &options)));
                         }
+
                         let publication = dispatch(&[0x5a; 4096]);
                         assert!(!worker.dispatch(&publication, &mut SmallVec::new()).await);
+
                         for (slot, decoder) in &mut peers {
                             assert_eq!(receive(slot, decoder), (vec![publication.clone()], 0));
                         }
+
                         let unmatched = Message::multipart([
                             Bytes::from_static(b"other"),
                             Bytes::from(vec![0x5a; 4096]),
                         ]);
                         assert!(!worker.dispatch(&unmatched, &mut SmallVec::new()).await);
+
                         for group in worker.codec_groups.iter().flatten() {
                             assert_eq!(group.encode_count, 1);
                         }
+
                         assert!(peers.iter().all(|(slot, _)| slot.is_empty()));
                     }
                 }
@@ -297,6 +324,7 @@ async fn trained_dictionary_precedes_payload_once_and_is_sent_to_late_joins() {
                     (slot, decoder(Some(kind), &options))
                 })
                 .collect();
+
             for index in 0..101 {
                 let body = format!(
                     "{{\"topic\":\"orders\",\"id\":{index},\"price\":1234,\"quantity\":17}}"
@@ -304,6 +332,7 @@ async fn trained_dictionary_precedes_payload_once_and_is_sent_to_late_joins() {
                 .repeat(4);
                 let publication = dispatch(body.as_bytes());
                 assert!(!worker.dispatch(&publication, &mut SmallVec::new()).await);
+
                 for (slot, decoder) in &mut peers {
                     assert_eq!(
                         receive(slot, decoder),
@@ -311,16 +340,19 @@ async fn trained_dictionary_precedes_payload_once_and_is_sent_to_late_joins() {
                     );
                 }
             }
+
             let slot = add_peer(&mut worker, 2, 0, profile(Some(kind), &options), 16);
             peers.push((slot, decoder(Some(kind), &options)));
             let publication = dispatch(b"orders orders orders orders orders orders orders orders");
             assert!(!worker.dispatch(&publication, &mut SmallVec::new()).await);
+
             for (index, (slot, decoder)) in peers.iter_mut().enumerate() {
                 assert_eq!(
                     receive(slot, decoder),
                     (vec![publication.clone()], usize::from(index == 2))
                 );
             }
+
             assert_eq!(worker.codec_groups[0].as_ref().unwrap().encode_count, 102);
         }
     }
@@ -329,26 +361,31 @@ async fn trained_dictionary_precedes_payload_once_and_is_sent_to_late_joins() {
 #[tokio::test]
 async fn nodrop_services_ready_groups_and_removal_discards_only_old_connection_output() {
     use futures::FutureExt;
+
     let options = Options::default();
     let kind = kinds().into_iter().flatten().next().unwrap();
     let (mut worker, ctrl) = worker(FanOutMode::SubscriptionPrefix, FanOutMutePolicy::Block);
     let slow = add_peer(&mut worker, 0, 0, None, 1);
     let fast = add_peer(&mut worker, 1, 0, None, 16);
     let other = add_peer(&mut worker, 2, 1, profile(Some(kind), &options), 16);
+
     assert_eq!(
         slow.try_push_pre_framed_no_signal(b"\x00\x03old"),
         TryFrameResult::Ok
     );
+
     let publication = dispatch(&[0x5a; 4096]);
     let mut touched = SmallVec::new();
     let send = worker.dispatch(&publication, &mut touched);
     tokio::pin!(send);
     assert!(send.as_mut().now_or_never().is_none());
+
     assert_eq!(receive(&fast, &mut None), (vec![publication.clone()], 0));
     assert_eq!(
         receive(&other, &mut decoder(Some(kind), &options)),
         (vec![publication.clone()], 0)
     );
+
     let replacement = PeerTransmitSlot::with_config(
         0,
         SlotConfig {
@@ -359,6 +396,7 @@ async fn nodrop_services_ready_groups_and_removal_discards_only_old_connection_o
             ..SlotConfig::default()
         },
     );
+
     ctrl.push(LaneControl::RemovePeer { peer_id: 0 });
     ctrl.push(LaneControl::AddPeer {
         add: LanePeerAdd {
@@ -368,6 +406,7 @@ async fn nodrop_services_ready_groups_and_removal_discards_only_old_connection_o
         },
         codec_group: 0,
     });
+
     assert!(
         !tokio::time::timeout(std::time::Duration::from_secs(1), send)
             .await
@@ -384,6 +423,7 @@ async fn nodrop_services_ready_groups_and_removal_discards_only_old_connection_o
 #[tokio::test]
 async fn shutdown_remains_reachable_while_a_dictionary_cannot_be_admitted() {
     use futures::FutureExt;
+
     let options = Options::default().compression_dict(Bytes::from_static(b"shared-dictionary"));
     let (mut worker, ctrl) = worker(FanOutMode::SubscriptionPrefix, FanOutMutePolicy::Block);
     let slow = add_peer(
@@ -394,14 +434,17 @@ async fn shutdown_remains_reachable_while_a_dictionary_cannot_be_admitted() {
         1,
     );
     let fast = add_peer(&mut worker, 1, 1, None, 16);
+
     slow.try_push_pre_framed_no_signal(b"\x00\x03old");
     let publication = dispatch(&[0x5a; 4096]);
     let mut touched = SmallVec::new();
     let send = worker.dispatch(&publication, &mut touched);
     tokio::pin!(send);
     assert!(send.as_mut().now_or_never().is_none());
+
     assert_eq!(receive(&fast, &mut None), (vec![publication.clone()], 0));
     assert!(!slow.fanout_dict_shipped());
+
     ctrl.push(LaneControl::Shutdown);
     assert!(
         tokio::time::timeout(std::time::Duration::from_secs(1), send)
@@ -422,6 +465,7 @@ async fn grouped_large_multipart_remains_atomic_with_all_mute_policies() {
             let options = Options::default();
             let (mut worker, _ctrl) = worker(FanOutMode::SubscriptionPrefix, policy);
             let mut peers = Vec::new();
+
             for (group, kind) in kinds().into_iter().enumerate() {
                 for copy in 0..2 {
                     let slot = add_peer(
@@ -434,11 +478,13 @@ async fn grouped_large_multipart_remains_atomic_with_all_mute_policies() {
                     peers.push((slot, decoder(kind, &options)));
                 }
             }
+
             let publication = Message::multipart(
                 std::iter::once(Bytes::from_static(b"topic"))
                     .chain((0..parts).map(|_| Bytes::from_static(&[0x5a; 1024]))),
             );
             assert!(!worker.dispatch(&publication, &mut SmallVec::new()).await);
+
             for (slot, decoder) in &mut peers {
                 assert_eq!(receive(slot, decoder), (vec![publication.clone()], 0));
             }

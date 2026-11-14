@@ -57,6 +57,7 @@ async fn stream_round(peer: &mut RawPeer, body: &Bytes, sequence: u64, counts: &
 
             let mut received = vec![0; body.len()];
             let mut offset = 0;
+
             while offset < received.len() {
                 let n = reader.read(&mut received[offset..]).await.unwrap();
                 assert!(n != 0, "STREAM disconnected under pacing");
@@ -122,6 +123,7 @@ pub(super) async fn stream_worker(worker: Worker) {
             let body = payload(seed, sequence, SIZES[sequence as usize % SIZES.len()]);
             stream_round(&mut peer, &body, sequence, &counts).await;
             sequence += 1;
+
             if Instant::now() >= deadline {
                 break;
             }
@@ -142,6 +144,7 @@ async fn udp_pair(sender: &Context, receiver: &Context) -> (Socket, Socket) {
         .unwrap();
     let radio = sender.socket(SocketType::Radio, options());
     radio.connect(endpoint).await.unwrap();
+
     (radio, dish)
 }
 
@@ -180,6 +183,7 @@ pub(super) async fn udp_worker(worker: Worker) {
                 assert_eq!(message.part_slice(1), Some(body.as_ref()));
                 counts.received(body.len());
             };
+
             tokio::time::timeout(IO_TIMEOUT, async {
                 tokio::join!(
                     transfer(&out, &out_receiver, body.clone()),

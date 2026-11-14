@@ -15,6 +15,7 @@ pub(crate) fn make_run_id(name: Option<&str>) -> String {
         .output()
         .expect("failed to run date");
     let ts = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
     match name {
         Some(n) => format!("{ts}-{n}"),
         None => ts,

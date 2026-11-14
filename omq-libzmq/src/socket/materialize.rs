@@ -34,10 +34,12 @@ impl RecvConsumers {
             self.prefer_pump = false;
             return self.pump.prefetch_and_pop_with_full();
         }
+
         if let Some(message) = self.fast.prefetch_and_pop_with_full() {
             self.prefer_pump = true;
             return Some(message);
         }
+
         self.prefer_pump = false;
         self.pump.prefetch_and_pop_with_full()
     }
@@ -107,6 +109,7 @@ fn configure_zap_authentication(
             | MechanismOverlay::PlainServer
             | MechanismOverlay::CurveServer { .. }
     );
+
     if zap_enforce && zap_domain.is_empty() && server_mechanism {
         return Err(libc::EINVAL);
     }
@@ -118,9 +121,11 @@ fn configure_zap_authentication(
                 mechanism,
                 MechanismOverlay::Null | MechanismOverlay::CurveServer { .. }
             ));
+
     if !needs_zap {
         return Ok(false);
     }
+
     if zap_domain.is_empty() {
         return Err(libc::EINVAL);
     }
@@ -129,6 +134,7 @@ fn configure_zap_authentication(
     let timeout = opts
         .handshake_timeout
         .unwrap_or(std::time::Duration::from_secs(30));
+
     let authenticator = omq_tokio::Authenticator::new_with_result(move |peer| {
         let query = crate::zap::ZapQuery {
             domain: &zap_domain,
@@ -136,8 +142,10 @@ fn configure_zap_authentication(
             identity: &identity,
             peer,
         };
+
         zap.authorize(&query, timeout)
     });
+
     let setup = std::mem::replace(&mut opts.mechanism, omq_tokio::MechanismSetup::Null);
     opts.mechanism = with_authenticator(setup, authenticator);
     Ok(true)
@@ -188,9 +196,11 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) -> Result<(), c_int> {
     if sock.is_zap_handler() {
         return Err(libc::EINVAL);
     }
+
     let Some(ctx) = sock.ctx.io_context().cloned() else {
         return Err(ETERM);
     };
+
     if sock.inner.get().is_some() {
         return Ok(());
     }
@@ -204,6 +214,7 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) -> Result<(), c_int> {
         let overlay = sock.overlay.lock().map_err(|_| ETERM)?;
         MaterializeSettings::from_overlay(&overlay)
     };
+
     let needs_zap = configure_zap_authentication(sock, &mut opts, zap)?;
     opts.validate().map_err(|_| libc::EINVAL)?;
 
@@ -218,8 +229,10 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) -> Result<(), c_int> {
         while sock.inner.get().is_none() {
             std::hint::spin_loop();
         }
+
         return Ok(());
     }
+
     // SAFETY: materialization runs before hot-path send ownership and freezes
     // bind/connect-scoped options for this socket.
     *unsafe { sock.send.queue_without_ready_peer.get_unchecked() } = queue_without_ready_peer;
@@ -274,6 +287,7 @@ fn build_recv_sink(
         let (sink, receiver) = omq_tokio::engine::RecvSink::authenticated(cap, signal_cb.clone());
         // SAFETY: like recv_cons, this is set before any user recv access.
         *unsafe { sock.recv.authenticated.get_unchecked() } = Some(receiver);
+
         sink
     } else {
         omq_tokio::engine::RecvSink::Yring(omq_tokio::engine::YringSink {
@@ -304,6 +318,7 @@ fn spawn_recv_pump(
 ) -> tokio::task::JoinHandle<()> {
     let s_recv = inner.clone();
     let pump_notify = sock.notify.clone();
+
     tokio::spawn(async move {
         let recv_notify = pump_notify.recv_notifier();
         while let Ok(msg) = s_recv.recv_for_external_recv().await {
@@ -324,11 +339,13 @@ async fn push_to_pump(
             Ok(()) => break,
             Err(returned) => m = returned,
         }
+
         // Full: watch for space, then retry once so a pop between the two
         // pushes cannot be missed.
         let seen = space.generation();
         let changed = space.changed_after(seen);
         tokio::pin!(changed);
+
         match prod.push(m) {
             Ok(()) => break,
             Err(returned) => {
@@ -337,6 +354,7 @@ async fn push_to_pump(
             }
         }
     }
+
     if let yring::FlushResult::Flushed {
         was_empty: true, ..
     } = prod.flush_and_check()

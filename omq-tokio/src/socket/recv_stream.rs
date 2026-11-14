@@ -51,11 +51,13 @@ where
         if *this.terminated {
             return Poll::Ready(None);
         }
+
         if this.budget.exhausted() {
             this.budget.reset();
             cx.waker().wake_by_ref();
             return Poll::Pending;
         }
+
         let result = if let Some(future) = this.future.as_mut().as_pin_mut() {
             ready!(future.poll(cx))
         } else if matches!(this.socket.socket_type(), SocketType::Req | SocketType::Rep) {
@@ -82,6 +84,7 @@ where
                 result => result,
             }
         };
+
         this.future.set(None);
         match result {
             Ok(message) => {

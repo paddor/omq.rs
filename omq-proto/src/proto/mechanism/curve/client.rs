@@ -60,6 +60,7 @@ impl CurveClient {
         let our_lt_public = PublicKey::from(*our_keypair.public.as_bytes());
         let peer_lt_public = PublicKey::from(*server_public.as_bytes());
         let our_eph_secret = StaticSecret::random();
+
         Self {
             our_lt_secret,
             our_lt_public,
@@ -82,9 +83,11 @@ impl CurveClient {
             name: Bytes::from_static(command::NAME_HELLO),
             body: hello_body,
         });
+
         let Some(CurveClientState::Init(our_eph_secret)) = self.state.take() else {
             unreachable!();
         };
+
         self.state = Some(CurveClientState::AwaitingWelcome(our_eph_secret));
         Ok(())
     }
@@ -97,12 +100,14 @@ impl CurveClient {
         if let Some(err) = try_error_command(&cmd, MechanismName::CURVE) {
             return Err(err);
         }
+
         let Command::Unknown { name, body } = cmd else {
             return Err(Error::HandshakeFailed(format!(
                 "CURVE client got unexpected command: {:?}",
                 cmd.kind()
             )));
         };
+
         match name.as_ref() {
             command::NAME_WELCOME
                 if matches!(self.state, Some(CurveClientState::AwaitingWelcome(_))) =>
@@ -113,6 +118,7 @@ impl CurveClient {
                     name: Bytes::from_static(command::NAME_INITIATE),
                     body: initiate,
                 });
+
                 Ok(MechanismStep::Continue)
             }
             command::NAME_READY
@@ -154,6 +160,7 @@ impl CurveClient {
         let nonce = nonce_short(NONCE_HELLO, counter);
         let signature_box =
             CurveBox::new(&self.peer_lt_public, self.eph_secret())?.encrypt(&nonce, &[0u8; 64][..]);
+
         let mut body = BytesMut::with_capacity(194);
         body.put_u8(0x01);
         body.put_u8(0x00);
@@ -161,6 +168,7 @@ impl CurveClient {
         body.put_slice(PublicKey::from(self.eph_secret()).as_bytes());
         body.put_slice(&counter.to_be_bytes());
         body.put_slice(&signature_box);
+
         Ok(body.freeze())
     }
 
@@ -171,18 +179,21 @@ impl CurveClient {
                 body.len()
             )));
         }
+
         let welcome_suffix: [u8; 16] = body[..16].try_into().unwrap();
         let welcome_box = &body[16..];
         let nonce = nonce_long(NONCE_WELCOME_PREFIX, &welcome_suffix);
         let pt = CurveBox::new(&self.peer_lt_public, self.eph_secret())?
             .decrypt(&nonce, welcome_box)
             .map_err(|_| Error::HandshakeFailed("CURVE WELCOME decrypt failed".into()))?;
+
         if pt.len() != 128 {
             return Err(Error::HandshakeFailed(format!(
                 "CURVE WELCOME plaintext len {}",
                 pt.len()
             )));
         }
+
         let sp_bytes: [u8; 32] = pt[..32].try_into().unwrap();
         let cookie = pt[32..].to_vec();
         debug_assert_eq!(cookie.len(), 96);
@@ -193,12 +204,14 @@ impl CurveClient {
         let Some(CurveClientState::AwaitingWelcome(our_eph_secret)) = self.state.take() else {
             unreachable!();
         };
+
         self.state = Some(CurveClientState::AwaitingReady(SessionKeys {
             our_eph_secret,
             peer_eph_public,
         }));
         // Stash cookie for build_initiate.
         self.received_cookie = cookie;
+
         Ok(())
     }
 
@@ -214,9 +227,11 @@ impl CurveClient {
         let mut vouch_suffix = [0u8; 16];
         rand::rng().fill_bytes(&mut vouch_suffix);
         let vouch_nonce = nonce_long(NONCE_VOUCH_PREFIX, &vouch_suffix);
+
         let mut vouch_pt = [0u8; 64];
         vouch_pt[..32].copy_from_slice(PublicKey::from(&keys.our_eph_secret).as_bytes());
         vouch_pt[32..].copy_from_slice(self.peer_lt_public.as_bytes());
+
         // RFC 26: vouch box is sealed by the client's long-term secret to
         // the SERVER'S TRANSIENT public key (S_eph), NOT the long-term one.
         let vouch_box = CurveBox::new(&keys.peer_eph_public, &self.our_lt_secret)?
@@ -237,6 +252,7 @@ impl CurveClient {
         body.put_slice(&self.received_cookie);
         body.put_slice(&counter.to_be_bytes());
         body.put_slice(&init_box);
+
         Ok(body.freeze())
     }
 
@@ -244,6 +260,7 @@ impl CurveClient {
         if body.len() < 8 + 16 {
             return Err(Error::HandshakeFailed("CURVE READY too short".into()));
         }
+
         let counter = u64::from_be_bytes(body[..8].try_into().unwrap());
         let ready_box = &body[8..];
         let nonce = nonce_short(NONCE_READY, counter);
@@ -259,6 +276,7 @@ impl CurveClient {
         let Some(CurveClientState::AwaitingReady(keys)) = self.state.take() else {
             unreachable!();
         };
+
         self.state = Some(CurveClientState::Done(keys));
         Ok(props)
     }
@@ -269,6 +287,7 @@ impl CurveClient {
                 "CURVE transform requested before handshake complete".into(),
             ));
         };
+
         keys.transform(self.out_counter, false)
     }
 }

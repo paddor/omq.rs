@@ -13,6 +13,12 @@ use smallvec::SmallVec;
 use std::{io, sync::Arc, time::Instant};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
+/// Owned chunks at least this long reach the writer uncopied.
+pub(super) const OWNED_COALESCE_BELOW: usize = 16 * 1024;
+
+/// Upper bound for one merged run of smaller chunks.
+pub(super) const OWNED_COALESCE_TARGET: usize = 64 * 1024;
+
 /// Wire chunks removed from a [`FrameBuffer`] but not yet accepted by the
 /// transport. Keeping them in driver state makes the write future safe to
 /// cancel when control work wins the outer `select!`.
@@ -31,12 +37,9 @@ pub(super) struct PendingWrite {
     /// A short write left codec output, maybe half a frame, unsent. Its
     /// tail goes out before any output framed since.
     pub(super) codec_started: bool,
+    /// Bytes the transport accepted since the last output pause.
+    pub(super) written_since_pause: usize,
 }
-
-/// Owned chunks at least this long reach the writer uncopied.
-pub(super) const OWNED_COALESCE_BELOW: usize = 16 * 1024;
-/// Upper bound for one merged run of smaller chunks.
-pub(super) const OWNED_COALESCE_TARGET: usize = 64 * 1024;
 
 /// Merges runs of small owned chunks into one buffer each, in order.
 ///
@@ -48,6 +51,7 @@ pub(super) const OWNED_COALESCE_TARGET: usize = 64 * 1024;
 pub(super) fn coalesce_small_chunks(chunks: &mut Vec<Bytes>) {
     let mut write = 0;
     let mut read = 0;
+
     while read < chunks.len() {
         if chunks[read].len() >= OWNED_COALESCE_BELOW {
             chunks.swap(write, read);
@@ -55,8 +59,10 @@ pub(super) fn coalesce_small_chunks(chunks: &mut Vec<Bytes>) {
             read += 1;
             continue;
         }
+
         let start = read;
         let mut run_len = 0;
+
         while read < chunks.len()
             && chunks[read].len() < OWNED_COALESCE_BELOW
             && (read == start || run_len + chunks[read].len() <= OWNED_COALESCE_TARGET)
@@ -64,19 +70,24 @@ pub(super) fn coalesce_small_chunks(chunks: &mut Vec<Bytes>) {
             run_len += chunks[read].len();
             read += 1;
         }
+
         let merged = if read - start == 1 {
             std::mem::take(&mut chunks[start])
         } else {
             copy_stats::record(Site::Coalesce, run_len);
             let mut merged = bytes::BytesMut::with_capacity(run_len);
+
             for chunk in &chunks[start..read] {
                 merged.extend_from_slice(chunk);
             }
+
             merged.freeze()
         };
+
         chunks[write] = merged;
         write += 1;
     }
+
     chunks.truncate(write);
 }
 
@@ -101,6 +112,7 @@ impl PendingWrite {
         debug_assert!(self.is_empty());
         self.arena.clear();
         self.arena_offset = 0;
+
         if let Some(outcome) = slot.try_drain_arena_only(&mut self.arena) {
             self.remaining = self.arena.len();
             return outcome.space_available;
@@ -109,6 +121,7 @@ impl PendingWrite {
         self.chunks.clear();
         self.first = 0;
         self.offset = 0;
+
         // Take the whole slot: codec output is written between two slot
         // batches, so a batch must not end inside a frame. The slot's byte
         // and message caps bound the batch.
@@ -119,10 +132,12 @@ impl PendingWrite {
         } else {
             slot.drain(&mut self.chunks, usize::MAX)
         };
+
         self.remaining = self.chunks.iter().map(Bytes::len).sum();
         if !slot.is_empty() {
             slot.data_signal.reschedule();
         }
+
         outcome.space_available
     }
 
@@ -153,9 +168,11 @@ impl PendingWrite {
     pub(super) fn advance_owned(&mut self, written: usize) {
         debug_assert!(written <= self.remaining);
         self.remaining -= written;
+
         while self.first < self.chunks.len() && self.chunks[self.first].is_empty() {
             self.first += 1;
         }
+
         if self.is_empty() {
             self.chunks.clear();
             self.first = 0;
@@ -167,6 +184,7 @@ impl PendingWrite {
         if self.arena_offset < self.arena.len() {
             return smallvec::smallvec![io::IoSlice::new(&self.arena[self.arena_offset..])];
         }
+
         self.chunks
             .iter()
             .skip(self.first)
@@ -184,24 +202,29 @@ impl PendingWrite {
     pub(super) fn advance(&mut self, mut written: usize) {
         debug_assert!(written <= self.remaining);
         self.remaining -= written;
+
         if self.arena_offset < self.arena.len() {
             self.arena_offset += written;
             if self.arena_offset == self.arena.len() {
                 self.arena.clear();
                 self.arena_offset = 0;
             }
+
             return;
         }
+
         while written > 0 {
             let available = self.chunks[self.first].len() - self.offset;
             if written < available {
                 self.offset += written;
                 return;
             }
+
             written -= available;
             self.first += 1;
             self.offset = 0;
         }
+
         if self.is_empty() {
             self.chunks.clear();
             self.first = 0;
@@ -224,6 +247,7 @@ pub(super) async fn write_driver_progress<W: DriverWrite>(
     let started = Instant::now();
     let mut budget = DrainBudget::WIRE_DRAIN;
     let owned = writer.chunk_writer().is_some();
+
     loop {
         pending.codec_started &= connection.has_pending_transmit();
         let written = if owned && pending.has_chunks() {
@@ -233,12 +257,14 @@ pub(super) async fn write_driver_progress<W: DriverWrite>(
                 std::future::poll_fn(|cx| owned_writer.poll_write_chunks(cx, chunks)).await?,
             )?;
             pending.advance_owned(written);
+
             written
         } else if !pending.is_empty() {
             let iovecs = pending.io_slices();
             let written = check_written(writer.write_vectored(&iovecs).await?)?;
             drop(iovecs);
             pending.advance(written);
+
             written
         } else if pending.codec_started {
             flush_codec(writer, connection, pending, heartbeat).await?
@@ -250,6 +276,7 @@ pub(super) async fn write_driver_progress<W: DriverWrite>(
                 let data = eq.arena_bytes();
                 check_written(writer.write_vectored(&[io::IoSlice::new(data)]).await?)?
             };
+
             eq.advance_arena(written);
             written
         } else if !eq.is_empty() {
@@ -264,7 +291,9 @@ pub(super) async fn write_driver_progress<W: DriverWrite>(
         } else {
             return Ok(());
         };
+
         pending.unflushed = true;
+        pending.written_since_pause += written;
 
         if !budget.account(written) || started.elapsed() >= OUTBOUND_BATCH_TIME {
             return Ok(());
@@ -303,6 +332,7 @@ where
         *unflushed = false;
         return Ok(0);
     }
+
     *unflushed = true;
     flush_once(writer, connection).await
 }
@@ -329,9 +359,11 @@ where
     if chunks.is_empty() {
         return Ok(0);
     }
+
     let n = check_written(writer.write_vectored(&chunks).await?)?;
     drop(chunks);
     connection.advance_transmit(n);
+
     Ok(n)
 }
 

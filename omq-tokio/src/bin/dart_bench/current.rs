@@ -15,17 +15,20 @@ pub(super) async fn run(config: &Config, affinity: &affinity::Affinity) {
     let context = Context::current();
     let socket = context.socket(config.role.socket_type(), config.options());
     let pool = config.send_pool();
+
     if config.role.receiving() {
         emit_bound(&socket.bind(config.endpoint.clone()).await.unwrap());
     } else {
         socket.connect(config.endpoint.clone()).await.unwrap();
     }
+
     socket.wait_connected(1, SETUP_TIMEOUT).await.unwrap();
     emit(&config.ready_event(affinity, &format_offloads(dart_capabilities(&socket))));
     // Keep driving connection setup and maintenance while awaiting the
     // runner's barrier. Stdin never blocks the current-thread runtime.
     tokio::task::spawn_blocking(super::start).await.unwrap();
     let stop = CancellationToken::new();
+
     let poller = (config.runtime == RuntimeMode::CurrentPoll).then(|| {
         let stop = stop.clone();
         // Explicit benchmark polling: keep this one runtime thread ready so
@@ -36,15 +39,18 @@ pub(super) async fn run(config: &Config, affinity: &affinity::Affinity) {
             }
         })
     });
+
     if config.role.receiving() {
         server(&socket).await;
     } else {
         client(&socket, config, pool.as_ref().unwrap()).await;
     }
+
     stop.cancel();
     if let Some(poller) = poller {
         poller.await.unwrap();
     }
+
     socket.close().await.unwrap();
     context.term();
 }
@@ -52,11 +58,13 @@ pub(super) async fn run(config: &Config, affinity: &affinity::Affinity) {
 async fn server(socket: &Socket) {
     let stop = CancellationToken::new();
     let cancel = stop.clone();
+
     std::thread::spawn(move || {
         let mut line = String::new();
         std::io::stdin().lock().read_line(&mut line).unwrap();
         cancel.cancel();
     });
+
     loop {
         tokio::select! {
             biased;
@@ -64,6 +72,7 @@ async fn server(socket: &Socket) {
             reply = socket.recv() => socket.send(reply.unwrap()).await.unwrap(),
         }
     }
+
     emit(&format!(
         "{{\"event\":\"result\",\"offloads\":{},{} }}",
         format_offloads(dart_capabilities(socket)),
@@ -84,10 +93,12 @@ async fn client(socket: &Socket, config: &Config, pool: &PayloadPool) {
             .unwrap();
         let elapsed = at.elapsed().as_secs_f64() * 1e6;
         super::validate_reply(&reply, config.size, tag);
+
         if index >= config.warmup {
             samples.push(elapsed);
         }
     }
+
     super::latency_result(
         &mut samples,
         config,

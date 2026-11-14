@@ -54,6 +54,7 @@ async fn push_distributes_across_inproc_and_tcp() {
             }
         }
     });
+
     let tc = tcp_count.clone();
     let h2 = tokio::spawn(async move {
         loop {
@@ -108,6 +109,7 @@ async fn push_reverts_to_remaining_after_peer_disconnect() {
             .await
             .unwrap();
     }
+
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Drop the TCP peer; only inproc remains.
@@ -130,6 +132,7 @@ async fn push_reverts_to_remaining_after_peer_disconnect() {
     {
         got += 1;
     }
+
     assert!(
         got >= AFTER,
         "inproc peer must receive all {AFTER} post-disconnect sends; got {got}"

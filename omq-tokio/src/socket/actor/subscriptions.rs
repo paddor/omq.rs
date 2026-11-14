@@ -63,8 +63,10 @@ impl SocketDriver {
                 .shared
                 .subscribe_count
                 .fetch_add(1, Ordering::Release);
+
             return;
         };
+
         let subscribe_count = self.link.shared.subscribe_count.clone();
         std::mem::drop(tokio::spawn(async move {
             if applied.await.is_ok() {
@@ -82,10 +84,12 @@ impl SocketDriver {
         if !matches!(self.socket_type, SocketType::Pub | SocketType::XPub) || msg.len() != 1 {
             return false;
         }
+
         let body = msg.part_bytes(0).unwrap_or_default();
         let Some(&tag) = body.first() else {
             return false;
         };
+
         let prefix = body.slice(1..);
         match tag {
             0x01 => {
@@ -93,6 +97,7 @@ impl SocketDriver {
                 if !self.admits_subscription(peer_id, &prefix) {
                     return true;
                 }
+
                 self.handle_peer_command(peer_id, Command::Subscribe(prefix));
                 self.socket_type != SocketType::XPub
             }
@@ -121,6 +126,7 @@ impl SocketDriver {
         let admission = matches!(self.socket_type, SocketType::Pub | SocketType::XPub)
             .then(|| self.options.subscription_admission.clone())
             .flatten();
+
         SubscriptionGate::new(
             self.socket_type == SocketType::XPub,
             admission,
@@ -145,6 +151,7 @@ impl SocketDriver {
     /// then the peer's ledger, as the gate does for SUBSCRIBE commands.
     fn admits_subscription(&self, peer_id: u64, prefix: &[u8]) -> bool {
         let peer = self.peers.get(&peer_id);
+
         let admitted = self
             .options
             .subscription_admission
@@ -156,12 +163,14 @@ impl SocketDriver {
             && peer
                 .and_then(|peer| peer.subscriptions.as_ref())
                 .is_none_or(|ledger| ledger.subscribe(prefix));
+
         if !admitted {
             self.link.monitor.publish(MonitorEvent::SubscribeRejected {
                 connection_id: peer_id,
                 prefix: bytes::Bytes::copy_from_slice(prefix),
             });
         }
+
         admitted
     }
 
@@ -180,9 +189,11 @@ impl SocketDriver {
                     .await;
             }
         }
+
         if supports_groups(self.socket_type) {
             let groups: Vec<bytes::Bytes> =
                 self.routing.joined_groups.load().iter().cloned().collect();
+
             for group in groups {
                 let _ = handle
                     .inbox
@@ -201,9 +212,11 @@ impl SocketDriver {
         let Some(peer) = self.peers.get(&peer_id) else {
             return;
         };
+
         let Some(info) = peer.handshake.info.clone() else {
             return;
         };
+
         self.link.monitor.publish(MonitorEvent::PeerCommand {
             endpoint: peer.origin.endpoint.clone(),
             peer: info,
@@ -223,6 +236,7 @@ impl SocketDriver {
                 "socket type does not support join / leave".into(),
             ));
         }
+
         {
             let mut groups = (**self.routing.joined_groups.load()).clone();
             if joining {
@@ -230,8 +244,10 @@ impl SocketDriver {
             } else {
                 groups.remove(&group);
             }
+
             self.routing.joined_groups.store(Arc::new(groups));
         }
+
         // Replay to data-plane-ready peers. Pending peers pick up the join
         // via `handle_peer_event(HandshakeSucceeded)`'s replay loop. UDP DISH
         // listener tasks see the change through the shared set, no command
@@ -241,6 +257,7 @@ impl SocketDriver {
         } else {
             omq_proto::proto::Command::Leave(group)
         };
+
         Ok(self.send_protocol_to_ready_peers(&cmd))
     }
 
@@ -256,11 +273,13 @@ impl SocketDriver {
                 "socket type does not support subscribe".into(),
             ));
         }
+
         if subscribe {
             self.routing.subscriptions.push(prefix.clone());
         } else if let Some(pos) = self.routing.subscriptions.iter().position(|p| p == &prefix) {
             self.routing.subscriptions.remove(pos);
         }
+
         // Broadcast to every data-plane-ready peer. Pending peers are skipped;
         // `handle_peer_event(HandshakeSucceeded)` replays `self.subscriptions`
         // for each peer as it transitions to ready.
@@ -269,6 +288,7 @@ impl SocketDriver {
         } else {
             omq_proto::proto::Command::Cancel(prefix)
         };
+
         Ok(self.send_protocol_to_ready_peers(&cmd))
     }
 
@@ -282,12 +302,15 @@ impl SocketDriver {
             if !p.handshake.ready {
                 continue;
             }
+
             let inbox = &p.handle.inbox;
             let _ = inbox.try_send(crate::engine::PeerDriverCommand::SendCommand(cmd.clone()));
+
             if inbox.protocol_backlogged() {
                 backlogged.push(inbox.clone());
             }
         }
+
         backlogged
     }
 }

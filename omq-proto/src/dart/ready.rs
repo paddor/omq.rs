@@ -3,6 +3,9 @@
 use super::{Datagram, MAX_DATAGRAM, Phase, VERSION, decode, supports};
 use crate::proto::SocketType;
 
+/// Most properties one READY datagram may carry.
+const MAX_READY_PROPERTIES: usize = 16;
+
 /// READY metadata, borrowed from one datagram.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Ready<'a> {
@@ -39,17 +42,21 @@ pub fn encode_ready(ready: Ready<'_>, output: &mut [u8]) -> Option<usize> {
     {
         return None;
     }
+
     let mut writer = Writer { output, cursor: 0 };
     writer.write(b"\xc0\x05READY")?;
     writer.property(b"Socket-Type", ready.socket_type.as_str().as_bytes())?;
+
     if let Some(identity) = ready.identity {
         writer.property(b"Identity", identity)?;
     }
+
     writer.property(b"DART-Version", &[VERSION])?;
     writer.property(b"Reply-Requested", &[u8::from(ready.reply_requested)])?;
     writer.property(b"Session", &ready.session.to_le_bytes())?;
     writer.property(b"Echo", &ready.echo.to_le_bytes())?;
     writer.property(b"Phase", &[ready.phase as u8])?;
+
     Some(writer.cursor)
 }
 
@@ -64,10 +71,12 @@ impl Writer<'_> {
         if end > MAX_DATAGRAM {
             return None;
         }
+
         self.output
             .get_mut(self.cursor..end)?
             .copy_from_slice(bytes);
         self.cursor = end;
+
         Some(())
     }
 
@@ -75,6 +84,7 @@ impl Writer<'_> {
         self.write(&[name.len() as u8])?;
         self.write(name)?;
         self.write(&(value.len() as u32).to_be_bytes())?;
+
         self.write(value)
     }
 }
@@ -82,17 +92,17 @@ impl Writer<'_> {
 fn property(bytes: &[u8]) -> Option<(&[u8], &[u8], &[u8])> {
     let (&name_len, rest) = bytes.split_first()?;
     let (name, rest) = rest.split_at_checked(usize::from(name_len))?;
+
     if name.is_empty() || !name.is_ascii() {
         return None;
     }
+
     let (length, rest) = rest.split_at_checked(4)?;
     let length = u32::from_be_bytes(length.try_into().ok()?) as usize;
     let (value, rest) = rest.split_at_checked(length)?;
+
     Some((name, value, rest))
 }
-
-/// Most properties one READY datagram may carry.
-const MAX_READY_PROPERTIES: usize = 16;
 
 /// Validate required metadata and all duplicate properties, without allocation.
 pub fn decode_ready(bytes: &[u8]) -> Option<Ready<'_>> {
@@ -107,6 +117,7 @@ pub fn decode_ready(bytes: &[u8]) -> Option<Ready<'_>> {
     let mut fields = ReadyFields::default();
     let mut rest = body;
     let mut count = 0;
+
     while !rest.is_empty() {
         // A READY needs seven properties. Bound the duplicate scan below.
         count += 1;
@@ -118,6 +129,7 @@ pub fn decode_ready(bytes: &[u8]) -> Option<Ready<'_>> {
         if repeats_earlier_property(body, rest, name)? {
             return None;
         }
+
         fields.set(name, value)?;
         rest = remaining;
     }
@@ -135,6 +147,7 @@ fn repeats_earlier_property(body: &[u8], current: &[u8], name: &[u8]) -> Option<
         if previous == name {
             return Some(true);
         }
+
         earlier = next;
     }
 
@@ -162,6 +175,7 @@ impl<'a> ReadyFields<'a> {
                 if value.is_empty() || !crate::message::is_valid_peer_identity(value) {
                     return None;
                 }
+
                 self.identity = Some(value);
             }
             b"DART-Version" => self.version = Some(value),

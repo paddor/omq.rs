@@ -22,6 +22,7 @@ async fn push_distributes_across_three_pulls() {
     let pulls: Vec<Socket> = (0..3)
         .map(|_| Socket::new(SocketType::Pull, Options::default()))
         .collect();
+
     for (i, p) in pulls.iter().enumerate() {
         p.bind(ep(&format!("rr-{i}"))).await.unwrap();
     }
@@ -39,6 +40,7 @@ async fn push_distributes_across_three_pulls() {
         .map(|_| Arc::new(AtomicUsize::new(0)))
         .collect();
     let mut handles = Vec::new();
+
     for (p, c) in pulls.into_iter().zip(counts.iter().cloned()) {
         handles.push(tokio::spawn(async move {
             loop {
@@ -51,12 +53,14 @@ async fn push_distributes_across_three_pulls() {
             }
         }));
     }
+
     for h in handles {
         let _ = h.await;
     }
 
     let total: usize = counts.iter().map(|c| c.load(Ordering::SeqCst)).sum();
     assert_eq!(total, N, "every message must reach exactly one pull");
+
     for c in &counts {
         let n = c.load(Ordering::SeqCst);
         assert!(
@@ -86,9 +90,11 @@ async fn push_distributes_fairly_over_tcp() {
         .map(|_| Socket::new(SocketType::Pull, Options::default()))
         .collect();
     let mut monitors: Vec<_> = pulls.iter().map(Socket::monitor).collect();
+
     for p in &pulls {
         p.connect(test_support::tcp_loopback(port)).await.unwrap();
     }
+
     for mon in &mut monitors {
         test_support::wait_for_handshake_on(mon).await;
     }
@@ -97,6 +103,7 @@ async fn push_distributes_fairly_over_tcp() {
     let counts: Vec<Arc<AtomicUsize>> = (0..N).map(|_| Arc::new(AtomicUsize::new(0))).collect();
     let total_received = Arc::new(AtomicUsize::new(0));
     let mut handles = Vec::new();
+
     for (p, c) in pulls.into_iter().zip(counts.iter().cloned()) {
         let total_received = total_received.clone();
         handles.push(tokio::spawn(async move {
@@ -115,6 +122,7 @@ async fn push_distributes_fairly_over_tcp() {
     for i in 0..M {
         push.send(Message::single(format!("m{i}"))).await.unwrap();
     }
+
     let all_arrived = tokio::time::timeout(Duration::from_secs(10), async {
         while total_received.load(Ordering::SeqCst) < M {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -127,6 +135,7 @@ async fn push_distributes_fairly_over_tcp() {
         h.abort();
         let _ = h.await;
     }
+
     assert!(
         all_arrived.is_ok(),
         "every message must reach exactly one pull; got {total} / {M}"
@@ -138,6 +147,7 @@ async fn push_distributes_fairly_over_tcp() {
     // fair-share floor catches that without flaking on the skip-on-full
     // jitter that CPU contention (parallel tests) adds to the even split.
     let fair_share = M / N;
+
     for (i, c) in counts.iter().enumerate() {
         let n = c.load(Ordering::SeqCst);
         assert!(
@@ -156,9 +166,11 @@ async fn pull_fair_queues_three_pushes() {
     for i in 0..3u32 {
         let p = Socket::new(SocketType::Push, Options::default());
         p.connect(ep("fq-pull")).await.unwrap();
+
         for j in 0..5u32 {
             p.send(Message::single(format!("p{i}-{j}"))).await.unwrap();
         }
+
         pushes.push(p);
     }
 
@@ -167,6 +179,7 @@ async fn pull_fair_queues_three_pushes() {
         let m = pull.recv().await.unwrap();
         received.insert(String::from_utf8_lossy(&m.part_bytes(0).unwrap()).into_owned());
     }
+
     assert_eq!(received.len(), 15);
     for i in 0..3u32 {
         for j in 0..5u32 {
@@ -182,6 +195,7 @@ async fn pub_sub_fan_out_with_prefix_filter() {
 
     let topics = ["news.a", "news.b", "weather"];
     let mut subs: Vec<Socket> = Vec::new();
+
     for prefix in topics {
         let s = Socket::new(SocketType::Sub, Options::default());
         s.subscribe(prefix).await.unwrap();
@@ -204,6 +218,7 @@ async fn pub_sub_fan_out_with_prefix_filter() {
             .await
             .unwrap();
     }
+
     for (i, s) in subs.iter().enumerate() {
         let m = tokio::time::timeout(std::time::Duration::from_secs(2), s.recv())
             .await

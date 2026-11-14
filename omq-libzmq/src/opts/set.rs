@@ -22,9 +22,6 @@ use std::ffi::c_int;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// One category of `zmq_setsockopt` options; `Ok(false)` when `option` is not in it.
-type SetOption = fn(&Arc<OmqSocket>, c_int, OptIn) -> Result<bool, c_int>;
-
 const SET_OPTIONS: [SetOption; 16] = [
     set_queue_option,
     set_message_option,
@@ -44,6 +41,9 @@ const SET_OPTIONS: [SetOption; 16] = [
     set_wss_option,
 ];
 
+/// One category of `zmq_setsockopt` options; `Ok(false)` when `option` is not in it.
+type SetOption = fn(&Arc<OmqSocket>, c_int, OptIn) -> Result<bool, c_int>;
+
 /// Set a socket option from caller storage; return zero or -1 with errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_setsockopt(
@@ -55,6 +55,7 @@ pub extern "C" fn zmq_setsockopt(
     // SAFETY: C callers pass null or a pointer from this API.
     let sock_arc = c_try!(unsafe { crate::handle::socket(sock) });
     c_try!(set_option(sock_arc, option, OptIn::new(optval, optvallen)));
+
     0
 }
 
@@ -103,6 +104,7 @@ fn set_queue_option(
             if v <= 0 {
                 return Err(libc::EINVAL);
             }
+
             overlay(sock_arc)?.send_hwm = Some(v as u32);
         }
         ZMQ_RCVHWM => {
@@ -110,6 +112,7 @@ fn set_queue_option(
             if v <= 0 {
                 return Err(libc::EINVAL);
             }
+
             overlay(sock_arc)?.recv_hwm = Some(v as u32);
         }
         ZMQ_LINGER => {
@@ -142,12 +145,14 @@ fn set_message_option(
             if v < -1 {
                 return Err(libc::EINVAL);
             }
+
             overlay(sock_arc)?.arena_threshold = if v < 0 {
                 None
             } else {
                 let Ok(v) = usize::try_from(v) else {
                     return Err(libc::EINVAL);
                 };
+
                 Some(v)
             };
         }
@@ -163,6 +168,7 @@ fn set_message_option(
                 OMQ_ON_MUTE_DROP_OLDEST => OnMute::DropOldest,
                 _ => return Err(libc::EINVAL),
             };
+
             overlay(sock_arc)?.on_mute = on_mute;
         }
         _ => return Ok(false),
@@ -217,6 +223,7 @@ fn set_tuning_option(
             if !(ZSTD_LEVEL_MIN..=ZSTD_LEVEL_MAX).contains(&v) {
                 return Err(libc::EINVAL);
             }
+
             overlay(sock_arc)?.compression.level = Some(v);
         }
         OMQ_COMPRESSION_DICT => {
@@ -224,6 +231,7 @@ fn set_tuning_option(
             if v.len() > COMPRESSION_DICT_MAX {
                 return Err(libc::EINVAL);
             }
+
             overlay(sock_arc)?.compression.dict = if v.is_empty() {
                 None
             } else {
@@ -363,6 +371,7 @@ fn set_tcp_option(sock_arc: &Arc<OmqSocket>, option: c_int, optval: OptIn) -> Re
             if v < 0 {
                 return Err(libc::EINVAL);
             }
+
             overlay(sock_arc)?.tcp.maxrt = v;
         }
         _ => return Ok(false),
@@ -419,12 +428,15 @@ fn set_routing_option(
             let Some(bytes) = optval.slice() else {
                 return Err(libc::EFAULT);
             };
+
             if bytes.len() > 255 {
                 return Err(libc::EINVAL);
             }
+
             if bytes.first() == Some(&0) {
                 return Err(libc::EINVAL);
             }
+
             overlay(sock_arc)?.identity = Bytes::copy_from_slice(bytes);
         }
         ZMQ_ROUTER_MANDATORY => {
@@ -478,6 +490,7 @@ fn do_subscribe(sock_arc: &Arc<OmqSocket>, optval: OptIn, subscribe: bool) -> Re
         None if optval.len == 0 => Bytes::new(),
         None => return Err(libc::EFAULT),
     };
+
     let inner = crate::socket::materialized(sock_arc)?;
     if subscribe {
         crate::socket::run_on_socket(sock_arc, inner, move |s| async move {

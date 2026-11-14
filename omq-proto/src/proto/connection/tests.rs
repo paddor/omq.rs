@@ -7,11 +7,13 @@ fn ready_connection(max_message_size: Option<usize>) -> Connection {
     if let Some(max) = max_message_size {
         cfg = cfg.max_message_size(max);
     }
+
     ready_connection_with(cfg)
 }
 
 fn ready_connection_with(cfg: ConnectionConfig) -> Connection {
     let mut c = Connection::new(cfg);
+
     let g = Greeting {
         major: 3,
         minor: 1,
@@ -20,6 +22,7 @@ fn ready_connection_with(cfg: ConnectionConfig) -> Connection {
     };
     let mut wire = BytesMut::new();
     g.encode(&mut wire);
+
     let mut ready_body = BytesMut::new();
     command::encode(
         &Command::Ready(PeerProperties::default().with_socket_type(SocketType::Push)),
@@ -30,8 +33,10 @@ fn ready_connection_with(cfg: ConnectionConfig) -> Connection {
         payload: Payload::from_bytes(ready_body.freeze()),
     };
     frame::encode_frame(&ready_frame, &mut wire);
+
     c.handle_input(wire.freeze()).unwrap();
     assert!(c.is_ready());
+
     c
 }
 
@@ -48,6 +53,7 @@ fn feed_data_frames(c: &mut Connection, frames: &[(bool, &[u8])]) -> Result<()> 
         };
         frame::encode_frame(&f, &mut wire);
     }
+
     c.handle_input(wire.freeze())
 }
 
@@ -55,6 +61,7 @@ fn feed_data_frames(c: &mut Connection, frames: &[(bool, &[u8])]) -> Result<()> 
 fn received_multipart_tables_recycle_without_retaining_payloads() {
     let mut connection = ready_connection(None).recv_message_pool(&MessagePool::new(2, 4));
     let mut pointers = std::collections::HashSet::new();
+
     for _ in 0..64 {
         feed_data_frames(
             &mut connection,
@@ -68,6 +75,7 @@ fn received_multipart_tables_recycle_without_retaining_payloads() {
         assert_eq!(parts.len(), 3);
         assert!(parts[1].is_empty());
     }
+
     assert_eq!(pointers.len(), 2, "one active table and one returned table");
 }
 
@@ -78,10 +86,12 @@ fn changing_receive_pool_preserves_partial_message_and_held_output() {
     connection = connection.recv_message_pool(&MessagePool::new(1, 4));
     feed_data_frames(&mut connection, &[(true, b""), (false, b"last")]).unwrap();
     let held = connection.poll_message().unwrap();
+
     for _ in 0..4 {
         feed_data_frames(&mut connection, &[(true, b"new"), (false, b"data")]).unwrap();
         drop(connection.poll_message().unwrap());
     }
+
     drop(connection);
     assert_eq!(held.part_slice(0), Some(b"first".as_slice()));
     assert_eq!(held.part_slice(1), Some(b"".as_slice()));
@@ -92,6 +102,7 @@ fn changing_receive_pool_preserves_partial_message_and_held_output() {
 fn masked_ws_frame(fin: bool, opcode: u8, payload: &[u8], mask: [u8; 4]) -> Bytes {
     let mut wire = BytesMut::new();
     wire.put_u8((if fin { 0x80 } else { 0 }) | opcode);
+
     if payload.len() <= 125 {
         wire.put_u8(0x80 | payload.len() as u8);
     } else if payload.len() <= 65_535 {
@@ -101,10 +112,12 @@ fn masked_ws_frame(fin: bool, opcode: u8, payload: &[u8], mask: [u8; 4]) -> Byte
         wire.put_u8(0x80 | 0x7f);
         wire.put_u64(payload.len() as u64);
     }
+
     wire.put_slice(&mask);
     let start = wire.len();
     wire.put_slice(payload);
     super::super::ws_codec::apply_mask(&mut wire[start..], mask);
+
     wire.freeze()
 }
 
@@ -122,6 +135,7 @@ fn ready_ws_connection() -> Connection {
     let mut zws = vec![super::super::zws::FLAG_COMMAND];
     zws.extend_from_slice(&ready);
     let split = zws.len() / 2;
+
     connection
         .handle_input(masked_ws_frame(
             false,
@@ -130,6 +144,7 @@ fn ready_ws_connection() -> Connection {
             [1, 2, 3, 4],
         ))
         .unwrap();
+
     connection
         .handle_input(masked_ws_frame(
             true,
@@ -138,6 +153,7 @@ fn ready_ws_connection() -> Connection {
             [5, 6, 7, 8],
         ))
         .unwrap();
+
     assert!(connection.is_ready());
     connection
 }
@@ -152,6 +168,7 @@ fn assembles_masked_fragmented_ws_message_with_interleaved_ping() {
     let mut zws = vec![super::super::zws::FLAG_FINAL];
     zws.extend_from_slice(&payload);
     let split = 32 * 1024;
+
     connection
         .handle_input(masked_ws_frame(
             false,
@@ -160,6 +177,7 @@ fn assembles_masked_fragmented_ws_message_with_interleaved_ping() {
             [9, 10, 11, 12],
         ))
         .unwrap();
+
     connection
         .handle_input(masked_ws_frame(
             true,
@@ -168,6 +186,7 @@ fn assembles_masked_fragmented_ws_message_with_interleaved_ping() {
             [13, 14, 15, 16],
         ))
         .unwrap();
+
     connection
         .handle_input(masked_ws_frame(
             true,
@@ -237,6 +256,7 @@ fn validates_ws_close_reason_after_unmasking() {
         let mut connection = ready_ws_connection();
         let mut payload = 1000u16.to_be_bytes().to_vec();
         payload.extend_from_slice(reason);
+
         assert!(
             connection
                 .handle_input(masked_ws_frame(
@@ -255,6 +275,7 @@ fn validates_ws_close_reason_after_unmasking() {
 fn tiny_ws_fast_path_cannot_bypass_fragment_sequence() {
     use super::super::ws_codec::OP_BINARY_CODE;
     let mut connection = ready_ws_connection();
+
     connection
         .handle_input(masked_ws_frame(
             false,
@@ -263,6 +284,7 @@ fn tiny_ws_fast_path_cannot_bypass_fragment_sequence() {
             [1, 2, 3, 4],
         ))
         .unwrap();
+
     assert!(
         connection
             .handle_input(masked_ws_frame(
@@ -273,6 +295,7 @@ fn tiny_ws_fast_path_cannot_bypass_fragment_sequence() {
             ))
             .is_err()
     );
+
     assert!(connection.poll_message().is_none());
 }
 
@@ -282,6 +305,7 @@ fn ws_single_frame_discard_does_not_leak_final_frame() {
     use super::super::ws_codec::{OP_BINARY_CODE, OP_PING_CODE};
     let mut connection = ready_ws_connection();
     connection.config.socket_type = SocketType::Channel;
+
     for (opcode, body) in [
         (OP_BINARY_CODE, &b"\x01first"[..]),
         (OP_PING_CODE, &b"alive"[..]),
@@ -292,6 +316,7 @@ fn ws_single_frame_discard_does_not_leak_final_frame() {
             .handle_input(masked_ws_frame(true, opcode, body, [1, 2, 3, 4]))
             .unwrap();
     }
+
     assert_eq!(
         connection.poll_message().unwrap().part_bytes(0).unwrap(),
         b"ok".as_slice()
@@ -310,6 +335,7 @@ fn accepts_registered_and_private_ws_close_codes_with_utf8() {
         let mut payload = code.to_be_bytes().to_vec();
         payload.extend_from_slice("closing \u{1f44b}".as_bytes());
         let wire = masked_ws_frame(true, OP_CLOSE_CODE, &payload, [1, 2, 3, 4]);
+
         for byte in wire {
             connection
                 .handle_input(Bytes::copy_from_slice(&[byte]))
@@ -400,6 +426,7 @@ fn multipart_header_admission_is_shared_by_every_receive_path() {
         let mut header = BytesMut::new();
         header.put_u8(frame::FLAG_LONG);
         header.put_u64(449);
+
         if path == 0 {
             assert!(matches!(
                 c.handle_input(header.freeze()),
@@ -407,8 +434,10 @@ fn multipart_header_admission_is_shared_by_every_receive_path() {
             ));
             continue;
         }
+
         c.in_buf.push(header.freeze());
         let before = c.in_buf.len();
+
         match path {
             1 => assert!(matches!(
                 c.peek_next_frame_payload_size(),
@@ -422,10 +451,12 @@ fn multipart_header_admission_is_shared_by_every_receive_path() {
             )),
             _ => unreachable!(),
         }
+
         assert_eq!(c.in_buf.len(), before);
         assert!(matches!(c.state, State::Ready));
         assert!(c.poll_message().is_none());
     }
+
     let mut c = ready_connection(Some(1024));
     feed_data_frames(&mut c, &[(true, &[7; 448]), (false, &[8; 448])]).unwrap();
     assert_eq!(c.poll_message().unwrap().len(), 2);

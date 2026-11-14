@@ -66,6 +66,7 @@ impl EndpointWorker {
         let Some(phase) = handshake.pending() else {
             return false;
         };
+
         let Some(length) = dart::encode_ready(
             Ready {
                 socket_type: self.socket_type,
@@ -142,6 +143,7 @@ impl EndpointWorker {
     ) -> (bool, Instant, bool) {
         let started = Instant::now();
         let routes = &mut task.routes;
+
         let mut pass = ServicePass {
             timestamp: Timestamp {
                 at: started,
@@ -163,6 +165,7 @@ impl EndpointWorker {
         if routes.remaining == 0 {
             routes.remaining = routes.order.len();
         }
+
         let target_visits = routes.remaining.min(routes.order.len()).min(MESSAGES);
         while visited < target_visits {
             let now = if visited == 0 {
@@ -170,17 +173,21 @@ impl EndpointWorker {
             } else {
                 Instant::now()
             };
+
             if now.duration_since(started) >= TURN {
                 break;
             }
+
             pass.timestamp.at = now;
 
             let source = routes.order[routes.cursor];
             let route = routes.map.get_mut(&source).expect("indexed route");
+
             if let Some((sent, wake)) = self.service_pending(source, route, &mut pass) {
                 worked |= sent;
                 deadline = deadline.min(wake);
             }
+
             if let Some(turn) = self.service_peer(source, route, &mut pass) {
                 worked |= turn.worked;
                 blocked |= turn.blocked;
@@ -192,6 +199,7 @@ impl EndpointWorker {
             } else {
                 routes.cursor = (routes.cursor + 1) % routes.order.len();
             }
+
             visited += 1;
             routes.remaining = routes.remaining.saturating_sub(1);
         }
@@ -199,6 +207,7 @@ impl EndpointWorker {
         if routes.order.is_empty() {
             routes.remaining = 0;
         }
+
         (worked || routes.remaining != 0, deadline, blocked)
     }
 
@@ -212,6 +221,7 @@ impl EndpointWorker {
     ) -> Option<(bool, Instant)> {
         let now = pass.timestamp.at;
         let pending = route.pending.as_mut()?;
+
         if pending.lease.expires <= now {
             route.pending = None;
             return None;
@@ -221,15 +231,18 @@ impl EndpointWorker {
         // WELCOME on its own, so spoofed HELLOs cannot amplify.
         let lease = &mut pending.lease;
         let connector = lease.handshake.is_connector();
+
         if connector {
             lease.retry_due(now);
         }
+
         let sent = self.send_handshake(source, &mut lease.handshake, pass.control, pass.stats);
         let wake = if connector {
             lease.retry
         } else {
             lease.expires
         };
+
         Some((sent, wake))
     }
 
@@ -243,6 +256,7 @@ impl EndpointWorker {
     ) -> Option<PeerTurn> {
         let now = pass.timestamp.at;
         let peer = route.peer.as_mut()?;
+
         if peer.lease.expires <= now
             || peer
                 .io
@@ -268,13 +282,16 @@ impl EndpointWorker {
         if peer.handshake_unsettled() {
             peer.lease.retry_due(now);
         }
+
         let sent = self.send_handshake(source, &mut peer.lease.handshake, pass.control, pass.stats);
 
         let mut turn = self.drive_peer(source, peer, pass);
         turn.worked |= sent;
+
         if turn.retire {
             route.peer = None;
         }
+
         Some(turn)
     }
 
@@ -292,19 +309,23 @@ impl EndpointWorker {
             retire: false,
             deadline: peer.lease.retry,
         };
+
         if peer.session.is_none() || peer.io.is_none() {
             return turn;
         }
 
         let groups = (self.socket_type == SocketType::Dish).then_some(&self.joined);
         turn.worked |= peer.advance_session(now, groups, pass.stats);
+
         let (Some(session), Some(io)) = (&mut peer.session, &mut peer.io) else {
             return turn;
         };
+
         if session.receive_failed() {
             turn.retire = true;
             return turn;
         }
+
         turn.worked |= io.refill(session) != 0;
         turn.worked |= peer.admit_ingress();
 
@@ -325,6 +346,7 @@ impl EndpointWorker {
                 waker: &peer.pacing.waker,
                 blocked: false,
             };
+
             turn.worked |= transmission.run(now);
             turn.blocked |= transmission.blocked;
 
@@ -342,6 +364,7 @@ impl EndpointWorker {
                 .max(peer.send_retry);
         add_session_stats(pass.stats, &mut peer.sampled, session.stats());
         turn.retire = peer.finished();
+
         turn
     }
 
@@ -373,6 +396,7 @@ impl EndpointWorker {
                 }
             }
         }
+
         (sent, false)
     }
 }
@@ -390,6 +414,7 @@ fn add_session_stats(
     stats.credit_stalls += current.credit_stalls - previous.credit_stalls;
     stats.congestion_stalls += current.congestion_stalls - previous.congestion_stalls;
     stats.ecn_failures += current.ecn_failures - previous.ecn_failures;
+
     *previous = current;
 }
 
@@ -405,6 +430,7 @@ impl Peer {
         let (Some(session), Some(io)) = (&mut self.session, &mut self.io) else {
             return false;
         };
+
         let mut worked = false;
 
         // Final drops of received bodies return credit through `returns`.
@@ -412,10 +438,12 @@ impl Peer {
         if returned != 0 {
             session.release_receive(returned);
         }
+
         if session.has_progress() {
             worked |= omq_proto::payload_pool::with_recycling_batch(|| session.poll_progress());
             io.acknowledge(session.acknowledged_position());
         }
+
         session.handle_timeout(now);
 
         let pool = &self.pool;
@@ -427,6 +455,7 @@ impl Peer {
                 stats,
             )
         }) != 0;
+
         worked
     }
 
@@ -435,6 +464,7 @@ impl Peer {
         let (Some(session), Some(ingress)) = (&mut self.session, &mut self.pacing.ingress) else {
             return false;
         };
+
         // Each newly admitted sequence can carry at most MAX_DATAGRAM
         // bytes. Packed packets reconcile all their units on arrival.
         let wanted = session.pending_receive_credit().min(MESSAGES as u64) as usize * MAX_DATAGRAM;
@@ -447,9 +477,11 @@ impl Peer {
         let Poll::Ready(n) = ingress.poll(&cx, wanted, MAX_DATAGRAM) else {
             return false;
         };
+
         let units = n / MAX_DATAGRAM;
         ingress.finish(n, units * MAX_DATAGRAM);
         session.grant_receive_credit(units);
+
         true
     }
 
@@ -459,6 +491,7 @@ impl Peer {
         let (Some(session), Some(io)) = (&self.session, &self.io) else {
             return false;
         };
+
         session.is_exhausted()
             || (io.draining
                 && session.outstanding() == 0
@@ -479,18 +512,22 @@ impl Transmission<'_> {
         let mut budget = DrainBudget::new(DATA_MESSAGES, BYTES);
         let mut worked = false;
         let mut elapsed = Duration::ZERO;
+
         // A short final fragment ends a GSO batch, not the peer's turn.
         // Keep sending queued batches within the same byte/message/time caps.
         while !budget.exhausted() && elapsed < TURN {
             let Some((messages, bytes)) = self.send_batch(now + elapsed, &budget) else {
                 break;
             };
+
             worked = true;
             if !budget.account_many(messages.max(1), bytes) {
                 break;
             }
+
             elapsed = started.elapsed();
         }
+
         worked
     }
 
@@ -501,6 +538,7 @@ impl Transmission<'_> {
             if let Some(gate) = self.egress.as_deref_mut() {
                 gate.cancel_wait();
             }
+
             return None;
         };
 
@@ -530,6 +568,7 @@ impl Transmission<'_> {
                 staged.length,
             )
         });
+
         // Settle the egress reservation with the bytes actually sent.
         if let Some(gate) = self.egress.as_deref_mut() {
             gate.finish(
@@ -539,6 +578,7 @@ impl Transmission<'_> {
                     .map_or(0, |count| staged.total.min(count * staged.length)),
             );
         }
+
         self.finish_send(result, staged, now)
     }
 
@@ -564,6 +604,7 @@ impl Transmission<'_> {
             self.session
                 .prepare_packed_prefix(first, &mut batch, output, max_tokens)
         }?;
+
         self.stage.packet_ends.push(prepared);
 
         let repair = matches!(token, Transmit::Data { repair: true, .. });
@@ -593,10 +634,12 @@ impl Transmission<'_> {
             if next_length > length {
                 break;
             }
+
             debug_assert!(matches!(next_token, Transmit::Data { repair: false, .. }));
             prepared += count;
             total += next_length;
             self.stage.packet_ends.push(prepared);
+
             if next_length < length {
                 break;
             }
@@ -630,10 +673,12 @@ impl Transmission<'_> {
                         repair: staged.repair,
                     };
                     self.session.commit_transmit(token, now);
+
                     if !staged.repair && self.session.transmit_completes_message(token) {
                         self.stats.sent_messages += 1;
                     }
                 }
+
                 (count != 0).then_some((accepted, staged.total.min(count * staged.length)))
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {

@@ -26,6 +26,7 @@ pub struct RelayReceiver {
 pub(crate) fn relay_channel(capacity: usize) -> (RelaySender, RelayReceiver) {
     let (control_tx, control_rx) = single_inbox::channel(capacity);
     let (data_tx, data_rx) = single_inbox::channel(capacity);
+
     (
         RelaySender {
             control: control_tx,

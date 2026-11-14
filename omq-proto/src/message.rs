@@ -33,13 +33,37 @@ pub use access::MessageIter;
 pub use frame::{Frame, FrameFlags};
 
 mod parts;
+
 pub use parts::MessagePool;
 pub(crate) use parts::Parts;
+
 mod owner;
+
 pub use owner::PayloadOwner;
 use owner::SharedOwner;
+
 mod inline_pair;
+
 use inline_pair::InlinePair;
+
+/// Maximum payload bytes stored inline (no `Bytes` / Arc).
+/// 62 is the largest value that keeps `Payload` at 64 bytes (one cache line).
+pub const MAX_INLINE_PAYLOAD: usize = 62;
+
+/// Maximum bytes stored inline in a `Message` (no heap, no refcount).
+/// 55 is the largest value that keeps `Message` at 64 bytes (one cache line).
+///
+// Bench: PUSH/PULL TCP, 2T/3core (i7-8700B), msg/s:
+//   payload   64B msg (this)    80B msg         delta
+//     16 B     7.3M / 11.8M    6.3M /  9.7M    +15% / +21%
+//     32 B     7.0M / 11.4M    6.0M /  9.3M    +17% / +23%
+//     64 B     5.1M /  7.0M    6.1M /  9.1M    -17% / -23%  (heap threshold)
+//    128 B     4.6M /  6.8M    4.9M /  5.8M     -5% / +18%
+//    256 B     4.1M /  5.3M    4.4M /  4.7M     -6% / +12%
+pub const MAX_INLINE_MESSAGE: usize = 55;
+
+const MAX_INLINE_ROUTED_MESSAGE: usize = 51;
+const INLINE_DELIMITED_FLAG: u8 = 0x80;
 
 /// Error returned by [`Message::try_as_parts`] when the message does not have
 /// the requested number of parts.
@@ -51,10 +75,6 @@ pub struct PartCountError {
     /// Number of parts the message actually has.
     pub actual: usize,
 }
-
-/// Maximum payload bytes stored inline (no `Bytes` / Arc).
-/// 62 is the largest value that keeps `Payload` at 64 bytes (one cache line).
-pub const MAX_INLINE_PAYLOAD: usize = 62;
 
 const _: () = assert!(std::mem::size_of::<Payload>() == 64);
 
@@ -83,21 +103,7 @@ enum PayloadInner {
     Shared(SharedOwner),
 }
 
-/// Maximum bytes stored inline in a `Message` (no heap, no refcount).
-/// 55 is the largest value that keeps `Message` at 64 bytes (one cache line).
-///
-// Bench: PUSH/PULL TCP, 2T/3core (i7-8700B), msg/s:
-//   payload   64B msg (this)    80B msg         delta
-//     16 B     7.3M / 11.8M    6.3M /  9.7M    +15% / +21%
-//     32 B     7.0M / 11.4M    6.0M /  9.3M    +17% / +23%
-//     64 B     5.1M /  7.0M    6.1M /  9.1M    -17% / -23%  (heap threshold)
-//    128 B     4.6M /  6.8M    4.9M /  5.8M     -5% / +18%
-//    256 B     4.1M /  5.3M    4.4M /  4.7M     -6% / +12%
-pub const MAX_INLINE_MESSAGE: usize = 55;
-const MAX_INLINE_ROUTED_MESSAGE: usize = 51;
-
 const _: () = assert!(std::mem::size_of::<Message>() == 64);
-const INLINE_DELIMITED_FLAG: u8 = 0x80;
 
 fn routed_inline_id(data: &[u8; MAX_INLINE_MESSAGE]) -> u32 {
     u32::from_le_bytes(
@@ -167,6 +173,7 @@ impl Message {
     pub(crate) fn push_inline(queue: &mut VecDeque<Self>, len: usize) -> &mut [u8] {
         debug_assert!(len <= MAX_INLINE_MESSAGE);
         queue.push_back(Self::EMPTY_INLINE);
+
         let Some(Self {
             inner:
                 MessageInner::Inline {
@@ -177,6 +184,7 @@ impl Message {
         else {
             unreachable!("inline message was just pushed");
         };
+
         *slot_len = len as u8;
         &mut data[..len]
     }
@@ -198,6 +206,7 @@ impl Message {
         if b.len() <= MAX_INLINE_MESSAGE {
             return Self::from_inline(&b);
         }
+
         Self {
             inner: MessageInner::Single(Payload::from_bytes(b)),
         }
@@ -210,6 +219,7 @@ impl Message {
         if data.len() <= MAX_INLINE_MESSAGE {
             return Self::from_inline(data);
         }
+
         Self::single(Bytes::copy_from_slice(data))
     }
 
@@ -234,12 +244,15 @@ impl Message {
         if parts.size_hint().0 >= 2 {
             return Self::from_payloads_vec(parts.collect());
         }
+
         let Some(first) = parts.next() else {
             return Self::new();
         };
+
         let Some(second) = parts.next() else {
             return Self::from_payload(first);
         };
+
         Self::from_payloads_vec(
             std::iter::once(first)
                 .chain(std::iter::once(second))
@@ -266,6 +279,7 @@ impl Message {
         debug_assert!(data.len() <= MAX_INLINE_MESSAGE);
         let mut buf = [0u8; MAX_INLINE_MESSAGE];
         buf[..data.len()].copy_from_slice(data);
+
         Self {
             inner: MessageInner::Inline {
                 len: data.len() as u8,
@@ -351,11 +365,13 @@ impl PartialEq for Message {
         if n != other.len() {
             return false;
         }
+
         for i in 0..n {
             if self.get(i) != other.get(i) {
                 return false;
             }
         }
+
         true
     }
 }
@@ -368,6 +384,7 @@ impl std::fmt::Debug for Message {
         for b in self {
             list.entry(&b);
         }
+
         list.finish()
     }
 }

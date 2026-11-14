@@ -104,6 +104,7 @@ impl ProxyCtx {
             capture.clone(),
             control.clone(),
         ];
+
         for sock in sockets.into_iter().flatten() {
             ensure_materialized(&sock)?;
         }
@@ -152,6 +153,7 @@ impl ProxyCtx {
                         Ok(false) => {}
                         Err(e) => return crate::error::fail(e),
                     }
+
                     match self.try_forward_available(direction, &mut fe_pending, &mut be_pending) {
                         Ok(true) => {
                             preferred = direction.opposite();
@@ -166,6 +168,7 @@ impl ProxyCtx {
             if self.frontend.ctx.is_effectively_terminated() {
                 return crate::error::fail(crate::error::ETERM);
             }
+
             if self.wait_for_events(state, fe_pending.as_ref(), be_pending.as_ref()) < 0 {
                 return -1;
             }
@@ -181,19 +184,23 @@ impl ProxyCtx {
         if !self.direction_enabled(direction) {
             return Ok(false);
         }
+
         let pending = match direction {
             Direction::FrontendToBackend => fe_pending,
             Direction::BackendToFrontend => be_pending,
         };
+
         if !pending.as_ref().is_some_and(Pending::is_finished) {
             return Ok(false);
         }
+
         let finished = pending.take().expect("finished pending send");
         match finished.send.take_result().expect("finished send result") {
             Ok(()) => {
                 if let Some(capture) = &self.capture {
                     let _ = try_send_message(capture, finished.copy);
                 }
+
                 Ok(true)
             }
             Err(error) => Err(map_send_err(self.target(direction), &error)),
@@ -209,6 +216,7 @@ impl ProxyCtx {
         if !self.direction_enabled(direction) {
             return Ok(false);
         }
+
         match direction {
             Direction::FrontendToBackend if fe_pending.is_some() => return Ok(false),
             Direction::BackendToFrontend if be_pending.is_some() => return Ok(false),
@@ -218,10 +226,12 @@ impl ProxyCtx {
         let Some(first) = self.try_recv(direction)? else {
             return Ok(false);
         };
+
         let pending = match direction {
             Direction::FrontendToBackend => fe_pending,
             Direction::BackendToFrontend => be_pending,
         };
+
         self.forward_burst(direction, first, pending)?;
         Ok(true)
     }
@@ -241,6 +251,7 @@ impl ProxyCtx {
                         copy: returned.clone(),
                         send: spawn_send_message(self.target(direction), returned)?,
                     });
+
                     return Ok(());
                 }
             }
@@ -248,11 +259,14 @@ impl ProxyCtx {
             if n + 1 == self.burst_size {
                 return Ok(());
             }
+
             let Some(next) = self.try_recv(direction)? else {
                 return Ok(());
             };
+
             msg = next;
         }
+
         Ok(())
     }
 
@@ -263,11 +277,13 @@ impl ProxyCtx {
     ) -> Result<SendMessageAttempt, libc::c_int> {
         let copy = msg.clone();
         let attempt = try_send_message(self.target(direction), msg)?;
+
         if matches!(attempt, SendMessageAttempt::Sent)
             && let Some(capture) = &self.capture
         {
             let _ = try_send_message(capture, copy);
         }
+
         Ok(attempt)
     }
 
@@ -282,6 +298,7 @@ impl ProxyCtx {
         let Some(control) = &self.control else {
             return Ok(None);
         };
+
         let mut cmd = [0u8; 64];
         let rc = zmq_recv(
             self.control_ptr,
@@ -289,6 +306,7 @@ impl ProxyCtx {
             cmd.len(),
             ZMQ_DONTWAIT,
         );
+
         if rc < 0 {
             let errno = crate::error::zmq_errno();
             return if errno == libc::EAGAIN {
@@ -297,6 +315,7 @@ impl ProxyCtx {
                 Err(errno)
             };
         }
+
         if rc == 0 {
             self.send_control_ack(control);
             return Ok(Some(ControlAction::Continue));
@@ -315,6 +334,7 @@ impl ProxyCtx {
             "TERMINATE" | "KILL" => ControlAction::Terminate,
             _ => ControlAction::Continue,
         };
+
         self.send_control_ack(control);
         Ok(Some(action))
     }
@@ -342,25 +362,30 @@ impl ProxyCtx {
             events,
             revents: 0,
         };
+
         if active && self.fe_to_be_enabled {
             items.push(match fe_pending {
                 None => item(self.frontend_ptr, ZMQ_POLLIN),
                 Some(_) => item(self.backend_ptr, ZMQ_POLLOUT),
             });
         }
+
         if active && self.be_to_fe_enabled {
             items.push(match be_pending {
                 None => item(self.backend_ptr, ZMQ_POLLIN),
                 Some(_) => item(self.frontend_ptr, ZMQ_POLLOUT),
             });
         }
+
         if self.control.is_some() {
             items.push(item(self.control_ptr, ZMQ_POLLIN));
         }
+
         let mut waiter = crate::notify::PollWaiter::new(&items);
         if waiter.has_no_handles() {
             return 0;
         }
+
         waiter.prepare_for_wait();
         // Recheck after draining: a later signal stays visible to the wait.
         let input = items.iter().any(|item| {
@@ -373,9 +398,11 @@ impl ProxyCtx {
             .into_iter()
             .flatten()
             .any(Pending::is_finished);
+
         if input || sent || self.frontend.ctx.is_effectively_terminated() {
             return 0;
         }
+
         let rc = waiter.wait(-1, &mut items);
         if rc < 0 { rc } else { 0 }
     }
@@ -406,6 +433,7 @@ fn socket_arc(ptr: *mut c_void) -> Result<Arc<OmqSocket>, libc::c_int> {
     if ptr.is_null() {
         return Err(libc::EFAULT);
     }
+
     // SAFETY: C callers pass null or a pointer from this API.
     Ok(unsafe { crate::handle::socket(ptr) }?.clone())
 }

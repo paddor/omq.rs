@@ -146,6 +146,7 @@ impl ReceiveReceipt {
         let source = self.lane.as_ref().ok_or_else(|| {
             Error::Protocol("unshift requires a receipt with a lane claim".into())
         })?;
+
         Ok((source.fanin()?, self.fanin_bytes))
     }
 
@@ -195,17 +196,21 @@ impl PeerReceiver {
         if !self.shared.control_pending.swap(false, Ordering::AcqRel) {
             return;
         }
+
         // At most max_peers entries, one per registered lane. Flags coalesce
         // churn and receipt release without retaining historical generations.
         let mut index = 0;
+
         while index < self.paused.len() {
             let state = &self.paused[index].state;
             let status = state.status.load(Ordering::Acquire);
             let retired = status & QueueState::LIVE != QueueState::LIVE;
+
             if !retired && status & QueueState::CLAIMED != 0 {
                 index += 1;
                 continue;
             }
+
             if retired {
                 state.retire();
                 state.release_claim();
@@ -215,6 +220,7 @@ impl PeerReceiver {
                     "live receipt cannot also be held"
                 );
             }
+
             let entry = self.paused.swap_remove(index);
             // Drop the one held frame. Unread stale entries use the ordinary
             // count/byte drain budgets, independent of idle producer lifetime.
@@ -238,9 +244,11 @@ impl PeerReceiver {
     ) -> Result<(ReceiveReceipt, Message)> {
         let source = source.map(ReceiveLane::peer).transpose()?;
         self.process_source_changes();
+
         if self.shared.closed.load(Ordering::Acquire) {
             return Err(Error::Closed);
         }
+
         self.yield_pending = false;
         if let Some(source) = source {
             if !self.belongs(source) {
@@ -248,9 +256,11 @@ impl PeerReceiver {
                     "receive lane belongs to another socket".into(),
                 ));
             }
+
             if !source.state.live() {
                 return Err(Error::Closed);
             }
+
             if let Some(entry) = self
                 .paused
                 .iter_mut()
@@ -259,6 +269,7 @@ impl PeerReceiver {
                 let held = entry.held.take().ok_or(Error::WouldBlock)?;
                 return Ok(Self::receipt(&self.shared, source.state.clone(), held));
             }
+
             let receiver = self.receiver.as_mut().ok_or(Error::Closed)?;
             let item = match receiver.try_recv_from(&source.state.lane) {
                 Ok(item) => item,
@@ -268,10 +279,13 @@ impl PeerReceiver {
                 }
                 Err(mpsc::TryRecvError::Disconnected) => return Err(Error::Closed),
             };
+
             return self.claim(item);
         }
+
         self.shared.data.begin_drain();
         let mut budget = DrainBudget::WORKER;
+
         while !budget.exhausted() {
             let receiver = self.receiver.as_mut().ok_or(Error::Closed)?;
             if let Ok(item) = receiver.try_recv_fair() {
@@ -282,12 +296,15 @@ impl PeerReceiver {
             } else {
                 receiver.release_consumed();
                 self.observed_empty = true;
+
                 if self.shared.data.clear_after(true) {
                     self.shared.blocking.wake();
                 }
+
                 return Err(Error::WouldBlock);
             }
         }
+
         self.receiver
             .as_mut()
             .expect("live receive")
@@ -295,6 +312,7 @@ impl PeerReceiver {
         self.yield_pending = true;
         self.shared.data.clear_after(false);
         self.shared.data.reschedule();
+
         Err(Error::WouldBlock)
     }
 
@@ -308,9 +326,11 @@ impl PeerReceiver {
             state: item.state.clone(),
             held: None,
         });
+
         if !item.state.claim() {
             self.shared.source_changed();
         }
+
         self.observed_empty = false;
         self.wake_waiter();
         Ok(Self::receipt(&self.shared, item.state, item.body))
@@ -344,6 +364,7 @@ impl PeerReceiver {
     ) -> Result<(ReceiveReceipt, Message)> {
         let peer_source = source.map(ReceiveLane::peer).transpose()?;
         let shared = receiver.lock().shared.clone();
+
         loop {
             let seen = peer_source.map(|source| source.state.data.generation());
             let (result, yielded) = {
@@ -351,14 +372,17 @@ impl PeerReceiver {
                 let result = receiver.try_recv_with_receipt(source);
                 (result, receiver.take_yield_pending())
             };
+
             match result {
                 Err(Error::WouldBlock) => {}
                 result => return result,
             }
+
             if yielded {
                 tokio::task::yield_now().await;
                 continue;
             }
+
             if let Some(source) = peer_source {
                 source
                     .state
@@ -393,15 +417,18 @@ impl PeerReceiver {
                 "unshift requires a receipt with a lane claim".into(),
             ))
         };
+
         if let Some(error) = error {
             return Err(UnshiftError { error, message });
         }
+
         let source = receipt
             .lane
             .as_ref()
             .expect("validated receipt")
             .peer()
             .expect("validated source");
+
         let Some(entry) = self
             .paused
             .iter_mut()
@@ -412,12 +439,14 @@ impl PeerReceiver {
                 message,
             });
         };
+
         if entry.held.is_some() {
             return Err(UnshiftError {
                 error: Error::Protocol("receive source already holds a message".into()),
                 message,
             });
         }
+
         message.bound_storage();
         if !receipt
             .permit
@@ -429,12 +458,14 @@ impl PeerReceiver {
                 message,
             });
         }
+
         entry.held = Some(QueuedMessage::with_permit(
             message,
             receipt.permit.take().expect("receipt permit"),
         ));
         source.state.data.notify_changed();
         receipt.lane = None;
+
         Ok(())
     }
 }

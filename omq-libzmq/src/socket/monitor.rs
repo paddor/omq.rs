@@ -20,16 +20,19 @@ pub extern "C" fn zmq_socket_monitor(
     if sock_ptr.is_null() {
         return fail(crate::error::ENOTSOCK);
     }
+
     // addr == NULL means stop monitoring.
     if addr.is_null() {
         return 0;
     }
+
     // SAFETY: C callers pass null or a pointer from this API.
     let sock = c_try!(unsafe { crate::handle::socket(sock_ptr) });
     // SAFETY: addr is non-null (checked above); caller guarantees a valid C string.
     let Ok(addr_str) = unsafe { CStr::from_ptr(addr) }.to_str() else {
         return fail(libc::EINVAL);
     };
+
     let addr_str = addr_str.to_owned();
     let events_mask = events as u16;
 
@@ -66,6 +69,7 @@ pub extern "C" fn zmq_socket_monitor(
 
         Ok(())
     }));
+
     0
 }
 
@@ -81,6 +85,7 @@ pub extern "C" fn zmq_socket_monitor_versioned(
     if event_version != 1 || events > c_int::MAX as u64 {
         return fail(crate::error::ENOTSUP);
     }
+
     zmq_socket_monitor(sock_ptr, addr, events as c_int)
 }
 
@@ -90,6 +95,7 @@ pub extern "C" fn zmq_socket_monitor_pipes_stats(sock_ptr: *mut c_void) -> c_int
     if sock_ptr.is_null() {
         return fail(crate::error::ENOTSOCK);
     }
+
     fail(crate::error::ENOTSUP)
 }
 
@@ -103,6 +109,7 @@ pub extern "C" fn zmq_socket_get_peer_state(
     if socket.is_null() {
         return fail(crate::error::ENOTSOCK);
     }
+
     fail(crate::error::ENOTSUP)
 }
 
@@ -125,6 +132,7 @@ fn monitor_frame(event_id: u16, value: i32, endpoint: &str) -> omq_tokio::Messag
     let mut header = [0u8; 6];
     header[0..2].copy_from_slice(&event_id.to_le_bytes());
     header[2..6].copy_from_slice(&value.to_le_bytes());
+
     omq_tokio::Message::multipart([
         bytes::Bytes::copy_from_slice(&header),
         bytes::Bytes::copy_from_slice(endpoint.as_bytes()),

@@ -1,8 +1,5 @@
 #![cfg(feature = "soak")]
 
-#[global_allocator]
-static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
-
 mod soak_common;
 
 use std::sync::Arc;
@@ -11,6 +8,9 @@ use std::time::{Duration, Instant};
 use std::{fs, io::Write};
 
 use omq_tokio::{Message, Options, Socket, SocketType};
+
+#[global_allocator]
+static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
 
 const MIN_MSG_SIZE: usize = 128 * 1024;
 const MAX_MSG_SIZE: usize = 8 * 1024 * 1024;
@@ -25,6 +25,7 @@ fn offset_payload_byte(offset: usize) -> u8 {
     let mut byte = (offset as u8).wrapping_mul(31);
     byte ^= ((offset >> 8) as u8).wrapping_mul(17);
     byte ^= ((offset >> 16) as u8).wrapping_mul(13);
+
     byte
 }
 
@@ -36,6 +37,7 @@ fn message_size(seq: u64) -> usize {
     if seq == 0 {
         return PROBE_MSG_SIZE;
     }
+
     let span = MAX_MSG_SIZE - MIN_MSG_SIZE + 1;
     MIN_MSG_SIZE + (seq as usize - 1).wrapping_mul(SIZE_STRIDE) % span
 }
@@ -47,9 +49,11 @@ fn build_payload(seq: u64) -> Vec<u8> {
     buf[..8].copy_from_slice(&CANARY_MAGIC.to_le_bytes());
     buf[8..16].copy_from_slice(&seq.to_le_bytes());
     buf[16..HEADER_SIZE].copy_from_slice(&(size as u64).to_le_bytes());
+
     for (i, slot) in buf.iter_mut().enumerate().skip(HEADER_SIZE) {
         *slot = offset_payload_byte(i) ^ mask;
     }
+
     buf
 }
 
@@ -59,18 +63,22 @@ fn best_source_shift(data: &[u8], seq: u64, offset: usize) -> (isize, usize, usi
     let end = offset.saturating_add(SHIFT_WINDOW / 2).min(data.len());
     let len = end - start;
     let mut best = (0, 0, len);
+
     for delta in -SHIFT_SCAN..=SHIFT_SCAN {
         let mut matches = 0usize;
         for (pos, &byte) in data.iter().enumerate().take(end).skip(start) {
             let Ok(pos) = isize::try_from(pos) else {
                 continue;
             };
+
             let Some(source) = pos.checked_add(delta) else {
                 continue;
             };
+
             let Ok(source) = usize::try_from(source) else {
                 continue;
             };
+
             if source >= HEADER_SIZE
                 && source < data.len()
                 && byte == (offset_payload_byte(source) ^ mask)
@@ -78,10 +86,12 @@ fn best_source_shift(data: &[u8], seq: u64, offset: usize) -> (isize, usize, usi
                 matches += 1;
             }
         }
+
         if matches > best.1 {
             best = (delta, matches, len);
         }
     }
+
     best
 }
 
@@ -96,6 +106,7 @@ fn corruption_context(data: &[u8], seq: u64, offset: usize) -> String {
         .map(|pos| offset_payload_byte(pos) ^ mask)
         .collect();
     let (delta, matches, window_len) = best_source_shift(data, seq, offset);
+
     format!(
         "xor=0x{xor:02x}, single_bit={}, best_source_delta={delta}, \
          shift_window_matches={matches}/{window_len}, \
@@ -118,6 +129,7 @@ fn dump_corruption_artifact(data: &[u8], seq: u64, offset: usize) -> Option<Stri
 
     let mask = seq_mask(seq);
     let size = message_size(seq);
+
     let expected = (0..size)
         .map(|i| {
             if i < 8 {
@@ -135,9 +147,11 @@ fn dump_corruption_artifact(data: &[u8], seq: u64, offset: usize) -> Option<Stri
     fs::write(&got_path, data).ok()?;
     fs::write(&expected_path, expected).ok()?;
     let mut meta = fs::File::create(&meta_path).ok()?;
+
     let got = data[offset];
     let expected_byte = offset_payload_byte(offset) ^ seq_mask(seq);
     let xor = got ^ expected_byte;
+
     writeln!(meta, "seq={seq}").ok()?;
     writeln!(meta, "offset={offset}").ok()?;
     writeln!(meta, "got={got}").ok()?;
@@ -146,6 +160,7 @@ fn dump_corruption_artifact(data: &[u8], seq: u64, offset: usize) -> Option<Stri
     writeln!(meta, "single_bit={}", xor.is_power_of_two()).ok()?;
     writeln!(meta, "got_path={}", got_path.display()).ok()?;
     writeln!(meta, "expected_path={}", expected_path.display()).ok()?;
+
     Some(meta_path.display().to_string())
 }
 
@@ -211,6 +226,7 @@ impl PayloadStats {
             self.reorders += 1;
             self.max_reorder_distance = self.max_reorder_distance.max(distance);
         }
+
         self.max_seq = self.max_seq.max(seq);
         self.max_size = self.max_size.max(data.len());
         self.count += 1;
@@ -226,16 +242,19 @@ fn large_throughput_options() -> Options {
     if std::env::var_os("OMQ_SOAK_DISABLE_LARGE_PATH").is_some() {
         options = options.disable_large_message_path();
     }
+
     if let Ok(bytes) = std::env::var("OMQ_SOAK_TCP_BUF_BYTES")
         && let Ok(bytes) = bytes.parse()
     {
         options = options.recv_buffer_size(bytes).send_buffer_size(bytes);
     }
+
     if let Ok(bytes) = std::env::var("OMQ_SOAK_ARENA_THRESHOLD")
         && let Ok(bytes) = bytes.parse()
     {
         options = options.arena_threshold(bytes);
     }
+
     options
 }
 
@@ -257,6 +276,7 @@ fn spawn_sender(push: Socket, counters: Arc<Counters>) -> tokio::task::JoinHandl
         while !counters.stop.load(Ordering::Relaxed) {
             let payload = build_payload(seq);
             let payload_len = payload.len() as u64;
+
             if let Ok(Ok(())) =
                 tokio::time::timeout(Duration::from_secs(2), push.send(Message::single(payload)))
                     .await
@@ -364,6 +384,7 @@ fn assert_payload_stats(st: &mut PayloadStats, total_sent: u64) {
     } else {
         0.0
     };
+
     assert!(
         drop_pct < 5.0 || st.dropped <= 16,
         "dropped {:.1}% of messages ({}/{})",

@@ -33,17 +33,21 @@ pub(super) fn configure(options: &mut Options) {
 fn configure_quic(options: &mut Options) {
     options.quic.server_cert_pem = read_pem("OMQ_BENCH_TLS_CERT_FILE");
     options.quic.server_key_pem = read_pem("OMQ_BENCH_TLS_KEY_FILE");
+
     if let Some(trust) = read_pem("OMQ_BENCH_TLS_TRUST_FILE") {
         options.quic.trust_pem = Some(trust);
         options.quic.trust_system = false;
     }
+
     if let Ok(name) = std::env::var("OMQ_BENCH_TLS_NAME") {
         options.quic.server_name = Some(name);
     }
+
     if QUIC_ENDPOINT.get().copied().unwrap_or(false) {
         options.recv_buffer_size = Some(QUIC_SOCKET_BUFFER);
         options.send_buffer_size = Some(QUIC_SOCKET_BUFFER);
     }
+
     if let Ok(window) = std::env::var("OMQ_BENCH_QUIC_STREAM_WINDOW") {
         options.quic.stream_window = window.parse().expect("OMQ_BENCH_QUIC_STREAM_WINDOW");
     }
@@ -54,13 +58,16 @@ fn configure_wss(options: &mut Options) {
     if let Some(cert) = read_pem("OMQ_BENCH_TLS_CERT_FILE") {
         options.wss_tls.server_cert_pem = Some(cert);
     }
+
     if let Some(key) = read_pem("OMQ_BENCH_TLS_KEY_FILE") {
         options.wss_tls.server_key_pem = Some(key);
     }
+
     if let Some(trust) = read_pem("OMQ_BENCH_TLS_TRUST_FILE") {
         options.wss_tls.trust_pem = Some(trust);
         options.wss_tls.trust_system = false;
     }
+
     if let Ok(name) = std::env::var("OMQ_BENCH_TLS_NAME") {
         options.wss_tls.hostname = Some(name);
     }

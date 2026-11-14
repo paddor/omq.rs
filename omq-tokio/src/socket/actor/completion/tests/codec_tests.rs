@@ -21,6 +21,7 @@ impl RemoteWire {
         let (commands, inbox) = mpsc::channel(16);
         let (events, receive) = mpsc::channel(16);
         let cancel = CancellationToken::new();
+
         let driver = ConnectionDriver::new(
             stream,
             Connection::new(ConnectionConfig::new(Role::Client, SocketType::Sub)),
@@ -29,9 +30,11 @@ impl RemoteWire {
             0,
             cancel.clone(),
         );
+
         let (encoder, decoder) = MessageEncoder::for_endpoint(endpoint, options)
             .unwrap()
             .unzip();
+
         Self {
             events: receive,
             commands,
@@ -48,23 +51,28 @@ impl RemoteWire {
         } else {
             smallvec::smallvec![message.clone()]
         };
+
         let mut decoded = Vec::new();
         for expected in expected {
             let (_, event) = self.events.recv().await.unwrap();
             let PeerEvent::Event(Event::Message(actual)) = event else {
                 panic!("unexpected wire event: {event:?}");
             };
+
             assert!(
                 actual == expected,
                 "materialized bytes must match the captured codec"
             );
+
             let plain = if let Some(decoder) = &mut self.decoder {
                 decoder.decode(actual).unwrap()
             } else {
                 Some(actual)
             };
+
             decoded.extend(plain);
         }
+
         assert!(
             decoded == [message.clone()],
             "receiver must recover the original message"
@@ -80,6 +88,7 @@ fn endpoint(kind: Option<CompressionKind>) -> Endpoint {
             1,
         );
     }
+
     let _ = kind;
     "tcp://127.0.0.1:1".parse().unwrap()
 }
@@ -106,6 +115,7 @@ async fn attach_on_route(
         leftover: Bytes::new(),
         setup: None,
     };
+
     let event = match route_id {
         Some(route_id) => InternalEvent::Connected {
             conn,
@@ -118,17 +128,20 @@ async fn attach_on_route(
             options,
         },
     };
+
     driver.handle_internal_event(event).await;
     let (id, event) = driver.mail.peer_control_rx.recv().await.unwrap();
     assert!(matches!(
         event,
         PeerEvent::Event(Event::HandshakeSucceeded { .. })
     ));
+
     driver.handle_peer_output(id, event).await;
     assert!(matches!(
         remote.events.recv().await.unwrap().1,
         PeerEvent::Event(Event::HandshakeSucceeded { .. })
     ));
+
     remote
         .commands
         .send(PeerDriverCommand::ActivateDataPlane)
@@ -141,12 +154,14 @@ async fn attach_on_route(
         )))
         .await
         .unwrap();
+
     let (id, event) = driver.mail.peer_control_rx.recv().await.unwrap();
     assert!(matches!(
         event,
         PeerEvent::Event(Event::Command(Command::Subscribe(_)))
     ));
     driver.handle_peer_output(id, event).await;
+
     remote
 }
 
@@ -154,6 +169,7 @@ async fn stop_dial_transport(driver: &mut SocketDriver) -> u64 {
     assert_eq!(driver.endpoints.dialers.len(), 1);
     let dialer = &mut driver.endpoints.dialers[0];
     dialer.task.stop().await;
+
     dialer.route_id
 }
 
@@ -162,10 +178,12 @@ async fn stop(driver: &mut SocketDriver, peers: Vec<RemoteWire>) {
     for peer in driver.peers.values() {
         peer.handle.cancel.cancel();
     }
+
     for remote in peers {
         remote.cancel.cancel();
         remote.task.await.unwrap().unwrap();
     }
+
     for peer in driver.peers.values_mut() {
         if let Some(task) = peer.task.take() {
             task.await.unwrap();
@@ -199,20 +217,24 @@ async fn queued_generations_materialize_original_codec_settings_after_defaults_c
                 attach(&mut driver, endpoint(kind), first).await,
                 attach(&mut driver, endpoint(kind), second).await,
             ];
+
             for _ in 0..3 {
                 let message = Message::multipart([
                     Bytes::from_static(b"topic"),
                     Bytes::from(vec![0x5a; 4096]),
                 ]);
                 publish(&driver, &message).await;
+
                 for peer in &mut peers {
                     peer.assert_publication(&message).await;
                 }
             }
+
             for peer in driver.peers.values() {
                 assert_eq!(peer.origin.options.max_message_size, Some(8192));
                 assert_eq!(peer.origin.options.max_recv_dict_size, Some(4096));
             }
+
             stop(&mut driver, peers).await;
         }
     })
@@ -235,6 +257,7 @@ async fn connect_by_name(
         port: 1,
     });
     let (ack, pending_ack) = futures::channel::oneshot::channel();
+
     driver
         .handle_command(SocketCommand::Connect {
             endpoint: named,
@@ -245,6 +268,7 @@ async fn connect_by_name(
             ack,
         })
         .await;
+
     assert_eq!(driver.endpoints.pending_endpoints.len(), 1);
     (
         *driver.endpoints.pending_endpoints.keys().next().unwrap(),
@@ -265,6 +289,7 @@ async fn finish_connect(driver: &mut SocketDriver, id: u64, resolved: Endpoint) 
             }),
         )
         .await;
+
     completed.await.unwrap().unwrap();
 }
 
@@ -290,9 +315,11 @@ async fn resolution_handoff_and_peer_reconnect_retain_the_operation_snapshot() {
         ] {
             let (mut driver, _consumer) = fixture_for(SocketType::Pub);
             driver.options.reconnect = ReconnectPolicy::Fixed(Duration::from_millis(10));
+
             // Hold the only admission so the dialer cannot connect on its own.
             driver.endpoints.setup_admission = crate::transport::setup::Admission::new(1);
             let held = driver.endpoints.setup_admission.try_acquire().unwrap();
+
             let resolved = endpoint(kind);
             let (id, _pending_ack) = connect_by_name(&mut driver, &resolved).await;
 
@@ -300,8 +327,10 @@ async fn resolution_handoff_and_peer_reconnect_retain_the_operation_snapshot() {
             // the options captured by connect().
             driver.options.compression_threshold = Some(8192);
             driver.options.reconnect = ReconnectPolicy::Disabled;
+
             finish_connect(&mut driver, id, resolved.clone()).await;
             let route = stop_dial_transport(&mut driver).await;
+
             let original = driver.endpoints.dialers[0].options.clone();
             assert_eq!(original.compression_threshold, Some(64));
             assert_eq!(
@@ -315,6 +344,7 @@ async fn resolution_handoff_and_peer_reconnect_retain_the_operation_snapshot() {
             let message = Message::single(Bytes::from(vec![0x5a; 4096]));
             publish(&driver, &message).await;
             remote.assert_publication(&message).await;
+
             let peer_id = *driver.peers.keys().next().unwrap();
             assert!(Arc::ptr_eq(
                 &driver.peers[&peer_id].origin.options,
@@ -325,12 +355,14 @@ async fn resolution_handoff_and_peer_reconnect_retain_the_operation_snapshot() {
             let held = driver.endpoints.setup_admission.try_acquire().unwrap();
             remote.cancel.cancel();
             remote.task.await.unwrap().unwrap();
+
             driver
                 .handle_internal_event(InternalEvent::PeerClosed {
                     peer_id,
                     reason: DisconnectReason::PeerClosed,
                 })
                 .await;
+
             let route = stop_dial_transport(&mut driver).await;
             assert!(Arc::ptr_eq(&driver.endpoints.dialers[0].options, &original));
             drop(held);
@@ -358,20 +390,25 @@ async fn old_listener_dictionary_survives_new_profile_and_late_subscriber() {
             dict: Some(Bytes::from_static(b"new-dictionary")),
             ..CompressionOptions::default()
         }));
+
         let endpoint = endpoint(Some(CompressionKind::Lz4));
         let mut peers = vec![attach(&mut driver, endpoint.clone(), first.clone()).await];
+
         let message =
             Message::multipart([Bytes::from_static(b"topic"), Bytes::from(vec![0x5a; 4096])]);
         publish(&driver, &message).await;
         peers[0].assert_publication(&message).await;
+
         peers.push(attach(&mut driver, endpoint.clone(), second).await);
         peers.push(attach(&mut driver, endpoint, first).await);
+
         for _ in 0..2 {
             publish(&driver, &message).await;
             for peer in &mut peers {
                 peer.assert_publication(&message).await;
             }
         }
+
         stop(&mut driver, peers).await;
     })
     .await

@@ -55,8 +55,10 @@ impl WsListener {
         let Ok((setup, deadline)) = self.queue.admit(addr) else {
             return;
         };
+
         let tls_acceptor = self.tls_acceptor.clone();
         let policy = self.policy.clone();
+
         self.queue.push(async move {
             let result = tokio::time::timeout_at(
                 deadline.into(),
@@ -66,6 +68,7 @@ impl WsListener {
             .map_err(|_| Error::HandshakeFailed("transport setup timeout".into()))
             .and_then(std::convert::identity)
             .map(|accepted| (accepted, setup));
+
             (addr, result)
         });
     }
@@ -87,11 +90,13 @@ pub(crate) async fn bind(
             )));
         }
     };
+
     omq_proto::proto::ws_handshake::validate_ws_address(host, path)?;
     let policy = std::sync::Arc::new(super::upgrade::ServerPolicy::new(path, options)?);
     let addr = crate::transport::dns::bind_addr(host, port).await?;
     let listener = crate::transport::tcp::reuse_addr_bind(addr)?;
     let local = listener.local_addr().map_err(Error::Io)?;
+
     let resolved = match endpoint {
         Endpoint::Ws { .. } => Endpoint::Ws {
             host: Host::Ip(local.ip()),
@@ -105,6 +110,7 @@ pub(crate) async fn bind(
         },
         _ => unreachable!(),
     };
+
     Ok(WsListener {
         inner: listener,
         queue: SetupQueue::new(setup, resolved.clone(), 32),
@@ -115,50 +121,4 @@ pub(crate) async fn bind(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::socket::monitor::MonitorPublisher;
-    use crate::transport::setup::Admission;
-    use std::time::Duration;
-    use tokio_util::sync::CancellationToken;
-
-    #[tokio::test]
-    async fn raw_accepts_respect_both_caps_and_release_every_reservation_on_drop() {
-        for (socket_limit, expected) in [(3, 3), (64, 32)] {
-            let admission = Admission::new(socket_limit);
-            let endpoint = "ws://127.0.0.1:0/".parse().unwrap();
-            let mut listener = bind(
-                &endpoint,
-                None,
-                AcceptSetup {
-                    admission: admission.clone(),
-                    timeout: Duration::from_secs(30),
-                    cancel: CancellationToken::new(),
-                    monitor: MonitorPublisher::new(omq_proto::options::DEFAULT_MONITOR_CAPACITY),
-                    io_pool: crate::context::IoPoolHandle::none(),
-                },
-                &omq_proto::Options::default(),
-            )
-            .await
-            .unwrap();
-            let address = listener.inner.local_addr().unwrap();
-            let mut clients = Vec::new();
-            for _ in 0..=expected {
-                clients.push(TcpStream::connect(address).await.unwrap());
-                let (stream, peer) = listener.inner.accept().await.unwrap();
-                listener.start_setup(stream, peer);
-            }
-            assert_eq!(listener.queue.len(), expected);
-            let free: Vec<_> = (expected..socket_limit)
-                .map(|_| admission.try_acquire().unwrap())
-                .collect();
-            assert!(admission.try_acquire().is_none());
-            drop(free);
-            drop(listener);
-            let released: Vec<_> = (0..socket_limit)
-                .map(|_| admission.try_acquire().unwrap())
-                .collect();
-            assert_eq!(released.len(), socket_limit);
-        }
-    }
-}
+mod tests;

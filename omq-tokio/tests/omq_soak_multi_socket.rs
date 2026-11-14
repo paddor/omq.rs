@@ -1,13 +1,13 @@
 #![cfg(feature = "soak")]
 
-#[global_allocator]
-static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
-
 mod soak_common;
 
 use std::time::{Duration, Instant};
 
 use omq_tokio::{Message, Options, Socket, SocketType};
+
+#[global_allocator]
+static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
 
 struct SocketPair {
     sender: Socket,
@@ -153,6 +153,7 @@ fn soak_multi_socket() {
             "[multi_socket] done: {total_exchanged} messages across 50 pairs in {:.1}s",
             start.elapsed().as_secs_f64(),
         );
+
         tracker
     });
 

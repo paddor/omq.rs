@@ -31,6 +31,7 @@ fn resolved_addr(ep: &Endpoint) -> std::net::SocketAddr {
                 Host::Ip(ip) => *ip,
                 _ => panic!("expected IP host"),
             };
+
             std::net::SocketAddr::new(ip, *port)
         }
         _ => panic!("expected TCP endpoint"),
@@ -42,10 +43,12 @@ async fn stream_connect_identity_queues_before_bind_with_bounded_capacity() {
     let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = reserved.local_addr().unwrap();
     drop(reserved);
+
     let stream = Socket::new(SocketType::Stream, Options::default().send_hwm(1));
     stream.connect(tcp_ep(addr.port())).await.unwrap();
     let identity = stream.last_stream_routing_id().await.unwrap().unwrap();
     assert!(!identity.is_empty());
+
     stream
         .try_send(Message::multipart([
             identity.clone(),
@@ -63,12 +66,14 @@ async fn stream_connect_identity_queues_before_bind_with_bounded_capacity() {
         .await
         .unwrap()
         .unwrap();
+
     let notification = tokio::time::timeout(Duration::from_secs(2), stream.recv())
         .await
         .unwrap()
         .unwrap();
     assert_eq!(notification.part_bytes(0).unwrap(), identity);
     assert!(notification.part_bytes(1).unwrap().is_empty());
+
     tokio::time::timeout(Duration::from_secs(2), stream.send(after))
         .await
         .unwrap()
@@ -87,9 +92,11 @@ async fn stream_disconnect_removes_pending_route() {
     let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = tcp_ep(reserved.local_addr().unwrap().port());
     drop(reserved);
+
     let stream = Socket::new(SocketType::Stream, Options::default());
     stream.connect(endpoint.clone()).await.unwrap();
     let identity = stream.last_stream_routing_id().await.unwrap().unwrap();
+
     let message = Message::multipart([identity, Bytes::from_static(b"queued")]);
     stream.try_send(message.clone()).unwrap();
     stream.disconnect(endpoint).await.unwrap();
@@ -109,6 +116,7 @@ async fn stream_reconnect_replaces_identity_and_invalidates_old_route() {
         .await
         .unwrap();
     let original = stream.last_stream_routing_id().await.unwrap().unwrap();
+
     let (peer, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
         .await
         .unwrap()
@@ -118,6 +126,7 @@ async fn stream_reconnect_replaces_identity_and_invalidates_old_route() {
         .unwrap()
         .unwrap();
     assert_eq!(connected.part_bytes(0).unwrap(), original);
+
     drop(peer);
     let disconnected = tokio::time::timeout(Duration::from_secs(2), stream.recv())
         .await
@@ -125,6 +134,7 @@ async fn stream_reconnect_replaces_identity_and_invalidates_old_route() {
         .unwrap();
     assert_eq!(disconnected.part_bytes(0).unwrap(), original);
     assert!(disconnected.part_bytes(1).unwrap().is_empty());
+
     let (mut peer, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
         .await
         .unwrap()
@@ -139,10 +149,12 @@ async fn stream_reconnect_replaces_identity_and_invalidates_old_route() {
         stream.last_stream_routing_id().await.unwrap(),
         Some(replacement.clone())
     );
+
     assert!(matches!(
         stream.try_send(Message::multipart([original, Bytes::from_static(b"old")])),
         Err(TrySendError::Error(Error::Unroutable))
     ));
+
     stream
         .send(Message::multipart([
             replacement,
@@ -169,6 +181,7 @@ async fn stream_rejects_malformed_sends_without_writing_or_closing() {
         .unwrap()
         .unwrap();
     let identity = connected.part_bytes(0).unwrap();
+
     for message in [
         Message::multipart(Vec::<Bytes>::new()),
         Message::single(identity.clone()),
@@ -187,6 +200,7 @@ async fn stream_rejects_malformed_sends_without_writing_or_closing() {
             Err(TrySendError::Error(Error::Protocol(_)))
         ));
     }
+
     stream
         .send(Message::multipart([identity, Bytes::from_static(b"valid")]))
         .await
@@ -205,12 +219,14 @@ async fn stream_rejects_unknown_and_disconnected_routes() {
     let stream = Socket::new(SocketType::Stream, Options::default());
     assert!(stream.send_ready());
     let ep = stream.bind(tcp_ep(0)).await.unwrap();
+
     let peer = TcpStream::connect(resolved_addr(&ep)).await.unwrap();
     let connected = tokio::time::timeout(Duration::from_secs(2), stream.recv())
         .await
         .unwrap()
         .unwrap();
     let identity = connected.part_bytes(0).unwrap();
+
     drop(peer);
     let disconnected = tokio::time::timeout(Duration::from_secs(2), stream.recv())
         .await
@@ -218,6 +234,7 @@ async fn stream_rejects_unknown_and_disconnected_routes() {
         .unwrap();
     assert_eq!(disconnected.part_bytes(0).unwrap(), identity);
     assert!(disconnected.part_bytes(1).unwrap().is_empty());
+
     for route in [Bytes::from_static(b"unknown"), identity] {
         let message = Message::multipart([route, Bytes::from_static(b"body")]);
         assert!(matches!(
@@ -229,6 +246,7 @@ async fn stream_rejects_unknown_and_disconnected_routes() {
             Err(TrySendError::Error(Error::Unroutable))
         ));
     }
+
     stream.close().await.unwrap();
 }
 
@@ -304,10 +322,12 @@ async fn stream_large_raw_payload_roundtrip() {
             assert!(!chunk.is_empty(), "unexpected empty STREAM notification");
             received.extend_from_slice(&chunk);
         }
+
         received
     })
     .await
     .expect("timed out receiving large raw payload");
+
     assert_eq!(received, payload);
 
     let reply: Vec<u8> = payload.iter().map(|b| b ^ 0xA5).collect();

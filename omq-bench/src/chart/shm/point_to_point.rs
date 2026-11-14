@@ -8,6 +8,11 @@ use std::path::Path;
 const TIMED_BATCH_MESSAGES: u64 = 256;
 const TIMED_BATCH_BYTES: u64 = 1024 * 1024;
 
+const THROUGHPUT: Mode = Mode {
+    latency: false,
+    spin: 0,
+};
+
 /// Throughput, or latency with a receive spin in microseconds.
 #[derive(Clone, Copy)]
 struct Mode {
@@ -15,18 +20,15 @@ struct Mode {
     spin: u64,
 }
 
-const THROUGHPUT: Mode = Mode {
-    latency: false,
-    spin: 0,
-};
-
 fn verified(row: &Value, target: Target<'_, Mode>) -> bool {
     if setup_rejected(row, target) {
         return false;
     }
+
     let Some(rounds) = row["rounds"].as_array().filter(|rounds| rounds.len() == 3) else {
         return false;
     };
+
     rounds.iter().enumerate().all(|(index, round)| {
         round["verified"] == true
             && if target.mode.latency {
@@ -71,6 +73,7 @@ fn latency_round_verified(round: &Value) -> bool {
         .iter()
         .map(|key| round[key].as_f64())
         .collect();
+
     round["samples"] == 100_000
         && round["warmup_iterations"] == 20_000
         && quantiles.is_some_and(|values| {
@@ -98,11 +101,14 @@ fn load(cache: &Path, latency: bool, cached_baselines: bool) -> ChartResult<Opti
     } else {
         SIZES
     };
+
     let spins: &[u64] = if latency { &[0, 50] } else { &[0] };
     let cohorts = super::load_cohorts(cache, name);
+
     if cohorts.is_empty() {
         return Ok(None);
     }
+
     // Complete when every implementation, size, and spin has a verified row.
     let complete = |rows: &[Value], implementations: &[common::Impl], sizes: &[u64]| {
         implementations.iter().all(|implementation| {
@@ -113,11 +119,13 @@ fn load(cache: &Path, latency: bool, cached_baselines: bool) -> ChartResult<Opti
                         size,
                         mode: Mode { latency, spin },
                     };
+
                     find(rows, target).is_some()
                 })
             })
         })
     };
+
     let selected = super::select_cohorts(&cohorts, name, sizes, cached_baselines, complete)
         .ok_or_else(|| format!("missing complete verified SHM {name} cohort"))?;
     Ok(Some(selected))
@@ -136,6 +144,7 @@ fn throughput(directory: &Path, rows: &[Value]) -> ChartResult {
             maps.insert_round_rates(find(rows, target).unwrap(), implementation.key, size);
         }
     }
+
     let path = directory.join("pushpull.svg");
     let spec = ChartSpec {
         out_path: &path,
@@ -152,6 +161,7 @@ fn throughput(directory: &Path, rows: &[Value]) -> ChartResult {
         super::hardware_subtitle().as_deref(),
     )?;
     eprintln!("Written: {}", path.display());
+
     Ok(())
 }
 
@@ -168,14 +178,17 @@ fn latency(directory: &Path, rows: &[Value]) -> ChartResult {
                         spin,
                     },
                 };
+
                 let row = find(rows, target).unwrap();
                 let mut rounds: Vec<_> = row["rounds"].as_array().unwrap().iter().collect();
+
                 rounds.sort_by(|a, b| {
                     a["p99_us"]
                         .as_f64()
                         .unwrap()
                         .total_cmp(&b["p99_us"].as_f64().unwrap())
                 });
+
                 let round = rounds[1];
                 panel.entry(size).or_default().insert(
                     implementation.key.into(),
@@ -188,6 +201,7 @@ fn latency(directory: &Path, rows: &[Value]) -> ChartResult {
             }
         }
     }
+
     let path = directory.join("reqrep.svg");
     let spec = ChartSpec {
         out_path: &path,
@@ -195,6 +209,7 @@ fn latency(directory: &Path, rows: &[Value]) -> ChartResult {
         sizes: common::COMPARISON_LATENCY_SIZES,
         impls: IMPLS,
     };
+
     common::draw_multirow_latency(
         &spec,
         &[
@@ -211,6 +226,7 @@ fn latency(directory: &Path, rows: &[Value]) -> ChartResult {
         20,
         super::hardware_subtitle().as_deref(),
     )?;
+
     eprintln!("Written: {}", path.display());
     Ok(())
 }
@@ -224,6 +240,7 @@ pub(super) fn generate(
     let Some(rows) = load(cache, is_latency, cached_baselines)? else {
         return Ok(());
     };
+
     if is_latency {
         latency(directory, &rows)
     } else {
@@ -232,91 +249,4 @@ pub(super) fn generate(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn throughput_rejects_the_old_per_message_clock_measurements() {
-        let rows = super::super::tests::point_cohort(false);
-        let mut row = rows
-            .iter()
-            .find(|row| row["msg_size"] == 16)
-            .unwrap()
-            .clone();
-        let implementation = row["impl"].as_str().unwrap().to_owned();
-        let target = |implementation| Target {
-            implementation,
-            size: 16,
-            mode: THROUGHPUT,
-        };
-        assert!(verified(&row, target(&implementation)));
-        row.as_object_mut().unwrap().remove("sender_clock_batch");
-        assert!(!verified(&row, target(&implementation)));
-        row["sender_clock_batch"] = json!(1);
-        assert!(!verified(&row, target(&implementation)));
-    }
-
-    fn write_rows(path: &Path, rows: &[Value]) {
-        use std::io::Write;
-        let mut file = std::fs::File::create(path).unwrap();
-        for row in rows {
-            serde_json::to_writer(&mut file, row).unwrap();
-            writeln!(file).unwrap();
-        }
-    }
-
-    #[test]
-    fn cached_baselines_select_complete_shared_cohorts_and_reject_partial_refreshes() {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let cache =
-            std::env::temp_dir().join(format!("omq-shm-point-{}-{unique}", std::process::id()));
-        std::fs::create_dir_all(&cache).unwrap();
-        for latency in [false, true] {
-            let path = cache.join(if latency {
-                "shm-reqrep.jsonl"
-            } else {
-                "shm-pushpull.jsonl"
-            });
-            let mut rows = super::super::tests::point_cohort(latency);
-            for row in &mut rows {
-                let shared = row["impl"].as_str().unwrap().starts_with("shm");
-                row["run_id"] = json!(if shared { "b-shared" } else { "a-baseline" });
-                row["binary_sha256"] = row["run_id"].clone();
-            }
-            let mut partial = rows
-                .iter()
-                .find(|row| row["impl"] == "shm")
-                .unwrap()
-                .clone();
-            partial["run_id"] = json!("c-incomplete");
-            partial["binary_sha256"] = json!("newer-binary");
-            rows.push(partial);
-            write_rows(&path, &rows);
-            assert!(load(&cache, latency, false).is_err());
-            let selected = load(&cache, latency, true).unwrap().unwrap();
-            assert_eq!(selected.len(), rows.len() - 1);
-            for row in selected {
-                assert_eq!(
-                    row["binary_sha256"],
-                    if row["impl"].as_str().unwrap().starts_with("shm") {
-                        "b-shared"
-                    } else {
-                        "a-baseline"
-                    }
-                );
-            }
-            let missing = rows
-                .iter()
-                .position(|row| row["impl"] == "shm-pool")
-                .unwrap();
-            rows.remove(missing);
-            write_rows(&path, &rows);
-            assert!(load(&cache, latency, true).is_err());
-        }
-        std::fs::remove_dir_all(cache).unwrap();
-    }
-}
+mod tests;

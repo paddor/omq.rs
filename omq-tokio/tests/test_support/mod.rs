@@ -12,6 +12,10 @@ pub fn tcp_loopback(port: u16) -> Endpoint {
     }
 }
 
+pub fn inproc(name: &str) -> Endpoint {
+    Endpoint::Inproc { name: name.into() }
+}
+
 pub fn ipc_endpoint(name: &str) -> Endpoint {
     static NEXT_IPC_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -40,6 +44,7 @@ pub fn ipc_endpoint(name: &str) -> Endpoint {
             "/tmp/omq-{short_name}-{}-{id:x}.sock",
             std::process::id()
         ));
+
         Endpoint::Ipc(omq_tokio::IpcPath::Filesystem(path))
     }
 
@@ -52,6 +57,7 @@ pub fn ipc_endpoint(name: &str) -> Endpoint {
 pub async fn bind_loopback(sock: &Socket) -> u16 {
     let mut mon = sock.monitor();
     sock.bind(tcp_loopback(0)).await.unwrap();
+
     loop {
         match mon.recv().await {
             Ok(MonitorEvent::Listening {
@@ -79,6 +85,7 @@ pub async fn wait_for_handshake_on(mon: &mut MonitorStream) {
             }
         }
     };
+
     tokio::time::timeout(Duration::from_secs(5), fut)
         .await
         .expect("handshake did not complete within 5s");
@@ -95,6 +102,7 @@ pub async fn wait_for_join(sock: &Socket) {
             }
         }
     };
+
     tokio::time::timeout(Duration::from_secs(5), fut)
         .await
         .expect("join did not propagate within 5s");
@@ -118,9 +126,11 @@ pub async fn wait_for_connection_count(
             .await
             .unwrap_or_else(|e| panic!("{context}: failed to read connections: {e:?}"))
             .len();
+
         if actual == expected {
             return;
         }
+
         assert!(
             std::time::Instant::now() < deadline,
             "{context}: expected {expected} connections, got {actual}"
@@ -142,16 +152,20 @@ pub fn open_fd_count() -> Option<usize> {
 pub async fn wait_for_fd_count_at_most(limit: usize, timeout: Duration) -> Option<usize> {
     let deadline = std::time::Instant::now() + timeout;
     let mut last = None;
+
     loop {
         if let Some(n) = open_fd_count() {
             if n <= limit {
                 return Some(n);
             }
+
             last = Some(n);
         }
+
         if std::time::Instant::now() >= deadline {
             return last;
         }
+
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }

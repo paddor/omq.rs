@@ -84,10 +84,12 @@ pub(super) fn needs_dns(endpoint: &Endpoint) -> bool {
     if let Endpoint::Udp { host, .. } = endpoint {
         return matches!(host, Host::Name(_));
     }
+
     #[cfg(feature = "dart")]
     if let Endpoint::Dart { host, .. } = endpoint {
         return matches!(host, Host::Name(_));
     }
+
     if endpoint.is_tcp_family() {
         return matches!(
             endpoint.without_compression(),
@@ -97,6 +99,7 @@ pub(super) fn needs_dns(endpoint: &Endpoint) -> bool {
             }
         );
     }
+
     #[cfg(feature = "ws")]
     if endpoint.is_ws_family() {
         return matches!(
@@ -110,10 +113,12 @@ pub(super) fn needs_dns(endpoint: &Endpoint) -> bool {
             }
         );
     }
+
     #[cfg(feature = "quic")]
     if let Endpoint::Quic { host, .. } = endpoint {
         return matches!(host, Host::Name(_));
     }
+
     false
 }
 
@@ -207,11 +212,13 @@ async fn ws_bind_address(endpoint: Endpoint) -> Result<Endpoint> {
 
     let address = first(&host, port).await?;
     let host = Host::Ip(address.ip());
+
     let resolved = if tls {
         Endpoint::Wss { host, port, path }
     } else {
         Endpoint::Ws { host, port, path }
     };
+
     Ok(endpoint.rewrap(resolved))
 }
 
@@ -237,6 +244,7 @@ impl EndpointTask {
             () = ack.canceled() => Err(Error::Closed),
             result = self.prepare() => result,
         };
+
         let _ = self
             .tx
             .send(InternalEvent::EndpointResolved {
@@ -254,6 +262,7 @@ impl EndpointTask {
             Some(limit) => Some(PendingHandshake::from_socket(limit.acquire().await)),
             None => None,
         };
+
         let now = Instant::now();
         let first_deadline = self
             .setup_timeout
@@ -268,6 +277,7 @@ impl EndpointTask {
         let endpoint = tokio::time::timeout_at(deadline.into(), self.resolve())
             .await
             .map_err(|_| Error::HandshakeFailed("DNS resolution timeout".into()))??;
+
         Ok(ResolvedEndpoint {
             endpoint,
             first: FirstAttempt {
@@ -286,14 +296,17 @@ impl EndpointTask {
                     if matches!(self.endpoint, Endpoint::Dart { .. }) {
                         return bind_address(self.endpoint.clone()).await;
                     }
+
                     if matches!(self.endpoint, Endpoint::Udp { .. }) {
                         return bind_address(self.endpoint.clone()).await;
                     }
+
                     super::super::dispatch::preflight_connect_endpoint_resolution(&self.endpoint)
                         .await
                         .map(|()| self.endpoint.clone())
                 }
             };
+
             if matches!(&result, Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock)
             {
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -316,8 +329,10 @@ impl SocketDriver {
                 std::io::ErrorKind::WouldBlock,
                 "pending endpoint resolution limit reached",
             )));
+
             return;
         }
+
         let side = ack.side();
         // Datagram targets have no handshake to admit.
         let admission = (side.is_connect()
@@ -325,14 +340,17 @@ impl SocketDriver {
             && !matches!(endpoint, Endpoint::Udp { .. }))
         .then(|| self.endpoints.dial_admission.clone());
         let setup_timeout = super::endpoints::dial_setup_timeout(&endpoint, &options);
+
         let Some(id) = self.alloc_id() else {
             ack.error(Error::Config("peer ID exhausted".into()));
             return;
         };
+
         let cancel = self.link.cancel.child_token();
         let task_cancel = cancel.clone();
         let task_endpoint = endpoint.clone();
         let tx = self.mail.internal_tx.clone();
+
         let task = tokio::spawn(
             EndpointTask {
                 id,
@@ -345,6 +363,7 @@ impl SocketDriver {
             }
             .run(ack),
         );
+
         self.endpoints.pending_endpoints.insert(
             id,
             PendingEndpoint {
@@ -378,9 +397,11 @@ impl SocketDriver {
         let Some(pending) = self.endpoints.pending_endpoints.remove(&id) else {
             return;
         };
+
         if pending.cancel.is_cancelled() || ack.is_canceled() || self.close.started {
             return;
         }
+
         match (ack, result) {
             (Ack::Bind(ack), Ok(resolved)) => {
                 #[cfg(feature = "dart")]
@@ -394,8 +415,10 @@ impl SocketDriver {
                         )
                         .await,
                     );
+
                     return;
                 }
+
                 let _ = ack.send(self.bind_resolved(resolved.endpoint, &pending).await);
             }
             (Ack::Connect(ack), Ok(resolved)) => {
@@ -406,6 +429,7 @@ impl SocketDriver {
                     );
                     return;
                 }
+
                 #[cfg(feature = "dart")]
                 if matches!(resolved.endpoint, Endpoint::Dart { .. }) {
                     let _ = ack.send(
@@ -418,8 +442,10 @@ impl SocketDriver {
                         .await
                         .map(|_| ()),
                     );
+
                     return;
                 }
+
                 if !self.should_ignore_duplicate_connect(&resolved.endpoint) {
                     self.start_dial_task(
                         resolved.endpoint,
@@ -428,6 +454,7 @@ impl SocketDriver {
                         0,
                     );
                 }
+
                 let _ = ack.send(Ok(()));
             }
             (ack, Err(error)) => ack.error(error),
@@ -444,6 +471,7 @@ impl SocketDriver {
                 canceled = true;
             }
         }
+
         canceled
     }
 }

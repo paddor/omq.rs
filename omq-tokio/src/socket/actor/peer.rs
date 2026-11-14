@@ -29,6 +29,7 @@ impl SocketDriver {
                     route_id: self.next_peer_id,
                     send_pipe_rx: None,
                 };
+
                 self.spawn_on_handshake(conn, peer);
             }
             InternalEvent::Connected {
@@ -45,6 +46,7 @@ impl SocketDriver {
                 else {
                     return;
                 };
+
                 let peer = PeerSetup {
                     endpoint,
                     ident: conn.peer_ident().clone(),
@@ -53,6 +55,7 @@ impl SocketDriver {
                     route_id,
                     send_pipe_rx: self.take_dialer_send_pipe(route_id),
                 };
+
                 self.spawn_on_handshake(conn, peer);
                 self.redial_unmaterialized_route(route_id);
             }
@@ -73,6 +76,7 @@ impl SocketDriver {
         let Some(peer) = PeerLifecycle::new(self).remove_peer(peer_id, reason) else {
             return;
         };
+
         self.finish_peer_close(peer_id, peer, refused).await;
     }
 
@@ -84,6 +88,7 @@ impl SocketDriver {
         else {
             return Err(omq_proto::Error::Unroutable);
         };
+
         peer.handle.cancel.cancel();
         self.finish_peer_close(peer_id, peer, false).await;
         Ok(())
@@ -101,13 +106,16 @@ impl SocketDriver {
             self.dart_peer_closed(peer_id);
             return;
         }
+
         // A refused handshake would be refused again; stop dialing.
         if refused {
             if peer.origin.side.is_connect() {
                 self.drop_dial_route(peer.origin.route_id);
             }
+
             return;
         }
+
         if peer.origin.side.is_connect() && !self.close.started && !peer.progress.redialed {
             if matches!(peer.origin.options.reconnect, ReconnectPolicy::Disabled) {
                 // No redial: end the route, so a later connect() dials again.
@@ -198,6 +206,7 @@ impl SocketDriver {
                 DisconnectReason::HandshakeRefused(refusal) => Some(refusal.to_string()),
                 _ => None,
             };
+
             if let Some(reason_text) = reason_text {
                 self.link
                     .monitor
@@ -232,6 +241,7 @@ impl SocketDriver {
                 .map_or(0, |dialer| dialer.failed_attempts.load(Ordering::Relaxed))
                 .saturating_add(1)
         };
+
         // Only this route: the endpoint may carry other connects.
         self.endpoints.dialers.retain(|d| d.route_id != route_id);
         self.start_redial(endpoint, options, failed_attempts);
@@ -309,6 +319,7 @@ impl SocketDriver {
         if self.close.started && self.routing.send_strategy.is_drained() {
             return;
         }
+
         if self.socket_type != SocketType::Stream
             && let AnyConn::ByteStream { setup, .. } = &mut conn
         {
@@ -318,6 +329,7 @@ impl SocketDriver {
             {
                 return;
             }
+
             if setup.is_none() {
                 let source = peer_ident_socket_addr(&peer.ident).map(|address| address.ip());
                 let Some(admission) = crate::transport::setup::PendingHandshake::acquire(
@@ -329,6 +341,7 @@ impl SocketDriver {
                     self.link.monitor.publish(peer.handshake_failed(reason));
                     return;
                 };
+
                 *setup = Some(crate::transport::setup::SetupState {
                     deadline: None,
                     cancel: self.link.cancel.clone(),
@@ -336,6 +349,7 @@ impl SocketDriver {
                 });
             }
         }
+
         self.link.monitor.publish(connection_event(
             peer.side,
             peer.endpoint.clone(),
@@ -388,18 +402,23 @@ impl SocketDriver {
                 if self.close.started {
                     return;
                 }
+
                 if !self.peers.get(&peer_id).is_some_and(|p| p.handshake.ready) {
                     return;
                 }
+
                 if matches!(self.socket_type, SocketType::Req | SocketType::Rep) {
                     let routing_id = super::peer_materialize::server_routing_id(peer_id)
                         .expect("REQ/REP peer ID checked");
                     self.stage_receive(peer_id, msg.with_routing_id(routing_id));
+
                     return;
                 }
+
                 if self.handle_legacy_subscribe(peer_id, &msg) {
                     return;
                 }
+
                 if self
                     .socket_type
                     .recv_parts()
@@ -407,6 +426,7 @@ impl SocketDriver {
                 {
                     return;
                 }
+
                 let message = self.routing.recv_strategy.prepare_message(peer_id, msg);
                 if let Some(message) = message {
                     self.stage_receive(peer_id, message);
@@ -432,10 +452,12 @@ impl SocketDriver {
                 self.begin_close(None, Some(Duration::ZERO));
                 return;
             };
+
             Some(properties)
         } else {
             None
         };
+
         self.pending_receive = Some(super::PendingReceive {
             peer_id,
             message,
@@ -448,6 +470,7 @@ impl SocketDriver {
         let Some(mut pending) = self.pending_receive.take() else {
             return;
         };
+
         let result = if let Some(properties) = &pending.properties {
             self.resources
                 .authenticated_recv_sink
@@ -457,6 +480,7 @@ impl SocketDriver {
         } else {
             self.link.recv_tx.try_send(pending.message)
         };
+
         match result {
             Ok(()) => {}
             Err(omq_proto::error::TrySendError::Full(message)) => {

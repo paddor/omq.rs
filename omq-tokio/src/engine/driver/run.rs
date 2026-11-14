@@ -3,6 +3,7 @@
 use super::{
     ConnectionDriver, DriverStep, DriverStream, DriverWrite, IPC_LATENCY_POLL_WINDOW, OutputSetup,
     PeerDriverConfig, PeerEvent, PreActivationStep, ReceiveProfile, ReceiveSetup, RecvSink,
+    WRITE_PAUSE_BYTES,
     control::{ControlState, Heartbeat, close_error_reason},
     outbound::OutboundState,
     output::QueuedOutput,
@@ -189,6 +190,7 @@ impl OutputSetup {
             self.offload_threshold,
             shm,
         );
+
         QueuedOutput::new(
             encoding,
             FrameBuffer::with_config_lazy(self.arena_threshold, self.arena_cap),
@@ -274,7 +276,19 @@ struct Turn {
     recv_blocked: bool,
     resume_input: bool,
     poll_transport: bool,
+    output_paused: bool,
     peer_ttl_deadline: Option<Instant>,
+}
+
+impl Turn {
+    /// Skip output for this turn and end it with a yield. Input, control,
+    /// and timers get polled, and tasks sharing the IO thread run.
+    fn pause_output(&mut self) {
+        self.want_write = false;
+        self.shutdown_ready = false;
+        self.can_accept_data = false;
+        self.output_paused = true;
+    }
 }
 
 /// State of one driver run. Struct fields drop first to last, so this order
@@ -318,6 +332,7 @@ where
         let peer_id = self.peer_id;
         let mut completion = std::mem::take(&mut self.completion);
         let result = self.run_inner_body(&mut completion).await;
+
         let reason = result
             .as_ref()
             .err()
@@ -328,6 +343,7 @@ where
                     DisconnectReason::Error(close_error_reason(error))
                 }
             });
+
         if completion.complete(reason).is_err() {
             let error = result.as_ref().err().map(close_error_reason);
             let _ = peer_out
@@ -335,6 +351,7 @@ where
                 .send((peer_id, PeerEvent::Closed { error }))
                 .await;
         }
+
         result
     }
 
@@ -351,6 +368,7 @@ where
             peer_control,
             setup_cancel,
         } = wiring;
+
         let shm_peer_death = shm::peer_death(session.receive.shm.clone());
         tokio::pin!(shm_peer_death);
 
@@ -369,15 +387,18 @@ where
             .activation(event_out, setup_cancel.as_ref())
             .run(&mut reader, &mut writer, &mut shm_peer_death, credit)
             .await?;
+
         if step == PreActivationStep::Close {
             return Ok(());
         }
 
         session.start_data_plane();
         let mut io = PacedIo::new(reader, writer, &network);
+
         if session.output.encoding.adapts_level() {
             io.writer.track_stalls();
         }
+
         let authenticated_sender = session
             .delivery
             .sink
@@ -402,6 +423,7 @@ where
             separate_control: peer_control.is_some(),
             reserved_admission: authenticated_sender.is_some(),
         };
+
         session.serve(&mut io, &mut waits).await
     }
 
@@ -457,6 +479,7 @@ where
             peer_control: self.peer_control,
             setup_cancel: self.setup_cancel,
         };
+
         (wiring, session)
     }
 }
@@ -492,6 +515,7 @@ impl<'c> Session<'c> {
         let Ok(permit) = permit else {
             return false;
         };
+
         self.peer_events.send_reserved(permit, self.outlet.view())
     }
 
@@ -505,6 +529,7 @@ impl<'c> Session<'c> {
             mailbox: event_out,
             outlet: self.outlet.view(),
         };
+
         self.peer_events.drive(
             &mut self.connection,
             route,
@@ -542,9 +567,11 @@ impl<'c> Session<'c> {
             let Some(control_exhausted) = self.service_control().await? else {
                 return Ok(());
             };
+
             let Some(data_plane_open) = self.observe_close()? else {
                 return Ok(());
             };
+
             if !self.dispatch_events(waits.event_out, waits.separate_control)? {
                 return Ok(());
             }
@@ -566,9 +593,19 @@ impl<'c> Session<'c> {
             if self.stage_output(data_plane_open).await? == Flow::Exit {
                 return Ok(());
             }
+
             self.adapt_compression_level(io);
 
-            let turn = self.plan_turn(io, control_exhausted, data_plane_open);
+            let mut turn = self.plan_turn(io, control_exhausted, data_plane_open);
+
+            // Queued output never runs out under load. Without a pause, the
+            // write arm would starve later arms and other tasks until the
+            // transport blocks.
+            if self.output.pending.written_since_pause >= WRITE_PAUSE_BYTES {
+                self.output.pending.written_since_pause = 0;
+                turn.pause_output();
+            }
+
             if self.wait(io, waits, &turn).await? == Flow::Exit {
                 return Ok(());
             }
@@ -609,6 +646,7 @@ impl<'c> Session<'c> {
         self.control
             .observe_peer_close(&self.connection, input_failed, self.output.data.as_mut());
         let data_plane_open = self.control.data_plane_open(input_failed);
+
         if self.control.expired() {
             return Ok(None);
         }
@@ -619,6 +657,7 @@ impl<'c> Session<'c> {
             &self.inbox,
             input_failed,
         );
+
         Ok(Some(data_plane_open))
     }
 
@@ -644,6 +683,7 @@ impl<'c> Session<'c> {
         self.outlet
             .output
             .set_control_prefix(self.peer_events.control_prefix());
+
         Ok(true)
     }
 
@@ -683,6 +723,7 @@ impl<'c> Session<'c> {
             if self.delivery.pending.take().is_some() {
                 authenticated.rearm();
             }
+
             self.delivery.discard_pending =
                 discard_received_messages(&mut self.connection, self.receive.shm.as_ref())?;
             return Ok(Flow::Next);
@@ -734,6 +775,7 @@ impl<'c> Session<'c> {
         if !self.output.claim_direct(slot) {
             return Ok(Flow::Exit);
         }
+
         if !data_plane_open {
             return Ok(Flow::Next);
         }
@@ -743,6 +785,7 @@ impl<'c> Session<'c> {
             DriverStep::Yield => tokio::task::yield_now().await,
             DriverStep::Close => return Ok(Flow::Exit),
         }
+
         if self.latency.profile {
             self.output.stage_latency_slot(&self.connection, slot);
         }
@@ -764,6 +807,7 @@ impl<'c> Session<'c> {
     fn shutdown_ready(&mut self, data_plane_open: bool) -> bool {
         let receive_drained = self.control.discard_receive
             || (!self.delivery.message_blocked() && !self.peer_events.blocked());
+
         let drained = self.control.is_closing()
             && self.inbox.is_empty()
             && receive_drained
@@ -795,6 +839,7 @@ impl<'c> Session<'c> {
         let want_write = self.output.has_pending_write(&self.connection);
         let can_accept_data = data_plane_open && self.output.idle(&self.connection);
         let message_blocked = !self.control.discard_receive && self.delivery.message_blocked();
+
         // Bound automatic replies without stopping reads for application
         // output: two peers with pending data must still read each other.
         let replies_blocked = self.connection.input_blocked_on_output();
@@ -810,6 +855,7 @@ impl<'c> Session<'c> {
         if !want_read {
             io.reader.cancel_wait();
         }
+
         if !want_write {
             io.writer.cancel_wait();
         }
@@ -832,6 +878,7 @@ impl<'c> Session<'c> {
             recv_blocked,
             resume_input,
             poll_transport,
+            output_paused: false,
             peer_ttl_deadline,
         }
     }

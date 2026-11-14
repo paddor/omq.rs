@@ -56,6 +56,7 @@ impl Shared {
             signal.notify_changed();
         }
     }
+
     #[cfg(feature = "dart")]
     fn notify_native_progress(&self) {
         if let Some(signal) = self.native_progress.get() {
@@ -101,6 +102,7 @@ impl Wake for SpaceWake {
     fn wake(self: Arc<Self>) {
         self.waiting.store(false, Ordering::Release);
         self.signal.notify_changed();
+
         #[cfg(feature = "dart")]
         if let Some(shared) = self.shared.upgrade() {
             shared.notify_native_progress();
@@ -132,14 +134,17 @@ impl SenderLanes {
         let Sender::Template(template) = sender else {
             return sender.clone();
         };
+
         if let Some(sender) = self.0.table.load().get(&template.id) {
             return sender.clone();
         }
+
         // Concurrent calls through one clone must publish the same lane.
         let _update = self.0.update.lock().expect("data cache poisoned");
         if let Some(sender) = self.0.table.load().get(&template.id) {
             return sender.clone();
         }
+
         let space = template.shared.registration.clone();
         let lane = Arc::new(Lane {
             template: template.clone(),
@@ -153,11 +158,13 @@ impl SenderLanes {
             }),
             space,
         });
+
         let sender = Sender::Lane(lane);
         let mut next = (**self.0.table.load()).clone();
         next.retain(|_, sender| !sender.is_closed());
         next.insert(template.id, sender.clone());
         self.0.table.store(Arc::new(next));
+
         sender
     }
 }
@@ -208,25 +215,31 @@ impl Admission {
         if count == 0 {
             return false;
         }
+
         let full =
             self.lane.queued.fetch_sub(count, Ordering::AcqRel) == self.lane.template.capacity;
+
         if full {
             self.lane.space.notify_changed();
             #[cfg(feature = "dart")]
             self.lane.template.shared.notify_native_progress();
         }
+
         let remaining = self
             .lane
             .template
             .shared
             .admitted
             .fetch_sub(count, Ordering::AcqRel);
+
         if remaining & !CLOSED == count {
             self.lane.template.shared.notify_close_progress();
         }
+
         if remaining == (CLOSED | count) {
             self.lane.template.shared.drained.wake();
         }
+
         full
     }
 
@@ -260,6 +273,7 @@ impl Batch<'_> {
         if let Some(admission) = admission {
             self.freed_full |= Admission::accumulate(&mut self.admission, admission);
         }
+
         Ok(data)
     }
 
@@ -272,6 +286,7 @@ impl Batch<'_> {
         if let Some(mut admission) = self.admission.take() {
             self.freed_full |= admission.release();
         }
+
         self.freed_full
     }
 }
@@ -349,13 +364,16 @@ fn publish(
         .expect("reserved producer")
         .sender
         .try_send(queued);
+
     #[cfg(feature = "dart")]
     if let Some(signal) = endpoint {
         signal.mark();
     }
+
     // Payload destruction can enter a binding's buffer owner.
     // Release the producer lock before dropping a disconnected send.
     drop(producer);
+
     match result {
         Ok(()) | Err(mpsc::TrySendError::Disconnected(_)) => {}
         Err(mpsc::TrySendError::Full(_)) => unreachable!("reserved data lane"),
@@ -386,6 +404,7 @@ fn channel_inner(
 ) -> (Sender, Receiver) {
     let capacity = capacity.max(1);
     let (registrar, receiver) = mpsc::channel_with_policy(capacity);
+
     let template = Arc::new(Template {
         id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
         registrar: Mutex::new(registrar),
@@ -404,6 +423,7 @@ fn channel_inner(
         #[cfg(feature = "dart")]
         dart,
     });
+
     (
         Sender::Template(template.clone()),
         Receiver::Owned { receiver, template },
@@ -432,12 +452,14 @@ impl Lane {
         if self.template.shared.is_closed() {
             return Err(ReserveError::Closed(()));
         }
+
         if producer.is_none() {
             let root = self
                 .template
                 .registrar
                 .lock()
                 .expect("data registrar poisoned");
+
             let registered = match root.try_register_bounded(MAX_LANES + 1) {
                 Err(mpsc::TryRegisterBoundedError::AtCapacity) => {
                     // Enable maintenance wakes lazily. Recheck after enabling
@@ -446,10 +468,12 @@ impl Lane {
                         .shared
                         .registration_hints
                         .store(true, Ordering::Release);
+
                     root.try_register_bounded(MAX_LANES + 1)
                 }
                 result => result,
             };
+
             let sender = registered.map_err(|error| match error {
                 mpsc::TryRegisterBoundedError::AtCapacity => ReserveError::Full(()),
                 mpsc::TryRegisterBoundedError::Disconnected => ReserveError::Closed(()),
@@ -459,6 +483,7 @@ impl Lane {
                 waker: Waker::from(self.wake.clone()),
             });
         }
+
         let producer = producer.as_mut().expect("registered producer");
         let ready = super::producer_ready::ready(
             &mut producer.sender,
@@ -471,6 +496,7 @@ impl Lane {
             },
         )
         .map_err(|()| ReserveError::Closed(()))?;
+
         Ok(ready && self.queued.load(Ordering::Acquire) < self.template.capacity)
     }
 }
@@ -489,6 +515,7 @@ impl Sender {
         let Some(template) = self.template() else {
             return;
         };
+
         let existing = template
             .shared
             .close_progress
@@ -523,6 +550,7 @@ impl Sender {
         if let Some(kind) = self.template().and_then(|template| template.dart) {
             omq_proto::dart::validate_message(kind, message, identity_prefix)?;
         }
+
         Ok(())
     }
 
@@ -549,6 +577,7 @@ impl Sender {
                 if !lane.ready(&mut producer)? {
                     return Err(ReserveError::Full(()));
                 }
+
                 // Linearize admission against graceful close. Reservations
                 // count as accepted work until committed or dropped.
                 #[allow(deprecated)] // fetch_update is supported by MSRV 1.93.
@@ -557,9 +586,11 @@ impl Sender {
                     Ordering::Acquire,
                     |n| (n & CLOSED == 0).then_some(n + 1),
                 );
+
                 if accepted.is_err() {
                     return Err(ReserveError::Closed(()));
                 }
+
                 lane.queued.fetch_add(1, Ordering::AcqRel);
                 Ok(Permit::Owned {
                     producer,
@@ -624,19 +655,24 @@ impl Sender {
             drop(sender.reserve().await);
             return;
         }
+
         loop {
             if self.send_ready() {
                 return;
             }
+
             let signal = self.space().expect("owned data signal");
             let seen = signal.generation();
+
             if self.send_ready() {
                 return;
             }
+
             // Successful registration changes the signal used for capacity.
             if self.space().is_none_or(|next| !Arc::ptr_eq(&signal, &next)) {
                 continue;
             }
+
             signal.changed_after(seen).await;
         }
     }
@@ -667,6 +703,7 @@ impl Sender {
                     return Err(legacy::error::SendError(returned));
                 }
             }
+
             self.wait_capacity().await;
         }
     }
@@ -726,6 +763,7 @@ impl Receiver {
                             legacy::error::TryRecvError::Empty
                         }
                     });
+
                 template.notify_registration();
                 result
             }
@@ -748,12 +786,14 @@ impl Receiver {
                 if template.shared.is_drained() {
                     return Poll::Ready(None);
                 }
+
                 let result = receiver
                     .poll_recv(cx)
                     .map(|result| result.ok().map(|queued| queued.data));
                 // poll_recv may retire empty lanes while returning Pending.
                 // Registration waiters must observe that maintenance too.
                 template.notify_registration();
+
                 result
             }
         })

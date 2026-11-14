@@ -8,6 +8,12 @@
 #[cfg(feature = "copy-stats")]
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(feature = "copy-stats")]
+static COPIED: [AtomicU64; Site::ALL.len()] = [const { AtomicU64::new(0) }; Site::ALL.len()];
+
+/// Whether recording is compiled in.
+pub const ENABLED: bool = cfg!(feature = "copy-stats");
+
 /// Where message bytes were copied.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Site {
@@ -57,9 +63,6 @@ impl Site {
     }
 }
 
-#[cfg(feature = "copy-stats")]
-static COPIED: [AtomicU64; Site::ALL.len()] = [const { AtomicU64::new(0) }; Site::ALL.len()];
-
 /// Record `bytes` copied at `site`.
 #[inline]
 pub fn record(site: Site, bytes: usize) {
@@ -106,15 +109,19 @@ impl std::fmt::Display for CopyCounts {
             if bytes == 0 {
                 continue;
             }
+
             if !first {
                 f.write_str(", ")?;
             }
+
             first = false;
             write!(f, "{site:?}={bytes}")?;
         }
+
         if first {
             f.write_str("none")?;
         }
+
         Ok(())
     }
 }
@@ -125,6 +132,7 @@ pub fn snapshot() -> CopyCounts {
     {
         CopyCounts(std::array::from_fn(|i| COPIED[i].load(Ordering::Relaxed)))
     }
+
     #[cfg(not(feature = "copy-stats"))]
     CopyCounts::default()
 }
@@ -136,6 +144,3 @@ pub fn reset() {
         counter.store(0, Ordering::Relaxed);
     }
 }
-
-/// Whether recording is compiled in.
-pub const ENABLED: bool = cfg!(feature = "copy-stats");

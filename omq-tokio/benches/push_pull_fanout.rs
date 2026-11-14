@@ -34,6 +34,7 @@ fn main() {
                     common::print_cell(size, cell);
                     common::append_jsonl(PATTERN, &transport, peers, size, cell);
                 }
+
                 println!();
             }
         }
@@ -51,12 +52,14 @@ async fn run_cell(transport: &str, peers: usize, size: usize, seq: usize) -> com
         p.connect(ep.clone()).await.expect("connect PULL");
         pulls.push(p);
     }
+
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let conns = push.connections().await.unwrap_or_default();
         if conns.iter().filter(|c| c.peer_info.is_some()).count() >= peers {
             break;
         }
+
         assert!(Instant::now() < deadline, "peers never connected");
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
@@ -72,6 +75,7 @@ async fn run_cell(transport: &str, peers: usize, size: usize, seq: usize) -> com
     let burst = |k: usize| {
         let push = push.clone();
         let payload = payload.clone();
+
         async move {
             let total = (k / peers) * peers;
             for _ in 0..total {
@@ -84,8 +88,10 @@ async fn run_cell(transport: &str, peers: usize, size: usize, seq: usize) -> com
     if let Ok(push) = Arc::try_unwrap(push) {
         let _ = push.close().await;
     }
+
     for h in recv_handles {
         h.abort();
     }
+
     cell
 }

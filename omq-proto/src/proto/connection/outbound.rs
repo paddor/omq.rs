@@ -38,6 +38,7 @@ impl Connection {
 
             self.emit_command_frame(body.freeze());
         }
+
         Ok(())
     }
 
@@ -54,6 +55,7 @@ impl Connection {
             self.emit_ws_frame(flags, &payload, role);
             return;
         }
+
         let f = crate::message::Frame { flags, payload };
         self.out.push_frame(&f);
     }
@@ -110,13 +112,16 @@ impl Connection {
                 "send_message before handshake complete".into(),
             ));
         }
+
         #[cfg(feature = "curve")]
         self.check_transform_present()?;
         let parts = msg.parts_payload();
         let n = parts.len();
+
         if n == 0 {
             return Ok(());
         }
+
         for (i, part) in parts.iter().enumerate() {
             let more = i + 1 < n;
             #[cfg(feature = "curve")]
@@ -128,15 +133,18 @@ impl Connection {
                 }
                 None => {}
             }
+
             {
                 let flags = if more {
                     crate::message::FrameFlags::MORE
                 } else {
                     crate::message::FrameFlags::LAST
                 };
+
                 self.emit_frame(flags, part.clone());
             }
         }
+
         Ok(())
     }
 
@@ -148,17 +156,21 @@ impl Connection {
                 "send_command before handshake complete".into(),
             ));
         }
+
         if self.peer_minor == 0 {
             let (tag, prefix) = match cmd {
                 Command::Subscribe(prefix) => (1, prefix),
                 Command::Cancel(prefix) => (0, prefix),
                 _ => return self.write_outbound_commands(std::slice::from_ref(cmd)),
             };
+
             let mut body = BytesMut::with_capacity(1 + prefix.len());
             body.extend_from_slice(&[tag]);
             body.extend_from_slice(prefix);
+
             return self.send_message(&Message::single(body.freeze()));
         }
+
         self.write_outbound_commands(std::slice::from_ref(cmd))
     }
 
@@ -178,11 +190,13 @@ impl Connection {
         if self.ws.close_sent {
             return;
         }
+
         self.ws.close_sent = true;
         self.ws.control.pending_pong = None;
         self.ws.fragment = None;
         self.assembly.parts.clear();
         self.assembly.size = 0;
+
         let role = self.ws.role.unwrap_or(ws_codec::WsRole::Server);
         self.out.reserve_scratch(8);
         let frame = ws_codec::encode_ws_control(
@@ -200,10 +214,12 @@ impl Connection {
         if self.ws.close_sent {
             return;
         }
+
         if self.ws.control.pong_remaining.is_some() {
             self.ws.control.pending_pong = Some(super::ws::Pong::new(payload));
             return;
         }
+
         let role = self.ws.role.unwrap_or(ws_codec::WsRole::Server);
         self.out.reserve_scratch(6 + payload.len());
         let frame = ws_codec::encode_ws_control(
@@ -221,10 +237,12 @@ impl Connection {
         let Some(remaining) = self.ws.control.pong_remaining else {
             return;
         };
+
         if written < remaining {
             self.ws.control.pong_remaining = Some(remaining - written);
             return;
         }
+
         self.ws.control.pong_remaining = None;
         if let Some(pong) = self.ws.control.pending_pong.take() {
             self.queue_ws_pong(pong.as_slice());
@@ -241,6 +259,7 @@ impl Connection {
         } else {
             crate::message::FrameFlags::LAST
         };
+
         self.emit_curve_frame(flags, part.as_slice())
     }
 
@@ -258,27 +277,33 @@ impl Connection {
         let Some(FrameTransform::Curve(tx)) = self.transform.as_mut() else {
             unreachable!("emit_curve_frame called without curve transform");
         };
+
         #[cfg(feature = "ws")]
         if self.ws.role.is_some() {
             let wire = tx.encrypt_message_frame(flags, plaintext)?;
             self.emit_frame(flags, Payload::from_bytes(wire));
             return Ok(());
         }
+
         let counter = tx.next_out_counter()?;
         let len = CurveTransform::message_frame_len(plaintext.len());
         let total = frame::header_len_for(len) + len;
+
         let chunk = if total <= crate::frame_buffer::ARENA_THRESHOLD {
             self.out.reserve_scratch(total);
             let scratch = &mut self.out.header_scratch;
             frame::write_header(scratch, flags, len);
             tx.seal_message_into(counter, flags, plaintext, scratch);
+
             scratch.split().freeze()
         } else {
             let mut owned = BytesMut::with_capacity(total);
             frame::write_header(&mut owned, flags, len);
             tx.seal_message_into(counter, flags, plaintext, &mut owned);
+
             owned.freeze()
         };
+
         self.out.push(chunk);
         Ok(())
     }
@@ -367,15 +392,18 @@ impl Connection {
         );
         let parts = msg.parts_payload();
         let n = parts.len();
+
         for (i, p) in parts.iter().enumerate() {
             let more = i + 1 < n;
             let payload_len = p.len();
+
             if payload_len > frame::MAX_SHORT_FRAME_SIZE {
                 flat_buf.extend_from_slice(&[frame::FLAG_LONG | u8::from(more)]);
                 flat_buf.extend_from_slice(&(payload_len as u64).to_be_bytes());
             } else {
                 flat_buf.extend_from_slice(&[u8::from(more), payload_len as u8]);
             }
+
             flat_buf.extend_from_slice(p.as_slice());
         }
     }

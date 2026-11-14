@@ -32,22 +32,29 @@ pub(crate) use receive::{multipart, references};
 
 /// Maximum independently delivered messages in one shared batch.
 pub const BATCH_MAX_MESSAGES: usize = 256;
+
 /// Maximum shared batch bytes, including the count and body lengths.
 pub const BATCH_MAX_BYTES: usize = 256 * 1024;
+
 /// Maximum body copied once into a shared publication batch.
 pub const COPIED_BATCH_MAX_BODY: usize = 16 * 1024;
+
 /// Maximum pooled body normally copied into a contiguous queued-message batch.
 pub const POOLED_BATCH_COPY_THRESHOLD: usize = 256;
+
 /// Maximum pooled body normally copied once into a shared fan-out batch.
 pub const FANOUT_POOLED_BATCH_COPY_THRESHOLD: usize = 1024;
+
 const REGION_TOKEN: usize = std::mem::size_of::<u32>();
 const BODY_OFFSET: usize = REGION_TOKEN + std::mem::size_of::<u64>();
 const COORDINATE_BYTES: usize = BODY_OFFSET + std::mem::size_of::<u64>();
 pub(crate) const COUNT_BYTES: usize = std::mem::size_of::<u16>();
 pub(crate) const SIZE_BYTES: usize = std::mem::size_of::<u64>();
 const MIN_STORAGE_BYTES: usize = 64;
+
 /// Bytes per length-and-coordinate entry in a reference batch.
 pub const REFERENCE_ENTRY_BYTES: usize = SIZE_BYTES + COORDINATE_BYTES;
+
 /// Bytes in frames before the last from which a whole message uses one shared
 /// multipart record instead of carrying those frames on the carrier ring.
 pub const MULTIPART_ENVELOPE_THRESHOLD: usize = 4 * 1024;
@@ -118,6 +125,7 @@ fn envelop(prefix: Option<Bytes>, routing_id: Option<u32>, body: Message) -> Mes
         Some(prefix) => Message::with_prefix(prefix, body),
         None => body,
     };
+
     match routing_id {
         Some(id) => message.with_routing_id(id),
         None => message,
@@ -157,8 +165,10 @@ pub(crate) fn count(bytes: &[u8]) -> Result<usize> {
         .try_into()
         .unwrap();
     let count = usize::from(u16::from_le_bytes(header));
+
     if !(2..=BATCH_MAX_MESSAGES).contains(&count) || bytes.len() > BATCH_MAX_BYTES {
         return Err(invalid("invalid SHM batch count or size").into());
     }
+
     Ok(count)
 }

@@ -110,6 +110,7 @@ async fn pub_sub_reconnect_connect_side() {
             assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"x.probe1");
             break;
         }
+
         assert!(
             std::time::Instant::now() < deadline,
             "sub1 never subscribed"
@@ -129,6 +130,7 @@ async fn pub_sub_reconnect_connect_side() {
             assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"x.probe2");
             break;
         }
+
         assert!(
             std::time::Instant::now() < deadline,
             "sub2 never subscribed"
@@ -265,10 +267,12 @@ async fn radio_dish_reconnect_connect_side() {
             .send(Message::multipart(["w", "probe1"]))
             .await
             .unwrap();
+
         if let Ok(Ok(m)) = tokio::time::timeout(Duration::from_millis(200), dish1.recv()).await {
             assert_eq!(m.part_bytes(1).unwrap().as_ref(), b"probe1");
             break;
         }
+
         assert!(
             std::time::Instant::now() < deadline,
             "dish1 join never propagated"
@@ -287,10 +291,12 @@ async fn radio_dish_reconnect_connect_side() {
             .send(Message::multipart(["w", "probe2"]))
             .await
             .unwrap();
+
         if let Ok(Ok(m)) = tokio::time::timeout(Duration::from_millis(200), dish2.recv()).await {
             assert_eq!(m.part_bytes(1).unwrap().as_ref(), b"probe2");
             break;
         }
+
         assert!(
             std::time::Instant::now() < deadline,
             "dish2 join never propagated"
@@ -359,11 +365,13 @@ async fn peer_reconnect_connect_side() {
             .send(Message::multipart(["pa", "hello"]))
             .await
             .unwrap();
+
         if let Ok(Ok(m)) = tokio::time::timeout(Duration::from_millis(200), peer_a.recv()).await {
             assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"pb");
             assert_eq!(m.part_bytes(1).unwrap().as_ref(), b"hello");
             break;
         }
+
         assert!(
             std::time::Instant::now() < deadline,
             "identity never discovered"
@@ -384,11 +392,13 @@ async fn peer_reconnect_connect_side() {
             .send(Message::multipart(["pa", "again"]))
             .await
             .unwrap();
+
         if let Ok(Ok(m)) = tokio::time::timeout(Duration::from_millis(200), peer_a.recv()).await {
             assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"pb");
             assert_eq!(m.part_bytes(1).unwrap().as_ref(), b"again");
             break;
         }
+
         assert!(
             std::time::Instant::now() < deadline,
             "identity not rediscovered after reconnect"

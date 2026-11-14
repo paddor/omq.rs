@@ -212,6 +212,7 @@ impl Proxy {
                         if turn.account(0) {
                             continue 'main;
                         }
+
                         // Sources stay ready under sustained load, and socket
                         // receives never yield on their own.
                         turn.reset();
@@ -280,6 +281,7 @@ impl Proxy {
         if !flows.enabled(direction) || flows.pending(direction).is_some() {
             return Ok(false);
         }
+
         let pending = flows.pending(direction);
 
         match self.source(direction).try_recv() {
@@ -296,6 +298,7 @@ impl Proxy {
         if same_socket && direction == Direction::BackendToFrontend {
             return false;
         }
+
         socket_can_recv(self.source(direction).socket_type())
             && socket_can_send(self.target(direction).socket_type())
     }
@@ -303,9 +306,11 @@ impl Proxy {
     fn finish_pending(&self, sent: Result<()>, pending: &mut Option<Pending>) -> Result<()> {
         let copy = pending.take().expect("completed pending send").copy;
         sent?;
+
         if let Some(capture) = &self.capture {
             let _ = capture.try_send(copy);
         }
+
         Ok(())
     }
 
@@ -337,6 +342,7 @@ impl Proxy {
             if n + 1 == self.burst_size {
                 return Ok(());
             }
+
             msg = match self.source(direction).try_recv() {
                 Ok(next) => next,
                 Err(Error::WouldBlock) => return Ok(()),
@@ -344,6 +350,7 @@ impl Proxy {
                 Err(error) => return Err(error),
             };
         }
+
         Ok(())
     }
 
@@ -354,12 +361,14 @@ impl Proxy {
                 if let Some(capture) = &self.capture {
                     let _ = capture.try_send(copy);
                 }
+
                 ForwardAttempt::Sent
             }
             Err(TrySendError::Full(msg)) => ForwardAttempt::Full(msg),
             Err(TrySendError::Closed) => ForwardAttempt::Closed,
             Err(TrySendError::Error(error)) => return Err(error),
         };
+
         Ok(attempt)
     }
 
@@ -381,12 +390,14 @@ impl Proxy {
         let Some(control) = &self.control else {
             return Ok(None);
         };
+
         // REP try_recv would mutate REP state and then handle_control() would
         // send the ack through the wrong path. Let the normal recv branch own
         // REP control sockets.
         if control.socket_type() == SocketType::Rep {
             return Ok(None);
         }
+
         match control.try_recv() {
             Ok(msg) => self.handle_control(msg, state).await.map(Some),
             Err(Error::WouldBlock) => Ok(None),
@@ -416,6 +427,7 @@ impl Proxy {
         {
             let _ = control.send(Message::single(bytes::Bytes::new())).await;
         }
+
         if action == ControlAction::Terminate {
             tokio::task::yield_now().await;
         }
@@ -434,6 +446,7 @@ pub async fn proxy(
     if let Some(capture) = capture {
         proxy = proxy.capture(capture);
     }
+
     proxy.run().await
 }
 
@@ -450,9 +463,11 @@ pub async fn proxy_steerable(
     if let Some(capture) = capture {
         proxy = proxy.capture(capture);
     }
+
     if let Some(control) = control {
         proxy = proxy.control(control);
     }
+
     proxy.run().await
 }
 
@@ -461,6 +476,7 @@ async fn recv_optional(socket: Option<Socket>) -> Result<Option<Message>> {
         std::future::pending::<()>().await;
         return Ok(None);
     };
+
     socket.recv().await.map(Some)
 }
 

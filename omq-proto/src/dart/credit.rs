@@ -35,10 +35,12 @@ impl AdmissionCounter {
             if state & CLOSED != 0 {
                 return 0;
             }
+
             let count = requested.min(self.capacity - state);
             if count == 0 {
                 return 0;
             }
+
             match self.state.compare_exchange_weak(
                 state,
                 state + count,
@@ -74,6 +76,7 @@ impl AdmissionCounter {
     pub fn close(&self) {
         self.state.fetch_or(CLOSED, Ordering::AcqRel);
     }
+
     /// Whether admission has been closed.
     pub fn is_closed(&self) -> bool {
         self.state.load(Ordering::Acquire) & CLOSED != 0
@@ -90,6 +93,7 @@ impl CreditCounter {
     pub fn publish(&self, count: usize) {
         self.0.fetch_add(count, Ordering::Release);
     }
+
     /// Atomically take all published credits, leaving the counter empty.
     pub fn take(&self) -> usize {
         self.0.swap(0, Ordering::AcqRel)

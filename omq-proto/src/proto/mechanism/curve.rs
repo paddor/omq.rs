@@ -29,6 +29,29 @@ pub(crate) use server::CurveServer;
 pub use transform::CurveTransform;
 use transform::build_transform;
 
+/// Overflow error of the handshake nonce counter.
+const HANDSHAKE_COUNTER_EXHAUSTED: &str = "CURVE handshake nonce counter exhausted";
+
+const NONCE_HELLO: &[u8; 16] = b"CurveZMQHELLO---";
+const NONCE_INITIATE: &[u8; 16] = b"CurveZMQINITIATE";
+const NONCE_READY: &[u8; 16] = b"CurveZMQREADY---";
+const NONCE_MESSAGE_C: &[u8; 16] = b"CurveZMQMESSAGEC";
+const NONCE_MESSAGE_S: &[u8; 16] = b"CurveZMQMESSAGES";
+const NONCE_WELCOME_PREFIX: &[u8; 8] = b"WELCOME-";
+const NONCE_VOUCH_PREFIX: &[u8; 8] = b"VOUCH---";
+
+/// Poly1305 tag length of every box.
+const BOX_TAG_LEN: usize = 16;
+
+/// Command name that starts every MESSAGE frame payload.
+pub(crate) const MESSAGE_PREFIX: &[u8; 8] = b"\x07MESSAGE";
+
+/// MESSAGE payload offset of the Poly1305 tag, after prefix and nonce.
+const MESSAGE_TAG_OFFSET: usize = MESSAGE_PREFIX.len() + 8;
+
+/// MESSAGE payload offset of the box, after the tag.
+const MESSAGE_BOX_OFFSET: usize = MESSAGE_TAG_OFFSET + BOX_TAG_LEN;
+
 /// `NaCl` `crypto_box` construction for the handshake boxes: X25519 DH,
 /// then `HSalsa20` key derivation and XSalsa20-Poly1305. A box is
 /// `tag(16) || ciphertext`.
@@ -48,6 +71,7 @@ impl CurveBox {
         let (tag, body) = out.split_at_mut(BOX_TAG_LEN);
         body.copy_from_slice(plaintext);
         tag.copy_from_slice(&self.inner.encrypt_detached(nonce, body));
+
         out
     }
 
@@ -61,6 +85,7 @@ impl CurveBox {
             .ok_or(salsabox::Error)?;
         let mut plaintext = body.to_vec();
         self.inner.decrypt_detached(nonce, &mut plaintext, tag)?;
+
         Ok(plaintext)
     }
 }
@@ -93,9 +118,6 @@ impl SessionKeys {
     }
 }
 
-/// Overflow error of the handshake nonce counter.
-const HANDSHAKE_COUNTER_EXHAUSTED: &str = "CURVE handshake nonce counter exhausted";
-
 /// Advance a nonce counter and return the new value. `exhausted` is the
 /// error text on overflow.
 #[inline]
@@ -103,6 +125,7 @@ fn next_counter(counter: &mut u64, exhausted: &'static str) -> Result<u64> {
     *counter = counter
         .checked_add(1)
         .ok_or_else(|| Error::Protocol(exhausted.into()))?;
+
     Ok(*counter)
 }
 
@@ -113,28 +136,12 @@ fn stamp_peer_key(props: &mut PeerProperties, public_key: [u8; 32]) {
     authentication.public_key = Some(crate::PeerPublicKey::Curve(public_key));
 }
 
-const NONCE_HELLO: &[u8; 16] = b"CurveZMQHELLO---";
-const NONCE_INITIATE: &[u8; 16] = b"CurveZMQINITIATE";
-const NONCE_READY: &[u8; 16] = b"CurveZMQREADY---";
-const NONCE_MESSAGE_C: &[u8; 16] = b"CurveZMQMESSAGEC";
-const NONCE_MESSAGE_S: &[u8; 16] = b"CurveZMQMESSAGES";
-const NONCE_WELCOME_PREFIX: &[u8; 8] = b"WELCOME-";
-const NONCE_VOUCH_PREFIX: &[u8; 8] = b"VOUCH---";
-
-/// Poly1305 tag length of every box.
-const BOX_TAG_LEN: usize = 16;
-/// Command name that starts every MESSAGE frame payload.
-pub(crate) const MESSAGE_PREFIX: &[u8; 8] = b"\x07MESSAGE";
-/// MESSAGE payload offset of the Poly1305 tag, after prefix and nonce.
-const MESSAGE_TAG_OFFSET: usize = MESSAGE_PREFIX.len() + 8;
-/// MESSAGE payload offset of the box, after the tag.
-const MESSAGE_BOX_OFFSET: usize = MESSAGE_TAG_OFFSET + BOX_TAG_LEN;
-
 /// Construct a 24-byte nonce as `prefix(16) || counter_be(8)`.
 fn nonce_short(prefix: &[u8; 16], counter: u64) -> [u8; 24] {
     let mut n = [0u8; 24];
     n[..16].copy_from_slice(prefix);
     n[16..].copy_from_slice(&counter.to_be_bytes());
+
     n
 }
 
@@ -144,6 +151,7 @@ fn nonce_long(prefix: &[u8; 8], suffix: &[u8; 16]) -> [u8; 24] {
     let mut n = [0u8; 24];
     n[..8].copy_from_slice(prefix);
     n[8..].copy_from_slice(suffix);
+
     n
 }
 

@@ -58,6 +58,7 @@ impl PeerTransmitSlot {
             self.is_below_lwm(eq.total_bytes(), self.queued_msgs.load(Ordering::Relaxed));
         let reactivate = self.claim_reactivation(below_lwm);
         drop(eq);
+
         if reactivate {
             self.notify_reactivation();
         }
@@ -80,6 +81,7 @@ impl PeerTransmitSlot {
         } else {
             ShmRecord::Batch(omq_shm::BatchKind::Copied)
         };
+
         self.try_encode_shm_record(message, count, record)
     }
 
@@ -106,32 +108,39 @@ impl PeerTransmitSlot {
             let Some(state) = self.shm.state.get() else {
                 return TryFrameResult::Ineligible;
             };
+
             if self.is_dead() {
                 return TryFrameResult::Dead;
             }
+
             if !self.is_handshake_done() {
                 return TryFrameResult::Ineligible;
             }
+
             // Wire-space wakes do not return borrowed SHM leases. Keep the
             // failed encode's credit snapshot until the driver wakes us for
             // returned credit instead of rescanning the payload pool.
             if self.shm.credit_blocked.load(Ordering::Acquire) {
                 return TryFrameResult::Full;
             }
+
             let Some(mut eq) = self.lock_live() else {
                 return TryFrameResult::Dead;
             };
+
             if eq.total_bytes() >= self.cap
                 || self.queued_msgs.load(Ordering::Relaxed) + count > self.msg_cap
             {
                 return self.full();
             }
+
             let mut state = state.lock().expect("SHM connection");
             let result = match record {
                 ShmRecord::Body => state.encode_and_frame(message, &mut eq),
                 ShmRecord::Batch(kind) => state.encode_batch_and_frame(message, kind, &mut eq),
                 ShmRecord::Multipart => state.encode_multipart_and_frame(message, &mut eq),
             };
+
             drop(state);
             match result {
                 Ok(true) => {
@@ -144,6 +153,7 @@ impl PeerTransmitSlot {
                     drop(eq);
                     // The driver must arm its futex wait even with no wire bytes.
                     self.signal_encoded();
+
                     TryFrameResult::Full
                 }
                 Err(_) => {
@@ -153,6 +163,7 @@ impl PeerTransmitSlot {
                 }
             }
         }
+
         #[cfg(not(target_os = "linux"))]
         {
             let _ = (message, count, record);

@@ -21,11 +21,13 @@ pub extern "C" fn zmq_recv(
     if sock_ptr.is_null() {
         return fail(libc::EFAULT);
     }
+
     // SAFETY: C callers pass null or a pointer from this API.
     let sock = c_try!(unsafe { crate::handle::socket(sock_ptr) });
     if sock.ctx.is_effectively_terminated() {
         return fail(ETERM);
     }
+
     if buf.is_null() && buf_len > 0 {
         return fail(libc::EFAULT);
     }
@@ -45,9 +47,11 @@ pub extern "C" fn zmq_recviov(
     if sock_ptr.is_null() {
         return fail(libc::EFAULT);
     }
+
     if iov.is_null() || count.is_null() {
         return fail(libc::EFAULT);
     }
+
     fail(crate::error::ENOTSUP)
 }
 
@@ -113,9 +117,11 @@ fn pop_message<T>(
     let Some(cons) = (unsafe { sock.recv.consumers.get() }) else {
         return Err(ETERM);
     };
+
     if let Some(message) = try_pop_dual(cons, sock) {
         return map(message);
     }
+
     block_recv_result(sock, RecvWait::new(sock, flags), || {
         try_pop_dual(cons, sock).map(&mut map).transpose()
     })
@@ -134,6 +140,7 @@ fn pop_zap_frame(sock: &OmqSocket, wait: RecvWait) -> Result<(Bytes, bool), c_in
     if let Some(frame) = sock.ctx.zap.try_recv_frame(sock.id)? {
         return Ok(frame);
     }
+
     block_recv_result(sock, wait, || sock.ctx.zap.try_recv_frame(sock.id))
 }
 
@@ -147,6 +154,7 @@ pub(crate) fn authenticated_recv_has_data(sock: &OmqSocket) -> bool {
     let queued = unsafe { sock.recv.authenticated.get() }
         .as_ref()
         .is_some_and(|receiver| !receiver.is_empty());
+
     // SAFETY: same socket-thread invariant as above.
     queued || !unsafe { sock.recv.authenticated_drain.get() }.is_empty()
 }
@@ -165,12 +173,14 @@ pub(super) fn try_recv_authenticated_message(
     let Some(receiver) = (unsafe { sock.recv.authenticated.get() }).as_mut() else {
         return Err(ETERM);
     };
+
     let mut budget = DrainBudget::WORKER;
     while !budget.exhausted() {
         match receiver.try_recv() {
             Ok(item) => {
                 let (message, properties) = item.into_parts();
                 let _ = budget.account(message.byte_len());
+
                 settle_authenticated_fd(sock, receiver);
                 if let Some(message) = prepare_external_recv(sock, message) {
                     return Ok(Some((message, properties)));
@@ -183,6 +193,7 @@ pub(super) fn try_recv_authenticated_message(
             Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => return Err(ETERM),
         }
     }
+
     Ok(None)
 }
 
@@ -209,6 +220,7 @@ fn pop_authenticated_message(
     if let Some(item) = try_recv_authenticated_message(sock)? {
         return Ok(item);
     }
+
     block_recv_result(sock, wait, || try_recv_authenticated_message(sock))
 }
 
@@ -236,11 +248,13 @@ pub(crate) fn pop_recv_frame_with_properties(
     let (message, properties) = item;
     let start = msg_start_index(sock, &message);
     let frame = message.part_bytes(start).unwrap_or_default();
+
     for index in start + 1..message.len() {
         if let Some(part) = message.part_bytes(index) {
             drain.push_back((part, properties.clone()));
         }
     }
+
     Ok(ReceivedPart::new(
         frame,
         !drain.is_empty(),
@@ -261,13 +275,16 @@ pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, b
         let Ok(mut drain) = sock.recv.drain.lock() else {
             return Err(ETERM);
         };
+
         if let Some(frame) = drain.pop_front() {
             let more = !drain.is_empty();
             if !more {
                 sock.recv.drain_nonempty.store(false, Ordering::Relaxed);
             }
+
             return Ok((frame, more));
         }
+
         sock.recv.drain_nonempty.store(false, Ordering::Relaxed);
     }
 
@@ -287,6 +304,7 @@ pub(crate) fn pop_recv_message_with_metadata(
     } else {
         (pop_message(sock, flags, Ok)?, None)
     };
+
     // A DISH message is `[group, body]`.
     let body = msg_start_index(sock, &message);
     let mut part = ReceivedPart::new(
@@ -337,22 +355,27 @@ pub(super) fn try_pop_dual(
     cons.refresh(sock.recv.sink_config.get());
     let mut released_full_slot = false;
     let mut budget = DrainBudget::WORKER;
+
     while !budget.exhausted() {
         let Some((message, released)) = cons.try_pop() else {
             break;
         };
+
         released_full_slot |= released;
         let _ = budget.account(message.byte_len());
         settle_recv_fd(sock, cons);
+
         if let Some(message) = prepare_external_recv(sock, message) {
             signal_recv_space_if_full(sock, released_full_slot);
             return Some(message);
         }
     }
+
     signal_recv_space_if_full(sock, released_full_slot);
     if !cons.fast.is_empty() || !cons.pump.is_empty() {
         sock.notify.recv_notifier().signal();
     }
+
     None
 }
 
@@ -369,8 +392,10 @@ fn settle_recv_fd(sock: &OmqSocket, cons: &crate::socket::RecvConsumers) {
     if !cons.fast.is_empty() || !cons.pump.is_empty() {
         return;
     }
+
     let notify = sock.notify.recv_notifier();
     notify.drain();
+
     if !cons.fast.is_empty() || !cons.pump.is_empty() {
         notify.signal();
     }
@@ -381,6 +406,7 @@ fn msg_start_index(sock: &OmqSocket, msg: &omq_tokio::Message) -> usize {
     if sock.socket_type == omq_tokio::SocketType::Dish && msg.len() >= 2 {
         return 1;
     }
+
     0
 }
 
@@ -393,20 +419,25 @@ fn stash_remaining_parts(
 ) -> Result<bool, c_int> {
     let nparts = msg.len();
     let next = start + 1;
+
     if next >= nparts {
         return Ok(false);
     }
+
     sock.recv
         .drain_nonempty
         .store(true, std::sync::atomic::Ordering::Relaxed);
+
     let Ok(mut drain) = sock.recv.drain.lock() else {
         return Err(ETERM);
     };
+
     for i in next..nparts {
         if let Some(b) = msg.part_bytes(i) {
             drain.push_back(b);
         }
     }
+
     Ok(true)
 }
 
@@ -414,6 +445,7 @@ fn decompose_message(sock: &OmqSocket, msg: &omq_tokio::Message) -> Result<(Byte
     let start = msg_start_index(sock, msg);
     let head = msg.part_bytes(start).unwrap_or_default();
     let more = stash_remaining_parts(sock, msg, start)?;
+
     Ok((head, more))
 }
 
@@ -427,6 +459,7 @@ fn copy_to_buf(buf: *mut libc::c_void, buf_len: usize, src: &[u8]) {
     if buf.is_null() || buf_len == 0 {
         return;
     }
+
     let copy_len = src.len().min(buf_len);
     // SAFETY: buf is non-null with buf_len writable bytes; copy_len <= buf_len.
     unsafe {

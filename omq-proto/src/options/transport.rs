@@ -68,6 +68,7 @@ impl DartOptions {
                 "dart.max_ready_peers must be nonzero".into(),
             ));
         }
+
         if !self.window_messages.is_power_of_two()
             || self.window_messages > 65536
             || self.max_send_rate == Some(0)
@@ -76,11 +77,13 @@ impl DartOptions {
                 "DART needs a power-of-two window <=65536 and a nonzero rate cap".into(),
             ));
         }
+
         if self.io_spin > Duration::from_micros(50) && self.io_spin != Duration::MAX {
             return Err(crate::error::Error::Config(
                 "dart.io_spin must be at most 50 microseconds or Duration::MAX".into(),
             ));
         }
+
         Ok(())
     }
 }
@@ -155,6 +158,7 @@ impl std::fmt::Debug for QuicOptions {
         debug.field("webtransport_path", &self.webtransport_path);
         #[cfg(feature = "webtransport")]
         debug.field("allowed_origins", &self.allowed_origins);
+
         debug.finish()
     }
 }
@@ -163,6 +167,7 @@ impl std::fmt::Debug for QuicOptions {
 impl QuicOptions {
     /// Smallest accepted stream window.
     pub const MIN_STREAM_WINDOW: u32 = 16 * 1024;
+
     /// Largest accepted stream window.
     pub const MAX_STREAM_WINDOW: u32 = 256 * 1024 * 1024;
 
@@ -181,33 +186,39 @@ impl QuicOptions {
                 Self::MAX_STREAM_WINDOW
             )));
         }
+
         if self.keep_alive_interval.is_zero() || self.keep_alive_interval >= self.idle_timeout {
             return Err(crate::error::Error::Config(
                 "quic.keep_alive_interval must be nonzero and below quic.idle_timeout".into(),
             ));
         }
+
         if self.idle_timeout > Duration::from_hours(1) {
             return Err(crate::error::Error::Config(
                 "quic.idle_timeout must not exceed one hour".into(),
             ));
         }
+
         if self.max_ready_peers == 0 {
             return Err(crate::error::Error::Config(
                 "quic.max_ready_peers must be greater than zero".into(),
             ));
         }
+
         #[cfg(feature = "webtransport")]
         crate::proto::web_address::validate_ws_address(
             &crate::endpoint::Host::Name("localhost".into()),
             &self.webtransport_path,
         )
         .map_err(|_| crate::error::Error::Config("invalid quic.webtransport_path".into()))?;
+
         #[cfg(feature = "webtransport")]
         for origin in &self.allowed_origins {
             crate::proto::web_address::normalize_ws_origin(origin).map_err(|_| {
                 crate::error::Error::Config(format!("invalid quic.allowed_origins entry {origin}"))
             })?;
         }
+
         Ok(())
     }
 }

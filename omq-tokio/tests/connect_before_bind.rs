@@ -23,6 +23,7 @@ fn free_tcp_port() -> u16 {
     let l = StdTcpListener::bind("127.0.0.1:0").unwrap();
     let p = l.local_addr().unwrap().port();
     drop(l);
+
     p
 }
 
@@ -237,6 +238,7 @@ async fn pub_sub_connect_before_bind(ep: Endpoint) {
             assert_eq!(m, Message::single("x.hit"));
             break;
         }
+
         assert!(
             std::time::Instant::now() < deadline,
             "subscription never propagated"
@@ -455,6 +457,7 @@ async fn radio_dish_connect_before_bind(ep: Endpoint) {
             assert_eq!(m, Message::multipart(["w", "hit"]));
             break;
         }
+
         assert!(
             std::time::Instant::now() < deadline,
             "join never propagated"
@@ -514,6 +517,7 @@ async fn peer_connect_before_bind(ep: Endpoint) {
             assert_eq!(m.part_bytes(1).unwrap(), &b"from-b"[..]);
             break;
         }
+
         assert!(
             std::time::Instant::now() < deadline,
             "peer identity never discovered"

@@ -9,10 +9,12 @@ fn request(path: &str, protocols: &str, origin: Option<&str>) -> Vec<u8> {
         "dGhlIHNhbXBsZSBub25jZQ==",
         protocols,
     );
+
     if let Some(origin) = origin {
         request.truncate(request.len() - 2);
         request.extend_from_slice(format!("Origin: {origin}\r\n\r\n").as_bytes());
     }
+
     request
 }
 
@@ -30,6 +32,7 @@ fn selection_requires_configured_mechanism_and_preserves_legacy_browser_profile(
         let req = ws_handshake::parse_client_upgrade(&request("/", offers, None)).unwrap();
         assert_eq!(policy.select(&req).ok(), expected, "{offers}");
     }
+
     #[cfg(feature = "plain")]
     {
         let options = Options {
@@ -39,6 +42,7 @@ fn selection_requires_configured_mechanism_and_preserves_legacy_browser_profile(
             ..Options::default()
         };
         let policy = ServerPolicy::new("/", &options).unwrap();
+
         for (offers, expected) in [
             ("ZWS2.0", Some("ZWS2.0")),
             ("ZWS2.0, ZWS2.0/PLAIN", Some("ZWS2.0/PLAIN")),
@@ -60,6 +64,7 @@ fn origin_and_resource_policy_uses_exact_normalized_origins_and_literal_targets(
     options.ws.allowed_origins = vec!["https://EXAMPLE.com:443".into(), "http://[::1]".into()];
     let policy = ServerPolicy::new("/app?x=1", &options).unwrap();
     assert!(policy.select(&browser).is_ok());
+
     for (path, origin, allowed) in [
         ("/app?x=1", None, true),
         ("/app?x=1", Some("http://[0:0:0:0:0:0:0:1]:80"), true),
@@ -84,6 +89,7 @@ fn origin_and_resource_policy_uses_exact_normalized_origins_and_literal_targets(
             .and_then(|req| policy.select(&req));
         assert_eq!(result.is_ok(), allowed, "{path} {origin:?}");
     }
+
     options.ws.allowed_origins.push("*".into());
     assert!(ServerPolicy::new("/", &options).is_err());
 }
@@ -95,6 +101,7 @@ async fn bytewise_request_and_coalesced_frames_survive_upgrade() {
         let policy = ServerPolicy::new("/", &Options::default()).unwrap();
         let task = tokio::spawn(async move { accept(&mut server, &policy).await.unwrap() });
         let mut bytes = request("/", "ZWS2.0/NULL", None);
+
         if bytewise {
             for byte in bytes {
                 client.write_all(&[byte]).await.unwrap();
@@ -104,12 +111,14 @@ async fn bytewise_request_and_coalesced_frames_survive_upgrade() {
             bytes.extend_from_slice(b"\x82\x81\x01\x02\x03\x04x");
             client.write_all(&bytes).await.unwrap();
         }
+
         let (head, _) = read_head(&mut client).await.unwrap();
         assert_eq!(
             ws_handshake::parse_server_upgrade(&head, "dGhlIHNhbXBsZSBub25jZQ==").unwrap(),
             "ZWS2.0/NULL"
         );
         let leftover = task.await.unwrap();
+
         assert_eq!(
             leftover.as_ref(),
             if bytewise {
@@ -135,12 +144,14 @@ async fn client_rejects_unoffered_selection_and_keeps_coalesced_frames() {
             response.extend_from_slice(b"\x82\x01x");
             server.write_all(&response).await.unwrap();
         });
+
         let result = connect(&mut client, "localhost", "/", "ZWS2.0/NULL").await;
         if selected == "ZWS2.0/NULL" {
             assert_eq!(result.unwrap().as_ref(), b"\x82\x01x");
         } else {
             assert!(result.is_err(), "accepted unoffered {selected}");
         }
+
         task.await.unwrap();
     }
 }
@@ -153,12 +164,14 @@ async fn stalled_response_write_is_covered_by_setup_deadline() {
     let task = tokio::spawn(async move {
         tokio::time::timeout(Duration::from_secs(1), accept(&mut server, &policy)).await
     });
+
     client
         .write_all(&request("/", "ZWS2.0/NULL", None))
         .await
         .unwrap();
     tokio::task::yield_now().await;
     assert!(!task.is_finished());
+
     tokio::time::advance(Duration::from_secs(1)).await;
     assert!(task.await.unwrap().is_err());
     assert_eq!(client.read_u8().await.unwrap(), b'H');

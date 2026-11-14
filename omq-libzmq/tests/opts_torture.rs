@@ -46,6 +46,7 @@ fn get_i32(sock: *mut c_void, opt: i32) -> i32 {
         0
     );
     assert_eq!(len, size_of::<i32>());
+
     val
 }
 
@@ -61,6 +62,7 @@ fn get_i64(sock: *mut c_void, opt: i32) -> i64 {
         0
     );
     assert_eq!(len, size_of::<i64>());
+
     val
 }
 
@@ -74,6 +76,7 @@ fn get_bytes(sock: *mut c_void, opt: i32, buf: &mut [u8]) -> usize {
         zmq_getsockopt(sock, opt, buf.as_mut_ptr().cast(), &mut len),
         0
     );
+
     len
 }
 
@@ -89,10 +92,12 @@ fn invalid_socket_option_calls_report_expected_errno() {
         ),
         -1
     );
+
     assert_eq!(omq_zmq::zmq_errno(), ZMQ_ENOTSOCK);
 
     let mut out = 0i32;
     let mut len = size_of::<i32>();
+
     assert_eq!(
         zmq_getsockopt(
             std::ptr::null_mut(),
@@ -102,6 +107,7 @@ fn invalid_socket_option_calls_report_expected_errno() {
         ),
         -1
     );
+
     assert_eq!(omq_zmq::zmq_errno(), ZMQ_ENOTSOCK);
 
     let ctx = zmq_ctx_new();
@@ -198,6 +204,7 @@ fn getsockopt_rejects_too_small_or_null_outputs() {
 
     let mut out = 0i64;
     let mut len = size_of::<i32>();
+
     assert_eq!(
         zmq_getsockopt(
             sock,
@@ -207,6 +214,7 @@ fn getsockopt_rejects_too_small_or_null_outputs() {
         ),
         -1
     );
+
     assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
 
     let mut short = [0u8; 4];

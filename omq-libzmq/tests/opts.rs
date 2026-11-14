@@ -14,8 +14,10 @@ use omq_zmq::{
 
 const ZMQ_PUSH: i32 = 8;
 const ZMQ_PULL: i32 = 7;
+
 #[allow(dead_code)]
 const ZMQ_PUB: i32 = 1;
+
 const ZMQ_SUB: i32 = 2;
 const ZMQ_ROUTER: i32 = 6;
 const ZMQ_DEALER: i32 = 5;
@@ -82,6 +84,7 @@ fn get_i32(sock: *mut c_void, opt: i32) -> i32 {
     let mut v: i32 = 0;
     let mut sz = size_of::<i32>();
     zmq_getsockopt(sock, opt, (&mut v as *mut i32).cast(), &mut sz);
+
     v
 }
 
@@ -93,6 +96,7 @@ fn get_i64(sock: *mut c_void, opt: i32) -> i64 {
     let mut v: i64 = 0;
     let mut sz = size_of::<i64>();
     zmq_getsockopt(sock, opt, (&mut v as *mut i64).cast(), &mut sz);
+
     v
 }
 
@@ -113,6 +117,7 @@ fn getsockopt_i32_clears_larger_output_buffer() {
 
     let mut more: i64 = -1;
     let mut more_size = size_of::<i64>();
+
     assert_eq!(
         zmq_getsockopt(
             sub,
@@ -122,6 +127,7 @@ fn getsockopt_i32_clears_larger_output_buffer() {
         ),
         0
     );
+
     assert_eq!(more_size, size_of::<i32>());
     assert_eq!(more, 0);
 
@@ -344,6 +350,7 @@ fn bound_push_after_last_peer_disconnect_is_muted_like_libzmq() {
 
     let payload = b"x";
     let mut muted = false;
+
     for _ in 0..50 {
         let rc = zmq_send(push, payload.as_ptr().cast(), payload.len(), ZMQ_DONTWAIT);
         if rc == -1 {
@@ -351,8 +358,10 @@ fn bound_push_after_last_peer_disconnect_is_muted_like_libzmq() {
             muted = true;
             break;
         }
+
         std::thread::sleep(Duration::from_millis(20));
     }
+
     assert!(muted, "bound PUSH stayed writable after last peer closed");
 
     set_i32(push, ZMQ_SNDTIMEO, 50);
@@ -662,20 +671,24 @@ fn updated_compression_after_materialization_is_validated_before_dns() {
         zmq_bind(socket, c"inproc://codec-snapshot-validation".as_ptr()),
         0
     );
+
     assert_eq!(
         set_bytes(socket, OMQ_COMPRESSION_DICT, b"invalid-zstd-dictionary"),
         0
     );
+
     assert_eq!(
         zmq_connect(socket, c"zstd+tcp://codec-snapshot.invalid:1".as_ptr()),
         -1
     );
     assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+
     assert_eq!(
         zmq_bind(socket, c"zstd+tcp://codec-snapshot.invalid:2".as_ptr()),
         -1
     );
     assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+
     assert_eq!(zmq_close(socket), 0);
     assert_eq!(zmq_ctx_term(ctx), 0);
 }
@@ -691,6 +704,7 @@ fn curve_overlay_cannot_change_on_a_materialized_socket() {
     // The running socket keeps its mechanism, so the change is refused.
     assert_eq!(set_i32(socket, ZMQ_CURVE_SERVER, 1), -1);
     assert_eq!(omq_zmq::zmq_errno(), libc::EBUSY);
+
     assert_eq!(zmq_close(socket), 0);
     assert_eq!(zmq_ctx_term(ctx), 0);
 }
@@ -1279,6 +1293,7 @@ fn ws_origin_allowlist_roundtrip_validation_and_materialization() {
     assert_eq!(set_bytes(socket, OMQ_WS_ALLOWED_ORIGINS, origins), 0);
     let size = get_bytes(socket, OMQ_WS_ALLOWED_ORIGINS, &mut buffer);
     assert_eq!(&buffer[..size], origins);
+
     for invalid in [
         "*",
         "null",
@@ -1292,14 +1307,17 @@ fn ws_origin_allowlist_roundtrip_validation_and_materialization() {
         );
         assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
     }
+
     let size = get_bytes(socket, OMQ_WS_ALLOWED_ORIGINS, &mut buffer);
     assert_eq!(&buffer[..size], origins);
     assert_eq!(set_bytes(socket, OMQ_WS_ALLOWED_ORIGINS, b""), 0);
     assert_eq!(get_bytes(socket, OMQ_WS_ALLOWED_ORIGINS, &mut buffer), 0);
+
     let endpoint = std::ffi::CString::new("ws://127.0.0.1:0/").unwrap();
     assert_eq!(zmq_bind(socket, endpoint.as_ptr()), 0);
     assert_eq!(set_bytes(socket, OMQ_WS_ALLOWED_ORIGINS, origins), -1);
     assert_eq!(omq_zmq::zmq_errno(), libc::EBUSY);
+
     assert_eq!(zmq_close(socket), 0);
     assert_eq!(zmq_ctx_term(ctx), 0);
 }
@@ -1312,18 +1330,22 @@ fn ws_ready_peer_limit_roundtrip_validation_and_materialization() {
     assert_eq!(get_i32(socket, OMQ_WS_MAX_READY_PEERS), 1024);
     assert_eq!(set_i32(socket, OMQ_WS_MAX_READY_PEERS, 7), 0);
     assert_eq!(get_i32(socket, OMQ_WS_MAX_READY_PEERS), 7);
+
     for invalid in [-1, 0] {
         assert_eq!(set_i32(socket, OMQ_WS_MAX_READY_PEERS, invalid), -1);
         assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
     }
+
     assert_eq!(set_bytes(socket, OMQ_WS_MAX_READY_PEERS, &[1, 2]), -1);
     assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
     assert_eq!(get_i32(socket, OMQ_WS_MAX_READY_PEERS), 7);
+
     let endpoint = std::ffi::CString::new("ws://127.0.0.1:0/").unwrap();
     assert_eq!(zmq_bind(socket, endpoint.as_ptr()), 0);
     assert_eq!(set_i32(socket, OMQ_WS_MAX_READY_PEERS, 9), -1);
     assert_eq!(omq_zmq::zmq_errno(), libc::EBUSY);
     assert_eq!(get_i32(socket, OMQ_WS_MAX_READY_PEERS), 7);
+
     assert_eq!(zmq_close(socket), 0);
     assert_eq!(zmq_ctx_term(ctx), 0);
 }
@@ -1451,6 +1473,7 @@ fn identity_rejects_reserved_prefix_and_preserves_previous_value() {
     let ctx = zmq_ctx_new();
     let socket = zmq_socket(ctx, ZMQ_DEALER);
     assert_eq!(set_bytes(socket, ZMQ_IDENTITY, b"valid\x00suffix"), 0);
+
     for identity in [b"\x00reserved".as_slice(), &[b'x'; 256]] {
         assert_eq!(set_bytes(socket, ZMQ_IDENTITY, identity), -1);
         assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
@@ -1458,6 +1481,7 @@ fn identity_rejects_reserved_prefix_and_preserves_previous_value() {
         let len = get_bytes(socket, ZMQ_IDENTITY, &mut previous);
         assert_eq!(&previous[..len], b"valid\x00suffix");
     }
+
     assert_eq!(set_bytes(socket, ZMQ_IDENTITY, &[b'x'; 255]), 0);
     zmq_close(socket);
     zmq_ctx_term(ctx);
@@ -1470,17 +1494,20 @@ fn huge_hwm_values_bind_connect_and_deliver() {
     let ctx = zmq_ctx_new();
     let pull = zmq_socket(ctx, ZMQ_PULL);
     let push = zmq_socket(ctx, ZMQ_PUSH);
+
     assert_eq!(set_i32(pull, ZMQ_RCVHWM, i32::MAX), 0);
     assert_eq!(set_i32(push, ZMQ_SNDHWM, i32::MAX), 0);
     let addr = std::ffi::CString::new("inproc://opts-huge-hwm").unwrap();
     assert_eq!(omq_zmq::zmq_bind(pull, addr.as_ptr()), 0);
     assert_eq!(omq_zmq::zmq_connect(push, addr.as_ptr()), 0);
+
     assert_eq!(omq_zmq::zmq_send(push, b"x".as_ptr().cast(), 1, 0), 1);
     let mut buf = [0u8; 4];
     assert_eq!(
         omq_zmq::zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0),
         1
     );
+
     zmq_close(push);
     zmq_close(pull);
     zmq_ctx_term(ctx);

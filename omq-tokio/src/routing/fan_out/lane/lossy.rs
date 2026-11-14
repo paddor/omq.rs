@@ -26,6 +26,7 @@ impl LaneWorker {
         if target.peers.is_empty() {
             return;
         }
+
         if self.is_shm_group(target.group) {
             self.dispatch_shm_group(target.peers, msg, touched, None);
             return;
@@ -34,9 +35,11 @@ impl LaneWorker {
         let group = self.codec_groups[target.group]
             .as_mut()
             .expect("matched codec group");
+
         let Ok(wire_messages) = group.encode(msg) else {
             return;
         };
+
         let dict_msg = group.dictionary().cloned();
 
         // A payload is only useful to peers whose dictionary already went out.
@@ -44,6 +47,7 @@ impl LaneWorker {
             Some(dict) => self.ship_dictionary_lossy(dict, target.peers, touched),
             None => SmallVec::<[u64; 32]>::from_slice(target.peers),
         };
+
         if payload_peer_ids.is_empty() {
             return;
         }
@@ -53,11 +57,13 @@ impl LaneWorker {
             policy: self.mute_policy,
             protected: false,
         };
+
         for peer_id in payload_peer_ids {
             if let Some(peer) = self.peers.get_mut(&peer_id) {
                 lossy.push(peer_id, peer, &encoded, touched);
             }
         }
+
         self.encoder.clear();
     }
 
@@ -76,16 +82,20 @@ impl LaneWorker {
             policy: self.mute_policy,
             protected: true,
         };
+
         for &peer_id in peer_ids {
             let Some(peer) = self.peers.get_mut(&peer_id) else {
                 continue;
             };
+
             let dict_ready = peer.slot.fanout_dict_queued_or_shipped()
                 || lossy.push(peer_id, peer, &encoded, touched);
+
             if dict_ready {
                 payload_peer_ids.push(peer_id);
             }
         }
+
         self.encoder.clear();
 
         payload_peer_ids
@@ -126,6 +136,7 @@ impl LossyPush {
                 if self.protected && self.policy != FanOutMutePolicy::DropOldest {
                     peer.mark_dict_shipped();
                 }
+
                 LaneWorker::touch_peer(peer_id, peer, touched);
                 true
             }
@@ -134,6 +145,7 @@ impl LossyPush {
                 if self.policy == FanOutMutePolicy::DropNewest {
                     peer.slot.deactivate_fanout();
                 }
+
                 false
             }
         }

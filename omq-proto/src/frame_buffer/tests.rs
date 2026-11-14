@@ -22,14 +22,17 @@ fn drain_owned_moves_arena_bytes_and_reserves_again() {
     let large = vec![7u8; ARENA_INITIAL_CAP];
     eq.frame(&Message::single(Bytes::from(large.clone())));
     eq.frame(&Message::single("h"));
+
     // The first chunk still holds the old arena allocation.
     assert!(eq.arena.capacity() >= ARENA_INITIAL_CAP);
+
     chunks.clear();
     eq.drain_owned(&mut chunks, 16);
     let wire: Vec<u8> = chunks
         .iter()
         .flat_map(|chunk| chunk.iter().copied())
         .collect();
+
     let mut expected = vec![0x02];
     expected.extend_from_slice(&(large.len() as u64).to_be_bytes());
     expected.extend_from_slice(&large);
@@ -57,6 +60,7 @@ fn drain_owned_reuses_arena_only_after_chunks_drop() {
     eq.frame(&Message::single("third"));
     assert_eq!(eq.arena_bytes().as_ptr() as usize, first_arena);
     assert!(eq.arena.capacity() >= ARENA_INITIAL_CAP);
+
     eq.drain_owned(&mut chunks, 16);
     assert_eq!(&chunks[0][..], b"\x00\x05third");
     assert_eq!(&second[0][..], b"\x00\x06second");
@@ -66,16 +70,19 @@ fn drain_owned_reuses_arena_only_after_chunks_drop() {
 fn drain_owned_bounds_retired_arenas_by_count_and_capacity() {
     let mut eq = FrameBuffer::new();
     let mut in_flight = Vec::new();
+
     for _ in 0..3 * RETIRED_ARENAS {
         eq.frame(&Message::single("x"));
         eq.drain_owned(&mut in_flight, 16);
         assert!(eq.retired.len() <= RETIRED_ARENAS);
     }
+
     let mut large = FrameBuffer::with_config(ARENA_THRESHOLD, 1024 * 1024);
     for _ in 0..8 {
         large.frame(&Message::single("x"));
         large.drain_owned(&mut in_flight, 16);
         assert!(large.retired_bytes <= RETIRED_ARENA_BYTES);
+
         assert_eq!(
             large.retired_bytes,
             large
@@ -85,6 +92,7 @@ fn drain_owned_bounds_retired_arenas_by_count_and_capacity() {
                 .sum::<usize>()
         );
     }
+
     // Evicted arenas stay valid for the chunks that still hold them.
     assert!(in_flight.iter().all(|chunk| &chunk[..] == b"\x00\x01x"));
     in_flight.clear();
@@ -151,6 +159,7 @@ fn advance_consumes_partial_writes_across_entries() {
         assert_eq!(wire_bytes(&eq), full[written..]);
         assert_eq!(eq.total_bytes(), full.len() - written);
     }
+
     eq.advance(full.len() - written);
     assert!(eq.is_empty());
     assert_eq!(eq.total_bytes(), 0);

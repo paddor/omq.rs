@@ -40,10 +40,12 @@ fn main() {
     ctx.block_on(async {
         common::print_header("PUB clone senders");
         let mut seq = 0usize;
+
         for transport in common::transports() {
             for &senders in &sender_counts() {
                 let s = if senders > 1 { "s" } else { "" };
                 println!("--- {transport} ({senders} sender clone{s}, {SUBSCRIBERS} SUB) ---");
+
                 for &size in &common::sizes() {
                     seq += 1;
                     let label = format!("{transport}/{senders}sender/{size}B");
@@ -54,6 +56,7 @@ fn main() {
                     println!("          delivered {delivered_s:>8.0} msg/s per SUB");
                     common::append_jsonl(PATTERN, &transport, senders, size, cell);
                 }
+
                 println!();
             }
         }
@@ -70,6 +73,7 @@ fn spawn_receivers(
         .map(|s| {
             let stop = stop.clone();
             let recv_count = recv_count.clone();
+
             tokio::spawn(async move {
                 while !stop.load(Ordering::Relaxed) {
                     if let Ok(Ok(msg)) =
@@ -78,16 +82,19 @@ fn spawn_receivers(
                         let mut budget = DrainBudget::WORKER;
                         let _ = budget.account(msg.byte_len());
                         recv_count.fetch_add(1, Ordering::Relaxed);
+
                         while !budget.exhausted() {
                             let Ok(msg) = s.try_recv() else { break };
                             let _ = budget.account(msg.byte_len());
                             recv_count.fetch_add(1, Ordering::Relaxed);
                         }
+
                         // A continuously ready SUB must let round timers and
                         // other receivers run before starting another batch.
                         tokio::task::yield_now().await;
                     }
                 }
+
                 drop(s);
             })
         })
@@ -115,10 +122,12 @@ async fn connect_pub_subs(
         let refs: Vec<&Socket> = subs.iter().collect();
         common::wait_connected(&refs).await;
     }
+
     {
         let refs: Vec<&Socket> = subs.iter().collect();
         common::wait_subscribed(&pub_, &refs).await;
     }
+
     (pub_, subs)
 }
 
@@ -141,6 +150,7 @@ async fn run_round(
     let round_stop = Arc::new(AtomicBool::new(false));
     // Senders and this task start the window together.
     let barrier = Arc::new(Barrier::new(senders + 1));
+
     let handles: Vec<_> = (0..senders)
         .map(|_| {
             let sock = pub_.clone();
@@ -148,13 +158,16 @@ async fn run_round(
             let payload = Bytes::copy_from_slice(payload);
             let round_stop = round_stop.clone();
             let barrier = barrier.clone();
+
             thread::spawn(move || {
                 barrier.wait();
                 let mut sent = 0usize;
+
                 while !round_stop.load(Ordering::Relaxed) {
                     let _ = sock.try_send(Message::single(payload.clone()));
                     sent += 1;
                 }
+
                 sent
             })
         })
@@ -171,6 +184,7 @@ async fn run_round(
         .into_iter()
         .map(|h| h.join().expect("sender thread"))
         .sum();
+
     RoundTotals {
         sent,
         elapsed: t0.elapsed(),
@@ -203,6 +217,7 @@ async fn run_cell(transport: &str, senders: usize, size: usize, seq: usize) -> (
         } else {
             round_dur
         };
+
         let totals = run_round(&pub_, senders, &payload, &recv_count, dur).await;
         if round == 0 {
             continue;
@@ -223,6 +238,7 @@ async fn run_cell(transport: &str, senders: usize, size: usize, seq: usize) -> (
     for h in recv_handles {
         let _ = h.await;
     }
+
     drop(pub_);
 
     let mbps = (best_n * size) as f64 / best_elapsed.as_secs_f64() / 1_000_000.0;

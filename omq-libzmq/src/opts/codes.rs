@@ -236,24 +236,34 @@ pub(super) const OMQ_COMPRESSION_AUTO_TRAIN: c_int = 1007;
 pub(super) const OMQ_WORKLOAD_PROFILE: c_int = 1008;
 pub(super) const OMQ_WS_ALLOWED_ORIGINS: c_int = 1009;
 pub(super) const OMQ_WS_MAX_READY_PEERS: c_int = 1010;
+
 #[cfg(feature = "quic")]
 pub(super) const OMQ_QUIC_CERT_PEM: c_int = 1011;
+
 #[cfg(feature = "quic")]
 pub(super) const OMQ_QUIC_KEY_PEM: c_int = 1012;
+
 #[cfg(feature = "quic")]
 pub(super) const OMQ_QUIC_TRUST_PEM: c_int = 1013;
+
 #[cfg(feature = "quic")]
 pub(super) const OMQ_QUIC_SERVER_NAME: c_int = 1014;
+
 #[cfg(feature = "quic")]
 pub(super) const OMQ_QUIC_TRUST_SYSTEM: c_int = 1015;
+
 #[cfg(feature = "quic")]
 pub(super) const OMQ_QUIC_STREAM_WINDOW: c_int = 1016;
+
 #[cfg(feature = "webtransport")]
 pub(super) const OMQ_QUIC_ALLOWED_ORIGINS: c_int = 1017;
+
 #[cfg(feature = "quic")]
 pub(super) const OMQ_QUIC_MAX_READY_PEERS: c_int = 1018;
+
 #[cfg(feature = "webtransport")]
 pub(super) const OMQ_QUIC_WEBTRANSPORT_PATH: c_int = 1019;
+
 pub(super) const OMQ_MAX_MESSAGE_PARTS: c_int = 1020;
 pub(super) const OMQ_MAX_PEER_SUBSCRIPTIONS: c_int = 1021;
 pub(super) const OMQ_ARENA_THRESHOLD: c_int = 10_001;

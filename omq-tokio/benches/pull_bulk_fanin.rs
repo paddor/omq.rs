@@ -27,6 +27,7 @@ fn writer(endpoint: &str, id: u8, size: usize) {
     let push = ctx.blocking_socket(SocketType::Push, options());
     push.connect(endpoint.parse::<Endpoint>().unwrap()).unwrap();
     let mut payload = vec![id; size];
+
     for seq in 0_u64..=u64::MAX {
         payload[1..9].copy_from_slice(&seq.to_le_bytes());
         push.send(Message::from_slice(&payload)).unwrap();
@@ -41,10 +42,12 @@ fn cpu_seconds() -> f64 {
         assert_eq!(libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()), 0);
         usage.assume_init()
     };
+
     #[cfg(target_vendor = "apple")]
     let micros = f64::from(usage.ru_utime.tv_usec + usage.ru_stime.tv_usec);
     #[cfg(not(target_vendor = "apple"))]
     let micros = (usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) as f64;
+
     (usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) as f64 + micros / 1e6
 }
 
@@ -56,16 +59,20 @@ fn cpu_seconds() -> f64 {
 fn run(writers: usize, size: usize, seconds: u64) {
     assert!((1..=255).contains(&writers));
     assert!((9..=omq_tokio::message::MAX_INLINE_MESSAGE).contains(&size));
+
     let ctx = Context::new();
     let recv_batching = std::env::var("OMQ_BENCH_RECV_BATCHING").is_ok_and(|value| value == "1");
     let pull = ctx.blocking_socket(SocketType::Pull, options().recv_batching(recv_batching));
     let endpoint = pull.bind("tcp://127.0.0.1:0").unwrap();
+
     // Held until the end of `run`; dropping it kills the writer processes.
     let _children = spawn_writers(&endpoint.to_string(), writers, size);
     pull.wait_connected(writers, Duration::from_secs(10))
         .unwrap();
+
     let mut out = Vec::with_capacity(256);
     let mut next = vec![0_u64; writers];
+
     for measuring in [false, true] {
         let duration = Duration::from_secs(if measuring { seconds } else { 1 });
         let start = Instant::now();
@@ -74,35 +81,42 @@ fn run(writers: usize, size: usize, seconds: u64) {
         let mut counts = vec![0_u64; writers];
         let mut calls = 0_u64;
         let mut end;
+
         loop {
             out.clear();
             pull.recv_many_timeout_into(256, Duration::from_secs(2), &mut out)
                 .unwrap();
+
             // Check content, FIFO, and inline storage without materializing Bytes.
             for msg in &out {
                 assert_eq!(msg.len(), 1);
                 let payload = msg.part_slice(0).unwrap();
                 assert_eq!(payload.len(), size);
+
                 let id = usize::from(payload[0]);
                 let seq = u64::from_le_bytes(payload[1..9].try_into().unwrap());
                 assert_eq!(seq, next[id]);
                 next[id] += 1;
                 assert!(payload[9..].iter().all(|&byte| usize::from(byte) == id));
+
                 let address = std::ptr::from_ref(msg) as usize;
                 assert!(
                     (address..address + size_of::<Message>())
                         .contains(&(payload.as_ptr() as usize))
                 );
             }
+
             end = Instant::now();
             if end >= deadline {
                 break;
             }
+
             calls += 1;
             for msg in &out {
                 counts[usize::from(msg.part_slice(0).unwrap()[0])] += 1;
             }
         }
+
         if measuring {
             let window = Window {
                 elapsed: (end - start).as_secs_f64(),
@@ -125,6 +139,7 @@ fn spawn_writers(endpoint: &str, writers: usize, size: usize) -> Writers {
                 .unwrap(),
         );
     }
+
     children
 }
 

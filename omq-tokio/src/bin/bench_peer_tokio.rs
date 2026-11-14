@@ -24,9 +24,6 @@
 
 use std::time::{Duration, Instant};
 
-const MULTI_PULL_DRAIN_BATCH: usize = 64;
-const RECV_BATCH_BYTES: usize = 1024 * 1024;
-
 use bytes::Bytes;
 use omq_tokio::{Endpoint, Error, Message, Options, Socket, SocketType};
 
@@ -59,6 +56,9 @@ use pubsub::{run_inproc_pubsub, run_multi_sub, run_pub, run_sub};
 
 use bench_common::{ModeArgs, RecvWindow, cpu_time_secs, warmup_duration};
 
+const MULTI_PULL_DRAIN_BATCH: usize = 64;
+const RECV_BATCH_BYTES: usize = 1024 * 1024;
+
 async fn report_bound_port(ctx: &omq_tokio::Context, ep: &Endpoint) {
     let port = match ep {
         Endpoint::Tcp { port, .. } => *port,
@@ -74,10 +74,12 @@ async fn report_bound_port(ctx: &omq_tokio::Context, ep: &Endpoint) {
         Endpoint::Quic { port, .. } => *port,
         _ => return,
     };
+
     let Ok(coord_ep) = std::env::var("OMQ_BENCH_COORD") else {
         println!("PORT {port}");
         return;
     };
+
     let coord = ctx.socket(SocketType::Push, Options::default());
     coord.connect(coord_ep).await.unwrap();
     coord
@@ -118,11 +120,13 @@ fn main() {
                 .enable_all()
                 .build()
                 .unwrap();
+
             rt.block_on(async {
                 let ctx = omq_tokio::Context::current();
                 async_main(args, ctx).await;
             });
         }
+
         #[cfg(not(feature = "bench-mt-runtime"))]
         panic!("OMQ_BENCH_MT_RUNTIME requires the bench-mt-runtime feature");
     } else {
@@ -131,6 +135,7 @@ fn main() {
             .enable_all()
             .build()
             .unwrap();
+
         rt.block_on(async {
             let ctx = omq_tokio::Context::current();
             async_main(args, ctx).await;
@@ -147,6 +152,7 @@ async fn async_main(args: Vec<String>, ctx: omq_tokio::Context) {
         || run_pattern_mode(&ctx, mode, &args).await
         || run_inproc_mode(mode, &args).await
         || run_tool_mode(mode, &args);
+
     if !handled {
         print_usage();
         std::process::exit(1);
@@ -181,6 +187,7 @@ async fn run_pipeline_mode(
         }
         _ => return false,
     }
+
     true
 }
 
@@ -215,6 +222,7 @@ async fn run_pattern_mode(
         }
         _ => return false,
     }
+
     true
 }
 
@@ -233,6 +241,7 @@ async fn run_inproc_mode(mode: Option<&str>, args: &ModeArgs<'_>) -> bool {
         }
         _ => return false,
     }
+
     true
 }
 
@@ -259,6 +268,7 @@ fn run_tool_mode(mode: Option<&str>, args: &ModeArgs<'_>) -> bool {
         }
         _ => return false,
     }
+
     true
 }
 
@@ -300,9 +310,11 @@ async fn wait_for_handshakes(sock: &Socket, mut monitor: omq_tokio::MonitorStrea
             .into_iter()
             .filter(|c| c.peer_info.is_some())
             .count();
+
         if connected >= peers {
             return;
         }
+
         let now = Instant::now();
         assert!(
             now < deadline,
@@ -318,9 +330,11 @@ async fn run_push_fanout(ctx: &omq_tokio::Context, ep: Endpoint, size: usize, pe
     let bound = push.bind(ep).await.expect("push bind");
     report_bound_port(ctx, &bound).await;
     wait_for_handshakes(&push, monitor, peers).await;
+
     let payload = bench_payload(size);
     wait_for_warmup_barrier().await;
     run_push_warmup(&push, &payload).await;
+
     wait_for_start_barrier().await;
     run_push_loop(&push, &payload).await;
 }
@@ -340,6 +354,7 @@ async fn run_push_loop(sock: &Socket, payload: &Bytes) {
             send_fast(sock, Message::from_slice(payload)).await;
         }
     }
+
     let msg = Message::single(payload.clone());
     loop {
         send_fast(sock, msg.clone()).await;
@@ -364,6 +379,7 @@ async fn recv_before_deadline(sock: &Socket, deadline: Instant) -> bool {
     if now >= deadline {
         return false;
     }
+
     matches!(
         tokio::time::timeout(deadline - now, sock.recv()).await,
         Ok(Ok(_))
@@ -386,6 +402,7 @@ async fn recv_loop(sock: &Socket, duration: Duration, size: usize) -> (u64, f64)
             }
             Err(error) => panic!("throughput receive failed: {error}"),
         }
+
         let mut received = 1;
         for _ in 1..batch {
             match sock.try_recv() {
@@ -394,9 +411,11 @@ async fn recv_loop(sock: &Socket, duration: Duration, size: usize) -> (u64, f64)
                 Err(error) => panic!("throughput receive failed: {error}"),
             }
         }
+
         if Instant::now() >= deadline {
             break;
         }
+
         count += received;
         tokio::task::coop::consume_budget().await;
     }
@@ -437,9 +456,11 @@ async fn run_push(ctx: &omq_tokio::Context, ep: Endpoint, size: usize, peers: us
     let monitor = push.monitor();
     let bound = push.bind(ep).await.expect("push bind");
     report_bound_port(ctx, &bound).await;
+
     if peers > 0 {
         wait_for_handshakes(&push, monitor, peers).await;
     }
+
     let payload = bench_payload(size);
     wait_for_warmup_barrier().await;
     run_push_warmup(&push, &payload).await;
@@ -546,12 +567,15 @@ fn with_commas(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + digits.len() / 3 + 1);
     out.push_str(sign);
     let len = digits.len();
+
     for (i, c) in digits.chars().enumerate() {
         if i > 0 && (len - i) % 3 == 0 {
             out.push(',');
         }
+
         out.push(c);
     }
+
     out.push_str(dec_part);
     out
 }

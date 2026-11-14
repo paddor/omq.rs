@@ -39,6 +39,7 @@ pub(crate) const DEFAULT_TRANSPORTS: &[&str] = &["inproc", "ipc", "tcp"];
 /// One untimed warmup pass; soaks up any first-allocation / first-frame
 /// codec setup before the calibration loop starts measuring.
 pub(crate) const PRIME_ITERS: usize = 2_000;
+
 pub(crate) const PRIME_BUDGET: Duration = Duration::from_millis(500);
 
 /// Calibration: keep doubling burst size until the timed run lasts at
@@ -51,6 +52,7 @@ pub(crate) const WARMUP_DURATION: Duration = Duration::from_millis(100);
 /// Override via env for longer overnight runs (`OMQ_BENCH_ROUND_MS`,
 /// `OMQ_BENCH_ROUNDS`).
 pub(crate) const DEFAULT_ROUND_DURATION: Duration = Duration::from_secs(2);
+
 pub(crate) const DEFAULT_ROUNDS: usize = 3;
 pub(crate) const QUICK_ROUND_DURATION: Duration = Duration::from_millis(1500);
 pub(crate) const QUICK_ROUNDS: usize = 1;
@@ -103,17 +105,20 @@ fn cache_dir() -> PathBuf {
         },
         PathBuf::from,
     );
+
     base.join("omq")
 }
 
 pub(crate) fn results_path() -> PathBuf {
     let mut p = cache_dir();
     let suffix = std::env::var("OMQ_BENCH_RESULTS_SUFFIX").unwrap_or_default();
+
     if suffix.is_empty() {
         p.push("results_tokio.jsonl");
     } else {
         p.push(format!("results_tokio_{suffix}.jsonl"));
     }
+
     p
 }
 
@@ -126,6 +131,7 @@ pub(crate) fn run_id() -> String {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs();
+
                 format!("ts-{now}")
             })
         })
@@ -142,12 +148,15 @@ pub(crate) fn sizes() -> Vec<usize> {
     if let Ok(s) = std::env::var("OMQ_BENCH_SIZES") {
         return s.split(',').filter_map(|t| t.trim().parse().ok()).collect();
     }
+
     if std::env::args().any(|a| a == "--dense-sizes") {
         return DENSE_SIZES.to_vec();
     }
+
     if std::env::args().any(|a| a == "--all-sizes") {
         return ALL_SIZES.to_vec();
     }
+
     DEFAULT_SIZES.to_vec()
 }
 
@@ -155,6 +164,7 @@ pub(crate) fn transports() -> Vec<String> {
     if let Ok(s) = std::env::var("OMQ_BENCH_TRANSPORTS") {
         return s.split(',').map(|t| t.trim().to_string()).collect();
     }
+
     DEFAULT_TRANSPORTS
         .iter()
         .map(|s| (*s).to_string())
@@ -165,6 +175,7 @@ pub(crate) fn all_transports() -> Vec<String> {
     if let Ok(s) = std::env::var("OMQ_BENCH_TRANSPORTS") {
         return s.split(',').map(|t| t.trim().to_string()).collect();
     }
+
     DEFAULT_TRANSPORTS
         .iter()
         .map(|s| (*s).to_string())
@@ -182,6 +193,7 @@ pub(crate) fn options(_msg_size: usize) -> Options {
     if let Ok(val) = std::env::var("OMQ_BENCH_ARENA_THRESHOLD") {
         o = o.arena_threshold(val.parse().expect("OMQ_BENCH_ARENA_THRESHOLD"));
     }
+
     o
 }
 
@@ -204,6 +216,7 @@ pub(crate) fn endpoint(transport: &str, seq: usize) -> Endpoint {
             let port = l.local_addr().unwrap().port();
             drop(l);
             let host = omq_tokio::endpoint::Host::Ip(Ipv4Addr::LOCALHOST.into());
+
             match transport {
                 "tcp" => Endpoint::Tcp { host, port },
                 #[cfg(feature = "lz4")]
@@ -232,6 +245,7 @@ pub(crate) async fn wait_connected(socks: &[&omq_tokio::Socket]) {
     // multi-cell run (TIME_WAIT sockets, kernel scheduling jitter). On a
     // healthy first cell the loop returns within ~10 ms.
     let deadline = Instant::now() + Duration::from_secs(30);
+
     loop {
         let mut pending = 0usize;
         for s in socks {
@@ -241,9 +255,11 @@ pub(crate) async fn wait_connected(socks: &[&omq_tokio::Socket]) {
                 pending += 1;
             }
         }
+
         if pending == 0 {
             return;
         }
+
         assert!(
             Instant::now() <= deadline,
             "bench: {pending}/{} peer(s) never reached peer_info=Some \
@@ -260,6 +276,7 @@ pub(crate) async fn wait_connected(socks: &[&omq_tokio::Socket]) {
 pub(crate) async fn wait_subscribed(pub_: &omq_tokio::Socket, subs: &[&omq_tokio::Socket]) {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut pending: Vec<usize> = (0..subs.len()).collect();
+
     while !pending.is_empty() {
         assert!(
             Instant::now() <= deadline,
@@ -268,12 +285,14 @@ pub(crate) async fn wait_subscribed(pub_: &omq_tokio::Socket, subs: &[&omq_tokio
         // Probe.
         let _ = pub_.send(omq_tokio::Message::single("")).await;
         let mut still: Vec<usize> = Vec::new();
+
         for &i in &pending {
             match tokio::time::timeout(Duration::from_millis(20), subs[i].recv()).await {
                 Ok(Ok(_)) => {} // got it; drop from pending
                 _ => still.push(i),
             }
         }
+
         pending = still;
     }
 }
@@ -289,6 +308,7 @@ where
 {
     let prime_start = Instant::now();
     let mut primed = 0usize;
+
     while primed < PRIME_ITERS && prime_start.elapsed() < PRIME_BUDGET {
         let chunk = (PRIME_ITERS - primed).min(align.max(1).max(10));
         burst(chunk).await;
@@ -298,16 +318,19 @@ where
     let round_dur = round_duration();
     let n_rounds = rounds();
     let mut n = align.max(1).max(10);
+
     let final_n = loop {
         let t = Instant::now();
         burst(n).await;
         let elapsed = t.elapsed();
+
         if elapsed >= WARMUP_DURATION {
             let rate = n as f64 / elapsed.as_secs_f64();
             let target = (rate * round_dur.as_secs_f64()) as usize;
             let aligned = (target / align.max(1)) * align.max(1);
             break aligned.max(align.max(1));
         }
+
         n = n.saturating_mul(4);
     };
 
@@ -320,12 +343,14 @@ where
         let cpu = process_cpu_time().saturating_sub(cpu0);
         rounds_data.push((wall, cpu));
     }
+
     let &(elapsed, cpu_time) = rounds_data
         .iter()
         .min_by_key(|(w, _)| *w)
         .expect("at least one round");
     let mbps = (final_n * msg_size) as f64 / elapsed.as_secs_f64() / 1_000_000.0;
     let msgs_s = final_n as f64 / elapsed.as_secs_f64();
+
     Cell {
         n: final_n,
         elapsed,
@@ -352,8 +377,10 @@ pub(crate) fn process_cpu_time() -> Duration {
             tv_nsec: 0,
         };
         unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, std::ptr::from_mut(&mut ts)) };
+
         Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
     }
+
     #[cfg(not(unix))]
     {
         Duration::ZERO
@@ -387,6 +414,7 @@ pub(crate) fn print_cell(msg_size: usize, c: Cell) {
     } else {
         0.0
     };
+
     println!(
         "  {:>6}  {:>8.1} MB/s  {:>8.0} msg/s  ({:.2}s, cpu {:.0}%, n={})",
         format!("{msg_size}B"),
@@ -402,10 +430,12 @@ pub(crate) fn append_jsonl(pattern: &str, transport: &str, peers: usize, msg_siz
     if std::env::var_os("OMQ_BENCH_NO_WRITE").is_some() {
         return;
     }
+
     let path = results_path();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+
     let row = format!(
         r#"{{"run_id":"{run}","pattern":"{pattern}","transport":"{transport}","peers":{peers},"msg_size":{msg_size},"msg_count":{n},"elapsed":{el},"cpu_time":{cpu},"mbps":{mbps},"msgs_s":{msgs_s}}}"#,
         run = run_id(),
@@ -419,6 +449,7 @@ pub(crate) fn append_jsonl(pattern: &str, transport: &str, peers: usize, msg_siz
         mbps = c.mbps,
         msgs_s = c.msgs_s,
     );
+
     if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&path) {
         let _ = writeln!(f, "{row}");
     }
@@ -427,8 +458,10 @@ pub(crate) fn append_jsonl(pattern: &str, transport: &str, peers: usize, msg_siz
 pub(crate) fn payload(target_bytes: usize) -> Bytes {
     const TEMPLATE: &str = r#"{"ts":"2026-04-27T12:34:56.{ID}Z","level":"INFO","service":"api-gateway","trace_id":"{ID}","span_id":"{ID}","user_id":"u-{ID}","method":"POST","path":"/v1/widgets/{ID}","status":200,"latency_ms":42,"region":"us-east-1","host":"api-{ID}.svc.cluster.local","msg":"request handled successfully"}
 "#;
+
     let mut out = String::with_capacity(target_bytes + TEMPLATE.len());
     let mut counter: u32 = 0;
+
     while out.len() < target_bytes {
         let mut rec = TEMPLATE.to_string();
         let id = format!("{:08x}", counter.wrapping_mul(0x9E37_79B1));
@@ -436,6 +469,7 @@ pub(crate) fn payload(target_bytes: usize) -> Bytes {
         out.push_str(&rec);
         counter = counter.wrapping_add(1);
     }
+
     out.truncate(target_bytes);
     Bytes::from(out)
 }
@@ -454,11 +488,13 @@ fn rustc_version_runtime() -> String {
 pub(crate) fn build_context() -> omq_tokio::Context {
     let config = omq_tokio::ContextConfig::from_env();
     let threads = config.io_threads;
+
     if threads <= 1 {
         println!("runtime: current_thread\n");
     } else {
         println!("runtime: {threads} x current_thread\n");
     }
+
     omq_tokio::Context::with_config(config)
 }
 
@@ -470,5 +506,6 @@ pub(crate) async fn with_timeout<T>(label: &str, fut: impl std::future::Future<O
         .await
         .unwrap_or_else(|_| panic!("BENCH TIMEOUT: {label} exceeded {to:?}"));
     tokio::task::yield_now().await;
+
     result
 }

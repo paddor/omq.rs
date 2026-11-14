@@ -11,6 +11,7 @@ async fn router() -> (RegularSocket, Endpoint) {
         .bind("tcp://127.0.0.1:0".parse::<Endpoint>().unwrap())
         .await
         .unwrap();
+
     (router, bound)
 }
 
@@ -20,6 +21,7 @@ async fn regular_rep() -> (RegularSocket, Endpoint) {
         .bind("tcp://127.0.0.1:0".parse::<Endpoint>().unwrap())
         .await
         .unwrap();
+
     (rep, bound)
 }
 
@@ -29,6 +31,7 @@ async fn regular_req() -> (RegularSocket, Endpoint) {
         .bind("tcp://127.0.0.1:0".parse::<Endpoint>().unwrap())
         .await
         .unwrap();
+
     (req, bound)
 }
 
@@ -38,6 +41,7 @@ async fn regular_dealer() -> (RegularSocket, Endpoint) {
         .bind("tcp://127.0.0.1:0".parse::<Endpoint>().unwrap())
         .await
         .unwrap();
+
     (dealer, bound)
 }
 
@@ -50,6 +54,7 @@ async fn regular_dealer_with_identity(identity: &'static [u8]) -> (RegularSocket
         .bind("tcp://127.0.0.1:0".parse::<Endpoint>().unwrap())
         .await
         .unwrap();
+
     (dealer, bound)
 }
 
@@ -72,6 +77,7 @@ async fn unresponsive_router() -> (Endpoint, tokio::task::JoinHandle<()>) {
         finish_handshake(&mut live).await.unwrap();
         tokio::time::sleep(Duration::from_secs(1)).await;
     });
+
     (endpoint, server)
 }
 
@@ -80,6 +86,7 @@ async fn router_replies_to_one_ping() -> (Endpoint, tokio::task::JoinHandle<()>)
     let endpoint: Endpoint = format!("tcp://{}", listener.local_addr().unwrap())
         .parse()
         .unwrap();
+
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let mut live = server_live(stream);
@@ -88,6 +95,7 @@ async fn router_replies_to_one_ping() -> (Endpoint, tokio::task::JoinHandle<()>)
         flush_live(&mut live).await.unwrap();
         tokio::time::sleep(Duration::from_secs(1)).await;
     });
+
     (endpoint, server)
 }
 
@@ -100,6 +108,7 @@ async fn dealer_round_trips_with_standard_router() {
             router.send(message).await.unwrap();
         }
     });
+
     let mut socket = Socket::connect(
         SocketType::Dealer,
         endpoint,
@@ -110,11 +119,13 @@ async fn dealer_round_trips_with_standard_router() {
     )
     .await
     .unwrap();
+
     for sequence in 0_u64..100 {
         let message = Message::single(Bytes::copy_from_slice(&sequence.to_le_bytes()));
         socket.send(&message).await.unwrap();
         assert_eq!(socket.recv().await.unwrap(), message);
     }
+
     server.await.unwrap();
 }
 
@@ -130,9 +141,11 @@ async fn req_round_trips_with_standard_rep() {
                 .unwrap();
         }
     });
+
     let mut socket = Socket::connect(SocketType::Req, endpoint, Options::default())
         .await
         .unwrap();
+
     for sequence in 0_u64..10 {
         let request = Message::single(sequence.to_le_bytes().to_vec());
         socket.send(&request).await.unwrap();
@@ -141,6 +154,7 @@ async fn req_round_trips_with_standard_rep() {
             Message::single((sequence + 1).to_le_bytes().to_vec())
         );
     }
+
     server.await.unwrap();
 }
 
@@ -165,6 +179,7 @@ async fn rep_round_trips_with_standard_req() {
     let mut socket = Socket::connect(SocketType::Rep, endpoint, Options::default())
         .await
         .unwrap();
+
     for sequence in 0_u64..10 {
         req.send(Message::single(sequence.to_le_bytes().to_vec()))
             .await
@@ -190,6 +205,7 @@ async fn bound_rep_round_trips_with_exclusive_req() {
         Socket::bind(SocketType::Rep, "tcp://127.0.0.1:0", Options::default())
             .await
             .unwrap();
+
     let server = tokio::spawn(async move {
         for sequence in 0_u64..10 {
             assert_eq!(
@@ -201,9 +217,11 @@ async fn bound_rep_round_trips_with_exclusive_req() {
                 .unwrap();
         }
     });
+
     let mut req = Socket::connect(SocketType::Req, endpoint, Options::default())
         .await
         .unwrap();
+
     for sequence in 0_u64..10 {
         req.send(&Message::single(sequence.to_le_bytes().to_vec()))
             .await
@@ -213,6 +231,7 @@ async fn bound_rep_round_trips_with_exclusive_req() {
             Message::single((sequence + 1).to_le_bytes().to_vec())
         );
     }
+
     server.await.unwrap();
 }
 
@@ -261,10 +280,12 @@ async fn client_server_round_trip() {
         Socket::bind(SocketType::Server, "tcp://127.0.0.1:0", Options::default())
             .await
             .unwrap();
+
     let server_task = tokio::spawn(async move {
         let request = server.recv().await.unwrap();
         assert_eq!(request, Message::single("request"));
         let routing_id = request.routing_id().expect("SERVER routing id");
+
         server
             .send(&Message::single("reply").with_routing_id(routing_id))
             .await
@@ -280,6 +301,7 @@ async fn client_server_round_trip() {
     )
     .await
     .unwrap();
+
     client.send(&Message::single("request")).await.unwrap();
     assert_eq!(client.recv().await.unwrap(), Message::single("reply"));
     server_task.await.unwrap().unwrap();
@@ -300,11 +322,13 @@ async fn server_rejects_stale_routing_id_after_reconnect() {
     client.send(&Message::single("first")).await.unwrap();
     let old_routing_id = server.recv().await.unwrap().routing_id().unwrap();
     client.close().await.unwrap();
+
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
             if server.maintain().await.is_err() {
                 break;
             }
+
             tokio::task::yield_now().await;
         }
     })
@@ -423,24 +447,29 @@ async fn reconnect_preserves_identity_and_reports_events() {
     )
     .await
     .unwrap();
+
     let mut monitor = socket.monitor();
     drop(router1);
     assert!(socket.recv().await.is_err());
+
     let (router2, rebound) = router().await;
     // A new ephemeral port is expected; exercise explicit reconnect state
     // here. Restart-on-the-same-address is covered by the external Wine
     // reproduction procedure.
     socket.endpoint = rebound;
     socket.reconnect_now().await.unwrap();
+
     let server = tokio::spawn(async move {
         let message = router2.recv().await.unwrap();
         assert_eq!(message.part_bytes(0).unwrap().as_ref(), b"stable-id");
         router2.send(message).await.unwrap();
     });
+
     let message = Message::single(Bytes::from_static(b"after-reconnect"));
     socket.send(&message).await.unwrap();
     assert_eq!(socket.recv().await.unwrap(), message);
     server.await.unwrap();
+
     let events: Vec<_> = std::iter::from_fn(|| monitor.try_recv().ok()).collect();
     assert!(
         events
@@ -462,6 +491,7 @@ async fn recv_drives_heartbeat_while_waiting_for_reply() {
         tokio::time::sleep(Duration::from_millis(150)).await;
         router.send(message).await.unwrap();
     });
+
     let mut socket = Socket::connect(
         SocketType::Dealer,
         endpoint,
@@ -473,6 +503,7 @@ async fn recv_drives_heartbeat_while_waiting_for_reply() {
     )
     .await
     .unwrap();
+
     let message = Message::single(Bytes::from_static(b"heartbeat"));
     socket.send(&message).await.unwrap();
     assert_eq!(socket.recv().await.unwrap(), message);
@@ -493,6 +524,7 @@ async fn recv_does_not_time_out_before_first_ping() {
     )
     .await
     .unwrap();
+
     assert!(
         tokio::time::timeout(Duration::from_millis(50), socket.recv())
             .await
@@ -520,6 +552,7 @@ async fn heartbeat_timeout_defaults_to_interval() {
     )
     .await
     .unwrap();
+
     assert!(matches!(
         tokio::time::timeout(Duration::from_millis(200), socket.recv()).await,
         Ok(Err(Error::Timeout))
@@ -566,6 +599,7 @@ async fn inbound_pong_clears_heartbeat_deadline() {
     )
     .await
     .unwrap();
+
     assert!(
         tokio::time::timeout(Duration::from_millis(125), socket.recv())
             .await
@@ -594,6 +628,7 @@ async fn unsupported_modes_fail_before_connecting() {
         .unwrap_err();
     assert!(matches!(error, Error::Config(message) if message.contains("only tcp://")));
 }
+
 #[tokio::test]
 async fn maintain_resumes_input_paused_behind_ping_replies() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -601,10 +636,12 @@ async fn maintain_resumes_input_paused_behind_ping_replies() {
         .parse()
         .unwrap();
     let (sent_tx, sent_rx) = tokio::sync::oneshot::channel();
+
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let mut live = server_live(stream);
         finish_handshake(&mut live).await.unwrap();
+
         // Enough replies to exceed the core's automatic reply backlog,
         // followed by data the client must still receive.
         for _ in 0..4096 {
@@ -615,6 +652,7 @@ async fn maintain_resumes_input_paused_behind_ping_replies() {
                 })
                 .unwrap();
         }
+
         live.connection
             .send_message(&Message::single(Bytes::from_static(b"after pings")))
             .unwrap();
@@ -622,6 +660,7 @@ async fn maintain_resumes_input_paused_behind_ping_replies() {
         sent_tx.send(()).unwrap();
         tokio::time::sleep(Duration::from_secs(2)).await;
     });
+
     let mut socket = Socket::connect(SocketType::Dealer, endpoint, Options::default())
         .await
         .unwrap();

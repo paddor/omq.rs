@@ -68,6 +68,7 @@ async fn monitor_listening_event_on_bind() {
         .await
         .unwrap()
         .unwrap();
+
     match ev {
         MonitorEvent::Listening { endpoint } => {
             assert!(matches!(endpoint, Endpoint::Inproc { .. }));
@@ -87,6 +88,7 @@ async fn monitor_capacity_bounds_retained_events() {
         mon.try_recv(),
         Err(omq_tokio::MonitorTryRecvError::Lagged(1))
     ));
+
     match mon.try_recv() {
         Ok(MonitorEvent::Listening {
             endpoint: Endpoint::Inproc { name },
@@ -133,6 +135,7 @@ async fn connections_changed_tracks_ready_set_until_close() {
     })
     .await
     .unwrap();
+
     assert!(matches!(closed, omq_tokio::Error::Closed));
 }
 
@@ -156,6 +159,7 @@ async fn monitor_full_lifecycle_on_pair() {
             .unwrap();
         srv_kinds.push(ev);
     }
+
     assert!(matches!(srv_kinds[0], MonitorEvent::Listening { .. }));
     assert!(matches!(srv_kinds[1], MonitorEvent::Accepted { .. }));
     assert!(matches!(
@@ -172,6 +176,7 @@ async fn monitor_full_lifecycle_on_pair() {
             .unwrap();
         cli_kinds.push(ev);
     }
+
     assert!(matches!(cli_kinds[0], MonitorEvent::Connected { .. }));
     assert!(matches!(
         cli_kinds[1],
@@ -192,6 +197,7 @@ async fn monitor_full_lifecycle_on_pair() {
             .await
             .unwrap()
             .unwrap();
+
         if let MonitorEvent::Disconnected { reason, .. } = ev {
             assert_eq!(reason, DisconnectReason::PeerClosed);
             break;
@@ -221,11 +227,13 @@ async fn monitor_handshake_carries_peer_properties() {
             .await
             .unwrap()
             .unwrap();
+
         if let MonitorEvent::HandshakeSucceeded { peer, .. } = ev {
             hs = Some(peer);
             break;
         }
     }
+
     let peer = hs.expect("HandshakeSucceeded must arrive");
     assert_eq!(peer.peer_identity.as_deref(), Some(&b"alice"[..]));
     assert_eq!(
@@ -319,6 +327,7 @@ async fn post_handshake_error_command_drops_connection() {
             break;
         }
     }
+
     assert!(
         saw_disconnect,
         "expected Disconnected after post-handshake ERROR"
@@ -489,6 +498,7 @@ async fn monitor_emits_closed_on_socket_close() {
             Ok(Err(_)) | Err(_) => break,
         }
     }
+
     assert!(saw_closed, "Closed event must be emitted on socket close");
 }
 
@@ -502,6 +512,7 @@ async fn drain_until_disconnect(mon: &mut omq_tokio::MonitorStream) -> Option<Di
             _ => break,
         }
     }
+
     None
 }
 
@@ -513,6 +524,7 @@ async fn drain_until_handshake(mon: &mut omq_tokio::MonitorStream) {
             _ => break,
         }
     }
+
     panic!("HandshakeSucceeded never arrived");
 }
 

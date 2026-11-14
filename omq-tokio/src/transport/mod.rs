@@ -83,6 +83,7 @@ macro_rules! delegate_async_io {
         }
     };
 }
+
 pub(crate) use delegate_async_io;
 
 pub mod backoff;
@@ -107,6 +108,7 @@ pub use inproc::{InprocConn, InprocListener};
 pub use ipc::IpcTransport;
 pub use omq_proto::inproc::{InboundFrame, InprocPeerSnapshot};
 pub use tcp::TcpTransport;
+
 #[cfg(feature = "ws")]
 pub mod ws;
 

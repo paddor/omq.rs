@@ -76,24 +76,34 @@ fn check_immediate(items: &mut [ZmqPollItem]) -> i32 {
     ready + crate::notify::check_descriptors(items)
 }
 
-/// Whether a socket has a buffered message or frame to receive.
+/// Whether a socket has a buffered message or frame to receive. A ZAP
+/// handler reads requests from the context instead of its drain.
 pub(crate) fn recv_ready(sock: &OmqSocket) -> bool {
-    sock.recv
-        .drain_nonempty
-        .load(std::sync::atomic::Ordering::Relaxed)
-        || sock.recv_has_data()
-        || crate::send_recv::authenticated_recv_has_data(sock)
+    let drain_nonempty = if sock.is_zap_handler() {
+        sock.ctx.zap.has_input(sock.id)
+    } else {
+        sock.recv
+            .drain_nonempty
+            .load(std::sync::atomic::Ordering::Relaxed)
+    };
+    drain_nonempty || sock.recv_has_data() || crate::send_recv::authenticated_recv_has_data(sock)
 }
 
-/// After a wait: add buffered input, and keep `POLLOUT` only for sockets
-/// that are writable. A send eventfd only says readiness may have changed.
+/// After a wait: keep `POLLIN` only for sockets with buffered input and
+/// `POLLOUT` only for sockets that are writable. A signaled descriptor only
+/// says readiness may have changed: the receive one also carries the
+/// `ZMQ_FD` wake of a socket that turned writable.
 fn accumulate_buffered(items: &mut [ZmqPollItem]) {
     for item in items.iter_mut() {
         let Some(sock) = item_socket(item) else {
             continue;
         };
-        if (item.events & ZMQ_POLLIN) != 0 && recv_ready(sock) {
-            item.revents |= ZMQ_POLLIN;
+        if (item.events & ZMQ_POLLIN) != 0 {
+            if recv_ready(sock) {
+                item.revents |= ZMQ_POLLIN;
+            } else {
+                item.revents &= !ZMQ_POLLIN;
+            }
         }
         if (item.events & ZMQ_POLLOUT) != 0 {
             if crate::send_recv::send_ready(sock) {

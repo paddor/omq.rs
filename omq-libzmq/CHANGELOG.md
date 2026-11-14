@@ -74,6 +74,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ZMQ_FD` of a ZAP-authenticated socket is no longer readable once its
   queue is empty. Before, it stayed readable after the first message, so
   an event loop on the descriptor spun at full CPU.
+- `ZMQ_FD` turns readable when a socket that could not send can send
+  again, as in libzmq. The wake is armed when a send returns `EAGAIN` or
+  `ZMQ_EVENTS` reports no `ZMQ_POLLOUT`, and reading `ZMQ_EVENTS` consumes
+  it. Before, the descriptor followed incoming messages only, so an event
+  loop that waited on it to send, for example on a PUSH socket, never woke.
+- `zmq_poll` with a zero timeout reports `ZMQ_POLLIN` for a ZAP handler
+  socket with a pending request. Before, it saw the request only after a
+  wait.
 
 ## [0.9.2] - 2026-11-04
 

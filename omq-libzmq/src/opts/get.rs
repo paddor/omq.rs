@@ -123,6 +123,7 @@ fn get_state_option(sock_arc: &Arc<OmqSocket>, option: c_int, out: OptOut) -> Re
             return Err(libc::ENOPROTOOPT);
             #[cfg(unix)]
             {
+                crate::send_recv::fd_edge::watch(sock_arc);
                 let fd = sock_arc.notify.recv_fd();
                 out.i32(fd)
             }
@@ -157,27 +158,13 @@ fn rcvmore(sock_arc: &OmqSocket) -> bool {
 }
 
 /// `ZMQ_EVENTS` bits: POLLOUT when a send would not block, POLLIN when any
-/// receive source has data.
+/// receive source has data. As in libzmq, the read also consumes a pending
+/// `ZMQ_FD` wake.
 fn poll_events(sock_arc: &OmqSocket) -> i32 {
-    let mut events = if crate::send_recv::send_ready(sock_arc) {
-        ZMQ_POLLOUT
-    } else {
-        0
-    };
-
-    let drain_nonempty = if sock_arc.is_zap_handler() {
-        sock_arc.ctx.zap.has_input(sock_arc.id)
-    } else {
-        sock_arc
-            .recv
-            .drain_nonempty
-            .load(std::sync::atomic::Ordering::Relaxed)
-    };
-    let recv_cons_has_data = sock_arc.recv_has_data();
-    let authenticated_recv_has_data = crate::send_recv::authenticated_recv_has_data(sock_arc);
-
-    let has_data = drain_nonempty || recv_cons_has_data || authenticated_recv_has_data;
-    if has_data {
+    let writable = crate::send_recv::send_ready(sock_arc);
+    crate::send_recv::fd_edge::observe(sock_arc, writable);
+    let mut events = if writable { ZMQ_POLLOUT } else { 0 };
+    if crate::poll::recv_ready(sock_arc) {
         events |= ZMQ_POLLIN;
     }
     events

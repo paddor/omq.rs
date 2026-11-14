@@ -456,7 +456,7 @@ pub extern "C" fn zmq_msg_send(
     if ret >= 0 {
         zmq_msg_close(msg);
     }
-    ret
+    crate::send_recv::fd_edge::after_send(sock_arc, ret)
 }
 
 /// Deprecated `zmq_sendmsg`: args are (socket, msg, flags), swapped

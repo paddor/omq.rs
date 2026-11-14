@@ -13,6 +13,7 @@ use crate::error::{ETERM, c_try, fail, map_omq_err};
 use crate::notify::NotifyHandle;
 use crate::socket::{OmqSocket, materialized, run_on_socket};
 
+pub(crate) mod fd_edge;
 mod recv;
 
 pub(crate) use recv::{
@@ -139,9 +140,15 @@ impl Drop for SendWake {
 
 /// Arm a [`SendWake`]. `None` when nothing could make `sock` writable.
 pub(crate) fn arm_send_wake(sock: &OmqSocket) -> Option<SendWake> {
+    let notify = sock.notify.clone();
+    spawn_send_wake(sock, move || notify.signal_send())
+}
+
+/// Run `ready` on the socket's runtime once [`send_ready`] may have turned
+/// true. `None` when nothing could make `sock` writable.
+fn spawn_send_wake(sock: &OmqSocket, ready: impl FnOnce() + Send + 'static) -> Option<SendWake> {
     let inner = sock.inner.get()?.clone();
     let gated = waits_for_ready_peer(sock);
-    let notify = sock.notify.clone();
     let task = sock.ctx.handle()?.spawn(async move {
         loop {
             if gated && inner.wait_connected(1, Duration::MAX).await.is_err() {
@@ -152,7 +159,7 @@ pub(crate) fn arm_send_wake(sock: &OmqSocket) -> Option<SendWake> {
                 break;
             }
         }
-        notify.signal_send();
+        ready();
     });
     Some(SendWake(task.abort_handle()))
 }
@@ -759,7 +766,7 @@ pub extern "C" fn zmq_send(
         unsafe { std::slice::from_raw_parts(buf.cast::<u8>(), len) }
     };
 
-    send_bytes(sock, data, flags)
+    fd_edge::after_send(sock, send_bytes(sock, data, flags))
 }
 
 /// Send one frame by copying caller storage; equivalent to `zmq_send`.

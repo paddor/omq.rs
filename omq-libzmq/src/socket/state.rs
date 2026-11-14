@@ -21,6 +21,8 @@ pub(crate) struct SendState {
     /// Frozen inverse of `ZMQ_IMMEDIATE`, captured at first bind/connect.
     /// Read only from the app-facing socket thread after materialization.
     pub queue_without_ready_peer: LocalCell<bool>,
+    /// `ZMQ_FD` wake for a socket that turns writable.
+    pub fd_edge: crate::send_recv::fd_edge::FdSendEdge,
 }
 
 impl SendState {
@@ -30,6 +32,7 @@ impl SendState {
             accum: LocalCell::new(Vec::new()),
             retry: LocalCell::new(false),
             queue_without_ready_peer: LocalCell::new(queue_without_ready_peer),
+            fd_edge: crate::send_recv::fd_edge::FdSendEdge::default(),
         }
     }
 

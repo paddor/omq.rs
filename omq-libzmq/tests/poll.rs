@@ -112,6 +112,41 @@ fn poll_timeout_no_events() {
     zmq_ctx_term(ctx);
 }
 
+/// `ZMQ_FD` also fires when a socket turns writable. `zmq_poll` must not
+/// take that wake for a message.
+#[cfg(unix)]
+#[test]
+fn poll_does_not_report_pollin_for_a_write_wake() {
+    const ZMQ_FD: i32 = 14;
+    const ZMQ_EVENTS: i32 = 15;
+    let ctx = zmq_ctx_new();
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    let addr = helpers::bind_random_tcp(push);
+    // Fetch the descriptor and see the socket blocked: this arms the wake.
+    for option in [ZMQ_FD, ZMQ_EVENTS] {
+        let mut value: i32 = 0;
+        let mut sz = size_of::<i32>();
+        let rc = omq_zmq::zmq_getsockopt(push, option, (&mut value as *mut i32).cast(), &mut sz);
+        assert_eq!(rc, 0);
+    }
+    assert_eq!(zmq_connect(pull, addr.as_ptr()), 0);
+
+    let mut items = [PollItem {
+        socket: push,
+        fd: invalid_fd(),
+        events: ZMQ_POLLIN,
+        revents: 0,
+    }];
+    let rc = zmq_poll(items.as_mut_ptr().cast(), 1, 500);
+    assert_eq!(rc, 0, "a PUSH socket never has input");
+    assert_eq!(items[0].revents, 0);
+
+    zmq_close(push);
+    zmq_close(pull);
+    zmq_ctx_term(ctx);
+}
+
 #[test]
 fn poll_detects_readable() {
     let ctx = zmq_ctx_new();

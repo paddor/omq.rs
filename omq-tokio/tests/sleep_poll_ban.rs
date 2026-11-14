@@ -24,6 +24,11 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "zmq_poll with no pollable items has nothing to wake it",
     ),
     (
+        "omq-tokio/src/transport/dns.rs",
+        "sleep(NEXT_ADDRESS_DELAY)",
+        "delay before the next resolved address is dialed, not a readiness poll",
+    ),
+    (
         "omq-tokio/src/transport/ipc.rs",
         "sleep(std::time::Duration::from_millis(5))",
         "Windows ERROR_PIPE_BUSY has no wakeup; connect setup only",

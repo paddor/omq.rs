@@ -716,6 +716,14 @@ func setMaxMessageSizeNative(socket *nativeSocket, value int64) error {
 	return statusErr(C.omq_go_socket_set_max_message_size((*C.OmqGoSocket)(socket), C.int64_t(value)))
 }
 
+func setMaxMessagePartsNative(socket *nativeSocket, value int64) error {
+	return statusErr(C.omq_go_socket_set_max_message_parts((*C.OmqGoSocket)(socket), C.int64_t(value)))
+}
+
+func setMaxPeerSubscriptionsNative(socket *nativeSocket, value int64) error {
+	return statusErr(C.omq_go_socket_set_max_peer_subscriptions((*C.OmqGoSocket)(socket), C.int64_t(value)))
+}
+
 func setPlainServerNative(socket *nativeSocket, credentials []PlainCredential) error {
 	if len(credentials) == 0 {
 		return statusErr(C.omq_go_socket_set_plain_server((*C.OmqGoSocket)(socket), nil, 0))

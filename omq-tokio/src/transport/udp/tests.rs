@@ -26,6 +26,21 @@ fn datagram_rejects_oversized_group() {
 }
 
 #[test]
+fn datagram_rejects_a_total_over_the_udp_limit() {
+    // 2 header bytes + 1 group byte + body.
+    let fits = vec![0u8; MAX_DATAGRAM_SIZE - 3];
+    assert_eq!(
+        encode_datagram(b"g", &fits).unwrap().len(),
+        MAX_DATAGRAM_SIZE
+    );
+    let over = vec![0u8; MAX_DATAGRAM_SIZE - 2];
+    assert!(matches!(
+        encode_datagram(b"g", &over),
+        Err(Error::Protocol(_))
+    ));
+}
+
+#[test]
 fn decode_rejects_truncated() {
     assert!(decode_datagram(&[]).is_none());
     assert!(decode_datagram(&[0x01]).is_none());

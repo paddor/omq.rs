@@ -80,9 +80,11 @@ impl RecvNotify {
         drain_fd(self.poll_fd);
     }
 
-    pub(crate) fn wait_for_readable(self, timeout_ms: c_int) -> bool {
+    /// Wait until the descriptor is readable or the timeout passes.
+    /// `Err(EINTR)` when a signal handler interrupted the wait.
+    pub(crate) fn wait_for_readable_or_signal(self, timeout_ms: c_int) -> Result<bool, c_int> {
         if self.poll_fd < 0 {
-            return false;
+            return Ok(false);
         }
 
         let mut pfd = libc::pollfd {
@@ -93,7 +95,10 @@ impl RecvNotify {
         // SAFETY: pfd is a valid single-element pollfd array.
         let rc = unsafe { libc::poll(&raw mut pfd, 1, timeout_ms) };
 
-        rc > 0
+        if rc < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+            return Err(libc::EINTR);
+        }
+        Ok(rc > 0)
     }
 }
 
@@ -112,13 +117,15 @@ impl NotifyFds {
         // Non-semaphore: a single read returns the accumulated count
         // and resets to 0. This allows O(1) drain instead of O(N).
         // SAFETY: eventfd returns a valid fd on success, -1 on failure.
-        let recv_fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK) };
+        // Close-on-exec keeps both out of child programs.
+        let recv_fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
         if recv_fd < 0 {
             return None;
         }
 
         // SAFETY: same as above.
-        let send_fd = unsafe { libc::eventfd(DEFAULT_HWM as u32, libc::EFD_NONBLOCK) };
+        let send_fd =
+            unsafe { libc::eventfd(DEFAULT_HWM as u32, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
         if send_fd < 0 {
             // SAFETY: recv_fd is a valid open fd from the successful eventfd call above.
             unsafe { libc::close(recv_fd) };
@@ -144,9 +151,12 @@ impl NotifyFds {
         }
 
         // SAFETY: fds[0] and fds[1] are valid fds from the successful pipe() call.
+        // Close-on-exec keeps them out of child programs.
         unsafe {
             libc::fcntl(fds[0], libc::F_SETFL, libc::O_NONBLOCK);
             libc::fcntl(fds[1], libc::F_SETFL, libc::O_NONBLOCK);
+            libc::fcntl(fds[0], libc::F_SETFD, libc::FD_CLOEXEC);
+            libc::fcntl(fds[1], libc::F_SETFD, libc::FD_CLOEXEC);
         }
 
         let (recv_read, recv_write) = (fds[0], fds[1]);
@@ -164,9 +174,12 @@ impl NotifyFds {
         }
 
         // SAFETY: fds[0] and fds[1] are valid fds from the successful pipe() call.
+        // Close-on-exec keeps them out of child programs.
         unsafe {
             libc::fcntl(fds[0], libc::F_SETFL, libc::O_NONBLOCK);
             libc::fcntl(fds[1], libc::F_SETFL, libc::O_NONBLOCK);
+            libc::fcntl(fds[0], libc::F_SETFD, libc::FD_CLOEXEC);
+            libc::fcntl(fds[1], libc::F_SETFD, libc::FD_CLOEXEC);
         }
 
         Some(Self {
@@ -201,6 +214,14 @@ pub(crate) struct UnixNotifyHandle(NotifyFds);
 impl UnixNotifyHandle {
     pub(crate) fn new() -> Option<Self> {
         NotifyFds::open().map(Self)
+    }
+
+    /// The send direction's descriptors, to wait on and to drain.
+    pub(crate) fn send_notifier(&self) -> RecvNotify {
+        RecvNotify {
+            poll_fd: self.0.send_poll,
+            signal_fd: self.0.send_signal,
+        }
     }
 }
 
@@ -239,6 +260,70 @@ impl std::fmt::Debug for UnixNotifyHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("UnixNotifyHandle { .. }")
     }
+}
+
+/// The `pollfd` for a descriptor item.
+fn descriptor_pollfd(item: &crate::poll::ZmqPollItem) -> libc::pollfd {
+    let mut events: libc::c_short = 0;
+    if (item.events & crate::poll::ZMQ_POLLIN) != 0 {
+        events |= libc::POLLIN;
+    }
+    if (item.events & crate::poll::ZMQ_POLLOUT) != 0 {
+        events |= libc::POLLOUT;
+    }
+    if (item.events & crate::poll::ZMQ_POLLERR) != 0 {
+        events |= libc::POLLERR;
+    }
+    libc::pollfd {
+        fd: item.fd,
+        events,
+        revents: 0,
+    }
+}
+
+/// The `zmq_poll` events for a descriptor's `poll` result.
+fn descriptor_revents(revents: libc::c_short) -> libc::c_short {
+    let mut events = 0;
+    if (revents & libc::POLLIN) != 0 {
+        events |= crate::poll::ZMQ_POLLIN;
+    }
+    if (revents & libc::POLLOUT) != 0 {
+        events |= crate::poll::ZMQ_POLLOUT;
+    }
+    if (revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL)) != 0 {
+        events |= crate::poll::ZMQ_POLLERR;
+    }
+    events
+}
+
+/// Check the descriptor items without waiting and add their events to
+/// `revents`. Returns how many of them became ready through this check.
+pub(crate) fn check_descriptors(items: &mut [crate::poll::ZmqPollItem]) -> i32 {
+    let mut pfds: Vec<libc::pollfd> = items
+        .iter()
+        .filter(|item| item.socket.is_null() && item.fd >= 0)
+        .map(descriptor_pollfd)
+        .collect();
+    if pfds.is_empty() {
+        return 0;
+    }
+    // SAFETY: `pfds` is a valid pollfd array, and a zero timeout never blocks.
+    let rc = unsafe { libc::poll(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, 0) };
+    if rc <= 0 {
+        return 0;
+    }
+    let mut ready = 0;
+    let descriptors = items
+        .iter_mut()
+        .filter(|item| item.socket.is_null() && item.fd >= 0);
+    for (item, pfd) in descriptors.zip(&pfds) {
+        let events = descriptor_revents(pfd.revents);
+        if events != 0 && item.revents == 0 {
+            ready += 1;
+        }
+        item.revents |= events;
+    }
+    ready
 }
 
 pub(crate) struct PollWaiter {
@@ -281,24 +366,7 @@ impl PollWaiter {
                     }
                 }
             } else if item.fd >= 0 {
-                let mut events: libc::c_short = 0;
-                if (item.events & crate::poll::ZMQ_POLLIN as libc::c_short) != 0 {
-                    events |= libc::POLLIN as libc::c_short;
-                }
-
-                if (item.events & crate::poll::ZMQ_POLLOUT as libc::c_short) != 0 {
-                    events |= libc::POLLOUT as libc::c_short;
-                }
-
-                if (item.events & crate::poll::ZMQ_POLLERR as libc::c_short) != 0 {
-                    events |= libc::POLLERR as libc::c_short;
-                }
-
-                pfds.push(libc::pollfd {
-                    fd: item.fd,
-                    events,
-                    revents: 0,
-                });
+                pfds.push(descriptor_pollfd(item));
                 map.push((i, 0));
             }
         }
@@ -336,7 +404,9 @@ impl PollWaiter {
         let poll_timeout = if timeout_ms < 0 {
             -1
         } else {
-            timeout_ms as std::os::raw::c_int
+            // A wait longer than `poll` can express ends early; the caller
+            // loops until its own deadline.
+            std::os::raw::c_int::try_from(timeout_ms).unwrap_or(std::os::raw::c_int::MAX)
         };
 
         // SAFETY: pfds is a valid pollfd array; poll blocks until events or timeout.
@@ -377,19 +447,7 @@ impl PollWaiter {
 
             if zmq_event == 0 {
                 // Raw fd item
-                if (pfd.revents & libc::POLLIN as libc::c_short) != 0 {
-                    items[item_idx].revents |= crate::poll::ZMQ_POLLIN as libc::c_short;
-                }
-
-                if (pfd.revents & libc::POLLOUT as libc::c_short) != 0 {
-                    items[item_idx].revents |= crate::poll::ZMQ_POLLOUT as libc::c_short;
-                }
-
-                if (pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) as libc::c_short)
-                    != 0
-                {
-                    items[item_idx].revents |= crate::poll::ZMQ_POLLERR as libc::c_short;
-                }
+                items[item_idx].revents |= descriptor_revents(pfd.revents);
             } else {
                 // ZMQ socket item
                 items[item_idx].revents |= zmq_event;

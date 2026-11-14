@@ -3,7 +3,6 @@
 
 use super::{
     MonitorEvent, PeerHandshake, PeerIdent, PeerInfo, SocketDriver, SocketType, generated_identity,
-    peer_ident_socket_addr,
 };
 use crate::routing::AddedPeer;
 #[cfg(any(feature = "ws", feature = "quic"))]
@@ -22,6 +21,27 @@ struct ReadiedPeer {
 }
 
 impl SocketDriver {
+    /// The live peer that a new connection with `identity` takes over from.
+    /// Only ROUTER and PEER route by the peer's identity, so only they hand
+    /// one over. Other types keep every peer: two REP or SERVER clients
+    /// with one identity would evict each other on every reconnect.
+    fn identity_holder(&self, peer_id: u64, identity: &bytes::Bytes) -> Option<u64> {
+        if !matches!(self.socket_type, SocketType::Router | SocketType::Peer) {
+            return None;
+        }
+        // A holder whose connection ended is no rival. It leaves on its own
+        // once the application took its events; evicting it drops them.
+        self.routing
+            .send_strategy
+            .peer_for_identity(identity)
+            .filter(|&old_id| old_id != peer_id)
+            .filter(|old_id| {
+                self.peers
+                    .get(old_id)
+                    .is_some_and(|peer| !peer.progress.ended())
+            })
+    }
+
     /// A routing identity in use stays with its principal. Handover needs the
     /// same mechanism, CURVE key, PLAIN username, and authenticator user ID.
     fn identity_held_by_other_principal(
@@ -31,10 +51,7 @@ impl SocketDriver {
         authentication: &omq_proto::PeerAuthentication,
     ) -> bool {
         let Some(held) = self
-            .routing
-            .send_strategy
-            .peer_for_identity(identity)
-            .filter(|&old_id| old_id != peer_id)
+            .identity_holder(peer_id, identity)
             .and_then(|old_id| self.peers.get(&old_id)?.handshake.info.as_ref())
         else {
             return false;
@@ -94,13 +111,12 @@ impl SocketDriver {
         let ready = self
             .peers
             .values()
-            .filter(|peer| peer.handshake.ready && family(&peer.origin.endpoint))
+            .filter(|peer| {
+                peer.handshake.ready && !peer.progress.ended() && family(&peer.origin.endpoint)
+            })
             .count();
         let replaced = self
-            .routing
-            .send_strategy
-            .peer_for_identity(identity)
-            .filter(|&old_id| old_id != peer_id)
+            .identity_holder(peer_id, identity)
             .and_then(|old_id| self.peers.get(&old_id))
             .is_some_and(|peer| peer.handshake.ready && family(&peer.origin.endpoint));
 
@@ -137,17 +153,19 @@ impl SocketDriver {
             return;
         };
 
-        if let Some(old_id) = self.routing.send_strategy.peer_for_identity(&identity)
-            && old_id != peer_id
-        {
-            self.evict_peer_for_handover(old_id);
-        }
+        let replaced = self.identity_holder(peer_id, &identity);
 
         let Some(ready) = self.mark_peer_ready(peer_id, &identity, info) else {
             return;
         };
 
         self.add_ready_routes(peer_id, &ready, identity, sender);
+        // The new route owns the identity now. Evicting the old connection
+        // first would leave a moment without a route, and a send from
+        // another thread would find the identity unroutable.
+        if let Some(old_id) = replaced {
+            self.evict_peer_for_handover(old_id);
+        }
         self.link.monitor.publish(ready.event);
 
         // Replies must be routable before a different I/O/application thread
@@ -203,19 +221,11 @@ impl SocketDriver {
         peer_properties: &std::sync::Arc<omq_proto::proto::command::PeerProperties>,
     ) -> Option<PeerInfo> {
         let peer = self.peers.get(&peer_id)?;
-        Some(PeerInfo {
-            authentication: peer_properties.authentication.clone(),
-            diagnostics: omq_proto::PeerDiagnostics {
-                endpoint: peer.origin.endpoint.to_string(),
-                local_address: peer.origin.local_address.clone(),
-                remote_address: peer.origin.remote_address.clone(),
-            },
-            connection_id: peer_id,
-            peer_address: peer_ident_socket_addr(&peer.origin.ident),
-            peer_identity: peer_properties.identity.clone(),
-            peer_properties: peer_properties.clone(),
-            zmtp_version: Self::peer_protocol_version(&peer.origin.endpoint, peer_minor),
-        })
+        Some(peer.origin.peer_info(
+            peer_id,
+            peer_properties,
+            Self::peer_protocol_version(&peer.origin.endpoint, peer_minor),
+        ))
     }
 
     /// Flip the peer entry to ready. Returns what activation still needs.

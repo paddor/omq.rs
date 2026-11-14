@@ -108,6 +108,27 @@ async fn proxy_exits_closed_when_socket_closes() {
     );
 }
 
+/// A closed control socket is a closed socket, not a TERMINATE command,
+/// whichever check of the proxy loop sees it first.
+#[tokio::test]
+async fn proxy_exits_closed_when_the_control_socket_is_closed() {
+    let frontend = Socket::new(SocketType::Pull, Options::default());
+    let backend = Socket::new(SocketType::Push, Options::default());
+    // PAIR, so that the proxy also polls control between forwarding turns.
+    let control = Socket::new(SocketType::Pair, Options::default());
+    control.bind(endpoint("closed-ctrl")).await.unwrap();
+    control.clone().close().await.unwrap();
+
+    let exit = tokio::time::timeout(
+        Duration::from_secs(2),
+        Proxy::new(frontend, backend).control(control).run(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(exit, ProxyExit::Closed);
+}
+
 #[tokio::test]
 async fn proxy_capture_gets_forwarded_copy() {
     let frontend = Socket::new(SocketType::Pull, Options::default());
@@ -395,5 +416,20 @@ async fn rep_control_is_serviced_while_input_stays_ready() {
     assert!(
         forwarded < QUEUED / 4,
         "control waited for {forwarded} forwarded messages"
+    );
+}
+
+/// Two receive-only sockets leave nothing to forward. That is an error,
+/// not a panic in the proxy loop.
+#[tokio::test]
+async fn proxy_without_a_forwarding_direction_fails() {
+    let frontend = Socket::new(SocketType::Pull, Options::default());
+    let backend = Socket::new(SocketType::Pull, Options::default());
+    let result = tokio::time::timeout(Duration::from_secs(2), Proxy::new(frontend, backend).run())
+        .await
+        .expect("proxy kept running with nothing to forward");
+    assert!(
+        matches!(result, Err(omq_tokio::Error::Protocol(_))),
+        "{result:?}"
     );
 }

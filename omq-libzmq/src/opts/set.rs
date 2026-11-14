@@ -22,9 +22,10 @@ use std::ffi::c_int;
 use std::sync::Arc;
 use std::time::Duration;
 
-const SET_OPTIONS: [SetOption; 15] = [
+const SET_OPTIONS: [SetOption; 16] = [
     set_queue_option,
     set_message_option,
+    set_peer_limit_option,
     set_tuning_option,
     set_reconnect_option,
     set_heartbeat_option,
@@ -174,6 +175,40 @@ fn set_message_option(
     }
 
     Ok(true)
+}
+
+/// Limits on what one peer may send or subscribe to.
+fn set_peer_limit_option(
+    sock_arc: &Arc<OmqSocket>,
+    option: c_int,
+    optval: OptIn,
+) -> Result<bool, c_int> {
+    match option {
+        OMQ_MAX_MESSAGE_PARTS => {
+            let value = peer_limit(sock_arc, optval)?;
+            overlay(sock_arc)?.limits.max_message_parts = value;
+        }
+        OMQ_MAX_PEER_SUBSCRIPTIONS => {
+            let value = peer_limit(sock_arc, optval)?;
+            overlay(sock_arc)?.limits.max_peer_subscriptions = value;
+        }
+        _ => return Ok(false),
+    }
+
+    Ok(true)
+}
+
+/// A peer limit: positive, or -1 for no limit. The backend fixes its limits
+/// when it materializes, so a later change fails with `EBUSY` instead of
+/// silently not applying.
+fn peer_limit(sock_arc: &OmqSocket, optval: OptIn) -> Result<i32, c_int> {
+    if sock_arc.inner.get().is_some() {
+        return Err(libc::EBUSY);
+    }
+    match optval.i32()? {
+        value if value > 0 || value == -1 => Ok(value),
+        _ => Err(libc::EINVAL),
+    }
 }
 
 /// OMQ compression and workload tuning.

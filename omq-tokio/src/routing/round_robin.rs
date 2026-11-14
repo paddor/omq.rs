@@ -147,6 +147,10 @@ impl ActivePipes {
         let mut budget = DrainBudget::WORKER;
         while budget.msgs() < max && !budget.exhausted() {
             if closed.load(Ordering::Acquire) {
+                // Report what this batch queued before the close.
+                if budget.msgs() > 0 {
+                    break;
+                }
                 return Err(omq_proto::TrySendError::Closed);
             }
 

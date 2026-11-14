@@ -16,8 +16,15 @@ struct TimerEntry {
     arg: *mut c_void,
 }
 
+// libzmq's timers_t tag.
+const TIMERS_TAG: u32 = 0xcafe_dada;
+
+/// Leads with a tag, so that a handle of another type or a destroyed
+/// timer set is refused instead of read as timers.
+#[repr(C)]
 #[derive(Debug)]
 struct ZmqTimers {
+    tag: u32,
     next_id: c_int,
     entries: Vec<TimerEntry>,
 }
@@ -25,19 +32,29 @@ struct ZmqTimers {
 impl Default for ZmqTimers {
     fn default() -> Self {
         Self {
+            tag: TIMERS_TAG,
             next_id: 1,
             entries: Vec::new(),
         }
     }
 }
 
+/// # Safety
+/// `ptr` must be null or readable for a handle tag. Like libzmq, a stale
+/// pointer is caught only while its memory still holds the dead tag.
 unsafe fn timers<'a>(ptr: *mut c_void) -> Result<&'a mut ZmqTimers, c_int> {
     if ptr.is_null() {
         return Err(libc::EFAULT);
     }
 
-    // SAFETY: caller guarantees ptr is a valid timers object from zmq_timers_new.
-    Ok(unsafe { &mut *ptr.cast::<ZmqTimers>() })
+    let timers = ptr.cast::<ZmqTimers>();
+    // SAFETY: the caller guarantees the tag is readable; it sits at offset 0.
+    if unsafe { (*timers).tag } != TIMERS_TAG {
+        return Err(libc::EFAULT);
+    }
+    // SAFETY: the tag matched, so this is a live timer set from
+    // zmq_timers_new.
+    Ok(unsafe { &mut *timers })
 }
 
 fn find_timer(entries: &[TimerEntry], id: c_int) -> Option<usize> {
@@ -67,12 +84,12 @@ pub extern "C" fn zmq_timers_destroy(timers_p: *mut *mut c_void) -> c_int {
 
     // SAFETY: timers_p is non-null (checked above).
     let ptr = unsafe { *timers_p };
-    if ptr.is_null() {
-        return fail(libc::EFAULT);
-    }
-
-    // SAFETY: ptr came from Box::into_raw in zmq_timers_new.
+    // SAFETY: C callers pass null or a pointer from this API.
+    let live = c_try!(unsafe { timers(ptr) });
+    // SAFETY: the tag matched, so ptr came from Box::into_raw in
+    // zmq_timers_new. It is marked dead before the memory is released.
     unsafe {
+        std::ptr::write_volatile(&raw mut live.tag, crate::handle::DEAD_TAG);
         drop(Box::from_raw(ptr.cast::<ZmqTimers>()));
         *timers_p = std::ptr::null_mut();
     }

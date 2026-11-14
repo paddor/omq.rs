@@ -146,7 +146,10 @@ fn request_rejects_invalid_rfc_string_fields() {
     let non_ascii_domain =
         String::from_utf8(vec![b'g', b'l', 0xc3, 0xb6, b'b', b'a', b'l']).expect("valid UTF-8");
     assert!(build_request(&non_ascii_domain, "127.0.0.1", b"", &null).is_err());
-    assert!(build_request("global", "localhost", b"", &null).is_err());
+    // A peer without an IP address, such as an IPC peer, has an empty
+    // address frame.
+    let ipc = build_request("global", "/tmp/omq.sock", b"", &null).expect("IPC request");
+    assert!(ipc[3].is_empty());
     assert!(build_request("global", "127.0.0.1", &[0; 256], &null).is_err());
 
     let mut plain = peer(omq_tokio::proto::MechanismName::PLAIN);

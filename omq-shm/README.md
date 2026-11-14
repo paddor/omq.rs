@@ -27,6 +27,7 @@ Each direction has a bounded SPSC byte ring for ZMTP framing, control, and
 coordinates. Release/acquire cursors publish and return bytes. Parked peers
 use coalesced eventfd notifications; actively polling readers need no wake syscall.
 New region descriptors are acknowledged before their coordinates are published.
+A sender marks a region it dropped and wakes its receivers, which unmap it.
 
 Automatic sender storage is shared across all socket peers. Each SHM endpoint
 uses one IO lane for its connections and fan-out worker. Ordinary publications
@@ -85,6 +86,10 @@ are excluded. Message-count HWM and `max_message_size` are separate limits.
 
 Requires Linux 5.3+, same-UID peers, visible peer PIDs, and `OMQSHM08` on both
 peers. Receivers trust the sender and read payloads in place. Receivers cannot
-write payloads, but can retain slots until they release them or exit. `omq-shm`
+write payloads, but can retain slots until they release them or exit. All
+peers of a socket map the same regions, so a peer can read payloads sent to
+other peers, such as publications outside its subscriptions. Peers also
+share the wake eventfds: one that clears their `O_NONBLOCK` flag and fills
+the counter blocks the other side's IO thread at its next signal. `omq-shm`
 contains the Linux/unsafe boundary. Do not inherit live contexts or borrowed
 payloads across `fork`.

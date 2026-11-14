@@ -290,3 +290,63 @@ async fn connect_preflight_accepts_named_lz4_ws_without_socket_connect() {
         .await
         .unwrap();
 }
+
+/// A WebSocket runs over TCP, so the TCP options apply to it too.
+#[cfg(feature = "ws")]
+#[tokio::test]
+async fn tcp_options_reach_the_stream_under_a_websocket() {
+    use omq_proto::options::KeepAlive;
+    use std::time::Duration;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let tcp = TcpStream::connect(listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    assert!(!socket2::SockRef::from(&tcp).keepalive().unwrap());
+    let any = AnyStream::Ws(Box::new(crate::transport::ws::WsTransport::Plain(tcp)));
+    let options = omq_proto::Options {
+        tcp_keepalive: KeepAlive::Enabled {
+            idle: Duration::from_secs(30),
+            intvl: Duration::from_secs(5),
+            cnt: 3,
+        },
+        ..omq_proto::Options::default()
+    };
+
+    any.apply_tcp_options(&options).unwrap();
+    let AnyStream::Ws(ws) = &any else {
+        unreachable!()
+    };
+    assert!(socket2::SockRef::from(ws.tcp()).keepalive().unwrap());
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_rejected_tcp_option_does_not_skip_the_later_ones() {
+    use omq_proto::options::KeepAlive;
+    use std::time::Duration;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let tcp = TcpStream::connect(listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    let default_size = socket2::SockRef::from(&tcp).recv_buffer_size().unwrap();
+    let any = AnyStream::Tcp(tcp);
+    let options = omq_proto::Options {
+        // Linux rejects a zero keepalive idle time.
+        tcp_keepalive: KeepAlive::Enabled {
+            idle: Duration::ZERO,
+            intvl: Duration::from_secs(1),
+            cnt: 1,
+        },
+        recv_buffer_size: Some(4096),
+        ..omq_proto::Options::default()
+    };
+
+    assert!(any.apply_tcp_options(&options).is_err());
+    let AnyStream::Tcp(tcp) = &any else {
+        unreachable!()
+    };
+    let size = socket2::SockRef::from(tcp).recv_buffer_size().unwrap();
+    assert!(size < default_size, "recv buffer stayed at {default_size}");
+}

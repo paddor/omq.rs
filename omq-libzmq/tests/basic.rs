@@ -45,6 +45,270 @@ fn thread_cpu_time() -> Duration {
     Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
 }
 
+/// A signal handler that returns ends a blocking receive with `EINTR`,
+/// as in libzmq. A program can then act on the signal, such as Ctrl-C.
+#[cfg(unix)]
+#[test]
+fn blocking_recv_returns_eintr_when_a_signal_interrupts_it() {
+    extern "C" fn on_signal(_signal: libc::c_int) {}
+    // SAFETY: the handler does nothing, which is async-signal-safe.
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = on_signal as extern "C" fn(libc::c_int) as usize;
+        libc::sigemptyset(&raw mut action.sa_mask);
+        assert_eq!(
+            libc::sigaction(libc::SIGUSR1, &raw const action, std::ptr::null_mut()),
+            0
+        );
+    }
+
+    let ctx = zmq_ctx_new();
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    let addr = CString::new("inproc://test-recv-eintr").unwrap();
+    assert_eq!(zmq_bind(pull, addr.as_ptr()), 0);
+    let (started, thread_id) = std::sync::mpsc::channel();
+    let socket = pull as usize;
+    let receiver = std::thread::spawn(move || {
+        // SAFETY: pthread_self has no preconditions.
+        started
+            .send(unsafe { libc::pthread_self() } as usize)
+            .unwrap();
+        let mut buf = [0u8; 8];
+        let rc = zmq_recv(socket as *mut c_void, buf.as_mut_ptr().cast(), buf.len(), 0);
+        (rc, omq_zmq::zmq_errno())
+    });
+    let thread = thread_id.recv().unwrap() as libc::pthread_t;
+
+    // Early signals can land before the receive blocks, so keep sending.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !receiver.is_finished() && Instant::now() < deadline {
+        // SAFETY: the thread is alive until it is joined below.
+        unsafe { libc::pthread_kill(thread, libc::SIGUSR1) };
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let interrupted = receiver.is_finished();
+    // Ends the receive in any case, so the test cannot hang.
+    zmq_ctx_shutdown(ctx);
+    let result = receiver.join().unwrap();
+    assert!(interrupted, "the signal did not end the receive");
+    assert_eq!(result, (-1, libc::EINTR));
+
+    zmq_close(pull);
+    zmq_ctx_term(ctx);
+}
+
+/// Install a handler for SIGUSR1 that does nothing but return.
+#[cfg(unix)]
+fn install_returning_signal_handler() {
+    extern "C" fn on_signal(_signal: libc::c_int) {}
+    // SAFETY: the handler does nothing, which is async-signal-safe.
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = on_signal as extern "C" fn(libc::c_int) as usize;
+        libc::sigemptyset(&raw mut action.sa_mask);
+        assert_eq!(
+            libc::sigaction(libc::SIGUSR1, &raw const action, std::ptr::null_mut()),
+            0
+        );
+    }
+}
+
+/// What the sending thread of [`interrupted_send`] reports.
+#[cfg(unix)]
+struct InterruptedSend {
+    /// Result and errno of the blocking send of the final frame.
+    result: (i32, i32),
+    /// Whether the signal ended that send, not the fallback shutdown.
+    interrupted: bool,
+    /// Messages that filled the queue first.
+    filled: usize,
+    /// Tells the thread to retry the final frame.
+    retry: std::sync::mpsc::Sender<()>,
+    /// Returns the result of the retry.
+    thread: std::thread::JoinHandle<i32>,
+}
+
+/// On one thread, as the C API requires for a socket: optionally fill the
+/// queue, stage every frame but the last, then send the last one blocking.
+/// This thread signals the sender until that send returns.
+#[cfg(unix)]
+fn interrupted_send(
+    ctx: *mut c_void,
+    sock: *mut c_void,
+    fill: bool,
+    frames: &'static [&'static [u8]],
+) -> InterruptedSend {
+    use std::sync::mpsc;
+    let (started, blocking) = mpsc::channel();
+    let (done, result) = mpsc::channel();
+    let (retry, retried) = mpsc::channel::<()>();
+    let socket = sock as usize;
+    let thread = std::thread::spawn(move || {
+        let sock = socket as *mut c_void;
+        let send = |frame: &[u8], flags| zmq_send(sock, frame.as_ptr().cast(), frame.len(), flags);
+        // A send that times out shows a queue that stays full. One refused
+        // without waiting can still find room a moment later.
+        let mut filled = 0;
+        if fill {
+            helpers::set_sndtimeo(sock, 100);
+            while send(b"fill", 0) == 4 {
+                filled += 1;
+                assert!(filled < 10_000, "the queue never filled");
+            }
+            helpers::set_sndtimeo(sock, -1);
+        }
+        let (last, staged) = frames.split_last().unwrap();
+        for frame in staged {
+            assert_eq!(send(frame, ZMQ_SNDMORE), frame.len() as i32);
+        }
+        // SAFETY: pthread_self has no preconditions.
+        let id = unsafe { libc::pthread_self() } as usize;
+        started.send((id, filled)).unwrap();
+        let rc = send(last, 0);
+        done.send((rc, omq_zmq::zmq_errno())).unwrap();
+        retried.recv().map_or(-1, |()| send(last, 0))
+    });
+    let (thread_id, filled) = blocking.recv().unwrap();
+
+    // Early signals can land before the send blocks, so keep sending.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut outcome = None;
+    while outcome.is_none() && Instant::now() < deadline {
+        // SAFETY: the thread lives until it is joined by the caller.
+        unsafe { libc::pthread_kill(thread_id as libc::pthread_t, libc::SIGUSR1) };
+        outcome = result.recv_timeout(Duration::from_millis(1)).ok();
+    }
+    let interrupted = outcome.is_some();
+    // Ends the send in any case, so the test cannot hang.
+    let result = outcome.unwrap_or_else(|| {
+        zmq_ctx_shutdown(ctx);
+        result.recv().unwrap()
+    });
+    InterruptedSend {
+        result,
+        interrupted,
+        filled,
+        retry,
+        thread,
+    }
+}
+
+/// A signal handler that returns ends a blocking send with `EINTR`, as in
+/// libzmq, while the send waits for a peer.
+#[cfg(unix)]
+#[test]
+fn blocking_send_without_a_peer_returns_eintr_when_a_signal_interrupts_it() {
+    install_returning_signal_handler();
+    let ctx = zmq_ctx_new();
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    let addr = caddr("inproc://test-send-eintr-no-peer");
+    assert_eq!(zmq_bind(push, addr.as_ptr()), 0);
+
+    let send = interrupted_send(ctx, push, false, &[b"once"]);
+    assert!(send.interrupted, "the signal did not end the send");
+    assert_eq!(send.result, (-1, libc::EINTR));
+
+    // The interrupted message was not queued: a peer gets only the retry.
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    helpers::set_rcvtimeo(pull, 2000);
+    assert_eq!(zmq_connect(pull, addr.as_ptr()), 0);
+    send.retry.send(()).unwrap();
+    assert_eq!(send.thread.join().unwrap(), 4);
+    let mut buf = [0u8; 8];
+    assert_eq!(zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0), 4);
+    assert_eq!(&buf[..4], b"once");
+    helpers::set_rcvtimeo(pull, 50);
+    assert_eq!(zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0), -1);
+
+    zmq_close(pull);
+    zmq_close(push);
+    zmq_ctx_term(ctx);
+}
+
+/// The same on a full queue, with a multipart message: the frames staged
+/// before the interrupted final frame stay staged, so a retry of that
+/// frame sends the whole message once.
+#[cfg(unix)]
+#[test]
+fn blocking_send_on_a_full_queue_returns_eintr_and_keeps_staged_frames() {
+    const ZMQ_SNDHWM: i32 = 23;
+    const ZMQ_RCVHWM: i32 = 24;
+    install_returning_signal_handler();
+    let ctx = zmq_ctx_new();
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    let one = 1i32;
+    for (sock, option) in [(pull, ZMQ_RCVHWM), (push, ZMQ_SNDHWM)] {
+        assert_eq!(
+            zmq_setsockopt(sock, option, (&one as *const i32).cast(), size_of::<i32>()),
+            0
+        );
+    }
+    let addr = caddr("inproc://test-send-eintr-full");
+    assert_eq!(zmq_bind(pull, addr.as_ptr()), 0);
+    assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
+
+    let send = interrupted_send(ctx, push, true, &[b"head", b"tail"]);
+    assert!(send.interrupted, "the signal did not end the send");
+    assert_eq!(send.result, (-1, libc::EINTR));
+
+    // Drain the fill messages; the retry of the final frame then goes out.
+    helpers::set_rcvtimeo(pull, 2000);
+    let mut buf = [0u8; 8];
+    for _ in 0..send.filled {
+        assert_eq!(zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0), 4);
+        assert_eq!(&buf[..4], b"fill");
+    }
+    send.retry.send(()).unwrap();
+    assert_eq!(send.thread.join().unwrap(), 4);
+    for expected in [b"head", b"tail"] {
+        assert_eq!(zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0), 4);
+        assert_eq!(&buf[..4], expected);
+    }
+    helpers::set_rcvtimeo(pull, 50);
+    assert_eq!(zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0), -1);
+
+    zmq_close(push);
+    zmq_close(pull);
+    zmq_ctx_term(ctx);
+}
+
+/// A socket without endpoints is a socket without peers, as in libzmq.
+/// The context is not terminated, so `ETERM` would mislead callers.
+#[test]
+fn io_before_bind_or_connect_sees_a_socket_without_peers() {
+    let ctx = zmq_ctx_new();
+    let mut buf = [0u8; 8];
+
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    assert_eq!(
+        zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), ZMQ_DONTWAIT),
+        -1
+    );
+    assert_eq!(omq_zmq::zmq_errno(), libc::EAGAIN);
+    let mut msg = [0u8; 64];
+    assert_eq!(omq_zmq::zmq_msg_init(msg.as_mut_ptr().cast()), 0);
+    assert_eq!(
+        omq_zmq::zmq_msg_recv(msg.as_mut_ptr().cast(), pull, ZMQ_DONTWAIT),
+        -1
+    );
+    assert_eq!(omq_zmq::zmq_errno(), libc::EAGAIN);
+
+    // A bound-side PUSH without a peer mutes.
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    assert_eq!(zmq_send(push, b"x".as_ptr().cast(), 1, ZMQ_DONTWAIT), -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EAGAIN);
+
+    // PUB drops for lack of subscribers.
+    let publisher = zmq_socket(ctx, ZMQ_PUB);
+    assert_eq!(zmq_send(publisher, b"x".as_ptr().cast(), 1, 0), 1);
+
+    for socket in [pull, push, publisher] {
+        assert_eq!(zmq_close(socket), 0);
+    }
+    zmq_ctx_term(ctx);
+}
+
 #[test]
 fn send_recv_null_nonzero_buffer_returns_efault() {
     let ctx = zmq_ctx_new();
@@ -207,6 +471,42 @@ fn push_pull_tcp() {
         assert_eq!(rc, 32);
         assert!(buf[..32].iter().all(|&b| b == i));
     }
+
+    zmq_close(push);
+    zmq_close(pull);
+    zmq_ctx_term(ctx);
+}
+
+/// libzmq has no part limit, so a message far above the omq-tokio default
+/// of 1024 parts must still arrive.
+#[test]
+fn multipart_above_the_default_part_limit_arrives_over_tcp() {
+    const PARTS: usize = 3000;
+    let ctx = zmq_ctx_new();
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    let addr = helpers::bind_random_tcp(pull);
+    assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
+    helpers::set_rcvtimeo(pull, 5000);
+    helpers::set_sndtimeo(push, 5000);
+
+    for index in 0..PARTS {
+        let flags = if index + 1 < PARTS { ZMQ_SNDMORE } else { 0 };
+        assert_eq!(zmq_send(push, b"p".as_ptr().cast(), 1, flags), 1);
+    }
+    let mut buf = [0u8; 8];
+    for _ in 0..PARTS {
+        assert_eq!(zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0), 1);
+    }
+    let mut more: i32 = 1;
+    let mut more_sz = size_of::<i32>();
+    zmq_getsockopt(
+        pull,
+        ZMQ_RCVMORE,
+        (&mut more as *mut i32).cast(),
+        &mut more_sz,
+    );
+    assert_eq!(more, 0, "the message has exactly {PARTS} parts");
 
     zmq_close(push);
     zmq_close(pull);
@@ -486,4 +786,19 @@ fn ctx_shutdown_wakes_send_blocked_on_a_full_pipe() {
     assert_eq!(zmq_close(push), 0);
     assert_eq!(zmq_close(pull), 0);
     assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+/// C callers test `errno` itself after a failed call, as libzmq documents.
+#[cfg(unix)]
+#[test]
+fn a_failed_call_sets_the_c_errno() {
+    let ctx = zmq_ctx_new();
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    let mut buf = [0u8; 8];
+    let rc = zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), ZMQ_DONTWAIT);
+    let c_errno = std::io::Error::last_os_error().raw_os_error();
+    assert_eq!(rc, -1);
+    assert_eq!(c_errno, Some(omq_zmq::zmq_errno()));
+    zmq_close(pull);
+    zmq_ctx_term(ctx);
 }

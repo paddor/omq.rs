@@ -544,7 +544,12 @@ impl FrameBuffer {
 
         let (frozen, retired_capacity) = self.freeze_arena(owned);
 
-        let take = max_chunks.min(self.entries.len());
+        let mut take = max_chunks.min(self.entries.len());
+        // Never split a chunk group: eviction would remove its undrained
+        // tail and tear the message on the wire.
+        while take > 0 && take < self.entries.len() && self.entries[take - 1].continues() {
+            take += 1;
+        }
         for entry in self.entries.drain(..take) {
             if entry.is_protected() {
                 drained.protected += 1;

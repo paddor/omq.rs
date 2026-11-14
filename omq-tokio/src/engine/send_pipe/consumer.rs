@@ -209,6 +209,9 @@ fn return_queue_credit(
     freed_full: &mut bool,
 ) {
     consumer.release();
+    // An AcqRel swap after the release, paired with the producer's
+    // `arm_space_wake`: either this sees the producer's flag, or the
+    // producer acquires the released slots.
     if consumer.len() <= consumer.capacity() / SEND_PIPE_LWM_DIVISOR
         && above_lwm.swap(false, Ordering::AcqRel)
     {

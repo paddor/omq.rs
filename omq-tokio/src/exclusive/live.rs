@@ -190,7 +190,8 @@ pub(super) async fn recv_live(
         let ping_deadline = heartbeat
             .interval
             .filter(|_| live.connection.peer_minor() >= 1)
-            .map(|interval| live.last_ping + interval);
+            // An interval past the clock range never comes due.
+            .and_then(|interval| live.last_ping.checked_add(interval));
         let heartbeat_deadline = live.silence_deadline();
 
         tokio::select! {

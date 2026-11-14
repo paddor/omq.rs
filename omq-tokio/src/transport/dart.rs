@@ -12,9 +12,6 @@ use omq_proto::DartOptions;
 use crate::PayloadPool;
 pub use io::{DartIo, ReceiveBatch, ReceivedDatagram, SegmentBatch};
 
-/// Unconfirmed inbound handshakes allowed even with a small ready limit.
-const PENDING_HANDSHAKES: usize = 64;
-
 /// Shared by the socket handle and its endpoint workers. TCP-only sockets
 /// receive storage is configured explicitly before endpoint setup.
 #[derive(Debug)]
@@ -23,9 +20,6 @@ pub(crate) struct SocketState {
     receive_pool: OnceLock<Option<PayloadPool>>,
     pub(crate) counters: Counters,
     pub(crate) peers: std::sync::Arc<tokio::sync::Semaphore>,
-    /// Unconfirmed inbound handshakes. Separate from `peers`, so sources that
-    /// never confirm cannot take ready slots.
-    pub(crate) pending: std::sync::Arc<tokio::sync::Semaphore>,
     identity: OnceLock<bytes::Bytes>,
     carriers: Mutex<Vec<Weak<DartIo>>>,
 }
@@ -42,11 +36,6 @@ impl SocketState {
                 } else {
                     options.max_ready_peers
                 },
-            )),
-            // Room for handshakes beyond a small ready limit, so unconfirmed
-            // sources cannot crowd out a real peer.
-            pending: std::sync::Arc::new(tokio::sync::Semaphore::new(
-                options.max_ready_peers.max(PENDING_HANDSHAKES),
             )),
             identity: OnceLock::new(),
             carriers: Mutex::new(Vec::new()),
@@ -84,7 +73,8 @@ impl SocketState {
 
         self.identity
             .get_or_init(|| {
-                let mut value = [0; 17];
+                // Peers reject an identity that starts with 0x00.
+                let mut value = [1; 17];
                 value[1..].copy_from_slice(&rand::random::<[u8; 16]>());
                 bytes::Bytes::copy_from_slice(&value)
             })

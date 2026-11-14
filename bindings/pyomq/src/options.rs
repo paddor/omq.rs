@@ -55,6 +55,8 @@ pub struct Overlay {
     pub keepalive_cnt: Option<u32>,
     pub tcp_user_timeout: Option<Duration>,
     pub max_message_size: Option<usize>,
+    pub max_message_parts: Option<usize>,
+    pub max_peer_subscriptions: Option<usize>,
     pub router_mandatory: bool,
     pub heartbeat_ivl: Option<Duration>,
     pub heartbeat_ttl: Option<Duration>,
@@ -100,6 +102,8 @@ impl Default for Overlay {
             keepalive_cnt: None,
             tcp_user_timeout: None,
             max_message_size: None,
+            max_message_parts: Some(omq_proto::options::DEFAULT_MAX_MESSAGE_PARTS),
+            max_peer_subscriptions: Some(omq_proto::options::DEFAULT_MAX_PEER_SUBSCRIPTIONS),
             router_mandatory: false,
             heartbeat_ivl: None,
             heartbeat_ttl: None,
@@ -143,6 +147,8 @@ impl Overlay {
             linger: self.linger,
             identity: self.identity.clone(),
             max_message_size: self.max_message_size,
+            max_message_parts: self.max_message_parts,
+            max_peer_subscriptions: self.max_peer_subscriptions,
             router_mandatory: self.router_mandatory,
             heartbeat_interval: self.heartbeat_ivl,
             heartbeat_ttl: self.heartbeat_ttl,
@@ -273,6 +279,8 @@ impl Overlay {
             keepalive_cnt: None,
             tcp_user_timeout: o.tcp_user_timeout,
             max_message_size: o.max_message_size,
+            max_message_parts: o.max_message_parts,
+            max_peer_subscriptions: o.max_peer_subscriptions,
             router_mandatory: o.router_mandatory,
             heartbeat_ivl: o.heartbeat_interval,
             heartbeat_ttl: o.heartbeat_ttl,
@@ -325,6 +333,18 @@ fn as_ms(d: Option<Duration>) -> i64 {
         Some(d) => d.as_millis().min(i64::MAX as u128) as i64,
         None => -1,
     }
+}
+
+/// Limit options: a negative value means no limit.
+fn parse_limit(value: &Bound<'_, PyAny>) -> PyResult<Option<usize>> {
+    Ok(match value.extract::<i64>()? {
+        v if v < 0 => None,
+        v => Some(v as usize),
+    })
+}
+
+fn limit_as_i64(limit: Option<usize>) -> i64 {
+    limit.map_or(-1, |n| n as i64)
 }
 
 fn parse_hwm(value: &Bound<'_, PyAny>) -> PyResult<Option<u32>> {
@@ -425,10 +445,19 @@ pub fn setsockopt(
             ov.router_mandatory = value.extract::<i64>()? != 0;
         }
         constants::MAXMSGSIZE => {
-            ov.max_message_size = match value.extract::<i64>()? {
-                v if v < 0 => None,
-                v => Some(v as usize),
-            };
+            ov.max_message_size = parse_limit(value)?;
+        }
+        constants::OMQ_MAX_MESSAGE_PARTS => {
+            let parts = parse_limit(value)?;
+            if parts == Some(0) {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "OMQ_MAX_MESSAGE_PARTS must be positive, or -1 for no limit",
+                ));
+            }
+            ov.max_message_parts = parts;
+        }
+        constants::OMQ_MAX_PEER_SUBSCRIPTIONS => {
+            ov.max_peer_subscriptions = parse_limit(value)?;
         }
         constants::RECONNECT_IVL => {
             ov.reconnect_ivl = duration_from_millis(value.extract::<i64>()?);
@@ -680,13 +709,15 @@ pub fn getsockopt<'py>(
             Ok(int_to_bound(py, v))
         }
         constants::MAXMSGSIZE => {
-            let v = sock
-                .overlay
-                .lock()
-                .unwrap()
-                .max_message_size
-                .map(|n| n as i64)
-                .unwrap_or(-1);
+            let v = limit_as_i64(sock.overlay.lock().unwrap().max_message_size);
+            Ok(int_to_bound(py, v))
+        }
+        constants::OMQ_MAX_MESSAGE_PARTS => {
+            let v = limit_as_i64(sock.overlay.lock().unwrap().max_message_parts);
+            Ok(int_to_bound(py, v))
+        }
+        constants::OMQ_MAX_PEER_SUBSCRIPTIONS => {
+            let v = limit_as_i64(sock.overlay.lock().unwrap().max_peer_subscriptions);
             Ok(int_to_bound(py, v))
         }
         constants::TCP_KEEPALIVE => {

@@ -1,6 +1,7 @@
 //! `zmq_msg_t` storage layout: a 64-byte, pointer-aligned blob with typed
 //! accessors, plus the boxed receive payloads it can own.
 
+use std::ffi::{CStr, CString};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -20,13 +21,21 @@ const PTR_SIZE: usize = std::mem::size_of::<usize>();
 const MSG_WORDS: usize = ZMQ_MSG_T_SIZE / PTR_SIZE;
 const OFF_KIND: usize = 0;
 const OFF_MORE: usize = 1;
+/// Set when the group is a heap string. Bytes 2..8 are otherwise padding.
+const OFF_GROUP_HEAP: usize = 2;
 const OFF_SIZE: usize = 8;
 const OFF_PTR: usize = 16;
 const OFF_FREE_FN: usize = OFF_PTR + PTR_SIZE;
 const OFF_HINT: usize = OFF_FREE_FN + PTR_SIZE;
 const OFF_BOXED: usize = OFF_HINT + PTR_SIZE;
 const OFF_RESERVED: usize = OFF_BOXED + PTR_SIZE;
-pub(super) const RESERVED_LEN: usize = 16;
+const RESERVED_LEN: usize = 16;
+/// The routing ID takes reserved bytes 0..4; the group area follows.
+const OFF_GROUP: usize = OFF_RESERVED + 4;
+/// Longest group that fits in the group area next to its terminator.
+const INLINE_GROUP_MAX: usize = RESERVED_LEN - 4 - 1;
+/// `ZMQ_GROUP_MAX_LENGTH`.
+pub(super) const GROUP_MAX: usize = 255;
 
 #[derive(Clone, Debug)]
 pub(super) struct ReceivedFrame {
@@ -111,7 +120,7 @@ pub(super) struct MsgFields {
     free_fn: Option<FreeFn>,
     hint: *mut libc::c_void,
     boxed: *mut libc::c_void,
-    reserved: [u8; RESERVED_LEN],
+    routing_id: u32,
 }
 
 impl MsgFields {
@@ -125,7 +134,7 @@ impl MsgFields {
             free_fn: None,
             hint: std::ptr::null_mut(),
             boxed: std::ptr::null_mut(),
-            reserved: [0; RESERVED_LEN],
+            routing_id: 0,
         }
     }
 
@@ -144,10 +153,10 @@ impl MsgFields {
         self
     }
 
-    /// Routing ID and group bytes carried alongside the payload.
+    /// SERVER routing ID carried alongside the payload.
     #[inline]
-    pub(super) fn reserved(mut self, reserved: [u8; RESERVED_LEN]) -> Self {
-        self.reserved = reserved;
+    pub(super) fn routing_id(mut self, routing_id: u32) -> Self {
+        self.routing_id = routing_id;
         self
     }
 }
@@ -228,21 +237,17 @@ impl OmqMsgRepr {
         }
     }
 
+    /// Routing ID: reserved bytes 0..4 as a little-endian u32.
     #[inline]
-    pub(super) fn reserved(&self) -> &[u8] {
-        &self.bytes()[OFF_RESERVED..OFF_RESERVED + RESERVED_LEN]
+    pub(super) fn routing_id(&self) -> u32 {
+        let mut bytes = [0; 4];
+        bytes.copy_from_slice(&self.bytes()[OFF_RESERVED..OFF_RESERVED + 4]);
+        u32::from_le_bytes(bytes)
     }
 
     #[inline]
-    pub(super) fn reserved_mut(&mut self) -> &mut [u8] {
-        &mut self.bytes_mut()[OFF_RESERVED..OFF_RESERVED + RESERVED_LEN]
-    }
-
-    #[inline]
-    pub(super) fn reserved_array(&self) -> [u8; RESERVED_LEN] {
-        let mut reserved = [0; RESERVED_LEN];
-        reserved.copy_from_slice(self.reserved());
-        reserved
+    pub(super) fn set_routing_id(&mut self, routing_id: u32) {
+        self.bytes_mut()[OFF_RESERVED..OFF_RESERVED + 4].copy_from_slice(&routing_id.to_le_bytes());
     }
 
     #[inline]
@@ -255,7 +260,7 @@ impl OmqMsgRepr {
         self.write_usize(OFF_FREE_FN, fields.free_fn.map_or(0, |f| f as usize));
         self.write_usize(OFF_HINT, fields.hint as usize);
         self.write_usize(OFF_BOXED, fields.boxed as usize);
-        self.reserved_mut().copy_from_slice(&fields.reserved);
+        self.set_routing_id(fields.routing_id);
     }
 
     #[inline]
@@ -387,6 +392,80 @@ impl OmqMsgRepr {
 
         self.write_usize(OFF_BOXED, 0);
     }
+}
+
+/// RADIO/DISH group. Up to 11 bytes sit in the group area as a C string.
+/// A longer group is a heap C string whose pointer takes the start of that
+/// area, flagged at `OFF_GROUP_HEAP`.
+impl OmqMsgRepr {
+    #[inline]
+    fn group_area(&self) -> &[u8] {
+        &self.bytes()[OFF_GROUP..OFF_RESERVED + RESERVED_LEN]
+    }
+
+    /// The heap group string; null when the group is inline.
+    #[inline]
+    fn heap_group(&self) -> *mut libc::c_char {
+        if self.bytes()[OFF_GROUP_HEAP] == 0 {
+            return std::ptr::null_mut();
+        }
+        self.read_usize(OFF_GROUP) as *mut libc::c_char
+    }
+
+    /// The group as a C string that lives until the message changes.
+    pub(super) fn group_ptr(&self) -> *const libc::c_char {
+        let heap = self.heap_group();
+        if heap.is_null() {
+            self.group_area().as_ptr().cast()
+        } else {
+            heap
+        }
+    }
+
+    /// The group bytes without their terminator; empty when unset.
+    pub(super) fn group(&self) -> &[u8] {
+        let heap = self.heap_group();
+        if !heap.is_null() {
+            // SAFETY: a flagged group pointer is a `CString::into_raw`
+            // string owned by this message.
+            return unsafe { CStr::from_ptr(heap) }.to_bytes();
+        }
+        until_nul(self.group_area())
+    }
+
+    /// Replace the group with `group`, cut at its first NUL byte.
+    pub(super) fn set_group(&mut self, group: &[u8]) {
+        self.drop_group();
+        let group = until_nul(group);
+        if group.len() <= INLINE_GROUP_MAX {
+            self.bytes_mut()[OFF_GROUP..OFF_GROUP + group.len()].copy_from_slice(group);
+            return;
+        }
+        // `group` holds no NUL, so the conversion cannot fail.
+        let owned = CString::new(group).unwrap_or_default();
+        self.write_usize(OFF_GROUP, owned.into_raw() as usize);
+        self.bytes_mut()[OFF_GROUP_HEAP] = 1;
+    }
+
+    /// Free a heap group, if any, and leave the group empty.
+    pub(super) fn drop_group(&mut self) {
+        let heap = self.heap_group();
+        if !heap.is_null() {
+            // SAFETY: as in `group`; the message gives the string up here.
+            drop(unsafe { CString::from_raw(heap) });
+            self.bytes_mut()[OFF_GROUP_HEAP] = 0;
+        }
+        self.bytes_mut()[OFF_GROUP..OFF_RESERVED + RESERVED_LEN].fill(0);
+    }
+}
+
+/// `bytes` up to its first NUL byte.
+fn until_nul(bytes: &[u8]) -> &[u8] {
+    let end = bytes
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(bytes.len());
+    &bytes[..end]
 }
 
 const _SIZE_ASSERT: () = assert!(std::mem::size_of::<OmqMsgRepr>() == ZMQ_MSG_T_SIZE);

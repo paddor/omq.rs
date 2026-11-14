@@ -1,9 +1,11 @@
 #![cfg(unix)]
 //! `ZMQ_FD` level-triggered behavior tests.
 //!
-//! omq-libzmq provides an accurate, level-triggered fd (eventfd on Linux,
-//! pipe on macOS). It is readable iff `zmq_recv()` would succeed without
-//! blocking. No spurious wakeups.
+//! omq-libzmq provides a level-triggered fd (eventfd on Linux, pipe on
+//! macOS). It is readable while `zmq_recv()` would succeed without blocking.
+//! As in libzmq, it also turns readable once when a socket that reported
+//! itself blocked for sending can send again; reading `ZMQ_EVENTS` consumes
+//! that wake.
 #![allow(clippy::borrow_as_ptr, clippy::ref_as_ptr)]
 
 mod helpers;
@@ -20,6 +22,11 @@ use omq_zmq::{
 const ZMQ_PUSH: i32 = 8;
 const ZMQ_PULL: i32 = 7;
 const ZMQ_FD: i32 = 14;
+const ZMQ_EVENTS: i32 = 15;
+const ZMQ_SNDHWM: i32 = 23;
+const ZMQ_RCVHWM: i32 = 24;
+const ZMQ_DONTWAIT: i32 = 1;
+const ZMQ_POLLOUT: i32 = 2;
 
 fn get_fd(sock: *mut c_void) -> i32 {
     let mut fd: i32 = -1;
@@ -40,6 +47,111 @@ fn fd_readable(fd: i32, timeout_ms: i32) -> bool {
     let ret = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
 
     ret > 0 && (pfd.revents & libc::POLLIN != 0)
+}
+
+fn get_events(sock: *mut c_void) -> i32 {
+    let mut events: i32 = 0;
+    let mut sz = size_of::<i32>();
+    let rc = zmq_getsockopt(sock, ZMQ_EVENTS, (&mut events as *mut i32).cast(), &mut sz);
+    assert_eq!(rc, 0, "ZMQ_EVENTS getsockopt failed");
+    events
+}
+
+/// An event loop that got `EAGAIN` from a send waits on `ZMQ_FD` and then
+/// reads `ZMQ_EVENTS`. The descriptor must fire when the send can proceed.
+#[test]
+fn fd_signals_when_a_blocked_send_can_proceed() {
+    for transport in ["tcp", "inproc"] {
+        let ctx = zmq_ctx_new();
+        let push = zmq_socket(ctx, ZMQ_PUSH);
+        let pull = zmq_socket(ctx, ZMQ_PULL);
+        helpers::set_int_opt(push, ZMQ_SNDHWM, 2);
+        helpers::set_int_opt(pull, ZMQ_RCVHWM, 2);
+        let addr = if transport == "tcp" {
+            helpers::bind_random_tcp(pull)
+        } else {
+            let addr = CString::new("inproc://test-fd-write-edge").unwrap();
+            assert_eq!(zmq_bind(pull, addr.as_ptr()), 0);
+            addr
+        };
+        assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
+        let fd = get_fd(push);
+
+        // Large frames fill the kernel buffers of the TCP case quickly.
+        let payload = vec![0x5a_u8; 256 * 1024];
+        let mut sent = 0;
+        loop {
+            while zmq_send(push, payload.as_ptr().cast(), payload.len(), ZMQ_DONTWAIT) >= 0 {
+                sent += 1;
+                assert!(sent < 10_000, "{transport}: the pipe never filled");
+            }
+            assert_eq!(omq_zmq::zmq_errno(), libc::EAGAIN, "{transport}");
+            // Queued frames may still move into kernel buffers. The wake
+            // reports that; without one the send is blocked for good.
+            if !fd_readable(fd, 200) {
+                break;
+            }
+            assert_ne!(get_events(push) & ZMQ_POLLOUT, 0, "{transport}");
+        }
+        assert!(sent > 0, "{transport}");
+
+        helpers::set_rcvtimeo(pull, 5000);
+        let mut buf = vec![0u8; payload.len()];
+        for _ in 0..sent {
+            let rc = zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0);
+            assert_eq!(rc as usize, payload.len(), "{transport}");
+        }
+        assert!(
+            fd_readable(fd, 5000),
+            "{transport}: fd must fire when the send can proceed"
+        );
+        assert_ne!(get_events(push) & ZMQ_POLLOUT, 0, "{transport}");
+        assert!(
+            !fd_readable(fd, 100),
+            "{transport}: reading ZMQ_EVENTS consumes the wake"
+        );
+
+        zmq_close(push);
+        zmq_close(pull);
+        zmq_ctx_term(ctx);
+    }
+}
+
+/// The wake is also armed by a `ZMQ_EVENTS` read that reports no `POLLOUT`,
+/// here on a bound PUSH that has no peer yet.
+#[test]
+fn fd_signals_after_events_reported_no_pollout() {
+    let ctx = zmq_ctx_new();
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    let addr = helpers::bind_random_tcp(push);
+    let fd = get_fd(push);
+    assert_eq!(get_events(push) & ZMQ_POLLOUT, 0);
+    assert!(!fd_readable(fd, 50), "nothing changed yet");
+
+    assert_eq!(zmq_connect(pull, addr.as_ptr()), 0);
+    assert!(fd_readable(fd, 5000), "fd must fire once a peer is ready");
+    assert_ne!(get_events(push) & ZMQ_POLLOUT, 0);
+    assert!(!fd_readable(fd, 50), "reading ZMQ_EVENTS consumes the wake");
+
+    zmq_close(push);
+    zmq_close(pull);
+    zmq_ctx_term(ctx);
+}
+
+/// The descriptor must not leak into programs the process executes.
+#[test]
+fn fd_is_close_on_exec() {
+    let ctx = zmq_ctx_new();
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+
+    let fd = get_fd(pull);
+    // SAFETY: `fd` is the socket's open descriptor.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    assert_ne!(flags & libc::FD_CLOEXEC, 0);
+
+    zmq_close(pull);
+    zmq_ctx_term(ctx);
 }
 
 #[test]

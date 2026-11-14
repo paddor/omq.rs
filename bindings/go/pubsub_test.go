@@ -117,6 +117,41 @@ func TestXPubReceivesSubscriptionFrame(t *testing.T) {
 	}
 }
 
+func TestMaxPeerSubscriptionsIgnoresExtraSubscription(t *testing.T) {
+	ctx := openTestContext(t)
+	defer closeContext(t, ctx)
+
+	xpub, err := ctx.Socket(XPub, MaxPeerSubscriptions(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeSocket(t, xpub)
+	sub := newTestSocket(t, ctx, Sub)
+	defer closeSocket(t, sub)
+
+	endpoint, err := xpub.Bind("tcp://127.0.0.1:*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sub.SubscribeString("a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sub.Connect(endpoint); err != nil {
+		t.Fatal(err)
+	}
+	assertRecvString(t, xpub, "\x01a")
+
+	// "b" is over the limit, so XPUB never sees it. The cancel that follows
+	// on the same connection proves XPUB got past it.
+	if err := sub.SubscribeString("b"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sub.UnsubscribeString("a"); err != nil {
+		t.Fatal(err)
+	}
+	assertRecvString(t, xpub, "\x00a")
+}
+
 func assertRecvString(t *testing.T, socket *Socket, want string) {
 	t.Helper()
 	msg, err := socket.RecvTimeout(5 * time.Second)

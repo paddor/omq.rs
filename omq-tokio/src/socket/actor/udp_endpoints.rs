@@ -44,9 +44,14 @@ impl SocketDriver {
         let local = sock.local_addr()?;
 
         let resolved = match &endpoint {
-            Endpoint::Udp { group, .. } => Endpoint::Udp {
+            Endpoint::Udp { group, host, .. } => Endpoint::Udp {
                 group: group.clone(),
-                host: omq_proto::endpoint::Host::Ip(local.ip()),
+                // A multicast bind holds the wildcard address. Its endpoint
+                // names the group, which is what a RADIO connects to.
+                host: match host {
+                    omq_proto::endpoint::Host::Ip(ip) if ip.is_multicast() => host.clone(),
+                    _ => omq_proto::endpoint::Host::Ip(local.ip()),
+                },
                 port: local.port(),
             },
             _ => unreachable!("checked above"),
@@ -82,8 +87,14 @@ impl SocketDriver {
 
     /// Establish a UDP RADIO outbound. Validates socket type, opens
     /// the socket, registers a synthetic peer with the `SendStrategy`
-    /// so `send` routes through the sender task's inbox.
-    pub(super) async fn start_dial_udp(&mut self, endpoint: Endpoint) -> Result<()> {
+    /// so `send` routes through the sender task's inbox. `original` is
+    /// the endpoint the caller connected, which `disconnect()` names; the
+    /// caller never sees the resolved one.
+    pub(super) async fn start_dial_udp(
+        &mut self,
+        endpoint: Endpoint,
+        original: Endpoint,
+    ) -> Result<()> {
         if self.socket_type != SocketType::Radio {
             return Err(Error::Protocol(
                 "udp:// connect is only supported on RADIO sockets".into(),
@@ -134,7 +145,7 @@ impl SocketDriver {
 
         self.endpoints.udp_dialers.push(UdpDialerEntry {
             task: EndpointTask {
-                endpoint,
+                endpoint: original,
                 cancel,
                 task,
             },

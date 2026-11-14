@@ -13,6 +13,59 @@ fn temp_ipc(name: &str) -> Endpoint {
     Endpoint::Ipc(IpcPath::Filesystem(path))
 }
 
+/// The listener removes its socket file on drop. A relative path must
+/// still name that file after the process changes its directory.
+#[cfg(unix)]
+#[test]
+fn socket_file_keeps_an_absolute_path() {
+    // One `..` per level of the working directory reaches the root.
+    let depth = std::env::current_dir().unwrap().components().count();
+    let relative = std::path::PathBuf::from(format!(
+        "{}tmp/omq-ipc-relative-{}.sock",
+        "../".repeat(depth),
+        std::process::id()
+    ));
+    if relative.as_os_str().len() >= 100 {
+        // Too long for a socket address from this directory.
+        return;
+    }
+    let listener = std::os::unix::net::UnixListener::bind(&relative).unwrap();
+
+    let file = SocketFile::new(&relative).unwrap();
+
+    assert!(file.path.is_absolute());
+    drop(listener);
+    file.remove_if_unchanged();
+    assert!(!relative.exists());
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn abstract_connect_to_a_full_backlog_fails_without_blocking() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let name = format!("omq-ipc-backlog-{}", std::process::id());
+    let mut raw = vec![0];
+    raw.extend_from_slice(name.as_bytes());
+    let addr = socket2::SockAddr::unix(std::ffi::OsStr::from_bytes(&raw)).unwrap();
+    // Backlog 0 holds one pending connection, and nothing accepts.
+    let listener =
+        socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None).unwrap();
+    listener.bind(&addr).unwrap();
+    listener.listen(0).unwrap();
+    let queued = connect_abstract_unix(&name).unwrap();
+
+    let attempt = tokio::task::spawn_blocking(move || connect_abstract_unix(&name).map(drop));
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), attempt).await;
+    // Closing the listener releases a connect still blocked on the backlog.
+    drop(listener);
+    drop(queued);
+    let result = outcome
+        .expect("connect blocked on the full backlog")
+        .unwrap();
+    assert!(result.is_err(), "the backlog had no room");
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn bind_connect_accept_roundtrip() {

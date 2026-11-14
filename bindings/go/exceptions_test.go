@@ -83,6 +83,46 @@ func TestMaxMessageSizeDropsOversizedReceive(t *testing.T) {
 	}
 }
 
+func TestMaxMessagePartsDropsOversizedReceive(t *testing.T) {
+	ctx := openTestContext(t)
+	defer closeContext(t, ctx)
+
+	pull, err := ctx.Socket(Pull, MaxMessageParts(2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeSocket(t, pull)
+	push := newTestSocket(t, ctx, Push)
+	defer closeSocket(t, push)
+
+	endpoint, err := pull.Bind("tcp://127.0.0.1:*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := push.Connect(endpoint); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := push.WaitConnectedTimeout(1, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if err := push.SendTimeout(Multipart([]byte("a"), []byte("b")), time.Second); err != nil {
+		t.Fatal(err)
+	}
+	msg, err := pull.RecvTimeout(5 * time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.Len() != 2 {
+		t.Fatalf("message parts = %d, want 2", msg.Len())
+	}
+	if err := push.SendTimeout(Multipart([]byte("a"), []byte("b"), []byte("c")), time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pull.RecvTimeout(200 * time.Millisecond); !errors.Is(err, ErrTimeout) {
+		t.Fatalf("RecvTimeout err = %v, want ErrTimeout", err)
+	}
+}
+
 func isEndpointError(err error) bool {
 	var endpoint *EndpointError
 	return errors.As(err, &endpoint)

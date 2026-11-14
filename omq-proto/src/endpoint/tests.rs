@@ -24,6 +24,18 @@ fn endpoint_argument_conversions_accept_strings_and_typed_values() {
 }
 
 #[test]
+fn bracketed_ipv6_accepts_wildcard_port() {
+    let endpoint: Endpoint = "tcp://[::1]:*".parse().unwrap();
+    assert_eq!(
+        endpoint,
+        Endpoint::Tcp {
+            host: Host::Ip("::1".parse().unwrap()),
+            port: 0,
+        }
+    );
+}
+
+#[test]
 fn endpoint_argument_conversions_preserve_validation_errors() {
     for uri in [
         "",

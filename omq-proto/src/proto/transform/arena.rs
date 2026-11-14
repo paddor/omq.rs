@@ -196,6 +196,16 @@ fn part(bytes: &[u8], offset: usize) -> Result<(bool, std::ops::Range<usize>)> {
     Ok((flags & FLAG_MORE != 0, start..end))
 }
 
+/// Per-message limits checked while validating a decoded arena.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ArenaLimits {
+    /// Body bytes of one message. `payload_slots` adds one slot per part.
+    pub(crate) size: Option<usize>,
+    pub(crate) payload_slots: bool,
+    /// Parts of one message.
+    pub(crate) parts: Option<usize>,
+}
+
 #[derive(Debug)]
 pub(crate) struct DecodedArena {
     bytes: Bytes,
@@ -209,12 +219,12 @@ impl DecodedArena {
         bytes: Bytes,
         retained: usize,
         count: usize,
-        limit: Option<usize>,
-        payload_slots: bool,
+        limits: ArenaLimits,
     ) -> Result<Self> {
         let mut offset = 0;
         let mut messages = 0;
         let mut parts = 0;
+        let mut message_parts = 0usize;
         let mut message_size = 0usize;
         let mut more = false;
 
@@ -222,18 +232,22 @@ impl DecodedArena {
             let (continues, range) = part(&bytes, offset)?;
             parts += 1;
 
+            message_parts += 1;
             if parts > MAX_ARENA_PARTS {
                 return Err(invalid());
             }
 
+            if limits.parts.is_some_and(|max| message_parts > max) {
+                return Err(Error::Protocol("multipart part limit exceeded".into()));
+            }
             message_size += range.len()
-                + if payload_slots {
+                + if limits.payload_slots {
                     size_of::<Payload>()
                 } else {
                     0
                 };
 
-            if let Some(max) = limit
+            if let Some(max) = limits.size
                 && message_size > max
             {
                 return Err(Error::MessageTooLarge {
@@ -248,6 +262,7 @@ impl DecodedArena {
             if !more {
                 messages += 1;
                 message_size = 0;
+                message_parts = 0;
             }
         }
 

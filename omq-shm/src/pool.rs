@@ -179,7 +179,7 @@ impl PayloadStorage for SlotStorage {
 /// Returns an error for invalid size classes, size overflow, or OS allocation failure.
 pub fn payload_pool(classes: impl IntoIterator<Item = (usize, usize)>) -> Result<PayloadPool> {
     PayloadPool::with_storage(classes, &crate::LEASE_RECLAIM_BUDGET, |size, capacity| {
-        pool_storage(size, capacity, None)
+        pool_storage(size, capacity, None, None)
     })
 }
 
@@ -187,6 +187,7 @@ pub(super) fn pool_storage(
     size: usize,
     capacity: usize,
     reservation: Option<memory::Reservation>,
+    retirements: Option<Arc<crate::lease::Retirements>>,
 ) -> Result<Vec<Box<dyn PayloadStorage>>> {
     if capacity == 0 {
         return Ok(Vec::new());
@@ -196,6 +197,7 @@ pub(super) fn pool_storage(
     let mut mapping = Mapping::create(length, DATA)?;
     mapping.reservation = reservation;
 
+    mapping.retirements = retirements;
     region_slots(&Arc::new(mapping), size, capacity)
 }
 

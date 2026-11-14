@@ -14,6 +14,7 @@ use tokio::sync::mpsc::error::TrySendError;
 use super::actor_output::OutletRef;
 use super::driver::PeerEvent;
 use super::recv_sink::RecvSink;
+use super::subscription_ledger::SubscriptionLedger;
 use crate::socket::monitor::{MonitorEvent, MonitorPublisher};
 
 /// Retain one popped event until its actual mailbox permit is available.
@@ -148,8 +149,8 @@ impl PeerEventDispatch {
             self.subscriptions.observe(&event);
 
             let bytes = event_work_bytes(&event);
-            // A rejected SUBSCRIBE still costs budget but never reaches the
-            // actor or XPUB receive.
+            // A rejected SUBSCRIBE or JOIN still costs budget but never
+            // reaches the actor or XPUB receive.
             if self.subscriptions.admits(&event) {
                 self.notification = self.subscriptions.notification(&event);
                 // The XPUB notification rides the data output right after its
@@ -205,34 +206,30 @@ fn is_handshake(event: &Event) -> bool {
 #[derive(Debug, Default)]
 pub(crate) struct SubscriptionGate {
     notify_xpub: bool,
-    admission: Option<GateAdmission>,
+    admission: Option<SubscriptionAdmission>,
+    /// What this peer holds, when the socket limits it.
+    ledger: Option<Arc<SubscriptionLedger>>,
+    /// Where rejections are reported, with this connection's id.
+    report: Option<(MonitorPublisher, u64)>,
     peer: Option<Arc<PeerProperties>>,
-}
-
-/// Admission callback plus where its rejections are reported.
-#[derive(Debug)]
-struct GateAdmission {
-    callback: SubscriptionAdmission,
-    monitor: MonitorPublisher,
-    connection_id: u64,
 }
 
 impl SubscriptionGate {
     pub(crate) fn new(
         notify_xpub: bool,
         admission: Option<SubscriptionAdmission>,
+        ledger: Option<Arc<SubscriptionLedger>>,
         monitor: &MonitorPublisher,
         connection_id: u64,
     ) -> Self {
-        let admission = admission.map(|callback| GateAdmission {
-            callback,
-            monitor: monitor.clone(),
-            connection_id,
-        });
+        let report =
+            (admission.is_some() || ledger.is_some()).then(|| (monitor.clone(), connection_id));
 
         Self {
             notify_xpub,
             admission,
+            ledger,
+            report,
             peer: None,
         }
     }
@@ -248,27 +245,63 @@ impl SubscriptionGate {
         }
     }
 
-    /// False for a SUBSCRIBE the admission callback rejects; monitors see
-    /// `SubscribeRejected`. Fails closed if no handshake was observed.
+    /// False for a SUBSCRIBE or JOIN that is not registered: the admission
+    /// callback rejects it, or the peer holds as many as the socket allows.
+    /// Monitors see `SubscribeRejected` or `JoinRejected`. CANCEL and LEAVE
+    /// release what the peer held.
     pub(crate) fn admits(&self, event: &Event) -> bool {
-        let (Some(admission), Event::Command(Command::Subscribe(prefix))) =
-            (&self.admission, event)
-        else {
+        let Event::Command(command) = event else {
             return true;
         };
 
-        let admitted = self
-            .peer
-            .as_deref()
-            .is_some_and(|peer| admission.callback.admits(prefix, peer));
+        match command {
+            Command::Subscribe(prefix) => self.admits_subscribe(prefix),
+            Command::Join(group) => self.admits_join(group),
+            Command::Cancel(prefix) => {
+                if let Some(ledger) = &self.ledger {
+                    ledger.cancel(prefix);
+                }
+                true
+            }
+            Command::Leave(group) => {
+                if let Some(ledger) = &self.ledger {
+                    ledger.leave(group);
+                }
+                true
+            }
+            _ => true,
+        }
+    }
 
-        if !admitted {
-            admission.monitor.publish(MonitorEvent::SubscribeRejected {
-                connection_id: admission.connection_id,
+    /// The callback decides first, so a rejected prefix takes no place.
+    /// Fails closed if the callback is set and no handshake was observed.
+    fn admits_subscribe(&self, prefix: &bytes::Bytes) -> bool {
+        let admitted = self.admission.as_ref().is_none_or(|admission| {
+            self.peer
+                .as_deref()
+                .is_some_and(|peer| admission.admits(prefix, peer))
+        }) && self
+            .ledger
+            .as_ref()
+            .is_none_or(|ledger| ledger.subscribe(prefix));
+        if !admitted && let Some((monitor, connection_id)) = &self.report {
+            monitor.publish(MonitorEvent::SubscribeRejected {
+                connection_id: *connection_id,
                 prefix: prefix.clone(),
             });
         }
 
+        admitted
+    }
+
+    fn admits_join(&self, group: &bytes::Bytes) -> bool {
+        let admitted = self.ledger.as_ref().is_none_or(|ledger| ledger.join(group));
+        if !admitted && let Some((monitor, connection_id)) = &self.report {
+            monitor.publish(MonitorEvent::JoinRejected {
+                connection_id: *connection_id,
+                group: group.clone(),
+            });
+        }
         admitted
     }
 
@@ -289,11 +322,21 @@ fn xpub_notification(event: &Event) -> Option<omq_proto::Message> {
         _ => return None,
     };
 
+    Some(xpub_message(tag, prefix))
+}
+
+/// The message XPUB surfaces for a peer that stopped subscribing to
+/// `prefix`.
+pub(crate) fn xpub_unsubscribe(prefix: &[u8]) -> omq_proto::Message {
+    xpub_message(0x00, prefix)
+}
+
+fn xpub_message(tag: u8, prefix: &[u8]) -> omq_proto::Message {
     let mut bytes = bytes::BytesMut::with_capacity(1 + prefix.len());
     bytes.extend_from_slice(&[tag]);
     bytes.extend_from_slice(prefix);
 
-    Some(omq_proto::Message::single(bytes.freeze()))
+    omq_proto::Message::single(bytes.freeze())
 }
 
 // Logical service costs, not backing-allocation accounting. A single event's

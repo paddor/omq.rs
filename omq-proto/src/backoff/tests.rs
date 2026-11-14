@@ -36,8 +36,34 @@ fn exponential_caps_at_max() {
         max: Duration::from_millis(500),
     };
     let d = next_delay(&policy, 20).unwrap();
-    // With +/-10% jitter the cap can be slightly exceeded on the high end.
+    // Jitter can exceed the cap by up to 10%.
     assert!(d <= Duration::from_millis(550));
+}
+
+#[test]
+fn jitter_spreads_evenly_on_both_sides_of_the_base() {
+    use rand::SeedableRng;
+
+    // A fixed seed makes the draws, and so this test, repeatable.
+    let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+    let base = Duration::from_secs(1);
+    let samples: Vec<Duration> = (0..1000).map(|_| jitter_with(base, &mut rng)).collect();
+    assert!(
+        samples
+            .iter()
+            .all(|d| *d >= base * 9 / 10 && *d <= base * 11 / 10)
+    );
+    let below = samples.iter().filter(|d| **d < base).count();
+    let above = samples.iter().filter(|d| **d > base).count();
+    // 100 of the 201 equally likely values lie on each side.
+    assert!(
+        (400..600).contains(&below),
+        "{below} of 1000 below the base"
+    );
+    assert!(
+        (400..600).contains(&above),
+        "{above} of 1000 above the base"
+    );
 }
 
 #[test]

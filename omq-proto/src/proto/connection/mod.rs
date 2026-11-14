@@ -87,6 +87,10 @@ pub struct ConnectionConfig {
     /// enforce that logical limit after decoding. `None` uses the ordinary
     /// message limit.
     pub max_wire_message_size: Option<usize>,
+    /// Reject inbound messages with more parts than this. `None` = no
+    /// limit. Defaults to [`crate::options::DEFAULT_MAX_MESSAGE_PARTS`]. A
+    /// WebSocket connection never accepts more than 65,536 parts.
+    pub max_message_parts: Option<usize>,
     /// Security mechanism to negotiate during the handshake.
     pub mechanism: MechanismSetup,
     /// Remote address exposed to security authenticators, when known.
@@ -116,6 +120,7 @@ impl ConnectionConfig {
             identity: bytes::Bytes::new(),
             max_message_size: None,
             max_wire_message_size: None,
+            max_message_parts: Some(crate::options::DEFAULT_MAX_MESSAGE_PARTS),
             mechanism: MechanismSetup::Null,
             peer_address: None,
             defer_authentication: false,
@@ -146,6 +151,25 @@ impl ConnectionConfig {
     pub fn max_wire_message_size(mut self, n: usize) -> Self {
         self.max_wire_message_size = Some(n);
         self
+    }
+
+    /// Set the inbound part limit. See [`Self::max_message_parts`].
+    #[must_use]
+    pub fn max_message_parts(mut self, parts: Option<usize>) -> Self {
+        self.max_message_parts = parts;
+        self
+    }
+
+    /// Most parts one inbound message may have on this connection.
+    fn part_limit(&self) -> usize {
+        let limit = self
+            .max_message_parts
+            .map_or(usize::MAX, |parts| parts.max(1));
+        #[cfg(feature = "ws")]
+        if self.ws_role.is_some() {
+            return limit.min(ws::MAX_PARTS);
+        }
+        limit
     }
 
     fn data_size_limit(&self) -> Option<usize> {
@@ -290,6 +314,9 @@ pub struct Connection {
     /// commands.
     #[cfg(feature = "curve")]
     transform: Option<FrameTransform>,
+    /// The caller holds the transform; see [`Self::take_transform`].
+    #[cfg(feature = "curve")]
+    transform_lent: bool,
     peer_minor: u8,
     in_buf: ChunkedInputBuf,
     out: output::OutputQueue,
@@ -309,6 +336,8 @@ struct Assembly {
     parts: Parts,
     /// Body bytes plus one payload slot per part, checked against the limit.
     size: usize,
+    /// Most parts one message may have, from [`ConnectionConfig::part_limit`].
+    max_parts: usize,
     /// Dropping the rest of a multipart message this socket type rejects.
     discarding: bool,
     payload_pool: Option<crate::PayloadPool>,
@@ -329,6 +358,8 @@ impl Connection {
             mechanism,
             #[cfg(feature = "curve")]
             transform: None,
+            #[cfg(feature = "curve")]
+            transform_lent: false,
             in_buf: ChunkedInputBuf::new(),
             out: output::OutputQueue::new(),
             events: VecDeque::new(),
@@ -336,6 +367,7 @@ impl Connection {
             assembly: Assembly {
                 parts: Vec::new().into(),
                 size: 0,
+                max_parts: config.part_limit(),
                 discarding: false,
                 payload_pool: None,
             },
@@ -450,17 +482,33 @@ impl Connection {
     }
 
     /// Temporarily remove the frame transform so the caller can run
-    /// encryption on a blocking thread. Must be restored via
-    /// [`Self::restore_transform`] before the next `send_message` call.
+    /// encryption on a blocking thread. Until
+    /// [`Self::restore_transform`] puts it back, `handle_input` and
+    /// `send_message` fail: without the transform they would treat the
+    /// encrypted connection as plaintext.
     #[cfg(feature = "curve")]
     pub fn take_transform(&mut self) -> Option<FrameTransform> {
-        self.transform.take()
+        let transform = self.transform.take();
+        self.transform_lent = transform.is_some();
+        transform
     }
 
     /// Put back a transform previously removed by [`Self::take_transform`].
     #[cfg(feature = "curve")]
     pub fn restore_transform(&mut self, tx: FrameTransform) {
         self.transform = Some(tx);
+        self.transform_lent = false;
+    }
+
+    /// Fail while the caller holds the frame transform.
+    #[cfg(feature = "curve")]
+    pub(super) fn check_transform_present(&self) -> crate::error::Result<()> {
+        if self.transform_lent {
+            return Err(crate::error::Error::Protocol(
+                "frame transform is taken; restore it first".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Emit pre-encrypted frames produced by

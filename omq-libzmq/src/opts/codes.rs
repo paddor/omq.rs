@@ -264,6 +264,8 @@ pub(super) const OMQ_QUIC_MAX_READY_PEERS: c_int = 1018;
 #[cfg(feature = "webtransport")]
 pub(super) const OMQ_QUIC_WEBTRANSPORT_PATH: c_int = 1019;
 
+pub(super) const OMQ_MAX_MESSAGE_PARTS: c_int = 1020;
+pub(super) const OMQ_MAX_PEER_SUBSCRIPTIONS: c_int = 1021;
 pub(super) const OMQ_ARENA_THRESHOLD: c_int = 10_001;
 pub(super) const OMQ_ON_MUTE_BLOCK: c_int = 0;
 pub(super) const OMQ_ON_MUTE_DROP_NEWEST: c_int = 1;

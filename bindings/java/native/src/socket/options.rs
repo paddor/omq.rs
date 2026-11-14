@@ -165,6 +165,46 @@ pub extern "system" fn Java_io_omq_Native_socketSetMaxMessageSize(
 }
 
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_io_omq_Native_socketSetMaxMessageParts(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    parts: jlong,
+) {
+    guard(&mut env, (), |env| {
+        let result = (|| {
+            let socket = socket_from_handle(handle)?;
+            let parts = optional_usize_from_long("max message parts", parts)?;
+            socket.set_option(move |options| options.max_message_parts = parts)
+        })();
+
+        if let Err(error) = result {
+            throw_omq(env, error);
+        }
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_omq_Native_socketSetMaxPeerSubscriptions(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    max: jlong,
+) {
+    guard(&mut env, (), |env| {
+        let result = (|| {
+            let socket = socket_from_handle(handle)?;
+            let max = optional_usize_from_long("max peer subscriptions", max)?;
+            socket.set_option(move |options| options.max_peer_subscriptions = max)
+        })();
+
+        if let Err(error) = result {
+            throw_omq(env, error);
+        }
+    });
+}
+
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_io_omq_Native_socketSetCompressionAutoTrain(
     mut env: JNIEnv<'_>,
     _class: JClass<'_>,

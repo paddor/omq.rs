@@ -1,6 +1,6 @@
 //! Retire completed peers after their admitted event prefix.
 
-use super::{DisconnectReason, InternalEvent, SocketDriver};
+use super::{DisconnectReason, InternalEvent, SocketDriver, SocketType};
 use crate::engine::PeerEvent;
 use crate::engine::peer_completion::{PeerCompletion, StreamDisconnect};
 use futures::StreamExt as _;
@@ -217,6 +217,9 @@ impl SocketDriver {
             debug_assert!(peer.progress.completion.is_none());
             peer.progress.completion = Some(completion);
             self.retire_completed_peer(peer_id).await;
+            // Still here: its events wait for the application. That delays
+            // the removal only; the route is redialed now.
+            self.redial_ended_peer(peer_id);
         }
     }
 
@@ -242,6 +245,12 @@ impl SocketDriver {
             return;
         }
 
+        if !self.report_lost_subscriptions(peer_id) {
+            return;
+        }
+        let Some(peer) = self.peers.get_mut(&peer_id) else {
+            return;
+        };
         match peer.progress.completion.as_mut().unwrap().stream_disconnect {
             StreamDisconnect::Pending => {
                 peer.progress.completion.as_mut().unwrap().stream_disconnect =
@@ -266,6 +275,53 @@ impl SocketDriver {
         .await;
     }
 
+    /// XPUB reports the subscriptions a completed peer still held as
+    /// unsubscribes, as if the peer had canceled each one. Without them a
+    /// forwarder keeps every subscription of every past subscriber
+    /// upstream. Returns false while more are left to report; the peer is
+    /// queued and continues once the receive queue has space.
+    fn report_lost_subscriptions(&mut self, peer_id: u64) -> bool {
+        if self.socket_type != SocketType::XPub || self.close.started {
+            return true;
+        }
+        if !self
+            .peers
+            .get(&peer_id)
+            .is_some_and(|peer| peer.handshake.ready)
+        {
+            return true;
+        }
+        let mut budget = DrainBudget::new(64, 64 * 1024);
+        loop {
+            if self.pending_receive.is_some() {
+                break;
+            }
+            let Some(prefix) = self.routing.send_strategy.peer_subscription(peer_id) else {
+                return true;
+            };
+            self.routing.send_strategy.peer_cancel(peer_id, &prefix);
+            self.stage_receive(
+                peer_id,
+                crate::engine::peer_events::xpub_unsubscribe(&prefix),
+            );
+            if !budget.account(prefix.len() + size_of::<crate::Message>()) {
+                break;
+            }
+        }
+        if let Some(completion) = self
+            .peers
+            .get_mut(&peer_id)
+            .and_then(|peer| peer.progress.completion.as_mut())
+            && completion.stream_disconnect == StreamDisconnect::None
+        {
+            completion.stream_disconnect = StreamDisconnect::Queued;
+            self.mail.stream_disconnects.push_back(peer_id);
+        }
+        false
+    }
+
+    /// Continue peers that wait for receive space to finish: a STREAM peer
+    /// with its terminal empty message, an XPUB peer with its unsubscribes.
     pub(super) async fn drain_stream_disconnects(&mut self) {
         if self.pending_receive.is_some() || self.mail.stream_disconnects.is_empty() {
             return;
@@ -286,15 +342,18 @@ impl SocketDriver {
                 && completion.stream_disconnect == StreamDisconnect::Queued
             {
                 completion.stream_disconnect = StreamDisconnect::None;
-                // The admitted data prefix is finished. Preserve the peer's
-                // identity until its terminal empty receive is admitted too.
-                self.handle_internal_event(InternalEvent::PeerEvent {
-                    peer_id,
-                    event: omq_proto::proto::Event::Message(crate::Message::single(
-                        bytes::Bytes::new(),
-                    )),
-                })
-                .await;
+                if self.socket_type == SocketType::Stream {
+                    // The admitted data prefix is finished. Preserve the
+                    // peer's identity until its terminal empty receive is
+                    // admitted too.
+                    self.handle_internal_event(InternalEvent::PeerEvent {
+                        peer_id,
+                        event: omq_proto::proto::Event::Message(crate::Message::single(
+                            bytes::Bytes::new(),
+                        )),
+                    })
+                    .await;
+                }
                 self.retire_completed_peer(peer_id).await;
             }
 

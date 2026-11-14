@@ -34,6 +34,9 @@ pub(super) struct PendingWrite {
     /// ciphertext after a partial socket write and sends it only on a later
     /// write or flush.
     pub(super) unflushed: bool,
+    /// A short write left codec output, maybe half a frame, unsent. Its
+    /// tail goes out before any output framed since.
+    pub(super) codec_started: bool,
     /// Bytes the transport accepted since the last output pause.
     pub(super) written_since_pause: usize,
 }
@@ -119,12 +122,15 @@ impl PendingWrite {
         self.first = 0;
         self.offset = 0;
 
+        // Take the whole slot: codec output is written between two slot
+        // batches, so a batch must not end inside a frame. The slot's byte
+        // and message caps bound the batch.
         let outcome = if owned {
-            let outcome = slot.drain_owned(&mut self.chunks, 1024);
+            let outcome = slot.drain_owned(&mut self.chunks, usize::MAX);
             coalesce_small_chunks(&mut self.chunks);
             outcome
         } else {
-            slot.drain(&mut self.chunks, 1024)
+            slot.drain(&mut self.chunks, usize::MAX)
         };
 
         self.remaining = self.chunks.iter().map(Bytes::len).sum();
@@ -243,6 +249,7 @@ pub(super) async fn write_driver_progress<W: DriverWrite>(
     let owned = writer.chunk_writer().is_some();
 
     loop {
+        pending.codec_started &= connection.has_pending_transmit();
         let written = if owned && pending.has_chunks() {
             let owned_writer = writer.chunk_writer().expect("owned-chunk writer");
             let chunks = pending.chunks_mut();
@@ -259,6 +266,8 @@ pub(super) async fn write_driver_progress<W: DriverWrite>(
             pending.advance(written);
 
             written
+        } else if pending.codec_started {
+            flush_codec(writer, connection, pending, heartbeat).await?
         } else if owned && !eq.is_empty() {
             pending.stage_owned(eq);
             continue;
@@ -274,12 +283,7 @@ pub(super) async fn write_driver_progress<W: DriverWrite>(
             pending.stage(eq);
             continue;
         } else if connection.has_pending_transmit() {
-            let written = flush_once(writer, connection).await?;
-            // Record successful writes before any further await. The main
-            // select may cancel this future on its next pending write.
-            heartbeat.advance(written);
-
-            written
+            flush_codec(writer, connection, pending, heartbeat).await?
         } else if pending.unflushed {
             writer.flush().await?;
             pending.unflushed = false;
@@ -295,6 +299,22 @@ pub(super) async fn write_driver_progress<W: DriverWrite>(
             return Ok(());
         }
     }
+}
+
+/// One write of codec output. A short write can stop inside a frame, so
+/// `codec_started` keeps output framed meanwhile behind its tail.
+async fn flush_codec<W: DriverWrite>(
+    writer: &mut W,
+    connection: &mut Connection,
+    pending: &mut PendingWrite,
+    heartbeat: &mut HeartbeatProbe,
+) -> io::Result<usize> {
+    let written = flush_once(writer, connection).await?;
+    // Record successful writes before any further await. The main select
+    // may cancel this future on its next pending write.
+    heartbeat.advance(written);
+    pending.codec_started = connection.has_pending_transmit();
+    Ok(written)
 }
 
 /// Write queued handshake output, then flush once everything is written:

@@ -46,6 +46,8 @@ struct Inner {
     created: Instant,
     /// Milliseconds after `created` before the next growth check may run.
     next_growth_check: AtomicU64,
+    /// Connections that are told when one of this pool's regions is dropped.
+    retirements: Arc<crate::lease::Retirements>,
 }
 
 /// How a new class claims the budget.
@@ -111,8 +113,14 @@ impl SendPool {
                 allocation: Mutex::new(Vec::new()),
                 created: Instant::now(),
                 next_growth_check: AtomicU64::new(0),
+                retirements: Arc::default(),
             }),
         }
+    }
+
+    /// The connections to tell when one of this pool's regions is dropped.
+    pub(crate) fn retirements(&self) -> &crate::lease::Retirements {
+        &self.inner.retirements
     }
 
     /// Current automatically allocated mapping bytes, including retained owners.
@@ -326,7 +334,10 @@ impl SendPool {
         let pool = PayloadPool::with_storage(
             [(size, capacity)],
             &crate::LEASE_RECLAIM_BUDGET,
-            |size, capacity| pool_storage(size, capacity, reservation.take()),
+            |size, capacity| {
+                let retirements = Some(self.inner.retirements.clone());
+                pool_storage(size, capacity, reservation.take(), retirements)
+            },
         )?;
 
         let class = Arc::new(Class::new(pool));

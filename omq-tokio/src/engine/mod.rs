@@ -31,6 +31,7 @@ pub(crate) mod send_pipe;
 pub(crate) mod shm_state;
 pub(crate) mod signal;
 pub(crate) mod single_inbox;
+pub(crate) mod subscription_ledger;
 pub(crate) mod transmit_slot;
 pub(crate) mod write_ownership;
 

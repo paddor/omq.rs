@@ -11,8 +11,7 @@ use quinn_udp::EcnCodepoint;
 use super::super::pool::ReceiveBody;
 use super::super::{DartStats, ReceiveBatch, ReceivedDatagram};
 use super::{
-    BYTES, EndpointWorker, LEASE, MESSAGES, Peer, RECEIVE_MESSAGES, Routes, TURN, TaskState,
-    Timestamp,
+    BYTES, EndpointWorker, MESSAGES, Peer, RECEIVE_MESSAGES, Routes, TURN, TaskState, Timestamp,
 };
 
 /// A received datagram and the endpoint clock when it was read.
@@ -332,11 +331,11 @@ impl EndpointWorker {
     ) {
         let session = peer.session.as_mut().expect("admitted receive session");
         match session.classify(unit.session, unit.sequence) {
-            Admission::Duplicate => peer.lease.expires = arrival.timestamp.at + LEASE,
+            Admission::Duplicate => peer.renew(arrival.timestamp.at),
             Admission::OutsideWindow => {}
             Admission::Accept => {
                 if self.accept_data(peer, unit, arrival, stats) {
-                    peer.lease.expires = arrival.timestamp.at + LEASE;
+                    peer.renew(arrival.timestamp.at);
                 }
             }
         }
@@ -395,7 +394,7 @@ impl EndpointWorker {
 
         match session.classify(unit.session, unit.sequence) {
             Admission::Duplicate => {
-                peer.lease.expires = now + LEASE;
+                peer.renew(now);
                 return;
             }
             Admission::OutsideWindow => return,
@@ -414,7 +413,7 @@ impl EndpointWorker {
             return;
         }
 
-        if length.is_some_and(|length| !session.may_reserve_ahead(length)) {
+        if length.is_some_and(|length| !session.may_reserve_ahead(unit.sequence, length)) {
             // Enough bodies already wait in the window. Leave this FIRST
             // unacknowledged; the sender retransmits it later.
             return;
@@ -433,7 +432,7 @@ impl EndpointWorker {
         if session.commit_fragment_with(receipt, length, message, |length| {
             ReceiveBody::reserve(peer.pool.as_ref().expect("receiver pool"), length)
         }) {
-            peer.lease.expires = now + LEASE;
+            peer.renew(now);
         } else {
             stats.invalid_datagrams += 1;
             peer.lease.expires = now;
@@ -522,11 +521,12 @@ impl Peer {
             return;
         }
 
-        self.lease.expires = arrival.timestamp.at + LEASE;
+        let acknowledged = session.acknowledged_position();
+        self.renew(arrival.timestamp.at);
         if matches!(decoded, Packet::Status(_))
             && let Some(io) = &mut self.io
         {
-            io.acknowledge(session.acknowledged_position());
+            io.acknowledge(acknowledged);
         }
     }
 

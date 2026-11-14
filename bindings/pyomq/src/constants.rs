@@ -74,6 +74,8 @@ pub const OMQ_QUIC_SERVER_NAME: i32 = 1014;
 pub const OMQ_QUIC_TRUST_SYSTEM: i32 = 1015;
 pub const OMQ_QUIC_STREAM_WINDOW: i32 = 1016;
 pub const OMQ_QUIC_MAX_READY_PEERS: i32 = 1018;
+pub const OMQ_MAX_MESSAGE_PARTS: i32 = 1020;
+pub const OMQ_MAX_PEER_SUBSCRIPTIONS: i32 = 1021;
 
 // OnMute enum values:
 pub const OMQ_ON_MUTE_BLOCK: i32 = 0;
@@ -179,6 +181,8 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         OMQ_QUIC_TRUST_SYSTEM,
         OMQ_QUIC_STREAM_WINDOW,
         OMQ_QUIC_MAX_READY_PEERS,
+        OMQ_MAX_MESSAGE_PARTS,
+        OMQ_MAX_PEER_SUBSCRIPTIONS,
         OMQ_ON_MUTE_BLOCK,
         OMQ_ON_MUTE_DROP_NEWEST,
         OMQ_ON_MUTE_DROP_OLDEST,

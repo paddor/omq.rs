@@ -162,12 +162,19 @@ impl<B: FragmentBuffer> Session<B> {
         budget.msgs() != 0
     }
 
-    /// Whether a FIRST advertising `length` may reserve its body now. One
-    /// waiting body is always admitted; more must fit a fixed byte budget,
-    /// so out-of-order FIRSTs cannot each reserve a large body. A refused
-    /// FIRST stays unacknowledged and the sender retransmits it.
-    pub fn may_reserve_ahead(&self, length: u64) -> bool {
-        self.receive.reserved_ahead == 0
+    /// Whether a FIRST at `sequence` advertising `length` may reserve its
+    /// body now. One waiting body is always admitted; more must fit a fixed
+    /// byte budget, so out-of-order FIRSTs cannot each reserve a large body.
+    /// A refused FIRST stays unacknowledged and the sender retransmits it.
+    ///
+    /// The next in-order FIRST passes once everything before it is
+    /// delivered: only its own delivery frees the budget that later FIRSTs
+    /// hold, so refusing it would stall the session for good.
+    pub fn may_reserve_ahead(&self, sequence: u64, length: u64) -> bool {
+        let unblocks =
+            sequence == self.receive.next && self.receive.deliver_next == self.receive.next;
+        unblocks
+            || self.receive.reserved_ahead == 0
             || usize::try_from(length).is_ok_and(|length| {
                 self.receive.reserved_ahead.saturating_add(length) <= RESERVE_AHEAD_LIMIT
             })

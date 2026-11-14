@@ -21,7 +21,7 @@ pub use endpoint::{
     zmq_bind, zmq_connect, zmq_connect_peer, zmq_disconnect, zmq_disconnect_peer, zmq_join,
     zmq_leave, zmq_unbind,
 };
-pub(crate) use materialize::{RecvConsumers, ensure_materialized};
+pub(crate) use materialize::{RecvConsumers, ensure_materialized, materialize_for_io};
 pub(crate) use state::{EndpointState, RecvState, SendState};
 
 pub use monitor::{
@@ -267,7 +267,7 @@ pub extern "C" fn zmq_close(sock_ptr: *mut c_void) -> c_int {
     // Enter the tokio runtime context so that dropping OmqSocket (and
     // the Arc<omq_tokio::Socket> it holds) doesn't panic from missing
     // reactor.
-    let Some(handle) = arc.ctx.handle().cloned() else {
+    let Some(handle) = arc.ctx.close_handle().cloned() else {
         arc.notify.close();
         arc.ctx.socket_closed();
         drop(arc);

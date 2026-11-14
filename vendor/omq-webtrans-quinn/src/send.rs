@@ -36,12 +36,20 @@ impl SendStream {
     ///
     /// Unlike Quinn, this returns `None` when the code is not a valid WebTransport error code.
     /// It also returns `SessionError` (not `StoppedError`) because 0-RTT is not supported.
-    pub async fn stopped(&self) -> Result<Option<u32>, SessionError> {
-        match self.stream.stopped().await {
-            Ok(Some(code)) => Ok(omq_webtrans_proto::error_from_http3(code.into_inner())),
-            Ok(None) => Ok(None),
-            Err(quinn::StoppedError::ConnectionLost(e)) => Err(e.into()),
-            Err(quinn::StoppedError::ZeroRttRejected) => unreachable!("0-RTT not supported"),
+    ///
+    /// The future does not borrow the stream, as Quinn's does not. It holds the wake
+    /// registration, so a caller that polls by hand must keep it across polls.
+    pub fn stopped(
+        &self,
+    ) -> impl Future<Output = Result<Option<u32>, SessionError>> + Send + Sync + 'static {
+        let stopped = self.stream.stopped();
+        async move {
+            match stopped.await {
+                Ok(Some(code)) => Ok(omq_webtrans_proto::error_from_http3(code.into_inner())),
+                Ok(None) => Ok(None),
+                Err(quinn::StoppedError::ConnectionLost(e)) => Err(e.into()),
+                Err(quinn::StoppedError::ZeroRttRejected) => unreachable!("0-RTT not supported"),
+            }
         }
     }
 

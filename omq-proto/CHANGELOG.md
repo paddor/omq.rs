@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Options::max_message_parts` and `ConnectionConfig::max_message_parts`
+  limit the parts of one received message. The default is 1024; `None`
+  removes the limit. `Lz4Decoder` and `ZstdDecoder` take the same limit for
+  arena messages through `with_max_message_parts`.
+- `Options::max_peer_subscriptions` limits the prefixes or groups one peer
+  may hold on a PUB, XPUB or RADIO socket. The default is 65,536; `None`
+  removes the limit. `MonitorEvent::JoinRejected` reports a JOIN over it.
+
+### Changed
+
+- `dart::Session::may_reserve_ahead` takes the fragment's sequence.
+- A received message with more than 1024 parts is a protocol error by
+  default. Before, only WebSocket connections had a part limit, so a peer
+  could hold 64 bytes here for every two bytes it sent as empty parts.
+
+### Fixed
+
+- Reconnect jitter spreads evenly over +/-10% of the base delay, as
+  documented. Before, it only added up to 10% and left about half of all
+  delays without jitter.
+- `tcp://[::1]:*` parses. A bracketed IPv6 host rejected the wildcard port
+  that other hosts accept.
+- `Options::validate` rejects a `handshake_timeout` that overflows the
+  clock, such as `Duration::MAX`. Before, TCP and IPC sockets accepted it
+  and then failed every dial attempt before any I/O, with no error.
+- `FrameBuffer::drain` never splits a chunk group from `push_raw_message`.
+  A capped drain could take the head of a message, and a later
+  `pop_oldest_unprotected_entry` then removed its tail, which tore the
+  message on the wire.
+- A DART session no longer stalls when a FIRST fragment is lost and later
+  FIRSTs have used up the reserve-ahead budget. The retransmitted FIRST
+  was refused forever, because only its own delivery frees that budget.
+- `Lz4Encoder::with_auto_train` does nothing after `with_send_dict`, as
+  documented. It trained and shipped a second dictionary, which closes
+  the connection on the peer.
+- The adaptive batching check no longer overflows its batch counter. A
+  debug build panicked and a release build wrapped after about 536
+  million limited batches in one window.
+- `ZstdEncoder` sends a part above the decoder's 1 GiB limit as
+  plaintext. Before, it compressed the part, and the peer's decoder
+  refused the frame and closed the connection.
+- `Lz4Encoder` gives back compression scratch above 1 MiB once the part
+  is encoded. Before, one large part left a buffer of its size in the
+  encoder until the connection closed.
+- The inbound buffer merges runs of small read chunks of an incomplete
+  frame. Before, a peer that paced a large frame in tiny reads made the
+  buffer hold one handle per read, many times the size of the frame.
+- `Connection::handle_input` and `send_message` fail while the CURVE
+  transform is out through `take_transform`. Before, the connection
+  treated frames as plaintext until `restore_transform`, so a peer could
+  inject unauthenticated frames in that window.
+
+### Security
+
+- `Authenticator::plain_credentials` compares user names and passwords in
+  constant time and checks every allowlist entry. Before, the time taken
+  depended on the matching prefix and on the entry that matched. The
+  `plain` feature now depends on `subtle`.
+
 ## [0.39.1] - 2026-11-12
 
 ### Changed

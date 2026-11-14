@@ -113,6 +113,8 @@ impl Connection {
             ));
         }
 
+        #[cfg(feature = "curve")]
+        self.check_transform_present()?;
         let parts = msg.parts_payload();
         let n = parts.len();
 

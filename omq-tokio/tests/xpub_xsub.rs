@@ -2,6 +2,8 @@
 //! - SUB → PUB: SUBSCRIBE / CANCEL drives PUB-side filtering.
 //! - SUB → XPUB: SUBSCRIBE surfaces as a `\x01<topic>` message at
 //!   `XPUB.recv()`, CANCEL as `\x00<topic>`.
+//! - A subscriber that disconnects surfaces `\x00<topic>` for each
+//!   subscription it still held.
 //! - XSUB → XPUB: `XSUB.subscribe()` sends SUBSCRIBE commands upstream.
 //! - ZMTP 3.0 compatibility: PUB accepts `\x01<topic>` data-frame subscriptions
 //!   from legacy peers that do not use the SUBSCRIBE command.
@@ -541,8 +543,13 @@ async fn xpub_tcp_subscriber_churn() {
             .unwrap();
         assert_eq!(m.part_bytes(0).unwrap(), tag.as_bytes());
 
+        // The lost subscriber's subscription comes back as an unsubscribe.
         drop(sub);
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        let unsub_notif = tokio::time::timeout(Duration::from_secs(2), xpub.recv())
+            .await
+            .expect("XPUB unsubscribe notification timed out")
+            .unwrap();
+        assert_eq!(unsub_notif.part_bytes(0).unwrap().as_ref(), b"\x00");
     }
 }
 
@@ -680,6 +687,86 @@ async fn rejected_subscription_reaches_monitors() {
         assert_eq!(rejected, Some(connections[0].connection_id));
         assert_eq!(received, rejected);
     }
+}
+
+/// A lost subscriber never sends CANCEL. XPUB reports the subscriptions it
+/// still held as unsubscribes, so a forwarder can drop them upstream.
+#[tokio::test]
+async fn xpub_reports_unsubscribes_for_a_lost_subscriber() {
+    for endpoint in ["tcp://127.0.0.1:0", "inproc://xpub-lost-subscriber"] {
+        let xpub = Socket::new(SocketType::XPub, Options::default());
+        let endpoint = xpub.bind(endpoint).await.unwrap();
+        let sub = Socket::new(SocketType::Sub, Options::default());
+        sub.subscribe("a").await.unwrap();
+        sub.subscribe("b").await.unwrap();
+        sub.subscribe("b").await.unwrap();
+        sub.connect(endpoint.clone()).await.unwrap();
+        let mut subscribed = recv_notices(&xpub, 3).await;
+        subscribed.sort();
+        assert_eq!(
+            subscribed,
+            [b"\x01a".to_vec(), b"\x01b".to_vec(), b"\x01b".to_vec()]
+        );
+
+        sub.close().await.unwrap();
+
+        let mut unsubscribed = recv_notices(&xpub, 3).await;
+        unsubscribed.sort();
+        assert_eq!(
+            unsubscribed,
+            [b"\x00a".to_vec(), b"\x00b".to_vec(), b"\x00b".to_vec()],
+            "{endpoint}"
+        );
+        xpub.close().await.unwrap();
+    }
+}
+
+/// The unsubscribes wait for receive space like any XPUB message, and the
+/// peer is only retired once all of them are delivered.
+#[tokio::test]
+async fn xpub_unsubscribes_for_a_lost_subscriber_wait_for_receive_space() {
+    const TOPICS: usize = 200;
+    let xpub = Socket::new(SocketType::XPub, Options::default().recv_hwm(1));
+    let mut monitor = xpub.monitor();
+    let endpoint = xpub.bind("tcp://127.0.0.1:0").await.unwrap();
+    let sub = Socket::new(SocketType::Sub, Options::default());
+    for topic in 0..TOPICS {
+        sub.subscribe(format!("t{topic}")).await.unwrap();
+    }
+    sub.connect(endpoint).await.unwrap();
+    let subscribed = recv_notices(&xpub, TOPICS).await;
+    assert!(subscribed.iter().all(|notice| notice[0] == 1));
+
+    sub.close().await.unwrap();
+
+    let mut unsubscribed = recv_notices(&xpub, TOPICS).await;
+    assert!(unsubscribed.iter().all(|notice| notice[0] == 0));
+    unsubscribed.sort();
+    unsubscribed.dedup();
+    assert_eq!(unsubscribed.len(), TOPICS);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !matches!(
+            monitor.recv().await.unwrap(),
+            MonitorEvent::Disconnected { .. }
+        ) {}
+    })
+    .await
+    .expect("lost subscriber was never retired");
+    assert!(xpub.connections().await.unwrap().is_empty());
+    xpub.close().await.unwrap();
+}
+
+/// The next `count` subscription messages an XPUB surfaces.
+async fn recv_notices(xpub: &Socket, count: usize) -> Vec<Vec<u8>> {
+    let mut notices = Vec::new();
+    for _ in 0..count {
+        let message = tokio::time::timeout(Duration::from_secs(2), xpub.recv())
+            .await
+            .expect("timed out waiting for a subscription message")
+            .unwrap();
+        notices.push(message.part_bytes(0).unwrap().to_vec());
+    }
+    notices
 }
 
 /// Disconnecting a peer revokes its subscriptions: its reconnect resubscribes
@@ -917,4 +1004,125 @@ async fn pub_subscription_admission_applies_to_zmtp30_subscribe() {
             ("unsubscribed", connection_id, b"bar".to_vec()),
         ]
     );
+}
+
+/// A PUB or XPUB that lets one peer hold `limit` prefixes.
+fn limited(socket_type: SocketType, limit: usize) -> Socket {
+    Socket::new(
+        socket_type,
+        Options::default().max_peer_subscriptions(Some(limit)),
+    )
+}
+
+#[tokio::test]
+async fn pub_limits_the_prefixes_one_peer_holds() {
+    for endpoint in ["tcp://127.0.0.1:0", "inproc://peer-subscription-limit"] {
+        let pub_ = limited(SocketType::Pub, 2);
+        let mut monitor = pub_.monitor();
+        let endpoint = pub_.bind(endpoint).await.unwrap();
+        let sub = Socket::new(SocketType::Sub, Options::default());
+        sub.subscribe("a.").await.unwrap();
+        sub.subscribe("b.").await.unwrap();
+        sub.connect(endpoint).await.unwrap();
+        let mut held = subscription_events(&mut monitor, 2).await;
+        held.sort();
+        let connection_id = pub_.connections().await.unwrap()[0].connection_id;
+        assert_eq!(
+            held,
+            [
+                ("subscribed", connection_id, b"a.".to_vec()),
+                ("subscribed", connection_id, b"b.".to_vec()),
+            ]
+        );
+
+        // A third prefix is over the limit. Dropping one makes room.
+        sub.subscribe("c.").await.unwrap();
+        sub.unsubscribe("a.").await.unwrap();
+        sub.subscribe("d.").await.unwrap();
+        assert_eq!(
+            subscription_events(&mut monitor, 3).await,
+            [
+                ("rejected", connection_id, b"c.".to_vec()),
+                ("unsubscribed", connection_id, b"a.".to_vec()),
+                ("subscribed", connection_id, b"d.".to_vec()),
+            ]
+        );
+
+        pub_.wait_subscribed(3, Duration::from_secs(2))
+            .await
+            .unwrap();
+        for topic in ["c.x", "b.x", "d.x"] {
+            pub_.send(Message::single(topic)).await.unwrap();
+        }
+        for expected in [&b"b.x"[..], b"d.x"] {
+            let message = tokio::time::timeout(Duration::from_secs(2), sub.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(message.part_bytes(0).unwrap().as_ref(), expected);
+        }
+    }
+}
+
+#[tokio::test]
+async fn xpub_hides_subscriptions_over_the_peer_limit() {
+    for endpoint in ["tcp://127.0.0.1:0", "inproc://xpub-peer-subscription-limit"] {
+        let xpub = limited(SocketType::XPub, 1);
+        let endpoint = xpub.bind(endpoint).await.unwrap();
+        let sub = Socket::new(SocketType::Sub, Options::default());
+        sub.subscribe("a.").await.unwrap();
+        sub.connect(endpoint).await.unwrap();
+        assert_eq!(recv_notices(&xpub, 1).await, [b"\x01a.".to_vec()]);
+
+        sub.subscribe("b.").await.unwrap();
+        sub.unsubscribe("a.").await.unwrap();
+        sub.subscribe("c.").await.unwrap();
+        assert_eq!(
+            recv_notices(&xpub, 2).await,
+            [b"\x00a.".to_vec(), b"\x01c.".to_vec()]
+        );
+    }
+}
+
+#[tokio::test]
+async fn pub_peer_limit_applies_to_zmtp30_subscribe() {
+    use std::io::{Read, Write};
+
+    let pub_ = limited(SocketType::Pub, 1);
+    let mut monitor = pub_.monitor();
+    let Endpoint::Tcp { port, .. } = pub_.bind(tcp_loopback(0)).await.unwrap() else {
+        unreachable!("TCP bind");
+    };
+    let addr = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        let mut stream = std::net::TcpStream::connect(addr).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        stream.write_all(&zmtp30_sub_greeting()).unwrap();
+        let mut peer_greeting = [0u8; 64];
+        stream.read_exact(&mut peer_greeting).unwrap();
+        stream.write_all(SUB_READY).unwrap();
+        let _ = read_zmtp_frame(&mut stream);
+        // foo is held, bar is over the limit, and baz takes foo's place.
+        for frame in [b"\x01foo", b"\x01bar", b"\x00foo", b"\x01baz"] {
+            stream.write_all(&[0x00, 0x04]).unwrap();
+            stream.write_all(frame).unwrap();
+        }
+        let _ = done_rx.recv();
+    });
+
+    let events = subscription_events(&mut monitor, 4).await;
+    let connection_id = pub_.connections().await.unwrap()[0].connection_id;
+    assert_eq!(
+        events,
+        [
+            ("subscribed", connection_id, b"foo".to_vec()),
+            ("rejected", connection_id, b"bar".to_vec()),
+            ("unsubscribed", connection_id, b"foo".to_vec()),
+            ("subscribed", connection_id, b"baz".to_vec()),
+        ]
+    );
+    drop(done_tx);
 }

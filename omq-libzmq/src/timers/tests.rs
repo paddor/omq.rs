@@ -40,6 +40,23 @@ unsafe extern "C" fn cancel_self(timer_id: c_int, arg: *mut c_void) {
     state.fired.fetch_add(1, Ordering::SeqCst);
 }
 
+/// A handle of another type is refused, not read as timers.
+#[test]
+fn timers_calls_refuse_a_poller_handle() {
+    let mut poller = crate::poller::zmq_poller_new();
+
+    assert_eq!(zmq_timers_timeout(poller), -1);
+    assert_eq!(crate::zmq_errno(), libc::EFAULT);
+    assert_eq!(zmq_timers_cancel(poller, 1), -1);
+    assert_eq!(crate::zmq_errno(), libc::EFAULT);
+    let mut handle = poller;
+    assert_eq!(zmq_timers_destroy(&raw mut handle), -1);
+    assert_eq!(crate::zmq_errno(), libc::EFAULT);
+    assert_eq!(handle, poller);
+
+    assert_eq!(crate::poller::zmq_poller_destroy(&raw mut poller), 0);
+}
+
 #[test]
 fn timer_lifecycle_and_repeat() {
     let timers = zmq_timers_new();

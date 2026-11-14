@@ -97,6 +97,9 @@ fn apply_transport_options(hash: VALUE, opts: &mut omq_tokio::Options) -> RbResu
     if let Some(v) = get_opt_usize(hash, "max_message_size")? {
         opts.max_message_size = Some(v);
     }
+    if let Some(v) = get_opt_i64(hash, "max_message_parts")? {
+        opts.max_message_parts = limit_from_i64(v);
+    }
     if let Some(v) = get_opt_usize(hash, "sndbuf")? {
         opts.send_buffer_size = Some(v);
     }
@@ -114,6 +117,9 @@ fn apply_transport_options(hash: VALUE, opts: &mut omq_tokio::Options) -> RbResu
     }
     if let Some(v) = get_opt_bool(hash, "xpub_nodrop")? {
         opts.xpub_nodrop = v;
+    }
+    if let Some(v) = get_opt_i64(hash, "max_peer_subscriptions")? {
+        opts.max_peer_subscriptions = limit_from_i64(v);
     }
     if let Some(v) = get_opt_bool(hash, "reconnect_stop_conn_refused")? {
         opts.reconnect_stop_conn_refused = v;
@@ -144,7 +150,7 @@ fn apply_compression_options(hash: VALUE, opts: &mut omq_tokio::Options) -> RbRe
     }
     if let Some(v) = get_opt_i64(hash, "compression_offload_threshold")? {
         // Negative disables offload.
-        opts.compression_offload_threshold = if v < 0 { None } else { Some(v as usize) };
+        opts.compression_offload_threshold = limit_from_i64(v);
     }
     Ok(())
 }
@@ -405,6 +411,15 @@ fn get_opt_usize(hash: VALUE, key: &str) -> RbResult<Option<usize>> {
     usize::try_from(v)
         .map(Some)
         .map_err(|_| RubyErr::arg(format!("{key} must be non-negative")))
+}
+
+/// A limit that is on by default. A negative value turns it off.
+fn limit_from_i64(value: i64) -> Option<usize> {
+    if value < 0 {
+        None
+    } else {
+        Some(value as usize)
+    }
 }
 
 fn get_opt_u32(hash: VALUE, key: &str) -> RbResult<Option<u32>> {

@@ -9,8 +9,8 @@ use super::{
     output::QueuedOutput,
     read::StreamRead,
     receive::{
-        DecodeInput, MessageDelivery, ReceiveRateLimiters, discard_received_messages,
-        drain_decoded_messages,
+        DecodeInput, MessageDelivery, ReceiveRateLimiters, decoded_messages_waiting,
+        discard_received_messages, drain_decoded_messages,
     },
     shm,
     write::{TransmitSlotLifetime, enable_transmit_slot_after_handshake, mark_peer_dead},
@@ -584,6 +584,11 @@ impl<'c> Session<'c> {
                 }
                 Flow::Exit => return Ok(()),
             }
+            // This turn may have delivered the last message in front of a
+            // parse error. Report it now: nothing else would end the wait.
+            if let Some(error) = self.take_input_error() {
+                return Err(error);
+            }
 
             if self.stage_output(data_plane_open).await? == Flow::Exit {
                 return Ok(());
@@ -671,9 +676,8 @@ impl<'c> Session<'c> {
             }
         }
 
-        // Report a parse error only after every event before it is admitted.
-        if self.pending_input_error.is_some() && !self.peer_events.blocked() {
-            return Err(self.pending_input_error.take().unwrap());
+        if let Some(error) = self.take_input_error() {
+            return Err(error);
         }
 
         self.outlet
@@ -681,6 +685,22 @@ impl<'c> Session<'c> {
             .set_control_prefix(self.peer_events.control_prefix());
 
         Ok(true)
+    }
+
+    /// The deferred parse error, once every codec event and every message
+    /// decoded before it is admitted. A full receive path delays the error,
+    /// as it delays the messages.
+    fn take_input_error(&mut self) -> Option<Error> {
+        if self.pending_input_error.is_none() || self.peer_events.blocked() {
+            return None;
+        }
+        let undelivered = !self.control.discard_receive
+            && (self.delivery.pending.is_some()
+                || decoded_messages_waiting(&self.connection, self.receive.decoder.as_ref()));
+        if undelivered {
+            return None;
+        }
+        self.pending_input_error.take()
     }
 
     /// Deliver or discard decoded messages. `Again` asks for a yield and a

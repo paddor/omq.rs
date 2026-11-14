@@ -450,9 +450,12 @@ fn build_request(
     peer: &omq_tokio::MechanismPeerInfo,
 ) -> Result<Vec<Bytes>, ()> {
     validate_ascii_string(domain.as_bytes(), false)?;
-    let address: IpAddr = address.parse().map_err(|_| ())?;
-    let address = address.to_string();
-    validate_ascii_string(address.as_bytes(), false)?;
+    // The address frame carries an IP address. A peer without one, such as
+    // an IPC peer, gets an empty frame, as in libzmq.
+    let address = address
+        .parse::<IpAddr>()
+        .map(|address| address.to_string())
+        .unwrap_or_default();
 
     if identity.len() > 255 {
         return Err(());

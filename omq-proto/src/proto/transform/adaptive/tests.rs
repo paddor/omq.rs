@@ -22,6 +22,16 @@ fn clear_windows_name_their_bottleneck() {
     assert_eq!(bottleneck(window(0, 0, 0, 0)), Some(Bottleneck::Input));
 }
 
+/// The 1/8 share is computed without overflowing the batch counter.
+#[test]
+fn a_huge_overflow_count_still_names_the_cpu() {
+    let busy = OutputWindow {
+        batches: u32::MAX,
+        ..window(0, 64, u32::MAX, 0)
+    };
+    assert_eq!(bottleneck(busy), Some(Bottleneck::Cpu));
+}
+
 #[test]
 fn mixed_and_empty_windows_name_none() {
     // Input queued after every batch, but batches emptied the queue.

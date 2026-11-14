@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use rand::RngExt;
+use rand::{Rng, RngExt};
 
 use crate::options::ReconnectPolicy;
 
@@ -14,7 +14,8 @@ use crate::options::ReconnectPolicy;
 /// `None` when the policy has exhausted retries (currently only
 /// [`ReconnectPolicy::Disabled`]).
 ///
-/// Adds ±10% jitter to stagger thundering herds across many peers.
+/// Adds +/-10% jitter to stagger thundering herds across many peers, so a
+/// delay can be up to 10% shorter than the policy's value.
 pub fn next_delay(policy: &ReconnectPolicy, attempt: u32) -> Option<Duration> {
     match policy {
         ReconnectPolicy::Disabled => None,
@@ -30,19 +31,23 @@ pub fn next_delay(policy: &ReconnectPolicy, attempt: u32) -> Option<Duration> {
     }
 }
 
-/// Apply ±10% jitter to a duration, rounded to whole milliseconds. Zero stays
-/// zero; any non-zero sub-millisecond delay is treated as 1 ms.
+/// Apply +/-10% jitter to a duration, rounded to whole milliseconds. Zero
+/// stays zero; any non-zero sub-millisecond delay is treated as 1 ms.
 pub fn jitter(d: Duration) -> Duration {
+    jitter_with(d, &mut rand::rng())
+}
+
+/// [`jitter`] with the caller's random source.
+fn jitter_with(d: Duration, rng: &mut impl Rng) -> Duration {
     if d.is_zero() {
         return d;
     }
 
-    let mut rng = rand::rng();
     let ms = d.as_millis().max(1);
     let delta = ms / 10;
-    let offset = rng.random_range(0..=2 * delta).saturating_sub(delta);
-
-    duration_from_millis(ms.saturating_add(offset))
+    // Draw evenly from [ms - delta, ms + delta]; `delta <= ms`.
+    let offset = rng.random_range(0..=2 * delta);
+    duration_from_millis((ms - delta).saturating_add(offset))
 }
 
 fn duration_from_millis(ms: u128) -> Duration {

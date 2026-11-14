@@ -119,6 +119,24 @@ fn arena_threshold_maps_to_backend_options() {
 }
 
 #[test]
+fn peer_limits_map_to_backend_options() {
+    let defaults = SocketOverlay::default().to_options();
+    assert_eq!(defaults.max_message_parts, Some(65_536));
+    assert_eq!(defaults.max_peer_subscriptions, Some(1 << 20));
+
+    let overlay = SocketOverlay {
+        limits: PeerLimitsOverlay {
+            max_message_parts: 7,
+            max_peer_subscriptions: -1,
+        },
+        ..Default::default()
+    };
+    let opts = overlay.to_options();
+    assert_eq!(opts.max_message_parts, Some(7));
+    assert_eq!(opts.max_peer_subscriptions, None);
+}
+
+#[test]
 fn compression_fields_map_to_backend_options() {
     let overlay = SocketOverlay {
         compression: CompressionOverlay {

@@ -83,6 +83,14 @@ impl Options {
         self
     }
 
+    /// Set the most parts one received message may have. `None` removes the
+    /// limit. See [`Self::max_message_parts`].
+    #[must_use]
+    pub fn max_message_parts(mut self, parts: Option<usize>) -> Self {
+        self.max_message_parts = parts;
+        self
+    }
+
     /// Set the wire-payload size at which the recv path switches to a
     /// sized one-shot read. See the field-level docs on
     /// [`large_message_threshold`](Self::large_message_threshold) for

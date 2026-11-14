@@ -13,13 +13,17 @@ fn maximum_message_and_part_counts_preserve_empty_multipart_messages() {
 
     let body = Bytes::from(body);
     let limit = 16 * size_of::<Payload>();
+    let limits = |size, parts| ArenaLimits {
+        size,
+        payload_slots: true,
+        parts,
+    };
 
     let mut arena = DecodedArena::new(
         body.clone(),
         body.len(),
         MAX_ARENA_MESSAGES,
-        Some(limit),
-        true,
+        limits(Some(limit), Some(16)),
     )
     .unwrap();
 
@@ -37,10 +41,20 @@ fn maximum_message_and_part_counts_preserve_empty_multipart_messages() {
             body.clone(),
             body.len(),
             MAX_ARENA_MESSAGES,
-            Some(limit - 1),
-            true
+            limits(Some(limit - 1), None),
         ),
         Err(Error::MessageTooLarge { .. })
+    ));
+
+    // One part over the per-message part limit.
+    assert!(matches!(
+        DecodedArena::new(
+            body.clone(),
+            body.len(),
+            MAX_ARENA_MESSAGES,
+            limits(None, Some(15)),
+        ),
+        Err(Error::Protocol(_))
     ));
 
     let mut excessive = body.to_vec();
@@ -51,8 +65,7 @@ fn maximum_message_and_part_counts_preserve_empty_multipart_messages() {
             Bytes::from(excessive),
             body.len() + 2,
             MAX_ARENA_MESSAGES,
-            None,
-            false
+            ArenaLimits::default(),
         )
         .is_err()
     );
@@ -67,15 +80,20 @@ fn full_size_long_frame_rejects_every_truncation_and_overflow_length() {
     let body = Bytes::from(body);
 
     for length in 0..body.len() {
-        assert!(DecodedArena::new(body.slice(..length), body.len(), 1, None, false).is_err());
+        assert!(
+            DecodedArena::new(body.slice(..length), body.len(), 1, ArenaLimits::default()).is_err()
+        );
     }
 
-    let mut arena =
-        DecodedArena::new(body.clone(), body.len(), 1, Some(payload_size), false).unwrap();
+    let limits = ArenaLimits {
+        size: Some(payload_size),
+        ..ArenaLimits::default()
+    };
+    let mut arena = DecodedArena::new(body.clone(), body.len(), 1, limits).unwrap();
     let message = arena.next().unwrap();
     assert_eq!(message.part_slice(0).unwrap(), &body[9..]);
     assert!(arena.is_empty());
     let mut overflow = vec![FLAG_LONG];
     overflow.extend_from_slice(&u64::MAX.to_be_bytes());
-    assert!(DecodedArena::new(Bytes::from(overflow), 9, 1, None, false).is_err());
+    assert!(DecodedArena::new(Bytes::from(overflow), 9, 1, ArenaLimits::default()).is_err());
 }

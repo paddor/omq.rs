@@ -1,8 +1,8 @@
 //! LZ4 arena marker and sender configuration.
 
 pub(super) use super::super::arena::{
-    ArenaHeader, DecodedArena, HEADER, PendingArena, check_batch, encode_header, invalid_envelope,
-    parse_header,
+    ArenaHeader, ArenaLimits, DecodedArena, HEADER, PendingArena, check_batch, encode_header,
+    invalid_envelope, parse_header,
 };
 pub use super::super::arena::{
     MAX_ARENA_BYTES, MAX_ARENA_MESSAGES, MAX_ARENA_PARTS, arena_message_size,

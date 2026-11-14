@@ -14,6 +14,7 @@ fn peer() -> Peer {
         },
         generation: 2,
         reported: false,
+        heard: false,
         ecn_supported: false,
         session: None,
         pool: None,
@@ -188,6 +189,74 @@ fn partial_ack_returns_exact_credits_and_keeps_unsent_reservations() {
         io.queues.data.try_recv(),
         Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
     ));
+}
+
+#[test]
+fn connector_handshake_settles_only_on_session_traffic() {
+    let signal = Arc::new(DataSignal::new());
+
+    // A listener is settled once activation installed its session.
+    let mut listener = peer();
+    assert!(listener.handshake_unsettled());
+    listener.install_io(2, queues(), &state(), &signal);
+    assert!(!listener.handshake_unsettled());
+
+    // A connector cannot know that its CONFIRM arrived until the peer
+    // sends session traffic.
+    let mut connector = peer();
+    connector.lease.handshake = Handshake::connector(2);
+    assert!(connector.lease.handshake.receive(Ready {
+        socket_type: SocketType::Gather,
+        identity: None,
+        reply_requested: false,
+        session: 1,
+        echo: 2,
+        phase: Phase::Welcome,
+    }));
+    connector.install_io(2, queues(), &state(), &signal);
+    assert!(connector.handshake_unsettled());
+    let now = Instant::now();
+    connector.renew(now);
+    assert!(!connector.handshake_unsettled());
+    assert_eq!(connector.lease.expires, now + LEASE);
+}
+
+#[test]
+fn challenge_ids_bind_source_and_session_and_survive_one_rotation() {
+    let source: SocketAddr = "192.0.2.1:5000".parse().unwrap();
+    let other: SocketAddr = "192.0.2.1:5001".parse().unwrap();
+    let mut challenges = Challenges::default();
+    let start = Instant::now();
+    challenges.rotate(start);
+    let id = challenges.issue(source, 7);
+    assert_ne!(id, 0);
+    // The same HELLO gets the same ID; another session or source does not.
+    assert_eq!(challenges.issue(source, 7), id);
+    assert!(challenges.verify(source, 7, id));
+    assert!(!challenges.verify(source, 8, id));
+    assert!(!challenges.verify(other, 7, id));
+    assert!(!challenges.verify(source, 7, id ^ 1));
+
+    // No rotation inside a lease. After one the ID still verifies, and a
+    // new HELLO gets another. After two it is gone.
+    challenges.rotate(start + LEASE / 2);
+    assert_eq!(challenges.issue(source, 7), id);
+    challenges.rotate(start + LEASE);
+    assert!(challenges.verify(source, 7, id));
+    assert_ne!(challenges.issue(source, 7), id);
+    challenges.rotate(start + LEASE * 2);
+    assert!(!challenges.verify(source, 7, id));
+}
+
+#[test]
+fn queued_welcomes_are_bounded() {
+    let source: SocketAddr = "192.0.2.1:5000".parse().unwrap();
+    let mut challenges = Challenges::default();
+    for session in 1..=(MESSAGES as u64 + 10) {
+        challenges.queue(source, session);
+    }
+    assert_eq!(challenges.queue.len(), MESSAGES);
+    assert_eq!(challenges.queue.front(), Some(&(source, 1)));
 }
 
 #[test]

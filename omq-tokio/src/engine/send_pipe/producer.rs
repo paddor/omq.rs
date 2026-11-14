@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use omq_proto::message::Message;
 
@@ -234,7 +234,7 @@ impl SendPipeProducer {
         }
 
         if producer.is_full() {
-            self.above_lwm.store(true, Ordering::Release);
+            arm_space_wake(&self.above_lwm);
             return Err(SendPipeError::Full(msg));
         }
 
@@ -338,7 +338,7 @@ impl SendPipeProducer {
                     messages.push_front(returned);
 
                     if !closed {
-                        self.above_lwm.store(true, Ordering::Release);
+                        arm_space_wake(&self.above_lwm);
                     }
 
                     if count > 0 {
@@ -464,8 +464,10 @@ impl SendPipeProducer {
                 }
 
                 if producer.is_full() {
-                    self.above_lwm.store(true, Ordering::Release);
-                    return false;
+                    // A drain between the check and the arming found no
+                    // wake to send. Look again now that it is armed.
+                    arm_space_wake(&self.above_lwm);
+                    return !producer.is_full();
                 }
 
                 true
@@ -477,7 +479,11 @@ impl SendPipeProducer {
                 crate::transport::inproc::Admission::Ready => true,
                 crate::transport::inproc::Admission::Full => {
                     self.above_lwm.store(true, Ordering::Release);
-                    false
+                    // As for a queue: look again once the wake is armed.
+                    matches!(
+                        sender.admission(),
+                        crate::transport::inproc::Admission::Ready
+                    )
                 }
                 crate::transport::inproc::Admission::Closed => false,
             },
@@ -532,6 +538,15 @@ impl SendPipeProducer {
         self.dart_admission()
             .is_some_and(|counter| counter.available() == 0)
     }
+}
+
+/// Arm the space wake of a full queue. The drain swaps the flag too: if its
+/// swap comes first, this one acquires the slots it released, so a later
+/// fullness check sees them. A plain store gives no such order and can pass
+/// that check.
+#[inline]
+fn arm_space_wake(above_lwm: &AtomicBool) {
+    above_lwm.swap(true, Ordering::AcqRel);
 }
 
 /// A DART pipe out of credit: closed once its consumer is gone, else full.

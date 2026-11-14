@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- `MaxMessageParts` limits the parts of one received message (default 1024).
+  `MaxPeerSubscriptions` limits the prefixes or groups one peer may hold on
+  a PUB, XPUB or RADIO socket (default 65536). `NoMaxMessageParts` and
+  `NoMaxPeerSubscriptions` remove the limits.
+
 ## [0.1.16] - 2026-11-12
 
 ### Changed

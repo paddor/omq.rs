@@ -157,7 +157,9 @@ impl SocketFile {
         use std::os::unix::fs::MetadataExt;
         let metadata = std::fs::symlink_metadata(path)?;
         Ok(Self {
-            path: path.to_path_buf(),
+            // Absolute, so that a later change of the working directory
+            // does not make drop look for the file elsewhere.
+            path: std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()),
             dev: metadata.dev(),
             ino: metadata.ino(),
         })
@@ -253,10 +255,9 @@ impl Drop for IpcListener {
 #[cfg(unix)]
 #[expect(clippy::unused_async)]
 async fn bind_filesystem_unix(endpoint: &Endpoint, path: &Path) -> Result<IpcListener> {
-    // Best-effort cleanup of any stale socket at this path. Ignore
-    // failure: the real bind below surfaces a precise error if the
-    // path is unusable.
-    let _ = std::fs::remove_file(path);
+    // libzmq unlinks whatever is at the path. That deletes regular files
+    // and leaves a live listener running but unreachable.
+    remove_stale_socket(path)?;
 
     listen_filesystem_unix(endpoint, path)
 }
@@ -272,9 +273,8 @@ fn listen_filesystem_unix(endpoint: &Endpoint, path: &Path) -> Result<IpcListene
     })
 }
 
-/// Bind an `shm://` rendezvous socket. Unlike IPC, a filesystem path is
-/// replaced only when it holds a stale socket: SHM peers are always OMQ, so
-/// the libzmq unlink-on-bind behavior does not apply.
+/// Bind an `shm://` rendezvous socket. As for IPC, a filesystem path is
+/// replaced only when it holds a stale socket.
 #[cfg(target_os = "linux")]
 pub(crate) fn bind_shm(endpoint: &Endpoint) -> Result<IpcListener> {
     match endpoint {
@@ -291,7 +291,7 @@ pub(crate) fn bind_shm(endpoint: &Endpoint) -> Result<IpcListener> {
 
 /// Remove `path` if it is a socket nobody accepts on; fail if anything else
 /// occupies it. A nonblocking connect never waits on a full backlog.
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn remove_stale_socket(path: &Path) -> Result<()> {
     use std::os::unix::fs::FileTypeExt;
     let metadata = match std::fs::symlink_metadata(path) {
@@ -315,7 +315,7 @@ fn remove_stale_socket(path: &Path) -> Result<()> {
 
     Err(std::io::Error::new(
         std::io::ErrorKind::AddrInUse,
-        format!("shm path {} is in use", path.display()),
+        format!("socket path {} is in use", path.display()),
     )
     .into())
 }
@@ -349,15 +349,20 @@ fn bind_abstract_unix(_endpoint: &Endpoint, _name: &str) -> Result<IpcListener> 
 
 #[cfg(target_os = "linux")]
 fn connect_abstract_unix(name: &str) -> Result<IpcStream> {
-    use std::os::linux::net::SocketAddrExt;
-    use std::os::unix::net::{SocketAddr as StdSockAddr, UnixStream as StdStream};
+    use std::os::unix::ffi::OsStrExt;
 
-    let addr = StdSockAddr::from_abstract_name(name.as_bytes())
+    // socket2 reads a leading NUL as an abstract name.
+    let mut raw = Vec::with_capacity(1 + name.len());
+    raw.push(0);
+    raw.extend_from_slice(name.as_bytes());
+    let addr = socket2::SockAddr::unix(std::ffi::OsStr::from_bytes(&raw))
         .map_err(|e| Error::InvalidEndpoint(format!("abstract ipc name {name:?}: {e}")))?;
-    let std_stream = StdStream::connect_addr(&addr)?;
-    std_stream.set_nonblocking(true)?;
-
-    Ok(UnixStream::from_std(std_stream)?)
+    // Nonblocking before the connect: a blocking one waits without limit
+    // while the listener's backlog is full, on a runtime thread.
+    let socket = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)?;
+    socket.set_nonblocking(true)?;
+    socket.connect(&addr)?;
+    Ok(UnixStream::from_std(socket.into())?)
 }
 
 #[cfg(not(target_os = "linux"))]

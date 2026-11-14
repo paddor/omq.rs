@@ -7,7 +7,7 @@
 use std::future::Future;
 use std::io;
 use std::pin::{Pin, pin};
-use std::task::{Context, Poll, ready};
+use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use futures::future::BoxFuture;
@@ -33,16 +33,21 @@ impl Carrier {
     pub(super) fn close(&self, code: u32) {
         match self {
             Self::Raw(connection) => connection.close(quinn::VarInt::from_u32(code), b""),
-            // Session close spawns its capsule writer; without a runtime,
-            // close the connection directly.
+            // A normal close goes out as a session capsule, which the
+            // session writes from a spawned task and then waits up to five
+            // seconds for the peer to acknowledge.
             #[cfg(feature = "webtransport")]
-            Self::Web(session) if tokio::runtime::Handle::try_current().is_ok() => {
+            Self::Web(session)
+                if code == super::code::NO_ERROR
+                    && tokio::runtime::Handle::try_current().is_ok() =>
+            {
                 session.close(code, b"");
             }
+            // An error close ends the connection at once, as raw QUIC
+            // does: the peer may be the reason, and until the connection
+            // closes its streams still carry data. Also without a runtime.
             #[cfg(feature = "webtransport")]
-            Self::Web(session) => session
-                .connection()
-                .close(quinn::VarInt::from_u32(code), b""),
+            Self::Web(session) => session.abort(code, b""),
         }
     }
 
@@ -68,18 +73,6 @@ impl Carrier {
                 stream = session.accept_uni() => stream.is_ok(),
             },
         }
-    }
-}
-
-#[cfg(feature = "webtransport")]
-trait SessionConnection {
-    fn connection(&self) -> &quinn::Connection;
-}
-
-#[cfg(feature = "webtransport")]
-impl SessionConnection for omq_webtrans_quinn::Session {
-    fn connection(&self) -> &quinn::Connection {
-        self
     }
 }
 
@@ -145,39 +138,32 @@ impl SendHalf {
         }
     }
 
-    /// Raw streams keep their stopped future across polls. WebTransport's
-    /// wrapper recreates its future; Quinn's stopped future is cancel-safe.
-    #[cfg_attr(not(feature = "webtransport"), expect(clippy::unnecessary_wraps))]
-    pub(super) fn raw_stopped(
-        &self,
-    ) -> Option<BoxFuture<'static, Result<Option<quinn::VarInt>, quinn::StoppedError>>> {
+    /// The stream's outcome after FIN. Quinn keeps the wake registration
+    /// in its stopped future, so the caller holds this future across polls:
+    /// a new one per poll would lose the wake for the acknowledgment.
+    pub(super) fn stopped(&self) -> BoxFuture<'static, Completion> {
         match self {
-            Self::Raw(stream) => Some(Box::pin(stream.stopped())),
-            #[cfg(feature = "webtransport")]
-            Self::Web(_) => None,
-        }
-    }
-
-    pub(super) fn poll_stopped(
-        &mut self,
-        raw: Option<&mut BoxFuture<'static, Result<Option<quinn::VarInt>, quinn::StoppedError>>>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Completion> {
-        match self {
-            Self::Raw(_) => {
-                let stopped = raw.expect("raw stream keeps its stopped future");
-                Poll::Ready(match ready!(stopped.as_mut().poll(cx)) {
-                    Ok(None) => Completion::Acknowledged,
-                    Ok(Some(_)) => Completion::PeerStopped,
-                    Err(e) => Completion::Failed(io::Error::other(e)),
+            Self::Raw(stream) => {
+                let stopped = stream.stopped();
+                Box::pin(async move {
+                    match stopped.await {
+                        Ok(None) => Completion::Acknowledged,
+                        Ok(Some(_)) => Completion::PeerStopped,
+                        Err(e) => Completion::Failed(io::Error::other(e)),
+                    }
                 })
             }
             #[cfg(feature = "webtransport")]
-            Self::Web(stream) => Poll::Ready(match ready!(pin!(stream.stopped()).poll(cx)) {
-                Ok(None) => Completion::Acknowledged,
-                Ok(Some(_)) => Completion::PeerStopped,
-                Err(e) => Completion::Failed(io::Error::other(e)),
-            }),
+            Self::Web(stream) => {
+                let stopped = stream.stopped();
+                Box::pin(async move {
+                    match stopped.await {
+                        Ok(None) => Completion::Acknowledged,
+                        Ok(Some(_)) => Completion::PeerStopped,
+                        Err(e) => Completion::Failed(io::Error::other(e)),
+                    }
+                })
+            }
         }
     }
 }

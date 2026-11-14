@@ -176,7 +176,7 @@ impl Socket {
     /// Subsequent messages are drained without waiting, within the receive
     /// work budget. REQ/REP return at most one message per call.
     pub async fn recv_many(&self, max: usize) -> Result<Vec<Message>> {
-        let mut messages = Vec::with_capacity(max);
+        let mut messages = Vec::with_capacity(max.min(crate::socket::recv::RECV_BATCH_MESSAGES));
         self.recv_many_into(max, &mut messages).await?;
         Ok(messages)
     }
@@ -218,7 +218,7 @@ impl Socket {
     }
 
     pub(crate) fn try_recv_many(&self, max: usize) -> Result<Vec<Message>> {
-        let mut messages = Vec::with_capacity(max);
+        let mut messages = Vec::with_capacity(max.min(crate::socket::recv::RECV_BATCH_MESSAGES));
         self.try_recv_many_into(max, &mut messages)?;
         Ok(messages)
     }

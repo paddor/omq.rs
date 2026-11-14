@@ -46,7 +46,8 @@ zig build test
 - `Socket.sendGroup(allocator, group, data, flags)` sends RADIO messages.
 - Typed `Socket.set*` helpers (`setLinger`, `setHighWaterMark`,
   `setIdentity`, and more) cover pyomq/libzmq options plus OMQ extensions: on-mute policy, compression knobs,
-  arena threshold, PLAIN/CURVE security, identity, timeouts, HWM, and routing.
+  arena threshold, message part and peer subscription limits, PLAIN/CURVE security, identity, timeouts, HWM,
+  and routing.
 - `omq.poll()` wraps `zmq_poll`.
 - `Poller` gives register/modify/unregister and returns active events.
 - `Socket.monitor()` returns a PAIR monitor socket wrapper with parsed events.

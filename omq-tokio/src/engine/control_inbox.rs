@@ -294,12 +294,23 @@ impl Receiver {
 
     /// Overflow holds only commands newer than every ring entry, so it is
     /// read after the ring is empty.
-    fn take_overflow(lifecycle: &Lifecycle) -> Option<PeerDriverCommand> {
+    fn take_overflow(
+        commands: &mut single_inbox::Receiver<PeerDriverCommand>,
+        lifecycle: &Lifecycle,
+    ) -> Option<PeerDriverCommand> {
         if !lifecycle.may_be_occupied() {
             return None;
         }
 
-        let command = lifecycle.lock().overflow.pop_front();
+        let mut pending = lifecycle.lock();
+        // The sender fills the ring and the overflow under this lock. It
+        // may have done both since the caller saw the ring empty, so look
+        // at the ring once more: its commands are the older ones.
+        if let Ok(command) = commands.try_recv() {
+            return Some(command);
+        }
+        let command = pending.overflow.pop_front();
+        drop(pending);
         if command.is_some() {
             // Wakes callers waiting in `Sender::protocol_drained`.
             lifecycle.changed.notify_changed();
@@ -321,7 +332,7 @@ impl Receiver {
 
                 commands
                     .try_recv()
-                    .or_else(|error| Self::take_overflow(lifecycle).ok_or(error))
+                    .or_else(|error| Self::take_overflow(commands, lifecycle).ok_or(error))
             }
         }
     }
@@ -348,7 +359,7 @@ impl Receiver {
 
                 match commands.poll_recv(cx) {
                     std::task::Poll::Ready(Some(command)) => std::task::Poll::Ready(Some(command)),
-                    closed_or_pending => Self::take_overflow(lifecycle)
+                    closed_or_pending => Self::take_overflow(commands, lifecycle)
                         .map_or(closed_or_pending, |command| {
                             std::task::Poll::Ready(Some(command))
                         }),

@@ -126,13 +126,19 @@ impl FanOutShared {
             return;
         };
 
-        let peer_id = slot.peer_id;
-        slot.deactivate_fanout();
-        let mut g = self.inner.lock().expect("fanout inner poisoned");
-
-        if g.deactivate_fanout_peer(peer_id) {
-            self.generation.fetch_add(1, Ordering::Release);
+        {
+            // The reactivation callback takes `inner` too. With both flags
+            // cleared under it, a drain cannot reactivate the slot while
+            // the peer still counts as active. That would leave the peer
+            // muted with nothing left to unmute it.
+            let mut g = self.inner.lock().expect("fanout inner poisoned");
+            slot.clear_fanout_active();
+            if g.deactivate_fanout_peer(slot.peer_id) {
+                self.generation.fetch_add(1, Ordering::Release);
+            }
         }
+        // Outside `inner`, because this can run the reactivation callback.
+        slot.reactivate_fanout_if_drained();
     }
 }
 
@@ -773,6 +779,14 @@ impl FanOutSend {
         }
 
         prefixes
+    }
+
+    /// One of the subscriptions `peer_id` holds, if any.
+    pub(crate) fn peer_subscription(&self, peer_id: u64) -> Option<Bytes> {
+        let g = self.shared.inner.lock().expect("fanout inner poisoned");
+        let peer = g.peers.get(&peer_id)?;
+        let (prefix, _) = peer.filter.subscriptions().iter().next()?;
+        Some(Bytes::from(prefix))
     }
 
     pub(crate) fn peer_cancel(&self, peer_id: u64, prefix: &[u8]) {

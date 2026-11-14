@@ -13,16 +13,17 @@ use super::raw::OptOut;
 use crate::error::c_try;
 #[cfg(unix)]
 use crate::notify::NotifyHandle;
-use crate::socket::OmqSocket;
+use crate::socket::{DEFAULT_HWM, OmqSocket};
 use omq_tokio::SocketType;
 use omq_tokio::options::{OnMute, WorkloadProfile};
 use std::ffi::c_int;
 use std::sync::Arc;
 
-const GET_OPTIONS: [GetOption; 15] = [
+const GET_OPTIONS: [GetOption; 16] = [
     get_queue_option,
     get_state_option,
     get_message_option,
+    get_peer_limit_option,
     get_tuning_option,
     get_reconnect_option,
     get_heartbeat_option,
@@ -86,12 +87,17 @@ fn get_queue_option(sock_arc: &Arc<OmqSocket>, option: c_int, out: OptOut) -> Re
                 .timeout_ms
                 .load(std::sync::atomic::Ordering::Relaxed) as i32,
         ),
+        // An unset HWM reads as the default that applies.
         ZMQ_SNDHWM => {
-            let v = overlay(sock_arc)?.send_hwm.map_or(0, |n| n as i32);
+            let v = overlay(sock_arc)?
+                .send_hwm
+                .map_or(DEFAULT_HWM as i32, |n| n as i32);
             out.i32(v)
         }
         ZMQ_RCVHWM => {
-            let v = overlay(sock_arc)?.recv_hwm.map_or(0, |n| n as i32);
+            let v = overlay(sock_arc)?
+                .recv_hwm
+                .map_or(DEFAULT_HWM as i32, |n| n as i32);
             out.i32(v)
         }
         ZMQ_LINGER => {
@@ -121,6 +127,7 @@ fn get_state_option(sock_arc: &Arc<OmqSocket>, option: c_int, out: OptOut) -> Re
 
             #[cfg(unix)]
             {
+                crate::send_recv::fd_edge::watch(sock_arc);
                 let fd = sock_arc.notify.recv_fd();
                 out.i32(fd)
             }
@@ -156,28 +163,13 @@ fn rcvmore(sock_arc: &OmqSocket) -> bool {
 }
 
 /// `ZMQ_EVENTS` bits: POLLOUT when a send would not block, POLLIN when any
-/// receive source has data.
+/// receive source has data. As in libzmq, the read also consumes a pending
+/// `ZMQ_FD` wake.
 fn poll_events(sock_arc: &OmqSocket) -> i32 {
-    let mut events = if crate::send_recv::send_ready(sock_arc) {
-        ZMQ_POLLOUT
-    } else {
-        0
-    };
-
-    let drain_nonempty = if sock_arc.is_zap_handler() {
-        sock_arc.ctx.zap.has_input(sock_arc.id)
-    } else {
-        sock_arc
-            .recv
-            .drain_nonempty
-            .load(std::sync::atomic::Ordering::Relaxed)
-    };
-
-    let recv_cons_has_data = sock_arc.recv_has_data();
-    let authenticated_recv_has_data = crate::send_recv::authenticated_recv_has_data(sock_arc);
-
-    let has_data = drain_nonempty || recv_cons_has_data || authenticated_recv_has_data;
-    if has_data {
+    let writable = crate::send_recv::send_ready(sock_arc);
+    crate::send_recv::fd_edge::observe(sock_arc, writable);
+    let mut events = if writable { ZMQ_POLLOUT } else { 0 };
+    if crate::poll::recv_ready(sock_arc) {
         events |= ZMQ_POLLIN;
     }
 
@@ -222,6 +214,21 @@ fn get_message_option(
 
             out.i32(v)
         }
+        _ => return Ok(false),
+    }?;
+
+    Ok(true)
+}
+
+/// Limits on what one peer may send or subscribe to; -1 is no limit.
+fn get_peer_limit_option(
+    sock_arc: &Arc<OmqSocket>,
+    option: c_int,
+    out: OptOut,
+) -> Result<bool, c_int> {
+    match option {
+        OMQ_MAX_MESSAGE_PARTS => out.i32(overlay(sock_arc)?.limits.max_message_parts),
+        OMQ_MAX_PEER_SUBSCRIPTIONS => out.i32(overlay(sock_arc)?.limits.max_peer_subscriptions),
         _ => return Ok(false),
     }?;
 
@@ -515,10 +522,15 @@ fn get_curve_option(sock_arc: &Arc<OmqSocket>, option: c_int, out: OptOut) -> Re
         }
         ZMQ_CURVE_PUBLICKEY => {
             let ov = overlay(sock_arc)?;
-            if let MechanismOverlay::CurveClient { ref public_key, .. } = ov.mechanism {
-                out.key(public_key)
-            } else {
-                out.key(&[0; 32])
+            match ov.mechanism {
+                MechanismOverlay::CurveClient { ref public_key, .. } => out.key(public_key),
+                // A server stores only its secret key. The public key it
+                // presents is derived from that.
+                MechanismOverlay::CurveServer { ref secret_key } if *secret_key != [0; 32] => {
+                    let secret = omq_tokio::CurveSecretKey::from_bytes(*secret_key);
+                    out.key(secret.derive_public().as_bytes())
+                }
+                _ => out.key(&[0; 32]),
             }
         }
         ZMQ_CURVE_SECRETKEY => {

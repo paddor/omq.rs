@@ -23,7 +23,7 @@ workspace = true
 #   zstd      zstd+tcp:// transport (pure Rust; zrip)
 default = []
 curve = ["dep:salsabox", "dep:subtle", "dep:x25519-dalek", "dep:zeroize"]
-plain = []
+plain = ["dep:subtle"]
 lz4 = ["dep:lz4rip"]
 zstd = ["dep:zrip"]
 ws = []

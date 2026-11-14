@@ -77,6 +77,15 @@ class ApiTest < Minitest::Test
     refute dealer.closed?
   end
 
+  def test_part_and_subscription_limit_options
+    refute socket(:pull, max_message_parts: 16).closed?
+    refute socket(:pull, max_message_parts: -1).closed?
+    refute socket(:pub, max_peer_subscriptions: 0).closed?
+    refute socket(:pub, max_peer_subscriptions: -1).closed?
+    error = assert_raises(ArgumentError) { OMQ.rs(:pull, max_message_parts: 0) }
+    assert_match(/max_message_parts/, error.message)
+  end
+
   def test_invalid_options
     assert_raises(ArgumentError) { OMQ.rs(:pull, send_hwm: -1) }
     assert_raises(ArgumentError) { OMQ.rs(:pull, workload_profile: :fast) }

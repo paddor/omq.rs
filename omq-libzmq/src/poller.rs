@@ -18,9 +18,25 @@ struct PollerEntry {
     events: c_short,
 }
 
-#[derive(Debug, Default)]
+// libzmq's socket_poller_t tag.
+const POLLER_TAG: u32 = 0xcafe_babe;
+
+/// Leads with a tag, so that a handle of another type or a destroyed
+/// poller is refused instead of read as a poller.
+#[repr(C)]
+#[derive(Debug)]
 struct ZmqPoller {
+    tag: u32,
     entries: Vec<PollerEntry>,
+}
+
+impl Default for ZmqPoller {
+    fn default() -> Self {
+        Self {
+            tag: POLLER_TAG,
+            entries: Vec::new(),
+        }
+    }
 }
 
 #[repr(C)]
@@ -44,13 +60,21 @@ fn fd_is_invalid(fd: ZmqFd) -> bool {
     }
 }
 
+/// # Safety
+/// `ptr` must be null or readable for a handle tag. Like libzmq, a stale
+/// pointer is caught only while its memory still holds the dead tag.
 unsafe fn poller<'a>(ptr: *mut c_void) -> Result<&'a mut ZmqPoller, c_int> {
     if ptr.is_null() {
         return Err(libc::EFAULT);
     }
 
-    // SAFETY: caller guarantees ptr is a valid poller from zmq_poller_new.
-    Ok(unsafe { &mut *ptr.cast::<ZmqPoller>() })
+    let poller = ptr.cast::<ZmqPoller>();
+    // SAFETY: the caller guarantees the tag is readable; it sits at offset 0.
+    if unsafe { (*poller).tag } != POLLER_TAG {
+        return Err(libc::EFAULT);
+    }
+    // SAFETY: the tag matched, so this is a live poller from zmq_poller_new.
+    Ok(unsafe { &mut *poller })
 }
 
 fn socket_entry(entries: &[PollerEntry], socket: *mut c_void) -> Option<usize> {
@@ -80,12 +104,12 @@ pub extern "C" fn zmq_poller_destroy(poller_p: *mut *mut c_void) -> c_int {
 
     // SAFETY: poller_p is non-null (checked above).
     let ptr = unsafe { *poller_p };
-    if ptr.is_null() {
-        return fail(libc::EFAULT);
-    }
-
-    // SAFETY: ptr came from Box::into_raw in zmq_poller_new.
+    // SAFETY: C callers pass null or a pointer from this API.
+    let live = c_try!(unsafe { poller(ptr) });
+    // SAFETY: the tag matched, so ptr came from Box::into_raw in
+    // zmq_poller_new. It is marked dead before the memory is released.
     unsafe {
+        std::ptr::write_volatile(&raw mut live.tag, crate::handle::DEAD_TAG);
         drop(Box::from_raw(ptr.cast::<ZmqPoller>()));
         *poller_p = std::ptr::null_mut();
     }

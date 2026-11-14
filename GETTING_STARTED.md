@@ -103,7 +103,7 @@ The endpoint URI picks the transport; socket code stays the same.
 | `shm://name` | Local processes over shared memory (Linux) |
 | `ws://`, `wss://` | WebSocket, optionally TLS |
 | `quic://host:port` | QUIC with TLS 1.3 (`quic` feature) |
-| `udp://host:port` | RADIO/DISH datagrams |
+| `udp://host:port` | RADIO/DISH datagrams; a DISH bound to a multicast address joins the group |
 | `dart://host:port` | Reliable ordered messages over UDP (`dart` feature) |
 | `lz4+tcp://`, `zstd+tcp://` | Compressed TCP (`lz4`, `zstd` features) |
 

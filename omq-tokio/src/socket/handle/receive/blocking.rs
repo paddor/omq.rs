@@ -166,7 +166,7 @@ impl Socket {
     }
 
     pub(crate) fn blocking_recv_many(&self, max: usize) -> Result<Vec<Message>> {
-        let mut messages = Vec::with_capacity(max);
+        let mut messages = Vec::with_capacity(max.min(crate::socket::recv::RECV_BATCH_MESSAGES));
         self.blocking_recv_many_into(max, &mut messages)?;
         Ok(messages)
     }
@@ -236,7 +236,7 @@ impl Socket {
         max: usize,
         timeout: std::time::Duration,
     ) -> Result<Vec<Message>> {
-        let mut messages = Vec::with_capacity(max);
+        let mut messages = Vec::with_capacity(max.min(crate::socket::recv::RECV_BATCH_MESSAGES));
         self.blocking_recv_many_timeout_into(max, timeout, &mut messages)?;
         Ok(messages)
     }

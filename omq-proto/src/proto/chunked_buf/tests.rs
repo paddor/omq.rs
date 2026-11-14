@@ -211,6 +211,39 @@ fn randomized_split_read_and_advance_match_contiguous_reference() {
 }
 
 #[test]
+fn tiny_chunks_of_one_frame_are_merged() {
+    const TOTAL: usize = 100_000;
+    let expected: Vec<u8> = (0..TOTAL).map(|index| (index % 251) as u8).collect();
+    let mut buf = ChunkedInputBuf::new();
+    for byte in &expected {
+        buf.push(Bytes::copy_from_slice(std::slice::from_ref(byte)));
+        assert!(buf.rest.len() < SMALL_RUN + buf.len() / SMALL_CHUNK + 1);
+    }
+    assert_eq!(buf.len(), TOTAL);
+    // Consuming across the merged chunks keeps the byte order.
+    assert_eq!(buf.peek_array::<4>(), Some([0, 1, 2, 3]));
+    buf.advance(10);
+    assert_eq!(buf.split_to(TOTAL - 10).as_slice(), &expected[10..]);
+    assert!(buf.is_empty());
+    assert_eq!(buf.small_run, 0);
+}
+
+#[test]
+fn large_chunks_are_not_copied_when_small_ones_follow() {
+    let large = Bytes::from(vec![7u8; 4 * SMALL_CHUNK]);
+    let mut buf = ChunkedInputBuf::new();
+    buf.push(Bytes::from_static(b"front"));
+    buf.push(large.clone());
+    for _ in 0..SMALL_RUN {
+        buf.push(Bytes::from_static(b"x"));
+    }
+    // The run of small chunks became one; the large chunk kept its storage.
+    assert_eq!(buf.rest.len(), 2);
+    assert_eq!(buf.rest[0].as_ptr(), large.as_ptr());
+    assert_eq!(buf.rest[1].len(), SMALL_RUN);
+}
+
+#[test]
 fn read_into_zero_on_empty() {
     let mut buf = ChunkedInputBuf::new();
     let mut dest = [0u8; 4];

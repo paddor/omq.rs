@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- `setMaxMessageParts`/`maxMessageParts` and
+  `setMaxPeerSubscriptions`/`maxPeerSubscriptions` limit the parts of one
+  received message and the prefixes or groups one peer may hold; `-1`
+  removes the limit.
+
 ## [0.1.14] - 2026-11-12
 
 ### Changed

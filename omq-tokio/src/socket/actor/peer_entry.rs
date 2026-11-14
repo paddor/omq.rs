@@ -43,6 +43,30 @@ pub(super) struct PeerOrigin {
     pub(super) io_thread: usize,
 }
 
+impl PeerOrigin {
+    /// What monitors and `connections()` report for this peer.
+    pub(super) fn peer_info(
+        &self,
+        connection_id: u64,
+        peer_properties: &Arc<omq_proto::proto::command::PeerProperties>,
+        zmtp_version: (u8, u8),
+    ) -> PeerInfo {
+        PeerInfo {
+            authentication: peer_properties.authentication.clone(),
+            diagnostics: omq_proto::PeerDiagnostics {
+                endpoint: self.endpoint.to_string(),
+                local_address: self.local_address.clone(),
+                remote_address: self.remote_address.clone(),
+            },
+            connection_id,
+            peer_address: super::peer_ident_socket_addr(&self.ident),
+            peer_identity: peer_properties.identity.clone(),
+            peer_properties: peer_properties.clone(),
+            zmtp_version,
+        }
+    }
+}
+
 /// Handshake state and what the handshake learned about the peer.
 #[derive(Default)]
 pub(super) struct PeerHandshake {
@@ -70,6 +94,17 @@ pub(super) struct PeerProgress {
     pub(super) handled_events: u64,
     pub(super) handled_control: u64,
     pub(super) completion: Option<PeerCompletion>,
+    /// The route was redialed when the driver ended, ahead of the peer's
+    /// removal.
+    pub(super) redialed: bool,
+}
+
+impl PeerProgress {
+    /// The connection ended. The peer stays until the application took
+    /// every event it delivered.
+    pub(super) const fn ended(&self) -> bool {
+        self.completion.is_some()
+    }
 }
 
 pub(super) struct PeerEntry {
@@ -77,6 +112,9 @@ pub(super) struct PeerEntry {
     pub(super) handle: PeerDriverHandle,
     pub(super) handshake: PeerHandshake,
     pub(super) progress: PeerProgress,
+    /// What the peer subscribed to or joined, shared with its driver, when
+    /// the socket limits it.
+    pub(super) subscriptions: Option<Arc<crate::engine::subscription_ledger::SubscriptionLedger>>,
     /// Inproc receive port and its sink, opened once this peer is ready.
     pub(super) inproc_inbound: Option<(
         Arc<crate::transport::inproc::InprocPort>,
@@ -93,6 +131,7 @@ impl PeerEntry {
             handle,
             handshake: PeerHandshake::default(),
             progress: PeerProgress::default(),
+            subscriptions: None,
             inproc_inbound: None,
             task: None,
         }

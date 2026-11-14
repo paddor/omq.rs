@@ -7,6 +7,203 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- XPUB surfaces a `\x00<prefix>` message for each subscription that a
+  subscriber still held when it disconnected, as libzmq does. Before, a
+  forwarder kept the subscriptions of every past subscriber upstream.
+- A peer that sends a message with more than 1024 parts is disconnected.
+  `Options::max_message_parts` changes the limit or removes it. Before, a
+  peer could hold 64 bytes for every two bytes it sent as empty parts
+  unless `max_message_size` was set. Inproc peers are not limited.
+- One peer holds at most 65,536 distinct prefixes on a PUB or XPUB socket,
+  or groups on a RADIO socket, and 64 bytes per permitted entry on average.
+  A SUBSCRIBE or JOIN over the limit is not registered; monitors see
+  `SubscribeRejected` or `JoinRejected`. `Options::max_peer_subscriptions`
+  changes the limit or removes it. Before, a peer could add prefixes
+  without end, and each stayed in memory until it disconnected.
+- Only ROUTER and PEER hand an identity over to a new connection. REP and
+  SERVER keep every peer, also peers that announce the same identity.
+  Before, two such clients evicted each other on every reconnect, though
+  neither socket type routes by identity.
+- An `ipc://` bind replaces a socket file only when nobody listens on it.
+  A path with a live listener fails with `AddrInUse`, and a file that is
+  no socket is left alone. Before, the bind unlinked whatever was there,
+  as libzmq does: a regular file was deleted, and a live listener stayed
+  up but unreachable.
+
+### Fixed
+
+- Codec output such as a PING no longer lands inside another frame. A
+  transmit slot batch could end between a frame header and its payload,
+  and a compression offload result could be written ahead of the tail of
+  a half-sent codec frame. Both corrupted the stream for the peer.
+- With the `lz4` or `zstd` feature, an uncompressed PUB, XPUB or RADIO
+  message that starts with `LZ4D` or the Zstandard dictionary magic is
+  delivered. Before, the lane took it for a dictionary shipment: later
+  such messages were lost, and new subscribers got a stale one.
+- A fan-out subscriber fed through its inbox, such as a `ws://`
+  subscriber, keeps receiving after a burst fills that inbox. Before, one
+  overflow under `OnMute::DropNewest` muted it until it reconnected.
+- A zero `heartbeat_interval` disables heartbeats, as in libzmq. Before,
+  it closed every connection right after the handshake or sent PINGs in
+  a busy loop.
+- RADIO drops a message whose `udp://` datagram would exceed 65507 bytes.
+  Before, under a `Context` egress limit such a datagram waited for a
+  grant larger than the burst and blocked every sender on its IO thread.
+- Connecting to an abstract `ipc://@name` listener whose accept backlog is
+  full fails and retries with backoff. Before, the connect blocked the
+  runtime thread without limit and stalled every socket on it.
+- A TCP option that the OS rejects no longer skips the options after it.
+  An invalid keepalive setting left `tcp_user_timeout` and the socket
+  buffer sizes unset.
+- A failed `TCP_NODELAY` on an accepted connection no longer makes the
+  listener back off for 50 ms.
+- A `dart://` session no longer stalls for good when a FIRST fragment is
+  lost while later large messages are already buffered.
+- Losing a peer redials only its own route. A socket connected twice to
+  one endpoint lost the other route's dialer and its queued messages, so
+  one of the two connections never came back.
+- A connect route whose transport connected but produced no peer is
+  redialed with backoff. Before, the route stayed dead: for example a
+  `ws://` peer that sent bad bytes with its upgrade response, or a PAIR
+  that connected a second endpoint while it had its one peer.
+- With `ReconnectPolicy::Disabled`, a lost peer ends its connect route.
+  Before, DEALER, SUB, PUB and REQ ignored a new `connect()` to that
+  endpoint as a duplicate.
+- Refusing a handshake at the socket's pending limit no longer leaves an
+  entry per refused source address behind.
+- `close()` on a clone while another clone's `close()` still lingers waits
+  for that close. Before, it shut the send side down at once and
+  discarded the messages the first close was still draining.
+- PEER sockets without a configured identity connect over `dart://`. The
+  generated identity started with 0x00, which peers reject, so the
+  handshake never completed.
+- `recv_many` and the other batch receives no longer allocate `max`
+  message slots up front. A large `max` aborted on allocation, and
+  `usize::MAX` panicked.
+- `exclusive::Socket` no longer panics on a `heartbeat_interval` or a
+  fixed reconnect delay beyond the clock range, such as `Duration::MAX`.
+- `Proxy::run` returns a protocol error when neither direction can
+  forward and there is no control socket, such as PULL to PULL. Before,
+  it panicked.
+- An `shm://` reference batch or multipart record no longer fails with
+  "SHM batch region was not registered" when it names an old region
+  together with new ones. The connection dropped and the batch was lost.
+- A panic in a `Context::block_on` job unwinds the caller of `block_on`.
+  Before, it killed the context's primary IO thread, and with it every
+  socket on the context and every later `block_on`.
+- `Context::term()` and dropping the last `Context` wake callers blocked
+  on its sockets with `Error::Closed`. Before, a blocked receive on PULL,
+  GATHER, SUB, XSUB or DISH hung forever.
+- `wait_send_ready()` no longer misses a drain that lands while it checks
+  an exactly full send pipe. The caller slept until another event woke
+  it, with space available. ROUTER with `router_mandatory` shared the
+  race.
+- A peer driver takes protocol commands such as SUBSCRIBE and CANCEL in
+  send order even when they overflow its command ring. A driver that was
+  preempted right after it saw the ring empty could take an overflowed
+  command ahead of older ones in the ring.
+- A `tcp://`, `ws://` or `wss://` connect to a name with several
+  addresses tries the next address after 250 ms without an answer.
+  Before, a first address that dropped SYNs used up every attempt's
+  deadline, and the socket never reached a working later address.
+- A `wss://` connect that fails in TLS, for an untrusted certificate, a
+  name mismatch or unusable trust settings, publishes
+  `MonitorEvent::HandshakeFailed` with the reason. Before, the monitor
+  showed only `ConnectDelayed`.
+- A fan-out subscriber is no longer muted for good when its connection
+  drains while the publisher is muting it for a full queue. This needed a
+  publisher and a connection on different threads, as with
+  `Context::current()` on a multi-thread runtime.
+- `try_send_many` on a round-robin socket reports the messages it queued
+  when the socket closes in the middle of the batch. Before, it returned
+  `Closed` and the caller lost that count.
+- A zero-linger `close()` ends a close that another clone started with a
+  longer linger. Before, it returned at once and the other close kept
+  lingering on a peer that had stopped reading.
+- `Context::block_on` panics when called on the context's own primary IO
+  thread, for example from inside another `block_on` future. Before, the
+  whole context hung without a message.
+- `Proxy::run` returns `ProxyExit::Closed` for a closed control socket in
+  every case. Before, a PAIR control socket that closed between forwarding
+  turns gave `ProxyExit::Terminated`.
+- STREAM sockets publish `Disconnected` monitor events for raw peers, and
+  `connections()` reports their peer info. Before, monitors saw raw peers
+  arrive and never leave.
+- `tcp_keepalive`, `tcp_user_timeout`, `recv_buffer_size` and
+  `send_buffer_size` apply to `ws://` and `wss://` connections. Before,
+  they were ignored there without an error.
+- A `quic://` connect no longer waits out a resolved address where nothing
+  answers. The next address is dialed alongside after 250 ms, as for
+  TCP. Before, `quic://localhost` never connected to an IPv4-only listener
+  when `::1` resolved first.
+- The listener of a relative `ipc://` path removes its socket file on
+  close after the process changed its working directory.
+- `disconnect()` of a `udp://` endpoint connected by host name works.
+  Before, it returned `Unroutable` and RADIO kept sending there, because
+  the endpoint was stored under its resolved address.
+- `unbind()` accepts the endpoint as it was passed to `bind()`, such as
+  `tcp://*:5555` or a host name, as libzmq does. Before, only the
+  resolved endpoint that `bind()` returned matched.
+- A `dart://` connector ignores HELLO datagrams. Before, one HELLO from
+  its target address replaced the connector's own handshake, and repeated
+  ones kept it from connecting.
+- A `quic://` peer that stops our liveness stream is closed with
+  `CONTROL_ERROR`. Before, liveness ended without a word and the
+  connection lived on with no dead-peer detection.
+- `connect()` to a `quic://` endpoint fails for invalid client TLS
+  settings, such as a malformed `quic.trust_pem` or `quic.server_name`.
+  Before, it returned `Ok` and every dial attempt failed.
+- A DISH bound to a multicast `udp://` address joins that group on the
+  default interface, as libzmq does, and several DISH sockets of one host
+  can share the port. Before, the socket bound the group address without
+  joining it, so it received nothing and reported no error.
+- A ROUTER, SERVER or PEER identity stays routable while a new connection
+  takes it over. Before, the old connection was removed first, and a send
+  from another thread in between got `Unroutable` under
+  `router_mandatory` or was dropped without it.
+- Messages that were complete in front of a bad or oversized frame are
+  delivered before the connection closes. Before, a read that held ten
+  valid messages and then a frame over `max_message_size` dropped all
+  ten. Messages that arrive before the data plane is active are still
+  dropped with such a frame.
+- An `inproc://` peer that the socket refuses, for its peer limit or an
+  incompatible socket type, is reported as `HandshakeFailed`. Before, the
+  refusal left no monitor event.
+- A `dart://` connector resends CONFIRM every 100 ms until the listener
+  answers with session traffic. Before, it sent CONFIRM once more at
+  most, and a lost one left it connected to a listener that had not
+  admitted it, for the three seconds of its lease.
+- A `dart://` connect whose socket has no ready peer slot left waits out
+  its three second lease before the next attempt. Before, it started a
+  new handshake on every pass: one HELLO and WELCOME per round trip for
+  as long as the slot stayed taken.
+- A lingering close of a WebTransport peer wakes when the peer
+  acknowledges the end of the stream. Before, that wake was lost, and
+  the close could wait out the whole linger, or forever without one.
+- A WebTransport peer closed for a liveness timeout or a protocol
+  violation loses its connection at once. Before, the close went out as
+  a session capsule first, and a peer that did not acknowledge it stayed
+  connected and routable for five more seconds.
+- A lost connect-side peer is redialed at once, also while the application
+  does not receive. Before, a ROUTER or REP socket kept such a peer until
+  the application took its waiting messages, and did not reconnect until
+  then.
+- A new connection that announces the identity of a peer whose connection
+  already ended no longer drops the messages of that peer which still
+  wait for the application.
+- An `shm://` receiver unmaps a region once its sender dropped it.
+  Before, it kept every region until 64 newer ones were registered, so
+  memory that a sender had reclaimed stayed resident in each receiver,
+  up to many times `shm_max_memory`. No format change: older peers
+  ignore the new header flag and keep the old behavior.
+- A `dart://` listener keeps no state for a HELLO. It derives the WELCOME
+  session from the HELLO's source and session with a secret and admits a
+  CONFIRM that echoes it. Before, each HELLO took one of a fixed number
+  of pending places for three seconds, so sources that never confirmed
+  could keep real peers out. The wire format is unchanged.
+
 ## [0.35.1] - 2026-11-12
 
 ### Changed

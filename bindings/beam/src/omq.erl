@@ -141,6 +141,7 @@
     plain_password/0, curve_server/0, curve_publickey/0, curve_secretkey/0,
     curve_serverkey/0, last_endpoint/0, omq_on_mute/0, omq_compression_level/0,
     omq_compression_dict/0, omq_compression_auto_train/0, omq_workload_profile/0,
+    omq_max_message_parts/0, omq_max_peer_subscriptions/0,
     omq_on_mute_block/0, omq_on_mute_drop_newest/0, omq_on_mute_drop_oldest/0,
     forwarder/0, queue/0, streamer/0, null/0, plain/0, curve/0
 ]).
@@ -1094,6 +1095,12 @@ omq_compression_dict() -> 1006.
 omq_compression_auto_train() -> 1007.
 %% @doc Return OMQ_WORKLOAD_PROFILE constant.
 omq_workload_profile() -> 1100.
+%% @doc Return OMQ_MAX_MESSAGE_PARTS constant. Most parts one received
+%% message may have. Defaults to 1024; -1 means no limit.
+omq_max_message_parts() -> 1101.
+%% @doc Return OMQ_MAX_PEER_SUBSCRIPTIONS constant. Most prefixes (PUB/XPUB)
+%% or groups (RADIO) one peer may hold. Defaults to 65536; -1 means no limit.
+omq_max_peer_subscriptions() -> 1102.
 %% @doc Return OMQ_ON_MUTE_BLOCK constant.
 omq_on_mute_block() -> 0.
 %% @doc Return OMQ_ON_MUTE_DROP_NEWEST constant.
@@ -1238,4 +1245,6 @@ option_code(omq_on_mute) -> omq_on_mute();
 option_code(omq_compression_level) -> omq_compression_level();
 option_code(omq_compression_dict) -> omq_compression_dict();
 option_code(omq_compression_auto_train) -> omq_compression_auto_train();
-option_code(omq_workload_profile) -> omq_workload_profile().
+option_code(omq_workload_profile) -> omq_workload_profile();
+option_code(omq_max_message_parts) -> omq_max_message_parts();
+option_code(omq_max_peer_subscriptions) -> omq_max_peer_subscriptions().

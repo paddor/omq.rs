@@ -200,10 +200,19 @@ impl Authenticator {
             .collect();
 
         Self::new(move |peer| {
-            credentials.iter().any(|(username, password)| {
-                peer.username.as_deref() == Some(username.as_str())
-                    && peer.password.as_deref() == Some(password.as_str())
-            })
+            use subtle::ConstantTimeEq;
+
+            let (Some(username), Some(password)) = (&peer.username, &peer.password) else {
+                return false;
+            };
+            // Every entry is compared in full, so the time taken shows
+            // neither a matching prefix nor which entry matched.
+            let mut admitted = subtle::Choice::from(0);
+            for (allowed_username, allowed_password) in &credentials {
+                admitted |= allowed_username.as_bytes().ct_eq(username.as_bytes())
+                    & allowed_password.as_bytes().ct_eq(password.as_bytes());
+            }
+            bool::from(admitted)
         })
     }
 

@@ -77,6 +77,26 @@ fn external_free_callback_runs_once_on_double_close() {
     assert_eq!(counter.load(Ordering::SeqCst), 1);
 }
 
+/// An empty message can still own resources through its hint.
+#[test]
+fn external_free_callback_runs_for_a_null_buffer() {
+    let counter = AtomicUsize::new(0);
+    let mut msg = ZmqMsg::zeroed();
+    assert_eq!(
+        zmq_msg_init_data(
+            msg.0.as_mut_ptr().cast(),
+            std::ptr::null_mut(),
+            0,
+            Some(count_free),
+            std::ptr::from_ref(&counter).cast::<c_void>().cast_mut(),
+        ),
+        0
+    );
+
+    assert_eq!(zmq_msg_close(msg.0.as_mut_ptr().cast()), 0);
+    assert_eq!(counter.load(Ordering::SeqCst), 1);
+}
+
 #[test]
 fn copying_external_message_does_not_take_external_ownership() {
     let counter = AtomicUsize::new(0);

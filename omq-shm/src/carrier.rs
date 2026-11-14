@@ -4,6 +4,7 @@
 use std::fs::File;
 use std::io::{self, IoSlice, Write};
 use std::os::unix::fs::MetadataExt;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
 
 use crate::coordination::CarrierState;
@@ -17,6 +18,9 @@ const READ: usize = CACHE_LINE;
 const IMPORTED: usize = 2 * CACHE_LINE;
 const READER_PARKED: usize = IMPORTED + std::mem::size_of::<u64>();
 const WRITER_PARKED: usize = READER_PARKED + std::mem::size_of::<u32>();
+/// Count of the writer's data regions that were dropped. It tells the
+/// reader when to look for retired regions among its imports.
+const RETIREMENTS: usize = WRITER_PARKED + std::mem::size_of::<u32>();
 const CONTROL_BYTES: usize = 3 * CACHE_LINE;
 pub(super) const CAPACITY: usize = 64 * 1024;
 pub(super) const MAX_SLICES: usize = 128;
@@ -99,6 +103,25 @@ impl Carrier {
 
     pub(super) fn imported(&self, mapping: &Mapping) -> u64 {
         self.state(mapping).imported()
+    }
+
+    /// Regions the writer announced as dropped so far.
+    pub(super) fn retirements(&self, mapping: &Mapping) -> u64 {
+        mapping
+            .atomic64(self.offset + RETIREMENTS)
+            .load(Ordering::Acquire)
+    }
+
+    /// Writer side: count one more dropped region and wake the reader, so
+    /// that it unmaps the region even when no message follows.
+    pub(super) fn announce_retirement(&self, mapping: &Mapping) -> io::Result<()> {
+        mapping
+            .atomic64(self.offset + RETIREMENTS)
+            .fetch_add(1, Ordering::Release);
+        match self.reader.get() {
+            Some(reader) => signal(reader),
+            None => Ok(()),
+        }
     }
 
     pub(super) fn acknowledge_imports(&self, mapping: &Mapping, count: u64) -> io::Result<()> {

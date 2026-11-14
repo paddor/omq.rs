@@ -134,3 +134,37 @@ async fn ws_pub_sub_fan_out() {
         }
     }
 }
+
+/// A burst past the subscriber's queue drops the overflow. Later
+/// publications still arrive.
+#[tokio::test]
+async fn ws_subscriber_recovers_after_a_burst_overflows_its_queue() {
+    let pub_ = Socket::new(SocketType::Pub, Options::default());
+    let bound = pub_.bind(ws_endpoint(0)).await.unwrap();
+    let sub = Socket::new(SocketType::Sub, Options::default());
+    sub.subscribe("").await.unwrap();
+    sub.connect(ws_endpoint(get_port(&bound))).await.unwrap();
+    pub_.wait_subscribed(1, Duration::from_secs(1))
+        .await
+        .expect("subscription did not arrive");
+
+    // No await between sends: the subscriber's driver cannot drain.
+    for _ in 0..1000 {
+        let _ = pub_.try_send(Message::single("burst"));
+    }
+    let mut burst = 0;
+    while tokio::time::timeout(Duration::from_millis(300), sub.recv())
+        .await
+        .is_ok()
+    {
+        burst += 1;
+    }
+    assert!(burst > 0, "nothing of the burst arrived");
+
+    pub_.send(Message::single("after")).await.unwrap();
+    let msg = tokio::time::timeout(Duration::from_secs(5), sub.recv())
+        .await
+        .expect("subscriber stayed muted after the burst")
+        .unwrap();
+    assert_eq!(msg.part_bytes(0).unwrap(), &b"after"[..]);
+}

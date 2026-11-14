@@ -101,6 +101,39 @@ impl EndpointWorker {
         }
     }
 
+    /// Send the WELCOMEs queued for this pass, one per HELLO. One that the
+    /// socket does not take is dropped: the connector repeats its HELLO.
+    fn send_welcomes(
+        &self,
+        routes: &mut super::Routes,
+        output: &mut [u8],
+        stats: &mut DartStats,
+    ) -> bool {
+        let mut sent = false;
+        while let Some((source, session)) = routes.challenges.queue.pop_front() {
+            let welcome = Ready {
+                socket_type: self.socket_type,
+                identity: (self.socket_type == SocketType::Peer).then_some(self.identity.as_ref()),
+                reply_requested: false,
+                session: routes.challenges.issue(source, session),
+                echo: session,
+                phase: Phase::Welcome,
+            };
+            let Some(length) = dart::encode_ready(welcome, output) else {
+                continue;
+            };
+            match self
+                .io
+                .try_send_segments(SegmentBatch::new(source, &output[..length], length))
+            {
+                Ok(_) => sent = true,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(_) => stats.send_failures += 1,
+            }
+        }
+        sent
+    }
+
     /// Visit a bounded number of routes round robin. Returns whether work
     /// remains, the next deadline, and whether a send hit `WouldBlock`.
     pub(super) fn service(
@@ -123,7 +156,7 @@ impl EndpointWorker {
         };
 
         let mut deadline = started + RETRY;
-        let mut worked = false;
+        let mut worked = self.send_welcomes(routes, pass.control, pass.stats);
         let mut blocked = false;
         let mut visited = 0;
 
@@ -244,9 +277,9 @@ impl EndpointWorker {
             });
         }
 
-        // Until activation installs a session, resend the current phase on
-        // the retry interval so a lost handshake packet is recovered.
-        if peer.session.is_none() {
+        // Resend the current phase on the retry interval until the
+        // handshake is settled, so a lost handshake packet is recovered.
+        if peer.handshake_unsettled() {
             peer.lease.retry_due(now);
         }
 

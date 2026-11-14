@@ -119,6 +119,16 @@ impl OmqContext {
         self.ctx.get().map(omq_tokio::Context::handle)
     }
 
+    /// Runtime handle for closing a socket. Unlike `handle`, it is still
+    /// returned after `zmq_ctx_shutdown`: the runtime lives until
+    /// `zmq_ctx_term` has seen every socket and lingering close end.
+    pub(crate) fn close_handle(&self) -> Option<&Handle> {
+        self.ctx
+            .get()
+            .filter(|ctx| !ctx.is_terminated())
+            .map(omq_tokio::Context::handle)
+    }
+
     pub(crate) fn io_context(&self) -> Option<&omq_tokio::Context> {
         if self.is_effectively_terminated() {
             return None;

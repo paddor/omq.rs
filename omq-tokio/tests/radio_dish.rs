@@ -166,3 +166,59 @@ async fn join_on_non_dish_errors() {
     let r = s.join("g").await;
     assert!(matches!(r, Err(Error::Protocol(_))), "got {r:?}");
 }
+
+#[tokio::test]
+async fn radio_limits_the_groups_one_peer_joins() {
+    use omq_tokio::MonitorEvent;
+
+    let ep = inproc_ep("rd-join-limit");
+    let radio = Socket::new(
+        SocketType::Radio,
+        Options::default().max_peer_subscriptions(Some(1)),
+    );
+    let mut monitor = radio.monitor();
+    radio.bind(ep.clone()).await.unwrap();
+    let dish = Socket::new(SocketType::Dish, Options::default());
+    dish.connect(ep).await.unwrap();
+
+    // g1 is held, g2 is over the limit, and g3 takes g1's place.
+    dish.join("g1").await.unwrap();
+    dish.join("g2").await.unwrap();
+    dish.leave("g1").await.unwrap();
+    dish.join("g3").await.unwrap();
+    let mut events = Vec::new();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while events.len() < 4 {
+            let (kind, group) = match monitor.recv().await.unwrap() {
+                MonitorEvent::JoinReceived { group } => ("joined", group),
+                MonitorEvent::JoinRejected { group, .. } => ("rejected", group),
+                MonitorEvent::LeaveReceived { group } => ("left", group),
+                _ => continue,
+            };
+            events.push((kind, group.to_vec()));
+        }
+    })
+    .await
+    .expect("join monitor events");
+    assert_eq!(
+        events,
+        [
+            ("joined", b"g1".to_vec()),
+            ("rejected", b"g2".to_vec()),
+            ("left", b"g1".to_vec()),
+            ("joined", b"g3".to_vec()),
+        ]
+    );
+
+    for group in ["g2", "g3"] {
+        radio
+            .send(Message::multipart([group, "body"]))
+            .await
+            .unwrap();
+    }
+    let message = tokio::time::timeout(Duration::from_secs(2), dish.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(message.part_bytes(0).unwrap(), &b"g3"[..]);
+}

@@ -67,6 +67,27 @@ fn roundtrip_plain_and_compressed() {
 }
 
 #[test]
+fn part_above_the_decoder_limit_goes_out_as_plaintext() {
+    let plain = vec![b'A'; 4096];
+    let mut enc = ZstdEncoder::new();
+    // The decoder refuses frames that declare more than this.
+    assert_eq!(enc.compress_limit, MAX_DECOMPRESSED_SIZE);
+
+    enc.compress_limit = plain.len() - 1;
+    let wire = enc.encode(&Message::single(plain.clone())).unwrap();
+    assert_eq!(&wire[0].part_bytes(0).unwrap()[..4], &SENTINEL_PLAIN);
+    let out = ZstdDecoder::new()
+        .decode(wire.into_iter().next().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(out.part_bytes(0).unwrap().to_vec(), plain);
+
+    enc.compress_limit = plain.len();
+    let wire = enc.encode(&Message::single(plain)).unwrap();
+    assert_eq!(&wire[0].part_bytes(0).unwrap()[..4], &ZSTD_MAGIC);
+}
+
+#[test]
 fn frame_content_size_is_present() {
     let plain = vec![b'A'; 4096];
     let mut enc = ZstdEncoder::new();

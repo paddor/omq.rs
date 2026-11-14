@@ -7,7 +7,8 @@ use std::io;
 #[cfg(not(miri))]
 use std::os::fd::AsRawFd;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU32, AtomicU64};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 #[cfg(not(miri))]
 use rustix::fs::{MemfdFlags, SealFlags};
@@ -31,6 +32,8 @@ const TOKEN_OFFSET: usize = REGION_MAGIC.len();
 const KIND_OFFSET: usize = TOKEN_OFFSET + std::mem::size_of::<u64>();
 const LENGTH_OFFSET: usize = KIND_OFFSET + std::mem::size_of::<u64>();
 // Bytes 32..48 hold the completion table's close flag and wake counters.
+// A data region uses the first of them for its retired flag.
+const RETIRED_OFFSET: usize = 32;
 const ID_OFFSET: usize = 48;
 
 #[derive(Debug)]
@@ -47,6 +50,8 @@ pub(crate) struct Mapping {
     pub(crate) id: u32,
     pub(crate) kind: u64,
     pub(crate) reservation: Option<crate::memory::Reservation>,
+    /// Connections to tell once this region is dropped.
+    pub(crate) retirements: Option<Arc<crate::lease::Retirements>>,
 }
 
 // SAFETY: immutable metadata and a stable shared mapping. Payload mutation is
@@ -115,6 +120,7 @@ impl Mapping {
             id: rand::random(),
             kind,
             reservation: None,
+            retirements: None,
         };
 
         mapping.initialize_header();
@@ -237,6 +243,7 @@ impl Mapping {
             id,
             kind: 0,
             reservation: None,
+            retirements: None,
         })
     }
 
@@ -341,6 +348,26 @@ impl Mapping {
         }
     }
 
+    /// Whether the creator of this data region has dropped it. It keeps a
+    /// region while any lease refers to it, so no new reference can arrive.
+    #[expect(
+        clippy::cast_ptr_alignment,
+        reason = "mmap is page aligned and the offset is a multiple of 8."
+    )]
+    pub(crate) fn retired(&self) -> bool {
+        // SAFETY: an aligned field inside the mapped header. An imported
+        // data region is read-only, and the atomic is only loaded here,
+        // which writes nothing.
+        let flag = unsafe {
+            &*self
+                .address
+                .as_ptr()
+                .add(RETIRED_OFFSET)
+                .cast::<AtomicU64>()
+        };
+        self.kind == DATA && flag.load(Ordering::Acquire) != 0
+    }
+
     #[expect(
         clippy::cast_ptr_alignment,
         reason = "mmap is page aligned and the offset is checked below."
@@ -399,6 +426,12 @@ impl Mapping {
 
 impl Drop for Mapping {
     fn drop(&mut self) {
+        // The creator's last owner is gone: mark the region, so that
+        // receivers stop holding its memory. Their mappings keep the flag
+        // readable after this one is unmapped.
+        if self.writable && self.kind == DATA {
+            self.atomic64(RETIRED_OFFSET).store(1, Ordering::Release);
+        }
         // SAFETY: this object owns exactly this mapping. Borrowed payloads
         // retain an Arc to it; no reference survives the final Arc drop.
         #[cfg(not(miri))]
@@ -411,6 +444,9 @@ impl Drop for Mapping {
         };
 
         drop(self.reservation.take());
+        if let Some(retirements) = self.retirements.take() {
+            retirements.announce();
+        }
     }
 }
 

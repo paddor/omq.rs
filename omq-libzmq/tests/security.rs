@@ -386,6 +386,108 @@ fn mismatched_curve_keypair_returns_einval_and_can_be_corrected() {
 
 #[test]
 fn curve_req_rep_tcp() {
+    curve_req_rep_round_trip(|rep, secret| {
+        helpers::set_int_opt(rep, ZMQ_CURVE_SERVER, 1);
+        set_bytes(rep, ZMQ_CURVE_SECRETKEY, secret);
+    });
+}
+
+/// czmq applies the certificate first and the server role second.
+#[test]
+fn curve_server_keeps_a_secret_key_set_before_the_server_role() {
+    curve_req_rep_round_trip(|rep, secret| {
+        set_bytes(rep, ZMQ_CURVE_SECRETKEY, secret);
+        helpers::set_int_opt(rep, ZMQ_CURVE_SERVER, 1);
+    });
+}
+
+/// A server's public key is derived. Setting it keeps the server role.
+#[test]
+fn curve_server_stays_a_server_when_its_public_key_is_set() {
+    let mut public = [0u8; 41];
+    let mut secret = [0u8; 41];
+    zmq_curve_keypair(public.as_mut_ptr().cast(), secret.as_mut_ptr().cast());
+    curve_req_rep_round_trip(|rep, server_secret| {
+        helpers::set_int_opt(rep, ZMQ_CURVE_SERVER, 1);
+        set_bytes(rep, ZMQ_CURVE_SECRETKEY, server_secret);
+        set_bytes(rep, ZMQ_CURVE_PUBLICKEY, &public[..40]);
+    });
+}
+
+/// A server reports the public key it presents, the one derived from its
+/// secret key. Bindings read it back after setting a keypair.
+#[test]
+fn curve_server_reports_its_derived_public_key() {
+    const ZMQ_PUSH: i32 = 8;
+    let mut public = [0u8; 41];
+    let mut secret = [0u8; 41];
+    zmq_curve_keypair(public.as_mut_ptr().cast(), secret.as_mut_ptr().cast());
+
+    let ctx = zmq_ctx_new();
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    let read_public = || {
+        let mut key = [0u8; 41];
+        let mut len = key.len();
+        let rc = zmq_getsockopt(
+            push,
+            ZMQ_CURVE_PUBLICKEY,
+            key.as_mut_ptr().cast(),
+            &raw mut len,
+        );
+        assert_eq!(rc, 0);
+        key
+    };
+    helpers::set_int_opt(push, ZMQ_CURVE_SERVER, 1);
+    // No secret key yet: nothing to derive.
+    let unset = read_public();
+    set_bytes(push, ZMQ_CURVE_SECRETKEY, &secret[..40]);
+    set_bytes(push, ZMQ_CURVE_PUBLICKEY, &public[..40]);
+    assert_eq!(get_i32(push, ZMQ_CURVE_SERVER), 1);
+    let derived = read_public();
+    assert_eq!(&derived[..40], &public[..40]);
+    assert_ne!(&unset[..40], &public[..40]);
+
+    zmq_close(push);
+    zmq_ctx_term(ctx);
+}
+
+/// Security options are consumed when the socket starts. A later change
+/// fails instead of leaving the socket on its old mechanism.
+#[test]
+fn security_options_after_subscribe_fail_with_ebusy() {
+    const ZMQ_SUB: i32 = 2;
+    const ZMQ_SUBSCRIBE: i32 = 6;
+    let mut public = [0u8; 41];
+    let mut secret = [0u8; 41];
+    zmq_curve_keypair(public.as_mut_ptr().cast(), secret.as_mut_ptr().cast());
+
+    let ctx = zmq_ctx_new();
+    let sub = zmq_socket(ctx, ZMQ_SUB);
+    assert_eq!(
+        zmq_setsockopt(sub, ZMQ_SUBSCRIBE, c"".as_ptr().cast(), 0),
+        0
+    );
+    let one = 1i32;
+    for (option, value, len) in [
+        (ZMQ_CURVE_SERVER, (&raw const one).cast::<c_void>(), 4),
+        (ZMQ_PLAIN_SERVER, (&raw const one).cast(), 4),
+        (ZMQ_CURVE_SECRETKEY, secret.as_ptr().cast(), 40),
+        (ZMQ_CURVE_SERVERKEY, public.as_ptr().cast(), 40),
+        (ZMQ_PLAIN_USERNAME, c"user".as_ptr().cast(), 4),
+        (ZMQ_ZAP_DOMAIN, c"domain".as_ptr().cast(), 6),
+    ] {
+        assert_eq!(
+            zmq_setsockopt(sub, option, value, len),
+            -1,
+            "option {option}"
+        );
+        assert_eq!(omq_zmq::zmq_errno(), libc::EBUSY, "option {option}");
+    }
+    zmq_close(sub);
+    zmq_ctx_term(ctx);
+}
+
+fn curve_req_rep_round_trip(configure_server: impl FnOnce(*mut c_void, &[u8])) {
     let mut srv_pub = [0u8; 41];
     let mut srv_sec = [0u8; 41];
     zmq_curve_keypair(srv_pub.as_mut_ptr().cast(), srv_sec.as_mut_ptr().cast());
@@ -396,8 +498,7 @@ fn curve_req_rep_tcp() {
 
     let ctx = zmq_ctx_new();
     let rep = zmq_socket(ctx, ZMQ_REP);
-    helpers::set_int_opt(rep, ZMQ_CURVE_SERVER, 1);
-    set_bytes(rep, ZMQ_CURVE_SECRETKEY, &srv_sec[..40]);
+    configure_server(rep, &srv_sec[..40]);
     let addr = helpers::bind_random_tcp(rep);
     helpers::set_timeouts(rep, 5000);
 
@@ -438,6 +539,100 @@ fn curve_req_rep_tcp() {
     zmq_close(req);
     zmq_close(rep);
     zmq_ctx_term(ctx);
+}
+
+/// `ZMQ_FD` is level-triggered. Once a ZAP-authenticated socket has no
+/// message left, the descriptor is not readable; otherwise an event loop
+/// that watches it spins.
+#[cfg(unix)]
+#[test]
+fn zap_socket_fd_is_not_readable_once_drained() {
+    const ZMQ_FD: i32 = 14;
+    const ZMQ_DONTWAIT: i32 = 1;
+    let readable = |fd: i32, timeout_ms: i32| {
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: `pfd` is one valid pollfd.
+        unsafe { libc::poll(&raw mut pfd, 1, timeout_ms) > 0 }
+    };
+
+    let ctx = zmq_ctx_new();
+    let zap = start_plain_zap_handler(ctx);
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    helpers::set_int_opt(pull, ZMQ_PLAIN_SERVER, 1);
+    set_bytes(pull, ZMQ_ZAP_DOMAIN, b"global");
+    assert_eq!(zmq_bind(pull, c"tcp://127.0.0.1:0".as_ptr()), 0);
+    let endpoint = helpers::last_endpoint(pull);
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    set_bytes(push, ZMQ_PLAIN_USERNAME, b"user");
+    set_bytes(push, ZMQ_PLAIN_PASSWORD, b"pass");
+    assert_eq!(zmq_connect(push, endpoint.as_ptr()), 0);
+    helpers::set_timeouts(push, 5000);
+    assert_eq!(zmq_send(push, b"hello".as_ptr().cast(), 5, 0), 5);
+
+    let fd = get_i32(pull, ZMQ_FD);
+    assert!(readable(fd, 5000), "no message arrived");
+    let mut buf = [0u8; 8];
+    assert_eq!(
+        zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), ZMQ_DONTWAIT),
+        5
+    );
+    assert_eq!(
+        zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), ZMQ_DONTWAIT),
+        -1
+    );
+    assert_eq!(omq_zmq::zmq_errno(), libc::EAGAIN);
+    assert!(!readable(fd, 0), "the descriptor stayed readable");
+
+    zap.join().unwrap();
+    zmq_close(push);
+    zmq_close(pull);
+    zmq_ctx_term(ctx);
+}
+
+/// An IPC peer has no IP address. ZAP carries an empty address frame for
+/// it, as in libzmq, and the handler decides.
+#[cfg(unix)]
+#[test]
+fn plain_zap_authenticates_over_ipc() {
+    let path = format!("/tmp/omq-zap-ipc-{}.sock", std::process::id());
+    let endpoint = std::ffi::CString::new(format!("ipc://{path}")).unwrap();
+    let ctx = zmq_ctx_new();
+    let zap = start_plain_zap_handler(ctx);
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    helpers::set_int_opt(pull, ZMQ_PLAIN_SERVER, 1);
+    set_bytes(pull, ZMQ_ZAP_DOMAIN, b"global");
+    assert_eq!(omq_zmq::zmq_bind(pull, endpoint.as_ptr()), 0);
+    helpers::set_timeouts(pull, 5000);
+
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    set_bytes(push, ZMQ_PLAIN_USERNAME, b"user");
+    set_bytes(push, ZMQ_PLAIN_PASSWORD, b"pass");
+    zmq_connect(push, endpoint.as_ptr());
+    helpers::set_timeouts(push, 5000);
+
+    assert_eq!(zmq_send(push, b"hello".as_ptr().cast(), 5, 0), 5);
+    let mut buf = [0u8; 64];
+    let rc = zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0);
+    assert_eq!(
+        rc,
+        5,
+        "PLAIN over ipc failed (errno={})",
+        omq_zmq::zmq_errno()
+    );
+
+    let request = zap.join().unwrap();
+    assert_eq!(request[2], b"global");
+    assert_eq!(request[3], [] as [u8; 0]);
+    assert_eq!(request[5], b"PLAIN");
+
+    zmq_close(push);
+    zmq_close(pull);
+    zmq_ctx_term(ctx);
+    let _ = std::fs::remove_file(path);
 }
 
 #[test]

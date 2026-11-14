@@ -8,6 +8,10 @@ fn ready_connection(max_message_size: Option<usize>) -> Connection {
         cfg = cfg.max_message_size(max);
     }
 
+    ready_connection_with(cfg)
+}
+
+fn ready_connection_with(cfg: ConnectionConfig) -> Connection {
     let mut c = Connection::new(cfg);
 
     let g = Greeting {
@@ -349,6 +353,46 @@ fn max_message_size_rejects_zero_length_more_flood() {
     let frames: Vec<(bool, &[u8])> = (0..frame_count).map(|_| (true, &[] as &[u8])).collect();
     let err = feed_data_frames(&mut c, &frames).unwrap_err();
     assert!(matches!(err, Error::MessageTooLarge { .. }));
+}
+
+/// `count` empty parts of one message.
+fn empty_parts(count: usize) -> Vec<(bool, &'static [u8])> {
+    (0..count)
+        .map(|index| (index + 1 < count, &[] as &[u8]))
+        .collect()
+}
+
+#[test]
+fn default_part_limit_accepts_the_exact_count_and_rejects_one_more() {
+    let limit = crate::options::DEFAULT_MAX_MESSAGE_PARTS;
+    let mut c = ready_connection(None);
+    feed_data_frames(&mut c, &empty_parts(limit)).unwrap();
+    assert_eq!(c.poll_message().unwrap().len(), limit);
+
+    let mut c = ready_connection(None);
+    let err = feed_data_frames(&mut c, &empty_parts(limit + 1)).unwrap_err();
+    assert!(matches!(err, Error::Protocol(_)), "{err:?}");
+    assert!(c.poll_message().is_none());
+}
+
+#[test]
+fn configured_part_limit_replaces_the_default() {
+    let config =
+        |parts| ConnectionConfig::new(Role::Server, SocketType::Pull).max_message_parts(parts);
+
+    let mut c = ready_connection_with(config(Some(3)));
+    feed_data_frames(&mut c, &empty_parts(3)).unwrap();
+    assert_eq!(c.poll_message().unwrap().len(), 3);
+    // The count restarts with each message.
+    feed_data_frames(&mut c, &empty_parts(3)).unwrap();
+    assert_eq!(c.poll_message().unwrap().len(), 3);
+    let err = feed_data_frames(&mut c, &empty_parts(4)).unwrap_err();
+    assert!(matches!(err, Error::Protocol(_)), "{err:?}");
+
+    let unlimited = crate::options::DEFAULT_MAX_MESSAGE_PARTS * 64 + 1;
+    let mut c = ready_connection_with(config(None));
+    feed_data_frames(&mut c, &empty_parts(unlimited)).unwrap();
+    assert_eq!(c.poll_message().unwrap().len(), unlimited);
 }
 
 #[test]

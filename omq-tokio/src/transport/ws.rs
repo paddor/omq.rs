@@ -28,6 +28,15 @@ pub(crate) enum WsTransport {
 }
 
 impl WsTransport {
+    /// The TCP stream that carries the WebSocket, for socket options.
+    pub(crate) fn tcp(&self) -> &TcpStream {
+        match self {
+            Self::Plain(tcp) => tcp,
+            Self::Tls(tls) => tls.get_ref().0,
+            Self::TlsServer(tls) => tls.get_ref().0,
+        }
+    }
+
     pub(crate) fn migrate(self) -> std::io::Result<Self> {
         match self {
             Self::Plain(tcp) => {
@@ -112,11 +121,7 @@ pub(crate) async fn connect(
     let _ = stream.set_nodelay(true);
 
     let mut transport = if tls {
-        let connector = build_tls_connector(wss_tls)?;
-        let domain = crate::transport::tls::server_name(host, wss_tls.hostname.as_deref())?;
-        let tls_stream = connector.connect(domain, stream).await.map_err(Error::Io)?;
-
-        WsTransport::Tls(tls_stream)
+        WsTransport::Tls(connect_tls(wss_tls, host, stream).await?)
     } else {
         WsTransport::Plain(stream)
     };
@@ -134,6 +139,26 @@ pub(crate) async fn connect(
         transport,
         leftover,
     })
+}
+
+/// TLS setup and handshake of one dial. A failure is a handshake failure:
+/// the dialer retries it and publishes it to monitors. As an I/O or
+/// protocol error it stayed invisible behind `ConnectDelayed`.
+async fn connect_tls(
+    wss_tls: &omq_proto::options::WssTls,
+    host: &omq_proto::endpoint::Host,
+    stream: TcpStream,
+) -> Result<tokio_rustls::client::TlsStream<TcpStream>> {
+    fn failed(error: &dyn std::fmt::Display) -> Error {
+        Error::HandshakeFailed(format!("TLS: {error}"))
+    }
+    let connector = build_tls_connector(wss_tls).map_err(|error| failed(&error))?;
+    let domain = crate::transport::tls::server_name(host, wss_tls.hostname.as_deref())
+        .map_err(|error| failed(&error))?;
+    connector
+        .connect(domain, stream)
+        .await
+        .map_err(|error| failed(&error))
 }
 
 fn build_tls_connector(wss_tls: &omq_proto::options::WssTls) -> Result<tokio_rustls::TlsConnector> {

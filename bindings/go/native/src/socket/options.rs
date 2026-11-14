@@ -78,6 +78,33 @@ pub extern "C" fn omq_go_socket_set_max_message_size(
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn omq_go_socket_set_max_message_parts(
+    socket: *mut OmqGoSocket,
+    parts: i64,
+) -> OmqGoStatus {
+    let max = match optional_usize_from_i64("max message parts", parts) {
+        Ok(value) => value,
+        Err(error) => return OmqGoStatus::from_error(error),
+    };
+    if max == Some(0) {
+        return OmqGoStatus::err(CONFIG, "max message parts must be greater than zero");
+    }
+    set_socket_option(socket, move |options| options.max_message_parts = max)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_socket_set_max_peer_subscriptions(
+    socket: *mut OmqGoSocket,
+    entries: i64,
+) -> OmqGoStatus {
+    let max = match optional_usize_from_i64("max peer subscriptions", entries) {
+        Ok(value) => value,
+        Err(error) => return OmqGoStatus::from_error(error),
+    };
+    set_socket_option(socket, move |options| options.max_peer_subscriptions = max)
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn omq_go_socket_set_workload_profile(
     socket: *mut OmqGoSocket,
     profile: i32,

@@ -38,6 +38,7 @@ module OMQ
       max_pending_handshakes
 
       max_message_size
+      max_message_parts
       sndbuf
       rcvbuf
       large_message_threshold
@@ -45,6 +46,7 @@ module OMQ
       transmit_slot_cap
 
       xpub_nodrop
+      max_peer_subscriptions
       reconnect_stop_conn_refused
       on_mute
       reconnect_interval
@@ -258,12 +260,16 @@ module OMQ
       # @option options [Numeric] :handshake_timeout handshake timeout in seconds
       # @option options [Integer] :max_pending_handshakes inbound handshake limit
       # @option options [Integer] :max_message_size maximum received message bytes
+      # @option options [Integer] :max_message_parts maximum parts of one received
+      #   message, 1024 by default; negative removes the limit
       # @option options [Integer] :sndbuf kernel send buffer bytes
       # @option options [Integer] :rcvbuf kernel receive buffer bytes
       # @option options [Integer] :large_message_threshold receive buffer threshold
       # @option options [Integer] :arena_threshold contiguous frame arena threshold
       # @option options [Integer] :transmit_slot_cap per-peer transmit bytes
       # @option options [Boolean] :xpub_nodrop block instead of dropping on mute
+      # @option options [Integer] :max_peer_subscriptions maximum prefixes or groups
+      #   one peer may hold, 65536 by default; negative removes the limit
       # @option options [Boolean] :reconnect_stop_conn_refused stop refused reconnects
       # @option options [Symbol] :on_mute +:block+, +:drop_newest+, or +:drop_oldest+
       # @option options [Numeric] :reconnect_interval fixed reconnect delay in seconds

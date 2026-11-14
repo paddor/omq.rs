@@ -174,6 +174,66 @@ fn idle_size_classes_are_reclaimed_after_final_retained_view() {
     assert_eq!(receiver.decode(wire).unwrap(), larger);
 }
 
+/// A sender that drops a region tells its receivers, and they unmap it.
+/// Without that, a receiver keeps every region until 64 newer ones arrive,
+/// and the shared memory stays resident though the sender freed it.
+#[test]
+fn receiver_unmaps_a_region_that_its_sender_retired() {
+    let maximum = HEADER + 1024;
+    let pool = SendPool::new(1, Some(maximum));
+    let (mut sender, mut receiver) = pair_with_send_pool(2, pool.clone());
+    let small = delivered(&mut sender, &mut receiver, &Message::from_slice(&[5; 128]));
+    drop(small);
+    assert_eq!(receiver.inbound.regions.len(), 1);
+    let (id, token, _) = receiver.inbound.regions[0].clone();
+
+    // The larger class needs the whole budget, so the idle one is retired.
+    let larger = Message::from(vec![6; 1024]);
+    let wire = (0..3)
+        .map(|_| sender.encode(&larger).unwrap().unwrap())
+        .find(|wire| body(wire).unwrap()[0] == BODY)
+        .expect("the larger class never got the budget");
+    assert_eq!(pool.memory_used(), maximum);
+
+    // The new region is not registered yet, so only the announcement can
+    // tell the receiver. Its next carrier read acts on it.
+    assert!(receiver.inbound.find(id, token).is_some());
+    let read = receiver.try_read_carrier(&mut [0; 8]);
+    assert_eq!(read.unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+    assert!(
+        receiver.inbound.find(id, token).is_none(),
+        "the receiver kept a region that its sender dropped"
+    );
+    assert!(receiver.inbound.regions.is_empty());
+
+    transfer(&mut sender, &mut receiver);
+    assert_eq!(receiver.decode(wire).unwrap(), larger);
+}
+
+/// A region dropped without an announcement, such as an application pool,
+/// is released when the next region is registered.
+#[test]
+fn receiver_unmaps_a_dropped_application_pool_at_the_next_registration() {
+    let (mut sender, mut receiver) = pair(2);
+    let first = payload_pool([(128, 1)]).unwrap();
+    let message = first.message(128, |bytes| bytes.fill(4)).unwrap();
+    let got = delivered(&mut sender, &mut receiver, &message);
+    let (id, token, _) = receiver.inbound.regions[0].clone();
+    // The receiver's view keeps its own mapping alive, as before.
+    drop((message, first));
+    let second = payload_pool([(128, 1)]).unwrap();
+    let message = second.message(128, |bytes| bytes.fill(9)).unwrap();
+    drop(delivered(&mut sender, &mut receiver, &message));
+    assert_eq!(got.part_slice(0).unwrap(), &[4; 128]);
+    drop(got);
+
+    let third = payload_pool([(128, 1)]).unwrap();
+    let message = third.message(128, |bytes| bytes.fill(3)).unwrap();
+    drop(delivered(&mut sender, &mut receiver, &message));
+    assert!(receiver.inbound.find(id, token).is_none());
+    assert_eq!(receiver.inbound.regions.len(), 2);
+}
+
 #[test]
 fn explicit_producer_storage_is_independent_of_the_automatic_cap() {
     let automatic = SendPool::new(1, Some(0));
@@ -1309,6 +1369,48 @@ fn reference_batches_preserve_unread_regions_across_registration_eviction() {
 
     drop(messages);
     assert!(sources.iter().all(|pool| pool.available() == 1));
+}
+
+/// A batch can name a region that its own new regions push out of the
+/// registration window. The peer must still find it.
+#[test]
+fn reference_batch_keeps_an_old_source_evicted_by_its_new_regions() {
+    // 64 regions fill the window. The first pool is its oldest entry, and
+    // no lease is pending.
+    let pools: Vec<_> = (0..64).map(|_| payload_pool([(128, 1)]).unwrap()).collect();
+    let (mut sender, mut receiver) = pair(128);
+    for (index, pool) in pools.iter().enumerate() {
+        let message = pool
+            .try_message(128, |bytes| bytes.fill(index as u8))
+            .unwrap()
+            .unwrap();
+        drop(delivered(&mut sender, &mut receiver, &message));
+    }
+    assert!(pools.iter().all(|pool| pool.available() == 1));
+
+    let fresh = payload_pool([(128, 1)]).unwrap();
+    let metadata = payload_pool([(BATCH_MAX_BYTES.next_power_of_two(), 1)]).unwrap();
+    let messages: Vec<_> = [(&pools[0], 200), (&fresh, 201)]
+        .into_iter()
+        .map(|(pool, fill)| {
+            Message::with_prefix(
+                b"group".as_slice().into(),
+                pool.try_message(128, |bytes| bytes.fill(fill))
+                    .unwrap()
+                    .unwrap(),
+            )
+        })
+        .collect();
+    let batch = prepare_reference_batch(&metadata, &messages.iter().collect::<Vec<_>>())
+        .unwrap()
+        .unwrap();
+    let wire = sender.encode_record(&batch, 2, 3).unwrap().unwrap();
+    transfer(&mut sender, &mut receiver);
+
+    let decoded = decode_all(&mut receiver, wire);
+    assert_eq!(decoded.len(), 2);
+    assert_eq!(decoded[0].part_slice(1).unwrap(), vec![200; 128]);
+    assert_eq!(decoded[1].part_slice(1).unwrap(), vec![201; 128]);
 }
 
 #[test]

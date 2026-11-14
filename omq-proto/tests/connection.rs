@@ -603,6 +603,65 @@ fn curve_handshake_and_message_roundtrip() {
     assert_eq!(m.part_bytes(0).unwrap(), &b"encrypted hello"[..]);
 }
 
+/// A connection whose CURVE transform the caller took must not fall back
+/// to plaintext: a peer could then inject unauthenticated frames.
+#[cfg(feature = "curve")]
+#[test]
+fn taken_curve_transform_blocks_input_and_sends_until_restored() {
+    use omq_proto::proto::mechanism::{CurveKeypair, CurveServerOptions, MechanismSetup};
+    let server_kp = CurveKeypair::generate();
+    let server_pub = server_kp.public;
+    let mut server = Connection::new(
+        ConnectionConfig::new(Role::Server, SocketType::Pair).mechanism(
+            MechanismSetup::CurveServer {
+                our_keypair: server_kp,
+                options: CurveServerOptions::default(),
+            },
+        ),
+    );
+    let mut client = Connection::new(
+        ConnectionConfig::new(Role::Client, SocketType::Pair).mechanism(
+            MechanismSetup::CurveClient {
+                our_keypair: CurveKeypair::generate(),
+                server_public: server_pub,
+            },
+        ),
+    );
+    for _ in 0..10 {
+        let (s_out, c_out) = (server.poll_transmit(), client.poll_transmit());
+        server.advance_transmit(s_out.len());
+        client.advance_transmit(c_out.len());
+        if !s_out.is_empty() {
+            client.handle_input(s_out).unwrap();
+        }
+        if !c_out.is_empty() {
+            server.handle_input(c_out).unwrap();
+        }
+    }
+    assert!(server.is_ready() && client.is_ready());
+
+    let transform = server.take_transform().expect("CURVE installs a transform");
+    // A plaintext data frame: short form, no flags, five bytes.
+    let plaintext = Bytes::from_static(b"\x00\x05hello");
+    assert!(matches!(
+        server.handle_input(plaintext),
+        Err(Error::Protocol(_))
+    ));
+    assert!(server.poll_message().is_none());
+    assert!(matches!(
+        server.send_message(&Message::single("leak")),
+        Err(Error::Protocol(_))
+    ));
+
+    server.restore_transform(transform);
+    client.send_message(&Message::single("sealed")).unwrap();
+    let c_out = client.poll_transmit();
+    client.advance_transmit(c_out.len());
+    server.handle_input(c_out).unwrap();
+    let message = server.poll_message().expect("message");
+    assert_eq!(message.part_bytes(0).unwrap(), &b"sealed"[..]);
+}
+
 /// SUBSCRIBE sent through CURVE must arrive as `Event::Command` even when
 /// the outer wire frame is DATA (not COMMAND). This simulates libzmq's
 /// behavior: it wraps all post-handshake traffic in DATA frames and relies

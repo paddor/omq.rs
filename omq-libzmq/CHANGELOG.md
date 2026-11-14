@@ -7,6 +7,113 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `OMQ_MAX_MESSAGE_PARTS` (1020) and `OMQ_MAX_PEER_SUBSCRIPTIONS` (1021):
+  `int` socket options for the two limits that were fixed before. The
+  defaults stay 65,536 parts and 1,048,576 prefixes or groups; -1 removes
+  a limit. Set them before the first bind or connect; later they fail
+  with `EBUSY`.
+
+### Changed
+
+- PLAIN, CURVE, ZAP and WSS trust options fail with `EBUSY` once the
+  socket has started: after its first bind, connect, `ZMQ_SUBSCRIBE`,
+  `zmq_join` or `zmq_socket_monitor`. Before, they returned 0 and did not
+  apply, so a SUB that subscribed before setting its CURVE keys ran
+  without encryption.
+- On Unix, `ENOTSUP`, `EPROTONOSUPPORT`, `ENOBUFS`, `ENETDOWN`,
+  `EADDRINUSE`, `EADDRNOTAVAIL`, `ECONNREFUSED`, `EINPROGRESS`,
+  `ENOTSOCK` and `EMSGSIZE` are reported with their system values, which
+  is what `zmq.h` resolves these names to there. Before, the library
+  returned the HAUSNUMERO fallbacks, so `zmq_errno() == ENOTSOCK` never
+  matched in C.
+- A blocking `zmq_recv` or `zmq_msg_recv` returns `EINTR` when a signal
+  handler interrupts it and no message arrived, as libzmq does. Before, it
+  kept waiting, so a handler for Ctrl-C could not end the receive. Unix
+  only; blocking sends are unchanged.
+- A received message may have at most 65,536 parts. A peer that sends more
+  is disconnected. libzmq has no such limit and no option for one.
+- One peer holds at most 1,048,576 distinct subscription prefixes or
+  groups. A subscription or join over that is ignored. libzmq has no such
+  limit and no option for one.
+- `zmq_bind` on an `ipc://` path with a live listener fails with
+  `EADDRINUSE`, and it does not delete a file that is no socket. libzmq
+  unlinks the path in both cases.
+- A blocking `zmq_send` or `zmq_msg_send` returns `EINTR` when a signal
+  handler interrupts it before the socket accepted the message, as libzmq
+  does. The message is not queued, and frames staged with `ZMQ_SNDMORE`
+  stay staged, so the caller retries the same call. Before, the send
+  kept waiting. Unix only.
+
+### Fixed
+
+- A CURVE server keeps a `ZMQ_CURVE_SECRETKEY` set before
+  `ZMQ_CURVE_SERVER`, the order czmq uses. Before, the role change reset
+  the key to zeros and no client could connect. Setting
+  `ZMQ_CURVE_PUBLICKEY` on a server no longer turns it into a client.
+- A failed call sets the C `errno` on Linux, Android, macOS, iOS and
+  FreeBSD, as libzmq does. Before, only `zmq_errno()` reported the
+  error, so C code testing `errno == EAGAIN` or `errno == ETERM` saw a
+  stale value.
+- ZAP authentication works over `ipc://`. The handler gets an empty
+  address frame for a peer without an IP address, as in libzmq. Before,
+  no request was sent and every IPC peer was denied.
+- A multipart send whose final frame returns `EAGAIN` because the peer
+  left can be restarted from its first frame. Before, the frames staged
+  by the failed attempt stayed in front, and the peer got them twice.
+- `zmq_poll` and `zmq_poller_wait` report a ready descriptor item with a
+  zero timeout, and in the same call that reports a ready socket. Before,
+  a descriptor was only checked once no socket was ready, so an always
+  writable socket hid it for good. Unix only.
+- `zmq_poller_*` and `zmq_timers_*` return `EFAULT` for a handle of
+  another type or a destroyed handle, as libzmq does. Before, they read
+  the memory as a poller or timer set.
+- `zmq_msg_close` calls the free function of a `zmq_msg_init_data` message
+  with a null buffer, so its hint is released.
+- `zmq_z85_decode` returns `EINVAL` for text that is not UTF-8. Before, it
+  returned success without writing anything.
+- `ZMQ_SNDHWM` and `ZMQ_RCVHWM` read 1000 on a socket that never set
+  them, the value that applies. Before, they read 0.
+- Socket notification descriptors, `ZMQ_FD` among them, are close-on-exec.
+- A `zmq_poll` timeout beyond the range of `poll()` no longer wraps to a
+  short wait that spins until the deadline.
+- `zmq_send`, `zmq_recv`, `zmq_msg_send` and `zmq_msg_recv` on a socket
+  that has not bound or connected yet behave as on a socket without peers:
+  `EAGAIN` or a wait for round-robin and receive calls, a drop for PUB.
+  Before, they failed with `ETERM`, which callers read as a terminated
+  context. The first such call now fixes the options that bind and
+  connect fix.
+- `ZMQ_FD` of a ZAP-authenticated socket is no longer readable once its
+  queue is empty. Before, it stayed readable after the first message, so
+  an event loop on the descriptor spun at full CPU.
+- `ZMQ_FD` turns readable when a socket that could not send can send
+  again, as in libzmq. The wake is armed when a send returns `EAGAIN` or
+  `ZMQ_EVENTS` reports no `ZMQ_POLLOUT`, and reading `ZMQ_EVENTS` consumes
+  it. Before, the descriptor followed incoming messages only, so an event
+  loop that waited on it to send, for example on a PUSH socket, never woke.
+- `zmq_poll` blocked when its context shuts down fails with `ETERM`, as in
+  libzmq. Before, it reported `ZMQ_POLLIN` for a socket with nothing to
+  receive.
+- `zmq_poll` with a zero timeout reports `ZMQ_POLLIN` for a ZAP handler
+  socket with a pending request. Before, it saw the request only after a
+  wait.
+- `zmq_bind` of a DISH socket on a multicast `udp://` address joins that
+  group on the default interface. Before, the socket received nothing.
+  The libzmq form with an interface, `udp://interface;group:port`, is not
+  supported.
+- `zmq_close` after `zmq_ctx_shutdown`, or while `zmq_ctx_term` waits,
+  honors `ZMQ_LINGER`: queued messages are still sent and term waits for
+  them, as in libzmq. Before, such a close dropped the queue.
+- `zmq_msg_group` returns the group of a message received on a DISH
+  socket. Before, `zmq_msg_recv` dropped it and the group was always
+  empty.
+- `zmq_msg_set_group` accepts a group of up to `ZMQ_GROUP_MAX_LENGTH`
+  (255) bytes. Before, it failed with `EINVAL` above 11 bytes.
+- `ZMQ_CURVE_PUBLICKEY` read on a CURVE server returns the public key
+  that the server presents, derived from its secret key. Before, it
+  returned zeros.
+
 ## [0.10.1] - 2026-11-12
 
 ### Changed

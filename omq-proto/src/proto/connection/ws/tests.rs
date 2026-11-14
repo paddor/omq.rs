@@ -8,8 +8,14 @@ use crate::proto::ws_codec::{OP_BINARY_CODE, OP_CONTINUATION_CODE, OP_PING_CODE,
 use crate::proto::zws::{FLAG_FINAL, FLAG_MORE};
 
 fn ready() -> Connection {
+    ready_with_part_limit(None)
+}
+
+fn ready_with_part_limit(parts: Option<usize>) -> Connection {
     let mut connection = Connection::new(
-        ConnectionConfig::new(Role::Client, SocketType::Pull).ws_role(WsRole::Client),
+        ConnectionConfig::new(Role::Client, SocketType::Pull)
+            .ws_role(WsRole::Client)
+            .max_message_parts(parts),
     );
     connection.state = State::Ready;
     connection.advance_transmit(connection.pending_transmit_size());
@@ -25,6 +31,17 @@ fn frame(fin: bool, opcode: u8, payload: &[u8]) -> Bytes {
     wire.extend_from_slice(payload);
 
     wire.freeze()
+}
+
+#[test]
+fn configured_part_limit_applies_below_the_websocket_ceiling() {
+    let mut connection = ready_with_part_limit(Some(2));
+    let more = frame(true, OP_BINARY_CODE, &[FLAG_MORE]);
+    connection.handle_input(more.clone()).unwrap();
+    connection.handle_input(more).unwrap();
+    let result = connection.handle_input(frame(true, OP_BINARY_CODE, &[FLAG_FINAL]));
+    assert!(matches!(result, Err(Error::Protocol(_))), "{result:?}");
+    assert!(connection.poll_message().is_none());
 }
 
 #[test]

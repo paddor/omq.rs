@@ -58,6 +58,38 @@ fn factory_decoder_enforces_body_and_payload_slots_at_exact_boundaries() {
 }
 
 #[test]
+fn factory_decoder_applies_the_part_limit_to_arena_messages() {
+    let message = Message::multipart((0..5).map(|_| Bytes::from_static(b"x")));
+    for kind in kinds() {
+        for (limit, allowed) in [(Some(5), true), (Some(4), false), (None, true)] {
+            let options = Options {
+                max_message_parts: limit,
+                ..Options::default()
+            };
+            let (mut encoder, mut decoder) = MessageEncoder::for_compression_kind(kind, &options)
+                .unwrap()
+                .unwrap();
+            let wire = encoder.encode_arena(&[&message, &message]).unwrap();
+            assert_eq!(wire.len(), 1);
+            let result = decoder.decode(wire[0].clone());
+            if allowed {
+                assert_eq!(
+                    result.unwrap(),
+                    Some(message.clone()),
+                    "{kind:?}, {limit:?}"
+                );
+                assert_eq!(decoder.poll_message(), Some(message.clone()));
+            } else {
+                assert!(
+                    matches!(result, Err(Error::Protocol(_))),
+                    "{kind:?}, {limit:?}: {result:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn raw_decoder_preserves_body_only_budget_for_empty_parts() {
     assert_eq!(size_of::<Payload>(), 64);
     let empty = Message::single(Bytes::new());

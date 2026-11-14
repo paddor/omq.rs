@@ -9,8 +9,8 @@ use std::time::Duration;
 use serial_test::serial;
 
 use omq_zmq::{
-    zmq_bind, zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_term, zmq_poll, zmq_ppoll, zmq_recv,
-    zmq_send, zmq_socket,
+    zmq_bind, zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_shutdown, zmq_ctx_term, zmq_poll,
+    zmq_ppoll, zmq_recv, zmq_send, zmq_socket,
 };
 
 const ZMQ_PUSH: i32 = 8;
@@ -23,6 +23,10 @@ const ZMQ_POLLIN: i16 = 1;
 const ZMQ_POLLOUT: i16 = 2;
 
 #[cfg(unix)]
+// POSIX defines this code, so `zmq.h` keeps the system value there.
+#[cfg(unix)]
+const ZMQ_ENOTSUP: i32 = libc::ENOTSUP;
+#[cfg(not(unix))]
 const ZMQ_ENOTSUP: i32 = 156_384_713;
 
 const ZMQ_REQ: i32 = 3;
@@ -30,6 +34,7 @@ const ZMQ_REP: i32 = 4;
 const ZMQ_SNDHWM: i32 = 23;
 const ZMQ_RCVHWM: i32 = 24;
 const ZMQ_DONTWAIT: i32 = 1;
+const ZMQ_ETERM: i32 = 156_384_765;
 
 #[repr(C)]
 struct PollItem {
@@ -97,6 +102,41 @@ fn poll_timeout_no_events() {
     assert_eq!(rc, 0, "expected 0 ready items on timeout");
     assert_eq!(items[0].revents, 0);
 
+    zmq_close(pull);
+    zmq_ctx_term(ctx);
+}
+
+/// `ZMQ_FD` also fires when a socket turns writable. `zmq_poll` must not
+/// take that wake for a message.
+#[cfg(unix)]
+#[test]
+fn poll_does_not_report_pollin_for_a_write_wake() {
+    const ZMQ_FD: i32 = 14;
+    const ZMQ_EVENTS: i32 = 15;
+    let ctx = zmq_ctx_new();
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    let addr = helpers::bind_random_tcp(push);
+    // Fetch the descriptor and see the socket blocked: this arms the wake.
+    for option in [ZMQ_FD, ZMQ_EVENTS] {
+        let mut value: i32 = 0;
+        let mut sz = size_of::<i32>();
+        let rc = omq_zmq::zmq_getsockopt(push, option, (&mut value as *mut i32).cast(), &mut sz);
+        assert_eq!(rc, 0);
+    }
+    assert_eq!(zmq_connect(pull, addr.as_ptr()), 0);
+
+    let mut items = [PollItem {
+        socket: push,
+        fd: invalid_fd(),
+        events: ZMQ_POLLIN,
+        revents: 0,
+    }];
+    let rc = zmq_poll(items.as_mut_ptr().cast(), 1, 500);
+    assert_eq!(rc, 0, "a PUSH socket never has input");
+    assert_eq!(items[0].revents, 0);
+
+    zmq_close(push);
     zmq_close(pull);
     zmq_ctx_term(ctx);
 }
@@ -214,6 +254,59 @@ fn poll_pollout_on_empty_socket() {
     zmq_close(push);
     zmq_close(pull);
     zmq_ctx_term(ctx);
+}
+
+/// A descriptor item is checked like a socket item: with a zero timeout,
+/// and in the same call that reports a ready socket.
+#[cfg(unix)]
+#[test]
+fn poll_reports_a_ready_descriptor_without_waiting() {
+    let mut pipe = [0; 2];
+    // SAFETY: `pipe` has room for the two descriptors.
+    assert_eq!(unsafe { libc::pipe(pipe.as_mut_ptr()) }, 0);
+    // SAFETY: the write end is open and the buffer holds one byte.
+    assert_eq!(unsafe { libc::write(pipe[1], b"x".as_ptr().cast(), 1) }, 1);
+
+    let ctx = zmq_ctx_new();
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    let addr = CString::new("inproc://test-poll-descriptor").unwrap();
+    zmq_connect(push, addr.as_ptr());
+
+    let mut items = [PollItem {
+        socket: std::ptr::null_mut(),
+        fd: pipe[0],
+        events: ZMQ_POLLIN,
+        revents: 0,
+    }];
+    assert_eq!(zmq_poll(items.as_mut_ptr().cast(), 1, 0), 1);
+    assert_eq!(items[0].revents, ZMQ_POLLIN);
+
+    // A connecting PUSH is writable at once.
+    let mut items = [
+        PollItem {
+            socket: push,
+            fd: invalid_fd(),
+            events: ZMQ_POLLOUT,
+            revents: 0,
+        },
+        PollItem {
+            socket: std::ptr::null_mut(),
+            fd: pipe[0],
+            events: ZMQ_POLLIN,
+            revents: 0,
+        },
+    ];
+    assert_eq!(zmq_poll(items.as_mut_ptr().cast(), 2, 1000), 2);
+    assert_eq!(items[0].revents, ZMQ_POLLOUT);
+    assert_eq!(items[1].revents, ZMQ_POLLIN);
+
+    zmq_close(push);
+    zmq_ctx_term(ctx);
+    // SAFETY: both descriptors are open and owned by this test.
+    unsafe {
+        libc::close(pipe[0]);
+        libc::close(pipe[1]);
+    }
 }
 
 /// Helper to create N push-pull socket pairs over inproc.
@@ -760,4 +853,55 @@ fn pollout_follows_req_rep_alternation() {
     zmq_close(req);
     zmq_close(rep);
     zmq_ctx_term(ctx);
+}
+
+/// A poll blocked on a socket whose context shuts down fails with ETERM,
+/// as in libzmq, instead of reporting the shutdown wake as input.
+#[test]
+fn poll_blocked_when_the_context_shuts_down_fails_with_eterm() {
+    for bound in [false, true] {
+        let ctx = zmq_ctx_new();
+        let pull = zmq_socket(ctx, ZMQ_PULL);
+        if bound {
+            let addr = CString::new("inproc://poll-ctx-shutdown").unwrap();
+            assert_eq!(zmq_bind(pull, addr.as_ptr()), 0);
+        }
+
+        let pull_addr = pull as usize;
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let poller = std::thread::spawn(move || {
+            let mut items = [PollItem {
+                socket: pull_addr as *mut c_void,
+                fd: invalid_fd(),
+                events: ZMQ_POLLIN,
+                revents: 0,
+            }];
+            entered_tx.send(()).unwrap();
+            let rc = zmq_poll(items.as_mut_ptr().cast(), 1, 10_000);
+            done_tx
+                .send((rc, omq_zmq::zmq_errno(), items[0].revents))
+                .unwrap();
+        });
+
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("poll thread entered");
+        // Let the poll block. Either order must give ETERM.
+        std::thread::sleep(Duration::from_millis(50));
+
+        assert_eq!(zmq_ctx_shutdown(ctx), 0);
+        let (rc, errno, revents) = done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("poll should wake on context shutdown");
+        assert_eq!(
+            (rc, errno),
+            (-1, ZMQ_ETERM),
+            "bound={bound} revents={revents}"
+        );
+        poller.join().unwrap();
+
+        assert_eq!(zmq_close(pull), 0);
+        assert_eq!(zmq_ctx_term(ctx), 0);
+    }
 }

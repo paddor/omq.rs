@@ -151,21 +151,22 @@ impl AnyStream {
         }
     }
 
-    /// Apply per-socket TCP options (keepalive, user timeout). No-op
-    /// for non-TCP variants. Called from the actor on every accepted /
-    /// connected stream so the option lives for the connection's
-    /// lifetime.
+    /// Apply per-socket TCP options (keepalive, user timeout, buffer
+    /// sizes) to TCP and to the TCP stream under a WebSocket. Called from
+    /// the actor on every accepted / connected stream so the option lives
+    /// for the connection's lifetime.
     pub(crate) fn apply_tcp_options(&self, options: &omq_proto::Options) -> std::io::Result<()> {
+        fn apply_tcp(stream: &TcpStream, options: &omq_proto::Options) -> std::io::Result<()> {
+            // One rejected option must not skip the others.
+            let keepalive = options.tcp_keepalive.apply(stream);
+            let user_timeout = options.apply_tcp_user_timeout(stream);
+            let buffers = options.apply_socket_buffers(stream);
+            keepalive.and(user_timeout).and(buffers)
+        }
         match self {
             #[cfg(test)]
             Self::Memory(_) => Ok(()),
-            Self::Tcp(s) => {
-                options.tcp_keepalive.apply(s)?;
-                options.apply_tcp_user_timeout(s)?;
-                options.apply_socket_buffers(s)?;
-
-                Ok(())
-            }
+            Self::Tcp(s) => apply_tcp(s, options),
             #[cfg(unix)]
             Self::Ipc(s) => options.apply_socket_buffers(s),
             #[cfg(target_os = "linux")]
@@ -173,7 +174,7 @@ impl AnyStream {
             #[cfg(target_os = "windows")]
             Self::Ipc(_) => Ok(()),
             #[cfg(feature = "ws")]
-            Self::Ws(_) => Ok(()),
+            Self::Ws(s) => apply_tcp(s.tcp(), options),
             #[cfg(feature = "quic")]
             Self::Quic(_) => Ok(()),
         }

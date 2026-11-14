@@ -481,6 +481,18 @@ test "extended option round trips" {
     try push.setMaxMessageSize(-1);
     try testing.expectEqual(@as(i64, -1), try push.maxMessageSize());
 
+    try testing.expectEqual(@as(i32, 65536), try push.maxMessageParts());
+    try push.setMaxMessageParts(16);
+    try testing.expectEqual(@as(i32, 16), try push.maxMessageParts());
+    try push.setMaxMessageParts(-1);
+    try testing.expectEqual(@as(i32, -1), try push.maxMessageParts());
+
+    try testing.expectEqual(@as(i32, 1048576), try push.maxPeerSubscriptions());
+    try push.setMaxPeerSubscriptions(32);
+    try testing.expectEqual(@as(i32, 32), try push.maxPeerSubscriptions());
+    try push.setMaxPeerSubscriptions(-1);
+    try testing.expectEqual(@as(i32, -1), try push.maxPeerSubscriptions());
+
     try push.setXpubVerbose(true);
     try testing.expect(try push.xpubVerbose());
     try push.setProbeRouter(true);

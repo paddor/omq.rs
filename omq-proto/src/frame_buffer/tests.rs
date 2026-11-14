@@ -321,3 +321,25 @@ fn pop_front_entry_drops_oldest_committed_chunk() {
     assert_eq!(chunks, vec![Bytes::from_static(b"second")]);
     assert!(eq.is_empty());
 }
+
+#[test]
+fn capped_drain_never_splits_a_chunk_group() {
+    let mut eq = FrameBuffer::one_shot();
+    let group = |tag: u8| [Bytes::from(vec![tag; 3]), Bytes::from(vec![tag; 5])];
+    eq.push_raw_message(&group(1), false);
+    eq.push_raw_message(&group(2), false);
+    eq.push_raw_message(&group(3), false);
+
+    // The cap lands inside the second group. Its tail must leave with it,
+    // or the eviction below would tear the message on the wire.
+    let mut chunks = Vec::new();
+    let drained = eq.drain(&mut chunks, 3);
+    assert_eq!(drained.entries, 2);
+    assert_eq!(
+        chunks.concat(),
+        [group(1).concat(), group(2).concat()].concat()
+    );
+
+    assert!(eq.pop_oldest_unprotected_entry());
+    assert!(eq.is_empty(), "eviction removes the whole third group");
+}

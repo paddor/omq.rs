@@ -266,11 +266,39 @@ impl PeerTransmitSlot {
     }
 
     #[inline]
+    /// Mute the peer after a full queue refused a push. Returns whether
+    /// this call muted it. The next drain below the LWM unmutes it.
+    ///
+    /// That drain can run between the refused push and this call. It finds
+    /// the peer active and reactivates nothing, and an idle queue never
+    /// drains again. So this rechecks the queue once the flag is clear.
     pub(crate) fn deactivate_fanout(&self) -> bool {
+        let deactivated = self.clear_fanout_active();
+        self.reactivate_fanout_if_drained();
+        deactivated
+    }
+
+    /// Clear the active flag only. The caller must follow up with
+    /// [`Self::reactivate_fanout_if_drained`].
+    pub(crate) fn clear_fanout_active(&self) -> bool {
         self.fan_out
             .active
             .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
+    }
+
+    /// Reactivate a muted peer whose queue is below the LWM already, so
+    /// that no later drain would do it. A peer out of SHM credit waits for
+    /// [`Self::shm_credit_returned`] instead.
+    pub(crate) fn reactivate_fanout_if_drained(&self) {
+        let eq = self.eq.lock().expect("transmit_slot eq poisoned");
+        let below_lwm = !self.shm_credit_blocked()
+            && self.is_below_lwm(eq.total_bytes(), self.queued_msgs.load(Ordering::Relaxed));
+        let reactivate = self.claim_reactivation(below_lwm);
+        drop(eq);
+        if reactivate {
+            self.notify_reactivation();
+        }
     }
 
     pub(crate) fn set_fanout_reactivation(&self, cb: FanOutReactivation) {

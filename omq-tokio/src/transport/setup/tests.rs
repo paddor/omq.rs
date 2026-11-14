@@ -19,6 +19,18 @@ fn failed_listener_reservation_releases_socket_credit() {
     assert_eq!(listener.used.load(Ordering::Relaxed), 0);
 }
 
+#[test]
+fn refused_sources_leave_no_entry_behind() {
+    let admission = Admission::new(1);
+    let held = admission.try_acquire().unwrap();
+    for host in 1..=3 {
+        let source = std::net::IpAddr::from([192, 0, 2, host]);
+        assert!(admission.try_acquire_from(Some(source)).is_none());
+    }
+    assert!(admission.sources.lock().unwrap().is_empty());
+    drop(held);
+}
+
 #[tokio::test]
 async fn waiting_for_admission_wakes_and_carries_one_reservation() {
     let admission = Admission::new(1);

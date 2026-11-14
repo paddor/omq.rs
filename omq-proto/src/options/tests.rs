@@ -175,6 +175,33 @@ fn plain_client_credentials_require_rfc_24_vchar() {
 }
 
 #[test]
+fn max_message_parts_defaults_to_1024_and_rejects_zero() {
+    let options = Options::default();
+    assert_eq!(options.max_message_parts, Some(1024));
+    assert!(options.validate().is_ok());
+    for parts in [None, Some(1), Some(usize::MAX)] {
+        let options = Options::default().max_message_parts(parts);
+        assert_eq!(options.max_message_parts, parts);
+        assert!(options.validate().is_ok());
+    }
+    assert!(matches!(
+        Options::default().max_message_parts(Some(0)).validate(),
+        Err(crate::Error::Config(_))
+    ));
+}
+
+#[test]
+fn max_peer_subscriptions_defaults_to_65536() {
+    let options = Options::default();
+    assert_eq!(options.max_peer_subscriptions, Some(65_536));
+    for entries in [None, Some(0), Some(1)] {
+        let options = Options::default().max_peer_subscriptions(entries);
+        assert_eq!(options.max_peer_subscriptions, entries);
+        assert!(options.validate().is_ok());
+    }
+}
+
+#[test]
 fn peer_count_limits_reject_zero_and_overflow() {
     for options in [
         Options::default().peer_send_queue_capacity(0),
@@ -548,4 +575,19 @@ fn from_bytes_sets_identity() {
     let o: Options = Bytes::from_static(b"id").into();
     assert_eq!(o.identity, &b"id"[..]);
     assert_eq!(o.send_hwm, 1000);
+}
+
+#[test]
+fn rejects_handshake_timeout_beyond_the_clock_range() {
+    let error = Options::default()
+        .handshake_timeout(Duration::MAX)
+        .validate()
+        .unwrap_err();
+    assert!(matches!(error, crate::error::Error::Config(_)), "{error}");
+    assert!(
+        Options::default()
+            .handshake_timeout(Duration::from_secs(3600))
+            .validate()
+            .is_ok()
+    );
 }

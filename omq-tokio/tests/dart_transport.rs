@@ -190,6 +190,63 @@ async fn scatter_gather_preserves_exact_body_lengths_including_empty() {
     gather.close().await.unwrap();
 }
 
+/// The next READY of `phase` that `socket` receives, with its source.
+async fn next_ready(
+    socket: &tokio::net::UdpSocket,
+    phase: dart::Phase,
+) -> Option<(u64, u64, std::net::SocketAddr)> {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        let mut bytes = [0; dart::MAX_DATAGRAM];
+        loop {
+            let (len, source) = socket.recv_from(&mut bytes).await.unwrap();
+            if let Some(ready) = dart::decode_ready(&bytes[..len])
+                && ready.phase == phase
+            {
+                return (ready.session, ready.echo, source);
+            }
+        }
+    })
+    .await
+    .ok()
+}
+
+/// Only listeners admit HELLO. One that arrives from the target address
+/// must not replace the connector's own handshake.
+#[tokio::test]
+async fn connector_ignores_a_hello_and_completes_its_own_handshake() {
+    let raw = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let scatter = Socket::new(SocketType::Scatter, Options::default());
+    scatter
+        .connect(format!("dart://{}", raw.local_addr().unwrap()))
+        .await
+        .unwrap();
+    let (session, _, connector) = next_ready(&raw, dart::Phase::Hello).await.unwrap();
+
+    send_ready(&raw, connector, SocketType::Gather, None, true).await;
+    let mut output = [0; dart::MAX_DATAGRAM];
+    let length = dart::encode_ready(
+        Ready {
+            socket_type: SocketType::Gather,
+            identity: None,
+            reply_requested: false,
+            session: 5,
+            echo: session,
+            phase: dart::Phase::Welcome,
+        },
+        &mut output,
+    )
+    .unwrap();
+    raw.send_to(&output[..length], connector).await.unwrap();
+
+    let confirm = next_ready(&raw, dart::Phase::Confirm).await;
+    assert_eq!(
+        confirm.map(|(_, echo, _)| echo),
+        Some(5),
+        "the HELLO replaced the connector's handshake"
+    );
+    scatter.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn malformed_packed_body_cannot_partially_advance_receipt() {
     let gather = Socket::new(SocketType::Gather, Options::default());
@@ -307,6 +364,22 @@ async fn peer_roundtrip_keeps_identity_outside_datagram_body() {
     assert_eq!(response.part_slice(0).unwrap(), b"server");
     assert_eq!(response.part_slice(1).unwrap(), &[9; 1024]);
 
+    client.close().await.unwrap();
+    server.close().await.unwrap();
+}
+
+/// Without a configured identity a PEER announces a generated one. Peers
+/// reject an identity that starts with 0x00, so it must not.
+#[tokio::test]
+async fn peers_without_a_configured_identity_connect() {
+    let server = Socket::new(SocketType::Peer, Options::default());
+    let client = Socket::new(SocketType::Peer, Options::default());
+    client
+        .connect(server.bind(endpoint(0)).await.unwrap())
+        .await
+        .unwrap();
+    ready(&server, 1).await;
+    ready(&client, 1).await;
     client.close().await.unwrap();
     server.close().await.unwrap();
 }
@@ -981,6 +1054,123 @@ async fn faulty_relay(
     )
 }
 
+/// UDP relay between one client and `target` that drops the client's
+/// first CONFIRM. Returns whether it dropped one.
+async fn confirm_dropping_relay(
+    relay: tokio::net::UdpSocket,
+    target: std::net::SocketAddr,
+    cancel: tokio_util::sync::CancellationToken,
+) -> bool {
+    let mut bytes = [0; dart::MAX_DATAGRAM];
+    let mut client = None;
+    let mut dropped = false;
+    loop {
+        let (length, source) = tokio::select! {
+            () = cancel.cancelled() => break,
+            result = relay.recv_from(&mut bytes) => result.unwrap(),
+        };
+        let server = source == target;
+        let destination = if server {
+            client.expect("client initiated handshake")
+        } else {
+            client = Some(source);
+            target
+        };
+        let confirm = dart::decode_ready(&bytes[..length])
+            .is_some_and(|ready| ready.phase == dart::Phase::Confirm);
+        if !server && confirm && !dropped {
+            dropped = true;
+            continue;
+        }
+        relay.send_to(&bytes[..length], destination).await.unwrap();
+    }
+    dropped
+}
+
+/// A connector resends CONFIRM until the listener answers. Without that, a
+/// lost CONFIRM leaves it connected to a listener that never admitted it,
+/// until its lease runs out after three seconds.
+#[tokio::test]
+async fn lost_confirm_is_resent_before_the_lease_expires() {
+    let gather = Socket::new(SocketType::Gather, Options::default());
+    let scatter = Socket::new(SocketType::Scatter, Options::default());
+    let target = address(&gather.bind(endpoint(0)).await.unwrap());
+    let relay = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let relay_endpoint = endpoint(relay.local_addr().unwrap().port());
+    let stop = tokio_util::sync::CancellationToken::new();
+    let forwarder = tokio::spawn(confirm_dropping_relay(relay, target, stop.clone()));
+
+    scatter.connect(relay_endpoint).await.unwrap();
+    scatter.send(Message::single("confirmed")).await.unwrap();
+    let message = tokio::time::timeout(Duration::from_secs(2), gather.recv())
+        .await
+        .expect("the connector did not resend its lost CONFIRM")
+        .unwrap();
+    assert_eq!(message.part_slice(0).unwrap(), b"confirmed");
+
+    stop.cancel();
+    assert!(forwarder.await.unwrap(), "the relay saw no CONFIRM to drop");
+    scatter.close().await.unwrap();
+    gather.close().await.unwrap();
+}
+
+/// A connector whose socket has no ready slot left must not start a new
+/// handshake on every pass: that is one HELLO per round trip, forever.
+#[tokio::test]
+async fn connector_without_a_ready_slot_backs_off() {
+    // CHANNEL takes one peer.
+    let listener = Socket::new(SocketType::Channel, Options::default());
+    let channel = Socket::new(SocketType::Channel, Options::default());
+    channel
+        .connect(listener.bind(endpoint(0)).await.unwrap())
+        .await
+        .unwrap();
+    ready(&channel, 1).await;
+
+    // A second target that answers every HELLO with a valid WELCOME.
+    let raw = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    channel
+        .connect(endpoint(raw.local_addr().unwrap().port()))
+        .await
+        .unwrap();
+    let mut hellos = 0;
+    let mut bytes = [0; dart::MAX_DATAGRAM];
+    let mut output = [0; dart::MAX_DATAGRAM];
+    let window = tokio::time::sleep(Duration::from_millis(500));
+    tokio::pin!(window);
+    loop {
+        let (length, source) = tokio::select! {
+            () = &mut window => break,
+            result = raw.recv_from(&mut bytes) => result.unwrap(),
+        };
+        let Some(hello) = dart::decode_ready(&bytes[..length]) else {
+            continue;
+        };
+        if hello.phase != dart::Phase::Hello {
+            continue;
+        }
+        hellos += 1;
+        let welcome = Ready {
+            socket_type: SocketType::Channel,
+            identity: None,
+            reply_requested: false,
+            session: 5,
+            echo: hello.session,
+            phase: dart::Phase::Welcome,
+        };
+        let length = dart::encode_ready(welcome, &mut output).unwrap();
+        raw.send_to(&output[..length], source).await.unwrap();
+    }
+    assert!(hellos >= 1, "the second connect sent no HELLO");
+    assert!(
+        hellos <= 2,
+        "{hellos} HELLOs in 500 ms without a ready slot"
+    );
+
+    channel.close().await.unwrap();
+    listener.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn repairs_burst_and_tail_loss_with_lost_feedback_and_reordering() {
     for congestion in [DartCongestion::Lan, DartCongestion::Adaptive] {
@@ -1516,6 +1706,83 @@ async fn dish_filters_groups_across_separate_datagrams() {
             .is_err()
     );
     dish.close().await.unwrap();
+}
+
+/// A listener keeps no state for a HELLO: it derives the WELCOME session
+/// from the HELLO and checks the CONFIRM against it. Sources that send
+/// HELLO and never confirm therefore cannot keep a real peer out.
+#[tokio::test]
+async fn unconfirmed_hellos_cannot_keep_a_real_peer_out() {
+    let gather = Socket::new(
+        SocketType::Gather,
+        Options {
+            dart: DartOptions {
+                max_ready_peers: 4,
+                ..DartOptions::default()
+            },
+            ..Options::default()
+        },
+    );
+    let target = address(&gather.bind(endpoint(0)).await.unwrap());
+
+    // More unconfirmed sources than a table of pending handshakes held:
+    // it had 64 places next to four ready peers.
+    let mut silent = Vec::new();
+    for _ in 0..200 {
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        send_ready(&socket, target, SocketType::Scatter, None, true).await;
+        silent.push(socket);
+    }
+    welcome(&silent[0]).await;
+
+    let scatter = Socket::new(SocketType::Scatter, Options::default());
+    scatter.connect(endpoint(target.port())).await.unwrap();
+    scatter.send(Message::single("admitted")).await.unwrap();
+    let message = tokio::time::timeout(Duration::from_secs(1), gather.recv())
+        .await
+        .expect("unconfirmed HELLOs kept the real peer out")
+        .unwrap();
+    assert_eq!(message.part_slice(0).unwrap(), b"admitted");
+
+    scatter.close().await.unwrap();
+    gather.close().await.unwrap();
+}
+
+/// A CONFIRM is accepted only with the session that this listener derived
+/// for its source and HELLO. A guessed echo admits nobody.
+#[tokio::test]
+async fn confirm_with_a_wrong_echo_is_not_admitted() {
+    let gather = Socket::new(SocketType::Gather, Options::default());
+    let target = address(&gather.bind(endpoint(0)).await.unwrap());
+    let raw = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    send_ready(&raw, target, SocketType::Scatter, None, true).await;
+    let (session, _, _) = welcome(&raw).await;
+
+    let confirm = |echo: u64| {
+        let mut bytes = [0; dart::MAX_DATAGRAM];
+        let ready = Ready {
+            socket_type: SocketType::Scatter,
+            identity: None,
+            reply_requested: false,
+            session: 1,
+            echo,
+            phase: dart::Phase::Confirm,
+        };
+        let length = dart::encode_ready(ready, &mut bytes).unwrap();
+        bytes[..length].to_vec()
+    };
+    raw.send_to(&confirm(session ^ 1), target).await.unwrap();
+    // A second source replays the right echo: it belongs to the first.
+    let other = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    other.send_to(&confirm(session), target).await.unwrap();
+    // The right echo from the right source is the last datagram, so the
+    // listener has seen the other two when this one makes the peer ready.
+    raw.send_to(&confirm(session), target).await.unwrap();
+    ready(&gather, 1).await;
+    let connections = gather.connections().await.unwrap();
+    assert_eq!(connections.len(), 1);
+
+    gather.close().await.unwrap();
 }
 
 #[tokio::test]

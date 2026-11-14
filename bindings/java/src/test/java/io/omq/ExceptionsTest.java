@@ -1,5 +1,6 @@
 package io.omq;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -88,6 +89,59 @@ final class ExceptionsTest {
             push.send("too-large-message");
 
             assertTrue(pull.receive(Duration.ofSeconds(5)).isEmpty());
+        }
+    }
+
+    @Test
+    void maxMessagePartsDropsReceiveOverLimit() {
+        byte[] part = {1};
+        try (Context context = OMQ.context();
+             Socket pull = context.socket(SocketType.PULL).maxMessageParts(2);
+             Socket push = context.socket(SocketType.PUSH)) {
+            String endpoint = pull.bind("tcp://127.0.0.1:0");
+            push.connect(endpoint);
+            push.waitConnected(1, Duration.ofSeconds(5));
+            push.send(Message.multipart(part, part));
+            assertEquals(2, pull.receive(Duration.ofSeconds(5)).orElseThrow().partCount());
+
+            push.send(Message.multipart(part, part, part));
+            assertTrue(pull.receive(Duration.ofSeconds(1)).isEmpty());
+        }
+    }
+
+    @Test
+    void noMaxMessagePartsLiftsDefaultLimit() {
+        byte[][] parts = new byte[1025][1];
+        try (Context context = OMQ.context();
+             Socket pull = context.socket(SocketType.PULL).noMaxMessageParts();
+             Socket push = context.socket(SocketType.PUSH)) {
+            String endpoint = pull.bind("tcp://127.0.0.1:0");
+            push.connect(endpoint);
+            push.waitConnected(1, Duration.ofSeconds(5));
+            push.send(Message.multipart(parts));
+            assertEquals(1025, pull.receive(Duration.ofSeconds(5)).orElseThrow().partCount());
+        }
+    }
+
+    @Test
+    void maxPeerSubscriptionsIgnoresPrefixOverLimit() {
+        try (Context context = OMQ.context();
+             Socket xpub = context.socket(SocketType.XPUB).maxPeerSubscriptions(1);
+             Socket sub = context.socket(SocketType.SUB)) {
+            String endpoint = xpub.bind("tcp://127.0.0.1:0");
+            sub.subscribe("a");
+            sub.connect(endpoint);
+            assertArrayEquals(
+                    new byte[] {1, 'a'}, xpub.receive(Duration.ofSeconds(5)).orElseThrow().bytes());
+
+            // "b" is over the limit, so XPUB never reports it.
+            sub.subscribe("b");
+            sub.unsubscribe(new byte[] {'a'});
+            sub.subscribe("c");
+            assertArrayEquals(
+                    new byte[] {0, 'a'}, xpub.receive(Duration.ofSeconds(5)).orElseThrow().bytes());
+            assertArrayEquals(
+                    new byte[] {1, 'c'}, xpub.receive(Duration.ofSeconds(5)).orElseThrow().bytes());
         }
     }
 }

@@ -28,6 +28,10 @@ const ZMQ_CURVE_SERVERKEY: i32 = 50;
 const ZMQ_WSS_KEY_PEM: i32 = 103;
 
 const ZMQ_POLLOUT: i32 = 2;
+// POSIX defines this code, so `zmq.h` keeps the system value there.
+#[cfg(unix)]
+const ZMQ_ENOTSOCK: i32 = libc::ENOTSOCK;
+#[cfg(not(unix))]
 const ZMQ_ENOTSOCK: i32 = 156_384_721;
 
 fn set_i32(sock: *mut c_void, opt: i32, val: i32) -> i32 {

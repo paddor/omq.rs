@@ -475,6 +475,18 @@ impl Session {
         }
     }
 
+    /// Close the QUIC connection at once, without the
+    /// CLOSE_WEBTRANSPORT_SESSION capsule. The peer sees the same mapped
+    /// code as after [`Self::close`]. Use it for error closes: the capsule
+    /// path waits up to five seconds for a peer that may be gone.
+    pub fn abort(&self, code: u32, reason: &[u8]) {
+        if self.session_id.is_some() {
+            Self::close_connection(&self.conn, code, reason);
+        } else {
+            self.conn.close(quinn::VarInt::from_u32(code), reason);
+        }
+    }
+
     /// Wait until the session is closed and return the error. See [`quinn::Connection::closed`].
     pub async fn closed(&self) -> SessionError {
         self.conn.closed().await.into()

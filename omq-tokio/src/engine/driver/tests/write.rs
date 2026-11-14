@@ -399,6 +399,93 @@ async fn owned_chunk_write_cancellation_keeps_staged_chunks() {
     assert_eq!(writer.out, expected);
 }
 
+#[test]
+fn slot_staging_never_leaves_a_payload_behind_its_header() {
+    let slot = PeerTransmitSlot::with_config(1, SlotConfig::default());
+    slot.mark_handshake_done();
+    let payload = Bytes::from(patterned_payload(64, 7));
+    let push = |chunks: &[Bytes], expected: &mut Vec<u8>| {
+        for chunk in chunks {
+            expected.extend_from_slice(chunk);
+        }
+        assert_eq!(
+            slot.try_push_encoded(chunks),
+            crate::engine::transmit_slot::TryFrameResult::Ok
+        );
+    };
+    let mut expected = Vec::new();
+    // One single-chunk frame makes entry 1024 a header and 1025 its payload.
+    push(&[Bytes::from_static(&[0, 0])], &mut expected);
+    for _ in 0..600 {
+        push(
+            &[Bytes::from_static(&[0, 64]), payload.clone()],
+            &mut expected,
+        );
+    }
+
+    // Codec output, such as a PING, goes out between two slot batches. A
+    // batch that ends on a header would put it inside that frame.
+    let mut pending = PendingWrite::default();
+    pending.stage_slot(&slot, false);
+    let staged: Vec<u8> = pending
+        .chunks
+        .iter()
+        .flat_map(|c| c.iter().copied())
+        .collect();
+    assert_eq!(staged.len(), expected.len(), "the batch split a frame");
+    assert_eq!(staged, expected);
+}
+
+#[tokio::test]
+async fn output_framed_during_a_short_codec_write_stays_behind_its_tail() {
+    // The unsent greeting stands in for any codec frame, such as a PING.
+    let config = || ConnectionConfig::new(Role::Client, SocketType::Push);
+    let mut connection = Connection::new(config());
+    let mut expected = drain_transmit(&mut Connection::new(config()));
+    let mut eq = FrameBuffer::one_shot();
+    let mut pending = PendingWrite::default();
+    let mut heartbeat = HeartbeatProbe::default();
+    let (stream, mut peer) = tokio::io::duplex(3);
+    let (reader_half, mut writer) = tokio::io::split(stream);
+    drop(reader_half);
+
+    tokio::select! {
+        biased;
+        result = write_driver_progress(
+            &mut writer,
+            &mut eq,
+            &mut pending,
+            &mut connection,
+            &mut heartbeat,
+        ) => panic!("stalled write unexpectedly completed: {result:?}"),
+        () = tokio::time::sleep(Duration::from_millis(10)) => {}
+    }
+    assert!(connection.has_pending_transmit(), "the write was not short");
+
+    // A compression offload completes now and frames its result.
+    eq.frame(&Message::single("after"));
+    expected.extend_from_slice(b"\x00\x05after");
+
+    let reader = tokio::spawn(async move {
+        let mut actual = Vec::new();
+        peer.read_to_end(&mut actual).await.unwrap();
+        actual
+    });
+    while !pending.is_empty() || !eq.is_empty() || connection.has_pending_transmit() {
+        write_driver_progress(
+            &mut writer,
+            &mut eq,
+            &mut pending,
+            &mut connection,
+            &mut heartbeat,
+        )
+        .await
+        .unwrap();
+    }
+    drop(writer);
+    assert_eq!(reader.await.unwrap(), expected);
+}
+
 #[tokio::test]
 async fn busy_sender_yields_to_tasks_on_its_thread() {
     use futures::FutureExt;

@@ -455,6 +455,20 @@ async fn malformed_record_and_finished_liveness_stream_close_the_peer() {
     assert_eq!(closed_code(&client).await, Some(code::CONTROL_ERROR));
 }
 
+/// A peer that stops our liveness stream leaves us without PING and PONG.
+/// That closes the connection, as an ended stream does.
+#[tokio::test]
+async fn stopped_liveness_stream_closes_the_peer() {
+    let options = Options {
+        heartbeat_interval: Some(Duration::from_millis(30)),
+        heartbeat_timeout: Some(Duration::from_secs(30)),
+        ..Options::default()
+    };
+    let (client, _send, mut recv, _stream) = established(options).await;
+    recv.stop(quinn::VarInt::from_u32(0)).unwrap();
+    assert_eq!(closed_code(&client).await, Some(code::CONTROL_ERROR));
+}
+
 #[tokio::test]
 async fn invalid_preface_is_rejected_during_setup() {
     let mut fixture = listener(Options::default(), Duration::from_secs(5)).await;
@@ -877,6 +891,100 @@ mod web_wire {
         assert_closed(&connection).await;
     }
 
+    /// A waker that reports each wake on a channel, so the test can wait
+    /// for the next one.
+    struct WakeProbe(tokio::sync::mpsc::UnboundedSender<()>);
+
+    impl std::task::Wake for WakeProbe {
+        fn wake(self: Arc<Self>) {
+            let _ = self.0.send(());
+        }
+    }
+
+    /// A lingering close waits for the peer to acknowledge FIN. Quinn
+    /// keeps that wake registration in the `stopped` future, so the future
+    /// must live across polls: a new one per poll loses the wake.
+    #[tokio::test]
+    async fn web_shutdown_is_woken_by_the_fin_acknowledgment() {
+        use std::pin::Pin;
+        use std::task::{Context, Poll, Waker};
+        use tokio::io::AsyncWrite;
+
+        // Both client streams stay open: a finished liveness stream would
+        // close the session, and that also ends the wait under test.
+        let mut fixture = web_listener(&[]).await;
+        let session = web_session(&fixture, None).await.unwrap();
+        let connection = (*session).clone();
+        let (mut data, _data_recv) = session.open_bi().await.unwrap();
+        let (mut live, _live_recv) = session.open_bi().await.unwrap();
+        data.write_all(&super::super::web::DATA_PREFACE)
+            .await
+            .unwrap();
+        live.write_all(&liveness::PREFACE).await.unwrap();
+        let stream = fixture.next().await.expect("peer delivered");
+        let (_recv, mut send) = stream.into_split();
+
+        let (probe, mut woken) = tokio::sync::mpsc::unbounded_channel();
+        let waker = Waker::from(Arc::new(WakeProbe(probe)));
+        let mut cx = Context::from_waker(&waker);
+        assert!(Pin::new(&mut send).poll_shutdown(&mut cx).is_pending());
+        tokio::time::timeout(Duration::from_secs(5), woken.recv())
+            .await
+            .expect("the FIN acknowledgment did not wake the shutdown");
+
+        // Acknowledged: the shutdown now waits for the peer to close.
+        let second = Pin::new(&mut send).poll_shutdown(&mut cx);
+        assert!(second.is_pending(), "{second:?}");
+        connection.close(0_u32.into(), b"");
+        tokio::time::timeout(Duration::from_secs(5), woken.recv())
+            .await
+            .expect("the peer's close did not wake the shutdown");
+        assert!(matches!(
+            Pin::new(&mut send).poll_shutdown(&mut cx),
+            Poll::Ready(Ok(()))
+        ));
+    }
+
+    /// An error close must not go through the session's close capsule:
+    /// that path waits up to five seconds for the peer to acknowledge it,
+    /// and the peer of a liveness timeout is the one that stopped
+    /// answering. Until then the connection would stay usable.
+    #[tokio::test]
+    async fn web_error_close_does_not_wait_for_the_peer() {
+        use omq_webtrans_quinn::{SessionError, WebTransportError};
+
+        let mut fixture = web_listener(&[]).await;
+        let session = web_session(&fixture, None).await.unwrap();
+        let (mut data, _data_recv) = session.open_bi().await.unwrap();
+        let (mut live, _live_recv) = session.open_bi().await.unwrap();
+        data.write_all(&super::super::web::DATA_PREFACE)
+            .await
+            .unwrap();
+        live.write_all(&liveness::PREFACE).await.unwrap();
+        let stream = fixture.next().await.expect("peer delivered");
+
+        let carrier = stream.carrier().clone();
+        carrier.close(code::LIVENESS_TIMEOUT);
+        assert!(
+            carrier.connection().close_reason().is_some(),
+            "the error close left the connection open"
+        );
+        // The peer still learns the code.
+        let closed = tokio::time::timeout(Duration::from_secs(5), session.closed())
+            .await
+            .expect("peer saw no close");
+        assert!(
+            matches!(
+                &closed,
+                SessionError::WebTransportError(WebTransportError::Closed(
+                    code::LIVENESS_TIMEOUT,
+                    _
+                ))
+            ),
+            "{closed:?}"
+        );
+    }
+
     #[tokio::test]
     async fn web_session_rejects_a_third_stream() {
         let (mut fixture, connection) =
@@ -896,6 +1004,47 @@ mod web_wire {
                 .is_ok(),
             "extra stream did not close the peer"
         );
+    }
+}
+
+/// QUIC gets no error for an address where nothing answers. Such an
+/// address must not use up the attempt: the next one is dialed alongside.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn connect_does_not_wait_out_a_silent_address() {
+    let mut fixture = listener(Options::default(), Duration::from_secs(5)).await;
+    // The same port on another loopback address. Nothing there speaks QUIC.
+    let silent = SocketAddr::new("127.0.0.2".parse().unwrap(), fixture.addr.port());
+    let _socket = std::net::UdpSocket::bind(silent).unwrap();
+    let mut options = Options::default();
+    options.quic.trust_pem = Some(fixture.cert.clone());
+    options.quic.trust_system = false;
+    let pool = crate::context::IoPoolHandle::none();
+    let host = Host::Ip(fixture.addr.ip());
+
+    let dial = connect_addrs(vec![silent, fixture.addr], &host, &options, None, &pool);
+    let client = tokio::time::timeout(Duration::from_secs(3), dial)
+        .await
+        .expect("the silent address used up the whole attempt")
+        .unwrap();
+    assert!(fixture.next().await.is_some());
+    drop(client);
+}
+
+/// Invalid local TLS settings fail `connect()`. No dial can ever succeed
+/// with them, so retrying would only hide the mistake.
+#[tokio::test]
+async fn connect_rejects_invalid_client_tls_settings() {
+    let mut bad_trust = Options::default();
+    bad_trust.quic.trust_pem = Some(b"not a certificate".to_vec());
+    bad_trust.quic.trust_system = false;
+    let mut bad_name = Options::default();
+    bad_name.quic.server_name = Some("not a host name".into());
+
+    for options in [bad_trust, bad_name] {
+        let push = crate::Socket::new(omq_proto::SocketType::Push, options);
+        assert!(push.connect("quic://127.0.0.1:9").await.is_err());
+        push.close().await.unwrap();
     }
 }
 

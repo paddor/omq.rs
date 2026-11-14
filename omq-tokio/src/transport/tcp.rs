@@ -77,7 +77,9 @@ impl Listener for TcpListener {
 
     async fn accept(&mut self) -> Result<(Self::Stream, PeerIdent)> {
         let (stream, peer) = self.inner.accept().await?;
-        stream.set_nodelay(true)?;
+        // A peer that already reset can fail this. That is no accept
+        // error: the listener must not back off for it.
+        let _ = stream.set_nodelay(true);
         Ok((stream, PeerIdent::Socket(peer)))
     }
 }
@@ -103,19 +105,15 @@ pub(crate) fn reuse_addr_bind(addr: SocketAddr) -> Result<TokioTcpListener> {
     ))?)
 }
 
-/// Dial `addrs` in order and return the first stream that connects.
+/// Dial `addrs` in order and return the first stream that connects. See
+/// [`super::dns::first_connected`]: an address that drops SYNs does not
+/// hold up the ones after it.
 pub(crate) async fn connect_any(addrs: Vec<SocketAddr>) -> Result<TcpStream> {
-    let mut last_err = None;
-    for addr in addrs {
-        match TcpStream::connect(addr).await {
-            Ok(stream) => return Ok(stream),
-            Err(e) => last_err = Some(e),
-        }
-    }
-
-    Err(Error::Io(last_err.unwrap_or_else(|| {
-        io::Error::other("no addresses to connect")
-    })))
+    super::dns::first_connected(addrs, TcpStream::connect)
+        .await
+        .map_err(|error| {
+            Error::Io(error.unwrap_or_else(|| io::Error::other("no addresses to connect")))
+        })
 }
 
 #[cfg(test)]

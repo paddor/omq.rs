@@ -23,7 +23,7 @@ pub(super) fn bottleneck(output: OutputWindow) -> Option<Bottleneck> {
 
     // The input queue filled up, or more than 1/8 of the batches stopped at
     // their limit with input left. A shorter backlog only grows the batches.
-    if output.input_full > 0 || output.overflowed * 8 > output.batches {
+    if output.input_full > 0 || u64::from(output.overflowed) * 8 > u64::from(output.batches) {
         return (blocked * 64 < elapsed).then_some(Bottleneck::Cpu);
     }
 

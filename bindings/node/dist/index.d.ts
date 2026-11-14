@@ -30,6 +30,13 @@ export interface SocketOptions {
     conflate?: boolean;
     /** XPUB send fails instead of dropping when subscribers are muted. */
     xpubNodrop?: boolean;
+    /** Most parts one received message may have. Defaults to 1024; negative means no limit. */
+    maxMessageParts?: number;
+    /**
+     * Most prefixes (PUB/XPUB) or groups (RADIO) one peer may hold. Defaults
+     * to 65536; negative means no limit.
+     */
+    maxPeerSubscriptions?: number;
     /** Behavior when a socket cannot currently send. */
     onMute?: "block" | "dropNewest" | "dropOldest";
     /** Workload hint used by the native transport. */

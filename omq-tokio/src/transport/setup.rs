@@ -97,7 +97,13 @@ impl Admission {
             return None;
         }
 
-        let mut permit = self.try_acquire()?;
+        let Some(mut permit) = self.try_acquire() else {
+            // Only a permit's drop removes an entry: leave no empty one.
+            if *held == 0 {
+                sources.remove(&key);
+            }
+            return None;
+        };
         *held += 1;
         permit.source = Some(Box::new((key, self.sources.clone())));
 

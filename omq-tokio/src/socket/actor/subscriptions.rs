@@ -9,6 +9,7 @@ use super::{
     supports_groups, supports_subscribe,
 };
 use crate::engine::peer_events::SubscriptionGate;
+use crate::engine::subscription_ledger::SubscriptionLedger;
 
 impl SocketDriver {
     pub(super) fn handle_peer_command(&mut self, peer_id: u64, cmd: omq_proto::proto::Command) {
@@ -101,6 +102,13 @@ impl SocketDriver {
                 self.socket_type != SocketType::XPub
             }
             0x00 => {
+                if let Some(ledger) = self
+                    .peers
+                    .get(&peer_id)
+                    .and_then(|peer| peer.subscriptions.as_ref())
+                {
+                    ledger.cancel(&prefix);
+                }
                 self.handle_peer_command(peer_id, Command::Cancel(prefix));
                 self.socket_type != SocketType::XPub
             }
@@ -110,7 +118,11 @@ impl SocketDriver {
 
     /// Peer SUBSCRIBE handling for one connection. Admission applies to PUB
     /// and XPUB; only XPUB surfaces subscriptions as messages.
-    pub(super) fn subscription_gate(&self, peer_id: u64) -> SubscriptionGate {
+    pub(super) fn subscription_gate(
+        &self,
+        peer_id: u64,
+        ledger: Option<Arc<SubscriptionLedger>>,
+    ) -> SubscriptionGate {
         let admission = matches!(self.socket_type, SocketType::Pub | SocketType::XPub)
             .then(|| self.options.subscription_admission.clone())
             .flatten();
@@ -118,21 +130,39 @@ impl SocketDriver {
         SubscriptionGate::new(
             self.socket_type == SocketType::XPub,
             admission,
+            ledger,
             &self.link.monitor,
             peer_id,
         )
     }
 
+    /// A ledger for one new peer of a socket that limits what a peer may
+    /// subscribe to or join. The peer entry and the peer's gate share it.
+    pub(super) fn subscription_ledger(&self) -> Option<Arc<SubscriptionLedger>> {
+        matches!(
+            self.socket_type,
+            SocketType::Pub | SocketType::XPub | SocketType::Radio
+        )
+        .then(|| SubscriptionLedger::new(self.options.max_peer_subscriptions))
+        .flatten()
+    }
+
+    /// Admission of a subscription sent as a message: the callback first,
+    /// then the peer's ledger, as the gate does for SUBSCRIBE commands.
     fn admits_subscription(&self, peer_id: u64, prefix: &[u8]) -> bool {
-        let Some(admission) = self.options.subscription_admission.as_ref() else {
-            return true;
-        };
+        let peer = self.peers.get(&peer_id);
 
         let admitted = self
-            .peers
-            .get(&peer_id)
-            .and_then(|peer| peer.handshake.info.as_ref())
-            .is_some_and(|info| admission.admits(prefix, &info.peer_properties));
+            .options
+            .subscription_admission
+            .as_ref()
+            .is_none_or(|admission| {
+                peer.and_then(|peer| peer.handshake.info.as_ref())
+                    .is_some_and(|info| admission.admits(prefix, &info.peer_properties))
+            })
+            && peer
+                .and_then(|peer| peer.subscriptions.as_ref())
+                .is_none_or(|ledger| ledger.subscribe(prefix));
 
         if !admitted {
             self.link.monitor.publish(MonitorEvent::SubscribeRejected {

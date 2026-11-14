@@ -19,6 +19,10 @@ const ZMQ_PUSH: i32 = 8;
 const ZMQ_PULL: i32 = 7;
 const ZMQ_POLLIN: i16 = 1;
 
+// POSIX defines this code, so `zmq.h` keeps the system value there.
+#[cfg(unix)]
+const ZMQ_ENOTSOCK: i32 = libc::ENOTSOCK;
+#[cfg(not(unix))]
 const ZMQ_ENOTSOCK: i32 = 156_384_721;
 const ZMQ_ETERM: i32 = 156_384_765;
 
@@ -82,6 +86,28 @@ fn blank_events<const N: usize>() -> [PollerEvent; N] {
         user_data: std::ptr::null_mut(),
         events: 0,
     }; N]
+}
+
+/// A handle of another type is refused, not read as a poller.
+#[test]
+fn poller_calls_refuse_a_socket_handle() {
+    let ctx = zmq_ctx_new();
+    let socket = zmq_socket(ctx, ZMQ_PULL);
+
+    assert_eq!(zmq_poller_size(socket), -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EFAULT);
+    assert_eq!(
+        zmq_poller_add(socket, socket, std::ptr::null_mut(), ZMQ_POLLIN),
+        -1
+    );
+    assert_eq!(omq_zmq::zmq_errno(), libc::EFAULT);
+    let mut handle = socket;
+    assert_eq!(zmq_poller_destroy(&mut handle), -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EFAULT);
+    assert_eq!(handle, socket, "a refused destroy leaves the pointer alone");
+
+    assert_eq!(zmq_close(socket), 0);
+    zmq_ctx_term(ctx);
 }
 
 #[test]

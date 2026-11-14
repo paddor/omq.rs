@@ -29,11 +29,14 @@ impl SocketDriver {
                 super::endpoint_resolution::Ack::Connect(ack),
             );
         } else if matches!(endpoint, Endpoint::Udp { .. }) {
-            let res = self.start_dial_udp(endpoint).await;
+            let res = self.start_dial_udp(endpoint.clone(), endpoint).await;
             let _ = ack.send(res);
         } else if let Err(e) = reject_encrypted_inproc(&endpoint, &options.mechanism) {
             let _ = ack.send(Err(e));
-        } else if let Err(e) = self.validate_setup_options(&endpoint, &options) {
+        } else if let Err(e) = self
+            .validate_setup_options(&endpoint, &options)
+            .and_then(|()| Self::validate_dial_settings(&endpoint, &options))
+        {
             let _ = ack.send(Err(e));
         } else if super::endpoint_resolution::needs_dns(&endpoint) {
             self.start_endpoint_resolution(
@@ -56,6 +59,16 @@ impl SocketDriver {
             self.start_dial(endpoint, options);
             let _ = ack.send(Ok(()));
         }
+    }
+
+    /// Settings that only a dial uses and that no dial can succeed without.
+    #[cfg_attr(not(feature = "quic"), expect(clippy::unnecessary_wraps))]
+    fn validate_dial_settings(endpoint: &Endpoint, options: &Options) -> Result<()> {
+        #[cfg(feature = "quic")]
+        crate::transport::quic::validate_connect(endpoint, options)?;
+        #[cfg(not(feature = "quic"))]
+        let _ = (endpoint, options);
+        Ok(())
     }
 
     pub(super) fn is_dart_endpoint(endpoint: &Endpoint) -> bool {
@@ -104,15 +117,33 @@ impl SocketDriver {
         }
 
         let pending = self.cancel_pending_endpoints(Some((endpoint, Side::Bind)));
-        // Wait for each task so the address is free when unbind returns.
-        let removed = super::stop_matching(&mut self.endpoints.listeners, endpoint).await
-            + super::stop_matching(&mut self.endpoints.udp_listeners, endpoint).await;
+        let mut removed = self.stop_listeners(endpoint).await;
+        if !pending
+            && removed == 0
+            && let Some(resolved) = self.endpoints.take_bound_as(endpoint)
+        {
+            // The form passed to bind(), such as a wildcard host.
+            removed = self.stop_listeners(&resolved).await;
+        }
 
         if pending || removed > 0 {
             Ok(())
         } else {
             Err(Error::Unroutable)
         }
+    }
+
+    /// Stop the listeners bound at `endpoint`, waiting for each task so
+    /// the address is free on return. Returns how many were stopped.
+    async fn stop_listeners(&mut self, endpoint: &Endpoint) -> usize {
+        let removed = super::stop_matching(&mut self.endpoints.listeners, endpoint).await
+            + super::stop_matching(&mut self.endpoints.udp_listeners, endpoint).await;
+        if removed > 0 {
+            self.endpoints
+                .bind_aliases
+                .retain(|(_, resolved)| resolved != endpoint);
+        }
+        removed
     }
 
     /// Tear down dialer(s) and live outbound peers targeting `endpoint`.
@@ -234,7 +265,9 @@ impl SocketDriver {
         }
 
         if matches!(endpoint, Endpoint::Udp { .. }) {
-            return self.bind_udp(endpoint).await;
+            let resolved = self.bind_udp(endpoint.clone()).await?;
+            self.endpoints.note_bound(endpoint, &resolved);
+            return Ok(resolved);
         }
 
         reject_encrypted_inproc(&endpoint, &options.mechanism)?;
@@ -248,7 +281,9 @@ impl SocketDriver {
         )
         .await?;
 
-        Ok(self.start_listener(bound, options, cancel))
+        let resolved = self.start_listener(bound, options, cancel);
+        self.endpoints.note_bound(endpoint, &resolved);
+        Ok(resolved)
     }
 
     /// Listener-side carrier settings, sharing the inbound setup admission.

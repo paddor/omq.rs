@@ -1,7 +1,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-const { Context, Dealer, Pull, Push, Router, curveKeypair, curvePublic } = require("../dist");
+const { Context, Dealer, Pull, Push, Router, Sub, XPub, curveKeypair, curvePublic } = require("../dist");
 
 test("identity option is copied before use", async () => {
   const identity = Buffer.from("before");
@@ -33,6 +33,8 @@ test("selected typed options are accepted before socket use", () => {
       conflate: false,
       routerMandatory: false,
       xpubNodrop: false,
+      maxMessageParts: 16,
+      maxPeerSubscriptions: 0,
     },
     context,
   );
@@ -46,6 +48,7 @@ test("invalid option values reject early", () => {
   assert.throws(() => new Push({ identity: Buffer.alloc(256) }), /identity length/);
   assert.throws(() => new Push({ lz4: true }), /lz4\+tcp:\/\//);
   assert.throws(() => new Push({ lz4: { dictionary: Buffer.alloc(0) } }), /compression dict/);
+  assert.throws(() => new Push({ maxMessageParts: 0 }), /max_message_parts/);
   assert.throws(
     () =>
       new Push({
@@ -53,6 +56,73 @@ test("invalid option values reject early", () => {
       }),
     /ASCII VCHAR/,
   );
+});
+
+test("maxMessageParts drops a message over the limit", async () => {
+  const pull = new Pull({ maxMessageParts: 2 });
+  const push = new Push();
+  try {
+    const endpoint = await pull.bind("tcp://127.0.0.1:0");
+    await push.connect(endpoint);
+    await push.send(["a", "b"]);
+    assert.equal((await pull.recv()).length, 2);
+    await push.send(["a", "b", "c"]);
+    assert.equal(await pull.recv({ signal: AbortSignal.timeout(300) }).catch(() => null), null);
+  } finally {
+    push.close();
+    pull.close();
+  }
+});
+
+test("negative maxMessageParts lifts the default limit", async () => {
+  const pull = new Pull({ maxMessageParts: -1 });
+  const push = new Push();
+  try {
+    const endpoint = await pull.bind("tcp://127.0.0.1:0");
+    await push.connect(endpoint);
+    await push.send(Array.from({ length: 1025 }, () => "x"));
+    assert.equal((await pull.recv()).length, 1025);
+  } finally {
+    push.close();
+    pull.close();
+  }
+});
+
+test("maxPeerSubscriptions ignores a prefix over the limit", async () => {
+  const xpub = new XPub({ maxPeerSubscriptions: 1 });
+  const sub = new Sub();
+  try {
+    const endpoint = await xpub.bind("tcp://127.0.0.1:0");
+    await sub.subscribe("a");
+    await sub.connect(endpoint);
+    assert.equal((await xpub.recv()).string(), "\x01a");
+
+    // "b" is over the limit, so XPUB never reports it.
+    await sub.subscribe("b");
+    await sub.unsubscribe("a");
+    await sub.subscribe("c");
+    assert.equal((await xpub.recv()).string(), "\x00a");
+    assert.equal((await xpub.recv()).string(), "\x01c");
+  } finally {
+    sub.close();
+    xpub.close();
+  }
+});
+
+test("negative maxPeerSubscriptions rejects no subscription", async () => {
+  const xpub = new XPub({ maxPeerSubscriptions: -1 });
+  const sub = new Sub();
+  try {
+    const endpoint = await xpub.bind("tcp://127.0.0.1:0");
+    await sub.connect(endpoint);
+    await sub.subscribe("a");
+    await sub.subscribe("b");
+    assert.equal((await xpub.recv()).string(), "\x01a");
+    assert.equal((await xpub.recv()).string(), "\x01b");
+  } finally {
+    sub.close();
+    xpub.close();
+  }
 });
 
 test("PLAIN PUSH/PULL accepts credential allowlist", async () => {

@@ -500,6 +500,95 @@ async fn linger_forever_close_keeps_dialer_until_late_peer_drains() {
     pull.close().await.unwrap();
 }
 
+/// A second `close()` on a clone joins the close in progress. It must not
+/// discard the queue that close still drains.
+#[tokio::test]
+async fn second_close_on_a_clone_keeps_the_first_close_linger_queue() {
+    let ep = free_tcp_ep();
+    let push = Socket::new(SocketType::Push, Options::default().linger_forever());
+    let clone = push.clone();
+    push.connect(ep.clone()).await.unwrap();
+    push.send(Message::single("queued-before-peer"))
+        .await
+        .unwrap();
+
+    let first = tokio::spawn(async move { push.close().await });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let second = tokio::spawn(async move { clone.close().await });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !first.is_finished(),
+        "close returned before the queue drained"
+    );
+
+    let pull = Socket::new(SocketType::Pull, Options::default());
+    pull.bind(ep).await.unwrap();
+    let msg = tokio::time::timeout(Duration::from_secs(2), pull.recv())
+        .await
+        .expect("the second close discarded the queued message")
+        .unwrap();
+    assert_eq!(msg.part_bytes(0).unwrap().as_ref(), b"queued-before-peer");
+
+    for close in [first, second] {
+        tokio::time::timeout(Duration::from_secs(2), close)
+            .await
+            .expect("close did not finish after the late peer drained")
+            .unwrap()
+            .unwrap();
+    }
+    pull.close().await.unwrap();
+}
+
+/// Zero linger drops everything now. That also ends a close that another
+/// clone started with a longer linger, whose backlog sits with a peer
+/// that stopped reading.
+#[tokio::test]
+async fn zero_linger_close_ends_a_lingering_close_of_another_clone() {
+    let receiver = Socket::new(SocketType::Pull, Options::default().recv_hwm(1));
+    let endpoint = receiver.bind("tcp://127.0.0.1:0").await.unwrap();
+    let sender = Socket::new(
+        SocketType::Push,
+        Options {
+            send_buffer_size: Some(64 * 1024),
+            ..Options::default().send_hwm(32).linger_forever()
+        },
+    );
+    let clone = sender.clone();
+    sender.connect(endpoint).await.unwrap();
+    sender
+        .wait_connected(1, Duration::from_secs(2))
+        .await
+        .unwrap();
+    // The receiver never reads, so the connection cannot write this out.
+    for _ in 0..24 {
+        sender
+            .send(Message::single(vec![7; 1024 * 1024]))
+            .await
+            .unwrap();
+    }
+
+    let lingering = tokio::spawn(sender.close());
+    // The first close is under way once the socket refuses new sends.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !matches!(
+            clone.try_send(Message::single("late")),
+            Err(omq_tokio::TrySendError::Closed)
+        ) {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("first close never started");
+
+    clone.close_with_linger(Some(Duration::ZERO)).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), lingering)
+        .await
+        .expect("zero-linger close left the other close lingering")
+        .unwrap()
+        .unwrap();
+    receiver.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn drop_with_linger_forever_keeps_dialer_until_late_peer_drains() {
     let ep = free_tcp_ep();

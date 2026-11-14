@@ -182,6 +182,9 @@ impl InboundRegions {
     /// `incoming` holds the peer's leases, which may still reference regions
     /// that fall out of the registration window.
     pub(super) fn insert(&mut self, mapping: Mapping, incoming: &Table) -> io::Result<()> {
+        // Also covers regions that were dropped without an announcement,
+        // such as application pools.
+        self.release_retired(incoming);
         let identity = (mapping.id, mapping.token);
         self.regions
             .retain(|(id, token, _)| (*id, *token) != identity);
@@ -209,6 +212,22 @@ impl InboundRegions {
         }
 
         Ok(())
+    }
+
+    /// Unmap every region that its creator has dropped. The creator keeps
+    /// a region while a lease refers to it, so the pending check only
+    /// guards against a peer that marks a region it still uses.
+    pub(super) fn release_retired(&mut self, incoming: &Table) {
+        let retired = |(_, _, mapping): &(u32, u64, Arc<Mapping>)| mapping.retired();
+        if !self.regions.iter().chain(&self.retired).any(retired) {
+            return;
+        }
+        let pending = self.pending(incoming);
+        let keep = |(id, token, mapping): &(u32, u64, Arc<Mapping>)| {
+            !mapping.retired() || pending.contains(&(*id, *token))
+        };
+        self.regions.retain(keep);
+        self.retired.retain(keep);
     }
 
     /// Regions referenced by the peer's pending leases.

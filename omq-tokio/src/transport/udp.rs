@@ -4,8 +4,9 @@
 //! receives; RADIO connects and sends. Wire format per datagram is
 //! `flags(0x01) | group_size | group | body`.
 //!
-//! Multicast is intentionally out of scope for this slice; the listener
-//! takes whatever address is bound and lets the OS handle routing.
+//! A DISH bind on a multicast address joins that group on the default
+//! interface, as libzmq does. RADIO sends to a group like to any address;
+//! the OS default hop limit of one keeps the datagrams on the local link.
 
 use std::net::{IpAddr, SocketAddr};
 
@@ -25,7 +26,8 @@ pub const MAX_DATAGRAM_SIZE: usize = 65_507;
 pub const FLAG_DATA: u8 = 0x01;
 
 /// Encode `[group, body]` as a single UDP datagram. Errors when
-/// `group` exceeds 255 bytes (it doesn't fit the 1-byte length field).
+/// `group` exceeds 255 bytes (it doesn't fit the 1-byte length field)
+/// or the datagram exceeds [`MAX_DATAGRAM_SIZE`].
 pub fn encode_datagram(group: &[u8], body: &[u8]) -> Result<Bytes> {
     if group.len() > u8::MAX as usize {
         return Err(Error::Protocol(format!(
@@ -34,6 +36,13 @@ pub fn encode_datagram(group: &[u8], body: &[u8]) -> Result<Bytes> {
         )));
     }
 
+    // No socket can send it, and an egress limit could never grant it.
+    let total = 2 + group.len() + body.len();
+    if total > MAX_DATAGRAM_SIZE {
+        return Err(Error::Protocol(format!(
+            "RADIO datagram too large ({total} bytes; max {MAX_DATAGRAM_SIZE})"
+        )));
+    }
     let mut out = Vec::with_capacity(2 + group.len() + body.len());
     out.push(FLAG_DATA);
     out.push(group.len() as u8);
@@ -66,7 +75,8 @@ pub fn split_datagram(data: &[u8]) -> Option<(&[u8], &[u8])> {
 
 /// Bind a UDP socket for a DISH endpoint. Wildcard (`udp://*:port`) is
 /// resolved to `0.0.0.0`; named hosts are not resolved here -- pass an
-/// IP literal or `*`.
+/// IP literal or `*`. A multicast address binds the wildcard address and
+/// joins that group.
 pub async fn bind(endpoint: &Endpoint) -> Result<UdpSocket> {
     let (host, port) = parts(endpoint)?;
     let ip = match host {
@@ -80,8 +90,36 @@ pub async fn bind(endpoint: &Endpoint) -> Result<UdpSocket> {
         _ => unreachable!(),
     };
 
+    if ip.is_multicast() {
+        return bind_multicast(ip, port);
+    }
     let sock = UdpSocket::bind(SocketAddr::new(ip, port)).await?;
     Ok(sock)
+}
+
+/// Bind the wildcard address and join `group` on the default interface.
+/// Address reuse lets several DISH sockets of one host share the port; each
+/// receives its own copy.
+fn bind_multicast(group: IpAddr, port: u16) -> Result<UdpSocket> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let (domain, any) = match group {
+        IpAddr::V4(_) => (Domain::IPV4, IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
+        IpAddr::V6(_) => (Domain::IPV6, IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)),
+    };
+    let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
+    socket.set_reuse_address(true)?;
+    // BSD kernels share a wildcard port only with this option.
+    #[cfg(all(unix, not(any(target_os = "solaris", target_os = "illumos"))))]
+    socket.set_reuse_port(true)?;
+    socket.set_nonblocking(true)?;
+    socket.bind(&SocketAddr::new(any, port).into())?;
+    match group {
+        IpAddr::V4(group) => {
+            socket.join_multicast_v4(&group, &std::net::Ipv4Addr::UNSPECIFIED)?;
+        }
+        IpAddr::V6(group) => socket.join_multicast_v6(&group, 0)?,
+    }
+    Ok(UdpSocket::from_std(socket.into())?)
 }
 
 /// Open an unbound UDP socket and "connect" it to the RADIO target so

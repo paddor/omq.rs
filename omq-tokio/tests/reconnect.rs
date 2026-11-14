@@ -192,9 +192,9 @@ async fn peer_drop_mid_send_is_handled_cleanly() {
 
 #[tokio::test]
 async fn exponential_backoff_retry_in_grows() {
-    // ConnectDelayed monitor events carry the configured retry_in duration.
-    // With ExponentialPolicy{min, max}, successive retry_in values must be
-    // non-decreasing and at least as large as `min`.
+    // ConnectDelayed monitor events carry the jittered retry_in duration.
+    // With ExponentialPolicy{min, max}, each retry_in stays within 10% of
+    // its doubled base, so successive values never decrease.
     use omq_tokio::MonitorEvent;
 
     // Nothing is listening; every dial attempt will fail immediately.
@@ -238,11 +238,13 @@ async fn exponential_backoff_retry_in_grows() {
         }
     }
 
-    // Each retry_in must be >= min.
-    for (i, &d) in delays.iter().enumerate() {
+    // Each retry_in must be within the 10% jitter of its base. These
+    // bounds hold for every draw.
+    for (i, (&d, base_ms)) in delays.iter().zip([20, 40, 80, 160]).enumerate() {
+        let base = Duration::from_millis(base_ms);
         assert!(
-            d >= Duration::from_millis(20),
-            "delay[{i}] = {d:?} is below min (20 ms)"
+            d >= base * 9 / 10 && d <= base * 11 / 10,
+            "delay[{i}] = {d:?} is not within 10% of {base:?}"
         );
     }
 
@@ -315,4 +317,149 @@ async fn push_hwm_drains_after_reconnect() {
     }
 
     assert!(count >= 1, "expected at least 1 message, got {count}");
+}
+
+/// Bind `socket` to `ep`, retrying while a closed socket still holds it.
+async fn rebind(socket: &Socket, ep: &Endpoint) {
+    for _ in 0..80 {
+        if socket.bind(ep.clone()).await.is_ok() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("failed to rebind {ep}");
+}
+
+fn fast_reconnect() -> Options {
+    Options::default().reconnect(ReconnectPolicy::Fixed(Duration::from_millis(20)))
+}
+
+/// Two connects to one endpoint are two routes. Losing the listener
+/// redials both.
+#[tokio::test]
+async fn duplicate_connects_to_one_endpoint_both_redial() {
+    let pull = Socket::new(SocketType::Pull, Options::default());
+    let ep = pull.bind(tcp_ep(0)).await.unwrap();
+    let push = Socket::new(SocketType::Push, fast_reconnect());
+    push.connect(ep.clone()).await.unwrap();
+    push.connect(ep.clone()).await.unwrap();
+    test_support::wait_for_connection_count(&pull, 2, Duration::from_secs(5), "first listener")
+        .await;
+
+    pull.close().await.unwrap();
+    let pull = Socket::new(SocketType::Pull, Options::default());
+    rebind(&pull, &ep).await;
+    test_support::wait_for_connection_count(&pull, 2, Duration::from_secs(5), "second listener")
+        .await;
+}
+
+/// With reconnect disabled, a lost peer ends its route. A new `connect()`
+/// to that endpoint dials again.
+#[tokio::test]
+async fn connect_after_peer_loss_dials_again_with_reconnect_disabled() {
+    let router = Socket::new(SocketType::Router, Options::default());
+    let ep = router.bind(tcp_ep(0)).await.unwrap();
+    let dealer = Socket::new(
+        SocketType::Dealer,
+        Options::default().reconnect(ReconnectPolicy::Disabled),
+    );
+    dealer.connect(ep.clone()).await.unwrap();
+    test_support::wait_for_connection_count(&router, 1, Duration::from_secs(5), "first connect")
+        .await;
+
+    router.close().await.unwrap();
+    test_support::wait_for_connection_count(&dealer, 0, Duration::from_secs(5), "peer loss").await;
+    let router = Socket::new(SocketType::Router, Options::default());
+    rebind(&router, &ep).await;
+
+    dealer.connect(ep).await.unwrap();
+    test_support::wait_for_connection_count(&router, 1, Duration::from_secs(5), "second connect")
+        .await;
+}
+
+/// A connected transport that yields no peer must not strand its route.
+/// Here a PAIR that has its one peer connects a second endpoint.
+#[tokio::test]
+async fn connect_route_redials_after_its_transport_yields_no_peer() {
+    let inproc = |name: &str| Endpoint::Inproc { name: name.into() };
+    let first = Socket::new(SocketType::Pair, Options::default());
+    first.bind(inproc("redial-no-peer-first")).await.unwrap();
+    let second = Socket::new(SocketType::Pair, Options::default());
+    second.bind(inproc("redial-no-peer-second")).await.unwrap();
+
+    let pair = Socket::new(SocketType::Pair, fast_reconnect());
+    pair.connect(inproc("redial-no-peer-first")).await.unwrap();
+    test_support::wait_for_connection_count(&first, 1, Duration::from_secs(5), "first peer").await;
+    pair.connect(inproc("redial-no-peer-second")).await.unwrap();
+
+    first.close().await.unwrap();
+    test_support::wait_for_connection_count(&pair, 0, Duration::from_secs(5), "peer loss").await;
+    let message = tokio::time::timeout(Duration::from_secs(5), async {
+        pair.send(Message::single("hello")).await.unwrap();
+        second.recv().await.unwrap()
+    })
+    .await
+    .expect("the second endpoint was never redialed");
+    assert_eq!(message.part_bytes(0).unwrap().as_ref(), b"hello");
+}
+
+/// A lost peer is redialed even while the application does not receive.
+/// ROUTER receives through the socket actor, which keeps a completed peer
+/// until the application took every message of it. That wait must delay
+/// only the peer's removal, not the reconnect, and a new connection with
+/// the same identity must not drop the messages still waiting.
+#[tokio::test]
+async fn lost_peer_is_redialed_while_the_application_does_not_receive() {
+    let identity = bytes::Bytes::from_static(b"worker");
+    let dealer_options = || {
+        Options::default()
+            .identity(identity.clone())
+            .linger(Duration::ZERO)
+    };
+    let first = Socket::new(SocketType::Dealer, dealer_options());
+    let ep = first.bind(tcp_ep(0)).await.unwrap();
+
+    let router = Socket::new(SocketType::Router, fast_reconnect().recv_hwm(1));
+    router.connect(ep.clone()).await.unwrap();
+    first
+        .wait_connected(1, Duration::from_secs(5))
+        .await
+        .unwrap();
+    for sequence in 0..64_u32 {
+        first
+            .send(Message::single(sequence.to_le_bytes().to_vec()))
+            .await
+            .unwrap();
+    }
+    // One message taken: the rest wait in the actor, and nothing takes them.
+    let message = tokio::time::timeout(Duration::from_secs(5), router.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(message.part_bytes(1).unwrap().as_ref(), 0_u32.to_le_bytes());
+
+    first.close().await.unwrap();
+    let second = Socket::new(SocketType::Dealer, dealer_options());
+    rebind(&second, &ep).await;
+    second
+        .wait_connected(1, Duration::from_secs(5))
+        .await
+        .expect("the router did not redial while its application was not receiving");
+
+    // The messages of the lost connection are still delivered, in order.
+    second.send(Message::single("new")).await.unwrap();
+    let mut expected = 1_u32;
+    loop {
+        let message = tokio::time::timeout(Duration::from_secs(5), router.recv())
+            .await
+            .expect("a waiting message was dropped")
+            .unwrap();
+        let body = message.part_bytes(1).unwrap();
+        if body.as_ref() == b"new" {
+            break;
+        }
+        assert_eq!(body.as_ref(), expected.to_le_bytes());
+        expected += 1;
+    }
+    assert!(expected > 1, "no message of the lost connection survived");
 }

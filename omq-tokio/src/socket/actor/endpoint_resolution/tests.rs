@@ -415,7 +415,7 @@ async fn named_udp_connect_resolves_without_holding_the_actor() {
     let endpoint: Endpoint = format!("udp://omq-test-lookup.invalid:{}", address.port())
         .parse()
         .unwrap();
-    radio.connect(endpoint).await.unwrap();
+    radio.connect(endpoint.clone()).await.unwrap();
     radio
         .send(crate::Message::with_group("weather", "hot"))
         .await
@@ -428,6 +428,10 @@ async fn named_udp_connect_resolves_without_holding_the_actor() {
         .unwrap();
     let (group, body) = crate::transport::udp::decode_datagram(&datagram[..len]).unwrap();
     assert_eq!((&group[..], &body[..]), (&b"weather"[..], &b"hot"[..]));
+
+    // The name that connected also disconnects; the caller never saw the
+    // resolved address.
+    radio.disconnect(endpoint).await.unwrap();
 
     // A lookup that never answers leaves the actor serving other commands.
     let _guard = TEST_STALL_LOCK.lock().await;

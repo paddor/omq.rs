@@ -21,7 +21,13 @@ pub(crate) use unix::RecvNotify;
 pub(crate) use windows::RecvNotify;
 
 #[cfg(unix)]
-pub(crate) use unix::PollWaiter;
+pub(crate) use unix::{PollWaiter, check_descriptors};
+
+/// Descriptor items are not polled on Windows.
+#[cfg(windows)]
+pub(crate) fn check_descriptors(_items: &mut [crate::poll::ZmqPollItem]) -> i32 {
+    0
+}
 
 #[cfg(windows)]
 #[allow(unused_imports)]

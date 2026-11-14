@@ -101,6 +101,8 @@ export interface NativeSocketOptions {
   routerMandatory?: boolean
   conflate?: boolean
   xpubNodrop?: boolean
+  maxMessageParts?: number
+  maxPeerSubscriptions?: number
   onMute?: string
   workloadProfile?: string
   compressionDictionary?: Uint8Array

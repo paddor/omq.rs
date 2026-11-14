@@ -835,6 +835,16 @@ pub fn omq_workload_profile() -> Int {
   1100
 }
 
+/// Return OMQ_MAX_MESSAGE_PARTS constant. Default 1024; -1 means no limit.
+pub fn omq_max_message_parts() -> Int {
+  1101
+}
+
+/// Return OMQ_MAX_PEER_SUBSCRIPTIONS constant. Default 65536; -1 means no limit.
+pub fn omq_max_peer_subscriptions() -> Int {
+  1102
+}
+
 /// Return OMQ_ON_MUTE block mode value.
 pub fn omq_on_mute_block() -> Int {
   0

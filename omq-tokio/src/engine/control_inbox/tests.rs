@@ -93,3 +93,35 @@ async fn protocol_commands_never_wait_and_keep_fifo_across_the_ring() {
     assert_eq!(prefixes, [0, 1, 2, 3, 4, 5]);
     assert!(receiver.is_empty());
 }
+
+/// The ring holds older commands than the overflow. A receive that saw
+/// the ring empty must not then take from the overflow past commands
+/// the sender put in the ring meanwhile.
+#[test]
+fn overflowed_commands_never_overtake_the_ring() {
+    const COMMANDS: u32 = 300_000;
+    let (sender, mut receiver) = channel(1);
+    let producer = std::thread::spawn(move || {
+        for value in 0..COMMANDS {
+            let prefix = bytes::Bytes::copy_from_slice(&value.to_be_bytes());
+            sender
+                .try_send(PeerDriverCommand::SendCommand(Command::Subscribe(prefix)))
+                .unwrap();
+        }
+        sender
+    });
+    let mut next = 0;
+    while next < COMMANDS {
+        let Ok(command) = receiver.try_recv() else {
+            std::hint::spin_loop();
+            continue;
+        };
+        let PeerDriverCommand::SendCommand(Command::Subscribe(prefix)) = command else {
+            panic!("unexpected command");
+        };
+        let value = u32::from_be_bytes(prefix[..].try_into().unwrap());
+        assert_eq!(value, next, "a command overtook an older one");
+        next += 1;
+    }
+    drop(producer.join().unwrap());
+}

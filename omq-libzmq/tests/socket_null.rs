@@ -11,6 +11,10 @@ use omq_zmq::{
 const ZMQ_PAIR: i32 = 0;
 const ZMQ_SNDHWM: i32 = 23;
 const ZMQ_EVENT_ALL: i32 = 0xFFFF;
+// POSIX defines this code, so `zmq.h` keeps the system value there.
+#[cfg(unix)]
+const ZMQ_ENOTSOCK: i32 = libc::ENOTSOCK;
+#[cfg(not(unix))]
 const ZMQ_ENOTSOCK: i32 = 156_384_721;
 
 #[test]

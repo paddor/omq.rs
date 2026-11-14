@@ -46,6 +46,8 @@ pub struct Connection {
     views: crate::views::Views,
     received_descriptors: u64,
     receive_polling: bool,
+    /// Retirements of the peer's regions that were acted on.
+    retirements_seen: u64,
 }
 
 /// A decoded single message or a validated batch awaiting application receive.
@@ -105,6 +107,7 @@ impl Connection {
             .atomic64(crate::carrier::COUNT_OFFSET)
             .store(count as u64, Ordering::Relaxed);
 
+        send_pool.retirements().subscribe(&outgoing);
         let descriptors = VecDeque::from([
             outgoing.mapping.descriptor()?,
             outgoing
@@ -133,6 +136,7 @@ impl Connection {
             views: crate::views::Views::new(count.max(crate::BATCH_MAX_MESSAGES)),
             received_descriptors: 0,
             receive_polling: false,
+            retirements_seen: 0,
         })
     }
 
@@ -246,7 +250,16 @@ impl Connection {
     /// # Errors
     /// Returns `WouldBlock` when empty, or an error for invalid shared cursors.
     pub fn try_read_carrier(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
-        let table = self.incoming("missing SHM carrier")?;
+        let Some(table) = &self.incoming else {
+            return Err(invalid("missing SHM carrier"));
+        };
+        // One load per read. The peer wakes this reader for a retirement,
+        // so its regions are unmapped also when no message follows.
+        let retirements = table.carrier.retirements(&table.mapping);
+        if retirements != self.retirements_seen {
+            self.retirements_seen = retirements;
+            self.inbound.release_retired(table);
+        }
         table.carrier.read(&table.mapping, bytes)
     }
 

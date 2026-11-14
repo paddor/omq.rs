@@ -934,6 +934,74 @@ async fn router_handover_evicts_old_peer() {
     assert!(r.is_err(), "dealer_a should not receive after handover");
 }
 
+/// A handover must not leave the identity without a route. A sender on
+/// another thread would get `Unroutable` under `router_mandatory`, though
+/// the old and the new connection are both alive at that moment.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn router_handover_keeps_the_identity_routable() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let ep = inproc_ep("rd-handover-gap");
+    let router = Socket::new(
+        SocketType::Router,
+        Options::default().router_mandatory(true),
+    );
+    let mut mon = router.monitor();
+    router.bind(ep.clone()).await.unwrap();
+
+    let options = Options::default()
+        .identity(bytes::Bytes::from_static(b"gamma"))
+        .reconnect(ReconnectPolicy::Disabled);
+    let mut current = Socket::new(SocketType::Dealer, options.clone());
+    current.connect(ep.clone()).await.unwrap();
+    loop {
+        match tokio::time::timeout(Duration::from_secs(5), mon.recv()).await {
+            Ok(Ok(MonitorEvent::HandshakeSucceeded { .. })) => break,
+            Ok(Ok(_)) => {}
+            other => panic!("expected HandshakeSucceeded, got {other:?}"),
+        }
+    }
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let sender = std::thread::spawn({
+        let (router, stop) = (router.clone(), stop.clone());
+        move || {
+            let mut unroutable = 0_usize;
+            // Relaxed: a plain stop flag.
+            while !stop.load(Ordering::Relaxed) {
+                // A full queue is fine; only a missing route counts.
+                if let Err(omq_tokio::TrySendError::Error(Error::Unroutable)) =
+                    router.try_send(Message::multipart(["gamma", "x"]))
+                {
+                    unroutable += 1;
+                }
+            }
+            unroutable
+        }
+    });
+
+    for _ in 0..200 {
+        let next = Socket::new(SocketType::Dealer, options.clone());
+        next.connect(ep.clone()).await.unwrap();
+        loop {
+            match tokio::time::timeout(Duration::from_secs(5), mon.recv()).await {
+                Ok(Ok(MonitorEvent::Disconnected {
+                    reason: DisconnectReason::Handover,
+                    ..
+                })) => break,
+                Ok(Ok(_)) => {}
+                other => panic!("expected Disconnected(Handover), got {other:?}"),
+            }
+        }
+        current = next;
+    }
+    stop.store(true, Ordering::Relaxed);
+    let unroutable = sender.join().unwrap();
+    drop(current);
+    assert_eq!(unroutable, 0, "sends found no route during a handover");
+}
+
 #[tokio::test]
 async fn router_handover_monitor_event() {
     let ep = inproc_ep("rd-handover-mon");
@@ -1023,62 +1091,57 @@ async fn router_handover_auto_identity_no_collision() {
     }
 }
 
+/// Only ROUTER and PEER route by the peer's identity, so only they hand an
+/// identity over. SERVER and REP keep every peer: two clients with one
+/// identity would otherwise evict each other on every reconnect.
 #[tokio::test]
-async fn server_handover_evicts_old_peer() {
-    let ep = inproc_ep("sv-handover");
-    let server = Socket::new(SocketType::Server, Options::default());
-    let mut mon = server.monitor();
-    server.bind(ep.clone()).await.unwrap();
+async fn server_and_rep_keep_peers_that_share_an_identity() {
+    for (kind, peer_kind) in [
+        (SocketType::Server, SocketType::Client),
+        (SocketType::Rep, SocketType::Req),
+    ] {
+        let ep = inproc_ep(&format!("shared-identity-{kind:?}"));
+        let server = Socket::new(kind, Options::default());
+        let mut mon = server.monitor();
+        server.bind(ep.clone()).await.unwrap();
 
-    let no_reconnect = Options::default()
-        .identity(bytes::Bytes::from_static(b"cli"))
-        .reconnect(ReconnectPolicy::Disabled);
+        let options = Options::default().identity(bytes::Bytes::from_static(b"cli"));
+        let client_a = Socket::new(peer_kind, options.clone());
+        let client_b = Socket::new(peer_kind, options);
+        client_a.connect(ep.clone()).await.unwrap();
+        client_b.connect(ep).await.unwrap();
+        server
+            .wait_connected(2, Duration::from_secs(5))
+            .await
+            .expect("the second client replaced the first");
 
-    let client_a = Socket::new(SocketType::Client, no_reconnect.clone());
-    client_a.connect(ep.clone()).await.unwrap();
-    client_a
-        .wait_connected(1, Duration::from_secs(1))
-        .await
-        .expect("client a did not connect");
+        // Each client still gets the reply to its own request.
+        for (client, body) in [(&client_a, "from-a"), (&client_b, "from-b")] {
+            client.send(Message::single(body)).await.unwrap();
+            let request = tokio::time::timeout(Duration::from_secs(5), server.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(request.part_bytes(0).unwrap().as_ref(), body.as_bytes());
+            let reply = match request.routing_id() {
+                Some(routing_id) => Message::single(body).with_routing_id(routing_id),
+                None => Message::single(body),
+            };
+            server.send(reply).await.unwrap();
+            let reply = tokio::time::timeout(Duration::from_secs(5), client.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(reply.part_bytes(0).unwrap().as_ref(), body.as_bytes());
+        }
 
-    client_a.send(Message::single("ping")).await.unwrap();
-    let got = tokio::time::timeout(Duration::from_millis(500), server.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(got, Message::single("ping"));
-    assert!(got.routing_id().is_some());
-
-    let client_b = Socket::new(SocketType::Client, no_reconnect);
-    client_b.connect(ep).await.unwrap();
-    client_b
-        .wait_connected(1, Duration::from_secs(1))
-        .await
-        .expect("client b did not connect");
-
-    // Verify handover monitor event.
-    let mut found = false;
-    for _ in 0..20 {
-        match tokio::time::timeout(Duration::from_millis(200), mon.recv()).await {
-            Ok(Ok(MonitorEvent::Disconnected { reason, .. })) => {
-                assert_eq!(reason, DisconnectReason::Handover);
-                found = true;
-                break;
-            }
-            Ok(Ok(_)) => {}
-            _ => break,
+        while let Ok(event) = mon.try_recv() {
+            assert!(
+                !matches!(event, MonitorEvent::Disconnected { .. }),
+                "{kind:?} dropped a peer: {event:?}"
+            );
         }
     }
-
-    assert!(found, "SERVER must emit Disconnected(Handover)");
-
-    client_b.send(Message::single("pong")).await.unwrap();
-    let got = tokio::time::timeout(Duration::from_millis(500), server.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(got, Message::single("pong"));
-    assert!(got.routing_id().is_some());
 }
 
 #[tokio::test]

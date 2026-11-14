@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- `SocketOption.MaxMessageParts` and `SocketOption.MaxPeerSubscriptions`
+  limit the parts of one received message and the prefixes or groups one
+  peer may hold; `-1` removes the limit.
+
+### Changed
+
+- `Poller.Wait` and `Poller.WaitAsync` blocked when the context shuts down
+  throw `OmqException` with `ETERM`. Before, they reported the socket as
+  readable.
+
 ## [0.2.14] - 2026-11-12
 
 ### Changed

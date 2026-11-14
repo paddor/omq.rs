@@ -245,3 +245,18 @@ impl SocketDriver {
         }
     }
 }
+
+/// An actor dropped without [`SocketDriver::teardown`] lost its runtime
+/// (`Context::term`) or its task was aborted. Close what the socket handles
+/// wait on, so blocked sends and receives end with `Closed`. After a
+/// teardown these calls change nothing.
+impl Drop for SocketDriver {
+    fn drop(&mut self) {
+        self.link.cancel.cancel();
+        self.routing.send_strategy.shutdown();
+        self.link.recv_tx.close();
+        if let Some(fanin) = &self.link.spsc.fanin {
+            fanin.close();
+        }
+    }
+}

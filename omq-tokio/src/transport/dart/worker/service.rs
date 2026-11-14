@@ -230,9 +230,9 @@ impl EndpointWorker {
             });
         }
 
-        // Until activation installs a session, resend the current phase on
-        // the retry interval so a lost handshake packet is recovered.
-        if peer.session.is_none() {
+        // Resend the current phase on the retry interval until the
+        // handshake is settled, so a lost handshake packet is recovered.
+        if peer.handshake_unsettled() {
             peer.lease.retry_due(now);
         }
         let sent = self.send_handshake(source, &mut peer.lease.handshake, pass.control, pass.stats);

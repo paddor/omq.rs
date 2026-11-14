@@ -162,6 +162,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An `inproc://` peer that the socket refuses, for its peer limit or an
   incompatible socket type, is reported as `HandshakeFailed`. Before, the
   refusal left no monitor event.
+- A `dart://` connector resends CONFIRM every 100 ms until the listener
+  answers with session traffic. Before, it sent CONFIRM once more at
+  most, and a lost one left it connected to a listener that had not
+  admitted it, for the three seconds of its lease.
 
 ## [0.34.3] - 2026-11-04
 

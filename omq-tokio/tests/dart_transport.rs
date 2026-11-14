@@ -975,6 +975,66 @@ async fn faulty_relay(
     )
 }
 
+/// UDP relay between one client and `target` that drops the client's
+/// first CONFIRM. Returns whether it dropped one.
+async fn confirm_dropping_relay(
+    relay: tokio::net::UdpSocket,
+    target: std::net::SocketAddr,
+    cancel: tokio_util::sync::CancellationToken,
+) -> bool {
+    let mut bytes = [0; dart::MAX_DATAGRAM];
+    let mut client = None;
+    let mut dropped = false;
+    loop {
+        let (length, source) = tokio::select! {
+            () = cancel.cancelled() => break,
+            result = relay.recv_from(&mut bytes) => result.unwrap(),
+        };
+        let server = source == target;
+        let destination = if server {
+            client.expect("client initiated handshake")
+        } else {
+            client = Some(source);
+            target
+        };
+        let confirm = dart::decode_ready(&bytes[..length])
+            .is_some_and(|ready| ready.phase == dart::Phase::Confirm);
+        if !server && confirm && !dropped {
+            dropped = true;
+            continue;
+        }
+        relay.send_to(&bytes[..length], destination).await.unwrap();
+    }
+    dropped
+}
+
+/// A connector resends CONFIRM until the listener answers. Without that, a
+/// lost CONFIRM leaves it connected to a listener that never admitted it,
+/// until its lease runs out after three seconds.
+#[tokio::test]
+async fn lost_confirm_is_resent_before_the_lease_expires() {
+    let gather = Socket::new(SocketType::Gather, Options::default());
+    let scatter = Socket::new(SocketType::Scatter, Options::default());
+    let target = address(&gather.bind(endpoint(0)).await.unwrap());
+    let relay = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let relay_endpoint = endpoint(relay.local_addr().unwrap().port());
+    let stop = tokio_util::sync::CancellationToken::new();
+    let forwarder = tokio::spawn(confirm_dropping_relay(relay, target, stop.clone()));
+
+    scatter.connect(relay_endpoint).await.unwrap();
+    scatter.send(Message::single("confirmed")).await.unwrap();
+    let message = tokio::time::timeout(Duration::from_secs(2), gather.recv())
+        .await
+        .expect("the connector did not resend its lost CONFIRM")
+        .unwrap();
+    assert_eq!(message.part_slice(0).unwrap(), b"confirmed");
+
+    stop.cancel();
+    assert!(forwarder.await.unwrap(), "the relay saw no CONFIRM to drop");
+    scatter.close().await.unwrap();
+    gather.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn repairs_burst_and_tail_loss_with_lost_feedback_and_reordering() {
     for congestion in [DartCongestion::Lan, DartCongestion::Adaptive] {

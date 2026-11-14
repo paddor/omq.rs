@@ -170,6 +170,9 @@ struct Peer {
     lease: Lease,
     generation: u64,
     reported: bool,
+    /// Session traffic from the peer arrived. Until then a connector
+    /// cannot tell whether its CONFIRM got through.
+    heard: bool,
     /// Whether the carrier reports ECN for this source's address family.
     ecn_supported: bool,
     session: Option<Session>,
@@ -201,6 +204,19 @@ impl std::task::Wake for BudgetWake {
 }
 
 impl Peer {
+    /// Valid session traffic arrived at `at`: extend the lease.
+    fn renew(&mut self, at: Instant) {
+        self.lease.expires = at + LEASE;
+        self.heard = true;
+    }
+
+    /// Whether the current handshake phase still needs resending. A
+    /// listener answers a CONFIRM only with session traffic, so a
+    /// connector repeats it until some arrives.
+    fn handshake_unsettled(&self) -> bool {
+        self.session.is_none() || (self.lease.handshake.is_connector() && !self.heard)
+    }
+
     fn install_io(
         &mut self,
         generation: u64,
@@ -659,6 +675,7 @@ impl EndpointWorker {
             },
             generation: next,
             reported: false,
+            heard: false,
             ecn_supported: self.io.ecn_receive_supported(source.ip()) == Some(true),
             session: None,
             pool: None,

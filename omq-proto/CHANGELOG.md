@@ -57,6 +57,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ZstdEncoder` sends a part above the decoder's 1 GiB limit as
   plaintext. Before, it compressed the part, and the peer's decoder
   refused the frame and closed the connection.
+- `Lz4Encoder` gives back compression scratch above 1 MiB once the part
+  is encoded. Before, one large part left a buffer of its size in the
+  encoder until the connection closed.
 
 ### Security
 

@@ -162,6 +162,24 @@ fn large_compressible_part_uses_lz4b() {
 }
 
 #[test]
+fn scratch_of_a_large_part_is_released_after_the_encode() {
+    let mut enc = Lz4Encoder::new();
+    // One block, then several blocks.
+    for block_size in [LZ4M_BLOCK_SIZE, 64 * 1024] {
+        enc.block_size = block_size;
+        let large = Message::single(vec![0x41u8; 2 * SCRATCH_RETAIN]);
+        assert_eq!(enc.encode(&large).unwrap().len(), 1);
+        assert_eq!(enc.out_buf.capacity(), 0);
+    }
+    // A part under the bound keeps its scratch for the next one.
+    enc.encode(&Message::single(vec![0x41u8; 4096])).unwrap();
+    let kept = enc.out_buf.capacity();
+    assert!(kept > 0 && kept <= SCRATCH_RETAIN);
+    enc.encode(&Message::single(vec![0x42u8; 4096])).unwrap();
+    assert_eq!(enc.out_buf.capacity(), kept);
+}
+
+#[test]
 fn incompressible_falls_back_to_plaintext() {
     let mut plain = Vec::with_capacity(MIN_COMPRESS_NO_DICT);
     for i in 0..MIN_COMPRESS_NO_DICT {

@@ -50,6 +50,10 @@ const SENTINEL_LZ4D: [u8; 4] = *b"LZ4D";
 
 const ENVELOPE_LZ4B: usize = 12;
 
+/// Compression scratch an encoder keeps between calls. One part above this
+/// would otherwise pin a buffer of its size for the encoder's lifetime.
+const SCRATCH_RETAIN: usize = 1 << 20;
+
 /// Maximum decompressed size per LZ4 block (RFC §5.3a).
 /// 1 GiB, well within the LZ4 block API's i32 parameter limit.
 const LZ4M_BLOCK_SIZE: usize = 0x4000_0000;
@@ -342,7 +346,7 @@ impl Lz4Encoder {
         }
         let mut out = self.ship_dictionary();
         let bound = block::get_maximum_output_size(size);
-        self.out_buf.resize(arena::HEADER + bound, 0);
+        self.grow_scratch(arena::HEADER + bound);
         let compressed = if size >= self.send.effective_threshold() {
             Some(
                 self.compressor
@@ -374,21 +378,42 @@ impl Lz4Encoder {
         if plain.len() < self.send.effective_threshold() {
             return Ok(plaintext_payload(&plain));
         }
-        if plain.len() > self.block_size {
-            return self.encode_part_multiblock(&plain);
+        let encoded = if plain.len() > self.block_size {
+            self.encode_part_multiblock(&plain)
+        } else {
+            self.encode_part_block(&plain)
+        };
+        self.trim_scratch();
+        encoded
+    }
+
+    /// Make the scratch at least `len` bytes long.
+    fn grow_scratch(&mut self, len: usize) {
+        if self.out_buf.len() < len {
+            // Nothing in the old scratch is needed, and a large zeroed
+            // allocation comes mapped, without a write per byte.
+            self.out_buf = vec![0; len];
         }
+    }
+
+    /// Give back a scratch grown past [`SCRATCH_RETAIN`].
+    fn trim_scratch(&mut self) {
+        if self.out_buf.capacity() > SCRATCH_RETAIN {
+            self.out_buf = Vec::new();
+        }
+    }
+
+    fn encode_part_block(&mut self, plain: &Bytes) -> Result<Payload> {
         let bound = block::get_maximum_output_size(plain.len());
-        if self.out_buf.len() < ENVELOPE_LZ4B + bound {
-            self.out_buf.resize(ENVELOPE_LZ4B + bound, 0);
-        }
+        self.grow_scratch(ENVELOPE_LZ4B + bound);
         let n = self
             .compressor
-            .compress_into(&plain, &mut self.out_buf[ENVELOPE_LZ4B..])
+            .compress_into(plain, &mut self.out_buf[ENVELOPE_LZ4B..])
             .map_err(|e| Error::Protocol(format!("lz4 compress: {e}")))?;
         // RFC §5.4: passthrough if the compressed envelope is no smaller
         // than the plaintext envelope.
         if n + ENVELOPE_LZ4B >= plain.len() + ENVELOPE_PLAIN {
-            return Ok(plaintext_payload(&plain));
+            return Ok(plaintext_payload(plain));
         }
         self.out_buf[..4].copy_from_slice(&SENTINEL_LZ4B);
         self.out_buf[4..ENVELOPE_LZ4B].copy_from_slice(&(plain.len() as u64).to_le_bytes());
@@ -403,9 +428,7 @@ impl Lz4Encoder {
         let num_blocks = total.div_ceil(block_size);
         let block_bound = block::get_maximum_output_size(block_size);
         let max_out = ENVELOPE_LZ4B + num_blocks * (4 + block_bound);
-        if self.out_buf.len() < max_out {
-            self.out_buf.resize(max_out, 0);
-        }
+        self.grow_scratch(max_out);
 
         self.out_buf[..4].copy_from_slice(&SENTINEL_LZ4M);
         self.out_buf[4..12].copy_from_slice(&(total as u64).to_le_bytes());

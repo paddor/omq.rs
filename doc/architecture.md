@@ -113,9 +113,12 @@ a nonblocking vectored write; the driver owns any unfinished output.
 | Identity or reply route | ROUTER, REP, SERVER, PEER | Selected peer or saved request route |
 | Exclusive | PAIR, CHANNEL | One peer |
 
-Round-robin peers have bounded send pipes. Connect-side pipes exist before the
-peer binds, so early sends keep their order; a bind-side socket without a ready
-pipe is mute. HWM bounds each pipe, not total socket memory.
+Round-robin peers have bounded send pipes. A connect-side pipe belongs to its
+`connect()` route and exists before the peer binds, so early sends keep their
+order. Each connection borrows the pipe and gives it back when it ends; a
+connection lost before READY took nothing, so the redial keeps the whole queue.
+A bind-side socket without a ready pipe is mute. HWM bounds each pipe, not
+total socket memory.
 
 A PUSH socket on one I/O thread picks one ready peer per message:
 

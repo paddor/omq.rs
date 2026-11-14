@@ -24,10 +24,14 @@ impl<'a> PeerLifecycle<'a> {
         let peer = self.driver.peers.remove(&peer_id);
 
         if let Some(ref p) = peer {
-            self.driver
+            if let Some(tx) = self
+                .driver
                 .routing
                 .send_strategy
-                .connection_removed(peer_id, p.origin.route_id);
+                .connection_removed(peer_id, p.origin.route_id)
+            {
+                self.driver.park_route_producer(p, tx);
+            }
 
             if self.driver.socket_type == SocketType::Req {
                 self.driver

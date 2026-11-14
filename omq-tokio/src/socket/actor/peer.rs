@@ -53,7 +53,7 @@ impl SocketDriver {
                     options,
                     side: Side::Connect,
                     route_id,
-                    send_pipe_rx: self.take_dialer_send_pipe(route_id),
+                    send_pipe_rx: self.lend_route_queue(route_id),
                 };
 
                 self.spawn_on_handshake(conn, peer);
@@ -121,13 +121,8 @@ impl SocketDriver {
                 // No redial: end the route, so a later connect() dials again.
                 self.drop_dial_route(peer.origin.route_id);
             } else {
-                let origin = &peer.origin;
-                self.redial_closed_peer(
-                    origin.route_id,
-                    origin.endpoint.clone(),
-                    origin.options.clone(),
-                    peer.handshake.ready,
-                );
+                // Removing the peer parked its queue if the route keeps it.
+                self.redial_closed_peer(LostRoute::of(&peer));
             }
         }
     }
@@ -158,14 +153,9 @@ impl SocketDriver {
             return;
         }
         peer.progress.redialed = true;
-        let origin = &peer.origin;
-        let (route_id, endpoint, options) = (
-            origin.route_id,
-            origin.endpoint.clone(),
-            origin.options.clone(),
-        );
-        let was_ready = peer.handshake.ready;
-        self.redial_closed_peer(route_id, endpoint, options, was_ready);
+        // Its route still holds the queue: the peer is removed later.
+        let lost = LostRoute::of(peer);
+        self.redial_closed_peer(lost);
     }
 
     /// Redial a route whose connected transport produced no peer. Its dial
@@ -188,9 +178,12 @@ impl SocketDriver {
             .failed_attempts
             .load(Ordering::Relaxed)
             .saturating_add(1);
-        self.drop_dial_route(route_id);
-        if !matches!(options.reconnect, ReconnectPolicy::Disabled) {
-            self.start_redial(endpoint, options, failed_attempts);
+        let redial = !matches!(options.reconnect, ReconnectPolicy::Disabled);
+        // Nothing took from the queue: the connection never became a peer.
+        let queue = self.take_route_queue(route_id, redial);
+        self.endpoints.dialers.retain(|d| d.route_id != route_id);
+        if redial {
+            self.start_redial(endpoint, options, failed_attempts, queue);
         }
     }
 
@@ -222,14 +215,16 @@ impl SocketDriver {
         }
     }
 
-    /// Restart the dial loop for a lost client peer, carrying its backoff.
-    fn redial_closed_peer(
-        &mut self,
-        route_id: u64,
-        endpoint: omq_proto::Endpoint,
-        options: std::sync::Arc<omq_proto::Options>,
-        was_ready: bool,
-    ) {
+    /// Restart the dial loop for a lost client peer, carrying its backoff
+    /// and the queue of its route.
+    fn redial_closed_peer(&mut self, lost: LostRoute) {
+        let LostRoute {
+            route_id,
+            endpoint,
+            options,
+            was_ready,
+            keep_queue,
+        } = lost;
         // Transport success does not reset backoff: READY does.
         let failed_attempts = if was_ready {
             1
@@ -242,9 +237,10 @@ impl SocketDriver {
                 .saturating_add(1)
         };
 
+        let queue = self.take_route_queue(route_id, keep_queue);
         // Only this route: the endpoint may carry other connects.
         self.endpoints.dialers.retain(|d| d.route_id != route_id);
-        self.start_redial(endpoint, options, failed_attempts);
+        self.start_redial(endpoint, options, failed_attempts, queue);
     }
 
     pub(super) fn evict_peer_for_handover(&mut self, peer_id: u64) {
@@ -302,14 +298,6 @@ impl SocketDriver {
     pub(super) fn drop_dial_route(&mut self, route_id: u64) {
         self.endpoints.dialers.retain(|d| d.route_id != route_id);
         self.remove_connect_route(route_id);
-    }
-
-    fn take_dialer_send_pipe(&mut self, route_id: u64) -> Option<crate::engine::SendPipeConsumer> {
-        self.endpoints
-            .dialers
-            .iter_mut()
-            .find(|d| d.route_id == route_id)
-            .and_then(|d| d.send_pipe_rx.take())
     }
 
     fn spawn_on_handshake(&mut self, mut conn: AnyConn, peer: PeerSetup) {
@@ -505,6 +493,27 @@ pub(crate) fn spawn_driver(
     io_pool: &crate::context::IoPoolHandle,
 ) -> tokio::task::JoinHandle<()> {
     io_pool.spawn_primary(async move { driver.run().await })
+}
+
+/// A lost client peer's route, as its redial needs it.
+struct LostRoute {
+    route_id: u64,
+    endpoint: omq_proto::Endpoint,
+    options: std::sync::Arc<omq_proto::Options>,
+    was_ready: bool,
+    keep_queue: bool,
+}
+
+impl LostRoute {
+    fn of(peer: &PeerEntry) -> Self {
+        Self {
+            route_id: peer.origin.route_id,
+            endpoint: peer.origin.endpoint.clone(),
+            options: peer.origin.options.clone(),
+            was_ready: peer.handshake.ready,
+            keep_queue: SocketDriver::keeps_route_queue(peer),
+        }
+    }
 }
 
 impl PeerSetup {

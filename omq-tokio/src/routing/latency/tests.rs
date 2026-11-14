@@ -181,3 +181,35 @@ fn state_prefers_peer_space_before_pending_space() {
         &peer_signal
     ));
 }
+
+#[test]
+fn taken_connect_pipe_keeps_its_queue_and_routes_again_under_a_new_route() {
+    let mut send = LatencySend::new(&Options::default().send_hwm(4));
+    let mut rx = send.make_connect_pipe(
+        1,
+        #[cfg(feature = "dart")]
+        None,
+    );
+    let submitter = send.submitter();
+    submitter.try_send(Message::from_slice(b"queued")).unwrap();
+
+    let tx = send.take_connect_pipe(1).expect("route 1 has a pipe");
+    assert!(
+        submitter
+            .try_send(Message::from_slice(b"no route"))
+            .is_err()
+    );
+    assert!(send.take_connect_pipe(1).is_none());
+
+    send.insert_connect_pipe(2, tx);
+    submitter.try_send(Message::from_slice(b"after")).unwrap();
+    let mut received = Vec::new();
+    rx.drain_into(&mut received, 4, usize::MAX);
+    assert_eq!(
+        received,
+        [
+            Message::from_slice(b"queued"),
+            Message::from_slice(b"after")
+        ]
+    );
+}

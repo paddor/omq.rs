@@ -130,7 +130,7 @@ impl ActivePipes {
             }
             SendPipeError::Closed(message) => {
                 let peer_id = self.active[index].peer_id;
-                self.remove_peer(peer_id);
+                drop(self.remove_peer(peer_id));
                 omq_proto::TrySendError::Full(message)
             }
             #[cfg(feature = "dart")]
@@ -249,10 +249,10 @@ impl ActivePipes {
         }
     }
 
-    fn remove_peer(&mut self, peer_id: u64) {
+    fn remove_peer(&mut self, peer_id: u64) -> Option<SendPipeProducer> {
         self.pipe_peers.remove(&peer_id);
         if let Some(pos) = self.active.iter().position(|p| p.peer_id == peer_id) {
-            self.active.remove(pos);
+            let pipe = self.active.remove(pos);
             if self.active.is_empty() {
                 self.cursor = 0;
             } else {
@@ -264,14 +264,19 @@ impl ActivePipes {
                     self.cursor = 0;
                 }
             }
-        } else if let Some(pos) = self.inactive.iter().position(|p| p.peer_id == peer_id) {
-            self.inactive.remove(pos);
-            if self.inactive.is_empty() {
-                self.inactive_cursor = 0;
-            } else {
-                self.inactive_cursor %= self.inactive.len();
-            }
+
+            return Some(pipe.tx);
         }
+
+        let pos = self.inactive.iter().position(|p| p.peer_id == peer_id)?;
+        let pipe = self.inactive.remove(pos);
+        if self.inactive.is_empty() {
+            self.inactive_cursor = 0;
+        } else {
+            self.inactive_cursor %= self.inactive.len();
+        }
+
+        Some(pipe.tx)
     }
 
     fn has_pipe(&self, peer_id: u64) -> bool {
@@ -279,7 +284,7 @@ impl ActivePipes {
     }
 
     fn insert_pipe(&mut self, peer_id: u64, tx: SendPipeProducer) {
-        self.remove_peer(peer_id);
+        drop(self.remove_peer(peer_id));
         self.pipe_peers.insert(peer_id);
 
         let pos = {
@@ -478,11 +483,22 @@ impl RoundRobinSend {
         let (tx, rx) = crate::engine::send_pipe_with_mode(self.pipe_cap, self.pipe_mode);
         #[cfg(feature = "dart")]
         let tx = super::with_dart(tx, dart);
-        let mut active = self.active.lock();
-        active.insert_pipe(route_id, tx);
-        self.active_changed.notify_changed();
+        self.insert_connect_pipe(route_id, tx);
 
         rx
+    }
+
+    /// Route sends into a connect route's pipe, as at `connect()`.
+    pub(crate) fn insert_connect_pipe(&mut self, route_id: u64, tx: SendPipeProducer) {
+        self.active.lock().insert_pipe(route_id, tx);
+        self.active_changed.notify_changed();
+    }
+
+    /// Stop routing into a route's pipe and hand back its producer.
+    pub(crate) fn take_connect_pipe(&mut self, route_id: u64) -> Option<SendPipeProducer> {
+        let tx = self.active.lock().remove_peer(route_id);
+        self.active_changed.notify_changed();
+        tx
     }
 
     pub(crate) fn connection_added(
@@ -513,8 +529,7 @@ impl RoundRobinSend {
     }
 
     pub(crate) fn connection_removed(&mut self, route_id: u64) {
-        self.active.lock().remove_peer(route_id);
-        self.active_changed.notify_changed();
+        drop(self.take_connect_pipe(route_id));
     }
 
     /// Cloneable handle for enqueuing from a spawned task. Lets the socket

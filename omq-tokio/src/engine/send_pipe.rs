@@ -7,7 +7,10 @@ use super::signal::{DataSignal, StateSignal};
 use super::transmit_slot::PeerTransmitSlot;
 
 mod consumer;
+mod lease;
 mod producer;
+
+pub(crate) use lease::{SendPipeHome, SendPipeLease};
 
 const SEND_PIPE_LWM_DIVISOR: usize = 2;
 

@@ -34,6 +34,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A connection that fails before its handshake completes, for example to a
+  proxy that accepts and closes while its backend is down, leaves the
+  messages queued on its `connect()` route in place, and the redial sends
+  them. A REQ request queued there still gets its reply. Before, up to
+  `send_hwm` messages were dropped, but only when something had accepted
+  the TCP connection; a refused connect kept them.
 - Codec output such as a PING no longer lands inside another frame. A
   transmit slot batch could end between a frame header and its payload,
   and a compression offload result could be written ahead of the tail of

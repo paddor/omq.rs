@@ -16,6 +16,7 @@ mod listener;
 mod peer;
 mod peer_entry;
 mod peer_materialize;
+mod route_queue;
 mod subscriptions;
 mod udp_endpoints;
 
@@ -141,7 +142,7 @@ struct DialerEntry {
     task: EndpointTask,
     options: Arc<Options>,
     route_id: u64,
-    send_pipe_rx: Option<crate::engine::SendPipeConsumer>,
+    queue: route_queue::RouteQueue,
     failed_attempts: Arc<std::sync::atomic::AtomicU32>,
 }
 
@@ -277,6 +278,12 @@ impl EndpointTable {
     fn dialer(&self, route_id: u64) -> Option<&DialerEntry> {
         self.dialers
             .iter()
+            .find(|dialer| dialer.route_id == route_id)
+    }
+
+    fn dialer_mut(&mut self, route_id: u64) -> Option<&mut DialerEntry> {
+        self.dialers
+            .iter_mut()
             .find(|dialer| dialer.route_id == route_id)
     }
 

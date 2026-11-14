@@ -29,7 +29,7 @@ use super::actor_output::PeerOutput;
 use super::compression_pool::CompressionPool;
 use super::peer_completion::CompletionProgress;
 use super::rate_limit::SharedIpRateLimiter;
-use super::send_pipe::{SendPipeConsumer, SendPipeProducerHandle};
+use super::send_pipe::{SendPipeLease, SendPipeProducerHandle};
 use super::transmit_slot::PeerTransmitSlot;
 
 mod builder;
@@ -286,7 +286,7 @@ struct OutputSetup {
     compression_pool: Option<Arc<CompressionPool>>,
     /// Minimum message `byte_len` to trigger compression offloading.
     offload_threshold: usize,
-    send_pipe_rx: Option<SendPipeConsumer>,
+    send_pipe_rx: SendPipeLease,
     data_inbox: Option<super::data_inbox::Receiver>,
     arena_threshold: usize,
     arena_cap: usize,
@@ -298,7 +298,7 @@ impl Default for OutputSetup {
             encoder: None,
             compression_pool: None,
             offload_threshold: 0,
-            send_pipe_rx: None,
+            send_pipe_rx: SendPipeLease::default(),
             data_inbox: None,
             arena_threshold: omq_proto::frame_buffer::ARENA_THRESHOLD,
             arena_cap: omq_proto::frame_buffer::ARENA_INITIAL_CAP,

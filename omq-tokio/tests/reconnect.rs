@@ -463,3 +463,77 @@ async fn lost_peer_is_redialed_while_the_application_does_not_receive() {
     }
     assert!(expected > 1, "no message of the lost connection survived");
 }
+
+/// Accept one connection on a raw listener and close it before the ZMTP
+/// greeting, as a proxy with its backend down does. Frees the port after.
+async fn refuse_one_handshake(listener: tokio::net::TcpListener) {
+    let (stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+        .await
+        .expect("the dialer never connected")
+        .unwrap();
+    drop(stream);
+}
+
+/// A connection that fails before READY took nothing from the route's send
+/// queue, so the redial must find every queued message still there.
+#[tokio::test]
+async fn failed_handshake_keeps_the_queued_messages() {
+    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let ep = tcp_ep(listener.local_addr().unwrap().port());
+    let push = Socket::new(SocketType::Push, fast_reconnect());
+    push.connect(ep.clone()).await.unwrap();
+    for sequence in 0..8_u32 {
+        push.send(Message::single(sequence.to_le_bytes().to_vec()))
+            .await
+            .unwrap();
+    }
+
+    refuse_one_handshake(listener).await;
+    let pull = Socket::new(SocketType::Pull, Options::default());
+    rebind(&pull, &ep).await;
+    for sequence in 0..8_u32 {
+        let message = tokio::time::timeout(Duration::from_secs(5), pull.recv())
+            .await
+            .expect("a queued message was lost with the failed connection")
+            .unwrap();
+        assert_eq!(
+            message.part_bytes(0).unwrap().as_ref(),
+            sequence.to_le_bytes()
+        );
+    }
+}
+
+/// A REQ request queued behind a failed handshake is still sent after the
+/// redial, and the socket waits for its reply instead of taking a new one.
+#[tokio::test]
+async fn failed_handshake_keeps_the_queued_request() {
+    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let ep = tcp_ep(listener.local_addr().unwrap().port());
+    let req = Socket::new(SocketType::Req, fast_reconnect());
+    req.connect(ep.clone()).await.unwrap();
+    req.send(Message::single("request")).await.unwrap();
+
+    refuse_one_handshake(listener).await;
+    let rep = Socket::new(SocketType::Rep, Options::default());
+    rebind(&rep, &ep).await;
+    let request = tokio::time::timeout(Duration::from_secs(5), rep.recv())
+        .await
+        .expect("the queued request was lost with the failed connection")
+        .unwrap();
+    assert_eq!(request.part_bytes(0).unwrap().as_ref(), b"request");
+    assert!(
+        req.try_send(Message::single("second")).is_err(),
+        "REQ took a new request while the first one waits for its reply"
+    );
+
+    rep.send(Message::single("reply")).await.unwrap();
+    let reply = tokio::time::timeout(Duration::from_secs(5), req.recv())
+        .await
+        .expect("the reply never arrived")
+        .unwrap();
+    assert_eq!(reply.part_bytes(0).unwrap().as_ref(), b"reply");
+}

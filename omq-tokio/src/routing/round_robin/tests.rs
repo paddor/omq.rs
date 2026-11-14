@@ -266,3 +266,31 @@ fn connection_added_reuses_connect_pipe() {
     assert_eq!(batch[1].part_bytes(0).unwrap(), &b"post"[..]);
     assert_eq!(send_pipe_rx.drain_into(&mut batch, 1, usize::MAX), 0);
 }
+
+#[test]
+fn taken_connect_pipe_keeps_its_queue_and_routes_again_under_a_new_route() {
+    let mut send = RoundRobinSend::new(&Options::default().send_hwm(4));
+    let mut rx = connect_pipe(&mut send, 1);
+    let submitter = send.submitter();
+    submitter.try_send(Message::from_slice(b"queued")).unwrap();
+
+    let tx = send.take_connect_pipe(1).expect("route 1 has a pipe");
+    assert!(
+        submitter
+            .try_send(Message::from_slice(b"no route"))
+            .is_err()
+    );
+    assert!(send.take_connect_pipe(1).is_none());
+
+    send.insert_connect_pipe(2, tx);
+    submitter.try_send(Message::from_slice(b"after")).unwrap();
+    let mut received = Vec::new();
+    rx.drain_into(&mut received, 4, usize::MAX);
+    assert_eq!(
+        received,
+        [
+            Message::from_slice(b"queued"),
+            Message::from_slice(b"after")
+        ]
+    );
+}

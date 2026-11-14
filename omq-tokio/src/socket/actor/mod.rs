@@ -630,12 +630,17 @@ impl SocketDriver {
 }
 
 impl SocketDriver {
-    pub(super) fn ready_peer_count(&self) -> usize {
-        self.peers.values().filter(|p| p.handshake.ready).count()
-    }
-
+    /// A peer whose connection ended holds no place: it only waits for the
+    /// application to take its events.
     pub(super) fn can_accept_ready_peer(&self) -> bool {
-        max_peer_count(self.socket_type).is_none_or(|max| self.ready_peer_count() < max)
+        max_peer_count(self.socket_type).is_none_or(|max| {
+            let live = self
+                .peers
+                .values()
+                .filter(|peer| peer.handshake.ready && !peer.progress.ended())
+                .count();
+            live < max
+        })
     }
 }
 

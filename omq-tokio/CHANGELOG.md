@@ -186,6 +186,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   violation loses its connection at once. Before, the close went out as
   a session capsule first, and a peer that did not acknowledge it stayed
   connected and routable for five more seconds.
+- A lost connect-side peer is redialed at once, also while the application
+  does not receive. Before, a ROUTER or REP socket kept such a peer until
+  the application took its waiting messages, and did not reconnect until
+  then.
+- A new connection that announces the identity of a peer whose connection
+  already ended no longer drops the messages of that peer which still
+  wait for the application.
 
 ## [0.34.3] - 2026-11-04
 

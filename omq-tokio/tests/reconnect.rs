@@ -384,3 +384,64 @@ async fn connect_route_redials_after_its_transport_yields_no_peer() {
     .expect("the second endpoint was never redialed");
     assert_eq!(message.part_bytes(0).unwrap().as_ref(), b"hello");
 }
+
+/// A lost peer is redialed even while the application does not receive.
+/// ROUTER receives through the socket actor, which keeps a completed peer
+/// until the application took every message of it. That wait must delay
+/// only the peer's removal, not the reconnect, and a new connection with
+/// the same identity must not drop the messages still waiting.
+#[tokio::test]
+async fn lost_peer_is_redialed_while_the_application_does_not_receive() {
+    let identity = bytes::Bytes::from_static(b"worker");
+    let dealer_options = || {
+        Options::default()
+            .identity(identity.clone())
+            .linger(Duration::ZERO)
+    };
+    let first = Socket::new(SocketType::Dealer, dealer_options());
+    let ep = first.bind(tcp_ep(0)).await.unwrap();
+
+    let router = Socket::new(SocketType::Router, fast_reconnect().recv_hwm(1));
+    router.connect(ep.clone()).await.unwrap();
+    first
+        .wait_connected(1, Duration::from_secs(5))
+        .await
+        .unwrap();
+    for sequence in 0..64_u32 {
+        first
+            .send(Message::single(sequence.to_le_bytes().to_vec()))
+            .await
+            .unwrap();
+    }
+    // One message taken: the rest wait in the actor, and nothing takes them.
+    let message = tokio::time::timeout(Duration::from_secs(5), router.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(message.part_bytes(1).unwrap().as_ref(), 0_u32.to_le_bytes());
+
+    first.close().await.unwrap();
+    let second = Socket::new(SocketType::Dealer, dealer_options());
+    rebind(&second, &ep).await;
+    second
+        .wait_connected(1, Duration::from_secs(5))
+        .await
+        .expect("the router did not redial while its application was not receiving");
+
+    // The messages of the lost connection are still delivered, in order.
+    second.send(Message::single("new")).await.unwrap();
+    let mut expected = 1_u32;
+    loop {
+        let message = tokio::time::timeout(Duration::from_secs(5), router.recv())
+            .await
+            .expect("a waiting message was dropped")
+            .unwrap();
+        let body = message.part_bytes(1).unwrap();
+        if body.as_ref() == b"new" {
+            break;
+        }
+        assert_eq!(body.as_ref(), expected.to_le_bytes());
+        expected += 1;
+    }
+    assert!(expected > 1, "no message of the lost connection survived");
+}

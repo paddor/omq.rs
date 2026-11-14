@@ -192,6 +192,9 @@ impl SocketDriver {
             debug_assert!(peer.progress.completion.is_none());
             peer.progress.completion = Some(completion);
             self.retire_completed_peer(peer_id).await;
+            // Still here: its events wait for the application. That delays
+            // the removal only; the route is redialed now.
+            self.redial_ended_peer(peer_id);
         }
     }
 

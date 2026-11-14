@@ -29,10 +29,17 @@ impl SocketDriver {
         if !matches!(self.socket_type, SocketType::Router | SocketType::Peer) {
             return None;
         }
+        // A holder whose connection ended is no rival. It leaves on its own
+        // once the application took its events; evicting it drops them.
         self.routing
             .send_strategy
             .peer_for_identity(identity)
             .filter(|&old_id| old_id != peer_id)
+            .filter(|old_id| {
+                self.peers
+                    .get(old_id)
+                    .is_some_and(|peer| !peer.progress.ended())
+            })
     }
 
     /// A routing identity in use stays with its principal. Handover needs the
@@ -100,7 +107,9 @@ impl SocketDriver {
         let ready = self
             .peers
             .values()
-            .filter(|peer| peer.handshake.ready && family(&peer.origin.endpoint))
+            .filter(|peer| {
+                peer.handshake.ready && !peer.progress.ended() && family(&peer.origin.endpoint)
+            })
             .count();
         let replaced = self
             .identity_holder(peer_id, identity)

@@ -94,6 +94,17 @@ pub(super) struct PeerProgress {
     pub(super) handled_events: u64,
     pub(super) handled_control: u64,
     pub(super) completion: Option<PeerCompletion>,
+    /// The route was redialed when the driver ended, ahead of the peer's
+    /// removal.
+    pub(super) redialed: bool,
+}
+
+impl PeerProgress {
+    /// The connection ended. The peer stays until the application took
+    /// every event it delivered.
+    pub(super) const fn ended(&self) -> bool {
+        self.completion.is_some()
+    }
 }
 
 pub(super) struct PeerEntry {

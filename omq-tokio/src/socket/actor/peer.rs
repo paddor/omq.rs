@@ -108,14 +108,56 @@ impl SocketDriver {
             }
             return;
         }
-        if peer.origin.side.is_connect() && !self.close.started {
+        if peer.origin.side.is_connect() && !self.close.started && !peer.progress.redialed {
             if matches!(peer.origin.options.reconnect, ReconnectPolicy::Disabled) {
                 // No redial: end the route, so a later connect() dials again.
                 self.drop_dial_route(peer.origin.route_id);
             } else {
-                self.redial_closed_peer(&peer);
+                let origin = &peer.origin;
+                self.redial_closed_peer(
+                    origin.route_id,
+                    origin.endpoint.clone(),
+                    origin.options.clone(),
+                    peer.handshake.ready,
+                );
             }
         }
+    }
+
+    /// Redial the route of a peer whose driver ended but which stays in the
+    /// table until the application took its events. A socket whose
+    /// application does not receive would otherwise never reconnect.
+    pub(super) fn redial_ended_peer(&mut self, peer_id: u64) {
+        if self.close.started {
+            return;
+        }
+        let Some(peer) = self.peers.get_mut(&peer_id) else {
+            return;
+        };
+        let refused = peer.progress.completion.as_ref().is_none_or(|completion| {
+            matches!(completion.reason, DisconnectReason::HandshakeRefused(_))
+        });
+        // Removal handles a refused peer, a disabled reconnect and DART.
+        if refused
+            || peer.progress.redialed
+            || !peer.origin.side.is_connect()
+            || matches!(peer.origin.options.reconnect, ReconnectPolicy::Disabled)
+        {
+            return;
+        }
+        #[cfg(feature = "dart")]
+        if matches!(peer.origin.endpoint, omq_proto::Endpoint::Dart { .. }) {
+            return;
+        }
+        peer.progress.redialed = true;
+        let origin = &peer.origin;
+        let (route_id, endpoint, options) = (
+            origin.route_id,
+            origin.endpoint.clone(),
+            origin.options.clone(),
+        );
+        let was_ready = peer.handshake.ready;
+        self.redial_closed_peer(route_id, endpoint, options, was_ready);
     }
 
     /// Redial a route whose connected transport produced no peer. Its dial
@@ -172,24 +214,27 @@ impl SocketDriver {
     }
 
     /// Restart the dial loop for a lost client peer, carrying its backoff.
-    fn redial_closed_peer(&mut self, peer: &PeerEntry) {
-        let ep = peer.origin.endpoint.clone();
+    fn redial_closed_peer(
+        &mut self,
+        route_id: u64,
+        endpoint: omq_proto::Endpoint,
+        options: std::sync::Arc<omq_proto::Options>,
+        was_ready: bool,
+    ) {
         // Transport success does not reset backoff: READY does.
-        let failed_attempts = if peer.handshake.ready {
+        let failed_attempts = if was_ready {
             1
         } else {
             self.endpoints
                 .dialers
                 .iter()
-                .find(|dialer| dialer.route_id == peer.origin.route_id)
+                .find(|dialer| dialer.route_id == route_id)
                 .map_or(0, |dialer| dialer.failed_attempts.load(Ordering::Relaxed))
                 .saturating_add(1)
         };
         // Only this route: the endpoint may carry other connects.
-        self.endpoints
-            .dialers
-            .retain(|d| d.route_id != peer.origin.route_id);
-        self.start_redial(ep, peer.origin.options.clone(), failed_attempts);
+        self.endpoints.dialers.retain(|d| d.route_id != route_id);
+        self.start_redial(endpoint, options, failed_attempts);
     }
 
     pub(super) fn evict_peer_for_handover(&mut self, peer_id: u64) {

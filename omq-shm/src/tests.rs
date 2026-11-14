@@ -161,6 +161,66 @@ fn idle_size_classes_are_reclaimed_after_final_retained_view() {
     assert_eq!(receiver.decode(wire).unwrap(), larger);
 }
 
+/// A sender that drops a region tells its receivers, and they unmap it.
+/// Without that, a receiver keeps every region until 64 newer ones arrive,
+/// and the shared memory stays resident though the sender freed it.
+#[test]
+fn receiver_unmaps_a_region_that_its_sender_retired() {
+    let maximum = HEADER + 1024;
+    let pool = SendPool::new(1, Some(maximum));
+    let (mut sender, mut receiver) = pair_with_send_pool(2, pool.clone());
+    let small = delivered(&mut sender, &mut receiver, &Message::from_slice(&[5; 128]));
+    drop(small);
+    assert_eq!(receiver.inbound.regions.len(), 1);
+    let (id, token, _) = receiver.inbound.regions[0].clone();
+
+    // The larger class needs the whole budget, so the idle one is retired.
+    let larger = Message::from(vec![6; 1024]);
+    let wire = (0..3)
+        .map(|_| sender.encode(&larger).unwrap().unwrap())
+        .find(|wire| body(wire).unwrap()[0] == BODY)
+        .expect("the larger class never got the budget");
+    assert_eq!(pool.memory_used(), maximum);
+
+    // The new region is not registered yet, so only the announcement can
+    // tell the receiver. Its next carrier read acts on it.
+    assert!(receiver.inbound.find(id, token).is_some());
+    let read = receiver.try_read_carrier(&mut [0; 8]);
+    assert_eq!(read.unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+    assert!(
+        receiver.inbound.find(id, token).is_none(),
+        "the receiver kept a region that its sender dropped"
+    );
+    assert!(receiver.inbound.regions.is_empty());
+
+    transfer(&mut sender, &mut receiver);
+    assert_eq!(receiver.decode(wire).unwrap(), larger);
+}
+
+/// A region dropped without an announcement, such as an application pool,
+/// is released when the next region is registered.
+#[test]
+fn receiver_unmaps_a_dropped_application_pool_at_the_next_registration() {
+    let (mut sender, mut receiver) = pair(2);
+    let first = payload_pool([(128, 1)]).unwrap();
+    let message = first.message(128, |bytes| bytes.fill(4)).unwrap();
+    let got = delivered(&mut sender, &mut receiver, &message);
+    let (id, token, _) = receiver.inbound.regions[0].clone();
+    // The receiver's view keeps its own mapping alive, as before.
+    drop((message, first));
+    let second = payload_pool([(128, 1)]).unwrap();
+    let message = second.message(128, |bytes| bytes.fill(9)).unwrap();
+    drop(delivered(&mut sender, &mut receiver, &message));
+    assert_eq!(got.part_slice(0).unwrap(), &[4; 128]);
+    drop(got);
+
+    let third = payload_pool([(128, 1)]).unwrap();
+    let message = third.message(128, |bytes| bytes.fill(3)).unwrap();
+    drop(delivered(&mut sender, &mut receiver, &message));
+    assert!(receiver.inbound.find(id, token).is_none());
+    assert_eq!(receiver.inbound.regions.len(), 2);
+}
+
 #[test]
 fn explicit_producer_storage_is_independent_of_the_automatic_cap() {
     let automatic = SendPool::new(1, Some(0));

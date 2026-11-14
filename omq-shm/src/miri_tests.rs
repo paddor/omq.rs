@@ -1042,7 +1042,7 @@ fn failed_storage_allocation_returns_its_memory_reservation() {
     for size in [usize::MAX, isize::MAX as usize] {
         let reservation = crate::memory::Budget::reserve(&budget, 64).unwrap();
         assert_eq!(budget.used(), 64);
-        assert!(pool_storage(size, 1, Some(reservation)).is_err());
+        assert!(pool_storage(size, 1, Some(reservation), None).is_err());
         assert_eq!(budget.used(), 0);
     }
 }

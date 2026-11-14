@@ -193,6 +193,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A new connection that announces the identity of a peer whose connection
   already ended no longer drops the messages of that peer which still
   wait for the application.
+- An `shm://` receiver unmaps a region once its sender dropped it.
+  Before, it kept every region until 64 newer ones were registered, so
+  memory that a sender had reclaimed stayed resident in each receiver,
+  up to many times `shm_max_memory`. No format change: older peers
+  ignore the new header flag and keep the old behavior.
 
 ## [0.34.3] - 2026-11-04
 

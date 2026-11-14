@@ -1,8 +1,8 @@
 //! Generation-tagged completion credit and retained receive owners.
 #![forbid(unsafe_code)]
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 
 use omq_proto::Result;
 use omq_proto::message::PayloadOwner;
@@ -15,6 +15,36 @@ use crate::wire::{
 };
 
 pub(super) use crate::coordination::{BORROWED, PENDING};
+
+/// The connections that send from one pool's regions. A dropped region is
+/// announced on each, so that every receiver unmaps it.
+#[derive(Debug, Default)]
+pub(crate) struct Retirements {
+    tables: Mutex<Vec<Weak<Table>>>,
+}
+
+impl Retirements {
+    /// Announce later retirements on `table`, a connection's outgoing table.
+    pub(super) fn subscribe(&self, table: &Arc<Table>) {
+        let mut tables = self.tables.lock().expect("SHM retirements");
+        tables.retain(|table| table.strong_count() != 0);
+        tables.push(Arc::downgrade(table));
+    }
+
+    /// A region was dropped. Runs on whichever thread dropped its last
+    /// owner, so the announcements are made outside the lock.
+    pub(crate) fn announce(&self) {
+        let tables: Vec<Arc<Table>> = {
+            let mut tables = self.tables.lock().expect("SHM retirements");
+            tables.retain(|table| table.strong_count() != 0);
+            tables.iter().filter_map(Weak::upgrade).collect()
+        };
+        for table in tables {
+            // A closed peer needs no announcement.
+            let _ = table.carrier.announce_retirement(&table.mapping);
+        }
+    }
+}
 
 #[derive(Debug)]
 pub(super) struct Table {

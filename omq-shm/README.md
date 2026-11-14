@@ -27,6 +27,7 @@ Each direction has a bounded SPSC byte ring for ZMTP framing, control, and
 coordinates. Release/acquire cursors publish and return bytes. Parked peers
 use coalesced eventfd notifications; actively polling readers need no wake syscall.
 New region descriptors are acknowledged before their coordinates are published.
+A sender marks a region it dropped and wakes its receivers, which unmap it.
 
 Automatic sender storage is shared across all socket peers. Each SHM endpoint
 uses one IO lane for its connections and fan-out worker. Ordinary publications

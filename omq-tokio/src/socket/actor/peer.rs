@@ -122,7 +122,7 @@ impl SocketDriver {
                 self.drop_dial_route(peer.origin.route_id);
             } else {
                 // Removing the peer parked its queue if the route keeps it.
-                self.redial_closed_peer(LostRoute::of(&peer));
+                self.redial_closed_peer(LostRoute::of(&peer, self.socket_type));
             }
         }
     }
@@ -154,7 +154,7 @@ impl SocketDriver {
         }
         peer.progress.redialed = true;
         // Its route still holds the queue: the peer is removed later.
-        let lost = LostRoute::of(peer);
+        let lost = LostRoute::of(peer, self.socket_type);
         self.redial_closed_peer(lost);
     }
 
@@ -505,13 +505,13 @@ struct LostRoute {
 }
 
 impl LostRoute {
-    fn of(peer: &PeerEntry) -> Self {
+    fn of(peer: &PeerEntry, socket_type: SocketType) -> Self {
         Self {
             route_id: peer.origin.route_id,
             endpoint: peer.origin.endpoint.clone(),
             options: peer.origin.options.clone(),
             was_ready: peer.handshake.ready,
-            keep_queue: SocketDriver::keeps_route_queue(peer),
+            keep_queue: SocketDriver::keeps_route_queue(peer, socket_type),
         }
     }
 }

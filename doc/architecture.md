@@ -115,10 +115,11 @@ a nonblocking vectored write; the driver owns any unfinished output.
 
 Round-robin peers have bounded send pipes. A connect-side pipe belongs to its
 `connect()` route and exists before the peer binds, so early sends keep their
-order. Each connection borrows the pipe and gives it back when it ends; a
-connection lost before READY took nothing, so the redial keeps the whole queue.
-A bind-side socket without a ready pipe is mute. HWM bounds each pipe, not
-total socket memory.
+order. Each connection borrows the pipe and gives it back when it ends, so the
+redial sends what is still queued; a lost connection loses only what it took
+out. REQ drops a request that a ready connection may have sent. A bind-side
+socket without a ready pipe is mute. HWM bounds each pipe, not total socket
+memory.
 
 A PUSH socket on one I/O thread picks one ready peer per message:
 

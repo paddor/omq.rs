@@ -40,6 +40,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   them. A REQ request queued there still gets its reply. Before, up to
   `send_hwm` messages were dropped, but only when something had accepted
   the TCP connection; a refused connect kept them.
+- Messages still queued on a `connect()` route when its connection drops
+  are sent after the reconnect, as in libzmq. Only what the connection
+  had already taken out of the queue is lost. Before, a peer restart
+  dropped up to `send_hwm` messages. REQ keeps dropping a request sent on
+  a lost connection, so its alternation can go on.
 - Codec output such as a PING no longer lands inside another frame. A
   transmit slot batch could end between a frame header and its payload,
   and a compression offload result could be written ahead of the tail of

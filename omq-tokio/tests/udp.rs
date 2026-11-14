@@ -181,3 +181,68 @@ async fn dish_rejected_on_udp_connect() {
         .await;
     assert!(res.is_err());
 }
+
+/// Whether this host delivers IPv4 multicast sent on its default interface
+/// back to its own sockets. Hosts without a multicast route do not.
+fn multicast_loops_back(group: Ipv4Addr) -> bool {
+    use std::net::UdpSocket;
+    let probe = || -> std::io::Result<bool> {
+        let receiver = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
+        receiver.join_multicast_v4(&group, &Ipv4Addr::UNSPECIFIED)?;
+        receiver.set_read_timeout(Some(Duration::from_millis(500)))?;
+        let port = receiver.local_addr()?.port();
+        let sender = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
+        sender.send_to(b"probe", (group, port))?;
+        Ok(receiver.recv(&mut [0u8; 8]).is_ok())
+    };
+    probe().unwrap_or(false)
+}
+
+#[tokio::test]
+async fn dish_bind_on_a_multicast_address_joins_the_group() {
+    let group = Ipv4Addr::new(239, 255, 77, 91);
+    if !multicast_loops_back(group) {
+        eprintln!("skip: this host does not loop IPv4 multicast back");
+        return;
+    }
+    let dish = Socket::new(SocketType::Dish, Options::default());
+    let bound = dish
+        .bind(Endpoint::Udp {
+            group: None,
+            host: Host::Ip(group.into()),
+            port: 0,
+        })
+        .await
+        .unwrap();
+    // The bound endpoint names the group, so a RADIO can connect to it and
+    // a second DISH can share the port.
+    let Endpoint::Udp {
+        host: Host::Ip(ip), ..
+    } = &bound
+    else {
+        panic!("not a UDP endpoint: {bound}");
+    };
+    assert_eq!(*ip, IpAddr::V4(group));
+    assert_ne!(udp_port(&bound), 0);
+    let second = Socket::new(SocketType::Dish, Options::default());
+    second.bind(bound.clone()).await.unwrap();
+    for dish in [&dish, &second] {
+        dish.join("weather").await.unwrap();
+    }
+
+    let radio = Socket::new(SocketType::Radio, Options::default());
+    radio.connect(bound.clone()).await.unwrap();
+    radio
+        .send(Message::multipart(["weather", "sunny"]))
+        .await
+        .unwrap();
+    for dish in [&dish, &second] {
+        let message = tokio::time::timeout(Duration::from_secs(2), dish.recv())
+            .await
+            .expect("a joined DISH receives the group's datagrams")
+            .unwrap();
+        assert_eq!(message.part_bytes(1).unwrap(), &b"sunny"[..]);
+    }
+    // The group endpoint also names the listener to unbind.
+    dish.unbind(bound).await.unwrap();
+}

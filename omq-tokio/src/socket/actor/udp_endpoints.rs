@@ -42,9 +42,14 @@ impl SocketDriver {
         let sock = crate::transport::udp::bind(&endpoint).await?;
         let local = sock.local_addr()?;
         let resolved = match &endpoint {
-            Endpoint::Udp { group, .. } => Endpoint::Udp {
+            Endpoint::Udp { group, host, .. } => Endpoint::Udp {
                 group: group.clone(),
-                host: omq_proto::endpoint::Host::Ip(local.ip()),
+                // A multicast bind holds the wildcard address. Its endpoint
+                // names the group, which is what a RADIO connects to.
+                host: match host {
+                    omq_proto::endpoint::Host::Ip(ip) if ip.is_multicast() => host.clone(),
+                    _ => omq_proto::endpoint::Host::Ip(local.ip()),
+                },
                 port: local.port(),
             },
             _ => unreachable!("checked above"),

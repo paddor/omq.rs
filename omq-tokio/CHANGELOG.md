@@ -146,6 +146,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `connect()` to a `quic://` endpoint fails for invalid client TLS
   settings, such as a malformed `quic.trust_pem` or `quic.server_name`.
   Before, it returned `Ok` and every dial attempt failed.
+- A DISH bound to a multicast `udp://` address joins that group on the
+  default interface, as libzmq does, and several DISH sockets of one host
+  can share the port. Before, the socket bound the group address without
+  joining it, so it received nothing and reported no error.
 
 ## [0.34.3] - 2026-11-04
 

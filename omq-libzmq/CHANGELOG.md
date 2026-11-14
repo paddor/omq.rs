@@ -82,6 +82,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `zmq_poll` with a zero timeout reports `ZMQ_POLLIN` for a ZAP handler
   socket with a pending request. Before, it saw the request only after a
   wait.
+- `zmq_bind` of a DISH socket on a multicast `udp://` address joins that
+  group on the default interface. Before, the socket received nothing.
+  The libzmq form with an interface, `udp://interface;group:port`, is not
+  supported.
 
 ## [0.9.2] - 2026-11-04
 

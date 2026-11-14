@@ -57,7 +57,7 @@ smallvec = { version = "1.16.3", features = ["const_generics", "union"] }
 thiserror = "2.0.21"
 tokio = { version = "1.53.3", features = ["rt", "net", "io-util", "sync", "macros", "time"] }
 tokio-util = { version = "0.7.20", features = ["rt"] }
-socket2 = "0.6"
+socket2 = { version = "0.6", features = ["all"] }
 libc = "0.2.190"
 rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std"] }
 rustls-native-certs = { version = "0.8.5", optional = true }

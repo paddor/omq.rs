@@ -14,6 +14,7 @@ fn peer() -> Peer {
         },
         generation: 2,
         reported: false,
+        heard: false,
         ecn_supported: false,
         session: None,
         pool: None,
@@ -172,6 +173,36 @@ fn partial_ack_returns_exact_credits_and_keeps_unsent_reservations() {
         io.queues.data.try_recv(),
         Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
     ));
+}
+
+#[test]
+fn connector_handshake_settles_only_on_session_traffic() {
+    let signal = Arc::new(DataSignal::new());
+
+    // A listener is settled once activation installed its session.
+    let mut listener = peer();
+    assert!(listener.handshake_unsettled());
+    listener.install_io(2, queues(), &state(), &signal);
+    assert!(!listener.handshake_unsettled());
+
+    // A connector cannot know that its CONFIRM arrived until the peer
+    // sends session traffic.
+    let mut connector = peer();
+    connector.lease.handshake = Handshake::connector(2);
+    assert!(connector.lease.handshake.receive(Ready {
+        socket_type: SocketType::Gather,
+        identity: None,
+        reply_requested: false,
+        session: 1,
+        echo: 2,
+        phase: Phase::Welcome,
+    }));
+    connector.install_io(2, queues(), &state(), &signal);
+    assert!(connector.handshake_unsettled());
+    let now = Instant::now();
+    connector.renew(now);
+    assert!(!connector.handshake_unsettled());
+    assert_eq!(connector.lease.expires, now + LEASE);
 }
 
 #[test]

@@ -60,6 +60,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Lz4Encoder` gives back compression scratch above 1 MiB once the part
   is encoded. Before, one large part left a buffer of its size in the
   encoder until the connection closed.
+- The inbound buffer merges runs of small read chunks of an incomplete
+  frame. Before, a peer that paced a large frame in tiny reads made the
+  buffer hold one handle per read, many times the size of the frame.
 
 ### Security
 

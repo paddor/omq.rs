@@ -4,6 +4,11 @@ use bytes::{Bytes, BytesMut};
 
 use crate::message::{MAX_INLINE_PAYLOAD, Payload};
 
+/// A queued chunk under this size counts as small.
+const SMALL_CHUNK: usize = 1024;
+/// Trailing small chunks that get merged into one.
+const SMALL_RUN: usize = 64;
+
 /// Growable byte queue that admits owned [`Bytes`] chunks without copying.
 ///
 /// Used as the codec's inbound buffer. Each [`push`](Self::push) appends a
@@ -18,6 +23,8 @@ pub(crate) struct ChunkedInputBuf {
     rest: VecDeque<Bytes>,
     total_len: usize,
     front_offset: usize,
+    /// Small chunks at the end of `rest`.
+    small_run: usize,
 }
 
 impl ChunkedInputBuf {
@@ -35,8 +42,31 @@ impl ChunkedInputBuf {
             self.front = chunk;
             self.front_offset = 0;
         } else {
+            let small = chunk.len() < SMALL_CHUNK;
             self.rest.push_back(chunk);
+            self.small_run = if small { self.small_run + 1 } else { 0 };
+            if self.small_run >= SMALL_RUN {
+                self.merge_small_run();
+            }
         }
+    }
+
+    /// Replace the trailing run of small chunks with one chunk. A peer that
+    /// paces a large frame in tiny reads would otherwise leave one handle
+    /// per read, many times the size of the frame. A merged chunk joins the
+    /// next run until it reaches [`SMALL_CHUNK`], so a byte is copied a
+    /// bounded number of times.
+    #[cold]
+    fn merge_small_run(&mut self) {
+        let start = self.rest.len() - self.small_run;
+        let len = self.rest.range(start..).map(Bytes::len).sum();
+        crate::copy_stats::record(crate::copy_stats::Site::RecvAssemble, len);
+        let mut merged = BytesMut::with_capacity(len);
+        for chunk in self.rest.drain(start..) {
+            merged.extend_from_slice(&chunk);
+        }
+        self.rest.push_back(merged.freeze());
+        self.small_run = usize::from(len < SMALL_CHUNK);
     }
 
     #[inline]
@@ -132,6 +162,8 @@ impl ChunkedInputBuf {
             self.front = Bytes::new();
         }
         self.front_offset = 0;
+        // The run sits at the end of `rest`; a pop can take its first chunk.
+        self.small_run = self.small_run.min(self.rest.len());
     }
 
     /// Consume the first `n` bytes without returning them.
@@ -506,6 +538,39 @@ mod tests {
                 assert_chunked_matches_prefix(&buf, &expected, case);
             }
         }
+    }
+
+    #[test]
+    fn tiny_chunks_of_one_frame_are_merged() {
+        const TOTAL: usize = 100_000;
+        let expected: Vec<u8> = (0..TOTAL).map(|index| (index % 251) as u8).collect();
+        let mut buf = ChunkedInputBuf::new();
+        for byte in &expected {
+            buf.push(Bytes::copy_from_slice(std::slice::from_ref(byte)));
+            assert!(buf.rest.len() < SMALL_RUN + buf.len() / SMALL_CHUNK + 1);
+        }
+        assert_eq!(buf.len(), TOTAL);
+        // Consuming across the merged chunks keeps the byte order.
+        assert_eq!(buf.peek_array::<4>(), Some([0, 1, 2, 3]));
+        buf.advance(10);
+        assert_eq!(buf.split_to(TOTAL - 10).as_slice(), &expected[10..]);
+        assert!(buf.is_empty());
+        assert_eq!(buf.small_run, 0);
+    }
+
+    #[test]
+    fn large_chunks_are_not_copied_when_small_ones_follow() {
+        let large = Bytes::from(vec![7u8; 4 * SMALL_CHUNK]);
+        let mut buf = ChunkedInputBuf::new();
+        buf.push(Bytes::from_static(b"front"));
+        buf.push(large.clone());
+        for _ in 0..SMALL_RUN {
+            buf.push(Bytes::from_static(b"x"));
+        }
+        // The run of small chunks became one; the large chunk kept its storage.
+        assert_eq!(buf.rest.len(), 2);
+        assert_eq!(buf.rest[0].as_ptr(), large.as_ptr());
+        assert_eq!(buf.rest[1].len(), SMALL_RUN);
     }
 
     #[test]

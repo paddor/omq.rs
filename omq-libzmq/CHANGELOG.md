@@ -32,6 +32,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `zmq_bind` on an `ipc://` path with a live listener fails with
   `EADDRINUSE`, and it does not delete a file that is no socket. libzmq
   unlinks the path in both cases.
+- A blocking `zmq_send` or `zmq_msg_send` returns `EINTR` when a signal
+  handler interrupts it before the socket accepted the message, as libzmq
+  does. The message is not queued, and frames staged with `ZMQ_SNDMORE`
+  stay staged, so the caller retries the same call. Before, the send
+  kept waiting. Unix only.
 
 ### Fixed
 

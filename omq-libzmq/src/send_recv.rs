@@ -163,6 +163,72 @@ fn spawn_send_wake(sock: &OmqSocket, ready: impl FnOnce() + Send + 'static) -> O
     Some(SendWake(task.abort_handle()))
 }
 
+/// Arm a wake that signals `sock`'s send eventfd once `msg` may be
+/// accepted. `None` without a backend socket or runtime.
+#[cfg(unix)]
+fn arm_progress_wake(sock: &OmqSocket, msg: &omq_tokio::Message) -> Option<SendWake> {
+    let inner = sock.inner.get()?.clone();
+    let notify = sock.notify.clone();
+    let probe = msg.clone();
+    let task = sock.ctx.handle()?.spawn(async move {
+        inner.wait_send_progress_for(&probe).await;
+        notify.signal_send();
+    });
+    Some(SendWake(task.abort_handle()))
+}
+
+/// When a blocking send gives up; `None` waits forever. A timeout past the
+/// clock's range also waits forever.
+#[cfg(unix)]
+fn send_deadline(timeout: Option<Duration>) -> Option<Instant> {
+    timeout.and_then(|timeout| Instant::now().checked_add(timeout))
+}
+
+/// Park the calling thread on the send eventfd until the wake that `arm`
+/// creates signals it. Fails with `EAGAIN` once `deadline` passed, `ETERM`
+/// on context shutdown, `EDEADLK` on an OMQ IO thread, and `EINTR` when a
+/// signal handler ran: a C caller can then act on the signal, as with
+/// libzmq.
+#[cfg(unix)]
+fn park_for_send(
+    sock: &OmqSocket,
+    deadline: Option<Instant>,
+    arm: impl FnOnce() -> Option<SendWake>,
+) -> Result<(), c_int> {
+    if omq_tokio::Context::on_io_thread() {
+        return Err(libc::EDEADLK);
+    }
+    let send = sock.notify.send_notifier();
+    // Before arming: a leftover signal must not end this wait, and the new
+    // wake's own signal must not be drained.
+    send.drain();
+    let _wake = arm().ok_or(ETERM)?;
+    loop {
+        if sock.ctx.is_effectively_terminated() {
+            return Err(ETERM);
+        }
+        // Context shutdown signals this descriptor. The 100 ms slices are
+        // a backstop, as for receives.
+        let ms = match deadline {
+            None => 100,
+            Some(deadline) => {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    return Err(libc::EAGAIN);
+                }
+                left.as_millis().clamp(1, 100) as c_int
+            }
+        };
+        if send.wait_for_readable_or_signal(ms)? {
+            send.drain();
+            if sock.ctx.is_effectively_terminated() {
+                return Err(ETERM);
+            }
+            return Ok(());
+        }
+    }
+}
+
 /// A send of one message running on its socket's runtime. Dropping it
 /// abandons the send.
 #[derive(Debug)]
@@ -307,6 +373,20 @@ impl SendCall {
     }
 }
 
+/// Wait for a ready peer. A signal handler ends the wait with `EINTR`.
+#[cfg(unix)]
+fn wait_for_ready_peer(sock: &OmqSocket, timeout: Option<Duration>) -> Result<(), c_int> {
+    let Some(inner) = sock.inner.get() else {
+        return Err(ETERM);
+    };
+    let deadline = send_deadline(timeout);
+    while inner.ready_peer_count() == 0 {
+        park_for_send(sock, deadline, || arm_send_wake(sock))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
 fn wait_for_ready_peer(sock: &OmqSocket, timeout: Option<Duration>) -> Result<(), c_int> {
     let Some(inner) = sock.inner.get() else {
         return Err(ETERM);
@@ -515,14 +595,14 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
 
     match submit_message_or_return(sock, msg, call) {
         Ok(rc) => rc,
-        Err(unsent) => {
+        Err((unsent, errno)) => {
             // Messages are atomic: keep the staged frames so retrying this
             // final frame sends the whole message.
             *accum = (0..unsent.len().saturating_sub(1))
                 .filter_map(|index| unsent.part_bytes(index))
                 .collect();
             *retry = !accum.is_empty();
-            fail(libc::EAGAIN)
+            fail(errno)
         }
     }
 }
@@ -565,10 +645,10 @@ fn send_stream_frame(sock: &Arc<OmqSocket>, data: &[u8], call: SendCall) -> c_in
     }
 
     let message = omq_tokio::Message::multipart([accum[0].clone(), Bytes::copy_from_slice(data)]);
-    // STREAM data always ends the pair. Keep the identity on EAGAIN so
-    // the caller can retry the same data frame.
+    // STREAM data always ends the pair. Keep the identity on EAGAIN and
+    // EINTR so the caller can retry the same data frame.
     let result = submit_message(sock, message, call);
-    if result >= 0 || crate::error::zmq_errno() != libc::EAGAIN {
+    if result >= 0 || !matches!(crate::error::zmq_errno(), libc::EAGAIN | libc::EINTR) {
         accum.clear();
     }
     result
@@ -597,6 +677,30 @@ fn admit_first_frame(sock: &Arc<OmqSocket>, call: SendCall) -> Result<(), c_int>
     let Some(timeout) = timeout.filter(|_| !dontwait) else {
         return Err(libc::EAGAIN);
     };
+    wait_send_ready_for(sock, inner, timeout)
+}
+
+/// Wait up to `timeout` for the socket to accept a send. A signal handler
+/// ends the wait with `EINTR`.
+#[cfg(unix)]
+fn wait_send_ready_for(
+    sock: &OmqSocket,
+    inner: &omq_tokio::Socket,
+    timeout: Duration,
+) -> Result<(), c_int> {
+    let deadline = send_deadline(Some(timeout));
+    while !inner.send_ready() {
+        park_for_send(sock, deadline, || arm_send_wake(sock))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn wait_send_ready_for(
+    sock: &OmqSocket,
+    inner: &Arc<omq_tokio::Socket>,
+    timeout: Duration,
+) -> Result<(), c_int> {
     let s = inner.clone();
     match crate::blocking::block_on(&sock.ctx, async move {
         tokio::time::timeout(timeout, s.wait_send_ready()).await
@@ -675,15 +779,19 @@ pub(crate) fn map_send_err(sock: &OmqSocket, error: &omq_tokio::Error) -> c_int 
 }
 
 fn submit_message(sock: &Arc<OmqSocket>, msg: omq_tokio::Message, call: SendCall) -> c_int {
-    submit_message_or_return(sock, msg, call).unwrap_or_else(|_| fail(libc::EAGAIN))
+    submit_message_or_return(sock, msg, call).unwrap_or_else(|(_, errno)| fail(errno))
 }
 
-/// Submit `msg`, or hand it back unsent when the send would block (EAGAIN).
+/// A message that was not sent, with the errno to report: `EAGAIN` when
+/// the send would block or timed out, `EINTR` when a signal ended the wait.
+type Unsent = (omq_tokio::Message, c_int);
+
+/// Submit `msg`, or hand it back unsent with `EAGAIN` or `EINTR`.
 fn submit_message_or_return(
     sock: &Arc<OmqSocket>,
     msg: omq_tokio::Message,
     call: SendCall,
-) -> Result<c_int, omq_tokio::Message> {
+) -> Result<c_int, Unsent> {
     let Some(inner) = sock.inner.get() else {
         return Ok(fail(ETERM));
     };
@@ -694,7 +802,7 @@ fn submit_message_or_return(
         Ok(()) => Ok(ret_len),
         Err(omq_tokio::TrySendError::Closed) => Ok(fail(ETERM)),
         Err(omq_tokio::TrySendError::Error(ref error)) => Ok(fail(map_send_err(sock, error))),
-        Err(omq_tokio::TrySendError::Full(msg)) if dontwait => Err(msg),
+        Err(omq_tokio::TrySendError::Full(msg)) if dontwait => Err((msg, libc::EAGAIN)),
         Err(omq_tokio::TrySendError::Full(mut msg)) => {
             for i in 0..8 {
                 if i < 4 {
@@ -711,29 +819,73 @@ fn submit_message_or_return(
                     Err(omq_tokio::TrySendError::Full(returned)) => msg = returned,
                 }
             }
-            let s = inner.clone();
-            let timeout = call
-                .timeout()
-                .filter(|timeout| Instant::now().checked_add(*timeout).is_some());
-            // Context shutdown ends either wait with ETERM.
-            let Some(timeout) = timeout else {
-                return Ok(match crate::blocking::block_on(&sock.ctx, s.send(msg)) {
-                    Ok(Ok(())) => ret_len,
-                    Ok(Err(_)) => fail(ETERM),
-                    Err(errno) => fail(errno),
-                });
-            };
-            // A timed-out send drops its copy; keep the original for EAGAIN.
-            let attempt = msg.clone();
-            match crate::blocking::block_on(&sock.ctx, async move {
-                tokio::time::timeout(timeout, s.send(attempt)).await
-            }) {
-                Ok(Ok(Ok(()))) => Ok(ret_len),
-                Ok(Ok(Err(_))) => Ok(fail(ETERM)),
-                Ok(Err(_elapsed)) => Err(msg),
-                Err(errno) => Ok(fail(errno)),
-            }
+            send_blocked(sock, inner, msg, call)
         }
+    }
+}
+
+/// Wait for room and send `msg`. The message stays with the caller until
+/// the socket accepts it, so a timeout or a signal hands it back whole.
+#[cfg(unix)]
+fn send_blocked(
+    sock: &Arc<OmqSocket>,
+    inner: &Arc<omq_tokio::Socket>,
+    mut msg: omq_tokio::Message,
+    call: SendCall,
+) -> Result<c_int, Unsent> {
+    let deadline = send_deadline(call.timeout());
+    loop {
+        let waited = park_for_send(sock, deadline, || arm_progress_wake(sock, &msg));
+        if let Err(errno) = waited
+            && !matches!(errno, libc::EAGAIN | libc::EINTR)
+        {
+            return Ok(fail(errno));
+        }
+        // Also after a timeout or a signal: room may have appeared.
+        match inner.try_send(msg) {
+            Ok(()) => return Ok(call.ret_len),
+            Err(omq_tokio::TrySendError::Closed) => return Ok(fail(ETERM)),
+            Err(omq_tokio::TrySendError::Error(ref error)) => {
+                return Ok(fail(map_send_err(sock, error)));
+            }
+            Err(omq_tokio::TrySendError::Full(returned)) => msg = returned,
+        }
+        if let Err(errno) = waited {
+            return Err((msg, errno));
+        }
+    }
+}
+
+/// Wait for room and send `msg` on the socket's runtime.
+#[cfg(not(unix))]
+fn send_blocked(
+    sock: &Arc<OmqSocket>,
+    inner: &Arc<omq_tokio::Socket>,
+    msg: omq_tokio::Message,
+    call: SendCall,
+) -> Result<c_int, Unsent> {
+    let ret_len = call.ret_len;
+    let s = inner.clone();
+    let timeout = call
+        .timeout()
+        .filter(|timeout| Instant::now().checked_add(*timeout).is_some());
+    // Context shutdown ends either wait with ETERM.
+    let Some(timeout) = timeout else {
+        return Ok(match crate::blocking::block_on(&sock.ctx, s.send(msg)) {
+            Ok(Ok(())) => ret_len,
+            Ok(Err(_)) => fail(ETERM),
+            Err(errno) => fail(errno),
+        });
+    };
+    // A timed-out send drops its copy; keep the original for EAGAIN.
+    let attempt = msg.clone();
+    match crate::blocking::block_on(&sock.ctx, async move {
+        tokio::time::timeout(timeout, s.send(attempt)).await
+    }) {
+        Ok(Ok(Ok(()))) => Ok(ret_len),
+        Ok(Ok(Err(_))) => Ok(fail(ETERM)),
+        Ok(Err(_elapsed)) => Err((msg, libc::EAGAIN)),
+        Err(errno) => Ok(fail(errno)),
     }
 }
 

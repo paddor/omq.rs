@@ -13,7 +13,9 @@ use crate::context::OmqContext;
 use crate::error::ETERM;
 
 /// Poll `future` on the calling thread until it completes or the context
-/// shuts down.
+/// shuts down. Unix waits on the send eventfd instead, so that a signal
+/// handler can end the wait.
+#[cfg(not(unix))]
 pub(crate) fn block_on<T>(ctx: &OmqContext, future: impl Future<Output = T>) -> Result<T, c_int> {
     if omq_tokio::Context::on_io_thread() {
         return Err(libc::EDEADLK);

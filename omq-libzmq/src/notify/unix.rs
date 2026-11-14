@@ -199,6 +199,14 @@ impl UnixNotifyHandle {
     pub(crate) fn new() -> Option<Self> {
         NotifyFds::open().map(Self)
     }
+
+    /// The send direction's descriptors, to wait on and to drain.
+    pub(crate) fn send_notifier(&self) -> RecvNotify {
+        RecvNotify {
+            poll_fd: self.0.send_poll,
+            signal_fd: self.0.send_signal,
+        }
+    }
 }
 
 impl NotifyHandle for UnixNotifyHandle {

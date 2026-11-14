@@ -165,6 +165,22 @@ fn plain_client_credentials_require_rfc_24_vchar() {
 }
 
 #[test]
+fn max_message_parts_defaults_to_1024_and_rejects_zero() {
+    let options = Options::default();
+    assert_eq!(options.max_message_parts, Some(1024));
+    assert!(options.validate().is_ok());
+    for parts in [None, Some(1), Some(usize::MAX)] {
+        let options = Options::default().max_message_parts(parts);
+        assert_eq!(options.max_message_parts, parts);
+        assert!(options.validate().is_ok());
+    }
+    assert!(matches!(
+        Options::default().max_message_parts(Some(0)).validate(),
+        Err(crate::Error::Config(_))
+    ));
+}
+
+#[test]
 fn peer_count_limits_reject_zero_and_overflow() {
     for options in [
         Options::default().peer_send_queue_capacity(0),

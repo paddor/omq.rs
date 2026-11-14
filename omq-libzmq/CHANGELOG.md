@@ -24,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   handler interrupts it and no message arrived, as libzmq does. Before, it
   kept waiting, so a handler for Ctrl-C could not end the receive. Unix
   only; blocking sends are unchanged.
+- A received message may have at most 65,536 parts. A peer that sends more
+  is disconnected. libzmq has no such limit and no option for one.
 
 ### Fixed
 

@@ -29,6 +29,11 @@ impl Options {
                 "max_pending_handshakes must be greater than zero".into(),
             ));
         }
+        if self.max_message_parts == Some(0) {
+            return Err(crate::error::Error::Config(
+                "max_message_parts must be greater than zero".into(),
+            ));
+        }
         if !(1..=MAX_QUEUE_CAPACITY).contains(&self.monitor_capacity) {
             return Err(crate::error::Error::Config(format!(
                 "monitor_capacity must be in 1..={MAX_QUEUE_CAPACITY}"

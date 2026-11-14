@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - XPUB surfaces a `\x00<prefix>` message for each subscription that a
   subscriber still held when it disconnected, as libzmq does. Before, a
   forwarder kept the subscriptions of every past subscriber upstream.
+- A peer that sends a message with more than 1024 parts is disconnected.
+  `Options::max_message_parts` changes the limit or removes it. Before, a
+  peer could hold 64 bytes for every two bytes it sent as empty parts
+  unless `max_message_size` was set. Inproc peers are not limited.
 
 ### Fixed
 

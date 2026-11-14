@@ -405,9 +405,10 @@ impl Connection {
             self.assembly.discarding = true;
             return Ok(true);
         }
-        #[cfg(feature = "ws")]
-        if self.ws.role.is_some() && self.assembly.parts.len() >= super::ws::MAX_PARTS {
-            return Err(Error::Protocol("WS multipart part limit exceeded".into()));
+        // An empty part costs the peer two wire bytes and holds a payload
+        // slot here, so the count is bounded apart from the byte limit.
+        if self.assembly.parts.len() >= self.assembly.max_parts {
+            return Err(Error::Protocol("multipart part limit exceeded".into()));
         }
         let size = payload.len() + size_of::<Payload>();
         self.assembly.size = self.assembly.size.saturating_add(size);

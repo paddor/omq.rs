@@ -19,6 +19,7 @@ pub(crate) struct CodecProfile {
     level_range: Option<(i32, i32)>,
     dict_capacity: Option<usize>,
     max_message_size: Option<usize>,
+    max_message_parts: Option<usize>,
     max_recv_dict_size: Option<usize>,
 }
 
@@ -57,6 +58,7 @@ impl CodecProfile {
             level_range: options.compression_level_range,
             dict_capacity: options.compression_dict_capacity,
             max_message_size: options.max_message_size,
+            max_message_parts: options.max_message_parts,
             max_recv_dict_size: options.max_recv_dict_size,
         }
     }
@@ -111,6 +113,7 @@ impl CodecProfile {
             compression_level_range: self.level_range,
             compression_dict_capacity: self.dict_capacity,
             max_message_size: self.max_message_size,
+            max_message_parts: self.max_message_parts,
             max_recv_dict_size: self.max_recv_dict_size,
             ..Options::default()
         }

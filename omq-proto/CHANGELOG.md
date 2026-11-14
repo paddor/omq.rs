@@ -11,10 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `SocketType::recv_parts` reports the frame count each received message
   must have, if the socket type fixes one.
+- `Options::max_message_parts` and `ConnectionConfig::max_message_parts`
+  limit the parts of one received message. The default is 1024; `None`
+  removes the limit. `Lz4Decoder` and `ZstdDecoder` take the same limit for
+  arena messages through `with_max_message_parts`.
 
 ### Changed
 
 - `dart::Session::may_reserve_ahead` takes the fragment's sequence.
+- A received message with more than 1024 parts is a protocol error by
+  default. Before, only WebSocket connections had a part limit, so a peer
+  could hold 64 bytes here for every two bytes it sent as empty parts.
 
 ### Removed
 

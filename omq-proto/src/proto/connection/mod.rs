@@ -87,6 +87,10 @@ pub struct ConnectionConfig {
     /// enforce that logical limit after decoding. `None` uses the ordinary
     /// message limit.
     pub max_wire_message_size: Option<usize>,
+    /// Reject inbound messages with more parts than this. `None` = no
+    /// limit. Defaults to [`crate::options::DEFAULT_MAX_MESSAGE_PARTS`]. A
+    /// WebSocket connection never accepts more than 65,536 parts.
+    pub max_message_parts: Option<usize>,
     /// Security mechanism to negotiate during the handshake.
     pub mechanism: MechanismSetup,
     /// Remote address exposed to security authenticators, when known.
@@ -116,6 +120,7 @@ impl ConnectionConfig {
             identity: bytes::Bytes::new(),
             max_message_size: None,
             max_wire_message_size: None,
+            max_message_parts: Some(crate::options::DEFAULT_MAX_MESSAGE_PARTS),
             mechanism: MechanismSetup::Null,
             peer_address: None,
             defer_authentication: false,
@@ -146,6 +151,25 @@ impl ConnectionConfig {
     pub fn max_wire_message_size(mut self, n: usize) -> Self {
         self.max_wire_message_size = Some(n);
         self
+    }
+
+    /// Set the inbound part limit. See [`Self::max_message_parts`].
+    #[must_use]
+    pub fn max_message_parts(mut self, parts: Option<usize>) -> Self {
+        self.max_message_parts = parts;
+        self
+    }
+
+    /// Most parts one inbound message may have on this connection.
+    fn part_limit(&self) -> usize {
+        let limit = self
+            .max_message_parts
+            .map_or(usize::MAX, |parts| parts.max(1));
+        #[cfg(feature = "ws")]
+        if self.ws_role.is_some() {
+            return limit.min(ws::MAX_PARTS);
+        }
+        limit
     }
 
     fn data_size_limit(&self) -> Option<usize> {
@@ -308,6 +332,8 @@ struct Assembly {
     parts: Parts,
     /// Body bytes plus one payload slot per part, checked against the limit.
     size: usize,
+    /// Most parts one message may have, from [`ConnectionConfig::part_limit`].
+    max_parts: usize,
     /// Dropping the rest of a multipart message this socket type rejects.
     discarding: bool,
     payload_pool: Option<crate::PayloadPool>,
@@ -334,6 +360,7 @@ impl Connection {
             assembly: Assembly {
                 parts: Vec::new().into(),
                 size: 0,
+                max_parts: config.part_limit(),
                 discarding: false,
                 payload_pool: None,
             },

@@ -293,6 +293,67 @@ async fn max_message_size_one_byte_over_drops_connection() {
     );
 }
 
+/// Wait for the next `Disconnected` event of `monitor`.
+async fn disconnected(monitor: &mut omq_tokio::MonitorStream) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let omq_tokio::MonitorEvent::Disconnected { .. } = monitor.recv().await.unwrap() {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("peer must be disconnected");
+}
+
+#[tokio::test]
+async fn max_message_parts_bounds_multipart_over_tcp() {
+    let parts = |count: usize| Message::multipart((0..count).map(|_| bytes::Bytes::new()));
+    let limit = omq_tokio::options::DEFAULT_MAX_MESSAGE_PARTS;
+    for (options, limit) in [
+        (Options::default(), limit),
+        (Options::default().max_message_parts(Some(3)), 3),
+    ] {
+        let pull = Socket::new(SocketType::Pull, options);
+        let mut monitor = pull.monitor();
+        let ep = pull.bind(tcp_ep(0)).await.unwrap();
+        let push = Socket::new(SocketType::Push, Options::default());
+        push.connect(ep).await.unwrap();
+
+        push.send(parts(limit)).await.unwrap();
+        let message = tokio::time::timeout(Duration::from_secs(5), pull.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(message.len(), limit);
+
+        // One part more: the receiver drops the connection, not the limit.
+        push.send(parts(limit + 1)).await.unwrap();
+        disconnected(&mut monitor).await;
+        assert!(
+            pull.try_recv().is_err(),
+            "an oversize message was delivered"
+        );
+    }
+}
+
+#[tokio::test]
+async fn max_message_parts_none_accepts_any_count_over_tcp() {
+    let count = omq_tokio::options::DEFAULT_MAX_MESSAGE_PARTS * 4;
+    let pull = Socket::new(SocketType::Pull, Options::default().max_message_parts(None));
+    let ep = pull.bind(tcp_ep(0)).await.unwrap();
+    let push = Socket::new(SocketType::Push, Options::default());
+    push.connect(ep).await.unwrap();
+    push.send(Message::multipart((0..count).map(|_| bytes::Bytes::new())))
+        .await
+        .unwrap();
+    let message = tokio::time::timeout(Duration::from_secs(5), pull.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(message.len(), count);
+}
+
 #[tokio::test]
 async fn max_message_size_counts_part_overhead_inproc() {
     let ep = inproc_ep("opt-mms-overhead-inproc");

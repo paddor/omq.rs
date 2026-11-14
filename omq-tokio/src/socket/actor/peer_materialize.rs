@@ -449,6 +449,7 @@ fn build_codec(
     let mut cfg = ConnectionConfig::new(role, socket.socket_type)
         .identity(options.identity.clone())
         .mechanism(options.mechanism.clone())
+        .max_message_parts(options.max_message_parts)
         .defer_authentication(true);
     let peer_address = match &peer.ident {
         PeerIdent::Socket(address) => Some(address.ip().to_string()),

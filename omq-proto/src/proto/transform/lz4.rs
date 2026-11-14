@@ -435,6 +435,8 @@ pub struct Lz4Decoder {
     decompressor: Option<Decompressor>,
     /// Decompression budget, in bytes. `None` = use the absolute ceiling.
     max_message_size: Option<usize>,
+    /// Most parts of one arena message. `None` = the arena ceiling.
+    max_message_parts: Option<usize>,
     /// Per-block decompressed size limit. Must match the encoder's value.
     block_size: usize,
     /// Maximum dict size accepted from a peer.
@@ -447,6 +449,7 @@ impl Default for Lz4Decoder {
             arena: arena::PendingArena::default(),
             decompressor: None,
             max_message_size: None,
+            max_message_parts: None,
             block_size: LZ4M_BLOCK_SIZE,
             max_recv_dict_size: MAX_DICT_BYTES,
         }
@@ -464,6 +467,13 @@ impl Lz4Decoder {
     #[must_use]
     pub fn with_max_message_size(mut self, max: Option<usize>) -> Self {
         self.max_message_size = max;
+        self
+    }
+
+    /// Reject an arena message with more parts than `max`.
+    #[must_use]
+    pub fn with_max_message_parts(mut self, max: Option<usize>) -> Self {
+        self.max_message_parts = max;
         self
     }
 
@@ -551,8 +561,11 @@ impl Lz4Decoder {
             payload.as_bytes(),
             retained,
             count,
-            self.max_message_size,
-            payload_slots,
+            arena::ArenaLimits {
+                size: self.max_message_size,
+                payload_slots,
+                parts: self.max_message_parts,
+            },
         )?))
     }
 

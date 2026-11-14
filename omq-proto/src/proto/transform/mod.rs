@@ -244,7 +244,8 @@ impl MessageEncoder {
     /// Build the per-connection encoder+decoder pair implied by an endpoint
     /// scheme. Returns `Ok(None)` for plain `tcp://` / `ipc://` /
     /// `inproc://` / `udp://`. Picks up `Options::compression_dict`,
-    /// `Options::compression_auto_train`, and `Options::max_message_size`.
+    /// `Options::compression_auto_train`, `Options::max_message_size`, and
+    /// `Options::max_message_parts`.
     /// Rejects compressed endpoints with an encrypted effective mechanism.
     pub fn for_endpoint(
         endpoint: &Endpoint,
@@ -306,7 +307,9 @@ impl MessageEncoder {
         if let Some(t) = options.compression_threshold {
             enc = enc.with_threshold(t);
         }
-        let mut dec = Lz4Decoder::new().with_max_message_size(options.max_message_size);
+        let mut dec = Lz4Decoder::new()
+            .with_max_message_size(options.max_message_size)
+            .with_max_message_parts(options.max_message_parts);
         if let Some(m) = options.max_recv_dict_size {
             dec = dec.with_max_recv_dict_size(m);
         }
@@ -340,7 +343,9 @@ impl MessageEncoder {
                 .unwrap_or(zstd::DEFAULT_LEVEL_RANGE);
             enc.with_level_range(min, max)
         };
-        let mut dec = ZstdDecoder::new().with_max_message_size(options.max_message_size);
+        let mut dec = ZstdDecoder::new()
+            .with_max_message_size(options.max_message_size)
+            .with_max_message_parts(options.max_message_parts);
         if let Some(m) = options.max_recv_dict_size {
             dec = dec.with_max_recv_dict_size(m);
         }

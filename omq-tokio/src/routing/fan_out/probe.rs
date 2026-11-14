@@ -15,6 +15,14 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+/// Receiving codec with the part limit of `options`.
+fn subscriber(options: &Options) -> Connection {
+    Connection::new(
+        ConnectionConfig::new(Role::Client, SocketType::Sub)
+            .max_message_parts(options.max_message_parts),
+    )
+}
+
 struct ProbePeer {
     handle: PeerDriverHandle,
     remote_inbox: mpsc::Sender<PeerDriverCommand>,
@@ -57,7 +65,7 @@ impl ProbePeer {
         .with_transmit_slot(slot.clone());
         let mut receiver = ConnectionDriver::new(
             incoming,
-            Connection::new(ConnectionConfig::new(Role::Client, SocketType::Sub)),
+            subscriber(options),
             remote_commands,
             events.clone(),
             id * 2 + 1,
@@ -118,7 +126,11 @@ async fn run_message_probe(
     message: Message,
     kinds: &[Option<CompressionKind>],
 ) -> Duration {
-    let mut options = Options::default().compression_auto_train(false);
+    // The probe sends more parts than the default limit to cross the
+    // gathered-write limit.
+    let mut options = Options::default()
+        .compression_auto_train(false)
+        .max_message_parts(None);
     options.xpub_nodrop = true;
     let mut fanout = FanOutSend::new(
         SocketType::Pub,

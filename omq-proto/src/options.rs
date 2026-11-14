@@ -48,6 +48,9 @@ pub const DEFAULT_SHM_MAX_MEMORY: usize = 64 * 1024 * 1024;
 /// Default PEER per-connection queue byte budget and single-message limit.
 pub const DEFAULT_PEER_MAX_BYTES: usize = 16 * 1024 * 1024;
 
+/// Default limit on the parts of one received message.
+pub const DEFAULT_MAX_MESSAGE_PARTS: usize = 1024;
+
 /// Default per-socket monitor event queue capacity.
 pub const DEFAULT_MONITOR_CAPACITY: usize = 256;
 
@@ -289,6 +292,15 @@ pub struct Options {
     /// there is no separate WS message-size default or socket byte ledger.
     pub max_message_size: Option<usize>,
 
+    /// Reject incoming messages with more parts than this. Defaults to 1024.
+    /// `None` = no limit. An empty part costs a peer two wire bytes and holds
+    /// one payload slot here, so this bounds that overhead per message.
+    /// Applies to ZMTP framing and compression arenas on every wire
+    /// transport. WebSocket connections never accept more than 65,536
+    /// parts; SHM multipart records keep their own cap of 256. Inproc
+    /// peers are not limited. Must not be `Some(0)`.
+    pub max_message_parts: Option<usize>,
+
     /// Maximum automatic outbound SHM mapping bytes across this socket's peers
     /// and fan-out lanes, including headers and alignment padding. Defaults to 64 MiB.
     /// `None` disables this cap; `Some(0)` uses the shared carrier for ordinary
@@ -515,6 +527,7 @@ impl Default for Options {
             handshake_timeout: Some(DEFAULT_HANDSHAKE_TIMEOUT),
             max_pending_handshakes: DEFAULT_MAX_PENDING_HANDSHAKES,
             max_message_size: None,
+            max_message_parts: Some(DEFAULT_MAX_MESSAGE_PARTS),
             shm_max_memory: Some(DEFAULT_SHM_MAX_MEMORY),
             conflate: false,
             router_mandatory: false,
@@ -782,6 +795,14 @@ impl Options {
     /// Set max allowed size for one complete message.
     pub fn max_message_size(mut self, n: usize) -> Self {
         self.max_message_size = Some(n);
+        self
+    }
+
+    /// Set the most parts one received message may have. `None` removes the
+    /// limit. See [`Self::max_message_parts`].
+    #[must_use]
+    pub fn max_message_parts(mut self, parts: Option<usize>) -> Self {
+        self.max_message_parts = parts;
         self
     }
 

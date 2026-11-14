@@ -452,6 +452,8 @@ impl ZstdEncoder {
 pub struct ZstdDecoder {
     recv_dict: Option<Bytes>,
     max_message_size: Option<usize>,
+    /// Most parts of one arena message. `None` = the arena ceiling.
+    max_message_parts: Option<usize>,
     max_recv_dict_size: usize,
     dctx: DecompressContext,
     arena: arena::PendingArena,
@@ -471,6 +473,7 @@ impl Default for ZstdDecoder {
         Self {
             recv_dict: None,
             max_message_size: None,
+            max_message_parts: None,
             max_recv_dict_size: MAX_DICT_BYTES,
             dctx: DecompressContext::new(),
             arena: arena::PendingArena::default(),
@@ -489,6 +492,13 @@ impl ZstdDecoder {
     #[must_use]
     pub fn with_max_message_size(mut self, max: Option<usize>) -> Self {
         self.max_message_size = max;
+        self
+    }
+
+    /// Reject an arena message with more parts than `max`.
+    #[must_use]
+    pub fn with_max_message_parts(mut self, max: Option<usize>) -> Self {
+        self.max_message_parts = max;
         self
     }
 
@@ -549,8 +559,11 @@ impl ZstdDecoder {
             payload.as_bytes(),
             payload.retained_size().unwrap_or(size),
             count,
-            self.max_message_size,
-            payload_slots,
+            arena::ArenaLimits {
+                size: self.max_message_size,
+                payload_slots,
+                parts: self.max_message_parts,
+            },
         )?))
     }
 

@@ -323,6 +323,42 @@ fn push_pull_tcp() {
     zmq_ctx_term(ctx);
 }
 
+/// libzmq has no part limit, so a message far above the omq-tokio default
+/// of 1024 parts must still arrive.
+#[test]
+fn multipart_above_the_default_part_limit_arrives_over_tcp() {
+    const PARTS: usize = 3000;
+    let ctx = zmq_ctx_new();
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    let addr = helpers::bind_random_tcp(pull);
+    assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
+    set_rcvtimeo(pull, 5000);
+    set_sndtimeo(push, 5000);
+
+    for index in 0..PARTS {
+        let flags = if index + 1 < PARTS { ZMQ_SNDMORE } else { 0 };
+        assert_eq!(zmq_send(push, b"p".as_ptr().cast(), 1, flags), 1);
+    }
+    let mut buf = [0u8; 8];
+    for _ in 0..PARTS {
+        assert_eq!(zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0), 1);
+    }
+    let mut more: i32 = 1;
+    let mut more_sz = size_of::<i32>();
+    zmq_getsockopt(
+        pull,
+        ZMQ_RCVMORE,
+        (&mut more as *mut i32).cast(),
+        &mut more_sz,
+    );
+    assert_eq!(more, 0, "the message has exactly {PARTS} parts");
+
+    zmq_close(push);
+    zmq_close(pull);
+    zmq_ctx_term(ctx);
+}
+
 #[test]
 fn dontwait_returns_eagain_when_empty() {
     let ctx = zmq_ctx_new();

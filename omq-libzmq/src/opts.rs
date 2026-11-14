@@ -29,6 +29,10 @@ pub(crate) use raw::OptOut;
 pub use set::zmq_setsockopt;
 pub use set_security::{OmqPlainCredential, omq_socket_set_plain_server_credentials};
 
+/// Most parts one received message may have. libzmq has no such limit and
+/// no option for one, so this is fixed and far above the omq-tokio default.
+const MAX_MESSAGE_PARTS: usize = 65_536;
+
 /// Lock the socket's overlay, or `ETERM` when the lock is poisoned.
 fn overlay(
     sock: &crate::socket::OmqSocket,
@@ -439,6 +443,7 @@ impl SocketOverlay {
             linger: self.effective_linger(),
             identity: self.identity.clone(),
             max_message_size: self.max_message_size,
+            max_message_parts: Some(MAX_MESSAGE_PARTS),
             arena_threshold: self.arena_threshold,
             router_mandatory: self.router_mandatory,
             heartbeat_interval: self.heartbeat.ivl,

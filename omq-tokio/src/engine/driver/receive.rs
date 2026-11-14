@@ -363,9 +363,15 @@ pub(super) fn drain_decoded_messages(
 
 /// Whether another message can be decoded without reading the transport.
 fn decoded_input_ready(connection: &Connection, decoder: Option<&MessageDecoder>) -> bool {
-    connection.has_messages()
-        || connection.has_pending_input()
-        || decoder.is_some_and(MessageDecoder::has_pending_messages)
+    connection.has_pending_input() || decoded_messages_waiting(connection, decoder)
+}
+
+/// Whether a decoded message still waits for delivery.
+pub(super) fn decoded_messages_waiting(
+    connection: &Connection,
+    decoder: Option<&MessageDecoder>,
+) -> bool {
+    connection.has_messages() || decoder.is_some_and(MessageDecoder::has_pending_messages)
 }
 
 enum DecodedReceive {

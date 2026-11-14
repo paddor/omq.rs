@@ -154,6 +154,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   takes it over. Before, the old connection was removed first, and a send
   from another thread in between got `Unroutable` under
   `router_mandatory` or was dropped without it.
+- Messages that were complete in front of a bad or oversized frame are
+  delivered before the connection closes. Before, a read that held ten
+  valid messages and then a frame over `max_message_size` dropped all
+  ten. Messages that arrive before the data plane is active are still
+  dropped with such a frame.
 
 ## [0.34.3] - 2026-11-04
 

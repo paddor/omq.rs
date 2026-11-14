@@ -132,6 +132,43 @@ async fn single_frame_sockets_discard_multipart_without_losing_connection() {
     }
 }
 
+/// Complete messages in front of a bad frame are delivered before the
+/// connection is closed, also when one read holds all of them.
+#[tokio::test]
+async fn messages_before_a_bad_frame_are_delivered() {
+    // The limit counts 64 bytes per part on top of the body.
+    let oversized = frame(0, &[b'x'; 100]);
+    let reserved_flags = vec![0x80, 0];
+    for bad in [oversized, reserved_flags] {
+        let options = Options::default()
+            .linger(Duration::ZERO)
+            .max_message_size(128);
+        let local = Socket::new(SocketType::Pull, options);
+        let mut monitor = local.monitor();
+        let mut raw = raw_peer(&local, b"PUSH", (3, 1)).await;
+        // A delivered message shows that the data plane is active.
+        raw.write_all(&frame(0, b"ready")).await.unwrap();
+        let message = tokio::time::timeout(DEADLINE, local.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(message.part_bytes(0).unwrap().as_ref(), b"ready");
+
+        let mut wire = frame(0, b"first");
+        wire.extend_from_slice(&frame(0, b"second"));
+        wire.extend_from_slice(&bad);
+        raw.write_all(&wire).await.unwrap();
+        wait_disconnected(&mut monitor).await;
+        for expected in [&b"first"[..], b"second"] {
+            let message = tokio::time::timeout(DEADLINE, local.recv())
+                .await
+                .expect("a message before the bad frame was dropped")
+                .unwrap();
+            assert_eq!(message.part_bytes(0).unwrap().as_ref(), expected);
+        }
+    }
+}
+
 #[tokio::test]
 async fn subscription_commands_follow_peer_version() {
     for kind in [SocketType::Sub, SocketType::XSub] {

@@ -832,6 +832,106 @@ mod web_wire {
         assert_closed(&connection).await;
     }
 
+    /// Counts wakes and lets the test wait for the next one.
+    #[derive(Default)]
+    struct WakeProbe {
+        wakes: std::sync::atomic::AtomicUsize,
+        woken: tokio::sync::Notify,
+    }
+
+    impl std::task::Wake for WakeProbe {
+        fn wake(self: Arc<Self>) {
+            // Relaxed: a counter read after the notification it pairs with.
+            self.wakes
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.woken.notify_one();
+        }
+    }
+
+    /// A lingering close waits for the peer to acknowledge FIN. Quinn
+    /// keeps that wake registration in the `stopped` future, so the future
+    /// must live across polls: a new one per poll loses the wake.
+    #[tokio::test]
+    async fn web_shutdown_is_woken_by_the_fin_acknowledgment() {
+        use std::pin::Pin;
+        use std::task::{Context, Poll, Waker};
+        use tokio::io::AsyncWrite;
+
+        // Both client streams stay open: a finished liveness stream would
+        // close the session, and that also ends the wait under test.
+        let mut fixture = web_listener(&[]).await;
+        let session = web_session(&fixture, None).await.unwrap();
+        let connection = (*session).clone();
+        let (mut data, _data_recv) = session.open_bi().await.unwrap();
+        let (mut live, _live_recv) = session.open_bi().await.unwrap();
+        data.write_all(&super::super::web::DATA_PREFACE)
+            .await
+            .unwrap();
+        live.write_all(&liveness::PREFACE).await.unwrap();
+        let stream = fixture.next().await.expect("peer delivered");
+        let (_recv, mut send) = stream.into_split();
+
+        let probe = Arc::new(WakeProbe::default());
+        let waker = Waker::from(probe.clone());
+        let mut cx = Context::from_waker(&waker);
+        assert!(Pin::new(&mut send).poll_shutdown(&mut cx).is_pending());
+        tokio::time::timeout(Duration::from_secs(5), probe.woken.notified())
+            .await
+            .expect("the FIN acknowledgment did not wake the shutdown");
+
+        // Acknowledged: the shutdown now waits for the peer to close.
+        let second = Pin::new(&mut send).poll_shutdown(&mut cx);
+        assert!(second.is_pending(), "{second:?}");
+        connection.close(0_u32.into(), b"");
+        tokio::time::timeout(Duration::from_secs(5), probe.woken.notified())
+            .await
+            .expect("the peer's close did not wake the shutdown");
+        assert!(matches!(
+            Pin::new(&mut send).poll_shutdown(&mut cx),
+            Poll::Ready(Ok(()))
+        ));
+    }
+
+    /// An error close must not go through the session's close capsule:
+    /// that path waits up to five seconds for the peer to acknowledge it,
+    /// and the peer of a liveness timeout is the one that stopped
+    /// answering. Until then the connection would stay usable.
+    #[tokio::test]
+    async fn web_error_close_does_not_wait_for_the_peer() {
+        use omq_webtrans_quinn::{SessionError, WebTransportError};
+
+        let mut fixture = web_listener(&[]).await;
+        let session = web_session(&fixture, None).await.unwrap();
+        let (mut data, _data_recv) = session.open_bi().await.unwrap();
+        let (mut live, _live_recv) = session.open_bi().await.unwrap();
+        data.write_all(&super::super::web::DATA_PREFACE)
+            .await
+            .unwrap();
+        live.write_all(&liveness::PREFACE).await.unwrap();
+        let stream = fixture.next().await.expect("peer delivered");
+
+        let carrier = stream.carrier().clone();
+        carrier.close(code::LIVENESS_TIMEOUT);
+        assert!(
+            carrier.connection().close_reason().is_some(),
+            "the error close left the connection open"
+        );
+        // The peer still learns the code.
+        let closed = tokio::time::timeout(Duration::from_secs(5), session.closed())
+            .await
+            .expect("peer saw no close");
+        assert!(
+            matches!(
+                &closed,
+                SessionError::WebTransportError(WebTransportError::Closed(
+                    code::LIVENESS_TIMEOUT,
+                    _
+                ))
+            ),
+            "{closed:?}"
+        );
+    }
+
     #[tokio::test]
     async fn web_session_rejects_a_third_stream() {
         let (mut fixture, connection) =

@@ -104,6 +104,11 @@ impl QuicStream {
         &self.send.shared.endpoint
     }
 
+    #[cfg(all(test, feature = "webtransport"))]
+    pub(super) fn carrier(&self) -> &Carrier {
+        &self.send.shared.carrier
+    }
+
     pub(crate) fn take_io_lease(&mut self) -> Option<crate::context::IoThreadLease> {
         self.io_lease.take()
     }
@@ -137,11 +142,9 @@ impl std::fmt::Debug for QuicRecvHalf {
     }
 }
 
-type RawStopped = BoxFuture<'static, Result<Option<quinn::VarInt>, quinn::StoppedError>>;
-
 enum Shutdown {
     Open,
-    Acknowledging(Option<RawStopped>),
+    Acknowledging(BoxFuture<'static, Completion>),
     AwaitingPeerClose(BoxFuture<'static, ()>),
     Done,
 }
@@ -232,23 +235,20 @@ impl AsyncWrite for QuicSendHalf {
             match &mut this.shutdown {
                 Shutdown::Open => {
                     this.stream.finish()?;
-                    this.shutdown = Shutdown::Acknowledging(this.stream.raw_stopped());
+                    this.shutdown = Shutdown::Acknowledging(this.stream.stopped());
                 }
-                Shutdown::Acknowledging(raw) => {
-                    match ready!(this.stream.poll_stopped(raw.as_mut(), cx)) {
-                        Completion::Acknowledged => {
-                            this.shutdown =
-                                Shutdown::AwaitingPeerClose(this.shared.carrier.closed());
-                        }
-                        Completion::PeerStopped => {
-                            return Poll::Ready(Err(io::Error::new(
-                                io::ErrorKind::BrokenPipe,
-                                "QUIC peer stopped the data stream",
-                            )));
-                        }
-                        Completion::Failed(e) => return Poll::Ready(Err(e)),
+                Shutdown::Acknowledging(stopped) => match ready!(stopped.as_mut().poll(cx)) {
+                    Completion::Acknowledged => {
+                        this.shutdown = Shutdown::AwaitingPeerClose(this.shared.carrier.closed());
                     }
-                }
+                    Completion::PeerStopped => {
+                        return Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::BrokenPipe,
+                            "QUIC peer stopped the data stream",
+                        )));
+                    }
+                    Completion::Failed(e) => return Poll::Ready(Err(e)),
+                },
                 Shutdown::AwaitingPeerClose(closed) => {
                     ready!(closed.as_mut().poll(cx));
                     this.shared.completed.store(true, Ordering::Release);

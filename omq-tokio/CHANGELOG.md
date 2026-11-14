@@ -170,6 +170,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its three second lease before the next attempt. Before, it started a
   new handshake on every pass: one HELLO and WELCOME per round trip for
   as long as the slot stayed taken.
+- A lingering close of a WebTransport peer wakes when the peer
+  acknowledges the end of the stream. Before, that wake was lost, and
+  the close could wait out the whole linger, or forever without one.
+- A WebTransport peer closed for a liveness timeout or a protocol
+  violation loses its connection at once. Before, the close went out as
+  a session capsule first, and a peer that did not acknowledge it stayed
+  connected and routable for five more seconds.
 
 ## [0.34.3] - 2026-11-04
 

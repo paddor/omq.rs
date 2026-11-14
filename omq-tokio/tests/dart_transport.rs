@@ -1035,6 +1035,63 @@ async fn lost_confirm_is_resent_before_the_lease_expires() {
     gather.close().await.unwrap();
 }
 
+/// A connector whose socket has no ready slot left must not start a new
+/// handshake on every pass: that is one HELLO per round trip, forever.
+#[tokio::test]
+async fn connector_without_a_ready_slot_backs_off() {
+    // CHANNEL takes one peer.
+    let listener = Socket::new(SocketType::Channel, Options::default());
+    let channel = Socket::new(SocketType::Channel, Options::default());
+    channel
+        .connect(listener.bind(endpoint(0)).await.unwrap())
+        .await
+        .unwrap();
+    ready(&channel, 1).await;
+
+    // A second target that answers every HELLO with a valid WELCOME.
+    let raw = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    channel
+        .connect(endpoint(raw.local_addr().unwrap().port()))
+        .await
+        .unwrap();
+    let mut hellos = 0;
+    let mut bytes = [0; dart::MAX_DATAGRAM];
+    let mut output = [0; dart::MAX_DATAGRAM];
+    let window = tokio::time::sleep(Duration::from_millis(500));
+    tokio::pin!(window);
+    loop {
+        let (length, source) = tokio::select! {
+            () = &mut window => break,
+            result = raw.recv_from(&mut bytes) => result.unwrap(),
+        };
+        let Some(hello) = dart::decode_ready(&bytes[..length]) else {
+            continue;
+        };
+        if hello.phase != dart::Phase::Hello {
+            continue;
+        }
+        hellos += 1;
+        let welcome = Ready {
+            socket_type: SocketType::Channel,
+            identity: None,
+            reply_requested: false,
+            session: 5,
+            echo: hello.session,
+            phase: dart::Phase::Welcome,
+        };
+        let length = dart::encode_ready(welcome, &mut output).unwrap();
+        raw.send_to(&output[..length], source).await.unwrap();
+    }
+    assert!(hellos >= 1, "the second connect sent no HELLO");
+    assert!(
+        hellos <= 2,
+        "{hellos} HELLOs in 500 ms without a ready slot"
+    );
+
+    channel.close().await.unwrap();
+    listener.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn repairs_burst_and_tail_loss_with_lost_feedback_and_reordering() {
     for congestion in [DartCongestion::Lan, DartCongestion::Adaptive] {

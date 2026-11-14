@@ -166,6 +166,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answers with session traffic. Before, it sent CONFIRM once more at
   most, and a lost one left it connected to a listener that had not
   admitted it, for the three seconds of its lease.
+- A `dart://` connect whose socket has no ready peer slot left waits out
+  its three second lease before the next attempt. Before, it started a
+  new handshake on every pass: one HELLO and WELCOME per round trip for
+  as long as the slot stayed taken.
 
 ## [0.34.3] - 2026-11-04
 

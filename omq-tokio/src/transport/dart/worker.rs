@@ -651,12 +651,30 @@ impl EndpointWorker {
         self.insert_pending(source, pending, routes);
     }
 
+    /// Drop a confirmed handshake that found no ready slot. A connector
+    /// keeps its route, silent, until the lease expires: without the route
+    /// the next pass would start a new attempt and send HELLO at once.
+    fn refuse_promotion(route: &mut Route) {
+        let Some(pending) = route.pending.as_mut() else {
+            return;
+        };
+        let lease = &mut pending.lease;
+        if !lease.handshake.is_connector() {
+            route.pending = None;
+            return;
+        }
+        // A new session ID: a repeated WELCOME for the old one is ignored.
+        lease.handshake = Handshake::connector(fresh_session());
+        lease.handshake.committed();
+        lease.retry = lease.expires;
+    }
+
     /// Turn a confirmed handshake into a peer once it holds a ready slot.
     fn promote(&self, source: SocketAddr, route: &mut Route, now: Instant, generation: &mut u64) {
         if route.permit.is_none() {
             let Ok(permit) = self.shared.peers.clone().try_acquire_owned() else {
                 // Every ready slot is taken; this source stays out.
-                route.pending = None;
+                Self::refuse_promotion(route);
                 return;
             };
             route.permit = Some(permit);

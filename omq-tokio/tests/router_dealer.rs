@@ -916,6 +916,74 @@ async fn router_handover_evicts_old_peer() {
     assert!(r.is_err(), "dealer_a should not receive after handover");
 }
 
+/// A handover must not leave the identity without a route. A sender on
+/// another thread would get `Unroutable` under `router_mandatory`, though
+/// the old and the new connection are both alive at that moment.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn router_handover_keeps_the_identity_routable() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let ep = inproc_ep("rd-handover-gap");
+    let router = Socket::new(
+        SocketType::Router,
+        Options::default().router_mandatory(true),
+    );
+    let mut mon = router.monitor();
+    router.bind(ep.clone()).await.unwrap();
+
+    let options = Options::default()
+        .identity(bytes::Bytes::from_static(b"gamma"))
+        .reconnect(ReconnectPolicy::Disabled);
+    let mut current = Socket::new(SocketType::Dealer, options.clone());
+    current.connect(ep.clone()).await.unwrap();
+    loop {
+        match tokio::time::timeout(Duration::from_secs(5), mon.recv()).await {
+            Ok(Ok(MonitorEvent::HandshakeSucceeded { .. })) => break,
+            Ok(Ok(_)) => {}
+            other => panic!("expected HandshakeSucceeded, got {other:?}"),
+        }
+    }
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let sender = std::thread::spawn({
+        let (router, stop) = (router.clone(), stop.clone());
+        move || {
+            let mut unroutable = 0_usize;
+            // Relaxed: a plain stop flag.
+            while !stop.load(Ordering::Relaxed) {
+                // A full queue is fine; only a missing route counts.
+                if let Err(omq_tokio::TrySendError::Error(Error::Unroutable)) =
+                    router.try_send(Message::multipart(["gamma", "x"]))
+                {
+                    unroutable += 1;
+                }
+            }
+            unroutable
+        }
+    });
+
+    for _ in 0..200 {
+        let next = Socket::new(SocketType::Dealer, options.clone());
+        next.connect(ep.clone()).await.unwrap();
+        loop {
+            match tokio::time::timeout(Duration::from_secs(5), mon.recv()).await {
+                Ok(Ok(MonitorEvent::Disconnected {
+                    reason: DisconnectReason::Handover,
+                    ..
+                })) => break,
+                Ok(Ok(_)) => {}
+                other => panic!("expected Disconnected(Handover), got {other:?}"),
+            }
+        }
+        current = next;
+    }
+    stop.store(true, Ordering::Relaxed);
+    let unroutable = sender.join().unwrap();
+    drop(current);
+    assert_eq!(unroutable, 0, "sends found no route during a handover");
+}
+
 #[tokio::test]
 async fn router_handover_monitor_event() {
     let ep = inproc_ep("rd-handover-mon");

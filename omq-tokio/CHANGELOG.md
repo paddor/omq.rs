@@ -150,6 +150,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default interface, as libzmq does, and several DISH sockets of one host
   can share the port. Before, the socket bound the group address without
   joining it, so it received nothing and reported no error.
+- A ROUTER, SERVER or PEER identity stays routable while a new connection
+  takes it over. Before, the old connection was removed first, and a send
+  from another thread in between got `Unroutable` under
+  `router_mandatory` or was dropped without it.
 
 ## [0.34.3] - 2026-11-04
 

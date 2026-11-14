@@ -127,16 +127,22 @@ impl SocketDriver {
         let Some(activation) = self.receive_activation(peer_id, &sender) else {
             return;
         };
-        if let Some(old_id) = self.routing.send_strategy.peer_for_identity(&identity)
-            && old_id != peer_id
-        {
-            self.evict_peer_for_handover(old_id);
-        }
+        let replaced = self
+            .routing
+            .send_strategy
+            .peer_for_identity(&identity)
+            .filter(|old_id| *old_id != peer_id);
 
         let Some(ready) = self.mark_peer_ready(peer_id, &identity, info) else {
             return;
         };
         self.add_ready_routes(peer_id, &ready, identity, sender);
+        // The new route owns the identity now. Evicting the old connection
+        // first would leave a moment without a route, and a send from
+        // another thread would find the identity unroutable.
+        if let Some(old_id) = replaced {
+            self.evict_peer_for_handover(old_id);
+        }
         self.link.monitor.publish(ready.event);
 
         // Replies must be routable before a different I/O/application thread

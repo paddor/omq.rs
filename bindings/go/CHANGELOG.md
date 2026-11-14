@@ -2,12 +2,22 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-14
+
 ### Added
 
 - `MaxMessageParts` limits the parts of one received message (default 1024).
   `MaxPeerSubscriptions` limits the prefixes or groups one peer may hold on
   a PUB, XPUB or RADIO socket (default 65536). `NoMaxMessageParts` and
   `NoMaxPeerSubscriptions` remove the limits.
+
+### Changed
+
+- Bundle `omq-tokio` 0.36.0. Messages queued on a `connect()` route
+  survive a reconnect, as in libzmq. A peer that sends more than 1024
+  message parts is disconnected, and one peer holds at most 65,536
+  subscriptions or groups. An `ipc://` bind on a path with a live
+  listener fails.
 
 ## [0.1.16] - 2026-11-12
 

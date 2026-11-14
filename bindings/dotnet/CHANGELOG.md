@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-14
+
 ### Added
 
 - `SocketOption.MaxMessageParts` and `SocketOption.MaxPeerSubscriptions`
@@ -13,6 +15,11 @@
 - `Poller.Wait` and `Poller.WaitAsync` blocked when the context shuts down
   throw `OmqException` with `ETERM`. Before, they reported the socket as
   readable.
+- Bundle `omq-libzmq` 0.11.0 on `omq-tokio` 0.36.0. Messages queued on a
+  `connect()` route survive a reconnect, as in libzmq. A peer that sends
+  more than 65,536 message parts is disconnected, and one peer holds at
+  most 1,048,576 subscriptions or groups. An `ipc://` bind on a path with
+  a live listener fails with `EADDRINUSE`.
 
 ## [0.2.14] - 2026-11-12
 

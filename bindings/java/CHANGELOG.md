@@ -2,10 +2,20 @@
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-14
+
 ### Added
 
 - `maxMessageParts` / `noMaxMessageParts` and `maxPeerSubscriptions` /
   `noMaxPeerSubscriptions` on `Socket` and `SocketOptions.Builder`.
+
+### Changed
+
+- Bundle `omq-tokio` 0.36.0. Messages queued on a `connect()` route
+  survive a reconnect, as in libzmq. A peer that sends more than 1024
+  message parts is disconnected, and one peer holds at most 65,536
+  subscriptions or groups. An `ipc://` bind on a path with a live
+  listener fails.
 
 ## [0.5.9] - 2026-11-12
 

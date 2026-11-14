@@ -2,11 +2,21 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-14
+
 ### Added
 
 - `max_message_parts` and `max_peer_subscriptions` socket options, with
   `set_*`/`get_*` methods. They limit the parts of one received message and
   the prefixes or groups one peer may hold; `-1` removes the limit.
+
+### Changed
+
+- Bundle `omq-libzmq` 0.11.0 on `omq-tokio` 0.36.0. Messages queued on a
+  `connect()` route survive a reconnect, as in libzmq. A peer that sends
+  more than 65,536 message parts is disconnected, and one peer holds at
+  most 1,048,576 subscriptions or groups. An `ipc://` bind on a path with
+  a live listener fails with `EADDRINUSE`.
 
 ## [0.2.16] - 2026-11-12
 

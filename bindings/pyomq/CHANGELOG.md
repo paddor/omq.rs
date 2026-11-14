@@ -7,12 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-11-14
+
 ### Added
 
 - `OMQ_MAX_MESSAGE_PARTS` (`max_message_parts`, default 1024) limits the
   parts of one received message. `OMQ_MAX_PEER_SUBSCRIPTIONS`
   (`max_peer_subscriptions`, default 65536) limits the prefixes or groups
   one peer may hold on a PUB, XPUB or RADIO socket. -1 removes a limit.
+
+### Changed
+
+- Bundle `omq-tokio` 0.36.0. Messages queued on a `connect()` route
+  survive a reconnect, as in libzmq. A peer that sends more than 1024
+  message parts is disconnected, and one peer holds at most 65,536
+  subscriptions or groups. An `ipc://` bind on a path with a live
+  listener fails.
 
 ## [0.27.8] - 2026-11-12
 

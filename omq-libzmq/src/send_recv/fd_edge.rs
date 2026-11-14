@@ -27,7 +27,9 @@ pub(crate) struct FdSendEdge {
     wake: Mutex<Option<SendWake>>,
 }
 
-/// The application fetched `ZMQ_FD` of `sock`.
+/// The application fetched `ZMQ_FD` of `sock`. Windows has no `ZMQ_FD`,
+/// so the wake never arms there.
+#[cfg(unix)]
 pub(crate) fn watch(sock: &OmqSocket) {
     // Relaxed: a plain flag, read by the same application thread.
     sock.send.fd_edge.watched.store(true, Ordering::Relaxed);

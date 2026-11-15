@@ -21,8 +21,8 @@ pub(crate) use recv::{
     authenticated_recv_has_more, direct_frame_recv, pop_first_frame,
     pop_recv_frame_with_properties, pop_recv_message_with_metadata,
 };
+pub use recv::{recv_frame_with, zmq_recv, zmq_recviov};
 use recv::{try_pop_dual, try_recv_authenticated_message};
-pub use recv::{zmq_recv, zmq_recviov};
 
 #[repr(C)]
 #[derive(Debug)]

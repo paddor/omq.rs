@@ -106,6 +106,15 @@ public sealed class Context : IDisposable
     internal sealed class SafeSocket : SafeHandleZeroOrMinusOneIsInvalid
     {
         public SafeSocket(IntPtr value) : base(true) => SetHandle(value);
-        protected override bool ReleaseHandle() => Native.zmq_close(handle) == 0;
+        /// Registered with the native ready callback; unrooted once close returns.
+        internal Readiness? Readiness { get; set; }
+        protected override bool ReleaseHandle()
+        {
+            // After a successful close no ready callback runs or follows. A
+            // failed close keeps the callback state rooted.
+            bool closed = Native.zmq_close(handle) == 0;
+            if (closed) Readiness?.Unroot();
+            return closed;
+        }
     }
 }

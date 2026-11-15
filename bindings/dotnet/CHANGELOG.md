@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `ReceiveAsync` and `Monitor.ReceiveAsync` wait on `omq-libzmq`'s ready
+  callback instead of 100 ms `zmq_poll` slices on thread-pool threads. A
+  waiting receive holds no thread and no socket lock, so idle receives no
+  longer delay others, and `Dispose` fails a pending receive at once.
+
 ## [0.3.0] - 2026-11-14
 
 ### Added

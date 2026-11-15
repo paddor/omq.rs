@@ -51,21 +51,15 @@ public sealed class Monitor : IDisposable
     public async Task<MonitorEvent> ReceiveAsync(CancellationToken cancellationToken = default)
     {
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, stopping.Token);
-        var poller = new Poller(); poller.Add(reader, PollEvents.Readable);
-        while (true)
+        try
         {
-            // A poll woken by Dispose's final event sees the cancellation first.
-            linked.Token.ThrowIfCancellationRequested();
-            try
-            {
-                if (reader.TryReceive(out Message? message)) return Parse(message!);
-            }
-            // Dispose closes the reader after cancelling, so a receive racing it is cancelled.
-            catch (OmqClosedException) when (linked.IsCancellationRequested)
-            {
-                throw new OperationCanceledException(linked.Token);
-            }
-            await poller.WaitAsync(TimeSpan.FromMilliseconds(100), linked.Token).ConfigureAwait(false);
+            // A receive woken by Dispose's final event sees the cancellation first.
+            return Parse(await reader.ReceiveAsync(linked.Token).ConfigureAwait(false));
+        }
+        // Dispose closes the reader after cancelling, so a receive racing it is cancelled.
+        catch (OmqClosedException) when (linked.IsCancellationRequested)
+        {
+            throw new OperationCanceledException(linked.Token);
         }
     }
 

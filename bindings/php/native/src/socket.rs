@@ -10,9 +10,9 @@ use ext_php_rs::prelude::*;
 use ext_php_rs::types::{ZendClassObject, ZendHashTable, ZendObject, ZendStr, Zval};
 
 use crate::context::{ContextShared, ZmqContext};
-use crate::errors::{last_errno, socket_error, socket_misuse};
+use crate::errors::{Class, exception, last_errno, socket_error, socket_misuse};
 use crate::sockopt;
-use crate::util::{Msg, c_endpoint, c_int_arg, with_bytes};
+use crate::util::{c_endpoint, c_int_arg, with_bytes};
 
 const ZMQ_SNDMORE: c_int = 2;
 const ZMQ_EVENT_ALL: i64 = 0xFFFF;
@@ -76,14 +76,17 @@ impl SocketShared {
     }
 
     /// Receive one frame and whether more follow; `None` when it would block.
+    /// One copy: the frame goes straight from the ring message into a PHP
+    /// string, without a `zmq_msg_t`.
     fn recv_frame(&self, flags: c_int) -> PhpResult<Option<(ZBox<ZendStr>, bool)>> {
-        let mut msg = Msg::new();
-        if omq_zmq::zmq_msg_recv(msg.as_mut_ptr(), self.as_ptr(), flags) < 0 {
-            return would_block("Failed to receive message").map(|_| None);
+        let received = omq_zmq::recv_frame_with(self.as_ptr(), flags, |bytes, more| {
+            (ZendStr::new(bytes, false), more)
+        });
+        match received {
+            Ok(frame) => Ok(Some(frame)),
+            Err(libc::EAGAIN) => Ok(None),
+            Err(errno) => Err(exception(Class::Socket, "Failed to receive message", errno)),
         }
-
-        let frame = ZendStr::new(msg.bytes(), false);
-        Ok(Some((frame, msg.more())))
     }
 
     fn attach(&self, how: Attach, dsn: &str, force: bool) -> PhpResult<()> {

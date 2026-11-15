@@ -61,10 +61,6 @@ fn identify(entry: &Zval) -> PhpResult<(String, Target)> {
         return Ok((format!("r:{fd}"), Target::Fd(fd)));
     }
 
-    if let Some(id) = entry.str() {
-        return Err(poll_error(&format!("Unknown poll item {id}")));
-    }
-
     Err(poll_error(
         "The first argument must be an instance of ZMQSocket or a resource",
     ))

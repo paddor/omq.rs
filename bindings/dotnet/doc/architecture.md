@@ -48,9 +48,16 @@ part of the current public contract.
 
 `SendAsync(Message)` uses the OMQ-native async task ABI. Cancellation requests
 native task cancellation and keeps the callback state rooted until completion.
-`SendAsync(ReadOnlyMemory<byte>)` and `ReceiveAsync` use nonblocking socket
-operations plus short cancellable poll slices. `Poller.WaitAsync` uses the same
-bounded-slice model.
+`SendAsync(ReadOnlyMemory<byte>)` tries a nonblocking send first and falls back
+to it.
+
+`ReceiveAsync` tries a nonblocking receive, then reads `ZMQ_EVENTS`, which arms
+the socket's native ready callback, and awaits a task. The callback runs on an
+OMQ I/O thread and only completes that task; continuations run on the thread
+pool. A waiting receive holds no thread and no socket lock. The callback
+registers on a socket's first wait and stays rooted until `zmq_close` returns;
+`Dispose` fails pending waits. `Poller.WaitAsync` still uses cancellable poll
+slices.
 
 Cancellation never frees a native async task or callback state while native
 code may still reference it. Dispose and context shutdown remain the explicit

@@ -11,6 +11,7 @@ public sealed class Socket : IDisposable
     private readonly Context owner;
     private readonly object gate = new();
     private Context.SafeSocket? handle;
+    private Readiness? readiness;
     /// Gets the socket pattern.
     public SocketType Type { get; }
     /// Gets whether the native socket has been closed.
@@ -315,11 +316,41 @@ public sealed class Socket : IDisposable
     }
     private static int Flags(bool more, bool dontWait) => (more ? 2 : 0) | (dontWait ? 1 : 0);
 
-    /// Closes the socket and releases its native handle.
+    /// Closes the socket and releases its native handle. Pending async waits
+    /// fail with <see cref="OmqClosedException"/>.
     public void Dispose()
     {
         lock (gate) { if (handle is null) return; handle.Dispose(); handle = null; }
+        readiness?.Close();
         owner.Remove(this); GC.SuppressFinalize(this);
+    }
+
+    /// <summary>
+    /// Arms the native ready callback by reading <c>ZMQ_EVENTS</c>. Returns
+    /// null when <paramref name="events"/> are ready now, else a task that
+    /// completes on the next readiness change (or fails once closed).
+    /// </summary>
+    internal Task? ArmReady(PollEvents events)
+    {
+        lock (gate)
+        {
+            IntPtr socket = Require();
+            Task next = (readiness ??= RegisterReadiness(socket)).Next();
+            return (GetInt32(SocketOption.Events) & (int)events) != 0 ? null : next;
+        }
+    }
+
+    /// Registers on first use, so sockets without async waits never arm
+    /// native write wakes.
+    private Readiness RegisterReadiness(IntPtr socket)
+    {
+        var created = new Readiness();
+        IntPtr userdata = created.Root();
+        int rc;
+        unsafe { rc = Native.omq_socket_set_ready_callback(socket, &Readiness.OnReady, userdata); }
+        if (rc < 0) { created.Unroot(); Errors.Check("set_ready_callback", rc); }
+        handle!.Readiness = created;
+        return created;
     }
 
     internal void EnableMonitor(string endpoint, int events)

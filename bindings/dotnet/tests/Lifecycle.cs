@@ -114,6 +114,54 @@ static async Task TryReceivePreservesMultipartAtomicity()
     Check(received[1].SequenceEqual("second"u8.ToArray()), "multipart second frame mismatch");
 }
 
+static async Task DisposeWakesPendingReceive()
+{
+    using var context = new Context();
+    var pull = context.CreateSocket(SocketType.Pull, new SocketOptions { Linger = 0 });
+    Task<Message> pending = pull.ReceiveAsync();
+    await Task.Delay(30);
+    Check(!pending.IsCompleted, "receive should wait for a message");
+    pull.Dispose();
+    try { await pending.WaitAsync(TimeSpan.FromSeconds(2)); throw new Exception("dispose did not wake receive"); }
+    catch (ObjectDisposedException) { }
+}
+
+static async Task IdleReceivesDoNoWork()
+{
+    // Waiting receives hold no thread and run no work items until a message
+    // arrives, so one message on one socket is delivered promptly however
+    // many other receives wait.
+    const int count = 100;
+    using var context = new Context();
+    var pulls = new List<Socket>();
+    var pushes = new List<Socket>();
+    try
+    {
+        for (int i = 0; i < count; i++)
+        {
+            pulls.Add(context.CreateSocket(SocketType.Pull, new SocketOptions { Linger = 0 }));
+            pushes.Add(context.CreateSocket(SocketType.Push, new SocketOptions { Linger = 0 }));
+            string endpoint = $"inproc://dotnet-idle-receives-{Environment.ProcessId}-{i}";
+            pulls[i].Bind(endpoint);
+            pushes[i].Connect(endpoint);
+        }
+        Task<Message>[] pending = pulls.Select(pull => pull.ReceiveAsync()).ToArray();
+        await Task.Delay(200);
+        long before = ThreadPool.CompletedWorkItemCount;
+        await Task.Delay(500);
+        long idleWork = ThreadPool.CompletedWorkItemCount - before;
+        Check(idleWork < 20, $"idle receives ran {idleWork} work items in 500 ms");
+        pushes[^1].SendText("one");
+        Message received = await pending[^1].WaitAsync(TimeSpan.FromSeconds(2));
+        Check(received.ToString() == "one", "idle-receive message mismatch");
+        Check(pending.Take(count - 1).All(task => !task.IsCompleted), "an idle receive completed");
+    }
+    finally
+    {
+        foreach (Socket socket in pulls.Concat(pushes)) socket.Dispose();
+    }
+}
+
 static void RepeatedCreateDispose()
 {
     for (int i = 0; i < 100; i++)
@@ -157,6 +205,8 @@ await AsyncSendUnderHwmIsBounded();
 await ShutdownAndCancellationBoundPoll();
 await ShutdownCompletesPendingSend();
 await MonitorStopWakesReceive();
+await DisposeWakesPendingReceive();
+await IdleReceivesDoNoWork();
 await ConnectBeforeBind();
 await TryReceivePreservesMultipartAtomicity();
 RepeatedCreateDispose();

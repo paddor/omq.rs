@@ -64,21 +64,23 @@ public static class SocketAsyncExtensions
     }
 
     /// Receives the next complete message, waiting asynchronously until available.
+    /// Waiting holds no thread and no socket lock: the native ready callback
+    /// wakes it.
     public static Task<Message> ReceiveAsync(this Socket socket, CancellationToken cancellationToken = default)
     {
-        return ReceiveAsyncCore(socket, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        return socket.TryReceive(out Message? message) ? Task.FromResult(message!) : ReceiveAsyncCore(socket, cancellationToken);
     }
 
     private static async Task<Message> ReceiveAsyncCore(Socket socket, CancellationToken cancellationToken)
     {
-        var poller = new Poller(); poller.Add(socket, PollEvents.Readable);
-        Message? message;
-        while (!socket.TryReceive(out message))
+        while (true)
         {
+            Task? ready = socket.ArmReady(PollEvents.Readable);
+            if (ready is not null) await ready.WaitAsync(cancellationToken).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
-            await poller.WaitAsync(TimeSpan.FromMilliseconds(100), cancellationToken).ConfigureAwait(false);
+            if (socket.TryReceive(out Message? message)) return message!;
         }
-        return message!;
     }
 
     private static byte[] Encode(Message message)

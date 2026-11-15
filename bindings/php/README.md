@@ -21,8 +21,9 @@ cargo build --release --manifest-path bindings/php/native/Cargo.toml
 php -d extension=/path/to/target/release/libomq_php.so app.php
 ```
 
-With several LLVM versions installed, point bindgen at one, for example
-`LIBCLANG_PATH=/usr/lib/llvm-19/lib`.
+With several LLVM versions installed, bindgen can mix one version's libclang
+with another's headers; `export $(bindings/php/scripts/libclang-env.sh)`
+pins both to one.
 
 - Contexts start on first use and belong to the process that created them,
   so PHP-FPM workers forked after startup each get their own. Persistent

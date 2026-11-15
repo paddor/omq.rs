@@ -1,0 +1,26 @@
+[package]
+name = "omq-php-native"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+license = "ISC"
+publish = false
+
+[lib]
+name = "omq_php"
+crate-type = ["cdylib"]
+
+[dependencies]
+ext-php-rs = "0.16"
+libc = "0.2"
+omq_zmq = { package = "omq-libzmq", path = "../../../omq-libzmq" }
+
+[lints.rust]
+missing_debug_implementations = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+
+[build-dependencies]
+cc = "1"

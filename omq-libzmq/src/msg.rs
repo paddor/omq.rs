@@ -23,6 +23,9 @@ use repr::{
 };
 
 const LARGE_MSG_SHARED_THRESHOLD: usize = 64;
+/// Received frames up to this size are copied into a malloc block: one
+/// allocation instead of a boxed `Bytes`.
+const SMALL_FRAME_MAX: usize = 128;
 
 /// Initialize caller-owned message storage as an empty message; return zero or -1 with errno.
 #[unsafe(no_mangle)]
@@ -456,39 +459,33 @@ pub extern "C" fn zmq_msg_send(
     let sock_arc = c_try!(unsafe { crate::handle::socket(sock) });
     c_try!(crate::socket::materialize_for_io(sock_arc));
 
-    let group = msg_group_bytes(msg);
-    let routing_id = zmq_msg_routing_id(msg);
-
-    // For KIND_BYTES, clone the Bytes (a zero-copy Arc bump) rather than
-    // copying the payload. We must NOT mutate `msg` here: libzmq leaves the
-    // message intact when a send fails, and the caller may then retry, copy,
-    // or close it. Stealing the Box and nulling the fields used to leave the
-    // message in a KIND_BYTES-with-null-boxed state that made a subsequent
-    // zmq_msg_copy dereference a null pointer. On success the Box is dropped
-    // by zmq_msg_close below.
+    // We must NOT mutate `msg` here: libzmq leaves the message intact when a
+    // send fails, and the caller may then retry, copy, or close it. On
+    // success zmq_msg_close below releases the payload.
     // SAFETY: msg is non-null (checked above).
     let r = unsafe { repr_ref(msg) };
-    let bytes = if let Some(bytes) = r.boxed_bytes() {
-        bytes.clone()
-    } else if r.ptr().is_null() && r.size() > 0 {
+    if r.boxed_bytes().is_none() && r.ptr().is_null() && r.size() > 0 {
         return crate::error::fail(libc::EFAULT);
-    } else {
-        extract_bytes(msg)
-    };
+    }
 
     // Only RADIO sends a group. Build it into this message; never stage it
     // in the socket's frame buffer, where a failed or non-RADIO send would
-    // leave it in front of the next message.
-    let ret = if sock_arc.socket_type == omq_tokio::SocketType::Radio && !group.is_empty() {
-        let ret_len = c_try!(checked_c_int_len(r.size()));
-        let message = omq_tokio::Message::with_group(group, bytes);
-        crate::send_recv::send_message(sock_arc, message, ret_len, flags)
-    } else if sock_arc.socket_type == omq_tokio::SocketType::Server {
-        let ret_len = c_try!(checked_c_int_len(r.size()));
-        let message = omq_tokio::Message::single(bytes).with_routing_id(routing_id);
-        crate::send_recv::send_message(sock_arc, message, ret_len, flags)
-    } else {
-        crate::send_recv::send_bytes(sock_arc, &bytes, flags)
+    // leave it in front of the next message. RADIO and SERVER need an owned
+    // payload; every other socket encodes from the borrowed bytes.
+    let ret = match sock_arc.socket_type {
+        omq_tokio::SocketType::Radio if !r.group().is_empty() => {
+            let ret_len = c_try!(checked_c_int_len(r.size()));
+            let group = msg_group_bytes(msg);
+            let message = omq_tokio::Message::with_group(group, owned_payload(r));
+            crate::send_recv::send_message(sock_arc, message, ret_len, flags)
+        }
+        omq_tokio::SocketType::Server => {
+            let ret_len = c_try!(checked_c_int_len(r.size()));
+            let message =
+                omq_tokio::Message::single(owned_payload(r)).with_routing_id(r.routing_id());
+            crate::send_recv::send_message(sock_arc, message, ret_len, flags)
+        }
+        _ => crate::send_recv::send_bytes(sock_arc, r.payload(), flags),
     };
 
     if ret >= 0 {
@@ -555,6 +552,17 @@ pub extern "C" fn zmq_msg_recv(
         omq_tokio::SocketType::Server | omq_tokio::SocketType::Dish => {
             crate::send_recv::pop_recv_message_with_metadata(sock, flags)
         }
+        _ if crate::send_recv::direct_frame_recv(sock) => {
+            return c_try!(crate::send_recv::pop_first_frame(
+                sock,
+                flags,
+                |message, start, more| {
+                    zmq_msg_close(msg);
+                    // SAFETY: msg is non-null and was just closed.
+                    store_message_frame(unsafe { repr(msg) }, message, start, more)
+                }
+            ));
+        }
         _ => crate::send_recv::pop_recv_frame_with_properties(sock, flags),
     };
 
@@ -567,6 +575,37 @@ pub extern "C" fn zmq_msg_recv(
     c_try!(store_received_frame(r, part));
 
     c_try!(checked_c_int_len(sz))
+}
+
+/// Store frame `start` of a ring message in a closed message: small frames
+/// copy straight from the borrowed message, larger ones share its storage.
+#[inline]
+fn store_message_frame(
+    r: &mut OmqMsgRepr,
+    message: &omq_tokio::Message,
+    start: usize,
+    more: bool,
+) -> Result<c_int, c_int> {
+    let frame = message.get(start).unwrap_or(&[]);
+    let len = checked_c_int_len(frame.len())?;
+    let more = u8::from(more);
+    let fields = if frame.len() <= SMALL_FRAME_MAX {
+        MsgFields::new(KIND_HEAP, more, frame.len(), malloc_copy(frame)?)
+    } else {
+        bytes_fields(message.part_bytes(start).unwrap_or_default(), more)
+    };
+
+    r.init_fields(fields);
+    Ok(len)
+}
+
+/// Fields for a `KIND_BYTES` message that owns `frame` through a box.
+fn bytes_fields(frame: Bytes, more: u8) -> MsgFields {
+    let size = frame.len();
+    let boxed = Box::new(frame);
+    let data_ptr = boxed.as_ptr().cast_mut();
+    MsgFields::new(KIND_BYTES, more, size, data_ptr)
+        .boxed(Box::into_raw(boxed).cast::<libc::c_void>())
 }
 
 /// Store a received frame in a closed message, picking the cheapest representation.
@@ -589,15 +628,12 @@ fn store_received_frame(r: &mut OmqMsgRepr, part: ReceivedPart) -> Result<(), c_
 
         MsgFields::new(KIND_BYTES_METADATA, more, sz, data_ptr)
             .boxed(Box::into_raw(boxed).cast::<libc::c_void>())
-    } else if sz <= 128 {
+    } else if sz <= SMALL_FRAME_MAX {
         // Small frame: malloc + memcpy (1 alloc) instead of
         // Box<Bytes> (2 allocs: Bytes::copy_from_slice + Box::new).
         MsgFields::new(KIND_HEAP, more, sz, malloc_copy(&frame)?)
     } else {
-        let boxed = Box::new(frame);
-        let data_ptr = boxed.as_ptr().cast_mut();
-        MsgFields::new(KIND_BYTES, more, sz, data_ptr)
-            .boxed(Box::into_raw(boxed).cast::<libc::c_void>())
+        bytes_fields(frame, more)
     };
 
     r.init_fields(fields.routing_id(routing_id));
@@ -605,11 +641,12 @@ fn store_received_frame(r: &mut OmqMsgRepr, part: ReceivedPart) -> Result<(), c_
     Ok(())
 }
 
-/// Extract a Bytes copy out of a msg without consuming ownership.
-fn extract_bytes(msg: *const OmqMsgRepr) -> Bytes {
-    // SAFETY: caller guarantees msg is non-null and initialized.
-    let r = unsafe { repr_ref(msg) };
-    Bytes::copy_from_slice(r.payload())
+/// The payload as owned `Bytes`, without consuming the message: received
+/// storage is shared by refcount, anything else is copied.
+fn owned_payload(r: &OmqMsgRepr) -> Bytes {
+    r.boxed_bytes()
+        .cloned()
+        .unwrap_or_else(|| Bytes::copy_from_slice(r.payload()))
 }
 
 #[cfg(test)]

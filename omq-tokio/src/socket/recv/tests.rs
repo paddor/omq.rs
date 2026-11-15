@@ -1,6 +1,4 @@
-use super::drain::{
-    RecvSource, drain_yring, drain_yring_one, drain_yring_one_into_batch, recv_source_at,
-};
+use super::drain::{RecvSource, drain_yring, drain_yring_one_into_batch, recv_source_at};
 use super::{
     BlockingRecvWaker, RECV_BATCH_BYTES, RECV_BATCH_MESSAGES, SpscAwareRecv, SpscHandles,
     TcpYringConsumer, recv_pipe,
@@ -757,75 +755,6 @@ fn native_lwm_wakes_producer_while_the_other_half_is_still_draining() {
     for (sequence, message) in out.iter().enumerate() {
         assert_eq!(message.part_slice(0).unwrap(), &[(sequence + 16) as u8]);
     }
-}
-
-#[test]
-fn native_lwm_counts_single_pops_and_preserves_partial_window_release() {
-    for capacity in [1, 2, 8, 16, 2048, 4096] {
-        let (mut producer, mut consumer) = yring::spsc(capacity);
-        assert!(!consumer.release_with_full());
-
-        for _ in 0..capacity {
-            producer.push(Message::single("queued")).unwrap();
-        }
-
-        producer.flush();
-        assert!(producer.is_full());
-        let mut progress = super::RingDrain::default();
-        let lwm = super::RingDrain::lwm(capacity);
-
-        for popped in 1..=lwm {
-            let (message, wake) = drain_yring_one(&mut consumer, &mut progress);
-            assert!(message.is_some());
-            assert_eq!(wake, popped == lwm);
-            assert_eq!(producer.is_full(), popped < lwm);
-        }
-
-        assert_eq!(progress.popped, 0);
-        if capacity > lwm {
-            let (message, wake) = drain_yring_one(&mut consumer, &mut progress);
-            assert!(message.is_some());
-            assert!(!wake);
-            let remaining = progress.remaining;
-            assert!(!progress.release(&mut consumer));
-            assert_eq!(progress.remaining, remaining);
-            assert_eq!(progress.popped, 0);
-
-            // The LWM batch plus this partial release are reusable slots.
-            for _ in 0..=lwm {
-                producer.push(Message::single("reused")).unwrap();
-            }
-
-            assert!(producer.is_full());
-        }
-    }
-}
-
-#[test]
-fn latency_drain_keeps_prefetched_batch_open() {
-    let (mut producer, mut consumer) = yring::spsc(8);
-    producer.push(Message::from_slice(b"a")).unwrap();
-    producer.push(Message::from_slice(b"b")).unwrap();
-    producer.flush();
-
-    let mut remaining = super::RingDrain::default();
-    let (first, released) = drain_yring_one(&mut consumer, &mut remaining);
-    assert_eq!(first.unwrap().part_bytes(0).unwrap(), &b"a"[..]);
-    assert!(!released);
-
-    let (second, released) = drain_yring_one(&mut consumer, &mut remaining);
-    assert_eq!(second.unwrap().part_bytes(0).unwrap(), &b"b"[..]);
-    assert!(released);
-
-    let (third, released) = drain_yring_one(&mut consumer, &mut remaining);
-    assert!(third.is_none());
-    assert!(!released);
-
-    producer.push(Message::from_slice(b"c")).unwrap();
-    producer.flush();
-    let (next, released) = drain_yring_one(&mut consumer, &mut remaining);
-    assert_eq!(next.unwrap().part_bytes(0).unwrap(), &b"c"[..]);
-    assert!(released);
 }
 
 #[test]

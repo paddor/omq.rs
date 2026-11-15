@@ -60,7 +60,7 @@ system `libzmq.so.5` in place for other programs.
 ## Development
 
 ```sh
-scripts/test-php.sh                       # both modes, plus ext-zmq's .phpt suite
+scripts/test-php.sh                       # both modes, ext-zmq's .phpt suite, a PHP-FPM check
 ruby bindings/php/scripts/update_perf.rb  # benchmark and chart
 ```
 

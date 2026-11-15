@@ -9,7 +9,8 @@
 #   OMQ_PHP      PHP command for the drop-in mode (default: php)
 #   OMQ_PROFILE  Cargo profile: debug or release (default: debug)
 #   OMQ_PHP_TEST_TIMEOUT  seconds per test file (default: 120)
-#   OMQ_PHP_REQUIRE=dropin,native  fail instead of skipping these modes
+#   OMQ_PHP_FPM  php-fpm binary for the native FPM check (default: search)
+#   OMQ_PHP_REQUIRE=dropin,native,fpm  fail instead of skipping these
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -85,6 +86,20 @@ run_phpt() {
     fi
 }
 
+run_fpm() {
+    local extension=$1 fpm="${OMQ_PHP_FPM:-}"
+    if [[ -z "$fpm" ]]; then
+        fpm="$(command -v php-fpm || compgen -G '/usr/sbin/php-fpm*' | head -n 1 || true)"
+    fi
+    if [[ -z "$fpm" ]]; then
+        skip fpm "php-fpm not found (install php-fpm)"
+        return
+    fi
+
+    echo "::: native PHP-FPM check"
+    "${runner[@]}" php -n -d "extension=$extension" bindings/php/tests/fpm_check.php "$fpm" "$extension"
+}
+
 run_native() {
     if ! command -v php-config >/dev/null 2>&1; then
         skip native "php-config not found (install php-dev)"
@@ -103,6 +118,7 @@ run_native() {
     done
 
     run_phpt "$extension" "$target_dir/omq-php-phpt"
+    run_fpm "$extension"
 }
 
 run_dropin

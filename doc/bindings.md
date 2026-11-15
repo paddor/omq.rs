@@ -20,6 +20,7 @@ flowchart TD
         lua["OMQ.lua"]
         zig["OMQ.zig"]
         php["OMQ.php"]
+        dart["OMQ.dart"]
         c["C applications"]
     end
     cabi --> libzmq["omq-libzmq<br/>C ABI"]
@@ -39,6 +40,7 @@ flowchart TD
 | [OMQ.lua](../bindings/lua) | Lua 5.4 | `omq-libzmq` | LuaRocks `omq` |
 | [OMQ.zig](../bindings/zig) | Zig | `omq-libzmq` | Git tag `omq-zig-v*` |
 | [OMQ.php](../bindings/php) | PHP | `omq-libzmq` | Source build; or distro `php-zmq` on staged `libomq_zmq` |
+| [OMQ.dart](../bindings/dart) | Dart | `omq-libzmq` | Git dependency on `bindings/dart` |
 
 Each native binding has a `doc/architecture.md` for its own ownership and
 threading details.

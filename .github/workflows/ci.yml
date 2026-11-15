@@ -385,7 +385,7 @@ jobs:
         run: ./scripts/test-lua.sh
 
   php-test:
-    name: php ext-zmq drop-in
+    name: php test
     needs: [changes, linux-gate]
     if: needs.changes.outputs.code == 'true' && needs.changes.outputs.run_php == 'true'
     runs-on: ubuntu-latest
@@ -393,14 +393,26 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: install PHP and ext-zmq
+        with:
+          workspaces: |
+            .
+            bindings/php/native
+      - name: install PHP, ext-zmq, and build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y php-cli php-zmq
+          sudo apt-get install -y php-cli php-dev php-zmq libclang-dev
       - name: php syntax
         run: for f in bindings/php/scripts/*.php bindings/php/tests/*.php; do php -l "$f"; done
-      - name: ext-zmq drop-in tests
+      - name: cargo fmt
+        run: cargo fmt --manifest-path bindings/php/native/Cargo.toml --check
+      - name: cargo clippy
+        run: cargo clippy --manifest-path bindings/php/native/Cargo.toml --all-targets -- -D warnings
+      - name: drop-in and native tests
+        env:
+          OMQ_PHP_REQUIRE: dropin,native
         run: ./scripts/test-php.sh
 
   zig-test:

@@ -107,6 +107,10 @@ promise:
 - `omq_socket_set_plain_server_credentials()` configures a copied, fixed PLAIN
   username/password allowlist before bind/connect. Each field is limited to
   255 ASCII VCHAR bytes. An empty allowlist denies every client.
+- `omq_socket_set_ready_callback()` is the push form of `ZMQ_FD`, for event
+  loops that cannot wait on a descriptor. Registering and each `ZMQ_EVENTS`
+  read arm it; it then runs once, on any thread, when `ZMQ_FD` would be
+  signaled.
 
 The async message encoding is an OMQ-specific length-table format. Its routed
 form also carries a SERVER routing ID. Bindings must use these functions only

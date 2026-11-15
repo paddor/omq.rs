@@ -568,6 +568,16 @@ ZMQ_EXPORT void omq_async_task_cancel (omq_async_task_t *task_);
 ZMQ_EXPORT void omq_async_task_free (omq_async_task_t *task_);
 /* Caller guarantees that socket operations are externally serialized. */
 ZMQ_EXPORT int omq_socket_allow_thread_migration (void *socket_);
+typedef void (*omq_ready_callback_fn) (void *userdata_);
+/*  The push form of ZMQ_FD. Registering arms the callback, and so does each
+    ZMQ_EVENTS read; once armed, it runs once when ZMQ_FD would be signaled:
+    input arrived, a blocked send can proceed, or the context terminates.
+    Like ZMQ_FD it reports changes, so read ZMQ_EVENTS after arming. It may
+    run on any thread, also inside a call on this socket; keep it short and
+    do not call into the socket from it. NULL clears it. Once a clearing
+    call or zmq_close returns, no call is running or follows.  */
+ZMQ_EXPORT int omq_socket_set_ready_callback (
+    void *socket_, omq_ready_callback_fn callback_, void *userdata_);
 /* One exact username/password pair in an OMQ fixed PLAIN allowlist. */
 typedef struct omq_plain_credential
 {

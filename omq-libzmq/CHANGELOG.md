@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `omq_socket_set_ready_callback()`: the push form of `ZMQ_FD`. Registering
+  and each `ZMQ_EVENTS` read arm the callback; it then runs once, on any
+  thread, when `ZMQ_FD` would be signaled. No call runs or follows once a
+  clearing call or `zmq_close()` returns.
+
 ## [0.11.0] - 2026-11-14
 
 ### Added

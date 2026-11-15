@@ -35,6 +35,10 @@ const FUNCTION_MATRIX: &[FunctionEntry] = &[
         status: FunctionStatus::Extension,
     },
     FunctionEntry {
+        name: "omq_socket_set_ready_callback",
+        status: FunctionStatus::Extension,
+    },
+    FunctionEntry {
         name: "zmq_atomic_counter_dec",
         status: FunctionStatus::Implemented,
     },

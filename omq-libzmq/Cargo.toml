@@ -175,3 +175,7 @@ path = "tests/xpub_xsub.rs"
 [[test]]
 name = "omq_libzmq_req_rep_admission"
 path = "tests/req_rep_admission.rs"
+
+[[test]]
+name = "omq_libzmq_ready_callback"
+path = "tests/ready_callback.rs"

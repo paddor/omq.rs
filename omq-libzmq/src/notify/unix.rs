@@ -1,7 +1,7 @@
 //! Unix notification fds: an eventfd per direction on Linux, a nonblocking
 //! pipe per direction elsewhere.
 
-use super::NotifyHandle;
+use super::{NotifyHandle, ReadyCallback};
 #[cfg(target_os = "linux")]
 use crate::socket::DEFAULT_HWM;
 use std::os::raw::c_int;
@@ -209,18 +209,24 @@ impl Drop for NotifyFds {
     }
 }
 
-pub(crate) struct UnixNotifyHandle(NotifyFds);
+pub(crate) struct UnixNotifyHandle {
+    fds: NotifyFds,
+    ready: ReadyCallback,
+}
 
 impl UnixNotifyHandle {
     pub(crate) fn new() -> Option<Self> {
-        NotifyFds::open().map(Self)
+        NotifyFds::open().map(|fds| Self {
+            fds,
+            ready: ReadyCallback::default(),
+        })
     }
 
     /// The send direction's descriptors, to wait on and to drain.
     pub(crate) fn send_notifier(&self) -> RecvNotify {
         RecvNotify {
-            poll_fd: self.0.send_poll,
-            signal_fd: self.0.send_signal,
+            poll_fd: self.fds.send_poll,
+            signal_fd: self.fds.send_signal,
         }
     }
 }
@@ -228,31 +234,39 @@ impl UnixNotifyHandle {
 impl NotifyHandle for UnixNotifyHandle {
     #[inline]
     fn signal_recv(&self) {
+        self.ready.fire();
         self.recv_notifier().signal();
     }
 
     fn signal_send(&self) {
-        signal_fd(self.0.send_signal);
+        signal_fd(self.fds.send_signal);
     }
 
     // Tasks and receive callbacks may still signal after socket close.
-    // Their Arc owners keep the descriptors open until the final drop.
-    fn close(&self) {}
+    // Their Arc owners keep the descriptors open until the final drop; the
+    // ready callback stops here.
+    fn close(&self) {
+        self.ready.set(None);
+    }
 
     fn recv_fd(&self) -> c_int {
-        self.0.recv_poll
+        self.fds.recv_poll
     }
 
     fn send_fd(&self) -> c_int {
-        self.0.send_poll
+        self.fds.send_poll
     }
 
     #[inline]
     fn recv_notifier(&self) -> RecvNotify {
         RecvNotify {
-            poll_fd: self.0.recv_poll,
-            signal_fd: self.0.recv_signal,
+            poll_fd: self.fds.recv_poll,
+            signal_fd: self.fds.recv_signal,
         }
+    }
+
+    fn ready(&self) -> &ReadyCallback {
+        &self.ready
     }
 }
 

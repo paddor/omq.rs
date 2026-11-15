@@ -164,8 +164,9 @@ fn rcvmore(sock_arc: &OmqSocket) -> bool {
 
 /// `ZMQ_EVENTS` bits: POLLOUT when a send would not block, POLLIN when any
 /// receive source has data. As in libzmq, the read also consumes a pending
-/// `ZMQ_FD` wake.
+/// `ZMQ_FD` wake; it also arms the ready callback before checking.
 fn poll_events(sock_arc: &OmqSocket) -> i32 {
+    sock_arc.notify.ready().arm();
     let writable = crate::send_recv::send_ready(sock_arc);
     crate::send_recv::fd_edge::observe(sock_arc, writable);
     let mut events = if writable { ZMQ_POLLOUT } else { 0 };

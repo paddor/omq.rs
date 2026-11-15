@@ -67,9 +67,9 @@ pub use send_recv::{
     recv_frame_with, zmq_recv, zmq_recviov, zmq_send, zmq_send_const, zmq_sendiov,
 };
 pub use socket::{
-    omq_socket_allow_thread_migration, zmq_bind, zmq_close, zmq_connect, zmq_connect_peer,
-    zmq_disconnect, zmq_disconnect_peer, zmq_join, zmq_leave, zmq_socket,
-    zmq_socket_get_peer_state, zmq_socket_monitor, zmq_socket_monitor_pipes_stats,
+    omq_socket_allow_thread_migration, omq_socket_set_ready_callback, zmq_bind, zmq_close,
+    zmq_connect, zmq_connect_peer, zmq_disconnect, zmq_disconnect_peer, zmq_join, zmq_leave,
+    zmq_socket, zmq_socket_get_peer_state, zmq_socket_monitor, zmq_socket_monitor_pipes_stats,
     zmq_socket_monitor_versioned, zmq_unbind,
 };
 pub use timers::{

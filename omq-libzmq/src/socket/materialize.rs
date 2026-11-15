@@ -9,7 +9,7 @@ use omq_tokio::engine::{RingDrain, StateSignal};
 
 use super::{DEFAULT_HWM, OmqSocket};
 use crate::error::ETERM;
-use crate::notify::{NotifyHandle, RecvNotify};
+use crate::notify::{NotifyHandle, PlatformNotifyHandle};
 use crate::opts::{MechanismOverlay, SocketOverlay, ZapOverlay};
 
 /// Dual yring consumers for the recv path.
@@ -346,9 +346,8 @@ fn spawn_recv_pump(
     let pump_notify = sock.notify.clone();
 
     tokio::spawn(async move {
-        let recv_notify = pump_notify.recv_notifier();
         while let Ok(msg) = s_recv.recv_for_external_recv().await {
-            push_to_pump(&mut pump_prod, msg, recv_notify, &recv_space).await;
+            push_to_pump(&mut pump_prod, msg, &pump_notify, &recv_space).await;
         }
     })
 }
@@ -356,7 +355,7 @@ fn spawn_recv_pump(
 async fn push_to_pump(
     prod: &mut yring::Producer<omq_tokio::Message>,
     msg: omq_tokio::Message,
-    recv_notify: RecvNotify,
+    notify: &PlatformNotifyHandle,
     space: &StateSignal,
 ) {
     let mut m = msg;
@@ -385,6 +384,6 @@ async fn push_to_pump(
         was_empty: true, ..
     } = prod.flush_and_check()
     {
-        recv_notify.signal();
+        notify.signal_recv();
     }
 }

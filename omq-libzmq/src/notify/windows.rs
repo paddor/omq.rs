@@ -1,4 +1,4 @@
-use super::NotifyHandle;
+use super::{NotifyHandle, ReadyCallback};
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::Threading::{CreateEventW, ResetEvent, SetEvent};
 
@@ -80,6 +80,7 @@ impl Drop for Event {
 pub(crate) struct WindowsNotifyHandle {
     recv_event: Event,
     send_event: Event,
+    ready: ReadyCallback,
 }
 
 // SAFETY: HANDLE is an opaque kernel object reference; Win32 event
@@ -100,12 +101,14 @@ impl WindowsNotifyHandle {
         Some(Self {
             recv_event: Event::new()?,
             send_event: Event::new()?,
+            ready: ReadyCallback::default(),
         })
     }
 }
 
 impl NotifyHandle for WindowsNotifyHandle {
     fn signal_recv(&self) {
+        self.ready.fire();
         // SAFETY: the event is open while `self` lives; SetEvent touches
         // no Rust memory.
         unsafe {
@@ -120,7 +123,9 @@ impl NotifyHandle for WindowsNotifyHandle {
         }
     }
 
-    fn close(&self) {}
+    fn close(&self) {
+        self.ready.set(None);
+    }
 
     fn recv_fd(&self) -> std::os::raw::c_int {
         -1
@@ -134,6 +139,10 @@ impl NotifyHandle for WindowsNotifyHandle {
         RecvNotify {
             event: self.recv_event.0,
         }
+    }
+
+    fn ready(&self) -> &ReadyCallback {
+        &self.ready
     }
 }
 

@@ -97,7 +97,7 @@ run_native() {
     local extension="$target_dir/$profile/libomq_php.so"
     [[ "$(uname -s)" == Darwin ]] && extension="$target_dir/$profile/libomq_php.dylib"
 
-    for test_file in bindings/php/tests/*_test.php; do
+    for test_file in bindings/php/tests/*_test.php bindings/php/tests/native_*.php; do
         echo "::: native $test_file"
         "${runner[@]}" php -n -d "extension=$extension" "$test_file"
     done

@@ -77,7 +77,12 @@ PHP);
 $port = free_port();
 file_put_contents("$work/fpm.conf", "[global]\npid = $work/fpm.pid\nerror_log = $work/fpm.log\ndaemonize = no\n"
     . "[www]\nlisten = 127.0.0.1:$port\npm = static\npm.max_children = " . WORKERS . "\n");
-$fpm = proc_open([$fpmBinary, '-n', '-d', "extension=$extension", '-y', "$work/fpm.conf", '-F'], [], $pipes);
+$command = [$fpmBinary, '-n', '-d', "extension=$extension", '-y', "$work/fpm.conf", '-F'];
+// FPM refuses to run as root, as in containers, without -R.
+if (@fileowner('/proc/self') === 0) {
+    $command[] = '-R';
+}
+$fpm = proc_open($command, [], $pipes);
 $fpm ?: fail('start php-fpm');
 for ($wait = 0; @stream_socket_client("tcp://127.0.0.1:$port") === false; $wait++) {
     $wait < 100 ?: fail('php-fpm did not listen');

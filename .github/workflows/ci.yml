@@ -35,6 +35,7 @@ jobs:
       run_dotnet: ${{ steps.scope.outputs.dotnet == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
       run_zig: ${{ steps.scope.outputs.zig == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
       run_ruby: ${{ steps.scope.outputs.ruby == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+      run_beam: ${{ steps.scope.outputs.beam == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
       run_node: ${{ steps.scope.outputs.node == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
       run_typescript: ${{ steps.scope.outputs.typescript == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     steps:
@@ -119,6 +120,15 @@ jobs:
               - '.cargo/**'
               - '.github/workflows/ci.yml'
               - '.github/workflows/release-rubygems.yml'
+            beam:
+              - 'bindings/beam/**'
+              - 'omq-proto/**'
+              - 'omq-shm/**'
+              - 'omq-tokio/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.cargo/**'
+              - '.github/workflows/ci.yml'
             node:
               - 'bindings/node/**'
               - '.github/workflows/ci.yml'
@@ -383,6 +393,58 @@ jobs:
       - name: zig tests
         working-directory: bindings/zig
         run: zig build test --summary all
+
+  beam:
+    name: BEAM (Erlang, Elixir, Gleam)
+    needs: [changes, linux-gate]
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.run_beam == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bindings/beam/native
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "27"
+          rebar3-version: "3.24"
+          elixir-version: "1.18"
+          gleam-version: "1.14.0"
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+      - name: install pyzmq
+        run: python -m pip install --upgrade pip 'pyzmq>=25'
+      - name: cargo fmt
+        working-directory: bindings/beam/native
+        run: cargo fmt --check
+      - name: cargo clippy
+        working-directory: bindings/beam/native
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo clippy --all-targets --no-default-features -- -D warnings
+      - name: rebar3 eunit
+        working-directory: bindings/beam
+        run: rebar3 eunit
+      - name: elixir wrapper
+        working-directory: bindings/beam/elixir
+        env:
+          MIX_ENV: test
+        run: |
+          mix deps.get
+          mix format --check-formatted lib/omq.ex ../scripts/bench_peer.exs
+          mix compile --warnings-as-errors
+          mix test
+      - name: gleam wrapper
+        working-directory: bindings/beam/gleam
+        run: |
+          gleam format --check src/omq_gleam.gleam
+          gleam check
+          gleam test
 
   ruby-lint:
     name: ruby lint
@@ -1092,6 +1154,7 @@ jobs:
         lua-lint,
         lua-test,
         zig-test,
+        beam,
         ruby-lint,
         ruby-test,
         dotnet-lint,

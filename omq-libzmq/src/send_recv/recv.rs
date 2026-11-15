@@ -70,6 +70,60 @@ fn zmq_recv_impl(sock: &OmqSocket, buf: *mut libc::c_void, buf_len: usize, flags
     }))
 }
 
+/// Receive one frame like `zmq_msg_recv` and lend it to `f` with its more
+/// flag, without a `zmq_msg_t`. For Rust bindings that link this crate and
+/// copy the frame into their own string type.
+///
+/// # Errors
+///
+/// Returns the errno that `zmq_msg_recv` would report, also stored for
+/// `zmq_errno`: `EAGAIN` when it would block, `ENOTSOCK`, `ETERM`, and so on.
+pub fn recv_frame_with<T>(
+    socket: *mut libc::c_void,
+    flags: c_int,
+    f: impl FnOnce(&[u8], bool) -> T,
+) -> Result<T, c_int> {
+    // SAFETY: callers pass null or a socket handle from this API.
+    let received =
+        unsafe { crate::handle::socket(socket) }.and_then(|sock| recv_frame_on(sock, flags, f));
+    if let Err(errno) = received {
+        crate::error::set_errno(errno);
+    }
+
+    received
+}
+
+fn recv_frame_on<T>(
+    sock: &Arc<OmqSocket>,
+    flags: c_int,
+    f: impl FnOnce(&[u8], bool) -> T,
+) -> Result<T, c_int> {
+    if sock.ctx.is_effectively_terminated() {
+        return Err(ETERM);
+    }
+
+    crate::socket::materialize_for_io(sock)?;
+    if matches!(
+        sock.socket_type,
+        omq_tokio::SocketType::Server | omq_tokio::SocketType::Dish
+    ) {
+        let part = pop_recv_message_with_metadata(sock, flags)?;
+        return Ok(f(&part.frame, part.more));
+    }
+
+    if !direct_frame_recv(sock) {
+        let part = pop_recv_frame_with_properties(sock, flags)?;
+        return Ok(f(&part.frame, part.more));
+    }
+
+    let mut f = Some(f);
+    pop_first_frame(sock, flags, |message, start, more| {
+        // pop_message maps one popped message, so `f` is still here.
+        let f = f.take().ok_or(libc::EFAULT)?;
+        Ok(f(message.get(start).unwrap_or(&[]), more))
+    })
+}
+
 /// Whether the next frame can be borrowed straight from a ring message: no
 /// ZAP handler, no retained auth properties, and no queued multipart frames.
 #[inline]

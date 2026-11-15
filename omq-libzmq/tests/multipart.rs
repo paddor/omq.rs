@@ -9,11 +9,11 @@ use std::mem::size_of;
 use std::time::Duration;
 
 use omq_zmq::{
-    zmq_bind, zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_term, zmq_getsockopt, zmq_msg_close,
-    zmq_msg_copy, zmq_msg_data, zmq_msg_get, zmq_msg_gets, zmq_msg_group, zmq_msg_init,
-    zmq_msg_init_buffer, zmq_msg_init_data, zmq_msg_init_size, zmq_msg_more, zmq_msg_move,
-    zmq_msg_recv, zmq_msg_send, zmq_msg_set, zmq_msg_set_group, zmq_msg_size, zmq_recv, zmq_send,
-    zmq_socket,
+    recv_frame_with, zmq_bind, zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_term, zmq_errno,
+    zmq_getsockopt, zmq_msg_close, zmq_msg_copy, zmq_msg_data, zmq_msg_get, zmq_msg_gets,
+    zmq_msg_group, zmq_msg_init, zmq_msg_init_buffer, zmq_msg_init_data, zmq_msg_init_size,
+    zmq_msg_more, zmq_msg_move, zmq_msg_recv, zmq_msg_send, zmq_msg_set, zmq_msg_set_group,
+    zmq_msg_size, zmq_recv, zmq_send, zmq_socket,
 };
 
 const ZMQ_PUSH: i32 = 8;
@@ -862,6 +862,40 @@ fn msg_recv_stores_inline_small_and_large_frames_of_one_message() {
     }
 
     zmq_msg_close(m.0.as_mut_ptr().cast());
+    zmq_close(push);
+    zmq_close(pull);
+    zmq_ctx_term(ctx);
+}
+
+/// `recv_frame_with` lends each frame with its more flag and reports
+/// would-block through the returned errno and `zmq_errno`.
+#[test]
+fn recv_frame_with_lends_frames_and_reports_eagain() {
+    let ctx = zmq_ctx_new();
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    let endpoint = helpers::bind_random_tcp(pull);
+    zmq_connect(push, endpoint.as_ptr());
+    helpers::set_int_opt(pull, ZMQ_RCVTIMEO, 2000);
+
+    let frames = [vec![7_u8; 16], vec![8_u8; 4096]];
+    zmq_send(
+        push,
+        frames[0].as_ptr().cast(),
+        frames[0].len(),
+        ZMQ_SNDMORE,
+    );
+    zmq_send(push, frames[1].as_ptr().cast(), frames[1].len(), 0);
+    for (index, frame) in frames.iter().enumerate() {
+        let (bytes, more) = recv_frame_with(pull, 0, |bytes, more| (bytes.to_vec(), more)).unwrap();
+        assert_eq!(&bytes, frame);
+        assert_eq!(more, index == 0);
+    }
+
+    let errno = recv_frame_with(pull, 1, |_, _| ()).unwrap_err();
+    assert_eq!(errno, libc::EAGAIN);
+    assert_eq!(zmq_errno(), libc::EAGAIN);
+
     zmq_close(push);
     zmq_close(pull);
     zmq_ctx_term(ctx);

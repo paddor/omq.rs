@@ -106,7 +106,10 @@ run_native() {
         return
     fi
 
-    local manifest=bindings/php/native/Cargo.toml target_dir
+    local manifest=bindings/php/native/Cargo.toml target_dir setting
+    while IFS= read -r setting; do
+        export "${setting?}"
+    done < <(bindings/php/scripts/libclang-env.sh)
     cargo build --manifest-path "$manifest" "${profile_args[@]}"
     target_dir="$(target_metadata --manifest-path "$manifest")"
     local extension="$target_dir/$profile/libomq_php.so"

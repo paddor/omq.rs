@@ -404,6 +404,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y php-cli php-dev php-fpm php-zmq libclang-dev
+          bindings/php/scripts/libclang-env.sh | tee -a "$GITHUB_ENV"
       - name: php syntax
         run: for f in bindings/php/scripts/*.php bindings/php/tests/*.php; do php -l "$f"; done
       - name: cargo fmt

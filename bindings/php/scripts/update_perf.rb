@@ -63,6 +63,10 @@ end
 
 def native_extension
   @native_extension ||= begin
+    IO.popen([File.join(__dir__, "libclang-env.sh")], &:readlines).each do |setting|
+      key, value = setting.chomp.split("=", 2)
+      ENV[key] = value
+    end
     system("cargo", "build", "--release", "--manifest-path", NATIVE_MANIFEST, exception: true)
     command = ["cargo", "metadata", "--format-version", "1", "--no-deps", "--manifest-path", NATIVE_MANIFEST]
     target = JSON.parse(IO.popen(command, &:read)).fetch("target_directory")

@@ -19,6 +19,7 @@ flowchart TD
         net["OMQ.Net"]
         lua["OMQ.lua"]
         zig["OMQ.zig"]
+        php["PHP ext-zmq"]
         c["C applications"]
     end
     cabi --> libzmq["omq-libzmq<br/>C ABI"]
@@ -37,9 +38,10 @@ flowchart TD
 | [OMQ.Net](../bindings/dotnet) | .NET | `omq-libzmq` | NuGet `Omq.Net` |
 | [OMQ.lua](../bindings/lua) | Lua 5.4 | `omq-libzmq` | LuaRocks `omq` |
 | [OMQ.zig](../bindings/zig) | Zig | `omq-libzmq` | Git tag `omq-zig-v*` |
+| [PHP](../bindings/php) | PHP | `omq-libzmq` | Distro `php-zmq` on staged `libomq_zmq` |
 
-Each binding has a `doc/architecture.md` for its own ownership and threading
-details.
+Each native binding has a `doc/architecture.md` for its own ownership and
+threading details.
 
 ## Ownership
 

@@ -32,6 +32,7 @@ jobs:
       run_java: ${{ steps.scope.outputs.java == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
       run_go: ${{ steps.scope.outputs.go == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
       run_lua: ${{ steps.scope.outputs.lua == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+      run_php: ${{ steps.scope.outputs.php == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
       run_dotnet: ${{ steps.scope.outputs.dotnet == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
       run_zig: ${{ steps.scope.outputs.zig == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
       run_ruby: ${{ steps.scope.outputs.ruby == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
@@ -87,6 +88,16 @@ jobs:
               - 'omq-libzmq/**'
               - 'omq-proto/**'
               - 'omq-tokio/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.cargo/**'
+              - '.github/workflows/ci.yml'
+            php:
+              - 'bindings/php/**'
+              - 'omq-libzmq/**'
+              - 'omq-proto/**'
+              - 'omq-tokio/**'
+              - 'scripts/test-php.sh'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.cargo/**'
@@ -372,6 +383,25 @@ jobs:
         env:
           OMQ_LUA: /usr/bin/lua5.4
         run: ./scripts/test-lua.sh
+
+  php-test:
+    name: php ext-zmq drop-in
+    needs: [changes, linux-gate]
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.run_php == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: install PHP and ext-zmq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y php-cli php-zmq
+      - name: php syntax
+        run: for f in bindings/php/scripts/*.php bindings/php/tests/*.php; do php -l "$f"; done
+      - name: ext-zmq drop-in tests
+        run: ./scripts/test-php.sh
 
   zig-test:
     name: zig test
@@ -1153,6 +1183,7 @@ jobs:
         go-test,
         lua-lint,
         lua-test,
+        php-test,
         zig-test,
         beam,
         ruby-lint,

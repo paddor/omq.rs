@@ -1,11 +1,13 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Measure the PECL zmq extension on libzmq vs on libomq_zmq over 2-process
-# TCP loopback. Rows are appended to ~/.cache/omq.php/bindings.jsonl; the
-# chart uses the latest row per implementation, pattern, and size.
+# Measure the native zmq extension (bindings/php/native) and the PECL zmq
+# extension on libomq_zmq and on libzmq over 2-process TCP loopback. Rows are
+# appended to ~/.cache/omq.php/bindings.jsonl; the chart uses the latest row
+# per implementation, pattern, and size.
 #
-# Env: OMQ_PHP (PHP command with the zmq extension, default "php").
+# Env: OMQ_PHP (PHP command with the PECL zmq extension, default "php"). The
+# native run uses the same PHP binary with only the native extension loaded.
 
 require "cgi"
 require "fileutils"
@@ -27,10 +29,15 @@ PHP = Shellwords.split(ENV.fetch("OMQ_PHP", "php"))
 SIZES = [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16_384, 32_768].freeze
 QUICK_SIZES = [16, 1024, 32_768].freeze
 LATENCY_MAX_SIZE = 4096
-IMPLS = %w[omq libzmq].freeze
-LABELS = {"omq" => "ext-zmq on OMQ (libomq_zmq)", "libzmq" => "ext-zmq on libzmq"}.freeze
-COLORS = {"omq" => "#ef4444", "libzmq" => "#60a5fa"}.freeze
-DRAW_ORDER = %w[libzmq omq].freeze
+NATIVE_MANIFEST = File.join(ROOT, "native", "Cargo.toml")
+IMPLS = %w[omq.php omq libzmq].freeze
+LABELS = {
+  "omq.php" => "OMQ.php (native)",
+  "omq" => "ext-zmq on OMQ (drop-in)",
+  "libzmq" => "ext-zmq on libzmq",
+}.freeze
+COLORS = {"omq.php" => "#ef4444", "omq" => "#f59e0b", "libzmq" => "#60a5fa"}.freeze
+DRAW_ORDER = %w[libzmq omq omq.php].freeze
 
 def parse_options
   options = {quick: false, chart_only: false, record: true, impls: IMPLS, patterns: %w[pushpull reqrep],
@@ -54,15 +61,30 @@ def stage_omq
          out: File::NULL, exception: true)
 end
 
+def native_extension
+  @native_extension ||= begin
+    system("cargo", "build", "--release", "--manifest-path", NATIVE_MANIFEST, exception: true)
+    command = ["cargo", "metadata", "--format-version", "1", "--no-deps", "--manifest-path", NATIVE_MANIFEST]
+    target = JSON.parse(IO.popen(command, &:read)).fetch("target_directory")
+    File.join(target, "release", RUBY_PLATFORM.include?("darwin") ? "libomq_php.dylib" : "libomq_php.so")
+  end
+end
+
+def php_command(impl)
+  return [PHP.first, "-n", "-d", "extension=#{native_extension}"] if impl == "omq.php"
+
+  PHP
+end
+
 def peer_env(impl)
-  return {"LD_LIBRARY_PATH" => nil, "DYLD_LIBRARY_PATH" => nil} if impl == "libzmq"
+  return {"LD_LIBRARY_PATH" => nil, "DYLD_LIBRARY_PATH" => nil} unless impl == "omq"
 
   lib = File.join(COMPAT, "lib")
   {"LD_LIBRARY_PATH" => lib, "DYLD_LIBRARY_PATH" => lib}
 end
 
 def spawn_peer(impl, args, streams)
-  stdin, stdout, stderr, wait = Open3.popen3(peer_env(impl), *PHP, PEER, impl, *args.map(&:to_s))
+  stdin, stdout, stderr, wait = Open3.popen3(peer_env(impl), *php_command(impl), PEER, impl, *args.map(&:to_s))
   stdin.close
   streams.concat([stdout, stderr])
   [stdout, stderr, wait]

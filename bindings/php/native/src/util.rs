@@ -52,19 +52,6 @@ impl Msg {
         self.0.as_ptr().cast()
     }
 
-    /// The payload, valid until the message changes or drops.
-    pub(crate) fn bytes(&mut self) -> &[u8] {
-        let size = omq_zmq::zmq_msg_size(self.as_ptr());
-        let data = omq_zmq::zmq_msg_data(self.as_mut_ptr());
-        if data.is_null() || size == 0 {
-            return &[];
-        }
-
-        // SAFETY: an initialized message holds `size` payload bytes at `data`
-        // while it lives and is not modified.
-        unsafe { std::slice::from_raw_parts(data.cast::<u8>(), size) }
-    }
-
     pub(crate) fn more(&self) -> bool {
         omq_zmq::zmq_msg_more(self.as_ptr()) != 0
     }

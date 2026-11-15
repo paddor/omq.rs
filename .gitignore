@@ -12,6 +12,7 @@ Cargo.lock.bak
 !pure/typescript/test/fixtures/omq-rs-peer/Cargo.lock
 !pure/typescript/test/browser/index.html
 !bindings/lua/native/Cargo.lock
+!bindings/php/native/Cargo.lock
 /bindings/pyomq/dist/*.whl
 !scripts/r0z_bench_peer/Cargo.lock
 !scripts/tmq_bench_peer/Cargo.lock

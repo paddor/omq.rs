@@ -1,6 +1,9 @@
 include: package:lints/recommended.yaml
 
 analyzer:
+  # Built by scripts/update_perf.rb in a scratch package that adds dartzmq.
+  exclude:
+    - bench/**
   language:
     strict-casts: true
     strict-raw-types: true

@@ -4,6 +4,15 @@ Dart binding for OMQ, backed by the `omq-libzmq` C ABI. It is pure Dart:
 `@Native` calls with no native shim. Async waits run on the native ready
 callback, so a pending `receive()` holds no thread.
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/bindings/dart/doc/charts/bindings.svg" alt="OMQ.dart performance" width="850">
+</p>
+
+2-process loopback TCP comparison against dartzmq on its bundled libzmq.
+Throughput covers 16 B to 32 KiB; REQ/REP p50 latency covers 16 B to 4 KiB.
+See [`DEVELOPMENT.md`](DEVELOPMENT.md) for benchmark and regeneration
+commands.
+
 ## Install
 
 Depend on the package from Git:

@@ -1,0 +1,15 @@
+include: package:lints/recommended.yaml
+
+analyzer:
+  language:
+    strict-casts: true
+    strict-raw-types: true
+
+linter:
+  rules:
+    - prefer_final_locals
+    - public_member_api_docs
+    - unawaited_futures
+
+formatter:
+  page_width: 100

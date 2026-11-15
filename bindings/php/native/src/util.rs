@@ -5,6 +5,9 @@ use std::ffi::{CString, c_int};
 use ext_php_rs::prelude::*;
 use ext_php_rs::types::Zval;
 
+use ext_php_rs::exception::PhpException;
+use ext_php_rs::zend::ce;
+
 use crate::errors::socket_misuse;
 
 /// Run `f` over the bytes of a PHP value: strings without a copy, other
@@ -13,10 +16,24 @@ pub(crate) fn with_bytes<T>(value: &Zval, f: impl FnOnce(&[u8]) -> T) -> PhpResu
     if let Some(string) = value.zend_str() {
         return Ok(f(string.as_bytes()));
     }
+    if value.is_null() {
+        return Ok(f(&[]));
+    }
 
+    // Scalars convert as PHP would; arrays, objects, and resources are a
+    // TypeError, as with ext-zmq's string parameters.
     let string = value
-        .coerce_to_string()
-        .ok_or_else(|| socket_misuse("Expected a string value"))?;
+        .is_scalar()
+        .then(|| value.coerce_to_string())
+        .flatten()
+        .ok_or_else(|| {
+            let kind = value.get_type();
+            PhpException::new(
+                format!("Argument must be of type string, {kind} given"),
+                0,
+                ce::type_error(),
+            )
+        })?;
     Ok(f(string.as_bytes()))
 }
 

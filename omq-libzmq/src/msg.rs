@@ -12,8 +12,10 @@ use bytes::{Bytes, BytesMut};
 use crate::error::c_try;
 use crate::send_recv::{ReceivedPart, checked_c_int_len};
 
+mod recv_into;
 mod repr;
 
+pub use recv_into::{OmqFrameInfo, omq_recv_into};
 pub use repr::OmqMsgRepr;
 pub(crate) use repr::ZMQ_MSG_T_SIZE;
 

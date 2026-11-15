@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and each `ZMQ_EVENTS` read arm the callback; it then runs once, on any
   thread, when `ZMQ_FD` would be signaled. No call runs or follows once a
   clearing call or `zmq_close()` returns.
+- `omq_recv_into()`: `zmq_recv()` without truncation. A frame that fits is
+  copied into the caller buffer; a larger one goes whole into an overflow
+  `zmq_msg_t`. `omq_frame_info_t` reports the more flag, SERVER routing ID,
+  and DISH group.
 
 ## [0.11.0] - 2026-11-14
 

@@ -578,6 +578,25 @@ typedef void (*omq_ready_callback_fn) (void *userdata_);
     call or zmq_close returns, no call is running or follows.  */
 ZMQ_EXPORT int omq_socket_set_ready_callback (
     void *socket_, omq_ready_callback_fn callback_, void *userdata_);
+/* Metadata of a frame received by omq_recv_into. */
+typedef struct omq_frame_info
+{
+    /* 1 when another frame of the same message follows, else 0. */
+    int more;
+    /* Routing ID of a SERVER message, else 0. */
+    uint32_t routing_id;
+    /* Group of a DISH message, NUL-terminated; empty for other types. */
+    char group[ZMQ_GROUP_MAX_LENGTH + 1];
+} omq_frame_info_t;
+/*  zmq_recv without truncation: a frame of at most size_ bytes is copied
+    into buf_; a larger one is stored in overflow_, an initialized zmq_msg_t,
+    as zmq_msg_recv would store it, and buf_ is left alone. Returns the frame
+    size, so a result above size_ means the frame is in overflow_; -1 with
+    errno on failure. info_ may be NULL. ZAP properties are kept only for
+    frames stored in overflow_.  */
+ZMQ_EXPORT int omq_recv_into (void *socket_, void *buf_, size_t size_,
+                              zmq_msg_t *overflow_, int flags_,
+                              omq_frame_info_t *info_);
 /* One exact username/password pair in an OMQ fixed PLAIN allowlist. */
 typedef struct omq_plain_credential
 {

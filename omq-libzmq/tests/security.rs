@@ -8,11 +8,11 @@ use std::mem::size_of;
 use std::time::Duration;
 
 use omq_zmq::{
-    OmqPlainCredential, omq_socket_set_plain_server_credentials, zmq_bind, zmq_close, zmq_connect,
-    zmq_ctx_new, zmq_ctx_set, zmq_ctx_term, zmq_curve_keypair, zmq_curve_public, zmq_getsockopt,
-    zmq_msg_close, zmq_msg_copy, zmq_msg_data, zmq_msg_gets, zmq_msg_init, zmq_msg_more,
-    zmq_msg_recv, zmq_msg_size, zmq_recv, zmq_send, zmq_setsockopt, zmq_socket, zmq_unbind,
-    zmq_z85_decode, zmq_z85_encode,
+    OmqFrameInfo, OmqPlainCredential, omq_recv_into, omq_socket_set_plain_server_credentials,
+    zmq_bind, zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_set, zmq_ctx_term, zmq_curve_keypair,
+    zmq_curve_public, zmq_getsockopt, zmq_msg_close, zmq_msg_copy, zmq_msg_data, zmq_msg_gets,
+    zmq_msg_init, zmq_msg_more, zmq_msg_recv, zmq_msg_size, zmq_recv, zmq_send, zmq_setsockopt,
+    zmq_socket, zmq_unbind, zmq_z85_decode, zmq_z85_encode,
 };
 
 const ZMQ_PUSH: i32 = 8;
@@ -671,6 +671,58 @@ fn plain_push_pull_tcp() {
     assert_eq!(request[6], b"user");
     assert_eq!(request[7], b"pass");
 
+    zmq_close(push);
+    zmq_close(pull);
+    zmq_ctx_term(ctx);
+}
+
+/// `omq_recv_into` on an authenticated socket: small frames land in the
+/// buffer, a larger one keeps its ZAP properties in the overflow message.
+#[test]
+fn recv_into_overflow_keeps_zap_properties() {
+    let ctx = zmq_ctx_new();
+    let zap = start_plain_zap_handler(ctx);
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    helpers::set_int_opt(pull, ZMQ_PLAIN_SERVER, 1);
+    set_bytes(pull, ZMQ_ZAP_DOMAIN, b"global");
+    helpers::set_timeouts(pull, 5000);
+    let addr = helpers::bind_random_tcp(pull);
+
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    set_bytes(push, ZMQ_PLAIN_USERNAME, b"alice");
+    set_bytes(push, ZMQ_PLAIN_PASSWORD, b"secret");
+    helpers::set_timeouts(push, 5000);
+    assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
+    let large = vec![7u8; 200];
+    send_multipart(push, &[b"small", &large]);
+    zap.join().unwrap();
+
+    let mut overflow = ZmqMsg::new();
+    let mut buf = [0u8; 16];
+    let mut info = OmqFrameInfo::default();
+    let rc = omq_recv_into(
+        pull,
+        buf.as_mut_ptr().cast(),
+        buf.len(),
+        overflow.0.as_mut_ptr().cast(),
+        0,
+        &mut info,
+    );
+    assert_eq!((rc, &buf[..5], info.more), (5, &b"small"[..], 1));
+
+    let rc = omq_recv_into(
+        pull,
+        buf.as_mut_ptr().cast(),
+        buf.len(),
+        overflow.0.as_mut_ptr().cast(),
+        0,
+        &mut info,
+    );
+    assert_eq!((rc, info.more), (200, 0));
+    assert_eq!(msg_bytes(&mut overflow), large);
+    assert_eq!(msg_property(&overflow, c"User-Id"), Some(b"alice".to_vec()));
+
+    zmq_msg_close(overflow.0.as_mut_ptr().cast());
     zmq_close(push);
     zmq_close(pull);
     zmq_ctx_term(ctx);

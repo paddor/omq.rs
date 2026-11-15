@@ -18,6 +18,14 @@ use ext_php_rs::prelude::*;
 /// The ext-zmq API level this module implements, reported as its version.
 const EXT_ZMQ_API_VERSION: &str = "1.1.3";
 
+extern "C" fn module_startup(_type: i32, _module_number: i32) -> i32 {
+    // Before the classes the macro registers: they throw these.
+    match errors::register() {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
 extern "C" fn module_shutdown(_type: i32, _module_number: i32) -> i32 {
     // Sockets first: terminating a context waits for its sockets.
     socket::shutdown();
@@ -30,12 +38,8 @@ pub fn get_module(module: ModuleBuilder) -> ModuleBuilder {
     module
         .name("zmq")
         .version(EXT_ZMQ_API_VERSION)
+        .startup_function(module_startup)
         .shutdown_function(module_shutdown)
-        .class::<errors::ZmqException>()
-        .class::<errors::ZmqContextException>()
-        .class::<errors::ZmqSocketException>()
-        .class::<errors::ZmqPollException>()
-        .class::<errors::ZmqDeviceException>()
         .class::<zmq_class::Zmq>()
         .class::<context::ZmqContext>()
         .class::<socket::ZmqSocket>()

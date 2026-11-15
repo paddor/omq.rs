@@ -151,6 +151,7 @@ impl Zmq {
     }
 
     /// Monotonic milliseconds since the extension first asked.
+    #[php(name = "clock")]
     pub fn clock() -> i64 {
         static START: OnceLock<Instant> = OnceLock::new();
         let elapsed = START.get_or_init(Instant::now).elapsed().as_millis();
@@ -207,7 +208,7 @@ impl Zmq {
     }
 
     /// A new CURVE key pair as Z85 strings: `public_key`, `secret_key`.
-    #[php(name = "curveKeyPair")]
+    #[php(name = "curvekeypair")]
     pub fn curve_key_pair() -> PhpResult<ZBox<ZendHashTable>> {
         let mut public = [0 as c_char; 41];
         let mut secret = [0 as c_char; 41];

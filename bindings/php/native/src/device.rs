@@ -4,12 +4,13 @@ use std::ffi::{c_int, c_short, c_void};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ext_php_rs::class::RegisteredClass;
+use ext_php_rs::error::php_error;
 use ext_php_rs::exception::PhpException;
+use ext_php_rs::flags::ErrorType;
 use ext_php_rs::prelude::*;
 use ext_php_rs::types::{ZendClassObject, Zval};
 
-use crate::errors::{ZmqDeviceException, exception, last_errno};
+use crate::errors::{Class, exception, last_errno, misuse};
 use crate::socket::{SocketShared, ZmqSocket};
 use crate::util::Msg;
 
@@ -26,11 +27,7 @@ struct RawPollItem {
 }
 
 fn device_error(message: &str) -> PhpException {
-    PhpException::new(
-        message.to_owned(),
-        0,
-        ZmqDeviceException::get_metadata().ce(),
-    )
+    misuse(Class::Device, message)
 }
 
 /// A callback that fires after `timeout` without (idle) or regardless of
@@ -43,6 +40,34 @@ struct Callback {
 }
 
 impl Callback {
+    /// The callback set by `set*Callback(callback, timeout, user_data)`.
+    /// The deprecated `(callback, user_data)` form keeps the old timeout.
+    fn replaced(
+        &self,
+        display: &str,
+        callback: &Zval,
+        timeout: &Zval,
+        user_data: Option<&Zval>,
+    ) -> Self {
+        let (timeout_ms, user_data) = match (timeout.long(), user_data) {
+            (Some(timeout_ms), user_data) => (timeout_ms, user_data),
+            (None, None) => {
+                php_error(
+                    &ErrorType::Deprecated,
+                    &format!("The signature for {display} has changed, please update your code"),
+                );
+                (self.timeout_ms, Some(timeout))
+            }
+            (None, Some(user_data)) => (self.timeout_ms, Some(user_data)),
+        };
+
+        Self {
+            function: Some(callback.shallow_clone()),
+            timeout_ms,
+            user_data: user_data.map(Zval::shallow_clone),
+        }
+    }
+
     fn period(&self) -> Option<Duration> {
         let millis = u64::try_from(self.timeout_ms).ok().filter(|&ms| ms > 0)?;
         self.function
@@ -97,40 +122,48 @@ impl ZmqDevice {
     }
 
     #[php(optional = user_data)]
-    pub fn set_idle_callback(&mut self, callback: &Zval, timeout: i64, user_data: Option<&Zval>) {
-        self.idle = Callback {
-            function: Some(callback.shallow_clone()),
-            timeout_ms: timeout,
-            user_data: user_data.map(Zval::shallow_clone),
-        };
+    #[php(name = "setidlecallback")]
+    pub fn set_idle_callback(&mut self, callback: &Zval, timeout: &Zval, user_data: Option<&Zval>) {
+        self.idle = self
+            .idle
+            .replaced("setIdleCallback", callback, timeout, user_data);
     }
 
+    #[php(name = "setidletimeout")]
     pub fn set_idle_timeout(&mut self, timeout: i64) {
         self.idle.timeout_ms = timeout;
     }
 
+    #[php(name = "getidletimeout")]
     pub fn get_idle_timeout(&self) -> i64 {
         self.idle.timeout_ms
     }
 
     #[php(optional = user_data)]
-    pub fn set_timer_callback(&mut self, callback: &Zval, timeout: i64, user_data: Option<&Zval>) {
-        self.timer = Callback {
-            function: Some(callback.shallow_clone()),
-            timeout_ms: timeout,
-            user_data: user_data.map(Zval::shallow_clone),
-        };
+    #[php(name = "settimercallback")]
+    pub fn set_timer_callback(
+        &mut self,
+        callback: &Zval,
+        timeout: &Zval,
+        user_data: Option<&Zval>,
+    ) {
+        self.timer = self
+            .timer
+            .replaced("setTimerCallback", callback, timeout, user_data);
     }
 
+    #[php(name = "settimertimeout")]
     pub fn set_timer_timeout(&mut self, timeout: i64) {
         self.timer.timeout_ms = timeout;
     }
 
+    #[php(name = "gettimertimeout")]
     pub fn get_timer_timeout(&self) -> i64 {
         self.timer.timeout_ms
     }
 
     /// Forward until a callback returns `false`.
+    #[php(name = "run")]
     pub fn run(&self) -> PhpResult<()> {
         let mut last_message = Instant::now();
         let mut last_timer = Instant::now();
@@ -190,7 +223,8 @@ impl ZmqDevice {
             revents: 0,
         });
         if omq_zmq::zmq_poll(items.as_mut_ptr().cast(), 2, timeout) < 0 {
-            return Err(exception::<ZmqDeviceException>(
+            return Err(exception(
+                Class::Device,
                 "Failed to start the device",
                 last_errno(),
             ));
@@ -204,7 +238,8 @@ impl ZmqDevice {
         loop {
             let mut part = Msg::new();
             if omq_zmq::zmq_msg_recv(part.as_mut_ptr(), from.as_ptr(), 0) < 0 {
-                return Err(exception::<ZmqDeviceException>(
+                return Err(exception(
+                    Class::Device,
                     "Failed to receive message",
                     last_errno(),
                 ));
@@ -219,7 +254,8 @@ impl ZmqDevice {
             }
 
             if omq_zmq::zmq_msg_send(part.as_mut_ptr(), to.as_ptr(), flags) < 0 {
-                return Err(exception::<ZmqDeviceException>(
+                return Err(exception(
+                    Class::Device,
                     "Failed to send message",
                     last_errno(),
                 ));

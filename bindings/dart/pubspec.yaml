@@ -1,0 +1,18 @@
+name: omq
+description: >-
+  Fast ZeroMQ-compatible messaging for Dart on the OMQ engine, through the
+  omq-libzmq C ABI.
+version: 0.1.0-dev.1
+repository: https://github.com/paddor/omq.rs/tree/main/bindings/dart
+
+environment:
+  sdk: ^3.10.0
+
+dependencies:
+  code_assets: ^2.2.0
+  ffi: ^2.2.0
+  hooks: ^2.2.0
+
+dev_dependencies:
+  lints: ^6.0.0
+  test: ^1.26.0

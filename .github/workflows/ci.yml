@@ -35,6 +35,7 @@ jobs:
       run_php: ${{ steps.scope.outputs.php == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
       run_dotnet: ${{ steps.scope.outputs.dotnet == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
       run_zig: ${{ steps.scope.outputs.zig == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+      run_dart_binding: ${{ steps.scope.outputs.dart_binding == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
       run_ruby: ${{ steps.scope.outputs.ruby == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
       run_beam: ${{ steps.scope.outputs.beam == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
       run_node: ${{ steps.scope.outputs.node == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
@@ -114,6 +115,15 @@ jobs:
               - '.github/workflows/ci.yml'
             zig:
               - 'bindings/zig/**'
+              - 'omq-libzmq/**'
+              - 'omq-proto/**'
+              - 'omq-tokio/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.cargo/**'
+              - '.github/workflows/ci.yml'
+            dart_binding:
+              - 'bindings/dart/**'
               - 'omq-libzmq/**'
               - 'omq-proto/**'
               - 'omq-tokio/**'
@@ -436,6 +446,40 @@ jobs:
       - name: zig tests
         working-directory: bindings/zig
         run: zig build test --summary all
+
+  dart-binding:
+    name: Dart binding (${{ matrix.sdk }})
+    needs: [changes, linux-gate]
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.run_dart_binding == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        sdk: ['3.10.0', stable]
+    defaults:
+      run:
+        working-directory: bindings/dart
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: ${{ matrix.sdk }}
+      - name: build native library
+        working-directory: .
+        run: cargo build --release -p omq-libzmq
+      - run: dart pub get
+      - name: dart format
+        if: matrix.sdk == 'stable'
+        run: dart format --output none --set-exit-if-changed .
+      - name: dart analyze
+        run: dart analyze --fatal-infos
+      - name: dart test
+        env:
+          LD_LIBRARY_PATH: ${{ github.workspace }}/target/release
+        run: dart test
 
   beam:
     name: BEAM (Erlang, Elixir, Gleam)
@@ -1198,6 +1242,7 @@ jobs:
         lua-test,
         php-test,
         zig-test,
+        dart-binding,
         beam,
         ruby-lint,
         ruby-test,

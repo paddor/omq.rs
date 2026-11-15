@@ -1,51 +1,84 @@
 //! The `ZMQException` hierarchy and errno conversion.
+//!
+//! The exception classes are plain Zend classes with no Rust state, so they
+//! inherit `Exception`'s constructor and properties and stay constructible
+//! from PHP.
 
 use std::ffi::{CStr, c_int};
+use std::sync::atomic::{AtomicPtr, Ordering};
 
-use ext_php_rs::class::RegisteredClass;
+use ext_php_rs::builders::ClassBuilder;
 use ext_php_rs::exception::PhpException;
 use ext_php_rs::flags::ClassFlags;
-use ext_php_rs::prelude::*;
-use ext_php_rs::zend::ce;
+use ext_php_rs::zend::{ClassEntry, ce};
 
-/// Base class of every exception the extension throws.
-#[php_class]
-#[php(name = "ZMQException")]
-#[php(extends(ce = ce::exception, stub = "Exception"))]
-#[derive(Debug, Default)]
-pub struct ZmqException;
+static BASE: AtomicPtr<ClassEntry> = AtomicPtr::new(std::ptr::null_mut());
+static CONTEXT: AtomicPtr<ClassEntry> = AtomicPtr::new(std::ptr::null_mut());
+static SOCKET: AtomicPtr<ClassEntry> = AtomicPtr::new(std::ptr::null_mut());
+static POLL: AtomicPtr<ClassEntry> = AtomicPtr::new(std::ptr::null_mut());
+static DEVICE: AtomicPtr<ClassEntry> = AtomicPtr::new(std::ptr::null_mut());
 
-/// Context creation and option failures.
-#[php_class]
-#[php(name = "ZMQContextException")]
-#[php(extends(ZmqException))]
-#[php(flags = ClassFlags::Final)]
-#[derive(Debug, Default)]
-pub struct ZmqContextException;
+type Registration = fn(&'static mut ClassEntry, ext_php_rs::args::ArgInfoTables);
 
-/// Socket call failures; the code is the errno.
-#[php_class]
-#[php(name = "ZMQSocketException")]
-#[php(extends(ZmqException))]
-#[php(flags = ClassFlags::Final)]
-#[derive(Debug, Default)]
-pub struct ZmqSocketException;
+/// The exception class to throw.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Class {
+    Context,
+    Socket,
+    Poll,
+    Device,
+}
 
-/// `ZMQPoll` failures.
-#[php_class]
-#[php(name = "ZMQPollException")]
-#[php(extends(ZmqException))]
-#[php(flags = ClassFlags::Final)]
-#[derive(Debug, Default)]
-pub struct ZmqPollException;
+fn load(slot: &AtomicPtr<ClassEntry>) -> &'static ClassEntry {
+    // Acquire pairs with the Release store at module startup.
+    let entry = slot.load(Ordering::Acquire);
+    // SAFETY: a stored entry comes from the engine's class table, which lives
+    // until module shutdown; before registration the slot is null.
+    unsafe { entry.as_ref() }.unwrap_or_else(ce::exception)
+}
 
-/// `ZMQDevice` failures.
-#[php_class]
-#[php(name = "ZMQDeviceException")]
-#[php(extends(ZmqException))]
-#[php(flags = ClassFlags::Final)]
-#[derive(Debug, Default)]
-pub struct ZmqDeviceException;
+fn base() -> &'static ClassEntry {
+    load(&BASE)
+}
+
+impl Class {
+    fn entry(self) -> &'static ClassEntry {
+        load(match self {
+            Self::Context => &CONTEXT,
+            Self::Socket => &SOCKET,
+            Self::Poll => &POLL,
+            Self::Device => &DEVICE,
+        })
+    }
+}
+
+fn store(slot: &AtomicPtr<ClassEntry>, entry: &'static mut ClassEntry) {
+    slot.store(entry, Ordering::Release);
+}
+
+/// Register the hierarchy; call from module startup before other classes.
+pub(crate) fn register() -> ext_php_rs::error::Result<()> {
+    ClassBuilder::new("ZMQException")
+        .extends((ce::exception, "Exception"))
+        .registration(|entry, _| store(&BASE, entry))
+        .register()?;
+
+    let children: [(&str, Registration); 4] = [
+        ("ZMQContextException", |entry, _| store(&CONTEXT, entry)),
+        ("ZMQSocketException", |entry, _| store(&SOCKET, entry)),
+        ("ZMQPollException", |entry, _| store(&POLL, entry)),
+        ("ZMQDeviceException", |entry, _| store(&DEVICE, entry)),
+    ];
+    for (name, registration) in children {
+        ClassBuilder::new(name)
+            .extends((base, "ZMQException"))
+            .flags(ClassFlags::Final)
+            .registration(registration)
+            .register()?;
+    }
+
+    Ok(())
+}
 
 /// The errno of the last failed `zmq_*` call on this thread.
 pub(crate) fn last_errno() -> c_int {
@@ -64,25 +97,22 @@ fn strerror(code: c_int) -> String {
         .into_owned()
 }
 
-/// `"<what>: <strerror(code)>"` as an exception of class `T` with `code`.
-pub(crate) fn exception<T: RegisteredClass>(what: &str, code: c_int) -> PhpException {
-    PhpException::new(
-        format!("{what}: {}", strerror(code)),
-        code,
-        T::get_metadata().ce(),
-    )
+/// `"<what>: <strerror(code)>"` as a `class` exception with `code`.
+pub(crate) fn exception(class: Class, what: &str, code: c_int) -> PhpException {
+    PhpException::new(format!("{what}: {}", strerror(code)), code, class.entry())
+}
+
+/// A `class` exception without an errno.
+pub(crate) fn misuse(class: Class, message: &str) -> PhpException {
+    PhpException::new(message.to_owned(), 0, class.entry())
 }
 
 /// A `ZMQSocketException` for the last errno.
 pub(crate) fn socket_error(what: &str) -> PhpException {
-    exception::<ZmqSocketException>(what, last_errno())
+    exception(Class::Socket, what, last_errno())
 }
 
 /// A `ZMQSocketException` without an errno, for invalid arguments.
 pub(crate) fn socket_misuse(message: &str) -> PhpException {
-    PhpException::new(
-        message.to_owned(),
-        0,
-        ZmqSocketException::get_metadata().ce(),
-    )
+    misuse(Class::Socket, message)
 }

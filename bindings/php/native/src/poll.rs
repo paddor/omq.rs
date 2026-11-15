@@ -4,12 +4,11 @@ use std::ffi::{c_int, c_short, c_void};
 use std::sync::Arc;
 
 use ext_php_rs::boxed::ZBox;
-use ext_php_rs::class::RegisteredClass;
 use ext_php_rs::exception::PhpException;
 use ext_php_rs::prelude::*;
 use ext_php_rs::types::{PhpRef, ZendClassObject, ZendHashTable, Zval};
 
-use crate::errors::{ZmqPollException, exception, last_errno};
+use crate::errors::{Class, exception, last_errno, misuse};
 use crate::fd_stream::stream_fd;
 use crate::socket::{SocketShared, ZmqSocket};
 
@@ -43,7 +42,7 @@ struct Item {
 }
 
 fn poll_error(message: &str) -> PhpException {
-    PhpException::new(message.to_owned(), 0, ZmqPollException::get_metadata().ce())
+    misuse(Class::Poll, message)
 }
 
 /// The id and poll target of a socket object or stream resource.
@@ -52,7 +51,7 @@ fn identify(entry: &Zval) -> PhpResult<(String, Target)> {
         let socket = ZendClassObject::<ZmqSocket>::from_zend_obj(object).ok_or_else(|| {
             poll_error("The first argument must be an instance of ZMQSocket or a resource")
         })?;
-        let id = format!("o:{}", object.handle);
+        let id = format!("o:{:032x}", object.handle);
         return Ok((id, Target::Socket(Arc::clone(&socket.shared))));
     }
 
@@ -87,6 +86,7 @@ impl ZmqPoll {
     }
 
     /// Add a socket or stream for `events`; return its id.
+    #[php(name = "add")]
     pub fn add(&mut self, entry: &Zval, events: i64) -> PhpResult<String> {
         let events = c_short::try_from(events).map_err(|_| poll_error("Invalid events"))?;
         let (id, target) = identify(entry)?;
@@ -105,6 +105,7 @@ impl ZmqPoll {
     }
 
     /// Remove an item by id, socket, or stream; `false` if it was absent.
+    #[php(name = "remove")]
     pub fn remove(&mut self, item: &Zval) -> PhpResult<bool> {
         let id = match item.str() {
             Some(id) => id.to_owned(),
@@ -118,6 +119,7 @@ impl ZmqPoll {
     /// Wait up to `timeout` ms (-1: forever); fill `readable` and `writable`
     /// with the ready entries and return how many are ready.
     #[php(defaults(timeout = -1))]
+    #[php(name = "poll")]
     pub fn poll(
         &mut self,
         mut readable: PhpRef,
@@ -133,7 +135,7 @@ impl ZmqPoll {
         let timeout = libc::c_long::try_from(timeout).unwrap_or(-1);
         let rc = omq_zmq::zmq_poll(raw.as_mut_ptr().cast(), count, timeout);
         if rc < 0 {
-            return Err(exception::<ZmqPollException>("Poll failed", last_errno()));
+            return Err(exception(Class::Poll, "Poll failed", last_errno()));
         }
 
         let (read, write) = self.collect(&raw)?;
@@ -142,14 +144,17 @@ impl ZmqPoll {
         Ok(i64::from(rc))
     }
 
+    #[php(name = "getlasterrors")]
     pub fn get_last_errors(&self) -> Vec<String> {
         self.errors.clone()
     }
 
+    #[php(name = "count")]
     pub fn count(&self) -> i64 {
         i64::try_from(self.items.len()).unwrap_or(i64::MAX)
     }
 
+    #[php(name = "clear")]
     pub fn clear(self_: &mut ZendClassObject<ZmqPoll>) -> Zval {
         self_.items.clear();
         self_.errors.clear();
@@ -158,6 +163,7 @@ impl ZmqPoll {
         this
     }
 
+    #[php(name = "items")]
     pub fn items(&self) -> PhpResult<ZBox<ZendHashTable>> {
         let mut items = ZendHashTable::new();
         for item in &self.items {

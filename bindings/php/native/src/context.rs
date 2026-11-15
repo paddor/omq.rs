@@ -14,7 +14,7 @@ use ext_php_rs::boxed::ZBox;
 use ext_php_rs::prelude::*;
 use ext_php_rs::types::{ZendClassObject, Zval};
 
-use crate::errors::{ZmqContextException, exception, last_errno};
+use crate::errors::{Class, exception, last_errno};
 use crate::socket::{self, ZmqSocket};
 use crate::util::c_int_arg;
 
@@ -34,7 +34,8 @@ impl ContextShared {
     fn open(io_threads: c_int, persistent: bool) -> PhpResult<Arc<Self>> {
         let raw = omq_zmq::zmq_ctx_new();
         if raw.is_null() {
-            return Err(exception::<ZmqContextException>(
+            return Err(exception(
+                Class::Context,
                 "Error creating context",
                 last_errno(),
             ));
@@ -43,7 +44,8 @@ impl ContextShared {
         if omq_zmq::zmq_ctx_set(raw, ZMQ_IO_THREADS, io_threads) != 0 {
             let code = last_errno();
             omq_zmq::zmq_ctx_term(raw);
-            return Err(exception::<ZmqContextException>(
+            return Err(exception(
+                Class::Context,
                 "Failed to set the IO thread count",
                 code,
             ));
@@ -132,17 +134,20 @@ impl ZmqContext {
     }
 
     /// The process-wide persistent context with one IO thread.
+    #[php(name = "acquire")]
     pub fn acquire() -> PhpResult<Self> {
         Ok(Self {
             shared: persistent_context(1)?,
         })
     }
 
+    #[php(name = "getsocketcount")]
     pub fn get_socket_count(&self) -> i64 {
         i64::try_from(self.shared.sockets.load(Ordering::Relaxed)).unwrap_or(i64::MAX)
     }
 
     #[php(optional = persistent_id)]
+    #[php(name = "getsocket")]
     pub fn get_socket(
         &self,
         socket_type: i64,
@@ -152,15 +157,18 @@ impl ZmqContext {
         socket::create(&self.shared, socket_type, persistent_id, on_new_socket)
     }
 
+    #[php(name = "ispersistent")]
     pub fn is_persistent(&self) -> bool {
         self.shared.persistent
     }
 
+    #[php(name = "setOpt")]
     pub fn set_opt(&self, option: i64, value: i64) -> PhpResult<()> {
         let option = c_int_arg(option, "option")?;
         let value = c_int_arg(value, "value")?;
         if omq_zmq::zmq_ctx_set(self.shared.as_ptr(), option, value) != 0 {
-            return Err(exception::<ZmqContextException>(
+            return Err(exception(
+                Class::Context,
                 "Failed to set the context option",
                 last_errno(),
             ));
@@ -169,11 +177,13 @@ impl ZmqContext {
         Ok(())
     }
 
+    #[php(name = "getOpt")]
     pub fn get_opt(&self, option: i64) -> PhpResult<i64> {
         let option = c_int_arg(option, "option")?;
         let value = omq_zmq::zmq_ctx_get(self.shared.as_ptr(), option);
         if value < 0 {
-            return Err(exception::<ZmqContextException>(
+            return Err(exception(
+                Class::Context,
                 "Failed to get the context option",
                 last_errno(),
             ));

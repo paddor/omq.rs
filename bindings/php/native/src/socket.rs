@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use ext_php_rs::boxed::ZBox;
 use ext_php_rs::prelude::*;
-use ext_php_rs::types::{ZendClassObject, ZendHashTable, ZendStr, Zval};
+use ext_php_rs::types::{ZendClassObject, ZendHashTable, ZendObject, ZendStr, Zval};
 
 use crate::context::{ContextShared, ZmqContext};
 use crate::errors::{last_errno, socket_error, socket_misuse};
@@ -178,25 +178,83 @@ fn registry() -> &'static SocketRegistry {
     REGISTRY.get_or_init(SocketRegistry::default)
 }
 
-/// The persistent socket for `id`, and whether it was just created.
-fn persistent_socket(
+/// A socket being created: an existing persistent socket, or a new one that
+/// joins the registry only after `on_new_socket` succeeds.
+struct Opened {
+    shared: Arc<SocketShared>,
+    /// Registry key of a new persistent socket.
+    register: Option<SocketKey>,
+    is_new: bool,
+}
+
+fn open(
     context: &Arc<ContextShared>,
-    socket_type: c_int,
-    id: &str,
-) -> PhpResult<(Arc<SocketShared>, bool)> {
-    let mut sockets = registry()
+    socket_type: i64,
+    persistent_id: Option<String>,
+) -> PhpResult<Opened> {
+    let socket_type = c_int_arg(socket_type, "type")?;
+    let Some(id) = persistent_id.filter(|_| context.is_persistent()) else {
+        let shared = SocketShared::open(context, socket_type, None)?;
+        return Ok(Opened {
+            shared,
+            register: None,
+            is_new: true,
+        });
+    };
+
+    let key = (context.as_ptr() as usize, socket_type, id.clone());
+    let sockets = registry()
         .lock()
         .map_err(|_| "persistent socket registry poisoned")?;
-    let key = (context.as_ptr() as usize, socket_type, id.to_owned());
     if let Some(socket) = sockets.get(&key)
         && socket.context.owned_here()
     {
-        return Ok((Arc::clone(socket), false));
+        return Ok(Opened {
+            shared: Arc::clone(socket),
+            register: None,
+            is_new: false,
+        });
     }
 
-    let socket = SocketShared::open(context, socket_type, Some(id.to_owned()))?;
-    sockets.insert(key, Arc::clone(&socket));
-    Ok((socket, true))
+    drop(sockets);
+    let shared = SocketShared::open(context, socket_type, Some(id))?;
+    Ok(Opened {
+        shared,
+        register: Some(key),
+        is_new: true,
+    })
+}
+
+impl Opened {
+    /// Call `on_new_socket` for a new socket with `object`, then register a
+    /// new persistent socket. A failed callback leaves it unregistered.
+    fn finish(
+        self,
+        object: &mut ZendObject,
+        on_new_socket: Option<&Zval>,
+    ) -> PhpResult<Arc<SocketShared>> {
+        if self.is_new
+            && let Some(callback) = on_new_socket.filter(|callback| !callback.is_null())
+        {
+            let callable = callback
+                .callable()
+                .ok_or_else(|| socket_misuse("on_new_socket is not callable"))?;
+            let mut this = Zval::new();
+            this.set_object(object);
+            callable
+                .try_call(vec![&this, &self.shared.persistent_id])
+                .map_err(|_| socket_misuse("Failed to invoke 'on_new_socket' callback"))?;
+        }
+
+        if let Some(key) = self.register {
+            let mut sockets = registry()
+                .lock()
+                .map_err(|_| "persistent socket registry poisoned")?;
+            sockets.insert(key, Arc::clone(&self.shared));
+        }
+
+        Ok(self.shared)
+    }
 }
 
 /// Close persistent sockets at module shutdown, before their contexts.
@@ -206,42 +264,18 @@ pub(crate) fn shutdown() {
     }
 }
 
-fn open_shared(
-    context: &Arc<ContextShared>,
-    socket_type: i64,
-    persistent_id: Option<String>,
-) -> PhpResult<(Arc<SocketShared>, bool)> {
-    let socket_type = c_int_arg(socket_type, "type")?;
-    match persistent_id.filter(|_| context.is_persistent()) {
-        Some(id) => persistent_socket(context, socket_type, &id),
-        None => Ok((SocketShared::open(context, socket_type, None)?, true)),
-    }
-}
-
-/// `ZMQContext::getSocket`: a socket object, passed to `on_new_socket` when
-/// the native socket is new.
+/// `ZMQContext::getSocket`: the socket object itself goes to `on_new_socket`.
 pub(crate) fn create(
     context: &Arc<ContextShared>,
     socket_type: i64,
     persistent_id: Option<String>,
     on_new_socket: Option<&Zval>,
 ) -> PhpResult<ZBox<ZendClassObject<ZmqSocket>>> {
-    let (shared, is_new) = open_shared(context, socket_type, persistent_id)?;
-    let id = shared.persistent_id.clone();
-    let mut object = ZendClassObject::new(ZmqSocket { shared });
-    if let Some(callback) = on_new_socket.filter(|callback| !callback.is_null())
-        && is_new
-    {
-        let callable = callback
-            .callable()
-            .ok_or_else(|| socket_misuse("on_new_socket is not callable"))?;
-        let mut this = Zval::new();
-        this.set_object(&mut object.std);
-        callable
-            .try_call(vec![&this, &id])
-            .map_err(|_| socket_misuse("Failed to invoke 'on_new_socket' callback"))?;
-    }
-
+    let opened = open(context, socket_type, persistent_id)?;
+    let mut object = ZendClassObject::new(ZmqSocket {
+        shared: Arc::clone(&opened.shared),
+    });
+    opened.finish(&mut object.std, on_new_socket)?;
     Ok(object)
 }
 
@@ -284,17 +318,18 @@ impl ZmqSocket {
         persistent_id: Option<String>,
         on_new_socket: Option<&Zval>,
     ) -> PhpResult<Self> {
-        if on_new_socket.is_some_and(|callback| !callback.is_null()) {
-            return Err(socket_misuse(
-                "on_new_socket is supported through ZMQContext::getSocket",
-            ));
-        }
-
-        let (shared, _) = open_shared(&context.shared, socket_type, persistent_id)?;
+        // The object under construction is not reachable yet, so the
+        // callback gets a second wrapper around the same native socket.
+        let opened = open(&context.shared, socket_type, persistent_id)?;
+        let mut stand_in = ZendClassObject::new(Self {
+            shared: Arc::clone(&opened.shared),
+        });
+        let shared = opened.finish(&mut stand_in.std, on_new_socket)?;
         Ok(Self { shared })
     }
 
     #[php(defaults(mode = 0))]
+    #[php(name = "send")]
     pub fn send(
         self_: &mut ZendClassObject<ZmqSocket>,
         message: &Zval,
@@ -315,6 +350,7 @@ impl ZmqSocket {
     }
 
     #[php(defaults(mode = 0))]
+    #[php(name = "recv")]
     pub fn recv(&self, mode: i64) -> PhpResult<Zval> {
         let flags = c_int_arg(mode, "mode")?;
         let mut zval = Zval::new();
@@ -332,6 +368,7 @@ impl ZmqSocket {
     }
 
     #[php(defaults(mode = 0))]
+    #[php(name = "sendmulti")]
     pub fn send_multi(
         self_: &mut ZendClassObject<ZmqSocket>,
         message: &ZendHashTable,
@@ -355,6 +392,7 @@ impl ZmqSocket {
     }
 
     #[php(defaults(mode = 0))]
+    #[php(name = "recvmulti")]
     pub fn recv_multi(&self, mode: i64) -> PhpResult<Zval> {
         let flags = c_int_arg(mode, "mode")?;
         let mut parts = ZendHashTable::new();
@@ -377,12 +415,14 @@ impl ZmqSocket {
     }
 
     #[php(defaults(force = false))]
+    #[php(name = "bind")]
     pub fn bind(self_: &mut ZendClassObject<ZmqSocket>, dsn: &str, force: bool) -> PhpResult<Zval> {
         self_.shared.attach(Attach::Bind, dsn, force)?;
         Ok(this(self_))
     }
 
     #[php(defaults(force = false))]
+    #[php(name = "connect")]
     pub fn connect(
         self_: &mut ZendClassObject<ZmqSocket>,
         dsn: &str,
@@ -392,16 +432,19 @@ impl ZmqSocket {
         Ok(this(self_))
     }
 
+    #[php(name = "unbind")]
     pub fn unbind(self_: &mut ZendClassObject<ZmqSocket>, dsn: &str) -> PhpResult<Zval> {
         self_.shared.detach(Attach::Bind, dsn)?;
         Ok(this(self_))
     }
 
+    #[php(name = "disconnect")]
     pub fn disconnect(self_: &mut ZendClassObject<ZmqSocket>, dsn: &str) -> PhpResult<Zval> {
         self_.shared.detach(Attach::Connect, dsn)?;
         Ok(this(self_))
     }
 
+    #[php(name = "getendpoints")]
     pub fn get_endpoints(&self) -> PhpResult<ZBox<ZendHashTable>> {
         let endpoints = self
             .shared
@@ -414,6 +457,7 @@ impl ZmqSocket {
         Ok(all)
     }
 
+    #[php(name = "setsockopt")]
     pub fn set_sock_opt(
         self_: &mut ZendClassObject<ZmqSocket>,
         key: i64,
@@ -423,23 +467,28 @@ impl ZmqSocket {
         Ok(this(self_))
     }
 
+    #[php(name = "getsockopt")]
     pub fn get_sock_opt(&self, key: i64) -> PhpResult<Zval> {
         sockopt::get(self.shared.as_ptr(), key)
     }
 
+    #[php(name = "getsockettype")]
     pub fn get_socket_type(&self) -> i64 {
         i64::from(self.shared.socket_type)
     }
 
+    #[php(name = "ispersistent")]
     pub fn is_persistent(&self) -> bool {
         self.shared.persistent_id.is_some()
     }
 
+    #[php(name = "getpersistentid")]
     pub fn get_persistent_id(&self) -> Option<String> {
         self.shared.persistent_id.clone()
     }
 
     #[php(defaults(events = ZMQ_EVENT_ALL))]
+    #[php(name = "monitor")]
     pub fn monitor(
         self_: &mut ZendClassObject<ZmqSocket>,
         dsn: &str,
@@ -457,6 +506,7 @@ impl ZmqSocket {
     /// Read one monitor event from this socket, which must be connected to
     /// a monitor endpoint: `event`, `value`, and `address`.
     #[php(defaults(flags = 0))]
+    #[php(name = "recvevent")]
     pub fn recv_event(&self, flags: i64) -> PhpResult<ZBox<ZendHashTable>> {
         let flags = c_int_arg(flags, "flags")?;
         let header = self.monitor_frame(flags)?;

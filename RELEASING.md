@@ -81,6 +81,15 @@ OMQ_GO_SOAK_DURATIONS="300 600 1800 3600" OMQ_GO_SOAK_WORKERS=12 \
 creates annotated tags after merge, publishes to crates.io, and creates
 GitHub releases. Configuration lives in `release-plz.toml`.
 
+When release-plz releases `omq-libzmq`, it calls
+`.github/workflows/release-libzmq.yml`, which attaches prebuilt
+`libomq_zmq` libraries, `zmq.h`, and `SHA256SUMS` to that GitHub release.
+To retry or backfill a release, dispatch it with the tag:
+
+```sh
+gh workflow run release-libzmq.yml --repo paddor/omq.rs -f tag=omq-libzmq-v0.11.0
+```
+
 ## Steps
 
 1. **Review the release-plz PR.** Verify semver bumps. A minor `omq-proto`

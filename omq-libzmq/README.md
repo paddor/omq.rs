@@ -74,6 +74,14 @@ Build with `--features quic` for `quic://` endpoints;
 `zmq_has("quic")` reports availability. See
 [QUIC options](doc/compatibility.md#quic-options) for certificate and trust setup.
 
+## Prebuilt libraries
+
+GitHub releases of omq-libzmq carry the shared library for x86_64 and
+aarch64 Linux (glibc 2.28 or later), x86_64 and arm64 macOS, and x86_64
+Windows, named `libomq_zmq-<target>.so`, `libomq_zmq-<target>.dylib`, and
+`omq_zmq-<target>.dll` after the Rust target triple, plus `zmq.h` and
+`SHA256SUMS`.
+
 ## Build
 
 Produces `libomq_zmq.so` / `libomq_zmq.a` / `libomq_zmq.dylib`.

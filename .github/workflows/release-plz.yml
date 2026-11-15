@@ -13,6 +13,8 @@ on:
 jobs:
   release-plz:
     runs-on: ubuntu-latest
+    outputs:
+      libzmq_tag: ${{ steps.libzmq.outputs.tag }}
     concurrency:
       group: release-plz
       cancel-in-progress: false
@@ -22,5 +24,23 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: MarcoIeni/release-plz-action@v0.5
+        id: release-plz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Find the omq-libzmq release
+        id: libzmq
+        env:
+          RELEASES: ${{ steps.release-plz.outputs.releases }}
+        run: |
+          tag=$(jq -r '.[]? | select(.package_name == "omq-libzmq") | .tag' <<<"${RELEASES:-[]}")
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  # Releases made with GITHUB_TOKEN start no workflows, so call it here.
+  libzmq-binaries:
+    needs: release-plz
+    if: needs.release-plz.outputs.libzmq_tag != ''
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release-libzmq.yml
+    with:
+      tag: ${{ needs.release-plz.outputs.libzmq_tag }}

@@ -33,6 +33,8 @@ With several LLVM versions installed, point bindgen at one, for example
 - `new ZMQSocket(..., $on_new_socket)` hands the callback a second
   `ZMQSocket` for the same native socket.
 
+Architecture: [`doc/architecture.md`](doc/architecture.md).
+
 ## Drop-in
 
 Install ext-zmq from your distro (`php-zmq` on Debian/Ubuntu, `php-pecl-zmq`

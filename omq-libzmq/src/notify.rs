@@ -8,11 +8,19 @@
 //! - `PollWaiter`: platform-specific multi-socket polling (`poll()` vs
 //!   `WaitForMultipleObjects` with 64-handle batching).
 //! - `NotifyHandle` trait: dynamic dispatch for setup/teardown.
+//!
+//! `ReadyCallback` pushes receive-descriptor signals to an application
+//! callback.
 
+mod ready;
 #[cfg(unix)]
 mod unix;
 #[cfg(windows)]
 pub(crate) mod windows;
+
+pub(crate) use ready::OMQReadyCallback;
+pub(crate) use ready::ReadyCallback;
+pub(crate) use ready::Registered as RegisteredReadyCallback;
 
 #[cfg(unix)]
 pub(crate) use unix::RecvNotify;
@@ -47,6 +55,7 @@ pub(crate) trait NotifyHandle: Send + Sync {
     fn recv_fd(&self) -> std::os::raw::c_int;
     fn send_fd(&self) -> std::os::raw::c_int;
     fn recv_notifier(&self) -> RecvNotify;
+    fn ready(&self) -> &ReadyCallback;
 }
 
 /// Wakeup handles for a new socket, or `None` when the OS cannot create

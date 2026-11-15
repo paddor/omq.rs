@@ -9,7 +9,9 @@ use omq_tokio::SocketType;
 
 use crate::context::{OmqContext, next_socket_id};
 use crate::error::{ETERM, c_try, fail, map_omq_err, set_errno};
-use crate::notify::{NotifyHandle, PlatformNotifyHandle};
+use crate::notify::{
+    NotifyHandle, OMQReadyCallback, PlatformNotifyHandle, RegisteredReadyCallback,
+};
 use crate::opts::{LingerSetting, SocketOverlay};
 
 mod endpoint;
@@ -226,6 +228,31 @@ pub extern "C" fn omq_socket_allow_thread_migration(sock_ptr: *mut c_void) -> c_
     // SAFETY: C callers pass null or a pointer from this API.
     let socket = c_try!(unsafe { crate::handle::socket(sock_ptr) });
     socket.allow_thread_migration();
+
+    0
+}
+
+/// Register the socket's ready callback, the push form of `ZMQ_FD`, or
+/// clear it with a null callback. Registration and each `ZMQ_EVENTS` read
+/// arm it; it then runs once, on any thread, when `ZMQ_FD` is signaled.
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_socket_set_ready_callback(
+    sock_ptr: *mut c_void,
+    callback: Option<OMQReadyCallback>,
+    userdata: *mut c_void,
+) -> c_int {
+    if sock_ptr.is_null() {
+        return fail(libc::EFAULT);
+    }
+
+    // SAFETY: C callers pass null or a pointer from this API.
+    let socket = c_try!(unsafe { crate::handle::socket(sock_ptr) });
+    let registered = callback.map(|callback| RegisteredReadyCallback { callback, userdata });
+    if registered.is_some() {
+        // A blocked send must wake the callback, as it wakes `ZMQ_FD`.
+        crate::send_recv::fd_edge::watch(socket);
+    }
+    socket.notify.ready().set(registered);
 
     0
 }

@@ -175,7 +175,7 @@ Language bindings:
 | Lua | [`OMQ.lua`](bindings/lua/): native module |
 | Erlang, Elixir, Gleam | [`OMQ.beam`](bindings/beam/): NIF and wrappers |
 | Zig | [`OMQ.zig`](bindings/zig/): C API wrapper |
-| PHP | [`php-zmq` drop-in](bindings/php/): stock `zmq` extension on `omq-libzmq` |
+| PHP | [`OMQ.php`](bindings/php/): ext-zmq-compatible native extension, or stock ext-zmq as a drop-in |
 | Crystal | [`omq-binding.cr`](https://github.com/paddor/omq-binding.cr): native binding |
 
 Pure implementations speak ZMTP without the Rust engine:

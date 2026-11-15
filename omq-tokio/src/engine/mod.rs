@@ -24,6 +24,7 @@ mod producer_ready;
 pub(crate) mod rate_limit;
 pub(crate) mod receive_cell;
 mod recv_sink;
+mod ring_drain;
 
 pub(crate) use recv_sink::reserve_authenticated;
 
@@ -40,6 +41,7 @@ pub use driver::{
     AuthenticatedRecvItem, ConnectionDriver, PeerDriverCommand, PeerDriverConfig, PeerDriverData,
     PeerDriverHandle, PeerEvent, RecvSink, RecvSinkConfig, YringSink,
 };
+pub use ring_drain::RingDrain;
 pub(crate) use send_pipe::{
     SendPipeConsumer, SendPipeError, SendPipeHome, SendPipeLease, SendPipeMode, SendPipeProducer,
     inproc_send_pipe, peer_send_pipe, send_pipe, send_pipe_with_mode,

@@ -33,3 +33,38 @@ fn receive_signal_retains_its_descriptor_after_socket_close() {
     );
     assert_eq!(count, 1);
 }
+
+#[test]
+fn full_recv_ring_returns_space_to_the_producer_in_one_lwm_batch() {
+    let (mut fast_producer, fast) = yring::spsc(16);
+    let (_pump_producer, pump) = yring::spsc(16);
+    let mut consumers = RecvConsumers::new(fast, pump);
+    for sequence in 0_u8..16 {
+        fast_producer
+            .push(omq_tokio::Message::from_slice(&[sequence]))
+            .unwrap();
+    }
+    fast_producer.flush();
+    assert!(fast_producer.is_full());
+
+    let wakes = (0_u8..8)
+        .map(|sequence| {
+            let (message, wake) = consumers.try_pop();
+            assert_eq!(message.unwrap().part_slice(0).unwrap(), &[sequence]);
+            wake
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        wakes,
+        [false, false, false, false, false, false, false, true]
+    );
+    assert!(!fast_producer.is_full());
+
+    // Draining to empty releases the rest of the consumed window.
+    while consumers.try_pop().0.is_some() {}
+    for sequence in 0_u8..16 {
+        fast_producer
+            .push(omq_tokio::Message::from_slice(&[sequence]))
+            .unwrap();
+    }
+}

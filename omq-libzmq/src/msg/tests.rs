@@ -26,7 +26,7 @@ fn writable_received_data_detaches_shared_storage_and_preserves_metadata() {
         // SAFETY: zmq_msg_data exposes writable storage for this message.
         unsafe { *pointer = b'b' };
         assert_eq!(original[0], b'a');
-        assert_eq!(extract_bytes(&raw const message)[0], b'b');
+        assert_eq!(owned_payload(&message)[0], b'b');
         assert_eq!(zmq_msg_data(&raw mut message).cast::<u8>(), pointer);
         assert_eq!(zmq_msg_more(&raw const message), 1);
 

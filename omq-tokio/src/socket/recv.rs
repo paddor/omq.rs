@@ -17,7 +17,8 @@ mod blocking;
 mod drain;
 mod pipe;
 
-use drain::{DrainLimit, DrainResult, DrainState, RingDrain, drain_peer_source};
+use crate::engine::RingDrain;
+use drain::{DrainLimit, DrainResult, DrainState, drain_peer_source};
 pub(crate) use pipe::{ConflateRecvSlot, RecvPipeEnds, SharedRecvPipe, recv_pipe};
 
 pub use crate::engine::signal::BlockingRecvCancel;

@@ -120,7 +120,7 @@ down and reconnects.
 | Area | libzmq | omq.rs | Gap? |
 |------|--------|--------|------|
 | HWM enforcement | per-pipe complete-message credits | Per-pipe/ring message caps; transmit slots separate, so effective capacity can exceed one `send_hwm` | **~** |
-| LWM re-activation at half | (hwm+1)/2 triggers activate_write | yring/fanring rings with `DataSignal` wakeups | **~** |
+| LWM re-activation at half | (hwm+1)/2 triggers activate_write | Receive rings return consumed slots at the same LWM; send pipes resume below theirs | **=** |
 | Round-robin HWM exceeded | Blocks / EAGAIN to user | Block / DropNewest / DropOldest | **=** superset |
 | PUB/XPUB mute | Drop on HWM (`XPUB_NODROP` excepted) | Drop on HWM (`xpub_nodrop` excepted) | **=** |
 | Pipe termination FSM | 6-state machine with delimiter protocol | Channel close + CancellationToken | **~** simpler |

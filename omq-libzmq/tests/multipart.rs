@@ -821,3 +821,48 @@ fn restarting_a_multipart_after_eagain_sends_it_once() {
     zmq_close(pull);
     zmq_ctx_term(ctx);
 }
+
+/// One message carries an inline, a small heap, and a shared large frame;
+/// `zmq_msg_recv` stores each in its own representation.
+#[test]
+fn msg_recv_stores_inline_small_and_large_frames_of_one_message() {
+    let ctx = zmq_ctx_new();
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    let endpoint = helpers::bind_random_tcp(pull);
+    zmq_connect(push, endpoint.as_ptr());
+    helpers::set_int_opt(pull, ZMQ_RCVTIMEO, 2000);
+
+    let frames = [vec![1_u8; 16], vec![2_u8; 100], vec![3_u8; 4096]];
+    for (index, frame) in frames.iter().enumerate() {
+        let flags = if index + 1 < frames.len() {
+            ZMQ_SNDMORE
+        } else {
+            0
+        };
+        let rc = zmq_send(push, frame.as_ptr().cast(), frame.len(), flags);
+        assert_eq!(rc as usize, frame.len());
+    }
+
+    let mut m = ZmqMsg::new();
+    for (index, frame) in frames.iter().enumerate() {
+        let rc = zmq_msg_recv(m.0.as_mut_ptr().cast(), pull, 0);
+        assert_eq!(rc as usize, frame.len());
+        assert_eq!(zmq_msg_size(m.0.as_ptr().cast()), frame.len());
+        let last = index + 1 == frames.len();
+        assert_eq!(zmq_msg_more(m.0.as_ptr().cast()), i32::from(!last));
+        assert_eq!(
+            zmq_msg_get(m.0.as_ptr().cast(), ZMQ_SHARED),
+            i32::from(last)
+        );
+        let data = zmq_msg_data(m.0.as_mut_ptr().cast());
+        // SAFETY: the live message holds `rc` payload bytes.
+        let got = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), rc as usize) };
+        assert_eq!(got, frame.as_slice());
+    }
+
+    zmq_msg_close(m.0.as_mut_ptr().cast());
+    zmq_close(push);
+    zmq_close(pull);
+    zmq_ctx_term(ctx);
+}

@@ -56,42 +56,46 @@ pub extern "C" fn zmq_recviov(
 }
 
 fn zmq_recv_impl(sock: &OmqSocket, buf: *mut libc::c_void, buf_len: usize, flags: c_int) -> c_int {
-    use std::sync::atomic::Ordering;
-
-    if sock.is_zap_handler() {
-        return zmq_recv_via_frame(sock, buf, buf_len, flags);
-    }
-
-    if authenticated_recv_configured(sock) {
+    if !sock.is_zap_handler() && authenticated_recv_configured(sock) {
         let part = c_try!(pop_recv_frame_with_properties(sock, flags));
         return c_try!(copy_out(buf, buf_len, &part.frame));
     }
 
-    // Multipart drain: leftover frames use the Bytes-returning path.
-    if sock.recv.drain_nonempty.load(Ordering::Relaxed) {
+    if !direct_frame_recv(sock) {
         return zmq_recv_via_frame(sock, buf, buf_len, flags);
     }
 
-    // Fast path: pop Message from yring, borrow first frame directly.
-    // Avoids the Bytes::copy_from_slice that pop_recv_frame/decompose_message
-    // would do for inline messages.
-    c_try!(pop_message(sock, flags, |message| {
-        recv_msg_to_buf(sock, &message, buf, buf_len)
+    c_try!(pop_first_frame(sock, flags, |message, start, _more| {
+        copy_out(buf, buf_len, message.get(start).unwrap_or(&[]))
     }))
 }
 
-/// Borrow the first frame of a Message and copy into the user buffer.
-/// Zero heap allocation for inline messages.
+/// Whether the next frame can be borrowed straight from a ring message: no
+/// ZAP handler, no retained auth properties, and no queued multipart frames.
 #[inline]
-fn recv_msg_to_buf(
+pub(crate) fn direct_frame_recv(sock: &OmqSocket) -> bool {
+    !sock.is_zap_handler()
+        && !authenticated_recv_configured(sock)
+        && !sock
+            .recv
+            .drain_nonempty
+            .load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Pop one ring message and pass it to `map` with its first frame index and
+/// whether more frames follow. The later frames queue for the following
+/// receives. Borrowing avoids a `Bytes` copy of inline payloads.
+#[inline]
+pub(crate) fn pop_first_frame<T>(
     sock: &OmqSocket,
-    m: &omq_tokio::Message,
-    buf: *mut libc::c_void,
-    buf_len: usize,
-) -> Result<c_int, c_int> {
-    let start = msg_start_index(sock, m);
-    stash_remaining_parts(sock, m, start)?;
-    copy_out(buf, buf_len, m.get(start).unwrap_or(&[]))
+    flags: c_int,
+    mut map: impl FnMut(&omq_tokio::Message, usize, bool) -> Result<T, c_int>,
+) -> Result<T, c_int> {
+    pop_message(sock, flags, |message| {
+        let start = msg_start_index(sock, &message);
+        let more = stash_remaining_parts(sock, &message, start)?;
+        map(&message, start, more)
+    })
 }
 
 /// Fallback for `zmq_recv` when multipart drain is non-empty.
@@ -357,11 +361,12 @@ pub(super) fn try_pop_dual(
     let mut budget = DrainBudget::WORKER;
 
     while !budget.exhausted() {
-        let Some((message, released)) = cons.try_pop() else {
+        let (message, released) = cons.try_pop();
+        released_full_slot |= released;
+        let Some(message) = message else {
             break;
         };
 
-        released_full_slot |= released;
         let _ = budget.account(message.byte_len());
         settle_recv_fd(sock, cons);
 

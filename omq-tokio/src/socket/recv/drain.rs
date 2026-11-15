@@ -3,6 +3,7 @@
 use super::{
     RECV_BATCH_BYTES, RECV_BATCH_MESSAGES, SpscAwareRecv, TcpYringConsumer, recv_budget_bytes,
 };
+use crate::engine::RingDrain;
 use omq_proto::error::Error;
 use omq_proto::flow::DrainBudget;
 use omq_proto::message::Message;
@@ -53,34 +54,6 @@ pub(super) fn recv_source_at(index: usize, stream_len: usize) -> RecvSource {
     }
 }
 
-/// Receive release policy. The cached window stays valid after partial releases.
-#[derive(Debug, Default)]
-pub(super) struct RingDrain {
-    pub(super) remaining: usize,
-    pub(super) popped: usize,
-}
-
-impl RingDrain {
-    pub(super) fn lwm(capacity: usize) -> usize {
-        // libzmq keeps at most 1024 occupied slots at the large-ring boundary.
-        if capacity > 2048 {
-            capacity - 1024
-        } else {
-            (capacity / 2).max(1)
-        }
-    }
-
-    /// Release only consumed slots; retain the remainder of the cached window.
-    pub(super) fn release(&mut self, consumer: &mut yring::Consumer<Message>) -> bool {
-        if self.popped == 0 {
-            return false;
-        }
-
-        self.popped = 0;
-        consumer.release_with_full()
-    }
-}
-
 pub(super) fn drain_peer_source(
     peer: &TcpYringConsumer,
     latency: bool,
@@ -98,7 +71,7 @@ pub(super) fn drain_peer_source(
     };
 
     let message = if latency {
-        let (item, wake) = drain_yring_one(&mut consumer, &mut progress);
+        let (item, wake) = progress.pop(&mut consumer);
         if wake {
             peer.space.notify_changed();
         }
@@ -144,7 +117,7 @@ pub(super) fn drain_yring_one_into_batch(
         return (0, false);
     }
 
-    let (item, released) = drain_yring_one(consumer, progress);
+    let (item, released) = progress.pop(consumer);
     let Some(item) = item else {
         return (0, released);
     };
@@ -207,38 +180,6 @@ pub(super) fn drain_yring(
     }
 
     drained
-}
-
-/// Pop once, publishing consumed credits at LWM or the cached window boundary.
-pub(super) fn drain_yring_one(
-    consumer: &mut yring::Consumer<Message>,
-    progress: &mut RingDrain,
-) -> (Option<Message>, bool) {
-    loop {
-        if progress.remaining == 0 {
-            progress.remaining = consumer.prefetch();
-            if progress.remaining == 0 {
-                return (None, progress.release(consumer));
-            }
-        }
-
-        if let Some(item) = consumer.pop() {
-            progress.remaining -= 1;
-            progress.popped += 1;
-            let wake = (progress.remaining == 0
-                || progress.popped >= RingDrain::lwm(consumer.capacity()))
-                && progress.release(consumer);
-
-            return (Some(item), wake);
-        }
-
-        let wake = progress.release(consumer);
-        progress.remaining = 0;
-
-        if wake {
-            return (None, true);
-        }
-    }
 }
 
 impl SpscAwareRecv {
@@ -459,7 +400,7 @@ impl SpscAwareRecv {
     /// Latency path: take one message from the shared pipe straight to the
     /// caller, bypassing the batch.
     fn drain_shared_one(&self, state: &mut DrainState) -> SourceDrain {
-        let (item, wake) = drain_yring_one(&mut state.recv_consumer, &mut state.recv_batch);
+        let (item, wake) = state.recv_batch.pop(&mut state.recv_consumer);
         if wake {
             self.recv_pipe_space.notify_changed();
         }

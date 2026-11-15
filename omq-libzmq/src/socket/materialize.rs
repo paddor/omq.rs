@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use bytes::Bytes;
-use omq_tokio::engine::StateSignal;
+use omq_tokio::engine::{RingDrain, StateSignal};
 
 use super::{DEFAULT_HWM, OmqSocket};
 use crate::error::ETERM;
@@ -19,29 +19,57 @@ pub(crate) struct RecvConsumers {
     pub fast: yring::Consumer<omq_tokio::Message>,
     /// Filled by the recv pump task (fallback for second+ peers).
     pub pump: yring::Consumer<omq_tokio::Message>,
+    fast_drain: RingDrain,
+    pump_drain: RingDrain,
     prefer_pump: bool,
 }
 
 impl RecvConsumers {
+    pub(crate) fn new(
+        fast: yring::Consumer<omq_tokio::Message>,
+        pump: yring::Consumer<omq_tokio::Message>,
+    ) -> Self {
+        Self {
+            fast,
+            pump,
+            fast_drain: RingDrain::default(),
+            pump_drain: RingDrain::default(),
+            prefer_pump: false,
+        }
+    }
+
+    /// Pop the next message, alternating sources while both have data.
+    ///
+    /// Consumed slots return to producers in LWM batches. The flag reports
+    /// that a producer waiting for space must be woken; an empty result has
+    /// already released every consumed slot.
     #[expect(
         clippy::len_zero,
         reason = "is_empty registers waiters; this snapshot only selects the next source"
     )]
-    pub(crate) fn try_pop(&mut self) -> Option<(omq_tokio::Message, bool)> {
+    pub(crate) fn try_pop(&mut self) -> (Option<omq_tokio::Message>, bool) {
         // This length snapshot selects the next source only. Failed pops
         // still register both rings' empty waiters before the caller parks.
+        let mut wake = false;
         if self.prefer_pump && self.pump.len() > 0 {
             self.prefer_pump = false;
-            return self.pump.prefetch_and_pop_with_full();
+            let (message, released) = self.pump_drain.pop(&mut self.pump);
+            if message.is_some() {
+                return (message, released);
+            }
+            wake = released;
         }
 
-        if let Some(message) = self.fast.prefetch_and_pop_with_full() {
+        let (message, released) = self.fast_drain.pop(&mut self.fast);
+        wake |= released;
+        if message.is_some() {
             self.prefer_pump = true;
-            return Some(message);
+            return (message, wake);
         }
 
         self.prefer_pump = false;
-        self.pump.prefetch_and_pop_with_full()
+        let (message, released) = self.pump_drain.pop(&mut self.pump);
+        (message, wake | released)
     }
 
     pub(crate) fn refresh(&mut self, config: Option<&Arc<omq_tokio::engine::RecvSinkConfig>>) {
@@ -50,6 +78,7 @@ impl RecvConsumers {
             && let Some(consumer) = config.try_take_pending_consumer()
         {
             self.fast = consumer;
+            self.fast_drain = RingDrain::default();
         }
     }
 }
@@ -244,11 +273,8 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) -> Result<(), c_int> {
     let (pump_prod, pump_cons) = yring::spsc(cap);
     // SAFETY: materialization happens before user recv access and must not
     // bind the later app-facing owner thread.
-    *unsafe { sock.recv.consumers.get_unchecked() } = Some(RecvConsumers {
-        fast: fast_cons,
-        pump: pump_cons,
-        prefer_pump: false,
-    });
+    *unsafe { sock.recv.consumers.get_unchecked() } =
+        Some(RecvConsumers::new(fast_cons, pump_cons));
 
     let recv_space = Arc::new(StateSignal::new());
     let _ = sock.recv.space.set(recv_space.clone());

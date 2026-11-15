@@ -111,6 +111,9 @@ promise:
   loops that cannot wait on a descriptor. Registering and each `ZMQ_EVENTS`
   read arm it; it then runs once, on any thread, when `ZMQ_FD` would be
   signaled.
+- `omq_recv_into()` receives one frame into a caller buffer without
+  truncating it: a larger frame goes into an overflow `zmq_msg_t` instead.
+  Small frames need one call and one copy, with no message allocation.
 
 The async message encoding is an OMQ-specific length-table format. Its routed
 form also carries a SERVER routing ID. Bindings must use these functions only

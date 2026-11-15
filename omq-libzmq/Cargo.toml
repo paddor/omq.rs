@@ -179,3 +179,7 @@ path = "tests/req_rep_admission.rs"
 [[test]]
 name = "omq_libzmq_ready_callback"
 path = "tests/ready_callback.rs"
+
+[[test]]
+name = "omq_libzmq_recv_into"
+path = "tests/recv_into.rs"

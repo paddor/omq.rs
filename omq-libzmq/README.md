@@ -64,8 +64,8 @@ see [doc/compatibility.md](doc/compatibility.md). The bundled
 `include/zmq.h` is the authoritative symbol and constant list.
 
 `libomq_zmq.so` also exposes a small `omq_*` extension API for context sharing,
-native async multipart sends, and a readiness callback. It is OMQ-specific,
-outside the libzmq ABI, and documented in
+native async multipart sends, a readiness callback, and receives into caller
+buffers. It is OMQ-specific, outside the libzmq ABI, and documented in
 [doc/compatibility.md](doc/compatibility.md).
 
 ## QUIC

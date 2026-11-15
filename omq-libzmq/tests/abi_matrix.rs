@@ -39,6 +39,10 @@ const FUNCTION_MATRIX: &[FunctionEntry] = &[
         status: FunctionStatus::Extension,
     },
     FunctionEntry {
+        name: "omq_recv_into",
+        status: FunctionStatus::Extension,
+    },
+    FunctionEntry {
         name: "zmq_atomic_counter_dec",
         status: FunctionStatus::Implemented,
     },

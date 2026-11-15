@@ -48,10 +48,12 @@ case "$(uname -s)" in
   Darwin)
     omq_dynamic=libomq_zmq.dylib
     zmq_dynamic=libzmq.dylib
+    zmq_soname=libzmq.5.dylib
     ;;
   *)
     omq_dynamic=libomq_zmq.so
     zmq_dynamic=libzmq.so
+    zmq_soname=libzmq.so.5
     ;;
 esac
 
@@ -78,6 +80,8 @@ cp "$crate_dir/include/zmq.h" "$include_dir/zmq.h"
 cp "$target_dir/$omq_dynamic" "$lib_dir/$omq_dynamic"
 cp "$target_dir/$omq_static" "$lib_dir/$omq_static"
 ln -sfn "$omq_dynamic" "$lib_dir/$zmq_dynamic"
+# Prebuilt libzmq consumers load the versioned name.
+ln -sfn "$omq_dynamic" "$lib_dir/$zmq_soname"
 ln -sfn "$omq_static" "$lib_dir/$zmq_static"
 
 version=$(awk -F'"' '/^version = / {print $2; exit}' "$crate_dir/Cargo.toml")

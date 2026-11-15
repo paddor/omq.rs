@@ -14,7 +14,7 @@ Your application sends messages, OMQ handles the network. Queues all the way!
 - **One API across transports.** inproc, IPC, TCP, UDP, WebSocket, QUIC, DART, and
   SHM. Sockets handle framing, reconnection, and back-pressure.
 - **Language support.** Rust plus [bindings](#workspace) for C/C++, Python,
-  Ruby, Go, Java, Node.js, .NET, Lua, BEAM, Zig, and Crystal.
+  Ruby, Go, Java, Node.js, .NET, Lua, BEAM, Zig, PHP, and Crystal.
   [OMQ.ts](pure/typescript/) is a TypeScript browser client.
 
 ## Usage
@@ -175,6 +175,7 @@ Language bindings:
 | Lua | [`OMQ.lua`](bindings/lua/): native module |
 | Erlang, Elixir, Gleam | [`OMQ.beam`](bindings/beam/): NIF and wrappers |
 | Zig | [`OMQ.zig`](bindings/zig/): C API wrapper |
+| PHP | [`php-zmq` drop-in](bindings/php/): stock `zmq` extension on `omq-libzmq` |
 | Crystal | [`omq-binding.cr`](https://github.com/paddor/omq-binding.cr): native binding |
 
 Pure implementations speak ZMTP without the Rust engine:

@@ -309,4 +309,5 @@ cargo run --release -p omq-bench -- chart compression
   python scripts/update_perf.py --chart-only)
 (cd bindings/pyomq && python scripts/update_perf.py --quick --impl pyomq)  # smoke, no writes
 (cd bindings/ruby && ruby -Ilib scripts/update_perf.rb)
+ruby bindings/php/scripts/update_perf.rb
 ```

@@ -9,6 +9,7 @@
 #   OMQ_SKIP_GO=1       skip the Go binding build + test pass
 #   OMQ_SKIP_LUA=1      skip the Lua binding build + test pass
 #   OMQ_SKIP_RUBY=1     skip the Ruby binding build + test pass
+#   OMQ_PHP=CMD         PHP command with the zmq extension (test-php.sh)
 #   OMQ_GO_RACE=1       run Go binding tests with the race detector too
 #   OMQ_TEST_RETRIES=N  retry each step up to N times (default 2) -
 #                       a few timing-sensitive tests may need one
@@ -261,6 +262,11 @@ if command -v "${CXX:-c++}" >/dev/null 2>&1 \
     run "$_repo_root/scripts/test-cppzmq.sh"
 else
     echo "skip: cppzmq tests require C++ compiler and cppzmq"
+fi
+if ${OMQ_PHP:-php} -r 'exit(extension_loaded("zmq") ? 0 : 1);' >/dev/null 2>&1; then
+    run "$_repo_root/scripts/test-php.sh"
+else
+    echo "skip: PHP tests require php with the zmq extension"
 fi
 if [[ "${OMQ_SKIP_GO:-}" == "1" ]]; then
     echo "skip: OMQ_SKIP_GO=1"

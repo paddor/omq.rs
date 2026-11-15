@@ -30,6 +30,7 @@ cargo test -p omq-tokio --features dart --test omq_dart_transport --test omq_dar
 cargo test -p omq-tokio --all-features --test omq_network_rate_limit
 cargo test -p omq-tokio --test omq_stress_connect_before_bind -- --test-threads=1
 ./scripts/test-cppzmq.sh
+./scripts/test-php.sh
 ```
 
 Loom and Miri:

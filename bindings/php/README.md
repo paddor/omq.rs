@@ -74,10 +74,14 @@ system `libzmq.so.5` in place for other programs.
 
 ```sh
 scripts/test-php.sh                       # both modes, ext-zmq's .phpt suite, a PHP-FPM check
+ruby scripts/test-php-matrix.rb --all     # build and test in PHP 8.2-8.5 NTS/ZTS glibc/musl images
 ruby bindings/php/scripts/update_perf.rb  # benchmark and chart
 ```
 
 `OMQ_PHP` names a PHP command with ext-zmq loaded for the drop-in mode, for
 example `OMQ_PHP="php -d extension=zmq.so"`. `tests/phpt` holds ext-zmq's
 BSD-licensed tests, adapted for PHP 8; three XFAIL tests name the engine
-differences behind them. Benchmark rows go to `~/.cache/omq.php/bindings.jsonl`.
+differences behind them. `scripts/test-extension.sh` runs the tests on any
+built `zmq.so`; the matrix and the PIE release workflow use it, and
+`test-php-matrix.rb --pie VERSION` checks a published release. Benchmark
+rows go to `~/.cache/omq.php/bindings.jsonl`.

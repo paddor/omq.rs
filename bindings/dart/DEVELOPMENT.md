@@ -19,8 +19,25 @@ The package's own `pubspec.yaml` sets the `system: true` user-define, so its
 tests load the local build through `LD_LIBRARY_PATH` instead of downloading
 a release. They cover the socket patterns over TCP and inproc, async wakes
 and timeouts, HWM backpressure, multipart edge cases, the `messages` stream,
-isolate lifetime, PLAIN, CURVE, monitors, and the build hook. CI runs them
-on Linux with Dart 3.10.0 and stable.
+isolate lifetime, PLAIN, CURVE, monitors, and the build hook.
+`test/package_test.dart` checks what pub.dev accepts in `hook/`, that the
+prebuilt pin covers every platform, the changelog section of a release
+version, and that `libomq_zmq` exports every `@Native` symbol. CI runs the
+tests with Dart 3.10.0 and stable on Linux, and with stable on macOS and
+Windows.
+
+## Prebuilt library checks
+
+```sh
+ruby bindings/dart/scripts/check_prebuilt.rb            # pinned libraries: SHA-256, format, exports
+ruby bindings/dart/scripts/test_prebuilt.rb             # a scratch app on the hook-downloaded library
+ruby bindings/dart/scripts/test_prebuilt.rb --hosted 0.1.0  # the same with a pub.dev release
+```
+
+`test_prebuilt.rb` runs the socket tests in a scratch app without
+user-defines, then AOT-builds and runs a smoke program with `dart build cli`.
+CI runs it on Linux x86_64 and arm64, macOS arm64, and Windows x86_64.
+`check_prebuilt.rb` needs `llvm-nm` and `llvm-readobj`.
 
 ## Prebuilt library pin
 

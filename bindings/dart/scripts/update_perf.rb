@@ -109,6 +109,10 @@ def build_peer
       ffi: ^2.2.0
       omq:
         path: #{ROOT}
+    hooks:
+      user_defines:
+        omq:
+          system: true
   YAML
   system(DART, "pub", "get", chdir: BENCH, out: File::NULL, exception: true)
   system(DART, "build", "cli", chdir: BENCH, out: File::NULL, exception: true)

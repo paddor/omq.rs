@@ -1,0 +1,8 @@
+# Replaces .gitignore for pub: keep it in sync.
+.dart_tool/
+build/
+pubspec.lock
+# Benchmark tooling and the README chart (linked by URL) stay out.
+bench/
+scripts/
+doc/charts/

@@ -1,7 +1,10 @@
 # OMQ.dart architecture
 
 OMQ.dart is pure Dart over the `omq-libzmq` C ABI: `@Native` declarations
-bound to the `libomq_zmq` code asset that `hook/build.dart` registers.
+bound to the `libomq_zmq` code asset that `hook/build.dart` registers. The
+hook downloads the prebuilt library of a pinned omq-libzmq release and
+checks it against SHA-256 sums shipped in the package; user-defines can
+bundle another file or defer to the system loader.
 
 - Dart owns API shape, option conversion, exception mapping, and async
   waits.

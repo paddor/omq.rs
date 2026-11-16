@@ -23,6 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Require rustls 0.23.46 for `ws` and `quic`: RUSTSEC-2026-0285, -0346,
+  -0348 and -0349.
+- nix 0.32.
 - `engine::PeerDriverCommand::Settle` and `engine::PeerEvent::Settled` carry
   the inproc settle marks. Other drivers ignore them.
 

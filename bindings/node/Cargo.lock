@@ -178,9 +178,9 @@ checksum = "914a755b7c2d4af2bdcff7ce1739e2db9a1b81a9b07123d8015786ae03c0980d"
 
 [[package]]
 name = "ctutils"
-version = "0.4.3"
+version = "0.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "03bb0e1cc970d482d121d9a1744999169b69a07470b3d644a7894e53fcaf4574"
+checksum = "261af4dc7a06ea8a527a8717d8cbba3417530d6ea14e1edb3de6b67806be474f"
 dependencies = [
  "cmov",
 ]
@@ -476,9 +476,9 @@ dependencies = [
 
 [[package]]
 name = "lz4rip"
-version = "0.12.1"
+version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "44d2d90f8780c813b8c8e9ba4a462c30c03463a7b092e237342a96177635ed18"
+checksum = "9a02e1ec2764c530e9ffe17687884c824e488ca8511640d78966a59c592b099b"
 dependencies = [
  "lz4rip-core",
  "lz4rip-decode",
@@ -487,24 +487,24 @@ dependencies = [
 
 [[package]]
 name = "lz4rip-core"
-version = "0.6.1"
+version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "687eec55dae7866f9a8cf785555aa81ea02ebed8a13c7079c4a4f59c2de46e92"
+checksum = "052afa89a977207a207f3e074b1518b0fb5767dab3274464fd1ee5fc7699a30b"
 
 [[package]]
 name = "lz4rip-decode"
-version = "0.11.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd92d97be818770dc15bf1562ee2986e0ab2197155fb41bddd8305ba963a6a7e"
+checksum = "5f408c3237d4c7a20084f2e3b86c02d91e551c295c8804e66f4a734c64c23f8d"
 dependencies = [
  "lz4rip-core",
 ]
 
 [[package]]
 name = "lz4rip-encode"
-version = "0.10.12"
+version = "0.10.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "19d07fb7d01f4fe624c9b63f942671e32088794647bce814d3960b89580554b2"
+checksum = "a69d815f24588d9dc2c171cd245d239353b159a297352c56faf7aa1a03e86a3d"
 dependencies = [
  "lz4rip-core",
 ]
@@ -596,9 +596,9 @@ dependencies = [
 
 [[package]]
 name = "nix"
-version = "0.31.3"
+version = "0.32.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
+checksum = "77730ed34f01f4990cb2ea67fec715ecebc6fab9a6396cf83c5529b13f581bdc"
 dependencies = [
  "bitflags",
  "cfg-if",
@@ -667,7 +667,7 @@ dependencies = [
 
 [[package]]
 name = "omq-tokio"
-version = "0.36.0"
+version = "0.36.1"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -856,9 +856,9 @@ dependencies = [
 
 [[package]]
 name = "rustix"
-version = "1.1.5"
+version = "1.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d"
+checksum = "e5e76742e5294153d4dde1207dbec5bdd81eef6fabdc0d2118babadabfd858aa"
 dependencies = [
  "bitflags",
  "errno",
@@ -869,9 +869,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.45"
+version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "aws-lc-rs",
  "log",
@@ -906,9 +906,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.15"
+version = "0.103.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
+checksum = "e3a0760a887c14823fca5a1c970b01d47c328c696c0c64829d1df50e8f853fd5"
 dependencies = [
  "aws-lc-rs",
  "ring",
@@ -924,9 +924,9 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "salsabox"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "65badd51079921914d824e15ead1d7e21209b9e92e4c3714c974f21ea7b22f07"
+checksum = "13f8c3a4226a1d05137fbb564cda7899f86b4a1218845389a484f2254eb9f9ce"
 dependencies = [
  "fearless_simd",
  "poly1305",
@@ -1080,9 +1080,9 @@ dependencies = [
 
 [[package]]
 name = "tokio"
-version = "1.53.3"
+version = "1.54.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce3335fa71841cda333a58d7615b03901380ecf09d59b3296d21f8bbac0dde4e"
+checksum = "b52fd3255258d26fac7264ab5a76b53c13367136dc011d3d6ad4f8ed070396a3"
 dependencies = [
  "bytes",
  "libc",

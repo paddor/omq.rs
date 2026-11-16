@@ -37,7 +37,7 @@ copy-stats = []
 [dependencies]
 concurrent-queue = "2.5.0"
 bytes = "1.12.1"
-salsabox = { version = "0.1", optional = true }
+salsabox = { version = "0.1.1", optional = true }
 subtle = { version = "2.6", optional = true }
 x25519-dalek = { version = "3", features = ["static_secrets", "getrandom"], optional = true }
 rand = "0.10.3"
@@ -48,13 +48,13 @@ thiserror = "2.0.21"
 zeroize = { version = "1.9.1", features = ["zeroize_derive"], optional = true }
 
 [dependencies.lz4rip]
-version = "0.12.1"
+version = "0.12.2"
 default-features = false
 features = ["std"]
 optional = true
 
 [dependencies.zrip]
-version = "0.8.13"
+version = "0.8.17"
 default-features = false
 features = ["std", "frame", "dict_builder"]
 optional = true

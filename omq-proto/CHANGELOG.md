@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Require salsabox 0.1.1, which no longer leaves the XSalsa20 subkey,
+  Poly1305 key, or block-0 keystream on the stack (`curve`).
+- Require zrip 0.8.17. Its decoder now keeps a dictionary reachable as RFC
+  8878 allows, so C zstd frames with a dictionary no longer fail with
+  `InvalidOffset` (`zstd`).
+- Require lz4rip 0.12.2: faster dictionary compression, and no debug-build
+  panic on frame checksums (`lz4`).
+
 ## [0.40.0] - 2026-11-14
 
 ### Added

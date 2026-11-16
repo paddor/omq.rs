@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-17
+
+### Fixed
+
+- Bundle `omq-tokio` 0.37.0. An inproc connect to a bound endpoint,
+  subscribe, unsubscribe, join and leave take effect before the
+  publisher's next send, as in libzmq. Before, that send could miss them.
+- Build with rustls 0.23.46 (RUSTSEC-2026-0285, -0346, -0348 and -0349),
+  salsabox 0.1.1, zrip 0.8.17 and lz4rip 0.12.2.
+
 ## [0.2.0] - 2026-11-14
 
 ### Added

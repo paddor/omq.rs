@@ -13,8 +13,18 @@ PHP code written for the PECL `zmq` extension (ext-zmq) runs on OMQ two ways:
 
 ## OMQ.php
 
-Build it with `php-config` (`php-dev`) and libclang installed, then load it
-in place of ext-zmq, never next to it:
+Install a prebuilt build with [PIE](https://github.com/php/pie), in place of
+ext-zmq, never next to it:
+
+```sh
+pie install paddor/omq-php
+```
+
+Prebuilt binaries cover PHP 8.2 to 8.5, NTS and ZTS, on x86_64 and arm64
+Linux (glibc 2.35 or later, or musl), and NTS on arm64 macOS.
+
+To build it, install `php-config` (`php-dev`) and libclang, then load the
+result the same way:
 
 ```sh
 cargo build --release --manifest-path bindings/php/native/Cargo.toml

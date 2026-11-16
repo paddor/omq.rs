@@ -1,0 +1,20 @@
+{
+    "name": "paddor/omq-php",
+    "description": "OMQ.php: the zmq PHP extension, with the ext-zmq API, on the OMQ engine",
+    "type": "php-ext",
+    "license": "ISC",
+    "keywords": ["zmq", "zeromq", "omq", "messaging"],
+    "homepage": "https://github.com/paddor/omq.rs/tree/main/bindings/php",
+    "support": {
+        "issues": "https://github.com/paddor/omq.rs/issues",
+        "source": "https://github.com/paddor/omq.rs/tree/main/bindings/php/native"
+    },
+    "require": {
+        "php": ">=8.2 <8.6"
+    },
+    "php-ext": {
+        "extension-name": "zmq",
+        "download-url-method": ["pre-packaged-binary"],
+        "os-families": ["linux", "darwin"]
+    }
+}

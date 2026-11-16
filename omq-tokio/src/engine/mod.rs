@@ -46,6 +46,6 @@ pub(crate) use send_pipe::{
     SendPipeConsumer, SendPipeError, SendPipeHome, SendPipeLease, SendPipeMode, SendPipeProducer,
     inproc_send_pipe, peer_send_pipe, send_pipe, send_pipe_with_mode,
 };
-pub use signal::StateSignal;
+pub use signal::{StateSignal, block_on};
 
 pub(crate) mod peer_send;

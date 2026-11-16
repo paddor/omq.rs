@@ -28,7 +28,11 @@ thread_local! {
 }
 
 /// Poll `future` on the calling thread and park it between wakeups.
-pub(crate) fn block_on<F: Future>(future: F) -> F::Output {
+///
+/// Unlike a wait on a std channel, the thread may park again in a child
+/// forked after it parked here. omq-libzmq waits through it.
+#[doc(hidden)]
+pub fn block_on<F: Future>(future: F) -> F::Output {
     let unpark = BLOCKING_UNPARK
         .try_with(Arc::clone)
         // A later TLS destructor may still need to perform a blocking call.

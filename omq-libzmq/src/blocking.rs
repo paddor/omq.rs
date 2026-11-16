@@ -35,15 +35,16 @@ pub(crate) fn run<T: Send + 'static>(
     }
 
     let handle = ctx.handle().ok_or(ETERM)?;
-    let (tx, rx) = flume::bounded(1);
+    let (tx, rx) = tokio::sync::oneshot::channel();
     let ctx = ctx.clone();
 
     handle.spawn(async move {
         let _ = tx.send(race_shutdown(&ctx, future).await);
     });
 
-    // A runtime torn down under the task drops the sender.
-    rx.recv().unwrap_or(Err(ETERM))
+    // A runtime torn down under the task drops the sender. Not a std or
+    // flume channel: their parking does not survive a fork on macOS.
+    omq_tokio::engine::block_on(rx).unwrap_or(Err(ETERM))
 }
 
 async fn race_shutdown<T>(ctx: &OmqContext, future: impl Future<Output = T>) -> Result<T, c_int> {

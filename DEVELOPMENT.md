@@ -31,6 +31,7 @@ cargo test -p omq-tokio --all-features --test omq_network_rate_limit
 cargo test -p omq-tokio --test omq_stress_connect_before_bind -- --test-threads=1
 ./scripts/test-cppzmq.sh
 ./scripts/test-php.sh
+ruby scripts/test-php-matrix.rb   # OMQ.php in official PHP images; --all for every version
 ```
 
 Loom and Miri:

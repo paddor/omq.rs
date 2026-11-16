@@ -99,6 +99,7 @@ jobs:
               - 'omq-proto/**'
               - 'omq-tokio/**'
               - 'scripts/test-php.sh'
+              - 'scripts/test-php-matrix.rb'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.cargo/**'
@@ -421,12 +422,68 @@ jobs:
         run: cargo fmt --manifest-path bindings/php/native/Cargo.toml --check
       - name: cargo clippy
         run: cargo clippy --manifest-path bindings/php/native/Cargo.toml --all-targets -- -D warnings
+      - name: shell syntax
+        run: for f in bindings/php/scripts/*.sh; do sh -n "$f"; done
       # Release builds ship; optimizations expose bugs debug builds hide.
       - name: drop-in and native tests
         env:
           OMQ_PHP_REQUIRE: dropin,native,fpm
           OMQ_PROFILE: release
         run: ./scripts/test-php.sh
+
+  # OMQ.php ships for PHP 8.2 to 8.5, NTS and ZTS, glibc and musl. Each
+  # official image builds the extension and runs the full suite; together
+  # the images cover every version, thread-safety mode, and libc.
+  php-images:
+    name: php ${{ matrix.image }}
+    needs: [changes, linux-gate]
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.run_php == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - 8.2-fpm
+          - 8.2-zts-alpine
+          - 8.3-zts
+          - 8.3-fpm-alpine
+          - 8.4-fpm
+          - 8.4-zts-alpine
+          - 8.5-zts
+          - 8.5-fpm-alpine
+    steps:
+      - uses: actions/checkout@v7
+      - name: build and test in php:${{ matrix.image }}
+        run: ruby scripts/test-php-matrix.rb --engine docker --image ${{ matrix.image }}
+
+  # The macOS archives link PHP symbols at load time; build and test them.
+  php-macos:
+    name: php ${{ matrix.php }} macOS
+    needs: [changes, linux-gate]
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.run_php == 'true'
+    runs-on: macos-15
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.2', '8.5']
+    steps:
+      - uses: actions/checkout@v7
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: pcntl
+          coverage: none
+          tools: none
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bindings/php/native
+      - name: build
+        run: cargo build --release --manifest-path bindings/php/native/Cargo.toml
+      - name: test
+        run: bindings/php/scripts/test-extension.sh bindings/php/native/target/release/libomq_php.dylib
 
   zig-test:
     name: zig test
@@ -450,17 +507,22 @@ jobs:
         run: zig build test --summary all
 
   dart-binding:
-    name: Dart binding (${{ matrix.sdk }})
+    name: Dart binding (${{ matrix.sdk }}, ${{ matrix.os }})
     needs: [changes, linux-gate]
     if: needs.changes.outputs.code == 'true' && needs.changes.outputs.run_dart_binding == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        sdk: ['3.10.0', stable]
+        include:
+          - { os: ubuntu-latest, sdk: '3.10.0' }
+          - { os: ubuntu-latest, sdk: stable, lint: true }
+          - { os: macos-15, sdk: stable }
+          - { os: windows-latest, sdk: stable }
     defaults:
       run:
+        shell: bash
         working-directory: bindings/dart
     steps:
       - uses: actions/checkout@v7
@@ -472,16 +534,50 @@ jobs:
       - name: build native library
         working-directory: .
         run: cargo build --release -p omq-libzmq
+      # The package's tests load libomq_zmq through the system loader.
+      - name: library search path
+        run: |
+          lib="$GITHUB_WORKSPACE/target/release"
+          case "$RUNNER_OS" in
+            Linux) echo "LD_LIBRARY_PATH=$lib" >> "$GITHUB_ENV" ;;
+            macOS) echo "DYLD_LIBRARY_PATH=$lib" >> "$GITHUB_ENV" ;;
+            Windows) cygpath -w "$lib" >> "$GITHUB_PATH" ;;
+          esac
       - run: dart pub get
       - name: dart format
-        if: matrix.sdk == 'stable'
+        if: matrix.lint
         run: dart format --output none --set-exit-if-changed .
       - name: dart analyze
         run: dart analyze --fatal-infos
       - name: dart test
-        env:
-          LD_LIBRARY_PATH: ${{ github.workspace }}/target/release
         run: dart test
+      - name: publish dry run
+        if: matrix.lint
+        run: dart pub publish --dry-run
+      - name: pinned prebuilt libraries
+        if: matrix.lint
+        run: ruby scripts/check_prebuilt.rb
+
+  # Apps get libomq_zmq from the build hook, which downloads the pinned
+  # release. Run the socket tests and an AOT build that way on each runner.
+  dart-prebuilt:
+    name: Dart prebuilt (${{ matrix.os }})
+    needs: [changes, linux-gate]
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.run_dart_binding == 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-15, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dart-lang/setup-dart@v1
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+      - name: test with the prebuilt library
+        run: ruby bindings/dart/scripts/test_prebuilt.rb
 
   beam:
     name: BEAM (Erlang, Elixir, Gleam)

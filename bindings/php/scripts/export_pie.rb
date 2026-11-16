@@ -17,8 +17,13 @@ require "uri"
 REPO = File.expand_path("../../..", __dir__)
 NATIVE = File.join(REPO, "bindings", "php", "native")
 README = File.join(REPO, "bindings", "php", "README.md")
-# The release workflow pins libclang with it.
-LIBCLANG_ENV = File.join(__dir__, "libclang-env.sh")
+# The release workflow pins libclang and tests each archive with these,
+# by path in omq.rs => path in the PIE repository.
+RELEASE_TOOLS = {
+  "bindings/php/scripts/libclang-env.sh" => "scripts/libclang-env.sh",
+  "bindings/php/scripts/test-extension.sh" => "scripts/test-extension.sh",
+  "bindings/php/tests" => "tests",
+}.freeze
 LIBZMQ_PATH_DEP = 'path = "../../../omq-libzmq"'
 SOURCE_URL = "https://github.com/paddor/omq.rs/blob/main/bindings/php/"
 
@@ -66,8 +71,15 @@ cargo = File.read(manifest)
 abort "Cargo.toml has no omq-libzmq path dependency" unless cargo.include?(LIBZMQ_PATH_DEP)
 File.write(manifest, cargo.sub(LIBZMQ_PATH_DEP, %(version = "=#{libzmq}")))
 FileUtils.cp(File.join(REPO, "LICENSE"), File.join(target, "LICENSE"))
-FileUtils.mkdir_p(File.join(target, "scripts"))
-FileUtils.cp(LIBCLANG_ENV, File.join(target, "scripts", "libclang-env.sh"), preserve: true)
+RELEASE_TOOLS.each do |source, destination|
+  git(REPO, "ls-files", "-z", "--", source).split("\0").each do |path|
+    # A file maps to destination itself; a directory's files keep their
+    # paths below it.
+    copy = File.join(target, destination, *path.delete_prefix(source).split("/").reject(&:empty?))
+    FileUtils.mkdir_p(File.dirname(copy))
+    FileUtils.cp(File.join(REPO, path), copy, preserve: true)
+  end
+end
 File.write(File.join(target, "README.md"), export_readme)
 system("cargo", "generate-lockfile", chdir: target, exception: true)
 

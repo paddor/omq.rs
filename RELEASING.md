@@ -292,11 +292,12 @@ pub.dev automates publishing only for packages that exist, so publish the
 first version by hand from `bindings/dart` with `dart pub publish`. Then, on
 the package's Admin page, enable publishing from GitHub Actions for
 `paddor/omq.rs` with the tag pattern `omq-dart-v{{version}}`. After the PR is
-merged, push a tag:
+merged, push a tag. Once pub.dev lists the version, check it from there:
 
 ```sh
 git tag -a omq-dart-v0.1.0 -m "OMQ.dart 0.1.0"
 git -c push.followTags=false push origin omq-dart-v0.1.0
+ruby bindings/dart/scripts/test_prebuilt.rb --hosted 0.1.0
 ```
 
 `OMQ.php` installs with PIE from the separate repository
@@ -307,8 +308,9 @@ and tags. That repository's release workflow builds `zmq.so` for each PHP
 version, thread-safety mode, and platform and attaches the PIE archives to
 the GitHub release, so release omq-libzmq first. Prepare a release by bumping
 `bindings/php/native/Cargo.toml` on a PR. After the PR is merged, export and
-push from the merged `main` commit. A manual run of the workflow builds and
-checks every archive without publishing; the tag publishes:
+push from the merged `main` commit. A manual run of the workflow builds
+every archive and runs the OMQ.php tests on it without publishing; the tag
+publishes. Once Packagist lists the version, check it in every image:
 
 ```sh
 git clone git@github.com:paddor/omq-binding.php.git /tmp/omq-binding.php
@@ -316,6 +318,7 @@ ruby bindings/php/scripts/export_pie.rb 0.1.1 /tmp/omq-binding.php
 git -C /tmp/omq-binding.php -c push.followTags=false push origin HEAD
 gh workflow run release.yml --repo paddor/omq-binding.php --ref main
 git -C /tmp/omq-binding.php push origin 0.1.1
+GITHUB_TOKEN=$(gh auth token) ruby scripts/test-php-matrix.rb --all --rmi --pie 0.1.1
 ```
 
 Packagist picks up the tag through its GitHub hook. One-time setup: create

@@ -1,0 +1,19 @@
+name: Release OMQ.dart
+
+# Publishes bindings/dart to pub.dev through pub.dev automated publishing
+# (GitHub OIDC). On pub.dev, the omq package's Admin page must allow
+# paddor/omq.rs with the tag pattern omq-dart-v{{version}}.
+
+on:
+  push:
+    tags:
+      - 'omq-dart-v[0-9]+.[0-9]+.[0-9]+*'
+
+jobs:
+  publish:
+    permissions:
+      id-token: write
+    uses: dart-lang/setup-dart/.github/workflows/publish.yml@v1
+    with:
+      working-directory: bindings/dart
+      use-flutter: false

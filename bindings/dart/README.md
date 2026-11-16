@@ -15,35 +15,25 @@ commands.
 
 ## Install
 
-Depend on the package from Git:
-
-```yaml
-dependencies:
-  omq:
-    git:
-      url: https://github.com/paddor/omq.rs
-      path: bindings/dart
-```
-
-Build the native library:
-
 ```sh
-cargo build --release -p omq-libzmq
+dart pub add omq
 ```
 
-The build hook loads `libomq_zmq` through the system loader
-(`LD_LIBRARY_PATH`, rpath, or system paths). To bundle a prebuilt file
-instead, set the `library` user-define in the app's `pubspec.yaml`:
+The build hook downloads the prebuilt `libomq_zmq` for the target from the
+omq-libzmq release this version pins, and checks its SHA-256. Prebuilt
+libraries cover x86_64 and arm64 Linux (glibc 2.28 or later), x86_64 and
+arm64 macOS, and x86_64 Windows. `dart build cli` copies the library into
+the bundle. Requires Dart 3.10 or later.
+
+To use another build, set a user-define in the app's `pubspec.yaml`:
 
 ```yaml
 hooks:
   user_defines:
     omq:
-      library: /path/to/libomq_zmq.so
+      library: /path/to/libomq_zmq.so # bundle this file
+      # system: true                  # or load it via the system loader
 ```
-
-`dart run` loads that file, and `dart build cli` copies it into the bundle.
-Requires Dart 3.10 or later.
 
 ## API
 

@@ -15,10 +15,22 @@ dart analyze --fatal-infos
 LD_LIBRARY_PATH="$PWD/../../target/release" dart test
 ```
 
-The tests cover the socket patterns over TCP and inproc, async wakes and
-timeouts, HWM backpressure, multipart edge cases, the `messages` stream,
-isolate lifetime, PLAIN, CURVE, and monitors. CI runs them on Linux with
-Dart 3.10.0 and stable.
+The package's own `pubspec.yaml` sets the `system: true` user-define, so its
+tests load the local build through `LD_LIBRARY_PATH` instead of downloading
+a release. They cover the socket patterns over TCP and inproc, async wakes
+and timeouts, HWM backpressure, multipart edge cases, the `messages` stream,
+isolate lifetime, PLAIN, CURVE, monitors, and the build hook. CI runs them
+on Linux with Dart 3.10.0 and stable.
+
+## Prebuilt library pin
+
+`hook/libomq_zmq.dart` names the omq-libzmq release whose prebuilt
+libraries the hook downloads, with their SHA-256 sums. Regenerate it from a
+release's `SHA256SUMS`:
+
+```sh
+ruby bindings/dart/scripts/pin_libomq_zmq.rb 0.11.1
+```
 
 ## Benchmarks
 

@@ -4,15 +4,35 @@ description: >-
   omq-libzmq C ABI.
 version: 0.1.0-dev.1
 repository: https://github.com/paddor/omq.rs/tree/main/bindings/dart
+issue_tracker: https://github.com/paddor/omq.rs/issues
+topics:
+  - zeromq
+  - messaging
+  - networking
+  - ffi
 
 environment:
   sdk: ^3.10.0
 
+# The build hook ships prebuilt libomq_zmq for these platforms.
+platforms:
+  linux:
+  macos:
+  windows:
+
 dependencies:
   code_assets: ^2.2.0
+  crypto: ^3.0.0
   ffi: ^2.2.0
   hooks: ^2.2.0
 
 dev_dependencies:
   lints: ^6.0.0
   test: ^1.26.0
+
+# Development of this package loads the local libomq_zmq build through the
+# system loader (LD_LIBRARY_PATH). Apps that depend on omq ignore this.
+hooks:
+  user_defines:
+    omq:
+      system: true

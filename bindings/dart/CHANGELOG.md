@@ -10,3 +10,6 @@
 - `try*`, `*Sync`, and `Future` forms of send and receive, plus a
   `messages` stream. Async waits use `omq_socket_set_ready_callback`;
   receives use `omq_recv_into`.
+- The build hook downloads the prebuilt `libomq_zmq` of a pinned
+  omq-libzmq release and checks its SHA-256. The `library` and `system`
+  user-defines bundle another build or use the system loader.

@@ -276,6 +276,29 @@ and `omq-tokio` dependency, and `bindings/beam/CHANGELOG.md`. Publish `omq`
 first, then the Elixir and Gleam wrappers, following
 `bindings/beam/DEVELOPMENT.md`.
 
+`OMQ.dart` publishes the `omq` package to pub.dev from
+`.github/workflows/release-dart.yml`. Its build hook downloads the prebuilt
+`libomq_zmq` of the omq-libzmq release pinned in
+`bindings/dart/hook/libomq_zmq.dart`, so release omq-libzmq and its binaries
+first. Prepare a release by pinning that version, bumping
+`bindings/dart/pubspec.yaml`, and adding a `bindings/dart/CHANGELOG.md`
+entry:
+
+```sh
+ruby bindings/dart/scripts/pin_libomq_zmq.rb 0.11.1
+```
+
+pub.dev automates publishing only for packages that exist, so publish the
+first version by hand from `bindings/dart` with `dart pub publish`. Then, on
+the package's Admin page, enable publishing from GitHub Actions for
+`paddor/omq.rs` with the tag pattern `omq-dart-v{{version}}`. After the PR is
+merged, push a tag:
+
+```sh
+git tag -a omq-dart-v0.1.0 -m "OMQ.dart 0.1.0"
+git -c push.followTags=false push origin omq-dart-v0.1.0
+```
+
 `OMQ.zig` is released from the repository tag. Prepare a release by updating
 `bindings/zig/build.zig.zon` and `bindings/zig/CHANGELOG.md`. After the PR is
 merged, push a tag:

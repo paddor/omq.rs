@@ -28,6 +28,7 @@ fn pair_ctx(
         completion,
         peer_id: 7,
         cancel,
+        settle: crate::transport::inproc::InprocSettle::pair().0,
         max_message_size: None,
         receive: ReceiveRoutes {
             inbound: None,

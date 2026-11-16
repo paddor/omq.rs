@@ -148,7 +148,8 @@ impl Sender {
         }
 
         let old = match command {
-            PeerDriverCommand::SendCommand(_) => {
+            // Settle marks keep their place behind the commands they follow.
+            PeerDriverCommand::SendCommand(_) | PeerDriverCommand::Settle(_) => {
                 // Serialize with lifecycle admission; one native producer.
                 // The ring only takes commands while no older one overflowed.
                 if pending.overflow.is_empty() {

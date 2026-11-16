@@ -179,6 +179,7 @@ impl SocketDriver {
 
         self.replay_state_to_peer(&ready.handle, ready.subs_replay)
             .await;
+        self.settle_replay(peer_id).await;
     }
 
     /// Why a handshaked peer cannot become ready, if it cannot.

@@ -96,8 +96,14 @@ fn register_inproc_peer(
     handle.routes.send_pipe = send_pipe;
     handle.routes.inproc.clone_from(&outbound);
     // Inproc's synthetic handshake never holds a pending-handshake slot.
+    // A `connect` waits for this side's first commands, sent once the
+    // peer is ready.
+    if let Some(waiter) = conn.connect_waiter.take() {
+        conn.settle.outgoing.register(waiter);
+    }
     let entry = PeerEntry {
         inproc_inbound,
+        inproc_settle: Some(conn.settle.clone()),
         subscriptions: socket.subscription_ledger(),
         ..PeerEntry::new(peer.into_origin(io_assignment.index()), handle)
     };
@@ -143,6 +149,7 @@ fn spawn_inproc_driver(
         completion,
         peer_id,
         cancel: ends.cancel,
+        settle: conn.settle,
         max_message_size: socket.options.max_message_size,
         receive: ReceiveRoutes {
             inbound: conn.inbound,

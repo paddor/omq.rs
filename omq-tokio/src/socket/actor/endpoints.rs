@@ -75,9 +75,65 @@ impl SocketDriver {
         } else if self.should_ignore_duplicate_connect(&endpoint) {
             let _ = ack.send(Ok(()));
         } else {
-            self.start_dial(endpoint, options);
-            let _ = ack.send(Ok(()));
+            self.start_connect(endpoint, options, ack);
         }
+    }
+
+    /// Dial `endpoint` and acknowledge the caller. On inproc, the caller
+    /// waits until the peer applied this connection's first subscriptions,
+    /// as libzmq's inproc connect does.
+    fn start_connect(
+        &mut self,
+        endpoint: Endpoint,
+        options: Arc<Options>,
+        ack: super::oneshot::Sender<Result<()>>,
+    ) {
+        let (settle, settled) = self.inproc_connect_settle(&endpoint);
+        let first = FirstAttempt {
+            settle,
+            ..FirstAttempt::default()
+        };
+        self.start_dial_task(endpoint, options, first.into());
+
+        match settled {
+            Some(settled) => drop(tokio::spawn(async move {
+                let _ = settled.await;
+                let _ = ack.send(Ok(()));
+            })),
+            None => {
+                let _ = ack.send(Ok(()));
+            }
+        }
+    }
+
+    /// The side of an inproc publisher-subscriber pair that sends commands
+    /// settles the connect. Other connections do not wait.
+    fn inproc_connect_settle(
+        &self,
+        endpoint: &Endpoint,
+    ) -> (
+        crate::transport::inproc::ConnectSettle,
+        Option<tokio::sync::oneshot::Receiver<()>>,
+    ) {
+        use crate::transport::inproc::{ConnectSettle, SettleWaiter};
+
+        if !matches!(endpoint, Endpoint::Inproc { .. }) {
+            return (ConnectSettle::None, None);
+        }
+
+        let (waiter, settled) = SettleWaiter::new();
+        let settle = if super::sends_subscriptions(self.socket_type) {
+            ConnectSettle::Connector(waiter)
+        } else if matches!(
+            self.socket_type,
+            SocketType::Pub | SocketType::XPub | SocketType::Radio
+        ) {
+            ConnectSettle::Listener(waiter)
+        } else {
+            return (ConnectSettle::None, None);
+        };
+
+        (settle, Some(settled))
     }
 
     /// Settings that only a dial uses and that no dial can succeed without.
@@ -358,10 +414,6 @@ impl SocketDriver {
         });
 
         resolved
-    }
-
-    pub(super) fn start_dial(&mut self, endpoint: Endpoint, options: Arc<Options>) {
-        self.start_dial_task(endpoint, options, DialStart::default());
     }
 
     /// Dial a lost route again under a new route ID, with its queue if kept.

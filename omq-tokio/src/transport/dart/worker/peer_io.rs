@@ -64,7 +64,7 @@ impl PeerIo {
                     self.register_space(signal);
                     self.active = true;
                 }
-                PeerDriverCommand::SendCommand(_) => {}
+                PeerDriverCommand::SendCommand(_) | PeerDriverCommand::Settle(_) => {}
             }
         }
 

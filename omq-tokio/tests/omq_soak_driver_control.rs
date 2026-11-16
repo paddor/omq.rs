@@ -270,7 +270,7 @@ async fn wait_for_handshake(events: &mut mpsc::Receiver<(u64, PeerEvent)>) {
         loop {
             match events.recv().await {
                 Some((_, PeerEvent::Event(Event::HandshakeSucceeded { .. }))) => return,
-                Some((_, PeerEvent::Event(_))) => {}
+                Some((_, PeerEvent::Event(_) | PeerEvent::Settled(_))) => {}
                 Some((_, PeerEvent::Closed { error })) => {
                     panic!("driver closed before handshake: {error:?}")
                 }

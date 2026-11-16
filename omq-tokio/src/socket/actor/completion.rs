@@ -23,6 +23,7 @@ impl SocketDriver {
         loop {
             let bytes = match &output {
                 PeerEvent::Event(event) => crate::engine::peer_events::event_work_bytes(event),
+                PeerEvent::Settled(_) => size_of::<PeerEvent>(),
                 PeerEvent::Closed { error } => {
                     size_of::<PeerEvent>() + error.as_ref().map_or(0, String::len)
                 }
@@ -42,7 +43,7 @@ impl SocketDriver {
     }
 
     pub(super) async fn handle_peer_control(&mut self, peer_id: u64, output: PeerEvent) {
-        if matches!(output, PeerEvent::Event(_))
+        if !matches!(output, PeerEvent::Closed { .. })
             && let Some(peer) = self.peers.get_mut(&peer_id)
         {
             peer.progress.handled_control = peer.progress.handled_control.wrapping_add(1);
@@ -200,6 +201,15 @@ impl SocketDriver {
                 }
 
                 InternalEvent::PeerEvent { peer_id, event }
+            }
+            PeerEvent::Settled(mark) => {
+                if let Some(peer) = self.peers.get_mut(&peer_id) {
+                    peer.progress.handled_events = peer.progress.handled_events.wrapping_add(1);
+                }
+
+                self.handle_peer_settled(peer_id, mark);
+                self.retire_completed_peer(peer_id).await;
+                return;
             }
             PeerEvent::Closed { error } => InternalEvent::PeerClosed {
                 peer_id,

@@ -20,6 +20,8 @@ use crate::transport::setup::{DialSetup, PendingHandshake};
 pub(super) struct FirstAttempt {
     pub(super) deadline: Option<std::time::Instant>,
     pub(super) admission: Option<PendingHandshake>,
+    /// The caller's `connect`, waiting for an inproc peer to settle.
+    pub(super) settle: crate::transport::inproc::ConnectSettle,
 }
 
 pub(super) struct DialTask {
@@ -89,6 +91,7 @@ impl DialTask {
                 connect_any(
                     &self.endpoint,
                     &self.inproc,
+                    first.settle,
                     #[cfg(any(feature = "ws", feature = "quic"))]
                     crate::socket::dispatch::CarrierConnect {
                         options: &self.options,

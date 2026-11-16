@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Inproc `zmq_connect` to a bound endpoint and `ZMQ_SUBSCRIBE`,
+  `ZMQ_UNSUBSCRIBE`, `zmq_join` and `zmq_leave` take effect before the
+  publisher's next send, as in libzmq. Before, that send could miss them.
+
 ## [0.11.2] - 2026-11-16
 
 ### Fixed

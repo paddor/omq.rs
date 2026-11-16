@@ -304,6 +304,7 @@ async fn preflight_connect_host(host: &Host, port: u16) -> Result<()> {
 pub(super) async fn connect_any(
     endpoint: &Endpoint,
     inproc: &InprocSetup,
+    settle: inproc_transport::ConnectSettle,
     #[cfg(any(feature = "ws", feature = "quic"))] carrier: CarrierConnect<'_>,
 ) -> Result<AnyConn> {
     if endpoint.is_tcp_family() {
@@ -350,6 +351,7 @@ pub(super) async fn connect_any(
                 name,
                 inproc.snapshot.clone(),
                 inproc.recv,
+                settle,
             )
             .await?;
 

@@ -312,10 +312,10 @@ checks every archive without publishing; the tag publishes:
 
 ```sh
 git clone git@github.com:paddor/omq-binding.php.git /tmp/omq-binding.php
-ruby bindings/php/scripts/export_pie.rb 0.1.0 /tmp/omq-binding.php
-git -C /tmp/omq-binding.php push origin HEAD
+ruby bindings/php/scripts/export_pie.rb 0.1.1 /tmp/omq-binding.php
+git -C /tmp/omq-binding.php -c push.followTags=false push origin HEAD
 gh workflow run release.yml --repo paddor/omq-binding.php --ref main
-git -C /tmp/omq-binding.php push origin 0.1.0
+git -C /tmp/omq-binding.php push origin 0.1.1
 ```
 
 Packagist picks up the tag through its GitHub hook. One-time setup: create

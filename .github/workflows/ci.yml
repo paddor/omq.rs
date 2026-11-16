@@ -421,9 +421,11 @@ jobs:
         run: cargo fmt --manifest-path bindings/php/native/Cargo.toml --check
       - name: cargo clippy
         run: cargo clippy --manifest-path bindings/php/native/Cargo.toml --all-targets -- -D warnings
+      # Release builds ship; optimizations expose bugs debug builds hide.
       - name: drop-in and native tests
         env:
           OMQ_PHP_REQUIRE: dropin,native,fpm
+          OMQ_PROFILE: release
         run: ./scripts/test-php.sh
 
   zig-test:

@@ -29,7 +29,7 @@ libraries the hook downloads, with their SHA-256 sums. Regenerate it from a
 release's `SHA256SUMS`:
 
 ```sh
-ruby bindings/dart/scripts/pin_libomq_zmq.rb 0.11.1
+ruby bindings/dart/scripts/pin_libomq_zmq.rb 0.11.2
 ```
 
 ## Benchmarks

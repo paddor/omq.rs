@@ -32,17 +32,34 @@ $parent = new ZMQContext();
 $push->send('before fork');
 check($pull->recv() === 'before fork', 'parent context works before fork');
 
+// The child records its last step, so a failure says where it stopped.
+$progress = tempnam(sys_get_temp_dir(), 'omq-fork-');
 $pid = pcntl_fork();
 if ($pid === 0) {
+    $step = static fn (string $what) => file_put_contents($progress, $what);
     // The child's persistent context must be a fresh one with live IO threads.
+    $step('creating a context');
     $child = new ZMQContext();
+    $step('creating sockets');
     [$childPull, $childPush] = pair($child, 'tcp://127.0.0.1:*');
+    $step('sending');
     $childPush->send('in child');
-    exit($childPull->recv() === 'in child' ? 0 : 3);
+    $step('receiving');
+    $received = $childPull->recv() === 'in child';
+    $step('shutting down');
+    exit($received ? 0 : 3);
 }
 
 pcntl_waitpid($pid, $status);
-check(pcntl_wifexited($status) && pcntl_wexitstatus($status) === 0, 'forked child gets a working context');
+$childOk = pcntl_wifexited($status) && pcntl_wexitstatus($status) === 0;
+$how = match (true) {
+    pcntl_wifexited($status) => 'exit ' . pcntl_wexitstatus($status),
+    pcntl_wifsignaled($status) => 'signal ' . pcntl_wtermsig($status),
+    default => "status $status",
+};
+$stopped = file_get_contents($progress);
+unlink($progress);
+check($childOk, 'forked child gets a working context' . ($childOk ? '' : " ($how while $stopped)"));
 
 $push->send('after fork');
 check($pull->recv() === 'after fork', 'parent context works after the child exits');

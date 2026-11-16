@@ -423,7 +423,14 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --manifest-path bindings/php/native/Cargo.toml --all-targets -- -D warnings
       - name: shell syntax
-        run: for f in bindings/php/scripts/*.sh; do sh -n "$f"; done
+        # POSIX scripts must also parse in dash and BusyBox sh.
+        run: |
+          for f in bindings/php/scripts/*.sh scripts/test-php.sh; do
+            case "$(head -n 1 "$f")" in
+            *bash*) bash -n "$f" ;;
+            *) sh -n "$f" ;;
+            esac
+          done
       # Release builds ship; optimizations expose bugs debug builds hide.
       - name: drop-in and native tests
         env:

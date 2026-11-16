@@ -491,6 +491,17 @@ jobs:
         run: cargo build --release --manifest-path bindings/php/native/Cargo.toml
       - name: test
         run: bindings/php/scripts/test-extension.sh bindings/php/native/target/release/libomq_php.dylib
+      # A crashed process, a forked test child too, leaves a backtrace here.
+      - name: crash reports
+        if: failure()
+        run: |
+          sleep 15
+          for report in ~/Library/Logs/DiagnosticReports/*.ips; do
+            [ -f "$report" ] || continue
+            echo "::group::$report"
+            cat "$report"
+            echo "::endgroup::"
+          done
 
   zig-test:
     name: zig test

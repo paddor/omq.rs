@@ -40,8 +40,14 @@ if ($pid === 0) {
     // The child's persistent context must be a fresh one with live IO threads.
     $step('creating a context');
     $child = new ZMQContext();
-    $step('creating sockets');
-    [$childPull, $childPush] = pair($child, 'tcp://127.0.0.1:*');
+    $step('creating a socket');
+    $childPull = $child->getSocket(ZMQ::SOCKET_PULL);
+    $step('binding');
+    $childPull->setSockOpt(ZMQ::SOCKOPT_RCVTIMEO, 2000);
+    $childPull->bind('tcp://127.0.0.1:*');
+    $step('connecting');
+    $childPush = $child->getSocket(ZMQ::SOCKET_PUSH);
+    $childPush->connect($childPull->getSockOpt(ZMQ::SOCKOPT_LAST_ENDPOINT));
     $step('sending');
     $childPush->send('in child');
     $step('receiving');

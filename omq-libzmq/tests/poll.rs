@@ -22,12 +22,10 @@ const ZMQ_PAIR: i32 = 0;
 const ZMQ_POLLIN: i16 = 1;
 const ZMQ_POLLOUT: i16 = 2;
 
-#[cfg(unix)]
-// POSIX defines this code, so `zmq.h` keeps the system value there.
+// POSIX defines this code, so `zmq.h` keeps the system value there. Only
+// a Unix test checks it.
 #[cfg(unix)]
 const ZMQ_ENOTSUP: i32 = libc::ENOTSUP;
-#[cfg(not(unix))]
-const ZMQ_ENOTSUP: i32 = 156_384_713;
 
 const ZMQ_REQ: i32 = 3;
 const ZMQ_REP: i32 = 4;

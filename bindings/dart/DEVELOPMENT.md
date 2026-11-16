@@ -36,7 +36,8 @@ ruby bindings/dart/scripts/test_prebuilt.rb --hosted 0.1.0  # the same with a pu
 
 `test_prebuilt.rb` runs the socket tests in a scratch app without
 user-defines, then AOT-builds and runs a smoke program with `dart build cli`.
-CI runs it on Linux x86_64 and arm64, macOS arm64, and Windows x86_64.
+CI runs it on Linux x86_64; scheduled and manual runs add Linux arm64, macOS
+arm64, and Windows x86_64.
 `check_prebuilt.rb` needs `llvm-nm` and `llvm-readobj`.
 
 ## Prebuilt library pin

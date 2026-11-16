@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   return once the PUB, XPUB or RADIO peer applied them. Before, a send right
   after them could miss the new subscriber or topic. An XPUB whose
   application stopped reading its notifications does not hold them up.
+- A forked child can use OMQ on a fresh context. On macOS, a thread that
+  had blocked on a socket before the fork trapped (SIGTRAP) the next time
+  it blocked: std's thread parking does not survive a fork there, so
+  blocking calls park on their own condition variable. On every platform,
+  the child's first DNS lookup hung on the parent's vanished resolver
+  threads; a child now starts its own.
 
 ### Changed
 

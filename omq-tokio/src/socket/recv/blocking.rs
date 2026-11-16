@@ -45,8 +45,7 @@ impl SpscAwareRecv {
         &self,
         cancel: &BlockingRecvCancel,
     ) -> Result<Option<Message>> {
-        let thread = std::thread::current();
-        cancel.register(&thread);
+        cancel.register(&crate::engine::signal::Parker::current());
         let _guard = BlockingRecvCancelGuard { cancel };
 
         if cancel.is_canceled() {

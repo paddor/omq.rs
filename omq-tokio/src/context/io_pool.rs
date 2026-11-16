@@ -3,7 +3,7 @@
 
 use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use futures::StreamExt;
@@ -48,7 +48,7 @@ impl IoThreadPool {
         let mut primary_job_tx = None;
 
         for i in 0..runtime_count {
-            let (handle_tx, handle_rx) = mpsc::channel::<Handle>();
+            let (handle_tx, handle_rx) = tokio::sync::oneshot::channel::<Handle>();
             let thread_name = background_thread_name(context_name, runtime_count, i);
 
             let join = if i == 0 {
@@ -60,7 +60,8 @@ impl IoThreadPool {
             };
 
             // Each thread reports its runtime handle once the runtime is up.
-            let handle = handle_rx.recv().expect("omq: runtime handle");
+            // Not std's channel: its parking does not survive a fork on macOS.
+            let handle = crate::engine::signal::block_on(handle_rx).expect("omq: runtime handle");
             threads.push(IoThread {
                 handle,
                 load: AtomicUsize::new(0),
@@ -143,7 +144,7 @@ impl IoThreadPool {
 fn spawn_primary_thread(
     name: String,
     cancel: CancellationToken,
-    handle_tx: mpsc::Sender<Handle>,
+    handle_tx: tokio::sync::oneshot::Sender<Handle>,
 ) -> (
     thread::JoinHandle<()>,
     tokio::sync::mpsc::UnboundedSender<BoxFuture>,
@@ -186,7 +187,7 @@ fn spawn_primary_thread(
 fn spawn_data_thread(
     name: String,
     cancel: CancellationToken,
-    handle_tx: mpsc::Sender<Handle>,
+    handle_tx: tokio::sync::oneshot::Sender<Handle>,
 ) -> thread::JoinHandle<()> {
     thread::Builder::new()
         .name(name)

@@ -29,6 +29,7 @@ use smallvec::SmallVec;
 use tokio::sync::Notify;
 
 mod blocking;
+mod park;
 mod woken;
 
 pub use blocking::BlockingRecvCancel;
@@ -36,6 +37,7 @@ pub(crate) use blocking::{
     BlockingRecvCancelGuard, BlockingSignal, WakerRegistration, block_on, enter_receive_guard,
     leave_receive_guard,
 };
+pub(crate) use park::Parker;
 pub(crate) use woken::{WakeGate, WokenGate};
 
 const IDLE: u8 = 0;

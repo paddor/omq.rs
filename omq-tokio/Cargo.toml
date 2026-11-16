@@ -299,6 +299,10 @@ name = "omq_inproc_settle"
 path = "tests/inproc_settle.rs"
 
 [[test]]
+name = "omq_fork"
+path = "tests/fork.rs"
+
+[[test]]
 name = "omq_loom_signal"
 path = "tests/loom_signal.rs"
 

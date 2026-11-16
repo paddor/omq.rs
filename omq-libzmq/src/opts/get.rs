@@ -11,7 +11,6 @@ use super::overlay;
 use super::quic;
 use super::raw::OptOut;
 use crate::error::c_try;
-#[cfg(unix)]
 use crate::notify::NotifyHandle;
 use crate::socket::{DEFAULT_HWM, OmqSocket};
 use omq_tokio::SocketType;

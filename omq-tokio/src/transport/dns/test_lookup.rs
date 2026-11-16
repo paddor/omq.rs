@@ -1,6 +1,7 @@
 use super::*;
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::sync::LazyLock;
 
 static ANSWERS: LazyLock<Mutex<HashMap<u16, Answer>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));

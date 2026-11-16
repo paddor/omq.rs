@@ -3,7 +3,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, OnceLock, Weak, mpsc};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use futures::FutureExt;
@@ -586,7 +586,7 @@ impl Context {
         let job_tx = guard
             .as_ref()
             .expect("Context::block_on() called on a terminated context");
-        let (result_tx, result_rx) = mpsc::channel();
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         let fut: BoxFuture = Box::pin(async move {
             // The primary IO thread polls this job inline and also runs
             // the context's sockets. A panic unwinds the caller instead.
@@ -596,8 +596,8 @@ impl Context {
         job_tx.send(fut).expect("omq: context runtime exited");
         drop(guard);
 
-        match result_rx
-            .recv()
+        // Not std's channel: its parking does not survive a fork on macOS.
+        match crate::engine::signal::block_on(result_rx)
             .expect("omq: context runtime exited unexpectedly")
         {
             Ok(output) => output,

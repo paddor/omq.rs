@@ -280,7 +280,7 @@ impl Socket {
             Err(TrySendError::Error(e)) => return Err(e),
         };
 
-        cancel.register(&std::thread::current());
+        cancel.register(&crate::engine::signal::Parker::current());
         let _guard = crate::engine::signal::BlockingRecvCancelGuard { cancel };
 
         if cancel.is_canceled() {
@@ -394,7 +394,7 @@ impl Socket {
         let deadline = time_limit.and_then(|time| Instant::now().checked_add(time));
         let cancel = cancel.as_deref();
         let _cancel_guard = cancel.map(|cancel| {
-            cancel.register(&std::thread::current());
+            cancel.register(&crate::engine::signal::Parker::current());
             crate::engine::signal::BlockingRecvCancelGuard { cancel }
         });
         let mut report = DispatchReport {

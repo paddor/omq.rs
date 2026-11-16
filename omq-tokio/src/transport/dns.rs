@@ -7,7 +7,7 @@
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, Mutex};
 
 use futures::channel::oneshot;
 
@@ -65,10 +65,48 @@ const QUEUED: usize = 8;
 const MAX_ADDRESSES: usize = 256;
 const MAX_HOST_BYTES: usize = 255;
 
-static GLOBAL: LazyLock<io::Result<Resolver>> = LazyLock::new(|| {
-    let lookup: Arc<Lookup> = Arc::new(system_lookup);
-    Resolver::new(WORKERS, QUEUED, &lookup)
-});
+/// This process's resolver. A forked child starts its own: the parent's
+/// workers did not survive the fork, and one may have held the queue.
+static GLOBAL: arc_swap::ArcSwapOption<ProcessResolver> = arc_swap::ArcSwapOption::const_empty();
+
+struct ProcessResolver {
+    pid: u32,
+    resolver: io::Result<Resolver>,
+}
+
+/// Lock-free, so a fork in the middle of it leaves nothing locked.
+fn process_resolver() -> Arc<ProcessResolver> {
+    let pid = std::process::id();
+    loop {
+        let current = GLOBAL.load_full();
+        if let Some(resolver) = &current
+            && resolver.pid == pid
+        {
+            return resolver.clone();
+        }
+
+        let lookup: Arc<Lookup> = Arc::new(system_lookup);
+        let fresh = Arc::new(ProcessResolver {
+            pid,
+            resolver: Resolver::new(WORKERS, QUEUED, &lookup),
+        });
+        let previous = GLOBAL.compare_and_swap(&current, Some(fresh.clone()));
+        let installed = match (&*previous, &current) {
+            (Some(previous), Some(current)) => Arc::ptr_eq(previous, current),
+            (None, None) => true,
+            _ => false,
+        };
+
+        // Otherwise another thread installed one first; dropping ours
+        // stops its workers.
+        if installed {
+            // Dropping the parent's would wake its vanished workers through
+            // std's parking, which traps after a fork on macOS.
+            std::mem::forget(current);
+            return fresh;
+        }
+    }
+}
 
 #[cfg(test)]
 static STALLED_TEST_LOOKUPS: std::sync::atomic::AtomicUsize =
@@ -201,7 +239,7 @@ pub(crate) async fn resolve(host: &str, port: u16) -> Result<Vec<SocketAddr>> {
         return test_lookup::resolve(port);
     }
 
-    match &*GLOBAL {
+    match &process_resolver().resolver {
         Ok(resolver) => resolver.resolve(host, port).await,
         Err(error) => Err(Error::Io(io::Error::other(error.to_string()))),
     }

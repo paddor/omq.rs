@@ -7,8 +7,10 @@ use std::sync::{Arc, Mutex, Weak};
 
 use smallvec::SmallVec;
 
+use super::park::Parker;
+
 #[derive(Debug)]
-struct Unpark(std::thread::Thread);
+struct Unpark(Parker);
 
 impl std::task::Wake for Unpark {
     fn wake(self: Arc<Self>) {
@@ -22,7 +24,7 @@ impl std::task::Wake for Unpark {
 
 thread_local! {
     // Every call wakes this same OS thread. Retain no future or socket state.
-    static BLOCKING_UNPARK: Arc<Unpark> = Arc::new(Unpark(std::thread::current()));
+    static BLOCKING_UNPARK: Arc<Unpark> = Arc::new(Unpark(Parker::current()));
 }
 
 /// Poll `future` on the calling thread and park it between wakeups.
@@ -30,7 +32,14 @@ pub(crate) fn block_on<F: Future>(future: F) -> F::Output {
     let unpark = BLOCKING_UNPARK
         .try_with(Arc::clone)
         // A later TLS destructor may still need to perform a blocking call.
-        .unwrap_or_else(|_| Arc::new(Unpark(std::thread::current())));
+        .unwrap_or_else(|_| Arc::new(Unpark(Parker::current())));
+    // After a fork the cached parker belongs to the parent.
+    let unpark = if unpark.0.is_current() {
+        unpark
+    } else {
+        Arc::new(Unpark(Parker::current()))
+    };
+    let parker = unpark.0.clone();
     let waker = std::task::Waker::from(unpark);
     let mut cx = std::task::Context::from_waker(&waker);
     let mut future = std::pin::pin!(future);
@@ -40,7 +49,7 @@ pub(crate) fn block_on<F: Future>(future: F) -> F::Output {
             return output;
         }
 
-        std::thread::park();
+        parker.park();
     }
 }
 
@@ -63,7 +72,7 @@ struct BlockingThread {
 #[derive(Debug)]
 enum WakeTarget {
     /// A parked receive. One wake per arm.
-    Thread(std::thread::Thread),
+    Thread(Parker),
     /// A foreign readiness waiter. Woken on every publication.
     Waker(std::task::Waker),
 }
@@ -82,7 +91,7 @@ thread_local! {
 fn blocking_thread(signal: &Arc<BlockingSignal>) -> Arc<BlockingThread> {
     let new = || {
         Arc::new(BlockingThread {
-            target: WakeTarget::Thread(std::thread::current()),
+            target: WakeTarget::Thread(Parker::current()),
             armed: AtomicBool::new(true),
         })
     };
@@ -95,6 +104,8 @@ fn blocking_thread(signal: &Arc<BlockingSignal>) -> Arc<BlockingThread> {
                 // Active guards and the signal's list own other references.
                 // A nested call must get a separate waiter.
                 && Arc::strong_count(&cached.state) == 1
+                // After a fork the cached parker belongs to the parent.
+                && matches!(&cached.state.target, WakeTarget::Thread(parker) if parker.is_current())
             }) {
                 return cached.state.clone();
             }
@@ -265,7 +276,7 @@ impl BlockingSignal {
     #[cfg(test)]
     pub(crate) fn has_waiter(&self, thread: std::thread::ThreadId) -> bool {
         self.waiters.lock().unwrap().iter().any(|waiter| {
-            matches!(&waiter.target, WakeTarget::Thread(t) if t.id() == thread)
+            matches!(&waiter.target, WakeTarget::Thread(t) if t.thread_id() == thread)
                 && waiter.armed.load(Ordering::Acquire)
         })
     }
@@ -273,14 +284,18 @@ impl BlockingSignal {
 
 impl BlockingWaiter<'_> {
     pub(crate) fn park(&self) {
-        if self.state.armed.load(Ordering::Acquire) {
-            std::thread::park();
+        if self.state.armed.load(Ordering::Acquire)
+            && let WakeTarget::Thread(parker) = &self.state.target
+        {
+            parker.park();
         }
     }
 
     pub(crate) fn park_timeout(&self, timeout: std::time::Duration) {
-        if self.state.armed.load(Ordering::Acquire) {
-            std::thread::park_timeout(timeout);
+        if self.state.armed.load(Ordering::Acquire)
+            && let WakeTarget::Thread(parker) = &self.state.target
+        {
+            parker.park_timeout(timeout);
         }
     }
 
@@ -317,7 +332,7 @@ impl Drop for WakerRegistration {
 pub struct BlockingRecvCancel {
     canceled: AtomicBool,
     registered: AtomicBool,
-    thread: Mutex<Option<std::thread::Thread>>,
+    thread: Mutex<Option<Parker>>,
 }
 
 impl BlockingRecvCancel {
@@ -349,7 +364,7 @@ impl BlockingRecvCancel {
     }
 
     #[inline]
-    pub(crate) fn register(&self, thread: &std::thread::Thread) {
+    pub(crate) fn register(&self, thread: &Parker) {
         *self.thread.lock().unwrap() = Some(thread.clone());
         self.registered.store(true, Ordering::Release);
 
@@ -371,7 +386,7 @@ impl BlockingRecvCancel {
             return;
         }
 
-        let thread = std::thread::current();
+        let thread = Parker::current();
         *self.thread.lock().unwrap() = Some(thread.clone());
 
         if self.is_canceled() {

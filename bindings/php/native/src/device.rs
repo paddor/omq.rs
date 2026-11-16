@@ -1,5 +1,6 @@
 //! `ZMQDevice`: a frontend/backend forwarder with idle and timer callbacks.
 
+use std::cell::RefCell;
 use std::ffi::{c_int, c_short, c_void};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -41,9 +42,11 @@ struct Callback {
 
 impl Callback {
     /// The callback set by `set*Callback(callback, timeout, user_data)`.
-    /// The deprecated `(callback, user_data)` form keeps the old timeout.
+    /// The deprecated `(callback, user_data)` form keeps `current_timeout`.
+    /// Takes no borrow of the device: the deprecation notice can run a
+    /// PHP error handler that calls back into it.
     fn replaced(
-        &self,
+        current_timeout: i64,
         display: &str,
         callback: &Zval,
         timeout: &Zval,
@@ -56,9 +59,9 @@ impl Callback {
                     &ErrorType::Deprecated,
                     &format!("The signature for {display} has changed, please update your code"),
                 );
-                (self.timeout_ms, Some(timeout))
+                (current_timeout, Some(timeout))
             }
-            (None, Some(user_data)) => (self.timeout_ms, Some(user_data)),
+            (None, Some(user_data)) => (current_timeout, Some(user_data)),
         };
 
         Self {
@@ -75,25 +78,39 @@ impl Callback {
             .map(|_| Duration::from_millis(millis))
     }
 
-    /// Call it; `Ok(false)` when it asks the device to stop.
-    fn invoke(&self) -> PhpResult<bool> {
-        let Some(function) = &self.function else {
-            return Ok(true);
+    /// Call the callback in `slot`; `Ok(false)` when it asks the device to
+    /// stop. The callback may change the device, even replace itself, so
+    /// it runs on refcounted copies taken out of `slot`, with no borrow held.
+    fn invoke(slot: &RefCell<Self>) -> PhpResult<bool> {
+        let (function, user_data) = {
+            let callback = slot.borrow();
+            let Some(function) = &callback.function else {
+                return Ok(true);
+            };
+            let user_data = callback.user_data.as_ref().map_or_else(
+                || {
+                    let mut null = Zval::new();
+                    null.set_null();
+                    null
+                },
+                Zval::shallow_clone,
+            );
+            (function.shallow_clone(), user_data)
         };
         let callable = function
             .callable()
             .ok_or_else(|| device_error("Device callback is not callable"))?;
-        let mut null = Zval::new();
-        null.set_null();
-        let user_data = self.user_data.as_ref().unwrap_or(&null);
         let result = callable
-            .try_call(vec![user_data])
+            .try_call(vec![&user_data])
             .map_err(|_| device_error("Failed to invoke device callback"))?;
         Ok(!result.is_false())
     }
 }
 
 /// Forwards whole messages between two sockets, optionally to a capture.
+///
+/// `run()` calls back into PHP, and callbacks may call the setters, so the
+/// callbacks sit in `RefCell`s behind `&self` methods, borrowed only briefly.
 #[php_class]
 #[php(name = "ZMQDevice")]
 #[derive(Debug)]
@@ -101,8 +118,8 @@ pub struct ZmqDevice {
     frontend: Arc<SocketShared>,
     backend: Arc<SocketShared>,
     capture: Option<Arc<SocketShared>>,
-    idle: Callback,
-    timer: Callback,
+    idle: RefCell<Callback>,
+    timer: RefCell<Callback>,
 }
 
 #[php_impl]
@@ -116,50 +133,45 @@ impl ZmqDevice {
             frontend: Arc::clone(&frontend.shared),
             backend: Arc::clone(&backend.shared),
             capture: capture.map(|socket| Arc::clone(&socket.shared)),
-            idle: Callback::default(),
-            timer: Callback::default(),
+            idle: RefCell::default(),
+            timer: RefCell::default(),
         }
     }
 
     #[php(optional = user_data)]
     #[php(name = "setidlecallback")]
-    pub fn set_idle_callback(&mut self, callback: &Zval, timeout: &Zval, user_data: Option<&Zval>) {
-        self.idle = self
-            .idle
-            .replaced("setIdleCallback", callback, timeout, user_data);
+    pub fn set_idle_callback(&self, callback: &Zval, timeout: &Zval, user_data: Option<&Zval>) {
+        let current = self.idle.borrow().timeout_ms;
+        let next = Callback::replaced(current, "setIdleCallback", callback, timeout, user_data);
+        *self.idle.borrow_mut() = next;
     }
 
     #[php(name = "setidletimeout")]
-    pub fn set_idle_timeout(&mut self, timeout: i64) {
-        self.idle.timeout_ms = timeout;
+    pub fn set_idle_timeout(&self, timeout: i64) {
+        self.idle.borrow_mut().timeout_ms = timeout;
     }
 
     #[php(name = "getidletimeout")]
     pub fn get_idle_timeout(&self) -> i64 {
-        self.idle.timeout_ms
+        self.idle.borrow().timeout_ms
     }
 
     #[php(optional = user_data)]
     #[php(name = "settimercallback")]
-    pub fn set_timer_callback(
-        &mut self,
-        callback: &Zval,
-        timeout: &Zval,
-        user_data: Option<&Zval>,
-    ) {
-        self.timer = self
-            .timer
-            .replaced("setTimerCallback", callback, timeout, user_data);
+    pub fn set_timer_callback(&self, callback: &Zval, timeout: &Zval, user_data: Option<&Zval>) {
+        let current = self.timer.borrow().timeout_ms;
+        let next = Callback::replaced(current, "setTimerCallback", callback, timeout, user_data);
+        *self.timer.borrow_mut() = next;
     }
 
     #[php(name = "settimertimeout")]
-    pub fn set_timer_timeout(&mut self, timeout: i64) {
-        self.timer.timeout_ms = timeout;
+    pub fn set_timer_timeout(&self, timeout: i64) {
+        self.timer.borrow_mut().timeout_ms = timeout;
     }
 
     #[php(name = "gettimertimeout")]
     pub fn get_timer_timeout(&self) -> i64 {
-        self.timer.timeout_ms
+        self.timer.borrow().timeout_ms
     }
 
     /// Forward until a callback returns `false`.
@@ -180,19 +192,21 @@ impl ZmqDevice {
             }
 
             let now = Instant::now();
-            if let Some(period) = self.idle.period()
+            let idle_period = self.idle.borrow().period();
+            if let Some(period) = idle_period
                 && now - last_message >= period
             {
                 last_message = now;
-                if !self.idle.invoke()? {
+                if !Callback::invoke(&self.idle)? {
                     return Ok(());
                 }
             }
-            if let Some(period) = self.timer.period()
+            let timer_period = self.timer.borrow().period();
+            if let Some(period) = timer_period
                 && now - last_timer >= period
             {
                 last_timer = now;
-                if !self.timer.invoke()? {
+                if !Callback::invoke(&self.timer)? {
                     return Ok(());
                 }
             }
@@ -204,8 +218,14 @@ impl ZmqDevice {
     /// Milliseconds until the next callback is due, or -1 without callbacks.
     fn poll_timeout(&self, last_message: Instant, last_timer: Instant) -> libc::c_long {
         let due = [
-            self.idle.period().map(|period| last_message + period),
-            self.timer.period().map(|period| last_timer + period),
+            self.idle
+                .borrow()
+                .period()
+                .map(|period| last_message + period),
+            self.timer
+                .borrow()
+                .period()
+                .map(|period| last_timer + period),
         ];
         let Some(next) = due.into_iter().flatten().min() else {
             return -1;

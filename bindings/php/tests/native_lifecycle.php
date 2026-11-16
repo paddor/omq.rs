@@ -1,6 +1,7 @@
 <?php
 // Lifecycle checks for the native extension: forked children get their own
-// context, and persistent sockets keep their native socket and endpoints.
+// context, persistent sockets keep their native socket and endpoints, and
+// device callbacks may change the device that runs them.
 
 declare(strict_types=1);
 
@@ -61,3 +62,31 @@ $sender->connect('inproc://lifecycle-persistent');
 $sender->send('persistent');
 $again->setSockOpt(ZMQ::SOCKOPT_RCVTIMEO, 2000);
 check($first->recv() === 'persistent', 'both handles share one native socket');
+
+// A device callback may replace itself; the replacement runs on its own
+// timeout.
+$device = new ZMQDevice($parent->getSocket(ZMQ::SOCKET_SUB), $parent->getSocket(ZMQ::SOCKET_PUB));
+$calls = 0;
+$replaced = 0.0;
+$elapsed = 0.0;
+$device->setTimerCallback(function () use ($device, &$calls, &$replaced, &$elapsed) {
+    $calls++;
+    $replaced = microtime(true);
+    $device->setTimerCallback(function () use ($replaced, &$elapsed) {
+        $elapsed = (microtime(true) - $replaced) * 1000;
+        return false;
+    }, 60, null);
+    return true;
+}, 10, null);
+$device->run();
+check($calls === 1 && $elapsed >= 55, 'a device callback can replace itself');
+
+// The deprecated two-argument form raises a notice; an error handler may use
+// the device meanwhile.
+set_error_handler(function () use ($device) {
+    $device->setTimerTimeout($device->getTimerTimeout() + 1);
+    return true;
+});
+$device->setTimerCallback(fn() => false, 'user data');
+restore_error_handler();
+check($device->getTimerTimeout() === 60, 'a notice handler may use the device');

@@ -158,8 +158,15 @@ void main() {
 
   test('an isolate with an idle socket exits when nothing waits', () async {
     // A registered callback must not keep the isolate alive by itself.
+    final result = ReceivePort();
     final exited = ReceivePort();
-    await Isolate.spawn(_idleIsolate, null, onExit: exited.sendPort);
+    await Isolate.spawn(
+      _idleIsolate,
+      result.sendPort,
+      onExit: exited.sendPort,
+      onError: result.sendPort,
+    );
+    expect(await result.first.timeout(wait), 'timed out');
     await exited.first.timeout(wait);
   });
 
@@ -186,14 +193,20 @@ void main() {
   });
 }
 
-Future<void> _idleIsolate(void _) async {
+// Test expectations do not work outside the test isolate, so this reports
+// the outcome to [result]. The isolate-wide ready listener outlives the
+// context, so the isolate exits only if the timed-out wait released it.
+Future<void> _idleIsolate(SendPort result) async {
   final context = Context();
   final socket = context.socket(SocketType.pull, quick)..bind('tcp://127.0.0.1:*');
-  await expectLater(
-    socket.receive(timeout: const Duration(milliseconds: 10)),
-    throwsA(isA<TimeoutException>()),
-  );
-  context.close();
+  try {
+    await socket.receive(timeout: const Duration(milliseconds: 10));
+    result.send('received');
+  } on TimeoutException {
+    result.send('timed out');
+  } finally {
+    context.close();
+  }
 }
 
 Future<void> _waitingIsolate((ShareKey, String, SendPort) args) async {

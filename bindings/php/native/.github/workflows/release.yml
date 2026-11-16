@@ -1,0 +1,172 @@
+name: Release
+
+# Builds zmq.so for each PHP version and thread-safety mode and attaches PIE
+# archives, php_zmq-<version>_php<x.y>-<arch>-<os>-<libc>-<ts>.zip, to the
+# GitHub release of the pushed tag. A manual run builds and checks them
+# without publishing. This repository is exported from bindings/php/native
+# in paddor/omq.rs.
+
+on:
+  push:
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    name: Check version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Tag matches Cargo.toml
+        id: version
+        env:
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: |
+          crate=$(awk -F'"' '/^version = / {print $2; exit}' Cargo.toml)
+          if [[ -n "$TAG" && "$crate" != "$TAG" ]]; then
+            echo "tag $TAG, Cargo.toml $crate" >&2
+            exit 1
+          fi
+          echo "version=$crate" >> "$GITHUB_OUTPUT"
+
+  glibc:
+    name: PHP ${{ matrix.php }} ${{ matrix.ts }} ${{ matrix.arch }} glibc
+    needs: version
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    # Ubuntu 22.04 keeps the glibc requirement at 2.35.
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-22.04-arm' || 'ubuntu-22.04' }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.2', '8.3', '8.4', '8.5']
+        ts: [nts, zts]
+        arch: [x86_64, arm64]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+          tools: none
+        env:
+          phpts: ${{ matrix.ts == 'zts' && 'ts' || 'nts' }}
+      - name: Install libclang
+        run: sudo apt-get install -y libclang-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --release
+      - name: Check and package
+        run: |
+          mkdir out
+          cp target/release/libomq_php.so out/zmq.so
+          php -n -d extension="$PWD/out/zmq.so" -r 'exit(class_exists("ZMQContext") ? 0 : 1);'
+          (cd out && zip -q "../php_zmq-${VERSION}_php${{ matrix.php }}-${{ matrix.arch }}-linux-glibc-${{ matrix.ts }}.zip" zmq.so)
+      - uses: actions/upload-artifact@v7
+        with:
+          name: php_zmq-${{ matrix.php }}-${{ matrix.arch }}-glibc-${{ matrix.ts }}
+          path: php_zmq-*.zip
+
+  musl:
+    name: PHP ${{ matrix.php }} ${{ matrix.ts }} ${{ matrix.arch }} musl
+    needs: version
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.2', '8.3', '8.4', '8.5']
+        ts: [nts, zts]
+        arch: [x86_64, arm64]
+    steps:
+      - uses: actions/checkout@v7
+      # The official Alpine images carry php-config and the headers of each
+      # PHP version and thread-safety mode.
+      - name: Build, check, and package in Alpine
+        env:
+          IMAGE: php:${{ matrix.php }}-${{ matrix.ts == 'zts' && 'zts' || 'cli' }}-alpine
+          ASSET: php_zmq-${{ needs.version.outputs.version }}_php${{ matrix.php }}-${{ matrix.arch }}-linux-musl-${{ matrix.ts }}.zip
+        run: |
+          docker run --rm -v "$PWD:/io" -w /io -e ASSET -e CARGO_TERM_COLOR "$IMAGE" sh -euc '
+            apk add --no-cache clang-dev curl gcc musl-dev zip
+            curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+            . "$HOME/.cargo/env"
+            # A cdylib needs the dynamic C runtime on musl.
+            RUSTFLAGS="-C target-feature=-crt-static" cargo build --release
+            mkdir out
+            cp target/release/libomq_php.so out/zmq.so
+            php -n -d extension=/io/out/zmq.so -r "exit(class_exists(\"ZMQContext\") ? 0 : 1);"
+            cd out && zip -q "../$ASSET" zmq.so
+          '
+      - uses: actions/upload-artifact@v7
+        with:
+          name: php_zmq-${{ matrix.php }}-${{ matrix.arch }}-musl-${{ matrix.ts }}
+          path: php_zmq-*.zip
+
+  macos:
+    name: PHP ${{ matrix.php }} nts arm64 macOS
+    needs: version
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    runs-on: macos-15
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.2', '8.3', '8.4', '8.5']
+    steps:
+      - uses: actions/checkout@v7
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+          tools: none
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --release
+      - name: Check and package
+        run: |
+          mkdir out
+          cp target/release/libomq_php.dylib out/zmq.so
+          php -n -d extension="$PWD/out/zmq.so" -r 'exit(class_exists("ZMQContext") ? 0 : 1);'
+          (cd out && zip -q "../php_zmq-${VERSION}_php${{ matrix.php }}-arm64-darwin-bsdlibc-nts.zip" zmq.so)
+      - uses: actions/upload-artifact@v7
+        with:
+          name: php_zmq-${{ matrix.php }}-arm64-darwin-nts
+          path: php_zmq-*.zip
+
+  release:
+    name: Publish GitHub release
+    needs: [version, glibc, musl, macos]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: php_zmq-*
+          merge-multiple: true
+          path: dist
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls dist
+          gh release create "$VERSION" dist/*.zip --repo "${{ github.repository }}" \
+            --title "OMQ.php $VERSION" --verify-tag \
+            --notes "Install with PIE: \`pie install paddor/omq-php\`. Built from paddor/omq.rs bindings/php/native."

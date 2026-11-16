@@ -299,6 +299,29 @@ git tag -a omq-dart-v0.1.0 -m "OMQ.dart 0.1.0"
 git -c push.followTags=false push origin omq-dart-v0.1.0
 ```
 
+`OMQ.php` installs with PIE from the separate repository `paddor/omq-php`,
+which Packagist lists as `paddor/omq-php`.
+`bindings/php/scripts/export_pie.rb` copies `bindings/php/native` there,
+replaces the omq-libzmq path dependency with its crates.io release, commits,
+and tags. That repository's release workflow builds `zmq.so` for each PHP
+version, thread-safety mode, and platform and attaches the PIE archives to
+the GitHub release, so release omq-libzmq first. Prepare a release by bumping
+`bindings/php/native/Cargo.toml` on a PR. After the PR is merged, export and
+push from the merged `main` commit. A manual run of the workflow builds and
+checks every archive without publishing; the tag publishes:
+
+```sh
+git clone git@github.com:paddor/omq-php.git /tmp/omq-php
+ruby bindings/php/scripts/export_pie.rb 0.1.0 /tmp/omq-php
+git -C /tmp/omq-php push origin HEAD
+gh workflow run release.yml --repo paddor/omq-php --ref main
+git -C /tmp/omq-php push origin 0.1.0
+```
+
+Packagist picks up the tag through its GitHub hook. One-time setup: create
+the `paddor/omq-php` repository, submit it on Packagist, and enable
+Packagist's GitHub integration for it.
+
 `OMQ.zig` is released from the repository tag. Prepare a release by updating
 `bindings/zig/build.zig.zon` and `bindings/zig/CHANGELOG.md`. After the PR is
 merged, push a tag:

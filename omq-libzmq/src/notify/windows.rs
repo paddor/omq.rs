@@ -45,6 +45,10 @@ impl RecvNotify {
     }
 
     /// As on Unix. Windows has no signals that interrupt the wait.
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "same signature as on Unix, where EINTR is an error"
+    )]
     pub(crate) fn wait_for_readable_or_signal(
         self,
         timeout_ms: std::os::raw::c_int,

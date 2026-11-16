@@ -2,12 +2,12 @@
 # frozen_string_literal: true
 
 # Export bindings/php/native into a checkout of the OMQ.php PIE repository
-# (paddor/omq-php) for release VERSION, then commit and tag there. The
-# omq-libzmq path dependency becomes its crates.io release, so release
+# (paddor/omq-binding.php) for release VERSION, then commit and tag there.
+# The omq-libzmq path dependency becomes its crates.io release, so release
 # omq-libzmq first. Push the result yourself; the tag starts that
 # repository's release workflow.
 #
-# usage: ruby bindings/php/scripts/export_pie.rb VERSION PATH/TO/omq-php
+# usage: ruby bindings/php/scripts/export_pie.rb VERSION PATH/TO/omq-binding.php
 
 require "fileutils"
 require "json"
@@ -42,7 +42,7 @@ def export_readme
 end
 
 version, target = ARGV
-abort "usage: #{$PROGRAM_NAME} VERSION PATH/TO/omq-php" unless version && target
+abort "usage: #{$PROGRAM_NAME} VERSION PATH/TO/omq-binding.php" unless version && target
 abort "bad version #{version}" unless version.match?(/\A\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\z/)
 native_version = crate_version(File.join(NATIVE, "Cargo.toml"))
 abort "VERSION #{version}, bindings/php/native/Cargo.toml #{native_version}" unless version == native_version

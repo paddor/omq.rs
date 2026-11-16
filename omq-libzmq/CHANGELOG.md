@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.3] - 2026-11-17
+
 ### Fixed
 
 - Inproc `zmq_connect` to a bound endpoint and `ZMQ_SUBSCRIBE`,
@@ -15,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A forked child can create a context and use it. On macOS it crashed
   (SIGTRAP) in its first blocking call if the parent had made one, and on
   every platform its first DNS lookup could hang.
+
+### Changed
+
+- Require omq-tokio 0.37.0, which requires rustls 0.23.46 (RUSTSEC-2026-0285,
+  -0346, -0348 and -0349) and salsabox 0.1.1.
 
 ## [0.11.2] - 2026-11-16
 

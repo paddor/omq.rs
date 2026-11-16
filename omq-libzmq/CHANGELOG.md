@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-11-16
+
 ### Added
 
 - `omq_socket_set_ready_callback()`: the push form of `ZMQ_FD`. Registering
@@ -17,6 +19,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   copied into the caller buffer; a larger one goes whole into an overflow
   `zmq_msg_t`. `omq_frame_info_t` reports the more flag, SERVER routing ID,
   and DISH group.
+- `recv_frame_with()`, for Rust bindings that link this crate: receives one
+  frame like `zmq_msg_recv()` and lends it to a closure with its more flag,
+  without a `zmq_msg_t`.
+- GitHub releases carry prebuilt `libomq_zmq` for x86_64 and aarch64 Linux
+  (glibc 2.28 or later), x86_64 and aarch64 macOS, and x86_64 Windows, with
+  `zmq.h` and `SHA256SUMS`.
+
+### Changed
+
+- Receives return queue slots to the sender in batches, at libzmq's
+  low-water mark, so a sender blocked on a full queue wakes once per batch.
+  `zmq_msg_recv()` shares the storage of large frames instead of copying
+  them; `zmq_msg_send()` copies the payload only for RADIO and SERVER.
+
+### Fixed
+
+- Builds on Windows with `-D warnings` again. A Unix-only `ZMQ_FD` helper
+  was compiled there unused.
 
 ## [0.11.0] - 2026-11-14
 

@@ -7,8 +7,8 @@ import 'package:hooks/hooks.dart';
 import 'package:test/test.dart';
 
 import '../hook/build.dart' as hook;
-import '../hook/libomq_zmq.dart';
-import '../hook/prebuilt.dart';
+import 'package:omq/src/hook/libomq_zmq.dart';
+import 'package:omq/src/hook/prebuilt.dart';
 
 PackageUserDefines defines(Map<String, Object?> values) => PackageUserDefines(
   workspacePubspec: PackageUserDefinesSource(defines: values, basePath: Directory.current.uri),

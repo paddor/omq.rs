@@ -12,7 +12,7 @@ import 'dart:io';
 import 'package:code_assets/code_assets.dart';
 import 'package:hooks/hooks.dart';
 
-import 'prebuilt.dart';
+import 'package:omq/src/hook/prebuilt.dart';
 
 void main(List<String> args) async {
   await build(args, (input, output) async {

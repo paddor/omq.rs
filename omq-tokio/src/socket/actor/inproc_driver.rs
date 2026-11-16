@@ -1,7 +1,9 @@
 //! Inproc peer driver: synthetic handshake plus relays for PEER and conflate.
 
 use super::{DisconnectReason, Message, ZmtpEvent, mpsc};
+use crate::engine::PeerEvent;
 use crate::engine::peer_events::SubscriptionGate;
+use crate::transport::inproc::{InprocSettle, RelayControl};
 
 /// Inproc fast path connection driver context. Replaces the
 /// `engine::ConnectionDriver` / ZMTP codec stack for in-process peers.
@@ -11,6 +13,7 @@ pub(super) struct InprocDriverCtx {
     pub(super) completion: crate::engine::peer_completion::CompletionProgress,
     pub(super) peer_id: u64,
     pub(super) cancel: tokio_util::sync::CancellationToken,
+    pub(super) settle: InprocSettle,
     pub(super) max_message_size: Option<usize>,
     pub(super) receive: ReceiveRoutes,
     pub(super) send: SendRoutes,
@@ -121,10 +124,21 @@ impl Drop for InprocPortGuard {
     }
 }
 
+/// Frees both directions' settle waiters when the peer task ends,
+/// including by abort.
+struct SettleGuard(InprocSettle);
+
+impl Drop for SettleGuard {
+    fn drop(&mut self) {
+        self.0.close();
+    }
+}
+
 /// Synthesizes `HandshakeSucceeded` immediately (no greeting exchange),
 /// then forwards Messages and Commands between the `SocketDriver`'s
 /// inbox and the partner's channels until either side drops.
 pub(super) async fn inproc_peer_driver(channels: InprocChannels, mut ctx: InprocDriverCtx) {
+    let _settle = SettleGuard(ctx.settle.clone());
     let mut completion = std::mem::take(&mut ctx.completion);
     inproc_peer_driver_body(channels, ctx, &mut completion).await;
     // Report completion only after every relay resource is dropped.
@@ -204,6 +218,10 @@ struct InprocRelay {
     cancel: tokio_util::sync::CancellationToken,
     peer_id: u64,
     subscriptions: SubscriptionGate,
+    settle: InprocSettle,
+    /// The partner's settle waiters go free: control waits for the
+    /// application to read an XPUB notification.
+    settle_stalled: bool,
     peer_out: crate::engine::actor_output::PeerOutput,
     channels: InprocChannels,
 }
@@ -215,10 +233,10 @@ struct RelayPending {
     inbound: Option<Message>,
     /// XPUB notification that must follow its control event.
     notification: Option<Message>,
-    /// Inbound command waiting for actor control credit.
-    control: Option<ZmtpEvent>,
-    /// Outbound command waiting for partner control space.
-    command: Option<omq_proto::proto::Command>,
+    /// Inbound command or settle mark waiting for actor control credit.
+    control: Option<PeerEvent>,
+    /// Outbound command or settle mark waiting for partner control space.
+    command: Option<RelayControl>,
     /// Outbound messages waiting for partner data space.
     outbound: std::collections::VecDeque<Message>,
 }
@@ -230,6 +248,7 @@ impl InprocRelay {
             subscriptions,
             peer_id,
             cancel,
+            settle,
             max_message_size,
             receive,
             send,
@@ -258,6 +277,8 @@ impl InprocRelay {
             cancel,
             peer_id,
             subscriptions,
+            settle,
+            settle_stalled: false,
             peer_out,
             channels,
         };
@@ -272,7 +293,6 @@ impl InprocRelay {
         peer_props: omq_proto::proto::command::PeerProperties,
         completion: &mut crate::engine::peer_completion::CompletionProgress,
     ) -> bool {
-        use crate::engine::PeerEvent;
         use omq_proto::proto::greeting::ZMTP_MINOR;
 
         let handshake = ZmtpEvent::HandshakeSucceeded {
@@ -310,6 +330,7 @@ impl InprocRelay {
                 return;
             }
 
+            self.track_settle_stall();
             let recv_blocked = self.recv_blocked();
             let actor_space = self.waits_for_actor_space();
             let close_deadline = self.closing.deadline;
@@ -485,7 +506,10 @@ impl InprocRelay {
             }
             Some(PeerDriverCommand::SendCommand(command)) => {
                 let _ = self.budget.account(inproc_command_size(&command));
-                self.pending.command = Some(command);
+                self.pending.command = Some(RelayControl::Command(command));
+            }
+            Some(PeerDriverCommand::Settle(mark)) => {
+                self.pending.command = Some(RelayControl::Settle(mark));
             }
             Some(PeerDriverCommand::DrainAndClose { deadline }) => {
                 // Stop taking new sends and inbound data; queued output
@@ -494,6 +518,8 @@ impl InprocRelay {
                     self.closing.requested = true;
                     self.closing.deadline = deadline;
                     self.channels.data_inbox.close();
+                    // Partner commands are dropped from here on.
+                    self.settle.close();
 
                     if let Some(port) = &self.receive.inbound {
                         port.close();
@@ -509,7 +535,9 @@ impl InprocRelay {
     /// Send the held command to the partner. False if the partner is gone.
     fn flush_command(&mut self) -> bool {
         let command = self.pending.command.take().unwrap();
-        let _ = self.budget.account(inproc_command_size(&command));
+        if let RelayControl::Command(command) = &command {
+            let _ = self.budget.account(inproc_command_size(command));
+        }
 
         match self.channels.out.control.try_send(command) {
             Ok(()) => {}
@@ -520,10 +548,12 @@ impl InprocRelay {
         true
     }
 
-    fn on_partner_command(&mut self, command: Option<omq_proto::proto::Command>) {
+    fn on_partner_command(&mut self, command: Option<RelayControl>) {
         match command {
-            Some(_) if self.closing.requested || self.closing.discard_receive => {}
-            Some(command) => {
+            Some(_) if self.closing.requested || self.closing.discard_receive => {
+                self.settle.incoming.close();
+            }
+            Some(RelayControl::Command(command)) => {
                 let _ = self.budget.account(inproc_command_size(&command));
                 let event = ZmtpEvent::Command(command);
 
@@ -532,9 +562,27 @@ impl InprocRelay {
                 }
 
                 self.pending.notification = self.subscriptions.notification(&event);
-                self.pending.control = Some(event);
+                self.pending.control = Some(PeerEvent::Event(event));
+            }
+            // The actor frees the waiters once it handled the commands
+            // before the mark.
+            Some(RelayControl::Settle(mark)) => {
+                self.pending.control = Some(PeerEvent::Settled(mark));
             }
             None => self.open.control = false,
+        }
+    }
+
+    /// A partner command held for an XPUB notification waits for the
+    /// application to read. The partner's callers must not wait on that.
+    fn track_settle_stall(&mut self) {
+        let stalled = self.pending.control.is_some()
+            && self.pending.notification.is_some()
+            && !(self.pending.inbound.is_none() && self.peer_out.has_capacity());
+
+        if stalled != self.settle_stalled {
+            self.settle_stalled = stalled;
+            self.settle.incoming.set_stalled(stalled);
         }
     }
 
@@ -545,10 +593,10 @@ impl InprocRelay {
         permit: mpsc::Permit<'_, (u64, crate::engine::PeerEvent)>,
         completion: &mut crate::engine::peer_completion::CompletionProgress,
     ) -> bool {
-        use crate::engine::{PeerEvent, SendPipeError};
+        use crate::engine::SendPipeError;
 
         let event = self.pending.control.take().unwrap();
-        permit.send((self.peer_id, PeerEvent::Event(event)));
+        permit.send((self.peer_id, event));
         completion.note_event();
         self.control_prefix = self.control_prefix.wrapping_add(1);
         self.peer_out.set_control_prefix(self.control_prefix);

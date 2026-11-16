@@ -96,6 +96,9 @@ pub enum PeerDriverCommand {
     ActivateWithRecvSink(RecvSink),
     /// Queue a ZMTP command for send (SUBSCRIBE, CANCEL, JOIN, LEAVE, ...).
     SendCommand(Command),
+    /// Inproc only: send a settle mark behind the queued commands. Other
+    /// drivers ignore it.
+    Settle(u64),
     /// Finish accepted output before shutting down the transport. The deadline
     /// belongs to the socket close operation and must not restart per stage.
     DrainAndClose {
@@ -184,6 +187,9 @@ impl From<PeerDriverHandle> for ActorPeerDriverHandle {
 pub enum PeerEvent {
     /// A decoded protocol event.
     Event(Event),
+    /// Inproc only: the partner's commands before this settle mark were
+    /// forwarded. Handling it frees the partner's waiters.
+    Settled(u64),
     /// The driver terminated.
     Closed {
         /// Failure description, or `None` for orderly shutdown.

@@ -300,7 +300,11 @@ where
 
     fn on_command(&mut self, cmd: Option<&PeerDriverCommand>) -> bool {
         match cmd {
-            Some(PeerDriverCommand::ActivateDataPlane | PeerDriverCommand::SendCommand(_)) => {}
+            Some(
+                PeerDriverCommand::ActivateDataPlane
+                | PeerDriverCommand::SendCommand(_)
+                | PeerDriverCommand::Settle(_),
+            ) => {}
             Some(PeerDriverCommand::Close | PeerDriverCommand::ActivateWithRecvSink(_)) | None => {
                 return false;
             }

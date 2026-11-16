@@ -120,6 +120,8 @@ pub(super) struct PeerEntry {
         Arc<crate::transport::inproc::InprocPort>,
         crate::transport::inproc::OpenPort,
     )>,
+    /// Inproc callers waiting for either side's commands to apply.
+    pub(super) inproc_settle: Option<crate::transport::inproc::InprocSettle>,
     pub(super) task: Option<JoinHandle<()>>,
 }
 
@@ -133,6 +135,7 @@ impl PeerEntry {
             progress: PeerProgress::default(),
             subscriptions: None,
             inproc_inbound: None,
+            inproc_settle: None,
             task: None,
         }
     }

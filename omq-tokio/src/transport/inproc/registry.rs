@@ -11,6 +11,7 @@ use omq_proto::error::{Error, Result};
 use omq_proto::inproc::InprocPeerSnapshot;
 
 use super::relay::{RelayReceiver, RelaySender, relay_channel};
+use super::settle::{ConnectSettle, InprocSettle, SettleWaiter};
 use super::{InprocPort, RecvConfig};
 
 /// Capacity of each command and relay-data lane of one connection.
@@ -33,6 +34,10 @@ pub struct InprocConn {
     pub(crate) inbound: Option<Arc<InprocPort>>,
     /// Port the peer opens for this socket's direct sends.
     pub(crate) outbound: Option<Arc<InprocPort>>,
+    /// Callers waiting for either side's commands to apply.
+    pub(crate) settle: InprocSettle,
+    /// A `connect` waiting until this side's first commands applied.
+    pub(crate) connect_waiter: Option<SettleWaiter>,
 }
 
 /// Sent from `connect` to `accept` through the registry. Carries
@@ -46,6 +51,10 @@ struct InprocConnectRequest {
     connector_config: RecvConfig,
     connector_to_listener_port: Arc<InprocPort>,
     listener_to_connector_port: Arc<InprocPort>,
+    listener_settle: InprocSettle,
+    /// A publishing connector's `connect`, waiting for the listener's
+    /// subscriptions.
+    listener_waiter: Option<SettleWaiter>,
     accept_ack: oneshot::Sender<InprocAck>,
 }
 
@@ -128,6 +137,7 @@ pub(crate) async fn connect(
     name: &str,
     snapshot: InprocPeerSnapshot,
     config: RecvConfig,
+    settle: ConnectSettle,
 ) -> Result<InprocConn> {
     let req_tx = {
         let reg = registry.binds.lock().expect("inproc registry poisoned");
@@ -141,6 +151,12 @@ pub(crate) async fn connect(
     let (ack_tx, ack_rx) = oneshot::channel();
     let c2l_port = InprocPort::new();
     let l2c_port = InprocPort::new();
+    let (connector_settle, listener_settle) = InprocSettle::pair();
+    let (connector_waiter, listener_waiter) = match settle {
+        ConnectSettle::None => (None, None),
+        ConnectSettle::Connector(waiter) => (Some(waiter), None),
+        ConnectSettle::Listener(waiter) => (None, Some(waiter)),
+    };
 
     let request = InprocConnectRequest {
         connector: snapshot,
@@ -149,6 +165,8 @@ pub(crate) async fn connect(
         connector_config: config,
         connector_to_listener_port: c2l_port.clone(),
         listener_to_connector_port: l2c_port.clone(),
+        listener_settle,
+        listener_waiter,
         accept_ack: ack_tx,
     };
 
@@ -167,6 +185,8 @@ pub(crate) async fn connect(
         peer_send_hwm: ack.listener_config.send_hwm,
         inbound: config.direct.then_some(l2c_port),
         outbound: ack.listener_config.direct.then_some(c2l_port),
+        settle: connector_settle,
+        connect_waiter: connector_waiter,
     })
 }
 
@@ -204,6 +224,8 @@ impl InprocListener {
             connector_config,
             connector_to_listener_port,
             listener_to_connector_port,
+            listener_settle,
+            listener_waiter,
             accept_ack,
         } = req;
 
@@ -221,6 +243,8 @@ impl InprocListener {
             outbound: connector_config
                 .direct
                 .then_some(listener_to_connector_port),
+            settle: listener_settle,
+            connect_waiter: listener_waiter,
         })
     }
 }

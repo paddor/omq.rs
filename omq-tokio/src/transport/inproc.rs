@@ -13,7 +13,9 @@
 //! sender's `Options::send_hwm` plus the receiver's `Options::recv_hwm`
 //! messages. Separate Coordinated fanring lanes carry commands (SUBSCRIBE,
 //! JOIN, ...) and messages for socket types that still route through their
-//! peer task. Registry requests retain their multi-producer Tokio queue.
+//! peer task. Settle marks follow commands on their lane, so `connect`,
+//! `subscribe` and `join` can wait until the peer applied them. Registry
+//! requests retain their multi-producer Tokio queue.
 
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
@@ -28,12 +30,15 @@ use crate::engine::{RecvSink, SendPipeConsumer, SendPipeError};
 
 mod registry;
 mod relay;
+mod settle;
 
 pub use registry::{DEFAULT_INPROC_HWM, InprocConn, InprocListener, InprocRegistry};
 pub(crate) use registry::{bind, connect, standalone_registry};
+pub(crate) use relay::RelayControl;
 #[cfg(test)]
 pub(crate) use relay::relay_channel;
 pub use relay::{RelayReceiver, RelaySender};
+pub(crate) use settle::{ConnectSettle, InprocSettle, SettleWaiter};
 
 /// What one socket tells its inproc peers at connect time.
 #[derive(Debug, Clone, Copy)]

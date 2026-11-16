@@ -10,6 +10,34 @@ use super::{
 };
 use crate::engine::peer_events::SubscriptionGate;
 use crate::engine::subscription_ledger::SubscriptionLedger;
+use crate::transport::inproc::SettleWaiter;
+
+/// What a subscription or group change still waits for before its caller
+/// returns.
+pub(super) struct ProtocolSent {
+    /// Peers whose protocol lane backlogged.
+    backlogged: Vec<crate::engine::control_inbox::Sender>,
+    /// Completes once every inproc peer applied the change.
+    settled: tokio::sync::oneshot::Receiver<()>,
+}
+
+impl ProtocolSent {
+    pub(super) fn is_done(&mut self) -> bool {
+        self.backlogged.is_empty()
+            && !matches!(
+                self.settled.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            )
+    }
+
+    pub(super) async fn wait(self) {
+        for inbox in self.backlogged {
+            inbox.protocol_drained().await;
+        }
+
+        let _ = self.settled.await;
+    }
+}
 
 impl SocketDriver {
     pub(super) fn handle_peer_command(&mut self, peer_id: u64, cmd: omq_proto::proto::Command) {
@@ -224,13 +252,12 @@ impl SocketDriver {
         });
     }
 
-    /// Returns the peers whose protocol lane backlogged. The caller's ack
-    /// waits for them; the actor never does.
+    /// Returns what the caller's ack waits for; the actor never does.
     pub(super) fn apply_join(
         &mut self,
         group: bytes::Bytes,
         joining: bool,
-    ) -> Result<Vec<crate::engine::control_inbox::Sender>> {
+    ) -> Result<ProtocolSent> {
         if !supports_groups(self.socket_type) {
             return Err(Error::Protocol(
                 "socket type does not support join / leave".into(),
@@ -261,13 +288,12 @@ impl SocketDriver {
         Ok(self.send_protocol_to_ready_peers(&cmd))
     }
 
-    /// Returns the peers whose protocol lane backlogged. The caller's ack
-    /// waits for them; the actor never does.
+    /// Returns what the caller's ack waits for; the actor never does.
     pub(super) fn apply_subscription(
         &mut self,
         prefix: bytes::Bytes,
         subscribe: bool,
-    ) -> Result<Vec<crate::engine::control_inbox::Sender>> {
+    ) -> Result<ProtocolSent> {
         if !supports_subscribe(self.socket_type) {
             return Err(Error::Protocol(
                 "socket type does not support subscribe".into(),
@@ -292,25 +318,72 @@ impl SocketDriver {
         Ok(self.send_protocol_to_ready_peers(&cmd))
     }
 
-    /// Queue `cmd` for every data-plane-ready peer without waiting.
-    fn send_protocol_to_ready_peers(
-        &self,
-        cmd: &omq_proto::proto::Command,
-    ) -> Vec<crate::engine::control_inbox::Sender> {
+    /// Queue `cmd` for every data-plane-ready peer without waiting. Inproc
+    /// peers settle it: a ready one after a mark sent behind it, one that is
+    /// not ready yet after the replay of its handshake.
+    fn send_protocol_to_ready_peers(&self, cmd: &omq_proto::proto::Command) -> ProtocolSent {
+        use crate::engine::PeerDriverCommand;
+
+        let (waiter, settled) = SettleWaiter::new();
         let mut backlogged = Vec::new();
         for p in self.peers.values() {
+            // A stalled or closed peer frees the waiter at once.
+            let settle = p
+                .inproc_settle
+                .as_ref()
+                .map(|settle| &settle.outgoing)
+                .filter(|settle| settle.register(waiter.clone()));
+
             if !p.handshake.ready {
                 continue;
             }
 
             let inbox = &p.handle.inbox;
-            let _ = inbox.try_send(crate::engine::PeerDriverCommand::SendCommand(cmd.clone()));
+            let _ = inbox.try_send(PeerDriverCommand::SendCommand(cmd.clone()));
+            if let Some(settle) = settle {
+                let _ = inbox.try_send(PeerDriverCommand::Settle(settle.mark()));
+            }
 
             if inbox.protocol_backlogged() {
                 backlogged.push(inbox.clone());
             }
         }
 
-        backlogged
+        ProtocolSent {
+            backlogged,
+            settled,
+        }
+    }
+
+    /// After the handshake replay, settle the callers waiting for this
+    /// inproc peer: a `connect`, or changes made before it was ready.
+    pub(super) async fn settle_replay(&self, peer_id: u64) {
+        let Some(peer) = self.peers.get(&peer_id) else {
+            return;
+        };
+
+        let Some(settle) = &peer.inproc_settle else {
+            return;
+        };
+
+        if settle.outgoing.has_waiters() {
+            let mark = settle.outgoing.mark();
+            let _ = peer
+                .handle
+                .inbox
+                .send(crate::engine::PeerDriverCommand::Settle(mark))
+                .await;
+        }
+    }
+
+    /// The peer's commands before `mark` are handled: free its waiters.
+    pub(super) fn handle_peer_settled(&self, peer_id: u64, mark: u64) {
+        if let Some(settle) = self
+            .peers
+            .get(&peer_id)
+            .and_then(|peer| peer.inproc_settle.as_ref())
+        {
+            settle.incoming.settled(mark);
+        }
     }
 }

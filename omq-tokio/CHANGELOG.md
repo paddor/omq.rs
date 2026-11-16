@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Inproc setup is visible to the next publication, as in libzmq. `connect`
+  to a bound inproc endpoint, `subscribe`, `unsubscribe`, `join` and `leave`
+  return once the PUB, XPUB or RADIO peer applied them. Before, a send right
+  after them could miss the new subscriber or topic. An XPUB whose
+  application stopped reading its notifications does not hold them up.
+
+### Changed
+
+- `engine::PeerDriverCommand::Settle` and `engine::PeerEvent::Settled` carry
+  the inproc settle marks. Other drivers ignore them.
+
 ## [0.36.1] - 2026-11-16
 
 ### Added

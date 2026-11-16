@@ -6,7 +6,7 @@ use omq_proto::inproc::{InboundFrame, InprocPeerSnapshot};
 use omq_proto::message::Message;
 use omq_proto::proto::SocketType;
 
-use super::{InprocRegistry, RecvConfig, bind, connect};
+use super::{ConnectSettle, InprocRegistry, RecvConfig, bind, connect};
 
 fn snap(t: SocketType) -> InprocPeerSnapshot {
     InprocPeerSnapshot {
@@ -44,6 +44,7 @@ async fn bind_connect_accept_exchange() {
             "test-bca",
             snap(SocketType::Push),
             config(),
+            ConnectSettle::None,
         )
         .await
     });
@@ -98,7 +99,8 @@ async fn connect_without_bind_fails() {
             &registry(),
             "test-unbound",
             snap(SocketType::Push),
-            config()
+            config(),
+            ConnectSettle::None,
         )
         .await,
         Err(Error::InvalidEndpoint(_))

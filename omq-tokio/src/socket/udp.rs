@@ -245,7 +245,11 @@ async fn run_radio_sender(
             () = async { tokio::time::sleep_until(deadline.unwrap().into()).await; },
                 if deadline.is_some() => break,
             cmd = inbox_rx.recv(), if control_open => match cmd {
-                Some(PeerDriverCommand::ActivateDataPlane | PeerDriverCommand::SendCommand(_)) => {}
+                Some(
+                    PeerDriverCommand::ActivateDataPlane
+                    | PeerDriverCommand::SendCommand(_)
+                    | PeerDriverCommand::Settle(_),
+                ) => {}
                 Some(PeerDriverCommand::Close | PeerDriverCommand::ActivateWithRecvSink(_)) => break,
                 Some(PeerDriverCommand::DrainAndClose { deadline: end }) => {
                     if !closing {

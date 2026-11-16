@@ -283,6 +283,7 @@ impl EndpointTask {
             first: FirstAttempt {
                 deadline: first_deadline,
                 admission,
+                ..FirstAttempt::default()
             },
         })
     }

@@ -74,7 +74,10 @@ impl ControlState {
         input_failed: bool,
     ) -> Result<DriverStep> {
         match cmd {
-            Some(PeerDriverCommand::ActivateDataPlane) => Ok(DriverStep::Continue),
+            // Settle marks are for inproc peers.
+            Some(PeerDriverCommand::ActivateDataPlane | PeerDriverCommand::Settle(_)) => {
+                Ok(DriverStep::Continue)
+            }
             Some(PeerDriverCommand::ActivateWithRecvSink(_)) if input_failed => {
                 Ok(DriverStep::Continue)
             }
@@ -204,6 +207,7 @@ pub(super) fn handle_pre_activation_inbox_command(
 
             Ok(PreActivationStep::Continue)
         }
+        Some(PeerDriverCommand::Settle(_)) => Ok(PreActivationStep::Continue),
         Some(PeerDriverCommand::Close | PeerDriverCommand::DrainAndClose { .. }) | None => {
             Ok(PreActivationStep::Close)
         }

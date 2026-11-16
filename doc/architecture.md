@@ -256,8 +256,11 @@ an I/O-thread task.
 
 Fan-out senders match subscriptions on the calling thread and push into each
 subscriber ring. Setup, subscription commands, and lifecycle run on the
-context runtime. PEER and `conflate` relay through peer tasks with separate
-data and control queues. Each context has its own inproc namespace.
+context runtime. A settle mark follows the subscriber's commands, and
+`connect`, `subscribe` and `join` return once the publisher's actor handled
+it, so the next publication sees them. PEER and `conflate` relay through peer
+tasks with separate data and control queues. Each context has its own inproc
+namespace.
 
 ## Other execution paths
 

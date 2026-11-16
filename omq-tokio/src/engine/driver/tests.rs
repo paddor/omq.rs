@@ -510,7 +510,7 @@ impl EventAdapter {
     pub(super) async fn recv(&mut self) -> Option<Event> {
         match self.rx.recv().await? {
             (_, PeerEvent::Event(e)) => Some(e),
-            (_, PeerEvent::Closed { .. }) => None,
+            (_, PeerEvent::Settled(_) | PeerEvent::Closed { .. }) => None,
         }
     }
 }

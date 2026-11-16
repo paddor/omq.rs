@@ -661,6 +661,11 @@ impl SocketDriver {
     }
 }
 
+/// Whether this socket type sends SUBSCRIBE, CANCEL, JOIN or LEAVE.
+fn sends_subscriptions(socket_type: SocketType) -> bool {
+    supports_subscribe(socket_type) || supports_groups(socket_type)
+}
+
 /// One limiter per socket, shared by all peers and keyed by remote IP.
 fn recv_ip_rate_limiter(options: &Options) -> Option<Arc<SharedIpRateLimiter>> {
     options
@@ -670,25 +675,28 @@ fn recv_ip_rate_limiter(options: &Options) -> Option<Arc<SharedIpRateLimiter>> {
 }
 
 /// Acknowledge a subscription or group change once every backlogged peer
-/// took its protocol command. The waiting happens off the actor, so slow
-/// peers backpressure the caller without making the socket unresponsive.
+/// took its protocol command and every inproc peer applied it. The waiting
+/// happens off the actor, so slow peers backpressure the caller without
+/// making the socket unresponsive.
 fn ack_after_protocol_drain(
-    result: Result<Vec<crate::engine::control_inbox::Sender>>,
+    result: Result<subscriptions::ProtocolSent>,
     ack: oneshot::Sender<Result<()>>,
 ) {
-    match result {
-        Ok(backlogged) if !backlogged.is_empty() => {
-            tokio::spawn(async move {
-                for inbox in backlogged {
-                    inbox.protocol_drained().await;
-                }
+    let mut sent = match result {
+        Ok(sent) => sent,
+        Err(error) => {
+            let _ = ack.send(Err(error));
+            return;
+        }
+    };
 
-                let _ = ack.send(Ok(()));
-            });
-        }
-        result => {
-            let _ = ack.send(result.map(|_| ()));
-        }
+    if sent.is_done() {
+        let _ = ack.send(Ok(()));
+    } else {
+        tokio::spawn(async move {
+            sent.wait().await;
+            let _ = ack.send(Ok(()));
+        });
     }
 }
 

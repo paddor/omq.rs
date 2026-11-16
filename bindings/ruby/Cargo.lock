@@ -253,7 +253,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -617,7 +617,7 @@ dependencies = [
 
 [[package]]
 name = "omq-proto"
-version = "0.40.0"
+version = "0.40.1"
 dependencies = [
  "bytes",
  "concurrent-queue",
@@ -637,7 +637,7 @@ dependencies = [
 
 [[package]]
 name = "omq-shm"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -649,7 +649,7 @@ dependencies = [
 
 [[package]]
 name = "omq-tokio"
-version = "0.36.1"
+version = "0.37.0"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -897,7 +897,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

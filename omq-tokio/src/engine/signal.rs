@@ -33,8 +33,9 @@ mod park;
 mod woken;
 
 pub use blocking::BlockingRecvCancel;
+pub use blocking::block_on;
 pub(crate) use blocking::{
-    BlockingRecvCancelGuard, BlockingSignal, WakerRegistration, block_on, enter_receive_guard,
+    BlockingRecvCancelGuard, BlockingSignal, WakerRegistration, enter_receive_guard,
     leave_receive_guard,
 };
 pub(crate) use park::Parker;

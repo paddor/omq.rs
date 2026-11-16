@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-16
+
 ### Added
 
 - Dart package `omq` over the `omq-libzmq` C ABI: contexts, every socket

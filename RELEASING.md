@@ -285,7 +285,7 @@ first. Prepare a release by pinning that version, bumping
 entry:
 
 ```sh
-ruby bindings/dart/scripts/pin_libomq_zmq.rb 0.11.1
+ruby bindings/dart/scripts/pin_libomq_zmq.rb 0.11.2
 ```
 
 pub.dev automates publishing only for packages that exist, so publish the

@@ -3,7 +3,13 @@
 
 /// The omq-libzmq release whose prebuilt libraries the build hook downloads;
 /// empty while none is pinned.
-const libomqZmqVersion = '';
+const libomqZmqVersion = '0.11.2';
 
 /// SHA-256 of each prebuilt library of that release, by Rust target triple.
-const libomqZmqSha256 = <String, String>{};
+const libomqZmqSha256 = <String, String>{
+  'x86_64-unknown-linux-gnu': '055906f478bf9fd625d4404eecca132a07a12a0dc854389d428d1458c99edccc',
+  'aarch64-unknown-linux-gnu': '7c92b864591a8664f7d60ef92acd350200b541bf8b869e3af0b3770de4dc5d34',
+  'x86_64-apple-darwin': '20cb6a83661c9e2871efc4dbb9015ed59b70fdce052fabab77fcbf51aa104b56',
+  'aarch64-apple-darwin': '56218ae4b53aec6e1662cb77c0a35a7d9e5ad26969a506243b94af88c0fd9e15',
+  'x86_64-pc-windows-msvc': 'd5281227cf8d408527ded53a9453caf14ad40a0b81ffe1d3e4d7535b2676678b',
+};

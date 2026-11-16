@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.36.1] - 2026-11-16
+
+### Added
+
+- `engine::RingDrain`: the receive-queue release policy, which returns
+  consumed slots to the sender in batches. omq-libzmq uses it for its
+  receives.
+
 ## [0.36.0] - 2026-11-14
 
 ### Changed

@@ -28,6 +28,9 @@ jobs:
       pyomq_matrix: ${{ steps.matrix.outputs.pyomq_matrix }}
       java_matrix: ${{ steps.matrix.outputs.java_matrix }}
       ruby_matrix: ${{ steps.matrix.outputs.ruby_matrix }}
+      php_images: ${{ steps.matrix.outputs.php_images }}
+      dart_matrix: ${{ steps.matrix.outputs.dart_matrix }}
+      dart_prebuilt_os: ${{ steps.matrix.outputs.dart_prebuilt_os }}
       run_pyomq: ${{ steps.scope.outputs.pyomq == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
       run_java: ${{ steps.scope.outputs.java == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
       run_go: ${{ steps.scope.outputs.go == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
@@ -171,11 +174,18 @@ jobs:
             echo 'pyomq_matrix={"include":[{"python-version":"3.12","os":"ubuntu-latest"},{"python-version":"3.14","os":"ubuntu-latest"},{"python-version":"3.14","os":"windows-latest"},{"python-version":"3.14","os":"macos-15"}]}' >> "$GITHUB_OUTPUT"
             echo 'java_matrix={"include":[{"os":"ubuntu-latest","java":"21"},{"os":"ubuntu-latest","java":"25"},{"os":"macos-15","java":"21"},{"os":"macos-15","java":"25"},{"os":"windows-latest","java":"21"},{"os":"windows-latest","java":"25"}]}' >> "$GITHUB_OUTPUT"
             echo 'ruby_matrix={"include":[{"ruby":"3.3","os":"ubuntu-latest"},{"ruby":"4.0","os":"ubuntu-latest","cztop":true},{"ruby":"truffleruby","os":"ubuntu-latest"},{"ruby":"4.0","os":"macos-15"}]}' >> "$GITHUB_OUTPUT"
+            echo 'php_images=["8.2-fpm","8.2-zts-alpine","8.3-zts","8.3-fpm-alpine","8.4-fpm","8.4-zts-alpine","8.5-zts","8.5-fpm-alpine"]' >> "$GITHUB_OUTPUT"
+            echo 'dart_matrix={"include":[{"os":"ubuntu-latest","sdk":"3.10.0"},{"os":"ubuntu-latest","sdk":"stable","lint":true},{"os":"macos-15","sdk":"stable"},{"os":"windows-latest","sdk":"stable"}]}' >> "$GITHUB_OUTPUT"
+            echo 'dart_prebuilt_os=["ubuntu-latest","ubuntu-24.04-arm","macos-15","windows-latest"]' >> "$GITHUB_OUTPUT"
           else
             echo 'test_matrix={"include":[{"toolchain":"1.93","os":"ubuntu-latest"}]}' >> "$GITHUB_OUTPUT"
             echo 'pyomq_matrix={"include":[{"python-version":"3.14","os":"ubuntu-latest"}]}' >> "$GITHUB_OUTPUT"
             echo 'java_matrix={"include":[{"os":"ubuntu-latest","java":"25"}]}' >> "$GITHUB_OUTPUT"
             echo 'ruby_matrix={"include":[{"ruby":"4.0","os":"ubuntu-latest","cztop":true}]}' >> "$GITHUB_OUTPUT"
+            # Latest PHP, glibc NTS and musl ZTS.
+            echo 'php_images=["8.5-fpm","8.5-zts-alpine"]' >> "$GITHUB_OUTPUT"
+            echo 'dart_matrix={"include":[{"os":"ubuntu-latest","sdk":"stable","lint":true}]}' >> "$GITHUB_OUTPUT"
+            echo 'dart_prebuilt_os=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
             if [[ "${{ steps.scope.outputs.pyomq }}" == "true" ]]; then
               echo 'lint_matrix={"include":[{"name":"Linux","kind":"rust","os":"ubuntu-latest"},{"name":"pyomq","kind":"pyomq","os":"ubuntu-latest"}]}' >> "$GITHUB_OUTPUT"
             else
@@ -439,8 +449,9 @@ jobs:
         run: ./scripts/test-php.sh
 
   # OMQ.php ships for PHP 8.2 to 8.5, NTS and ZTS, glibc and musl. Each
-  # official image builds the extension and runs the full suite; together
-  # the images cover every version, thread-safety mode, and libc.
+  # official image builds the extension and runs the full suite. Scheduled
+  # and manual runs cover every version, thread-safety mode, and libc;
+  # other runs the latest PHP on each libc.
   php-images:
     name: php ${{ matrix.image }}
     needs: [changes, linux-gate]
@@ -450,25 +461,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image:
-          - 8.2-fpm
-          - 8.2-zts-alpine
-          - 8.3-zts
-          - 8.3-fpm-alpine
-          - 8.4-fpm
-          - 8.4-zts-alpine
-          - 8.5-zts
-          - 8.5-fpm-alpine
+        image: ${{ fromJSON(needs.changes.outputs.php_images) }}
     steps:
       - uses: actions/checkout@v7
       - name: build and test in php:${{ matrix.image }}
         run: ruby scripts/test-php-matrix.rb --engine docker --image ${{ matrix.image }}
 
-  # The macOS archives link PHP symbols at load time; build and test them.
+  # The macOS archives link PHP symbols at load time. Scheduled and manual
+  # runs build and test them.
   php-macos:
     name: php ${{ matrix.php }} macOS
     needs: [changes, linux-gate]
-    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.run_php == 'true'
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.full == 'true'
     runs-on: macos-15
     timeout-minutes: 45
     strategy:
@@ -487,6 +491,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: bindings/php/native
+          # The extension is built for one PHP version.
+          key: php${{ matrix.php }}
       - name: build
         run: cargo build --release --manifest-path bindings/php/native/Cargo.toml
       - name: test
@@ -532,12 +538,7 @@ jobs:
     timeout-minutes: 30
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - { os: ubuntu-latest, sdk: '3.10.0' }
-          - { os: ubuntu-latest, sdk: stable, lint: true }
-          - { os: macos-15, sdk: stable }
-          - { os: windows-latest, sdk: stable }
+      matrix: ${{ fromJSON(needs.changes.outputs.dart_matrix) }}
     defaults:
       run:
         shell: bash
@@ -577,7 +578,8 @@ jobs:
         run: ruby scripts/check_prebuilt.rb
 
   # Apps get libomq_zmq from the build hook, which downloads the pinned
-  # release. Run the socket tests and an AOT build that way on each runner.
+  # release. Run the socket tests and an AOT build that way; scheduled and
+  # manual runs do it on each runner OS.
   dart-prebuilt:
     name: Dart prebuilt (${{ matrix.os }})
     needs: [changes, linux-gate]
@@ -587,7 +589,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-15, windows-latest]
+        os: ${{ fromJSON(needs.changes.outputs.dart_prebuilt_os) }}
     steps:
       - uses: actions/checkout@v7
       - uses: dart-lang/setup-dart@v1

@@ -2,7 +2,8 @@
 # frozen_string_literal: true
 
 # Pin the build hook to an omq-libzmq release: read the release's SHA256SUMS
-# and rewrite hook/libomq_zmq.dart with the version and per-target digests.
+# and rewrite lib/src/hook/libomq_zmq.dart with the version and per-target
+# digests.
 #
 # usage: ruby bindings/dart/scripts/pin_libomq_zmq.rb VERSION
 
@@ -15,7 +16,7 @@ TARGETS = %w[
   aarch64-apple-darwin
   x86_64-pc-windows-msvc
 ].freeze
-PIN = File.expand_path("../hook/libomq_zmq.dart", __dir__)
+PIN = File.expand_path("../lib/src/hook/libomq_zmq.dart", __dir__)
 
 version = ARGV.fetch(0) { abort "usage: #{$PROGRAM_NAME} VERSION" }
 abort "bad version #{version}" unless version.match?(/\A\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\z/)

@@ -24,7 +24,7 @@ on Linux with Dart 3.10.0 and stable.
 
 ## Prebuilt library pin
 
-`hook/libomq_zmq.dart` names the omq-libzmq release whose prebuilt
+`lib/src/hook/libomq_zmq.dart` names the omq-libzmq release whose prebuilt
 libraries the hook downloads, with their SHA-256 sums. Regenerate it from a
 release's `SHA256SUMS`:
 

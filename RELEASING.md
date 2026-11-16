@@ -279,8 +279,8 @@ first, then the Elixir and Gleam wrappers, following
 `OMQ.dart` publishes the `omq` package to pub.dev from
 `.github/workflows/release-dart.yml`. Its build hook downloads the prebuilt
 `libomq_zmq` of the omq-libzmq release pinned in
-`bindings/dart/hook/libomq_zmq.dart`, so release omq-libzmq and its binaries
-first. Prepare a release by pinning that version, bumping
+`bindings/dart/lib/src/hook/libomq_zmq.dart`, so release omq-libzmq and its
+binaries first. Prepare a release by pinning that version, bumping
 `bindings/dart/pubspec.yaml`, and adding a `bindings/dart/CHANGELOG.md`
 entry:
 

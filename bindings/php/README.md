@@ -17,7 +17,7 @@ Install a prebuilt build with [PIE](https://github.com/php/pie), in place of
 ext-zmq, never next to it:
 
 ```sh
-pie install paddor/omq-php
+pie install paddor/omq-binding.php
 ```
 
 Prebuilt binaries cover PHP 8.2 to 8.5, NTS and ZTS, on x86_64 and arm64

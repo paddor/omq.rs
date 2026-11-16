@@ -169,4 +169,4 @@ jobs:
           ls dist
           gh release create "$VERSION" dist/*.zip --repo "${{ github.repository }}" \
             --title "OMQ.php $VERSION" --verify-tag \
-            --notes "Install with PIE: \`pie install paddor/omq-php\`. Built from paddor/omq.rs bindings/php/native."
+            --notes "Install with PIE: \`pie install paddor/omq-binding.php\`. Built from paddor/omq.rs bindings/php/native."

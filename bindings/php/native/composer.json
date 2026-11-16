@@ -1,5 +1,5 @@
 {
-    "name": "paddor/omq-php",
+    "name": "paddor/omq-binding.php",
     "description": "OMQ.php: the zmq PHP extension, with the ext-zmq API, on the OMQ engine",
     "type": "php-ext",
     "license": "ISC",

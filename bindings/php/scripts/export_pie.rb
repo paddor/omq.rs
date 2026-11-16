@@ -17,6 +17,8 @@ require "uri"
 REPO = File.expand_path("../../..", __dir__)
 NATIVE = File.join(REPO, "bindings", "php", "native")
 README = File.join(REPO, "bindings", "php", "README.md")
+# The release workflow pins libclang with it.
+LIBCLANG_ENV = File.join(__dir__, "libclang-env.sh")
 LIBZMQ_PATH_DEP = 'path = "../../../omq-libzmq"'
 SOURCE_URL = "https://github.com/paddor/omq.rs/blob/main/bindings/php/"
 
@@ -64,6 +66,8 @@ cargo = File.read(manifest)
 abort "Cargo.toml has no omq-libzmq path dependency" unless cargo.include?(LIBZMQ_PATH_DEP)
 File.write(manifest, cargo.sub(LIBZMQ_PATH_DEP, %(version = "=#{libzmq}")))
 FileUtils.cp(File.join(REPO, "LICENSE"), File.join(target, "LICENSE"))
+FileUtils.mkdir_p(File.join(target, "scripts"))
+FileUtils.cp(LIBCLANG_ENV, File.join(target, "scripts", "libclang-env.sh"), preserve: true)
 File.write(File.join(target, "README.md"), export_readme)
 system("cargo", "generate-lockfile", chdir: target, exception: true)
 

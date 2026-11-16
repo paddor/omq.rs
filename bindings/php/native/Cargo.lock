@@ -1069,7 +1069,7 @@ checksum = "521739c6d2bac4aa25192232afe6841231376b2b26d4d9fae5ecf8ca5772e441"
 
 [[package]]
 name = "omq-libzmq"
-version = "0.11.0"
+version = "0.11.2"
 dependencies = [
  "bytes",
  "flume",
@@ -1125,7 +1125,7 @@ dependencies = [
 
 [[package]]
 name = "omq-tokio"
-version = "0.36.0"
+version = "0.36.1"
 dependencies = [
  "arc-swap",
  "bytes",

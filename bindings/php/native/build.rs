@@ -23,4 +23,10 @@ fn main() {
     }
 
     build.compile("omq_php_fd_stream");
+
+    // The extension takes the PHP API from the PHP binary that loads it.
+    // macOS's linker rejects those undefined symbols unless told so.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        println!("cargo:rustc-cdylib-link-arg=-Wl,-undefined,dynamic_lookup");
+    }
 }

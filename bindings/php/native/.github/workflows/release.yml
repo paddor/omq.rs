@@ -61,8 +61,12 @@ jobs:
           tools: none
         env:
           phpts: ${{ matrix.ts == 'zts' && 'ts' || 'nts' }}
+      # The runner has several LLVM versions; bindgen must take libclang and
+      # its builtin headers from the same one.
       - name: Install libclang
-        run: sudo apt-get install -y libclang-dev
+        run: |
+          sudo apt-get install -y libclang-dev
+          scripts/libclang-env.sh | tee -a "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
       - name: Build
         run: cargo build --release

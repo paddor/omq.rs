@@ -32,8 +32,13 @@ fn kind(key: c_int) -> Kind {
     match key {
         ZMQ_AFFINITY => Kind::Uint64,
         ZMQ_MAXMSGSIZE => Kind::Int64,
-        5..=7 | 61 | 72 => Kind::Bytes,
-        32 | 38 | 45 | 46 | 48..=50 | 55 | 63 | 64 | 68 | 92 => Kind::Text,
+        // OMQ_COMPRESSION_DICT and the OMQ_QUIC_* PEM options.
+        5..=7 | 61 | 72 | 1006 | 1011..=1013 => Kind::Bytes,
+        // OMQ_WS_ALLOWED_ORIGINS, OMQ_QUIC_SERVER_NAME,
+        // OMQ_QUIC_ALLOWED_ORIGINS, and OMQ_QUIC_WEBTRANSPORT_PATH.
+        32 | 38 | 45 | 46 | 48..=50 | 55 | 63 | 64 | 68 | 92 | 1009 | 1014 | 1017 | 1019 => {
+            Kind::Text
+        }
         _ => Kind::Int,
     }
 }

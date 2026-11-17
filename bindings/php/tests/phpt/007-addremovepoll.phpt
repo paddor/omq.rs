@@ -33,6 +33,15 @@ $stream = stream_socket_accept ($socket_server);
 /* Write something from client so that connection will be readable and writable */
 fwrite($socket_client, "1");
 
+/* macOS delivers loopback data after fwrite returns, and the poll below
+ * returns as soon as the stream is writable. Wait until it is readable. */
+$ready = array($stream);
+$none = null;
+if (stream_select($ready, $none, $none, 1) !== 1) {
+	echo "Loopback data did not arrive" . PHP_EOL;
+	exit (1);
+}
+
 $poll   = new ZMQPoll();
 $obj_id = $poll->add($z, ZMQ::POLL_IN);
 $fp_id  = $poll->add($stream, ZMQ::POLL_IN | ZMQ::POLL_OUT);

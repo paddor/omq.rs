@@ -199,7 +199,11 @@ Publish `omq`:
 (cd bindings/beam && rebar3 hex publish)
 ```
 
-After Hex shows `omq` 0.2.0, dry-run/audit and publish the Elixir wrapper:
+After Hex shows the new `omq`, bump the wrappers on a PR: `version` and the
+`omq` requirement in `elixir/mix.exs` and `gleam/gleam.toml`, and
+`gleam update omq` for `gleam/manifest.toml`. After it merges, dry-run/audit
+and publish the Elixir wrapper. Mix leaves `deps/`, `doc/`, and `mix.lock` in
+`elixir/`; remove them.
 
 ```sh
 (cd bindings/beam/elixir && mix deps.get)
@@ -208,7 +212,15 @@ After Hex shows `omq` 0.2.0, dry-run/audit and publish the Elixir wrapper:
 (cd bindings/beam/elixir && mix hex.publish)
 ```
 
-After Hex shows `omq` 0.2.0, dry-run/audit and publish the Gleam wrapper:
+Tag the wrapper PR's merge commit before publishing the Gleam wrapper; its
+docs link their source to the tag:
+
+```sh
+git tag -a bindings/beam/gleam/v0.3.1 -m "OMQ.gleam 0.3.1" MERGE_COMMIT
+git -c push.followTags=false push origin refs/tags/bindings/beam/gleam/v0.3.1
+```
+
+Then dry-run/audit and publish the Gleam wrapper:
 
 ```sh
 (cd bindings/beam/gleam && ~/src/gleam/target/release/gleam update)
@@ -224,7 +236,7 @@ exported tarball and the built docs through the Hex API instead:
 
 ```sh
 cd bindings/beam/gleam
-version=0.2.6
+version=0.3.1
 curl -fsS -X POST 'https://hex.pm/api/publish?replace=false' \
   -H "authorization: $HEX_API_KEY" -H 'content-type: application/octet-stream' \
   --data-binary @build/omq_gleam-$version.tar
@@ -237,5 +249,6 @@ curl -fsS -X POST "https://hex.pm/api/packages/omq_gleam/releases/$version/docs"
 
 For token-based publishing, Mix and Rebar3 read `HEX_API_KEY`; Gleam reads
 `HEXPM_API_KEY`. Pass `--repo hexpm` to `rebar3 hex publish` so Rebar3 loads
-the repository token from the environment. Prefer the interactive commands above for the first publish
+the repository token from the environment. Without prompts:
+`rebar3 hex publish --repo hexpm --yes` and `mix hex.publish --yes`. Prefer the interactive commands above for the first publish
 so package metadata and included files can be reviewed before confirming.

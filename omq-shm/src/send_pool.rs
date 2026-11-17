@@ -2,13 +2,14 @@
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Instant;
 
 use arc_swap::ArcSwap;
 use omq_proto::{Message, PayloadPool, Result};
 
+use crate::lease::Table;
 use crate::mapping::invalid;
 use crate::pool::{payload_offset, storage_length};
 use crate::{
@@ -18,6 +19,9 @@ use crate::{
 /// Minimum spacing of growth checks. Growth retires a class only after it
 /// stayed unused for a whole interval, so classes used in turn are kept.
 const GROWTH_CHECK_INTERVAL_MS: u64 = 50;
+
+/// Minimum spacing of reclaim passes while closed connections linger.
+const CLOSED_SWEEP_INTERVAL_MS: u64 = 50;
 
 /// Automatic outbound SHM storage shared by all connections of one socket.
 ///
@@ -48,6 +52,21 @@ struct Inner {
     next_growth_check: AtomicU64,
     /// Connections that are told when one of this pool's regions is dropped.
     retirements: Arc<crate::lease::Retirements>,
+    /// Outgoing tables of this pool's closed connections.
+    closed: Closed,
+}
+
+/// Tables of closed connections. Leases of deferred slots keep them, with
+/// their mapping, eventfds, and peer pidfd, until a reclaim pass drops the
+/// completed leases.
+#[derive(Debug, Default)]
+struct Closed {
+    tables: Mutex<Vec<Weak<Table>>>,
+    /// Whether `tables` may hold a live table. Set and cleared under the
+    /// lock; preparations read it as a hint, so `Relaxed` is enough.
+    lingering: AtomicBool,
+    /// Milliseconds after `created` before the next pass may run.
+    next_sweep: AtomicU64,
 }
 
 /// How a new class claims the budget.
@@ -114,6 +133,7 @@ impl SendPool {
                 created: Instant::now(),
                 next_growth_check: AtomicU64::new(0),
                 retirements: Arc::default(),
+                closed: Closed::default(),
             }),
         }
     }
@@ -121,6 +141,15 @@ impl SendPool {
     /// The connections to tell when one of this pool's regions is dropped.
     pub(crate) fn retirements(&self) -> &crate::lease::Retirements {
         &self.inner.retirements
+    }
+
+    /// Remember the outgoing table of a closed connection until no lease
+    /// retains it.
+    pub(crate) fn close(&self, table: &Arc<Table>) {
+        let mut tables = self.lock_closed();
+        tables.retain(|table| table.strong_count() != 0);
+        tables.push(Arc::downgrade(table));
+        self.inner.closed.lingering.store(true, Ordering::Relaxed);
     }
 
     /// Current automatically allocated mapping bytes, including retained owners.
@@ -138,6 +167,7 @@ impl SendPool {
     /// # Errors
     /// Returns an error for a missing body, size overflow, or OS allocation failure.
     pub fn prepare(&self, message: &Message) -> Result<Option<Message>> {
+        self.release_closed();
         let body = crate::body(message)?;
         if body.len() <= COPY_THRESHOLD || find_slot(body).is_some() {
             return Ok(Some(message.clone()));
@@ -158,6 +188,7 @@ impl SendPool {
     /// # Errors
     /// Returns an error for invalid counts/envelopes, size overflow, or OS failure.
     pub fn prepare_batch(&self, messages: &[&Message], kind: BatchKind) -> Result<Option<Message>> {
+        self.release_closed();
         let Some(length) = batch::storage_length(messages, kind)? else {
             return Ok(None);
         };
@@ -177,6 +208,7 @@ impl SendPool {
     /// # Errors
     /// Returns an error for an unsupported message, size overflow, or OS failure.
     pub fn prepare_multipart(&self, message: &Message) -> Result<Option<Message>> {
+        self.release_closed();
         if !batch::uses_multipart_record(message) {
             return Err(invalid("message does not use an SHM multipart record").into());
         }
@@ -277,20 +309,49 @@ impl SendPool {
 
     /// Claim the next growth check; checks run at most once per interval.
     fn growth_check_due(&self) -> bool {
-        let now = u64::try_from(self.inner.created.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let next = self.inner.next_growth_check.load(Ordering::Relaxed);
+        self.claim(&self.inner.next_growth_check, GROWTH_CHECK_INTERVAL_MS)
+    }
 
-        now >= next
-            && self
-                .inner
-                .next_growth_check
+    /// Claim the interval that starts at `next`, unless it lies ahead.
+    fn claim(&self, next: &AtomicU64, interval: u64) -> bool {
+        let now = u64::try_from(self.inner.created.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let due = next.load(Ordering::Relaxed);
+
+        now >= due
+            && next
                 .compare_exchange(
-                    next,
-                    now.saturating_add(GROWTH_CHECK_INTERVAL_MS),
+                    due,
+                    now.saturating_add(interval),
                     Ordering::Relaxed,
                     Ordering::Relaxed,
                 )
                 .is_ok()
+    }
+
+    /// While closed connections linger, return completed deferred slots of
+    /// every class. Their leases are the last owners of those tables.
+    /// A free list that never runs dry would otherwise keep them forever.
+    fn release_closed(&self) {
+        let closed = &self.inner.closed;
+        if !closed.lingering.load(Ordering::Relaxed)
+            || !self.claim(&closed.next_sweep, CLOSED_SWEEP_INTERVAL_MS)
+        {
+            return;
+        }
+
+        for class in self.inner.classes.load().values() {
+            class.pool.reclaim();
+        }
+
+        for class in self.lock_allocation().iter() {
+            class.pool.reclaim();
+        }
+
+        let mut tables = self.lock_closed();
+        tables.retain(|table| table.strong_count() != 0);
+        if tables.is_empty() {
+            closed.lingering.store(false, Ordering::Relaxed);
+        }
     }
 
     /// Remove classes selected by `retire`, and replaced classes whose last
@@ -349,6 +410,14 @@ impl SendPool {
 
         self.inner.classes.store(Arc::new(classes));
         Ok(Some(class))
+    }
+
+    fn lock_closed(&self) -> MutexGuard<'_, Vec<Weak<Table>>> {
+        self.inner
+            .closed
+            .tables
+            .lock()
+            .expect("SHM send pool closed tables")
     }
 
     fn lock_allocation(&self) -> MutexGuard<'_, Vec<Arc<Class>>> {

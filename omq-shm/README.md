@@ -68,7 +68,8 @@ Receivers validate batches on the IO thread and enqueue one descriptor;
 application receive creates the non-inline payload views.
 
 Disconnect cancels unread leases. Borrowed storage remains pinned until final
-drop or pidfd-confirmed reader exit; EOF cannot reclaim it. Mappings outlive
+drop or pidfd-confirmed reader exit; EOF cannot reclaim it. A closed
+connection's table closes after its leases complete. Mappings outlive
 socket/context teardown. Futex credit waits leave control and shutdown reachable.
 
 ## Memory limit

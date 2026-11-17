@@ -685,6 +685,30 @@ fn repeated_publication_keeps_completed_lease_bookkeeping_bounded() {
 }
 
 #[test]
+fn closed_connection_tables_close_once_their_leases_complete() {
+    let pool = SendPool::new(64, None);
+    let (mut sender, mut receiver) = pair_with_send_pool(64, pool.clone());
+    drop(delivered(
+        &mut sender,
+        &mut receiver,
+        &Message::from_slice(&[7; 256]),
+    ));
+
+    // The slot waits in the deferred queue while the pool has free slots.
+    let table = Arc::downgrade(&sender.outgoing);
+    drop(sender);
+    drop(receiver);
+
+    let (mut sender, mut receiver) = pair_with_send_pool(64, pool);
+    drop(delivered(
+        &mut sender,
+        &mut receiver,
+        &Message::from_slice(&[8; 256]),
+    ));
+    assert_eq!(table.strong_count(), 0);
+}
+
+#[test]
 fn completed_leases_return_before_credit_runs_out() {
     let body = Message::from_slice(&[7; 256]);
     let (mut sender, mut receiver) = pair(64);

@@ -379,6 +379,7 @@ impl Drop for Connection {
 
         self.outgoing.stop();
         let _ = self.outgoing.carrier.notify_writer(&self.outgoing.mapping);
+        self.send_pool.close(&self.outgoing);
         // EOF alone never clears borrowed outgoing leases. Application pools
         // retain those leases; pidfd death or final receiver Drop returns them.
     }

@@ -96,27 +96,76 @@ gh workflow run release-libzmq.yml --repo paddor/omq.rs -f tag=omq-libzmq-v0.11.
    bump needs minor bumps of `omq-shm`, `omq-tokio`, and `omq-libzmq`, not
    release-plz's patch: their APIs expose `omq-proto` types.
 
-2. **Curate changelogs.** For each bumped crate, insert a new
-   `## [x.y.z]` section below `## [Unreleased]`. Never modify existing
-   versioned sections.
+2. **Start a full CI run.** PRs skip macOS and old language versions. Run
+   them on `main` now, so their failures show before the binding releases:
 
-3. **Update zguide examples.** Bump `omq-tokio` versions in
-   `examples/zguide/*/Cargo.toml`.
+   ```sh
+   gh workflow run ci.yml --repo paddor/omq.rs --ref main
+   ```
 
-4. **Merge the release PR.** release-plz tags and publishes to
-   crates.io automatically.
+3. **Curate on the release-plz branch.** Push one commit to that branch.
+   Changelogs added after the merge miss crates.io, and a bot-opened PR runs
+   no CI until someone pushes to it.
+   - For each bumped crate, insert a new `## [x.y.z] - DATE` section below
+     `## [Unreleased]`. Never modify existing versioned sections.
+   - Bump `omq-tokio` in `examples/zguide/*/Cargo.toml`.
+   - On a minor `omq-proto` or `omq-tokio` bump, raise their crates.io
+     requirements in `bindings/go/native`, `bindings/ruby/ext/omq_rs_native`,
+     and `bindings/beam/native`. Otherwise the workspace path patch goes
+     unused (`[[patch.unused]]` in `bindings/ruby/Cargo.lock`).
+   - Refresh the tracked lockfiles. This changes only path crate versions:
 
-5. **Bindings** if changed: prepare the binding release on a PR, merge it,
-   then tag from the merged `main` commit. Do not tag before the release PR is
-   merged.
+     ```sh
+     for lock in $(git ls-files '*Cargo.lock'); do
+       (cd "$(dirname "$lock")" && cargo metadata --format-version 1 >/dev/null)
+     done
+     ```
+
+4. **Squash-merge the release PR** with a title that names the versions.
+   release-plz tags and publishes to crates.io and attaches the omq-libzmq
+   libraries.
+
+5. **Bindings** if changed: prepare all binding releases on one PR once
+   crates.io lists the crates and the omq-libzmq release has its libraries
+   (OMQ.dart pins them). Merge it, then tag from the merged `main` commit.
+   Do not tag before the release PR is merged.
 
 ## Binding Releases
 
+What each release changes, besides its `CHANGELOG.md` entry (OMQ.php has
+none). Paths are relative to the binding's directory; the sections below
+have the details.
+
+| Binding | Bump | Tag | Publish |
+| --- | --- | --- | --- |
+| pyomq | `Cargo.toml`, `pyproject.toml`, `Cargo.lock` | `pyomq-vX.Y.Z` | workflow, PyPI |
+| omq-rs | `lib/omq/rs/version.rb`, `ext/omq_rs_native/Cargo.toml`, `Cargo.lock`, `Gemfile.lock` | `ruby-vX.Y.Z` | workflow, RubyGems |
+| OMQ.java | - | `omq-java-vX.Y.Z` | workflow, Maven Central |
+| OMQ.go | - | `bindings/go/vX.Y.Z` | the tag |
+| OMQ.node | `Cargo.toml`, `Cargo.lock`, `package.json`, `package-lock.json`, `npm/*/package.json` | `omq-node-vX.Y.Z` | workflow, npm |
+| OMQ.Net | `Omq.Net.csproj` | `omq-dotnet-vX.Y.Z` | workflow, NuGet |
+| OMQ.lua | new `omq-X.Y.Z-1.rockspec` | `omq-lua-vX.Y.Z` | `luarocks upload` |
+| omq (BEAM) | `native/Cargo.toml`, `src/omq.app.src` | - | `rebar3 hex publish` |
+| OMQ.zig | `build.zig.zon` | `omq-zig-vX.Y.Z` | the tag |
+| OMQ.dart | `pubspec.yaml`, `lib/src/hook/libomq_zmq.dart` | `omq-dart-vX.Y.Z` | workflow, pub.dev |
+| OMQ.php | `native/Cargo.toml`, `native/Cargo.lock` | `X.Y.Z` in `paddor/omq-binding.php` | `export_pie.rb`, workflow |
+
 Push binding tags one at a time with `push.followTags` disabled. GitHub does
 not create push events when one push creates more than three tags, and a local
-`push.followTags=true` setting can silently add other annotated tags.
+`push.followTags=true` setting can silently add other annotated tags:
 
-For workflow-backed releases, find and watch the run created for the tag:
+```sh
+while read -r tag msg; do
+  git tag -a "$tag" -m "$msg" MERGE_COMMIT
+  git -c push.followTags=false push origin "refs/tags/$tag"
+done <<'EOF'
+pyomq-v0.28.1 pyomq 0.28.1
+omq-node-v0.3.1 OMQ.node 0.3.1
+EOF
+```
+
+For workflow-backed releases, find and watch the run created for the tag.
+Do the LuaRocks, Hex, and PIE releases while the workflows run.
 
 ```sh
 gh run list --repo paddor/omq.rs --workflow WORKFLOW --branch TAG --limit 1
@@ -262,19 +311,21 @@ git -c push.followTags=false push origin omq-dotnet-v0.2.0
 
 `OMQ.lua` publishes to LuaRocks. Prepare a release by adding a versioned
 rockspec and `bindings/lua/CHANGELOG.md` entry. After the PR is merged, tag the
-same commit before uploading the rockspec:
+same commit before uploading the rockspec. The upload leaves
+`omq-0.2.2-1.src.rock` in the current directory; delete it.
 
 ```sh
 git tag -a omq-lua-v0.2.2 -m "OMQ.lua 0.2.2"
 git -c push.followTags=false push origin omq-lua-v0.2.2
 luarocks upload bindings/lua/omq-0.2.2-1.rockspec
+rm omq-0.2.2-1.src.rock
 ```
 
 `OMQ.beam` publishes the `omq`, `omq_elixir`, and `omq_gleam` packages to Hex.
-Prepare them by updating all three package versions, the native crate version
-and `omq-tokio` dependency, and `bindings/beam/CHANGELOG.md`. Publish `omq`
-first, then the Elixir and Gleam wrappers, following
-`bindings/beam/DEVELOPMENT.md`.
+Prepare `omq` on the bindings PR by bumping `bindings/beam/native/Cargo.toml`
+and `bindings/beam/src/omq.app.src` and adding a `bindings/beam/CHANGELOG.md`
+entry. After it merges, publish `omq`, then bump the wrappers on a second PR
+and publish them, following `bindings/beam/DEVELOPMENT.md`.
 
 `OMQ.dart` publishes the `omq` package to pub.dev from
 `.github/workflows/release-dart.yml`. Its build hook downloads the prebuilt
@@ -310,7 +361,10 @@ the GitHub release, so release omq-libzmq first. Prepare a release by bumping
 `bindings/php/native/Cargo.toml` on a PR. After the PR is merged, export and
 push from the merged `main` commit. A manual run of the workflow builds
 every archive and runs the OMQ.php tests on it without publishing; the tag
-publishes. Once Packagist lists the version, check it in every image:
+publishes. `export_pie.rb` creates the tag locally, so push it only after
+the manual run passes. If the run fails, fix it on omq.rs, delete the local
+tag with `git -C /tmp/omq-binding.php tag -d 0.1.1`, and export again.
+Once Packagist lists the version, check it in every image:
 
 ```sh
 git clone git@github.com:paddor/omq-binding.php.git /tmp/omq-binding.php

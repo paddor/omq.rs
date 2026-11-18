@@ -1,6 +1,6 @@
 [package]
 name = "pyomq"
-version = "0.28.1"
+version = "0.28.2"
 edition = "2024"
 rust-version = "1.93"
 license = "ISC"

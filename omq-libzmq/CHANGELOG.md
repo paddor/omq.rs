@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.4] - 2026-11-19
+
+### Fixed
+
+- An `shm://` sender closes a disconnected connection's lease table,
+  eventfds, and peer pidfd once its leases complete. Before, every
+  reconnect could leave four descriptors open.
+
+### Changed
+
+- Require `omq-tokio` 0.37.1, which requires zrip 0.8.18 (faster Zstd
+  encoding and decoding) and lz4rip 0.12.3 (same LZ4 output on every target).
+
 ## [0.11.3] - 2026-11-17
 
 ### Fixed

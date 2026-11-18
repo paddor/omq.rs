@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.40.2] - 2026-11-19
+
 ### Changed
 
 - Require zrip 0.8.18: faster encoding and decoding, and Fast levels -6 to 2

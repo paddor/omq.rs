@@ -769,7 +769,7 @@ dependencies = [
 
 [[package]]
 name = "omq-proto"
-version = "0.40.1"
+version = "0.40.2"
 dependencies = [
  "bytes",
  "concurrent-queue",
@@ -785,7 +785,7 @@ dependencies = [
 
 [[package]]
 name = "omq-shm"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -797,7 +797,7 @@ dependencies = [
 
 [[package]]
 name = "omq-tokio"
-version = "0.37.0"
+version = "0.37.1"
 dependencies = [
  "arc-swap",
  "bytes",

@@ -48,13 +48,13 @@ thiserror = "2.0.21"
 zeroize = { version = "1.9.1", features = ["zeroize_derive"], optional = true }
 
 [dependencies.lz4rip]
-version = "0.12.2"
+version = "0.12.3"
 default-features = false
 features = ["std"]
 optional = true
 
 [dependencies.zrip]
-version = "0.8.17"
+version = "0.8.18"
 default-features = false
 features = ["std", "frame", "dict_builder"]
 optional = true

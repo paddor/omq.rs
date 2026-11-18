@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Require zrip 0.8.18: faster encoding and decoding, and Fast levels -6 to 2
+  retuned for speed (`zstd`).
+- Require lz4rip 0.12.3: 32-bit and big-endian targets compress like 64-bit
+  little-endian ones, so output is the same on every target (`lz4`).
+
 ## [0.40.1] - 2026-11-17
 
 ### Changed

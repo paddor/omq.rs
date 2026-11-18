@@ -7,12 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.37.1] - 2026-11-19
+
 ### Fixed
 
 - An `shm://` sender closes a disconnected connection's lease table,
   eventfds, and peer pidfd once its leases complete. Before, slots waiting
   for reuse kept them until the socket ran out of free slots, so every
   reconnect could leave four descriptors open.
+
+### Changed
+
+- Require `omq-proto` 0.40.2, which requires zrip 0.8.18 (faster Zstd
+  encoding and decoding) and lz4rip 0.12.3 (same LZ4 output on every target).
 
 ## [0.37.0] - 2026-11-17
 

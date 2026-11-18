@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-11-19
+
+### Changed
+
+- Build with lz4rip 0.12.3 (same LZ4 output on every target).
+
+### Fixed
+
+- Bundle `omq-tokio` 0.37.1. On Linux, an `shm://` sender closes a
+  disconnected connection's lease table, eventfds, and peer pidfd once its
+  leases complete. Before, every reconnect could leave four descriptors
+  open.
+
 ## [0.3.1] - 2026-11-17
 
 ### Fixed

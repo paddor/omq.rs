@@ -1,6 +1,6 @@
 [package]
 name = "omq-php-native"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 rust-version = "1.93"
 license = "ISC"
@@ -11,7 +11,7 @@ name = "omq_php"
 crate-type = ["cdylib"]
 
 [dependencies]
-ext-php-rs = "0.16"
+ext-php-rs = "=0.16.4"
 libc = "0.2"
 omq_zmq = { package = "omq-libzmq", path = "../../../omq-libzmq" }
 

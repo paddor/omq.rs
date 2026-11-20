@@ -9,10 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Require zrip 0.8.22. Dictionary compression no longer panics or writes a
-  corrupt frame on far matches. Trained dictionaries carry a Huffman table,
-  so 64-256 B dictionary frames are 12-24% smaller and 1 KiB frames 4%
-  smaller (`zstd`).
+- Require zrip 0.8.23. Trained dictionaries carry a Huffman table, so
+  64-256 B dictionary frames are 12-24% smaller and 1 KiB frames 4%
+  smaller. Level -7 encodes 4-25% faster (`zstd`).
+
+### Fixed
+
+- Compression with a dictionary could panic or write a frame the peer
+  cannot decode, on far matches or at level -7, which the adaptive level
+  reaches under load (`zstd`).
 
 ## [0.40.2] - 2026-11-19
 

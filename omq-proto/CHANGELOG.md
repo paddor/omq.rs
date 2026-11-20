@@ -9,9 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Require zrip 0.8.21. Dictionary compression no longer panics or writes a
-  corrupt frame on far matches. 64 B dictionary frames are 11-13% smaller,
-  and levels 3 and 4 encode small dictionary frames faster (`zstd`).
+- Require zrip 0.8.22. Dictionary compression no longer panics or writes a
+  corrupt frame on far matches. Trained dictionaries carry a Huffman table,
+  so 64-256 B dictionary frames are 12-24% smaller and 1 KiB frames 4%
+  smaller (`zstd`).
 
 ## [0.40.2] - 2026-11-19
 

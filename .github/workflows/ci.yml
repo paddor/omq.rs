@@ -1290,8 +1290,7 @@ jobs:
           java-version: |
             25
             21
-          cache: maven
-          cache-dependency-path: bindings/java/pom.xml
+      - uses: ./.github/actions/maven-cache
       - name: format, lint, compile, javadoc
         run: >
           mvn -f bindings/java/pom.xml -DskipNative=true -DskipTests
@@ -1320,8 +1319,7 @@ jobs:
           java-version: |
             ${{ matrix.java == '21' && '25' || '21' }}
             ${{ matrix.java }}
-          cache: maven
-          cache-dependency-path: bindings/java/pom.xml
+      - uses: ./.github/actions/maven-cache
       - uses: actions/setup-python@v6
         id: python
         with:

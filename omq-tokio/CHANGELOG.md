@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.37.2] - 2026-11-21
+
+### Fixed
+
+- Zstd compression with a dictionary could write a frame the peer cannot
+  decode, on far matches or at level -7, which the adaptive level reaches
+  under load.
+
+### Changed
+
+- Require `omq-proto` 0.40.3, which requires zrip 0.8.23. Trained Zstd
+  dictionaries carry a Huffman table, so 64-256 B dictionary frames are
+  12-24% smaller.
+
 ## [0.37.1] - 2026-11-19
 
 ### Fixed

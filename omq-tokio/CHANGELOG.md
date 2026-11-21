@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.38.0] - 2026-11-21
+
 ### Added
 
 - Listeners enforce `Options::ip_allowlist` once per connection. TCP
@@ -18,6 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Socket::set_ip_allowlist` and `blocking::Socket::set_ip_allowlist` replace
   the list for later binds. They fail while a TCP, WS, QUIC, DART, or UDP
   endpoint is bound or resolving.
+
+### Changed
+
+- Require `omq-proto` 0.41.0, which adds `Options::ip_allowlist` and requires
+  zrip 0.8.24 (Zstd dictionary fixes, faster level -7 and decoding).
 
 ## [0.37.1] - 2026-11-19
 

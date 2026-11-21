@@ -76,4 +76,18 @@ defmodule OMQTest do
     assert :ok = :omq.close(pull)
     assert :ok = OMQ.term(ctx)
   end
+
+  test "web transport options" do
+    assert OMQ.has(:ws)
+    assert OMQ.has(:quic)
+    assert {:ok, ctx} = OMQ.context()
+    assert {:ok, pub} = OMQ.socket(ctx, :pub)
+    origin = "http://localhost:5173"
+    assert :ok = OMQ.setsockopt(pub, OMQ.omq_ws_allowed_origins(), origin)
+    assert {:ok, ^origin} = OMQ.getsockopt(pub, :omq_ws_allowed_origins)
+    assert {:ok, "/omq"} = OMQ.getsockopt(pub, OMQ.omq_quic_webtransport_path())
+    assert {:ok, "ws://127.0.0.1:" <> _} = OMQ.bind(pub, "ws://127.0.0.1:0/omq")
+    assert :ok = OMQ.close(pub)
+    assert :ok = OMQ.term(ctx)
+  end
 end

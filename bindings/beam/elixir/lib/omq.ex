@@ -624,6 +624,45 @@ defmodule OMQ do
   @doc "OMQ_MAX_PEER_SUBSCRIPTIONS option ID. Default 65536; -1 means no limit."
   def omq_max_peer_subscriptions, do: call(:omq_max_peer_subscriptions, [])
 
+  @doc "WSS_KEY_PEM option ID. PEM private key for wss:// binds."
+  def wss_key_pem, do: call(:wss_key_pem, [])
+
+  @doc "WSS_CERT_PEM option ID. PEM certificate chain for wss:// binds."
+  def wss_cert_pem, do: call(:wss_cert_pem, [])
+
+  @doc "WSS_TRUST_PEM option ID. PEM trust anchors for wss:// connects."
+  def wss_trust_pem, do: call(:wss_trust_pem, [])
+
+  @doc "WSS_HOSTNAME option ID. Certificate name override for wss:// connects."
+  def wss_hostname, do: call(:wss_hostname, [])
+
+  @doc "WSS_TRUST_SYSTEM option ID. Trust the platform certificate store on wss:// connects. Default 1."
+  def wss_trust_system, do: call(:wss_trust_system, [])
+
+  @doc "OMQ_WS_ALLOWED_ORIGINS option ID. Newline-separated browser origins that ws:// and wss:// listeners admit. Empty (default) rejects browsers."
+  def omq_ws_allowed_origins, do: call(:omq_ws_allowed_origins, [])
+
+  @doc "OMQ_QUIC_CERT_PEM option ID. PEM certificate chain for quic:// binds."
+  def omq_quic_cert_pem, do: call(:omq_quic_cert_pem, [])
+
+  @doc "OMQ_QUIC_KEY_PEM option ID. PEM private key for quic:// binds."
+  def omq_quic_key_pem, do: call(:omq_quic_key_pem, [])
+
+  @doc "OMQ_QUIC_TRUST_PEM option ID. PEM trust anchors for quic:// connects."
+  def omq_quic_trust_pem, do: call(:omq_quic_trust_pem, [])
+
+  @doc "OMQ_QUIC_SERVER_NAME option ID. Certificate name override for quic:// connects."
+  def omq_quic_server_name, do: call(:omq_quic_server_name, [])
+
+  @doc "OMQ_QUIC_TRUST_SYSTEM option ID. Trust the platform certificate store on quic:// connects. Default 1."
+  def omq_quic_trust_system, do: call(:omq_quic_trust_system, [])
+
+  @doc "OMQ_QUIC_ALLOWED_ORIGINS option ID. Newline-separated browser origins that quic:// listeners admit over WebTransport. Empty (default) rejects browsers."
+  def omq_quic_allowed_origins, do: call(:omq_quic_allowed_origins, [])
+
+  @doc "OMQ_QUIC_WEBTRANSPORT_PATH option ID. WebTransport path on quic:// listeners. Default /omq."
+  def omq_quic_webtransport_path, do: call(:omq_quic_webtransport_path, [])
+
   @doc "OMQ_ON_MUTE block mode value."
   def omq_on_mute_block, do: call(:omq_on_mute_block, [])
 

@@ -92,3 +92,20 @@ pub fn erlang_api_receives_from_gleam_peer_test() {
   let assert Ok(Nil) = omq.close(push)
   let assert Ok(Nil) = omq.term(ctx)
 }
+
+pub fn web_transport_options_test() {
+  ensure_omq()
+  let assert True = omq.has(<<"ws":utf8>>)
+  let assert True = omq.has(<<"quic":utf8>>)
+  let assert Ok(ctx) = omq.context()
+  let assert Ok(pub_socket) = omq.socket(ctx, omq.publisher())
+  let origin = <<"http://localhost:5173":utf8>>
+  let assert Ok(Nil) =
+    omq.setsockopt_binary(pub_socket, omq.omq_ws_allowed_origins(), origin)
+  omq.getsockopt_binary(pub_socket, omq.omq_ws_allowed_origins())
+  |> should.equal(Ok(origin))
+  omq.getsockopt_binary(pub_socket, omq.omq_quic_webtransport_path())
+  |> should.equal(Ok(<<"/omq":utf8>>))
+  let assert Ok(Nil) = omq.close(pub_socket)
+  let assert Ok(Nil) = omq.term(ctx)
+}

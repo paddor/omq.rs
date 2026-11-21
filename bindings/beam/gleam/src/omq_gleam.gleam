@@ -845,6 +845,71 @@ pub fn omq_max_peer_subscriptions() -> Int {
   1102
 }
 
+/// Return WSS_KEY_PEM constant. PEM private key for wss:// binds.
+pub fn wss_key_pem() -> Int {
+  103
+}
+
+/// Return WSS_CERT_PEM constant. PEM certificate chain for wss:// binds.
+pub fn wss_cert_pem() -> Int {
+  104
+}
+
+/// Return WSS_TRUST_PEM constant. PEM trust anchors for wss:// connects.
+pub fn wss_trust_pem() -> Int {
+  105
+}
+
+/// Return WSS_HOSTNAME constant. Certificate name override for wss:// connects.
+pub fn wss_hostname() -> Int {
+  106
+}
+
+/// Return WSS_TRUST_SYSTEM constant. Trust the platform certificate store on wss:// connects. Default 1.
+pub fn wss_trust_system() -> Int {
+  107
+}
+
+/// Return OMQ_WS_ALLOWED_ORIGINS constant. Newline-separated browser origins that ws:// and wss:// listeners admit. Empty (default) rejects browsers.
+pub fn omq_ws_allowed_origins() -> Int {
+  1009
+}
+
+/// Return OMQ_QUIC_CERT_PEM constant. PEM certificate chain for quic:// binds.
+pub fn omq_quic_cert_pem() -> Int {
+  1011
+}
+
+/// Return OMQ_QUIC_KEY_PEM constant. PEM private key for quic:// binds.
+pub fn omq_quic_key_pem() -> Int {
+  1012
+}
+
+/// Return OMQ_QUIC_TRUST_PEM constant. PEM trust anchors for quic:// connects.
+pub fn omq_quic_trust_pem() -> Int {
+  1013
+}
+
+/// Return OMQ_QUIC_SERVER_NAME constant. Certificate name override for quic:// connects.
+pub fn omq_quic_server_name() -> Int {
+  1014
+}
+
+/// Return OMQ_QUIC_TRUST_SYSTEM constant. Trust the platform certificate store on quic:// connects. Default 1.
+pub fn omq_quic_trust_system() -> Int {
+  1015
+}
+
+/// Return OMQ_QUIC_ALLOWED_ORIGINS constant. Newline-separated browser origins that quic:// listeners admit over WebTransport. Empty (default) rejects browsers.
+pub fn omq_quic_allowed_origins() -> Int {
+  1017
+}
+
+/// Return OMQ_QUIC_WEBTRANSPORT_PATH constant. WebTransport path on quic:// listeners. Default /omq.
+pub fn omq_quic_webtransport_path() -> Int {
+  1019
+}
+
 /// Return OMQ_ON_MUTE block mode value.
 pub fn omq_on_mute_block() -> Int {
   0

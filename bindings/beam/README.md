@@ -52,6 +52,10 @@ omq_gleam = ">= 0.2.8 and < 1.0.0"
 - PLAIN servers require a fixed credential allowlist through
   `omq:plain_server(Socket, [{Username, Password}, ...])` before bind. Bare
   `plain_server` option staging fails closed.
+- Browsers connect to `ws://`, `wss://`, or `quic://` (WebTransport)
+  listeners through [OMQ.ts](../../pure/typescript/). List the page origin
+  in `omq_ws_allowed_origins` or `omq_quic_allowed_origins`. QUIC binds need
+  `omq_quic_cert_pem` and `omq_quic_key_pem`.
 
 Example:
 

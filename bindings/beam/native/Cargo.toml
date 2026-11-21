@@ -1,6 +1,6 @@
 [package]
 name = "omq_beam_native"
-version = "0.3.2"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.93"
 license = "ISC"
@@ -14,12 +14,14 @@ name = "omq_beam_native"
 crate-type = ["cdylib"]
 
 [features]
-default = ["plain", "curve", "lz4", "zstd"]
+default = ["plain", "curve", "lz4", "zstd", "ws", "quic", "webtransport"]
 plain = ["omq-tokio/plain"]
 curve = ["omq-tokio/curve"]
 lz4 = ["omq-tokio/lz4"]
 zstd = ["omq-tokio/zstd"]
 ws = ["omq-tokio/ws"]
+quic = ["omq-tokio/quic"]
+webtransport = ["quic", "omq-tokio/webtransport"]
 
 [dependencies]
 bytes = "1.12.0"

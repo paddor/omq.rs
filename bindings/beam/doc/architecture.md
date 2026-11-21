@@ -146,12 +146,13 @@ materialization because they are wrapper state or native socket commands.
 metadata and constants.
 
 Unsupported or read-only options return `{error, badarg, Reason}`. Core OMQ
-transport options use IDs outside the libzmq range.
+transport options use IDs outside the libzmq range. WSS, WebSocket origin,
+and QUIC options use omq-libzmq IDs.
 
-The native library builds PLAIN, CURVE, LZ4, and ZSTD by default. `has/1`
-delegates to native compile-time feature detection, so builds with custom
-Cargo features report actual capability state. CURVE key helper functions live
-in the NIF because they operate on native key types.
+The native library builds PLAIN, CURVE, LZ4, ZSTD, WS, QUIC, and WebTransport
+by default. `has/1` delegates to native compile-time feature detection, so
+builds with custom Cargo features report actual capability state. CURVE key
+helper functions live in the NIF because they operate on native key types.
 
 ## Language Wrappers
 

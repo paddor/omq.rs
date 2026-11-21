@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-21
+
+### Added
+
+- `ws://`, `wss://`, and `quic://` endpoints. The NIF builds the `ws`,
+  `quic`, and `webtransport` features by default, and `has/1` reports them.
+- Options with omq-libzmq IDs: `omq_ws_allowed_origins` lists the browser
+  origins WebSocket listeners admit, `wss_*` set WSS certificates and
+  trust, and `omq_quic_*` set QUIC certificates, trust, browser origins,
+  and the WebTransport path. Browsers connect through OMQ.ts
+  (`@paddor/omq`).
+
+### Changed
+
+- Build with zrip 0.8.24. Zstd level -7 encodes 4-25% faster, decoding is
+  faster, and 64-256 B dictionary frames are 12-24% smaller.
+
+### Fixed
+
+- Bundle `omq-tokio` 0.38.0. Zstd compression with a dictionary no longer
+  panics or writes a frame the peer cannot decode.
+
 ## [0.3.2] - 2026-11-19
 
 ### Changed

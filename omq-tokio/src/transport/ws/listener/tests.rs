@@ -18,6 +18,7 @@ async fn raw_accepts_respect_both_caps_and_release_every_reservation_on_drop() {
                 timeout: Duration::from_secs(30),
                 cancel: CancellationToken::new(),
                 monitor: MonitorPublisher::new(omq_proto::options::DEFAULT_MONITOR_CAPACITY),
+                allowlist: None,
                 io_pool: crate::context::IoPoolHandle::none(),
             },
             &omq_proto::Options::default(),

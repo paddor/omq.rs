@@ -35,6 +35,13 @@ pub(super) struct Entry {
     active_peer: Option<u64>,
 }
 
+impl Entry {
+    /// Whether this endpoint came from `bind()`.
+    pub(super) fn is_listener(&self) -> bool {
+        self.side == Side::Bind
+    }
+}
+
 /// A bound DART datagram socket and the IO thread reserved for it.
 struct Carrier {
     io: Arc<DartIo>,
@@ -202,6 +209,11 @@ impl SocketDriver {
             socket_type: self.socket_type,
             identity: self.dart.identity(&options.identity),
             target: carrier.target,
+            // Outbound connects are not filtered.
+            allowlist: options
+                .ip_allowlist
+                .clone()
+                .filter(|_| carrier.target.is_none()),
             shared: self.dart.clone(),
             joined: self.routing.joined_groups.clone(),
             // A full actor queue refuses the notice; the worker reports the

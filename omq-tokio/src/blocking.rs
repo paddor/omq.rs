@@ -547,6 +547,18 @@ impl Socket {
         self.inner.try_recv_many_into(max, out)
     }
 
+    /// Replace the IP allowlist for later binds. See
+    /// [`crate::Socket::set_ip_allowlist`].
+    ///
+    /// # Errors
+    /// Returns [`Error::Config`] while an IP endpoint is bound or resolving,
+    /// or [`Error::Closed`] after close.
+    pub fn set_ip_allowlist(&self, allowlist: Option<crate::IpAllowlist>) -> Result<()> {
+        let s = self.inner.clone_shared();
+        self.ctx
+            .block_on(async move { s.set_ip_allowlist(allowlist).await })
+    }
+
     /// Add a SUB prefix subscription.
     pub fn subscribe(&self, prefix: impl Into<bytes::Bytes>) -> Result<()> {
         let s = self.inner.clone_shared();

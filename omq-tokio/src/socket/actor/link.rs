@@ -27,6 +27,11 @@ pub(crate) enum SocketCommand {
         compression: Option<omq_proto::CompressionOptions>,
         ack: oneshot::Sender<Result<()>>,
     },
+    /// Replace the IP allowlist that later binds capture.
+    SetIpAllowlist {
+        allowlist: Option<omq_proto::IpAllowlist>,
+        ack: oneshot::Sender<Result<()>>,
+    },
     Subscribe {
         prefix: bytes::Bytes,
         ack: oneshot::Sender<Result<()>>,

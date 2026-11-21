@@ -131,6 +131,25 @@ impl Socket {
         rx.await.map_err(|_| Error::Closed)?
     }
 
+    /// Replace the IP allowlist for later binds. `None` admits every peer; an
+    /// empty list admits none. See [`omq_proto::Options::ip_allowlist`] for
+    /// the transports it covers. A bind started after this returns uses the
+    /// new list.
+    ///
+    /// # Errors
+    /// Returns [`Error::Config`] while a TCP, WS, QUIC, DART, or UDP endpoint
+    /// is bound or resolving, or [`Error::Closed`] after close.
+    pub async fn set_ip_allowlist(&self, allowlist: Option<omq_proto::IpAllowlist>) -> Result<()> {
+        let (ack, rx) = oneshot::channel();
+        self.inner
+            .cmd_tx
+            .send(SocketCommand::SetIpAllowlist { allowlist, ack })
+            .await
+            .map_err(|_| Error::Closed)?;
+
+        rx.await.map_err(|_| Error::Closed)?
+    }
+
     /// Subscribe to a topic prefix. Only valid on SUB / XSUB sockets; other
     /// types return `Error::Protocol`. An empty prefix subscribes to all
     /// topics. Sends a ZMTP SUBSCRIBE command to every currently-connected

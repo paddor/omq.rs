@@ -21,6 +21,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::engine::{PeerDriverCommand, PeerDriverData};
+use crate::transport::setup::ip_admitted;
 use crate::transport::udp;
 use omq_proto::message::Message;
 
@@ -39,6 +40,8 @@ pub(crate) struct DishDelivery {
     /// Groups this socket joined. Other datagrams are dropped here.
     pub(crate) joined: JoinedGroups,
     pub(crate) pool: Option<crate::PayloadPool>,
+    /// Source addresses this listener accepts. `None` accepts every source.
+    pub(crate) allowlist: Option<omq_proto::IpAllowlist>,
 }
 
 /// Spawn a DISH listener task. Reads datagrams, applies the local
@@ -80,11 +83,14 @@ async fn run_dish_listener(
         tokio::select! {
             () = cancel.cancelled() => break,
             res = recv_datagram(sock, &mut buf, ingress.as_mut()) => match res {
-                Ok((n, _from)) => {
+                Ok((n, from)) => {
                     if let Some(gate) = &mut ingress {
                         gate.cancel_wait();
                     }
                     let _ = budget.account(n);
+                    if !ip_admitted(delivery.allowlist.as_ref(), from.ip()) {
+                        continue;
+                    }
                     let Some(msg) = dish_message(&buf[..n], delivery) else {
                         continue;
                     };

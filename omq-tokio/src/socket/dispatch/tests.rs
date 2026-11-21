@@ -39,6 +39,7 @@ async fn bind_result_for_test(endpoint: &Endpoint) -> Result<BoundListener> {
                 monitor: crate::socket::monitor::MonitorPublisher::new(
                     omq_proto::options::DEFAULT_MONITOR_CAPACITY,
                 ),
+                allowlist: None,
                 io_pool: crate::context::IoPoolHandle::none(),
             },
         },

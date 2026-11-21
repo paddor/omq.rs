@@ -41,9 +41,9 @@ pub use omq_proto::{
 };
 pub use omq_proto::{
     CompressionKind, CompressionOptions, Endpoint, EndpointRole, EndpointSpec, Error, Frame,
-    FrameFlags, HandshakeRefusal, KeepAlive, MechanismConfig, MechanismSetup, Message, MessageIter,
-    MessagePool, OnMute, Options, PartCountError, Payload, ReconnectPolicy, Result, SocketType,
-    TrySendError, is_compatible,
+    FrameFlags, HandshakeRefusal, IpAllowlist, KeepAlive, MechanismConfig, MechanismSetup, Message,
+    MessageIter, MessagePool, OnMute, Options, PartCountError, Payload, ReconnectPolicy, Result,
+    SocketType, TrySendError, is_compatible,
 };
 #[cfg(feature = "curve")]
 pub use omq_proto::{CurveKeypair, CurvePublicKey, CurveSecretKey, CurveServerOptions};

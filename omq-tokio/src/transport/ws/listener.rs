@@ -52,6 +52,11 @@ impl WsListener {
     }
 
     fn start_setup(&mut self, stream: TcpStream, addr: SocketAddr) {
+        // Dropping a denied stream closes it before TLS or the HTTP upgrade.
+        if !self.queue.permits(addr) {
+            return;
+        }
+
         let Ok((setup, deadline)) = self.queue.admit(addr) else {
             return;
         };

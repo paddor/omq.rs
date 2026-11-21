@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Listeners enforce `Options::ip_allowlist` once per connection. TCP
+  (including STREAM and compressed TCP) and WS/WSS close other peers before
+  TLS, HTTP, the ZMTP greeting, or a pending-handshake slot. QUIC refuses
+  their Initials before Retry or TLS, DART ignores their handshakes, and UDP
+  DISH drops their datagrams. Outbound connects, IPC, SHM, and inproc are
+  unaffected.
+- `Socket::set_ip_allowlist` and `blocking::Socket::set_ip_allowlist` replace
+  the list for later binds. They fail while a TCP, WS, QUIC, DART, or UDP
+  endpoint is bound or resolving.
+
 ## [0.37.1] - 2026-11-19
 
 ### Fixed

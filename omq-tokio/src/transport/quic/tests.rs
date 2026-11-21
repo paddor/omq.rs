@@ -44,6 +44,7 @@ async fn listener_at(endpoint: &str, options: Options, timeout: Duration) -> Fix
             timeout,
             cancel: CancellationToken::new(),
             monitor: MonitorPublisher::new(omq_proto::options::DEFAULT_MONITOR_CAPACITY),
+            allowlist: options.ip_allowlist.clone(),
             io_pool: crate::context::IoPoolHandle::none(),
         },
         &options,
@@ -584,6 +585,7 @@ fn accept_setup(pool: &crate::context::IoPoolHandle) -> AcceptSetup {
         timeout: Duration::from_secs(5),
         cancel: CancellationToken::new(),
         monitor: MonitorPublisher::new(omq_proto::options::DEFAULT_MONITOR_CAPACITY),
+        allowlist: None,
         io_pool: pool.clone(),
     }
 }

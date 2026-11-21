@@ -275,6 +275,27 @@ impl EndpointTable {
         Some(self.bind_aliases.swap_remove(index).1)
     }
 
+    /// Whether an IP endpoint is bound or a bind is still resolving. Each
+    /// keeps the IP allowlist it captured.
+    fn has_ip_listener(&self) -> bool {
+        #[cfg(feature = "dart")]
+        if self.dart_endpoints.iter().any(dart::Entry::is_listener) {
+            return true;
+        }
+
+        !self.udp_listeners.is_empty()
+            || self
+                .pending_endpoints
+                .values()
+                .any(|pending| pending.side == Side::Bind)
+            || self.listeners.iter().any(|listener| {
+                !matches!(
+                    listener.endpoint,
+                    Endpoint::Ipc(_) | Endpoint::Shm(_) | Endpoint::Inproc { .. }
+                )
+            })
+    }
+
     fn dialer(&self, route_id: u64) -> Option<&DialerEntry> {
         self.dialers
             .iter()
@@ -537,6 +558,7 @@ impl SocketDriver {
         }
     }
 
+    #[expect(clippy::too_many_lines, reason = "one arm per socket command")]
     async fn handle_command(&mut self, cmd: SocketCommand) {
         match cmd {
             SocketCommand::Bind {
@@ -553,6 +575,9 @@ impl SocketDriver {
             } => {
                 self.handle_connect_command(endpoint, compression, ack)
                     .await;
+            }
+            SocketCommand::SetIpAllowlist { allowlist, ack } => {
+                let _ = ack.send(self.set_ip_allowlist(allowlist));
             }
             SocketCommand::Subscribe { prefix, ack } => {
                 ack_after_protocol_drain(self.apply_subscription(prefix, true), ack);

@@ -61,3 +61,42 @@ async fn full_mailbox_closes_excess_transport_and_releases_its_admission() {
     let _second_slot = admission.try_acquire().unwrap();
     assert!(admission.try_acquire().is_none());
 }
+
+#[tokio::test]
+async fn unlisted_peer_closes_without_reserving_a_handshake_slot() {
+    let (tx, mut rx) = mpsc::channel(1);
+    let admission = Admission::new(1);
+    let monitor = MonitorPublisher::new(omq_proto::options::DEFAULT_MONITOR_CAPACITY);
+    let mut events = monitor.subscribe();
+    let options = Options {
+        ip_allowlist: Some(omq_proto::IpAllowlist::try_from(&["127.0.0.2"][..]).unwrap()),
+        ..Options::default()
+    };
+
+    let task = ListenerTask {
+        options: Arc::new(options),
+        endpoint: "tcp://127.0.0.1:1".parse().unwrap(),
+        cancel: CancellationToken::new(),
+        tx,
+        admission: Some(admission.clone()),
+        monitor,
+    };
+
+    let (mut denied, mut client) = connection().await;
+    assert!(!task.admit(&mut denied));
+    drop(denied);
+    assert!(admission.try_acquire().is_some());
+    assert!(rx.try_recv().is_err());
+
+    let mut byte = [0];
+    let read = tokio::time::timeout(Duration::from_secs(1), client.read(&mut byte))
+        .await
+        .unwrap();
+    assert!(matches!(read, Ok(0) | Err(_)));
+
+    let event = events.try_recv().unwrap();
+    assert!(
+        matches!(&event, MonitorEvent::HandshakeFailed { reason, .. } if reason == IP_DENIED),
+        "{event:?}"
+    );
+}

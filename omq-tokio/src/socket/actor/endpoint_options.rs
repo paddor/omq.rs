@@ -1,11 +1,24 @@
 //! Per-endpoint options: capture at bind or connect, and setup checks.
 
-use omq_proto::Options;
+use omq_proto::{IpAllowlist, Options};
 use std::sync::Arc;
 
 use super::{Endpoint, Error, Result, SocketDriver, SocketType};
 
 impl SocketDriver {
+    /// Replace the IP allowlist that later binds capture. Bound IP endpoints
+    /// keep the list they captured, so a change while one exists fails.
+    pub(super) fn set_ip_allowlist(&mut self, allowlist: Option<IpAllowlist>) -> Result<()> {
+        if self.endpoints.has_ip_listener() {
+            return Err(Error::Config(
+                "IP allowlist cannot change while an IP endpoint is bound".into(),
+            ));
+        }
+
+        self.options.ip_allowlist = allowlist;
+        Ok(())
+    }
+
     pub(super) fn capture_endpoint_options(
         &self,
         compression: Option<omq_proto::CompressionOptions>,

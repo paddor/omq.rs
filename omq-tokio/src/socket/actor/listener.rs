@@ -6,13 +6,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use omq_proto::flow::DrainBudget;
+use omq_proto::monitor::PeerIdent;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::{AnyConn, Endpoint, InternalEvent, MonitorEvent};
 use crate::socket::dispatch::AnyListener;
 use crate::socket::monitor::MonitorPublisher;
-use crate::transport::setup::{Admission, PendingHandshake, SetupState};
+use crate::transport::setup::{Admission, IP_DENIED, PendingHandshake, SetupState, ip_admitted};
 
 pub(super) struct ListenerTask {
     pub(super) endpoint: Endpoint,
@@ -55,6 +56,15 @@ impl ListenerTask {
     }
 
     fn admit(&self, conn: &mut AnyConn) -> bool {
+        // TCP, STREAM, and compressed TCP. WS and QUIC peers passed the same
+        // check before their setup started.
+        if let PeerIdent::Socket(address) = conn.peer_ident()
+            && !ip_admitted(self.options.ip_allowlist.as_ref(), address.ip())
+        {
+            self.reject(conn.peer_ident().clone(), IP_DENIED);
+            return false;
+        }
+
         if let AnyConn::ByteStream {
             setup, peer_ident, ..
         } = conn
@@ -62,7 +72,7 @@ impl ListenerTask {
             && let Some(limit) = &self.admission
         {
             let source = match peer_ident {
-                omq_proto::monitor::PeerIdent::Socket(address) => Some(address.ip()),
+                PeerIdent::Socket(address) => Some(address.ip()),
                 _ => None,
             };
 
@@ -112,7 +122,7 @@ impl ListenerTask {
         }
     }
 
-    fn reject(&self, peer_ident: omq_proto::monitor::PeerIdent, reason: &str) {
+    fn reject(&self, peer_ident: PeerIdent, reason: &str) {
         self.monitor.publish(MonitorEvent::HandshakeFailed {
             endpoint: self.endpoint.clone(),
             peer_ident,

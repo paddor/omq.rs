@@ -30,8 +30,13 @@ impl SocketDriver {
     /// Bind a UDP DISH listener. Validates socket type, opens the
     /// socket, registers the listener task, publishes
     /// [`MonitorEvent::Listening`]. UDP listeners do not register a
-    /// peer entry - datagrams are pushed straight onto `recv_tx`.
-    pub(super) async fn bind_udp(&mut self, endpoint: Endpoint) -> Result<Endpoint> {
+    /// peer entry - datagrams are pushed straight onto `recv_tx`. Datagrams
+    /// from sources outside `allowlist` are dropped.
+    pub(super) async fn bind_udp(
+        &mut self,
+        endpoint: Endpoint,
+        allowlist: Option<omq_proto::IpAllowlist>,
+    ) -> Result<Endpoint> {
         if self.socket_type != SocketType::Dish {
             return Err(Error::Protocol(
                 "udp:// bind is only supported on DISH sockets".into(),
@@ -66,6 +71,7 @@ impl SocketDriver {
             recv_tx: self.link.recv_tx.clone(),
             joined: self.routing.joined_groups.clone(),
             pool: self.resources.payload_pools.receive(),
+            allowlist,
         };
         let task = spawn_dish_listener(
             sock,

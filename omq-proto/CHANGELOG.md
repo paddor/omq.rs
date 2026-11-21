@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Options::ip_allowlist` and `IpAllowlist`: exact remote IP addresses that
+  listeners admit. `None` admits every peer; an empty list admits none.
+  Entries parse as IP literals with `TryFrom<&[S]>`, and IPv4-mapped IPv6
+  addresses match their IPv4 form.
+
 ### Changed
 
 - Require zrip 0.8.23. Trained dictionaries carry a Huffman table, so

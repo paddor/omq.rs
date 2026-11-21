@@ -16,9 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Require zrip 0.8.23. Trained dictionaries carry a Huffman table, so
+- Require zrip 0.8.24. Trained dictionaries carry a Huffman table, so
   64-256 B dictionary frames are 12-24% smaller and 1 KiB frames 4%
-  smaller. Level -7 encodes 4-25% faster (`zstd`).
+  smaller. Level -7 encodes 4-25% faster. Huffman literals decode faster,
+  and builds without CPU flags use BMI2 and LZCNT when the CPU has them
+  (`zstd`).
 
 ### Fixed
 

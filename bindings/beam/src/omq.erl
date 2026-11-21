@@ -1119,8 +1119,8 @@ wss_hostname() -> 106.
 %% platform certificate store. Defaults to 1.
 wss_trust_system() -> 107.
 %% @doc Return OMQ_WS_ALLOWED_ORIGINS constant. Newline-separated exact
-%% browser origins, such as `<<"https://app.example.com">>`, that ws:// and
-%% wss:// listeners admit. Empty (default) rejects every request carrying
+%% browser origins, such as https://app.example.com, that ws:// and wss://
+%% listeners admit. Empty (default) rejects every request carrying
 %% Origin, so browsers need this. Native clients omit Origin.
 omq_ws_allowed_origins() -> 1009.
 %% @doc Return OMQ_QUIC_CERT_PEM constant. PEM certificate chain for quic://
@@ -1142,8 +1142,8 @@ omq_quic_trust_system() -> 1015.
 %% (default) rejects every request carrying Origin.
 omq_quic_allowed_origins() -> 1017.
 %% @doc Return OMQ_QUIC_WEBTRANSPORT_PATH constant. WebTransport path on
-%% quic:// listeners. Defaults to `<<"/omq">>`; browsers connect to
-%% `https://host:port/omq`.
+%% quic:// listeners. Defaults to /omq; browsers connect to
+%% https://host:port/omq.
 omq_quic_webtransport_path() -> 1019.
 %% @doc Return OMQ_ON_MUTE_BLOCK constant.
 omq_on_mute_block() -> 0.

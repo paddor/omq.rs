@@ -26,9 +26,17 @@ pub(crate) use queue::Refusal;
 #[cfg(any(feature = "ws", feature = "quic"))]
 pub(crate) use queue::{AcceptBudget, SetupQueue};
 
+/// Monitor reason for a peer outside a listener's IP allowlist.
+pub(crate) const IP_DENIED: &str = "peer address not in IP allowlist";
+
 /// One remote host may hold at most this share of a socket's pending
 /// handshakes, so a single source cannot fill the pool.
 const SOURCE_SHARE: usize = 8;
+
+/// Whether `allowlist` admits a peer at `address`. `None` admits every peer.
+pub(crate) fn ip_admitted(allowlist: Option<&omq_proto::IpAllowlist>, address: IpAddr) -> bool {
+    allowlist.is_none_or(|list| list.contains(address))
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct Admission {
@@ -203,6 +211,8 @@ pub(crate) struct AcceptSetup {
     pub(crate) timeout: Duration,
     pub(crate) cancel: CancellationToken,
     pub(crate) monitor: crate::socket::monitor::MonitorPublisher,
+    /// Peer addresses the listener admits. `None` admits every peer.
+    pub(crate) allowlist: Option<omq_proto::IpAllowlist>,
     /// Data IO runtimes for carriers that place setup work per peer.
     #[cfg_attr(not(feature = "quic"), expect(dead_code))]
     pub(crate) io_pool: crate::context::IoPoolHandle,

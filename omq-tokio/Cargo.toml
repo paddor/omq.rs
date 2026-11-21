@@ -354,6 +354,10 @@ name = "omq_shm"
 path = "tests/shm.rs"
 
 [[test]]
+name = "omq_ip_allowlist"
+path = "tests/ip_allowlist.rs"
+
+[[test]]
 name = "omq_ipv6"
 path = "tests/ipv6.rs"
 

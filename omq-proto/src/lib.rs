@@ -47,7 +47,7 @@ pub use monitor::{
 #[cfg(feature = "quic")]
 pub use options::QuicOptions;
 pub use options::{
-    CompressionOptions, KeepAlive, MechanismConfig, MessageRateLimit, OnMute, Options,
+    CompressionOptions, IpAllowlist, KeepAlive, MechanismConfig, MessageRateLimit, OnMute, Options,
     ReconnectPolicy, WorkloadProfile,
 };
 #[cfg(feature = "dart")]

@@ -439,6 +439,12 @@ impl QuicListener {
 
     fn start_setup(&mut self, index: usize, incoming: quinn::Incoming) {
         let addr = incoming.remote_address();
+        // Refuse before Retry or TLS. A spoofed source gets one small close.
+        if !self.queue.permits(addr) {
+            incoming.refuse();
+            return;
+        }
+
         // A spoofed source never receives the Retry token. Once half of this
         // listener's setup slots are taken, admit only validated addresses.
         if !incoming.remote_address_validated()

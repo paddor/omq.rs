@@ -11,6 +11,7 @@
 mod buffers;
 mod compression;
 mod connection;
+mod ip_allowlist;
 mod queue;
 mod receive;
 #[cfg(any(feature = "plain", feature = "curve"))]
@@ -29,6 +30,7 @@ use crate::subscription::{SubscriptionAdmission, SubscriptionRequest};
 
 pub use compression::CompressionOptions;
 pub use connection::ReconnectPolicy;
+pub use ip_allowlist::IpAllowlist;
 pub use queue::{OnMute, queue_capacity};
 pub use receive::MessageRateLimit;
 pub use tcp::KeepAlive;
@@ -261,6 +263,16 @@ pub struct Options {
     /// out or failed handshakes release their slot when the peer is closed.
     pub max_pending_handshakes: usize,
 
+    /// Remote IP addresses that bound endpoints admit. `None` (the default)
+    /// admits every peer; an empty list admits none.
+    ///
+    /// TCP (including STREAM and compressed TCP), WS/WSS, QUIC, and DART
+    /// listeners check the kernel-reported source address once per
+    /// connection, before carrier setup, the ZMTP greeting, or a
+    /// pending-handshake slot. UDP DISH drops datagrams from other
+    /// addresses. Outbound connects, IPC, SHM, and inproc are unaffected.
+    pub ip_allowlist: Option<IpAllowlist>,
+
     /// Reject incoming messages larger than this. Accounting includes payload
     /// bytes plus one internal payload slot per part. `None` = no limit,
     /// except native PEER sockets which default to 16 MiB.
@@ -488,6 +500,7 @@ pub struct Options {
 pub type MechanismConfig = MechanismSetup;
 
 impl Default for Options {
+    #[expect(clippy::too_many_lines, reason = "one line per flat Options field")]
     fn default() -> Self {
         Self {
             workload_profile: None,
@@ -513,6 +526,7 @@ impl Default for Options {
             heartbeat_timeout: None,
             handshake_timeout: Some(DEFAULT_HANDSHAKE_TIMEOUT),
             max_pending_handshakes: DEFAULT_MAX_PENDING_HANDSHAKES,
+            ip_allowlist: None,
             max_message_size: None,
             max_message_parts: Some(DEFAULT_MAX_MESSAGE_PARTS),
             shm_max_memory: Some(DEFAULT_SHM_MAX_MEMORY),

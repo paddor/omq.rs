@@ -340,7 +340,9 @@ impl SocketDriver {
         }
 
         if matches!(endpoint, Endpoint::Udp { .. }) {
-            let resolved = self.bind_udp(endpoint.clone()).await?;
+            let resolved = self
+                .bind_udp(endpoint.clone(), options.ip_allowlist.clone())
+                .await?;
             self.endpoints.note_bound(endpoint, &resolved);
             return Ok(resolved);
         }
@@ -376,6 +378,7 @@ impl SocketDriver {
                 timeout: carrier_setup_timeout(endpoint, options),
                 cancel: cancel.clone(),
                 monitor: self.link.monitor.clone(),
+                allowlist: options.ip_allowlist.clone(),
                 io_pool: self.resources.io_pool.clone(),
             },
         }

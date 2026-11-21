@@ -11,7 +11,7 @@ use omq_proto::endpoint::Endpoint;
 use omq_proto::flow::DrainBudget;
 use omq_proto::{Error, Result};
 
-use super::{AcceptSetup, Admission, PendingHandshake, SetupState};
+use super::{AcceptSetup, Admission, IP_DENIED, PendingHandshake, SetupState, ip_admitted};
 
 /// A finished setup: the transport with its admission, or why it failed.
 type Finished<T> = (SocketAddr, Result<(T, SetupState)>);
@@ -79,6 +79,17 @@ impl<T> SetupQueue<T> {
     #[cfg(feature = "quic")]
     pub(crate) fn io_pool(&self) -> &crate::context::IoPoolHandle {
         &self.setup.io_pool
+    }
+
+    /// Whether the IP allowlist admits a peer at `addr`. A denial is reported
+    /// to the monitor.
+    pub(crate) fn permits(&self, addr: SocketAddr) -> bool {
+        let admitted = ip_admitted(self.setup.allowlist.as_ref(), addr.ip());
+        if !admitted {
+            self.reject(addr, IP_DENIED.into());
+        }
+
+        admitted
     }
 
     /// Reserve socket and listener slots for a peer at `addr` and fix its

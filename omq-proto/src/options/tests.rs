@@ -591,3 +591,57 @@ fn rejects_handshake_timeout_beyond_the_clock_range() {
             .is_ok()
     );
 }
+
+#[test]
+fn ip_allowlist_normalizes_spelling_and_mapped_addresses() {
+    let list =
+        IpAllowlist::try_from(&[" 10.0.0.7 ", "::ffff:10.0.0.8", "FD00:0::7", "10.0.0.7"][..])
+            .unwrap();
+
+    let expected: Vec<std::net::IpAddr> = ["10.0.0.7", "10.0.0.8", "fd00::7"]
+        .iter()
+        .map(|a| a.parse().unwrap())
+        .collect();
+    assert_eq!(list.iter().collect::<Vec<_>>(), expected);
+    assert_eq!(list.len(), 3);
+
+    for admitted in [
+        "10.0.0.7",
+        "::ffff:10.0.0.7",
+        "10.0.0.8",
+        "fd00:0:0:0:0:0:0:7",
+    ] {
+        assert!(list.contains(admitted.parse().unwrap()), "{admitted}");
+    }
+
+    for denied in ["10.0.0.9", "fd00::8", "::10.0.0.7", "::1"] {
+        assert!(!list.contains(denied.parse().unwrap()), "{denied}");
+    }
+}
+
+#[test]
+fn empty_ip_allowlist_admits_nothing() {
+    let list = IpAllowlist::try_from(&[] as &[&str]).unwrap();
+    assert!(list.is_empty());
+    assert!(!list.contains(std::net::Ipv4Addr::LOCALHOST.into()));
+    assert_eq!(list, IpAllowlist::default());
+}
+
+#[test]
+fn ip_allowlist_rejects_anything_but_ip_literals() {
+    for invalid in [
+        "",
+        "10.0.0.7:80",
+        "[::1]",
+        "fe80::1%eth0",
+        "10.0.0.0/8",
+        "localhost",
+        "10.0.0.256",
+    ] {
+        let error = IpAllowlist::try_from(&["10.0.0.7", invalid][..]).unwrap_err();
+        assert!(
+            matches!(&error, crate::error::Error::Config(text) if text.contains("entry 1")),
+            "{invalid}: {error}"
+        );
+    }
+}

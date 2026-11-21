@@ -300,6 +300,11 @@ separate liveness stream so heartbeats ignore receive backpressure
 ([quic-rfc.md](quic-rfc.md)). Each DART endpoint task drives all its peers'
 sans-I/O sessions with bounded receive credit ([dart-rfc.md](dart-rfc.md)).
 
+`Options::ip_allowlist` admits IP peers by exact source address, once per
+connection. TCP, WS, and QUIC listeners close or refuse other peers before
+carrier setup, the ZMTP greeting, or a handshake slot; DART listeners ignore
+their handshakes, and DISH drops their datagrams.
+
 ## Source map
 
 | Question | Start here |

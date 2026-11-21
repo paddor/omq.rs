@@ -437,6 +437,8 @@ pub(crate) struct EndpointWorker {
     pub(crate) socket_type: SocketType,
     pub(crate) identity: Bytes,
     pub(crate) target: Option<SocketAddr>,
+    /// Listener-side peer addresses. `None` admits every source.
+    pub(crate) allowlist: Option<omq_proto::IpAllowlist>,
     pub(crate) shared: Arc<SocketState>,
     pub(crate) joined: crate::socket::udp::JoinedGroups,
     pub(crate) ready: Arc<dyn Fn(ReadyPeer) -> bool + Send + Sync>,
@@ -647,6 +649,7 @@ impl EndpointWorker {
         if !dart::supports(ready.socket_type)
             || !omq_proto::is_compatible(self.socket_type, ready.socket_type)
             || self.target.is_some_and(|target| target != source)
+            || !crate::transport::setup::ip_admitted(self.allowlist.as_ref(), source.ip())
         {
             return;
         }

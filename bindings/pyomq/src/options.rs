@@ -647,8 +647,7 @@ pub fn setsockopt(
         | constants::RECOVERY_IVL
         | constants::ZAP_DOMAIN => {}
         constants::RECONNECT_STOP => {
-            let v: i32 = value.extract()?;
-            sock.overlay.lock().unwrap().reconnect_stop = v;
+            ov.reconnect_stop = value.extract()?;
         }
         constants::AFFINITY => return Err(not_implemented("AFFINITY")),
         constants::BACKLOG => return Err(not_implemented("BACKLOG")),

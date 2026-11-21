@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-21
+
+### Changed
+
+- Require `omq-tokio` 0.38.0, which requires zrip 0.8.24. Zstd compression
+  with a dictionary no longer panics or writes a frame the peer cannot
+  decode, and level -7 and decoding are faster.
+
 ## [0.11.4] - 2026-11-19
 
 ### Fixed

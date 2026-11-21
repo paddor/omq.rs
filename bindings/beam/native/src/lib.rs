@@ -15,6 +15,9 @@ use omq_tokio::{
 use omq_tokio::{CurveKeypair, CurvePublicKey, CurveSecretKey};
 use rustler::{Binary, Encoder, Env, OwnedBinary, ResourceArc, Term};
 
+#[cfg(any(feature = "ws", feature = "quic"))]
+mod transport_options;
+
 mod atoms {
     rustler::atoms! {
         ok,
@@ -786,6 +789,12 @@ fn has_feature(name: Binary<'_>) -> bool {
         "lz4" => true,
         #[cfg(feature = "zstd")]
         "zstd" => true,
+        #[cfg(feature = "ws")]
+        "ws" | "wss" => true,
+        #[cfg(feature = "quic")]
+        "quic" => true,
+        #[cfg(feature = "webtransport")]
+        "webtransport" => true,
         _ => false,
     }
 }
@@ -1491,7 +1500,19 @@ fn setsockopt<'a>(
         39 | 42 | 31 | 8 | 79 | 40 | 51 | 52 | 53 | 56 | 38 | 80 | 25 | 9 | 55 => {}
         6 | 7 => return err_term(env, atoms::badarg(), "use subscribe/unsubscribe"),
         16 | 13 => return err_term(env, atoms::badarg(), "read-only option"),
-        _ => return err_term(env, atoms::badarg(), format!("unsupported option {option}")),
+        _ => {
+            #[cfg(any(feature = "ws", feature = "quic"))]
+            if let Some(result) =
+                transport_options::set(&mut options, option, int_value, bin_value.as_slice())
+            {
+                return match result {
+                    Ok(()) => ok_unit(env),
+                    Err(reason) => err_term(env, atoms::badarg(), reason),
+                };
+            }
+
+            return err_term(env, atoms::badarg(), format!("unsupported option {option}"));
+        }
     }
     ok_unit(env)
 }
@@ -1642,7 +1663,16 @@ fn getsockopt<'a>(env: Env<'a>, socket: ResourceArc<NativeSocket>, option: i64) 
         43 | 39 | 42 | 31 | 8 | 79 | 40 | 51 | 52 | 53 | 56 | 80 | 25 | 9 => ok(env, 0i64),
         32 => ok_binary(env, &socket.last_endpoint.lock().unwrap()),
         38 | 55 => ok_binary(env, &[]),
-        _ => err_term(env, atoms::badarg(), format!("unsupported option {option}")),
+        _ => {
+            #[cfg(any(feature = "ws", feature = "quic"))]
+            match transport_options::get(&options, option) {
+                Some(transport_options::Value::Int(value)) => return ok(env, value),
+                Some(transport_options::Value::Bytes(value)) => return ok_binary(env, &value),
+                None => {}
+            }
+
+            err_term(env, atoms::badarg(), format!("unsupported option {option}"))
+        }
     }
 }
 

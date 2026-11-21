@@ -142,6 +142,11 @@
     curve_serverkey/0, last_endpoint/0, omq_on_mute/0, omq_compression_level/0,
     omq_compression_dict/0, omq_compression_auto_train/0, omq_workload_profile/0,
     omq_max_message_parts/0, omq_max_peer_subscriptions/0,
+    wss_key_pem/0, wss_cert_pem/0, wss_trust_pem/0, wss_hostname/0,
+    wss_trust_system/0, omq_ws_allowed_origins/0, omq_quic_cert_pem/0,
+    omq_quic_key_pem/0, omq_quic_trust_pem/0, omq_quic_server_name/0,
+    omq_quic_trust_system/0, omq_quic_allowed_origins/0,
+    omq_quic_webtransport_path/0,
     omq_on_mute_block/0, omq_on_mute_drop_newest/0, omq_on_mute_drop_oldest/0,
     forwarder/0, queue/0, streamer/0, null/0, plain/0, curve/0
 ]).
@@ -1101,6 +1106,45 @@ omq_max_message_parts() -> 1101.
 %% @doc Return OMQ_MAX_PEER_SUBSCRIPTIONS constant. Most prefixes (PUB/XPUB)
 %% or groups (RADIO) one peer may hold. Defaults to 65536; -1 means no limit.
 omq_max_peer_subscriptions() -> 1102.
+%% @doc Return WSS_KEY_PEM constant. PEM private key for wss:// binds.
+wss_key_pem() -> 103.
+%% @doc Return WSS_CERT_PEM constant. PEM certificate chain for wss:// binds.
+wss_cert_pem() -> 104.
+%% @doc Return WSS_TRUST_PEM constant. PEM trust anchors for wss:// connects.
+wss_trust_pem() -> 105.
+%% @doc Return WSS_HOSTNAME constant. Certificate name override for wss://
+%% connects.
+wss_hostname() -> 106.
+%% @doc Return WSS_TRUST_SYSTEM constant. Whether wss:// connects trust the
+%% platform certificate store. Defaults to 1.
+wss_trust_system() -> 107.
+%% @doc Return OMQ_WS_ALLOWED_ORIGINS constant. Newline-separated exact
+%% browser origins, such as `<<"https://app.example.com">>`, that ws:// and
+%% wss:// listeners admit. Empty (default) rejects every request carrying
+%% Origin, so browsers need this. Native clients omit Origin.
+omq_ws_allowed_origins() -> 1009.
+%% @doc Return OMQ_QUIC_CERT_PEM constant. PEM certificate chain for quic://
+%% binds.
+omq_quic_cert_pem() -> 1011.
+%% @doc Return OMQ_QUIC_KEY_PEM constant. PEM private key for quic:// binds.
+omq_quic_key_pem() -> 1012.
+%% @doc Return OMQ_QUIC_TRUST_PEM constant. PEM trust anchors for quic://
+%% connects.
+omq_quic_trust_pem() -> 1013.
+%% @doc Return OMQ_QUIC_SERVER_NAME constant. Certificate name override for
+%% quic:// connects.
+omq_quic_server_name() -> 1014.
+%% @doc Return OMQ_QUIC_TRUST_SYSTEM constant. Whether quic:// connects trust
+%% the platform certificate store. Defaults to 1.
+omq_quic_trust_system() -> 1015.
+%% @doc Return OMQ_QUIC_ALLOWED_ORIGINS constant. Newline-separated exact
+%% browser origins that quic:// listeners admit over WebTransport. Empty
+%% (default) rejects every request carrying Origin.
+omq_quic_allowed_origins() -> 1017.
+%% @doc Return OMQ_QUIC_WEBTRANSPORT_PATH constant. WebTransport path on
+%% quic:// listeners. Defaults to `<<"/omq">>`; browsers connect to
+%% `https://host:port/omq`.
+omq_quic_webtransport_path() -> 1019.
 %% @doc Return OMQ_ON_MUTE_BLOCK constant.
 omq_on_mute_block() -> 0.
 %% @doc Return OMQ_ON_MUTE_DROP_NEWEST constant.
@@ -1247,4 +1291,17 @@ option_code(omq_compression_dict) -> omq_compression_dict();
 option_code(omq_compression_auto_train) -> omq_compression_auto_train();
 option_code(omq_workload_profile) -> omq_workload_profile();
 option_code(omq_max_message_parts) -> omq_max_message_parts();
-option_code(omq_max_peer_subscriptions) -> omq_max_peer_subscriptions().
+option_code(omq_max_peer_subscriptions) -> omq_max_peer_subscriptions();
+option_code(wss_key_pem) -> wss_key_pem();
+option_code(wss_cert_pem) -> wss_cert_pem();
+option_code(wss_trust_pem) -> wss_trust_pem();
+option_code(wss_hostname) -> wss_hostname();
+option_code(wss_trust_system) -> wss_trust_system();
+option_code(omq_ws_allowed_origins) -> omq_ws_allowed_origins();
+option_code(omq_quic_cert_pem) -> omq_quic_cert_pem();
+option_code(omq_quic_key_pem) -> omq_quic_key_pem();
+option_code(omq_quic_trust_pem) -> omq_quic_trust_pem();
+option_code(omq_quic_server_name) -> omq_quic_server_name();
+option_code(omq_quic_trust_system) -> omq_quic_trust_system();
+option_code(omq_quic_allowed_origins) -> omq_quic_allowed_origins();
+option_code(omq_quic_webtransport_path) -> omq_quic_webtransport_path().

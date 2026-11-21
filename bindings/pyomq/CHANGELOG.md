@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-11-21
+
 ### Added
 
 - `Socket.set_ip_allowlist()` and `pyomq.asyncio.Socket.set_ip_allowlist()`
@@ -16,12 +18,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   An invalid entry raises `ValueError` and keeps the current list. A call
   while an IP endpoint is bound raises `ZMQError` (`EINVAL`).
 
+### Changed
+
+- Build with zrip 0.8.24. Zstd level -7 encodes 4-25% faster, decoding is
+  faster, and 64-256 B dictionary frames are 12-24% smaller.
+
 ### Fixed
 
 - Configuration errors from the native core raise `ZMQError` with `EINVAL`
   and their message. Before, they raised `EIO` with "internal error".
 - `setsockopt(RECONNECT_STOP, ...)` no longer hangs. It locked the option
   overlay a second time.
+- Bundle `omq-tokio` 0.38.0. Zstd compression with a dictionary no longer
+  panics or writes a frame the peer cannot decode.
 
 ## [0.28.2] - 2026-11-19
 

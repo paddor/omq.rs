@@ -105,6 +105,11 @@ with `pull.plain_server = 1; pull.set_plain_auth([("alice", "secret")])`, or
 pass a callable to `set_plain_auth`. Clients keep using `plain_username` and
 `plain_password`. PLAIN does not encrypt traffic.
 
+`pull.set_ip_allowlist(["10.0.0.7", "fd00::7"])` before `bind()` admits only
+those source addresses on TCP, QUIC, DART, and UDP listeners; other peers are
+closed before the handshake. `None` admits every peer and an empty list admits
+none. `TCP_ACCEPT_FILTER` and `ZAP_DOMAIN` remain no-ops.
+
 ## Performance
 
 See [COMPARISONS.md](https://github.com/paddor/omq.rs/blob/main/COMPARISONS.md) for full tables.

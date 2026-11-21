@@ -40,6 +40,7 @@ pub fn map_err(e: Error) -> PyErr {
         ),
         Error::MessageTooLarge { size, max } => (libc::EMSGSIZE, format!("message {size} > {max}")),
         Error::InvalidEndpoint(m) => (libc::EINVAL, m),
+        Error::Config(m) => (libc::EINVAL, m),
         Error::Io(io) => (
             io.raw_os_error().unwrap_or_else(|| match io.kind() {
                 std::io::ErrorKind::AddrInUse => EADDRINUSE,

@@ -634,6 +634,17 @@ impl AsyncSocket {
         crate::auth::set_curve_auth_impl(&self.inner, auth)
     }
 
+    /// Admit only these remote IP addresses on later TCP, QUIC, DART, and
+    /// UDP binds. `None` admits every peer; an empty iterable admits none.
+    fn set_ip_allowlist(
+        &self,
+        py: Python<'_>,
+        addresses: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<()> {
+        let allowlist = crate::options::parse_ip_allowlist(addresses)?;
+        self.inner.set_ip_allowlist(py, allowlist)
+    }
+
     #[cfg(feature = "plain")]
     /// Configure PLAIN server admission before first socket use.
     ///

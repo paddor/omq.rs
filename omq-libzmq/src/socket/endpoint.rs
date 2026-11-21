@@ -1,6 +1,7 @@
 //! Endpoint calls: bind, connect, unbind, disconnect, peer disconnect, and
 //! DISH group membership.
 
+use std::borrow::Cow;
 use std::ffi::{CStr, c_int, c_void};
 use std::net::{IpAddr, Ipv6Addr};
 use std::os::raw::c_char;
@@ -15,6 +16,23 @@ use omq_tokio::endpoint::{Endpoint, Host};
 use super::{OmqSocket, materialized, run_on_socket};
 use crate::error::{ETERM, c_try, fail, set_errno};
 use crate::opts::SocketOverlay;
+
+/// Bracket a bare IPv6 host in a TCP endpoint, as libzmq accepts
+/// `tcp://::1:5555`. The port is mandatory and follows the last colon, so
+/// the split is unambiguous. Anything else is left for the parser.
+fn bracket_bare_ipv6(addr: &str) -> Cow<'_, str> {
+    let Some((scheme, rest)) = addr.split_once("://") else {
+        return Cow::Borrowed(addr);
+    };
+
+    let tcp = matches!(scheme, "tcp" | "lz4+tcp" | "zstd+tcp");
+    match rest.rsplit_once(':') {
+        Some((host, port)) if tcp && host.parse::<Ipv6Addr>().is_ok() => {
+            Cow::Owned(format!("{scheme}://[{host}]:{port}"))
+        }
+        _ => Cow::Borrowed(addr),
+    }
+}
 
 /// Rewrite `Host::Wildcard` to IPv6 unspecified (::) for dual-stack bind.
 fn ipv6_rewrite_wildcard(ep: Endpoint) -> Endpoint {
@@ -66,7 +84,7 @@ unsafe fn parse_endpoint_args<'a>(
         return Err(libc::EINVAL);
     }
 
-    let Ok(endpoint) = omq_tokio::Endpoint::from_str(&addr_str) else {
+    let Ok(endpoint) = omq_tokio::Endpoint::from_str(&bracket_bare_ipv6(&addr_str)) else {
         return Err(libc::EINVAL);
     };
 

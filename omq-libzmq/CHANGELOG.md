@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Accept unbracketed IPv6 hosts in `tcp://` endpoints, such as `tcp://::1:5555`,
+  like libzmq. The port follows the last colon.
+
 ## [0.12.0] - 2026-11-21
 
 ### Changed

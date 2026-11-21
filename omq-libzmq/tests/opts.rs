@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use omq_zmq::{
     zmq_bind, zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_term, zmq_getsockopt, zmq_recv,
-    zmq_send, zmq_setsockopt, zmq_socket,
+    zmq_send, zmq_setsockopt, zmq_socket, zmq_unbind,
 };
 
 const ZMQ_PUSH: i32 = 8;
@@ -1221,6 +1221,46 @@ fn ipv6_req_rep() {
 
     zmq_close(req);
     zmq_close(rep);
+    zmq_ctx_term(ctx);
+}
+
+#[test]
+fn unbracketed_ipv6_tcp_endpoints_take_the_port_after_the_last_colon() {
+    if std::net::TcpListener::bind("[::1]:0").is_err() {
+        eprintln!("skipping: IPv6 loopback not available");
+        return;
+    }
+
+    let ctx = zmq_ctx_new();
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    assert_eq!(zmq_bind(pull, c"tcp://::1:*".as_ptr()), 0);
+
+    let mut ep_buf = [0u8; 256];
+    let ep_len = get_bytes(pull, ZMQ_LAST_ENDPOINT, &mut ep_buf);
+    let bound = std::ffi::CStr::from_bytes_until_nul(&ep_buf[..ep_len])
+        .unwrap()
+        .to_str()
+        .unwrap();
+    let port = bound.strip_prefix("tcp://[::1]:").expect(bound);
+    let unbracketed = std::ffi::CString::new(format!("tcp://::1:{port}")).unwrap();
+    assert_eq!(zmq_connect(push, unbracketed.as_ptr()), 0);
+
+    let timeo: i32 = 2000;
+    set_i32(push, ZMQ_SNDTIMEO, timeo);
+    set_i32(pull, ZMQ_RCVTIMEO, timeo);
+    assert_eq!(zmq_send(push, b"bare".as_ptr().cast(), 4, 0), 4);
+    let mut buf = [0u8; 8];
+    assert_eq!(zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0), 4);
+    assert_eq!(&buf[..4], b"bare");
+    assert_eq!(zmq_unbind(pull, unbracketed.as_ptr()), 0);
+
+    // With no port, `::1` splits into host `:` and port `1`, as in libzmq.
+    assert_eq!(zmq_bind(pull, c"tcp://::1".as_ptr()), -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+
+    zmq_close(push);
+    zmq_close(pull);
     zmq_ctx_term(ctx);
 }
 

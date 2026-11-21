@@ -356,29 +356,31 @@ impl SocketInner {
         }
 
         py.detach(|| {
-            // Lock order: setter, then the slots, then the overlay, as in
-            // materialization. Held slots keep a new backend from taking the
-            // overlay before it changes. Backends do not need the GIL.
+            // Lock order: setter, async slot, blocking slot, overlay, as in
+            // materialization and set_plain_auth. Held slots keep a new
+            // backend from taking the overlay before it changes. Nothing here
+            // may take the GIL: close() and first use wait on these slots
+            // while holding it.
             let _setter = self.ip_allowlist_setter.lock().unwrap();
             let fork_gen = FORK_GEN.load(Ordering::Relaxed);
-            let blocking = self.blocking_materialized.read().unwrap();
             let materialized = self.materialized.read().unwrap();
+            let blocking = self.blocking_materialized.read().unwrap();
+
+            if let Some(live) = materialized.as_ref().filter(|m| m.fork_gen == fork_gen) {
+                let socket = live.socket.clone();
+                let list = allowlist.clone();
+                self.ctx
+                    .run_detached(async move { socket.set_ip_allowlist(list).await })?;
+            }
 
             if let Some(live) = blocking.as_ref().filter(|m| m.fork_gen == fork_gen) {
                 live.socket.set_ip_allowlist(allowlist.clone())?;
             }
 
-            if let Some(live) = materialized.as_ref().filter(|m| m.fork_gen == fork_gen) {
-                let list = allowlist.clone();
-                self.ctx
-                    .with_socket(&live.socket, move |socket| async move {
-                        socket.set_ip_allowlist(list).await
-                    })?;
-            }
-
             self.overlay.lock().unwrap().ip_allowlist = allowlist;
             Ok(())
         })
+        // map_err takes the GIL, so it runs after the locks are released.
         .map_err(map_err)
     }
 

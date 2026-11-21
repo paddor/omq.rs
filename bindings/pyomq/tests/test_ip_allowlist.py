@@ -6,7 +6,9 @@ The second source address is 127.0.0.2, which Linux routes on loopback.
 import asyncio
 import errno
 import socket
+import subprocess
 import sys
+import textwrap
 
 import pyomq
 import pyomq.asyncio
@@ -140,6 +142,39 @@ def test_setter_after_tcp_bind_raises_until_unbind(context):
         endpoint = pull.bind("tcp://127.0.0.1:0").addr
         for source in [UNLISTED, LISTED]:
             assert raw_bytes_until_close(source, endpoint) == b""
+
+
+def test_setter_never_deadlocks_with_close_on_another_thread():
+    # A deadlock leaves the GIL held, so it runs in a child with a timeout.
+    script = textwrap.dedent(
+        """
+        import threading
+        import pyomq
+        import pyomq.asyncio
+
+        for _ in range(300):
+            ctx = pyomq.asyncio.Context()
+            pull = ctx.socket(pyomq.PULL)
+            pull.monitor()
+            started = threading.Event()
+
+            def spin():
+                started.set()
+                try:
+                    while True:
+                        pull.set_ip_allowlist(["127.0.0.2"])
+                except pyomq.ZMQError:
+                    pass
+
+            setter = threading.Thread(target=spin)
+            setter.start()
+            started.wait()
+            pull.close()
+            setter.join()
+            ctx.term()
+        """
+    )
+    subprocess.run([sys.executable, "-c", script], check=True, timeout=30)
 
 
 @pytest.mark.parametrize("context", [pyomq.Context, pyomq.asyncio.Context])

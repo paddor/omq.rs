@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Configuration errors from the native core raise `ZMQError` with `EINVAL`
   and their message. Before, they raised `EIO` with "internal error".
+- `setsockopt(RECONNECT_STOP, ...)` no longer hangs. It locked the option
+  overlay a second time.
 
 ## [0.28.2] - 2026-11-19
 

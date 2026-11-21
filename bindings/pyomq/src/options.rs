@@ -83,6 +83,7 @@ pub struct Overlay {
     pub compression_dict: Option<Bytes>,
     pub compression_auto_train: bool,
     pub reconnect_stop: i32,
+    pub ip_allowlist: Option<omq_proto::IpAllowlist>,
     #[cfg(feature = "quic")]
     pub quic: omq_proto::options::QuicOptions,
 }
@@ -130,6 +131,7 @@ impl Default for Overlay {
             compression_dict: None,
             compression_auto_train: false,
             reconnect_stop: 0,
+            ip_allowlist: None,
             #[cfg(feature = "quic")]
             quic: Default::default(),
         }
@@ -172,6 +174,7 @@ impl Overlay {
             arena_threshold: Some(64 * 1024),
             transmit_slot_cap: None,
             reconnect_stop_conn_refused: (self.reconnect_stop & 1) != 0,
+            ip_allowlist: self.ip_allowlist.clone(),
             #[cfg(feature = "quic")]
             quic: self.quic.clone(),
             ..Default::default()
@@ -315,10 +318,41 @@ impl Overlay {
             compression_dict: o.compression_dict.clone(),
             compression_auto_train: o.compression_auto_train,
             reconnect_stop: i32::from(o.reconnect_stop_conn_refused),
+            ip_allowlist: o.ip_allowlist.clone(),
             #[cfg(feature = "quic")]
             quic: o.quic.clone(),
         }
     }
+}
+
+/// Parse `set_ip_allowlist` input: `None`, or an iterable of IP strings.
+/// The whole list is checked before anything changes.
+pub(crate) fn parse_ip_allowlist(
+    addresses: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<omq_proto::IpAllowlist>> {
+    let Some(addresses) = addresses else {
+        return Ok(None);
+    };
+
+    let type_error = || {
+        pyo3::exceptions::PyTypeError::new_err(
+            "set_ip_allowlist expects an iterable of IP address strings or None",
+        )
+    };
+    // A bare string is iterable too; its characters are not addresses.
+    if addresses.is_instance_of::<pyo3::types::PyString>() || addresses.is_instance_of::<PyBytes>()
+    {
+        return Err(type_error());
+    }
+
+    let entries: Vec<String> = addresses
+        .try_iter()
+        .and_then(|items| items.map(|item| item?.extract()).collect())
+        .map_err(|_| type_error())?;
+
+    omq_proto::IpAllowlist::try_from(entries.as_slice())
+        .map(Some)
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))
 }
 
 pub(crate) fn duration_from_millis(value: i64) -> Option<Duration> {

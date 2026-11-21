@@ -399,6 +399,7 @@ class _NativeSocket(_NativeSocketOptions, Protocol):
 
     def set_curve_auth(self, auth: CurveAuth) -> None: ...
     def set_plain_auth(self, auth: PlainAuth) -> None: ...
+    def set_ip_allowlist(self, addresses: Iterable[str] | None) -> None: ...
     def bind(self, endpoint: str) -> str: ...
     def connect(self, endpoint: str) -> None: ...
     def unbind(self, endpoint: str) -> None: ...
@@ -605,6 +606,24 @@ class _BaseSocket[
             raise error.from_native(e) from None
         except AttributeError:
             raise ZMQNotImplementedError("plain feature not compiled")
+
+    def set_ip_allowlist(self, addresses: Iterable[str] | None) -> None:
+        """Admit only these remote IP addresses on later binds.
+
+        Pass exact IPv4 or IPv6 literals, or ``None`` to admit every peer.
+        An empty iterable admits none. Ports are ignored, and IPv4-mapped
+        IPv6 addresses match their IPv4 form. TCP, QUIC, and DART listeners
+        close or refuse other peers before the handshake; UDP DISH drops
+        their datagrams. Outbound connects, IPC, and inproc are unaffected.
+
+        Raises ``ValueError`` naming the first invalid entry, leaving the
+        current list in place. Raises ``ZMQError`` (``EINVAL``) while a
+        TCP, QUIC, DART, or UDP endpoint is bound.
+        """
+        try:
+            return self._sock.set_ip_allowlist(addresses)
+        except _native.ZMQError as e:
+            raise error.from_native(e) from None
 
     def set_hwm(self, value: int) -> None:
         self.setsockopt(SNDHWM, value)

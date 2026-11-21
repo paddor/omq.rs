@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Socket.set_ip_allowlist()` and `pyomq.asyncio.Socket.set_ip_allowlist()`
+  admit only exact remote IP addresses on later TCP, QUIC, DART, and UDP
+  binds. Other peers are closed before the ZMTP handshake, in Rust, with no
+  per-message cost. `None` admits every peer; an empty iterable admits none.
+  An invalid entry raises `ValueError` and keeps the current list. A call
+  while an IP endpoint is bound raises `ZMQError` (`EINVAL`).
+
+### Fixed
+
+- Configuration errors from the native core raise `ZMQError` with `EINVAL`
+  and their message. Before, they raised `EIO` with "internal error".
+
 ## [0.28.2] - 2026-11-19
 
 ### Changed

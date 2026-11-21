@@ -112,6 +112,8 @@ pub(crate) struct SocketInner {
     pub pending_sends: Mutex<Vec<std::sync::Weak<crate::socket_async::PendingMessage>>>,
     pub materialized: std::sync::RwLock<Option<Materialized>>,
     pub blocking_materialized: std::sync::RwLock<Option<BlockingMaterialized>>,
+    /// Serializes `set_ip_allowlist` calls.
+    ip_allowlist_setter: Mutex<()>,
     closed: AtomicBool,
 }
 
@@ -131,6 +133,7 @@ impl SocketInner {
             pending_sends: Mutex::new(Vec::new()),
             materialized: std::sync::RwLock::new(None),
             blocking_materialized: std::sync::RwLock::new(None),
+            ip_allowlist_setter: Mutex::new(()),
             closed: AtomicBool::new(false),
         })
     }
@@ -338,6 +341,45 @@ impl SocketInner {
             socket,
         });
         Ok(())
+    }
+
+    /// Apply `allowlist` to live backend sockets, then to later
+    /// materializations. Each backend refuses the change while it has an IP
+    /// listener; the overlay changes only if every live backend accepted.
+    pub fn set_ip_allowlist(
+        &self,
+        py: Python<'_>,
+        allowlist: Option<omq_proto::IpAllowlist>,
+    ) -> PyResult<()> {
+        if self.closed.load(Ordering::Relaxed) || self.ctx.is_terminated() {
+            return Err(map_err(PError::Closed));
+        }
+
+        py.detach(|| {
+            // Lock order: setter, then the slots, then the overlay, as in
+            // materialization. Held slots keep a new backend from taking the
+            // overlay before it changes. Backends do not need the GIL.
+            let _setter = self.ip_allowlist_setter.lock().unwrap();
+            let fork_gen = FORK_GEN.load(Ordering::Relaxed);
+            let blocking = self.blocking_materialized.read().unwrap();
+            let materialized = self.materialized.read().unwrap();
+
+            if let Some(live) = blocking.as_ref().filter(|m| m.fork_gen == fork_gen) {
+                live.socket.set_ip_allowlist(allowlist.clone())?;
+            }
+
+            if let Some(live) = materialized.as_ref().filter(|m| m.fork_gen == fork_gen) {
+                let list = allowlist.clone();
+                self.ctx
+                    .with_socket(&live.socket, move |socket| async move {
+                        socket.set_ip_allowlist(list).await
+                    })?;
+            }
+
+            self.overlay.lock().unwrap().ip_allowlist = allowlist;
+            Ok(())
+        })
+        .map_err(map_err)
     }
 
     pub fn ensure_blocking_socket(&self) -> PyResult<omq_tokio::blocking::Socket> {
@@ -1204,6 +1246,17 @@ impl Socket {
     #[cfg(feature = "curve")]
     fn set_curve_auth(&self, auth: &Bound<'_, PyAny>) -> PyResult<()> {
         crate::auth::set_curve_auth_impl(&self.inner, auth)
+    }
+
+    /// Admit only these remote IP addresses on later TCP, QUIC, DART, and
+    /// UDP binds. `None` admits every peer; an empty iterable admits none.
+    fn set_ip_allowlist(
+        &self,
+        py: Python<'_>,
+        addresses: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<()> {
+        let allowlist = options::parse_ip_allowlist(addresses)?;
+        self.inner.set_ip_allowlist(py, allowlist)
     }
 
     #[cfg(feature = "plain")]

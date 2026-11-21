@@ -27,6 +27,7 @@ def invalid(sync: zmq.Socket, async_: azmq.Socket) -> None:
     sync.linger = b"bytes"  # reject
     sync.set_plain_auth([("user", 1)])  # reject
     sync.set_curve_auth(["not bytes"])  # reject
+    async_.set_ip_allowlist([1])  # reject
     zmq.Frame("text")  # reject
     zmq.Socket.shadow(async_).send("text")  # reject
     sync.recv_serialized(lambda parts: len(parts), copy="no")  # reject

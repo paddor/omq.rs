@@ -60,16 +60,14 @@ handles do not leave native socket state alive.
 
 ## Calls
 
-Blocking calls that may wait on IO use dirty IO NIF scheduling:
+Endpoint, subscription, group, and close calls run as dirty IO NIFs.
 
-- `bind`
-- `connect`
-- `unbind`
-- `disconnect`
-- `send`
-- `recv`
-- subscription and group control
-- close and wait helpers
+Calls that can wait (`send`, `recv`, `poll`, `monitor_recv`,
+`wait_connected`, `wait_subscribed`) never park a scheduler thread. The NIF
+either finishes at once or starts a task on the socket's IO runtime and
+returns. The task sends `{omq_wait, Ref, Reply}` once, and the caller waits
+in `receive`, so it stays killable. A receive task only signals readiness;
+the retry takes the message, so a killed caller loses none.
 
 Nonblocking calls use normal NIF scheduling:
 
@@ -99,9 +97,9 @@ OTP `json`. `recv_term/1,2` and `try_recv_term/1` decode one frame with
 ## Monitoring
 
 `monitor/1` materializes the socket and returns a native monitor resource.
-The resource owns an `omq_tokio::MonitorStream` behind a mutex.
-`monitor_recv/1,2` runs as dirty IO and polls that stream until an event,
-timeout, lag notification, or close. `monitor_try_recv/1` is nonblocking.
+The resource owns an `omq_tokio::MonitorStream` behind an async mutex.
+`monitor_recv/1,2` waits for an event, timeout, lag notification, or close;
+concurrent waiters take turns. `monitor_try_recv/1` is nonblocking.
 
 Monitor events are encoded as Erlang maps with atom keys. Connection snapshots
 from `connections/1` and `connection_info/2` use the same map shape for peer
@@ -111,7 +109,7 @@ external types.
 ## Readiness
 
 `poll/2` and `select/4` are implemented in Erlang over the native
-`wait_any/2` helper. `wait_any/2` probes each socket with nonblocking receive.
+`wait_any/3` helper. `wait_any/3` probes each socket with nonblocking receive.
 When a message is found, it is pushed into the socket resource receive buffer.
 The later `recv` call drains that buffer before touching the native socket.
 

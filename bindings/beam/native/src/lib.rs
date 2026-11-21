@@ -1,15 +1,16 @@
 use std::collections::VecDeque;
+use std::panic::AssertUnwindSafe;
 use std::str;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use omq_tokio::options::WorkloadProfile;
 use omq_tokio::{
     ConnectionStatus, Context, ContextConfig, DisconnectReason, Endpoint, Error as OmqError,
-    KeepAlive, Message, MonitorEvent, MonitorRecvError, MonitorStream, MonitorTryRecvError, OnMute,
-    Options, PeerCommandKind, PeerInfo, ReconnectPolicy, SocketType, TrySendError,
+    KeepAlive, Message, MonitorEvent, MonitorStream, MonitorTryRecvError, OnMute, Options,
+    PeerCommandKind, PeerInfo, ReconnectPolicy, SocketType, TrySendError,
 };
 #[cfg(feature = "curve")]
 use omq_tokio::{CurveKeypair, CurvePublicKey, CurveSecretKey};
@@ -17,6 +18,7 @@ use rustler::{Binary, Encoder, Env, OwnedBinary, ResourceArc, Term};
 
 #[cfg(any(feature = "ws", feature = "quic"))]
 mod transport_options;
+mod wait;
 
 mod atoms {
     rustler::atoms! {
@@ -64,6 +66,9 @@ mod atoms {
         timeout,
         unsupported_scheme,
         would_block,
+        omq_wait,
+        ready,
+        wait,
         undefined,
         zmtp_version,
     }
@@ -103,14 +108,16 @@ struct NativeSocket {
 #[rustler::resource_impl]
 impl rustler::Resource for NativeSocket {
     fn destructor(self, _env: Env<'_>) {
-        let _ = self.close_with_linger(None);
+        // A panic cannot unwind out of a destructor, and close can race a
+        // concurrent context termination.
+        let _ = std::panic::catch_unwind(AssertUnwindSafe(|| self.close_with_linger(None)));
     }
 }
 
 struct NativeMonitor {
     ctx: Context,
-    /// Taken out while a blocking receive waits.
-    stream: Mutex<Option<MonitorStream>>,
+    /// Held by a waiting receive; later waiters queue behind it.
+    stream: Arc<tokio::sync::Mutex<MonitorStream>>,
 }
 
 #[rustler::resource_impl]
@@ -220,10 +227,16 @@ impl NativeSocket {
             return Ok(());
         }
         self.recv_buffer.lock().unwrap().clear();
-        if let Some(socket) = self.socket.write().unwrap().take() {
-            socket.close_with_linger(linger)?;
+        let Some(socket) = self.socket.write().unwrap().take() else {
+            return Ok(());
+        };
+
+        // Terminating the context closed the socket and stopped its runtime.
+        if self.ctx.is_terminated() {
+            return Ok(());
         }
-        Ok(())
+
+        socket.close_with_linger(linger)
     }
 }
 
@@ -612,53 +625,6 @@ fn deadline_after(timeout: Duration) -> Option<Instant> {
     }
 }
 
-fn send_with_timeout(
-    socket: &omq_tokio::blocking::Socket,
-    message: Message,
-    timeout: Option<Duration>,
-) -> Result<(), OmqError> {
-    match timeout {
-        None => socket.send(message),
-        Some(timeout) if timeout.is_zero() => socket.try_send(message).map_err(|err| match err {
-            TrySendError::Full(_) => OmqError::WouldBlock,
-            TrySendError::Closed => OmqError::Closed,
-            TrySendError::Error(err) => err,
-        }),
-        Some(timeout) => socket.send_timeout(message, timeout),
-    }
-}
-
-fn recv_with_timeout(
-    recv_buffer: &Mutex<VecDeque<Message>>,
-    socket: &omq_tokio::blocking::Socket,
-    timeout: Option<Duration>,
-) -> Result<Message, OmqError> {
-    if let Some(message) = recv_buffer.lock().unwrap().pop_front() {
-        return Ok(message);
-    }
-    match timeout {
-        None => socket.recv(),
-        Some(timeout) if timeout.is_zero() => socket.try_recv(),
-        Some(timeout) => socket.recv_timeout(timeout),
-    }
-}
-
-fn socket_has_message(socket: &NativeSocket) -> bool {
-    if !socket.recv_buffer.lock().unwrap().is_empty() {
-        return true;
-    }
-    let Ok(materialized) = socket.materialize() else {
-        return false;
-    };
-    match materialized.try_recv() {
-        Ok(message) => {
-            socket.recv_buffer.lock().unwrap().push_back(message);
-            true
-        }
-        Err(_) => false,
-    }
-}
-
 fn keepalive_parts(keepalive: KeepAlive) -> (Duration, Duration, u32) {
     match keepalive {
         KeepAlive::Enabled { idle, intvl, cnt } => (idle, intvl, cnt),
@@ -856,60 +822,17 @@ fn monitor<'a>(env: Env<'a>, socket: ResourceArc<NativeSocket>) -> Term<'a> {
             env,
             ResourceArc::new(NativeMonitor {
                 ctx: socket.ctx.clone(),
-                stream: Mutex::new(Some(materialized.monitor())),
+                stream: Arc::new(tokio::sync::Mutex::new(materialized.monitor())),
             }),
         ),
         Err(error) => map_error(env, error),
     }
 }
 
-#[rustler::nif(schedule = "DirtyIo")]
-fn monitor_recv<'a>(
-    env: Env<'a>,
-    monitor: ResourceArc<NativeMonitor>,
-    timeout_ms: i64,
-) -> Term<'a> {
-    let Some(mut stream) = monitor.stream.lock().unwrap().take() else {
-        return err_term(env, atoms::badarg(), "monitor receive already in progress");
-    };
-    let immediate = stream.try_recv();
-    if !matches!(immediate, Err(MonitorTryRecvError::Empty)) || timeout_ms == 0 {
-        *monitor.stream.lock().unwrap() = Some(stream);
-        return match immediate {
-            Ok(event) => ok(env, monitor_event_term(env, event)),
-            Err(MonitorTryRecvError::Lagged(count)) => {
-                ok(env, lagged_monitor_event_term(env, count))
-            }
-            Err(MonitorTryRecvError::Empty) => {
-                err_term(env, atoms::timeout(), "operation timed out")
-            }
-            Err(_) => err_term(env, atoms::closed(), "monitor closed"),
-        };
-    }
-    let timeout = duration_from_millis(timeout_ms);
-    let (stream, received) = monitor.ctx.block_on(async move {
-        let received = match timeout {
-            Some(timeout) => tokio::time::timeout(timeout, stream.recv()).await.ok(),
-            None => Some(stream.recv().await),
-        };
-        (stream, received)
-    });
-    *monitor.stream.lock().unwrap() = Some(stream);
-    match received {
-        Some(Ok(event)) => ok(env, monitor_event_term(env, event)),
-        Some(Err(MonitorRecvError::Lagged(count))) => {
-            ok(env, lagged_monitor_event_term(env, count))
-        }
-        Some(Err(_)) => err_term(env, atoms::closed(), "monitor closed"),
-        None => err_term(env, atoms::timeout(), "operation timed out"),
-    }
-}
-
 #[rustler::nif]
 fn monitor_try_recv<'a>(env: Env<'a>, monitor: ResourceArc<NativeMonitor>) -> Term<'a> {
-    let mut guard = monitor.stream.lock().unwrap();
-    // A blocking receive in progress owns the stream.
-    let Some(stream) = guard.as_mut() else {
+    // A waiting receive holds the stream.
+    let Ok(mut stream) = monitor.stream.try_lock() else {
         return err_term(env, atoms::would_block(), "operation would block");
     };
     match stream.try_recv() {
@@ -1042,24 +965,6 @@ fn disconnect<'a>(
     }
 }
 
-#[rustler::nif(schedule = "DirtyIo")]
-fn send<'a>(
-    env: Env<'a>,
-    socket: ResourceArc<NativeSocket>,
-    parts: Vec<Binary<'a>>,
-    routing_id: u32,
-) -> Term<'a> {
-    let message = message_from_parts(parts, routing_id);
-    let timeout = *socket.sndtimeo.lock().unwrap();
-    match socket
-        .materialize()
-        .and_then(|socket| send_with_timeout(&socket, message, timeout))
-    {
-        Ok(()) => ok_unit(env),
-        Err(error) => map_error(env, error),
-    }
-}
-
 #[rustler::nif]
 fn try_send<'a>(
     env: Env<'a>,
@@ -1075,85 +980,11 @@ fn try_send<'a>(
     }
 }
 
-#[rustler::nif(schedule = "DirtyIo")]
-fn recv<'a>(env: Env<'a>, socket: ResourceArc<NativeSocket>, timeout_ms: i64) -> Term<'a> {
-    let timeout = if timeout_ms == -2 {
-        *socket.rcvtimeo.lock().unwrap()
-    } else {
-        duration_from_millis(timeout_ms)
-    };
-    let result = socket
-        .materialize()
-        .and_then(|materialized| recv_with_timeout(&socket.recv_buffer, &materialized, timeout));
-    match result {
-        Ok(message) => message_to_term(env, message),
-        Err(error) => map_error(env, error),
-    }
-}
-
 #[rustler::nif]
 fn try_recv<'a>(env: Env<'a>, socket: ResourceArc<NativeSocket>) -> Term<'a> {
-    let result = socket.materialize().and_then(|materialized| {
-        recv_with_timeout(&socket.recv_buffer, &materialized, Some(Duration::ZERO))
-    });
-    match result {
+    match wait::try_recv_buffered(&socket) {
         Ok(message) => message_to_term(env, message),
         Err(error) => map_error(env, error),
-    }
-}
-
-#[rustler::nif(schedule = "DirtyIo")]
-fn wait_any<'a>(
-    env: Env<'a>,
-    sockets: Vec<ResourceArc<NativeSocket>>,
-    timeout_ms: i64,
-) -> Term<'a> {
-    if sockets.is_empty() {
-        return ok(env, Vec::<usize>::new());
-    }
-    let deadline = duration_from_millis(timeout_ms).and_then(deadline_after);
-    let waker = std::task::Waker::from(std::sync::Arc::new(ThreadWake(std::thread::current())));
-    let mut registrations = Vec::new();
-    loop {
-        let ready: Vec<_> = sockets
-            .iter()
-            .enumerate()
-            .filter_map(|(index, socket)| socket_has_message(socket).then_some(index))
-            .collect();
-        if !ready.is_empty() {
-            return ok(env, ready);
-        }
-        if timeout_ms == 0 || deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            return ok(env, Vec::<usize>::new());
-        }
-        if registrations.is_empty() {
-            // Register, then recheck before the first park.
-            registrations = sockets
-                .iter()
-                .filter_map(|socket| socket.materialize().ok())
-                .map(|socket| socket.register_recv_waker(waker.clone()))
-                .collect();
-            continue;
-        }
-        match deadline {
-            Some(deadline) => {
-                std::thread::park_timeout(deadline.saturating_duration_since(Instant::now()));
-            }
-            None => std::thread::park(),
-        }
-    }
-}
-
-/// Unparks a thread waiting in `wait_any`.
-struct ThreadWake(std::thread::Thread);
-
-impl std::task::Wake for ThreadWake {
-    fn wake(self: std::sync::Arc<Self>) {
-        self.0.unpark();
-    }
-
-    fn wake_by_ref(self: &std::sync::Arc<Self>) {
-        self.0.unpark();
     }
 }
 
@@ -1225,40 +1056,6 @@ fn send_group<'a>(
 fn close<'a>(env: Env<'a>, socket: ResourceArc<NativeSocket>, linger_ms: i64) -> Term<'a> {
     match socket.close_with_linger(duration_from_millis(linger_ms)) {
         Ok(()) => ok_unit(env),
-        Err(error) => map_error(env, error),
-    }
-}
-
-#[rustler::nif(schedule = "DirtyIo")]
-fn wait_connected<'a>(
-    env: Env<'a>,
-    socket: ResourceArc<NativeSocket>,
-    min_peers: usize,
-    timeout_ms: i64,
-) -> Term<'a> {
-    let timeout = duration_from_millis(timeout_ms).unwrap_or(Duration::from_secs(u64::MAX));
-    match socket
-        .materialize()
-        .and_then(|socket| socket.wait_connected(min_peers, timeout))
-    {
-        Ok(count) => ok(env, count),
-        Err(error) => map_error(env, error),
-    }
-}
-
-#[rustler::nif(schedule = "DirtyIo")]
-fn wait_subscribed<'a>(
-    env: Env<'a>,
-    socket: ResourceArc<NativeSocket>,
-    min_subscriptions: u64,
-    timeout_ms: i64,
-) -> Term<'a> {
-    let timeout = duration_from_millis(timeout_ms).unwrap_or(Duration::from_secs(u64::MAX));
-    match socket
-        .materialize()
-        .and_then(|socket| socket.wait_subscribed(min_subscriptions, timeout))
-    {
-        Ok(generation) => ok(env, generation),
         Err(error) => map_error(env, error),
     }
 }

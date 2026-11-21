@@ -19,7 +19,7 @@
     socket_id/1,
     closed/1,
     monitor/1,
-    monitor_recv/2,
+    monitor_recv/3,
     monitor_try_recv/1,
     connections/1,
     connection_info/2,
@@ -27,19 +27,20 @@
     connect/2,
     unbind/2,
     disconnect/2,
-    send/3,
+    send/4,
     try_send/3,
-    recv/2,
+    recv/3,
     try_recv/1,
-    wait_any/2,
+    wait_any/3,
     subscribe/2,
     unsubscribe/2,
     join/2,
     leave/2,
     send_group/3,
     close/2,
-    wait_connected/3,
-    wait_subscribed/3,
+    wait_connected/4,
+    wait_subscribed/4,
+    wait_done/1,
     setsockopt/4,
     getsockopt/2
 ]).
@@ -69,7 +70,7 @@ socket_type(_Socket) -> nif_error().
 socket_id(_Socket) -> nif_error().
 closed(_Socket) -> nif_error().
 monitor(_Socket) -> nif_error().
-monitor_recv(_Monitor, _TimeoutMs) -> nif_error().
+monitor_recv(_Monitor, _TimeoutMs, _Ref) -> nif_error().
 monitor_try_recv(_Monitor) -> nif_error().
 connections(_Socket) -> nif_error().
 connection_info(_Socket, _ConnectionId) -> nif_error().
@@ -77,19 +78,20 @@ bind(_Socket, _Endpoint) -> nif_error().
 connect(_Socket, _Endpoint) -> nif_error().
 unbind(_Socket, _Endpoint) -> nif_error().
 disconnect(_Socket, _Endpoint) -> nif_error().
-send(_Socket, _Parts, _RoutingId) -> nif_error().
+send(_Socket, _Parts, _RoutingId, _Ref) -> nif_error().
 try_send(_Socket, _Parts, _RoutingId) -> nif_error().
-recv(_Socket, _TimeoutMs) -> nif_error().
+recv(_Socket, _TimeoutMs, _Ref) -> nif_error().
 try_recv(_Socket) -> nif_error().
-wait_any(_Sockets, _TimeoutMs) -> nif_error().
+wait_any(_Sockets, _TimeoutMs, _Ref) -> nif_error().
 subscribe(_Socket, _Prefix) -> nif_error().
 unsubscribe(_Socket, _Prefix) -> nif_error().
 join(_Socket, _Group) -> nif_error().
 leave(_Socket, _Group) -> nif_error().
 send_group(_Socket, _Group, _Body) -> nif_error().
 close(_Socket, _LingerMs) -> nif_error().
-wait_connected(_Socket, _MinPeers, _TimeoutMs) -> nif_error().
-wait_subscribed(_Socket, _MinSubscriptions, _TimeoutMs) -> nif_error().
+wait_connected(_Socket, _MinPeers, _TimeoutMs, _Ref) -> nif_error().
+wait_subscribed(_Socket, _MinSubscriptions, _TimeoutMs, _Ref) -> nif_error().
+wait_done(_Wait) -> nif_error().
 setsockopt(_Socket, _Option, _IntValue, _BinValue) -> nif_error().
 getsockopt(_Socket, _Option) -> nif_error().
 

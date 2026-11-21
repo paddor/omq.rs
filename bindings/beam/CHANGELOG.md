@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `send`, `recv`, `poll`, `monitor_recv`, `wait_connected`, and
+  `wait_subscribed` wait in `receive` instead of on a dirty IO scheduler. A
+  waiting process can be killed, so VM shutdown no longer hangs on a
+  blocked `recv`. Many waiting processes no longer starve file IO and
+  other dirty IO work.
+- Collecting an open socket after `term/1` no longer aborts the VM.
+
 ## [0.4.0] - 2026-11-21
 
 ### Added

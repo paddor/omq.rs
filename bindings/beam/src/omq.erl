@@ -287,7 +287,7 @@ monitor_recv(Monitor) ->
     monitor_recv(Monitor, infinity).
 
 monitor_recv(Monitor, Timeout) ->
-    omq_nif:monitor_recv(Monitor, timeout_ms(Timeout)).
+    await(fun(Ref) -> omq_nif:monitor_recv(Monitor, timeout_ms(Timeout), Ref) end).
 
 %% @doc Try to receive one monitor event without blocking.
 monitor_try_recv(Monitor) ->
@@ -353,7 +353,7 @@ try_send(Socket, Data, Opts) ->
 
 %% @doc Receive one message. Returns routing metadata when present.
 recv(Socket) ->
-    case omq_nif:recv(Socket, -2) of
+    case recv_message(Socket, -2) of
         {ok, [Part], 0} -> {ok, Part};
         {ok, [Part], RoutingId} -> {ok, #{data => Part, routing_id => RoutingId}};
         {ok, Parts, RoutingId} -> {ok, #{parts => Parts, routing_id => routing_id(RoutingId)}};
@@ -361,7 +361,7 @@ recv(Socket) ->
     end.
 
 recv(Socket, Timeout) ->
-    case omq_nif:recv(Socket, timeout_ms(Timeout)) of
+    case recv_message(Socket, timeout_ms(Timeout)) of
         {ok, [Part], 0} -> {ok, Part};
         {ok, [Part], RoutingId} -> {ok, #{data => Part, routing_id => RoutingId}};
         {ok, Parts, RoutingId} -> {ok, #{parts => Parts, routing_id => routing_id(RoutingId)}};
@@ -418,7 +418,7 @@ recv_frame(Socket, Timeout) ->
         {ok, Part} ->
             {ok, Part};
         empty ->
-            case omq_nif:recv(Socket, timeout_ms(Timeout)) of
+            case recv_message(Socket, timeout_ms(Timeout)) of
                 {ok, Parts, 0} -> first_recv_frame(Socket, Parts);
                 {ok, Parts, _RoutingId} -> first_recv_frame(Socket, Parts);
                 Error -> Error
@@ -448,7 +448,7 @@ try_recv_string(Socket, Encoding) ->
 
 %% @doc Receive one multipart message.
 recv_multipart(Socket) ->
-    case omq_nif:recv(Socket, -2) of
+    case recv_message(Socket, -2) of
         {ok, Parts, 0} -> {ok, Parts};
         {ok, Parts, RoutingId} -> {ok, #{parts => Parts, routing_id => RoutingId}};
         Error -> Error
@@ -463,7 +463,7 @@ try_recv_multipart(Socket) ->
     end.
 
 recv_multipart(Socket, Timeout) ->
-    case omq_nif:recv(Socket, timeout_ms(Timeout)) of
+    case recv_message(Socket, timeout_ms(Timeout)) of
         {ok, Parts, 0} -> {ok, Parts};
         {ok, Parts, RoutingId} -> {ok, #{parts => Parts, routing_id => RoutingId}};
         Error -> Error
@@ -478,7 +478,7 @@ poll(Entries, Timeout) ->
         [] -> timeout_ms(Timeout);
         _ -> 0
     end,
-    case omq_nif:wait_any([Socket || {Socket, _Flags} <- InEntries], Wait) of
+    case poll_in([Socket || {Socket, _Flags} <- InEntries], Wait) of
         {ok, Indexes} ->
             ReadyIn = [poll_ready_entry(InEntries, Index) || Index <- Indexes],
             {ok, merge_poll_ready(ReadyOut ++ ReadyIn)};
@@ -579,11 +579,13 @@ close(Socket, Linger) ->
 
 %% @doc Wait until minimum peer count is connected.
 wait_connected(Socket, MinPeers, Timeout) ->
-    omq_nif:wait_connected(Socket, MinPeers, timeout_ms(Timeout)).
+    await(fun(Ref) -> omq_nif:wait_connected(Socket, MinPeers, timeout_ms(Timeout), Ref) end).
 
 %% @doc Wait until minimum subscription generation is visible.
 wait_subscribed(Socket, MinSubscriptions, Timeout) ->
-    omq_nif:wait_subscribed(Socket, MinSubscriptions, timeout_ms(Timeout)).
+    await(fun(Ref) ->
+        omq_nif:wait_subscribed(Socket, MinSubscriptions, timeout_ms(Timeout), Ref)
+    end).
 
 %% @doc Set socket option. Alias for setsockopt/3.
 set(Socket, Option, Value) ->
@@ -735,8 +737,37 @@ send_parts(Socket, Parts, RoutingId, Flags) ->
             FinalParts = take_send_more(Socket) ++ Parts,
             case (Flags band noblock()) =/= 0 of
                 true -> omq_nif:try_send(Socket, FinalParts, RoutingId);
-                false -> omq_nif:send(Socket, FinalParts, RoutingId)
+                false -> await(fun(Ref) -> omq_nif:send(Socket, FinalParts, RoutingId, Ref) end)
             end
+    end.
+
+%% Calls that can wait return {wait, Wait} from the NIF and reply later with
+%% {omq_wait, Ref, Reply}, so the caller waits here, not on a dirty scheduler.
+%% Collecting Wait aborts the native wait, so it stays live until the reply.
+await(Call) ->
+    Ref = make_ref(),
+    case Call(Ref) of
+        {wait, Wait} ->
+            receive
+                {omq_wait, Ref, Reply} ->
+                    ok = omq_nif:wait_done(Wait),
+                    Reply
+            end;
+        Result ->
+            Result
+    end.
+
+%% A ready reply carries the time left for the next try.
+recv_message(Socket, TimeoutMs) ->
+    case await(fun(Ref) -> omq_nif:recv(Socket, TimeoutMs, Ref) end) of
+        {ready, RemainingMs} -> recv_message(Socket, RemainingMs);
+        Result -> Result
+    end.
+
+poll_in(Sockets, TimeoutMs) ->
+    case await(fun(Ref) -> omq_nif:wait_any(Sockets, TimeoutMs, Ref) end) of
+        {ready, RemainingMs} -> poll_in(Sockets, RemainingMs);
+        Result -> Result
     end.
 
 try_send_parts(Socket, Parts, RoutingId, Flags) ->

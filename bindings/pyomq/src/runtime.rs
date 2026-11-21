@@ -191,6 +191,29 @@ impl ContextInner {
         Python::attach(|py| py.detach(|| orx.recv().expect("pyomq: runtime dropped result")))
     }
 
+    /// Run `fut` on the live runtime and wait for it. For callers that
+    /// released the GIL and hold locks a GIL holder may wait on: unlike
+    /// [`Self::spawn_blocking`], this never takes the GIL.
+    pub fn run_detached<F, T>(&self, fut: F) -> Result<T, omq_proto::error::Error>
+    where
+        F: Future<Output = Result<T, omq_proto::error::Error>> + Send + 'static,
+        T: Send + 'static,
+    {
+        let handle = self
+            .state
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|rt| rt.pid == std::process::id() && !rt.ctx.is_terminated())
+            .map(|rt| rt.ctx.handle().clone())
+            .ok_or(omq_proto::error::Error::Closed)?;
+        let (otx, orx) = flume::bounded(1);
+        handle.spawn(async move {
+            let _ = otx.send(fut.await);
+        });
+        orx.recv().map_err(|_| omq_proto::error::Error::Closed)?
+    }
+
     /// Build a socket on the tokio thread, spawn per-socket send/recv pumps,
     /// and return the socket Arc and its id.
     #[expect(clippy::type_complexity)]

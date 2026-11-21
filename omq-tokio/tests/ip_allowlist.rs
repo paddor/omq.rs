@@ -266,8 +266,8 @@ fn invalid_entry_names_its_position_and_builds_nothing() {
 #[tokio::test]
 async fn setter_applies_to_later_binds_and_is_refused_while_an_ip_listener_is_bound() {
     let pull = Socket::new(SocketType::Pull, Options::default());
-    let ipc = pull
-        .bind(format!("ipc://@omq-ip-allowlist-{}", std::process::id()))
+    let inproc = pull
+        .bind(format!("inproc://omq-ip-allowlist-{}", std::process::id()))
         .await
         .unwrap();
     let list = IpAllowlist::try_from(&["127.0.0.2"][..]).unwrap();
@@ -290,7 +290,7 @@ async fn setter_applies_to_later_binds_and_is_refused_while_an_ip_listener_is_bo
     let _admitted = zmtp_push(LOCAL, address(&tcp), "open").await.unwrap();
     assert_eq!(recv_body(&pull).await, "open");
 
-    pull.unbind(ipc).await.unwrap();
+    pull.unbind(inproc).await.unwrap();
     pull.clone_shared().close().await.unwrap();
     assert!(matches!(
         pull.set_ip_allowlist(Some(list)).await,

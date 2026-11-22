@@ -123,4 +123,13 @@ soak job per soak test, `--ignored` stress tests, libzmq draft interop
 (libzmq built with `ENABLE_DRAFTS=ON`), and Ubuntu ARM64.
 
 Interop tests skip when their peer is missing. CI sets
-`OMQ_INTEROP_REQUIRED=1` so a missing peer fails instead.
+`OMQ_INTEROP_REQUIRED=1` so a missing peer fails instead. The libzmq draft
+and WebSocket helpers need libzmq built with `ENABLE_DRAFTS=ON` and
+`ENABLE_WS=ON`. Link them with an rpath to that libzmq:
+
+```sh
+cc -O2 -o omq-tokio/tests/helpers/zmq_draft_peer \
+  omq-tokio/tests/helpers/zmq_draft_peer.c \
+  -I"$LIBZMQ_PREFIX/include" -L"$LIBZMQ_PREFIX/lib" \
+  -Wl,-rpath,"$LIBZMQ_PREFIX/lib" -lzmq
+```

@@ -14,16 +14,32 @@ const HELPER: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/helpers/zmq_dra
 
 fn skip_if_no_helper() -> bool {
     if !std::path::Path::new(HELPER).exists() {
-        assert!(
-            std::env::var_os("OMQ_INTEROP_REQUIRED").is_none(),
-            "OMQ_INTEROP_REQUIRED=1 but zmq_draft_peer helper not found at {HELPER}",
-        );
-        eprintln!("skip: zmq_draft_peer helper not found at {HELPER}");
+        return skip(&format!("zmq_draft_peer helper not found at {HELPER}"));
+    }
 
-        return true;
+    // A helper whose libzmq lacks the draft API connects but never finishes
+    // the draft-socket handshake, so every test would time out.
+    let has_draft = Command::new(HELPER)
+        .arg("has-draft")
+        .status()
+        .is_ok_and(|status| status.success());
+    if !has_draft {
+        return skip(&format!(
+            "zmq_draft_peer at {HELPER} runs on a libzmq without ENABLE_DRAFTS=ON"
+        ));
     }
 
     false
+}
+
+fn skip(reason: &str) -> bool {
+    assert!(
+        std::env::var_os("OMQ_INTEROP_REQUIRED").is_none(),
+        "OMQ_INTEROP_REQUIRED=1 but {reason}",
+    );
+    eprintln!("skip: {reason}");
+
+    true
 }
 
 fn spawn_helper(args: &[&str]) -> Child {

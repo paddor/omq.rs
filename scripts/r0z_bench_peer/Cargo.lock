@@ -797,7 +797,7 @@ dependencies = [
 
 [[patch.unused]]
 name = "omq-proto"
-version = "0.41.1"
+version = "0.41.2"
 
 [[patch.unused]]
 name = "omq-tokio"

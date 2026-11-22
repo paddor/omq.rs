@@ -40,7 +40,11 @@ if [[ "${SOAK_SKIP_BUILD:-0}" != "1" ]]; then
   cargo build --release -p omq-libzmq
 fi
 
-export LD_LIBRARY_PATH="${repo_root}/target/release:${LD_LIBRARY_PATH:-}"
+# Cargo config and CARGO_TARGET_DIR decide where omq-libzmq lands.
+target_dir="$(cargo metadata --format-version 1 --no-deps \
+  --manifest-path "${repo_root}/Cargo.toml" \
+  | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
+export LD_LIBRARY_PATH="${target_dir}/release:${LD_LIBRARY_PATH:-}"
 
 if [[ -z "$jobs" ]]; then
   jobs="${#tests[@]}"

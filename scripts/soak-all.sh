@@ -320,7 +320,7 @@ run_job node bindings/node/scripts/soak.sh "$duration"
 run_job ruby bindings/ruby/scripts/soak.sh "$duration"
 run_job dotnet bindings/dotnet/scripts/soak.sh "$duration"
 
-omq_ts_dir="${OMQ_TS_DIR:-${script_dir}/../../omq.ts}"
+omq_ts_dir="${OMQ_TS_DIR:-${script_dir}/../pure/typescript}"
 if [[ -d "$omq_ts_dir" ]]; then
   run_job omq-ts env OMQ_TS_SOAK_DURATION_SECS="$duration_seconds" \
     npm --prefix "$omq_ts_dir" run soak

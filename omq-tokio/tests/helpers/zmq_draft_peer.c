@@ -1,5 +1,6 @@
 // Helper for libzmq draft-socket interop tests.
 // Usage:
+//   zmq_draft_peer has-draft
 //   zmq_draft_peer radio-connect-send ENDPOINT GROUP BODY
 //   zmq_draft_peer dish-connect-recv ENDPOINT GROUP BODY
 //   zmq_draft_peer scatter-connect-send ENDPOINT BODY
@@ -216,6 +217,10 @@ static void peer_connect_request(void *ctx, const char *endpoint, const char *re
 }
 
 int main(int argc, char **argv) {
+    if (argc == 2 && strcmp(argv[1], "has-draft") == 0)
+        return zmq_has("draft") ? 0 : 2;
+    if (!zmq_has("draft"))
+        die_msg("libzmq lacks the draft API; build it with ENABLE_DRAFTS=ON");
     if (argc < 4)
         die_msg("usage: zmq_draft_peer MODE ENDPOINT ...");
 

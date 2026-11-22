@@ -62,7 +62,7 @@ impl<'a> PeerLifecycle<'a> {
         capacity: usize,
         spin_probe: bool,
     ) -> crate::engine::RecvSink {
-        let (producer, consumer) = yring::spsc(capacity);
+        let (producer, consumer) = crate::engine::queue_ring(capacity);
         let space = Arc::new(StateSignal::new());
         self.register_tcp_consumer(consumer, space.clone(), peer_id, spin_probe);
         let recv_signal = self.driver.link.spsc.recv_signal.clone();

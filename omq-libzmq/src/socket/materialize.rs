@@ -269,8 +269,8 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) -> Result<(), c_int> {
     let socket_type = sock.socket_type;
 
     let cap = recv_hwm.max(16);
-    let (fast_prod, fast_cons) = yring::spsc(cap);
-    let (pump_prod, pump_cons) = yring::spsc(cap);
+    let (fast_prod, fast_cons) = omq_tokio::engine::queue_ring(cap);
+    let (pump_prod, pump_cons) = omq_tokio::engine::queue_ring(cap);
     // SAFETY: materialization happens before user recv access and must not
     // bind the later app-facing owner thread.
     *unsafe { sock.recv.consumers.get_unchecked() } =

@@ -42,7 +42,9 @@ async fn main() -> Result<()> {
 - **Queues are bounded.** The high-water mark (`send_hwm`, `recv_hwm`) caps
   queued messages per peer. When a peer is full, round-robin and exclusive
   sockets block (or `try_send` returns `Full`); PUB, XPUB, and RADIO drop for
-  that subscriber unless `xpub_nodrop` is set.
+  that subscriber unless `xpub_nodrop` is set. Queues start small and grow
+  toward the HWM as a backlog builds. They keep their peak size, so memory
+  follows the deepest backlog seen, never more than the HWM allows.
 - **Fairness.** Sends round-robin across ready peers; receives fair-queue
   across connections. A fast peer cannot starve a slow one.
 - **Heartbeats find dead peers, not slow ones.** A peer that answers PINGs is

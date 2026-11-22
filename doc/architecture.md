@@ -119,7 +119,8 @@ order. Each connection borrows the pipe and gives it back when it ends, so the
 redial sends what is still queued; a lost connection loses only what it took
 out. REQ drops a request that a ready connection may have sent. A bind-side
 socket without a ready pipe is mute. HWM bounds each pipe, not total socket
-memory.
+memory. Queue rings start small, grow toward the HWM as a backlog builds, and
+keep their peak size until dropped.
 
 A PUSH socket on one I/O thread picks one ready peer per message:
 

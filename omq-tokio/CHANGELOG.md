@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.38.1] - 2026-11-22
+
 ### Changed
 
 - Queue rings (receive rings, send pipes, fan-out lanes, fanring lanes)

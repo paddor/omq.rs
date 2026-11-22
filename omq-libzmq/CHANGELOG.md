@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Receive rings start at 1024 slots and grow toward `ZMQ_RCVHWM` as a
+  backlog builds, and keep their peak size. Requires yring 0.3.22.
+
 ### Fixed
 
 - Accept unbracketed IPv6 hosts in `tcp://` endpoints, such as `tcp://::1:5555`,

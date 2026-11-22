@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Queue rings (receive rings, send pipes, fan-out lanes, fanring lanes)
+  start at 1024 slots and grow toward the HWM as a backlog builds, instead
+  of allocating the full HWM up front. Idle and lightly loaded peers stay
+  small. A ring keeps its peak size, so memory follows the deepest backlog,
+  bounded by the HWM as before. Requires yring 0.3.22 and fanring 0.3.12.
+
 ## [0.38.0] - 2026-11-21
 
 ### Added

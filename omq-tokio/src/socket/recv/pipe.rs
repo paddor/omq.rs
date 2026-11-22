@@ -214,7 +214,7 @@ pub(crate) fn recv_pipe(
     Arc<DataSignal>,
     Arc<StateSignal>,
 ) {
-    let (prod, cons) = yring::spsc(capacity);
+    let (prod, cons) = crate::engine::queue_ring(capacity);
     let notify = Arc::new(DataSignal::new());
     let space = Arc::new(StateSignal::new());
     let pipe = Arc::new(SharedRecvPipe {

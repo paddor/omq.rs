@@ -195,7 +195,7 @@ impl RecvSinkConfig {
             return;
         }
 
-        let (prod, cons) = yring::spsc(self.cap);
+        let (prod, cons) = super::queue_ring(self.cap);
         let signal = self.signal.clone();
         slot.sink = Some(RecvSink::Yring(YringSink {
             producer: prod,

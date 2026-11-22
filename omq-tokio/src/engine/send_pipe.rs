@@ -173,7 +173,7 @@ pub(crate) fn send_pipe_with_mode(
     capacity: usize,
     mode: SendPipeMode,
 ) -> (SendPipeProducer, SendPipeConsumer) {
-    let (producer, consumer) = yring::spsc(capacity.max(1));
+    let (producer, consumer) = super::queue_ring(capacity.max(1));
     let (producer, consumer) = match mode {
         SendPipeMode::Queue => (
             SendPipeProducerInner::Queue(producer),

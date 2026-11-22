@@ -112,7 +112,7 @@ impl LaneTemplate {
         index: usize,
         io_pool: &crate::context::IoPoolHandle,
     ) -> (LaneInput, LaneEndpoint) {
-        let (data_tx, data_rx) = yring::spsc(self.pipe_cap);
+        let (data_tx, data_rx) = crate::engine::queue_ring(self.pipe_cap);
         let worker = LaneWorker::new(
             data_rx,
             self.space.clone(),

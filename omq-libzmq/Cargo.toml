@@ -26,7 +26,7 @@ workspace = true
 
 [dependencies]
 omq-tokio = { path = "../omq-tokio", version = "0.38.0", features = ["plain", "curve", "lz4", "zstd", "ws"] }
-yring = "0.3.21"
+yring = "0.3.22"
 tokio = { version = "1.53.3", features = ["rt", "sync", "time"] }
 bytes = "1.12.1"
 rustc-hash = "2.1.3"

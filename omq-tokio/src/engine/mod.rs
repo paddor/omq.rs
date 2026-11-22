@@ -49,3 +49,18 @@ pub(crate) use send_pipe::{
 pub use signal::{StateSignal, block_on};
 
 pub(crate) mod peer_send;
+
+/// Slots a queue ring starts with. It doubles up to its HWM capacity while a
+/// backlog builds, so idle and lightly loaded peers stay small.
+const QUEUE_RING_INITIAL_SLOTS: usize = 1024;
+
+/// A queue ring bounded at `capacity` that starts with 1024 slots and grows
+/// on demand. It keeps its peak size until dropped.
+#[doc(hidden)]
+#[must_use]
+pub fn queue_ring<T>(capacity: usize) -> (yring::Producer<T>, yring::Consumer<T>) {
+    yring::spsc_growing(QUEUE_RING_INITIAL_SLOTS, capacity)
+}
+
+#[cfg(test)]
+mod tests;

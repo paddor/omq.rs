@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Require lz4rip 0.12.4. Dictionary compression also matches within
+  129-256 B messages, so they compress 7-16% smaller but take longer
+  (`lz4`).
+
 ## [0.41.0] - 2026-11-21
 
 ### Added

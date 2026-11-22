@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Require lz4rip 0.12.5. Saturated PUSH/PULL with a dictionary delivers
+  about 11% more 256 B-16 KiB messages; without one, 256 KiB messages drop
+  about 7% (`lz4`).
+
 ## [0.41.1] - 2026-11-22
 
 ### Changed

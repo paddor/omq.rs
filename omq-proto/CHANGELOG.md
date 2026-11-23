@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as CPU-bound above it and output-bound below it; a level that carries more
   is kept. A window whose encoding kept up asks for ratio, since a saturated
   link can queue in the kernel send buffer without refusing bytes.
+- Adaptive Zstd levels check level -4, or the nearest level in range, now
+  and then. When one window there carries more input than the walk's level,
+  the walk starts over at -4. Checks come 16 windows after the start, then
+  every 64 to 256 windows, and within 16 windows of the walk settling at
+  another level or rate. A best recent rate not measured for 32 windows
+  gives way.
 - `OutputWindow` no longer has `backlogged`.
 
 ## [0.41.3] - 2026-11-23

@@ -495,7 +495,7 @@ impl Context {
     ) -> Socket {
         let build = Build {
             recv_sink_config,
-            compatibility: crate::routing::SendCompatibility::Libzmq,
+            compatibility: crate::routing::Compatibility::Libzmq,
         };
 
         self.new_socket("Context::socket_for_libzmq()", socket_type, options, build)

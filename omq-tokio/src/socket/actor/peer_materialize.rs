@@ -336,6 +336,9 @@ fn configure_actor_driver(
         .with_socket_close_state(socket.link.recv_tx.clone())
         .with_latency_polling(latency_polling)
         .with_receive_profile(receive_profile)
+        .with_unique_large_bodies(
+            socket.resources.compatibility == crate::routing::Compatibility::Libzmq,
+        )
 }
 
 fn attach_ip_rate_limit(

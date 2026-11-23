@@ -147,7 +147,7 @@ impl FanOutShared {
 struct FanOutConfig {
     mode: FanOutMode,
     mute_policy: FanOutMutePolicy,
-    compatibility: super::SendCompatibility,
+    compatibility: super::Compatibility,
     #[cfg(feature = "dart")]
     native_pending_limit: usize,
     #[cfg(feature = "dart")]
@@ -193,7 +193,7 @@ fn fan_out_mute_policy(socket_type: SocketType, options: &Options) -> FanOutMute
 
 impl Submitter {
     fn try_admission(&self) -> LaneAdmission {
-        if self.config.compatibility == super::SendCompatibility::Libzmq
+        if self.config.compatibility == super::Compatibility::Libzmq
             && self.config.mute_policy.is_lossy()
         {
             LaneAdmission::Drop
@@ -680,7 +680,7 @@ impl FanOutSend {
             config: FanOutConfig {
                 mode,
                 mute_policy,
-                compatibility: super::SendCompatibility::Native,
+                compatibility: super::Compatibility::Native,
                 #[cfg(feature = "dart")]
                 native_pending_limit: options.send_queue_capacity(),
                 #[cfg(feature = "dart")]
@@ -689,7 +689,7 @@ impl FanOutSend {
         }
     }
 
-    pub(super) fn set_compatibility(&mut self, compatibility: super::SendCompatibility) {
+    pub(super) fn set_compatibility(&mut self, compatibility: super::Compatibility) {
         self.config.compatibility = compatibility;
     }
 

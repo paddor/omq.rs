@@ -353,6 +353,7 @@ pub(crate) struct Resources {
     recv_ip_rate_limiter: Option<Arc<SharedIpRateLimiter>>,
     recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
     authenticated_recv_sink: Option<crate::engine::RecvSink>,
+    compatibility: crate::routing::Compatibility,
 }
 
 impl SocketDriver {
@@ -380,6 +381,7 @@ impl SocketDriver {
             recv_ip_rate_limiter: recv_ip_rate_limiter(&options),
             recv_sink_config: env.recv_sink_config,
             authenticated_recv_sink,
+            compatibility: env.compatibility,
         };
 
         Self {

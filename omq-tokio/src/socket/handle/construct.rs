@@ -1,5 +1,5 @@
 use super::{Inner, Socket};
-use crate::routing::{SendCompatibility, SendStrategy};
+use crate::routing::{Compatibility, SendStrategy};
 use crate::socket::actor::{DriverEnv, HandleLink, HandleShared, SocketDriver, spawn_driver};
 use crate::socket::monitor::MonitorPublisher;
 use crate::socket::peer_recv::PeerRecvRoutes;
@@ -33,18 +33,18 @@ impl Placement<'_> {
 }
 
 /// How a new socket behaves: an optional caller-provided receive sink and
-/// its send semantics.
+/// its native or libzmq semantics.
 pub(crate) struct Build {
     pub(crate) recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
-    pub(crate) compatibility: SendCompatibility,
+    pub(crate) compatibility: Compatibility,
 }
 
 impl Build {
-    /// Native send semantics.
+    /// Native semantics.
     pub(crate) fn native(recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>) -> Self {
         Self {
             recv_sink_config,
-            compatibility: SendCompatibility::Native,
+            compatibility: Compatibility::Native,
         }
     }
 }
@@ -155,6 +155,7 @@ impl Socket {
             io_pool: placement.io_pool.clone(),
             inproc_registry: placement.inproc_registry,
             recv_sink_config: build.recv_sink_config,
+            compatibility: build.compatibility,
         };
         let driver = SocketDriver::new(socket_type, options, send_strategy, link, env);
         #[cfg(feature = "dart")]

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Sockets built for omq-libzmq read each large body up to 8 MiB into an
+  allocation of its own instead of the reusable receive pool, so the receiver
+  owns it alone.
+
 ## [0.38.2] - 2026-11-23
 
 ### Fixed

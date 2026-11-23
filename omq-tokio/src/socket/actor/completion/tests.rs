@@ -48,6 +48,7 @@ fn fixture_with_pool(
         io_pool: pool,
         inproc_registry: Arc::new(crate::transport::inproc::InprocRegistry::new()),
         recv_sink_config: None,
+        compatibility: crate::routing::Compatibility::Native,
     };
     let driver = SocketDriver::new(socket_type, options, send_strategy, link, env);
 

@@ -284,6 +284,11 @@ where
         self
     }
 
+    pub(crate) fn with_unique_large_bodies(mut self, unique: bool) -> Self {
+        self.receive.unique_large_bodies = unique;
+        self
+    }
+
     pub(crate) fn with_socket_close_state(
         mut self,
         state: Arc<crate::socket::recv::SharedRecvPipe>,

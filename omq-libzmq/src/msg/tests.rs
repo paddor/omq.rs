@@ -53,6 +53,64 @@ fn writable_received_data_reuses_unique_heap_storage() {
     assert_eq!(zmq_msg_close(&raw mut message), 0);
 }
 
+/// A large frame read off a stream arrives in storage the message alone
+/// owns, so writable access needs no copy.
+#[test]
+fn large_received_frame_is_writable_in_place() {
+    const ZMQ_PUSH: c_int = 8;
+    const ZMQ_PULL: c_int = 7;
+    const ZMQ_RCVTIMEO: c_int = 27;
+    const ZMQ_LAST_ENDPOINT: c_int = 32;
+    let ctx = crate::zmq_ctx_new();
+    let pull = crate::zmq_socket(ctx, ZMQ_PULL);
+    let push = crate::zmq_socket(ctx, ZMQ_PUSH);
+    let timeout = 5000_i32;
+    assert_eq!(
+        crate::zmq_setsockopt(
+            pull,
+            ZMQ_RCVTIMEO,
+            (&raw const timeout).cast(),
+            size_of::<i32>()
+        ),
+        0
+    );
+    assert_eq!(crate::zmq_bind(pull, c"tcp://127.0.0.1:0".as_ptr()), 0);
+    let mut endpoint = [0u8; 64];
+    let mut len = endpoint.len();
+    assert_eq!(
+        crate::zmq_getsockopt(
+            pull,
+            ZMQ_LAST_ENDPOINT,
+            endpoint.as_mut_ptr().cast(),
+            &raw mut len
+        ),
+        0
+    );
+    assert_eq!(crate::zmq_connect(push, endpoint.as_ptr().cast()), 0);
+
+    let body = vec![b'a'; 1024 * 1024];
+    let size = c_int::try_from(body.len()).unwrap();
+    assert_eq!(
+        crate::zmq_send(push, body.as_ptr().cast(), body.len(), 0),
+        size
+    );
+    let mut message = OmqMsgRepr::zeroed();
+    assert_eq!(zmq_msg_init(&raw mut message), 0);
+    assert_eq!(zmq_msg_recv(&raw mut message, pull, 0), size);
+
+    let received = message.ptr();
+    let pointer = zmq_msg_data(&raw mut message).cast::<u8>();
+    assert_eq!(pointer, received, "zmq_msg_data copied the frame");
+    // SAFETY: zmq_msg_data exposes writable storage for this message.
+    unsafe { *pointer = b'b' };
+    assert_eq!(owned_payload(&message)[..2], *b"ba");
+
+    assert_eq!(zmq_msg_close(&raw mut message), 0);
+    assert_eq!(crate::zmq_close(push), 0);
+    assert_eq!(crate::zmq_close(pull), 0);
+    assert_eq!(crate::zmq_ctx_term(ctx), 0);
+}
+
 fn group_of(message: &OmqMsgRepr) -> &CStr {
     // SAFETY: the live message owns its group string.
     unsafe { CStr::from_ptr(zmq_msg_group(message)) }

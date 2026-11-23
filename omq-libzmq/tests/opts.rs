@@ -169,13 +169,20 @@ fn hwm_roundtrip() {
     set_i32(s, ZMQ_RCVHWM, 2000);
     assert_eq!(get_i32(s, ZMQ_RCVHWM), 2000);
 
-    assert_eq!(set_i32(s, ZMQ_SNDHWM, 0), -1);
+    assert_eq!(set_i32(s, ZMQ_SNDHWM, -1), -1);
     assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
     assert_eq!(get_i32(s, ZMQ_SNDHWM), 500);
 
-    assert_eq!(set_i32(s, ZMQ_RCVHWM, 0), -1);
+    assert_eq!(set_i32(s, ZMQ_RCVHWM, -1), -1);
     assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
     assert_eq!(get_i32(s, ZMQ_RCVHWM), 2000);
+
+    // libzmq's "no limit" reads back as set.
+    assert_eq!(set_i32(s, ZMQ_SNDHWM, 0), 0);
+    assert_eq!(get_i32(s, ZMQ_SNDHWM), 0);
+
+    assert_eq!(set_i32(s, ZMQ_RCVHWM, 0), 0);
+    assert_eq!(get_i32(s, ZMQ_RCVHWM), 0);
 
     zmq_close(s);
     zmq_ctx_term(ctx);

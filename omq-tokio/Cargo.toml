@@ -71,7 +71,7 @@ omq-webtrans-quinn = { path = "../vendor/omq-webtrans-quinn", version = "0.1.1",
 nix = { version = "0.32", default-features = false, features = ["signal"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-omq-shm = { path = "../omq-shm", version = "0.9.2" }
+omq-shm = { path = "../omq-shm", version = "0.9.1" }
 
 [dev-dependencies]
 serde_json = "1.0.154"

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.41.3] - 2026-11-23
+
 ### Fixed
 
 - Routing identities may start with a zero byte, as in libzmq, both in

@@ -130,24 +130,6 @@ fn required_metadata_and_duplicates_are_checked() {
     }
 
     assert_eq!(decode_ready(&crowded), None);
-    // Only the 9-byte generated form is reserved; other identities may
-    // start with 0x00.
-    let zero_prefixed = Ready {
-        identity: Some(b"\0\0"),
-        ..ready
-    };
-    let n_zero = encode_ready(zero_prefixed, &mut output).unwrap();
-    assert_eq!(decode_ready(&output[..n_zero]), Some(zero_prefixed));
-    let reserved = encode_ready(
-        Ready {
-            identity: Some(b"\0reserved"),
-            ..ready
-        },
-        &mut output,
-    )
-    .unwrap();
-
-    assert_eq!(decode_ready(&output[..reserved]), None);
     assert_eq!(decode_ready(b"\xc0\x05READY"), None);
 
     for (name, value) in [
@@ -171,6 +153,31 @@ fn required_metadata_and_duplicates_are_checked() {
 
         assert!(decode_ready(&bytes).is_none());
     }
+}
+
+#[test]
+fn only_the_generated_identity_form_is_reserved() {
+    let mut output = [0; MAX_DATAGRAM];
+    let ready = Ready {
+        socket_type: SocketType::Peer,
+        identity: Some(b"\0\0"),
+        reply_requested: true,
+        session: 1,
+        echo: 0,
+        phase: Phase::Hello,
+    };
+    let n = encode_ready(ready, &mut output).unwrap();
+    assert_eq!(decode_ready(&output[..n]), Some(ready));
+
+    let reserved = encode_ready(
+        Ready {
+            identity: Some(b"\0reserved"),
+            ..ready
+        },
+        &mut output,
+    )
+    .unwrap();
+    assert_eq!(decode_ready(&output[..reserved]), None);
 }
 
 #[test]

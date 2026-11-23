@@ -38,7 +38,6 @@ pub(super) struct OutboundState {
 struct LevelWindow {
     started: Instant,
     batches: u32,
-    backlogged: u32,
     overflowed: u32,
     input_full: u32,
     due: bool,
@@ -49,7 +48,6 @@ impl LevelWindow {
         Self {
             started,
             batches: 0,
-            backlogged: 0,
             overflowed: 0,
             input_full: 0,
             due: false,
@@ -464,7 +462,6 @@ impl OutboundState {
         };
 
         window.batches += 1;
-        window.backlogged += u32::from(backlogged);
         window.overflowed += u32::from(backlogged && limited);
         window.input_full += u32::from(input_full);
         window.due = window.started.elapsed() >= ADAPT_WINDOW
@@ -488,7 +485,6 @@ impl OutboundState {
             elapsed: now.saturating_duration_since(window.started),
             blocked,
             batches: window.batches,
-            backlogged: window.backlogged,
             overflowed: window.overflowed,
             input_full: window.input_full,
         });

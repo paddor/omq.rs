@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Adaptive `zstd+tcp://` picks better levels for senders that wait on
+  replies. Over 1 Gbit/s, 8 closed-loop senders of ~90 KB messages that
+  compress about 2x delivered 14-22% more messages; less compressible ones
+  are unchanged.
+
 ## [0.38.3] - 2026-11-23
 
 ### Changed

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Adaptive Zstd levels also follow the sender's input rate. A level that
+  carries more than 5% less input per second than the best recent one counts
+  as CPU-bound above it and output-bound below it; a level that carries more
+  is kept. A window whose encoding kept up asks for ratio, since a saturated
+  link can queue in the kernel send buffer without refusing bytes.
+- `OutputWindow` no longer has `backlogged`.
+
 ## [0.41.3] - 2026-11-23
 
 ### Fixed

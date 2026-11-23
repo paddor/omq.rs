@@ -171,7 +171,6 @@ fn adapted_level_changes_frames_and_offload_work_counts_only_at_that_level() {
         elapsed: std::time::Duration::from_millis(100),
         blocked: std::time::Duration::from_millis(100),
         batches: 1,
-        backlogged: 1,
         overflowed: 0,
         input_full: 0,
     };
@@ -198,6 +197,10 @@ fn adapted_level_changes_frames_and_offload_work_counts_only_at_that_level() {
     encoder.stats = Some(CompressStats::default());
     encoder.absorb_offload_stats(&mut stale);
     assert_eq!(encoder.stats.unwrap().plain, 0);
+    assert_eq!(
+        encoder.adaptive.as_ref().unwrap().carried(),
+        message.byte_len() as u64
+    );
 }
 
 #[test]

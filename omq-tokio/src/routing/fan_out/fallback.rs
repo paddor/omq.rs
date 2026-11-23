@@ -11,6 +11,17 @@ use omq_proto::message::Message;
 
 use super::{FanOutMutePolicy, fan_out_cost};
 
+/// WebSocket peers frame each message for themselves.
+#[cfg(feature = "ws")]
+fn any_ws(targets: &[PeerOutbound]) -> bool {
+    targets.iter().any(PeerOutbound::is_ws)
+}
+
+#[cfg(not(feature = "ws"))]
+const fn any_ws(_targets: &[PeerOutbound]) -> bool {
+    false
+}
+
 fn data_inbox(target: &PeerOutbound) -> Option<&crate::engine::data_inbox::Sender> {
     match target {
         PeerOutbound::Wire { inbox, .. } | PeerOutbound::Inbox(inbox) => Some(inbox),
@@ -154,19 +165,10 @@ impl FallbackPublication<'_> {
     /// encodes directly.
     fn encodes_per_peer(&self) -> bool {
         let targets = self.targets;
-        if (targets.len() == 1 && self.policy != FanOutMutePolicy::DropOldest)
+        (targets.len() == 1 && self.policy != FanOutMutePolicy::DropOldest)
             || targets.iter().any(PeerOutbound::requires_per_peer_encoding)
             || !targets.iter().any(PeerOutbound::is_wire)
-        {
-            return true;
-        }
-
-        #[cfg(feature = "ws")]
-        if targets.iter().any(PeerOutbound::is_ws) {
-            return true;
-        }
-
-        false
+            || any_ws(targets)
     }
 
     /// A full inbox drops this publication for that peer. The peer stays

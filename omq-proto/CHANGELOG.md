@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Routing identities may start with a zero byte, as in libzmq, both in
+  `Options::identity` and in a peer's READY. Only the 9-byte generated form
+  stays reserved; `is_generated_identity` tells it apart.
+
 ## [0.41.2] - 2026-11-22
 
 ### Changed

@@ -67,9 +67,11 @@ impl Options {
             )));
         }
 
-        if self.identity.first() == Some(&0) {
+        if omq_proto::is_generated_identity(&self.identity) {
             return Err(Error::Config(
-                "exclusive socket identity must not start with a zero byte".into(),
+                "exclusive socket identity must not have the generated form: 9 bytes with a \
+                 leading zero byte"
+                    .into(),
             ));
         }
 

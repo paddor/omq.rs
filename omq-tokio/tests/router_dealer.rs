@@ -302,6 +302,42 @@ async fn latency_dealer_round_robins_tcp_peers() {
     assert_eq!(counts, [10, 10]);
 }
 
+/// libzmq peers may declare an identity with a leading zero byte. ROUTER
+/// routes by it like any other.
+#[tokio::test]
+async fn router_routes_a_zero_prefixed_dealer_identity() {
+    let router = Socket::new(
+        SocketType::Router,
+        Options::default().router_mandatory(true),
+    );
+    let port = test_support::bind_loopback(&router).await;
+    let dealer = Socket::new(
+        SocketType::Dealer,
+        Options::default().identity(bytes::Bytes::from_static(b"\0\0")),
+    );
+    dealer
+        .connect(test_support::tcp_loopback(port))
+        .await
+        .unwrap();
+
+    dealer.send(Message::single("ping")).await.unwrap();
+    let request = tokio::time::timeout(Duration::from_secs(1), router.recv())
+        .await
+        .expect("router did not receive the DEALER message")
+        .unwrap();
+    assert_eq!(request, Message::multipart([&b"\0\0"[..], b"ping"]));
+
+    router
+        .send(Message::multipart([&b"\0\0"[..], b"pong"]))
+        .await
+        .unwrap();
+    let reply = tokio::time::timeout(Duration::from_secs(1), dealer.recv())
+        .await
+        .expect("dealer did not receive the ROUTER reply")
+        .unwrap();
+    assert_eq!(reply, Message::single("pong"));
+}
+
 #[tokio::test]
 async fn latency_router_can_reply_to_dealer() {
     let router = Socket::new(

@@ -433,7 +433,8 @@ fn set_routing_option(
                 return Err(libc::EINVAL);
             }
 
-            if bytes.first() == Some(&0) {
+            // libzmq takes any identity; OMQ reserves the generated form.
+            if omq_tokio::message::is_generated_identity(bytes) {
                 return Err(libc::EINVAL);
             }
 

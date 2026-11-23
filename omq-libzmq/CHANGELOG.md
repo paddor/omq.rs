@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.3] - 2026-11-23
+
 ### Changed
 
 - `zmq_msg_data` returns received frames from 128 KiB through 8 MiB in place

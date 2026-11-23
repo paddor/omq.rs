@@ -44,7 +44,7 @@ fn fill_window(state: &mut OutboundState, limited: bool, input_full: bool) {
 }
 
 #[test]
-fn stalled_writes_raise_and_overflowing_input_lowers_the_level() {
+fn stalled_writes_and_kept_up_input_raise_and_overflowing_input_lowers_the_level() {
     let mut stalled = state(&Options::default());
     assert_eq!(level(&stalled), -1);
     fill_window(&mut stalled, true, true);
@@ -55,7 +55,7 @@ fn stalled_writes_raise_and_overflowing_input_lowers_the_level() {
     let mut queued = state(&Options::default());
     fill_window(&mut queued, false, false);
     queued.adapt_level(Instant::now(), Duration::ZERO);
-    assert_eq!(level(&queued), -1);
+    assert_eq!(level(&queued), 1);
 
     for (limited, input_full) in [(true, false), (false, true)] {
         let mut behind = state(&Options::default());

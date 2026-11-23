@@ -97,7 +97,7 @@ pub struct ZstdEncoder {
     send: SendDict,
     level: i32,
     cctx: Option<CompressContext>,
-    adaptive: Option<AdaptiveLevel>,
+    adaptive: Option<adaptive::LevelWalk>,
     // Counted for an adaptive primary and its offload encoders.
     stats: Option<CompressStats>,
     train: Option<TrainState>,
@@ -210,9 +210,9 @@ impl ZstdEncoder {
     /// If `min..=max` holds no supported level.
     #[must_use]
     pub fn with_level_range(mut self, min: i32, max: i32) -> Self {
-        let controller = AdaptiveLevel::new(min..=max, DEFAULT_LEVEL);
-        self.set_level(controller.level());
-        self.adaptive = Some(controller);
+        let walk = adaptive::LevelWalk::new(min..=max, DEFAULT_LEVEL);
+        self.set_level(walk.level());
+        self.adaptive = Some(walk);
         self.stats = Some(CompressStats::default());
 
         self
@@ -247,7 +247,7 @@ impl ZstdEncoder {
 
     /// Close an adaptation window and pick the level for the next one.
     pub fn adapt_level(&mut self, output: OutputWindow) {
-        let Some(controller) = self.adaptive.as_mut() else {
+        let Some(walk) = self.adaptive.as_mut() else {
             return;
         };
 
@@ -255,17 +255,20 @@ impl ZstdEncoder {
             .stats
             .replace(CompressStats::default())
             .unwrap_or_default();
-        let level = controller.update(stats, adaptive::bottleneck(output));
+        let level = walk.update(self.level, stats, output);
         self.set_level(level);
     }
 
-    /// Count an offload encoder's work done at the current level.
+    /// Count an offload encoder's work done at the current level. Work at
+    /// an earlier level only counts toward the window's input rate.
     pub fn absorb_offload_stats(&mut self, offload: &mut Self) {
-        if let Some(stats) = self.stats.as_mut()
-            && let Some(work) = offload.stats.take()
-            && offload.level == self.level
-        {
+        let (Some(stats), Some(work)) = (self.stats.as_mut(), offload.stats.take()) else {
+            return;
+        };
+        if offload.level == self.level {
             stats.merge(work);
+        } else if let Some(walk) = self.adaptive.as_mut() {
+            walk.carry(work.plain);
         }
     }
 

@@ -78,8 +78,6 @@ pub struct OutputWindow {
     pub blocked: std::time::Duration,
     /// Encoded batches.
     pub batches: u32,
-    /// Batches that ended with more input queued.
-    pub backlogged: u32,
     /// Backlogged batches that stopped at their size or time limit.
     pub overflowed: u32,
     /// Batches that freed space in a full input queue.

@@ -457,13 +457,25 @@ impl TryFrom<Message> for Bytes {
 /// ID in big-endian order, so the identity stays stable for the
 /// lifetime of the connection and cannot collide across peers.
 pub fn generated_identity(id: u64) -> Bytes {
-    let mut buf = [0u8; 9];
+    let mut buf = [0u8; GENERATED_IDENTITY_LEN];
     buf[1..].copy_from_slice(&id.to_be_bytes());
     Bytes::copy_from_slice(&buf)
 }
 
+/// Length of a [`generated_identity`].
+const GENERATED_IDENTITY_LEN: usize = 9;
+
+/// Whether `identity` has the form of a [`generated_identity`]: nine bytes
+/// with a leading null byte. Neither peers nor local options may declare
+/// it, so a declared identity never names a connection that declared none.
+/// Other identities may start with a null byte, as libzmq allows.
+#[must_use]
+pub const fn is_generated_identity(identity: &[u8]) -> bool {
+    identity.len() == GENERATED_IDENTITY_LEN && matches!(identity.first(), Some(0))
+}
+
 /// Whether a peer may declare `identity` as its routing identity: at most
-/// 255 bytes, and not starting with 0x00, which generated identities use.
-pub(crate) fn is_valid_peer_identity(identity: &[u8]) -> bool {
-    identity.len() <= 255 && identity.first() != Some(&0)
+/// 255 bytes, and not of the generated form.
+pub(crate) const fn is_valid_peer_identity(identity: &[u8]) -> bool {
+    identity.len() <= 255 && !is_generated_identity(identity)
 }

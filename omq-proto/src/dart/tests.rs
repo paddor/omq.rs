@@ -130,10 +130,17 @@ fn required_metadata_and_duplicates_are_checked() {
     }
 
     assert_eq!(decode_ready(&crowded), None);
-    // Identities starting with 0x00 belong to generated identities.
+    // Only the 9-byte generated form is reserved; other identities may
+    // start with 0x00.
+    let zero_prefixed = Ready {
+        identity: Some(b"\0\0"),
+        ..ready
+    };
+    let n_zero = encode_ready(zero_prefixed, &mut output).unwrap();
+    assert_eq!(decode_ready(&output[..n_zero]), Some(zero_prefixed));
     let reserved = encode_ready(
         Ready {
-            identity: Some(b"\0peer"),
+            identity: Some(b"\0reserved"),
             ..ready
         },
         &mut output,

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `ZMQ_ROUTING_ID` accepts identities that start with a zero byte, as
+  libzmq does, except the 9-byte form OMQ generates.
+
 ## [0.12.1] - 2026-11-22
 
 ### Changed

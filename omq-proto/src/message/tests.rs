@@ -448,3 +448,14 @@ fn message_inline_max_push_part_payload() {
     assert_eq!(m.get(0).unwrap(), &data[..]);
     assert_eq!(m.get(1).unwrap(), b"extra");
 }
+
+#[test]
+fn only_the_generated_form_is_reserved() {
+    assert!(is_generated_identity(&generated_identity(7)));
+    assert!(!is_generated_identity(b"\0\0"));
+    assert!(!is_generated_identity(b"\0longer-than-nine"));
+    assert!(!is_generated_identity(b"generated"));
+    assert!(is_valid_peer_identity(b"\0\0"));
+    assert!(!is_valid_peer_identity(&generated_identity(7)));
+    assert!(!is_valid_peer_identity(&[b'x'; 256]));
+}

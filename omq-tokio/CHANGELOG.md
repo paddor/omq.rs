@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- ROUTER and PEER admit peers whose identity starts with a zero byte, and
+  sockets may set one, as libzmq allows. Only the 9-byte generated form
+  stays reserved, so a declared identity never names another connection.
+
 ## [0.38.1] - 2026-11-22
 
 ### Changed

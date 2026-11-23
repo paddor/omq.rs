@@ -154,6 +154,44 @@ fn router_full_destination_drop_and_mandatory_backpressure() {
     }
 }
 
+/// A routing identity may start with a zero byte, as in libzmq. The ROUTER
+/// receives it and routes the reply by it over TCP.
+#[test]
+fn zero_prefixed_routing_id_round_trips_over_tcp() {
+    let ctx = zmq_ctx_new();
+    let router = zmq_socket(ctx, ZMQ_ROUTER);
+    let dealer = zmq_socket(ctx, ZMQ_DEALER);
+    for sock in [router, dealer] {
+        helpers::set_int_opt(sock, ZMQ_LINGER, 0);
+        helpers::set_int_opt(sock, ZMQ_RCVTIMEO, TIMEOUT_MS);
+        helpers::set_int_opt(sock, ZMQ_SNDTIMEO, TIMEOUT_MS);
+    }
+    helpers::set_int_opt(router, ZMQ_ROUTER_MANDATORY, 1);
+    let id = [0u8; 2];
+    assert_eq!(
+        zmq_setsockopt(dealer, ZMQ_ROUTING_ID, id.as_ptr().cast(), id.len()),
+        0
+    );
+
+    let addr = helpers::bind_random_tcp(router);
+    assert_eq!(zmq_connect(dealer, addr.as_ptr()), 0);
+    assert_eq!(zmq_send(dealer, b"ping".as_ptr().cast(), 4, 0), 4);
+    let mut buf = [0u8; 64];
+    assert_eq!(recv_frame(router, &mut buf), id);
+    assert_eq!(recv_frame(router, &mut buf), b"ping");
+
+    assert_eq!(
+        zmq_send(router, id.as_ptr().cast(), id.len(), ZMQ_SNDMORE),
+        2
+    );
+    assert_eq!(zmq_send(router, b"pong".as_ptr().cast(), 4, 0), 4);
+    assert_eq!(recv_frame(dealer, &mut buf), b"pong");
+
+    zmq_close(dealer);
+    zmq_close(router);
+    zmq_ctx_term(ctx);
+}
+
 /// DEALER connects to ROUTER; ROUTER sees identity frame + payload.
 #[test]
 fn dealer_router_identity_routing() {

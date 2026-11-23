@@ -244,6 +244,14 @@ fn rejects_reserved_peer_identity() {
 }
 
 #[test]
+fn accepts_zero_prefixed_peer_identity() {
+    let mut body = BytesMut::new();
+    write_property(&mut body, b"Identity", b"\0\0");
+    let properties = decode_properties_inner(body.freeze()).unwrap();
+    assert_eq!(properties.identity.as_deref(), Some(&b"\0\0"[..]));
+}
+
+#[test]
 fn kind_discriminates_all_variants() {
     assert_eq!(
         Command::Subscribe(Bytes::new()).kind(),

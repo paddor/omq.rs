@@ -10,6 +10,7 @@ fn identity_limits_and_reserved_prefix() {
     for valid in [
         Bytes::new(),
         Bytes::from_static(b"valid\x00suffix"),
+        Bytes::from_static(b"\x00\x00"),
         Bytes::from(vec![b'x'; 255]),
     ] {
         assert!(super::Options::default().identity(valid).validate().is_ok());

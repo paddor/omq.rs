@@ -188,6 +188,49 @@ ctx.term()
     assert!(status.success(), "pyzmq PULL exited with {status}");
 }
 
+/// A pyzmq DEALER whose identity starts with a zero byte is admitted and
+/// routed by a Rust ROUTER, as libzmq does.
+#[tokio::test]
+async fn null_tcp_pyzmq_zero_prefixed_dealer_to_rust_router() {
+    if skip_if_no_pyzmq() {
+        return;
+    }
+
+    let router = Socket::new(
+        SocketType::Router,
+        Options::default().router_mandatory(true),
+    );
+    let endpoint = router.bind(test_support::tcp_loopback(0)).await.unwrap();
+    let script = r#"
+import os, zmq
+ctx = zmq.Context.instance()
+s = ctx.socket(zmq.DEALER)
+s.setsockopt(zmq.IDENTITY, b"\x00\x00")
+s.setsockopt(zmq.RCVTIMEO, 5000)
+s.connect(os.environ["ENDPOINT"])
+s.send(b"ping")
+assert s.recv() == b"pong"
+s.close(linger=2000)
+ctx.term()
+"#;
+    let child = python3_command()
+        .args(["-c", script])
+        .env("ENDPOINT", endpoint.to_string())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn pyzmq DEALER");
+
+    let request = recv(&router, "pyzmq DEALER -> Rust ROUTER").await;
+    assert_eq!(request, Message::multipart([&b"\0\0"[..], b"ping"]));
+    router
+        .send(Message::multipart([&b"\0\0"[..], b"pong"]))
+        .await
+        .unwrap();
+
+    wait_success(child, "pyzmq DEALER").await;
+}
+
 #[tokio::test]
 async fn null_tcp_pyzmq_push_to_rust_pull() {
     if skip_if_no_pyzmq() {

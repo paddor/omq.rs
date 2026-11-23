@@ -38,7 +38,7 @@ pub use error::{Error, HandshakeRefusal, Result, TrySendError};
 pub use identity::{Identity, PeerAuthentication, PeerDiagnostics, PeerPublicKey};
 pub use message::{
     Frame, FrameFlags, Message, MessageIter, MessagePool, PartCountError, Payload,
-    generated_identity,
+    generated_identity, is_generated_identity,
 };
 pub use monitor::{
     ConnectionStatus, DisconnectReason, MonitorEvent, MonitorRecvError, MonitorTryRecvError,

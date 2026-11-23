@@ -10,7 +10,9 @@
 //!
 //! # Send and HWM semantics
 //!
-//! `ZMQ_SNDHWM` and `ZMQ_RCVHWM` count complete messages, not bytes.
+//! `ZMQ_SNDHWM` and `ZMQ_RCVHWM` count complete messages, not bytes. HWM 0,
+//! libzmq's "no limit", sets the largest bound, 1,048,576 messages, and reads
+//! back as 0.
 //! `ZMQ_LINGER` defaults to `-1`, matching libzmq. Bound round-robin sockets
 //! with no ready peer are muted: blocking `zmq_send()` waits, while
 //! `ZMQ_DONTWAIT` or `ZMQ_SNDTIMEO=0` returns `EAGAIN`.

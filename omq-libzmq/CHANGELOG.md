@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `ZMQ_SNDHWM` and `ZMQ_RCVHWM` accept 0, which libzmq reads as no limit, and
+  read it back. It sets the largest bound, 1,048,576 messages. Queues grow with
+  the backlog, so the bound reserves no memory.
+
 ## [0.12.2] - 2026-11-23
 
 ### Fixed

@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use omq_tokio::MechanismSetup;
-use omq_tokio::options::{KeepAlive, OnMute, ReconnectPolicy, WorkloadProfile};
+use omq_tokio::options::{KeepAlive, MAX_QUEUE_CAPACITY, OnMute, ReconnectPolicy, WorkloadProfile};
 
 use crate::socket::DEFAULT_HWM;
 
@@ -47,7 +47,9 @@ fn overlay(
 #[derive(Clone, Debug)]
 #[expect(clippy::struct_excessive_bools)]
 pub(crate) struct SocketOverlay {
+    /// `ZMQ_SNDHWM` as set; [`hwm_bound`] gives the bound it applies.
     pub send_hwm: Option<u32>,
+    /// `ZMQ_RCVHWM` as set; [`hwm_bound`] gives the bound it applies.
     pub recv_hwm: Option<u32>,
     pub linger: LingerSetting,
     pub identity: Bytes,
@@ -470,8 +472,8 @@ impl SocketOverlay {
 
     pub(crate) fn to_options(&self) -> omq_tokio::Options {
         omq_tokio::Options {
-            send_hwm: self.send_hwm.unwrap_or(DEFAULT_HWM as u32),
-            recv_hwm: self.recv_hwm.unwrap_or(DEFAULT_HWM as u32),
+            send_hwm: hwm_bound(self.send_hwm),
+            recv_hwm: hwm_bound(self.recv_hwm),
             linger: self.effective_linger(),
             identity: self.identity.clone(),
             max_message_size: self.max_message_size,
@@ -535,6 +537,16 @@ impl SocketOverlay {
                 server_public: omq_tokio::CurvePublicKey::from_bytes(*server_key),
             },
         }
+    }
+}
+
+/// The message bound of an HWM option. libzmq reads 0 as no limit; OMQ
+/// bounds every queue, so 0 selects the largest bound it supports.
+const fn hwm_bound(hwm: Option<u32>) -> u32 {
+    match hwm {
+        None => DEFAULT_HWM as u32,
+        Some(0) => MAX_QUEUE_CAPACITY as u32,
+        Some(n) => n,
     }
 }
 

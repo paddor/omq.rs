@@ -107,6 +107,20 @@ fn explicit_linger_zero_maps_to_native_zero() {
 }
 
 #[test]
+fn zero_hwm_maps_to_the_largest_queue_bound() {
+    let overlay = SocketOverlay {
+        send_hwm: Some(0),
+        recv_hwm: Some(0),
+        ..Default::default()
+    };
+    let largest = omq_tokio::options::MAX_QUEUE_CAPACITY;
+
+    let options = overlay.to_options();
+    assert_eq!(options.send_queue_capacity(), largest);
+    assert_eq!(options.recv_queue_capacity(), largest);
+}
+
+#[test]
 fn arena_threshold_maps_to_backend_options() {
     let default_overlay = SocketOverlay::default();
     assert_eq!(default_overlay.to_options().arena_threshold, None);

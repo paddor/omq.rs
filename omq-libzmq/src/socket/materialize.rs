@@ -7,7 +7,7 @@ use std::sync::atomic::Ordering;
 use bytes::Bytes;
 use omq_tokio::engine::{RingDrain, StateSignal};
 
-use super::{DEFAULT_HWM, OmqSocket};
+use super::OmqSocket;
 use crate::error::ETERM;
 use crate::notify::{NotifyHandle, PlatformNotifyHandle};
 use crate::opts::{MechanismOverlay, SocketOverlay, ZapOverlay};
@@ -100,11 +100,11 @@ struct MaterializeSettings {
 
 impl MaterializeSettings {
     fn from_overlay(overlay: &SocketOverlay) -> Self {
+        let opts = overlay.to_options();
+
         Self {
-            opts: overlay.to_options(),
-            recv_hwm: omq_tokio::options::queue_capacity(
-                overlay.recv_hwm.unwrap_or(DEFAULT_HWM as u32),
-            ),
+            recv_hwm: opts.recv_queue_capacity(),
+            opts,
             queue_without_ready_peer: !overlay.immediate,
             zap: ZapSettings {
                 mechanism: overlay.mechanism.clone(),

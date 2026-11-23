@@ -763,6 +763,45 @@ fn ctx_shutdown_wakes_send_waiting_for_a_peer() {
     assert_eq!(zmq_ctx_term(ctx), 0);
 }
 
+/// libzmq reads HWM 0 as no limit. OMQ bounds every queue, so 0 selects its
+/// largest bound: a peer that has not received yet holds far more than the
+/// default 1000 messages per side.
+#[test]
+fn zero_hwm_queues_past_the_default_bound() {
+    const ZMQ_SNDHWM: i32 = 23;
+    const ZMQ_RCVHWM: i32 = 24;
+    const MESSAGES: u32 = 5000;
+    let ctx = zmq_ctx_new();
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    helpers::set_int_opt(pull, ZMQ_RCVHWM, 0);
+    helpers::set_int_opt(push, ZMQ_SNDHWM, 0);
+
+    let addr = caddr("inproc://test-basic-zero-hwm");
+    assert_eq!(zmq_bind(pull, addr.as_ptr()), 0);
+    assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
+    for i in 0..MESSAGES {
+        let body = i.to_le_bytes();
+        assert_eq!(
+            zmq_send(push, body.as_ptr().cast(), body.len(), ZMQ_DONTWAIT),
+            4,
+            "message {i}, errno={}",
+            omq_zmq::zmq_errno(),
+        );
+    }
+
+    helpers::set_rcvtimeo(pull, 2000);
+    let mut buf = [0u8; 4];
+    for i in 0..MESSAGES {
+        assert_eq!(zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0), 4);
+        assert_eq!(u32::from_le_bytes(buf), i);
+    }
+
+    assert_eq!(zmq_close(push), 0);
+    assert_eq!(zmq_close(pull), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
 #[test]
 fn ctx_shutdown_wakes_send_blocked_on_a_full_pipe() {
     const ZMQ_SNDHWM: i32 = 23;

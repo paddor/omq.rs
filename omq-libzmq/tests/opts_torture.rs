@@ -143,7 +143,7 @@ fn invalid_option_sizes_and_values_preserve_previous_state() {
     assert_eq!(get_i32(sock, ZMQ_SNDHWM), 10);
 
     assert_eq!(set_i32(sock, ZMQ_RCVHWM, 11), 0);
-    assert_eq!(set_i32(sock, ZMQ_RCVHWM, 0), -1);
+    assert_eq!(set_i32(sock, ZMQ_RCVHWM, -1), -1);
     assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
     assert_eq!(get_i32(sock, ZMQ_RCVHWM), 11);
 

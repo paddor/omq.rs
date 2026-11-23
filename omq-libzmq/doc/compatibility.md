@@ -51,6 +51,10 @@ Socket options fall into three groups:
   do not map to omq-tokio behavior, such as ZAP, SOCKS, GSSAPI, VMCI, NORM,
   multicast tuning, batch sizes, busy-poll, and most XPUB manual knobs.
 
+`ZMQ_SNDHWM` and `ZMQ_RCVHWM` count messages. libzmq reads 0 as no limit; OMQ
+bounds every queue, so 0 sets the largest bound, 1,048,576 messages. Queues grow
+with the backlog, not up front. The option reads back as 0.
+
 `OMQ_ARENA_THRESHOLD` is an OMQ extension. It sets the outbound frame arena
 threshold before first bind/connect; `-1` restores the 4 KiB native default.
 

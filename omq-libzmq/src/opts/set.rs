@@ -101,7 +101,9 @@ fn set_queue_option(
         }
         ZMQ_SNDHWM => {
             let v = optval.i32()?;
-            if v <= 0 {
+            // 0 is the largest bound (`hwm_bound`), as libzmq reads it
+            // as no limit.
+            if v < 0 {
                 return Err(libc::EINVAL);
             }
 
@@ -109,7 +111,9 @@ fn set_queue_option(
         }
         ZMQ_RCVHWM => {
             let v = optval.i32()?;
-            if v <= 0 {
+            // 0 is the largest bound (`hwm_bound`), as libzmq reads it
+            // as no limit.
+            if v < 0 {
                 return Err(libc::EINVAL);
             }
 

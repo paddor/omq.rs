@@ -13,6 +13,6 @@ path = "src/main.rs"
 [dependencies]
 bytes = "1"
 libc = "0.2"
-monocoque-rs = { version = "0.4.2", default-features = false, features = ["runtime-tokio", "zmq"] }
+monocoque-rs = { version = "1.0.0", default-features = false, features = ["runtime-tokio", "zmq"] }
 tokio = { version = "1", features = ["time", "rt", "macros"] }
 zmq = "0.10"

@@ -1,7 +1,8 @@
 use bytes::Bytes;
-use monocoque::rt::{LocalRuntime, TcpListener, TcpStream};
+use monocoque::rt::LocalRuntime;
 use monocoque::zmq::{
-    PubSocket, PullSocket, PushSocket, RepSocket, ReqSocket, SocketOptions, SubSocket,
+    MonocoqueError, Msg, PubSocket, PullSocket, PushSocket, RepSocket, ReqSocket, SocketOptions,
+    SubSocket,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -46,48 +47,36 @@ async fn barrier() {
     }
 }
 
-fn addr(s: &str) -> String {
-    s.strip_prefix("tcp://").unwrap_or(s).to_owned()
-}
-
-// Monocoque clamps the read buffer to its 64 KiB read slab, and its own default
-// is 32 KiB. A 16 KiB read buffer is therefore below the untuned default and
-// halves the read batch. Bulk transfers want the full slab.
-const READ_SLAB: usize = 64 * 1024;
-
+// Write coalescing everywhere except the REQ/REP latency test, which stays
+// eager so each request and reply leaves as soon as it is sent. The read
+// buffer stays at its default: it starts at 32 KiB and grows by itself, and
+// forcing 64 KiB up front halved PULL throughput at 1 KiB.
 fn throughput_options() -> SocketOptions {
-    SocketOptions::default()
-        .with_buffer_sizes(READ_SLAB, 64 * 1024)
-        .with_write_coalescing(true)
+    SocketOptions::default().with_write_coalescing(true)
 }
 
 fn latency_options() -> SocketOptions {
     SocketOptions::default().with_write_coalescing(false)
 }
 
-fn receive_options() -> SocketOptions {
-    SocketOptions::default().with_buffer_sizes(READ_SLAB, 8 * 1024)
-}
-
-async fn listener(s: &str) -> (TcpListener, u16) {
-    let l = TcpListener::bind(addr(s)).await.expect("bind");
-    let p = l.local_addr().expect("local addr").port();
-    report(p);
-    (l, p)
+// `bind` returns the bound endpoint with a requested port of 0 resolved.
+fn report_endpoint(endpoint: &str) {
+    let port = endpoint
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.parse().ok())
+        .expect("bound port");
+    report(port);
 }
 
 // Keep the sender alive until the runner reads its CPU usage and terminates it.
 // Receivers normally close first after reporting their measurement.
-async fn park_after_disconnect(error: Option<std::io::Error>) {
+async fn park_after_disconnect(error: Option<MonocoqueError>) {
     if let Some(error) = error {
         assert!(
             matches!(
-                error.kind(),
-                std::io::ErrorKind::BrokenPipe
-                    | std::io::ErrorKind::ConnectionReset
-                    | std::io::ErrorKind::ConnectionAborted
-                    | std::io::ErrorKind::UnexpectedEof
-                    | std::io::ErrorKind::NotConnected
+                error,
+                MonocoqueError::PeerDisconnected(_) | MonocoqueError::Io(_)
             ),
             "peer I/O: {error}"
         );
@@ -96,34 +85,32 @@ async fn park_after_disconnect(error: Option<std::io::Error>) {
 }
 
 async fn push(s: &str, n: usize) {
-    let (l, _) = listener(s).await;
-    let (stream, _) = l.accept().await.expect("accept");
-    let mut p = PushSocket::from_tcp_with_options(stream, throughput_options())
-        .await
-        .expect("push handshake");
+    let mut p = PushSocket::with_options(throughput_options());
+    report_endpoint(&p.bind(s).await.expect("push bind"));
+    while p.peer_count() < 1 {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
     barrier().await;
-    let msg = Bytes::from(vec![b'x'; n]);
+    let msg = Msg::from(Bytes::from(vec![b'x'; n]));
     loop {
-        if let Err(error) = p.send_one(msg.clone()).await {
+        if let Err(error) = p.send(msg.clone()).await {
             park_after_disconnect(Some(error)).await;
         }
     }
 }
 
 async fn pull(s: &str, n: usize, d: f64) {
-    let mut p = PullSocket::connect_with_options(addr(s), receive_options())
-        .await
-        .expect("pull connect");
+    let mut p = PullSocket::with_options(throughput_options());
+    p.connect(s).await.expect("pull connect");
     barrier().await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     let start_cpu = cpu();
     let start = Instant::now();
     let mut count = 0u64;
-    let mut buf: Vec<Bytes> = Vec::with_capacity(4);
     let duration = Duration::from_secs_f64(d);
     let _ = tokio::time::timeout(duration, async {
         while start.elapsed() < duration {
-            assert!(p.recv_into(&mut buf).await.expect("pull recv"), "pull EOF");
+            p.recv().await.expect("pull recv");
             count += 1;
         }
     })
@@ -136,25 +123,32 @@ async fn pull(s: &str, n: usize, d: f64) {
 }
 
 async fn pub_run(s: &str, n: usize, peers: usize) {
-    // Default to 1 so the chart is reproducible. Set MONOCOQUE_PUB_WORKERS to
-    // compare against Monocoque's default, which picks CPU count clamped to
-    // [2, 16]. This baseline uses the default PUB socket options.
-    let workers: usize = std::env::var("MONOCOQUE_PUB_WORKERS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(1);
-    let mut p = PubSocket::bind_with_workers(addr(s), workers)
-        .await
-        .expect("pub bind");
-    report(p.local_addr().expect("local addr").port());
-    for _ in 0..peers {
-        p.accept_subscriber().await.expect("sub accept");
+    // Bodies under the vectored-write threshold (16 KiB by default) are copied
+    // into the send buffer once per subscriber. At 4 KiB a 4 KiB threshold
+    // removes those copies: +23% at 32 subscribers. Lower thresholds cost
+    // more at 1 KiB than they save.
+    let mut p = PubSocket::with_options(throughput_options().with_vectored_write_threshold(4096));
+    report_endpoint(&p.bind(s).await.expect("pub bind"));
+    // Subscribers are accepted in the background. Publishing before every
+    // subscription has landed would only drop messages, so wait until one
+    // message reaches all of them.
+    let msg = Msg::from(Bytes::from(vec![b'x'; n]));
+    while p.send_ref(&msg).await.expect("pub send") < peers {
+        tokio::time::sleep(Duration::from_millis(1)).await;
     }
     barrier().await;
-    let msg = Bytes::from(vec![b'x'; n]);
+    // `send_ref` never waits; it skips subscribers at their HWM. Flushing when
+    // one was skipped waits for the queued bytes to be written, which lets it
+    // catch up and keeps this loop from starving the runtime.
     loop {
-        if let Err(error) = p.send_frames(std::slice::from_ref(&msg)).await {
-            park_after_disconnect(Some(error)).await;
+        match p.send_ref(&msg).await {
+            Ok(delivered) if delivered < p.peer_count() => {
+                if let Err(error) = p.flush().await {
+                    park_after_disconnect(Some(error)).await;
+                }
+            }
+            Ok(_) => {}
+            Err(error) => park_after_disconnect(Some(error)).await,
         }
     }
 }
@@ -162,10 +156,8 @@ async fn pub_run(s: &str, n: usize, peers: usize) {
 async fn sub(s: &str, n: usize, d: f64, peers: usize) {
     let mut sockets = Vec::with_capacity(peers);
     for _ in 0..peers {
-        let stream = TcpStream::connect(addr(s)).await.expect("sub connect");
-        let mut x = SubSocket::from_tcp_with_options(stream, receive_options())
-            .await
-            .expect("sub connect");
+        let mut x = SubSocket::with_options(throughput_options());
+        x.connect(s).await.expect("sub connect");
         x.subscribe(b"").await.expect("subscribe");
         sockets.push(x);
     }
@@ -177,8 +169,7 @@ async fn sub(s: &str, n: usize, d: f64, peers: usize) {
     for mut x in sockets {
         let c = Arc::clone(&counts);
         tokio::task::spawn_local(async move {
-            let mut buf: Vec<Bytes> = Vec::with_capacity(4);
-            while x.recv_into(&mut buf).await.unwrap_or(false) {
+            while x.recv().await.is_ok() {
                 c.fetch_add(1, Ordering::Relaxed);
             }
         });
@@ -194,39 +185,30 @@ async fn sub(s: &str, n: usize, d: f64, peers: usize) {
 }
 
 async fn rep(s: &str) {
-    let (l, _) = listener(s).await;
-    let (stream, _) = l.accept().await.expect("accept");
-    let mut r = RepSocket::from_tcp_with_options(stream, latency_options())
-        .await
-        .expect("rep handshake");
+    let mut r = RepSocket::with_options(latency_options());
+    report_endpoint(&r.bind(s).await.expect("rep bind"));
     loop {
-        match r.recv().await {
-            Ok(Some(msg)) => {
+        match r.recv_owned().await {
+            Ok(msg) => {
                 if let Err(error) = r.send(msg).await {
                     park_after_disconnect(Some(error)).await;
                 }
             }
-            Ok(None) => park_after_disconnect(None).await,
             Err(error) => park_after_disconnect(Some(error)).await,
         }
     }
 }
 
 async fn req(s: &str, n: usize, iters: usize, warmup: usize) {
-    let mut r = ReqSocket::connect_with_options(s, latency_options())
-        .await
-        .expect("req connect");
-    let msg = vec![Bytes::from(vec![b'x'; n])];
-    let mut reply: Vec<Bytes> = Vec::with_capacity(4);
+    let mut r = ReqSocket::with_options(latency_options());
+    r.connect(s).await.expect("req connect");
+    let msg = Msg::from(Bytes::from(vec![b'x'; n]));
     r.send(msg.clone()).await.expect("req validation send");
-    assert!(
-        r.recv_into(&mut reply).await.expect("req validation recv"),
-        "req EOF"
-    );
-    assert_eq!(reply, msg, "req reply payload");
+    let reply = r.recv_owned().await.expect("req validation recv");
+    assert!(reply == msg, "req reply payload");
     for _ in 0..warmup {
         r.send(msg.clone()).await.expect("req send");
-        assert!(r.recv_into(&mut reply).await.expect("req recv"), "req EOF");
+        r.recv().await.expect("req recv");
     }
     let before = cpu();
     let started = Instant::now();
@@ -234,7 +216,7 @@ async fn req(s: &str, n: usize, iters: usize, warmup: usize) {
     for _ in 0..iters {
         let t = Instant::now();
         r.send(msg.clone()).await.expect("req send");
-        assert!(r.recv_into(&mut reply).await.expect("req recv"), "req EOF");
+        r.recv().await.expect("req recv");
         times.push(t.elapsed().as_nanos() as u64);
     }
     times.sort_unstable();

@@ -438,6 +438,7 @@ where
         self,
         completion: &mut CompletionProgress,
     ) -> (Wiring<T::Reader, T::Writer>, Session<'_>) {
+        let unique_large_bodies = self.receive.unique_large_bodies;
         let receive = ReceivePath::new(self.receive, &self.config);
         let latency_profile = !matches!(receive.profile, ReceiveProfile::Throughput);
         let (reader, mut writer) = self.stream.split(latency_profile);
@@ -460,7 +461,7 @@ where
             heartbeat,
             _slot_lifetime: TransmitSlotLifetime(self.transmit_slot.clone()),
             output,
-            read: StreamRead::new(receive.profile),
+            read: StreamRead::new(receive.profile, unique_large_bodies),
             shm_driver: shm::Driver::new(receive.shm.clone()),
             receive,
             transmit_slot: self.transmit_slot,

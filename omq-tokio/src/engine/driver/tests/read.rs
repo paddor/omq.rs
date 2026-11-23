@@ -122,15 +122,19 @@ async fn accepted_large_read_keeps_one_allocation_through_completion() {
         ..PeerDriverConfig::default()
     };
     let pool = RecvBufPool::new();
-    let mut pending = PendingLargeRead::begin(&mut pull, &config, &pool)
+    let mut pending = PendingLargeRead::begin(&mut pull, &config, Some(&pool))
         .unwrap()
         .unwrap();
 
-    let ReceiveBody::Stream { buf, pooled } = &pending.buf else {
+    let ReceiveBody::Stream {
+        buf,
+        pool: body_pool,
+    } = &pending.buf
+    else {
         panic!("expected an owned receive buffer");
     };
 
-    assert!(!pooled);
+    assert!(body_pool.is_none());
     assert_eq!(buf.capacity(), declared);
     let allocation = buf.as_ptr();
     let mut reader = tokio::io::repeat(b'!').take((declared - prefix.len()) as u64);
@@ -145,11 +149,86 @@ async fn accepted_large_read_keeps_one_allocation_through_completion() {
         assert_eq!(buf.capacity(), declared);
     }
 
-    pending.finish(&mut pull, &pool).unwrap();
+    pending.finish(&mut pull).unwrap();
     let message = pull.poll_message().unwrap();
     let body = message.part_bytes(0).unwrap();
     assert_eq!(body.as_ptr(), allocation);
     assert_eq!(&body[..prefix.len()], prefix);
+    assert!(body[prefix.len()..].iter().all(|byte| *byte == b'!'));
+}
+
+/// A connection that declared a body the pool takes, with `prefix` buffered.
+fn declared_body(declared: usize, prefix: &[u8]) -> Connection {
+    let (_, mut pull) = ready_push_pull_connections();
+    let mut wire = vec![0x02];
+    wire.extend_from_slice(&(declared as u64).to_be_bytes());
+    wire.extend_from_slice(prefix);
+    pull.handle_input(Bytes::from(wire)).unwrap();
+
+    pull
+}
+
+#[tokio::test]
+async fn pooled_reader_takes_bodies_up_to_the_limit_from_its_pool() {
+    let mut pull = declared_body(1024 * 1024, b"buffered prefix");
+    let config = PeerDriverConfig {
+        large_message_threshold: 128 * 1024,
+        ..PeerDriverConfig::default()
+    };
+    let pool = RecvBufPool::new();
+    let pending = PendingLargeRead::begin(&mut pull, &config, Some(&pool))
+        .unwrap()
+        .unwrap();
+
+    let ReceiveBody::Stream {
+        pool: body_pool, ..
+    } = &pending.buf
+    else {
+        panic!("expected a stream receive buffer");
+    };
+    assert!(body_pool.is_some());
+}
+
+/// Without a pool, such a body gets one whole allocation of its own, so the
+/// receiver ends up as its only owner.
+#[tokio::test]
+async fn unique_large_body_skips_the_pool_and_stays_unique() {
+    let declared = 1024 * 1024;
+    let prefix = b"buffered prefix";
+    let mut pull = declared_body(declared, prefix);
+
+    let config = PeerDriverConfig {
+        large_message_threshold: 128 * 1024,
+        ..PeerDriverConfig::default()
+    };
+    let mut pending = PendingLargeRead::begin(&mut pull, &config, None)
+        .unwrap()
+        .unwrap();
+
+    let ReceiveBody::Stream {
+        buf,
+        pool: body_pool,
+    } = &pending.buf
+    else {
+        panic!("expected an owned receive buffer");
+    };
+
+    assert!(body_pool.is_none());
+    assert_eq!(buf.capacity(), declared);
+    let allocation = buf.as_ptr();
+    let mut reader = tokio::io::repeat(b'!').take((declared - prefix.len()) as u64);
+
+    while !pending.complete() {
+        pending.read(&mut reader).await.unwrap();
+    }
+
+    pending.finish(&mut pull).unwrap();
+    let body = pull.poll_message().unwrap().into_bytes().unwrap();
+    assert_eq!(body.as_ptr(), allocation);
+    assert_eq!(&body[..prefix.len()], prefix);
+    let body = body
+        .try_into_mut()
+        .expect("the receiver owns the body alone");
     assert!(body[prefix.len()..].iter().all(|byte| *byte == b'!'));
 }
 
@@ -169,15 +248,19 @@ async fn unpooled_large_read_grows_with_received_bytes() {
         ..PeerDriverConfig::default()
     };
     let pool = RecvBufPool::new();
-    let mut pending = PendingLargeRead::begin(&mut pull, &config, &pool)
+    let mut pending = PendingLargeRead::begin(&mut pull, &config, Some(&pool))
         .unwrap()
         .unwrap();
 
-    let ReceiveBody::Stream { buf, pooled } = &pending.buf else {
+    let ReceiveBody::Stream {
+        buf,
+        pool: body_pool,
+    } = &pending.buf
+    else {
         panic!("expected an unpooled receive buffer");
     };
 
-    assert!(!pooled);
+    assert!(body_pool.is_none());
     assert_eq!(buf.as_ref(), prefix);
     assert!(
         buf.capacity() <= prefix.len() + 64 * 1024,
@@ -193,7 +276,7 @@ async fn unpooled_large_read_grows_with_received_bytes() {
         assert_eq!(pending.filled(), before + n);
     }
 
-    pending.finish(&mut pull, &pool).unwrap();
+    pending.finish(&mut pull).unwrap();
     let message = pull.poll_message().unwrap();
     let body = message.part_bytes(0).unwrap();
     assert_eq!(body.len(), declared);
@@ -216,7 +299,7 @@ async fn unpooled_large_declaration_keeps_partial_read_bounded() {
         ..PeerDriverConfig::default()
     };
     let pool = RecvBufPool::new();
-    let mut pending = PendingLargeRead::begin(&mut pull, &config, &pool)
+    let mut pending = PendingLargeRead::begin(&mut pull, &config, Some(&pool))
         .unwrap()
         .unwrap();
 
@@ -278,7 +361,7 @@ async fn read_stream_reuses_prefix_buffer_after_large_frame_consumes_it() {
         .unwrap();
     let wire = Bytes::from(drain_transmit(&mut push));
 
-    let mut read = StreamRead::new(ReceiveProfile::Throughput);
+    let mut read = StreamRead::new(ReceiveProfile::Throughput, false);
     read.buffer.reserve(READ_BUF_MAX);
     read.buffer.extend_from_slice(&wire[..READ_BUF_MAX]);
     let original = read.buffer.as_ptr();

@@ -139,9 +139,11 @@ impl HandleShared {
     }
 }
 
-/// Where the actor runs, plus an optional caller-provided receive sink.
+/// Where the actor runs, plus an optional caller-provided receive sink and
+/// the socket's native or libzmq semantics.
 pub(crate) struct DriverEnv {
     pub(crate) io_pool: crate::context::IoPoolHandle,
     pub(crate) inproc_registry: Arc<crate::transport::inproc::InprocRegistry>,
     pub(crate) recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
+    pub(crate) compatibility: crate::routing::Compatibility,
 }

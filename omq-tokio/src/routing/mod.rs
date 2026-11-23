@@ -51,9 +51,11 @@ pub(crate) const OUTBOUND_BATCH_MAX_MSGS: usize = 512;
 
 pub(crate) type RepEnvelope = SmallVec<[Bytes; 2]>;
 
-/// Fixed at construction, before any socket handles are published.
+/// Native or libzmq semantics. Libzmq sockets keep lossy fan-out writable and
+/// receive large bodies into storage the application owns alone. Fixed at
+/// construction, before any socket handles are published.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum SendCompatibility {
+pub(crate) enum Compatibility {
     #[default]
     Native,
     Libzmq,
@@ -359,7 +361,7 @@ impl SendSubmitter {
 }
 
 impl SendStrategy {
-    pub(crate) fn with_compatibility(mut self, compatibility: SendCompatibility) -> Self {
+    pub(crate) fn with_compatibility(mut self, compatibility: Compatibility) -> Self {
         if let Self::FanOut(send) = &mut self {
             send.set_compatibility(compatibility);
         }

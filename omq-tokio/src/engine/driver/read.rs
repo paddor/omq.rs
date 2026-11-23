@@ -109,7 +109,12 @@ pub(super) struct PendingLargeRead {
 
 #[derive(Debug)]
 pub(super) enum ReceiveBody {
-    Stream { buf: BytesMut, pooled: bool },
+    /// A body read into `buf`, which returns to `pool` once its last view
+    /// drops; without a pool, the receiver owns `buf` alone.
+    Stream {
+        buf: BytesMut,
+        pool: Option<Arc<RecvBufPool>>,
+    },
     Payload(omq_proto::PayloadBuffer),
 }
 
@@ -117,7 +122,7 @@ impl PendingLargeRead {
     pub(super) fn begin(
         connection: &mut Connection,
         config: &PeerDriverConfig,
-        pool: &Arc<RecvBufPool>,
+        pool: Option<&Arc<RecvBufPool>>,
     ) -> Result<Option<Self>> {
         #[cfg(feature = "ws")]
         let skip_large = connection.is_ws();
@@ -176,11 +181,13 @@ impl PendingLargeRead {
 
         // Release the shared input prefix before the caller refills read_buf.
         copy_stats::record(Site::RecvLargePrefix, prefix.len());
-        let pooled = target <= RECV_POOL_MAX_BUFFER_BYTES;
+        // Bodies up to the pool limit get their whole size at once.
+        let whole = target <= RECV_POOL_MAX_BUFFER_BYTES;
+        let pool = pool.filter(|_| whole).cloned();
 
-        let mut buf = if pooled {
+        let mut buf = if let Some(pool) = &pool {
             pool.take(target)
-        } else if bounded {
+        } else if whole || bounded {
             // Admission already checked the complete frame and multipart size.
             // Allocate once so accepted large bodies never move while filling.
             BytesMut::with_capacity(target)
@@ -191,7 +198,7 @@ impl PendingLargeRead {
 
         buf.extend_from_slice(prefix.as_slice());
         Ok(Some(Self {
-            buf: ReceiveBody::Stream { buf, pooled },
+            buf: ReceiveBody::Stream { buf, pool },
             target,
         }))
     }
@@ -234,13 +241,16 @@ impl PendingLargeRead {
         Ok(n)
     }
 
-    pub(super) fn finish(self, connection: &mut Connection, pool: &Arc<RecvBufPool>) -> Result<()> {
+    pub(super) fn finish(self, connection: &mut Connection) -> Result<()> {
         debug_assert!(self.complete());
         let payload = match self.buf {
             ReceiveBody::Payload(buf) => buf.into_payload(),
-            ReceiveBody::Stream { buf, pooled } => {
+            ReceiveBody::Stream { buf, pool } => {
                 let capacity = buf.capacity();
-                let bytes = if pooled { pool.wrap(buf) } else { buf.freeze() };
+                let bytes = match pool {
+                    Some(pool) => pool.wrap(buf),
+                    None => buf.freeze(),
+                };
                 omq_proto::Payload::from_bytes_with_retained_size(bytes, capacity)
             }
         };
@@ -254,12 +264,14 @@ pub(super) struct StreamRead {
     pub(super) buffer: BytesMut,
     target: usize,
     full_reads: usize,
-    pool: Arc<RecvBufPool>,
+    /// Reusable large-body buffers. Without it, each large body gets an
+    /// allocation its receiver owns alone.
+    pool: Option<Arc<RecvBufPool>>,
     pending: Option<PendingLargeRead>,
 }
 
 impl StreamRead {
-    pub(super) fn new(profile: ReceiveProfile) -> Self {
+    pub(super) fn new(profile: ReceiveProfile, unique_large_bodies: bool) -> Self {
         let target = match profile {
             ReceiveProfile::Throughput => READ_BUF_INITIAL_THROUGHPUT,
             ReceiveProfile::Latency | ReceiveProfile::LatencyReq => READ_BUF_INITIAL_LATENCY,
@@ -269,7 +281,7 @@ impl StreamRead {
             buffer: BytesMut::with_capacity(target),
             target,
             full_reads: 0,
-            pool: RecvBufPool::new(),
+            pool: (!unique_large_bodies).then(RecvBufPool::new),
             pending: None,
         }
     }
@@ -288,11 +300,8 @@ impl StreamRead {
             .as_ref()
             .is_some_and(PendingLargeRead::complete)
         {
-            self.pending
-                .take()
-                .unwrap()
-                .finish(connection, &self.pool)?;
-            self.pending = PendingLargeRead::begin(connection, config, &self.pool)?;
+            self.pending.take().unwrap().finish(connection)?;
+            self.pending = PendingLargeRead::begin(connection, config, self.pool.as_ref())?;
         }
 
         Ok(())
@@ -325,7 +334,7 @@ impl StreamRead {
 
         let chunk = self.buffer.split().freeze();
         connection.handle_input(chunk)?;
-        self.pending = PendingLargeRead::begin(connection, config, &self.pool)?;
+        self.pending = PendingLargeRead::begin(connection, config, self.pool.as_ref())?;
         // Parse before reserving so a consumed prefix can release its allocation.
         // The target is a growth hint, not a minimum spare-capacity promise.
         self.buffer

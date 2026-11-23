@@ -29,6 +29,7 @@ async fn late_peer_after_fanin_close_gets_closed_receive() {
         io_pool: pool.clone(),
         inproc_registry: Arc::new(crate::transport::inproc::InprocRegistry::new()),
         recv_sink_config: None,
+        compatibility: crate::routing::Compatibility::Native,
     };
     let send_strategy =
         crate::routing::SendStrategy::for_socket_type(SocketType::Pull, &options, &pool);

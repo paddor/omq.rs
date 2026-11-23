@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `zmq_msg_data` returns received frames from 128 KiB through 8 MiB in place
+  instead of copying them, since they now arrive in storage the message owns
+  alone. Receivers that read frames through `zmq_msg_data` save one copy per
+  frame.
+
 ### Fixed
 
 - `ZMQ_SNDHWM` and `ZMQ_RCVHWM` accept 0, which libzmq reads as no limit, and

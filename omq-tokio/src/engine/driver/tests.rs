@@ -673,13 +673,13 @@ async fn handle_large_messages_test<R: AsyncRead + Unpin>(
     last_input: &mut Instant,
 ) -> Result<()> {
     let recv_pool = RecvBufPool::new();
-    while let Some(mut large) = PendingLargeRead::begin(connection, config, &recv_pool)? {
+    while let Some(mut large) = PendingLargeRead::begin(connection, config, Some(&recv_pool))? {
         while !large.complete() {
             large.read(reader).await?;
             *last_input = Instant::now();
         }
 
-        large.finish(connection, &recv_pool)?;
+        large.finish(connection)?;
     }
 
     Ok(())

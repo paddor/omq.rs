@@ -263,6 +263,9 @@ struct ReceiveSetup {
     /// Exact part count of every valid message, if the socket type fixes it.
     parts: Option<usize>,
     profile: ReceiveProfile,
+    /// Read large bodies into allocations of their own, not pooled buffers,
+    /// so the receiver owns each one alone.
+    unique_large_bodies: bool,
     /// Output storage for decompressed payloads.
     payload_pool: Option<omq_proto::PayloadPool>,
     ip_rate_limiter: Option<(Arc<SharedIpRateLimiter>, IpAddr)>,
@@ -275,6 +278,7 @@ impl Default for ReceiveSetup {
             decoder: None,
             parts: None,
             profile: ReceiveProfile::Throughput,
+            unique_large_bodies: false,
             payload_pool: None,
             ip_rate_limiter: None,
             shm: None,

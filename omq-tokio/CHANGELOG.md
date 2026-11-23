@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   replies. Over 1 Gbit/s, 8 closed-loop senders of ~90 KB messages that
   compress about 2x delivered 14-22% more messages; less compressible ones
   are unchanged.
+- Adaptive `zstd+tcp://` falls back to level -4 when a check window there
+  carries more input than the level it picked. A single closed-loop sender
+  of ~90 KB messages over 1 Gbit/s delivered 7% more messages at 11% lower
+  median latency; 8 senders are unchanged.
 
 ## [0.38.3] - 2026-11-23
 

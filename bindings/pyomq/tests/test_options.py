@@ -328,7 +328,6 @@ def test_noop_options_accepted():
             zmq.REQ_CORRELATE,
             zmq.REQ_RELAXED,
             zmq.ROUTER_HANDOVER,
-            zmq.ZAP_DOMAIN,
             zmq.RATE,
             zmq.CONNECT_TIMEOUT,
             zmq.RECOVERY_IVL,

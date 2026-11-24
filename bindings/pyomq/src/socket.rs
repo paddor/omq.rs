@@ -1271,6 +1271,12 @@ impl Socket {
         crate::auth::set_plain_auth_impl(&self.inner, auth)
     }
 
+    /// Private hook for `pyomq.auth`: a context authenticator called as
+    /// `callback(mechanism, domain, peer)` before first socket use.
+    fn _set_zap_auth(&self, callback: &Bound<'_, PyAny>) -> PyResult<()> {
+        crate::auth::set_zap_auth_impl(&self.inner, callback)
+    }
+
     #[pyo3(signature = (linger=None))]
     fn close(&self, py: Python<'_>, linger: Option<i64>) -> PyResult<()> {
         let linger = self.inner.close_linger(linger);

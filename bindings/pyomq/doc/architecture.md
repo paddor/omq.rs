@@ -10,6 +10,9 @@ python/pyomq/
   __init__.py       sync API: Socket, Context, Poller, proxy, select
   asyncio.py        async API: wraps _native.AsyncSocket
   error.py          exception hierarchy (pyzmq-compatible)
+  auth/             pyzmq-compatible zmq.auth: Authenticator, certificates
+  _zap.py           running authenticators per context, socket hooks
+  utils/z85.py      Z85 encoding (RFC 32)
 
 src/
   lib.rs            module root: classes, constants, wait_any, proxy,
@@ -33,7 +36,7 @@ src/
   conversions.rs    zero-copy PyBytes via PyBytesOwner + Bytes::from_owner
   frame.rs          native Frame/Message object backed by bytes::Bytes
   error.rs          ZMQError with errno (EAGAIN, ETERM, etc.)
-  auth.rs           CURVE authenticator: key-list or Python callable
+  auth.rs           NULL/PLAIN/CURVE authenticators from Python policies
 ```
 
 ## Threading model
@@ -416,18 +419,27 @@ IPV6, RATE, PROBE_ROUTER. Some raise ENOSYS: AFFINITY, BACKLOG.
 
 ## Authentication
 
-CURVE uses the same bridge pattern. The Python side sets
-an authenticator on the overlay via `setsockopt`:
+`set_curve_auth()` and `set_plain_auth()` store a policy on the overlay
+before first socket use:
 
-- `None`: clear authenticator.
-- Iterable of keys: build a `HashSet` of accepted keys. CURVE keys are
-  Z85-encoded strings.
-- Callable: wrap as `Py<PyAny>`. Called with a `PeerInfo` pyclass (has
-  `.public_key` attribute). Must return truthy/falsy.
+- `None` (CURVE only): accept any client.
+- Iterable: a `HashSet` of Z85 CURVE keys, or exact PLAIN credentials.
+- Callable: called with a `PeerInfo` (key, identity, address, PLAIN
+  credentials). Must return truthy/falsy.
 
-At materialization, `build_authenticator()` converts the enum into an
-`omq_proto::Authenticator` closure. Callable authenticators acquire the
-GIL when invoked from the tokio thread.
+At materialization the policy becomes an `omq_proto::Authenticator`
+closure. Callables acquire the GIL on the handshake worker thread.
+
+`pyomq.auth` gives pyzmq's context-wide `zmq.auth` API without a ZAP
+socket. `start()` registers the authenticator under the native context key
+in `_zap.py`. A socket created while it runs, or first used by `bind()`,
+`connect()` or `monitor()`, gets the private `_set_zap_auth(callback)`.
+`to_options()` hands that callback to the server mechanism it builds:
+CURVE or PLAIN servers without an explicit policy, and NULL sockets with a
+`ZAP_DOMAIN`, as libzmq consults ZAP. The callback looks up the running
+authenticator per handshake, so a stopped one rejects. A covered socket
+already in use without it makes `start()` raise, or its next `bind()` if
+`send()` or `poll()` put it in use. Context `term()` drops the entry.
 
 ROUTER/PEER `recv_from()` returns an owning `Identity` and complete body frames
 in both sync and async APIs. `Identity.peer_info` reads the immutable admission

@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `pyomq.auth`, pyzmq's `zmq.auth` API: `Authenticator`,
+  `pyomq.auth.thread.ThreadAuthenticator`,
+  `pyomq.auth.asyncio.AsyncioAuthenticator`, `CURVE_ALLOW_ANY`, and the
+  certificate helpers `create_certificates`, `load_certificate`, and
+  `load_certificates`. A running authenticator covers its context's CURVE
+  and PLAIN servers without their own policy and NULL sockets with a ZAP
+  domain. It runs on the handshake worker thread, with no ZAP socket.
+  `start()` raises `ZMQError` (`EADDRINUSE`) for a second authenticator on
+  a context and `RuntimeError` when a CURVE server or ZAP-domain socket is
+  already in use. A stopped authenticator rejects new peers; terminating
+  the context stops it. A raising policy rejects and logs; awaitable
+  results time out after 30 seconds.
+- `pyomq.utils.z85`, pyzmq's Z85 `encode` and `decode`.
+- `Socket.zap_domain`. `ZAP_DOMAIN` is stored and read back; before, it was
+  accepted and dropped.
+
+### Changed
+
+- `PeerInfo` passed to CURVE callbacks includes `peer_address`; PLAIN
+  callbacks get `identity`.
+- `set_curve_auth()` after first socket use raises `ValueError`, like
+  `set_plain_auth()`. Before, the new policy was ignored.
+
 ## [0.29.0] - 2026-11-21
 
 ### Added

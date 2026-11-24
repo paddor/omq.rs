@@ -1,15 +1,18 @@
-//! PLAIN and CURVE authenticator bridges from Python policies.
+//! NULL, PLAIN, and CURVE authenticator bridges from Python policies.
 
+#[cfg(feature = "curve")]
 use std::collections::HashSet;
 use std::fmt;
 
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 
 use crate::peer_info::PeerInfo;
 use crate::socket::SocketInner;
 
 /// Two modes of CURVE client authentication stored in the Overlay
 /// before socket materialization.
+#[cfg(feature = "curve")]
 pub(crate) enum CurveAuthenticator {
     AllowedKeys(HashSet<[u8; 32]>),
     Callback(Py<PyAny>),
@@ -45,6 +48,7 @@ impl fmt::Debug for PlainAuthenticator {
     }
 }
 
+#[cfg(feature = "curve")]
 impl Clone for CurveAuthenticator {
     fn clone(&self) -> Self {
         match self {
@@ -54,6 +58,7 @@ impl Clone for CurveAuthenticator {
     }
 }
 
+#[cfg(feature = "curve")]
 impl fmt::Debug for CurveAuthenticator {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -63,8 +68,46 @@ impl fmt::Debug for CurveAuthenticator {
     }
 }
 
+/// Context-wide policy installed by `pyomq.auth`, called as
+/// `callback(mechanism, domain, peer)`. It covers the socket's server
+/// mechanism unless an explicit CURVE or PLAIN policy is set.
+pub(crate) struct ZapAuthenticator(Py<PyAny>);
+
+impl Clone for ZapAuthenticator {
+    fn clone(&self) -> Self {
+        Python::attach(|py| Self(self.0.clone_ref(py)))
+    }
+}
+
+impl fmt::Debug for ZapAuthenticator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ZapAuthenticator(<callable>)")
+    }
+}
+
+/// Build the handshake authenticator for `mechanism` (`"NULL"`, `"PLAIN"`,
+/// or `"CURVE"`) and the socket's ZAP domain.
+pub(crate) fn build_zap_authenticator(
+    auth: &ZapAuthenticator,
+    mechanism: &'static str,
+    domain: &[u8],
+) -> omq_proto::proto::mechanism::Authenticator {
+    let callback = Python::attach(|py| auth.0.clone_ref(py));
+    let domain = domain.to_vec();
+    omq_proto::proto::mechanism::Authenticator::new(move |peer| {
+        Python::attach(|py| {
+            let Ok(info) = Py::new(py, PeerInfo::from_mechanism(py, peer)) else {
+                return false;
+            };
+            let domain = PyBytes::new(py, &domain);
+            admitted(py, callback.call1(py, (mechanism, domain, info)))
+        })
+    })
+}
+
 /// Convert a pyomq-level `CurveAuthenticator` into the `omq_proto`
 /// `Authenticator` closure consumed by the CURVE handshake.
+#[cfg(feature = "curve")]
 pub(crate) fn build_authenticator(
     auth: &CurveAuthenticator,
 ) -> omq_proto::proto::mechanism::Authenticator {
@@ -79,21 +122,10 @@ pub(crate) fn build_authenticator(
             let cb = Python::attach(|py| cb.clone_ref(py));
             omq_proto::proto::mechanism::Authenticator::new(move |peer| {
                 Python::attach(|py| {
-                    let info = Py::new(
-                        py,
-                        PeerInfo::from_raw(py, &peer.public_key, peer.identity.as_ref()),
-                    );
-                    let info = match info {
-                        Ok(i) => i,
-                        Err(_) => return false,
+                    let Ok(info) = Py::new(py, PeerInfo::from_mechanism(py, peer)) else {
+                        return false;
                     };
-                    match cb.call1(py, (info,)) {
-                        Ok(val) => val.is_truthy(py).unwrap_or(false),
-                        Err(e) => {
-                            e.restore(py);
-                            false
-                        }
-                    }
+                    admitted(py, cb.call1(py, (info,)))
                 })
             })
         }
@@ -112,25 +144,10 @@ pub(crate) fn build_plain_authenticator(
             let callback = Python::attach(|py| callback.clone_ref(py));
             omq_proto::Authenticator::new(move |peer| {
                 Python::attach(|py| {
-                    let info = Py::new(
-                        py,
-                        PeerInfo::from_plain(
-                            py,
-                            peer.username.as_deref(),
-                            peer.password.as_deref(),
-                            peer.peer_address.as_deref(),
-                        ),
-                    );
-                    let Ok(info) = info else {
+                    let Ok(info) = Py::new(py, PeerInfo::from_mechanism(py, peer)) else {
                         return false;
                     };
-                    match callback.call1(py, (info,)) {
-                        Ok(value) => value.is_truthy(py).unwrap_or(false),
-                        Err(error) => {
-                            error.restore(py);
-                            false
-                        }
-                    }
+                    admitted(py, callback.call1(py, (info,)))
                 })
             })
         }
@@ -139,13 +156,6 @@ pub(crate) fn build_plain_authenticator(
 
 #[cfg(feature = "plain")]
 pub(crate) fn set_plain_auth_impl(inner: &SocketInner, auth: &Bound<'_, PyAny>) -> PyResult<()> {
-    let materialized = inner.materialized.read().unwrap();
-    let blocking_materialized = inner.blocking_materialized.read().unwrap();
-    if materialized.is_some() || blocking_materialized.is_some() {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "PLAIN authentication must be configured before socket use",
-        ));
-    }
     let policy = if auth.is_callable() {
         PlainAuthenticator::Callback(auth.clone().unbind())
     } else {
@@ -171,37 +181,82 @@ pub(crate) fn set_plain_auth_impl(inner: &SocketInner, auth: &Bound<'_, PyAny>) 
         }
         PlainAuthenticator::Credentials(credentials)
     };
-    inner.overlay.lock().unwrap().plain_authenticator = Some(policy);
-    Ok(())
+    store_before_use(inner, "PLAIN authentication", |ov| {
+        ov.plain_authenticator = Some(policy);
+    })
 }
 
 /// Shared implementation for `Socket::set_curve_auth` and
 /// `AsyncSocket::set_curve_auth`.
+#[cfg(feature = "curve")]
 pub(crate) fn set_curve_auth_impl(inner: &SocketInner, auth: &Bound<'_, PyAny>) -> PyResult<()> {
-    let mut ov = inner.overlay.lock().unwrap();
-    if auth.is_none() {
-        ov.curve_authenticator = None;
-        return Ok(());
+    let policy = if auth.is_none() {
+        None
+    } else if auth.is_callable() {
+        Some(CurveAuthenticator::Callback(auth.clone().unbind()))
+    } else {
+        let iter = auth.try_iter().map_err(|_| {
+            pyo3::exceptions::PyTypeError::new_err(
+                "set_curve_auth expects an iterable of Z85 keys, a callable, or None",
+            )
+        })?;
+        let mut keys = HashSet::new();
+        for item in iter {
+            let item = item?;
+            let z85_bytes: &[u8] = item.extract()?;
+            let z85_str = std::str::from_utf8(z85_bytes).map_err(|_| {
+                pyo3::exceptions::PyValueError::new_err("key must be valid Z85 ASCII")
+            })?;
+            let pk = omq_tokio::CurvePublicKey::from_z85(z85_str)
+                .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+            keys.insert(*pk.as_bytes());
+        }
+        Some(CurveAuthenticator::AllowedKeys(keys))
+    };
+    store_before_use(inner, "CURVE authentication", |ov| {
+        ov.curve_authenticator = policy;
+    })
+}
+
+/// Shared implementation of the private `_set_zap_auth` used by `pyomq.auth`.
+pub(crate) fn set_zap_auth_impl(inner: &SocketInner, callback: &Bound<'_, PyAny>) -> PyResult<()> {
+    if !callback.is_callable() {
+        return Err(pyo3::exceptions::PyTypeError::new_err(
+            "_set_zap_auth expects a callable",
+        ));
     }
-    if auth.is_callable() {
-        ov.curve_authenticator = Some(CurveAuthenticator::Callback(auth.clone().unbind()));
-        return Ok(());
+    let policy = ZapAuthenticator(callback.clone().unbind());
+    store_before_use(inner, "A pyomq.auth authenticator", |ov| {
+        ov.zap_authenticator = Some(policy);
+    })
+}
+
+/// Store an admission policy unless the socket is already in use. The lock
+/// order matches materialization: socket slots, then the overlay.
+fn store_before_use(
+    inner: &SocketInner,
+    what: &str,
+    store: impl FnOnce(&mut crate::options::Overlay),
+) -> PyResult<()> {
+    let materialized = inner.materialized.read().unwrap();
+    let blocking_materialized = inner.blocking_materialized.read().unwrap();
+    if materialized.is_some() || blocking_materialized.is_some() {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "{what} must be configured before socket use"
+        )));
     }
-    let iter = auth.try_iter().map_err(|_| {
-        pyo3::exceptions::PyTypeError::new_err(
-            "set_curve_auth expects an iterable of Z85 keys, a callable, or None",
-        )
-    })?;
-    let mut keys = HashSet::new();
-    for item in iter {
-        let item = item?;
-        let z85_bytes: &[u8] = item.extract()?;
-        let z85_str = std::str::from_utf8(z85_bytes)
-            .map_err(|_| pyo3::exceptions::PyValueError::new_err("key must be valid Z85 ASCII"))?;
-        let pk = omq_tokio::CurvePublicKey::from_z85(z85_str)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-        keys.insert(*pk.as_bytes());
-    }
-    ov.curve_authenticator = Some(CurveAuthenticator::AllowedKeys(keys));
+    store(&mut inner.overlay.lock().unwrap());
     Ok(())
+}
+
+/// Reads a Python policy result. An exception or a falsy value rejects the
+/// peer.
+fn admitted(py: Python<'_>, result: PyResult<Py<PyAny>>) -> bool {
+    match result {
+        Ok(value) => value.is_truthy(py).unwrap_or(false),
+        Err(error) => {
+            error.restore(py);
+            false
+        }
+    }
 }

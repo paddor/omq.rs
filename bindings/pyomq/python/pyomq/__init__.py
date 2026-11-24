@@ -37,7 +37,7 @@ from typing import (
     overload,
 )
 
-from . import _native
+from . import _native, _zap
 from . import error as error
 from ._native import (
     AFFINITY,
@@ -399,6 +399,9 @@ class _NativeSocket(_NativeSocketOptions, Protocol):
 
     def set_curve_auth(self, auth: CurveAuth) -> None: ...
     def set_plain_auth(self, auth: PlainAuth) -> None: ...
+    def _set_zap_auth(
+        self, callback: Callable[[str, bytes, PeerInfo], object]
+    ) -> None: ...
     def set_ip_allowlist(self, addresses: Iterable[str] | None) -> None: ...
     def bind(self, endpoint: str) -> str: ...
     def connect(self, endpoint: str) -> None: ...
@@ -479,6 +482,7 @@ class _SocketOptionsBase[
     plain_server = _SocketOptionDescriptor[int](PLAIN_SERVER)
     plain_username = _SocketOptionDescriptor[bytes](PLAIN_USERNAME)
     plain_password = _SocketOptionDescriptor[bytes](PLAIN_PASSWORD)
+    zap_domain = _SocketOptionDescriptor[bytes](ZAP_DOMAIN)
 
     # ── Shared properties ────────────────────────────────────────────
 
@@ -583,10 +587,15 @@ class _BaseSocket[
     _pid: int
     _binds: list[str | bytes]
     _connects: list[str | bytes]
+    # pyomq.auth: the context's authenticator is installed at creation or
+    # before first use; see _zap. An explicit policy takes precedence.
+    _zap_checked: bool = False
+    _explicit_auth: bool = False
 
     def set_curve_auth(self, auth: CurveAuth) -> None:
         try:
-            return self._sock.set_curve_auth(auth)
+            self._sock.set_curve_auth(auth)
+            self._explicit_auth = True
         except _native.ZMQError as e:
             raise error.from_native(e) from None
         except AttributeError:
@@ -601,7 +610,8 @@ class _BaseSocket[
         authenticates clients but does not encrypt traffic.
         """
         try:
-            return self._sock.set_plain_auth(auth)
+            self._sock.set_plain_auth(auth)
+            self._explicit_auth = True
         except _native.ZMQError as e:
             raise error.from_native(e) from None
         except AttributeError:
@@ -650,7 +660,10 @@ class _BaseSocket[
         if isinstance(endpoint, bytes):
             endpoint = endpoint.decode("utf-8")
         try:
+            if not self._zap_checked:
+                _zap.attach(self)
             ep = self._sock.bind(self._context._namespace_inproc(endpoint))
+            self._zap_checked = True  # in use: options are fixed
             self._last_endpoint = ep.encode() if isinstance(ep, str) else ep
             return _SocketContext(self, "bind", ep)
         except _native.ZMQError as e:
@@ -677,7 +690,10 @@ class _BaseSocket[
         if isinstance(endpoint, bytes):
             endpoint = endpoint.decode("utf-8")
         try:
+            if not self._zap_checked:
+                _zap.attach(self)
             self._sock.connect(self._context._namespace_inproc(endpoint))
+            self._zap_checked = True
             self._last_endpoint = (
                 endpoint.encode() if isinstance(endpoint, str) else endpoint
             )
@@ -736,7 +752,11 @@ class _BaseSocket[
     # ── Monitoring ───────────────────────────────────────────────────
 
     def monitor(self) -> _native.Monitor:
-        return self._sock.monitor()
+        if not self._zap_checked:
+            _zap.attach(self)
+        monitor = self._sock.monitor()
+        self._zap_checked = True
+        return monitor
 
     def connections(self) -> list[ConnectionInfo]:
         return self._sock.connections()
@@ -1601,6 +1621,8 @@ class Context[SocketT: _BaseSocket[Any, Any]](metaclass=_ContextMeta):
     def socket(self, socket_type, socket_class=None, **kwargs):
         s = self._new_socket(socket_type, socket_class)
         self._sockets.add(s)
+        if _zap._active:
+            _zap.attach(s, first_use=False)
         return s
 
     def _new_socket(self, socket_type, socket_class):
@@ -1652,6 +1674,7 @@ class Context[SocketT: _BaseSocket[Any, Any]](metaclass=_ContextMeta):
                 s.close()
         self._sockets.clear()
         if not self._is_shadow:
+            _zap.forget(self)
             self._ctx.term()
 
     def destroy(self, linger: int | None = None) -> None:

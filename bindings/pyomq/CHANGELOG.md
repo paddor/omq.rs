@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-11-24
+
 ### Added
 
 - `pyomq.auth`, pyzmq's `zmq.auth` API: `Authenticator`,
@@ -31,6 +33,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   callbacks get `identity`.
 - `set_curve_auth()` after first socket use raises `ValueError`, like
   `set_plain_auth()`. Before, the new policy was ignored.
+- Bundle `omq-tokio` 0.39.0 with zrip 0.8.25. Receive rings, send pipes,
+  and fan-out lanes start at 1024 slots and grow toward the HWM, so idle
+  peers stay small. Adaptive `zstd+tcp://` picks better levels for senders
+  that wait on replies.
+
+### Fixed
+
+- ROUTER and PEER admit peers whose identity starts with a zero byte, as
+  libzmq does. Only the 9-byte generated form stays reserved.
 
 ## [0.29.0] - 2026-11-21
 

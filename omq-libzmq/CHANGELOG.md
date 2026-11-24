@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-24
+
+### Changed
+
+- Require `omq-tokio` 0.39.0, which requires zrip 0.8.25. Adaptive
+  `zstd+tcp://` levels follow the sender's input rate and fall back to level
+  -4 when it carries more, so senders that wait on replies deliver more.
+
 ## [0.12.3] - 2026-11-23
 
 ### Changed

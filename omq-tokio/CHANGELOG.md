@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.39.0] - 2026-11-24
+
 ### Changed
 
 - Adaptive `zstd+tcp://` picks better levels for senders that wait on
@@ -17,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   carries more input than the level it picked. A single closed-loop sender
   of ~90 KB messages over 1 Gbit/s delivered 7% more messages at 11% lower
   median latency; 8 senders are unchanged.
+- Require `omq-proto` 0.42.0, which requires zrip 0.8.25. `OutputWindow` no
+  longer has `backlogged`.
 
 ## [0.38.3] - 2026-11-23
 

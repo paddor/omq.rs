@@ -25,6 +25,6 @@ webtransport = ["quic", "omq-tokio/webtransport"]
 
 [dependencies]
 bytes = "1.12.0"
-omq-tokio = { version = "0.38.0", default-features = false }
+omq-tokio = { version = "0.39.0", default-features = false }
 rustler = "0.38.0"
 tokio = { version = "1.52.0", features = ["rt", "sync", "time"] }

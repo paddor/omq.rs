@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   another level or rate. A best recent rate not measured for 32 windows
   gives way.
 - `OutputWindow` no longer has `backlogged`.
+- Require zrip 0.8.25. A step that adaptive Zstd levels revert again at the
+  same level waits twice as long before its next try: 32, 64, 128, then 256
+  windows (`zstd`).
 
 ## [0.41.3] - 2026-11-23
 

@@ -655,6 +655,12 @@ impl AsyncSocket {
         crate::auth::set_plain_auth_impl(&self.inner, auth)
     }
 
+    /// Private hook for `pyomq.auth`: a context authenticator called as
+    /// `callback(mechanism, domain, peer)` before first socket use.
+    fn _set_zap_auth(&self, callback: &Bound<'_, PyAny>) -> PyResult<()> {
+        crate::auth::set_zap_auth_impl(&self.inner, callback)
+    }
+
     // ── Lifecycle ───────────────────────────────────────────────────
 
     #[pyo3(signature = (linger=None))]

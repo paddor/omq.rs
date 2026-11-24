@@ -1,7 +1,6 @@
 //! pyomq native module. The Python-facing surface is in `python/pyomq/`;
 //! this module exposes the native classes that re-export it imports.
 
-#[cfg(feature = "curve")]
 mod auth;
 mod constants;
 mod context;

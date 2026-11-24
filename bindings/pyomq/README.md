@@ -100,9 +100,10 @@ The package includes native stubs and precise sync/async receive overloads.
 of byte and frame result types. Serialization callbacks retain their return
 types; socket options, authentication policies, and monitor events are typed.
 
-PLAIN servers require an explicit policy before bind. Use fixed credentials
-with `pull.plain_server = 1; pull.set_plain_auth([("alice", "secret")])`, or
-pass a callable to `set_plain_auth`. Clients keep using `plain_username` and
+PLAIN servers require a policy before bind: `set_plain_auth()` or a running
+`pyomq.auth` authenticator. Use fixed credentials with
+`pull.plain_server = 1; pull.set_plain_auth([("alice", "secret")])`, or pass a
+callable to `set_plain_auth`. Clients keep using `plain_username` and
 `plain_password`. PLAIN does not encrypt traffic.
 
 `pull.set_ip_allowlist(["10.0.0.7", "fd00::7"])` before `bind()` admits only
@@ -234,8 +235,8 @@ pull.set_curve_auth(lambda peer: peer.public_key in allowed_keys)
 pull.set_curve_auth(None)
 ```
 
-No ZAP, no filesystem key management. The callback runs during the CURVE
-handshake; returning a falsy value rejects the client.
+The callback runs during the CURVE handshake; returning a falsy value rejects
+the client.
 
 On ROUTER and PEER, `recv_from()` returns an owning identity and all body
 frames; `copy=False` returns `Frame` objects, and the asyncio API is awaitable.
@@ -249,6 +250,26 @@ key = info.authentication.public_key  # raw CURVE key bytes, or None
 endpoint = info.diagnostics.endpoint
 router.send_to(identity, [b"reply"])  # route bytes may now select a replacement peer
 ```
+
+### pyzmq `zmq.auth`
+
+`pyomq.auth` has pyzmq's authenticators and certificate files, without a ZAP
+socket or thread. Start the authenticator before binding:
+
+```python
+from pyomq.auth.thread import ThreadAuthenticator
+
+auth = ThreadAuthenticator(ctx)
+auth.start()
+auth.allow("127.0.0.1")
+auth.configure_curve(domain="*", location="public_keys")  # *.key files
+```
+
+It covers CURVE and PLAIN servers without their own policy, and NULL sockets
+with a `zap_domain`. `create_certificates()` and `load_certificate()` use the
+czmq/pyzmq `.key` file format. `AsyncioAuthenticator` runs awaitable
+credential callbacks on its event loop. pyomq does not attach a `User-Id` to
+messages.
 
 ## Develop
 

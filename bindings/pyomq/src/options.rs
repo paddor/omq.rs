@@ -84,6 +84,9 @@ pub struct Overlay {
     pub compression_auto_train: bool,
     pub reconnect_stop: i32,
     pub ip_allowlist: Option<omq_proto::IpAllowlist>,
+    /// RFC 27 domain passed to a `pyomq.auth` authenticator.
+    pub zap_domain: Bytes,
+    pub zap_authenticator: Option<crate::auth::ZapAuthenticator>,
     #[cfg(feature = "quic")]
     pub quic: omq_proto::options::QuicOptions,
 }
@@ -132,6 +135,8 @@ impl Default for Overlay {
             compression_auto_train: false,
             reconnect_stop: 0,
             ip_allowlist: None,
+            zap_domain: Bytes::new(),
+            zap_authenticator: None,
             #[cfg(feature = "quic")]
             quic: Default::default(),
         }
@@ -181,14 +186,19 @@ impl Overlay {
         };
         #[cfg(feature = "plain")]
         if self.plain_server {
-            let authenticator = self.plain_authenticator.as_ref().ok_or_else(|| {
-                pyo3::exceptions::PyValueError::new_err(
-                    "PLAIN server requires explicit authentication via set_plain_auth",
-                )
-            })?;
-            opts.mechanism = backend::MechanismSetup::PlainServer {
-                authenticator: crate::auth::build_plain_authenticator(authenticator),
+            let authenticator = match (&self.plain_authenticator, &self.zap_authenticator) {
+                (Some(policy), _) => crate::auth::build_plain_authenticator(policy),
+                (None, Some(zap)) => {
+                    crate::auth::build_zap_authenticator(zap, "PLAIN", &self.zap_domain)
+                }
+                (None, None) => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(concat!(
+                        "PLAIN server requires explicit authentication via ",
+                        "set_plain_auth or a pyomq.auth authenticator",
+                    )));
+                }
             };
+            opts.mechanism = backend::MechanismSetup::PlainServer { authenticator };
         } else if self.plain_username.is_some() || self.plain_password.is_some() {
             // Like libzmq, either credential selects PLAIN. Never fall back
             // to NULL when only one was set.
@@ -224,7 +234,12 @@ impl Overlay {
             curve_options.authenticator = self
                 .curve_authenticator
                 .as_ref()
-                .map(crate::auth::build_authenticator);
+                .map(crate::auth::build_authenticator)
+                .or_else(|| {
+                    self.zap_authenticator.as_ref().map(|zap| {
+                        crate::auth::build_zap_authenticator(zap, "CURVE", &self.zap_domain)
+                    })
+                });
             opts = opts.curve_server_with_options(keypair, curve_options);
         } else if self.curve_publickey.is_some()
             || self.curve_secretkey.is_some()
@@ -262,6 +277,15 @@ impl Overlay {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "CURVE support is not enabled",
             ));
+        }
+        // Like libzmq, NULL asks the ZAP handler only with a ZAP domain.
+        if let Some(zap) = &self.zap_authenticator
+            && !self.zap_domain.is_empty()
+            && matches!(opts.mechanism, backend::MechanismSetup::Null)
+        {
+            opts.mechanism = backend::MechanismSetup::NullServer {
+                authenticator: crate::auth::build_zap_authenticator(zap, "NULL", &self.zap_domain),
+            };
         }
         opts.validate()
             .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
@@ -319,6 +343,8 @@ impl Overlay {
             compression_auto_train: o.compression_auto_train,
             reconnect_stop: i32::from(o.reconnect_stop_conn_refused),
             ip_allowlist: o.ip_allowlist.clone(),
+            zap_domain: Bytes::new(),
+            zap_authenticator: None,
             #[cfg(feature = "quic")]
             quic: o.quic.clone(),
         }
@@ -568,6 +594,15 @@ pub fn setsockopt(
         constants::PLAIN_SERVER => {
             ov.plain_server = value.extract::<i64>()? != 0;
         }
+        constants::ZAP_DOMAIN => {
+            let v: &[u8] = value.extract()?;
+            if v.len() > 255 {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "ZAP_DOMAIN must be at most 255 bytes",
+                ));
+            }
+            ov.zap_domain = Bytes::copy_from_slice(v);
+        }
         constants::PLAIN_USERNAME => {
             let v: &[u8] = value.extract()?;
             ov.plain_username = Some(String::from_utf8_lossy(v).into_owned());
@@ -644,8 +679,7 @@ pub fn setsockopt(
         | constants::ROUTER_HANDOVER
         | constants::TCP_ACCEPT_FILTER
         | constants::MULTICAST_HOPS
-        | constants::RECOVERY_IVL
-        | constants::ZAP_DOMAIN => {}
+        | constants::RECOVERY_IVL => {}
         constants::RECONNECT_STOP => {
             ov.reconnect_stop = value.extract()?;
         }
@@ -940,7 +974,11 @@ pub fn getsockopt<'py>(
             }
             Ok(int_to_bound(py, i64::from(flags)))
         }
-        constants::ZAP_DOMAIN | constants::TCP_ACCEPT_FILTER | constants::LAST_ENDPOINT => {
+        constants::ZAP_DOMAIN => {
+            let v = sock.overlay.lock().unwrap().zap_domain.clone();
+            Ok(PyBytes::new(py, &v).into_any())
+        }
+        constants::TCP_ACCEPT_FILTER | constants::LAST_ENDPOINT => {
             Ok(PyBytes::new(py, b"").into_any())
         }
         other => Err(not_implemented(&format!(

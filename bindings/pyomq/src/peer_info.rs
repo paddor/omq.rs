@@ -57,40 +57,36 @@ impl PeerInfo {
 }
 
 impl PeerInfo {
-    #[cfg(feature = "curve")]
-    pub(crate) fn from_raw(
-        py: Python<'_>,
-        raw: &[u8; 32],
-        identity: Option<&bytes::Bytes>,
-    ) -> Self {
-        let pk = omq_proto::CurvePublicKey::from_bytes(*raw);
-        let z85 = pk.to_z85();
+    /// Pre-admission view of a handshake, for authenticator callbacks. The
+    /// public key is Z85 for CURVE and empty otherwise.
+    pub(crate) fn from_mechanism(py: Python<'_>, peer: &omq_proto::MechanismPeerInfo) -> Self {
         Self {
-            public_key: PyBytes::new(py, z85.as_bytes()).unbind(),
-            identity: identity.map(|id| PyBytes::new(py, id).unbind()),
-            peer_address: None,
-            username: None,
-            password: None,
+            public_key: PyBytes::new(py, &mechanism_z85(peer)).unbind(),
+            identity: peer
+                .identity
+                .as_ref()
+                .map(|id| PyBytes::new(py, id).unbind()),
+            peer_address: peer.peer_address.clone(),
+            username: peer.username.clone(),
+            password: peer.password.clone(),
             snapshot: None,
         }
     }
+}
 
-    #[cfg(feature = "plain")]
-    pub(crate) fn from_plain(
-        py: Python<'_>,
-        username: Option<&str>,
-        password: Option<&str>,
-        peer_address: Option<&str>,
-    ) -> Self {
-        Self {
-            public_key: PyBytes::new(py, b"").unbind(),
-            identity: None,
-            peer_address: peer_address.map(str::to_owned),
-            username: username.map(str::to_owned),
-            password: password.map(str::to_owned),
-            snapshot: None,
-        }
+#[cfg(feature = "curve")]
+fn mechanism_z85(peer: &omq_proto::MechanismPeerInfo) -> Vec<u8> {
+    if peer.mechanism != omq_proto::proto::MechanismName::CURVE {
+        return Vec::new();
     }
+    omq_proto::CurvePublicKey::from_bytes(peer.public_key)
+        .to_z85()
+        .into_bytes()
+}
+
+#[cfg(not(feature = "curve"))]
+fn mechanism_z85(_peer: &omq_proto::MechanismPeerInfo) -> Vec<u8> {
+    Vec::new()
 }
 
 /// Opaque sender handle retaining the peer snapshot from message admission.

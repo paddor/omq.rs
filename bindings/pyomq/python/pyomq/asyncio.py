@@ -41,6 +41,7 @@ from . import (
     _copy_received_into,
     _native,
     _next_ctx_id,
+    _zap,
     error,
 )
 from . import Context as _SyncContext
@@ -979,6 +980,7 @@ class Context(_SyncContext[Socket]):
                 s.close()
         self._sockets.clear()
         if not self._is_shadow:
+            _zap.forget(self)
             self._ctx.term()
 
     def destroy(self, linger: int | None = None) -> None:

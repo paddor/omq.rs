@@ -54,7 +54,7 @@ features = ["std"]
 optional = true
 
 [dependencies.zrip]
-version = "0.8.24"
+version = "0.8.25"
 default-features = false
 features = ["std", "frame", "dict_builder"]
 optional = true

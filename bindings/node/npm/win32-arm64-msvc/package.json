@@ -1,6 +1,6 @@
 {
   "name": "@paddor/omq-node-win32-arm64-msvc",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "cpu": [
     "arm64"
   ],

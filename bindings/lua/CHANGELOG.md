@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-11-25
+
+### Changed
+
+- Bundle `omq-libzmq` 0.13.1 on `omq-tokio` 0.39.1. Queues start at 1024
+  slots and grow toward the HWM, so idle sockets stay small. Received frames
+  from 128 KiB through 8 MiB skip one copy. Adaptive `zstd+tcp://` picks
+  better levels for senders that wait on replies.
+- Build with zrip 0.8.27 and lz4rip 0.12.5. Zstd levels 3 and 4 write
+  0.2-3.9% smaller output on inputs over 256 KiB, and level -7 compresses
+  better but encodes slower. A Zstd dictionary whose repeat offsets exceed
+  its content is rejected, as C zstd does. LZ4 with a dictionary compresses
+  129-256 B messages 7-16% smaller and delivers about 11% more 256 B-16 KiB
+  messages; without one, 256 KiB messages drop about 7%.
+
+### Fixed
+
+- A send or receive HWM of 0 means no limit, as in libzmq.
+- Routing IDs may start with a zero byte, as in libzmq. Only the 9-byte form
+  OMQ generates stays reserved.
+- `tcp://` endpoints accept unbracketed IPv6 hosts, such as
+  `tcp://::1:5555`, like libzmq. The port follows the last colon.
+- Under steady input, an `shm://` connection lets other connections on its
+  IO thread run.
+
 ## [0.3.3] - 2026-11-21
 
 ### Changed

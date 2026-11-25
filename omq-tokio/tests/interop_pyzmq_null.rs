@@ -1,5 +1,5 @@
 //! Wire-compatibility tests against libzmq via pyzmq, exercising the
-//! NULL mechanism over TCP/IPC and the STREAM socket.
+//! NULL mechanism over TCP/IPC, PUB/SUB, and the STREAM socket.
 
 mod test_support;
 
@@ -388,4 +388,373 @@ ctx.term()
 
     reader.await.unwrap();
     wait_success(child, "pyzmq STREAM").await;
+}
+
+// ---------------------------------------------------------------------
+// PUB/SUB with KV-event style messages: topic, 8-byte big-endian sequence
+// number, payload.
+// ---------------------------------------------------------------------
+
+/// Python helpers shared by the PUB/SUB scripts.
+const PY_KV: &str = r#"
+import os, sys, zmq
+
+def bind_random(s):
+    port = s.bind_to_random_port("tcp://127.0.0.1")
+    return f"tcp://127.0.0.1:{port}"
+
+def kv(s, topic, seq, payload):
+    s.send_multipart([topic, seq.to_bytes(8, "big"), payload])
+
+def wait_subscribe(s, prefix):
+    while s.recv() != b"\x01" + prefix:
+        pass
+"#;
+
+fn spawn_python_kv(script: &str, envs: &[(&str, String)]) -> Child {
+    let mut command = python3_command();
+    command
+        .args(["-c", &format!("{PY_KV}{script}")])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+
+    command.spawn().expect("spawn pyzmq script")
+}
+
+/// Reads the endpoint a pyzmq script prints first.
+async fn read_endpoint(child: &mut Child) -> Endpoint {
+    let (endpoint, _reader) = read_endpoint_then_lines(child.stdout.take().unwrap(), 0).await;
+
+    endpoint
+}
+
+fn kv_event(topic: &str, seq: u64, payload: &[u8]) -> Message {
+    Message::multipart([
+        Bytes::copy_from_slice(topic.as_bytes()),
+        Bytes::copy_from_slice(&seq.to_be_bytes()),
+        Bytes::copy_from_slice(payload),
+    ])
+}
+
+fn kv_parts(message: &Message) -> (Bytes, u64, Bytes) {
+    assert_eq!(message.len(), 3, "KV event parts");
+    let seq = message.part_bytes(1).unwrap();
+
+    (
+        message.part_bytes(0).unwrap(),
+        u64::from_be_bytes(seq[..].try_into().expect("8-byte sequence")),
+        message.part_bytes(2).unwrap(),
+    )
+}
+
+/// libzmq filters by the prefix a Rust SUB subscribed, and multipart
+/// events arrive whole, including a 1 MiB payload. XPUB lets the script
+/// publish once the subscription arrived.
+#[tokio::test]
+async fn null_tcp_pyzmq_pub_to_rust_sub_filters_multipart_events() {
+    if skip_if_no_pyzmq() {
+        return;
+    }
+
+    let script = r#"
+ctx = zmq.Context.instance()
+s = ctx.socket(zmq.XPUB)
+s.setsockopt(zmq.RCVTIMEO, 10000)
+sys.stdout.write(bind_random(s) + "\n"); sys.stdout.flush()
+wait_subscribe(s, b"kv.")
+kv(s, b"other", 0, b"dropped")
+kv(s, b"kv.a", 1, b"small")
+kv(s, b"kv", 2, b"no dot")
+kv(s, b"kv.b", 3, b"x" * (1 << 20))
+kv(s, b"kv.end", 4, b"")
+s.close(linger=5000)
+ctx.term()
+"#;
+    let mut child = spawn_python_kv(script, &[]);
+    let endpoint = read_endpoint(&mut child).await;
+
+    let sub = Socket::new(SocketType::Sub, Options::default());
+    sub.subscribe("kv.").await.unwrap();
+    sub.connect(endpoint).await.unwrap();
+
+    let (topic, seq, payload) = kv_parts(&recv(&sub, "kv.a").await);
+    assert_eq!(
+        (&topic[..], seq, &payload[..]),
+        (&b"kv.a"[..], 1, &b"small"[..])
+    );
+
+    let (topic, seq, payload) = kv_parts(&recv(&sub, "kv.b").await);
+    assert_eq!((&topic[..], seq), (&b"kv.b"[..], 3));
+    assert_eq!(payload.len(), 1 << 20);
+    assert!(payload.iter().all(|byte| *byte == b'x'));
+
+    let (topic, seq, payload) = kv_parts(&recv(&sub, "kv.end").await);
+    assert_eq!(
+        (&topic[..], seq, &payload[..]),
+        (&b"kv.end"[..], 4, &b""[..])
+    );
+
+    wait_success(child, "pyzmq XPUB").await;
+}
+
+/// A plain libzmq PUB, as a KV event publisher uses, streams into a Rust
+/// SUB in order and without gaps once the subscription took effect.
+#[tokio::test]
+async fn null_tcp_pyzmq_pub_streams_in_order_to_rust_sub() {
+    if skip_if_no_pyzmq() {
+        return;
+    }
+
+    let script = r#"
+import select
+ctx = zmq.Context.instance()
+s = ctx.socket(zmq.PUB)
+sys.stdout.write(bind_random(s) + "\n"); sys.stdout.flush()
+for seq in range(20000):
+    kv(s, b"kv.events", seq, b"payload-%d" % seq)
+    if select.select([sys.stdin], [], [], 0.001)[0]:
+        break
+else:
+    sys.exit("the subscriber never asked to stop")
+s.close(linger=0)
+ctx.term()
+"#;
+    let mut child = spawn_python_kv(script, &[]);
+    let endpoint = read_endpoint(&mut child).await;
+
+    let sub = Socket::new(SocketType::Sub, Options::default());
+    sub.subscribe("kv.").await.unwrap();
+    sub.connect(endpoint).await.unwrap();
+
+    let (_, first, _) = kv_parts(&recv(&sub, "first streamed event").await);
+    for expected in first + 1..first + 200 {
+        let (topic, seq, payload) = kv_parts(&recv(&sub, "streamed event").await);
+        assert_eq!(&topic[..], b"kv.events");
+        assert_eq!(seq, expected, "events arrive in order without gaps");
+        assert_eq!(payload, format!("payload-{seq}").as_bytes());
+    }
+
+    {
+        use std::io::Write;
+
+        child.stdin.take().unwrap().write_all(b"stop\n").unwrap();
+    }
+
+    wait_success(child, "pyzmq PUB").await;
+}
+
+/// A libzmq SUB's subscription reaches a Rust PUB, which filters by it and
+/// sends multipart events whole.
+#[tokio::test]
+async fn null_tcp_rust_pub_to_pyzmq_sub_filters_multipart_events() {
+    if skip_if_no_pyzmq() {
+        return;
+    }
+
+    let publisher = Socket::new(SocketType::Pub, Options::default());
+    let endpoint = publisher.bind(test_support::tcp_loopback(0)).await.unwrap();
+
+    let script = r#"
+ctx = zmq.Context.instance()
+s = ctx.socket(zmq.SUB)
+s.setsockopt(zmq.RCVTIMEO, 10000)
+s.subscribe(b"kv.")
+s.connect(os.environ["ENDPOINT"])
+for _ in range(3):
+    topic, seq, payload = s.recv_multipart()
+    assert topic != b"kv.b" or payload == b"x" * len(payload)
+    sys.stdout.write(f"{topic.decode()} {int.from_bytes(seq, 'big')} {len(payload)}\n")
+    sys.stdout.flush()
+s.close(linger=0)
+ctx.term()
+"#;
+    let child = spawn_python_kv(script, &[("ENDPOINT", endpoint.to_string())]);
+
+    publisher
+        .wait_subscribed(1, Duration::from_secs(10))
+        .await
+        .expect("pyzmq SUB subscribed");
+
+    for event in [
+        kv_event("other", 0, b"dropped"),
+        kv_event("kv.a", 1, b"small"),
+        kv_event("kv", 2, b"no dot"),
+        kv_event("kv.b", 3, &vec![b'x'; 1 << 20]),
+        kv_event("kv.end", 4, b""),
+    ] {
+        publisher.send(event).await.unwrap();
+    }
+
+    let output = wait_success(child, "pyzmq SUB").await;
+    assert_eq!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        ["kv.a 1 5", "kv.b 3 1048576", "kv.end 4 0"]
+    );
+}
+
+/// A frame over `max_message_size` from libzmq drops the connection
+/// instead of being allocated. The SUB reconnects and subscribes again,
+/// and later events arrive.
+#[tokio::test]
+async fn null_tcp_rust_sub_drops_oversized_pyzmq_event_and_resubscribes() {
+    if skip_if_no_pyzmq() {
+        return;
+    }
+
+    let script = r#"
+ctx = zmq.Context.instance()
+s = ctx.socket(zmq.XPUB)
+s.setsockopt(zmq.XPUB_VERBOSE, 1)
+s.setsockopt(zmq.RCVTIMEO, 10000)
+sys.stdout.write(bind_random(s) + "\n"); sys.stdout.flush()
+wait_subscribe(s, b"kv.")
+kv(s, b"kv.small", 0, b"a")
+kv(s, b"kv.big", 1, b"x" * 4096)
+# The subscriber dropped the connection and came back.
+wait_subscribe(s, b"kv.")
+kv(s, b"kv.after", 2, b"b")
+s.close(linger=5000)
+ctx.term()
+"#;
+    let mut child = spawn_python_kv(script, &[]);
+    let endpoint = read_endpoint(&mut child).await;
+
+    let sub = Socket::new(SocketType::Sub, Options::default().max_message_size(1024));
+    sub.subscribe("kv.").await.unwrap();
+    sub.connect(endpoint).await.unwrap();
+
+    let (topic, seq, _) = kv_parts(&recv(&sub, "event before the oversized one").await);
+    assert_eq!((&topic[..], seq), (&b"kv.small"[..], 0));
+
+    let after = tokio::time::timeout(Duration::from_secs(10), sub.recv())
+        .await
+        .expect("event after reconnecting")
+        .unwrap();
+    let (topic, seq, payload) = kv_parts(&after);
+    assert_eq!(
+        (&topic[..], seq, &payload[..]),
+        (&b"kv.after"[..], 2, &b"b"[..])
+    );
+
+    wait_success(child, "pyzmq XPUB").await;
+}
+
+/// `connect` returns while the publisher is down. The SUB connects once a
+/// libzmq publisher binds, and again after it restarts on the same port.
+#[tokio::test]
+async fn null_tcp_rust_sub_connects_before_pyzmq_pub_binds_and_follows_restart() {
+    if skip_if_no_pyzmq() {
+        return;
+    }
+
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+
+    let sub = Socket::new(SocketType::Sub, Options::default());
+    sub.subscribe("kv.").await.unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        sub.connect(test_support::tcp_loopback(port)),
+    )
+    .await
+    .expect("connect returns while nothing listens")
+    .unwrap();
+
+    let script = r#"
+ctx = zmq.Context.instance()
+s = ctx.socket(zmq.XPUB)
+s.setsockopt(zmq.RCVTIMEO, 10000)
+s.bind(f"tcp://127.0.0.1:{os.environ['PORT']}")
+wait_subscribe(s, b"kv.")
+kv(s, os.environ["TOPIC"].encode(), int(os.environ["SEQ"]), b"")
+s.close(linger=5000)
+ctx.term()
+"#;
+
+    for (seq, topic) in [(0_u64, "kv.first"), (1, "kv.restarted")] {
+        let child = spawn_python_kv(
+            script,
+            &[
+                ("PORT", port.to_string()),
+                ("TOPIC", topic.to_string()),
+                ("SEQ", seq.to_string()),
+            ],
+        );
+
+        let event = tokio::time::timeout(Duration::from_secs(15), sub.recv())
+            .await
+            .unwrap_or_else(|_| panic!("{topic} not received"))
+            .unwrap();
+        let (received, received_seq, _) = kv_parts(&event);
+        assert_eq!((&received[..], received_seq), (topic.as_bytes(), seq));
+
+        wait_success(child, topic).await;
+    }
+}
+
+/// `recv` futures dropped by `select!` while events arrive consume
+/// nothing: every event from libzmq arrives once, in order.
+#[tokio::test]
+async fn null_tcp_rust_sub_canceled_recv_loses_no_pyzmq_event() {
+    const EVENTS: u64 = 3000;
+
+    if skip_if_no_pyzmq() {
+        return;
+    }
+
+    let script = r#"
+import time
+ctx = zmq.Context.instance()
+s = ctx.socket(zmq.XPUB)
+s.setsockopt(zmq.SNDHWM, 0)
+s.setsockopt(zmq.RCVTIMEO, 10000)
+sys.stdout.write(bind_random(s) + "\n"); sys.stdout.flush()
+wait_subscribe(s, b"kv.")
+for seq in range(int(os.environ["EVENTS"])):
+    kv(s, b"kv.c", seq, b"")
+    if seq % 16 == 0:
+        time.sleep(0.001)
+s.close(linger=5000)
+ctx.term()
+"#;
+    let mut child = spawn_python_kv(script, &[("EVENTS", EVENTS.to_string())]);
+    let endpoint = read_endpoint(&mut child).await;
+
+    let sub = Socket::new(SocketType::Sub, Options::default());
+    sub.subscribe("kv.").await.unwrap();
+    sub.connect(endpoint).await.unwrap();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let mut expected = 0;
+    let mut canceled = 0_u32;
+
+    while expected < EVENTS {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "received {expected} of {EVENTS} events"
+        );
+
+        tokio::select! {
+            message = sub.recv() => {
+                let (_, seq, _) = kv_parts(&message.unwrap());
+                assert_eq!(seq, expected, "no event lost or repeated");
+                expected += 1;
+            }
+            () = tokio::time::sleep(Duration::from_micros(200)) => canceled += 1,
+        }
+    }
+
+    assert!(canceled > 0, "no recv was canceled");
+    wait_success(child, "pyzmq XPUB").await;
 }

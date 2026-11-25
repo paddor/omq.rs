@@ -207,6 +207,8 @@ impl SpscAwareRecv {
         &self,
         source: Option<&super::peer_recv::ReceiveLane>,
     ) -> Result<(super::peer_recv::ReceiveReceipt, Message)> {
+        super::recv_budget::cooperate().await;
+
         if let Some(fanin) = self
             .handles
             .fanin
@@ -362,6 +364,8 @@ impl SpscAwareRecv {
     }
 
     pub(crate) async fn recv(&self) -> Result<Message> {
+        super::recv_budget::cooperate().await;
+
         // Set once a signal wake led here. A woken receiver that takes a
         // message passes the wake on to other parked receivers.
         let mut woken = false;

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Async receives and `Socket::message` streams spend the calling task's
+  Tokio budget, like Tokio's channels. A receive loop over a socket that
+  stays ready now yields instead of starving other tasks on its worker.
+
 ## [0.39.0] - 2026-11-24
 
 ### Changed

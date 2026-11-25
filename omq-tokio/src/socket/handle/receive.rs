@@ -189,6 +189,7 @@ impl Socket {
             return Ok(0);
         }
 
+        crate::socket::recv_budget::cooperate().await;
         match self.try_recv_many_into(max, out) {
             Err(Error::WouldBlock) => {}
             result => return result,

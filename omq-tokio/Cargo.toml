@@ -630,6 +630,10 @@ name = "omq_stress_connect_before_bind"
 path = "tests/stress_connect_before_bind.rs"
 
 [[test]]
+name = "omq_recv_budget"
+path = "tests/recv_budget.rs"
+
+[[test]]
 name = "omq_tcp_smoke"
 path = "tests/tcp_smoke.rs"
 

@@ -54,15 +54,14 @@ impl PeerTransmitSlot {
             return TryFrameResult::Dead;
         }
 
-        let bytes = chunks.iter().map(Bytes::len).sum();
         let Some(mut eq) = self.lock_live() else {
             return TryFrameResult::Dead;
         };
 
         let queued_msgs = self.queued_msgs.load(Ordering::Relaxed);
-        if queued_msgs >= self.msg_cap
-            || (queued_msgs > 0 && eq.total_bytes().saturating_add(bytes) >= self.cap)
-        {
+        // The byte cap bounds queued backlog, not message size: the last
+        // admitted publication may cross it, as for pre-framed ones.
+        if queued_msgs >= self.msg_cap || eq.total_bytes() >= self.cap {
             return self.full();
         }
 

@@ -1,5 +1,6 @@
 //! PUB/SUB fan-out throughput. PUB sends for a timed window, each SUB
-//! counts received messages. Reported rate is the PUB send rate.
+//! counts received messages. The reported rate is what one SUB received
+//! per second, and the cell shows the share of sent messages delivered.
 
 #[path = "common/mod.rs"]
 mod common;
@@ -28,9 +29,10 @@ fn main() {
                 for &size in &common::sizes() {
                     seq += 1;
                     let label = format!("{transport}/{peers}peer/{size}B");
-                    let cell =
+                    let (cell, delivered) =
                         common::with_timeout(&label, run_cell(&transport, peers, size, seq)).await;
                     common::print_cell(size, cell);
+                    println!("          delivered {:.1}% of sent", delivered * 100.0);
                     common::append_jsonl(PATTERN, &transport, peers, size, cell);
                 }
 
@@ -99,7 +101,9 @@ fn spawn_counting_receivers(
     recv_handles
 }
 
-async fn run_cell(transport: &str, peers: usize, size: usize, seq: usize) -> common::Cell {
+/// One cell: the best round by per-SUB receive rate, and the share of sent
+/// messages each SUB received in that round.
+async fn run_cell(transport: &str, peers: usize, size: usize, seq: usize) -> (common::Cell, f64) {
     let ep = common::endpoint(transport, seq);
     let (pub_, subs) = connect_pub_subs(transport, ep, peers, size).await;
 
@@ -123,6 +127,7 @@ async fn run_cell(transport: &str, peers: usize, size: usize, seq: usize) -> com
     let mut best_n = 0usize;
 
     let mut best_cpu = Duration::ZERO;
+    let mut best_delivered = 0.0f64;
 
     for _ in 0..n_rounds {
         recv_count.store(0, Ordering::Relaxed);
@@ -138,13 +143,15 @@ async fn run_cell(transport: &str, peers: usize, size: usize, seq: usize) -> com
 
         let elapsed = t0.elapsed();
         let cpu = common::process_cpu_time().saturating_sub(cpu0);
-        let msgs_s = sent as f64 / elapsed.as_secs_f64();
+        let received = recv_count.load(Ordering::Relaxed) / peers;
+        let msgs_s = received as f64 / elapsed.as_secs_f64();
 
         if msgs_s > best_msgs_s {
             best_msgs_s = msgs_s;
             best_elapsed = elapsed;
-            best_n = sent;
+            best_n = received;
             best_cpu = cpu;
+            best_delivered = received as f64 / sent.max(1) as f64;
         }
     }
 
@@ -154,11 +161,13 @@ async fn run_cell(transport: &str, peers: usize, size: usize, seq: usize) -> com
     }
 
     let mbps = (best_n * size) as f64 / best_elapsed.as_secs_f64() / 1_000_000.0;
-    common::Cell {
+    let cell = common::Cell {
         n: best_n,
         elapsed: best_elapsed,
         mbps,
         msgs_s: best_msgs_s,
         cpu_time: best_cpu,
-    }
+    };
+
+    (cell, best_delivered)
 }

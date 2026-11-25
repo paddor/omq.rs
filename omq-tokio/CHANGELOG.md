@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   opened its receive queue just as the wait began, although the connect-side
   backlog had moved and the queue had room. Backlog delivery and fan-out
   fallback sends could miss the same wake.
+- PUB, XPUB, and RADIO dropped for a peer once 512 KiB was queued for it,
+  and dropped any message of 512 KiB or more behind a queued one. A
+  subscriber that kept up lost most of a burst of 64 KiB messages. Unless
+  `xpub_nodrop` or `Options::transmit_slot_cap` is set, they now drop only
+  at `send_hwm` messages, as in libzmq, so a stalled subscriber can hold up
+  to `send_hwm` messages. With `xpub_nodrop`, a large message behind a
+  queued one no longer waits for the queue to empty.
 
 ## [0.39.1] - 2026-11-25
 

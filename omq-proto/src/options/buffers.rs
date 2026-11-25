@@ -20,7 +20,11 @@ impl Options {
         self
     }
 
-    /// Set the per-peer transmit-slot capacity in bytes. Default: 2 MiB.
+    /// Set the per-peer transmit-slot capacity in bytes. A peer with this
+    /// much queued is full and the sender waits; the last admitted message
+    /// may cross the cap. Default: 512 KiB. Fan-out sockets that drop for a
+    /// full peer (PUB, XPUB, and RADIO without `xpub_nodrop`) have no byte
+    /// cap unless set: they drop only at `send_hwm` messages, as in libzmq.
     #[must_use]
     pub fn transmit_slot_cap(mut self, bytes: usize) -> Self {
         self.transmit_slot_cap = Some(bytes);

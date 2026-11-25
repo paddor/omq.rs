@@ -74,7 +74,7 @@ pub(super) enum FanOutMutePolicy {
 }
 
 impl FanOutMutePolicy {
-    pub(super) fn is_lossy(self) -> bool {
+    pub(super) const fn is_lossy(self) -> bool {
         !matches!(self, Self::Block)
     }
 
@@ -646,6 +646,12 @@ impl FanOutInner {
 }
 
 impl FanOutSend {
+    /// Whether a peer with a full queue loses new messages rather than
+    /// holding the publisher back.
+    pub(crate) const fn drops_when_full(&self) -> bool {
+        self.config.mute_policy.is_lossy()
+    }
+
     #[cfg(target_os = "linux")]
     pub(crate) fn shm_send_pool(&self) -> omq_shm::SendPool {
         self.lanes.shm_pool.clone()

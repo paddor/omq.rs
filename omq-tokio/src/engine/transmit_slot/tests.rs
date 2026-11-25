@@ -39,6 +39,33 @@ fn transmit_slot_caps_queued_messages_independent_of_bytes() {
     assert_eq!(slot.try_encode(&msg), TryFrameResult::Ok);
 }
 
+/// The byte cap bounds queued backlog, not message size. A large encoded
+/// publication behind a small queued one is admitted while the backlog is
+/// under the cap, as pre-framed ones are. Lossy fan-out dropped it before.
+#[test]
+fn encoded_publication_may_cross_the_byte_cap_behind_a_queued_one() {
+    let slot = PeerTransmitSlot::with_config(
+        1,
+        SlotConfig {
+            cap: 1024,
+            ..SlotConfig::default()
+        },
+    );
+    slot.mark_handshake_done();
+    let small = [Bytes::from_static(b"small")];
+
+    assert_eq!(slot.try_push_encoded_no_signal(&small), TryFrameResult::Ok);
+    assert_eq!(
+        slot.try_push_encoded_no_signal(&[Bytes::from(vec![0; 4096])]),
+        TryFrameResult::Ok
+    );
+    // The backlog is over the cap now.
+    assert_eq!(
+        slot.try_push_encoded_no_signal(&small),
+        TryFrameResult::Full
+    );
+}
+
 /// Fill the slot until it refuses a message.
 fn fill(slot: &PeerTransmitSlot) {
     let msg = Message::from("x");

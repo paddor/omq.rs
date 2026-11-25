@@ -629,6 +629,76 @@ async fn pub_sub_ipc_large_message_exceeds_transmit_slot_cap() {
     assert_eq!(msg.part_bytes(0).unwrap(), body.as_slice());
 }
 
+/// Send `count` messages of `size` bytes to one subscriber that keeps up
+/// and return the sequence numbers it received.
+async fn publish_burst(endpoint: Endpoint, size: usize, count: u32) -> Vec<u32> {
+    let pub_ = Socket::new(SocketType::Pub, Options::default());
+    let endpoint = pub_.bind(endpoint).await.unwrap();
+    let sub = Socket::new(SocketType::Sub, Options::default());
+    sub.subscribe(bytes::Bytes::new()).await.unwrap();
+    sub.connect(endpoint).await.unwrap();
+    pub_.wait_subscribed(1, Duration::from_secs(5))
+        .await
+        .expect("subscription did not arrive");
+
+    let reader = tokio::spawn(async move {
+        let mut received = Vec::new();
+        while let Ok(Ok(msg)) = tokio::time::timeout(Duration::from_secs(2), sub.recv()).await {
+            let body = msg.part_bytes(0).unwrap();
+            assert_eq!(body.len(), size);
+            received.push(u32::from_le_bytes(body[..4].try_into().unwrap()));
+            if received.len() == count as usize {
+                break;
+            }
+        }
+
+        received
+    });
+
+    for seq in 0..count {
+        let mut body = vec![0x5a; size];
+        body[..4].copy_from_slice(&seq.to_le_bytes());
+        pub_.send(Message::single(body)).await.unwrap();
+    }
+
+    reader.await.unwrap()
+}
+
+/// PUB drops only at its send HWM, which counts messages as in libzmq. A
+/// burst below it reaches a subscriber that keeps up whole and in order,
+/// whatever the message size.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pub_burst_below_send_hwm_reaches_a_subscriber_that_keeps_up() {
+    const COUNT: u32 = 100;
+
+    let mut endpoints = vec![
+        ("tcp", test_support::tcp_loopback(0)),
+        ("ipc", test_support::ipc_endpoint("pub-burst")),
+        ("inproc", inproc_ep("pub-burst")),
+    ];
+    #[cfg(feature = "lz4")]
+    endpoints.push(("lz4+tcp", "lz4+tcp://127.0.0.1:0".parse().unwrap()));
+    #[cfg(feature = "zstd")]
+    endpoints.push(("zstd+tcp", "zstd+tcp://127.0.0.1:0".parse().unwrap()));
+
+    for (transport, endpoint) in endpoints {
+        for size in [16 * 1024, 256 * 1024, 1024 * 1024] {
+            let endpoint = match endpoint {
+                Endpoint::Inproc { ref name } => inproc_ep(&format!("{name}-{size}")),
+                Endpoint::Ipc(_) => test_support::ipc_endpoint("pub-burst"),
+                ref other => other.clone(),
+            };
+
+            let received = publish_burst(endpoint, size, COUNT).await;
+            assert_eq!(
+                received,
+                (0..COUNT).collect::<Vec<_>>(),
+                "{transport}, {size} B messages"
+            );
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pub_io_lane_fanout_block_on_mute_does_not_block_slow_sub() {
     const SUBS: usize = 6;

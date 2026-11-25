@@ -70,8 +70,12 @@ where
                     .poll(cx)
             )
         } else {
+            // A ready message spends the task budget like `recv`; the wait
+            // path leaves the unit to `recv`.
+            let coop = ready!(tokio::task::coop::poll_proceed(cx));
             match this.socket.try_recv() {
                 Err(Error::WouldBlock) => {
+                    drop(coop);
                     this.future.set(Some((this.recv)()));
                     ready!(
                         this.future
@@ -81,7 +85,10 @@ where
                             .poll(cx)
                     )
                 }
-                result => result,
+                result => {
+                    coop.made_progress();
+                    result
+                }
             }
         };
 

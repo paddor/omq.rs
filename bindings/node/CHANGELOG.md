@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-11-25
+
+### Changed
+
+- Bundle `omq-tokio` 0.39.1. Receive rings, send pipes, and fan-out lanes
+  start at 1024 slots and grow toward the HWM, so idle peers stay small.
+- Build with lz4rip 0.12.5. LZ4 with a dictionary compresses 129-256 B
+  messages 7-16% smaller and delivers about 11% more 256 B-16 KiB messages;
+  without one, 256 KiB messages drop about 7%.
+
+### Fixed
+
+- ROUTER and PEER admit peers whose identity starts with a zero byte, as
+  libzmq does. Only the 9-byte generated form stays reserved.
+- A socket that stays readable no longer starves other sockets on its
+  runtime worker. Under steady input, an `shm://` connection lets other
+  connections on its IO thread run.
+
 ## [0.3.2] - 2026-11-19
 
 ### Changed

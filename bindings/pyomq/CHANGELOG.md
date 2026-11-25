@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.1] - 2026-11-25
+
+### Changed
+
+- Bundle `omq-tokio` 0.39.1 with zrip 0.8.27. Zstd levels 3 and 4 write
+  0.2-3.9% smaller output on inputs over 256 KiB, and level -7 compresses
+  better but encodes slower. A Zstd dictionary whose repeat offsets exceed
+  its content is rejected, as C zstd does.
+
+### Fixed
+
+- A socket that stays readable no longer starves other sockets on its
+  runtime worker. Under steady input, a `quic://` or `shm://` connection
+  lets other connections on its IO thread run.
+
 ## [0.30.0] - 2026-11-24
 
 ### Added

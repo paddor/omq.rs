@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-25
+
+### Changed
+
+- Bundle `omq-tokio` 0.39.1. Receive rings, send pipes, and fan-out lanes
+  start at 1024 slots and grow toward the HWM, so idle peers stay small.
+  Adaptive `zstd+tcp://` picks better levels for senders that wait on
+  replies.
+- Build with zrip 0.8.27 and lz4rip 0.12.5. Zstd levels 3 and 4 write
+  0.2-3.9% smaller output on inputs over 256 KiB, and level -7 compresses
+  better but encodes slower. A Zstd dictionary whose repeat offsets exceed
+  its content is rejected, as C zstd does. LZ4 with a dictionary compresses
+  129-256 B messages 7-16% smaller and delivers about 11% more 256 B-16 KiB
+  messages; without one, 256 KiB messages drop about 7%.
+
 ### Fixed
 
 - `send`, `recv`, `poll`, `monitor_recv`, `wait_connected`, and
@@ -10,6 +25,11 @@
   blocked `recv`. Many waiting processes no longer starve file IO and
   other dirty IO work.
 - Collecting an open socket after `term/1` no longer aborts the VM.
+- ROUTER and PEER admit peers whose identity starts with a zero byte, as
+  libzmq does. Only the 9-byte generated form stays reserved.
+- A socket that stays readable no longer starves other sockets on its
+  runtime worker. Under steady input, a `quic://` or `shm://` connection
+  lets other connections on its IO thread run.
 
 ## [0.4.0] - 2026-11-21
 

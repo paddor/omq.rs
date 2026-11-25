@@ -312,10 +312,14 @@ pub(super) fn build_transmit_slot(
         return None;
     }
 
-    let transmit_slot_cap = socket
-        .options
-        .transmit_slot_cap
-        .unwrap_or(crate::engine::transmit_slot::TRANSMIT_SLOT_CAP_DEFAULT);
+    // A full queue that drops counts only messages, so lossy fan-out drops
+    // at the send HWM as in libzmq. A full queue that waits also paces on
+    // queued bytes.
+    let transmit_slot_cap = match socket.options.transmit_slot_cap {
+        Some(cap) => cap,
+        None if socket.routing.send_strategy.drops_when_full() => usize::MAX,
+        None => crate::engine::transmit_slot::TRANSMIT_SLOT_CAP_DEFAULT,
+    };
     let transmit_slot_msg_cap = socket.options.send_queue_capacity();
 
     let config = crate::engine::transmit_slot::SlotConfig {

@@ -443,10 +443,10 @@ pub struct Options {
     /// traffic is more expensive than a flat memcpy.
     pub arena_threshold: Option<usize>,
 
-    /// Maximum encoded bytes buffered in a per-peer transmit slot before
-    /// `try_encode` returns `Full` and the message falls back to the
-    /// actor inbox. `None` uses the default (2 MiB). Larger values
-    /// allow more batching at the cost of memory per peer.
+    /// Encoded bytes a per-peer transmit slot queues before the peer is
+    /// full. `None` uses the default (512 KiB), or no byte cap for fan-out
+    /// that drops. Larger values allow more batching at the cost of memory
+    /// per peer.
     pub transmit_slot_cap: Option<usize>,
 
     /// `XPUB_NODROP`: when true, PUB/XPUB `try_send` returns `Full`

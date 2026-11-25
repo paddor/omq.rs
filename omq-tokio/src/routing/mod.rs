@@ -627,6 +627,15 @@ impl SendStrategy {
         }
     }
 
+    /// Whether a peer with a full queue loses new messages: lossy PUB, XPUB,
+    /// and RADIO.
+    pub(crate) const fn drops_when_full(&self) -> bool {
+        match self {
+            Self::FanOut(s) => s.drops_when_full(),
+            _ => false,
+        }
+    }
+
     pub(crate) fn needs_transmit_slot(&self) -> bool {
         match self {
             Self::Latency(_) | Self::FanOut(_) => true,

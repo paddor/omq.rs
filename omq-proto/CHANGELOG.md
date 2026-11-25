@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `Options::transmit_slot_cap` documents its 512 KiB default and that fan-out
+  sockets that drop for a full peer have no byte cap unless it is set.
+
 ## [0.42.1] - 2026-11-25
 
 ### Changed

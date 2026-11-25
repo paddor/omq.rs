@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.39.2] - 2026-11-25
+
 ### Fixed
 
 - A send waiting on an inproc connection could stay blocked when the peer

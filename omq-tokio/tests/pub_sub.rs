@@ -671,15 +671,15 @@ async fn publish_burst(endpoint: Endpoint, size: usize, count: u32) -> Vec<u32> 
 async fn pub_burst_below_send_hwm_reaches_a_subscriber_that_keeps_up() {
     const COUNT: u32 = 100;
 
-    let mut endpoints = vec![
+    let endpoints = [
         ("tcp", test_support::tcp_loopback(0)),
         ("ipc", test_support::ipc_endpoint("pub-burst")),
         ("inproc", inproc_ep("pub-burst")),
+        #[cfg(feature = "lz4")]
+        ("lz4+tcp", "lz4+tcp://127.0.0.1:0".parse().unwrap()),
+        #[cfg(feature = "zstd")]
+        ("zstd+tcp", "zstd+tcp://127.0.0.1:0".parse().unwrap()),
     ];
-    #[cfg(feature = "lz4")]
-    endpoints.push(("lz4+tcp", "lz4+tcp://127.0.0.1:0".parse().unwrap()));
-    #[cfg(feature = "zstd")]
-    endpoints.push(("zstd+tcp", "zstd+tcp://127.0.0.1:0".parse().unwrap()));
 
     for (transport, endpoint) in endpoints {
         for size in [16 * 1024, 256 * 1024, 1024 * 1024] {

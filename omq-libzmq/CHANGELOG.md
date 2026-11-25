@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2] - 2026-11-25
+
+### Changed
+
+- Require `omq-tokio` 0.39.2. `ZMQ_PUB`, `ZMQ_XPUB`, and `ZMQ_RADIO` drop for
+  a peer only at `ZMQ_SNDHWM` messages, as in libzmq, instead of once 512 KiB
+  was queued for it.
+
 ## [0.13.1] - 2026-11-25
 
 ### Changed

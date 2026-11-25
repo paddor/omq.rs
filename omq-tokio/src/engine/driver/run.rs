@@ -149,6 +149,20 @@ async fn slot_ready(slot: Option<Arc<PeerTransmitSlot>>) {
     }
 }
 
+/// Run `future` and report whether it returned Pending, so the task gave the
+/// thread back at least once.
+async fn parked<T>(future: impl Future<Output = T>) -> (T, bool) {
+    let mut future = std::pin::pin!(future);
+    let mut polls = 0_u32;
+    let output = std::future::poll_fn(|cx| {
+        polls = polls.saturating_add(1);
+        future.as_mut().poll(cx)
+    })
+    .await;
+
+    (output, polls > 1)
+}
+
 /// Inbound decode and delivery settings.
 struct ReceivePath {
     rate_limiter: Option<TokenBucket>,
@@ -281,8 +295,8 @@ struct Turn {
 }
 
 impl Turn {
-    /// Skip output for this turn and end it with a yield. Input, control,
-    /// and timers get polled, and tasks sharing the IO thread run.
+    /// Skip output for this turn, which always yields. Input, control, and
+    /// timers get polled, and tasks sharing the IO thread run.
     fn pause_output(&mut self) {
         self.want_write = false;
         self.shutdown_ready = false;
@@ -607,8 +621,15 @@ impl<'c> Session<'c> {
                 turn.pause_output();
             }
 
-            if self.wait(io, waits, &turn).await? == Flow::Exit {
+            let (flow, parked) = parked(self.wait(io, waits, &turn)).await;
+            if flow? == Flow::Exit {
                 return Ok(());
+            }
+
+            // An earlier ready arm, such as input, ends a paused turn before
+            // its yield arm. The pause still yields.
+            if turn.output_paused && !parked {
+                tokio::task::yield_now().await;
             }
         }
     }

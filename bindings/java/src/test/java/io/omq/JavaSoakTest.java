@@ -42,7 +42,7 @@ final class JavaSoakTest {
     private static final byte[] ZSTD_DICT = hex(
             "37a430ecbeaadd5c811120841042664644444444244902002114c418638c21841042"
                     + "082184104208214444444444444444240900005110638c31c618630c21c418636666"
-                    + "864692040080000000c000000000010000");
+                    + "86469204000100000004000000080000006f6d712d7a7374642d66697874757265");
 
     @Test
     void mixedWorkloadsKeepMemoryBounded() throws Exception {

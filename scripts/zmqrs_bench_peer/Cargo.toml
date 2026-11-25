@@ -13,4 +13,4 @@ path = "src/main.rs"
 bytes = "1"
 libc = "0.2"
 tokio = { version = "1", features = ["full"] }
-zeromq = { version = "0.6", features = ["ipc-transport"] }
+zeromq = { version = "=0.7.0", features = ["ipc-transport"] }

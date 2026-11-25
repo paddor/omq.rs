@@ -63,12 +63,7 @@ fn build_source(source: &str, peer_features: &[&str], needs_mt_runtime: bool) ->
             PathBuf::from(out)
         }
         "zmq.rs" => {
-            run_build_in_dir(
-                &["cargo", "build", "--release", "-q"],
-                "scripts/zmqrs_bench_peer",
-            );
-
-            PathBuf::from("scripts/zmqrs_bench_peer/target/release/omq_zmqrs_bench_peer")
+            process::build_external_peer("scripts/zmqrs_bench_peer", "omq_zmqrs_bench_peer", &[])
         }
         "r0z-async" | "tmq" | "monocoque-tokio-ct" => build_external_comparison_peer(source),
         "rzmq" => {

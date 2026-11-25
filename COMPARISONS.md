@@ -1,8 +1,8 @@
 # Comparisons
 
-These charts compare OMQ with `libzmq`, `tmq`, `zmq.rs`, and `rzmq`. The
-benchmark runner records throughput, latency, CPU time, and peer fairness where
-the pattern has multiple peers.
+These charts compare OMQ with `libzmq`, `tmq`, `r0z`, `monocoque`, `zmq.rs`,
+and `rzmq`. The benchmark runner records throughput, latency, CPU time, and
+peer fairness where the pattern has multiple peers.
 
 Comparisons with other messaging and RPC protocols live in
 [PROTOCOL_COMPARISONS.md](https://github.com/paddor/omq.rs/blob/other-moms/PROTOCOL_COMPARISONS.md).
@@ -11,8 +11,10 @@ Comparisons with other messaging and RPC protocols live in
 
 - `libzmq v4.3.5`
 - `tmq v0.5.0`
-- `zeromq v0.6.0`
-- `rzmq v0.5.24` in its normal and io_uring modes
+- `r0z v0.1.1`
+- `monocoque-rs v1.0.0`
+- `zeromq v0.7.0` (zmq.rs)
+- `rzmq v0.5.28` in its io_uring mode
 - OMQ from this repository
 
 ## Methodology

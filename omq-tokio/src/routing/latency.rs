@@ -226,13 +226,9 @@ impl Submitter {
                     })
                     .collect();
 
-                let pending = crate::engine::signal::any_changed(
-                    std::iter::once(self.changed.clone()).chain(
-                        state
-                            .pending
-                            .iter()
-                            .flat_map(|pipe| pipe.tx.readiness_signals()),
-                    ),
+                let pending = crate::engine::signal::changed_since(
+                    std::iter::once(crate::engine::signal::observe(self.changed.clone()))
+                        .chain(state.pending.iter().flat_map(|pipe| pipe.tx.readiness())),
                 );
 
                 (peers, pending)

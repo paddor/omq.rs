@@ -25,7 +25,7 @@ use parking_lot::Mutex as ParkingMutex;
 use omq_proto::Message;
 
 use crate::engine::send_pipe::SendPreparation;
-use crate::engine::signal::StateSignal;
+use crate::engine::signal::{StateSignal, stable_generation};
 use crate::engine::{RecvSink, SendPipeConsumer, SendPipeError};
 
 mod registry;
@@ -232,6 +232,12 @@ impl InprocPort {
             _ => self.changed.clone(),
         }
     }
+
+    /// [`Self::space`] with the generation to wait from. Opening switches
+    /// from `changed` to the sink's signal.
+    pub(crate) fn space_since(&self) -> (Arc<StateSignal>, u64) {
+        stable_generation(|| self.space())
+    }
 }
 
 /// Outcome a send would have right now.
@@ -408,8 +414,7 @@ impl InprocSender {
     /// Deliver the connect-side backlog, waiting for the ring to open.
     pub(crate) async fn deliver_backlog(&self) {
         while self.has_backlog() {
-            let space = self.inner.port.space();
-            let seen = space.generation();
+            let (space, seen) = self.inner.port.space_since();
 
             if self.flush_backlog() != Flush::Stalled {
                 return;
@@ -447,11 +452,15 @@ impl InprocSender {
         self.inner.port.space()
     }
 
+    /// [`Self::space`] with the generation to wait from.
+    pub(crate) fn space_since(&self) -> (Arc<StateSignal>, u64) {
+        self.inner.port.space_since()
+    }
+
     /// Wait until a send can make progress or the route closed.
     pub(crate) async fn wait_space(&self) {
         loop {
-            let space = self.space();
-            let seen = space.generation();
+            let (space, seen) = self.space_since();
 
             if self.has_space() {
                 return;

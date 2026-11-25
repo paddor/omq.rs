@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A send waiting on an inproc connection could stay blocked when the peer
+  opened its receive queue just as the wait began, although the connect-side
+  backlog had moved and the queue had room. Backlog delivery and fan-out
+  fallback sends could miss the same wake.
+
 ## [0.39.1] - 2026-11-25
 
 ### Fixed

@@ -336,7 +336,37 @@ pub(crate) fn any_changed(signals: impl IntoIterator<Item = Arc<StateSignal>>) -
     )
 }
 
-/// Generations captured by [`any_changed`].
+/// Completes once any of `signals` moved past the generation paired with it.
+pub(crate) fn changed_since(signals: impl IntoIterator<Item = (Arc<StateSignal>, u64)>) -> Changes {
+    Changes(signals.into_iter().collect())
+}
+
+/// Pair a signal with its generation for [`changed_since`].
+pub(crate) fn observe(signal: Arc<StateSignal>) -> (Arc<StateSignal>, u64) {
+    let seen = signal.generation();
+    (signal, seen)
+}
+
+/// Read the generation of the signal `choose` picks from state that can
+/// switch to another signal. A switch notifies the old signal, then later
+/// wakes go to the new one. So a read after that notify, from a signal
+/// picked before it, would miss them: keep the read only if a second pick
+/// finds the same signal.
+pub(crate) fn stable_generation(choose: impl Fn() -> Arc<StateSignal>) -> (Arc<StateSignal>, u64) {
+    let mut signal = choose();
+    loop {
+        let seen = signal.generation();
+        let current = choose();
+
+        if Arc::ptr_eq(&signal, &current) {
+            return (signal, seen);
+        }
+
+        signal = current;
+    }
+}
+
+/// Generations captured by [`any_changed`] or paired by [`changed_since`].
 #[derive(Debug)]
 pub(crate) struct Changes(SmallVec<[(Arc<StateSignal>, u64); 4]>);
 

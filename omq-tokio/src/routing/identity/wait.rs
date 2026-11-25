@@ -69,7 +69,7 @@ impl Submitter {
 
         match target {
             PeerTarget::Pipe(pipe) | PeerTarget::RepInproc(pipe) => {
-                Box::pin(crate::engine::signal::any_changed(pipe.readiness_signals()).wait())
+                Box::pin(crate::engine::signal::changed_since(pipe.readiness()).wait())
             }
             PeerTarget::Direct(_) | PeerTarget::Inbox(_) => Box::pin(std::future::pending()),
         }

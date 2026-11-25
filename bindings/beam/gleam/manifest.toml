@@ -4,10 +4,10 @@
 packages = [
   { name = "gleam_stdlib", version = "1.0.5", build_tools = ["gleam"], requirements = [], otp_app = "gleam_stdlib", source = "hex", outer_checksum = "CEE5B6C076A85B45F60C585F4316C63EC8B7127C119D5738C3958A9C4D50404E" },
   { name = "gleeunit", version = "1.11.0", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "gleeunit", source = "hex", outer_checksum = "EC31ABA74256AEA531EDF8169931D775BBB384FED0A8A1BDC4DD9354E3E21826" },
-  { name = "omq", version = "0.4.0", build_tools = ["rebar3"], requirements = [], otp_app = "omq", source = "hex", outer_checksum = "4D347B81FF8C1D2E4427C748903670091376D894243DEA0AB81F0C3AAA2AF548" },
+  { name = "omq", version = "0.4.1", build_tools = ["rebar3"], requirements = [], otp_app = "omq", source = "hex", outer_checksum = "EDA64D28E1E0561B108357320EA836A69E633455D15353299C858C2478ACE116" },
 ]
 
 [requirements]
 gleam_stdlib = { version = ">= 0.44.0 and < 2.0.0" }
 gleeunit = { version = ">= 1.11.0 and < 2.0.0" }
-omq = { version = ">= 0.4.0 and < 1.0.0" }
+omq = { version = ">= 0.4.1 and < 1.0.0" }

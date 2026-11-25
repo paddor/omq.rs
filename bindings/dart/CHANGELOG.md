@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-11-25
+
+### Changed
+
+- Pin `omq-libzmq` 0.13.2 on `omq-tokio` 0.39.2.
+
+### Fixed
+
+- PUB, XPUB, and RADIO dropped for a peer once 512 KiB was queued for it,
+  so a subscriber that kept up lost most of a burst of 64 KiB messages.
+  They now drop only at the send HWM, as in libzmq, so a stalled subscriber
+  can hold up to that many messages.
+- A send on an inproc connection could stay blocked when the peer opened
+  its receive queue just as the send began to wait.
+
 ## [0.1.4] - 2026-11-25
 
 ### Changed

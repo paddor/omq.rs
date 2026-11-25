@@ -7,12 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.42.1] - 2026-11-25
+
 ### Changed
 
 - Require zrip 0.8.27. Zstd levels 3 and 4 search as C zstd does on inputs
   over 256 KiB, so their output is 0.2-3.9% smaller. Level -7 compresses
-  better and encodes slower. A peer dictionary whose repeat offsets exceed
-  its content is rejected, as C zstd does (`zstd`).
+  better and encodes slower. A dictionary whose repeat offsets exceed its
+  content is rejected, whether set locally or shipped by a peer, as C zstd
+  does (`zstd`).
 
 ## [0.42.0] - 2026-11-24
 

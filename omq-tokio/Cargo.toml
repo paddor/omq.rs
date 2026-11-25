@@ -1,6 +1,6 @@
 [package]
 name = "omq-tokio"
-version = "0.39.0"
+version = "0.39.1"
 edition.workspace = true
 rust-version.workspace = true
 autotests = false
@@ -42,7 +42,7 @@ bench-mt-runtime = ["tokio/rt-multi-thread"]
 
 [dependencies]
 fanring = { version = "0.3.12", features = ["async"] }
-omq-proto = { path = "../omq-proto", version = "0.42.0", default-features = false }
+omq-proto = { path = "../omq-proto", version = "0.42.1", default-features = false }
 yring = "0.3.22"
 arc-swap = "1.9.2"
 bytes = "1.12.1"
@@ -65,13 +65,13 @@ rustls-pki-types = { version = "1.14", optional = true }
 tokio-rustls = { version = "0.26.6", optional = true }
 quinn = { version = "0.11.12", optional = true, default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 quinn-udp = { version = "0.6.3", optional = true, default-features = false }
-omq-webtrans-quinn = { path = "../vendor/omq-webtrans-quinn", version = "0.1.1", optional = true }
+omq-webtrans-quinn = { path = "../vendor/omq-webtrans-quinn", version = "0.1.2", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.32", default-features = false, features = ["signal"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-omq-shm = { path = "../omq-shm", version = "0.10.0" }
+omq-shm = { path = "../omq-shm", version = "0.10.1" }
 
 [dev-dependencies]
 serde_json = "1.0.154"

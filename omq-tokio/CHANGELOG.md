@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.39.1] - 2026-11-25
+
 ### Fixed
 
 - Async receives and `Socket::message` streams spend the calling task's

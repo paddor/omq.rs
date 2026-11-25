@@ -2,7 +2,7 @@
 
 [package]
 name = "omq-webtrans-quinn"
-version = "0.1.1"
+version = "0.1.2"
 edition.workspace = true
 rust-version.workspace = true
 license = "MIT"
@@ -16,7 +16,7 @@ categories = ["network-programming", "web-programming"]
 bytes = "1.12.1"
 futures = { version = "0.3.34", default-features = false, features = ["std", "async-await"] }
 http = "1.4.0"
-omq-webtrans-proto = { path = "../omq-webtrans-proto", version = "0.1.0" }
+omq-webtrans-proto = { path = "../omq-webtrans-proto", version = "0.1.1" }
 quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio"] }
 thiserror = "2.0.21"
 tokio = { version = "1.53.3", default-features = false, features = ["io-util", "macros", "rt", "sync", "time"] }

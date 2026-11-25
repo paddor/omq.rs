@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-11-25
+
+### Changed
+
+- Require `omq-tokio` 0.39.1, which requires zrip 0.8.27. Zstd level -7
+  compresses better and encodes slower. A zstd dictionary whose repeat
+  offsets exceed its content is rejected, as C zstd does.
+
 ## [0.13.0] - 2026-11-24
 
 ### Changed

@@ -769,7 +769,7 @@ dependencies = [
 
 [[package]]
 name = "omq-proto"
-version = "0.42.0"
+version = "0.42.1"
 dependencies = [
  "bytes",
  "concurrent-queue",
@@ -785,7 +785,7 @@ dependencies = [
 
 [[package]]
 name = "omq-shm"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -797,7 +797,7 @@ dependencies = [
 
 [[package]]
 name = "omq-tokio"
-version = "0.39.0"
+version = "0.39.1"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -840,7 +840,7 @@ dependencies = [
 
 [[package]]
 name = "omq-webtrans-proto"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "http",
@@ -851,7 +851,7 @@ dependencies = [
 
 [[package]]
 name = "omq-webtrans-quinn"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bytes",
  "futures",

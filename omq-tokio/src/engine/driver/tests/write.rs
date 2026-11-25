@@ -538,3 +538,134 @@ async fn busy_sender_yields_to_tasks_on_its_thread() {
     );
     task.abort();
 }
+
+#[tokio::test]
+async fn busy_sender_yields_while_input_keeps_arriving() {
+    use std::sync::atomic::AtomicUsize;
+
+    const MESSAGES: usize = 40_000;
+    const WIRE_BYTES: usize = MESSAGES * (2 + 100);
+
+    let (dealer, mut peer) = ready_connections(
+        ConnectionConfig::new(Role::Client, SocketType::Dealer),
+        ConnectionConfig::new(Role::Server, SocketType::Dealer),
+    );
+    peer.send_message(&Message::single(Bytes::from_static(b"x")))
+        .unwrap();
+    let written = Arc::new(AtomicUsize::new(0));
+    let stream = EndlessStream {
+        input: Bytes::from(drain_transmit(&mut peer)),
+        written: written.clone(),
+    };
+    let (commands, inbox) = mpsc::channel(4);
+    let (events, _event_inbox) = mpsc::channel(4);
+    let (mut producer, consumer) = crate::engine::send_pipe(MESSAGES);
+    // Room for every input message, so a full receive queue never stops reads.
+    let (received, _consumer) = yring::spsc(MESSAGES);
+
+    for _ in 0..MESSAGES {
+        producer.try_send(Message::single(vec![7; 100])).unwrap();
+    }
+
+    let driver = ConnectionDriver::new(stream, dealer, inbox, events, 1, CancellationToken::new())
+        .with_send_pipe(consumer)
+        .with_recv_sink(RecvSink::Yring(YringSink {
+            producer: received,
+            signal: Box::new(|| {}),
+            space: Arc::new(StateSignal::new()),
+        }));
+    commands
+        .send(PeerDriverCommand::ActivateDataPlane)
+        .await
+        .unwrap();
+
+    let task = tokio::spawn(driver.run());
+    let mut seen = 0;
+    let mut largest_burst = 0;
+
+    // This task shares the driver's thread, so each pass sees what one
+    // driver poll wrote.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while seen < WIRE_BYTES {
+            let now = written.load(Ordering::Relaxed);
+            largest_burst = largest_burst.max(now - seen);
+            seen = now;
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("driver output stalled");
+
+    assert!(
+        largest_burst < WIRE_BYTES / 4,
+        "one driver poll wrote {largest_burst} of {WIRE_BYTES} bytes"
+    );
+    task.abort();
+}
+
+/// Always readable and writable, and never spends the Tokio budget, like the
+/// QUIC and SHM carriers. Reads repeat `input`; writes only count bytes.
+#[derive(Debug)]
+struct EndlessStream {
+    input: Bytes,
+    written: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl DriverStream for EndlessStream {
+    type Reader = EndlessReader;
+    type Writer = CountingWriter;
+
+    fn split(self, _fast_write: bool) -> (Self::Reader, Self::Writer) {
+        (
+            EndlessReader {
+                input: self.input,
+                offset: 0,
+            },
+            CountingWriter(self.written),
+        )
+    }
+}
+
+#[derive(Debug)]
+struct EndlessReader {
+    input: Bytes,
+    offset: usize,
+}
+
+impl AsyncRead for EndlessReader {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = &mut *self;
+        let n = buf.remaining().min(this.input.len() - this.offset);
+        buf.put_slice(&this.input[this.offset..this.offset + n]);
+        this.offset = (this.offset + n) % this.input.len();
+        Poll::Ready(Ok(()))
+    }
+}
+
+#[derive(Debug)]
+struct CountingWriter(Arc<std::sync::atomic::AtomicUsize>);
+
+impl AsyncWrite for CountingWriter {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        self.0.fetch_add(buf.len(), Ordering::Relaxed);
+        Poll::Ready(Ok(buf.len()))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl DriverWrite for CountingWriter {}

@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Async receives and `Socket::message` streams spend the calling task's
   Tokio budget, like Tokio's channels. A receive loop over a socket that
   stays ready now yields instead of starving other tasks on its worker.
+- A connection driver's output pause yields even when input is ready. Under
+  steady input, a driver on QUIC or SHM wrote until the transport blocked
+  without letting other tasks on its IO thread run.
 
 ## [0.39.0] - 2026-11-24
 

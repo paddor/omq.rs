@@ -9,7 +9,7 @@ use omq_proto::message::Message;
 use super::{
     SEND_PIPE_LWM_DIVISOR, SendPipeError, SendPipeProducer, SendPipeProducerInner, SendPreparation,
 };
-use crate::engine::signal::StateSignal;
+use crate::engine::signal::{StateSignal, observe};
 use crate::engine::transmit_slot::{PeerTransmitSlot, TryFrameResult};
 
 impl SendPipeProducer {
@@ -449,7 +449,7 @@ impl SendPipeProducer {
 
     /// Whether `try_send` would admit an ordinary message now. A full
     /// queue arms its space wake exactly like a failed `try_send`, so a
-    /// readiness wait on [`Self::readiness_signals`] cannot be stranded.
+    /// readiness wait on [`Self::readiness`] cannot be stranded.
     pub(crate) fn can_accept(&mut self) -> bool {
         #[cfg(feature = "dart")]
         if self.dart_exhausted() {
@@ -490,13 +490,24 @@ impl SendPipeProducer {
         }
     }
 
-    /// Signals that fire when [`Self::can_accept`] may have turned true.
-    pub(crate) fn readiness_signals(&self) -> smallvec::SmallVec<[Arc<StateSignal>; 2]> {
+    /// Signals that fire when [`Self::can_accept`] may have turned true, each
+    /// with the generation to wait from.
+    pub(crate) fn readiness(&self) -> smallvec::SmallVec<[(Arc<StateSignal>, u64); 2]> {
         if let SendPipeProducerInner::Peer(peer) = &self.inner {
-            peer.space_signals().into_iter().collect()
-        } else {
-            smallvec::smallvec![self.space_available()]
+            return peer.space_signals().into_iter().map(observe).collect();
         }
+
+        #[cfg(feature = "dart")]
+        if self.dart.is_some() {
+            return smallvec::smallvec![observe(self.space_available.clone())];
+        }
+
+        if let SendPipeProducerInner::Inproc(sender) = &self.inner {
+            // An inproc route switches signals when its port opens.
+            return smallvec::smallvec![sender.space_since()];
+        }
+
+        smallvec::smallvec![observe(self.space_available())]
     }
 
     /// Whether a round-robin router may move this full pipe back into

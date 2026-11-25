@@ -49,9 +49,9 @@ impl Submitter {
         loop {
             let changed = {
                 let guard = self.pipe.lock().expect("exclusive pipe");
-                crate::engine::signal::any_changed(
-                    std::iter::once(self.peer_ready.clone())
-                        .chain(guard.iter().flat_map(SendPipeProducer::readiness_signals)),
+                crate::engine::signal::changed_since(
+                    std::iter::once(crate::engine::signal::observe(self.peer_ready.clone()))
+                        .chain(guard.iter().flat_map(SendPipeProducer::readiness)),
                 )
             };
 

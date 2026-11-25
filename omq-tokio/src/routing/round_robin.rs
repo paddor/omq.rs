@@ -362,9 +362,9 @@ impl Submitter {
             let changed = {
                 let active = self.active.lock();
                 let pipes = active.active.iter().chain(&active.inactive);
-                crate::engine::signal::any_changed(
-                    std::iter::once(self.active_changed.clone())
-                        .chain(pipes.flat_map(|pipe| pipe.tx.readiness_signals())),
+                crate::engine::signal::changed_since(
+                    std::iter::once(crate::engine::signal::observe(self.active_changed.clone()))
+                        .chain(pipes.flat_map(|pipe| pipe.tx.readiness())),
                 )
             };
 

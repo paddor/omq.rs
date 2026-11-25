@@ -42,6 +42,46 @@ fn any_changed_registers_every_signal_and_wakes_the_task() {
     }
 }
 
+/// An inproc port picks `changed` while pending and its sink's signal once
+/// open. Opening notifies `changed`; later space wakes go to the sink only.
+/// A generation read after that notify, from a signal picked before it,
+/// would wait on `changed` forever.
+#[test]
+fn stable_generation_follows_a_switch_between_choice_and_read() {
+    let pending = Arc::new(StateSignal::new());
+    let open = Arc::new(StateSignal::new());
+    let opened = std::sync::atomic::AtomicBool::new(false);
+    let choose = || {
+        if opened.swap(true, Ordering::SeqCst) {
+            return open.clone();
+        }
+
+        // Picked while pending; the port opens before the caller reads.
+        pending.notify_changed();
+        pending.clone()
+    };
+
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    let mut wait = std::pin::pin!(changed_since([stable_generation(choose)]).wait());
+    assert!(wait.as_mut().poll(&mut cx).is_pending());
+    open.notify_changed();
+    assert!(wait.as_mut().poll(&mut cx).is_ready());
+}
+
+#[test]
+fn stable_generation_keeps_the_first_read_of_a_stable_choice() {
+    let signal = Arc::new(StateSignal::new());
+    let (chosen, seen) = stable_generation(|| signal.clone());
+    assert!(Arc::ptr_eq(&chosen, &signal));
+    assert_eq!(seen, 0);
+
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    let mut wait = std::pin::pin!(changed_since([(chosen, seen)]).wait());
+    assert!(wait.as_mut().poll(&mut cx).is_pending());
+    signal.notify_changed();
+    assert!(wait.as_mut().poll(&mut cx).is_ready());
+}
+
 #[cfg(feature = "dart")]
 #[test]
 fn dart_forwarded_waker_can_register_another_endpoint() {

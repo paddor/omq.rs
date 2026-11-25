@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.2] - 2026-11-25
+
+### Changed
+
+- Bundle `omq-tokio` 0.39.2.
+
+### Fixed
+
+- PUB, XPUB, and RADIO dropped for a peer once 512 KiB was queued for it,
+  so a subscriber that kept up lost most of a burst of 64 KiB messages.
+  They now drop only at the send HWM, as in libzmq, so a stalled subscriber
+  can hold up to that many messages.
+- A send on an inproc connection could stay blocked when the peer opened
+  its receive queue just as the send began to wait.
+
 ## [0.30.1] - 2026-11-25
 
 ### Changed

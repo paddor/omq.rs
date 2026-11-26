@@ -1,4 +1,4 @@
-use super::{DisconnectReason, MonitorEvent, PeerEntry, SocketDriver, SocketType};
+use super::{DisconnectReason, Endpoint, MonitorEvent, PeerEntry, SocketDriver, SocketType};
 use crate::engine::signal::StateSignal;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -10,6 +10,18 @@ pub(super) struct PeerLifecycle<'a> {
 impl<'a> PeerLifecycle<'a> {
     pub(super) fn new(driver: &'a mut SocketDriver) -> Self {
         Self { driver }
+    }
+
+    /// Register a peer. A non-inproc peer counts as a wire route until its
+    /// entry drops, so sends spend their bytes from the send budget.
+    pub(super) fn insert_peer(&mut self, peer_id: u64, entry: PeerEntry) {
+        let entry = if matches!(entry.origin.endpoint, Endpoint::Inproc { .. }) {
+            entry
+        } else {
+            entry.holding(self.driver.link.shared.wire_routes.hold())
+        };
+
+        self.driver.peers.insert(peer_id, entry);
     }
 
     pub(super) fn remove_peer(

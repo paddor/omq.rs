@@ -127,6 +127,9 @@ pub(crate) struct HandleShared {
     pub(crate) req_awaiting_reply: Arc<crate::socket::handle::ReqAwaitingReply>,
     pub(crate) subscribe_count: Arc<AtomicU64>,
     pub(crate) ready_peers: Arc<crate::socket::handle::ReadyPeers>,
+    /// Live peers and UDP dialers with a driver, which make sends spend
+    /// their bytes from the send budget.
+    pub(crate) wire_routes: Arc<crate::socket::send_budget::WireRoutes>,
 }
 
 impl HandleShared {
@@ -135,6 +138,7 @@ impl HandleShared {
             req_awaiting_reply: Arc::default(),
             subscribe_count: Arc::new(AtomicU64::new(0)),
             ready_peers: Arc::default(),
+            wire_routes: Arc::default(),
         }
     }
 }

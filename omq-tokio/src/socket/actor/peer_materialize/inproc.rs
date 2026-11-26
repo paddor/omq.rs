@@ -107,7 +107,7 @@ fn register_inproc_peer(
         subscriptions: socket.subscription_ledger(),
         ..PeerEntry::new(peer.into_origin(io_assignment.index()), handle)
     };
-    socket.peers.insert(peer_id, entry);
+    PeerLifecycle::new(socket).insert_peer(peer_id, entry);
 
     InprocDriverEnds {
         inbox: control,

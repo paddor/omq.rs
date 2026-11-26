@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use super::lifecycle::PeerLifecycle;
 use super::peer_materialize::{FaninProducer, PeerChannels, fanin_recv_sink, wrap_routed_sink};
 use super::{
     Endpoint, Error, MonitorEvent, PeerDriverHandle, PeerEntry, PeerIdent, PeerOrigin, Result,
@@ -331,7 +332,7 @@ impl SocketDriver {
             peer_id,
         ));
         let peer = self.endpoints.dart_endpoints[index].peer_entry(ident, handle, route_id);
-        self.peers.insert(peer_id, peer);
+        PeerLifecycle::new(self).insert_peer(peer_id, peer);
 
         let completion = self.reserve_completion(peer_id);
         let queues = PeerQueues {

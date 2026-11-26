@@ -439,6 +439,84 @@ fn ready_sends_yield_outside_tokio_and_cancel_cleanly() {
     });
 }
 
+/// Polls ready 4 MiB sends to an absent identity until one yields. Returns
+/// how many completed first, at most 4096.
+fn large_ready_sends_before_yield(router: &Socket, body: &Message) -> usize {
+    use std::future::Future;
+    use std::task::{Context as TaskContext, Poll, Waker};
+
+    let mut cx = TaskContext::from_waker(Waker::noop());
+    for sent in 0..4096 {
+        let mut send = std::pin::pin!(router.send_to(b"absent", body.clone()));
+        match send.as_mut().poll(&mut cx) {
+            Poll::Ready(result) => result.unwrap(),
+            Poll::Pending => return sent,
+        }
+    }
+
+    4096
+}
+
+/// Waits until `socket` lists no ready peer. The actor drops a removed
+/// peer before it answers the next query.
+async fn wait_disconnected(socket: &Socket) {
+    loop {
+        let seen = socket.connections_generation();
+        if socket.connections().await.unwrap().is_empty() {
+            return;
+        }
+
+        tokio::time::timeout(WAIT, socket.connections_changed(seen))
+            .await
+            .expect("peer never left")
+            .unwrap();
+    }
+}
+
+/// Only a peer other than inproc has a driver that writes queued bytes, so
+/// sends spend their bytes from the send budget only while one is live.
+#[tokio::test]
+async fn large_ready_sends_spend_bytes_only_while_a_wire_peer_lives() {
+    let context = Context::new();
+    let body = Message::from_slice(&vec![0x5a; 4 * 1024 * 1024]);
+    let router = context.socket(SocketType::Router, Options::default());
+    router.bind("inproc://large-ready-sends").await.unwrap();
+    let bound = router.bind("tcp://127.0.0.1:0").await.unwrap();
+    assert!(
+        large_ready_sends_before_yield(&router, &body) > 1,
+        "sends without a wire peer yielded by bytes"
+    );
+
+    // An accepted peer outlives the unbind of its listener.
+    let dealer = context.socket(SocketType::Dealer, Options::default());
+    dealer.connect(bound.clone()).await.unwrap();
+    router.wait_connected(1, WAIT).await.unwrap();
+    router.unbind(bound).await.unwrap();
+    assert_eq!(large_ready_sends_before_yield(&router, &body), 0);
+
+    dealer.close().await.unwrap();
+    wait_disconnected(&router).await;
+    assert!(
+        large_ready_sends_before_yield(&router, &body) > 1,
+        "sends yielded by bytes after the accepted peer left"
+    );
+
+    // A disconnect releases dialed peers before it returns.
+    let listener = context.socket(SocketType::Router, Options::default());
+    let dialed = listener.bind("tcp://127.0.0.1:0").await.unwrap();
+    router.connect(dialed.clone()).await.unwrap();
+    router.wait_connected(1, WAIT).await.unwrap();
+    assert_eq!(large_ready_sends_before_yield(&router, &body), 0);
+
+    router.disconnect(dialed).await.unwrap();
+    assert!(
+        large_ready_sends_before_yield(&router, &body) > 1,
+        "sends yielded by bytes after disconnect"
+    );
+    router.close().await.unwrap();
+    listener.close().await.unwrap();
+}
+
 fn ready_routed_message() -> Message {
     Message::with_prefix(
         bytes::Bytes::from_static(b"absent"),

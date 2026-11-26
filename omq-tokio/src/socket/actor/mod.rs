@@ -151,6 +151,8 @@ struct DialerEntry {
 struct UdpDialerEntry {
     task: EndpointTask,
     peer_id: u64,
+    /// Counts the dialer as a wire route until it is removed.
+    _wire_route: crate::socket::send_budget::WireRoute,
 }
 
 struct PendingReceive {

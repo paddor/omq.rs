@@ -77,7 +77,8 @@ impl Options {
     }
 
     #[must_use]
-    /// Set max allowed size for one complete message.
+    /// Set max allowed size for one complete message. A limit lets large
+    /// bodies be allocated once; see [`Self::max_message_size`].
     pub fn max_message_size(mut self, n: usize) -> Self {
         self.max_message_size = Some(n);
         self

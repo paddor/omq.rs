@@ -115,7 +115,42 @@ pub(super) enum ReceiveBody {
         buf: BytesMut,
         pool: Option<Arc<RecvBufPool>>,
     },
+    /// A body of unlimited declared size, grown as it arrives.
+    Growing(Vec<u8>),
     Payload(omq_proto::PayloadBuffer),
+}
+
+impl ReceiveBody {
+    /// Storage for a `target`-byte stream body that starts with `prefix`.
+    fn stream(
+        target: usize,
+        prefix: &[u8],
+        bounded: bool,
+        pool: Option<&Arc<RecvBufPool>>,
+    ) -> Self {
+        // Bodies up to the pool limit get their whole size at once.
+        let whole = target <= RECV_POOL_MAX_BUFFER_BYTES;
+
+        if !whole && !bounded {
+            // A declaration alone must not reserve an arbitrarily large body.
+            let mut buf =
+                Vec::with_capacity(prefix.len().saturating_add(LARGE_READ_CHUNK).min(target));
+            buf.extend_from_slice(prefix);
+            return Self::Growing(buf);
+        }
+
+        let pool = pool.filter(|_| whole).cloned();
+        let mut buf = if let Some(pool) = &pool {
+            pool.take(target)
+        } else {
+            // Admission already checked the complete frame and multipart size.
+            // Allocate once so accepted large bodies never move while filling.
+            BytesMut::with_capacity(target)
+        };
+
+        buf.extend_from_slice(prefix);
+        Self::Stream { buf, pool }
+    }
 }
 
 impl PendingLargeRead {
@@ -181,24 +216,8 @@ impl PendingLargeRead {
 
         // Release the shared input prefix before the caller refills read_buf.
         copy_stats::record(Site::RecvLargePrefix, prefix.len());
-        // Bodies up to the pool limit get their whole size at once.
-        let whole = target <= RECV_POOL_MAX_BUFFER_BYTES;
-        let pool = pool.filter(|_| whole).cloned();
-
-        let mut buf = if let Some(pool) = &pool {
-            pool.take(target)
-        } else if whole || bounded {
-            // Admission already checked the complete frame and multipart size.
-            // Allocate once so accepted large bodies never move while filling.
-            BytesMut::with_capacity(target)
-        } else {
-            // A declaration alone must not reserve an arbitrarily large body.
-            BytesMut::with_capacity(prefix.len().saturating_add(LARGE_READ_CHUNK).min(target))
-        };
-
-        buf.extend_from_slice(prefix.as_slice());
         Ok(Some(Self {
-            buf: ReceiveBody::Stream { buf, pool },
+            buf: ReceiveBody::stream(target, prefix.as_slice(), bounded, pool),
             target,
         }))
     }
@@ -206,6 +225,7 @@ impl PendingLargeRead {
     pub(super) fn filled(&self) -> usize {
         match &self.buf {
             ReceiveBody::Stream { buf, .. } => buf.len(),
+            ReceiveBody::Growing(buf) => buf.len(),
             ReceiveBody::Payload(buf) => buf.len(),
         }
     }
@@ -221,6 +241,11 @@ impl PendingLargeRead {
         let n = match &mut self.buf {
             ReceiveBody::Stream { buf, .. } => {
                 buf.reserve(remaining);
+                let mut limited = buf.limit(remaining);
+                reader.read_buf(&mut limited).await?
+            }
+            ReceiveBody::Growing(buf) => {
+                grow_body(buf, remaining, self.target);
                 let mut limited = buf.limit(remaining);
                 reader.read_buf(&mut limited).await?
             }
@@ -253,10 +278,26 @@ impl PendingLargeRead {
                 };
                 omq_proto::Payload::from_bytes_with_retained_size(bytes, capacity)
             }
+            ReceiveBody::Growing(buf) => {
+                let capacity = buf.capacity();
+                omq_proto::Payload::from_bytes_with_retained_size(Bytes::from(buf), capacity)
+            }
         };
 
         connection.supply_payload_frame(payload)
     }
+}
+
+/// Make room for `additional` more bytes of a `target`-byte body. The capacity
+/// doubles, so it stays within twice the bytes received, and stops at `target`.
+fn grow_body(buf: &mut Vec<u8>, additional: usize, target: usize) {
+    let needed = buf.len() + additional;
+    if needed <= buf.capacity() {
+        return;
+    }
+
+    let capacity = buf.capacity().saturating_mul(2).min(target).max(needed);
+    buf.reserve_exact(capacity - buf.len());
 }
 
 /// Retain stream buffers and a partially read body across selected operations.

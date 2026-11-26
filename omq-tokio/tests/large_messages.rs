@@ -193,6 +193,46 @@ async fn large_message_back_to_back() {
     assert_eq!(&*m2.part_bytes(0).unwrap(), &p2[..]);
 }
 
+/// A socket's connections share one pool of large-body buffers, so a body one
+/// connection received and the application dropped holds the next body from
+/// another connection.
+#[tokio::test]
+async fn connections_reuse_each_others_released_large_bodies() {
+    const SIZE: usize = 1024 * 1024;
+
+    let pull = Socket::new(SocketType::Pull, Options::default());
+    let ep = pull.bind(tcp_ep(0)).await.unwrap();
+    let first = Socket::new(SocketType::Push, Options::default());
+    let second = Socket::new(SocketType::Push, Options::default());
+    first.connect(ep.clone()).await.unwrap();
+    second.connect(ep).await.unwrap();
+    test_support::wait_for_handshake(&first).await;
+    test_support::wait_for_handshake(&second).await;
+    pull.wait_connected(2, Duration::from_secs(5))
+        .await
+        .unwrap();
+
+    first.send(Message::single(vec![1; SIZE])).await.unwrap();
+    let body = recv_body(&pull).await;
+    assert!(body.iter().all(|byte| *byte == 1));
+    let allocation = body.as_ptr();
+    drop(body);
+
+    second.send(Message::single(vec![2; SIZE])).await.unwrap();
+    let body = recv_body(&pull).await;
+    assert!(body.iter().all(|byte| *byte == 2));
+    assert_eq!(body.as_ptr(), allocation);
+}
+
+async fn recv_body(socket: &Socket) -> bytes::Bytes {
+    let message = tokio::time::timeout(Duration::from_secs(5), socket.recv())
+        .await
+        .expect("large message recv timed out")
+        .unwrap();
+
+    message.into_bytes().expect("single-part message")
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn many_large_messages_preserve_pattern_under_hwm_backpressure() {
     const COUNT: u64 = 32;

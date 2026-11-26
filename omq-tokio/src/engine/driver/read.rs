@@ -7,6 +7,7 @@ use omq_proto::{
     error::Result,
     proto::Connection,
 };
+use parking_lot::Mutex;
 use std::{
     io,
     sync::{Arc, Weak},
@@ -14,8 +15,13 @@ use std::{
 };
 use tokio::io::{AsyncRead, AsyncReadExt};
 
+/// Largest buffer a receive pool keeps.
 pub(super) const RECV_POOL_MAX_BUFFER_BYTES: usize = 8 * 1024 * 1024;
+/// Idle bytes one socket's receive pool keeps.
 pub(super) const RECV_POOL_MAX_RETAINED_BYTES: usize = 64 * 1024 * 1024;
+/// Idle buffers one socket's receive pool keeps, which bounds each sorted
+/// insert and removal.
+pub(super) const RECV_POOL_MAX_BUFFERS: usize = 512;
 const LARGE_READ_CHUNK: usize = 64 * 1024;
 
 pub(super) const READ_BUF_INITIAL_LATENCY: usize = 4 * 1024;
@@ -23,53 +29,40 @@ pub(super) const READ_BUF_INITIAL_THROUGHPUT: usize = 4 * 1024;
 pub(super) const READ_BUF_MAX: usize = 128 * 1024;
 pub(super) const READ_BUF_GROW_FULL_READS: usize = 2;
 
-#[derive(Debug)]
-pub(super) struct RecvBufPool {
-    pub(super) inner: std::sync::Mutex<RecvBufPoolInner>,
+/// Reusable large-body buffers that a socket's connections share.
+#[derive(Debug, Default)]
+pub(crate) struct RecvBufPool {
+    pub(super) inner: Mutex<RecvBufPoolInner>,
 }
 
 #[derive(Debug, Default)]
 pub(super) struct RecvBufPoolInner {
+    /// Idle buffers in ascending capacity order.
     pub(super) buffers: Vec<BytesMut>,
     pub(super) retained_bytes: usize,
 }
 
 impl RecvBufPool {
-    pub(super) fn new() -> Arc<Self> {
-        Arc::new(Self {
-            inner: std::sync::Mutex::new(RecvBufPoolInner::default()),
-        })
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::default()
     }
 
+    /// An empty buffer for a `capacity`-byte body. Receive budgets charge a
+    /// body's whole buffer, so a pooled one serves only up to twice that size.
     pub(super) fn take(&self, capacity: usize) -> BytesMut {
-        let mut pool = self.inner.lock().expect("recv buf pool");
-        if let Some(mut buf) = pool.buffers.pop() {
-            pool.retained_bytes = pool.retained_bytes.saturating_sub(buf.capacity());
-            buf.clear();
-
-            if buf.capacity() < capacity {
-                buf.reserve(capacity);
-            }
-
-            return buf;
-        }
-
-        BytesMut::with_capacity(capacity)
+        let pooled = self.inner.lock().take(capacity);
+        pooled.unwrap_or_else(|| BytesMut::with_capacity(capacity))
     }
 
     pub(super) fn give(&self, mut buf: BytesMut) {
-        let capacity = buf.capacity();
-        if capacity > RECV_POOL_MAX_BUFFER_BYTES {
+        if buf.capacity() > RECV_POOL_MAX_BUFFER_BYTES {
             return;
         }
 
         buf.clear();
-        let mut pool = self.inner.lock().expect("recv buf pool");
-
-        if pool.retained_bytes.saturating_add(capacity) <= RECV_POOL_MAX_RETAINED_BYTES {
-            pool.retained_bytes += capacity;
-            pool.buffers.push(buf);
-        }
+        // The lock guard drops at the end of this statement, so the buffers
+        // the pool lets go are freed after unlocking.
+        let _released = self.inner.lock().give(buf);
     }
 
     pub(super) fn wrap(self: &Arc<Self>, buf: BytesMut) -> Bytes {
@@ -77,6 +70,69 @@ impl RecvBufPool {
             buf,
             pool: Arc::downgrade(self),
         })
+    }
+}
+
+impl RecvBufPoolInner {
+    /// Remove the smallest buffer that holds `capacity` bytes, and of equal
+    /// ones the last returned. A buffer over twice `capacity` does not count.
+    fn take(&mut self, capacity: usize) -> Option<BytesMut> {
+        let smallest = self
+            .buffers
+            .partition_point(|buf| buf.capacity() < capacity);
+        let best = self.buffers.get(smallest)?.capacity();
+        if best > capacity.saturating_mul(2) {
+            return None;
+        }
+
+        let latest = self.buffers.partition_point(|buf| buf.capacity() <= best) - 1;
+        self.retained_bytes -= best;
+
+        Some(self.buffers.remove(latest))
+    }
+
+    /// Keep `buf` if it fits. A full pool first evicts the buffer farthest
+    /// from its size, so pooled sizes follow the received ones. Returns the
+    /// buffers the pool lets go.
+    fn give(&mut self, buf: BytesMut) -> [Option<BytesMut>; 2] {
+        let capacity = buf.capacity();
+        let evicted = if self.fits(capacity) {
+            None
+        } else {
+            self.evict_farthest_from(capacity)
+        };
+
+        if !self.fits(capacity) {
+            return [evicted, Some(buf)];
+        }
+
+        let at = self
+            .buffers
+            .partition_point(|pooled| pooled.capacity() <= capacity);
+        self.buffers.insert(at, buf);
+        self.retained_bytes += capacity;
+
+        [evicted, None]
+    }
+
+    fn fits(&self, capacity: usize) -> bool {
+        self.buffers.len() < RECV_POOL_MAX_BUFFERS
+            && self.retained_bytes.saturating_add(capacity) <= RECV_POOL_MAX_RETAINED_BYTES
+    }
+
+    /// Remove the smallest or the largest buffer, whichever is farther from
+    /// `capacity`.
+    fn evict_farthest_from(&mut self, capacity: usize) -> Option<BytesMut> {
+        let smallest = self.buffers.first()?.capacity();
+        let largest = self.buffers.last()?.capacity();
+        let buf = if largest.abs_diff(capacity) >= smallest.abs_diff(capacity) {
+            self.buffers.pop()?
+        } else {
+            self.buffers.remove(0)
+        };
+        self.retained_bytes -= buf.capacity();
+
+        Some(buf)
     }
 }
 
@@ -305,14 +361,14 @@ pub(super) struct StreamRead {
     pub(super) buffer: BytesMut,
     target: usize,
     full_reads: usize,
-    /// Reusable large-body buffers. Without it, each large body gets an
-    /// allocation its receiver owns alone.
+    /// Reusable large-body buffers the socket's connections share. Without
+    /// it, each large body gets an allocation its receiver owns alone.
     pool: Option<Arc<RecvBufPool>>,
     pending: Option<PendingLargeRead>,
 }
 
 impl StreamRead {
-    pub(super) fn new(profile: ReceiveProfile, unique_large_bodies: bool) -> Self {
+    pub(super) fn new(profile: ReceiveProfile, pool: Option<Arc<RecvBufPool>>) -> Self {
         let target = match profile {
             ReceiveProfile::Throughput => READ_BUF_INITIAL_THROUGHPUT,
             ReceiveProfile::Latency | ReceiveProfile::LatencyReq => READ_BUF_INITIAL_LATENCY,
@@ -322,7 +378,7 @@ impl StreamRead {
             buffer: BytesMut::with_capacity(target),
             target,
             full_reads: 0,
-            pool: (!unique_large_bodies).then(RecvBufPool::new),
+            pool,
             pending: None,
         }
     }

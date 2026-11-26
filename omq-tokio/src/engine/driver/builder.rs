@@ -284,8 +284,8 @@ where
         self
     }
 
-    pub(crate) fn with_unique_large_bodies(mut self, unique: bool) -> Self {
-        self.receive.unique_large_bodies = unique;
+    pub(crate) fn with_recv_buf_pool(mut self, pool: Option<Arc<super::RecvBufPool>>) -> Self {
+        self.receive.recv_buf_pool = pool;
         self
     }
 

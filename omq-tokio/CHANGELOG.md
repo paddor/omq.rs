@@ -12,9 +12,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tokio's `parking_lot` feature is on. Tokio's scheduler and wake locks spin
   before they sleep, which saves context switches when more threads are busy
   than there are cores.
+- A socket's connections share one pool of large-body receive buffers, which
+  keeps at most 64 MiB per socket, not per connection. A body takes the
+  smallest pooled buffer that holds it, so a reconnected or new peer reuses
+  buffers too.
 
 ### Fixed
 
+- A pooled receive buffer could hold a much smaller body, such as an 8 MiB
+  buffer for a 128 KiB body, and receive byte budgets charged the whole
+  buffer, so backpressure began far too early. A body now takes a pooled
+  buffer only up to twice its size.
 - Ready async sends also yield once a thread has queued about 2 MiB, not
   only every 4096 sends. A task doing CPU work between large sends on a
   single-worker runtime held back its socket's driver, which shares that

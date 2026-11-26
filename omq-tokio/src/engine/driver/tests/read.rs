@@ -8,29 +8,116 @@ fn recv_buf_pool_reuses_bounded_buffers() {
     let capacity = buf.capacity();
     pool.give(buf);
 
-    assert_eq!(pool.inner.lock().unwrap().buffers.len(), 1);
+    assert_eq!(pool.inner.lock().buffers.len(), 1);
     let reused = pool.take(128 * 1024);
     assert_eq!(reused.len(), 0);
     assert!(reused.capacity() >= capacity);
-    assert_eq!(pool.inner.lock().unwrap().retained_bytes, 0);
+    assert_eq!(pool.inner.lock().retained_bytes, 0);
 }
 
 #[test]
 fn recv_buf_pool_does_not_retain_huge_buffers() {
     let pool = RecvBufPool::new();
     pool.give(BytesMut::with_capacity(RECV_POOL_MAX_BUFFER_BYTES + 1));
-    let guard = pool.inner.lock().unwrap();
+    let guard = pool.inner.lock();
     assert_eq!(guard.buffers.len(), 0);
     assert_eq!(guard.retained_bytes, 0);
 }
 
 #[test]
-fn recv_buf_pool_grows_before_returning_a_larger_lease() {
+fn recv_buf_pool_allocates_when_no_buffer_fits() {
     let pool = RecvBufPool::new();
     pool.give(BytesMut::with_capacity(128 * 1024));
     let buffer = pool.take(192 * 1024);
     assert!(buffer.is_empty());
-    assert!(buffer.capacity() >= 192 * 1024);
+    assert_eq!(buffer.capacity(), 192 * 1024);
+    assert_eq!(pooled_capacities(&pool), [128 * 1024]);
+}
+
+#[test]
+fn recv_buf_pool_takes_the_smallest_buffer_up_to_twice_the_size() {
+    const KIB: usize = 1024;
+
+    let pool = RecvBufPool::new();
+    for capacity in [512 * KIB, 192 * KIB, 256 * KIB, 128 * KIB] {
+        pool.give(BytesMut::with_capacity(capacity));
+    }
+
+    assert_eq!(pool.take(160 * KIB).capacity(), 192 * KIB);
+    assert_eq!(pool.take(160 * KIB).capacity(), 256 * KIB);
+    assert_eq!(pool.take(160 * KIB).capacity(), 160 * KIB);
+    assert_eq!(pooled_capacities(&pool), [128 * KIB, 512 * KIB]);
+    assert_eq!(pool.inner.lock().retained_bytes, 640 * KIB);
+}
+
+#[test]
+fn recv_buf_pool_takes_the_last_returned_of_equal_buffers() {
+    let pool = RecvBufPool::new();
+    let first = BytesMut::with_capacity(256 * 1024);
+    let second = BytesMut::with_capacity(256 * 1024);
+    let latest = second.as_ptr();
+    pool.give(first);
+    pool.give(second);
+
+    assert_eq!(pool.take(256 * 1024).as_ptr(), latest);
+}
+
+#[test]
+fn full_recv_buf_pool_evicts_its_largest_buffer_for_a_smaller_one() {
+    let pool = RecvBufPool::new();
+    let full = RECV_POOL_MAX_RETAINED_BYTES / RECV_POOL_MAX_BUFFER_BYTES;
+    for _ in 0..full {
+        pool.give(BytesMut::with_capacity(RECV_POOL_MAX_BUFFER_BYTES));
+    }
+
+    pool.give(BytesMut::with_capacity(128 * 1024));
+
+    let mut expected = vec![RECV_POOL_MAX_BUFFER_BYTES; full - 1];
+    expected.insert(0, 128 * 1024);
+    assert_eq!(pooled_capacities(&pool), expected);
+}
+
+/// A larger buffer replaces small ones only once enough are evicted, one
+/// for each buffer returned.
+#[test]
+fn full_recv_buf_pool_evicts_its_smallest_buffers_for_a_larger_one() {
+    const SMALL: usize = 1024 * 1024;
+
+    let pool = RecvBufPool::new();
+    let full = RECV_POOL_MAX_RETAINED_BYTES / SMALL;
+    for _ in 0..full {
+        pool.give(BytesMut::with_capacity(SMALL));
+    }
+
+    let evictions = RECV_POOL_MAX_BUFFER_BYTES / SMALL;
+    for _ in 1..evictions {
+        pool.give(BytesMut::with_capacity(RECV_POOL_MAX_BUFFER_BYTES));
+    }
+    assert_eq!(pooled_capacities(&pool), vec![SMALL; full - evictions + 1]);
+
+    pool.give(BytesMut::with_capacity(RECV_POOL_MAX_BUFFER_BYTES));
+    let mut expected = vec![SMALL; full - evictions];
+    expected.push(RECV_POOL_MAX_BUFFER_BYTES);
+    assert_eq!(pooled_capacities(&pool), expected);
+    assert_eq!(
+        pool.inner.lock().retained_bytes,
+        RECV_POOL_MAX_RETAINED_BYTES
+    );
+}
+
+#[test]
+fn recv_buf_pool_caps_its_buffer_count() {
+    let pool = RecvBufPool::new();
+    for _ in 0..=RECV_POOL_MAX_BUFFERS {
+        pool.give(BytesMut::with_capacity(64 * 1024));
+    }
+
+    assert_eq!(pool.inner.lock().buffers.len(), RECV_POOL_MAX_BUFFERS);
+}
+
+fn pooled_capacities(pool: &RecvBufPool) -> Vec<usize> {
+    let guard = pool.inner.lock();
+    guard.buffers.iter().map(BytesMut::capacity).collect()
 }
 
 #[test]
@@ -44,7 +131,7 @@ fn recv_buf_pool_caps_total_retained_bytes() {
         pool.give(BytesMut::with_capacity(BUFFER_BYTES));
     }
 
-    let guard = pool.inner.lock().unwrap();
+    let guard = pool.inner.lock();
     assert!(guard.retained_bytes <= RECV_POOL_MAX_RETAINED_BYTES);
     assert_eq!(
         guard.buffers.len(),
@@ -61,16 +148,16 @@ fn recv_buf_pool_waits_for_last_bytes_clone() {
     let clone = payload.clone();
 
     drop(payload);
-    assert_eq!(pool.inner.lock().unwrap().buffers.len(), 0);
+    assert_eq!(pool.inner.lock().buffers.len(), 0);
 
     drop(clone);
-    let guard = pool.inner.lock().unwrap();
+    let guard = pool.inner.lock();
     assert_eq!(guard.buffers.len(), 1);
     assert!(guard.retained_bytes >= 4 * 1024 * 1024);
 }
 
 #[test]
-fn recv_buf_pool_does_not_outlive_connection_owner() {
+fn recv_buf_pool_does_not_outlive_its_owners() {
     let pool = RecvBufPool::new();
     let weak = Arc::downgrade(&pool);
     let payload = pool.wrap(pool.take(4 * 1024 * 1024));
@@ -97,7 +184,7 @@ fn recv_buf_pool_accepts_concurrent_last_owner_drops() {
         }
     });
 
-    let guard = pool.inner.lock().unwrap();
+    let guard = pool.inner.lock();
     assert_eq!(guard.buffers.len(), BUFFER_COUNT);
     assert_eq!(guard.retained_bytes, BUFFER_COUNT * BUFFER_BYTES);
 }
@@ -189,6 +276,33 @@ async fn pooled_reader_takes_bodies_up_to_the_limit_from_its_pool() {
     assert!(body_pool.is_some());
 }
 
+/// Receive budgets charge a body's whole buffer, so a much larger pooled
+/// buffer must not hold a body.
+#[tokio::test]
+async fn pooled_body_retains_at_most_twice_its_size() {
+    let declared = 1024 * 1024;
+    let prefix = b"buffered prefix";
+    let mut pull = declared_body(declared, prefix);
+    let config = PeerDriverConfig {
+        large_message_threshold: 128 * 1024,
+        ..PeerDriverConfig::default()
+    };
+    let pool = RecvBufPool::new();
+    pool.give(BytesMut::with_capacity(RECV_POOL_MAX_BUFFER_BYTES));
+    let mut pending = PendingLargeRead::begin(&mut pull, &config, Some(&pool))
+        .unwrap()
+        .unwrap();
+    let mut reader = tokio::io::repeat(b'!').take((declared - prefix.len()) as u64);
+
+    while !pending.complete() {
+        pending.read(&mut reader).await.unwrap();
+    }
+
+    pending.finish(&mut pull).unwrap();
+    let retained = pull.poll_message().unwrap().retained_size().unwrap();
+    assert!(retained <= 2 * declared, "retained {retained} bytes");
+}
+
 /// Without a pool, such a body gets one whole allocation of its own, so the
 /// receiver ends up as its only owner.
 #[tokio::test]
@@ -277,7 +391,7 @@ async fn unpooled_large_read_grows_with_received_bytes() {
     assert_eq!(body.len(), declared);
     assert_eq!(&body[..prefix.len()], prefix);
     assert!(body[prefix.len()..].iter().all(|byte| *byte == b'!'));
-    assert_eq!(pool.inner.lock().unwrap().retained_bytes, 0);
+    assert_eq!(pool.inner.lock().retained_bytes, 0);
 }
 
 #[tokio::test]
@@ -396,7 +510,7 @@ async fn read_stream_reuses_prefix_buffer_after_large_frame_consumes_it() {
         .unwrap();
     let wire = Bytes::from(drain_transmit(&mut push));
 
-    let mut read = StreamRead::new(ReceiveProfile::Throughput, false);
+    let mut read = StreamRead::new(ReceiveProfile::Throughput, Some(RecvBufPool::new()));
     read.buffer.reserve(READ_BUF_MAX);
     read.buffer.extend_from_slice(&wire[..READ_BUF_MAX]);
     let original = read.buffer.as_ptr();

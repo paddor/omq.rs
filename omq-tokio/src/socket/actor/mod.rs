@@ -353,7 +353,9 @@ pub(crate) struct Resources {
     recv_ip_rate_limiter: Option<Arc<SharedIpRateLimiter>>,
     recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
     authenticated_recv_sink: Option<crate::engine::RecvSink>,
-    compatibility: crate::routing::Compatibility,
+    /// Large-body buffers this socket's connections share. omq-libzmq
+    /// sockets have none, so `zmq_msg_data` can expose each body in place.
+    recv_buf_pool: Option<Arc<crate::engine::driver::RecvBufPool>>,
 }
 
 impl SocketDriver {
@@ -381,7 +383,8 @@ impl SocketDriver {
             recv_ip_rate_limiter: recv_ip_rate_limiter(&options),
             recv_sink_config: env.recv_sink_config,
             authenticated_recv_sink,
-            compatibility: env.compatibility,
+            recv_buf_pool: (env.compatibility == crate::routing::Compatibility::Native)
+                .then(crate::engine::driver::RecvBufPool::new),
         };
 
         Self {

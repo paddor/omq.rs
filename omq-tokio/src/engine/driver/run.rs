@@ -449,10 +449,10 @@ where
     /// Split the driver into the run's session and the pieces that pinned
     /// waits borrow.
     fn into_session(
-        self,
+        mut self,
         completion: &mut CompletionProgress,
     ) -> (Wiring<T::Reader, T::Writer>, Session<'_>) {
-        let unique_large_bodies = self.receive.unique_large_bodies;
+        let recv_buf_pool = self.receive.recv_buf_pool.take();
         let receive = ReceivePath::new(self.receive, &self.config);
         let latency_profile = !matches!(receive.profile, ReceiveProfile::Throughput);
         let (reader, mut writer) = self.stream.split(latency_profile);
@@ -475,7 +475,7 @@ where
             heartbeat,
             _slot_lifetime: TransmitSlotLifetime(self.transmit_slot.clone()),
             output,
-            read: StreamRead::new(receive.profile, unique_large_bodies),
+            read: StreamRead::new(receive.profile, recv_buf_pool),
             shm_driver: shm::Driver::new(receive.shm.clone()),
             receive,
             transmit_slot: self.transmit_slot,

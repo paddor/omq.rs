@@ -45,6 +45,7 @@ mod write;
 
 pub(crate) use builder::ActorLink;
 pub(crate) use control::{heartbeat_timeout, sleep_until_opt, ttl_deciseconds};
+pub(crate) use read::RecvBufPool;
 pub(crate) use receive::ReceiveProfile;
 pub use stream::{ChunkWrite, DriverStream, DriverWrite};
 pub(crate) use write::check_written;
@@ -263,9 +264,9 @@ struct ReceiveSetup {
     /// Exact part count of every valid message, if the socket type fixes it.
     parts: Option<usize>,
     profile: ReceiveProfile,
-    /// Read large bodies into allocations of their own, not pooled buffers,
-    /// so the receiver owns each one alone.
-    unique_large_bodies: bool,
+    /// Large-body buffers the socket's connections share. Without them,
+    /// each large body gets an allocation its receiver owns alone.
+    recv_buf_pool: Option<Arc<RecvBufPool>>,
     /// Output storage for decompressed payloads.
     payload_pool: Option<omq_proto::PayloadPool>,
     ip_rate_limiter: Option<(Arc<SharedIpRateLimiter>, IpAddr)>,
@@ -278,7 +279,7 @@ impl Default for ReceiveSetup {
             decoder: None,
             parts: None,
             profile: ReceiveProfile::Throughput,
-            unique_large_bodies: false,
+            recv_buf_pool: None,
             payload_pool: None,
             ip_rate_limiter: None,
             shm: None,

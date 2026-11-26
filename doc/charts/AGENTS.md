@@ -125,7 +125,9 @@ Data: `comparisons.jsonl`, kind `fan_out`/`fan_in`.
 | `pushpull/fanout/tcp.svg` | 4, 32 peers | libzmq 1IO, libzmq 2IO, omq 1IO, omq 2IO |
 | `pushpull/fanin/tcp.svg` | 4, 32 peers | libzmq 1IO, libzmq 2IO, omq 1IO, omq 2IO |
 
-No CT. 2IO omq must outperform 1IO omq. Do not publish if it does not.
+No CT. 2IO omq must outperform 1IO omq from 256 B. Do not publish if it does
+not. At 16 B and 64 B the receiving application thread bounds both, so they
+may tie.
 
 **Fairness whiskers+baskets.** Fan-out and fan-in charts show per-peer
 fairness as box-and-whisker overlays at each data point. The whiskers

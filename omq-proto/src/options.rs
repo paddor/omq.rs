@@ -281,6 +281,9 @@ pub struct Options {
     /// command limits and dictionary protocol ceilings remain independent.
     /// Count HWM and assembly limits do not bound aggregate retained bytes;
     /// there is no separate WS message-size default or socket byte ledger.
+    /// On `tcp://` and `ipc://` without a limit, a body over 8 MiB grows as it
+    /// arrives, so a declared size alone cannot reserve memory. With a limit,
+    /// each accepted body is allocated once at its declared size.
     pub max_message_size: Option<usize>,
 
     /// Reject incoming messages with more parts than this. Defaults to 1024.

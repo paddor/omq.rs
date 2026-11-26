@@ -252,16 +252,11 @@ async fn unpooled_large_read_grows_with_received_bytes() {
         .unwrap()
         .unwrap();
 
-    let ReceiveBody::Stream {
-        buf,
-        pool: body_pool,
-    } = &pending.buf
-    else {
-        panic!("expected an unpooled receive buffer");
+    let ReceiveBody::Growing(buf) = &pending.buf else {
+        panic!("expected a growing receive buffer");
     };
 
-    assert!(body_pool.is_none());
-    assert_eq!(buf.as_ref(), prefix);
+    assert_eq!(buf.as_slice(), prefix);
     assert!(
         buf.capacity() <= prefix.len() + 64 * 1024,
         "a header allocated the entire declared body: {} bytes",
@@ -283,6 +278,46 @@ async fn unpooled_large_read_grows_with_received_bytes() {
     assert_eq!(&body[..prefix.len()], prefix);
     assert!(body[prefix.len()..].iter().all(|byte| *byte == b'!'));
     assert_eq!(pool.inner.lock().unwrap().retained_bytes, 0);
+}
+
+#[tokio::test]
+async fn unpooled_large_read_stops_growing_at_the_declared_size() {
+    let declared = RECV_POOL_MAX_BUFFER_BYTES + RECV_POOL_MAX_BUFFER_BYTES / 2;
+    let prefix = b"buffered prefix";
+    let mut pull = declared_body(declared, prefix);
+    let config = PeerDriverConfig {
+        large_message_threshold: 128 * 1024,
+        ..PeerDriverConfig::default()
+    };
+    let mut pending = PendingLargeRead::begin(&mut pull, &config, None)
+        .unwrap()
+        .unwrap();
+
+    let mut reader = tokio::io::repeat(b'!').take((declared - prefix.len()) as u64);
+    while !pending.complete() {
+        pending.read(&mut reader).await.unwrap();
+        let ReceiveBody::Growing(buf) = &pending.buf else {
+            panic!("expected a growing receive buffer");
+        };
+
+        assert!(buf.capacity() <= declared);
+        assert!(
+            buf.capacity() <= (2 * buf.len()).max(prefix.len() + 64 * 1024),
+            "{} bytes reserved for {} received",
+            buf.capacity(),
+            buf.len()
+        );
+    }
+
+    let ReceiveBody::Growing(buf) = &pending.buf else {
+        unreachable!()
+    };
+    assert_eq!(buf.capacity(), declared);
+    pending.finish(&mut pull).unwrap();
+    let body = pull.poll_message().unwrap().into_bytes().unwrap();
+    assert_eq!(body.len(), declared);
+    assert_eq!(&body[..prefix.len()], prefix);
+    assert!(body[prefix.len()..].iter().all(|byte| *byte == b'!'));
 }
 
 #[tokio::test]
@@ -308,11 +343,11 @@ async fn unpooled_large_declaration_keeps_partial_read_bounded() {
     assert_eq!(pending.target, declared);
     assert!(!pending.complete());
 
-    let ReceiveBody::Stream { buf, .. } = &pending.buf else {
-        panic!("expected an unpooled receive buffer");
+    let ReceiveBody::Growing(buf) = &pending.buf else {
+        panic!("expected a growing receive buffer");
     };
 
-    assert_eq!(buf.as_ref(), b"partial body");
+    assert_eq!(buf.as_slice(), b"partial body");
     assert!(buf.capacity() <= 64 * 1024);
     assert_eq!(
         pending.read(&mut reader).await.unwrap_err().kind(),

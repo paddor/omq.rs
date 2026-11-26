@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only every 4096 sends. A task doing CPU work between large sends on a
   single-worker runtime held back its socket's driver, which shares that
   worker, so the sends left in bursts.
+- Without `max_message_size`, a `tcp://` or `ipc://` body over 8 MiB grew in
+  doubling steps past its declared size, up to almost twice that size. Growth
+  now stops at the declared size.
 
 ## [0.39.2] - 2026-11-25
 

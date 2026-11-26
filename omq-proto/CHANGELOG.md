@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `Options::max_message_size` documents that without a limit, `tcp://` and
+  `ipc://` bodies over 8 MiB grow as they arrive, and that a limit lets each
+  accepted body be allocated once.
+
 ## [0.42.2] - 2026-11-25
 
 ### Fixed

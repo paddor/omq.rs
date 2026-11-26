@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before they sleep, which saves context switches when more threads are busy
   than there are cores.
 
+### Fixed
+
+- Ready async sends also yield once a thread has queued about 2 MiB, not
+  only every 4096 sends. A task doing CPU work between large sends on a
+  single-worker runtime held back its socket's driver, which shares that
+  worker, so the sends left in bursts.
+
 ## [0.39.2] - 2026-11-25
 
 ### Fixed

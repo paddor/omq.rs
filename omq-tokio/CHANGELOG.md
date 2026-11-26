@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Tokio's `parking_lot` feature is on. Tokio's scheduler and wake locks spin
+  before they sleep, which saves context switches when more threads are busy
+  than there are cores.
+
 ## [0.39.2] - 2026-11-25
 
 ### Fixed

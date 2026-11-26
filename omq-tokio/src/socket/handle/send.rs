@@ -47,7 +47,7 @@ impl Socket {
             return Err(Error::Protocol("send_to requires a message body".into()));
         }
 
-        crate::socket::send_budget::cooperate().await;
+        crate::socket::send_budget::cooperate(body.byte_len()).await;
         self.send_submitter.send_to(identity.as_ref(), body).await
     }
 
@@ -119,7 +119,7 @@ impl Socket {
     /// a pipe exists and has space. Connected no-peer sends queue in the
     /// endpoint's pre-ready pipe up to `Options::send_hwm`.
     pub async fn send(&self, msg: Message) -> Result<()> {
-        crate::socket::send_budget::cooperate().await;
+        crate::socket::send_budget::cooperate(msg.byte_len()).await;
         match self.inner.socket_type {
             SocketType::Req => {
                 if !self.inner.shared.req_awaiting_reply.claim() {

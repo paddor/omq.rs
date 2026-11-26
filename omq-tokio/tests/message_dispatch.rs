@@ -5,7 +5,7 @@ use std::ops::ControlFlow;
 use std::rc::Rc;
 use std::sync::{
     Arc,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     mpsc,
 };
 use std::time::{Duration, Instant};
@@ -291,6 +291,49 @@ async fn ready_async_sends_cooperate_across_clones_and_sockets() {
             socket.close().await.unwrap();
         }
     }
+}
+
+/// A task that does CPU work between ready sends, on the worker its socket
+/// driver shares, still lets the driver write what it queued.
+#[tokio::test]
+async fn ready_large_sends_let_their_driver_write_between_cpu_work() {
+    const SENDS: usize = 256;
+
+    let receiver = Context::new();
+    let pull = receiver.blocking_socket(SocketType::Pull, receive_options());
+    let endpoint = pull.bind("tcp://127.0.0.1:0").unwrap();
+    let delivered = Arc::new(AtomicBool::new(false));
+    let flag = delivered.clone();
+    let reader = std::thread::spawn(move || {
+        let result = pull.recv_timeout(WAIT);
+        flag.store(true, Ordering::Release);
+        (pull, result)
+    });
+
+    let push = Socket::new(SocketType::Push, receive_options());
+    push.connect(endpoint).await.unwrap();
+    push.wait_connected(1, WAIT).await.unwrap();
+
+    let body = Message::from_slice(&vec![0x5a; 64 * 1024]);
+    let mut sent = 0;
+    while sent < SENDS && !delivered.load(Ordering::Acquire) {
+        push.send(body.clone()).await.unwrap();
+        sent += 1;
+
+        let work = Instant::now();
+        while work.elapsed() < Duration::from_micros(200) {
+            std::hint::spin_loop();
+        }
+    }
+
+    assert!(
+        sent < SENDS,
+        "nothing reached the peer during {SENDS} sends"
+    );
+    let (pull, result) = reader.join().unwrap();
+    assert_eq!(result.unwrap(), body);
+    push.close().await.unwrap();
+    pull.close().unwrap();
 }
 
 /// Counts wakeups, so a cooperative yield can be told apart from a stall.

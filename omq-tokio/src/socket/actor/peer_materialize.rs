@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 
+use super::lifecycle::PeerLifecycle;
 use super::{
     AnyStream, ConnectionConfig, ConnectionDriver, Endpoint, PeerDriverConfig, PeerDriverHandle,
     PeerEntry, PeerHandshake, PeerIdent, PeerOrigin, Role, Side, SocketDriver, SocketType,
@@ -103,7 +104,7 @@ pub(super) fn spawn_byte_stream_connection(socket: &mut SocketDriver, conn: Byte
         return;
     };
 
-    socket.peers.insert(peer_id, entry);
+    PeerLifecycle::new(socket).insert_peer(peer_id, entry);
     let completion = socket.reserve_completion(peer_id);
     spawn_wire_task(
         socket,

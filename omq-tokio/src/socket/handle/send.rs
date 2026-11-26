@@ -47,7 +47,7 @@ impl Socket {
             return Err(Error::Protocol("send_to requires a message body".into()));
         }
 
-        crate::socket::send_budget::cooperate(body.byte_len()).await;
+        crate::socket::send_budget::cooperate(self.budget_bytes(&body)).await;
         self.send_submitter.send_to(identity.as_ref(), body).await
     }
 
@@ -65,6 +65,16 @@ impl Socket {
         }
 
         self.send_submitter.try_send_to(identity.as_ref(), body)
+    }
+
+    /// Bytes a send of `msg` spends from the send budget. A socket without
+    /// wire routes spends none, since no driver writes its bytes.
+    fn budget_bytes(&self, msg: &Message) -> usize {
+        if self.inner.shared.wire_routes.any() {
+            msg.byte_len()
+        } else {
+            0
+        }
     }
 
     fn check_identity_routing(&self) -> Result<()> {
@@ -119,7 +129,7 @@ impl Socket {
     /// a pipe exists and has space. Connected no-peer sends queue in the
     /// endpoint's pre-ready pipe up to `Options::send_hwm`.
     pub async fn send(&self, msg: Message) -> Result<()> {
-        crate::socket::send_budget::cooperate(msg.byte_len()).await;
+        crate::socket::send_budget::cooperate(self.budget_bytes(&msg)).await;
         match self.inner.socket_type {
             SocketType::Req => {
                 if !self.inner.shared.req_awaiting_reply.claim() {

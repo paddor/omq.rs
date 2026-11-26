@@ -3,6 +3,7 @@
 use super::{AnyStream, PeerDriverHandle, PeerEntry, PeerHandshake, PeerSetup, Side, SocketDriver};
 use crate::routing::AddedPeer;
 use crate::socket::actor::generated_identity;
+use crate::socket::actor::lifecycle::PeerLifecycle;
 
 /// A spawned raw STREAM task with its handle and IO thread.
 struct RawStreamTask {
@@ -58,7 +59,7 @@ impl SocketDriver {
             ..PeerEntry::new(origin, handle.clone())
         };
 
-        self.peers.insert(peer_id, entry);
+        PeerLifecycle::new(self).insert_peer(peer_id, entry);
         self.link.shared.ready_peers.add();
 
         self.routing.send_strategy.connection_added(AddedPeer {

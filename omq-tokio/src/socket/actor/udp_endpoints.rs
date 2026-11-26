@@ -156,6 +156,7 @@ impl SocketDriver {
                 task,
             },
             peer_id,
+            _wire_route: self.link.shared.wire_routes.hold(),
         });
 
         Ok(())

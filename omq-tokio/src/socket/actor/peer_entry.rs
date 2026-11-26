@@ -123,6 +123,8 @@ pub(super) struct PeerEntry {
     /// Inproc callers waiting for either side's commands to apply.
     pub(super) inproc_settle: Option<crate::transport::inproc::InprocSettle>,
     pub(super) task: Option<JoinHandle<()>>,
+    /// Counts a non-inproc peer as a wire route while its entry lives.
+    pub(super) _wire_route: Option<crate::socket::send_budget::WireRoute>,
 }
 
 impl PeerEntry {
@@ -137,6 +139,15 @@ impl PeerEntry {
             inproc_inbound: None,
             inproc_settle: None,
             task: None,
+            _wire_route: None,
+        }
+    }
+
+    /// Count this peer as a wire route until the entry drops.
+    pub(super) fn holding(self, route: crate::socket::send_budget::WireRoute) -> Self {
+        Self {
+            _wire_route: Some(route),
+            ..self
         }
     }
 

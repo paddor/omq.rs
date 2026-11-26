@@ -26,7 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Ready async sends also yield once a thread has queued about 2 MiB, not
   only every 4096 sends. A task doing CPU work between large sends on a
   single-worker runtime held back its socket's driver, which shares that
-  worker, so the sends left in bursts.
+  worker, so the sends left in bursts. A socket whose only live peers are
+  inproc has no driver to wait for and still yields by count alone.
 - Without `max_message_size`, a `tcp://` or `ipc://` body over 8 MiB grew in
   doubling steps past its declared size, up to almost twice that size. Growth
   now stops at the declared size.

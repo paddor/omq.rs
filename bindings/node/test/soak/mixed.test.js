@@ -72,7 +72,7 @@ test("mixed socket soak", { timeout: (DURATION_SECS + 30) * 1000 }, async () => 
 
       if (Date.now() >= nextReport) {
         const current = sampleResources();
-        console.error(`[node-soak] cycles=${cycles} messages=${messages} rss=${Math.round(current.rss / 1048576)}MB fds=${current.fd}`);
+        console.error(`[node-soak] cycles=${cycles} messages=${messages} ${memoryReport(current)} fds=${current.fd}`);
         nextReport = Date.now() + 10_000;
       }
     }
@@ -340,10 +340,17 @@ async function largeMultipartCycle(pair, cycle) {
 
 function sampleResources() {
   collectGarbage();
-  return {
-    fd: fdCount(),
-    rss: process.memoryUsage().rss,
-  };
+  const { rss, heapTotal, heapUsed, external, arrayBuffers } = process.memoryUsage();
+  return { fd: fdCount(), threads: threadCount(), rss, heapTotal, heapUsed, external, arrayBuffers };
+}
+
+// V8 heap and external buffers belong to the JS runtime; the rest of RSS is
+// native memory, including the OMQ engine.
+function memoryReport(sample) {
+  const native = sample.rss - sample.heapTotal - sample.external;
+  return `rss=${mib(sample.rss)}MB heap=${mib(sample.heapUsed)}/${mib(sample.heapTotal)}MB ` +
+    `external=${mib(sample.external)}MB arrayBuffers=${mib(sample.arrayBuffers)}MB native=${mib(native)}MB ` +
+    `threads=${sample.threads}`;
 }
 
 function assertResourceSlope(samples) {
@@ -356,6 +363,8 @@ function assertResourceSlope(samples) {
   const peakRss = Math.max(...samples.map((item) => item.rss));
   const growth = tailRss - baseRss;
   console.error(`[node-soak] RSS baseline=${mib(baseRss)}MB tail-max=${mib(tailRss)}MB peak=${mib(peakRss)}MB growth=${(growth / baseRss * 100).toFixed(1)}%`);
+  console.error(`[node-soak] first ${memoryReport(baseline[0])}`);
+  console.error(`[node-soak] last ${memoryReport(samples[samples.length - 1])}`);
   assert.ok(growth < 64 * 1024 * 1024 || growth / baseRss < 0.25,
     `RSS slope: baseline=${baseRss} tail=${tailRss} growth=${growth}`);
 }
@@ -387,6 +396,14 @@ async function sendBatch(socket, payload, count, label) {
   for (let sent = 0; sent < count; sent++) {
     await sendWithin(socket, payload, `${label} send`);
   }
+}
+
+function threadCount() {
+  if (os.platform() !== "linux") {
+    return 0;
+  }
+  const status = fs.readFileSync("/proc/self/status", "utf8");
+  return Number(/^Threads:\s+(\d+)/m.exec(status)?.[1] ?? 0);
 }
 
 function fdCount() {

@@ -145,6 +145,22 @@ cargo run --release -p omq-bench -- run comparisons \
 cargo run --release -p omq-bench -- chart comparison
 ```
 
+TCP and inproc REQ/REP use the same settings. At the default 5000
+iterations, p99.9 is 5 samples:
+
+```sh
+cargo run --release -p omq-bench -- run comparisons \
+  --impl libzmq --impl omq-tokio-1t --impl omq-tokio-1t-spin50 --impl omq-tokio-ct \
+  --impl omq-tokio-exclusive --transport tcp --no-throughput --no-pubsub \
+  --latency-iterations 100000 --latency-warmup 20000 --rounds 3
+cargo run --release -p omq-bench -- run comparisons \
+  --impl libzmq --impl omq-tokio-1t --impl omq-tokio-ct --transport inproc \
+  --no-throughput --no-pubsub \
+  --latency-iterations 100000 --latency-warmup 20000 --rounds 3
+cargo run --release -p omq-bench -- chart main
+cargo run --release -p omq-bench -- chart comparison
+```
+
 ### CURVE PUB/SUB chart
 
 `doc/charts/pubsub/curve_tcp.svg`. `--curve` adds the CURVE impls of the
@@ -199,10 +215,12 @@ OMQ_BENCH_TASKSET=1 cargo run --release -p omq-bench -- run comparisons \
   --pubsub-peers 4,8 --fanout-peers 4,8 --fanin-peers 4,8
 cargo run --release -p omq-bench -- run comparisons \
   --impl omq-curve-1t --impl omq-curve-2t --transport tcp \
-  --no-throughput --no-pubsub
+  --no-throughput --no-pubsub \
+  --latency-iterations 100000 --latency-warmup 20000 --rounds 3
 cargo run --release -p omq-bench -- run comparisons \
   --impl omq-tokio-1t --impl omq-tokio-2t --transport quic \
-  --no-throughput --no-pubsub
+  --no-throughput --no-pubsub \
+  --latency-iterations 100000 --latency-warmup 20000 --rounds 3
 cargo run --release -p omq-bench -- chart quic
 ```
 

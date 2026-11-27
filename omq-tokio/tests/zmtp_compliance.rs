@@ -498,6 +498,36 @@ async fn exclusive_receive_honors_received_ttl_without_local_heartbeats() {
 }
 
 #[tokio::test]
+async fn an_unset_heartbeat_timeout_keeps_a_peer_silent_past_one_interval() {
+    const INTERVAL: Duration = Duration::from_millis(300);
+    let local = Socket::new(
+        SocketType::Pair,
+        Options::default()
+            .linger(Duration::ZERO)
+            .heartbeat_interval(INTERVAL),
+    );
+    let mut monitor = local.monitor();
+    let mut raw = raw_peer(&local, b"PAIR", (3, 1)).await;
+
+    // The peer answers nothing for over two intervals, as one whose replies
+    // wait behind its own output. The silence itself is the scenario.
+    tokio::time::sleep(INTERVAL * 8 / 3).await;
+    raw.write_all(&frame(0, b"still alive")).await.unwrap();
+
+    let message = tokio::time::timeout(DEADLINE, local.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(message.part_bytes(0).unwrap().as_ref(), b"still alive");
+    while let Ok(event) = monitor.try_recv() {
+        assert!(
+            !matches!(event, MonitorEvent::Disconnected { .. }),
+            "a peer silent for less than three intervals was dropped"
+        );
+    }
+}
+
+#[tokio::test]
 async fn announced_ttl_drops_a_silent_peer_behind_stalled_output() {
     let local = Socket::new(
         SocketType::Pair,

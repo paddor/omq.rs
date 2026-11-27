@@ -74,7 +74,7 @@ export interface SocketOptions {
   webTransport?: WebTransportOptions;
   /** WebTransport liveness PING interval in milliseconds. Disabled by default. */
   heartbeatIntervalMs?: number;
-  /** WebTransport liveness timeout in milliseconds; defaults to the interval. */
+  /** WebTransport liveness timeout in milliseconds; defaults to three intervals. */
   heartbeatTimeoutMs?: number;
   /**
    * WebTransport close: how long messages whose send resolved may take to

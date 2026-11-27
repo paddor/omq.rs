@@ -233,7 +233,7 @@ pub struct Options {
     pub heartbeat_ttl: Option<Duration>,
 
     /// Close the connection if no traffic received within this window.
-    /// Defaults to `heartbeat_interval` when unset.
+    /// Defaults to three `heartbeat_interval`s when unset.
     pub heartbeat_timeout: Option<Duration>,
 
     /// Max time for one connection setup attempt. Default 10 seconds. One

@@ -46,11 +46,6 @@ fn lz4_options() -> Options {
         .compression_auto_train(true)
         .send_hwm(4096)
         .recv_hwm(4096)
-        // Under full-suite load a decoded SUB trails the publisher by a
-        // compressed backlog of up to a million publications. The PUB PING
-        // waits behind it, so only the SUB's own PINGs show it alive. Allow
-        // three of their intervals before dropping a live, slow SUB.
-        .heartbeat_timeout(Duration::from_secs(30))
 }
 
 async fn bind_lz4_pub(publisher: &Socket) -> (Endpoint, omq_tokio::MonitorStream) {

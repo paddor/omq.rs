@@ -540,7 +540,7 @@ async fn recv_does_not_time_out_before_first_ping() {
 }
 
 #[tokio::test]
-async fn heartbeat_timeout_defaults_to_interval() {
+async fn heartbeat_timeout_defaults_to_three_intervals() {
     let (endpoint, server) = unresponsive_router().await;
     let mut socket = Socket::connect(
         SocketType::Dealer,
@@ -594,6 +594,7 @@ async fn inbound_pong_clears_heartbeat_deadline() {
         endpoint,
         Options {
             heartbeat_interval: Some(Duration::from_millis(50)),
+            heartbeat_timeout: Some(Duration::from_millis(50)),
             ..Options::default()
         },
     )

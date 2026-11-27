@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- With `ZMQ_HEARTBEAT_TIMEOUT` unset, a connection closes after three
+  `ZMQ_HEARTBEAT_IVL`s of silence that follow an unanswered PING. libzmq
+  waits one interval, which drops live peers whose PONG waits behind their
+  own output.
+
 ## [0.13.2] - 2026-11-25
 
 ### Changed

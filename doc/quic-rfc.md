@@ -98,7 +98,7 @@ Liveness records have no ordering relationship to application messages.
 With a nonzero heartbeat interval, each side sends periodic PINGs. The
 reply timeout starts when a complete PING is admitted to the transport,
 not when its timer fires. A valid incoming record clears that timeout.
-The configured heartbeat timeout defaults to the heartbeat interval.
+The configured heartbeat timeout defaults to three heartbeat intervals.
 Without an interval, the peer answers PINGs but initiates no probes.
 
 Delayed timers produce one probe, not a backlog of missed intervals.

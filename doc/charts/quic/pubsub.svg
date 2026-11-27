@@ -198,18 +198,18 @@ small messages (higher is better)
 <circle cx="201" cy="268" r="2.5" opacity="1" fill="#B91C1C" stroke="none" stroke-width="1"/>
 <circle cx="322" cy="271" r="2.5" opacity="1" fill="#B91C1C" stroke="none" stroke-width="1"/>
 <circle cx="444" cy="276" r="2.5" opacity="1" fill="#B91C1C" stroke="none" stroke-width="1"/>
-<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="80,266 86,266 "/>
-<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="89,266 95,266 "/>
-<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="98,267 104,267 "/>
-<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="107,267 113,267 "/>
-<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="116,267 122,267 "/>
-<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="125,267 131,268 "/>
+<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="80,267 86,267 "/>
+<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="89,267 95,267 "/>
+<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="98,267 104,268 "/>
+<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="107,268 113,268 "/>
+<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="116,268 122,268 "/>
+<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="125,268 131,268 "/>
 <polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="134,268 140,268 "/>
-<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="143,268 149,268 "/>
-<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="152,268 158,269 "/>
+<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="143,269 149,269 "/>
+<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="152,269 158,269 "/>
 <polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="161,269 167,269 "/>
 <polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="170,269 176,269 "/>
-<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="179,269 185,269 "/>
+<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="179,269 185,270 "/>
 <polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="188,270 194,270 "/>
 <polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="197,270 201,270 203,270 "/>
 <polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="206,270 212,270 "/>
@@ -228,21 +228,21 @@ small messages (higher is better)
 <polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="323,274 329,274 "/>
 <polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="332,274 338,275 "/>
 <polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="341,275 347,275 "/>
-<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="350,275 356,275 "/>
+<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="350,275 356,276 "/>
 <polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="359,276 365,276 "/>
-<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="368,276 374,276 "/>
-<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="377,276 383,276 "/>
+<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="368,276 374,277 "/>
+<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="377,277 383,277 "/>
 <polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="386,277 392,277 "/>
-<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="395,277 401,277 "/>
-<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="404,277 410,278 "/>
-<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="413,278 419,278 "/>
-<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="422,278 428,278 "/>
-<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="431,278 437,279 "/>
-<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="440,279 444,279 "/>
-<circle cx="80" cy="266" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
+<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="395,278 401,278 "/>
+<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="404,278 410,278 "/>
+<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="413,278 419,279 "/>
+<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="422,279 428,279 "/>
+<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="431,279 437,280 "/>
+<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="440,280 444,280 "/>
+<circle cx="80" cy="267" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
 <circle cx="201" cy="270" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
 <circle cx="322" cy="274" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
-<circle cx="444" cy="279" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
+<circle cx="444" cy="280" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
 <text x="712" y="97" dy="0.76em" text-anchor="middle" font-family="sans-serif" font-size="9.67741935483871" opacity="1" fill="#E5E7EB">
 medium/large messages (higher is better)
 </text>
@@ -313,16 +313,16 @@ medium/large messages (higher is better)
 <circle cx="615" cy="211" r="2.5" opacity="1" fill="#38BDF8" stroke="none" stroke-width="1"/>
 <circle cx="746" cy="198" r="2.5" opacity="1" fill="#38BDF8" stroke="none" stroke-width="1"/>
 <circle cx="877" cy="188" r="2.5" opacity="1" fill="#38BDF8" stroke="none" stroke-width="1"/>
-<polyline fill="none" opacity="1" stroke="#B91C1C" stroke-width="2" points="485,253 615,189 746,116 877,119 "/>
-<circle cx="485" cy="253" r="2.5" opacity="1" fill="#B91C1C" stroke="none" stroke-width="1"/>
+<polyline fill="none" opacity="1" stroke="#B91C1C" stroke-width="2" points="485,252 615,189 746,116 877,113 "/>
+<circle cx="485" cy="252" r="2.5" opacity="1" fill="#B91C1C" stroke="none" stroke-width="1"/>
 <circle cx="615" cy="189" r="2.5" opacity="1" fill="#B91C1C" stroke="none" stroke-width="1"/>
 <circle cx="746" cy="116" r="2.5" opacity="1" fill="#B91C1C" stroke="none" stroke-width="1"/>
-<circle cx="877" cy="119" r="2.5" opacity="1" fill="#B91C1C" stroke="none" stroke-width="1"/>
-<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="485,258 615,219 746,182 877,168 "/>
+<circle cx="877" cy="113" r="2.5" opacity="1" fill="#B91C1C" stroke="none" stroke-width="1"/>
+<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="485,258 615,222 746,193 877,185 "/>
 <circle cx="485" cy="258" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
-<circle cx="615" cy="219" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
-<circle cx="746" cy="182" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
-<circle cx="877" cy="168" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
+<circle cx="615" cy="222" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
+<circle cx="746" cy="193" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
+<circle cx="877" cy="185" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
 <text x="227" y="427" dy="0.76em" text-anchor="middle" font-family="sans-serif" font-size="9.67741935483871" opacity="1" fill="#E5E7EB">
 small messages (higher is better)
 </text>
@@ -526,18 +526,18 @@ small messages (higher is better)
 <circle cx="201" cy="595" r="2.5" opacity="1" fill="#B91C1C" stroke="none" stroke-width="1"/>
 <circle cx="322" cy="599" r="2.5" opacity="1" fill="#B91C1C" stroke="none" stroke-width="1"/>
 <circle cx="444" cy="605" r="2.5" opacity="1" fill="#B91C1C" stroke="none" stroke-width="1"/>
-<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="80,597 86,597 "/>
-<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="89,597 95,597 "/>
-<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="98,597 104,598 "/>
-<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="107,598 113,598 "/>
-<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="116,598 122,598 "/>
-<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="125,598 131,598 "/>
+<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="80,596 86,596 "/>
+<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="89,596 95,596 "/>
+<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="98,597 104,597 "/>
+<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="107,597 113,597 "/>
+<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="116,597 122,597 "/>
+<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="125,597 131,598 "/>
 <polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="134,598 140,598 "/>
-<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="143,599 149,599 "/>
-<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="152,599 158,599 "/>
+<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="143,598 149,598 "/>
+<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="152,598 158,599 "/>
 <polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="161,599 167,599 "/>
 <polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="170,599 176,599 "/>
-<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="179,599 185,600 "/>
+<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="179,599 185,599 "/>
 <polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="188,600 194,600 "/>
 <polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="197,600 201,600 203,600 "/>
 <polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="206,600 212,600 "/>
@@ -554,23 +554,23 @@ small messages (higher is better)
 <polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="305,603 311,603 "/>
 <polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="314,603 320,603 "/>
 <polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="323,603 329,603 "/>
-<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="332,603 338,604 "/>
+<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="332,604 338,604 "/>
 <polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="341,604 347,604 "/>
-<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="350,604 356,605 "/>
+<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="350,605 356,605 "/>
 <polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="359,605 365,605 "/>
-<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="368,605 374,606 "/>
+<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="368,606 374,606 "/>
 <polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="377,606 383,606 "/>
-<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="386,606 392,606 "/>
-<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="395,607 401,607 "/>
-<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="404,607 410,607 "/>
-<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="413,607 419,608 "/>
-<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="422,608 428,608 "/>
-<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="431,608 437,609 "/>
-<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="440,609 444,609 "/>
-<circle cx="80" cy="597" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
+<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="386,607 392,607 "/>
+<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="395,607 401,608 "/>
+<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="404,608 410,608 "/>
+<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="413,608 419,609 "/>
+<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="422,609 428,609 "/>
+<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="431,609 437,610 "/>
+<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="440,610 444,610 "/>
+<circle cx="80" cy="596" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
 <circle cx="201" cy="600" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
 <circle cx="322" cy="603" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
-<circle cx="444" cy="609" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
+<circle cx="444" cy="610" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
 <text x="712" y="427" dy="0.76em" text-anchor="middle" font-family="sans-serif" font-size="9.67741935483871" opacity="1" fill="#E5E7EB">
 medium/large messages (higher is better)
 </text>
@@ -646,16 +646,16 @@ medium/large messages (higher is better)
 <circle cx="615" cy="551" r="2.5" opacity="1" fill="#38BDF8" stroke="none" stroke-width="1"/>
 <circle cx="746" cy="543" r="2.5" opacity="1" fill="#38BDF8" stroke="none" stroke-width="1"/>
 <circle cx="877" cy="532" r="2.5" opacity="1" fill="#38BDF8" stroke="none" stroke-width="1"/>
-<polyline fill="none" opacity="1" stroke="#B91C1C" stroke-width="2" points="485,584 615,530 746,471 877,443 "/>
+<polyline fill="none" opacity="1" stroke="#B91C1C" stroke-width="2" points="485,584 615,531 746,464 877,443 "/>
 <circle cx="485" cy="584" r="2.5" opacity="1" fill="#B91C1C" stroke="none" stroke-width="1"/>
-<circle cx="615" cy="530" r="2.5" opacity="1" fill="#B91C1C" stroke="none" stroke-width="1"/>
-<circle cx="746" cy="471" r="2.5" opacity="1" fill="#B91C1C" stroke="none" stroke-width="1"/>
+<circle cx="615" cy="531" r="2.5" opacity="1" fill="#B91C1C" stroke="none" stroke-width="1"/>
+<circle cx="746" cy="464" r="2.5" opacity="1" fill="#B91C1C" stroke="none" stroke-width="1"/>
 <circle cx="877" cy="443" r="2.5" opacity="1" fill="#B91C1C" stroke="none" stroke-width="1"/>
-<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="485,592 615,559 746,527 877,515 "/>
+<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="485,592 615,562 746,536 877,529 "/>
 <circle cx="485" cy="592" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
-<circle cx="615" cy="559" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
-<circle cx="746" cy="527" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
-<circle cx="877" cy="515" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
+<circle cx="615" cy="562" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
+<circle cx="746" cy="536" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
+<circle cx="877" cy="529" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
 <text x="250" y="650" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
 threads
 </text>
@@ -680,7 +680,7 @@ omq CURVE
 2 IO
 </text>
 <text x="360" y="682" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
-177%
+178%
 </text>
 <polyline fill="none" opacity="1" stroke="#38BDF8" stroke-width="2" points="78,704 92,704 "/>
 <text x="98" y="698" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">

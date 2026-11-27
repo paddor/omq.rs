@@ -202,14 +202,16 @@ cargo run --release -p omq-bench -- chart rate-limit
 
 `doc/charts/quic/{pushpull,reqrep,pubsub,fanout,fanin}.svg`: QUIC against
 CURVE over TCP. Linux needs `net.core.rmem_max` and `net.core.wmem_max` of at
-least 4 MiB, or multi-peer QUIC runs drop packets on loopback.
+least 4 MiB, or multi-peer QUIC runs drop packets on loopback. Run them
+unpinned: `OMQ_BENCH_TASKSET=1` gives each process two CPUs, so two IO
+threads compete with the receiving thread and fan-in shows no 2 IO gain.
 
 ```sh
-OMQ_BENCH_TASKSET=1 cargo run --release -p omq-bench -- run comparisons \
+cargo run --release -p omq-bench -- run comparisons \
   --impl omq-curve-1t --impl omq-curve-2t --transport tcp \
   --no-latency --fanout --fanin \
   --pubsub-peers 4,8 --fanout-peers 4,8 --fanin-peers 4,8
-OMQ_BENCH_TASKSET=1 cargo run --release -p omq-bench -- run comparisons \
+cargo run --release -p omq-bench -- run comparisons \
   --impl omq-tokio-1t --impl omq-tokio-2t --transport quic \
   --no-latency --fanout --fanin \
   --pubsub-peers 4,8 --fanout-peers 4,8 --fanin-peers 4,8

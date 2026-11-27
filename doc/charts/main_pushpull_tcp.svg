@@ -712,7 +712,7 @@ medium/large messages (higher is better)
 <circle cx="798" cy="139" r="2.5" opacity="1" fill="#F97316" stroke="none" stroke-width="1"/>
 <circle cx="837" cy="91" r="2.5" opacity="1" fill="#F97316" stroke="none" stroke-width="1"/>
 <circle cx="877" cy="113" r="2.5" opacity="1" fill="#F97316" stroke="none" stroke-width="1"/>
-<polyline fill="none" opacity="1" stroke="#FB7185" stroke-width="2" points="485,273 524,251 563,222 602,196 641,175 681,151 720,146 759,140 798,119 837,80 877,115 "/>
+<polyline fill="none" opacity="1" stroke="#FB7185" stroke-width="2" points="485,273 524,251 563,222 602,196 641,175 681,151 720,146 759,140 798,119 837,75 877,119 "/>
 <circle cx="485" cy="273" r="2.5" opacity="1" fill="#FB7185" stroke="none" stroke-width="1"/>
 <circle cx="524" cy="251" r="2.5" opacity="1" fill="#FB7185" stroke="none" stroke-width="1"/>
 <circle cx="563" cy="222" r="2.5" opacity="1" fill="#FB7185" stroke="none" stroke-width="1"/>
@@ -722,9 +722,9 @@ medium/large messages (higher is better)
 <circle cx="720" cy="146" r="2.5" opacity="1" fill="#FB7185" stroke="none" stroke-width="1"/>
 <circle cx="759" cy="140" r="2.5" opacity="1" fill="#FB7185" stroke="none" stroke-width="1"/>
 <circle cx="798" cy="119" r="2.5" opacity="1" fill="#FB7185" stroke="none" stroke-width="1"/>
-<circle cx="837" cy="80" r="2.5" opacity="1" fill="#FB7185" stroke="none" stroke-width="1"/>
-<circle cx="877" cy="115" r="2.5" opacity="1" fill="#FB7185" stroke="none" stroke-width="1"/>
-<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="485,246 524,219 563,200 602,182 641,171 681,154 720,151 759,151 798,129 837,86 877,121 "/>
+<circle cx="837" cy="75" r="2.5" opacity="1" fill="#FB7185" stroke="none" stroke-width="1"/>
+<circle cx="877" cy="119" r="2.5" opacity="1" fill="#FB7185" stroke="none" stroke-width="1"/>
+<polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="485,246 524,219 563,200 602,182 641,171 681,154 720,151 759,151 798,129 837,86 877,112 "/>
 <circle cx="485" cy="246" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
 <circle cx="524" cy="219" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
 <circle cx="563" cy="200" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
@@ -735,7 +735,7 @@ medium/large messages (higher is better)
 <circle cx="759" cy="151" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
 <circle cx="798" cy="129" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
 <circle cx="837" cy="86" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
-<circle cx="877" cy="121" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
+<circle cx="877" cy="112" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
 <polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="485,293 524,284 563,279 602,273 641,270 681,269 720,269 759,243 798,172 837,164 877,167 "/>
 <circle cx="485" cy="293" r="2.5" opacity="1" fill="#FACC15" stroke="none" stroke-width="1"/>
 <circle cx="524" cy="284" r="2.5" opacity="1" fill="#FACC15" stroke="none" stroke-width="1"/>

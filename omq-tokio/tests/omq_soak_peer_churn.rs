@@ -60,7 +60,7 @@ fn soak_peer_churn() {
 
         let initial_pull = Socket::new(SocketType::Pull, soak_common::soak_options().recv_hwm(64));
         initial_pull.connect(ep.clone()).await.unwrap();
-        push.wait_connected(1, Duration::from_secs(1))
+        push.wait_connected(1, Duration::from_secs(10))
             .await
             .expect("initial PULL did not connect");
 

@@ -75,8 +75,9 @@ pub(super) fn should_measure(name: &str, config: &ThresholdConfig) -> bool {
     // Profile contracts compare within one run and need no thresholds.
     config.values.contains_key(name)
         || (config.mode == ThresholdMode::Hardware
-            && !name.starts_with("quic_")
-            && !name.starts_with("dart_"))
+            && !["quic_", "dart_", "curve_"]
+                .iter()
+                .any(|prefix| name.starts_with(prefix)))
         || name.starts_with("contract_")
 }
 

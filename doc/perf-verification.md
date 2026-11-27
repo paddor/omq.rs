@@ -3,7 +3,7 @@
 Run the local performance gates with:
 
 ```text
-cargo run --release -p omq-tokio --features 'quic dart' --bin omq_perf_verify
+cargo run --release -p omq-tokio --features 'quic dart curve' --bin omq_perf_verify
 ```
 
 With `.perf_hw` present, TCP PUSH/PULL covers 16B, 256B, 1KiB, and
@@ -24,6 +24,10 @@ with 1 and 2 IO threads, and run only for configured thresholds.
 Prefix the section with `quic_` or `dart_`, for example
 `[dart_scattergather_1io]`. QUIC generates a fresh
 trusted loopback certificate using `openssl`; UDP buffers request 4 MiB.
+CURVE over TCP covers PUSH/PULL at 256B, 16KiB, and 256KiB with 1 IO
+thread, and four-subscriber PUB/SUB at 256B and 4KiB with 1 and 2 IO
+threads, under `curve_` sections, and runs only for configured thresholds.
+The binding socket is the CURVE server.
 
 Thresholds are machine-specific. Create the ignored `.perf_hw` file in the
 repository root. Keys match the measurement names printed by the verifier:

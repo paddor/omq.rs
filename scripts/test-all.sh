@@ -297,7 +297,7 @@ elif [[ "${OMQ_SKIP_PERF:-}" == "1" ]]; then
     echo "skip: OMQ_SKIP_PERF=1"
 else
     wait_for_perf_quiet
-    run cargo run --release -q -p omq-tokio --features 'quic dart' --bin omq_perf_verify
+    run cargo run --release -q -p omq-tokio --features 'quic dart curve' --bin omq_perf_verify
 fi
 
 # ---------------------------------------------------------------- #

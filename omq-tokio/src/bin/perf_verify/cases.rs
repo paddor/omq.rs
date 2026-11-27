@@ -73,6 +73,8 @@ pub(super) fn cases() -> Vec<Case> {
         },
     });
 
+    #[cfg(feature = "curve")]
+    curve_cases(&mut cases);
     contract_cases(&mut cases);
     draft::cases(&mut cases);
     cases
@@ -126,6 +128,38 @@ fn add_pubsub_cases(cases: &mut Vec<Case>, transport: Transport, io_threads: usi
                 transport,
             },
         });
+    }
+}
+
+/// CURVE over TCP: PUSH/PULL from small bodies to large ones, which decrypt
+/// in their pooled receive buffer, and PUB/SUB to four subscribers. Bodies of
+/// 1 MiB and up would spend the whole window draining the warmup backlog the
+/// default HWM admits.
+#[cfg(feature = "curve")]
+fn curve_cases(cases: &mut Vec<Case>) {
+    for (size, suffix) in [(256, "256b"), (16 * 1024, "16k"), (256 * 1024, "256k")] {
+        cases.push(Case {
+            name: format!("curve_pushpull_1io.{suffix}_msgs_s"),
+            workload: Workload::Pipeline {
+                size,
+                io_threads: 1,
+                transport: Transport::Curve,
+            },
+        });
+    }
+
+    for io_threads in [1, 2] {
+        for (size, suffix) in [(256, "256b"), (4096, "4k")] {
+            cases.push(Case {
+                name: format!("curve_pubsub_{io_threads}io.{suffix}_msgs_s"),
+                workload: Workload::Pubsub {
+                    size,
+                    io_threads,
+                    peers: 4,
+                    transport: Transport::Curve,
+                },
+            });
+        }
     }
 }
 

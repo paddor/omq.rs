@@ -8,6 +8,11 @@ use std::sync::atomic::Ordering;
 
 use omq_tokio::{Endpoint, Options};
 
+#[cfg(feature = "curve")]
+const CURVE_SERVER_KEY: u8 = 0x01;
+#[cfg(feature = "curve")]
+const CURVE_CLIENT_KEY: u8 = 0x02;
+
 #[cfg(feature = "quic")]
 static QUIC_CREDENTIALS: LazyLock<(Vec<u8>, Vec<u8>)> = LazyLock::new(|| {
     let nonce = std::time::SystemTime::now()
@@ -58,6 +63,13 @@ static QUIC_CREDENTIALS: LazyLock<(Vec<u8>, Vec<u8>)> = LazyLock::new(|| {
     credentials
 });
 
+#[cfg(feature = "curve")]
+fn curve_keypair(byte: u8) -> omq_tokio::CurveKeypair {
+    let secret = omq_tokio::CurveSecretKey::from_bytes([byte; 32]);
+    let public = secret.derive_public();
+    omq_tokio::CurveKeypair { public, secret }
+}
+
 pub(super) fn tcp_zero() -> Endpoint {
     "tcp://127.0.0.1:0".parse().expect("valid TCP endpoint")
 }
@@ -95,6 +107,9 @@ pub(super) enum Transport {
     Quic,
     #[cfg(feature = "dart")]
     Dart,
+    /// TCP with CURVE. The binding socket is the server.
+    #[cfg(feature = "curve")]
+    Curve,
 }
 
 impl Transport {
@@ -110,6 +125,8 @@ impl Transport {
             Self::Quic => "quic_",
             #[cfg(feature = "dart")]
             Self::Dart => "dart_",
+            #[cfg(feature = "curve")]
+            Self::Curve => "curve_",
         }
     }
 
@@ -125,6 +142,8 @@ impl Transport {
             Self::Quic => "quic://127.0.0.1:0".parse().expect("QUIC endpoint"),
             #[cfg(feature = "dart")]
             Self::Dart => "dart://127.0.0.1:0".parse().expect("DART endpoint"),
+            #[cfg(feature = "curve")]
+            Self::Curve => tcp_zero(),
         }
     }
 
@@ -148,5 +167,29 @@ impl Transport {
             }
             _ => Options::default(),
         }
+    }
+
+    /// Options for the binding socket: a CURVE binder is the server.
+    pub(super) fn bind_options(self) -> Options {
+        #[cfg(feature = "curve")]
+        if let Self::Curve = self {
+            return Options::default().curve_server(curve_keypair(CURVE_SERVER_KEY));
+        }
+
+        self.options()
+    }
+
+    /// Options for a connecting socket: a CURVE connector is a client of the
+    /// binding server.
+    pub(super) fn connect_options(self) -> Options {
+        #[cfg(feature = "curve")]
+        if let Self::Curve = self {
+            return Options::default().curve_client(
+                curve_keypair(CURVE_CLIENT_KEY),
+                curve_keypair(CURVE_SERVER_KEY).public,
+            );
+        }
+
+        self.options()
     }
 }

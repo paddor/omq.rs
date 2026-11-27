@@ -80,4 +80,36 @@ fn transport_cases_cover_key_sizes_without_duplicate_names() {
             assert!(names.contains(&format!("dart_scattergather_{io}io.{size}_msgs_s")));
         }
     }
+
+    #[cfg(feature = "curve")]
+    {
+        for size in ["256b", "16k", "256k"] {
+            assert!(names.contains(&format!("curve_pushpull_1io.{size}_msgs_s")));
+        }
+        for io in [1, 2] {
+            for size in ["256b", "4k"] {
+                assert!(names.contains(&format!("curve_pubsub_{io}io.{size}_msgs_s")));
+            }
+        }
+    }
+}
+
+#[test]
+fn hardware_gates_measure_optional_transports_only_with_thresholds() {
+    use super::thresholds::{ThresholdConfig, ThresholdMode, should_measure};
+    let mut config = ThresholdConfig {
+        mode: ThresholdMode::Hardware,
+        values: std::collections::HashMap::new(),
+    };
+    assert!(should_measure("pushpull_1io.16b_msgs_s", &config));
+
+    for name in [
+        "quic_pushpull_1io.16b_msgs_s",
+        "dart_scattergather_1io.16b_msgs_s",
+        "curve_pushpull_1io.256b_msgs_s",
+    ] {
+        assert!(!should_measure(name, &config));
+        config.values.insert(name.to_owned(), 1.0);
+        assert!(should_measure(name, &config));
+    }
 }

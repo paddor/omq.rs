@@ -13,6 +13,10 @@ use tokio::sync::mpsc;
 
 pub(super) const COMMAND_DRAIN_BUDGET: DrainBudget = DrainBudget::new(64, 64 * 1024);
 const PEER_CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Silence after an unanswered PING, in heartbeat intervals, that closes a
+/// connection without a configured timeout. One interval would drop a live
+/// peer whose reply waits behind its own output.
+const DEFAULT_TIMEOUT_INTERVALS: u32 = 3;
 
 #[cfg(feature = "ws")]
 const WS_NORMAL_CLOSURE: u16 = 1000;
@@ -232,13 +236,15 @@ pub(super) async fn cancelled_opt(token: Option<&tokio_util::sync::CancellationT
     }
 }
 
-/// Silence allowed after a PING: the configured timeout, else the interval.
-/// `None` without a heartbeat interval.
+/// Silence allowed after a PING: the configured timeout, else three
+/// intervals. `None` without a heartbeat interval.
 pub(crate) fn heartbeat_timeout(
     interval: Option<Duration>,
     timeout: Option<Duration>,
 ) -> Option<Duration> {
-    interval.map(|interval| timeout.unwrap_or(interval))
+    interval.map(|interval| {
+        timeout.unwrap_or_else(|| interval.saturating_mul(DEFAULT_TIMEOUT_INTERVALS))
+    })
 }
 
 /// PING TTL in deciseconds; 0 when unset or too large for the field.

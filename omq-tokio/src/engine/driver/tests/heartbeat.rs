@@ -319,3 +319,18 @@ fn a_zero_heartbeat_interval_disables_heartbeats() {
         "a zero interval armed a timer that fires on every poll"
     );
 }
+
+#[test]
+fn an_unset_timeout_allows_three_intervals_of_silence() {
+    use super::super::control::heartbeat_timeout;
+    let interval = Some(Duration::from_secs(10));
+    assert_eq!(
+        heartbeat_timeout(interval, None),
+        Some(Duration::from_secs(30))
+    );
+    assert_eq!(
+        heartbeat_timeout(interval, Some(Duration::from_secs(2))),
+        Some(Duration::from_secs(2))
+    );
+    assert_eq!(heartbeat_timeout(None, Some(Duration::from_secs(2))), None);
+}

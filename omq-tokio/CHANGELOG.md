@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Each large CURVE message used to take two fresh allocations and copies,
   which with glibc often faulted in new pages: tcp throughput fell to about
   510 MB/s at 8 MiB and now holds 910-1000 MB/s from 256 KiB to 8 MiB.
+- Without `heartbeat_timeout`, a connection closes after three
+  `heartbeat_interval`s of silence that follow an unanswered PING, not one.
+  A live peer whose PONG waits behind its own output, such as a SUB far
+  behind a publisher, is no longer dropped and reconnected.
 
 ### Fixed
 

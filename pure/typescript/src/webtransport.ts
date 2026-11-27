@@ -292,7 +292,7 @@ export class WebTransportConnection implements PeerConnection {
   private startHeartbeat(): void {
     const interval = this.opts.heartbeatIntervalMs;
     if (!interval || interval <= 0) return;
-    const timeout = this.opts.heartbeatTimeoutMs ?? interval;
+    const timeout = this.opts.heartbeatTimeoutMs ?? interval * 3;
     const tick = () => {
       if (this.state === "closed") return;
       if (Date.now() - this.lastRecordAt > timeout) {

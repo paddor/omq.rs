@@ -64,7 +64,7 @@ export interface ConnectionOptions {
   webTransport?: WebTransportOptions;
   /** WebTransport liveness PING interval. Disabled by default. */
   heartbeatIntervalMs?: number;
-  /** WebTransport liveness timeout; defaults to the interval. */
+  /** WebTransport liveness timeout; defaults to three intervals. */
   heartbeatTimeoutMs?: number;
   /** WebTransport close: wait for sent messages to reach the peer. */
   lingerMs?: number;

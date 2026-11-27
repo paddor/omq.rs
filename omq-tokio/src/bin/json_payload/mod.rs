@@ -4,6 +4,14 @@
 use bytes::Bytes;
 use std::fmt::Write as _;
 
+/// Bench bodies start on a 128-byte boundary: a cache line pair.
+const PAYLOAD_ALIGN: usize = 128;
+
+/// Bodies from glibc's default mmap threshold up stay as allocated: one
+/// refcount miss is noise next to their copy, and freeing a mapped copy
+/// source would raise glibc's dynamic mmap threshold.
+const ALIGN_LIMIT: usize = 128 * 1024;
+
 const LEVELS: &[&str] = &["DEBUG", "INFO", "WARN", "ERROR", "TRACE"];
 
 const SERVICES: &[&str] = &[
@@ -79,10 +87,32 @@ const MSGS: &[&str] = &[
 /// `size` filler bytes, or JSON records with `OMQ_BENCH_PAYLOAD=json`.
 pub(crate) fn bench_payload(size: usize) -> Bytes {
     if std::env::var("OMQ_BENCH_PAYLOAD").as_deref() == Ok("json") {
-        json_payload_random(size)
+        aligned_if_small(json_payload_random(size))
     } else {
-        Bytes::from(vec![b'x'; size])
+        aligned_if_small(Bytes::from(vec![b'x'; size]))
     }
+}
+
+/// `body` copied by `line_aligned` when below `ALIGN_LIMIT`, else unchanged.
+fn aligned_if_small(body: Bytes) -> Bytes {
+    if body.len() < ALIGN_LIMIT {
+        line_aligned(&body)
+    } else {
+        body
+    }
+}
+
+/// Copy `bytes` into a buffer where they own every cache line they touch,
+/// counting adjacent-line prefetch pairs. Peers send clones of one body, so
+/// its shared refcount changes on every send, and a body that shared its
+/// line made each send miss twice when the driver copied it.
+fn line_aligned(bytes: &[u8]) -> Bytes {
+    let mut buf = vec![0; bytes.len() + 2 * PAYLOAD_ALIGN];
+    let start = buf.as_ptr().align_offset(PAYLOAD_ALIGN);
+    let end = start + bytes.len();
+    buf[start..end].copy_from_slice(bytes);
+
+    Bytes::from(buf).slice(start..end)
 }
 
 /// JSON records cut to `target_bytes`, seeded from `OMQ_BENCH_JSON_SEED` or
@@ -159,3 +189,6 @@ fn json_record(out: &mut String, state: &mut u32) {
         nl = '\n',
     );
 }
+
+#[cfg(test)]
+mod tests;

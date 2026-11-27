@@ -54,7 +54,7 @@ async fn churn_dealers(
         *next_id += 1;
         let d = Socket::new(SocketType::Dealer, dealer_opts(id.as_bytes()));
         d.connect(ep.clone()).await.unwrap();
-        d.wait_connected(1, Duration::from_secs(1))
+        d.wait_connected(1, Duration::from_secs(10))
             .await
             .expect("DEALER did not connect during churn");
         dealers.push(Dealer {

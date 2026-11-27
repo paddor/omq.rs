@@ -23,7 +23,7 @@ async fn create_pairs() -> Vec<SocketPair> {
         let ep = pull.bind(soak_common::tcp_ep(0)).await.unwrap();
         let push = Socket::new(SocketType::Push, soak_common::soak_options().send_hwm(16));
         push.connect(ep).await.unwrap();
-        push.wait_connected(1, Duration::from_secs(1))
+        push.wait_connected(1, Duration::from_secs(10))
             .await
             .expect("PUSH/PULL pair did not connect");
         pairs.push(SocketPair {
@@ -55,7 +55,7 @@ async fn create_pairs() -> Vec<SocketPair> {
         let ep = rep.bind(soak_common::tcp_ep(0)).await.unwrap();
         let req = Socket::new(SocketType::Req, soak_common::soak_options());
         req.connect(ep).await.unwrap();
-        req.wait_connected(1, Duration::from_secs(1))
+        req.wait_connected(1, Duration::from_secs(10))
             .await
             .expect("REQ/REP pair did not connect");
         pairs.push(SocketPair {

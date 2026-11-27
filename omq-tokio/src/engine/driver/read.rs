@@ -220,10 +220,7 @@ impl PendingLargeRead {
         #[cfg(not(feature = "ws"))]
         let skip_large = false;
 
-        if matches!(config.large_message_threshold, 0 | usize::MAX)
-            || connection.has_frame_transform()
-            || skip_large
-        {
+        if matches!(config.large_message_threshold, 0 | usize::MAX) || skip_large {
             return Ok(None);
         }
 
@@ -241,7 +238,9 @@ impl PendingLargeRead {
             .receive_frame_size_limit(info.flags.command)
             .is_some();
 
-        let payload_buffer = if info.flags.command {
+        // A CURVE frame holds ciphertext and its plaintext starts past the
+        // MESSAGE header, so it reads into a stream body, never a slot.
+        let payload_buffer = if info.flags.command || connection.has_frame_transform() {
             None
         } else {
             connection.try_recv_payload_buffer(info.payload_len)
@@ -324,23 +323,32 @@ impl PendingLargeRead {
 
     pub(super) fn finish(self, connection: &mut Connection) -> Result<()> {
         debug_assert!(self.complete());
-        let payload = match self.buf {
-            ReceiveBody::Payload(buf) => buf.into_payload(),
+        // Stream bodies stay writable until the connection has decrypted a
+        // CURVE frame in place; the payload then views the same buffer.
+        match self.buf {
+            ReceiveBody::Payload(buf) => connection.supply_payload_frame(buf.into_payload()),
             ReceiveBody::Stream { buf, pool } => {
                 let capacity = buf.capacity();
-                let bytes = match pool {
-                    Some(pool) => pool.wrap(buf),
-                    None => buf.freeze(),
-                };
-                omq_proto::Payload::from_bytes_with_retained_size(bytes, capacity)
+                connection.supply_payload_frame_mut(buf, |buf, range| {
+                    let bytes = match pool {
+                        Some(pool) => pool.wrap(buf),
+                        None => buf.freeze(),
+                    };
+                    omq_proto::Payload::from_bytes_with_retained_size(bytes.slice(range), capacity)
+                })
             }
             ReceiveBody::Growing(buf) => {
                 let capacity = buf.capacity();
-                omq_proto::Payload::from_bytes_with_retained_size(Bytes::from(buf), capacity)
+                // A unique `Bytes` converts back without copying.
+                let frame = BytesMut::from(Bytes::from(buf));
+                connection.supply_payload_frame_mut(frame, |buf, range| {
+                    omq_proto::Payload::from_bytes_with_retained_size(
+                        buf.freeze().slice(range),
+                        capacity,
+                    )
+                })
             }
-        };
-
-        connection.supply_payload_frame(payload)
+        }
     }
 }
 

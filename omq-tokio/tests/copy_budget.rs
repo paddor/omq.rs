@@ -425,6 +425,71 @@ fn peer_copies_stay_in_budget() {
     check(&[Pattern::Peer, Pattern::Pair]);
 }
 
+/// CURVE frames from the large-read threshold up read into one buffer and
+/// decrypt there, so they keep the plaintext receive budget.
+#[cfg(feature = "curve")]
+#[test]
+fn curve_large_receive_copies_stay_in_budget() {
+    use omq_tokio::CurveKeypair;
+
+    const SIZE: usize = 1024 * 1024;
+    const ROUNDS: usize = 8;
+    const RECV_BUDGET: u64 = 2 * LARGE_READ + HEADER_SLACK;
+
+    let _serial = SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let ctx = Context::new();
+    let mut failures = Vec::new();
+
+    for profile in PROFILES {
+        let server = CurveKeypair::generate();
+        let pull = ctx.blocking_socket(
+            SocketType::Pull,
+            base_options(profile).curve_server(server.clone()),
+        );
+        let endpoint = pull
+            .bind(Transport::Tcp.endpoint("curve"))
+            .expect("pull bind");
+        let push = ctx.blocking_socket(
+            SocketType::Push,
+            base_options(profile).curve_client(CurveKeypair::generate(), server.public),
+        );
+        push.connect(endpoint).expect("push connect");
+        push.wait_connected(1, TIMEOUT).expect("push connected");
+
+        let deliver = |round| {
+            push.send(Message::single(payload(SIZE, round)))
+                .expect("push");
+            let message = recv(&pull);
+            assert_eq!(message.part_bytes(0), Some(payload(SIZE, round)));
+        };
+
+        // Settle the handshake and buffer growth first.
+        (0..4).for_each(&deliver);
+        copy_stats::reset();
+        (0..ROUNDS).for_each(&deliver);
+        let counts = copy_stats::snapshot();
+
+        if counts.recv() > ROUNDS as u64 * RECV_BUDGET {
+            failures.push(format!(
+                "CURVE {profile:?}: recv {}/{RECV_BUDGET} B per delivery ({counts})",
+                counts.recv() / ROUNDS as u64,
+            ));
+        }
+
+        push.close().expect("close push");
+        pull.close().expect("close pull");
+    }
+
+    ctx.term();
+    assert!(
+        failures.is_empty(),
+        "copy budgets exceeded:\n{}",
+        failures.join("\n")
+    );
+}
+
 #[test]
 fn every_site_reports_under_its_direction() {
     let recv: Vec<Site> = Site::ALL

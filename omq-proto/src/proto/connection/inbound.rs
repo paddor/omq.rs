@@ -1,7 +1,8 @@
 use std::collections::VecDeque;
+use std::ops::Range;
 use std::sync::Arc;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 
 use crate::error::{Error, Result};
 use crate::flow::DrainBudget;
@@ -389,9 +390,7 @@ impl Connection {
                 return self.dispatch_decrypted(command, more, plaintext);
             }
 
-            return Err(Error::Protocol(
-                "expected CURVE-wrapped MESSAGE on data-phase connection".into(),
-            ));
+            return Err(expected_curve_message());
         }
 
         if flags.command {
@@ -692,6 +691,51 @@ impl Connection {
     /// Supply an owning payload with its allocation accounting intact.
     /// State and length requirements are the same as [`Self::supply_payload`].
     pub fn supply_payload_frame(&mut self, payload: Payload) -> Result<()> {
+        let flags = self.claim_supplied_frame(payload.len())?;
+        self.decode_assembled_frame(flags, payload)?;
+        // Drive in case in_buf still holds further frames the caller
+        // pushed before deciding to switch back to direct-recv.
+        self.drive()
+    }
+
+    /// Supply a frame payload the caller can still write, so a CURVE MESSAGE
+    /// decrypts in place instead of into a second buffer. `wrap` turns
+    /// `frame` and the range of the bytes to deliver into the payload, which
+    /// keeps viewing that storage. State and length requirements are the
+    /// same as [`Self::supply_payload`].
+    ///
+    /// # Errors
+    /// Returns the errors of [`Self::supply_payload_frame`].
+    pub fn supply_payload_frame_mut(
+        &mut self,
+        #[cfg_attr(not(feature = "curve"), allow(unused_mut))] mut frame: BytesMut,
+        wrap: impl FnOnce(BytesMut, Range<usize>) -> Payload,
+    ) -> Result<()> {
+        let flags = self.claim_supplied_frame(frame.len())?;
+
+        #[cfg(feature = "curve")]
+        if let Some(FrameTransform::Curve(tx)) = self.transform.as_mut() {
+            use super::super::mechanism::curve::MESSAGE_PREFIX;
+
+            if !frame.starts_with(MESSAGE_PREFIX) {
+                return Err(expected_curve_message());
+            }
+
+            let prefix = MESSAGE_PREFIX.len();
+            let (more, command, plaintext) = tx.decrypt_message_in_place(&mut frame[prefix..])?;
+            let plaintext = wrap(frame, prefix + plaintext.start..prefix + plaintext.end);
+            self.dispatch_decrypted(command, more, plaintext)?;
+
+            return self.drive();
+        }
+
+        let len = frame.len();
+        self.decode_assembled_frame(flags, wrap(frame, 0..len))?;
+        self.drive()
+    }
+
+    /// Leave `AwaitingSuppliedPayload` for a supplied payload of `len` bytes.
+    fn claim_supplied_frame(&mut self, len: usize) -> Result<FrameFlags> {
         let (flags, expected_len) = match self.state {
             State::AwaitingSuppliedPayload { flags, payload_len } => (flags, payload_len),
             State::Closed => return Err(Error::Closed),
@@ -702,18 +746,18 @@ impl Connection {
             }
         };
 
-        if payload.len() != expected_len {
+        if len != expected_len {
             return Err(Error::Protocol(format!(
-                "supplied payload length {} != expected {}",
-                payload.len(),
-                expected_len,
+                "supplied payload length {len} != expected {expected_len}",
             )));
         }
 
         self.state = State::Ready;
-        self.decode_assembled_frame(flags, payload)?;
-        // Drive in case in_buf still holds further frames the caller
-        // pushed before deciding to switch back to direct-recv.
-        self.drive()
+        Ok(flags)
     }
+}
+
+#[cfg(feature = "curve")]
+fn expected_curve_message() -> Error {
+    Error::Protocol("expected CURVE-wrapped MESSAGE on data-phase connection".into())
 }

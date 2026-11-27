@@ -177,6 +177,62 @@ fn assert_transforms_roundtrip(server: &CurveServer, client: &CurveClient) {
     }
 }
 
+/// Server and client transforms after a handshake without an authenticator.
+fn handshaken_transforms() -> (CurveTransform, CurveTransform) {
+    let server_kp = CurveKeypair::generate();
+    let mut server = CurveServer::new(server_kp.clone(), test_server_options(), None);
+    let mut client = CurveClient::new(CurveKeypair::generate(), server_kp.public);
+
+    let mut c_out = Vec::new();
+    server.start(dummy_props(SocketType::Pull));
+    client
+        .start(&mut c_out, dummy_props(SocketType::Push))
+        .unwrap();
+    pump_handshake(&mut server, &mut client, Vec::new(), c_out);
+
+    (
+        server.build_transform().unwrap(),
+        client.build_transform().unwrap(),
+    )
+}
+
+#[test]
+fn messages_decrypt_in_place_with_their_inner_flags() {
+    let (mut s_tx, mut c_tx) = handshaken_transforms();
+    let plaintext: Vec<u8> = (0..300_000).map(|i| (i % 251) as u8).collect();
+
+    for (more, command) in [(false, false), (true, false), (false, true), (true, true)] {
+        let frame = c_tx
+            .encrypt_message_frame(FrameFlags { more, command }, &plaintext)
+            .unwrap();
+        let mut body = frame[MESSAGE_PREFIX.len()..].to_vec();
+        let (got_more, got_command, range) = s_tx.decrypt_message_in_place(&mut body).unwrap();
+
+        assert_eq!((got_more, got_command), (more, command));
+        assert_eq!(&body[range], plaintext.as_slice());
+    }
+}
+
+#[test]
+fn in_place_decrypt_rejects_tampered_replayed_and_short_messages() {
+    let (mut s_tx, mut c_tx) = handshaken_transforms();
+    let frame = c_tx
+        .encrypt_message_frame(FrameFlags::LAST, b"payload")
+        .unwrap();
+
+    let mut tampered = frame[MESSAGE_PREFIX.len()..].to_vec();
+    *tampered.last_mut().unwrap() ^= 1;
+    assert!(s_tx.decrypt_message_in_place(&mut tampered).is_err());
+
+    // A rejected body leaves the counter, so the genuine one still opens.
+    let mut body = frame[MESSAGE_PREFIX.len()..].to_vec();
+    s_tx.decrypt_message_in_place(&mut body).unwrap();
+
+    let mut replayed = frame[MESSAGE_PREFIX.len()..].to_vec();
+    assert!(s_tx.decrypt_message_in_place(&mut replayed).is_err());
+    assert!(s_tx.decrypt_message_in_place(&mut [0u8; 24]).is_err());
+}
+
 #[test]
 fn encode_properties_rejects_overlong_property_name() {
     let mut props = dummy_props(SocketType::Push);

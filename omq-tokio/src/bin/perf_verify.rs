@@ -176,8 +176,8 @@ async fn pipeline(size: usize, io_threads: usize, transport: Transport) -> f64 {
                 _ => (SocketType::Push, SocketType::Pull),
             };
 
-            let receiver = receiver_ctx.blocking_socket(receiver_type, transport.options());
-            let sender = sender_ctx.blocking_socket(sender_type, transport.options());
+            let receiver = receiver_ctx.blocking_socket(receiver_type, transport.bind_options());
+            let sender = sender_ctx.blocking_socket(sender_type, transport.connect_options());
             let endpoint = receiver.bind(transport.endpoint()).expect("pipeline bind");
             sender.connect(endpoint).expect("pipeline connect");
             receiver
@@ -271,12 +271,13 @@ async fn pubsub(size: usize, io_threads: usize, peers: usize, transport: Transpo
         size,
         "PUB/SUB task",
         move |pub_ctx, sub_ctx| {
-            let publisher = pub_ctx.blocking_socket(SocketType::Pub, transport.options());
+            let publisher = pub_ctx.blocking_socket(SocketType::Pub, transport.bind_options());
             let endpoint = publisher.bind(transport.endpoint()).expect("PUB bind");
             let mut receivers = Vec::with_capacity(peers);
 
             for _ in 0..peers {
-                let subscriber = sub_ctx.blocking_socket(SocketType::Sub, transport.options());
+                let subscriber =
+                    sub_ctx.blocking_socket(SocketType::Sub, transport.connect_options());
                 subscriber.connect(endpoint.clone()).expect("SUB connect");
                 subscriber.subscribe(Bytes::new()).expect("SUB subscribe");
                 receivers.push(subscriber);

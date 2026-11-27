@@ -13,6 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   can still write, so a CURVE MESSAGE decrypts in place and the delivered
   payload views the same buffer.
 
+### Changed
+
+- Require lz4rip 0.12.10 and zrip 0.8.30. A kept LZ4 compressor clears its
+  table for inputs over 512 B after one that compressed, so rotating 1 KiB
+  messages compress faster, and incompressible LZ4 blocks decode without
+  zero filling (`lz4`). Zstd levels 1-4 search inputs up to 256 KiB with C
+  zstd's settings, blocks that save less than C zstd's minimum gain stay
+  raw, small one-block messages decode faster, and a frame content size of
+  `u64::MAX` reads as unknown, as in C zstd (`zstd`).
+
 ### Fixed
 
 - `Options::max_message_size` documents that without a limit, `tcp://` and

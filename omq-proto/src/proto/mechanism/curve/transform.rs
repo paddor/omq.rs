@@ -1,6 +1,7 @@
 //! Post-handshake CURVE MESSAGE encryption and decryption (hot path).
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use std::ops::Range;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 use super::{
@@ -9,6 +10,9 @@ use super::{
 };
 use crate::error::{Error, Result};
 use crate::message::{FrameFlags, MAX_INLINE_PAYLOAD, Payload};
+
+/// Offset of the box in a MESSAGE command body: nonce counter(8), tag(16).
+const BODY_BOX_OFFSET: usize = MESSAGE_BOX_OFFSET - MESSAGE_PREFIX.len();
 
 /// Per-direction frame transform: encrypts outgoing application frames as
 /// MESSAGE commands, decrypts incoming MESSAGE commands.
@@ -99,22 +103,8 @@ impl CurveTransform {
     pub(crate) fn decrypt_message(&mut self, body: &[u8]) -> Result<(bool, bool, Payload)> {
         const INLINE_BOX: usize = 1 + MAX_INLINE_PAYLOAD;
 
-        if body.len() < 8 + 16 + 1 {
-            return Err(Error::Protocol("MESSAGE command too short".into()));
-        }
-
-        let counter = u64::from_be_bytes(body[..8].try_into().unwrap());
-        if counter <= self.in_counter {
-            return Err(Error::Protocol(
-                "CURVE MESSAGE nonce counter not monotonically increasing".into(),
-            ));
-        }
-
-        // NaCl wire layout: nonce(8) || tag(16) || ciphertext.
-        let nonce = nonce_short(&self.in_prefix, counter);
-        let tag: [u8; 16] = body[8..8 + 16].try_into().unwrap();
-        let ct = &body[8 + 16..];
-        let decrypt_failed = |_| Error::Protocol("CURVE decrypt failed".into());
+        let (counter, nonce, tag) = self.open_body(body)?;
+        let ct = &body[BODY_BOX_OFFSET..];
 
         let (flags, plaintext) = if ct.len() <= INLINE_BOX {
             let mut stack = [0u8; INLINE_BOX];
@@ -137,8 +127,57 @@ impl CurveTransform {
         };
 
         self.in_counter = counter;
-        Ok((flags & 0x01 != 0, flags & 0x02 != 0, plaintext))
+        let (more, command) = inner_flags(flags);
+        Ok((more, command, plaintext))
     }
+
+    /// Decrypt a MESSAGE command body (post-`\x07MESSAGE` prefix) in place,
+    /// as [`Self::decrypt_message`] does into a new buffer. Returns
+    /// `(more, command, plaintext)`, where `plaintext` is the range of the
+    /// frame data in `body`.
+    pub(crate) fn decrypt_message_in_place(
+        &mut self,
+        body: &mut [u8],
+    ) -> Result<(bool, bool, Range<usize>)> {
+        let (counter, nonce, tag) = self.open_body(body)?;
+        self.salsa
+            .decrypt_detached(&nonce, &mut body[BODY_BOX_OFFSET..], &tag)
+            .map_err(decrypt_failed)?;
+
+        self.in_counter = counter;
+        let (more, command) = inner_flags(body[BODY_BOX_OFFSET]);
+        Ok((more, command, BODY_BOX_OFFSET + 1..body.len()))
+    }
+
+    /// Nonce counter, nonce, and tag of a MESSAGE command body, once its
+    /// length and increasing counter check out.
+    fn open_body(&self, body: &[u8]) -> Result<(u64, [u8; 24], [u8; 16])> {
+        if body.len() < BODY_BOX_OFFSET + 1 {
+            return Err(Error::Protocol("MESSAGE command too short".into()));
+        }
+
+        let counter = u64::from_be_bytes(body[..8].try_into().unwrap());
+        if counter <= self.in_counter {
+            return Err(Error::Protocol(
+                "CURVE MESSAGE nonce counter not monotonically increasing".into(),
+            ));
+        }
+
+        // NaCl wire layout: nonce(8) || tag(16) || ciphertext.
+        let nonce = nonce_short(&self.in_prefix, counter);
+        let tag = body[8..BODY_BOX_OFFSET].try_into().unwrap();
+
+        Ok((counter, nonce, tag))
+    }
+}
+
+/// MORE and COMMAND bits of a decrypted MESSAGE's inner flags byte.
+const fn inner_flags(flags: u8) -> (bool, bool) {
+    (flags & 0x01 != 0, flags & 0x02 != 0)
+}
+
+fn decrypt_failed<E>(_: E) -> Error {
+    Error::Protocol("CURVE decrypt failed".into())
 }
 
 pub(super) fn build_transform(

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Connection::supply_payload_frame_mut` takes a supplied frame the backend
+  can still write, so a CURVE MESSAGE decrypts in place and the delivered
+  payload views the same buffer.
+
 ### Fixed
 
 - `Options::max_message_size` documents that without a limit, `tcp://` and

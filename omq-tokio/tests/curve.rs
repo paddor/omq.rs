@@ -389,6 +389,43 @@ async fn curve_multipart_roundtrip() {
     assert_eq!(m.part_bytes(2).unwrap(), &b"ccc"[..]);
 }
 
+/// Frames from the large-read threshold up decrypt in the buffer they were
+/// read into: pooled bodies, multipart parts, and unbounded bodies past the
+/// receive pool's largest buffer.
+#[tokio::test]
+async fn curve_large_messages_arrive_intact() {
+    let body =
+        |size: usize, seed: u8| -> Vec<u8> { (0..size).map(|i| (i % 251) as u8 ^ seed).collect() };
+    let messages = [
+        Message::single(body(256 * 1024, 1)),
+        Message::multipart([body(300 * 1024, 2), body(200 * 1024, 3)]),
+        Message::single(body(9 * 1024 * 1024, 4)),
+        Message::single(body(256 * 1024, 5)),
+    ];
+
+    let server_kp = CurveKeypair::generate();
+    let server_pub = server_kp.public;
+    let pull = Socket::new(SocketType::Pull, Options::default().curve_server(server_kp));
+    let ep = pull.bind(tcp_ep(0)).await.unwrap();
+    let push = Socket::new(
+        SocketType::Push,
+        Options::default().curve_client(CurveKeypair::generate(), server_pub),
+    );
+    push.connect(ep).await.unwrap();
+
+    tokio::time::timeout(Duration::from_secs(30), async {
+        for message in &messages {
+            push.send(message.clone()).await.unwrap();
+            assert_eq!(&pull.recv().await.unwrap(), message);
+        }
+    })
+    .await
+    .expect("large CURVE messages were not delivered");
+
+    push.close().await.unwrap();
+    pull.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn curve_wrong_server_key_fails_handshake() {
     let server_kp = CurveKeypair::generate();

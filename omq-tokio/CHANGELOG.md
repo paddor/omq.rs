@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keeps at most 64 MiB per socket, not per connection. A body takes the
   smallest pooled buffer that holds it, so a reconnected or new peer reuses
   buffers too.
+- CURVE frames from `large_message_threshold` up are read into the
+  socket's receive pool and decrypted there, as plaintext frames are read.
+  Each large CURVE message used to take two fresh allocations and copies,
+  which with glibc often faulted in new pages: tcp throughput fell to about
+  510 MB/s at 8 MiB and now holds 910-1000 MB/s from 256 KiB to 8 MiB.
 
 ### Fixed
 

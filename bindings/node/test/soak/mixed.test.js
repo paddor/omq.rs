@@ -353,6 +353,9 @@ function memoryReport(sample) {
     `threads=${sample.threads}`;
 }
 
+// V8 grows its young generation with the allocation rate and keeps it after
+// GC, which adds tens of MB of RSS over a long run. The soak script caps it
+// with --max-semi-space-size, so RSS growth tracks native and live heap.
 function assertResourceSlope(samples) {
   if (samples.length < 12) return;
   const warm = samples.slice(Math.floor(samples.length / 5));

@@ -7,11 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.40.0] - 2026-11-28
+
 ### Changed
 
 - Tokio's `parking_lot` feature is on. Tokio's scheduler and wake locks spin
   before they sleep, which saves context switches when more threads are busy
-  than there are cores.
+  than there are cores. `MonitorStream` holds a Tokio broadcast receiver,
+  so it is no longer `UnwindSafe` or `RefUnwindSafe`.
+- Require `omq-proto` 0.42.3, which requires lz4rip 0.12.10 and zrip 0.8.30.
 - A socket's connections share one pool of large-body receive buffers, which
   keeps at most 64 MiB per socket, not per connection. A body takes the
   smallest pooled buffer that holds it, so a reconnected or new peer reuses

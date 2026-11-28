@@ -679,7 +679,7 @@ dependencies = [
 
 [[package]]
 name = "omq_rs_native"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "bytes",
  "flume",

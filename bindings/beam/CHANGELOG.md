@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-11-28
+
+### Changed
+
+- Bundle `omq-tokio` 0.40.0 with lz4rip 0.12.10 and zrip 0.8.30.
+- With no heartbeat timeout set, a connection closes after three heartbeat
+  intervals of silence that follow an unanswered PING, not one. A live peer
+  whose PONG waits behind its own output, such as a subscriber far behind a
+  publisher, is no longer dropped and reconnected.
+- A socket's connections share one pool of large-body receive buffers, at
+  most 64 MiB per socket instead of per connection. Large CURVE messages
+  decrypt in that pool, which holds tcp throughput at 910-1000 MB/s from
+  256 KiB to 8 MiB instead of about 510 MB/s at 8 MiB.
+
+### Fixed
+
+- A pooled receive buffer could hold a much smaller body, and receive byte
+  budgets charged the whole buffer, so backpressure began far too early.
+- Without a maximum message size, a `tcp://` or `ipc://` body over 8 MiB
+  grew past its declared size, up to almost twice that size.
+
 ## [0.4.2] - 2026-11-25
 
 ### Changed

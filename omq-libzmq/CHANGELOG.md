@@ -7,8 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-11-28
+
 ### Changed
 
+- Require `omq-tokio` 0.40.0, which requires lz4rip 0.12.10 and zrip
+  0.8.30. A socket's connections share one pool of large-body receive
+  buffers, and large CURVE messages decrypt in place, which holds tcp
+  throughput at 910-1000 MB/s from 256 KiB to 8 MiB instead of about
+  510 MB/s at 8 MiB.
 - With `ZMQ_HEARTBEAT_TIMEOUT` unset, a connection closes after three
   `ZMQ_HEARTBEAT_IVL`s of silence that follow an unanswered PING. libzmq
   waits one interval, which drops live peers whose PONG waits behind their

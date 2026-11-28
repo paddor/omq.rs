@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.42.3] - 2026-11-28
+
 ### Added
 
 - `Connection::supply_payload_frame_mut` takes a supplied frame the backend

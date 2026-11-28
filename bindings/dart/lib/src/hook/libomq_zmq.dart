@@ -3,13 +3,13 @@
 
 /// The omq-libzmq release whose prebuilt libraries the build hook downloads;
 /// empty while none is pinned.
-const libomqZmqVersion = '0.13.2';
+const libomqZmqVersion = '0.14.0';
 
 /// SHA-256 of each prebuilt library of that release, by Rust target triple.
 const libomqZmqSha256 = <String, String>{
-  'x86_64-unknown-linux-gnu': 'bc7c299420957d26829056f17f4ee87a36019c992f330e282408785d1a53b434',
-  'aarch64-unknown-linux-gnu': '2fcdca4dfc82754c585f977f0cae3708f69d4379ed970bbf53926c4be77f0066',
-  'x86_64-apple-darwin': '39421cc3bbcfa9c90dd506342762ff066bd15833af76f6d5d28c3208148c70e2',
-  'aarch64-apple-darwin': '99cbfe79379ac0738d82af4d327191f8ab584ed4f9095a1e997268863de30ed1',
-  'x86_64-pc-windows-msvc': '3a6d1a1e8816684d75e6409c80fd34cbcc7449abb3f4de8d97ba1806273128d8',
+  'x86_64-unknown-linux-gnu': '69513aee6b8ea7b06ce5382e96975379f67abe715cf3c02258a8e345bff29f7e',
+  'aarch64-unknown-linux-gnu': '0c252eed12fe283c9c331b2e7a0a9991e763090f5afe2eddfa2553cbbadee0ed',
+  'x86_64-apple-darwin': '77cf92d2a794b13e6ae0f54508bf34b93692ecf50b2ecea9a892970434178c15',
+  'aarch64-apple-darwin': 'd19b7571c665d54ce714268abc50c9920b69e4583ab9e1a83c468952a5d29121',
+  'x86_64-pc-windows-msvc': '73e38bf259e36f9528e2947d462753762bfea43021f275e3bacead26b10e3ecc',
 };
